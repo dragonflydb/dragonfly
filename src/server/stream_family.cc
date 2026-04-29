@@ -16,6 +16,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
@@ -29,6 +30,10 @@ extern "C" {
 #include "server/family_utils.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
+
+ABSL_FLAG(uint32_t, stream_node_zstd_dict_threshold, 0,
+          "Minimum stream node bytes accumulated before training ZSTD dictionary for stream node "
+          "compression. 0 disables compression.");
 
 namespace dfly {
 
@@ -180,15 +185,30 @@ void StreamIteratorRemoveEntry(streamIterator* si, streamID* current) {
   aux = LpGetInteger(p);
 
   if (aux == 1) {
-    node.Free();
+    zfree(lp);
+    if (node.IsCompressed()) {
+      node.InvalidateDecompressionState();
+      node.Free();
+    }
     checkedRaxRemove(si->stream->rax, si->ri.key, si->ri.key_len, NULL);
   } else {
     lp = lpReplaceInteger(lp, &p, aux - 1);
     p = lpNext(lp, p);
     aux = LpGetInteger(p);
     lp = lpReplaceInteger(lp, &p, aux + 1);
-    if (si->lp != lp)
+    bool update_rax_lp = false;
+    if (node.IsCompressed()) {
+      lp = StreamNodeObj::MaterializeListpack(lp);
+      node.Free();
+      update_rax_lp = true;
+    } else if (lp != node.Ptr()) {
+      update_rax_lp = true;
+    }
+    if (update_rax_lp) {
       raxInsert(si->stream->rax, si->ri.key, si->ri.key_len, lp, nullptr);
+      si->ri.data = lp;
+    }
+    si->lp = lp;
     CHECK_GT(lpBytes(lp), 0u);
   }
 
@@ -467,7 +487,17 @@ int64_t StreamTrim(stream* s, streamAddTrimArgs* args) {
     p = lpNext(lp, p);
     int64_t marked_deleted = LpGetInteger(p);
     lp = lpReplaceInteger(lp, &p, marked_deleted + deleted_from_lp);
-    raxInsert(s->rax, ri.key, ri.key_len, lp, nullptr);
+    bool update_rax_lp = false;
+    if (node.IsCompressed()) {
+      lp = StreamNodeObj::MaterializeListpack(lp);
+      node.Free();
+      update_rax_lp = true;
+    } else if (lp != node.Ptr()) {
+      update_rax_lp = true;
+    }
+    if (update_rax_lp) {
+      raxInsert(s->rax, ri.key, ri.key_len, lp, nullptr);
+    }
     CHECK_GT(lpBytes(lp), 0u);
     break;
   }
@@ -916,6 +946,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
 
   if (!raxEOF(&ri)) {
     /* Get a reference to the tail node listpack. */
+    DCHECK(StreamNodeObj(ri.data).IsRaw());
     current_node = StreamNodeObj(ri.data).Ptr();
     lp = current_node;
     lp_bytes = lpBytes(current_node);
@@ -978,9 +1009,12 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
       if (ri.key_len != sizeof(rax_key) || memcmp(ri.key, rax_key, sizeof(rax_key)) != 0) {
         LOG(DFATAL) << "StreamAppendItem: Key mismatch";
       }
-      if (lp != current_node) {
-        raxInsert(s->rax, rax_key, sizeof(rax_key), lp, nullptr);
+      /* Finalize and optionally compress the node. */
+      StreamNodeObj finalized_node = StreamNodeObj::Raw(lp);
+      if (absl::GetFlag(FLAGS_stream_node_zstd_dict_threshold) > 0) {
+        finalized_node = finalized_node.TryCompress();
       }
+      raxInsert(s->rax, rax_key, sizeof(rax_key), finalized_node.Get(), nullptr);
       current_node = nullptr;
       lp = NULL;
     }
