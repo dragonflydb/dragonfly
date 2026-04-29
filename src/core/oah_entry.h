@@ -16,6 +16,8 @@ extern "C" {
 
 namespace dfly {
 
+class PageUsage;
+
 #define PREFETCH_READ(x) __builtin_prefetch(x, 0, 1)
 #define FORCE_INLINE __attribute__((always_inline))
 
@@ -242,6 +244,13 @@ class OAHEntry {
   void SetExpiry(uint32_t at_sec);
 
   void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* alloc_used);
+
+  // Reallocates fragmented buffers under this entry. For a single entry, that's its own
+  // string buffer. For a vector entry, recurses into every inner entry AND the vector's
+  // own array buffer. Returns the cumulative change in zmalloc_usable_size across inner
+  // entry buffers (the vector array buffer is realloc'd to the same logical size so its
+  // AllocSize is unchanged). *realloced is set to true iff any buffer was moved.
+  ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced);
 
   // TODO refactor, because it's inefficient
   // Returns additional allocation size of ptrVector
