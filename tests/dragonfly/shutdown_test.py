@@ -82,7 +82,8 @@ class TestShutdownOptions:
         df_server.stop()
 
     @pytest.mark.asyncio
-    async def test_shutdown_safe_persists_snapshot(self, df_factory, tmp_path):
+    @pytest.mark.parametrize("flavour", ["SAVE", "SAFE"])  # valkey uses SAFE instead of SAVE
+    async def test_shutdown_save_persists_snapshot(self, df_factory, tmp_path, flavour):
         # Ensure snapshot dir exists and is used
         snap_dir = tmp_path
         df_args = {"dbfilename": "dump", "dir": str(snap_dir) + "/", "port": 1122}
@@ -91,49 +92,28 @@ class TestShutdownOptions:
         df_server.start()
 
         client = aioredis.Redis(port=df_server.port)
-        await client.set("safe_key", "safe_value")
+        await client.set("key", "value")
 
-        # SHUTDOWN SAFE should save synchronously and then stop
+        # SHUTDOWN SAVE/SAFE should save synchronously and then stop
         try:
-            await client.execute_command("SHUTDOWN SAFE")
-        except Exception:
+            await client.execute_command("SHUTDOWN", flavour)
+        except Exception as e:
+            print(e)
             # Connection may be dropped as part of shutdown; this is acceptable
             pass
 
         await client.connection_pool.disconnect()
 
+        lines = df_server.find_in_logs("Exit SnapshotSerializer")
+        assert lines == [
+            "Exit SnapshotSerializer total_serialized: 1, buckets side saved 0, total bucket saved 1, journal_saved 0"
+        ]
+
         # Restart and verify data persisted
         df_server.start()
         client = aioredis.Redis(port=df_server.port)
         await wait_available_async(client)
-        val = await client.get("safe_key")
-        assert val == b"safe_value"
-        await client.connection_pool.disconnect()
-        df_server.stop()
-
-    @pytest.mark.asyncio
-    async def test_shutdown_save_persists_snapshot(self, df_factory, tmp_path):
-        # SAVE should follow the same synchronous path as SAFE
-        snap_dir = tmp_path
-        df_args = {"dbfilename": "dump", "dir": str(snap_dir) + "/", "port": 1123}
-
-        df_server = df_factory.create(**df_args)
-        df_server.start()
-
-        client = aioredis.Redis(port=df_server.port)
-        await client.set("save_key", "save_value")
-
-        try:
-            await client.execute_command("SHUTDOWN SAVE")
-        except Exception:
-            pass
-
-        await client.connection_pool.disconnect()
-
-        df_server.start()
-        client = aioredis.Redis(port=df_server.port)
-        await wait_available_async(client)
-        val = await client.get("save_key")
-        assert val == b"save_value"
+        val = await client.get("key")
+        assert val == b"value"
         await client.connection_pool.disconnect()
         df_server.stop()
