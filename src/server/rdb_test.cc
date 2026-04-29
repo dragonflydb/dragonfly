@@ -1544,8 +1544,8 @@ TEST_F(RdbTest, SplitSBF) {
 
   // split the blob of the second filter into three chunks. this exercises the loader path where we
   // first try to load the incomplete filter, and return early before that finishes
-  constexpr size_t first_split = 17;
-  constexpr size_t second_split = 13;
+  constexpr size_t kFirstSplit = 17;
+  constexpr size_t kSecondSplit = 13;
 
   pp_->at(0)->Await([&] {
     const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
@@ -1559,7 +1559,7 @@ TEST_F(RdbTest, SplitSBF) {
     const std::string blob0{sbf->data(0)};
 
     blob1 = std::string{sbf->data(1)};
-    ASSERT_GT(blob1.size(), first_split + second_split);
+    ASSERT_GT(blob1.size(), kFirstSplit + kSecondSplit);
 
     first.push_back(RDB_TYPE_SBF2);
     // brand new key whose shape is copied off bf_src
@@ -1583,8 +1583,8 @@ TEST_F(RdbTest, SplitSBF) {
     // total size of blob1
     AppendLen(&first, blob1.size());
     // only 17 bytes from blob1 in this chunk
-    AppendLen(&first, first_split);
-    first.append(blob1.data(), first_split);
+    AppendLen(&first, kFirstSplit);
+    first.append(blob1.data(), kFirstSplit);
   });
 
   // add this plain string between chunks of blob1 filter
@@ -1595,14 +1595,14 @@ TEST_F(RdbTest, SplitSBF) {
 
   // p2 of blob1
   std::string second;
-  AppendLen(&second, second_split);
-  second.append(blob1.data() + first_split, second_split);
+  AppendLen(&second, kSecondSplit);
+  second.append(blob1.data() + kFirstSplit, kSecondSplit);
 
-  // p2 of blob1
+  // p3 of blob1
   std::string third;
-  constexpr auto sum = first_split + second_split;
-  AppendLen(&third, blob1.size() - sum);
-  third.append(blob1.data() + sum, blob1.size() - sum);
+  constexpr auto kPrefixConsumed = kFirstSplit + kSecondSplit;
+  AppendLen(&third, blob1.size() - kPrefixConsumed);
+  third.append(blob1.data() + kPrefixConsumed, blob1.size() - kPrefixConsumed);
 
   std::string body;
   body += MakeTaggedChunk(1, first);

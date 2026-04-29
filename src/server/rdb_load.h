@@ -427,6 +427,10 @@ class RdbLoader : protected RdbLoaderBase {
   std::error_code HandleVectorIndex();
   std::error_code HandleShardDocIndex();
 
+  // validates if the current chunk is fully read, resets the state. returns early if stop_early_ is
+  // requested.
+  std::error_code FinalizeCurrentChunkIfNeeded();
+
   Service* service_;
   RdbLoadContext* load_context_;
 

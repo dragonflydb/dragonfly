@@ -2100,11 +2100,11 @@ struct RdbLoader::ObjSettings {
 // The first chunk carries the object type and key. Continuation chunks carry only payload,
 // so we keep the object type, key, db, settings, and pending read.
 struct RdbLoader::StreamState {
+  std::string key;
   DbIndex db_index;
   int type;
   PendingRead pending_read;
   ObjSettings settings;
-  std::string key;
 };
 
 RdbLoader::RdbLoader(Service* service, RdbLoadContext* load_context, std::string snapshot_id)
@@ -2187,12 +2187,6 @@ error_code RdbLoader::Load(io::Source* src) {
     GetCurrentDbSlice().IncrLoadInProgress();
   }
 
-  auto finalize_curr_chunk = [&] {
-    if (!stop_early_.load(memory_order_relaxed))
-      return FinishCurrentChunk();
-    return kOk;
-  };
-
   while (!stop_early_.load(memory_order_relaxed)) {
     if (pause_) {
       ThisFiber::SleepFor(100ms);
@@ -2248,15 +2242,15 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_EOF) {
-      if (current_chunk_state_.has_value() || !stream_states_.empty()) {
-        if (current_chunk_state_.has_value()) {
-          LOG(ERROR) << "eof seen while a previous chunk is not yet finished, stream id "
-                     << current_chunk_state_->stream_id << ", remaining bytes "
-                     << current_chunk_state_->remaining_payload_bytes
-                     << ", pending stream states: " << stream_states_.size();
-          return RdbError(errc::rdb_chunk_payload_remaining);
-        }
+      if (current_chunk_state_) {
+        LOG(ERROR) << "eof seen while a previous chunk is not yet finished, stream id "
+                   << current_chunk_state_->stream_id << ", remaining bytes "
+                   << current_chunk_state_->remaining_payload_bytes
+                   << ", pending stream states: " << stream_states_.size();
+        return RdbError(errc::rdb_chunk_payload_remaining);
+      }
 
+      if (!stream_states_.empty()) {
         LOG(ERROR) << "eof seen while pending stream states: " << stream_states_.size();
         return RdbError(errc::rdb_chunk_payload_remaining);
       }
@@ -2402,7 +2396,7 @@ error_code RdbLoader::Load(io::Source* src) {
       // path below will read its type and key.
       if (stream_states_.contains(current_chunk_state_->stream_id)) {
         RETURN_ON_ERR(LoadValueChunk());
-        RETURN_ON_ERR(finalize_curr_chunk());
+        RETURN_ON_ERR(FinalizeCurrentChunkIfNeeded());
       }
       continue;
     }
@@ -2423,7 +2417,7 @@ error_code RdbLoader::Load(io::Source* src) {
     VLOG(2) << "LoadKeyValPair key=" << last_key_loaded_ << " rdb_type=" << type
             << " db= " << cur_db_index_;
     settings.Reset();
-    RETURN_ON_ERR(finalize_curr_chunk());
+    RETURN_ON_ERR(FinalizeCurrentChunkIfNeeded());
   }  // main load loop
 
   DVLOG(1) << "RdbLoad loop finished";
@@ -3010,11 +3004,11 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   // the next chunk with the same stream id arrives.
   if (!finalized && current_chunk_state_) {
     StreamState stream_state{
+        .key = std::move(key),
         .db_index = cur_db_index_,
         .type = type,
         .pending_read = std::move(pending_read_),
         .settings = *settings,
-        .key = std::move(key),
     };
     const bool inserted =
         stream_states_.try_emplace(current_chunk_state_->stream_id, std::move(stream_state)).second;
@@ -3284,6 +3278,12 @@ error_code RdbLoader::HandleShardDocIndex() {
   // keys to replica shards and remap global_ids accordingly.
   load_context_->AddPendingIndexMapping(shard_id, std::move(pim));
   return kOk;
+}
+
+std::error_code RdbLoader::FinalizeCurrentChunkIfNeeded() {
+  if (stop_early_.load(memory_order_relaxed))
+    return kOk;
+  return FinishCurrentChunk();
 }
 
 error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
