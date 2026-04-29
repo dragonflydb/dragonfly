@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/numeric/bits.h>
+#include <absl/random/random.h>
 #include <absl/types/span.h>
 
 #include <concepts>
@@ -38,6 +39,7 @@ class OAHSet {  // Open Addressing Hash Set
       owner_->obj_alloc_used_ -= entry.AllocSize();
       owner_->entries_[bucket_][pos_].SetExpiry(owner_->EntryTTL(ttl_sec));
       owner_->obj_alloc_used_ += entry.AllocSize();
+      owner_->expiration_used_ = true;
     }
 
     iterator& operator++() {
@@ -82,6 +84,25 @@ class OAHSet {  // Open Addressing Hash Set
       return owner_;
     }
 
+    // Reallocates fragmented buffers in this entry's bucket. For vector buckets, the
+    // inner entries and the array buffer are all checked. Returns true iff anything
+    // moved. Idempotent: repeated calls within a defrag pass hit fresh pages and no-op.
+    bool ReallocIfNeeded(PageUsage* page_usage) {
+      auto& bucket = owner_->entries_[bucket_];
+      bool realloced = false;
+      ssize_t delta = bucket.ReallocIfNeeded(page_usage, &realloced);
+      // delta can be negative if a realloc lands in a smaller mimalloc usable-size
+      // bucket; route the signed update through ssize_t to avoid size_t underflow.
+      if (delta >= 0) {
+        owner_->obj_alloc_used_ += static_cast<size_t>(delta);
+      } else {
+        const size_t shrink = static_cast<size_t>(-delta);
+        assert(shrink <= owner_->obj_alloc_used_);
+        owner_->obj_alloc_used_ -= shrink;
+      }
+      return realloced;
+    }
+
     // find valid entry_ iterator starting from buckets_it_ and set it
     void SetEntryIt() {
       if (!owner_)
@@ -113,6 +134,8 @@ class OAHSet {  // Open Addressing Hash Set
     return iterator(nullptr, 0, 0);
   }
 
+  static constexpr uint32_t kMaxBatchLen = 32;
+
   explicit OAHSet() = default;
 
   bool Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
@@ -136,6 +159,8 @@ class OAHSet {  // Open Addressing Hash Set
       return false;
     }
 
+    if (ttl_sec != UINT32_MAX)
+      expiration_used_ = true;
     obj_alloc_used_ += entry.AllocSize();
     AddUnique(std::move(entry), bucket_id, ttl_sec);
     return true;
@@ -179,6 +204,39 @@ class OAHSet {  // Open Addressing Hash Set
     size_ = 0;
     obj_alloc_used_ = 0;
     ptr_vectors_alloc_used_ = 0;
+    expiration_used_ = false;
+  }
+
+  // Incrementally clears entries in [start, start+count). Returns the next bucket index;
+  // when the returned value equals Capacity() (i.e. entries_.size()), the table is empty.
+  // Mirrors DenseSet::ClearStep, used by AsyncDeleter for cooperative deletion.
+  uint32_t ClearStep(uint32_t start, uint32_t count) {
+    const uint32_t total = entries_.size();
+    const uint32_t end = std::min(total, start + count);
+    for (uint32_t i = start; i < end; ++i) {
+      auto& bucket = entries_[i];
+      if (bucket.Empty())
+        continue;
+
+      if (bucket.IsVector()) {
+        auto& vec = bucket.AsVector();
+        for (auto& entry : vec) {
+          if (entry) {
+            obj_alloc_used_ -= entry.AllocSize();
+            --size_;
+          }
+        }
+        ptr_vectors_alloc_used_ -= vec.AllocSize();
+      } else {
+        obj_alloc_used_ -= bucket.AllocSize();
+        --size_;
+      }
+      bucket = OAHEntry();
+    }
+    // Match Clear() semantics: once incrementally cleared empty, the TTL flag is stale.
+    if (size_ == 0)
+      expiration_used_ = false;
+    return end;
   }
 
   // TODO should be removed, inefficient
@@ -201,12 +259,20 @@ class OAHSet {  // Open Addressing Hash Set
     ptr_vectors_alloc_used_ += entries_[bid].Insert(std::move(e));
   }
 
-  unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec = UINT32_MAX) {
+  // keepttl=true: existing entries are left alone (current/legacy behavior).
+  // keepttl=false: when ttl_sec is set, existing entries' expiry is updated to ttl_sec.
+  unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec = UINT32_MAX,
+                   bool keepttl = true) {
     Reserve(span.size());
     unsigned res = 0;
+    const bool has_ttl = ttl_sec != UINT32_MAX;
     for (auto& s : span) {
-      if (Add(s, ttl_sec) != end()) {
-        res++;
+      if (Add(s, ttl_sec)) {
+        ++res;
+      } else if (has_ttl && !keepttl) {
+        auto it = Find(s);
+        if (it != end())
+          it.SetExpiryTime(ttl_sec);
       }
     }
     return res;
@@ -332,6 +398,49 @@ class OAHSet {  // Open Addressing Hash Set
     return Find(member) != end();
   }
 
+  // Returns iterator to a uniformly random non-empty entry, or end() if the set is empty.
+  // Mirrors StringSet::GetRandomMember (used by SPOP/SRANDMEMBER).
+  iterator GetRandomMember() {
+    if (entries_.empty() || size_ == 0)
+      return end();
+
+    static thread_local absl::InsecureBitGen rng;
+    const uint32_t num_buckets = entries_.size();
+    uint32_t start_bucket = absl::Uniform<uint32_t>(rng, 0u, num_buckets);
+
+    for (uint32_t n = 0; n < num_buckets; ++n) {
+      uint32_t bucket_id = start_bucket + n;
+      if (bucket_id >= num_buckets)
+        bucket_id -= num_buckets;
+      auto& bucket = entries_[bucket_id];
+      if (bucket.Empty())
+        continue;
+
+      if (!bucket.IsVector()) {
+        bucket.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+        if (!bucket.Empty())
+          return iterator{this, bucket_id, 0};
+        continue;
+      }
+
+      auto& vec = bucket.AsVector();
+      const uint32_t vec_size = vec.Size();
+      uint32_t start_pos = absl::Uniform<uint32_t>(rng, 0u, vec_size);
+      for (uint32_t p = 0; p < vec_size; ++p) {
+        uint32_t pos = start_pos + p;
+        if (pos >= vec_size)
+          pos -= vec_size;
+        auto& entry = vec[pos];
+        if (!entry)
+          continue;
+        entry.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+        if (entry)
+          return iterator{this, bucket_id, pos};
+      }
+    }
+    return end();
+  }
+
   // Returns the number of elements in the map. Note that it might be that some of these elements
   // have expired and can't be accessed.
   size_t UpperBoundSize() const {
@@ -368,9 +477,7 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   bool ExpirationUsed() const {
-    // TODO
-    assert(false);
-    return true;
+    return expiration_used_;
   }
 
   size_t SizeSlow() {
@@ -651,6 +758,7 @@ class OAHSet {  // Open Addressing Hash Set
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;
+  bool expiration_used_ = false;
   Buckets entries_;
 };
 

@@ -14,6 +14,7 @@
 
 #include "base/gtest.h"
 #include "core/mi_memory_resource.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "glog/logging.h"
 
 extern "C" {
@@ -554,6 +555,290 @@ TEST_F(OAHSetTest, Fill) {
   for (const auto& s : *ss_) {
     EXPECT_TRUE(s2.Contains(s.Key()));
   }
+}
+
+TEST_F(OAHSetTest, ExpirationUsedTracking) {
+  EXPECT_FALSE(ss_->ExpirationUsed());
+
+  EXPECT_TRUE(ss_->Add("no_ttl"sv));
+  EXPECT_FALSE(ss_->ExpirationUsed());
+
+  EXPECT_TRUE(ss_->Add("with_ttl"sv, 100));
+  EXPECT_TRUE(ss_->ExpirationUsed());
+
+  ss_->Clear();
+  EXPECT_FALSE(ss_->ExpirationUsed());
+}
+
+TEST_F(OAHSetTest, AddManyKeepTtl) {
+  // keepttl=true: existing entries keep their original TTL (or none).
+  EXPECT_TRUE(ss_->Add("k1"sv, 100));
+  EXPECT_TRUE(ss_->Add("k2"sv));  // no TTL
+
+  string_view members[] = {"k1"sv, "k2"sv, "k3"sv};
+  unsigned added = ss_->AddMany(absl::MakeSpan(members), 200, /*keepttl=*/true);
+  EXPECT_EQ(added, 1u);  // only k3 is new
+
+  EXPECT_EQ(ss_->Find("k1"sv).ExpiryTime(), 100u);  // unchanged
+  EXPECT_FALSE(ss_->Find("k2"sv).HasExpiry());      // unchanged
+  EXPECT_EQ(ss_->Find("k3"sv).ExpiryTime(), 200u);  // newly added with TTL
+}
+
+TEST_F(OAHSetTest, AddManyOverwriteTtl) {
+  // keepttl=false with TTL: existing entries' expiry is updated to ttl_sec.
+  EXPECT_TRUE(ss_->Add("k1"sv, 100));
+  EXPECT_TRUE(ss_->Add("k2"sv));  // no TTL initially
+
+  string_view members[] = {"k1"sv, "k2"sv, "k3"sv};
+  unsigned added = ss_->AddMany(absl::MakeSpan(members), 200, /*keepttl=*/false);
+  EXPECT_EQ(added, 1u);  // only k3 is new
+
+  EXPECT_EQ(ss_->Find("k1"sv).ExpiryTime(), 200u);  // updated
+  EXPECT_TRUE(ss_->Find("k2"sv).HasExpiry());       // got TTL
+  EXPECT_EQ(ss_->Find("k2"sv).ExpiryTime(), 200u);
+  EXPECT_EQ(ss_->Find("k3"sv).ExpiryTime(), 200u);
+}
+
+TEST_F(OAHSetTest, AddManyNoTtlIgnoresKeepttl) {
+  // ttl_sec == UINT32_MAX: keepttl is irrelevant — existing entries are not touched.
+  EXPECT_TRUE(ss_->Add("k1"sv, 100));
+
+  string_view members[] = {"k1"sv};
+  unsigned added = ss_->AddMany(absl::MakeSpan(members), UINT32_MAX, /*keepttl=*/false);
+  EXPECT_EQ(added, 0u);
+  EXPECT_EQ(ss_->Find("k1"sv).ExpiryTime(), 100u);  // unchanged — no TTL provided
+}
+
+TEST_F(OAHSetTest, ReallocIfNeededForceReallocates) {
+  // With ForceReallocate, every entry's buffer is moved; content (key + TTL) must survive.
+  for (size_t i = 0; i < 50; ++i) {
+    EXPECT_TRUE(ss_->Add(absl::StrCat("key_", i, "_xxxxxxxx"), 100 + i));
+  }
+  size_t alloc_before = ss_->ObjAllocUsed();
+  EXPECT_GT(alloc_before, 0u);
+
+  PageUsage page_usage{CollectPageStats::NO, 0.9};
+  page_usage.SetForceReallocate(true);
+
+  size_t realloced = 0;
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    if (it.ReallocIfNeeded(&page_usage))
+      ++realloced;
+  }
+  EXPECT_EQ(realloced, 50u);
+
+  // Every member is still present with its TTL intact.
+  for (size_t i = 0; i < 50; ++i) {
+    auto it = ss_->Find(absl::StrCat("key_", i, "_xxxxxxxx"));
+    ASSERT_NE(it, ss_->end());
+    EXPECT_EQ(it.ExpiryTime(), 100u + i);
+  }
+  // ObjAllocUsed remains roughly consistent (mimalloc usable size for same logical size).
+  EXPECT_GT(ss_->ObjAllocUsed(), 0u);
+}
+
+TEST_F(OAHSetTest, ReallocIfNeededVectorEntry) {
+  // Construct a vector OAHEntry directly via Insert — same shape as a colliding bucket.
+  OAHEntry e("first_entry_payload");
+  (void)e.Insert(OAHEntry("second_entry_payload"));
+  (void)e.Insert(OAHEntry("third_entry_payload"));
+  ASSERT_TRUE(e.IsVector());
+
+  // Snapshot inner-entry buffer pointers so we can assert each one moved.
+  std::vector<char*> old_inner_ptrs;
+  for (uint32_t i = 0; i < e.AsVector().Size(); ++i)
+    if (e.AsVector()[i])
+      old_inner_ptrs.push_back(e.AsVector()[i].Raw());
+  char* old_vec_buf = e.Raw();
+
+  PageUsage page_usage{CollectPageStats::NO, 0.9};
+  page_usage.SetForceReallocate(true);
+
+  bool realloced = false;
+  e.ReallocIfNeeded(&page_usage, &realloced);
+  EXPECT_TRUE(realloced);
+  ASSERT_TRUE(e.IsVector());
+
+  // The vector container buffer was moved.
+  EXPECT_NE(e.Raw(), old_vec_buf);
+
+  // Each inner entry's buffer was also moved (recursion into elements happened) and
+  // their content is intact.
+  std::set<std::string> seen;
+  std::vector<char*> new_inner_ptrs;
+  auto& vec = e.AsVector();
+  for (uint32_t i = 0; i < vec.Size(); ++i) {
+    if (vec[i]) {
+      seen.insert(std::string(vec[i].Key()));
+      new_inner_ptrs.push_back(vec[i].Raw());
+    }
+  }
+  EXPECT_EQ(seen.count("first_entry_payload"), 1u);
+  EXPECT_EQ(seen.count("second_entry_payload"), 1u);
+  EXPECT_EQ(seen.count("third_entry_payload"), 1u);
+
+  // No new inner pointer should match any old inner pointer (every inner buffer moved).
+  ASSERT_EQ(new_inner_ptrs.size(), old_inner_ptrs.size());
+  for (char* old_p : old_inner_ptrs) {
+    for (char* new_p : new_inner_ptrs) {
+      EXPECT_NE(old_p, new_p) << "inner entry buffer not reallocated";
+    }
+  }
+}
+
+TEST_F(OAHSetTest, ReallocIfNeededVectorBucketViaIterator) {
+  // Force collisions by overflowing the displacement window: add many entries until
+  // at least one bucket becomes a vector, then force-realloc and verify consistency.
+  ss_->Reserve(4);  // tiny start
+  constexpr size_t num = 100;
+  for (size_t i = 0; i < num; ++i)
+    ss_->Add(absl::StrCat("vec_member_", i));
+
+  PageUsage page_usage{CollectPageStats::NO, 0.9};
+  page_usage.SetForceReallocate(true);
+
+  for (auto it = ss_->begin(); it != ss_->end(); ++it)
+    it.ReallocIfNeeded(&page_usage);
+
+  // All members survive the defrag, including any that were inside vector buckets.
+  for (size_t i = 0; i < num; ++i)
+    EXPECT_TRUE(ss_->Contains(absl::StrCat("vec_member_", i))) << i;
+  EXPECT_EQ(ss_->UpperBoundSize(), num);
+}
+
+TEST_F(OAHSetTest, ReallocIfNeededNoUnderutilized) {
+  // No force flag, no fragmented pages — reallocation should not occur.
+  for (size_t i = 0; i < 10; ++i)
+    ss_->Add(absl::StrCat("k", i));
+
+  PageUsage page_usage{CollectPageStats::NO, 0.9};
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    it.ReallocIfNeeded(&page_usage);
+  }
+  // It's possible (rare) the heap is underutilized for some entries. Don't assert exactly 0,
+  // but verify the set is still consistent.
+  for (size_t i = 0; i < 10; ++i)
+    EXPECT_TRUE(ss_->Contains(absl::StrCat("k", i)));
+}
+
+TEST_F(OAHSetTest, ClearStepEmpty) {
+  EXPECT_EQ(ss_->ClearStep(0, 100), 0u);  // nothing to clear, end = entries_.size() = 0
+}
+
+TEST_F(OAHSetTest, ClearStepIncremental) {
+  // Populate enough to span multiple buckets, then clear in chunks.
+  constexpr size_t num = 1000;
+  for (size_t i = 0; i < num; ++i)
+    ss_->Add(absl::StrCat("k", i), 100);
+  EXPECT_GT(ss_->UpperBoundSize(), 0u);
+  EXPECT_TRUE(ss_->ExpirationUsed());
+
+  const uint32_t total = ss_->Capacity();
+  uint32_t cursor = 0;
+  size_t steps = 0;
+  while (cursor < total) {
+    cursor = ss_->ClearStep(cursor, 64);
+    ++steps;
+    ASSERT_LT(steps, total) << "ClearStep not making progress";
+  }
+  EXPECT_EQ(cursor, total);
+  EXPECT_EQ(ss_->UpperBoundSize(), 0u);
+  EXPECT_EQ(ss_->ObjAllocUsed(), 0u);
+}
+
+TEST_F(OAHSetTest, ClearStepFullBucketCount) {
+  for (size_t i = 0; i < 100; ++i)
+    ss_->Add(absl::StrCat("k", i));
+  // One mega-step covering everything.
+  uint32_t end = ss_->ClearStep(0, ss_->Capacity());
+  EXPECT_EQ(end, ss_->Capacity());
+  EXPECT_EQ(ss_->UpperBoundSize(), 0u);
+  EXPECT_EQ(ss_->ObjAllocUsed(), 0u);
+}
+
+TEST_F(OAHSetTest, GetRandomMemberEmpty) {
+  EXPECT_EQ(ss_->GetRandomMember(), ss_->end());
+}
+
+TEST_F(OAHSetTest, GetRandomMemberSingle) {
+  EXPECT_TRUE(ss_->Add("only"sv));
+  auto it = ss_->GetRandomMember();
+  ASSERT_NE(it, ss_->end());
+  EXPECT_EQ(it->Key(), "only"sv);
+}
+
+TEST_F(OAHSetTest, GetRandomMemberSkipsExpired) {
+  EXPECT_TRUE(ss_->Add("alive"sv, 100));
+  EXPECT_TRUE(ss_->Add("dead"sv, 1));
+
+  ss_->set_time(50);  // dead has expired (expiry=1), alive (expiry=100) survives.
+
+  for (size_t i = 0; i < 200; ++i) {
+    auto it = ss_->GetRandomMember();
+    if (it == ss_->end())
+      continue;
+    EXPECT_EQ(it->Key(), "alive"sv);
+  }
+}
+
+TEST_F(OAHSetTest, AddManyKeepTtlFalseSetsExpirationUsed) {
+  // Regression: adding TTL to an existing member via AddMany(keepttl=false) must mark
+  // expiration_used_ true — otherwise RDB save will skip TTL serialization for the entry.
+  EXPECT_TRUE(ss_->Add("k1"sv));  // no TTL
+  EXPECT_FALSE(ss_->ExpirationUsed());
+
+  string_view members[] = {"k1"sv};
+  ss_->AddMany(absl::MakeSpan(members), 100, /*keepttl=*/false);
+
+  EXPECT_TRUE(ss_->Find("k1"sv).HasExpiry());
+  EXPECT_TRUE(ss_->ExpirationUsed()) << "TTL was added to existing member but flag wasn't set";
+}
+
+TEST_F(OAHSetTest, ClearStepResetsExpirationUsed) {
+  // Regression: ClearStep that fully empties the set must also reset expiration_used_,
+  // matching Clear() semantics.
+  for (size_t i = 0; i < 50; ++i)
+    ss_->Add(absl::StrCat("k", i), 100);
+  EXPECT_TRUE(ss_->ExpirationUsed());
+
+  uint32_t cursor = 0;
+  while (cursor < ss_->Capacity())
+    cursor = ss_->ClearStep(cursor, 16);
+
+  EXPECT_EQ(ss_->UpperBoundSize(), 0u);
+  EXPECT_FALSE(ss_->ExpirationUsed())
+      << "ExpirationUsed must be false after ClearStep fully empties the set";
+}
+
+TEST_F(OAHSetTest, ReallocIfNeededObjAllocUsedConsistent) {
+  // Sanity: after force-realloc, obj_alloc_used_ remains the sum of all entries'
+  // current AllocSize. Guards against signed-delta arithmetic going wrong on the counter.
+  for (size_t i = 0; i < 100; ++i)
+    ss_->Add(absl::StrCat("member_", i), 100 + i);
+
+  PageUsage page_usage{CollectPageStats::NO, 0.9};
+  page_usage.SetForceReallocate(true);
+  for (auto it = ss_->begin(); it != ss_->end(); ++it)
+    it.ReallocIfNeeded(&page_usage);
+
+  size_t expected = 0;
+  for (auto it = ss_->begin(); it != ss_->end(); ++it)
+    expected += (*it).AllocSize();
+  EXPECT_EQ(ss_->ObjAllocUsed(), expected);
+}
+
+TEST_F(OAHSetTest, ClearResetsObjAllocUsed) {
+  for (size_t i = 0; i < 100; ++i) {
+    ss_->Add(random_string(generator_, 10));
+  }
+
+  EXPECT_GT(ss_->ObjAllocUsed(), 0u);
+  EXPECT_GT(ss_->UpperBoundSize(), 0u);
+
+  ss_->Clear();
+
+  EXPECT_EQ(ss_->ObjAllocUsed(), 0u);
+  EXPECT_EQ(ss_->UpperBoundSize(), 0u);
 }
 
 TEST_F(OAHSetTest, IterateEmpty) {
