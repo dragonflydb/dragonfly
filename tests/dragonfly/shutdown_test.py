@@ -104,6 +104,7 @@ class TestShutdownOptions:
 
         await client.connection_pool.disconnect()
 
+        df_server.wait()
         lines = df_server.find_in_logs("Exit SnapshotSerializer")
         assert lines == [
             "Exit SnapshotSerializer total_serialized: 1, buckets side saved 0, total bucket saved 1, journal_saved 0"
