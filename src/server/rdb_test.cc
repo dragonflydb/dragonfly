@@ -1470,32 +1470,56 @@ TEST_F(RdbTest, LoadTwoChunks) {
 }
 
 TEST_F(RdbTest, InterleavedLoad) {
+  // must have >1 shards for non inlined path check. find a key that lands in shard 1 by hashing, to
+  // test non inlined obj. creation
+  ASSERT_GT(shard_set->size(), 1u);
+  std::string key;
+  for (unsigned i = 0; i < 1000; ++i) {
+    key = StrCat("x", i);
+    if (Shard(key, shard_set->size()) == 1)
+      break;
+  }
+  ASSERT_EQ(Shard(key, shard_set->size()), 1u);
+
   std::string a1;
+  // hash chunk 1
   a1.push_back(RDB_TYPE_HASH);
-  AppendString(&a1, "a");
+  AppendString(&a1, key);
   AppendLen(&a1, 2);
   AddKV(&a1, "f1", "v1");
 
+  // string
   std::string b;
   b.push_back(RDB_TYPE_STRING);
   AppendString(&b, "b");
   AppendString(&b, "plain");
 
+  // hash chunk 2
   std::string a2;
   AddKV(&a2, "f2", "v2");
 
   std::string body;
-  // interleave - one tag, one plain, then one tag for the same id=1
+  // chunk for db 0
   body += MakeTaggedChunk(1, a1);
+  // simple string b=plain
   body += b;
+  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
+  // switch to db 1
+  AppendLen(&body, 1);
+  // back to chunk for db 0
   body += MakeTaggedChunk(1, a2);
 
   auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
   ASSERT_FALSE(ec) << ec.message();
 
-  EXPECT_EQ(Run({"HGET", "a", "f1"}), "v1");
-  EXPECT_EQ(Run({"HGET", "a", "f2"}), "v2");
+  EXPECT_EQ(Run({"SELECT", "0"}), "OK");
+  EXPECT_EQ(Run({"HGET", key, "f1"}), "v1");
+  EXPECT_EQ(Run({"HGET", key, "f2"}), "v2");
   EXPECT_EQ(Run({"GET", "b"}), "plain");
+
+  EXPECT_EQ(Run({"SELECT", "1"}), "OK");
+  EXPECT_THAT(Run({"EXISTS", key}), IntArg(0));
+  EXPECT_EQ(Run({"SELECT", "0"}), "OK");
 }
 
 TEST_F(RdbTest, ChunksAroundJournalOffset) {

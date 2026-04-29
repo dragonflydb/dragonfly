@@ -353,6 +353,7 @@ class RdbLoader : protected RdbLoaderBase {
     OpaqueObj val;
     uint64_t expire_ms;
     std::atomic<Item*> next;
+    DbIndex db_index = 0;
     bool is_sticky = false;
     bool has_mc_flags = false;
     uint32_t mc_flags = 0;
@@ -395,7 +396,7 @@ class RdbLoader : protected RdbLoaderBase {
   void FlushShardAsync(ShardId sid);
   void FlushAllShards();
 
-  void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
+  void LoadItemsBuffer(const ItemsBuf& ib);
 
   void CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice);
 

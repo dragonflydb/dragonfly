@@ -2803,14 +2803,14 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   if (out_buf.empty())
     return;
 
-  auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
+  auto cb = [this, ib = std::move(out_buf)] {
     auto& db_slice = GetCurrentDbSlice();
 
     // Before we start loading, increment LoadInProgress.
     // This is required because FlushShardAsync dispatches to multiple shards, and those shards
     // might have not yet have their state (load in progress) incremented.
     db_slice.IncrLoadInProgress();
-    this->LoadItemsBuffer(indx, ib);
+    this->LoadItemsBuffer(ib);
     db_slice.DecrLoadInProgress();
   };
 
@@ -2960,17 +2960,19 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 }
 
-void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
+void RdbLoader::LoadItemsBuffer(const ItemsBuf& ib) {
   EngineShard* es = EngineShard::tlocal();
-  DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
-  DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
-
-  DCHECK(!db_slice.IsCacheMode());
+  const uint64_t now_ms = GetCurrentTimeMs();
+  Namespace* ns = &namespaces->GetDefaultNamespace();
 
   for (const auto* item : ib) {
+    DbContext db_cntx{ns, item->db_index, now_ms};
+    DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
+    DCHECK(!db_slice.IsCacheMode());
     CreateObjectOnShard(db_cntx, item, &db_slice);
     if (stop_early_) {
-      return;
+      // force all items in ib to move into item_queue_ so they can be cleaned up later.
+      break;
     }
   }
 
@@ -3121,6 +3123,7 @@ io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& 
   item->has_mc_flags = obj_settings.has_mc_flags;
   item->mc_flags = obj_settings.mc_flags;
   item->expire_ms = obj_settings.expiretime;
+  item->db_index = db_index;
 
   std::move(cleanup).Cancel();
 
