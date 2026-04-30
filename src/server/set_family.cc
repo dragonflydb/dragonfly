@@ -31,7 +31,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/transaction.h"
 
-ABSL_FLAG(bool, use_oah_set, false, "If true, store SET values in OAHSet instead of StringSet.");
+ABSL_FLAG(bool, use_oah_set, true, "If true, store SET values in OAHSet instead of StringSet.");
 
 namespace rng = std::ranges;
 
