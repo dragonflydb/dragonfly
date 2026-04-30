@@ -25,8 +25,10 @@ class SetFamily {
 
   static uint32_t MaxIntsetEntries();
 
-  // Returns nullptr on OOM.
-  static StringSet* ConvertToStrSet(const intset* is, size_t expected_len);
+  // Returns nullptr on OOM. The returned pointer is StringSet* if --use_oah_set is false,
+  // or OAHSet* if --use_oah_set is true. Callers store it as a void* in CompactObj and
+  // dispatch via dfly::g_use_oah_set.
+  static void* ConvertToStrSet(const intset* is, size_t expected_len);
 
   // returns expiry time in seconds since kMemberExpiryBase date.
   // returns -3 if field was not found, -1 if no ttl is associated with the item.

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/detail/stateless_allocator.h"
+#include "core/string_set.h"
 #include "oah_entry.h"
 
 namespace dfly {
@@ -107,11 +108,19 @@ class OAHSet {  // Open Addressing Hash Set
     void SetEntryIt() {
       if (!owner_)
         return;
+      // time_now_ == 0 disables expiry (callers set it to 0 around serialization).
+      const uint32_t now = owner_->time_now_;
       for (auto num_entries = owner_->entries_.size(); bucket_ < num_entries; ++bucket_) {
         auto& bucket = owner_->entries_[bucket_];
         for (uint32_t bucket_size = bucket.ElementsNum(); pos_ < bucket_size; ++pos_) {
-          if (bucket[pos_])
-            return;
+          auto& entry = bucket[pos_];
+          if (!entry)
+            continue;
+          if (now != 0 && entry.HasExpiry() && entry.GetExpiry() <= now) {
+            entry.ExpireIfNeeded(now, &owner_->size_, &owner_->obj_alloc_used_);
+            continue;
+          }
+          return;
         }
         pos_ = 0;
       }
@@ -468,11 +477,11 @@ class OAHSet {  // Open Addressing Hash Set
     return time_now_;
   }
 
-  size_t ObjAllocUsed() const {
+  size_t ObjMallocUsed() const {
     return obj_alloc_used_;
   }
 
-  size_t SetAllocUsed() const {
+  size_t SetMallocUsed() const {
     return entries_.capacity() * sizeof(OAHEntry) + ptr_vectors_alloc_used_;
   }
 
@@ -761,5 +770,29 @@ class OAHSet {  // Open Addressing Hash Set
   bool expiration_used_ = false;
   Buckets entries_;
 };
+
+// Snapshot of --use_oah_set captured once at startup.
+inline bool g_use_oah_set = false;
+
+// Dispatches a generic lambda over the runtime-selected dense-set type backing
+// kEncodingStrMap2 SETs. Both StringSet and OAHSet expose the same surface
+// (set_time, Empty, BucketCount, Reserve, ObjMallocUsed, ...) so the lambda
+// can be written once and visit either concrete type.
+template <typename Fn> auto VisitSet(void* ptr, Fn&& fn) {
+  return g_use_oah_set ? fn(static_cast<OAHSet*>(ptr)) : fn(static_cast<StringSet*>(ptr));
+}
+
+// Extracts the current member as a string_view from either a StringSet or an
+// OAHSet iterator. Free functions so generic code (e.g. inside VisitSet
+// lambdas) can write `Key(it)` without a member-method asymmetry between the
+// two iterator types.
+inline std::string_view Key(StringSet::iterator it) {
+  sds s = *it;
+  return {s, sdslen(s)};
+}
+
+inline std::string_view Key(OAHSet::iterator it) {
+  return it->Key();
+}
 
 }  // namespace dfly

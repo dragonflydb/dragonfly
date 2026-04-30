@@ -28,6 +28,7 @@ extern "C" {
 #include "core/bloom.h"
 #include "core/cms.h"
 #include "core/json/json_object.h"
+#include "core/oah_set.h"
 #include "core/qlist.h"
 #include "core/search/hnsw_index.h"
 #include "core/size_tracking_channel.h"
@@ -177,10 +178,8 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       if (compact_enc == kEncodingIntSet)
         return RDB_TYPE_SET_INTSET;
       else if (compact_enc == kEncodingStrMap2) {
-        if (((StringSet*)pv.RObjPtr())->ExpirationUsed())
-          return RDB_TYPE_SET_WITH_EXPIRY;
-        else
-          return RDB_TYPE_SET;
+        bool has_expiry = VisitSet(pv.RObjPtr(), [](auto* s) { return s->ExpirationUsed(); });
+        return has_expiry ? RDB_TYPE_SET_WITH_EXPIRY : RDB_TYPE_SET;
       }
       break;
     case OBJ_ZSET:
@@ -437,28 +436,27 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
   if (obj.Encoding() == kEncodingStrMap2) {
-    StringSet* set = (StringSet*)obj.RObjPtr();
-
-    // We don't expire any data during serialization
-    set->set_time(0);
-
-    // due to we avoid expiring we can use UpperBoundSize() instead of SlowSize()
-    RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
-    for (auto it = set->begin(); it != set->end();) {
-      RETURN_ON_ERR(SaveString(string_view{*it, sdslen(*it)}));
-      if (set->ExpirationUsed()) {
-        int64_t expiry = -1;
-        if (it.HasExpiry())
-          expiry = it.ExpiryTime();
-        RETURN_ON_ERR(SaveLongLongAsString(expiry));
+    auto save_loop = [this](auto* set) -> error_code {
+      // set_time(0) disables lazy expiry during serialization, so we can rely
+      // on UpperBoundSize() rather than the more expensive SlowSize().
+      set->set_time(0);
+      RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
+      for (auto it = set->begin(); it != set->end();) {
+        RETURN_ON_ERR(SaveString(Key(it)));
+        if (set->ExpirationUsed()) {
+          int64_t expiry = it.HasExpiry() ? int64_t{it.ExpiryTime()} : -1;
+          RETURN_ON_ERR(SaveLongLongAsString(expiry));
+        }
+        ++it;
+        FlushState flush_state =
+            it == set->end() ? FlushState::kFlushEndEntry : FlushState::kFlushMidEntry;
+        PushToConsumerIfNeeded(flush_state);
       }
-      ++it;
-      FlushState flush_state = FlushState::kFlushMidEntry;
-      if (it == set->end())
-        flush_state = FlushState::kFlushEndEntry;
-      PushToConsumerIfNeeded(flush_state);
-    }
-    set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+      set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+      return error_code{};
+    };
+
+    RETURN_ON_ERR(VisitSet(obj.RObjPtr(), save_loop));
   } else {
     CHECK_EQ(obj.Encoding(), kEncodingIntSet);
     intset* is = (intset*)obj.RObjPtr();

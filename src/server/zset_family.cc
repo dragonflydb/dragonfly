@@ -15,6 +15,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/oah_set.h"
 #include "core/sorted_map.h"
 #include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"
@@ -741,7 +742,8 @@ ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight, const DbContext& 
   // Enable lazy member expiry before iterating dense sets so expired members
   // do not pollute the result (and so the caller can detect an emptied set).
   if (pv.Encoding() == kEncodingStrMap2) {
-    static_cast<StringSet*>(pv.RObjPtr())->set_time(MemberTimeSeconds(db_cntx.time_now_ms));
+    uint32_t t = MemberTimeSeconds(db_cntx.time_now_ms);
+    VisitSet(pv.RObjPtr(), [t](auto* s) { s->set_time(t); });
   }
 
   ScoredMap result;

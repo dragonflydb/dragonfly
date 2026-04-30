@@ -30,6 +30,7 @@ extern "C" {
 #include "core/cms.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
+#include "core/oah_set.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
@@ -63,10 +64,12 @@ size_t UpdateSize(size_t size, int64_t update) {
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
-    case kEncodingStrMap2: {
-      CompactObj::DeleteMR<StringSet>(ptr);
+    case kEncodingStrMap2:
+      VisitSet(ptr, [](auto* ss) {
+        using T = std::remove_pointer_t<decltype(ss)>;
+        CompactObj::DeleteMR<T>(ss);
+      });
       break;
-    }
 
     case kEncodingIntSet:
       zfree((void*)ptr);
@@ -87,10 +90,10 @@ void FreeList(unsigned encoding, void* ptr, MemoryResource* mr) {
 
 size_t MallocUsedSet(unsigned encoding, void* ptr) {
   switch (encoding) {
-    case kEncodingStrMap2: {
-      StringSet* ss = (StringSet*)ptr;
-      return ss->ObjMallocUsed() + ss->SetMallocUsed() + zmalloc_usable_size(ptr);
-    }
+    case kEncodingStrMap2:
+      return VisitSet(ptr, [ptr](auto* ss) {
+        return ss->ObjMallocUsed() + ss->SetMallocUsed() + zmalloc_usable_size(ptr);
+      });
     case kEncodingIntSet:
       return intsetBlobLen((intset*)ptr);
   }
@@ -277,12 +280,10 @@ pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, PageUsage* page_usage) 
   return {sm, reallocated};
 }
 
-pair<void*, bool> DefragStrSet(StringSet* ss, PageUsage* page_usage) {
+template <typename Set> pair<void*, bool> DefragDenseSet(Set* ss, PageUsage* page_usage) {
   bool realloced = false;
-
   for (auto it = ss->begin(); it != ss->end(); ++it)
     realloced |= it.ReallocIfNeeded(page_usage);
-
   return {ss, realloced};
 }
 
@@ -313,9 +314,8 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, PageUsage* page_usage)
       return DefragIntSet((intset*)ptr, page_usage);
     }
 
-    case kEncodingStrMap2: {
-      return DefragStrSet((StringSet*)ptr, page_usage);
-    }
+    case kEncodingStrMap2:
+      return VisitSet(ptr, [page_usage](auto* ss) { return DefragDenseSet(ss, page_usage); });
 
     default:
       ABSL_UNREACHABLE();
@@ -460,10 +460,8 @@ size_t RobjWrapper::Size() const {
           intset* is = (intset*)inner_obj_;
           return intsetLen(is);
         }
-        case kEncodingStrMap2: {
-          StringSet* ss = (StringSet*)inner_obj_;
-          return ss->UpperBoundSize();
-        }
+        case kEncodingStrMap2:
+          return VisitSet(inner_obj_, [](auto* ss) { return ss->UpperBoundSize(); });
         default:
           LOG(FATAL) << "Unexpected encoding " << encoding_;
       };
