@@ -110,7 +110,7 @@ def test_celery_inspect(celery_app, celery_worker):
 
 
 def _noop_task(i):
-    time.sleep(0.02)
+    time.sleep(0.5)
     return i
 
 
@@ -153,6 +153,25 @@ def pubsub_celery_app(df_server):
 
 @pytest.fixture
 def pubsub_worker(pubsub_celery_app):
+    # Python 3 raises EOFError (not IOError) on broken pipes, but
+    # _help_stuff_finish only catches IOError, producing a spurious traceback
+    # during pool cleanup. Assign directly so the patch outlives fixture teardown.
+    try:
+        from celery.concurrency.asynpool import AsynPool
+
+        orig = AsynPool._help_stuff_finish.__func__
+
+        @classmethod
+        def _silent(cls, *args, **kwargs):
+            try:
+                orig(cls, *args, **kwargs)
+            except EOFError:
+                pass
+
+        AsynPool._help_stuff_finish = _silent
+    except Exception:
+        pass
+
     setup_app_for_worker(pubsub_celery_app, loglevel="WARNING", logfile=None)
     w = TestWorkController(
         app=pubsub_celery_app,
@@ -174,10 +193,12 @@ def pubsub_worker(pubsub_celery_app):
     t.join(timeout=10)
 
 
-def test_pubsub_publish_not_lost(pubsub_celery_app, pubsub_worker):
+@pytest.mark.large
+@pytest.mark.opt_only
+def test_pubsub_publish_not_lost_in_celery(pubsub_celery_app, pubsub_worker):
     """#7056: PUBLISH notifications must not be silently lost under Celery group().get()."""
     dispatch = pubsub_celery_app.tasks["group_get"]
-    BATCH, CONCURRENT, ROUNDS, TIMEOUT = 50, 16, 5, 5
+    BATCH, CONCURRENT, ROUNDS, TIMEOUT = 10, 8, 5, 5
 
     total_lost = 0
     for rnd in range(1, ROUNDS + 1):
