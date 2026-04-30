@@ -81,6 +81,12 @@ absl::flat_hash_set<std::string> RemapAndRestoreHnswGraphs(
   absl::flat_hash_set<std::string> failed_indices;
 #ifdef WITH_SEARCH
   for (auto& pn : pending_nodes) {
+    // Empty graph is a valid state, not a failure — skip restore (the index already
+    // matches an empty graph) and don't mark it failed.
+    if (pn.nodes.empty()) {
+      continue;
+    }
+
     auto remap_it = remap_table.find(pn.index_name);
 
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(pn.index_name, pn.field_name);
