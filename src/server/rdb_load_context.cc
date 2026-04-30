@@ -252,10 +252,6 @@ void RdbLoadContext::SetMasterShardCount(uint32_t count) {
   master_shard_count_ = count;
 }
 
-void RdbLoadContext::MarkHnswIndexRestored() {
-  hnsw_index_restored_.store(true, std::memory_order_relaxed);
-}
-
 std::vector<std::string> RdbLoadContext::TakePendingSynonymCommands() {
   util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
   std::vector<std::string> result;
@@ -307,8 +303,6 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
 
   uint32_t master_shards = master_shard_count_;
 
-  bool has_hnsw_restore = hnsw_index_restored_.load(std::memory_order_relaxed);
-
   if (is_error)
     return;
 
@@ -355,13 +349,14 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   // RestoreKeyIndex (above) and RebuildAllIndices (below) run in separate sequential
   // AwaitRunningOnShardQueue calls, so there is no parallel index build that could interfere
   // with the doc_ids assigned during key mapping restoration.
-  LOG(INFO) << "PostLoad: rebuilding search indices across shards has_hnsw_restore="
-            << has_hnsw_restore << " rss="
+  // RebuildAllIndices decides per-index whether to use the restore path or rebuild from
+  // scratch, based on the index's actual graph + key_index state.
+  LOG(INFO) << "PostLoad: rebuilding search indices across shards rss="
             << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
-  shard_set->AwaitRunningOnShardQueue([has_hnsw_restore](EngineShard* es) {
+  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-    es->search_indices()->RebuildAllIndices(op_args, has_hnsw_restore);
+    es->search_indices()->RebuildAllIndices(op_args);
   });
 
   // Now execute all pending synonym commands after indices are rebuilt
@@ -376,19 +371,17 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
               << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
   });
 
-  // All shards completed restoration — drain pending ops.
-  // DrainPendingVectorUpdates sets kBuilding which allows Add calls.
-  if (has_hnsw_restore) {
-    shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-      OpArgs op_args{es, nullptr,
-                     DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-      for (const auto& name : es->search_indices()->GetIndexNames()) {
-        if (auto* idx = es->search_indices()->GetIndex(name)) {
-          idx->DrainPendingVectorUpdates(op_args);
-        }
+  // Drain any journal-buffered vector updates accumulated during a restoring window.
+  // No-ops cheaply for indices that were not in kRestoring (per-index early return).
+  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+    OpArgs op_args{es, nullptr,
+                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+    for (const auto& name : es->search_indices()->GetIndexNames()) {
+      if (auto* idx = es->search_indices()->GetIndex(name)) {
+        idx->DrainPendingVectorUpdates(op_args);
       }
-    });
-  }
+    }
+  });
 #endif
 }
 

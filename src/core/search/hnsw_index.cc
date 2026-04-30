@@ -277,12 +277,11 @@ struct HnswlibAdapter {
     // Wire-ordering invariant: GetNodesRange writes nodes by ascending internal_id
     // 0..count-1 under the saver's read lock, and the loader reads them sequentially
     // (LoadVectorIndexNodes), so nodes[i].internal_id == i and nodes.size() is the
-    // capacity we need. Validate the entry-point in O(1) and read its level
-    // directly — by the hnswlib invariant it equals world_.maxlevel_ at save time.
-    if (metadata.enterpoint_node >= nodes.size() ||
-        nodes[metadata.enterpoint_node].internal_id != metadata.enterpoint_node) {
+    // capacity we need. Verify the entry-point in O(1) and read its level directly —
+    // by the hnswlib invariant it equals world_.maxlevel_ at save time.
+    if (metadata.enterpoint_node >= nodes.size()) {
       LOG(ERROR) << "HNSW restore: entry point internal_id=" << metadata.enterpoint_node
-                 << " out of range or wire ordering violated (" << nodes.size()
+                 << " out of range (" << nodes.size()
                  << " nodes); skipping restore — index will be rebuilt from the keyspace";
       return false;
     }
@@ -291,14 +290,21 @@ struct HnswlibAdapter {
       world_.resizeIndex(nodes.size());
     }
 
-    // Restore each node - directly set up memory and fields
+    // Restore each node - directly set up memory and fields. We also enforce the
+    // wire-ordering invariant (nodes[i].internal_id == i) inline: if a corrupted or
+    // future-format wire violates it we bail out cleanly so the index is rebuilt from
+    // the keyspace instead of writing past the resized memory.
     size_t restored_count = 0;
 
-    for (const auto& node : nodes) {
-      size_t internal_id = node.internal_id;
-
-      // Validate internal_id is within bounds - invalid internal_id indicates corrupted data
-      CHECK(internal_id < world_.max_elements_);
+    for (size_t i = 0; i < nodes.size(); ++i) {
+      const auto& node = nodes[i];
+      if (node.internal_id != i) {
+        LOG(ERROR) << "HNSW restore: wire ordering invariant violated at index " << i
+                   << " (got internal_id=" << node.internal_id << "); index will be rebuilt "
+                   << "from the keyspace";
+        return false;
+      }
+      size_t internal_id = i;
 
       // Register label in lookup table
       world_.label_lookup_[node.global_id] = internal_id;
