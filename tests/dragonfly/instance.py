@@ -348,7 +348,7 @@ class DflyInstance:
         p = psutil.Process(self.proc.pid)
         rv = []
         for file in p.open_files():
-            if ".log." in file.path and "dragonfly" in file.path:
+            if ".log" in file.path and "dragonfly" in file.path:
                 rv.append(file.path)
         return rv
 

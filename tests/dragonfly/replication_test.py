@@ -1198,7 +1198,7 @@ async def test_auth_master(df_factory, n_keys=20):
     masterpass = "requirepass"
     replicapass = "replicapass"
     master = df_factory.create(requirepass=masterpass)
-    replica = df_factory.create(logtostdout=True, masterauth=masterpass, requirepass=replicapass)
+    replica = df_factory.create(masterauth=masterpass, requirepass=replicapass)
 
     df_factory.start_all([master, replica])
 

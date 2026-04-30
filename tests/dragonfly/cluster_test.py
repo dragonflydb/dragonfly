@@ -319,7 +319,7 @@ def verify_slots_result(port: int, answer: list, replicas) -> bool:
 @dfly_args({"proactor_threads": 4, "cluster_mode": "emulated", "managed_service_info": "true"})
 async def test_emulated_cluster_with_replicas(df_factory):
     master = df_factory.create(port=next(next_port), admin_port=next(next_port))
-    replicas = [df_factory.create(port=next(next_port), logtostdout=True) for i in range(1, 3)]
+    replicas = [df_factory.create(port=next(next_port)) for i in range(1, 3)]
 
     df_factory.start_all([master, *replicas])
 

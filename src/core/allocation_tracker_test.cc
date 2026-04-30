@@ -1,3 +1,7 @@
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include <absl/strings/match.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -15,6 +19,39 @@ namespace dfly {
 namespace {
 using namespace std;
 using namespace testing;
+
+#ifdef USE_ABSL_LOG
+
+class LogSink : public absl::LogSink {
+ public:
+  void Send(const absl::LogEntry& entry) override {
+    logs_.push_back(string(entry.text_message()));
+  }
+
+  const vector<string>& GetLogs() const {
+    return logs_;
+  }
+
+  void Clear() {
+    logs_.clear();
+  }
+
+ private:
+  vector<string> logs_;
+};
+
+class AllocationTrackerTest : public Test {
+ protected:
+  AllocationTrackerTest() {
+    absl::AddLogSink(&log_sink_);
+  }
+
+  ~AllocationTrackerTest() {
+    absl::RemoveLogSink(&log_sink_);
+    AllocationTracker::Get().Clear();
+  }
+
+#else
 
 class LogSink : public google::LogSink {
  public:
@@ -45,6 +82,8 @@ class AllocationTrackerTest : public Test {
     google::RemoveLogSink(&log_sink_);
     AllocationTracker::Get().Clear();
   }
+
+#endif  // USE_ABSL_LOG
 
   vector<string> GetLogsDelta() {
     auto logs = log_sink_.GetLogs();
