@@ -853,16 +853,20 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
 }
 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
-                                   search::SearchAlgorithm* search_algo,
-                                   bool is_knn_prefilter) const {
+                                   search::SearchAlgorithm* search_algo, bool is_knn_prefilter,
+                                   const search::GlobalScoringStats* global_stats) const {
   size_t limit = params.limit_offset + params.limit_total;
+
+  // Disable BasicSearch's per-shard cutoff; we re-rank by (score, key) below.
+  const bool sort_by_text_score = params.scorer || params.with_scores;
 
   // If we don't sort the documents, we don't need to copy more ids than are requested
   // Also for HNSW KNN search we don't cut results at the search stage.
-  bool can_cut = !params.sort_option && !search_algo->GetKnnScoreSortOption() && !is_knn_prefilter;
+  bool can_cut = !params.sort_option && !search_algo->GetKnnScoreSortOption() &&
+                 !is_knn_prefilter && !sort_by_text_score;
   size_t id_cutoff_limit = can_cut ? limit : numeric_limits<size_t>::max();
 
-  auto result = search_algo->Search(&*indices_, id_cutoff_limit);
+  auto result = search_algo->Search(&*indices_, id_cutoff_limit, global_stats);
   if (!result.error.empty())
     return {facade::ErrorReply(std::move(result.error))};
 
@@ -916,6 +920,40 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     }
   }
 
+  // Re-rank by (score, key) so per-shard top-K matches what a global merge
+  // would pick. Skipped when SORTBY or KNN drives the order — those vectors
+  // are positionally aligned with result.ids and reordering desyncs them.
+  if (sort_by_text_score && sort_scores.empty() && result.knn_scores.empty() &&
+      !result.text_scores.empty()) {
+    struct Scored {
+      float score;
+      std::string_view key;
+      search::DocId doc;
+    };
+    std::vector<Scored> entries;
+    entries.reserve(result.text_scores.size());
+    for (const auto& [doc, score] : result.text_scores)
+      entries.push_back({score, key_index_.Get(doc), doc});
+
+    const size_t take = std::min(limit, entries.size());
+    std::partial_sort(entries.begin(), entries.begin() + take, entries.end(),
+                      [](const Scored& a, const Scored& b) {
+                        if (a.score != b.score)
+                          return a.score > b.score;
+                        return a.key < b.key;
+                      });
+
+    // Trim text_scores to the surviving top-K so the score map below stays small.
+    result.ids.clear();
+    result.ids.reserve(take);
+    result.text_scores.clear();
+    result.text_scores.reserve(take);
+    for (size_t i = 0; i < take; i++) {
+      result.ids.push_back(entries[i].doc);
+      result.text_scores.emplace_back(entries[i].doc, entries[i].score);
+    }
+  }
+
   // Cut off unnecessary items
   result.ids.resize(min(result.ids.size(), limit));
 
@@ -965,10 +1003,16 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   return {result.total - expired_count, std::move(out), std::move(result.profile)};
 }
 
+search::ShardScoringStats ShardDocIndex::CollectScoringStats(
+    search::SearchAlgorithm* search_algo) const {
+  return search_algo->CollectScoringStats(&*indices_);
+}
+
 vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
     search::SearchAlgorithm* search_algo) const {
-  auto search_results = search_algo->Search(&*indices_);
+  auto search_results = search_algo->Search(&*indices_, std::numeric_limits<size_t>::max(),
+                                            params.global_scoring_stats);
 
   if (!search_results.error.empty())
     return {};
@@ -1024,7 +1068,7 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
     auto entry = LoadEntry(doc, op_args);
     if (!entry)
       continue;
-    auto& [_, accessor] = *entry;
+    auto& [key, accessor] = *entry;
 
     SearchDocData extracted_sort_indicies;
     extracted_sort_indicies.reserve(sort_indicies.size());
@@ -1045,6 +1089,8 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
     if (!text_score_map.empty()) {
       if (auto it = text_score_map.find(doc); it != text_score_map.end())
         out.back()["__score"] = static_cast<double>(it->second);
+      // Hidden tie-breaker for SORTBY @__score; not added to fields_to_print.
+      out.back()["__key"] = string{key};
     }
   }
   return out;
