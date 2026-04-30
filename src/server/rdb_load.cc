@@ -3072,10 +3072,6 @@ error_code RdbLoader::HandleVectorIndex() {
     return SkipVectorIndex(index_key, elements_number);
   }
 
-  if (elements_number > 0) {
-    load_context_->MarkHnswIndexRestored();
-  }
-
   DCHECK_GT(shard_count_, 0u);
   // Parse "index_name:field_name" from the composite key.
   size_t colon_pos = index_key.rfind(':');

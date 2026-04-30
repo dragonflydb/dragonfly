@@ -52,11 +52,6 @@ class RdbLoadContext {
   void AddPendingHnswNodes(PendingHnswNodes nodes);
   void SetMasterShardCount(uint32_t count);
 
-  // Marks that an HNSW index with non-empty graph data was received in this load session.
-  // Used by PerformPostLoad to tell RebuildAllIndices to populate vectors into the
-  // already-restored graph instead of rebuilding from scratch.
-  void MarkHnswIndexRestored();
-
   // Performs post load procedures while still remaining in global LOADING state.
   // Called once immediately after loading the snapshot / full sync succeeded from the coordinator.
   void PerformPostLoad(Service* service, bool is_error = false);
@@ -82,7 +77,6 @@ class RdbLoadContext {
   absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> pending_index_mappings_
       ABSL_GUARDED_BY(mu_);
   std::vector<PendingHnswNodes> pending_hnsw_nodes_ ABSL_GUARDED_BY(mu_);
-  std::atomic<bool> hnsw_index_restored_{false};
   uint32_t master_shard_count_ = 0;  // Set identically by all loaders from AUX field.
 };
 
