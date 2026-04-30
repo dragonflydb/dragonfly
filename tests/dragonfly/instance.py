@@ -188,7 +188,7 @@ class DflyInstance:
             self._check_status()
             try:
                 self.get_port_from_psutil()
-                logging.debug(
+                logging.info(
                     f"Process {self.proc.pid} started after {time.time() - s:.2f} seconds. port={self.port}"
                 )
                 break
@@ -284,7 +284,7 @@ class DflyInstance:
             stdout=None if self.params.direct_output else subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
-        logging.debug(f"Starting {real_path} {' '.join(all_args)}, pid {self.proc.pid}")
+        logging.info(f"Starting {real_path} {' '.join(all_args)}, pid {self.proc.pid}")
 
     def _check_status(self):
         if not self.params.existing_port:

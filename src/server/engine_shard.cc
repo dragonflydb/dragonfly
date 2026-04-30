@@ -356,7 +356,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
   }
 
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
-  auto [prime_table, expire_table] = slice.GetTables(defrag_state_.dbid);
+  auto [prime_table, _unused_expire] = slice.GetTables(defrag_state_.dbid);
   PrimeTable::Cursor cur{defrag_state_.cursor};
   uint64_t reallocations = 0;
   uint64_t attempts = 0;
@@ -848,9 +848,20 @@ void EngineShard::RetireExpiredAndEvict() {
       continue;
 
     db_cntx.db_index = i;
-    auto [pt, expt] = db_slice.GetTables(i);
-    if (!expt->Empty()) {
-      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
+    auto [pt, _unused_expt] = db_slice.GetTables(i);
+    uint64_t expire_count = db_slice.GetDBTable(i)->stats.expire_count;
+    if (expire_count > 0) {
+      // Scale traversal count to compensate for TTL key dilution in the prime table.
+      // Since we now scan the prime table (not a dedicated expire table), most entries
+      // may not have TTLs. We need more bucket traversals to check the same number of
+      // TTL keys, but cap to avoid excessive work when TTL keys are extremely sparse.
+      unsigned db_ttl_delete_target = ttl_delete_target;
+
+      if (pt->size() >= expire_count * 2) {
+        unsigned ratio = std::min<uint64_t>(pt->size() / expire_count, 7);
+        db_ttl_delete_target = ttl_delete_target * ratio;
+      }
+      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
 
       deleted_bytes += stats.deleted_bytes;
       eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));

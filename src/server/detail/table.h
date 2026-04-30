@@ -46,7 +46,7 @@ struct PrimeTablePolicy {
 };
 
 struct ExpireTablePolicy {
-  enum { kSlotNum = 14, kBucketNum = 56 };
+  enum : uint8_t { kSlotNum = 14, kBucketNum = 56 };
   static constexpr bool kUseVersion = false;
 
   static uint64_t HashFn(const PrimeKey& s) {
@@ -61,17 +61,10 @@ struct ExpireTablePolicy {
     cs.Reset();
   }
 
-  static void DestroyValue(ExpirePeriod e) {
-  }
-
   static void DestroyValue(uint32_t val) {
   }
 
   static bool Equal(const PrimeKey& s1, std::string_view s2) {
-    return s1 == s2;
-  }
-
-  static bool Equal(const PrimeKey& s1, const PrimeKey& s2) {
     return s1 == s2;
   }
 };
