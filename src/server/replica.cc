@@ -771,7 +771,12 @@ error_code Replica::ConsumeRedisStream() {
       // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we simply
       // ignore MULTI/EXEC and execute their inner commands individually.
       if (!absl::EqualsIgnoreCase(cmd, "MULTI") && !absl::EqualsIgnoreCase(cmd, "EXEC")) {
-        VLOG(2) << "Got command " << cmd << "\n consumed: " << response->total_read;
+        VLOG(1) << "RedisStream cmd=" << cmd << " num_args=" << last_args.size()
+                << " consumed=" << response->total_read << " repl_offs=" << repl_offs_;
+
+        if (last_args.size() > 1) {
+          VLOG(1) << "RedisStream first_arg=" << absl::CHexEscape(last_args[1].GetView());
+        }
 
         if (LastResponseArgs()[0].GetBuf()[0] == '\r') {
           for (const auto& arg : LastResponseArgs()) {
@@ -782,7 +787,13 @@ error_code Replica::ConsumeRedisStream() {
         FillBackedArgs(last_args, &cmnd_ctx);
         service_.DispatchCommand(facade::ParsedArgs{cmnd_ctx}, &cmnd_ctx,
                                  facade::AsyncPreference::ONLY_SYNC);
+        VLOG(1) << "RedisStream dispatched cmd=" << cmd << " repl_offs=" << repl_offs_;
+      } else {
+        VLOG(1) << "RedisStream skipped cmd=" << cmd << " (MULTI/EXEC) repl_offs=" << repl_offs_;
       }
+    } else {
+      VLOG(1) << "RedisStream received empty response (ping?) consumed=" << response->total_read
+              << " repl_offs=" << repl_offs_;
     }
 
     io_buf.ConsumeInput(response->left_in_buffer);
@@ -1065,10 +1076,11 @@ void Replica::RedisStreamAcksFb() {
   auto next_ack_tp = std::chrono::steady_clock::now();
 
   while (exec_st_.IsRunning()) {
-    VLOG(2) << "Sending an ACK with offset=" << repl_offs_;
+    VLOG(1) << "RedisAcks sending ACK offset=" << repl_offs_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", repl_offs_);
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
     if (auto ec = SendCommand(ack_cmd); ec) {
+      LOG(WARNING) << "RedisAcks SendCommand failed: " << ec.message() << " offset=" << repl_offs_;
       exec_st_.ReportError(ec);
       break;
     }
@@ -1078,6 +1090,8 @@ void Replica::RedisStreamAcksFb() {
         [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || (!exec_st_.IsRunning()); },
         next_ack_tp);
   }
+  LOG(INFO) << "RedisAcks fiber exiting, exec_st_.IsRunning()=" << exec_st_.IsRunning()
+            << " last_acked_offset=" << ack_offs_ << " repl_offs=" << repl_offs_;
 }
 
 void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
