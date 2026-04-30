@@ -69,12 +69,16 @@ class HnswSpace : public hnswlib::SpaceInterface<float> {
 struct HnswlibAdapter {
   // Default setting of hnswlib/hnswalg
   constexpr static size_t kDefaultEfRuntime = 10;
+  constexpr static size_t kSeed = 100;
 
   explicit HnswlibAdapter(const SchemaField::VectorParams& params, bool copy_vector)
       : space_{params.dim, params.sim},
-        world_{&space_,       params.capacity, params.hnsw_m, params.hnsw_ef_construction,
-               100 /* seed*/, copy_vector},
+        world_{&space_, params.capacity, params.hnsw_m, params.hnsw_ef_construction,
+               kSeed,   copy_vector},
         copy_vector_{copy_vector},
+        capacity_{params.capacity},
+        M_{params.hnsw_m},
+        ef_construction_{params.hnsw_ef_construction},
         data_size_{params.dim * sizeof(float)},
         stub_vector_(data_size_ / sizeof(float), 1.0f) {
   }
@@ -181,6 +185,15 @@ struct HnswlibAdapter {
   }
 
  private:
+  // Discard world_ and reconstruct it with the original ctor parameters — used to
+  // recover from a partially-applied RestoreFromNodes when the wire-ordering
+  // invariant is violated. Must be called under the write lock.
+  void Reset() {
+    world_.~HierarchicalNSW<float>();
+    new (&world_)
+        HierarchicalNSW<float>(&space_, capacity_, M_, ef_construction_, kSeed, copy_vector_);
+  }
+
   // Actually add the point. Must be called while holding mrmw write lock.
   void DoAdd(const void* data, GlobalDocId id) {
     while (true) {
@@ -293,21 +306,11 @@ struct HnswlibAdapter {
     // Restore each node - directly set up memory and fields. We also enforce the
     // wire-ordering invariant (nodes[i].internal_id == i) inline: if a corrupted or
     // future-format wire violates it we bail out cleanly so the index is rebuilt from
-    // the keyspace instead of writing past the resized memory. On failure we must roll
-    // back the partial mutations from iterations 0..i-1 so RebuildAllIndices doesn't
-    // see a non-empty graph and steer into the (corrupt) restore path.
+    // the keyspace instead of writing past the resized memory. On failure Reset()
+    // discards world_ entirely (calling its destructor) and reconstructs it with the
+    // original ctor params — this leaves the index indistinguishable from a freshly
+    // created empty graph regardless of what internal state hnswlib accumulates.
     size_t restored_count = 0;
-
-    auto rollback_partial_state = [&]() {
-      for (size_t k = 0; k < restored_count; ++k) {
-        if (world_.linkLists_[k]) {
-          mi_free(world_.linkLists_[k]);
-          world_.linkLists_[k] = nullptr;
-        }
-      }
-      world_.label_lookup_.clear();
-      world_.cur_element_count.store(0);
-    };
 
     for (size_t i = 0; i < nodes.size(); ++i) {
       const auto& node = nodes[i];
@@ -315,7 +318,7 @@ struct HnswlibAdapter {
         LOG(ERROR) << "HNSW restore: wire ordering invariant violated at index " << i
                    << " (got internal_id=" << node.internal_id << "); index will be rebuilt "
                    << "from the keyspace";
-        rollback_partial_state();
+        Reset();
         return false;
       }
       size_t internal_id = i;
@@ -440,6 +443,9 @@ struct HnswlibAdapter {
   mutable MRMWMutex mrmw_mutex_;
 
   bool copy_vector_;                // Whether vectors are copied into hnswlib.
+  size_t capacity_;                 // Initial max_elements_ — used to reconstruct world_.
+  size_t M_;                        // hnsw_m — used to reconstruct world_.
+  size_t ef_construction_;          // hnsw_ef_construction — used to reconstruct world_.
   size_t data_size_;                // Byte size of a single vector.
   std::vector<float> stub_vector_;  // Non-zero data for deleted nodes in borrowed mode.
 };
