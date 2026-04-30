@@ -1072,6 +1072,30 @@ TEST_F(KnnTest, AutoResize) {
   EXPECT_EQ(indices.GetAllDocs().size(), 100);
 }
 
+// Seeds the given HNSW index with `n` deterministic random vectors of dim `dim` using
+// the given RNG seed. Returns the owning MockedDocuments so the caller can pass them
+// back to UpdateVectorData after a restore. Used by the serialization/restore tests.
+inline vector<MockedDocument> SeedHnswIndex(HnswVectorIndex& index, size_t n, size_t dim,
+                                            uint32_t rng_seed) {
+  vector<MockedDocument> docs(n);
+  std::mt19937 rng(rng_seed);
+  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+  for (size_t i = 0; i < n; i++) {
+    vector<float> coords(dim);
+    for (size_t d = 0; d < dim; d++)
+      coords[d] = dist(rng);
+    docs[i] = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
+    index.Add(i, docs[i], "vec");
+  }
+  return docs;
+}
+
+// Snapshots all nodes from the index under its read lock.
+inline vector<HnswNodeData> SnapshotHnswNodes(const HnswVectorIndex& index) {
+  auto lock = index.GetReadLock();
+  return index.GetNodesRange(0, index.GetNodeCount());
+}
+
 // Parameterized HNSW serialization round-trip test.
 // Parameters: {num_elements, dim, similarity}
 struct HnswSerParam {
@@ -1108,27 +1132,12 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   params.hnsw_ef_construction = 200;
 
   HnswVectorIndex original(params, /*copy_vector=*/true);
+  vector<MockedDocument> docs = SeedHnswIndex(original, num_elements, dim, /*rng_seed=*/42);
 
-  std::mt19937 rng(42);
-  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-  vector<MockedDocument> docs(num_elements);
-  for (size_t i = 0; i < num_elements; i++) {
-    vector<float> coords(dim);
-    for (size_t d = 0; d < dim; d++)
-      coords[d] = dist(rng);
-    docs[i] = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
-    original.Add(i, docs[i], "vec");
-  }
-
-  // Serialize
   auto metadata = original.GetMetadata();
-  ASSERT_EQ(metadata.cur_element_count, num_elements);
+  ASSERT_EQ(original.GetNodeCount(), num_elements);
 
-  std::vector<HnswNodeData> nodes;
-  {
-    auto lock = original.GetReadLock();
-    nodes = original.GetNodesRange(0, metadata.cur_element_count);
-  }
+  std::vector<HnswNodeData> nodes = SnapshotHnswNodes(original);
   ASSERT_EQ(nodes.size(), num_elements);
 
   // Verify node data integrity
@@ -1139,8 +1148,7 @@ TEST_P(HnswSerializationTest, RoundTrip) {
 
   // Deserialize into a fresh index
   HnswVectorIndex restored(params, /*copy_vector=*/true);
-  restored.SetMetadata(metadata);
-  restored.RestoreFromNodes(nodes, metadata);
+  ASSERT_TRUE(restored.RestoreFromNodes(nodes, metadata));
 
   // Before UpdateVectorData, all nodes must be marked deleted.
   // KNN should safely return empty results (no crash from nullptr dereference).
@@ -1153,17 +1161,16 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   for (size_t i = 0; i < num_elements; i++)
     restored.UpdateVectorData(i, docs[i], "vec");
 
-  // Metadata must match
   auto rm = restored.GetMetadata();
-  EXPECT_EQ(rm.cur_element_count, metadata.cur_element_count);
-  EXPECT_EQ(rm.maxlevel, metadata.maxlevel);
+  EXPECT_EQ(restored.GetNodeCount(), num_elements);
   EXPECT_EQ(rm.enterpoint_node, metadata.enterpoint_node);
+  EXPECT_EQ(restored.GetMaxLevel(), original.GetMaxLevel());
 
   // Graph links must be identical
   std::vector<HnswNodeData> restored_nodes;
   {
     auto lock = restored.GetReadLock();
-    restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+    restored_nodes = restored.GetNodesRange(0, restored.GetNodeCount());
   }
   ASSERT_EQ(restored_nodes.size(), nodes.size());
   for (size_t i = 0; i < nodes.size(); i++) {
@@ -1207,6 +1214,76 @@ TEST_P(HnswSerializationTest, RoundTrip) {
     EXPECT_EQ(orig_f[i].second, rest_f[i].second);
     EXPECT_NEAR(orig_f[i].first, rest_f[i].first, 1e-5);
   }
+}
+
+// Regression for the save-side race where an Add raises maxlevel between metadata
+// capture and node serialization (see RestoreFromNodes for the rationale). Simulated
+// by forging metadata with a low-level entry point against a multi-level node set;
+// expects maxlevel_ to clamp to the entry point's level rather than max(node.level).
+TEST(HnswRestoreInvariant, MaxLevelClampedToEntryPointLevel) {
+  constexpr size_t kDim = 8;
+  constexpr size_t kN = 100;
+
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup cleanup = [] { InitTLSearchMR(nullptr); };
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.sim = VectorSimilarity::L2;
+  params.capacity = kN;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+
+  HnswVectorIndex original(params, /*copy_vector=*/true);
+  SeedHnswIndex(original, kN, kDim, /*rng_seed=*/42);
+  std::vector<HnswNodeData> nodes = SnapshotHnswNodes(original);
+
+  int global_max_level = -1;
+  std::optional<uint32_t> low_level_internal_id;
+  for (const auto& n : nodes) {
+    global_max_level = std::max(global_max_level, n.level);
+    if (!low_level_internal_id && n.level == 0)
+      low_level_internal_id = n.internal_id;
+  }
+  ASSERT_GT(global_max_level, 0) << "test setup: need a multi-level graph";
+  ASSERT_TRUE(low_level_internal_id.has_value()) << "test setup: need a level-0 node";
+
+  HnswIndexMetadata forged_metadata{.enterpoint_node = *low_level_internal_id};
+
+  HnswVectorIndex restored(params, /*copy_vector=*/true);
+  ASSERT_TRUE(restored.RestoreFromNodes(nodes, forged_metadata));
+
+  EXPECT_EQ(restored.GetMaxLevel(), 0)
+      << "maxlevel_ must equal entry-point level; got " << restored.GetMaxLevel()
+      << " while node set max level=" << global_max_level;
+}
+
+// Malformed/mismatched metadata (entry point not in serialized node set) must
+// fail restoration gracefully — returning false — instead of SIGABRT'ing via
+// CHECK. Callers then rebuild the index from the keyspace.
+TEST(HnswRestoreInvariant, MissingEntrypointFailsGracefully) {
+  constexpr size_t kDim = 4;
+  constexpr size_t kN = 10;
+
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup cleanup = [] { InitTLSearchMR(nullptr); };
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.sim = VectorSimilarity::L2;
+  params.capacity = kN;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+
+  HnswVectorIndex original(params, /*copy_vector=*/true);
+  SeedHnswIndex(original, kN, kDim, /*rng_seed=*/7);
+  std::vector<HnswNodeData> nodes = SnapshotHnswNodes(original);
+
+  HnswIndexMetadata bad_metadata{.enterpoint_node = 999999};  // well past any real id
+  HnswVectorIndex restored(params, /*copy_vector=*/true);
+  EXPECT_FALSE(restored.RestoreFromNodes(nodes, bad_metadata));
 }
 
 // Regression: in borrowed mode (copy_vector=false), Remove marks the node deleted
@@ -3127,6 +3204,255 @@ TEST_F(ScoringTest, ScorerTopKCutoff) {
   for (size_t i = 1; i < result.text_scores.size(); i++) {
     EXPECT_GE(result.text_scores[i - 1].second, result.text_scores[i].second)
         << "Scores should be in descending order";
+  }
+}
+
+TEST_F(SearchTest, MatchOptional) {
+  // ~term returns ALL documents, not just matching ones
+  PrepareQuery("~hello");
+
+  ExpectAll("hello world", "no match here", "something else");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchOptionalWithRequired) {
+  // "foo ~bar" means: must match "foo", optionally match "bar"
+  PrepareQuery("foo ~bar");
+
+  ExpectAll("foo", "foo bar", "foo and something");
+  ExpectNone("bar only", "nothing");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchOptionalScoreBoost) {
+  // ~hello: all docs returned, but docs with "hello" get higher score
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc_with("hello world");
+  MockedDocument doc_without("goodbye world");
+
+  index.Add(0, doc_with);
+  index.Add(1, doc_without);
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("~hello", &params));
+  algo.SetScorer(&BM25Std);
+
+  auto result = algo.Search(&index);
+
+  // Both docs are returned (optional never filters)
+  ASSERT_EQ(result.ids.size(), 2u);
+
+  // Use optional<float> so an absent score is distinguishable from 0.
+  std::optional<float> score_with, score_without;
+  for (auto& [doc, score] : result.text_scores) {
+    if (doc == 0)
+      score_with = score;
+    if (doc == 1)
+      score_without = score;
+  }
+  ASSERT_TRUE(score_with.has_value()) << "doc:0 must have a score entry";
+  ASSERT_TRUE(score_without.has_value()) << "doc:1 must have a score entry";
+  EXPECT_GT(*score_with, 0.0f) << "Doc matching the optional term should score > 0";
+  EXPECT_GT(*score_with, *score_without) << "Matching doc must score higher than non-matching";
+}
+
+TEST_F(SearchTest, MatchDoubleOptional) {
+  // ~foo ~bar: all docs returned
+  PrepareQuery("~foo ~bar");
+
+  ExpectAll("foo bar", "only foo", "only bar", "neither one");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchOptionalNonExistentTerm) {
+  // ~xyznonexistent: term never matches anything, but all docs still returned
+  PrepareQuery("~xyznonexistent");
+
+  ExpectAll("anything goes", "another doc", "third one");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchNestedOptional) {
+  // ~~hello: double optional should still return all docs
+  PrepareQuery("~~hello");
+
+  ExpectAll("hello world", "no match here", "third doc");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchOptionalWithOr) {
+  // ~hello | world: '~hello' is all docs; OR with anything is still all docs
+  PrepareQuery("~hello | world");
+
+  ExpectAll("hello there", "world peace", "neither term", "both hello world");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchFieldOptionalUnparen) {
+  // @field:~hello (no parens) — was a parser fix, ensure it executes correctly
+  PrepareQuery("@field:~hello");
+
+  ExpectAll("hello there", "no match", "another");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchOptionalSwallowsInnerErrors) {
+  // ~@invalid_field:hello: ~ is a soft boost, not a filter. Inner errors
+  // (missing/NOINDEX field) must NOT poison the outer query — return all docs
+  // without error, matching Redis's silent no-op semantics.
+  Schema schema = MakeSimpleSchema({{"text", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  MockedDocument doc{Map{{"text", "anything"}}};
+  index.Add(0, doc);
+  index.FinalizeInitialization();
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("~@invalid_field:hello", &params));
+  auto result = algo.Search(&index);
+  EXPECT_TRUE(result.error.empty()) << "~ should swallow inner errors, got: " << result.error;
+  EXPECT_EQ(result.ids.size(), 1u) << "~ should still return all docs";
+}
+
+TEST_F(SearchTest, MatchEscapedTermLiteral) {
+  // \X escape: lexer must produce a TERM with the literal char, not a separate
+  // operator token. The actual tokenizer typically strips punctuation when
+  // building the index, so these searches usually return 0 docs — the point of
+  // this test is the *parse + search* path doesn't error or return the wrong
+  // docs through misinterpreting `\~` as TILDE.
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  MockedDocument plain("hello world");
+  index.Add(0, plain);
+  index.FinalizeInitialization();
+
+  for (auto* query : {"\\~hello", "foo\\~bar", "\\-test", "\\|word", "\\(group\\)"}) {
+    SearchAlgorithm algo;
+    QueryParams params;
+    ASSERT_TRUE(algo.Init(query, &params)) << "should parse: " << query;
+    auto result = algo.Search(&index);
+    EXPECT_TRUE(result.error.empty()) << "no error for escaped query: " << query;
+  }
+}
+
+TEST_F(SearchTest, MatchNestedOptionalNoDoubleScore) {
+  // ~~hello: nested optionals should not double-count "hello" in scoring.
+  // matched_text_terms_ uses a set keyed by (index, term) so the second
+  // OPT(hello) shouldn't add an extra cursor; doc with one "hello" must score
+  // the same as a plain ~hello.
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  MockedDocument doc_hello("hello world");
+  index.Add(0, doc_hello);
+  index.FinalizeInitialization();
+
+  auto run = [&](const char* query) {
+    SearchAlgorithm algo;
+    QueryParams params;
+    EXPECT_TRUE(algo.Init(query, &params));
+    algo.SetScorer(&BM25Std);
+    return algo.Search(&index);
+  };
+
+  auto single = run("~hello");
+  auto nested = run("~~hello");
+
+  ASSERT_EQ(single.text_scores.size(), 1u);
+  ASSERT_EQ(nested.text_scores.size(), 1u);
+  EXPECT_NEAR(single.text_scores[0].second, nested.text_scores[0].second, 1e-6)
+      << "Nested optionals must not inflate the score";
+}
+
+TEST_F(SearchTest, MatchNegateErrorPropagation) {
+  // -@invalid_field:hello: pre-existing AstNegateNode pattern, error must propagate
+  Schema schema = MakeSimpleSchema({{"text", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  index.FinalizeInitialization();
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("-@invalid_field:hello", &params));
+  auto result = algo.Search(&index);
+  EXPECT_FALSE(result.error.empty()) << "error from negated subtree must propagate";
+}
+
+TEST_F(SearchTest, MatchOptionalFieldScopedReturnsAllDocs) {
+  Schema schema = MakeSimpleSchema({{"text", SchemaField::TEXT}, {"other", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument with_text{Map{{"text", "hello"}}};
+  MockedDocument without_text{Map{{"other", "world"}}};  // no "text" field
+  index.Add(0, with_text);
+  index.Add(1, without_text);
+  index.FinalizeInitialization();
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("@text:~hello", &params));
+  auto result = algo.Search(&index);
+
+  EXPECT_TRUE(result.error.empty()) << result.error;
+  EXPECT_EQ(result.ids.size(), 2u)
+      << "@field:~term must return all docs, including ones without the field";
+}
+
+TEST_F(SearchTest, MatchOptionalFieldScopedSortableNoIndex) {
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup mr_cleanup{[] { InitTLSearchMR(nullptr); }};
+
+  Schema schema = MakeSimpleSchema({{"txt", SchemaField::TEXT}});
+  schema.fields["txt"].flags = SchemaField::SORTABLE | SchemaField::NOINDEX;
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  MockedDocument doc{Map{{"txt", "hello"}}};
+  index.Add(0, doc);
+  index.FinalizeInitialization();
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("@txt:~hello", &params));
+  auto result = algo.Search(&index);
+
+  EXPECT_TRUE(result.error.empty()) << "SORTABLE+NOINDEX field must not error: " << result.error;
+}
+
+TEST_F(SearchTest, MatchOptionalKnnIdsScoresAligned) {
+  auto schema = MakeSimpleSchema({{"text", SchemaField::TEXT}, {"vec", SchemaField::VECTOR}});
+  schema.fields["vec"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // 4 docs with different text and 1-D vector positions.
+  for (size_t i = 0; i < 4; ++i) {
+    MockedDocument doc{Map{{"text", i == 0 || i == 3 ? "hello world" : "other"},
+                           {"vec", ToBytes({float(i + 1)})}}};
+    index.Add(i, doc);
+  }
+  index.FinalizeInitialization();
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  params["v"] = ToBytes({2.5f});  // closest is doc:1 (pos=2) and doc:2 (pos=3)
+  ASSERT_TRUE(algo.Init("~hello => [KNN 4 @vec $v]", &params));
+  algo.SetScorer(&BM25Std);
+  auto result = algo.Search(&index);
+
+  ASSERT_TRUE(result.error.empty()) << result.error;
+  ASSERT_EQ(result.ids.size(), result.knn_scores.size())
+      << "ids and knn_scores must have matching size";
+  for (size_t i = 0; i < result.ids.size(); ++i) {
+    EXPECT_EQ(result.ids[i], result.knn_scores[i].first)
+        << "ids[" << i << "] (" << result.ids[i] << ") must align with knn_scores[" << i
+        << "].first (" << result.knn_scores[i].first << ")";
   }
 }
 

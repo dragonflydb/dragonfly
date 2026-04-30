@@ -300,10 +300,6 @@ string UnknownCmd(string cmd, CmdArgList args) {
 
 std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
   if (detail::IsS3Path(uri)) {
-#if defined(WITH_AWS) || defined(WITH_AWS_CLOUD)
-#ifdef WITH_AWS
-    shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
-#endif
     auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(
         absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
         absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
@@ -314,10 +310,6 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
       exit(1);
     }
     return aws;
-#else
-    LOG(ERROR) << "Compiled without AWS support";
-    exit(1);
-#endif
   } else if (detail::IsGCSPath(uri)) {
 #ifdef WITH_GCP
     auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
@@ -2933,12 +2925,7 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
 
   if (args.size() >= 2) {
     if (detail::IsS3Path(ArgS(args, 1))) {
-#ifdef WITH_AWS
       save_cmd_opts.cloud_uri = ArgS(args, 1);
-#else
-      LOG(ERROR) << "Compiled without AWS support";
-      exit(1);
-#endif
     } else if (detail::IsGCSPath(ArgS(args, 1)) || detail::IsAzurePath(ArgS(args, 1))) {
       save_cmd_opts.cloud_uri = ArgS(args, 1);
     } else {

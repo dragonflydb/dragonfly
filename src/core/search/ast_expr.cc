@@ -24,6 +24,9 @@ AstGeoNode::AstGeoNode(double lon, double lat, double radius, std::string unit)
     : lon(lon), lat(lat), radius(radius), unit(std::move(unit)) {
 }
 
+AstOptionalNode::AstOptionalNode(AstNode&& node) : node{make_unique<AstNode>(std::move(node))} {
+}
+
 AstNegateNode::AstNegateNode(AstNode&& node) : node{make_unique<AstNode>(std::move(node))} {
 }
 
