@@ -377,8 +377,10 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
               << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
   });
 
-  // Drain any journal-buffered vector updates accumulated during a restoring window.
-  // No-ops cheaply for indices that were not in kRestoring (per-index early return).
+  // Transition every search index out of kRestoring/kSerializing into kBuilding and
+  // drain any journal-buffered vector updates accumulated during a restoring window.
+  // For indices already in kBuilding the state assignment is idempotent and the empty
+  // pending set returns early, so this is cheap when nothing was deferred.
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};

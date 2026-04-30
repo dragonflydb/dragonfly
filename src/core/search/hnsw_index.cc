@@ -293,8 +293,21 @@ struct HnswlibAdapter {
     // Restore each node - directly set up memory and fields. We also enforce the
     // wire-ordering invariant (nodes[i].internal_id == i) inline: if a corrupted or
     // future-format wire violates it we bail out cleanly so the index is rebuilt from
-    // the keyspace instead of writing past the resized memory.
+    // the keyspace instead of writing past the resized memory. On failure we must roll
+    // back the partial mutations from iterations 0..i-1 so RebuildAllIndices doesn't
+    // see a non-empty graph and steer into the (corrupt) restore path.
     size_t restored_count = 0;
+
+    auto rollback_partial_state = [&]() {
+      for (size_t k = 0; k < restored_count; ++k) {
+        if (world_.linkLists_[k]) {
+          mi_free(world_.linkLists_[k]);
+          world_.linkLists_[k] = nullptr;
+        }
+      }
+      world_.label_lookup_.clear();
+      world_.cur_element_count.store(0);
+    };
 
     for (size_t i = 0; i < nodes.size(); ++i) {
       const auto& node = nodes[i];
@@ -302,6 +315,7 @@ struct HnswlibAdapter {
         LOG(ERROR) << "HNSW restore: wire ordering invariant violated at index " << i
                    << " (got internal_id=" << node.internal_id << "); index will be rebuilt "
                    << "from the keyspace";
+        rollback_partial_state();
         return false;
       }
       size_t internal_id = i;
