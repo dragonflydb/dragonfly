@@ -2096,6 +2096,17 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
+// State needed to resume loading a chunked value after the first tagged chunk.
+// The first chunk carries the object type and key. Continuation chunks carry only payload,
+// so we keep the object type, key, db, settings, and pending read.
+struct RdbLoader::StreamState {
+  std::string key;
+  DbIndex db_index;
+  int type;
+  PendingRead pending_read;
+  ObjSettings settings;
+};
+
 RdbLoader::RdbLoader(Service* service, RdbLoadContext* load_context, std::string snapshot_id)
     : service_{service},
       load_context_(load_context),
@@ -2231,6 +2242,18 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_EOF) {
+      if (current_chunk_state_) {
+        LOG(ERROR) << "eof seen while a previous chunk is not yet finished, stream id "
+                   << current_chunk_state_->stream_id << ", remaining bytes "
+                   << current_chunk_state_->remaining_payload_bytes
+                   << ", pending stream states: " << stream_states_.size();
+        return RdbError(errc::rdb_chunk_payload_remaining);
+      }
+
+      if (!stream_states_.empty()) {
+        LOG(ERROR) << "eof seen while pending stream states: " << stream_states_.size();
+        return RdbError(errc::rdb_chunk_payload_remaining);
+      }
       /* EOF: End of file, exit the main loop. */
       break;
     }
@@ -2352,6 +2375,32 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_TAGGED_CHUNK) {
+      ActiveTaggedChunk state;
+      SET_OR_RETURN(FetchInt<uint32_t>(), state.stream_id);
+      SET_OR_RETURN(FetchInt<uint32_t>(), state.remaining_payload_bytes);
+      if (state.stream_id == 0) {
+        LOG(ERROR) << "invalid stream id 0 with size " << state.remaining_payload_bytes;
+        return RdbError(errc::rdb_file_corrupted);
+      }
+
+      if (state.remaining_payload_bytes == 0) {
+        LOG(ERROR) << "invalid payload of zero size for stream id " << state.stream_id;
+        return RdbError(errc::rdb_file_corrupted);
+      }
+
+      current_chunk_state_ = state;
+
+      // A known stream id means this is a continuation chunk containing payload only.
+      // Otherwise this is the first chunk of a new object, and the normal object-loading
+      // path below will read its type and key.
+      if (stream_states_.contains(current_chunk_state_->stream_id)) {
+        RETURN_ON_ERR(LoadValueChunk());
+        RETURN_ON_ERR(FinalizeCurrentChunkIfNeeded());
+      }
+      continue;
+    }
+
     if (!rdbIsObjectTypeDF(type)) {
       LOG(ERROR) << "Unrecognized rdb object type: " << type;
       LOG(ERROR) << "Last iteration: ";
@@ -2368,6 +2417,7 @@ error_code RdbLoader::Load(io::Source* src) {
     VLOG(2) << "LoadKeyValPair key=" << last_key_loaded_ << " rdb_type=" << type
             << " db= " << cur_db_index_;
     settings.Reset();
+    RETURN_ON_ERR(FinalizeCurrentChunkIfNeeded());
   }  // main load loop
 
   DVLOG(1) << "RdbLoad loop finished";
@@ -2563,6 +2613,11 @@ error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
   string res;
   SET_OR_RETURN(FetchGenericString(), res);
 
+  // Stop counting payload bytes on decompressed data. At this point the entire payload size must be
+  // consumed as it was the compressed blob. We switch to another buffer and must be able to read
+  // everything from it without any checks
+  RETURN_ON_ERR(FinishCurrentChunk());
+
   // Decompress blob and switch membuf pointer
   // Last type in the compressed blob is RDB_OPCODE_COMPRESSED_BLOB_END
   // in which we will switch back to the origin membuf (HandleCompressedBlobFinish)
@@ -2748,14 +2803,14 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   if (out_buf.empty())
     return;
 
-  auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
+  auto cb = [this, ib = std::move(out_buf)] {
     auto& db_slice = GetCurrentDbSlice();
 
     // Before we start loading, increment LoadInProgress.
     // This is required because FlushShardAsync dispatches to multiple shards, and those shards
     // might have not yet have their state (load in progress) incremented.
     db_slice.IncrLoadInProgress();
-    this->LoadItemsBuffer(indx, ib);
+    this->LoadItemsBuffer(ib);
     db_slice.DecrLoadInProgress();
   };
 
@@ -2774,6 +2829,20 @@ std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig co
   std::visit(visitor, opaque.obj);
 
   return visitor.ec();
+}
+
+std::error_code RdbLoaderBase::FinishCurrentChunk() {
+  if (!current_chunk_state_)
+    return kOk;
+
+  if (!ChunkBudgetExhausted()) {
+    LOG(ERROR) << "chunk fully consumed but payload bytes remain "
+               << current_chunk_state_->remaining_payload_bytes;
+    return RdbError(errc::rdb_chunk_payload_remaining);
+  }
+
+  current_chunk_state_.reset();
+  return kOk;
 }
 
 void RdbLoaderBase::CopyStreamId(const StreamID& src, struct streamID* dest) {
@@ -2891,17 +2960,19 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 }
 
-void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
+void RdbLoader::LoadItemsBuffer(const ItemsBuf& ib) {
   EngineShard* es = EngineShard::tlocal();
-  DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
-  DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
-
-  DCHECK(!db_slice.IsCacheMode());
+  const uint64_t now_ms = GetCurrentTimeMs();
+  Namespace* ns = &namespaces->GetDefaultNamespace();
 
   for (const auto* item : ib) {
+    DbContext db_cntx{ns, item->db_index, now_ms};
+    DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
+    DCHECK(!db_slice.IsCacheMode());
     CreateObjectOnShard(db_cntx, item, &db_slice);
     if (stop_early_) {
-      return;
+      // force all items in ib to move into item_queue_ so they can be cleaned up later.
+      break;
     }
   }
 
@@ -2931,8 +3002,63 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     SET_OR_RETURN(ReadAndDispatchObject(type, key, *settings, cur_db_index_), finalized);
   } while (!finalized && remaining_payload_bytes() > 0 && !stop_early_.load(memory_order_relaxed));
 
-  int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
+  // If the first tagged chunk did not finish the object, save enough state to resume it when
+  // the next chunk with the same stream id arrives.
+  if (!finalized && current_chunk_state_) {
+    StreamState stream_state{
+        .key = std::move(key),
+        .db_index = cur_db_index_,
+        .type = type,
+        .pending_read = std::move(pending_read_),
+        .settings = *settings,
+    };
+    const bool inserted =
+        stream_states_.try_emplace(current_chunk_state_->stream_id, std::move(stream_state)).second;
+    if (!inserted) {
+      LOG(ERROR) << "attempt to add first chunk for id " << current_chunk_state_->stream_id
+                 << " which already exists";
+      return RdbError(errc::rdb_file_corrupted);
+    }
+  }
+
+  const int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
   LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;
+
+  pending_read_ = {};
+  return kOk;
+}
+
+std::error_code RdbLoader::LoadValueChunk() {
+  if (!current_chunk_state_.has_value()) {
+    LOG(ERROR) << "chunk load attempt without expected state";
+    return RdbError(errc::rdb_file_corrupted);
+  }
+
+  const auto it = stream_states_.find(current_chunk_state_->stream_id);
+  if (it == stream_states_.end()) {
+    LOG(ERROR) << "missing stream id " << current_chunk_state_->stream_id;
+    return RdbError(errc::rdb_file_corrupted);
+  }
+
+  StreamState& state = it->second;
+
+  // Restore the state from the previous chunk
+  pending_read_ = std::move(state.pending_read);
+
+  bool finalized = false;
+  do {
+    SET_OR_RETURN(ReadAndDispatchObject(state.type, state.key, state.settings, state.db_index),
+                  finalized);
+  } while (!finalized && current_chunk_state_->remaining_payload_bytes > 0 &&
+           !stop_early_.load(memory_order_relaxed));
+
+  if (finalized) {
+    // done reading this object
+    stream_states_.erase(current_chunk_state_->stream_id);
+  } else {
+    // only pending read changes from chunk -> chunk
+    state.pending_read = std::move(pending_read_);
+  }
 
   pending_read_ = {};
   return kOk;
@@ -2997,6 +3123,7 @@ io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& 
   item->has_mc_flags = obj_settings.has_mc_flags;
   item->mc_flags = obj_settings.mc_flags;
   item->expire_ms = obj_settings.expiretime;
+  item->db_index = db_index;
 
   std::move(cleanup).Cancel();
 
@@ -3151,6 +3278,12 @@ error_code RdbLoader::HandleShardDocIndex() {
   // keys to replica shards and remap global_ids accordingly.
   load_context_->AddPendingIndexMapping(shard_id, std::move(pim));
   return kOk;
+}
+
+std::error_code RdbLoader::FinalizeCurrentChunkIfNeeded() {
+  if (stop_early_.load(memory_order_relaxed))
+    return kOk;
+  return FinishCurrentChunk();
 }
 
 error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
