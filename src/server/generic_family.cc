@@ -21,6 +21,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/glob_matcher.h"
+#include "core/oah_set.h"
 #include "core/qlist.h"
 #include "core/string_set.h"
 #include "redis/rdb.h"

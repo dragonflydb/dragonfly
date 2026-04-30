@@ -4,6 +4,7 @@
 
 #include "server/journal/cmd_serializer.h"
 
+#include "core/oah_set.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/container_utils.h"

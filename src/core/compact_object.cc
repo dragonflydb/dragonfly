@@ -30,6 +30,7 @@ extern "C" {
 #include "core/cms.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
+#include "core/oah_set.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
@@ -63,10 +64,12 @@ size_t UpdateSize(size_t size, int64_t update) {
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
-    case kEncodingStrMap2: {
-      CompactObj::DeleteMR<StringSet>(ptr);
+    case kEncodingStrMap2:
+      VisitSet(ptr, [](auto* ss) {
+        using T = std::remove_pointer_t<decltype(ss)>;
+        CompactObj::DeleteMR<T>(ss);
+      });
       break;
-    }
 
     case kEncodingIntSet:
       zfree((void*)ptr);
@@ -87,10 +90,10 @@ void FreeList(unsigned encoding, void* ptr, MemoryResource* mr) {
 
 size_t MallocUsedSet(unsigned encoding, void* ptr) {
   switch (encoding) {
-    case kEncodingStrMap2: {
-      StringSet* ss = (StringSet*)ptr;
-      return ss->ObjMallocUsed() + ss->SetMallocUsed() + zmalloc_usable_size(ptr);
-    }
+    case kEncodingStrMap2:
+      return VisitSet(ptr, [ptr](auto* ss) {
+        return ss->ObjMallocUsed() + ss->SetMallocUsed() + zmalloc_usable_size(ptr);
+      });
     case kEncodingIntSet:
       return intsetBlobLen((intset*)ptr);
   }
@@ -277,12 +280,10 @@ pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, PageUsage* page_usage) 
   return {sm, reallocated};
 }
 
-pair<void*, bool> DefragStrSet(StringSet* ss, PageUsage* page_usage) {
+template <typename Set> pair<void*, bool> DefragDenseSet(Set* ss, PageUsage* page_usage) {
   bool realloced = false;
-
   for (auto it = ss->begin(); it != ss->end(); ++it)
     realloced |= it.ReallocIfNeeded(page_usage);
-
   return {ss, realloced};
 }
 
@@ -313,9 +314,8 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, PageUsage* page_usage)
       return DefragIntSet((intset*)ptr, page_usage);
     }
 
-    case kEncodingStrMap2: {
-      return DefragStrSet((StringSet*)ptr, page_usage);
-    }
+    case kEncodingStrMap2:
+      return VisitSet(ptr, [page_usage](auto* ss) { return DefragDenseSet(ss, page_usage); });
 
     default:
       ABSL_UNREACHABLE();
@@ -563,7 +563,7 @@ size_t CompactObj::Size() const {
       if (enc == kEncodingIntSet)
         return intsetLen((intset*)p);
       if (enc == kEncodingStrMap2)
-        return ((StringSet*)p)->UpperBoundSize();
+        return VisitSet(p, [](auto* ss) { return ss->UpperBoundSize(); });
       LOG(FATAL) << "Unexpected SET encoding " << enc;
       return 0;
     }
@@ -739,29 +739,33 @@ void CompactObj::InitRobj(CompactObjType type, unsigned encoding, void* obj) {
 }
 
 namespace {
-// Returns the underlying DenseSet if this CompactObj wraps a StringSet/StringMap
-// (kEncodingStrMap2), otherwise nullptr. Encoding() is a safe accessor that
-// returns kEncodingStrMap2 only for collection tags (SET/HASH).
-DenseSet* AsDenseSetOrNull(const CompactObj& obj) {
-  if (obj.Encoding() != kEncodingStrMap2)
-    return nullptr;
-  return static_cast<DenseSet*>(obj.RObjPtr());
+// Dispatches `fn` over the dense set/map backing this CompactObj for
+// kEncodingStrMap2. OBJ_HASH always uses StringMap (a DenseSet subclass);
+// OBJ_SET uses StringSet by default and OAHSet under --use_oah_set.
+template <typename Fn> auto DispatchSetOrMap(const CompactObj& obj, Fn&& fn) {
+  using R = decltype(fn(static_cast<DenseSet*>(nullptr)));
+  if (obj.Encoding() != kEncodingStrMap2) {
+    if constexpr (std::is_void_v<R>)
+      return;
+    else
+      return R{};
+  }
+  if (obj.ObjType() == OBJ_SET)
+    return VisitSet(obj.RObjPtr(), std::forward<Fn>(fn));
+  return fn(static_cast<DenseSet*>(obj.RObjPtr()));
 }
 }  // namespace
 
 void CompactObj::SetMemberTime(uint32_t seconds) const {
-  if (DenseSet* ds = AsDenseSetOrNull(*this))
-    ds->set_time(seconds);
+  DispatchSetOrMap(*this, [seconds](auto* s) { s->set_time(seconds); });
 }
 
 uint32_t CompactObj::MemberTime() const {
-  DenseSet* ds = AsDenseSetOrNull(*this);
-  return ds ? ds->time_now() : 0;
+  return DispatchSetOrMap(*this, [](auto* s) { return s->time_now(); });
 }
 
 bool CompactObj::HasMemberExpiration() const {
-  DenseSet* ds = AsDenseSetOrNull(*this);
-  return ds && ds->ExpirationUsed();
+  return DispatchSetOrMap(*this, [](auto* s) { return s->ExpirationUsed(); });
 }
 
 void CompactObj::SetInt(int64_t val) {
