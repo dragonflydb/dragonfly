@@ -12,6 +12,8 @@
 
 extern "C" {
 #include "redis/zmalloc.h"
+
+namespace rng = std::ranges;
 }
 
 using namespace std;
@@ -67,20 +69,16 @@ StringMap::~StringMap() {
 
 bool StringMap::AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec,
                             bool keepttl) {
-  sds prev = AddOrExchange(field, value, ttl_sec, keepttl);
-  if (prev) {
-    ObjDelete(prev, false);
-    return false;
-  }
-  return true;
+  SdsEntry prev = AddOrExchange(field, value, ttl_sec, keepttl);
+  return !prev;
 }
 
-sds StringMap::AddOrExchange(std::string_view field, std::string_view value, uint32_t ttl_sec,
-                             bool keepttl) {
+StringMap::SdsEntry StringMap::AddOrExchange(std::string_view field, std::string_view value,
+                                             uint32_t ttl_sec, bool keepttl) {
   const uint32_t computed_ttl = ComputeTtl(field, ttl_sec, keepttl);
   auto [newkey, sdsval_tag] = CreateEntry(field, value, time_now(), computed_ttl);
   auto prev_entry = static_cast<sds>(AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit));
-  return prev_entry;
+  return SdsEntry(prev_entry, DeleteEntry);
 }
 
 uint32_t StringMap::ComputeTtl(string_view field, uint32_t ttl_sec, bool keepttl) const {
@@ -114,13 +112,14 @@ bool StringMap::Erase(string_view key) {
 }
 
 StringMap::SdsEntry StringMap::Extract(string_view key) {
-  return SdsEntry(static_cast<sds>(DetachInternal(const_cast<string_view*>(&key), 1)), DeleteEntry);
+  return SdsEntry(DetachInternal(const_cast<string_view*>(&key), 1), DeleteEntry);
 }
 
-void StringMap::DeleteEntry(sds entry) {
-  sds value = GetValue(entry);
+void StringMap::DeleteEntry(void* entry) {
+  sds s1 = (sds)entry;
+  sds value = GetValue(s1);
   sdsfree(value);
-  sdsfree(entry);
+  sdsfree(s1);
 }
 
 bool StringMap::Contains(string_view field) const {
@@ -187,7 +186,7 @@ void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vec
     picks.push_back(pick);
   }
 
-  std::sort(picks.begin(), picks.end(), [](auto& x, auto& y) { return x.first < y.first; });
+  rng::sort(picks, [](auto& x, auto& y) { return x.first < y.first; });
 
   unsigned int index = picks[0].first, pick_index = 0;
   auto itr = begin();
@@ -310,7 +309,7 @@ void StringMap::ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) {
   return SdsUpdateExpireTime(obj, time_now() + ttl_sec, 8);
 }
 
-void StringMap::ObjDelete(void* obj, bool has_ttl) const {
+void StringMap::ObjDelete(void* obj) const {
   sds s1 = (sds)obj;
   sds value = GetValue(s1);
   sdsfree(value);

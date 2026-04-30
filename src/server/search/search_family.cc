@@ -11,6 +11,7 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
+#include <algorithm>
 #include <atomic>
 #include <variant>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "base/logging.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
+#include "core/search/scoring.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
 #include "facade/cmd_arg_parser.h"
@@ -38,6 +40,8 @@
 #include "server/search/global_hnsw_index.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
+
+namespace rng = std::ranges;
 
 ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
 ABSL_FLAG(bool, cluster_search, false,
@@ -111,6 +115,8 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
     } else if (parser->Check("INITIAL_CAP", &params.capacity)) {
     } else if (parser->Check("M", &params.hnsw_m)) {
     } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
+    } else if (parser->Check("TYPE")) {
+      params.data_type = absl::AsciiStrToUpper(parser->Next<string_view>());
     } else if (parser->Check("EF_RUNTIME")) {
       parser->Next<size_t>();
       LOG(WARNING) << "EF_RUNTIME not supported";
@@ -211,6 +217,20 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
   if (vector_params.dim == 0) {
     return CreateSyntaxError("Knn vector dimension cannot be zero"sv);
   }
+
+  // Validate that the initial allocation (capacity * (dim+1) floats) cannot
+  // overflow size_t or request an unreasonable amount of memory.  Without this
+  // check FlatVectorIndex::FlatVectorIndex() would throw std::bad_alloc,
+  // leaving a half-initialised index registered in ShardDocIndices.
+  static constexpr size_t kMaxFlatBufEntries = size_t{1} << 30;  // ~4 GiB of floats
+  if (vector_params.dim >= kMaxFlatBufEntries) {
+    return CreateSyntaxError("Vector index initial allocation is too large"sv);
+  }
+  size_t dim_plus1 = vector_params.dim + 1;
+  if (vector_params.capacity > kMaxFlatBufEntries / dim_plus1) {
+    return CreateSyntaxError("Vector index initial allocation is too large"sv);
+  }
+
   return std::make_pair(search::SchemaField::VECTOR, vector_params);
 }
 
@@ -227,9 +247,15 @@ ParseResult<bool> ParseOnOption(CmdArgParser* parser, DocIndex* index) {
 // PREFIX count prefix [prefix ...]
 ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
   size_t count = parser->Next<size_t>();
-  index->prefixes.reserve(count);
-  for (size_t i = 0; i < count; i++) {
+  size_t i = 0;
+  for (; i < count && parser->HasNext(); i++) {
     index->prefixes.push_back(parser->Next<std::string>());
+  }
+  // If fewer prefixes were consumed than promised, trigger an out-of-bounds error.
+  // This prevents unbounded loops for huge user-supplied counts while
+  // preserving the existing syntax-error behavior for mismatched counts.
+  if (i < count) {
+    parser->Next();  // triggers OUT_OF_BOUNDS
   }
   return true;
 }
@@ -237,8 +263,14 @@ ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
 // STOPWORDS count [words...]
 ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   index->options.stopwords.clear();
-  for (size_t num = parser->Next<size_t>(); num > 0; num--) {
+  index->options.custom_stopwords = true;
+  size_t count = parser->Next<size_t>();
+  size_t i = 0;
+  for (; i < count && parser->HasNext(); i++) {
     index->options.stopwords.emplace(parser->Next());
+  }
+  if (i < count) {
+    parser->Next();  // triggers OUT_OF_BOUNDS
   }
   return true;
 }
@@ -295,16 +327,14 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
                                      search::SchemaField::SORTABLE);
       if (!flag) {
         std::string_view option = parser->Peek();
-        if (std::find(kIgnoredOptions.begin(), kIgnoredOptions.end(), option) !=
-            kIgnoredOptions.end()) {
+        if (rng::find(kIgnoredOptions, option) != kIgnoredOptions.end()) {
           LOG_IF(WARNING, option != "INDEXMISSING"sv && option != "INDEXEMPTY"sv)
               << "Ignoring unsupported field option in FT.CREATE: " << option;
           // Ignore these options
           parser->Skip(1);
           continue;
         }
-        if (std::find(kIgnoredOptionsWithArg.begin(), kIgnoredOptionsWithArg.end(), option) !=
-            kIgnoredOptionsWithArg.end()) {
+        if (rng::find(kIgnoredOptionsWithArg, option) != kIgnoredOptionsWithArg.end()) {
           LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: " << option;
           // Ignore these options with argument
           parser->Skip(2);
@@ -412,6 +442,12 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   return params;
 }
 
+std::optional<search::ScorerFn> ParseScorer(CmdArgParser* parser) {
+  return parser->TryMapNext("BM25STD", &search::BM25Std,  //
+                            "TFIDF", &search::TfIdf,      //
+                            "TFIDF.DOCNORM", &search::TfIdfDocNorm);
+}
+
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   SearchParams params;
 
@@ -449,6 +485,15 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       ParseNumericFilter(parser, &params);
     } else if (parser->Check("WITHSORTKEYS")) {
       params.with_sortkeys = true;
+    } else if (parser->Check("WITHSCORES")) {
+      params.with_scores = true;
+    } else if (parser->Check("SCORER")) {
+      auto scorer = ParseScorer(parser);
+      if (!scorer)
+        return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
+      params.scorer = *scorer;
+    } else if (parser->Check("DIALECT")) {
+      parser->Skip(1);  // Accepted and ignored — DF always behaves as dialect 2
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
@@ -462,6 +507,10 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
 
 ParseResult<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parser) {
   size_t strings_num = parser->Next<size_t>();
+
+  if (!parser->HasError() && !parser->HasAtLeast(strings_num)) {
+    return CreateSyntaxError("bad arguments for SORTBY: specified invalid number of strings"sv);
+  }
 
   aggregate::SortParams sort_params;
   sort_params.fields.reserve(strings_num / 2);
@@ -524,7 +573,7 @@ ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
   known_indexes->insert(join_params.index_alias);
 
   size_t num_fields = parser->Next<size_t>();
-  join_params.conditions.reserve(num_fields);
+  join_params.conditions.reserve(std::min(num_fields, parser->Tail().size()));
   // Conditions are in the form index.field=foreign_index.field or foreign_index.field=index.field
   while (parser->HasNext() && num_fields > 0) {
     auto [left, right] = Split(parser->Next(), '=');
@@ -593,7 +642,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       size_t num_fields = parser->Next<size_t>();
 
       std::vector<std::string> fields;
-      fields.reserve(num_fields);
+      fields.reserve(std::min(num_fields, parser->Tail().size()));
       while (parser->HasNext() && num_fields > 0) {
         auto parsed_field = ParseFieldWithAtSign(parser);
         if (!parsed_field) {
@@ -661,9 +710,60 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       continue;
     }
 
+    // FILTER "expr"
+    if (parser->Check("FILTER")) {
+      std::string filter_expr{parser->Next<std::string_view>()};
+      auto step_or_err = aggregate::MakeFilterStep(filter_expr);
+      if (std::holds_alternative<std::string>(step_or_err)) {
+        return CreateSyntaxError(
+            absl::StrCat("FILTER expression error: ", std::get<std::string>(step_or_err)));
+      }
+      params.steps.push_back(std::move(std::get<aggregate::AggregationStep>(step_or_err)));
+      continue;
+    }
+
     // PARAMS
     if (parser->Check("PARAMS")) {
       params.params = ParseQueryParams(parser);
+      continue;
+    }
+
+    // DIALECT (accepted and ignored — DF always behaves as dialect 2)
+    if (parser->Check("DIALECT")) {
+      parser->Skip(1);
+      continue;
+    }
+
+    // APPLY "expr" AS alias
+    if (parser->Check("APPLY")) {
+      string expr{parser->Next<string_view>()};
+      parser->ExpectTag("AS");
+      string alias = parser->Next<string>();
+      auto step_or_err = aggregate::MakeApplyStep(expr, std::move(alias));
+      if (std::holds_alternative<std::string>(step_or_err)) {
+        return CreateSyntaxError(
+            absl::StrCat("APPLY expression error: ", std::get<std::string>(step_or_err)));
+      }
+      params.steps.push_back(std::move(std::get<aggregate::AggregationStep>(step_or_err)));
+      continue;
+    }
+
+    // SCORER, ADDSCORES, WITHSCORES can appear anywhere in the command
+    if (parser->Check("SCORER")) {
+      auto scorer = ParseScorer(parser);
+      if (!scorer)
+        return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
+      params.scorer = *scorer;
+      continue;
+    }
+
+    if (parser->Check("ADDSCORES")) {
+      params.add_scores = true;
+      continue;
+    }
+
+    if (parser->Check("WITHSCORES")) {
+      // Silently ignored for FT.AGGREGATE (use ADDSCORES instead)
       continue;
     }
 
@@ -881,7 +981,7 @@ join::Vector<join::Vector<join::Key>> DoJoin(
     size_t limit = offset + total;
     if (!sort_params.empty()) {
       if (limit >= joined_entries->size()) {
-        std::sort(joined_entries->begin(), joined_entries->end(), std::move(comparator));
+        rng::sort(*joined_entries, std::move(comparator));
       } else {
         std::partial_sort(joined_entries->begin(), joined_entries->begin() + limit,
                           joined_entries->end(), std::move(comparator));
@@ -983,7 +1083,8 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
 
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
-                 absl::Span<SearchResult> results, SinkReplyBuilder* builder, bool is_css) {
+                 std::string_view inject_score_alias, absl::Span<SearchResult> results,
+                 SinkReplyBuilder* builder, bool is_css) {
   size_t total_hits = 0;
   absl::InlinedVector<SerializedSearchDoc*, 5> docs;
   docs.reserve(results.size());
@@ -1005,6 +1106,10 @@ void SearchReply(const SearchParams& params,
     ignore_sort = !params.sort_option || params.sort_option->IsSame(*knn_sort_option);
     if (params.ShouldReturnField(knn_sort_option->score_field_alias))
       knn_score_ret_field = knn_sort_option->score_field_alias;
+  } else if (!inject_score_alias.empty() && params.ShouldReturnField(inject_score_alias)) {
+    // FLAT VECTOR_RANGE without distance-based SORTBY: expose the alias without
+    // forcing a global reorder. Matches Redis Stack default ordering.
+    knn_score_ret_field = string{inject_score_alias};
   }
 
   // Apply LIMIT
@@ -1025,7 +1130,8 @@ void SearchReply(const SearchParams& params,
 
   const bool reply_with_ids_only = params.IdsOnly();
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  const size_t items_per_field = (reply_with_ids_only ? 1 : 2) + params.with_sortkeys;
+  const size_t items_per_field =
+      (reply_with_ids_only ? 1 : 2) + params.with_sortkeys + params.with_scores;
   RedisReplyBuilder::ArrayScope scope{rb, limit * items_per_field + 1};
 
   Overloaded sortable_value_sender{
@@ -1037,6 +1143,9 @@ void SearchReply(const SearchParams& params,
   rb->SendLong(total_hits);
   for (size_t i = offset; i < end; i++) {
     rb->SendBulkString(docs[i]->key);
+    if (params.with_scores) {
+      rb->SendBulkString(absl::StrCat(docs[i]->text_score));
+    }
     if (params.with_sortkeys) {
       visit(sortable_value_sender, docs[i]->sort_score);
     }
@@ -1323,6 +1432,70 @@ bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
   return true;
 }
 
+// Validate HNSW VECTOR_RANGE parameters and return the index on success.
+// On failure, sends an error reply via builder and returns nullptr.
+std::shared_ptr<search::HnswVectorIndex> GetValidatedHnswRangeIndex(
+    std::string_view index_name, const search::AstVectorRangeNode* hnsw_range,
+    SinkReplyBuilder* builder) {
+  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, hnsw_range->field);
+  if (!hnsw_index) {
+    builder->SendError(string{index_name} + ": no such global hnsw index");
+    return nullptr;
+  }
+  if (hnsw_range->vec.second == 0) {
+    builder->SendError("Parse error of vector parameters");
+    return nullptr;
+  }
+  if (hnsw_range->radius < 0 || std::isnan(hnsw_range->radius)) {
+    builder->SendError(
+        absl::StrCat("VECTOR_RANGE radius must be non-negative, got: ", hnsw_range->radius));
+    return nullptr;
+  }
+  if (hnsw_index->GetDim() != hnsw_range->vec.second) {
+    builder->SendError(absl::StrCat("Wrong vector index dimensions, got: ", hnsw_range->vec.second,
+                                    ", expected: ", hnsw_index->GetDim()));
+    return nullptr;
+  }
+  return hnsw_index;
+}
+
+// Group global (score, GlobalDocId) pairs into per-shard vectors of (local DocId, score).
+std::vector<std::vector<std::pair<search::DocId, float>>> GroupByShardId(
+    const std::vector<std::pair<float, search::GlobalDocId>>& global_results, ShardId shard_count) {
+  std::vector<std::vector<std::pair<search::DocId, float>>> shard_docs(shard_count);
+  for (const auto& [score, global_doc_id] : global_results) {
+    auto [shard_id, local_doc_id] = search::DecomposeGlobalDocId(global_doc_id);
+    shard_docs[shard_id].emplace_back(local_doc_id, score);
+  }
+  return shard_docs;
+}
+
+// Collect GlobalDocIds from sharded prefilter search results.
+std::vector<search::GlobalDocId> CollectPrefilterGlobalIds(
+    absl::Span<const SearchResult> prefilter_docs) {
+  std::vector<search::GlobalDocId> ids;
+  for (size_t shard_id = 0; shard_id < prefilter_docs.size(); shard_id++) {
+    for (const auto& doc : prefilter_docs[shard_id].docs) {
+      ids.push_back(search::CreateGlobalDocId(shard_id, doc.id));
+    }
+  }
+  return ids;
+}
+
+// Try to pop KNN node from search algorithm if HNSW index exists for the field.
+// Returns {knn_node, knn_ptr} pair; both null if not a HNSW KNN query.
+std::pair<std::unique_ptr<search::AstNode>, search::AstKnnNode*> TryPopHnswKnnNode(
+    search::SearchAlgorithm& search_algo, std::string_view index_name) {
+  if (search_algo.IsKnnQuery()) {
+    if (GlobalHnswIndexRegistry::Instance().Exist(index_name, search_algo.GetKnnNode()->field)) {
+      auto knn_node = search_algo.PopKnnNode();
+      auto* knn = std::get_if<search::AstKnnNode>(knn_node.get());
+      return {std::move(knn_node), knn};
+    }
+  }
+  return {nullptr, nullptr};
+}
+
 }  // namespace
 
 void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1457,6 +1630,12 @@ void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
   shared_ptr<DocIndex> index_info;
   atomic_uint num_deleted{0};
 
+  // Collect dropped indices per shard. We must NOT destroy ShardDocIndex inside the transaction
+  // callback because it runs on the shard's FiberQueue, and ~ShardDocIndex -> CancelBuilder ->
+  // IndexBuilder::Cancel joins the builder fiber. If the builder's VectorLoop dispatched work
+  // to the same FiberQueue (via shard_set->Await), joining from within the FiberQueue deadlocks.
+  vector<unique_ptr<ShardDocIndex>> dropped(shard_set->size());
+
   auto cb = [&](Transaction* t, EngineShard* es) {
     // Get index info from first shard for global cleanup
     if (es->shard_id() == 0) {
@@ -1473,7 +1652,6 @@ void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
 
     // If DD is set, delete all documents that were in the index
     if (delete_docs) {
-      // Get const reference to document keys map (index will be destroyed after this scope)
       const auto& doc_keys = index->key_index().GetDocKeysMap();
 
       auto op_args = t->GetOpArgs(es);
@@ -1487,10 +1665,19 @@ void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
       }
     }
 
+    // Defer destruction — will be destroyed on the shard thread after the transaction.
+    dropped[es->shard_id()] = std::move(index);
     return OpStatus::OK;
   };
 
   cmd_cntx->tx()->Execute(cb, true);
+
+  // Destroy indices on their shard threads outside the FiberQueue.
+  // ~ShardDocIndex calls CancelBuilder which joins the builder fiber. We must not run this
+  // on the FiberQueue because the builder's VectorLoop may have work queued on the same
+  // FiberQueue — joining from within the FiberQueue consumer would deadlock.
+  shard_set->RunBlockingInParallel(
+      [&dropped](EngineShard* es) { dropped[es->shard_id()].reset(); });
 
   if (index_info) {
     for (const auto& [field_ident, field_info] : index_info->schema.fields) {
@@ -1546,7 +1733,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  rb->StartCollection(7, CollectionType::MAP);
+  bool has_custom_stopwords = info.base_index.options.custom_stopwords;
+  rb->StartCollection(has_custom_stopwords ? 8 : 7, CollectionType::MAP);
 
   rb->SendSimpleString("index_name");
   rb->SendSimpleString(idx_name);
@@ -1584,7 +1772,38 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
     if (field_info.flags & search::SchemaField::SORTABLE)
       info.emplace_back("SORTABLE"sv);
 
-    if (field_info.type == search::SchemaField::NUMERIC) {
+    if (field_info.type == search::SchemaField::VECTOR) {
+      auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
+      info.emplace_back("algorithm");
+      info.emplace_back(vparams.use_hnsw ? "HNSW" : "FLAT");
+      info.emplace_back("data_type");
+      info.emplace_back(vparams.data_type);
+      info.emplace_back("dim");
+      info.emplace_back(std::to_string(vparams.dim));
+      info.emplace_back("distance_metric");
+      auto sim = vparams.sim == search::VectorSimilarity::L2   ? "L2"
+                 : vparams.sim == search::VectorSimilarity::IP ? "IP"
+                                                               : "COSINE";
+      info.emplace_back(sim);
+      if (vparams.use_hnsw) {
+        info.emplace_back("M");
+        info.emplace_back(std::to_string(vparams.hnsw_m));
+        info.emplace_back("ef_construction");
+        info.emplace_back(std::to_string(vparams.hnsw_ef_construction));
+      }
+    } else if (field_info.type == search::SchemaField::TAG) {
+      auto& tparams = std::get<search::SchemaField::TagParams>(field_info.special_params);
+      info.emplace_back("SEPARATOR");
+      info.emplace_back(std::string(1, tparams.separator));
+      if (tparams.case_sensitive)
+        info.emplace_back("CASESENSITIVE");
+      if (tparams.with_suffixtrie)
+        info.emplace_back("WITHSUFFIXTRIE");
+    } else if (field_info.type == search::SchemaField::TEXT) {
+      auto& tparams = std::get<search::SchemaField::TextParams>(field_info.special_params);
+      if (tparams.with_suffixtrie)
+        info.emplace_back("WITHSUFFIXTRIE");
+    } else if (field_info.type == search::SchemaField::NUMERIC) {
       auto& numeric_params =
           std::get<search::SchemaField::NumericParams>(field_info.special_params);
       info.emplace_back("blocksize"sv);
@@ -1596,6 +1815,15 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("num_docs");
   rb->SendLong(total_num_docs);
+
+  if (has_custom_stopwords) {
+    const auto& stopwords = info.base_index.options.stopwords;
+    rb->SendSimpleString("stopwords_list");
+    rb->StartArray(stopwords.size());
+    for (const auto& sw : stopwords) {
+      rb->SendBulkString(sw);
+    }
+  }
 
   rb->SendSimpleString("indexing");
   rb->SendLong(indexing ? 1 : 0);
@@ -1691,6 +1919,9 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   vector<SearchResult> css_docs;
   if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
+    if (params->with_scores || params->scorer) {
+      return builder->SendError("WITHSCORES/SCORER is not yet supported in cluster search mode");
+    }
     std::string args_str = absl::StrJoin(args.subspan(2), " ");
 
     css_docs = FtSearchCSS(index_name, query_str, args_str, *params);
@@ -1700,16 +1931,13 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
 
-  std::unique_ptr<search::AstNode> knn_node;
-  search::AstKnnNode* knn = nullptr;
+  // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
+  if (params->scorer)
+    search_algo.SetScorer(params->scorer);
+  else if (params->with_scores)
+    search_algo.SetScorer(&search::BM25Std);
 
-  if (search_algo.IsKnnQuery()) {
-    // Check if it is HNSW node
-    if (GlobalHnswIndexRegistry::Instance().Exist(index_name, search_algo.GetKnnNode()->field)) {
-      knn_node = search_algo.PopKnnNode();
-      knn = std::get_if<search::AstKnnNode>(knn_node.get());
-    }
-  }
+  auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, index_name);
 
   // Check for HNSW vector range query (mutually exclusive with KNN)
   const search::AstVectorRangeNode* hnsw_range = nullptr;
@@ -1761,22 +1989,9 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   auto knn_sort_option = search_algo.GetKnnScoreSortOption();
 
   if (hnsw_range) {
-    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, hnsw_range->field);
-    if (!hnsw_index) {
-      return builder->SendError(string{index_name} + ": no such global hnsw index");
-    }
-    if (hnsw_range->vec.second == 0) {
-      return builder->SendError("Parse error of vector parameters");
-    }
-    if (hnsw_range->radius < 0 || std::isnan(hnsw_range->radius)) {
-      return builder->SendError(
-          absl::StrCat("VECTOR_RANGE radius must be non-negative, got: ", hnsw_range->radius));
-    }
-    if (hnsw_index->GetDim() != hnsw_range->vec.second) {
-      return builder->SendError(
-          absl::StrCat("Wrong vector index dimensions, got: ", hnsw_range->vec.second,
-                       ", expected: ", hnsw_index->GetDim()));
-    }
+    auto hnsw_index = GetValidatedHnswRangeIndex(index_name, hnsw_range, builder);
+    if (!hnsw_index)
+      return;
     if (!hnsw_range->score_alias.empty())
       knn_sort_option =
           search::KnnScoreSortOption{hnsw_range->score_alias, std::numeric_limits<size_t>::max()};
@@ -1784,11 +1999,28 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
                                       *cmd_cntx);
   }
 
+  // FLAT VECTOR_RANGE alias: HNSW is handled above. For FLAT, the per-shard Search()
+  // populates SerializedSearchDoc::knn_score but doesn't expose the alias name.
+  // If the user is sorting by the alias, route through knn_sort_option to get distance
+  // ordering; otherwise expose the alias without forcing a global reorder.
+  std::string_view inject_score_alias;
+  if (!knn && !hnsw_range && !knn_sort_option) {
+    if (auto* vr = search_algo.GetVectorRangeNode(); vr && !vr->score_alias.empty()) {
+      search::KnnScoreSortOption opt{vr->score_alias, std::numeric_limits<size_t>::max()};
+      if (params->sort_option && params->sort_option->IsSame(opt)) {
+        knn_sort_option = opt;
+      } else {
+        inject_score_alias = vr->score_alias;
+      }
+    }
+  }
+
   // TODO add merging of CSS results with local results (SORT, LIMIT, etc)
   docs.insert(docs.end(), std::make_move_iterator(css_docs.begin()),
               std::make_move_iterator(css_docs.end()));
 
-  SearchReply(*params, knn_sort_option, absl::MakeSpan(docs), builder, is_cross_shard);
+  SearchReply(*params, knn_sort_option, inject_score_alias, absl::MakeSpan(docs), builder,
+              is_cross_shard);
 }
 
 void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1813,6 +2045,12 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   search::SearchAlgorithm search_algo;
   if (!search_algo.Init(query_str, &params->query_params))
     return cmd_cntx->SendError("query syntax error");
+
+  // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
+  if (params->scorer)
+    search_algo.SetScorer(params->scorer);
+  else if (params->with_scores)
+    search_algo.SetScorer(&search::BM25Std);
 
   search_algo.EnableProfiling();
 
@@ -1863,8 +2101,8 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Result of the search command
   if (!result_is_empty) {
-    SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(search_results), rb,
-                false);
+    SearchReply(*params, search_algo.GetKnnScoreSortOption(), {}, absl::MakeSpan(search_results),
+                rb, false);
   } else {
     rb->StartArray(1);
     rb->SendLong(0);
@@ -1986,18 +2224,118 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     if (!search_algo.Init(params->query, &params->params))
       return builder->SendError("Query syntax error");
 
+    // Enable scorer: explicit SCORER param, or default BM25STD when ADDSCORES is set
+    if (params->scorer)
+      search_algo.SetScorer(params->scorer);
+    else if (params->add_scores)
+      search_algo.SetScorer(&search::BM25Std);
+
     using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
         declval<OpArgs>(), params.value(), &search_algo));
 
     vector<ResultContainer> query_results(shard_set->size());
 
-    cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-      if (auto* index = es->search_indices()->GetIndex(params->index); index) {
-        query_results[es->shard_id()] =
-            index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
+    auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, params->index);
+
+    // Per-shard text scores from prefilter for __score injection in ADDSCORES mode.
+    // Indexed by shard_id because local DocIds are not unique across shards.
+    // Always allocated to shard_set->size() so the callback can index unconditionally.
+    std::vector<absl::flat_hash_map<search::DocId, float>> prefilter_text_scores(shard_set->size());
+
+    // Build a shard-load callback for HNSW results (KNN or VECTOR_RANGE).
+    // The returned lambda captures shard_docs and text_scores by const-reference —
+    // the caller must ensure they outlive the ScheduleSingleHop / Execute call.
+    auto make_load_cb =
+        [&](const std::vector<std::vector<std::pair<search::DocId, float>>>& shard_docs,
+            std::string_view score_alias,
+            const std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores) {
+          return [&query_results, &params, &shard_docs, score_alias, &text_scores](
+                     Transaction* t, EngineShard* es) {
+            auto* index = es->search_indices()->GetIndex(params->index);
+            if (!index || shard_docs[es->shard_id()].empty())
+              return OpStatus::OK;
+            DCHECK_LT(es->shard_id(), text_scores.size());
+            query_results[es->shard_id()] = index->LoadHnswRangeDocsForAggregator(
+                t->GetOpArgs(es), params.value(), shard_docs[es->shard_id()], score_alias,
+                text_scores[es->shard_id()]);
+            return OpStatus::OK;
+          };
+        };
+
+    if (knn) {
+      auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(params->index, knn->field);
+      if (!hnsw_index) {
+        return builder->SendError(string{params->index} + ": no such global hnsw index");
       }
-      return OpStatus::OK;
-    });
+
+      // Run per-shard prefilter and collect GlobalDocIds if KNN has a filter expression
+      const bool knn_has_prefilter = knn->HasPreFilter();
+      std::optional<std::vector<search::GlobalDocId>> prefilter_global_ids;
+
+      if (knn_has_prefilter) {
+        vector<SearchResult> prefilter_docs(shard_set->size());
+        cmd_cntx->tx()->Execute(
+            [&](Transaction* t, EngineShard* es) {
+              if (auto* index = es->search_indices()->GetIndex(params->index); index) {
+                SearchParams sp;
+                sp.limit_total = std::numeric_limits<size_t>::max();
+                sp.return_fields.emplace();  // ids-only, skip field serialization
+                prefilter_docs[es->shard_id()] =
+                    index->Search(t->GetOpArgs(es), sp, &search_algo, true);
+              }
+              return OpStatus::OK;
+            },
+            false);
+        prefilter_global_ids = CollectPrefilterGlobalIds(prefilter_docs);
+
+        // Collect text scores per-shard from prefilter results for __score injection
+        if (params->add_scores) {
+          for (size_t shard_id = 0; shard_id < prefilter_docs.size(); shard_id++) {
+            for (const auto& doc : prefilter_docs[shard_id].docs) {
+              prefilter_text_scores[shard_id][doc.id] = doc.text_score;
+            }
+          }
+        }
+      }
+
+      // Run global HNSW KNN search
+      auto knn_results = prefilter_global_ids
+                             ? hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime,
+                                               *prefilter_global_ids)
+                             : hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+
+      auto shard_docs = GroupByShardId(knn_results, shard_set->size());
+
+      if (knn_has_prefilter) {
+        cmd_cntx->tx()->Execute(make_load_cb(shard_docs, knn->score_alias, prefilter_text_scores),
+                                true);  // finalize multi-hop
+      } else {
+        cmd_cntx->tx()->ScheduleSingleHop(
+            make_load_cb(shard_docs, knn->score_alias, prefilter_text_scores));
+      }
+    } else if (auto* vr = search_algo.GetVectorRangeNode();
+               vr && GlobalHnswIndexRegistry::Instance().Exist(params->index, vr->field)) {
+      const search::AstVectorRangeNode* hnsw_range = vr;
+      auto hnsw_index = GetValidatedHnswRangeIndex(params->index, hnsw_range, builder);
+      if (!hnsw_index)
+        return;
+
+      auto range_results = hnsw_index->RangeQuery(hnsw_range->vec.first.get(),
+                                                  static_cast<float>(hnsw_range->radius));
+
+      auto shard_docs = GroupByShardId(range_results, shard_set->size());
+
+      cmd_cntx->tx()->ScheduleSingleHop(
+          make_load_cb(shard_docs, hnsw_range->score_alias, prefilter_text_scores));
+    } else {
+      cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+        if (auto* index = es->search_indices()->GetIndex(params->index); index) {
+          query_results[es->shard_id()] =
+              index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
+        }
+        return OpStatus::OK;
+      });
+    }
 
     // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
     // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
@@ -2109,6 +2447,13 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
+  // Auto-add __score to visible fields when ADDSCORES is set
+  static constexpr std::string_view kScoreField = "__score";
+  if (params->add_scores &&
+      std::find(load_fields.begin(), load_fields.end(), kScoreField) == load_fields.end()) {
+    load_fields.push_back(kScoreField);
+  }
+
   auto agg_results = aggregate::Process(std::move(values), load_fields, params->steps);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -2191,7 +2536,7 @@ void CmdFtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Sort group_ids before sending
     std::vector<std::string> sorted_ids(group_ids.begin(), group_ids.end());
-    std::sort(sorted_ids.begin(), sorted_ids.end());
+    rng::sort(sorted_ids);
 
     for (const auto& id : sorted_ids) {
       rb->SendBulkString(id);

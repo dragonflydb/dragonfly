@@ -7,6 +7,13 @@
 #include <aws/s3/S3Client.h>
 #endif
 
+#ifdef WITH_AWS_CLOUD
+#include "util/cloud/aws/aws_creds_provider.h"
+#include "util/cloud/aws/s3_storage.h"
+#endif
+
+#include "util/cloud/azure/creds_provider.h"
+
 #ifdef WITH_GCP
 #include "util/cloud/gcp/gcp_creds_provider.h"
 #include "util/cloud/gcp/gcs.h"
@@ -21,6 +28,7 @@
 
 #include "io/io.h"
 #include "server/execution_state.h"
+#include "util/cloud/azure/creds_provider.h"
 #include "util/cloud/utils.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/uring_file.h"
@@ -157,15 +165,18 @@ class AzureSnapshotStorage : public SnapshotStorage {
 
   std::error_code CheckPath(const std::string& path) final;
 
-  std::unique_ptr<util::cloud::CredentialsProvider> creds_provider_;
+  std::unique_ptr<util::cloud::azure::Credentials> creds_provider_;
   SSL_CTX* ctx_ = NULL;
 };
 
-#ifdef WITH_AWS
+#if defined(WITH_AWS_CLOUD) || defined(WITH_AWS)
 class AwsS3SnapshotStorage : public SnapshotStorage {
  public:
   AwsS3SnapshotStorage(const std::string& endpoint, bool https, bool ec2_metadata,
                        bool sign_payload);
+  ~AwsS3SnapshotStorage();
+
+  std::error_code Init(unsigned connect_ms);
 
   io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
       const std::string& path) override;
@@ -189,7 +200,12 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
   io::Result<std::vector<SnapStat>, GenericError> ListObjects(std::string_view bucket_name,
                                                               std::string_view prefix);
 
+#ifdef WITH_AWS
   std::shared_ptr<Aws::S3::S3Client> s3_;
+#elif WITH_AWS_CLOUD
+  util::cloud::aws::AwsCredsProvider creds_provider_;
+  SSL_CTX* ctx_ = nullptr;
+#endif
 };
 
 #endif

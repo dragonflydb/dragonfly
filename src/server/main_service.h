@@ -20,6 +20,10 @@ namespace util {
 class AcceptServer;
 }  // namespace util
 
+namespace facade {
+class RedisReplyBuilder;
+}  // namespace facade
+
 namespace dfly {
 
 using facade::MemcacheParser;
@@ -114,6 +118,10 @@ class Service : public facade::ServiceInterface {
     return cluster_family_;
   }
 
+  acl::UserRegistry& user_registry() {
+    return user_registry_;
+  }
+
   // Utility function used in unit tests
   // Do not use in production, only meant to be used by unit tests
   const acl::AclFamily* TestInit();
@@ -169,6 +177,9 @@ class Service : public facade::ServiceInterface {
   // Return optional payload - first received error that occured when executing commands.
   std::optional<facade::payload::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
                                                              bool force = false);
+
+  void TryEnqueueEvalAsyncCmd(const Interpreter::CallArgs& args, CommandContext* cmd_cntx,
+                              facade::RedisReplyBuilder* replier);
 
   void CallFromScript(Interpreter::CallArgs& args, CommandContext* cmd_cntx);
 

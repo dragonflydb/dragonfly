@@ -3,6 +3,7 @@
 //
 extern "C" {
 #include "redis/sds.h"
+#include "redis/zmalloc.h"
 }
 
 #include <absl/functional/overload.h>
@@ -25,7 +26,10 @@ extern "C" {
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/namespaces.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
+
+namespace rng = std::ranges;
 
 /**
  * The number of entries allowed per internal list node can be specified
@@ -65,6 +69,9 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
 ABSL_FLAG(unsigned, list_tiering_threshold, 0,
           "Tiering threshold for lists. Default - no tiering.");
+ABSL_FLAG(uint32_t, list_experimental_zstd_dict_threshold, 0,
+          "Minimum list malloc usage in bytes before attempting ZSTD dictionary compression. "
+          "0 disables. Experimental: compression is synchronous and may block the thread.");
 
 namespace dfly {
 
@@ -77,9 +84,41 @@ using time_point = Transaction::time_point;
 
 namespace {
 
+void OffloadListNode(QList* ql, QList::Node* node) {
+  TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+  DCHECK(ts);
+  QList::stats.offload_requests++;
+  StashListNode(ql->GetDbIndex(), ql, node, ts, nullptr);
+}
+
+void LoadListNode(QList* ql, QList::Node* node) {
+  TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+  DCHECK(ts);
+  QList::stats.onload_requests++;
+  auto res = ReadTieredListNode(ql->GetDbIndex(), ql, node, node->GetExternalSlice(), ts).Get();
+  if (!res) {
+    LOG(WARNING) << "Failed to load list node from tiered storage: " << res.error().message();
+  }
+}
+
+void CleanupListNode(QList* ql, QList::Node* node) {
+  TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+  DCHECK(ts);
+  if (!ts->IsClosed()) {
+    if (node->io_pending) {
+      ts->CancelStash(tiering::ListNodeId{ql->GetDbIndex(), ql, node}, node);
+    } else {
+      // We don't pass QList pointer so we need to decrease num_offloaded_nodes_ now.
+      ql->AdjustOffloadNodeCount(-1);
+      ts->Delete(ql->GetDbIndex(), node);
+    }
+  }
+}
+
 class ListWrapper {
   using LP = detail::ListPack;
 
+  DbIndex db_id_;
   std::variant<QList*, LP> impl_;
 
   template <typename F> decltype(auto) VisitRef(F f) const {  // Cast T* to T&
@@ -90,16 +129,32 @@ class ListWrapper {
     return std::visit(Overload{[&f](auto* s) { return f(*s); }, f}, impl_);
   }
 
-  static QList* PromoteToQLIfNeeded(LP lp, size_t additional_size) {
+  QList* PromoteToQLIfNeeded(LP lp, size_t additional_size) const {
     size_t sz = lp.BytesSize();
     if (ShouldStoreAsListPack(sz + additional_size)) {
       return nullptr;
     }
+
     QList* ql = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
                                               GetFlag(FLAGS_list_compress_depth));
-    if (GetFlag(FLAGS_list_tiering_threshold) > 0) {
-      ql->SetTieringParams(
-          QList::TieringParams{.node_depth_threshold = GetFlag(FLAGS_list_tiering_threshold)});
+
+    // Set db index for new QList
+    ql->SetDbIndex(db_id_);
+
+    const uint32_t tiering_node_depth_threshold = absl::GetFlag(FLAGS_list_tiering_threshold);
+    if (tiering_node_depth_threshold > 0 && EngineShard::tlocal()->tiered_storage()) {
+      QList::TieringParams params{
+          .node_depth_threshold = tiering_node_depth_threshold,
+          .offload = OffloadListNode,
+          .load = LoadListNode,
+          .cleanup = CleanupListNode,
+      };
+      ql->EnableTiering(params);
+    }
+
+    if (uint32_t zstd_thresh = GetFlag(FLAGS_list_experimental_zstd_dict_threshold);
+        zstd_thresh > 0) {
+      ql->set_compr_threshold(zstd_thresh);
     }
     if (lp.Size() > 0) {
       ql->AppendListpack(lp.GetPointer());
@@ -161,7 +216,10 @@ class ListWrapper {
   }
 
  public:
-  template <typename T> explicit ListWrapper(T t) : impl_(std::forward<T>(t)) {
+  // TODO: passing current dbid of object. It could happen that object is moved to
+  // another db so this dbid will be incorrect. Refactor to support moving objects between dbs.
+  template <typename T>
+  explicit ListWrapper(DbIndex dbid, T t) : db_id_(dbid), impl_(std::forward<T>(t)) {
   }
 
   size_t Size() const {
@@ -294,11 +352,11 @@ unsigned ListWrapper::Remove(string_view elem, unsigned count, QList::Where wher
   return removed;
 }
 
-ListWrapper GetLW(const PrimeValue& mv) {
+ListWrapper GetLW(DbIndex dbid, const PrimeValue& mv) {
   if (mv.Encoding() == kEncodingQL2) {
-    return ListWrapper{static_cast<QList*>(mv.RObjPtr())};
+    return ListWrapper{dbid, static_cast<QList*>(mv.RObjPtr())};
   }
-  return ListWrapper{detail::ListPack(static_cast<uint8_t*>(mv.RObjPtr()))};
+  return ListWrapper{dbid, detail::ListPack(static_cast<uint8_t*>(mv.RObjPtr()))};
 }
 
 enum class ListDir : uint8_t { LEFT, RIGHT };
@@ -340,7 +398,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   std::string value;
   size_t len;
 
-  ListWrapper lw = GetLW(it->second);
+  ListWrapper lw = GetLW(t->GetDbContext().db_index, it->second);
   QList::Where where = ToWhere(dir);
   value = lw.Pop(where);
   lw.Launder(&it->second);
@@ -371,10 +429,10 @@ ListWrapper CreateOrGet(const OpArgs& op_args, string_view key, bool create, Pri
 
     uint8_t* lp = lpNew(0);
     pv->InitRobj(OBJ_LIST, kEncodingListPack, lp);
-    return ListWrapper{detail::ListPack(lp)};
+    return ListWrapper{op_args.db_cntx.db_index, detail::ListPack(lp)};
   }
 
-  return GetLW(*pv);
+  return GetLW(op_args.db_cntx.db_index, *pv);
 }
 
 OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, string_view dest,
@@ -386,7 +444,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 
   auto src_it = src_res->it;
   string val;
-  ListWrapper srcql_v2 = GetLW(src_it->second);
+  ListWrapper srcql_v2 = GetLW(op_args.db_cntx.db_index, src_it->second);
   size_t prev_len = srcql_v2.Size();
 
   if (src == dest) {  // simple case.
@@ -438,7 +496,7 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
   const PrimeValue& pv = it_res.value()->second;
   DCHECK_GT(pv.Size(), 0u);  // should be not-empty.
 
-  ListWrapper lw = GetLW(pv);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, pv);
   return lw.First(ToWhere(dir));
 }
 
@@ -494,7 +552,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   size_t prev_len = 0;
   StringVec res;
 
-  ListWrapper lw = GetLW(it->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, it->second);
   prev_len = lw.Size();
 
   if (prev_len < count) {
@@ -598,7 +656,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
   if (!res)
     return res.status();
 
-  ListWrapper lw = GetLW(res.value()->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, res.value()->second);
   return lw.Size();
 }
 
@@ -607,7 +665,7 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
   if (!res)
     return res.status();
 
-  ListWrapper lw = GetLW(res.value()->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, res.value()->second);
   optional elem = lw.At(index);
   if (!elem)
     return OpStatus::KEY_NOTFOUND;
@@ -624,7 +682,7 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_
     return it_res.status();
 
   const PrimeValue& pv = (*it_res)->second;
-  ListWrapper lw = GetLW(pv);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, pv);
 
   QList::Where where = QList::HEAD;
   if (rank < 0) {
@@ -644,7 +702,7 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
   if (!it_res)
     return it_res.status();
 
-  ListWrapper lw = GetLW(it_res->it->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, it_res->it->second);
 
   int res = -1;
 
@@ -662,7 +720,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   if (!it_res)
     return it_res.status();
 
-  ListWrapper lw = GetLW(it_res->it->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, it_res->it->second);
 
   QList::Where where = QList::HEAD;
   if (count < 0) {
@@ -688,7 +746,7 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
   if (!it_res)
     return it_res.status();
 
-  ListWrapper lw = GetLW(it_res->it->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, it_res->it->second);
   OpStatus status = OpStatus::OUT_OF_RANGE;
   if (lw.Replace(index, elem)) {
     lw.Launder(&it_res->it->second);
@@ -730,7 +788,7 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
     rtrim = llen - end - 1;
   }
 
-  ListWrapper lw = GetLW(it->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, it->second);
   lw.Erase(0, ltrim);
   lw.Erase(-rtrim, rtrim);
   lw.Launder(&it->second);
@@ -887,6 +945,15 @@ void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+KeyReadyResult ListKeyChecker(EngineShard* owner, const DbContext& context, std::string_view key) {
+  auto res = context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST);
+  if (res.ok())
+    return KeyReadyResult::kReady;
+  if (res.status() == OpStatus::WRONG_TYPE)
+    return KeyReadyResult::kNotReady;
+  return KeyReadyResult::kKeyNotFound;
+}
+
 BPopPusher::BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir)
     : pop_key_(pop_key), push_key_(push_key), popdir_(popdir), pushdir_(pushdir) {
 }
@@ -928,13 +995,8 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
     return op_res;
   }
 
-  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
-                              std::string_view key) -> bool {
-    return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
-  };
-
   // Block
-  auto status = tx->WaitOnWatch(tp, pop_key_, key_checker, &(cntx->blocked), &(cntx->paused));
+  auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, &(cntx->blocked), &(cntx->paused));
   if (status != OpStatus::OK)
     return status;
 
@@ -954,16 +1016,11 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
     return op_res;
   }
 
-  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
-                              std::string_view key) -> bool {
-    return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
-  };
-
   // a hack: we watch in both shards for pop_key but only in the source shard it's relevant.
   // Therefore we follow the regular flow of watching the key but for the destination shard it
   // will never be triggerred.
   // This allows us to run Transaction::Execute on watched transactions in both shards.
-  if (auto status = tx->WaitOnWatch(tp, pop_key_, key_checker, &cntx->blocked, &cntx->paused);
+  if (auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, &cntx->blocked, &cntx->paused);
       status != OpStatus::OK)
     return status;
 
@@ -1105,8 +1162,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
 
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
   size_t pop_count = 1;
-  if (parser.Check("COUNT"))
-    pop_count = parser.Next<size_t>();
+  parser.Check("COUNT", &pop_count);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -1194,8 +1250,7 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 
   size_t pop_count = 1;
-  if (parser.Check("COUNT"))
-    pop_count = parser.Next<size_t>();
+  parser.Check("COUNT", &pop_count);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -1262,38 +1317,19 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   auto [key, elem] = parser.Next<string_view, string_view>();
 
   int rank = 1;
-  uint32_t count = 1;
+  std::optional<uint32_t> count;
   uint32_t max_len = 0;
-  bool skip_count = true;
 
-  while (parser.HasNext()) {
-    if (parser.Check("RANK")) {
-      rank = parser.Next<int>();
-      continue;
-    }
+  parser.ApplyOrSkip(Tag("RANK", &rank), Tag("COUNT", &count), Tag("MAXLEN", &max_len));
 
-    if (parser.Check("COUNT")) {
-      count = parser.Next<uint32_t>();
-      skip_count = false;
-      continue;
-    }
-
-    if (parser.Check("MAXLEN")) {
-      max_len = parser.Next<uint32_t>();
-      continue;
-    }
-
-    parser.Skip(1);
-  }
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (rank == 0)
     return rb->SendError(kInvalidIntErr);
 
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
-
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
-    return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
+    return OpPos(t->GetOpArgs(shard), key, elem, rank, count.value_or(1), max_len);
   };
 
   Transaction* trans = cmd_cntx->tx();
@@ -1305,7 +1341,7 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(result.status());
   }
 
-  if (skip_count) {
+  if (!count.has_value()) {
     if (result->empty()) {
       rb->SendNull();
     } else {

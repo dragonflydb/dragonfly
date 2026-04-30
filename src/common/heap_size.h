@@ -19,6 +19,7 @@
 #include <absl/container/inlined_vector.h>
 #include <absl/types/span.h>
 
+#include <concepts>
 #include <deque>
 #include <string>
 #include <string_view>
@@ -27,48 +28,43 @@
 
 namespace cmn {
 
-namespace heap_size_detail {
-
-template <class, class = void> struct has_marked_stackonly : std::false_type {};
-
-template <class T>
-struct has_marked_stackonly<T, std::void_t<typename T::is_stackonly>> : std::true_type {};
-
-template <typename T> constexpr bool StackOnlyType() {
-  return std::is_trivial_v<T> || std::is_same_v<T, std::string_view> ||
-         has_marked_stackonly<T>::value;
-}
-
-template <typename T, typename = void> struct has_used_mem : std::false_type {};
-
-template <typename T>
-struct has_used_mem<T, std::void_t<decltype(&T::UsedMemory)>> : std::true_type {};
-
-template <typename Container> size_t AccumulateContainer(const Container& c);
-}  // namespace heap_size_detail
+namespace detail {
+template <typename Container>
+size_t AccumulateContainer(const Container& c);  // defined below to use HeapSize()
+}  // namespace detail
 
 inline size_t HeapSize(const std::string& s) {
   constexpr size_t kSmallStringOptSize = 15;
   return s.capacity() > kSmallStringOptSize ? s.capacity() : 0UL;
 }
 
-template <typename T, std::enable_if_t<heap_size_detail::has_used_mem<T>::value, bool> = true>
+// Overload for types that have defined UsedMemory
+template <typename T>
+requires requires(T t) {
+  { t.UsedMemory() } -> std::convertible_to<size_t>;
+}
 size_t HeapSize(const T& t) {
   return t.UsedMemory();
 }
 
-template <typename T, std::enable_if_t<heap_size_detail::StackOnlyType<T>(), bool> = true>
+// Overload for types that should be explicitly excluded from calculations
+template <typename T>
+requires requires {
+  typename T::is_stackonly;
+}
 size_t HeapSize(const T& t) {
   return 0;
 }
 
-template <typename T> size_t HeapSize(absl::Span<T>) {
+// Overload for trivial types we don't have to account for
+template <typename T> size_t HeapSize(const T& t) {
+  static_assert(std::is_trivial_v<T> || std::is_same_v<std::string_view, T>);
   return 0;
 }
 
 // Declare first, so that we can use these "recursively"
-template <typename T> size_t HeapSize(const std::vector<T>& v);
 template <typename T> size_t HeapSize(const std::unique_ptr<T>& t);
+template <typename T> size_t HeapSize(const std::vector<T>& v);
 template <typename T> size_t HeapSize(const std::deque<T>& d);
 template <typename T1, typename T2> size_t HeapSize(const std::pair<T1, T2>& p);
 template <typename T, size_t N> size_t HeapSize(const absl::InlinedVector<T, N>& v);
@@ -84,11 +80,11 @@ template <typename T> size_t HeapSize(const std::unique_ptr<T>& t) {
 }
 
 template <typename T> size_t HeapSize(const std::vector<T>& v) {
-  return (v.capacity() * sizeof(T)) + heap_size_detail::AccumulateContainer(v);
+  return (v.capacity() * sizeof(T)) + detail::AccumulateContainer(v);
 }
 
 template <typename T> size_t HeapSize(const std::deque<T>& d) {
-  return (d.size() * sizeof(T)) + heap_size_detail::AccumulateContainer(d);
+  return (d.size() * sizeof(T)) + detail::AccumulateContainer(d);
 }
 
 template <typename T1, typename T2> size_t HeapSize(const std::pair<T1, T2>& p) {
@@ -100,46 +96,27 @@ template <typename T, size_t N> size_t HeapSize(const absl::InlinedVector<T, N>&
   if (v.capacity() > N) {
     size += v.capacity() * sizeof(T);
   }
-  size += heap_size_detail::AccumulateContainer(v);
+  size += detail::AccumulateContainer(v);
   return size;
 }
 
 template <typename K, typename V> size_t HeapSize(const absl::flat_hash_map<K, V>& m) {
   size_t size = m.capacity() * sizeof(typename absl::flat_hash_map<K, V>::value_type);
-
-  if constexpr (!heap_size_detail::StackOnlyType<K>() || !heap_size_detail::StackOnlyType<V>()) {
-    for (const auto& kv : m) {
-      size += HeapSize(kv);
-    }
-  }
-
-  return size;
+  return size + detail::AccumulateContainer(m);
 }
 
 template <typename K> size_t HeapSize(const absl::flat_hash_set<K>& s) {
   size_t size = s.capacity() * sizeof(typename absl::flat_hash_set<K>::value_type);
-
-  if constexpr (!heap_size_detail::StackOnlyType<K>()) {
-    for (const auto& k : s) {
-      size += HeapSize(k);
-    }
-  }
-
-  return size;
+  return size + detail::AccumulateContainer(s);
 }
 
-namespace heap_size_detail {
+namespace detail {
 template <typename Container> size_t AccumulateContainer(const Container& c) {
   size_t size = 0;
-
-  if constexpr (!heap_size_detail::StackOnlyType<typename Container::value_type>()) {
-    for (const auto& e : c) {
-      size += HeapSize(e);
-    }
-  }
-
+  for (const auto& e : c)
+    size += HeapSize(e);
   return size;
 }
-}  // namespace heap_size_detail
+}  // namespace detail
 
 }  // namespace cmn

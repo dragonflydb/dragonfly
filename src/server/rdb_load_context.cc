@@ -13,6 +13,7 @@
 #include "base/logging.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/main_service.h"
@@ -20,6 +21,7 @@
 #include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
 #include "server/sharding.h"
+#include "strings/human_readable.h"
 
 namespace dfly {
 
@@ -378,6 +380,9 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   // RestoreKeyIndex (above) and RebuildAllIndices (below) run in separate sequential
   // AwaitRunningOnShardQueue calls, so there is no parallel index build that could interfere
   // with the doc_ids assigned during key mapping restoration.
+  LOG(INFO) << "PostLoad: rebuilding search indices across shards has_hnsw_restore="
+            << has_hnsw_restore << " rss="
+            << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
   shard_set->AwaitRunningOnShardQueue([has_hnsw_restore](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
@@ -389,9 +394,26 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }
 
-  // Wait until index building ends
-  shard_set->RunBlockingInParallel(
-      [](EngineShard* es) { es->search_indices()->BlockUntilConstructionEnd(); });
+  // Wait until index building ends (all shards' vector data populated).
+  shard_set->RunBlockingInParallel([](EngineShard* es) {
+    es->search_indices()->BlockUntilConstructionEnd();
+    LOG(INFO) << "PostLoad: search index rebuild phase returned rss="
+              << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
+  });
+
+  // All shards completed restoration — drain pending ops.
+  // DrainPendingVectorUpdates sets kBuilding which allows Add calls.
+  if (has_hnsw_restore) {
+    shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+      OpArgs op_args{es, nullptr,
+                     DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+      for (const auto& name : es->search_indices()->GetIndexNames()) {
+        if (auto* idx = es->search_indices()->GetIndex(name)) {
+          idx->DrainPendingVectorUpdates(op_args);
+        }
+      }
+    });
+  }
 #endif
 }
 

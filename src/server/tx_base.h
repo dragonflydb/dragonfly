@@ -107,9 +107,15 @@ class LockTag {
   }
 };
 
+enum class KeyReadyResult {
+  kKeyNotFound,  // key doesn't exist - abort the entire watch queue
+  kNotReady,     // key exists but per-tx conditions not met - skip this tx, try next
+  kReady,        // wake this tx
+};
+
 // Checks whether the touched key is valid for a blocking transaction watching it.
 using KeyReadyChecker =
-    std::function<bool(EngineShard*, const DbContext& context, Transaction* tx, std::string_view)>;
+    std::function<KeyReadyResult(EngineShard*, const DbContext& context, std::string_view)>;
 
 // References arguments in another array.
 using IndexSlice = std::pair<uint32_t, uint32_t>;  // [begin, end)

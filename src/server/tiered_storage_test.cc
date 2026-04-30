@@ -29,6 +29,9 @@ ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
+ABSL_DECLARE_FLAG(bool, tiered_experimental_list_support);
+ABSL_DECLARE_FLAG(unsigned, list_tiering_threshold);
+ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 
 namespace dfly {
 
@@ -650,6 +653,405 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
     EXPECT_THAT(Run({"HSET", key, c_key, "Even more recent value"}), IntArg(0));
     EXPECT_EQ(Run({"HGET", key, c_key}), "Even more recent value");
   }
+}
+
+class ListNodeTieringTest : public TieredStorageTest {
+  void SetUp() override {
+    fs.emplace();
+    SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+    SetFlag(&FLAGS_tiered_experimental_cooling, false);
+    // One entry per QList node
+    SetFlag(&FLAGS_list_max_listpack_size, 1);
+    // Offload nodes at depth >= 2 from both ends
+    SetFlag(&FLAGS_list_tiering_threshold, 2u);
+    SetFlag(&FLAGS_tiered_experimental_list_support, true);
+    TieredStorageTest::SetUp();
+  }
+  optional<absl::FlagSaver> fs;
+};
+
+// Push 6 large values; verify that at least one QList node is offloaded to disk.
+TEST_F(ListNodeTieringTest, StashOccurs) {
+  // 2048-byte values ensure QList creation on the very first RPUSH.
+  // 6 pushes produce 6 nodes; CoolOff on the 5th push offloads node 2.
+  const int kItems = 6;
+  for (int i = 0; i < kItems; i++) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('a' + i))});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_GE(GetMetrics().tiered_stats.total_stashes, 1u);
+}
+
+TEST_F(ListNodeTieringTest, LLenCorrectAfterStash) {
+  const int kItems = 6;
+  for (int i = 0; i < kItems; i++) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('a' + i))});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kItems));
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+}
+
+// DEL a list that has fully-offloaded nodes.
+TEST_F(ListNodeTieringTest, DeleteAfterStash) {
+  const int kItems = 6;
+  for (int i = 0; i < kItems; i++) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('a' + i))});
+  }
+
+  // Wait until stash is complete (io_pending cleared, offloaded=1) before DEL
+  // to avoid the io_pending use-after-free path.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_THAT(Run({"DEL", "mylist"}), IntArg(1));
+  EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+}
+
+// LRANGE all elements forces the QList iterator to call AccessForReads on every
+// node, including those that were offloaded to disk. The onload_cb must
+// synchronously restore node->entry before returning so LRANGE returns the
+// correct values.
+TEST_F(ListNodeTieringTest, LoadOccurs) {
+  const int kItems = 6;
+  vector<string> expected;
+  for (int i = 0; i < kItems; i++) {
+    string val = BuildString(2048, static_cast<char>('a' + i));
+    expected.push_back(val);
+    Run({"RPUSH", "mylist", val});
+  }
+
+  // Wait for at least one interior node to be offloaded.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  // LRANGE 0 -1 must traverse all nodes, triggering onload_cb for offloaded
+  // interior nodes, and return the correct values.
+  auto resp = Run({"LRANGE", "mylist", "0", "-1"});
+  const auto& elements = resp.GetVec();
+  ASSERT_EQ(static_cast<int>(elements.size()), kItems);
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_EQ(elements[i].GetString(), expected[i]) << "index " << i;
+  }
+
+  // LLEN must still be correct after the load.
+  EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kItems));
+}
+
+// Verify that every element read back from a list with offloaded matches the original.
+TEST_F(ListNodeTieringTest, StashedDataMatchesOnLoad) {
+  const int kItems = 8;
+
+  // Build values with a unique fill character per position so any swap or
+  // corruption is immediately visible.
+  vector<string> expected;
+  for (int i = 0; i < kItems; i++) {
+    expected.push_back(BuildString(2048, static_cast<char>('A' + i)));
+    Run({"RPUSH", "mylist", expected.back()});
+  }
+
+  // Wait until at least one interior node has been flushed to disk.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  const auto fetches_before = GetMetrics().tiered_stats.total_fetches;
+
+  // Read every element individually via LINDEX — this forces node-level access
+  // and triggers onload_cb for each offloaded node.
+  for (int i = 0; i < kItems; i++) {
+    auto resp = Run({"LINDEX", "mylist", absl::StrCat(i)});
+    EXPECT_EQ(resp, expected[i]) << "LINDEX mismatch at position " << i;
+  }
+
+  // At least one fetch must have gone to disk .
+  EXPECT_GT(GetMetrics().tiered_stats.total_fetches, fetches_before);
+
+  // Also verify the bulk read path returns identical data.
+  auto resp = Run({"LRANGE", "mylist", "0", "-1"});
+  const auto& elements = resp.GetVec();
+  ASSERT_EQ(static_cast<int>(elements.size()), kItems);
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_EQ(elements[i].GetString(), expected[i]) << "LRANGE mismatch at position " << i;
+  }
+
+  EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kItems));
+}
+
+// DEL a list whose interior nodes have io_pending=1.
+TEST_F(ListNodeTieringTest, DeleteWhileNodePending) {
+  const int kItems = 6;
+  for (int i = 0; i < kItems; i++) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('a' + i))});
+  }
+
+  // DEL immediately — do NOT wait for stashes to complete.
+  EXPECT_THAT(Run({"DEL", "mylist"}), IntArg(1));
+  EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+
+  // Drain any still-in-flight stash I/Os so allocation counters are final.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
+}
+
+// RENAME a list whose interior nodes are fully offloaded.
+TEST_F(ListNodeTieringTest, RenameWithStashedNodes) {
+  const int kItems = 6;
+  vector<string> expected;
+  for (int i = 0; i < kItems; i++) {
+    expected.push_back(BuildString(2048, static_cast<char>('a' + i)));
+    Run({"RPUSH", "src", expected.back()});
+  }
+
+  // Wait for interior nodes to be fully offloaded to disk.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  // RENAME fetches data from disk (for offloaded nodes), creates the destination
+  // key, and deletes the source — all node delete_cb calls must not crash.
+  EXPECT_EQ(Run({"RENAME", "src", "dst"}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "src"}), IntArg(0));
+  EXPECT_THAT(Run({"LLEN", "dst"}), IntArg(kItems));
+
+  // Verify every element is intact after the rename.
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_EQ(Run({"LINDEX", "dst", absl::StrCat(i)}), expected[i]) << "index " << i;
+  }
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);  // after reads nodes come back to memory
+}
+
+// RENAME a list while its nodes are still io_pending.
+TEST_F(ListNodeTieringTest, RenameWhileNodesPending) {
+  const int kItems = 6;
+  vector<string> expected;
+  for (int i = 0; i < kItems; i++) {
+    expected.push_back(BuildString(2048, static_cast<char>('a' + i)));
+    Run({"RPUSH", "src", expected.back()});
+  }
+
+  // RENAME immediately without waiting for stash I/Os to complete.
+  EXPECT_EQ(Run({"RENAME", "src", "dst"}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "src"}), IntArg(0));
+  EXPECT_THAT(Run({"LLEN", "dst"}), IntArg(kItems));
+
+  // Verify data integrity in the renamed key.
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_EQ(Run({"LINDEX", "dst", absl::StrCat(i)}), expected[i]) << "index " << i;
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+}
+
+// PEXPIRE a list while its nodes are fully offloaded.
+TEST_F(ListNodeTieringTest, ExpireListWithStashedNodes) {
+  const int kItems = 6;
+  for (int i = 0; i < kItems; i++) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('a' + i))});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  // Set a 1 ms TTL and advance time past it.
+  Run({"PEXPIRE", "mylist", "1"});
+  AdvanceTime(10);
+
+  // Trigger expiry collection.
+  Run({"SET", "trigger", "x"});
+
+  EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
+}
+
+// PEXPIRE a list while its nodes are still io_pending
+TEST_F(ListNodeTieringTest, ExpireListWhileNodesPending) {
+  const int kItems = 6;
+  for (int i = 0; i < kItems; i++) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('a' + i))});
+  }
+
+  // Set TTL and advance time before awaiting any stash completion.
+  Run({"PEXPIRE", "mylist", "1"});
+  AdvanceTime(10);
+  Run({"SET", "trigger", "x"});
+
+  EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
+
+  // Wait so that all allocated bytes for stashed nodes are freed
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
+}
+
+// FLUSHALL while list nodes are io_pending or fully offloaded.
+TEST_F(ListNodeTieringTest, FlushAllWithTieredListNodes) {
+  const int kLists = 4;
+  const int kItems = 6;
+
+  for (int l = 0; l < kLists; l++) {
+    string key = absl::StrCat("list", l);
+    for (int i = 0; i < kItems; i++) {
+      Run({"RPUSH", key, BuildString(2048, static_cast<char>('a' + i))});
+    }
+  }
+
+  // Wait for at least some nodes to be stashed across any list.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  // FLUSHALL while more stashes may be in flight (mixed pending/stashed state).
+  Run({"FLUSHALL"});
+
+  for (int l = 0; l < kLists; l++) {
+    EXPECT_THAT(Run({"EXISTS", absl::StrCat("list", l)}), IntArg(0));
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
+}
+
+// LPOP exhausts a list whose interior nodes were offloaded to disk..
+TEST_F(ListNodeTieringTest, LPopStashedNodes) {
+  const int kItems = 8;
+  vector<string> expected;
+  for (int i = 0; i < kItems; i++) {
+    expected.push_back(BuildString(2048, static_cast<char>('A' + i)));
+    Run({"RPUSH", "mylist", expected.back()});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  // Pop every element and verify order and content.
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_EQ(Run({"LPOP", "mylist"}), expected[i]) << "pop index " << i;
+  }
+
+  // List must be gone after all elements are popped.
+  EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+}
+
+// MOVE a list whose interior nodes are fully offloaded to a different DB.
+TEST_F(ListNodeTieringTest, MoveWithStashedNodes) {
+  const int kItems = 6;
+  vector<string> expected;
+  for (int i = 0; i < kItems; i++) {
+    expected.push_back(BuildString(2048, static_cast<char>('a' + i)));
+    Run({"RPUSH", "src", expected.back()});
+  }
+
+  // Wait for interior nodes to be fully offloaded to disk.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  // MOVE to db 1 — SetDbIndex materializes all offloaded nodes.
+  EXPECT_THAT(Run({"MOVE", "src", "1"}), IntArg(1));
+  EXPECT_THAT(Run({"EXISTS", "src"}), IntArg(0));
+
+  // Verify the key exists in db 1 with correct length and contents.
+  Run({"SELECT", "1"});
+  EXPECT_THAT(Run({"LLEN", "src"}), IntArg(kItems));
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_EQ(Run({"LINDEX", "src", absl::StrCat(i)}), expected[i]) << "index " << i;
+  }
+
+  // No nodes should remain offloaded after the move.
+  // auto metrics = GetMetrics();
+  // EXPECT_EQ(metrics.db_stats[1].tiered_entries, 0u);
+}
+
+// MOVE a list whose interior nodes are still io_pending (stash in flight).
+TEST_F(ListNodeTieringTest, MoveWhileNodesPending) {
+  const int kItems = 6;
+  vector<string> expected;
+  for (int i = 0; i < kItems; i++) {
+    expected.push_back(BuildString(2048, static_cast<char>('a' + i)));
+    Run({"RPUSH", "src", expected.back()});
+  }
+
+  // MOVE immediately without waiting for stash I/Os to complete.
+  EXPECT_THAT(Run({"MOVE", "src", "1"}), IntArg(1));
+  EXPECT_THAT(Run({"EXISTS", "src"}), IntArg(0));
+
+  // Drain any in-flight stash I/Os.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+
+  // Verify the key exists in db 1 with correct length and contents.
+  Run({"SELECT", "1"});
+  EXPECT_THAT(Run({"LLEN", "src"}), IntArg(kItems));
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_EQ(Run({"LINDEX", "src", absl::StrCat(i)}), expected[i]) << "index " << i;
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
+}
+
+// RPOP exhausts a list from the tail side
+TEST_F(ListNodeTieringTest, RPopStashedNodes) {
+  const int kItems = 8;
+  vector<string> expected;
+  for (int i = 0; i < kItems; i++) {
+    expected.push_back(BuildString(2048, static_cast<char>('A' + i)));
+    Run({"RPUSH", "mylist", expected.back()});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  // Pop from tail → values arrive in reverse order.
+  for (int i = kItems - 1; i >= 0; i--) {
+    EXPECT_EQ(Run({"RPOP", "mylist"}), expected[i]) << "pop index " << i;
+  }
+
+  EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+}
+
+// Test MEMORY DECOMMIT COOL command flushes the cool queue
+TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);  // Ensure cooling is enabled
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);     // Force offloading
+  UpdateFromFlags();
+
+  const int kMin = 256;
+  const int kMax = tiering::kPageSize + 10;
+
+  // Create entries that will be cooled down
+  for (size_t i = kMin; i < kMax; i++) {
+    Run({"SET", absl::StrCat("k", i), BuildString(i)});
+  }
+
+  // Wait for entries to be stashed and cooled
+  ExpectConditionWithinTimeout(
+      [this] { return GetMetrics().tiered_stats.total_stashes >= kMax - kMin - 1; });
+
+  // Get metrics before decommit
+  auto metrics_before = GetMetrics();
+  ASSERT_GT(metrics_before.tiered_stats.cold_storage_bytes, 0)
+      << "Should have cool storage data before decommit";
+
+  // Call MEMORY DECOMMIT COOL
+  auto response = Run({"MEMORY", "DECOMMIT", "COOL"});
+  ASSERT_EQ(response, "OK");
+
+  // Get metrics after decommit and verify cool queue was flushed
+  auto metrics_after = GetMetrics();
+  EXPECT_EQ(metrics_after.tiered_stats.cold_storage_bytes, 0)
+      << "Cool queue should be flushed after MEMORY DECOMMIT COOL";
 }
 
 }  // namespace dfly

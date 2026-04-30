@@ -3,7 +3,7 @@
 //
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
 
 extern "C" {
@@ -17,8 +17,6 @@ extern "C" {
 #include "io/io_buf.h"
 #include "server/detail/compressor.h"
 #include "server/execution_state.h"
-#include "server/journal/serializer.h"
-#include "server/journal/types.h"
 #include "server/table.h"
 #include "server/version.h"
 
@@ -80,6 +78,83 @@ enum class CompressionMode : uint8_t { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MUL
 CompressionMode GetDefaultCompressionMode();
 
 using StringVec = std::vector<std::string>;
+
+// Manages per-entry IO buffers for the RDB serializer, enabling tagged chunk framing for
+// interleaved serialization of multiple keys. When tagging is enabled, entries that were split
+// across multiple flushes are prefixed with a [opcode:1][stream_id:4][payload_length:4] header so
+// the loader can reassemble them.
+class MemBufController {
+  friend class MemBufControllerTest;
+
+ public:
+  using EntryId = uint32_t;
+  // Tagged chunk envelope: [RDB_OPCODE_TAGGED_CHUNK:1][stream_id:4][payload_length:4]
+  static constexpr auto kHeaderSize = 9;
+
+  // Makes entry_buffer_ the current write target and assigns a new entry id.
+  // Must be paired with FinishEntry().
+  void StartEntry();
+
+  // Finalizes the active entry. Drains any remaining data from entry_buffer_ into the
+  // default buffer (tagging it if the entry was split), then resets to default state.
+  void FinishEntry();
+
+  // Moves data from entry_buffer_ into the default buffer. If the entry was
+  // split and tagging is enabled, a tag header is prepended.
+  void TagAndDrainToDefaultBuffer();
+
+  io::IoBuf* CurrentBuffer() const {
+    return current_buffer_;
+  }
+
+  // Marks the active entry as having been split across multiple flushes. Once marked,
+  // later flushes of this entry's data will be tagged with a chunk header.
+  void MarkEntrySplit() {
+    split_entries_.insert(active_id_);
+  }
+
+  // Total bytes available for flushing: current entry buffer + any previously drained
+  // data sitting in the default buffer.
+  size_t FlushableSize() const;
+
+  // Captures the active entry id and points the current buffer to the default buffer. Called before
+  // the serializer's consume callback, which may preempt and allow other entries to interleave.
+  [[nodiscard]] EntryId SaveStateBeforeConsume();
+
+  // Restores a previously saved entry id after the consume callback returns. Points the current
+  // buffer to entry_buffer_.
+  void RestoreStateAfterConsume(EntryId id);
+
+  // Assembles a flush blob in the following steps:
+  // 1. Prepends any data in the default buffer (from previously finished entries) as a prefix.
+  // 2. If the active entry was split, a tag header is inserted before current_bytes.
+  // 3. current_bytes is added.
+  // 3. Consumes all buffers used.
+  // current_bytes is typically CurrentBuffer()->InputBuffer(), passed explicitly because it works
+  // on data returned by PrepareFlush.
+  [[nodiscard]] std::string BuildBlob(io::Bytes current_bytes);
+
+  void SetTagEntries(bool tag_entries) {
+    send_tagged_entries_ = tag_entries;
+  }
+
+ private:
+  // Builds a 9-byte tagged chunk header for the active entry with the given payload size.
+  std::array<uint8_t, 9> MakeTagHeader(size_t size) const;
+
+  bool send_tagged_entries_ = false;
+
+  EntryId next_id_ = 1;
+  EntryId active_id_ = 0;
+
+  io::IoBuf default_buffer_{4096};
+  io::IoBuf entry_buffer_{4096};
+
+  // intent lock to check that some entry id does not own the entry buffer before writing to it
+  EntryId entry_buffer_owner_ = 0;
+  io::IoBuf* current_buffer_ = &default_buffer_;
+  absl::flat_hash_set<EntryId> split_entries_;
+};
 
 class RdbSaver {
  public:
@@ -165,13 +240,18 @@ class RdbSaver {
   std::string snapshot_id_;
 };
 
-class RdbSerializer;
-class RdbSerializerBase {
+class RdbSerializer {
  public:
   enum class FlushState : uint8_t { kFlushMidEntry, kFlushEndEntry };
 
-  explicit RdbSerializerBase(CompressionMode compression_mode);
-  virtual ~RdbSerializerBase() = default;
+  // ConsumeFun is called when internal buffer exceeds flush_threshold.
+  // The callback receives the extracted data.
+  using ConsumeFun = std::function<void(std::string)>;
+
+  explicit RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun = {},
+                         size_t flush_threshold = 0);
+
+  ~RdbSerializer();
 
   // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
   static std::string DumpValue(const PrimeValue& obj, bool ignore_crc = false);
@@ -182,10 +262,10 @@ class RdbSerializerBase {
   size_t SerializedLen() const;
 
   // Flush internal buffer and return serialized blob.
-  virtual std::string Flush(FlushState flush_state);
+  std::string Flush(FlushState flush_state);
 
   size_t GetBufferCapacity() const;
-  virtual size_t GetTempBufferSize() const;
+  size_t GetTempBufferSize() const;
 
   std::error_code WriteRaw(const ::io::Bytes& buf);
 
@@ -211,50 +291,6 @@ class RdbSerializerBase {
     compression_mode_ = mode;
   }
 
- protected:
-  // Prepare internal buffer for flush. Compress it.
-  io::Bytes PrepareFlush(FlushState flush_state);
-
-  // If membuf data is compressable use compression impl to compress the data and write it to membuf
-  void CompressBlob();
-  void AllocateCompressorOnce();
-
-  std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
-
-  CompressionMode compression_mode_;
-  io::IoBuf mem_buf_;
-  std::unique_ptr<detail::CompressorImpl> compressor_impl_;
-
-  static constexpr size_t kFilterChunkSize = 1ULL << 26;
-  static constexpr size_t kMinStrSizeToCompress = 256;
-  static constexpr size_t kMaxStrSizeToCompress = 1 * 1024 * 1024;
-  static constexpr double kMinCompressionReductionPrecentage = 0.95;
-  struct CompressionStats {
-    uint32_t compression_no_effective = 0;
-    uint32_t size_skip_count = 0;
-    uint32_t compression_failed = 0;
-    uint32_t compressed_blobs = 0;
-  };
-  std::optional<CompressionStats> compression_stats_;
-  base::PODArray<uint8_t> tmp_buf_;
-  std::unique_ptr<LZF_HSLOT[]> lzf_;
-  size_t number_of_chunks_ = 0;
-
-  uint64_t serialization_peak_bytes_ = 0;
-};
-
-class RdbSerializer : public RdbSerializerBase {
- public:
-  // ConsumeFun is called when internal buffer exceeds flush_threshold.
-  // The callback receives the extracted data.
-  using ConsumeFun = std::function<void(std::string)>;
-
-  explicit RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun = {},
-                         size_t flush_threshold = 0);
-
-  ~RdbSerializer();
-
-  std::string Flush(FlushState flush_state) override;
   std::error_code SelectDb(uint32_t dbid);
 
   // Must be called in the thread to which `it` belongs.
@@ -276,10 +312,18 @@ class RdbSerializer : public RdbSerializerBase {
   // Save HNSW index entry using provided tmp_buf for serialization to avoid repeated allocations.
   std::error_code SaveHNSWEntry(const search::HnswNodeData& node, absl::Span<uint8_t> tmp_buf);
 
-  size_t GetTempBufferSize() const override;
   std::error_code SendEofAndChecksum();
 
  private:
+  // Prepare internal buffer for flush. Compress it.
+  io::Bytes PrepareFlush(FlushState flush_state);
+
+  // If membuf data is compressable use compression impl to compress the data and write it to membuf
+  void CompressBlob();
+  void AllocateCompressorOnce();
+
+  std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
+
   // Might preempt if flush_fun_ is used
   std::error_code SaveObject(const PrimeValue& pv);
   std::error_code SaveListObject(const PrimeValue& pv);
@@ -289,6 +333,7 @@ class RdbSerializer : public RdbSerializerBase {
   std::error_code SaveStreamObject(const PrimeValue& obj);
   std::error_code SaveJsonObject(const PrimeValue& pv);
   std::error_code SaveSBFObject(const PrimeValue& pv);
+  std::error_code SaveTOPKObject(const PrimeValue& pv);
   std::error_code SaveCMSObject(const PrimeValue& pv);
 
   std::error_code SaveLongLongAsString(int64_t value);
@@ -298,6 +343,26 @@ class RdbSerializer : public RdbSerializerBase {
 
   // Might preempt
   void PushToConsumerIfNeeded(FlushState flush_state);
+
+  static constexpr size_t kFilterChunkSize = 1ULL << 26;
+  static constexpr size_t kMinStrSizeToCompress = 256;
+  static constexpr size_t kMaxStrSizeToCompress = 1 * 1024 * 1024;
+  static constexpr double kMinCompressionReductionPrecentage = 0.95;
+  struct CompressionStats {
+    uint32_t compression_no_effective = 0;
+    uint32_t size_skip_count = 0;
+    uint32_t compression_failed = 0;
+    uint32_t compressed_blobs = 0;
+  };
+
+  CompressionMode compression_mode_;
+  io::IoBuf mem_buf_;
+  std::unique_ptr<detail::CompressorImpl> compressor_impl_;
+  std::optional<CompressionStats> compression_stats_;
+  base::PODArray<uint8_t> tmp_buf_;
+  std::unique_ptr<LZF_HSLOT[]> lzf_;
+  size_t number_of_chunks_ = 0;
+  uint64_t serialization_peak_bytes_ = 0;
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;

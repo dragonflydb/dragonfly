@@ -12,6 +12,7 @@
 #include <absl/strings/str_cat.h>
 #include <absl/time/time.h>
 
+#include <algorithm>
 #include <numeric>
 #include <variant>
 
@@ -27,6 +28,7 @@
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
+#include "facade/op_status.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_srv_parser.h"
@@ -155,16 +157,23 @@ bool MatchHttp11Line(string_view line) {
          absl::EndsWith(line, "HTTP/1.1");
 }
 
-void UpdateIoBufCapacity(const io::IoBuf& io_buf, ConnectionStats* stats,
-                         absl::FunctionRef<void()> f) {
-  const size_t prev_capacity = io_buf.Capacity();
-  f();
-  const size_t capacity = io_buf.Capacity();
-  if (prev_capacity != capacity) {
-    VLOG(2) << "Grown io_buf to " << capacity;
-    stats->read_buf_capacity += capacity - prev_capacity;
+struct ReadBufTracker {
+  explicit ReadBufTracker(const io::IoBuf& io_buf)
+      : io_buf_(io_buf), last_capacity_(io_buf.Capacity()) {
   }
-}
+
+  ~ReadBufTracker() {
+    size_t capacity = io_buf_.Capacity();
+    if (last_capacity_ != capacity) {
+      VLOG(2) << "Grown io_buf to " << capacity;
+      tl_facade_stats->conn_stats.read_buf_capacity += capacity - last_capacity_;
+    }
+  }
+
+ private:
+  const io::IoBuf& io_buf_;
+  size_t last_capacity_;
+};
 
 size_t UsedMemoryInternal(const ParsedCommand& msg) {
   return msg.GetSize() + msg.HeapMemory();
@@ -175,6 +184,10 @@ struct TrafficLogger {
   // Also, makes sure that LogTraffic are executed atomically.
   fb2::Mutex mutex;
   unique_ptr<io::WriteFile> log_file;
+  // Listener type that this thread's file is recording. Only connections with a
+  // matching `listener_type_` produce records; others are skipped on the hot path.
+  // Set once when the file is opened, cleared in ResetLocked().
+  Connection::ListenerType listener_type = Connection::ListenerType::MAIN_RESP;
 
   void ResetLocked();
   // Returns true if Write succeeded, false if it failed and the recording should be aborted.
@@ -187,6 +200,7 @@ void TrafficLogger::ResetLocked() {
     std::ignore = log_file->Close();
     log_file.reset();
   }
+  listener_type = Connection::ListenerType::MAIN_RESP;
 }
 
 // Returns true if Write succeeded, false if it failed and the recording should be aborted.
@@ -216,10 +230,16 @@ thread_local base::Histogram* io_req_size_hist = nullptr;
 thread_local const size_t reply_size_limit = absl::GetFlag(FLAGS_squashed_reply_size_limit);
 thread_local uint32 pipeline_wait_batch_usec = absl::GetFlag(FLAGS_pipeline_wait_batch_usec);
 
-void OpenTrafficLogger(string_view base_path) {
+// Opens the per-thread traffic log file. Distinguishes three outcomes so the caller
+// can report an accurate error to the user (was the logger already running, or did
+// we fail to open a file). `listener_type` is only committed after the file is
+// successfully opened so the logger's state stays consistent on failure.
+Connection::StartTrafficResult OpenTrafficLogger(string_view base_path,
+                                                 Connection::ListenerType listener_type) {
+  using Res = Connection::StartTrafficResult;
   unique_lock lk{tl_traffic_logger.mutex};
   if (tl_traffic_logger.log_file)
-    return;
+    return Res::kAlreadyLogging;
 
 #ifdef __linux__
   // Open file with append mode, without it concurrent fiber writes seem to conflict
@@ -228,21 +248,30 @@ void OpenTrafficLogger(string_view base_path) {
   auto file = util::fb2::OpenWrite(path, io::WriteFile::Options{/*.append = */ false});
   if (!file) {
     LOG(ERROR) << "Error opening a file " << path << " for traffic logging: " << file.error();
-    return;
+    return Res::kOpenFailed;
   }
   tl_traffic_logger.log_file = unique_ptr<io::WriteFile>{file.value()};
+  tl_traffic_logger.listener_type = listener_type;
 #else
   LOG(WARNING) << "Traffic logger is only supported on Linux";
+  return Res::kOpenFailed;
 #endif
 
-  // Write version, incremental numbering :)
-  uint8_t version[1] = {2};
-  std::ignore = tl_traffic_logger.log_file->Write(version);
+  // File header: version byte (v3), followed by a single byte carrying the listener
+  // type for the whole file. Every record in the file belongs to this listener.
+  uint8_t header[2] = {3, static_cast<uint8_t>(listener_type)};
+  std::ignore = tl_traffic_logger.log_file->Write(header);
+  return Res::kStarted;
 }
 
-void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
-                ServiceInterface::ContextInfo ci) {
-  string_view cmd = args.Front();
+// Writes a single record. `parts[0]` is the command name, following entries are its arguments.
+// Callers must guarantee a non-empty span (both LogTraffic and LogMemcacheTraffic push
+// the command name as the first element before invoking this function).
+void LogTrafficParts(uint32_t id, bool has_more, uint32_t db_index,
+                     absl::Span<const string_view> parts) {
+  DCHECK(!parts.empty());
+
+  string_view cmd = parts.front();
   if (absl::EqualsIgnoreCase(cmd, "debug"sv))
     return;
 
@@ -251,26 +280,22 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
   char stack_buf[1024];
   char* next = stack_buf;
 
-  // We write id, timestamp, db_index, has_more, num_parts, part_len, part_len, part_len, ...
-  // And then all the part blobs concatenated together.
+  // Record header: id, timestamp, db_index, has_more, num_parts, followed by
+  // part_len, part_len, ... and finally the concatenated part blobs.
+  // The listener type is stored once in the file header; it is not repeated per record.
   auto write_u32 = [&next](uint32_t i) {
     absl::little_endian::Store32(next, i);
     next += 4;
   };
 
-  // id
   write_u32(id);
 
-  // timestamp
   absl::little_endian::Store64(next, absl::GetCurrentTimeNanos());
   next += 8;
 
-  // db_index
-  write_u32(ci.db_index);
-
-  // has_more, num_parts
-  write_u32(has_more ? 1 : 0);
-  write_u32(uint32_t(args.size()));
+  write_u32(db_index);
+  write_u32(has_more ? 1u : 0u);
+  write_u32(uint32_t(parts.size()));
 
   // Grab the lock and check if the file is still open.
   lock_guard lk{tl_traffic_logger.mutex};
@@ -278,7 +303,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
     return;
 
   // part_len, ...
-  for (auto part : args) {
+  for (string_view part : parts) {
     if (size_t(next - stack_buf + 4) > sizeof(stack_buf)) {
       if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)})) {
         return;
@@ -295,7 +320,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
     blobs[index++] = iovec{.iov_base = stack_buf, .iov_len = size_t(next - stack_buf)};
   }
 
-  for (auto part : args) {
+  for (string_view part : parts) {
     if (auto blob_len = part.size(); blob_len > 0) {
       blobs[index++] = iovec{.iov_base = const_cast<char*>(part.data()), .iov_len = blob_len};
 
@@ -311,6 +336,90 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
   if (index) {
     tl_traffic_logger.Write(blobs.data(), index);
   }
+}
+
+void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
+                ServiceInterface::ContextInfo ci) {
+  absl::InlinedVector<string_view, 16> parts;
+  parts.reserve(args.size());
+  for (auto v : args.view())
+    parts.push_back(v);
+  LogTrafficParts(id, has_more, ci.db_index, absl::MakeSpan(parts));
+}
+
+// Variant used by the Memcache protocol path.
+//
+// The memcache parser keeps fields that are NOT arguments in scalar Command members
+// (flags, expire_ts, delta, cas_unique) rather than in `backed_args`. We serialize
+// them into the record so that tools/replay has enough context to reproduce the
+// command faithfully. Record layout per command type:
+//
+//   SET/ADD/REPLACE/APPEND/PREPEND : [cmd, key, value, flags, expire_ts]
+//   CAS                            : [cas, key, value, flags, expire_ts, cas_unique]
+//   INCR/DECR                      : [cmd, key, delta]
+//   GAT/GATS                       : [cmd, expire_ts, key+]  (expire BEFORE keys, matches wire)
+//   all others (GET/GETS/DELETE/
+//               FLUSHALL/STATS/
+//               QUIT/VERSION)      : [cmd, *backed_args]
+void LogMemcacheTraffic(uint32_t id, bool has_more, const MemcacheParser::Command& mc,
+                        ServiceInterface::ContextInfo ci) {
+  using MP = MemcacheParser;
+  string_view cmd_name = MP::CmdName(mc.type);
+  if (cmd_name.empty())
+    return;
+
+  // owned backs stringified numeric fields. We use a fixed-size std::array
+  // rather than a resizable vector so that string_views inserted into `parts`
+  // remain stable even if more fields are appended in the future: std::array
+  // never reallocates. kMaxOwned must be >= the largest per-type push count
+  // (currently 3, for CAS: flags + expire_ts + cas_unique).
+  constexpr size_t kMaxOwned = 4;
+  std::array<string, kMaxOwned> owned;
+  size_t owned_n = 0;
+
+  absl::InlinedVector<string_view, 16> parts;
+  parts.reserve(mc.backed_args->size() + kMaxOwned + 1);
+  parts.push_back(cmd_name);
+
+  auto push_num = [&](uint64_t n) {
+    DCHECK_LT(owned_n, kMaxOwned);
+    owned[owned_n] = absl::StrCat(n);
+    parts.push_back(owned[owned_n]);
+    ++owned_n;
+  };
+
+  // For GAT/GATS we want expire_ts to precede the key list because the parser can
+  // push multiple keys into backed_args; placing expire at the end would make the
+  // expire index depend on the number of keys.
+  if (mc.type == MP::GAT || mc.type == MP::GATS)
+    push_num(mc.raw_expire_ts);
+
+  for (string_view a : mc.backed_args->view())
+    parts.push_back(a);
+
+  switch (mc.type) {
+    case MP::SET:
+    case MP::ADD:
+    case MP::REPLACE:
+    case MP::APPEND:
+    case MP::PREPEND:
+      push_num(mc.flags);
+      push_num(mc.raw_expire_ts);
+      break;
+    case MP::CAS:
+      push_num(mc.flags);
+      push_num(mc.raw_expire_ts);
+      push_num(mc.cas_unique);
+      break;
+    case MP::INCR:
+    case MP::DECR:
+      push_num(mc.delta);
+      break;
+    default:
+      break;
+  }
+
+  LogTrafficParts(id, has_more, ci.db_index, absl::MakeSpan(parts));
 }
 
 constexpr size_t kMinReadSize = 256;
@@ -359,6 +468,18 @@ struct QueueBackpressure {
   // Used by pipelining/execution fiber to throttle the incoming pipeline messages.
   // Used together with pipeline_buffer_limit to limit the pipeline usage per thread.
   util::fb2::CondVarAny pipeline_cnd;
+
+  // V2 connections subscribe to this EventCount when parked on backpressure.
+  // When global memory is freed, notifyAll() calls for each subscriber's callback,
+  // which in turn calls io_event_.notify() to wake the V2 fiber.
+  // Registration and unregistration are O(1) via intrusive linked list.
+  util::fb2::EventCount v2_pipeline_backpressure_ec;
+
+  // Notifies both V1 waiters (pipeline_cnd) and V2 subscribers (v2_pipeline_backpressure_ec).
+  void NotifyPipelineWaiters() {
+    pipeline_cnd.notify_all();
+    v2_pipeline_backpressure_ec.notifyAll();
+  }
 
   size_t publish_buffer_limit = 0;        // cached flag publish_buffer_limit
   size_t pipeline_cache_limit = 0;        // cached flag pipeline_cache_limit
@@ -683,8 +804,9 @@ void Connection::OnPostMigrateThread() {
   }
 
   if (ioloop_v2_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
+    MaybeEnableRecvMultishot();
     socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
-      DoReadOnRecv(n);
+      NotifyOnRecv(n);
       io_event_.notify();
     });
   }
@@ -694,7 +816,7 @@ void Connection::OnPostMigrateThread() {
   DCHECK(!async_fb_.IsJoinable());
 
   // If someone had sent Async during the migration, we must create async_fb_.
-  if (HasPendingMessages()) {
+  if (HasPendingMessages() && !ioloop_v2_) {
     LaunchAsyncFiberIfNeeded();
   }
 
@@ -707,6 +829,14 @@ void Connection::OnConnectionStart() {
   // is null in unit-tests.
   if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
     is_main_ = lsnr->IsMainInterface();
+    if (lsnr->IsPrivilegedInterface()) {
+      listener_type_ = ListenerType::ADMIN_RESP;
+    } else if (protocol_ == Protocol::MEMCACHE) {
+      listener_type_ = ListenerType::MEMCACHE;
+    } else {
+      // MAIN_RESP covers TCP main listener as well as unix-socket RESP listeners.
+      listener_type_ = ListenerType::MAIN_RESP;
+    }
   }
 
   if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
@@ -1034,7 +1164,6 @@ io::Result<bool> Connection::CheckForHttpProto() {
 
   size_t last_len = 0;
   auto* peer = socket_.get();
-  auto& conn_stats = tl_facade_stats->conn_stats;
   do {
     auto buf = io_buf_.AppendBuffer();
     DCHECK(!buf.empty());
@@ -1067,7 +1196,10 @@ io::Result<bool> Connection::CheckForHttpProto() {
       return MatchHttp11Line(ib);
     }
     last_len = io_buf_.InputLen();
-    UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() { io_buf_.EnsureCapacity(128); });
+    {
+      ReadBufTracker tracker(io_buf_);
+      io_buf_.EnsureCapacity(128);
+    }
   } while (last_len < 1024);
 
   return false;
@@ -1092,10 +1224,9 @@ void Connection::ConnectionFlow() {
   // Therefore we may already have some data in the buffer.
   if (io_buf_.InputLen() > 0) {
     phase_ = PROCESS;
-    if (redis_parser_) {
-      parse_status = ParseRedis(10000);
+    if (redis_parser_ && !ioloop_v2_) {
+      parse_status = ParseRedis(io_buf_, 10000);
     } else {
-      DCHECK(memcache_parser_);
       parse_status = ParseLoop();
     }
   }
@@ -1104,13 +1235,12 @@ void Connection::ConnectionFlow() {
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
-    UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() { io_buf_.EnsureCapacity(64); });
+    {
+      ReadBufTracker tracker(io_buf_);
+      io_buf_.EnsureCapacity(64);
+    }
     variant<error_code, Connection::ParserStatus> res;
     if (ioloop_v2_) {
-      // Everything above the IoLoopV2 is fiber blocking. A connection can migrate before
-      // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
-      // a migration shall only call RegisterOnRecv if it reached the main IoLoopV2 below.
-      migration_allowed_to_register_ = true;
       res = IoLoopV2();
     } else {
       res = IoLoop();
@@ -1206,7 +1336,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   if ((optimize_for_async || !can_dispatch_sync) &&
       qbp.IsPipelineBufferOverLimit(conn_stats->pipeline_queue_bytes, parsed_cmd_q_len_)) {
     conn_stats->pipeline_throttle_count++;
-    LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit."
+    LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit (V1)."
                              << ", Thread pipeline_queue_bytes: "
                              << conn_stats->pipeline_queue_bytes
                              << ", Thread pipeline_queue_entries: "
@@ -1256,7 +1386,8 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 }
 
-Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool enqueue_only) {
+Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, unsigned max_busy_cycles,
+                                                bool enqueue_only) {
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
 
@@ -1271,7 +1402,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool e
     auto* cmd = std::exchange(parsed_cmd_, ptr.release());
     EnqueueParsedCommand(cmd);
   };
-  io::Bytes read_buffer = io_buf_.InputBuffer();
+  io::Bytes read_buffer = io_buf.InputBuffer();
   // Keep track of total bytes consumed/parsed. The do/while{} loop below preempts,
   // and InputBuffer() size might change between preemption points. There is a corner case,
   // that ConsumeInput() will strip a portion of the request which makes the test_publish_stuck
@@ -1292,14 +1423,23 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool e
       request_consumed_bytes_ = 0;
       bool has_more = consumed < read_buffer.size();
 
-      if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
+      if (tl_traffic_logger.log_file && tl_traffic_logger.listener_type == listener_type_) {
         LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()));
       }
 
-      if (enqueue_only)
+      if (enqueue_only) {
         dispatch_async();
-      else
+
+        // Stop parsing the current buffer if we crossed the limit.
+        // Unparsed bytes remain in io_buf_ for the next ParseLoop iteration.
+        if (GetQueueBackpressure().IsPipelineBufferOverLimit(
+                GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_)) {
+          DVLOG(2) << "Pipeline buffer over limit, breaking from parsing loop.";
+          break;
+        }
+      } else {
         DispatchSingle(has_more, dispatch_sync, dispatch_async);
+      }
     }
     if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
@@ -1317,7 +1457,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool e
     }
   } while (RespSrvParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
 
-  io_buf_.ConsumeInput(total_consumed);
+  io_buf.ConsumeInput(total_consumed);
 
   parser_error_ = result;
   if (result == RespSrvParser::OK)
@@ -1340,7 +1480,7 @@ auto Connection::ParseLoop() -> ParserStatus {
 
   bool commands_parsed = false;
   do {
-    commands_parsed = (this->*parse_func)();
+    commands_parsed = (this->*parse_func)(io_buf_);
 
     if (!ExecuteBatch())
       return ERROR;
@@ -1372,22 +1512,28 @@ void Connection::OnBreakCb(int32_t mask) {
 }
 
 void Connection::HandleMigrateRequest() {
-  if (cc_->conn_closing || !migration_request_) {
+  if (!migration_request_)
+    return;
+
+  if (cc_->conn_closing) {
+    migration_request_ = nullptr;
     return;
   }
+
   ProactorBase* dest = migration_request_;
 
-  if (async_fb_.IsJoinable()) {
+  // V1 loop: we must coordinate with and shutdown the AsyncFiber before migration.
+  // V2 loop: is single-fiber and handles this by breaking the dispatch_q loop.
+  if (!ioloop_v2_ && async_fb_.IsJoinable()) {
     SendAsync({MigrationRequestMessage{}});
     async_fb_.Join();
   }
 
-  // We don't support migrating with subscriptions as it would require moving thread local
-  // handles. We can't check above, as the queue might have contained a subscribe request.
-
+  // We don't support migrating with subscriptions as it would require moving thread-local handles.
   if (cc_->subscriptions == 0) {
     // RegisterOnErrorCb might be called on POLLHUP and the join above is a preemption point.
     // So, it could be the case that after this fiber wakes up the connection might be closing.
+    // Re-check closing status after the potential V1 Join() or any preemption.
     if (cc_->conn_closing) {
       return;
     }
@@ -1395,15 +1541,17 @@ void Connection::HandleMigrateRequest() {
     tl_facade_stats->conn_stats.num_migrations++;
     migration_request_ = nullptr;
 
-    // We need to return early as the socket is closing and IoLoop will clean up.
-    // The reason that this is true is because of the following DCHECK
-    DCHECK(!async_fb_.IsJoinable());
+    // Verify that no background command processing is active.
+    // V1 loop: Join() ensures this.
+    // V2 loop: it is guaranteed by the single-fiber loop.
+    DCHECK(ioloop_v2_ || !async_fb_.IsJoinable());
 
-    // which can never trigger since we Joined on the async_fb_ above and we are
-    // atomic in respect to our proactor meaning that no other fiber will
-    // launch the DispatchFiber.
     std::ignore = !this->Migrate(dest);
   }
+
+  // Note: If cc_->subscriptions > 0, we skip the hop but leave migration_request_
+  // set. This defers the migration, retrying at the start of every subsequent
+  // loop iteration until all subscriptions are cleared.
 }
 
 io::Result<size_t> Connection::HandleRecvSocket() {
@@ -1449,10 +1597,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
     }
 
     phase_ = PROCESS;
-    bool is_iobuf_full = io_buf_.AppendLen() == 0;
+    bool reached_capacity = io_buf_.AppendLen() == 0;
 
     if (redis_parser_) {
-      parse_status = ParseRedis(max_busy_read_cycles_cached);
+      parse_status = ParseRedis(io_buf_, max_busy_read_cycles_cached);
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseLoop();
@@ -1477,19 +1625,16 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
         // (Note: The buffer object is only working in power-of-2 sizes,
         // so there's no danger of accidental O(n^2) behavior.)
         if (parser_hint > capacity) {
-          auto& conn_stats = GetLocalConnStats();
-          UpdateIoBufCapacity(io_buf_, &conn_stats,
-                              [&]() { io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint)); });
+          ReadBufTracker tracker(io_buf_);
+          io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint));
         }
 
         // If we got a partial request because iobuf was full, grow it up to
         // a reasonable limit to save on Recv() calls.
-        if (is_iobuf_full && capacity < max_iobfuf_len / 2) {
-          auto& conn_stats = GetLocalConnStats();
+        if (reached_capacity && capacity < max_iobfuf_len / 2) {
           // Last io used most of the io_buf to the end.
-          UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() {
-            io_buf_.Reserve(capacity * 2);  // Valid growth range.
-          });
+          ReadBufTracker tracker(io_buf_);
+          io_buf_.Reserve(capacity * 2);  // Valid growth range.
         }
 
         if (io_buf_.AppendLen() == 0U) {
@@ -1636,7 +1781,7 @@ void Connection::ClearPipelinedMessages() {
   parsed_to_execute_ = nullptr;
 
   QueueBackpressure& qbp = GetQueueBackpressure();
-  qbp.pipeline_cnd.notify_all();
+  qbp.NotifyPipelineWaiters();
   qbp.pubsub_ec.notifyAll();
 }
 
@@ -1685,7 +1830,7 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
   // Fiber Termination Check
   if (ShouldEndAsyncFiber(*msg)) {
     CHECK(!HasPendingMessages()) << DebugInfo();
-    GetQueueBackpressure().pipeline_cnd.notify_all();
+    GetQueueBackpressure().NotifyPipelineWaiters();
     return true;  // Signal to terminate AsyncFiber
   }
 
@@ -1880,7 +2025,7 @@ void Connection::AsyncFiber() {
     // 2. Local queue (length) is under limit -> Wakes up this connection's producer.
     if (qbp.IsPipelineBufferUnderLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_) ||
         !HasPendingMessages()) {
-      qbp.pipeline_cnd.notify_all();
+      qbp.NotifyPipelineWaiters();
     }
 
     if (subscriber_over_limit &&
@@ -1891,7 +2036,7 @@ void Connection::AsyncFiber() {
   DCHECK(cc_->conn_closing || reply_builder_->GetError());
 
   cc_->conn_closing = true;
-  qbp.pipeline_cnd.notify_all();
+  qbp.NotifyPipelineWaiters();
 
   // If shutdown was requested, we need to break the receive call in case the i/o fiber
   // is blocked there. With io loop v2, we can have a different mechanism to break from recv flow.
@@ -2007,6 +2152,7 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 }
 
 void Connection::LaunchAsyncFiberIfNeeded() {
+  DCHECK(!ioloop_v2_);
   if (!async_fb_.IsJoinable() && !migration_in_process_) {
     VLOG(1) << "[" << id_ << "] LaunchAsyncFiberIfNeeded ";
     async_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch", [this]() { AsyncFiber(); });
@@ -2030,7 +2176,7 @@ void Connection::SendAsync(MessageHandle msg) {
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
-  if (!cc_->conn_closing) {
+  if (!cc_->conn_closing && !ioloop_v2_) {
     LaunchAsyncFiberIfNeeded();
   }
   DCHECK_NE(phase_, PRECLOSE);  // No more messages are processed after this point
@@ -2069,6 +2215,13 @@ void Connection::SendAsync(MessageHandle msg) {
   }
 
   // Control Path Notification:
+
+  // TODO: Poissbily optimize wakeups
+  if (ioloop_v2_) {
+    io_event_.notify();
+    return;
+  }
+
   // We need to wake up the AsyncFiber only if it is currently sleeping.
   // 1. Memcache: Sleeps if dispatch_q_ is empty. Must notify on 0->1 transition.
   // 2. Redis: Sleeps if BOTH queues are empty. If pipeline has items, it's already awake.
@@ -2159,15 +2312,41 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force
   // Connections can migrate at most once.
   migration_enabled_ = false;
   migration_request_ = dest;
+
+  // Wake up the V2 loop so it can immediately process the migration request.
+  if (ioloop_v2_) {
+    io_event_.notify();
+  }
 }
 
-void Connection::StartTrafficLogging(string_view path) {
-  OpenTrafficLogger(path);
+Connection::StartTrafficResult Connection::StartTrafficLogging(string_view path,
+                                                               ListenerType listener_type) {
+  return OpenTrafficLogger(path, listener_type);
 }
 
 void Connection::StopTrafficLogging() {
   lock_guard lk(tl_traffic_logger.mutex);
   tl_traffic_logger.ResetLocked();
+}
+
+void Connection::LogReplicaCommand(const cmn::BackedArguments& args, uint32_t db_index) {
+  // Contract: LSN/PING opcodes are filtered before ExecuteTx, and
+  // COMMAND/EXPIRED journal entries always carry at least a command name.
+  DCHECK(!args.empty());
+  // Fast-path gate: cheap thread-local reads without the mutex. If the logger
+  // was swapped out concurrently, LogTrafficParts re-checks `log_file` inside
+  // the lock so at worst we do a bit of wasted work (building `parts`).
+  // id=0 is a synthetic client id — replication has no connection/client of its
+  // own, and callers on the same fiber serialise naturally.
+  if (!tl_traffic_logger.log_file ||
+      tl_traffic_logger.listener_type != ListenerType::REPLICA_RESP) {
+    return;
+  }
+  absl::InlinedVector<string_view, 16> parts;
+  parts.reserve(args.size());
+  for (auto v : args.view())
+    parts.push_back(v);
+  LogTrafficParts(/*id=*/0, /*has_more=*/false, db_index, absl::MakeSpan(parts));
 }
 
 bool Connection::IsHttp() const {
@@ -2245,7 +2424,7 @@ void Connection::BreakOnce(uint32_t ev_mask) {
   if (breaker_cb_) {
     DVLOG(1) << "[" << id_ << "] Connection::breaker_cb_ " << ev_mask;
     auto fun = std::move(breaker_cb_);
-    DCHECK(!breaker_cb_);
+    breaker_cb_ = nullptr;
     fun(ev_mask);
   }
 }
@@ -2266,12 +2445,24 @@ bool Connection::IsReplySizeOverLimit() const {
   return over_limit;
 }
 
-bool Connection::ParseRedisBatch() {
-  return ParseRedis(max_busy_read_cycles_cached, true) == ParserStatus::OK;
+bool Connection::ParseRedisBatch(base::IoBuf& buf) {
+  QueueBackpressure& qbp = GetQueueBackpressure();
+
+  // Only throttle parsing if this connection is actively contributing to the queue.
+  // Connections with parsed_cmd_q_len_ == 0 must always be allowed to parse so that
+  // administrative commands (CONFIG SET, etc.) can execute and relieve backpressure.
+  if ((parsed_cmd_q_len_ > 0) &&
+      qbp.IsPipelineBufferOverLimit(GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_)) {
+    // Signal ParseLoop to stop. IoLoopV2 will drain before resuming.
+    DVLOG(2) << "Pipeline buffer over limit. Avoid parsing Redis batch.";
+    GetLocalConnStats().pipeline_throttle_count++;
+    return false;
+  }
+  return ParseRedis(buf, max_busy_read_cycles_cached, true) == ParserStatus::OK;
 }
 
-bool Connection::ParseMCBatch() {
-  CHECK(io_buf_.InputLen() > 0);
+bool Connection::ParseMCBatch(base::IoBuf& io_buf) {
+  CHECK(io_buf.InputLen() > 0);
 
   do {
     if (parsed_cmd_ == nullptr) {
@@ -2281,14 +2472,21 @@ bool Connection::ParseMCBatch() {
     }
     uint32_t consumed = 0;
     memcache_parser_->set_last_unix_time(time(nullptr));
-    MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf_.InputBuffer()),
+    MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf.InputBuffer()),
                                                             &consumed, parsed_cmd_->mc_command());
-    io_buf_.ConsumeInput(consumed);
+    io_buf.ConsumeInput(consumed);
 
     DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
              << unsigned(parsed_cmd_->mc_command()->type);
     if (result == MemcacheParser::INPUT_PENDING)
       return false;
+
+    if (result == MemcacheParser::OK && tl_traffic_logger.log_file &&
+        tl_traffic_logger.listener_type == listener_type_) {
+      bool has_more = io_buf_.InputLen() > 0;
+      LogMemcacheTraffic(id_, has_more, *parsed_cmd_->mc_command(),
+                         service_->GetContextInfo(cc_.get()));
+    }
 
     // We push the command to the parsed queue even in case of parse errors,
     // so that we can reply in order.
@@ -2318,7 +2516,7 @@ bool Connection::ParseMCBatch() {
           break;
       }
     }
-  } while (parsed_cmd_q_len_ < 128 && io_buf_.InputLen() > 0);
+  } while (parsed_cmd_q_len_ < 128 && io_buf.InputLen() > 0);
   return true;
 }
 
@@ -2390,26 +2588,35 @@ bool Connection::ExecuteBatch() {
 
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
+
+  // Since we are done executing a batch, and advance_head might be called which release commands,
+  // notify waiters that backpressure might be relieved.
+  if (ioloop_v2_) {
+    io_event_.notify();
+  }
   return true;
 }
 
 bool Connection::ReplyBatch() {
   reply_builder_->SetBatchMode(true);
-  for (auto& cmd = parsed_head_; cmd != parsed_to_execute_;) {
-    if (!cmd->CanReply())
-      break;
-
-    current_wait_.reset();  // we must free waiter before proceeding with other commands
+  while (HasInFlightCommands() && parsed_head_->CanReply()) {
+    current_wait_.reset();  // Clear the subscription before moving to the next command
+    auto* cmd = parsed_head_;
+    parsed_head_ = cmd->next;
     cmd->SendReply();
-
-    auto* prev = exchange(cmd, cmd->next);
-    ReleaseParsedCommand(prev, cmd != parsed_to_execute_ /* is_pipelined */);
+    ReleaseParsedCommand(cmd, HasInFlightCommands() /* is_pipelined */);
     if (reply_builder_->GetError())
       return false;
   }
 
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
+
+  // Since we are done replying a batch, and ReleaseParsedCommand might be called which release
+  // commands, notify waiters that backpressure might be relieved.
+  if (ioloop_v2_) {
+    io_event_.notify();
+  }
 
   reply_builder_->SetBatchMode(false);
   reply_builder_->Flush();
@@ -2523,7 +2730,7 @@ void Connection::UpdateFromFlags() {
   unsigned tid = fb2::ProactorBase::me()->GetPoolIndex();
   thread_queue_backpressure[tid].pipeline_queue_max_len = GetFlag(FLAGS_pipeline_queue_limit);
   thread_queue_backpressure[tid].pipeline_buffer_limit = GetFlag(FLAGS_pipeline_buffer_limit);
-  thread_queue_backpressure[tid].pipeline_cnd.notify_all();
+  thread_queue_backpressure[tid].NotifyPipelineWaiters();
 
   max_busy_read_cycles_cached = base::CycleClock::FromUsec(GetFlag(FLAGS_max_busy_read_usec));
   always_flush_pipeline_cached = GetFlag(FLAGS_always_flush_pipeline);
@@ -2586,7 +2793,7 @@ bool ConnectionRef::operator==(const ConnectionRef& other) const {
   return client_id_ == other.client_id_;
 }
 
-void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) {
+void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) {
   if (std::holds_alternative<std::error_code>(n.read_result)) {
     io_ec_ = std::get<std::error_code>(n.read_result);
     return;
@@ -2594,56 +2801,57 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 
   using RecvNoti = util::FiberSocketBase::RecvNotification::RecvCompletion;
   if (std::holds_alternative<RecvNoti>(n.read_result)) {
-    if (!std::get<RecvNoti>(n.read_result)) {
+    if (!std::get<RecvNoti>(n.read_result)) {  // false - connection aborted
       io_ec_ = make_error_code(errc::connection_aborted);
       return;
     }
 
-    if (io_buf_.AppendLen() == 0) {
-      // We will regrow in IoLoopV2
-      return;
-    }
-
-    io::MutableBytes buf = io_buf_.AppendBuffer();
-    io::Result<size_t> res = socket_->TryRecv(buf);
-
-    if (res) {
-      if (*res > 0) {
-        // A recv call can return fewer bytes than requested even if the
-        // socket buffer actually contains enough data to satisfy the full request.
-        // TODO maybe worth looping here and try another recv call until it fails
-        // with EAGAIN or EWOULDBLOCK. The problem there is that we need to handle
-        // resizing if AppendBuffer is zero.
-        io_buf_.CommitWrite(*res);
-        return;
-      }
-      // *res == 0
-      io_ec_ = make_error_code(errc::connection_aborted);
-      return;
-    }
-
-    // error path (!res)
-    auto ec = res.error();
-    // EAGAIN and EWOULDBLOCK
-    if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
-      return;
-    }
-
-    io_ec_ = ec;
+    pending_input_ = true;
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
-    UpdateIoBufCapacity(io_buf_, &tl_facade_stats->conn_stats,
-                        [&]() { io_buf_.WriteAndCommit(buf.data(), buf.size()); });
+    {
+      ReadBufTracker tracker(io_buf_);
+      io_buf_.WriteAndCommit(buf.data(), buf.size());
+    }
+    last_interaction_ = time(nullptr);
   } else {
     LOG(FATAL) << "Should not reach here";
   }
 }
 
-void Connection::CheckIoBufCapacity(bool is_iobuf_full) {
-  auto& conn_stats = tl_facade_stats->conn_stats;
+void Connection::ReadPendingInput() {
+  // Drain available socket data into io_buf_.
+  io::MutableBytes buf = io_buf_.AppendBuffer();
+  // A recv call can return fewer bytes than requested even if the
+  // socket buffer actually contains enough data to satisfy the full request.
+  while (!buf.empty()) {
+    io::Result<size_t> res = socket_->TryRecv(buf);
+    if (!res) {
+      auto ec = res.error();
+      // TryRecv is non-blocking: it returns EAGAIN/EWOULDBLOCK when nothing is ready.
+      if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block)
+        pending_input_ = false;
+      else
+        io_ec_ = ec;
+      break;
+    }
+
+    if (*res == 0) {
+      io_ec_ = make_error_code(errc::connection_aborted);  // *res == 0, clean EOF
+      pending_input_ = false;
+      break;
+    }
+
+    last_interaction_ = time(nullptr);
+    io_buf_.CommitWrite(*res);
+    buf = io_buf_.AppendBuffer();
+  }
+}
+
+void Connection::CheckIoBufCapacity(bool reached_capacity, base::IoBuf* io_buf) {
   size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
-  size_t capacity = io_buf_.Capacity();
+  size_t capacity = io_buf->Capacity();
   if (capacity < max_io_buf_len) {
     size_t parser_hint = 0;
     if (redis_parser_)
@@ -2655,114 +2863,244 @@ void Connection::CheckIoBufCapacity(bool is_iobuf_full) {
     // (Note: The buffer object is only working in power-of-2 sizes,
     // so there's no danger of accidental O(n^2) behavior.)
     if (parser_hint > capacity) {
-      UpdateIoBufCapacity(io_buf_, &conn_stats,
-                          [&]() { io_buf_.Reserve(std::min(max_io_buf_len, parser_hint)); });
+      ReadBufTracker tracker(*io_buf);
+      io_buf->Reserve(std::min(max_io_buf_len, parser_hint));
     }
 
     // If we got a partial request because iobuf was full, grow it up to
     // a reasonable limit to save on Recv() calls.
-    if (is_iobuf_full && capacity < max_io_buf_len / 2) {
+    if (reached_capacity && capacity < max_io_buf_len / 2) {
       // Last io used most of the io_buf to the end.
-      UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() {
-        io_buf_.Reserve(capacity * 2);  // Valid growth range.
-      });
+      ReadBufTracker tracker(*io_buf);
+      io_buf->Reserve(capacity * 2);  // Valid growth range.
     }
 
-    if (io_buf_.AppendLen() == 0U) {
+    if (io_buf->AppendLen() == 0U) {
       // it can happen with memcached but not for RedisParser, because RedisParser fully
       // consumes the passed buffer
-      LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf_.Capacity()
+      LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf->Capacity()
                                << ", consider to increase max_client_iobuf_len flag";
     }
   }
 }
 
-variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
-  DCHECK(memcache_parser_) << "Not supported for redis yet";
+void Connection::MaybeEnableRecvMultishot() {
+#ifdef __linux__
+  if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
+    auto* up = static_cast<fb2::UringProactor*>(fb2::ProactorBase::me());
+    // Only enable if the buffer ring is configured and we aren't using TLS
+    if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_) {
+      static_cast<fb2::UringSocket*>(socket_.get())->EnableRecvMultishot();
+      pending_input_ = false;
+    }
+  }
+#endif
+}
 
+variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
+
+  auto is_ready_to_migrate = [this]() { return migration_request_ && (cc_->subscriptions == 0); };
 
   // Don't proceed with RegisterOnRecv() if socket is closed (possible cancellation)
   if (!peer->IsOpen())
     return ParserStatus::OK;
 
-  if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
-#ifdef __linux__
-    fb2::UringProactor* up = static_cast<fb2::UringProactor*>(fb2::ProactorBase::me());
-    if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_) {
-      static_cast<fb2::UringSocket*>(peer)->EnableRecvMultishot();
-    }
-#endif
-  }
+  // Everything above the IoLoopV2 is fiber blocking. A connection can migrate before
+  // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
+  // a migration shall only call RegisterOnRecv if it reached the main IoLoopV2 below.
+  migration_allowed_to_register_ = true;
+  pending_input_ = true;
+
+  MaybeEnableRecvMultishot();
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
     DVLOG(2) << "Calling DoReadOnRecv iobuf_len: " << io_buf_.InputLen();
-    DoReadOnRecv(n);
+    NotifyOnRecv(n);
     io_event_.notify();
   });
 
   ParserStatus parse_status = OK;
 
-  // Waiter that is passed to the current async command head to be notified on completion
+  // Callback that wakes the currrent V2 fiber by bumping the io_event_ epoch.
+  // Multiple waiters (e.g command completion, backpressure relief) can use the same callback since
+  // they all wake the same fiber.
   auto ioevent_cb = [this]() { io_event_.notify(); };
-  util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};  // takes callback by reference
+
+  // Waiter used to establish a mandatory subscription to the head command's blocker,
+  // ensuring the fiber wakes immediately upon async command completion.
+  util::fb2::detail::Waiter cmd_completion_waiter{ioevent_cb};
   absl::Cleanup waiter_cleanup = [this] { current_wait_.reset(); };
+
+  // Waiter used for transient, conditional subscriptions (via check_or_subscribe)
+  // to global pipeline-backpressure relief notifications.
+  util::fb2::detail::Waiter backpressure_waiter{ioevent_cb};
 
   do {
     HandleMigrateRequest();
 
-    // Register completion for current head if its pending and we don't wait
-    if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_ && !current_wait_.has_value()) {
-      current_wait_.emplace(cmd, &ioevent_waiter);
+    // Register completion for current head if its pending and we don't wait on current_wait_.
+    if (HasInFlightCommands() && !current_wait_.has_value()) {
+      current_wait_.emplace(parsed_head_, &cmd_completion_waiter);
     }
 
+    if (pending_input_) {
+      ReadPendingInput();
+    }
+
+    // await block (no data to read)
     if (io_buf_.InputLen() == 0) {
-      // Poll again for readiness. The event handler registered above is edge triggered
-      // We should read from the socket until EAGAIN or EWOULDBLOCK
-      // to make sure we consume all available data.
-      // See "Do I need to continuously read/write" question
-      // under https://man7.org/linux/man-pages/man7/epoll.7.html
-      // The exception is when we use io_uring with multishot recv enabled, in which case
-      // we rely on the kernel to keep feeding us data until we multishot is disabled.
-      DoReadOnRecv(FiberSocketBase::RecvNotification{true});
-      io_event_.await([this]() {
+      phase_ = READ_SOCKET;
+
+      io_event_.await([this, &is_ready_to_migrate]() {
         // TODO: optimize CanReply with looking up waiter key
-        bool cmd_executable = parsed_head_ && parsed_head_ == parsed_to_execute_;
-        bool cmd_ready = !cmd_executable && parsed_head_ && parsed_head_->CanReply();
-        return io_buf_.InputLen() > 0 || cmd_ready || cmd_executable || io_ec_;
+        // io_buf_.InputLen() > 0 is still needed for multishot flow.
+
+        // We wake up if:
+        // 1. New data arrived or is pending (io_buf_.InputLen() > 0 || pending_input_).
+        // 2. A parsed command is ready to execute (HasCommandToExecute()).
+        // 3. An executed command is ready to send its reply (parsed_head_ &&
+        //    parsed_head_->CanReply()).
+        // 4. Control-plane messages arrived (!dispatch_q_.empty()).
+        // 5. The socket encountered an error/closed (io_ec_).
+        // 6. A migration to another thread was requested AND is actionable now (no subscriptions).
+        return io_buf_.InputLen() > 0 || pending_input_ || HasCommandToExecute() ||
+               (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
+               is_ready_to_migrate();
       });
     }
 
-    if (io_ec_) {
-      LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
-      return std::exchange(io_ec_, {});
+    phase_ = PROCESS;
+    bool reached_capacity = io_buf_.AppendLen() == 0;
+
+    // Temporary: Handle dispatch queue items (Control Path) one by one blocking command execution
+    if (!dispatch_q_.empty()) {
+      while (!dispatch_q_.empty()) {
+        auto msg = std::move(dispatch_q_.front());
+        dispatch_q_.pop_front();
+        UpdateDispatchStats(msg, false /* subtract */);
+
+        // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
+        // and let the loop iterate back to HandleMigrateRequest() at the top.
+        if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
+          break;
+        }
+
+        std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
+      }
+
+      // TODO: Possibly don't flush unconditionally - optimize it
+      reply_builder_->Flush();
+      if (auto ec = reply_builder_->GetError(); ec)
+        return ec;
+
+      // TODO: Properly handle backpressure
+      GetQueueBackpressure().pubsub_ec.notifyAll();
+      continue;
     }
 
-    phase_ = PROCESS;
-    bool is_iobuf_full = io_buf_.AppendLen() == 0;
+    // Handle Parsed Commands Queue (Data Path)
+    auto& conn_stats = GetLocalConnStats();
+    QueueBackpressure& qbp = GetQueueBackpressure();
 
-    if (io_buf_.InputLen() > 0) {
+    // Only parse data if we are under the memory limit (backpressure).
+    // Exception: If the queue is empty, we always parse to allow admin commands
+    // (like CONFIG SET) to run so they can fix the memory limits if needed.
+    bool pre_over_limit =
+        (parsed_cmd_q_len_ > 0) &&
+        qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
+    if (io_buf_.InputLen() > 0 && !pre_over_limit) {  // Parse, execute and reply
+      size_t mem_before = conn_stats.pipeline_queue_bytes;
       parse_status = ParseLoop();
-    } else {
+
+      // Executing and replying to commands (in ParseLoop()) frees up memory. Because those internal
+      // functions only wake up this specific connection, we need to manually notify
+      // other connections on this thread that there is now room to resume.
+      if (conn_stats.pipeline_queue_bytes < mem_before) {
+        qbp.NotifyPipelineWaiters();
+      }
+    } else {  // Execute and reply what we have, then wait if we are over the limit
       parse_status = NEED_MORE;
 
+      size_t mem_before = conn_stats.pipeline_queue_bytes;
+
       if (parsed_head_) {
-        if (parsed_head_ == parsed_to_execute_)
+        if (HasCommandToExecute())
           ExecuteBatch();
         ReplyBatch();
       }
-    }
+
+      // After draining commands, notify all connections parked on backpressure relief
+      if (conn_stats.pipeline_queue_bytes < mem_before) {
+        qbp.NotifyPipelineWaiters();
+      }
+
+      // await block (backpressure)
+      // Re-check if pipeline buffer over limit after draining - ExecuteBatch/ReplyBatch may have
+      // freed memory. If still over limit, sleep to prevent busy-spin.
+      // Only park if this connection is actively contributing (parsed_cmd_q_len_ > 0).
+      // Connections with an empty queue must stay in the read loop.
+      bool post_over_limit =
+          (parsed_cmd_q_len_ > 0) &&
+          qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
+      if (post_over_limit) {
+        conn_stats.pipeline_throttle_count++;
+        LOG_EVERY_T(WARNING, 10)
+            << "Pipeline buffer over limit (V2)."
+            << ", Thread pipeline_queue_bytes: " << conn_stats.pipeline_queue_bytes
+            << ", Thread pipeline_queue_entries: " << conn_stats.pipeline_queue_entries
+            << ", Connection parsed_cmd_q_bytes_: " << parsed_cmd_q_bytes_
+            << ", Connection parsed commands queue size: " << parsed_cmd_q_len_
+            << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
+
+        // Subscribe persistently to the global backpressure EventCount so that when another
+        // connection frees memory (or CONFIG SET raises limits), our backpressure_waiter callback
+        // fires io_event_.notify(), waking this fiber. Must be persistent because
+        // io_event_.await()'s internal loop may re-sleep if the predicate is still false after the
+        // first notification. A one-shot subscription would be consumed on the first wake, leaving
+        // us "deaf" to future memory relief.
+        auto sub_key = qbp.v2_pipeline_backpressure_ec.subscribe_persistent(&backpressure_waiter);
+
+        io_event_.await([this, &is_ready_to_migrate]() {
+          bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
+          bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
+              GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
+          // We wake up and exit the backpressure wait if:
+          // 1. Memory is freed (under_limit) or we can free it ourselves (cmd_ready).
+          // 2. Control-plane messages need processing (!dispatch_q_.empty()).
+          // 3. The connection is terminating (io_ec_).
+          // 4. A migration was requested AND is actionable now (migration_request_ with no
+          // subscriptions).
+          return under_limit || cmd_ready || !dispatch_q_.empty() || io_ec_ ||
+                 is_ready_to_migrate();
+        });
+      }
+    }  // else Execute and reply
 
     if (reply_builder_->GetError()) {
       return reply_builder_->GetError();
     }
 
+    // Check io_ec_ after parsing and flushing replies, so that half-closed
+    // connections get their responses before we close.
+    if (io_ec_) {
+      LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
+      return std::exchange(io_ec_, {});
+    }
+
+    if ((parse_status != OK) && (parse_status != NEED_MORE)) {
+      break;
+    }
+
+    // Migration requested and actionable: skip buffer bookkeeping, jump to HandleMigrateRequest().
+    if (is_ready_to_migrate()) {
+      continue;
+    }
+
     if (parse_status == NEED_MORE) {
       parse_status = OK;
-      CheckIoBufCapacity(is_iobuf_full);
-    } else if (parse_status != OK) {
-      break;
+      CheckIoBufCapacity(reached_capacity, &io_buf_);
     }
   } while (peer->IsOpen());
 

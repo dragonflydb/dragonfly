@@ -49,7 +49,7 @@ jobs:
           fetch-depth: 0
           submodules: true
       - name: Set up Docker Build
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Registries
         uses: ./.github/actions/multi-registry-docker-login
@@ -77,7 +77,7 @@ jobs:
 
       - name: Docker meta
         id: metadata
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.IMAGE }}
@@ -98,7 +98,7 @@ jobs:
 
       - name: Build image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -286,32 +286,21 @@ jobs:
         fetch-depth: 0
 
     - name: Install helm
-      uses: azure/setup-helm@v4
+      uses: azure/setup-helm@v5
 
     - name: Setup Go
       uses: actions/setup-go@v6
 
-    - name: Configure Git
-      if: env.IS_PRERELEASE != 'true'
-      run: |
-        git config user.name "$GITHUB_ACTOR"
-        git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-
     - name: Update helm chart
       if: env.IS_PRERELEASE != 'true'
       run: |
-        git checkout -b helm-chart-update/${{ env.TAG_NAME }} origin/main
+        git checkout main
         sed -Ei \
             -e 's/^(version\:) .*/\1 '${{ env.TAG_NAME }}'/g' \
             -e 's/^(appVersion\:) .*/\1 "'${{ env.TAG_NAME }}'"/g' \
             contrib/charts/dragonfly/Chart.yaml
 
         go test ./contrib/charts/dragonfly/... -update
-
-        git commit \
-          -m 'chore(helm-chart): update to ${{ env.TAG_NAME }}' \
-          contrib/charts/dragonfly/Chart.yaml \
-          contrib/charts/dragonfly/ci || true
 
     - name: Push Helm chart as OCI to Github
       if: env.IS_PRERELEASE != 'true'
@@ -337,13 +326,16 @@ jobs:
 
     - name: Create Helm Chart PR
       if: env.IS_PRERELEASE != 'true'
-      env:
-        GH_TOKEN: ${{ secrets.DRAGONFLY_TOKEN }}
-      run: |
-        git push origin helm-chart-update/${{ env.TAG_NAME }}
-        gh pr create \
-          --base main \
-          --head helm-chart-update/${{ env.TAG_NAME }} \
-          --title 'chore(helm-chart): update to ${{ env.TAG_NAME }}' \
-          --body 'Automated Helm chart version bump to ${{ env.TAG_NAME }}.' \
-          --reviewer vyavdoshenko
+      uses: peter-evans/create-pull-request@v7
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        branch: helm-chart-update/${{ env.TAG_NAME }}
+        base: main
+        title: 'chore(helm-chart): update to ${{ env.TAG_NAME }}'
+        body: 'Automated Helm chart version bump to ${{ env.TAG_NAME }}.'
+        commit-message: 'chore(helm-chart): update to ${{ env.TAG_NAME }}'
+        sign-commits: true
+        reviewers: romange,vyavdoshenko
+        add-paths: |
+          contrib/charts/dragonfly/Chart.yaml
+          contrib/charts/dragonfly/ci

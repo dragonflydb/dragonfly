@@ -84,6 +84,8 @@ enum errc {
   unsupported_operation = 13,
   value_expired = 14,  // applying to set and hmap
   incorrect_snapshot_id = 15,
+  rdb_chunk_budget_exceeded = 16,
+  rdb_chunk_payload_remaining = 17,
 };
 
 }  // namespace rdb

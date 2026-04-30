@@ -815,6 +815,8 @@ CompactObjType CompactObj::ObjType() const {
         return OBJ_STRING;
       case ExternalRep::SERIALIZED_MAP:
         return OBJ_HASH;
+      case ExternalRep::LIST_NODE:
+        return OBJ_LIST;
     };
   }
 
@@ -1109,7 +1111,7 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
 }
 
 bool CompactObj::HasAllocated() const {
-  if (IsRef() || taglen_ == INT_TAG || IsInline() || taglen_ == EXTERNAL_TAG ||
+  if (taglen_ == INT_TAG || IsInline() || taglen_ == EXTERNAL_TAG ||
       (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr))
     return false;
 
@@ -1475,43 +1477,6 @@ size_t CompactObj::MallocUsed(bool slow) const {
   return 0;
 }
 
-// TODO: we need this operator ONLY because we search in prime-table based on the ExpireKey
-// which is a reference to the CompactKey. Therefore operator== currently works
-// specifically for this particular use-case.
-// So once we remove the expire table, we can remove this operator too.
-// In addition - we MUST remove AsRef/IsRef api as well as it will break
-// once we start using SetExpireTime/ClearExpireTime methods.
-// All in all, we will free up two additional bits.
-bool CompactKey::operator==(const CompactKey& o) const {
-  DCHECK(taglen_ != JSON_TAG && o.taglen_ != JSON_TAG) << "cannot use JSON type to check equal";
-
-  // Cross-tag/encoding comparison: fall back to decoded string comparison for OBJ_STRING.
-  // This handles e.g. SDS_TTL_TAG vs ROBJ_TAG/inline/INT_TAG with same logical content.
-  if (taglen_ != o.taglen_ || encoding_ != o.encoding_) {
-    if (ObjType() == OBJ_STRING && o.ObjType() == OBJ_STRING) {
-      std::string tmp;
-      return *this == o.GetSlice(&tmp);
-    }
-    return false;
-  }
-
-  if (taglen_ == ROBJ_TAG)
-    return u_.r_obj.Equal(o.u_.r_obj);
-
-  if (taglen_ == INT_TAG)
-    return u_.ival == o.u_.ival;
-
-  if (taglen_ == SMALL_TAG)
-    return u_.small_str.Equal(o.u_.small_str);
-
-  if (taglen_ == SDS_TTL_TAG)
-    return u_.sds_ttl.view() == o.u_.sds_ttl.view();
-
-  DCHECK(IsInline() && o.IsInline());
-
-  return memcmp(u_.inline_str, o.u_.inline_str, taglen_) == 0;
-}
-
 bool CompactObj::CmpNonInline(std::string_view sv) const {
   DCHECK_GT(taglen_, kInlineLen);
   switch (taglen_) {
@@ -1827,7 +1792,7 @@ CompactObjType ObjTypeFromString(std::string_view sv) {
 }
 
 void CompactKey::SetExpireTime(uint64_t abs_ms) {
-  DCHECK(!IsRef() && !IsExternal());
+  DCHECK(!IsExternal());
 
   // Already SDS_TTL_TAG — update TTL in place.
   if (taglen_ == SDS_TTL_TAG) {
@@ -1862,19 +1827,17 @@ void CompactKey::SetExpireTime(uint64_t abs_ms) {
   u_.sds_ttl.sds_ptr = new_sds;
   u_.sds_ttl.exp_ms = abs_ms;
   taglen_ = SDS_TTL_TAG;
-  mask_bits_.expire = 1;
 }
 
 bool CompactKey::ClearExpireTime() {
   if (taglen_ != SDS_TTL_TAG)
     return false;
-  DCHECK(!IsRef() && !IsExternal());
+  DCHECK(!IsExternal());
 
   string decoded;
   GetString(&decoded);
   SetMeta(0, mask_);
   encoding_ = NONE_ENC;
-  mask_bits_.expire = 0;
 
   SetString(decoded);
   return true;
@@ -1883,7 +1846,7 @@ bool CompactKey::ClearExpireTime() {
 uint64_t CompactKey::GetExpireTime() const {
   if (taglen_ != SDS_TTL_TAG)
     return 0;
-  DCHECK(!IsRef() && !IsExternal());
+  DCHECK(!IsExternal());
   return u_.sds_ttl.exp_ms;
 }
 

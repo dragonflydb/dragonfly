@@ -134,6 +134,7 @@ runs:
         AFL_FAST_CAL: ${{ inputs.mode == 'long' && '1' || '' }}
         AFL_PERSISTENT_RECORD: 1000
         AFL_CUSTOM_MUTATOR_ONLY: 1
+        AFL_ENABLE_SAVE: ${{ inputs.mode == 'long' && '1' || '' }}
         FUZZ_FOCUS_COMMANDS: ${{ inputs.focus-commands }}
 
     - name: Analyze fuzzing results
@@ -217,8 +218,11 @@ runs:
           exit 0
         fi
 
-        echo "Raw crash directory contents:"
-        ls -la "$CRASHES_DIR"
+        TOTAL_FILES=$(find "$CRASHES_DIR" -maxdepth 1 -type f | wc -l)
+        RECORD_FILES=$(find "$CRASHES_DIR" -maxdepth 1 -name 'RECORD:*' | wc -l)
+        echo "Crash directory: ${TOTAL_FILES} files (${RECORD_FILES} RECORD files for replay)"
+        echo "Crash inputs:"
+        find "$CRASHES_DIR" -maxdepth 1 -type f -name 'id:*' ! -name 'RECORD:*' -exec ls -lh {} +
 
         mkdir -p fuzz/packaged
 

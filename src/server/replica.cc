@@ -14,7 +14,6 @@ extern "C" {
 }
 
 #include <absl/cleanup/cleanup.h>
-#include <absl/flags/flag.h>
 #include <absl/functional/bind_front.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
@@ -24,7 +23,9 @@ extern "C" {
 #include <memory>
 #include <utility>
 
+#include "base/flags.h"
 #include "base/logging.h"
+#include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
 #include "facade/socket_utils.h"
@@ -101,6 +102,7 @@ Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
 Replica::~Replica() {
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
+  exec_st_.JoinErrorHandler();
 }
 
 static const char kConnErr[] = "could not connect to master: ";
@@ -869,7 +871,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
   proactor_index_ = ProactorBase::me()->GetPoolIndex();
 
   RETURN_ON_ERR_T(make_unexpected,
-                  ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &exec_st_));
+                  ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, cntx));
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
           << master_context_.dfly_session_id << " " << flow_id_ << " lsn: " << lsn.value_or(-1);
@@ -1139,6 +1141,10 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
 
   if (!tx_data.IsGlobalCmd()) {
     VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
+    // Traffic logger hook: gate is inside LogReplicaCommand, so the no-op path
+    // (logger disabled) is cheap. Log before Execute so a crash during execute
+    // still leaves the record on disk for post-mortem replay.
+    facade::Connection::LogReplicaCommand(tx_data.command, tx_data.dbid);
     return executor_->Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
   }
 
@@ -1153,7 +1159,7 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   // and replica recieved all the commands from all shards.
   multi_shard_data.block->Wait();
   // Check if we woke up due to cancellation.
-  if (!exec_st_.IsRunning())
+  if (!cntx->IsRunning())
     return false;
   VLOG(2) << "Execute txid: " << tx_data.txid << " block wait finished";
 
@@ -1161,19 +1167,22 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   // Wait until all shards flows get to execution step of this transaction.
   multi_shard_data.barrier.Wait();
   // Check if we woke up due to cancellation.
-  if (!exec_st_.IsRunning())
+  if (!cntx->IsRunning())
     return false;
   // Global command will be executed only from one flow fiber. This ensure corectness of data in
   // replica.
   bool execution_res = true;
   if (inserted_by_me) {
+    // Global command — log exactly once (only the inserter flow runs Execute,
+    // so this guard naturally dedups across per-shard flows).
+    facade::Connection::LogReplicaCommand(tx_data.command, tx_data.dbid);
     execution_res = executor_->Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
   }
   // Wait until exection is done, to make sure we done execute next commands while the global is
   // executed.
   multi_shard_data.barrier.Wait();
   // Check if we woke up due to cancellation.
-  if (!exec_st_.IsRunning())
+  if (!cntx->IsRunning())
     return false;
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.

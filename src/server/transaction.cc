@@ -6,6 +6,7 @@
 
 #include <absl/strings/match.h>
 
+#include <memory>
 #include <new>
 
 #include "base/flags.h"
@@ -70,12 +71,12 @@ void RecordTxScheduleStats(const Transaction* tx) {
   ++ss->stats.tx_width_freq_arr[tx->GetUniqueShardCnt() - 1];
 }
 
-std::ostream& operator<<(std::ostream& os, Transaction::time_point tp) {
+std::string FormatTp(Transaction::time_point tp) {
   using namespace chrono;
   if (tp == Transaction::time_point::max())
-    return os << "inf";
+    return "inf";
   size_t ms = duration_cast<milliseconds>(tp - Transaction::time_point::clock::now()).count();
-  return os << ms << "ms";
+  return absl::StrCat(ms, "ms");
 }
 
 uint16_t trans_id(const Transaction* ptr) {
@@ -182,7 +183,7 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVAL_RO" || cmd_name == "EVALSHA" ||
       cmd_name == "EVALSHA_RO") {
-    multi_.reset(new MultiData);
+    multi_ = make_unique<MultiData>();
     multi_->mode = NOT_DETERMINED;
     multi_->role = DEFAULT;
   }
@@ -456,7 +457,6 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
 
 void Transaction::StartMultiGlobal(Namespace* ns, DbIndex dbid) {
   CHECK(multi_);
-  CHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
 
   multi_->mode = GLOBAL;
   InitBase(ns, dbid, {});
@@ -469,9 +469,7 @@ void Transaction::StartMultiGlobal(Namespace* ns, DbIndex dbid) {
 void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
                                         bool skip_scheduling) {
   DVLOG(1) << "StartMultiLockedAhead on " << keys.size() << " keys";
-
   DCHECK(multi_);
-  DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
 
   multi_->mode = LOCK_AHEAD;
   multi_->lock_mode = LockMode();
@@ -1044,6 +1042,9 @@ void Transaction::Refurbish() {
   txid_ = 0;
   coordinator_state_ = 0;
   cb_ptr_.reset();
+
+  if (multi_)
+    multi_ = make_unique<MultiData>();
 }
 
 const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps() const {
@@ -1151,6 +1152,9 @@ pair<uint16_t, bool> Transaction::DisarmInShardWhen(ShardId sid, uint16_t releva
 }
 
 bool Transaction::IsActive(ShardId sid) const {
+  if (unique_shard_cnt_ == 0)  // Not initialized
+    return false;
+
   // If we have only one shard, we often don't store infromation about all shards, so determine it
   // solely by id
   if (unique_shard_cnt_ == 1) {
@@ -1376,7 +1380,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
 
   auto* stats = ServerState::tl_connection_stats();
   ++stats->num_blocked_clients;
-  DVLOG(1) << "WaitOnWatch wait for " << tp << " " << DebugId();
+  DVLOG(1) << "WaitOnWatch wait for " << FormatTp(tp) << " " << DebugId();
 
   // Wait for the blocking barrier to be closed.
   // Note: It might return immediately if another thread already notified us.
@@ -1618,8 +1622,13 @@ void Transaction::CancelBlocking(const std::function<OpStatus(ArgSlice)>& status
 bool Transaction::CanRunInlined() const {
   auto* ss = ServerState::tlocal();
   auto* es = EngineShard::tlocal();
+
+  // Global transactions like SAVE can change the inlining rules, so run them non-inlined.
+  // This guarantees that their PollExecution batch executes on the shard-queue fiber
+  // when the conditions update
   if (unique_shard_cnt_ == 1 && unique_shard_id_ == ss->thread_index() &&
-      ss->AllowInlineScheduling() && !GetDbSlice(es->shard_id()).HasRegisteredCallbacks()) {
+      ss->AllowInlineScheduling() && !GetDbSlice(es->shard_id()).HasRegisteredCallbacks() &&
+      !IsGlobal()) {
     ss->stats.tx_inline_runs++;
     return true;
   }

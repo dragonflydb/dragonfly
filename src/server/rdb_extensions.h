@@ -8,18 +8,20 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
-//  Custom types: Range 30-35 is used by DF RDB types.
+//  Custom types: Range 30-36 is used by DF RDB types.
 constexpr uint8_t RDB_TYPE_JSON = 30;
 constexpr uint8_t RDB_TYPE_HASH_WITH_EXPIRY = 31;
 constexpr uint8_t RDB_TYPE_SET_WITH_EXPIRY = 32;
 constexpr uint8_t RDB_TYPE_SBF = 33;
 constexpr uint8_t RDB_TYPE_SBF2 = 34;
 constexpr uint8_t RDB_TYPE_CMS = 35;
+constexpr uint8_t RDB_TYPE_TOPK = 36;
 
 constexpr bool rdbIsObjectTypeDF(uint8_t type) {
   return __rdbIsObjectType(type) || (type == RDB_TYPE_JSON) ||
          (type == RDB_TYPE_HASH_WITH_EXPIRY) || (type == RDB_TYPE_SET_WITH_EXPIRY) ||
-         (type == RDB_TYPE_SBF) || (type == RDB_TYPE_SBF2) || (type == RDB_TYPE_CMS);
+         (type == RDB_TYPE_SBF) || (type == RDB_TYPE_SBF2) || (type == RDB_TYPE_CMS) ||
+         (type == RDB_TYPE_TOPK);
 }
 
 //  Opcodes: Range 200-240 is used by DF extensions.
@@ -56,3 +58,6 @@ constexpr uint8_t RDB_OPCODE_VECTOR_INDEX = 222;
 // Opcode to store ShardDocIndex key-to-DocId mapping for search indices
 // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
 constexpr uint8_t RDB_OPCODE_SHARD_DOC_INDEX = 223;
+
+// Used to tag a chunk of serialized data with its stream id
+constexpr uint8_t RDB_OPCODE_TAGGED_CHUNK = 224;

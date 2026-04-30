@@ -45,7 +45,7 @@ jobs:
             mv dragonfly_*.deb ${{ env.RELEASE_DIR }}/
 
     - name: Upload
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: dragonfly-aarch64
         path: |
@@ -117,7 +117,7 @@ jobs:
           fi
 
     - name: Upload
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: dragonfly-amd64-${{ matrix.name }}
         path: results-artifacts/*
@@ -146,7 +146,7 @@ jobs:
       with:
         submodules: true
     - name: Download artifacts
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: ${{ matrix.artifact }}
         path: results-artifacts
@@ -155,10 +155,13 @@ jobs:
         set -eu
         mkdir -p ${{ env.RELEASE_DIR }}
         tar -xzf results-artifacts/dragonfly-*dbgsym.tar.gz -C ${{ env.RELEASE_DIR }}
+        ls -lh results-artifacts/
+        ls -lh ${{ env.RELEASE_DIR }}/
+
     - name: Run regression tests
       uses: ./.github/actions/regression-tests
       with:
-        dfly-executable: ${{ matrix.binary }}
+        dfly-executable: dragonfly
         gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
         build-folder-name: ${{ env.RELEASE_DIR }}
         filter: 'not debug_only'
@@ -167,7 +170,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: test-regression
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         name: Download files
         with:
           path: artifacts

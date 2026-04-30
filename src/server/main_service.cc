@@ -35,6 +35,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/search/vector_utils.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/error.h"
@@ -69,6 +70,7 @@ extern "C" {
 #include "util/varz.h"
 
 using namespace std;
+namespace rng = std::ranges;
 using facade::ErrorReply;
 
 ABSL_FLAG(int32_t, port, 6379,
@@ -148,7 +150,11 @@ ShutdownWatchdog::ShutdownWatchdog(util::ProactorPool& pp) : pool{pp} {
   watchdog_fb = pool.GetNextProactor()->LaunchFiber("shutdown_watchdog", [&] {
     if (!watchdog_done.WaitFor(20s)) {
       LOG(ERROR) << "Deadlock detected during shutdown";
+#ifdef USE_ABSL_LOG
+      absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
+#else
       absl::SetFlag(&FLAGS_alsologtostderr, true);
+#endif
       util::fb2::Mutex m;
       pool.AwaitFiberOnAll([&m](unsigned index, auto*) {
         util::ThisFiber::SetName(absl::StrFormat("print_stack_fib_%u", index));
@@ -174,6 +180,8 @@ namespace dfly {
 #if defined(__linux__)
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
 #include <sys/syscall.h>
+
+namespace rng = std::ranges;
 #define gettid() syscall(SYS_gettid)
 #endif
 
@@ -491,18 +499,18 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
 }
 
 bool IsSHA(string_view str) {
-  return std::all_of(str.begin(), str.end(),
-                     [](unsigned char c) { return absl::ascii_isxdigit(c); });
+  return rng::all_of(str, [](unsigned char c) { return absl::ascii_isxdigit(c); });
 }
 
 optional<ErrorReply> EvalValidator(CmdArgList args) {
-  string_view num_keys_str = ArgS(args, 1);
-  int32_t num_keys;
+  facade::CmdArgParser parser{args};
+  parser.Skip(1);  // script body / sha
+  uint32_t num_keys = parser.Next<uint32_t>();
 
-  if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0)
-    return ErrorReply{facade::kInvalidIntErr};
+  if (auto err = parser.TakeError(); err)
+    return err.MakeReply();
 
-  if (unsigned(num_keys) > args.size() - 2)
+  if (num_keys > parser.Tail().size())
     return ErrorReply{"Number of keys can't be greater than number of args", kSyntaxErrType};
 
   return nullopt;
@@ -1359,13 +1367,12 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   // The following switch statement relies on the command's metadata
   // (e.g., SupportsAsync()) to evaluate execution preferences,
   // making this lookup a hard dependency for the logic below.
-  string cmd = absl::AsciiStrToUpper(args.Front());
-  const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
+  const auto [cid, args_no_cmd] = registry_.FindExtended(args);
   if (cid == nullptr) {
     if (async_pref != AsyncPreference::ONLY_SYNC) {
       parsed_cmd->SetDeferredReply();
     }
-    parsed_cmd->SendError(ReportUnknownCmd(cmd));
+    parsed_cmd->SendError(ReportUnknownCmd(absl::AsciiStrToUpper(args.Front())));
     return DispatchResult::ERROR;
   }
 
@@ -1628,8 +1635,7 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
 
   for (unsigned i = 0; i < count; i++) {
     ParsedArgs args = arg_gen();
-    string cmd = absl::AsciiStrToUpper(args.Front());
-    const auto [cid, tail_args] = registry_.FindExtended(cmd, args.Tail());
+    const auto [cid, tail_args] = registry_.FindExtended(args);
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
@@ -1774,7 +1780,8 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       args.emplace_back(buffer);
     }
   } else {  // is_read
-    args.insert(args.end(), cmd.backed_args->begin(), cmd.backed_args->end());
+    auto view = cmd.backed_args->view();
+    args.insert(args.end(), view.begin(), view.end());
   }
 
   return DispatchCommand(ParsedArgs{args}, parsed_cmd, apref);
@@ -1943,47 +1950,87 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   return CapturingReplyBuilder::TryExtractError(reply) ? make_optional(std::move(reply)) : nullopt;
 }
 
+void Service::TryEnqueueEvalAsyncCmd(const Interpreter::CallArgs& ca, CommandContext* cmd_cntx,
+                                     facade::RedisReplyBuilder* replier) {
+  using CT = Interpreter::CallArgs::Type;
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  auto& info = cntx->conn_state.script_info;
+
+  bool abort_on_error = (ca.call_type & CT::PCALL) == 0;
+  bool async_call = ca.call_type & CT::ACALL;
+  bool tx_call = ca.call_type & (CT::LOCK | CT::UNLOCK);
+
+  optional<ErrorReply> early_async_error;
+
+  // Full command verification happens during squashed execution
+  if (async_call) {
+    if (auto [cid, tail] = registry_.FindExtended(ca.args); cid != nullptr) {
+      auto reply_mode = abort_on_error ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
+      auto tail_slice = ca.args.subspan(ca.args.size() - tail.size());
+
+      info->async_cmds.emplace_back(cid, tail_slice, reply_mode);
+      info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
+    } else if (abort_on_error) {  // If we don't abort on errors, we can ignore it completely
+      early_async_error = ReportUnknownCmd(ca.args[0]);
+    }
+  }
+
+  bool need_flush = !async_call || early_async_error.has_value() || tx_call;
+  if (auto err = FlushEvalAsyncCmds(cntx, need_flush); err) {
+    CapturingReplyBuilder::Apply(std::move(*err), replier);  // forward error to lua
+    *ca.requested_abort = true;
+    return;
+  }
+
+  if (early_async_error.has_value()) {
+    auto* prev = cmd_cntx->SwapReplier(replier);
+    cmd_cntx->SendError(*early_async_error);
+    *ca.requested_abort |= abort_on_error;
+    cmd_cntx->SwapReplier(prev);
+  }
+}
+
 void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
+  using CT = Interpreter::CallArgs::Type;  // TODO: use c++20 using enum
   auto* tx = cmd_cntx->tx();
   DCHECK(tx);
+
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& info = cntx->conn_state.script_info;
   info->stats.num_commands++;
 
   InterpreterReplier replier(ca.translator);
-  optional<ErrorReply> findcmd_err;
-  if (ca.async) {
-    string cmd = absl::AsciiStrToUpper(ca.args[0]);
+  TryEnqueueEvalAsyncCmd(ca, cmd_cntx, &replier);
 
-    // Full command verification happens during squashed execution
-    if (auto* cid = registry_.Find(cmd); cid != nullptr) {
-      auto reply_mode = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
-      info->async_cmds.emplace_back(cid, ca.args.subspan(1), reply_mode);
-      info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
-    } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
-      findcmd_err = ReportUnknownCmd(ca.args[0]);
-    }
+  // Handle unlock/lock or default call
+  switch (ca.call_type) {
+    case CT::UNLOCK:
+      tx->UnlockMulti(true);
+      tx->StartMultiNonAtomic();
+      info->lock_tags.clear();
+      info->key_backing.clear();
+      return;
+    case CT::LOCK:
+      if (tx->GetMultiMode() != Transaction::NON_ATOMIC)
+        return;
+
+      info->key_backing.resize(ca.args.size());
+      for (size_t i = 0; i < ca.args.size(); i++) {
+        info->key_backing[i] = ca.args[i];  // copy key
+        info->lock_tags.insert(LockTag(info->key_backing[i]));
+      }
+
+      tx->MultiSwitchCmd(registry_.Find("EVAL"));  // change cid + refurbish
+      tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args, false);
+      return;
+    case CT::ACALL:
+    case CT::APCALL:  // was handled above
+      return;
+    default:  // regular call
+      auto* prev = cmd_cntx->SwapReplier(&replier);
+      DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
+      cmd_cntx->SwapReplier(prev);
   }
-
-  if (auto err = FlushEvalAsyncCmds(cntx, !ca.async || findcmd_err.has_value()); err) {
-    CapturingReplyBuilder::Apply(std::move(*err), &replier);  // forward error to lua
-    *ca.requested_abort = true;
-    return;
-  }
-
-  if (findcmd_err.has_value()) {
-    auto* prev = cmd_cntx->SwapReplier(&replier);
-    cmd_cntx->SendError(*findcmd_err);
-    *ca.requested_abort |= ca.error_abort;
-    cmd_cntx->SwapReplier(prev);
-  }
-
-  if (ca.async)
-    return;
-
-  auto* prev = cmd_cntx->SwapReplier(&replier);
-  DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
-  cmd_cntx->SwapReplier(prev);
 }
 
 void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
@@ -2183,7 +2230,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cmd_cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
-      args.async = false;
+      args.call_type =
+          static_cast<Interpreter::CallArgs::Type>(args.call_type & ~Interpreter::CallArgs::ACALL);
       CallFromScript(args, cmd_cntx);
     });
 
@@ -2311,7 +2359,7 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandId* exists_cid,
 
 // Check if exec_info watches keys on dbs other than db_indx.
 bool IsWatchingOtherDbs(DbIndex db_indx, const ConnectionState::ExecInfo& exec_info) {
-  return std::any_of(exec_info.watched_keys.begin(), exec_info.watched_keys.end(),
+  return rng::any_of(exec_info.watched_keys,
                      [db_indx](const auto& pair) { return pair.first != db_indx; });
 }
 
@@ -2786,13 +2834,22 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
   if (!should_skip_auth) {
     base->SetAuthFunctor([pass = GetPassword()](std::string_view path, std::string_view username,
                                                 std::string_view password) {
-      if (path == "/metrics")
+      if (path == "/metrics" || path == "/healthz")
         return true;
       const bool pass_verified = pass.empty() ? true : password == pass;
       return username == "default" && pass_verified;
     });
   }
   server_family_.ConfigureMetrics(base);
+
+  base->RegisterCb("/healthz", [](const http::QueryArgs&, HttpContext* send) {
+    const bool healthy = ServerState::tlocal()->gstate() == GlobalState::ACTIVE;
+    http::StringResponse resp =
+        http::MakeStringResponse(healthy ? h2::status::ok : h2::status::service_unavailable);
+    http::SetMime(http::kTextMime, &resp);
+    resp.body() = healthy ? "OK\n" : "Service Unavailable\n";
+    return send->Invoke(std::move(resp));
+  });
 
   if (GetFlag(FLAGS_expose_http_api)) {
     base->RegisterCb("/api",
@@ -2943,6 +3000,7 @@ void Service::RegisterCommands() {
   RegisterHllFamily(&registry_);
   RegisterBloomFamily(&registry_);
   RegisterCmsFamily(&registry_);
+  RegisterTopkFamily(&registry_);
   RegisterJsonFamily(&registry_);
 #endif
 

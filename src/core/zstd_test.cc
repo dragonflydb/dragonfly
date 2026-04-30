@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#define ZSTD_STATIC_LINKING_ONLY
+
 #include <absl/base/macros.h>
 #include <gmock/gmock.h>
 #include <zstd.h>
@@ -51,6 +53,14 @@ class ZStdTest : public ::testing::Test {
     return res;
   }
 };
+
+TEST_F(ZStdTest, EstimateDictSize) {
+  ZSTD_compressionParameters cParams = ZSTD_getCParams(1, 8192, 8192);
+
+  ZSTD_dictLoadMethod_e dictLoadMethod = ZSTD_dlm_byCopy;
+  size_t estimatedMemory = ZSTD_estimateCDictSize_advanced(4096, cParams, dictLoadMethod);
+  EXPECT_GT(estimatedMemory, 200000);
+}
 
 // Dictionary works well for small messages where we do not have enough data to reference
 // previous stream to have significant savings.

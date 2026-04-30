@@ -16,6 +16,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
@@ -286,6 +287,11 @@ TEST_F(DflyEngineTest, EvalSha) {
   // Important to keep spaces in order to be compatible with Redis.
   // See https://github.com/dragonflydb/dragonfly/issues/146
   EXPECT_THAT(resp, "c6459b95a0e81df97af6fdd49b1a9e0287a57363");
+}
+
+TEST_F(DflyEngineTest, EvalShaNegativeZeroNumKeys) {
+  EXPECT_THAT(Run({"evalsha", "k1", "-0"}), ErrArg(facade::kInvalidIntErr));
+  EXPECT_THAT(Run({"eval", "return 1", "-0"}), ErrArg(facade::kInvalidIntErr));
 }
 
 TEST_F(DflyEngineTest, ScriptFlush) {
@@ -702,8 +708,11 @@ TEST_F(DflyEngineTest, Bug496) {
     auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
     int cb_hits = 0;
+    // RegisterOnChange requires the shard lock to be held (see #7153).
+    shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
     uint32_t cb_id =
         db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
+    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
 
     {
       auto res = *db.AddOrFind({}, "key-1", std::nullopt);

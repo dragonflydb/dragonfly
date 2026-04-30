@@ -25,6 +25,7 @@
 #include "server/namespaces.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
+#include "server/tiered_storage.h"
 
 using namespace std;
 using namespace facade;
@@ -204,8 +205,9 @@ void MemoryCmd::Run(CmdArgList args) {
         "USAGE <key> [WITHOUTKEY]",
         "    Show memory usage of a key.",
         "    If WITHOUTKEY is specified, the key itself is not accounted.",
-        "DECOMMIT",
+        "DECOMMIT [COOL]",
         "    Force decommit the memory freed by the server back to OS.",
+        "    If COOL is specified, flush the tiered storage cool queue to disk.",
         "TRACK",
         "    Allow tracking of memory allocation via `new` and `delete` based on input criteria.",
         "    USE WITH CAUTIOUS! This command is designed for Dragonfly developers.",
@@ -249,8 +251,17 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (parser.Check("DECOMMIT")) {
-    shard_set->pool()->AwaitBrief(
-        [](unsigned, auto* pb) { ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory); });
+    if (parser.Check("COOL")) {
+      shard_set->RunBriefInParallel([](EngineShard* shard) {
+        if (auto* ts = shard->tiered_storage(); ts) {
+          ts->ReclaimMemory(SIZE_MAX);
+        }
+      });
+    } else {
+      shard_set->pool()->AwaitBrief([](unsigned, auto* pb) {
+        ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory);
+      });
+    }
     return cmd_cntx_->rb()->SendSimpleString("OK");
   }
 
@@ -458,7 +469,7 @@ void MemoryCmd::Usage(std::string_view key, bool account_key_memory_usage) {
   ssize_t memory_usage = shard_set->pool()->at(sid)->AwaitBrief(
       [key, account_key_memory_usage, this, sid]() -> ssize_t {
         auto& db_slice = cmd_cntx_->server_conn_cntx()->ns->GetDbSlice(sid);
-        auto [pt, exp_t] = db_slice.GetTables(cmd_cntx_->server_conn_cntx()->db_index());
+        auto* pt = db_slice.GetTables(cmd_cntx_->server_conn_cntx()->db_index());
         PrimeIterator it = pt->Find(key);
         if (IsValid(it)) {
           return MemoryUsage(it, account_key_memory_usage);

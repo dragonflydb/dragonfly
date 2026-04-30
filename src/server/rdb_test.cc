@@ -5,7 +5,6 @@
 
 extern "C" {
 #include "redis/crc64.h"
-#include "redis/listpack.h"
 #include "redis/redis_aux.h"
 #include "redis/zmalloc.h"
 }
@@ -19,9 +18,12 @@ extern "C" {
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
 #include "server/engine_shard_set.h"
+#include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/test_utils.h"
+
+namespace rng = std::ranges;
 
 using namespace testing;
 using namespace std;
@@ -794,7 +796,7 @@ TEST_P(HnswRestoreTest, RestoreVectorSearchIndexHnsw) {
   auto is_indexing_done = [this](string_view idx_name) {
     auto resp = Run({"FT.INFO", idx_name});
     auto arr = resp.GetVec();
-    auto it = std::find_if(arr.begin(), arr.end(), [](const auto& e) { return e == "indexing"; });
+    auto it = rng::find_if(arr, [](const auto& e) { return e == "indexing"; });
     return it != arr.end() && (++it)->GetInt() == 0;
   };
 
@@ -1090,6 +1092,289 @@ TEST_F(RdbTest, CmsSerialization) {
 
   resp = Run("cms.query cms foo bar baz");
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(5), IntArg(3), IntArg(9))));
+}
+
+// Tests basic TOPK save/load: verifies that top-k heap items are correctly serialized
+// and restored, maintaining their frequency-based ordering.
+// Uses TOPK.INCRBY with large increments to ensure deterministic counts despite
+// the stochastic HeavyKeeper decay (decay^count ≈ 0 for large counts).
+TEST_F(RdbTest, TopkSerializationBasic) {
+  Run({"TOPK.RESERVE", "topk_small", "3", "50", "7", "0.9"});
+  Run({"TOPK.INCRBY", "topk_small", "foo", "300", "bar", "200", "baz", "400"});
+
+  auto resp = Run({"TOPK.LIST", "topk_small"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("baz", "foo", "bar")));
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TOPK.LIST", "topk_small"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("baz", "foo", "bar")));
+}
+
+// Tests that the Count-Min Sketch counter array is correctly serialized:
+// verifies that existing counters suppress colliding items correctly after load.
+TEST_F(RdbTest, TopkSerializationCounterArrayIntegrity) {
+  Run({"TOPK.RESERVE", "topk_counters", "5", "100", "5", "0.9"});
+  Run({"TOPK.INCRBY", "topk_counters", "alpha", "300", "beta", "200"});
+
+  Run({"debug", "reload"});
+
+  // Verify counts are preserved via TOPK.COUNT, which reads the counter array directly.
+  // If counters weren't restored, these would return 0 (or wrong values).
+  // TOPK.COUNT returns an array with one element per queried item.
+  auto counts = Run({"TOPK.COUNT", "topk_counters", "alpha", "beta"});
+  ASSERT_THAT(counts, ArrLen(2));
+  int64_t alpha_count = counts.GetVec()[0].GetInt().value_or(0);
+  int64_t beta_count = counts.GetVec()[1].GetInt().value_or(0);
+  EXPECT_GE(alpha_count, 1);
+  EXPECT_GE(beta_count, 1);
+  EXPECT_GT(alpha_count, beta_count);
+
+  // Also verify items are still in the heap (heap restoration).
+  EXPECT_THAT(Run({"TOPK.QUERY", "topk_counters", "alpha", "beta"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(1))));
+
+  auto resp = Run({"TOPK.LIST", "topk_counters"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("alpha", "beta")));
+}
+
+// Tests that K parameter (max heap size) is preserved after serialization:
+// verifies list size stays at K=3 and eviction works correctly after load.
+TEST_F(RdbTest, TopkSerializationParametersPreserved) {
+  Run({"TOPK.RESERVE", "topk_params", "3", "64", "4", "0.95"});
+  Run({"TOPK.INCRBY", "topk_params", "a", "100", "b", "200", "c", "300"});
+
+  Run({"debug", "reload"});
+
+  auto before = Run({"TOPK.LIST", "topk_params"});
+  ASSERT_THAT(before, ArrLen(3));  // K=3 must be enforced
+
+  // Add a new item heavily. It should evict the lowest item, maintaining K=3.
+  Run({"TOPK.INCRBY", "topk_params", "z", "1000"});
+
+  auto after = Run({"TOPK.LIST", "topk_params"});
+  ASSERT_THAT(after, ArrLen(3));
+  EXPECT_EQ(after.GetVec().front(), "z");  // 'z' should be the new king
+}
+
+// Tests serialization of heap-allocated strings (bypass SSO) to verify correct
+// memory handling for string pointers in the min-heap.
+TEST_F(RdbTest, TopkSerializationExtensive) {
+  Run({"TOPK.RESERVE", "topk_large", "10", "128", "5", "0.9"});
+
+  // Bypass SSO (Small String Optimization) to test memory pointers
+  std::string long_str1(50, 'A');
+  std::string long_str2(60, 'B');
+  std::string long_str3(70, 'C');
+
+  // Use INCRBY with large values to ensure deterministic counts
+  Run({"TOPK.INCRBY", "topk_large", long_str1, "500"});
+  Run({"TOPK.INCRBY", "topk_large", long_str2, "300"});
+  Run({"TOPK.INCRBY", "topk_large", long_str3, "700"});
+
+  Run({"debug", "reload"});
+
+  auto resp = Run({"TOPK.LIST", "topk_large"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(long_str3, long_str1, long_str2)));
+}
+
+// Tests that empty TOPK (zero items in heap) can be saved and loaded correctly:
+// validates TagAllowsEmptyValue() and ensures structure remains functional after load.
+TEST_F(RdbTest, TopkSerializationEmptyEdgeCase) {
+  Run({"TOPK.RESERVE", "topk_empty", "5", "50", "3", "0.9"});
+
+  Run({"debug", "reload"});
+
+  auto resp = Run({"TOPK.LIST", "topk_empty"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  // After loading an empty TOPK, adding items must work correctly.
+  Run({"TOPK.INCRBY", "topk_empty", "new_item", "100"});
+  resp = Run({"TOPK.LIST", "topk_empty"});
+  // Run() unwraps single-element arrays to a scalar string
+  EXPECT_EQ(resp, "new_item");
+}
+
+// Tests that the decay parameter (double) is correctly serialized using SaveBinaryDouble/
+// FetchBinaryDouble: critical test for the strict aliasing fix (no reinterpret_cast).
+TEST_F(RdbTest, TopkSerializationDecayParameter) {
+  // Create TOPK with extreme decay values to ensure the double serialization works
+  Run({"TOPK.RESERVE", "topk_decay_low", "5", "50", "3", "0.1"});     // Very aggressive decay
+  Run({"TOPK.RESERVE", "topk_decay_high", "5", "50", "3", "0.999"});  // Minimal decay
+
+  // Use INCRBY with large values to ensure deterministic counts
+  Run({"TOPK.INCRBY", "topk_decay_low", "item1", "500", "item2", "300"});
+  Run({"TOPK.INCRBY", "topk_decay_high", "item3", "500", "item4", "300"});
+
+  Run({"debug", "reload"});
+
+  // Verify both TOPKs loaded successfully and maintain their items
+  auto resp1 = Run({"TOPK.LIST", "topk_decay_low"});
+  EXPECT_THAT(resp1, RespArray(ElementsAre("item1", "item2")));
+
+  auto resp2 = Run({"TOPK.LIST", "topk_decay_high"});
+  EXPECT_THAT(resp2, RespArray(ElementsAre("item3", "item4")));
+}
+
+void AssertTaggedData(std::string_view blob, std::string_view expected, uint32_t expected_id = 1) {
+  using namespace absl::little_endian;
+
+  ASSERT_EQ(blob.size(), MemBufController::kHeaderSize + expected.size());
+  EXPECT_EQ(static_cast<uint8_t>(blob[0]), RDB_OPCODE_TAGGED_CHUNK);
+
+  auto id = Load32(reinterpret_cast<const uint8_t*>(blob.data()) + 1);
+  auto len = Load32(reinterpret_cast<const uint8_t*>(blob.data()) + 5);
+
+  EXPECT_EQ(id, expected_id);
+  EXPECT_EQ(len, expected.size());
+  EXPECT_EQ(blob.substr(MemBufController::kHeaderSize), expected);
+}
+
+class MemBufControllerTest : public Test {
+ protected:
+  MemBufController controller_;
+
+  bool HasSplitEntries() const {
+    return !controller_.split_entries_.empty();
+  }
+
+  std::string Flush() {
+    auto current = controller_.CurrentBuffer()->InputBuffer();
+    const auto blob = controller_.BuildBlob(current);
+    EXPECT_EQ(controller_.FlushableSize(), 0);
+    return blob;
+  }
+
+  void Write(std::string_view s) {
+    controller_.CurrentBuffer()->WriteAndCommit(s.data(), s.size());
+  }
+
+  void AssertDefaultState() const {
+    EXPECT_EQ(controller_.active_id_, 0u);
+    EXPECT_EQ(controller_.CurrentBuffer(), &controller_.default_buffer_);
+  }
+
+  void MarkMidFlush() {
+    controller_.MarkEntrySplit();
+    EXPECT_TRUE(controller_.split_entries_.contains(controller_.active_id_));
+  }
+
+  MemBufController::EntryId SplitAndSuspend(std::string_view payload, uint32_t expected_id) {
+    controller_.StartEntry();
+    EXPECT_EQ(controller_.active_id_, expected_id);
+    Write(payload);
+    MarkMidFlush();
+    AssertTaggedData(Flush(), payload, expected_id);
+
+    const auto saved_id = controller_.SaveStateBeforeConsume();
+    EXPECT_EQ(saved_id, expected_id);
+    AssertDefaultState();
+    EXPECT_EQ(controller_.FlushableSize(), 0);
+    return saved_id;
+  }
+
+  void Restore(MemBufController::EntryId id) {
+    controller_.RestoreStateAfterConsume(id);
+    EXPECT_EQ(controller_.active_id_, id);
+    EXPECT_EQ(controller_.CurrentBuffer(), &controller_.entry_buffer_);
+  }
+};
+
+TEST_F(MemBufControllerTest, TaggedData) {
+  controller_.SetTagEntries(true);
+
+  const std::string_view data = "a_a_a_";
+  const auto saved_id = SplitAndSuspend(data, 1);
+  EXPECT_TRUE(HasSplitEntries());
+
+  Write("a");
+  Restore(saved_id);
+  EXPECT_EQ(controller_.FlushableSize(), 1);
+
+  Write("b");
+  EXPECT_EQ(controller_.FlushableSize(), 2);
+  controller_.FinishEntry();
+  EXPECT_FALSE(HasSplitEntries());
+
+  const std::string blob = Flush();
+
+  EXPECT_EQ(blob.size(), MemBufController::kHeaderSize + 2);
+  EXPECT_EQ(blob[0], 'a');
+  AssertTaggedData(blob.substr(1), "b");
+}
+
+TEST_F(MemBufControllerTest, NestedInterleaving) {
+  controller_.SetTagEntries(true);
+
+  const auto saved_id_a = SplitAndSuspend("aaa", 1);
+  const auto saved_id_b = SplitAndSuspend("bbb", 2);
+
+  controller_.StartEntry();
+  Write("ccc");
+  controller_.FinishEntry();
+  AssertDefaultState();
+
+  EXPECT_EQ(controller_.FlushableSize(), 3);
+
+  EXPECT_EQ(Flush(), "ccc");
+
+  Restore(saved_id_b);
+  Write("x");
+  controller_.FinishEntry();
+
+  AssertTaggedData(Flush(), "x", 2);
+
+  Restore(saved_id_a);
+  Write("y");
+  controller_.FinishEntry();
+  EXPECT_FALSE(HasSplitEntries());
+
+  AssertTaggedData(Flush(), "y");
+}
+
+TEST_F(MemBufControllerTest, BuildBlobEdgeCases) {
+  controller_.SetTagEntries(true);
+
+  Write("p");
+  controller_.StartEntry();
+  Write("x");
+  MarkMidFlush();
+
+  const std::string blob = Flush();
+  ASSERT_FALSE(blob.empty());
+  EXPECT_EQ(blob[0], 'p');
+  AssertTaggedData(blob.substr(1), "x");
+
+  controller_.FinishEntry();
+  AssertDefaultState();
+}
+
+TEST_F(MemBufControllerTest, UnsplitEntry) {
+  controller_.SetTagEntries(true);
+
+  controller_.StartEntry();
+  Write("hello");
+  controller_.FinishEntry();
+  AssertDefaultState();
+
+  EXPECT_EQ(controller_.FlushableSize(), 5);
+  EXPECT_EQ(Flush(), "hello");
+}
+
+TEST_F(MemBufControllerTest, TaggingDisabled) {
+  controller_.StartEntry();
+  Write("abc");
+  MarkMidFlush();
+
+  EXPECT_EQ(Flush(), "abc");
+
+  const auto saved_id = controller_.SaveStateBeforeConsume();
+  Restore(saved_id);
+
+  Write("def");
+  controller_.FinishEntry();
+
+  EXPECT_EQ(Flush(), "def");
 }
 
 }  // namespace dfly

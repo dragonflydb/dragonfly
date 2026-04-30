@@ -277,7 +277,7 @@ class DenseSet {
   virtual size_t ObjectAllocSize(const void* obj) const = 0;
   virtual uint32_t ObjExpireTime(const void* obj) const = 0;
   virtual void ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) = 0;
-  virtual void ObjDelete(void* obj, bool has_ttl) const = 0;
+  virtual void ObjDelete(void* obj) const = 0;
   virtual void* ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const = 0;
 
   void CollectExpired();

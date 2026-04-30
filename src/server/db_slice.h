@@ -145,8 +145,6 @@ class DbSlice {
 
   using Iterator = IteratorT<PrimeIterator>;
   using ConstIterator = IteratorT<PrimeConstIterator>;
-  using ExpIterator = IteratorT<ExpireIterator>;
-  using ExpConstIterator = IteratorT<ExpireConstIterator>;
 
   class AutoUpdater {
    public:
@@ -176,6 +174,7 @@ class DbSlice {
 
       // The following fields are calculated at init time
       size_t orig_value_heap_size = 0;
+      CompactObjType orig_obj_type = 0;
     };
 
     AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
@@ -196,8 +195,8 @@ class DbSlice {
   using ChangeReq = dfly::ChangeReq;
 
   // Called before deleting an element to notify the search indices.
-  using DocDeletionCallback =
-      std::function<void(std::string_view, const Context&, const PrimeValue& pv)>;
+  // pv is non-const: HNSW external vector preservation may swap sds entries.
+  using DocDeletionCallback = std::function<void(std::string_view, const Context&, PrimeValue& pv)>;
 
   struct ExpireParams {
     bool IsDefined() const {
@@ -226,18 +225,11 @@ class DbSlice {
   DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
   ~DbSlice();
 
-  // Activates `db_ind` database if it does not exist (see ActivateDb below).
-  void Reserve(DbIndex db_ind, size_t key_size);
-
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
 
   // Returns slot statistics for db 0.
   SlotStats GetSlotStats(SlotId sid) const;
-
-  void UpdateExpireBase(uint64_t now, unsigned generation) {
-    expire_base_[generation & 1] = now;
-  }
 
   void UpdateMemoryParams(int64_t budget, size_t bytes_per_object) {
     memory_budget_ = budget;
@@ -252,17 +244,8 @@ class DbSlice {
     return bytes_per_object_;
   }
 
-  int64_t ExpireTime(const ExpirePeriod& val) const {
-    return expire_base_[0] + val.duration_ms();
-  }
-
-  ExpirePeriod FromAbsoluteTime(uint64_t time_ms) const {
-    return ExpirePeriod{time_ms - expire_base_[0]};
-  }
-
   struct ItAndUpdater {
     Iterator it;
-    ExpIterator exp_it;
     AutoUpdater post_updater;
     bool is_new = false;
   };
@@ -271,12 +254,7 @@ class DbSlice {
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
                                      unsigned req_obj_type);
 
-  struct ItAndExpConst {
-    ConstIterator it;
-    ExpConstIterator exp_it;
-  };
-
-  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
+  ConstIterator FindReadOnly(const Context& cntx, std::string_view key) const;
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                        unsigned req_obj_type) const;
 
@@ -301,9 +279,9 @@ class DbSlice {
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                                 uint64_t expire_at_ms);
 
-  // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
+  // Update entry expiration. Return expiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
-  facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it, ExpIterator exp_it,
+  facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it,
                                          const ExpireParams& params);
 
   // Adds expiry on a key. If the key already has expiry, updates it.
@@ -378,8 +356,8 @@ class DbSlice {
     return db_arr_[id].get();
   }
 
-  std::pair<PrimeTable*, ExpireTable*> GetTables(DbIndex id) {
-    return std::pair<PrimeTable*, ExpireTable*>(&db_arr_[id]->prime, nullptr);
+  PrimeTable* GetTables(DbIndex id) {
+    return &db_arr_[id]->prime;
   }
 
   // Returns existing keys count in the db.
@@ -390,12 +368,8 @@ class DbSlice {
   }
 
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
-  // from both tables and return Iterator{}.
-  struct ItAndExp {
-    Iterator it;
-    ExpIterator exp_it;
-  };
-  ItAndExp ExpireIfNeeded(const Context& cntx, Iterator it) const;
+  // and returns Iterator{}.
+  Iterator ExpireIfNeeded(const Context& cntx, Iterator it) const;
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -415,19 +389,11 @@ class DbSlice {
   }
 
   using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
-  // Holds pairs of source and destination cursors for items moved in the dash table
-  using MovedItemsVec = std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>;
-  using MovedCallback = std::function<void(DbIndex, const MovedItemsVec&)>;
 
   //! Registers the callback to be called for each change.
   //! Returns the registration id which is also the unique version of the dbslice
   //! at a time of the call.
   uint64_t RegisterOnChange(ChangeCallback cb);
-
-  //! Registers the callback to be called after items are moved in table.
-  //! Returns the registration id which is also the unique version of the dbslice
-  //! at a time of the call.
-  uint64_t RegisterOnMove(MovedCallback cb);
 
   bool HasRegisteredCallbacks() const {
     return !change_cb_.empty();
@@ -438,8 +404,6 @@ class DbSlice {
 
   //! Unregisters the callback.
   void UnregisterOnChange(uint64_t id);
-
-  void UnregisterOnMoved(uint64_t id);
 
   struct DeleteExpiredStats {
     uint32_t deleted = 0;        // number of deleted items due to expiry.
@@ -557,7 +521,7 @@ class DbSlice {
                                              PrimeValue obj, uint64_t expire_at_ms,
                                              bool force_update);
 
-  void FlushSlotsFb(const cluster::SlotSet& slot_ids);
+  void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version, uint64_t cb_id);
   util::fb2::Fiber FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
@@ -570,8 +534,7 @@ class DbSlice {
   void RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
                                                const DbTableArray& db_arr) const;
 
-  void PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it, DbTable* table,
-                             bool async = false);
+  void PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async = false);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
@@ -585,17 +548,12 @@ class DbSlice {
     kMutableStats,
   };
 
-  struct PrimeItAndExp {
-    PrimeIterator it;
-    ExpireIterator exp_it;
-  };
-
-  PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
+  PrimeIterator ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
 
   OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
                                            std::optional<unsigned> req_obj_type);
 
-  OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
+  OpResult<PrimeIterator> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
                                        UpdateStatsMode stats_mode) const;
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
@@ -606,7 +564,6 @@ class DbSlice {
   }
 
   void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
-  void CallMovedCallbacks(DbIndex id, const MovedItemsVec& moved_items);
 
   // We need this because registered callbacks might yield and when they do so we want
   // to avoid Heartbeat or Flushing the db.
@@ -618,11 +575,9 @@ class DbSlice {
 
   EngineShard* owner_;
 
-  int64_t expire_base_[2];  // Used for expire logic, represents a real clock.
   bool expire_allowed_ = true;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
-  uint64_t next_moved_id_ = 1;
 
   // Estimation of available memory dedicated to this shard.
   // Recalculated periodically by dividing free memory left among all shards equally
@@ -654,8 +609,6 @@ class DbSlice {
 
   // ordered from the smallest to largest version.
   std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
-
-  std::list<std::pair<uint32_t, MovedCallback>> moved_cb_;
 
   // Used in temporary computations in Find item and CbFinish
   // This set is used to hold fingerprints of key accessed during the run of
@@ -711,14 +664,6 @@ inline bool IsValid(const DbSlice::Iterator& it) {
 }
 
 inline bool IsValid(const DbSlice::ConstIterator& it) {
-  return dfly::IsValid(it.GetInnerIt());
-}
-
-inline bool IsValid(const DbSlice::ExpIterator& it) {
-  return dfly::IsValid(it.GetInnerIt());
-}
-
-inline bool IsValid(const DbSlice::ExpConstIterator& it) {
   return dfly::IsValid(it.GetInnerIt());
 }
 

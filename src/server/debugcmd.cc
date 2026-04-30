@@ -39,11 +39,13 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/hset_family.h"
 #include "server/main_service.h"
 #include "server/multi_command_squasher.h"
 #include "server/namespaces.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
+#include "server/set_family.h"
 #include "server/string_stats.h"
 #include "server/transaction.h"
 
@@ -372,7 +374,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
 ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
   auto& db_slice = cntx->ns->GetCurrentDbSlice();
   auto db_index = cntx->db_index();
-  auto* pt = db_slice.GetTables(db_index).first;
+  auto* pt = db_slice.GetTables(db_index);
 
   PrimeIterator it = pt->Find(key);
   ObjInfo oinfo;
@@ -420,7 +422,7 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
 OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_view key) {
   auto& db_slice = cntx->ns->GetCurrentDbSlice();
   auto db_index = cntx->db_index();
-  auto* pt = db_slice.GetTables(db_index).first;
+  auto* pt = db_slice.GetTables(db_index);
 
   PrimeIterator it = pt->Find(key);
   if (!IsValid(it)) {
@@ -559,7 +561,9 @@ IOStat& IOStat::operator-=(const IOStat& other) {
   return *this;
 }
 
-// Traverse over all entries on all databases, manage cpu time automatically
+// Traverse over all entries on all databases, manage cpu time automatically.
+// The callback receives (DbIndex, PrimeIterator) — the DbIndex identifies
+// which database is currently being iterated.
 template <typename F> void TraverseAllEntries(bool background, ConnectionContext* cntx, F&& f) {
   util::fb2::BlockingCounter bc{0};
   for (uint32_t i = 0; i < shard_set->size(); ++i) {
@@ -575,9 +579,11 @@ template <typename F> void TraverseAllEntries(bool background, ConnectionContext
         if (!dbt)
           continue;
 
+        DbIndex dbid = static_cast<DbIndex>(i);
+        auto bound_f = [&f, dbid](PrimeIterator it) { f(dbid, it); };
         PrimeTable::Cursor cursor;
         do {
-          cursor = dbt->prime.Traverse(cursor, f);
+          cursor = dbt->prime.Traverse(cursor, bound_f);
           if (background) {
             ThisFiber::Yield();
           } else if (base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) >= 500) {
@@ -662,10 +668,15 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    calling VALUES OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
-        "TRAFFIC <path>/<file_prefix> | [STOP]",
-        "    Use <path>/<file_prefix> to start traffic logging to the specified path.",
-        "    All recorded files will have the specified prefix.",
-        "    Use 'STOP' or do not specify any arguments to stop traffic logging.",
+        "TRAFFIC START <path>/<file_prefix> LISTENER <main|memcache|admin>",
+        "    Start traffic logging for a single listener type to files with the given",
+        "    path/prefix. LISTENER is required; mixing listeners in one recording is",
+        "    intentionally not supported - start separate recordings per listener.",
+        "TRAFFIC START <path>/<file_prefix> REPLICA",
+        "    On a replica, capture commands received from the master via the replication",
+        "    stream. Fails with an error on a master/standalone server.",
+        "TRAFFIC STOP",
+        "    Stop traffic logging started by a previous TRAFFIC START.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
         "COMPRESSION [IMPORT <bintable> | EXPORT | SET <bintable>] [type]",
@@ -1045,25 +1056,103 @@ void DebugCmd::Exec(CommandContext* cmd_cntx) {
 }
 
 void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
-  optional<string> path;
+  using facade::Connection;
+
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (ProactorBase::me()->GetKind() != ProactorBase::IOURING) {
     return cmd_cntx->SendError("Traffic recording supported only on iouring");
   }
 
-  if (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) != "STOP"sv) {
-    path = ArgS(args, 0);
-    LOG(INFO) << "Logging to traffic to " << *path << "*.bin";
-  } else {
+  // Syntax:
+  //   DEBUG TRAFFIC STOP
+  //   DEBUG TRAFFIC START <path> LISTENER <main|memcache|admin>
+  //   DEBUG TRAFFIC START <path> REPLICA
+  // A recording captures exactly one source; LISTENER and REPLICA are mutually
+  // exclusive. REPLICA captures commands received from a master via the
+  // replication stream (only meaningful while this server is a replica).
+  CmdArgParser parser(args);
+  if (parser.Check("STOP")) {
+    if (!parser.Finalize())
+      return cmd_cntx->SendError(parser.TakeError().MakeReply());
     LOG(INFO) << "Traffic logging stopped";
+    shard_set->pool()->AwaitFiberOnAll([](auto*) { Connection::StopTrafficLogging(); });
+    return rb->SendOk();
   }
 
-  shard_set->pool()->AwaitFiberOnAll([path](auto*) {
-    if (path)
-      facade::Connection::StartTrafficLogging(*path);
-    else
-      facade::Connection::StopTrafficLogging();
-  });
+  parser.ExpectTag("START");
+  auto path = parser.Next<string_view>();
+
+  Connection::ListenerType listener_type;
+  if (parser.Check("REPLICA")) {
+    // Replication stream is only incoming on a replica; there is no stream to
+    // capture on a master/standalone server. Fail fast so the caller gets a
+    // clear diagnosis instead of an empty log. We intentionally skip Finalize()
+    // here: the role error is more actionable than "extra arg after REPLICA",
+    // and calling Finalize would leave an unchecked UNPROCESSED error that
+    // trips CmdArgParser's destructor DCHECK.
+    if (ServerState::tlocal()->is_master) {
+      return cmd_cntx->SendError(
+          "REPLICA option requires this server to be a replica (current role is master)");
+    }
+    listener_type = Connection::ListenerType::REPLICA_RESP;
+  } else {
+    parser.ExpectTag("LISTENER");
+    listener_type = parser.MapNext("main", Connection::ListenerType::MAIN_RESP, "memcache",
+                                   Connection::ListenerType::MEMCACHE, "admin",
+                                   Connection::ListenerType::ADMIN_RESP);
+  }
+  if (!parser.Finalize())
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
+
+  LOG(INFO) << "Logging traffic to " << path << "*.bin, listener=" << unsigned(listener_type);
+
+  std::atomic<unsigned> started_new{0};
+  std::atomic<unsigned> already_logging{0};
+  std::atomic<unsigned> open_failed{0};
+  std::string path_str(path);
+  shard_set->pool()->AwaitFiberOnAll(
+      [path_str, listener_type, &started_new, &already_logging, &open_failed](auto*) {
+        switch (Connection::StartTrafficLogging(path_str, listener_type)) {
+          case Connection::StartTrafficResult::kStarted:
+            started_new.fetch_add(1, std::memory_order_relaxed);
+            break;
+          case Connection::StartTrafficResult::kAlreadyLogging:
+            already_logging.fetch_add(1, std::memory_order_relaxed);
+            break;
+          case Connection::StartTrafficResult::kOpenFailed:
+            open_failed.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+      });
+
+  unsigned started = started_new.load(std::memory_order_relaxed);
+  unsigned refused = already_logging.load(std::memory_order_relaxed);
+  unsigned failed = open_failed.load(std::memory_order_relaxed);
+
+  // Any failure rolls back any thread that started, then reports a specific error.
+  // The only success path is when every thread reports kStarted.
+  if (failed > 0 || refused > 0) {
+    if (started > 0)
+      shard_set->pool()->AwaitFiberOnAll([](auto*) { Connection::StopTrafficLogging(); });
+
+    const char* msg;
+    if (failed > 0) {
+      msg =
+          "Failed to open traffic log file on one or more threads; "
+          "no recording is active. Check server logs for details.";
+    } else if (started > 0) {
+      // Partial state: some threads started a new recording while others refused
+      // (they were already logging). The previously-active recording is now split
+      // across two files and cannot be restored, so we stop everything.
+      msg =
+          "Traffic logging was in an inconsistent state; all recording has been stopped. "
+          "Retry DEBUG TRAFFIC START.";
+    } else {
+      // Every thread was already logging — the original recording is untouched.
+      msg = "Traffic logging is already in progress. Call DEBUG TRAFFIC STOP first.";
+    }
+    return cmd_cntx->SendError(msg);
+  }
   rb->SendOk();
 }
 
@@ -1177,13 +1266,26 @@ void DebugCmd::TxAnalysis(CommandContext* cmd_cntx) {
 
 void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
   vector<ObjHistMap> obj_hist_map_arr(shard_set->size());
-  auto cb = [&obj_hist_map_arr](PrimeIterator it) {
+  auto cb = [&obj_hist_map_arr, cntx = cntx_](DbIndex dbid, PrimeIterator it) {
     unsigned obj_type = it->second.ObjType();
     auto& hist_ptr = obj_hist_map_arr[EngineShard::tlocal()->shard_id()][obj_type];
     if (!hist_ptr) {
       hist_ptr.reset(new struct ObjHist);
     }
     AddObjHist(it, hist_ptr.get());
+
+    // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
+    // in the currently traversed DB (not the connection-selected one).
+    if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2) {
+      auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
+      DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
+      string key;
+      it->first.GetString(&key);
+      if (obj_type == OBJ_SET)
+        SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
+      else if (obj_type == OBJ_HASH)
+        HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
+    }
   };
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
 
@@ -1644,7 +1746,7 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
   using PerShardStats = std::array<std::unique_ptr<UniqueStrings>, OBJ_HASH + 1>;
 
   vector<PerShardStats> all_shards(shard_set->size());
-  auto cb = [&all_shards](PrimeIterator it) {
+  auto cb = [&all_shards, cntx = cntx_](DbIndex dbid, PrimeIterator it) {
     const unsigned obj_type = it->second.ObjType();
     if (obj_type != OBJ_HASH && obj_type != OBJ_LIST && obj_type != OBJ_SET &&
         obj_type != OBJ_ZSET) {
@@ -1664,6 +1766,19 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
       entry->AddSet(it->second);
     else if (obj_type == OBJ_ZSET)
       entry->AddZSet(it->second);
+
+    // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
+    // in the currently traversed DB (not the connection-selected one).
+    if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2) {
+      auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
+      DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
+      string key;
+      it->first.GetString(&key);
+      if (obj_type == OBJ_SET)
+        SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
+      else if (obj_type == OBJ_HASH)
+        HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
+    }
   };
 
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);

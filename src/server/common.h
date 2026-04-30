@@ -18,7 +18,6 @@ namespace dfly {
 using CompactObjType = unsigned;
 class GlobMatcher;
 
-// Dependent on ExpirePeriod representation of the value.
 constexpr int64_t kMaxExpireDeadlineSec = (1u << 28) - 1;  // 8.5 years
 constexpr int64_t kMaxExpireDeadlineMs = kMaxExpireDeadlineSec * 1000;
 

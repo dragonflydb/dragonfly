@@ -22,6 +22,9 @@
 #include "core/search/vector_utils.h"
 #include "core/string_map.h"
 #include "server/container_utils.h"
+#include "server/engine_shard.h"
+#include "server/hset_family.h"
+#include "server/namespaces.h"
 
 extern "C" {
 #include "redis/listpack.h"
@@ -168,6 +171,18 @@ SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
     }
   }
   return out;
+}
+
+StringMapAccessor::~StringMapAccessor() {
+  // Reads (e.g. Serialize/GetStrings) trigger lazy field expiry on the
+  // underlying StringMap.  If all fields expired during our lifetime,
+  // delete the now-empty hash so a later SAVE does not hit the DFATAL for
+  // empty OBJ_HASH in rdb_save.cc.
+  if (cleanup_key_.empty() || !hset_ || !hset_->Empty())
+    return;
+
+  auto& db_slice = db_cntx_.ns->GetDbSlice(EngineShard::tlocal()->shard_id());
+  HSetFamily::DeleteIfEmpty(db_slice, db_cntx_, cleanup_key_, *cleanup_pv_);
 }
 
 std::optional<BaseAccessor::StringList> StringMapAccessor::GetStrings(
@@ -399,7 +414,8 @@ void JsonAccessor::RemoveFieldFromCache(string_view field) {
 thread_local absl::flat_hash_map<std::string, std::unique_ptr<JsonAccessor::JsonPathContainer>>
     JsonAccessor::path_cache_;
 
-unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv) {
+unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv,
+                                     std::string_view cleanup_key) {
   DCHECK(pv.ObjType() == OBJ_HASH || pv.ObjType() == OBJ_JSON);
 
   if (pv.ObjType() == OBJ_JSON) {
@@ -412,7 +428,9 @@ unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue&
     return make_unique<ListPackAccessor>(ptr);
   } else {
     auto* sm = container_utils::GetStringMap(pv, db_cntx);
-    return make_unique<StringMapAccessor>(sm);
+    if (cleanup_key.empty())
+      return make_unique<StringMapAccessor>(sm);
+    return make_unique<StringMapAccessor>(sm, std::string{cleanup_key}, db_cntx, &pv);
   }
 }
 

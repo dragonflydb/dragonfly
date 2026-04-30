@@ -51,7 +51,7 @@ class HnswVectorIndex {
   ~HnswVectorIndex();
 
   bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
-  void Remove(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
+
   void Remove(search::GlobalDocId id);
 
   bool IsVectorCopied() const {
@@ -96,7 +96,10 @@ class HnswVectorIndex {
 
   // Acquire a read lock on the internal MRMW mutex.
   // Use this during serialization to block concurrent Add/Remove (write) operations.
-  std::unique_ptr<MRMWMutexLock> GetReadLock() const;
+  MRMWMutexLock GetReadLock() const;
+
+  // Approximate in-memory footprint of this HNSW graph, in bytes.
+  size_t GetMemoryUsage() const;
 
  private:
   bool copy_vector_;

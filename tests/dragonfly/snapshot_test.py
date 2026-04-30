@@ -8,6 +8,7 @@ import redis
 from redis import asyncio as aioredis
 from pathlib import Path
 import boto3
+from azure.storage.blob import BlobServiceClient
 from .instance import DflyInstanceFactory, RedisServer
 from random import randint as rand
 import string
@@ -358,11 +359,22 @@ def delete_s3_objects(bucket, prefix):
     )
 
 
+def _missing_s3_test_env():
+    return (
+        "DRAGONFLY_S3_BUCKET" not in os.environ
+        or os.environ["DRAGONFLY_S3_BUCKET"] == ""
+        or "AWS_ACCESS_KEY_ID" not in os.environ
+        or os.environ["AWS_ACCESS_KEY_ID"] == ""
+        or "AWS_SECRET_ACCESS_KEY" not in os.environ
+        or os.environ["AWS_SECRET_ACCESS_KEY"] == ""
+    )
+
+
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
-    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
-    reason="AWS S3 snapshots bucket is not configured",
+    _missing_s3_test_env(),
+    reason="AWS S3 snapshots bucket or credentials are not configured",
 )
 async def test_exit_on_s3_snapshot_load_err(df_factory):
     invalid_s3_dir = "s3://{DRAGONFLY_S3_BUCKET}" + "_invalid_bucket_"
@@ -375,26 +387,22 @@ async def test_exit_on_s3_snapshot_load_err(df_factory):
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
-    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
-    reason="AWS S3 snapshots bucket is not configured",
+    _missing_s3_test_env(),
+    reason="AWS S3 snapshots bucket or credentials are not configured",
 )
-@dfly_args({**BASIC_ARGS, "dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}", "dbfilename": ""})
+@dfly_args({**BASIC_ARGS})
 async def test_s3_snapshot(async_client, tmp_dir):
     seeder = DebugPopulateSeeder(key_target=10_000)
     await seeder.run(async_client)
 
     start_capture = await DebugPopulateSeeder.capture(async_client)
+    s3_path = "s3://" + os.environ["DRAGONFLY_S3_BUCKET"] + str(tmp_dir)
 
     try:
-        # save + flush + load
-        await async_client.execute_command("SAVE DF snapshot")
+        # save to S3 + flush + load from S3 (with local --dir)
+        await async_client.execute_command("SAVE", "DF", s3_path, "snapshot")
         assert await async_client.flushall()
-        await async_client.execute_command(
-            "DFLY LOAD "
-            + os.environ["DRAGONFLY_S3_BUCKET"]
-            + str(tmp_dir)
-            + "/snapshot-summary.dfs"
-        )
+        await async_client.execute_command("DFLY", "LOAD", s3_path + "/snapshot-summary.dfs")
 
         assert await DebugPopulateSeeder.capture(async_client) == start_capture
 
@@ -408,8 +416,8 @@ async def test_s3_snapshot(async_client, tmp_dir):
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
-    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
-    reason="AWS S3 snapshots bucket is not configured",
+    _missing_s3_test_env(),
+    reason="AWS S3 snapshots bucket or credentials are not configured",
 )
 @dfly_args(
     {
@@ -449,8 +457,8 @@ async def test_s3_reload_snapshot_after_restart(df_factory, tmp_dir):
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
-    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
-    reason="AWS S3 snapshots bucket is not configured",
+    _missing_s3_test_env(),
+    reason="AWS S3 snapshots bucket or credentials are not configured",
 )
 @dfly_args({**BASIC_ARGS})
 async def test_s3_save_local_dir(async_client, tmp_dir):
@@ -467,6 +475,51 @@ async def test_s3_save_local_dir(async_client, tmp_dir):
         delete_s3_objects(
             os.environ["DRAGONFLY_S3_BUCKET"],
             str(tmp_dir)[1:] + "/s3_dump",
+        )
+
+
+def _missing_azure_test_env():
+    return (
+        "DRAGONFLY_AZURE_CONTAINER" not in os.environ
+        or os.environ["DRAGONFLY_AZURE_CONTAINER"] == ""
+        or "AZURE_STORAGE_CONNECTION_STRING" not in os.environ
+        or os.environ["AZURE_STORAGE_CONNECTION_STRING"] == ""
+    )
+
+
+def delete_azure_objects(container, prefix):
+    conn_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
+    blob_service = BlobServiceClient.from_connection_string(conn_str)
+    container_client = blob_service.get_container_client(container)
+    blobs = container_client.list_blobs(name_starts_with=prefix)
+    for blob in blobs:
+        container_client.delete_blob(blob.name)
+
+
+@pytest.mark.skipif(
+    _missing_azure_test_env(),
+    reason="Azure storage container or credentials are not configured",
+)
+@dfly_args({**BASIC_ARGS})
+async def test_azure_snapshot(async_client, tmp_dir):
+    seeder = DebugPopulateSeeder(key_target=10_000)
+    await seeder.run(async_client)
+
+    start_capture = await DebugPopulateSeeder.capture(async_client)
+    az_path = "az://" + os.environ["DRAGONFLY_AZURE_CONTAINER"] + str(tmp_dir)
+
+    try:
+        # save to Azure + flush + load from Azure
+        await async_client.execute_command("SAVE", "DF", az_path, "snapshot")
+        assert await async_client.flushall()
+        await async_client.execute_command("DFLY", "LOAD", az_path + "/snapshot-summary.dfs")
+
+        assert await DebugPopulateSeeder.capture(async_client) == start_capture
+
+    finally:
+        delete_azure_objects(
+            os.environ["DRAGONFLY_AZURE_CONTAINER"],
+            str(tmp_dir)[1:],
         )
 
 
@@ -583,6 +636,90 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
     while await is_saving(async_client):
         await asyncio.sleep(0.1)
     await async_client.execute_command("SAVE")
+
+
+@dfly_args({"proactor_threads": 1, "dbfilename": "test-hsetex-save", "dir": "{DRAGONFLY_TMP}/"})
+async def test_save_hash_with_expired_fields(async_client: aioredis.Redis):
+    """
+    HSETEX creates a hash with field-level TTL.  After all fields
+    expire, the hash key remains in the DB with Size()==0.  SAVE then hits the
+    DFATAL check in SaveEntry because OBJ_HASH does not allow empty values.
+
+    Reproduction: HSETEX with short TTL -> SAVE (while field is alive) ->
+    wait for expiry -> second SAVE -> crash.
+    """
+
+    await async_client.execute_command("HSETEX", "mykey", "1", "f1", "v1")
+    await async_client.execute_command("SAVE")
+
+    await asyncio.sleep(1.5)
+
+    # Trigger lazy expiry of the field — the key remains but has 0 fields.
+    assert await async_client.execute_command("FIELDTTL", "mykey", "f1") == -3
+
+    # This SAVE crashes on unfixed code: SaveEntry sees empty hash → DFATAL.
+    await async_client.execute_command("SAVE")
+
+    # If we get here, the server survived.
+    assert await async_client.ping()
+
+
+@dfly_args({"proactor_threads": 1, "dbfilename": "test-save-del-crash", "dir": "{DRAGONFLY_TMP}/"})
+async def test_save_with_concurrent_mutations(df_server):
+    """
+    Regression test: SIGABRT in OnChangeBlocking on a non-shard fiber.
+
+    With proactor_threads=1 the single shard and all connections live on the same
+    thread.  CanRunInlined() may let a write command execute directly on a
+    connection fiber while a concurrent SAVE has already registered snapshot change
+    listeners.  The write then fires OnChangeBlocking on the wrong fiber, hitting
+    the DFATAL assertion in serializer_base.cc.
+
+    We reproduce this by running SAVE and SET/DEL concurrently from separate
+    connections until the race manifests (typically < 5 s on a debug build).
+    """
+
+    client = df_server.client()
+    for i in range(10):
+        await client.set(f"k{i}", f"val{i}")
+
+    save_done = asyncio.Event()
+
+    async def save_loop():
+        """Issue SAVE in a tight loop on a dedicated connection."""
+        c = df_server.client()
+        while not save_done.is_set():
+            try:
+                await c.execute_command("SAVE")
+            except Exception:
+                pass
+        await c.close()
+
+    async def mutate_loop(worker_id):
+        """Issue SET/DEL on a dedicated connection to race with SAVE."""
+        c = df_server.client()
+        i = 0
+        while not save_done.is_set():
+            key = f"k{i % 10}"
+            try:
+                await c.set(key, "v")
+                await c.delete(key)
+                await c.set(key, "v")
+            except Exception:
+                pass
+            i += 1
+        await c.close()
+
+    tasks = [asyncio.create_task(save_loop())]
+    tasks += [asyncio.create_task(mutate_loop(i)) for i in range(3)]
+
+    await asyncio.sleep(5)
+    save_done.set()
+    await asyncio.gather(*tasks)
+
+    # If we get here the server survived — the bug is fixed.
+    assert await client.ping()
+    await client.close()
 
 
 @pytest.mark.exclude_epoll

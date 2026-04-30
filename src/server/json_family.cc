@@ -38,6 +38,8 @@
 #include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
 #include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
 #include <jsoncons_ext/mergepatch/mergepatch.hpp>
+
+namespace rng = std::ranges;
 // clang-format on
 
 ABSL_DECLARE_FLAG(bool, jsonpathv2);
@@ -441,11 +443,10 @@ bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
       if (lhs.size() != rhs.size()) {
         return false;
       }
-      return std::all_of(
-          lhs.object_range().begin(), lhs.object_range().end(), [&](const auto& l_it) {
-            auto r_it = rhs.find(l_it.key());
-            return r_it != rhs.object_range().end() && JsonAreEquals(l_it.value(), r_it->value());
-          });
+      return rng::all_of(lhs.object_range(), [&](const auto& l_it) {
+        auto r_it = rhs.find(l_it.key());
+        return r_it != rhs.object_range().end() && JsonAreEquals(l_it.value(), r_it->value());
+      });
     }
 
     default:
@@ -867,7 +868,7 @@ OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(
 }
 
 bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJsonPath>>& paths) {
-  return std::all_of(paths.begin(), paths.end(),
+  return rng::all_of(paths,
                      [](auto& parsed_path) { return parsed_path.second.IsLegacyModePath(); });
 }
 
@@ -875,7 +876,7 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
                                 const JsonGetParams& params) {
   // We don't use OBJ_JSON here because we want to support both JSON and STRING types.
   // If the key is not OBJ_JSON and not OBJ_STRING, we return WRONG_TYPE.
-  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
@@ -1066,8 +1067,13 @@ void BinOpApply(double num, bool num_is_double, ArithmeticOpType op, JsonType* v
 
   if (val->is_double() || num_is_double) {
     *val = result;
-  } else {
+  } else if (result >= 0) {
     *val = static_cast<uint64_t>(result);
+  } else if (result >= static_cast<double>(std::numeric_limits<int64_t>::min())) {
+    *val = static_cast<int64_t>(result);
+  } else {
+    *overflow = true;
+    return;
   }
   *overflow = false;
 }

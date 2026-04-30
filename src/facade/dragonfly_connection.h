@@ -191,6 +191,24 @@ class Connection : public util::Connection {
   // This method returns true for customer facing listeners.
   bool IsMainOrMemcache() const;
 
+  // Classification of the traffic source for the DEBUG TRAFFIC recorder.
+  // Persisted as the second byte of the file header in the on-disk format;
+  // the numeric values are part of that format — do not change them.
+  // MAIN_RESP / ADMIN_RESP / REPLICA_RESP all carry RESP-format commands;
+  // MAIN vs ADMIN differ by the port they were accepted on, while REPLICA
+  // covers commands that arrived on a replica via the replication stream
+  // (not from a client-facing listener).
+  enum class ListenerType : uint8_t {
+    MAIN_RESP = 1,     // main RESP listener (TCP and unix-socket)
+    MEMCACHE = 2,      // memcached protocol listener
+    ADMIN_RESP = 3,    // privileged / admin listener (RESP protocol on admin port)
+    REPLICA_RESP = 4,  // commands arriving on a replica from its master
+  };
+
+  ListenerType GetListenerType() const {
+    return listener_type_;
+  }
+
   void SetName(std::string name);
 
   void SetLibName(std::string name);
@@ -218,13 +236,31 @@ class Connection : public util::Connection {
   // and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force);
 
+  // Outcome of a StartTrafficLogging call on a single thread.
+  enum class StartTrafficResult : uint8_t {
+    kStarted,         // new recording started successfully on this thread
+    kAlreadyLogging,  // this thread already had an active recording (noop)
+    kOpenFailed,      // failed to open the log file (or unsupported platform)
+  };
+
   // Starts traffic logging in the calling thread. Must be a proactor thread.
-  // Each thread creates its own log file combining requests from all the connections in
-  // that thread. A noop if the thread is already logging.
-  static void StartTrafficLogging(std::string_view base_path);
+  // Each thread creates its own log file containing requests from connections on
+  // that thread whose listener type equals `listener_type`. Exactly one listener
+  // kind per recording — mixing protocols in a single file is not supported.
+  static StartTrafficResult StartTrafficLogging(std::string_view base_path,
+                                                ListenerType listener_type);
 
   // Stops traffic logging in this thread. A noop if the thread is not logging.
   static void StopTrafficLogging();
+
+  // Writes a single command to the per-thread traffic log if (and only if) the
+  // logger on this thread is currently recording the REPLICA_RESP source.
+  // Used by the replication read path on replicas to capture commands that
+  // arrived from the master — they do not travel through a Connection, so the
+  // regular per-connection hot path does not see them.
+  // `db_index` is the database the command should be applied to; it is stored
+  // in the record so replay tools can issue SELECT before dispatch.
+  static void LogReplicaCommand(const cmn::BackedArguments& args, uint32_t db_index);
 
   // Get quick debug info for logs
   std::string DebugInfo() const;
@@ -277,9 +313,17 @@ class Connection : public util::Connection {
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoop();
 
-  void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
+  void NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n);
 
-  void CheckIoBufCapacity(bool is_iobuf_full);
+  // Enables io_uring multishot receives for the connection if the current thread supports it.
+  // This is required during initial setup or after migrating to a new thread/proactor,
+  // provided the buffer ring is configured and the connection is not using TLS.
+  void MaybeEnableRecvMultishot();
+
+  // Drains currently available bytes from socket into io_buf_ using non-blocking reads.
+  void ReadPendingInput();
+
+  void CheckIoBufCapacity(bool reached_capacity, base::IoBuf* buf);
 
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
@@ -311,7 +355,7 @@ class Connection : public util::Connection {
   // If add is true, stats are incremented, otherwise decremented.
   void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
-  ParserStatus ParseRedis(unsigned max_busy_cycles, bool enqueue_only = false);
+  ParserStatus ParseRedis(base::IoBuf& buf, unsigned max_busy_cycles, bool enqueue_only = false);
 
   void OnBreakCb(int32_t mask);
 
@@ -358,9 +402,13 @@ class Connection : public util::Connection {
   // Returns true if one or more commands were parsed from the read buffer,
   // and false if no complete commands could be parsed (for example, when
   // parsing is pending more input).
-  bool ParseMCBatch();
+  bool ParseMCBatch(base::IoBuf& buf);
 
-  bool ParseRedisBatch();
+  bool ParseRedisBatch(base::IoBuf& buf);
+
+  // Call the appropriate ParseMCBatch or ParseRedisBatch based on the protocol.
+  // Only CPU-bound work; must not perform I/O or fiber suspension.
+  void ParseFromBuffer(base::IoBuf& buf);
 
   // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
   ParserStatus ParseLoop();
@@ -437,10 +485,23 @@ class Connection : public util::Connection {
   ParsedCommand* parsed_head_ = nullptr;
   ParsedCommand* parsed_tail_ = nullptr;
   ParsedCommand* parsed_to_execute_ = nullptr;
+
   // Total number of commands in parsed command queue
   size_t parsed_cmd_q_len_ = 0;
+
   // Total bytes used by commands in parsed command queue
   size_t parsed_cmd_q_bytes_ = 0;
+
+  // Returns true if there are dispatched commands that haven't been replied yet.
+  bool HasInFlightCommands() const {
+    return parsed_head_ != parsed_to_execute_;
+  }
+
+  // Returns true if the head command is ready to execute (nothing in-flight ahead of it).
+  bool HasCommandToExecute() const {
+    return parsed_head_ && !HasInFlightCommands();
+  }
+
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
   bool HasPendingMessages() const {
     return parsed_head_ || !dispatch_q_.empty();
@@ -507,8 +568,11 @@ class Connection : public util::Connection {
 
       // If post migration is allowed to call RegisterRecv
       bool migration_allowed_to_register_ : 1;
+      bool pending_input_ : 1;
     };
   };
+
+  ListenerType listener_type_ = ListenerType::MAIN_RESP;
 
   bool request_shutdown_ = false;
 };

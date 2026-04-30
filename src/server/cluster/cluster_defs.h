@@ -24,13 +24,7 @@ struct SlotRange {
   SlotId start = 0;
   SlotId end = 0;
 
-  bool operator==(const SlotRange& r) const noexcept {
-    return start == r.start && end == r.end;
-  }
-
-  bool operator<(const SlotRange& r) const noexcept {
-    return start < r.start || (start == r.start && end < r.end);
-  }
+  std::strong_ordering operator<=>(const SlotRange&) const noexcept = default;
 
   bool IsValid() const noexcept {
     return start <= end && start <= kMaxSlotId && end <= kMaxSlotId;
@@ -38,6 +32,10 @@ struct SlotRange {
 
   bool Contains(SlotId id) const noexcept {
     return id >= start && id <= end;
+  }
+
+  bool Overlaps(SlotRange other) const noexcept {
+    return start <= other.end && other.start <= end;
   }
 
   std::string ToString() const;
@@ -51,6 +49,15 @@ class SlotRanges {
   bool Contains(SlotId id) const noexcept {
     for (const auto& sr : ranges_) {
       if (sr.Contains(id))
+        return true;
+    }
+    return false;
+  }
+
+  // True iff `r` lies entirely within a single range of *this. Expects r.IsValid().
+  bool Contains(SlotRange r) const noexcept {
+    for (const auto& sr : ranges_) {
+      if (sr.start <= r.start && r.end <= sr.end)
         return true;
     }
     return false;

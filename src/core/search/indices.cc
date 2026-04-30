@@ -24,6 +24,8 @@
 
 #include "base/flags.h"
 
+namespace rng = std::ranges;
+
 ABSL_FLAG(bool, use_numeric_range_tree, true,
           "Use range tree for numeric index. "
           "If false, use a simple implementation with btree_set. "
@@ -45,36 +47,38 @@ string ToLower(string_view word) {
   return IsAllAscii(word) ? absl::AsciiStrToLower(word) : una::cases::to_lowercase_utf8(word);
 }
 
-// Get all words from text as matched by the ICU library
-absl::flat_hash_set<std::string> TokenizeWords(std::string_view text,
-                                               const TextIndex::StopWords& stopwords,
-                                               const Synonyms* synonyms) {
-  absl::flat_hash_set<std::string> words;
+// Get all words from text as matched by the ICU library, counting term frequencies
+absl::flat_hash_map<std::string, uint32_t> TokenizeWords(std::string_view text,
+                                                         const TextIndex::StopWords& stopwords,
+                                                         const Synonyms* synonyms) {
+  absl::flat_hash_map<std::string, uint32_t> words;
   for (std::string_view word : una::views::word_only::utf8(text)) {
     if (std::string word_lc = una::cases::to_lowercase_utf8(word); !stopwords.contains(word_lc)) {
       if (synonyms) {
         if (auto group_id = synonyms->GetGroupToken(word_lc); group_id) {
-          words.insert(*group_id);
+          // Index under synonym group token for exact-match scoring.
+          // Also index under original word (with freq=0) so prefix/suffix/infix search still works.
+          words[*group_id]++;
+          words.emplace(std::move(word_lc), 0);
+          continue;
         }
       }
 
-      words.insert(std::move(word_lc));
+      words[std::move(word_lc)]++;
     }
   }
   return words;
 }
 
-// Split taglist, remove duplicates and convert all to lowercase
-absl::flat_hash_set<string> NormalizeTags(string_view taglist, bool case_sensitive,
-                                          char separator) {
+// Split taglist, remove duplicates and convert all to lowercase. Freq is always 1 for tags.
+absl::flat_hash_map<string, uint32_t> NormalizeTags(string_view taglist, bool case_sensitive,
+                                                    char separator) {
   // Splitting utf8 by ascii character is safe
-  absl::flat_hash_set<string> tags;
+  absl::flat_hash_map<string, uint32_t> tags;
   for (string_view tag : absl::StrSplit(taglist, separator, absl::SkipEmpty())) {
     string_view str = absl::StripAsciiWhitespace(tag);
-    if (case_sensitive)
-      tags.insert(string{str});
-    else
-      tags.insert(ToLower(str));
+    std::string s = case_sensitive ? string{str} : ToLower(str);
+    tags.emplace(std::move(s), 1);
   }
   return tags;
 }
@@ -236,7 +240,7 @@ class BtreeSetImpl : public NumericIndex::RangeTreeBase {
       }
     }
 
-    std::sort(result.begin(), result.end());
+    rng::sort(result);
     return result;
   }
 
@@ -309,7 +313,7 @@ void BaseStringIndex<C>::MatchPrefix(std::string_view prefix,
 
   // TODO(vlad): Use right iterator to avoid string comparison?
   for (auto it = entries_.lower_bound(prefix);
-       it != entries_.end() && (*it).first.rfind(prefix, 0) == 0; ++it) {
+       it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
     cb(&(*it).second);
   }
 }
@@ -329,8 +333,7 @@ void BaseStringIndex<C>::MatchSuffix(std::string_view suffix,
 
   // Otherwise, iterate over all entries and look for the suffix
   for (const auto& entry : entries_) {
-    int32_t start = entry.first.size() - suffix.size();
-    if (start >= 0 && entry.first.substr(start) == suffix)
+    if (entry.first.ends_with(suffix))
       cb(&entry.second);
   }
 }
@@ -344,7 +347,7 @@ void BaseStringIndex<C>::MatchInfix(std::string_view infix,
   // If we have a suffix trie built, we just need to match the prefix
   if (suffix_trie_) {
     for (auto it = suffix_trie_->lower_bound(infix);
-         it != suffix_trie_->end() && (*it).first.rfind(infix, 0) == 0; ++it)
+         it != suffix_trie_->end() && (*it).first.starts_with(infix); ++it)
       cb(&(*it).second);
     return;
   }
@@ -357,41 +360,131 @@ void BaseStringIndex<C>::MatchInfix(std::string_view infix,
 }
 
 template <typename C>
+void BaseStringIndex<C>::MatchPrefixWithTerm(
+    std::string_view prefix,
+    absl::FunctionRef<void(std::string_view term, const Container*)> cb) const {
+  StringOrView prefix_norm{NormalizeQueryWord(prefix)};
+  prefix = prefix_norm.view();
+
+  for (auto it = entries_.lower_bound(prefix);
+       it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
+    cb((*it).first, &(*it).second);
+  }
+}
+
+template <typename C>
+void BaseStringIndex<C>::MatchSuffixWithTerm(
+    std::string_view suffix,
+    absl::FunctionRef<void(std::string_view term, const Container*)> cb) const {
+  StringOrView suffix_norm{NormalizeQueryWord(suffix)};
+  suffix = suffix_norm.view();
+
+  // Use suffix_trie for early-exit: if no documents match the suffix, skip the entries scan.
+  // We still need to scan entries_ to resolve original term names for scoring.
+  if (suffix_trie_) {
+    if (suffix_trie_->find(suffix) == suffix_trie_->end())
+      return;
+  }
+
+  for (const auto& entry : entries_) {
+    if (entry.first.ends_with(suffix))
+      cb(entry.first, &entry.second);
+  }
+}
+
+template <typename C>
+void BaseStringIndex<C>::MatchInfixWithTerm(
+    std::string_view infix,
+    absl::FunctionRef<void(std::string_view term, const Container*)> cb) const {
+  StringOrView infix_norm{NormalizeQueryWord(infix)};
+  infix = infix_norm.view();
+
+  // Use suffix_trie for early-exit: infix = prefix in suffix space.
+  // If no suffixes match the infix as prefix, no terms contain the infix.
+  if (suffix_trie_) {
+    auto it = suffix_trie_->lower_bound(infix);
+    if (it == suffix_trie_->end() || !(*it).first.starts_with(infix))
+      return;
+  }
+
+  for (const auto& entry : entries_) {
+    if (entry.first.find(infix) != string::npos)
+      cb(entry.first, &entry.second);
+  }
+}
+
+template <typename C>
 bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view field) {
   auto strings_list = GetStrings(doc, field);
   if (!strings_list) {
     return false;
   }
 
-  absl::flat_hash_set<std::string> tokens;
-  for (string_view str : strings_list.value())
-    tokens.merge(Tokenize(str));
+  absl::flat_hash_map<std::string, uint32_t> tokens;
+  for (string_view str : strings_list.value()) {
+    for (auto& [token, freq] : Tokenize(str))
+      tokens[std::move(token)] += freq;
+  }
+
+  // Track per-field document length for BM25 scoring.
+  if constexpr (kIsScored) {
+    uint32_t doc_tf_sum = 0;
+    for (const auto& [_, freq] : tokens)
+      doc_tf_sum += freq;
+    if (doc_tf_sum > 0) {
+      if (id >= field_doc_lengths_.size())
+        field_doc_lengths_.resize(id + 1, 0);
+      if (field_doc_lengths_[id] == 0)
+        field_num_docs_++;
+      field_doc_lengths_[id] = doc_tf_sum;
+      field_total_docs_len_ += doc_tf_sum;
+    }
+  }
 
   if (tokens.size() > 1)
     unique_ids_ = false;
-  for (string_view token : tokens)
-    GetOrCreate(&entries_, token)->Insert(id);
+  for (const auto& [token, freq] : tokens)
+    GetOrCreate(&entries_, token, kIsScored)->Insert(id, freq);
 
-  if (suffix_trie_)
-    IterateAllSuffixes(tokens,
+  if (suffix_trie_) {
+    absl::flat_hash_set<std::string> token_keys;
+    for (const auto& [token, _] : tokens)
+      token_keys.insert(token);
+    IterateAllSuffixes(token_keys,
                        [&](string_view str) { GetOrCreate(&*suffix_trie_, str)->Insert(id); });
+  }
 
   return true;
 }
 
 template <typename C>
 void BaseStringIndex<C>::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+  // Update per-field scoring stats before removing tokens
+  if constexpr (kIsScored) {
+    if (id < field_doc_lengths_.size() && field_doc_lengths_[id] > 0) {
+      field_total_docs_len_ -= field_doc_lengths_[id];
+      field_doc_lengths_[id] = 0;
+      field_num_docs_--;
+    }
+  }
+
   auto strings_list = GetStrings(doc, field).value();
 
-  absl::flat_hash_set<std::string> tokens;
-  for (string_view str : strings_list)
-    tokens.merge(Tokenize(str));
+  absl::flat_hash_map<std::string, uint32_t> tokens;
+  for (string_view str : strings_list) {
+    for (auto& [token, freq] : Tokenize(str))
+      tokens[std::move(token)] += freq;
+  }
 
-  for (string_view token : tokens)
+  for (const auto& [token, _] : tokens)
     Remove(&entries_, id, token);
 
-  if (suffix_trie_)
-    IterateAllSuffixes(tokens, [&](string_view str) { Remove(&*suffix_trie_, id, str); });
+  if (suffix_trie_) {
+    absl::flat_hash_set<std::string> token_keys;
+    for (const auto& [token, _] : tokens)
+      token_keys.insert(token);
+    IterateAllSuffixes(token_keys, [&](string_view str) { Remove(&*suffix_trie_, id, str); });
+  }
 }
 
 template <typename C> vector<string> BaseStringIndex<C>::GetTerms() const {
@@ -428,7 +521,7 @@ template <typename C> vector<DocId> BaseStringIndex<C>::GetAllDocsWithNonNullVal
       }
     }
   }
-  std::sort(result.begin(), result.end());
+  rng::sort(result);
   return result;
 }
 
@@ -442,9 +535,10 @@ StringOrView BaseStringIndex<C>::NormalizeQueryWord(std::string_view query) cons
 
 template <typename C>
 typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(
-    search::RaxTreeMap<Container>* map, string_view word) {
+    search::RaxTreeMap<Container>* map, string_view word, bool store_freq) {
   auto* mr = map->get_allocator().resource();
-  return &map->try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */).first->second;
+  return &map->try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */, store_freq)
+              .first->second;
 }
 
 template <typename C>
@@ -471,7 +565,7 @@ std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const Document
   return doc.GetStrings(field);
 }
 
-absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
+absl::flat_hash_map<std::string, uint32_t> TextIndex::Tokenize(std::string_view value) const {
   return TokenizeWords(value, *stopwords_, synonyms_);
 }
 
@@ -495,7 +589,7 @@ std::optional<DocumentAccessor::StringList> TagIndex::GetStrings(const DocumentA
   return doc.GetTags(field);
 }
 
-absl::flat_hash_set<std::string> TagIndex::Tokenize(std::string_view value) const {
+absl::flat_hash_map<std::string, uint32_t> TagIndex::Tokenize(std::string_view value) const {
   return NormalizeTags(value, case_sensitive_, separator_);
 }
 

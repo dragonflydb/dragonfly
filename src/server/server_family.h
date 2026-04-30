@@ -12,6 +12,7 @@
 #include "core/qlist.h"
 #include "facade/facade_stats.h"
 #include "facade/facade_types.h"
+#include "server/acl/user_registry.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/replica_types.h"
@@ -151,6 +152,8 @@ struct Metrics {
   absl::flat_hash_map<std::string, hdr_histogram*> cmd_latency_map;
 
   InternedStringStats interned_string_stats;
+
+  acl::UserRegistry::AclStats acl_stats;
 };
 
 // Contains the state of the last save operation.
@@ -385,7 +388,8 @@ class ServerFamily {
   // Updates LoadOptions if successful. If snapshot_id and shard_count are passed in,
   // may use them for consistency checks.
   std::error_code LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
-                          LoadOptions* load_opts, RdbLoadContext* load_context);
+                          LoadOptions* load_opts, RdbLoadContext* load_context,
+                          detail::SnapshotStorage* storage);
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 

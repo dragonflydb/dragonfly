@@ -42,6 +42,12 @@ class RespSrvParserTest : public testing::Test {
  protected:
   RespSrvParser::Result Parse(std::string_view str);
 
+  auto Vec() {
+    vector<string_view> out;
+    ranges::copy(args_.view(), back_inserter(out));
+    return out;
+  }
+
   RespSrvParser parser_;
   cmn::BackedArguments args_;
   uint32_t consumed_;
@@ -57,7 +63,7 @@ TEST_F(RespSrvParserTest, Inline) {
 
   ASSERT_EQ(RespSrvParser::OK, Parse(kCmd1));
   EXPECT_EQ(strlen(kCmd1), consumed_);
-  EXPECT_THAT(args_, ElementsAre("KEY", "VAL"));
+  EXPECT_THAT(Vec(), ElementsAre("KEY", "VAL"));
 
   ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse("KEY"));
   EXPECT_EQ(3, consumed_);
@@ -67,7 +73,7 @@ TEST_F(RespSrvParserTest, Inline) {
   EXPECT_EQ(4, consumed_);
   ASSERT_EQ(RespSrvParser::OK, Parse(" \r\n "));
   EXPECT_EQ(3, consumed_);
-  EXPECT_THAT(args_, ElementsAre("KEY", "FOO", "BAR"));
+  EXPECT_THAT(Vec(), ElementsAre("KEY", "FOO", "BAR"));
 
   ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(" 1 2"));
   EXPECT_EQ(4, consumed_);
@@ -75,14 +81,14 @@ TEST_F(RespSrvParserTest, Inline) {
   EXPECT_EQ(3, consumed_);
   ASSERT_EQ(RespSrvParser::OK, Parse("\r\n"));
   EXPECT_EQ(2, consumed_);
-  EXPECT_THAT(args_, ElementsAre("1", "2", "45"));
+  EXPECT_THAT(Vec(), ElementsAre("1", "2", "45"));
 
   // Empty queries return INPUT_PENDING.
   EXPECT_EQ(RespSrvParser::INPUT_PENDING, Parse("\r\n"));
   EXPECT_EQ(2, consumed_);
 
   ASSERT_EQ(RespSrvParser::OK, Parse("_\r\n"));
-  EXPECT_THAT(args_, ElementsAre("_"));
+  EXPECT_THAT(Vec(), ElementsAre("_"));
 }
 
 TEST_F(RespSrvParserTest, Multi1) {
@@ -97,7 +103,7 @@ TEST_F(RespSrvParserTest, Multi1) {
   ASSERT_EQ(RespSrvParser::OK, Parse("PING\r\n"));
   EXPECT_EQ(6, consumed_);
   EXPECT_EQ(0, parser_.parselen_hint());
-  EXPECT_THAT(args_, ElementsAre("PING"));
+  EXPECT_THAT(Vec(), ElementsAre("PING"));
 }
 
 TEST_F(RespSrvParserTest, Multi2) {
@@ -115,7 +121,7 @@ TEST_F(RespSrvParserTest, Multi2) {
 
   ASSERT_EQ(RespSrvParser::OK, Parse("\r\n"));
   EXPECT_EQ(2, consumed_);
-  EXPECT_THAT(args_, ElementsAre("KEY", "VAL"));
+  EXPECT_THAT(Vec(), ElementsAre("KEY", "VAL"));
 }
 
 TEST_F(RespSrvParserTest, Multi3) {
@@ -127,7 +133,7 @@ TEST_F(RespSrvParserTest, Multi3) {
   ASSERT_EQ(strlen(kSecond), consumed_);
   ASSERT_EQ(RespSrvParser::OK, Parse("\r\n*3\r\n$3\r\nSET"));
   ASSERT_EQ(2, consumed_);
-  EXPECT_THAT(args_, ElementsAre("SET", "key:000002273458", "VXK"));
+  EXPECT_THAT(Vec(), ElementsAre("SET", "key:000002273458", "VXK"));
 }
 
 TEST_F(RespSrvParserTest, InvalidMult1) {

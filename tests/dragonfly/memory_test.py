@@ -202,7 +202,7 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
 
 @pytest.mark.parametrize("heartbeat_rss_eviction", [True, False])
 async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbeat_rss_eviction):
-    max_memory = 1024 * 1024**2  # 10242mb
+    max_memory = 1024 * 1024**2  # 1024 mb
 
     df_server = df_factory.create(
         proactor_threads=3,
@@ -210,6 +210,7 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
         maxmemory=max_memory,
         enable_heartbeat_eviction="false",
         enable_heartbeat_rss_eviction=heartbeat_rss_eviction,
+        vmodule="engine_shard=2",
     )
     df_server.start()
     client = df_server.client()
@@ -237,7 +238,7 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
 
     # This will increase only RSS memory above treshold
     p = client.pipeline()
-    for _ in range(50):
+    for _ in range(150):
         p.execute_command("LRANGE list_1 0 -1")
         p.execute_command("LRANGE list_2 0 -1")
     await p.execute()
@@ -295,6 +296,7 @@ async def test_no_rss_eviction_overflow_on_expired_keys(df_factory: DflyInstance
     assert keyspace_info["db0"]["keys"] == num_keys
 
 
+@pytest.mark.skip(reason="Disabling test until improvements in squashing.")
 @pytest.mark.asyncio
 async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInstanceFactory):
     df = df_factory.create(

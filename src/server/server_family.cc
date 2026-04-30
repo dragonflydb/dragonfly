@@ -68,6 +68,9 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/replica.h"
 #include "server/script_mgr.h"
+#ifdef WITH_SEARCH
+#include "server/search/global_hnsw_index.h"
+#endif
 #include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
@@ -77,6 +80,8 @@ extern "C" {
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/aws/aws.h"
+
+namespace rng = std::ranges;
 
 using namespace std;
 
@@ -295,11 +300,20 @@ string UnknownCmd(string cmd, CmdArgList args) {
 
 std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
   if (detail::IsS3Path(uri)) {
+#if defined(WITH_AWS) || defined(WITH_AWS_CLOUD)
 #ifdef WITH_AWS
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
-    return std::make_shared<detail::AwsS3SnapshotStorage>(
+#endif
+    auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(
         absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
         absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
+    auto ec = shard_set->pool()->GetNextProactor()->Await(
+        [&] { return aws->Init(detail::kBucketConnectMs); });
+    if (ec) {
+      LOG(ERROR) << "Failed to initialize AWS S3 snapshot storage: " << ec.message();
+      exit(1);
+    }
+    return aws;
 #else
     LOG(ERROR) << "Compiled without AWS support";
     exit(1);
@@ -317,8 +331,17 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
     LOG(ERROR) << "Compiled without GCP support";
     exit(1);
 #endif
+  } else if (detail::IsAzurePath(uri)) {
+    auto azure = std::make_shared<detail::AzureSnapshotStorage>();
+    auto ec = shard_set->pool()->GetNextProactor()->Await(
+        [&] { return azure->Init(detail::kBucketConnectMs); });
+    if (ec) {
+      LOG(ERROR) << "Failed to initialize Azure snapshot storage: " << ec.message();
+      exit(1);
+    }
+    return azure;
   } else {
-    LOG(ERROR) << "Uknown cloud storage " << uri;
+    LOG(ERROR) << "Unknown cloud storage " << uri;
     exit(1);
   }
 }
@@ -655,8 +678,8 @@ void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
     return cmd_cntx->SendError("Invalid thread id");
   }
 
-  unsigned migrated = 0;
-  auto cb_brief = [&](unsigned current_tid, ProactorBase* p) {
+  std::atomic<unsigned> migrated{0};
+  auto search_and_migrate_cb = [&](unsigned current_tid, ProactorBase* p) {
     if (current_tid == tid) {
       return;  // we should not migrate to the same thread
     }
@@ -664,7 +687,7 @@ void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
     auto traverse_cb = [&](unsigned, util::Connection* conn) {
       facade::Connection* dconn = static_cast<facade::Connection*>(conn);
       if (dconn->GetClientId() == id) {
-        ++migrated;
+        migrated.fetch_add(1, std::memory_order_relaxed);
         dconn->RequestAsyncMigration(shard_set->pool()->at(tid), true /* force */);
       }
     };
@@ -677,7 +700,7 @@ void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
     }
   };
 
-  shard_set->pool()->AwaitBrief(cb_brief);
+  shard_set->pool()->AwaitFiberOnAll(search_and_migrate_cb);
 
   return cmd_cntx->rb()->SendLong(migrated);
 }
@@ -955,7 +978,7 @@ void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorP
     }
   }
 
-  std::sort(merged_slow_log.begin(), merged_slow_log.end(), [](const auto& e1, const auto& e2) {
+  rng::sort(merged_slow_log, [](const auto& e1, const auto& e2) {
     return e1.first.unix_ts_usec > e2.first.unix_ts_usec;
   });
 
@@ -1150,7 +1173,6 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("replica_priority");
   config_registry.RegisterMutable("lua_undeclared_keys_shas");
   config_registry.RegisterMutable("lua_float_as_int_shas");
-  config_registry.RegisterMutable("point_in_time_snapshot");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -1264,7 +1286,7 @@ void ServerFamily::Shutdown() {
     }
     StopAllClusterReplicas();
 
-    dfly_cmd_->Shutdown();
+    dfly_cmd_->CancelReplicas();
     DebugCmd::Shutdown();
 #ifdef WITH_SEARCH
     SearchFamily::Shutdown();
@@ -1342,7 +1364,11 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     return immediate(string("Replica cannot load data"));
   }
 
-  auto expand_result = snapshot_storage_->ExpandSnapshot(path);
+  // Select the right storage based on the path: cloud paths need their own storage,
+  // mirroring what DoSaveCheckAndStart does for saves.
+  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
+
+  auto expand_result = storage->ExpandSnapshot(path);
   if (!expand_result) {
     LOG(ERROR) << "Failed to load snapshot: " << expand_result.error().Format();
 
@@ -1372,8 +1398,9 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
   auto load_context = std::make_unique<RdbLoadContext>();
   if (absl::EndsWith(path, "summary.dfs")) {
     // we read summary first to get snapshot_id and load data correctly
-    error_code load_ec = pool.GetNextProactor()->Await(
-        [&] { return LoadRdb(path, existing_keys, &load_opts, load_context.get()); });
+    error_code load_ec = pool.GetNextProactor()->Await([&] {
+      return LoadRdb(path, existing_keys, &load_opts, load_context.get(), storage.get());
+    });
     if (load_ec)
       return immediate(load_ec);
   }
@@ -1395,8 +1422,8 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     }
 
     auto load_func = [file, existing_keys, load_opts, aggregated_result,
-                      load_context = load_context.get(), this]() mutable {
-      error_code load_ec = LoadRdb(file, existing_keys, &load_opts, load_context);
+                      load_context = load_context.get(), storage, this]() mutable {
+      error_code load_ec = LoadRdb(file, existing_keys, &load_opts, load_context, storage.get());
       if (load_ec) {
         aggregated_result->first_error = load_ec;
       } else {
@@ -1410,7 +1437,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_func = [this, aggregated_result, load_fibers = std::move(load_fibers),
-                         load_context = std::move(load_context), future]() mutable {
+                         load_context = std::move(load_context), storage, future]() mutable {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
@@ -1421,6 +1448,13 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     } else {
       load_context->PerformPostLoad(&service_);
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
+
+      // Loaded data bypasses the journal, so force replicas into full sync.
+      dfly_cmd_->CancelReplicas();
+      shard_set->RunBriefInParallel([](EngineShard* shard) {
+        if (shard->journal())
+          journal::ClearBuffer();
+      });
     }
 
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
@@ -1466,7 +1500,8 @@ void ServerFamily::SnapshotScheduling() {
 }
 
 std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
-                                      LoadOptions* load_opts, RdbLoadContext* load_context) {
+                                      LoadOptions* load_opts, RdbLoadContext* load_context,
+                                      detail::SnapshotStorage* storage) {
   DCHECK(load_opts);
   VLOG(1) << "Loading data from " << rdb_file;
   CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
@@ -1476,7 +1511,7 @@ std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingK
   ProactorBase* proactor = fb2::ProactorBase::me();
   error_code result;
   auto fb = proactor->LaunchFiber([&] {
-    io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
+    io::ReadonlyFileOrError res = storage->OpenReadFile(rdb_file);
     if (!res) {
       result = res.error();
       return;
@@ -1599,6 +1634,13 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                     &resp->body());
   AppendMetricValue("connected_clients", conn_stats.num_conns_other, {"listener"}, {"other"},
                     &resp->body());
+  AppendMetricHeader("tls_handshakes_total", "Total TLS handshakes by status", MetricType::COUNTER,
+                     &resp->body());
+  AppendMetricValue("tls_handshakes_total", conn_stats.handshakes_started, {"status"}, {"started"},
+                    &resp->body());
+  AppendMetricValue("tls_handshakes_total", conn_stats.handshakes_completed, {"status"},
+                    {"completed"}, &resp->body());
+
   AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.pipeline_queue_entries,
@@ -2054,6 +2096,20 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricValue("list_reads", m.qlist_stats.interior_node_reads, {"type"}, {"interior"},
                     &resp->body());
 
+  AppendMetricHeader("list_compression_attempts", "List compression attempts", MetricType::COUNTER,
+                     &resp->body());
+  AppendMetricValue("list_compression_attempts", m.qlist_stats.compression_attempts, {"type"},
+                    {"total"}, &resp->body());
+  AppendMetricValue("list_compression_attempts", m.qlist_stats.bad_compression_attempts, {"type"},
+                    {"fail"}, &resp->body());
+
+  AppendMetricHeader("list_compressed_bytes", "List compressed bytes", MetricType::GAUGE,
+                     &resp->body());
+  AppendMetricValue("list_compressed_bytes", m.qlist_stats.compressed_bytes, {"type"},
+                    {"compressed"}, &resp->body());
+  AppendMetricValue("list_compressed_bytes", m.qlist_stats.raw_compressed_bytes, {"type"}, {"raw"},
+                    &resp->body());
+
   // Tiered metrics
   {
     AppendMetricWithoutLabels("tiered_entries", "Tiered entries", total.tiered_entries,
@@ -2102,6 +2158,24 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                       &resp->body());
     AppendMetricValue("tiered_list_events", m.qlist_stats.onload_requests, {"type"}, {"onload"},
                       &resp->body());
+  }
+
+  // Replication Info
+  if (m.replica_side_info) {
+    const ReplicaSummary& rsummary = m.replica_side_info->summary;
+    AppendMetricWithoutLabels("master_link_status", "1 if up 0 if down",
+                              rsummary.master_link_established ? 1 : 0, MetricType::GAUGE,
+                              &resp->body());
+    AppendMetricWithoutLabels("master_last_io_seconds_ago", "Last Master IO Seconds Ago",
+                              rsummary.master_last_io_sec, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("master_sync_in_progress", "1 if true 0 if false",
+                              rsummary.full_sync_in_progress ? 1 : 0, MetricType::GAUGE,
+                              &resp->body());
+    // Print last known offset either during stable sync (online) or during disconnects when
+    // the full sync phase did not start yet.
+    if (rsummary.full_sync_done || (rsummary.passed_full_sync && !rsummary.master_link_established))
+      AppendMetricWithoutLabels("slave_repl_offset", "Slave Replication Offset",
+                                rsummary.repl_offset_sum, MetricType::GAUGE, &resp->body());
   }
 
   // Stream access pattern metrics
@@ -2174,8 +2248,7 @@ bool ServerFamily::AreAllReplicasInStableSync() const {
     return true;
   }
   auto match = SyncStateName(DflyCmd::SyncState::STABLE_SYNC);
-  return std::all_of(roles.begin(), roles.end(),
-                     [&match](auto& elem) { return elem.state == match; });
+  return rng::all_of(roles, [&match](auto& elem) { return elem.state == match; });
 }
 
 optional<Metrics::ReplicaInfo> ServerFamily::GetReplicaSummary() const {
@@ -2386,7 +2459,8 @@ bool ServerFamily::TEST_IsSaving() const {
 }
 
 void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait) {
-  VLOG(1) << "Drakarys";
+  LOG(INFO) << "Drakarys start db=" << db_ind << " wait=" << wait
+            << " rss=" << HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
 
   vector<fb2::Fiber> fibers(shard_set->size());
   transaction->Execute(
@@ -2399,6 +2473,11 @@ void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait)
   auto action = wait ? &fb2::Fiber::JoinIfNeeded : &fb2::Fiber::Detach;
   for (auto& f : fibers)
     (f.*action)();
+
+  LOG(INFO) << (wait ? "Drakarys main done (shards joined)"
+                     : "Drakarys main dispatched (shards detached; per-shard 'finished decommit' "
+                       "logs mark real completion)")
+            << " rss=" << HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
 }
 
 SaveInfoData ServerFamily::GetLastSaveInfo() const {
@@ -2749,37 +2828,61 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
-    auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
-    if (!IsValid(it)) {
-      return OpStatus::KEY_NOTFOUND;
+
+    // First, do a read-only check: validate type/encoding and decide whether
+    // shrink is needed.  This avoids bumping the key version, firing WATCH
+    // invalidations, or running PostUpdate for no-op / WRONGTYPE paths.
+    {
+      auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
+      if (!IsValid(it)) {
+        return OpStatus::KEY_NOTFOUND;
+      }
+
+      const PrimeValue& pv = it->second;
+      unsigned encoding = pv.Encoding();
+      unsigned obj_type = pv.ObjType();
+
+      if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
+        return OpStatus::WRONG_TYPE;
+      }
+
+      DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
+      ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+      size_t current_size = ds->UpperBoundSize();
+      size_t bucket_count = ds->BucketCount();
+
+      if (current_size == 0 || bucket_count == 0) {
+        return 0;
+      }
+
+      size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
+      if (optimal_size >= bucket_count) {
+        return 0;
+      }
     }
 
-    const PrimeValue& pv = it->second;
-    unsigned encoding = pv.Encoding();
-    unsigned obj_type = pv.ObjType();
-
-    // Only DenseSet-based structures (set or hash with kEncodingStrMap2)
-    if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
-      return OpStatus::WRONG_TYPE;
+    // Shrink is needed — use FindMutable so the AutoUpdater tracks the
+    // MallocUsed() delta (bucket array resize, link changes, expired-entry
+    // deletions) and keeps obj_memory_usage in sync.
+    auto it_res = db_slice.FindMutable(t->GetDbContext(), key);
+    if (!IsValid(it_res.it)) {
+      return OpStatus::KEY_NOTFOUND;  // raced away between the two lookups
     }
 
+    PrimeValue& pv = it_res.it->second;
     DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
     ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
-    size_t current_size = ds->UpperBoundSize();
-    size_t bucket_count = ds->BucketCount();
 
-    if (current_size == 0 || bucket_count == 0) {
-      return 0;
-    }
-
-    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
-    if (optimal_size >= bucket_count) {
-      return 0;
-    }
-
-    size_t bucket_bytes_before = bucket_count * sizeof(void*);
+    size_t bucket_bytes_before = ds->BucketCount() * sizeof(void*);
+    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(ds->UpperBoundSize()));
     ds->Shrink(optimal_size);
     size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
+
+    // Shrink expires entries during bucket compaction.  If all entries expired,
+    // delete the now-empty key to prevent zombie keys that crash SAVE.
+    if (ds->Empty()) {
+      db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
+    }
 
     return bucket_bytes_before - bucket_bytes_after;
   };
@@ -2836,7 +2939,7 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
       LOG(ERROR) << "Compiled without AWS support";
       exit(1);
 #endif
-    } else if (detail::IsGCSPath(ArgS(args, 1))) {
+    } else if (detail::IsGCSPath(ArgS(args, 1)) || detail::IsAzurePath(ArgS(args, 1))) {
       save_cmd_opts.cloud_uri = ArgS(args, 1);
     } else {
       // no cloud_uri get basename and return
@@ -3002,6 +3105,16 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
 
+#ifdef WITH_SEARCH
+  // HNSW indices live in a single global registry shared across shards, so their
+  // footprint must be added once — not per-shard. Track it in both the search_used
+  // breakdown (memory_by_class_bytes{class="search_used"}) and the overall heap
+  // gauge (memory_used_bytes). See issue #7110.
+  size_t hnsw_memory = GlobalHnswIndexRegistry::Instance().GetTotalMemoryUsage();
+  result.search_stats.used_memory += hnsw_memory;
+  result.heap_used_bytes += hnsw_memory;
+#endif
+
   uint64_t after_cb = absl::GetCurrentTimeNanos();
 
   // Normalize moving average stats
@@ -3019,6 +3132,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   }
 
   result.migration_errors_total = service_.cluster_family().MigrationsErrorsCount();
+  result.acl_stats = service_.user_registry().GetAclStats();
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
@@ -3554,6 +3668,19 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
       append(absl::StrFormat("latency_percentiles_usec_%s", cmd_name), absl::StrJoin(stats, ","));
     }
+  }
+
+  if (should_enter("ACL", true)) {
+    const auto& acl = m.acl_stats;
+    append("acl_num_users", acl.num_users);
+    append("acl_num_passwords", acl.num_passwords);
+    append("acl_num_cat_changes", acl.num_cat_changes);
+    append("acl_num_cmd_changes", acl.num_cmd_changes);
+    append("acl_num_key_globs", acl.num_key_globs);
+    append("acl_key_globs_bytes", acl.key_globs_bytes);
+    append("acl_num_pubsub_globs", acl.num_pubsub_globs);
+    append("acl_pubsub_globs_bytes", acl.pubsub_globs_bytes);
+    append("acl_total_bytes", acl.TotalBytes());
   }
 
   return info;

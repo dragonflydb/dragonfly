@@ -13,6 +13,7 @@
 #include "base/flags.h"
 #include "core/huff_coder.h"
 #include "core/page_usage/page_usage_stats.h"
+#include "core/qlist.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -356,7 +357,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
   }
 
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
-  auto [prime_table, _unused_expire] = slice.GetTables(defrag_state_.dbid);
+  auto* prime_table = slice.GetTables(defrag_state_.dbid);
   PrimeTable::Cursor cur{defrag_state_.cursor};
   uint64_t reallocations = 0;
   uint64_t attempts = 0;
@@ -589,6 +590,7 @@ void EngineShard::DestroyThreadLocal() {
 
   shard_->Shutdown();
 
+  QList::ShutdownThread();
   detail::InternedString::ResetPool();
   shard_->~EngineShard();
   CleanupStatelessAllocMR();
@@ -848,7 +850,7 @@ void EngineShard::RetireExpiredAndEvict() {
       continue;
 
     db_cntx.db_index = i;
-    auto [pt, _unused_expt] = db_slice.GetTables(i);
+    auto* pt = db_slice.GetTables(i);
     uint64_t expire_count = db_slice.GetDBTable(i)->stats.expire_count;
     if (expire_count > 0) {
       // Scale traversal count to compensate for TTL key dilution in the prime table.
@@ -1035,8 +1037,10 @@ void EngineShard::CacheStats() {
   size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
   size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
 
-  VLOG_EVERY_N(1, 500) << "Entries count " << entries << " "
-                       << "obj_memory: " << obj_memory << ", bytes_per_obj: " << bytes_per_obj;
+  if (VLOG_IS_ON(1)) {
+    LOG_EVERY_T(INFO, 1) << "Entries count " << entries << " "
+                         << "obj_memory: " << obj_memory << ", bytes_per_obj: " << bytes_per_obj;
+  }
 
   db_slice.UpdateMemoryParams(free_mem / shard_set->size(), bytes_per_obj);
   last_mem_params_ = {now, used_mem};

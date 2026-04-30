@@ -472,6 +472,23 @@ TEST_F(SetFamilyTest, CheckSetLinkExpiryTransfer) {
   EXPECT_THAT(Run("SCARD key"), IntArg(0));
 }
 
+// Regression: SPOP on a set where all members have expired via lazy expiry
+// must return nil, not crash with DCHECK on empty result.
+TEST_F(SetFamilyTest, SPopAllExpired) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Add a member without TTL, then update it with TTL via SADDEX.
+  Run({"sadd", "key", "member"});
+  EXPECT_EQ(0, CheckedInt({"saddex", "key", "1", "member"}));
+
+  // Advance time so the member expires.
+  AdvanceTime(2000);
+
+  // SPOP should return nil (key effectively empty), not crash.
+  auto resp = Run({"spop", "key"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
 TEST_F(SetFamilyTest, SetInter_5590) {
   absl::FlagSaver fs;
   SetTestFlag("num_shards", "2");
@@ -494,6 +511,314 @@ TEST_F(SetFamilyTest, SetInter_5590) {
   int64_t end = absl::GetCurrentTimeNanos();
   // Less than 100 ms. Before the fix it took 3seconds.
   EXPECT_LE(end - start, 100000000);
+}
+
+// Regression test: SUNIONSTORE/SDIFFSTORE/SINTERSTORE overwriting a key of a different type
+// must properly decrement the old type's memory counter before switching to OBJ_SET.
+// Without the ReduceHeapUsage() call in OpAdd, the old type's counter is never decremented,
+// leading to "Encountered underflow memory usage" errors.
+TEST_F(SetFamilyTest, StoreOverwritesNonSetKeyAccounting) {
+  // Create a list key that will be overwritten
+  Run({"rpush", "dest", "a", "b", "c"});
+  // Create a source set
+  Run({"sadd", "src", "x", "y", "z"});
+
+  Metrics before = GetMetrics();
+  ASSERT_FALSE(before.db_stats.empty());
+  const size_t list_before = before.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  ASSERT_GT(list_before, 0u);
+
+  // SUNIONSTORE overwrites "dest" (a list) with a set
+  auto resp = Run({"sunionstore", "dest", "src"});
+  EXPECT_THAT(resp, IntArg(3));
+  EXPECT_EQ(Run({"type", "dest"}), "set");
+
+  Metrics after = GetMetrics();
+  const size_t list_after = after.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  const size_t set_after = after.db_stats[0].memory_usage_by_type[OBJ_SET];
+  EXPECT_EQ(list_after, 0u) << "Old list memory must be fully decremented";
+  EXPECT_GT(set_after, 0u) << "New set memory must be tracked";
+
+  // Also test SDIFFSTORE
+  Run({"rpush", "dest2", "a", "b"});
+  Run({"sdiffstore", "dest2", "src"});
+  EXPECT_EQ(Run({"type", "dest2"}), "set");
+  Metrics after2 = GetMetrics();
+  EXPECT_EQ(after2.db_stats[0].memory_usage_by_type[OBJ_LIST], 0u);
+
+  // And SINTERSTORE
+  Run({"rpush", "dest3", "a", "b"});
+  Run({"sadd", "src2", "x", "y"});
+  Run({"sinterstore", "dest3", "src", "src2"});
+  EXPECT_EQ(Run({"type", "dest3"}), "set");
+  Metrics after3 = GetMetrics();
+  EXPECT_EQ(after3.db_stats[0].memory_usage_by_type[OBJ_LIST], 0u);
+}
+
+// Regression test for #6973: SDIFF/SDIFFSTORE crash when all set members
+// have expired via per-member TTL, leaving the key present but the set empty.
+TEST_F(SetFamilyTest, SDiffAllMembersExpired) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Add members with a short TTL.
+  Run({"saddex", "src", "1", "a", "b", "c"});
+  Run({"sadd", "other", "x"});
+
+  // Advance time so all members in "src" expire.
+  AdvanceTime(2000);
+
+  // SDIFF should return empty (like KEY_NOTFOUND), not crash.
+  auto resp = Run({"sdiff", "src", "other"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  // The key must be deleted after lazy expiry emptied the set.
+  EXPECT_THAT(Run({"exists", "src"}), IntArg(0));
+
+  // SDIFFSTORE should store nothing and return 0.
+  Run({"saddex", "src", "1", "a", "b", "c"});
+  AdvanceTime(2000);
+  resp = Run({"sdiffstore", "dest", "src", "other"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"exists", "src"}), IntArg(0));
+}
+
+// Verify key deletion after lazy member expiry for SUNION and SINTER.
+TEST_F(SetFamilyTest, SetOpsDeleteEmptyAfterExpiry) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "s1", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  // SUNION triggers iteration which expires all members — key should be deleted.
+  auto resp = Run({"sunion", "s1"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "s1"}), IntArg(0));
+
+  Run({"saddex", "s2", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  // SINTER single-key path — same behavior.
+  resp = Run({"sinter", "s2"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "s2"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SPopWithExpiredMembers) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Add members with a short TTL. After expiry Size() still reports them.
+  Run({"saddex", "key", "1", "a", "b", "c"});
+
+  // Let all members expire.
+  AdvanceTime(2000);
+
+  // SPOP 2: Size()=3 (stale), picks_count=min(2,3)=2 < 3 → CASE 2.
+  // Iteration lazy-expires all 3 → set becomes empty → CHECK(!is_empty) crash.
+  auto resp = Run({"spop", "key", "2"});
+  // All members are expired, so nothing is actually popped.
+  ASSERT_THAT(resp, ArrLen(0));
+
+  // The key should be deleted after lazy expiry emptied the set.
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  // Single-arg form: SPOP key (no count). Must return NULL, not crash on
+  // empty vector dereference.
+  Run({"saddex", "key2", "1", "x", "y"});
+  AdvanceTime(2000);
+
+  resp = Run({"spop", "key2"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"exists", "key2"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SPopSingleArgExpiredCase2) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  for (int attempt = 0; attempt < 50; ++attempt) {
+    string key = absl::StrCat("key", attempt);
+
+    Run({"sadd", key, "live"});
+    Run({"saddex", key, "1", "a", "b", "c"});
+
+    // Let TTL members expire.
+    AdvanceTime(2000);
+
+    auto resp = Run({"spop", key});
+    // Must be either "live" or nil — never a DCHECK crash.
+    if (resp.type == RespExpr::NIL) {
+      // The live member must still be in the set.
+      EXPECT_THAT(Run({"sismember", key, "live"}), IntArg(1));
+      continue;
+    }
+    EXPECT_THAT(resp, "live");
+  }
+}
+
+// Regression test: SRANDMEMBER crashes (SIGSEGV) when all set members have
+// expired via per-member TTL.  OpRandMember reads co.Size() before lazy expiry,
+// then RandMemberStrSetPicky dereferences GetRandomMember() on an empty set.
+// To hit the RandMemberStrSetPicky path we need picks_count*5 < UpperBoundSize(),
+// so with count=1 we need at least 6 members.
+TEST_F(SetFamilyTest, SRandMemberWithExpiredMembers) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // 6+ members so UpperBoundSize() > 5, triggering the RandMemberStrSetPicky path.
+  Run({"saddex", "key", "1", "a", "b", "c", "d", "e", "f"});
+  AdvanceTime(2000);
+
+  // Without count — should return NIL, not crash.
+  auto resp = Run({"srandmember", "key"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  // With positive count — unique picks path.
+  Run({"saddex", "key2", "1", "a", "b", "c", "d", "e", "f"});
+  AdvanceTime(2000);
+
+  resp = Run({"srandmember", "key2", "1"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key2"}), IntArg(0));
+
+  // With negative count — non-unique picks, picky path (count*5 < UpperBoundSize).
+  Run({"saddex", "key3", "1", "a", "b", "c", "d", "e", "f"});
+  AdvanceTime(2000);
+
+  resp = Run({"srandmember", "key3", "-1"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key3"}), IntArg(0));
+
+  // Large negative count — exercises the iteration path (picks_count*5 >= UpperBoundSize).
+  Run({"saddex", "key4", "1", "a", "b", "c", "d", "e", "f"});
+  AdvanceTime(2000);
+
+  resp = Run({"srandmember", "key4", "-25"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key4"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SIsMemberDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Single member so the SISMEMBER lookup touches its bucket and empties the set.
+  Run({"saddex", "key", "1", "a"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"sismember", "key", "a"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SMIsMemberDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"smismember", "key", "a", "b"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SScanDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"sscan", "key", "0"});
+  // Cursor should be 0 and result set empty.
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], "0");
+  EXPECT_THAT(resp.GetVec()[1], ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SInterMultiKeyDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key1", "1", "a", "b"});
+  Run({"sadd", "key2", "a", "b"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"sinter", "key1", "key2"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key1"}), IntArg(0));
+  // key2 has no TTL, should still exist.
+  EXPECT_THAT(Run({"exists", "key2"}), IntArg(1));
+}
+
+TEST_F(SetFamilyTest, SMoveDeletesEmptySourceSet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Single member so the SMOVE lookup touches its bucket and empties the set.
+  Run({"saddex", "src", "1", "a"});
+  Run({"sadd", "dst", "x"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"smove", "src", "dst", "a"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"exists", "src"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, FieldExpireDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Single member so FIELDEXPIRE touches its bucket and triggers lazy expiry.
+  Run({"saddex", "key", "1", "a"});
+  AdvanceTime(2000);
+
+  // FIELDEXPIRE on an already-expired member should clean up the empty set.
+  auto resp = Run({"fieldexpire", "key", "100", "a"});
+  // -2 means the field was not found (expired).
+  EXPECT_THAT(resp, IntArg(-2));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, FieldTtlDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Single member so FIELDTTL touches its bucket and triggers lazy expiry.
+  Run({"saddex", "key", "1", "a"});
+  AdvanceTime(2000);
+
+  // FIELDTTL on an already-expired member should clean up the empty set.
+  auto resp = Run({"fieldttl", "key", "a"});
+  // -3 means the field was not found (expired); -2 would mean key not found.
+  EXPECT_THAT(resp, IntArg(-3));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+// Regression test for github.com/dragonflydb/dragonfly/issues/7171
+// Same bug as ShrinkMemoryAccountingHash but for sets with SADDEX/SREM.
+TEST_F(SetFamilyTest, ShrinkMemoryAccountingSet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Phase 1: Grow bucket_count to 128 by adding 60 members.
+  for (int i = 0; i < 60; i++) {
+    Run({"SADDEX", "s1", "1000", absl::StrCat("temp", i)});
+  }
+
+  // Phase 2: Remove 50, keep 10, bucket_count stays 128.
+  for (int i = 0; i < 50; i++) {
+    Run({"SREM", "s1", absl::StrCat("temp", i)});
+  }
+
+  // Phase 3: Add 10 members with short TTL.
+  for (int i = 0; i < 10; i++) {
+    Run({"SADDEX", "s1", "1", absl::StrCat("exp", i)});
+  }
+  // 20 total (10 long + 10 short), bucket_count = 128.
+
+  // Phase 4: Expire the short-TTL members.
+  AdvanceTime(2000);
+
+  // UpperBoundSize = 20, optimal = 32 < 128 → Shrink.
+  int64_t shrink_result = CheckedInt({"SHRINK", "s1"});
+  EXPECT_GT(shrink_result, 0) << "SHRINK must actually shrink the set";
+
+  // Must not crash in FindMutable → DCHECK.
+  Run({"SREM", "s1", "temp50"});
+  EXPECT_THAT(Run({"SCARD", "s1"}), IntArg(9));
 }
 
 }  // namespace dfly

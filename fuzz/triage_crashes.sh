@@ -165,6 +165,9 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     CRASH_NAME=$(basename "$CRASH_ARCHIVE" .tar.gz)   # crash-000000
     CRASH_ID="${CRASH_NAME#crash-}"                    # 000000
     IDX=$((CONFIRMED + FALSE_POSITIVE + FAILED + 1))
+    # Reset per-archive port defaults (may be overridden from repro.env below)
+    RESP_PORT=6379
+    MC_PORT=11211
 
     echo -e "${CYAN}${BOLD}─── [$IDX/$TOTAL] Crash ${CRASH_ID} ───${NC}"
 
@@ -182,6 +185,36 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
         continue
     fi
 
+    # Load exact Dragonfly flags and memory limit from repro.env bundled in the archive.
+    # Done before the port-in-use check so RESP_PORT reflects the actual fuzz port.
+    # repro.env is written by run_fuzzer.sh so flags stay in sync with the fuzz run.
+    # Fallback to safe defaults for older archives that don't include repro.env.
+    REPRO_ENV="$EXTRACT_DIR/${CRASH_NAME}/repro.env"
+    if [[ -f "$REPRO_ENV" ]]; then
+        MEM_LIMIT_KB=$(grep '^MEM_LIMIT_KB=' "$REPRO_ENV" | cut -d= -f2 || true)
+        MEM_LIMIT_KB="${MEM_LIMIT_KB:-$((4 * 1024 * 1024))}"
+        mapfile -t DF_ARGS < <(grep -v '^#' "$REPRO_ENV" | grep -v '^MEM_LIMIT_KB=' | grep -v '^$' || true)
+        RESP_PORT=$(grep '^--port=' "$REPRO_ENV" | cut -d= -f2 || true)
+        RESP_PORT="${RESP_PORT:-6379}"
+        MC_PORT=$(grep '^--memcached_port=' "$REPRO_ENV" | cut -d= -f2 || true)
+        MC_PORT="${MC_PORT:-11211}"
+    else
+        print_warn "repro.env not found — using default flags (older crash archive)"
+        MEM_LIMIT_KB=$((4 * 1024 * 1024))
+        DF_ARGS=(
+            --port="$RESP_PORT"
+            --proactor_threads=1
+            --dbfilename=
+            --omit_basic_usage
+            --rename_command=SHUTDOWN=
+            --rename_command=DEBUG=
+            --rename_command=FLUSHALL=
+            --rename_command=FLUSHDB=
+            --max_bulk_len=1048576
+        )
+        [[ "$MODE" == "memcache" ]] && DF_ARGS+=(--memcached_port="$MC_PORT")
+    fi
+
     # Kill any leftover process on the port from a previous iteration
     if (>/dev/tcp/127.0.0.1/"$RESP_PORT") 2>/dev/null; then
         print_warn "Port $RESP_PORT still in use — waiting..."
@@ -196,28 +229,16 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     # Start Dragonfly — use --log_dir so glog writes to separate per-level files
     # (dragonfly.FATAL symlink is created on crash and contains the fatal message)
     LOG_DIR="$WORK_DIR/logs_${CRASH_ID}"
-    mkdir -p "$LOG_DIR"
+    DB_DIR="$WORK_DIR/db_${CRASH_ID}"
+    rm -rf "$DB_DIR"
+    mkdir -p "$LOG_DIR" "$DB_DIR"
 
-    # Mirror the exact flags used by run_fuzzer.sh so replay runs in the same
-    # server configuration as when the crash was found.
-    # Missing rename_command flags are the most common cause of false positives:
-    # if FLUSHALL/FLUSHDB/SHUTDOWN are not disabled, they execute during replay,
-    # wiping state or shutting down the server before the crash can trigger.
-    DF_ARGS=(
-        --port "$RESP_PORT"
-        --log_dir="$LOG_DIR"
-        --proactor_threads 1
-        --dbfilename=""
-        --omit_basic_usage
-        --rename_command=SHUTDOWN=
-        --rename_command=DEBUG=
-        --rename_command=FLUSHALL=
-        --rename_command=FLUSHDB=
-        --max_bulk_len=1048576
-    )
-    [[ "$MODE" == "memcache" ]] && DF_ARGS+=(--memcached_port="$MC_PORT")
+    # Triage-specific flags (not part of the fuzz run):
+    # --log_dir captures crash logs; --dir provides a clean writable directory
+    # for save-enabled runs (each crash gets its own dir to avoid stale dumps)
+    DF_ARGS+=(--log_dir="$LOG_DIR" --dir="$DB_DIR")
 
-    "$DRAGONFLY_BIN" "${DF_ARGS[@]}" >/dev/null 2>&1 &
+    (ulimit -v "$MEM_LIMIT_KB"; exec "$DRAGONFLY_BIN" "${DF_ARGS[@]}" >/dev/null 2>&1) &
     DF_PID=$!
 
     if ! wait_for_port 127.0.0.1 "$RESP_PORT" "$STARTUP_TIMEOUT"; then
