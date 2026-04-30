@@ -274,25 +274,21 @@ struct HnswlibAdapter {
     DCHECK_EQ(world_.cur_element_count.load(), 0u)
         << "RestoreFromNodes should only be called on an empty index during deserialization";
 
-    // hnswlib pairs enterpoint_node_ with maxlevel_; node levels are immutable after
-    // creation, so the entry point's level in the serialized set equals the live
-    // maxlevel at metadata capture. max(node.level) would risk OOB reads when a
-    // concurrent Add raised maxlevel between capture and node serialization.
-    size_t max_internal_id = 0;
-    int entrypoint_level = -1;
-    for (const auto& node : nodes) {
-      max_internal_id = std::max<size_t>(max_internal_id, node.internal_id);
-      if (node.internal_id == metadata.enterpoint_node)
-        entrypoint_level = node.level;
-    }
-    if (entrypoint_level < 0) {
+    // Wire-ordering invariant: GetNodesRange writes nodes by ascending internal_id
+    // 0..count-1 under the saver's read lock, and the loader reads them sequentially
+    // (LoadVectorIndexNodes), so nodes[i].internal_id == i and nodes.size() is the
+    // capacity we need. Validate the entry-point in O(1) and read its level
+    // directly — by the hnswlib invariant it equals world_.maxlevel_ at save time.
+    if (metadata.enterpoint_node >= nodes.size() ||
+        nodes[metadata.enterpoint_node].internal_id != metadata.enterpoint_node) {
       LOG(ERROR) << "HNSW restore: entry point internal_id=" << metadata.enterpoint_node
-                 << " not present in serialized node set (" << nodes.size()
+                 << " out of range or wire ordering violated (" << nodes.size()
                  << " nodes); skipping restore — index will be rebuilt from the keyspace";
       return false;
     }
-    if (world_.max_elements_ < max_internal_id + 1) {
-      world_.resizeIndex(max_internal_id + 1);
+    int entrypoint_level = nodes[metadata.enterpoint_node].level;
+    if (world_.max_elements_ < nodes.size()) {
+      world_.resizeIndex(nodes.size());
     }
 
     // Restore each node - directly set up memory and fields

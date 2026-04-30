@@ -77,8 +77,7 @@ HnswRemapTable BuildRemapTable(
 // Remaps global_ids in deferred HNSW nodes and restores the graphs.
 // Returns the set of index names that failed restoration (to be excluded from key mappings).
 absl::flat_hash_set<std::string> RemapAndRestoreHnswGraphs(
-    std::vector<PendingHnswNodes>& pending_nodes,
-    const std::vector<PendingHnswMetadata>& hnsw_metadata, const HnswRemapTable& remap_table) {
+    std::vector<PendingHnswNodes>& pending_nodes, const HnswRemapTable& remap_table) {
   absl::flat_hash_set<std::string> failed_indices;
 #ifdef WITH_SEARCH
   for (auto& pn : pending_nodes) {
@@ -120,21 +119,7 @@ absl::flat_hash_set<std::string> RemapAndRestoreHnswGraphs(
       continue;
     }
 
-    const PendingHnswMetadata* phm_ptr = nullptr;
-    for (const auto& phm : hnsw_metadata) {
-      if (phm.index_name == pn.index_name && phm.field_name == pn.field_name) {
-        phm_ptr = &phm;
-        break;
-      }
-    }
-    if (!phm_ptr) {
-      LOG(ERROR) << "HNSW metadata missing for " << pn.index_name << ":" << pn.field_name
-                 << ". Will rebuild from scratch.";
-      failed_indices.insert(pn.index_name);
-      continue;
-    }
-
-    if (!hnsw_index->RestoreFromNodes(pn.nodes, phm_ptr->metadata)) {
+    if (!hnsw_index->RestoreFromNodes(pn.nodes, pn.metadata)) {
       LOG(WARNING) << "HNSW graph restore rejected for " << pn.index_name << ":" << pn.field_name
                    << ". Will rebuild from scratch.";
       failed_indices.insert(pn.index_name);
@@ -258,11 +243,6 @@ void RdbLoadContext::AddPendingIndexMapping(uint32_t shard_id, PendingIndexMappi
   pending_index_mappings_[shard_id].emplace_back(std::move(mapping));
 }
 
-void RdbLoadContext::AddPendingHnswMetadata(PendingHnswMetadata metadata) {
-  util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
-  pending_hnsw_metadata_.emplace_back(std::move(metadata));
-}
-
 void RdbLoadContext::AddPendingHnswNodes(PendingHnswNodes nodes) {
   util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
   pending_hnsw_nodes_.emplace_back(std::move(nodes));
@@ -272,15 +252,8 @@ void RdbLoadContext::SetMasterShardCount(uint32_t count) {
   master_shard_count_ = count;
 }
 
-std::optional<search::HnswIndexMetadata> RdbLoadContext::FindHnswMetadata(
-    std::string_view index_name, std::string_view field_name) const {
-  util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
-  for (const auto& phm : pending_hnsw_metadata_) {
-    if (phm.index_name == index_name && phm.field_name == field_name) {
-      return phm.metadata;
-    }
-  }
-  return std::nullopt;
+void RdbLoadContext::MarkHnswIndexRestored() {
+  hnsw_index_restored_.store(true, std::memory_order_relaxed);
 }
 
 std::vector<std::string> RdbLoadContext::TakePendingSynonymCommands() {
@@ -305,8 +278,7 @@ std::vector<PendingHnswNodes> RdbLoadContext::TakePendingHnswNodes() {
 
 RdbLoadContext::PerShardMappings RdbLoadContext::RemapHnswForDifferentShardCount(
     const absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>>& index_mappings,
-    std::vector<PendingHnswNodes>& pending_nodes,
-    const std::vector<PendingHnswMetadata>& hnsw_metadata) {
+    std::vector<PendingHnswNodes>& pending_nodes) {
   const ShardId new_shard_count = shard_set->size();
 
   // Build remap table: index_name -> master_shard_id -> new_global_ids indexed by old doc_id.
@@ -314,7 +286,7 @@ RdbLoadContext::PerShardMappings RdbLoadContext::RemapHnswForDifferentShardCount
   HnswRemapTable remap_table = BuildRemapTable(index_mappings, new_shard_count);
 
   // Remap global_ids, restore HNSW graphs; failed indices are excluded from key mappings.
-  auto failed = RemapAndRestoreHnswGraphs(pending_nodes, hnsw_metadata, remap_table);
+  auto failed = RemapAndRestoreHnswGraphs(pending_nodes, remap_table);
   for (const auto& name : failed) {
     remap_table.erase(name);
   }
@@ -333,15 +305,9 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   auto index_mappings = TakePendingIndexMappings();
   auto pending_nodes = TakePendingHnswNodes();
 
-  // Extract remaining shared state under lock. After this, no member access is needed.
-  std::vector<PendingHnswMetadata> hnsw_metadata;
-  {
-    util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
-    hnsw_metadata.swap(pending_hnsw_metadata_);
-  }
   uint32_t master_shards = master_shard_count_;
 
-  bool has_hnsw_restore = !hnsw_metadata.empty();
+  bool has_hnsw_restore = hnsw_index_restored_.load(std::memory_order_relaxed);
 
   if (is_error)
     return;
@@ -352,8 +318,7 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   if (shard_count_differs && !index_mappings.empty()) {
     // Remaps HNSW global_ids, restores HNSW graphs, and pre-distributes key mappings by target
     // shard. The internal remap table is local to the function and freed when it returns.
-    auto per_shard_mappings =
-        RemapHnswForDifferentShardCount(index_mappings, pending_nodes, hnsw_metadata);
+    auto per_shard_mappings = RemapHnswForDifferentShardCount(index_mappings, pending_nodes);
 
     // Each shard reads only its own pre-built slice — no per-shard filtering of all N keys.
     shard_set->AwaitRunningOnShardQueue([&per_shard_mappings](EngineShard* es) {
