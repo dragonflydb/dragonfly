@@ -79,12 +79,16 @@ struct HMapWrap {
   }
 
  public:
+  // Create from non-external prime value
   HMapWrap(const PrimeValue& pv, DbContext db_cntx) {
     DCHECK(!pv.IsExternal() || pv.IsCool());
     if (pv.Encoding() == kEncodingListPack)
       impl_ = detail::ListpackWrap{static_cast<uint8_t*>(pv.RObjPtr())};
     else
       impl_ = GetStringMap(pv, db_cntx);
+  }
+
+  explicit HMapWrap(detail::ListpackWrap lw) : impl_{std::move(lw)} {
   }
 
   explicit HMapWrap(tiering::SerializedMap* sm) : impl_{sm} {
@@ -134,6 +138,14 @@ struct HMapWrap {
     Overloaded ov{
         [](StringMap* s) {},
         [&](detail::ListpackWrap& lw) { pv.SetRObjPtr(lw.GetPointer()); },
+    };
+    VisitMut(ov);
+  }
+
+  void Launder(tiering::SerializedMapDecoder* dec) {
+    Overloaded ov{
+        [](StringMap* s) {},
+        [&](detail::ListpackWrap& lw) { *dec->GetMutable() = lw; },
     };
     VisitMut(ov);
   }
@@ -197,7 +209,17 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
       using D = tiering::SerializedMapDecoder;
       util::fb2::Future<OpResult<T>> fut;
       auto read_cb = [fut, f = std::move(f)](io::Result<D*> res) mutable {
-        HMapWrap hw{res.value()->Get()};
+        if (!res) {
+          fut.Resolve(OpResult<T>{OpStatus::IO_ERROR});
+          return;
+        }
+
+        // Create wrapper from different types
+        Overloaded ov{
+            [](tiering::SerializedMap* sm) { return HMapWrap{sm}; },
+            [](detail::ListpackWrap* lw) { return HMapWrap{*lw}; },
+        };
+        auto hw = visit(ov, res.value()->Get());
         fut.Resolve(f(hw));
       };
 
@@ -220,19 +242,40 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
   return Unwrap(tx->ScheduleSingleHopT(std::move(shard_cb)));
 }
 
-// Wrap write handler with field-level extraction for HNSW external data preservation.
-// Note: modified_fields contains string_views into CmdArgList data, which the transaction
-// keeps alive for the duration of execution.
+// Wrap write handler
 template <typename F>
-auto WrapW(F&& f, absl::InlinedVector<std::string_view, 4> modified_fields = {}) {
-  using RT = std::invoke_result_t<F, HMapWrap&>;
-  return [f = std::forward<F>(f), fields = std::move(modified_fields)](Transaction* t,
-                                                                       EngineShard* es) -> RT {
+auto ExecuteW(Transaction* tx, F&& f,
+              absl::InlinedVector<std::string_view, 4> modified_fields = {}) {
+  using T = typename std::invoke_result_t<F, HMapWrap&>::Type;
+  auto shard_cb = [f = std::forward<F>(f), fields = std::move(modified_fields)](
+                      Transaction* t, EngineShard* es) -> OpResult<CbVariant<T>> {
+    // Fetch value of hash type
     auto [key, op_args] = KeyAndArgs(t, es);
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
     auto& pv = it_res->it->second;
+
+    // Enqueue read for future values
+    if (pv.IsExternal() && !pv.IsCool()) {
+      using D = tiering::SerializedMapDecoder;
+      util::fb2::Future<OpResult<T>> fut;
+      auto read_cb = [fut, f = std::move(f)](io::Result<D*> res) mutable {
+        if (!res) {
+          fut.Resolve(OpResult<T>{OpStatus::IO_ERROR});
+          return;
+        }
+
+        // Create wrapper from different types
+        HMapWrap hw{*res.value()->GetMutable()};
+        fut.Resolve(f(hw));
+        hw.Launder(*res);
+      };
+
+      es->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
+                                 pv.GetExternalSlice(), D{}, std::move(read_cb), false);
+      return CbVariant<T>{std::move(fut)};
+    }
 
     // Remove document before modification, preserving HNSW external vector data.
     op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv, fields);
@@ -249,8 +292,11 @@ auto WrapW(F&& f, absl::InlinedVector<std::string_view, 4> modified_fields = {})
     else
       op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
-    return res;
+    RETURN_ON_BAD_STATUS(res);
+    return CbVariant<T>{std::move(res).value()};
   };
+
+  return Unwrap(tx->ScheduleSingleHopT(std::move(shard_cb)));
 }
 
 size_t EstimateListpackMinBytes(CmdArgList members) {
@@ -308,6 +354,10 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 
   auto& add_res = *op_res;
   PrimeValue& pv = add_res.it->second;
+
+  if (pv.IsExternal() && !pv.IsCool())
+    return OpStatus::CANCELLED;  // Not supported for offloaded values
+
   if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
   } else {
@@ -404,26 +454,25 @@ OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, CmdArgList fields) {
   DCHECK(!fields.empty());
 
   std::vector<OptStr> result(fields.size());
-  if (auto lw = hw.Get<detail::ListpackWrap>(); lw) {
+  if (auto sm = hw.Get<StringMap*>(); sm) {
+    for (size_t i = 0; i < fields.size(); ++i) {
+      if (auto it = (*sm)->Find(fields[i]); it != (*sm)->end()) {
+        result[i].emplace(it->second, sdslen(it->second));
+      }
+    }
+  } else {
     absl::flat_hash_map<string_view, absl::InlinedVector<size_t, 3>> reverse;
     reverse.reserve(fields.size() + 1);
     for (size_t i = 0; i < fields.size(); ++i) {
       reverse[ArgS(fields, i)].push_back(i);  // map fields to their index.
     }
 
-    for (const auto [key, value] : *lw) {
+    for (const auto [key, value] : hw.Range()) {
       if (auto it = reverse.find(key); it != reverse.end()) {
         for (size_t index : it->second) {
           DCHECK_LT(index, result.size());
           result[index].emplace(value);
         }
-      }
-    }
-  } else {
-    StringMap* sm = *hw.Get<StringMap*>();
-    for (size_t i = 0; i < fields.size(); ++i) {
-      if (auto it = sm->Find(fields[i]); it != sm->end()) {
-        result[i].emplace(it->second, sdslen(it->second));
       }
     }
   }
@@ -435,10 +484,12 @@ struct OpSetParams {
   bool skip_if_exists = false;
   uint32_t ttl = UINT32_MAX;
   bool keepttl = false;
+
+  optional<util::fb2::Future<bool>>* backpressure = nullptr;
 };
 
-OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
-                         const OpSetParams& op_sp = OpSetParams{}) {
+OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
+                                    const OpSetParams& op_sp = OpSetParams{}) {
   DCHECK(!values.empty() && 0 == values.size() % 2);
   VLOG(2) << "OpSet(" << key << ")";
 
@@ -450,6 +501,32 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   uint8_t* lp = nullptr;
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
+
+  // If the value is external, enqueue read and modify it there
+  if (pv.IsExternal() && !pv.IsCool()) {
+    if (op_sp.ttl != UINT32_MAX)
+      return OpStatus::CANCELLED;  // Don't support expiry with offloaded hashes
+
+    using D = tiering::SerializedMapDecoder;
+    util::fb2::Future<OpResult<uint32_t>> fut;
+    auto read_cb = [fut, values, op_sp](io::Result<D*> res) mutable {
+      if (!res) {
+        fut.Resolve({OpStatus::IO_ERROR});
+        return;
+      }
+
+      auto& lw = *res.value()->GetMutable();
+      uint32_t created = 0;
+      for (size_t i = 0; i < values.size(); i += 2) {
+        created += lw.Insert(values[i], values[i + 1], op_sp.skip_if_exists);
+      }
+      fut.Resolve(created);
+    };
+
+    op_args.shard->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
+                                          pv.GetExternalSlice(), D{}, std::move(read_cb), false);
+    return CbVariant<uint32_t>{std::move(fut)};
+  }
 
   if (add_res.is_new) {
     if (op_sp.ttl == UINT32_MAX) {
@@ -511,10 +588,10 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   if (auto* ts = op_args.shard->tiered_storage(); ts) {
-    StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, nullptr);
+    StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, op_sp.backpressure);
   }
 
-  return created;
+  return CbVariant<uint32_t>{created};
 }
 
 void HGetGeneric(CmdArgList args, uint8_t getall_mask, CommandContext* cmd_cntx) {
@@ -615,7 +692,8 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
     return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  auto delayed_result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = Unwrap(std::move(delayed_result));
   if (result) {
     rb->SendLong(*result);
   } else {
@@ -650,7 +728,7 @@ void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
       deleted += hw.Erase(s);
     return deleted;
   };
-  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(WrapW(cb, std::move(field_names))));
+  HSetReplies{cmd_cntx}.Send(ExecuteW(cmd_cntx->tx(), std::move(cb), std::move(field_names)));
 }
 
 void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -956,12 +1034,19 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
 
+  optional<util::fb2::Future<bool>> tiered_backpressure;
+  OpSetParams params{.backpressure = &tiered_backpressure};
+
   args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args);
+    return OpSet(t->GetOpArgs(shard), key, args, params);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  auto delayed_result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = Unwrap(std::move(delayed_result));
+
+  if (tiered_backpressure)
+    tiered_backpressure->GetFor(10ms);
 
   if (result && cmd == "HSET") {
     rb->SendLong(*result);
@@ -976,7 +1061,7 @@ void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args.subspan(1), OpSetParams{.skip_if_exists = true});
   };
-  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  HSetReplies{cmd_cntx}.Send(Unwrap(cmd_cntx->tx()->ScheduleSingleHopT(cb)));
 }
 
 void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
