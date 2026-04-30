@@ -27,17 +27,12 @@ struct PendingIndexMapping {
   std::vector<std::pair<std::string, search::DocId>> mappings;
 };
 
-// HNSW metadata loaded from "hnsw-index-metadata" AUX fields.
-struct PendingHnswMetadata {
-  std::string index_name;
-  std::string field_name;
-  search::HnswIndexMetadata metadata;
-};
-
 // Deferred HNSW graph nodes for restoration when shard counts differ.
+// The entry-point travels with the nodes inside RDB_OPCODE_VECTOR_INDEX.
 struct PendingHnswNodes {
   std::string index_name;
   std::string field_name;
+  search::HnswIndexMetadata metadata;
   std::vector<search::HnswNodeData> nodes;
 };
 
@@ -54,12 +49,13 @@ class RdbLoadContext {
 
   void AddPendingSynonymCommand(std::string cmd);
   void AddPendingIndexMapping(uint32_t shard_id, PendingIndexMapping mapping);
-  void AddPendingHnswMetadata(PendingHnswMetadata metadata);
   void AddPendingHnswNodes(PendingHnswNodes nodes);
   void SetMasterShardCount(uint32_t count);
 
-  std::optional<search::HnswIndexMetadata> FindHnswMetadata(std::string_view index_name,
-                                                            std::string_view field_name) const;
+  // Marks that an HNSW index with non-empty graph data was received in this load session.
+  // Used by PerformPostLoad to tell RebuildAllIndices to populate vectors into the
+  // already-restored graph instead of rebuilding from scratch.
+  void MarkHnswIndexRestored();
 
   // Performs post load procedures while still remaining in global LOADING state.
   // Called once immediately after loading the snapshot / full sync succeeded from the coordinator.
@@ -79,15 +75,14 @@ class RdbLoadContext {
   // Failed indices are excluded from the returned mappings so they fall back to a full rebuild.
   PerShardMappings RemapHnswForDifferentShardCount(
       const absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>>& index_mappings,
-      std::vector<PendingHnswNodes>& pending_nodes,
-      const std::vector<PendingHnswMetadata>& hnsw_metadata);
+      std::vector<PendingHnswNodes>& pending_nodes);
 
   mutable util::fb2::Mutex mu_;
   std::vector<std::string> pending_synonym_cmds_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> pending_index_mappings_
       ABSL_GUARDED_BY(mu_);
-  std::vector<PendingHnswMetadata> pending_hnsw_metadata_ ABSL_GUARDED_BY(mu_);
   std::vector<PendingHnswNodes> pending_hnsw_nodes_ ABSL_GUARDED_BY(mu_);
+  std::atomic<bool> hnsw_index_restored_{false};
   uint32_t master_shard_count_ = 0;  // Set identically by all loaders from AUX field.
 };
 

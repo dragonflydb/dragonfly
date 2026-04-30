@@ -89,12 +89,18 @@ void SearchSerializer::SerializeGlobalHnswIndices() const {
       // Acquire a read lock to ensure a consistent snapshot of the graph.
       auto read_lock = index->GetReadLock();
 
-      // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, elements_number,
+      // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, enterpoint_node, elements_number,
       //          then for each node: binary encoded entry via SaveHNSWEntry]
+      // The entry-point ships with the node data so loaders need no separate AUX field.
       if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_VECTOR_INDEX); ec) {
         continue;
       }
       if (auto ec = serializer_->SaveString(index_key); ec) {
+        continue;
+      }
+
+      auto metadata = index->GetMetadata();
+      if (auto ec = serializer_->SaveLen(metadata.enterpoint_node); ec) {
         continue;
       }
 
