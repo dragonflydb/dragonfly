@@ -236,6 +236,10 @@ class RdbLoaderBase {
     return current_chunk_state_ && current_chunk_state_->remaining_payload_bytes == 0;
   }
 
+  // Called to validate that the current chunk is fully consumed, after validation resets current
+  // chunk state.
+  std::error_code FinishCurrentChunk();
+
   static void CopyStreamId(const StreamID& src, struct streamID* dest);
 
   base::IoBuf* mem_buf_ = nullptr;
@@ -349,6 +353,7 @@ class RdbLoader : protected RdbLoaderBase {
     OpaqueObj val;
     uint64_t expire_ms;
     std::atomic<Item*> next;
+    DbIndex db_index = 0;
     bool is_sticky = false;
     bool has_mc_flags = false;
     uint32_t mc_flags = 0;
@@ -368,7 +373,13 @@ class RdbLoader : protected RdbLoaderBase {
 
   struct ObjSettings;
 
+  struct StreamState;
+
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
+
+  // Loads a continuation tagged chunk. The first chunk has already loaded the key and object type.
+  // This restores the saved stream state and continues loading only the remaining payload.
+  std::error_code LoadValueChunk();
 
   io::Result<bool> ReadAndDispatchObject(int object_type, std::string& key,
                                          const ObjSettings& obj_settings, DbIndex db_index);
@@ -385,7 +396,7 @@ class RdbLoader : protected RdbLoaderBase {
   void FlushShardAsync(ShardId sid);
   void FlushAllShards();
 
-  void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
+  void LoadItemsBuffer(const ItemsBuf& ib);
 
   void CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice);
 
@@ -416,6 +427,10 @@ class RdbLoader : protected RdbLoaderBase {
   // locals don't accumulate in Load()'s stack frame.
   std::error_code HandleVectorIndex();
   std::error_code HandleShardDocIndex();
+
+  // validates if the current chunk is fully read, resets the state. returns early if stop_early_ is
+  // requested.
+  std::error_code FinalizeCurrentChunkIfNeeded();
 
   Service* service_;
   RdbLoadContext* load_context_;
@@ -457,6 +472,9 @@ class RdbLoader : protected RdbLoaderBase {
   base::SpinLock now_chunked_mu_;  // guards now_chunked_
 
   std::string last_key_loaded_;
+
+  // Maps tagged stream id to the loader state needed to resume a partially read object
+  absl::flat_hash_map<uint32_t, StreamState> stream_states_;
 };
 
 }  // namespace dfly

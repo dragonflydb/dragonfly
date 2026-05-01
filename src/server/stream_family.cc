@@ -1181,7 +1181,6 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
   auto& it = add_res.it;
 
   StreamMemTracker mem_tracker;
-  absl::Cleanup on_exit([it, &mem_tracker]() mutable { mem_tracker.UpdateStreamSize(it->second); });
 
   if (add_res.is_new) {
     stream* s = streamNew();
@@ -1198,8 +1197,9 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
   if (res != 0) {
     if (add_res.is_new) {
-      std::move(on_exit).Cancel();
       db_slice.DelMutable(op_args.db_cntx, std::move(add_res));
+    } else {
+      mem_tracker.UpdateStreamSize(it->second);
     }
     if (res == ERANGE)
       return OpStatus::OUT_OF_RANGE;
@@ -1214,6 +1214,10 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     VLOG(2) << "Trimmed " << deleted_items_number << " items from stream " << key
             << " during the XADD command";
   }
+
+  // Must update before RecordJournal, which can preempt and cause evictions that change
+  // zmalloc_used_memory_tl, corrupting the diff computed by UpdateStreamSize.
+  mem_tracker.UpdateStreamSize(it->second);
 
   if (op_args.shard->journal()) {
     std::string result_id_as_string = StreamsIdToString(result_id);
