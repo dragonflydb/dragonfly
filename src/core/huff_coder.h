@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 namespace dfly {
@@ -25,7 +26,8 @@ class HuffmanEncoder {
   bool Load(std::string_view binary_data, std::string* error_msg);
 
   // Exports a binary representation of the table, that can be loaded using Load().
-  std::string Export() const;
+  // Returns nullopt if the table cannot be serialized (e.g. incompressible data).
+  std::optional<std::string> Export() const;
 
   uint8_t num_bits() const {
     return num_bits_;

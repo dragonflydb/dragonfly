@@ -894,10 +894,11 @@ static void BuildEncoderAB(HuffmanEncoder* encoder) {
 TEST_F(CompactObjectTest, Huffman) {
   HuffmanEncoder encoder;
   BuildEncoderAB(&encoder);
-  string bindata = encoder.Export();
+  auto bindata = encoder.Export();
+  ASSERT_TRUE(bindata.has_value());
 
   for (CompactObj::HuffmanDomain domain : {CompactObj::HUFF_KEYS, CompactObj::HUFF_STRING_VALUES}) {
-    ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(domain, bindata));
+    ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(domain, *bindata));
     for (unsigned i = 30; i < 2048; i += 10) {
       string data(i, 'a');
 
