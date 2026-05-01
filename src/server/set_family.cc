@@ -61,7 +61,7 @@ bool IsDenseEncoding(const CompactObj& co) {
   return co.Encoding() == kEncodingStrMap2;
 }
 
-inline void DenseSetTouchTime(void* robj_ptr, uint64_t now_ms) {
+inline void UpdateSetTime(void* robj_ptr, uint64_t now_ms) {
   uint32_t t = MemberTimeSeconds(now_ms);
   VisitSet(robj_ptr, [t](auto* s) { s->set_time(t); });
 }
@@ -187,7 +187,7 @@ struct StringSetWrapper {
 
  private:
   StringSetWrapper(void* robj_ptr, uint64_t now_ms) : obj_(robj_ptr) {
-    DenseSetTouchTime(obj_, now_ms);
+    UpdateSetTime(obj_, now_ms);
   }
 
   void* const obj_;
@@ -1667,7 +1667,7 @@ auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlo
 
 // Allocate a fresh dense set and populate it from the listpack. Returns nullptr
 // (and deletes the partial set) if a duplicate member is detected.
-template <typename Set> static Set* BuildDenseSetFromLP(unsigned char* lp) {
+template <typename Set> static Set* BuildSetFromLP(unsigned char* lp) {
   Set* set = CompactObj::AllocateMR<Set>();
   for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
     unsigned char field_buf[LP_INTBUF_SIZE];
@@ -1688,8 +1688,8 @@ auto SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlob
   }
 
   unsigned char* lp = (unsigned char*)blob.data();
-  void* set_ptr = g_use_oah_set ? static_cast<void*>(BuildDenseSetFromLP<OAHSet>(lp))
-                                : static_cast<void*>(BuildDenseSetFromLP<StringSet>(lp));
+  void* set_ptr = g_use_oah_set ? static_cast<void*>(BuildSetFromLP<OAHSet>(lp))
+                                : static_cast<void*>(BuildSetFromLP<StringSet>(lp));
   if (!set_ptr)
     return LoadBlobResult::kCorrupted;
 
@@ -1699,7 +1699,7 @@ auto SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlob
 
 // Allocate a fresh dense set, reserve capacity, and copy each intset member as
 // the decimal string form.
-template <typename Set> static Set* BuildDenseSetFromIntSet(const intset* is, size_t expected_len) {
+template <typename Set> static Set* BuildSetFromIntSet(const intset* is, size_t expected_len) {
   Set* ss = CompactObj::AllocateMR<Set>();
   if (expected_len) {
     ss->Reserve(expected_len);
@@ -1715,8 +1715,8 @@ template <typename Set> static Set* BuildDenseSetFromIntSet(const intset* is, si
 }
 
 void* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
-  return g_use_oah_set ? static_cast<void*>(BuildDenseSetFromIntSet<OAHSet>(is, expected_len))
-                       : static_cast<void*>(BuildDenseSetFromIntSet<StringSet>(is, expected_len));
+  return g_use_oah_set ? static_cast<void*>(BuildSetFromIntSet<OAHSet>(is, expected_len))
+                       : static_cast<void*>(BuildSetFromIntSet<StringSet>(is, expected_len));
 }
 
 using CI = CommandId;

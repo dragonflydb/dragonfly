@@ -280,13 +280,6 @@ pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, PageUsage* page_usage) 
   return {sm, reallocated};
 }
 
-template <typename Set> pair<void*, bool> DefragDenseSet(Set* ss, PageUsage* page_usage) {
-  bool realloced = false;
-  for (auto it = ss->begin(); it != ss->end(); ++it)
-    realloced |= it.ReallocIfNeeded(page_usage);
-  return {ss, realloced};
-}
-
 // Iterates over allocations of internal hash data structures and re-allocates
 // them if their pages are underutilized.
 // Returns pointer to new object ptr and whether any re-allocations happened.
@@ -315,7 +308,12 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, PageUsage* page_usage)
     }
 
     case kEncodingStrMap2:
-      return VisitSet(ptr, [page_usage](auto* ss) { return DefragDenseSet(ss, page_usage); });
+      return VisitSet(ptr, [page_usage](auto* ss) -> pair<void*, bool> {
+        bool realloced = false;
+        for (auto it = ss->begin(); it != ss->end(); ++it)
+          realloced |= it.ReallocIfNeeded(page_usage);
+        return {ss, realloced};
+      });
 
     default:
       ABSL_UNREACHABLE();

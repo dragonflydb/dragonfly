@@ -15,7 +15,6 @@ extern "C" {
 
 #include "base/logging.h"
 #include "base/stl_util.h"
-#include "core/oah_set.h"
 #include "core/sorted_map.h"
 #include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"

@@ -440,10 +440,11 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
       set->set_time(0);
       absl::Cleanup restore_time = [set] { set->set_time(MemberTimeSeconds(GetCurrentTimeMs())); };
 
+      const bool has_expiry = set->ExpirationUsed();
       RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
       for (auto it = set->begin(); it != set->end();) {
         RETURN_ON_ERR(SaveString(Key(it)));
-        if (set->ExpirationUsed()) {
+        if (has_expiry) {
           int64_t expiry = it.HasExpiry() ? int64_t{it.ExpiryTime()} : -1;
           RETURN_ON_ERR(SaveLongLongAsString(expiry));
         }
