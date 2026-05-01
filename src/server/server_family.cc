@@ -2877,10 +2877,21 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
       Set* ds = static_cast<Set*>(pv.RObjPtr());
       ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
 
-      size_t bucket_bytes_before = ds->BucketCount() * sizeof(void*);
+      // Bucket-array bytes only. We can't use SetMallocUsed() because it also
+      // counts collision-link / vector-bucket bytes which can grow when the
+      // table shrinks, and the SHRINK reply is meant to report the bucket-vector
+      // delta. DenseSet buckets are DensePtr (pointer-sized); OAHSet buckets are
+      // OAHEntry-sized and the entries vector includes displacement slots.
+      auto bucket_bytes = [](Set* s) -> size_t {
+        if constexpr (std::is_same_v<Set, OAHSet>)
+          return size_t{s->Capacity()} * sizeof(OAHEntry);
+        else
+          return s->BucketCount() * sizeof(void*);
+      };
+      size_t bytes_before = bucket_bytes(ds);
       size_t optimal_size = std::max(size_t(8), absl::bit_ceil(ds->UpperBoundSize()));
       ds->Shrink(optimal_size);
-      size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
+      size_t bytes_after = bucket_bytes(ds);
 
       // Shrink expires entries during bucket compaction.  If all entries expired,
       // delete the now-empty key to prevent zombie keys that crash SAVE.
@@ -2888,7 +2899,7 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
         db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
       }
 
-      return bucket_bytes_before - bucket_bytes_after;
+      return bytes_before - bytes_after;
     };
 
     bool use_oah;

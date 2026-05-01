@@ -275,11 +275,21 @@ class AsyncDeleter {
 
 __thread AsyncDeleter::ClearNode* AsyncDeleter::head_ = nullptr;
 
+// ClearStep returns the next cursor; the table is empty when it equals the
+// underlying entries-vector size. DenseSet exposes that as BucketCount();
+// OAHSet exposes it as Capacity() (BucketCount() omits displacement slots).
+template <typename Set> uint32_t ClearStepEnd(Set* s) {
+  if constexpr (std::is_same_v<Set, OAHSet>)
+    return s->Capacity();
+  else
+    return s->BucketCount();
+}
+
 template <typename Set> void AsyncDeleter::EnqueDeletion(uint32_t next, Set* ds) {
   auto step = +[](ClearNode* n) {
     auto* s = static_cast<Set*>(n->ds);
     n->cursor = s->ClearStep(n->cursor, kClearStepSize);
-    if (n->cursor == s->BucketCount()) {
+    if (n->cursor == ClearStepEnd(s)) {
       CompactObj::DeleteMR<Set>(s);
       return true;
     }
@@ -1839,11 +1849,12 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
 
   if (async && MayDeleteAsynchronously(pv)) {
     auto schedule = [](auto* ds) {
+      using Ds = std::remove_pointer_t<decltype(ds)>;
       uint32_t next = ds->ClearStep(0, 512);
-      if (next < ds->BucketCount())
+      if (next < ClearStepEnd(ds))
         AsyncDeleter::EnqueDeletion(next, ds);
       else
-        CompactObj::DeleteMR<std::remove_pointer_t<decltype(ds)>>(ds);
+        CompactObj::DeleteMR<Ds>(ds);
     };
     void* obj_ptr = pv.RObjPtr();
     pv.SetRObjPtr(nullptr);

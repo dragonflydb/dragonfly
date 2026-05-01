@@ -437,9 +437,12 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
   if (obj.Encoding() == kEncodingStrMap2) {
     auto save_loop = [this](auto* set) -> error_code {
-      // set_time(0) disables lazy expiry during serialization, so we can rely
-      // on UpperBoundSize() rather than the more expensive SlowSize().
+      // set_time(0) disables lazy expiry during serialization. Restore on every
+      // exit path (including the early returns inside RETURN_ON_ERR) so a failed
+      // SAVE doesn't leave the set with expiry permanently disabled.
       set->set_time(0);
+      absl::Cleanup restore_time = [set] { set->set_time(MemberTimeSeconds(GetCurrentTimeMs())); };
+
       RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
       for (auto it = set->begin(); it != set->end();) {
         RETURN_ON_ERR(SaveString(Key(it)));
@@ -452,7 +455,6 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
             it == set->end() ? FlushState::kFlushEndEntry : FlushState::kFlushMidEntry;
         PushToConsumerIfNeeded(flush_state);
       }
-      set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
       return error_code{};
     };
 
