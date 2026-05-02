@@ -12,10 +12,13 @@ extern "C" {
 #include "redis/util.h"  // for string2ll
 }
 
+#include <absl/flags/flag.h>
+
 #include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/oah_set.h"
 #include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
@@ -27,6 +30,8 @@ extern "C" {
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/transaction.h"
+
+ABSL_FLAG(bool, use_oah_set, true, "If true, store SET values in OAHSet instead of StringSet.");
 
 namespace rng = std::ranges;
 
@@ -54,6 +59,11 @@ constexpr uint32_t kMaxIntSetEntries = 256;
 
 bool IsDenseEncoding(const CompactObj& co) {
   return co.Encoding() == kEncodingStrMap2;
+}
+
+inline void DenseSetTouchTime(void* robj_ptr, uint64_t now_ms) {
+  uint32_t t = MemberTimeSeconds(now_ms);
+  VisitSet(robj_ptr, [t](auto* s) { s->set_time(t); });
 }
 
 intset* IntsetAddSafe(string_view val, intset* is, bool* success, bool* added) {
@@ -89,7 +99,9 @@ struct StringSetWrapper {
   }
 
   static void Init(CompactObj* obj) {
-    obj->InitRobj(OBJ_SET, kEncodingStrMap2, CompactObj::AllocateMR<StringSet>());
+    void* set = g_use_oah_set ? static_cast<void*>(CompactObj::AllocateMR<OAHSet>())
+                              : static_cast<void*>(CompactObj::AllocateMR<StringSet>());
+    obj->InitRobj(OBJ_SET, kEncodingStrMap2, set);
   }
 
   unsigned Add(const NewEntries& entries, uint32_t ttl_sec, bool keepttl) const {
@@ -97,29 +109,33 @@ struct StringSetWrapper {
     string_view members[StringSet::kMaxBatchLen];
     size_t entries_len = std::visit([](const auto& e) { return e.size(); }, entries);
     unsigned len = 0;
-    if (ss->BucketCount() < entries_len) {
-      ss->Reserve(entries_len);
-    }
+    VisitSet(obj_, [entries_len](auto* s) {
+      if (s->BucketCount() < entries_len)
+        s->Reserve(entries_len);
+    });
+    auto add_many = [&](unsigned n) {
+      return VisitSet(
+          obj_, [&](auto* s) { return s->AddMany(absl::MakeSpan(members, n), ttl_sec, keepttl); });
+    };
     for (string_view member : EntriesRange(entries)) {
       members[len++] = member;
       if (len == StringSet::kMaxBatchLen) {
-        res += ss->AddMany(absl::MakeSpan(members, StringSet::kMaxBatchLen), ttl_sec, keepttl);
+        res += add_many(len);
         len = 0;
       }
     }
-
-    if (len) {
-      res += ss->AddMany(absl::MakeSpan(members, len), ttl_sec, keepttl);
-    }
-
+    if (len)
+      res += add_many(len);
     return res;
   }
 
   pair<unsigned, bool> Remove(const facade::ArgRange& entries) const {
-    unsigned removed = 0;
-    for (string_view member : entries)
-      removed += ss->Erase(member);
-    return {removed, ss->Empty()};
+    return VisitSet(obj_, [&](auto* s) {
+      unsigned removed = 0;
+      for (string_view member : entries)
+        removed += s->Erase(member);
+      return std::pair<unsigned, bool>{removed, s->Empty()};
+    });
   }
 
   uint64_t Scan(uint64_t curs, const ScanOpts& scan_op, StringVec* res) const {
@@ -130,36 +146,51 @@ struct StringSetWrapper {
     // Approximately 100usec
     const uint64_t timeout_cycles = base::CycleClock::Now() + base::CycleClock::Frequency() / 10000;
 
+    auto record = [&](string_view str) {
+      if (scan_op.Matches(str))
+        res->emplace_back(str);
+    };
     do {
-      auto scan_callback = [&](sds ptr) {
-        if (string_view str{ptr, sdslen(ptr)}; scan_op.Matches(str))
-          res->emplace_back(str);
-      };
-      curs = ss->Scan(curs, scan_callback);
+      curs = VisitSet(obj_, [&](auto* s) {
+        return s->Scan(static_cast<uint32_t>(curs), [&](auto key) {
+          if constexpr (std::is_same_v<decltype(key), sds>)
+            record(string_view{key, sdslen(key)});
+          else
+            record(key);
+        });
+      });
     } while (curs && maxiterations-- && res->size() < count &&
              (base::CycleClock::Now() - start_cycles) < timeout_cycles);
     return curs;
   }
 
-  explicit operator StringSet*() const {
-    return ss;
+  template <typename Cb> void ForEach(Cb&& cb) const {
+    VisitSet(obj_, [&](auto* s) {
+      for (auto it = s->begin(); it != s->end(); ++it)
+        cb(Key(it));
+    });
   }
 
-  StringSet* operator->() const {
-    return ss;
+  size_t UpperBoundSize() const {
+    return VisitSet(obj_, [](auto* s) { return s->UpperBoundSize(); });
+  }
+  bool Empty() const {
+    return VisitSet(obj_, [](auto* s) { return s->Empty(); });
+  }
+  bool Contains(string_view member) const {
+    return VisitSet(obj_, [member](auto* s) { return s->Contains(member); });
   }
 
-  auto Range() const {
-    auto transform = [](sds ptr) { return string_view{ptr, sdslen(ptr)}; };
-    return base::it::Transform(transform, base::it::Range(ss->begin(), ss->end()));
+  void* obj() const {
+    return obj_;
   }
 
  private:
-  StringSetWrapper(void* robj_ptr, uint64_t now_ms) : ss(static_cast<StringSet*>(robj_ptr)) {
-    ss->set_time(MemberTimeSeconds(now_ms));
+  StringSetWrapper(void* robj_ptr, uint64_t now_ms) : obj_(robj_ptr) {
+    DenseSetTouchTime(obj_, now_ms);
   }
 
-  StringSet* const ss;
+  void* const obj_;
 };
 
 // returns (removed, isempty)
@@ -210,7 +241,7 @@ uint32_t SetTypeLen(const DbContext& db_context, const SetType& set) {
   if (set.second == kEncodingIntSet) {
     return intsetLen((const intset*)set.first);
   } else {
-    return StringSetWrapper(set, db_context)->UpperBoundSize();
+    return StringSetWrapper(set, db_context).UpperBoundSize();
   }
 }
 
@@ -222,7 +253,7 @@ bool IsInSet(const DbContext& db_context, const SetType& st, int64_t val) {
   char* next = absl::numbers_internal::FastIntToBuffer(val, buf);
   string_view str{buf, size_t(next - buf)};
 
-  return StringSetWrapper(st, db_context)->Contains(str);
+  return StringSetWrapper(st, db_context).Contains(str);
 }
 
 bool IsInSet(const DbContext& db_context, const SetType& st, string_view member) {
@@ -233,7 +264,7 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
 
     return intsetFind((intset*)st.first, llval);
   } else {
-    return StringSetWrapper(st, db_context)->Contains(member);
+    return StringSetWrapper(st, db_context).Contains(member);
   }
 }
 
@@ -247,23 +278,23 @@ int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view me
     return -1;
   } else {
     StringSetWrapper ss{st, db_context};
-    auto it = ss->Find(member);
-    if (it == ss->end())
-      return -3;
-
-    return it.HasExpiry() ? it.ExpiryTime() : -1;
+    return VisitSet(ss.obj(), [member](auto* s) -> int32_t {
+      auto it = s->Find(member);
+      if (it == s->end())
+        return -3;
+      return it.HasExpiry() ? it.ExpiryTime() : -1;
+    });
   }
 }
 
 // Removes arg from result.
 void DiffStrSet(const DbContext& db_context, const SetType& st,
                 absl::flat_hash_set<string>* result) {
-  for (string_view entry : StringSetWrapper{st, db_context}.Range())
-    result->erase(entry);
+  StringSetWrapper{st, db_context}.ForEach([&](string_view entry) { result->erase(entry); });
 }
 
 void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, StringVec* result) {
-  for (string_view str : StringSetWrapper{vec.front(), db_context}.Range()) {
+  StringSetWrapper{vec.front(), db_context}.ForEach([&](string_view str) {
     size_t j = 1;
     for (j = 1; j < vec.size(); ++j) {
       if (vec[j].first != vec.front().first && !IsInSet(db_context, vec[j], str)) {
@@ -274,22 +305,23 @@ void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, String
     if (j == vec.size()) {
       result->emplace_back(str);
     }
-  }
+  });
 }
 
 template <typename C = absl::flat_hash_set<string>>
-StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
+StringVec RandMemberStrSetPicky(const StringSetWrapper& strset, size_t count) {
   C picks;
   picks.reserve(count);
 
-  size_t tries = 0;
-  while (picks.size() < count && tries++ < count * 2) {
-    auto it = strset->GetRandomMember();
-    if (it == strset->end())
-      break;
-    sds member = *it;
-    picks.insert(picks.end(), {member, sdslen(member)});
-  }
+  VisitSet(strset.obj(), [&](auto* s) {
+    size_t tries = 0;
+    while (picks.size() < count && tries++ < count * 2) {
+      auto it = s->GetRandomMember();
+      if (it == s->end())
+        break;
+      picks.insert(picks.end(), string{Key(it)});
+    }
+  });
 
   if constexpr (is_same_v<StringVec, C>)
     return picks;
@@ -301,13 +333,12 @@ StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
   CHECK(IsDenseEncoding(co));
   StringSetWrapper strset{co, db_context};
 
-  // If the set is small, extract entries with StringSet::GetRandomMember
-  if (picks_count * 5 < strset->UpperBoundSize()) {
-    StringSet* ss(strset);
+  // If the set is small, extract entries with random sampling.
+  if (picks_count * 5 < strset.UpperBoundSize()) {
     if (bool unique = (dynamic_cast<UniquePicksGenerator*>(&generator) != nullptr); unique)
-      return RandMemberStrSetPicky(ss, picks_count);
+      return RandMemberStrSetPicky(strset, picks_count);
     else
-      return RandMemberStrSetPicky<StringVec>(ss, picks_count);
+      return RandMemberStrSetPicky<StringVec>(strset, picks_count);
   }
 
   std::unordered_map<RandomPick, std::uint32_t> times_index_is_picked;
@@ -319,13 +350,13 @@ StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
   result.reserve(picks_count);
 
   std::uint32_t ss_entry_index = 0;
-  for (string_view str : strset.Range()) {
+  strset.ForEach([&](string_view str) {
     auto it = times_index_is_picked.find(ss_entry_index++);
     if (it != times_index_is_picked.end()) {
       while (it->second--)
         result.emplace_back(str);
     }
-  }
+  });
   /* Equal elements in the result are always successive. So, it is necessary to shuffle them */
   absl::BitGen gen;
   std::shuffle(result.begin(), result.end(), gen);
@@ -544,7 +575,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
       if (!success) {
         co.SetRObjPtr(is);
 
-        StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+        void* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
         if (!ss) {
           return OpStatus::OUT_OF_MEMORY;
         }
@@ -594,7 +625,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
     // Update stats and trigger any handle the old value if needed.
     if (co.Encoding() == kEncodingIntSet) {
       intset* is = (intset*)co.RObjPtr();
-      StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+      void* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
       if (!ss) {
         return OpStatus::OUT_OF_MEMORY;
       }
@@ -737,8 +768,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
     if (find_res) {
       const PrimeValue& pv = find_res.value()->second;
       if (IsDenseEncoding(pv)) {
-        StringSet* ss = (StringSet*)pv.RObjPtr();
-        ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+        DenseSetTouchTime(pv.RObjPtr(), op_args.db_cntx.time_now_ms);
       }
       container_utils::IterateSet(pv, [&uniques](container_utils::ContainerEntry ce) {
         uniques.emplace(ce.ToString());
@@ -771,8 +801,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
   absl::flat_hash_set<string> uniques;
   const PrimeValue& pv = find_res.value()->second;
   if (IsDenseEncoding(pv)) {
-    StringSet* ss = (StringSet*)pv.RObjPtr();
-    ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+    DenseSetTouchTime(pv.RObjPtr(), op_args.db_cntx.time_now_ms);
   }
 
   container_utils::IterateSet(pv, [&uniques](container_utils::ContainerEntry ce) {
@@ -834,8 +863,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 
     const PrimeValue& pv = find_res.value()->second;
     if (IsDenseEncoding(pv)) {
-      StringSet* ss = (StringSet*)pv.RObjPtr();
-      ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+      DenseSetTouchTime(pv.RObjPtr(), t->GetDbContext().time_now_ms);
     }
 
     result.reserve(pv.Size());
@@ -962,8 +990,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
    * the number of elements inside the set: simply return the whole set. */
   if (count >= size) {
     if (IsDenseEncoding(co)) {
-      StringSet* ss = (StringSet*)co.RObjPtr();
-      ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+      DenseSetTouchTime(co.RObjPtr(), op_args.db_cntx.time_now_ms);
     }
 
     StringVec result;
@@ -1606,7 +1633,7 @@ bool SetFamily::DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, st
   if (!IsDenseEncoding(pv))
     return false;
 
-  if (StringSet* ss = (StringSet*)pv.RObjPtr(); !ss->Empty())
+  if (!VisitSet(pv.RObjPtr(), [](auto* s) { return s->Empty(); }))
     return false;
 
   if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_SET); res) {
@@ -1630,7 +1657,7 @@ auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlo
   unsigned len = intsetLen(is);
 
   if (len > SetFamily::MaxIntsetEntries()) {
-    StringSet* set = SetFamily::ConvertToStrSet(is, len);
+    void* set = SetFamily::ConvertToStrSet(is, len);
 
     if (!set) {
       LOG(ERROR) << "OOM in ConvertToStrSet " << len;
@@ -1646,6 +1673,22 @@ auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlo
   return LoadBlobResult::kSuccess;
 }
 
+// Allocate a fresh dense set and populate it from the listpack. Returns nullptr
+// (and deletes the partial set) if a duplicate member is detected.
+template <typename Set> static Set* BuildDenseSetFromLP(unsigned char* lp) {
+  Set* set = CompactObj::AllocateMR<Set>();
+  for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
+    unsigned char field_buf[LP_INTBUF_SIZE];
+    string_view elem = detail::ListpackWrap::GetView(cur, field_buf);
+    if (!set->Add(elem)) {
+      LOG(ERROR) << "Duplicate member " << elem;
+      CompactObj::DeleteMR<Set>(set);
+      return nullptr;
+    }
+  }
+  return set;
+}
+
 auto SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
   if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
     LOG(ERROR) << "ListPack integrity check failed.";
@@ -1653,37 +1696,35 @@ auto SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlob
   }
 
   unsigned char* lp = (unsigned char*)blob.data();
-  StringSet* set = CompactObj::AllocateMR<StringSet>();
-  for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
-    unsigned char field_buf[LP_INTBUF_SIZE];
-    string_view elem = detail::ListpackWrap::GetView(cur, field_buf);
-    if (!set->Add(elem)) {
-      LOG(ERROR) << "Duplicate member " << elem;
-      CompactObj::DeleteMR<StringSet>(set);
-      return LoadBlobResult::kCorrupted;
-    }
-  }
-  pv->InitRobj(OBJ_SET, kEncodingStrMap2, set);
+  void* set_ptr = g_use_oah_set ? static_cast<void*>(BuildDenseSetFromLP<OAHSet>(lp))
+                                : static_cast<void*>(BuildDenseSetFromLP<StringSet>(lp));
+  if (!set_ptr)
+    return LoadBlobResult::kCorrupted;
+
+  pv->InitRobj(OBJ_SET, kEncodingStrMap2, set_ptr);
   return LoadBlobResult::kSuccess;
 }
 
-StringSet* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
-  int64_t intele;
-  char buf[32];
-  int ii = 0;
-
-  StringSet* ss = CompactObj::AllocateMR<StringSet>();
+// Allocate a fresh dense set, reserve capacity, and copy each intset member as
+// the decimal string form.
+template <typename Set> static Set* BuildDenseSetFromIntSet(const intset* is, size_t expected_len) {
+  Set* ss = CompactObj::AllocateMR<Set>();
   if (expected_len) {
     ss->Reserve(expected_len);
   }
-
+  int64_t intele;
+  char buf[32];
+  int ii = 0;
   while (intsetGet(const_cast<intset*>(is), ii++, &intele)) {
     char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
-    string_view str{buf, size_t(next - buf)};
-    CHECK(ss->Add(str));
+    CHECK(ss->Add(string_view{buf, size_t(next - buf)}));
   }
-
   return ss;
+}
+
+void* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
+  return g_use_oah_set ? static_cast<void*>(BuildDenseSetFromIntSet<OAHSet>(is, expected_len))
+                       : static_cast<void*>(BuildDenseSetFromIntSet<StringSet>(is, expected_len));
 }
 
 using CI = CommandId;
@@ -1734,7 +1775,7 @@ vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_
   if (pv->Encoding() == kEncodingIntSet) {
     // a valid result can never be a intset, since it doesnt keep ttl
     intset* is = (intset*)pv->RObjPtr();
-    StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+    void* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
     if (!ss) {
       std::vector<long> out(values.size(), -2);
       return out;
@@ -1742,9 +1783,10 @@ vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_
     pv->InitRobj(OBJ_SET, kEncodingStrMap2, ss);
   }
 
-  auto ss = static_cast<StringSet*>(pv->RObjPtr());
-  ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-  return ExpireElements(ss, values, ttl_sec);
+  return VisitSet(pv->RObjPtr(), [&](auto* ss) {
+    ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+    return ExpireElements(ss, values, ttl_sec);
+  });
 }
 
 }  // namespace dfly

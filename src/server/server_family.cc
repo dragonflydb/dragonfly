@@ -41,6 +41,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/dense_set.h"
+#include "core/oah_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
@@ -2821,62 +2822,75 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
 
-    // First, do a read-only check: validate type/encoding and decide whether
-    // shrink is needed.  This avoids bumping the key version, firing WATCH
-    // invalidations, or running PostUpdate for no-op / WRONGTYPE paths.
+    // SET with --use_oah_set uses OAHSet; HASH (StringMap) and SET-without-OAH
+    // (StringSet) both inherit DenseSet, so the original code path covers them.
+    auto shrink = [&]<typename Set>() -> OpResult<int64_t> {
+      // First, do a read-only check: validate type/encoding and decide whether
+      // shrink is needed.  This avoids bumping the key version, firing WATCH
+      // invalidations, or running PostUpdate for no-op / WRONGTYPE paths.
+      {
+        auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
+        if (!IsValid(it)) {
+          return OpStatus::KEY_NOTFOUND;
+        }
+
+        const PrimeValue& pv = it->second;
+        unsigned encoding = pv.Encoding();
+        unsigned obj_type = pv.ObjType();
+
+        if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
+          return OpStatus::WRONG_TYPE;
+        }
+
+        Set* ds = static_cast<Set*>(pv.RObjPtr());
+        ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+        size_t current_size = ds->UpperBoundSize();
+        size_t bucket_count = ds->BucketCount();
+
+        if (current_size == 0 || bucket_count == 0) {
+          return 0;
+        }
+
+        size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
+        if (optimal_size >= bucket_count) {
+          return 0;
+        }
+      }
+
+      // Shrink is needed — use FindMutable so the AutoUpdater tracks the
+      // MallocUsed() delta (bucket array resize, link changes, expired-entry
+      // deletions) and keeps obj_memory_usage in sync.
+      auto it_res = db_slice.FindMutable(t->GetDbContext(), key);
+      if (!IsValid(it_res.it)) {
+        return OpStatus::KEY_NOTFOUND;  // raced away between the two lookups
+      }
+
+      PrimeValue& pv = it_res.it->second;
+      Set* ds = static_cast<Set*>(pv.RObjPtr());
+      ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+
+      size_t bucket_bytes_before = ds->BucketCount() * sizeof(void*);
+      size_t optimal_size = std::max(size_t(8), absl::bit_ceil(ds->UpperBoundSize()));
+      ds->Shrink(optimal_size);
+      size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
+
+      // Shrink expires entries during bucket compaction.  If all entries expired,
+      // delete the now-empty key to prevent zombie keys that crash SAVE.
+      if (ds->Empty()) {
+        db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
+      }
+
+      return bucket_bytes_before - bucket_bytes_after;
+    };
+
+    bool use_oah;
     {
       auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
-      if (!IsValid(it)) {
+      if (!IsValid(it))
         return OpStatus::KEY_NOTFOUND;
-      }
-
-      const PrimeValue& pv = it->second;
-      unsigned encoding = pv.Encoding();
-      unsigned obj_type = pv.ObjType();
-
-      if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
-        return OpStatus::WRONG_TYPE;
-      }
-
-      DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
-      ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
-      size_t current_size = ds->UpperBoundSize();
-      size_t bucket_count = ds->BucketCount();
-
-      if (current_size == 0 || bucket_count == 0) {
-        return 0;
-      }
-
-      size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
-      if (optimal_size >= bucket_count) {
-        return 0;
-      }
+      use_oah = it->second.ObjType() == OBJ_SET && g_use_oah_set;
     }
-
-    // Shrink is needed — use FindMutable so the AutoUpdater tracks the
-    // MallocUsed() delta (bucket array resize, link changes, expired-entry
-    // deletions) and keeps obj_memory_usage in sync.
-    auto it_res = db_slice.FindMutable(t->GetDbContext(), key);
-    if (!IsValid(it_res.it)) {
-      return OpStatus::KEY_NOTFOUND;  // raced away between the two lookups
-    }
-
-    PrimeValue& pv = it_res.it->second;
-    DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
-    ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
-
-    size_t bucket_bytes_before = ds->BucketCount() * sizeof(void*);
-    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(ds->UpperBoundSize()));
-    ds->Shrink(optimal_size);
-    size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
-
-    // Shrink expires entries during bucket compaction.  If all entries expired,
-    // delete the now-empty key to prevent zombie keys that crash SAVE.
-    if (ds->Empty()) {
-      db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
-    }
-
-    return bucket_bytes_before - bucket_bytes_after;
+    return use_oah ? shrink.template operator()<OAHSet>() : shrink.template operator()<DenseSet>();
   };
 
   OpResult<int64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));

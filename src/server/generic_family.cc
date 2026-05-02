@@ -21,6 +21,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/glob_matcher.h"
+#include "core/oah_set.h"
 #include "core/qlist.h"
 #include "core/string_set.h"
 #include "redis/rdb.h"
@@ -1668,8 +1669,8 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
   // IterateSet would skip expiry entirely and empty-set cleanup below would
   // depend on a prior command having set time_now_.
   if (obj_type == OBJ_SET && it->second.Encoding() == kEncodingStrMap2) {
-    static_cast<StringSet*>(it->second.RObjPtr())
-        ->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+    uint32_t t = MemberTimeSeconds(op_args.db_cntx.time_now_ms);
+    VisitSet(it->second.RObjPtr(), [t](auto* s) { s->set_time(t); });
   }
 
   Iterate(it->second, [&elements](const ContainerEntry& entry) {

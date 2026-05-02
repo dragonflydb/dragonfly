@@ -35,6 +35,7 @@ extern "C" {
 #include "core/cms.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
+#include "core/oah_set.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -372,6 +373,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     if (inner_obj) {
       if (is_intset) {
         zfree(inner_obj);
+      } else if (g_use_oah_set) {
+        CompactObj::DeleteMR<OAHSet>(inner_obj);
       } else {
         CompactObj::DeleteMR<StringSet>(inner_obj);
       }
@@ -394,62 +397,67 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       return true;
     });
   } else {
-    StringSet* set;
-    if (config_.append) {
-      // Note we always use StringSet when the object is being chunked.
-      if (!EnsureObjEncoding(OBJ_SET, kEncodingStrMap2)) {
-        return;
-      }
-      set = static_cast<StringSet*>(pv_->RObjPtr());
-    } else {
-      set = CompactObj::AllocateMR<StringSet>();
-      set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
-      inner_obj = set;
-
-      // Expand the set up front to avoid rehashing.
-      set->Reserve((config_.reserve > len) ? config_.reserve : len);
-    }
-
-    size_t increment = 1;
-    if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
-      increment = 2;
-    }
-
-    bool values_expired = false;
-
-    for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
-      string_view element = ToSV(ltrace->arr[i].rdb_var, &buf1_);
-
-      uint32_t ttl_sec = UINT32_MAX;
-      if (increment == 2) {
-        int64_t ttl_time = -1;
-        string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
-        if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
-          LOG(ERROR) << "Can't parse set TTL " << ttl_str;
-          ec_ = RdbError(errc::rdb_file_corrupted);
+    auto load = [&]<typename Set>() {
+      Set* set;
+      if (config_.append) {
+        if (!EnsureObjEncoding(OBJ_SET, kEncodingStrMap2)) {
           return;
         }
+        set = static_cast<Set*>(pv_->RObjPtr());
+      } else {
+        set = CompactObj::AllocateMR<Set>();
+        set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+        inner_obj = set;
 
-        if (ttl_time != -1) {
-          if (ttl_time <= set->time_now()) {
-            values_expired = true;
-            continue;
+        // Expand the set up front to avoid rehashing.
+        set->Reserve((config_.reserve > len) ? config_.reserve : len);
+      }
+
+      size_t increment = 1;
+      if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
+        increment = 2;
+      }
+
+      bool values_expired = false;
+
+      for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
+        string_view element = ToSV(ltrace->arr[i].rdb_var, &buf1_);
+
+        uint32_t ttl_sec = UINT32_MAX;
+        if (increment == 2) {
+          int64_t ttl_time = -1;
+          string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
+          if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
+            LOG(ERROR) << "Can't parse set TTL " << ttl_str;
+            ec_ = RdbError(errc::rdb_file_corrupted);
+            return;
           }
 
-          ttl_sec = ttl_time - set->time_now();
+          if (ttl_time != -1) {
+            if (ttl_time <= set->time_now()) {
+              values_expired = true;
+              continue;
+            }
+
+            ttl_sec = ttl_time - set->time_now();
+          }
+        }
+        if (!set->Add(element, ttl_sec)) {
+          LOG(ERROR) << "Duplicate set members detected " << absl::CHexEscape(element)
+                     << " with TTL " << ttl_sec << " " << rdb_type_ << " " << set->ExpirationUsed()
+                     << " " << config_.append;
+          ec_ = RdbError(errc::duplicate_key);
+          return;
         }
       }
-      if (!set->Add(element, ttl_sec)) {
-        LOG(ERROR) << "Duplicate set members detected " << absl::CHexEscape(element) << " with TTL "
-                   << ttl_sec << " " << rdb_type_ << " " << set->ExpirationUsed() << " "
-                   << config_.append;
-        ec_ = RdbError(errc::duplicate_key);
-        return;
+      if (set->Empty() && values_expired) {
+        ec_ = RdbError(errc::value_expired);
       }
-    }
-    if (set->Empty() && values_expired) {
-      ec_ = RdbError(errc::value_expired);
-    }
+    };
+    if (g_use_oah_set)
+      load.template operator()<OAHSet>();
+    else
+      load.template operator()<StringSet>();
   }
 
   if (ec_)
