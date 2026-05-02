@@ -84,6 +84,20 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
+  struct ChangeConsumerInterface {
+    virtual void OnChange(DbIndex, const ChangeReq&) = 0;
+
+    // Should return true if any value is mid-serialization
+    virtual bool HasActiveSerialization() const {
+      return false;
+    }
+
+    virtual void WaitForActiveToFinish() const {
+    }
+
+    uint64_t snapshot_version_ = 0;
+  };
+
   // Auto-laundering iterator wrapper. Laundering means re-finding keys if they moved between
   // buckets.
   template <typename T> class IteratorT {
@@ -393,7 +407,8 @@ class DbSlice {
   //! Registers the callback to be called for each change.
   //! Returns the registration id which is also the unique version of the dbslice
   //! at a time of the call.
-  uint64_t RegisterOnChange(ChangeCallback cb);
+  void RegisterOnChange(ChangeConsumerInterface* consumer);
+  void UnregisterOnChange(ChangeConsumerInterface* consumer);
 
   bool HasRegisteredCallbacks() const {
     return !change_cb_.empty();
@@ -401,9 +416,6 @@ class DbSlice {
 
   // Call registered callbacks with version less than upper_bound.
   void FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound);
-
-  //! Unregisters the callback.
-  void UnregisterOnChange(uint64_t id);
 
   struct DeleteExpiredStats {
     uint32_t deleted = 0;        // number of deleted items due to expiry.
@@ -483,13 +495,8 @@ class DbSlice {
   // if it's not empty and not EX.
   void SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events);
 
-  bool WillBlockOnJournalWrite() const {
-    return serialization_latch_.IsBlocked();
-  }
-
-  LocalLatch* GetLatch() {
-    return &serialization_latch_;
-  }
+  bool WillBlockOnJournalWrite() const;
+  void WaitUnblockJournalWrite() const;
 
   void StartSampleTopK(DbIndex db_ind, uint32_t min_freq);
 
@@ -521,7 +528,8 @@ class DbSlice {
                                              PrimeValue obj, uint64_t expire_at_ms,
                                              bool force_update);
 
-  void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version, uint64_t cb_id);
+  void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
+                    ChangeConsumerInterface* consumer);
   util::fb2::Fiber FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
@@ -565,11 +573,6 @@ class DbSlice {
 
   void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
 
-  // We need this because registered callbacks might yield and when they do so we want
-  // to avoid Heartbeat or Flushing the db.
-  // This latch protects us against this case.
-  mutable LocalLatch serialization_latch_;
-
   ShardId shard_id_;
   uint8_t cache_mode_ : 1;
 
@@ -608,7 +611,8 @@ class DbSlice {
   mutable absl::flat_hash_set<uint64_t, FpHasher> uniq_fps_;
 
   // ordered from the smallest to largest version.
-  std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
+  std::list<ChangeConsumerInterface*> change_cb_;
+  mutable LocalLatch change_cb_latch_;
 
   // Used in temporary computations in Find item and CbFinish
   // This set is used to hold fingerprints of key accessed during the run of

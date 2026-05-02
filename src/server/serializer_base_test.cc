@@ -23,6 +23,7 @@
 #include "server/conn_context.h"
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
+#include "server/engine_shard_set.h"
 #include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
@@ -125,8 +126,8 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   // TODO: possibly replace with unified loop if we decide on this?
   void Loop();
 
-  void Serialize(BucketIdentity bucket, std::string key) {
-    if (absl::Bernoulli(bg_, params_.delay_prob)) {
+  void Serialize(BucketIdentity bucket, std::string key, unsigned obj_type) {
+    if (obj_type == OBJ_STRING && absl::Bernoulli(bg_, params_.delay_prob)) {
       DelayedEntryHandler::deps_.Increment(bucket);
       unsigned delay = absl::Uniform(bg_, params_.delay_lat_us.first, params_.delay_lat_us.second);
       auto de = std::make_unique<TieredDelayedEntry>(0, CompactKey{key},
@@ -247,7 +248,7 @@ unsigned TestDriver::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_
     DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
     std::lock_guard lk{stream_mu_};
-    Serialize(it.bucket_address(), it->first.ToString());
+    Serialize(it.bucket_address(), it->first.ToString(), it->second.ObjType());
     ++serialized;
 
     while (absl::Bernoulli(bg_, 0.3)) {
@@ -393,8 +394,6 @@ TEST_F(SerializerBaseTest, IncreasingLists) {
 // Serialization code has many paths that omit empty bucket checks at all -
 // assert those "lost" delayed reads are correctly flushed before new changes
 TEST_F(SerializerBaseTest, DelayedAllDeleted) {
-  GTEST_SKIP() << "To be fixed";
-
   // 1-2 ms
   driver_params = {.delay_prob = 0.9, .delay_lat_us = {1000, 2000}};
 
@@ -413,15 +412,45 @@ TEST_F(SerializerBaseTest, DelayedAllDeleted) {
   // Let all values to be expire deleted
   TEST_current_time_ms = TEST_current_time_ms + 100;
   for (unsigned i = 0; i < kKeys; i++)
-    EXPECT_THAT(Run({"GET", absl::StrCat("key:", i)}), ArgType(RespExpr::NIL));
-
-  // Reallow delayed entry resolution
-  Change([](TestDriver& d) { d.delay_driver_.Resume(); });
-
-  // Trigger changes with dels
-  for (unsigned i = 0; i < kKeys; i++)
     Run({"SET", absl::StrCat("key:", i), "V"});
 
   Finish();
 }
+
+// Background eviction can cause delayed entries to be evicted.
+// We must make sure that the entry is either serialized before the eviction or aborted.
+// Detail: Yes, currently pure offloaded strings never allocate memory - but the keys do, so they
+// are targets for eviction nonetheless
+TEST_F(SerializerBaseTest, DelayedEvicted) {
+  // 1-2 ms
+  driver_params = {.delay_prob = 0.5, .delay_lat_us = {1000, 2000}};
+
+  // Fill database with some keys
+  const size_t kKeys = 100;
+  Run({"DEBUG", "POPULATE", std::to_string(kKeys), "key", "4096"});
+
+  // Add gigantic set that will eat up memory
+  Run({"SADD", "gigantic-set", "first-entry"});
+
+  // Start and pause reolution of delayed entries
+  Start();
+  Change([](TestDriver& d) { d.delay_driver_.Pause(); });
+
+  // Enable cache mode and grow set
+  shard_set->TEST_EnableCacheMode();
+  max_memory_limit = 10'000;
+  for (unsigned i = 0; i < 1000; i++)
+    Run({"SADD", "gigantic-set",
+         absl::StrCat("some data some data some data some long data @ ", i)});
+
+  // Give heartbeat a change to run if it didn't yet
+  for (unsigned i = 0; i < 10; i++)
+    util::ThisFiber::Yield();
+
+  // Reallow delayed entry resolution
+  Change([](TestDriver& d) { d.delay_driver_.Resume(); });
+
+  Finish();
+}
+
 }  // namespace dfly

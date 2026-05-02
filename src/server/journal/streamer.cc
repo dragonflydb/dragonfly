@@ -537,7 +537,7 @@ bool RestoreStreamer::Cancel() {
   snapshot_version_ = 0;  // to prevent double cancel in another fiber
   cntx_->Cancel();
   if (sver != 0) {
-    db_slice_->UnregisterOnChange(sver);
+    db_slice_->UnregisterOnChange(this);
   }
   bool res = JournalStreamer::Cancel();
   LOG_IF(WARNING, res != (sver != 0)) << "Journal and DBSlice unregister state mismatch in "
