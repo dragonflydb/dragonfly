@@ -652,7 +652,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // ScanCb can preempt due to journaling expired entries and we need to make sure that
   // we enter the callback in a timing when journaling will not cause preemption. Otherwise,
   // the bucket might change as we Traverse and yield.
-  db_slice.GetLatch()->Wait();
+  db_slice.WaitUnblockJournalWrite();
 
   // Disable flush journal changes to prevent preemtion in traverse.
   journal::DisableFlushGuard journal_flush_guard(op_args.shard->journal());

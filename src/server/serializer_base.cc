@@ -19,6 +19,7 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -36,6 +37,9 @@ void BucketDependencies::Decrement(BucketIdentity bucket) {
   it->second->unlock();
   if (!it->second->IsBlocked())
     deps_.erase(it);
+
+  if (deps_.empty())
+    empty_q_.notify_all();
 }
 
 void BucketDependencies::Wait(BucketIdentity bucket) const {
@@ -45,6 +49,11 @@ void BucketDependencies::Wait(BucketIdentity bucket) const {
 
   auto counter = it->second;  // copy value for address stability
   counter->Wait();
+}
+
+void BucketDependencies::WaitEmpty() const {
+  util::fb2::NoOpLock lock;
+  empty_q_.wait(lock, [&] { return deps_.empty(); });
 }
 
 bool BucketDependencies::DEBUG_IsBusy(BucketIdentity bucket) const {
@@ -131,15 +140,12 @@ SerializerBase::~SerializerBase() {
 //   emitting large values.
 void SerializerBase::RegisterChangeListener() {
   db_array_ = db_slice_->databases();  // copy pointers to survive flush
-  auto cb = [this](DbIndex dbid, const ChangeReq& req) {
-    std::visit([&](auto it) { OnChangeBlocking(dbid, it); }, req);
-  };
-  snapshot_version_ = db_slice_->RegisterOnChange(cb);
+  db_slice_->RegisterOnChange(this);
 }
 
 void SerializerBase::UnregisterChangeListener() {
   if (auto version = std::exchange(snapshot_version_, 0); version > 0)
-    db_slice_->UnregisterOnChange(version);
+    db_slice_->UnregisterOnChange(this);
 }
 
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
@@ -165,12 +171,9 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   // acquire serialization latch.
   // We must make sure that earlier snapshots serialized this bucket before we update its
   // version below.
-  std::optional<std::lock_guard<LocalLatch>> db_guard;
-  if (!on_update) {
+  if (!on_update)
     db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
                                              snapshot_version_);
-    db_guard.emplace(*db_slice_->GetLatch());
-  }
 
   // The block above with updating earlier callbacks is not exlusive - check version again
   if (it.GetVersion() >= snapshot_version_)
@@ -190,6 +193,14 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
 
   return true;
+}
+
+void SerializerBase::WaitForActiveToFinish() const {
+  BucketDependencies::WaitEmpty();
+}
+
+void SerializerBase::OnChange(DbIndex db_index, const ChangeReq& req) {
+  std::visit([&](auto it) { OnChangeBlocking(db_index, it); }, req);
 }
 
 void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it) {
