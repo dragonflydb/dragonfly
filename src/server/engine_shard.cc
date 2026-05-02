@@ -190,11 +190,15 @@ int32_t HuffmanCheckTask::Run(DbSlice* db_slice) {
   string error_msg;
   if (huff_enc.Build(hist_.data(), kMaxSymbol, &error_msg)) {
     size_t compressed_size = huff_enc.EstimateCompressedSize(hist_.data(), kMaxSymbol);
+    double ratio = double(compressed_size) / total_freq;
     LOG(INFO) << "Huffman table built, reducing character count from " << total_freq << " to "
-              << compressed_size << ", compression ratio " << double(compressed_size) / total_freq;
-    string bintable = huff_enc.Export();
-    LOG(INFO) << "Huffman binary table: " << absl::Base64Escape(bintable);
-    db_slice->shard_owner()->stats().huffman_tables_built++;
+              << compressed_size << ", compression ratio " << ratio;
+    if (ratio < 1.0) {
+      if (auto bintable = huff_enc.Export()) {
+        LOG(INFO) << "Huffman binary table: " << absl::Base64Escape(*bintable);
+        db_slice->shard_owner()->stats().huffman_tables_built++;
+      }
+    }
   } else {
     LOG(WARNING) << "Huffman build failed: " << error_msg;
   }
