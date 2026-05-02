@@ -11,10 +11,10 @@
 
 namespace dfly::search {
 
-// Wire format for HNSW index AUX. Only the entry point is persisted: capacity is
-// derived from max(internal_id)+1 in the node set and maxlevel from the entry-point
-// node's level (hnswlib pairs enterpoint_node_ with maxlevel_, and node levels are
-// immutable after creation).
+// HNSW graph state needed at restore time. Capacity is derived from nodes.size()
+// (internal_ids are contiguous 0..N-1 because hnswlib uses tombstones for deletes
+// and GetNodesRange writes them in order); maxlevel is the entry-point node's
+// level by hnswlib invariant, looked up in O(1) at restore.
 struct HnswIndexMetadata {
   size_t enterpoint_node = 0;
 };
