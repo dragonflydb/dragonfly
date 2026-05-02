@@ -133,6 +133,22 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
     return field_num_docs_;
   }
 
+  // Sum of per-doc field lengths. Pair with GetFieldNumDocs() to aggregate
+  // avg doc len across shards without going through the lossy ratio.
+  size_t GetFieldTotalDocsLen() const {
+    return field_total_docs_len_;
+  }
+
+  // Schema canonical identifier of this field. Set by FieldIndices after
+  // construction; empty when the index is built outside that path.
+  std::string_view field_ident() const {
+    return field_ident_;
+  }
+
+  void set_field_ident(std::string_view ident) {
+    field_ident_ = ident;
+  }
+
  protected:
   using StringList = DocumentAccessor::StringList;
 
@@ -160,6 +176,9 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   std::vector<uint32_t> field_doc_lengths_;  // DocId -> sum of TF in this field
   size_t field_total_docs_len_ = 0;
   size_t field_num_docs_ = 0;  // Number of docs with non-empty content in this field
+
+  // Borrows from owning Schema's field map; the schema outlives this index.
+  std::string_view field_ident_;
 };
 
 // Index for text fields.

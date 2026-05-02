@@ -198,6 +198,9 @@ struct AggregateParams {
 
   bool add_scores = false;            // ADDSCORES flag
   search::ScorerFn scorer = nullptr;  // SCORER parameter (null = not set)
+
+  // Set only for multi-shard scoring queries; not owned.
+  const search::GlobalScoringStats* global_scoring_stats = nullptr;
 };
 
 // Stores basic info about a document index.
@@ -352,8 +355,14 @@ class ShardDocIndex {
   ~ShardDocIndex();
 
   // Perform search on all indexed documents and return results.
+  // When global_stats is non-null, scorers see cluster-wide counts.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
-                      search::SearchAlgorithm* search_algo, bool is_knn_prefilter) const;
+                      search::SearchAlgorithm* search_algo, bool is_knn_prefilter,
+                      const search::GlobalScoringStats* global_stats) const;
+
+  // This shard's contribution to a GlobalScoringStats. search_algo must be
+  // Init()-ed.
+  search::ShardScoringStats CollectScoringStats(search::SearchAlgorithm* search_algo) const;
 
   // Perform search and load requested values - note params might be interpreted differently.
   std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,

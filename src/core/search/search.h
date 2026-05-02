@@ -220,9 +220,15 @@ class SearchAlgorithm {
   bool Init(std::string_view query, const QueryParams* params,
             const OptionalFilters* filters = nullptr);
 
-  // Search on given index with predefined limit for cutting off result ids
+  // Search on given index with predefined limit for cutting off result ids.
+  // When global_stats is non-null, scorers see cluster-wide counts instead of
+  // values local to `index`.
   SearchResult Search(const FieldIndices* index,
-                      size_t cuttoff_limit = std::numeric_limits<size_t>::max()) const;
+                      size_t cuttoff_limit = std::numeric_limits<size_t>::max(),
+                      const GlobalScoringStats* global_stats = nullptr) const;
+
+  // This shard's contribution to GlobalScoringStats. Requires Init().
+  ShardScoringStats CollectScoringStats(const FieldIndices* index) const;
 
   std::optional<KnnScoreSortOption> GetKnnScoreSortOption() const;
 

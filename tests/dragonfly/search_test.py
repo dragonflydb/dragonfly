@@ -1295,3 +1295,236 @@ async def test_ft_aggregate_addscores(async_client: aioredis.Redis):
         assert float(results[0]["__score"]) >= float(results[1]["__score"])
 
     await async_client.execute_command("FT.DROPINDEX", "agg_score_idx")
+
+
+# Documents must be diverse enough that BM25/TFIDF rankings differ between docs;
+# ~200 docs spread across 4 shards puts ~50 docs per shard, enough that local
+# IDF/avgdl differ measurably from global if scoring is per-shard.
+def _make_scorer_corpus():
+    base_terms = [
+        "alpha beta",
+        "alpha gamma delta",
+        "beta gamma delta epsilon",
+        "alpha epsilon",
+        "gamma",
+        "delta epsilon zeta",
+        "alpha zeta eta",
+        "alpha alpha alpha beta",
+        "epsilon eta theta",
+        "beta beta gamma theta iota",
+    ]
+    docs = []
+    for i in range(200):
+        content = base_terms[i % len(base_terms)]
+        if i % 7 == 0:
+            content = content + " kappa lambda mu nu xi omicron"
+        if i % 13 == 0:
+            content = content + " " + content
+        docs.append({"key": f"sdoc:{i}", "content": content})
+    return docs
+
+
+async def _index_and_query_with_scorer(client, scorer: str, query: str, k: int):
+    idx_name = f"scorer_shard_idx_{scorer.lower().replace('.', '_')}"
+    await client.execute_command(
+        "FT.CREATE", idx_name, "ON", "HASH", "PREFIX", "1", "sdoc:", "SCHEMA", "content", "TEXT"
+    )
+
+    for doc in _make_scorer_corpus():
+        await client.hset(doc["key"], mapping={"content": doc["content"]})
+
+    res = await client.execute_command(
+        "FT.SEARCH",
+        idx_name,
+        query,
+        "WITHSCORES",
+        "SCORER",
+        scorer,
+        "LIMIT",
+        "0",
+        str(k),
+    )
+
+    total = int(res[0])
+    docs = []
+    i = 1
+    while i < len(res):
+        key = res[i].decode() if isinstance(res[i], bytes) else res[i]
+        score_raw = res[i + 1]
+        score = float(score_raw.decode() if isinstance(score_raw, bytes) else score_raw)
+        docs.append((key, score))
+        i += 3  # skip key, score, fields
+
+    await client.execute_command("FT.DROPINDEX", idx_name)
+    return total, docs
+
+
+@pytest.mark.parametrize("scorer", ["BM25STD", "TFIDF", "TFIDF.DOCNORM"])
+async def test_scorer_consistent_across_shards(df_factory: DflyInstanceFactory, scorer: str):
+    """Top-K and scores must be identical regardless of proactor_threads count.
+
+    Reproducer for the per-shard IDF/avgdl bug: when a scorer is computed using
+    only the docs that live on the executing shard, IDF and avgdl shift with
+    shard count and ranking degrades. The fix runs a stats-collection phase
+    across all shards before scoring so that every shard uses the same global
+    statistics. This test verifies that property.
+    """
+    inst1 = df_factory.create(proactor_threads=1)
+    inst4 = df_factory.create(proactor_threads=4)
+    df_factory.start_all([inst1, inst4])
+
+    client1 = inst1.client()
+    client4 = inst4.client()
+
+    # Query that matches a meaningful subset (most docs contain at least one of these).
+    query = "alpha|beta|gamma"
+    k = 20
+
+    total1, docs1 = await _index_and_query_with_scorer(client1, scorer, query, k)
+    total4, docs4 = await _index_and_query_with_scorer(client4, scorer, query, k)
+
+    assert total1 == total4, f"total_hits diverged: 1-shard={total1}, 4-shard={total4}"
+
+    keys1 = [d[0] for d in docs1]
+    keys4 = [d[0] for d in docs4]
+    assert keys1 == keys4, (
+        f"top-{k} ordering differs across shard counts (scorer={scorer}).\n"
+        f"  1-shard: {keys1}\n"
+        f"  4-shard: {keys4}"
+    )
+
+    # Scores: identical inputs to the scorer => identical outputs (bit-equality
+    # would be ideal, but tolerate tiny FP variation from sum order).
+    by_key1 = dict(docs1)
+    by_key4 = dict(docs4)
+    for key in keys1:
+        s1, s4 = by_key1[key], by_key4[key]
+        denom = max(abs(s1), abs(s4), 1e-9)
+        assert abs(s1 - s4) / denom < 1e-4, (
+            f"score for {key} differs across shard counts (scorer={scorer}): "
+            f"1-shard={s1}, 4-shard={s4}"
+        )
+
+
+async def _aggregate_with_scorer(client, scorer: str, query: str, k: int):
+    idx_name = f"agg_scorer_idx_{scorer.lower().replace('.', '_')}"
+    await client.execute_command(
+        "FT.CREATE",
+        idx_name,
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "sdoc:",
+        "SCHEMA",
+        "content",
+        "TEXT",
+        "doc_id",
+        "TAG",
+    )
+    for doc in _make_scorer_corpus():
+        await client.hset(doc["key"], mapping={"content": doc["content"], "doc_id": doc["key"]})
+
+    res = await client.execute_command(
+        "FT.AGGREGATE",
+        idx_name,
+        query,
+        "LOAD",
+        "1",
+        "@doc_id",
+        "SCORER",
+        scorer,
+        "ADDSCORES",
+        "SORTBY",
+        "2",
+        "@__score",
+        "DESC",
+        "LIMIT",
+        "0",
+        str(k),
+    )
+
+    docs = []
+    for row in res[1:]:
+        kv = {}
+        for i in range(0, len(row), 2):
+            k_ = row[i].decode() if isinstance(row[i], bytes) else row[i]
+            v_ = row[i + 1].decode() if isinstance(row[i + 1], bytes) else row[i + 1]
+            kv[k_] = v_
+        docs.append((kv["doc_id"], float(kv["__score"])))
+
+    await client.execute_command("FT.DROPINDEX", idx_name)
+    return docs
+
+
+@pytest.mark.parametrize("scorer", ["BM25STD", "TFIDF", "TFIDF.DOCNORM"])
+async def test_aggregate_scorer_consistent_across_shards(
+    df_factory: DflyInstanceFactory, scorer: str
+):
+    """FT.AGGREGATE top-K and order must be identical regardless of shard count.
+
+    Tied scores are broken implicitly by doc key in Aggregator::DoSort.
+    """
+    inst1 = df_factory.create(proactor_threads=1)
+    inst4 = df_factory.create(proactor_threads=4)
+    df_factory.start_all([inst1, inst4])
+
+    docs1 = await _aggregate_with_scorer(inst1.client(), scorer, "alpha|beta|gamma", 20)
+    docs4 = await _aggregate_with_scorer(inst4.client(), scorer, "alpha|beta|gamma", 20)
+
+    assert [d[0] for d in docs1] == [d[0] for d in docs4], (
+        f"FT.AGGREGATE top-K differs across shards (scorer={scorer}).\n"
+        f"  1-shard: {[d[0] for d in docs1]}\n  4-shard: {[d[0] for d in docs4]}"
+    )
+    for (k1, s1), (k4, s4) in zip(docs1, docs4):
+        denom = max(abs(s1), abs(s4), 1e-9)
+        assert abs(s1 - s4) / denom < 1e-4, f"score for {k1} differs: {s1} vs {s4}"
+
+
+async def test_sortby_with_scores_alignment(async_client: aioredis.Redis):
+    """Regression: SORTBY+WITHSCORES must keep score/sort_score/key consistent
+    after per-shard re-rank (re-rank must not desync sort_scores).
+    """
+    await async_client.execute_command(
+        "FT.CREATE",
+        "sw_idx",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "sw:",
+        "SCHEMA",
+        "name",
+        "TEXT",
+        "rank",
+        "NUMERIC",
+        "SORTABLE",
+    )
+    for i in range(1, 13):
+        await async_client.hset(f"sw:{i}", mapping={"name": "alpha beta", "rank": str(100 - i)})
+
+    res = await async_client.execute_command(
+        "FT.SEARCH", "sw_idx", "alpha", "SORTBY", "rank", "DESC", "WITHSCORES", "LIMIT", "0", "5"
+    )
+
+    total = int(res[0])
+    assert total == 12
+
+    keys, ranks = [], []
+    i = 1
+    while i < len(res):
+        key = res[i].decode() if isinstance(res[i], bytes) else res[i]
+        fields = res[i + 2]
+        kv = {}
+        for j in range(0, len(fields), 2):
+            k_ = fields[j].decode() if isinstance(fields[j], bytes) else fields[j]
+            v_ = fields[j + 1].decode() if isinstance(fields[j + 1], bytes) else fields[j + 1]
+            kv[k_] = v_
+        keys.append(key)
+        ranks.append(int(kv["rank"]))
+        i += 3
+
+    # SORTBY rank DESC: ranks must be strictly descending. If re-rank desynced
+    # sort_scores from ids, ranks would be jumbled.
+    assert ranks == sorted(ranks, reverse=True), f"SORTBY desynced: {keys} -> {ranks}"
+    await async_client.execute_command("FT.DROPINDEX", "sw_idx")
