@@ -1645,7 +1645,8 @@ void DebugCmd::Compression(CmdArgList args, CommandContext* cmd_cntx) {
     compressed_size = huff_enc.EstimateCompressedSize(hist.hist.data(), HufHist::kMaxSymbol);
 
     if (print_bintable) {
-      bintable = huff_enc.Export();
+      auto exported = huff_enc.Export();
+      bintable = exported.value_or(string{});
     } else {
       bintable.clear();
     }

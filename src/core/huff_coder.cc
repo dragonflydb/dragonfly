@@ -92,7 +92,7 @@ size_t HuffmanEncoder::EstimateCompressedSize(const unsigned hist[], unsigned ma
   return res;
 }
 
-string HuffmanEncoder::Export() const {
+optional<string> HuffmanEncoder::Export() const {
   DCHECK(huf_ctable_);
 
   // Reverse engineered: (maxSymbolValue + 1) / 2 + 1.
@@ -105,7 +105,10 @@ string HuffmanEncoder::Export() const {
   // Seems we can reuse the same workspace, its capacity is enough.
   size_t size = HUF_writeCTable_wksp(res.data(), res.size(), huf_ctable_.get(), table_max_symbol_,
                                      num_bits_, wrkspace.get(), kWspSize);
-  CHECK(!HUF_isError(size));
+  if (HUF_isError(size)) {
+    LOG(WARNING) << "Failed to export Huffman table: " << HUF_getErrorName(size);
+    return nullopt;
+  }
   res.resize(size);
   return res;
 }
