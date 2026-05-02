@@ -565,12 +565,16 @@ IOStat& IOStat::operator-=(const IOStat& other) {
 // The callback receives (DbIndex, PrimeIterator) — the DbIndex identifies
 // which database is currently being iterated.
 template <typename F> void TraverseAllEntries(bool background, ConnectionContext* cntx, F&& f) {
-  util::fb2::BlockingCounter bc{0};
-  for (uint32_t i = 0; i < shard_set->size(); ++i) {
-    bc->Add(1);
-    util::ProactorBase* dest = shard_set->pool()->at(i);
+  using namespace util::fb2;
+  vector<Fiber> fibers;
+  fibers.reserve(shard_set->size());
 
-    auto cb = [f /* copy per thread */, bc, cntx, background]() mutable {
+  for (uint32_t i = 0; i < shard_set->size(); ++i) {
+    Fiber::Opts opts{
+        .priority = background ? FiberPriority::BACKGROUND : FiberPriority::NORMAL,
+        .name = "Debug/Traverse",
+    };
+    fibers.push_back(shard_set->pool()->at(i)->LaunchFiber(opts, [f, cntx, background]() mutable {
       auto* shard = EngineShard::tlocal();
       auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
 
@@ -591,18 +595,11 @@ template <typename F> void TraverseAllEntries(bool background, ConnectionContext
           }
         } while (cursor);
       }
-      bc->Dec();
-    };
-    dest->DispatchBrief([cb, background]() mutable {
-      using namespace util::fb2;
-      Fiber::Opts opts{
-          .priority = background ? FiberPriority::BACKGROUND : FiberPriority::NORMAL,
-          .name = "Debug/Traverse",
-      };
-      Fiber(opts, std::move(cb)).Detach();
-    });
+    }));
   }
-  bc->Wait();
+
+  for (auto& fb : fibers)
+    fb.Join();
 }
 
 }  // namespace

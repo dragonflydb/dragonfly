@@ -638,6 +638,40 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
     await async_client.execute_command("SAVE")
 
 
+@pytest.mark.asyncio
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-objhist-crash"})
+async def test_debug_objhist_during_bgsave(df_factory: DflyInstanceFactory):
+    df = df_factory.create(proactor_threads=2)
+    df.start()
+    client = df.client()
+
+    await client.execute_command("DEBUG", "POPULATE", "50000")
+
+    await client.execute_command("SADDEX", "myset_crash", "1", "member_abc")
+
+    await asyncio.sleep(2)
+
+    await client.execute_command("SRANDMEMBER", "myset_crash", "0")
+
+    await client.execute_command("BGSAVE")
+
+    # Wait until the snapshot is confirmed running before issuing DEBUG OBJHIST.
+    # Without this, BGSAVE may finish before the traversal reaches myset_crash,
+    # leaving no active snapshot change listener and making the crash non-reproducible.
+    # Use a timeout in case BGSAVE finishes before we even reach this check.
+    try:
+        async with timeout(10):
+            while not await is_saving(client):
+                await asyncio.sleep(0.01)
+    except asyncio.TimeoutError:
+        pass  # BGSAVE already finished before we checked — that's fine
+
+    await client.execute_command("DEBUG", "OBJHIST")
+
+    # If we reach here the server did not crash — verify it is still responsive.
+    assert await client.ping()
+
+
 @dfly_args({"proactor_threads": 1, "dbfilename": "test-hsetex-save", "dir": "{DRAGONFLY_TMP}/"})
 async def test_save_hash_with_expired_fields(async_client: aioredis.Redis):
     """
