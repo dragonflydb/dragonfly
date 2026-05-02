@@ -4,6 +4,7 @@
 
 #include "server/journal/cmd_serializer.h"
 
+#include "core/oah_set.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/container_utils.h"
@@ -162,12 +163,13 @@ void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms)
 size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
   // Disable lazy expiry during serialization (same as rdb_save.cc).
   // We are called under bucket lock so DeleteIfEmpty is not possible.
-  StringSet* ss = nullptr;
   uint32_t prev_time = 0;
-  if (pv.Encoding() == kEncodingStrMap2) {
-    ss = static_cast<StringSet*>(pv.RObjPtr());
-    prev_time = ss->time_now();
-    ss->set_time(0);
+  bool dense = pv.Encoding() == kEncodingStrMap2;
+  if (dense) {
+    VisitSet(pv.RObjPtr(), [&](auto* s) {
+      prev_time = s->time_now();
+      s->set_time(0);
+    });
   }
 
   CommandAggregator aggregator(
@@ -181,8 +183,8 @@ size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
   });
 
   // Restore previous time so subsequent operations can trigger lazy expiry.
-  if (ss)
-    ss->set_time(prev_time);
+  if (dense)
+    VisitSet(pv.RObjPtr(), [prev_time](auto* s) { s->set_time(prev_time); });
 
   return commands;
 }

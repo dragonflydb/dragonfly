@@ -30,7 +30,7 @@ StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
   return nullptr;
 }
 
-StringSet* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
+void* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
   Fail();
   return nullptr;
 }

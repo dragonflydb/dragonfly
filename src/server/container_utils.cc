@@ -6,6 +6,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/oah_set.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -205,12 +206,15 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func) {
       success = func(ContainerEntry{ival});
     }
   } else {
-    for (sds ptr : *static_cast<StringSet*>(pv.RObjPtr())) {
-      if (!func(ContainerEntry{ptr, sdslen(ptr)})) {
-        success = false;
-        break;
+    VisitSet(pv.RObjPtr(), [&](auto* set) {
+      for (auto it = set->begin(); it != set->end(); ++it) {
+        std::string_view key = Key(it);
+        if (!func(ContainerEntry{key.data(), key.size()})) {
+          success = false;
+          break;
+        }
       }
-    }
+    });
   }
 
   return success;

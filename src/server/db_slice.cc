@@ -5,6 +5,7 @@
 #include "server/db_slice.h"
 
 #include "core/dense_set.h"
+#include "core/oah_set.h"
 #include "strings/human_readable.h"
 
 extern "C" {
@@ -254,35 +255,48 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
 
 class AsyncDeleter {
  public:
-  static void EnqueDeletion(uint32_t next, DenseSet* ds);
+  template <typename Set> static void EnqueDeletion(uint32_t next, Set* ds);
   static void Shutdown();
 
  private:
   static constexpr uint32_t kClearStepSize = 1024;
   struct ClearNode {
-    DenseSet* ds;
+    void* ds;
     uint32_t cursor;
+    // Advances the node by one step. Deletes the underlying set and returns true
+    // when the set is fully cleared; otherwise updates cursor and returns false.
+    bool (*step)(ClearNode*);
     ClearNode* next;
-
-    ClearNode(DenseSet* d, uint32_t c, ClearNode* n) : ds(d), cursor(c), next(n) {
-    }
   };
 
-  // Asynchronously deletes entries during the cpu-idle time.
   static int32_t IdleCb();
-
-  // We add async deletion requests to a linked list and process them asynchronously
-  // in each thread.
   static __thread ClearNode* head_;
 };
 
 __thread AsyncDeleter::ClearNode* AsyncDeleter::head_ = nullptr;
 
-void AsyncDeleter::EnqueDeletion(uint32_t next, DenseSet* ds) {
-  bool launch_task = (head_ == nullptr);
+// ClearStep returns the next cursor; the table is empty when it equals the
+// underlying entries-vector size. DenseSet exposes that as BucketCount();
+// OAHSet exposes it as Capacity() (BucketCount() omits displacement slots).
+template <typename Set> uint32_t ClearStepEnd(Set* s) {
+  if constexpr (std::is_same_v<Set, OAHSet>)
+    return s->Capacity();
+  else
+    return s->BucketCount();
+}
 
-  // register ds
-  head_ = new ClearNode{ds, next, head_};
+template <typename Set> void AsyncDeleter::EnqueDeletion(uint32_t next, Set* ds) {
+  auto step = +[](ClearNode* n) {
+    auto* s = static_cast<Set*>(n->ds);
+    n->cursor = s->ClearStep(n->cursor, kClearStepSize);
+    if (n->cursor == ClearStepEnd(s)) {
+      CompactObj::DeleteMR<Set>(s);
+      return true;
+    }
+    return false;
+  };
+  bool launch_task = (head_ == nullptr);
+  head_ = new ClearNode{ds, next, step, head_};
   ProactorBase* pb = ProactorBase::me();
   DCHECK(pb);
   DVLOG(2) << "Adding async deletion task, thread " << pb->GetPoolIndex() << " " << launch_task;
@@ -306,15 +320,10 @@ int32_t AsyncDeleter::IdleCb() {
     return -1;  // unregister itself.
 
   auto* current = head_;
-
   DVLOG(2) << "IdleCb " << current->cursor;
-  uint32_t next = current->ds->ClearStep(current->cursor, kClearStepSize);
-  if (next == current->ds->BucketCount()) {  // reached the end.
-    CompactObj::DeleteMR<DenseSet>(current->ds);
+  if (current->step(current)) {
     head_ = current->next;
     delete current;
-  } else {
-    current->cursor = next;
   }
   return ProactorBase::kOnIdleMaxLevel;
 };
@@ -1839,16 +1848,21 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 
   if (async && MayDeleteAsynchronously(pv)) {
-    DenseSet* ds = (DenseSet*)pv.RObjPtr();
+    auto schedule = [](auto* ds) {
+      using Ds = std::remove_pointer_t<decltype(ds)>;
+      uint32_t next = ds->ClearStep(0, 512);
+      if (next < ClearStepEnd(ds))
+        AsyncDeleter::EnqueDeletion(next, ds);
+      else
+        CompactObj::DeleteMR<Ds>(ds);
+    };
+    void* obj_ptr = pv.RObjPtr();
     pv.SetRObjPtr(nullptr);
-    const size_t kClearStepSize = 512;
-
-    uint32_t next = ds->ClearStep(0, kClearStepSize);
-    if (next < ds->BucketCount()) {
-      AsyncDeleter::EnqueDeletion(next, ds);
-    } else {
-      CompactObj::DeleteMR<DenseSet>(ds);
-    }
+    // SET dispatches via VisitSet (StringSet/OAHSet); HASH is always StringMap (DenseSet-derived).
+    if (pv.ObjType() == OBJ_SET)
+      VisitSet(obj_ptr, schedule);
+    else
+      schedule(static_cast<DenseSet*>(obj_ptr));
   }
 
   if (table->slots_stats) {
