@@ -264,6 +264,10 @@ class DflyInstance:
                 self.sed_thread.join()
                 symbolize_stack_trace(proc.args[0], self.stacktrace)
 
+    def wait(self):
+        if self.proc is not None:
+            self.proc.communicate(timeout=120)
+
     def _start(self):
         if self.params.existing_port:
             return
