@@ -110,8 +110,9 @@ class SetCmd {
 
   OpStatus CachePrevIfNeeded(const SetParams& params, DbSlice::Iterator it);
 
-  const OpArgs op_args_;
+  OpArgs op_args_;
   bool explicit_journal_;  // call RecordJournal (auto journaling disabled)
+  bool skip_journal_ = false;
 };
 
 size_t SetRangeInternal(std::string* value, size_t start, std::string_view range) {
@@ -836,9 +837,13 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
     }
   }
 
+  // Enable journal omits for this operation
+  op_args_.db_cntx.is_omittable_operation = true;
+
   // We can use std::nullopt here because SET command can change the key type to string
   auto op_res = db_slice.AddOrFind(op_args_.db_cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(op_res);
+  skip_journal_ = op_res->omitted_journal;
 
   if (!op_res->is_new) {
     if (auto status = CachePrevIfNeeded(params, op_res->it); status != OpStatus::OK)
@@ -934,7 +939,7 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
     StashPrimeValue(op_args_.db_cntx.db_index, key, pv, ts, params.backpressure);
   }
 
-  if (explicit_journal_ && op_args_.shard->journal()) {
+  if (!skip_journal_ && explicit_journal_ && op_args_.shard->journal()) {
     RecordJournal(params, key, value);
   }
 }

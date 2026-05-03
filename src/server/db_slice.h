@@ -74,6 +74,9 @@ struct SliceEvents {
   // how many updates and insertions of keys between snapshot intervals
   size_t update = 0;
 
+  // how many journal omit optimizations were performed
+  size_t journal_omit = 0;
+
   uint64_t huff_encode_total = 0, huff_encode_success = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
@@ -99,6 +102,7 @@ class DbSlice {
     virtual void WaitForNoBucketBlocked() const {
     }
 
+    bool eventually_consistent_ = false;
     uint64_t snapshot_version_ = 0;
   };
 
@@ -266,6 +270,10 @@ class DbSlice {
     Iterator it;
     AutoUpdater post_updater;
     bool is_new = false;
+
+    // Set if DbContext::is_omittable_operation was set and the conditions were met.
+    // Means that the journal write should NOT be performed.
+    bool omitted_journal = false;
   };
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
@@ -555,6 +563,9 @@ class DbSlice {
   void SendQueuedInvalidationMessagesAsync();
 
   void CreateDb(DbIndex index);
+
+  // Returns true if this write could be ignored during replication without losing consistency
+  bool IsOmittableWrite(const Context& cntx, ChangeReq req);
 
   enum class UpdateStatsMode : uint8_t {
     kReadStats,
