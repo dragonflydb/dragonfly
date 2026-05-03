@@ -46,7 +46,28 @@ using IncrByParam = std::variant<double, int64_t>;
 using OptStr = std::optional<std::string>;
 enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
 
+// TODO: replace all the listpack code with our detail::Listpack wrapper.
 bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
+  DCHECK_GE(args.size(), 2u);
+
+  // For a single field-value pair on an empty or single-entry listpack, approve automatically
+  // even with large values. A one-field hash is efficient to look-up or mutate.
+  if (args.size() == 2 && args.front().size() < 4096) {
+    if (lpLength((uint8_t*)lp) == 0)
+      return true;
+
+    // if we override the same field of a singleton hashmap, we allow listpack as well.
+    if (lpLength((uint8_t*)lp) == 2) {
+      uint8_t* first = lpFirst((uint8_t*)lp);
+      unsigned slen = 0;
+      long long lval;
+      uint8_t* vstr = lpGetValue(first, &slen, &lval);
+      if (vstr && args.front().size() == slen && memcmp(vstr, args.front().data(), slen) == 0) {
+        return true;
+      }
+    }
+  }
+
   size_t sum = 0;
   for (auto s : args) {
     if (s.size() > server.max_map_field_len)
