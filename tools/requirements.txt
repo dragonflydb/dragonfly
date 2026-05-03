@@ -8,3 +8,4 @@ requests>=2.32.0
 aiocsv==1.2.3
 aiofiles==22.1.0
 numpy==2.1.3
+anthropic>=0.40.0,<1.0
