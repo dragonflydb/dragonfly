@@ -245,17 +245,6 @@ class ServerState {  // public struct - to allow initialization.
     return thread_index_;
   }
 
-  ChannelStore* channel_store() const {
-    return channel_store_;
-  }
-
-  void UpdateChannelStore(ChannelStore* replacement) {
-    channel_store_ = replacement;
-  }
-
-  void UnsubscribeSlotsAndUpdateChannelStore(const ChannelStore::ChannelsSubMap& sub_map,
-                                             ChannelStore* replacement);
-
   bool ShouldLogSlowCmd(unsigned latency_usec) const;
 
   Stats stats;
@@ -315,8 +304,6 @@ class ServerState {  // public struct - to allow initialization.
 
   InterpreterManager interpreter_mgr_;
   absl::flat_hash_map<ScriptMgr::ScriptKey, ScriptMgr::ScriptParams> cached_script_params_;
-
-  ChannelStore* channel_store_;
 
   GlobalState gstate_ = GlobalState::ACTIVE;
 
