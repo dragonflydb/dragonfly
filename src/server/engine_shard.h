@@ -10,6 +10,7 @@
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
 #include "server/common_types.h"
+#include "server/defrag.h"
 #include "util/sliding_counter.h"
 
 typedef char* sds;
@@ -209,8 +210,10 @@ class EngineShard {
   void FinalizeMulti(Transaction* tx);
 
   // Scan the shard with the cursor and apply defragmentation for database entries.
-  // Returns collected page stats if defragmentation was performed.
-  std::optional<CollectedPageStats> DoDefrag(PageUsage* page_usage);
+  // phased_quota_usec controls the inner CycleQuota for the phased path. Background
+  // defrag uses the default; explicit MEMORY DEFRAGMENT passes a much larger value.
+  DefragShardReport DoDefrag(PageUsage* page_usage,
+                             uint64_t phased_quota_usec = CycleQuota::kDefaultDefragQuota);
 
   uint64_t GetDefragCursor() const {
     return defrag_state_.cursor;
@@ -220,29 +223,6 @@ class EngineShard {
   size_t CompactTable(double threshold, DbIndex db_idx);
 
  private:
-  struct DefragTaskState {
-    size_t dbid = 0u;
-    uint64_t cursor = 0u;
-    time_t last_check_time = 0;
-    float page_utilization_threshold = 0.8;
-
-    enum class SkipReason : uint8_t {
-      MemoryTooLow,
-      MemoryBelowThreshold,
-      CheckWithinInterval,
-      NotEnoughFragmentation,
-      CheckInProgress,
-      NotSkipped,
-    };
-
-    // check the current threshold and return a reason if we skip the defragmentation
-    SkipReason CheckRequired();
-
-    void UpdateScanState(uint64_t cursor_val);
-
-    void ResetScanState();
-  };
-
   struct EvictionTaskState {
     void Reset(bool rss_eviction_enabled_flag) {
       rss_eviction_enabled = rss_eviction_enabled_flag;

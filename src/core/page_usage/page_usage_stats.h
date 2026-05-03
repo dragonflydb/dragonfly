@@ -20,7 +20,10 @@ namespace dfly {
 class CycleQuota {
  public:
   static constexpr uint64_t kMaxQuota = std::numeric_limits<uint64_t>::max();
-  static constexpr uint64_t kDefaultDefragQuota = 150;
+  // Note: 600 here is ~150us of real time because helio's CycleClock mixes raw
+  // rdtsc with abseil's shifted frequency, making FromUsec/ToUsec ~4x off on
+  // x86. Once the helio bug is fixed, drop this back to 150.
+  static constexpr uint64_t kDefaultDefragQuota = 600;
 
   explicit CycleQuota(uint64_t quota_usec);
 
@@ -85,7 +88,7 @@ class PageUsage {
 
   virtual bool IsPageForObjectUnderUtilized(void* object);
 
-  bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
+  virtual bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
 
   CollectedPageStats CollectedStats() const {
     return unique_pages_.CollectedStats();
@@ -106,6 +109,20 @@ class PageUsage {
   }
 
   bool QuotaDepleted() const;
+
+  virtual bool ShouldStop() const {
+    return false;
+  }
+
+  // Read-only walkers (e.g. CENSUS) never reallocate, so callers can skip
+  // pre/post sizing work that only matters when an object may move.
+  virtual bool IsReadOnly() const {
+    return false;
+  }
+
+  float threshold() const {
+    return threshold_;
+  }
 
   void ExtendQuota(uint64_t quota_usec);
 

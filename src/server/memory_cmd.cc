@@ -282,19 +282,26 @@ void MemoryCmd::Run(CmdArgList args) {
     static const float default_threshold =
         absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     const float threshold = parser.NextOrDefault(default_threshold);
+    if (parser.HasError()) {
+      return cmd_cntx_->SendError(parser.TakeError().MakeReply());
+    }
 
-    std::vector<CollectedPageStats> results(shard_set->size());
+    // Explicit MEMORY DEFRAGMENT runs with a generous quota so the operator
+    // sees real progress per call (~5s real time given the 4x helio CycleClock
+    // calibration bug). Phase transitions still happen between calls — a 5s
+    // slice is large enough to walk a chunk but doesn't pretend to be unlimited.
+    constexpr uint64_t kExplicitDefragQuotaUsec = 20'000'000;
+
+    std::vector<DefragShardReport> results(shard_set->size());
     shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard) {
         PageUsage page_usage{CollectPageStats::YES, threshold,
-                             CycleQuota{CycleQuota::kDefaultDefragQuota}};
-        if (auto shard_res = shard->DoDefrag(&page_usage); shard_res.has_value()) {
-          results[shard->shard_id()] = std::move(shard_res.value());
-        }
+                             CycleQuota{kExplicitDefragQuotaUsec}};
+        results[shard->shard_id()] = shard->DoDefrag(&page_usage, kExplicitDefragQuotaUsec);
       }
     });
 
-    const CollectedPageStats merged = CollectedPageStats::Merge(std::move(results), threshold);
+    const DefragMergedReport merged = DefragMergedReport::Merge(std::move(results));
     auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
     return rb->SendVerbatimString(merged.ToString());
   }

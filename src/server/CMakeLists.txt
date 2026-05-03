@@ -82,6 +82,7 @@ endif()
 
 # Optionally include tiered_storage which interfaces with tiering_module
 add_library(dragonfly_lib
+            defrag.cc
             engine_shard.cc engine_shard_set.cc
             config_registry.cc conn_context.cc
             debugcmd.cc dflycmd.cc error.cc family_utils.cc string_stats.cc ${DF_SEARCH_SRCS}
@@ -166,6 +167,7 @@ helio_cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(serializer_base_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(defrag_test dfly_test_lib LABELS DFLY)
 
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test

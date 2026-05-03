@@ -21,6 +21,7 @@ extern "C" {
 }
 #include "server/blocking_controller.h"
 #include "server/db_slice.h"
+#include "server/defrag.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/namespaces.h"
@@ -46,6 +47,15 @@ ABSL_FLAG(float, mem_defrag_waste_threshold, 0.2,
 ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "memory page under utilization threshold. Ratio between used and committed size, below "
           "this, memory in this page will defragmented");
+
+ABSL_FLAG(bool, enable_bg_defrag, false,
+          "If true, run periodic defragmentation as an idle background task. "
+          "Defaults to false on this branch so tests only trigger defrag via "
+          "explicit MEMORY DEFRAGMENT calls.");
+
+ABSL_FLAG(bool, experimental_defrag, true,
+          "When true, run the phased defragmentation strategy (CENSUS / SELECT_TARGETS / "
+          "EVACUATE / VERIFY) instead of the legacy single-pass defragmenter. Experimental.");
 
 ABSL_FLAG(int32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
@@ -77,6 +87,76 @@ using namespace util;
 namespace {
 
 constexpr uint64_t kCursorDoneState = 0u;
+
+// Runs one slice of the prime-table traversal: advances `*dbid` past invalid
+// dbs, walks the current db's prime table dispatching DefragIfNeeded through
+// `visitor`, and persists the new cursor position via `*cursor`. Stops when
+// the visitor's quota depletes, the cursor wraps, or the global namespace
+// pointer goes away. Mutates per-db memory accounting on the slice.
+DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
+                                 PageUsage* visitor) {
+  // Skip past invalid dbs (e.g., dropped, not yet allocated).
+  while (!slice->IsDbValid(*dbid) && *dbid + 1 < slice->db_array_size())
+    ++*dbid;
+
+  if (!slice->IsDbValid(*dbid)) {
+    return DbSliceResult{.finished_all_dbs = true};
+  }
+
+  auto* prime_table = slice->GetTables(*dbid);
+  PrimeTable::Cursor cur{*cursor};
+  DbSliceResult result;
+  const DbTable* db_table = slice->GetDBTable(*dbid);
+
+  const size_t dbid_before = *dbid;
+  const uint64_t cursor_before = cur.token();
+  const uint64_t start_ns = absl::GetCurrentTimeNanos();
+  uint64_t traverse_calls = 0;
+
+  bool quota_depleted = false;
+  bool should_stop = false;
+  bool cursor_done = false;
+  bool namespaces_null = false;
+
+  const bool read_only = visitor->IsReadOnly();
+  do {
+    cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
+      if (read_only) {
+        it->second.DefragIfNeeded(visitor);
+        ++result.attempts;
+        return;
+      }
+      const ssize_t original_size = it->second.MallocUsed();
+      const bool did = it->second.DefragIfNeeded(visitor);
+      ++result.attempts;
+      if (did) {
+        ++result.reallocations;
+        if (const ssize_t delta = it->second.MallocUsed() - original_size; delta != 0) {
+          db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+        }
+      }
+    });
+    ++traverse_calls;
+
+    quota_depleted = visitor->QuotaDepleted();
+    should_stop = visitor->ShouldStop();
+    cursor_done = !cur;
+    namespaces_null = !namespaces;
+  } while (!quota_depleted && !should_stop && !cursor_done && !namespaces_null);
+
+  const double elapsed_ms = static_cast<double>(absl::GetCurrentTimeNanos() - start_ns) / 1e6;
+  LOG(INFO) << absl::StrFormat(
+      "defrag[Slice] dbid=%zu cursor=%llu->%llu traverses=%llu attempts=%llu "
+      "reallocs=%llu took=%.1fms exit{quota=%d stop=%d cursor_done=%d ns_null=%d}",
+      dbid_before, cursor_before, cur.token(), traverse_calls, result.attempts,
+      result.reallocations, elapsed_ms, quota_depleted, should_stop, cursor_done, namespaces_null);
+
+  *cursor = cur.token();
+  if (*cursor == kCursorDoneState) {
+    ++*dbid;
+  }
+  return result;
+}
 
 bool HasContendedLocks(ShardId shard_id, Transaction* trx, const DbTable* table) {
   auto is_contended = [table](LockFp fp) { return table->trans_locks.Find(fp)->IsContended(); };
@@ -259,17 +339,14 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
   return *this;
 }
 
-void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {
-  cursor = cursor_val;
-  // Once we're done with a db, jump to the next
-  if (cursor == kCursorDoneState) {
-    dbid++;
-  }
-}
-
-void EngineShard::DefragTaskState::ResetScanState() {
-  dbid = cursor = 0u;
-}
+enum class DefragSkipReason : uint8_t {
+  MemoryTooLow,
+  MemoryBelowThreshold,
+  CheckWithinInterval,
+  NotEnoughFragmentation,
+  CheckInProgress,
+  NotSkipped,
+};
 
 // This function checks 3 things:
 // 1. Don't try memory fragmentation if we don't use "enough" memory (control by
@@ -277,10 +354,12 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // 2. We have memory blocks that can be better utilized (there is a "wasted memory" in them).
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by mem_defrag_waste_threshold flag)
-EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequired() {
-  using enum SkipReason;
-  if (cursor > kCursorDoneState) {
-    VLOG(2) << "cursor: " << cursor;
+DefragSkipReason ShouldStartDefrag(DefragTaskState* state) {
+  using enum DefragSkipReason;
+  // Mid-cycle: keep going regardless of memory / interval gates. Legacy uses
+  // cursor > 0; phased uses phase != IDLE. Either signals "in progress".
+  if (state->cursor > kCursorDoneState || state->phase != DefragPhase::IDLE) {
+    VLOG(2) << "cursor: " << state->cursor << " phase: " << static_cast<int>(state->phase);
     return NotSkipped;
   }
 
@@ -302,7 +381,7 @@ EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequ
 
   if (finfo.bin == 0) {  // did not start the iterative checking yet
     const auto now = time(nullptr);
-    const auto seconds_from_prev_check = now - last_check_time;
+    const auto seconds_from_prev_check = now - state->last_check_time;
     const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
     if (seconds_from_prev_check < mem_defrag_interval) {
@@ -312,17 +391,17 @@ EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequ
     // start checking.
     finfo.committed = finfo.committed_golden = 0;
     finfo.wasted = 0;
-    page_utilization_threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+    state->page_utilization_threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
   }
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  int res = zmalloc_get_allocator_fragmentation_step(page_utilization_threshold, &finfo);
+  int res = zmalloc_get_allocator_fragmentation_step(state->page_utilization_threshold, &finfo);
   uint64_t duration = absl::GetCurrentTimeNanos() - start;
   VLOG(1) << "Reading memory usage took " << duration << " ns on bin " << finfo.bin - 1;
 
   if (res == 0) {
     // finished checking.
-    last_check_time = time(nullptr);
+    state->last_check_time = time(nullptr);
 
     if (finfo.committed != finfo.committed_golden) {
       LOG_FIRST_N(ERROR, 100) << "committed memory computed incorrectly: " << finfo.committed
@@ -339,7 +418,7 @@ EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequ
   return CheckInProgress;
 }
 
-std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
+DefragShardReport EngineShard::DoDefrag(PageUsage* page_usage, uint64_t phased_quota_usec) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -350,42 +429,74 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
   // TODO: enable tiered storage on non-default db slice
   DbSlice& slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
 
-  // If we moved to an invalid db, skip as long as it's not the last one
-  while (!slice.IsDbValid(defrag_state_.dbid) && defrag_state_.dbid + 1 < slice.db_array_size())
-    defrag_state_.dbid++;
+  const uint64_t start_ns = absl::GetCurrentTimeNanos();
+  const DefragPhase phase_start = defrag_state_.phase;
 
-  // If we found no valid db, we finished traversing and start from scratch next time
-  if (!slice.IsDbValid(defrag_state_.dbid)) {
-    defrag_state_.ResetScanState();
-    return std::nullopt;
+  // Re-arm page_usage's quota so it counts only DoDefrag's actual work. Without
+  // this, expensive HLL/hdr_histogram allocation in PageUsage's constructor
+  // (in the caller) is charged against the defrag budget.
+  page_usage->ArmQuotaTimer();
+
+  if (GetFlag(FLAGS_experimental_defrag)) {
+    LOG(INFO) << absl::StrFormat("defrag[DoDefrag] shard=%u enter phase=%s threshold=%.2f",
+                                 shard_id_, PhaseName(phase_start), page_usage->threshold());
+
+    auto walker = [&](PageUsage* visitor) {
+      return RunPrimeTableSlice(&slice, &defrag_state_.dbid, &defrag_state_.cursor, visitor);
+    };
+    RunPhaseDefrag(&defrag_state_, page_usage->threshold(), CycleQuota{phased_quota_usec}, walker);
+
+    page_usage->ExtendQuota(50);
+    shard_search_indices_->Defragment(page_usage);
+
+    stats_.defrag_task_invocation_total++;
+
+    DefragShardReport report;
+    report.summary.phase_start = phase_start;
+    report.summary.phase_end = defrag_state_.phase;
+    report.summary.duration_us = (absl::GetCurrentTimeNanos() - start_ns) / 1000;
+    // TODO(defrag): quota_depleted here reflects page_usage's quota, which arms
+    // when page_usage is constructed (in the caller, before we entered DoDefrag)
+    // and only gates the trailing search-index defrag. RunPhaseDefrag uses its
+    // own internal CycleQuota that's not surfaced. Empirically on an empty DB
+    // we observe quota_depleted=true while cycle_finished=false, which suggests
+    // the phased CycleQuota is exhausted inside individual step walks (150us is
+    // tight) and the cycle never reaches VERIFY in a single invocation. Add
+    // per-phase logging and consider plumbing the phased quota's depletion bit
+    // into the summary so we can tell which quota actually stopped us.
+    report.summary.quota_depleted = page_usage->QuotaDepleted();
+    report.summary.finished_all_dbs = defrag_state_.cycle_stats.cycle_finished;
+    report.cycle_stats = defrag_state_.cycle_stats;
+    report.page_usage_stats = page_usage->CollectedStats();
+    report.work_pending = defrag_state_.phase != DefragPhase::IDLE;
+
+    LOG(INFO) << absl::StrFormat(
+        "defrag[DoDefrag] shard=%u exit phase=%s->%s duration=%lluus quota_depleted=%d "
+        "work_pending=%d cycle_finished=%d",
+        shard_id_, PhaseName(report.summary.phase_start), PhaseName(report.summary.phase_end),
+        report.summary.duration_us, report.summary.quota_depleted, report.work_pending,
+        report.summary.finished_all_dbs);
+    return report;
   }
 
-  DCHECK(slice.IsDbValid(defrag_state_.dbid));
-  auto* prime_table = slice.GetTables(defrag_state_.dbid);
-  PrimeTable::Cursor cur{defrag_state_.cursor};
-  uint64_t reallocations = 0;
-  uint64_t attempts = 0;
+  auto [attempts, reallocations, finished_all_dbs] =
+      RunPrimeTableSlice(&slice, &defrag_state_.dbid, &defrag_state_.cursor, page_usage);
 
-  DbTable* db_table = slice.GetDBTable(defrag_state_.dbid);
-  do {
-    cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
-      // for each value check whether we should move it because it
-      // seats on underutilized page of memory, and if so, do it.
-      const ssize_t original_size = it->second.MallocUsed();
-      const bool did = it->second.DefragIfNeeded(page_usage);
-      attempts++;
-      if (did) {
-        reallocations++;
-        if (const ssize_t delta = it->second.MallocUsed() - original_size; delta != 0) {
-          db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
-        }
-      }
-    });
-  } while (!page_usage->QuotaDepleted() && cur && namespaces);
+  DefragShardReport report;
+  report.summary.phase_start = phase_start;  // legacy path: always IDLE
+  report.summary.phase_end = DefragPhase::IDLE;
+
+  if (finished_all_dbs) {
+    defrag_state_.ResetScanState();
+    report.summary.duration_us = (absl::GetCurrentTimeNanos() - start_ns) / 1000;
+    report.summary.quota_depleted = page_usage->QuotaDepleted();
+    report.summary.finished_all_dbs = true;
+    report.work_pending = false;
+    return report;
+  }
+
   const uint64_t used_cycles = page_usage->UsedQuotaCycles();
   const uint64_t usec = base::CycleClock::ToUsec(used_cycles);
-
-  defrag_state_.UpdateScanState(cur.token());
 
   page_usage->ExtendQuota(50);
   const auto [quota_depleted, objects_moved] = shard_search_indices_->Defragment(page_usage);
@@ -409,7 +520,12 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
         slice.shard_id(), used_cycles, usec, cursor_state);
   }
 
-  return page_usage->CollectedStats();
+  report.page_usage_stats = page_usage->CollectedStats();
+  report.summary.duration_us = (absl::GetCurrentTimeNanos() - start_ns) / 1000;
+  report.summary.quota_depleted = page_usage->QuotaDepleted();
+  report.summary.finished_all_dbs = false;
+  report.work_pending = true;  // !finished_all_dbs path
+  return report;
 }
 
 // the memory defragmentation task is as follow:
@@ -421,21 +537,20 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
 //     priority.
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
-  using enum DefragTaskState::SkipReason;
+  using enum DefragSkipReason;
 
   constexpr uint32_t kRunAtLowPriority = 0u;
   if (!namespaces) {
     return kRunAtLowPriority;
   }
 
-  if (auto check_result = defrag_state_.CheckRequired(); check_result == NotSkipped) {
+  if (auto check_result = ShouldStartDefrag(&defrag_state_); check_result == NotSkipped) {
     VLOG(2) << shard_id_ << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
     static const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     // TODO (abhijat): implement move ctor for PageUsage so this object can be moved into the task.
     PageUsage page_usage{CollectPageStats::NO, threshold,
                          CycleQuota{CycleQuota::kDefaultDefragQuota}};
-    if (DoDefrag(&page_usage)) {
-      // we didn't finish the scan
+    if (DoDefrag(&page_usage).work_pending) {
       return ProactorBase::kOnIdleMaxLevel;
     }
   } else {
@@ -474,6 +589,7 @@ EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
       queue2_(kQueueLen / 2, 2, 2),
       shard_id_(pb->GetPoolIndex()),
       mi_resource_(heap) {
+  defrag_state_.shard_id = shard_id_;
   queue_.Start(absl::StrCat("shard_queue_", shard_id()));
   queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
 }
@@ -537,7 +653,9 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
     RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
   });
-  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  if (absl::GetFlag(FLAGS_enable_bg_defrag)) {
+    defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  }
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
