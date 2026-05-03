@@ -1,23 +1,17 @@
-import pytest
 import copy
-import re
-import json
-import redis
 from binascii import crc_hqx
-from redis import asyncio as aioredis
-import asyncio
 from dataclasses import dataclass
 
-from .instance import DflyInstanceFactory, DflyInstance
-from .utility import *
-from .replication_test import check_all_replicas_finished
-from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
+from redis.cluster import RedisCluster
 from redis.exceptions import MovedError
-from .proxy import Proxy
-from .seeder import Seeder, SeederBase, DebugPopulateSeeder
 
 from . import dfly_args
+from .instance import DflyInstanceFactory, DflyInstance
+from .proxy import Proxy
+from .replication_test import check_all_replicas_finished
+from .seeder import DebugPopulateSeeder
+from .utility import *
 
 BASE_PORT = 30001
 
@@ -953,9 +947,22 @@ async def test_cluster_flush_slots_after_config_change(df_factory: DflyInstanceF
     await push_config(config, [c_master_admin, c_replica_admin])
 
     await check_all_replicas_finished([c_replica], c_master)
+    expected_size = 100_000 - slot_0_size
+    cmd = ("DFLYCLUSTER", "GETSLOTINFO", "SLOTS", "0")
 
-    assert await c_master.execute_command("dbsize") == (100_000 - slot_0_size)
-    assert await c_replica.execute_command("dbsize") == (100_000 - slot_0_size)
+    @assert_eventually(timeout=5)
+    async def slot_zero_flushed():
+        m_slots, repl_slots, master_size, replica_size = await asyncio.gather(
+            c_master_admin.execute_command(*cmd),
+            c_replica_admin.execute_command(*cmd),
+            c_master.execute_command("DBSIZE"),
+            c_replica.execute_command("DBSIZE"),
+        )
+
+        assert m_slots[0][2] == repl_slots[0][2] == 0
+        assert master_size == replica_size == expected_size
+
+    await slot_zero_flushed()
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "admin_port": next(next_port)})
