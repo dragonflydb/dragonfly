@@ -86,6 +86,21 @@ containers:
     {{- with .Values.extraArgs }}
       {{- toYaml . | trim | nindent 6 }}
     {{- end }}
+    {{- with .Values.cluster }}
+    {{- $modeRaw := .mode | default "" }}
+    {{- $clusterMode := "" }}
+    {{- if kindIs "bool" $modeRaw }}
+      {{- if $modeRaw }}{{- $clusterMode = "yes" }}{{- end }}
+    {{- else }}
+      {{- $clusterMode = $modeRaw | toString }}
+    {{- end }}
+    {{- if ne $clusterMode "" }}
+      - "--cluster_mode={{ $clusterMode }}"
+    {{- end }}
+    {{- if and (ne $clusterMode "") .experimentalShardBySlot }}
+      - "--experimental_cluster_shard_by_slot=true"
+    {{- end }}
+    {{- end }}
     {{- if .Values.tls.enabled }}
       - "--tls"
       - "--tls_cert_file=/etc/dragonfly/tls/tls.crt"
