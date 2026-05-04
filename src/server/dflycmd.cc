@@ -69,6 +69,7 @@ const char kBadMasterId[] = "bad master id";
 const char kIdNotFound[] = "syncid not found";
 const char kInvalidSyncId[] = "bad sync id";
 const char kInvalidState[] = "invalid state";
+const char kTakeoverOnReplica[] = "TAKEOVER not supported on a chained replica";
 
 bool ToSyncId(string_view str, uint32_t* num) {
   if (!absl::StartsWith(str, "SYNC"))
@@ -487,6 +488,10 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
 // timeout_sec - number of seconds to wait for TAKEOVER to converge.
 // SAVE option is used only by tests.
 void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
+  if (!ServerState::tlocal()->is_master) {
+    return cmd_cntx->SendError(kTakeoverOnReplica);
+  }
+
   CmdArgParser parser{args};
   parser.Next();
   float timeout = std::ceil(parser.Next<float>());

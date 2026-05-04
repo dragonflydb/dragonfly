@@ -3467,47 +3467,52 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   };
 
   auto add_repl_info = [&] {
-    if (!m.replica_side_info) {
-      vector<ReplicaRoleInfo> replicas_info = dfly_cmd_->GetReplicasRoleInfo();
-      append("role", "master");
-      append("connected_slaves", replicas_info.size());
+    const bool is_master = !m.replica_side_info;
+    append("role", is_master
+                       ? "master"
+                       : (GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica"));
 
-      if (show_managed_info) {
-        for (size_t i = 0; i < replicas_info.size(); i++) {
-          auto& r = replicas_info[i];
-          // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
-          append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port,
-                                            ",state=", r.state, ",lag=", r.lsn_lag));
-        }
+    // Downstream replicas: emit on master AND on chained replicas, since either
+    // can be the source for further replicas in a cascading topology.
+    vector<ReplicaRoleInfo> replicas_info = dfly_cmd_->GetReplicasRoleInfo();
+    append("connected_slaves", replicas_info.size());
+    if (show_managed_info) {
+      for (size_t i = 0; i < replicas_info.size(); i++) {
+        auto& r = replicas_info[i];
+        // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
+        append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port,
+                                          ",state=", r.state, ",lag=", r.lsn_lag));
       }
+    }
+
+    if (is_master) {
       append("master_replid", master_replid_);
-    } else {
-      append("role", GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
+      return;
+    }
 
-      auto replication_info_cb = [&](const Replica::Summary& rinfo) {
-        append("master_host", rinfo.host);
-        append("master_port", rinfo.port);
+    auto replication_info_cb = [&](const Replica::Summary& rinfo) {
+      append("master_host", rinfo.host);
+      append("master_port", rinfo.port);
 
-        const char* link = rinfo.master_link_established ? "up" : "down";
-        append("master_link_status", link);
-        append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
-        append("master_sync_in_progress", rinfo.full_sync_in_progress);
-        append("master_replid", rinfo.master_id);
-        if (rinfo.full_sync_done || (rinfo.passed_full_sync && !rinfo.master_link_established))
-          append("slave_repl_offset", rinfo.repl_offset_sum);
-        append("slave_priority", GetFlag(FLAGS_replica_priority));
-        append("slave_read_only", 1);
-        append("psync_attempts", rinfo.psync_attempts);
-        append("psync_successes", rinfo.psync_successes);
-      };
+      const char* link = rinfo.master_link_established ? "up" : "down";
+      append("master_link_status", link);
+      append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
+      append("master_sync_in_progress", rinfo.full_sync_in_progress);
+      append("master_replid", rinfo.master_id);
+      if (rinfo.full_sync_done || (rinfo.passed_full_sync && !rinfo.master_link_established))
+        append("slave_repl_offset", rinfo.repl_offset_sum);
+      append("slave_priority", GetFlag(FLAGS_replica_priority));
+      append("slave_read_only", 1);
+      append("psync_attempts", rinfo.psync_attempts);
+      append("psync_successes", rinfo.psync_successes);
+    };
 
-      const auto& info = *m.replica_side_info;
+    const auto& info = *m.replica_side_info;
 
-      replication_info_cb(info.summary);
-      // Special case, when multiple masters replicate to a single replica.
-      for (const auto& summary : info.cl_repl_summary) {
-        replication_info_cb(summary);
-      }
+    replication_info_cb(info.summary);
+    // Special case, when multiple masters replicate to a single replica.
+    for (const auto& summary : info.cl_repl_summary) {
+      replication_info_cb(summary);
     }
   };
 
@@ -4153,12 +4158,6 @@ void ServerFamily::ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) {
 
 void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
-  {
-    util::fb2::LockGuard lk(replicaof_mu_);
-    if (!IsMaster()) {
-      return cmd_cntx->SendError("Replicating a replica is unsupported");
-    }
-  }
 
   auto err_cb = [&]() mutable {
     LOG(ERROR) << "Error in receiving command: " << args;

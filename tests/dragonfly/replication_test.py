@@ -4715,3 +4715,301 @@ async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):
     assert master_capture == replica_capture
 
     await c_replica.execute_command("REPLICAOF", "NO", "ONE")
+
+
+# -----------------------------------------------------------------------------
+# Cascading replication (replica-of-replica)
+#
+# Master -> R1 -> R2 -> ... chains of arbitrary depth. Each downstream replica
+# behaves as a normal read-only replica that observes the upstream master's
+# writes through its parent in the chain.
+# -----------------------------------------------------------------------------
+
+
+async def _wait_keys_propagated(client, expected_keys, timeout=30):
+    """Poll DBSIZE on a replica until it reaches expected_keys or times out."""
+    start = time.time()
+    while time.time() - start < timeout:
+        size = await client.execute_command("DBSIZE")
+        if size >= expected_keys:
+            return size
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"DBSIZE never reached {expected_keys}, last={size}")
+
+
+async def test_chain_basic_3node(df_factory: DflyInstanceFactory):
+    """M -> R1 -> R2. Writes on M must reach R2; INFO must report both
+    directions for the chained R1 (role=replica AND connected_slaves)."""
+    master = df_factory.create(proactor_threads=2)
+    r1 = df_factory.create(proactor_threads=2)
+    r2 = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, r1, r2])
+
+    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
+
+    await c_r1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_r1)
+    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
+    await wait_available_async(c_r2)
+
+    n = 200
+    for i in range(n):
+        await c_master.execute_command(f"SET k{i} v{i}")
+
+    await _wait_keys_propagated(c_r1, n)
+    await _wait_keys_propagated(c_r2, n)
+
+    # Sample-check value propagation end-to-end.
+    for i in (0, n // 2, n - 1):
+        assert (await c_r2.execute_command(f"GET k{i}")) == f"v{i}"
+
+    info_master = await c_master.info("replication")
+    info_r1 = await c_r1.info("replication")
+    info_r2 = await c_r2.info("replication")
+
+    assert info_master["role"] == "master"
+    assert info_master["connected_slaves"] == 1
+
+    # R1 is a replica of master AND has one downstream slave.
+    assert info_r1["role"] in ("replica", "slave")
+    assert info_r1["master_host"] == "localhost"
+    assert int(info_r1["master_port"]) == master.port
+    assert info_r1["connected_slaves"] == 1
+    assert "slave0" in info_r1
+    # redis-py auto-parses each slaveN entry into a dict.
+    assert int(info_r1["slave0"]["port"]) == r2.port
+
+    assert info_r2["role"] in ("replica", "slave")
+    assert int(info_r2["master_port"]) == r1.port
+
+
+async def test_chain_deep_5node(df_factory: DflyInstanceFactory):
+    """M -> R1 -> R2 -> R3 -> R4. DBSIZE matches at every hop."""
+    nodes = [df_factory.create(proactor_threads=2) for _ in range(5)]
+    df_factory.start_all(nodes)
+    clients = [n.client() for n in nodes]
+    master = nodes[0]
+    c_master = clients[0]
+
+    # Build the chain top-down: each replica points at its predecessor.
+    for parent, child, c_child in zip(nodes, nodes[1:], clients[1:]):
+        await c_child.execute_command(f"REPLICAOF localhost {parent.port}")
+        await wait_available_async(c_child)
+
+    await c_master.execute_command("DEBUG", "POPULATE", "5000")
+
+    for c in clients[1:]:
+        await _wait_keys_propagated(c, 5000, timeout=60)
+
+    sizes = await asyncio.gather(*(c.execute_command("DBSIZE") for c in clients))
+    assert all(s == 5000 for s in sizes), f"sizes diverged: {sizes}"
+
+
+async def test_chain_late_attach_full_sync(df_factory: DflyInstanceFactory):
+    """R2 attaches to R1 after R1 has accumulated data. R2 must full-sync from
+    R1's current state and stay caught up on subsequent writes from M."""
+    master = df_factory.create(proactor_threads=2)
+    r1 = df_factory.create(proactor_threads=2)
+    r2 = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, r1, r2])
+
+    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
+
+    await c_r1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_r1)
+
+    # Pre-populate via master so R1 has a substantial dataset before R2 arrives.
+    await c_master.execute_command("DEBUG", "POPULATE", "3000")
+    await _wait_keys_propagated(c_r1, 3000)
+
+    # R2 attaches now and must full-sync from R1.
+    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
+    await wait_available_async(c_r2)
+    await _wait_keys_propagated(c_r2, 3000)
+
+    # Subsequent writes on M should still flow through to R2 via stable sync.
+    for i in range(50):
+        await c_master.execute_command(f"SET late{i} {i}")
+    await _wait_keys_propagated(c_r2, 3050)
+
+    # End-to-end value check on a sample.
+    assert (await c_r2.execute_command("GET late42")) == "42"
+
+
+async def test_chain_writes_rejected(df_factory: DflyInstanceFactory):
+    """Writes on chained R1 and on tail R2 must both be rejected as READONLY."""
+    master = df_factory.create(proactor_threads=2)
+    r1 = df_factory.create(proactor_threads=2)
+    r2 = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, r1, r2])
+
+    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
+    await c_r1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_r1)
+    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
+    await wait_available_async(c_r2)
+
+    for c in (c_r1, c_r2):
+        with pytest.raises(redis.exceptions.ResponseError) as exc:
+            await c.execute_command("SET nope 1")
+        assert "READONLY" in str(exc.value).upper() or "read only" in str(exc.value).lower()
+
+
+async def test_chain_upstream_pause(df_factory: DflyInstanceFactory):
+    """If the original master is killed, R1 retries upstream while R2 stays
+    connected to R1 (R2 must NOT flip role). When the master restarts, the
+    chain catches up."""
+    master = df_factory.create(proactor_threads=2)
+    r1 = df_factory.create(proactor_threads=2)
+    r2 = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, r1, r2])
+    master_port = master.port
+
+    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
+    await c_r1.execute_command(f"REPLICAOF localhost {master_port}")
+    await wait_available_async(c_r1)
+    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
+    await wait_available_async(c_r2)
+
+    await c_master.execute_command("SET before kill")
+    await _wait_keys_propagated(c_r2, 1)
+
+    master.stop()
+    # R2 must still consider itself a replica of R1.
+    await asyncio.sleep(0.5)
+    role = await c_r2.execute_command("ROLE")
+    assert role[0] == "slave"
+    assert int(role[2]) == r1.port
+
+
+async def test_chain_takeover_rejected(df_factory: DflyInstanceFactory):
+    """REPLTAKEOVER issued by R2 against R1 must be rejected because R1 is itself
+    a chained replica and we refuse to handle takeover in that role."""
+    master = df_factory.create(proactor_threads=2)
+    r1 = df_factory.create(proactor_threads=2)
+    r2 = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, r1, r2])
+
+    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
+    await c_r1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_r1)
+    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
+    await wait_available_async(c_r2)
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await c_r2.execute_command("REPLTAKEOVER 5")
+
+    # Topology unchanged: R2 is still a replica of R1.
+    role_r2 = await c_r2.execute_command("ROLE")
+    assert role_r2[0] == "slave"
+    assert int(role_r2[2]) == r1.port
+
+    role_r1 = await c_r1.execute_command("ROLE")
+    assert role_r1[0] == "slave"
+    assert int(role_r1[2]) == master.port
+
+
+async def test_chain_replicaof_no_one_promotes_r1(df_factory: DflyInstanceFactory):
+    """`REPLICAOF NO ONE` on R1 promotes R1 to master. R2 should keep replicating
+    from now-master R1 without needing to be reconfigured (replid stays the
+    same across the role flip)."""
+    master = df_factory.create(proactor_threads=2)
+    r1 = df_factory.create(proactor_threads=2)
+    r2 = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, r1, r2])
+
+    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
+    await c_r1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_r1)
+    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
+    await wait_available_async(c_r2)
+
+    await c_master.execute_command("SET pre_promote 1")
+    await _wait_keys_propagated(c_r2, 1)
+
+    await c_r1.execute_command("REPLICAOF", "NO", "ONE")
+
+    @assert_eventually
+    async def check_r1_master():
+        info = await c_r1.info("replication")
+        assert info["role"] == "master"
+        assert info["connected_slaves"] >= 1
+
+    await check_r1_master()
+
+    # Subsequent writes go directly to R1 (now master); R2 must observe them.
+    await c_r1.execute_command("SET post_promote 2")
+
+    @assert_eventually
+    async def check_r2_post_promote():
+        v = await c_r2.execute_command("GET post_promote")
+        assert v == "2"
+
+    await check_r2_post_promote()
+
+
+async def test_chain_failover_repoint_r2_takes_r1_place(df_factory: DflyInstanceFactory):
+    """Failover scenario: Master -> R1 -> R2. R1 dies. We re-point R2 directly
+    at Master so it becomes the new intermediate, then attach a fresh R3 behind
+    R2 to rebuild the chain as Master -> R2 -> R3.
+
+    Verifies that the cascading code path supports a survivor taking over an
+    intermediate role through manual REPLICAOF reconfiguration."""
+    master = df_factory.create(proactor_threads=2)
+    r1 = df_factory.create(proactor_threads=2)
+    r2 = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, r1, r2])
+
+    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
+
+    # Phase 1: original chain Master -> R1 -> R2.
+    await c_r1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_r1)
+    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
+    await wait_available_async(c_r2)
+
+    await c_master.execute_command("SET pre_failover 1")
+    await _wait_keys_propagated(c_r2, 1)
+
+    # Phase 2: R1 dies.
+    r1.stop()
+
+    # Phase 3: re-point R2 directly at Master. R2's old psync cookie carries R1's
+    # replid, so a full sync from Master is expected (and acceptable).
+    await c_r2.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_r2)
+
+    # Phase 4: bring up R3 and attach it behind R2 to rebuild the chain.
+    r3 = df_factory.create(proactor_threads=2)
+    df_factory.start_all([r3])
+    c_r3 = r3.client()
+    await c_r3.execute_command(f"REPLICAOF localhost {r2.port}")
+    await wait_available_async(c_r3)
+
+    # Phase 5: a write on Master must propagate Master -> R2 -> R3.
+    await c_master.execute_command("SET post_failover 2")
+
+    @assert_eventually
+    async def check_r3_caught_up():
+        assert (await c_r3.execute_command("GET post_failover")) == "2"
+        # Pre-failover key carried through the topology change too.
+        assert (await c_r3.execute_command("GET pre_failover")) == "1"
+
+    await check_r3_caught_up()
+
+    # Topology sanity: Master has 1 direct replica (R2); R2 is replica of Master
+    # AND has 1 downstream slave (R3); R3 is replica of R2.
+    info_master = await c_master.info("replication")
+    info_r2 = await c_r2.info("replication")
+    info_r3 = await c_r3.info("replication")
+
+    assert info_master["role"] == "master"
+    assert info_master["connected_slaves"] == 1
+
+    assert info_r2["role"] in ("replica", "slave")
+    assert int(info_r2["master_port"]) == master.port
+    assert info_r2["connected_slaves"] == 1
+    assert int(info_r2["slave0"]["port"]) == r3.port
+
+    assert info_r3["role"] in ("replica", "slave")
+    assert int(info_r3["master_port"]) == r2.port
