@@ -412,13 +412,17 @@ class DashTable : public detail::DashTableBase {
     return stash_unloaded_;
   }
 
+  // Advances cursor by exactly one logical bucket in bucket-major order, without
+  // visiting bucket contents. Used by sampled walkers (e.g. defrag CENSUS) to
+  // skip buckets between Traverse calls. Returns Cursor::end() once the table
+  // is exhausted.
+  Cursor AdvanceCursorBucketOrder(Cursor cursor);
+
  private:
   enum class InsertMode {
     kInsertIfNotFound,
     kForceInsert,
   };
-
-  Cursor AdvanceCursorBucketOrder(Cursor cursor);
 
   template <typename U, typename V, typename EvictionPolicy>
   std::pair<iterator, bool> InsertInternal(U&& key, V&& value, EvictionPolicy& policy,

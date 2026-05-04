@@ -57,6 +57,11 @@ ABSL_FLAG(bool, experimental_defrag, true,
           "When true, run the phased defragmentation strategy (CENSUS / SELECT_TARGETS / "
           "EVACUATE / VERIFY) instead of the legacy single-pass defragmenter. Experimental.");
 
+ABSL_FLAG(uint32_t, defrag_census_sample_rate, 1,
+          "Phased defrag CENSUS bucket sampling stride. 1 = full scan. N>1 visits every "
+          "Nth logical bucket: per-cycle reclamation drops to ~1/N but cycle wall time "
+          "drops too. Steady-state reclamation converges over multiple cycles.");
+
 ABSL_FLAG(int32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
           "Warning: not advised to decrease in production.");
@@ -154,9 +159,9 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
 
   const double elapsed_ms = static_cast<double>(absl::GetCurrentTimeNanos() - start_ns) / 1e6;
   LOG(INFO) << absl::StrFormat(
-      "defrag[Slice] dbid=%zu cursor=%llu->%llu traverses=%llu attempts=%llu "
+      "defrag[Slice] dbid=%zu cursor=%llu->%llu traverses=%llu skipped=%llu attempts=%llu "
       "reallocs=%llu took=%.1fms exit{quota=%d stop=%d cursor_done=%d ns_null=%d}",
-      dbid_before, cursor_before, cur.token(), traverse_calls, result.attempts,
+      dbid_before, cursor_before, cur.token(), traverse_calls, buckets_skipped, result.attempts,
       result.reallocations, elapsed_ms, quota_depleted, should_stop, cursor_done, namespaces_null);
 
   *cursor = cur.token();
@@ -514,6 +519,13 @@ DefragShardReport EngineShard::DoDefrag(PageUsage* page_usage, uint64_t phased_q
   if (GetFlag(FLAGS_experimental_defrag)) {
     LOG(INFO) << absl::StrFormat("defrag[DoDefrag] shard=%u enter phase=%s threshold=%.2f",
                                  shard_id_, PhaseName(phase_start), page_usage->threshold());
+
+    // Picked up at IDLE so a new cycle reflects flag changes; mid-cycle changes
+    // are deferred until the next cycle so CENSUS/EVACUATE see consistent state.
+    if (defrag_state_.phase == DefragPhase::IDLE) {
+      defrag_state_.census_sample_rate =
+          std::max<uint32_t>(1, GetFlag(FLAGS_defrag_census_sample_rate));
+    }
 
     auto walker = [&](PageUsage* visitor, const absl::flat_hash_set<uint64_t>* hints) {
       if (hints != nullptr) {

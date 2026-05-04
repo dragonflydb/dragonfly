@@ -217,7 +217,8 @@ class TargetPlan {
 
   explicit TargetPlan(PlanStats* stats);
 
-  void BuildFrom(const PageCensus& census, size_t max_targets = kDefaultMaxTargets);
+  void BuildFrom(const PageCensus& census, size_t max_targets = kDefaultMaxTargets,
+                 uint32_t sample_rate = 1);
 
   const std::vector<TargetPage>& targets() const {
     return targets_;
@@ -341,7 +342,8 @@ const char* PhaseName(DefragPhase phase);
 
 class CensusTaker : public PageUsage {
  public:
-  CensusTaker(PageCensus* census, float threshold, CycleQuota quota = CycleQuota::Unlimited());
+  CensusTaker(PageCensus* census, float threshold, CycleQuota quota = CycleQuota::Unlimited(),
+              uint32_t sample_rate = 1);
 
   bool IsPageForObjectUnderUtilized(void* object) override;
   bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) override;
@@ -354,10 +356,17 @@ class CensusTaker : public PageUsage {
     current_cursor_ = cursor;
   }
 
+  // Asks the slice walker to skip (sample_rate-1) buckets after each Traverse.
+  // sample_rate=1 returns 0 (visit every bucket); sample_rate=4 returns 3.
+  uint32_t BucketSkipAfterTraverse() const override {
+    return sample_rate_ > 0 ? sample_rate_ - 1 : 0;
+  }
+
  private:
   PageCensus* census_;
   float threshold_;
   uint64_t current_cursor_ = 0;
+  uint32_t sample_rate_;
 };
 
 class Evacuator : public PageUsage {
@@ -386,6 +395,12 @@ struct DefragTaskState {
   // Threshold-gate state, consulted before starting a new cycle.
   time_t last_check_time = 0;
   float page_utilization_threshold = 0.8f;
+
+  // CENSUS bucket sampling stride. 1 = visit every bucket (default).
+  // N>1 = visit every Nth logical bucket; per-cycle bytes_freed scales as
+  // ~1/N but cycle wall time drops proportionally. Steady-state reclamation
+  // is unaffected (multiple cycles converge).
+  uint32_t census_sample_rate = 1;
 
   // Phased-only state, untouched in legacy mode.
   DefragPhase phase = DefragPhase::IDLE;

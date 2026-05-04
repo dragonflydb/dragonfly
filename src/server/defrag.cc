@@ -40,14 +40,19 @@ void PopulateAgg(PageAgg& agg, const mi_page_usage_stats_t& stat, float score) {
   agg.retention_score = score;
 }
 
-TargetFilterReason ClassifyForTarget(const PageAgg& agg) {
+TargetFilterReason ClassifyForTarget(const PageAgg& agg, uint32_t sample_rate) {
   if (agg.observed_movable_blocks == 0)
     return TargetFilterReason::kNoObservedBlocks;
   if (agg.used_blocks == 0)
     return TargetFilterReason::kAlreadyEmpty;
   if (agg.observed_movable_blocks > agg.used_blocks)
     return TargetFilterReason::kStaleObservation;
-  if (agg.observed_movable_blocks < agg.used_blocks)
+  // Under sampling we expect observed_movable ≈ used_blocks / sample_rate, so
+  // a strict observed==used check would reject ~all pages. Skip the filter
+  // when sampling — pages with truly non-movable data will be caught by
+  // EVACUATE's per-block revalidation (no false reclamation, just wasted
+  // EVACUATE effort on a fraction of targets).
+  if (sample_rate == 1 && agg.observed_movable_blocks < agg.used_blocks)
     return TargetFilterReason::kHasImmovableData;
   return TargetFilterReason::kKeep;
 }
@@ -407,7 +412,7 @@ void PageCensus::RebuildHeap() {
 TargetPlan::TargetPlan(PlanStats* stats) : stats_(stats) {
 }
 
-void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets) {
+void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets, uint32_t sample_rate) {
   targets_.clear();
   address_to_index_.clear();
   *stats_ = PlanStats{};
@@ -416,7 +421,7 @@ void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets) {
   candidates.reserve(census.pages().size());
 
   for (const auto& agg : census.pages() | std::views::values) {
-    switch (ClassifyForTarget(agg)) {
+    switch (ClassifyForTarget(agg, sample_rate)) {
       case TargetFilterReason::kKeep:
         candidates.push_back(MakeTargetPage(agg));
         break;
@@ -619,8 +624,12 @@ CycleProgress RunVerify(const TargetPlan& plan) {
   return p;
 }
 
-CensusTaker::CensusTaker(PageCensus* census, float threshold, CycleQuota quota)
-    : PageUsage(CollectPageStats::NO, threshold, quota), census_(census), threshold_(threshold) {
+CensusTaker::CensusTaker(PageCensus* census, float threshold, CycleQuota quota,
+                         uint32_t sample_rate)
+    : PageUsage(CollectPageStats::NO, threshold, quota),
+      census_(census),
+      threshold_(threshold),
+      sample_rate_(sample_rate) {
 }
 
 bool CensusTaker::IsPageForObjectUnderUtilized(void* object) {
@@ -685,7 +694,7 @@ void DefragIdleStep(DefragTaskState* state, float threshold) {
 
 void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,
                       const DbSliceWalker& walk) {
-  CensusTaker visitor(&*state->census, threshold, quota);
+  CensusTaker visitor(&*state->census, threshold, quota, state->census_sample_rate);
   const DbSliceResult result = walk(&visitor, /*hints=*/nullptr);
   state->cycle_stats.census_db_objects_scanned += result.attempts;
   if (!result.finished_all_dbs) {
@@ -723,7 +732,7 @@ void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,
 
 void DefragSelectTargetsStep(DefragTaskState* state) {
   state->plan.emplace(&state->cycle_stats.plan);
-  state->plan->BuildFrom(*state->census);
+  state->plan->BuildFrom(*state->census, TargetPlan::kDefaultMaxTargets, state->census_sample_rate);
   state->cycle_stats.plan_target_pages = state->plan->size();
   // Hand the bucket-cursor hints off to the task state so EVACUATE can use
   // them after we release the census itself (the page map is large).
@@ -752,8 +761,12 @@ void DefragSelectTargetsStep(DefragTaskState* state) {
 void DefragEvacuateStep(DefragTaskState* state, float threshold, CycleQuota quota,
                         const DbSliceWalker& walk) {
   Evacuator visitor(&*state->plan, threshold, &state->cycle_stats.evac, quota);
-  const DbSliceResult result =
-      walk(&visitor, state->cursor_hints.empty() ? nullptr : &state->cursor_hints);
+  // When CENSUS sampled the keyspace, hints cover only ~1/sample_rate of the
+  // buckets touching each target page — using them would partially-evacuate
+  // every page and free nothing. Fall back to a full walk; the per-object
+  // _mi_ptr_page precheck in Evacuator skips non-target pages cheaply.
+  const bool use_hints = state->census_sample_rate == 1 && !state->cursor_hints.empty();
+  const DbSliceResult result = walk(&visitor, use_hints ? &state->cursor_hints : nullptr);
   state->cycle_stats.evac_db_objects_scanned += result.attempts;
   state->cycle_stats.evac_reallocations += result.reallocations;
   if (!result.finished_all_dbs && !state->plan->AllTargetsDone()) {
