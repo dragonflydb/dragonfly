@@ -8,6 +8,8 @@
 #include <absl/strings/str_format.h>
 #include <absl/strings/strip.h>
 #include <absl/time/clock.h>
+#include <mimalloc/internal.h>
+#include <mimalloc/types.h>
 
 #include <algorithm>
 
@@ -92,6 +94,7 @@ void DefragTaskState::FinishCycle() {
   phase = DefragPhase::IDLE;
   census.reset();
   plan.reset();
+  cursor_hints.clear();
   ResetScanState();
 }
 
@@ -327,7 +330,7 @@ PageCensus::PageCensus(CensusStats* stats, size_t max_retained_pages)
     : stats_(stats), max_retained_pages_(max_retained_pages) {
 }
 
-void PageCensus::Observe(const mi_page_usage_stats_t& stat) {
+void PageCensus::Observe(const mi_page_usage_stats_t& stat, uint64_t bucket_cursor) {
   ++stats_->allocations_seen;
 
   if (stat.flags & MI_DFLY_HEAP_MISMATCH) {
@@ -346,6 +349,10 @@ void PageCensus::Observe(const mi_page_usage_stats_t& stat) {
     ++stats_->skipped_above_threshold;
     return;
   }
+
+  // Object lives on a candidate page; remember its bucket so EVACUATE can
+  // skip buckets that contain no candidates at all.
+  cursor_hints_.insert(bucket_cursor);
 
   const float new_score = ComputeRetentionScore(stat.capacity, stat.used);
 
@@ -614,14 +621,14 @@ CensusTaker::CensusTaker(PageCensus* census, float threshold, CycleQuota quota)
 bool CensusTaker::IsPageForObjectUnderUtilized(void* object) {
   mi_page_usage_stats_t stat;
   zmalloc_page_is_underutilized(object, threshold_, /*collect_stats=*/true, &stat);
-  census_->Observe(stat);
+  census_->Observe(stat, current_cursor_);
   return false;
 }
 
 bool CensusTaker::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
   mi_page_usage_stats_t stat =
       mi_heap_page_is_underutilized(heap, object, threshold_, /*collect_stats=*/true);
-  census_->Observe(stat);
+  census_->Observe(stat, current_cursor_);
   return false;
 }
 
@@ -633,12 +640,27 @@ Evacuator::Evacuator(TargetPlan* plan, float threshold, EvacStats* evac_stats, C
 }
 
 bool Evacuator::IsPageForObjectUnderUtilized(void* object) {
+  // Fast precheck: derive the page from the object pointer cheaply and bail
+  // out before the full mi_heap_page_is_underutilized probe if the page isn't
+  // in the target set. Saves the per-block probe for the ~95% of EVACUATE
+  // attempts that hit non-target pages. Mirrors EvacDecide's kNotATarget
+  // bookkeeping so blocks_skipped_not_target stays accurate.
+  const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
+  if (!plan_->Contains(addr)) {
+    ++evac_stats_->blocks_skipped_not_target;
+    return false;
+  }
   mi_page_usage_stats_t stat;
   zmalloc_page_is_underutilized(object, threshold_, /*collect_stats=*/true, &stat);
   return EvacDecide(*plan_, stat, *evac_stats_) == EvacOutcome::kCommitMove;
 }
 
 bool Evacuator::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
+  const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
+  if (!plan_->Contains(addr)) {
+    ++evac_stats_->blocks_skipped_not_target;
+    return false;
+  }
   mi_page_usage_stats_t stat =
       mi_heap_page_is_underutilized(heap, object, threshold_, /*collect_stats=*/true);
   return EvacDecide(*plan_, stat, *evac_stats_) == EvacOutcome::kCommitMove;
@@ -660,7 +682,7 @@ void DefragIdleStep(DefragTaskState* state, float threshold) {
 void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,
                       const DbSliceWalker& walk) {
   CensusTaker visitor(&*state->census, threshold, quota);
-  const DbSliceResult result = walk(&visitor);
+  const DbSliceResult result = walk(&visitor, /*hints=*/nullptr);
   state->cycle_stats.census_db_objects_scanned += result.attempts;
   if (!result.finished_all_dbs) {
     return;
@@ -680,12 +702,12 @@ void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,
   const uint64_t now = NowNs();
   DEFRAG_STEP_LOG << absl::StrFormat(
       "defrag[CENSUS] shard=%u cycle=%llu db_objects=%llu retained=%zu/%zu "
-      "recorded/seen=%llu/%llu potential_reclaim=%s movable_observed=%s "
+      "recorded/seen=%llu/%llu cursor_hints=%zu potential_reclaim=%s movable_observed=%s "
       "skipped{above_thr=%llu full=%llu wrong_heap=%llu active=%llu low_score=%llu} "
       "topk{evicted=%llu rebuilds=%llu} took=%.1fms",
       state->shard_id, state->cycle_id, state->cycle_stats.census_db_objects_scanned,
       state->cycle_stats.census_retained_pages, PageCensus::kDefaultMaxRetainedPages,
-      c.allocations_recorded, c.allocations_seen,
+      c.allocations_recorded, c.allocations_seen, state->census->cursor_hints().size(),
       FormatMiB(state->cycle_stats.census_potential_reclaim_bytes),
       FormatMiB(state->cycle_stats.census_movable_bytes_observed), c.skipped_above_threshold,
       c.skipped_full_page, c.skipped_wrong_heap, c.skipped_active_malloc_page, c.skipped_low_score,
@@ -699,6 +721,9 @@ void DefragSelectTargetsStep(DefragTaskState* state) {
   state->plan.emplace(&state->cycle_stats.plan);
   state->plan->BuildFrom(*state->census);
   state->cycle_stats.plan_target_pages = state->plan->size();
+  // Hand the bucket-cursor hints off to the task state so EVACUATE can use
+  // them after we release the census itself (the page map is large).
+  state->cursor_hints = state->census->TakeCursorHints();
   state->census.reset();
   // EVACUATE walks the prime table again from the start.
   state->ResetScanState();
@@ -723,7 +748,8 @@ void DefragSelectTargetsStep(DefragTaskState* state) {
 void DefragEvacuateStep(DefragTaskState* state, float threshold, CycleQuota quota,
                         const DbSliceWalker& walk) {
   Evacuator visitor(&*state->plan, threshold, &state->cycle_stats.evac, quota);
-  const DbSliceResult result = walk(&visitor);
+  const DbSliceResult result =
+      walk(&visitor, state->cursor_hints.empty() ? nullptr : &state->cursor_hints);
   state->cycle_stats.evac_db_objects_scanned += result.attempts;
   state->cycle_stats.evac_reallocations += result.reallocations;
   if (!result.finished_all_dbs && !state->plan->AllTargetsDone()) {

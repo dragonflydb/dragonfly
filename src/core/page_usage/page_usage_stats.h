@@ -120,6 +120,11 @@ class PageUsage {
     return false;
   }
 
+  // Walkers may stash the bucket cursor about to be visited so that downstream
+  // Observe() calls can attribute candidates back to a bucket. Default no-op.
+  virtual void SetCurrentBucketCursor(uint64_t /*cursor*/) {
+  }
+
   float threshold() const {
     return threshold_;
   }

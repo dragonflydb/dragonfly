@@ -120,6 +120,7 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
 
   const bool read_only = visitor->IsReadOnly();
   do {
+    visitor->SetCurrentBucketCursor(cur.token());
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       if (read_only) {
         it->second.DefragIfNeeded(visitor);
@@ -155,6 +156,72 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
   if (*cursor == kCursorDoneState) {
     ++*dbid;
   }
+  return result;
+}
+
+// Hinted variant: visits only the buckets in `hints` for the current dbid.
+// Each hint is replayed via a single Traverse(Cursor{hint}, cb) call which the
+// underlying DashTable resolves to that one logical bucket (see core/dash.h).
+// On quota exhaustion we bail without recording resume state; the next call
+// will re-iterate the hint set from scratch (per-target work is gated by
+// EvacDecide which is cheap for already-done targets).
+DbSliceResult RunPrimeTableHinted(DbSlice* slice, size_t dbid,
+                                  const absl::flat_hash_set<uint64_t>& hints, PageUsage* visitor) {
+  if (!slice->IsDbValid(dbid)) {
+    return DbSliceResult{.finished_all_dbs = true};
+  }
+
+  auto* prime_table = slice->GetTables(dbid);
+  const DbTable* db_table = slice->GetDBTable(dbid);
+
+  DbSliceResult result;
+  const uint64_t start_ns = absl::GetCurrentTimeNanos();
+  uint64_t hints_visited = 0;
+  bool quota_depleted = false;
+  bool should_stop = false;
+  bool namespaces_null = false;
+
+  const bool read_only = visitor->IsReadOnly();
+
+  for (uint64_t h : hints) {
+    visitor->SetCurrentBucketCursor(h);
+    PrimeTable::Cursor cur{h};
+    prime_table->Traverse(cur, [&](PrimeIterator it) {
+      if (read_only) {
+        it->second.DefragIfNeeded(visitor);
+        ++result.attempts;
+        return;
+      }
+      const ssize_t original_size = it->second.MallocUsed();
+      const bool did = it->second.DefragIfNeeded(visitor);
+      ++result.attempts;
+      if (did) {
+        ++result.reallocations;
+        if (const ssize_t delta = it->second.MallocUsed() - original_size; delta != 0) {
+          db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+        }
+      }
+    });
+    ++hints_visited;
+
+    quota_depleted = visitor->QuotaDepleted();
+    should_stop = visitor->ShouldStop();
+    namespaces_null = !namespaces;
+    if (quota_depleted || should_stop || namespaces_null) {
+      break;
+    }
+  }
+
+  const double elapsed_ms = static_cast<double>(absl::GetCurrentTimeNanos() - start_ns) / 1e6;
+  LOG(INFO) << absl::StrFormat(
+      "defrag[Hinted] dbid=%zu hints=%zu/%zu attempts=%llu reallocs=%llu took=%.1fms "
+      "exit{quota=%d stop=%d ns_null=%d}",
+      dbid, hints_visited, hints.size(), result.attempts, result.reallocations, elapsed_ms,
+      quota_depleted, should_stop, namespaces_null);
+
+  // Hinted walk treats the hint set as the entire work list; once we've
+  // iterated all of them without bailing, the slice is "finished".
+  result.finished_all_dbs = !quota_depleted && !should_stop && hints_visited == hints.size();
   return result;
 }
 
@@ -441,7 +508,10 @@ DefragShardReport EngineShard::DoDefrag(PageUsage* page_usage, uint64_t phased_q
     LOG(INFO) << absl::StrFormat("defrag[DoDefrag] shard=%u enter phase=%s threshold=%.2f",
                                  shard_id_, PhaseName(phase_start), page_usage->threshold());
 
-    auto walker = [&](PageUsage* visitor) {
+    auto walker = [&](PageUsage* visitor, const absl::flat_hash_set<uint64_t>* hints) {
+      if (hints != nullptr) {
+        return RunPrimeTableHinted(&slice, defrag_state_.dbid, *hints, visitor);
+      }
       return RunPrimeTableSlice(&slice, &defrag_state_.dbid, &defrag_state_.cursor, visitor);
     };
     RunPhaseDefrag(&defrag_state_, page_usage->threshold(), CycleQuota{phased_quota_usec}, walker);

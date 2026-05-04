@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 
 #define MI_BUILD_RELEASE 1
 #include <mimalloc/types.h>
@@ -63,7 +64,11 @@ class PageCensus {
 
   explicit PageCensus(CensusStats* stats, size_t max_retained_pages = kDefaultMaxRetainedPages);
 
-  void Observe(const mi_page_usage_stats_t& stat);
+  // bucket_cursor is the DashTable cursor of the bucket the observed object
+  // currently lives in. Recorded so EVACUATE can restrict its walk to buckets
+  // known to contain at least one candidate object. Pass 0 if unknown
+  // (callers outside the hot defrag path may not have a cursor).
+  void Observe(const mi_page_usage_stats_t& stat, uint64_t bucket_cursor = 0);
 
   const CensusStats& stats() const {
     return *stats_;
@@ -71,6 +76,16 @@ class PageCensus {
 
   const absl::flat_hash_map<uintptr_t, PageAgg>& pages() const {
     return pages_;
+  }
+
+  const absl::flat_hash_set<uint64_t>& cursor_hints() const {
+    return cursor_hints_;
+  }
+
+  // Move-out accessor: lets SELECT_TARGETS hand the hint set off to
+  // DefragTaskState before the census itself is released.
+  absl::flat_hash_set<uint64_t> TakeCursorHints() {
+    return std::move(cursor_hints_);
   }
 
  private:
@@ -90,6 +105,9 @@ class PageCensus {
 
   absl::flat_hash_map<uintptr_t, PageAgg> pages_;
   std::priority_queue<HeapEntry, std::vector<HeapEntry>, WorseFirst> worst_retained_;
+  // Buckets that observed at least one object on a candidate (under-threshold)
+  // page. Consumed by EVACUATE to skip buckets with no targets.
+  absl::flat_hash_set<uint64_t> cursor_hints_;
   CensusStats* stats_;
   size_t max_retained_pages_;
 };
@@ -322,9 +340,14 @@ class CensusTaker : public PageUsage {
     return true;
   }
 
+  void SetCurrentBucketCursor(uint64_t cursor) override {
+    current_cursor_ = cursor;
+  }
+
  private:
   PageCensus* census_;
   float threshold_;
+  uint64_t current_cursor_ = 0;
 };
 
 class Evacuator : public PageUsage {
@@ -358,6 +381,10 @@ struct DefragTaskState {
   DefragPhase phase = DefragPhase::IDLE;
   std::optional<PageCensus> census;
   std::optional<TargetPlan> plan;
+  // Bucket cursors observed during CENSUS that contained at least one object
+  // on a candidate page. Moved here from PageCensus before SELECT_TARGETS
+  // releases the census, then consumed by EVACUATE.
+  absl::flat_hash_set<uint64_t> cursor_hints;
   DefragCycleStats cycle_stats;
 
   uint16_t shard_id = 0;
@@ -378,7 +405,12 @@ struct DbSliceResult {
   bool finished_all_dbs = false;
 };
 
-using DbSliceWalker = std::function<DbSliceResult(PageUsage*)>;
+// Walker callable. If `hints` is non-null and non-empty, the walker should
+// visit only the buckets listed in the hint set (used by EVACUATE to skip
+// buckets without candidate objects). If `hints` is null, the walker performs
+// a full slice walk (used by CENSUS).
+using DbSliceWalker =
+    std::function<DbSliceResult(PageUsage*, const absl::flat_hash_set<uint64_t>* hints)>;
 
 void DefragIdleStep(DefragTaskState* state, float threshold);
 void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,
