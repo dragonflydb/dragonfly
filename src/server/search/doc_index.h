@@ -252,7 +252,7 @@ class HnswShardIndex {
   // Update vector data for an existing HNSW node (used during restoration).
   bool UpdateVectorData(search::GlobalDocId id, const BaseAccessor& doc);
 
-  bool IsVectorCopied() const;
+  bool IsVectorStored() const;
 
   void ClearPreservedData();
 

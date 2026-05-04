@@ -22,4 +22,8 @@ float IPDistance(const float* u, const float* v, size_t dims);
 float CosineDistance(const float* u, const float* v, size_t dims);
 float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilarity sim);
 
+float DotProductF32(const float* u, const float* v, size_t dims);
+float DotProductF32I8(const float* u, const int8_t* v, size_t dims);
+float DotProductI8(const int8_t* u, const int8_t* v, size_t dims);
+
 }  // namespace dfly::search

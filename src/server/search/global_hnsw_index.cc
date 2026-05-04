@@ -4,6 +4,7 @@
 
 #include "server/search/global_hnsw_index.h"
 
+#include <absl/flags/flag.h>
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
@@ -18,6 +19,8 @@
 #include "server/search/doc_index.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
+
+ABSL_FLAG(bool, hnsw_sq8_quantization, false, "Enable SQ8 quantization in HNSW.");
 
 namespace dfly {
 
@@ -40,18 +43,20 @@ bool GlobalHnswIndexRegistry::Create(std::string_view index_name, std::string_vi
   if (it != indices_.end())
     return false;
 
-  // We make a copy of vector data when:
+  // We store vector data when:
   // 1. Data type is JSON. This is because JSON object is not represented as contiguous memory.
   // 2. Data type is HASH and vector data memory size is smaller than threshold for listpack
-  // encoding.
-  //    We use pesimistic approach for decision and expect that ONLY VECTOR data field is used.
-  //    When HSET object is created function `IsGoodForListpack` decides if object should be encoded
-  //    as listpack or StringMap. Problem with listpack encoding is that vector memory, if
+  //    encoding. We use pesimistic approach for decision and expect that ONLY VECTOR data field is
+  //    used. When HSET object is created function `IsGoodForListpack` decides if object should be
+  //    encoded as listpack or StringMap. Problem with listpack encoding is that vector memory, if
   //    referenced, can have wrong alignment for vector distance operations.
-  const bool copy_vector =
-      (data_type == DocIndex::JSON) || (params.dim * 4 < server.max_listpack_map_bytes);
+  // 3. We use SQ8 vector quantization (both HSET and JSON).
+  //
+  const bool store_vector = (data_type == DocIndex::JSON) ||
+                            (params.dim * 4 < server.max_listpack_map_bytes) ||
+                            absl::GetFlag(FLAGS_hnsw_sq8_quantization);
 
-  indices_[key] = std::make_shared<search::HnswVectorIndex>(params, copy_vector);
+  indices_[key] = std::make_shared<search::HnswVectorIndex>(params, store_vector);
 
   return true;
 }

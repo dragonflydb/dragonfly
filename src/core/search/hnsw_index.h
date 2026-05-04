@@ -41,7 +41,7 @@ struct HnswNodeData {
 struct HnswlibAdapter;
 class HnswVectorIndex {
  public:
-  explicit HnswVectorIndex(const search::SchemaField::VectorParams& params, bool copy_vector,
+  explicit HnswVectorIndex(const search::SchemaField::VectorParams& params, bool store_vector,
                            PMR_NS::memory_resource* mr = PMR_NS::get_default_resource());
 
   ~HnswVectorIndex();
@@ -50,8 +50,8 @@ class HnswVectorIndex {
 
   void Remove(search::GlobalDocId id);
 
-  bool IsVectorCopied() const {
-    return copy_vector_;
+  bool IsVectorStored() const {
+    return store_vector_;
   }
 
   std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
@@ -101,7 +101,7 @@ class HnswVectorIndex {
   size_t GetMemoryUsage() const;
 
  private:
-  bool copy_vector_;
+  bool store_vector_;
   size_t dim_;
   std::unique_ptr<HnswlibAdapter> adapter_;
 };

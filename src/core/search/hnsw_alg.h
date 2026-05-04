@@ -1,12 +1,34 @@
 // This file is copied from hnswlib and modified to fit Dragonfly's needs.
 
+#pragma once
+
 #include <hnswlib/hnswalg.h>
 #include <hnswlib/visited_list_pool.h>
 #include <mimalloc.h>
 
-#pragma once
+#include <functional>
 
 namespace dfly::search {
+
+// Extends hnswlib::SpaceInterface with a store callback and per-thread search cache management.
+template <typename TYPE> class QuantizedSpaceInterface : public hnswlib::SpaceInterface<TYPE> {
+ public:
+  // Callback used to write a vector into HNSW's internal storage.
+  // Parameters:
+  // - dest: Pointer to the destination buffer inside the HNSW graph
+  // - src:  Pointer to the input vector in its original representation.
+  // - data_size: Number of bytes available in dest.
+  using STOREFUNC = std::function<void(void* dest, const void* src, size_t data_size)>;
+  // Returns the store callback function.
+  virtual STOREFUNC get_store_func() = 0;
+  // Returns the distance function used during graph construction and pruning, which compares two
+  // stored vectors. This can be different from the distance function used during search
+  // (get_dist_func) if the stored vector format is optimized for asymmetric distance computation
+  // (e.g. SQ8 ADC).
+  virtual hnswlib::DISTFUNC<TYPE> get_node_dist_func() = 0;
+  // Clears any thread-local or cached state used during search.
+  virtual void cleanup() = 0;
+};
 
 enum class HnswErrorStatus : int8_t {
   SUCCESS = 0,
@@ -64,8 +86,11 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
   size_t data_size_{0};
 
-  hnswlib::DISTFUNC<dist_t> fstdistfunc_;
+  hnswlib::DISTFUNC<dist_t> dist_func_;       // Distance function for search
+  hnswlib::DISTFUNC<dist_t> node_dist_func_;  // Distance function for graph construction
   void* dist_func_param_{nullptr};
+
+  typename QuantizedSpaceInterface<dist_t>::STOREFUNC store_func_;
 
   mutable std::mutex label_lookup_lock;  // lock for label_lookup_
   std::unordered_map<labeltype, tableint> label_lookup_;
@@ -97,7 +122,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     loadIndex(location, s, max_elements);
   }
 
-  HierarchicalNSW(hnswlib::SpaceInterface<dist_t>* s, size_t max_elements, size_t M = 16,
+  HierarchicalNSW(QuantizedSpaceInterface<dist_t>* s, size_t max_elements, size_t M = 16,
                   size_t ef_construction = 200, size_t random_seed = 100, bool copy_vector = true,
                   bool allow_replace_deleted = false)
       : label_op_locks_(MAX_LABEL_OPERATION_LOCKS),
@@ -108,8 +133,10 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     max_elements_ = max_elements;
     num_deleted_ = 0;
     data_size_ = s->get_data_size();
-    fstdistfunc_ = s->get_dist_func();
+    dist_func_ = s->get_dist_func();
+    node_dist_func_ = s->get_node_dist_func();
     dist_func_param_ = s->get_dist_func_param();
+    store_func_ = s->get_store_func();
     if (M <= 10000) {
       M_ = M;
     } else {
@@ -262,7 +289,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     dist_t lowerBound;
     if (!isMarkedDeleted(ep_id)) {
-      dist_t dist = fstdistfunc_(data_point, getDataByInternalId(ep_id), dist_func_param_);
+      dist_t dist = dist_func_(data_point, getDataByInternalId(ep_id), dist_func_param_);
       top_candidates.emplace(dist, ep_id);
       lowerBound = dist;
       candidateSet.emplace(-dist, ep_id);
@@ -312,7 +339,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         visited_array[candidate_id] = visited_array_tag;
         char* currObj1 = (getDataByInternalId(candidate_id));
 
-        dist_t dist1 = fstdistfunc_(data_point, currObj1, dist_func_param_);
+        dist_t dist1 = dist_func_(data_point, currObj1, dist_func_param_);
         if (top_candidates.size() < ef_construction_ || lowerBound > dist1) {
           candidateSet.emplace(-dist1, candidate_id);
 
@@ -357,7 +384,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     if (bare_bone_search ||
         (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))))) {
       char* ep_data = getDataByInternalId(ep_id);
-      dist_t dist = fstdistfunc_(data_point, ep_data, dist_func_param_);
+      dist_t dist = dist_func_(data_point, ep_data, dist_func_param_);
       lowerBound = dist;
       top_candidates.emplace(dist, ep_id);
       if (!bare_bone_search && stop_condition) {
@@ -417,7 +444,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           visited_array[candidate_id] = visited_array_tag;
 
           char* currObj1 = (getDataByInternalId(candidate_id));
-          dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+          dist_t dist = dist_func_(data_point, currObj1, dist_func_param_);
 
           bool flag_consider_candidate;
           if (!bare_bone_search && stop_condition) {
@@ -496,8 +523,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       bool good = true;
 
       for (std::pair<dist_t, tableint> second_pair : return_list) {
-        dist_t curdist = fstdistfunc_(getDataByInternalId(second_pair.second),
-                                      getDataByInternalId(curent_pair.second), dist_func_param_);
+        dist_t curdist = node_dist_func_(getDataByInternalId(second_pair.second),
+                                         getDataByInternalId(curent_pair.second), dist_func_param_);
         if (curdist < dist_to_query) {
           good = false;
           break;
@@ -618,8 +645,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         } else {
           // finding the "weakest" element to replace it with the new one
           dist_t d_max =
-              fstdistfunc_(getDataByInternalId(cur_c), getDataByInternalId(selectedNeighbors[idx]),
-                           dist_func_param_);
+              node_dist_func_(getDataByInternalId(cur_c),
+                              getDataByInternalId(selectedNeighbors[idx]), dist_func_param_);
           // Heuristic:
           std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>,
                               CompareByFirst>
@@ -628,8 +655,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
           for (size_t j = 0; j < sz_link_list_other; j++) {
             candidates.emplace(
-                fstdistfunc_(getDataByInternalId(data[j]),
-                             getDataByInternalId(selectedNeighbors[idx]), dist_func_param_),
+                node_dist_func_(getDataByInternalId(data[j]),
+                                getDataByInternalId(selectedNeighbors[idx]), dist_func_param_),
                 data[j]);
           }
 
@@ -643,16 +670,6 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           }
 
           setListCount(ll_other, indx);
-          // Nearest K:
-          /*int indx = -1;
-          for (int j = 0; j < sz_link_list_other; j++) {
-              dist_t d = fstdistfunc_(getDataByInternalId(data[j]), getDataByInternalId(rez[idx]),
-          dist_func_param_); if (d > d_max) { indx = j; d_max = d;
-              }
-          }
-          if (indx >= 0) {
-              data[indx] = cur_c;
-          } */
         }
       }
     }
@@ -792,7 +809,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 #endif
   }
 
-  void loadIndex(const std::string& location, hnswlib::SpaceInterface<dist_t>* s,
+  void loadIndex(const std::string& location, QuantizedSpaceInterface<dist_t>* s,
                  size_t max_elements_i = 0) {
 #if 0
         std::ifstream input(location, std::ios::binary);
@@ -829,8 +846,10 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         readBinaryPOD(input, copy_vector_);
 
         data_size_ = s->get_data_size();
-        fstdistfunc_ = s->get_dist_func();
+        dist_func_ = s->get_dist_func();
+        node_dist_func_ = s->get_node_dist_func();
         dist_func_param_ = s->get_dist_func_param();
+        store_func_ = s->get_store_func();
 
         auto pos = input.tellg();
 
@@ -1131,8 +1150,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           if (cand == neigh)
             continue;
 
-          dist_t distance =
-              fstdistfunc_(getDataByInternalId(neigh), getDataByInternalId(cand), dist_func_param_);
+          dist_t distance = node_dist_func_(getDataByInternalId(neigh), getDataByInternalId(cand),
+                                            dist_func_param_);
           if (candidates.size() < elementsToKeep) {
             candidates.emplace(distance, cand);
           } else {
@@ -1168,7 +1187,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
                                   tableint dataPointInternalId, int dataPointLevel, int maxLevel) {
     tableint currObj = entryPointInternalId;
     if (dataPointLevel < maxLevel) {
-      dist_t curdist = fstdistfunc_(dataPoint, getDataByInternalId(currObj), dist_func_param_);
+      dist_t curdist = dist_func_(dataPoint, getDataByInternalId(currObj), dist_func_param_);
       for (int level = maxLevel; level > dataPointLevel; level--) {
         bool changed = true;
         while (changed) {
@@ -1187,7 +1206,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
             }
 
             tableint cand = datal[i];
-            dist_t d = fstdistfunc_(dataPoint, getDataByInternalId(cand), dist_func_param_);
+            dist_t d = dist_func_(dataPoint, getDataByInternalId(cand), dist_func_param_);
             if (d < curdist) {
               curdist = d;
               currObj = cand;
@@ -1223,7 +1242,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         bool epDeleted = isMarkedDeleted(entryPointInternalId);
         if (epDeleted) {
           filteredTopCandidates.emplace(
-              fstdistfunc_(dataPoint, getDataByInternalId(entryPointInternalId), dist_func_param_),
+              dist_func_(dataPoint, getDataByInternalId(entryPointInternalId), dist_func_param_),
               entryPointInternalId);
           if (filteredTopCandidates.size() > ef_construction_)
             filteredTopCandidates.pop();
@@ -1305,12 +1324,14 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     setExternalLabel(cur_c, label);
 
     if (copy_vector_) {
-      memcpy(getDataByInternalId(cur_c), data_point_in, data_size_);
+      store_func_(getDataByInternalId(cur_c), data_point_in, data_size_);
     } else {
       memcpy(getDataPtrByInternalId(cur_c), &data_point_in, sizeof(void*));
     }
 
-    const void* data_point = getDataByInternalId(cur_c);
+    // Use the original input vector for construction distances so that distance functions
+    // always receive the raw (unquantized) query as their first argument.
+    const void* data_point = data_point_in;
     assert(data_point != nullptr);
 
     if (curlevel) {
@@ -1322,7 +1343,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     if ((signed)currObj != -1) {
       if (curlevel < maxlevelcopy) {
-        dist_t curdist = fstdistfunc_(data_point, getDataByInternalId(currObj), dist_func_param_);
+        dist_t curdist = dist_func_(data_point, getDataByInternalId(currObj), dist_func_param_);
         for (int level = maxlevelcopy; level > curlevel; level--) {
           bool changed = true;
           while (changed) {
@@ -1337,7 +1358,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
               tableint cand = datal[i];
               if (cand > max_elements_)
                 throw std::runtime_error("cand error");
-              dist_t d = fstdistfunc_(data_point, getDataByInternalId(cand), dist_func_param_);
+              dist_t d = dist_func_(data_point, getDataByInternalId(cand), dist_func_param_);
               if (d < curdist) {
                 curdist = d;
                 currObj = cand;
@@ -1358,7 +1379,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
             top_candidates = searchBaseLayer(currObj, data_point, level);
         if (epDeleted) {
           top_candidates.emplace(
-              fstdistfunc_(data_point, getDataByInternalId(enterpoint_copy), dist_func_param_),
+              dist_func_(data_point, getDataByInternalId(enterpoint_copy), dist_func_param_),
               enterpoint_copy);
           if (top_candidates.size() > ef_construction_)
             top_candidates.pop();
@@ -1387,7 +1408,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     tableint currObj = enterpoint_node_;
     dist_t curdist =
-        fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
+        dist_func_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
 
     for (int level = maxlevel_; level > 0; level--) {
       bool changed = true;
@@ -1405,7 +1426,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           tableint cand = datal[i];
           if (cand > max_elements_)
             throw std::runtime_error("cand error");
-          dist_t d = fstdistfunc_(query_data, getDataByInternalId(cand), dist_func_param_);
+          dist_t d = dist_func_(query_data, getDataByInternalId(cand), dist_func_param_);
 
           if (d < curdist) {
             curdist = d;
@@ -1459,7 +1480,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         continue;
       }
 
-      dist_t dist = fstdistfunc_(query_data, getDataByInternalId(internal_id), dist_func_param_);
+      dist_t dist = dist_func_(query_data, getDataByInternalId(internal_id), dist_func_param_);
       if (result.size() < k) {
         result.emplace(dist, label);
       } else if (dist < result.top().first) {
@@ -1480,7 +1501,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     tableint currObj = enterpoint_node_;
     dist_t curdist =
-        fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
+        dist_func_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
 
     for (int level = maxlevel_; level > 0; level--) {
       bool changed = true;
@@ -1498,7 +1519,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           tableint cand = datal[i];
           if (cand < 0 || cand > max_elements_)
             throw std::runtime_error("cand error");
-          dist_t d = fstdistfunc_(query_data, getDataByInternalId(cand), dist_func_param_);
+          dist_t d = dist_func_(query_data, getDataByInternalId(cand), dist_func_param_);
 
           if (d < curdist) {
             curdist = d;
@@ -1542,7 +1563,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     // Phase 1: greedy descent from top level to find the best entry point for level 0.
     tableint currObj = enterpoint_node_;
     dist_t curdist =
-        fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
+        dist_func_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
     for (int level = maxlevel_; level > 0; level--) {
       bool changed = true;
       while (changed) {
@@ -1554,7 +1575,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           tableint cand = datal[i];
           if (cand >= max_elements_)
             throw std::runtime_error("cand error");
-          dist_t d = fstdistfunc_(query_data, getDataByInternalId(cand), dist_func_param_);
+          dist_t d = dist_func_(query_data, getDataByInternalId(cand), dist_func_param_);
           if (d < curdist) {
             curdist = d;
             currObj = cand;
@@ -1622,7 +1643,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           continue;
         visited_array[candidate_id] = visited_array_tag;
 
-        dist_t d = fstdistfunc_(query_data, getDataByInternalId(candidate_id), dist_func_param_);
+        dist_t d = dist_func_(query_data, getDataByInternalId(candidate_id), dist_func_param_);
         if (d < dyn_boundary) {
           candidate_set.emplace(-d, candidate_id);
           if (!isMarkedDeleted(candidate_id) && d <= radius)

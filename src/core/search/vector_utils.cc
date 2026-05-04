@@ -111,6 +111,43 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
   return 0.0f;
 }
 
+// float32 × float32 dot product
+FAST_MATH float DotProductF32(const float* u, const float* v, size_t dims) {
+#ifdef WITH_SIMSIMD
+  simsimd_distance_t result = 0;
+  simsimd_dot_f32(u, v, dims, &result);
+  return static_cast<float>(result);
+#else
+  float dot = 0.0f;
+  for (size_t i = 0; i < dims; i++)
+    dot += u[i] * v[i];
+  return dot;
+#endif
+}
+
+// float32 × int8 mixed dot product.
+// SimSIMD has no native f32×i8 kerne so we implement it manually.
+FAST_MATH float DotProductF32I8(const float* u, const int8_t* v, size_t dims) {
+  float dot = 0.0f;
+  for (size_t i = 0; i < dims; i++)
+    dot += u[i] * static_cast<float>(v[i]);
+  return dot;
+}
+
+// int8 × int8 dot product
+FAST_MATH float DotProductI8(const int8_t* u, const int8_t* v, size_t dims) {
+#ifdef WITH_SIMSIMD
+  simsimd_distance_t result = 0;
+  simsimd_dot_i8(u, v, dims, &result);
+  return static_cast<float>(result);
+#else
+  float dot = 0.0f;
+  for (size_t i = 0; i < dims; i++)
+    dot += static_cast<float>(u[i]) * static_cast<float>(v[i]);
+  return dot;
+#endif
+}
+
 void InitSimSIMD() {
 #if defined(WITH_SIMSIMD)
   (void)simsimd_capabilities();

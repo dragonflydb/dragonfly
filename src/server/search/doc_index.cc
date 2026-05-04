@@ -539,8 +539,8 @@ bool HnswShardIndex::UpdateVectorData(search::GlobalDocId id, const BaseAccessor
   return global_index_->UpdateVectorData(id, doc, field_ident_);
 }
 
-bool HnswShardIndex::IsVectorCopied() const {
-  return global_index_->IsVectorCopied();
+bool HnswShardIndex::IsVectorStored() const {
+  return global_index_->IsVectorStored();
 }
 
 void HnswShardIndex::ClearPreservedData() {
@@ -550,7 +550,7 @@ void HnswShardIndex::ClearPreservedData() {
 void HnswShardIndex::MaybePreserveField(PrimeValue& pv,
                                         absl::Span<const std::string_view> modified_fields,
                                         FieldExtractionCache* cache) {
-  if (global_index_->IsVectorCopied())
+  if (global_index_->IsVectorStored())
     return;
   if (!modified_fields.empty() && rng::find(modified_fields, field_ident_) == modified_fields.end())
     return;
@@ -593,7 +593,7 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
   for (auto& hnsw : hnsw_shard_indices_) {
-    if (hnsw.Add(global_id, *accessor) && !hnsw.IsVectorCopied()) {
+    if (hnsw.Add(global_id, *accessor) && !hnsw.IsVectorStored()) {
       pv->SetOmitDefrag(true);
     }
   }
@@ -675,7 +675,7 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
       bool success = hnsw.UpdateVectorData(global_id, *doc);
       if (success) {
         ++successful_updates;
-        if (!hnsw.IsVectorCopied()) {
+        if (!hnsw.IsVectorStored()) {
           pv.SetOmitDefrag(true);
         }
       } else {
