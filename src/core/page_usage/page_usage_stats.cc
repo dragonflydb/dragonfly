@@ -207,9 +207,9 @@ uint64_t PageUsage::UsedQuotaCycles() const {
 }
 
 bool PageUsage::IsPageForObjectUnderUtilized(void* object) {
-  mi_page_usage_stats_t stat;
-  zmalloc_page_is_underutilized(object, threshold_, collect_stats_ == CollectPageStats::YES, &stat);
-  return ConsumePageStats(stat);
+  return ConsumePageStats(mi_heap_page_is_underutilized(static_cast<mi_heap_t*>(zmalloc_heap),
+                                                        object, threshold_,
+                                                        collect_stats_ == CollectPageStats::YES));
 }
 
 bool PageUsage::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {

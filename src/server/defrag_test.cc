@@ -4,8 +4,20 @@
 
 #include "server/defrag.h"
 
+#include <absl/container/flat_hash_map.h>
+#include <mimalloc.h>
+#include <mimalloc/internal.h>
+
+#include <vector>
+
 #include "base/gtest.h"
 #include "base/logging.h"
+
+extern "C" {
+#include "redis/zmalloc.h"
+mi_page_usage_stats_t mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio,
+                                                    bool collect_stats);
+}
 
 namespace dfly {
 
@@ -575,5 +587,217 @@ TEST(VerifyTest, OvershootCountsAsComplete) {
   EXPECT_EQ(p.targets_partial, 0u);
   EXPECT_EQ(p.targets_no_progress, 0u);
 }
+
+// =====================================================================
+// Microbenchmarks for the CENSUS / EVACUATE per-object hot path.
+// Run with: ./defrag_test --benchmark_filter='BM_.*'
+// =====================================================================
+namespace {
+
+constexpr size_t kBenchObjectCount = 10000;
+constexpr size_t kBenchBlockSize = 64;
+
+void InitBenchEnv() {
+  static bool initialized = false;
+  if (!initialized) {
+    init_zmalloc_threadlocal(mi_heap_get_backing());
+    initialized = true;
+  }
+}
+
+// Holds a batch of allocations; frees them on destruction.
+struct AllocationBatch {
+  std::vector<void*> pointers;
+  ~AllocationBatch() {
+    for (void* p : pointers) {
+      mi_free(p);
+    }
+  }
+};
+
+AllocationBatch AllocBatch(size_t count, size_t block_size) {
+  AllocationBatch ab;
+  ab.pointers.reserve(count);
+  mi_heap_t* heap = mi_heap_get_default();
+  for (size_t i = 0; i < count; ++i) {
+    ab.pointers.push_back(mi_heap_malloc(heap, block_size));
+  }
+  return ab;
+}
+
+}  // namespace
+
+void BM_PtrPage(benchmark::State& state) {
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+  for (auto _ : state) {
+    for (void* p : ab.pointers) {
+      benchmark::DoNotOptimize(_mi_ptr_page(p));
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_PtrPage)->Arg(kBenchObjectCount);
+
+void BM_ProbeHeap(benchmark::State& state) {
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+  mi_heap_t* heap = mi_heap_get_default();
+  for (auto _ : state) {
+    for (void* p : ab.pointers) {
+      auto stat = mi_heap_page_is_underutilized(heap, p, 0.8f, /*collect_stats=*/true);
+      benchmark::DoNotOptimize(stat);
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_ProbeHeap)->Arg(kBenchObjectCount);
+
+void BM_ProbeNoHeap(benchmark::State& state) {
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+  for (auto _ : state) {
+    for (void* p : ab.pointers) {
+      mi_page_usage_stats_t stat;
+      zmalloc_page_is_underutilized(p, 0.8f, /*collect_stats=*/true, &stat);
+      benchmark::DoNotOptimize(stat);
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_ProbeNoHeap)->Arg(kBenchObjectCount);
+
+void BM_HashFindMiss(benchmark::State& state) {
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+  absl::flat_hash_map<uintptr_t, size_t> empty;
+  for (auto _ : state) {
+    for (void* p : ab.pointers) {
+      uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(p));
+      benchmark::DoNotOptimize(empty.find(addr));
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_HashFindMiss)->Arg(kBenchObjectCount);
+
+void BM_HashFindHit(benchmark::State& state) {
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+  absl::flat_hash_map<uintptr_t, size_t> populated;
+  for (void* p : ab.pointers) {
+    populated[reinterpret_cast<uintptr_t>(_mi_ptr_page(p))] = 1;
+  }
+  for (auto _ : state) {
+    for (void* p : ab.pointers) {
+      uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(p));
+      benchmark::DoNotOptimize(populated.find(addr));
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_HashFindHit)->Arg(kBenchObjectCount);
+
+void BM_HashEmplaceFresh(benchmark::State& state) {
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+  for (auto _ : state) {
+    state.PauseTiming();
+    absl::flat_hash_map<uintptr_t, size_t> m;
+    state.ResumeTiming();
+    for (void* p : ab.pointers) {
+      m.emplace(reinterpret_cast<uintptr_t>(_mi_ptr_page(p)), 1);
+    }
+    benchmark::DoNotOptimize(m);
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_HashEmplaceFresh)->Arg(kBenchObjectCount);
+
+void BM_ProbeAndObserve(benchmark::State& state) {
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+  mi_heap_t* heap = mi_heap_get_default();
+  for (auto _ : state) {
+    state.PauseTiming();
+    CensusStats cs;
+    PageCensus census(&cs);
+    state.ResumeTiming();
+    for (void* p : ab.pointers) {
+      auto stat = mi_heap_page_is_underutilized(heap, p, 0.8f, /*collect_stats=*/true);
+      census.Observe(stat, /*bucket_cursor=*/0);
+    }
+    benchmark::DoNotOptimize(census);
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_ProbeAndObserve)->Arg(kBenchObjectCount);
+
+void BM_EvacDecideMiss(benchmark::State& state) {
+  // Empty plan -> every pointer hits the kNotATarget early-bail. Models
+  // the 95% non-target case in EVACUATE.
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+  PlanStats ps;
+  TargetPlan plan(&ps);
+  for (auto _ : state) {
+    EvacStats es{};
+    for (void* p : ab.pointers) {
+      uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(p));
+      TargetPage* target = plan.FindMut(addr);
+      if (target == nullptr) {
+        ++es.blocks_skipped_not_target;
+        continue;
+      }
+      // Unreachable in this microbench.
+      auto stat = mi_heap_page_is_underutilized(mi_heap_get_default(), p, 0.8f, true);
+      EvacDecide(plan, target, stat, es);
+    }
+    benchmark::DoNotOptimize(es);
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_EvacDecideMiss)->Arg(kBenchObjectCount);
+
+void BM_EvacDecideHit(benchmark::State& state) {
+  // Plan contains every page our allocations live on -> every pointer hits
+  // the EvacDecide commit path. Models the 5% on-target case.
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+  mi_heap_t* heap = mi_heap_get_default();
+
+  // Build a synthetic census whose retention scoring doesn't filter our pages.
+  CensusStats cs;
+  PageCensus census(&cs);
+  for (void* p : ab.pointers) {
+    mi_page_usage_stats_t s{};
+    s.page_address = reinterpret_cast<uintptr_t>(_mi_ptr_page(p));
+    s.block_size = kBenchBlockSize;
+    s.capacity = 64;
+    s.used = 4;  // very low used -> high retention score
+    s.flags = MI_DFLY_PAGE_BELOW_THRESHOLD;
+    census.Observe(s, 0);
+  }
+  PlanStats ps;
+  TargetPlan plan(&ps);
+  plan.BuildFrom(census);
+
+  for (auto _ : state) {
+    EvacStats es{};
+    for (void* p : ab.pointers) {
+      uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(p));
+      TargetPage* target = plan.FindMut(addr);
+      if (target == nullptr) {
+        ++es.blocks_skipped_not_target;
+        continue;
+      }
+      auto stat = mi_heap_page_is_underutilized(heap, p, 0.8f, /*collect_stats=*/true);
+      EvacDecide(plan, target, stat, es);
+    }
+    benchmark::DoNotOptimize(es);
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_EvacDecideHit)->Arg(kBenchObjectCount);
 
 }  // namespace dfly

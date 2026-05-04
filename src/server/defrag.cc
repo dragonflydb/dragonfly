@@ -533,12 +533,8 @@ void RecordFirstFailure(TargetPage* target, EvacStats& stats, RevalidationFailur
 
 }  // namespace
 
-EvacOutcome EvacDecide(TargetPlan& plan, const mi_page_usage_stats_t& stat, EvacStats& stats) {
-  TargetPage* target = plan.FindMut(stat.page_address);
-  if (target == nullptr) {
-    ++stats.blocks_skipped_not_target;
-    return EvacOutcome::kNotATarget;
-  }
+EvacOutcome EvacDecide(TargetPlan& plan, TargetPage* target, const mi_page_usage_stats_t& stat,
+                       EvacStats& stats) {
   if (target->revalidation_failed) {
     ++stats.blocks_skipped_revalidation_failed;
     stats.bytes_skipped_revalidation_failed += stat.block_size;
@@ -583,6 +579,15 @@ EvacOutcome EvacDecide(TargetPlan& plan, const mi_page_usage_stats_t& stat, Evac
   return EvacOutcome::kCommitMove;
 }
 
+EvacOutcome EvacDecide(TargetPlan& plan, const mi_page_usage_stats_t& stat, EvacStats& stats) {
+  TargetPage* target = plan.FindMut(stat.page_address);
+  if (target == nullptr) {
+    ++stats.blocks_skipped_not_target;
+    return EvacOutcome::kNotATarget;
+  }
+  return EvacDecide(plan, target, stat, stats);
+}
+
 CycleProgress RunVerify(const TargetPlan& plan) {
   CycleProgress p;
   for (const TargetPage& target : plan.targets()) {
@@ -619,8 +624,8 @@ CensusTaker::CensusTaker(PageCensus* census, float threshold, CycleQuota quota)
 }
 
 bool CensusTaker::IsPageForObjectUnderUtilized(void* object) {
-  mi_page_usage_stats_t stat;
-  zmalloc_page_is_underutilized(object, threshold_, /*collect_stats=*/true, &stat);
+  mi_page_usage_stats_t stat = mi_heap_page_is_underutilized(
+      static_cast<mi_heap_t*>(zmalloc_heap), object, threshold_, /*collect_stats=*/true);
   census_->Observe(stat, current_cursor_);
   return false;
 }
@@ -640,30 +645,29 @@ Evacuator::Evacuator(TargetPlan* plan, float threshold, EvacStats* evac_stats, C
 }
 
 bool Evacuator::IsPageForObjectUnderUtilized(void* object) {
-  // Fast precheck: derive the page from the object pointer cheaply and bail
-  // out before the full mi_heap_page_is_underutilized probe if the page isn't
-  // in the target set. Saves the per-block probe for the ~95% of EVACUATE
-  // attempts that hit non-target pages. Mirrors EvacDecide's kNotATarget
-  // bookkeeping so blocks_skipped_not_target stays accurate.
+  // Fast precheck folds the not-a-target lookup with the lookup EvacDecide
+  // would otherwise repeat. One FindMut per object instead of two.
   const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
-  if (!plan_->Contains(addr)) {
+  TargetPage* target = plan_->FindMut(addr);
+  if (target == nullptr) {
     ++evac_stats_->blocks_skipped_not_target;
     return false;
   }
-  mi_page_usage_stats_t stat;
-  zmalloc_page_is_underutilized(object, threshold_, /*collect_stats=*/true, &stat);
-  return EvacDecide(*plan_, stat, *evac_stats_) == EvacOutcome::kCommitMove;
+  mi_page_usage_stats_t stat = mi_heap_page_is_underutilized(
+      static_cast<mi_heap_t*>(zmalloc_heap), object, threshold_, /*collect_stats=*/true);
+  return EvacDecide(*plan_, target, stat, *evac_stats_) == EvacOutcome::kCommitMove;
 }
 
 bool Evacuator::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
-  if (!plan_->Contains(addr)) {
+  TargetPage* target = plan_->FindMut(addr);
+  if (target == nullptr) {
     ++evac_stats_->blocks_skipped_not_target;
     return false;
   }
   mi_page_usage_stats_t stat =
       mi_heap_page_is_underutilized(heap, object, threshold_, /*collect_stats=*/true);
-  return EvacDecide(*plan_, stat, *evac_stats_) == EvacOutcome::kCommitMove;
+  return EvacDecide(*plan_, target, stat, *evac_stats_) == EvacOutcome::kCommitMove;
 }
 
 void DefragIdleStep(DefragTaskState* state, float threshold) {

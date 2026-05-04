@@ -119,6 +119,8 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
   bool namespaces_null = false;
 
   const bool read_only = visitor->IsReadOnly();
+  const uint32_t bucket_skip = visitor->BucketSkipAfterTraverse();
+  uint64_t buckets_skipped = 0;
   do {
     visitor->SetCurrentBucketCursor(cur.token());
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
@@ -138,6 +140,11 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
       }
     });
     ++traverse_calls;
+
+    for (uint32_t i = 0; i < bucket_skip && cur; ++i) {
+      cur = prime_table->AdvanceCursorBucketOrder(cur);
+      ++buckets_skipped;
+    }
 
     quota_depleted = visitor->QuotaDepleted();
     should_stop = visitor->ShouldStop();

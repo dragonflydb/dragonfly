@@ -255,6 +255,16 @@ class TargetPlan {
   size_t pending_targets_ = 0;
 };
 
+// Hot-path variant: caller has already resolved the target (e.g. via
+// plan.FindMut). Must be non-null. Skips the redundant lookup that the
+// 3-arg variant otherwise performs.
+EvacOutcome EvacDecide(TargetPlan& plan, TargetPage* target, const mi_page_usage_stats_t& stat,
+                       EvacStats& stats);
+
+// Convenience variant: looks up the target from stat.page_address. Returns
+// kNotATarget on miss. Kept for test ergonomics; production callers should
+// prefer the 4-arg form so they can fold the lookup with their own
+// fast-path checks.
 EvacOutcome EvacDecide(TargetPlan& plan, const mi_page_usage_stats_t& stat, EvacStats& stats);
 
 struct CycleProgress {

@@ -148,6 +148,11 @@ char* zstrdup(const char* s);
 
 void init_zmalloc_threadlocal(void* heap);
 extern __thread ssize_t zmalloc_used_memory_tl;
+// The heap zmalloc operates on. Exposed so C++ hot-path callers can avoid
+// the zmalloc_page_is_underutilized wrapper indirection (~3.7ns/call) and
+// invoke mi_heap_page_is_underutilized directly. Treat as opaque (cast to
+// mi_heap_t*).
+extern __thread void* zmalloc_heap;
 
 #undef __zm_str
 #undef __xstr

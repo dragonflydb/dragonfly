@@ -13,7 +13,10 @@
 #include "zmalloc.h"
 
 __thread ssize_t zmalloc_used_memory_tl = 0;
-__thread mi_heap_t* zmalloc_heap = NULL;
+// Linkage matches the extern declaration in zmalloc.h, which uses void* to
+// avoid pulling mimalloc headers into every C++ TU. The actual stored
+// pointer is always a mi_heap_t*.
+__thread void* zmalloc_heap = NULL;
 
 mi_page_usage_stats_t mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio,
                                                     bool collect_stats);
@@ -175,12 +178,13 @@ int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* 
 // Implemented based on this mimalloc code:
 // https://github.com/microsoft/mimalloc/blob/main/src/heap.c#L27
 int zmalloc_get_allocator_fragmentation_step(float ratio, struct fragmentation_info* info) {
-  if (zmalloc_heap->page_count == 0 || info->bin >= MI_BIN_FULL) {
+  mi_heap_t* heap = (mi_heap_t*)zmalloc_heap;
+  if (heap->page_count == 0 || info->bin >= MI_BIN_FULL) {
     // We avoid iterating over full pages since they are fully utilized.
     return 0;
   }
 
-  mi_page_queue_t* pq = &zmalloc_heap->pages[info->bin];
+  mi_page_queue_t* pq = &heap->pages[info->bin];
   const mi_page_t* page = pq->first;
   while (page != NULL) {
     const mi_page_t* next = page->next;
@@ -205,11 +209,11 @@ int zmalloc_get_allocator_fragmentation_step(float ratio, struct fragmentation_i
     info->committed_golden = info->committed;
     // Add total comitted size of MI_BIN_FULL that we do not traverse
     // as its tracked by zmalloc_heap->full_page_size variable.
-    info->committed += zmalloc_heap->full_page_size;
+    info->committed += heap->full_page_size;
 
     // TODO: it's a test code that makes sure `full_page_size` is correct.
     // Remove it once we are confident with the implementation.
-    mi_page_queue_t* pq = &zmalloc_heap->pages[MI_BIN_FULL];
+    mi_page_queue_t* pq = &heap->pages[MI_BIN_FULL];
     const mi_page_t* page = pq->first;
     while (page != NULL) {
       info->committed_golden += page->capacity * page->block_size;
