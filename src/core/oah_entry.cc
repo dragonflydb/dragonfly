@@ -20,6 +20,7 @@ OAHEntry::OAHEntry(std::string_view key, uint32_t expiry) {
   auto size = key_len_field_size + key_size + expiry_size;
 
   auto* expiry_pos = (char*)zmalloc(size);
+
   data_ = reinterpret_cast<uint64_t>(expiry_pos);
   if (expiry_size) {
     SetExpiryBit(true);
@@ -129,6 +130,11 @@ ssize_t OAHEntry::ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
 }
 
 // TODO refactor, because it's inefficient
+//
+// Vector capacity is always a power of 2 with a minimum of 2 (the initial
+// promotion from single-entry uses FromLogSize(1) below; ResizeLog doubles).
+// OAHSet::ProbeExtensionVector relies on this invariant to drive a 2-lane
+// SIMD probe over vector contents without ever reading past the allocation.
 size_t OAHEntry::Insert(OAHEntry&& e) {
   if (Empty()) {
     *this = std::move(e);
