@@ -416,6 +416,11 @@ struct DefragTaskState {
   uint64_t cycle_id = 0;
   uint64_t cycle_start_ns = 0;
   uint64_t phase_start_ns = 0;
+  // CPU time spent doing actual work in the current phase, summed across
+  // DoDefrag invocations. Resets at each phase transition. Distinguishes
+  // CPU-only effort from wall-clock (phase_start_ns -> now), which includes
+  // idle gaps between invocations.
+  uint64_t phase_active_ns = 0;
 
   void UpdateScanState(uint64_t cursor_val);
 

@@ -222,6 +222,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("-k", "--keys", type=int, default=800_000, help="number of keys to create")
     parser.add_argument(
+        "--mul",
+        type=float,
+        default=1.0,
+        help="scale --keys by this multiplier (e.g. --mul 5 -> 5x keys)",
+    )
+    parser.add_argument(
         "-v", "--value-size", type=int, default=645, help="value size for DEBUG POPULATE"
     )
     parser.add_argument("-n", "--key-name", default="key-for-testing", help="base key name")
@@ -260,4 +266,7 @@ if __name__ == "__main__":
         help="print snapshots every N deleted chunks; 0 disables intermediate snapshots",
     )
 
-    asyncio.run(main(parser.parse_args()))
+    args = parser.parse_args()
+    if args.mul != 1.0:
+        args.keys = int(args.keys * args.mul)
+    asyncio.run(main(args))

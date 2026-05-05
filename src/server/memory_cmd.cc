@@ -286,18 +286,12 @@ void MemoryCmd::Run(CmdArgList args) {
       return cmd_cntx_->SendError(parser.TakeError().MakeReply());
     }
 
-    // Explicit MEMORY DEFRAGMENT runs with a generous quota so the operator
-    // sees real progress per call (~5s real time given the 4x helio CycleClock
-    // calibration bug). Phase transitions still happen between calls — a 5s
-    // slice is large enough to walk a chunk but doesn't pretend to be unlimited.
-    constexpr uint64_t kExplicitDefragQuotaUsec = 20'000'000;
-
     std::vector<DefragShardReport> results(shard_set->size());
     shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard) {
         PageUsage page_usage{CollectPageStats::YES, threshold,
-                             CycleQuota{kExplicitDefragQuotaUsec}};
-        results[shard->shard_id()] = shard->DoDefrag(&page_usage, kExplicitDefragQuotaUsec);
+                             CycleQuota{CycleQuota::kDefaultDefragQuota}};
+        results[shard->shard_id()] = shard->DoDefrag(&page_usage);
       }
     });
 

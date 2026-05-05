@@ -20,10 +20,10 @@ namespace dfly {
 class CycleQuota {
  public:
   static constexpr uint64_t kMaxQuota = std::numeric_limits<uint64_t>::max();
-  // Note: 600 here is ~150us of real time because helio's CycleClock mixes raw
-  // rdtsc with abseil's shifted frequency, making FromUsec/ToUsec ~4x off on
-  // x86. Once the helio bug is fixed, drop this back to 150.
-  static constexpr uint64_t kDefaultDefragQuota = 600;
+  // 40000 here is ~10ms of real time because helio's CycleClock mixes raw rdtsc
+  // with abseil's shifted frequency, making FromUsec/ToUsec ~4x off on x86.
+  // Once the helio bug is fixed, drop this to 10000.
+  static constexpr uint64_t kDefaultDefragQuota = 40'000;
 
   explicit CycleQuota(uint64_t quota_usec);
 

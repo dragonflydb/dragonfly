@@ -497,7 +497,7 @@ DefragSkipReason ShouldStartDefrag(DefragTaskState* state) {
   return CheckInProgress;
 }
 
-DefragShardReport EngineShard::DoDefrag(PageUsage* page_usage, uint64_t phased_quota_usec) {
+DefragShardReport EngineShard::DoDefrag(PageUsage* page_usage) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -533,7 +533,8 @@ DefragShardReport EngineShard::DoDefrag(PageUsage* page_usage, uint64_t phased_q
       }
       return RunPrimeTableSlice(&slice, &defrag_state_.dbid, &defrag_state_.cursor, visitor);
     };
-    RunPhaseDefrag(&defrag_state_, page_usage->threshold(), CycleQuota{phased_quota_usec}, walker);
+    RunPhaseDefrag(&defrag_state_, page_usage->threshold(),
+                   CycleQuota{CycleQuota::kDefaultDefragQuota}, walker);
 
     page_usage->ExtendQuota(50);
     shard_search_indices_->Defragment(page_usage);

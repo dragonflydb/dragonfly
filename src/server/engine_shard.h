@@ -210,10 +210,7 @@ class EngineShard {
   void FinalizeMulti(Transaction* tx);
 
   // Scan the shard with the cursor and apply defragmentation for database entries.
-  // phased_quota_usec controls the inner CycleQuota for the phased path. Background
-  // defrag uses the default; explicit MEMORY DEFRAGMENT passes a much larger value.
-  DefragShardReport DoDefrag(PageUsage* page_usage,
-                             uint64_t phased_quota_usec = CycleQuota::kDefaultDefragQuota);
+  DefragShardReport DoDefrag(PageUsage* page_usage);
 
   uint64_t GetDefragCursor() const {
     return defrag_state_.cursor;

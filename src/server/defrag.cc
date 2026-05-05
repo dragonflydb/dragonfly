@@ -687,6 +687,7 @@ void DefragIdleStep(DefragTaskState* state, float threshold) {
   const uint64_t now = NowNs();
   state->cycle_start_ns = now;
   state->phase_start_ns = now;
+  state->phase_active_ns = 0;
   LOG(INFO) << absl::StrFormat("defrag[CYCLE_START] shard=%u cycle=%llu threshold=%.2f",
                                state->shard_id, state->cycle_id, threshold);
   state->phase = DefragPhase::CENSUS;
@@ -694,10 +695,12 @@ void DefragIdleStep(DefragTaskState* state, float threshold) {
 
 void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,
                       const DbSliceWalker& walk) {
+  const uint64_t step_start_ns = NowNs();
   CensusTaker visitor(&*state->census, threshold, quota, state->census_sample_rate);
   const DbSliceResult result = walk(&visitor, /*hints=*/nullptr);
   state->cycle_stats.census_db_objects_scanned += result.attempts;
   if (!result.finished_all_dbs) {
+    state->phase_active_ns += NowNs() - step_start_ns;
     return;
   }
 
@@ -713,24 +716,28 @@ void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,
 
   const CensusStats& c = state->cycle_stats.census;
   const uint64_t now = NowNs();
+  state->phase_active_ns += now - step_start_ns;
   DEFRAG_STEP_LOG << absl::StrFormat(
       "defrag[CENSUS] shard=%u cycle=%llu db_objects=%llu retained=%zu/%zu "
       "recorded/seen=%llu/%llu cursor_hints=%zu potential_reclaim=%s movable_observed=%s "
       "skipped{above_thr=%llu full=%llu wrong_heap=%llu active=%llu low_score=%llu} "
-      "topk{evicted=%llu rebuilds=%llu} took=%.1fms",
+      "topk{evicted=%llu rebuilds=%llu} took=%.1fms cpu=%.1fms",
       state->shard_id, state->cycle_id, state->cycle_stats.census_db_objects_scanned,
       state->cycle_stats.census_retained_pages, PageCensus::kDefaultMaxRetainedPages,
       c.allocations_recorded, c.allocations_seen, state->census->cursor_hints().size(),
       FormatMiB(state->cycle_stats.census_potential_reclaim_bytes),
       FormatMiB(state->cycle_stats.census_movable_bytes_observed), c.skipped_above_threshold,
       c.skipped_full_page, c.skipped_wrong_heap, c.skipped_active_malloc_page, c.skipped_low_score,
-      c.pages_evicted_from_retained, c.heap_rebuilds, NsToMs(now - state->phase_start_ns));
+      c.pages_evicted_from_retained, c.heap_rebuilds, NsToMs(now - state->phase_start_ns),
+      NsToMs(state->phase_active_ns));
 
   state->phase_start_ns = now;
+  state->phase_active_ns = 0;
   state->phase = DefragPhase::SELECT_TARGETS;
 }
 
 void DefragSelectTargetsStep(DefragTaskState* state) {
+  const uint64_t step_start_ns = NowNs();
   state->plan.emplace(&state->cycle_stats.plan);
   state->plan->BuildFrom(*state->census, TargetPlan::kDefaultMaxTargets, state->census_sample_rate);
   state->cycle_stats.plan_target_pages = state->plan->size();
@@ -743,23 +750,26 @@ void DefragSelectTargetsStep(DefragTaskState* state) {
 
   const PlanStats& p = state->cycle_stats.plan;
   const uint64_t now = NowNs();
+  state->phase_active_ns += now - step_start_ns;
   DEFRAG_STEP_LOG << absl::StrFormat(
       "defrag[PLAN] shard=%u cycle=%llu targets=%zu/%zu kept=%llu reclaimable=%s "
       "filtered{no_obs=%llu stale=%llu immovable=%llu empty=%llu} truncated_by_cap=%llu "
-      "filtered_immovable=%s truncated=%s took=%.1fms",
+      "filtered_immovable=%s truncated=%s took=%.1fms cpu=%.1fms",
       state->shard_id, state->cycle_id, state->cycle_stats.plan_target_pages,
       state->cycle_stats.census_retained_pages, p.targets_kept,
       FormatMiB(p.selected_reclaimable_bytes_at_census), p.filtered_no_observed_blocks,
       p.filtered_stale, p.filtered_has_immovable_data, p.filtered_already_empty, p.truncated_by_cap,
       FormatMiB(p.filtered_immovable_reclaimable_bytes), FormatMiB(p.truncated_reclaimable_bytes),
-      NsToMs(now - state->phase_start_ns));
+      NsToMs(now - state->phase_start_ns), NsToMs(state->phase_active_ns));
 
   state->phase_start_ns = now;
+  state->phase_active_ns = 0;
   state->phase = DefragPhase::EVACUATE;
 }
 
 void DefragEvacuateStep(DefragTaskState* state, float threshold, CycleQuota quota,
                         const DbSliceWalker& walk) {
+  const uint64_t step_start_ns = NowNs();
   Evacuator visitor(&*state->plan, threshold, &state->cycle_stats.evac, quota);
   // When CENSUS sampled the keyspace, hints cover only ~1/sample_rate of the
   // buckets touching each target page — using them would partially-evacuate
@@ -770,6 +780,7 @@ void DefragEvacuateStep(DefragTaskState* state, float threshold, CycleQuota quot
   state->cycle_stats.evac_db_objects_scanned += result.attempts;
   state->cycle_stats.evac_reallocations += result.reallocations;
   if (!result.finished_all_dbs && !state->plan->AllTargetsDone()) {
+    state->phase_active_ns += NowNs() - step_start_ns;
     return;
   }
 
@@ -778,25 +789,29 @@ void DefragEvacuateStep(DefragTaskState* state, float threshold, CycleQuota quot
   const double commit_pct =
       attempted == 0 ? 0.0 : 100.0 * static_cast<double>(e.blocks_move_committed) / attempted;
   const uint64_t now = NowNs();
+  state->phase_active_ns += now - step_start_ns;
   DEFRAG_STEP_LOG << absl::StrFormat(
       "defrag[EVACUATE] shard=%u cycle=%llu db_objects=%llu reallocs=%llu "
       "commit=%llu/%llu (%.1f%%) bytes_committed=%s "
       "skipped_blocks{not_target=%llu target_done=%llu revalid=%llu} "
       "reval_fail{heap=%llu active=%llu full=%llu above_thr=%llu} "
-      "abandoned=%llu completed_during_evac=%llu took=%.1fms",
+      "abandoned=%llu completed_during_evac=%llu took=%.1fms cpu=%.1fms",
       state->shard_id, state->cycle_id, state->cycle_stats.evac_db_objects_scanned,
       state->cycle_stats.evac_reallocations, e.blocks_move_committed, attempted, commit_pct,
       FormatMiB(e.bytes_move_committed), e.blocks_skipped_not_target, e.blocks_skipped_target_done,
       e.blocks_skipped_revalidation_failed, e.targets_revalidation_heap_mismatch,
       e.targets_revalidation_active_malloc_page, e.targets_revalidation_full_page,
       e.targets_revalidation_above_threshold, e.targets_abandoned_revalidation,
-      e.targets_completed_during_evac, NsToMs(now - state->phase_start_ns));
+      e.targets_completed_during_evac, NsToMs(now - state->phase_start_ns),
+      NsToMs(state->phase_active_ns));
 
   state->phase_start_ns = now;
+  state->phase_active_ns = 0;
   state->phase = DefragPhase::VERIFY;
 }
 
 void DefragVerifyStep(DefragTaskState* state) {
+  const uint64_t step_start_ns = NowNs();
   state->cycle_stats.verify = RunVerify(*state->plan);
   state->cycle_stats.cycle_finished = true;
 
@@ -815,15 +830,16 @@ void DefragVerifyStep(DefragTaskState* state) {
   const double freed_pct =
       planned_reclaim == 0 ? 0.0 : 100.0 * static_cast<double>(v.bytes_freed) / planned_reclaim;
   const uint64_t now = NowNs();
+  state->phase_active_ns += now - step_start_ns;
   DEFRAG_STEP_LOG << absl::StrFormat(
       "defrag[VERIFY] shard=%u cycle=%llu targets{done=%llu/%llu (%.1f%%) "
       "partial=%llu none=%llu abandoned=%llu} "
-      "bytes{moved=%s/%s (%.1f%%) freed=%s/%s (%.1f%%) remaining=%s} took=%.1fms",
+      "bytes{moved=%s/%s (%.1f%%) freed=%s/%s (%.1f%%) remaining=%s} took=%.1fms cpu=%.1fms",
       state->shard_id, state->cycle_id, v.targets_complete, total_targets, done_pct,
       v.targets_partial, v.targets_no_progress, v.targets_abandoned, FormatMiB(v.bytes_evacuated),
       FormatMiB(v.bytes_total_at_census), bytes_pct, FormatMiB(v.bytes_freed),
       FormatMiB(planned_reclaim), freed_pct, FormatMiB(v.bytes_remaining),
-      NsToMs(now - state->phase_start_ns));
+      NsToMs(now - state->phase_start_ns), NsToMs(state->phase_active_ns));
 
   const double cycle_ms = NsToMs(now - state->cycle_start_ns);
   const double freed_mib_per_s =
