@@ -62,7 +62,8 @@ class PageCensus {
  public:
   static constexpr size_t kDefaultMaxRetainedPages = 100'000;
 
-  explicit PageCensus(CensusStats* stats, size_t max_retained_pages = kDefaultMaxRetainedPages);
+  explicit PageCensus(CensusStats* stats, size_t max_retained_pages = kDefaultMaxRetainedPages,
+                      uint64_t per_block_move_cost_bytes = 256);
 
   // bucket_cursor is the DashTable cursor of the bucket the observed object
   // currently lives in. Recorded so EVACUATE can restrict its walk to buckets
@@ -83,9 +84,14 @@ class PageCensus {
   }
 
   // Move-out accessor: lets SELECT_TARGETS hand the hint set off to
-  // DefragTaskState before the census itself is released.
-  absl::flat_hash_set<uint64_t> TakeCursorHints() {
-    return std::move(cursor_hints_);
+  // DefragTaskState before the census itself is released. Returns a sorted
+  // vector so the EVACUATE walker can iterate deterministically and resume
+  // from a saved cursor index across DoDefrag invocations.
+  std::vector<uint64_t> TakeCursorHints() {
+    std::vector<uint64_t> out(cursor_hints_.begin(), cursor_hints_.end());
+    cursor_hints_.clear();
+    std::ranges::sort(out);
+    return out;
   }
 
  private:
@@ -110,6 +116,7 @@ class PageCensus {
   absl::flat_hash_set<uint64_t> cursor_hints_;
   CensusStats* stats_;
   size_t max_retained_pages_;
+  uint64_t per_block_move_cost_bytes_;
 };
 
 enum class TargetStatus : uint8_t {
@@ -213,12 +220,26 @@ struct EvacStats {
 
 class TargetPlan {
  public:
-  static constexpr size_t kDefaultMaxTargets = 2048;
+  static constexpr size_t kDefaultMaxTargets = 5000;
+  // How many additional candidates beyond max_targets to retain as a tail for
+  // reuse on subsequent phased cycles, skipping CENSUS until exhausted.
+  static constexpr size_t kDefaultTailCapacity = 50000;
 
   explicit TargetPlan(PlanStats* stats);
 
   void BuildFrom(const PageCensus& census, size_t max_targets = kDefaultMaxTargets,
-                 uint32_t sample_rate = 1);
+                 uint32_t sample_rate = 1, size_t tail_capacity = kDefaultTailCapacity);
+
+  // Build an active plan directly from a pre-vetted target list (typically a
+  // tail saved from an earlier BuildFrom). Skips classification — entries are
+  // assumed already filtered. EVACUATE's per-page revalidation handles any
+  // staleness at the time of move.
+  void HydrateFromTail(std::vector<TargetPage> targets);
+
+  // Move the saved tail out of this plan; leaves tail_ empty after.
+  std::vector<TargetPage> TakeTail() {
+    return std::move(tail_);
+  }
 
   const std::vector<TargetPage>& targets() const {
     return targets_;
@@ -251,6 +272,9 @@ class TargetPlan {
 
  private:
   std::vector<TargetPage> targets_;  // sorted by retention_score desc
+  // Candidates ranked just below the active target cap, retained so a future
+  // phased cycle can hydrate a plan without doing a fresh CENSUS.
+  std::vector<TargetPage> tail_;
   absl::flat_hash_map<uintptr_t, size_t> address_to_index_;
   PlanStats* stats_;
   size_t pending_targets_ = 0;
@@ -402,14 +426,30 @@ struct DefragTaskState {
   // is unaffected (multiple cycles converge).
   uint32_t census_sample_rate = 1;
 
+  // Per-block move-cost weight in the page retention score:
+  //   score = reclaim / (move_bytes + used_blocks * per_block_move_cost + slot_overhead)
+  // Higher values penalize many-entry pages more strongly, pushing pages with
+  // small block sizes (more entries per page) toward the back of the candidate
+  // ordering. Useful for wide/mixed workloads where evacuating small-block
+  // pages is expensive per byte reclaimed.
+  uint64_t per_block_move_cost_bytes = 256;
+
   // Phased-only state, untouched in legacy mode.
   DefragPhase phase = DefragPhase::IDLE;
   std::optional<PageCensus> census;
   std::optional<TargetPlan> plan;
   // Bucket cursors observed during CENSUS that contained at least one object
   // on a candidate page. Moved here from PageCensus before SELECT_TARGETS
-  // releases the census, then consumed by EVACUATE.
-  absl::flat_hash_set<uint64_t> cursor_hints;
+  // releases the census, then consumed by EVACUATE. Sorted vector + cursor
+  // index lets the hinted walker resume mid-iteration across DoDefrag calls
+  // when one EVAC quota slice can't drain the full hint set.
+  std::vector<uint64_t> cursor_hints;
+  size_t hint_cursor_idx = 0;
+  // Pre-vetted target candidates carried over from a prior cycle's CENSUS.
+  // Drained one max_targets-sized batch per cycle, letting subsequent phased
+  // cycles skip CENSUS entirely until the tail empties. EVAC's per-page
+  // revalidation handles entries that became stale between cycles.
+  std::vector<TargetPage> target_tail;
   DefragCycleStats cycle_stats;
 
   uint16_t shard_id = 0;
@@ -436,11 +476,12 @@ struct DbSliceResult {
 };
 
 // Walker callable. If `hints` is non-null and non-empty, the walker should
-// visit only the buckets listed in the hint set (used by EVACUATE to skip
-// buckets without candidate objects). If `hints` is null, the walker performs
-// a full slice walk (used by CENSUS).
-using DbSliceWalker =
-    std::function<DbSliceResult(PageUsage*, const absl::flat_hash_set<uint64_t>* hints)>;
+// visit only the buckets listed in the hint vector starting at *hint_cursor
+// (used by EVACUATE to skip buckets without candidate objects); the walker
+// updates *hint_cursor to where it stopped so the next call can resume. If
+// `hints` is null, the walker performs a full slice walk (used by CENSUS).
+using DbSliceWalker = std::function<DbSliceResult(PageUsage*, const std::vector<uint64_t>* hints,
+                                                  size_t* hint_cursor)>;
 
 void DefragIdleStep(DefragTaskState* state, float threshold);
 void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,

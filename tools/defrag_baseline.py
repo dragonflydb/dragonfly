@@ -9,8 +9,28 @@ import argparse
 import asyncio
 import random
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 
 import aioredis
+
+
+@dataclass(frozen=True)
+class WideBand:
+    name: str
+    value_size: int
+    byte_share: float
+    profile: str
+
+
+WIDE_BANDS = [
+    WideBand("tiny", 64, 0.02, "0.99:6,0.90:3,0.60:1"),
+    WideBand("small", 128, 0.04, "0.98:4,0.80:3,0.35:2,0.08:1"),
+    WideBand("med1", 256, 0.10, "0.98:3,0.65:2,0.25:3,0.04:2"),
+    WideBand("med2", 512, 0.22, "0.95:3,0.55:3,0.15:3,0.03:1"),
+    WideBand("large1", 1024, 0.28, "0.95:3,0.60:3,0.20:3,0.05:1"),
+    WideBand("large2", 2048, 0.24, "0.90:4,0.45:3,0.12:2,0.03:1"),
+    WideBand("huge", 4096, 0.10, "0.85:5,0.35:3,0.08:2"),
+]
 
 
 def parse_profile(profile: str) -> list[tuple[float, int]]:
@@ -137,15 +157,23 @@ async def delete_batches(connection: aioredis.Redis, keys: list[str], batch_size
     return deleted
 
 
-async def create_fragmentation(connection: aioredis.Redis, args: argparse.Namespace) -> None:
-    rng = random.Random(args.seed)
-    profile = parse_profile(args.profile)
+async def delete_fragmented_chunks(
+    connection: aioredis.Redis,
+    *,
+    rng: random.Random,
+    prefix: str,
+    keys_count: int,
+    value_size: int,
+    chunk_keys: int,
+    profile_text: str,
+    delete_batch: int,
+    snapshot_every_chunks: int,
+    snapshot_prefix: str,
+    include_arena: bool,
+    top_arena_bins: int,
+) -> dict:
+    profile = parse_profile(profile_text)
     deck = make_ratio_deck(profile, rng)
-
-    await flushdb(connection)
-    await snapshot(connection, "before_populate", args.arena, args.top_arena_bins)
-    await populate(connection, args.keys, args.key_name, args.value_size)
-    await snapshot(connection, "after_populate", args.arena, args.top_arena_bins)
 
     chunks_by_ratio = Counter()
     deleted_by_ratio = defaultdict(int)
@@ -153,8 +181,8 @@ async def create_fragmentation(connection: aioredis.Redis, args: argparse.Namesp
     total_deleted = 0
     chunks = 0
 
-    for chunk_start in range(0, args.keys, args.chunk_keys):
-        chunk_end = min(args.keys, chunk_start + args.chunk_keys)
+    for chunk_start in range(0, keys_count, chunk_keys):
+        chunk_end = min(keys_count, chunk_start + chunk_keys)
         chunk_size = chunk_end - chunk_start
 
         if chunks and chunks % len(deck) == 0:
@@ -166,9 +194,9 @@ async def create_fragmentation(connection: aioredis.Redis, args: argparse.Namesp
 
         ids = list(range(chunk_start, chunk_end))
         delete_ids = rng.sample(ids, delete_count)
-        delete_keys = [key_name(args.key_name, key_id) for key_id in delete_ids]
+        delete_keys = [key_name(prefix, key_id) for key_id in delete_ids]
 
-        deleted = await delete_batches(connection, delete_keys, args.delete_batch)
+        deleted = await delete_batches(connection, delete_keys, delete_batch)
         live = chunk_size - deleted
 
         chunks_by_ratio[live_ratio] += 1
@@ -177,30 +205,158 @@ async def create_fragmentation(connection: aioredis.Redis, args: argparse.Namesp
         total_deleted += deleted
         chunks += 1
 
-        if args.snapshot_every_chunks and chunks % args.snapshot_every_chunks == 0:
+        if snapshot_every_chunks and chunks % snapshot_every_chunks == 0:
             await snapshot(
-                connection, f"after_delete_chunk_{chunks}", args.arena, args.top_arena_bins
+                connection,
+                f"{snapshot_prefix}_after_delete_chunk_{chunks}",
+                include_arena,
+                top_arena_bins,
             )
 
+    return {
+        "chunks": chunks,
+        "chunk_keys": chunk_keys,
+        "profile": profile_text,
+        "created_keys": keys_count,
+        "deleted_keys": total_deleted,
+        "live_keys": keys_count - total_deleted,
+        "value_size": value_size,
+        "chunks_by_ratio": chunks_by_ratio,
+        "deleted_by_ratio": deleted_by_ratio,
+        "live_by_ratio": live_by_ratio,
+    }
+
+
+def print_fragmentation_summary(summary: dict, *, label: str, seed: int) -> None:
     print("\n=== planned_fragmentation ===")
-    print(f"chunks={chunks:,}")
-    print(f"chunk_keys={args.chunk_keys:,}")
-    print(f"seed={args.seed}")
-    print(f"profile={args.profile}")
-    print(f"created_keys={args.keys:,}")
-    print(f"deleted_keys={total_deleted:,}")
-    print(f"live_keys={args.keys - total_deleted:,}")
-    print(f"estimated_deleted_value_bytes={total_deleted * args.value_size:,}")
-    print(f"estimated_live_value_bytes={(args.keys - total_deleted) * args.value_size:,}")
+    print(f"label={label}")
+    print(f"chunks={summary['chunks']:,}")
+    print(f"chunk_keys={summary['chunk_keys']:,}")
+    print(f"seed={seed}")
+    print(f"profile={summary['profile']}")
+    print(f"value_size={summary['value_size']:,}")
+    print(f"created_keys={summary['created_keys']:,}")
+    print(f"deleted_keys={summary['deleted_keys']:,}")
+    print(f"live_keys={summary['live_keys']:,}")
+    print(f"estimated_deleted_value_bytes={summary['deleted_keys'] * summary['value_size']:,}")
+    print(f"estimated_live_value_bytes={summary['live_keys'] * summary['value_size']:,}")
 
     print("\nby_live_ratio:")
-    for ratio in sorted(chunks_by_ratio.keys(), reverse=True):
+    for ratio in sorted(summary["chunks_by_ratio"].keys(), reverse=True):
         print(
-            f"  live_ratio={ratio:.2f} chunks={chunks_by_ratio[ratio]:,} "
-            f"live_keys={live_by_ratio[ratio]:,} deleted_keys={deleted_by_ratio[ratio]:,}"
+            f"  live_ratio={ratio:.2f} chunks={summary['chunks_by_ratio'][ratio]:,} "
+            f"live_keys={summary['live_by_ratio'][ratio]:,} "
+            f"deleted_keys={summary['deleted_by_ratio'][ratio]:,}"
         )
 
+
+async def create_uniform_fragmentation(
+    connection: aioredis.Redis, args: argparse.Namespace
+) -> None:
+    rng = random.Random(args.seed)
+
+    await flushdb(connection)
+    await snapshot(connection, "before_populate", args.arena, args.top_arena_bins)
+    await populate(connection, args.keys, args.key_name, args.value_size)
+    await snapshot(connection, "after_populate", args.arena, args.top_arena_bins)
+
+    summary = await delete_fragmented_chunks(
+        connection,
+        rng=rng,
+        prefix=args.key_name,
+        keys_count=args.keys,
+        value_size=args.value_size,
+        chunk_keys=args.chunk_keys,
+        profile_text=args.profile,
+        delete_batch=args.delete_batch,
+        snapshot_every_chunks=args.snapshot_every_chunks,
+        snapshot_prefix="uniform",
+        include_arena=args.arena,
+        top_arena_bins=args.top_arena_bins,
+    )
+
+    print_fragmentation_summary(summary, label="uniform", seed=args.seed)
     await snapshot(connection, "after_delete", args.arena, args.top_arena_bins)
+
+
+def wide_chunk_keys(value_size: int) -> int:
+    return max(32, round((256 * 1024) / value_size))
+
+
+async def create_wide_fragmentation(connection: aioredis.Redis, args: argparse.Namespace) -> None:
+    rng = random.Random(args.seed)
+    target_value_bytes = args.keys * args.value_size
+
+    await flushdb(connection)
+    await snapshot(connection, "before_populate", args.arena, args.top_arena_bins)
+
+    band_specs = []
+    for band in WIDE_BANDS:
+        keys_count = max(1, round((target_value_bytes * band.byte_share) / band.value_size))
+        prefix = f"{args.key_name}:{band.name}"
+        chunk_keys = wide_chunk_keys(band.value_size)
+        band_specs.append((band, prefix, keys_count, chunk_keys))
+        await populate(connection, keys_count, prefix, band.value_size)
+
+    await snapshot(connection, "after_populate", args.arena, args.top_arena_bins)
+
+    summaries = []
+    for band, prefix, keys_count, chunk_keys in band_specs:
+        summary = await delete_fragmented_chunks(
+            connection,
+            rng=rng,
+            prefix=prefix,
+            keys_count=keys_count,
+            value_size=band.value_size,
+            chunk_keys=chunk_keys,
+            profile_text=band.profile,
+            delete_batch=args.delete_batch,
+            snapshot_every_chunks=args.snapshot_every_chunks,
+            snapshot_prefix=band.name,
+            include_arena=args.arena,
+            top_arena_bins=args.top_arena_bins,
+        )
+        summaries.append((band, summary))
+
+    print("\n=== wide_workload ===")
+    print(f"seed={args.seed}")
+    print(f"target_value_bytes={target_value_bytes:,}")
+    print(f"bands={len(WIDE_BANDS)}")
+
+    created_keys = sum(summary["created_keys"] for _, summary in summaries)
+    deleted_keys = sum(summary["deleted_keys"] for _, summary in summaries)
+    live_keys = sum(summary["live_keys"] for _, summary in summaries)
+    deleted_value_bytes = sum(
+        summary["deleted_keys"] * summary["value_size"] for _, summary in summaries
+    )
+    live_value_bytes = sum(summary["live_keys"] * summary["value_size"] for _, summary in summaries)
+
+    print(f"created_keys={created_keys:,}")
+    print(f"deleted_keys={deleted_keys:,}")
+    print(f"live_keys={live_keys:,}")
+    print(f"estimated_deleted_value_bytes={deleted_value_bytes:,}")
+    print(f"estimated_live_value_bytes={live_value_bytes:,}")
+
+    print("\nby_band:")
+    for band, summary in summaries:
+        print(
+            f"  band={band.name} value_size={band.value_size:,} "
+            f"byte_share={band.byte_share:.2f} chunk_keys={summary['chunk_keys']:,} "
+            f"profile={band.profile} created={summary['created_keys']:,} "
+            f"deleted={summary['deleted_keys']:,} live={summary['live_keys']:,}"
+        )
+
+    for band, summary in summaries:
+        print_fragmentation_summary(summary, label=f"wide:{band.name}", seed=args.seed)
+
+    await snapshot(connection, "after_delete", args.arena, args.top_arena_bins)
+
+
+async def create_fragmentation(connection: aioredis.Redis, args: argparse.Namespace) -> None:
+    if args.workload == "wide":
+        await create_wide_fragmentation(connection, args)
+    else:
+        await create_uniform_fragmentation(connection, args)
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -233,6 +389,12 @@ if __name__ == "__main__":
     parser.add_argument("-n", "--key-name", default="key-for-testing", help="base key name")
     parser.add_argument("-s", "--server", default="localhost", help="server host")
     parser.add_argument("-p", "--port", type=int, default=6379, help="server port")
+    parser.add_argument(
+        "--workload",
+        choices=["uniform", "wide"],
+        default="uniform",
+        help="fragmentation workload preset",
+    )
 
     parser.add_argument("--seed", type=int, default=12345, help="deterministic deletion seed")
     parser.add_argument(

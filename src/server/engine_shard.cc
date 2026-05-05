@@ -62,6 +62,12 @@ ABSL_FLAG(uint32_t, defrag_census_sample_rate, 1,
           "Nth logical bucket: per-cycle reclamation drops to ~1/N but cycle wall time "
           "drops too. Steady-state reclamation converges over multiple cycles.");
 
+ABSL_FLAG(uint64_t, defrag_per_block_move_cost_bytes, 256,
+          "Per-block move-cost weight in the page retention score. Higher values push "
+          "pages with many small entries toward the back of the candidate ranking, "
+          "favoring large-block pages that reclaim more bytes per bucket walked during "
+          "EVACUATE. Useful for wide/mixed-size workloads.");
+
 ABSL_FLAG(int32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
           "Warning: not advised to decrease in production.");
@@ -171,14 +177,15 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
   return result;
 }
 
-// Hinted variant: visits only the buckets in `hints` for the current dbid.
-// Each hint is replayed via a single Traverse(Cursor{hint}, cb) call which the
-// underlying DashTable resolves to that one logical bucket (see core/dash.h).
-// On quota exhaustion we bail without recording resume state; the next call
-// will re-iterate the hint set from scratch (per-target work is gated by
-// EvacDecide which is cheap for already-done targets).
-DbSliceResult RunPrimeTableHinted(DbSlice* slice, size_t dbid,
-                                  const absl::flat_hash_set<uint64_t>& hints, PageUsage* visitor) {
+// Hinted variant: visits only the buckets in `hints` for the current dbid,
+// resuming from `*cursor_idx` so quota-bounded calls can drain a large hint
+// set across multiple invocations. Each hint is replayed via a single
+// Traverse(Cursor{hint}, cb) call which the underlying DashTable resolves
+// to that one logical bucket (see core/dash.h). On quota exhaustion we
+// persist the next index back into *cursor_idx; once we reach hints.size()
+// the slice is "finished".
+DbSliceResult RunPrimeTableHinted(DbSlice* slice, size_t dbid, const std::vector<uint64_t>& hints,
+                                  size_t* cursor_idx, PageUsage* visitor) {
   if (!slice->IsDbValid(dbid)) {
     return DbSliceResult{.finished_all_dbs = true};
   }
@@ -188,14 +195,16 @@ DbSliceResult RunPrimeTableHinted(DbSlice* slice, size_t dbid,
 
   DbSliceResult result;
   const uint64_t start_ns = absl::GetCurrentTimeNanos();
-  uint64_t hints_visited = 0;
   bool quota_depleted = false;
   bool should_stop = false;
   bool namespaces_null = false;
 
   const bool read_only = visitor->IsReadOnly();
+  const size_t start_idx = cursor_idx ? *cursor_idx : 0;
+  size_t i = start_idx;
 
-  for (uint64_t h : hints) {
+  for (; i < hints.size(); ++i) {
+    const uint64_t h = hints[i];
     visitor->SetCurrentBucketCursor(h);
     PrimeTable::Cursor cur{h};
     prime_table->Traverse(cur, [&](PrimeIterator it) {
@@ -214,26 +223,29 @@ DbSliceResult RunPrimeTableHinted(DbSlice* slice, size_t dbid,
         }
       }
     });
-    ++hints_visited;
 
     quota_depleted = visitor->QuotaDepleted();
     should_stop = visitor->ShouldStop();
     namespaces_null = !namespaces;
     if (quota_depleted || should_stop || namespaces_null) {
+      ++i;  // we finished bucket i; resume from i+1 next call
       break;
     }
   }
 
+  if (cursor_idx) {
+    *cursor_idx = i;
+  }
+
+  const size_t hints_visited = i - start_idx;
   const double elapsed_ms = static_cast<double>(absl::GetCurrentTimeNanos() - start_ns) / 1e6;
   LOG(INFO) << absl::StrFormat(
-      "defrag[Hinted] dbid=%zu hints=%zu/%zu attempts=%llu reallocs=%llu took=%.1fms "
-      "exit{quota=%d stop=%d ns_null=%d}",
-      dbid, hints_visited, hints.size(), result.attempts, result.reallocations, elapsed_ms,
+      "defrag[Hinted] dbid=%zu hints_this_call=%zu pos=%zu/%zu attempts=%llu reallocs=%llu "
+      "took=%.1fms exit{quota=%d stop=%d ns_null=%d}",
+      dbid, hints_visited, i, hints.size(), result.attempts, result.reallocations, elapsed_ms,
       quota_depleted, should_stop, namespaces_null);
 
-  // Hinted walk treats the hint set as the entire work list; once we've
-  // iterated all of them without bailing, the slice is "finished".
-  result.finished_all_dbs = !quota_depleted && !should_stop && hints_visited == hints.size();
+  result.finished_all_dbs = !quota_depleted && !should_stop && i == hints.size();
   return result;
 }
 
@@ -525,11 +537,12 @@ DefragShardReport EngineShard::DoDefrag(PageUsage* page_usage) {
     if (defrag_state_.phase == DefragPhase::IDLE) {
       defrag_state_.census_sample_rate =
           std::max<uint32_t>(1, GetFlag(FLAGS_defrag_census_sample_rate));
+      defrag_state_.per_block_move_cost_bytes = GetFlag(FLAGS_defrag_per_block_move_cost_bytes);
     }
 
-    auto walker = [&](PageUsage* visitor, const absl::flat_hash_set<uint64_t>* hints) {
+    auto walker = [&](PageUsage* visitor, const std::vector<uint64_t>* hints, size_t* hint_cursor) {
       if (hints != nullptr) {
-        return RunPrimeTableHinted(&slice, defrag_state_.dbid, *hints, visitor);
+        return RunPrimeTableHinted(&slice, defrag_state_.dbid, *hints, hint_cursor, visitor);
       }
       return RunPrimeTableSlice(&slice, &defrag_state_.dbid, &defrag_state_.cursor, visitor);
     };

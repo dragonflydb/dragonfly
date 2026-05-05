@@ -276,8 +276,15 @@ async def main(args: argparse.Namespace) -> None:
             committed_drop = (before["committed"] - after["committed"]) if before and after else 0
             n_shards = len(shards)
             total_freed = sum(s.get("bytes_freed", 0) for s in shards.values())
+            waste_before = (before or {}).get("waste_pct")
+            waste_after = (after or {}).get("waste_pct")
+            waste_str = (
+                f"{waste_before:.2f}%->{waste_after:.2f}%"
+                if waste_before is not None and waste_after is not None
+                else "n/a"
+            )
             print(
-                f"cycle={cycle} shards_logged={n_shards} "
+                f"cycle={cycle} waste={waste_str} shards_logged={n_shards} "
                 f"freed={total_freed:,}B committed_drop={committed_drop:,}B"
             )
 
