@@ -20,6 +20,42 @@
 
 namespace dfly {
 
+// Tracks pages that mimalloc has signalled (via the dragonfly underutil
+// callback) as having dropped below the defrag utilization threshold during a
+// free. Storage is per-thread (via thread_local) so each shard observes only
+// its own heap. Replaces the dashtable-walking CENSUS as the source of
+// candidate target pages.
+namespace defrag_underutil {
+
+// Register the mimalloc callback once per process. Safe to call from any
+// thread; only the first call performs the registration. Subsequent calls are
+// no-ops.
+void InitOnce();
+
+// Set the threshold (in percent, 0-100) used by mimalloc to decide when a page
+// has crossed below the underutil watermark during a free. Must match the
+// dragonfly-side `mem_defrag_page_utilization_threshold` so census and EVAC
+// use the same definition of "underutilized".
+void SetThresholdPct(uint8_t pct);
+
+// Number of pages currently tracked on this thread's set.
+size_t Size();
+
+// Returns a copy of the page-address set as a vector. Does not modify the
+// set; callers drop entries explicitly via Remove. Returned order is
+// unspecified.
+std::vector<uintptr_t> Snapshot();
+
+// Drop a page from this thread's set. Used by VERIFY to retire targets that
+// were successfully drained, and by the new CENSUS to drop entries that have
+// since recovered above threshold.
+void Remove(uintptr_t page_addr);
+
+// Clear the entire set on this thread.
+void Clear();
+
+}  // namespace defrag_underutil
+
 enum class DefragPhase : uint8_t {
   IDLE,
   CENSUS,
@@ -70,6 +106,13 @@ class PageCensus {
   // known to contain at least one candidate object. Pass 0 if unknown
   // (callers outside the hot defrag path may not have a cursor).
   void Observe(const mi_page_usage_stats_t& stat, uint64_t bucket_cursor = 0);
+
+  // Page-level observe used by the underutil-set fast path: caller has already
+  // verified the page is in-heap, non-full, and below threshold. We don't have
+  // per-object visibility, so we assume every used block is movable and let
+  // EVACUATE's per-page revalidation correct any wrongly-classified entries.
+  // No bucket cursor is recorded (cursor_hints stays empty in this path).
+  void ObservePage(const mi_page_usage_stats_t& stat);
 
   const CensusStats& stats() const {
     return *stats_;
@@ -158,6 +201,15 @@ struct TargetPage {
   // Set on the first revalidation failure; consulted on sticky-skip branches
   // to attribute subsequent block/byte skips to the originating reason.
   RevalidationFailureReason failure_reason = RevalidationFailureReason::kNone;
+
+  // Per-slice revalidation cache: `mi_heap_page_is_underutilized` is invariant
+  // within a single EVACUATE slice for a given page (`used` only decreases as
+  // we evacuate; flags don't change). Recomputing per object on the same page
+  // is wasted work — cache the stat once per slice and reuse for siblings.
+  // `cached_at_slice == 0` means no cache; Evacuator stamps a non-zero
+  // slice-unique value when populating.
+  mi_page_usage_stats_t cached_stat = {};
+  uint32_t cached_at_slice = 0;
 };
 
 struct PlanStats {
@@ -220,7 +272,7 @@ struct EvacStats {
 
 class TargetPlan {
  public:
-  static constexpr size_t kDefaultMaxTargets = 5000;
+  static constexpr size_t kDefaultMaxTargets = 10000;
   // How many additional candidates beyond max_targets to retain as a tail for
   // reuse on subsequent phased cycles, skipping CENSUS until exhausted.
   static constexpr size_t kDefaultTailCapacity = 50000;
@@ -263,6 +315,12 @@ class TargetPlan {
   const TargetPage* Find(uintptr_t addr) const;
   TargetPage* FindMut(uintptr_t addr);
 
+  // Fast-reject pre-filter for hot per-object EVAC checks. Returns true if
+  // `addr` *might* be a target page, false if definitely not. False positives
+  // (~1% at design size) cost a follow-up flat_hash_map lookup; false
+  // negatives are impossible. Rebuilt by BuildFrom / HydrateFromTail.
+  bool BloomMaybeContains(uintptr_t addr) const;
+
   size_t size() const {
     return targets_.size();
   }
@@ -280,11 +338,29 @@ class TargetPlan {
   }
 
  private:
+  // Compact bloom over target page addresses, sized for kDefaultMaxTargets at
+  // ~1% FP rate. Power-of-two so position lookup is a mask, not a modulo.
+  // 16 KiB total — small enough to live alongside the hot plan data without
+  // adding meaningful pressure.
+  struct PlanBloom {
+    static constexpr size_t kBits = 1u << 17;  // 128 Kbit
+    static constexpr size_t kMask = kBits - 1;
+    static constexpr size_t kHashes = 4;
+    std::array<uint64_t, kBits / 64> words{};
+
+    void Insert(uintptr_t addr);
+    bool MaybeContains(uintptr_t addr) const;
+    void Clear() {
+      words.fill(0);
+    }
+  };
+
   std::vector<TargetPage> targets_;  // sorted by retention_score desc
   // Candidates ranked just below the active target cap, retained so a future
   // phased cycle can hydrate a plan without doing a fresh CENSUS.
   std::vector<TargetPage> tail_;
   absl::flat_hash_map<uintptr_t, size_t> address_to_index_;
+  PlanBloom bloom_;
   PlanStats* stats_;
   size_t pending_targets_ = 0;
 };
@@ -418,6 +494,12 @@ class Evacuator : public PageUsage {
   TargetPlan* plan_;
   float threshold_;
   EvacStats* evac_stats_;
+
+  // Unique-per-Evacuator slice tag, used by per-page revalidation cache on
+  // TargetPage. Each EvacuateStep constructs a new Evacuator, so each slice
+  // gets a fresh tag without explicit cache invalidation.
+  uint32_t slice_version_;
+  static inline uint32_t next_slice_version_ = 1;
 };
 
 struct DefragTaskState {

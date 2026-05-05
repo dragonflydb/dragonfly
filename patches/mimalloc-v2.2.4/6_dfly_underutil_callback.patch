@@ -1,0 +1,82 @@
+commit 0000000000000000000000000000000000000000
+Author: Dragonfly Defrag Hackathon <dev@dragonflydb.io>
+Date:   Tue May 5 18:00:00 2026 +0000
+
+    feat: underutilized-page callback for reactive defrag
+
+    Adds a public API mi_dfly_set_underutil_callback(cb) that fires on
+    local-thread free when a page's used count drops below a configured
+    threshold for the first time. Lets phased defrag enqueue pages
+    reactively instead of doing a full prime-table CENSUS scan to
+    discover them.
+
+--- a/include/mimalloc.h
++++ b/include/mimalloc.h
+@@ -271,6 +271,13 @@
+ 
+ mi_decl_export bool mi_heap_visit_blocks(const mi_heap_t* heap, bool visit_blocks, mi_block_visit_fun* visitor, void* arg);
+ 
++// dragonfly: callback fired on local-thread free when a page's used count
++// crosses the configured threshold downward. Lets phased defrag enqueue
++// pages reactively instead of doing a full prime-table CENSUS scan.
++typedef void (*mi_dfly_underutil_callback_t)(uintptr_t page_addr);
++mi_decl_export void mi_dfly_set_underutil_callback(mi_dfly_underutil_callback_t cb);
++mi_decl_export void mi_dfly_set_underutil_threshold_pct(uint8_t pct);
++
+ // Experimental
+ mi_decl_nodiscard mi_decl_export bool mi_is_in_heap_region(const void* p) mi_attr_noexcept;
+ mi_decl_nodiscard mi_decl_export bool mi_is_redirected(void) mi_attr_noexcept;
+--- a/src/free.c
++++ b/src/free.c
+@@ -18,6 +18,24 @@
+ static size_t mi_page_usable_size_of(const mi_page_t* page, const mi_block_t* block);
+ static void   mi_stat_free(const mi_page_t* page, const mi_block_t* block);
+ 
++// ------------------------------------------------------
++// Dragonfly: underutilized-page callback
++// Fired on local-thread free when the page's used count crosses the
++// configured threshold downward. Lets defrag enqueue pages reactively
++// instead of doing a full prime-table CENSUS scan.
++// ------------------------------------------------------
++static mi_dfly_underutil_callback_t _mi_dfly_underutil_cb = NULL;
++static uint8_t                       _mi_dfly_underutil_pct = 80;
++
++void mi_dfly_set_underutil_callback(mi_dfly_underutil_callback_t cb) {
++  _mi_dfly_underutil_cb = cb;
++}
++
++void mi_dfly_set_underutil_threshold_pct(uint8_t pct) {
++  if (pct > 100) pct = 100;
++  _mi_dfly_underutil_pct = pct;
++}
++
+ 
+ // ------------------------------------------------------
+ // Free
+@@ -44,12 +62,26 @@
+   // actual free: push on the local free list
+   mi_block_set_next(page, block, page->local_free);
+   page->local_free = block;
++  // dragonfly: capture used count before decrement so we can detect a
++  // threshold-crossing drop and notify defrag without scanning.
++  const uint16_t prev_used = page->used;
+   if mi_unlikely(--page->used == 0) {
+     _mi_page_retire(page);
+   }
+   else if mi_unlikely(check_full && mi_page_is_in_full(page)) {
+     _mi_page_unfull(page);
+   }
++  // dragonfly: fire underutilized-page callback when this free dropped
++  // used below the configured threshold for the first time. Skipped for
++  // empty pages (handled by retire) and for pages still above threshold.
++  if (mi_unlikely(_mi_dfly_underutil_cb != NULL && page->used > 0)) {
++    const uint32_t cap_thr  = (uint32_t)page->capacity * _mi_dfly_underutil_pct;
++    const uint32_t prev_x100 = (uint32_t)prev_used * 100;
++    const uint32_t cur_x100  = (uint32_t)page->used * 100;
++    if (prev_x100 > cap_thr && cur_x100 <= cap_thr) {
++      _mi_dfly_underutil_cb((uintptr_t)page);
++    }
++  }
+ }
+ 
+ // Adjust a block that was allocated aligned, to the actual start of the block in the page.

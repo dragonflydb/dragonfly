@@ -789,6 +789,14 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
   SmallString::InitThreadLocal(data_heap);
   InitTLStatelessAllocMR(shard_->memory_resource());
 
+  // Register the mimalloc underutil callback once (process-wide); each shard
+  // thread's tracker storage is thread_local, so the single callback dispatches
+  // naturally to per-shard sets. Threshold is the same value defrag uses to
+  // classify under-utilized pages.
+  defrag_underutil::InitOnce();
+  const float thr = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+  defrag_underutil::SetThresholdPct(static_cast<uint8_t>(std::clamp(thr * 100.0f, 0.0f, 100.0f)));
+
   shard_->shard_search_indices_ = std::make_unique<ShardDocIndices>();
 }
 

@@ -12,8 +12,22 @@
 #include <mimalloc/types.h>
 
 #include <algorithm>
+#include <mutex>
 
+#include "base/flags.h"
 #include "base/logging.h"
+
+ABSL_FLAG(bool, defrag_use_skip_bit, true,
+          "If true, mark target pages with mimalloc's defrag_skip bit so EVAC moves don't "
+          "refill them. Disable to A/B compare against an unmarked baseline.");
+
+ABSL_FLAG(double, defrag_skip_percentile, 1.0,
+          "Fraction of the target plan (sorted by retention_score, most-fragmented first) "
+          "to apply the mimalloc defrag_skip bit to. 1.0 marks every target (default). "
+          "Lower values shrink the lockout footprint: only the most-fragmented top-K pages "
+          "are protected from refill, while higher-utilization targets stay refillable. "
+          "Trades reclaim completeness on those pages against transient memory bulge during "
+          "EVACUATE.");
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -22,6 +36,12 @@ mi_page_usage_stats_t mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, fl
 // Dragonfly mimalloc patch: tell mi_malloc to skip a page during defrag so
 // EVACUATE moves don't refill pages we're trying to drain.
 void mi_page_set_defrag_skip(uintptr_t page_addr, bool skip);
+
+// Dragonfly mimalloc patch: per-process callback fired by mi_free_block_local
+// when a page's used count crosses below the configured underutil threshold.
+typedef void (*mi_dfly_underutil_callback_t)(uintptr_t page_addr);
+void mi_dfly_set_underutil_callback(mi_dfly_underutil_callback_t cb);
+void mi_dfly_set_underutil_threshold_pct(uint8_t pct);
 }
 
 namespace dfly {
@@ -102,7 +122,66 @@ std::string FormatMiB(uint64_t bytes) {
   return absl::StrFormat("%.2fMiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
 }
 
+// Wrapper around mimalloc's defrag_skip setter. Gated by a runtime flag so
+// experiments can disable the skip-bit logic and observe whether refills on
+// drained pages re-emerge.
+void SetDefragSkipIfEnabled(uintptr_t page_addr, bool skip) {
+  if (absl::GetFlag(FLAGS_defrag_use_skip_bit)) {
+    mi_page_set_defrag_skip(page_addr, skip);
+  }
+}
+
 }  // namespace
+
+namespace defrag_underutil {
+
+namespace {
+
+// Per-thread set of mimalloc page addresses that have been signalled as having
+// dropped below the defrag threshold. Populated by the mimalloc free path via
+// `OnPageUnderutil` and consumed by the defrag CENSUS phase.
+thread_local absl::flat_hash_set<uintptr_t> tl_underutil_pages;
+
+void OnPageUnderutil(uintptr_t page_addr) {
+  // Idempotent: re-adding an already-tracked page is a no-op.
+  const auto [_, inserted] = tl_underutil_pages.insert(page_addr);
+  if (inserted) {
+    LOG_FIRST_N(INFO, 5) << "defrag[underutil_cb] first hits, set_size_now="
+                         << tl_underutil_pages.size() << " page=0x" << std::hex << page_addr;
+  }
+}
+
+}  // namespace
+
+void InitOnce() {
+  static std::once_flag once;
+  std::call_once(once, []() {
+    mi_dfly_set_underutil_callback(&OnPageUnderutil);
+    LOG(INFO) << "defrag[underutil_cb] registered with mimalloc";
+  });
+}
+
+void SetThresholdPct(uint8_t pct) {
+  mi_dfly_set_underutil_threshold_pct(pct);
+}
+
+size_t Size() {
+  return tl_underutil_pages.size();
+}
+
+std::vector<uintptr_t> Snapshot() {
+  return std::vector(tl_underutil_pages.begin(), tl_underutil_pages.end());
+}
+
+void Remove(uintptr_t page_addr) {
+  tl_underutil_pages.erase(page_addr);
+}
+
+void Clear() {
+  tl_underutil_pages.clear();
+}
+
+}  // namespace defrag_underutil
 
 void DefragTaskState::UpdateScanState(uint64_t cursor_val) {
   cursor = cursor_val;
@@ -358,6 +437,40 @@ std::string DefragMergedReport::ToString() const {
   return out;
 }
 
+// Build a usage-stat struct directly from a page address, validating that the
+// page still belongs to `heap`, isn't empty, isn't full, and is still below
+// threshold. Returns true on success; on false the caller should drop the
+// address from the underutil set (page recovered, was reclaimed, or never was
+// ours). Threshold is fractional in [0, 1] matching the dragonfly setting.
+static bool BuildPageStatFromAddress(uintptr_t page_addr, mi_heap_t* heap, float threshold,
+                                     mi_page_usage_stats_t* out) {
+  if (page_addr == 0)
+    return false;
+  mi_page_t* page = reinterpret_cast<mi_page_t*>(page_addr);
+
+  if (mi_page_heap(page) != heap)
+    return false;
+
+  const uint16_t used = page->used;
+  const uint16_t cap = page->capacity;
+  if (used == 0 || cap == 0)
+    return false;
+  if (used >= cap)
+    return false;  // full; mimalloc may have re-filled it
+
+  const float used_ratio = static_cast<float>(used) / static_cast<float>(cap);
+  if (used_ratio > threshold)
+    return false;  // recovered above threshold
+
+  out->page_address = page_addr;
+  out->block_size = mi_page_block_size(page);
+  out->capacity = cap;
+  out->reserved = page->reserved;
+  out->used = used;
+  out->flags = MI_DFLY_PAGE_BELOW_THRESHOLD;
+  return true;
+}
+
 PageCensus::PageCensus(CensusStats* stats, size_t max_retained_pages,
                        uint64_t per_block_move_cost_bytes)
     : stats_(stats),
@@ -431,6 +544,38 @@ void PageCensus::Observe(const mi_page_usage_stats_t& stat, uint64_t bucket_curs
   }
 }
 
+void PageCensus::ObservePage(const mi_page_usage_stats_t& stat) {
+  ++stats_->allocations_seen;
+
+  if ((stat.flags & MI_DFLY_PAGE_BELOW_THRESHOLD) == 0) {
+    ++stats_->skipped_above_threshold;
+    return;
+  }
+
+  const float new_score = ComputeRetentionScore(
+      stat.capacity, stat.used, static_cast<uint32_t>(stat.block_size), per_block_move_cost_bytes_);
+
+  PageAgg& agg = pages_[stat.page_address];
+  agg.page_address = stat.page_address;
+  agg.block_size = static_cast<uint32_t>(stat.block_size);
+  agg.capacity_blocks = stat.capacity;
+  agg.used_blocks = stat.used;
+  agg.flags = stat.flags;
+  // No per-object visibility on this path; assume every used block is movable.
+  // EVAC's per-page revalidation drops pages whose blocks turn out immovable.
+  agg.observed_movable_blocks = stat.used;
+  agg.generation = 1;
+  agg.retention_score = new_score;
+
+  worst_retained_.push({stat.page_address, new_score, agg.generation});
+  ++stats_->allocations_recorded;
+
+  if (worst_retained_.size() > 2 * max_retained_pages_) {
+    RebuildHeap();
+    ++stats_->heap_rebuilds;
+  }
+}
+
 void PageCensus::RebuildHeap() {
   std::vector<HeapEntry> entries;
   entries.reserve(pages_.size());
@@ -448,7 +593,7 @@ TargetPlan::~TargetPlan() {
   // becomes eligible for new allocations again. Tail entries are not marked
   // (only active plan entries are), so they need no clear.
   for (const TargetPage& tp : targets_) {
-    mi_page_set_defrag_skip(tp.page_address, false);
+    SetDefragSkipIfEnabled(tp.page_address, false);
   }
 }
 
@@ -519,11 +664,13 @@ void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets, uint32_
 
   targets_ = std::move(candidates);
   address_to_index_.reserve(targets_.size());
+  bloom_.Clear();
   for (size_t i = 0; i < targets_.size(); ++i) {
     address_to_index_[targets_[i].page_address] = i;
+    bloom_.Insert(targets_[i].page_address);
     // Tell mimalloc to skip this page in alloc paths; EVACUATE moves should
     // not refill pages we are about to drain.
-    mi_page_set_defrag_skip(targets_[i].page_address, true);
+    SetDefragSkipIfEnabled(targets_[i].page_address, true);
   }
   stats_->targets_kept = targets_.size();
   pending_targets_ = targets_.size();
@@ -544,6 +691,7 @@ void TargetPlan::HydrateFromTail(std::vector<TargetPage> targets) {
 
   targets_ = std::move(targets);
   address_to_index_.reserve(targets_.size());
+  bloom_.Clear();
   for (size_t i = 0; i < targets_.size(); ++i) {
     // Reset mutable fields in case the caller passed cached entries that were
     // touched in a prior context (defensive — tail entries are typically clean).
@@ -553,7 +701,8 @@ void TargetPlan::HydrateFromTail(std::vector<TargetPage> targets) {
     targets_[i].revalidation_failed = false;
     targets_[i].failure_reason = RevalidationFailureReason::kNone;
     address_to_index_[targets_[i].page_address] = i;
-    mi_page_set_defrag_skip(targets_[i].page_address, true);
+    bloom_.Insert(targets_[i].page_address);
+    SetDefragSkipIfEnabled(targets_[i].page_address, true);
   }
   stats_->targets_kept = targets_.size();
   pending_targets_ = targets_.size();
@@ -568,6 +717,47 @@ void TargetPlan::HydrateFromTail(std::vector<TargetPage> targets) {
 
 bool TargetPlan::Contains(uintptr_t addr) const {
   return address_to_index_.contains(addr);
+}
+
+// Use the murmur-style finalizer to spread page-address bits, then derive
+// kHashes positions via a double-hash scheme (h1 + i*h2) — only one Mix per
+// query, the rest is cheap arithmetic.
+namespace {
+inline uint64_t BloomMix(uintptr_t x) {
+  uint64_t v = static_cast<uint64_t>(x);
+  v ^= v >> 33;
+  v *= 0xff51afd7ed558ccdULL;
+  v ^= v >> 33;
+  v *= 0xc4ceb9fe1a85ec53ULL;
+  v ^= v >> 33;
+  return v;
+}
+}  // namespace
+
+void TargetPlan::PlanBloom::Insert(uintptr_t addr) {
+  const uint64_t h = BloomMix(addr);
+  const uint64_t h1 = h;
+  const uint64_t h2 = (h >> 32) | 1;  // odd -> coprime with power-of-two size
+  for (size_t i = 0; i < kHashes; ++i) {
+    const size_t bit = (h1 + i * h2) & kMask;
+    words[bit >> 6] |= (1ULL << (bit & 63));
+  }
+}
+
+bool TargetPlan::PlanBloom::MaybeContains(uintptr_t addr) const {
+  const uint64_t h = BloomMix(addr);
+  const uint64_t h1 = h;
+  const uint64_t h2 = (h >> 32) | 1;
+  for (size_t i = 0; i < kHashes; ++i) {
+    const size_t bit = (h1 + i * h2) & kMask;
+    if ((words[bit >> 6] & (1ULL << (bit & 63))) == 0)
+      return false;
+  }
+  return true;
+}
+
+bool TargetPlan::BloomMaybeContains(uintptr_t addr) const {
+  return bloom_.MaybeContains(addr);
 }
 
 const TargetPage* TargetPlan::Find(uintptr_t addr) const {
@@ -645,26 +835,26 @@ EvacOutcome EvacDecide(TargetPlan& plan, TargetPage* target, const mi_page_usage
   // flag is attributed; targets_revalidation_* sums to targets_abandoned_revalidation.
   if (stat.flags & MI_DFLY_HEAP_MISMATCH) {
     RecordFirstFailure(target, stats, RevalidationFailureReason::kHeapMismatch, stat.block_size);
-    mi_page_set_defrag_skip(target->page_address, false);
+    SetDefragSkipIfEnabled(target->page_address, false);
     plan.NotifyTargetDone();
     return EvacOutcome::kRevalidationFailed;
   }
   if (stat.flags & MI_DFLY_PAGE_USED_FOR_MALLOC) {
     RecordFirstFailure(target, stats, RevalidationFailureReason::kActiveMallocPage,
                        stat.block_size);
-    mi_page_set_defrag_skip(target->page_address, false);
+    SetDefragSkipIfEnabled(target->page_address, false);
     plan.NotifyTargetDone();
     return EvacOutcome::kRevalidationFailed;
   }
   if (stat.flags & MI_DFLY_PAGE_FULL) {
     RecordFirstFailure(target, stats, RevalidationFailureReason::kFullPage, stat.block_size);
-    mi_page_set_defrag_skip(target->page_address, false);
+    SetDefragSkipIfEnabled(target->page_address, false);
     plan.NotifyTargetDone();
     return EvacOutcome::kRevalidationFailed;
   }
   if ((stat.flags & MI_DFLY_PAGE_BELOW_THRESHOLD) == 0) {
     RecordFirstFailure(target, stats, RevalidationFailureReason::kAboveThreshold, stat.block_size);
-    mi_page_set_defrag_skip(target->page_address, false);
+    SetDefragSkipIfEnabled(target->page_address, false);
     plan.NotifyTargetDone();
     return EvacOutcome::kRevalidationFailed;
   }
@@ -680,7 +870,7 @@ EvacOutcome EvacDecide(TargetPlan& plan, TargetPage* target, const mi_page_usage
     // First-time completion: drop the skip bit so the now-drained page can be
     // reused by mi_malloc immediately if needed (no need to wait for plan
     // teardown).
-    mi_page_set_defrag_skip(target->page_address, false);
+    SetDefragSkipIfEnabled(target->page_address, false);
     plan.NotifyTargetDone();
     ++stats.targets_completed_during_evac;
   }
@@ -753,33 +943,50 @@ Evacuator::Evacuator(TargetPlan* plan, float threshold, EvacStats* evac_stats, C
     : PageUsage(CollectPageStats::NO, threshold, quota),
       plan_(plan),
       threshold_(threshold),
-      evac_stats_(evac_stats) {
+      evac_stats_(evac_stats),
+      slice_version_(next_slice_version_++) {
 }
 
 bool Evacuator::IsPageForObjectUnderUtilized(void* object) {
   // Fast precheck folds the not-a-target lookup with the lookup EvacDecide
   // would otherwise repeat. One FindMut per object instead of two.
   const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
-  TargetPage* target = plan_->FindMut(addr);
-  if (target == nullptr) {
+  // Bloom-rejects ~99% of non-target pages without paying the hash lookup.
+  if (!plan_->BloomMaybeContains(addr)) {
     ++evac_stats_->blocks_skipped_not_target;
     return false;
   }
-  mi_page_usage_stats_t stat = mi_heap_page_is_underutilized(
-      static_cast<mi_heap_t*>(zmalloc_heap), object, threshold_, /*collect_stats=*/true);
-  return EvacDecide(*plan_, target, stat, *evac_stats_) == EvacOutcome::kCommitMove;
+  TargetPage* target = plan_->FindMut(addr);
+  if (target == nullptr) {
+    // Bloom false positive — confirmed not in plan.
+    ++evac_stats_->blocks_skipped_not_target;
+    return false;
+  }
+  if (target->cached_at_slice != slice_version_) {
+    target->cached_stat = mi_heap_page_is_underutilized(static_cast<mi_heap_t*>(zmalloc_heap),
+                                                        object, threshold_, /*collect_stats=*/true);
+    target->cached_at_slice = slice_version_;
+  }
+  return EvacDecide(*plan_, target, target->cached_stat, *evac_stats_) == EvacOutcome::kCommitMove;
 }
 
 bool Evacuator::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
+  if (!plan_->BloomMaybeContains(addr)) {
+    ++evac_stats_->blocks_skipped_not_target;
+    return false;
+  }
   TargetPage* target = plan_->FindMut(addr);
   if (target == nullptr) {
     ++evac_stats_->blocks_skipped_not_target;
     return false;
   }
-  mi_page_usage_stats_t stat =
-      mi_heap_page_is_underutilized(heap, object, threshold_, /*collect_stats=*/true);
-  return EvacDecide(*plan_, target, stat, *evac_stats_) == EvacOutcome::kCommitMove;
+  if (target->cached_at_slice != slice_version_) {
+    target->cached_stat =
+        mi_heap_page_is_underutilized(heap, object, threshold_, /*collect_stats=*/true);
+    target->cached_at_slice = slice_version_;
+  }
+  return EvacDecide(*plan_, target, target->cached_stat, *evac_stats_) == EvacOutcome::kCommitMove;
 }
 
 void DefragIdleStep(DefragTaskState* state, float threshold) {
@@ -824,6 +1031,54 @@ void DefragIdleStep(DefragTaskState* state, float threshold) {
 void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,
                       const DbSliceWalker& walk) {
   const uint64_t step_start_ns = NowNs();
+
+  // Reactive fast path: if mimalloc has flagged any pages via the underutil
+  // callback, hydrate the census from that set and skip the dashtable walk.
+  // Falls back to the legacy walk if the set is empty (bootstrap, or workload
+  // with no recent threshold-crossing frees).
+  const size_t underutil_set_size = defrag_underutil::Size();
+  LOG_FIRST_N(INFO, 8) << absl::StrFormat("defrag[CENSUS_ENTRY] shard=%u cycle=%llu set_size=%zu",
+                                          state->shard_id, state->cycle_id, underutil_set_size);
+  if (underutil_set_size > 0) {
+    auto* heap = static_cast<mi_heap_t*>(zmalloc_heap);
+    const std::vector<uintptr_t> snapshot = defrag_underutil::Snapshot();
+    size_t recovered = 0;
+    for (uintptr_t addr : snapshot) {
+      mi_page_usage_stats_t stat;
+      if (!BuildPageStatFromAddress(addr, heap, threshold, &stat)) {
+        defrag_underutil::Remove(addr);
+        ++recovered;
+        continue;
+      }
+      state->census->ObservePage(stat);
+    }
+
+    state->cycle_stats.census_retained_pages = state->census->pages().size();
+    for (const auto& agg : state->census->pages() | std::views::values) {
+      state->cycle_stats.census_potential_reclaim_bytes +=
+          uint64_t(agg.capacity_blocks - agg.used_blocks) * agg.block_size;
+      state->cycle_stats.census_movable_bytes_observed +=
+          uint64_t(agg.observed_movable_blocks) * agg.block_size;
+    }
+
+    const uint64_t now = NowNs();
+    state->phase_active_ns += now - step_start_ns;
+    DEFRAG_STEP_LOG << absl::StrFormat(
+        "defrag[CENSUS_REACTIVE] shard=%u cycle=%llu set_in=%zu retained=%zu recovered=%zu "
+        "potential_reclaim=%s movable_observed=%s took=%.1fms cpu=%.1fms",
+        state->shard_id, state->cycle_id, underutil_set_size,
+        state->cycle_stats.census_retained_pages, recovered,
+        FormatMiB(state->cycle_stats.census_potential_reclaim_bytes),
+        FormatMiB(state->cycle_stats.census_movable_bytes_observed),
+        NsToMs(now - state->phase_start_ns), NsToMs(state->phase_active_ns));
+
+    state->phase_start_ns = now;
+    state->phase_active_ns = 0;
+    state->phase = DefragPhase::SELECT_TARGETS;
+    return;
+  }
+
+  // Fallback: full dashtable walk.
   CensusTaker visitor(&*state->census, threshold, quota, state->census_sample_rate);
   const DbSliceResult result = walk(&visitor, /*hints=*/nullptr, /*hint_cursor=*/nullptr);
   state->cycle_stats.census_db_objects_scanned += result.attempts;
