@@ -45,9 +45,12 @@ from typing import Literal, Optional
 
 try:
     import anthropic
-    from pydantic import BaseModel, Field
-except ImportError:  # allow --dry-run without the SDK installed
+except ImportError:
     anthropic = None  # type: ignore[assignment]
+
+try:
+    from pydantic import BaseModel, Field
+except ImportError:  # allow --dry-run without pydantic installed
     BaseModel = object  # type: ignore[assignment,misc]
 
     def Field(*args, **kwargs):  # type: ignore[no-redef]
@@ -369,10 +372,13 @@ def _parse_commit_analysis_json(text: str) -> CommitAnalysis:
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
+    start = text.find("{")
+    if start == -1:
         raise ValueError(f"No JSON object found in LLM response: {text[:300]}")
-    data = json.loads(match.group())
+    try:
+        data, _ = json.JSONDecoder().raw_decode(text, start)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse JSON from LLM response: {exc}\nText: {text[:300]}")
     return CommitAnalysis(
         category=data["category"],
         user_facing=bool(data["user_facing"]),
@@ -771,7 +777,9 @@ def _make_cache_key(backend: LLMBackend, sha: str) -> str:
         backend.analyze_system_prompt,
         sha,
     ):
-        h.update(part.encode())
+        encoded = part.encode()
+        h.update(len(encoded).to_bytes(4, "little"))
+        h.update(encoded)
     return h.hexdigest()
 
 
@@ -1027,6 +1035,15 @@ async def _analyze_round(
                         abort_event.set()
 
     await asyncio.gather(*[analyze_one(c) for c in commits])
+
+    # Any commit not in succeeded or failed was silently skipped due to abort.
+    # Add them to failed so the caller can retry them in the next round.
+    if abort_event.is_set():
+        processed = {a.commit.sha for a in succeeded} | {c.sha for c, _ in failed}
+        for commit in commits:
+            if commit.sha not in processed:
+                failed.append((commit, RuntimeError("skipped due to fatal backend error")))
+
     return succeeded, failed
 
 
