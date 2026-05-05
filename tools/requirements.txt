@@ -9,3 +9,5 @@ aiocsv==1.2.3
 aiofiles==22.1.0
 numpy==2.1.3
 anthropic>=0.40.0,<1.0
+# Optional: install for --backend copilot support
+# github-copilot-sdk
