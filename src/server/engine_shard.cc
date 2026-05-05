@@ -807,7 +807,8 @@ void EngineShard::Heartbeat() {
     }
   }
 
-  if (!IsReplica()) {  // Never run expiry/evictions on replica.
+  // Replicas skip the periodic sweep by default; --replica_mode=mutable opts in.
+  if (!IsReplica() || IsReplicaMutable()) {
     RetireExpiredAndEvict();
   }
 
@@ -847,7 +848,10 @@ void EngineShard::RetireExpiredAndEvict() {
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
   size_t deleted_bytes = 0;
-  size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
+  // Cache-mode eviction is master-only: FreeMemWithEvictionStepAtomic asserts !IsReplica().
+  // A mutable replica still runs the TTL sweep above but stays out of memory-pressure eviction.
+  size_t eviction_goal =
+      (!IsReplica() && GetFlag(FLAGS_enable_heartbeat_eviction)) ? CalculateEvictionBytes() : 0;
 
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
     if (!db_slice.IsDbValid(i))

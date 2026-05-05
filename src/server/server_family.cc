@@ -3502,7 +3502,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       if (rinfo.full_sync_done || (rinfo.passed_full_sync && !rinfo.master_link_established))
         append("slave_repl_offset", rinfo.repl_offset_sum);
       append("slave_priority", GetFlag(FLAGS_replica_priority));
-      append("slave_read_only", 1);
+      append("slave_read_only", IsReplicaMutable() ? 0 : 1);
       append("psync_attempts", rinfo.psync_attempts);
       append("psync_successes", rinfo.psync_successes);
     };

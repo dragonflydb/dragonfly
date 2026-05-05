@@ -1315,7 +1315,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
   bool under_script = dfly_cntx.conn_state.script_info != nullptr;
   bool multi_active = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
-  if (!etl.is_master && is_write_cmd && !dfly_cntx.is_replicating)
+  if (!etl.is_master && is_write_cmd && !dfly_cntx.is_replicating && !IsReplicaMutable())
     return ErrorReply{"-READONLY You can't write against a read only replica."};
 
   if (multi_active) {

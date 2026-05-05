@@ -1282,10 +1282,12 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) con
 
   int64_t expire_time = it->first.GetExpireTime();
 
-  // Never do expiration if expiration is disabled, or on replicas unless replica_delete_expired
-  // is enabled (which allows replicas to proactively delete expired keys on the read path).
+  // Never do expiration if expiration is disabled, or on replicas unless either
+  // replica_delete_expired is enabled (proactive read-path deletion) or the replica is in
+  // --replica_mode=mutable (acts as its own master for expiration purposes).
   if (int64_t(cntx.time_now_ms) < expire_time || !expire_allowed_ ||
-      (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))) {
+      (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired) &&
+       !IsReplicaMutable())) {
     return it;
   }
 

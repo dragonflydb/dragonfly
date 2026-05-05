@@ -332,4 +332,11 @@ class ServerState {  // public struct - to allow initialization.
   static __thread ServerState* state_;
 };
 
+// Selects writability of a replica. `kMutable` lifts the -READONLY guard on
+// client writes and re-enables the periodic expiration sweep on this replica.
+enum class ReplicaMode : uint8_t { kReadonly, kMutable };
+
+// Returns true when --replica_mode=mutable.
+bool IsReplicaMutable();
+
 }  // namespace dfly

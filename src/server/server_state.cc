@@ -42,10 +42,41 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
 ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
           "Max number of commands squashed in a single shard during squash optimizaiton");
 
+ABSL_FLAG(dfly::ReplicaMode, replica_mode, dfly::ReplicaMode::kReadonly,
+          "Replica writability mode. 'readonly' (default) rejects client writes on a replica with "
+          "READONLY. 'mutable' accepts client writes — used together with REPLICAOF NO_FULL_SYNC "
+          "for active replication topologies (last-writer-wins, eventual consistency).");
+
 namespace dfly {
 
 using namespace std;
 using namespace std::chrono_literals;
+
+bool AbslParseFlag(std::string_view in, ReplicaMode* mode, std::string* err) {
+  if (in == "readonly") {
+    *mode = ReplicaMode::kReadonly;
+    return true;
+  }
+  if (in == "mutable") {
+    *mode = ReplicaMode::kMutable;
+    return true;
+  }
+  *err = absl::StrCat("Unknown value '", in,
+                      "' for replica_mode flag (expected 'readonly' or "
+                      "'mutable')");
+  return false;
+}
+
+std::string AbslUnparseFlag(ReplicaMode mode) {
+  switch (mode) {
+    case ReplicaMode::kReadonly:
+      return "readonly";
+    case ReplicaMode::kMutable:
+      return "mutable";
+  }
+  DCHECK(false) << "Unknown replica_mode flag value " << int(mode);
+  return "readonly";
+}
 
 __thread ServerState* ServerState::state_ = nullptr;
 
@@ -354,4 +385,9 @@ void ServerState::RecordCmd(bool is_main_conn) {
   }
   qps_.Inc();
 }
+
+bool IsReplicaMutable() {
+  return absl::GetFlag(FLAGS_replica_mode) == ReplicaMode::kMutable;
+}
+
 }  // end of namespace dfly

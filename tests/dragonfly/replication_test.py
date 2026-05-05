@@ -5013,3 +5013,81 @@ async def test_chain_failover_repoint_r2_takes_r1_place(df_factory: DflyInstance
 
     assert info_r3["role"] in ("replica", "slave")
     assert int(info_r3["master_port"]) == r2.port
+
+
+# --- replica_mode flag (mutable replica) ---
+#
+# `--replica_mode=mutable` lifts three guards:
+#   1) -READONLY rejection of client writes  (main_service.cc)
+#   2) lazy expiration on read path skip      (db_slice.cc)
+#   3) periodic background expiry/eviction    (engine_shard.cc)
+#
+# In the default (`readonly`) mode all three guards remain in place.
+
+
+async def test_replica_mode_default_rejects_writes(df_factory: DflyInstanceFactory):
+    """Regression: default replica must reject client writes with -READONLY."""
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
+
+    c_master, c_replica = master.client(), replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    with pytest.raises(redis.exceptions.ResponseError) as exc:
+        await c_replica.execute_command("SET local-key 1")
+    assert "READONLY" in str(exc.value).upper() or "read only" in str(exc.value).lower()
+
+
+async def test_replica_mode_mutable_allows_client_writes(df_factory: DflyInstanceFactory):
+    """`--replica_mode=mutable` allows direct client writes on a replica."""
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2, replica_mode="mutable")
+    df_factory.start_all([master, replica])
+
+    c_master, c_replica = master.client(), replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # Direct client write on the replica must succeed.
+    assert await c_replica.execute_command("SET local-key v") == "OK"
+    assert await c_replica.get("local-key") == "v"
+
+    # Master continues to drive replication and is unaffected by the local write.
+    await c_master.execute_command("SET m-key from-master")
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.get("m-key") == "from-master"
+
+
+async def test_replica_mode_mutable_background_expiration(df_factory: DflyInstanceFactory):
+    """On a mutable replica the background sweep must delete expired keys.
+
+    We probe `total_heartbeat_expired_keys` (incremented only by the periodic
+    sweep, not by the lazy read-path expiration) to prove the sweep ran.
+    """
+    master = df_factory.create(proactor_threads=2)
+    # hz left at default so the periodic sweep fires every ~10ms.
+    replica = df_factory.create(proactor_threads=2, replica_mode="mutable")
+    df_factory.start_all([master, replica])
+
+    c_master, c_replica = master.client(), replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    before = (await c_replica.info("stats")).get("total_heartbeat_expired_keys", 0)
+
+    # Local write with a short TTL — never seen by the master.
+    await c_replica.execute_command("SET local-exp v PX 200")
+
+    @assert_eventually(timeout=5)
+    async def sweep_retired_key():
+        after = (await c_replica.info("stats")).get("total_heartbeat_expired_keys", 0)
+        assert after > before, (
+            f"background sweep did not run on mutable replica: "
+            f"total_heartbeat_expired_keys before={before} after={after}"
+        )
+        assert await c_replica.get("local-exp") is None
+        assert await c_replica.execute_command("TTL", "local-exp") == -2
+
+    await sweep_retired_key()
