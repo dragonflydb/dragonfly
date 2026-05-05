@@ -226,6 +226,15 @@ class TargetPlan {
   static constexpr size_t kDefaultTailCapacity = 50000;
 
   explicit TargetPlan(PlanStats* stats);
+  ~TargetPlan();
+
+  // Non-copyable, non-movable: destructor clears mimalloc defrag_skip bits on
+  // active targets, so move-from would double-clear (harmless) but copies
+  // would set bits this object doesn't own.
+  TargetPlan(const TargetPlan&) = delete;
+  TargetPlan& operator=(const TargetPlan&) = delete;
+  TargetPlan(TargetPlan&&) = delete;
+  TargetPlan& operator=(TargetPlan&&) = delete;
 
   void BuildFrom(const PageCensus& census, size_t max_targets = kDefaultMaxTargets,
                  uint32_t sample_rate = 1, size_t tail_capacity = kDefaultTailCapacity);

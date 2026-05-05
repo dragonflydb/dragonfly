@@ -1,0 +1,108 @@
+commit 0000000000000000000000000000000000000000
+Author: Dragonfly Defrag Hackathon <dev@dragonflydb.io>
+Date:   Tue May 5 17:30:00 2026 +0000
+
+    feat: skip defrag-targeted pages in mi_malloc
+
+    Adds a defrag_skip byte to mi_page_t and a public API
+    mi_page_set_defrag_skip(page_addr, skip). When set, mi_malloc skips
+    the page in the small-size fast path, the queue-head fast path, and
+    mi_page_queue_find_free_ex. Prevents new allocations from landing
+    on a page that phased defrag is trying to drain.
+
+--- a/include/mimalloc/internal.h
++++ b/include/mimalloc/internal.h
+@@ -516,7 +516,14 @@
+   mi_assert_internal(size <= (MI_SMALL_SIZE_MAX + MI_PADDING_SIZE));
+   const size_t idx = _mi_wsize_from_size(size);
+   mi_assert_internal(idx < MI_PAGES_DIRECT);
+-  return heap->pages_free_direct[idx];
++  mi_page_t* page = heap->pages_free_direct[idx];
++  // dragonfly: when the cached small-page is a defrag target, force the
++  // generic slow path so the allocation goes through `mi_find_free_page` ->
++  // `mi_page_queue_find_free_ex` which skips defrag-targeted pages.
++  if (mi_unlikely(page->defrag_skip)) {
++    return (mi_page_t*) &_mi_page_empty;
++  }
++  return page;
+ }
+ 
+ // Segment that contains the pointer
+--- a/include/mimalloc/types.h
++++ b/include/mimalloc/types.h
+@@ -337,6 +337,7 @@
+   uint16_t              used;              // number of blocks in use (including blocks in `thread_free`)
+   uint8_t               block_size_shift;  // if not zero, then `(1 << block_size_shift) == block_size` (only used for fast path in `free.c:_mi_page_ptr_unalign`)
+   uint8_t               heap_tag;          // tag of the owning heap, used to separate heaps by object type
++  uint8_t               defrag_skip;       // dragonfly: when nonzero, alloc paths skip this page (it is being drained by defrag)
+                                            // padding
+   size_t                block_size;        // size available in each block (always `>0`)
+   uint8_t*              page_start;        // start of the page area containing the blocks
+--- a/src/init.c
++++ b/src/init.c
+@@ -26,6 +26,7 @@
+   0,       // used
+   0,       // block size shift
+   0,       // heap tag
++  0,       // defrag_skip (dragonfly)
+   0,       // block_size
+   NULL,    // page_start
+   #if (MI_PADDING || MI_ENCODE_FREELIST)
+--- a/src/page.c
++++ b/src/page.c
+@@ -697,6 +697,7 @@
+   page->keys[1] = _mi_heap_random_next(heap);
+   #endif
+   page->free_is_zero = page->is_zero_init;
++  page->defrag_skip = 0;  // dragonfly: fresh page is not a defrag target
+   #if MI_DEBUG>2
+   if (page->is_zero_init) {
+     mi_track_mem_defined(page->page_start, page_size);
+@@ -763,6 +764,14 @@
+   while (page != NULL)
+   {
+     mi_page_t* next = page->next; // remember next
++
++    // dragonfly: pages tagged by defrag are being drained; skip them so new
++    // allocations don't refill targets while EVACUATE moves entries off.
++    if (page->defrag_skip) {
++      page = next;
++      continue;
++    }
++
+     #if MI_STAT
+     count++;
+     #endif
+@@ -860,6 +869,12 @@
+ 
+   // check the first page: we even do this with candidate search or otherwise we re-search every time
+   mi_page_t* page = pq->first;
++  // dragonfly: skip the queue-head fast path when it points at a defrag
++  // target so the search falls through to mi_page_queue_find_free_ex which
++  // walks past target pages.
++  if (page != NULL && page->defrag_skip) {
++    page = NULL;
++  }
+   if (page != NULL) {
+    #if (MI_SECURE>=3) // in secure mode, we extend half the time to increase randomness
+     if (page->capacity < page->reserved && ((_mi_heap_random_next(heap) & 1) == 1)) {
+--- a/src/alloc.c
++++ b/src/alloc.c
+@@ -711,6 +711,17 @@
+   return result;
+ }
+ 
++// dragonfly: mark a page so that mi_malloc skips it when picking a page to
++// allocate from. Used by phased defrag to prevent EVACUATE moves from
++// refilling target pages that we are trying to drain. `page_addr` must be
++// a value previously returned in mi_page_usage_stats_t::page_address (i.e.
++// a `(uintptr_t)mi_page_t*`).
++void mi_page_set_defrag_skip(uintptr_t page_addr, bool skip) mi_attr_noexcept {
++  if (page_addr == 0) return;
++  mi_page_t* page = (mi_page_t*) page_addr;
++  page->defrag_skip = (skip ? 1 : 0);
++}
++
+ // ------------------------------------------------------
+ // ensure explicit external inline definitions are emitted!
+ // ------------------------------------------------------

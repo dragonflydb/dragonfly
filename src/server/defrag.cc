@@ -19,6 +19,9 @@ extern "C" {
 #include "redis/zmalloc.h"
 mi_page_usage_stats_t mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio,
                                                     bool collect_stats);
+// Dragonfly mimalloc patch: tell mi_malloc to skip a page during defrag so
+// EVACUATE moves don't refill pages we're trying to drain.
+void mi_page_set_defrag_skip(uintptr_t page_addr, bool skip);
 }
 
 namespace dfly {
@@ -440,6 +443,15 @@ void PageCensus::RebuildHeap() {
 TargetPlan::TargetPlan(PlanStats* stats) : stats_(stats) {
 }
 
+TargetPlan::~TargetPlan() {
+  // Clear the mimalloc defrag_skip bit on every active target so the page
+  // becomes eligible for new allocations again. Tail entries are not marked
+  // (only active plan entries are), so they need no clear.
+  for (const TargetPage& tp : targets_) {
+    mi_page_set_defrag_skip(tp.page_address, false);
+  }
+}
+
 void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets, uint32_t sample_rate,
                            size_t tail_capacity) {
   targets_.clear();
@@ -507,8 +519,12 @@ void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets, uint32_
 
   targets_ = std::move(candidates);
   address_to_index_.reserve(targets_.size());
-  for (size_t i = 0; i < targets_.size(); ++i)
+  for (size_t i = 0; i < targets_.size(); ++i) {
     address_to_index_[targets_[i].page_address] = i;
+    // Tell mimalloc to skip this page in alloc paths; EVACUATE moves should
+    // not refill pages we are about to drain.
+    mi_page_set_defrag_skip(targets_[i].page_address, true);
+  }
   stats_->targets_kept = targets_.size();
   pending_targets_ = targets_.size();
 
@@ -537,6 +553,7 @@ void TargetPlan::HydrateFromTail(std::vector<TargetPage> targets) {
     targets_[i].revalidation_failed = false;
     targets_[i].failure_reason = RevalidationFailureReason::kNone;
     address_to_index_[targets_[i].page_address] = i;
+    mi_page_set_defrag_skip(targets_[i].page_address, true);
   }
   stats_->targets_kept = targets_.size();
   pending_targets_ = targets_.size();
@@ -628,22 +645,26 @@ EvacOutcome EvacDecide(TargetPlan& plan, TargetPage* target, const mi_page_usage
   // flag is attributed; targets_revalidation_* sums to targets_abandoned_revalidation.
   if (stat.flags & MI_DFLY_HEAP_MISMATCH) {
     RecordFirstFailure(target, stats, RevalidationFailureReason::kHeapMismatch, stat.block_size);
+    mi_page_set_defrag_skip(target->page_address, false);
     plan.NotifyTargetDone();
     return EvacOutcome::kRevalidationFailed;
   }
   if (stat.flags & MI_DFLY_PAGE_USED_FOR_MALLOC) {
     RecordFirstFailure(target, stats, RevalidationFailureReason::kActiveMallocPage,
                        stat.block_size);
+    mi_page_set_defrag_skip(target->page_address, false);
     plan.NotifyTargetDone();
     return EvacOutcome::kRevalidationFailed;
   }
   if (stat.flags & MI_DFLY_PAGE_FULL) {
     RecordFirstFailure(target, stats, RevalidationFailureReason::kFullPage, stat.block_size);
+    mi_page_set_defrag_skip(target->page_address, false);
     plan.NotifyTargetDone();
     return EvacOutcome::kRevalidationFailed;
   }
   if ((stat.flags & MI_DFLY_PAGE_BELOW_THRESHOLD) == 0) {
     RecordFirstFailure(target, stats, RevalidationFailureReason::kAboveThreshold, stat.block_size);
+    mi_page_set_defrag_skip(target->page_address, false);
     plan.NotifyTargetDone();
     return EvacOutcome::kRevalidationFailed;
   }
@@ -656,7 +677,11 @@ EvacOutcome EvacDecide(TargetPlan& plan, TargetPage* target, const mi_page_usage
   ++stats.blocks_move_committed;
   stats.bytes_move_committed += stat.block_size;
   if (target->blocks_evacuated == target->blocks_at_census) {
-    plan.NotifyTargetDone();  // first-time completion of this target
+    // First-time completion: drop the skip bit so the now-drained page can be
+    // reused by mi_malloc immediately if needed (no need to wait for plan
+    // teardown).
+    mi_page_set_defrag_skip(target->page_address, false);
+    plan.NotifyTargetDone();
     ++stats.targets_completed_during_evac;
   }
   return EvacOutcome::kCommitMove;

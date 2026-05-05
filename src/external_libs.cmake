@@ -77,6 +77,7 @@ ExternalProject_Add(mimalloc2_project
       COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/2_return_stat.patch
       COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/3_track_full_size.patch
       COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/4_fix_heap_collect.patch
+      COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/5_skip_defrag_targets.patch
   BUILD_COMMAND make mimalloc-static
 
   INSTALL_COMMAND make install
