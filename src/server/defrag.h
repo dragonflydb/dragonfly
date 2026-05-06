@@ -99,6 +99,13 @@ class PageCensus {
  public:
   static constexpr size_t kDefaultMaxRetainedPages = 100'000;
 
+  // When false, PageCensus skips the top-k heap entirely and just inserts every
+  // observed page into pages_. Cheap (no priority_queue work per Observe), but
+  // loses the cap-and-evict-worst guard: the map hard-crashes on a new entry
+  // once it reaches max_retained_pages_. Flip to true to restore heap-based
+  // eviction so workloads exceeding the cap stay bounded.
+  static constexpr bool kEnableTopK = false;
+
   explicit PageCensus(CensusStats* stats, size_t max_retained_pages = kDefaultMaxRetainedPages,
                       uint64_t per_block_move_cost_bytes = 256);
 
@@ -202,15 +209,6 @@ struct TargetPage {
   // Set on the first revalidation failure; consulted on sticky-skip branches
   // to attribute subsequent block/byte skips to the originating reason.
   RevalidationFailureReason failure_reason = RevalidationFailureReason::kNone;
-
-  // Per-slice revalidation cache: `mi_heap_page_is_underutilized` is invariant
-  // within a single EVACUATE slice for a given page (`used` only decreases as
-  // we evacuate; flags don't change). Recomputing per object on the same page
-  // is wasted work — cache the stat once per slice and reuse for siblings.
-  // `cached_at_slice == 0` means no cache; Evacuator stamps a non-zero
-  // slice-unique value when populating.
-  mi_page_usage_stats_t cached_stat = {};
-  uint32_t cached_at_slice = 0;
 };
 
 struct PlanStats {
@@ -302,12 +300,6 @@ class TargetPlan {
   const TargetPage* Find(uintptr_t addr) const;
   TargetPage* FindMut(uintptr_t addr);
 
-  // Fast-reject pre-filter for hot per-object EVAC checks. Returns true if
-  // `addr` *might* be a target page, false if definitely not. False positives
-  // (~1% at design size) cost a follow-up flat_hash_map lookup; false
-  // negatives are impossible. Rebuilt by BuildFrom.
-  bool BloomMaybeContains(uintptr_t addr) const;
-
   size_t size() const {
     return targets_.size();
   }
@@ -325,27 +317,8 @@ class TargetPlan {
   }
 
  private:
-  // Compact bloom over target page addresses. Sized for ~10k entries at ~1%
-  // FP rate; with selective skip on a larger plan, FP rate scales gracefully
-  // (hot path falls back to flat_hash_map lookup on a hit). Power-of-two so
-  // position lookup is a mask, not a modulo. 16 KiB total — small enough to
-  // live alongside the hot plan data without adding meaningful pressure.
-  struct PlanBloom {
-    static constexpr size_t kBits = 1u << 17;  // 128 Kbit
-    static constexpr size_t kMask = kBits - 1;
-    static constexpr size_t kHashes = 4;
-    std::array<uint64_t, kBits / 64> words{};
-
-    void Insert(uintptr_t addr);
-    bool MaybeContains(uintptr_t addr) const;
-    void Clear() {
-      words.fill(0);
-    }
-  };
-
   std::vector<TargetPage> targets_;  // sorted by retention_score desc
   absl::flat_hash_map<uintptr_t, size_t> address_to_index_;
-  PlanBloom bloom_;
   PlanStats* stats_;
   size_t pending_targets_ = 0;
 };
@@ -471,12 +444,6 @@ class Evacuator : public PageUsage {
   TargetPlan* plan_;
   float threshold_;
   EvacStats* evac_stats_;
-
-  // Unique-per-Evacuator slice tag, used by per-page revalidation cache on
-  // TargetPage. Each EvacuateStep constructs a new Evacuator, so each slice
-  // gets a fresh tag without explicit cache invalidation.
-  uint32_t slice_version_;
-  static inline uint32_t next_slice_version_ = 1;
 };
 
 struct DefragTaskState {

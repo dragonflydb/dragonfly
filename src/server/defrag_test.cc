@@ -10,8 +10,11 @@
 
 #include <vector>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+
+ABSL_DECLARE_FLAG(bool, defrag_use_skip_bit);
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -38,6 +41,9 @@ mi_page_usage_stats_t MakeStat(uintptr_t addr, uint16_t capacity, uint16_t used,
 }  // namespace
 
 TEST(PageCensusEvictionTest, EvictsLowestScorePageWhenOverCap) {
+  if (!PageCensus::kEnableTopK) {
+    GTEST_SKIP() << "PageCensus::kEnableTopK is false; eviction path inactive";
+  }
   CensusStats cstats;
   PageCensus census(&cstats, /*max_retained_pages=*/4);
 
@@ -63,6 +69,9 @@ TEST(PageCensusEvictionTest, EvictsLowestScorePageWhenOverCap) {
 }
 
 TEST(PageCensusEvictionTest, StaleHeapEntryDoesNotEvictWrongPage) {
+  if (!PageCensus::kEnableTopK) {
+    GTEST_SKIP() << "PageCensus::kEnableTopK is false; eviction path inactive";
+  }
   CensusStats cstats;
   PageCensus census(&cstats, /*max_retained_pages=*/4);
 
@@ -95,6 +104,9 @@ TEST(PageCensusEvictionTest, StaleHeapEntryDoesNotEvictWrongPage) {
 }
 
 TEST(PageCensusEvictionTest, RebuildFiresWhenHeapDoublesCap) {
+  if (!PageCensus::kEnableTopK) {
+    GTEST_SKIP() << "PageCensus::kEnableTopK is false; heap rebuild inactive";
+  }
   CensusStats cstats;
   PageCensus census(&cstats, /*max_retained_pages=*/4);
 
@@ -119,6 +131,9 @@ TEST(PageCensusEvictionTest, RebuildFiresWhenHeapDoublesCap) {
 }
 
 TEST(PageCensusEvictionTest, RejectsNewPageWithScoreBelowWorstRetained) {
+  if (!PageCensus::kEnableTopK) {
+    GTEST_SKIP() << "PageCensus::kEnableTopK is false; reject-on-cap inactive";
+  }
   CensusStats cstats;
   PageCensus census(&cstats, /*max_retained_pages=*/4);
 
@@ -799,5 +814,246 @@ void BM_EvacDecideHit(benchmark::State& state) {
   state.SetItemsProcessed(state.iterations() * ab.pointers.size());
 }
 BENCHMARK(BM_EvacDecideHit)->Arg(kBenchObjectCount);
+
+// Same shape as BM_EvacDecideMiss but goes through the full Evacuator:
+// bloom precheck rejects every page (empty plan -> bloom is empty -> no
+// hashes computed beyond bloom). Compared against BM_EvacDecideMiss this
+// shows the bloom's contribution on the no-target hot path.
+void BM_EvacDecideMiss_Evacuator(benchmark::State& state) {
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+  PlanStats ps;
+  TargetPlan plan(&ps);
+  EvacStats es;
+  Evacuator visitor(&plan, 0.8f, &es);
+  for (auto _ : state) {
+    for (void* p : ab.pointers) {
+      benchmark::DoNotOptimize(visitor.IsPageForObjectUnderUtilized(p));
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_EvacDecideMiss_Evacuator)->Arg(kBenchObjectCount);
+
+// Same shape as BM_EvacDecideHit but goes through the full Evacuator:
+// bloom hits, FindMut hits, per-page slice cache fills on first object per
+// page and short-circuits mi_heap_page_is_underutilized for siblings.
+// Compared against BM_EvacDecideHit this shows the cache's contribution.
+void BM_EvacDecideHit_Evacuator(benchmark::State& state) {
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+
+  CensusStats cs;
+  PageCensus census(&cs);
+  for (void* p : ab.pointers) {
+    mi_page_usage_stats_t s{};
+    s.page_address = reinterpret_cast<uintptr_t>(_mi_ptr_page(p));
+    s.block_size = kBenchBlockSize;
+    s.capacity = 64;
+    s.used = 4;
+    s.flags = MI_DFLY_PAGE_BELOW_THRESHOLD;
+    census.Observe(s, 0);
+  }
+  PlanStats ps;
+  TargetPlan plan(&ps);
+  plan.BuildFrom(census);
+  EvacStats es;
+  Evacuator visitor(&plan, 0.8f, &es);
+
+  for (auto _ : state) {
+    for (void* p : ab.pointers) {
+      benchmark::DoNotOptimize(visitor.IsPageForObjectUnderUtilized(p));
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_EvacDecideHit_Evacuator)->Arg(kBenchObjectCount);
+
+// Populated plan + queries that all miss. Models the dominant production
+// case: EVAC walks the prime table over millions of objects while the plan
+// holds a few thousand target pages — most objects are on non-target pages
+// and need fast rejection. Plan is built from synthetic addresses unrelated
+// to the real allocations so every query miss hits the populated-map find()
+// path (raw variant) or the bloom-rejection path (Evacuator variant).
+namespace {
+
+constexpr size_t kBenchSyntheticPlanSize = 4000;
+
+void PopulatePlanWithSyntheticAddrs(PageCensus* census, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    mi_page_usage_stats_t s{};
+    // Addresses well above any mimalloc-managed range; 64 KiB stride matches
+    // mimalloc page alignment so the addresses look plausible to the bloom
+    // hasher.
+    s.page_address = 0x100000000ULL + i * 0x10000ULL;
+    s.block_size = kBenchBlockSize;
+    s.capacity = 64;
+    s.used = 4;
+    s.flags = MI_DFLY_PAGE_BELOW_THRESHOLD;
+    census->Observe(s, 0);
+  }
+}
+
+// RAII: turn off the skip-bit setter for the duration of this object. The
+// populated-plan benchmarks use synthetic addresses that aren't valid
+// mi_page_t*; SetDefragSkipIfEnabled would dereference them and segfault on
+// BuildFrom and on ~TargetPlan. Restoring on dtor (declare this BEFORE the
+// TargetPlan so the plan destructs first while the flag is still off).
+struct DefragSkipBitOff {
+  bool prev;
+  DefragSkipBitOff() : prev(absl::GetFlag(FLAGS_defrag_use_skip_bit)) {
+    absl::SetFlag(&FLAGS_defrag_use_skip_bit, false);
+  }
+  ~DefragSkipBitOff() {
+    absl::SetFlag(&FLAGS_defrag_use_skip_bit, prev);
+  }
+};
+
+}  // namespace
+
+void BM_EvacDecideMiss_Populated(benchmark::State& state) {
+  DefragSkipBitOff skip_bit_off;  // declared first → destroyed last
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+
+  CensusStats cs;
+  PageCensus census(&cs);
+  PopulatePlanWithSyntheticAddrs(&census, kBenchSyntheticPlanSize);
+  PlanStats ps;
+  TargetPlan plan(&ps);
+  plan.BuildFrom(census);
+
+  for (auto _ : state) {
+    EvacStats es{};
+    for (void* p : ab.pointers) {
+      uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(p));
+      TargetPage* target = plan.FindMut(addr);
+      if (target == nullptr) {
+        ++es.blocks_skipped_not_target;
+        continue;
+      }
+      auto stat = mi_heap_page_is_underutilized(mi_heap_get_default(), p, 0.8f, true);
+      EvacDecide(plan, target, stat, es);
+    }
+    benchmark::DoNotOptimize(es);
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_EvacDecideMiss_Populated)->Arg(kBenchObjectCount);
+
+void BM_EvacDecideMiss_Populated_Evacuator(benchmark::State& state) {
+  DefragSkipBitOff skip_bit_off;  // declared first → destroyed last
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+
+  CensusStats cs;
+  PageCensus census(&cs);
+  PopulatePlanWithSyntheticAddrs(&census, kBenchSyntheticPlanSize);
+  PlanStats ps;
+  TargetPlan plan(&ps);
+  plan.BuildFrom(census);
+  EvacStats es;
+  Evacuator visitor(&plan, 0.8f, &es);
+
+  for (auto _ : state) {
+    for (void* p : ab.pointers) {
+      benchmark::DoNotOptimize(visitor.IsPageForObjectUnderUtilized(p));
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_EvacDecideMiss_Populated_Evacuator)->Arg(kBenchObjectCount);
+
+// =====================================================================
+// Microbenchmarks for the underutil-callback per-free overhead.
+//
+// Each variant allocates a fresh batch of objects (untimed) and frees them
+// (timed); the delta between variants isolates the cost the dragonfly
+// mimalloc patch adds to mi_free_block_local:
+//
+//   BM_Free_CallbackOff     callback unregistered. Only the unconditional
+//                           prev_used load runs; the arith block and
+//                           indirect call are short-circuited by the NULL
+//                           check on _mi_dfly_underutil_cb.
+//   BM_Free_CallbackNoOp    callback registered, body just bumps a counter.
+//                           Adds the per-free arith block (cap_thr,
+//                           prev_x100, cur_x100, two compares) on EVERY
+//                           free, plus an indirect call on edge crossings.
+//   BM_Free_CallbackInsert  callback registered, body inserts into a
+//                           thread_local flat_hash_set. Adds hash work on
+//                           top of NoOp, only on edge crossings.
+//
+// Differences:
+//   (NoOp  - Off)   = per-free arith cost (paid by every delete)
+//   (Insert - NoOp) = per-edge insert cost amortized over total frees
+//
+// The "edges/iter" counter reports the number of callback invocations per
+// iteration so per-edge cost can be derived.
+// Run with: ./defrag_test --benchmark_filter='BM_Free_.*'
+// =====================================================================
+
+namespace {
+
+thread_local absl::flat_hash_set<uintptr_t> g_bench_underutil_set;
+thread_local size_t g_bench_underutil_count = 0;
+
+void BenchCallbackNoOp(uintptr_t /*addr*/) {
+  ++g_bench_underutil_count;
+}
+
+void BenchCallbackInsert(uintptr_t addr) {
+  ++g_bench_underutil_count;
+  g_bench_underutil_set.insert(addr);
+}
+
+void RunFreeBench(benchmark::State& state, size_t count) {
+  InitBenchEnv();
+  size_t total_edges = 0;
+  for (auto _ : state) {
+    state.PauseTiming();
+    g_bench_underutil_set.clear();
+    g_bench_underutil_count = 0;
+    std::vector<void*> ptrs;
+    ptrs.reserve(count);
+    mi_heap_t* heap = mi_heap_get_default();
+    for (size_t i = 0; i < count; ++i) {
+      ptrs.push_back(mi_heap_malloc(heap, kBenchBlockSize));
+    }
+    state.ResumeTiming();
+    for (void* p : ptrs) {
+      mi_free(p);
+    }
+    state.PauseTiming();
+    total_edges += g_bench_underutil_count;
+    state.ResumeTiming();
+  }
+  state.counters["edges/iter"] =
+      benchmark::Counter(static_cast<double>(total_edges) / state.iterations());
+  state.SetItemsProcessed(state.iterations() * count);
+}
+
+}  // namespace
+
+void BM_Free_CallbackOff(benchmark::State& state) {
+  mi_dfly_set_underutil_callback(nullptr);
+  RunFreeBench(state, state.range(0));
+}
+BENCHMARK(BM_Free_CallbackOff)->Arg(kBenchObjectCount);
+
+void BM_Free_CallbackNoOp(benchmark::State& state) {
+  mi_dfly_set_underutil_threshold_pct(80);
+  mi_dfly_set_underutil_callback(&BenchCallbackNoOp);
+  RunFreeBench(state, state.range(0));
+  mi_dfly_set_underutil_callback(nullptr);
+}
+BENCHMARK(BM_Free_CallbackNoOp)->Arg(kBenchObjectCount);
+
+void BM_Free_CallbackInsert(benchmark::State& state) {
+  mi_dfly_set_underutil_threshold_pct(80);
+  mi_dfly_set_underutil_callback(&BenchCallbackInsert);
+  RunFreeBench(state, state.range(0));
+  mi_dfly_set_underutil_callback(nullptr);
+}
+BENCHMARK(BM_Free_CallbackInsert)->Arg(kBenchObjectCount);
 
 }  // namespace dfly

@@ -17,7 +17,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 
-ABSL_FLAG(bool, defrag_use_skip_bit, true,
+ABSL_FLAG(bool, defrag_use_skip_bit, false,
           "If true, mark target pages with mimalloc's defrag_skip bit so EVAC moves don't "
           "refill them. Disable to A/B compare against an unmarked baseline.");
 
@@ -57,13 +57,6 @@ namespace dfly {
 namespace {
 
 constexpr uint64_t kPerTargetSlotCostBytes = 16 * 1024;
-
-// When false, PageCensus skips the top-k heap entirely and just inserts every
-// observed page into pages_. Cheap (no priority_queue work per Observe), but
-// loses the cap-and-evict-worst guard: the map hard-crashes on a new entry
-// once it reaches max_retained_pages_. Flip to true to restore heap-based
-// eviction so workloads exceeding the cap stay bounded.
-constexpr bool kEnableTopK = false;
 
 uint64_t ReclaimableBytes(uint16_t capacity_blocks, uint16_t used_blocks, uint32_t block_size) {
   if (used_blocks >= capacity_blocks)
@@ -140,6 +133,23 @@ std::string FormatMiB(uint64_t bytes) {
 // Wrapper around mimalloc's defrag_skip setter. Gated by a runtime flag so
 // experiments can disable the skip-bit logic and observe whether refills on
 // drained pages re-emerge.
+//
+// SHARP EDGE: mi_page_set_defrag_skip writes through the page address as
+// mi_page_t*. If that memory has been unmapped (page retired -> segment
+// freed -> OS reclaim, particularly under Dragonfly's aggressive purge
+// settings) or reused for something else, the write segfaults or silently
+// corrupts unrelated state. The window opens between SELECT_TARGETS adding
+// the page to the plan and ~TargetPlan clearing the bit at end-of-cycle;
+// any external drain-to-empty plus retire-and-unmap during that window
+// makes the page address stale.
+//
+// The EvacDecide success / revalidation paths clear the bit *before* the
+// triggering move runs (so the page is still mapped). The destructor sweep
+// is the riskier site — it touches every plan target unconditionally. To
+// harden, options are: (a) move the skip flag to a per-shard side table
+// keyed by page address, (b) add a mimalloc refcount keeping target pages
+// mapped for the cycle, (c) validate the page is still in a known segment
+// before writing. (a) is the cleanest if it ever bites in production.
 void SetDefragSkipIfEnabled(uintptr_t page_addr, bool skip) {
   if (absl::GetFlag(FLAGS_defrag_use_skip_bit)) {
     mi_page_set_defrag_skip(page_addr, skip);
@@ -679,7 +689,6 @@ void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets) {
 
   targets_ = std::move(candidates);
   address_to_index_.reserve(targets_.size());
-  bloom_.Clear();
   // Selective skip: targets_ is sorted descending by retention_score, which
   // correlates inversely with used/capacity. Head of the vector = most
   // fragmented. Apply skip_bit only to the top fraction so high-utilization
@@ -688,7 +697,6 @@ void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets) {
   const size_t skip_count = static_cast<size_t>(static_cast<double>(targets_.size()) * skip_pct);
   for (size_t i = 0; i < targets_.size(); ++i) {
     address_to_index_[targets_[i].page_address] = i;
-    bloom_.Insert(targets_[i].page_address);
     if (i < skip_count) {
       // Tell mimalloc to skip this page in alloc paths; EVACUATE moves should
       // not refill pages we are about to drain.
@@ -708,47 +716,6 @@ void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets) {
 
 bool TargetPlan::Contains(uintptr_t addr) const {
   return address_to_index_.contains(addr);
-}
-
-// Use the murmur-style finalizer to spread page-address bits, then derive
-// kHashes positions via a double-hash scheme (h1 + i*h2) — only one Mix per
-// query, the rest is cheap arithmetic.
-namespace {
-inline uint64_t BloomMix(uintptr_t x) {
-  uint64_t v = static_cast<uint64_t>(x);
-  v ^= v >> 33;
-  v *= 0xff51afd7ed558ccdULL;
-  v ^= v >> 33;
-  v *= 0xc4ceb9fe1a85ec53ULL;
-  v ^= v >> 33;
-  return v;
-}
-}  // namespace
-
-void TargetPlan::PlanBloom::Insert(uintptr_t addr) {
-  const uint64_t h = BloomMix(addr);
-  const uint64_t h1 = h;
-  const uint64_t h2 = (h >> 32) | 1;  // odd -> coprime with power-of-two size
-  for (size_t i = 0; i < kHashes; ++i) {
-    const size_t bit = (h1 + i * h2) & kMask;
-    words[bit >> 6] |= (1ULL << (bit & 63));
-  }
-}
-
-bool TargetPlan::PlanBloom::MaybeContains(uintptr_t addr) const {
-  const uint64_t h = BloomMix(addr);
-  const uint64_t h1 = h;
-  const uint64_t h2 = (h >> 32) | 1;
-  for (size_t i = 0; i < kHashes; ++i) {
-    const size_t bit = (h1 + i * h2) & kMask;
-    if ((words[bit >> 6] & (1ULL << (bit & 63))) == 0)
-      return false;
-  }
-  return true;
-}
-
-bool TargetPlan::BloomMaybeContains(uintptr_t addr) const {
-  return bloom_.MaybeContains(addr);
 }
 
 const TargetPage* TargetPlan::Find(uintptr_t addr) const {
@@ -930,50 +897,31 @@ Evacuator::Evacuator(TargetPlan* plan, float threshold, EvacStats* evac_stats, C
     : PageUsage(CollectPageStats::NO, threshold, quota),
       plan_(plan),
       threshold_(threshold),
-      evac_stats_(evac_stats),
-      slice_version_(next_slice_version_++) {
+      evac_stats_(evac_stats) {
 }
 
 bool Evacuator::IsPageForObjectUnderUtilized(void* object) {
-  // Fast precheck folds the not-a-target lookup with the lookup EvacDecide
-  // would otherwise repeat. One FindMut per object instead of two.
   const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
-  // Bloom-rejects ~99% of non-target pages without paying the hash lookup.
-  if (!plan_->BloomMaybeContains(addr)) {
-    ++evac_stats_->blocks_skipped_not_target;
-    return false;
-  }
   TargetPage* target = plan_->FindMut(addr);
   if (target == nullptr) {
-    // Bloom false positive — confirmed not in plan.
     ++evac_stats_->blocks_skipped_not_target;
     return false;
   }
-  if (target->cached_at_slice != slice_version_) {
-    target->cached_stat = mi_heap_page_is_underutilized(static_cast<mi_heap_t*>(zmalloc_heap),
-                                                        object, threshold_, /*collect_stats=*/true);
-    target->cached_at_slice = slice_version_;
-  }
-  return EvacDecide(*plan_, target, target->cached_stat, *evac_stats_) == EvacOutcome::kCommitMove;
+  const mi_page_usage_stats_t stat = mi_heap_page_is_underutilized(
+      static_cast<mi_heap_t*>(zmalloc_heap), object, threshold_, /*collect_stats=*/true);
+  return EvacDecide(*plan_, target, stat, *evac_stats_) == EvacOutcome::kCommitMove;
 }
 
 bool Evacuator::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
-  if (!plan_->BloomMaybeContains(addr)) {
-    ++evac_stats_->blocks_skipped_not_target;
-    return false;
-  }
   TargetPage* target = plan_->FindMut(addr);
   if (target == nullptr) {
     ++evac_stats_->blocks_skipped_not_target;
     return false;
   }
-  if (target->cached_at_slice != slice_version_) {
-    target->cached_stat =
-        mi_heap_page_is_underutilized(heap, object, threshold_, /*collect_stats=*/true);
-    target->cached_at_slice = slice_version_;
-  }
-  return EvacDecide(*plan_, target, target->cached_stat, *evac_stats_) == EvacOutcome::kCommitMove;
+  const mi_page_usage_stats_t stat =
+      mi_heap_page_is_underutilized(heap, object, threshold_, /*collect_stats=*/true);
+  return EvacDecide(*plan_, target, stat, *evac_stats_) == EvacOutcome::kCommitMove;
 }
 
 void DefragIdleStep(DefragTaskState* state, float threshold) {
