@@ -534,16 +534,16 @@ def _parse_commit_analysis_json(text: str) -> CommitAnalysis:
     return CommitAnalysis(
         category=data["category"],
         user_facing=bool(data["user_facing"]),
-        summary=data.get("summary", ""),
-        impact=data.get("impact", ""),
-        theme=data.get("theme", ""),
-        use_case=data.get("use_case", ""),
-        audience=data.get("audience", ""),
-        adoption_notes=data.get("adoption_notes", ""),
-        technical_details=data.get("technical_details", ""),
-        competitive_context=data.get("competitive_context", ""),
-        validation_notes=data.get("validation_notes", ""),
-        caveats=data.get("caveats", ""),
+        summary=data.get("summary") or "",
+        impact=data.get("impact") or "",
+        theme=data.get("theme") or "",
+        use_case=data.get("use_case") or "",
+        audience=data.get("audience") or "",
+        adoption_notes=data.get("adoption_notes") or "",
+        technical_details=data.get("technical_details") or "",
+        competitive_context=data.get("competitive_context") or "",
+        validation_notes=data.get("validation_notes") or "",
+        caveats=data.get("caveats") or "",
     )
 
 
@@ -1590,7 +1590,7 @@ def _build_announce_user_message(payload: CompositionPayload) -> str:
         theme = item.analysis.theme.strip().lower() or "-"
         lines.append(
             f"- ref={item.ref}; category={item.analysis.category}; theme={theme}; "
-            f"promoted_theme_size={item.promoted_theme_size}; score={item.announce_score:.2f}"
+            f"promoted_theme_size={item.promoted_theme_size}"
         )
         lines.append(f"  summary: {item.analysis.summary}")
         if item.analysis.impact:
