@@ -18,7 +18,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "core/dict_builder.h"
-#include "core/page_usage/page_usage_stats.h"
+#include "core/page_usage/page_usage_dispatch.h"
 
 using namespace std;
 

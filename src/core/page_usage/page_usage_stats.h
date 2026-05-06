@@ -74,6 +74,17 @@ struct CollectedPageStats {
 
 class PageUsage {
  public:
+  // Tag for tagged-dispatch on the IsPageForObjectUnderUtilized hot path.
+  // Subclasses set this in their constructor; the dispatch in
+  // page_usage_dispatch.h switches on it and inlines into the concrete
+  // subclass's *Impl method. Avoids virtual-call + cross-TU-inlining cost.
+  //
+  // kCustom is a test/benchmark-only escape hatch: the dispatch forwards to
+  // the virtual IsPageForObjectUnderUtilizedHook, letting test classes
+  // override behavior without a Kind of their own. Production hot paths
+  // (kBase, kEvacuator, kCensus) never pay vtable cost.
+  enum class Kind : uint8_t { kBase, kEvacuator, kCensus, kCustom };
+
   PageUsage(CollectPageStats collect_stats, float threshold,
             CycleQuota quota = CycleQuota::Unlimited());
 
@@ -86,9 +97,34 @@ class PageUsage {
 
   uint64_t UsedQuotaCycles() const;
 
-  virtual bool IsPageForObjectUnderUtilized(void* object);
+  Kind kind() const {
+    return kind_;
+  }
 
-  virtual bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
+  // Non-virtual entry point. Definition lives in page_usage_dispatch.h as an
+  // inline switch on kind_ — callers that want this method must include that
+  // header. Callers that include only page_usage_stats.h get a link error if
+  // they try to use it (intentional: catches missed callers at link time).
+  bool IsPageForObjectUnderUtilized(void* object);
+
+  bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
+
+  // Default-kind (Kind::kBase) implementations used by the dispatch header
+  // when no subclass override is selected. Non-virtual; out-of-line in
+  // page_usage_stats.cc.
+  bool BaseIsPageForObjectUnderUtilized(void* object);
+  bool BaseIsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
+
+  // Optional fast-path filter for the legacy DefragIfNeeded walker. When set,
+  // BaseIsPageForObjectUnderUtilized consults the predicate before calling
+  // mi_heap_page_is_underutilized: if the predicate returns false, the page
+  // is treated as "not underutil" without the mimalloc syscall. Conservative-
+  // positive filter — see defrag_underutil::IsPageMaybeUnderutil for semantics.
+  // Phased Evacuator/CensusTaker bypass the Base impl and don't consult this.
+  using UnderutilFilter = bool (*)(uintptr_t page_addr);
+  void SetUnderutilFilter(UnderutilFilter f) {
+    underutil_filter_ = f;
+  }
 
   CollectedPageStats CollectedStats() const {
     return unique_pages_.CollectedStats();
@@ -131,6 +167,18 @@ class PageUsage {
 
   void ExtendQuota(uint64_t quota_usec);
 
+ protected:
+  // Hook invoked from the dispatch switch when kind_ == kCustom. Default
+  // returns false. Test/benchmark subclasses (e.g. SelectiveDefragment)
+  // override to inject probabilistic or custom decisions without paying
+  // virtual-dispatch cost on the production paths.
+  virtual bool IsPageForObjectUnderUtilizedHook(void* /*object*/) {
+    return false;
+  }
+  virtual bool IsPageForObjectUnderUtilizedHook(mi_heap_t* /*heap*/, void* /*object*/) {
+    return false;
+  }
+
  private:
   CollectPageStats collect_stats_{CollectPageStats::NO};
   float threshold_;
@@ -157,6 +205,13 @@ class PageUsage {
   UniquePages unique_pages_;
 
   CycleQuota quota_;
+
+  UnderutilFilter underutil_filter_ = nullptr;
+
+ protected:
+  // Set to non-kBase by subclass constructors. Read by the inline dispatch
+  // in page_usage_dispatch.h to forward to the concrete subclass impl.
+  Kind kind_ = Kind::kBase;
 
   // For use in testing, forces reallocate check to always return true
   bool force_reallocate_{false};

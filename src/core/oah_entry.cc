@@ -6,7 +6,7 @@
 
 #include "base/hash.h"
 #include "base/logging.h"
-#include "core/page_usage/page_usage_stats.h"
+#include "core/page_usage/page_usage_dispatch.h"
 
 namespace dfly {
 
