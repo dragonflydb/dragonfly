@@ -3,15 +3,14 @@
 Release Notes Generator for Dragonfly.
 
 Takes a git commit range (e.g., v1.37.0..v1.38.0) and produces curated,
-human-readable release notes in Markdown using Claude.
+human-readable release notes or announce briefs in Markdown using Claude.
 
 Each commit is analyzed independently with its message AND a truncated diff,
 so the LLM is grounded in actual code changes rather than just commit subjects.
 This dramatically reduces the risk of hallucinated or misclassified entries.
 
-The per-commit analyses are then aggregated into themed release notes
-(Commands / Performance / Replication / Search / Cluster / Protocol / Security
-/ Cloud & Storage / Bug fixes).
+The per-commit analyses are then aggregated into composition targets such as
+themed release notes or community-facing announce briefs.
 
 Usage
 -----
@@ -21,6 +20,7 @@ Usage
     python tools/release_notes_generator.py v1.37.0..v1.38.0
     python tools/release_notes_generator.py v1.37.0..v1.38.0 --output-dir /tmp
     python tools/release_notes_generator.py HEAD~50..HEAD --max-parallel 4
+    python tools/release_notes_generator.py v1.37.0..v1.38.0 --target announce
 
     # GitHub Copilot backend (uses Copilot CLI auth, no API key needed):
     pip install github-copilot-sdk
@@ -41,7 +41,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 try:
     import anthropic
@@ -190,6 +190,51 @@ class CommitAnalysis(BaseModel):
         "was built. Do not just repeat the category name. Leave empty for one-off "
         "changes with no broader product theme.",
     )
+    use_case: str = Field(
+        default="",
+        description="Optional announce metadata: a short phrase naming the main workload, "
+        "problem, or scenario this change helps with, such as 'high-cardinality metrics', "
+        "'cluster migration', or 'json-heavy workloads'. Empty if not directly supported "
+        "by the commit subject, body, or diff.",
+    )
+    audience: str = Field(
+        default="",
+        description="Optional announce metadata: the primary user persona that benefits, "
+        "such as 'operators', 'platform engineers', 'application developers', or 'cloud "
+        "users'. Empty if not directly supported by the commit subject, body, or diff.",
+    )
+    adoption_notes: str = Field(
+        default="",
+        description="Optional announce metadata: a short note about rollout, migration, or "
+        "operator action, such as 'enabled by default', 'requires config change', or "
+        "'opt-in via flag'. Empty if not directly supported by the commit subject, body, "
+        "or diff.",
+    )
+    technical_details: str = Field(
+        default="",
+        description="Optional announce metadata: concrete technical detail useful for later "
+        "content, such as benchmark numbers, config names, limits, architecture notes, or "
+        "commands. Empty if not directly supported by the commit subject, body, or diff.",
+    )
+    competitive_context: str = Field(
+        default="",
+        description="Optional announce metadata: note whether the change appears to be "
+        "parity, differentiation, compatibility, or net-new capability relative to "
+        "alternatives, but ONLY when the commit explicitly supports that framing. Empty "
+        "otherwise.",
+    )
+    validation_notes: str = Field(
+        default="",
+        description="Optional announce metadata: user, benchmark, issue, or other evidence "
+        "that could support external communication later. Empty if not directly supported "
+        "by the commit subject, body, or diff.",
+    )
+    caveats: str = Field(
+        default="",
+        description="Optional announce metadata: limitations, unsupported cases, or "
+        "important caveats visible in the commit subject, body, or diff. Empty if none "
+        "are directly supported.",
+    )
 
 
 @dataclass
@@ -244,6 +289,43 @@ class _ComposeStats:
     response_bytes: int = 0
 
 
+@dataclass(frozen=True)
+class CompositionCommit:
+    analyzed: AnalyzedCommit
+    ref: str
+    promoted_theme_size: int
+    announce_score: float
+
+    @property
+    def commit(self) -> Commit:
+        return self.analyzed.commit
+
+    @property
+    def analysis(self) -> CommitAnalysis:
+        return self.analyzed.analysis
+
+
+@dataclass(frozen=True)
+class CompositionPayload:
+    commit_range: str
+    analyzed: list[AnalyzedCommit]
+    user_facing: list[CompositionCommit]
+    promoted_themes: dict[str, list[CompositionCommit]]
+    full_changelog: list[str]
+    announce_highlights: list[CompositionCommit]
+
+
+@dataclass(frozen=True)
+class CompositionTarget:
+    name: str
+    system_prompt: str
+    build_user_message: Callable[[CompositionPayload], str]
+    build_empty_output: Callable[[CompositionPayload], str]
+    output_filename: Callable[[str, str], str]
+    post_process: Callable[[str, str], str]
+    should_skip: Callable[[CompositionPayload], bool] = lambda _: False
+
+
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
@@ -289,6 +371,20 @@ The 'theme' field is for cross-cutting topics that may span multiple commits
 independent of 'category' -- a commit can have category='performance' AND
 theme='memory tracking' if it's part of a broader memory-tracking effort.
 Use the diff to identify shared subsystems. If nothing distinctive, leave empty.
+
+Also extract OPTIONAL announce metadata for later community-facing content. Keep
+these fields concise and strictly grounded in the commit subject, body, or diff.
+If the evidence is missing, leave the field empty rather than guessing:
+- use_case           : workload, problem, or scenario this change helps with
+- audience           : the primary user persona that benefits most
+- adoption_notes     : opt-in/default/migration/config rollout note
+- technical_details  : concrete benchmark/config/command/architecture detail
+- competitive_context: parity/differentiator/compatibility framing if explicit
+- validation_notes   : benchmark, issue, or user evidence if explicit
+- caveats            : limitations or unsupported cases if explicit
+
+These optional fields are supporting metadata only. Do not let them distort the
+primary release-notes fields: category, user_facing, summary, impact, and theme.
 """
 
 _ANALYZE_JSON_SUFFIX = """\
@@ -298,13 +394,20 @@ Respond with a JSON object only (no other text), matching this exact shape:
   "user_facing": <true|false>,
   "summary": "<up to five sentences, or single sentence if not user-facing>",
   "impact": "<quantified impact if explicitly mentioned, else empty string>",
-  "theme": "<short cross-cutting product theme noun phrase, or empty string>"
+  "theme": "<short cross-cutting product theme noun phrase, or empty string>",
+  "use_case": "<workload/problem/scenario this change helps with, or empty string>",
+  "audience": "<primary user persona that benefits, or empty string>",
+  "adoption_notes": "<opt-in/default/migration/config note, or empty string>",
+  "technical_details": "<concrete benchmark/config/command/architecture detail, or empty string>",
+  "competitive_context": "<parity/differentiator/compatibility framing if explicit, or empty string>",
+  "validation_notes": "<benchmark/issue/user evidence if explicit, or empty string>",
+  "caveats": "<limitations or unsupported cases if explicit, or empty string>"
 }"""
 
 # Used by non-Anthropic backends that cannot do constrained structured-output decoding.
 ANALYZE_SYSTEM_PROMPT_JSON = ANALYZE_SYSTEM_PROMPT + _ANALYZE_JSON_SUFFIX
 
-COMPOSE_SYSTEM_PROMPT = """\
+RELEASE_NOTES_SYSTEM_PROMPT = """\
 You are a senior technical writer producing release notes for Dragonfly,
 a Redis/Memcached-compatible in-memory data store. Your audience is engineers
 and operators upgrading their Dragonfly deployment.
@@ -361,6 +464,55 @@ INVARIANTS:
 - Output Markdown only. No preamble like "Here are the release notes:".
 """
 
+ANNOUNCE_SYSTEM_PROMPT = """\
+You are a senior product marketer and technical writer producing a community-facing
+announce brief for Dragonfly, a Redis/Memcached-compatible in-memory data store.
+
+Your job is to turn evidence-backed engineering changes into a credible product story.
+Be concrete, grounded, and selective. Do not exaggerate. If the input does not support
+an angle, omit it entirely.
+
+Output Markdown only.
+
+Required structure:
+- Start with a Markdown H1 title derived from the commit range when possible.
+- Follow with a short 2-4 sentence overview that explains the main story of the release.
+- Add a `## Top Highlights` section using ONLY the supplied selected highlights.
+- Add a concise community-facing brief using this framework selectively:
+    - Required emphasis when supported by evidence: what it is, who it is for,
+        why it matters, adoption path, technical details, caveats.
+    - Optional sections ONLY when clearly supported by evidence: why we're building it,
+        alternatives, customer validation, documentation status.
+- End with `## Channel-ready copy` containing:
+    - `### LinkedIn`
+    - `### Community forums`
+    - `### Mailing list`
+
+Rules:
+- Keep all claims grounded in the supplied commit summaries and announce metadata.
+- Use the feature framework selectively rather than mechanically.
+- Omit unsupported sections instead of fabricating content.
+- Do not invent benchmark numbers, customer validation, competitive claims, docs status,
+    migration steps, or rollout details.
+- If fewer than five strong highlights are provided, keep that smaller number.
+- Prefer clear product language over hype.
+- Internal refactors, CI, and docs-only work should stay out unless the payload explicitly
+    shows user-facing impact.
+"""
+
+_ANNOUNCE_CATEGORY_WEIGHTS = {
+    "commands": 1.2,
+    "performance": 1.35,
+    "replication": 1.2,
+    "search": 1.25,
+    "cluster": 1.25,
+    "protocol": 1.15,
+    "security": 1.3,
+    "cloud": 1.1,
+    "tiering": 1.1,
+    "bugfix": 0.95,
+}
+
 
 # ---------------------------------------------------------------------------
 # JSON parsing utility (used by non-Anthropic backends)
@@ -385,11 +537,18 @@ def _parse_commit_analysis_json(text: str) -> CommitAnalysis:
         summary=data.get("summary", ""),
         impact=data.get("impact", ""),
         theme=data.get("theme", ""),
+        use_case=data.get("use_case", ""),
+        audience=data.get("audience", ""),
+        adoption_notes=data.get("adoption_notes", ""),
+        technical_details=data.get("technical_details", ""),
+        competitive_context=data.get("competitive_context", ""),
+        validation_notes=data.get("validation_notes", ""),
+        caveats=data.get("caveats", ""),
     )
 
 
 def _dedupe_highlights_section(notes: str) -> str:
-    """Keep only the first '## Highlights' section.
+    """Keep only the first `## Highlights...` section.
 
     Copilot occasionally emits a second placeholder Highlights section. Drop later
     duplicates to keep the output stable.
@@ -400,7 +559,7 @@ def _dedupe_highlights_section(notes: str) -> str:
     skip_duplicate = False
 
     for line in lines:
-        if line == "## Highlights":
+        if re.match(r"^## Highlights\b", line):
             if seen_highlights:
                 skip_duplicate = True
                 continue
@@ -454,13 +613,6 @@ class LLMBackend:
         """Return a comma-prefixed status string for the heartbeat line, or ''."""
         return ""
 
-    def post_process_notes(self, notes: str) -> str:
-        """Apply any backend-specific fixes to the composed release notes."""
-        return notes
-
-    def notes_filename(self, safe_range: str) -> str:
-        raise NotImplementedError
-
 
 class AnthropicBackend(LLMBackend):
     """Thin async wrapper around the synchronous Anthropic SDK."""
@@ -470,7 +622,7 @@ class AnthropicBackend(LLMBackend):
     analyze_system_prompt = ANALYZE_SYSTEM_PROMPT
     analyze_max_tokens = ANALYZE_MAX_TOKENS_STRUCTURED
 
-    def __init__(self, client: "anthropic.Anthropic") -> None:
+    def __init__(self, client: Any) -> None:
         self._client = client
         self._compose_stats = _ComposeStats()
 
@@ -598,9 +750,6 @@ class AnthropicBackend(LLMBackend):
         if s.cache_creation_input_tokens not in (None, 0):
             parts.append(f"cache_creation_input_tokens={s.cache_creation_input_tokens}")
         return (", " + ", ".join(parts)) if parts else ""
-
-    def notes_filename(self, safe_range: str) -> str:
-        return f"release_notes_{safe_range}.md"
 
 
 class CopilotBackend(LLMBackend):
@@ -755,12 +904,6 @@ class CopilotBackend(LLMBackend):
             parts.append(f"cache_write_tokens={s.cache_write_tokens}")
         return (", " + ", ".join(parts)) if parts else ""
 
-    def post_process_notes(self, notes: str) -> str:
-        return _dedupe_highlights_section(_strip_leading_preamble(notes))
-
-    def notes_filename(self, safe_range: str) -> str:
-        return f"release_notes_copilot_{safe_range}.md"
-
 
 # ---------------------------------------------------------------------------
 # Disk cache for per-commit analysis results
@@ -783,8 +926,13 @@ def _make_cache_key(backend: LLMBackend, sha: str) -> str:
     return h.hexdigest()
 
 
-def _cache_load(cache_dir: Path, key: str) -> Optional[CommitAnalysis]:
-    path = cache_dir / f"{key}.json"
+def _cache_backend_dir(cache_root: Path, backend: LLMBackend) -> Path:
+    backend_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", backend.name).strip("_") or "backend"
+    return cache_root / backend_slug
+
+
+def _cache_load(cache_root: Path, key: str) -> Optional[CommitAnalysis]:
+    path = cache_root / f"{key}.json"
     if not path.exists():
         return None
     try:
@@ -793,9 +941,9 @@ def _cache_load(cache_dir: Path, key: str) -> Optional[CommitAnalysis]:
         return None  # treat corrupt entries as a miss
 
 
-def _cache_save(cache_dir: Path, key: str, analysis: CommitAnalysis) -> None:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    (cache_dir / f"{key}.json").write_text(
+def _cache_save(cache_root: Path, key: str, analysis: CommitAnalysis) -> None:
+    cache_root.mkdir(parents=True, exist_ok=True)
+    (cache_root / f"{key}.json").write_text(
         json.dumps(analysis.model_dump(), indent=2),
         encoding="utf-8",
     )
@@ -1240,51 +1388,291 @@ def detect_promoted_themes(
     return {t: cs for t, cs in buckets.items() if len(cs) >= min_size}
 
 
-def _build_composition_payload(
+def _normalize_ref(analyzed_commit: AnalyzedCommit) -> str:
+    return (
+        f"#{analyzed_commit.pr_number}"
+        if analyzed_commit.pr_number
+        else analyzed_commit.commit.short_sha
+    )
+
+
+def _has_signal(text: str) -> bool:
+    return bool(text.strip())
+
+
+def _score_announce_candidate(analyzed_commit: AnalyzedCommit, promoted_theme_size: int) -> float:
+    analysis = analyzed_commit.analysis
+    score = _ANNOUNCE_CATEGORY_WEIGHTS.get(analysis.category, 1.0)
+
+    if _has_signal(analysis.impact):
+        score += 1.5
+    if promoted_theme_size:
+        score += 0.8 + min(promoted_theme_size, 6) * 0.15
+    if _has_signal(analysis.adoption_notes):
+        score += 0.55
+    if _has_signal(analysis.technical_details):
+        score += 0.65
+    if _has_signal(analysis.use_case):
+        score += 0.35
+    if _has_signal(analysis.audience):
+        score += 0.2
+    if _has_signal(analysis.validation_notes):
+        score += 0.3
+    if _has_signal(analysis.competitive_context):
+        score += 0.2
+    if len(analysis.summary.split()) >= 10:
+        score += 0.1
+
+    return score
+
+
+def _select_announce_highlights(
+    user_facing: list[CompositionCommit],
+    *,
+    top_highlights_override: Optional[int],
+) -> list[CompositionCommit]:
+    ranked = sorted(
+        user_facing,
+        key=lambda item: (
+            item.announce_score,
+            1 if item.analysis.impact else 0,
+            item.promoted_theme_size,
+            item.commit.date,
+        ),
+        reverse=True,
+    )
+    if top_highlights_override is not None:
+        return ranked[:top_highlights_override]
+    if not ranked:
+        return []
+
+    # Adaptive threshold: aim for the score band that includes the top-5 items,
+    # but never drop below the absolute floor of 2.4.  If the adaptive threshold
+    # is so tight that fewer than 5 items pass, fall back to the absolute floor so
+    # the LLM always gets a reasonable number of highlights to work with.
+    threshold = 2.4
+    if len(ranked) >= 5:
+        threshold = max(threshold, ranked[4].announce_score - 0.2)
+
+    selected = [item for item in ranked if item.announce_score >= threshold][:10]
+    if len(selected) < 5:
+        selected = [item for item in ranked if item.announce_score >= 2.4][:10]
+    return selected
+
+
+def build_composition_payload(
     commit_range: str,
     analyzed: list[AnalyzedCommit],
-    user_facing: list[AnalyzedCommit],
-    promoted: dict[str, list[AnalyzedCommit]],
-) -> str:
-    promoted_shas = {a.commit.sha for cs in promoted.values() for a in cs}
+    top_highlights_override: Optional[int] = None,
+) -> CompositionPayload:
+    user_facing = [a for a in analyzed if a.analysis.user_facing]
+    promoted = detect_promoted_themes(user_facing)
+    promoted_sizes = {theme: len(commits) for theme, commits in promoted.items()}
+
+    normalized_user_facing: list[CompositionCommit] = []
+    by_sha: dict[str, CompositionCommit] = {}
+    for analyzed_commit in user_facing:
+        theme = analyzed_commit.analysis.theme.strip().lower()
+        promoted_theme_size = promoted_sizes.get(theme, 0)
+        item = CompositionCommit(
+            analyzed=analyzed_commit,
+            ref=_normalize_ref(analyzed_commit),
+            promoted_theme_size=promoted_theme_size,
+            announce_score=_score_announce_candidate(analyzed_commit, promoted_theme_size),
+        )
+        normalized_user_facing.append(item)
+        by_sha[analyzed_commit.commit.sha] = item
+
+    normalized_promoted = {
+        theme: [by_sha[a.commit.sha] for a in commits] for theme, commits in promoted.items()
+    }
+    announce_highlights = _select_announce_highlights(
+        normalized_user_facing,
+        top_highlights_override=top_highlights_override,
+    )
+
+    return CompositionPayload(
+        commit_range=commit_range,
+        analyzed=analyzed,
+        user_facing=normalized_user_facing,
+        promoted_themes=normalized_promoted,
+        full_changelog=[f"- {a.commit.subject}" for a in analyzed],
+        announce_highlights=announce_highlights,
+    )
+
+
+def _build_release_notes_user_message(payload: CompositionPayload) -> str:
+    promoted_shas = {
+        item.commit.sha for commits in payload.promoted_themes.values() for item in commits
+    }
 
     bullets: list[str] = []
-    for a in user_facing:
-        ref = f"#{a.pr_number}" if a.pr_number else a.commit.short_sha
-        impact = f" [{a.analysis.impact}]" if a.analysis.impact else ""
+    for item in payload.user_facing:
+        impact = f" [{item.analysis.impact}]" if item.analysis.impact else ""
         theme_tag = (
-            f" {{theme: {a.analysis.theme.strip().lower()}}}"
-            if a.commit.sha in promoted_shas
+            f" {{theme: {item.analysis.theme.strip().lower()}}}"
+            if item.commit.sha in promoted_shas
             else ""
         )
-        bullets.append(f"- [{a.analysis.category}]{impact} {a.analysis.summary} ({ref}){theme_tag}")
-
-    full_changelog = [f"- {a.commit.subject}" for a in analyzed]
+        bullets.append(
+            f"- [{item.analysis.category}]{impact} {item.analysis.summary} ({item.ref}){theme_tag}"
+        )
 
     promoted_block = ""
-    if promoted:
+    if payload.promoted_themes:
         lines = ["", "Promoted themes (3+ commits each -- render as standalone sections):"]
-        for theme, cs in promoted.items():
-            refs = ", ".join(f"#{a.pr_number}" if a.pr_number else a.commit.short_sha for a in cs)
-            lines.append(f"  - {theme} ({len(cs)} commits): {refs}")
+        for theme, commits in payload.promoted_themes.items():
+            refs = ", ".join(item.ref for item in commits)
+            lines.append(f"  - {theme} ({len(commits)} commits): {refs}")
         promoted_block = "\n".join(lines) + "\n"
 
-    return (
-        f"Range: {commit_range}\n"
-        f"Total commits: {len(analyzed)}\n"
-        f"User-facing commits: {len(user_facing)}\n"
+    normalized_payload = (
+        f"Range: {payload.commit_range}\n"
+        f"Total commits: {len(payload.analyzed)}\n"
+        f"User-facing commits: {len(payload.user_facing)}\n"
         f"{promoted_block}\n"
         "Per-commit summaries (use these as the source of truth):\n"
         + "\n".join(bullets)
         + "\n\nFull commit list (for the appended What's Changed section):\n"
-        + "\n".join(full_changelog)
+        + "\n".join(payload.full_changelog)
     )
+    return (
+        f"Produce release notes for Dragonfly {payload.commit_range}.\n\n"
+        f"{normalized_payload}\n\n"
+        "After all themed sections, append a final section:\n"
+        "## What's Changed\n"
+        "with the full commit list verbatim (one bullet per commit subject)."
+    )
+
+
+def _build_announce_user_message(payload: CompositionPayload) -> str:
+    lines = [
+        f"Produce an announce brief for Dragonfly {payload.commit_range}.",
+        "",
+        f"Range: {payload.commit_range}",
+        f"Total commits analyzed: {len(payload.analyzed)}",
+        f"User-facing commits available: {len(payload.user_facing)}",
+        f"Selected announce highlights: {len(payload.announce_highlights)}",
+    ]
+
+    if payload.promoted_themes:
+        lines.extend(["", "Promoted themes (cross-cutting product themes):"])
+        for theme, commits in payload.promoted_themes.items():
+            refs = ", ".join(item.ref for item in commits)
+            lines.append(f"- {theme} ({len(commits)} commits): {refs}")
+
+    if payload.announce_highlights:
+        lines.extend(["", "Selected top highlights (use these to anchor the story):"])
+        for idx, item in enumerate(payload.announce_highlights, 1):
+            lines.append(
+                f"{idx}. {item.analysis.summary} ({item.ref}) "
+                f"[category={item.analysis.category}]"
+            )
+            if item.analysis.impact:
+                lines.append(f"   impact: {item.analysis.impact}")
+            if item.analysis.use_case:
+                lines.append(f"   use_case: {item.analysis.use_case}")
+            if item.analysis.audience:
+                lines.append(f"   audience: {item.analysis.audience}")
+            if item.analysis.adoption_notes:
+                lines.append(f"   adoption_notes: {item.analysis.adoption_notes}")
+            if item.analysis.technical_details:
+                lines.append(f"   technical_details: {item.analysis.technical_details}")
+            if item.analysis.validation_notes:
+                lines.append(f"   validation_notes: {item.analysis.validation_notes}")
+            if item.analysis.competitive_context:
+                lines.append(f"   competitive_context: {item.analysis.competitive_context}")
+            if item.analysis.caveats:
+                lines.append(f"   caveats: {item.analysis.caveats}")
+
+    lines.extend(["", "All user-facing commits and evidence (source of truth):"])
+    for item in payload.user_facing:
+        theme = item.analysis.theme.strip().lower() or "-"
+        lines.append(
+            f"- ref={item.ref}; category={item.analysis.category}; theme={theme}; "
+            f"promoted_theme_size={item.promoted_theme_size}; score={item.announce_score:.2f}"
+        )
+        lines.append(f"  summary: {item.analysis.summary}")
+        if item.analysis.impact:
+            lines.append(f"  impact: {item.analysis.impact}")
+        if item.analysis.use_case:
+            lines.append(f"  use_case: {item.analysis.use_case}")
+        if item.analysis.audience:
+            lines.append(f"  audience: {item.analysis.audience}")
+        if item.analysis.adoption_notes:
+            lines.append(f"  adoption_notes: {item.analysis.adoption_notes}")
+        if item.analysis.technical_details:
+            lines.append(f"  technical_details: {item.analysis.technical_details}")
+        if item.analysis.validation_notes:
+            lines.append(f"  validation_notes: {item.analysis.validation_notes}")
+        if item.analysis.competitive_context:
+            lines.append(f"  competitive_context: {item.analysis.competitive_context}")
+        if item.analysis.caveats:
+            lines.append(f"  caveats: {item.analysis.caveats}")
+
+    return "\n".join(lines)
+
+
+def _build_release_notes_empty_output(payload: CompositionPayload) -> str:
+    return (
+        f"# Release Notes -- {payload.commit_range}\n\n"
+        "_No user-facing changes detected in this range._\n"
+    )
+
+
+def _build_announce_empty_output(payload: CompositionPayload) -> str:
+    return (
+        f"# Announce Brief -- {payload.commit_range}\n\n"
+        "_No user-facing changes were strong enough to support an announce brief in this range._\n"
+    )
+
+
+def _release_notes_filename(backend_name: str, safe_range: str) -> str:
+    prefix = "release_notes_copilot" if backend_name == "copilot" else "release_notes"
+    return f"{prefix}_{safe_range}.md"
+
+
+def _announce_filename(backend_name: str, safe_range: str) -> str:
+    prefix = "announce_copilot" if backend_name == "copilot" else "announce"
+    return f"{prefix}_{safe_range}.md"
+
+
+def _post_process_release_notes(_backend_name: str, notes: str) -> str:
+    return _dedupe_highlights_section(_strip_leading_preamble(notes))
+
+
+def _post_process_announce(_backend_name: str, notes: str) -> str:
+    notes = _strip_leading_preamble(notes).strip()
+    notes = re.sub(r"\n{3,}", "\n\n", notes)
+    return notes + "\n"
+
+
+TARGETS = {
+    "release-notes": CompositionTarget(
+        name="release-notes",
+        system_prompt=RELEASE_NOTES_SYSTEM_PROMPT,
+        build_user_message=_build_release_notes_user_message,
+        build_empty_output=_build_release_notes_empty_output,
+        output_filename=_release_notes_filename,
+        post_process=_post_process_release_notes,
+    ),
+    "announce": CompositionTarget(
+        name="announce",
+        system_prompt=ANNOUNCE_SYSTEM_PROMPT,
+        build_user_message=_build_announce_user_message,
+        build_empty_output=_build_announce_empty_output,
+        output_filename=_announce_filename,
+        post_process=_post_process_announce,
+        should_skip=lambda p: not p.announce_highlights,
+    ),
+}
 
 
 async def _heartbeat_compose(
     backend: LLMBackend,
     compose_task: "asyncio.Task[str]",
     user_facing_count: int,
+    target_name: str,
 ) -> str:
     """Drive the compose task and print periodic progress lines until it finishes."""
     started_at = time.monotonic()
@@ -1292,7 +1680,7 @@ async def _heartbeat_compose(
         elapsed_s = int(time.monotonic() - started_at)
         status = backend.compose_progress_status()
         print(
-            f"  Compose in progress: backend={backend.name}, elapsed={elapsed_s}s, "
+            f"  Compose in progress: target={target_name}, backend={backend.name}, elapsed={elapsed_s}s, "
             f"user-facing commits={user_facing_count}{status} ..."
         )
         try:
@@ -1302,39 +1690,41 @@ async def _heartbeat_compose(
     return await compose_task
 
 
-async def compose_release_notes(
+async def compose_target(
     backend: LLMBackend,
-    analyzed: list[AnalyzedCommit],
-    commit_range: str,
+    target: CompositionTarget,
+    payload: CompositionPayload,
 ) -> str:
-    user_facing = [a for a in analyzed if a.analysis.user_facing]
-    if not user_facing:
-        return (
-            f"# Release Notes -- {commit_range}\n\n"
-            "_No user-facing changes detected in this range._\n"
-        )
+    if not payload.user_facing or target.should_skip(payload):
+        return target.build_empty_output(payload)
 
-    promoted = detect_promoted_themes(user_facing)
-    if promoted:
+    if payload.promoted_themes:
         print(
             f"  Promoted themes (>={PROMOTE_THEME_MIN_SIZE} commits each): "
-            + ", ".join(f"{t}({len(cs)})" for t, cs in promoted.items())
+            + ", ".join(
+                f"{theme}({len(commits)})" for theme, commits in payload.promoted_themes.items()
+            )
+        )
+    if payload.announce_highlights:
+        print(
+            "  Selected announce highlights: "
+            + ", ".join(
+                f"{item.ref}:{item.announce_score:.2f}" for item in payload.announce_highlights
+            )
         )
 
-    payload = _build_composition_payload(commit_range, analyzed, user_facing, promoted)
-    user_message = (
-        f"Produce release notes for Dragonfly {commit_range}.\n\n"
-        f"{payload}\n\n"
-        "After all themed sections, append a final section:\n"
-        "## What's Changed\n"
-        "with the full commit list verbatim (one bullet per commit subject)."
-    )
+    user_message = target.build_user_message(payload)
 
     compose_task = asyncio.create_task(
-        backend.compose(COMPOSE_SYSTEM_PROMPT, user_message, max_tokens=COMPOSE_MAX_TOKENS)
+        backend.compose(target.system_prompt, user_message, max_tokens=COMPOSE_MAX_TOKENS)
     )
-    notes = await _heartbeat_compose(backend, compose_task, len(user_facing))
-    return backend.post_process_notes(notes)
+    notes = await _heartbeat_compose(
+        backend,
+        compose_task,
+        len(payload.user_facing),
+        target.name,
+    )
+    return target.post_process(backend.name, notes)
 
 
 # ---------------------------------------------------------------------------
@@ -1384,7 +1774,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         default=".",
-        help="Where to write release_notes_<range>.md (default: current dir)",
+        help="Where to write the generated Markdown artifact (default: current dir)",
+    )
+    parser.add_argument(
+        "--target",
+        choices=sorted(TARGETS),
+        default="release-notes",
+        help=(
+            "Composition target to generate: 'release-notes' (default) or 'announce'. "
+            "Both targets reuse the same per-commit analysis artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--top-highlights",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Override the number of announce highlights to pass into composition. "
+            "By default announce mode auto-selects the strongest 5-10 items."
+        ),
     )
     parser.add_argument(
         "--max-parallel",
@@ -1464,12 +1872,18 @@ def _build_backend(backend_name: str) -> LLMBackend:
     return AnthropicBackend(anthropic.Anthropic(max_retries=SDK_MAX_RETRIES))
 
 
-def _resolve_cache_dir(no_cache: bool, cache_dir_arg: Optional[str], repo: Path) -> Optional[Path]:
+def _resolve_cache_dir(
+    no_cache: bool,
+    cache_dir_arg: Optional[str],
+    repo: Path,
+    backend: LLMBackend,
+) -> Optional[Path]:
     if no_cache:
         return None
-    cache_dir = Path(cache_dir_arg).resolve() if cache_dir_arg else repo / CACHE_SUBDIR
+    cache_root = Path(cache_dir_arg).resolve() if cache_dir_arg else repo / CACHE_SUBDIR
+    cache_dir = _cache_backend_dir(cache_root, backend)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  Cache dir: {cache_dir}")
+    print(f"  Cache dir ({backend.name}): {cache_dir}")
     return cache_dir
 
 
@@ -1479,12 +1893,14 @@ class _AnalysisIncompleteError(RuntimeError):
 
 async def _run_async(
     backend: LLMBackend,
+    target: CompositionTarget,
     commits: list[Commit],
     commit_range: str,
     max_parallel: int,
     retry_rounds: int,
     cache_dir: Optional[Path],
     output_dir: Path,
+    top_highlights_override: Optional[int],
 ) -> None:
     analyzed, stats = await analyze_with_retries(
         backend,
@@ -1505,11 +1921,20 @@ async def _run_async(
     order = {c.sha: i for i, c in enumerate(commits)}
     analyzed.sort(key=lambda a: order.get(a.commit.sha, 0))
 
-    print("\nAll commits analyzed. Composing release notes ...")
-    notes = await compose_release_notes(backend, analyzed, commit_range)
+    payload = build_composition_payload(
+        commit_range,
+        analyzed,
+        top_highlights_override=top_highlights_override,
+    )
+
+    print(f"\nAll commits analyzed. Composing {target.name} ...")
+    notes = await compose_target(backend, target, payload)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / backend.notes_filename(sanitize_for_filename(commit_range))
+    out_path = output_dir / target.output_filename(
+        backend.name,
+        sanitize_for_filename(commit_range),
+    )
     out_path.write_text(notes, encoding="utf-8")
     print(f"\nWrote {out_path}")
 
@@ -1520,7 +1945,11 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(message)s",
         force=True,
     )
-    args = _build_arg_parser().parse_args()
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    if args.top_highlights is not None and args.target != "announce":
+        parser.error("--top-highlights is only valid with --target announce")
 
     repo = Path(args.repo).resolve()
     if not (repo / ".git").exists():
@@ -1548,18 +1977,21 @@ def main() -> int:
         return 0
 
     backend = _build_backend(args.backend)
-    cache_dir = _resolve_cache_dir(args.no_cache, args.cache_dir, repo)
+    target = TARGETS[args.target]
+    cache_dir = _resolve_cache_dir(args.no_cache, args.cache_dir, repo, backend)
 
     try:
         asyncio.run(
             _run_async(
                 backend,
+                target,
                 commits,
                 args.commit_range,
                 args.max_parallel,
                 args.retry_rounds,
                 cache_dir,
                 Path(args.output_dir).resolve(),
+                args.top_highlights,
             )
         )
     except _AnalysisIncompleteError as e:
