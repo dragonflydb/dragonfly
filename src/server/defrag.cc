@@ -21,13 +21,21 @@ ABSL_FLAG(bool, defrag_use_skip_bit, true,
           "If true, mark target pages with mimalloc's defrag_skip bit so EVAC moves don't "
           "refill them. Disable to A/B compare against an unmarked baseline.");
 
-ABSL_FLAG(double, defrag_skip_percentile, 1.0,
+ABSL_FLAG(double, defrag_skip_percentile, 0.5,
           "Fraction of the target plan (sorted by retention_score, most-fragmented first) "
-          "to apply the mimalloc defrag_skip bit to. 1.0 marks every target (default). "
-          "Lower values shrink the lockout footprint: only the most-fragmented top-K pages "
-          "are protected from refill, while higher-utilization targets stay refillable. "
-          "Trades reclaim completeness on those pages against transient memory bulge during "
-          "EVACUATE.");
+          "to apply the mimalloc defrag_skip bit to. 0.5 (default) marks the top half "
+          "and lets the bottom half stay refillable, which empirically gives the best "
+          "floor-vs-bulge tradeoff. 1.0 marks every target (max reclaim, biggest bulge). "
+          "Lower values shrink the lockout footprint: only the most-fragmented top-K "
+          "pages are protected from refill while higher-utilization targets stay "
+          "refillable.");
+
+ABSL_FLAG(uint64_t, defrag_min_plan_reclaimable_bytes, 64u << 20,
+          "Minimum bytes-reclaimable threshold the SELECT_TARGETS plan must hit to "
+          "justify running EVACUATE. Below this, the cycle is skipped (PLAN_SKIPPED) "
+          "and we return to IDLE without walking the dashtable. The underutil set is "
+          "left intact so the next cycle picks it up if churn refills the pages above "
+          "threshold (or new fragmentation appears). Default 64 MiB.");
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -49,6 +57,13 @@ namespace dfly {
 namespace {
 
 constexpr uint64_t kPerTargetSlotCostBytes = 16 * 1024;
+
+// When false, PageCensus skips the top-k heap entirely and just inserts every
+// observed page into pages_. Cheap (no priority_queue work per Observe), but
+// loses the cap-and-evict-worst guard: the map hard-crashes on a new entry
+// once it reaches max_retained_pages_. Flip to true to restore heap-based
+// eviction so workloads exceeding the cap stay bounded.
+constexpr bool kEnableTopK = false;
 
 uint64_t ReclaimableBytes(uint16_t capacity_blocks, uint16_t used_blocks, uint32_t block_size) {
   if (used_blocks >= capacity_blocks)
@@ -88,7 +103,7 @@ void PopulateAgg(PageAgg& agg, const mi_page_usage_stats_t& stat, float score) {
   agg.retention_score = score;
 }
 
-TargetFilterReason ClassifyForTarget(const PageAgg& agg, uint32_t /*sample_rate*/) {
+TargetFilterReason ClassifyForTarget(const PageAgg& agg) {
   if (agg.observed_movable_blocks == 0)
     return TargetFilterReason::kNoObservedBlocks;
   if (agg.used_blocks == 0)
@@ -137,18 +152,10 @@ namespace defrag_underutil {
 
 namespace {
 
-// Per-thread set of mimalloc page addresses that have been signalled as having
-// dropped below the defrag threshold. Populated by the mimalloc free path via
-// `OnPageUnderutil` and consumed by the defrag CENSUS phase.
 thread_local absl::flat_hash_set<uintptr_t> tl_underutil_pages;
 
 void OnPageUnderutil(uintptr_t page_addr) {
-  // Idempotent: re-adding an already-tracked page is a no-op.
-  const auto [_, inserted] = tl_underutil_pages.insert(page_addr);
-  if (inserted) {
-    LOG_FIRST_N(INFO, 5) << "defrag[underutil_cb] first hits, set_size_now="
-                         << tl_underutil_pages.size() << " page=0x" << std::hex << page_addr;
-  }
+  tl_underutil_pages.insert(page_addr);
 }
 
 }  // namespace
@@ -170,7 +177,7 @@ size_t Size() {
 }
 
 std::vector<uintptr_t> Snapshot() {
-  return std::vector(tl_underutil_pages.begin(), tl_underutil_pages.end());
+  return {tl_underutil_pages.begin(), tl_underutil_pages.end()};
 }
 
 void Remove(uintptr_t page_addr) {
@@ -199,12 +206,7 @@ void DefragTaskState::FinishCycle() {
   phase = DefragPhase::IDLE;
   census.reset();
   plan.reset();
-  // Preserve cursor_hints if a tail is still queued — they were populated for
-  // every bucket containing any candidate page from the original CENSUS, so
-  // they remain valid for tail-derived plans. Reset only the walk position.
-  if (target_tail.empty()) {
-    cursor_hints.clear();
-  }
+  cursor_hints.clear();
   hint_cursor_idx = 0;
   ResetScanState();
 }
@@ -505,42 +507,55 @@ void PageCensus::Observe(const mi_page_usage_stats_t& stat, uint64_t bucket_curs
   const float new_score = ComputeRetentionScore(
       stat.capacity, stat.used, static_cast<uint32_t>(stat.block_size), per_block_move_cost_bytes_);
 
-  auto add_entry = [&] {
-    PageAgg& agg = pages_[stat.page_address];
-    PopulateAgg(agg, stat, new_score);
-    worst_retained_.push({stat.page_address, new_score, agg.generation});
-    ++stats_->allocations_recorded;
-  };
+  if constexpr (kEnableTopK) {
+    auto add_entry = [&] {
+      PageAgg& agg = pages_[stat.page_address];
+      PopulateAgg(agg, stat, new_score);
+      worst_retained_.push({stat.page_address, new_score, agg.generation});
+      ++stats_->allocations_recorded;
+    };
 
-  if (auto it = pages_.find(stat.page_address); it != pages_.end()) {
-    PopulateAgg(it->second, stat, new_score);
-    worst_retained_.push({stat.page_address, new_score, it->second.generation});
-    ++stats_->allocations_recorded;
-  } else if (pages_.size() < max_retained_pages_) {
-    add_entry();
-  } else {
-    while (!worst_retained_.empty()) {
-      const HeapEntry top = worst_retained_.top();
-      auto evict_it = pages_.find(top.page_address);
-      if (evict_it == pages_.end() || evict_it->second.generation != top.generation) {
-        worst_retained_.pop();
-        continue;
+    if (auto it = pages_.find(stat.page_address); it != pages_.end()) {
+      PopulateAgg(it->second, stat, new_score);
+      worst_retained_.push({stat.page_address, new_score, it->second.generation});
+      ++stats_->allocations_recorded;
+    } else if (pages_.size() < max_retained_pages_) {
+      add_entry();
+    } else {
+      while (!worst_retained_.empty()) {
+        const HeapEntry top = worst_retained_.top();
+        auto evict_it = pages_.find(top.page_address);
+        if (evict_it == pages_.end() || evict_it->second.generation != top.generation) {
+          worst_retained_.pop();
+          continue;
+        }
+        if (new_score > top.score) {
+          worst_retained_.pop();
+          pages_.erase(evict_it);
+          ++stats_->pages_evicted_from_retained;
+          add_entry();
+        } else {
+          ++stats_->skipped_low_score;
+        }
+        break;
       }
-      if (new_score > top.score) {
-        worst_retained_.pop();
-        pages_.erase(evict_it);
-        ++stats_->pages_evicted_from_retained;
-        add_entry();
-      } else {
-        ++stats_->skipped_low_score;
-      }
-      break;
     }
-  }
 
-  if (worst_retained_.size() > 2 * max_retained_pages_) {
-    RebuildHeap();
-    ++stats_->heap_rebuilds;
+    if (worst_retained_.size() > 2 * max_retained_pages_) {
+      RebuildHeap();
+      ++stats_->heap_rebuilds;
+    }
+  } else {
+    if (auto it = pages_.find(stat.page_address); it != pages_.end()) {
+      PopulateAgg(it->second, stat, new_score);
+    } else {
+      CHECK_LT(pages_.size(), max_retained_pages_)
+          << "PageCensus exceeded max_retained_pages_=" << max_retained_pages_
+          << " with kEnableTopK=false";
+      PageAgg& agg = pages_[stat.page_address];
+      PopulateAgg(agg, stat, new_score);
+    }
+    ++stats_->allocations_recorded;
   }
 }
 
@@ -555,6 +570,14 @@ void PageCensus::ObservePage(const mi_page_usage_stats_t& stat) {
   const float new_score = ComputeRetentionScore(
       stat.capacity, stat.used, static_cast<uint32_t>(stat.block_size), per_block_move_cost_bytes_);
 
+  if constexpr (!kEnableTopK) {
+    if (!pages_.contains(stat.page_address)) {
+      CHECK_LT(pages_.size(), max_retained_pages_)
+          << "PageCensus exceeded max_retained_pages_=" << max_retained_pages_
+          << " with kEnableTopK=false";
+    }
+  }
+
   PageAgg& agg = pages_[stat.page_address];
   agg.page_address = stat.page_address;
   agg.block_size = static_cast<uint32_t>(stat.block_size);
@@ -567,12 +590,14 @@ void PageCensus::ObservePage(const mi_page_usage_stats_t& stat) {
   agg.generation = 1;
   agg.retention_score = new_score;
 
-  worst_retained_.push({stat.page_address, new_score, agg.generation});
   ++stats_->allocations_recorded;
 
-  if (worst_retained_.size() > 2 * max_retained_pages_) {
-    RebuildHeap();
-    ++stats_->heap_rebuilds;
+  if constexpr (kEnableTopK) {
+    worst_retained_.push({stat.page_address, new_score, agg.generation});
+    if (worst_retained_.size() > 2 * max_retained_pages_) {
+      RebuildHeap();
+      ++stats_->heap_rebuilds;
+    }
   }
 }
 
@@ -597,10 +622,8 @@ TargetPlan::~TargetPlan() {
   }
 }
 
-void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets, uint32_t sample_rate,
-                           size_t tail_capacity) {
+void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets) {
   targets_.clear();
-  tail_.clear();
   address_to_index_.clear();
   *stats_ = PlanStats{};
 
@@ -608,7 +631,7 @@ void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets, uint32_
   candidates.reserve(census.pages().size());
 
   for (const auto& agg : census.pages() | std::views::values) {
-    switch (ClassifyForTarget(agg, sample_rate)) {
+    switch (ClassifyForTarget(agg)) {
       case TargetFilterReason::kKeep:
         candidates.push_back(MakeTargetPage(agg));
         break;
@@ -645,15 +668,7 @@ void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets, uint32_
 
   max_targets = std::min(max_targets, candidates.size());
   if (candidates.size() > max_targets) {
-    const size_t overflow = candidates.size() - max_targets;
-    stats_->truncated_by_cap = overflow;
-    const size_t tail_take = std::min(overflow, tail_capacity);
-    tail_.reserve(tail_take);
-    for (size_t i = max_targets; i < max_targets + tail_take; ++i) {
-      tail_.push_back(candidates[i]);
-    }
-    // Reclaimable bytes still tracked for the full overflow even if only part
-    // is retained as tail — that's the truthful "we saw but won't target" total.
+    stats_->truncated_by_cap = candidates.size() - max_targets;
     for (size_t i = max_targets; i < candidates.size(); ++i) {
       const TargetPage& tp = candidates[i];
       stats_->truncated_reclaimable_bytes +=
@@ -665,44 +680,20 @@ void TargetPlan::BuildFrom(const PageCensus& census, size_t max_targets, uint32_
   targets_ = std::move(candidates);
   address_to_index_.reserve(targets_.size());
   bloom_.Clear();
+  // Selective skip: targets_ is sorted descending by retention_score, which
+  // correlates inversely with used/capacity. Head of the vector = most
+  // fragmented. Apply skip_bit only to the top fraction so high-utilization
+  // targets stay refillable, shrinking lockout pressure on the workload.
+  const double skip_pct = std::clamp(absl::GetFlag(FLAGS_defrag_skip_percentile), 0.0, 1.0);
+  const size_t skip_count = static_cast<size_t>(static_cast<double>(targets_.size()) * skip_pct);
   for (size_t i = 0; i < targets_.size(); ++i) {
     address_to_index_[targets_[i].page_address] = i;
     bloom_.Insert(targets_[i].page_address);
-    // Tell mimalloc to skip this page in alloc paths; EVACUATE moves should
-    // not refill pages we are about to drain.
-    SetDefragSkipIfEnabled(targets_[i].page_address, true);
-  }
-  stats_->targets_kept = targets_.size();
-  pending_targets_ = targets_.size();
-
-  for (const TargetPage& tp : targets_) {
-    stats_->selected_capacity_bytes_at_census += uint64_t(tp.capacity_blocks) * tp.block_size;
-    stats_->selected_used_bytes_at_census += uint64_t(tp.blocks_at_census) * tp.block_size;
-    stats_->selected_reclaimable_bytes_at_census +=
-        uint64_t(tp.capacity_blocks - tp.blocks_at_census) * tp.block_size;
-  }
-}
-
-void TargetPlan::HydrateFromTail(std::vector<TargetPage> targets) {
-  targets_.clear();
-  tail_.clear();
-  address_to_index_.clear();
-  *stats_ = PlanStats{};
-
-  targets_ = std::move(targets);
-  address_to_index_.reserve(targets_.size());
-  bloom_.Clear();
-  for (size_t i = 0; i < targets_.size(); ++i) {
-    // Reset mutable fields in case the caller passed cached entries that were
-    // touched in a prior context (defensive — tail entries are typically clean).
-    targets_[i].blocks_evacuated = 0;
-    targets_[i].evacuation_failures = 0;
-    targets_[i].status = TargetStatus::kPending;
-    targets_[i].revalidation_failed = false;
-    targets_[i].failure_reason = RevalidationFailureReason::kNone;
-    address_to_index_[targets_[i].page_address] = i;
-    bloom_.Insert(targets_[i].page_address);
-    SetDefragSkipIfEnabled(targets_[i].page_address, true);
+    if (i < skip_count) {
+      // Tell mimalloc to skip this page in alloc paths; EVACUATE moves should
+      // not refill pages we are about to drain.
+      SetDefragSkipIfEnabled(targets_[i].page_address, true);
+    }
   }
   stats_->targets_kept = targets_.size();
   pending_targets_ = targets_.size();
@@ -917,12 +908,8 @@ CycleProgress RunVerify(const TargetPlan& plan) {
   return p;
 }
 
-CensusTaker::CensusTaker(PageCensus* census, float threshold, CycleQuota quota,
-                         uint32_t sample_rate)
-    : PageUsage(CollectPageStats::NO, threshold, quota),
-      census_(census),
-      threshold_(threshold),
-      sample_rate_(sample_rate) {
+CensusTaker::CensusTaker(PageCensus* census, float threshold, CycleQuota quota)
+    : PageUsage(CollectPageStats::NO, threshold, quota), census_(census), threshold_(threshold) {
 }
 
 bool CensusTaker::IsPageForObjectUnderUtilized(void* object) {
@@ -998,29 +985,6 @@ void DefragIdleStep(DefragTaskState* state, float threshold) {
   state->phase_start_ns = now;
   state->phase_active_ns = 0;
 
-  if (!state->target_tail.empty()) {
-    // Fast path: hydrate plan from the tail saved by an earlier CENSUS and
-    // skip straight to EVACUATE. Per-page revalidation in EVAC drops any
-    // entries that went stale.
-    const size_t take = std::min(state->target_tail.size(), TargetPlan::kDefaultMaxTargets);
-    std::vector<TargetPage> next_batch(std::make_move_iterator(state->target_tail.begin()),
-                                       std::make_move_iterator(state->target_tail.begin() + take));
-    state->target_tail.erase(state->target_tail.begin(), state->target_tail.begin() + take);
-    state->plan.emplace(&state->cycle_stats.plan);
-    state->plan->HydrateFromTail(std::move(next_batch));
-    state->cycle_stats.plan_target_pages = state->plan->size();
-    // Hints carried over from the original CENSUS still apply: they cover
-    // every bucket holding any candidate, including the tail's pages. Just
-    // rewind the walk position.
-    state->hint_cursor_idx = 0;
-    LOG(INFO) << absl::StrFormat(
-        "defrag[CYCLE_START_FAST] shard=%u cycle=%llu targets=%zu "
-        "remaining_tail=%zu (skipping CENSUS)",
-        state->shard_id, state->cycle_id, state->plan->size(), state->target_tail.size());
-    state->phase = DefragPhase::EVACUATE;
-    return;
-  }
-
   state->census.emplace(&state->cycle_stats.census, PageCensus::kDefaultMaxRetainedPages,
                         state->per_block_move_cost_bytes);
   LOG(INFO) << absl::StrFormat("defrag[CYCLE_START] shard=%u cycle=%llu threshold=%.2f",
@@ -1079,7 +1043,7 @@ void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,
   }
 
   // Fallback: full dashtable walk.
-  CensusTaker visitor(&*state->census, threshold, quota, state->census_sample_rate);
+  CensusTaker visitor(&*state->census, threshold, quota);
   const DbSliceResult result = walk(&visitor, /*hints=*/nullptr, /*hint_cursor=*/nullptr);
   state->cycle_stats.census_db_objects_scanned += result.attempts;
   if (!result.finished_all_dbs) {
@@ -1122,11 +1086,8 @@ void DefragCensusStep(DefragTaskState* state, float threshold, CycleQuota quota,
 void DefragSelectTargetsStep(DefragTaskState* state) {
   const uint64_t step_start_ns = NowNs();
   state->plan.emplace(&state->cycle_stats.plan);
-  state->plan->BuildFrom(*state->census, TargetPlan::kDefaultMaxTargets, state->census_sample_rate,
-                         TargetPlan::kDefaultTailCapacity);
+  state->plan->BuildFrom(*state->census);
   state->cycle_stats.plan_target_pages = state->plan->size();
-  // Stash any retained tail so future cycles can skip CENSUS entirely.
-  state->target_tail = state->plan->TakeTail();
   // Hand the bucket-cursor hints off to the task state so EVACUATE can use
   // them after we release the census itself (the page map is large).
   state->cursor_hints = state->census->TakeCursorHints();
@@ -1149,6 +1110,21 @@ void DefragSelectTargetsStep(DefragTaskState* state) {
       FormatMiB(p.filtered_immovable_reclaimable_bytes), FormatMiB(p.truncated_reclaimable_bytes),
       NsToMs(now - state->phase_start_ns), NsToMs(state->phase_active_ns));
 
+  // Skip EVAC when the prize is too small to justify the dashtable walk. The
+  // underutil set is left intact: future cycles re-enter via reactive CENSUS
+  // and re-plan; if churn pushes more pages below threshold, the plan grows
+  // back above the bar naturally.
+  const uint64_t min_reclaimable = absl::GetFlag(FLAGS_defrag_min_plan_reclaimable_bytes);
+  if (p.selected_reclaimable_bytes_at_census < min_reclaimable) {
+    LOG(INFO) << absl::StrFormat(
+        "defrag[PLAN_SKIPPED] shard=%u cycle=%llu reclaimable=%s threshold=%s targets=%zu",
+        state->shard_id, state->cycle_id, FormatMiB(p.selected_reclaimable_bytes_at_census),
+        FormatMiB(min_reclaimable), state->cycle_stats.plan_target_pages);
+    state->cycle_stats.cycle_finished = true;
+    state->FinishCycle();
+    return;
+  }
+
   state->phase_start_ns = now;
   state->phase_active_ns = 0;
   state->phase = DefragPhase::EVACUATE;
@@ -1158,11 +1134,7 @@ void DefragEvacuateStep(DefragTaskState* state, float threshold, CycleQuota quot
                         const DbSliceWalker& walk) {
   const uint64_t step_start_ns = NowNs();
   Evacuator visitor(&*state->plan, threshold, &state->cycle_stats.evac, quota);
-  // Hints are only safe to use when CENSUS visited every bucket
-  // (sample_rate == 1). Sampled CENSUS only sees ~1/sample_rate of the buckets
-  // touching each target page; using those partial hints would cause every
-  // page to partially-evacuate without freeing.
-  const bool use_hints = state->census_sample_rate == 1 && !state->cursor_hints.empty();
+  const bool use_hints = !state->cursor_hints.empty();
   const DbSliceResult result = walk(&visitor, use_hints ? &state->cursor_hints : nullptr,
                                     use_hints ? &state->hint_cursor_idx : nullptr);
   state->cycle_stats.evac_db_objects_scanned += result.attempts;
@@ -1275,7 +1247,11 @@ StepTransition RunPhaseStep(DefragTaskState* state, float threshold, CycleQuota 
 }
 
 bool CycleEnded(StepTransition t) {
-  return t.before == DefragPhase::VERIFY && t.after == DefragPhase::IDLE;
+  if (t.after != DefragPhase::IDLE)
+    return false;
+  // Normal end (VERIFY -> IDLE) and PLAN_SKIPPED bail-out (SELECT_TARGETS ->
+  // IDLE) both terminate the cycle.
+  return t.before == DefragPhase::VERIFY || t.before == DefragPhase::SELECT_TARGETS;
 }
 
 }  // namespace

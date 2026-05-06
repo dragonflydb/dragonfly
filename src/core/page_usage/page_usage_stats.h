@@ -125,13 +125,6 @@ class PageUsage {
   virtual void SetCurrentBucketCursor(uint64_t /*cursor*/) {
   }
 
-  // Number of buckets the slice walker should skip after each Traverse call.
-  // Used by sampled walkers (e.g. CENSUS at sample_rate=4 returns 3 to visit
-  // ~1-in-4 logical buckets). Default 0 = visit every bucket.
-  virtual uint32_t BucketSkipAfterTraverse() const {
-    return 0;
-  }
-
   float threshold() const {
     return threshold_;
   }

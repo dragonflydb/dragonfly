@@ -57,11 +57,6 @@ ABSL_FLAG(bool, experimental_defrag, true,
           "When true, run the phased defragmentation strategy (CENSUS / SELECT_TARGETS / "
           "EVACUATE / VERIFY) instead of the legacy single-pass defragmenter. Experimental.");
 
-ABSL_FLAG(uint32_t, defrag_census_sample_rate, 1,
-          "Phased defrag CENSUS bucket sampling stride. 1 = full scan. N>1 visits every "
-          "Nth logical bucket: per-cycle reclamation drops to ~1/N but cycle wall time "
-          "drops too. Steady-state reclamation converges over multiple cycles.");
-
 ABSL_FLAG(uint64_t, defrag_per_block_move_cost_bytes, 256,
           "Per-block move-cost weight in the page retention score. Higher values push "
           "pages with many small entries toward the back of the candidate ranking, "
@@ -130,8 +125,6 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
   bool namespaces_null = false;
 
   const bool read_only = visitor->IsReadOnly();
-  const uint32_t bucket_skip = visitor->BucketSkipAfterTraverse();
-  uint64_t buckets_skipped = 0;
   do {
     visitor->SetCurrentBucketCursor(cur.token());
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
@@ -152,11 +145,6 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
     });
     ++traverse_calls;
 
-    for (uint32_t i = 0; i < bucket_skip && cur; ++i) {
-      cur = prime_table->AdvanceCursorBucketOrder(cur);
-      ++buckets_skipped;
-    }
-
     quota_depleted = visitor->QuotaDepleted();
     should_stop = visitor->ShouldStop();
     cursor_done = !cur;
@@ -165,9 +153,9 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
 
   const double elapsed_ms = static_cast<double>(absl::GetCurrentTimeNanos() - start_ns) / 1e6;
   LOG(INFO) << absl::StrFormat(
-      "defrag[Slice] dbid=%zu cursor=%llu->%llu traverses=%llu skipped=%llu attempts=%llu "
-      "reallocs=%llu took=%.1fms exit{quota=%d stop=%d cursor_done=%d ns_null=%d}",
-      dbid_before, cursor_before, cur.token(), traverse_calls, buckets_skipped, result.attempts,
+      "defrag[Slice] dbid=%zu cursor=%llu->%llu traverses=%llu attempts=%llu reallocs=%llu "
+      "took=%.1fms exit{quota=%d stop=%d cursor_done=%d ns_null=%d}",
+      dbid_before, cursor_before, cur.token(), traverse_calls, result.attempts,
       result.reallocations, elapsed_ms, quota_depleted, should_stop, cursor_done, namespaces_null);
 
   *cursor = cur.token();
@@ -535,8 +523,6 @@ DefragShardReport EngineShard::DoDefrag(PageUsage* page_usage) {
     // Picked up at IDLE so a new cycle reflects flag changes; mid-cycle changes
     // are deferred until the next cycle so CENSUS/EVACUATE see consistent state.
     if (defrag_state_.phase == DefragPhase::IDLE) {
-      defrag_state_.census_sample_rate =
-          std::max<uint32_t>(1, GetFlag(FLAGS_defrag_census_sample_rate));
       defrag_state_.per_block_move_cost_bytes = GetFlag(FLAGS_defrag_per_block_move_cost_bytes);
     }
 

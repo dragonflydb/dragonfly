@@ -66,7 +66,76 @@ PHASE_RE = re.compile(
     r".*?\stook=([\d.]+)ms(?:\s+cpu=([\d.]+)ms)?"
 )
 
+DO_DEFRAG_EXIT_RE = re.compile(
+    r"defrag\[DoDefrag\]\s+shard=(\d+)\s+exit\s+"
+    r"phase=([A-Z_]+)->([A-Z_]+)\s+"
+    r"duration=(\d+)us.*?"
+    r"quota_depleted=(\d+)\s+work_pending=(\d+)\s+cycle_finished=(\d+)"
+)
+
 UNIT = {"B": 1, "KiB": 1024, "MiB": 1024 * 1024, "GiB": 1024 * 1024 * 1024}
+
+
+def record_committed_drop(record: dict) -> int:
+    before = record.get("before") or {}
+    after = record.get("after") or {}
+    if not before or not after:
+        return 0
+    return before.get("committed", 0) - after.get("committed", 0)
+
+
+def record_waste_drop(record: dict) -> float:
+    before = record.get("before") or {}
+    after = record.get("after") or {}
+    before_pct = before.get("waste_pct")
+    after_pct = after.get("waste_pct")
+    if before_pct is None or after_pct is None:
+        return 0.0
+    return before_pct - after_pct
+
+
+def record_bytes_freed(record: dict) -> int:
+    return sum(s.get("bytes_freed", 0) for s in record.get("shards", []))
+
+
+def record_work_pending(record: dict) -> bool | None:
+    pending = [s["work_pending"] for s in record.get("shards", []) if "work_pending" in s]
+    if not pending:
+        return None
+    return any(pending)
+
+
+def stall_reason(records: list[dict], args: argparse.Namespace, stall_armed: bool) -> str | None:
+    if not stall_armed or args.stall_window <= 0 or len(records) < args.stall_window:
+        return None
+    if record_work_pending(records[-1]) is not False:
+        return None
+
+    recent = records[-args.stall_window :]
+    first_before = recent[0].get("before") or {}
+    last_after = recent[-1].get("after") or {}
+    first_waste = first_before.get("waste_pct")
+    last_waste = last_after.get("waste_pct")
+    waste_drop = 0.0
+    if first_waste is not None and last_waste is not None:
+        waste_drop = first_waste - last_waste
+
+    committed_drop = sum(record_committed_drop(r) for r in recent)
+    bytes_freed = sum(record_bytes_freed(r) for r in recent)
+    min_committed_drop = int(args.stall_min_committed_drop_mb * 1024 * 1024)
+
+    if (
+        waste_drop < args.stall_min_waste_drop
+        and committed_drop < min_committed_drop
+        and bytes_freed == 0
+    ):
+        return (
+            f"stalled for {args.stall_window} driver iterations: "
+            f"waste_drop={waste_drop:.3f}pp "
+            f"committed_drop={committed_drop:,}B bytes_freed={bytes_freed:,}B"
+        )
+
+    return None
 
 
 def parse_log_delta(text: str) -> dict[int, dict]:
@@ -118,6 +187,21 @@ def parse_log_delta(text: str) -> dict[int, dict]:
                 "bytes_moved": int(float(moved_v) * UNIT[moved_u]),
                 "cycle_took_ms": float(cycle_took),
                 "freed_rate_mibs": float(freed_rate),
+            }
+        )
+
+    for match in DO_DEFRAG_EXIT_RE.finditer(text):
+        shard_str, phase_start, phase_end, duration_us, quota, pending, finished = match.groups()
+        shard = int(shard_str)
+        rec = by_shard.setdefault(shard, {"shard": shard, "phase_ms": {}})
+        rec.update(
+            {
+                "phase_start": phase_start,
+                "phase_end": phase_end,
+                "duration_us": int(duration_us),
+                "quota_depleted": bool(int(quota)),
+                "work_pending": bool(int(pending)),
+                "cycle_finished": bool(int(finished)),
             }
         )
 
@@ -243,6 +327,7 @@ async def main(args: argparse.Namespace) -> None:
 
     records: list[dict] = []
     last_waste: float | None = None
+    stall_armed = False
     stop_reason = f"reached --cycles={args.cycles}"
     with open(args.output, "w") as out_fh:
         for cycle in range(args.cycles):
@@ -273,9 +358,9 @@ async def main(args: argparse.Namespace) -> None:
             out_fh.flush()
             records.append(record)
 
-            committed_drop = (before["committed"] - after["committed"]) if before and after else 0
+            committed_drop = record_committed_drop(record)
             n_shards = len(shards)
-            total_freed = sum(s.get("bytes_freed", 0) for s in shards.values())
+            total_freed = record_bytes_freed(record)
             waste_before = (before or {}).get("waste_pct")
             waste_after = (after or {}).get("waste_pct")
             waste_str = (
@@ -299,6 +384,14 @@ async def main(args: argparse.Namespace) -> None:
                     f"reached target waste {args.target_waste:.2f}% at "
                     f"{current_waste:.2f}% (cycle {cycle})"
                 )
+                break
+
+            if committed_drop > 0 or total_freed > 0 or record_waste_drop(record) > 0:
+                stall_armed = True
+
+            reason = stall_reason(records, args, stall_armed)
+            if reason is not None:
+                stop_reason = f"{reason} (cycle {cycle})"
                 break
 
             if cycle + 1 < args.cycles:
@@ -337,4 +430,25 @@ if __name__ == "__main__":
     parser.add_argument("--sleep-ms", type=int, default=500)
     parser.add_argument("--log-path", default="/tmp/dragonfly.INFO")
     parser.add_argument("--output", default="runs/defrag_run.jsonl")
+    parser.add_argument(
+        "--stall-window",
+        type=int,
+        default=8,
+        help=(
+            "look back this many driver iterations after arena progress is observed; "
+            "0 disables stall stopping"
+        ),
+    )
+    parser.add_argument(
+        "--stall-min-waste-drop",
+        type=float,
+        default=0.05,
+        help="minimum waste percentage-point drop over --stall-window to count as progress",
+    )
+    parser.add_argument(
+        "--stall-min-committed-drop-mb",
+        type=float,
+        default=16.0,
+        help="minimum committed byte drop over --stall-window to count as progress",
+    )
     asyncio.run(main(parser.parse_args()))

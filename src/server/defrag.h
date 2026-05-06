@@ -11,6 +11,7 @@
 #include <mimalloc/types.h>
 
 #include <functional>
+#include <limits>
 #include <optional>
 #include <queue>
 #include <vector>
@@ -272,11 +273,6 @@ struct EvacStats {
 
 class TargetPlan {
  public:
-  static constexpr size_t kDefaultMaxTargets = 10000;
-  // How many additional candidates beyond max_targets to retain as a tail for
-  // reuse on subsequent phased cycles, skipping CENSUS until exhausted.
-  static constexpr size_t kDefaultTailCapacity = 50000;
-
   explicit TargetPlan(PlanStats* stats);
   ~TargetPlan();
 
@@ -288,19 +284,10 @@ class TargetPlan {
   TargetPlan(TargetPlan&&) = delete;
   TargetPlan& operator=(TargetPlan&&) = delete;
 
-  void BuildFrom(const PageCensus& census, size_t max_targets = kDefaultMaxTargets,
-                 uint32_t sample_rate = 1, size_t tail_capacity = kDefaultTailCapacity);
-
-  // Build an active plan directly from a pre-vetted target list (typically a
-  // tail saved from an earlier BuildFrom). Skips classification — entries are
-  // assumed already filtered. EVACUATE's per-page revalidation handles any
-  // staleness at the time of move.
-  void HydrateFromTail(std::vector<TargetPage> targets);
-
-  // Move the saved tail out of this plan; leaves tail_ empty after.
-  std::vector<TargetPage> TakeTail() {
-    return std::move(tail_);
-  }
+  // Default `max_targets` is effectively unlimited; selective skip-bit (top
+  // skip_pct fraction) bounds lockout pressure. Tests pass explicit small
+  // values to exercise the cap path.
+  void BuildFrom(const PageCensus& census, size_t max_targets = std::numeric_limits<size_t>::max());
 
   const std::vector<TargetPage>& targets() const {
     return targets_;
@@ -318,7 +305,7 @@ class TargetPlan {
   // Fast-reject pre-filter for hot per-object EVAC checks. Returns true if
   // `addr` *might* be a target page, false if definitely not. False positives
   // (~1% at design size) cost a follow-up flat_hash_map lookup; false
-  // negatives are impossible. Rebuilt by BuildFrom / HydrateFromTail.
+  // negatives are impossible. Rebuilt by BuildFrom.
   bool BloomMaybeContains(uintptr_t addr) const;
 
   size_t size() const {
@@ -338,10 +325,11 @@ class TargetPlan {
   }
 
  private:
-  // Compact bloom over target page addresses, sized for kDefaultMaxTargets at
-  // ~1% FP rate. Power-of-two so position lookup is a mask, not a modulo.
-  // 16 KiB total — small enough to live alongside the hot plan data without
-  // adding meaningful pressure.
+  // Compact bloom over target page addresses. Sized for ~10k entries at ~1%
+  // FP rate; with selective skip on a larger plan, FP rate scales gracefully
+  // (hot path falls back to flat_hash_map lookup on a hit). Power-of-two so
+  // position lookup is a mask, not a modulo. 16 KiB total — small enough to
+  // live alongside the hot plan data without adding meaningful pressure.
   struct PlanBloom {
     static constexpr size_t kBits = 1u << 17;  // 128 Kbit
     static constexpr size_t kMask = kBits - 1;
@@ -356,9 +344,6 @@ class TargetPlan {
   };
 
   std::vector<TargetPage> targets_;  // sorted by retention_score desc
-  // Candidates ranked just below the active target cap, retained so a future
-  // phased cycle can hydrate a plan without doing a fresh CENSUS.
-  std::vector<TargetPage> tail_;
   absl::flat_hash_map<uintptr_t, size_t> address_to_index_;
   PlanBloom bloom_;
   PlanStats* stats_;
@@ -451,8 +436,7 @@ const char* PhaseName(DefragPhase phase);
 
 class CensusTaker : public PageUsage {
  public:
-  CensusTaker(PageCensus* census, float threshold, CycleQuota quota = CycleQuota::Unlimited(),
-              uint32_t sample_rate = 1);
+  CensusTaker(PageCensus* census, float threshold, CycleQuota quota = CycleQuota::Unlimited());
 
   bool IsPageForObjectUnderUtilized(void* object) override;
   bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) override;
@@ -465,17 +449,10 @@ class CensusTaker : public PageUsage {
     current_cursor_ = cursor;
   }
 
-  // Asks the slice walker to skip (sample_rate-1) buckets after each Traverse.
-  // sample_rate=1 returns 0 (visit every bucket); sample_rate=4 returns 3.
-  uint32_t BucketSkipAfterTraverse() const override {
-    return sample_rate_ > 0 ? sample_rate_ - 1 : 0;
-  }
-
  private:
   PageCensus* census_;
   float threshold_;
   uint64_t current_cursor_ = 0;
-  uint32_t sample_rate_;
 };
 
 class Evacuator : public PageUsage {
@@ -511,12 +488,6 @@ struct DefragTaskState {
   time_t last_check_time = 0;
   float page_utilization_threshold = 0.8f;
 
-  // CENSUS bucket sampling stride. 1 = visit every bucket (default).
-  // N>1 = visit every Nth logical bucket; per-cycle bytes_freed scales as
-  // ~1/N but cycle wall time drops proportionally. Steady-state reclamation
-  // is unaffected (multiple cycles converge).
-  uint32_t census_sample_rate = 1;
-
   // Per-block move-cost weight in the page retention score:
   //   score = reclaim / (move_bytes + used_blocks * per_block_move_cost + slot_overhead)
   // Higher values penalize many-entry pages more strongly, pushing pages with
@@ -536,11 +507,6 @@ struct DefragTaskState {
   // when one EVAC quota slice can't drain the full hint set.
   std::vector<uint64_t> cursor_hints;
   size_t hint_cursor_idx = 0;
-  // Pre-vetted target candidates carried over from a prior cycle's CENSUS.
-  // Drained one max_targets-sized batch per cycle, letting subsequent phased
-  // cycles skip CENSUS entirely until the tail empties. EVAC's per-page
-  // revalidation handles entries that became stale between cycles.
-  std::vector<TargetPage> target_tail;
   DefragCycleStats cycle_stats;
 
   uint16_t shard_id = 0;
