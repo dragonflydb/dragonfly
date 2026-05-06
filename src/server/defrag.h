@@ -407,18 +407,18 @@ struct DefragMergedReport {
 
 const char* PhaseName(DefragPhase phase);
 
-class CensusTaker : public PageUsage {
+class CensusTaker final : public PageUsage {
  public:
   CensusTaker(PageCensus* census, float threshold, CycleQuota quota = CycleQuota::Unlimited());
 
-  bool IsPageForObjectUnderUtilized(void* object) override;
-  bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) override;
+  bool IsPageForObjectUnderUtilized(void* object) final;
+  bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) final;
 
-  bool IsReadOnly() const override {
+  bool IsReadOnly() const final {
     return true;
   }
 
-  void SetCurrentBucketCursor(uint64_t cursor) override {
+  void SetCurrentBucketCursor(uint64_t cursor) final {
     current_cursor_ = cursor;
   }
 
@@ -428,15 +428,15 @@ class CensusTaker : public PageUsage {
   uint64_t current_cursor_ = 0;
 };
 
-class Evacuator : public PageUsage {
+class Evacuator final : public PageUsage {
  public:
   Evacuator(TargetPlan* plan, float threshold, EvacStats* evac_stats,
             CycleQuota quota = CycleQuota::Unlimited());
 
-  bool IsPageForObjectUnderUtilized(void* object) override;
-  bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) override;
+  bool IsPageForObjectUnderUtilized(void* object) final;
+  bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) final;
 
-  bool ShouldStop() const override {
+  bool ShouldStop() const final {
     return plan_->AllTargetsDone();
   }
 

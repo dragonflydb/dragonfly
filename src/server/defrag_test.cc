@@ -869,6 +869,69 @@ void BM_EvacDecideHit_Evacuator(benchmark::State& state) {
 }
 BENCHMARK(BM_EvacDecideHit_Evacuator)->Arg(kBenchObjectCount);
 
+namespace {
+
+// Non-virtual mirror of Evacuator's hot path. Identical body, but no
+// inheritance, no vtable, and the method is defined inline so the compiler
+// can fold it into the caller. Comparing against BM_EvacDecideHit_Evacuator
+// isolates how much of the per-call overhead is virtual dispatch + worse
+// inlining vs structural cost (member access through `this`).
+class EvacuatorNonVirt {
+ public:
+  EvacuatorNonVirt(TargetPlan* plan, float threshold, EvacStats* evac_stats)
+      : plan_(plan), threshold_(threshold), evac_stats_(evac_stats) {
+  }
+
+  bool IsPageForObjectUnderUtilized(void* object) {
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
+    TargetPage* target = plan_->FindMut(addr);
+    if (target == nullptr) {
+      ++evac_stats_->blocks_skipped_not_target;
+      return false;
+    }
+    const mi_page_usage_stats_t stat = mi_heap_page_is_underutilized(
+        static_cast<mi_heap_t*>(zmalloc_heap), object, threshold_, /*collect_stats=*/true);
+    return EvacDecide(*plan_, target, stat, *evac_stats_) == EvacOutcome::kCommitMove;
+  }
+
+ private:
+  TargetPlan* plan_;
+  float threshold_;
+  EvacStats* evac_stats_;
+};
+
+}  // namespace
+
+void BM_EvacDecideHit_NonVirt(benchmark::State& state) {
+  InitBenchEnv();
+  AllocationBatch ab = AllocBatch(state.range(0), kBenchBlockSize);
+
+  CensusStats cs;
+  PageCensus census(&cs);
+  for (void* p : ab.pointers) {
+    mi_page_usage_stats_t s{};
+    s.page_address = reinterpret_cast<uintptr_t>(_mi_ptr_page(p));
+    s.block_size = kBenchBlockSize;
+    s.capacity = 64;
+    s.used = 4;
+    s.flags = MI_DFLY_PAGE_BELOW_THRESHOLD;
+    census.Observe(s, 0);
+  }
+  PlanStats ps;
+  TargetPlan plan(&ps);
+  plan.BuildFrom(census);
+  EvacStats es;
+  EvacuatorNonVirt visitor(&plan, 0.8f, &es);
+
+  for (auto _ : state) {
+    for (void* p : ab.pointers) {
+      benchmark::DoNotOptimize(visitor.IsPageForObjectUnderUtilized(p));
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * ab.pointers.size());
+}
+BENCHMARK(BM_EvacDecideHit_NonVirt)->Arg(kBenchObjectCount);
+
 // Populated plan + queries that all miss. Models the dominant production
 // case: EVAC walks the prime table over millions of objects while the plan
 // holds a few thousand target pages — most objects are on non-target pages
