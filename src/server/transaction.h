@@ -350,6 +350,15 @@ class Transaction {
   // Write a journal entry to a shard journal with the given payload.
   void LogJournalOnShard(journal::Entry::Payload&& payload) const;
 
+  // Tag journal entries emitted by this transaction with the given source replid.
+  // Used by replication apply path to enable loop suppression in active replication.
+  void SetJournalSourceReplid(std::string replid) {
+    journal_source_replid_ = std::move(replid);
+  }
+  std::string_view journal_source_replid() const {
+    return journal_source_replid_;
+  }
+
   // Re-enable auto journal for commands marked as NO_AUTOJOURNAL. Call during setup.
   void ReviveAutoJournal();
 
@@ -613,6 +622,10 @@ class Transaction {
   Namespace* namespace_{nullptr};
   DbIndex db_index_{0};
   uint64_t time_now_ms_{0};
+
+  // Replid that journal records produced by this transaction will carry. See
+  // ConnectionContext::journal_source_replid for semantics. Empty for ordinary client writes.
+  std::string journal_source_replid_;
 
   std::atomic_uint32_t use_count_{0};  // transaction exists only as an intrusive_ptr
 

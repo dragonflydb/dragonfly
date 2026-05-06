@@ -76,7 +76,7 @@ void JournalSlice::SetFlushMode(bool allow_flush) {
   }
 }
 
-void JournalSlice::AddLogRecord(const Entry& entry) {
+void JournalSlice::AddLogRecord(const Entry& entry, std::string_view source_replid) {
   DCHECK(ring_buffer_.capacity() > 0);
 
   JournalChangeItem item;
@@ -88,6 +88,7 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     // only used by RestoreStreamer
     item.cmd = entry.payload.cmd;
     item.slot = entry.slot;
+    item.source_replid = source_replid;
 
     io::StringSink sink;
     JournalWriter writer{&sink};

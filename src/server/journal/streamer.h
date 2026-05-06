@@ -24,6 +24,11 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     bool should_sent_lsn = false;
     bool init_from_stable_sync = false;
     LSN start_partial_sync_at = 0;
+    // For active replication: skip records whose source_replid matches this
+    // (i.e., records that originated from the peer this streamer is sending to).
+    // Empty disables filtering. Typically set to the connecting replica's own
+    // master_replid as conveyed via REPLCONF CLIENT-ID.
+    std::string target_replid;
   };
 
   JournalStreamer(ExecutionState* cntx, Config config);
@@ -61,6 +66,13 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   virtual bool ShouldWrite(const journal::JournalChangeItem& item) const {
     return cntx_->IsRunning();
+  }
+
+  // Active replication: a record is loop-suppressed if its source is the very peer
+  // we're sending to. The streamer ships a small PING placeholder for these records
+  // so the replica's LSN counter stays aligned with our journal LSN axis.
+  bool IsLoopSuppressed(const journal::JournalChangeItem& item) const {
+    return !config_.target_replid.empty() && item.source_replid == config_.target_replid;
   }
 
   void WaitForInflightToComplete(bool with_timeout);

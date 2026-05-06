@@ -329,6 +329,13 @@ class ConnectionContext : public facade::ConnectionContext {
                          // of it as a state for the connection
   bool journal_emulated = false;  // whether it is used to dispatch journal commands
 
+  // Replid to tag journal records produced by commands dispatched on this connection.
+  // Empty for ordinary client connections (records are local and shipped to all peers).
+  // Set by JournalExecutor to the upstream master's replid during replication apply, so that
+  // a downstream JournalStreamer targeting that same upstream skips them (loop suppression
+  // for active replication / --replica_mode=mutable).
+  std::string journal_source_replid;
+
   // Reference to a master-side FlowInfo for this connection if it is a replication connection.
   FlowInfo* master_repl_flow = nullptr;
 

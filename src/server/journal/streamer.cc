@@ -129,6 +129,19 @@ void JournalStreamer::ConsumeJournalChange(const JournalChangeItem& item) {
     return;
   }
 
+  if (IsLoopSuppressed(item)) {
+    // Active-replication loop suppression: don't ship the record (it would loop
+    // back to the peer it came from), but still ship a PING so the receiver's
+    // record counter advances past this LSN. Otherwise the LSN integrity check
+    // (tx_executor.cc) would mismatch and partial-sync resume would be off.
+    io::StringSink sink;
+    JournalWriter writer{&sink};
+    writer.Write(journal::Entry{journal::Op::PING, /*dbid=*/0, /*slot_id=*/std::nullopt});
+    Write(std::move(sink).str());
+    last_lsn_writen_ = item.journal_item.lsn;
+    return;
+  }
+
   DCHECK_GT(item.journal_item.lsn, last_lsn_writen_);
   Write(item.journal_item.data);
   time_t now = time(nullptr);

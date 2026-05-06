@@ -36,6 +36,7 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/namespaces.h"
 #include "server/rdb_load.h"
+#include "server/server_state.h"
 #include "strings/human_readable.h"
 
 #define LOG_REPL_ERROR(msg)                                         \
@@ -94,8 +95,11 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 }  // namespace
 
 Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
-                 std::optional<cluster::SlotRange> slot_range)
+                 std::optional<cluster::SlotRange> slot_range, bool no_full_sync)
     : ProtocolClient(std::move(host), port), service_(*se), id_{id}, slot_range_(slot_range) {
+  // no_full_sync is per-replica config; carry it on master_context_ so it survives
+  // the per-reconnect re-init in HandleCapaDflyResp.
+  master_context_.no_full_sync = no_full_sync;
   proactor_ = ProactorBase::me();
 }
 
@@ -410,7 +414,8 @@ std::error_code Replica::HandleCapaDflyResp() {
   VLOG(1) << "Master id: " << master_context_.master_repl_id
           << ", sync id: " << master_context_.dfly_session_id
           << ", num journals: " << param_num_flows
-          << ", version: " << unsigned(master_context_.version);
+          << ", version: " << unsigned(master_context_.version)
+          << ", no_full_sync: " << master_context_.no_full_sync;
 
   return error_code{};
 }
@@ -876,7 +881,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
           << master_context_.dfly_session_id << " " << flow_id_ << " lsn: " << lsn.value_or(-1);
 
-  // DFLY FLOW <master_id> <session_id> <flow_id> [lsn] [last_master_id lsn-vec]
+  // DFLY FLOW <master_id> <session_id> <flow_id> [lsn] [last_master_id lsn-vec] [STABLE]
   std::string cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
                            master_context_.dfly_session_id, " ", flow_id_);
   // Try to negotiate a partial sync if possible.
@@ -889,6 +894,11 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
     string lsn_str = absl::StrJoin(last_master_data.value().last_journal_LSNs, "-");
     absl::StrAppend(&cmd, " ", last_master_data.value().id, " ", lsn_str);
     VLOG(1) << "Sending last master sync flow " << last_master_data.value().id << " " << lsn_str;
+  }
+  // Active replication: ask master to skip historical full-sync and start streaming
+  // from its current LSN. Existing local data on the replica is preserved.
+  if (master_context_.no_full_sync && master_context_.version >= DflyVersion::VER7) {
+    absl::StrAppend(&cmd, " STABLE");
   }
 
   ResetParser(RedisParser::Mode::CLIENT);
@@ -1027,7 +1037,11 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
     } else if (tx_data.opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
-      if (EngineShard::tlocal() && EngineShard::tlocal()->journal()) {
+      // Don't re-journal PINGs received from upstream when this node accepts client
+      // writes (active replication). Doing so would relay the master's loop-suppression
+      // PING placeholders back across the chain, creating an infinite ping-pong.
+      const bool active_mode = IsReplicaMutable();
+      if (!active_mode && EngineShard::tlocal() && EngineShard::tlocal()->journal()) {
         // We must register this entry to the journal to allow partial sync
         // if journal is active.
         journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
@@ -1124,6 +1138,9 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
       multi_shard_exe_(multi_shard_exe),
       flow_id_(flow_id) {
   executor_ = std::make_unique<JournalExecutor>(service);
+  // Tag records dispatched through this executor with the upstream's replid so that
+  // a downstream JournalStreamer pointing back at the same upstream skips them.
+  executor_->SetSourceReplid(master_context.master_repl_id);
   rdb_loader_ = std::make_unique<RdbLoader>(&service_, load_context);
   rdb_loader_->SetLoadUnownedSlots(true);
   rdb_loader_->SetShardCount(master_context.num_flows);

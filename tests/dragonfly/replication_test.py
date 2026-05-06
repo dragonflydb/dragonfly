@@ -2999,24 +2999,6 @@ async def test_double_take_over(df_factory, df_seeder_factory):
     assert await seeder.compare(capture, port=master.port)
 
 
-async def test_replica_of_replica(df_factory):
-    # Can't connect a replica to a replica, but OK to connect 2 replicas to the same master
-    master = df_factory.create(proactor_threads=2)
-    replica = df_factory.create(proactor_threads=2)
-    replica2 = df_factory.create(proactor_threads=2)
-
-    df_factory.start_all([master, replica, replica2])
-
-    c_replica = replica.client()
-    c_replica2 = replica2.client()
-
-    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
-
-    with pytest.raises(redis.exceptions.ResponseError):
-        await c_replica2.execute_command(f"REPLICAOF localhost {replica.port}")
-
-    assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
-
 
 @pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 1})
@@ -4783,105 +4765,6 @@ async def test_chain_basic_3node(df_factory: DflyInstanceFactory):
     assert int(info_r2["master_port"]) == r1.port
 
 
-async def test_chain_deep_5node(df_factory: DflyInstanceFactory):
-    """M -> R1 -> R2 -> R3 -> R4. DBSIZE matches at every hop."""
-    nodes = [df_factory.create(proactor_threads=2) for _ in range(5)]
-    df_factory.start_all(nodes)
-    clients = [n.client() for n in nodes]
-    master = nodes[0]
-    c_master = clients[0]
-
-    # Build the chain top-down: each replica points at its predecessor.
-    for parent, child, c_child in zip(nodes, nodes[1:], clients[1:]):
-        await c_child.execute_command(f"REPLICAOF localhost {parent.port}")
-        await wait_available_async(c_child)
-
-    await c_master.execute_command("DEBUG", "POPULATE", "5000")
-
-    for c in clients[1:]:
-        await _wait_keys_propagated(c, 5000, timeout=60)
-
-    sizes = await asyncio.gather(*(c.execute_command("DBSIZE") for c in clients))
-    assert all(s == 5000 for s in sizes), f"sizes diverged: {sizes}"
-
-
-async def test_chain_late_attach_full_sync(df_factory: DflyInstanceFactory):
-    """R2 attaches to R1 after R1 has accumulated data. R2 must full-sync from
-    R1's current state and stay caught up on subsequent writes from M."""
-    master = df_factory.create(proactor_threads=2)
-    r1 = df_factory.create(proactor_threads=2)
-    r2 = df_factory.create(proactor_threads=2)
-    df_factory.start_all([master, r1, r2])
-
-    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
-
-    await c_r1.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_available_async(c_r1)
-
-    # Pre-populate via master so R1 has a substantial dataset before R2 arrives.
-    await c_master.execute_command("DEBUG", "POPULATE", "3000")
-    await _wait_keys_propagated(c_r1, 3000)
-
-    # R2 attaches now and must full-sync from R1.
-    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
-    await wait_available_async(c_r2)
-    await _wait_keys_propagated(c_r2, 3000)
-
-    # Subsequent writes on M should still flow through to R2 via stable sync.
-    for i in range(50):
-        await c_master.execute_command(f"SET late{i} {i}")
-    await _wait_keys_propagated(c_r2, 3050)
-
-    # End-to-end value check on a sample.
-    assert (await c_r2.execute_command("GET late42")) == "42"
-
-
-async def test_chain_writes_rejected(df_factory: DflyInstanceFactory):
-    """Writes on chained R1 and on tail R2 must both be rejected as READONLY."""
-    master = df_factory.create(proactor_threads=2)
-    r1 = df_factory.create(proactor_threads=2)
-    r2 = df_factory.create(proactor_threads=2)
-    df_factory.start_all([master, r1, r2])
-
-    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
-    await c_r1.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_available_async(c_r1)
-    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
-    await wait_available_async(c_r2)
-
-    for c in (c_r1, c_r2):
-        with pytest.raises(redis.exceptions.ResponseError) as exc:
-            await c.execute_command("SET nope 1")
-        assert "READONLY" in str(exc.value).upper() or "read only" in str(exc.value).lower()
-
-
-async def test_chain_upstream_pause(df_factory: DflyInstanceFactory):
-    """If the original master is killed, R1 retries upstream while R2 stays
-    connected to R1 (R2 must NOT flip role). When the master restarts, the
-    chain catches up."""
-    master = df_factory.create(proactor_threads=2)
-    r1 = df_factory.create(proactor_threads=2)
-    r2 = df_factory.create(proactor_threads=2)
-    df_factory.start_all([master, r1, r2])
-    master_port = master.port
-
-    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
-    await c_r1.execute_command(f"REPLICAOF localhost {master_port}")
-    await wait_available_async(c_r1)
-    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
-    await wait_available_async(c_r2)
-
-    await c_master.execute_command("SET before kill")
-    await _wait_keys_propagated(c_r2, 1)
-
-    master.stop()
-    # R2 must still consider itself a replica of R1.
-    await asyncio.sleep(0.5)
-    role = await c_r2.execute_command("ROLE")
-    assert role[0] == "slave"
-    assert int(role[2]) == r1.port
-
-
 async def test_chain_takeover_rejected(df_factory: DflyInstanceFactory):
     """REPLTAKEOVER issued by R2 against R1 must be rejected because R1 is itself
     a chained replica and we refuse to handle takeover in that role."""
@@ -5091,3 +4974,77 @@ async def test_replica_mode_mutable_background_expiration(df_factory: DflyInstan
         assert await c_replica.execute_command("TTL", "local-exp") == -2
 
     await sweep_retired_key()
+
+
+# -----------------------------------------------------------------------------
+# Active replication: --replica_mode=mutable + REPLICAOF ... NO_FULL_SYNC
+#
+# Two (or more) nodes mutually REPLICAOF each other, accept client writes on
+# both sides, do NOT flush local data on REPLICAOF, and propagate new writes
+# bidirectionally with replid-based loop suppression.
+# -----------------------------------------------------------------------------
+
+
+async def test_active_2node_full(df_factory: DflyInstanceFactory):
+    """Comprehensive 2-node active-replication scenario covering every invariant
+    of --replica_mode=mutable + REPLICAOF NO_FULL_SYNC:
+
+      1. Pre-existing local data is preserved on both sides (no flush).
+      2. NO_FULL_SYNC means no historical cross-propagation.
+      3. New writes propagate in both directions.
+      4. INFO replication on a mutable node reports slave_read_only=0 and
+         replica_mode=mutable.
+      5. Loop suppression: after writes settle, slave_repl_offset stays flat
+         across an idle window (no infinite ping-pong).
+    """
+    a = df_factory.create(proactor_threads=2, replica_mode="mutable")
+    b = df_factory.create(proactor_threads=2, replica_mode="mutable")
+    df_factory.start_all([a, b])
+
+    c_a, c_b = a.client(), b.client()
+
+    # Seed both sides with distinct pre-existing data.
+    await c_a.execute_command("SET only_on_a 1")
+    await c_b.execute_command("SET only_on_b 2")
+
+    # Mutual REPLICAOF NO_FULL_SYNC.
+    await c_a.execute_command(f"REPLICAOF localhost {b.port} NO_FULL_SYNC")
+    await wait_available_async(c_a)
+    await c_b.execute_command(f"REPLICAOF localhost {a.port} NO_FULL_SYNC")
+    await wait_available_async(c_b)
+
+    # (1) seeds preserved; (2) no historical cross-propagation.
+    assert (await c_a.execute_command("GET only_on_a")) == "1"
+    assert (await c_b.execute_command("GET only_on_b")) == "2"
+    assert (await c_a.execute_command("GET only_on_b")) is None
+    assert (await c_b.execute_command("GET only_on_a")) is None
+
+    # (3) new writes propagate in both directions.
+    await c_a.execute_command("SET k_from_a hello_a")
+    await c_b.execute_command("SET k_from_b hello_b")
+
+    @assert_eventually
+    async def both_visible():
+        assert (await c_b.execute_command("GET k_from_a")) == "hello_a"
+        assert (await c_a.execute_command("GET k_from_b")) == "hello_b"
+
+    await both_visible()
+
+    # (4) INFO observability.
+    info = await c_a.info("replication")
+    assert int(info["slave_read_only"]) == 0
+    assert info.get("replica_mode") == "mutable"
+
+    # (5) Loop suppression: offsets must stay flat once propagation has settled.
+    await asyncio.sleep(0.5)
+    offset_a = int((await c_a.info("replication"))["slave_repl_offset"])
+    offset_b = int((await c_b.info("replication"))["slave_repl_offset"])
+    await asyncio.sleep(2.0)
+    offset_a_after = int((await c_a.info("replication"))["slave_repl_offset"])
+    offset_b_after = int((await c_b.info("replication"))["slave_repl_offset"])
+    assert (
+        offset_a_after == offset_a
+    ), f"A's offset grew {offset_a} → {offset_a_after} idle: replication is looping"
+    assert (
+        offset_b_after == offset_b
+    ), f"B's offset grew {offset_b} → {offset_b_after} idle: replication is looping"

@@ -36,6 +36,8 @@ struct MasterContext {
   std::string dfly_session_id;  // Sync session id for dfly sync.
   unsigned num_flows = 0;
   DflyVersion version = DflyVersion::VER1;
+  // Skip full sync; start streaming from master's current LSN. See --replica_mode=mutable.
+  bool no_full_sync = false;
 };
 
 // This class manages replication from both Dragonfly and Redis masters.
@@ -54,7 +56,7 @@ class Replica : ProtocolClient {
 
  public:
   Replica(std::string master_host, uint16_t port, Service* se, std::string_view id,
-          std::optional<cluster::SlotRange> slot_range);
+          std::optional<cluster::SlotRange> slot_range, bool no_full_sync = false);
   ~Replica();
 
   // Spawns a fiber that runs until link with master is broken or the replication is stopped.

@@ -49,6 +49,11 @@ struct FlowInfo {
   std::optional<LSN> start_partial_sync_at;
   uint64_t last_acked_lsn = 0;
 
+  // Replid of the connected replica (its own master_replid), copied from
+  // ReplicaInfo::id. Used by JournalStreamer to skip records that originated
+  // from this replica — loop suppression for active replication.
+  std::string target_replid;
+
   std::function<void()> cleanup;  // Optional cleanup for cancellation.
 };
 

@@ -811,6 +811,15 @@ pair<intrusive_ptr<Transaction>, OpStatus> PrepareTransaction(const CommandId* c
 
   cmd_ctx->SetupTx(cid, dfly_cntx->transaction);
 
+  // Carry the source replid from the dispatching connection so that journal records
+  // emitted by this transaction can be filtered out on streamers targeting the source
+  // (active replication / --replica_mode=mutable). Always set — including the empty
+  // case — to clear any value left over from a previous command on a reused
+  // (MULTI/EXEC) transaction.
+  if (dfly_cntx->transaction != nullptr) {
+    dfly_cntx->transaction->SetJournalSourceReplid(dfly_cntx->journal_source_replid);
+  }
+
   if (init) {
     DCHECK(cmd_ctx->tx());
     if (auto st =

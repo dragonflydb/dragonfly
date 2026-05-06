@@ -81,8 +81,8 @@ LSN GetLsn() {
 }
 
 void RecordEntry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot,
-                 Entry::Payload payload) {
-  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, slot, std::move(payload)});
+                 Entry::Payload payload, std::string_view source_replid) {
+  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, slot, std::move(payload)}, source_replid);
 }
 
 void SetFlushMode(bool allow_flush) {

@@ -510,6 +510,9 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
   cid_ = cid;
   re_enabled_auto_journal_ = false;
   cb_ptr_.reset();
+  // Cleared so a reused transaction doesn't leak the prior command's source replid;
+  // PrepareTransaction will set it again for the new dispatch.
+  journal_source_replid_.clear();
 
   for (auto& sd : shard_data_) {
     sd.slice_count = sd.slice_start = 0;
@@ -1581,7 +1584,8 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
 
 void Transaction::LogJournalOnShard(journal::Entry::Payload&& payload) const {
   journal::RecordEntry(txid_, journal::Op::COMMAND, db_index_,
-                       unique_slot_checker_.GetUniqueSlotId(), std::move(payload));
+                       unique_slot_checker_.GetUniqueSlotId(), std::move(payload),
+                       journal_source_replid_);
 }
 
 void Transaction::ReviveAutoJournal() {

@@ -86,6 +86,12 @@ struct JournalChangeItem {
 
   std::string_view cmd;
   std::optional<SlotId> slot;
+  // Replid of the upstream source this record was applied from. Empty for locally
+  // originated writes. A JournalStreamer skips records whose source_replid equals
+  // its target replica's replid (active-replication loop suppression).
+  // Stored as std::string (not string_view) because the originating Transaction may
+  // be destroyed before async streamer fibers iterate over this item.
+  std::string source_replid;
 };
 
 struct JournalConsumerInterface {

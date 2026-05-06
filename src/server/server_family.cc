@@ -716,6 +716,10 @@ struct ReplicaOfArgs {
   string host;
   uint16_t port;
   std::optional<cluster::SlotRange> slot_range;
+  // Skip the initial full sync / RDB load when becoming a replica. Existing data is
+  // preserved; replication starts from the master's current LSN. Used for active
+  // replication: see --replica_mode=mutable.
+  bool no_full_sync = false;
   static nonstd::expected<ReplicaOfArgs, ErrorReply> FromCmdArgs(CmdArgList args);
   bool IsReplicaOfNoOne() const {
     return port == 0;
@@ -728,6 +732,9 @@ struct ReplicaOfArgs {
     if (args.slot_range.has_value()) {
       os << " SLOTS [" << args.slot_range.value().start << "-" << args.slot_range.value().end
          << "]";
+    }
+    if (args.no_full_sync) {
+      os << " NO_FULL_SYNC";
     }
     return os;
   }
@@ -746,11 +753,16 @@ nonstd::expected<ReplicaOfArgs, ErrorReply> ReplicaOfArgs::FromCmdArgs(CmdArgLis
     if (auto err = parser.TakeError(); err || replicaof_args.port < 1) {
       return nonstd::make_unexpected(ErrorReply("port is out of range"));
     }
-    if (parser.HasNext()) {
+    if (parser.Check("NO_FULL_SYNC")) {
+      replicaof_args.no_full_sync = true;
+    } else if (parser.HasNext()) {
       auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
       replicaof_args.slot_range = cluster::SlotRange{slot_start, slot_end};
       if (auto err = parser.TakeError(); err || !replicaof_args.slot_range->IsValid()) {
         return nonstd::make_unexpected(ErrorReply("Invalid slot range"));
+      }
+      if (parser.Check("NO_FULL_SYNC")) {
+        replicaof_args.no_full_sync = true;
       }
     }
   }
@@ -3502,7 +3514,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       if (rinfo.full_sync_done || (rinfo.passed_full_sync && !rinfo.master_link_established))
         append("slave_repl_offset", rinfo.repl_offset_sum);
       append("slave_priority", GetFlag(FLAGS_replica_priority));
-      append("slave_read_only", IsReplicaMutable() ? 0 : 1);
+      const bool active = IsReplicaMutable();
+      append("slave_read_only", active ? 0 : 1);
+      append("replica_mode", active ? "mutable" : "readonly");
       append("psync_attempts", rinfo.psync_attempts);
       append("psync_successes", rinfo.psync_successes);
     };
@@ -3905,8 +3919,9 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, CommandContext* cmd_cntx,
     }
 
     // Create a new replica and assign it
-    new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
-                                       master_replid(), replicaof_args->slot_range);
+    new_replica =
+        make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_, master_replid(),
+                             replicaof_args->slot_range, replicaof_args->no_full_sync);
 
     replica_ = new_replica;
 
@@ -4057,8 +4072,9 @@ void ServerFamily::ReplicaOfInternalV2(CmdArgList args, CommandContext* cmd_cntx
     return ReplicaOfNoOne(cmd_cntx->rb());
   }
 
-  auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
-                                          master_replid(), replicaof_args->slot_range);
+  auto new_replica =
+      make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_, master_replid(),
+                           replicaof_args->slot_range, replicaof_args->no_full_sync);
   GenericError ec;
   switch (on_error) {
     case ActionOnConnectionFail::kReturnOnError:

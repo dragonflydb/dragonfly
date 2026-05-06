@@ -32,7 +32,10 @@ class JournalSlice {
     return status_ec_;
   }
 
-  void AddLogRecord(const Entry& entry);
+  // source_replid: replid of the upstream peer this entry was applied from.
+  // Empty for locally originated writes. Forwarded to JournalChangeItem so
+  // streamers can skip records that originated from their target peer.
+  void AddLogRecord(const Entry& entry, std::string_view source_replid = {});
 
   // Register a callback that will be called every time a new entry is
   // added to the journal.

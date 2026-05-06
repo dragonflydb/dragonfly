@@ -37,6 +37,12 @@ class JournalExecutor {
     return &conn_context_;
   }
 
+  // Tag every journal record produced by commands dispatched through this executor with
+  // the given replid (typically the upstream master's replid). Empty disables tagging.
+  void SetSourceReplid(std::string replid) {
+    conn_context_.journal_source_replid = std::move(replid);
+  }
+
  private:
   facade::DispatchResult Execute(CommandContext* cmd_cntx);
 

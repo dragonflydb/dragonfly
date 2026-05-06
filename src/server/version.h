@@ -42,8 +42,12 @@ enum class DflyVersion {
   // - hnsw-index-metadata AUX field
   VER6,
 
+  // - DFLY FLOW ... STABLE keyword: skip full sync entirely, start streaming from
+  //   master's current LSN. Used by --replica_mode=mutable / REPLICAOF NO_FULL_SYNC.
+  VER7,
+
   // Always points to the latest version
-  CURRENT_VER = VER6,
+  CURRENT_VER = VER7,
 };
 
 }  // namespace dfly

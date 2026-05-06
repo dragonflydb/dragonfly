@@ -248,21 +248,31 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
   string_view sync_id_str = ArgS(args, 2);
   string_view flow_id_str = ArgS(args, 3);
 
+  // Optional trailing STABLE keyword: skip full sync and start streaming from current LSN.
+  // Used by replicas in --replica_mode=mutable / REPLICAOF NO_FULL_SYNC.
+  size_t pos_args_end = args.size();
+  bool stable_only = false;
+  if (pos_args_end > 4 && absl::EqualsIgnoreCase(ArgS(args, pos_args_end - 1), "STABLE")) {
+    stable_only = true;
+    --pos_args_end;
+  }
+
   std::optional<LSN> seqid;
   std::optional<string> last_master_id;
   std::optional<string> last_master_lsn;
-  if (args.size() == 5) {
+  if (pos_args_end == 5) {
     seqid.emplace();
     if (!absl::SimpleAtoi(ArgS(args, 4), &seqid.value())) {
       return cmd_cntx->SendError(facade::kInvalidIntErr);
     }
-  } else if (args.size() == 6) {
+  } else if (pos_args_end == 6) {
     last_master_id = ArgS(args, 4);
     last_master_lsn = ArgS(args, 5);
   }
 
   VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
-          << " flow: " << flow_id_str << " seq: " << seqid.value_or(-1);
+          << " flow: " << flow_id_str << " seq: " << seqid.value_or(-1)
+          << " stable_only: " << stable_only;
 
   if (master_id != sf_->master_replid()) {
     return cmd_cntx->SendError(kBadMasterId);
@@ -301,6 +311,7 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
     flow.conn = cmd_cntx->conn();
     flow.eof_token = eof_token;
     flow.version = replica_ptr->version;
+    flow.target_replid = replica_ptr->id;
 
     if (!conn_cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
       // Listener::PreShutdown() triggered
@@ -314,8 +325,12 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
 
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
     std::optional<LSN> lsn_to_start_partial;
-    // In this flow the master and the registered replica where synced from the same master.
-    if (last_master_id && data && data->id == *last_master_id) {
+    if (stable_only) {
+      // Active replication: start partial-sync from this shard's current LSN.
+      // Replica does not get history; existing local data is preserved.
+      lsn_to_start_partial.emplace(journal::GetLsn());
+    } else if (last_master_id && data && data->id == *last_master_id) {
+      // In this flow the master and the registered replica where synced from the same master.
       ++ServerState::tlocal()->stats.psync_requests_total;
       auto flow_lsn =
           ParseLsnVec(*last_master_lsn, data->last_journal_LSNs.size(), flow_id, cmd_cntx);
@@ -752,9 +767,14 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
   DCHECK(flow->conn);
 
   LSN partial_lsn = flow->start_partial_sync_at.value_or(0);
-  JournalStreamer::Config config{
-      .should_sent_lsn = true, .init_from_stable_sync = true, .start_partial_sync_at = partial_lsn};
-  flow->streamer.reset(new JournalStreamer(exec_st, config));
+  // For active replication / cascading: streamer skips records whose source_replid
+  // matches the connecting replica's own replid (sent via REPLCONF CLIENT-ID and
+  // stored in replica_ptr->id). Empty disables filtering.
+  JournalStreamer::Config config{.should_sent_lsn = true,
+                                 .init_from_stable_sync = true,
+                                 .start_partial_sync_at = partial_lsn,
+                                 .target_replid = flow->target_replid};
+  flow->streamer.reset(new JournalStreamer(exec_st, std::move(config)));
   flow->streamer->Start(flow->conn->socket());
 
   // Register cleanup.
