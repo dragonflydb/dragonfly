@@ -383,7 +383,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
   if (const auto* key = std::get_if<tiering::DbKeyId>(&id); key) {
     auto* pv = Find(key->first, key->second);
     if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-      if (metrics.modified || pv->WasTouched()) {
+      if (!metrics.modified || pv->WasTouched()) {
         ++stats_.total_uploads;
         decoder->Upload(pv);
         RecordDeleted(*pv, segment.length, GetDbTableStats(key->first));

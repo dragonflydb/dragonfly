@@ -4,11 +4,13 @@
 
 // GCC yields a spurious warning about uninitialized data in DocumentAccessor::StringList.
 
+#include "server/tiered_storage.h"
+#include "server/tiering/decoders.h"
+#include "server/tiering/serialized_map.h"
+
 #ifndef __clang__
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
-
-#include "server/search/doc_accessors.h"
 
 #include <absl/functional/any_invocable.h>
 #include <absl/strings/str_cat.h>
@@ -25,6 +27,7 @@
 #include "server/engine_shard.h"
 #include "server/hset_family.h"
 #include "server/namespaces.h"
+#include "server/search/doc_accessors.h"
 
 extern "C" {
 #include "redis/listpack.h"
@@ -417,6 +420,20 @@ thread_local absl::flat_hash_map<std::string, std::unique_ptr<JsonAccessor::Json
 unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv,
                                      std::string_view cleanup_key) {
   DCHECK(pv.ObjType() == OBJ_HASH || pv.ObjType() == OBJ_JSON);
+
+  if (pv.IsExternal() && !pv.IsCool()) {
+    DCHECK(pv.ObjType() == OBJ_HASH);
+    DCHECK(!cleanup_key.empty());
+    using D = tiering::SerializedMapDecoder;
+    util::fb2::Future<bool> fut;
+    auto read_cb = [fut](const io::Result<D*>& res) mutable { fut.Resolve(res.has_value()); };
+    EngineShard::tlocal()->tiered_storage()->Read(std::make_pair(db_cntx.db_index, cleanup_key),
+                                                  pv.GetExternalSlice(), D{}, std::move(read_cb));
+    if (!fut.Get() || pv.IsExternal()) {
+      LOG(DFATAL) << "Failed to read external data for key '" << cleanup_key << "' in db "
+                  << db_cntx.db_index;
+    }
+  }
 
   if (pv.ObjType() == OBJ_JSON) {
     DCHECK(pv.GetJson());
