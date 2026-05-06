@@ -187,20 +187,13 @@ DbSliceResult RunPrimeTableHinted(DbSlice* slice, size_t dbid, const std::vector
   bool should_stop = false;
   bool namespaces_null = false;
 
-  const bool read_only = visitor->IsReadOnly();
   const size_t start_idx = cursor_idx ? *cursor_idx : 0;
   size_t i = start_idx;
 
   for (; i < hints.size(); ++i) {
     const uint64_t h = hints[i];
-    visitor->SetCurrentBucketCursor(h);
     PrimeTable::Cursor cur{h};
     prime_table->Traverse(cur, [&](PrimeIterator it) {
-      if (read_only) {
-        it->second.DefragIfNeeded(visitor);
-        ++result.attempts;
-        return;
-      }
       const ssize_t original_size = it->second.MallocUsed();
       const bool did = it->second.DefragIfNeeded(visitor);
       ++result.attempts;

@@ -132,7 +132,7 @@ class PageCensus {
   // vector so the EVACUATE walker can iterate deterministically and resume
   // from a saved cursor index across DoDefrag invocations.
   std::vector<uint64_t> TakeCursorHints() {
-    std::vector<uint64_t> out(cursor_hints_.begin(), cursor_hints_.end());
+    std::vector out(cursor_hints_.begin(), cursor_hints_.end());
     cursor_hints_.clear();
     std::ranges::sort(out);
     return out;
