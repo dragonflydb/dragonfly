@@ -13,8 +13,11 @@ extern "C" {
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_split.h>
 
+#include <array>
 #include <boost/icl/interval_set.hpp>
 #include <csignal>
+#include <fstream>
+#include <map>
 #include <queue>
 #include <shared_mutex>
 #include <tuple>
@@ -86,6 +89,7 @@ ABSL_FLAG(bool, connect_only, false,
           "If true, will only connect to the server, without sending "
           "loadtest commands");
 ABSL_FLAG(string, password, "", "password to authenticate the client");
+ABSL_FLAG(string, json_out_file, "", "Write a memtier-compatible latency JSON report to this file");
 
 using namespace std;
 using namespace util;
@@ -106,9 +110,13 @@ atomic_bool terminate_requested = false;
 #pragma diag_suppress 144
 #endif
 
-enum Protocol { RESP, MC_TEXT } protocol;
-enum DistType { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
+enum Protocol : uint8_t { RESP, MC_TEXT } protocol;
+enum DistType : uint8_t { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
+
 constexpr uint16_t kNumSlots = 16384;
+enum class BenchOp : uint8_t { kSet = 0, kGet = 1, kUnknown = 2 };
+constexpr size_t kTrackedOpCount = 2;
+constexpr std::array<string_view, kTrackedOpCount> kTrackedOpNames = {"Sets", "Gets"};
 
 static string GetRandomBlob(size_t len, bool ascii) {
   static bool is_random = GetFlag(FLAGS_random_data);
@@ -258,6 +266,10 @@ class CommandGenerator {
 
   string Next(SlotRange range);
 
+  BenchOp op() const {
+    return op_;
+  }
+
   bool might_hit() const {
     return might_hit_;
   }
@@ -288,6 +300,7 @@ class CommandGenerator {
   bool might_hit_ = false;
   bool noreply_ = false;
   bool is_ascii_ = true;
+  BenchOp op_ = BenchOp::kUnknown;
 };
 
 CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
@@ -343,15 +356,18 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
 
 string CommandGenerator::Next(SlotRange range) {
   noreply_ = false;
+  op_ = BenchOp::kUnknown;
 
   if (command_.empty()) {
     string key = (*keygen_)(range.first, range.second);
 
     if (absl::Uniform(bit_gen, 0U, ratio_get_ + ratio_set_) < ratio_set_) {
       might_hit_ = false;
+      op_ = BenchOp::kSet;
       return FillSet(key);
     }
     might_hit_ = true;
+    op_ = BenchOp::kGet;
     return FillGet(key);
   }
 
@@ -423,6 +439,8 @@ string CommandGenerator::FillGet(string_view key) {
 
 struct ClientStats {
   base::Histogram total_hist, online_hist;
+  std::array<base::Histogram, kTrackedOpCount> op_stats;
+  std::map<uint32_t, std::array<base::Histogram, kTrackedOpCount>> time_series;
 
   uint64_t num_responses = 0;
   uint64_t qps = 0;
@@ -431,9 +449,28 @@ struct ClientStats {
   uint64_t num_errors = 0;
   unsigned num_clients = 0;
 
+  void AddLatencySample(BenchOp op, uint64_t usec, uint64_t elapsed_ns) {
+    unsigned index = unsigned(op);
+    if (index >= kTrackedOpCount)
+      return;
+
+    op_stats[index].Add(usec);
+    time_series[elapsed_ns / 1'000'000'000ULL][index].Add(usec);
+  }
+
   ClientStats& operator+=(const ClientStats& o) {
     total_hist.Merge(o.total_hist);
     online_hist.Merge(o.online_hist);
+
+    for (size_t i = 0; i < kTrackedOpCount; ++i) {
+      op_stats[i].Merge(o.op_stats[i]);
+    }
+    for (const auto& [sec, samples] : o.time_series) {
+      auto& dst = time_series[sec];
+      for (size_t i = 0; i < kTrackedOpCount; ++i) {
+        dst[i].Merge(samples[i]);
+      }
+    }
 
     num_responses += o.num_responses;
     qps += o.qps;
@@ -485,6 +522,7 @@ class Driver {
   struct Req {
     uint64_t start;
     bool might_hit;
+    BenchOp op = BenchOp::kUnknown;
   };
 
   uint32_t num_reqs_, time_limit_, received_ = 0;
@@ -720,6 +758,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       Req req;
       req.start = absl::GetCurrentTimeNanos();
       req.might_hit = cmd_gen->might_hit();
+      req.op = cmd_gen->op();
 
       reqs_.push(req);
 
@@ -801,10 +840,12 @@ static string_view FindLine(io::Bytes buf) {
 
 void Driver::PopRequest() {
   uint64_t now = absl::GetCurrentTimeNanos();
-  uint64_t usec = (now - reqs_.front().start) / 1000;
+  const Req& req = reqs_.front();
+  uint64_t usec = (now - req.start) / 1000;
   stats_.online_hist.Add(usec);
   stats_.total_hist.Add(usec);
-  stats_.hit_opportunities += reqs_.front().might_hit;
+  stats_.hit_opportunities += req.might_hit;
+  stats_.AddLatencySample(req.op, usec, now - start_ns_);
   ++received_;
   reqs_.pop();
   if (reqs_.empty()) {
@@ -1011,6 +1052,212 @@ void TLocalClient::AdjustCycle() {
 
 thread_local unique_ptr<TLocalClient> client;
 
+double ToMillis(double usec) {
+  return usec / 1000.0;
+}
+
+double HistogramAverageMs(const base::Histogram& hist) {
+  return hist.count() ? ToMillis(hist.Average()) : 0.0;
+}
+
+double HistogramMinMs(const base::Histogram& hist) {
+  return hist.count() ? ToMillis(hist.min()) : 0.0;
+}
+
+double HistogramMaxMs(const base::Histogram& hist) {
+  return hist.count() ? ToMillis(hist.max()) : 0.0;
+}
+
+double HistogramPercentileMs(const base::Histogram& hist, double percentile) {
+  return hist.count() ? ToMillis(hist.Percentile(percentile)) : 0.0;
+}
+
+double OpsPerSec(uint64_t count, uint64_t total_ms) {
+  return total_ms ? (double(count) * 1000.0 / double(total_ms)) : 0.0;
+}
+
+string JsonEscape(string_view input) {
+  string out;
+  out.reserve(input.size() + 8);
+
+  for (unsigned char c : input) {
+    switch (c) {
+      case '\\':
+        out += "\\\\";
+        break;
+      case '"':
+        out += "\\\"";
+        break;
+      case '\b':
+        out += "\\b";
+        break;
+      case '\f':
+        out += "\\f";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        if (c < 0x20) {
+          absl::StrAppendFormat(&out, "\\u%04x", c);
+        } else {
+          out.push_back(char(c));
+        }
+    }
+  }
+
+  return out;
+}
+
+string FormatJsonDouble(double value) {
+  return StrFormat("%.6f", value);
+}
+
+void WriteIndent(std::ostream& os, unsigned indent) {
+  for (unsigned i = 0; i < indent; ++i) {
+    os.put(' ');
+  }
+}
+
+void WritePercentilesJson(std::ostream& os, const base::Histogram& hist, unsigned indent) {
+  WriteIndent(os, indent);
+  os << "\"Percentile Latencies\": {\n";
+  WriteIndent(os, indent + 2);
+  os << "\"p50.00\": " << FormatJsonDouble(HistogramPercentileMs(hist, 50.0)) << ",\n";
+  WriteIndent(os, indent + 2);
+  os << "\"p99.00\": " << FormatJsonDouble(HistogramPercentileMs(hist, 99.0)) << ",\n";
+  WriteIndent(os, indent + 2);
+  os << "\"p99.90\": " << FormatJsonDouble(HistogramPercentileMs(hist, 99.9)) << "\n";
+  WriteIndent(os, indent);
+  os << '}';
+}
+
+void WriteSampleStatsJson(std::ostream& os, const base::Histogram& hist, uint64_t total_ms,
+                          unsigned indent, bool nested_percentiles) {
+  WriteIndent(os, indent);
+  os << "\"Count\": " << hist.count() << ",\n";
+  WriteIndent(os, indent);
+  os << "\"Ops/sec\": " << FormatJsonDouble(OpsPerSec(hist.count(), total_ms)) << ",\n";
+  WriteIndent(os, indent);
+  os << "\"Average Latency\": " << FormatJsonDouble(HistogramAverageMs(hist)) << ",\n";
+  WriteIndent(os, indent);
+  os << "\"Min Latency\": " << FormatJsonDouble(HistogramMinMs(hist)) << ",\n";
+  WriteIndent(os, indent);
+  os << "\"Max Latency\": " << FormatJsonDouble(HistogramMaxMs(hist));
+
+  if (nested_percentiles) {
+    os << ",\n";
+    WritePercentilesJson(os, hist, indent);
+  } else {
+    os << ",\n";
+    WriteIndent(os, indent);
+    os << "\"p50.00\": " << FormatJsonDouble(HistogramPercentileMs(hist, 50.0)) << ",\n";
+    WriteIndent(os, indent);
+    os << "\"p99.00\": " << FormatJsonDouble(HistogramPercentileMs(hist, 99.0)) << ",\n";
+    WriteIndent(os, indent);
+    os << "\"p99.90\": " << FormatJsonDouble(HistogramPercentileMs(hist, 99.9));
+  }
+}
+
+void WriteTimeSeriesJson(std::ostream& os, const ClientStats& summary, size_t op_index,
+                         uint64_t bucket_count, unsigned indent) {
+  WriteIndent(os, indent);
+  os << "\"Time-Serie\": {\n";
+
+  for (uint64_t sec = 0; sec < bucket_count; ++sec) {
+    base::Histogram sample;
+    if (auto it = summary.time_series.find(sec); it != summary.time_series.end()) {
+      sample = it->second[op_index];
+    }
+
+    WriteIndent(os, indent + 2);
+    os << '"' << sec << "\": {\n";
+    WriteSampleStatsJson(os, sample, 1000, indent + 4, false);
+    os << "\n";
+    WriteIndent(os, indent + 2);
+    os << '}';
+    if (sec + 1 != bucket_count) {
+      os << ',';
+    }
+    os << "\n";
+  }
+
+  WriteIndent(os, indent);
+  os << '}';
+}
+
+void WriteOperationJson(std::ostream& os, string_view op_name, const ClientStats& summary,
+                        size_t op_index, uint64_t total_ms, uint64_t bucket_count, unsigned indent,
+                        bool trailing_comma) {
+  WriteIndent(os, indent);
+  os << '"' << op_name << "\": {\n";
+  WriteSampleStatsJson(os, summary.op_stats[op_index], total_ms, indent + 2, true);
+  os << ",\n";
+  WriteTimeSeriesJson(os, summary, op_index, bucket_count, indent + 2);
+  os << "\n";
+  WriteIndent(os, indent);
+  os << '}';
+  if (trailing_comma) {
+    os << ',';
+  }
+  os << "\n";
+}
+
+void WriteLatencyJsonReport(const ClientStats& summary, absl::Duration duration,
+                            size_t thread_count) {
+  const string output_path = GetFlag(FLAGS_json_out_file);
+  if (output_path.empty())
+    return;
+
+  const uint64_t total_ms = std::max<uint64_t>(1, absl::ToInt64Milliseconds(duration));
+  uint64_t bucket_count = std::max<uint64_t>(1, (total_ms + 999) / 1000);
+  if (!summary.time_series.empty()) {
+    bucket_count = std::max<uint64_t>(bucket_count, summary.time_series.rbegin()->first + 1);
+  }
+
+  std::ofstream os(output_path, std::ios::out | std::ios::trunc);
+  CHECK(os) << "Could not open latency report file " << output_path;
+
+  os << "{\n";
+  WriteIndent(os, 2);
+  os << "\"configuration\": {\n";
+  WriteIndent(os, 4);
+  os << "\"server\": \"" << JsonEscape(GetFlag(FLAGS_h)) << "\",\n";
+  WriteIndent(os, 4);
+  os << "\"port\": " << GetFlag(FLAGS_p) << ",\n";
+  WriteIndent(os, 4);
+  os << "\"clients\": " << GetFlag(FLAGS_c) << ",\n";
+  WriteIndent(os, 4);
+  os << "\"threads\": " << thread_count << ",\n";
+  WriteIndent(os, 4);
+  os << "\"pipeline\": " << GetFlag(FLAGS_pipeline) << ",\n";
+  WriteIndent(os, 4);
+  os << "\"ratio\": \"" << JsonEscape(GetFlag(FLAGS_ratio)) << "\"\n";
+  WriteIndent(os, 2);
+  os << "},\n";
+  WriteIndent(os, 2);
+  os << "\"ALL STATS\": {\n";
+  WriteIndent(os, 4);
+  os << "\"Runtime\": {\n";
+  WriteIndent(os, 6);
+  os << "\"Total duration\": " << total_ms << "\n";
+  WriteIndent(os, 4);
+  os << "},\n";
+  WriteOperationJson(os, kTrackedOpNames[0], summary, 0, total_ms, bucket_count, 4, true);
+  WriteOperationJson(os, kTrackedOpNames[1], summary, 1, total_ms, bucket_count, 4, false);
+  WriteIndent(os, 2);
+  os << "}\n";
+  os << "}\n";
+
+  CHECK(os.good()) << "Failed writing latency report to " << output_path;
+}
+
 void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp) {
   fb2::Mutex mutex;
 
@@ -1189,6 +1436,14 @@ int main(int argc, char* argv[]) {
   }
 
   string dist = GetFlag(FLAGS_key_dist);
+  string json_out_file = GetFlag(FLAGS_json_out_file);
+
+  if (!json_out_file.empty()) {
+    CHECK(GetFlag(FLAGS_command).empty())
+        << "--json_out_file is supported only with the built-in GET/SET workload";
+    CHECK(!GetFlag(FLAGS_noreply)) << "--json_out_file is not supported together with --noreply";
+    CHECK(!GetFlag(FLAGS_connect_only)) << "--json_out_file requires sending benchmark commands";
+  }
 
   if (dist == "U") {
     dist_type = UNIFORM;
@@ -1327,6 +1582,8 @@ int main(int argc, char* argv[]) {
     CONSOLE_INFO << "----------------------------------\nHit rate: "
                  << 100 * double(summary.hit_count) / double(summary.hit_opportunities) << "%\n";
   }
+
+  WriteLatencyJsonReport(summary, duration, pp->size());
   pp->Stop();
 
   return 0;
