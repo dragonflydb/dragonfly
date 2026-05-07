@@ -7,7 +7,7 @@
 #include <stack>
 
 #include "base/logging.h"
-#include "core/page_usage/page_usage_dispatch.h"
+#include "core/page_usage/page_usage_stats.h"
 
 using namespace jsoncons;
 

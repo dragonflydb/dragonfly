@@ -2,7 +2,7 @@
 
 #include <type_traits>
 
-#include "core/page_usage/page_usage_dispatch.h"
+#include "core/page_usage/page_usage_stats.h"
 
 namespace {
 

@@ -6,12 +6,19 @@
 
 #include <absl/flags/flag.h>
 
+#define MI_BUILD_RELEASE 1
+#include <mimalloc/internal.h>
+
 #include <algorithm>
 #include <ranges>
 #include <utility>
 
 #include "base/flags.h"
 #include "base/logging.h"
+
+extern "C" {
+#include "redis/zmalloc.h"
+}
 
 ABSL_FLAG(bool, defrag_use_skip_bit, false,
           "If true, mark target pages with mimalloc's defrag_skip bit so EVAC moves don't "
@@ -540,7 +547,20 @@ EvacOutcome EvacDecide(TargetPlan& plan, const mi_page_usage_stats_t& stat, Evac
 
 CensusTaker::CensusTaker(PageCensus* census, float threshold, CycleQuota quota)
     : PageUsage(CollectPageStats::NO, threshold, quota), census_(census), threshold_(threshold) {
-  kind_ = Kind::kCensus;
+}
+
+bool CensusTaker::IsPageForObjectUnderUtilized(void* object) {
+  mi_page_usage_stats_t stat = mi_heap_page_is_underutilized(
+      static_cast<mi_heap_t*>(zmalloc_heap), object, threshold_, /*collect_stats=*/true);
+  census_->Observe(stat, current_cursor_);
+  return false;
+}
+
+bool CensusTaker::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
+  mi_page_usage_stats_t stat =
+      mi_heap_page_is_underutilized(heap, object, threshold_, /*collect_stats=*/true);
+  census_->Observe(stat, current_cursor_);
+  return false;
 }
 
 Evacuator::Evacuator(TargetPlan* plan, float threshold, EvacStats* evac_stats, CycleQuota quota)
@@ -548,7 +568,30 @@ Evacuator::Evacuator(TargetPlan* plan, float threshold, EvacStats* evac_stats, C
       plan_(plan),
       threshold_(threshold),
       evac_stats_(evac_stats) {
-  kind_ = Kind::kEvacuator;
+}
+
+bool Evacuator::IsPageForObjectUnderUtilized(void* object) {
+  const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
+  TargetPage* target = plan_->FindMut(addr);
+  if (target == nullptr) {
+    ++evac_stats_->blocks_skipped_not_target;
+    return false;
+  }
+  const mi_page_usage_stats_t stat = mi_heap_page_is_underutilized(
+      static_cast<mi_heap_t*>(zmalloc_heap), object, threshold_, /*collect_stats=*/true);
+  return EvacDecide(*plan_, target, stat, *evac_stats_) == EvacOutcome::kCommitMove;
+}
+
+bool Evacuator::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
+  const uintptr_t addr = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
+  TargetPage* target = plan_->FindMut(addr);
+  if (target == nullptr) {
+    ++evac_stats_->blocks_skipped_not_target;
+    return false;
+  }
+  const mi_page_usage_stats_t stat =
+      mi_heap_page_is_underutilized(heap, object, threshold_, /*collect_stats=*/true);
+  return EvacDecide(*plan_, target, stat, *evac_stats_) == EvacOutcome::kCommitMove;
 }
 
 }  // namespace dfly

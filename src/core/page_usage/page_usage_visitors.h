@@ -291,10 +291,10 @@ class CensusTaker final : public PageUsage {
  public:
   CensusTaker(PageCensus* census, float threshold, CycleQuota quota = CycleQuota::Unlimited());
 
-  // Non-virtual; called from the tagged-dispatch switch in page_usage_dispatch.h
-  // (where the inline bodies live so this header does not need mimalloc/internal.h).
-  bool IsPageForObjectUnderUtilizedImpl(void* object);
-  bool IsPageForObjectUnderUtilizedImpl(mi_heap_t* heap, void* object);
+  // Override to call the mimalloc syscall and feed the resulting stats into
+  // the census; CensusTaker never reallocates so the return is always false.
+  bool IsPageForObjectUnderUtilized(void* object) override;
+  bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) override;
 
   bool IsReadOnly() const final {
     return true;
@@ -315,10 +315,11 @@ class Evacuator final : public PageUsage {
   Evacuator(TargetPlan* plan, float threshold, EvacStats* evac_stats,
             CycleQuota quota = CycleQuota::Unlimited());
 
-  // Non-virtual; called from the tagged-dispatch switch in page_usage_dispatch.h
-  // (where the inline bodies live so this header does not need mimalloc/internal.h).
-  bool IsPageForObjectUnderUtilizedImpl(void* object);
-  bool IsPageForObjectUnderUtilizedImpl(mi_heap_t* heap, void* object);
+  // Override to filter through the plan: a per-object hashmap lookup short-
+  // circuits the expensive mi_heap_page_is_underutilized syscall when the
+  // object isn't on a target page. On hit, calls the syscall + EvacDecide.
+  bool IsPageForObjectUnderUtilized(void* object) override;
+  bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) override;
 
   bool ShouldStop() const final {
     return plan_->AllTargetsDone();

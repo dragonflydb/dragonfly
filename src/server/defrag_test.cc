@@ -13,7 +13,7 @@
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
-#include "core/page_usage/page_usage_dispatch.h"
+#include "core/page_usage/page_usage_visitors.h"
 
 ABSL_DECLARE_FLAG(bool, defrag_use_skip_bit);
 

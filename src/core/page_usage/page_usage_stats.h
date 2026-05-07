@@ -74,17 +74,6 @@ struct CollectedPageStats {
 
 class PageUsage {
  public:
-  // Tag for tagged-dispatch on the IsPageForObjectUnderUtilized hot path.
-  // Subclasses set this in their constructor; the dispatch in
-  // page_usage_dispatch.h switches on it and inlines into the concrete
-  // subclass's *Impl method. Avoids virtual-call + cross-TU-inlining cost.
-  //
-  // kCustom is a test/benchmark-only escape hatch: the dispatch forwards to
-  // the virtual IsPageForObjectUnderUtilizedHook, letting test classes
-  // override behavior without a Kind of their own. Production hot paths
-  // (kBase, kEvacuator, kCensus) never pay vtable cost.
-  enum class Kind : uint8_t { kBase, kEvacuator, kCensus, kCustom };
-
   PageUsage(CollectPageStats collect_stats, float threshold,
             CycleQuota quota = CycleQuota::Unlimited());
 
@@ -97,23 +86,11 @@ class PageUsage {
 
   uint64_t UsedQuotaCycles() const;
 
-  Kind kind() const {
-    return kind_;
-  }
-
-  // Non-virtual entry point. Definition lives in page_usage_dispatch.h as an
-  // inline switch on kind_ — callers that want this method must include that
-  // header. Callers that include only page_usage_stats.h get a link error if
-  // they try to use it (intentional: catches missed callers at link time).
-  bool IsPageForObjectUnderUtilized(void* object);
-
-  bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
-
-  // Default-kind (Kind::kBase) implementations used by the dispatch header
-  // when no subclass override is selected. Non-virtual; out-of-line in
-  // page_usage_stats.cc.
-  bool BaseIsPageForObjectUnderUtilized(void* object);
-  bool BaseIsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
+  // Returns true when the object on the page should be reallocated. Subclasses
+  // (Evacuator, CensusTaker) override to short-circuit or extend the decision.
+  // Out-of-line in page_usage_stats.cc.
+  virtual bool IsPageForObjectUnderUtilized(void* object);
+  virtual bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
 
   CollectedPageStats CollectedStats() const {
     return unique_pages_.CollectedStats();
@@ -156,18 +133,6 @@ class PageUsage {
 
   void ExtendQuota(uint64_t quota_usec);
 
- protected:
-  // Hook invoked from the dispatch switch when kind_ == kCustom. Default
-  // returns false. Test/benchmark subclasses (e.g. SelectiveDefragment)
-  // override to inject probabilistic or custom decisions without paying
-  // virtual-dispatch cost on the production paths.
-  virtual bool IsPageForObjectUnderUtilizedHook(void* /*object*/) {
-    return false;
-  }
-  virtual bool IsPageForObjectUnderUtilizedHook(mi_heap_t* /*heap*/, void* /*object*/) {
-    return false;
-  }
-
  private:
   CollectPageStats collect_stats_{CollectPageStats::NO};
   float threshold_;
@@ -196,10 +161,6 @@ class PageUsage {
   CycleQuota quota_;
 
  protected:
-  // Set to non-kBase by subclass constructors. Read by the inline dispatch
-  // in page_usage_dispatch.h to forward to the concrete subclass impl.
-  Kind kind_ = Kind::kBase;
-
   // For use in testing, forces reallocate check to always return true
   bool force_reallocate_{false};
 };

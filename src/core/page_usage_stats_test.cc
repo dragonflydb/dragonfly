@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include "core/page_usage/page_usage_stats.h"
+
 #include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
 
@@ -10,7 +12,6 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
-#include "core/page_usage/page_usage_dispatch.h"
 #include "core/qlist.h"
 #include "core/score_map.h"
 #include "core/search/block_list.h"
@@ -48,16 +49,13 @@ std::string GenerateTestJSON(size_t num_objects) {
 
 // Helper to defragment only if a randomly generated value is less than preset probability. For
 // benchmarking realistic situations, where some nodes are fragmented and others are not.
-// Uses Kind::kCustom so the dispatch in page_usage_dispatch.h forwards to the virtual hook.
 class SelectiveDefragment : public PageUsage {
  public:
   explicit SelectiveDefragment(const double fragmentation_probability)
       : PageUsage(CollectPageStats::NO, 0), frag_prob_{fragmentation_probability} {
-    kind_ = Kind::kCustom;
   }
 
- protected:
-  bool IsPageForObjectUnderUtilizedHook(void*) override {
+  bool IsPageForObjectUnderUtilized(void*) override {
     return dist_(rng_) < frag_prob_;
   }
 

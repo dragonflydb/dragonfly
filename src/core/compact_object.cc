@@ -30,7 +30,7 @@ extern "C" {
 #include "core/cms.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
-#include "core/page_usage/page_usage_dispatch.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"

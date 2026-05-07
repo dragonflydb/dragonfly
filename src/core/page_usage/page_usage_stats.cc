@@ -206,13 +206,13 @@ uint64_t PageUsage::UsedQuotaCycles() const {
   return quota_.UsedCycles();
 }
 
-bool PageUsage::BaseIsPageForObjectUnderUtilized(void* object) {
+bool PageUsage::IsPageForObjectUnderUtilized(void* object) {
   return ConsumePageStats(mi_heap_page_is_underutilized(static_cast<mi_heap_t*>(zmalloc_heap),
                                                         object, threshold_,
                                                         collect_stats_ == CollectPageStats::YES));
 }
 
-bool PageUsage::BaseIsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
+bool PageUsage::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
   return ConsumePageStats(mi_heap_page_is_underutilized(heap, object, threshold_,
                                                         collect_stats_ == CollectPageStats::YES));
 }
