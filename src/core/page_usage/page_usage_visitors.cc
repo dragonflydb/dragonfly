@@ -90,6 +90,8 @@ TargetFilterReason ClassifyForTarget(const PageAgg& agg) {
     return TargetFilterReason::kAlreadyEmpty;
   if (agg.observed_movable_blocks > agg.used_blocks)
     return TargetFilterReason::kStaleObservation;
+  if (agg.observed_movable_blocks < agg.used_blocks)
+    return TargetFilterReason::kHasImmovableData;
   return TargetFilterReason::kKeep;
 }
 
