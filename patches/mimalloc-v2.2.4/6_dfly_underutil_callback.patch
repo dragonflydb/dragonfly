@@ -53,29 +53,31 @@ Date:   Tue May 5 18:00:00 2026 +0000
  
  // ------------------------------------------------------
  // Free
-@@ -44,12 +62,26 @@
+@@ -44,12 +62,28 @@
    // actual free: push on the local free list
    mi_block_set_next(page, block, page->local_free);
    page->local_free = block;
-+  // dragonfly: capture used count before decrement so we can detect a
-+  // threshold-crossing drop and notify defrag without scanning.
-+  const uint16_t prev_used = page->used;
++  // dragonfly: decide whether to fire the underutilized-page callback BEFORE
++  // _mi_page_retire below. _mi_page_retire may call _mi_page_free which
++  // returns the page metadata to the segment, after which reading
++  // page->used / page->capacity is a UAF. We gate on page->used > 1 so that
++  // after --, used > 0 (page not retired and still alive), which makes
++  // (uintptr_t)page a valid address to hand to the callback.
++  bool fire_underutil_cb = false;
++  if (mi_unlikely(_mi_dfly_underutil_cb != NULL && page->used > 1)) {
++    const uint32_t cap_thr   = (uint32_t)page->capacity * _mi_dfly_underutil_pct;
++    const uint32_t prev_x100 = (uint32_t)page->used * 100;
++    const uint32_t cur_x100  = (uint32_t)(page->used - 1) * 100;
++    fire_underutil_cb = (prev_x100 > cap_thr && cur_x100 <= cap_thr);
++  }
    if mi_unlikely(--page->used == 0) {
      _mi_page_retire(page);
    }
    else if mi_unlikely(check_full && mi_page_is_in_full(page)) {
      _mi_page_unfull(page);
    }
-+  // dragonfly: fire underutilized-page callback when this free dropped
-+  // used below the configured threshold for the first time. Skipped for
-+  // empty pages (handled by retire) and for pages still above threshold.
-+  if (mi_unlikely(_mi_dfly_underutil_cb != NULL && page->used > 0)) {
-+    const uint32_t cap_thr  = (uint32_t)page->capacity * _mi_dfly_underutil_pct;
-+    const uint32_t prev_x100 = (uint32_t)prev_used * 100;
-+    const uint32_t cur_x100  = (uint32_t)page->used * 100;
-+    if (prev_x100 > cap_thr && cur_x100 <= cap_thr) {
-+      _mi_dfly_underutil_cb((uintptr_t)page);
-+    }
++  if (fire_underutil_cb) {
++    _mi_dfly_underutil_cb((uintptr_t)page);
 +  }
  }
  
