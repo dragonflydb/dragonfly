@@ -94,10 +94,6 @@ def record_waste_drop(record: dict) -> float:
     return before_pct - after_pct
 
 
-def record_bytes_freed(record: dict) -> int:
-    return sum(s.get("bytes_freed", 0) for s in record.get("shards", []))
-
-
 def record_work_pending(record: dict) -> bool | None:
     pending = [s["work_pending"] for s in record.get("shards", []) if "work_pending" in s]
     if not pending:
@@ -121,18 +117,13 @@ def stall_reason(records: list[dict], args: argparse.Namespace, stall_armed: boo
         waste_drop = first_waste - last_waste
 
     committed_drop = sum(record_committed_drop(r) for r in recent)
-    bytes_freed = sum(record_bytes_freed(r) for r in recent)
     min_committed_drop = int(args.stall_min_committed_drop_mb * 1024 * 1024)
 
-    if (
-        waste_drop < args.stall_min_waste_drop
-        and committed_drop < min_committed_drop
-        and bytes_freed == 0
-    ):
+    if waste_drop < args.stall_min_waste_drop and committed_drop < min_committed_drop:
         return (
             f"stalled for {args.stall_window} driver iterations: "
             f"waste_drop={waste_drop:.3f}pp "
-            f"committed_drop={committed_drop:,}B bytes_freed={bytes_freed:,}B"
+            f"committed_drop={committed_drop:,}B"
         )
 
     return None
@@ -262,7 +253,6 @@ def print_summary(records: list[dict]) -> None:
         committed_drop = (
             (before.get("committed", 0) - after.get("committed", 0)) if before and after else 0
         )
-        freed = sum(s.get("bytes_freed", 0) for s in shards)
 
         # Aggregate per-phase CPU=ms across shards (max), preferring the new
         # cpu= field over the wall-clock took= field. "-" for unparsed.
@@ -296,7 +286,7 @@ def print_summary(records: list[dict]) -> None:
         print(
             f"cycle {rec['cycle']:>3}: waste {waste_str}  call={call_ms:.1f}ms  "
             f"{phases_part}  "
-            f"committed_drop={committed_drop:>+13,}B  freed={freed:>10,}B"
+            f"committed_drop={committed_drop:>+13,}B"
         )
 
     total_cpu_ms = sum(r.get("call_ms", 0.0) for r in records)
@@ -359,19 +349,14 @@ async def main(args: argparse.Namespace) -> None:
             records.append(record)
 
             committed_drop = record_committed_drop(record)
-            n_shards = len(shards)
-            total_freed = record_bytes_freed(record)
             waste_before = (before or {}).get("waste_pct")
             waste_after = (after or {}).get("waste_pct")
             waste_str = (
-                f"{waste_before:.2f}%->{waste_after:.2f}%"
+                f"{waste_before:.2f}% -> {waste_after:.2f}%"
                 if waste_before is not None and waste_after is not None
                 else "n/a"
             )
-            print(
-                f"cycle={cycle} waste={waste_str} shards_logged={n_shards} "
-                f"freed={total_freed:,}B committed_drop={committed_drop:,}B"
-            )
+            print(f"cycle={cycle} waste={waste_str} committed_drop={committed_drop:,}B")
 
             current_waste = (after or {}).get("waste_pct")
             last_waste = current_waste if current_waste is not None else last_waste
@@ -386,7 +371,7 @@ async def main(args: argparse.Namespace) -> None:
                 )
                 break
 
-            if committed_drop > 0 or total_freed > 0 or record_waste_drop(record) > 0:
+            if committed_drop > 0 or record_waste_drop(record) > 0:
                 stall_armed = True
 
             reason = stall_reason(records, args, stall_armed)
