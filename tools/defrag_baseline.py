@@ -122,6 +122,18 @@ def print_arena_summary(report: str, top_bins: int) -> None:
         )
 
 
+def format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            if unit == "B":
+                return f"{int(value)}B"
+            return f"{value:.1f}{unit}"
+        value /= 1024.0
+
+    raise AssertionError("unreachable")
+
+
 async def snapshot(
     connection: aioredis.Redis, label: str, include_arena: bool, top_bins: int
 ) -> None:
@@ -238,6 +250,7 @@ def print_fragmentation_summary(summary: dict, *, label: str, seed: int) -> None
     print(f"created_keys={summary['created_keys']:,}")
     print(f"deleted_keys={summary['deleted_keys']:,}")
     print(f"live_keys={summary['live_keys']:,}")
+    print(f"estimated_created_value_bytes={summary['created_keys'] * summary['value_size']:,}")
     print(f"estimated_deleted_value_bytes={summary['deleted_keys'] * summary['value_size']:,}")
     print(f"estimated_live_value_bytes={summary['live_keys'] * summary['value_size']:,}")
 
@@ -248,6 +261,83 @@ def print_fragmentation_summary(summary: dict, *, label: str, seed: int) -> None
             f"live_keys={summary['live_by_ratio'][ratio]:,} "
             f"deleted_keys={summary['deleted_by_ratio'][ratio]:,}"
         )
+
+
+def print_wide_distribution(
+    summaries: list[tuple[WideBand, dict]], target_value_bytes: int
+) -> None:
+    total_created_keys = sum(summary["created_keys"] for _, summary in summaries)
+    total_live_keys = sum(summary["live_keys"] for _, summary in summaries)
+    total_deleted_keys = sum(summary["deleted_keys"] for _, summary in summaries)
+    total_created_bytes = sum(
+        summary["created_keys"] * summary["value_size"] for _, summary in summaries
+    )
+    total_live_bytes = sum(summary["live_keys"] * summary["value_size"] for _, summary in summaries)
+    total_deleted_bytes = sum(
+        summary["deleted_keys"] * summary["value_size"] for _, summary in summaries
+    )
+
+    print("\n=== wide_object_distribution ===")
+    print(f"target_value_bytes={target_value_bytes:,} ({format_bytes(target_value_bytes)})")
+    print(f"created_value_bytes={total_created_bytes:,} ({format_bytes(total_created_bytes)})")
+    print(f"live_value_bytes={total_live_bytes:,} ({format_bytes(total_live_bytes)})")
+    print(f"deleted_value_bytes={total_deleted_bytes:,} ({format_bytes(total_deleted_bytes)})")
+    print()
+
+    print(
+        f"{'band':<8} {'size':>6} {'share':>7} {'keys_created':>13} "
+        f"{'keys_live':>12} {'keys_deleted':>13} {'bytes_created':>13} "
+        f"{'bytes_live':>10} {'bytes_deleted':>13} {'live%':>7} {'chunks':>7}"
+    )
+
+    for band, summary in summaries:
+        created_keys = summary["created_keys"]
+        live_keys = summary["live_keys"]
+        deleted_keys = summary["deleted_keys"]
+        value_size = summary["value_size"]
+        created_bytes = created_keys * value_size
+        live_bytes = live_keys * value_size
+        deleted_bytes = deleted_keys * value_size
+        live_ratio = live_keys / created_keys if created_keys else 0.0
+
+        print(
+            f"{band.name:<8} {value_size:>6,} {band.byte_share:>6.1%} "
+            f"{created_keys:>13,} {live_keys:>12,} {deleted_keys:>13,} "
+            f"{format_bytes(created_bytes):>13} {format_bytes(live_bytes):>10} "
+            f"{format_bytes(deleted_bytes):>13} {live_ratio:>6.1%} "
+            f"{summary['chunks']:>7,}"
+        )
+
+    total_live_ratio = total_live_keys / total_created_keys if total_created_keys else 0.0
+    print(
+        f"{'total':<8} {'-':>6} {'100.0%':>7} {total_created_keys:>12,} "
+        f"{total_live_keys:>12,} {total_deleted_keys:>13,} "
+        f"{format_bytes(total_created_bytes):>13} {format_bytes(total_live_bytes):>10} "
+        f"{format_bytes(total_deleted_bytes):>13} {total_live_ratio:>6.1%} "
+        f"{sum(summary['chunks'] for _, summary in summaries):>7,}"
+    )
+
+
+def print_wide_live_ratio_distribution(summaries: list[tuple[WideBand, dict]]) -> None:
+    print("\n=== wide_live_ratio_distribution ===")
+    print(
+        f"{'band':<8} {'ratio':>7} {'chunks':>8} {'keys_total':>12} "
+        f"{'keys_live':>12} {'keys_deleted':>13} {'bytes_deleted':>14}"
+    )
+
+    for band, summary in summaries:
+        value_size = summary["value_size"]
+        for ratio in sorted(summary["chunks_by_ratio"].keys(), reverse=True):
+            live_keys = summary["live_by_ratio"][ratio]
+            deleted_keys = summary["deleted_by_ratio"][ratio]
+            keys = live_keys + deleted_keys
+            deleted_bytes = deleted_keys * value_size
+
+            print(
+                f"{band.name:<8} {ratio:>6.1%} {summary['chunks_by_ratio'][ratio]:>8,} "
+                f"{keys:>12,} {live_keys:>12,} {deleted_keys:>12,} "
+                f"{format_bytes(deleted_bytes):>14}"
+            )
 
 
 async def create_uniform_fragmentation(
@@ -336,6 +426,9 @@ async def create_wide_fragmentation(connection: aioredis.Redis, args: argparse.N
     print(f"live_keys={live_keys:,}")
     print(f"estimated_deleted_value_bytes={deleted_value_bytes:,}")
     print(f"estimated_live_value_bytes={live_value_bytes:,}")
+
+    print_wide_distribution(summaries, target_value_bytes)
+    print_wide_live_ratio_distribution(summaries)
 
     print("\nby_band:")
     for band, summary in summaries:

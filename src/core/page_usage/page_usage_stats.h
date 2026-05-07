@@ -115,17 +115,6 @@ class PageUsage {
   bool BaseIsPageForObjectUnderUtilized(void* object);
   bool BaseIsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
 
-  // Optional fast-path filter for the legacy DefragIfNeeded walker. When set,
-  // BaseIsPageForObjectUnderUtilized consults the predicate before calling
-  // mi_heap_page_is_underutilized: if the predicate returns false, the page
-  // is treated as "not underutil" without the mimalloc syscall. Conservative-
-  // positive filter — see defrag_underutil::IsPageMaybeUnderutil for semantics.
-  // Phased Evacuator/CensusTaker bypass the Base impl and don't consult this.
-  using UnderutilFilter = bool (*)(uintptr_t page_addr);
-  void SetUnderutilFilter(UnderutilFilter f) {
-    underutil_filter_ = f;
-  }
-
   CollectedPageStats CollectedStats() const {
     return unique_pages_.CollectedStats();
   }
@@ -205,8 +194,6 @@ class PageUsage {
   UniquePages unique_pages_;
 
   CycleQuota quota_;
-
-  UnderutilFilter underutil_filter_ = nullptr;
 
  protected:
   // Set to non-kBase by subclass constructors. Read by the inline dispatch

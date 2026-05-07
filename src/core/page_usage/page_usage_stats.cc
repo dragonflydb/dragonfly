@@ -8,7 +8,6 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
 #include <hdr/hdr_histogram.h>
-#include <mimalloc/internal.h>  // for _mi_ptr_page in the underutil-filter fast path
 
 #include <string>
 
@@ -208,24 +207,12 @@ uint64_t PageUsage::UsedQuotaCycles() const {
 }
 
 bool PageUsage::BaseIsPageForObjectUnderUtilized(void* object) {
-  if (underutil_filter_ != nullptr) {
-    const uintptr_t page = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
-    if (!underutil_filter_(page)) {
-      return false;  // filter says: not in underutil set, skip mimalloc syscall
-    }
-  }
   return ConsumePageStats(mi_heap_page_is_underutilized(static_cast<mi_heap_t*>(zmalloc_heap),
                                                         object, threshold_,
                                                         collect_stats_ == CollectPageStats::YES));
 }
 
 bool PageUsage::BaseIsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
-  if (underutil_filter_ != nullptr) {
-    const uintptr_t page = reinterpret_cast<uintptr_t>(_mi_ptr_page(object));
-    if (!underutil_filter_(page)) {
-      return false;
-    }
-  }
   return ConsumePageStats(mi_heap_page_is_underutilized(heap, object, threshold_,
                                                         collect_stats_ == CollectPageStats::YES));
 }

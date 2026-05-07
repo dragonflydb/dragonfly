@@ -57,14 +57,6 @@ ABSL_FLAG(bool, experimental_defrag, true,
           "When true, run the phased defragmentation strategy (CENSUS / SELECT_TARGETS / "
           "EVACUATE / VERIFY) instead of the legacy single-pass defragmenter. Experimental.");
 
-ABSL_FLAG(bool, defrag_use_underutil_filter, true,
-          "Legacy defrag path only. When true, BaseIsPageForObjectUnderUtilized consults "
-          "the reactive underutil page set populated by mimalloc's free-callback before "
-          "calling mi_heap_page_is_underutilized: pages absent from the set are treated "
-          "as not-underutil and skip the syscall. Conservative-positive filter — pages "
-          "that crossed threshold without a recent free are missed until next free. "
-          "Empty set bypasses the filter (bootstrap).");
-
 ABSL_FLAG(bool, disable_huffman_check, true,
           "If true, skip the periodic huffman frequency-table check task that fires once "
           "key memory crosses 50 MiB on shard 0. The task is currently informational only "
@@ -648,12 +640,6 @@ uint32_t EngineShard::DefragTask() {
     // TODO (abhijat): implement move ctor for PageUsage so this object can be moved into the task.
     PageUsage page_usage{CollectPageStats::NO, threshold,
                          CycleQuota{CycleQuota::kDefaultDefragQuota}};
-    // Wire the reactive underutil-set predicate as a fast-path filter in the
-    // legacy DefragIfNeeded walker. The phased path's Evacuator/CensusTaker
-    // bypass the Base impl via tagged dispatch and don't see this filter.
-    if (!GetFlag(FLAGS_experimental_defrag) && GetFlag(FLAGS_defrag_use_underutil_filter)) {
-      page_usage.SetUnderutilFilter(&defrag_underutil::IsPageMaybeUnderutil);
-    }
     if (DoDefrag(&page_usage).work_pending) {
       return ProactorBase::kOnIdleMaxLevel;
     }
