@@ -103,6 +103,9 @@ struct DefragCycleStats {
   uint64_t census_db_objects_scanned = 0;
   uint64_t evac_db_objects_scanned = 0;
   uint64_t evac_reallocations = 0;
+  uint64_t evac_key_reallocations = 0;  // keys whose allocation was moved
+  uint64_t evac_val_reallocations = 0;  // values whose allocation was moved
+  uint64_t evac_bytes_moved = 0;        // total bytes read+written during reallocations
 
   size_t census_retained_pages = 0;
   size_t plan_target_pages = 0;
@@ -190,8 +193,11 @@ struct DefragTaskState {
 };
 
 struct DbSliceResult {
-  uint64_t attempts = 0;       // # of (key, value) pairs visited
-  uint64_t reallocations = 0;  // # of values where DefragIfNeeded returned true
+  uint64_t attempts = 0;           // # of (key, value) pairs visited
+  uint64_t reallocations = 0;      // # of entries where key or value was reallocated
+  uint64_t key_reallocations = 0;  // # of keys reallocated
+  uint64_t val_reallocations = 0;  // # of values reallocated
+  uint64_t bytes_moved = 0;        // bytes read+written across all reallocations
   bool finished_all_dbs = false;
 };
 

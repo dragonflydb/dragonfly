@@ -133,21 +133,44 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
   bool namespaces_null = false;
 
   const bool read_only = visitor->IsReadOnly();
+  const bool defrag_keys = visitor->ShouldDefragKeys();
   do {
     visitor->SetCurrentBucketCursor(cur.token());
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       if (read_only) {
+        if (defrag_keys && it->first.HasAllocated()) {
+          it->first.DefragIfNeeded(visitor);
+        }
         it->second.DefragIfNeeded(visitor);
         ++result.attempts;
         return;
       }
-      const ssize_t original_size = it->second.MallocUsed();
-      const bool did = it->second.DefragIfNeeded(visitor);
+      const ssize_t orig_val_size = it->second.MallocUsed();
+      const bool did_val = it->second.DefragIfNeeded(visitor);
+      bool did_key = false;
+      ssize_t orig_key_size = 0;
+      if (defrag_keys && it->first.HasAllocated()) {
+        orig_key_size = it->first.MallocUsed();
+        did_key = it->first.DefragIfNeeded(visitor);
+        if (did_key) {
+          if (const ssize_t delta = it->first.MallocUsed() - orig_key_size; delta != 0) {
+            db_table->stats.AddTypeMemoryUsage(OBJ_KEY, delta);
+          }
+        }
+      }
       ++result.attempts;
-      if (did) {
+      if (did_val || did_key) {
         ++result.reallocations;
-        if (const ssize_t delta = it->second.MallocUsed() - original_size; delta != 0) {
-          db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+        if (did_val) {
+          result.bytes_moved += static_cast<uint64_t>(orig_val_size);
+          ++result.val_reallocations;
+          if (const ssize_t delta = it->second.MallocUsed() - orig_val_size; delta != 0) {
+            db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+          }
+        }
+        if (did_key) {
+          result.bytes_moved += static_cast<uint64_t>(orig_key_size);
+          ++result.key_reallocations;
         }
       }
     });
@@ -161,10 +184,13 @@ DbSliceResult RunPrimeTableSlice(DbSlice* slice, size_t* dbid, uint64_t* cursor,
 
   const double elapsed_ms = static_cast<double>(absl::GetCurrentTimeNanos() - start_ns) / 1e6;
   LOG(INFO) << absl::StrFormat(
-      "defrag[Slice] dbid=%zu cursor=%llu->%llu traverses=%llu attempts=%llu reallocs=%llu "
+      "defrag[Slice] dbid=%zu cursor=%llu->%llu traverses=%llu attempts=%llu "
+      "reallocs=%llu(keys=%llu vals=%llu) bytes_moved=%.2fMiB "
       "took=%.1fms exit{quota=%d stop=%d cursor_done=%d ns_null=%d}",
       dbid_before, cursor_before, cur.token(), traverse_calls, result.attempts,
-      result.reallocations, elapsed_ms, quota_depleted, should_stop, cursor_done, namespaces_null);
+      result.reallocations, result.key_reallocations, result.val_reallocations,
+      static_cast<double>(result.bytes_moved) / (1024.0 * 1024.0), elapsed_ms, quota_depleted,
+      should_stop, cursor_done, namespaces_null);
 
   *cursor = cur.token();
   if (*cursor == kCursorDoneState) {
@@ -194,6 +220,7 @@ DbSliceResult RunPrimeTableHinted(DbSlice* slice, size_t dbid, const std::vector
   bool quota_depleted = false;
   bool should_stop = false;
   bool namespaces_null = false;
+  const bool defrag_keys = visitor->ShouldDefragKeys();
 
   const size_t start_idx = cursor_idx ? *cursor_idx : 0;
   size_t i = start_idx;
@@ -202,13 +229,32 @@ DbSliceResult RunPrimeTableHinted(DbSlice* slice, size_t dbid, const std::vector
     const uint64_t h = hints[i];
     PrimeTable::Cursor cur{h};
     prime_table->Traverse(cur, [&](PrimeIterator it) {
-      const ssize_t original_size = it->second.MallocUsed();
-      const bool did = it->second.DefragIfNeeded(visitor);
+      const ssize_t orig_val_size = it->second.MallocUsed();
+      const bool did_val = it->second.DefragIfNeeded(visitor);
+      bool did_key = false;
+      ssize_t orig_key_size = 0;
+      if (defrag_keys && it->first.HasAllocated()) {
+        orig_key_size = it->first.MallocUsed();
+        did_key = it->first.DefragIfNeeded(visitor);
+        if (did_key) {
+          if (const ssize_t delta = it->first.MallocUsed() - orig_key_size; delta != 0) {
+            db_table->stats.AddTypeMemoryUsage(OBJ_KEY, delta);
+          }
+        }
+      }
       ++result.attempts;
-      if (did) {
+      if (did_val || did_key) {
         ++result.reallocations;
-        if (const ssize_t delta = it->second.MallocUsed() - original_size; delta != 0) {
-          db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+        if (did_val) {
+          result.bytes_moved += static_cast<uint64_t>(orig_val_size);
+          ++result.val_reallocations;
+          if (const ssize_t delta = it->second.MallocUsed() - orig_val_size; delta != 0) {
+            db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+          }
+        }
+        if (did_key) {
+          result.bytes_moved += static_cast<uint64_t>(orig_key_size);
+          ++result.key_reallocations;
         }
       }
     });
@@ -229,10 +275,13 @@ DbSliceResult RunPrimeTableHinted(DbSlice* slice, size_t dbid, const std::vector
   const size_t hints_visited = i - start_idx;
   const double elapsed_ms = static_cast<double>(absl::GetCurrentTimeNanos() - start_ns) / 1e6;
   LOG(INFO) << absl::StrFormat(
-      "defrag[Hinted] dbid=%zu hints_this_call=%zu pos=%zu/%zu attempts=%llu reallocs=%llu "
+      "defrag[Hinted] dbid=%zu hints_this_call=%zu pos=%zu/%zu attempts=%llu "
+      "reallocs=%llu(keys=%llu vals=%llu) bytes_moved=%.2fMiB "
       "took=%.1fms exit{quota=%d stop=%d ns_null=%d}",
-      dbid, hints_visited, i, hints.size(), result.attempts, result.reallocations, elapsed_ms,
-      quota_depleted, should_stop, namespaces_null);
+      dbid, hints_visited, i, hints.size(), result.attempts, result.reallocations,
+      result.key_reallocations, result.val_reallocations,
+      static_cast<double>(result.bytes_moved) / (1024.0 * 1024.0), elapsed_ms, quota_depleted,
+      should_stop, namespaces_null);
 
   result.finished_all_dbs = !quota_depleted && !should_stop && i == hints.size();
   return result;
@@ -569,8 +618,11 @@ DefragShardReport EngineShard::DoDefrag(PageUsage* page_usage) {
     return report;
   }
 
-  auto [attempts, reallocations, finished_all_dbs] =
+  const DbSliceResult slice_result =
       RunPrimeTableSlice(&slice, &defrag_state_.dbid, &defrag_state_.cursor, page_usage);
+  const uint64_t attempts = slice_result.attempts;
+  uint64_t reallocations = slice_result.reallocations;
+  const bool finished_all_dbs = slice_result.finished_all_dbs;
 
   DefragShardReport report;
   report.summary.phase_start = phase_start;  // legacy path: always IDLE

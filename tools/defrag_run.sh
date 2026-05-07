@@ -71,6 +71,7 @@ fi
 EXPERIMENTAL=""
 MODE=""
 POSITIONAL_SET=false
+PASSTHROUGH_FLAGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -91,6 +92,8 @@ while [[ $# -gt 0 ]]; do
             EXPERIMENTAL="true"; MODE="phased"; POSITIONAL_SET=true; shift ;;
         false)
             EXPERIMENTAL="false"; MODE="legacy"; POSITIONAL_SET=true; shift ;;
+        --)
+            shift; PASSTHROUGH_FLAGS=("$@"); break ;;
         *)
             echo "error: unknown argument '$1' (expected phased|legacy or an option flag)"
             echo "run with --help for usage"
@@ -174,6 +177,8 @@ EXTRA_FLAGS=(
     # Disable RDB snapshot on shutdown to avoid "direct I/O not supported"
     # warnings on encrypted filesystems.
     --dbfilename ""
+    # Extra flags passed after -- on the command line.
+    "${PASSTHROUGH_FLAGS[@]}"
 )
 
 taskset -c "${DF_CORE_LIST}" \

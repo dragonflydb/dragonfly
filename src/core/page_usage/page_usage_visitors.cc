@@ -24,6 +24,11 @@ ABSL_FLAG(bool, defrag_use_skip_bit, false,
           "If true, mark target pages with mimalloc's defrag_skip bit so EVAC moves don't "
           "refill them. Disable to A/B compare against an unmarked baseline.");
 
+ABSL_FLAG(bool, defrag_keys, false,
+          "If true, the phased defragmenter also defragments key allocations "
+          "(it->first) in addition to values. Set to false to measure the "
+          "incremental benefit of key defrag.");
+
 ABSL_FLAG(double, defrag_skip_percentile, 0.5,
           "Fraction of the target plan (sorted by retention_score, most-fragmented first) "
           "to apply the mimalloc defrag_skip bit to. 0.5 (default) marks the top half "
@@ -565,11 +570,19 @@ bool CensusTaker::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
   return false;
 }
 
+bool CensusTaker::ShouldDefragKeys() const {
+  return ::absl::GetFlag(FLAGS_defrag_keys);
+}
+
 Evacuator::Evacuator(TargetPlan* plan, float threshold, EvacStats* evac_stats, CycleQuota quota)
     : PageUsage(CollectPageStats::NO, threshold, quota),
       plan_(plan),
       threshold_(threshold),
       evac_stats_(evac_stats) {
+}
+
+bool Evacuator::ShouldDefragKeys() const {
+  return ::absl::GetFlag(FLAGS_defrag_keys);
 }
 
 bool Evacuator::IsPageForObjectUnderUtilized(void* object) {

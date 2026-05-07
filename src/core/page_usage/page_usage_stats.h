@@ -122,6 +122,12 @@ class PageUsage {
     return false;
   }
 
+  // When true, the traversal should also defrag keys (it->first) in addition
+  // to values. Only the phased algorithm (CENSUS + EVACUATE) enables this.
+  virtual bool ShouldDefragKeys() const {
+    return false;
+  }
+
   // Walkers may stash the bucket cursor about to be visited so that downstream
   // Observe() calls can attribute candidates back to a bucket. Default no-op.
   virtual void SetCurrentBucketCursor(uint64_t /*cursor*/) {

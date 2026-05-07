@@ -29,6 +29,9 @@ ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
 ABSL_DECLARE_FLAG(bool, latency_tracking);
+ABSL_DECLARE_FLAG(bool, experimental_defrag);
+ABSL_DECLARE_FLAG(uint64_t, defrag_min_plan_reclaimable_bytes);
+ABSL_DECLARE_FLAG(bool, defrag_keys);
 
 namespace dfly {
 
@@ -881,6 +884,103 @@ TEST_F(DefragDflyEngineTest, DefragEventuallyFinishes) {
     EXPECT_GT(shard->stats().defrag_realloc_total, 0);
     EXPECT_GE(shard->stats().defrag_attempt_total, shard->stats().defrag_realloc_total);
   });
+}
+
+// Validates that key defragmentation in the phased algorithm doesn't corrupt data.
+// Uses large keys (>18 bytes) to force external heap allocations, fragments them,
+// runs defrag, then verifies all keys are still accessible and that both key and
+// value reallocations occurred.
+TEST_F(DefragDflyEngineTest, KeyDefragIntegrity) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_experimental_defrag, true);
+  absl::SetFlag(&FLAGS_defrag_keys, true);
+  // Disable the minimum-reclaimable guard so small-scale fragmentation triggers EVACUATE.
+  absl::SetFlag(&FLAGS_defrag_min_plan_reclaimable_bytes, 0);
+
+  // Use keys > 18 bytes to force external allocation (not inline in CompactObj).
+  // Use values > 18 bytes to also force external allocation for values.
+  constexpr int kNumKeys = 5000;
+  constexpr int kValueSize = 64;
+  // Threshold: pages with used/capacity < 0.8 are candidates.
+  constexpr float kThreshold = 0.8f;
+
+  // Populate with large keys and values.
+  for (int i = 0; i < kNumKeys; ++i) {
+    string key = absl::StrFormat("long-key-name-for-defrag-test-%05d", i);
+    string val(kValueSize, 'A' + (i % 26));
+    Run({"SET", key, val});
+  }
+
+  // Delete every other key to fragment key and value pages.
+  for (int i = 0; i < kNumKeys; i += 2) {
+    string key = absl::StrFormat("long-key-name-for-defrag-test-%05d", i);
+    Run({"DEL", key});
+  }
+
+  // Run phased defrag. Track total key and value reallocations across all cycles.
+  uint64_t total_key_reallocs = 0;
+  uint64_t total_val_reallocs = 0;
+  uint64_t total_bytes_moved = 0;
+
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned, ProactorBase*) {
+    auto* shard = EngineShard::tlocal();
+    if (!shard)
+      return;
+
+    uint64_t shard_key_reallocs = 0;
+    uint64_t shard_val_reallocs = 0;
+    uint64_t shard_bytes_moved = 0;
+
+    for (int i = 0; i < 500; ++i) {
+      PageUsage page_usage{CollectPageStats::NO, kThreshold,
+                           CycleQuota{CycleQuota::kDefaultDefragQuota}};
+      page_usage.SetForceReallocate(true);
+      auto report = shard->DoDefrag(&page_usage);
+      shard_key_reallocs += report.cycle_stats.evac_key_reallocations;
+      shard_val_reallocs += report.cycle_stats.evac_val_reallocations;
+      shard_bytes_moved += report.cycle_stats.evac_bytes_moved;
+    }
+
+    // Atomic accumulation into shared counters (single shard in this fixture, but safe).
+    __atomic_fetch_add(&total_key_reallocs, shard_key_reallocs, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&total_val_reallocs, shard_val_reallocs, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&total_bytes_moved, shard_bytes_moved, __ATOMIC_RELAXED);
+  });
+
+  LOG(INFO) << "Defrag stats: key_reallocs=" << total_key_reallocs
+            << " val_reallocs=" << total_val_reallocs << " bytes_moved=" << total_bytes_moved;
+
+  // Verify that both key AND value reallocations happened.
+  EXPECT_GT(total_key_reallocs, 0u) << "Expected key reallocations during defrag";
+  EXPECT_GT(total_val_reallocs, 0u) << "Expected value reallocations during defrag";
+  EXPECT_GT(total_bytes_moved, 0u) << "Expected non-zero bytes moved during defrag";
+
+  // Validate all remaining keys are intact after defrag — no corruption.
+  for (int i = 1; i < kNumKeys; i += 2) {
+    string key = absl::StrFormat("long-key-name-for-defrag-test-%05d", i);
+    string expected_val(kValueSize, 'A' + (i % 26));
+    auto resp = Run({"GET", key});
+    ASSERT_EQ(resp, expected_val) << "Value corrupted after defrag: " << key;
+  }
+
+  // Verify deleted keys are still gone (no resurrection from dangling pointers).
+  for (int i = 0; i < kNumKeys; i += 2) {
+    string key = absl::StrFormat("long-key-name-for-defrag-test-%05d", i);
+    auto resp = Run({"EXISTS", key});
+    ASSERT_THAT(resp, IntArg(0)) << "Deleted key reappeared after defrag: " << key;
+  }
+
+  // Write new values to the defragged keys — verifies no dangling pointers.
+  for (int i = 1; i < kNumKeys; i += 2) {
+    string key = absl::StrFormat("long-key-name-for-defrag-test-%05d", i);
+    ASSERT_EQ(Run({"SET", key, "new-value"}), "OK");
+  }
+
+  // Final read-back.
+  for (int i = 1; i < kNumKeys; i += 2) {
+    string key = absl::StrFormat("long-key-name-for-defrag-test-%05d", i);
+    ASSERT_EQ(Run({"GET", key}), "new-value");
+  }
 }
 
 TEST_F(DflyEngineTest, Issue752) {

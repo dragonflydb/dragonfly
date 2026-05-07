@@ -300,6 +300,8 @@ class CensusTaker final : public PageUsage {
     return true;
   }
 
+  bool ShouldDefragKeys() const final;
+
   void SetCurrentBucketCursor(uint64_t cursor) final {
     current_cursor_ = cursor;
   }
@@ -320,6 +322,8 @@ class Evacuator final : public PageUsage {
   // object isn't on a target page. On hit, calls the syscall + EvacDecide.
   bool IsPageForObjectUnderUtilized(void* object) override;
   bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) override;
+
+  bool ShouldDefragKeys() const final;
 
   bool ShouldStop() const final {
     return plan_->AllTargetsDone();

@@ -147,6 +147,9 @@ void DefragCycleStats::Merge(const DefragCycleStats& other) {
   census_db_objects_scanned += other.census_db_objects_scanned;
   evac_db_objects_scanned += other.evac_db_objects_scanned;
   evac_reallocations += other.evac_reallocations;
+  evac_key_reallocations += other.evac_key_reallocations;
+  evac_val_reallocations += other.evac_val_reallocations;
+  evac_bytes_moved += other.evac_bytes_moved;
   census_retained_pages += other.census_retained_pages;
   plan_target_pages += other.plan_target_pages;
   census_potential_reclaim_bytes += other.census_potential_reclaim_bytes;
@@ -247,6 +250,9 @@ std::string DefragMergedReport::ToString() const {
   absl::StrAppend(&out, "\n[EVACUATE]\n");
   absl::StrAppend(&out, "DB objects scanned: ", cs.evac_db_objects_scanned, "\n");
   absl::StrAppend(&out, "Reallocations: ", cs.evac_reallocations, "\n");
+  absl::StrAppend(&out, "Keys reallocated: ", cs.evac_key_reallocations, "\n");
+  absl::StrAppend(&out, "Values reallocated: ", cs.evac_val_reallocations, "\n");
+  absl::StrAppend(&out, "Bytes moved: ", FormatMiB(cs.evac_bytes_moved), "\n");
   absl::StrAppend(&out, "Blocks moved (committed): ", cs.evac.blocks_move_committed, "\n");
   absl::StrAppend(&out, "Bytes moved (committed): ", cs.evac.bytes_move_committed, "\n");
   absl::StrAppend(&out, "Blocks skipped (not target): ", cs.evac.blocks_skipped_not_target, "\n");
@@ -531,6 +537,9 @@ void DefragEvacuateStep(DefragTaskState* state, float threshold, CycleQuota quot
                                     use_hints ? &state->hint_cursor_idx : nullptr);
   state->cycle_stats.evac_db_objects_scanned += result.attempts;
   state->cycle_stats.evac_reallocations += result.reallocations;
+  state->cycle_stats.evac_key_reallocations += result.key_reallocations;
+  state->cycle_stats.evac_val_reallocations += result.val_reallocations;
+  state->cycle_stats.evac_bytes_moved += result.bytes_moved;
   if (!result.finished_all_dbs && !state->plan->AllTargetsDone()) {
     state->phase_active_ns += NowNs() - step_start_ns;
     return;
@@ -543,14 +552,17 @@ void DefragEvacuateStep(DefragTaskState* state, float threshold, CycleQuota quot
   const uint64_t now = NowNs();
   state->phase_active_ns += now - step_start_ns;
   DEFRAG_STEP_LOG << absl::StrFormat(
-      "defrag[EVACUATE] shard=%u cycle=%llu db_objects=%llu reallocs=%llu "
+      "defrag[EVACUATE] shard=%u cycle=%llu db_objects=%llu "
+      "reallocs=%llu(keys=%llu vals=%llu) bytes_moved=%s "
       "commit=%llu/%llu (%.1f%%) bytes_committed=%s "
       "skipped_blocks{not_target=%llu target_done=%llu revalid=%llu} "
       "reval_fail{heap=%llu active=%llu full=%llu above_thr=%llu} "
       "abandoned=%llu completed_during_evac=%llu took=%.1fms cpu=%.1fms",
       state->shard_id, state->cycle_id, state->cycle_stats.evac_db_objects_scanned,
-      state->cycle_stats.evac_reallocations, e.blocks_move_committed, attempted, commit_pct,
-      FormatMiB(e.bytes_move_committed), e.blocks_skipped_not_target, e.blocks_skipped_target_done,
+      state->cycle_stats.evac_reallocations, state->cycle_stats.evac_key_reallocations,
+      state->cycle_stats.evac_val_reallocations, FormatMiB(state->cycle_stats.evac_bytes_moved),
+      e.blocks_move_committed, attempted, commit_pct, FormatMiB(e.bytes_move_committed),
+      e.blocks_skipped_not_target, e.blocks_skipped_target_done,
       e.blocks_skipped_revalidation_failed, e.targets_revalidation_heap_mismatch,
       e.targets_revalidation_active_malloc_page, e.targets_revalidation_full_page,
       e.targets_revalidation_above_threshold, e.targets_abandoned_revalidation,
