@@ -37,6 +37,16 @@
 #include "core/page_usage/page_usage_stats.h"
 #include "core/page_usage/page_usage_visitors.h"
 
+// GCC's -Warray-bounds fires when the inline dispatch switch below is
+// inlined into a function holding a stack-allocated bare `PageUsage`. The
+// compiler sees the unreachable `kind_ == kEvacuator` case static_cast
+// and warns about Evacuator's members lying past the PageUsage object's
+// extent. The runtime tag check makes the path unreachable for kBase
+// instances, so the warning is spurious. Suppress for the dispatch and
+// *Impl bodies only.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+
 namespace dfly {
 
 inline bool CensusTaker::IsPageForObjectUnderUtilizedImpl(void* object) {
@@ -106,3 +116,5 @@ inline bool PageUsage::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* objec
 }
 
 }  // namespace dfly
+
+#pragma GCC diagnostic pop
