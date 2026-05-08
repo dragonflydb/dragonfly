@@ -11,6 +11,9 @@ Connects to an already-running dragonfly. Each cycle:
   6. Emit one JSONL record
   7. Sleep
 
+After the final summary, the script runs FLUSHALL to clean up the generated
+dataset.
+
 Run dragonfly with:
     ./build-dbg/dragonfly --alsologtostderr ...
 This writes glog files into /tmp/ with /tmp/dragonfly.INFO as a stable symlink
@@ -213,6 +216,10 @@ async def run_defragment(client: aioredis.Redis) -> str:
     return reply
 
 
+async def flushall(client: aioredis.Redis) -> None:
+    await client.execute_command("FLUSHALL")
+
+
 def read_log_delta(path: str, start_offset: int) -> tuple[str, int]:
     """Return text written to `path` since `start_offset`, plus new EOF."""
     with open(path, "rb") as fh:
@@ -382,18 +389,22 @@ async def main(args: argparse.Namespace) -> None:
             if cycle + 1 < args.cycles:
                 await asyncio.sleep(args.sleep_ms / 1000.0)
 
-    await client.aclose()
-    if (
-        stop_reason.startswith("reached --cycles=")
-        and args.target_waste is not None
-        and last_waste is not None
-    ):
-        stop_reason = (
-            f"reached --cycles={args.cycles} (target {args.target_waste:.2f}% "
-            f"not reached, final {last_waste:.2f}%)"
-        )
-    print(f"\nstopped: {stop_reason}")
-    print_summary(records)
+    try:
+        if (
+            stop_reason.startswith("reached --cycles=")
+            and args.target_waste is not None
+            and last_waste is not None
+        ):
+            stop_reason = (
+                f"reached --cycles={args.cycles} (target {args.target_waste:.2f}% "
+                f"not reached, final {last_waste:.2f}%)"
+            )
+        print(f"\nstopped: {stop_reason}")
+        print_summary(records)
+        await flushall(client)
+        print("\ncleanup: FLUSHALL")
+    finally:
+        await client.aclose()
 
 
 if __name__ == "__main__":
