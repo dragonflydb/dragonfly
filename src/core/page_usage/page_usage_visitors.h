@@ -54,7 +54,7 @@ struct CensusStats {
 
 class PageCensus {
  public:
-  static constexpr size_t kDefaultMaxRetainedPages = 100'000;
+  static constexpr size_t kDefaultMaxRetainedPages = 300'000;
 
   // When false, PageCensus skips the top-k heap entirely and just inserts every
   // observed page into pages_. Cheap (no priority_queue work per Observe), but
