@@ -7,6 +7,8 @@ does not wait for background defrag counters.
 
 import argparse
 import asyncio
+import contextlib
+import os
 import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -531,7 +533,11 @@ async def main(args: argparse.Namespace) -> None:
         max_connections=args.max_connections,
     )
     connection = aioredis.Redis(connection_pool=pool)
-    await create_fragmentation(connection, args)
+    if args.quiet:
+        with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+            await create_fragmentation(connection, args)
+    else:
+        await create_fragmentation(connection, args)
 
 
 if __name__ == "__main__":
@@ -590,6 +596,7 @@ if __name__ == "__main__":
         default=0,
         help="print snapshots every N deleted chunks; 0 disables intermediate snapshots",
     )
+    parser.add_argument("--quiet", action="store_true", help="suppress normal progress output")
 
     args = parser.parse_args()
     if args.mul != 1.0:

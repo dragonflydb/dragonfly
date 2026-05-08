@@ -21,6 +21,10 @@ to the current INFO log; the script reads from that symlink.
 
 Plot in pandas with:
     pd.read_json("run.jsonl", lines=True)
+
+Use the required label to keep old/new runs separate:
+    ./tools/defrag_drive.py old
+    ./tools/defrag_drive.py new
 """
 
 import argparse
@@ -317,8 +321,9 @@ def print_summary(records: list[dict]) -> None:
 
 async def main(args: argparse.Namespace) -> None:
     client = aioredis.Redis(host=args.host, port=args.port, db=0)
+    output_path = args.output or os.path.join("runs", f"{args.label}.jsonl")
 
-    out_dir = os.path.dirname(args.output)
+    out_dir = os.path.dirname(output_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
@@ -326,7 +331,8 @@ async def main(args: argparse.Namespace) -> None:
     last_waste: float | None = None
     stall_armed = False
     stop_reason = f"reached --cycles={args.cycles}"
-    with open(args.output, "w") as out_fh:
+    print(f"writing run: {output_path}")
+    with open(output_path, "w") as out_fh:
         for cycle in range(args.cycles):
             log_offset = log_size(args.log_path)
             ts_ns = time.time_ns()
@@ -343,6 +349,7 @@ async def main(args: argparse.Namespace) -> None:
             shards = parse_log_delta(log_text)
 
             record = {
+                "label": args.label,
                 "cycle": cycle,
                 "ts_ns": ts_ns,
                 "call_ms": call_ms,
@@ -412,6 +419,9 @@ if __name__ == "__main__":
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument(
+        "label", choices=("old", "new"), help="run label used for runs/<label>.jsonl"
+    )
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=6379)
     parser.add_argument(
@@ -425,7 +435,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--sleep-ms", type=int, default=500)
     parser.add_argument("--log-path", default="/tmp/dragonfly.INFO")
-    parser.add_argument("--output", default="runs/defrag_run.jsonl")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="output JSONL path; defaults to runs/<label>.jsonl",
+    )
     parser.add_argument(
         "--stall-window",
         type=int,
