@@ -134,6 +134,10 @@ def format_bytes(size: int) -> str:
     raise AssertionError("unreachable")
 
 
+def format_bytes_pair(size: int) -> str:
+    return f"{size:,} ({format_bytes(size)})"
+
+
 async def snapshot(
     connection: aioredis.Redis, label: str, include_arena: bool, top_bins: int
 ) -> None:
@@ -250,9 +254,18 @@ def print_fragmentation_summary(summary: dict, *, label: str, seed: int) -> None
     print(f"created_keys={summary['created_keys']:,}")
     print(f"deleted_keys={summary['deleted_keys']:,}")
     print(f"live_keys={summary['live_keys']:,}")
-    print(f"estimated_created_value_bytes={summary['created_keys'] * summary['value_size']:,}")
-    print(f"estimated_deleted_value_bytes={summary['deleted_keys'] * summary['value_size']:,}")
-    print(f"estimated_live_value_bytes={summary['live_keys'] * summary['value_size']:,}")
+    print(
+        "estimated_created_value_bytes="
+        f"{format_bytes_pair(summary['created_keys'] * summary['value_size'])}"
+    )
+    print(
+        "estimated_deleted_value_bytes="
+        f"{format_bytes_pair(summary['deleted_keys'] * summary['value_size'])}"
+    )
+    print(
+        "estimated_live_value_bytes="
+        f"{format_bytes_pair(summary['live_keys'] * summary['value_size'])}"
+    )
 
     print("\nby_live_ratio:")
     for ratio in sorted(summary["chunks_by_ratio"].keys(), reverse=True):
@@ -278,10 +291,10 @@ def print_wide_distribution(
     )
 
     print("\n=== wide_object_distribution ===")
-    print(f"target_value_bytes={target_value_bytes:,} ({format_bytes(target_value_bytes)})")
-    print(f"created_value_bytes={total_created_bytes:,} ({format_bytes(total_created_bytes)})")
-    print(f"live_value_bytes={total_live_bytes:,} ({format_bytes(total_live_bytes)})")
-    print(f"deleted_value_bytes={total_deleted_bytes:,} ({format_bytes(total_deleted_bytes)})")
+    print(f"target_value_bytes={format_bytes_pair(target_value_bytes)}")
+    print(f"created_value_bytes={format_bytes_pair(total_created_bytes)}")
+    print(f"live_value_bytes={format_bytes_pair(total_live_bytes)}")
+    print(f"deleted_value_bytes={format_bytes_pair(total_deleted_bytes)}")
     print()
 
     print(
@@ -338,6 +351,62 @@ def print_wide_live_ratio_distribution(summaries: list[tuple[WideBand, dict]]) -
                 f"{keys:>12,} {live_keys:>12,} {deleted_keys:>12,} "
                 f"{format_bytes(deleted_bytes):>14}"
             )
+
+
+def profile_histogram_counts(summary: dict) -> list[int]:
+    # Buckets are live-ratio ranges: [0.80, 1.00], [0.40, 0.80), [0.10, 0.40), [0.00, 0.10).
+    buckets = [0, 0, 0, 0]
+    for ratio, chunks in summary["chunks_by_ratio"].items():
+        if ratio >= 0.80:
+            buckets[0] += chunks
+        elif ratio >= 0.40:
+            buckets[1] += chunks
+        elif ratio >= 0.10:
+            buckets[2] += chunks
+        else:
+            buckets[3] += chunks
+    return buckets
+
+
+def render_histogram_cell(count: int, total: int, width: int = 12) -> str:
+    if count == 0 or total == 0:
+        return "-"
+
+    pct = 100.0 * count / total
+    bars = max(1, round(width * count / total))
+    return f"{'#' * bars} {pct:.0f}%"
+
+
+def print_wide_profile_histogram(summaries: list[tuple[WideBand, dict]]) -> None:
+    print("\n=== wide_profile_histogram ===")
+    print(
+        f"{'band':<8} {'size':>6} {'chunks':>8} {'80-100% live':<18} "
+        f"{'40-80% live':<18} {'10-40% live':<18} {'0-10% live':<18}"
+    )
+
+    totals = [0, 0, 0, 0]
+    total_chunks = 0
+    for band, summary in summaries:
+        counts = profile_histogram_counts(summary)
+        chunks = summary["chunks"]
+        totals = [cur + add for cur, add in zip(totals, counts)]
+        total_chunks += chunks
+
+        print(
+            f"{band.name:<8} {band.value_size:>6,} {chunks:>8,} "
+            f"{render_histogram_cell(counts[0], chunks):<18} "
+            f"{render_histogram_cell(counts[1], chunks):<18} "
+            f"{render_histogram_cell(counts[2], chunks):<18} "
+            f"{render_histogram_cell(counts[3], chunks):<18}"
+        )
+
+    print(
+        f"{'total':<8} {'-':>6} {total_chunks:>8,} "
+        f"{render_histogram_cell(totals[0], total_chunks):<18} "
+        f"{render_histogram_cell(totals[1], total_chunks):<18} "
+        f"{render_histogram_cell(totals[2], total_chunks):<18} "
+        f"{render_histogram_cell(totals[3], total_chunks):<18}"
+    )
 
 
 async def create_uniform_fragmentation(
@@ -424,10 +493,11 @@ async def create_wide_fragmentation(connection: aioredis.Redis, args: argparse.N
     print(f"created_keys={created_keys:,}")
     print(f"deleted_keys={deleted_keys:,}")
     print(f"live_keys={live_keys:,}")
-    print(f"estimated_deleted_value_bytes={deleted_value_bytes:,}")
-    print(f"estimated_live_value_bytes={live_value_bytes:,}")
+    print(f"estimated_deleted_value_bytes={format_bytes_pair(deleted_value_bytes)}")
+    print(f"estimated_live_value_bytes={format_bytes_pair(live_value_bytes)}")
 
     print_wide_distribution(summaries, target_value_bytes)
+    print_wide_profile_histogram(summaries)
     print_wide_live_ratio_distribution(summaries)
 
     print("\nby_band:")
