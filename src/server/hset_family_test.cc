@@ -572,6 +572,28 @@ TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {
   EXPECT_THAT(Run({"HLEN", "hk"}), IntArg(kElements));
 }
 
+// A single-field hash must remain listpack even when the value exceeds max_map_field_len
+// (default 64 bytes). With multiple fields the large value still triggers dense_set. (#7249)
+TEST_F(HSetFamilyTest, SingleFieldLargeValueRemainsListpack) {
+  const string large_value(2000, 'x');
+
+  EXPECT_EQ(1, CheckedInt({"HSET", "hmap", "field", large_value}));
+  auto resp = Run({"DEBUG", "OBJECT", "hmap"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:listpack"));
+  EXPECT_EQ(Run({"HGET", "hmap", "field"}), large_value);
+
+  EXPECT_EQ(0, CheckedInt({"HSET", "hmap", "field", string(2000, 'y')}));
+  resp = Run({"DEBUG", "OBJECT", "hmap"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:listpack"));
+
+  // Two fields: falls through to the regular size check, which rejects the large value.
+  EXPECT_EQ(2, CheckedInt({"HSET", "hmap", "field1", large_value, "field2", "val"}));
+  resp = Run({"DEBUG", "OBJECT", "hmap"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:dense_set"));
+  EXPECT_EQ(Run({"HGET", "hmap", "field1"}), large_value);
+  EXPECT_EQ(Run({"HGET", "hmap", "field2"}), "val");
+}
+
 TEST_F(HSetFamilyTest, Issue1140) {
   Run({"HSET", "CaseKey", "Foo", "Bar"});
 

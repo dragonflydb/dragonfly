@@ -4,7 +4,7 @@
 
 #include "server/set_family.h"
 
-#include "absl/flags/flag.h"
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"

@@ -264,6 +264,11 @@ class DflyInstance:
                 self.sed_thread.join()
                 symbolize_stack_trace(proc.args[0], self.stacktrace)
 
+    def wait(self):
+        if self.proc is not None:
+            self.proc.communicate(timeout=120)
+            self.proc = None
+
     def _start(self):
         if self.params.existing_port:
             return
@@ -348,7 +353,7 @@ class DflyInstance:
         p = psutil.Process(self.proc.pid)
         rv = []
         for file in p.open_files():
-            if ".log." in file.path and "dragonfly" in file.path:
+            if ".log" in file.path and "dragonfly" in file.path:
                 rv.append(file.path)
         return rv
 
