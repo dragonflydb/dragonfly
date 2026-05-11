@@ -1279,6 +1279,37 @@ TEST_F(GenericFamilyTest, Info) {
   EXPECT_EQ(2, get_rdb_changes_since_last_save(resp.GetString()));
 }
 
+TEST_F(GenericFamilyTest, BgSaveSchedule) {
+  InitWithDbFilename();
+
+  auto changes_since_save = [](const string& info) -> int {
+    const string m = "rdb_changes_since_last_success_save:";
+    auto pos = info.find(m);
+    if (pos == string::npos)
+      return -1;
+    pos += m.size();
+    auto end = info.find('\r', pos);
+    return atoi(info.substr(pos, end - pos).c_str());
+  };
+
+  auto bgsave_and_wait = [&](const std::vector<std::string_view>& cmd) {
+    EXPECT_EQ(Run({"set", "k", "1"}), "OK");
+    EXPECT_EQ(Run(cmd), "OK");
+    EXPECT_TRUE(WaitUntilCondition(
+        [&] {
+          return changes_since_save(Run({"info", "persistence"}).GetString()) == 0;
+        },
+        500ms));
+  };
+
+  bgsave_and_wait({"bgsave", "SCHEDULE"});
+  bgsave_and_wait({"bgsave", "schedule"});
+  bgsave_and_wait({"bgsave", "SCHEDULE", "DF"});
+
+  // SAVE must still reject the subcommand.
+  EXPECT_THAT(Run({"save", "SCHEDULE"}), ErrArg("Unknown subcommand"));
+}
+
 TEST_F(GenericFamilyTest, FieldTtl) {
   TEST_current_time_ms = kMemberExpiryBase * 1000;  // to reset to test time.
   EXPECT_THAT(Run({"saddex", "key", "1", "val1"}), IntArg(1));

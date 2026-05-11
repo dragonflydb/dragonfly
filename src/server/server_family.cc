@@ -2942,9 +2942,14 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
   return save_cmd_opts;
 }
 
-// SAVE [DF|RDB] [CLOUD_URI] [BASENAME]
-// TODO add missing [SCHEDULE]
+// BGSAVE [SCHEDULE] [DF|RDB] [CLOUD_URI] [BASENAME]
 void ServerFamily::BgSave(CmdArgList args, CommandContext* cmd_cntx) {
+  // SCHEDULE is parsed for client compatibility but is a no-op: concurrent
+  // saves are still rejected by DoSaveCheckAndStart; we do not queue.
+  if (!args.empty() && absl::EqualsIgnoreCase(ArgS(args, 0), "SCHEDULE")) {
+    args.remove_prefix(1);
+  }
+
   auto maybe_res = GetSaveCmdOpts(args, cmd_cntx);
   if (!maybe_res) {
     return;
