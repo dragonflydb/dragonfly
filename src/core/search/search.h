@@ -79,6 +79,7 @@ struct SchemaField {
   struct TextParams {
     // if enabled, suffix trie is build for efficient suffix and infix queries
     bool with_suffixtrie = false;
+    bool no_stem = false;
   };
 
   struct NumericParams {
@@ -107,6 +108,8 @@ struct Schema {
 
   // Mapping for short field names (aliases).
   absl::flat_hash_map<std::string /* short name*/, std::string /*identifier*/> field_names;
+
+  std::string language = "english";
 
   // Return identifier for alias if found, otherwise return passed value
   std::string_view LookupAlias(std::string_view alias) const;

@@ -142,9 +142,7 @@ if (WITH_SEARCH)
     LIB "none"
   )
 
-  # Snowball libstemmer_c: plain Makefile that builds libstemmer.a in-tree;
-  # no autoconf/cmake/install rules, so configure is a no-op and install is a
-  # manual copy (mirrors the simsimd pattern below).
+  # No autoconf/cmake/install in upstream Makefile — manual install copy.
   add_third_party(
     stemmer
     URL https://snowballstem.org/dist/libstemmer_c-2.2.0.tar.gz
@@ -228,8 +226,6 @@ if (WITH_SEARCH)
   add_dependencies(TRDP::hnswlib hnswlib_project)
   set_target_properties(TRDP::hnswlib PROPERTIES
                         INTERFACE_INCLUDE_DIRECTORIES "${HNSWLIB_INCLUDE_DIR}")
-  # TRDP::stemmer is created automatically by add_third_party (LIB libstemmer.a),
-  # so no manual imported-target block is needed here.
 endif()
 
 add_library(TRDP::fast_float INTERFACE IMPORTED)
