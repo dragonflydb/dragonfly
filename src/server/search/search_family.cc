@@ -1779,7 +1779,7 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("index_definition");
   {
-    rb->StartCollection(3, CollectionType::MAP);
+    rb->StartCollection(4, CollectionType::MAP);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
     rb->SendSimpleString("prefixes");
@@ -1787,6 +1787,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
     for (const auto& prefix : info.base_index.prefixes) {
       rb->SendBulkString(prefix);
     }
+    rb->SendSimpleString("language");
+    rb->SendSimpleString(schema.language);
     rb->SendSimpleString("default_score");
     rb->SendLong(1);
   }
@@ -1841,6 +1843,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
       auto& tparams = std::get<search::SchemaField::TextParams>(field_info.special_params);
       if (tparams.with_suffixtrie)
         info.emplace_back("WITHSUFFIXTRIE");
+      if (tparams.no_stem)
+        info.emplace_back("NOSTEM");
     } else if (field_info.type == search::SchemaField::NUMERIC) {
       auto& numeric_params =
           std::get<search::SchemaField::NumericParams>(field_info.special_params);

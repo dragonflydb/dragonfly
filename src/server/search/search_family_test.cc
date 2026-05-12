@@ -319,8 +319,8 @@ TEST_F(SearchFamilyTest, InfoIndex) {
 
   auto info = Run({"ft.info", "idx-1"});
 
-  auto descriptor_matcher =
-      IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "default_score", 1);
+  auto descriptor_matcher = IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "language",
+                                    "english", "default_score", 1);
   auto schema_matcher = IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT"));
 
   EXPECT_THAT(info, IsArray(_, _, _, descriptor_matcher, "index_options", RespArray(IsEmpty()),
