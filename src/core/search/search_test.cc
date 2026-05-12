@@ -343,6 +343,49 @@ TEST_F(SearchTest, CheckParenthesisPriority) {
   }
 }
 
+TEST_F(SearchTest, EnglishStemming) {
+  for (auto query : {"learn", "learning", "learns", "learned"}) {
+    PrepareQuery(query);
+    ExpectAll("machine learning fundamentals", "I will learn tomorrow", "she learned yesterday",
+              "the model learns fast");
+    ExpectNone("unrelated text", "completely different");
+    EXPECT_TRUE(Check()) << "query=" << query << " err=" << GetError();
+  }
+}
+
+TEST_F(SearchTest, NoStemAttribute) {
+  PrepareSchema({{"field", SchemaField::TEXT, SchemaField::TextParams{.no_stem = true}}});
+
+  PrepareQuery("learn");
+  ExpectAll("I will learn tomorrow");
+  ExpectNone("machine learning fundamentals", "she learned yesterday", "the model learns fast");
+  EXPECT_TRUE(Check()) << GetError();
+
+  PrepareQuery("learning");
+  ExpectAll("machine learning fundamentals");
+  ExpectNone("I will learn tomorrow", "she learned yesterday", "the model learns fast");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, StemmingNotAppliedToWildcards) {
+  PrepareQuery("learn*");
+  ExpectAll("learning fast", "she learned yesterday", "many learners here");
+  ExpectNone("totally unrelated");
+  EXPECT_TRUE(Check()) << GetError();
+
+  // Stored token is the stem, not "learning" — so a `learning*` prefix never matches.
+  PrepareQuery("learning*");
+  ExpectNone("learning fast", "she learned yesterday", "many learners here", "totally unrelated");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, StemmingNormalizesCase) {
+  PrepareQuery("Running");
+  ExpectAll("He was RUNNING fast", "the runs were good");
+  ExpectNone("she sat still", "runner ahead");  // Porter does not unify -er nouns with -ing verbs
+  EXPECT_TRUE(Check()) << GetError();
+}
+
 TEST_F(SearchTest, CheckPrefix) {
   {
     PrepareQuery("pre*");
