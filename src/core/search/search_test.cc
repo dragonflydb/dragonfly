@@ -530,7 +530,8 @@ TEST_P(SearchRaxTest, SuffixInfix) {
   if (use_tag) {
     schema.fields["title"].special_params = SchemaField::TagParams{.with_suffixtrie = with_trie};
   } else {
-    schema.fields["title"].special_params = SchemaField::TextParams{.with_suffixtrie = with_trie};
+    schema.fields["title"].special_params =
+        SchemaField::TextParams{.with_suffixtrie = with_trie, .no_stem = true};
   }
 
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};

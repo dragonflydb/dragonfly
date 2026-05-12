@@ -296,7 +296,7 @@ TEST_F(SearchFamilyTest, AlterIndex) {
 }
 
 TEST_F(SearchFamilyTest, SuffixPrefixSearch) {
-  Run({"ft.create", "idx", "SCHEMA", "name", "TEXT"});
+  Run({"ft.create", "idx", "SCHEMA", "name", "TEXT", "NOSTEM"});
   Run({"hset", "d:1", "name", "apple"});
   Run({"hset", "d:2", "name", "carrot"});
 
@@ -1070,7 +1070,7 @@ TEST_F(SearchFamilyTest, UnicodeWords) {
 }
 
 TEST_F(SearchFamilyTest, PrefixSuffixInfixTrie) {
-  Run({"ft.create", "i1", "schema", "title", "text", "withsuffixtrie"});
+  Run({"ft.create", "i1", "schema", "title", "text", "withsuffixtrie", "nostem"});
 
   Run({"hset", "d:1", "title", "CaspIAn SeA"});
   Run({"hset", "d:2", "title", "GreAt LakEs"});
@@ -4629,8 +4629,8 @@ TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
 
 TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   // Test 1: Correct geo field definition and usage with HASH
-  auto resp =
-      Run({"FT.CREATE", "idx_hash", "ON", "HASH", "SCHEMA", "name", "TEXT", "coords", "GEO"});
+  auto resp = Run(
+      {"FT.CREATE", "idx_hash", "ON", "HASH", "SCHEMA", "name", "TEXT", "NOSTEM", "coords", "GEO"});
   EXPECT_EQ(resp, "OK");
 
   // Documents with correct geo fields
@@ -4677,7 +4677,7 @@ TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
 
   // Test 4: Correct geo field definition with JSON
   resp = Run({"FT.CREATE", "idx_json", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT",
-              "$.location", "AS", "location", "GEO"});
+              "NOSTEM", "$.location", "AS", "location", "GEO"});
   EXPECT_EQ(resp, "OK");
 
   // JSON documents with correct geo fields

@@ -50,22 +50,25 @@ string ToLower(string_view word) {
 // Get all words from text as matched by the ICU library, counting term frequencies
 absl::flat_hash_map<std::string, uint32_t> TokenizeWords(std::string_view text,
                                                          const TextIndex::StopWords& stopwords,
-                                                         const Synonyms* synonyms) {
+                                                         const Synonyms* synonyms,
+                                                         Stemmer* stemmer) {
   absl::flat_hash_map<std::string, uint32_t> words;
   for (std::string_view word : una::views::word_only::utf8(text)) {
-    if (std::string word_lc = una::cases::to_lowercase_utf8(word); !stopwords.contains(word_lc)) {
-      if (synonyms) {
-        if (auto group_id = synonyms->GetGroupToken(word_lc); group_id) {
-          // Index under synonym group token for exact-match scoring.
-          // Also index under original word (with freq=0) so prefix/suffix/infix search still works.
-          words[*group_id]++;
-          words.emplace(std::move(word_lc), 0);
-          continue;
-        }
+    std::string word_lc = una::cases::to_lowercase_utf8(word);
+    if (stopwords.contains(word_lc))
+      continue;
+    if (synonyms) {
+      if (auto group_id = synonyms->GetGroupToken(word_lc); group_id) {
+        // Index under synonym group token for exact-match scoring.
+        // Also index under original word (with freq=0) so prefix/suffix/infix search still works.
+        words[*group_id]++;
+        words.emplace(std::move(word_lc), 0);
+        continue;
       }
-
-      words[std::move(word_lc)]++;
     }
+    if (stemmer)
+      word_lc = stemmer->Stem(word_lc);
+    words[std::move(word_lc)]++;
   }
   return words;
 }
@@ -301,7 +304,7 @@ const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(
   if (strip_whitespace)
     word = absl::StripAsciiWhitespace(word);
 
-  auto it = entries_.find(NormalizeQueryWord(word).view());
+  auto it = entries_.find(NormalizeForExactQuery(word).view());
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
@@ -534,6 +537,16 @@ StringOrView BaseStringIndex<C>::NormalizeQueryWord(std::string_view query) cons
 }
 
 template <typename C>
+StringOrView BaseStringIndex<C>::NormalizeForExactQuery(std::string_view query) const {
+  if (case_sensitive_)
+    return StringOrView::FromView(query);
+  std::string lc = ToLower(query);
+  if (stemmer_)
+    lc = stemmer_->Stem(lc);
+  return StringOrView::FromString(std::move(lc));
+}
+
+template <typename C>
 typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(
     search::RaxTreeMap<Container>* map, string_view word, bool store_freq) {
   auto* mr = map->get_allocator().resource();
@@ -556,8 +569,13 @@ template struct BaseStringIndex<CompressedSortedSet>;
 template struct BaseStringIndex<SortedVector<DocId>>;
 
 TextIndex::TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords,
-                     const Synonyms* synonyms, bool with_suffixtrie)
+                     const Synonyms* synonyms, bool with_suffixtrie, bool no_stem,
+                     std::string_view language)
     : BaseStringIndex(mr, false, with_suffixtrie), stopwords_{stopwords}, synonyms_{synonyms} {
+  if (!no_stem) {
+    stemmer_storage_.emplace(language);
+    stemmer_ = &*stemmer_storage_;
+  }
 }
 
 std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const DocumentAccessor& doc,
@@ -566,7 +584,7 @@ std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const Document
 }
 
 absl::flat_hash_map<std::string, uint32_t> TextIndex::Tokenize(std::string_view value) const {
-  return TokenizeWords(value, *stopwords_, synonyms_);
+  return TokenizeWords(value, *stopwords_, synonyms_, stemmer_);
 }
 
 DefragmentResult TagIndex::Defragment(PageUsage* page_usage) {

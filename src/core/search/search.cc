@@ -699,7 +699,8 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
       case SchemaField::TEXT: {
         const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
         indices_[field_ident] =
-            make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie);
+            make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie,
+                                   tparams.no_stem, schema_.language);
         break;
       }
       case SchemaField::NUMERIC: {
