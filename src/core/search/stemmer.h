@@ -6,6 +6,7 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -42,13 +43,14 @@ class Stemmer {
 // Lazily-populated cache of Stemmer instances keyed by language. Used to honor
 // LANGUAGE_FIELD per-doc overrides without paying allocation cost on every doc.
 // Not thread-safe; keep one per shard, like Stemmer itself.
+// unique_ptr storage keeps returned pointers stable across rehashes.
 class StemmerPool {
  public:
   // Returns a stemmer for the language; nullptr if libstemmer doesn't ship one.
   Stemmer* Get(std::string_view language);
 
  private:
-  absl::flat_hash_map<std::string, Stemmer> pool_;
+  absl::flat_hash_map<std::string, std::unique_ptr<Stemmer>> pool_;
 };
 
 }  // namespace dfly::search

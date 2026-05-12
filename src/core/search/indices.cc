@@ -542,7 +542,8 @@ StringOrView BaseStringIndex<C>::NormalizeForExactQuery(std::string_view query) 
   if (case_sensitive_)
     return StringOrView::FromView(query);
   std::string lc = ToLower(query);
-  if (stemmer_)
+  // Synonym group tokens are sentinels prefixed with a space by GetGroupToken; never stem them.
+  if (stemmer_ && !lc.empty() && lc.front() != ' ')
     lc = stemmer_->Stem(lc);
   return StringOrView::FromString(std::move(lc));
 }

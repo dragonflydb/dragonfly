@@ -53,12 +53,13 @@ std::string Stemmer::Stem(std::string_view token) {
 
 Stemmer* StemmerPool::Get(std::string_view language) {
   if (auto it = pool_.find(language); it != pool_.end())
-    return &it->second;
+    return it->second.get();
   auto stem = Stemmer::TryCreate(language);
   if (!stem)
     return nullptr;
-  auto [it, _] = pool_.try_emplace(std::string{language}, std::move(*stem));
-  return &it->second;
+  auto [it, _] =
+      pool_.try_emplace(std::string{language}, std::make_unique<Stemmer>(std::move(*stem)));
+  return it->second.get();
 }
 
 }  // namespace dfly::search

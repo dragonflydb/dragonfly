@@ -148,7 +148,7 @@ if (WITH_SEARCH)
     URL https://snowballstem.org/dist/libstemmer_c-2.2.0.tar.gz
     BUILD_IN_SOURCE 1
     CONFIGURE_COMMAND echo skip
-    BUILD_COMMAND make -j4 CFLAGS=-O3\ -fPIC libstemmer.a
+    BUILD_COMMAND ${DFLY_TOOLS_MAKE} -j4 CFLAGS=-O3\ -fPIC libstemmer.a
     INSTALL_COMMAND bash -c "\
       mkdir -p ${THIRD_PARTY_LIB_DIR}/stemmer/include ${THIRD_PARTY_LIB_DIR}/stemmer/lib && \
       cp <SOURCE_DIR>/include/libstemmer.h ${THIRD_PARTY_LIB_DIR}/stemmer/include/ && \
