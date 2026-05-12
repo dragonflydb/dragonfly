@@ -163,7 +163,7 @@ ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser)
 
 ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
   std::string lang = absl::AsciiStrToLower(parser->Next<std::string_view>());
-  if (lang != "english") {
+  if (!search::Stemmer::TryCreate(lang)) {
     return CreateSyntaxError(absl::StrCat("Unsupported language: "sv, lang));
   }
   return lang;
@@ -282,13 +282,12 @@ ParseResult<bool> ParseIndexLanguage(CmdArgParser* parser, DocIndex* index) {
   auto lang = ParseLanguageArg(parser);
   if (!lang)
     return make_unexpected(lang.error());
-  index->schema.language = std::move(lang).value();
+  index->schema.default_language = std::move(lang).value();
   return true;
 }
 
-ParseResult<bool> ParseIndexLanguageField(CmdArgParser* parser, DocIndex* /*index*/) {
-  auto attr = parser->Next<std::string_view>();
-  LOG(WARNING) << "Ignoring LANGUAGE_FIELD " << attr << " (not yet supported)";
+ParseResult<bool> ParseIndexLanguageField(CmdArgParser* parser, DocIndex* index) {
+  index->schema.language_field = std::string{parser->Next<std::string_view>()};
   return true;
 }
 
@@ -1779,7 +1778,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("index_definition");
   {
-    rb->StartCollection(4, CollectionType::MAP);
+    const bool has_lang_field = !schema.language_field.empty();
+    rb->StartCollection(has_lang_field ? 5 : 4, CollectionType::MAP);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
     rb->SendSimpleString("prefixes");
@@ -1787,8 +1787,12 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
     for (const auto& prefix : info.base_index.prefixes) {
       rb->SendBulkString(prefix);
     }
-    rb->SendSimpleString("language");
-    rb->SendSimpleString(schema.language);
+    rb->SendSimpleString("default_language");
+    rb->SendSimpleString(schema.default_language);
+    if (has_lang_field) {
+      rb->SendSimpleString("language_field");
+      rb->SendSimpleString(schema.language_field);
+    }
     rb->SendSimpleString("default_score");
     rb->SendLong(1);
   }

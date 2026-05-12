@@ -142,7 +142,7 @@ if (WITH_SEARCH)
     LIB "none"
   )
 
-  # No autoconf/cmake/install in upstream Makefile — manual install copy.
+  # No autoconf/cmake/install in upstream Makefile; manual install copy.
   add_third_party(
     stemmer
     URL https://snowballstem.org/dist/libstemmer_c-2.2.0.tar.gz

@@ -267,40 +267,40 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
   }
 
-  // "term": access field's text index or unify results from all text indices if no field is set
+  // "term": access field's text index or unify results from all text indices if no field is set.
+  // When the term is in a synonym group, the search is expanded to (term OR group_ref) so docs
+  // matched via stem still join the synonym group's docs.
   IndexResult Search(const AstAffixNode<TagType::REGULAR> node, string_view active_field) {
-    std::string term = node.affix;
-    bool strip_whitespace = true;
+    const std::string& term = node.affix;
+    std::optional<std::string> group_id;
+    if (auto synonyms = indices_->GetSynonyms(); synonyms)
+      group_id = synonyms->GetGroupToken(term);
 
-    if (auto synonyms = indices_->GetSynonyms(); synonyms) {
-      if (auto group_id = synonyms->GetGroupToken(term); group_id) {
-        term = *group_id;
-        strip_whitespace = false;
+    auto match_in = [&](TextIndex* index) {
+      if (scorer_)
+        AddMatchedTerm(index, term);
+      IndexResult r{index->Matching(term, /*strip_whitespace=*/true)};
+      if (group_id) {
+        if (scorer_)
+          AddMatchedTerm(index, *group_id);
+        vector<IndexResult> parts;
+        parts.push_back(std::move(r));
+        parts.push_back(IndexResult{index->Matching(*group_id, /*strip_whitespace=*/false)});
+        r = UnifyResults(std::move(parts), LogicOp::OR);
       }
-    }
+      return r;
+    };
 
     if (!active_field.empty()) {
-      if (auto* index = GetIndex<TextIndex>(active_field); index) {
-        if (scorer_)
-          AddMatchedTerm(index, term);
-        return IndexResult{index->Matching(term, strip_whitespace)};
-      }
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        return match_in(index);
       return IndexResult{};
     }
 
-    vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
-
-    // Track terms for scoring
-    if (scorer_) {
-      for (auto* index : selected_indices)
-        AddMatchedTerm(index, term);
-    }
-
-    auto mapping = [&term, strip_whitespace](TextIndex* index) {
-      return index->Matching(term, strip_whitespace);
-    };
-
-    return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
+    vector<IndexResult> sub_results;
+    for (auto* index : indices_->GetAllTextIndices())
+      sub_results.push_back(match_in(index));
+    return UnifyResults(std::move(sub_results), LogicOp::OR);
   }
 
   // [range]: access field's numeric index
@@ -698,9 +698,9 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
     switch (field_info.type) {
       case SchemaField::TEXT: {
         const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
-        indices_[field_ident] =
-            make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie,
-                                   tparams.no_stem, schema_.language);
+        indices_[field_ident] = make_unique<TextIndex>(
+            mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie, tparams.no_stem,
+            schema_.default_language, schema_.language_field);
         break;
       }
       case SchemaField::NUMERIC: {

@@ -9,6 +9,13 @@
 
 namespace dfly::search {
 
+std::optional<Stemmer> Stemmer::TryCreate(std::string_view language) {
+  auto* s = sb_stemmer_new(std::string(language).c_str(), "UTF_8");
+  if (!s)
+    return std::nullopt;
+  return Stemmer{s};
+}
+
 Stemmer::Stemmer(std::string_view language)
     : stemmer_(sb_stemmer_new(std::string(language).c_str(), "UTF_8")) {
   CHECK(stemmer_) << "Unsupported stemmer language: " << language;
@@ -42,6 +49,16 @@ std::string Stemmer::Stem(std::string_view token) {
     return std::string{token};
   int len = sb_stemmer_length(stemmer_);
   return {reinterpret_cast<const char*>(result), static_cast<size_t>(len)};
+}
+
+Stemmer* StemmerPool::Get(std::string_view language) {
+  if (auto it = pool_.find(language); it != pool_.end())
+    return &it->second;
+  auto stem = Stemmer::TryCreate(language);
+  if (!stem)
+    return nullptr;
+  auto [it, _] = pool_.try_emplace(std::string{language}, std::move(*stem));
+  return &it->second;
 }
 
 }  // namespace dfly::search

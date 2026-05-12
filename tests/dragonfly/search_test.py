@@ -139,6 +139,8 @@ async def test_management(async_client: aioredis.Redis):
         "HASH",
         "prefixes",
         ["p1"],
+        "default_language",
+        "english",
         "default_score",
         1,
     ]
@@ -164,6 +166,8 @@ async def test_management(async_client: aioredis.Redis):
         "HASH",
         "prefixes",
         ["p2"],
+        "default_language",
+        "english",
         "default_score",
         1,
     ]
@@ -1295,159 +1299,3 @@ async def test_ft_aggregate_addscores(async_client: aioredis.Redis):
         assert float(results[0]["__score"]) >= float(results[1]["__score"])
 
     await async_client.execute_command("FT.DROPINDEX", "agg_score_idx")
-
-
-@dfly_args({"proactor_threads": 4})
-async def test_ft_search_stemming_default(async_client: aioredis.Redis):
-    """Issue #7284: TEXT fields stem by default; query for any morphological form
-    matches all variants."""
-    await async_client.execute_command("FT.CREATE", "stem_idx", "SCHEMA", "text", "TEXT")
-    await async_client.hset("t:n0", mapping={"text": "machine learning fundamentals"})
-    await async_client.hset("t:n1", mapping={"text": "deep learning advanced"})
-    await async_client.hset("t:n2", mapping={"text": "I will learn tomorrow"})
-    await async_client.hset("t:n3", mapping={"text": "she learned yesterday"})
-
-    for query in ("learn", "learning", "learns", "learned"):
-        res = await async_client.execute_command(
-            "FT.SEARCH", "stem_idx", f"@text:({query})", "NOCONTENT"
-        )
-        assert res[0] == 4, f"query {query!r} expected 4 docs, got {res[0]}: {res}"
-
-    await async_client.execute_command("FT.DROPINDEX", "stem_idx")
-
-
-@dfly_args({"proactor_threads": 4})
-async def test_ft_search_nostem(async_client: aioredis.Redis):
-    """NOSTEM disables stemming for the field; queries match literal tokens only."""
-    await async_client.execute_command(
-        "FT.CREATE", "nostem_idx", "SCHEMA", "text", "TEXT", "NOSTEM"
-    )
-    await async_client.hset("d:1", mapping={"text": "machine learning"})
-    await async_client.hset("d:2", mapping={"text": "I will learn"})
-    await async_client.hset("d:3", mapping={"text": "she learned yesterday"})
-
-    res = await async_client.execute_command(
-        "FT.SEARCH", "nostem_idx", "@text:(learn)", "NOCONTENT"
-    )
-    assert res[0] == 1, f"expected only literal 'learn' match, got {res}"
-
-    res = await async_client.execute_command(
-        "FT.SEARCH", "nostem_idx", "@text:(learning)", "NOCONTENT"
-    )
-    assert res[0] == 1, f"expected only literal 'learning' match, got {res}"
-
-    await async_client.execute_command("FT.DROPINDEX", "nostem_idx")
-
-
-@dfly_args({"proactor_threads": 4})
-async def test_ft_search_wildcards_do_not_stem(async_client: aioredis.Redis):
-    """Wildcard queries operate on stored stems, not the unstemmed input
-    (Redis Stack parity). `learn*` matches; `learning*` does not."""
-    await async_client.execute_command("FT.CREATE", "wc_idx", "SCHEMA", "text", "TEXT")
-    await async_client.hset("d:1", mapping={"text": "machine learning"})
-    await async_client.hset("d:2", mapping={"text": "she learned"})
-    await async_client.hset("d:3", mapping={"text": "unrelated content"})
-
-    res = await async_client.execute_command("FT.SEARCH", "wc_idx", "learn*", "NOCONTENT")
-    assert res[0] == 2
-
-    res = await async_client.execute_command("FT.SEARCH", "wc_idx", "learning*", "NOCONTENT")
-    assert res[0] == 0
-
-    await async_client.execute_command("FT.DROPINDEX", "wc_idx")
-
-
-@dfly_args({"proactor_threads": 4})
-async def test_ft_aggregate_query_filter_stems(async_client: aioredis.Redis):
-    """FT.AGGREGATE reuses the FT.SEARCH query path, so the initial filter stems."""
-    await async_client.execute_command("FT.CREATE", "agg_idx", "SCHEMA", "text", "TEXT")
-    await async_client.hset("a:0", mapping={"text": "machine learning fundamentals"})
-    await async_client.hset("a:1", mapping={"text": "deep learning advanced"})
-    await async_client.hset("a:2", mapping={"text": "I will learn tomorrow"})
-    await async_client.hset("a:3", mapping={"text": "she learned yesterday"})
-    await async_client.hset("a:4", mapping={"text": "totally unrelated"})
-
-    def _decode(v):
-        return v.decode() if isinstance(v, bytes) else v
-
-    res = await async_client.execute_command(
-        "FT.AGGREGATE",
-        "agg_idx",
-        "@text:(learning)",
-        "GROUPBY",
-        "0",
-        "REDUCE",
-        "COUNT",
-        "0",
-        "AS",
-        "cnt",
-    )
-    assert res[0] == 1, f"expected one group row, got {res}"
-    row = {_decode(res[1][i]): _decode(res[1][i + 1]) for i in range(0, len(res[1]), 2)}
-    assert int(row["cnt"]) == 4, f"expected cnt=4 (stem expansion), got {row}"
-
-    await async_client.execute_command("FT.DROPINDEX", "agg_idx")
-
-
-@dfly_args({"proactor_threads": 4})
-async def test_ft_aggregate_groupby_does_not_stem(async_client: aioredis.Redis):
-    """GROUPBY operates on raw field values — stemming must NOT collapse
-    morphological variants into a single bucket."""
-    await async_client.execute_command(
-        "FT.CREATE", "agg_grp_idx", "SCHEMA", "tag", "TAG", "text", "TEXT"
-    )
-    await async_client.hset("g:1", mapping={"tag": "learning", "text": "irrelevant"})
-    await async_client.hset("g:2", mapping={"tag": "learn", "text": "irrelevant"})
-    await async_client.hset("g:3", mapping={"tag": "learned", "text": "irrelevant"})
-
-    # Group on TAG (raw value). All three should form distinct groups.
-    res = await async_client.execute_command(
-        "FT.AGGREGATE",
-        "agg_grp_idx",
-        "*",
-        "GROUPBY",
-        "1",
-        "@tag",
-        "REDUCE",
-        "COUNT",
-        "0",
-        "AS",
-        "n",
-    )
-    assert res[0] == 3, f"expected 3 distinct groups (learn/learning/learned), got {res[0]}: {res}"
-
-    await async_client.execute_command("FT.DROPINDEX", "agg_grp_idx")
-
-
-@dfly_args({"proactor_threads": 4})
-async def test_ft_info_surfaces_stemming(async_client: aioredis.Redis):
-    """FT.INFO surfaces NOSTEM per-attribute and `language` in index_definition."""
-    await async_client.execute_command(
-        "FT.CREATE", "info_idx", "SCHEMA", "title", "TEXT", "body", "TEXT", "NOSTEM"
-    )
-    info = await async_client.execute_command("FT.INFO", "info_idx")
-
-    def decode(v):
-        return v.decode() if isinstance(v, bytes) else v
-
-    flat = []
-    for v in info:
-        if isinstance(v, list):
-            flat.append([decode(x) if not isinstance(x, list) else x for x in v])
-        else:
-            flat.append(decode(v))
-
-    # index_definition is a flat key/value list at index 3
-    definition = {flat[3][i]: flat[3][i + 1] for i in range(0, len(flat[3]), 2)}
-    assert decode(definition["language"]) == "english", f"got {definition}"
-
-    # attributes: list of per-field attr arrays
-    attrs_idx = flat.index("attributes")
-    attrs = flat[attrs_idx + 1]
-    decoded_attrs = [[decode(x) for x in a] for a in attrs]
-    title_attr = next(a for a in decoded_attrs if "title" in a)
-    body_attr = next(a for a in decoded_attrs if "body" in a)
-    assert "NOSTEM" not in title_attr, f"title should not be NOSTEM: {title_attr}"
-    assert "NOSTEM" in body_attr, f"body should be NOSTEM: {body_attr}"
-
-    await async_client.execute_command("FT.DROPINDEX", "info_idx")

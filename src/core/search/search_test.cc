@@ -367,18 +367,6 @@ TEST_F(SearchTest, NoStemAttribute) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
-TEST_F(SearchTest, StemmingNotAppliedToWildcards) {
-  PrepareQuery("learn*");
-  ExpectAll("learning fast", "she learned yesterday", "many learners here");
-  ExpectNone("totally unrelated");
-  EXPECT_TRUE(Check()) << GetError();
-
-  // Stored token is the stem, not "learning" — so a `learning*` prefix never matches.
-  PrepareQuery("learning*");
-  ExpectNone("learning fast", "she learned yesterday", "many learners here", "totally unrelated");
-  EXPECT_TRUE(Check()) << GetError();
-}
-
 TEST_F(SearchTest, StemmingNormalizesCase) {
   PrepareQuery("Running");
   ExpectAll("He was RUNNING fast", "the runs were good");
@@ -573,8 +561,7 @@ TEST_P(SearchRaxTest, SuffixInfix) {
   if (use_tag) {
     schema.fields["title"].special_params = SchemaField::TagParams{.with_suffixtrie = with_trie};
   } else {
-    schema.fields["title"].special_params =
-        SchemaField::TextParams{.with_suffixtrie = with_trie, .no_stem = true};
+    schema.fields["title"].special_params = SchemaField::TextParams{.with_suffixtrie = with_trie};
   }
 
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};

@@ -4,6 +4,7 @@
 
 #include "core/search/indices.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/numbers.h>
@@ -47,7 +48,9 @@ string ToLower(string_view word) {
   return IsAllAscii(word) ? absl::AsciiStrToLower(word) : una::cases::to_lowercase_utf8(word);
 }
 
-// Get all words from text as matched by the ICU library, counting term frequencies
+// Get all words from text as matched by the ICU library, counting term frequencies.
+// When stemming is on, both the raw and stemmed forms are emitted so wildcards
+// can match unstemmed tokens and synonym hits stay additive.
 absl::flat_hash_map<std::string, uint32_t> TokenizeWords(std::string_view text,
                                                          const TextIndex::StopWords& stopwords,
                                                          const Synonyms* synonyms,
@@ -58,16 +61,14 @@ absl::flat_hash_map<std::string, uint32_t> TokenizeWords(std::string_view text,
     if (stopwords.contains(word_lc))
       continue;
     if (synonyms) {
-      if (auto group_id = synonyms->GetGroupToken(word_lc); group_id) {
-        // Index under synonym group token for exact-match scoring.
-        // Also index under original word (with freq=0) so prefix/suffix/infix search still works.
+      if (auto group_id = synonyms->GetGroupToken(word_lc); group_id)
         words[*group_id]++;
-        words.emplace(std::move(word_lc), 0);
-        continue;
-      }
     }
-    if (stemmer)
-      word_lc = stemmer->Stem(word_lc);
+    if (stemmer) {
+      std::string stem = stemmer->Stem(word_lc);
+      if (stem != word_lc)
+        words[std::move(stem)]++;
+    }
     words[std::move(word_lc)]++;
   }
   return words;
@@ -570,12 +571,42 @@ template struct BaseStringIndex<SortedVector<DocId>>;
 
 TextIndex::TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords,
                      const Synonyms* synonyms, bool with_suffixtrie, bool no_stem,
-                     std::string_view language)
-    : BaseStringIndex(mr, false, with_suffixtrie), stopwords_{stopwords}, synonyms_{synonyms} {
+                     std::string_view language, std::string_view language_field)
+    : BaseStringIndex(mr, false, with_suffixtrie),
+      stopwords_{stopwords},
+      synonyms_{synonyms},
+      language_field_{language_field} {
   if (!no_stem) {
-    stemmer_storage_.emplace(language);
-    stemmer_ = &*stemmer_storage_;
+    default_stemmer_.emplace(language);
+    stemmer_ = &*default_stemmer_;
+    if (!language_field_.empty())
+      pool_.emplace();
   }
+}
+
+bool TextIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
+  Stemmer* prev = stemmer_;
+  absl::Cleanup restore{[&] { stemmer_ = prev; }};
+  stemmer_ = ResolveStemmer(doc);
+  return BaseStringIndex::Add(id, doc, field);
+}
+
+void TextIndex::Remove(DocId id, const DocumentAccessor& doc, std::string_view field) {
+  Stemmer* prev = stemmer_;
+  absl::Cleanup restore{[&] { stemmer_ = prev; }};
+  stemmer_ = ResolveStemmer(doc);
+  BaseStringIndex::Remove(id, doc, field);
+}
+
+Stemmer* TextIndex::ResolveStemmer(const DocumentAccessor& doc) const {
+  if (!pool_ || language_field_.empty())
+    return stemmer_;
+  auto strs = doc.GetStrings(language_field_);
+  if (!strs || strs->empty())
+    return stemmer_;
+  std::string lang = absl::AsciiStrToLower((*strs)[0]);
+  Stemmer* s = pool_->Get(lang);
+  return s ? s : stemmer_;
 }
 
 std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const DocumentAccessor& doc,

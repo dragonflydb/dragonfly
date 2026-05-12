@@ -173,7 +173,11 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
   using StopWords = absl::flat_hash_set<std::string>;
 
   TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords, const Synonyms* synonyms,
-            bool with_suffixtrie, bool no_stem, std::string_view language);
+            bool with_suffixtrie, bool no_stem, std::string_view language,
+            std::string_view language_field);
+
+  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
@@ -181,9 +185,14 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
   absl::flat_hash_map<std::string, uint32_t> Tokenize(std::string_view value) const override;
 
  private:
+  // Reads language_field_ from doc; returns a per-doc stemmer or the default.
+  Stemmer* ResolveStemmer(const DocumentAccessor& doc) const;
+
   const StopWords* stopwords_;
   const Synonyms* synonyms_;
-  std::optional<Stemmer> stemmer_storage_;
+  std::optional<Stemmer> default_stemmer_;
+  std::string language_field_;
+  mutable std::optional<StemmerPool> pool_;  // mutable: lazily filled in ResolveStemmer
 };
 
 // Index for text fields.
