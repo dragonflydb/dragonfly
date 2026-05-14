@@ -120,6 +120,7 @@ include(FetchContent)
 FetchContent_Declare(
   eve
   URL https://github.com/jfalcou/eve/archive/refs/tags/v2023.02.15.tar.gz
+  URL_HASH SHA256=7a5fb59c0e6ef3bef3e8b36d62e138d31e7f2a9f1bdfe95a8e96512b207f84c5
 )
 FetchContent_GetProperties(eve)
 if (NOT eve_POPULATED)

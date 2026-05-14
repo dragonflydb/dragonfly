@@ -167,12 +167,17 @@ class OAHSet {  // Open Addressing Hash Set
   explicit OAHSet() = default;
 
   bool Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
+    // Bootstrap or grow before any bucket math: on first Add capacity_log_==0
+    // and entries_.data()==nullptr, so computing BucketId or prefetching
+    // would be UB (shift-by-64 + null deref-via-offset).
+    if (size_ >= entries_.size()) [[unlikely]] {
+      Reserve(BucketCount() * 2);
+    }
     assert(Capacity() >= kDisplacementSize);
 
     uint64_t hash = Hash(str);
     auto bucket_id = BucketId(hash, capacity_log_);
     PREFETCH_READ(entries_.data() + bucket_id);
-    PREFETCH_READ(entries_.data() + bucket_id + 8);
 
     // Build the entry between the bucket prefetch and the SIMD probe so
     // zmalloc + memcpy overlap with the cacheline fetch. On a duplicate
@@ -186,11 +191,6 @@ class OAHSet {  // Open Addressing Hash Set
       expiration_used_ = true;
 
     const size_t entry_alloc_size = zmalloc_used_memory_tl - mem_before;
-
-    if (size_ >= entries_.size()) [[unlikely]] {
-      Reserve(BucketCount() * 2);
-      bucket_id = BucketId(hash, capacity_log_);
-    }
 
     const uint32_t ext_bid = GetExtensionPoint(bucket_id);
     PREFETCH_READ(entries_[ext_bid].Raw());
@@ -338,10 +338,9 @@ class OAHSet {  // Open Addressing Hash Set
   // from "match-but-expired" (slot is now vacant; reuse it for the new entry).
   //
   // Vectors have power-of-2 capacity with minimum 2, so we sweep in 2-lane
-  // SIMD strides. For each stride we build the same "non-empty AND (hash ==
-  // ext_hash OR hash == 0)" mask as the main displacement-window scan and use
-  // eve::none() to skip strides with no candidates outright. On a hit, we
-  // scalarize the lane(s) and confirm with CheckExtendedHash + key compare.
+  // SIMD strides. Lane iteration uses top_bits + countr_zero rather than
+  // candidate.get(j) — the latter triggers eve's memcpy-into-logical extract
+  // which trips GCC's -Wclass-memaccess under -Werror.
   OAHEntry* ProbeExtensionVector(uint32_t ext_bid, std::string_view str, uint64_t ext_hash) {
     auto& vec = entries_[ext_bid].AsVector();
     auto* raw_arr = vec.Raw();
@@ -354,12 +353,15 @@ class OAHSet {  // Open Addressing Hash Set
           (data_v & VectorWide{OAHEntry::kExtHashShiftedMask}) >> OAHEntry::kExtHashShift;
       auto is_empty = eve::is_eqz(data_v);
       auto candidate = (hash_v == VectorWide{ext_hash} || eve::is_eqz(hash_v)) && !is_empty;
-      if (eve::none(candidate))
-        continue;
 
-      for (uint32_t j = 0; j < kVectorLaneStep; ++j) {
-        if (!candidate.get(j))
-          continue;
+      using TopBits = eve::top_bits<decltype(candidate)>;
+      constexpr auto kBitsPerLane = TopBits::bits_per_element;
+      auto cand_bits = TopBits{candidate}.as_int();
+      while (cand_bits) {
+        const uint32_t j = std::countr_zero(cand_bits) / kBitsPerLane;
+        const auto lane_mask = ((decltype(cand_bits)(1) << kBitsPerLane) - 1) << (j * kBitsPerLane);
+        cand_bits &= ~lane_mask;
+
         OAHEntry& re = raw_arr[base + j];
         if (re.Key() != str) {  // after rehash, the pointer can miss hash so we need to set it for
                                 // better performance
