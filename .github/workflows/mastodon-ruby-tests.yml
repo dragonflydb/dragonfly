@@ -87,7 +87,7 @@ jobs:
           SPEC_OPTS: '--exclude-pattern "**/self_destruct_scheduler_spec.rb"'
         run: |
           unset COVERAGE
-          bin/flatware rspec -r ./spec/flatware_helper.rb
+          bin/flatware rspec
       - name: Notify on failures
         if: failure()
         shell: bash
