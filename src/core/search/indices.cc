@@ -585,6 +585,8 @@ TextIndex::TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords,
   }
 }
 
+// Add/Remove swap the active stemmer to the per-doc one resolved from
+// LANGUAGE_FIELD for the duration of the call, then restore the index default.
 bool TextIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
   Stemmer* prev = stemmer_;
   absl::Cleanup restore{[&] { stemmer_ = prev; }};

@@ -7,6 +7,8 @@
 #include <glog/logging.h>
 #include <libstemmer.h>
 
+#include <utility>
+
 namespace dfly::search {
 
 std::optional<Stemmer> Stemmer::TryCreate(std::string_view language) {
@@ -22,8 +24,7 @@ Stemmer::Stemmer(std::string_view language)
 }
 
 Stemmer::~Stemmer() {
-  if (stemmer_)
-    sb_stemmer_delete(stemmer_);
+  sb_stemmer_delete(stemmer_);
 }
 
 Stemmer::Stemmer(Stemmer&& other) noexcept : stemmer_(other.stemmer_) {
@@ -31,12 +32,7 @@ Stemmer::Stemmer(Stemmer&& other) noexcept : stemmer_(other.stemmer_) {
 }
 
 Stemmer& Stemmer::operator=(Stemmer&& other) noexcept {
-  if (this != &other) {
-    if (stemmer_)
-      sb_stemmer_delete(stemmer_);
-    stemmer_ = other.stemmer_;
-    other.stemmer_ = nullptr;
-  }
+  std::swap(stemmer_, other.stemmer_);
   return *this;
 }
 
