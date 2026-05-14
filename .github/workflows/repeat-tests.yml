@@ -56,7 +56,7 @@ jobs:
         container: ["ubuntu-dev:24"]
         proactor: [Uring]
         build-type: ["${{ inputs.build_type || 'Debug' }}"]
-        runner: [ubuntu-latest]
+        runner: [CI-LARGE-86]
 
     runs-on: ${{ matrix.runner }}
 
@@ -69,6 +69,8 @@ jobs:
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       volumes:
         - /var/crash:/var/crash
+        - /:/hostroot
+        - /mnt:/mnt
 
     steps:
       - uses: actions/checkout@v6
