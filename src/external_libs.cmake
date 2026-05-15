@@ -145,7 +145,7 @@ if (WITH_SEARCH)
   # No autoconf/cmake/install in upstream Makefile; manual install copy.
   add_third_party(
     stemmer
-    URL https://snowballstem.org/dist/libstemmer_c-2.2.0.tar.gz
+    URL https://github.com/snowballstem/snowball/archive/refs/tags/v3.0.1.tar.gz
     BUILD_IN_SOURCE 1
     CONFIGURE_COMMAND echo skip
     BUILD_COMMAND ${DFLY_TOOLS_MAKE} -j4 CFLAGS=-O3\ -fPIC libstemmer.a
