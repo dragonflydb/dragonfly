@@ -233,8 +233,10 @@ struct BasicSearch {
       indices = indices_->GetAllTextIndices();
     }
 
-    // Single trie walk: enumerate matching terms once, dispatch each container
-    // to AddMatchedTerm (for scoring) and to the union (for the result set).
+    // Single trie walk dispatches each match to scoring (AddMatchedTerm) and
+    // to the union (for the result set). Synonym shadow entries (freq=0) are
+    // resolved to the group token so TakeScoredTopK looks up the group's
+    // posting list instead.
     vector<IndexResult> sub_results;
     sub_results.reserve(indices.size());
     for (auto* index : indices) {
@@ -242,7 +244,6 @@ struct BasicSearch {
       auto term_cb = [&per_index, this, index](string_view term, const auto* container) {
         if (scorer_) {
           std::string resolved{term};
-          // Synonym shadow entries have freq=0; scoring must use the group's posting list.
           if (auto synonyms = indices_->GetSynonyms(); synonyms) {
             if (auto group_id = synonyms->GetGroupToken(resolved); group_id)
               resolved = std::move(*group_id);
@@ -805,9 +806,9 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
     switch (field_info.type) {
       case SchemaField::TEXT: {
         const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
-        auto idx = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie,
-                                         tparams.no_stem, schema_.default_language,
-                                         schema_.language_field);
+        auto idx = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_,
+                                          tparams.with_suffixtrie, tparams.no_stem,
+                                          schema_.default_language, schema_.language_field);
         idx->set_field_ident(field_ident);
         indices_[field_ident] = std::move(idx);
         break;
