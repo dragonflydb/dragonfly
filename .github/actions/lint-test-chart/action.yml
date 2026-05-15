@@ -11,6 +11,8 @@ runs:
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
+        with:
+          version: "v3.21.0"
 
       - uses: actions/setup-python@v5
         with:
