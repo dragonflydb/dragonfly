@@ -1,5 +1,6 @@
 #pragma once
 
+#include <absl/container/inlined_vector.h>
 #include <absl/types/span.h>
 
 #include <cstdint>
@@ -34,6 +35,8 @@ class CompressedSortedSet {
 
     IntType operator*() const;
     uint32_t Freq() const;
+    // Sorted ascending. Empty when the owning set is store_positions_=false.
+    absl::Span<const uint32_t> Positions() const;
     ConstIterator& operator++();
 
     friend class CompressedSortedSet;
@@ -49,7 +52,9 @@ class CompressedSortedSet {
 
     std::optional<IntType> stash_{};
     uint32_t freq_stash_{0};
+    absl::InlinedVector<uint32_t, 4> positions_stash_;
     bool store_freq_{false};
+    bool store_positions_{false};
     absl::Span<const uint8_t> last_read_{};
     absl::Span<const uint8_t> diffs_{};
   };
@@ -57,15 +62,22 @@ class CompressedSortedSet {
   using iterator = ConstIterator;
 
  public:
-  // When store_freq is true, each entry encodes [diff_varint][freq_varint].
-  // When false (default), only [diff_varint] is stored — saves 1 byte per entry.
-  explicit CompressedSortedSet(PMR_NS::memory_resource* mr, bool store_freq = false);
+  // Entry layout depends on flags:
+  //   neither:       [diff_varint]
+  //   store_freq:    [diff_varint][freq_varint]
+  //   +positions:    [diff_varint][freq_varint][pos0_varint][pos1_delta_varint]...
+  //
+  // store_positions implies store_freq (freq tells the reader how many positions follow).
+  explicit CompressedSortedSet(PMR_NS::memory_resource* mr, bool store_freq = false,
+                               bool store_positions = false);
 
   ConstIterator begin() const;
   ConstIterator end() const;
 
-  // Insert element with term frequency. Returns true if new, false if already present.
-  bool Insert(IntType value, uint32_t freq = 1);
+  // Insert with term frequency. Returns true if new, false if already present.
+  // `positions` must be sorted ascending and have size == freq when store_positions_;
+  // it is ignored when store_positions_ is false.
+  bool Insert(IntType value, uint32_t freq = 1, absl::Span<const uint32_t> positions = {});
   bool Remove(IntType value);  // Remove arbitrary element, needs to scan whole list
 
   size_t Size() const {
@@ -88,6 +100,10 @@ class CompressedSortedSet {
 
   bool StoresFreq() const {
     return store_freq_;
+  }
+
+  bool StoresPositions() const {
+    return store_positions_;
   }
 
   // Add all values from other
@@ -117,8 +133,9 @@ class CompressedSortedSet {
   // Find EntryLocation of first entry that is not less than value (std::lower_bound)
   EntryLocation LowerBound(IntType value) const;
 
-  // Push back difference + freq without any decoding. Used for efficient construction
-  void PushBackDiff(IntType diff, uint32_t freq);
+  // Push back difference + freq + positions without any decoding. Used for efficient construction.
+  // `positions` is consulted only when store_positions_; expected to have size == freq.
+  void PushBackDiff(IntType diff, uint32_t freq, absl::Span<const uint32_t> positions = {});
 
   // Encode integer with variable length encoding into buf and return written subspan
   static absl::Span<uint8_t> WriteVarLen(IntType value, absl::Span<uint8_t> buf);
@@ -126,9 +143,13 @@ class CompressedSortedSet {
   // Decode integer with variable length encoding from source
   static std::pair<IntType /*value*/, size_t /*read*/> ReadVarLen(absl::Span<const uint8_t> source);
 
+  // Bytes consumed by an entry's diff+freq prefix (everything before the optional positions block).
+  static size_t HeadSize(absl::Span<const uint8_t> entry_span, bool store_freq);
+
  private:
   uint32_t size_{0};
-  bool store_freq_;  // Whether to encode/decode freq alongside diffs
+  bool store_freq_;       // Whether to encode/decode freq alongside diffs
+  bool store_positions_;  // Whether to encode/decode positions; implies store_freq_
 
   std::optional<IntType> tail_value_{};
   std::vector<uint8_t, PMR_NS::polymorphic_allocator<uint8_t>> diffs_;

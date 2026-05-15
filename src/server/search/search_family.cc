@@ -291,6 +291,13 @@ ParseResult<bool> ParseIndexLanguageField(CmdArgParser* parser, DocIndex* index)
   return true;
 }
 
+// NOOFFSETS (index-level): disable storing token positions in TEXT posting lists.
+// Saves memory but breaks phrase queries.
+ParseResult<bool> ParseNoOffsets(CmdArgParser* /*parser*/, DocIndex* index) {
+  index->options.no_offsets = true;
+  return true;
+}
+
 // STOPWORDS count [words...]
 ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   index->options.stopwords.clear();
@@ -398,10 +405,10 @@ ParseResult<DocIndex> CreateDocIndex(std::string_view name, CmdArgParser* parser
   index.name = name;
 
   while (parser->HasNext()) {
-    auto option_parser =
-        parser->TryMapNext("ON"sv, &ParseOnOption, "PREFIX"sv, &ParsePrefix, "STOPWORDS"sv,
-                           &ParseStopwords, "LANGUAGE"sv, &ParseIndexLanguage, "LANGUAGE_FIELD"sv,
-                           &ParseIndexLanguageField, "SCHEMA"sv, &ParseSchema);
+    auto option_parser = parser->TryMapNext(
+        "ON"sv, &ParseOnOption, "PREFIX"sv, &ParsePrefix, "STOPWORDS"sv, &ParseStopwords,
+        "LANGUAGE"sv, &ParseIndexLanguage, "LANGUAGE_FIELD"sv, &ParseIndexLanguageField,
+        "NOOFFSETS"sv, &ParseNoOffsets, "SCHEMA"sv, &ParseSchema);
 
     if (!option_parser) {
       // Unsupported parameters are ignored for now
@@ -1798,7 +1805,14 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   rb->SendSimpleString("index_options");
-  rb->SendEmptyArray();
+  {
+    std::vector<std::string_view> opts;
+    if (info.base_index.options.no_offsets)
+      opts.emplace_back("NOOFFSETS");
+    rb->StartArray(opts.size());
+    for (auto opt : opts)
+      rb->SendSimpleString(opt);
+  }
 
   rb->SendSimpleString("attributes");
   rb->StartArray(schema.fields.size());

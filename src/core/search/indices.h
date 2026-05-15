@@ -38,6 +38,13 @@
 
 namespace dfly::search {
 
+// Per-token indexing payload. `positions` is sorted ascending (0-based per field value,
+// continuous across multi-value fields). Empty when the owning index doesn't store positions.
+struct TermInfo {
+  uint32_t freq = 0;
+  absl::InlinedVector<uint32_t, 4> positions;
+};
+
 // Index for integer fields.
 // Range bounds are queried in logarithmic time, iteration is constant.
 struct NumericIndex : public BaseIndex {
@@ -84,13 +91,18 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // TextIndex (CompressedSortedSet) supports TF storage and BM25 scoring; TagIndex does not.
   static constexpr bool kIsScored = std::is_same_v<C, CompressedSortedSet>;
 
-  BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive, bool with_suffixtrie);
+  BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive, bool with_suffixtrie,
+                  bool with_offsets = false);
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
   // Pointer is valid as long as index is not mutated. Nullptr if not found
   const Container* Matching(std::string_view str, bool strip_whitespace = true) const;
+
+  // Like Matching, but never stems the query word — used by phrase queries which must hit
+  // the raw token form (stems live at the same positions but under a separate trie key).
+  const Container* MatchingNoStem(std::string_view str) const;
 
   // Iterate over all nodes matching on prefix.
   void MatchPrefix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
@@ -141,17 +153,21 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   virtual std::optional<StringList> GetStrings(const DocumentAccessor& doc,
                                                std::string_view field) const = 0;
 
-  // Used by Add & Remove to tokenize text value. Returns token -> frequency map.
-  virtual absl::flat_hash_map<std::string, uint32_t> Tokenize(std::string_view value) const = 0;
+  // Used by Add & Remove to tokenize a single field value. Merges results into `out`,
+  // advancing `pos_counter` per non-stopword token so positions are continuous across
+  // multiple values of the same field. Tag indices ignore positions.
+  virtual void Tokenize(std::string_view value, uint32_t* pos_counter,
+                        absl::flat_hash_map<std::string, TermInfo>* out) const = 0;
 
   cmn::StringOrView NormalizeQueryWord(std::string_view word) const;
   cmn::StringOrView NormalizeForExactQuery(std::string_view word) const;
   static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word,
-                                bool store_freq = false);
+                                bool store_freq = false, bool store_positions = false);
   static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);
 
   bool case_sensitive_ = false;
   bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
+  bool with_offsets_ = false;  // Whether posting lists store token positions (TextIndex only).
   search::RaxTreeMap<Container> entries_;
   std::optional<search::RaxTreeMap<Container>> suffix_trie_;
 
@@ -174,15 +190,24 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 
   TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords, const Synonyms* synonyms,
             bool with_suffixtrie, bool no_stem, std::string_view language,
-            std::string_view language_field);
+            std::string_view language_field, bool with_offsets = true);
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
+  bool StoresPositions() const {
+    return with_offsets_;
+  }
+
+  // Tokenize a quoted phrase query: split on whitespace, lowercase, drop stopwords.
+  // Stems are NOT applied — phrase queries match raw token positions only.
+  std::vector<std::string> TokenizePhraseQuery(std::string_view phrase) const;
+
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
                                        std::string_view field) const override;
-  absl::flat_hash_map<std::string, uint32_t> Tokenize(std::string_view value) const override;
+  void Tokenize(std::string_view value, uint32_t* pos_counter,
+                absl::flat_hash_map<std::string, TermInfo>* out) const override;
 
  private:
   // Reads language_field_ from doc; returns a per-doc stemmer or the default.
@@ -208,7 +233,8 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
                                        std::string_view field) const override;
-  absl::flat_hash_map<std::string, uint32_t> Tokenize(std::string_view value) const override;
+  void Tokenize(std::string_view value, uint32_t* pos_counter,
+                absl::flat_hash_map<std::string, TermInfo>* out) const override;
 
  private:
   char separator_;

@@ -53,6 +53,15 @@ class SearchParserTest : public ::testing::Test {
     auto tok = Lex();                                   \
     ASSERT_EQ(tok.type_get(), Parser::token::tok_enum); \
   }
+
+#define NEXT_PHRASE(raw_val, slop_val)                    \
+  {                                                       \
+    auto tok = Lex();                                     \
+    ASSERT_EQ(tok.type_get(), Parser::token::TOK_PHRASE); \
+    const auto& pt = tok.value.as<PhraseTok>();           \
+    EXPECT_EQ(pt.raw, raw_val);                           \
+    EXPECT_EQ(pt.slop, static_cast<uint32_t>(slop_val));  \
+  }
 #define NEXT_ERROR()                          \
   {                                           \
     bool caught = false;                      \
@@ -83,7 +92,7 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_TOK(TOK_RPAREN);
 
   SetInput(R"( "hello\"world" )");
-  NEXT_EQ(TOK_TERM, string, R"(hello"world)");
+  NEXT_PHRASE(R"(hello"world)", 0);
 
   SetInput("@field:hello");
   NEXT_EQ(TOK_FIELD, string, "@field");
@@ -188,7 +197,8 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TERM, string, "prefix*");
+  // Lexer always emits PHRASE for quoted strings; the tag grammar treats it as a literal term.
+  NEXT_PHRASE("prefix*", 0);
   NEXT_TOK(TOK_RCURLBR);
 
   // Prefix spaced with star
@@ -389,18 +399,21 @@ TEST_F(SearchParserTest, ParseParams) {
 }
 
 TEST_F(SearchParserTest, Quotes) {
+  // Quoted strings tokenize to PHRASE (distinct from TERM) so the grammar can route them
+  // into AstPhraseNode for exact phrase queries. See PHRASE_QUERIES_PLAN.md.
   SetInput(" \"fir  st\"  'sec@o@nd' \":third:\" 'four\\\"th' ");
-  NEXT_EQ(TOK_TERM, string, "fir  st");
-  NEXT_EQ(TOK_TERM, string, "sec@o@nd");
-  NEXT_EQ(TOK_TERM, string, ":third:");
-  NEXT_EQ(TOK_TERM, string, "four\"th");
+  NEXT_PHRASE("fir  st", 0);
+  NEXT_PHRASE("sec@o@nd", 0);
+  NEXT_PHRASE(":third:", 0);
+  NEXT_PHRASE("four\"th", 0);
 }
 
 TEST_F(SearchParserTest, Numeric) {
   SetInput("11 123123123123 '22'");
   NEXT_EQ(TOK_UINT32, string, "11");
   NEXT_EQ(TOK_DOUBLE, string, "123123123123");
-  NEXT_EQ(TOK_TERM, string, "22");
+  // '22' is a quoted single-token phrase — still a phrase lit, executor will treat it as 1-token.
+  NEXT_PHRASE("22", 0);
 }
 
 TEST_F(SearchParserTest, VectorRange) {
@@ -448,6 +461,76 @@ TEST_F(SearchParserTest, KNNfull) {
   NEXT_EQ(TOK_TERM, string, "vec_sort");
 
   NEXT_TOK(TOK_RBRACKET);
+}
+
+TEST_F(SearchParserTest, PhraseSlopLex) {
+  // `"..."~N` (no whitespace before ~) → PHRASE token with slop=N.
+  SetInput("\"foo bar\"~3");
+  NEXT_PHRASE("foo bar", 3);
+
+  // Whitespace between `"..."` and `~` blocks slop attachment: ~ is the unary optional operator.
+  SetInput("\"foo bar\" ~3");
+  NEXT_PHRASE("foo bar", 0);
+  NEXT_TOK(TOK_TILDE);
+  NEXT_EQ(TOK_UINT32, string, "3");
+
+  // Slop digits must be unsigned; multi-digit works.
+  SetInput("\"a b\"~123");
+  NEXT_PHRASE("a b", 123);
+}
+
+TEST_F(SearchParserTest, PhraseSlopParse) {
+  ASSERT_EQ(0, Parse("\"machine learning\"~2"));
+  AstExpr root = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(root));
+  const auto& p = std::get<AstPhraseNode>(root);
+  EXPECT_EQ(p.raw, "machine learning");
+  EXPECT_EQ(p.slop, 2u);
+
+  // Field-scoped slop.
+  ASSERT_EQ(0, Parse("@title:\"machine learning\"~5"));
+  AstExpr field = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(field));
+  const auto& fnode = std::get<AstFieldNode>(field);
+  ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(*fnode.node));
+  EXPECT_EQ(std::get<AstPhraseNode>(*fnode.node).slop, 5u);
+}
+
+TEST_F(SearchParserTest, PhraseParse) {
+  // Top-level phrase.
+  ASSERT_EQ(0, Parse("\"machine learning\""));
+  AstExpr root = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(root));
+  EXPECT_EQ(std::get<AstPhraseNode>(root).raw, "machine learning");
+
+  // Phrase inside @field:"..."
+  ASSERT_EQ(0, Parse("@title:\"fully convolutional network\""));
+  AstExpr field = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(field));
+  const auto& fnode = std::get<AstFieldNode>(field);
+  EXPECT_EQ(fnode.field, "title");
+  ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(*fnode.node));
+  EXPECT_EQ(std::get<AstPhraseNode>(*fnode.node).raw, "fully convolutional network");
+
+  // Single-quoted single token still becomes a phrase (executor handles 1-token case).
+  ASSERT_EQ(0, Parse("'foo'"));
+  AstExpr single = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(single));
+
+  // Phrase combined with AND of free terms — RAG-style "...AND \"...\"" queries.
+  ASSERT_EQ(0, Parse("machine \"deep learning\""));
+  AstExpr and_root = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstLogicalNode>(and_root));
+  const auto& log = std::get<AstLogicalNode>(and_root);
+  EXPECT_EQ(log.op, AstLogicalNode::AND);
+  bool found_phrase = false;
+  for (const auto& child : log.nodes) {
+    if (std::holds_alternative<AstPhraseNode>(child)) {
+      found_phrase = true;
+      EXPECT_EQ(std::get<AstPhraseNode>(child).raw, "deep learning");
+    }
+  }
+  EXPECT_TRUE(found_phrase);
 }
 
 }  // namespace dfly::search

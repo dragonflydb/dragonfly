@@ -65,6 +65,7 @@ struct ProfileBuilder {
         [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.affix, "}"); },
         [](const AstSuffixNode& n) { return absl::StrCat("Suffix{", n.affix, "}"); },
         [](const AstInfixNode& n) { return absl::StrCat("Infix{", n.affix, "}"); },
+        [](const AstPhraseNode& n) { return absl::StrCat("Phrase{", n.raw, "}"); },
         [](const AstRangeNode& n) { return absl::StrCat("Range{", n.lo, "<>", n.hi, "}"); },
         [](const AstLogicalNode& n) {
           auto op = n.op == AstLogicalNode::AND ? "and" : "or";
@@ -300,6 +301,129 @@ struct BasicSearch {
     vector<IndexResult> sub_results;
     for (auto* index : indices_->GetAllTextIndices())
       sub_results.push_back(match_in(index));
+    return UnifyResults(std::move(sub_results), LogicOp::OR);
+  }
+
+  // Recursive backtracking: can we extend a phrase starting at `cur` through positions[i..]?
+  // `cur` is the previously chosen position; we need next position q in positions[i] with
+  // q > cur and q - cur - 1 <= slop. Greedy isn't always optimal — must try all candidates
+  // in the window. positions per term per doc are typically small, so this is fine.
+  static bool CanExtendPhrase(const vector<absl::Span<const uint32_t>>& positions, size_t i,
+                              uint32_t cur, uint32_t slop) {
+    if (i >= positions.size())
+      return true;
+    const auto& p = positions[i];
+    uint32_t upper = cur + slop + 1;
+    auto lo = std::upper_bound(p.begin(), p.end(), cur);
+    for (auto it = lo; it != p.end() && *it <= upper; ++it) {
+      if (CanExtendPhrase(positions, i + 1, *it, slop))
+        return true;
+    }
+    return false;
+  }
+
+  // Check whether there exists a sequence p_0 < p_1 < ... < p_{N-1}, with p_i ∈
+  // iters[i].Positions() and p_{i+1} - p_i - 1 <= slop (i.e., at most `slop` intervening tokens).
+  // slop=0 = adjacency.
+  using PhraseIt = TextIndex::Container::BlockListIterator;
+  static bool HasPhraseRun(const vector<PhraseIt>& iters, uint32_t slop) {
+    vector<absl::Span<const uint32_t>> positions;
+    positions.reserve(iters.size());
+    for (const auto& it : iters)
+      positions.push_back(it.Positions());
+    for (uint32_t start : positions[0]) {
+      if (CanExtendPhrase(positions, 1, start, slop))
+        return true;
+    }
+    return false;
+  }
+
+  // Quoted phrase: AND-intersect posting lists of raw tokens, then verify adjacency by positions.
+  // Stems are not consulted — phrase semantics require the exact surface form. Stopwords inside
+  // the phrase are dropped (matching the index-side tokenizer, which doesn't advance pos for them).
+  IndexResult Search(const AstPhraseNode& node, string_view active_field) {
+    auto eval_in = [&](TextIndex* text_index) -> IndexResult {
+      if (!text_index->StoresPositions()) {
+        error_ = "phrase queries require offsets; index was created with NOOFFSETS";
+        return IndexResult{};
+      }
+
+      vector<string> terms = text_index->TokenizePhraseQuery(node.raw);
+      if (terms.empty())
+        return IndexResult{};
+
+      // Register each phrase term with the scorer so BM25 picks them up as virtual matches.
+      // Phrase-matched docs then score the same as if `term1 term2 ...` were AND-ed.
+      if (scorer_) {
+        for (const auto& t : terms)
+          AddMatchedTerm(text_index, t);
+      }
+
+      // Fetch posting lists (raw form only, no stem expansion). Any miss → empty result.
+      vector<const TextIndex::Container*> lists;
+      lists.reserve(terms.size());
+      for (const auto& t : terms) {
+        const auto* c = text_index->MatchingNoStem(t);
+        if (!c || c->Empty())
+          return IndexResult{};
+        lists.push_back(c);
+      }
+
+      // Single-token phrase short-circuit: posting list IS the answer (no adjacency to check).
+      if (lists.size() == 1)
+        return IndexResult{lists[0]};
+
+      // Intersect doc ids across all lists; for each common doc, check adjacency.
+      vector<PhraseIt> iters;
+      iters.reserve(lists.size());
+      for (const auto* l : lists)
+        iters.push_back(l->begin());
+
+      auto any_at_end = [&]() {
+        for (size_t i = 0; i < iters.size(); ++i)
+          if (iters[i] == lists[i]->end())
+            return true;
+        return false;
+      };
+
+      vector<DocId> matches;
+      while (!any_at_end()) {
+        DocId max_id = *iters[0];
+        for (size_t i = 1; i < iters.size(); ++i)
+          if (*iters[i] > max_id)
+            max_id = *iters[i];
+        for (auto& it : iters)
+          it.SeekGE(max_id);
+        if (any_at_end())
+          break;
+        bool aligned = true;
+        DocId d = *iters[0];
+        for (size_t i = 1; i < iters.size(); ++i) {
+          if (*iters[i] != d) {
+            aligned = false;
+            break;
+          }
+        }
+        if (aligned) {
+          if (HasPhraseRun(iters, node.slop))
+            matches.push_back(d);
+          // Advance every iterator past this doc to find the next candidate.
+          for (auto& it : iters)
+            ++it;
+        }
+      }
+      return IndexResult{std::move(matches)};
+    };
+
+    if (!active_field.empty()) {
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        return eval_in(index);
+      return IndexResult{};
+    }
+
+    vector<IndexResult> sub_results;
+    for (auto* index : indices_->GetAllTextIndices())
+      sub_results.push_back(eval_in(index));
     return UnifyResults(std::move(sub_results), LogicOp::OR);
   }
 
@@ -700,7 +824,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
         const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
         indices_[field_ident] = make_unique<TextIndex>(
             mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie, tparams.no_stem,
-            schema_.default_language, schema_.language_field);
+            schema_.default_language, schema_.language_field, !options_.no_offsets);
         break;
       }
       case SchemaField::NUMERIC: {
