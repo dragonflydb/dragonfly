@@ -15,12 +15,14 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/bloom.h"
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
 #include "server/engine_shard_set.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
+#include "server/serializer_commons.h"
 #include "server/test_utils.h"
 
 namespace rng = std::ranges;
@@ -1027,6 +1029,7 @@ TEST_F(RdbTest, SnapshotTooBig) {
 }
 
 TEST_F(RdbTest, HugeKeyIssue4497) {
+  absl::FlagSaver fs;
   SetTestFlag("cache_mode", "true");
   ResetService();
 
@@ -1039,6 +1042,7 @@ TEST_F(RdbTest, HugeKeyIssue4497) {
 }
 
 TEST_F(RdbTest, HugeKeyIssue4554) {
+  absl::FlagSaver fs;
   SetTestFlag("cache_mode", "true");
   // We need to stress one flow/shard such that the others finish early. Lock on hashtags allows
   // that.
@@ -1375,6 +1379,272 @@ TEST_F(MemBufControllerTest, TaggingDisabled) {
   controller_.FinishEntry();
 
   EXPECT_EQ(Flush(), "def");
+}
+
+namespace {
+
+// Wraps string in rdb version, eof, checksum, etc so it can be fed to a loader
+std::string WrapInRdb(std::string_view body) {
+  std::string out = absl::StrFormat("REDIS%04d", RDB_SER_VERSION);
+  out.append(body);
+  out.push_back(static_cast<char>(RDB_OPCODE_EOF));
+  constexpr uint8_t checksum[8] = {};
+  out.append(reinterpret_cast<const char*>(checksum), sizeof(checksum));
+  return out;
+}
+
+std::error_code LoadRdbData(Service* service, const std::string& rdb,
+                            std::optional<uint64_t> journal_offset = std::nullopt) {
+  io::BytesSource src{io::Buffer(rdb)};
+  RdbLoadContext load_context;
+  RdbLoader loader(service, &load_context);
+  auto ec = loader.Load(&src);
+  EXPECT_EQ(loader.journal_offset(), journal_offset);
+  return ec;
+}
+
+void AppendLen(std::string* out, uint64_t len) {
+  uint8_t buf[9];
+  const auto sz = WritePackedUInt(len, {buf, sizeof(buf)});
+  out->append(reinterpret_cast<const char*>(buf), sz);
+}
+
+void AppendString(std::string* out, std::string_view s) {
+  AppendLen(out, s.size());
+  out->append(s);
+}
+
+void AddKV(std::string* out, std::string_view key, std::string_view val) {
+  AppendString(out, key);
+  AppendString(out, val);
+}
+
+std::string MakeTaggedChunk(uint32_t id, std::string_view payload) {
+  std::string out;
+  out.push_back(static_cast<char>(RDB_OPCODE_TAGGED_CHUNK));
+
+  uint8_t header[8];
+  absl::little_endian::Store32(header, id);
+  absl::little_endian::Store32(header + 4, payload.size());
+  out.append(reinterpret_cast<const char*>(header), sizeof(header));
+
+  out.append(payload);
+  return out;
+}
+
+void AppendBinaryDouble(std::string* out, double val) {
+  uint64_t bits;
+  memcpy(&bits, &val, sizeof(bits));
+
+  uint8_t buf[8];
+  absl::little_endian::Store64(buf, bits);
+  out->append(reinterpret_cast<const char*>(buf), sizeof(buf));
+}
+
+}  // namespace
+
+// The following are tests that directly feed byte data to loader to exercise chunk loading.
+// Some of these will become redundant once the saver starts sending chunked data, so instead of
+// hand-crafting data we will be able to load from the db directly.
+
+TEST_F(RdbTest, LoadTwoChunks) {
+  std::string first;
+  first.push_back(RDB_TYPE_HASH);
+  AppendString(&first, "h");
+  AppendLen(&first, 2);
+  AddKV(&first, "f1", "v1");
+
+  std::string second;
+  AddKV(&second, "f2", "v2");
+
+  std::string body;
+  // hash is split across two tagged chunks
+  body += MakeTaggedChunk(1, first);
+  body += MakeTaggedChunk(1, second);
+
+  const auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run({"HGET", "h", "f1"}), "v1");
+  EXPECT_EQ(Run({"HGET", "h", "f2"}), "v2");
+}
+
+TEST_F(RdbTest, InterleavedLoad) {
+  // must have >1 shards for non inlined path check. find a key that lands in shard 1 by hashing, to
+  // test non inlined obj. creation
+  ASSERT_GT(shard_set->size(), 1u);
+  std::string key;
+  for (unsigned i = 0; i < 1000; ++i) {
+    key = StrCat("x", i);
+    if (Shard(key, shard_set->size()) == 1)
+      break;
+  }
+  ASSERT_EQ(Shard(key, shard_set->size()), 1u);
+
+  std::string a1;
+  // hash chunk 1
+  a1.push_back(RDB_TYPE_HASH);
+  AppendString(&a1, key);
+  AppendLen(&a1, 2);
+  AddKV(&a1, "f1", "v1");
+
+  // string
+  std::string b;
+  b.push_back(RDB_TYPE_STRING);
+  AppendString(&b, "b");
+  AppendString(&b, "plain");
+
+  // hash chunk 2
+  std::string a2;
+  AddKV(&a2, "f2", "v2");
+
+  std::string body;
+  // chunk for db 0
+  body += MakeTaggedChunk(1, a1);
+  // simple string b=plain
+  body += b;
+  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
+  // switch to db 1
+  AppendLen(&body, 1);
+  // back to chunk for db 0
+  body += MakeTaggedChunk(1, a2);
+
+  auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run({"SELECT", "0"}), "OK");
+  EXPECT_EQ(Run({"HGET", key, "f1"}), "v1");
+  EXPECT_EQ(Run({"HGET", key, "f2"}), "v2");
+  EXPECT_EQ(Run({"GET", "b"}), "plain");
+
+  EXPECT_EQ(Run({"SELECT", "1"}), "OK");
+  EXPECT_THAT(Run({"EXISTS", key}), IntArg(0));
+  EXPECT_EQ(Run({"SELECT", "0"}), "OK");
+}
+
+TEST_F(RdbTest, ChunksAroundJournalOffset) {
+  std::string a1;
+  a1.push_back(RDB_TYPE_HASH);
+  AppendString(&a1, "a");
+  AppendLen(&a1, 2);
+  AddKV(&a1, "f1", "v1");
+
+  std::string a2;
+  AddKV(&a2, "f2", "v2");
+
+  std::string body;
+  body += MakeTaggedChunk(1, a1);
+
+  // put the journal offset in the middle
+  body.push_back(static_cast<char>(RDB_OPCODE_JOURNAL_OFFSET));
+  uint8_t offset_bytes[8];
+  absl::little_endian::Store64(offset_bytes, 1234);
+  body.append(reinterpret_cast<const char*>(offset_bytes), sizeof(offset_bytes));
+
+  body += MakeTaggedChunk(1, a2);
+
+  auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body), 1234); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run({"HGET", "a", "f1"}), "v1");
+  EXPECT_EQ(Run({"HGET", "a", "f2"}), "v2");
+}
+
+TEST_F(RdbTest, SplitSBF) {
+  // this test creates two filter SBF, then splits one of the filters. Since in sbf loading there
+  // are two layers of possible splits, intra-filter and inter-filter, this test exercises both
+  // splits. A plain string is also added between the split filter.
+
+  // Creates filter in db to copy the fields from
+  auto resp = Run({"BF.RESERVE", "bf_src", "0.01", "10"});
+  EXPECT_EQ(resp, "OK");
+  for (size_t i = 0; i < 50; ++i) {
+    resp = Run({"BF.ADD", "bf_src", StrCat("item", i)});
+    EXPECT_THAT(resp, AnyOf(0, 1));
+  }
+
+  std::string first;
+  std::string blob1;
+
+  // split the blob of the second filter into three chunks. this exercises the loader path where we
+  // first try to load the incomplete filter, and return early before that finishes
+  constexpr size_t kFirstSplit = 17;
+  constexpr size_t kSecondSplit = 13;
+
+  pp_->at(0)->Await([&] {
+    const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    const auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, "bf_src", OBJ_SBF);
+    ASSERT_TRUE(it.ok());
+
+    const SBF* sbf = it.value()->second.GetSBF();
+    ASSERT_GE(sbf->num_filters(), 2);
+
+    const std::string blob0{sbf->data(0)};
+
+    blob1 = std::string{sbf->data(1)};
+    ASSERT_GT(blob1.size(), kFirstSplit + kSecondSplit);
+
+    first.push_back(RDB_TYPE_SBF2);
+    // brand new key whose shape is copied off bf_src
+    AppendString(&first, "bf_loaded");
+    AppendLen(&first, 0);
+    AppendBinaryDouble(&first, sbf->grow_factor());
+    AppendBinaryDouble(&first, sbf->fp_probability());
+    AppendLen(&first, sbf->prev_size());
+    AppendLen(&first, sbf->current_size());
+    AppendLen(&first, sbf->max_capacity());
+    AppendLen(&first, sbf->num_filters());
+
+    AppendLen(&first, sbf->hashfunc_cnt(0));
+    // total size of blob0
+    AppendLen(&first, blob0.size());
+    // this chunk size (all of blob0 is fit in one chunk)
+    AppendLen(&first, blob0.size());
+    first.append(blob0);
+
+    AppendLen(&first, sbf->hashfunc_cnt(1));
+    // total size of blob1
+    AppendLen(&first, blob1.size());
+    // only 17 bytes from blob1 in this chunk
+    AppendLen(&first, kFirstSplit);
+    first.append(blob1.data(), kFirstSplit);
+  });
+
+  // add this plain string between chunks of blob1 filter
+  std::string plain;
+  plain.push_back(RDB_TYPE_STRING);
+  AppendString(&plain, "plain_key");
+  AppendString(&plain, "plain_val");
+
+  // p2 of blob1
+  std::string second;
+  AppendLen(&second, kSecondSplit);
+  second.append(blob1.data() + kFirstSplit, kSecondSplit);
+
+  // p3 of blob1
+  std::string third;
+  constexpr auto kPrefixConsumed = kFirstSplit + kSecondSplit;
+  AppendLen(&third, blob1.size() - kPrefixConsumed);
+  third.append(blob1.data() + kPrefixConsumed, blob1.size() - kPrefixConsumed);
+
+  std::string body;
+  body += MakeTaggedChunk(1, first);
+  body += plain;
+  body += MakeTaggedChunk(1, second);
+  body += MakeTaggedChunk(1, third);
+
+  EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+
+  auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run({"TYPE", "bf_loaded"}), "MBbloom--");
+  EXPECT_EQ(Run({"GET", "plain_key"}), "plain_val");
+
+  for (size_t i = 0; i < 50; ++i) {
+    EXPECT_THAT(Run({"BF.EXISTS", "bf_loaded", StrCat("item", i)}), IntArg(1));
+  }
 }
 
 }  // namespace dfly

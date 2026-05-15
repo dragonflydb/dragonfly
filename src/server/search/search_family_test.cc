@@ -319,8 +319,8 @@ TEST_F(SearchFamilyTest, InfoIndex) {
 
   auto info = Run({"ft.info", "idx-1"});
 
-  auto descriptor_matcher =
-      IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "default_score", 1);
+  auto descriptor_matcher = IsArray("key_type", "HASH", "prefixes", IsArray("doc-"),
+                                    "default_language", "english", "default_score", 1);
   auto schema_matcher = IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT"));
 
   EXPECT_THAT(info, IsArray(_, _, _, descriptor_matcher, "index_options", RespArray(IsEmpty()),
@@ -1080,7 +1080,8 @@ TEST_F(SearchFamilyTest, PrefixSuffixInfixTrie) {
   EXPECT_THAT(Run({"ft.search", "i1", "*ea*"}), AreDocIds("d:1", "d:2"));
   EXPECT_THAT(Run({"ft.search", "i1", "*ia*"}), AreDocIds("d:1", "d:3"));
   EXPECT_THAT(Run({"ft.search", "i1", "lake*"}), AreDocIds("d:2", "d:3", "d:4"));
-  EXPECT_THAT(Run({"ft.search", "i1", "*lake"}), AreDocIds("d:3", "d:4"));
+  // d:2 ("LakEs") matches via the stem "lake" stored alongside the raw "lakes".
+  EXPECT_THAT(Run({"ft.search", "i1", "*lake"}), AreDocIds("d:2", "d:3", "d:4"));
 }
 
 struct SortTest : SearchFamilyTest, public testing::WithParamInterface<bool /* sortable */> {};
@@ -5477,6 +5478,117 @@ TEST_F(SearchFamilyTest, InfoIndexDefaultStopwordsOmitted) {
 
   // Collection size is 7 (no stopwords_list field).
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, _, _, "num_docs", _, "indexing", _, _, _));
+}
+
+// TEXT fields stem by default; any morphological form matches the full set.
+TEST_F(SearchFamilyTest, StemmingDefault) {
+  Run({"FT.CREATE", "idx", "SCHEMA", "text", "TEXT"});
+  Run({"HSET", "t:n0", "text", "machine learning fundamentals"});
+  Run({"HSET", "t:n1", "text", "deep learning advanced"});
+  Run({"HSET", "t:n2", "text", "I will learn tomorrow"});
+  Run({"HSET", "t:n3", "text", "she learned yesterday"});
+
+  for (auto q : {"learn", "learning", "learns", "learned", "LEARNING"}) {
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", absl::StrCat("@text:(", q, ")")}),
+                AreDocIds("t:n0", "t:n1", "t:n2", "t:n3"))
+        << "query: " << q;
+  }
+}
+
+// NOSTEM disables stemming for the field; queries match literal tokens only.
+TEST_F(SearchFamilyTest, StemmingNoStemAttribute) {
+  Run({"FT.CREATE", "idx", "SCHEMA", "text", "TEXT", "NOSTEM"});
+  Run({"HSET", "d:1", "text", "machine learning"});
+  Run({"HSET", "d:2", "text", "I will learn"});
+  Run({"HSET", "d:3", "text", "she learned yesterday"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@text:(learn)"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@text:(learning)"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@text:(learned)"}), AreDocIds("d:3"));
+}
+
+// FT.AGGREGATE reuses the FT.SEARCH query path, so the initial filter stems.
+TEST_F(SearchFamilyTest, StemmingAggregateQueryFilter) {
+  Run({"FT.CREATE", "agg_idx", "SCHEMA", "text", "TEXT"});
+  Run({"HSET", "a:0", "text", "machine learning fundamentals"});
+  Run({"HSET", "a:1", "text", "deep learning advanced"});
+  Run({"HSET", "a:2", "text", "I will learn tomorrow"});
+  Run({"HSET", "a:3", "text", "she learned yesterday"});
+  Run({"HSET", "a:4", "text", "totally unrelated"});
+
+  auto resp = Run({"FT.AGGREGATE", "agg_idx", "@text:(learning)", "GROUPBY", "0", "REDUCE", "COUNT",
+                   "0", "AS", "cnt"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("cnt", "4")));
+}
+
+// GROUPBY operates on raw field values; morphological variants stay distinct.
+TEST_F(SearchFamilyTest, StemmingAggregateGroupbyKeepsRaw) {
+  Run({"FT.CREATE", "agg_grp_idx", "SCHEMA", "tag", "TAG", "text", "TEXT"});
+  Run({"HSET", "g:1", "tag", "learning", "text", "irrelevant"});
+  Run({"HSET", "g:2", "tag", "learn", "text", "irrelevant"});
+  Run({"HSET", "g:3", "tag", "learned", "text", "irrelevant"});
+
+  auto resp = Run({"FT.AGGREGATE", "agg_grp_idx", "*", "GROUPBY", "1", "@tag", "REDUCE", "COUNT",
+                   "0", "AS", "n"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("tag", "learning", "n", "1"),
+                                         IsMap("tag", "learn", "n", "1"),
+                                         IsMap("tag", "learned", "n", "1")));
+}
+
+// FT.INFO surfaces NOSTEM per-attribute and language in index_definition.
+TEST_F(SearchFamilyTest, StemmingInfoSurface) {
+  Run({"FT.CREATE", "info_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT",
+       "body", "TEXT", "NOSTEM"});
+
+  auto info = Run({"FT.INFO", "info_idx"});
+  auto title_matcher = IsArray("identifier", "title", "attribute", "title", "type", "TEXT");
+  auto body_matcher = IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "NOSTEM");
+  auto definition = IsArray("key_type", "HASH", "prefixes", IsArray("doc:"), "default_language",
+                            "english", "default_score", 1);
+  EXPECT_THAT(info, IsArray(_, _, _, definition, _, _, "attributes",
+                            IsUnordArray(title_matcher, body_matcher), _, _, _, _, _, _));
+}
+
+// LANGUAGE selects the algorithm; German Porter unifies Haus / Häuser / Hauses.
+TEST_F(SearchFamilyTest, StemmingMultilang) {
+  Run({"FT.CREATE", "de_idx", "LANGUAGE", "german", "SCHEMA", "body", "TEXT"});
+  Run({"HSET", "d:1", "body", "viele Häuser hier"});
+  Run({"HSET", "d:2", "body", "ein altes Haus"});
+  Run({"HSET", "d:3", "body", "des Hauses Wert"});
+  Run({"HSET", "d:4", "body", "etwas anderes"});
+
+  for (auto q : {"Haus", "Häuser", "Hauses"}) {
+    EXPECT_THAT(Run({"FT.SEARCH", "de_idx", absl::StrCat("@body:(", q, ")")}),
+                AreDocIds("d:1", "d:2", "d:3"))
+        << "query: " << q;
+  }
+
+  // Unsupported language is rejected at FT.CREATE.
+  EXPECT_THAT(Run({"FT.CREATE", "bad", "LANGUAGE", "klingon", "SCHEMA", "t", "TEXT"}),
+              ErrArg("Unsupported language"));
+}
+
+// LANGUAGE_FIELD selects the stemmer per-doc from a hash attribute.
+TEST_F(SearchFamilyTest, StemmingLanguageFieldPerDoc) {
+  Run({"FT.CREATE", "lf_idx", "LANGUAGE", "english", "LANGUAGE_FIELD", "lang", "SCHEMA", "body",
+       "TEXT", "lang", "TEXT", "NOSTEM"});
+
+  Run({"HSET", "d:en", "body", "machine learning", "lang", "english"});
+  Run({"HSET", "d:de", "body", "viele Häuser", "lang", "german"});
+  Run({"HSET", "d:fallback", "body", "she learned"});  // no lang -> schema default
+
+  // English Porter stems "learning" and "learned" to "learn".
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "@body:(learn)"}), AreDocIds("d:en", "d:fallback"));
+
+  // German Porter stems "Häuser" to "Haus" for d:de.
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "@body:(Haus)"}), AreDocIds("d:de"));
+
+  // FT.INFO exposes language_field.
+  auto info = Run({"FT.INFO", "lf_idx"});
+  auto definition =
+      IsArray("key_type", "HASH", "prefixes", RespArray(IsEmpty()), "default_language", "english",
+              "language_field", "lang", "default_score", 1);
+  EXPECT_THAT(info, IsArray(_, _, _, definition, _, _, _, _, _, _, _, _, _, _));
 }
 
 // Verify that BM25 text scores survive document expiration correctly:

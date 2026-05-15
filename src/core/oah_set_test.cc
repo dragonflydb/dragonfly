@@ -13,9 +13,9 @@
 #include <unordered_set>
 
 #include "base/gtest.h"
+#include "base/logging.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
-#include "glog/logging.h"
 
 extern "C" {
 #include "redis/zmalloc.h"

@@ -116,14 +116,6 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  // Cached posting list for a (TextIndex, term) pair so the AST walker
-  // and the scoring loop don't repeat the rax tree lookup.
-  struct MatchedTerm {
-    TextIndex* index;
-    std::string term;
-    const TextIndex::Container* container;
-  };
-
   BasicSearch(const FieldIndices* indices, ScorerFn scorer, const GlobalScoringStats* global_stats)
       : indices_{indices}, scorer_{scorer}, global_stats_{global_stats} {
   }
@@ -251,14 +243,11 @@ struct BasicSearch {
         if (scorer_) {
           std::string resolved{term};
           // Synonym shadow entries have freq=0; scoring must use the group's posting list.
-          const auto* score_container = container;
           if (auto synonyms = indices_->GetSynonyms(); synonyms) {
-            if (auto group_id = synonyms->GetGroupToken(resolved); group_id) {
+            if (auto group_id = synonyms->GetGroupToken(resolved); group_id)
               resolved = std::move(*group_id);
-              score_container = index->Matching(resolved, /*strip_whitespace=*/false);
-            }
           }
-          AddMatchedTerm(index, std::move(resolved), score_container);
+          AddMatchedTerm(index, std::move(resolved));
         }
         Merge(IndexResult{container}, &per_index, LogicOp::OR);
       };
@@ -274,39 +263,39 @@ struct BasicSearch {
     return UnifyResults(std::move(sub_results), LogicOp::OR);
   }
 
-  // "term": access field's text index or unify results from all text indices if no field is set
+  // "term": access field's text index or unify results from all text indices if no field is set.
+  // When the term is in a synonym group, the search is expanded to (term OR group_ref) so docs
+  // matched via stem still join the synonym group's docs.
   IndexResult Search(const AstAffixNode<TagType::REGULAR> node, string_view active_field) {
-    std::string term = node.affix;
-    bool strip_whitespace = true;
+    const std::string& term = node.affix;
+    std::optional<std::string> group_id;
+    if (auto synonyms = indices_->GetSynonyms(); synonyms)
+      group_id = synonyms->GetGroupToken(term);
 
-    if (auto synonyms = indices_->GetSynonyms(); synonyms) {
-      if (auto group_id = synonyms->GetGroupToken(term); group_id) {
-        term = *group_id;
-        strip_whitespace = false;
+    auto match_in = [&](TextIndex* index) {
+      if (scorer_)
+        AddMatchedTerm(index, term);
+      IndexResult r{index->Matching(term, /*strip_whitespace=*/true)};
+      if (group_id) {
+        if (scorer_)
+          AddMatchedTerm(index, *group_id);
+        vector<IndexResult> parts;
+        parts.push_back(std::move(r));
+        parts.push_back(IndexResult{index->Matching(*group_id, /*strip_whitespace=*/false)});
+        r = UnifyResults(std::move(parts), LogicOp::OR);
       }
-    }
+      return r;
+    };
 
     if (!active_field.empty()) {
-      if (auto* index = GetIndex<TextIndex>(active_field); index) {
-        const auto* container = index->Matching(term, strip_whitespace);
-        if (scorer_)
-          AddMatchedTerm(index, term, container);
-        return IndexResult{container};
-      }
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        return match_in(index);
       return IndexResult{};
     }
 
-    vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
-
     vector<IndexResult> sub_results;
-    sub_results.reserve(selected_indices.size());
-    for (auto* index : selected_indices) {
-      const auto* container = index->Matching(term, strip_whitespace);
-      if (scorer_)
-        AddMatchedTerm(index, term, container);
-      sub_results.emplace_back(IndexResult{container});
-    }
-
+    for (auto* index : indices_->GetAllTextIndices())
+      sub_results.push_back(match_in(index));
     return UnifyResults(std::move(sub_results), LogicOp::OR);
   }
 
@@ -590,10 +579,11 @@ struct BasicSearch {
     // Ensure sorted for cursor-based scoring
     sort(all_docs.begin(), all_docs.end());
 
-    // Open cursors on posting lists cached during the AST walk.
+    // Open cursors on posting lists for each matched term.
     vector<TermCursor> cursors;
     cursors.reserve(matched_text_terms_.size());
-    for (const auto& [index, term, container] : matched_text_terms_) {
+    for (const auto& [index, term] : matched_text_terms_) {
+      auto* container = index->Matching(term, /*strip_whitespace=*/false);
       if (!container)
         continue;
       string_view field_ident = index->field_ident();
@@ -643,9 +633,9 @@ struct BasicSearch {
     return std::make_tuple(std::move(out), total_size, std::move(text_scores));
   }
 
-  void AddMatchedTerm(TextIndex* index, string term, const TextIndex::Container* container) {
+  void AddMatchedTerm(TextIndex* index, string term) {
     if (matched_terms_set_.emplace(index, term).second)
-      matched_text_terms_.push_back({index, std::move(term), container});
+      matched_text_terms_.emplace_back(index, std::move(term));
   }
 
   const FieldIndices* indices_;
@@ -658,8 +648,10 @@ struct BasicSearch {
   std::vector<pair<DocId, float>> knn_scores_;
   vector<pair<float, DocId>> knn_distances_;
 
-  // Deduped (TextIndex, normalized_term) pairs with their cached posting list.
-  vector<MatchedTerm> matched_text_terms_;
+  // Tracked text terms for scoring: (TextIndex*, normalized_term)
+  // Deduplicated via matched_terms_set_ to avoid double-counting synonyms resolved to same
+  // group_id.
+  vector<pair<TextIndex*, string>> matched_text_terms_;
   absl::flat_hash_set<pair<TextIndex*, string>> matched_terms_set_;
 };
 
@@ -813,8 +805,9 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
     switch (field_info.type) {
       case SchemaField::TEXT: {
         const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
-        auto idx =
-            make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie);
+        auto idx = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie,
+                                         tparams.no_stem, schema_.default_language,
+                                         schema_.language_field);
         idx->set_field_ident(field_ident);
         indices_[field_ident] = std::move(idx);
         break;

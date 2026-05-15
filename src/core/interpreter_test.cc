@@ -9,7 +9,6 @@ extern "C" {
 #include <lua.h>
 }
 
-#include <absl/flags/flag.h>
 #include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_replace.h>
@@ -18,6 +17,7 @@ extern "C" {
 
 #include <thread>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 
