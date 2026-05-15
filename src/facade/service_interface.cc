@@ -22,10 +22,10 @@ std::string ServiceInterface::ContextInfo::Format() const {
   if (conn_closing)
     buf[index++] = 't';
 
-  if (subscribers)
+  if (has_subscribers)
     buf[index++] = 'P';
 
-  if (blocked)
+  if (is_blocked)
     buf[index++] = 'b';
 
   if (index)

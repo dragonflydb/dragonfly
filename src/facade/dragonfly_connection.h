@@ -69,7 +69,6 @@ class Connection : public util::Connection {
   // HandleRequests will run.
   void OnConnectionStart();
 
-  using BreakerCb = std::function<void(uint32_t)>;
   using ShutdownCb = std::function<void()>;
 
   // PubSub message, either incoming message for active subscription or reply for new subscription.
@@ -153,9 +152,6 @@ class Connection : public util::Connection {
 
   // Add InvalidationMessage to dispatch queue.
   virtual void SendInvalidationMessageAsync(InvalidationMessage);
-
-  // Register hook that is executen when the connection breaks.
-  void RegisterBreakHook(BreakerCb breaker_cb);
 
   void FlushReplies();
 
@@ -536,8 +532,6 @@ class Connection : public util::Connection {
   std::string lib_ver_;
 
   unsigned parser_error_ = 0;
-
-  BreakerCb breaker_cb_;
 
   // Used to keep track of borrowed references. Does not really own itself
   std::shared_ptr<Connection> self_;
