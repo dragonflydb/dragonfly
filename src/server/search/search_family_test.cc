@@ -5864,4 +5864,18 @@ TEST_F(SearchFamilyTest, SearchDeletesEmptyHash) {
   }
 }
 
+TEST_F(SearchFamilyTest, SynUpdateExpiredDocCrash) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"});
+  Run({"HSET", "doc:1", "title", "cat"});
+
+  // Set a short TTL. The key remains in the prime table until lazily expired.
+  Run({"EXPIRE", "doc:1", "1"});
+  AdvanceTime(2000);  // TTL is now past; lazy expiry will fire on next lookup.
+
+  // Without the fix, RebuildForGroup's second update_indices pass calls
+  // key_index_.Get(DocId=0) after the first pass's FindReadOnly already triggered
+  // ExpireIfNeeded which freed DocId=0 — crashing on the DCHECK.
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "group1", "cat"}), "OK");
+}
+
 }  // namespace dfly
