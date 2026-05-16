@@ -690,6 +690,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
       CallChangeCallbacks(cntx.db_index, bucket_set);
 
       // Repeat the change callbacks if the target set changed
+      // The operation is finite as eventually all target buckets will be visited
       consistent = (bucket_set == db.prime.CVCUponInsert(key));
     }
   }
