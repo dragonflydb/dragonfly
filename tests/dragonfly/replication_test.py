@@ -6,7 +6,6 @@ import signal
 import struct
 import tarfile
 import time
-import urllib.request
 from itertools import chain, repeat
 
 import async_timeout
@@ -2662,7 +2661,7 @@ def download_dragonfly_release(version):
     logging.debug(f"Downloading Dragonfly release into {gzfile}...")
 
     # Download
-    urllib.request.urlretrieve(
+    download_with_retries(
         f"https://github.com/dragonflydb/dragonfly/releases/download/{version}/dragonfly-x86_64.tar.gz",
         gzfile,
     )
