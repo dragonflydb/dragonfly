@@ -1378,7 +1378,10 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
     // does not change during the serialization, therefore we allow at most one serializer
     // reading the bucket at the same time.
     if (bucket_version <= cb_version) {
-      ccb->second(db_ind, ChangeReq{it.GetInnerIt()});
+      // Key might have been deleted because another FlushChangeToEarlierCallbacks finished
+      // and allowed a mutation to pass while this one was suspended
+      if (auto inner_it = it.GetInnerIt(); !inner_it.is_done())
+        ccb->second(db_ind, ChangeReq{inner_it});
     }
     ++ccb;
   }
