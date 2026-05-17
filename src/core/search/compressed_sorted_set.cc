@@ -240,30 +240,13 @@ bool CompressedSortedSet::Insert(IntType value, uint32_t freq,
                         diff2_span.size() + freq2_span.size() + bound_pos_span.size();
   DCHECK_LE(bound.entry_span.size(), required_len);  // It can't shrink for sure
 
-  // bound_pos_span points into diffs_; capture its offset before any insert() invalidates it.
-  ptrdiff_t bound_pos_offset = store_positions_ ? bound_pos_span.data() - diffs_.data() : 0;
-  size_t bound_pos_size = bound_pos_span.size();
-
+  // Insert padding zeros at entry_offset. This shifts bound's existing positions block right by
+  // exactly the right amount: its new location coincides with entry 2's positions slot in the
+  // final layout, so we don't need to move those bytes explicitly.
   diffs_.insert(diffs_.begin() + entry_offset, required_len - bound.entry_span.size(), 0u);
 
-  // The original positions bytes shifted right by `shift` after the insert above.
-  size_t shift = required_len - bound.entry_span.size();
-  // Move bound's positions block to its final destination (entry 2's tail) before
-  // overwriting earlier bytes that would clobber it.
-  if (store_positions_ && bound_pos_size > 0) {
-    size_t old_pos_pos = bound_pos_offset + shift;
-    size_t new_pos_pos = entry_offset + diff1_span.size() + freq1_span.size() +
-                         new_pos_bytes.size() + diff2_span.size() + freq2_span.size();
-    // Memmove-style: regions may overlap but we always move right-to-left here since
-    // new entries are written from entry_offset onward; preserve bytes by copying first.
-    if (new_pos_pos != old_pos_pos) {
-      std::vector<uint8_t> scratch(diffs_.begin() + old_pos_pos,
-                                   diffs_.begin() + old_pos_pos + bound_pos_size);
-      std::copy(scratch.begin(), scratch.end(), diffs_.begin() + new_pos_pos);
-    }
-  }
-
-  // Now overwrite old entry with the two new entries (heads only; positions already placed).
+  // Overwrite old entry's prefix with the two new entries (heads + new entry's positions only;
+  // bound's original positions sit untouched at entry_offset + (left half size)).
   auto out = diffs_.begin() + entry_offset;
   out = copy(diff1_span.begin(), diff1_span.end(), out);
   out = copy(freq1_span.begin(), freq1_span.end(), out);

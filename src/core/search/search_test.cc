@@ -3744,5 +3744,78 @@ TEST_F(PhraseTest, PhraseMatchedDocsAreScored) {
   EXPECT_GT(*s0, *s1) << "Higher TF must score higher";
 }
 
+// UTF-8 phrase eval — adjacency works across Unicode word boundaries (Cyrillic).
+// Corpus drawn from a small Ukrainian poem; verifies Cyrillic lowercase + adjacency
+// through the full eval pipeline:
+//   Кіт заліз у холодильник —
+//   Шукав там ковбасу.
+//   Знайшов лише каструлю борщу
+//   І втратив віру в красу.
+TEST_F(PhraseTest, UnicodePhraseAdjacency) {
+  PrepareQuery("\"втратив віру\"");
+  ExpectAll("І втратив віру в красу",         // adjacent, in order (line 4)
+            "він втратив віру назавжди");     // adjacent, embedded
+  ExpectNone("віру втратив швидко",           // reversed
+             "втратив надію а потім віру",    // not adjacent
+             "Кіт заліз у холодильник",       // unrelated line
+             "Знайшов лише каструлю борщу");  // unrelated line
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+// Phrase of 5+ tokens (exceeds positions_stash_ inline capacity of 4).
+TEST_F(PhraseTest, LongPhraseFiveTokens) {
+  PrepareQuery("\"the quick brown fox jumps\"");
+  ExpectAll("the quick brown fox jumps over", "before the quick brown fox jumps after");
+  ExpectNone("the quick brown fox runs",
+             "quick brown fox jumps over",  // missing 'the'
+             "the brown fox jumps over");   // missing 'quick'
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+// Document with many occurrences of a phrase term — exercises position-decoding loop
+// past the InlinedVector<uint32_t, 4> inline capacity.
+TEST_F(PhraseTest, ManyPositionsPerTerm) {
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // 'foo' appears 10x, 'bar' 1x adjacent to one of the foos. Forces the position list
+  // for 'foo' to spill to the heap inside positions_stash_.
+  std::string text;
+  for (int i = 0; i < 9; ++i)
+    text += "foo zzz ";
+  text += "foo bar";  // adjacency at the 10th foo
+  MockedDocument doc({{"field", text}});
+  indices.Add(0, doc);
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("\"foo bar\"", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0u));
+}
+
+// Empty phrase "" must safely match nothing — neither crash nor match-all.
+TEST_F(PhraseTest, EmptyPhrase) {
+  PrepareQuery("\"\"");
+  ExpectNone("foo", "anything", "literally any document");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+// NOOFFSETS index surfaces a typed error to FT.SEARCH callers, not silently empty.
+TEST_F(PhraseTest, NoOffsetsErrorIsExplicit) {
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  IndicesOptions options{{}};
+  options.no_offsets = true;
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc("machine learning algorithm");
+  indices.Add(0, doc);
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("\"machine learning\"", &params));
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.error, testing::HasSubstr("phrase queries require offsets"));
+}
+
 }  // namespace search
 }  // namespace dfly
