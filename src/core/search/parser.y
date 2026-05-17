@@ -299,7 +299,13 @@ tag_list:
 
 tag_list_element:
   TERM        { $$ = AstTermNode(std::move($1));   }
-  | PHRASE { $$ = AstTermNode(std::move($1.raw));  }  /* Inside {..}, quoted strings are literals, not phrases. */
+  | PHRASE {
+      /* Inside {..}, quoted strings are literal tag values. ~N slop is only meaningful for
+         phrases, so reject it here rather than silently dropping it. */
+      if ($1.slop != 0)
+        throw Parser::syntax_error(@$, "slop is not allowed in tag values");
+      $$ = AstTermNode(std::move($1.raw));
+    }
   | PREFIX    { $$ = AstPrefixNode(std::move($1)); }
   | SUFFIX    { $$ = AstSuffixNode(std::move($1)); }
   | INFIX     { $$ = AstInfixNode(std::move($1));  }

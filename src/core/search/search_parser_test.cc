@@ -496,6 +496,17 @@ TEST_F(SearchParserTest, PhraseSlopParse) {
   EXPECT_EQ(std::get<AstPhraseNode>(*fnode.node).slop, 5u);
 }
 
+// Slop inside a tag value (@tag:{"foo"~N}) is meaningless and must be rejected, not silently
+// dropped. Bare quoted tag values are still allowed and become literal AstTermNode.
+TEST_F(SearchParserTest, PhraseSlopRejectedInTagContext) {
+  // Bare quoted tag parses successfully.
+  EXPECT_EQ(0, Parse("@t:{\"foo bar\"}"));
+
+  // Slop in tag context — parser action throws Parser::syntax_error which bison converts to a
+  // non-zero parse result code.
+  EXPECT_NE(0, Parse("@t:{\"foo\"~2}"));
+}
+
 TEST_F(SearchParserTest, PhraseParse) {
   // Top-level phrase.
   ASSERT_EQ(0, Parse("\"machine learning\""));

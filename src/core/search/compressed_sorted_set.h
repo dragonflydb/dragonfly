@@ -1,6 +1,5 @@
 #pragma once
 
-#include <absl/container/inlined_vector.h>
 #include <absl/types/span.h>
 
 #include <cstdint>
@@ -52,7 +51,7 @@ class CompressedSortedSet {
 
     std::optional<IntType> stash_{};
     uint32_t freq_stash_{0};
-    absl::InlinedVector<uint32_t, 4> positions_stash_;
+    std::vector<uint32_t> positions_stash_;
     bool store_freq_{false};
     bool store_positions_{false};
     absl::Span<const uint8_t> last_read_{};

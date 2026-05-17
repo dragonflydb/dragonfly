@@ -38,7 +38,7 @@
 
 namespace dfly::search {
 
-// Per-token indexing payload. `positions` is sorted ascending (0-based per field value,
+// Per-token indexing payload. `positions` is sorted ascending (1-based per field value,
 // continuous across multi-value fields). Empty when the owning index doesn't store positions.
 struct TermInfo {
   uint32_t freq = 0;

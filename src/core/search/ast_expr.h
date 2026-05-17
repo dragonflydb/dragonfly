@@ -38,8 +38,9 @@ using AstSuffixNode = AstAffixNode<TagType::SUFFIX>;
 using AstInfixNode = AstAffixNode<TagType::INFIX>;
 
 // Quoted multi-word phrase. `raw` is the unsplit content between quotes;
-// the executor lowercases, splits on whitespace, drops stopwords (without
-// advancing positions), then matches against raw posting-list positions.
+// the executor tokenizes via ICU word boundaries (same as indexing), lowercases,
+// drops stopwords (without advancing positions), then matches against raw
+// posting-list positions.
 // `slop` = max number of intervening tokens allowed between consecutive phrase
 // terms (in order). slop=0 = exact adjacency (the default for `"..."`); slop>0
 // comes from `"..."~N` syntax.
