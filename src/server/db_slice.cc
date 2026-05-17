@@ -683,12 +683,16 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
+  // Call change callbacks on the computed set of buckets that can be affected by the insert
   if (!change_cb_.empty()) {
-    auto bucket_set = db.prime.CVCUponInsert(key);
-    CallChangeCallbacks(cntx.db_index, bucket_set);
+    for (bool consistent = false; !consistent;) {
+      auto bucket_set = db.prime.CVCUponInsert(key);
+      CallChangeCallbacks(cntx.db_index, bucket_set);
 
-    // Set of possible insertion buckets must be the same after possibly blocking call
-    DCHECK(bucket_set == db.prime.CVCUponInsert(key));
+      // Repeat the change callbacks if the target set changed
+      // The operation is finite as eventually all target buckets will be visited
+      consistent = (bucket_set == db.prime.CVCUponInsert(key));
+    }
   }
 
   ssize_t memory_offset = -key.size();

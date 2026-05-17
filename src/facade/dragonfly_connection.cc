@@ -362,7 +362,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
 //               FLUSHALL/STATS/
 //               QUIT/VERSION)      : [cmd, *backed_args]
 void LogMemcacheTraffic(uint32_t id, bool has_more, const MemcacheParser::Command& mc,
-                        ServiceInterface::ContextInfo ci) {
+                        unsigned db_index) {
   using MP = MemcacheParser;
   string_view cmd_name = MP::CmdName(mc.type);
   if (cmd_name.empty())
@@ -419,7 +419,7 @@ void LogMemcacheTraffic(uint32_t id, bool has_more, const MemcacheParser::Comman
       break;
   }
 
-  LogTrafficParts(id, has_more, ci.db_index, absl::MakeSpan(parts));
+  LogTrafficParts(id, has_more, db_index, absl::MakeSpan(parts));
 }
 
 constexpr size_t kMinReadSize = 256;
@@ -799,7 +799,7 @@ void Connection::OnPostMigrateThread() {
   DVLOG(1) << "[" << id_ << "] OnPostMigrateThread";
 
   // Once we migrated, we should rearm OnBreakCb callback.
-  if (breaker_cb_ && socket()->IsOpen()) {
+  if (socket()->IsOpen()) {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
 
@@ -968,9 +968,7 @@ void Connection::HandleRequests() {
       ioloop_v2_ =
           GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_ && protocol_ == Protocol::MEMCACHE;
 
-      if (breaker_cb_) {
-        socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
-      }
+      socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       switch (protocol_) {
         case Protocol::REDIS:
           reply_builder_.reset(new RedisReplyBuilder(socket_.get()));
@@ -1001,10 +999,6 @@ unsigned Connection::GetSendWaitTimeSec() const {
   }
 
   return 0;
-}
-
-void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
-  breaker_cb_ = std::move(breaker_cb);
 }
 
 void Connection::FlushReplies() {  // NOLINT must not be const due to flush side effect
@@ -1071,12 +1065,14 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
                   " tot-dispatches=", local_stats_.dispatch_entries_added);
 
   if (cc_) {
-    string cc_info = service_->GetContextInfo(cc_.get()).Format();
+    auto ctx_info = service_->GetContextInfo(cc_.get());
 
     // reply_builder_ may be null if the connection is in the setup phase, for example.
     if (reply_builder_ && reply_builder_->IsSendActive())
       phase_name = "send";
-    absl::StrAppend(&after, " ", cc_info);
+    else if (ctx_info.is_scheduled)
+      phase_name = "scheduled";
+    absl::StrAppend(&after, " ", ctx_info.Format());
   }
   absl::StrAppend(&after, " phase=", phase_name);
 
@@ -1501,9 +1497,9 @@ void Connection::OnBreakCb(int32_t mask) {
     return;
   }
 
-  DCHECK(reply_builder_) << "[" << id_ << "] " << phase_ << " " << migration_in_process_;
+  DCHECK(reply_builder_) << "[" << id_ << "] " << unsigned(phase_) << " " << migration_in_process_;
 
-  VLOG(1) << "[" << id_ << "] Got event " << mask << " " << phase_ << " "
+  VLOG(1) << "[" << id_ << "] Got event " << mask << " " << unsigned(phase_) << " "
           << reply_builder_->IsSendActive() << " " << reply_builder_->GetError();
 
   cc_->conn_closing = true;
@@ -2421,11 +2417,8 @@ void Connection::DecreaseConnStats() {
 }
 
 void Connection::BreakOnce(uint32_t ev_mask) {
-  if (breaker_cb_) {
-    DVLOG(1) << "[" << id_ << "] Connection::breaker_cb_ " << ev_mask;
-    auto fun = std::move(breaker_cb_);
-    breaker_cb_ = nullptr;
-    fun(ev_mask);
+  if (cc_) {
+    cc_->OnSocketError(ev_mask);
   }
 }
 
@@ -2484,8 +2477,8 @@ bool Connection::ParseMCBatch(base::IoBuf& io_buf) {
     if (result == MemcacheParser::OK && tl_traffic_logger.log_file &&
         tl_traffic_logger.listener_type == listener_type_) {
       bool has_more = io_buf_.InputLen() > 0;
-      LogMemcacheTraffic(id_, has_more, *parsed_cmd_->mc_command(),
-                         service_->GetContextInfo(cc_.get()));
+      unsigned db_index = service_->GetContextInfo(cc_.get()).db_index;
+      LogMemcacheTraffic(id_, has_more, *parsed_cmd_->mc_command(), db_index);
     }
 
     // We push the command to the parsed queue even in case of parse errors,

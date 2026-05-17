@@ -1824,13 +1824,6 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
     }
   }
 
-  // a bit of a hack. I set up breaker callback here for the owner.
-  // Should work though it's confusing to have it here.
-  owner->RegisterBreakHook([res](uint32_t) {
-    if (res->transaction)
-      res->transaction->CancelBlocking(nullptr);
-  });
-
   return res;
 }
 
@@ -2908,11 +2901,15 @@ void Service::RegisterTieringFlags() {
 
 Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) const {
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
+  bool is_scheduled = server_cntx->transaction && server_cntx->transaction->IsScheduled() &&
+                      !server_cntx->transaction->Blocker()->IsCompleted();
+
   return {.db_index = server_cntx->db_index(),
           .async_dispatch = server_cntx->async_dispatch,
           .conn_closing = server_cntx->conn_closing,
-          .subscribers = bool(server_cntx->conn_state.subscribe_info),
-          .blocked = server_cntx->blocked};
+          .has_subscribers = bool(server_cntx->conn_state.subscribe_info),
+          .is_blocked = server_cntx->blocked,
+          .is_scheduled = is_scheduled};
 }
 
 #define HFUNC(x) SetHandler(&Service::x)
