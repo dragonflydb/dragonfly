@@ -59,7 +59,7 @@ jobs:
       - name: Install pre-requisites
         run: |
           sudo apt update
-          sudo apt install -y libicu-dev libidn11-dev libvips42 ffmpeg imagemagick libpam-dev
+          sudo apt install -y libicu-dev libidn11-dev libvips42 libheif-plugin-libde265 libheif-plugin-dav1d ffmpeg imagemagick libpam-dev
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
