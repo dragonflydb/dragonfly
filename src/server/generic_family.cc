@@ -1667,10 +1667,7 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
   // Enable lazy per-member expiry before iterating dense sets.  Without this,
   // IterateSet would skip expiry entirely and empty-set cleanup below would
   // depend on a prior command having set time_now_.
-  if (obj_type == OBJ_SET && it->second.Encoding() == kEncodingStrMap2) {
-    static_cast<StringSet*>(it->second.RObjPtr())
-        ->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-  }
+  it->second.SetMemberTime(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
 
   Iterate(it->second, [&elements](const ContainerEntry& entry) {
     elements.emplace_back(entry.ToString());

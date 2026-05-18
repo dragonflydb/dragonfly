@@ -2838,8 +2838,8 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
         return OpStatus::WRONG_TYPE;
       }
 
+      pv.SetMemberTime(MemberTimeSeconds(t->GetDbContext().time_now_ms));
       DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
-      ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
       size_t current_size = ds->UpperBoundSize();
       size_t bucket_count = ds->BucketCount();
 
@@ -2862,8 +2862,8 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
     }
 
     PrimeValue& pv = it_res.it->second;
+    pv.SetMemberTime(MemberTimeSeconds(t->GetDbContext().time_now_ms));
     DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
-    ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
 
     size_t bucket_bytes_before = ds->BucketCount() * sizeof(void*);
     size_t optimal_size = std::max(size_t(8), absl::bit_ceil(ds->UpperBoundSize()));

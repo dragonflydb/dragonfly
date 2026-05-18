@@ -867,6 +867,32 @@ void CompactObj::InitRobj(CompactObjType type, unsigned encoding, void* obj) {
   u_.r_obj.Init(type, encoding, obj);
 }
 
+namespace {
+// Returns the underlying DenseSet if this CompactObj wraps a StringSet/StringMap
+// (kEncodingStrMap2), otherwise nullptr. Encoding() is a safe accessor that
+// returns kEncodingStrMap2 only when taglen_ == ROBJ_TAG.
+DenseSet* AsDenseSetOrNull(const CompactObj& obj) {
+  if (obj.Encoding() != kEncodingStrMap2)
+    return nullptr;
+  return static_cast<DenseSet*>(obj.RObjPtr());
+}
+}  // namespace
+
+void CompactObj::SetMemberTime(uint32_t seconds) const {
+  if (DenseSet* ds = AsDenseSetOrNull(*this))
+    ds->set_time(seconds);
+}
+
+uint32_t CompactObj::MemberTime() const {
+  DenseSet* ds = AsDenseSetOrNull(*this);
+  return ds ? ds->time_now() : 0;
+}
+
+bool CompactObj::HasMemberExpiration() const {
+  DenseSet* ds = AsDenseSetOrNull(*this);
+  return ds && ds->ExpirationUsed();
+}
+
 void CompactObj::SetInt(int64_t val) {
   DCHECK(!IsExternal());
 
