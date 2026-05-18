@@ -84,6 +84,8 @@ astrsk_ch  \*
 [0-9]{1,9}                          return Parser::make_UINT32(str(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)       return Parser::make_DOUBLE(str(), loc());
 
+  /* Quoted phrase, optionally followed by `~N` slop (no whitespace before `~`). With whitespace
+     before `~`, the tilde tokenizes separately as the optional-term operator. */
 {dq}([^"]|{esc_seq})*{dq}(~[0-9]+)?   return make_PhraseTok(str(), loc());
 {sq}([^']|{esc_seq})*{sq}(~[0-9]+)?   return make_PhraseTok(str(), loc());
 

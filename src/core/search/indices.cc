@@ -636,9 +636,10 @@ void TextIndex::Tokenize(std::string_view value, uint32_t* pos_counter,
 
 std::vector<std::string> TextIndex::TokenizePhraseQuery(std::string_view phrase) const {
   std::vector<std::string> out;
+  const StopWords* sw = stopwords_;
   for (std::string_view word : una::views::word_only::utf8(phrase)) {
     std::string lc = una::cases::to_lowercase_utf8(word);
-    if (stopwords_ && stopwords_->contains(lc))
+    if (sw && sw->contains(lc))
       continue;
     out.push_back(std::move(lc));
   }

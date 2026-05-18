@@ -338,92 +338,112 @@ struct BasicSearch {
     return false;
   }
 
-  // Quoted phrase: AND-intersect posting lists of raw tokens, then verify adjacency by positions.
-  // Stems are not consulted — phrase semantics require the exact surface form. Stopwords inside
-  // the phrase are dropped (matching the index-side tokenizer, which doesn't advance pos for them).
-  IndexResult Search(const AstPhraseNode& node, string_view active_field) {
-    auto eval_in = [&](TextIndex* text_index) -> IndexResult {
-      if (!text_index->StoresPositions()) {
-        error_ = "phrase queries require offsets; index was created with NOOFFSETS";
-        return IndexResult{};
+  // Tokenizes a phrase query, registers its terms with the scorer (so BM25 picks up
+  // phrase-matched docs), and fetches one posting list per term — raw form only, no stem
+  // expansion. Returns the lists in phrase-order, or an empty vector if the phrase can't
+  // possibly match (empty phrase, all-stopword phrase, or any term missing from the index).
+  vector<const TextIndex::Container*> FetchPhrasePostingLists(TextIndex* text_index,
+                                                              std::string_view raw_phrase) {
+    vector<const TextIndex::Container*> lists;
+
+    vector<string> terms = text_index->TokenizePhraseQuery(raw_phrase);
+    if (terms.empty())
+      return lists;
+
+    if (scorer_) {
+      for (const auto& t : terms)
+        AddMatchedTerm(text_index, t);
+    }
+
+    lists.reserve(terms.size());
+    for (const auto& t : terms) {
+      const auto* c = text_index->MatchingNoStem(t);
+      if (!c || c->Empty()) {
+        lists.clear();
+        return lists;
       }
+      lists.push_back(c);
+    }
+    return lists;
+  }
 
-      vector<string> terms = text_index->TokenizePhraseQuery(node.raw);
-      if (terms.empty())
-        return IndexResult{};
+  // Zig-zag intersection over `lists` by docId, with positional adjacency (within `slop`)
+  // verified per common doc via `HasPhraseRun`. Returns matched docIds in sorted order.
+  // Pre: lists.size() >= 2 and each list is non-empty.
+  vector<DocId> IntersectAdjacentDocs(const vector<const TextIndex::Container*>& lists,
+                                      uint32_t slop) {
+    vector<PhraseIt> iters;
+    iters.reserve(lists.size());
+    for (const auto* l : lists)
+      iters.push_back(l->begin());
 
-      // Register each phrase term with the scorer so BM25 picks them up as virtual matches.
-      // Phrase-matched docs then score the same as if `term1 term2 ...` were AND-ed.
-      if (scorer_) {
-        for (const auto& t : terms)
-          AddMatchedTerm(text_index, t);
-      }
-
-      // Fetch posting lists (raw form only, no stem expansion). Any miss → empty result.
-      vector<const TextIndex::Container*> lists;
-      lists.reserve(terms.size());
-      for (const auto& t : terms) {
-        const auto* c = text_index->MatchingNoStem(t);
-        if (!c || c->Empty())
-          return IndexResult{};
-        lists.push_back(c);
-      }
-
-      // Single-token phrase short-circuit: posting list IS the answer (no adjacency to check).
-      if (lists.size() == 1)
-        return IndexResult{lists[0]};
-
-      // Intersect doc ids across all lists; for each common doc, check adjacency.
-      vector<PhraseIt> iters;
-      iters.reserve(lists.size());
-      for (const auto* l : lists)
-        iters.push_back(l->begin());
-
-      auto any_at_end = [&]() {
-        for (size_t i = 0; i < iters.size(); ++i)
-          if (iters[i] == lists[i]->end())
-            return true;
-        return false;
-      };
-
-      vector<DocId> matches;
-      while (!any_at_end()) {
-        DocId max_id = *iters[0];
-        for (size_t i = 1; i < iters.size(); ++i)
-          if (*iters[i] > max_id)
-            max_id = *iters[i];
-        for (auto& it : iters)
-          it.SeekGE(max_id);
-        if (any_at_end())
-          break;
-        bool aligned = true;
-        DocId d = *iters[0];
-        for (size_t i = 1; i < iters.size(); ++i) {
-          if (*iters[i] != d) {
-            aligned = false;
-            break;
-          }
-        }
-        if (aligned) {
-          if (HasPhraseRun(iters, node.slop))
-            matches.push_back(d);
-          // Advance every iterator past this doc to find the next candidate.
-          for (auto& it : iters)
-            ++it;
-        }
-      }
-      return IndexResult{std::move(matches)};
+    auto any_at_end = [&]() {
+      for (size_t i = 0; i < iters.size(); ++i)
+        if (iters[i] == lists[i]->end())
+          return true;
+      return false;
     };
 
-    if (!active_field.empty()) {
-      if (auto* index = GetIndex<TextIndex>(active_field); index)
-        return eval_in(index);
+    vector<DocId> matches;
+    while (!any_at_end()) {
+      DocId max_id = *iters[0];
+      for (size_t i = 1; i < iters.size(); ++i)
+        max_id = std::max(max_id, *iters[i]);
+      for (auto& it : iters)
+        it.SeekGE(max_id);
+      if (any_at_end())
+        break;
+      bool aligned = true;
+      DocId d = *iters[0];
+      for (size_t i = 1; i < iters.size(); ++i) {
+        if (*iters[i] != d) {
+          aligned = false;
+          break;
+        }
+      }
+      if (aligned) {
+        if (HasPhraseRun(iters, slop))
+          matches.push_back(d);
+        // Advance every iterator past this doc to find the next candidate.
+        for (auto& it : iters)
+          ++it;
+      }
+    }
+    return matches;
+  }
+
+  // Phrase match on a single TEXT index. Sets error_ and returns empty if the index was
+  // created with NOOFFSETS. Stems are never consulted — phrase semantics require the exact
+  // surface form. Stopwords inside the phrase drop without advancing positions, matching the
+  // index-side tokenizer.
+  IndexResult MatchPhraseInIndex(TextIndex* text_index, const AstPhraseNode& node) {
+    if (!text_index->StoresPositions()) {
+      error_ = "phrase queries require offsets; index was created with NOOFFSETS";
       return IndexResult{};
+    }
+
+    auto lists = FetchPhrasePostingLists(text_index, node.raw);
+    if (lists.empty())
+      return IndexResult{};
+
+    // Single-token phrase: posting list IS the answer (no adjacency to check).
+    if (lists.size() == 1)
+      return IndexResult{lists[0]};
+
+    return IndexResult{IntersectAdjacentDocs(lists, node.slop)};
+  }
+
+  // Quoted phrase: dispatches per scoping. `@field:"..."` runs against one index; bare `"..."`
+  // ORs results across all TEXT indices, matching the term-lookup pattern.
+  IndexResult Search(const AstPhraseNode& node, string_view active_field) {
+    if (!active_field.empty()) {
+      auto* index = GetIndex<TextIndex>(active_field);
+      return index ? MatchPhraseInIndex(index, node) : IndexResult{};
     }
 
     vector<IndexResult> sub_results;
     for (auto* index : indices_->GetAllTextIndices())
-      sub_results.push_back(eval_in(index));
+      sub_results.push_back(MatchPhraseInIndex(index, node));
     return UnifyResults(std::move(sub_results), LogicOp::OR);
   }
 
