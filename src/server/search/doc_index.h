@@ -544,8 +544,10 @@ class ShardDocIndices {
   // Drop all indices
   void DropAllIndices();
 
-  // Rebuild all indices
-  void RebuildAllIndices(const OpArgs& op_args, bool is_restored);
+  // Rebuild all indices. Each index decides on its own whether to use the restore
+  // path (graph already populated from RDB → only vectors need to be filled in)
+  // or a full rebuild from the keyspace, based on its own state at call time.
+  void RebuildAllIndices(const OpArgs& op_args);
 
   // Block until construction of all indices finishes
   void BlockUntilConstructionEnd();

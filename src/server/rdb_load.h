@@ -406,15 +406,13 @@ class RdbLoader : protected RdbLoaderBase {
   // issues an FT.CREATE call, but does not start indexing
   void LoadSearchIndexDefFromAux(std::string&& value);
 
-  // Load HNSW index metadata from JSON, sets metadata on the GlobalHnswIndexRegistry
-  void LoadHnswIndexMetadataFromAux(std::string&& value);
-
   // Load synonyms from RESP string and issue FT.SYNUPDATE call
   void LoadSearchSynonymsFromAux(std::string&& value);
 
   // Restore HNSW vector index graph from serialized node data.
   std::error_code RestoreVectorIndex(std::string_view index_key, std::string_view index_name,
-                                     std::string_view field_name, uint64_t elements_number);
+                                     std::string_view field_name, uint64_t elements_number,
+                                     const search::HnswIndexMetadata& metadata);
 
   // Load HNSW vector index nodes into a vector for deferred restoration.
   std::error_code LoadVectorIndexNodes(uint64_t elements_number,
