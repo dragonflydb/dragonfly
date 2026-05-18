@@ -99,7 +99,8 @@ class ClusterFamily {
   std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
-  void StartNewSlotMigrations(const ClusterConfig& new_config);
+  void StartNewSlotMigrations(const ClusterConfig& new_config,
+                              const std::shared_ptr<ClusterConfig>& prev_config);
 
   // must be destroyed excluded set_config_mu and migration_mu_ locks
   struct PreparedToRemoveOutgoingMigrations {
