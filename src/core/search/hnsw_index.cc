@@ -188,7 +188,7 @@ struct HnswlibAdapter {
   // Discard world_ and reconstruct it with the original ctor parameters — used to
   // recover from a partially-applied RestoreFromNodes when the wire-ordering
   // invariant is violated. Must be called under the write lock.
-  void Reset() {
+  void ResetLocked() {
     world_.~HierarchicalNSW<float>();
     new (&world_)
         HierarchicalNSW<float>(&space_, capacity_, M_, ef_construction_, kSeed, copy_vector_);
@@ -306,7 +306,7 @@ struct HnswlibAdapter {
     // Restore each node - directly set up memory and fields. We also enforce the
     // wire-ordering invariant (nodes[i].internal_id == i) inline: if a corrupted or
     // future-format wire violates it we bail out cleanly so the index is rebuilt from
-    // the keyspace instead of writing past the resized memory. On failure Reset()
+    // the keyspace instead of writing past the resized memory. On failure ResetLocked()
     // discards world_ entirely (calling its destructor) and reconstructs it with the
     // original ctor params — this leaves the index indistinguishable from a freshly
     // created empty graph regardless of what internal state hnswlib accumulates.
@@ -318,7 +318,7 @@ struct HnswlibAdapter {
         LOG(ERROR) << "HNSW restore: wire ordering invariant violated at index " << i
                    << " (got internal_id=" << node.internal_id << "); index will be rebuilt "
                    << "from the keyspace";
-        Reset();
+        ResetLocked();
         return false;
       }
       size_t internal_id = i;
