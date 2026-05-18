@@ -407,15 +407,23 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnStatus(string_view str) {
+    if (str.find_first_of("\r\n") == string_view::npos) {
+      rb_->SendSimpleString(str);
+      return;
+    }
     rb_->SendSimpleString(StripCRLF(str));
   }
 
   void OnError(string_view str) {
-    std::string s = StripCRLF(str);
-    if (!s.empty() && s.front() != '-') {
-      rb_->SendError(absl::StrCat("-", s));
+    std::string buf;
+    if (str.find_first_of("\r\n") != string_view::npos) {
+      buf = StripCRLF(str);
+      str = buf;
+    }
+    if (!str.empty() && str.front() == '-') {
+      rb_->SendError(str);
     } else {
-      rb_->SendError(s);
+      rb_->SendError(absl::StrCat("-", str));
     }
   }
 
