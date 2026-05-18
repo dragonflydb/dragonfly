@@ -18,6 +18,10 @@ import fakeredis
 from typing import Iterable, Union
 from enum import Enum
 import re
+from shutil import copyfileobj
+from requests import Session
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 def tmp_file_name():
@@ -37,6 +41,25 @@ def chunked(n, iterable):
 def eprint(*args, **kwargs):
     """Print to stderr"""
     print(*args, file=sys.stderr, **kwargs)
+
+
+def download_with_retries(url, dest, max_retries: int = 5) -> None:
+    """Download a file from url to dest with exponential backoff retries."""
+    adapter = HTTPAdapter(
+        max_retries=Retry(
+            total=max_retries,
+            backoff_factor=1,
+            status_forcelist=[500, 502, 503, 504],
+            raise_on_status=True,
+        )
+    )
+    with Session() as session:
+        session.mount("https://", adapter)
+        with session.get(url, stream=True) as r:
+            r.raise_for_status()
+            r.raw.decode_content = True
+            with open(dest, "wb") as f:
+                copyfileobj(r.raw, f)
 
 
 def gen_test_data(n, start=0, seed=None):
