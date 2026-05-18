@@ -7,11 +7,8 @@
 #include <aws/s3/S3Client.h>
 #endif
 
-#ifdef WITH_AWS_CLOUD
 #include "util/cloud/aws/aws_creds_provider.h"
 #include "util/cloud/aws/s3_storage.h"
-#endif
-
 #include "util/cloud/azure/creds_provider.h"
 
 #ifdef WITH_GCP
@@ -169,7 +166,6 @@ class AzureSnapshotStorage : public SnapshotStorage {
   SSL_CTX* ctx_ = NULL;
 };
 
-#if defined(WITH_AWS_CLOUD) || defined(WITH_AWS)
 class AwsS3SnapshotStorage : public SnapshotStorage {
  public:
   AwsS3SnapshotStorage(const std::string& endpoint, bool https, bool ec2_metadata,
@@ -200,15 +196,17 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
   io::Result<std::vector<SnapStat>, GenericError> ListObjects(std::string_view bucket_name,
                                                               std::string_view prefix);
 
+  // Chosen at construction: true -> helio cloud::aws client; false -> aws-sdk-cpp.
+  // Forced to helio when WITH_AWS is not compiled in.
+  bool use_helio_;
+
 #ifdef WITH_AWS
   std::shared_ptr<Aws::S3::S3Client> s3_;
-#elif WITH_AWS_CLOUD
+#endif
   util::cloud::aws::AwsCredsProvider creds_provider_;
   SSL_CTX* ctx_ = nullptr;
-#endif
+  bool https_ = true;
 };
-
-#endif
 
 #ifdef __linux__
 // takes ownership over the file.

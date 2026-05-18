@@ -161,9 +161,27 @@ ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser)
   return params;
 }
 
+ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
+  std::string lang = absl::AsciiStrToLower(parser->Next<std::string_view>());
+  if (!search::Stemmer::TryCreate(lang)) {
+    return CreateSyntaxError(absl::StrCat("Unsupported language: "sv, lang));
+  }
+  return lang;
+}
+
 ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parser) {
   search::SchemaField::TextParams params{};
-  params.with_suffixtrie = parser->Check("WITHSUFFIXTRIE");
+  while (parser->HasNext()) {
+    if (parser->Check("WITHSUFFIXTRIE")) {
+      params.with_suffixtrie = true;
+      continue;
+    }
+    if (parser->Check("NOSTEM")) {
+      params.no_stem = true;
+      continue;
+    }
+    break;
+  }
   return params;
 }
 
@@ -260,6 +278,19 @@ ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
   return true;
 }
 
+ParseResult<bool> ParseIndexLanguage(CmdArgParser* parser, DocIndex* index) {
+  auto lang = ParseLanguageArg(parser);
+  if (!lang)
+    return make_unexpected(lang.error());
+  index->schema.default_language = std::move(lang).value();
+  return true;
+}
+
+ParseResult<bool> ParseIndexLanguageField(CmdArgParser* parser, DocIndex* index) {
+  index->schema.language_field = std::string{parser->Next<std::string_view>()};
+  return true;
+}
+
 // STOPWORDS count [words...]
 ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   index->options.stopwords.clear();
@@ -275,8 +306,8 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   return true;
 }
 
-constexpr std::array<const std::string_view, 4> kIgnoredOptions = {
-    "UNF"sv, "NOSTEM"sv, "INDEXMISSING"sv, "INDEXEMPTY"sv};
+constexpr std::array<const std::string_view, 3> kIgnoredOptions = {"UNF"sv, "INDEXMISSING"sv,
+                                                                   "INDEXEMPTY"sv};
 constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "PHONETIC"sv};
 
 // SCHEMA field [AS alias] type [flags...]
@@ -327,6 +358,11 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
                                      search::SchemaField::SORTABLE);
       if (!flag) {
         std::string_view option = parser->Peek();
+        if (field_type == search::SchemaField::TEXT && option == "NOSTEM"sv) {
+          std::get<search::SchemaField::TextParams>(params).no_stem = true;
+          parser->Skip(1);
+          continue;
+        }
         if (rng::find(kIgnoredOptions, option) != kIgnoredOptions.end()) {
           LOG_IF(WARNING, option != "INDEXMISSING"sv && option != "INDEXEMPTY"sv)
               << "Ignoring unsupported field option in FT.CREATE: " << option;
@@ -364,7 +400,8 @@ ParseResult<DocIndex> CreateDocIndex(std::string_view name, CmdArgParser* parser
   while (parser->HasNext()) {
     auto option_parser =
         parser->TryMapNext("ON"sv, &ParseOnOption, "PREFIX"sv, &ParsePrefix, "STOPWORDS"sv,
-                           &ParseStopwords, "SCHEMA"sv, &ParseSchema);
+                           &ParseStopwords, "LANGUAGE"sv, &ParseIndexLanguage, "LANGUAGE_FIELD"sv,
+                           &ParseIndexLanguageField, "SCHEMA"sv, &ParseSchema);
 
     if (!option_parser) {
       // Unsupported parameters are ignored for now
@@ -1741,13 +1778,20 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("index_definition");
   {
-    rb->StartCollection(3, CollectionType::MAP);
+    const bool has_lang_field = !schema.language_field.empty();
+    rb->StartCollection(has_lang_field ? 5 : 4, CollectionType::MAP);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
     rb->SendSimpleString("prefixes");
     rb->StartArray(info.base_index.prefixes.size());
     for (const auto& prefix : info.base_index.prefixes) {
       rb->SendBulkString(prefix);
+    }
+    rb->SendSimpleString("default_language");
+    rb->SendSimpleString(schema.default_language);
+    if (has_lang_field) {
+      rb->SendSimpleString("language_field");
+      rb->SendSimpleString(schema.language_field);
     }
     rb->SendSimpleString("default_score");
     rb->SendLong(1);
@@ -1803,6 +1847,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
       auto& tparams = std::get<search::SchemaField::TextParams>(field_info.special_params);
       if (tparams.with_suffixtrie)
         info.emplace_back("WITHSUFFIXTRIE");
+      if (tparams.no_stem)
+        info.emplace_back("NOSTEM");
     } else if (field_info.type == search::SchemaField::NUMERIC) {
       auto& numeric_params =
           std::get<search::SchemaField::NumericParams>(field_info.special_params);

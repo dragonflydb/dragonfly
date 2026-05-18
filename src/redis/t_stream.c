@@ -205,7 +205,7 @@ int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields) {
             /* Get the master ID. */
             streamDecodeID(si->ri.key,&si->master_id);
             /* Get the master fields count. */
-            si->lp = si->ri.data;
+            si->lp = si->stream->getNodeLp(si->ri.data);  /* Get raw listpack from stream node. */
             si->lp_ele = lpFirst(si->lp);           /* Seek items count */
             si->lp_ele = lpNext(si->lp,si->lp_ele); /* Seek deleted count. */
             si->lp_ele = lpNext(si->lp,si->lp_ele); /* Seek num fields. */

@@ -456,6 +456,8 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_vie
 
   auto update_indices = [&](bool remove) {
     for (DocId doc_id : docs_to_rebuild) {
+      if (!key_index_.IsValid(doc_id))
+        continue;
       std::string_view key = key_index_.Get(doc_id);
       auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
 

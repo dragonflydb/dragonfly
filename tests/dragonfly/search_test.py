@@ -139,6 +139,8 @@ async def test_management(async_client: aioredis.Redis):
         "HASH",
         "prefixes",
         ["p1"],
+        "default_language",
+        "english",
         "default_score",
         1,
     ]
@@ -164,6 +166,8 @@ async def test_management(async_client: aioredis.Redis):
         "HASH",
         "prefixes",
         ["p2"],
+        "default_language",
+        "english",
         "default_score",
         1,
     ]

@@ -30,6 +30,8 @@
 
   Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc);
   Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc);
+  // Strip backslashes from \X sequences in a term.
+  string UnescapeTerm(string_view src);
 %}
 
 dq         \"
@@ -37,6 +39,12 @@ sq         \'
 esc_chars  ['"\?\\abfnrtv]
 esc_seq    \\{esc_chars}
 term_ch    \w
+/* term_part: word char OR any backslash-escaped char.
+ * This deliberately overlaps with tag_val_ch — both can match the same input
+ * inside `{...}`. The grammar treats TERM and TAG_VAL interchangeably as
+ * `tag_list_element`, so identical-length matches resolve to TERM (rule order)
+ * and the unescaped text is the same. UnescapeTerm produces the literal text. */
+term_part  (\w|\\.)
 tag_val_base_ch [^,.<>{}\[\]\\\"\?':;!@#$%^&*()\-+=~\/| ]|\\.
 tag_val_ch {tag_val_base_ch}+(:+{tag_val_base_ch}*)*
 astrsk_ch  \*
@@ -58,6 +66,7 @@ astrsk_ch  \*
 ")"                  return Parser::make_RPAREN (loc());
 "*"                  return Parser::make_STAR (loc());
 "-"                  return Parser::make_NOT_OP (loc());
+"~"                  return Parser::make_TILDE (loc());
 ":"                  return Parser::make_COLON (loc());
 "=>"                 return Parser::make_ARROW (loc());
 "["                  return Parser::make_LBRACKET (loc());
@@ -80,11 +89,11 @@ astrsk_ch  \*
 
 "$"{term_ch}+                       return ParseParam(str(), loc());
 "@"{term_ch}+                       return Parser::make_FIELD(str(), loc());
-{astrsk_ch}{term_ch}+{astrsk_ch}    return Parser::make_INFIX(string{matched_view(1, 1)}, loc());
-{term_ch}+{astrsk_ch}               return Parser::make_PREFIX(string{matched_view(0, 1)}, loc());
-{astrsk_ch}{term_ch}+               return Parser::make_SUFFIX(string{matched_view(1, 0)}, loc());
+{astrsk_ch}{term_part}+{astrsk_ch}    return Parser::make_INFIX(UnescapeTerm(matched_view(1, 1)), loc());
+{term_part}+{astrsk_ch}               return Parser::make_PREFIX(UnescapeTerm(matched_view(0, 1)), loc());
+{astrsk_ch}{term_part}+               return Parser::make_SUFFIX(UnescapeTerm(matched_view(1, 0)), loc());
 
-{term_ch}+                          return Parser::make_TERM(str(), loc());
+{term_part}+                          return Parser::make_TERM(UnescapeTerm(str()), loc());
 {tag_val_ch}+{astrsk_ch}            return make_Tag(str(), TagType::PREFIX, loc());
 {astrsk_ch}{tag_val_ch}+            return make_Tag(str(), TagType::SUFFIX, loc());
 {astrsk_ch}{tag_val_ch}+{astrsk_ch} return make_Tag(str(), TagType::INFIX, loc());
@@ -99,6 +108,26 @@ Parser::symbol_type make_StringLit(string_view src, const Parser::location_type&
     throw Parser::syntax_error (loc, "bad escaped string: " + string(src));
 
   return Parser::make_TERM(res, loc);
+}
+
+string UnescapeTerm(string_view src) {
+  string res;
+  res.reserve(src.size());
+  bool escaped = false;
+  for (char c : src) {
+    if (escaped) {
+      res.push_back(c);
+      escaped = false;
+    } else if (c == '\\') {
+      escaped = true;
+    } else {
+      res.push_back(c);
+    }
+  }
+  // The {term_part}+ pattern always pairs `\\` with a following char, so a
+  // trailing lone backslash is unreachable.
+  DCHECK(!escaped);
+  return res;
 }
 
 Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc) {

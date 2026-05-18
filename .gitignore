@@ -8,6 +8,7 @@ clang-*
 third_party
 genfiles/*
 *.sublime-*
+.release_notes_cache/
 *.orig
 .tags
 !third_party/include/*

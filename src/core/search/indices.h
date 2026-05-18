@@ -30,6 +30,7 @@
 #include "core/search/compressed_sorted_set.h"
 #include "core/search/range_tree.h"
 #include "core/search/rax_tree.h"
+#include "core/search/stemmer.h"
 
 // TODO: move core field definitions out of big header
 #include "common/string_or_view.h"
@@ -144,6 +145,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   virtual absl::flat_hash_map<std::string, uint32_t> Tokenize(std::string_view value) const = 0;
 
   cmn::StringOrView NormalizeQueryWord(std::string_view word) const;
+  cmn::StringOrView NormalizeForExactQuery(std::string_view word) const;
   static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word,
                                 bool store_freq = false);
   static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);
@@ -152,6 +154,9 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
   search::RaxTreeMap<Container> entries_;
   std::optional<search::RaxTreeMap<Container>> suffix_trie_;
+
+  // Non-owning. mutable: Stem() touches libstemmer's internal buffer.
+  mutable Stemmer* stemmer_ = nullptr;
 
   // Per-field BM25 scoring data (only meaningful for TextIndex / CompressedSortedSet).
   // Note: field_doc_lengths_ only grows (like FlatVectorIndex::entries_). Slots are zeroed
@@ -168,7 +173,11 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
   using StopWords = absl::flat_hash_set<std::string>;
 
   TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords, const Synonyms* synonyms,
-            bool with_suffixtrie);
+            bool with_suffixtrie, bool no_stem, std::string_view language,
+            std::string_view language_field);
+
+  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
@@ -176,8 +185,14 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
   absl::flat_hash_map<std::string, uint32_t> Tokenize(std::string_view value) const override;
 
  private:
+  // Reads language_field_ from doc; returns a per-doc stemmer or the default.
+  Stemmer* ResolveStemmer(const DocumentAccessor& doc) const;
+
   const StopWords* stopwords_;
   const Synonyms* synonyms_;
+  std::optional<Stemmer> default_stemmer_;
+  std::string language_field_;
+  mutable std::optional<StemmerPool> pool_;  // mutable: lazily filled in ResolveStemmer
 };
 
 // Index for text fields.

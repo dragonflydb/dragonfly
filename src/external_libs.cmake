@@ -141,6 +141,20 @@ if (WITH_SEARCH)
     INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
     LIB "none"
   )
+
+  # No autoconf/cmake/install in upstream Makefile; manual install copy.
+  add_third_party(
+    stemmer
+    URL https://github.com/snowballstem/snowball/archive/refs/tags/v3.0.1.tar.gz
+    BUILD_IN_SOURCE 1
+    CONFIGURE_COMMAND echo skip
+    BUILD_COMMAND ${DFLY_TOOLS_MAKE} -j4 CFLAGS=-O3\ -fPIC libstemmer.a
+    INSTALL_COMMAND bash -c "\
+      mkdir -p ${THIRD_PARTY_LIB_DIR}/stemmer/include ${THIRD_PARTY_LIB_DIR}/stemmer/lib && \
+      cp <SOURCE_DIR>/include/libstemmer.h ${THIRD_PARTY_LIB_DIR}/stemmer/include/ && \
+      cp <SOURCE_DIR>/libstemmer.a ${THIRD_PARTY_LIB_DIR}/stemmer/lib/"
+    LIB libstemmer.a
+  )
 endif()
 
 add_third_party(
