@@ -4,10 +4,16 @@
 
 #include "server/cluster/coordinator.h"
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/redis_parser.h"
 #include "facade/socket_utils.h"
 #include "server/cluster/cluster_config.h"
+
+ABSL_FLAG(int, cluster_coordinator_connect_timeout_ms, 3000,
+          "Timeout in milliseconds for coordinator to connect to remote shards");
+ABSL_FLAG(int, cluster_coordinator_response_timeout_ms, 3000,
+          "Timeout in milliseconds for coordinator to read responses from remote shards");
 
 using namespace std;
 using namespace facade;
@@ -65,7 +71,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
       return false;
     }
     VLOG(1) << "Start coordinator connection to " << server().Description();
-    auto timeout = 3000ms;  // TODO add flag;
+    auto timeout = absl::GetFlag(FLAGS_cluster_coordinator_connect_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
       LOG(WARNING) << "Couldn't connect to " << server().Description() << ": " << ec.message()
                    << ", socket state: " << GetSocketInfo(Sock()->native_handle());
@@ -125,7 +131,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
       if (exec_st_.IsCancelled())
         return;
       std::lock_guard lk(resp_mu_);
-      constexpr auto timeout = 3000;  // TODO add flag and add usage in ReadRespReply.
+      auto timeout = absl::GetFlag(FLAGS_cluster_coordinator_response_timeout_ms);
       while (!resp_queue_.empty()) {
         auto resp = TakeRespReply(timeout);
         if (!resp) {
