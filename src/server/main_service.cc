@@ -2484,8 +2484,8 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
         // execution inside exec.
         cmd_cntx->UpdateCid(scmd.Cid());
         auto invoke_res = InvokeCmd(args, cmd_cntx);
-        if ((invoke_res != DispatchResult::OK) ||
-            rb->GetError())  // checks for i/o error, not logical error.
+        if ((invoke_res != DispatchResult::OK) || rb->GetError() ||
+            cntx->conn_closing)  // connection was RST'd while we were blocked in Execute()
           break;
       }
       cmd_cntx->UpdateCid(exec_cid_);

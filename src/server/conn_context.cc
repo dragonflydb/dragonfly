@@ -204,8 +204,19 @@ size_t ConnectionContext::UsedMemory() const {
 }
 
 void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
-  if (transaction)
-    transaction->CancelBlocking(nullptr);
+  if (!transaction)
+    return;
+
+  transaction->CancelBlocking(nullptr);
+
+  // If the coordinator fiber is blocked inside Execute()'s run_barrier_.Wait() (i.e. it
+  // dispatched a hop but the shard hasn't run it yet — indicated by run_barrier_ not completed),
+  // wake it immediately so the connection can close without waiting for a slow txq drain.
+  // Do NOT trigger for blocking commands (BLPOP etc.) whose coordinator is in
+  // blocking_barrier_.Wait() with run_barrier_ already at zero.
+  if (transaction->IsScheduled() && !transaction->Blocker()->IsCompleted()) {
+    transaction->Blocker()->Cancel();
+  }
 }
 
 void ConnectionContext::Unsubscribe(std::string_view channel) {
