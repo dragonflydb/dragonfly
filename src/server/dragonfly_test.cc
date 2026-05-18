@@ -703,15 +703,27 @@ TEST_F(DflyEngineTest, Bug468) {
   ASSERT_FALSE(IsLocked(0, "foo"));
 }
 
+struct CountingConsumer : public DbSlice::ChangeConsumerInterface {
+  explicit CountingConsumer(unsigned* cb_hits) : cb_hits_(cb_hits) {
+  }
+
+  void OnChange(DbIndex db_index, const ChangeReq&) {
+    (*cb_hits_)++;
+  }
+
+  unsigned* cb_hits_;
+};
+
 TEST_F(DflyEngineTest, Bug496) {
   shard_set->RunBlockingInParallel([](EngineShard* shard) {
     auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
-    int cb_hits = 0;
+    unsigned cb_hits = 0;
+    CountingConsumer consumer{&cb_hits};
+
     // RegisterOnChange requires the shard lock to be held (see #7153).
     shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
-    uint32_t cb_id =
-        db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
+    db.RegisterOnChange(&consumer);
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
 
     {
@@ -732,7 +744,7 @@ TEST_F(DflyEngineTest, Bug496) {
       EXPECT_EQ(cb_hits, 3);
     }
 
-    db.UnregisterOnChange(cb_id);
+    db.UnregisterOnChange(&consumer);
   });
 }
 
