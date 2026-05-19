@@ -736,10 +736,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
     auto find_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
     if (find_res) {
       const PrimeValue& pv = find_res.value()->second;
-      if (IsDenseEncoding(pv)) {
-        StringSet* ss = (StringSet*)pv.RObjPtr();
-        ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-      }
+      pv.SetMemberTime(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
       container_utils::IterateSet(pv, [&uniques](container_utils::ContainerEntry ce) {
         uniques.emplace(ce.ToString());
         return true;
@@ -770,10 +767,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
 
   absl::flat_hash_set<string> uniques;
   const PrimeValue& pv = find_res.value()->second;
-  if (IsDenseEncoding(pv)) {
-    StringSet* ss = (StringSet*)pv.RObjPtr();
-    ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-  }
+  pv.SetMemberTime(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
 
   container_utils::IterateSet(pv, [&uniques](container_utils::ContainerEntry ce) {
     uniques.emplace(ce.ToString());
@@ -833,10 +827,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
       return find_res.status();
 
     const PrimeValue& pv = find_res.value()->second;
-    if (IsDenseEncoding(pv)) {
-      StringSet* ss = (StringSet*)pv.RObjPtr();
-      ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
-    }
+    pv.SetMemberTime(MemberTimeSeconds(t->GetDbContext().time_now_ms));
 
     result.reserve(pv.Size());
     container_utils::IterateSet(find_res.value()->second,
@@ -961,10 +952,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
    * The number of requested elements is greater than or equal to
    * the number of elements inside the set: simply return the whole set. */
   if (count >= size) {
-    if (IsDenseEncoding(co)) {
-      StringSet* ss = (StringSet*)co.RObjPtr();
-      ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-    }
+    co.SetMemberTime(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
 
     StringVec result;
     result.reserve(picks_count);
@@ -1742,9 +1730,8 @@ vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_
     pv->InitRobj(OBJ_SET, kEncodingStrMap2, ss);
   }
 
-  auto ss = static_cast<StringSet*>(pv->RObjPtr());
-  ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-  return ExpireElements(ss, values, ttl_sec);
+  pv->SetMemberTime(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+  return ExpireElements(static_cast<StringSet*>(pv->RObjPtr()), values, ttl_sec);
 }
 
 }  // namespace dfly

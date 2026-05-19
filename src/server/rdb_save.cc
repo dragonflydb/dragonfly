@@ -175,7 +175,7 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       if (compact_enc == kEncodingIntSet)
         return RDB_TYPE_SET_INTSET;
       else if (compact_enc == kEncodingStrMap2) {
-        if (((StringSet*)pv.RObjPtr())->ExpirationUsed())
+        if (pv.HasMemberExpiration())
           return RDB_TYPE_SET_WITH_EXPIRY;
         else
           return RDB_TYPE_SET;
@@ -191,7 +191,7 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       if (compact_enc == kEncodingListPack)
         return RDB_TYPE_HASH_LISTPACK;
       else if (compact_enc == kEncodingStrMap2) {
-        if (((StringMap*)pv.RObjPtr())->ExpirationUsed())
+        if (pv.HasMemberExpiration())
           return RDB_TYPE_HASH_WITH_EXPIRY;  // Incompatible with Redis
         else
           return RDB_TYPE_HASH;
@@ -435,16 +435,17 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
   if (obj.Encoding() == kEncodingStrMap2) {
-    StringSet* set = (StringSet*)obj.RObjPtr();
-
     // We don't expire any data during serialization
-    set->set_time(0);
+    obj.SetMemberTime(0);
+
+    StringSet* set = (StringSet*)obj.RObjPtr();
+    const bool has_expiry = obj.HasMemberExpiration();
 
     // due to we avoid expiring we can use UpperBoundSize() instead of SlowSize()
     RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
     for (auto it = set->begin(); it != set->end();) {
       RETURN_ON_ERR(SaveString(string_view{*it, sdslen(*it)}));
-      if (set->ExpirationUsed()) {
+      if (has_expiry) {
         int64_t expiry = -1;
         if (it.HasExpiry())
           expiry = it.ExpiryTime();
@@ -456,7 +457,7 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
         flush_state = FlushState::kFlushEndEntry;
       PushToConsumerIfNeeded(flush_state);
     }
-    set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+    obj.SetMemberTime(MemberTimeSeconds(GetCurrentTimeMs()));
   } else {
     CHECK_EQ(obj.Encoding(), kEncodingIntSet);
     intset* is = (intset*)obj.RObjPtr();
@@ -472,10 +473,11 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
   DCHECK_EQ(OBJ_HASH, pv.ObjType());
 
   if (pv.Encoding() == kEncodingStrMap2) {
-    StringMap* string_map = (StringMap*)pv.RObjPtr();
-
     // We don't expire any data during serialization
-    string_map->set_time(0);
+    pv.SetMemberTime(0);
+
+    StringMap* string_map = (StringMap*)pv.RObjPtr();
+    const bool has_expiry = pv.HasMemberExpiration();
 
     // due to we avoid expiring we can use UpperBoundSize() instead of SlowSize()
     RETURN_ON_ERR(SaveLen(string_map->UpperBoundSize()));
@@ -484,7 +486,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
       const auto& [k, v] = *it;
       RETURN_ON_ERR(SaveString(string_view{k, sdslen(k)}));
       RETURN_ON_ERR(SaveString(string_view{v, sdslen(v)}));
-      if (string_map->ExpirationUsed()) {
+      if (has_expiry) {
         int64_t expiry = -1;
         if (it.HasExpiry())
           expiry = it.ExpiryTime();
@@ -497,7 +499,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
       PushToConsumerIfNeeded(flush_state);
     }
 
-    string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+    pv.SetMemberTime(MemberTimeSeconds(GetCurrentTimeMs()));
   } else {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
 

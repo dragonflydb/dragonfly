@@ -740,9 +740,7 @@ ScoredMap FromObject(const PrimeValue& co, double weight) {
 ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight, const DbContext& db_cntx) {
   // Enable lazy member expiry before iterating dense sets so expired members
   // do not pollute the result (and so the caller can detect an emptied set).
-  if (pv.Encoding() == kEncodingStrMap2) {
-    static_cast<StringSet*>(pv.RObjPtr())->set_time(MemberTimeSeconds(db_cntx.time_now_ms));
-  }
+  pv.SetMemberTime(MemberTimeSeconds(db_cntx.time_now_ms));
 
   ScoredMap result;
   container_utils::IterateSet(pv, [&result, weight](container_utils::ContainerEntry ce) {

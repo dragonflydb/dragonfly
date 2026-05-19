@@ -801,6 +801,49 @@ TEST_F(CompactObjectTest, DefragSet) {
   ASSERT_FALSE(cobj_.DefragIfNeeded(&page_usage));
 }
 
+TEST_F(CompactObjectTest, MemberTimeSet) {
+  StringSet* s = CompactObj::AllocateMR<StringSet>();
+  cobj_.InitRobj(OBJ_SET, kEncodingStrMap2, s);
+
+  cobj_.SetMemberTime(0);
+  EXPECT_EQ(cobj_.MemberTime(), 0u);
+  EXPECT_FALSE(cobj_.HasMemberExpiration());
+
+  cobj_.SetMemberTime(1234);
+  EXPECT_EQ(cobj_.MemberTime(), 1234u);
+  EXPECT_EQ(s->time_now(), 1234u);
+
+  s->Add("a", 60);  // adding TTL'd entry marks expiration as used
+  EXPECT_TRUE(cobj_.HasMemberExpiration());
+}
+
+TEST_F(CompactObjectTest, MemberTimeHash) {
+  StringMap* m = CompactObj::AllocateMR<StringMap>();
+  cobj_.InitRobj(OBJ_HASH, kEncodingStrMap2, m);
+
+  cobj_.SetMemberTime(100);
+  EXPECT_EQ(cobj_.MemberTime(), 100u);
+  EXPECT_EQ(m->time_now(), 100u);
+  EXPECT_FALSE(cobj_.HasMemberExpiration());
+
+  m->AddOrUpdate("k", "v", 60);
+  EXPECT_TRUE(cobj_.HasMemberExpiration());
+}
+
+TEST_F(CompactObjectTest, MemberTimeSafeOnNonDense) {
+  // Methods must be safe to call on objects that don't use kEncodingStrMap2.
+  cobj_.SetString("hello");
+  cobj_.SetMemberTime(42);  // no-op
+  EXPECT_EQ(cobj_.MemberTime(), 0u);
+  EXPECT_FALSE(cobj_.HasMemberExpiration());
+
+  intset* is = intsetNew();
+  cobj_.InitRobj(OBJ_SET, kEncodingIntSet, is);
+  cobj_.SetMemberTime(42);  // no-op
+  EXPECT_EQ(cobj_.MemberTime(), 0u);
+  EXPECT_FALSE(cobj_.HasMemberExpiration());
+}
+
 TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
   for (bool ascii : {true, false}) {
     for (size_t len : {64, 128, 256, 512, 1024}) {
