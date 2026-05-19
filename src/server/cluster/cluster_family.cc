@@ -593,7 +593,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, CommandContext* cmd_cntx)
 
     new_config = new_config->CloneWithChanges(enable_slots, disable_slots);
 
-    StartNewSlotMigrations(*new_config);
+    // Capture prev config before SetCurrent so StartNewSlotMigrations can diff correctly.
+    auto prev_config = ClusterConfig::Current();
 
     SlotSet before =
         ClusterConfig::Current() ? ClusterConfig::Current()->GetOwnedSlots() : SlotSet(true);
@@ -632,6 +633,10 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, CommandContext* cmd_cntx)
           << "Flushing newly unowned slots: " << deleted_slots.ToString();
       WriteFlushSlotsToJournal(deleted_slots);
     }
+
+    // Start new migrations only after stale data is flushed. This ensures DFLYMIGRATE FLOW
+    // cannot write data that is immediately wiped by DeleteSlots above.
+    StartNewSlotMigrations(*new_config, prev_config);
   }
 
   return cmd_cntx->SendOk();
@@ -744,10 +749,11 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, CommandContext* cmd_c
   return cmd_cntx->SendOk();
 }
 
-void ClusterFamily::StartNewSlotMigrations(const ClusterConfig& new_config) {
+void ClusterFamily::StartNewSlotMigrations(const ClusterConfig& new_config,
+                                           const std::shared_ptr<ClusterConfig>& prev_config) {
   // TODO Add validating and error processing
-  auto out_migrations = new_config.GetNewOutgoingMigrations(ClusterConfig::Current());
-  auto in_migrations = new_config.GetNewIncomingMigrations(ClusterConfig::Current());
+  auto out_migrations = new_config.GetNewOutgoingMigrations(prev_config);
+  auto in_migrations = new_config.GetNewIncomingMigrations(prev_config);
 
   util::fb2::LockGuard lk(migration_mu_);
 
