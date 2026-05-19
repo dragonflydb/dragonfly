@@ -1329,8 +1329,8 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
     detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
     return lw.Find(field) == lw.end() ? -3 : -1;
   } else {
+    pv.SetMemberTime(MemberTimeSeconds(db_context.time_now_ms));
     StringMap* string_map = (StringMap*)pv.RObjPtr();
-    string_map->set_time(MemberTimeSeconds(db_context.time_now_ms));
     auto it = string_map->Find(field);
     if (it == string_map->end())
       return -3;

@@ -419,7 +419,8 @@ std::error_code Replica::ConfigureDflyMaster() {
   // We need to send this because we may require to use this for cluster commands.
   // this reason to send this here is that in other context we can get an error reply
   // since we are budy with the replication
-  RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF CLIENT-ID ", id_)));
+  RETURN_ON_ERR(
+      SendCommandAndReadResponse(StrCat("REPLCONF CLIENT-ID ", service_.cluster_family().MyID())));
   if (!CheckRespIsSimpleReply("OK")) {
     LOG(WARNING) << "Bad REPLCONF CLIENT-ID response";
   }

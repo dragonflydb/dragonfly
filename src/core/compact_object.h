@@ -265,6 +265,19 @@ class CompactObj {
   // type should not be OBJ_STRING.
   void InitRobj(CompactObjType type, unsigned encoding, void* obj_inner);
 
+  // Sets the abstract time used by per-member lazy expiry on StringSet/StringMap.
+  // The value should typically be obtained via MemberTimeSeconds(now_ms).
+  // Safe to call unconditionally — no-op if the underlying encoding is not kEncodingStrMap2.
+  void SetMemberTime(uint32_t seconds) const;
+
+  // Returns the abstract time previously set via SetMemberTime, or 0 if encoding
+  // is not kEncodingStrMap2.
+  uint32_t MemberTime() const;
+
+  // Returns true if any member of the underlying StringSet/StringMap has expiration.
+  // Returns false if encoding is not kEncodingStrMap2.
+  bool HasMemberExpiration() const;
+
   // For STR object.
   void SetInt(int64_t val);
   std::optional<int64_t> TryGetInt() const;
