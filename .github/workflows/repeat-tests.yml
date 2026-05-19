@@ -48,6 +48,15 @@ on:
           - Debug
           - Release
         default: "Debug"
+      arch:
+        description: "CPU architecture to run on"
+        required: false
+        type: choice
+        options:
+          - x86_64
+          - arm64
+          - both
+        default: "x86_64"
 
 jobs:
   build:
@@ -56,7 +65,7 @@ jobs:
         container: ["ubuntu-dev:24"]
         proactor: [Uring]
         build-type: ["${{ inputs.build_type || 'Debug' }}"]
-        runner: [ubuntu-latest]
+        runner: ${{ fromJSON(inputs.arch == 'arm64' && '[["self-hosted", "linux", "ARM64"]]' || inputs.arch == 'both' && '["ubuntu-latest", ["self-hosted", "linux", "ARM64"]]' || '["ubuntu-latest"]') }}
 
     runs-on: ${{ matrix.runner }}
 
@@ -88,9 +97,11 @@ jobs:
         run: |
           mkdir "${GITHUB_WORKSPACE}"/build
           cd "${GITHUB_WORKSPACE}"/build
-          wget -q https://github.com/dragonflydb/dragonfly/releases/latest/download/dragonfly-x86_64.tar.gz
-          tar xf dragonfly-x86_64.tar.gz
-          mv dragonfly-x86_64 dragonfly
+          arch=$(uname -m)
+          tarball="dragonfly-${arch}.tar.gz"
+          wget -q "https://github.com/dragonflydb/dragonfly/releases/latest/download/${tarball}"
+          tar xf "${tarball}"
+          mv "dragonfly-${arch}" dragonfly
           ls -l
 
       - name: Build Dragonfly
