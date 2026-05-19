@@ -205,9 +205,10 @@ auto RespSrvParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
     return ResultConsumed{OK, consumed};
   }
 
-  LOG(ERROR) << "Failed to parse len " << absl::CHexEscape(len_token) << " "
-             << absl::CHexEscape(string_view{reinterpret_cast<const char*>(str.data()), str.size()})
-             << " " << consumed << " " << int(s == small_buf_.data());
+  LOG_EVERY_T(WARNING, 1) << "Failed to parse len " << absl::CHexEscape(len_token) << " "
+                          << absl::CHexEscape(
+                                 string_view{reinterpret_cast<const char*>(str.data()), str.size()})
+                          << " " << consumed << " " << static_cast<int>(s == small_buf_.data());
   return ResultConsumed{BAD_ARRAYLEN, consumed};
 }
 
