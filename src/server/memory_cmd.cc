@@ -282,6 +282,8 @@ void MemoryCmd::Run(CmdArgList args) {
     static const float default_threshold =
         absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     const float threshold = parser.NextOrDefault(default_threshold);
+    if (const auto err = parser.TakeError(); err)
+      return cmd_cntx_->SendError(err.MakeReply());
 
     std::vector<CollectedPageStats> results(shard_set->size());
     shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
@@ -299,7 +301,7 @@ void MemoryCmd::Run(CmdArgList args) {
     return rb->SendVerbatimString(merged.ToString());
   }
 
-  string err = UnknownSubCmd(parser.Next(), "MEMORY");
+  const string err = UnknownSubCmd(parser.Next(), "MEMORY");
   return cmd_cntx_->SendError(err, kSyntaxErrType);
 }
 
