@@ -645,10 +645,9 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
     }
   };
 
-  const bool is_eval =
-      command == "EVAL" || command == "EVALSHA" || command == "EVAL_RO" || command == "EVALSHA_RO";
+  const bool is_eval = absl::StartsWith(command, "EVAL");
 
-  if (command == "AUTH" || command == "ACL SETUSER") {
+  if (command == "AUTH" || absl::StartsWith(command, "ACL")) {
     // skip all args to protect passwords
   } else if (is_eval) {
     // log only script/SHA and numkeys, skip KEYS and ARGV to avoid PII leaks
