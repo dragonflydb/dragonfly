@@ -3448,11 +3448,19 @@ async def test_slot_migration_oom(df_factory):
     assert status[0][4] == "INCOMING_MIGRATION_OOM"
 
 
+@pytest.mark.parametrize("set_cluster_node_id", [True, False])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_replica_takeover_moved(
-    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, set_cluster_node_id: bool
 ):
-    instances = [df_factory.create(port=next(next_port)) for i in range(4)]
+    node_names = ["takeover-m1", "takeover-r1", "takeover-m2", "takeover-r2"]
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            cluster_node_id=node_names[i] if set_cluster_node_id else "",
+        )
+        for i in range(4)
+    ]
     df_factory.start_all(instances)
 
     nodes = [await create_node_info(n) for n in instances]
