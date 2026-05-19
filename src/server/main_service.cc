@@ -407,18 +407,36 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnStatus(string_view str) {
-    rb_->SendSimpleString(str);
+    if (str.find_first_of("\r\n") == string_view::npos) {
+      rb_->SendSimpleString(str);
+      return;
+    }
+    rb_->SendSimpleString(StripCRLF(str));
   }
 
   void OnError(string_view str) {
-    if (!str.empty() && str.front() != '-') {
-      rb_->SendError(absl::StrCat("-", str));
-    } else {
+    std::string buf;
+    if (str.find_first_of("\r\n") != string_view::npos) {
+      buf = StripCRLF(str);
+      str = buf;
+    }
+    if (!str.empty() && str.front() == '-') {
       rb_->SendError(str);
+    } else {
+      rb_->SendError(absl::StrCat("-", str));
     }
   }
 
  private:
+  static std::string StripCRLF(string_view str) {
+    std::string out;
+    out.reserve(str.size());
+    for (char c : str)
+      if (c != '\r' && c != '\n')
+        out += c;
+    return out;
+  }
+
   RedisReplyBuilder* rb_;
   bool float_as_int_;
 };

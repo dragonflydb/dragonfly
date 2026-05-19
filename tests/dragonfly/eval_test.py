@@ -414,6 +414,21 @@ async def test_StackOverflowByHincrbyfloat(df_server: DflyInstance):
     assert "2.5" == await client.execute_command("HGET myhash field")
 
 
+@dfly_args({"proactor_threads": 1})
+async def test_eval_no_resp_injection(async_client: aioredis.Redis):
+    """Verify redis.error_reply() and redis.status_reply() strip embedded CRLF (RESP injection)."""
+    for script in [
+        'return redis.error_reply("ERR msg\\r\\n+INJECTED\\r\\n")',
+        'return redis.status_reply("OK\\r\\n+INJECTED\\r\\n")',
+    ]:
+        pipe = async_client.pipeline(transaction=False)
+        pipe.eval(script, 0)
+        pipe.ping()
+        results = await pipe.execute(raise_on_error=False)
+        # If CRLF is not stripped, "+INJECTED\r\n" is consumed as PING's response instead of "+PONG"
+        assert results[1] is True, f"RESP injection detected for: {script}"
+
+
 @dfly_args({"proactor_threads": 4})
 async def test_eval_commandstats_nested_call(async_client: aioredis.Redis):
     def calls(stats, name: str) -> int:
