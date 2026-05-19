@@ -104,10 +104,11 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
 namespace {
 
 // Helper to create a new block with the right constructor args.
-// CompressedSortedSet takes (mr, store_freq); other containers take (mr).
-template <typename Container> Container MakeBlock(PMR_NS::memory_resource* mr, bool store_freq) {
+// CompressedSortedSet takes (mr, store_freq, store_positions); other containers take (mr).
+template <typename Container>
+Container MakeBlock(PMR_NS::memory_resource* mr, bool store_freq, bool store_positions) {
   if constexpr (std::is_same_v<Container, CompressedSortedSet>) {
-    return Container{mr, store_freq};
+    return Container{mr, store_freq, store_positions};
   } else {
     return Container{mr};
   }
@@ -115,13 +116,14 @@ template <typename Container> Container MakeBlock(PMR_NS::memory_resource* mr, b
 
 }  // namespace
 
-template <typename C> bool BlockList<C>::Insert(ElementType t, uint32_t freq) {
+template <typename C>
+bool BlockList<C>::Insert(ElementType t, uint32_t freq, absl::Span<const uint32_t> positions) {
   auto block = FindBlock(t);
   if (block == blocks_.end())
-    block = blocks_.insert(blocks_.end(),
-                           MakeBlock<C>(blocks_.get_allocator().resource(), store_freq_));
+    block = blocks_.insert(blocks_.end(), MakeBlock<C>(blocks_.get_allocator().resource(),
+                                                       store_freq_, store_positions_));
 
-  if (!block->Insert(std::move(t), freq))
+  if (!block->Insert(std::move(t), freq, positions))
     return false;
 
   size_++;
@@ -129,14 +131,16 @@ template <typename C> bool BlockList<C>::Insert(ElementType t, uint32_t freq) {
   return true;
 }
 
-template <typename C> bool BlockList<C>::PushBack(ElementType t, uint32_t freq) {
+template <typename C>
+bool BlockList<C>::PushBack(ElementType t, uint32_t freq, absl::Span<const uint32_t> positions) {
   // If the last block is full, after insert we will need to split it
   // So we can prevent split by creating a new block and inserting there
   if (blocks_.empty() || ShouldSplit(blocks_.back().Size() + 1)) {
-    blocks_.insert(blocks_.end(), MakeBlock<C>(blocks_.get_allocator().resource(), store_freq_));
+    blocks_.insert(blocks_.end(),
+                   MakeBlock<C>(blocks_.get_allocator().resource(), store_freq_, store_positions_));
   }
 
-  if (!blocks_.back().Insert(std::move(t), freq))
+  if (!blocks_.back().Insert(std::move(t), freq, positions))
     return false;
 
   size_++;

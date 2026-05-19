@@ -703,7 +703,7 @@ void Transaction::RunCallback(EngineShard* shard) {
       }
     }
   } catch (std::bad_alloc&) {
-    LOG_FIRST_N(ERROR, 16) << " out of memory";  // TODO: to log at most once per sec.
+    LOG_EVERY_T(ERROR, 1) << " out of memory";
     absl::base_internal::SpinLockHolder lk{&local_result_mu_};
     local_result_ = OpStatus::OUT_OF_MEMORY;
   } catch (std::exception& e) {

@@ -162,13 +162,8 @@ void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms)
 size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
   // Disable lazy expiry during serialization (same as rdb_save.cc).
   // We are called under bucket lock so DeleteIfEmpty is not possible.
-  StringSet* ss = nullptr;
-  uint32_t prev_time = 0;
-  if (pv.Encoding() == kEncodingStrMap2) {
-    ss = static_cast<StringSet*>(pv.RObjPtr());
-    prev_time = ss->time_now();
-    ss->set_time(0);
-  }
+  const uint32_t prev_time = pv.MemberTime();
+  pv.SetMemberTime(0);
 
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("SADD", args); },
@@ -181,8 +176,7 @@ size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
   });
 
   // Restore previous time so subsequent operations can trigger lazy expiry.
-  if (ss)
-    ss->set_time(prev_time);
+  pv.SetMemberTime(prev_time);
 
   return commands;
 }
@@ -206,13 +200,8 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
 
 size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
   // Disable lazy expiry during serialization (same as rdb_save.cc).
-  StringMap* sm = nullptr;
-  uint32_t prev_time = 0;
-  if (pv.Encoding() == kEncodingStrMap2) {
-    sm = static_cast<StringMap*>(pv.RObjPtr());
-    prev_time = sm->time_now();
-    sm->set_time(0);
-  }
+  const uint32_t prev_time = pv.MemberTime();
+  pv.SetMemberTime(0);
 
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("HSET", args); },
@@ -227,8 +216,7 @@ size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
       });
 
   // Restore previous time so subsequent operations can trigger lazy expiry.
-  if (sm)
-    sm->set_time(prev_time);
+  pv.SetMemberTime(prev_time);
 
   return commands;
 }

@@ -203,6 +203,11 @@ size_t ConnectionContext::UsedMemory() const {
          HeapSize(pub_sub.globs);
 }
 
+void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
+  if (transaction)
+    transaction->CancelBlocking(nullptr);
+}
+
 void ConnectionContext::Unsubscribe(std::string_view channel) {
   auto* sinfo = conn_state.subscribe_info.get();
   DCHECK(sinfo);

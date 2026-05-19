@@ -46,6 +46,8 @@ class ConnectionContext {
   virtual void Unsubscribe(std::string_view channel) {
   }
 
+  virtual void OnSocketError(uint32_t epoll_mask){};
+
   // connection state / properties.
   bool conn_closing : 1;
   bool req_auth : 1;

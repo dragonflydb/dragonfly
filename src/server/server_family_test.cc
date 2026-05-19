@@ -743,4 +743,8 @@ TEST_F(ServerFamilyTest, MemoryArenaSummary) {
   EXPECT_THAT(resp.GetString(), HasSubstr("Count"));
 }
 
+TEST_F(ServerFamilyTest, MemoryParserErrorHandling) {
+  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT", "not-a-float"}), ErrArg("not a valid float"));
+}
+
 }  // namespace dfly

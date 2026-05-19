@@ -29,7 +29,6 @@ extern "C" {
 #include "core/cms.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
-#include "core/search/hnsw_index.h"
 #include "core/size_tracking_channel.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -41,7 +40,6 @@ extern "C" {
 #include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/search/doc_index.h"
-#include "server/search/global_hnsw_index.h"
 #include "server/serializer_commons.h"
 #include "server/snapshot.h"
 #include "server/tiered_storage.h"
@@ -177,7 +175,7 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       if (compact_enc == kEncodingIntSet)
         return RDB_TYPE_SET_INTSET;
       else if (compact_enc == kEncodingStrMap2) {
-        if (((StringSet*)pv.RObjPtr())->ExpirationUsed())
+        if (pv.HasMemberExpiration())
           return RDB_TYPE_SET_WITH_EXPIRY;
         else
           return RDB_TYPE_SET;
@@ -193,7 +191,7 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       if (compact_enc == kEncodingListPack)
         return RDB_TYPE_HASH_LISTPACK;
       else if (compact_enc == kEncodingStrMap2) {
-        if (((StringMap*)pv.RObjPtr())->ExpirationUsed())
+        if (pv.HasMemberExpiration())
           return RDB_TYPE_HASH_WITH_EXPIRY;  // Incompatible with Redis
         else
           return RDB_TYPE_HASH;
@@ -437,16 +435,17 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
   if (obj.Encoding() == kEncodingStrMap2) {
-    StringSet* set = (StringSet*)obj.RObjPtr();
-
     // We don't expire any data during serialization
-    set->set_time(0);
+    obj.SetMemberTime(0);
+
+    StringSet* set = (StringSet*)obj.RObjPtr();
+    const bool has_expiry = obj.HasMemberExpiration();
 
     // due to we avoid expiring we can use UpperBoundSize() instead of SlowSize()
     RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
     for (auto it = set->begin(); it != set->end();) {
       RETURN_ON_ERR(SaveString(string_view{*it, sdslen(*it)}));
-      if (set->ExpirationUsed()) {
+      if (has_expiry) {
         int64_t expiry = -1;
         if (it.HasExpiry())
           expiry = it.ExpiryTime();
@@ -458,7 +457,7 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
         flush_state = FlushState::kFlushEndEntry;
       PushToConsumerIfNeeded(flush_state);
     }
-    set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+    obj.SetMemberTime(MemberTimeSeconds(GetCurrentTimeMs()));
   } else {
     CHECK_EQ(obj.Encoding(), kEncodingIntSet);
     intset* is = (intset*)obj.RObjPtr();
@@ -474,10 +473,11 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
   DCHECK_EQ(OBJ_HASH, pv.ObjType());
 
   if (pv.Encoding() == kEncodingStrMap2) {
-    StringMap* string_map = (StringMap*)pv.RObjPtr();
-
     // We don't expire any data during serialization
-    string_map->set_time(0);
+    pv.SetMemberTime(0);
+
+    StringMap* string_map = (StringMap*)pv.RObjPtr();
+    const bool has_expiry = pv.HasMemberExpiration();
 
     // due to we avoid expiring we can use UpperBoundSize() instead of SlowSize()
     RETURN_ON_ERR(SaveLen(string_map->UpperBoundSize()));
@@ -486,7 +486,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
       const auto& [k, v] = *it;
       RETURN_ON_ERR(SaveString(string_view{k, sdslen(k)}));
       RETURN_ON_ERR(SaveString(string_view{v, sdslen(v)}));
-      if (string_map->ExpirationUsed()) {
+      if (has_expiry) {
         int64_t expiry = -1;
         if (it.HasExpiry())
           expiry = it.ExpiryTime();
@@ -499,7 +499,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
       PushToConsumerIfNeeded(flush_state);
     }
 
-    string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+    pv.SetMemberTime(MemberTimeSeconds(GetCurrentTimeMs()));
   } else {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
 
@@ -1511,14 +1511,14 @@ error_code RdbSaver::Impl::FlushSerializer() {
 
 namespace {
 
-// Collect search index definitions and optionally HNSW metadata.
+// Collect search index definitions for replication / RDB.
 // search_indices always gets simple "index_name cmd" restore commands.
-// For summary shards, hnsw_index_metadata gets JSON with HNSW graph metadata,
-// and search_synonyms gets synonym group restore commands.
+// For summary shards, search_synonyms gets synonym group restore commands.
+// (HNSW graph metadata travels inline with the node data in RDB_OPCODE_VECTOR_INDEX,
+//  so it is not collected here.)
 void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
                           [[maybe_unused]] StringVec* search_indices,
                           [[maybe_unused]] StringVec* search_synonyms,
-                          [[maybe_unused]] StringVec* hnsw_index_metadata,
                           [[maybe_unused]] bool is_summary) {
 #ifdef WITH_SEARCH
   auto* indices = shard.search_indices();
@@ -1532,28 +1532,6 @@ void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
 
     if (!is_summary)
       continue;
-
-    // Collect HNSW metadata for vector field (first one found), for now we don't support multiple
-    // vector fields per index serialization
-    for (const auto& [fident, finfo] : index_info.base_index.schema.fields) {
-      if (finfo.type == search::SchemaField::VECTOR &&
-          !(finfo.flags & search::SchemaField::NOINDEX)) {
-        if (auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, finfo.short_name);
-            hnsw_index) {
-          // Empty graph: enterpoint_node_ is -1 (wraps to UINT32_MAX as tableint); skip
-          // emission so the load path doesn't receive a garbage entry point.
-          if (hnsw_index->GetNodeCount() == 0)
-            break;
-          auto meta = hnsw_index->GetMetadata();
-          TmpJson meta_json;
-          meta_json["index_name"] = index_name;
-          meta_json["field_name"] = finfo.short_name;
-          meta_json["enterpoint_node"] = meta.enterpoint_node;
-          hnsw_index_metadata->emplace_back(meta_json.to_string());
-          break;
-        }
-      }
-    }
 
     // Save synonym groups
     const auto& synonym_groups = index->GetSynonyms().GetGroups();
@@ -1571,18 +1549,16 @@ void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
 }  // namespace
 
 RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_summary) {
-  StringVec script_bodies, search_indices, search_synonyms, hnsw_index_metadata;
+  StringVec script_bodies, search_indices, search_synonyms;
   size_t table_mem_result = 0;
 
   if (!is_summary) {
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
       if (shard->shard_id() == 0)
-        CollectSearchIndices(*shard, &search_indices, &search_synonyms, &hnsw_index_metadata,
-                             is_summary);
+        CollectSearchIndices(*shard, &search_indices, &search_synonyms, is_summary);
     });
     return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
-                                std::move(search_synonyms), std::move(hnsw_index_metadata),
-                                table_mem_result};
+                                std::move(search_synonyms), table_mem_result};
   }
   {
     // For summary file: collect all global data
@@ -1595,8 +1571,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   atomic<size_t> table_mem{0};
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     if (shard->shard_id() == 0)
-      CollectSearchIndices(*shard, &search_indices, &search_synonyms, &hnsw_index_metadata,
-                           is_summary);
+      CollectSearchIndices(*shard, &search_indices, &search_synonyms, is_summary);
 
     auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     size_t shard_table_mem = 0;
@@ -1610,8 +1585,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   });
 
   return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
-                              std::move(search_synonyms), std::move(hnsw_index_metadata),
-                              table_mem.load(memory_order_relaxed)};
+                              std::move(search_synonyms), table_mem.load(memory_order_relaxed)};
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
@@ -1756,12 +1730,6 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
     if (send_search_index) {
       for (const string& s : glob_state.search_indices)
         RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
-    }
-
-    // HNSW index metadata (JSON, summary only) - only for replicas >= VER6
-    if (replica_dfly_version_ >= DflyVersion::VER6) {
-      for (const string& s : glob_state.hnsw_index_metadata)
-        RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("hnsw-index-metadata", s));
     }
 
     // Save synonyms only in summary file

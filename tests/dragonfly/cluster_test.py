@@ -3448,11 +3448,19 @@ async def test_slot_migration_oom(df_factory):
     assert status[0][4] == "INCOMING_MIGRATION_OOM"
 
 
+@pytest.mark.parametrize("set_cluster_node_id", [True, False])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_replica_takeover_moved(
-    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, set_cluster_node_id: bool
 ):
-    instances = [df_factory.create(port=next(next_port)) for i in range(4)]
+    node_names = ["takeover-m1", "takeover-r1", "takeover-m2", "takeover-r2"]
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            cluster_node_id=node_names[i] if set_cluster_node_id else "",
+        )
+        for i in range(4)
+    ]
     df_factory.start_all(instances)
 
     nodes = [await create_node_info(n) for n in instances]
@@ -3717,6 +3725,7 @@ async def test_cluster_migration_with_tiering(df_factory):
             proactor_threads=2,
             tiered_prefix="/tmp/tiered/cluster_node",
             tiered_offload_threshold="0.2",
+            tiered_experimental_cooling="False",
             maxmemory="512MB",
         ),
         df_factory.create(
@@ -3733,6 +3742,10 @@ async def test_cluster_migration_with_tiering(df_factory):
 
     keys = 1000000
     await nodes[0].client.execute_command(f"DEBUG POPULATE {keys} size 440")
+
+    # Expect that number of added keys is 1000000
+    info = await nodes[0].client.info("keyspace")
+    assert info["db0"]["keys"] == keys
 
     await asyncio.sleep(5)  # wait for tiering to offload data
 
@@ -3781,6 +3794,7 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
             proactor_threads=2,
             tiered_prefix="/tmp/tiered/cluster_node",
             tiered_offload_threshold="0.2",
+            tiered_experimental_cooling="False",
             maxmemory="512MB",
         ),
         df_factory.create(

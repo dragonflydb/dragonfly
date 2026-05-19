@@ -77,11 +77,16 @@ HnswRemapTable BuildRemapTable(
 // Remaps global_ids in deferred HNSW nodes and restores the graphs.
 // Returns the set of index names that failed restoration (to be excluded from key mappings).
 absl::flat_hash_set<std::string> RemapAndRestoreHnswGraphs(
-    std::vector<PendingHnswNodes>& pending_nodes,
-    const std::vector<PendingHnswMetadata>& hnsw_metadata, const HnswRemapTable& remap_table) {
+    std::vector<PendingHnswNodes>& pending_nodes, const HnswRemapTable& remap_table) {
   absl::flat_hash_set<std::string> failed_indices;
 #ifdef WITH_SEARCH
   for (auto& pn : pending_nodes) {
+    // Empty graph is a valid state, not a failure — skip restore (the index already
+    // matches an empty graph) and don't mark it failed.
+    if (pn.nodes.empty()) {
+      continue;
+    }
+
     auto remap_it = remap_table.find(pn.index_name);
 
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(pn.index_name, pn.field_name);
@@ -120,21 +125,7 @@ absl::flat_hash_set<std::string> RemapAndRestoreHnswGraphs(
       continue;
     }
 
-    const PendingHnswMetadata* phm_ptr = nullptr;
-    for (const auto& phm : hnsw_metadata) {
-      if (phm.index_name == pn.index_name && phm.field_name == pn.field_name) {
-        phm_ptr = &phm;
-        break;
-      }
-    }
-    if (!phm_ptr) {
-      LOG(ERROR) << "HNSW metadata missing for " << pn.index_name << ":" << pn.field_name
-                 << ". Will rebuild from scratch.";
-      failed_indices.insert(pn.index_name);
-      continue;
-    }
-
-    if (!hnsw_index->RestoreFromNodes(pn.nodes, phm_ptr->metadata)) {
+    if (!hnsw_index->RestoreFromNodes(pn.nodes, pn.metadata)) {
       LOG(WARNING) << "HNSW graph restore rejected for " << pn.index_name << ":" << pn.field_name
                    << ". Will rebuild from scratch.";
       failed_indices.insert(pn.index_name);
@@ -258,11 +249,6 @@ void RdbLoadContext::AddPendingIndexMapping(uint32_t shard_id, PendingIndexMappi
   pending_index_mappings_[shard_id].emplace_back(std::move(mapping));
 }
 
-void RdbLoadContext::AddPendingHnswMetadata(PendingHnswMetadata metadata) {
-  util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
-  pending_hnsw_metadata_.emplace_back(std::move(metadata));
-}
-
 void RdbLoadContext::AddPendingHnswNodes(PendingHnswNodes nodes) {
   util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
   pending_hnsw_nodes_.emplace_back(std::move(nodes));
@@ -270,17 +256,6 @@ void RdbLoadContext::AddPendingHnswNodes(PendingHnswNodes nodes) {
 
 void RdbLoadContext::SetMasterShardCount(uint32_t count) {
   master_shard_count_ = count;
-}
-
-std::optional<search::HnswIndexMetadata> RdbLoadContext::FindHnswMetadata(
-    std::string_view index_name, std::string_view field_name) const {
-  util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
-  for (const auto& phm : pending_hnsw_metadata_) {
-    if (phm.index_name == index_name && phm.field_name == field_name) {
-      return phm.metadata;
-    }
-  }
-  return std::nullopt;
 }
 
 std::vector<std::string> RdbLoadContext::TakePendingSynonymCommands() {
@@ -305,8 +280,7 @@ std::vector<PendingHnswNodes> RdbLoadContext::TakePendingHnswNodes() {
 
 RdbLoadContext::PerShardMappings RdbLoadContext::RemapHnswForDifferentShardCount(
     const absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>>& index_mappings,
-    std::vector<PendingHnswNodes>& pending_nodes,
-    const std::vector<PendingHnswMetadata>& hnsw_metadata) {
+    std::vector<PendingHnswNodes>& pending_nodes) {
   const ShardId new_shard_count = shard_set->size();
 
   // Build remap table: index_name -> master_shard_id -> new_global_ids indexed by old doc_id.
@@ -314,7 +288,7 @@ RdbLoadContext::PerShardMappings RdbLoadContext::RemapHnswForDifferentShardCount
   HnswRemapTable remap_table = BuildRemapTable(index_mappings, new_shard_count);
 
   // Remap global_ids, restore HNSW graphs; failed indices are excluded from key mappings.
-  auto failed = RemapAndRestoreHnswGraphs(pending_nodes, hnsw_metadata, remap_table);
+  auto failed = RemapAndRestoreHnswGraphs(pending_nodes, remap_table);
   for (const auto& name : failed) {
     remap_table.erase(name);
   }
@@ -333,15 +307,7 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   auto index_mappings = TakePendingIndexMappings();
   auto pending_nodes = TakePendingHnswNodes();
 
-  // Extract remaining shared state under lock. After this, no member access is needed.
-  std::vector<PendingHnswMetadata> hnsw_metadata;
-  {
-    util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
-    hnsw_metadata.swap(pending_hnsw_metadata_);
-  }
   uint32_t master_shards = master_shard_count_;
-
-  bool has_hnsw_restore = !hnsw_metadata.empty();
 
   if (is_error)
     return;
@@ -352,8 +318,7 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   if (shard_count_differs && !index_mappings.empty()) {
     // Remaps HNSW global_ids, restores HNSW graphs, and pre-distributes key mappings by target
     // shard. The internal remap table is local to the function and freed when it returns.
-    auto per_shard_mappings =
-        RemapHnswForDifferentShardCount(index_mappings, pending_nodes, hnsw_metadata);
+    auto per_shard_mappings = RemapHnswForDifferentShardCount(index_mappings, pending_nodes);
 
     // Each shard reads only its own pre-built slice — no per-shard filtering of all N keys.
     shard_set->AwaitRunningOnShardQueue([&per_shard_mappings](EngineShard* es) {
@@ -390,13 +355,14 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   // RestoreKeyIndex (above) and RebuildAllIndices (below) run in separate sequential
   // AwaitRunningOnShardQueue calls, so there is no parallel index build that could interfere
   // with the doc_ids assigned during key mapping restoration.
-  LOG(INFO) << "PostLoad: rebuilding search indices across shards has_hnsw_restore="
-            << has_hnsw_restore << " rss="
+  // RebuildAllIndices decides per-index whether to use the restore path or rebuild from
+  // scratch, based on the index's actual graph + key_index state.
+  LOG(INFO) << "PostLoad: rebuilding search indices across shards rss="
             << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
-  shard_set->AwaitRunningOnShardQueue([has_hnsw_restore](EngineShard* es) {
+  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-    es->search_indices()->RebuildAllIndices(op_args, has_hnsw_restore);
+    es->search_indices()->RebuildAllIndices(op_args);
   });
 
   // Now execute all pending synonym commands after indices are rebuilt
@@ -411,19 +377,19 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
               << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
   });
 
-  // All shards completed restoration — drain pending ops.
-  // DrainPendingVectorUpdates sets kBuilding which allows Add calls.
-  if (has_hnsw_restore) {
-    shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-      OpArgs op_args{es, nullptr,
-                     DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-      for (const auto& name : es->search_indices()->GetIndexNames()) {
-        if (auto* idx = es->search_indices()->GetIndex(name)) {
-          idx->DrainPendingVectorUpdates(op_args);
-        }
+  // Transition every search index out of kRestoring/kSerializing into kBuilding and
+  // drain any journal-buffered vector updates accumulated during a restoring window.
+  // For indices already in kBuilding the state assignment is idempotent and the empty
+  // pending set returns early, so this is cheap when nothing was deferred.
+  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+    OpArgs op_args{es, nullptr,
+                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+    for (const auto& name : es->search_indices()->GetIndexNames()) {
+      if (auto* idx = es->search_indices()->GetIndex(name)) {
+        idx->DrainPendingVectorUpdates(op_args);
       }
-    });
-  }
+    }
+  });
 #endif
 }
 

@@ -305,10 +305,8 @@ bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func) {
 
 StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context) {
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-  StringMap* res = static_cast<StringMap*>(pv.RObjPtr());
-  uint32_t map_time = MemberTimeSeconds(db_context.time_now_ms);
-  res->set_time(map_time);
-  return res;
+  pv.SetMemberTime(MemberTimeSeconds(db_context.time_now_ms));
+  return static_cast<StringMap*>(pv.RObjPtr());
 }
 
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,

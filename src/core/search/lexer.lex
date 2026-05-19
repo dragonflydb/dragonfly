@@ -28,7 +28,7 @@
   using namespace std;
   using dfly::search::TagType;
 
-  Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc);
+  Parser::symbol_type make_PhraseTok(string_view src, const Parser::location_type& loc);
   Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc);
   // Strip backslashes from \X sequences in a term.
   string UnescapeTerm(string_view src);
@@ -84,8 +84,10 @@ astrsk_ch  \*
 [0-9]{1,9}                          return Parser::make_UINT32(str(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)       return Parser::make_DOUBLE(str(), loc());
 
-{dq}([^"]|{esc_seq})*{dq}           return make_StringLit(matched_view(1, 1), loc());
-{sq}([^']|{esc_seq})*{sq}           return make_StringLit(matched_view(1, 1), loc());
+  /* Quoted phrase, optionally followed by `~N` slop (no whitespace before `~`). With whitespace
+     before `~`, the tilde tokenizes separately as the optional-term operator. */
+{dq}([^"]|{esc_seq})*{dq}(~[0-9]+)?   return make_PhraseTok(str(), loc());
+{sq}([^']|{esc_seq})*{sq}(~[0-9]+)?   return make_PhraseTok(str(), loc());
 
 "$"{term_ch}+                       return ParseParam(str(), loc());
 "@"{term_ch}+                       return Parser::make_FIELD(str(), loc());
@@ -102,12 +104,25 @@ astrsk_ch  \*
 <<EOF>> return Parser::make_YYEOF(loc());
 %%
 
-Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc) {
+Parser::symbol_type make_PhraseTok(string_view src, const Parser::location_type& loc) {
+  // src is the full match: opening quote, content, closing quote, optionally `~N`.
+  uint32_t slop = 0;
+  char quote = src.front();
+  // Locate closing quote (last char matching the opener, skipping escaped pairs).
+  size_t close_idx = src.size() - 1;
+  while (close_idx > 0 && src[close_idx] != quote)
+    --close_idx;
+  string_view inner = src.substr(1, close_idx - 1);
+  string_view after = src.substr(close_idx + 1);
+  if (!after.empty() && after.front() == '~') {
+    if (!absl::SimpleAtoi(after.substr(1), &slop))
+      throw Parser::syntax_error(loc, "bad phrase slop: " + string(after));
+  }
   string res;
-  if (!absl::CUnescape(src, &res))
-    throw Parser::syntax_error (loc, "bad escaped string: " + string(src));
+  if (!absl::CUnescape(inner, &res))
+    throw Parser::syntax_error(loc, "bad escaped string: " + string(inner));
 
-  return Parser::make_TERM(res, loc);
+  return Parser::make_PHRASE(dfly::search::PhraseTok{std::move(res), slop}, loc);
 }
 
 string UnescapeTerm(string_view src) {

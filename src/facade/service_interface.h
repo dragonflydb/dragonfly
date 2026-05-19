@@ -71,7 +71,8 @@ class ServiceInterface {
     std::string Format() const;
 
     unsigned db_index;
-    bool async_dispatch, conn_closing, subscribers, blocked;
+    bool async_dispatch, conn_closing, has_subscribers, is_blocked;
+    bool is_scheduled;  // coordinator fiber is waiting on scheduled transaction.
   };
 
   virtual ContextInfo GetContextInfo(ConnectionContext* cntx) const {

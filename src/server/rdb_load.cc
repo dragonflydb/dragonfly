@@ -2757,8 +2757,6 @@ error_code RdbLoader::HandleAux() {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
-  } else if (auxkey == "hnsw-index-metadata") {
-    LoadHnswIndexMetadataFromAux(std::move(auxval));
   } else if (auxkey == "search-synonyms") {
     LoadSearchSynonymsFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
@@ -3182,37 +3180,17 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition", true);
 }
 
-void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
-  try {
-    auto json_opt = JsonFromString(def);
-    if (!json_opt) {
-      LOG(ERROR) << "Invalid HNSW index metadata JSON: " << def;
-      return;
-    }
-    const auto& json = *json_opt;
-
-    PendingHnswMetadata phm;
-    phm.index_name = json["index_name"].as<string>();
-    phm.field_name = json["field_name"].as<string>();
-    phm.metadata.enterpoint_node = json["enterpoint_node"].as<size_t>();
-
-    LOG(INFO) << "Loaded HNSW metadata for index=" << phm.index_name << " field=" << phm.field_name
-              << " enterpoint=" << phm.metadata.enterpoint_node;
-
-    load_context_->AddPendingHnswMetadata(std::move(phm));
-  } catch (const std::exception& e) {
-    LOG(ERROR) << "Failed to parse HNSW index metadata JSON: " << e.what() << " def: " << def;
-  }
-}
-
 error_code RdbLoader::HandleVectorIndex() {
   // HNSW vector index graph data.
-  // Binary format: [index_key, elements_number,
-  //   then for each node (little-endian):
+  // Binary format: [index_key, enterpoint_node, elements_number,
+  //   then for each node (little-endian, ascending internal_id 0..count-1):
   //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
   //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
   string index_key;
   SET_OR_RETURN(FetchGenericString(), index_key);
+
+  search::HnswIndexMetadata metadata;
+  SET_OR_RETURN(LoadLen(nullptr), metadata.enterpoint_node);
 
   uint64_t elements_number;
   SET_OR_RETURN(LoadLen(nullptr), elements_number);
@@ -3231,12 +3209,12 @@ error_code RdbLoader::HandleVectorIndex() {
 
   if (shard_count_ == shard_set->size()) {
     // Same shard count: restore directly.
-    return RestoreVectorIndex(index_key, index_name, field_name, elements_number);
+    return RestoreVectorIndex(index_key, index_name, field_name, elements_number, metadata);
   }
 
   // Different shard count: load nodes and defer restoration.
   // Global_ids will be remapped in PerformPostLoad after all key mappings are collected.
-  PendingHnswNodes pending{std::string(index_name), std::string(field_name), {}};
+  PendingHnswNodes pending{std::string(index_name), std::string(field_name), metadata, {}};
   RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &pending.nodes));
   LOG(INFO) << "Deferred HNSW index restore for " << index_key << " with " << pending.nodes.size()
             << " nodes (shard count mismatch: " << shard_count_ << " vs " << shard_set->size()
@@ -3312,7 +3290,8 @@ error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
 }
 
 error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
-                                         string_view field_name, uint64_t elements_number) {
+                                         string_view field_name, uint64_t elements_number,
+                                         const search::HnswIndexMetadata& metadata) {
 #ifdef WITH_SEARCH
   // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
   auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
@@ -3327,13 +3306,7 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
   if (nodes.empty())
     return {};
 
-  auto metadata = load_context_->FindHnswMetadata(index_name, field_name);
-  if (!metadata) {
-    LOG(ERROR) << "HNSW metadata missing for " << index_key
-               << "; skipping graph restore — index will be rebuilt from keyspace";
-    return {};
-  }
-  if (!hnsw_index->RestoreFromNodes(nodes, *metadata)) {
+  if (!hnsw_index->RestoreFromNodes(nodes, metadata)) {
     LOG(WARNING) << "HNSW graph restore rejected for " << index_key
                  << "; index will be rebuilt from keyspace";
     return {};

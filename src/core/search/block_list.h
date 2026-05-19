@@ -1,5 +1,7 @@
 #pragma once
 
+#include <absl/types/span.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
@@ -35,15 +37,22 @@ template <typename Container /* underlying container */> class BlockList {
   using ElementType = typename Container::ElementType;
 
  public:
-  // store_freq: forwarded to CompressedSortedSet blocks (ignored for other container types).
-  BlockList(PMR_NS::memory_resource* mr, size_t block_size = 1000, bool store_freq = false)
-      : block_size_{block_size}, store_freq_{store_freq}, blocks_(mr) {
+  // store_freq / store_positions: forwarded to CompressedSortedSet blocks (ignored for other
+  // container types). store_positions implies store_freq.
+  BlockList(PMR_NS::memory_resource* mr, size_t block_size = 1000, bool store_freq = false,
+            bool store_positions = false)
+      : block_size_{block_size},
+        store_freq_{store_freq || store_positions},
+        store_positions_{store_positions},
+        blocks_(mr) {
   }
 
   BlockList(const BlockList& other) = default;
 
   BlockList(BlockList&& other) noexcept
-      : block_size_{other.block_size_}, store_freq_{other.store_freq_} {
+      : block_size_{other.block_size_},
+        store_freq_{other.store_freq_},
+        store_positions_{other.store_positions_} {
     // Consider not to do move if block_size_ is different
     // DCHECK(block_size_ == other.block_size_);
     // It seams there is bugs in BaseStringIndex
@@ -60,9 +69,9 @@ template <typename Container /* underlying container */> class BlockList {
   ~BlockList() = default;
 
   // Insert element, returns true if inserted, false if already present.
-  // freq parameter is forwarded to underlying container (used by CompressedSortedSet for TF).
-  bool Insert(ElementType t, uint32_t freq = 1);
-  bool PushBack(ElementType t, uint32_t freq = 1);
+  // freq and positions are forwarded to the underlying container (CompressedSortedSet).
+  bool Insert(ElementType t, uint32_t freq = 1, absl::Span<const uint32_t> positions = {});
+  bool PushBack(ElementType t, uint32_t freq = 1, absl::Span<const uint32_t> positions = {});
 
   // Remove element, returns true if removed, false if not found.
   bool Remove(ElementType t);
@@ -103,6 +112,16 @@ template <typename Container /* underlying container */> class BlockList {
         return block_it.Freq();
       } else {
         return 1;
+      }
+    }
+
+    // Sorted positions for the current term in the current document.
+    // Only valid (non-empty) for BlockList<CompressedSortedSet> with store_positions=true.
+    absl::Span<const uint32_t> Positions() const {
+      if constexpr (requires { block_it.Positions(); }) {
+        return block_it.Positions();
+      } else {
+        return {};
       }
     }
 
@@ -156,7 +175,8 @@ template <typename Container /* underlying container */> class BlockList {
 
  private:
   const size_t block_size_ = 1000;
-  bool store_freq_ = false;  // Forwarded to CompressedSortedSet blocks
+  bool store_freq_ = false;       // Forwarded to CompressedSortedSet blocks
+  bool store_positions_ = false;  // Forwarded to CompressedSortedSet blocks
   size_t size_ = 0;
   PMR_NS::vector<Container> blocks_;
 };
@@ -171,8 +191,8 @@ template <typename T> class SortedVector {
   }
 
   bool Insert(T t);
-  // TODO: store freq when SortedVector-based indices need TF scoring.
-  bool Insert(T t, uint32_t /*freq*/) {
+  // TODO: store freq/positions when SortedVector-based indices need TF scoring or phrase queries.
+  bool Insert(T t, uint32_t /*freq*/, absl::Span<const uint32_t> /*positions*/ = {}) {
     return Insert(std::move(t));
   }
   bool Remove(T t);

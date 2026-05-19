@@ -25,7 +25,13 @@ from redis import asyncio as aioredis
 
 from . import PortPicker
 from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
-from .utility import DflySeederFactory, gen_ca_cert, gen_certificate, skip_if_not_in_github
+from .utility import (
+    DflySeederFactory,
+    gen_ca_cert,
+    gen_certificate,
+    skip_if_not_in_github,
+    download_with_retries,
+)
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 # Suppress "Unclosed ClusterNode" warnings from redis-py topology refreshes (not actionable)
@@ -44,7 +50,6 @@ def _download_minio_binary(dest: Path):
     leaving a corrupt binary on interrupted downloads.
     """
     import platform
-    import urllib.request
 
     system = platform.system().lower()
     arch = platform.machine()
@@ -54,7 +59,7 @@ def _download_minio_binary(dest: Path):
     logging.info(f"Downloading MinIO binary from {url}")
     tmp_dest = dest.with_suffix(".tmp")
     try:
-        urllib.request.urlretrieve(url, tmp_dest)
+        download_with_retries(url, tmp_dest)
         tmp_dest.chmod(0o755)
         tmp_dest.rename(dest)
     except Exception:

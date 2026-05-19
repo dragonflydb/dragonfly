@@ -17,12 +17,16 @@ using VarintBuffer = array<uint8_t, sizeof(CompressedSortedSet::IntType) * 3>;
 
 }  // namespace
 
-CompressedSortedSet::CompressedSortedSet(PMR_NS::memory_resource* mr, bool store_freq)
-    : store_freq_{store_freq}, diffs_{mr} {
+CompressedSortedSet::CompressedSortedSet(PMR_NS::memory_resource* mr, bool store_freq,
+                                         bool store_positions)
+    : store_freq_{store_freq || store_positions}, store_positions_{store_positions}, diffs_{mr} {
 }
 
 CompressedSortedSet::ConstIterator::ConstIterator(const CompressedSortedSet& list)
-    : stash_{}, store_freq_{list.store_freq_}, diffs_{list.diffs_} {
+    : stash_{},
+      store_freq_{list.store_freq_},
+      store_positions_{list.store_positions_},
+      diffs_{list.diffs_} {
   ReadNext();
 }
 
@@ -34,6 +38,11 @@ CompressedSortedSet::IntType CompressedSortedSet::ConstIterator::operator*() con
 uint32_t CompressedSortedSet::ConstIterator::Freq() const {
   DCHECK(stash_);
   return freq_stash_;
+}
+
+absl::Span<const uint32_t> CompressedSortedSet::ConstIterator::Positions() const {
+  DCHECK(stash_);
+  return {positions_stash_.data(), positions_stash_.size()};
 }
 
 CompressedSortedSet::ConstIterator& CompressedSortedSet::ConstIterator::operator++() {
@@ -51,8 +60,12 @@ bool operator!=(const CompressedSortedSet::ConstIterator& l,
   return !(l == r);
 }
 
-// Each entry is encoded as: [diff_varint] or [diff_varint][freq_varint] when store_freq_ is set.
+// Entry layout per ctor flags:
+//   none:       [diff_varint]
+//   freq:       [diff_varint][freq_varint]
+//   +positions: [diff_varint][freq_varint][pos0_varint][pos1_delta_varint]...[pos(freq-1)_delta]
 void CompressedSortedSet::ConstIterator::ReadNext() {
+  positions_stash_.clear();
   if (diffs_.empty()) {
     stash_ = nullopt;
     freq_stash_ = 0;
@@ -68,11 +81,24 @@ void CompressedSortedSet::ConstIterator::ReadNext() {
   stash_ = base + diff;
 
   if (store_freq_) {
-    auto [freq, freq_read] = CompressedSortedSet::ReadVarLen(diffs_.subspan(diff_read));
+    auto [freq, freq_read] = CompressedSortedSet::ReadVarLen(diffs_.subspan(total_read));
     freq_stash_ = freq;
     total_read += freq_read;
   } else {
     freq_stash_ = 1;
+  }
+
+  if (store_positions_) {
+    positions_stash_.reserve(freq_stash_);
+    uint32_t prev = 0;
+    for (uint32_t i = 0; i < freq_stash_; ++i) {
+      auto [pos_delta, pos_read] = CompressedSortedSet::ReadVarLen(diffs_.subspan(total_read));
+      uint32_t pos =
+          (i == 0) ? static_cast<uint32_t>(pos_delta) : prev + static_cast<uint32_t>(pos_delta);
+      positions_stash_.push_back(pos);
+      prev = pos;
+      total_read += pos_read;
+    }
   }
 
   last_read_ = diffs_.subspan(0, total_read);
@@ -87,8 +113,9 @@ CompressedSortedSet::ConstIterator CompressedSortedSet::end() const {
   return ConstIterator{};
 }
 
-// Encode difference (and optionally freq) and add to end of diffs array
-void CompressedSortedSet::PushBackDiff(IntType diff, uint32_t freq) {
+// Encode difference (and optionally freq + positions) and add to end of diffs array
+void CompressedSortedSet::PushBackDiff(IntType diff, uint32_t freq,
+                                       absl::Span<const uint32_t> positions) {
   size_++;
 
   VarintBuffer buf;
@@ -98,6 +125,17 @@ void CompressedSortedSet::PushBackDiff(IntType diff, uint32_t freq) {
   if (store_freq_) {
     auto freq_span = WriteVarLen(freq, absl::MakeSpan(buf));
     diffs_.insert(diffs_.end(), freq_span.begin(), freq_span.end());
+  }
+
+  if (store_positions_) {
+    DCHECK_EQ(positions.size(), freq);
+    uint32_t prev = 0;
+    for (size_t i = 0; i < positions.size(); ++i) {
+      uint32_t to_write = (i == 0) ? positions[i] : positions[i] - prev;
+      auto pos_span = WriteVarLen(to_write, absl::MakeSpan(buf));
+      diffs_.insert(diffs_.end(), pos_span.begin(), pos_span.end());
+      prev = positions[i];
+    }
   }
 }
 
@@ -118,16 +156,28 @@ CompressedSortedSet::EntryLocation CompressedSortedSet::LowerBound(IntType value
                        .entry_span = it.last_read_};
 }
 
+size_t CompressedSortedSet::HeadSize(absl::Span<const uint8_t> entry_span, bool store_freq) {
+  auto [_diff, d_read] = ReadVarLen(entry_span);
+  if (!store_freq)
+    return d_read;
+  auto [_freq, f_read] = ReadVarLen(entry_span.subspan(d_read));
+  return d_read + f_read;
+}
+
 // Insert has linear complexity. It tries to find between which two entries A and B the new value V
 // needs to be inserted. Then it computes the differences dif1 = V - A and diff2 = B - V that need
 // to be stored where diff0 = B - A was previously stored, possibly extending the vector.
-// Each entry is [diff_varint] or [diff_varint][freq_varint] when store_freq_ is set.
-bool CompressedSortedSet::Insert(IntType value, uint32_t freq) {
+// When store_positions_ is set, the bound's original positions block is preserved verbatim and
+// becomes the right half of the replacement; the new entry contributes positions for V.
+bool CompressedSortedSet::Insert(IntType value, uint32_t freq,
+                                 absl::Span<const uint32_t> positions) {
+  DCHECK(!store_positions_ || positions.size() == freq);
+
   if (tail_value_ && *tail_value_ == value)
     return false;
 
   if (tail_value_ && value > *tail_value_) {
-    PushBackDiff(value - *tail_value_, freq);
+    PushBackDiff(value - *tail_value_, freq, positions);
     tail_value_ = value;
     return true;
   }
@@ -142,7 +192,7 @@ bool CompressedSortedSet::Insert(IntType value, uint32_t freq) {
 
   // Value is bigger than any other (or list is empty): append required diff at the end
   if (value > bound.value || bound.entry_span.empty()) {
-    PushBackDiff(value - bound.value, freq);
+    PushBackDiff(value - bound.value, freq, positions);
     tail_value_ = value;
     return true;
   }
@@ -164,17 +214,43 @@ bool CompressedSortedSet::Insert(IntType value, uint32_t freq) {
     freq2_span = WriteVarLen(bound.freq, absl::MakeSpan(buf4));
   }
 
-  // Extend the location where the old entry is stored with optional zeros before overwriting it
+  // Bound's original positions block is preserved as the right half (entry for B).
+  absl::Span<const uint8_t> bound_pos_span;
+  if (store_positions_) {
+    size_t head = CompressedSortedSet::HeadSize(bound.entry_span, store_freq_);
+    bound_pos_span = bound.entry_span.subspan(head);
+  }
+
+  // New entry's positions block (for V), encoded into a small scratch buffer.
+  absl::InlinedVector<uint8_t, 16> new_pos_bytes;
+  if (store_positions_) {
+    uint32_t prev = 0;
+    VarintBuffer pbuf;
+    for (size_t i = 0; i < positions.size(); ++i) {
+      uint32_t to_write = (i == 0) ? positions[i] : positions[i] - prev;
+      auto sp = WriteVarLen(to_write, absl::MakeSpan(pbuf));
+      new_pos_bytes.insert(new_pos_bytes.end(), sp.begin(), sp.end());
+      prev = positions[i];
+    }
+  }
+
+  // Extend storage to fit both new entries; old entry will be overwritten in place.
   ptrdiff_t entry_offset = bound.entry_span.data() - diffs_.data();
-  size_t required_len =
-      diff1_span.size() + freq1_span.size() + diff2_span.size() + freq2_span.size();
+  size_t required_len = diff1_span.size() + freq1_span.size() + new_pos_bytes.size() +
+                        diff2_span.size() + freq2_span.size() + bound_pos_span.size();
   DCHECK_LE(bound.entry_span.size(), required_len);  // It can't shrink for sure
+
+  // Insert padding zeros at entry_offset. This shifts bound's existing positions block right by
+  // exactly the right amount: its new location coincides with entry 2's positions slot in the
+  // final layout, so we don't need to move those bytes explicitly.
   diffs_.insert(diffs_.begin() + entry_offset, required_len - bound.entry_span.size(), 0u);
 
-  // Now overwrite old entry with the two new entries
+  // Overwrite old entry's prefix with the two new entries (heads + new entry's positions only;
+  // bound's original positions sit untouched at entry_offset + (left half size)).
   auto out = diffs_.begin() + entry_offset;
   out = copy(diff1_span.begin(), diff1_span.end(), out);
   out = copy(freq1_span.begin(), freq1_span.end(), out);
+  out = copy(new_pos_bytes.begin(), new_pos_bytes.end(), out);
   out = copy(diff2_span.begin(), diff2_span.end(), out);
   copy(freq2_span.begin(), freq2_span.end(), out);
 
@@ -244,16 +320,17 @@ bool CompressedSortedSet::Remove(IntType value) {
 
 void CompressedSortedSet::Merge(CompressedSortedSet&& other) {
   DCHECK_EQ(store_freq_, other.store_freq_);
+  DCHECK_EQ(store_positions_, other.store_positions_);
   // Quadratic compexity in theory, but in practice used only to merge with larger values.
   // Tail insert optimization makes it linear
   for (auto it = other.begin(); it != other.end(); ++it)
-    Insert(*it, it.Freq());
+    Insert(*it, it.Freq(), it.Positions());
 }
 
 std::pair<CompressedSortedSet, CompressedSortedSet> CompressedSortedSet::Split() && {
   DCHECK_GT(Size(), 5u);
 
-  CompressedSortedSet second(diffs_.get_allocator().resource(), store_freq_);
+  CompressedSortedSet second(diffs_.get_allocator().resource(), store_freq_, store_positions_);
 
   // Move iterator to middle position and save size of diffs tail
   auto it = begin();
@@ -267,7 +344,7 @@ std::pair<CompressedSortedSet, CompressedSortedSet> CompressedSortedSet::Split()
 
   // Copy second half into second set
   for (; it != end(); ++it)
-    second.Insert(*it, it.Freq());
+    second.Insert(*it, it.Freq(), it.Positions());
 
   // Erase diffs tail
   diffs_.resize(keep_bytes);

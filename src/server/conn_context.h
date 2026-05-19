@@ -318,7 +318,8 @@ class ConnectionContext : public facade::ConnectionContext {
 
   size_t UsedMemory() const override;
 
-  virtual void Unsubscribe(std::string_view channel) override;
+  void Unsubscribe(std::string_view channel) override;
+  void OnSocketError(uint32_t epoll_mask) override;
 
   // Whether this connection is a connection from a replica to its master.
   // This flag is true only on replica side, where we need to setup a special ConnectionContext

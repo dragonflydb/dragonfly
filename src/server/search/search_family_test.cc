@@ -5535,6 +5535,52 @@ TEST_F(SearchFamilyTest, StemmingAggregateGroupbyKeepsRaw) {
                                          IsMap("tag", "learned", "n", "1")));
 }
 
+// End-to-end reproduction of issue #7294: FT.SEARCH with a quoted phrase enforces adjacency.
+TEST_F(SearchFamilyTest, PhraseQueryIssue7294) {
+  Run({"FT.CREATE", "idx_phrase", "SCHEMA", "t", "TEXT", "NOSTEM"});
+
+  Run({"HSET", "p:1", "t", "machine learning algorithm"});  // adjacent, in order
+  Run({"HSET", "p:2", "t", "learning machine works"});      // reversed order
+  Run({"HSET", "p:3", "t", "machine learning"});            // adjacent, exact
+
+  // Bare terms: AND-match, all three docs.
+  EXPECT_THAT(Run({"FT.SEARCH", "idx_phrase", "machine learning"}), AreDocIds("p:1", "p:2", "p:3"));
+
+  // Quoted phrase: only adjacent, in-order matches.
+  EXPECT_THAT(Run({"FT.SEARCH", "idx_phrase", "\"machine learning\""}), AreDocIds("p:1", "p:3"));
+}
+
+// Phrase queries against a NOOFFSETS index surface an error (positions aren't stored).
+TEST_F(SearchFamilyTest, PhraseOnNoOffsetsErrors) {
+  Run({"FT.CREATE", "idx_no_off", "NOOFFSETS", "SCHEMA", "t", "TEXT"});
+  Run({"HSET", "p:1", "t", "machine learning"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx_no_off", "\"machine learning\""}),
+              ErrArg("phrase queries require offsets"));
+}
+
+// NOOFFSETS index-level flag is accepted by FT.CREATE and round-trips through FT.INFO.
+TEST_F(SearchFamilyTest, NoOffsetsFlagSurface) {
+  Run({"FT.CREATE", "no_off_idx", "NOOFFSETS", "SCHEMA", "body", "TEXT"});
+
+  auto info = Run({"FT.INFO", "no_off_idx"});
+  EXPECT_THAT(info,
+              IsArray(_, _, _, _, "index_options", IsArray("NOOFFSETS"), _, _, _, _, _, _, _, _));
+
+  // Ordinary AND queries don't need offsets and must still work.
+  Run({"HSET", "h:1", "body", "machine learning algorithm"});
+  Run({"HSET", "h:2", "body", "learning machine works"});
+  EXPECT_THAT(Run({"FT.SEARCH", "no_off_idx", "machine learning"}), AreDocIds("h:1", "h:2"));
+}
+
+// Default index (no NOOFFSETS) has an empty index_options array.
+TEST_F(SearchFamilyTest, NoOffsetsAbsentByDefault) {
+  Run({"FT.CREATE", "default_idx", "SCHEMA", "body", "TEXT"});
+  auto info = Run({"FT.INFO", "default_idx"});
+  EXPECT_THAT(info,
+              IsArray(_, _, _, _, "index_options", RespArray(IsEmpty()), _, _, _, _, _, _, _, _));
+}
+
 // FT.INFO surfaces NOSTEM per-attribute and language in index_definition.
 TEST_F(SearchFamilyTest, StemmingInfoSurface) {
   Run({"FT.CREATE", "info_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT",

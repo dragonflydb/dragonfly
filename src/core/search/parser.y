@@ -19,6 +19,14 @@
   namespace dfly {
   namespace search {
     class QueryDriver;
+    // Token value for quoted phrases: raw text plus optional ~N slop. `slop`=0 = exact adjacency.
+    struct PhraseTok {
+      std::string raw;
+      uint32_t slop = 0;
+    };
+    inline std::ostream& operator<<(std::ostream& os, const PhraseTok&) {
+      return os;  // bison debug trace requires this; content not material to traces.
+    }
   }
   }
 }
@@ -72,6 +80,7 @@ double toDouble(string_view src);
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
 %token <std::string> TERM "term" TAG_VAL "tag_val" PARAM "param" FIELD "field" PREFIX "prefix" SUFFIX "suffix" INFIX "infix"
+%token <PhraseTok> PHRASE "phrase"
 
 %precedence TERM TAG_VAL
 %left OR_OP
@@ -193,6 +202,7 @@ search_unary_expr:
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2));   }
   | TILDE search_unary_expr           { $$ = AstOptionalNode(std::move($2)); }
   | TERM                              { $$ = AstTermNode(std::move($1));     }
+  | PHRASE                            { $$ = AstPhraseNode(std::move($1.raw), $1.slop); }
   | PREFIX                            { $$ = AstPrefixNode(std::move($1));   }
   | SUFFIX                            { $$ = AstSuffixNode(std::move($1));   }
   | INFIX                             { $$ = AstInfixNode(std::move($1));    }
@@ -201,6 +211,7 @@ search_unary_expr:
 
 field_cond:
   TERM                                                  { $$ = AstTermNode(std::move($1));   }
+  | PHRASE                                              { $$ = AstPhraseNode(std::move($1.raw), $1.slop); }
   | UINT32                                              { $$ = AstTermNode(std::move($1));   }
   | STAR                                                { $$ = AstStarFieldNode();           }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
@@ -288,6 +299,13 @@ tag_list:
 
 tag_list_element:
   TERM        { $$ = AstTermNode(std::move($1));   }
+  | PHRASE {
+      /* Inside {..}, quoted strings are literal tag values. ~N slop is only meaningful for
+         phrases, so reject it here rather than silently dropping it. */
+      if ($1.slop != 0)
+        throw Parser::syntax_error(@$, "slop is not allowed in tag values");
+      $$ = AstTermNode(std::move($1.raw));
+    }
   | PREFIX    { $$ = AstPrefixNode(std::move($1)); }
   | SUFFIX    { $$ = AstSuffixNode(std::move($1)); }
   | INFIX     { $$ = AstInfixNode(std::move($1));  }

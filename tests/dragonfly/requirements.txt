@@ -31,4 +31,6 @@ hiredis==2.4.0
 PyYAML>=6.0.3
 valkey>=6.0.2
 celery>=5.3.0
+requests>=2.28.0
+urllib3>=1.26.0
 # bullmq>=2.0.0

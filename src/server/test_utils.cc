@@ -331,14 +331,14 @@ void BaseFamilyTest::ShutdownService() {
   CleanupSnapshots();
   absl::SetFlag(&FLAGS_dbfilename, "");
 
-  service_->Shutdown();
-  service_.reset();
-
   // Stop the watchdog before shutting down the service, because shutdown tears down namespaces
   // which the watchdog's diagnostic code may access. Must run before we delete shard_set as
   // the watchdog accesses it.
   watchdog_done_.Notify();
   watchdog_fiber_.Join();
+
+  service_->Shutdown();
+  service_.reset();
 
   delete shard_set;
   shard_set = nullptr;
