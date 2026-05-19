@@ -37,6 +37,21 @@ using AstPrefixNode = AstAffixNode<TagType::PREFIX>;
 using AstSuffixNode = AstAffixNode<TagType::SUFFIX>;
 using AstInfixNode = AstAffixNode<TagType::INFIX>;
 
+// Quoted multi-word phrase. `raw` is the unsplit content between quotes;
+// the executor tokenizes via ICU word boundaries (same as indexing), lowercases,
+// drops stopwords (without advancing positions), then matches against raw
+// posting-list positions.
+// `slop` = max number of intervening tokens allowed between consecutive phrase
+// terms (in order). slop=0 = exact adjacency (the default for `"..."`); slop>0
+// comes from `"..."~N` syntax.
+struct AstPhraseNode {
+  explicit AstPhraseNode(std::string raw, uint32_t slop = 0) : raw{std::move(raw)}, slop{slop} {
+  }
+
+  std::string raw;
+  uint32_t slop = 0;
+};
+
 // Matches numeric range
 struct AstRangeNode {
   AstRangeNode(double lo, bool lo_excl, double hi, bool hi_excl);
@@ -175,10 +190,11 @@ struct AstVectorRangeNode {
   std::string score_alias;
 };
 
-using NodeVariants = std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode,
-                                  AstPrefixNode, AstSuffixNode, AstInfixNode, AstRangeNode,
-                                  AstNegateNode, AstOptionalNode, AstLogicalNode, AstFieldNode,
-                                  AstTagsNode, AstKnnNode, AstGeoNode, AstVectorRangeNode>;
+using NodeVariants =
+    std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode,
+                 AstSuffixNode, AstInfixNode, AstPhraseNode, AstRangeNode, AstNegateNode,
+                 AstOptionalNode, AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstGeoNode,
+                 AstVectorRangeNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;

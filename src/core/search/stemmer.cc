@@ -4,10 +4,11 @@
 
 #include "core/search/stemmer.h"
 
-#include <glog/logging.h>
 #include <libstemmer.h>
 
 #include <utility>
+
+#include "base/logging.h"
 
 namespace dfly::search {
 

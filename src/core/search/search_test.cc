@@ -3487,5 +3487,335 @@ TEST_F(SearchTest, MatchOptionalKnnIdsScoresAligned) {
   }
 }
 
+// Positions end-to-end via TextIndex: verifies that TokenizeWords -> BaseStringIndex::Add ->
+// BlockList -> CompressedSortedSet plumbing preserves per-token positions, that stopwords
+// don't advance positions, and that stem and raw tokens share the same position.
+class PositionsTest : public SearchTest {
+ protected:
+  std::vector<uint32_t> Positions(TextIndex* idx, std::string_view term, DocId doc) {
+    const auto* container = idx->Matching(term);
+    if (!container)
+      return {};
+    for (auto it = container->begin(); it != container->end(); ++it) {
+      if (*it == doc) {
+        auto p = it.Positions();
+        return std::vector<uint32_t>(p.begin(), p.end());
+      }
+    }
+    return {};
+  }
+};
+
+TEST_F(PositionsTest, BasicAdjacent) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc("machine learning algorithm");
+  index.Add(0, doc);
+
+  auto text_indices = index.GetAllTextIndices();
+  ASSERT_EQ(text_indices.size(), 1u);
+  auto* ti = text_indices[0];
+
+  // Tokens "machine", "learning", "algorithm" should land at sequential positions.
+  auto m = Positions(ti, "machine", 0);
+  auto l = Positions(ti, "learning", 0);
+  auto a = Positions(ti, "algorithm", 0);
+  ASSERT_EQ(m.size(), 1u);
+  ASSERT_EQ(l.size(), 1u);
+  ASSERT_EQ(a.size(), 1u);
+  EXPECT_EQ(l[0], m[0] + 1) << "learning must be adjacent to machine";
+  EXPECT_EQ(a[0], l[0] + 1) << "algorithm must follow learning";
+}
+
+TEST_F(PositionsTest, RepeatedTermAccumulates) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc("foo bar foo baz foo");
+  index.Add(0, doc);
+  auto* ti = index.GetAllTextIndices()[0];
+
+  auto foo = Positions(ti, "foo", 0);
+  EXPECT_EQ(foo.size(), 3u);
+  ASSERT_TRUE(std::is_sorted(foo.begin(), foo.end()));
+  // bar and baz fall between the foos at positions foo[0]+1 and foo[1]+1.
+  auto bar = Positions(ti, "bar", 0);
+  auto baz = Positions(ti, "baz", 0);
+  ASSERT_EQ(bar.size(), 1u);
+  ASSERT_EQ(baz.size(), 1u);
+  EXPECT_EQ(bar[0], foo[0] + 1);
+  EXPECT_EQ(baz[0], foo[1] + 1);
+}
+
+TEST_F(PositionsTest, StopwordsDoNotAdvance) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  // "a", "the", "of" are typical English stopwords used by default.
+  IndicesOptions opts{};
+  FieldIndices index{schema, opts, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc("a machine the learning of");
+  index.Add(0, doc);
+  auto* ti = index.GetAllTextIndices()[0];
+
+  auto m = Positions(ti, "machine", 0);
+  auto l = Positions(ti, "learning", 0);
+  ASSERT_EQ(m.size(), 1u);
+  ASSERT_EQ(l.size(), 1u);
+  EXPECT_EQ(l[0], m[0] + 1)
+      << "Stopwords (a/the/of) must not advance positions; machine and learning should be adjacent";
+}
+
+// Exact phrase queries — issue #7294 reproduction and edge cases.
+class PhraseTest : public SearchTest {};
+
+TEST_F(PhraseTest, BasicReproductionFromIssue7294) {
+  PrepareQuery("\"machine learning\"");
+  ExpectAll("machine learning algorithm",  // adjacent, in order
+            "machine learning",            // adjacent, exact
+            "preface machine learning epilogue");
+  ExpectNone("learning machine works",  // reversed order
+             "machine deep learning",   // not adjacent
+             "only machine", "no learning here");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, SingleTokenPhraseEqualsTerm) {
+  PrepareQuery("\"foo\"");
+  ExpectAll("foo", "foo bar", "bar foo baz");
+  ExpectNone("food", "afoo", "bar");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, StopwordsInPhraseDoNotAdvancePositions) {
+  // Both indexing and phrase-tokenize drop stopwords without advancing positions, so
+  // "a machine the learning" indexes as machine@1, learning@2 and the phrase
+  // "the machine learning" tokenizes to [machine, learning] — adjacency holds.
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  IndicesOptions options{{"a", "the", "of"}};
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+
+  vector<string> documents = {"a machine the learning algorithm",  // pos: machine@1, learning@2
+                              "machine learning works",            // pos: machine@1, learning@2
+                              "learning machine"};                 // pos: learning@1, machine@2
+  for (size_t i = 0; i < documents.size(); i++) {
+    MockedDocument doc{{{"field", documents[i]}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("\"the machine learning\"", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0u, 1u));
+}
+
+TEST_F(PhraseTest, ThreeWordAdjacency) {
+  PrepareQuery("\"fully convolutional network\"");
+  ExpectAll("the fully convolutional network is great", "fully convolutional network");
+  ExpectNone("fully network convolutional",       // wrong order
+             "fully deep convolutional network",  // not adjacent
+             "convolutional network only");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, RepeatedTermInPhrase) {
+  // "the the" → after stopword filter is empty → matches nothing.
+  // But repeated content terms like "foo foo" must find adjacent foo,foo.
+  PrepareQuery("\"foo foo\"");
+  ExpectAll("foo foo bar",
+            "bar foo foo baz",  // adjacent pair in middle
+            "foo foo foo");     // three foos contain adjacent pair
+  ExpectNone("foo bar foo",     // separated
+             "foo");            // single
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, FieldScopedPhrase) {
+  PrepareSchema({{"title", SchemaField::TEXT}, {"body", SchemaField::TEXT}});
+  PrepareQuery("@title:\"machine learning\"");
+  ExpectAll(Map{{"title", "machine learning algorithm"}, {"body", "anything"}});
+  ExpectNone(Map{{"title", "learning machine"}, {"body", "machine learning"}});  // wrong field
+  ExpectNone(Map{{"title", "deep learning"}, {"body", "machine learning"}});
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, PhraseAndedWithTerm) {
+  PrepareQuery("algorithm \"machine learning\"");
+  ExpectAll("machine learning algorithm", "algorithm runs machine learning");
+  ExpectNone("machine learning",             // missing 'algorithm'
+             "algorithm works",              // missing phrase
+             "learning machine algorithm");  // phrase order wrong
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, SlopAllowsGap) {
+  PrepareQuery("\"machine learning\"~1");
+  ExpectAll("machine learning",             // gap=0
+            "machine deep learning",        // gap=1
+            "machine learning algorithm");  // contains gap=0 run
+  ExpectNone("machine very deep learning",  // gap=2 (over budget)
+             "learning machine",            // wrong order
+             "machine only");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, SlopThreeWordPhrase) {
+  PrepareQuery("\"a b c\"~1");
+  // slop=1: at most 1 intervening word between consecutive phrase terms.
+  ExpectAll("a b c",       // 0,1,2
+            "a x b c",     // 0,2,3 → gap 1 then 0
+            "a b x c",     // 0,1,3 → gap 0 then 1
+            "a x b y c");  // 0,2,4 → gap 1 each
+  ExpectNone("a x y b c",  // gap=2 between a and b
+             "b a c",      // wrong order
+             "a b");       // missing c
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, SlopRequiresOrder) {
+  // slop > 0 still requires terms in order.
+  PrepareQuery("\"machine learning\"~10");
+  ExpectAll("machine and learning");
+  ExpectNone("learning the machine");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, SlopBacktrackingFindsLaterCandidate) {
+  // Greedy "smallest first" fails when an earlier candidate dead-ends: text "a x a y b" with
+  // "a b"~1 should pick a@2 → b@4 (gap=1), not give up at a@0 where no b is within slop range.
+  PrepareQuery("\"a b\"~1");
+  ExpectAll("a x a y b");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, OnlyStopwordsInPhraseMatchesNothing) {
+  // Phrase that tokenizes to zero terms (all stopwords) must match no docs.
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  IndicesOptions options{{"a", "the", "of"}};
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+
+  vector<string> documents = {"a the of", "machine learning", "anything else"};
+  for (size_t i = 0; i < documents.size(); i++) {
+    MockedDocument doc{{{"field", documents[i]}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("\"a the of\"", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre());
+}
+
+TEST_F(PhraseTest, PhraseMatchedDocsAreScored) {
+  // Phrase matches must populate text_scores via BM25 — i.e. constituent terms are registered
+  // as matched. Without this, top-K ranking would treat phrase-matched docs as score=0.
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // doc 0 contains the phrase with extra repetition (higher TF → higher BM25).
+  MockedDocument doc0("machine learning machine learning algorithm");
+  MockedDocument doc1("machine learning works");
+  MockedDocument doc2("unrelated content");
+  index.Add(0, doc0);
+  index.Add(1, doc1);
+  index.Add(2, doc2);
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("\"machine learning\"", &params));
+  algo.SetScorer(&BM25Std);
+
+  auto result = algo.Search(&index);
+  ASSERT_EQ(result.ids.size(), 2u);
+  EXPECT_EQ(result.text_scores.size(), 2u);
+  for (auto& [doc, score] : result.text_scores)
+    EXPECT_GT(score, 0.0f) << "Phrase-matched doc " << doc << " must have positive score";
+
+  // doc 0 has higher term frequency → must rank higher than doc 1.
+  std::optional<float> s0, s1;
+  for (auto& [doc, score] : result.text_scores) {
+    if (doc == 0)
+      s0 = score;
+    if (doc == 1)
+      s1 = score;
+  }
+  ASSERT_TRUE(s0 && s1);
+  EXPECT_GT(*s0, *s1) << "Higher TF must score higher";
+}
+
+// UTF-8 phrase eval — adjacency works across Unicode word boundaries (Cyrillic).
+// Corpus drawn from a small Ukrainian poem; verifies Cyrillic lowercase + adjacency
+// through the full eval pipeline:
+//   Кіт заліз у холодильник —
+//   Шукав там ковбасу.
+//   Знайшов лише каструлю борщу
+//   І втратив віру в красу.
+TEST_F(PhraseTest, UnicodePhraseAdjacency) {
+  PrepareQuery("\"втратив віру\"");
+  ExpectAll("І втратив віру в красу",         // adjacent, in order (line 4)
+            "він втратив віру назавжди");     // adjacent, embedded
+  ExpectNone("віру втратив швидко",           // reversed
+             "втратив надію а потім віру",    // not adjacent
+             "Кіт заліз у холодильник",       // unrelated line
+             "Знайшов лише каструлю борщу");  // unrelated line
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+// Phrase of 5+ tokens (exceeds positions_stash_ inline capacity of 4).
+TEST_F(PhraseTest, LongPhraseFiveTokens) {
+  PrepareQuery("\"the quick brown fox jumps\"");
+  ExpectAll("the quick brown fox jumps over", "before the quick brown fox jumps after");
+  ExpectNone("the quick brown fox runs",
+             "quick brown fox jumps over",  // missing 'the'
+             "the brown fox jumps over");   // missing 'quick'
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+// Document with many occurrences of a phrase term — exercises position-decoding loop
+// past the InlinedVector<uint32_t, 4> inline capacity.
+TEST_F(PhraseTest, ManyPositionsPerTerm) {
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // 'foo' appears 10x, 'bar' 1x adjacent to one of the foos. Forces the position list
+  // for 'foo' to spill to the heap inside positions_stash_.
+  std::string text;
+  for (int i = 0; i < 9; ++i)
+    text += "foo zzz ";
+  text += "foo bar";  // adjacency at the 10th foo
+  MockedDocument doc({{"field", text}});
+  indices.Add(0, doc);
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("\"foo bar\"", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0u));
+}
+
+// Empty phrase "" must safely match nothing — neither crash nor match-all.
+TEST_F(PhraseTest, EmptyPhrase) {
+  PrepareQuery("\"\"");
+  ExpectNone("foo", "anything", "literally any document");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+// NOOFFSETS index surfaces a typed error to FT.SEARCH callers, not silently empty.
+TEST_F(PhraseTest, NoOffsetsErrorIsExplicit) {
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  IndicesOptions options{{}};
+  options.no_offsets = true;
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc("machine learning algorithm");
+  indices.Add(0, doc);
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("\"machine learning\"", &params));
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.error, testing::HasSubstr("phrase queries require offsets"));
+}
+
 }  // namespace search
 }  // namespace dfly

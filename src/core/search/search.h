@@ -127,6 +127,9 @@ struct IndicesOptions {
 
   absl::flat_hash_set<std::string> stopwords;
   bool custom_stopwords = false;  // true when STOPWORDS was explicitly set in FT.CREATE
+  // When true, TEXT posting lists do not store token positions. Saves memory but
+  // disables phrase queries. Set via NOOFFSETS in FT.CREATE.
+  bool no_offsets = false;
 };
 
 // BM25 scoring statistics are now tracked per-field inside each TextIndex.

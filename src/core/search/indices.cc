@@ -48,43 +48,46 @@ string ToLower(string_view word) {
   return IsAllAscii(word) ? absl::AsciiStrToLower(word) : una::cases::to_lowercase_utf8(word);
 }
 
-// Get all words from text as matched by the ICU library, counting term frequencies.
-// When stemming is on, both the raw and stemmed forms are emitted so wildcards
-// can match unstemmed tokens and synonym hits stay additive.
-absl::flat_hash_map<std::string, uint32_t> TokenizeWords(std::string_view text,
-                                                         const TextIndex::StopWords& stopwords,
-                                                         const Synonyms* synonyms,
-                                                         Stemmer* stemmer) {
-  absl::flat_hash_map<std::string, uint32_t> words;
+// Tokenize text into `out`, advancing *pos_counter per non-stopword token. Raw + stem +
+// synonym entries share the same position. Stopwords don't advance the counter.
+void TokenizeWords(std::string_view text, const TextIndex::StopWords& stopwords,
+                   const Synonyms* synonyms, Stemmer* stemmer, uint32_t* pos_counter,
+                   absl::flat_hash_map<std::string, TermInfo>* out) {
+  auto emit = [&](std::string key, uint32_t pos) {
+    auto& info = (*out)[std::move(key)];
+    info.freq++;
+    info.positions.push_back(pos);
+  };
   for (std::string_view word : una::views::word_only::utf8(text)) {
     std::string word_lc = una::cases::to_lowercase_utf8(word);
     if (stopwords.contains(word_lc))
       continue;
+    uint32_t pos = ++(*pos_counter);
     if (synonyms) {
       if (auto group_id = synonyms->GetGroupToken(word_lc); group_id)
-        words[*group_id]++;
+        emit(*group_id, pos);
     }
     if (stemmer) {
       std::string stem = stemmer->Stem(word_lc);
       if (stem != word_lc)
-        words[std::move(stem)]++;
+        emit(std::move(stem), pos);
     }
-    words[std::move(word_lc)]++;
+    emit(std::move(word_lc), pos);
   }
-  return words;
 }
 
-// Split taglist, remove duplicates and convert all to lowercase. Freq is always 1 for tags.
-absl::flat_hash_map<string, uint32_t> NormalizeTags(string_view taglist, bool case_sensitive,
-                                                    char separator) {
+// Split taglist, remove duplicates and convert all to lowercase. Freq is always 1 for tags;
+// positions are not tracked (phrase queries don't apply to tag fields).
+void NormalizeTags(string_view taglist, bool case_sensitive, char separator,
+                   absl::flat_hash_map<std::string, TermInfo>* out) {
   // Splitting utf8 by ascii character is safe
-  absl::flat_hash_map<string, uint32_t> tags;
   for (string_view tag : absl::StrSplit(taglist, separator, absl::SkipEmpty())) {
     string_view str = absl::StripAsciiWhitespace(tag);
     std::string s = case_sensitive ? string{str} : ToLower(str);
-    tags.emplace(std::move(s), 1);
+    auto& info = (*out)[std::move(s)];
+    if (info.freq == 0)
+      info.freq = 1;  // dedup: tag presence is binary
   }
-  return tags;
 }
 
 // Iterate over all suffixes of all words
@@ -293,8 +296,8 @@ vector<DocId> NumericIndex::GetAllDocsWithNonNullValues() const {
 
 template <typename C>
 BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive,
-                                    bool with_suffix)
-    : case_sensitive_{case_sensitive}, entries_{mr} {
+                                    bool with_suffix, bool with_offsets)
+    : case_sensitive_{case_sensitive}, with_offsets_{with_offsets}, entries_{mr} {
   if (with_suffix)
     suffix_trie_.emplace(mr);
 }
@@ -306,6 +309,13 @@ const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(
     word = absl::StripAsciiWhitespace(word);
 
   auto it = entries_.find(NormalizeForExactQuery(word).view());
+  return (it != entries_.end()) ? &it->second : nullptr;
+}
+
+template <typename C>
+const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::MatchingNoStem(
+    string_view word) const {
+  auto it = entries_.find(NormalizeQueryWord(word).view());
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
@@ -424,17 +434,17 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
     return false;
   }
 
-  absl::flat_hash_map<std::string, uint32_t> tokens;
+  absl::flat_hash_map<std::string, TermInfo> tokens;
+  uint32_t pos_counter = 0;
   for (string_view str : strings_list.value()) {
-    for (auto& [token, freq] : Tokenize(str))
-      tokens[std::move(token)] += freq;
+    Tokenize(str, &pos_counter, &tokens);
   }
 
   // Track per-field document length for BM25 scoring.
   if constexpr (kIsScored) {
     uint32_t doc_tf_sum = 0;
-    for (const auto& [_, freq] : tokens)
-      doc_tf_sum += freq;
+    for (const auto& [_, info] : tokens)
+      doc_tf_sum += info.freq;
     if (doc_tf_sum > 0) {
       if (id >= field_doc_lengths_.size())
         field_doc_lengths_.resize(id + 1, 0);
@@ -447,8 +457,9 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
 
   if (tokens.size() > 1)
     unique_ids_ = false;
-  for (const auto& [token, freq] : tokens)
-    GetOrCreate(&entries_, token, kIsScored)->Insert(id, freq);
+  for (const auto& [token, info] : tokens)
+    GetOrCreate(&entries_, token, kIsScored, with_offsets_)
+        ->Insert(id, info.freq, absl::MakeConstSpan(info.positions.data(), info.positions.size()));
 
   if (suffix_trie_) {
     absl::flat_hash_set<std::string> token_keys;
@@ -474,10 +485,10 @@ void BaseStringIndex<C>::Remove(DocId id, const DocumentAccessor& doc, string_vi
 
   auto strings_list = GetStrings(doc, field).value();
 
-  absl::flat_hash_map<std::string, uint32_t> tokens;
+  absl::flat_hash_map<std::string, TermInfo> tokens;
+  uint32_t pos_counter = 0;
   for (string_view str : strings_list) {
-    for (auto& [token, freq] : Tokenize(str))
-      tokens[std::move(token)] += freq;
+    Tokenize(str, &pos_counter, &tokens);
   }
 
   for (const auto& [token, _] : tokens)
@@ -550,9 +561,10 @@ StringOrView BaseStringIndex<C>::NormalizeForExactQuery(std::string_view query) 
 
 template <typename C>
 typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(
-    search::RaxTreeMap<Container>* map, string_view word, bool store_freq) {
+    search::RaxTreeMap<Container>* map, string_view word, bool store_freq, bool store_positions) {
   auto* mr = map->get_allocator().resource();
-  return &map->try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */, store_freq)
+  return &map->try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */, store_freq,
+                           store_positions)
               .first->second;
 }
 
@@ -572,8 +584,8 @@ template struct BaseStringIndex<SortedVector<DocId>>;
 
 TextIndex::TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords,
                      const Synonyms* synonyms, bool with_suffixtrie, bool no_stem,
-                     std::string_view language, std::string_view language_field)
-    : BaseStringIndex(mr, false, with_suffixtrie),
+                     std::string_view language, std::string_view language_field, bool with_offsets)
+    : BaseStringIndex(mr, false, with_suffixtrie, with_offsets),
       stopwords_{stopwords},
       synonyms_{synonyms},
       language_field_{language_field} {
@@ -617,8 +629,21 @@ std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const Document
   return doc.GetStrings(field);
 }
 
-absl::flat_hash_map<std::string, uint32_t> TextIndex::Tokenize(std::string_view value) const {
-  return TokenizeWords(value, *stopwords_, synonyms_, stemmer_);
+void TextIndex::Tokenize(std::string_view value, uint32_t* pos_counter,
+                         absl::flat_hash_map<std::string, TermInfo>* out) const {
+  TokenizeWords(value, *stopwords_, synonyms_, stemmer_, pos_counter, out);
+}
+
+std::vector<std::string> TextIndex::TokenizePhraseQuery(std::string_view phrase) const {
+  std::vector<std::string> out;
+  const StopWords* sw = stopwords_;
+  for (std::string_view word : una::views::word_only::utf8(phrase)) {
+    std::string lc = una::cases::to_lowercase_utf8(word);
+    if (sw && sw->contains(lc))
+      continue;
+    out.push_back(std::move(lc));
+  }
+  return out;
 }
 
 DefragmentResult TagIndex::Defragment(PageUsage* page_usage) {
@@ -641,8 +666,9 @@ std::optional<DocumentAccessor::StringList> TagIndex::GetStrings(const DocumentA
   return doc.GetTags(field);
 }
 
-absl::flat_hash_map<std::string, uint32_t> TagIndex::Tokenize(std::string_view value) const {
-  return NormalizeTags(value, case_sensitive_, separator_);
+void TagIndex::Tokenize(std::string_view value, uint32_t* /*pos_counter*/,
+                        absl::flat_hash_map<std::string, TermInfo>* out) const {
+  NormalizeTags(value, case_sensitive_, separator_, out);
 }
 
 BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim) : dim_{dim}, sim_{sim} {
