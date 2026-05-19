@@ -1,10 +1,10 @@
-#include "server/channel_store.h"
-
 // Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include "server/channel_store.h"
 
 #include <absl/container/fixed_array.h>
+#include <absl/container/inlined_vector.h>
 
 #include "base/logging.h"
 #include "core/glob_matcher.h"
@@ -13,7 +13,6 @@
 #include "server/cluster_support.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
-#include "server/server_state.h"
 
 namespace dfly {
 using namespace std;
@@ -51,23 +50,22 @@ auto BuildSender(string_view channel, facade::ArgRange messages, bool sharded = 
 
 }  // namespace
 
-bool ChannelStore::Subscriber::ByThread(const Subscriber& lhs, const Subscriber& rhs) {
-  return ByThreadId(lhs, rhs.LastKnownThreadId());
-}
-
-bool ChannelStore::Subscriber::ByThreadId(const Subscriber& lhs, const unsigned thread) {
-  return lhs.LastKnownThreadId() < thread;
-}
+ChannelStore* channel_store = nullptr;
 
 ChannelStore::UpdatablePointer::UpdatablePointer(const UpdatablePointer& other) {
   ptr.store(other.ptr.load(memory_order_relaxed), memory_order_relaxed);
+}
+
+ChannelStore::UpdatablePointer::UpdatablePointer(UpdatablePointer&& other) noexcept {
+  ptr.store(other.ptr.load(memory_order_relaxed), memory_order_relaxed);
+  other.ptr.store(nullptr, memory_order_relaxed);
 }
 
 ChannelStore::SubscribeMap* ChannelStore::UpdatablePointer::Get() const {
   return ptr.load(memory_order_acquire);  // sync pointed memory
 }
 
-void ChannelStore::UpdatablePointer::Set(ChannelStore::SubscribeMap* sm) {
+void ChannelStore::UpdatablePointer::Set(ChannelStore::SubscribeMap* sm) const {
   ptr.store(sm, memory_order_release);  // sync pointed memory
 }
 
@@ -79,49 +77,21 @@ const ChannelStore::SubscribeMap& ChannelStore::UpdatablePointer::operator*() co
   return *Get();
 }
 
-void ChannelStore::ChannelMap::Add(string_view key, ConnectionContext* me, uint32_t thread_id) {
-  auto it = find(key);
-  if (it == end())
-    it = emplace(key, new SubscribeMap{}).first;
-  it->second->emplace(me, thread_id);
+bool ChannelStore::Subscriber::ByThread(const Subscriber& lhs, const Subscriber& rhs) {
+  return ByThreadId(lhs, rhs.LastKnownThreadId());
 }
 
-void ChannelStore::ChannelMap::Remove(string_view key, ConnectionContext* me) {
-  if (auto it = find(key); it != end()) {
-    it->second->erase(me);
-    if (it->second->empty())
-      erase(it);
-  }
+bool ChannelStore::Subscriber::ByThreadId(const Subscriber& lhs, const unsigned thread) {
+  return lhs.LastKnownThreadId() < thread;
 }
 
-void ChannelStore::ChannelMap::DeleteAll() {
-  for (auto [k, ptr] : *this)
-    delete ptr.Get();
+ChannelStore::~ChannelStore() {
+  auto del_cb = [](const string&, UpdatablePointer& up) { delete up.Get(); };
+  channels_.ForEachExclusive(del_cb);
+  patterns_.ForEachExclusive(del_cb);
 }
 
-ChannelStore::ChannelStore() : channels_{new ChannelMap{}}, patterns_{new ChannelMap{}} {
-  control_block.most_recent = this;
-}
-
-ChannelStore::ChannelStore(ChannelMap* channels, ChannelMap* patterns)
-    : channels_{channels}, patterns_{patterns} {
-}
-
-void ChannelStore::Destroy() {
-  control_block.update_mu.lock();
-  control_block.update_mu.unlock();
-
-  auto* store = control_block.most_recent.load(memory_order_relaxed);
-  for (auto* chan_map : {store->channels_, store->patterns_}) {
-    chan_map->DeleteAll();
-    delete chan_map;
-  }
-  delete control_block.most_recent;
-}
-
-ChannelStore::ControlBlock ChannelStore::control_block;
-
-unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange messages,
+unsigned ChannelStore::SendMessages(string_view channel, facade::ArgRange messages,
                                     bool sharded) const {
   vector<Subscriber> subscribers = FetchSubscribers(channel);
   if (subscribers.empty())
@@ -163,17 +133,19 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
   return subscribers_ptr->size();
 }
 
+// Note: This function is not atomic. The underlying channel and pattern stores
+// may be modified concurrently, so the result may not reflect a fully consistent state.
+// This trade-off for avoiding synchronization is acceptable for pub/sub use cases.
 vector<ChannelStore::Subscriber> ChannelStore::FetchSubscribers(string_view channel) const {
   vector<Subscriber> res;
 
-  if (auto it = channels_->find(channel); it != channels_->end())
-    Fill(*it->second, string{}, &res);
+  channels_.FindIf(channel, [&](const UpdatablePointer& up) { Fill(*up, string{}, &res); });
 
-  for (const auto& [pat, subs] : *patterns_) {
+  patterns_.ForEachShared([&](const string& pat, const UpdatablePointer& up) {
     GlobMatcher matcher{pat, true};
     if (matcher.Matches(channel))
-      Fill(*subs, pat, &res);
-  }
+      Fill(*up, pat, &res);
+  });
 
   sort(res.begin(), res.end(), Subscriber::ByThread);
   return res;
@@ -190,40 +162,65 @@ void ChannelStore::Fill(const SubscribeMap& src, const string& pattern, vector<S
   }
 }
 
-std::vector<string> ChannelStore::ListChannels(const string_view pattern) const {
+vector<string> ChannelStore::ListChannels(const string_view pattern) const {
   vector<string> res;
   GlobMatcher matcher{pattern, true};
-  for (const auto& [channel, _] : *channels_) {
+  channels_.ForEachShared([&](const string& channel, const UpdatablePointer&) {
     if (pattern.empty() || matcher.Matches(channel))
       res.push_back(channel);
-  }
+  });
   return res;
 }
 
 size_t ChannelStore::PatternCount() const {
-  return patterns_->size();
+  return patterns_.SizeApproximate();
 }
 
 void ChannelStore::UnsubscribeAfterClusterSlotMigration(const cluster::SlotSet& deleted_slots) {
-  if (deleted_slots.Empty()) {
+  if (deleted_slots.Empty())
     return;
-  }
 
-  const uint32_t tid = util::ProactorBase::me()->GetPoolIndex();
-  ChannelStoreUpdater csu(false, false, nullptr, tid);
-
-  for (const auto& [channel, _] : *channels_) {
-    auto channel_slot = KeySlot(channel);
-    if (deleted_slots.Contains(channel_slot)) {
-      csu.Record(channel);
+  // Single pass: collect matching channels and their subscribers.
+  absl::flat_hash_map<string, vector<Subscriber>> owned_subs;
+  channels_.ForEachShared([&](const string& channel, const UpdatablePointer& up) {
+    if (!deleted_slots.Contains(KeySlot(channel)))
+      return;
+    vector<Subscriber> subs;
+    Fill(*up, string{}, &subs);
+    if (!subs.empty()) {
+      sort(subs.begin(), subs.end(), Subscriber::ByThread);
+      owned_subs.emplace(channel, std::move(subs));
     }
-  }
+  });
 
-  csu.ApplyAndUnsubscribe();
+  if (owned_subs.empty())
+    return;
+
+  for (const auto& [channel, _] : owned_subs)
+    RemoveAllSubscribers(false, channel);
+
+  ChannelsSubMap channel_subs_map;
+  channel_subs_map.reserve(owned_subs.size());
+  for (auto& [channel, subs] : owned_subs)
+    channel_subs_map.emplace(channel, std::move(subs));
+
+  shard_set->pool()->AwaitFiberOnAll([&channel_subs_map](unsigned idx, util::ProactorBase*) {
+    channel_store->UnsubscribeConnectionsFromDeletedSlots(channel_subs_map, idx);
+  });
 }
 
-// TODO: Reuse common code with Send function
-// TODO: Find proper solution to hacky `force_unsubscribe` flag or at least move logic out of io
+void ChannelStore::RemoveAllSubscribers(bool pattern, string_view channel) {
+  ChannelMap& map = pattern ? patterns_ : channels_;
+  map.Mutate(channel, [&](const auto& m, auto LockReaders) {
+    auto it = m.find(channel);
+    if (it == m.end())
+      return;
+    auto locked_map = LockReaders();
+    delete it->second.Get();
+    locked_map.map.erase(it);
+  });
+}
+
 void ChannelStore::UnsubscribeConnectionsFromDeletedSlots(const ChannelsSubMap& sub_map,
                                                           uint32_t idx) {
   for (const auto& [channel, subscribers] : sub_map) {
@@ -249,157 +246,97 @@ ChannelStoreUpdater::ChannelStoreUpdater(bool pattern, bool to_add, ConnectionCo
     : pattern_{pattern}, to_add_{to_add}, cntx_{cntx}, thread_id_{thread_id} {
 }
 
-void ChannelStoreUpdater::Record(string_view key) {
-  ops_.emplace_back(key);
-}
-
-pair<ChannelStore::ChannelMap*, bool> ChannelStoreUpdater::GetTargetMap(ChannelStore* store) {
-  auto* target = pattern_ ? store->patterns_ : store->channels_;
-
-  for (auto key : ops_) {
-    auto it = target->find(key);
-    DCHECK(it != target->end() || to_add_);
-    // We need to make a copy, if we are going to add or delete new map slot.
-    if ((to_add_ && it == target->end()) || (!to_add_ && it->second->size() == 1))
-      return {new ChannelStore::ChannelMap{*target}, true};
-  }
-
-  return {target, false};
-}
-
-void ChannelStoreUpdater::Modify(ChannelMap* target, string_view key) {
-  using SubscribeMap = ChannelStore::SubscribeMap;
-
-  auto it = target->find(key);
-
-  // New key, add new slot.
-  if (to_add_ && it == target->end()) {
-    target->emplace(key, new SubscribeMap{{cntx_, thread_id_}});
-    return;
-  }
-
-  // Last entry for key, remove slot.
-  if (!to_add_ && it->second->size() == 1) {
-    DCHECK(it->second->begin()->first == cntx_);
-    freelist_.push_back(it->second.Get());
-    target->erase(it);
-    return;
-  }
-
-  // RCU update existing SubscribeMap entry.
-  DCHECK(!it->second->empty());
-  auto* replacement = new SubscribeMap{*it->second};
-  if (to_add_)
-    replacement->emplace(cntx_, thread_id_);
-  else
-    replacement->erase(cntx_);
-
-  // The pointer can still be in use, so delay freeing it
-  // until the dispatch and update the slot atomically.
-  freelist_.push_back(it->second.Get());
-  it->second.Set(replacement);
+void ChannelStoreUpdater::Record(string_view channel) {
+  ChannelStore::ChannelMap& map = pattern_ ? channel_store->patterns_ : channel_store->channels_;
+  size_t sid = map.ShardOf(channel);
+  ops_[sid].push_back(channel);
 }
 
 void ChannelStoreUpdater::Apply() {
-  // Wait for other updates to finish, lock the control block and update store pointer.
-  auto& cb = ChannelStore::control_block;
-  cb.update_mu.lock();
-  auto* store = cb.most_recent.load(memory_order_relaxed);
+  ChannelStore::ChannelMap& map = pattern_ ? channel_store->patterns_ : channel_store->channels_;
 
-  // Get target map (copied if needed) and apply operations.
-  auto [target, copied] = GetTargetMap(store);
-  for (auto key : ops_)
-    Modify(target, key);
+  for (size_t sid = 0; sid < ChannelStore::ChannelMap::kNumShards; ++sid) {
+    const auto& shard_keys = ops_[sid];
 
-  // Prepare replacement.
-  auto* replacement = store;
-  if (copied) {
-    auto* new_chans = pattern_ ? store->channels_ : target;
-    auto* new_patterns = pattern_ ? target : store->patterns_;
-    replacement = new ChannelStore{new_chans, new_patterns};
+    if (shard_keys.empty()) {
+      continue;
+    }
+
+    map.Mutate(ChannelStore::ChannelMap::ShardId{sid}, [&](const auto& m, auto LockReaders) {
+      // Track which keys require map changes - new insert or last-subscriber erase.
+      absl::InlinedVector<bool, 8> needs_map_change(shard_keys.size(), false);
+      bool has_map_change = false;
+
+      // Apply RCU update if possible, track if map change is needed.
+      for (size_t i = 0; i < shard_keys.size(); ++i) {
+        std::string_view key = shard_keys[i];
+        auto it = m.find(key);
+        if (to_add_) {
+          if (it == m.end()) {
+            needs_map_change[i] = true;
+            has_map_change = true;
+          } else {
+            auto* old_sm = it->second.Get();
+            auto* new_sm = new ChannelStore::SubscribeMap{*old_sm};
+            new_sm->emplace(cntx_, thread_id_);
+            it->second.Set(new_sm);
+            freelist_[sid].push_back(old_sm);
+          }
+        } else {
+          if (it == m.end())
+            continue;
+          DCHECK(!it->second->empty());
+          if (it->second->size() == 1) {
+            // If a channel is being deleted because the last subscriber is leaving,
+            // make sure the one leaving is actually that last subscriber.
+            DCHECK(it->second->begin()->first == cntx_);
+            needs_map_change[i] = true;
+            has_map_change = true;
+          } else {
+            auto* old_sm = it->second.Get();
+            // You cannot unsubscribe from a channel if you aren't subscribed to it in the first
+            // place.
+            DCHECK(old_sm->contains(cntx_));
+            auto* new_sm = new ChannelStore::SubscribeMap{*old_sm};
+            new_sm->erase(cntx_);
+            it->second.Set(new_sm);
+            freelist_[sid].push_back(old_sm);
+          }
+        }
+      }
+
+      // Apply map changes under exclusive if needed.
+      if (has_map_change) {
+        auto locked_map = LockReaders();
+        for (size_t i = 0; i < shard_keys.size(); ++i) {
+          if (!needs_map_change[i]) {
+            continue;
+          }
+          std::string_view key = shard_keys[i];
+          if (to_add_) {
+            DCHECK(!locked_map.map.contains(key));
+            locked_map.map.emplace(std::string{key},
+                                   ChannelStore::UpdatablePointer{
+                                       new ChannelStore::SubscribeMap{{cntx_, thread_id_}}});
+          } else {
+            auto it = locked_map.map.find(key);
+            DCHECK(it != locked_map.map.end());
+            delete it->second.Get();
+            locked_map.map.erase(it);
+          }
+        }
+      }
+    });
+
+    // Delete old SubscribeMaps after taking exclusive read lock.
+    if (!freelist_[sid].empty()) {
+      map.WithReadExclusiveLock(ChannelStore::ChannelMap::ShardId{sid},
+                                [&old_sms = freelist_[sid]]() {
+                                  for (auto* sm : old_sms)
+                                    delete sm;
+                                });
+    }
   }
-
-  // Update control block and unlock it.
-  cb.most_recent.store(replacement, memory_order_relaxed);
-  cb.update_mu.unlock();
-
-  // Update thread local references. Readers fetch subscribers via FetchSubscribers,
-  // which runs without preemption, and store references to them in self container Subscriber
-  // structs. This means that any point on the other thread is safe to update the channel store.
-  // Regardless of whether we need to replace, we dispatch to make sure all
-  // queued SubscribeMaps in the freelist are no longer in use.
-  shard_set->pool()->AwaitBrief([](unsigned idx, util::ProactorBase*) {
-    ServerState::tlocal()->UpdateChannelStore(
-        // Do not use memory_order_relaxed, we need to fetch the latest value of
-        // the control block
-        ChannelStore::control_block.most_recent.load(std::memory_order_seq_cst));
-  });
-
-  // Delete previous map and channel store.
-  if (copied) {
-    delete (pattern_ ? store->patterns_ : store->channels_);
-    delete store;
-  }
-
-  for (auto ptr : freelist_)
-    delete ptr;
-}
-
-void ChannelStoreUpdater::ApplyAndUnsubscribe() {
-  DCHECK(to_add_ == false);
-  DCHECK(pattern_ == false);
-  DCHECK(cntx_ == nullptr);
-
-  if (ops_.empty()) {
-    return;
-  }
-
-  // Wait for other updates to finish, lock the control block and update store pointer.
-  auto& cb = ChannelStore::control_block;
-  cb.update_mu.lock();
-  auto* store = cb.most_recent.load(memory_order_relaxed);
-
-  // Deep copy, we will remove channels
-  auto* target = new ChannelStore::ChannelMap{*store->channels_};
-
-  for (auto key : ops_) {
-    auto it = target->find(key);
-    freelist_.push_back(it->second.Get());
-    target->erase(it);
-    continue;
-  }
-
-  // Prepare replacement.
-  auto* replacement = new ChannelStore{target, store->patterns_};
-
-  // Update control block and unlock it.
-  cb.most_recent.store(replacement, memory_order_relaxed);
-  cb.update_mu.unlock();
-
-  // FetchSubscribers is not thead safe so we need to fetch here before we do the hop below.
-  // Bonus points because now we compute subscribers only once.
-  absl::flat_hash_map<std::string_view, std::vector<ChannelStore::Subscriber>> subs;
-  for (auto channel : ops_) {
-    auto channel_subs = ServerState::tlocal()->channel_store()->FetchSubscribers(channel);
-    DCHECK(!subs.contains(channel));
-    subs[channel] = std::move(channel_subs);
-  }
-  // Update thread local references. Readers fetch subscribers via FetchSubscribers,
-  // which runs without preemption, and store references to them in self container Subscriber
-  // structs. This means that any point on the other thread is safe to update the channel store.
-  // Regardless of whether we need to replace, we dispatch to make sure all
-  // queued SubscribeMaps in the freelist are no longer in use.
-  shard_set->pool()->AwaitFiberOnAll([&subs](unsigned idx, util::ProactorBase*) {
-    ServerState::tlocal()->UnsubscribeSlotsAndUpdateChannelStore(
-        subs, ChannelStore::control_block.most_recent.load(memory_order_relaxed));
-  });
-
-  // Delete previous map and channel store.
-  delete store->channels_;
-  delete store;
-
-  for (auto ptr : freelist_)
-    delete ptr;
 }
 
 }  // namespace dfly

@@ -109,6 +109,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   using ProtocolClient::CloseSocket;
 
  private:
+  ExecutionState exec_st_;
   RestoreStreamer streamer_;
 };
 

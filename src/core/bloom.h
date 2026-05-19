@@ -5,12 +5,24 @@
 #pragma once
 
 #include <cstdint>
+#include <nonstd/expected.hpp>
+#include <string>
 #include <string_view>
 #include <vector>
 
 #include "base/pmr/memory_resource.h"
 
 namespace dfly {
+
+enum class SBFLoadResult : uint8_t {
+  kOk,
+  kBadVersion,
+  kBadInput,
+  kTruncatedInput,
+  kOutOfRange,
+};
+
+const char* ToString(SBFLoadResult res);
 
 /// Bloom filter based on the design of https://github.com/jvirkki/libbloom
 class Bloom {
@@ -65,6 +77,10 @@ class Bloom {
     return hash_cnt_;
   }
 
+  uint8_t* mutable_data() {
+    return bf_;
+  }
+
  private:
   bool IsSet(size_t index) const;
   bool Set(size_t index);  // return true if bit was set (i.e was 0 before)
@@ -88,14 +104,14 @@ class SBF {
   SBF(const SBF&) = delete;
 
   // C'tor used for loading persisted filters into SBF.
-  // Should be followed by AddFilter.
+  // Should be followed by AllocateFilter.
   SBF(double grow_factor, double fp_prob, size_t max_capacity, size_t prev_size,
       size_t current_size, PMR_NS::memory_resource* mr);
   ~SBF();
 
   SBF& operator=(SBF&& src) noexcept;
 
-  void AddFilter(const std::string& blob, unsigned hash_cnt);
+  uint8_t* AllocateFilter(size_t alloc_size, unsigned hash_cnt);
 
   bool Add(std::string_view str);
   bool Exists(std::string_view str) const;
@@ -136,6 +152,19 @@ class SBF {
 
   size_t MallocUsed() const;
 
+  uint8_t* filter_data(size_t idx) {
+    return filters_[idx].mutable_data();
+  }
+
+  struct StateUpdate {
+    double fp_prob;
+    size_t max_capacity;
+    size_t current_size;
+    size_t prev_size;
+  };
+
+  void ApplyStateUpdate(const StateUpdate& update);
+
  private:
   // multiple filters from the smallest to the largest.
   std::vector<Bloom, PMR_NS::polymorphic_allocator<Bloom>> filters_;
@@ -145,5 +174,86 @@ class SBF {
   size_t current_size_ = 0;
   size_t max_capacity_;
 };
+
+// Pair of values returned to a client.
+struct SBFChunk {
+  // The cursor can have the following values:
+  // 1: The data field is a header that should be used to reconstruct the SBF object itself.
+  // >1: Filter data. First metadata about filter and SBF, then bytes to copy to filter
+  // 0: The filter is fully consumed. The data field must be empty.
+  int64_t cursor;
+  // Bytes containing either the SBF metadata or filter data, depending on cursor value
+  // Maximum size returned is 16MiB. Will always contain data from exactly one filter, does not
+  // span multiple filters.
+  std::string data;
+};
+
+// This class allows sending the contents of an SBF to the caller in chunks, where each chunk is a
+// maximum of 16MiB in size. The first chunk sent back contains only the SBF metadata. Following
+// chunks contain filter data and a state of the SBF. The loader uses per filter data to update the
+// SBF as it encounters new filter items.
+
+/*
+SCANDUMP wire output format (all fields little-endian)
+
+  cursor=1 returns the SBF header (12 bytes):
+  +-------------------+--------------------+
+  | version (4B)      | grow_factor (8B)   |
+  +-------------------+--------------------+
+
+  cursor>1 chunks carry filter data. Each filter begins with
+  44 bytes of metadata, followed by the raw filter bytes.
+  A single filter may span multiple chunks.
+
+  First chunk of a filter:
+  +-----------------+----------------+------------+---------------------+
+  | hash_cnt 4B     | data_length 8B | fp_prob 8B | max_capacity 8B     |
+  +-----------------+----------------+------------+---------------------+
+  | current_size 8B | prev_size 8B   | filter bytes (up to 16MiB - 44B) |
+  +-----------------+----------------+------------ ... -----------------+
+
+  Continuation chunks (same filter, if >16MiB):
+  +------------------------ ... -------------------------+
+  | filter bytes (up to 16MiB)                           |
+  +------------------------ ... -------------------------+
+
+  cursor=0 signals end of iteration (empty data).
+*/
+
+class SBFDumpIterator {
+ public:
+  static constexpr uint64_t kMaxChunkSize = 16 * 1024 * 1024;
+
+  // The cursor is input from client, used to seek within a given SBF. 0 is used to start iteration
+  // from the beginning.
+  SBFDumpIterator(const SBF& sbf, int64_t cursor);
+
+  // Returns (next cursor, data between current and next cursor)
+  // Once the filter is fully read returns 0,""
+  SBFChunk Next();
+
+ private:
+  std::string SerializeHeader() const;
+
+  // Converts a cursor to the specific filter and the offset inside it
+  // O(n) in number of filters
+  void ResolveCursorToPos();
+
+  std::string BuildFilterHeader(std::string_view filter_data) const;
+  std::string BuildFilterContinuation(std::string_view filter_data) const;
+
+  const SBF& sbf_;
+  int64_t cursor_;
+  uint32_t filter_index_ = 0;
+  size_t byte_offset_ = 0;
+};
+
+// Creates an SBF from a dump header chunk (the chunk returned with cursor=1).
+nonstd::expected<SBF*, SBFLoadResult> LoadSBFHeader(std::string_view header_data,
+                                                    PMR_NS::memory_resource* mr);
+
+// Loads a data chunk into an existing SBF. The cursor and data are the values
+// returned by SBFDumpIterator for chunks with cursor > 1.
+SBFLoadResult LoadSBFChunk(int64_t cursor, std::string_view data, SBF* sbf);
 
 }  // namespace dfly

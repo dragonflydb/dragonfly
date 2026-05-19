@@ -6,6 +6,7 @@
 
 #include <absl/types/span.h>
 
+#include <concepts>
 #include <string_view>
 #include <variant>
 
@@ -34,8 +35,9 @@ struct ArgRange {
   ArgRange(ArgRange& range) : ArgRange((const ArgRange&)range) {
   }
 
-  template <typename T, std::enable_if_t<!std::is_same_v<ArgRange, T>, bool> = true>
-  ArgRange(T&& span) : span(std::forward<T>(span)) {  // NOLINT google-explicit-constructor)
+  template <typename T>
+  requires(!std::is_same_v<ArgRange, T>) ArgRange(T&& span)
+      : span(std::forward<T>(span)) {  // NOLINT google-explicit-constructor)
   }
 
   size_t Size() const {

@@ -16,6 +16,10 @@ void StartInThread();
 // Also drops the (resets) the partial sync buffers
 void StartInThreadAtLsn(LSN lsn);
 
+// Drops the partial-sync buffer for the current shard and invalidates any
+// replica's previously-observed LSN; see the definition for details.
+void ClearBuffer();
+
 std::error_code Close();
 
 //******* The following functions must be called in the context of the owning shard *********//

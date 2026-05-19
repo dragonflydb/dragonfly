@@ -86,7 +86,7 @@ TEST_F(BlockingControllerTest, Basic) {
     BlockingController bc(shard, &namespaces->GetDefaultNamespace());
     auto keys = t->GetShardArgs(shard->shard_id());
     bc.AddWatched(
-        keys, [](auto...) { return true; }, t);
+        keys, [](auto...) { return KeyReadyResult::kReady; }, t);
     EXPECT_EQ(1, bc.NumWatched(0));
 
     bc.RemovedWatched(keys, t);
@@ -95,13 +95,55 @@ TEST_F(BlockingControllerTest, Basic) {
   });
 }
 
+// Regression for https://github.com/dragonflydb/dragonfly/pull/7225:
+// NotifyWatchQueue used to walk every queued waiter (O(N) per notify) when
+// the key was absent. The fast path now short-circuits via FindReadOnly. We
+// assert the per-waiter checker is never invoked.
+TEST_F(BlockingControllerTest, NotifyWatchQueueFastPathOnAbsentKey) {
+  constexpr size_t kWaiters = 64;
+  const std::string_view key = str_vec_[0];  // "x", hashes to shard 0 (verified in SetUp)
+
+  std::vector<boost::intrusive_ptr<Transaction>> txs;
+  txs.reserve(kWaiters);
+  for (size_t i = 0; i < kWaiters; ++i) {
+    auto t = boost::intrusive_ptr<Transaction>(new Transaction{&cid_});
+    t->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {arg_vec_.data(), arg_vec_.size()});
+    txs.push_back(std::move(t));
+  }
+
+  size_t checker_calls = 0;
+
+  shard_set->Await(0, [&] {
+    EngineShard* shard = EngineShard::tlocal();
+    BlockingController bc(shard, &namespaces->GetDefaultNamespace());
+
+    auto checker = [&checker_calls](EngineShard*, const DbContext&, std::string_view) {
+      ++checker_calls;
+      return KeyReadyResult::kKeyNotFound;
+    };
+
+    for (auto& t : txs) {
+      bc.AddWatched(t->GetShardArgs(shard->shard_id()), checker, t.get());
+    }
+    ASSERT_EQ(1u, bc.NumWatched(0));  // 1 watched key, kWaiters items in its queue
+
+    bc.Awaken(0, key);
+    bc.NotifyPending();
+  });
+
+  // With the enum-based fast path, the first item's checker is called once and returns
+  // kKeyNotFound, aborting the scan without visiting the remaining kWaiters-1 items.
+  EXPECT_EQ(1u, checker_calls) << "fast path did not short-circuit";
+}
+
 TEST_F(BlockingControllerTest, Timeout) {
   time_point tp = steady_clock::now() + chrono::milliseconds(10);
   bool blocked;
   bool paused;
 
   facade::OpStatus status = trans_->WaitOnWatch(
-      tp, Transaction::kShardArgs, [](auto...) { return true; }, &blocked, &paused);
+      tp, Transaction::kShardArgs, [](auto...) { return KeyReadyResult::kReady; }, &blocked,
+      &paused);
 
   EXPECT_EQ(status, facade::OpStatus::TIMED_OUT);
   unsigned num_watched = shard_set->Await(

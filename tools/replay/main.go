@@ -13,8 +13,11 @@ import (
 	"github.com/pterm/pterm"
 )
 
-var fHost = flag.String("host", "127.0.0.1:6379", "Redis host")
-var fCompareHost = flag.String("compare-host", "", "Redis host to compare with")
+var fHost = flag.String("host", "127.0.0.1:6379",
+	"host:port of the replay target. The client protocol is chosen per file from its "+
+		"header (MAIN_RESP/ADMIN_RESP use RESP, MEMCACHE uses the memcache text protocol); "+
+		"-host must speak the protocol of the files being replayed")
+var fCompareHost = flag.String("compare-host", "", "RESP host to compare with (main listener only)")
 var fClientBuffer = flag.Int("buffer", 100, "How many records to buffer per client")
 var fPace = flag.Bool("pace", true, "whether to pace the traffic according to the original timings.false - to pace as fast as possible")
 var fSkip = flag.Uint("skip", 0, "skip N records")
@@ -145,7 +148,7 @@ func Print(files []string) {
 	for i, file := range files {
 		tops[i].ch = make(chan Record, 100)
 		go func(ch chan Record, file string) {
-			parseRecords(file, func(r Record) bool {
+			parseRecords(file, nil, func(r Record) bool {
 				ch <- r
 				return true
 			}, *fIgnoreParseErrors)
@@ -192,9 +195,9 @@ func Analyze(files []string) {
 	for _, file := range files {
 		fileClients := make(map[uint32]bool)
 
-		parseRecords(file, func(r Record) bool {
+		parseRecords(file, nil, func(r Record) bool {
 			total += 1
-			if r.HasMore > 0 {
+			if r.HasMore() {
 				chained += 1
 			}
 
@@ -243,7 +246,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  analyze - analyzes the traffic")
 
 		fmt.Fprintln(os.Stderr, "\nExamples:")
-		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -buffer 50 run *.bin\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -buffer 50 run *.bin        # RESP files\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:11211 run *.bin                  # memcache files\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s -skip-time-sec 30 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s -time-limit 60 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s print *.bin\n", binaryName)

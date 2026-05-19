@@ -27,6 +27,8 @@ extern "C" {
 #include "server/transaction.h"
 #include "server/zset_family.h"
 
+namespace rng = std::ranges;
+
 namespace dfly {
 
 using namespace std;
@@ -112,8 +114,8 @@ struct GeoSearchOpts {
 };
 
 bool ValidateLongLat(double longitude, double latitude) {
-  return !(longitude < GEO_LONG_MIN || longitude > GEO_LONG_MAX || latitude < GEO_LAT_MIN ||
-           latitude > GEO_LAT_MAX);
+  return std::isfinite(longitude) && std::isfinite(latitude) && longitude >= GEO_LONG_MIN &&
+         longitude <= GEO_LONG_MAX && latitude >= GEO_LAT_MIN && latitude <= GEO_LAT_MAX;
 }
 
 void ParseLongLat(CmdArgParser* parser, double lonlat[2]) {
@@ -440,7 +442,7 @@ void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
     std::partial_sort(ga->begin(), ga->begin() + count, ga->end(), comparator);
     ga->resize(count);
   } else {
-    std::sort(ga->begin(), ga->end(), comparator);
+    rng::sort(*ga, comparator);
   }
 }
 

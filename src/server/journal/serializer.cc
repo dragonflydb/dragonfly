@@ -7,7 +7,6 @@
 #include <system_error>
 
 #include "base/logging.h"
-#include "glog/logging.h"
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/error.h"

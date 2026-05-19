@@ -355,8 +355,9 @@ TEST_F(HuffCoderTest, Decode) {
   EXPECT_EQ(2, encoder_.GetNBits('a'));
   EXPECT_EQ(3, encoder_.GetNBits('b'));
 
-  string bindata = encoder_.Export();
-  ASSERT_TRUE(decoder_.Load(bindata, &error_msg_)) << error_msg_;
+  auto bindata = encoder_.Export();
+  ASSERT_TRUE(bindata.has_value());
+  ASSERT_TRUE(decoder_.Load(*bindata, &error_msg_)) << error_msg_;
 
   const char* src_ptr = reinterpret_cast<const char*>(encoded.data());
   array<char, 100> decode_dest{0};
@@ -415,9 +416,22 @@ TEST_F(HuffCoderTest, HugeHistogram) {
   LOG(INFO) << "Total sum: " << sum << " reduced sum: " << sum / 4;
   ASSERT_TRUE(encoder_.Build(hist.data(), hist.size() - 1, &error_msg_)) << error_msg_;
 
-  string bindata = encoder_.Export();
+  auto bindata = encoder_.Export();
+  ASSERT_TRUE(bindata.has_value());
   encoder_.Reset();
-  ASSERT_TRUE(encoder_.Load(bindata, &error_msg_)) << error_msg_;
+  ASSERT_TRUE(encoder_.Load(*bindata, &error_msg_)) << error_msg_;
+}
+
+// Regression test: uniform histogram produces a degenerate Huffman table with num_bits=0.
+// HUF_writeCTable_wksp fails for such tables, which previously triggered a CHECK crash.
+TEST_F(HuffCoderTest, IncompressibleUniformHistogram) {
+  array<unsigned, 256> hist;
+  hist.fill(100);
+  ASSERT_TRUE(encoder_.Build(hist.data(), hist.size() - 1, &error_msg_)) << error_msg_;
+
+  // Uniform distribution is incompressible - Export() should return nullopt instead of crashing.
+  auto bindata = encoder_.Export();
+  EXPECT_FALSE(bindata.has_value());
 }
 
 using benchmark::DoNotOptimize;

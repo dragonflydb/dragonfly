@@ -188,6 +188,14 @@ TEST_F(GeoFamilyTest, GeoSearch) {
   EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "Lisbon")));
 }
 
+// Regression test: GEOSEARCH FROMLONLAT with NaN latitude passes ValidateLongLat
+// (NaN comparisons always return false) and then crashes on DCHECK.
+TEST_F(GeoFamilyTest, GeoSearchNaNCoord) {
+  Run("GEOADD cities 13.361 38.115 Palermo 15.087 37.502 Catania");
+  auto resp = Run("GEOSEARCH cities FROMLONLAT 15 NaN BYRADIUS 200 km");
+  EXPECT_THAT(resp, ErrArg("invalid longitude,latitude pair"));
+}
+
 TEST_F(GeoFamilyTest, GeoRadiusByMember) {
   EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
                             "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",

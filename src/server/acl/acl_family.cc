@@ -43,6 +43,8 @@
 #include "server/server_state.h"
 #include "util/proactor_pool.h"
 
+namespace rng = std::ranges;
+
 using namespace std;
 
 ABSL_FLAG(string, aclfile, "", "Path and name to aclfile");
@@ -145,6 +147,7 @@ void AclFamily::SetUser(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto update_case = [username, &reg, cmd_cntx, this, exists](User::UpdateRequest&& req) {
     auto& user = reg.registry[username];
+    const User::MemoryUsage before = exists ? user.GetMemoryUsage() : User::MemoryUsage{};
     if (!exists) {
       User::UpdateRequest default_req;
       default_req.updates = {User::UpdateRequest::CategoryValueType{User::Sign::MINUS, acl::ALL}};
@@ -153,6 +156,7 @@ void AclFamily::SetUser(CmdArgList args, CommandContext* cmd_cntx) {
     }
     const bool reset_channels = req.reset_channels;
     user.Update(std::move(req), CategoryToIdx(), reverse_cat_table_, CategoryToCommandsIndex());
+    registry_->TrackUser(before, user.GetMemoryUsage(), !exists);
     // Send ok first because the connection might get evicted
     cmd_cntx->SendOk();
     if (exists) {
@@ -331,6 +335,7 @@ GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
     // Evict open connections for old users
     EvictOpenConnectionsOnAllProactorsWithRegistry(registry);
     registry.clear();
+    registry_->ResetStats();
   }
 
   for (size_t i = 0; i < usernames.size(); ++i) {
@@ -341,12 +346,14 @@ GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
                 CategoryToCommandsIndex());
     user.Update(std::move(requests[i]), CategoryToIdx(), reverse_cat_table_,
                 CategoryToCommandsIndex());
+    registry_->TrackUser({}, user.GetMemoryUsage(), /*is_new=*/true);
   }
 
   if (!registry.contains("default")) {
     auto& user = registry["default"];
     user.Update(registry_->DefaultUserUpdateRequest(), CategoryToIdx(), reverse_cat_table_,
                 CategoryToCommandsIndex());
+    registry_->TrackUser({}, user.GetMemoryUsage(), /*is_new=*/true);
   }
 
   return {};
@@ -688,7 +695,7 @@ MergeResult MergeTables(const User::CategoryChanges& categories,
     result.push_back(CommandAndMetadata{cmd, meta});
   }
 
-  std::sort(result.begin(), result.end(), [](const auto& l, const auto& r) {
+  rng::sort(result, [](const auto& l, const auto& r) {
     auto fetch = [](const auto& l) { return l.metadata.seq_no; };
     return std::visit(fetch, l) < std::visit(fetch, r);
   });

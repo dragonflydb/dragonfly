@@ -4,10 +4,13 @@
 
 #include "core/bloom.h"
 
+#include <absl/base/internal/endian.h>
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
 
 #include "base/gtest.h"
+#include "core/compact_object.h"
 
 namespace dfly {
 
@@ -86,6 +89,122 @@ TEST_F(BloomTest, SBF) {
   // TODO: to revisit the math for deriving number of hash functions for each filter
   // according the the SBF paper.
   EXPECT_LE(collisions, kNumElems * 0.008);
+}
+
+TEST_F(BloomTest, DumpAndLoadRoundTrip) {
+  auto* mr = PMR_NS::get_default_resource();
+  SBF src(10, 0.001, 2, mr);
+
+  constexpr unsigned kNumElems = 200;
+  for (unsigned i = 0; i < kNumElems; ++i)
+    src.Add(absl::StrCat("item", i));
+
+  SBFDumpIterator it(src, 0);
+  std::vector<SBFChunk> chunks;
+  for (auto c = it.Next(); c.cursor; c = it.Next())
+    chunks.push_back(std::move(c));
+
+  // at least header + 1 filter
+  ASSERT_GE(chunks.size(), 2u);
+  auto cit = chunks.cbegin();
+
+  // first chunk cursor guaranteed to be 1
+  EXPECT_EQ(cit->cursor, 1);
+
+  auto init_result = LoadSBFHeader(cit->data, mr);
+  ASSERT_TRUE(init_result.has_value());
+
+  SBF* loaded = *init_result;
+  absl::Cleanup cleanup = [&loaded] { CompactObj::DeleteMR<SBF>(loaded); };
+
+  // load all the chunks
+  ++cit;
+  for (; cit != chunks.cend(); ++cit)
+    ASSERT_EQ(LoadSBFChunk(cit->cursor, cit->data, loaded), SBFLoadResult::kOk);
+
+  EXPECT_EQ(loaded->grow_factor(), src.grow_factor());
+  EXPECT_DOUBLE_EQ(loaded->fp_probability(), src.fp_probability());
+  EXPECT_EQ(loaded->max_capacity(), src.max_capacity());
+  EXPECT_EQ(loaded->current_size(), src.current_size());
+  EXPECT_EQ(loaded->prev_size(), src.prev_size());
+  EXPECT_EQ(loaded->num_filters(), src.num_filters());
+
+  for (uint32_t i = 0; i < src.num_filters(); ++i) {
+    EXPECT_EQ(loaded->data(i), src.data(i));
+    EXPECT_EQ(loaded->hashfunc_cnt(i), src.hashfunc_cnt(i));
+  }
+
+  for (unsigned i = 0; i < kNumElems; ++i)
+    EXPECT_TRUE(loaded->Exists(absl::StrCat("item", i))) << "Missing item " << i;
+}
+
+TEST_F(BloomTest, DumpPastEndCursorReturnsEof) {
+  SBF sbf(10, 0.001, 2, PMR_NS::get_default_resource());
+  SBFDumpIterator it(sbf, 999999);
+  auto [cursor, data] = it.Next();
+  EXPECT_EQ(cursor, 0);
+  EXPECT_TRUE(data.empty());
+}
+
+TEST_F(BloomTest, DumpWithGrowthDuringIteration) {
+  auto* mr = PMR_NS::get_default_resource();
+  SBF sbf(10, 0.001, 2, mr);
+
+  constexpr unsigned initial = 100;
+  for (unsigned i = 0; i < initial; ++i)
+    sbf.Add(absl::StrCat("item", i));
+
+  const uint32_t initial_filters = sbf.num_filters();
+
+  // Dump header + first data chunk
+  std::vector<SBFChunk> chunks;
+
+  chunks.push_back(SBFDumpIterator(sbf, 0).Next());
+  ASSERT_EQ(chunks[0].cursor, 1);
+
+  chunks.push_back(SBFDumpIterator(sbf, 1).Next());
+  int64_t cursor = chunks.back().cursor;
+
+  // Trigger growth by adding many more items
+  constexpr unsigned total = 5000;
+  for (unsigned i = initial; i < total; ++i)
+    sbf.Add(absl::StrCat("item", i));
+  ASSERT_GT(sbf.num_filters(), initial_filters) << "SBF should have grown";
+
+  // Continue dumping from old cursor, new filters should be picked up
+  while (cursor != 0) {
+    auto chunk = SBFDumpIterator(sbf, cursor).Next();
+    cursor = chunk.cursor;
+    if (cursor != 0)
+      chunks.push_back(std::move(chunk));
+  }
+
+  auto init_result = LoadSBFHeader(chunks[0].data, mr);
+  ASSERT_TRUE(init_result.has_value());
+
+  SBF* loaded = *init_result;
+  absl::Cleanup cleanup = [&loaded] { CompactObj::DeleteMR<SBF>(loaded); };
+
+  for (size_t i = 1; i < chunks.size(); ++i)
+    ASSERT_EQ(LoadSBFChunk(chunks[i].cursor, chunks[i].data, loaded), SBFLoadResult::kOk);
+
+  // Loaded SBF should have all filters including the grown ones
+  EXPECT_EQ(loaded->num_filters(), sbf.num_filters());
+
+  EXPECT_EQ(loaded->grow_factor(), sbf.grow_factor());
+  EXPECT_DOUBLE_EQ(loaded->fp_probability(), sbf.fp_probability());
+  EXPECT_EQ(loaded->max_capacity(), sbf.max_capacity());
+  EXPECT_EQ(loaded->current_size(), sbf.current_size());
+  EXPECT_EQ(loaded->prev_size(), sbf.prev_size());
+  EXPECT_EQ(loaded->num_filters(), sbf.num_filters());
+
+  for (uint32_t i = 0; i < sbf.num_filters(); ++i) {
+    EXPECT_EQ(loaded->data(i), sbf.data(i));
+    EXPECT_EQ(loaded->hashfunc_cnt(i), sbf.hashfunc_cnt(i));
+  }
+
+  for (unsigned i = 0; i < total; ++i)
+    EXPECT_TRUE(loaded->Exists(absl::StrCat("item", i))) << "Missing item " << i;
 }
 
 static void BM_BloomExist(benchmark::State& state) {

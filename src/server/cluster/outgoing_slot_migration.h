@@ -4,6 +4,7 @@
 #pragma once
 
 #include "server/cluster/cluster_defs.h"
+#include "server/execution_state.h"
 #include "server/protocol_client.h"
 #include "server/transaction.h"
 
@@ -88,6 +89,8 @@ class OutgoingMigration : private ProtocolClient {
   bool ChangeState(MigrationState new_state) ABSL_LOCKS_EXCLUDED(state_mu_);
 
   void OnAllShards(std::function<void(UniqueSliceSlotMigration&)>);
+
+  ExecutionState exec_st_;
 
   MigrationInfo migration_info_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_;

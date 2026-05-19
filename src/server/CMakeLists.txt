@@ -112,6 +112,11 @@ if (WITH_AWS)
   add_definitions(-DWITH_AWS)
 endif()
 
+if (WITH_AWS_CLOUD)
+  SET(AWS_LIB ${AWS_LIB} aws_cloud_lib)
+  add_definitions(-DWITH_AWS_CLOUD)
+endif()
+
 if (WITH_GCP)
   SET(GCP_LIB gcp_lib)
   add_definitions(-DWITH_GCP)

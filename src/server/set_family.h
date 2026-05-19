@@ -35,6 +35,12 @@ class SetFamily {
 
   static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
                                                facade::CmdArgList values, PrimeValue* pv);
+
+  // After iterating a StringSet with set_time(), lazy member expiry may have emptied it.
+  // Per Redis semantics empty collections must not exist as keys, so delete the stale key.
+  // Returns true if the key was deleted.
+  static bool DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
+                               const PrimeValue& pv);
 };
 
 }  // namespace dfly

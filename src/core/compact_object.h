@@ -171,8 +171,9 @@ class CompactObj {
 
   // Different representations of external values
   enum class ExternalRep : uint8_t {
-    STRING,         // OBJ_STRING, Basic representation with various string encodings
-    SERIALIZED_MAP  // OBJ_HASH, Serialized map
+    STRING,          // OBJ_STRING, Basic representation with various string encodings
+    SERIALIZED_MAP,  // OBJ_HASH, Serialized map
+    LIST_NODE        // OBJ_LIST, QList::Node
   };
 
   explicit CompactObj(bool is_key)

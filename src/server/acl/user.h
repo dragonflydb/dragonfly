@@ -134,6 +134,22 @@ class User final {
 
   const CommandChanges& CmdChanges() const;
 
+  // Per-user heap-allocated collection sizes, used by UserRegistry for aggregate stats.
+  struct MemoryUsage {
+    size_t num_passwords = 0;
+    size_t num_cat_changes = 0;
+    size_t num_cmd_changes = 0;
+    size_t num_key_globs = 0;
+    size_t key_globs_bytes = 0;  // total byte length of key glob strings
+    size_t num_pubsub_globs = 0;
+    size_t pubsub_globs_bytes = 0;  // total byte length of pubsub glob strings
+
+    MemoryUsage& operator+=(const MemoryUsage& u);
+    MemoryUsage& operator-=(const MemoryUsage& u);
+  };
+
+  MemoryUsage GetMemoryUsage() const;
+
  private:
   void SetAclCategoriesAndIncrSeq(uint32_t cat, const CategoryToIdxStore& cat_to_id,
                                   const ReverseCategoryIndexTable& reverse_cat,

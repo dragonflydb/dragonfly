@@ -484,6 +484,60 @@ TEST_F(StringSetTest, Ttl) {
   }
 }
 
+// Regression: AddMany with TTL on a member originally added without TTL must
+// reallocate the SDS with TTL space. Before the fix, ObjUpdateExpireTime wrote
+// 4 bytes past the SDS null terminator causing a heap buffer overflow.
+TEST_F(StringSetTest, AddBatchTtlOverflow) {
+  // Add members without TTL (allocated via sdsnewlen, no extra space).
+  EXPECT_TRUE(ss_->Add("foobar"sv));
+  EXPECT_TRUE(ss_->Add("short"sv));
+
+  // AddMany with TTL on the same members — before the fix this overflowed.
+  string_view members[] = {"foobar"sv, "short"sv};
+  ss_->AddMany(absl::MakeSpan(members), 100, false);
+
+  // Verify members are present and have TTL.
+  auto it = ss_->Find("foobar"sv);
+  ASSERT_NE(it, ss_->end());
+  EXPECT_TRUE(it.HasExpiry());
+  EXPECT_EQ(100u, it.ExpiryTime());
+
+  it = ss_->Find("short"sv);
+  ASSERT_NE(it, ss_->end());
+  EXPECT_TRUE(it.HasExpiry());
+
+  // Various string lengths to hit different mimalloc size classes.
+  string strs[] = {string(6, 'x'), string(14, 'x'), string(22, 'x'), string(30, 'x')};
+  for (auto& s : strs) {
+    EXPECT_TRUE(ss_->Add(string_view{s}));
+  }
+  string_view sv_members[] = {strs[0], strs[1], strs[2], strs[3]};
+  ss_->AddMany(absl::MakeSpan(sv_members), 200, false);
+}
+
+// Regression: AddOrReplaceObj must set expiration_used_ when replacing with a TTL entry.
+// Without this, iterating the set skips lazy expiry and expired members stay visible.
+TEST_F(StringSetTest, AddOrReplaceObjSetsExpirationUsed) {
+  // Add member without TTL.
+  EXPECT_TRUE(ss_->Add("key"sv));
+  EXPECT_FALSE(ss_->ExpirationUsed());
+
+  // Replace with TTL via AddMany — this calls AddOrReplaceObj internally.
+  string_view members[] = {"key"sv};
+  ss_->AddMany(absl::MakeSpan(members), 1, false);
+
+  // expiration_used_ must be set so lazy expiry kicks in.
+  EXPECT_TRUE(ss_->ExpirationUsed());
+
+  // Advance time past expiry and iterate — the expired member must be skipped.
+  ss_->set_time(2);
+  unsigned count = 0;
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    ++count;
+  }
+  EXPECT_EQ(0u, count);
+}
+
 TEST_F(StringSetTest, Grow) {
   for (size_t j = 0; j < 10; ++j) {
     for (size_t i = 0; i < 4098; ++i) {
@@ -813,6 +867,21 @@ TEST_F(StringSetTest, ReallocIfNeeded) {
   EXPECT_EQ(ss_->UpperBoundSize(), 1000);
   for (size_t i = 0; i < 1000; i++)
     EXPECT_EQ(*ss_->Find(build_str(i * 10)), build_str(i * 10));
+}
+
+// Regression: MayHaveTtl didn't account for SDS header size, causing a heap buffer overread
+// in DuplicateEntryIfFragmented for non-TTL entries. Caught by DCHECK inside the function.
+TEST_F(StringSetTest, ReallocIfNeededNoTtlOverread) {
+  // strlen=11 with sdshdr5 (hdr=1): alloc request=13, usable=16.
+  // Old MayHaveTtl: 11+5=16 <= 16 → true, but only 15 bytes available from data ptr.
+  ss_->Add(string(11, 'x'));
+
+  PageUsage page_usage{CollectPageStats::NO, 0.9};
+  page_usage.SetForceReallocate(true);
+  for (auto it = ss_->begin(); it != ss_->end(); ++it)
+    it.ReallocIfNeeded(&page_usage);
+
+  EXPECT_EQ(*ss_->Find(string(11, 'x')), string(11, 'x'));
 }
 
 TEST_F(StringSetTest, TransferTTLFlagLinkToObjectOnDelete) {

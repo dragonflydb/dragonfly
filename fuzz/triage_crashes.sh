@@ -229,10 +229,14 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     # Start Dragonfly — use --log_dir so glog writes to separate per-level files
     # (dragonfly.FATAL symlink is created on crash and contains the fatal message)
     LOG_DIR="$WORK_DIR/logs_${CRASH_ID}"
-    mkdir -p "$LOG_DIR"
+    DB_DIR="$WORK_DIR/db_${CRASH_ID}"
+    rm -rf "$DB_DIR"
+    mkdir -p "$LOG_DIR" "$DB_DIR"
 
-    # --log_dir is triage-specific (captures crash logs); not part of the fuzz run
-    DF_ARGS+=(--log_dir="$LOG_DIR")
+    # Triage-specific flags (not part of the fuzz run):
+    # --log_dir captures crash logs; --dir provides a clean writable directory
+    # for save-enabled runs (each crash gets its own dir to avoid stale dumps)
+    DF_ARGS+=(--log_dir="$LOG_DIR" --dir="$DB_DIR")
 
     (ulimit -v "$MEM_LIMIT_KB"; exec "$DRAGONFLY_BIN" "${DF_ARGS[@]}" >/dev/null 2>&1) &
     DF_PID=$!

@@ -575,4 +575,49 @@ TEST_F(AclFamilyTest, TestAclLogUB) {
   EXPECT_THAT(resp, ErrArg("ERR index out of range"));
 }
 
+TEST_F(AclFamilyTest, AclInfoMetrics) {
+  TestInitAclFam();
+
+  // After init only the default user exists.
+  auto stats = GetMetrics().acl_stats;
+  EXPECT_EQ(stats.num_users, 1);
+  EXPECT_EQ(stats.num_passwords, 0);  // default user uses nopass
+  EXPECT_EQ(stats.num_key_globs, 0);
+  EXPECT_EQ(stats.num_pubsub_globs, 0);
+
+  // Add a new user with two passwords.
+  Run("ACL SETUSER alice >pass1 >pass2");
+  stats = GetMetrics().acl_stats;
+  EXPECT_EQ(stats.num_users, 2);
+  EXPECT_EQ(stats.num_passwords, 2);
+
+  // Adding a key glob is tracked in num_key_globs and key_globs_bytes.
+  Run("ACL SETUSER alice ~mykey*");
+  stats = GetMetrics().acl_stats;
+  EXPECT_EQ(stats.num_key_globs, 1);
+  EXPECT_EQ(stats.key_globs_bytes, std::string("mykey*").size());
+
+  // Adding a pubsub glob is tracked in num_pubsub_globs and pubsub_globs_bytes.
+  Run("ACL SETUSER alice &news.*");
+  stats = GetMetrics().acl_stats;
+  EXPECT_EQ(stats.num_pubsub_globs, 1);
+  EXPECT_EQ(stats.pubsub_globs_bytes, std::string("news.*").size());
+
+  // Removing a password is reflected immediately.
+  Run("ACL SETUSER alice <pass1");
+  stats = GetMetrics().acl_stats;
+  EXPECT_EQ(stats.num_passwords, 1);
+
+  // Deleting a user decrements num_users and clears its contributions.
+  Run("ACL DELUSER alice");
+  stats = GetMetrics().acl_stats;
+  EXPECT_EQ(stats.num_users, 1);
+  EXPECT_EQ(stats.num_passwords, 0);
+  EXPECT_EQ(stats.num_key_globs, 0);
+  EXPECT_EQ(stats.num_pubsub_globs, 0);
+
+  // TotalBytes must be positive even with only the default user.
+  EXPECT_GT(stats.TotalBytes(), 0u);
+}
+
 }  // namespace dfly

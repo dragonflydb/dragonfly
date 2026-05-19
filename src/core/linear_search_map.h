@@ -83,15 +83,13 @@ bool LinearSearchMap<Key, Value, N>::contains(const Key& key) const {
 template <typename Key, typename Value, size_t N>
 typename LinearSearchMap<Key, Value, N>::iterator LinearSearchMap<Key, Value, N>::find(
     const Key& key) {
-  return std::find_if(this->begin(), this->end(),
-                      [&key](const auto& pair) { return pair.first == key; });
+  return std::ranges::find_if(*this, [&key](const auto& pair) { return pair.first == key; });
 }
 
 template <typename Key, typename Value, size_t N>
 typename LinearSearchMap<Key, Value, N>::const_iterator LinearSearchMap<Key, Value, N>::find(
     const Key& key) const {
-  return std::find_if(this->begin(), this->end(),
-                      [&key](const auto& pair) { return pair.first == key; });
+  return std::ranges::find_if(*this, [&key](const auto& pair) { return pair.first == key; });
 }
 
 template <typename Key, typename Value, size_t N>

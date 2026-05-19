@@ -174,6 +174,7 @@ class DbSlice {
 
       // The following fields are calculated at init time
       size_t orig_value_heap_size = 0;
+      CompactObjType orig_obj_type = 0;
     };
 
     AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
@@ -194,8 +195,8 @@ class DbSlice {
   using ChangeReq = dfly::ChangeReq;
 
   // Called before deleting an element to notify the search indices.
-  using DocDeletionCallback =
-      std::function<void(std::string_view, const Context&, const PrimeValue& pv)>;
+  // pv is non-const: HNSW external vector preservation may swap sds entries.
+  using DocDeletionCallback = std::function<void(std::string_view, const Context&, PrimeValue& pv)>;
 
   struct ExpireParams {
     bool IsDefined() const {
@@ -223,9 +224,6 @@ class DbSlice {
 
   DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
   ~DbSlice();
-
-  // Activates `db_ind` database if it does not exist (see ActivateDb below).
-  void Reserve(DbIndex db_ind, size_t key_size);
 
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
@@ -391,19 +389,11 @@ class DbSlice {
   }
 
   using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
-  // Holds pairs of source and destination cursors for items moved in the dash table
-  using MovedItemsVec = std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>;
-  using MovedCallback = std::function<void(DbIndex, const MovedItemsVec&)>;
 
   //! Registers the callback to be called for each change.
   //! Returns the registration id which is also the unique version of the dbslice
   //! at a time of the call.
   uint64_t RegisterOnChange(ChangeCallback cb);
-
-  //! Registers the callback to be called after items are moved in table.
-  //! Returns the registration id which is also the unique version of the dbslice
-  //! at a time of the call.
-  uint64_t RegisterOnMove(MovedCallback cb);
 
   bool HasRegisteredCallbacks() const {
     return !change_cb_.empty();
@@ -414,8 +404,6 @@ class DbSlice {
 
   //! Unregisters the callback.
   void UnregisterOnChange(uint64_t id);
-
-  void UnregisterOnMoved(uint64_t id);
 
   struct DeleteExpiredStats {
     uint32_t deleted = 0;        // number of deleted items due to expiry.
@@ -533,7 +521,7 @@ class DbSlice {
                                              PrimeValue obj, uint64_t expire_at_ms,
                                              bool force_update);
 
-  void FlushSlotsFb(const cluster::SlotSet& slot_ids);
+  void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version, uint64_t cb_id);
   util::fb2::Fiber FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
@@ -576,7 +564,6 @@ class DbSlice {
   }
 
   void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
-  void CallMovedCallbacks(DbIndex id, const MovedItemsVec& moved_items);
 
   // We need this because registered callbacks might yield and when they do so we want
   // to avoid Heartbeat or Flushing the db.
@@ -591,7 +578,6 @@ class DbSlice {
   bool expire_allowed_ = true;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
-  uint64_t next_moved_id_ = 1;
 
   // Estimation of available memory dedicated to this shard.
   // Recalculated periodically by dividing free memory left among all shards equally
@@ -623,8 +609,6 @@ class DbSlice {
 
   // ordered from the smallest to largest version.
   std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
-
-  std::list<std::pair<uint32_t, MovedCallback>> moved_cb_;
 
   // Used in temporary computations in Find item and CbFinish
   // This set is used to hold fingerprints of key accessed during the run of

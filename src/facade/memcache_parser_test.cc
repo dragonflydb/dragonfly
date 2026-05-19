@@ -27,7 +27,9 @@ class MCParserTest : public testing::Test {
   }
 
   vector<string_view> ToArgs() const {
-    return {cmd_.backed_args->begin(), cmd_.backed_args->end()};
+    vector<string_view> out;
+    std::ranges::copy(cmd_.backed_args->view(), std::back_inserter(out));
+    return out;
   }
 
   MemcacheParser parser_;

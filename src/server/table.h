@@ -61,7 +61,13 @@ struct DbTableStats {
   // Applies for any non-inline objects.
   size_t obj_memory_usage = 0;
 
+  // Number of entries currently offloaded to tiered storage.
   size_t tiered_entries = 0;
+
+  // Sum of the actual value sizes (in bytes) for all tiered entries.
+  // Unlike TieredStats::allocated_bytes, this reflects logical value sizes only —
+  // not the disk space physically reserved, which is larger due to block alignment
+  // and fragmentation in ExternalAllocator.
   size_t tiered_used_bytes = 0;
 
   struct {
@@ -176,20 +182,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 // the snapshot process. We copy the pointers in StartSnapshotInShard function.
 using DbTableArray = std::vector<boost::intrusive_ptr<DbTable>>;
 
-// ChangeReq - describes the change to the table.
-struct ChangeReq {
-  // If iterator is set then it's an update to the existing bucket.
-  // Otherwise (string_view is set) then it's a new key that is going to be added to the table.
-  std::variant<PrimeTable::bucket_iterator, std::string_view> change;
-
-  explicit ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
-  }
-  explicit ChangeReq(std::string_view key) : change(key) {
-  }
-
-  const PrimeTable::bucket_iterator* update() const {
-    return std::get_if<PrimeTable::bucket_iterator>(&change);
-  }
-};
+// ChangeReq - describes the change to the table: either single bucket or whole bucket set.
+using ChangeReq = std::variant<PrimeTable::bucket_iterator, PrimeTable::BucketSet>;
 
 }  // namespace dfly

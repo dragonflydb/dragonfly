@@ -82,6 +82,15 @@ void GlobalHnswIndexRegistry::Reset() {
   indices_.clear();
 }
 
+size_t GlobalHnswIndexRegistry::GetTotalMemoryUsage() const {
+  std::shared_lock<std::shared_mutex> lock(registry_mutex_);
+  size_t total = 0;
+  for (const auto& [_, index] : indices_) {
+    total += index->GetMemoryUsage();
+  }
+  return total;
+}
+
 absl::flat_hash_set<std::string> GlobalHnswIndexRegistry::GetIndexNames() const {
   std::shared_lock<std::shared_mutex> lock(registry_mutex_);
   absl::flat_hash_set<std::string> index_names;

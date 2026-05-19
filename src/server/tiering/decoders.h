@@ -8,8 +8,14 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 
 #include "core/compact_object.h"
+#include "core/qlist.h"
+
+namespace dfly::detail {
+struct ListpackWrap;
+}
 
 namespace dfly::tiering {
 
@@ -34,8 +40,9 @@ struct Decoder {
   // Compute upload metrics to determine if its worth
   virtual UploadMetrics GetMetrics() const = 0;
 
-  // Store value in compact object
-  virtual void Upload(CompactObj* obj) = 0;
+  // Store value. It's up to implementation to ensure that
+  // pointer is cast to correct object type.
+  virtual void Upload(void* obj) = 0;
 };
 
 // Basic "bare" decoder that just stores the provided slice
@@ -43,7 +50,7 @@ struct BareDecoder : public Decoder {
   std::unique_ptr<Decoder> Clone() const override;
   void Initialize(std::string_view slice) override;
   UploadMetrics GetMetrics() const override;
-  void Upload(CompactObj* obj) override;
+  void Upload(void* obj) override;
 
   std::string_view slice;
 };
@@ -55,7 +62,7 @@ struct StringDecoder : public Decoder {
   std::unique_ptr<Decoder> Clone() const override;
   void Initialize(std::string_view slice) override;
   UploadMetrics GetMetrics() const override;
-  void Upload(CompactObj* obj) override;
+  void Upload(void* obj) override;
 
   std::string_view GetView() const {
     return value_.view();
@@ -74,15 +81,37 @@ struct StringDecoder : public Decoder {
 
 // Decodes SerializedMaps
 struct SerializedMapDecoder : public Decoder {
+  ~SerializedMapDecoder();  // because of forward declared types
+
   std::unique_ptr<Decoder> Clone() const override;
   void Initialize(std::string_view slice) override;
   UploadMetrics GetMetrics() const override;
-  void Upload(CompactObj* obj) override;
+  void Upload(void* obj) override;
 
-  SerializedMap* Get() const;
+  // Access internal object for read, returns currently stored variant
+  std::variant<SerializedMap*, dfly::detail::ListpackWrap*> Get() const;
+
+  // Access internal object for writes
+  dfly::detail::ListpackWrap* GetMutable();
 
  private:
-  std::unique_ptr<SerializedMap> map_;
+  void MakeOwned();  // Convert to listpack
+
+  bool modified_ = false;
+  std::variant<std::unique_ptr<SerializedMap>, std::unique_ptr<dfly::detail::ListpackWrap>> map_;
+};
+
+// Decodes QList::Node
+struct ListNodeDecoder : public Decoder {
+  explicit ListNodeDecoder(QList* ql);
+  std::unique_ptr<Decoder> Clone() const override;
+  void Initialize(std::string_view slice) override;
+  UploadMetrics GetMetrics() const override;
+  void Upload(void* obj) override;
+
+ private:
+  QList* ql_;
+  std::string_view slice_;
 };
 
 }  // namespace dfly::tiering

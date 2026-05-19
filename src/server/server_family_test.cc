@@ -41,7 +41,7 @@ TEST_F(ServerFamilyTest, ReadTcpInfo) {
   server_addr.sin_port = 0;  // Let the system choose a free port
 
   // Bind to the port
-  ASSERT_EQ(bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)), 0)
+  ASSERT_EQ(::bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)), 0)
       << "Failed to bind socket: " << strerror(errno);
 
   // Start listening
@@ -78,7 +78,7 @@ TEST_F(ServerFamilyTest, GetTcpSocketInfoIPv6) {
   server_addr.sin6_port = 0;  // Let the system choose a free port
 
   // Bind to the port
-  ASSERT_EQ(bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)), 0)
+  ASSERT_EQ(::bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)), 0)
       << "Failed to bind IPv6 socket: " << strerror(errno);
 
   // Start listening

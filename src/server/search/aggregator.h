@@ -126,6 +126,11 @@ AggregationStep MakeLimitStep(size_t offset, size_t num);
 // Parses the expression string immediately; returns an error message on parse failure.
 std::variant<AggregationStep, std::string> MakeFilterStep(std::string_view raw_expr);
 
+// Make `APPLY "expr" AS alias` step.
+// Evaluates the expression for each doc and stores the result under `alias`.
+std::variant<AggregationStep, std::string> MakeApplyStep(std::string_view raw_expr,
+                                                         std::string alias);
+
 // Process values with given steps
 AggregationResult Process(std::vector<DocValues> values,
                           absl::Span<const std::string_view> fields_to_print,

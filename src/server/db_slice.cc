@@ -5,6 +5,7 @@
 #include "server/db_slice.h"
 
 #include "core/dense_set.h"
+#include "strings/human_readable.h"
 
 extern "C" {
 #include "redis/hyperloglog.h"
@@ -45,6 +46,9 @@ ABSL_FLAG(std::string, notify_keyspace_events, "",
           "notify-keyspace-events. Only Ex is supported for now");
 
 ABSL_FLAG(bool, cluster_flush_decommit_memory, false, "Decommit memory after flushing slots");
+
+ABSL_FLAG(bool, replica_delete_expired, true,
+          "If true, replicas proactively delete expired keys on the read path.");
 
 namespace dfly {
 
@@ -96,8 +100,8 @@ class PrimeEvictionPolicy {
   void RecordSplit(PrimeTable::Segment_t* segment) {
     DVLOG(2) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
+
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
-    moved_items_.push_back(std::make_pair(source, dest));
   }
 
   bool CanGrow(const PrimeTable& tbl) const;
@@ -112,12 +116,8 @@ class PrimeEvictionPolicy {
   unsigned checked() const {
     return checked_;
   }
-  const DbSlice::MovedItemsVec& moved_items() {
-    return moved_items_;
-  }
 
  private:
-  DbSlice::MovedItemsVec moved_items_;
   DbSlice* db_slice_;
   ssize_t mem_offset_;
   ssize_t soft_limit_ = 0;
@@ -394,16 +394,9 @@ class DbSlice::PrimeBumpPolicy {
   bool CanBump(const CompactObj& obj) const {
     return !obj.IsSticky();
   }
+
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
-    moved_items_.push_back(std::make_pair(source, dest));
   }
-
-  const DbSlice::MovedItemsVec& moved_items() {
-    return moved_items_;
-  }
-
- private:
-  DbSlice::MovedItemsVec moved_items_;
 };
 
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
@@ -462,15 +455,6 @@ SlotStats DbSlice::GetSlotStats(SlotId sid) const {
   return db_arr_[0]->slots_stats[sid];
 }
 
-void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
-  ActivateDb(db_ind);
-
-  auto& db = db_arr_[db_ind];
-  DCHECK(db);
-
-  db->prime.Reserve(key_size);
-}
-
 DbSlice::AutoUpdater::AutoUpdater() {
 }
 
@@ -490,9 +474,10 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 }
 
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
-  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), -fields_.orig_value_heap_size,
+  AccountObjectMemory(fields_.key, fields_.orig_obj_type, -fields_.orig_value_heap_size,
                       fields_.db_slice->GetDBTable(fields_.db_ind));
-  fields_.orig_value_heap_size = 0;  // Reset to avoid double accounting.
+  fields_.orig_value_heap_size = 0;                      // Reset to avoid double accounting.
+  fields_.orig_obj_type = fields_.it->second.ObjType();  // Sync type after accounting.
 }
 
 void DbSlice::AutoUpdater::Run() {
@@ -507,10 +492,22 @@ void DbSlice::AutoUpdater::Run() {
 
   CHECK_NE(fields_.db_slice, nullptr);
 
-  ssize_t delta = static_cast<int64_t>(fields_.it->second.MallocUsed()) -
-                  static_cast<int64_t>(fields_.orig_value_heap_size);
-  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), delta,
-                      fields_.db_slice->GetDBTable(fields_.db_ind));
+  CompactObjType current_type = fields_.it->second.ObjType();
+  int64_t current_size = static_cast<int64_t>(fields_.it->second.MallocUsed());
+  DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
+
+  if (current_type != fields_.orig_obj_type) {
+    // Type changed: remove old size from old type, add new size to new type separately.
+    // Applying (current_size - orig_size) to the new type would incorrectly subtract
+    // from a counter that never had the original bytes added to it.
+    AccountObjectMemory(fields_.key, fields_.orig_obj_type,
+                        -static_cast<int64_t>(fields_.orig_value_heap_size), table);
+    AccountObjectMemory(fields_.key, current_type, current_size, table);
+  } else {
+    ssize_t delta = current_size - static_cast<int64_t>(fields_.orig_value_heap_size);
+    AccountObjectMemory(fields_.key, current_type, delta, table);
+  }
+
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
   Cancel();  // Reset to not run again
 }
@@ -525,7 +522,8 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .db_ind = db_ind,
               .it = it,
               .key = key,
-              .orig_value_heap_size = it->second.MallocUsed()} {
+              .orig_value_heap_size = it->second.MallocUsed(),
+              .orig_obj_type = it->second.ObjType()} {
   DCHECK(IsValid(it));
 }
 
@@ -640,7 +638,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   // Rationale: we either look it up for reads - and then it's hot, or alternatively,
   // we follow up with modifications, so the pending stash becomes outdated.
   if (pv.HasStashPending()) {
-    owner_->tiered_storage()->CancelStash(cntx.db_index, key, &pv);
+    owner_->tiered_storage()->CancelStash(std::make_pair(cntx.db_index, key), &pv);
   }
 
   // Fetch back cool items
@@ -681,11 +679,21 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     return OpStatus::WRONG_TYPE;
   }
 
+  // It's a new entry.
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
-  // It's a new entry.
-  CallChangeCallbacks(cntx.db_index, ChangeReq{key});
+  // Call change callbacks on the computed set of buckets that can be affected by the insert
+  if (!change_cb_.empty()) {
+    for (bool consistent = false; !consistent;) {
+      auto bucket_set = db.prime.CVCUponInsert(key);
+      CallChangeCallbacks(cntx.db_index, bucket_set);
+
+      // Repeat the change callbacks if the target set changed
+      // The operation is finite as eventually all target buckets will be visited
+      consistent = (bucket_set == db.prime.CVCUponInsert(key));
+    }
+  }
 
   ssize_t memory_offset = -key.size();
   size_t reclaimed = 0;
@@ -743,7 +751,6 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
-  CallMovedCallbacks(cntx.db_index, evp.moved_items());
 
   events_.mutations++;
   ssize_t table_increase = db.prime.mem_usage() - table_before;
@@ -822,12 +829,15 @@ void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
   Del(cntx, it_updater.it);
 }
 
-void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
+void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
+                           uint64_t cb_id) {
   VLOG(1) << "Start FlushSlotsFb";
   // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
-  // We want to flush all the data of a slot that was added till the time the call to FlushSlotsFb
-  // was made. Therefore we delete slots entries with version < next_version
-  uint64_t next_version = 0;
+  // We want to flush all the data of a slot that was added till the time the call to FlushSlots
+  // was made. Therefore we delete slots entries with version < next_version.
+  // next_version and the on_change callback are registered synchronously in FlushSlots
+  // so that entries inserted after the flush was initiated (e.g. by concurrent RDB loading)
+  // get version >= next_version and survive.
   uint64_t del_count = 0;
 
   // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
@@ -853,25 +863,6 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     }
   };
 
-  auto on_change = [&](DbIndex db_index, const ChangeReq& req) {
-    FiberAtomicGuard fg;
-    PrimeTable* table = GetTables(db_index);
-
-    if (const PrimeTable::bucket_iterator* bit = req.update()) {
-      if (!bit->is_done() && bit->GetVersion() < next_version) {
-        iterate_bucket(*bit);
-      }
-    } else {
-      string_view key = get<string_view>(req.change);
-      table->CVCUponInsert(next_version, key,
-                           [next_version, iterate_bucket](PrimeTable::bucket_iterator it) {
-                             DCHECK_LT(it.GetVersion(), next_version);
-                             iterate_bucket(it);
-                           });
-    }
-  };
-  next_version = RegisterOnChange(std::move(on_change));
-
   ServerState& etl = *ServerState::tlocal();
   PrimeTable* pt = &table->prime;
   PrimeTable::Cursor cursor;
@@ -883,7 +874,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
-  UnregisterOnChange(next_version);
+  UnregisterOnChange(cb_id);
 
   if (absl::GetFlag(FLAGS_cluster_flush_decommit_memory)) {
     int64_t start = absl::GetCurrentTimeNanos();
@@ -899,8 +890,53 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
 void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   cluster::SlotSet slot_set(slot_ranges);
   InvalidateSlotWatches(slot_set);
-  fb2::Fiber("flush_slots", [this, slot_set = std::move(slot_set)]() mutable {
-    FlushSlotsFb(slot_set);
+
+  // Capture the version threshold synchronously, before launching the fiber.
+  // Entries inserted after this point get version >= next_version and survive the flush.
+  uint64_t next_version = NextVersion();
+
+  auto shared_slots = std::make_shared<cluster::SlotSet>(std::move(slot_set));
+  boost::intrusive_ptr<DbTable> table = db_arr_.front();
+
+  // Register the on_change callback synchronously so that bucket modifications between
+  // FlushSlots returning and the fiber starting are caught (the callback deletes old entries
+  // before the bucket version is bumped, preventing the traversal from skipping them).
+  auto on_change = [this, shared_slots, next_version, table](DbIndex db_index,
+                                                             const ChangeReq& req) {
+    FiberAtomicGuard fg;
+
+    auto process_bucket = [&](PrimeTable::bucket_iterator it) {
+      std::string tmp;
+      it.AdvanceIfNotOccupied();
+      while (!it.is_done()) {
+        std::string_view key = it->first.GetSlice(&tmp);
+        SlotId sid = KeySlot(key);
+        if (shared_slots->Contains(sid) && it.GetVersion() < next_version) {
+          DbContext cntx;
+          cntx.time_now_ms = GetCurrentTimeMs();
+          cntx.db_index = db_index;
+          Del(cntx, Iterator::FromPrime(it), table.get());
+        }
+        ++it;
+      }
+    };
+
+    if (const auto* bit = std::get_if<PrimeTable::bucket_iterator>(&req)) {
+      if (!bit->is_done() && bit->GetVersion() < next_version) {
+        process_bucket(*bit);
+      }
+    } else {
+      for (auto it : std::get<PrimeTable::BucketSet>(req).buckets()) {
+        if (!it.is_done() && it.GetVersion() < next_version)
+          process_bucket(it);
+      }
+    }
+  };
+
+  uint64_t cb_id = RegisterOnChange(std::move(on_change));
+
+  fb2::Fiber("flush_slots", [this, shared_slots, next_version, cb_id]() {
+    FlushSlotsFb(*shared_slots, next_version, cb_id);
   }).Detach();
 }
 
@@ -932,10 +968,17 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   LOG_IF(DFATAL, !fetched_items_.empty())
       << "Some operation might bumped up items outside of a transaction";
 
-  auto cb = [flush_db_arr = std::move(flush_db_arr)]() mutable {
+  ShardId shard_id = owner_->shard_id();
+  auto cb = [flush_db_arr = std::move(flush_db_arr), shard_id]() mutable {
+    LOG(INFO) << "Drakarys shard " << shard_id << " cb entered (pre-destructors)"
+              << " rss="
+              << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                           ServerState::kGlibcmalloc);
+    LOG(INFO) << "Drakarys shard " << shard_id << " finished decommit"
+              << " rss="
+              << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
   };
 
   return {"flush_dbs", std::move(cb)};
@@ -1243,8 +1286,10 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) con
 
   int64_t expire_time = it->first.GetExpireTime();
 
-  // Never do expiration on replica or if expiration is disabled.
-  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_) {
+  // Never do expiration if expiration is disabled, or on replicas unless replica_delete_expired
+  // is enabled (which allows replicas to proactively delete expired keys on the read path).
+  if (int64_t(cntx.time_now_ms) < expire_time || !expire_allowed_ ||
+      (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))) {
     return it;
   }
 
@@ -1300,22 +1345,17 @@ void DbSlice::ExpireAllIfNeeded() {
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
+  DCHECK(!owner_->shard_lock()->IsFree());
   return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 
-uint64_t DbSlice::RegisterOnMove(MovedCallback cb) {
-  ++next_moved_id_;
-  moved_cb_.emplace_back(next_moved_id_, cb);
-  return next_moved_id_;
-}
-
 // Ordering invariant (PIT mode):
-//   When the traversal fiber visits a bucket in BucketSaveCb, earlier-registered snapshots
+//   When the traversal fiber visits a bucket in OnChangeBlocking, earlier-registered snapshots
 //   (those with snapshot_version_ < this snapshot's version) may not have serialized this bucket
-//   yet. FlushChangeToEarlierCallbacks invokes their OnDbChange callbacks so they serialize the
-//   bucket before the current snapshot stamps it with its own version. Without this, an earlier
+//   yet. FlushChangeToEarlierCallbacks invokes their OnChangeBlocking callbacks so they serialize
+//   the bucket before the current snapshot stamps it with its own version. Without this, an earlier
 //   snapshot could miss the bucket entirely — its traversal already passed it, and the version
-//   stamp from the current snapshot would cause the earlier snapshot's OnDbChange to skip it.
+//   stamp from the current snapshot would cause the earlier snapshot's OnChangeBlocking to skip it.
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   unique_lock<LocalLatch> lk(serialization_latch_);
 
@@ -1332,8 +1372,20 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
     if (cb_version == upper_bound) {
       return;
     }
-    if (bucket_version < cb_version) {
-      ccb->second(db_ind, ChangeReq{it.GetInnerIt()});
+
+    // We can not have here bucket_version < cb_version check. Explanation:
+    // Suppose we run snapshots S1 and S2, S1 starts serializing the bucket B,
+    // now snapshot S2 is started and it reaches the B, calls FlushChangeToEarlierCallbacks.
+    // if if we have here strong inequality, then S1 callback will be skipped here, and S2
+    // will start processing B concurrently with S1. It should be fine in general, but
+    // we prefer avoiding this, so that we could DCHECK the invariant that the version bucket
+    // does not change during the serialization, therefore we allow at most one serializer
+    // reading the bucket at the same time.
+    if (bucket_version <= cb_version) {
+      // Key might have been deleted because another FlushChangeToEarlierCallbacks finished
+      // and allowed a mutation to pass while this one was suspended
+      if (auto inner_it = it.GetInnerIt(); !inner_it.is_done())
+        ccb->second(db_ind, ChangeReq{inner_it});
     }
     ++ccb;
   }
@@ -1346,14 +1398,6 @@ void DbSlice::UnregisterOnChange(uint64_t id) {
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
   change_cb_.erase(it);
-}
-
-void DbSlice::UnregisterOnMoved(uint64_t id) {
-  serialization_latch_.Wait();
-  auto it =
-      find_if(moved_cb_.begin(), moved_cb_.end(), [id](const auto& cb) { return cb.first == id; });
-  CHECK(it != moved_cb_.end());
-  moved_cb_.erase(it);
 }
 
 auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteExpiredStats {
@@ -1403,8 +1447,8 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
 
   // Send and clear accumulated expired key events
   if (auto& events = db_arr_[cntx.db_index]->expired_keys_events_; !events.empty()) {
-    ChannelStore* store = ServerState::tlocal()->channel_store();
-    store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events, false);
+    channel_store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events,
+                                false);
     events.clear();
   }
 
@@ -1530,8 +1574,7 @@ void DbSlice::UnregisterConnectionWatches(absl::Span<const std::pair<DbIndex, st
   for (const auto& [db_indx, key] : keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {
-      it->second.erase(std::remove(it->second.begin(), it->second.end(), dirty_ptr),
-                       it->second.end());
+      std::erase(it->second, dirty_ptr);
       if (it->second.empty())
         watched_keys.erase(it);
     }
@@ -1573,7 +1616,14 @@ void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> 
         if (it->second.IsExternal()) {
           tiered_storage->Delete(index, &it->second);
         } else if (it->second.HasStashPending()) {
-          tiered_storage->CancelStash(index, it->first.GetSlice(&scratch), &it->second);
+          tiered_storage->CancelStash(std::make_pair(index, it->first.GetSlice(&scratch)),
+                                      &it->second);
+        } else if (it->second.ObjType() == OBJ_LIST && it->second.Encoding() == kEncodingQL2) {
+          // Nodes can be offloaded to tiered storage, but the main object doesn't have external or
+          // pending flag set. We need to clear the list explicitly.
+          if (auto* ql = static_cast<QList*>(it->second.RObjPtr()); ql) {
+            ql->Clear();
+          }
         }
       });
     } while (cursor);
@@ -1782,7 +1832,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
   if (pv.HasStashPending()) {
     string scratch;
     string_view key = del_it->first.GetSlice(&scratch);
-    shard_owner()->tiered_storage()->CancelStash(table->index, key, &pv);
+    shard_owner()->tiered_storage()->CancelStash(std::make_pair(table->index, key), &pv);
   } else if (pv.IsExternal()) {
     shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
   }
@@ -1851,7 +1901,7 @@ void DbSlice::OnCbFinishBlocking() {
         auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
           CallChangeCallbacks(db_index, ChangeReq{bit});
         };
-        db.prime.CVCUponBump(change_cb_.back().first, it, bump_cb);
+        db.prime.CVCUponBump(it, bump_cb);
       }
 
       // We must not change the bucket's internal order during serialization
@@ -1861,7 +1911,6 @@ void DbSlice::OnCbFinishBlocking() {
       if (bump_it != it) {  // the item was bumped
         ++events_.bumpups;
       }
-      CallMovedCallbacks(db_index, policy.moved_items());
     }
   }
 
@@ -1881,23 +1930,6 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
   for (size_t i = 0; i < limit; ++i) {
     CHECK(ccb->second);
     ccb->second(id, cr);
-    ++ccb;
-  }
-}
-
-void DbSlice::CallMovedCallbacks(
-    DbIndex id, const std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>& moved_items) {
-  if (moved_cb_.empty())
-    return;
-
-  // does not preempt, just increments the counter.
-  unique_lock<LocalLatch> lk(serialization_latch_);
-
-  const size_t limit = moved_cb_.size();
-  auto ccb = moved_cb_.begin();
-  for (size_t i = 0; i < limit; ++i) {
-    CHECK(ccb->second);
-    ccb->second(id, moved_items);
     ++ccb;
   }
 }

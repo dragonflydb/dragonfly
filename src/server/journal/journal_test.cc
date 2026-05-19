@@ -1,3 +1,5 @@
+#include <absl/strings/str_join.h>
+
 #include <boost/circular_buffer.hpp>
 #include <random>
 #include <string>
@@ -18,28 +20,11 @@ using namespace util;
 
 namespace dfly {
 namespace journal {
-template <typename T> string ConCat(const T& list) {
-  string res;
-  for (auto arg : list) {
-    res += string_view{arg.data(), arg.size()};
-    res += ' ';
-  }
-  return res;
-}
-
-template <> string ConCat(const CmdArgList& list) {
-  string res;
-  for (auto arg : list) {
-    res += facade::ToSV(arg);
-    res += ' ';
-  }
-  return res;
-}
 
 struct EntryPayloadVisitor {
   void operator()(const Entry::Payload& p) {
     out->append(p.cmd).append(" ");
-    *out += visit([](const auto& args) { return ConCat(args); }, p.args);
+    *out += visit([](const auto& args) { return absl::StrJoin(args, " "); }, p.args);
   }
 
   string* out;
@@ -47,22 +32,13 @@ struct EntryPayloadVisitor {
 
 // Extract payload from entry in string form.
 std::string ExtractPayload(ParsedEntry& entry) {
-  std::string out = ConCat(entry.cmd);
-
-  if (!out.empty())
-    out.pop_back();
-
-  return out;
+  return absl::StrJoin(entry.cmd.view(), " ");
 }
 
 std::string ExtractPayload(Entry& entry) {
   std::string out;
   EntryPayloadVisitor visitor{&out};
   visitor(entry.payload);
-
-  if (!out.empty())
-    out.pop_back();
-
   return out;
 }
 

@@ -5,8 +5,10 @@
 #include "server/rdb_load.h"
 
 #include "absl/strings/escaping.h"
+#include "server/common.h"
 #include "server/search/global_hnsw_index.h"
 #include "server/tiered_storage.h"
+#include "strings/human_readable.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -22,6 +24,7 @@ extern "C" {
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 
+#include <bit>
 #include <cmath>
 #include <cstring>
 
@@ -287,13 +290,19 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
-  SBF* sbf =
-      CompactObj::AllocateMR<SBF>(src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
+  SBF* sbf = config_.append ? pv_->GetSBF()
+                            : CompactObj::AllocateMR<SBF>(
+                                  src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
                                   src.current_size, CompactObj::memory_resource());
   for (unsigned i = 0; i < src.filters.size(); ++i) {
-    sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
+    const auto& blob = src.filters[i].blob;
+    auto* ptr = sbf->AllocateFilter(blob.size(), src.filters[i].hash_cnt);
+    memcpy(ptr, blob.data(), blob.size());
   }
-  pv_->SetSBF(sbf);
+
+  // new obj
+  if (!config_.append)
+    pv_->SetSBF(sbf);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTOPK& src) {
@@ -1000,7 +1009,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   DVLOG(3) << "Copying " << to_copy << " bytes";
 
   ::memcpy(next, mem_buf_->InputBuffer().data(), to_copy);
-  mem_buf_->ConsumeInput(to_copy);
+  RETURN_ON_ERR(ConsumeInput(to_copy));
   size -= to_copy;
   if (size == 0)
     return kOk;
@@ -1016,6 +1025,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   if (size > 512) {  // Worth reading directly into next.
     io::MutableBytes mb{next, size};
 
+    RETURN_ON_ERR(ConsumeChunkBudget(size));
     SET_OR_RETURN(src_->Read(mb), bytes_read);
     if (bytes_read < size)
       return RdbError(errc::rdb_file_corrupted);
@@ -1045,7 +1055,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
 
   mem_buf_->CommitWrite(bytes_read);
   ::memcpy(next, mem_buf_->InputBuffer().data(), size);
-  mem_buf_->ConsumeInput(size);
+  RETURN_ON_ERR(ConsumeInput(size));
 
   return kOk;
 }
@@ -1141,8 +1151,11 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
 
   // FetchBuf consumes the input but if we have not went through that path
   // we need to consume now.
-  if (zerocopy_decompress)
-    mem_buf_->ConsumeInput(clen);
+  if (zerocopy_decompress) {
+    if (auto ec = ConsumeInput(clen); ec) {
+      return make_unexpected(ec);
+    }
+  }
 
   return res;
 }
@@ -1161,20 +1174,15 @@ auto RdbLoaderBase::FetchIntegerObject(int enctype) -> io::Result<string> {
 }
 
 io::Result<double> RdbLoaderBase::FetchBinaryDouble() {
-  union {
-    uint64_t val;
-    double d;
-  } u;
-
-  static_assert(sizeof(u) == sizeof(uint64_t));
-  auto ec = EnsureRead(8);
-  if (ec)
+  if (auto ec = EnsureRead(8))
     return make_unexpected(ec);
 
+  if (auto ec = ConsumeChunkBudget(8))
+    return make_unexpected(ec);
   uint8_t buf[8];
   mem_buf_->ReadAndConsume(8, buf);
-  u.val = base::LE::LoadT<uint64_t>(buf);
-  return u.d;
+  const uint64_t val = base::LE::LoadT<uint64_t>(buf);
+  return std::bit_cast<double>(val);
 }
 
 io::Result<double> RdbLoaderBase::FetchDouble() {
@@ -1385,17 +1393,20 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   size_t n = std::min(len, kMaxBlobLen);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; i++) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); i++) {
     error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec) {
       return make_unexpected(ec);
     }
   }
+  // cut off extra elements we allocated but stopped short due to budget
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (len > n) {
-    pending_read_.remaining = len - n;
+  if (len > i) {
+    pending_read_.remaining = len - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1466,16 +1477,18 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   size_t n = std::min<size_t>(len, kMaxBlobLen);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec)
       return make_unexpected(ec);
   }
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (len > n) {
-    pending_read_.remaining = len - n;
+  if (len > i) {
+    pending_read_.remaining = len - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1501,7 +1514,8 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   size_t n = std::min<size_t>(zsetlen, kMaxBlobLen);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec)
       return make_unexpected(ec);
@@ -1516,11 +1530,12 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
     }
     load_trace->arr[i].score = score;
   }
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (zsetlen > n) {
-    pending_read_.remaining = zsetlen - n;
+  if (zsetlen > i) {
+    pending_read_.remaining = zsetlen - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1545,7 +1560,8 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
   // therefore using a smaller segment length than kMaxBlobLen.
   size_t n = std::min<size_t>(len, 512);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
     if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
       SET_OR_UNEXPECT(LoadLen(nullptr), container);
@@ -1568,11 +1584,12 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
     load_trace->arr[i].rdb_var = std::move(var);
     load_trace->arr[i].encoding = container;
   }
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (len > n) {
-    pending_read_.remaining = len - n;
+  if (len > i) {
+    pending_read_.remaining = len - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1595,7 +1612,10 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   load_trace->arr.resize(n * 2);
 
   error_code ec;
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  // The sender always sends stream id and blob together, there is no flush between. So the budget
+  // check is not midway between the two entries.
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     /* Get the master ID, the one we'll use as key of the radix tree
      * node: the entries inside the listpack itself are delta-encoded
      * relatively to this ID. */
@@ -1620,14 +1640,15 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     load_trace->arr[2 * i].rdb_var = std::move(stream_id);
     load_trace->arr[2 * i + 1].rdb_var = std::move(blob);
   }
+  load_trace->arr.resize(2 * i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
   //
   // We only load the stream metadata and consumer groups in the final read,
   // so if there are still unread elements return the partial stream.
-  if (listpacks > n) {
-    pending_read_.remaining = listpacks - n;
+  if (listpacks > i) {
+    pending_read_.remaining = listpacks - i;
     return OpaqueObj{std::move(load_trace), rdbtype};
   }
 
@@ -1803,62 +1824,116 @@ auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(dest), RDB_TYPE_JSON};
 }
 
-auto RdbLoaderBase::ReadSBFImpl(bool chunking) -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadSBFImpl(bool filter_is_chunked) -> io::Result<OpaqueObj> {
   RdbSBF res;
-  uint64_t options;
-  SET_OR_UNEXPECT(LoadLen(nullptr), options);
-  if (options != 0)
-    return Unexpected(errc::rdb_file_corrupted);
-  SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
-  SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
-  if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
-
-  unsigned num_filters = 0;
-  SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
   auto is_power2 = [](size_t n) { return (n & (n - 1)) == 0; };
 
-  for (unsigned i = 0; i < num_filters; ++i) {
+  unsigned num_filters = 0;
+
+  // Only read SBF metadata if not continuing.
+  if (!pending_read_.sbf_filter.has_value() && pending_read_.remaining == 0) {
+    uint64_t options;
+    SET_OR_UNEXPECT(LoadLen(nullptr), options);
+    if (options != 0)
+      return Unexpected(errc::rdb_file_corrupted);
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
+    if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+  } else {
+    num_filters = pending_read_.remaining;
+    pending_read_.remaining = 0;
+  }
+
+  // Read one SBF filter encoded as [chunk_size][chunk_data][chunk_size][chunk_data] up to a total
+  // size which is the size of the `data` string.
+  // We may stop between chunks if the outer tagged chunk ends.
+  auto read_filter_chunks = [&](string& data, size_t start_offset) -> io::Result<size_t> {
+    // data size never changes after initial reserve, we memcpy directly into it in FetchBuf
+    const size_t total = data.size();
+    size_t curr_offset = start_offset;
+    while (curr_offset < total && !ChunkBudgetExhausted()) {
+      auto chunk_res = LoadLen(nullptr);
+      if (!chunk_res)
+        return make_unexpected(chunk_res.error());
+      const size_t chunk_size = *chunk_res;
+      if (chunk_size == 0 || chunk_size > total - curr_offset)
+        return Unexpected(errc::rdb_file_corrupted);
+      if (auto ec = FetchBuf(chunk_size, data.data() + curr_offset))
+        return make_unexpected(ec);
+      curr_offset += chunk_size;
+    }
+    return curr_offset;
+  };
+
+  // Adds a fully read filter into the SBF object after size validation
+  auto append_filter = [&](unsigned hash_cnt, string filter_data) -> error_code {
+    if (const size_t bit_len = filter_data.size() * 8; !is_power2(bit_len) || filter_data.empty())
+      return RdbError(errc::rdb_file_corrupted);
+    res.filters.emplace_back(hash_cnt, std::move(filter_data));
+    return {};
+  };
+
+  // First, complete a partially read filter from the previous state if there is one
+  // In this code path num_filters still includes the partially read filter. So num_filters is
+  // decremented only once the current filter is fully read.
+  if (pending_read_.sbf_filter) {
+    auto& sf = *pending_read_.sbf_filter;
+
+    SET_OR_UNEXPECT(read_filter_chunks(sf.filter_data, sf.offset), sf.offset);
+
+    if (sf.offset < sf.filter_data.size()) {
+      // restore pending_read_ as we did not finish the partially read filter. Also, do not
+      // decrement num_filters. We still need to read the same number of filters next time.
+      pending_read_.remaining = num_filters;
+      return OpaqueObj{std::move(res), RDB_TYPE_SBF};
+    }
+
+    if (auto ec = append_filter(sf.hash_cnt, std::move(sf.filter_data)))
+      return make_unexpected(ec);
+
+    pending_read_.sbf_filter.reset();
+    num_filters--;
+  }
+
+  unsigned filters_read = 0;
+  for (; filters_read < num_filters && !ChunkBudgetExhausted(); ++filters_read) {
     unsigned hash_cnt;
     string filter_data;
     SET_OR_UNEXPECT(LoadLen(nullptr), hash_cnt);
 
-    if (chunking) {
+    if (filter_is_chunked) {
       size_t total_size = 0;
       SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
-      if (total_size == 0) {
+      if (total_size == 0)
         return Unexpected(errc::rdb_file_corrupted);
-      }
 
+      // This size is fixed and never changes. It acts as a limit of how much to read.
       filter_data.resize(total_size);
       size_t offset = 0;
-      while (offset < total_size) {
-        size_t chunk_size = 0;
-        SET_OR_UNEXPECT(LoadLen(nullptr), chunk_size);
-        if (chunk_size == 0 || chunk_size > total_size - offset) {
-          return Unexpected(errc::rdb_file_corrupted);
-        }
-        error_code ec = FetchBuf(chunk_size, filter_data.data() + offset);
-        if (ec) {
-          return make_unexpected(ec);
-        }
+      SET_OR_UNEXPECT(read_filter_chunks(filter_data, 0), offset);
 
-        offset += chunk_size;
+      if (offset < total_size) {
+        DCHECK(ChunkBudgetExhausted()) << "chunk budget not exhausted but filter read ended early";
+        pending_read_.sbf_filter = {std::move(filter_data), offset, hash_cnt};
+        pending_read_.remaining = num_filters - filters_read;
+        return OpaqueObj{std::move(res), RDB_TYPE_SBF};
       }
     } else {
       SET_OR_UNEXPECT(FetchGenericString(), filter_data);
     }
 
-    size_t bit_len = filter_data.size() * 8;
-    if (!is_power2(bit_len)) {  // must be power of two
-      return Unexpected(errc::rdb_file_corrupted);
-    }
-    res.filters.emplace_back(hash_cnt, std::move(filter_data));
+    if (auto ec = append_filter(hash_cnt, std::move(filter_data)))
+      return make_unexpected(ec);
   }
+
+  pending_read_.remaining = num_filters - filters_read;
   return OpaqueObj{std::move(res), RDB_TYPE_SBF};
 }
 
@@ -1974,11 +2049,12 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
 }
 
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
-  auto ec = EnsureRead(sizeof(T));
-  if (ec)
+  if (auto ec = EnsureRead(sizeof(T)); ec)
     return make_unexpected(ec);
 
   char buf[16];
+  if (auto ec = ConsumeChunkBudget(sizeof(T)); ec)
+    return make_unexpected(ec);
   mem_buf_->ReadAndConsume(sizeof(T), buf);
 
   return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
@@ -2018,6 +2094,17 @@ struct RdbLoader::ObjSettings {
   }
 
   ObjSettings() = default;
+};
+
+// State needed to resume loading a chunked value after the first tagged chunk.
+// The first chunk carries the object type and key. Continuation chunks carry only payload,
+// so we keep the object type, key, db, settings, and pending read.
+struct RdbLoader::StreamState {
+  std::string key;
+  DbIndex db_index;
+  int type;
+  PendingRead pending_read;
+  ObjSettings settings;
 };
 
 RdbLoader::RdbLoader(Service* service, RdbLoadContext* load_context, std::string snapshot_id)
@@ -2155,14 +2242,27 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_EOF) {
+      if (current_chunk_state_) {
+        LOG(ERROR) << "eof seen while a previous chunk is not yet finished, stream id "
+                   << current_chunk_state_->stream_id << ", remaining bytes "
+                   << current_chunk_state_->remaining_payload_bytes
+                   << ", pending stream states: " << stream_states_.size();
+        return RdbError(errc::rdb_chunk_payload_remaining);
+      }
+
+      if (!stream_states_.empty()) {
+        LOG(ERROR) << "eof seen while pending stream states: " << stream_states_.size();
+        return RdbError(errc::rdb_chunk_payload_remaining);
+      }
       /* EOF: End of file, exit the main loop. */
       break;
     }
 
     if (type == RDB_OPCODE_FULLSYNC_END) {
-      VLOG(1) << "Read RDB_OPCODE_FULLSYNC_END";
+      LOG(INFO) << "Read RDB_OPCODE_FULLSYNC_END rss="
+                << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
       RETURN_ON_ERR(EnsureRead(8));
-      mem_buf_->ConsumeInput(8);  // ignore 8 bytes
+      RETURN_ON_ERR(ConsumeInput(8));  // ignore 8 bytes
 
       if (full_sync_cut_cb) {
         FlushAllShards();  // Flush as the handler awakes post load handlers
@@ -2266,78 +2366,38 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_VECTOR_INDEX) {
-      // HNSW vector index graph data.
-      // Binary format: [index_key, elements_number,
-      //   then for each node (little-endian):
-      //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
-      //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
-      string index_key;
-      SET_OR_RETURN(FetchGenericString(), index_key);
-
-      uint64_t elements_number;
-      SET_OR_RETURN(LoadLen(nullptr), elements_number);
-
-      if (!deserialize_hnsw_index_) {
-        RETURN_ON_ERR(SkipVectorIndex(index_key, elements_number));
-      } else {
-        DCHECK_GT(shard_count_, 0u);
-        // Parse "index_name:field_name" from the composite key.
-        size_t colon_pos = index_key.rfind(':');
-        string_view index_name{index_key.data(),
-                               colon_pos != string::npos ? colon_pos : index_key.size()};
-        string_view field_name = colon_pos != string::npos
-                                     ? string_view{index_key.data() + colon_pos + 1}
-                                     : string_view{};
-
-        if (shard_count_ == shard_set->size()) {
-          // Same shard count: restore directly.
-          RETURN_ON_ERR(RestoreVectorIndex(index_key, index_name, field_name, elements_number));
-        } else {
-          // Different shard count: load nodes and defer restoration.
-          // Global_ids will be remapped in PerformPostLoad after all key mappings are collected.
-          PendingHnswNodes pending{std::string(index_name), std::string(field_name), {}};
-          RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &pending.nodes));
-          LOG(INFO) << "Deferred HNSW index restore for " << index_key << " with "
-                    << pending.nodes.size() << " nodes (shard count mismatch: " << shard_count_
-                    << " vs " << shard_set->size() << ")";
-          load_context_->AddPendingHnswNodes(std::move(pending));
-        }
-      }
+      RETURN_ON_ERR(HandleVectorIndex());
       continue;
     }
 
     if (type == RDB_OPCODE_SHARD_DOC_INDEX) {
-      // Load ShardDocIndex key-to-DocId mapping
-      // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
-      PendingIndexMapping pim;
-      uint32_t shard_id;
-      SET_OR_RETURN(LoadLen(nullptr), shard_id);
+      RETURN_ON_ERR(HandleShardDocIndex());
+      continue;
+    }
 
-      SET_OR_RETURN(FetchGenericString(), pim.index_name);
-
-      uint64_t mapping_count;
-      SET_OR_RETURN(LoadLen(nullptr), mapping_count);
-      pim.mappings.reserve(mapping_count);
-
-      for (uint64_t i = 0; i < mapping_count; ++i) {
-        string key;
-        SET_OR_RETURN(FetchGenericString(), key);
-        uint64_t doc_id;
-        SET_OR_RETURN(LoadLen(nullptr), doc_id);
-        pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
+    if (type == RDB_OPCODE_TAGGED_CHUNK) {
+      ActiveTaggedChunk state;
+      SET_OR_RETURN(FetchInt<uint32_t>(), state.stream_id);
+      SET_OR_RETURN(FetchInt<uint32_t>(), state.remaining_payload_bytes);
+      if (state.stream_id == 0) {
+        LOG(ERROR) << "invalid stream id 0 with size " << state.remaining_payload_bytes;
+        return RdbError(errc::rdb_file_corrupted);
       }
 
-      if (!deserialize_hnsw_index_) {
-        continue;
+      if (state.remaining_payload_bytes == 0) {
+        LOG(ERROR) << "invalid payload of zero size for stream id " << state.stream_id;
+        return RdbError(errc::rdb_file_corrupted);
       }
-      DCHECK_GT(shard_count_, 0u);
 
-      VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
-              << " entries";
+      current_chunk_state_ = state;
 
-      // Always store mappings. When shard counts differ, PerformPostLoad will redistribute
-      // keys to replica shards and remap global_ids accordingly.
-      load_context_->AddPendingIndexMapping(shard_id, std::move(pim));
+      // A known stream id means this is a continuation chunk containing payload only.
+      // Otherwise this is the first chunk of a new object, and the normal object-loading
+      // path below will read its type and key.
+      if (stream_states_.contains(current_chunk_state_->stream_id)) {
+        RETURN_ON_ERR(LoadValueChunk());
+        RETURN_ON_ERR(FinalizeCurrentChunkIfNeeded());
+      }
       continue;
     }
 
@@ -2353,7 +2413,11 @@ error_code RdbLoader::Load(io::Source* src) {
 
     ++keys_loaded;
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
+
+    VLOG(2) << "LoadKeyValPair key=" << last_key_loaded_ << " rdb_type=" << type
+            << " db= " << cur_db_index_;
     settings.Reset();
+    RETURN_ON_ERR(FinalizeCurrentChunkIfNeeded());
   }  // main load loop
 
   DVLOG(1) << "RdbLoad loop finished";
@@ -2433,14 +2497,34 @@ error_code RdbLoaderBase::EnsureReadInternal(size_t min_to_read) {
   return kOk;
 }
 
+std::error_code RdbLoaderBase::ConsumeInput(size_t n) {
+  RETURN_ON_ERR(ConsumeChunkBudget(n));
+  mem_buf_->ConsumeInput(n);
+  return kOk;
+}
+
+std::error_code RdbLoaderBase::ConsumeChunkBudget(size_t n) {
+  if (!current_chunk_state_)
+    return kOk;
+
+  if (n > current_chunk_state_->remaining_payload_bytes) {
+    LOG(ERROR) << "Chunk budget exceeded: requested " << n << " bytes, remaining "
+               << current_chunk_state_->remaining_payload_bytes << ", stream_id "
+               << current_chunk_state_->stream_id << ", bytes_read " << bytes_read_;
+    return RdbError(errc::rdb_chunk_budget_exceeded);
+  }
+
+  current_chunk_state_->remaining_payload_bytes -= n;
+  return kOk;
+}
+
 io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
   if (is_encoded)
     *is_encoded = false;
 
   // Every RDB file with rdbver >= 5 has 8-bytes checksum at the end,
   // so we can ensure we have 9 bytes to read up until that point.
-  error_code ec = EnsureRead(9);
-  if (ec)
+  if (error_code ec = EnsureRead(9))
     return make_unexpected(ec);
 
   // Read integer meta info.
@@ -2455,7 +2539,9 @@ io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
   if (meta.Type() == RDB_ENCVAL && is_encoded)
     *is_encoded = true;
 
-  mem_buf_->ConsumeInput(1 + meta.ByteSize());
+  if (auto ec = ConsumeInput(1 + meta.ByteSize()); ec) {
+    return make_unexpected(ec);
+  }
 
   return res;
 }
@@ -2527,6 +2613,11 @@ error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
   string res;
   SET_OR_RETURN(FetchGenericString(), res);
 
+  // Stop counting payload bytes on decompressed data. At this point the entire payload size must be
+  // consumed as it was the compressed blob. We switch to another buffer and must be able to read
+  // everything from it without any checks
+  RETURN_ON_ERR(FinishCurrentChunk());
+
   // Decompress blob and switch membuf pointer
   // Last type in the compressed blob is RDB_OPCODE_COMPRESSED_BLOB_END
   // in which we will switch back to the origin membuf (HandleCompressedBlobFinish)
@@ -2554,15 +2645,21 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   string journal_blob;
   SET_OR_RETURN(FetchGenericString(), journal_blob);
 
+  // Create reader & executor if needed
+  if (!journal_reader_)
+    journal_reader_ = std::make_unique<JournalReader>(nullptr, 0);
+
+  if (!journal_executor_)
+    journal_executor_ = std::make_unique<JournalExecutor>(service);
+
   io::BytesSource bs{io::Buffer(journal_blob)};
-  journal_reader_.SetSource(&bs);
+  journal_reader_->SetSource(&bs);
 
   // Parse and exectue in loop.
   size_t done = 0;
-  JournalExecutor ex{service};
   while (done < num_entries) {
     journal::ParsedEntry entry;
-    auto ec = journal_reader_.ReadEntry(&entry);
+    auto ec = journal_reader_->ReadEntry(&entry);
     if (ec)
       return ec;
 
@@ -2584,7 +2681,7 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     }
 
     DVLOG(2) << "Executing item: " << entry.ToString();
-    ex.Execute(entry.dbid, entry.cmd);
+    journal_executor_->Execute(entry.dbid, entry.cmd);
   }
 
   return std::error_code{};
@@ -2706,14 +2803,14 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   if (out_buf.empty())
     return;
 
-  auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
+  auto cb = [this, ib = std::move(out_buf)] {
     auto& db_slice = GetCurrentDbSlice();
 
     // Before we start loading, increment LoadInProgress.
     // This is required because FlushShardAsync dispatches to multiple shards, and those shards
     // might have not yet have their state (load in progress) incremented.
     db_slice.IncrLoadInProgress();
-    this->LoadItemsBuffer(indx, ib);
+    this->LoadItemsBuffer(ib);
     db_slice.DecrLoadInProgress();
   };
 
@@ -2734,6 +2831,20 @@ std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig co
   return visitor.ec();
 }
 
+std::error_code RdbLoaderBase::FinishCurrentChunk() {
+  if (!current_chunk_state_)
+    return kOk;
+
+  if (!ChunkBudgetExhausted()) {
+    LOG(ERROR) << "chunk fully consumed but payload bytes remain "
+               << current_chunk_state_->remaining_payload_bytes;
+    return RdbError(errc::rdb_chunk_payload_remaining);
+  }
+
+  current_chunk_state_.reset();
+  return kOk;
+}
+
 void RdbLoaderBase::CopyStreamId(const StreamID& src, struct streamID* dest) {
   dest->ms = src.ms;
   dest->seq = src.seq;
@@ -2750,9 +2861,10 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   };
 
   LoadConfig config_copy = item->load_config;
+  ChunkedKey chunked_key{db_ind, item->key};
   if (item->load_config.chunked && item->load_config.append) {
     std::unique_lock lk{now_chunked_mu_};
-    if (auto it = now_chunked_.find(item->key); it != now_chunked_.end()) {
+    if (auto it = now_chunked_.find(chunked_key); it != now_chunked_.end()) {
       pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
@@ -2793,13 +2905,13 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
 
   if (item->load_config.chunked) {
     std::unique_lock lk{now_chunked_mu_};
-    if (!now_chunked_.contains(item->key))
-      now_chunked_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
+    if (!now_chunked_.contains(chunked_key))
+      now_chunked_.emplace(chunked_key, make_unique<PrimeValue>(std::move(pv)));
 
     if (!item->load_config.finalize)
       return;
 
-    pv = std::move(*now_chunked_.extract(item->key).mapped());
+    pv = std::move(*now_chunked_.extract(chunked_key).mapped());
   }
 
   // We need this extra check because we don't return empty_key
@@ -2848,17 +2960,19 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 }
 
-void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
+void RdbLoader::LoadItemsBuffer(const ItemsBuf& ib) {
   EngineShard* es = EngineShard::tlocal();
-  DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
-  DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
-
-  DCHECK(!db_slice.IsCacheMode());
+  const uint64_t now_ms = GetCurrentTimeMs();
+  Namespace* ns = &namespaces->GetDefaultNamespace();
 
   for (const auto* item : ib) {
+    DbContext db_cntx{ns, item->db_index, now_ms};
+    DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
+    DCHECK(!db_slice.IsCacheMode());
     CreateObjectOnShard(db_cntx, item, &db_slice);
     if (stop_early_) {
-      return;
+      // force all items in ib to move into item_queue_ so they can be cleaned up later.
+      break;
     }
   }
 
@@ -2879,81 +2993,153 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   SET_OR_RETURN(ReadKey(), key);
   last_key_loaded_ = key;
 
-  bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
-  bool streamed = false;
+  auto remaining_payload_bytes = [&] {
+    return current_chunk_state_ ? current_chunk_state_->remaining_payload_bytes : UINT32_MAX;
+  };
+
+  bool finalized = false;
   do {
-    // If there is a cached Item in the free pool, take it, otherwise allocate
-    // a new Item (LoadItemsBuffer returns free items).
-    Item* item = item_queue_.Pop();
-    if (item == nullptr) {
-      item = new Item;
+    SET_OR_RETURN(ReadAndDispatchObject(type, key, *settings, cur_db_index_), finalized);
+  } while (!finalized && remaining_payload_bytes() > 0 && !stop_early_.load(memory_order_relaxed));
+
+  // If the first tagged chunk did not finish the object, save enough state to resume it when
+  // the next chunk with the same stream id arrives.
+  if (!finalized && current_chunk_state_) {
+    StreamState stream_state{
+        .key = std::move(key),
+        .db_index = cur_db_index_,
+        .type = type,
+        .pending_read = std::move(pending_read_),
+        .settings = *settings,
+    };
+    const bool inserted =
+        stream_states_.try_emplace(current_chunk_state_->stream_id, std::move(stream_state)).second;
+    if (!inserted) {
+      LOG(ERROR) << "attempt to add first chunk for id " << current_chunk_state_->stream_id
+                 << " which already exists";
+      return RdbError(errc::rdb_file_corrupted);
     }
-    // Delete the item if we fail to load the key/val pair.
-    auto cleanup = absl::Cleanup([item] { delete item; });
+  }
 
-    item->load_config.append = pending_read_.remaining > 0;
-
-    error_code ec = ReadObj(type, &item->val);
-    if (ec) {
-      VLOG(2) << "ReadObj error " << ec << " for key " << key;
-      return ec;
-    }
-
-    // If the key can be discarded, we must still continue to read the
-    // object from the RDB so we can read the next key.
-    if (ShouldDiscardKey(key, *settings)) {
-      pending_read_.reserve = 0;
-      continue;
-    }
-
-    if (dry_run)
-      continue;
-
-    item->load_config.finalize = pending_read_.remaining == 0;
-    if (!item->load_config.finalize) {
-      item->key = key;
-      streamed = true;
-    } else {
-      // Avoid copying the key if this is the last read of the object.
-      item->key = std::move(key);
-    }
-
-    item->load_config.chunked = streamed;
-    item->load_config.reserve = pending_read_.reserve;
-    // Clear 'reserve' as we must only set when the object is first
-    // initialized.
-    pending_read_.reserve = 0;
-
-    item->is_sticky = settings->is_sticky;
-    item->has_mc_flags = settings->has_mc_flags;
-    item->mc_flags = settings->mc_flags;
-    item->expire_ms = settings->expiretime;
-
-    std::move(cleanup).Cancel();
-    ShardId sid = Shard(item->key, shard_set->size());
-    EngineShard* es = EngineShard::tlocal();
-
-    if (es && es->shard_id() == sid) {
-      DbContext db_cntx{&namespaces->GetDefaultNamespace(), cur_db_index_, GetCurrentTimeMs()};
-      CreateObjectOnShard(db_cntx, item, &db_cntx.GetDbSlice(sid));
-      item_queue_.Push(item);
-    } else {
-      auto& out_buf = shard_buf_[sid];
-
-      out_buf.emplace_back(item);
-
-      constexpr size_t kBufSize = 64;
-      if (out_buf.size() >= kBufSize) {
-        // Despite being async, this function can block if the shard queue is full.
-        FlushShardAsync(sid);
-      }
-    }
-  } while (pending_read_.remaining > 0 && !stop_early_.load(memory_order_relaxed));
-
-  int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
+  const int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
   LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;
 
+  pending_read_ = {};
   return kOk;
+}
+
+std::error_code RdbLoader::LoadValueChunk() {
+  if (!current_chunk_state_.has_value()) {
+    LOG(ERROR) << "chunk load attempt without expected state";
+    return RdbError(errc::rdb_file_corrupted);
+  }
+
+  const auto it = stream_states_.find(current_chunk_state_->stream_id);
+  if (it == stream_states_.end()) {
+    LOG(ERROR) << "missing stream id " << current_chunk_state_->stream_id;
+    return RdbError(errc::rdb_file_corrupted);
+  }
+
+  StreamState& state = it->second;
+
+  // Restore the state from the previous chunk
+  pending_read_ = std::move(state.pending_read);
+
+  bool finalized = false;
+  do {
+    SET_OR_RETURN(ReadAndDispatchObject(state.type, state.key, state.settings, state.db_index),
+                  finalized);
+  } while (!finalized && current_chunk_state_->remaining_payload_bytes > 0 &&
+           !stop_early_.load(memory_order_relaxed));
+
+  if (finalized) {
+    // done reading this object
+    stream_states_.erase(current_chunk_state_->stream_id);
+  } else {
+    // only pending read changes from chunk -> chunk
+    state.pending_read = std::move(pending_read_);
+  }
+
+  pending_read_ = {};
+  return kOk;
+}
+
+io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& key,
+                                                  const ObjSettings& obj_settings,
+                                                  DbIndex db_index) {
+  const ShardId sid = Shard(key, shard_set->size());
+  bool run_inlined = EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid;
+  Item local_item, *item = &local_item;
+
+  // If we run non-inlined, take an item from the queue
+  if (!run_inlined) {
+    if (item = item_queue_.Pop(); item == nullptr)
+      item = new Item;
+  }
+
+  auto cleanup = absl::Cleanup([item, run_inlined] {
+    if (!run_inlined)
+      delete item;
+  });
+
+  // The caller restores pending_read_ for continuation chunks.
+  // If it is already non-empty, this call appends to an existing partially built object.
+  const bool was_appending = pending_read_.remaining != 0;
+
+  // Read a part of the object. Updates remaining items
+  if (auto ec = ReadObj(object_type, &item->val); ec)
+    return make_unexpected(ec);
+
+  const bool finalized = pending_read_.remaining == 0;
+
+  if (ShouldDiscardKey(key, obj_settings)) {
+    pending_read_.reserve = 0;
+    return finalized;
+  }
+
+  if (GetFlag(FLAGS_rdb_load_dry_run)) {
+    return finalized;
+  }
+
+  item->load_config = {
+      .chunked = was_appending || !finalized,
+      .reserve = pending_read_.reserve,
+      // append drives create vs. append and stays true for all continuation chunks, including the
+      // final one. It is always false for the first chunk.
+      .append = was_appending,
+      // finalize is the post-read state and tells the caller whether this call finished reading
+      // the object or has remaining data to read.
+      .finalize = finalized,
+  };
+  pending_read_.reserve = 0;
+
+  if (finalized) {
+    item->key = std::move(key);
+  } else {
+    item->key = key;
+  }
+
+  item->is_sticky = obj_settings.is_sticky;
+  item->has_mc_flags = obj_settings.has_mc_flags;
+  item->mc_flags = obj_settings.mc_flags;
+  item->expire_ms = obj_settings.expiretime;
+  item->db_index = db_index;
+
+  std::move(cleanup).Cancel();
+
+  if (run_inlined) {
+    const DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_index, GetCurrentTimeMs()};
+    CreateObjectOnShard(db_cntx, item, &db_cntx.GetDbSlice(sid));
+  } else {
+    auto& out_buf = shard_buf_[sid];
+    out_buf.emplace_back(item);
+    constexpr size_t kBufSize = 64;
+    if (out_buf.size() >= kBufSize) {
+      FlushShardAsync(sid);
+    }
+  }
+
+  return finalized;
 }
 
 bool RdbLoader::ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const {
@@ -3008,18 +3194,96 @@ void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
     PendingHnswMetadata phm;
     phm.index_name = json["index_name"].as<string>();
     phm.field_name = json["field_name"].as<string>();
-    phm.metadata.max_elements = json["max_elements"].as<size_t>();
-    phm.metadata.cur_element_count = json["cur_element_count"].as<size_t>();
-    phm.metadata.maxlevel = json["maxlevel"].as<int>();
     phm.metadata.enterpoint_node = json["enterpoint_node"].as<size_t>();
 
     LOG(INFO) << "Loaded HNSW metadata for index=" << phm.index_name << " field=" << phm.field_name
-              << " elements=" << phm.metadata.cur_element_count;
+              << " enterpoint=" << phm.metadata.enterpoint_node;
 
     load_context_->AddPendingHnswMetadata(std::move(phm));
   } catch (const std::exception& e) {
     LOG(ERROR) << "Failed to parse HNSW index metadata JSON: " << e.what() << " def: " << def;
   }
+}
+
+error_code RdbLoader::HandleVectorIndex() {
+  // HNSW vector index graph data.
+  // Binary format: [index_key, elements_number,
+  //   then for each node (little-endian):
+  //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
+  //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
+  string index_key;
+  SET_OR_RETURN(FetchGenericString(), index_key);
+
+  uint64_t elements_number;
+  SET_OR_RETURN(LoadLen(nullptr), elements_number);
+
+  if (!deserialize_hnsw_index_) {
+    return SkipVectorIndex(index_key, elements_number);
+  }
+
+  DCHECK_GT(shard_count_, 0u);
+  // Parse "index_name:field_name" from the composite key.
+  size_t colon_pos = index_key.rfind(':');
+  string_view index_name{index_key.data(),
+                         colon_pos != string::npos ? colon_pos : index_key.size()};
+  string_view field_name =
+      colon_pos != string::npos ? string_view{index_key.data() + colon_pos + 1} : string_view{};
+
+  if (shard_count_ == shard_set->size()) {
+    // Same shard count: restore directly.
+    return RestoreVectorIndex(index_key, index_name, field_name, elements_number);
+  }
+
+  // Different shard count: load nodes and defer restoration.
+  // Global_ids will be remapped in PerformPostLoad after all key mappings are collected.
+  PendingHnswNodes pending{std::string(index_name), std::string(field_name), {}};
+  RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &pending.nodes));
+  LOG(INFO) << "Deferred HNSW index restore for " << index_key << " with " << pending.nodes.size()
+            << " nodes (shard count mismatch: " << shard_count_ << " vs " << shard_set->size()
+            << ")";
+  load_context_->AddPendingHnswNodes(std::move(pending));
+  return kOk;
+}
+
+error_code RdbLoader::HandleShardDocIndex() {
+  // Load ShardDocIndex key-to-DocId mapping.
+  // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
+  PendingIndexMapping pim;
+  uint32_t shard_id;
+  SET_OR_RETURN(LoadLen(nullptr), shard_id);
+
+  SET_OR_RETURN(FetchGenericString(), pim.index_name);
+
+  uint64_t mapping_count;
+  SET_OR_RETURN(LoadLen(nullptr), mapping_count);
+  pim.mappings.reserve(mapping_count);
+
+  for (uint64_t i = 0; i < mapping_count; ++i) {
+    string key;
+    SET_OR_RETURN(FetchGenericString(), key);
+    uint64_t doc_id;
+    SET_OR_RETURN(LoadLen(nullptr), doc_id);
+    pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
+  }
+
+  if (!deserialize_hnsw_index_) {
+    return kOk;
+  }
+  DCHECK_GT(shard_count_, 0u);
+
+  VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
+          << " entries";
+
+  // Always store mappings. When shard counts differ, PerformPostLoad will redistribute
+  // keys to replica shards and remap global_ids accordingly.
+  load_context_->AddPendingIndexMapping(shard_id, std::move(pim));
+  return kOk;
+}
+
+std::error_code RdbLoader::FinalizeCurrentChunkIfNeeded() {
+  if (stop_early_.load(memory_order_relaxed))
+    return kOk;
+  return FinishCurrentChunk();
 }
 
 error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
@@ -3060,13 +3324,21 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
   std::vector<search::HnswNodeData> nodes;
   RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &nodes));
 
-  if (!nodes.empty()) {
-    auto metadata = load_context_->FindHnswMetadata(index_name, field_name);
-    DCHECK(metadata) << "HNSW metadata missing for " << index_key;
+  if (nodes.empty())
+    return {};
 
-    hnsw_index->RestoreFromNodes(nodes, *metadata);
-    LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
+  auto metadata = load_context_->FindHnswMetadata(index_name, field_name);
+  if (!metadata) {
+    LOG(ERROR) << "HNSW metadata missing for " << index_key
+               << "; skipping graph restore — index will be rebuilt from keyspace";
+    return {};
   }
+  if (!hnsw_index->RestoreFromNodes(nodes, *metadata)) {
+    LOG(WARNING) << "HNSW graph restore rejected for " << index_key
+                 << "; index will be rebuilt from keyspace";
+    return {};
+  }
+  LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
   return {};
 #else
   return SkipVectorIndex(index_key, elements_number);

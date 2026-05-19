@@ -118,12 +118,27 @@ class MRMWMutexLock {
   }
 
   MRMWMutexLock(const MRMWMutexLock&) = delete;
-  MRMWMutexLock(MRMWMutexLock&&) = delete;
   MRMWMutexLock& operator=(const MRMWMutexLock&) = delete;
-  MRMWMutexLock& operator=(MRMWMutexLock&&) = delete;
+
+  MRMWMutexLock(MRMWMutexLock&& other) noexcept
+      : mutex_(other.mutex_), lock_mode_(other.lock_mode_), locked_(other.locked_) {
+    other.locked_ = false;
+  }
+
+  MRMWMutexLock& operator=(MRMWMutexLock&& other) noexcept {
+    if (this != &other) {
+      if (locked_)
+        mutex_->Unlock(lock_mode_);
+      mutex_ = other.mutex_;
+      lock_mode_ = other.lock_mode_;
+      locked_ = other.locked_;
+      other.locked_ = false;
+    }
+    return *this;
+  }
 
  private:
-  MRMWMutex* const mutex_;
+  MRMWMutex* mutex_;
   MRMWMutex::LockMode lock_mode_;
   bool locked_;
 };

@@ -19,6 +19,7 @@
 #include "core/search/index_result.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
+#include "core/search/scoring.h"
 #include "core/search/sort_indices.h"
 #include "core/search/tag_types.h"
 #include "core/search/vector_utils.h"
@@ -75,6 +76,7 @@ struct ProfileBuilder {
         [](const AstFieldNode& n) { return absl::StrCat("Field{", n.field, "}"); },
         [](const AstKnnNode& n) { return absl::StrCat("KNN{l=", n.limit, "}"); },
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
+        [](const AstOptionalNode& n) { return absl::StrCat("Optional{}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
         [](const AstStarFieldNode& n) { return absl::StrCat("StarField{}"); },
         [](const AstGeoNode& n) {
@@ -114,7 +116,8 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices) : indices_{indices} {
+  BasicSearch(const FieldIndices* indices, ScorerFn scorer = nullptr)
+      : indices_{indices}, scorer_{scorer} {
   }
 
   void EnableProfiling() {
@@ -230,6 +233,27 @@ struct BasicSearch {
       indices = indices_->GetAllTextIndices();
     }
 
+    // Track matched terms for scoring (prefix/suffix/infix expand to multiple terms).
+    // Synonym shadow entries (freq=0) are resolved to their group_id for correct scoring.
+    if (scorer_) {
+      for (auto* index : indices) {
+        auto term_cb = [this, index](string_view term, const auto*) {
+          std::string resolved{term};
+          if (auto synonyms = indices_->GetSynonyms(); synonyms) {
+            if (auto group_id = synonyms->GetGroupToken(resolved); group_id)
+              resolved = std::move(*group_id);
+          }
+          AddMatchedTerm(index, std::move(resolved));
+        };
+        if constexpr (T == TagType::PREFIX)
+          index->MatchPrefixWithTerm(node.affix, term_cb);
+        else if constexpr (T == TagType::SUFFIX)
+          index->MatchSuffixWithTerm(node.affix, term_cb);
+        else if constexpr (T == TagType::INFIX)
+          index->MatchInfixWithTerm(node.affix, term_cb);
+      }
+    }
+
     auto mapping = [&node, this](TextIndex* index) {
       if constexpr (T == TagType::PREFIX)
         return CollectMatches(index, node.affix, &TextIndex::MatchPrefix);
@@ -243,30 +267,40 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
   }
 
-  // "term": access field's text index or unify results from all text indices if no field is set
+  // "term": access field's text index or unify results from all text indices if no field is set.
+  // When the term is in a synonym group, the search is expanded to (term OR group_ref) so docs
+  // matched via stem still join the synonym group's docs.
   IndexResult Search(const AstAffixNode<TagType::REGULAR> node, string_view active_field) {
-    std::string term = node.affix;
-    bool strip_whitespace = true;
+    const std::string& term = node.affix;
+    std::optional<std::string> group_id;
+    if (auto synonyms = indices_->GetSynonyms(); synonyms)
+      group_id = synonyms->GetGroupToken(term);
 
-    if (auto synonyms = indices_->GetSynonyms(); synonyms) {
-      if (auto group_id = synonyms->GetGroupToken(term); group_id) {
-        term = *group_id;
-        strip_whitespace = false;
+    auto match_in = [&](TextIndex* index) {
+      if (scorer_)
+        AddMatchedTerm(index, term);
+      IndexResult r{index->Matching(term, /*strip_whitespace=*/true)};
+      if (group_id) {
+        if (scorer_)
+          AddMatchedTerm(index, *group_id);
+        vector<IndexResult> parts;
+        parts.push_back(std::move(r));
+        parts.push_back(IndexResult{index->Matching(*group_id, /*strip_whitespace=*/false)});
+        r = UnifyResults(std::move(parts), LogicOp::OR);
       }
-    }
+      return r;
+    };
 
     if (!active_field.empty()) {
       if (auto* index = GetIndex<TextIndex>(active_field); index)
-        return IndexResult{index->Matching(term, strip_whitespace)};
+        return match_in(index);
       return IndexResult{};
     }
 
-    vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
-    auto mapping = [&term, strip_whitespace](TextIndex* index) {
-      return index->Matching(term, strip_whitespace);
-    };
-
-    return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
+    vector<IndexResult> sub_results;
+    for (auto* index : indices_->GetAllTextIndices())
+      sub_results.push_back(match_in(index));
+    return UnifyResults(std::move(sub_results), LogicOp::OR);
   }
 
   // [range]: access field's numeric index
@@ -289,6 +323,9 @@ struct BasicSearch {
   // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
   IndexResult Search(const AstNegateNode& node, string_view active_field) {
     auto matched = SearchGeneric(*node.node, active_field).Take().first;
+    if (!error_.empty())
+      return IndexResult{};
+
     vector<DocId> all = indices_->GetAllDocs();
 
     // To negate a result, we have to find the complement of matched to all documents,
@@ -298,6 +335,20 @@ struct BasicSearch {
     };
     all.erase(remove_if(all.begin(), all.end(), pred), all.end());
     return IndexResult{std::move(all)};
+  }
+
+  IndexResult Search(const AstOptionalNode& node, string_view active_field) {
+    // ~ tolerates inner failures: it's a soft scoring boost, not a filter.
+    // E.g. @noindex_field:~hello can't actually populate matched_text_terms_
+    // (no index to query) — but the operator should still return all docs.
+    // Save/restore error_ so a transient inner failure doesn't poison the
+    // outer query.
+    string saved_error = std::move(error_);
+    SearchGeneric(*node.node, active_field);
+    error_ = std::move(saved_error);
+    // ~ never filters: return the full doc set, including docs that lack the
+    // active field. Mirrors AstNegateNode which also operates on global all-docs.
+    return IndexResult{&indices_->GetAllDocs()};
   }
 
   // logical query: unify all sub results
@@ -472,18 +523,133 @@ struct BasicSearch {
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
+    if (scorer_ && !matched_text_terms_.empty()) {
+      // Score ALL matched docs and return top-K by score (not arbitrary cutoff).
+      auto [out, total_size, text_scores] = TakeScoredTopK(std::move(result), cuttoff_limit);
+
+      // KNN populated knn_scores_ in distance order; TakeScoredTopK reordered
+      // `out` by text score, so realign knn_scores_ to the new id order.
+      // Consumers (e.g. search_family.cc) index ids and knn_scores by position.
+      if (!knn_scores_.empty()) {
+        absl::flat_hash_map<DocId, float> knn_by_id;
+        knn_by_id.reserve(knn_scores_.size());
+        for (auto& [doc, dist] : knn_scores_)
+          knn_by_id.emplace(doc, dist);
+        knn_scores_.clear();
+        knn_scores_.reserve(out.size());
+        for (DocId doc : out) {
+          if (auto it = knn_by_id.find(doc); it != knn_by_id.end())
+            knn_scores_.emplace_back(doc, it->second);
+        }
+      }
+
+      return SearchResult{
+          total_size,         std::move(out),   std::move(knn_scores_), std::move(text_scores),
+          std::move(profile), std::move(error_)};
+    }
+
     auto [out, total_size] = result.Take(cuttoff_limit);
-    return SearchResult{total_size, std::move(out), std::move(knn_scores_), std::move(profile),
-                        std::move(error_)};
+    return SearchResult{total_size, std::move(out),     std::move(knn_scores_),
+                        {},         std::move(profile), std::move(error_)};
+  }
+
+ private:
+  // Cursor for sequential freq lookup in a posting list.
+  // Advances forward only - amortized O(1) per doc when docs are sorted.
+  struct TermCursor {
+    TextIndex* index;
+    size_t term_docs;
+    TextIndex::Container::BlockListIterator it;
+    TextIndex::Container::BlockListIterator end;
+  };
+
+  // Advance cursor past entries < doc. Return freq if doc found, 0 otherwise.
+  static uint32_t SeekCursor(TermCursor& c, DocId doc) {
+    while (c.it != c.end && *c.it < doc)
+      ++c.it;
+    return (c.it != c.end && *c.it == doc) ? c.it.Freq() : 0;
+  }
+
+  // Score all matched docs via cursor-based posting list traversal and return top-K by score.
+  // Total work: O(sum of posting_list_sizes) for cursors + O(N log K) for partial sort.
+  std::tuple<vector<DocId>, size_t, vector<pair<DocId, float>>> TakeScoredTopK(IndexResult&& result,
+                                                                               size_t limit) {
+    auto [all_docs, total_size] = result.Take();  // all matched docs
+
+    if (all_docs.empty())
+      return std::make_tuple(vector<DocId>{}, total_size, vector<pair<DocId, float>>{});
+
+    // Ensure sorted for cursor-based scoring
+    sort(all_docs.begin(), all_docs.end());
+
+    // Open cursors on posting lists for each matched term
+    vector<TermCursor> cursors;
+    cursors.reserve(matched_text_terms_.size());
+    for (auto& [index, term] : matched_text_terms_) {
+      auto* container = index->Matching(term, /*strip_whitespace=*/false);
+      if (!container)
+        continue;
+      cursors.push_back({index, container->Size(), container->begin(), container->end()});
+    }
+
+    ScoringContext ctx{indices_->GetAllDocs().size()};
+
+    // Score all docs - reuse term_infos buffer across iterations
+    vector<pair<float, DocId>> scored;
+    scored.reserve(all_docs.size());
+    vector<ScoringTermInfo> term_infos(cursors.size());
+
+    for (DocId doc : all_docs) {
+      for (size_t t = 0; t < cursors.size(); t++) {
+        term_infos[t].term_docs = cursors[t].term_docs;
+        term_infos[t].term_freq = SeekCursor(cursors[t], doc);
+        if (cursors[t].index) {
+          term_infos[t].field_doc_len = cursors[t].index->GetFieldDocLength(doc);
+          term_infos[t].field_avg_doc_len = cursors[t].index->GetFieldAvgDocLen();
+        }
+      }
+      scored.emplace_back(static_cast<float>(ScoreDocument(scorer_, ctx, term_infos)), doc);
+    }
+
+    // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)
+    size_t k = min(limit, scored.size());
+    if (k < scored.size()) {
+      partial_sort(scored.begin(), scored.begin() + k, scored.end(), greater<>());
+      scored.resize(k);
+    }
+
+    // Build output: docs in score order, paired scores
+    vector<DocId> out;
+    vector<pair<DocId, float>> text_scores;
+    out.reserve(k);
+    text_scores.reserve(k);
+    for (auto& [score, doc] : scored) {
+      out.push_back(doc);
+      text_scores.emplace_back(doc, score);
+    }
+
+    return std::make_tuple(std::move(out), total_size, std::move(text_scores));
+  }
+
+  void AddMatchedTerm(TextIndex* index, string term) {
+    if (matched_terms_set_.emplace(index, term).second)
+      matched_text_terms_.emplace_back(index, std::move(term));
   }
 
   const FieldIndices* indices_;
+  ScorerFn scorer_ = nullptr;
 
   string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
 
   std::vector<pair<DocId, float>> knn_scores_;
   vector<pair<float, DocId>> knn_distances_;
+
+  // Tracked text terms for scoring: (TextIndex*, normalized_term)
+  // Deduplicated via matched_terms_set_ to avoid double-counting synonyms resolved to same
+  // group_id.
+  vector<pair<TextIndex*, string>> matched_text_terms_;
+  absl::flat_hash_set<pair<TextIndex*, string>> matched_terms_set_;
 };
 
 #ifndef __clang__
@@ -532,8 +698,9 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
     switch (field_info.type) {
       case SchemaField::TEXT: {
         const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
-        indices_[field_ident] =
-            make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie);
+        indices_[field_ident] = make_unique<TextIndex>(
+            mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie, tparams.no_stem,
+            schema_.default_language, schema_.language_field);
         break;
       }
       case SchemaField::NUMERIC: {
@@ -624,13 +791,18 @@ bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
 }
 
 void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
+  auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
+  if (it == all_ids_.end() || *it != doc) {
+    // During index restoration CursorLoop may not have indexed this document
+    // yet, so it is absent from all_ids_. Nothing to remove.
+    return;
+  }
+
   for (auto& [field, index] : indices_)
     index->Remove(doc, access, field);
   for (auto& [field, sort_index] : sort_indices_)
     sort_index->Remove(doc, access, field);
 
-  auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
-  DCHECK(it != all_ids_.end() && *it == doc);
   all_ids_.erase(it);
 }
 
@@ -658,6 +830,19 @@ std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
 
 const vector<DocId>& FieldIndices::GetAllDocs() const {
   return all_ids_;
+}
+
+size_t FieldIndices::GetNonPmrMemoryUsage() const {
+  // all_ids_ scales with document count — the dominant untracked cost.
+  size_t mem = all_ids_.capacity() * sizeof(DocId);
+  // Hash map bucket arrays scale with field count (typically small).
+  constexpr size_t kIndicesSlotSize =
+      sizeof(absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>>::value_type) + 1;
+  constexpr size_t kSortSlotSize =
+      sizeof(absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>>::value_type) + 1;
+  mem += indices_.bucket_count() * kIndicesSlotSize;
+  mem += sort_indices_.bucket_count() * kSortSlotSize;
+  return mem;
 }
 
 const Schema& FieldIndices::GetSchema() const {
@@ -717,7 +902,7 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
 SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t cuttoff_limit) const {
   DCHECK(query_);
 
-  auto bs = BasicSearch{index};
+  auto bs = BasicSearch{index, scorer_};
   if (profiling_enabled_)
     bs.EnableProfiling();
   return bs.Search(*query_, cuttoff_limit);
@@ -764,6 +949,10 @@ std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
 
 void SearchAlgorithm::EnableProfiling() {
   profiling_enabled_ = true;
+}
+
+void SearchAlgorithm::SetScorer(ScorerFn scorer) {
+  scorer_ = scorer;
 }
 
 const AstVectorRangeNode* SearchAlgorithm::GetVectorRangeNode() const {

@@ -90,6 +90,12 @@ class MemcacheParser {
 
     int64_t expire_ts = 0;  // unix time (expire_ts > month) in seconds
 
+    // Original, pre-ToAbsolute exptime token as sent by the client. Kept so that
+    // tools/replay can reproduce the exact wire command: relative exptimes stay
+    // relative on replay (re-resolved against the replayer's "now"), absolute
+    // exptimes stay absolute. `expire_ts` above is always the absolutised form.
+    uint32_t raw_expire_ts = 0;
+
     // flags for STORE commands
     uint32_t flags = 0;
 
@@ -99,7 +105,7 @@ class MemcacheParser {
     cmn::BackedArguments* backed_args = nullptr;
   };
 
-  static_assert(sizeof(Command) == 40);
+  static_assert(sizeof(Command) == 48);
 
   enum Result : uint8_t {
     OK,
@@ -113,6 +119,11 @@ class MemcacheParser {
   static bool IsStoreCmd(CmdType type) {
     return type >= SET && type <= CAS;
   }
+
+  // Returns the wire-protocol token for `type` (e.g. "set", "mg"), or an empty
+  // string_view for INVALID / unrecognized values. Used by the traffic logger
+  // so that the memcache command name does not need to be duplicated in callers.
+  static std::string_view CmdName(CmdType type);
 
   size_t UsedMemory() const {
     return tmp_buf_.capacity();

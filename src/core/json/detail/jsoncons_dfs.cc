@@ -3,20 +3,26 @@
 //
 
 // clang-format off
-#include <glog/logging.h>
+#include "base/logging.h"
 // clang-format on
 
 #include "core/json/detail/jsoncons_dfs.h"
 
-namespace dfly::json::detail {
+namespace dfly::json {
 
 using namespace std;
-using nonstd::make_unexpected;
 
 ostream& operator<<(ostream& os, const PathSegment& ps) {
   os << SegmentName(ps.type());
   return os;
 }
+
+}  // namespace dfly::json
+
+namespace dfly::json::detail {
+
+using namespace std;
+using nonstd::make_unexpected;
 
 inline bool IsRecursive(jsoncons::json_type type) {
   return type == jsoncons::json_type::object_value || type == jsoncons::json_type::array_value;

@@ -35,9 +35,7 @@ async def test_ping(async_redis: redis.asyncio.Redis):
 
 
 async def test_types(async_redis: redis.asyncio.Redis):
-    await async_redis.hset(
-        "hash", mapping={"key1": "value1", "key2": "value2", "key3": 123}
-    )
+    await async_redis.hset("hash", mapping={"key1": "value1", "key2": "value2", "key3": 123})
     result = await async_redis.hgetall("hash")
     assert result == {b"key1": b"value1", b"key2": b"value2", b"key3": b"123"}
 
@@ -64,7 +62,7 @@ async def test_transaction_fail(async_redis: redis.asyncio.Redis):
             await tr.execute()
 
 
-async def test_pubsub(async_redis, event_loop):
+async def test_pubsub(async_redis):
     queue = asyncio.Queue()
 
     async def reader(ps):
@@ -77,7 +75,7 @@ async def test_pubsub(async_redis, event_loop):
 
     async with async_timeout(5), async_redis.pubsub() as ps:
         await ps.subscribe("channel")
-        task = event_loop.create_task(reader(ps))
+        task = asyncio.create_task(reader(ps))
         await async_redis.publish("channel", "message1")
         await async_redis.publish("channel", "message2")
         result1 = await queue.get()
@@ -133,14 +131,14 @@ async def test_blocking_timeout(conn):
 
 
 @pytest.mark.slow
-async def test_blocking_unblock(async_redis, conn, event_loop):
+async def test_blocking_unblock(async_redis, conn):
     """Blocking command that gets unblocked after some time."""
 
     async def unblock():
         await asyncio.sleep(0.1)
         await async_redis.rpush("list", "y")
 
-    task = event_loop.create_task(unblock())
+    task = asyncio.create_task(unblock())
     result = await conn.blpop("list", timeout=1)
     assert result == (b"list", b"y")
     await task

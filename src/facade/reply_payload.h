@@ -27,7 +27,7 @@ struct BulkString : public std::string {};    // SendBulkString
 using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
                              std::unique_ptr<CollectionPayload>>;
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(_LIBCPP_VERSION)
 static_assert(sizeof(Payload) == 40);
 #endif
 

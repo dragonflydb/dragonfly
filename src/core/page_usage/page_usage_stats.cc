@@ -7,12 +7,12 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
-#include <glog/logging.h>
 #include <hdr/hdr_histogram.h>
 
 #include <string>
 
 #include "base/cycle_clock.h"
+#include "base/logging.h"
 
 extern "C" {
 #include <unistd.h>

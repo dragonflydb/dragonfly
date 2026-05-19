@@ -30,5 +30,6 @@ else()
     search/index_join.cc
     search/global_hnsw_index.cc
     search/index_builder.cc
+    search/serialization_utils.cc
     PARENT_SCOPE)
 endif()

@@ -30,6 +30,14 @@ inputs:
   s3-bucket:
     required: true
     type: string
+  azure-container:
+    required: false
+    type: string
+    description: "Azure Blob Storage container name for snapshot tests"
+  azure-storage-connection-string:
+    required: false
+    type: string
+    description: "Azure Storage connection string"
   epoll:
     required: false
     type: string
@@ -57,14 +65,7 @@ runs:
 
     - name: Install Python test requirements
       shell: bash
-      run: |
-        cd ${GITHUB_WORKSPACE}/tests
-        # https://peps.python.org/pep-0668/#keep-the-marker-file-in-container-images
-        if compgen -G '/usr/lib/python3.*/EXTERNALLY-MANAGED' > /dev/null; then
-          pip3 install --break-system-packages -r dragonfly/requirements.txt
-        else
-          pip3 install -r dragonfly/requirements.txt
-        fi
+      run: ${GITHUB_WORKSPACE}/.github/scripts/install-pytest-requirements.sh
 
     - name: Run S3 snapshot tests with MinIO
       if: inputs.s3-bucket != ''
@@ -134,6 +135,9 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key || env.AWS_SECRET_ACCESS_KEY }}
         AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
         AWS_REGION: ${{ env.AWS_REGION || 'us-east-1' }}
+        # Azure credentials for snapshot tests (optional)
+        DRAGONFLY_AZURE_CONTAINER: ${{ inputs.azure-container }}
+        AZURE_STORAGE_CONNECTION_STRING: ${{ inputs.azure-storage-connection-string }}
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'

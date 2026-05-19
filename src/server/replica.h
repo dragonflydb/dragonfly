@@ -138,6 +138,8 @@ class Replica : ProtocolClient {
   size_t GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const;
 
  private:
+  ExecutionState exec_st_;
+
   util::fb2::ProactorBase* proactor_ = nullptr;
   Service& service_;
   MasterContext master_context_;

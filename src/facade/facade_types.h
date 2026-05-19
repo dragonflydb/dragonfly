@@ -5,6 +5,7 @@
 #pragma once
 
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -109,7 +110,10 @@ class ParsedArgs {
     }
 
     void ToVec(CmdArgVec* vec) const {
-      vec->assign(args_->begin() + index_, args_->end());
+      vec->clear();
+      vec->reserve(args_->size() - index_);
+      for (auto arg : args_->view(index_))
+        vec->emplace_back(arg);
     }
   };
 

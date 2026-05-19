@@ -4,6 +4,8 @@
 
 #include "core/search/range_tree.h"
 
+namespace rng = std::ranges;
+
 namespace dfly::search {
 
 namespace {
@@ -304,7 +306,7 @@ void RangeTree::Builder::Remove(DocId id, double value) {
 void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) {
   // Sort all elements by value
   std::vector<Entry> sorted_entries(updates_.begin(), updates_.end());
-  std::ranges::sort(sorted_entries, {}, &Entry::second);
+  rng::sort(sorted_entries, {}, &Entry::second);
   updates_.clear();
 
   quota.Check();  // TODO: sort might take a long time

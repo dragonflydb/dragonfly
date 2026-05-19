@@ -1,23 +1,17 @@
-import pytest
 import copy
-import re
-import json
-import redis
 from binascii import crc_hqx
-from redis import asyncio as aioredis
-import asyncio
 from dataclasses import dataclass
 
-from .instance import DflyInstanceFactory, DflyInstance
-from .utility import *
-from .replication_test import check_all_replicas_finished
-from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
+from redis.cluster import RedisCluster
 from redis.exceptions import MovedError
-from .proxy import Proxy
-from .seeder import Seeder, SeederBase, DebugPopulateSeeder
 
 from . import dfly_args
+from .instance import DflyInstanceFactory, DflyInstance
+from .proxy import Proxy
+from .replication_test import check_all_replicas_finished
+from .seeder import DebugPopulateSeeder
+from .utility import *
 
 BASE_PORT = 30001
 
@@ -319,7 +313,7 @@ def verify_slots_result(port: int, answer: list, replicas) -> bool:
 @dfly_args({"proactor_threads": 4, "cluster_mode": "emulated", "managed_service_info": "true"})
 async def test_emulated_cluster_with_replicas(df_factory):
     master = df_factory.create(port=next(next_port), admin_port=next(next_port))
-    replicas = [df_factory.create(port=next(next_port), logtostdout=True) for i in range(1, 3)]
+    replicas = [df_factory.create(port=next(next_port)) for i in range(1, 3)]
 
     df_factory.start_all([master, *replicas])
 
@@ -953,9 +947,22 @@ async def test_cluster_flush_slots_after_config_change(df_factory: DflyInstanceF
     await push_config(config, [c_master_admin, c_replica_admin])
 
     await check_all_replicas_finished([c_replica], c_master)
+    expected_size = 100_000 - slot_0_size
+    cmd = ("DFLYCLUSTER", "GETSLOTINFO", "SLOTS", "0")
 
-    assert await c_master.execute_command("dbsize") == (100_000 - slot_0_size)
-    assert await c_replica.execute_command("dbsize") == (100_000 - slot_0_size)
+    @assert_eventually(timeout=5)
+    async def slot_zero_flushed():
+        m_slots, repl_slots, master_size, replica_size = await asyncio.gather(
+            c_master_admin.execute_command(*cmd),
+            c_replica_admin.execute_command(*cmd),
+            c_master.execute_command("DBSIZE"),
+            c_replica.execute_command("DBSIZE"),
+        )
+
+        assert m_slots[0][2] == repl_slots[0][2] == 0
+        assert master_size == replica_size == expected_size
+
+    await slot_zero_flushed()
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "admin_port": next(next_port)})
@@ -1431,6 +1438,56 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
     await check_for_no_state_status([node.admin_client for node in nodes])
 
 
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_migration_serializer_expired_fields(df_factory):
+    """
+    CmdSerializer uses IterateMap/IterateSet during migration.  If time_now_
+    was set by a prior command (HGET), the iteration triggers lazy expiry.
+    After serialization the source has an empty hash — SAVE must not crash.
+    """
+    instances = [
+        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # Many fields with short TTL spread across DenseSet buckets.
+    for i in range(64):
+        await nodes[0].client.execute_command("HSETEX", "hkey", "1", f"f{i}", "v")
+        await nodes[0].client.execute_command("SADDEX", "skey", "1", f"m{i}")
+    await nodes[0].client.execute_command("SET", "normal", "val")
+
+    # TTL is 1s; wait generously to tolerate slow/loaded CI runners.
+    await asyncio.sleep(2.0)
+
+    # HGET/SISMEMBER update time_now_ but only partially expire (one bucket).
+    # ExecuteRO sees UpperBoundSize > 0, doesn't clean up.
+    await nodes[0].client.execute_command("HGET", "hkey", "f0")
+    await nodes[0].client.execute_command("SISMEMBER", "skey", "m0")
+
+    # Start migration — serializer iterates all DenseSet buckets, expiring rest.
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", instances[1].port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+
+    # Without the fix, SAVE on source crashes (DFATAL on empty hash).
+    assert await nodes[0].admin_client.execute_command("SAVE", "RDB", "test_zombie.rdb")
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    assert await nodes[1].client.execute_command("GET", "normal") == "val"
+    # Server survived — no zombie crash.
+
+
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "cache_mode": "true"})
 async def test_migration_with_key_ttl(df_factory):
     instances = [
@@ -1480,8 +1537,7 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
-@pytest.mark.exclude_epoll
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_finalization_timeout_ms": 5})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_finalization_timeout_ms": 50})
 async def test_network_disconnect_during_migration(df_factory):
     instances = [
         df_factory.create(
@@ -1936,6 +1992,7 @@ async def test_keys_expiration_during_migration(df_factory: DflyInstanceFactory)
     await seeder_task
 
     logging.debug("finish migration")
+    nodes[0].migrations = []
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
@@ -2208,6 +2265,7 @@ async def test_cluster_migration_while_seeding(
     logging.debug("Migration finished")
 
     logging.debug("Finalizing migration")
+    nodes[0].migrations = []
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])

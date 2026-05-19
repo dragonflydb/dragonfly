@@ -47,7 +47,13 @@ Configuration via environment variables:
 |----------|---------|-------------|
 | `AFL_PROACTOR_THREADS` | `1` | Server threads (1 = most stable coverage) |
 | `AFL_LOOP_LIMIT` | `10000` | Iterations before server restart (= `AFL_PERSISTENT_RECORD`) |
+| `AFL_ENABLE_SAVE` | off | Set to `1` to enable SAVE/BGSAVE (tests snapshot serialization) |
 | `BUILD_DIR` | `build-dbg` | Path to build directory |
+
+Save mode (`AFL_ENABLE_SAVE=1`) enables `--dbfilename=dump` and writes snapshots
+to a temp directory. Enabled automatically in nightly (long) fuzzing campaigns.
+The dump directory is cleaned before each AFL++ loop cycle to ensure RECORD files
+capture the full state needed for crash reproduction.
 
 ## Custom Mutators
 
@@ -87,42 +93,69 @@ crashes/RECORD:000000,cnt:000001      # second input
 crashes/RECORD:000000,cnt:NNNNNN      # input before the crash
 ```
 
-### Replay (RESP)
+### Triage crashes from CI
+
+Download the crashes zip from CI artifacts and run:
 
 ```bash
-./build/dragonfly --port 6379 --logtostderr --proactor_threads 1 --dbfilename=""
+./fuzz/triage_crashes.sh ./build-dbg/dragonfly resp crashes.zip
+./fuzz/triage_crashes.sh ./build-dbg/dragonfly memcache crashes.zip
+```
 
+### Replay a single crash
+
+Each crash has a `repro.env` with the exact Dragonfly flags used during fuzzing.
+Use it to start the server with the same configuration:
+
+```bash
+# Load flags from repro.env:
+MEM_KB=$(grep '^MEM_LIMIT_KB=' fuzz/artifacts/resp/repro.env | cut -d= -f2)
+readarray -t DF_FLAGS < <(grep -v '^#' fuzz/artifacts/resp/repro.env | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')
+(ulimit -v "$MEM_KB"; exec ./build-dbg/dragonfly "${DF_FLAGS[@]}") &
+
+# RESP replay:
 python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000
 ```
 
-### Replay (memcache)
+For memcache, use the memcache repro.env and pass the memcache port:
 
 ```bash
-./build/dragonfly --port 6379 --memcached_port=11211 --logtostderr --proactor_threads 1 --dbfilename=""
+MEM_KB=$(grep '^MEM_LIMIT_KB=' fuzz/artifacts/memcache/repro.env | cut -d= -f2)
+readarray -t DF_FLAGS < <(grep -v '^#' fuzz/artifacts/memcache/repro.env | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')
+(ulimit -v "$MEM_KB"; exec ./build-dbg/dragonfly "${DF_FLAGS[@]}") &
 
+# Memcache replay:
 python3 fuzz/replay_crash.py fuzz/artifacts/memcache/default/crashes 000000 127.0.0.1 11211
 ```
 
 ### Package crash for sharing
 
 ```bash
-cd fuzz
 # RESP
-./package_crash.sh 000000
+./fuzz/package_crash.sh 000000
 # Memcache
-./package_crash.sh 000000 fuzz/artifacts/memcache/default/crashes
+./fuzz/package_crash.sh 000000 fuzz/artifacts/memcache/default/crashes
+# All RESP crashes
+for f in fuzz/artifacts/resp/default/crashes/id:*; do
+  id=$(basename "$f" | grep -oP '(?<=id:)\d+')
+  ./fuzz/package_crash.sh "$id"
+done
 ```
 
-Creates `crash-000000.tar.gz` containing crash data and `replay_crash.py`.
-The recipient runs:
+Creates `crash-000000.tar.gz` containing crash data, `replay_crash.py`, and `repro.env`.
+The recipient extracts and runs:
 
 ```bash
-# RESP
-./build/dragonfly --port 6379 --logtostderr --proactor_threads 1 --dbfilename=""
-python3 replay_crash.py crashes 000000
+tar xzf crash-000000.tar.gz && cd crash-000000
 
-# Memcache
-./build/dragonfly --port 6379 --memcached_port=11211 --logtostderr --proactor_threads 1 --dbfilename=""
+# Start Dragonfly with the fuzz run flags:
+MEM_KB=$(grep '^MEM_LIMIT_KB=' repro.env | cut -d= -f2)
+readarray -t DF_FLAGS < <(grep -v '^#' repro.env | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')
+(ulimit -v "$MEM_KB"; exec ./build-dbg/dragonfly "${DF_FLAGS[@]}") &
+
+# RESP:
+python3 replay_crash.py crashes 000000
+# Memcache:
 python3 replay_crash.py crashes 000000 127.0.0.1 11211
 ```
 
@@ -130,7 +163,7 @@ python3 replay_crash.py crashes 000000 127.0.0.1 11211
 
 | Target | Directory | Seeds | Coverage |
 |--------|-----------|-------|----------|
-| `resp` | `seeds/resp/` | 79 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops |
+| `resp` | `seeds/resp/` | 96 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops, CMS, Top-K, field expiry, hash expiry, SADDEX, GEORADIUS |
 | `memcache` | `seeds/memcache/` | 15 | set/get, add/replace, append/prepend, cas, incr/decr, delete, multiget, gat, noreply, meta commands, flush, stats |
 
 To add a new RESP seed:

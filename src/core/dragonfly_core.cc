@@ -4,10 +4,16 @@
 
 #include <absl/base/macros.h>
 
+#include <ostream>
+
 #include "base/logging.h"
 #include "core/intent_lock.h"
 
 namespace dfly {
+
+std::ostream& operator<<(std::ostream& o, const IntentLock& lock) {
+  return o << "{SHARED: " << lock.cnt_[0] << ", EXCLUSIVE: " << lock.cnt_[1] << "}";
+}
 
 const char* IntentLock::ModeName(Mode m) {
   switch (m) {

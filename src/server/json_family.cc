@@ -38,6 +38,8 @@
 #include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
 #include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
 #include <jsoncons_ext/mergepatch/mergepatch.hpp>
+
+namespace rng = std::ranges;
 // clang-format on
 
 ABSL_DECLARE_FLAG(bool, jsonpathv2);
@@ -441,11 +443,10 @@ bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
       if (lhs.size() != rhs.size()) {
         return false;
       }
-      return std::all_of(
-          lhs.object_range().begin(), lhs.object_range().end(), [&](const auto& l_it) {
-            auto r_it = rhs.find(l_it.key());
-            return r_it != rhs.object_range().end() && JsonAreEquals(l_it.value(), r_it->value());
-          });
+      return rng::all_of(lhs.object_range(), [&](const auto& l_it) {
+        auto r_it = rhs.find(l_it.key());
+        return r_it != rhs.object_range().end() && JsonAreEquals(l_it.value(), r_it->value());
+      });
     }
 
     default:
@@ -867,7 +868,7 @@ OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(
 }
 
 bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJsonPath>>& paths) {
-  return std::all_of(paths.begin(), paths.end(),
+  return rng::all_of(paths,
                      [](auto& parsed_path) { return parsed_path.second.IsLegacyModePath(); });
 }
 

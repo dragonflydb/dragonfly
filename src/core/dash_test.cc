@@ -1029,9 +1029,10 @@ TEST_F(DashTest, BumpUp) {
   key = segment_.Key(kFirstStashId, 5);
   hash = dt_.DoHash(key);
 
-  EXPECT_EQ(2, segment_.CVCOnBump(1, kFirstStashId, 5, hash, touched_bid));
-  EXPECT_EQ(touched_bid[0], 0);
-  EXPECT_EQ(touched_bid[1], 1);
+  EXPECT_EQ(3, segment_.CVCOnBump(kFirstStashId, 5, hash, touched_bid));
+  EXPECT_EQ(touched_bid[0], kFirstStashId);
+  EXPECT_EQ(touched_bid[1], 0);
+  EXPECT_EQ(touched_bid[2], 1);
 
   // Bump up
   std::vector<std::pair<uint8_t, uint8_t>> moved_buckets;
@@ -1055,7 +1056,7 @@ TEST_F(DashTest, BumpUp) {
   key = segment_.Key(kSecondStashId, 9);
   hash = dt_.DoHash(key);
 
-  EXPECT_EQ(3, segment_.CVCOnBump(2, kSecondStashId, 9, hash, touched_bid));
+  EXPECT_EQ(3, segment_.CVCOnBump(kSecondStashId, 9, hash, touched_bid));
   EXPECT_EQ(touched_bid[0], kSecondStashId);
   // Bumpup will move the key to either its original bucket or a probing bucket.
   // Since we can't determine the exact bucket before calling bumpup, CVCOnBump
@@ -1472,22 +1473,20 @@ TEST_F(DashTest, CVCUponInsert) {
   // freed slot 0 but the bucket still has i at slot 1.
   dt.Erase(10);
 
-  auto cb = [](VersionDT::bucket_iterator bit) {
+  auto bucket_set = dt.CVCUponInsert(i);
+  for (auto bit : bucket_set.buckets()) {
     LOG(INFO) << "sid: " << bit.segment_id() << " " << bit.bucket_id();
     while (!bit.is_done()) {
       LOG(INFO) << "key: " << bit->first;
       ++bit;
     }
-  };
-  dt.CVCUponInsert(1, i, cb);
+  }
 }
 
 TEST_F(DashTest, CVCUponInsertStress) {
   VersionDT dt;
   for (int i = 0; i < 5000; ++i) {
-    dt.CVCUponInsert(1, i, [](VersionDT::bucket_iterator) {
-      // empty callback
-    });
+    dt.CVCUponInsert(i);
     dt.Insert(i, 0);
   }
 }

@@ -247,3 +247,74 @@ async def test_tiered_replication_with_hashes(
 
     await check_all_replicas_finished([replica_client], async_client, timeout=500)
     monitor.assert_no_match()
+
+
+@pytest.mark.large
+@pytest.mark.exclude_epoll
+@pytest.mark.opt_only
+async def test_tiered_replication_with_lists(df_factory: DflyInstanceFactory):
+    master = df_factory.create(
+        proactor_threads=2,
+        maxmemory="512MB",
+        tiered_prefix="/tmp/tiered/backing_master_list",
+        tiered_offload_threshold="1.0",
+        tiered_storage_write_depth=1500,
+        tiered_experimental_cooling="false",
+        list_max_listpack_size=1,
+        list_tiering_threshold=2,
+        tiered_experimental_list_support="true",
+    )
+    master.start()
+    master_client = master.client()
+
+    # 100 lists x 8 elements x 3500 bytes. Values must be >= kMinOccupancySize (2 KB)
+    # so nodes qualify for whole-page tiered offloading.
+    await master_client.execute_command("DEBUG POPULATE 100 lst 3500 RAND TYPE LIST ELEMENTS 8")
+
+    # Wait for at least one list node to be stashed to disk before starting replication.
+    async for info, breaker in info_tick_timer(master_client, section="TIERED", timeout=60):
+        with breaker:
+            assert info["tiered_total_stashes"] > 0
+
+    replica = df_factory.create(
+        proactor_threads=1,
+        dbfilename="",
+    )
+    replica.start()
+    replica_client = replica.client()
+
+    monitor = LogMonitor(replica, "Internal error when loading RDB")
+    monitor.start()
+
+    await replica_client.replicaof("localhost", master.port)
+    logging.info("Waiting for replica to sync")
+
+    try:
+        async with async_timeout.timeout(300):
+            wait_task = asyncio.create_task(wait_for_replicas_state(replica_client))
+            done, _ = await asyncio.wait(
+                [wait_task, monitor.task], return_when=asyncio.FIRST_COMPLETED
+            )
+            if monitor.task in done:
+                wait_task.cancel()
+                await asyncio.gather(wait_task, return_exceptions=True)
+                monitor.assert_no_match()
+            if wait_task in done:
+                wait_task.result()  # propagate exceptions
+    except asyncio.TimeoutError:
+        master_info = await master_client.info("ALL")
+        replica_info = await replica_client.info("ALL")
+        pytest.fail(
+            f"Replica did not sync in time. \nmaster: {master_info} \n\nreplica: {replica_info}"
+        )
+    finally:
+        await monitor.stop()
+
+    await check_all_replicas_finished([replica_client], master_client, timeout=300)
+    monitor.assert_no_match()
+
+    # Verify data consistency between master and replica
+    hashes = await asyncio.gather(
+        *(SeederV2.capture(c, types=["LIST"]) for c in [master_client, replica_client])
+    )
+    assert len(set(hashes)) == 1, "Inconsistency detected between master and replica lists."

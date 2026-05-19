@@ -3,6 +3,8 @@
 
 #include "server/detail/snapshot_storage.h"
 
+#include <absl/base/optimization.h>
+#include <absl/flags/flag.h>
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
 
@@ -19,6 +21,8 @@
 #include "util/aws/s3_write_file.h"
 #endif
 
+#include "util/cloud/aws/s3_storage.h"
+
 #ifdef WITH_GCP
 #include "util/cloud/gcp/gcs_file.h"
 #endif
@@ -31,6 +35,13 @@
 #include "util/cloud/azure/creds_provider.h"
 #include "util/cloud/azure/storage.h"
 #include "util/fibers/fiber_file.h"
+
+// Selects between the helio-native S3 client (util::cloud::aws) and aws-sdk-cpp.
+// Only meaningful when WITH_AWS is compiled in; otherwise the helio client is used.
+ABSL_FLAG(bool, s3_use_helio_client, true,
+          "If true, use helio's native S3 client; if false, use aws-sdk-cpp");
+
+namespace rng = std::ranges;
 namespace dfly {
 namespace detail {
 
@@ -43,7 +54,12 @@ constexpr string_view kSummarySuffix = "summary.dfs"sv;
 
 pair<string, string> GetBucketPath(string_view path) {
   string_view clean = path;
-  auto prefix = absl::StartsWith(clean, kS3Prefix) ? kS3Prefix : kGCSPrefix;
+  string_view prefix = kGCSPrefix;
+  if (absl::StartsWith(clean, kS3Prefix)) {
+    prefix = kS3Prefix;
+  } else if (absl::StartsWith(clean, kAzurePrefix)) {
+    prefix = kAzurePrefix;
+  }
   clean = absl::StripPrefix(clean, prefix);
 
   size_t pos = clean.find('/');
@@ -85,7 +101,7 @@ std::string EscapeRegex(string_view input) {
 
 string SnapshotStorage::FindMatchingFile(string_view prefix, string_view dbfilename,
                                          vector<SnapStat> keys) {
-  std::sort(std::begin(keys), std::end(keys),
+  rng::sort(keys,
             [](const SnapStat& l, const SnapStat& r) { return l.last_modified > r.last_modified; });
 
   // Create a regex to match the object keys, substituting the timestamp
@@ -219,10 +235,9 @@ io::Result<std::string, GenericError> FileSnapshotStorage::LoadPath(std::string_
   }
   io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
   if (short_vec) {
-    std::sort(short_vec->begin(), short_vec->end(),
-              [](const io::StatShort& l, const io::StatShort& r) {
-                return std::difftime(l.last_modified, r.last_modified) < 0;
-              });
+    rng::sort(*short_vec, [](const io::StatShort& l, const io::StatShort& r) {
+      return std::difftime(l.last_modified, r.last_modified) < 0;
+    });
     auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
       return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, kSummarySuffix);
     });
@@ -329,12 +344,17 @@ io::Result<std::string, GenericError> GcsSnapshotStorage::LoadPath(string_view d
                        prefix = prefix]() -> io::Result<vector<SnapStat>, GenericError> {
         cloud::GCS gcs(&creds_provider_, ctx_, proactor);
         vector<SnapStat> res;
-        error_code ec =
-            gcs.List(bucket_name, prefix, false, [&res](const cloud::StorageListItem& item) {
-              res.emplace_back(SnapStat{string(item.key), item.mtime_ns});
-            });
-        if (ec)
-          return nonstd::make_unexpected(GenericError(ec, "Failed to list objects"));
+        string cursor;
+        do {
+          error_code ec = gcs.List(
+              bucket_name, prefix, false, 500,
+              [&res](const cloud::StorageListItem& item) {
+                res.emplace_back(string(item.key), item.mtime_ns);
+              },
+              &cursor);
+          if (ec)
+            return nonstd::make_unexpected(GenericError(ec, "Failed to list objects"));
+        } while (!cursor.empty());
         return res;
       });
 
@@ -365,25 +385,30 @@ io::Result<vector<string>, GenericError> GcsSnapshotStorage::ExpandFromPath(
 
   // Find snapshot shard files if we're loading DFS.
   fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-  auto paths = proactor->Await([&, &bucket_name =
-                                       bucket_name]() -> io::Result<vector<string>, GenericError> {
-    vector<string> res;
-    cloud::GCS gcs(&creds_provider_, ctx_, proactor);
+  auto paths = proactor->Await(
+      [&, &bucket_name = bucket_name]() -> io::Result<vector<string>, GenericError> {
+        vector<string> res;
+        cloud::GCS gcs(&creds_provider_, ctx_, proactor);
+        string cursor;
 
-    error_code ec = gcs.List(bucket_name, prefix, false, [&](const cloud::StorageListItem& item) {
-      std::smatch m;
-      string key{item.key};
-      if (std::regex_match(key, m, re)) {
-        res.push_back(absl::StrCat(kGCSPrefix, bucket_name, "/", item.key));
-      }
-    });
+        do {
+          error_code ec = gcs.List(
+              bucket_name, prefix, false, 500,
+              [&](const cloud::StorageListItem& item) {
+                std::smatch m;
+                string key{item.key};
+                if (std::regex_match(key, m, re)) {
+                  res.push_back(absl::StrCat(kGCSPrefix, bucket_name, "/", item.key));
+                }
+              },
+              &cursor);
 
-    if (ec) {
-      return nonstd::make_unexpected(ec);
-    }
-
-    return res;
-  });
+          if (ec) {
+            return nonstd::make_unexpected(ec);
+          }
+        } while (!cursor.empty());
+        return res;
+      });
 
   if (!paths || paths->empty()) {
     return nonstd::make_unexpected(
@@ -406,29 +431,44 @@ AzureSnapshotStorage::AzureSnapshotStorage() {
 }
 
 AzureSnapshotStorage::~AzureSnapshotStorage() {
-  util::http::TlsClient::FreeContext(ctx_);
+  if (ctx_)
+    util::http::TlsClient::FreeContext(ctx_);
 }
 
 error_code AzureSnapshotStorage::Init(unsigned connect_ms) {
-  error_code ec = creds_provider_->Init(connect_ms);
-  if (!ec) {
+  RETURN_ERROR(creds_provider_->Init(connect_ms));
+  if (creds_provider_->IsHttps()) {
     ctx_ = util::http::TlsClient::CreateSslContext();
   }
-  return ec;
+
+  return {};
 }
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AzureSnapshotStorage::OpenWriteFile(
     const std::string& path) {
-  return nonstd::make_unexpected(GenericError("Not implemented"));
+  auto [container, key] = GetBucketPath(path);
+  cloud::azure::WriteFileOptions opts;
+  opts.creds_provider = creds_provider_.get();
+  opts.ssl_cntx = ctx_;
+
+  io::Result<io::WriteFile*> dest_res = cloud::azure::OpenWriteFile(container, key, opts);
+  if (!dest_res) {
+    return nonstd::make_unexpected(GenericError(dest_res.error(), "Could not open file"));
+  }
+
+  return std::pair(*dest_res, FileType::CLOUD);
 }
 
 io::ReadonlyFileOrError AzureSnapshotStorage::OpenReadFile(const std::string& path) {
   if (!IsAzurePath(path))
     return nonstd::make_unexpected(GenericError("Invalid azure path"));
 
-  auto [bucket, key] = GetBucketPath(path);
+  auto [container, key] = GetBucketPath(path);
+  cloud::azure::ReadFileOptions opts;
+  opts.creds_provider = creds_provider_.get();
+  opts.ssl_cntx = ctx_;
 
-  return nonstd::make_unexpected(GenericError("Not implemented"));
+  return cloud::azure::OpenReadFile(container, key, opts);
 }
 
 io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view dir,
@@ -448,14 +488,20 @@ io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view
   io::Result<vector<SnapStat>, GenericError> keys =
       proactor->Await([this, bucket_name = bucket_name,
                        prefix = prefix]() -> io::Result<vector<SnapStat>, GenericError> {
-        cloud::azure::Storage azure((cloud::azure::Credentials*)creds_provider_.get());
+        cloud::azure::Storage azure(creds_provider_.get());
         vector<SnapStat> res;
-        error_code ec =
-            azure.List(bucket_name, prefix, false, 500, [&res](const cloud::StorageListItem& item) {
-              res.emplace_back(string(item.key), item.mtime_ns);
-            });
-        if (ec)
-          return nonstd::make_unexpected(GenericError(ec, "Failed to list objects"));
+        string cursor;
+        do {
+          error_code ec = azure.List(
+              bucket_name, prefix, false, 500,
+              [&res](const cloud::StorageListItem& item) {
+                res.emplace_back(string(item.key), item.mtime_ns);
+              },
+              &cursor);
+          if (ec)
+            return nonstd::make_unexpected(GenericError(ec, "Failed to list objects"));
+        } while (!cursor.empty());
+
         return res;
       });
 
@@ -465,7 +511,7 @@ io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view
 
   auto match_key = FindMatchingFile(prefix, dbfilename, *keys);
   if (!match_key.empty()) {
-    return absl::StrCat(kGCSPrefix, bucket_name, "/", match_key);
+    return absl::StrCat(kAzurePrefix, bucket_name, "/", match_key);
   }
   return nonstd::make_unexpected(GenericError(
       std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
@@ -489,20 +535,24 @@ io::Result<vector<string>, GenericError> AzureSnapshotStorage::ExpandFromPath(
   auto paths = proactor->Await(
       [&, &bucket_name = bucket_name]() -> io::Result<vector<string>, GenericError> {
         vector<string> res;
-        cloud::azure::Storage azure(creds_provider_.get());
+        cloud::azure::Storage azure(static_cast<cloud::azure::Credentials*>(creds_provider_.get()));
+        string cursor;
+        do {
+          error_code ec = azure.List(
+              bucket_name, prefix, false, 500,
+              [&](const cloud::StorageListItem& item) {
+                std::smatch m;
+                string key{item.key};
+                if (std::regex_match(key, m, re)) {
+                  res.push_back(absl::StrCat(kAzurePrefix, bucket_name, "/", item.key));
+                }
+              },
+              &cursor);
 
-        error_code ec =
-            azure.List(bucket_name, prefix, false, 500, [&](const cloud::StorageListItem& item) {
-              std::smatch m;
-              string key{item.key};
-              if (std::regex_match(key, m, re)) {
-                res.push_back(absl::StrCat(kAzurePrefix, bucket_name, "/", item.key));
-              }
-            });
-
-        if (ec) {
-          return nonstd::make_unexpected(ec);
-        }
+          if (ec) {
+            return nonstd::make_unexpected(ec);
+          }
+        } while (!cursor.empty());
 
         return res;
       });
@@ -520,10 +570,34 @@ error_code AzureSnapshotStorage::CheckPath(const std::string& path) {
   return {};
 }
 
-#ifdef WITH_AWS
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool https,
                                            bool ec2_metadata, bool sign_payload) {
+#ifdef WITH_AWS
+  use_helio_ = absl::GetFlag(FLAGS_s3_use_helio_client);
+#else
+  use_helio_ = true;
+#endif
+
+  if (use_helio_) {
+    https_ = https;
+    if (!ec2_metadata) {
+      setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
+    }
+    // AwsCredsProvider reads AWS_S3_ENDPOINT at ServiceEndpoint() time; setting it here lets
+    // callers override the default S3 endpoint (e.g. for MinIO tests).
+    if (!endpoint.empty()) {
+      string endpoint_url = absl::StrCat(https ? "https://" : "http://", endpoint);
+      setenv("AWS_S3_ENDPOINT", endpoint_url.c_str(), 1);
+    }
+    (void)sign_payload;  // Uploads in cloud::aws always use UNSIGNED-PAYLOAD.
+    LOG(INFO) << "Creating AWS S3 client (helio); https=" << std::boolalpha << https
+              << "; endpoint=" << endpoint;
+    return;
+  }
+
+#ifdef WITH_AWS
   shard_set->pool()->GetNextProactor()->Await([&] {
+    util::aws::Init();
     if (!ec2_metadata) {
       setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
     }
@@ -533,8 +607,8 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
     s3_conf.checksumConfig.responseChecksumValidation =
         Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
 
-    LOG(INFO) << "Creating AWS S3 client; region=" << s3_conf.region << "; https=" << std::boolalpha
-              << https << "; endpoint=" << endpoint;
+    LOG(INFO) << "Creating AWS S3 client (sdk); region=" << s3_conf.region
+              << "; https=" << std::boolalpha << https << "; endpoint=" << endpoint;
     if (!sign_payload) {
       s3_conf.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never;
     }
@@ -545,16 +619,49 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
         std::make_shared<aws::S3EndpointProvider>(endpoint, https);
     s3_ = std::make_shared<Aws::S3::S3Client>(credentials_provider, endpoint_provider, s3_conf);
   });
+#endif
+}
+
+AwsS3SnapshotStorage::~AwsS3SnapshotStorage() {
+  if (ctx_) {
+    util::http::TlsClient::FreeContext(ctx_);
+  }
+}
+
+error_code AwsS3SnapshotStorage::Init(unsigned connect_ms) {
+  if (!use_helio_) {
+    return {};
+  }
+
+  RETURN_ERROR(creds_provider_.Init(connect_ms));
+
+  if (https_) {
+    ctx_ = util::http::TlsClient::CreateSslContext();
+    if (!ctx_) {
+      return make_error_code(std::errc::operation_not_permitted);
+    }
+  }
+  return {};
 }
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::OpenWriteFile(
     const std::string& path) {
-  optional<pair<string, string>> bucket_path = GetBucketPath(path);
-  if (!bucket_path) {
-    return nonstd::make_unexpected(GenericError("Invalid S3 path"));
-  }
-  auto [bucket, key] = *bucket_path;
+  if (use_helio_) {
+    auto [bucket, key] = GetBucketPath(path);
+    cloud::aws::WriteFileOptions opts;
+    opts.creds_provider = &creds_provider_;
+    opts.ssl_cntx = ctx_;
 
+    io::Result<io::WriteFile*> dest_res = cloud::aws::OpenWriteFile(bucket, key, opts);
+    if (!dest_res) {
+      return nonstd::make_unexpected(GenericError(dest_res.error(), "Could not open file"));
+    }
+
+    return std::pair<io::Sink*, uint8_t>(*dest_res, FileType::CLOUD);
+  }
+
+#ifdef WITH_AWS
+  auto [bucket, key] = GetBucketPath(path);
   fb2::ProactorBase* proactor = ProactorBase::me();
 
   // We run S3 operations via a temporary fiber to avoid agressive stack consumption.
@@ -571,16 +678,31 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::Op
         result = std::pair<io::Sink*, uint8_t>(f, FileType::CLOUD);
       });
   fb.Join();
+
   return result;
+#else
+  ABSL_UNREACHABLE();
+#endif
 }
 
 io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& path) {
-  std::optional<std::pair<std::string, std::string>> bucket_path = GetBucketPath(path);
-  if (!bucket_path) {
+  VLOG(1) << "Opening S3 read file: " << path;
+  if (!IsS3Path(path))
     return nonstd::make_unexpected(GenericError("Invalid S3 path"));
+
+  auto [bucket, key] = GetBucketPath(path);
+  if (use_helio_) {
+    cloud::aws::ReadFileOptions opts;
+    opts.creds_provider = &creds_provider_;
+    opts.ssl_cntx = ctx_;
+    return cloud::aws::OpenReadFile(bucket, key, opts);
   }
-  auto [bucket, key] = *bucket_path;
+
+#ifdef WITH_AWS
   return new aws::S3ReadFile(bucket, key, s3_);
+#else
+  ABSL_UNREACHABLE();
+#endif
 }
 
 io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string_view dir,
@@ -607,6 +729,8 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
 
 io::Result<vector<string>, GenericError> AwsS3SnapshotStorage::ExpandFromPath(
     const string& load_path) {
+  VLOG(1) << "Expanding S3 path: " << load_path;
+
   optional<pair<string, string>> bucket_path = GetBucketPath(load_path);
   if (!bucket_path) {
     return nonstd::make_unexpected(
@@ -652,6 +776,8 @@ error_code AwsS3SnapshotStorage::CheckPath(const std::string& path) {
 
 io::Result<std::vector<AwsS3SnapshotStorage::SnapStat>, GenericError>
 AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view prefix) {
+  VLOG(1) << "Listing S3 objects in bucket: " << bucket_name << " with prefix: " << prefix;
+
   // Each list objects request has a 1000 object limit, so page through the
   // objects if needed.
   std::string continuation_token;
@@ -660,6 +786,33 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
   // We use a random proactor because this function might be called from the main thread.
   fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
 
+  if (use_helio_) {
+    string adjusted_prefix(prefix);
+    if (!prefix.empty() && prefix.back() != '/') {
+      adjusted_prefix.push_back('/');
+    }
+    string cursor;
+
+    do {
+      error_code ec = proactor->Await([&]() -> error_code {
+        cloud::aws::S3Storage s3(&creds_provider_, ctx_, proactor);
+        return s3.List(
+            bucket_name, adjusted_prefix, false, 1000,
+            [&keys](const cloud::StorageListItem& item) {
+              keys.emplace_back(string(item.key), item.mtime_ns);
+            },
+            &cursor);
+      });
+
+      if (ec) {
+        return nonstd::make_unexpected(GenericError(ec, "Failed list objects in S3 bucket"));
+      }
+    } while (!cursor.empty());
+
+    return keys;
+  }
+
+#ifdef WITH_AWS
   do {
     Aws::S3::Model::ListObjectsV2Request request;
     request.SetBucket(std::string(bucket_name));
@@ -716,8 +869,10 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
     }
   } while (!continuation_token.empty());
   return keys;
-}
+#else
+  ABSL_UNREACHABLE();
 #endif
+}
 
 #ifdef __linux__
 io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {

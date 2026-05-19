@@ -1,4 +1,5 @@
 import asyncio
+import json as json_mod
 import random
 import logging
 import re
@@ -247,12 +248,16 @@ class HnswSearchSeeder:
         num_dims=4,
         num_initial_docs=200,
         seed=42,
+        document_type="HASH",
     ):
+        if document_type not in ("HASH", "JSON"):
+            raise ValueError(f"document_type must be HASH or JSON, got {document_type}")
         self.index_name = index_name
         self.prefix = prefix
         self.num_dims = num_dims
         self.num_initial_docs = num_initial_docs
         self.seed = seed
+        self.document_type = document_type
 
         self._doc_counter = 0
         self._stop_event = asyncio.Event()
@@ -260,45 +265,97 @@ class HnswSearchSeeder:
     def _make_embedding(self):
         return np.random.uniform(-10, 10, self.num_dims).astype(np.float32)
 
+    def _field(self, name: str, *spec: str) -> list:
+        # FT.CREATE field syntax: HASH uses the field name directly; JSON
+        # uses a JSONPath plus AS alias so query syntax (@name:...) stays
+        # the same in both modes.
+        if self.document_type == "HASH":
+            return [name, *spec]
+        return [f"$.{name}", "AS", name, *spec]
+
     async def create_index(self, client: aioredis.Redis):
+        schema = [
+            *self._field("title", "TEXT"),
+            *self._field("doc_id", "TAG"),
+            *self._field(
+                "embedding",
+                "VECTOR",
+                "HNSW",
+                "6",
+                "TYPE",
+                "FLOAT32",
+                "DIM",
+                str(self.num_dims),
+                "DISTANCE_METRIC",
+                "L2",
+            ),
+        ]
         await client.execute_command(
             "FT.CREATE",
             self.index_name,
             "ON",
-            "HASH",
+            self.document_type,
             "PREFIX",
             "1",
             self.prefix,
             "SCHEMA",
-            "title",
-            "TEXT",
-            "doc_id",
-            "TAG",
-            "embedding",
-            "VECTOR",
-            "HNSW",
-            "6",
-            "TYPE",
-            "FLOAT32",
-            "DIM",
-            str(self.num_dims),
-            "DISTANCE_METRIC",
-            "L2",
+            *schema,
         )
 
-    async def seed_initial_docs(self, client: aioredis.Redis):
-        pipe = client.pipeline(transaction=False)
-        for i in range(self.num_initial_docs):
+    async def _write_doc(self, client: aioredis.Redis, doc_id: int, emb=None):
+        if emb is None:
             emb = self._make_embedding()
-            pipe.hset(
-                f"{self.prefix}{i}",
+        key = f"{self.prefix}{doc_id}"
+        if self.document_type == "HASH":
+            await client.hset(
+                key,
                 mapping={
-                    "title": f"Product {i}",
-                    "doc_id": str(i),
+                    "title": f"Product {doc_id}",
+                    "doc_id": str(doc_id),
                     "embedding": emb.tobytes(),
                 },
             )
-        await pipe.execute()
+        else:
+            await client.execute_command(
+                "JSON.SET",
+                key,
+                "$",
+                json_mod.dumps(
+                    {
+                        "title": f"Product {doc_id}",
+                        "doc_id": str(doc_id),
+                        "embedding": emb.tolist(),
+                    }
+                ),
+            )
+
+    async def _update_embedding(self, client: aioredis.Redis, doc_id: int):
+        emb = self._make_embedding()
+        key = f"{self.prefix}{doc_id}"
+        if self.document_type == "HASH":
+            await client.hset(key, mapping={"embedding": emb.tobytes()})
+        else:
+            await client.execute_command(
+                "JSON.SET", key, "$.embedding", json_mod.dumps(emb.tolist())
+            )
+
+    async def seed_initial_docs(self, client: aioredis.Redis):
+        if self.document_type == "HASH":
+            pipe = client.pipeline(transaction=False)
+            for i in range(self.num_initial_docs):
+                emb = self._make_embedding()
+                pipe.hset(
+                    f"{self.prefix}{i}",
+                    mapping={
+                        "title": f"Product {i}",
+                        "doc_id": str(i),
+                        "embedding": emb.tobytes(),
+                    },
+                )
+            await pipe.execute()
+        else:
+            for i in range(self.num_initial_docs):
+                await self._write_doc(client, i)
         self._doc_counter = self.num_initial_docs
 
     def stop(self):
@@ -407,23 +464,13 @@ class HnswSearchSeeder:
             op = random.choice(["insert", "update", "delete"])
             try:
                 if op == "insert":
-                    emb = self._make_embedding()
-                    await client.hset(
-                        f"{self.prefix}{self._doc_counter}",
-                        mapping={
-                            "title": f"Product {self._doc_counter}",
-                            "doc_id": str(self._doc_counter),
-                            "embedding": emb.tobytes(),
-                        },
-                    )
+                    await self._write_doc(client, self._doc_counter)
                     self._doc_counter += 1
                 elif op == "update":
                     key_id = random.randint(0, max(self._doc_counter - 1, 0))
-                    key = f"{self.prefix}{key_id}"
-                    if not await client.exists(key):
+                    if not await client.exists(f"{self.prefix}{key_id}"):
                         continue
-                    emb = self._make_embedding()
-                    await client.hset(key, mapping={"embedding": emb.tobytes()})
+                    await self._update_embedding(client, key_id)
                 elif op == "delete":
                     key_id = random.randint(0, max(self._doc_counter - 1, 0))
                     await client.delete(f"{self.prefix}{key_id}")

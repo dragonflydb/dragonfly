@@ -12,6 +12,8 @@
 #include "server/search/filter_driver.h"
 #include "server/search/filter_eval.h"
 
+namespace rng = std::ranges;
+
 namespace dfly::aggregate {
 
 namespace {
@@ -119,7 +121,7 @@ void Aggregator::DoSort(const SortParams& sort_params) {
 
   auto& values = result.values;
   if (sort_params.SortAll()) {
-    std::sort(values.begin(), values.end(), comparator);
+    rng::sort(values, comparator);
   } else {
     DCHECK_GE(sort_params.max, 0);
     const size_t limit = std::min(values.size(), size_t(sort_params.max));
@@ -240,10 +242,7 @@ AggregationStep MakeLimitStep(size_t offset, size_t num) {
 
 void Aggregator::DoFilter(const FilterExprNode& expr) {
   auto& values = result.values;
-  values.erase(
-      std::remove_if(values.begin(), values.end(),
-                     [&](const DocValues& doc) { return !IsTruthy(EvalFilterExpr(expr, doc)); }),
-      values.end());
+  std::erase_if(values, [&](const DocValues& doc) { return !IsTruthy(EvalFilterExpr(expr, doc)); });
 }
 
 std::variant<AggregationStep, std::string> MakeFilterStep(std::string_view raw_expr) {
@@ -254,6 +253,21 @@ std::variant<AggregationStep, std::string> MakeFilterStep(std::string_view raw_e
   // Wrap in shared_ptr so the AST can be captured by copy into std::function.
   auto shared = std::shared_ptr<FilterExprNode>(std::get<FilterExpr>(std::move(parsed)).release());
   return AggregationStep{[shared](Aggregator* agg) { agg->DoFilter(*shared); }};
+}
+
+std::variant<AggregationStep, std::string> MakeApplyStep(std::string_view raw_expr,
+                                                         std::string alias) {
+  FilterParseResult parsed = ParseFilterExpr(raw_expr);
+  if (!std::holds_alternative<FilterExpr>(parsed))
+    return std::get<std::string>(std::move(parsed));
+
+  auto shared = std::shared_ptr<FilterExprNode>(std::get<FilterExpr>(std::move(parsed)).release());
+  return AggregationStep{[shared, alias = std::move(alias)](Aggregator* agg) {
+    for (auto& doc : agg->result.values) {
+      doc[alias] = EvalFilterExpr(*shared, doc);
+    }
+    agg->result.fields_to_print.insert(alias);
+  }};
 }
 
 AggregationResult Process(std::vector<DocValues> values,

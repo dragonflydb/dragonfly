@@ -4,6 +4,7 @@
 
 #include "server/tiering/disk_storage.h"
 
+#include <ostream>
 #include <system_error>
 
 #include "base/flags.h"
@@ -23,6 +24,10 @@ ABSL_FLAG(uint64_t, registered_buffer_size, 512_KB,
           "Size of registered buffer for IoUring fixed read/writes");
 
 namespace dfly::tiering {
+
+std::ostream& operator<<(std::ostream& os, const DiskSegment& ds) {
+  return os << "[" << ds.offset << ", " << ds.length << "]";
+}
 
 using namespace std;
 using namespace ::util::fb2;

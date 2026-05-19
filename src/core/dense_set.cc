@@ -406,6 +406,9 @@ void DenseSet::ShrinkBucket(size_t bucket_idx) {
     }
 
     if (has_ttl && ObjExpireTime(obj) <= time_now_) {
+      size_t obj_size = ObjectAllocSize(obj);
+      DCHECK_GE(obj_malloc_used_, obj_size);
+      obj_malloc_used_ -= obj_size;
       ObjDelete(obj);
       --size_;
       continue;
@@ -793,8 +796,10 @@ void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
   DensePtr* dptr = entries_.empty() ? nullptr : Find(obj, BucketId(hc), 0).second;
   if (dptr) {  // replace existing object.
     // A bit confusing design: ttl bit is located on the wrapping pointer,
-    // therefore we must set ttl bit before unrapping below.
+    // therefore we must set ttl bit before unwrapping below.
     dptr->SetTtl(has_ttl);
+    if (has_ttl)
+      expiration_used_ = true;
 
     if (dptr->IsLink())  // unwrap the pointer.
       dptr = dptr->AsLink();
@@ -940,7 +945,8 @@ void DenseSet::CollectExpired() {
 }
 
 size_t DenseSet::SizeSlow() {
-  CollectExpired();
+  if (expiration_used_)
+    CollectExpired();
   return size_;
 }
 

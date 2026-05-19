@@ -5,9 +5,8 @@
 #pragma once
 
 #include <algorithm>
-#include <iostream>
+#include <iosfwd>
 #include <memory>
-#include <ostream>
 #include <variant>
 #include <vector>
 
@@ -52,9 +51,22 @@ struct AstGeoNode {
   std::string unit;
 };
 
+// ~subquery: returns all docs, boosts score of those matched by subquery
+struct AstOptionalNode {
+  explicit AstOptionalNode(AstNode&& node);
+
+  AstOptionalNode(const AstOptionalNode&) = delete;
+  AstOptionalNode& operator=(const AstOptionalNode&) = delete;
+
+  AstOptionalNode(AstOptionalNode&&) noexcept = default;
+  AstOptionalNode& operator=(AstOptionalNode&&) noexcept = default;
+
+  std::unique_ptr<AstNode> node;
+};
+
 // Negates subtree
 struct AstNegateNode {
-  AstNegateNode(AstNode&& node);
+  explicit AstNegateNode(AstNode&& node);
 
   AstNegateNode(const AstNegateNode&) = delete;
   AstNegateNode& operator=(const AstNegateNode&) = delete;
@@ -108,7 +120,7 @@ struct AstTagsNode {
     }
   };
 
-  AstTagsNode(TagValue);
+  explicit AstTagsNode(TagValue);
   AstTagsNode(AstNode&& l, TagValue);
 
   std::vector<TagValue> tags;
@@ -163,10 +175,10 @@ struct AstVectorRangeNode {
   std::string score_alias;
 };
 
-using NodeVariants =
-    std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode,
-                 AstSuffixNode, AstInfixNode, AstRangeNode, AstNegateNode, AstLogicalNode,
-                 AstFieldNode, AstTagsNode, AstKnnNode, AstGeoNode, AstVectorRangeNode>;
+using NodeVariants = std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode,
+                                  AstPrefixNode, AstSuffixNode, AstInfixNode, AstRangeNode,
+                                  AstNegateNode, AstOptionalNode, AstLogicalNode, AstFieldNode,
+                                  AstTagsNode, AstKnnNode, AstGeoNode, AstVectorRangeNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;

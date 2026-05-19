@@ -13,6 +13,7 @@
 #include "base/flags.h"
 #include "core/huff_coder.h"
 #include "core/page_usage/page_usage_stats.h"
+#include "core/qlist.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -189,11 +190,15 @@ int32_t HuffmanCheckTask::Run(DbSlice* db_slice) {
   string error_msg;
   if (huff_enc.Build(hist_.data(), kMaxSymbol, &error_msg)) {
     size_t compressed_size = huff_enc.EstimateCompressedSize(hist_.data(), kMaxSymbol);
+    double ratio = double(compressed_size) / total_freq;
     LOG(INFO) << "Huffman table built, reducing character count from " << total_freq << " to "
-              << compressed_size << ", compression ratio " << double(compressed_size) / total_freq;
-    string bintable = huff_enc.Export();
-    LOG(INFO) << "Huffman binary table: " << absl::Base64Escape(bintable);
-    db_slice->shard_owner()->stats().huffman_tables_built++;
+              << compressed_size << ", compression ratio " << ratio;
+    if (ratio < 1.0) {
+      if (auto bintable = huff_enc.Export()) {
+        LOG(INFO) << "Huffman binary table: " << absl::Base64Escape(*bintable);
+        db_slice->shard_owner()->stats().huffman_tables_built++;
+      }
+    }
   } else {
     LOG(WARNING) << "Huffman build failed: " << error_msg;
   }
@@ -589,6 +594,7 @@ void EngineShard::DestroyThreadLocal() {
 
   shard_->Shutdown();
 
+  QList::ShutdownThread();
   detail::InternedString::ResetPool();
   shard_->~EngineShard();
   CleanupStatelessAllocMR();
@@ -1035,8 +1041,10 @@ void EngineShard::CacheStats() {
   size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
   size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
 
-  VLOG_EVERY_N(1, 500) << "Entries count " << entries << " "
-                       << "obj_memory: " << obj_memory << ", bytes_per_obj: " << bytes_per_obj;
+  if (VLOG_IS_ON(1)) {
+    LOG_EVERY_T(INFO, 1) << "Entries count " << entries << " "
+                         << "obj_memory: " << obj_memory << ", bytes_per_obj: " << bytes_per_obj;
+  }
 
   db_slice.UpdateMemoryParams(free_mem / shard_set->size(), bytes_per_obj);
   last_mem_params_ = {now, used_mem};

@@ -140,6 +140,8 @@ void BlockingController::RemovedWatched(Keys keys, Transaction* tx) {
   if (wt.queue_map.empty()) {
     watched_dbs_.erase(dbit);
   }
+  // TODO: awakened_keys.insert in UnwatchTx already guards on !wq->items.empty(), so we could
+  // skip awakened_indices_.emplace when no key was re-queued, avoiding a spurious NotifyPending.
   awakened_indices_.emplace(tx->GetDbIndex());
 }
 
@@ -232,8 +234,11 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
   while (!queue.empty()) {
     auto& wi = queue.front();
     Transaction* head = wi.get();
-    // We check may the transaction be notified otherwise move it to the end of the queue
-    if (wi.key_ready_checker(owner_, context, head, key)) {
+    KeyReadyResult result = wi.key_ready_checker(owner_, context, key);
+    if (result == KeyReadyResult::kKeyNotFound) {
+      // Key is gone - no tx in this queue can be woken, abort the scan entirely.
+      break;
+    } else if (result == KeyReadyResult::kReady) {
       DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key << " committed txid "
                << owner_->committed_txid();
       if (head->NotifySuspended(sid, key)) {
@@ -243,7 +248,7 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
         awakened_transactions_.insert(head);
         break;
       }
-    } else {
+    } else {  // kNotReady - key exists but per-tx conditions not met, try next
       skipped.push_back(std::move(wi));
     }
 

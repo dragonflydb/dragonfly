@@ -7,10 +7,12 @@
 #include <absl/functional/function_ref.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
 #include "core/collection_entry.h"
+#include "server/common_types.h"
 
 #define QL_COMP_BITS 16
 #define QL_BM_BITS 4
@@ -53,7 +55,14 @@ class QList {
   struct Node {
     Node* prev;
     Node* next;
-    unsigned char* entry;
+
+    union {
+      unsigned char* entry;  // Pointer to the memory value of the node.
+      size_t ext_offset;     // Offset in tiered storage
+    };
+
+    // For offloaded nodes, we store the offset of the value in colder storage
+    // instead of a pointer to the data in memory.
     size_t sz : 48;    /* entry size in bytes */
     size_t count : 16; /* count of items in listpack */
 
@@ -63,16 +72,24 @@ class QList {
     uint16_t attempted_compress : 1; /* node can't compress; too small */
     uint16_t dont_compress : 1;      /* prevent compression of entry that will be used later */
     uint16_t offloaded : 1;          /* node is offloaded to colder storage */
+    uint16_t io_pending : 1;         /* node has pending io operation */
     uint16_t reserved1 : 7;          /* reserved for future use */
 
     uint16_t reserved2; /* more bits to steal for future usage */
-    uint32_t reserved3; /* more bits to steal for future usage */
+
+    uint32_t ext_size; /* Offloaded size */
 
     bool IsCompressed() const {
       return encoding != QUICKLIST_NODE_ENCODING_RAW;
     }
 
     size_t GetLZF(void** data) const;
+
+    void SetExternal(size_t offset, uint32_t sz);
+    void Upload(QList* ql, std::string_view val);
+    std::pair<size_t, size_t> GetExternalSlice() const {
+      return std::make_pair(size_t(ext_offset), size_t(ext_size));
+    }
   };
 
   using Entry = CollectionEntry;
@@ -102,9 +119,26 @@ class QList {
   using IterateFunc = absl::FunctionRef<bool(Entry)>;
   enum InsertOpt : uint8_t { BEFORE, AFTER };
 
+  void AdjustMallocSize(ssize_t delta) {
+    malloc_size_ += delta;
+  }
+
+  // Add to the number of offloaded nodes by one.
+  void AdjustOffloadNodeCount(int delta) {
+    if (tiering_enabled_) {
+      tiering_params_->num_offloaded_nodes += delta;
+    }
+  }
+
+  DbIndex GetDbIndex() const {
+    return db_id_;
+  }
   struct TieringParams {
-    // TODO: hook functions and params that allow qlist offloading nodes to colder storage.
-    uint32_t node_depth_threshold = 2;
+    uint32_t num_offloaded_nodes = 0;
+    uint32_t node_depth_threshold = 0;
+    void (*offload)(QList* ql, Node* node) = nullptr;
+    void (*load)(QList* ql, Node* node) = nullptr;
+    void (*cleanup)(QList* ql, Node* node) = nullptr;
   };
 
   /**
@@ -207,6 +241,10 @@ class QList {
     return _Tail();
   }
 
+  // Materializes a node that was offloaded to tiered storage back into memory.
+  // No-op if the node is already in memory. Does not decompress the node.
+  void Materialize(Node* node);
+
   // Returns nullptr if quicklist does not fit the necessary requirements
   // to be converted to listpack, and listpack otherwise. The ownership over the listpack
   // blob is moved to the caller.
@@ -218,17 +256,33 @@ class QList {
 
   static void SetPackedThreshold(unsigned threshold);
 
+  // Frees the thread-local ZSTD dictionary state. Must be called once per thread
+  // during service shutdown.
+  static void ShutdownThread();
+
+  // Decompresses a ZSTD-encoded node into dest using the thread-local dict.
+  // Returns false if the node is not ZSTD-encoded or decompression fails.
+  // Used during RDB save to avoid persisting ZSTD bytes as LZF.
+  static bool DecompressZstdNode(const Node* node, std::string* dest);
+
   // Moves nodes away from underused pages by reallocating if the underlying page usage is low.
   // Returns count of nodes reallocated to help in testing.
   size_t DefragIfNeeded(PageUsage* page_usage);
-
-  void SetTieringParams(const TieringParams& params);
 
   // Sets the malloc_size_ threshold at which ZSTD dictionary training is triggered.
   // 0 disables ZSTD dictionary compression.
   void set_compr_threshold(uint32_t threshold) {
     zstd_threshold_ = threshold;
   }
+
+  // Enable tiered storage.
+  void EnableTiering(const TieringParams& params) {
+    tiering_enabled_ = 1;
+    tiering_params_ = std::make_unique<TieringParams>(params);
+  }
+
+  // Updates the db index associated with this list.
+  void SetDbIndex(DbIndex db_id);
 
   struct Stats {
     uint64_t compression_attempts = 0;
@@ -257,7 +311,7 @@ class QList {
   static __thread Stats stats;
 
  private:
-  bool AllowCompression() const {
+  bool AllowLZFCompression() const {
     return compress_ != 0;
   }
 
@@ -274,8 +328,24 @@ class QList {
   // compressing the node based on its position in the list.
   void CoolOff(Node* node, uint32_t node_id);
 
+  // Like the RecompressOnly free function, but also handles ZSTD dict mode.
+  // Returns the size delta (negative means compression reduced memory usage).
+  ssize_t RecompressNode(Node* node);
+
   void Replace(Iterator it, std::string_view elem);
   void CompressByDepth(Node* node);
+
+  // Trains a ZSTD dictionary from all node data and stores it in thread-local state.
+  // Returns true if a dictionary was successfully trained (or already exists).
+  // Sets dict_learning_failed_ on failure.
+  bool TrainZstdDict();
+
+  // Bulk-compresses all interior nodes using the thread-local ZSTD dictionary.
+  // Sets dict_compress_failed_ if no nodes could be compressed.
+  void CompressWithZstdDict();
+
+  // Compresses a single node using the thread-local ZSTD dictionary.
+  bool CompressNodeWithDict(Node* node);
 
   // Prepares the node for read access.
   void AccessForReads(bool recompress, Node* node);
@@ -287,27 +357,27 @@ class QList {
 
   void DelNode(Node* node);
   bool DelPackedIndex(Node* node, uint8_t* p);
-  void OffloadNode(Node* node);
 
   // Initializes iterator's zi_ to point to the element at offset_.
   // Decompresses the node if needed. Assumes current_ is not null.
   void InitIteratorEntry(Iterator* it) const;
 
   Node* head_ = nullptr;
-  size_t malloc_size_ = 0;  // size of the quicklist struct
-  uint32_t count_ = 0;      /* total count of all entries in all listpacks */
-  uint32_t len_ = 0;        /* number of quicklistNodes */
-  int16_t fill_;            /* fill factor for individual nodes */
-  int16_t reserved1_;
+  size_t malloc_size_ = 0;            // size of the quicklist struct
+  uint32_t count_ = 0;                /* total count of all entries in all listpacks */
+  uint32_t len_ = 0;                  /* number of quicklistNodes */
+  int16_t fill_;                      /* fill factor for individual nodes */
+  uint16_t dict_learning_failed_ : 1; /* thread-local dict training failed for this list's data */
+  uint16_t dict_compress_failed_ : 1; /* compression with thread-local dict failed for this list */
+  uint16_t dict_bulk_finished_ : 1;   /* bulk compression done, per-node compression active */
+  uint16_t tiering_enabled_ : 1;      /* tiering storage enabled */
+  uint16_t reserved1_ : 12;
   unsigned compress_ : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
   unsigned bookmark_count_ : QL_BM_BITS;
   unsigned reserved2_ : 12;
-  uint32_t num_offloaded_nodes_ = 0;
+  uint16_t db_id_ = kInvalidDbId;
   uint32_t zstd_threshold_ = 0;  // 0 = disabled
   std::unique_ptr<TieringParams> tiering_params_;
-
-  struct ZstdDictState;
-  std::unique_ptr<ZstdDictState> zstd_dict_;
 };
 
 }  // namespace dfly

@@ -264,6 +264,11 @@ class DflyInstance:
                 self.sed_thread.join()
                 symbolize_stack_trace(proc.args[0], self.stacktrace)
 
+    def wait(self):
+        if self.proc is not None:
+            self.proc.communicate(timeout=120)
+            self.proc = None
+
     def _start(self):
         if self.params.existing_port:
             return
@@ -348,7 +353,7 @@ class DflyInstance:
         p = psutil.Process(self.proc.pid)
         rv = []
         for file in p.open_files():
-            if ".log." in file.path and "dragonfly" in file.path:
+            if ".log" in file.path and "dragonfly" in file.path:
                 rv.append(file.path)
         return rv
 
@@ -422,9 +427,13 @@ class DflyInstanceFactory:
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
-        vmod = "dragonfly_connection=1,db_slice=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,engine_shard=1,dflycmd=1,snapshot=1,streamer=1"
+        vmod = "dragonfly_connection=1,db_slice=1,listener_interface=1,main_service=1,rdb_save=1,rdb_load=1,replica=1,cluster_family=1,engine_shard=1,dflycmd=1,snapshot=1,streamer=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
+        # Disable replica_delete_expired by default so consistency tests that compare master/replica
+        # data signatures are not broken by replicas proactively deleting expired keys.
+        if version > 1.37:
+            args.setdefault("replica_delete_expired", "false")
         if version > 1.27:
             args.setdefault("omit_basic_usage")
 

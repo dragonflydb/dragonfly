@@ -23,6 +23,8 @@ extern "C" {
 #include "redis/util.h"
 }
 
+namespace rng = std::ranges;
+
 namespace dfly::container_utils {
 using namespace std;
 namespace {
@@ -113,7 +115,8 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
   trans->Execute(std::move(cb), false);
 
   // If any key is of the wrong type, report it immediately
-  if (std::find(find_res.begin(), find_res.end(), OpStatus::WRONG_TYPE) != find_res.end())
+  if (rng::find_if(find_res, [](const auto& r) { return r == OpStatus::WRONG_TYPE; }) !=
+      find_res.end())
     return OpStatus::WRONG_TYPE;
 
   // Order result by their keys position in the command arguments, push errors to back
@@ -365,8 +368,13 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
 
   auto* ns = &trans->GetNamespace();
   const auto key_checker = [req_obj_type, ns](EngineShard* owner, const DbContext& context,
-                                              Transaction*, std::string_view key) -> bool {
-    return ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, req_obj_type).ok();
+                                              std::string_view key) -> KeyReadyResult {
+    auto res = ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, req_obj_type);
+    if (res.ok())
+      return KeyReadyResult::kReady;
+    if (res.status() == OpStatus::WRONG_TYPE)
+      return KeyReadyResult::kNotReady;
+    return KeyReadyResult::kKeyNotFound;
   };
 
   auto status =

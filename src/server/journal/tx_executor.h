@@ -34,6 +34,7 @@ class MultiShardExecution {
  private:
   util::fb2::Mutex map_mu;
   std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
+  bool cancelled_{false};  // Protected by map_mu
 };
 
 // This class holds the commands of transaction in single shard.

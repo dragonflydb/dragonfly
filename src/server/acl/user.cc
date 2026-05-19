@@ -247,6 +247,44 @@ const User::CommandChanges& User::CmdChanges() const {
   return cmd_changes_;
 }
 
+User::MemoryUsage& User::MemoryUsage::operator+=(const MemoryUsage& u) {
+  num_passwords += u.num_passwords;
+  num_cat_changes += u.num_cat_changes;
+  num_cmd_changes += u.num_cmd_changes;
+  num_key_globs += u.num_key_globs;
+  key_globs_bytes += u.key_globs_bytes;
+  num_pubsub_globs += u.num_pubsub_globs;
+  pubsub_globs_bytes += u.pubsub_globs_bytes;
+  return *this;
+}
+
+User::MemoryUsage& User::MemoryUsage::operator-=(const MemoryUsage& u) {
+  num_passwords -= u.num_passwords;
+  num_cat_changes -= u.num_cat_changes;
+  num_cmd_changes -= u.num_cmd_changes;
+  num_key_globs -= u.num_key_globs;
+  key_globs_bytes -= u.key_globs_bytes;
+  num_pubsub_globs -= u.num_pubsub_globs;
+  pubsub_globs_bytes -= u.pubsub_globs_bytes;
+  return *this;
+}
+
+User::MemoryUsage User::GetMemoryUsage() const {
+  MemoryUsage usage;
+  usage.num_passwords = password_hashes_.size();
+  usage.num_cat_changes = cat_changes_.size();
+  usage.num_cmd_changes = cmd_changes_.size();
+  usage.num_key_globs = keys_.key_globs.size();
+  for (const auto& [glob, _] : keys_.key_globs) {
+    usage.key_globs_bytes += glob.size();
+  }
+  usage.num_pubsub_globs = pub_sub_.globs.size();
+  for (const auto& [glob, _] : pub_sub_.globs) {
+    usage.pubsub_globs_bytes += glob.size();
+  }
+  return usage;
+}
+
 void User::SetKeyGlobs(std::vector<UpdateKey> keys) {
   for (auto& key : keys) {
     if (key.all_keys) {

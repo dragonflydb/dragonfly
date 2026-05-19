@@ -6,6 +6,7 @@
 
 #include "base/hash.h"
 #include "base/logging.h"
+#include "core/page_usage/page_usage_stats.h"
 
 namespace dfly {
 
@@ -76,6 +77,55 @@ void OAHEntry::ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* all
     Clear();
     --*set_size;
   }
+}
+
+ssize_t OAHEntry::ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
+  *realloced = false;
+  if (!data_)
+    return 0;
+
+  ssize_t obj_alloc_delta = 0;
+
+  if (IsVector()) {
+    // Recurse into each inner entry first — every element's own buffer must be checked.
+    auto& vec = AsVector();
+    for (size_t i = 0, n = vec.Size(); i < n; ++i) {
+      if (vec[i]) {
+        bool inner_moved = false;
+        obj_alloc_delta += vec[i].ReallocIfNeeded(page_usage, &inner_moved);
+        if (inner_moved)
+          *realloced = true;
+      }
+    }
+    // Then defrag the vector's array buffer if its page is underutilized. ResizeLog
+    // with the same log_size allocates a fresh buffer, move-constructs each element
+    // (OAHEntry's move-ctor swaps data_, leaving sources empty), and frees the old
+    // buffer via Clear(). The vector's logical AllocSize is unchanged, so no delta
+    // is reported for ptr_vectors_alloc_used_.
+    if (page_usage->IsPageForObjectUnderUtilized(Raw())) {
+      vec.ResizeLog(vec.LogSize());
+      *realloced = true;
+    }
+    return obj_alloc_delta;
+  }
+
+  if (!page_usage->IsPageForObjectUnderUtilized(Raw()))
+    return 0;
+
+  // Single-entry realloc via ctor + move-assignment: build a fresh OAHEntry from this
+  // one's key/expiry/ext_hash; move-assign to swap data_, then the temporary's
+  // destructor frees the old buffer.
+  const size_t old_alloc = AllocSize();
+  const uint64_t saved_hash = GetHash();
+  const uint32_t expiry = HasExpiry() ? GetExpiry() : UINT32_MAX;
+  {
+    OAHEntry replacement(Key(), expiry);
+    if (saved_hash)
+      replacement.SetExtHash(saved_hash);
+    *this = std::move(replacement);
+  }
+  *realloced = true;
+  return static_cast<ssize_t>(AllocSize()) - static_cast<ssize_t>(old_alloc);
 }
 
 // TODO refactor, because it's inefficient

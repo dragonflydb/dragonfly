@@ -144,10 +144,10 @@ void CmdInitByProb(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RETURN_ON_PARSE_ERROR(parser, rb);
 
-  if (error <= 0 || error >= 1) {
+  if (!(error > 0 && error < 1)) {
     return rb->SendError("CMS: error must be between 0 and 1 exclusive");
   }
-  if (probability <= 0 || probability >= 1) {
+  if (!(probability > 0 && probability < 1)) {
     return rb->SendError("CMS: probability must be between 0 and 1 exclusive");
   }
 

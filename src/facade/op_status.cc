@@ -1,8 +1,18 @@
 #include "facade/op_status.h"
 
+#include <ostream>
+
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/resp_expr.h"
+
+namespace std {
+
+std::ostream& operator<<(std::ostream& os, facade::OpStatus op) {
+  return os << static_cast<int>(op);
+}
+
+}  // namespace std
 
 namespace facade {
 
@@ -44,6 +54,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return kNanOrInfDuringIncr;
     case OpStatus::IO_ERROR:
       return kTieredIoError;
+    case OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS:
+      return kBloomFilterLoadInProgress;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       return "Internal error";

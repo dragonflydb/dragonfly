@@ -97,60 +97,65 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_TERM, string, "tag");
   NEXT_TOK(TOK_RCURLBR);
 
+  // After the term lexer learned to handle backslash-escapes (\X anywhere in a
+  // term), `{blue\,1\\\$\+}` and similar inputs are matched by the TERM rule
+  // (same length as TAG_VAL on these inputs, term rule comes first). The
+  // grammar accepts both TERM and TAG_VAL as `tag_list_element`, so the only
+  // observable difference is the token type — the unescaped string is identical.
   SetInput("@color:{blue\\,1\\\\\\$\\+}");
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TAG_VAL, string, R"(blue,1\$+)");
+  NEXT_EQ(TOK_TERM, string, R"(blue,1\$+)");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@color:{blue\\.1\\\"\\%\\=}");
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TAG_VAL, string, "blue.1\"%=");
+  NEXT_EQ(TOK_TERM, string, "blue.1\"%=");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@color:{blue\\<1\\'\\^\\~}");
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TAG_VAL, string, "blue<1'^~");
+  NEXT_EQ(TOK_TERM, string, "blue<1'^~");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@color:{blue\\>1\\:\\&\\/}");
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TAG_VAL, string, "blue>1:&/");
+  NEXT_EQ(TOK_TERM, string, "blue>1:&/");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@color:{blue\\{1\\;\\*\\ }");
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TAG_VAL, string, "blue{1;* ");
+  NEXT_EQ(TOK_TERM, string, "blue{1;* ");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@color:{blue\\}1\\!\\(}");
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TAG_VAL, string, "blue}1!(");
+  NEXT_EQ(TOK_TERM, string, "blue}1!(");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@color:{blue\\[1\\@\\)}");
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TAG_VAL, string, "blue[1@)");
+  NEXT_EQ(TOK_TERM, string, "blue[1@)");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@color:{blue\\]1\\#\\-}");
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TAG_VAL, string, "blue]1#-");
+  NEXT_EQ(TOK_TERM, string, "blue]1#-");
   NEXT_TOK(TOK_RCURLBR);
 
   // Colon in tag value (unescaped)
@@ -227,6 +232,109 @@ TEST_F(SearchParserTest, EscapedTagPrefixes) {
   NEXT_TOK(TOK_LCURLBR);
   NEXT_EQ(TOK_PREFIX, string, "complex-escape+with.many*chars");
   NEXT_TOK(TOK_RCURLBR);
+}
+
+TEST_F(SearchParserTest, TildeScanner) {
+  SetInput("~hello");
+  NEXT_TOK(TOK_TILDE);
+  NEXT_EQ(TOK_TERM, string, "hello");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput("hello ~world");
+  NEXT_EQ(TOK_TERM, string, "hello");
+  NEXT_TOK(TOK_TILDE);
+  NEXT_EQ(TOK_TERM, string, "world");
+  NEXT_TOK(TOK_YYEOF);
+}
+
+TEST_F(SearchParserTest, EscapedTilde) {
+  // \~hello must produce a literal-text TERM "~hello", not a TILDE+TERM pair.
+  SetInput("\\~hello");
+  NEXT_EQ(TOK_TERM, string, "~hello");
+  NEXT_TOK(TOK_YYEOF);
+
+  // foo\~bar — escape in middle of a term yields one TERM "foo~bar".
+  SetInput("foo\\~bar");
+  NEXT_EQ(TOK_TERM, string, "foo~bar");
+  NEXT_TOK(TOK_YYEOF);
+
+  // Escape other special chars too (\- and \|).
+  SetInput("foo\\-bar");
+  NEXT_EQ(TOK_TERM, string, "foo-bar");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput("foo\\|bar");
+  NEXT_EQ(TOK_TERM, string, "foo|bar");
+  NEXT_TOK(TOK_YYEOF);
+
+  // Tag-specific chars are now also escapable in term context.
+  SetInput("foo\\,bar");
+  NEXT_EQ(TOK_TERM, string, "foo,bar");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput("foo\\$bar");
+  NEXT_EQ(TOK_TERM, string, "foo$bar");
+  NEXT_TOK(TOK_YYEOF);
+
+  // Literal backslash via \\ — UnescapeTerm strips the leading \ producing a
+  // single \ character. Also verifies UnescapeTerm doesn't trip its DCHECK.
+  SetInput("foo\\\\bar");
+  NEXT_EQ(TOK_TERM, string, "foo\\bar");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput("\\\\");
+  NEXT_EQ(TOK_TERM, string, "\\");
+  NEXT_TOK(TOK_YYEOF);
+
+  // Escape inside prefix/suffix/infix.
+  SetInput("foo\\~*");
+  NEXT_EQ(TOK_PREFIX, string, "foo~");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput("*foo\\~");
+  NEXT_EQ(TOK_SUFFIX, string, "foo~");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput("*foo\\~bar*");
+  NEXT_EQ(TOK_INFIX, string, "foo~bar");
+  NEXT_TOK(TOK_YYEOF);
+}
+
+TEST_F(SearchParserTest, TildeParse) {
+  // Simple optional term
+  EXPECT_EQ(0, Parse("~hello"));
+  // AND with optional
+  EXPECT_EQ(0, Parse("hello ~world"));
+  // Double optional
+  EXPECT_EQ(0, Parse("~hello ~world"));
+  // Optional with grouping
+  EXPECT_EQ(0, Parse("~(hello world)"));
+  // Optional prefix
+  EXPECT_EQ(0, Parse("~hel*"));
+  // Nested with NOT
+  EXPECT_EQ(0, Parse("~-hello"));
+  // Field-qualified optional — with and without parentheses
+  EXPECT_EQ(0, Parse("@field:(~hello)"));
+  EXPECT_EQ(0, Parse("@field:~hello"));
+  EXPECT_EQ(0, Parse("@title:~hel*"));
+  EXPECT_EQ(0, Parse("@title:~(hello world)"));
+}
+
+TEST_F(SearchParserTest, TildeInvalidGrammar) {
+  // ~ cannot precede top-level KNN or vector-range constructs (they live at
+  // final_query level, not search_unary_expr). Must be a clean syntax error.
+  EXPECT_EQ(1, Parse("~*=>[KNN 3 @v vec]"));
+  EXPECT_EQ(1, Parse("~@v:[VECTOR_RANGE 1 vec]"));
+
+  // ~ followed by closing paren or empty group — syntax errors.
+  EXPECT_EQ(1, Parse("~)"));
+  EXPECT_EQ(1, Parse("~()"));
+
+  // Bare ~ at end of input — syntax error.
+  EXPECT_EQ(1, Parse("hello ~"));
+
+  // ~ inside a tag list is NOT supported (per issue #7223).
+  EXPECT_EQ(1, Parse("@tag:{~value}"));
 }
 
 TEST_F(SearchParserTest, Parse) {

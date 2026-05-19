@@ -71,12 +71,12 @@ void RecordTxScheduleStats(const Transaction* tx) {
   ++ss->stats.tx_width_freq_arr[tx->GetUniqueShardCnt() - 1];
 }
 
-std::ostream& operator<<(std::ostream& os, Transaction::time_point tp) {
+std::string FormatTp(Transaction::time_point tp) {
   using namespace chrono;
   if (tp == Transaction::time_point::max())
-    return os << "inf";
+    return "inf";
   size_t ms = duration_cast<milliseconds>(tp - Transaction::time_point::clock::now()).count();
-  return os << ms << "ms";
+  return absl::StrCat(ms, "ms");
 }
 
 uint16_t trans_id(const Transaction* ptr) {
@@ -703,7 +703,7 @@ void Transaction::RunCallback(EngineShard* shard) {
       }
     }
   } catch (std::bad_alloc&) {
-    LOG_FIRST_N(ERROR, 16) << " out of memory";  // TODO: to log at most once per sec.
+    LOG_EVERY_T(ERROR, 1) << " out of memory";
     absl::base_internal::SpinLockHolder lk{&local_result_mu_};
     local_result_ = OpStatus::OUT_OF_MEMORY;
   } catch (std::exception& e) {
@@ -1152,6 +1152,9 @@ pair<uint16_t, bool> Transaction::DisarmInShardWhen(ShardId sid, uint16_t releva
 }
 
 bool Transaction::IsActive(ShardId sid) const {
+  if (unique_shard_cnt_ == 0)  // Not initialized
+    return false;
+
   // If we have only one shard, we often don't store infromation about all shards, so determine it
   // solely by id
   if (unique_shard_cnt_ == 1) {
@@ -1377,7 +1380,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
 
   auto* stats = ServerState::tl_connection_stats();
   ++stats->num_blocked_clients;
-  DVLOG(1) << "WaitOnWatch wait for " << tp << " " << DebugId();
+  DVLOG(1) << "WaitOnWatch wait for " << FormatTp(tp) << " " << DebugId();
 
   // Wait for the blocking barrier to be closed.
   // Note: It might return immediately if another thread already notified us.
@@ -1619,8 +1622,13 @@ void Transaction::CancelBlocking(const std::function<OpStatus(ArgSlice)>& status
 bool Transaction::CanRunInlined() const {
   auto* ss = ServerState::tlocal();
   auto* es = EngineShard::tlocal();
+
+  // Global transactions like SAVE can change the inlining rules, so run them non-inlined.
+  // This guarantees that their PollExecution batch executes on the shard-queue fiber
+  // when the conditions update
   if (unique_shard_cnt_ == 1 && unique_shard_id_ == ss->thread_index() &&
-      ss->AllowInlineScheduling() && !GetDbSlice(es->shard_id()).HasRegisteredCallbacks()) {
+      ss->AllowInlineScheduling() && !GetDbSlice(es->shard_id()).HasRegisteredCallbacks() &&
+      !IsGlobal()) {
     ss->stats.tx_inline_runs++;
     return true;
   }

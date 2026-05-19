@@ -94,6 +94,7 @@ MP::Result ParseStore(ArgSlice tokens, int64_t now, MP::Command* res, uint32_t m
     return MP::PARSE_ERROR;
   }
 
+  res->raw_expire_ts = expire_ts;
   res->expire_ts = ToAbsolute(expire_ts, now);
 
   if (res->type == MP::CAS && !absl::SimpleAtoi(tokens[4], &res->cas_unique)) {
@@ -126,6 +127,7 @@ MP::Result ParseValueless(ArgSlice tokens, int64_t now, MP::Command* res) {
     if (!absl::SimpleAtoi(tokens[0], &expire_ts)) {
       return MP::BAD_INT;
     }
+    res->raw_expire_ts = expire_ts;
     res->expire_ts = ToAbsolute(expire_ts, now);
     ++key_pos;
   }
@@ -277,6 +279,7 @@ MP::Result ParseMeta(ArgSlice tokens, int64_t now, MP::Command* res, uint32_t ma
       case 'T':
         if (!absl::SimpleAtoi(token.substr(1), &expire_ts))
           return MP::BAD_INT;
+        res->raw_expire_ts = expire_ts;
         res->expire_ts = ToAbsolute(expire_ts, now);
         if (res->type == MP::GET)
           res->type = MP::GAT;
@@ -471,6 +474,62 @@ auto MP::ConsumeValue(std::string_view str, uint32_t* consumed, Command* dest) -
   } while (val_len_to_read_ && !str.empty());
 
   return val_len_to_read_ > 0 ? MP::INPUT_PENDING : MP::OK;
+}
+
+// Inverse of the token map in From(): enum -> wire token. Only used by the
+// traffic logger, which is off most of the time, so a switch is plenty.
+string_view MP::CmdName(CmdType type) {
+  switch (type) {
+    case MP::SET:
+      return "set"sv;
+    case MP::ADD:
+      return "add"sv;
+    case MP::REPLACE:
+      return "replace"sv;
+    case MP::APPEND:
+      return "append"sv;
+    case MP::PREPEND:
+      return "prepend"sv;
+    case MP::CAS:
+      return "cas"sv;
+    case MP::GET:
+      return "get"sv;
+    case MP::GETS:
+      return "gets"sv;
+    case MP::GAT:
+      return "gat"sv;
+    case MP::GATS:
+      return "gats"sv;
+    case MP::STATS:
+      return "stats"sv;
+    case MP::INCR:
+      return "incr"sv;
+    case MP::DECR:
+      return "decr"sv;
+    case MP::DELETE:
+      return "delete"sv;
+    case MP::FLUSHALL:
+      return "flush_all"sv;
+    case MP::QUIT:
+      return "quit"sv;
+    case MP::VERSION:
+      return "version"sv;
+    case MP::META_NOOP:
+      return "mn"sv;
+    case MP::META_SET:
+      return "ms"sv;
+    case MP::META_DEL:
+      return "md"sv;
+    case MP::META_ARITHM:
+      return "ma"sv;
+    case MP::META_GET:
+      return "mg"sv;
+    case MP::META_DEBUG:
+      return "me"sv;
+    case MP::INVALID:
+      return ""sv;
+  }
+  return ""sv;
 }
 
 }  // namespace facade

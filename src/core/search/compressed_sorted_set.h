@@ -33,6 +33,7 @@ class CompressedSortedSet {
     using reference = IntType&;
 
     IntType operator*() const;
+    uint32_t Freq() const;
     ConstIterator& operator++();
 
     friend class CompressedSortedSet;
@@ -47,6 +48,8 @@ class CompressedSortedSet {
     void ReadNext();  // Decode next value to stash
 
     std::optional<IntType> stash_{};
+    uint32_t freq_stash_{0};
+    bool store_freq_{false};
     absl::Span<const uint8_t> last_read_{};
     absl::Span<const uint8_t> diffs_{};
   };
@@ -54,12 +57,15 @@ class CompressedSortedSet {
   using iterator = ConstIterator;
 
  public:
-  explicit CompressedSortedSet(PMR_NS::memory_resource* mr);
+  // When store_freq is true, each entry encodes [diff_varint][freq_varint].
+  // When false (default), only [diff_varint] is stored — saves 1 byte per entry.
+  explicit CompressedSortedSet(PMR_NS::memory_resource* mr, bool store_freq = false);
 
   ConstIterator begin() const;
   ConstIterator end() const;
 
-  bool Insert(IntType value);  // Insert arbitrary element, needs to scan whole list
+  // Insert element with term frequency. Returns true if new, false if already present.
+  bool Insert(IntType value, uint32_t freq = 1);
   bool Remove(IntType value);  // Remove arbitrary element, needs to scan whole list
 
   size_t Size() const {
@@ -80,6 +86,10 @@ class CompressedSortedSet {
     diffs_.clear();
   }
 
+  bool StoresFreq() const {
+    return store_freq_;
+  }
+
   // Add all values from other
   void Merge(CompressedSortedSet&& other);
 
@@ -97,18 +107,18 @@ class CompressedSortedSet {
 
  private:
   struct EntryLocation {
-    IntType value;                        // Value or 0
-    IntType prev_value;                   // Preceding value or 0
-    absl::Span<const uint8_t> diff_span;  // Location of value encoded diff, empty if none read
+    IntType value;                         // Value or 0
+    IntType prev_value;                    // Preceding value or 0
+    uint32_t freq;                         // Frequency of the value
+    absl::Span<const uint8_t> entry_span;  // Location of encoded diff+freq, empty if none read
   };
 
  private:
   // Find EntryLocation of first entry that is not less than value (std::lower_bound)
   EntryLocation LowerBound(IntType value) const;
 
-  // Push back difference without any decoding. Used only for efficient construction from sorted
-  // list
-  void PushBackDiff(IntType diff);
+  // Push back difference + freq without any decoding. Used for efficient construction
+  void PushBackDiff(IntType diff, uint32_t freq);
 
   // Encode integer with variable length encoding into buf and return written subspan
   static absl::Span<uint8_t> WriteVarLen(IntType value, absl::Span<uint8_t> buf);
@@ -118,6 +128,7 @@ class CompressedSortedSet {
 
  private:
   uint32_t size_{0};
+  bool store_freq_;  // Whether to encode/decode freq alongside diffs
 
   std::optional<IntType> tail_value_{};
   std::vector<uint8_t, PMR_NS::polymorphic_allocator<uint8_t>> diffs_;

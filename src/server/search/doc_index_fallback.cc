@@ -17,8 +17,8 @@ ShardDocIndices::ShardDocIndices() : local_mr_(nullptr) {
 
 void ShardDocIndices::AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv) {
 }
-void ShardDocIndices::RemoveDoc(std::string_view key, const DbContext& db_cnt,
-                                const PrimeValue& pv) {
+void ShardDocIndices::RemoveDoc(std::string_view key, const DbContext& db_cnt, PrimeValue& pv,
+                                absl::Span<const std::string_view>) {
 }
 
 void ShardDocIndices::DropAllIndices() {

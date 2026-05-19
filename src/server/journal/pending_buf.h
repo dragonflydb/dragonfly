@@ -29,7 +29,7 @@ class PendingBuf {
   }
 
   bool Empty() const {
-    return std::all_of(bufs_.begin(), bufs_.end(), [](const auto& b) { return b.buf.empty(); });
+    return std::ranges::all_of(bufs_, [](const auto& b) { return b.buf.empty(); });
   }
 
   void Push(std::string str) {

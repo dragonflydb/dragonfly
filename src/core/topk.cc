@@ -15,6 +15,8 @@
 #include "base/logging.h"
 #include "base/random.h"
 
+namespace rng = std::ranges;
+
 namespace dfly {
 
 namespace {
@@ -259,7 +261,7 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
   // Sort descending by count.
   // If counts are equal, tie-break lexicographically to ensure
   // deterministic API responses and exact Redis compatibility.
-  std::sort(result.begin(), result.end(), [](const TopKItem& a, const TopKItem& b) {
+  rng::sort(result, [](const TopKItem& a, const TopKItem& b) {
     if (a.count != b.count) {
       return a.count > b.count;
     }

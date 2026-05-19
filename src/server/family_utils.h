@@ -84,8 +84,8 @@ streamConsumer* StreamCreateConsumer(streamCG* cg, std::string_view name, uint64
  * being modified could potentially be of type HSET or JSON. */
 void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, PrimeValue& pv,
                              EngineShard* shard);
-void RemoveKeyFromIndexesIfNeeded(std::string_view key, const DbContext& db_cntx,
-                                  const PrimeValue& pv, EngineShard* shard);
+void RemoveKeyFromIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, PrimeValue& pv,
+                                  EngineShard* shard);
 
 // Validate and convert field/value ziplist pairs into listpack.
 // Returns 1 on success, 0 on integrity failure.
@@ -125,7 +125,7 @@ inline void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cn
 }
 
 inline void RemoveKeyFromIndexesIfNeeded(std::string_view key, const DbContext& db_cntx,
-                                         const PrimeValue& pv, EngineShard* shard) {
+                                         PrimeValue& pv, EngineShard* shard) {
   if (IsIndexedKeyType(pv)) {
     shard->search_indices()->RemoveDoc(key, db_cntx, pv);
   }

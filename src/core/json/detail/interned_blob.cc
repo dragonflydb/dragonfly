@@ -3,9 +3,9 @@
 
 #include "core/json/detail/interned_blob.h"
 
-#include <glog/logging.h>
 #include <mimalloc.h>
 
+#include "base/logging.h"
 #include "core/detail/stateless_allocator.h"
 
 namespace {

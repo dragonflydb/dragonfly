@@ -997,7 +997,7 @@ bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& repl_info, SyncState e
   return true;
 }
 
-void DflyCmd::Shutdown() {
+void DflyCmd::CancelReplicas() {
   ReplicaInfoMap pending;
   {
     util::fb2::LockGuard lk(mu_);
