@@ -138,10 +138,10 @@ SerializerBase::~SerializerBase() {
 //   same fiber, so the baseline is serialized first. big_value_mu_ prevents this callback path
 //   from interleaving with the traversal fiber's bucket serialization, which may preempt while
 //   emitting large values.
-void SerializerBase::RegisterChangeListener(bool replica) {
+void SerializerBase::RegisterChangeListener(bool replication) {
   db_array_ = db_slice_->databases();  // copy pointers to survive flush
   db_slice_->RegisterOnChange(this);
-  eventually_consistent_ = replica;
+  eventually_consistent_ = replication;
 }
 
 void SerializerBase::UnregisterChangeListener() {

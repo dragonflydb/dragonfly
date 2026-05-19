@@ -940,7 +940,9 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   }
 
   if (explicit_journal_ && op_args_.shard->journal()) {
-    // Skipping a journal write breaks the LSN buffer, so clear it
+    // A skipped journal write is not added to the journal ring buffer, so it goes unnoticed for
+    // partial sync. To fix that, we clear the ring buffer, so partial sync is no longer possible.
+    // TODO: Record journal, but only into ring buffer.
     if (skip_journal_)
       journal::ClearBuffer();
     else

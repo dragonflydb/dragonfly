@@ -105,7 +105,8 @@ class SerializerBase : public BucketDependencies,
   virtual ~SerializerBase();
 
   // Register db_slice change listener and save snapshot version.
-  void RegisterChangeListener(bool replica);
+  // Pass whether this is replication (true) or snapshotting (false)
+  void RegisterChangeListener(bool replication);
 
   // Unregisters the callback.  Safe to call if already unregistered.
   void UnregisterChangeListener();
