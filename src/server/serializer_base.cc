@@ -153,10 +153,11 @@ void SerializerBase::UnregisterChangeListener() {
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                    bool on_update) {
   // Check if this bucket is stale
-  if (it.GetVersion() >= snapshot_version_) {
+  if (it.is_done() || it.GetVersion() >= snapshot_version_) {
     stats_.buckets_skipped++;
 
-    // Update versions for empty buckets
+    // Update versions for empty buckets to mark that won't visit them anymore
+    // TODO: Flush changes to earlier callbacks
     if (it.GetVersion() < snapshot_version_)
       it.SetVersion(snapshot_version_);
 
@@ -166,12 +167,6 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
 
     // Wait for all dependencies to be resolved
     BucketDependencies::Wait(it.bucket_address());
-    return false;
-  }
-
-  // TODO: Flushing to earlier callbacks
-  if (it.is_done()) {
-    it.SetVersion(snapshot_version_);
     return false;
   }
 
