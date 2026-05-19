@@ -533,17 +533,12 @@ RestoreStreamer::~RestoreStreamer() {
 }
 
 bool RestoreStreamer::Cancel() {
-  auto sver = snapshot_version_;
-  snapshot_version_ = 0;  // to prevent double cancel in another fiber
-  cntx_->Cancel();
-  if (sver != 0) {
-    db_slice_->UnregisterOnChange(sver);
-  }
-  bool res = JournalStreamer::Cancel();
-  LOG_IF(WARNING, res != (sver != 0)) << "Journal and DBSlice unregister state mismatch in "
-                                         "RestoreStreamer Cancel. DBSlice unregister state: "
-                                      << (sver != 0) << ", Journal unregister state: " << res;
-  return res && (sver != 0);
+  if (snapshot_version_ == 0)
+    return false;
+
+  db_slice_->UnregisterOnChange(this);
+  JournalStreamer::Cancel();
+  return true;
 }
 
 bool RestoreStreamer::ShouldWrite(const journal::JournalChangeItem& item) const {

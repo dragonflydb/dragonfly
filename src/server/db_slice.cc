@@ -347,6 +347,18 @@ inline bool MayDeleteAsynchronously(const PrimeValue& pv) {
   return (obj_type == OBJ_SET || obj_type == OBJ_HASH) && pv.Encoding() == kEncodingStrMap2;
 }
 
+// Implement ChangeConsumerInterface with a single callback for one-shot functions
+template <typename F> struct CallbackConsumer : public DbSlice::ChangeConsumerInterface {
+  explicit CallbackConsumer(F f) : f_{std::move(f)} {
+  }
+
+  void OnChange(DbIndex db_index, const ChangeReq& req) {
+    f_(db_index, req);
+  }
+
+  F f_;
+};
+
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -830,7 +842,7 @@ void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
 }
 
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
-                           uint64_t cb_id) {
+                           ChangeConsumerInterface* consumer) {
   VLOG(1) << "Start FlushSlotsFb";
   // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
   // We want to flush all the data of a slot that was added till the time the call to FlushSlots
@@ -874,7 +886,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
-  UnregisterOnChange(cb_id);
+  UnregisterOnChange(consumer);
 
   if (absl::GetFlag(FLAGS_cluster_flush_decommit_memory)) {
     int64_t start = absl::GetCurrentTimeNanos();
@@ -933,10 +945,11 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
     }
   };
 
-  uint64_t cb_id = RegisterOnChange(std::move(on_change));
+  auto consumer = std::make_unique<CallbackConsumer<decltype(on_change)>>(std::move(on_change));
+  RegisterOnChange(consumer.get());
 
-  fb2::Fiber("flush_slots", [this, shared_slots, next_version, cb_id]() {
-    FlushSlotsFb(*shared_slots, next_version, cb_id);
+  fb2::Fiber("flush_slots", [this, shared_slots, next_version, consumer = std::move(consumer)]() {
+    FlushSlotsFb(*shared_slots, next_version, consumer.get());
   }).Detach();
 }
 
@@ -1322,7 +1335,8 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) con
 void DbSlice::ExpireAllIfNeeded() {
   // We hold no locks to any of the keys so we should Wait() here such that
   // we don't preempt in ExpireIfNeeded
-  serialization_latch_.Wait();
+  WaitForUnblockedJournalWrites();
+
   // Disable flush journal changes to prevent preemtion in traverse.
   journal::DisableFlushGuard journal_flush_guard(owner_->journal());
 
@@ -1344,9 +1358,29 @@ void DbSlice::ExpireAllIfNeeded() {
   }
 }
 
-uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
+void DbSlice::RegisterOnChange(ChangeConsumerInterface* consumer) {
   DCHECK(!owner_->shard_lock()->IsFree());
-  return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
+
+  consumer->snapshot_version_ = NextVersion();
+  change_cb_.emplace_back(consumer);
+}
+
+void DbSlice::UnregisterOnChange(ChangeConsumerInterface* consumer) {
+  change_cb_latch_.Wait();
+  auto it = std::find(change_cb_.begin(), change_cb_.end(), consumer);
+  CHECK(it != change_cb_.end());
+  change_cb_.erase(it);
+  consumer->snapshot_version_ = 0;
+}
+
+bool DbSlice::WillBlockOnJournalWrite() const {
+  return ranges::any_of(change_cb_, &ChangeConsumerInterface::IsAnyBucketBlocked);
+}
+
+void DbSlice::WaitForUnblockedJournalWrites() const {
+  std::lock_guard lk{change_cb_latch_};
+  while (WillBlockOnJournalWrite())
+    ranges::for_each(change_cb_, &ChangeConsumerInterface::WaitForNoBucketBlocked);
 }
 
 // Ordering invariant (PIT mode):
@@ -1357,47 +1391,24 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 //   snapshot could miss the bucket entirely — its traversal already passed it, and the version
 //   stamp from the current snapshot would cause the earlier snapshot's OnChangeBlocking to skip it.
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
-  unique_lock<LocalLatch> lk(serialization_latch_);
-
   uint64_t bucket_version = it.GetVersion();
-  // change_cb_ is ordered by version.
-  DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
-           << ", upper_bound=" << upper_bound;
 
-  const size_t limit = change_cb_.size();
-  auto ccb = change_cb_.begin();
-  for (size_t i = 0; i < limit; ++i) {
-    uint64_t cb_version = ccb->first;
-    DCHECK_LE(cb_version, upper_bound);
-    if (cb_version == upper_bound) {
+  // See CallChangeCallbacks for iteration details
+  unique_lock<LocalLatch> lk(change_cb_latch_);
+  for (auto* cb : change_cb_ | std::views::take(change_cb_.size())) {
+    DCHECK_LE(cb->snapshot_version_, upper_bound);
+    if (cb->snapshot_version_ == upper_bound)
       return;
-    }
 
-    // We can not have here bucket_version < cb_version check. Explanation:
-    // Suppose we run snapshots S1 and S2, S1 starts serializing the bucket B,
-    // now snapshot S2 is started and it reaches the B, calls FlushChangeToEarlierCallbacks.
-    // if if we have here strong inequality, then S1 callback will be skipped here, and S2
-    // will start processing B concurrently with S1. It should be fine in general, but
-    // we prefer avoiding this, so that we could DCHECK the invariant that the version bucket
-    // does not change during the serialization, therefore we allow at most one serializer
-    // reading the bucket at the same time.
-    if (bucket_version <= cb_version) {
+    // We call OnChange even if bucket_version == snapshot_version to ensure that the bucket
+    // _finished_ serializing, as we update its version when we start serializing.
+    if (bucket_version <= cb->snapshot_version_) {
       // Key might have been deleted because another FlushChangeToEarlierCallbacks finished
       // and allowed a mutation to pass while this one was suspended
       if (auto inner_it = it.GetInnerIt(); !inner_it.is_done())
-        ccb->second(db_ind, ChangeReq{inner_it});
+        cb->OnChange(db_ind, ChangeReq{it.GetInnerIt()});
     }
-    ++ccb;
   }
-}
-
-//! Unregisters the callback.
-void DbSlice::UnregisterOnChange(uint64_t id) {
-  serialization_latch_.Wait();
-  auto it = find_if(change_cb_.begin(), change_cb_.end(),
-                    [id](const auto& cb) { return cb.first == id; });
-  CHECK(it != change_cb_.end());
-  change_cb_.erase(it);
 }
 
 auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteExpiredStats {
@@ -1905,7 +1916,7 @@ void DbSlice::OnCbFinishBlocking() {
       }
 
       // We must not change the bucket's internal order during serialization
-      serialization_latch_.Wait();
+      WaitForUnblockedJournalWrites();
       PrimeBumpPolicy policy;
       auto bump_it = db.prime.BumpUp(it, policy);
       if (bump_it != it) {  // the item was bumped
@@ -1922,16 +1933,10 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
   if (change_cb_.empty())
     return;
 
-  // does not preempt, just increments the counter.
-  unique_lock<LocalLatch> lk(serialization_latch_);
-
-  const size_t limit = change_cb_.size();
-  auto ccb = change_cb_.begin();
-  for (size_t i = 0; i < limit; ++i) {
-    CHECK(ccb->second);
-    ccb->second(id, cr);
-    ++ccb;
-  }
+  // Lock latch to prevent deletion, take size() entries to ignore new insertions during suspensions
+  unique_lock<LocalLatch> lk(change_cb_latch_);
+  for (auto* cb : change_cb_ | std::views::take(change_cb_.size()))
+    cb->OnChange(id, cr);
 }
 
 }  // namespace dfly

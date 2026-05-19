@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "io/io.h"
+#include "server/db_slice.h"
 #include "server/synchronization.h"
 #include "server/table.h"
 #include "util/fibers/future.h"
@@ -36,9 +37,18 @@ struct BucketDependencies {
   void Wait(BucketIdentity bucket) const;
   bool DEBUG_IsBusy(BucketIdentity) const;
 
+  // Wait for no dependencies to exist
+  void WaitEmpty() const;
+  bool HasAny() const {
+    return !deps_.empty();
+  }
+
  private:
   using SharedLatch = std::shared_ptr<LocalLatch>;
   absl::flat_hash_map<BucketIdentity, SharedLatch> deps_;
+
+  // Triggered when all dependencies are resolved
+  mutable util::fb2::CondVarAny empty_q_;
 };
 
 struct TieredDelayedEntry {
@@ -79,7 +89,9 @@ struct DelayedEntryHandler {
 // Progress should be driven externally by calling ProcessBucket().
 // Additionally, db_slice change listeners can be registered that invoke SerializeBucket
 // before any modification are performed to ensure point-in-time isolation.
-class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
+class SerializerBase : public BucketDependencies,
+                       public DelayedEntryHandler,
+                       public DbSlice::ChangeConsumerInterface {
  public:
   struct Stats {
     uint64_t keys_serialized = 0;              // total number of keys serialized
@@ -114,6 +126,14 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) = 0;
 
+  void OnChange(DbIndex db_index, const ChangeReq& req) override;
+
+  bool IsAnyBucketBlocked() const override {
+    return BucketDependencies::HasAny();
+  }
+
+  void WaitForNoBucketBlocked() const override;
+
   // Called when an existing bucket is about to be mutated. Calls ProcessBucket.
   void OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it);
 
@@ -127,7 +147,6 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
 
   DbTableArray db_array_;
 
-  uint64_t snapshot_version_ = 0;
   Stats stats_;
 
   // Guards output stream (serializer) to not be used from multiple fibers
