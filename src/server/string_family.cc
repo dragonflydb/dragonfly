@@ -939,8 +939,12 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
     StashPrimeValue(op_args_.db_cntx.db_index, key, pv, ts, params.backpressure);
   }
 
-  if (!skip_journal_ && explicit_journal_ && op_args_.shard->journal()) {
-    RecordJournal(params, key, value);
+  if (explicit_journal_ && op_args_.shard->journal()) {
+    // Skipping a journal write breaks the LSN buffer, so clear it
+    if (skip_journal_)
+      journal::ClearBuffer();
+    else
+      RecordJournal(params, key, value);
   }
 }
 

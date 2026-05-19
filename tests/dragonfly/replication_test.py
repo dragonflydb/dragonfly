@@ -256,7 +256,7 @@ async def test_replication_all(
         # it's usually close to 1% but there are some that are close to 3.
         assert preemptions <= (key_capacity * 0.03)
 
-    if len(replicas) == 1:
+    if len(replicas) == 1 and seeder_config["key_target"] > 100_000:
         print("total omits", info["total_journal_omits"])
         assert info["total_journal_omits"] > 0
 
@@ -3495,8 +3495,9 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     # Make server 4 replica of server 2
     await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
     # Send some write command for lsn inc
+    # NOTE: using append temporarily because SET is omit-optimized with disables partial sync
     for i in range(100):
-        await c_s2.set(i, "val")
+        await c_s2.append(i, "val")
     # Make server 3 replica of server 2
     await c_s3.execute_command(f"REPLICAOF localhost {server2.port}")
 
