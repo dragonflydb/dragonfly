@@ -16,7 +16,6 @@ from redis.asyncio import Redis as RedisClient
 from redis.asyncio import RedisCluster as RedisCluster
 import signal
 
-
 START_DELAY = 0.8
 START_GDB_DELAY = 5.0
 
@@ -556,15 +555,18 @@ class RedisServer:
         logging.info(f"Started {self.server_bin} on port {self.port}, pid={self.proc.pid}")
 
     def stop(self):
+        ident = f"{self.server_bin} (port={self.port}, pid={self.proc.pid})"
         ret = self.proc.poll()
         if ret is not None:
-            logging.error(
-                f"{self.server_bin} (port={self.port}, pid={self.proc.pid}) "
-                f"already exited with code {ret}"
-            )
+            logging.error(f"{ident} already exited with code {ret}")
             return
         self.proc.terminate()
         try:
             self.proc.wait(timeout=10)
-        except Exception as e:
-            pass
+        except subprocess.TimeoutExpired:
+            logging.error(f"{ident} did not terminate in 10s; sending SIGKILL")
+            self.proc.kill()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logging.error(f"{ident} did not exit after SIGKILL within 5s")

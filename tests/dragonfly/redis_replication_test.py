@@ -7,6 +7,47 @@ from .utility import *
 from .instance import DflyInstanceFactory
 from .proxy import Proxy
 
+# Master fields surfaced on each poll. `slave*` entries (parsed by redis-py into per-slave
+# dicts with ip/port/state/offset/lag) reveal the master's view of every replica.
+_MASTER_SYNC_FIELDS = ("role", "connected_slaves", "master_repl_offset", "master_replid")
+# Replica fields surfaced on each poll. Together with the master's master_repl_offset,
+# `slave_repl_offset` makes the catch-up gap visible second-by-second.
+_REPLICA_SYNC_FIELDS = (
+    "role",
+    "master_host",
+    "master_link_status",
+    "master_sync_in_progress",
+    "master_last_io_seconds_ago",
+    "slave_repl_offset",
+    "loading",
+    "master_replid",
+)
+
+
+def _project_replication(info: dict, fields) -> dict:
+    out = {k: info.get(k) for k in fields}
+    if "_info_error" in info:
+        out["_info_error"] = info["_info_error"]
+    for k, v in info.items():
+        if isinstance(k, str) and k.startswith("slave") and k[5:].isdigit():
+            out[k] = v
+    return out
+
+
+async def _safe_info(client: aioredis.Redis, label: str) -> dict:
+    # Bounded so a stalled connection produces a diagnostic instead of hanging.
+    try:
+        return await asyncio.wait_for(client.info("replication"), timeout=5)
+    except Exception as e:
+        return {"_info_error": f"{label}: {type(e).__name__}: {e}"}
+
+
+async def _safe_dbsize(client: aioredis.Redis) -> object:
+    try:
+        return await asyncio.wait_for(client.dbsize(), timeout=5)
+    except Exception as e:
+        return f"<{type(e).__name__}: {e}>"
+
 
 # Checks that master redis and dragonfly replica are synced by writing a random key to master
 # and waiting for it to exist in replica. Foreach db in 0..dbcount-1.
@@ -15,24 +56,42 @@ async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbco
     key = "sync_key/" + rnd_str
     for db in range(dbcount):
         await c_master.set(key, "dummy")
-        logging.debug(f"set {key} MASTER db = {db}")
+        logging.info(f"await_synced: set {key} on MASTER db={db}, polling REPLICA up to {timeout}s")
         remaining = timeout
         while remaining > 0:
-            v = await c_replica.get(key)
-            logging.debug(f"get {key} from REPLICA db = {db} got {v}")
+            # All five calls run concurrently so one tick is bounded by the slowest single
+            # call (capped at 5s by _safe_*), not by their sum.
+            v, master_info, replica_info, master_dbsize, replica_dbsize = await asyncio.gather(
+                c_replica.get(key),
+                _safe_info(c_master, "master"),
+                _safe_info(c_replica, "replica"),
+                _safe_dbsize(c_master),
+                _safe_dbsize(c_replica),
+            )
             if v is not None:
+                logging.info(f"await_synced: REPLICA db={db} synced after {timeout - remaining}s")
                 break
-            repl_state = await c_master.info("replication")
-            logging.debug(f"replication info: {repl_state}")
+            logging.info(
+                f"await_synced db={db} t={timeout - remaining}s "
+                f"dbsize master={master_dbsize} replica={replica_dbsize} master_info="
+                f"{_project_replication(master_info, _MASTER_SYNC_FIELDS)} replica_info="
+                f"{_project_replication(replica_info, _REPLICA_SYNC_FIELDS)}"
+            )
             await asyncio.sleep(1)
-
             remaining -= 1
-        assert remaining > 0, "Timeout while waiting for replica to sync"
+        else:
+            logging.error(
+                f"await_synced TIMEOUT db={db} key={key} after {timeout}s "
+                f"dbsize master={master_dbsize} replica={replica_dbsize} "
+                f"master_info={master_info} replica_info={replica_info}"
+            )
+            assert False, "Timeout while waiting for replica to sync"
 
 
-async def await_synced_all(c_master, c_replicas, timeout=30):
-    for c_replica in c_replicas:
-        await await_synced(c_master, c_replica, timeout=timeout)
+async def await_synced_all(c_master, c_replicas, timeout=30, dbcount=1):
+    for i, c_replica in enumerate(c_replicas):
+        logging.info(f"await_synced_all: checking replica {i + 1}/{len(c_replicas)}")
+        await await_synced(c_master, c_replica, dbcount=dbcount, timeout=timeout)
 
 
 async def check_data(seeder, replicas, c_replicas):
