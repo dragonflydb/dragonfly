@@ -152,6 +152,8 @@ async def compare_datasets(c_master, c_replica):
             2, [2], dict(key_target=1_000, data_size=10_000, huge_value_target=0), 100, marks=M_SLOW
         ),
         # Stress test
+        # Single replica process might have additional optimizations that need to be verified
+        pytest.param(4, [4], dict(key_target=500_000, types=["STRING"]), 100_000, marks=M_STRESS),
         pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
     ],
 )
@@ -241,7 +243,8 @@ async def test_replication_all(
         f"Compressed blobs {compressed_blobs} .Capacity {key_capacity}. Preemptions {preemptions}"
     )
 
-    assert preemptions >= seeder.huge_value_target * 0.5
+    if len(replicas) > 1:
+        assert preemptions >= seeder.huge_value_target * 0.5
     assert compressed_blobs > 0
     # Because data size could be 10k and for that case there will be almost a preemption
     # per bucket.
@@ -252,6 +255,10 @@ async def test_replication_all(
         # the size of the hug value and the serialization max chunk size. For the test cases here,
         # it's usually close to 1% but there are some that are close to 3.
         assert preemptions <= (key_capacity * 0.03)
+
+    if len(replicas) == 1 and seeder_config["key_target"] > 100_000:
+        print("total omits", info["total_journal_omits"])
+        assert info["total_journal_omits"] > 0
 
     # Assert select calls are properly optimized
     for replica in c_replicas:
@@ -3488,8 +3495,9 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     # Make server 4 replica of server 2
     await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
     # Send some write command for lsn inc
+    # NOTE: using append temporarily because SET is omit-optimized with disables partial sync
     for i in range(100):
-        await c_s2.set(i, "val")
+        await c_s2.append(i, "val")
     # Make server 3 replica of server 2
     await c_s3.execute_command(f"REPLICAOF localhost {server2.port}")
 

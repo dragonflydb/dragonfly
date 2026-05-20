@@ -61,6 +61,11 @@ struct DbContext {
   DbIndex db_index = 0;
   uint64_t time_now_ms = 0;
 
+  // Set if this operation can be safely not reported to eventually consistent
+  // snapshots (replicas) - the change callbacks and journal consumers.
+  // Optimizes unnecessary serialization reordering
+  bool is_omittable_operation = false;
+
   // Convenience method.
   DbSlice& GetDbSlice(ShardId shard_id) const;
 };

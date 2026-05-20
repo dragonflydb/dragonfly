@@ -56,8 +56,8 @@ error_code Close() {
   return {};
 }
 
-bool HasRegisteredCallbacks() {
-  return journal_slice.HasRegisteredCallbacks();
+unsigned GetCallbackCount() {
+  return journal_slice.OnChangeCbCount();
 }
 
 bool IsLSNInBuffer(LSN lsn) {

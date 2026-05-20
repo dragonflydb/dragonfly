@@ -138,9 +138,10 @@ SerializerBase::~SerializerBase() {
 //   same fiber, so the baseline is serialized first. big_value_mu_ prevents this callback path
 //   from interleaving with the traversal fiber's bucket serialization, which may preempt while
 //   emitting large values.
-void SerializerBase::RegisterChangeListener() {
+void SerializerBase::RegisterChangeListener(bool replication) {
   db_array_ = db_slice_->databases();  // copy pointers to survive flush
   db_slice_->RegisterOnChange(this);
+  eventually_consistent_ = replication;
 }
 
 void SerializerBase::UnregisterChangeListener() {
@@ -155,7 +156,8 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   if (it.is_done() || it.GetVersion() >= snapshot_version_) {
     stats_.buckets_skipped++;
 
-    // Update versions for empty buckets
+    // Update versions for empty buckets to mark that won't visit them anymore
+    // TODO: Flush changes to earlier callbacks
     if (it.GetVersion() < snapshot_version_)
       it.SetVersion(snapshot_version_);
 

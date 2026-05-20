@@ -145,7 +145,7 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   }
 
   void Start() {
-    SerializerBase::RegisterChangeListener();
+    SerializerBase::RegisterChangeListener(false);
     journal::StartInThread();
     journal_id_ = journal::RegisterConsumer(this);
 
