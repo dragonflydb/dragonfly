@@ -1213,6 +1213,7 @@ uint8_t CompactObj::GetFirstByte() const {
   }
 
   if (taglen_ == LARGE_STR_TAG) {
+    DCHECK(u_.large_str.ptr);
     return *(uint8_t*)u_.large_str.ptr;
   }
 
