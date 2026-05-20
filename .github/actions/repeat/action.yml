@@ -57,7 +57,7 @@ runs:
         else
           FORCE_EPOLL=""
         fi
-        if [[ $"{{ inputs.vmodule_expression }}" != "" ]]; then
+        if [[ "${{ inputs.vmodule_expression }}" != "" ]]; then
           VMOD="--df vmodule=${{ inputs.vmodule_expression }}"
         else
           VMOD=""
