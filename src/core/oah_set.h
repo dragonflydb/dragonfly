@@ -10,10 +10,10 @@
 
 #include <bit>
 #include <concepts>
-#include <eve/eve.hpp>
 #include <vector>
 
 #include "core/detail/stateless_allocator.h"
+#include "core/simd_op.h"
 #include "core/string_set.h"
 #include "oah_entry.h"
 
@@ -156,13 +156,13 @@ class OAHSet {  // Open Addressing Hash Set
   // bytes — perfect for an AVX2 256-bit register on x86_64.
   static_assert(sizeof(OAHEntry) == sizeof(uint64_t));
   static_assert(alignof(OAHEntry) == alignof(uint64_t));
-  using EntryWide = eve::wide<uint64_t, eve::fixed<kDisplacementSize>>;
+  using EntryWide = SimdOp<uint64_t, kDisplacementSize>;
 
   // 2-lane SIMD for iterating the extension-point vector. Vectors are
   // guaranteed power-of-2 capacity with minimum 2 (see OAHEntry::Insert), so a
   // 2-lane (16-byte SSE) load is always within the heap allocation.
   static constexpr std::uint32_t kVectorLaneStep = 2;
-  using VectorWide = eve::wide<uint64_t, eve::fixed<kVectorLaneStep>>;
+  using VectorWide = SimdOp<uint64_t, kVectorLaneStep>;
 
   explicit OAHSet() = default;
 
@@ -198,24 +198,21 @@ class OAHSet {  // Open Addressing Hash Set
     const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
     entry.SetExtHash(ext_hash);
 
-    EntryWide data_v{reinterpret_cast<const uint64_t*>(&entries_[bucket_id])};
-    EntryWide hash_v =
-        (data_v & EntryWide{OAHEntry::kExtHashShiftedMask}) >> OAHEntry::kExtHashShift;
+    auto data_v = EntryWide::Load(reinterpret_cast<const uint64_t*>(&entries_[bucket_id]));
+    auto hash_v =
+        (data_v & EntryWide::Broadcast(OAHEntry::kExtHashShiftedMask)) >> OAHEntry::kExtHashShift;
 
     // !is_empty guards an empty lane's zero hash_v from aliasing a hash
     // match when ext_hash==0 or the lazy-init (stored==0) branch.
-    auto is_empty = eve::is_eqz(data_v);
-    auto candidate = (hash_v == EntryWide{ext_hash} || eve::is_eqz(hash_v)) && !is_empty;
+    auto is_empty = data_v == uint64_t(0);
+    auto candidate = ((hash_v == ext_hash) | (hash_v == uint64_t(0))) & ~is_empty;
 
     OAHEntry* reuse_slot = nullptr;
 
-    using TopBits = eve::top_bits<decltype(candidate)>;
-    constexpr auto kBitsPerLane = TopBits::bits_per_element;
-    auto cand_bits = TopBits{candidate}.as_int();
+    auto cand_bits = candidate.ToBits();
     while (cand_bits) {
-      const uint32_t i = std::countr_zero(cand_bits) / kBitsPerLane;
-      const auto lane_mask = ((decltype(cand_bits)(1) << kBitsPerLane) - 1) << (i * kBitsPerLane);
-      cand_bits &= ~lane_mask;
+      const uint32_t i = std::countr_zero(cand_bits);
+      cand_bits &= cand_bits - 1;
 
       OAHEntry& e = entries_[bucket_id + i];
       if (e.IsVector())
@@ -251,8 +248,8 @@ class OAHSet {  // Open Addressing Hash Set
       return true;
     }
 
-    if (auto idx = eve::first_true(is_empty); idx) {
-      entries_[bucket_id + *idx] = std::move(entry);
+    if (auto empty_bits = is_empty.ToBits(); empty_bits) {
+      entries_[bucket_id + std::countr_zero(empty_bits)] = std::move(entry);
     } else {
       ptr_vectors_alloc_used_ += entries_[ext_bid].Insert(std::move(entry));
     }
@@ -338,9 +335,7 @@ class OAHSet {  // Open Addressing Hash Set
   // from "match-but-expired" (slot is now vacant; reuse it for the new entry).
   //
   // Vectors have power-of-2 capacity with minimum 2, so we sweep in 2-lane
-  // SIMD strides. Lane iteration uses top_bits + countr_zero rather than
-  // candidate.get(j) — the latter triggers eve's memcpy-into-logical extract
-  // which trips GCC's -Wclass-memaccess under -Werror.
+  // SIMD strides.
   OAHEntry* ProbeExtensionVector(uint32_t ext_bid, std::string_view str, uint64_t ext_hash) {
     auto& vec = entries_[ext_bid].AsVector();
     auto* raw_arr = vec.Raw();
@@ -348,19 +343,16 @@ class OAHSet {  // Open Addressing Hash Set
     assert(size >= kVectorLaneStep && std::has_single_bit(size));
 
     for (size_t base = 0; base < size; base += kVectorLaneStep) {
-      VectorWide data_v{reinterpret_cast<const uint64_t*>(&raw_arr[base])};
-      VectorWide hash_v =
-          (data_v & VectorWide{OAHEntry::kExtHashShiftedMask}) >> OAHEntry::kExtHashShift;
-      auto is_empty = eve::is_eqz(data_v);
-      auto candidate = (hash_v == VectorWide{ext_hash} || eve::is_eqz(hash_v)) && !is_empty;
+      auto data_v = VectorWide::Load(reinterpret_cast<const uint64_t*>(&raw_arr[base]));
+      auto hash_v = (data_v & VectorWide::Broadcast(OAHEntry::kExtHashShiftedMask)) >>
+                    OAHEntry::kExtHashShift;
+      auto is_empty = data_v == uint64_t(0);
+      auto candidate = ((hash_v == ext_hash) | (hash_v == uint64_t(0))) & ~is_empty;
 
-      using TopBits = eve::top_bits<decltype(candidate)>;
-      constexpr auto kBitsPerLane = TopBits::bits_per_element;
-      auto cand_bits = TopBits{candidate}.as_int();
+      auto cand_bits = candidate.ToBits();
       while (cand_bits) {
-        const uint32_t j = std::countr_zero(cand_bits) / kBitsPerLane;
-        const auto lane_mask = ((decltype(cand_bits)(1) << kBitsPerLane) - 1) << (j * kBitsPerLane);
-        cand_bits &= ~lane_mask;
+        const uint32_t j = std::countr_zero(cand_bits);
+        cand_bits &= cand_bits - 1;
 
         OAHEntry& re = raw_arr[base + j];
         if (re.Key() != str) {  // after rehash, the pointer can miss hash so we need to set it for

@@ -109,29 +109,6 @@ endif()
 
 include(third_party)
 include(internal)
-# helio's internal.cmake sets CMAKE_CXX_STANDARD=17 for its own legacy targets;
-# dragonfly itself uses C++20 (operator<=>, std::contiguous_iterator, concepts),
-# so restore the C++20 standard before configuring our own subdirectories.
-set(CMAKE_CXX_STANDARD 20)
-
-# Fetch the EVE (Expressive Vector Engine) SIMD library used by OAHSet.
-# Mirrors the FetchContent pattern in helio/cmake/third_party.cmake.
-include(FetchContent)
-FetchContent_Declare(
-  eve
-  URL https://github.com/jfalcou/eve/archive/refs/tags/v2023.02.15.tar.gz
-  URL_HASH SHA256=7a5fb59c0e6ef3bef3e8b36d62e138d31e7f2a9f1bdfe95a8e96512b207f84c5
-)
-FetchContent_GetProperties(eve)
-if (NOT eve_POPULATED)
-  FetchContent_Populate(eve)
-  set(EVE_BUILD_TEST OFF CACHE BOOL "")
-  set(EVE_BUILD_DOCUMENTATION OFF CACHE BOOL "")
-  set(EVE_BUILD_BENCHMARKS OFF CACHE BOOL "")
-  set(EVE_BUILD_INTEGRATION OFF CACHE BOOL "")
-  set(EVE_BUILD_RANDOM OFF CACHE BOOL "")
-  add_subdirectory(${eve_SOURCE_DIR} ${eve_BINARY_DIR})
-endif()
 
 include_directories(src)
 include_directories(helio)
