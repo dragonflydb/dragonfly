@@ -629,16 +629,50 @@ string ConnectionLogContext(const facade::Connection* conn) {
 
 string FailedCommandToString(std::string_view command, facade::CmdArgList args,
                              std::string_view reason) {
+  constexpr size_t kMaxArgCount = 31;
+  constexpr size_t kMaxArgLength = 128;
+  constexpr size_t kMaxReasonLength = 256;
+
   string result;
   absl::StrAppend(&result, " ", command);
 
-  if (command != "AUTH" && command != "ACL SETUSER") {
-    for (auto arg : args) {
+  auto AppendArg = [&](string_view arg) {
+    if (arg.size() > kMaxArgLength) {
+      absl::StrAppend(&result, " ", absl::CHexEscape(arg.substr(0, kMaxArgLength)), "... (",
+                      arg.size() - kMaxArgLength, " more bytes)");
+    } else {
       absl::StrAppend(&result, " ", absl::CHexEscape(arg));
+    }
+  };
+
+  const bool is_eval = absl::StartsWith(command, "EVAL");
+
+  if (command == "AUTH" || absl::StartsWith(command, "ACL")) {
+    // skip all args to protect passwords
+  } else if (is_eval) {
+    // log only script/SHA and numkeys, skip KEYS and ARGV to avoid PII leaks
+    for (size_t i = 0; i < std::min(args.size(), size_t{2}); ++i) {
+      AppendArg(facade::ArgS(args, i));
+    }
+  } else {
+    size_t num_args = std::min(args.size(), kMaxArgCount);
+    for (size_t i = 0; i < num_args; ++i) {
+      AppendArg(facade::ArgS(args, i));
+    }
+    if (args.size() > kMaxArgCount) {
+      absl::StrAppend(&result, " ... (", args.size() - kMaxArgCount, " more arguments)");
     }
   }
 
-  absl::StrAppend(&result, " failed with reason: ", reason);
+  // Lua error messages for EVAL can contain user-supplied data (PII).
+  // "Error running script (call to <sha>): <lua_error>" — strip everything after "): ".
+  string_view safe_reason = reason.substr(0, kMaxReasonLength);
+  if (is_eval && absl::StartsWith(reason, "Error running script (call to ")) {
+    auto sep = reason.find("): ");
+    if (sep != string_view::npos)
+      safe_reason = reason.substr(0, sep + 1);
+  }
+  absl::StrAppend(&result, " failed with reason: ", safe_reason);
 
   return result;
 }
