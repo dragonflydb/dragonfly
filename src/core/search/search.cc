@@ -117,8 +117,8 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices, ScorerFn scorer = nullptr)
-      : indices_{indices}, scorer_{scorer} {
+  BasicSearch(const FieldIndices* indices, ScorerFn scorer, const GlobalScoringStats* global_stats)
+      : indices_{indices}, scorer_{scorer}, global_stats_{global_stats} {
   }
 
   void EnableProfiling() {
@@ -234,38 +234,35 @@ struct BasicSearch {
       indices = indices_->GetAllTextIndices();
     }
 
-    // Track matched terms for scoring (prefix/suffix/infix expand to multiple terms).
-    // Synonym shadow entries (freq=0) are resolved to their group_id for correct scoring.
-    if (scorer_) {
-      for (auto* index : indices) {
-        auto term_cb = [this, index](string_view term, const auto*) {
+    // Single trie walk dispatches each match to scoring (AddMatchedTerm) and
+    // to the union (for the result set). Synonym shadow entries (freq=0) are
+    // resolved to the group token so TakeScoredTopK looks up the group's
+    // posting list instead.
+    vector<IndexResult> sub_results;
+    sub_results.reserve(indices.size());
+    for (auto* index : indices) {
+      IndexResult per_index{};
+      auto term_cb = [&per_index, this, index](string_view term, const auto* container) {
+        if (scorer_) {
           std::string resolved{term};
           if (auto synonyms = indices_->GetSynonyms(); synonyms) {
             if (auto group_id = synonyms->GetGroupToken(resolved); group_id)
               resolved = std::move(*group_id);
           }
           AddMatchedTerm(index, std::move(resolved));
-        };
-        if constexpr (T == TagType::PREFIX)
-          index->MatchPrefixWithTerm(node.affix, term_cb);
-        else if constexpr (T == TagType::SUFFIX)
-          index->MatchSuffixWithTerm(node.affix, term_cb);
-        else if constexpr (T == TagType::INFIX)
-          index->MatchInfixWithTerm(node.affix, term_cb);
-      }
+        }
+        Merge(IndexResult{container}, &per_index, LogicOp::OR);
+      };
+      if constexpr (T == TagType::PREFIX)
+        index->MatchPrefixWithTerm(node.affix, term_cb);
+      else if constexpr (T == TagType::SUFFIX)
+        index->MatchSuffixWithTerm(node.affix, term_cb);
+      else if constexpr (T == TagType::INFIX)
+        index->MatchInfixWithTerm(node.affix, term_cb);
+      sub_results.push_back(std::move(per_index));
     }
 
-    auto mapping = [&node, this](TextIndex* index) {
-      if constexpr (T == TagType::PREFIX)
-        return CollectMatches(index, node.affix, &TextIndex::MatchPrefix);
-      else if constexpr (T == TagType::SUFFIX)
-        return CollectMatches(index, node.affix, &TextIndex::MatchSuffix);
-      else if constexpr (T == TagType::INFIX)
-        return CollectMatches(index, node.affix, &TextIndex::MatchInfix);
-      else
-        return vector<DocId>{};
-    };
-    return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
+    return UnifyResults(std::move(sub_results), LogicOp::OR);
   }
 
   // "term": access field's text index or unify results from all text indices if no field is set.
@@ -703,6 +700,7 @@ struct BasicSearch {
   struct TermCursor {
     TextIndex* index;
     size_t term_docs;
+    double field_avg_doc_len;  // pre-resolved (global or local)
     TextIndex::Container::BlockListIterator it;
     TextIndex::Container::BlockListIterator end;
   };
@@ -726,17 +724,22 @@ struct BasicSearch {
     // Ensure sorted for cursor-based scoring
     sort(all_docs.begin(), all_docs.end());
 
-    // Open cursors on posting lists for each matched term
+    // Open cursors on posting lists for each matched term.
     vector<TermCursor> cursors;
     cursors.reserve(matched_text_terms_.size());
-    for (auto& [index, term] : matched_text_terms_) {
+    for (const auto& [index, term] : matched_text_terms_) {
       auto* container = index->Matching(term, /*strip_whitespace=*/false);
       if (!container)
         continue;
-      cursors.push_back({index, container->Size(), container->begin(), container->end()});
+      string_view field_ident = index->field_ident();
+      size_t term_docs =
+          global_stats_ ? global_stats_->GetTermDocs(field_ident, term) : container->Size();
+      double avg = global_stats_ ? global_stats_->GetFieldAvgDocLen(field_ident)
+                                 : index->GetFieldAvgDocLen();
+      cursors.push_back({index, term_docs, avg, container->begin(), container->end()});
     }
 
-    ScoringContext ctx{indices_->GetAllDocs().size()};
+    ScoringContext ctx{global_stats_ ? global_stats_->num_docs : indices_->GetAllDocs().size()};
 
     // Score all docs - reuse term_infos buffer across iterations
     vector<pair<float, DocId>> scored;
@@ -749,7 +752,7 @@ struct BasicSearch {
         term_infos[t].term_freq = SeekCursor(cursors[t], doc);
         if (cursors[t].index) {
           term_infos[t].field_doc_len = cursors[t].index->GetFieldDocLength(doc);
-          term_infos[t].field_avg_doc_len = cursors[t].index->GetFieldAvgDocLen();
+          term_infos[t].field_avg_doc_len = cursors[t].field_avg_doc_len;
         }
       }
       scored.emplace_back(static_cast<float>(ScoreDocument(scorer_, ctx, term_infos)), doc);
@@ -782,6 +785,7 @@ struct BasicSearch {
 
   const FieldIndices* indices_;
   ScorerFn scorer_ = nullptr;
+  const GlobalScoringStats* global_stats_ = nullptr;
 
   string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
@@ -799,6 +803,110 @@ struct BasicSearch {
 #ifndef __clang__
 #pragma GCC diagnostic pop
 #endif
+
+// Walks the AST to collect per-(field, term) and per-field stats for the
+// scoring phase.
+struct StatsCollector {
+  explicit StatsCollector(const FieldIndices* indices) : indices_{indices} {
+    stats_.num_docs = indices_->GetAllDocs().size();
+  }
+
+  ShardScoringStats Take() && {
+    return std::move(stats_);
+  }
+
+  void Walk(const AstNode& node, string_view active_field) {
+    visit([this, active_field](const auto& inner) { Visit(inner, active_field); }, node.Variant());
+  }
+
+ private:
+  // Catch-all for nodes that don't reference text terms; specific overloads below win.
+  template <typename T> void Visit(const T&, string_view) {
+  }
+
+  void Visit(const AstFieldNode& node, string_view) {
+    DCHECK(node.node);
+    Walk(*node.node, node.field);
+  }
+  void Visit(const AstLogicalNode& node, string_view active_field) {
+    for (const auto& child : node.nodes)
+      Walk(child, active_field);
+  }
+  void Visit(const AstNegateNode& node, string_view active_field) {
+    Walk(*node.node, active_field);
+  }
+  void Visit(const AstOptionalNode& node, string_view active_field) {
+    Walk(*node.node, active_field);
+  }
+  void Visit(const AstKnnNode& node, string_view active_field) {
+    Walk(*node.filter, active_field);
+  }
+
+  void Visit(const AstTermNode& node, string_view active_field) {
+    string term = node.affix;
+    bool strip_whitespace = true;
+    if (auto* syn = indices_->GetSynonyms(); syn) {
+      if (auto group_id = syn->GetGroupToken(term); group_id) {
+        term = *group_id;
+        strip_whitespace = false;
+      }
+    }
+    for (auto* idx : SelectTextIndices(active_field)) {
+      const auto* container = idx->Matching(term, strip_whitespace);
+      Record(idx, term, container);
+    }
+  }
+
+  template <TagType T> void Visit(const AstAffixNode<T>& node, string_view active_field) {
+    static_assert(T != TagType::REGULAR);
+    for (auto* idx : SelectTextIndices(active_field)) {
+      auto cb = [this, idx](string_view term, const auto* container) {
+        string resolved{term};
+        // Synonym shadow has freq=0; stats must come from the group's posting list.
+        const auto* effective = container;
+        if (auto* syn = indices_->GetSynonyms(); syn) {
+          if (auto group_id = syn->GetGroupToken(resolved); group_id) {
+            resolved = std::move(*group_id);
+            effective = idx->Matching(resolved, /*strip_whitespace=*/false);
+          }
+        }
+        Record(idx, std::move(resolved), effective);
+      };
+      if constexpr (T == TagType::PREFIX)
+        idx->MatchPrefixWithTerm(node.affix, cb);
+      else if constexpr (T == TagType::SUFFIX)
+        idx->MatchSuffixWithTerm(node.affix, cb);
+      else if constexpr (T == TagType::INFIX)
+        idx->MatchInfixWithTerm(node.affix, cb);
+    }
+  }
+
+  vector<TextIndex*> SelectTextIndices(string_view active_field) {
+    if (active_field.empty())
+      return indices_->GetAllTextIndices();
+    auto* idx = dynamic_cast<TextIndex*>(indices_->GetIndex(active_field));
+    return idx ? vector<TextIndex*>{idx} : vector<TextIndex*>{};
+  }
+
+  void Record(TextIndex* idx, string term, const TextIndex::Container* container) {
+    string_view field_ident = idx->field_ident();
+    if (field_ident.empty())
+      return;
+    if (!seen_.emplace(idx, term).second)
+      return;
+    auto [it, inserted] =
+        stats_.field_stats.try_emplace(string{field_ident}, ShardScoringStats::FieldStats{});
+    if (inserted) {
+      it->second.num_docs = idx->GetFieldNumDocs();
+      it->second.total_docs_len = idx->GetFieldTotalDocsLen();
+    }
+    stats_.term_stats[string{field_ident}][std::move(term)] = container ? container->Size() : 0;
+  }
+
+  const FieldIndices* indices_;
+  ShardScoringStats stats_;
+  absl::flat_hash_set<pair<TextIndex*, string>> seen_;
+};
 
 }  // namespace
 
@@ -842,9 +950,11 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
     switch (field_info.type) {
       case SchemaField::TEXT: {
         const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
-        indices_[field_ident] = make_unique<TextIndex>(
+        auto idx = make_unique<TextIndex>(
             mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie, tparams.no_stem,
             schema_.default_language, schema_.language_field, !options_.no_offsets);
+        idx->set_field_ident(field_ident);
+        indices_[field_ident] = std::move(idx);
         break;
       }
       case SchemaField::NUMERIC: {
@@ -1043,13 +1153,21 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
   return true;
 }
 
-SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t cuttoff_limit) const {
+SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t cuttoff_limit,
+                                     const GlobalScoringStats* global_stats) const {
   DCHECK(query_);
 
-  auto bs = BasicSearch{index, scorer_};
+  auto bs = BasicSearch{index, scorer_, global_stats};
   if (profiling_enabled_)
     bs.EnableProfiling();
   return bs.Search(*query_, cuttoff_limit);
+}
+
+ShardScoringStats SearchAlgorithm::CollectScoringStats(const FieldIndices* index) const {
+  DCHECK(query_);
+  StatsCollector collector{index};
+  collector.Walk(*query_, "");
+  return std::move(collector).Take();
 }
 
 std::optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const {

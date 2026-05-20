@@ -4,10 +4,13 @@
 
 #pragma once
 
+#include <absl/container/flat_hash_map.h>
+
 #include <algorithm>
 #include <cmath>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "core/search/base.h"
@@ -91,5 +94,31 @@ inline double TfIdfDocNorm(const ScoringContext& ctx, const ScoringTermInfo& ter
 // Returns sum of per-term scores produced by the given scorer function.
 double ScoreDocument(ScorerFn scorer, const ScoringContext& ctx,
                      const std::vector<ScoringTermInfo>& terms);
+
+// Single-shard slice of the counts a scorer needs. Keys are schema canonical
+// names; terms are post-synonym-resolution.
+struct ShardScoringStats {
+  struct FieldStats {
+    size_t num_docs = 0;
+    size_t total_docs_len = 0;
+  };
+
+  size_t num_docs = 0;
+  absl::flat_hash_map<std::string, FieldStats> field_stats;
+  absl::flat_hash_map<std::string, absl::flat_hash_map<std::string, size_t>> term_stats;
+};
+
+// Cluster-wide aggregate of ShardScoringStats. Injected into ScoringContext
+// so ranking is independent of how documents are partitioned across shards.
+struct GlobalScoringStats {
+  size_t num_docs = 0;
+  absl::flat_hash_map<std::string, ShardScoringStats::FieldStats> field_stats;
+  absl::flat_hash_map<std::string, absl::flat_hash_map<std::string, size_t>> term_stats;
+
+  void Merge(const ShardScoringStats& shard);
+
+  double GetFieldAvgDocLen(std::string_view field_ident) const;
+  size_t GetTermDocs(std::string_view field_ident, std::string_view term) const;
+};
 
 }  // namespace dfly::search
