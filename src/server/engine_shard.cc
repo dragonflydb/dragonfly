@@ -231,7 +231,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
-  static_assert(sizeof(Stats) == 152);
+  static_assert(sizeof(Stats) == 160);
 
 #define ADD(x) x += o.x
 
@@ -254,6 +254,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
   ADD(stream_sequential_accesses);
   ADD(stream_random_accesses);
   ADD(stream_fetch_all_accesses);
+  ADD(borrowed_string_views_total);
 
 #undef ADD
   return *this;

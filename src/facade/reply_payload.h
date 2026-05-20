@@ -24,8 +24,17 @@ struct CollectionPayload;
 struct SimpleString : public std::string {};  // SendSimpleString
 struct BulkString : public std::string {};    // SendBulkString
 
+// Borrowed bulk string: the underlying bytes are owned by a stable source
+// (e.g., a CompactObj raw payload) and must remain valid until the captured
+// reply is applied to the sink. Used by SendBulkStringBorrowed to preserve
+// zero-copy through the squashing capture/replay boundary. Same read-only
+// lifetime contract as CompactObj::TryGetRawView().
+struct BulkStringView {
+  std::string_view view;
+};
+
 using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
-                             std::unique_ptr<CollectionPayload>>;
+                             BulkStringView, std::unique_ptr<CollectionPayload>>;
 
 #if defined(__linux__) && !defined(_LIBCPP_VERSION)
 static_assert(sizeof(Payload) == 40);

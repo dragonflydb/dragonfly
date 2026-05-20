@@ -930,6 +930,14 @@ void CompactObj::AppendString(std::string_view str) {
   u_.large_str.AppendString(str, tl.local_mr);
 }
 
+std::optional<std::string_view> CompactObj::TryGetRawView() const {
+  if (encoding_ != NONE_ENC)
+    return std::nullopt;
+  if (taglen_ != LARGE_STR_TAG)
+    return std::nullopt;
+  return u_.large_str.AsView();
+}
+
 string_view CompactObj::GetSlice(string* scratch) const {
   CHECK(!IsExternal());
 

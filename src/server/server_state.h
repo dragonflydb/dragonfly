@@ -136,6 +136,15 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t oom_error_cmd_cnt = 0;
     uint32_t conn_timeout_events = 0;
     uint64_t psync_requests_total = 0;
+
+    // Number of times SendBulkStringBorrowed reached the reply builder — i.e.,
+    // a borrowed CompactObj view flowed through the reply path without an
+    // intermediate std::string copy. Counts both the direct sink path
+    // (non-squashed) and the CapturingReplyBuilder path
+    // (squashed / EXEC / pipelined). Should match EngineShard's
+    // borrowed_string_views_total under read-only workloads.
+    uint64_t borrowed_strings_sent_total = 0;
+
     std::valarray<uint64_t> tx_width_freq_arr, squash_width_freq_arr;
 
     // Memory size of stored commands during multi-exec in connections

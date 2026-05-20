@@ -57,6 +57,7 @@ class EngineShard {
     uint64_t stream_sequential_accesses = 0;  // head/tail: XADD, XREAD recent, XTRIM, etc.
     uint64_t stream_random_accesses = 0;      // arbitrary-ID lookups: XRANGE partial, XDEL, XCLAIM
     uint64_t stream_fetch_all_accesses = 0;   // full stream scan from beginning
+    uint64_t borrowed_string_views_total = 0;
 
     Stats& operator+=(const Stats&);
   };

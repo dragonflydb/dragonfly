@@ -54,6 +54,15 @@ void CapturingReplyBuilder::SendBulkString(std::string_view str) {
   Capture(BulkString{string{str}});
 }
 
+// Borrowed variant: the caller guarantees the underlying bytes outlive this
+// captured reply (until Apply runs against the real sink and the iovec is
+// flushed). We store the view directly — no allocation, no copy — so the
+// zero-copy borrowed-view path from CmdGet survives squashing.
+void CapturingReplyBuilder::SendBulkStringBorrowed(std::string_view str) {
+  SKIP_LESS(ReplyMode::FULL);
+  Capture(BulkStringView{str});
+}
+
 void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
   SKIP_LESS(ReplyMode::FULL);
   stack_.emplace(make_unique<CollectionPayload>(len, type),
@@ -121,6 +130,15 @@ struct CaptureVisitor {
 
   void operator()(const payload::BulkString& bs) {
     static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs);
+  }
+
+  void operator()(const payload::BulkStringView& bs) {
+    // Replay via the real sink's SendBulkString — for large strings the sink
+    // path uses WriteRef (iovec) so the bytes flow straight through without
+    // an intermediate copy. The view's underlying bytes must still be valid
+    // here, which holds under the read-only invariant documented at the
+    // borrow source (CompactObj::TryGetRawView).
+    static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs.view);
   }
 
   void operator()(payload::Null) {

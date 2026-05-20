@@ -188,6 +188,16 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
   void SendSimpleString(std::string_view str) override;
   virtual void SendBulkString(std::string_view str);  // RESP: Blob String
 
+  // Like SendBulkString, but the caller guarantees that the underlying bytes
+  // remain valid until the next reply flush — typically because they're
+  // borrowed from a stable in-memory source (e.g., a CompactObj raw payload
+  // under the read-only invariant). The default implementation forwards to
+  // SendBulkString; CapturingReplyBuilder overrides this to record the view
+  // itself, preserving zero-copy through the squashing capture/replay path.
+  virtual void SendBulkStringBorrowed(std::string_view str) {
+    SendBulkString(str);
+  }
+
   void SendLong(long val) override;
   virtual void SendDouble(double val);  // RESP: Number
 

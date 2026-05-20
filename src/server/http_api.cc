@@ -119,6 +119,10 @@ struct CaptureVisitor {
     absl::StrAppend(&str, JsonEscape(bs));
   }
 
+  void operator()(const payload::BulkStringView& bs) {
+    absl::StrAppend(&str, JsonEscape(bs.view));
+  }
+
   void operator()(payload::Null) {
     absl::StrAppend(&str, "null");
   }

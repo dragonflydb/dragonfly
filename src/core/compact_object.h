@@ -232,6 +232,19 @@ class CompactObj {
 
   std::string_view GetSlice(std::string* scratch) const;
 
+  // Read-only fast path. Returns a borrowed view into the underlying storage
+  // iff this CompactObj holds a raw (NONE_ENC) large string in memory — i.e.
+  // taglen_==LARGE_STR_TAG, encoding_==NONE_ENC, !IsExternal(). Returns
+  // std::nullopt otherwise (inline / int / small / encoded / external /
+  // collection / etc), in which case the caller must use the materializing
+  // path (GetSlice/GetString/ToString).
+  //
+  // The returned view is valid only as long as this CompactObj's storage is
+  // not mutated, freed, or relocated (defrag). The caller is responsible for
+  // that lifetime — see facade::SinkReplyBuilder::ReplyScope for the reply
+  // builder's contract.
+  std::optional<std::string_view> TryGetRawView() const;
+
   std::string ToString() const {
     std::string res;
     GetString(&res);

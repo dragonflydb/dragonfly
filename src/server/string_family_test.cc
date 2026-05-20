@@ -1,6 +1,8 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <random>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -992,6 +994,104 @@ TEST_F(StringFamilyTest, MSetNxOddArgs) {
 
   resp = Run({"mset", "key", "value", "key2"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+}
+
+// Exercises the zero-copy GET fast path (CompactObj::TryGetRawView() →
+// ReadStringBorrow). The value must be a NONE_ENC large string: random
+// binary > kInlineLen avoids inline storage and the ASCII/Huffman heuristics
+// in EncodeString. We test multiple sizes that all exceed SmallString's
+// capacity so they land in LARGE_STR_TAG storage, exercising the borrowed
+// view path including sizes that cross the SinkReplyBuilder early-flush
+// threshold (kMaxBufferSize/2 = 4 KiB).
+TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
+  auto get_info_stat = [this](std::string_view name) -> uint64_t {
+    std::string stats = Run({"info", "stats"}).GetString();
+    std::string needle = absl::StrCat(name, ":");
+    size_t pos = stats.find(needle);
+    EXPECT_NE(pos, std::string::npos) << name;
+    if (pos == std::string::npos)
+      return 0;
+    pos += needle.size();
+    size_t line_end = stats.find("\r\n", pos);
+    EXPECT_NE(line_end, std::string::npos) << name;
+    if (line_end == std::string::npos)
+      return 0;
+    uint64_t value = 0;
+    EXPECT_TRUE(absl::SimpleAtoi(stats.substr(pos, line_end - pos), &value)) << name;
+    return value;
+  };
+
+  uint64_t initial_borrowed = get_info_stat("borrowed_string_views_total");
+  std::mt19937 rng{0xDF1FDF1F};
+  std::uniform_int_distribution<int> dist(0, 255);
+
+  for (size_t sz : {size_t{1024}, size_t{4096}, size_t{16384}}) {
+    std::string value(sz, '\0');
+    for (char& c : value)
+      c = static_cast<char>(dist(rng));
+
+    EXPECT_THAT(Run({"set", "k", value}), "OK");
+    auto resp = Run({"get", "k"});
+    EXPECT_EQ(resp, value) << "size " << sz;
+  }
+
+  EXPECT_EQ(get_info_stat("borrowed_string_views_total"), initial_borrowed + 3);
+}
+
+// Same as GetLargeRawBorrowed, but executes the GETs through MULTI/EXEC so the
+// reply round-trips through MultiCommandSquasher's CapturingReplyBuilder.
+// Without the SendBulkStringBorrowed override the captured payload would
+// materialize a std::string copy and silently defeat the zero-copy path on
+// pipelined / EXEC workloads. The shard-side TryGetRawView must still fire
+// (borrowed_string_views_total advances) and the bytes must round-trip
+// correctly through capture and replay.
+TEST_F(StringFamilyTest, GetLargeRawBorrowedSquashed) {
+  auto get_info_stat = [this](std::string_view name) -> uint64_t {
+    std::string stats = Run({"info", "stats"}).GetString();
+    std::string needle = absl::StrCat(name, ":");
+    size_t pos = stats.find(needle);
+    EXPECT_NE(pos, std::string::npos) << name;
+    if (pos == std::string::npos)
+      return 0;
+    pos += needle.size();
+    size_t line_end = stats.find("\r\n", pos);
+    EXPECT_NE(line_end, std::string::npos) << name;
+    if (line_end == std::string::npos)
+      return 0;
+    uint64_t value = 0;
+    EXPECT_TRUE(absl::SimpleAtoi(stats.substr(pos, line_end - pos), &value)) << name;
+    return value;
+  };
+
+  uint64_t initial_borrowed = get_info_stat("borrowed_string_views_total");
+  uint64_t initial_sent = get_info_stat("borrowed_strings_sent_total");
+  std::mt19937 rng{0xDF1FDF1F};
+  std::uniform_int_distribution<int> dist(0, 255);
+
+  std::vector<std::string> values;
+  for (size_t sz : {size_t{1024}, size_t{4096}, size_t{16384}}) {
+    std::string value(sz, '\0');
+    for (char& c : value)
+      c = static_cast<char>(dist(rng));
+    values.push_back(std::move(value));
+  }
+
+  // Seed three keys with raw-encoded large strings.
+  EXPECT_THAT(Run({"set", "k0", values[0]}), "OK");
+  EXPECT_THAT(Run({"set", "k1", values[1]}), "OK");
+  EXPECT_THAT(Run({"set", "k2", values[2]}), "OK");
+
+  // GET them inside MULTI/EXEC — this dispatches through MultiCommandSquasher,
+  // so each GET reply is first captured then replayed to the real sink.
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"get", "k0"}), "QUEUED");
+  EXPECT_EQ(Run({"get", "k1"}), "QUEUED");
+  EXPECT_EQ(Run({"get", "k2"}), "QUEUED");
+  auto resp = Run({"exec"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(values[0], values[1], values[2])));
+
+  EXPECT_EQ(get_info_stat("borrowed_string_views_total"), initial_borrowed + 3);
+  EXPECT_EQ(get_info_stat("borrowed_strings_sent_total"), initial_sent + 3);
 }
 
 }  // namespace dfly
