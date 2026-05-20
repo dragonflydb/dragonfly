@@ -403,148 +403,6 @@ static_assert(sizeof(CompactObj) == 18);
 
 namespace detail {
 
-size_t RobjWrapper::MallocUsed(bool slow) const {
-  if (!inner_obj_)
-    return 0;
-
-  switch (type_) {
-    case OBJ_LIST:
-      if (encoding_ == kEncodingListPack) {
-        return zmalloc_usable_size(inner_obj_);
-      }
-      return ((QList*)inner_obj_)->MallocUsed(slow);
-    case OBJ_SET:
-      return MallocUsedSet(encoding_, inner_obj_);
-    case OBJ_HASH:
-      return MallocUsedHSet(encoding_, inner_obj_);
-    case OBJ_ZSET:
-      return MallocUsedZSet(encoding_, inner_obj_);
-    case OBJ_STREAM:
-      return slow ? MallocUsedStream((stream*)inner_obj_) : sz_;
-
-    default:
-      LOG(FATAL) << "Not supported " << type_;
-  }
-
-  return 0;
-}
-
-size_t RobjWrapper::Size() const {
-  switch (type_) {
-    case OBJ_LIST:
-      if (encoding_ == kEncodingListPack) {
-        return lpLength((uint8_t*)inner_obj_);
-      }
-      return ((QList*)inner_obj_)->Size();
-    case OBJ_ZSET: {
-      switch (encoding_) {
-        case OBJ_ENCODING_SKIPLIST: {
-          SortedMap* ss = (SortedMap*)inner_obj_;
-          return ss->Size();
-        }
-        case OBJ_ENCODING_LISTPACK:
-          return lpLength((uint8_t*)inner_obj_) / 2;
-        default:
-          LOG(FATAL) << "Unknown sorted set encoding" << encoding_;
-      }
-    }
-    case OBJ_SET:
-      switch (encoding_) {
-        case kEncodingIntSet: {
-          intset* is = (intset*)inner_obj_;
-          return intsetLen(is);
-        }
-        case kEncodingStrMap2: {
-          StringSet* ss = (StringSet*)inner_obj_;
-          return ss->UpperBoundSize();
-        }
-        default:
-          LOG(FATAL) << "Unexpected encoding " << encoding_;
-      };
-    case OBJ_HASH:
-      switch (encoding_) {
-        case kEncodingListPack: {
-          uint8_t* lp = (uint8_t*)inner_obj_;
-          return lpLength(lp) / 2;
-        } break;
-
-        case kEncodingStrMap2: {
-          StringMap* sm = (StringMap*)inner_obj_;
-          return sm->UpperBoundSize();
-        }
-        default:
-          LOG(FATAL) << "Unexpected encoding " << encoding_;
-      }
-    case OBJ_STREAM:
-      // Size mean malloc bytes for streams
-      return sz_;
-    default:;
-  }
-  return 0;
-}
-
-void RobjWrapper::Free(MemoryResource* mr) {
-  if (!inner_obj_)
-    return;
-  DVLOG(1) << "RobjWrapper::Free " << inner_obj_;
-
-  switch (type_) {
-    case OBJ_LIST:
-      FreeList(encoding_, inner_obj_, mr);
-      break;
-    case OBJ_SET:
-      FreeObjSet(encoding_, inner_obj_, mr);
-      break;
-    case OBJ_ZSET:
-      FreeObjZset(encoding_, inner_obj_);
-      break;
-    case OBJ_HASH:
-      FreeObjHash(encoding_, inner_obj_);
-      break;
-    case OBJ_MODULE:
-      LOG(FATAL) << "Unsupported OBJ_MODULE type";
-      break;
-    case OBJ_STREAM:
-      FreeObjStream(inner_obj_);
-      break;
-    default:
-      LOG(FATAL) << "Unknown object type";
-      break;
-  }
-  Set(nullptr, 0);
-}
-
-void RobjWrapper::SetSize(uint64_t size) {
-  sz_ = size;
-}
-
-bool RobjWrapper::DefragIfNeeded(PageUsage* page_usage) {
-  auto do_defrag = [this, &page_usage](auto defrag_fun) mutable {
-    auto [new_ptr, realloced] = defrag_fun(encoding_, inner_obj_, page_usage);
-    inner_obj_ = new_ptr;
-    return realloced;
-  };
-
-  if (type() == OBJ_HASH) {
-    return do_defrag(DefragHash);
-  } else if (type() == OBJ_SET) {
-    return do_defrag(DefragSet);
-  } else if (type() == OBJ_ZSET) {
-    return do_defrag(DefragZSet);
-  } else if (type() == OBJ_LIST) {
-    return do_defrag(DefragList);
-  }
-
-  page_usage->RecordNotSupported();
-  return false;
-}
-
-void RobjWrapper::Init(unsigned type, unsigned encoding, void* inner) {
-  type_ = type;
-  encoding_ = encoding;
-  Set(inner, 0);
-}
-
 size_t LargeString::MallocUsed() const {
   return zmalloc_size(ptr);
 }
@@ -693,7 +551,44 @@ size_t CompactObj::Size() const {
         return decoded_str_size(u_.ext_ptr.serialized_size, GetFirstByte());
       else
         return u_.ext_ptr.serialized_size;
-    case ROBJ_TAG:
+    case LIST_TAG: {
+      void* p = u_.r_obj.inner_obj();
+      if (u_.r_obj.encoding() == kEncodingListPack)
+        return lpLength((uint8_t*)p);
+      return ((QList*)p)->Size();
+    }
+    case SET_TAG: {
+      void* p = u_.r_obj.inner_obj();
+      unsigned enc = u_.r_obj.encoding();
+      if (enc == kEncodingIntSet)
+        return intsetLen((intset*)p);
+      if (enc == kEncodingStrMap2)
+        return ((StringSet*)p)->UpperBoundSize();
+      LOG(FATAL) << "Unexpected SET encoding " << enc;
+      return 0;
+    }
+    case HASH_TAG: {
+      void* p = u_.r_obj.inner_obj();
+      unsigned enc = u_.r_obj.encoding();
+      if (enc == kEncodingListPack)
+        return lpLength((uint8_t*)p) / 2;
+      if (enc == kEncodingStrMap2)
+        return ((StringMap*)p)->UpperBoundSize();
+      LOG(FATAL) << "Unexpected HASH encoding " << enc;
+      return 0;
+    }
+    case ZSET_TAG: {
+      void* p = u_.r_obj.inner_obj();
+      unsigned enc = u_.r_obj.encoding();
+      if (enc == OBJ_ENCODING_SKIPLIST)
+        return ((detail::SortedMap*)p)->Size();
+      if (enc == OBJ_ENCODING_LISTPACK)
+        return lpLength((uint8_t*)p) / 2;
+      LOG(FATAL) << "Unknown ZSET encoding " << enc;
+      return 0;
+    }
+    case STREAM_TAG:
+      // For streams, Size() returns malloc bytes (tracked in r_obj.sz_).
       return u_.r_obj.Size();
     case LARGE_STR_TAG:
       return decoded_str_size(u_.large_str.Size(), *(uint8_t*)u_.large_str.ptr);
@@ -775,23 +670,25 @@ CompactObjType CompactObj::ObjType() const {
     };
   }
 
-  if (taglen_ == ROBJ_TAG)
-    return u_.r_obj.type();
-
-  if (taglen_ == JSON_TAG) {
-    return OBJ_JSON;
-  }
-
-  if (taglen_ == SBF_TAG) {
-    return OBJ_SBF;
-  }
-
-  if (taglen_ == CMS_TAG) {
-    return OBJ_CMS;
-  }
-
-  if (taglen_ == TOPK_TAG) {
-    return OBJ_TOPK;
+  switch (taglen_) {
+    case LIST_TAG:
+      return OBJ_LIST;
+    case SET_TAG:
+      return OBJ_SET;
+    case HASH_TAG:
+      return OBJ_HASH;
+    case ZSET_TAG:
+      return OBJ_ZSET;
+    case STREAM_TAG:
+      return OBJ_STREAM;
+    case JSON_TAG:
+      return OBJ_JSON;
+    case SBF_TAG:
+      return OBJ_SBF;
+    case CMS_TAG:
+      return OBJ_CMS;
+    case TOPK_TAG:
+      return OBJ_TOPK;
   }
 
   LOG(FATAL) << "TBD " << int(taglen_);
@@ -800,7 +697,11 @@ CompactObjType CompactObj::ObjType() const {
 
 unsigned CompactObj::Encoding() const {
   switch (taglen_) {
-    case ROBJ_TAG:
+    case LIST_TAG:
+    case SET_TAG:
+    case HASH_TAG:
+    case ZSET_TAG:
+    case STREAM_TAG:
       return u_.r_obj.encoding();
     case INT_TAG:
       return OBJ_ENCODING_INT;
@@ -813,14 +714,34 @@ unsigned CompactObj::Encoding() const {
 
 void CompactObj::InitRobj(CompactObjType type, unsigned encoding, void* obj) {
   DCHECK_NE(type, OBJ_STRING);
-  SetMeta(ROBJ_TAG, mask_);
-  u_.r_obj.Init(type, encoding, obj);
+  uint8_t tag;
+  switch (type) {
+    case OBJ_LIST:
+      tag = LIST_TAG;
+      break;
+    case OBJ_SET:
+      tag = SET_TAG;
+      break;
+    case OBJ_HASH:
+      tag = HASH_TAG;
+      break;
+    case OBJ_ZSET:
+      tag = ZSET_TAG;
+      break;
+    case OBJ_STREAM:
+      tag = STREAM_TAG;
+      break;
+    default:
+      LOG(FATAL) << "Unsupported type for InitRobj: " << type;
+  }
+  SetMeta(tag, mask_);
+  u_.r_obj.Init(encoding, obj);
 }
 
 namespace {
 // Returns the underlying DenseSet if this CompactObj wraps a StringSet/StringMap
 // (kEncodingStrMap2), otherwise nullptr. Encoding() is a safe accessor that
-// returns kEncodingStrMap2 only when taglen_ == ROBJ_TAG.
+// returns kEncodingStrMap2 only for collection tags (SET/HASH).
 DenseSet* AsDenseSetOrNull(const CompactObj& obj) {
   if (obj.Encoding() != kEncodingStrMap2)
     return nullptr;
@@ -909,6 +830,7 @@ void CompactObj::SetJsonSize(int64_t size) {
 }
 
 void CompactObj::AddStreamSize(int64_t size) {
+  DCHECK_EQ(taglen_, STREAM_TAG);
   if (size < 0) {
     // We might have a negative size. For example, if we remove a consumer,
     // the tracker will report a negative net (since we deallocated),
@@ -1055,12 +977,26 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
     return false;
   }
 
+  auto defrag_collection = [this, page_usage](auto defrag_fun) {
+    void* ptr = u_.r_obj.inner_obj();
+    if (ptr == nullptr)
+      return false;
+    auto [new_ptr, realloced] = defrag_fun(u_.r_obj.encoding(), ptr, page_usage);
+    u_.r_obj.set_inner_obj(new_ptr);
+    return realloced;
+  };
+
   switch (taglen_) {
-    case ROBJ_TAG:
-      // currently only these object types are supported for this operation
-      if (u_.r_obj.inner_obj() != nullptr) {
-        return u_.r_obj.DefragIfNeeded(page_usage);
-      }
+    case LIST_TAG:
+      return defrag_collection(DefragList);
+    case SET_TAG:
+      return defrag_collection(DefragSet);
+    case HASH_TAG:
+      return defrag_collection(DefragHash);
+    case ZSET_TAG:
+      return defrag_collection(DefragZSet);
+    case STREAM_TAG:
+      page_usage->RecordNotSupported();
       return false;
     case LARGE_STR_TAG:
       if (u_.large_str.ptr != nullptr) {
@@ -1098,13 +1034,16 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
 }
 
 bool CompactObj::HasAllocated() const {
-  if (taglen_ == INT_TAG || IsInline() || taglen_ == EXTERNAL_TAG ||
-      (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr) ||
-      (taglen_ == LARGE_STR_TAG && u_.large_str.ptr == nullptr))
+  if (taglen_ == INT_TAG || IsInline() || taglen_ == EXTERNAL_TAG)
     return false;
 
-  DCHECK(taglen_ == ROBJ_TAG || taglen_ == LARGE_STR_TAG || taglen_ == SMALL_TAG ||
-         taglen_ == JSON_TAG || taglen_ == SBF_TAG || taglen_ == CMS_TAG ||
+  // Collection tags + LARGE_STR_TAG share the same {ptr-may-be-null} model.
+  if (taglen_ >= LIST_TAG && taglen_ <= STREAM_TAG)
+    return u_.r_obj.inner_obj() != nullptr;
+  if (taglen_ == LARGE_STR_TAG)
+    return u_.large_str.ptr != nullptr;
+
+  DCHECK(taglen_ == SMALL_TAG || taglen_ == JSON_TAG || taglen_ == SBF_TAG || taglen_ == CMS_TAG ||
          taglen_ == SDS_TTL_TAG || taglen_ == TOPK_TAG);
   return true;
 }
@@ -1388,8 +1327,27 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
 void CompactObj::Free() {
   DCHECK(HasAllocated());
 
-  if (taglen_ == ROBJ_TAG) {
-    u_.r_obj.Free(tl.local_mr);
+  if (taglen_ >= LIST_TAG && taglen_ <= STREAM_TAG) {
+    void* ptr = u_.r_obj.inner_obj();
+    unsigned enc = u_.r_obj.encoding();
+    DVLOG(1) << "CompactObj::Free collection " << int(taglen_) << " ptr=" << ptr;
+    switch (taglen_) {
+      case LIST_TAG:
+        FreeList(enc, ptr, tl.local_mr);
+        break;
+      case SET_TAG:
+        FreeObjSet(enc, ptr, tl.local_mr);
+        break;
+      case HASH_TAG:
+        FreeObjHash(enc, ptr);
+        break;
+      case ZSET_TAG:
+        FreeObjZset(enc, ptr);
+        break;
+      case STREAM_TAG:
+        FreeObjStream(ptr);
+        break;
+    }
   } else if (taglen_ == LARGE_STR_TAG) {
     u_.large_str.Free(tl.local_mr);
   } else if (taglen_ == SMALL_TAG) {
@@ -1421,8 +1379,23 @@ size_t CompactObj::MallocUsed(bool slow) const {
   if (!HasAllocated())
     return 0;
 
-  if (taglen_ == ROBJ_TAG) {
-    return u_.r_obj.MallocUsed(slow);
+  if (taglen_ >= LIST_TAG && taglen_ <= STREAM_TAG) {
+    void* ptr = u_.r_obj.inner_obj();
+    unsigned enc = u_.r_obj.encoding();
+    switch (taglen_) {
+      case LIST_TAG:
+        if (enc == kEncodingListPack)
+          return zmalloc_usable_size(ptr);
+        return ((QList*)ptr)->MallocUsed(slow);
+      case SET_TAG:
+        return MallocUsedSet(enc, ptr);
+      case HASH_TAG:
+        return MallocUsedHSet(enc, ptr);
+      case ZSET_TAG:
+        return MallocUsedZSet(enc, ptr);
+      case STREAM_TAG:
+        return slow ? MallocUsedStream((stream*)ptr) : u_.r_obj.Size();
+    }
   }
 
   if (taglen_ == LARGE_STR_TAG) {
