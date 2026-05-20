@@ -1400,8 +1400,9 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
     if (cb->snapshot_version_ == upper_bound)
       return;
 
-    // Only call OnChange if the bucket version is strictly less than the snapshot version.
-    if (bucket_version < cb->snapshot_version_) {
+    // We call OnChange even if bucket_version == snapshot_version to ensure that the bucket
+    // _finished_ serializing, as we update its version when we start serializing.
+    if (bucket_version <= cb->snapshot_version_) {
       // Key might have been deleted because another FlushChangeToEarlierCallbacks finished
       // and allowed a mutation to pass while this one was suspended
       if (auto inner_it = it.GetInnerIt(); !inner_it.is_done())
