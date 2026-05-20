@@ -408,9 +408,6 @@ size_t RobjWrapper::MallocUsed(bool slow) const {
     return 0;
 
   switch (type_) {
-    case OBJ_STRING:
-      CHECK_EQ(OBJ_ENCODING_RAW, encoding_);
-      return InnerObjMallocUsed();
     case OBJ_LIST:
       if (encoding_ == kEncodingListPack) {
         return zmalloc_usable_size(inner_obj_);
@@ -434,9 +431,6 @@ size_t RobjWrapper::MallocUsed(bool slow) const {
 
 size_t RobjWrapper::Size() const {
   switch (type_) {
-    case OBJ_STRING:
-      DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
-      return sz_;
     case OBJ_LIST:
       if (encoding_ == kEncodingListPack) {
         return lpLength((uint8_t*)inner_obj_);
@@ -495,11 +489,6 @@ void RobjWrapper::Free(MemoryResource* mr) {
   DVLOG(1) << "RobjWrapper::Free " << inner_obj_;
 
   switch (type_) {
-    case OBJ_STRING:
-      DVLOG(2) << "Freeing string object";
-      DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
-      mr->deallocate(inner_obj_, 0, 8);  // we do not keep the allocated size.
-      break;
     case OBJ_LIST:
       FreeList(encoding_, inner_obj_, mr);
       break;
@@ -525,69 +514,6 @@ void RobjWrapper::Free(MemoryResource* mr) {
   Set(nullptr, 0);
 }
 
-uint64_t RobjWrapper::HashCode() const {
-  switch (type_) {
-    case OBJ_STRING:
-      DCHECK_EQ(OBJ_ENCODING_RAW, encoding());
-      {
-        auto str = AsView();
-        return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
-      }
-      break;
-    default:
-      LOG(FATAL) << "Unsupported type for hashcode " << type_;
-  }
-  return 0;
-}
-
-bool RobjWrapper::Equal(const RobjWrapper& ow) const {
-  if (ow.type_ != type_ || ow.encoding_ != encoding_)
-    return false;
-
-  if (type_ == OBJ_STRING) {
-    DCHECK_EQ(OBJ_ENCODING_RAW, encoding());
-    return AsView() == ow.AsView();
-  }
-  LOG(FATAL) << "Unsupported type " << type_;
-  return false;
-}
-
-bool RobjWrapper::Equal(string_view sv) const {
-  if (type() != OBJ_STRING)
-    return false;
-
-  DCHECK_EQ(OBJ_ENCODING_RAW, encoding());
-  return AsView() == sv;
-}
-
-void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
-  type_ = OBJ_STRING;
-  encoding_ = OBJ_ENCODING_RAW;
-
-  if (s.size() > sz_) {
-    size_t cur_cap = InnerObjMallocUsed();
-    if (s.size() > cur_cap) {
-      MakeInnerRoom(cur_cap, s.size(), mr);
-    }
-    memcpy(inner_obj_, s.data(), s.size());
-    sz_ = s.size();
-  }
-}
-
-void RobjWrapper::ReserveString(size_t size, MemoryResource* mr) {
-  CHECK_EQ(inner_obj_, nullptr);
-  type_ = OBJ_STRING;
-  encoding_ = OBJ_ENCODING_RAW;
-  MakeInnerRoom(0, size, mr);
-}
-
-void RobjWrapper::AppendString(string_view s, MemoryResource* mr) {
-  size_t cur_cap = InnerObjMallocUsed();
-  CHECK(cur_cap >= sz_ + s.size()) << cur_cap << " " << sz_ << " " << s.size();
-  memcpy(reinterpret_cast<uint8_t*>(inner_obj_) + sz_, s.data(), s.size());
-  sz_ += s.size();
-}
-
 void RobjWrapper::SetSize(uint64_t size) {
   sz_ = size;
 }
@@ -599,12 +525,7 @@ bool RobjWrapper::DefragIfNeeded(PageUsage* page_usage) {
     return realloced;
   };
 
-  if (type() == OBJ_STRING) {
-    if (page_usage->IsPageForObjectUnderUtilized(inner_obj())) {
-      ReallocateString(tl.local_mr);
-      return true;
-    }
-  } else if (type() == OBJ_HASH) {
+  if (type() == OBJ_HASH) {
     return do_defrag(DefragHash);
   } else if (type() == OBJ_SET) {
     return do_defrag(DefragSet);
@@ -618,41 +539,68 @@ bool RobjWrapper::DefragIfNeeded(PageUsage* page_usage) {
   return false;
 }
 
-void RobjWrapper::ReallocateString(MemoryResource* mr) {
-  DCHECK_EQ(type(), OBJ_STRING);
-  void* old_ptr = inner_obj_;
-  inner_obj_ = mr->allocate(sz_, kAlignSize);
-  memcpy(inner_obj_, old_ptr, sz_);
-  mr->deallocate(old_ptr, 0, kAlignSize);
-}
-
 void RobjWrapper::Init(unsigned type, unsigned encoding, void* inner) {
   type_ = type;
   encoding_ = encoding;
   Set(inner, 0);
 }
 
-inline size_t RobjWrapper::InnerObjMallocUsed() const {
-  return zmalloc_size(inner_obj_);
+size_t LargeString::MallocUsed() const {
+  return zmalloc_size(ptr);
 }
 
-void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, MemoryResource* mr) {
-  if (current_cap * 2 > desired) {
-    if (desired < SDS_MAX_PREALLOC)
-      desired *= 2;
-    else
-      desired += SDS_MAX_PREALLOC;
-  }
+uint64_t LargeString::HashCode() const {
+  auto str = AsView();
+  return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
+}
 
-  void* newp = mr->allocate(desired, kAlignSize);
-  if (sz_) {
-    memcpy(newp, inner_obj_, sz_);
+void LargeString::SetString(string_view s, MemoryResource* mr) {
+  if (s.size() > zmalloc_size(ptr)) {
+    if (ptr) {
+      mr->deallocate(ptr, 0, kAlignSize);
+    }
+    ptr = mr->allocate(s.size(), kAlignSize);
   }
+  if (!s.empty()) {
+    memcpy(ptr, s.data(), s.size());
+  }
+  sz = s.size();
+}
 
-  if (current_cap) {
-    mr->deallocate(inner_obj_, current_cap, kAlignSize);
+void LargeString::ReserveString(size_t size, MemoryResource* mr) {
+  CHECK_EQ(ptr, nullptr);
+  ptr = mr->allocate(size, kAlignSize);
+}
+
+void LargeString::AppendString(string_view s, MemoryResource* mr) {
+  size_t cur_cap = zmalloc_size(ptr);
+  CHECK(cur_cap >= sz + s.size()) << cur_cap << " " << sz << " " << s.size();
+  memcpy(reinterpret_cast<uint8_t*>(ptr) + sz, s.data(), s.size());
+  sz += s.size();
+}
+
+void LargeString::Free(MemoryResource* mr) {
+  if (!ptr)
+    return;
+
+  mr->deallocate(ptr, 0, 8);  // we do not keep the allocated size.
+  ptr = nullptr;
+  sz = 0;
+}
+
+bool LargeString::DefragIfNeeded(PageUsage* page_usage) {
+  if (page_usage->IsPageForObjectUnderUtilized(ptr)) {
+    ReallocateString(tl.local_mr);
+    return true;
   }
-  inner_obj_ = newp;
+  return false;
+}
+
+void LargeString::ReallocateString(MemoryResource* mr) {
+  void* old_ptr = ptr;
+  ptr = mr->allocate(sz, kAlignSize);
+  memcpy(ptr, old_ptr, sz);
+  mr->deallocate(old_ptr, 0, kAlignSize);
 }
 
 }  // namespace detail
@@ -746,10 +694,9 @@ size_t CompactObj::Size() const {
       else
         return u_.ext_ptr.serialized_size;
     case ROBJ_TAG:
-      if (size_t size = u_.r_obj.Size(); u_.r_obj.type() != OBJ_STRING)
-        return size;
-      else
-        return decoded_str_size(size, *(uint8_t*)u_.r_obj.inner_obj());
+      return u_.r_obj.Size();
+    case LARGE_STR_TAG:
+      return decoded_str_size(u_.large_str.Size(), *(uint8_t*)u_.large_str.ptr);
     case INT_TAG:
       return absl::AlphaNum(u_.ival).size();
     case SDS_TTL_TAG:
@@ -782,8 +729,8 @@ uint64_t CompactObj::HashCode() const {
     switch (taglen_) {
       case SMALL_TAG:
         return u_.small_str.HashCode();
-      case ROBJ_TAG:
-        return u_.r_obj.HashCode();
+      case LARGE_STR_TAG:
+        return u_.large_str.HashCode();
       case INT_TAG: {
         absl::AlphaNum an(u_.ival);
         return XXH3_64bits_withSeed(an.data(), an.size(), kHashSeed);
@@ -813,7 +760,8 @@ uint64_t CompactObj::HashCode(string_view str) {
 }
 
 CompactObjType CompactObj::ObjType() const {
-  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG || taglen_ == SDS_TTL_TAG)
+  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG || taglen_ == SDS_TTL_TAG ||
+      taglen_ == LARGE_STR_TAG)
     return OBJ_STRING;
 
   if (taglen_ == EXTERNAL_TAG) {
@@ -856,6 +804,8 @@ unsigned CompactObj::Encoding() const {
       return u_.r_obj.encoding();
     case INT_TAG:
       return OBJ_ENCODING_INT;
+    case LARGE_STR_TAG:
+      return OBJ_ENCODING_RAW;
     default:
       return OBJ_ENCODING_RAW;
   }
@@ -1048,13 +998,14 @@ void CompactObj::SetString(std::string_view str) {
 
 void CompactObj::ReserveString(size_t size) {
   encoding_ = NONE_ENC;
-  SetMeta(ROBJ_TAG, mask_);
+  SetMeta(LARGE_STR_TAG, mask_);
 
-  u_.r_obj.ReserveString(size, tl.local_mr);
+  u_.large_str.ReserveString(size, tl.local_mr);
 }
 
 void CompactObj::AppendString(std::string_view str) {
-  u_.r_obj.AppendString(str, tl.local_mr);
+  DCHECK_EQ(taglen_, LARGE_STR_TAG);
+  u_.large_str.AppendString(str, tl.local_mr);
 }
 
 string_view CompactObj::GetSlice(string* scratch) const {
@@ -1077,10 +1028,8 @@ string_view CompactObj::GetSlice(string* scratch) const {
   }
 
   // no encoding.
-  if (taglen_ == ROBJ_TAG) {
-    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    return u_.r_obj.AsView();
+  if (taglen_ == LARGE_STR_TAG) {
+    return u_.large_str.AsView();
   }
 
   if (taglen_ == SMALL_TAG) {
@@ -1111,6 +1060,11 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
       // currently only these object types are supported for this operation
       if (u_.r_obj.inner_obj() != nullptr) {
         return u_.r_obj.DefragIfNeeded(page_usage);
+      }
+      return false;
+    case LARGE_STR_TAG:
+      if (u_.large_str.ptr != nullptr) {
+        return u_.large_str.DefragIfNeeded(page_usage);
       }
       return false;
     case SMALL_TAG:
@@ -1145,11 +1099,13 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
 
 bool CompactObj::HasAllocated() const {
   if (taglen_ == INT_TAG || IsInline() || taglen_ == EXTERNAL_TAG ||
-      (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr))
+      (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr) ||
+      (taglen_ == LARGE_STR_TAG && u_.large_str.ptr == nullptr))
     return false;
 
-  DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG || taglen_ == JSON_TAG || taglen_ == SBF_TAG ||
-         taglen_ == CMS_TAG || taglen_ == SDS_TTL_TAG || taglen_ == TOPK_TAG);
+  DCHECK(taglen_ == ROBJ_TAG || taglen_ == LARGE_STR_TAG || taglen_ == SMALL_TAG ||
+         taglen_ == JSON_TAG || taglen_ == SBF_TAG || taglen_ == CMS_TAG ||
+         taglen_ == SDS_TTL_TAG || taglen_ == TOPK_TAG);
   return true;
 }
 
@@ -1187,10 +1143,8 @@ void CompactObj::GetString(char* dest) const {
   }
 
   // no encoding.
-  if (taglen_ == ROBJ_TAG) {
-    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    memcpy(dest, u_.r_obj.inner_obj(), u_.r_obj.Size());
+  if (taglen_ == LARGE_STR_TAG) {
+    memcpy(dest, u_.large_str.ptr, u_.large_str.Size());
     return;
   }
 
@@ -1261,10 +1215,8 @@ std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
 }
 
 string_view CompactObj::GetEncodedBlob(StrEncoding str_encoding, char* opt_dest) const {
-  if (taglen_ == ROBJ_TAG) {
-    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    return u_.r_obj.AsView();
+  if (taglen_ == LARGE_STR_TAG) {
+    return u_.large_str.AsView();
   } else if (IsInline()) {
     return {u_.inline_str, taglen_};
   } else if (taglen_ == SDS_TTL_TAG) {
@@ -1296,8 +1248,8 @@ void CompactObj::Materialize(std::string_view blob, bool is_raw) {
       SetMeta(SMALL_TAG, mask_);
       tl.small_str_bytes += u_.small_str.Assign(blob);
     } else {
-      SetMeta(ROBJ_TAG, mask_);
-      u_.r_obj.SetString(blob, tl.local_mr);
+      SetMeta(LARGE_STR_TAG, mask_);
+      u_.large_str.SetString(blob, tl.local_mr);
     }
   } else {
     encoding_ = NONE_ENC;  // reset encoding
@@ -1321,10 +1273,8 @@ uint8_t CompactObj::GetFirstByte() const {
     return u_.inline_str[0];
   }
 
-  if (taglen_ == ROBJ_TAG) {
-    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    return *(uint8_t*)u_.r_obj.inner_obj();
+  if (taglen_ == LARGE_STR_TAG) {
+    return *(uint8_t*)u_.large_str.ptr;
   }
 
   if (taglen_ == SMALL_TAG) {
@@ -1399,24 +1349,21 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
     return {true, true};
   }
 
-  // ROBJ_TAG raw string without encoding: modify the underlying buffer directly.
-  if (taglen_ == ROBJ_TAG && !encoding_) {
-    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    if (idx >= u_.r_obj.Size()) {
-      VLOG(1) << "Offset out of bounds for raw string: " << idx << " >= " << u_.r_obj.Size();
+  // LARGE_STR_TAG raw string without encoding: modify the underlying buffer directly.
+  if (taglen_ == LARGE_STR_TAG && !encoding_) {
+    if (idx >= u_.large_str.Size()) {
+      VLOG(1) << "Offset out of bounds for raw string: " << idx << " >= " << u_.large_str.Size();
       return {false, false};
     }
-    reinterpret_cast<char*>(u_.r_obj.inner_obj())[idx] = val;
+    reinterpret_cast<char*>(u_.large_str.ptr)[idx] = val;
     return {true, true};
   }
 
-  // For ASCII encoded ROBJ strings we can modify the underlying buffer directly.
-  if (encoding_ && (encoding_ == ASCII1_ENC || encoding_ == ASCII2_ENC) && taglen_ == ROBJ_TAG &&
-      absl::ascii_isascii(val)) {
-    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    auto* buf = reinterpret_cast<uint8_t*>(u_.r_obj.inner_obj());
-    size_t decoded_len = GetStrEncoding().DecodedSize(u_.r_obj.Size(), buf[0]);
+  // For ASCII encoded large strings we can modify the underlying buffer directly.
+  if (encoding_ && (encoding_ == ASCII1_ENC || encoding_ == ASCII2_ENC) &&
+      taglen_ == LARGE_STR_TAG && absl::ascii_isascii(val)) {
+    auto* buf = reinterpret_cast<uint8_t*>(u_.large_str.ptr);
+    size_t decoded_len = GetStrEncoding().DecodedSize(u_.large_str.Size(), buf[0]);
     if (idx >= decoded_len) {
       VLOG(1) << "Offset out of bounds for ASCII encoded string: " << idx << " >= " << decoded_len;
       return {false, false};
@@ -1443,6 +1390,8 @@ void CompactObj::Free() {
 
   if (taglen_ == ROBJ_TAG) {
     u_.r_obj.Free(tl.local_mr);
+  } else if (taglen_ == LARGE_STR_TAG) {
+    u_.large_str.Free(tl.local_mr);
   } else if (taglen_ == SMALL_TAG) {
     tl.small_str_bytes -= u_.small_str.MallocUsed();
     u_.small_str.Free();
@@ -1474,6 +1423,10 @@ size_t CompactObj::MallocUsed(bool slow) const {
 
   if (taglen_ == ROBJ_TAG) {
     return u_.r_obj.MallocUsed(slow);
+  }
+
+  if (taglen_ == LARGE_STR_TAG) {
+    return u_.large_str.MallocUsed();
   }
 
   if (taglen_ == JSON_TAG) {
@@ -1515,8 +1468,8 @@ bool CompactObj::CmpNonInline(std::string_view sv) const {
   switch (taglen_) {
     case INT_TAG:
       return absl::AlphaNum(u_.ival).Piece() == sv;
-    case ROBJ_TAG:
-      return u_.r_obj.Equal(sv);
+    case LARGE_STR_TAG:
+      return u_.large_str.Equal(sv);
     case SMALL_TAG:
       return u_.small_str.Equal(sv);
     case SDS_TTL_TAG:
@@ -1562,17 +1515,14 @@ bool CompactObj::CmpEncoded(string_view sv) const {
     return sv == string_view(buf, sv.size());
   }
 
-  if (taglen_ == ROBJ_TAG) {
-    if (u_.r_obj.type() != OBJ_STRING)
-      return false;
-
-    if (u_.r_obj.Size() != encode_len)
+  if (taglen_ == LARGE_STR_TAG) {
+    if (u_.large_str.Size() != encode_len)
       return false;
 
     if (!detail::validate_ascii_fast(sv.data(), sv.size()))
       return false;
 
-    return detail::compare_packed(to_byte(u_.r_obj.inner_obj()), sv.data(), sv.size());
+    return detail::compare_packed(to_byte(u_.large_str.ptr), sv.data(), sv.size());
   }
 
   if (taglen_ == SDS_TTL_TAG) {
@@ -1726,17 +1676,15 @@ void CompactObj::EncodeString(string_view str) {
     return;
   }
 
-  SetMeta(ROBJ_TAG, mask_);
-  u_.r_obj.SetString(encoded, tl.local_mr);
+  SetMeta(LARGE_STR_TAG, mask_);
+  u_.large_str.SetString(encoded, tl.local_mr);
 }
 
 std::array<std::string_view, 2> CompactObj::GetRawString() const {
   DCHECK(!IsExternal());
 
-  if (taglen_ == ROBJ_TAG) {
-    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    return {u_.r_obj.AsView(), {}};
+  if (taglen_ == LARGE_STR_TAG) {
+    return {u_.large_str.AsView(), {}};
   }
 
   if (taglen_ == SMALL_TAG) {
@@ -1848,11 +1796,10 @@ void CompactKey::SetExpireTime(uint64_t abs_ms) {
     u_.small_str.Get(new_sds);
     tl.small_str_bytes -= u_.small_str.MallocUsed();
     u_.small_str.Free();
-  } else if (taglen_ == ROBJ_TAG) {
-    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-    auto view = u_.r_obj.AsView();
+  } else if (taglen_ == LARGE_STR_TAG) {
+    auto view = u_.large_str.AsView();
     new_sds = sdsnewlen(view.data(), view.size());
-    u_.r_obj.Free(tl.local_mr);
+    u_.large_str.Free(tl.local_mr);
   } else {
     LOG(FATAL) << "Unexpected tag for SetExpireTime: " << int(taglen_);
   }

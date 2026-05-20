@@ -48,16 +48,10 @@ class RobjWrapper {
 
   size_t MallocUsed(bool slow) const;
 
-  uint64_t HashCode() const;
-  bool Equal(const RobjWrapper& ow) const;
-  bool Equal(std::string_view sv) const;
   size_t Size() const;
   void Free(MemoryResource* mr);
 
-  void SetString(std::string_view s, MemoryResource* mr);
-  void ReserveString(size_t size, MemoryResource* mr);
-  void AppendString(std::string_view s, MemoryResource* mr);
-  // Used when sz_ is used to denote memory usage
+  // Used when sz_ is used to denote memory usage (e.g. OBJ_STREAM).
   void SetSize(uint64_t size);
   void Init(unsigned type, unsigned encoding, void* inner);
 
@@ -75,20 +69,11 @@ class RobjWrapper {
     inner_obj_ = ptr;
   }
 
-  std::string_view AsView() const {
-    return std::string_view{reinterpret_cast<char*>(inner_obj_), sz_};
-  }
-
   // Try reducing memory fragmentation by re-allocating values from underutilized pages.
   // Returns true if re-allocated.
   bool DefragIfNeeded(PageUsage* page_usage);
 
  private:
-  void ReallocateString(MemoryResource* mr);
-
-  size_t InnerObjMallocUsed() const;
-  void MakeInnerRoom(size_t current_cap, size_t desired, MemoryResource* mr);
-
   void Set(void* p, size_t s) {
     inner_obj_ = p;
     sz_ = s;
@@ -96,7 +81,7 @@ class RobjWrapper {
 
   void* inner_obj_ = nullptr;
 
-  // semantics depend on the type. For OBJ_STRING it's string length.
+  // semantics depend on the type; for OBJ_STREAM it tracks bytes used.
   uint64_t sz_ : 56;
 
   uint64_t type_ : 4;
@@ -104,6 +89,52 @@ class RobjWrapper {
 } __attribute__((packed));
 
 static_assert(sizeof(RobjWrapper) == 16);
+
+// Raw, large (non-inline) string storage. Used when a string value does not
+// fit in CompactObj's inline buffer and is not better represented as INT/SMALL/EXTERNAL.
+struct LargeString {
+  using MemoryResource = PMR_NS::memory_resource;
+
+  void* ptr;
+  uint64_t sz : 56;
+  uint64_t reserved : 8;
+
+  size_t Size() const {
+    return sz;
+  }
+
+  size_t MallocUsed() const;
+
+  std::string_view AsView() const {
+    return std::string_view{reinterpret_cast<char*>(ptr), sz};
+  }
+
+  uint64_t HashCode() const;
+
+  bool Equal(std::string_view sv) const {
+    return AsView() == sv;
+  }
+
+  // Replace contents with s, growing the underlying allocation if needed.
+  void SetString(std::string_view s, MemoryResource* mr);
+
+  // Allocate room for `size` bytes; ptr must be null.
+  void ReserveString(size_t size, MemoryResource* mr);
+
+  // Append s. Precondition: existing capacity >= sz + s.size().
+  void AppendString(std::string_view s, MemoryResource* mr);
+
+  // Free underlying allocation; resets to {nullptr, 0}.
+  void Free(MemoryResource* mr);
+
+  // Re-allocate the backing buffer if its memory page is under-utilized.
+  bool DefragIfNeeded(PageUsage* page_usage);
+
+ private:
+  void ReallocateString(MemoryResource* mr);
+} __attribute__((packed));
+
+static_assert(sizeof(LargeString) == 16);
 
 }  // namespace detail
 
@@ -131,6 +162,7 @@ class CompactObj {
     CMS_TAG = 23,
     SDS_TTL_TAG = 24,
     TOPK_TAG = 25,
+    LARGE_STR_TAG = 26,  // detail::LargeString — raw, large non-inline string
   };
 
   // String encoding types.
@@ -523,6 +555,7 @@ class CompactObj {
 
     SmallString small_str;
     detail::RobjWrapper r_obj;
+    detail::LargeString large_str;
 
     // using 'packed' to reduce alignment of U to 1.
     JsonWrapper json_obj __attribute__((packed));

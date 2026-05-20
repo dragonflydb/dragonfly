@@ -876,6 +876,43 @@ TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
   }
 }
 
+TEST_F(CompactObjectTest, LargeStringSetReplacesContents) {
+  // SetString must fully replace contents, including when the new string is
+  // shorter than or equal in length to the current one. See LargeString::SetString.
+  detail::LargeString ls{};
+  auto* mr = CompactObj::memory_resource();
+
+  // 1. Initial set with a long value.
+  string long_str(128, 'a');
+  ls.SetString(long_str, mr);
+  EXPECT_EQ(ls.Size(), long_str.size());
+  EXPECT_EQ(ls.AsView(), long_str);
+
+  // 2. Replace with a shorter value of a different content.
+  string short_str(40, 'b');
+  ls.SetString(short_str, mr);
+  EXPECT_EQ(ls.Size(), short_str.size());
+  EXPECT_EQ(ls.AsView(), short_str);
+
+  // 3. Replace with an equal-length but different value.
+  string equal_len_str(40, 'c');
+  ls.SetString(equal_len_str, mr);
+  EXPECT_EQ(ls.Size(), equal_len_str.size());
+  EXPECT_EQ(ls.AsView(), equal_len_str);
+
+  // 4. Replace with a longer value (the growth path).
+  string longer_str(200, 'd');
+  ls.SetString(longer_str, mr);
+  EXPECT_EQ(ls.Size(), longer_str.size());
+  EXPECT_EQ(ls.AsView(), longer_str);
+
+  // 5. Replace with an empty string.
+  ls.SetString("", mr);
+  EXPECT_EQ(ls.Size(), 0u);
+
+  ls.Free(mr);
+}
+
 TEST_F(CompactObjectTest, ExternalRepresentation) {
   {
     CompactValue obj;
