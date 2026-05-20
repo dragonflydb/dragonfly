@@ -53,6 +53,10 @@ ABSL_FLAG(bool, cluster_flush_decommit_memory, false, "Decommit memory after flu
 ABSL_FLAG(bool, replica_delete_expired, true,
           "If true, replicas proactively delete expired keys on the read path.");
 
+ABSL_FLAG(bool, journal_omit_redundant_writes, true,
+          "If true, omit journal writes for keys during full sync that are yet to be reached by "
+          "the serialization loop. Reduces full sync overhead");
+
 namespace dfly {
 
 using namespace std;
@@ -428,6 +432,7 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
     exit(0);
   }
   expired_keys_events_recording_ = !keyspace_events.empty();
+  journal_omit_redundant_writes_ = absl::GetFlag(FLAGS_journal_omit_redundant_writes);
 }
 
 DbSlice::~DbSlice() {
@@ -1963,6 +1968,9 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
 // 3. there are no other journal consumers
 // 4. the snapshot did not reach the bucket yet
 bool DbSlice::IsOmittableWrite(const Context& cntx, ChangeReq req) {
+  if (!journal_omit_redundant_writes_)
+    return false;
+
   auto cb1 = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };
   auto cb2 = [cb1](const PrimeTable::BucketSet& bs) -> uint64_t {
     DCHECK(!std::ranges::empty(bs.buckets()));
