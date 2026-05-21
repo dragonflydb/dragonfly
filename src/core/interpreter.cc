@@ -471,14 +471,20 @@ mt.__index = function (t, n)
   end
   return rawget(t, n)
 end
-local _orig_getmetatable = getmetatable
+-- Restrict load() to text-only mode; binary chunks are not supported.
+local _orig_load = load
+load = function(chunk, chunkname, mode, env)
+  return _orig_load(chunk, chunkname, "t", env)
+end
 -- Prevent access to _G's metatable.
+local _orig_getmetatable = getmetatable
 getmetatable = function(t)
   if t == _G then
     error("Script attempted to access metatable of global environment", 2)
   end
   return _orig_getmetatable(t)
 end
+-- Remove debug library
 debug = nil
 -- Lock all global tables so scripts cannot replace their metatables.
 local global_guard = {}

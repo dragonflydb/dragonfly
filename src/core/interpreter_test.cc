@@ -597,6 +597,35 @@ TEST_F(InterpreterTest, Robust) {
   EXPECT_EQ("", ser_.res);
 }
 
+TEST_F(InterpreterTest, LoadBytecodeBlocked) {
+  // Bytecode passed as string must be rejected.
+  EXPECT_TRUE(Execute(R"(
+    local bc = string.dump(function() return 1 end)
+    local f, err = load(bc, "test", "b")
+    return f == nil
+  )"));
+  EXPECT_EQ("bool(1)", ser_.res);
+
+  // Bytecode delivered via a reader function must also be rejected.
+  EXPECT_TRUE(Execute(R"(
+    local bc = string.dump(function() return 1 end)
+    local i = 0
+    local f, err = load(function()
+      i = i + 1
+      return bc:sub(i, i) ~= "" and bc:sub(i, i) or nil
+    end)
+    return f == nil
+  )"));
+  EXPECT_EQ("bool(1)", ser_.res);
+
+  // Source code must still load and execute normally.
+  EXPECT_TRUE(Execute(R"(
+    local f = load("return 42")
+    return f()
+  )"));
+  EXPECT_EQ("i(42)", ser_.res);
+}
+
 TEST_F(InterpreterTest, Unpack) {
   auto cb = [](Interpreter::CallArgs ca) {
     auto* reply = ca.translator;
