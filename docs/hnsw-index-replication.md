@@ -49,9 +49,10 @@ master's shard id, it must be rewritten when shard counts differ (§6).
 `0..level` the neighbour-link list (so `level + 1` link arrays). Vector payloads are
 not part of this record; they are restored from the normal key stream.
 
-**`HnswIndexMetadata`** accompanies each graph with the identifying
-`index_name`/`field_name` pair and the graph-level parameters the replica needs for
-restore.
+Capacity, top level and element count are derived from the node stream itself during
+restore; the entry point is the only graph-level parameter carried on the wire, and it
+travels in the `RDB_OPCODE_VECTOR_INDEX` header (§3.2). Empty graphs are not
+transmitted; the replica rebuilds them from the (empty) keyspace.
 
 ## 3. Wire Format
 
@@ -60,18 +61,18 @@ restore.
 | Key | Payload | Scope |
 |-----|---------|-------|
 | `search-index` | `"<index_name> <FT.CREATE arguments…>"` | Summary flow and `SINGLE_SHARD_WITH_SUMMARY` flows unconditionally; per-shard flows only if the replica advertises capability `VER6` or later. Omitted entirely from RDB-to-disk saves. |
-| `hnsw-index-metadata` | `HnswIndexMetadata` record, one per HNSW-indexed index | Summary flow, replicas at `VER6` or later. |
 | `search-synonyms` | `"<index_name> <group_id> <terms…>"` | Summary flow. |
 | `shard-count` | integer | Summary and `SINGLE_SHARD_WITH_SUMMARY` flows. Load-bearing: controls the remap branch (§6). |
 
 ### 3.2 Opcodes
 
-`RDB_OPCODE_VECTOR_INDEX` (value `222`). One block per global HNSW index, emitted by
-shard 0 only.
+`RDB_OPCODE_VECTOR_INDEX` (value `222`). One block per non-empty global HNSW index,
+emitted by shard 0 only.
 
 ```
 opcode                   u8   = 222
 index_key                string    "<index_name>:<field_name>"
+enterpoint_node          len
 elements_number          len
 repeated elements_number times:
   internal_id            u32         (little-endian raw)
@@ -82,8 +83,9 @@ repeated elements_number times:
     links                u32 × links_num
 ```
 
-`index_key` is split on the final `:`. Integer fields inside the node record are packed
-little-endian rather than RDB varints.
+`index_key` is split on the final `:`. `enterpoint_node` and `elements_number` are RDB
+varints (`SaveLen`/`LoadLen`); the per-node fields are packed little-endian. Indices
+whose graph is empty are not emitted at all.
 
 `RDB_OPCODE_SHARD_DOC_INDEX` (value `223`). One block per HNSW-indexed index, emitted by
 every shard.
@@ -102,21 +104,37 @@ repeated mapping_count times:
 
 ### 4.1 States
 
-An index carries exactly one of four states per shard.
+Each shard holds one state per index, drawn from the four values below. States on
+different shards and on different indices are independent.
 
-| State | Initial condition | HNSW mutation behaviour |
-|-------|-------------------|-------------------------|
-| `kProhibit` | Default at index construction. | Buffered. |
-| `kRestoring` | Entered after graph restore, before vector hydration. | Buffered. |
-| `kSerializing` | Entered on the master before a graph dump. | Buffered. |
-| `kBuilding` | Steady state. | Applied inline to the graph. |
+| State | When entered | Mutations | Exit |
+|-------|--------------|-----------|------|
+| `kProhibit` | Default at construction, on a replica that is still in LOADING. | Buffered into the pending-updates list. | Restore-side drain → `kBuilding`. |
+| `kRestoring` | Replica enters this when the local index is rebuilt with restored graph data, before vector hydration. | Buffered. | Restore-side drain → `kBuilding`, after hydration completes on every shard. |
+| `kSerializing` | Master enters this on every shard right before a graph dump. The promotion only takes effect on indices that are currently in `kBuilding`. | Buffered. | Save-side drain → `kBuilding`, after the dump completes. |
+| `kBuilding` | Steady state. Reached the first time an index is built, and re-entered after every drain. | Applied inline to the graph. | Promoted to `kSerializing` by a save. |
 
-Transitions are strictly `{kProhibit, kRestoring, kSerializing} → kBuilding`, performed
-by a drain that replays the buffered operations. A serialization request transitions
-only an index already in `kBuilding`; indices in `kProhibit` or `kRestoring` keep their
-state, so a serialization pass cannot disturb an index that is still restoring. A
-serialization drain acts only on indices in `kSerializing`, so a master drain cannot
-terminate a concurrent replica restore.
+**Transitions.** Every transition out of a non-`kBuilding` state is performed by a drain
+that replays the pending-updates list against the current database state (§4.2). The
+legal transitions are:
+
+1. `kProhibit → kBuilding` — restore-side drain at the end of post-load reconciliation.
+2. `kRestoring → kBuilding` — restore-side drain at the end of post-load
+   reconciliation.
+3. `kBuilding → kSerializing` — issued by the master at the start of the graph dump.
+4. `kSerializing → kBuilding` — save-side drain at the end of the graph dump.
+
+There is no direct transition between `kProhibit`, `kRestoring` and `kSerializing`.
+
+**Safety carve-outs.** Two asymmetries in the transition rules give the safety
+properties the protocol relies on:
+
+- The `kBuilding → kSerializing` promotion is the only way to enter `kSerializing`. An
+  index in `kProhibit` or `kRestoring` is left untouched by a save, so a save cannot
+  disturb a half-restored replica.
+- The save-side drain acts only on indices currently in `kSerializing`, so it cannot
+  promote a `kRestoring` or `kProhibit` index to `kBuilding` and replay buffered ops
+  before restore has finished.
 
 ### 4.2 Single-writer invariant
 
@@ -132,11 +150,12 @@ buffered mutation from committing until the dump completes.
 
 ### 4.4 Borrowed-vector invariant
 
-When the graph stores pointers into hash field sds (i.e. vectors are not copied into the
-graph), any mutation that would free or overwrite such an sds while the index is not in
-`kBuilding` must retain the original sds until the drain. Retention is per-shard,
-per-field. The containing `PrimeValue` additionally suppresses defragmentation for the
-lifetime of the node to prevent relocation of borrowed storage.
+A graph can be configured to store pointers into hash field sds rather than copying
+vectors. In copy mode this invariant is a no-op. In borrowed mode, any mutation that
+would free or overwrite such an sds while the index is not in `kBuilding` must retain
+the original sds until the drain. Retention is per-shard, per-field. The containing
+`PrimeValue` additionally suppresses defragmentation for the lifetime of the node to
+prevent relocation of borrowed storage.
 
 ### 4.5 Identifier uniqueness
 
@@ -148,31 +167,39 @@ key index.
 ### 4.6 Restore ordering
 
 Graph structure is restored before vector payloads are hydrated. A node whose document
-has disappeared by the hydration step is removed; the graph never retains a live node
-without a vector payload.
+is missing in the local database at hydration is removed from the graph. Nodes whose
+vector data cannot be installed immediately are deferred to the post-load drain (§4.2);
+they exist briefly with stale payloads but are never reachable by a search query, which
+requires the index to be in `kBuilding`.
 
 ## 5. Protocol
 
 ### 5.1 Master
 
-Per shard, in order of appearance in the RDB stream:
+![Serialization flow](./hnsw-replication-serialize.svg)
 
-1. **AUX fields.** `search-index` is written for every index. On the summary flow,
-   `hnsw-index-metadata` is written once per HNSW-indexed index, `search-synonyms` once
-   per synonym group, and `shard-count` once.
-2. **Mapping dump.** For every HNSW-indexed index, the shard emits one
-   `RDB_OPCODE_SHARD_DOC_INDEX` block containing a snapshot of its current key→DocId
-   table.
-3. **Graph dump (shard 0 only).** Every shard first transitions each of its
-   `kBuilding` indices to `kSerializing`; indices in other states retain their state.
-   Shard 0 then acquires the read half of each global index's MRMW mutex and emits one
-   `RDB_OPCODE_VECTOR_INDEX` block per index. The lock is released, and the serializer
-   output is flushed, at the end of each index.
-4. **Drain.** Each shard replays its pending updates for indices currently in
-   `kSerializing` and returns those indices to `kBuilding`.
+In order of appearance in the RDB stream:
+
+1. **AUX fields.** `search-index` is written for every index. The summary flow also
+   writes `search-synonyms` once per synonym group and `shard-count` once.
+2. **Mapping dump.** Each shard emits one `RDB_OPCODE_SHARD_DOC_INDEX` block per
+   HNSW-indexed index, containing a snapshot of that shard's key→DocId table.
+3. **Graph dump (shard 0 only, non-empty graphs only).** Shard 0 broadcasts a
+   `kBuilding → kSerializing` transition to every shard; indices in other states are
+   left as-is. It then acquires the read half of each global index's MRMW mutex in
+   turn and emits one `RDB_OPCODE_VECTOR_INDEX` block per index, releasing the lock
+   and flushing the serializer at the end of each one.
+4. **Save-side drain.** Every shard replays its pending updates for indices currently
+   in `kSerializing` and returns those indices to `kBuilding`.
 5. **Key stream.** Bucket iteration proceeds as for any other data.
 
+The graph dump is additionally gated by the `--serialize_hnsw_index` flag on the master.
+When the flag is off, steps 2 and 3 are skipped and the replica rebuilds every index
+from the key stream.
+
 ### 5.2 Replica
+
+![Deserialization flow](./hnsw-replication-deserialize.svg)
 
 Inline processing:
 
@@ -189,16 +216,23 @@ Post-load reconciliation, run once after the stream has been fully consumed:
 1. **Apply mappings.** If shard counts match, each parked mapping is restored on the
    replica shard whose id equals the master shard id in the block. If they differ, the
    remap of §6 runs first and each replica shard receives its pre-distributed slice.
-2. **Rebuild.** Each shard rebuilds its local index in `kRestoring`.
+2. **Rebuild.** Each shard decides per index whether to take the restore path (graph
+   was installed in step 1) or to rebuild the index from scratch (graph missing or
+   inconsistent), and enters `kRestoring` in either case.
 3. **Synonyms.** Parked synonym commands are replayed; the replica waits for index
    construction to complete on all shards.
 4. **Hydrate.** Each shard iterates its key index, loads every live document, and
    populates vector data for the corresponding `GlobalDocId`. The key→DocId mapping is
    revalidated against the snapshot before any removal, because concurrent fibers may
-   reuse freed DocIds. Nodes whose document is missing are removed from the graph. Keys
+   reuse freed DocIds. Nodes whose document is missing are removed from the graph; keys
    whose hydration cannot complete immediately are queued for the final drain.
-5. **Drain.** Each shard replays its pending updates and transitions its indices to
-   `kBuilding`.
+5. **Drain.** Once every shard has finished hydration, each shard replays its pending
+   updates and transitions its indices to `kBuilding`. The drain is deferred until all
+   shards have completed because the graph is global; a single shard cannot mark itself
+   ready while others may still install vector data into the same graph.
+
+The replica's `--deserialize_hnsw_index` flag mirrors the master flag: when off, both
+opcodes are skipped on arrival and every index is rebuilt from the key stream.
 
 ## 6. Shard Count Remap
 
@@ -220,17 +254,17 @@ the graph can be installed.
 
 | Master shards | Replica shards | Mappings present | Action |
 |---------------|----------------|------------------|--------|
-| N | N | yes | Direct restore, no remap. |
-| N | M (≠ N) | yes | Remap, restore, pre-distributed mapping apply. |
-| N | any | no | Discard graph, rebuild from key stream. |
-| any | any | remap fails | Discard graph, rebuild from key stream. |
+| N | N | — | Direct restore on each shard at opcode arrival; no remap. |
+| N | M (≠ N) | yes | Park nodes; remap, restore, pre-distributed mapping apply at post-load. |
+| N | M (≠ N) | no, or remap fails | Discard graph, rebuild from key stream. |
 
 ## 7. Version Compatibility
 
 The wire format is gated on the replica capability `VER6`, advertised through
-`REPLCONF capa dragonfly`. Replicas below `VER6` receive only the `FT.CREATE` definition
-through the summary flow and reconstruct each index from the key stream alone. RDB saves
-to disk omit all search-index data: search indices are a replication-only concern.
+`REPLCONF capa dragonfly`, and on the master flag `--serialize_hnsw_index`. Replicas
+below `VER6` receive only the `FT.CREATE` definition through the summary flow and
+reconstruct each index from the key stream alone. RDB saves to disk omit all
+search-index data: search indices are a replication-only concern.
 
 ## 8. Open Issues
 
