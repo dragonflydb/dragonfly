@@ -1070,6 +1070,7 @@ void Replica::RedisStreamAcksFb() {
     ack_cmd = absl::StrCat("REPLCONF ACK ", repl_offs_);
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
     if (auto ec = SendCommand(ack_cmd); ec) {
+      VLOG(1) << "RedisAcks SendCommand failed: " << ec.message() << " offset=" << repl_offs_;
       exec_st_.ReportError(ec);
       break;
     }
@@ -1079,6 +1080,8 @@ void Replica::RedisStreamAcksFb() {
         [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || (!exec_st_.IsRunning()); },
         next_ack_tp);
   }
+  VLOG(1) << "RedisAcks fiber exiting, exec_st_.IsRunning()=" << exec_st_.IsRunning()
+          << " last_acked_offset=" << ack_offs_ << " repl_offs=" << repl_offs_;
 }
 
 void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
