@@ -16,6 +16,8 @@ class BackedArguments {
   constexpr static size_t kLenCap = 5;
   constexpr static size_t kStorageCap = 88;
 
+  constexpr static size_t kShrinkFloor = 64 << 10;  // 256 KiB
+
  public:
   using value_type = std::string_view;
 
@@ -93,6 +95,13 @@ class BackedArguments {
     // Clear the contents without deallocating memory. clear() deallocates inlined_vector.
     offsets_.resize(0);
     storage_.resize(0);
+  }
+
+  void MaybeShrink() {
+    if (storage_.capacity() > kShrinkFloor && storage_.size() < storage_.capacity() / 2) {
+      storage_.shrink_to_fit();
+      offsets_.shrink_to_fit();
+    }
   }
 
   std::string_view back() const {
