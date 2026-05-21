@@ -707,89 +707,95 @@ TEST_F(BitOpsFamilyTest, BitFieldParsing) {
 
 TEST_F(BitOpsFamilyTest, BitFieldCreate) {
   // check that SET, INCR create the key when it does not exist
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "u1", "0", "1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "0"}), IntArg(1));
-  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "u1", "1", "1"}), IntArg(1));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "1"}), IntArg(1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "u1", "0", "1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "0"}), RespElementsAre(IntArg(1)));
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "u1", "1", "1"}), RespElementsAre(IntArg(1)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "1"}), RespElementsAre(IntArg(1)));
 }
 
 TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
   Run({"bitfield", "foo", "set", "u2", "0", "2"});
 
   // unsigned 1bit
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "u1", "0", "2"}), IntArg(1));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "0"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "u1", "1", "2"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "1"}), IntArg(0));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "u1", "0", "2"}), RespElementsAre(IntArg(1)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "0"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "u1", "1", "2"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "1"}), RespElementsAre(IntArg(0)));
 
   // unsigned 63bit
   int64_t max = std::numeric_limits<int64_t>::max();
   Run({"bitfield", "foo", "set", "i64", "0", StrCat(max)});
-  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i64", "0", "1"}), IntArg(-max - 1));
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i64", "0", "1"}),
+              RespElementsAre(IntArg(-max - 1)));
 
   // signed 1 bit
   Run({"bitfield", "foo", "set", "i1", "0", "-2"});
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i1", "0"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i1", "0", "-1"}), IntArg(-1));
-  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i1", "0", "-1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i1", "0", "-3"}), IntArg(-1));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i1", "0"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i1", "0", "-1"}), RespElementsAre(IntArg(-1)));
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i1", "0", "-1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i1", "0", "-3"}), RespElementsAre(IntArg(-1)));
 
   int64_t min = std::numeric_limits<int64_t>::min();
   Run({"bitfield", "foo", "set", "i8", "0", StrCat(min)});
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "0"}), IntArg(0));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "0"}), RespElementsAre(IntArg(0)));
 
   // signed 64 bit
   Run({"bitfield", "foo", "set", "i64", "0", StrCat(min)});
-  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i64", "0", "-1"}), IntArg(max));
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i64", "0", "-1"}), RespElementsAre(IntArg(max)));
 
   // overflow sat
   // unsigned 8 bit
   Run({"bitfield", "foo", "set", "u1", "0", "0"});
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "u8", "0", "300"}), IntArg(255));
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "u8", "0", "10"}), IntArg(255));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "0"}), IntArg(255));
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "u8", "0", "300"}),
+              RespElementsAre(IntArg(255)));
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "u8", "0", "10"}),
+              RespElementsAre(IntArg(255)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "0"}), RespElementsAre(IntArg(255)));
 
   // unsigned 63 bit
   Run({"bitfield", "foo", "set", "u63", "0", "0"});
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "u63", "0", StrCat(max)}),
-              IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "u63", "0", "10"}), IntArg(max));
+              RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "u63", "0", "10"}),
+              RespElementsAre(IntArg(max)));
 
   // signed 8 bit
   Run({"bitfield", "foo", "set", "u8", "0", "0"});
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i8", "0", "300"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "i8", "0", "-127"}), IntArg(0));
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i8", "0", "300"}),
+              RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "i8", "0", "-127"}),
+              RespElementsAre(IntArg(0)));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "i8", "0", "-255"}),
-              IntArg(-128));
+              RespElementsAre(IntArg(-128)));
 
   // signed 64 bit
   Run({"bitfield", "foo", "set", "i64", "0", "0"});
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i64", "0", StrCat(max)}),
-              IntArg(0));
+              RespElementsAre(IntArg(0)));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "i64", "0", "100"}),
-              IntArg(max));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i64", "0"}), IntArg(max));
+              RespElementsAre(IntArg(max)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i64", "0"}), RespElementsAre(IntArg(max)));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i64", "0", StrCat(min)}),
-              IntArg(max));
+              RespElementsAre(IntArg(max)));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "i64", "0", "-100"}),
-              IntArg(min));
+              RespElementsAre(IntArg(min)));
 
   // overflow fail
   // unsigned
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "fail", "set", "u8", "0", "300"}),
-              ArgType(RespExpr::Type::NIL));
+              RespElementsAre(ArgType(RespExpr::Type::NIL)));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "fail", "incrby", "u1", "0", "10"}),
-              ArgType(RespExpr::Type::NIL));
+              RespElementsAre(ArgType(RespExpr::Type::NIL)));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "fail", "incrby", "u1", "0", "-10"}),
-              ArgType(RespExpr::Type::NIL));
+              RespElementsAre(ArgType(RespExpr::Type::NIL)));
 
   // signed
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "fail", "incrby", "i8", "0", "300"}),
-              ArgType(RespExpr::Type::NIL));
+              RespElementsAre(ArgType(RespExpr::Type::NIL)));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "fail", "incrby", "i1", "0", "10"}),
-              ArgType(RespExpr::Type::NIL));
+              RespElementsAre(ArgType(RespExpr::Type::NIL)));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "fail", "incrby", "i1", "0", "-10"}),
-              ArgType(RespExpr::Type::NIL));
+              RespElementsAre(ArgType(RespExpr::Type::NIL)));
 
   // stickiness of overflow among operations in a chain
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "fail", "set", "u8", "0", "300", "set", "u1", "0",
@@ -801,84 +807,85 @@ TEST_F(BitOpsFamilyTest, BitFieldOperations) {
   // alligned offset reads/writes unsigned
   Run({"bitfield", "foo", "set", "u32", "0", "0"});
   // Set the bit battern 01111000 00000001 00000001 00001010
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "0", "120"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "0"}), IntArg(120));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "0", "120"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "0"}), RespElementsAre(IntArg(120)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "8", "1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "8"}), IntArg(1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "8", "1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "8"}), RespElementsAre(IntArg(1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "16", "1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "16"}), IntArg(1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "16", "1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "16"}), RespElementsAre(IntArg(1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "24", "10"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "24"}), IntArg(10));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "24", "10"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "24"}), RespElementsAre(IntArg(10)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u32", "0"}), IntArg(2013331722));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u32", "0"}), RespElementsAre(IntArg(2013331722)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "u8", "0", "120"}), IntArg(240));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "0"}), IntArg(240));
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "u8", "0", "120"}), RespElementsAre(IntArg(240)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "0"}), RespElementsAre(IntArg(240)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "u16", "0", "120"}), IntArg(61561));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u16", "0"}), IntArg(61561));
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "u16", "0", "120"}),
+              RespElementsAre(IntArg(61561)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u16", "0"}), RespElementsAre(IntArg(61561)));
 
   // alligned offset reads/writes signed
   Run({"bitfield", "foo", "set", "u32", "0", "0"});
   // Set the bit battern 10001000 11111111 11111111 11110110
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "0", "-120"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "0"}), IntArg(-120));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "0", "-120"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "0"}), RespElementsAre(IntArg(-120)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "8", "-1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "8"}), IntArg(-1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "8", "-1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "8"}), RespElementsAre(IntArg(-1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "16", "-1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "16"}), IntArg(-1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "16", "-1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "16"}), RespElementsAre(IntArg(-1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "24", "-10"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "24"}), IntArg(-10));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "24", "-10"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "24"}), RespElementsAre(IntArg(-10)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i32", "0"}), IntArg(-1996488714));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i32", "0"}), RespElementsAre(IntArg(-1996488714)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i8", "0", "-8"}), IntArg(-128));
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i8", "0", "-8"}), RespElementsAre(IntArg(-128)));
 
   // nonalligned offset reads/writes unsigned
   Run({"bitfield", "foo", "set", "i64", "0", "0"});
   // Set the bit battern 00000000 10000000 10000000 10000000 10000000
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "1", "1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "1"}), IntArg(1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "1", "1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "1"}), RespElementsAre(IntArg(1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "9", "1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "9"}), IntArg(1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "9", "1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "9"}), RespElementsAre(IntArg(1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "17", "1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "17"}), IntArg(1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "17", "1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "17"}), RespElementsAre(IntArg(1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "25", "1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "25"}), IntArg(1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "25", "1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "25"}), RespElementsAre(IntArg(1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "0"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "8"}), IntArg(1));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "16"}), IntArg(1));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "24"}), IntArg(1));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "32"}), IntArg(1));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "0"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "8"}), RespElementsAre(IntArg(1)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "16"}), RespElementsAre(IntArg(1)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "24"}), RespElementsAre(IntArg(1)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "32"}), RespElementsAre(IntArg(1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u33", "0"}), IntArg(16843009));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u33", "0"}), RespElementsAre(IntArg(16843009)));
 
   // nonalligned offset reads/writes signed
   Run({"bitfield", "foo", "set", "i64", "0", "0"});
   // Set the bit battern 1111111 11111111 0000000 000000001
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "1", "-1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "1"}), IntArg(-1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "1", "-1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "1"}), RespElementsAre(IntArg(-1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "9", "-1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "9"}), IntArg(-1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "9", "-1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "9"}), RespElementsAre(IntArg(-1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "17", "0"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "17"}), IntArg(0));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "17", "0"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "17"}), RespElementsAre(IntArg(0)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "25", "1"}), IntArg(0));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "25"}), IntArg(1));
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "25", "1"}), RespElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "25"}), RespElementsAre(IntArg(1)));
 
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "i32", "1"}), IntArg(-65535));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i32", "1"}), RespElementsAre(IntArg(-65535)));
 
   // chaining
   Run({
@@ -887,7 +894,7 @@ TEST_F(BitOpsFamilyTest, BitFieldOperations) {
       "5",        "1",   "set", "u1", "6", "1", "set", "u1", "7", "1",
   });
 
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "0"}), IntArg(255));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u8", "0"}), RespElementsAre(IntArg(255)));
 
   ASSERT_THAT(Run({
                   "bitfield",
@@ -909,8 +916,8 @@ TEST_F(BitOpsFamilyTest, BitFieldOperations) {
   // check for positional offsets
   Run({"bitfield", "foo", "set", "u8", "#0", "1", "set", "u8", "#1", "1", "set", "u8", "#2", "1"});
 
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "7"}), IntArg(1));
-  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "15"}), IntArg(1));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "7"}), RespElementsAre(IntArg(1)));
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "u1", "15"}), RespElementsAre(IntArg(1)));
 }
 
 TEST_F(BitOpsFamilyTest, BitFieldLargeOffset) {
@@ -927,7 +934,7 @@ TEST_F(BitOpsFamilyTest, BitFieldLargeOffset) {
   EXPECT_THAT(ToSV(resp.GetBuf()), Eq(std::string_view("bar\0", 4)));
 
   resp = Run({"bitfield", "foo", "get", "u32", "4294967295"});
-  EXPECT_THAT(resp, 0);
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 }
 
 TEST_F(BitOpsFamilyTest, BitFieldIssue5237_SetOverflowSat) {

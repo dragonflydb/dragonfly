@@ -96,7 +96,7 @@ TEST_F(MultiTest, MultiWithError) {
 
   EXPECT_THAT(Run({"multi"}), "OK");
   EXPECT_THAT(Run({"set", "z", "y"}), "QUEUED");
-  EXPECT_THAT(Run({"exec"}), "OK");
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("OK"));
 
   EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
   EXPECT_THAT(Run({"get", "z"}), "y");
@@ -247,12 +247,12 @@ TEST_F(MultiTest, MultiEmpty) {
   Run({"multi"});
   ASSERT_EQ(Run({"ping", "foo"}), "QUEUED");
   resp = Run({"exec"});
-  EXPECT_EQ(resp, "foo");
+  EXPECT_THAT(resp, RespElementsAre("foo"));
 
   Run({"multi"});
   Run({"set", "a", ""});
   resp = Run({"exec"});
-  EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(resp, RespElementsAre("OK"));
 
   resp = Run({"get", "a"});
   EXPECT_EQ(resp, "");
@@ -432,7 +432,7 @@ TEST_F(MultiTest, MultiRename) {
   resp = Run({"rename", kKey4, kKey2});
   ASSERT_EQ(resp, "QUEUED");
   resp = Run({"exec"});
-  EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(resp, RespElementsAre("OK"));
 
   EXPECT_FALSE(IsLocked(0, kKey1));
   EXPECT_FALSE(IsLocked(0, kKey2));
@@ -445,7 +445,7 @@ TEST_F(MultiTest, MultiWithoutTx) {
   Run({"multi"});
   Run({"ping"});
   auto resp = Run({"exec"});
-  EXPECT_EQ(resp, "PONG");
+  EXPECT_THAT(resp, RespElementsAre("PONG"));
 
   // EVAL without keys and default script flags should be non-transactional
   Run({"multi"});
@@ -480,7 +480,7 @@ TEST_F(MultiTest, MultiCommandsWithBonusKeys) {
   Run({"multi"});
   Run({"zinterstore", "ze", "2", "za", "zb", "z one extra"});
   resp = Run({"exec"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, RespElementsAre(ErrArg("syntax error")));
 }
 
 TEST_F(MultiTest, MultiHop) {
@@ -590,7 +590,7 @@ TEST_F(MultiTest, Eval) {
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"hvals", "hmap"});
-  EXPECT_EQ(resp, "2222");
+  EXPECT_THAT(resp, RespElementsAre("2222"));
 
   Run({"sadd", "s1", "a", "b"});
   Run({"sadd", "s2", "a", "c"});
@@ -998,7 +998,7 @@ TEST_F(MultiTest, UndeclaredKeyFlag) {
 
   // Clear all Lua scripts so we can configure the cache
   EXPECT_THAT(Run({"script", "flush"}), "OK");
-  EXPECT_THAT(Run({"script", "exists", sha}), IntArg(0));
+  EXPECT_THAT(Run({"script", "exists", sha}), RespElementsAre(IntArg(0)));
 
   EXPECT_THAT(
       Run({"config", "set", "lua_undeclared_keys_shas", absl::StrCat(sha, ",NON-EXISTING-HASH")}),
@@ -1459,7 +1459,7 @@ TEST_F(MultiEvalTest, MultiAndEval) {
   Run({"multi"});
   Run({"eval", "return 'OK';", "0"});
   auto resp = Run({"exec"});
-  EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(resp, RespElementsAre("OK"));
 
   // We had a bug running script load inside multi
   Run({"multi"});

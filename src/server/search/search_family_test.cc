@@ -57,7 +57,7 @@ class SearchFamilyTest : public BaseFamilyTest {
  protected:
 };
 
-const auto kNoResults = IntArg(0);  // tests auto destruct single element arrays
+const auto kNoResults = RespElementsAre(IntArg(0));
 
 /* Asserts that response is array of two arrays. Used to test FT.PROFILE response */
 ::testing::AssertionResult AssertArrayOfTwoArrays(const RespExpr& resp) {
@@ -81,20 +81,21 @@ const auto kNoResults = IntArg(0);  // tests auto destruct single element arrays
 #define ASSERT_ARRAY_OF_TWO_ARRAYS(resp) ASSERT_PRED1(AssertArrayOfTwoArrays, resp)
 
 MATCHER_P2(DocIds, total, arg_ids, "") {
-  if (arg_ids.empty()) {
-    if (auto res = arg.GetInt(); !res || *res != 0) {
-      *result_listener << "Expected single zero";
-      return false;
-    }
-    return true;
-  }
-
   if (arg.type != RespExpr::ARRAY) {
     *result_listener << "Wrong response type: " << int(arg.type);
     return false;
   }
 
   auto results = arg.GetVec();
+
+  if (arg_ids.empty()) {
+    if (results.size() != 1 || !results[0].GetInt() || *results[0].GetInt() != 0) {
+      *result_listener << "Expected single zero";
+      return false;
+    }
+    return true;
+  }
+
   if (results.size() != arg_ids.size() * 2 + 1) {
     *result_listener << "Wrong resp vec size: " << results.size();
     return false;
@@ -246,7 +247,7 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_THAT(Run({"ft.dropindex", "idx-100"}), ErrArg("Index with name 'idx-100' not found"));
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
-  EXPECT_EQ(Run({"ft._list"}), "idx-3");
+  EXPECT_THAT(Run({"ft._list"}), RespElementsAre("idx-3"));
 }
 
 TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
@@ -270,7 +271,7 @@ TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
 
   // Search from db 1 should return 0 results (only db 0 is indexed)
   resp = Run({"ft.search", "idx-1", "*"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, kNoResults);
 
   // ft.dropindex must work from another database
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
@@ -505,11 +506,11 @@ TEST_F(SearchFamilyTest, Indexing) {
   EXPECT_GT(iterations, 0u);  // ensure we observed indexing-in-progress state at least once
 
   auto resp = Run({"ft.search", "i1", "@v1:[10 20]", "LIMIT", "0", "0"});
-  EXPECT_THAT(resp, IntArg(110));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(110)));
 
   // check added with alter field v2 is fully indexed
   resp = Run({"ft.search", "i1", "@v2:[0 10000]", "LIMIT", "0", "0"});
-  EXPECT_THAT(resp, IntArg(kNumDocs));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(kNumDocs)));
 }
 
 TEST_F(SearchFamilyTest, Simple) {
@@ -848,7 +849,7 @@ TEST_F(SearchFamilyTest, TestLimit) {
   EXPECT_THAT(resp, ArrLen(10 * 2 + 1));
 
   resp = Run({"ft.search", "i1", "all", "limit", "0", "0"});
-  EXPECT_THAT(resp, IntArg(20));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(20)));
 
   resp = Run({"ft.search", "i1", "all", "limit", "0", "5"});
   EXPECT_THAT(resp, ArrLen(5 * 2 + 1));
@@ -2047,7 +2048,7 @@ TEST_F(SearchFamilyTest, KnnSearchOptions) {
   // KNN 11929939, LIMIT 4 2
   resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 11929939 @vector $query_vector]", "PARAMS", "2",
               "query_vector", query_vector, "LIMIT", "4", "2"});
-  EXPECT_THAT(resp, IntArg(3));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3)));
 
   // KNN 11929939, LIMIT 0 10
   resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 11929939 @vector $query_vector]", "PARAMS", "2",
@@ -3248,7 +3249,7 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromNoMatches) {
       Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.str1", "idx2.num2",
            "idx2.str2", "LOAD_FROM", "idx2", "2", "idx2.num2=idx1.num1", "idx2.str2=idx1.str1"});
 
-  EXPECT_THAT(resp, IntArg(0));  // No matches, so result should be empty
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));  // No matches, so result should be empty
 }
 
 TEST_F(SearchFamilyTest, AggregateWithLoadFromQueries) {
@@ -3322,7 +3323,7 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromSyntaxErrors) {
   // Test when index does not exist
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
                    "idx4", "1", "idx4.num2=idx1.num1"}),
-              IntArg(0));
+              RespElementsAre(IntArg(0)));
 
   // Test when index exists but no LOAD_FROM is specified
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
@@ -3345,15 +3346,15 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromSyntaxErrors) {
   // Test when field of index does not exist
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
                    "idx2", "1", "idx2.num2=idx1.nonexistent_field"}),
-              IntArg(0));
+              RespElementsAre(IntArg(0)));
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
                    "idx2", "1", "idx2.nonexistent_field=idx1.num1"}),
-              IntArg(0));
+              RespElementsAre(IntArg(0)));
 
   // Test when field in QUERY does not exist in index
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
                    "idx2", "1", "idx2.num2=idx1.num1", "QUERY", "@nonexistent_tag:{tag1|tag2}"}),
-              IntArg(0));
+              RespElementsAre(IntArg(0)));
 
   // Test when field in LOAD does not exist in index
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.non_existent_field",
@@ -3552,8 +3553,9 @@ TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
   EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
 
   resp = Run({"FT.CONFIG", "HELP", "MAXSEARCHRESULTS"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
-                            "Maximum number of results from ft.search command", "Value", "1"));
+  EXPECT_THAT(resp, RespElementsAre(IsArray("MAXSEARCHRESULTS", "Description",
+                                            "Maximum number of results from ft.search command",
+                                            "Value", "1")));
 
   resp = Run({"FT.CONFIG", "GET", "*"});
   // Should contain MAXSEARCHRESULTS among other search config parameters
@@ -3728,7 +3730,7 @@ TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
 
   // Search on database 1 should return no results (only db 0 is indexed)
   auto resp = Run({"FT.SEARCH", "idx", "another_value"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, kNoResults);
 
   // Switch back to database 0
   EXPECT_THAT(Run({"SELECT", "0"}), "OK");
@@ -3809,12 +3811,12 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
 
   resp = Run({"FT.SEARCH", "knn_idx", "@even:{maybe} => [KNN 3 @pos $vec]", "PARAMS", "2", "vec",
               query_vec});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, kNoResults);
 
   // Verify that empty prefilter return zero results
   resp = Run({"FT.SEARCH", "knn_idx", "@even:{non_existing} => [KNN 3 @pos $vec]", "PARAMS", "2",
               "vec", query_vec});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, kNoResults);
 }
 
 TEST_F(SearchFamilyTest, KnnHnswCosineDistanceCalculation) {
@@ -4573,7 +4575,7 @@ TEST_F(SearchFamilyTest, VectorRangeAggregate) {
   resp = Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
               "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
               "cnt"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 }
 
 TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
@@ -4625,7 +4627,7 @@ TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
   resp = Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
               "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
               "cnt"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 }
 
 TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
@@ -4970,7 +4972,7 @@ TEST_F(SearchFamilyTest, FtAggregateFilterEmptyResult) {
                    "FILTER", "@total > 100"});
   // clang-format on
   // When all rows are filtered out, FT.AGGREGATE returns integer 0
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 }
 
 TEST_F(SearchFamilyTest, FtAggregateFilterPipelineOrder) {

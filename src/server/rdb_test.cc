@@ -194,9 +194,10 @@ TEST_F(RdbTest, Stream) {
                               "1655444851523-1", "entries-read", kMatchNil, "lag", kMatchNil));
 
   resp = Run({"xinfo", "groups", "key:1"});  // test dereferences array of size 1
-  EXPECT_THAT(resp, RespElementsAre("name", "g2", "consumers", IntArg(0), "pending", IntArg(0),
-                                    "last-delivered-id", "1655444851523-1", "entries-read",
-                                    kMatchNil, "lag", kMatchNil));
+  EXPECT_THAT(resp,
+              RespElementsAre(RespElementsAre("name", "g2", "consumers", IntArg(0), "pending",
+                                              IntArg(0), "last-delivered-id", "1655444851523-1",
+                                              "entries-read", kMatchNil, "lag", kMatchNil)));
 
   resp = Run({"xinfo", "groups", "key:2"});
   EXPECT_THAT(resp, ArrLen(0));
@@ -1195,8 +1196,7 @@ TEST_F(RdbTest, TopkSerializationEmptyEdgeCase) {
   // After loading an empty TOPK, adding items must work correctly.
   Run({"TOPK.INCRBY", "topk_empty", "new_item", "100"});
   resp = Run({"TOPK.LIST", "topk_empty"});
-  // Run() unwraps single-element arrays to a scalar string
-  EXPECT_EQ(resp, "new_item");
+  EXPECT_THAT(resp, RespElementsAre("new_item"));
 }
 
 // Tests that the decay parameter (double) is correctly serialized using SaveBinaryDouble/
