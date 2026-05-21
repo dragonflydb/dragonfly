@@ -638,4 +638,49 @@ TEST_F(InterpreterTest, GcAccountingAfterReturn) {
   im.Return(interpreter);
 }
 
+TEST_F(InterpreterTest, RandstrValidation) {
+  // Single string: valid size
+  ASSERT_TRUE(Execute("return string.len(dragonfly.randstr(1024))"));
+  EXPECT_EQ("i(1024)", ser_.res);
+
+  // Multiple strings: valid size and count
+  ASSERT_TRUE(Execute("return #dragonfly.randstr(16, 4)"));
+  EXPECT_EQ("i(4)", ser_.res);
+
+  // Invalid: wrong argument type
+  ASSERT_FALSE(Execute("return dragonfly.randstr('bad')"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr:"));
+
+  // Invalid: too few arguments
+  ASSERT_FALSE(Execute("return dragonfly.randstr()"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr:"));
+
+  // Invalid: too many arguments
+  ASSERT_FALSE(Execute("return dragonfly.randstr(1, 2, 3)"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr:"));
+
+  constexpr int kMaxRandstrSize = 16 << 20;
+  constexpr int kMaxRandstrCount = 32 << 10;
+
+  // Invalid: size = 0
+  ASSERT_FALSE(Execute("return dragonfly.randstr(0)"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr: size must be between 1 and"));
+
+  // Invalid: negative size
+  ASSERT_FALSE(Execute("return dragonfly.randstr(-1)"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr: size must be between 1 and"));
+
+  // Invalid: size exceeds max
+  ASSERT_FALSE(Execute(absl::StrCat("return dragonfly.randstr(", kMaxRandstrSize + 1, ")")));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr: size must be between 1 and"));
+
+  // Invalid: count = 0
+  ASSERT_FALSE(Execute("return dragonfly.randstr(16, 0)"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr: count must be between 1 and"));
+
+  // Invalid: count exceeds max
+  ASSERT_FALSE(Execute(absl::StrCat("return dragonfly.randstr(1, ", kMaxRandstrCount + 1, ")")));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr: count must be between 1 and"));
+}
+
 }  // namespace dfly

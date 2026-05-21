@@ -466,8 +466,30 @@ int DragonflyHashCommand(lua_State* lua) {
 
 int DragonflyRandstrCommand(lua_State* state) {
   int argc = lua_gettop(state);
-  lua_Integer dsize = lua_tonumber(state, 1);
+
+  if ((argc < 1 || argc > 2) || lua_type(state, 1) != LUA_TNUMBER) {
+    PushError(state, "randstr: expected randstr(size) or randstr(size, count)");
+    return RaiseErrorAndAbort(state);
+  }
+
+  lua_Integer dsize = lua_tointeger(state, 1);
   lua_remove(state, 1);
+
+  constexpr lua_Integer kMaxRandstrSize = 16 << 20;  // 16 MiB per string
+  if (dsize < 1 || dsize > kMaxRandstrSize) {
+    PushError(state, absl::StrCat("randstr: size must be between 1 and ", kMaxRandstrSize));
+    return RaiseErrorAndAbort(state);
+  }
+
+  lua_Integer count = 1;
+  if (argc == 2) {
+    count = lua_tointeger(state, 1);
+    constexpr lua_Integer kMaxRandstrCount = 32 << 10;  // 32k strings
+    if (count < 1 || count > kMaxRandstrCount) {
+      PushError(state, absl::StrCat("randstr: count must be between 1 and ", kMaxRandstrCount));
+      return RaiseErrorAndAbort(state);
+    }
+  }
 
   std::string buf(dsize, ' ');
 
@@ -496,9 +518,8 @@ int DragonflyRandstrCommand(lua_State* state) {
   if (argc == 1) {
     push_str();
   } else {
-    lua_Integer num = lua_tonumber(state, 1);
-    lua_createtable(state, num, 0);
-    for (int i = 1; i <= num; i++) {
+    lua_createtable(state, count, 0);
+    for (int i = 1; i <= count; i++) {
       push_str();
       lua_rawseti(state, -2, i);
     }
