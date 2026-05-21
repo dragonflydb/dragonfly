@@ -3795,7 +3795,7 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
             tiered_prefix="/tmp/tiered/cluster_node",
             tiered_offload_threshold="0.2",
             tiered_experimental_cooling="False",
-            maxmemory="512MB",
+            maxmemory="800MB",
         ),
         df_factory.create(
             port=next(next_port), admin_port=next(next_port), proactor_threads=2, maxmemory="1024MB"
@@ -3813,7 +3813,8 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
     await nodes[0].client.execute_command(f"DEBUG POPULATE {keys} key 440")
 
     # Expect that number of added keys is 1000000
-    info = await nodes[0].client.info("keyspace")
+    info = await nodes[0].client.info()
+    assert info["oom_rejections"] == 0
     assert info["db0"]["keys"] == keys
 
     # Wait for some data to be offloaded to tiered storage
