@@ -348,6 +348,75 @@ void LoadLibrary(lua_State* lua, const char* libname, lua_CFunction luafunc) {
   lua_call(lua, 1, 0);
 }
 
+// Returns true if the table at stack index idx is _G, its metatable, or any global table value.
+bool IsGlobalTableOrMetatable(lua_State* lua, int idx) {
+  lua_pushglobaltable(lua);
+
+  // Check if idx is _G itself.
+  if (lua_rawequal(lua, idx, -1)) {
+    lua_pop(lua, 1);
+    return true;
+  }
+
+  // Check if metatable of _G.
+  bool has_mt = lua_getmetatable(lua, -1);
+  if (has_mt) {
+    lua_remove(lua, -2);
+    bool eq = lua_rawequal(lua, idx, -1);
+    lua_pop(lua, 1);
+    if (eq) {
+      return true;
+    }
+  } else {
+    lua_pop(lua, 1);
+  }
+
+  // Check if idx is any table stored directly as a global value.
+  lua_pushglobaltable(lua);
+  lua_pushnil(lua);
+  while (lua_next(lua, -2) != 0) {
+    if (lua_type(lua, -1) == LUA_TTABLE && lua_rawequal(lua, idx, -1)) {
+      lua_pop(lua, 3);
+      return true;
+    }
+    lua_pop(lua, 1);
+  }
+
+  lua_pop(lua, 1);
+
+  return false;
+}
+
+// Protected replacement for rawset: blocks writes to _G or its metatable.
+int ProtectedRawset(lua_State* lua) {
+  int argc = lua_gettop(lua);
+  if (argc != 3 || lua_type(lua, 1) != LUA_TTABLE) {
+    lua_pushstring(lua, "rawset requires a table and two arguments");
+    return lua_error(lua);
+  }
+  if (IsGlobalTableOrMetatable(lua, 1)) {
+    lua_pushstring(lua, "Script attempted to access rawset with global environment");
+    return lua_error(lua);
+  }
+  lua_rawset(lua, 1);
+  return 1;
+}
+
+// Protected replacement for setmetatable: blocks replacing metatable of _G or its metatable.
+int ProtectedSetmetatable(lua_State* lua) {
+  int argc = lua_gettop(lua);
+  if (argc != 2 || lua_type(lua, 1) != LUA_TTABLE) {
+    lua_pushstring(lua, "setmetatable requires a table and one argument");
+    return lua_error(lua);
+  }
+  if (IsGlobalTableOrMetatable(lua, 1)) {
+    lua_pushstring(lua, "Script attempted to set metatable of global environment");
+    return lua_error(lua);
+  }
+  lua_setmetatable(lua, 1);
+  return 1;
+}
+
 void InitLua(lua_State* lua) {
   Require(lua, "", luaopen_base);
   Require(lua, LUA_TABLIBNAME, luaopen_table);
@@ -385,7 +454,7 @@ void InitLua(lua_State* lua) {
     const char code[] = R"(
 local dbg=debug
 local mt = {}
-
+local _orig_rawset=rawset
 setmetatable(_G, mt)
 mt.__newindex = function (t, n, v)
   if dbg.getinfo(2) then
@@ -394,7 +463,7 @@ mt.__newindex = function (t, n, v)
       error("Script attempted to create global variable '"..tostring(n).."'", 2)
     end
   end
-  rawset(t, n, v)
+  _orig_rawset(t, n, v)
 end
 mt.__index = function (t, n)
   if dbg.getinfo(2) and dbg.getinfo(2, "S").what ~= "C" then
@@ -402,10 +471,38 @@ mt.__index = function (t, n)
   end
   return rawget(t, n)
 end
+local _orig_getmetatable = getmetatable
+-- Prevent access to _G's metatable.
+getmetatable = function(t)
+  if t == _G then
+    error("Script attempted to access metatable of global environment", 2)
+  end
+  return _orig_getmetatable(t)
+end
 debug = nil
+-- Lock all global tables so scripts cannot replace their metatables.
+local global_guard = {}
+global_guard.__metatable = "Script attempted to access metatable of global table"
+for _, v in pairs(_G) do
+  if type(v) == "table" and v ~= _G then
+    setmetatable(v, global_guard)
+  end
+end
 )";
     RunSafe(lua, code, "@enable_strict_lua");
   }
+
+  // Protected replacements for built-in functions.
+  const luaL_Reg protected_funcs[] = {
+      // Blocks direct writes to _G or its metatable.
+      {"rawset", ProtectedRawset},
+      // Blocks replacing the metatable of _G or its metatable.
+      {"setmetatable", ProtectedSetmetatable},
+      {nullptr, nullptr},
+  };
+  lua_pushglobaltable(lua);
+  luaL_setfuncs(lua, protected_funcs, 0);
+  lua_pop(lua, 1);
 
   lua_pushnil(lua);
   lua_setglobal(lua, "loadfile");
