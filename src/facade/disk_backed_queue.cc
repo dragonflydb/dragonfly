@@ -33,10 +33,19 @@ ABSL_FLAG(size_t, disk_backpressure_file_max_bytes, 50_MB,
           "Maximum size of the backing file. When max size is reached, connection will "
           "stop offloading backpressure to disk and block on client read.");
 
-ABSL_FLAG(size_t, disk_backpressure_drain_threshold, 16_KB,
-          "When remaining bytes in the disk-backed queue drop below this "
-          "threshold, queue is in draining phase (backpressure drains). "
-          "Defaults to 2x the max chunk size (16KB).");
+ABSL_FLAG(size_t, disk_backpressure_hysteresis_trigger, 16_KB,
+          "Low-water mark for the disk-backed queue hysteresis band. Once the high-water "
+          "mark (disk_backpressure_hysteresis_arm) has been crossed, new socket reads are "
+          "blocked when the queue shrinks below this threshold, ensuring a clean drain-to-"
+          "memory transition without new writes racing the tail reads. Defaults to 2× "
+          "kMaxChunkSize (16 KB).");
+
+ABSL_FLAG(size_t, disk_backpressure_hysteresis_arm, 256_KB,
+          "High-water mark for the disk-backed queue hysteresis band. The queue must "
+          "accumulate at least this many bytes before the low-water drain phase can "
+          "activate. Prevents a tiny transient queue from ever triggering the drain-to-"
+          "memory block. Must be larger than disk_backpressure_hysteresis_trigger. "
+          "Defaults to 256 KB.");
 
 namespace facade {
 
@@ -53,6 +62,11 @@ struct DiskBackedQueue::Impl {
   bool pop_in_flight = false;
   // Set by Cancel(). In-flight CQE callbacks skip accounting and chaining when true.
   bool cancelled = false;
+  // Set when total bytes cross hysteresis_arm on the way up; cleared when the
+  // queue fully empties. Together with hysteresis_trigger_ this forms the two-level
+  // hysteresis band that governs draining mode.
+  bool hysteresis_armed = false;
+  size_t hysteresis_arm = 0;
 
   struct PendingWrite {
     Chunk chunk;
@@ -98,10 +112,15 @@ struct DiskBackedQueue::Impl {
         write_offset += size;
         total_backing_bytes += size;
         queued_bytes -= size;
+        if (!hysteresis_armed && (total_backing_bytes + queued_bytes) >= hysteresis_arm)
+          hysteresis_armed = true;
       }
 
       if (cancelled)
         ec = std::make_error_code(std::errc::operation_canceled);
+
+      VLOG(2) << "Write CQE done: cancelled=" << cancelled << " write_in_flight=" << write_in_flight
+              << " write_queue.size=" << write_queue.size() << " pop_in_flight=" << pop_in_flight;
 
       // Chain next write before invoking cb, so IsActive() reflects
       // the true state when the callback notifies the connection.
@@ -118,8 +137,9 @@ struct DiskBackedQueue::Impl {
 DiskBackedQueue::DiskBackedQueue(uint32_t conn_id)
     : impl_(std::make_unique<Impl>()),
       max_backing_size_(absl::GetFlag(FLAGS_disk_backpressure_file_max_bytes)),
-      drain_threshold_(absl::GetFlag(FLAGS_disk_backpressure_drain_threshold)),
+      hysteresis_trigger_(absl::GetFlag(FLAGS_disk_backpressure_hysteresis_trigger)),
       id_(conn_id) {
+  impl_->hysteresis_arm = absl::GetFlag(FLAGS_disk_backpressure_hysteresis_arm);
 }
 
 DiskBackedQueue::~DiskBackedQueue() {
@@ -163,6 +183,16 @@ void DiskBackedQueue::Cancel() {
   impl_->cancelled = true;
   impl_->queued_bytes = 0;
   impl_->total_backing_bytes = 0;
+  // Drain items that were queued but never submitted to io_uring.
+  // MaybeFlushQueue won't process them once cancelled is set, so we must
+  // invoke their callbacks here to avoid leaving IsActive() permanently true.
+  VLOG(2) << "DiskQueue Cancel: flushing write_queue.size=" << impl_->write_queue.size()
+          << " write_in_flight=" << impl_->write_in_flight
+          << " pop_in_flight=" << impl_->pop_in_flight;
+  auto ec = std::make_error_code(std::errc::operation_canceled);
+  for (auto& pw : impl_->write_queue)
+    pw.cb(ec);
+  impl_->write_queue.clear();
 }
 
 bool DiskBackedQueue::IsActive() const {
@@ -171,9 +201,9 @@ bool DiskBackedQueue::IsActive() const {
 }
 
 bool DiskBackedQueue::IsDraining() const {
-  if (!IsActive())
+  if (!impl_->hysteresis_armed)
     return false;
-  return (impl_->total_backing_bytes + impl_->queued_bytes) < drain_threshold_;
+  return (impl_->total_backing_bytes + impl_->queued_bytes) < hysteresis_trigger_;
 }
 
 bool DiskBackedQueue::IsPopInFlight() const {
@@ -184,11 +214,22 @@ bool DiskBackedQueue::HasEnoughBackingSpaceFor(size_t bytes) const {
   return (bytes + impl_->total_backing_bytes + impl_->queued_bytes) < max_backing_size_;
 }
 
+bool DiskBackedQueue::CanPush(size_t bytes) const {
+  if (impl_->cancelled)
+    return false;
+  if (IsDraining())
+    return false;
+  return HasEnoughBackingSpaceFor(bytes);
+}
+
 void DiskBackedQueue::PushAsync(Chunk chunk, AsyncPushCallback cb) {
   DCHECK(!chunk.data.empty());
 
   impl_->queued_bytes += chunk.data.size();
   impl_->write_queue.push_back({std::move(chunk), std::move(cb)});
+  VLOG(3) << "PushAsync: queued_bytes=" << impl_->queued_bytes
+          << " write_queue.size=" << impl_->write_queue.size()
+          << " write_in_flight=" << impl_->write_in_flight << " armed=" << impl_->hysteresis_armed;
   impl_->MaybeFlushQueue();
 }
 
@@ -226,8 +267,14 @@ void DiskBackedQueue::PopAsync(io::MutableBytes out, AsyncPopCallback cb) {
     impl_->next_read_offset += bytes_read;
     impl_->total_backing_bytes -= bytes_read;
 
-    VLOG(2) << "Loaded item with offset " << offset << " of size " << bytes_read
-            << " for connection " << this;
+    // Reset hysteresis once the queue is fully drained (nothing on disk, nothing pending write).
+    // This re-arms the high-water mark check so the next growth cycle starts fresh.
+    if (impl_->total_backing_bytes == 0 && impl_->write_queue.empty() && !impl_->write_in_flight)
+      impl_->hysteresis_armed = false;
+
+    VLOG(2) << "PopAsync done: bytes_read=" << bytes_read
+            << " total_backing=" << impl_->total_backing_bytes
+            << " armed=" << impl_->hysteresis_armed << " cancelled=" << impl_->cancelled;
 
     impl_->MaybePunchHole();
 
@@ -244,7 +291,7 @@ namespace facade {
 struct DiskBackedQueue::Impl {};
 
 DiskBackedQueue::DiskBackedQueue(uint32_t conn_id)
-    : impl_(std::make_unique<Impl>()), max_backing_size_(0), drain_threshold_(0), id_(conn_id) {
+    : impl_(std::make_unique<Impl>()), max_backing_size_(0), hysteresis_trigger_(0), id_(conn_id) {
 }
 
 DiskBackedQueue::~DiskBackedQueue() = default;
@@ -270,6 +317,10 @@ bool DiskBackedQueue::IsDraining() const {
 }
 
 bool DiskBackedQueue::IsPopInFlight() const {
+  return false;
+}
+
+bool DiskBackedQueue::CanPush(size_t) const {
   return false;
 }
 

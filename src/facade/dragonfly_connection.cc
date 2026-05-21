@@ -1285,8 +1285,12 @@ void Connection::ConnectionFlow() {
     // This leaves at most one in-flight write CQE and one in-flight pop CQE,
     // both of which will complete quickly without draining the full queue.
     disk_queue_->Cancel();
+    VLOG(2) << "DiskQueue post-Cancel: IsActive=" << disk_queue_->IsActive()
+            << " IsPopInFlight=" << disk_queue_->IsPopInFlight() << " conn=" << id_;
     if (disk_queue_->IsActive()) {
+      VLOG(2) << "Waiting for in-flight disk CQEs to complete conn=" << id_;
       io_event_.await([this] { return !disk_queue_->IsActive(); });
+      VLOG(2) << "In-flight disk CQEs done conn=" << id_;
     }
     std::ignore = disk_queue_->Close();
     disk_queue_.reset();
@@ -2811,6 +2815,10 @@ void Connection::DrainDiskQueue(size_t offload_threshold) {
     return;
   if (disk_queue_->IsPopInFlight() || io_buf_.AppendLen() == 0)
     return;
+  VLOG(3) << "DrainDiskQueue: parsed_cmd_q_bytes_=" << parsed_cmd_q_bytes_
+          << " threshold=" << offload_threshold << " pop_in_flight=" << disk_queue_->IsPopInFlight()
+          << " append_len=" << io_buf_.AppendLen() << " IsDraining=" << disk_queue_->IsDraining()
+          << " CanPush=" << disk_queue_->CanPush(0);
   if (parsed_cmd_q_bytes_ >= offload_threshold)
     return;
 
@@ -2869,34 +2877,18 @@ bool ConnectionRef::operator==(const ConnectionRef& other) const {
   return client_id_ == other.client_id_;
 }
 
-bool Connection::MaybeOffloadToDisk(size_t len, const uint8_t* data) {
-  if (offload_threshold_ == 0 || !disk_queue_)
-    return false;
-  if (!disk_queue_->IsActive() && parsed_cmd_q_bytes_ < offload_threshold_)
-    return false;
-
-  const uint8_t* src = data;
-  size_t remaining = len;
-  while (remaining > 0) {
-    size_t chunk_size = std::min(remaining, DiskBackedQueue::kMaxChunkSize);
-    DiskBackedQueue::Chunk chunk;
-    chunk.data.assign(src, src + chunk_size);
-    src += chunk_size;
-    remaining -= chunk_size;
-    disk_queue_->PushAsync(std::move(chunk), [this](std::error_code ec) {
-      if (ec)
-        io_ec_ = ec;
-      io_event_.notify();
-    });
-  }
-  return true;
-}
-
 void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) {
   if (std::holds_alternative<std::error_code>(n.read_result)) {
     io_ec_ = std::get<std::error_code>(n.read_result);
     return;
   }
+
+  // True when incoming socket bytes should be routed to the disk queue rather than io_buf_.
+  auto should_offload = [this]() {
+    if (offload_threshold_ == 0 || !disk_queue_)
+      return false;
+    return disk_queue_->IsActive() || parsed_cmd_q_bytes_ >= offload_threshold_;
+  };
 
   using RecvNoti = util::FiberSocketBase::RecvNotification::RecvCompletion;
   if (std::holds_alternative<RecvNoti>(n.read_result)) {
@@ -2905,21 +2897,11 @@ void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) 
       return;
     }
 
-    // Check if we should offload before doing a TryRecv (IsDraining blocks the recv entirely).
-    auto should_offload = [this]() {
-      if (offload_threshold_ == 0 || !disk_queue_)
-        return false;
-      return disk_queue_->IsActive() || parsed_cmd_q_bytes_ >= offload_threshold_;
-    };
-
     if (should_offload()) {
-      // During the drain window block socket reads (MaybeOffloadToDisk returns true
-      // without pushing), so TCP backpressure builds until the queue fully empties.
-      if (disk_queue_->IsDraining())
-        return;
-
-      // Don't recv if backing store is too full to accept a max-size chunk.
-      if (!disk_queue_->HasEnoughBackingSpaceFor(DiskBackedQueue::kMaxChunkSize))
+      // CanPush covers all queue-side reasons to block a recv: draining window,
+      // backing store full, or cancelled. TCP backpressure builds naturally when
+      // we stop reading from the socket.
+      if (!disk_queue_->CanPush(DiskBackedQueue::kMaxChunkSize))
         return;
 
       DiskBackedQueue::Chunk chunk;
@@ -2941,7 +2923,12 @@ void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) 
       disk_queue_->PushAsync(std::move(chunk), [this](std::error_code ec) {
         if (ec)
           io_ec_ = ec;
-        io_event_.notify();
+        // Don't notify while a pop CQE is in flight: the pop callback will wake the
+        // fiber when io_buf_ data is ready. Notifying on every write CQE causes a
+        // cooperative-scheduler starvation spin — the fiber loops checking can_parse
+        // (always false while pop is in flight) and starves the proactor.
+        if (!disk_queue_->IsPopInFlight())
+          io_event_.notify();
       });
       return;
     }
@@ -2974,12 +2961,10 @@ void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) 
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
 
-    if (MaybeOffloadToDisk(buf.size(), buf.data())) {
-    } else {
-      // TODO: if a pop CQE is in-flight writing into io_buf_, WriteAndCommit races with it.
-      ReadBufTracker tracker(io_buf_);
-      io_buf_.WriteAndCommit(buf.data(), buf.size());
-    }
+    // TODO: if a pop CQE is in-flight writing into io_buf_, WriteAndCommit races with it.
+    // TODO: disk offload for multishot recv (provided-buffer) path.
+    ReadBufTracker tracker(io_buf_);
+    io_buf_.WriteAndCommit(buf.data(), buf.size());
     last_interaction_ = time(nullptr);
   } else {
     LOG(FATAL) << "Should not reach here";
@@ -3108,7 +3093,12 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
             << " disk_queue_=" << (disk_queue_ != nullptr)
             << " parsed_cmd_q_bytes_=" << parsed_cmd_q_bytes_
             << " io_buf_len=" << io_buf_.InputLen();
-    io_event_.notify();
+    // Suppress notify while a pop CQE owns io_buf_.AppendBuffer() — the pop callback
+    // will wake the fiber when data is ready. Without this guard every socket recv wakes
+    // the await, the predicate (can_parse=false while pop is in flight) is false, and
+    // we spin without ever yielding to the proactor that needs to fire the pop CQE.
+    if (!disk_queue_ || !disk_queue_->IsPopInFlight())
+      io_event_.notify();
   });
 
   ParserStatus parse_status = OK;
@@ -3175,8 +3165,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
                               parsed_cmd_q_bytes_ < offload_threshold && !pop_in_flight;
         // Wake when there is parseable data in io_buf_ and no pop is writing into it.
         bool can_parse = io_buf_.InputLen() > 0 && !pop_in_flight;
-        return can_parse || cmd_ready || cmd_executable || io_ec_ || can_drain_disk ||
-               pending_input_ || !dispatch_q_.empty() || is_ready_to_migrate();
+        // Only poll the socket when no pop CQE owns io_buf_.AppendBuffer(). Mirrors the
+        // guard at the ReadPendingInput() call site above: if we let pending_input_ wake
+        // the fiber while pop_in_flight=true, the fiber spins (ReadPendingInput is
+        // skipped, pending_input_ stays true) and starves the proactor that must fire
+        // the pop CQE.
+        bool can_poll = pending_input_ && !pop_in_flight;
+        return can_parse || cmd_ready || cmd_executable || io_ec_ || can_drain_disk || can_poll ||
+               !dispatch_q_.empty() || is_ready_to_migrate();
       });
     }
 
@@ -3215,6 +3211,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     // When over the offload threshold with no commands left to dispatch, force the
     // await path so the fiber yields and lets shard completions be processed.
     // Without this, new recvs keep routing to chunks but we spin without yielding.
+    // This also prevents ReadPendingInput() from bypassing the disk offload path:
+    // ReadPendingInput() calls TryRecv directly into io_buf_ with no should_offload()
+    // check; with force_await set, the parse guard below skips the io_buf_ parse path
+    // and we fall through to the await, which only wakes when the queue drains.
     bool force_await = offload_threshold > 0 && parsed_cmd_q_bytes_ >= offload_threshold &&
                        parsed_to_execute_ == nullptr;
 

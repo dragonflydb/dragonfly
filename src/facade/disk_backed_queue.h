@@ -36,13 +36,17 @@ class DiskBackedQueue {
   // waiting to be written, a write CQE in-flight, or a pop CQE in-flight.
   bool IsActive() const;
 
-  // Returns true when remaining bytes have dropped below the drain
-  // threshold. The caller should block new socket reads to allow a clean
-  // drain-to-memory transition (TCP backpressure builds during this window).
+  // Returns true when remaining bytes have dropped below the drain threshold after
+  // previously exceeding the hysteresis threshold. The caller should block new
+  // socket reads to allow a clean drain-to-memory transition.
   bool IsDraining() const;
 
   // Returns true if there is a pop in flight
   bool IsPopInFlight() const;
+
+  // Returns true if the queue can accept new data right now.
+  // False when draining, at capacity, or cancelled.
+  bool CanPush(size_t bytes) const;
 
   // Check if we can offload bytes to backing file.
   // Counts both on-disk bytes and bytes queued for writing (not yet on disk).
@@ -78,7 +82,7 @@ class DiskBackedQueue {
 
   // Read only constants
   const size_t max_backing_size_;
-  const size_t drain_threshold_;
+  const size_t hysteresis_trigger_;
 
   // same as connection id. Used to uniquely identify the backed file
   const size_t id_;

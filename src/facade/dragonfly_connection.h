@@ -312,10 +312,6 @@ class Connection : public util::Connection {
 
   void NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n);
 
-  // Pushes [data, data+len) to the disk queue in ≤kMaxChunkSize chunks.
-  // Returns true if data was offloaded; false means caller should fall through to io_buf_.
-  bool MaybeOffloadToDisk(size_t len, const uint8_t* data);
-
   // Enables io_uring multishot receives for the connection if the current thread supports it.
   // This is required during initial setup or after migrating to a new thread/proactor,
   // provided the buffer ring is configured and the connection is not using TLS.
