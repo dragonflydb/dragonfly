@@ -38,26 +38,31 @@ class PageUsage;
 using cmn::StringOrView;
 namespace detail {
 
-// redis objects or blobs of upto 4GB size.
+// Storage for the five Redis collection types (LIST/SET/HASH/ZSET/STREAM).
+// The CompactObj tag identifies the type; this struct holds the inner pointer,
+// a per-collection size/byte-count, and an encoding byte. All type-aware
+// dispatch (Free/Size/MallocUsed/DefragIfNeeded) is performed by CompactObj.
 class RobjWrapper {
  public:
   using MemoryResource = PMR_NS::memory_resource;
 
-  RobjWrapper() : sz_(0), type_(0), encoding_(0) {
+  RobjWrapper() : sz_(0), encoding_(0), reserved_(0) {
   }
-
-  size_t MallocUsed(bool slow) const;
-
-  size_t Size() const;
-  void Free(MemoryResource* mr);
 
   // Used when sz_ is used to denote memory usage (e.g. OBJ_STREAM).
-  void SetSize(uint64_t size);
-  void Init(unsigned type, unsigned encoding, void* inner);
-
-  unsigned type() const {
-    return type_;
+  void SetSize(uint64_t size) {
+    sz_ = size;
   }
+  size_t Size() const {
+    return sz_;
+  }
+
+  void Init(unsigned encoding, void* inner) {
+    encoding_ = encoding;
+    inner_obj_ = inner;
+    sz_ = 0;
+  }
+
   unsigned encoding() const {
     return encoding_;
   }
@@ -69,23 +74,15 @@ class RobjWrapper {
     inner_obj_ = ptr;
   }
 
-  // Try reducing memory fragmentation by re-allocating values from underutilized pages.
-  // Returns true if re-allocated.
-  bool DefragIfNeeded(PageUsage* page_usage);
-
  private:
-  void Set(void* p, size_t s) {
-    inner_obj_ = p;
-    sz_ = s;
-  }
-
   void* inner_obj_ = nullptr;
 
-  // semantics depend on the type; for OBJ_STREAM it tracks bytes used.
+  // Semantics depend on the collection tag; only OBJ_STREAM currently uses it
+  // (tracking bytes used, for memory accounting).
   uint64_t sz_ : 56;
 
-  uint64_t type_ : 4;
   uint64_t encoding_ : 4;
+  uint64_t reserved_ : 4;
 } __attribute__((packed));
 
 static_assert(sizeof(RobjWrapper) == 16);
@@ -155,7 +152,6 @@ class CompactObj {
   enum TagEnum : uint8_t {
     INT_TAG = 17,
     SMALL_TAG = 18,
-    ROBJ_TAG = 19,
     EXTERNAL_TAG = 20,
     JSON_TAG = 21,
     SBF_TAG = 22,
@@ -163,6 +159,11 @@ class CompactObj {
     SDS_TTL_TAG = 24,
     TOPK_TAG = 25,
     LARGE_STR_TAG = 26,  // detail::LargeString — raw, large non-inline string
+    LIST_TAG = 27,
+    SET_TAG = 28,
+    HASH_TAG = 29,
+    ZSET_TAG = 30,
+    STREAM_TAG = 31,
   };
 
   // String encoding types.
@@ -290,7 +291,7 @@ class CompactObj {
   }
 
   void SetRObjPtr(void* ptr) {
-    u_.r_obj.Init(u_.r_obj.type(), u_.r_obj.encoding(), ptr);
+    u_.r_obj.set_inner_obj(ptr);
   }
 
   // takes ownership over obj_inner.
