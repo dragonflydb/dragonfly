@@ -16,7 +16,7 @@ Three thresholds form a three-level band:
 **Why hysteresis?**
 
 We want to keep the disk queue active as long as it's busy and we also want to avoid the disk tax for pipelines that are being drained. Think of DrainDiskQueue reads to io_buf_, RecvNotification fires and we are forced to write
-to disk. With hysterisis, we allow backpressure to fall naturally to tcp buffers while we drain the last chunks from the queue.
+to disk. With hysterisis, we allow backpressure to fall naturally to tcp buffers while we drain the last chunks from the queue. Also note, we can use a staging buffer within the disk queue but I don't think it's worth it right now.
 
 ---
 
