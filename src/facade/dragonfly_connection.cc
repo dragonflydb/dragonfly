@@ -709,8 +709,6 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       ssl_ctx_(ctx),
       service_(service),
       flags_(0) {
-  static atomic_uint32_t next_id{1};
-
   constexpr size_t kReqSz = sizeof(ParsedCommand);
   static_assert(kReqSz <= 256);
 
@@ -728,7 +726,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   creation_time_ = time(nullptr);
   last_interaction_ = creation_time_;
-  id_ = next_id.fetch_add(1, memory_order_relaxed);
+  id_ = NextClientId();
 
   migration_enabled_ = GetFlag(FLAGS_migrate_connections);
 
@@ -1113,6 +1111,11 @@ string Connection::GetClientInfo() const {
 
 uint32_t Connection::GetClientId() const {
   return id_;
+}
+
+uint32_t Connection::NextClientId() {
+  static std::atomic_uint32_t next_id{1};
+  return next_id.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool Connection::IsPrivileged() const {

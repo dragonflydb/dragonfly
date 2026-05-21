@@ -424,30 +424,121 @@ void ClientInfo(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendBulkString(info);
 }
 
-void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
-                CommandContext* cmd_cntx) {
-  if (!args.empty()) {
-    return cmd_cntx->SendError(facade::kSyntaxErr);
+enum class ClientListType { kNormal, kMaster, kReplica, kPubsub };
+
+struct ClientListFilter {
+  optional<ClientListType> type;
+  absl::flat_hash_set<uint32_t> ids;
+};
+
+optional<ClientListFilter> ParseClientListFilter(CmdArgList args, CommandContext* cmd_cntx) {
+  ClientListFilter filter;
+  if (args.empty())
+    return filter;
+
+  string first = absl::AsciiStrToUpper(ArgS(args, 0));
+  if (first == "TYPE") {
+    if (args.size() != 2) {
+      cmd_cntx->SendError(facade::kSyntaxErr);
+      return nullopt;
+    }
+    string val = absl::AsciiStrToUpper(ArgS(args, 1));
+    if (val == "NORMAL")
+      filter.type = ClientListType::kNormal;
+    else if (val == "MASTER")
+      filter.type = ClientListType::kMaster;
+    else if (val == "REPLICA" || val == "SLAVE")
+      filter.type = ClientListType::kReplica;
+    else if (val == "PUBSUB")
+      filter.type = ClientListType::kPubsub;
+    else {
+      cmd_cntx->SendError(StrCat("Unknown client type '", ArgS(args, 1), "'"));
+      return nullopt;
+    }
+    return filter;
   }
+
+  if (first == "ID") {
+    if (args.size() < 2) {
+      cmd_cntx->SendError(facade::kSyntaxErr);
+      return nullopt;
+    }
+    for (size_t i = 1; i < args.size(); ++i) {
+      uint32_t id;
+      if (!absl::SimpleAtoi(ArgS(args, i), &id)) {
+        cmd_cntx->SendError("Invalid client ID");
+        return nullopt;
+      }
+      filter.ids.insert(id);
+    }
+    return filter;
+  }
+
+  cmd_cntx->SendError(facade::kSyntaxErr);
+  return nullopt;
+}
+
+ClientListType ClassifyConnection(facade::Connection* conn) {
+  auto* base_cntx = conn->cntx();
+  if (base_cntx == nullptr)
+    return ClientListType::kNormal;
+
+  // Replica takes priority over PUBSUB; kMaster is added separately by
+  // GetMasterLinkClientInfo (not produced here).
+  if (base_cntx->replica_conn)
+    return ClientListType::kReplica;
+
+  auto* dfly_cntx = static_cast<const ConnectionContext*>(base_cntx);
+  const auto& sub_info = dfly_cntx->conn_state.subscribe_info;
+  if (sub_info && !sub_info->IsEmpty())
+    return ClientListType::kPubsub;
+
+  return ClientListType::kNormal;
+}
+
+void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
+                ServerFamily* server_family, CommandContext* cmd_cntx) {
+  auto filter = ParseClientListFilter(args, cmd_cntx);
+  if (!filter)
+    return;
 
   vector<string> client_info;
   absl::base_internal::SpinLock mu;
 
-  // we can not preempt the connection traversal, so we need to use a spinlock.
-  // alternatively we could lock when mutating the connection list, but it seems not important.
-  auto cb = [&](unsigned thread_index, util::Connection* conn) {
-    facade::Connection* dcon = static_cast<facade::Connection*>(conn);
-    string info = dcon->GetClientInfo(thread_index);
-    absl::base_internal::SpinLockHolder l(&mu);
-    client_info.push_back(std::move(info));
-  };
+  // No listener-attached connection classifies as kMaster; skip the walk.
+  if (filter->type != ClientListType::kMaster) {
+    // we can not preempt the connection traversal, so we need to use a spinlock.
+    // alternatively we could lock when mutating the connection list, but it seems not important.
+    auto cb = [&](unsigned thread_index, util::Connection* conn) {
+      facade::Connection* dcon = static_cast<facade::Connection*>(conn);
 
-  for (auto* listener : listeners) {
-    listener->TraverseConnections(cb);
+      if (!filter->ids.empty() && !filter->ids.contains(dcon->GetClientId()))
+        return;
+
+      if (filter->type.has_value() && ClassifyConnection(dcon) != *filter->type)
+        return;
+
+      string info = dcon->GetClientInfo(thread_index);
+      absl::base_internal::SpinLockHolder l(&mu);
+      client_info.push_back(std::move(info));
+    };
+
+    for (auto* listener : listeners) {
+      listener->TraverseConnections(cb);
+    }
+  }
+
+  bool want_master = !filter->type.has_value() || *filter->type == ClientListType::kMaster;
+  if (want_master) {
+    for (auto& entry : server_family->GetMasterLinkClientInfo()) {
+      if (filter->ids.empty() || filter->ids.contains(entry.client_id))
+        client_info.push_back(std::move(entry.info));
+    }
   }
 
   string result = absl::StrJoin(client_info, "\n");
-  result.append("\n");
+  if (!result.empty())
+    result.append("\n");
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   return rb->SendVerbatimString(result);
 }
@@ -577,7 +668,7 @@ void ClientId(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners,
-                CommandContext* cmd_cntx) {
+                ServerFamily* server_family, CommandContext* cmd_cntx) {
   std::function<bool(facade::Connection * conn)> evaluator;
 
   if (args.size() == 1) {
@@ -601,6 +692,9 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners,
     } else if (filter_type == "ID") {
       uint32_t id;
       if (absl::SimpleAtoi(filter_value, &id)) {
+        if (server_family->IsMasterLinkClientId(id)) {
+          return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
+        }
         evaluator = [id](facade::Connection* conn) { return conn->GetClientId() == id; };
       }
     }
@@ -2258,6 +2352,29 @@ optional<Metrics::ReplicaInfo> ServerFamily::GetReplicaSummary() const {
   return info;
 }
 
+vector<ServerFamily::MasterLinkClientInfo> ServerFamily::GetMasterLinkClientInfo() const {
+  vector<MasterLinkClientInfo> out;
+  util::fb2::LockGuard lk(replicaof_mu_);
+  if (replica_ == nullptr)
+    return out;
+  out.push_back({replica_->GetClientId(), replica_->GetClientInfo()});
+  for (const auto& cl_repl : cluster_replicas_) {
+    out.push_back({cl_repl->GetClientId(), cl_repl->GetClientInfo()});
+  }
+  return out;
+}
+
+bool ServerFamily::IsMasterLinkClientId(uint32_t id) const {
+  util::fb2::LockGuard lk(replicaof_mu_);
+  if (replica_ && replica_->GetClientId() == id)
+    return true;
+  for (const auto& cl_repl : cluster_replicas_) {
+    if (cl_repl->GetClientId() == id)
+      return true;
+  }
+  return false;
+}
+
 void ServerFamily::OnClose(ConnectionContext* cntx) {
   dfly_cmd_->OnClose(cntx->conn_state.replication_info.repl_session_id);
 }
@@ -2686,7 +2803,7 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
   } else if (sub_cmd == "INFO") {
     return ClientInfo(sub_args, cmd_cntx);
   } else if (sub_cmd == "LIST") {
-    return ClientList(sub_args, absl::MakeSpan(listeners_), cmd_cntx);
+    return ClientList(sub_args, absl::MakeSpan(listeners_), this, cmd_cntx);
   } else if (sub_cmd == "PAUSE") {
     return ClientPauseCmd(sub_args, cmd_cntx);
   } else if (sub_cmd == "UNPAUSE") {
@@ -2694,7 +2811,7 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, cmd_cntx);
   } else if (sub_cmd == "KILL") {
-    return ClientKill(sub_args, absl::MakeSpan(listeners_), cmd_cntx);
+    return ClientKill(sub_args, absl::MakeSpan(listeners_), this, cmd_cntx);
   } else if (sub_cmd == "CACHING") {
     return ClientCaching(sub_args, cmd_cntx);
   } else if (sub_cmd == "SETINFO") {

@@ -179,6 +179,9 @@ class Connection : public util::Connection {
 
   uint32_t GetClientId() const;
 
+  // Reserves an id from the same monotonic pool Connection instances use.
+  static uint32_t NextClientId();
+
   virtual bool IsPrivileged() const;  // virtual because overwritten in test_utils
 
   bool IsMain() const;

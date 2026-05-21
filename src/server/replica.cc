@@ -95,7 +95,12 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
                  std::optional<cluster::SlotRange> slot_range)
-    : ProtocolClient(std::move(host), port), service_(*se), id_{id}, slot_range_(slot_range) {
+    : ProtocolClient(std::move(host), port),
+      service_(*se),
+      id_{id},
+      slot_range_(slot_range),
+      creation_time_(time(nullptr)),
+      client_id_(facade::Connection::NextClientId()) {
   proactor_ = ProactorBase::me();
 }
 
@@ -1225,6 +1230,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     size_t pos = header.find(' ');
     if (pos != std::string_view::npos) {
       if (absl::SimpleAtoi(header.substr(pos + 1), &repl_offs_)) {
+        initial_repl_offs_ = repl_offs_;
         master_context_.master_repl_id = string(header.substr(0, pos));
         valid = true;
         VLOG(1) << "master repl_id " << master_context_.master_repl_id << " / " << repl_offs_;
@@ -1331,6 +1337,48 @@ std::string Replica::GetSyncId() const {
   return master_context_.dfly_session_id;
 }
 
+string Replica::GetClientInfo() const {
+  auto f = [this]() {
+    time_t now = time(nullptr);
+
+    uint64_t last_io_ns = LastIoTime();
+    for (const auto& flow : shard_flows_) {
+      last_io_ns = std::max(last_io_ns, flow->LastIoTime());
+    }
+    uint64_t current_ns = ProactorBase::GetMonotonicTimeNs();
+    time_t idle_sec = 0;
+    if (last_io_ns > 0 && last_io_ns <= current_ns) {
+      idle_sec = (current_ns - last_io_ns) / 1'000'000'000UL;
+    }
+
+    string addr = StrCat(server().host, ":", server().port);
+    string laddr = "-";
+    int fd = -1;
+    if (auto* s = Sock(); s != nullptr && (state_mask_ & R_TCP_CONNECTED)) {
+      auto re = s->RemoteEndpoint();
+      addr = StrCat(re.address().to_string(), ":", re.port());
+      auto le = s->LocalEndpoint();
+      laddr = StrCat(le.address().to_string(), ":", le.port());
+      fd = s->native_handle();
+    }
+
+    uint64_t records_applied = 0;
+    for (uint64_t offs : GetReplicaOffset()) {
+      records_applied += offs;
+    }
+
+    uint64_t bytes_in = (repl_offs_ >= initial_repl_offs_) ? repl_offs_ - initial_repl_offs_ : 0;
+
+    return StrCat("id=", client_id_, " addr=", addr, " laddr=", laddr, " fd=", fd,
+                  " name=", " tid=", proactor_->GetPoolIndex(),
+                  " irqmatch=0 age=", now - creation_time_, " idle=", idle_sec,
+                  " tot-cmds=", records_applied, " tot-net-in=", bytes_in,
+                  " tot-read-calls=0 tot-dispatches=0 db=0 flags=M phase=",
+                  absl::AsciiStrToLower(GetCurrentPhase()), " lib-name= lib-ver=");
+  };
+  return proactor_->AwaitBrief(f);
+}
+
 std::string Replica::GetCurrentPhase() const {
   if (!(state_mask_ & R_ENABLED))
     return "DISABLED";
@@ -1338,10 +1386,11 @@ std::string Replica::GetCurrentPhase() const {
     return "TCP_CONNECTING";
   if (!(state_mask_ & R_GREETED))
     return "GREETING";
-  if (!(state_mask_ & R_SYNC_OK))
-    return "INITIAL_SYNC";
+  // R_SYNCING and R_SYNC_OK are exclusive; check R_SYNCING first.
   if (state_mask_ & R_SYNCING)
     return "FULL_SYNC_IN_PROGRESS";
+  if (!(state_mask_ & R_SYNC_OK))
+    return "INITIAL_SYNC";
 
   return "STABLE_SYNC";
 }

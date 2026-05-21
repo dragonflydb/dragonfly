@@ -130,6 +130,12 @@ class Replica : ProtocolClient {
   // Get the current replication phase based on state_mask_
   std::string GetCurrentPhase() const;
 
+  std::string GetClientInfo() const;
+
+  uint32_t GetClientId() const {
+    return client_id_;
+  }
+
   // Used *only* in TakeOver flow and replicaof no one. There is small data race if
   // thread_flow_map_ gets written by the MainReplicationFiber thread but
   // the chances for that are extremely rare.
@@ -162,7 +168,9 @@ class Replica : ProtocolClient {
 
   // repl_offs - till what offset we've already read from the master.
   // ack_offs_ last acknowledged offset.
-  size_t repl_offs_ = 0, ack_offs_ = 0;
+  // initial_repl_offs_ - master-supplied offset at FULLRESYNC; subtract from
+  // repl_offs_ to derive bytes read since this connection was established.
+  size_t repl_offs_ = 0, ack_offs_ = 0, initial_repl_offs_ = 0;
   unsigned state_mask_ = 0;  // see State enum above.
 
   // When replica starts full sync it is set to false and true when it completes the full sync.
@@ -184,6 +192,9 @@ class Replica : ProtocolClient {
   uint32_t reconnect_count_ = 0;
   size_t psync_attempts_ = 0;
   size_t psync_successes_ = 0;
+
+  const time_t creation_time_;
+  const uint32_t client_id_;
 };
 
 class RdbLoader;
