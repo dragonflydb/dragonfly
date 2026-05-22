@@ -69,6 +69,7 @@ struct ConnectionStats {
 struct ReplyStats {
   struct SendStats {
     int64_t count = 0;
+    // In CycleClock cycles. Convert via base::CycleClock::ToUsec at the reporting boundary.
     int64_t total_duration = 0;
 
     SendStats& operator+=(const SendStats& other) {

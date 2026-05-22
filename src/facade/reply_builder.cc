@@ -13,6 +13,7 @@
 
 #include "absl/strings/escaping.h"
 #include "absl/types/span.h"
+#include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "facade/error.h"
 #include "util/fibers/proactor_base.h"
@@ -156,8 +157,8 @@ void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
     buffer_.Reserve(expected_buffer_cap);
 }
 
-uint64_t SinkReplyBuilder::GetLastSendTimeNs() const {
-  return send_time_ns_;
+uint64_t SinkReplyBuilder::GetLastSendTimeCycles() const {
+  return send_time_cycles_;
 }
 
 void SinkReplyBuilder::Send() {
@@ -165,8 +166,8 @@ void SinkReplyBuilder::Send() {
   DCHECK(!vecs_.empty());
   auto& reply_stats = tl_facade_stats->reply_stats;
 
-  send_time_ns_ = util::fb2::ProactorBase::GetMonotonicTimeNs();
-  PendingPin pin(send_time_ns_);
+  send_time_cycles_ = base::CycleClock::Now();
+  PendingPin pin(send_time_cycles_);
 
   pending_list.push_back(pin);
 
@@ -179,11 +180,11 @@ void SinkReplyBuilder::Send() {
   auto it = PendingList::s_iterator_to(pin);
   pending_list.erase(it);
 
-  send_time_ns_ = 0;
+  send_time_cycles_ = 0;
 
-  uint64_t after_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
+  uint64_t after_cycles = base::CycleClock::Now();
   reply_stats.send_stats.count++;
-  reply_stats.send_stats.total_duration += (after_ns - pin.timestamp_ns);
+  reply_stats.send_stats.total_duration += (after_cycles - pin.timestamp_cycles);
   DVLOG(2) << "Finished writing " << total_size_ << " bytes";
 }
 
