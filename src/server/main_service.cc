@@ -5,7 +5,7 @@
 #include "server/main_service.h"
 
 #include "absl/strings/str_split.h"
-#include "facade/resp_expr.h"
+#include "core/glob_matcher.h"
 #include "util/fibers/detail/fiber_interface.h"
 #include "util/fibers/proactor_base.h"
 #include "util/fibers/synchronization.h"
@@ -28,7 +28,7 @@ extern "C" {
 #include <xxhash.h>
 
 #include <csignal>
-#include <filesystem>
+#include <optional>
 
 #include "base/cycle_clock.h"
 #include "base/flag_utils.h"
@@ -2744,38 +2744,117 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendLong(cmd_cnt);
   }
 
-  bool sufficient_args = (args.size() == 2);
+  // INFO [command-name [command-name ...]]
+  if (subcmd == "INFO") {
+    const auto total_cmds = static_cast<uint32_t>(args.size() - 1);
+    rb->StartArray(total_cmds);
 
-  // INFO [cmd]
-  if (subcmd == "INFO" && sufficient_args) {
-    string cmd = absl::AsciiStrToUpper(ArgS(args, 1));
+    std::string cmd_name_buf;
+    for (size_t i = 1; i < args.size(); ++i) {
+      std::string_view raw_arg = ArgS(args, i);
 
-    if (const auto* cid = registry_.Find(cmd); cid) {
-      rb->StartArray(1);
-      serialize_command(cmd, *cid);
-    } else {
-      rb->SendNull();
+      // Resize/clear the buffer without necessarily deallocating capacity
+      cmd_name_buf.assign(raw_arg);
+      absl::AsciiStrToUpper(&cmd_name_buf);
+
+      if (const auto* cid = registry_.Find(cmd_name_buf)) {
+        serialize_command(cid->name(), *cid);
+      } else {
+        rb->SendNull();
+      }
     }
-
     return;
   }
 
-  sufficient_args = (args.size() == 1);
-  if (subcmd == "DOCS" && sufficient_args) {
+  // LIST [FILTERBY <MODULE module-name | ACLCAT category | PATTERN pattern>]
+  if (subcmd == "LIST") {
+    if (args.size() != 1 && args.size() != 4)
+      return rb->SendError(kSyntaxErr, kSyntaxErrType);
+
+    string_view filter_type, filter_value;
+    uint32_t cat_bit = 0;
+    bool is_pattern = false;
+
+    // Parse filters and return early for non-traversal cases (syntax error, MODULE, invalid ACL)
+    if (args.size() == 4) {
+      if (!absl::EqualsIgnoreCase(ArgS(args, 1), "FILTERBY"))
+        return rb->SendError(kSyntaxErr, kSyntaxErrType);
+      filter_type = ArgS(args, 2);
+      filter_value = ArgS(args, 3);
+
+      if (absl::EqualsIgnoreCase(filter_type, "MODULE"))
+        return rb->SendEmptyArray();
+
+      if (absl::EqualsIgnoreCase(filter_type, "ACLCAT")) {
+        if (filter_value.empty())
+          return rb->SendEmptyArray();
+
+        const string_view cat = absl::StripPrefix(filter_value, "@");
+        const auto& rev_table = acl_family_.GetRevTable();
+        auto it = std::find_if(rev_table.begin(), rev_table.end(), [cat](string_view rev_cat) {
+          return absl::EqualsIgnoreCase(rev_cat, cat);
+        });
+
+        auto dist = std::distance(rev_table.begin(), it);
+        if (it == rev_table.end() || dist >= 32)
+          return rb->SendEmptyArray();
+        cat_bit = dist;
+      } else {
+        is_pattern = absl::EqualsIgnoreCase(filter_type, "PATTERN");
+        if (!is_pattern)
+          return rb->SendError(kSyntaxErr, kSyntaxErrType);
+      }
+    }
+
+    // Lazy-construct GlobMatcher only for PATTERN filter
+    std::optional<GlobMatcher> pattern_matcher;
+    if (is_pattern)
+      pattern_matcher.emplace(filter_value, false);
+
+    std::vector<string_view> matching_cmds;
+    registry_.Traverse([&](string_view name, const CommandId& cid) {
+      if (cid.opt_mask() & CO::HIDDEN)
+        return;
+
+      bool keep;
+      if (pattern_matcher)
+        keep = pattern_matcher->Matches(name);
+      else if (args.size() == 1)
+        keep = true;
+      else
+        keep = cid.acl_categories() & (1u << cat_bit);
+
+      if (keep)
+        matching_cmds.emplace_back(name);
+    });
+
+    rb->StartArray(matching_cmds.size());
+    for (string_view cmd_name : matching_cmds)
+      rb->SendBulkString(cmd_name);
+    return;
+  }
+
+  const bool no_args = (args.size() == 1);
+
+  // DOCS
+  if (subcmd == "DOCS" && no_args) {
     // Returning an error here forces the interactive CLI client to fall back to static hints and
     // tab completion
     return rb->SendError("COMMAND DOCS Not Implemented");
   }
 
-  if (subcmd == "HELP" && sufficient_args) {
+  // HELP
+  if (subcmd == "HELP" && no_args) {
     // Return help information for supported COMMAND subcommands
     constexpr string_view help[] = {
         "(no subcommand)",
         "    Return details about all commands.",
-        "INFO command-name",
-        "    Return details about specified command.",
         "COUNT",
         "    Return the total number of commands in this server.",
+        "INFO [<command-name> ...]",
+        "    Return details about one or more commands.",
+        "LIST [FILTERBY <MODULE module-name | ACLCAT category | PATTERN pattern>]",
+        "    Return a list of command names, optionally filtered.",
     };
     return rb->SendSimpleStrArr(help);
   }
