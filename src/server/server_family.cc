@@ -434,49 +434,48 @@ struct ClientListFilter {
 
 optional<ClientListFilter> ParseClientListFilter(CmdArgList args, CommandContext* cmd_cntx) {
   ClientListFilter filter;
-  if (args.empty())
+  CmdArgParser parser{args};
+  if (!parser.HasNext())
     return filter;
 
-  string first = absl::AsciiStrToUpper(ArgS(args, 0));
-  if (first == "TYPE") {
-    if (args.size() != 2) {
+  if (parser.Check("TYPE")) {
+    if (!parser.HasNext()) {
       cmd_cntx->SendError(facade::kSyntaxErr);
       return nullopt;
     }
-    string val = absl::AsciiStrToUpper(ArgS(args, 1));
-    if (val == "NORMAL")
-      filter.type = ClientListType::kNormal;
-    else if (val == "MASTER")
-      filter.type = ClientListType::kMaster;
-    else if (val == "REPLICA" || val == "SLAVE")
-      filter.type = ClientListType::kReplica;
-    else if (val == "PUBSUB")
-      filter.type = ClientListType::kPubsub;
-    else {
-      cmd_cntx->SendError(StrCat("Unknown client type '", ArgS(args, 1), "'"));
+    string_view raw = parser.Peek();
+    auto mapped =
+        parser.TryMapNext("NORMAL", ClientListType::kNormal, "MASTER", ClientListType::kMaster,
+                          "REPLICA", ClientListType::kReplica, "SLAVE", ClientListType::kReplica,
+                          "PUBSUB", ClientListType::kPubsub);
+    if (!mapped) {
+      cmd_cntx->SendError(StrCat("Unknown client type '", raw, "'"));
       return nullopt;
     }
-    return filter;
-  }
-
-  if (first == "ID") {
-    if (args.size() < 2) {
+    filter.type = *mapped;
+  } else if (parser.Check("ID")) {
+    if (!parser.HasNext()) {
       cmd_cntx->SendError(facade::kSyntaxErr);
       return nullopt;
     }
-    for (size_t i = 1; i < args.size(); ++i) {
+    while (parser.HasNext()) {
       uint32_t id;
-      if (!absl::SimpleAtoi(ArgS(args, i), &id)) {
+      if (!absl::SimpleAtoi(parser.Next<string_view>(), &id)) {
         cmd_cntx->SendError("Invalid client ID");
         return nullopt;
       }
       filter.ids.insert(id);
     }
-    return filter;
+  } else {
+    cmd_cntx->SendError(facade::kSyntaxErr);
+    return nullopt;
   }
 
-  cmd_cntx->SendError(facade::kSyntaxErr);
-  return nullopt;
+  if (parser.HasNext() || parser.HasError()) {
+    cmd_cntx->SendError(facade::kSyntaxErr);
+    return nullopt;
+  }
+  return filter;
 }
 
 ClientListType ClassifyConnection(facade::Connection* conn) {

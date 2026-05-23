@@ -4757,7 +4757,8 @@ async def test_client_list_replication_types(df_factory: DflyInstanceFactory):
     assert entry["flags"] == "M"
     assert int(entry["age"]) >= 0
     assert int(entry["idle"]) >= 0
-    assert entry["phase"] == "stable_sync"
+    assert entry["repl-phase"] == "stable_sync"
+    assert "phase" not in entry  # master link reports replication state, not lifecycle phase
 
     all_on_replica = parse_client_list(await c_replica.execute_command("CLIENT LIST"))
     assert any(c.get("flags") == "M" for c in all_on_replica)

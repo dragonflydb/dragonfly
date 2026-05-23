@@ -1342,42 +1342,39 @@ std::string Replica::GetSyncId() const {
 
 string Replica::GetClientInfo() const {
   auto f = [this]() {
+    facade::ClientInfo ci;
     time_t now = time(nullptr);
 
-    uint64_t last_io_ns = LastIoTime();
+    // LastIoTime() is wall-clock seconds (see ProtocolClient::TimeSec).
+    uint64_t last_io_sec = LastIoTime();
     for (const auto& flow : shard_flows_) {
-      last_io_ns = std::max(last_io_ns, flow->LastIoTime());
+      last_io_sec = std::max(last_io_sec, flow->LastIoTime());
     }
-    uint64_t current_ns = ProactorBase::GetMonotonicTimeNs();
-    time_t idle_sec = 0;
-    if (last_io_ns > 0 && last_io_ns <= current_ns) {
-      idle_sec = (current_ns - last_io_ns) / 1'000'000'000UL;
+    if (last_io_sec > 0 && static_cast<time_t>(last_io_sec) <= now) {
+      ci.idle = now - static_cast<time_t>(last_io_sec);
     }
 
-    string addr = StrCat(server().host, ":", server().port);
-    string laddr = "-";
-    int fd = -1;
+    ci.id = client_id_;
+    ci.addr = StrCat(server().host, ":", server().port);
+    ci.laddr = "-";
     if (auto* s = Sock(); s != nullptr && (state_mask_ & R_TCP_CONNECTED)) {
       auto re = s->RemoteEndpoint();
-      addr = StrCat(re.address().to_string(), ":", re.port());
+      ci.addr = StrCat(re.address().to_string(), ":", re.port());
       auto le = s->LocalEndpoint();
-      laddr = StrCat(le.address().to_string(), ":", le.port());
-      fd = s->native_handle();
+      ci.laddr = StrCat(le.address().to_string(), ":", le.port());
+      ci.fd = s->native_handle();
     }
-
-    uint64_t records_applied = 0;
+    ci.tid = proactor_->GetPoolIndex();
+    ci.age = now - creation_time_;
     for (uint64_t offs : GetReplicaOffset()) {
-      records_applied += offs;
+      ci.tot_cmds += offs;
     }
-
-    uint64_t bytes_in = (repl_offs_ >= initial_repl_offs_) ? repl_offs_ - initial_repl_offs_ : 0;
-
-    return StrCat("id=", client_id_, " addr=", addr, " laddr=", laddr, " fd=", fd,
-                  " name=", " tid=", proactor_->GetPoolIndex(),
-                  " irqmatch=0 age=", now - creation_time_, " idle=", idle_sec,
-                  " tot-cmds=", records_applied, " tot-net-in=", bytes_in,
-                  " tot-read-calls=0 tot-dispatches=0 db=0 flags=M phase=",
-                  absl::AsciiStrToLower(GetCurrentPhase()), " lib-name= lib-ver=");
+    if (repl_offs_ >= initial_repl_offs_)
+      ci.tot_net_in = repl_offs_ - initial_repl_offs_;
+    ci.db = 0;
+    ci.flags = "M";
+    ci.repl_phase = absl::AsciiStrToLower(GetCurrentPhase());
+    return facade::FormatClientInfo(ci);
   };
   return proactor_->AwaitBrief(f);
 }
