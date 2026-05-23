@@ -170,10 +170,13 @@ size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
       max_serialization_buffer_size_);
 
   size_t commands = 0;
-  container_utils::IterateSet(pv, [&](container_utils::ContainerEntry ce) {
-    commands += aggregator.AddArg(ce.ToString());
-    return true;
-  });
+  container_utils::IterateSet(
+      pv,
+      [&](container_utils::ContainerEntry ce) {
+        commands += aggregator.AddArg(ce.ToString());
+        return true;
+      },
+      /*allow_yield=*/false);
 
   // Restore previous time so subsequent operations can trigger lazy expiry.
   pv.SetMemberTime(prev_time);
@@ -194,7 +197,7 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
         commands += aggregator.AddArg(ce.ToString());
         return true;
       },
-      /*start=*/0, /*end=*/SIZE_MAX, /*reverse=*/false, /*use_score=*/true);
+      /*start=*/0, /*end=*/SIZE_MAX, /*reverse=*/false, /*use_score=*/true, /*allow_yield=*/false);
   return commands;
 }
 
@@ -209,11 +212,13 @@ size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
 
   size_t commands = 0;
   container_utils::IterateMap(
-      pv, [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
+      pv,
+      [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
         aggregator.AddArg(k.ToString(), CommandAggregator::CommitMode::kNoCommit);
         commands += aggregator.AddArg(v.ToString());
         return true;
-      });
+      },
+      /*allow_yield=*/false);
 
   // Restore previous time so subsequent operations can trigger lazy expiry.
   pv.SetMemberTime(prev_time);
@@ -227,10 +232,13 @@ size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
       max_serialization_buffer_size_);
 
   size_t commands = 0;
-  container_utils::IterateList(pv, [&](container_utils::ContainerEntry ce) {
-    commands += aggregator.AddArg(ce.ToString());
-    return true;
-  });
+  container_utils::IterateList(
+      pv,
+      [&](container_utils::ContainerEntry ce) {
+        commands += aggregator.AddArg(ce.ToString());
+        return true;
+      },
+      /*start=*/0, /*end=*/SIZE_MAX, /*allow_yield=*/false);
   return commands;
 }
 
