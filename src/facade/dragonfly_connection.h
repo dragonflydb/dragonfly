@@ -307,7 +307,7 @@ class Connection : public util::Connection {
   void ConnectionFlow();
 
   // Main loop reading client messages and passing requests to dispatch queue.
-  std::variant<std::error_code, ParserStatus> IoLoop();
+  io::Result<ParserStatus> IoLoop();
 
   void NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n);
 
@@ -322,7 +322,30 @@ class Connection : public util::Connection {
   void CheckIoBufCapacity(bool reached_capacity, base::IoBuf* buf);
 
   // Main loop reading client messages and passing requests to dispatch queue.
-  std::variant<std::error_code, ParserStatus> IoLoopV2();
+  io::Result<ParserStatus> IoLoopV2();
+
+  // Flushes pending replies and suspends the fiber until new input, command completion,
+  // dispatch-queue messages, errors, or an actionable migration request arrives.
+  // Returns a non-zero error_code if the flush failed, default (falsy) error_code on success.
+  std::error_code FlushAndAwaitInput();
+
+  // Drains the dispatch queue (control path): processes admin/pubsub messages.
+  // Returns true if the caller should re-enter the main loop (i.e. `continue`).
+  bool ProcessDispatchQueue();
+
+  // Parses available input, executes queued commands, and sends replies while
+  // respecting pipeline memory backpressure. Parks the fiber when over the limit.
+  // Returns the resulting ParserStatus, or an error_code on write failure.
+  io::Result<ParserStatus> ParseAndExecuteCommands(bool reached_capacity,
+                                                   util::fb2::detail::Waiter* backpressure_waiter);
+
+  // Parks the fiber until pipeline memory usage drops below the configured limit.
+  // Subscribes to the global backpressure EventCount, flushes replies, and awaits relief.
+  // Returns a non-zero error_code if the flush failed.
+  std::error_code ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_waiter);
+
+  // Returns true if a thread migration was requested AND is actionable (no subscriptions).
+  bool IsReadyToMigrate() const;
 
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto();

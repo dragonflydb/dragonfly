@@ -1235,17 +1235,17 @@ void Connection::ConnectionFlow() {
       ReadBufTracker tracker(io_buf_);
       io_buf_.EnsureCapacity(64);
     }
-    variant<error_code, Connection::ParserStatus> res;
+    io::Result<Connection::ParserStatus> res;
     if (ioloop_v2_) {
       res = IoLoopV2();
     } else {
       res = IoLoop();
     }
 
-    if (holds_alternative<error_code>(res)) {
-      ec = get<error_code>(res);
+    if (!res) {
+      ec = res.error();
     } else {
-      parse_status = get<ParserStatus>(res);
+      parse_status = *res;
     }
   }
 
@@ -1573,7 +1573,7 @@ io::Result<size_t> Connection::HandleRecvSocket() {
   return recv_sz;
 }
 
-variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
+io::Result<Connection::ParserStatus> Connection::IoLoop() {
   error_code ec;
   ParserStatus parse_status = OK;
   size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
@@ -1586,7 +1586,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
     auto recv_sz = HandleRecvSocket();
     if (!recv_sz) {
       LOG_IF(WARNING, cntx()->replica_conn) << "HandleRecvSocket() error: " << recv_sz.error();
-      return recv_sz.error();
+      return make_unexpected(recv_sz.error());
     }
     if (*recv_sz == 0) {
       break;
@@ -1603,7 +1603,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
     }
 
     if (reply_builder_->GetError()) {
-      return reply_builder_->GetError();
+      return make_unexpected(reply_builder_->GetError());
     }
 
     if (parse_status == NEED_MORE) {
@@ -2901,11 +2901,183 @@ void Connection::MaybeEnableRecvMultishot() {
 #endif
 }
 
-variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
+// Flushes pending replies and suspends the fiber until new input, command completion,
+// dispatch-queue messages, errors, or an actionable migration request arrives.
+// Returns a non-zero error_code if the flush failed, default (falsy) error_code on success.
+error_code Connection::FlushAndAwaitInput() {
+  phase_ = READ_SOCKET;
+
+  // Flush replies deferred by ReplyBatch before sleeping - ensures the client
+  // gets its response even when no more data arrives (single commands, end of pipeline).
+  reply_builder_->Flush();
+  if (auto err = reply_builder_->GetError(); err) {
+    return err;
+  }
+
+  io_event_.await([this]() {
+    // TODO: optimize CanReply with looking up waiter key
+    // io_buf_.InputLen() > 0 is still needed for multishot flow.
+
+    // We wake up if:
+    // 1. New data arrived or is pending (io_buf_.InputLen() > 0 || pending_input_).
+    // 2. A parsed command is ready to execute (HasCommandToExecute()).
+    // 3. An executed command is ready to send its reply (parsed_head_ &&
+    //    parsed_head_->CanReply()).
+    // 4. Control-plane messages arrived (!dispatch_q_.empty()).
+    // 5. The socket encountered an error/closed (io_ec_).
+    // 6. A migration to another thread was requested AND is actionable now (no subscriptions).
+    return io_buf_.InputLen() > 0 || pending_input_ || HasCommandToExecute() ||
+           (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
+           IsReadyToMigrate();
+  });
+
+  return {};
+}
+
+// Drains the dispatch queue (control path): processes admin/pubsub messages.
+// Returns true if the caller should re-enter the main loop (i.e. `continue`).
+bool Connection::ProcessDispatchQueue() {
+  while (!dispatch_q_.empty()) {
+    auto msg = std::move(dispatch_q_.front());
+    dispatch_q_.pop_front();
+    UpdateDispatchStats(msg, false /* subtract */);
+
+    // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
+    // and let the loop iterate back to HandleMigrateRequest() at the top.
+    if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
+      break;
+    }
+
+    std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
+  }
+
+  // Note: No flush needed here: the `continue` below re-enters the loop, which either
+  // hits the data path (ParseLoop flushes via ReplyBatch) or the idle-await block
+  // (Flush 1), which always flushes before sleeping.
+
+  // TODO: Properly handle backpressure
+  GetQueueBackpressure().pubsub_ec.notifyAll();
+  return true;
+}
+
+// Parses available input, executes queued commands, and sends replies while
+// respecting pipeline memory backpressure. Parks the fiber when over the limit.
+// Returns the resulting ParserStatus, or an error_code on write failure.
+io::Result<Connection::ParserStatus> Connection::ParseAndExecuteCommands(
+    bool reached_capacity, util::fb2::detail::Waiter* backpressure_waiter) {
+  auto& conn_stats = GetLocalConnStats();
+  QueueBackpressure& qbp = GetQueueBackpressure();
+
+  ParserStatus parse_status;
+
+  // Only parse data if we are under the memory limit (backpressure).
+  // Exception: If the queue is empty, we always parse to allow admin commands
+  // (like CONFIG SET) to run so they can fix the memory limits if needed.
+  bool pre_over_limit =
+      (parsed_cmd_q_len_ > 0) &&
+      qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
+  if (io_buf_.InputLen() > 0 && !pre_over_limit) {  // Parse, execute and reply
+    size_t mem_before = conn_stats.pipeline_queue_bytes;
+    parse_status = ParseLoop();
+
+    // Executing and replying to commands (in ParseLoop()) frees up memory. Because those internal
+    // functions only wake up this specific connection, we need to manually notify
+    // other connections on this thread that there is now room to resume.
+    if (conn_stats.pipeline_queue_bytes < mem_before) {
+      qbp.NotifyPipelineWaiters();
+    }
+  } else {  // Execute and reply what we have, then wait if we are over the limit
+    parse_status = NEED_MORE;
+
+    size_t mem_before = conn_stats.pipeline_queue_bytes;
+
+    if (parsed_head_) {
+      if (HasCommandToExecute())
+        ExecuteBatch();
+      ReplyBatch();
+    }
+
+    // After draining commands, notify all connections parked on backpressure relief
+    if (conn_stats.pipeline_queue_bytes < mem_before) {
+      qbp.NotifyPipelineWaiters();
+    }
+
+    // Re-check if pipeline buffer over limit after draining - ExecuteBatch/ReplyBatch may have
+    // freed memory. If still over limit, park until relief arrives.
+    bool post_over_limit =
+        (parsed_cmd_q_len_ > 0) &&
+        qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
+    if (post_over_limit) {
+      if (auto err = ParkOnBackpressure(backpressure_waiter); err) {
+        return make_unexpected(err);
+      }
+    }
+  }  // else Execute and reply
+
+  if (reply_builder_->GetError()) {
+    return make_unexpected(reply_builder_->GetError());
+  }
+
+  if (parse_status == NEED_MORE) {
+    parse_status = OK;
+    CheckIoBufCapacity(reached_capacity, &io_buf_);
+  }
+
+  return parse_status;
+}
+
+// Parks the fiber until pipeline memory usage drops below the configured limit.
+// Subscribes to the global backpressure EventCount, flushes replies, and awaits relief.
+// Returns a non-zero error_code if the flush failed.
+error_code Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_waiter) {
+  auto& conn_stats = GetLocalConnStats();
+  QueueBackpressure& qbp = GetQueueBackpressure();
+
+  conn_stats.pipeline_throttle_count++;
+  LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit (V2)."
+                           << ", Thread pipeline_queue_bytes: " << conn_stats.pipeline_queue_bytes
+                           << ", Thread pipeline_queue_entries: "
+                           << conn_stats.pipeline_queue_entries
+                           << ", Connection parsed_cmd_q_bytes_: " << parsed_cmd_q_bytes_
+                           << ", Connection parsed commands queue size: " << parsed_cmd_q_len_
+                           << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
+
+  // Subscribe persistently to the global backpressure EventCount so that when another
+  // connection frees memory (or CONFIG SET raises limits), our backpressure_waiter callback
+  // fires io_event_.notify(), waking this fiber. Must be persistent because
+  // io_event_.await()'s internal loop may re-sleep if the predicate is still false after the
+  // first notification. A one-shot subscription would be consumed on the first wake, leaving
+  // us "deaf" to future memory relief.
+  auto sub_key = qbp.v2_pipeline_backpressure_ec.subscribe_persistent(backpressure_waiter);
+
+  // Client needs replies to free its send buffer and relieve backpressure.
+  reply_builder_->Flush();
+  if (auto err = reply_builder_->GetError(); err) {
+    return err;
+  }
+
+  io_event_.await([this]() {
+    bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
+    bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
+        GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
+    // We wake up and exit the backpressure wait if:
+    // 1. Memory is freed (under_limit) or we can free it ourselves (cmd_ready).
+    // 2. Control-plane messages need processing (!dispatch_q_.empty()).
+    // 3. The connection is terminating (io_ec_).
+    // 4. A migration was requested AND is actionable now (no subscriptions).
+    return under_limit || cmd_ready || !dispatch_q_.empty() || io_ec_ || IsReadyToMigrate();
+  });
+
+  return {};
+}
+
+bool Connection::IsReadyToMigrate() const {
+  return migration_request_ && (cc_->subscriptions == 0);
+}
+
+io::Result<Connection::ParserStatus> Connection::IoLoopV2() {
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
-
-  auto is_ready_to_migrate = [this]() { return migration_request_ && (cc_->subscriptions == 0); };
 
   // Don't proceed with RegisterOnRecv() if socket is closed (possible cancellation)
   if (!peer->IsOpen())
@@ -2955,158 +3127,36 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     // await block (no data to read)
     if (io_buf_.InputLen() == 0) {
-      phase_ = READ_SOCKET;
-
-      // Flush replies deferred by ReplyBatch before sleeping - ensures the client
-      // gets its response even when no more data arrives (single commands, end of pipeline).
-      reply_builder_->Flush();
-      if (auto err = reply_builder_->GetError(); err) {
-        return err;
+      if (auto err = FlushAndAwaitInput(); err) {
+        return make_unexpected(err);
       }
-
-      io_event_.await([this, &is_ready_to_migrate]() {
-        // TODO: optimize CanReply with looking up waiter key
-        // io_buf_.InputLen() > 0 is still needed for multishot flow.
-
-        // We wake up if:
-        // 1. New data arrived or is pending (io_buf_.InputLen() > 0 || pending_input_).
-        // 2. A parsed command is ready to execute (HasCommandToExecute()).
-        // 3. An executed command is ready to send its reply (parsed_head_ &&
-        //    parsed_head_->CanReply()).
-        // 4. Control-plane messages arrived (!dispatch_q_.empty()).
-        // 5. The socket encountered an error/closed (io_ec_).
-        // 6. A migration to another thread was requested AND is actionable now (no subscriptions).
-        return io_buf_.InputLen() > 0 || pending_input_ || HasCommandToExecute() ||
-               (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
-               is_ready_to_migrate();
-      });
     }
 
     phase_ = PROCESS;
     bool reached_capacity = io_buf_.AppendLen() == 0;
 
-    // Temporary: Handle dispatch queue items (Control Path) one by one blocking command execution
+    // Handle dispatch queue items (Control Path) one by one blocking command execution
     if (!dispatch_q_.empty()) {
-      while (!dispatch_q_.empty()) {
-        auto msg = std::move(dispatch_q_.front());
-        dispatch_q_.pop_front();
-        UpdateDispatchStats(msg, false /* subtract */);
-
-        // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
-        // and let the loop iterate back to HandleMigrateRequest() at the top.
-        if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
-          break;
-        }
-
-        std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
-      }
-
-      // Note: No flush needed here: the `continue` below re-enters the loop, which either
-      // hits the data path (ParseLoop flushes via ReplyBatch) or the idle-await block
-      // (Flush 1), which always flushes before sleeping.
-
-      // TODO: Properly handle backpressure
-      GetQueueBackpressure().pubsub_ec.notifyAll();
-      continue;
+      if (ProcessDispatchQueue())
+        continue;
     }
 
     // Handle Parsed Commands Queue (Data Path)
-    auto& conn_stats = GetLocalConnStats();
-    QueueBackpressure& qbp = GetQueueBackpressure();
-
-    // Only parse data if we are under the memory limit (backpressure).
-    // Exception: If the queue is empty, we always parse to allow admin commands
-    // (like CONFIG SET) to run so they can fix the memory limits if needed.
-    bool pre_over_limit =
-        (parsed_cmd_q_len_ > 0) &&
-        qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
-    if (io_buf_.InputLen() > 0 && !pre_over_limit) {  // Parse, execute and reply
-      size_t mem_before = conn_stats.pipeline_queue_bytes;
-      parse_status = ParseLoop();
-
-      // Executing and replying to commands (in ParseLoop()) frees up memory. Because those internal
-      // functions only wake up this specific connection, we need to manually notify
-      // other connections on this thread that there is now room to resume.
-      if (conn_stats.pipeline_queue_bytes < mem_before) {
-        qbp.NotifyPipelineWaiters();
-      }
-    } else {  // Execute and reply what we have, then wait if we are over the limit
-      parse_status = NEED_MORE;
-
-      size_t mem_before = conn_stats.pipeline_queue_bytes;
-
-      if (parsed_head_) {
-        if (HasCommandToExecute())
-          ExecuteBatch();
-        ReplyBatch();
-      }
-
-      // After draining commands, notify all connections parked on backpressure relief
-      if (conn_stats.pipeline_queue_bytes < mem_before) {
-        qbp.NotifyPipelineWaiters();
-      }
-
-      // await block (backpressure)
-      // Re-check if pipeline buffer over limit after draining - ExecuteBatch/ReplyBatch may have
-      // freed memory. If still over limit, sleep to prevent busy-spin.
-      // Only park if this connection is actively contributing (parsed_cmd_q_len_ > 0).
-      // Connections with an empty queue must stay in the read loop.
-      bool post_over_limit =
-          (parsed_cmd_q_len_ > 0) &&
-          qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
-      if (post_over_limit) {
-        conn_stats.pipeline_throttle_count++;
-        LOG_EVERY_T(WARNING, 10)
-            << "Pipeline buffer over limit (V2)."
-            << ", Thread pipeline_queue_bytes: " << conn_stats.pipeline_queue_bytes
-            << ", Thread pipeline_queue_entries: " << conn_stats.pipeline_queue_entries
-            << ", Connection parsed_cmd_q_bytes_: " << parsed_cmd_q_bytes_
-            << ", Connection parsed commands queue size: " << parsed_cmd_q_len_
-            << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
-
-        // Subscribe persistently to the global backpressure EventCount so that when another
-        // connection frees memory (or CONFIG SET raises limits), our backpressure_waiter callback
-        // fires io_event_.notify(), waking this fiber. Must be persistent because
-        // io_event_.await()'s internal loop may re-sleep if the predicate is still false after the
-        // first notification. A one-shot subscription would be consumed on the first wake, leaving
-        // us "deaf" to future memory relief.
-        auto sub_key = qbp.v2_pipeline_backpressure_ec.subscribe_persistent(&backpressure_waiter);
-
-        // Client needs replies to free its send buffer and relieve backpressure.
-        reply_builder_->Flush();
-        if (auto err = reply_builder_->GetError(); err) {
-          return err;
-        }
-
-        io_event_.await([this, &is_ready_to_migrate]() {
-          bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
-          bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
-              GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
-          // We wake up and exit the backpressure wait if:
-          // 1. Memory is freed (under_limit) or we can free it ourselves (cmd_ready).
-          // 2. Control-plane messages need processing (!dispatch_q_.empty()).
-          // 3. The connection is terminating (io_ec_).
-          // 4. A migration was requested AND is actionable now (migration_request_ with no
-          // subscriptions).
-          return under_limit || cmd_ready || !dispatch_q_.empty() || io_ec_ ||
-                 is_ready_to_migrate();
-        });
-      }
-    }  // else Execute and reply
-
-    if (reply_builder_->GetError()) {
-      return reply_builder_->GetError();
+    auto data_result = ParseAndExecuteCommands(reached_capacity, &backpressure_waiter);
+    if (!data_result) {
+      return data_result;
     }
+    parse_status = *data_result;
 
     // Check io_ec_ after parsing and flushing replies, so that half-closed
     // connections get their responses before we close.
     if (io_ec_) {
       reply_builder_->Flush();
       if (auto err = reply_builder_->GetError(); err) {
-        return err;
+        return make_unexpected(err);
       }
       LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
-      return std::exchange(io_ec_, {});
+      return make_unexpected(std::exchange(io_ec_, {}));
     }
 
     if ((parse_status != OK) && (parse_status != NEED_MORE)) {
@@ -3114,19 +3164,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     }
 
     // Migration requested and actionable: skip buffer bookkeeping, jump to HandleMigrateRequest().
-    if (is_ready_to_migrate()) {
+    if (IsReadyToMigrate()) {
       // Flush before migrating: handing off unflushed thread-local buffers to a
       // new thread will cause data corruption or a hard crash.
       reply_builder_->Flush();
       if (auto err = reply_builder_->GetError(); err) {
-        return err;  // Connection is dead, no point migrating it cross-thread.
+        return make_unexpected(err);  // Connection is dead, no point migrating it cross-thread.
       }
       continue;
-    }
-
-    if (parse_status == NEED_MORE) {
-      parse_status = OK;
-      CheckIoBufCapacity(reached_capacity, &io_buf_);
     }
   } while (peer->IsOpen());
 
