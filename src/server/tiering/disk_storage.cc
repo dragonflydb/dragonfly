@@ -7,6 +7,7 @@
 #include <ostream>
 #include <system_error>
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "io/io_buf.h"
@@ -221,8 +222,8 @@ error_code DiskStorage::RequestGrow(off_t grow_size) {
     return make_error_code(errc::file_too_large);
 
   // Don't try again immediately, most likely it won't succeed ever.
-  const uint64_t kCooldownTime = 100'000'000;  // 100ms
-  if (grow_.last_err && (ProactorBase::GetMonotonicTimeNs() - grow_.timestamp_ns) < kCooldownTime)
+  const uint64_t kCooldownCycles = base::CycleClock::FromUsec(100'000);  // 100ms
+  if (grow_.last_err && (base::CycleClock::Now() - grow_.timestamp_cycles) < kCooldownCycles)
     return make_error_code(errc::operation_canceled);
 
   if (std::exchange(grow_.pending, true)) {
@@ -235,7 +236,7 @@ error_code DiskStorage::RequestGrow(off_t grow_size) {
     auto ec = (res < 0) ? std::error_code{-res, std::system_category()} : std::error_code{};
     grow_.pending = false;
     grow_.last_err = ec;
-    grow_.timestamp_ns = ProactorBase::GetMonotonicTimeNs();
+    grow_.timestamp_cycles = base::CycleClock::Now();
     if (!ec)
       alloc_.AddStorage(end, grow_size);
   });
