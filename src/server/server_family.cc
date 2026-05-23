@@ -36,6 +36,7 @@ extern "C" {
 #include "redis/redis_aux.h"
 }
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/histogram.h"
 #include "base/logging.h"
@@ -855,13 +856,10 @@ nonstd::expected<ReplicaOfArgs, ErrorReply> ReplicaOfArgs::FromCmdArgs(CmdArgLis
   return replicaof_args;
 }
 
-uint64_t GetDelayMs(uint64_t ts) {
-  uint64_t now_ns = fb2::ProactorBase::GetMonotonicTimeNs();
-  uint64_t delay_ns = 0;
-  if (ts < now_ns - 1000000) {  // if more than 1ms has passed between ts and now_ns
-    delay_ns = (now_ns - ts) / 1000000;
-  }
-  return delay_ns;
+uint64_t GetDelayMs(uint64_t cycles_ts) {
+  if (cycles_ts == UINT64_MAX)  // sentinel: no pending sends on any thread
+    return 0;
+  return base::CycleClock::ToUsec(base::CycleClock::Now() - cycles_ts) / 1'000;
 }
 
 bool ReadProcStats(io::StatusData* sdata) {
@@ -1893,9 +1891,10 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("net_output_bytes_total", "", m.facade_stats.reply_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
   {
-    AppendMetricWithoutLabels("reply_duration_seconds", "",
-                              m.facade_stats.reply_stats.send_stats.total_duration * 1e-9,
-                              MetricType::COUNTER, &resp->body());
+    AppendMetricWithoutLabels(
+        "reply_duration_seconds", "",
+        base::CycleClock::ToUsec(m.facade_stats.reply_stats.send_stats.total_duration) * 1e-6,
+        MetricType::COUNTER, &resp->body());
     AppendMetricWithoutLabels("reply_total", "", m.facade_stats.reply_stats.send_stats.count,
                               MetricType::COUNTER, &resp->body());
   }
@@ -3201,12 +3200,12 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     if (!send_list.empty()) {
       DCHECK(std::is_sorted(send_list.begin(), send_list.end(),
                             [](const auto& left, const auto& right) {
-                              return left.timestamp_ns < right.timestamp_ns;
+                              return left.timestamp_cycles < right.timestamp_cycles;
                             }));
 
       auto& oldest_member = send_list.front();
       result.oldest_pending_send_ts =
-          min<uint64_t>(result.oldest_pending_send_ts, oldest_member.timestamp_ns);
+          min<uint64_t>(result.oldest_pending_send_ts, oldest_member.timestamp_cycles);
     }
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
     result.interned_string_stats += GetInternedStringStats();

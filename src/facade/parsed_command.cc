@@ -52,10 +52,11 @@ void ParsedCommand::ResetForReuse() {
   is_deferred_reply_ = false;
   reply_ = std::monostate{};
 
-  offsets_.clear();
+  offsets_.resize(0);
+  offsets_.shrink_to_fit();
   if (HeapMemory() > 1024) {
-    storage_.clear();  // also deallocates the heap.
-    offsets_.shrink_to_fit();
+    storage_.resize(0);
+    storage_.shrink_to_fit();
   }
   ReuseInternal();
 }

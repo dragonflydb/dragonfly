@@ -992,8 +992,9 @@ void Connection::HandleRequests() {
 
 unsigned Connection::GetSendWaitTimeSec() const {
   if (reply_builder_ && reply_builder_->IsSendActive()) {
-    return (util::fb2::ProactorBase::GetMonotonicTimeNs() - reply_builder_->GetLastSendTimeNs()) /
-           1'000'000'000;
+    return base::CycleClock::ToUsec(base::CycleClock::Now() -
+                                    reply_builder_->GetLastSendTimeCycles()) /
+           1'000'000;
   }
 
   return 0;

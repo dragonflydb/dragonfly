@@ -90,6 +90,7 @@ auto RespSrvParser::Parse(Buffer str, uint32_t* consumed, cmn::BackedArguments* 
     return resultc.first;
   }
 
+  args->MaybeShrink();
   return resultc.first;
 }
 

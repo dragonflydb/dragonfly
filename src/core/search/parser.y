@@ -202,7 +202,7 @@ search_unary_expr:
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2));   }
   | TILDE search_unary_expr           { $$ = AstOptionalNode(std::move($2)); }
   | TERM                              { $$ = AstTermNode(std::move($1));     }
-  | PHRASE                            { $$ = AstPhraseNode(std::move($1.raw), $1.slop); }
+  | PHRASE                            { auto p = std::move($1); $$ = AstPhraseNode(std::move(p.raw), p.slop); }
   | PREFIX                            { $$ = AstPrefixNode(std::move($1));   }
   | SUFFIX                            { $$ = AstSuffixNode(std::move($1));   }
   | INFIX                             { $$ = AstInfixNode(std::move($1));    }
@@ -211,7 +211,7 @@ search_unary_expr:
 
 field_cond:
   TERM                                                  { $$ = AstTermNode(std::move($1));   }
-  | PHRASE                                              { $$ = AstPhraseNode(std::move($1.raw), $1.slop); }
+  | PHRASE                                              { auto p = std::move($1); $$ = AstPhraseNode(std::move(p.raw), p.slop); }
   | UINT32                                              { $$ = AstTermNode(std::move($1));   }
   | STAR                                                { $$ = AstStarFieldNode();           }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
@@ -302,9 +302,10 @@ tag_list_element:
   | PHRASE {
       /* Inside {..}, quoted strings are literal tag values. ~N slop is only meaningful for
          phrases, so reject it here rather than silently dropping it. */
-      if ($1.slop != 0)
+      auto p = std::move($1);
+      if (p.slop != 0)
         throw Parser::syntax_error(@$, "slop is not allowed in tag values");
-      $$ = AstTermNode(std::move($1.raw));
+      $$ = AstTermNode(std::move(p.raw));
     }
   | PREFIX    { $$ = AstPrefixNode(std::move($1)); }
   | SUFFIX    { $$ = AstSuffixNode(std::move($1)); }

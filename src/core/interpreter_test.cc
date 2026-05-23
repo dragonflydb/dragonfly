@@ -503,11 +503,127 @@ TEST_F(InterpreterTest, Log) {
   EXPECT_THAT(error_, testing::HasSubstr("requires two arguments or more"));
 }
 
+TEST_F(InterpreterTest, ProtectedRawset) {
+  // rawset on a plain table is allowed
+  EXPECT_TRUE(Execute("local t = {}; rawset(t, 'k', 'v'); return t['k']"));
+  EXPECT_EQ("str(v)", ser_.res);
+
+  // rawset directly on _G is blocked
+  EXPECT_FALSE(Execute("rawset(_G, 'key', 'value')"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to access rawset with global environment"));
+
+  // getmetatable(_G) now errors, so rawset never runs
+  EXPECT_FALSE(Execute("rawset(getmetatable(_G), 'key', 'value')"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to access metatable of global environment"));
+}
+
+TEST_F(InterpreterTest, ProtectedSetmetatable) {
+  // setmetatable on a plain table is allowed
+  EXPECT_TRUE(Execute("local t = {}; setmetatable(t, {}); return 'ok'"));
+
+  // setmetatable on _G is blocked
+  EXPECT_FALSE(Execute("setmetatable(_G, {})"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to set metatable of global environment"));
+
+  // getmetatable(_G) now errors — mt is unreachable.
+  EXPECT_FALSE(Execute("return type(getmetatable(_G))"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to access metatable of global environment"));
+
+  // setmetatable on global tables (stdlib) is blocked — prevents cross-script contamination.
+  EXPECT_FALSE(Execute("setmetatable(string, {})"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to set metatable of global environment"));
+  EXPECT_FALSE(Execute("setmetatable(table, {})"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to set metatable of global environment"));
+  EXPECT_FALSE(Execute("setmetatable(math, {})"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to set metatable of global environment"));
+}
+
+TEST_F(InterpreterTest, ProtectedRawsetGlobalTables) {
+  // rawset on global stdlib tables is blocked — same contamination risk as setmetatable.
+  EXPECT_FALSE(Execute("rawset(string, 'format', function() end)"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to access rawset with global environment"));
+  EXPECT_FALSE(Execute("rawset(table, 'sort', function() end)"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to access rawset with global environment"));
+}
+
+TEST_F(InterpreterTest, ProtectedGetmetatable) {
+  // getmetatable on a plain table is allowed
+  EXPECT_TRUE(Execute("local t = {}; return type(getmetatable(t))"));
+  EXPECT_EQ("str(nil)", ser_.res);
+
+  // getmetatable on _G is blocked from Lua functions
+  EXPECT_FALSE(Execute("local function f() return getmetatable(_G) end; f()"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to access metatable of global environment"));
+
+  // top-level script call is also blocked — scripts run as Lua functions, not main chunks
+  EXPECT_FALSE(Execute("return type(getmetatable(_G))"));
+  EXPECT_THAT(error_,
+              testing::HasSubstr("Script attempted to access metatable of global environment"));
+  ;
+
+  // global_guard __metatable on stdlib tables is still respected
+  EXPECT_TRUE(Execute("return type(getmetatable(string))"));
+  EXPECT_EQ("str(string)", ser_.res);
+}
+
+TEST_F(InterpreterTest, ProtectedGlobalAssignment) {
+  // direct global assignment from a function is blocked
+  EXPECT_FALSE(Execute("local function f() x = 1 end; f()"));
+  EXPECT_THAT(error_, testing::HasSubstr("Script attempted to create global variable 'x'"));
+
+  // direct field assignment on _G is blocked
+  EXPECT_FALSE(Execute("_G.newkey = 1"));
+  EXPECT_THAT(error_, testing::HasSubstr("Script attempted to create global variable 'newkey'"));
+
+  // top-level script assignment is also blocked — scripts run as functions, not main chunk
+  EXPECT_FALSE(Execute("x = 1; return x"));
+  EXPECT_THAT(error_, testing::HasSubstr("Script attempted to create global variable 'x'"));
+}
+
 TEST_F(InterpreterTest, Robust) {
   EXPECT_FALSE(Execute(R"(eval "local a = {}
       setmetatable(a,{__index=function() foo() end})
       return a")"));
   EXPECT_EQ("", ser_.res);
+}
+
+TEST_F(InterpreterTest, LoadBytecodeBlocked) {
+  // Bytecode passed as string must be rejected.
+  EXPECT_TRUE(Execute(R"(
+    local bc = string.dump(function() return 1 end)
+    local f, err = load(bc, "test", "b")
+    return f == nil
+  )"));
+  EXPECT_EQ("bool(1)", ser_.res);
+
+  // Bytecode delivered via a reader function must also be rejected.
+  EXPECT_TRUE(Execute(R"(
+    local bc = string.dump(function() return 1 end)
+    local i = 0
+    local f, err = load(function()
+      i = i + 1
+      return bc:sub(i, i) ~= "" and bc:sub(i, i) or nil
+    end)
+    return f == nil
+  )"));
+  EXPECT_EQ("bool(1)", ser_.res);
+
+  // Source code must still load and execute normally.
+  EXPECT_TRUE(Execute(R"(
+    local f = load("return 42")
+    return f()
+  )"));
+  EXPECT_EQ("i(42)", ser_.res);
 }
 
 TEST_F(InterpreterTest, Unpack) {
@@ -636,6 +752,51 @@ TEST_F(InterpreterTest, GcAccountingAfterReturn) {
 
   absl::SetFlag(&FLAGS_lua_mem_gc_threshold, uint64_t{0});
   im.Return(interpreter);
+}
+
+TEST_F(InterpreterTest, RandstrValidation) {
+  // Single string: valid size
+  ASSERT_TRUE(Execute("return string.len(dragonfly.randstr(1024))"));
+  EXPECT_EQ("i(1024)", ser_.res);
+
+  // Multiple strings: valid size and count
+  ASSERT_TRUE(Execute("return #dragonfly.randstr(16, 4)"));
+  EXPECT_EQ("i(4)", ser_.res);
+
+  // Invalid: wrong argument type
+  ASSERT_FALSE(Execute("return dragonfly.randstr('bad')"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr:"));
+
+  // Invalid: too few arguments
+  ASSERT_FALSE(Execute("return dragonfly.randstr()"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr:"));
+
+  // Invalid: too many arguments
+  ASSERT_FALSE(Execute("return dragonfly.randstr(1, 2, 3)"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr:"));
+
+  constexpr int kMaxRandstrSize = 16 << 20;
+  constexpr int kMaxRandstrCount = 32 << 10;
+
+  // Invalid: size = 0
+  ASSERT_FALSE(Execute("return dragonfly.randstr(0)"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr: size must be between 1 and"));
+
+  // Invalid: negative size
+  ASSERT_FALSE(Execute("return dragonfly.randstr(-1)"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr: size must be between 1 and"));
+
+  // Invalid: size exceeds max
+  ASSERT_FALSE(Execute(absl::StrCat("return dragonfly.randstr(", kMaxRandstrSize + 1, ")")));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr: size must be between 1 and"));
+
+  // Invalid: count = 0
+  ASSERT_FALSE(Execute("return dragonfly.randstr(16, 0)"));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr: count must be between 1 and"));
+
+  // Invalid: count exceeds max
+  ASSERT_FALSE(Execute(absl::StrCat("return dragonfly.randstr(1, ", kMaxRandstrCount + 1, ")")));
+  EXPECT_THAT(error_, testing::HasSubstr("randstr: count must be between 1 and"));
 }
 
 }  // namespace dfly
