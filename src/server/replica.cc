@@ -1022,7 +1022,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
   while (tx_reader.NextTxData(&reader, cntx, &tx_data)) {
     DVLOG(3) << "Lsn: " << tx_data.lsn;
 
-    last_io_time_ = Proactor()->GetMonotonicTimeNs();
+    last_io_time_ = TimeSec();
     if (tx_data.opcode == journal::Op::LSN) {
       //  Do nothing
     } else if (tx_data.opcode == journal::Op::PING) {
@@ -1293,14 +1293,14 @@ auto Replica::GetSummary() const -> Summary {
     res.full_sync_in_progress = (state_mask_ & R_SYNCING);
     res.full_sync_done = (state_mask_ & R_SYNC_OK);
 
-    uint64_t current_time = ProactorBase::GetMonotonicTimeNs();
+    uint64_t current_time_sec = TimeSec();
     // last_io_time is derived above by reading last_io_time_ from all the flows,
     // by accessing them from a foreign thread, see the loop above. As a result some
     // threads may have last_io_time_ bigger than our current time, so we fix it here.
-    if (last_io_time > current_time) {
+    if (last_io_time > current_time_sec) {
       res.master_last_io_sec = 0;
     } else {
-      res.master_last_io_sec = (current_time - last_io_time) / 1000000000UL;
+      res.master_last_io_sec = current_time_sec - last_io_time;
     }
 
     res.master_id = master_context_.master_repl_id;
