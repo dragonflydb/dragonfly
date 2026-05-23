@@ -678,7 +678,11 @@ auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
   DensePtr* prev = &entries_[bid];
   curr = prev->Next();
   while (curr != nullptr) {
-    ExpireIfNeeded(prev, curr);
+    if (ExpireIfNeeded(prev, curr)) {
+      // Chain compacted: prev's LinkKey was freed and curr now dangles.
+      if (!prev->IsLink())
+        break;
+    }
 
     if (Equal(*curr, ptr, cookie)) {
       return {bid, prev, curr};
@@ -928,9 +932,16 @@ bool DenseSet::ExpireIfNeededInternal(DensePtr* prev, DensePtr* node) const {
       break;
     }
 
+    // Delete on a tail Object with non-null prev frees prev's LinkKey,
+    // which dangles `node` (= &prev->AsLink()->next).
+    const bool node_in_prev_link = prev != nullptr && node->IsObject();
+
     // updates the *node to next item if relevant or resets it to empty.
     const_cast<DenseSet*>(this)->Delete(prev, node);
     deleted = true;
+
+    if (node_in_prev_link)
+      break;
   } while (node->HasTtl());
 
   return deleted;
