@@ -353,6 +353,9 @@ TEST_F(StringMapTest, RandomPairsUniqueAfterSetExpiryTime) {
     ASSERT_FALSE(it.HasExpiry());
     it.SetExpiryTime(1);
   }
+  // Validate the regression in all build types: DCHECK below is a no-op in
+  // release, so RandomPairsUnique could still return 10 keys by chance.
+  EXPECT_TRUE(sm_->ExpirationUsed());
 
   sm_->set_time(2);
 

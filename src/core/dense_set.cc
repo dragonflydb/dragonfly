@@ -53,6 +53,9 @@ DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
 void DenseSet::IteratorBase::SetExpiryTime(uint32_t ttl_sec) {
   DensePtr* ptr = curr_entry_->IsLink() ? curr_entry_->AsLink() : curr_entry_;
   void* src = ptr->GetObject();
+  // Self-heal: pre-existing TTL entries may have been created before this
+  // flag was tracked here.
+  owner_->expiration_used_ = true;
   if (!HasExpiry()) {
     const size_t old_size = owner_->ObjectAllocSize(ptr->Raw());
     void* new_obj = owner_->ObjectClone(src, false, true);
@@ -62,7 +65,6 @@ void DenseSet::IteratorBase::SetExpiryTime(uint32_t ttl_sec) {
 
     // Important: we set the ttl bit on the wrapping pointer.
     curr_entry_->SetTtl(true);
-    owner_->expiration_used_ = true;
     owner_->ObjDelete(src);
     src = new_obj;
 
