@@ -12,7 +12,7 @@ extern "C" {
 #include "redis/util.h"  // for string2ll
 }
 
-#include <absl/flags/flag.h>
+#include <base/flags.h>
 
 #include "base/cycle_clock.h"
 #include "base/logging.h"
