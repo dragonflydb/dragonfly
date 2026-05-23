@@ -73,8 +73,8 @@ class DiskStorage {
   struct {
     bool pending = false;  // currently in progress
     std::error_code last_err;
-    uint64_t timestamp_ns;  // last grow finished
-  } grow_;                  // status of last RequestGrow() operation
+    uint64_t timestamp_cycles;  // last grow finished, base::CycleClock::Now() cycles
+  } grow_;                      // status of last RequestGrow() operation
 
   std::string backing_file_path_;
   std::unique_ptr<util::fb2::LinuxFile> backing_file_;

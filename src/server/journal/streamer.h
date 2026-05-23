@@ -96,7 +96,8 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   const Config config_;
   // If we are replication in stable sync we can aggregate data before sending
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
-  // Last time that send data in milliseconds
+
+  // Last time we sent async data, as base::CycleClock::Now() cycles.
   uint64_t last_async_write_time_ = 0;
   time_t last_lsn_time_ = 0;
   LSN last_lsn_writen_ = 0;
