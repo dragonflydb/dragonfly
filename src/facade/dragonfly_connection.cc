@@ -13,6 +13,7 @@
 #include <absl/time/time.h>
 
 #include <algorithm>
+#include <boost/intrusive/list.hpp>
 #include <numeric>
 #include <variant>
 
@@ -548,6 +549,47 @@ class PipelineCacheSizeTracker {
 };
 
 thread_local PipelineCacheSizeTracker tl_pipe_cache_sz_tracker;
+
+// An orphaned command is a command whose execution was aborted due to a client disconnect,
+// but which cannot be safely cancelled (due to transactional framework limitations),
+// so we wait for its execution to finish and keep it in a separate list.
+// TODO: Explore more safe ways to cancel a scheduled transaction atomically
+struct OrphanedCommand : public boost::intrusive::list_base_hook<
+                             boost::intrusive::link_mode<boost::intrusive::auto_unlink>> {
+  explicit OrphanedCommand(ParsedCommand* c)
+      : cmd(c),
+        callback(std::bind_front(&OrphanedCommand::OnFinish, this)),
+        waiter(util::fb2::detail::Waiter::Callback(callback)),
+        sub_key(cmd->Blocker()->OnCompletion(&waiter)) {
+  }
+
+  void OnFinish() {
+    sub_key->Drop();
+    sub_key.reset();
+    unlink();
+    delete this;
+  }
+
+  // Takes ownership of cmd: registers a self-deleting waiter, or deletes immediately if done.
+  static void Adopt(ParsedCommand* cmd);
+
+  std::unique_ptr<ParsedCommand> cmd;  // owned by this struct
+
+  std::function<void()> callback;
+  util::fb2::detail::Waiter waiter;
+  std::optional<util::fb2::EventCount::SubKey> sub_key;
+};
+
+using OrphanedList =
+    boost::intrusive::list<OrphanedCommand, boost::intrusive::constant_time_size<false>>;
+thread_local OrphanedList tl_orphaned_commands;
+
+void OrphanedCommand::Adopt(ParsedCommand* cmd) {
+  if (auto* orphan = new OrphanedCommand(cmd); orphan->sub_key)
+    tl_orphaned_commands.push_back(*orphan);
+  else
+    delete orphan;  // already completed
+}
 
 size_t Connection::MessageHandle::UsedMemory() const {
   struct MessageSize {
@@ -1810,8 +1852,20 @@ void Connection::ClearPipelinedMessages() {
     auto* curr{parsed_head_};
     parsed_head_ = parsed_head_->next;
 
-    // Wait for the in-flight async commands processing by consumer to finish before recycling.
+    // For in-flight async commands that haven't completed yet:
     if (curr->IsDeferredReply() && !curr->CanReply()) {
+      if (ioloop_v2_) {
+        // Multi-shard commands are atomic — orphan instead of blocking.
+        size_t used_mem = curr->UsedMemory();
+        curr->next = nullptr;
+        VLOG(1) << "Orphaning in-flight command from closed connection " << id_;
+        OrphanedCommand::Adopt(curr);
+        parsed_cmd_q_len_--;
+        parsed_cmd_q_bytes_ -= used_mem;
+        tl_facade_stats->conn_stats.pipeline_queue_entries--;
+        tl_facade_stats->conn_stats.pipeline_queue_bytes -= used_mem;
+        continue;
+      }
       curr->Blocker()->Wait();
     }
 
@@ -2157,6 +2211,17 @@ Connection::WeakRef Connection::Borrow() {
 
 void Connection::ShutdownThreadLocal() {
   pipeline_req_pool_.clear();
+
+  // Wait at most 10ms for orphaned commands to finish
+  for (size_t i = 0; i < 10 && !tl_orphaned_commands.empty(); i++)
+    util::ThisFiber::SleepFor(1ms);
+
+  // Force delete orphaned commands then
+  if (!tl_orphaned_commands.empty()) {
+    size_t cmds = std::distance(tl_orphaned_commands.begin(), tl_orphaned_commands.end());
+    LOG(WARNING) << "Shutting down with " << cmds << " orphaned commands still pending";
+    tl_orphaned_commands.clear_and_dispose([](OrphanedCommand* o) { delete o; });
+  }
 }
 
 bool Connection::IsCurrentlyDispatching() const {
