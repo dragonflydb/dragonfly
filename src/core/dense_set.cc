@@ -62,6 +62,7 @@ void DenseSet::IteratorBase::SetExpiryTime(uint32_t ttl_sec) {
 
     // Important: we set the ttl bit on the wrapping pointer.
     curr_entry_->SetTtl(true);
+    owner_->expiration_used_ = true;
     owner_->ObjDelete(src);
     src = new_obj;
 

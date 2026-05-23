@@ -341,6 +341,26 @@ TEST_F(StringMapTest, AddOrExchangeWithTtl) {
   EXPECT_EQ(it.ExpiryTime(), 200u);
 }
 
+TEST_F(StringMapTest, RandomPairsUniqueAfterSetExpiryTime) {
+  sm_->Reserve(1024);
+  for (unsigned i = 0; i < 20; i++) {
+    EXPECT_TRUE(sm_->AddOrUpdate(to_string(i), "v"));
+  }
+  EXPECT_FALSE(sm_->ExpirationUsed());
+
+  for (unsigned i = 0; i < 10; i++) {
+    auto it = sm_->Find(to_string(i));
+    ASSERT_FALSE(it.HasExpiry());
+    it.SetExpiryTime(1);
+  }
+
+  sm_->set_time(2);
+
+  vector<sds> keys, vals;
+  sm_->RandomPairsUnique(20, keys, vals, false);
+  EXPECT_EQ(keys.size(), 10u);
+}
+
 TEST_F(StringMapTest, ExtractMultiple) {
   for (unsigned i = 0; i < 20; i++) {
     sm_->AddOrUpdate(to_string(i), "val" + to_string(i));
