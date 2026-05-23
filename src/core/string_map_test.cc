@@ -364,6 +364,48 @@ TEST_F(StringMapTest, RandomPairsUniqueAfterSetExpiryTime) {
   EXPECT_EQ(keys.size(), 10u);
 }
 
+TEST_F(StringMapTest, ExpireCollectChainUaf) {
+  // Iterating after SetExpiryTime'd chain-tail entries expire reads through
+  // a LinkKey freed by Delete in ExpireIfNeededInternal's loop. Reproduces
+  // probabilistically without ASAN; the 32-trial loop raises crash rate.
+  for (unsigned trial = 0; trial < 32; trial++) {
+    StringMap sm(&mi_alloc_);
+    for (unsigned i = 0; i < 20; i++) {
+      ASSERT_TRUE(sm.AddOrUpdate(absl::StrCat("t", trial, "_", i), "v"));
+    }
+    for (unsigned i = 0; i < 10; i++) {
+      sm.Find(absl::StrCat("t", trial, "_", i)).SetExpiryTime(1);
+    }
+    sm.set_time(2);
+
+    unsigned alive = 0;
+    for (auto it = sm.begin(); it != sm.end(); ++it) {
+      ++alive;
+    }
+    EXPECT_EQ(alive, 10u);
+  }
+}
+
+TEST_F(StringMapTest, FindAfterExpiredTailUaf) {
+  // Find() on a missing key walks the chain to the tail. If the tail Object
+  // has expired, ExpireIfNeeded inside Find2 frees prev's LinkKey, leaving
+  // `curr` dangling for the subsequent Equal / curr->Next() reads.
+  for (unsigned trial = 0; trial < 32; trial++) {
+    StringMap sm(&mi_alloc_);
+    for (unsigned i = 0; i < 20; i++) {
+      ASSERT_TRUE(sm.AddOrUpdate(absl::StrCat("t", trial, "_", i), "v"));
+    }
+    for (unsigned i = 0; i < 10; i++) {
+      sm.Find(absl::StrCat("t", trial, "_", i)).SetExpiryTime(1);
+    }
+    sm.set_time(2);
+
+    for (unsigned i = 0; i < 50; i++) {
+      sm.Find(absl::StrCat("missing", trial, "_", i));
+    }
+  }
+}
+
 TEST_F(StringMapTest, ExtractMultiple) {
   for (unsigned i = 0; i < 20; i++) {
     sm_->AddOrUpdate(to_string(i), "val" + to_string(i));
