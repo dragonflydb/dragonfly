@@ -136,6 +136,7 @@ class BaseFamilyTest : public ::testing::Test {
   }
 
   TestConnWrapper* AddFindConn(Protocol proto, std::string_view id);
+  Transaction* GetTransaction(std::string_view id);
   static std::vector<std::string> StrArray(const RespExpr& expr);
 
   Metrics GetMetrics() const {

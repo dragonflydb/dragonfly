@@ -227,6 +227,15 @@ class Transaction {
   // Must be called from coordinator thread.
   void CancelBlocking(const std::function<OpStatus(ArgSlice)>&);
 
+  // Attempt to cancel a scheduled transaction that has been armed (hop dispatched).
+  // Tries to atomically disarm all active shards. If all shards are successfully disarmed,
+  // the transaction is cancelled and removed from shard queues. If any shard already executed
+  // (couldn't be disarmed), re-arms the previously disarmed shards so the transaction
+  // completes normally.
+  // Returns true if the transaction was successfully cancelled.
+  // Must be called from the coordinator thread after DispatchHop() but before run_barrier_.Wait().
+  bool CancelScheduledTx();
+
   // Prepare a squashed hop on given shards.
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);

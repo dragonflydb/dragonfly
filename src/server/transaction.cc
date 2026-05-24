@@ -1038,6 +1038,79 @@ void Transaction::Conclude() {
   Execute(std::move(cb), true);
 }
 
+bool Transaction::CancelScheduledTx() {
+  DCHECK(coordinator_state_ & COORD_SCHED);
+
+  bool is_readonly = cid_->IsReadOnly();
+
+  // Phase 1: Try to disarm all active shards atomically.
+  // We iterate shards and attempt to clear is_armed. If a shard was already disarmed
+  // (consumed by PollExecution/RunInShard), it means the callback already ran there.
+  unsigned disarmed_cnt = 0;
+  unsigned active_cnt = 0;
+
+  // Track which shards we successfully disarmed so we can re-arm them on failure.
+  // Using a bitset since shard_data_ is bounded at 1024.
+  std::bitset<1024> disarmed_shards;
+
+  IterateActiveShards([&](auto& sd, ShardId i) {
+    active_cnt++;
+    if (sd.is_armed.exchange(false, memory_order_acquire)) {
+      disarmed_shards.set(i);
+      disarmed_cnt++;
+    }
+  });
+
+  // If we disarmed all shards, the callback never ran anywhere - safe to cancel.
+  // For readonly transactions, we can cancel even if some shards already ran
+  // (partial reads are harmless since they don't mutate state).
+  if (disarmed_cnt == active_cnt || is_readonly) {
+    // Remove the transaction from shard queues and release locks BEFORE unblocking
+    // the coordinator barrier. This prevents a race where the coordinator fiber wakes,
+    // the transaction is destroyed, and shard threads still reference it.
+    auto is_active = [this](uint32_t i) { return IsActive(i); };
+    shard_set->RunBriefInParallel([this](EngineShard* shard) { CancelShardCb(shard); }, is_active);
+
+    coordinator_state_ |= COORD_CANCELLED;
+    coordinator_state_ &= ~COORD_SCHED;
+    cb_ptr_.reset();
+
+    // Signal the run_barrier_ for all shards we disarmed so the coordinator unblocks.
+    for (unsigned i = 0; i < disarmed_cnt; i++) {
+      run_barrier_.Dec();
+    }
+
+    // If readonly and some shards already ran, wait for them to finish naturally.
+    if (disarmed_cnt < active_cnt) {
+      run_barrier_.Wait();
+    }
+
+    return true;
+  }
+
+  // Phase 2: A mutable transaction already ran on at least one shard.
+  // We must re-arm the shards we disarmed so the transaction completes on all shards.
+  std::atomic_thread_fence(memory_order_release);
+  IterateActiveShards([&](auto& sd, ShardId i) {
+    if (disarmed_shards.test(i)) {
+      sd.is_armed.store(true, memory_order_relaxed);
+    }
+  });
+
+  // Submit poll tasks for re-armed shards so they get picked up.
+  IterateActiveShards([&](auto& sd, ShardId i) {
+    if (disarmed_shards.test(i)) {
+      use_count_.fetch_add(1, memory_order_relaxed);
+      shard_set->Add(i, [this] {
+        EngineShard::tlocal()->PollExecution("cancel_rearm", this);
+        intrusive_ptr_release(this);
+      });
+    }
+  });
+
+  return false;
+}
+
 void Transaction::Refurbish() {
   txid_ = 0;
   coordinator_state_ = 0;
