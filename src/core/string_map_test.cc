@@ -341,6 +341,29 @@ TEST_F(StringMapTest, AddOrExchangeWithTtl) {
   EXPECT_EQ(it.ExpiryTime(), 200u);
 }
 
+TEST_F(StringMapTest, RandomPairsUniqueAfterSetExpiryTime) {
+  sm_->Reserve(1024);
+  for (unsigned i = 0; i < 20; i++) {
+    EXPECT_TRUE(sm_->AddOrUpdate(to_string(i), "v"));
+  }
+  EXPECT_FALSE(sm_->ExpirationUsed());
+
+  for (unsigned i = 0; i < 10; i++) {
+    auto it = sm_->Find(to_string(i));
+    ASSERT_FALSE(it.HasExpiry());
+    it.SetExpiryTime(1);
+  }
+  // Validate the regression in all build types: DCHECK below is a no-op in
+  // release, so RandomPairsUnique could still return 10 keys by chance.
+  EXPECT_TRUE(sm_->ExpirationUsed());
+
+  sm_->set_time(2);
+
+  vector<sds> keys, vals;
+  sm_->RandomPairsUnique(20, keys, vals, false);
+  EXPECT_EQ(keys.size(), 10u);
+}
+
 TEST_F(StringMapTest, ExpireCollectChainUaf) {
   // Iterating after SetExpiryTime'd chain-tail entries expire reads through
   // a LinkKey freed by Delete in ExpireIfNeededInternal's loop. Reproduces
