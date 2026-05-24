@@ -2901,9 +2901,6 @@ void Connection::MaybeEnableRecvMultishot() {
 #endif
 }
 
-// Flushes pending replies and suspends the fiber until new input, command completion,
-// dispatch-queue messages, errors, or an actionable migration request arrives.
-// Returns a non-zero error_code if the flush failed, default (falsy) error_code on success.
 error_code Connection::FlushAndAwaitInput() {
   phase_ = READ_SOCKET;
 
@@ -2934,19 +2931,16 @@ error_code Connection::FlushAndAwaitInput() {
   return {};
 }
 
-// Drains the dispatch queue (control path): processes admin/pubsub messages.
-// Returns true if the caller should re-enter the main loop (i.e. `continue`).
-bool Connection::ProcessDispatchQueue() {
+void Connection::ProcessDispatchQueue() {
   while (!dispatch_q_.empty()) {
     auto msg = std::move(dispatch_q_.front());
     dispatch_q_.pop_front();
     UpdateDispatchStats(msg, false /* subtract */);
 
     // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
-    // and let the loop iterate back to HandleMigrateRequest() at the top.
-    if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
+    // and let the ioloop iterate back to HandleMigrateRequest() at the start.
+    if (std::holds_alternative<MigrationRequestMessage>(msg.handle))
       break;
-    }
 
     std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
   }
@@ -2957,18 +2951,14 @@ bool Connection::ProcessDispatchQueue() {
 
   // TODO: Properly handle backpressure
   GetQueueBackpressure().pubsub_ec.notifyAll();
-  return true;
 }
 
-// Parses available input, executes queued commands, and sends replies while
-// respecting pipeline memory backpressure. Parks the fiber when over the limit.
-// Returns the resulting ParserStatus, or an error_code on write failure.
 io::Result<Connection::ParserStatus> Connection::ParseAndExecuteCommands(
     bool reached_capacity, util::fb2::detail::Waiter* backpressure_waiter) {
   auto& conn_stats = GetLocalConnStats();
   QueueBackpressure& qbp = GetQueueBackpressure();
 
-  ParserStatus parse_status;
+  ParserStatus parse_status = ParserStatus::OK;
 
   // Only parse data if we are under the memory limit (backpressure).
   // Exception: If the queue is empty, we always parse to allow admin commands
@@ -3008,7 +2998,7 @@ io::Result<Connection::ParserStatus> Connection::ParseAndExecuteCommands(
         (parsed_cmd_q_len_ > 0) &&
         qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
     if (post_over_limit) {
-      if (auto err = ParkOnBackpressure(backpressure_waiter); err) {
+      if (auto err = AwaitBackpressureRelief(backpressure_waiter); err) {
         return make_unexpected(err);
       }
     }
@@ -3026,10 +3016,7 @@ io::Result<Connection::ParserStatus> Connection::ParseAndExecuteCommands(
   return parse_status;
 }
 
-// Parks the fiber until pipeline memory usage drops below the configured limit.
-// Subscribes to the global backpressure EventCount, flushes replies, and awaits relief.
-// Returns a non-zero error_code if the flush failed.
-error_code Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_waiter) {
+error_code Connection::AwaitBackpressureRelief(util::fb2::detail::Waiter* backpressure_waiter) {
   auto& conn_stats = GetLocalConnStats();
   QueueBackpressure& qbp = GetQueueBackpressure();
 
@@ -3137,8 +3124,8 @@ io::Result<Connection::ParserStatus> Connection::IoLoopV2() {
 
     // Handle dispatch queue items (Control Path) one by one blocking command execution
     if (!dispatch_q_.empty()) {
-      if (ProcessDispatchQueue())
-        continue;
+      ProcessDispatchQueue();
+      continue;
     }
 
     // Handle Parsed Commands Queue (Data Path)

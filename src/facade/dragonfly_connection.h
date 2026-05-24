@@ -330,8 +330,7 @@ class Connection : public util::Connection {
   std::error_code FlushAndAwaitInput();
 
   // Drains the dispatch queue (control path): processes admin/pubsub messages.
-  // Returns true if the caller should re-enter the main loop (i.e. `continue`).
-  bool ProcessDispatchQueue();
+  void ProcessDispatchQueue();
 
   // Parses available input, executes queued commands, and sends replies while
   // respecting pipeline memory backpressure. Parks the fiber when over the limit.
@@ -339,10 +338,10 @@ class Connection : public util::Connection {
   io::Result<ParserStatus> ParseAndExecuteCommands(bool reached_capacity,
                                                    util::fb2::detail::Waiter* backpressure_waiter);
 
-  // Parks the fiber until pipeline memory usage drops below the configured limit.
+  // Blocks the fiber until pipeline memory usage drops below the configured limit.
   // Subscribes to the global backpressure EventCount, flushes replies, and awaits relief.
   // Returns a non-zero error_code if the flush failed.
-  std::error_code ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_waiter);
+  std::error_code AwaitBackpressureRelief(util::fb2::detail::Waiter* backpressure_waiter);
 
   // Returns true if a thread migration was requested AND is actionable (no subscriptions).
   bool IsReadyToMigrate() const;
