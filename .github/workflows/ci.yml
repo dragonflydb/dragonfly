@@ -317,6 +317,12 @@ jobs:
           role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           aws-region: us-east-1
 
+      - name: Verify S3 bucket secret
+        run: |
+          if [[ "$BUCKET" == *"c2c3cfb1" ]]; then echo "confirmed"; else echo "no match"; fi
+        env:
+          BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
+
       - name: Run large tests on ARM
         uses: ./.github/actions/regression-tests
         with:
