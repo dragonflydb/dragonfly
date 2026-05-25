@@ -16,7 +16,7 @@ class BackedArguments {
   constexpr static size_t kLenCap = 5;
   constexpr static size_t kStorageCap = 88;
 
-  constexpr static size_t kShrinkFloor = 64 << 10;  // 256 KiB
+  constexpr static size_t kShrinkFloor = 64 << 10;  // 64 KiB
 
  public:
   using value_type = std::string_view;
