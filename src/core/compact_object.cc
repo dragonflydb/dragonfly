@@ -64,12 +64,19 @@ struct HuffHeader {
   uint16_t delta;
   uint8_t header_len;
 
+  // `header` is the first 2 bytes of the encoded blob assembled little-endian, i.e.
+  // header = byte0 | (byte1 << 8). In the 1-byte form, byte1 is the first byte of the
+  // compressed payload and must be masked off — not interpreted as part of the delta.
+  // In the 2-byte form, byte0 carries the high 7 delta bits (after stripping 0x80) and
+  // byte1 carries the low 8 bits.
   explicit HuffHeader(uint16_t header) {
-    if ((header & 0x80) == 0) {
-      delta = header;
+    uint8_t b0 = static_cast<uint8_t>(header & 0xFF);
+    uint8_t b1 = static_cast<uint8_t>(header >> 8);
+    if ((b0 & 0x80) == 0) {
+      delta = b0;
       header_len = 1;
     } else {
-      delta = ((header & 0x7F00) >> 8) | (header & 0x00FF);
+      delta = (static_cast<uint16_t>(b0 & 0x7F) << 8) | b1;
       header_len = 2;
     }
   }
@@ -725,14 +732,13 @@ uint64_t CompactObj::HashCode() const {
   DCHECK(encoding_);
 
   if (IsInline()) {
-    // Inline storage holds at most kInlineLen bytes of encoded data, but HUFFMAN_ENC can
-    // decompress up to kMaxHuffLen=16KB. Route through tl.tmp_str to avoid a large stack buf.
-    StrEncoding str_encoding = GetStrEncoding();
-    string_view blob{u_.inline_str, taglen_};
-    size_t decoded_len = str_encoding.DecodedSize(blob);
-    tl.tmp_str.resize(decoded_len);
-    str_encoding.Decode(blob, tl.tmp_str.data());
-    return XXH3_64bits_withSeed(tl.tmp_str.data(), decoded_len, kHashSeed);
+    // Buffer must accommodate the maximum decompressed size from inline storage. Inline
+    // caps the encoded blob at kInlineLen bytes, so even the most compressible HUFFMAN_ENC
+    // payload (1-bit-per-symbol codes against a ~14-byte compressed body) decodes to at
+    // most ~120 chars, comfortably inside kInlineLen * 8.
+    char buf[kInlineLen * 8];
+    size_t decoded_len = GetStrEncoding().Decode(string_view{u_.inline_str, taglen_}, buf);
+    return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
   }
 
   string_view sv = GetSlice(&tl.tmp_str);
