@@ -3770,8 +3770,7 @@ async def _run_tiering_migration(
                 if migration_done:
                     break
                 try:
-                    await nodes[0].client.delete(f"key:{i}")
-                    delete_succeded += 1
+                    delete_succeded += await nodes[0].client.delete(f"key:{i}")
                 except Exception:
                     pass
 
