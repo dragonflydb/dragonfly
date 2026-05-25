@@ -28,7 +28,6 @@
 #include "server/tiering/common.h"
 #include "server/tiering/decoders.h"
 #include "server/tiering/op_manager.h"
-#include "server/tiering/serialized_map.h"
 #include "server/tiering/small_bins.h"
 
 extern "C" {
@@ -101,7 +100,7 @@ size_t TieredStorage::StashDescriptor::EstimatedSerializedSize() const {
       absl::Overload{[](const array<string_view, 2>& a) { return a[0].size() + a[1].size(); },
                      [](uint8_t* ptr) {
                        detail::ListpackWrap lw{ptr};
-                       return tiering::SerializedMap::EstimateSize(lw.UsedBytes(), lw.size());
+                       return lw.UsedBytes();
                      }},
       blob);
 };
@@ -118,9 +117,10 @@ size_t TieredStorage::StashDescriptor::Serialize(io::MutableBytes buffer) const 
       return strs[0].size() + strs[1].size();
     }
     case CompactObj::ExternalRep::SERIALIZED_MAP: {
-      detail::ListpackWrap lw{static_cast<uint8_t*>(std::get<uint8_t*>(blob))};
-      return tiering::SerializedMap::Serialize(
-          lw, {reinterpret_cast<char*>(buffer.data()), buffer.length()});
+      detail::ListpackWrap lw{std::get<uint8_t*>(blob)};
+      size_t bytes = lw.UsedBytes();
+      memcpy(buffer.data(), lw.GetPointer(), bytes);
+      return bytes;
     }
     case CompactObj::ExternalRep::LIST_NODE: {
       // LIST_NODE uses the string_view pair path (same as STRING).
@@ -226,7 +226,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
         break;
       }
       case CompactObj::ExternalRep::SERIALIZED_MAP: {
-        tiering::SerializedMapDecoder decoder{};
+        tiering::ListpackMapDecoder decoder{};
         decoder.Initialize(value);
         decoder.Upload(pv);
         break;

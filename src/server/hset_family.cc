@@ -29,7 +29,6 @@ extern "C" {
 #include "server/search/doc_index.h"
 #include "server/tiered_storage.h"
 #include "server/tiering/decoders.h"
-#include "server/tiering/serialized_map.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
 
@@ -84,19 +83,14 @@ using container_utils::GetStringMap;
 // holding a variant of:
 // 1. Listpack
 // 2. StringMap
-// 3. SerializedMap (tiered)
 struct HMapWrap {
  private:
-  template <typename F> decltype(auto) VisitRef(F f) const {  // Cast T* to T&
+  template <typename F> decltype(auto) VisitRef(F f) const {
     return std::visit(Overloaded{[&f](auto* s) { return f(*s); }, f}, impl_);
   }
 
   template <typename F> decltype(auto) VisitMut(F& f) {
-    auto serialized_bust = [&](tiering::SerializedMap* s) {
-      ABSL_UNREACHABLE();                          // Serialized maps should never be mutable
-      return f(static_cast<StringMap*>(nullptr));  // purely for same return type
-    };
-    return std::visit(Overloaded{f, serialized_bust}, impl_);
+    return std::visit(Overloaded{[&f](auto* s) { return f(*s); }, f}, impl_);
   }
 
  public:
@@ -112,14 +106,10 @@ struct HMapWrap {
   explicit HMapWrap(detail::ListpackWrap lw) : impl_{std::move(lw)} {
   }
 
-  explicit HMapWrap(tiering::SerializedMap* sm) : impl_{sm} {
-  }
-
   size_t Length() const {
     Overloaded ov{
         [](StringMap* s) { return s->UpperBoundSize(); },
         [](const detail::ListpackWrap& lw) { return lw.size(); },
-        [](tiering::SerializedMap* s) { return s->size(); },
     };
     return visit(ov, impl_);
   }
@@ -136,7 +126,7 @@ struct HMapWrap {
   auto Range() const {
     auto f = [](auto p) -> pair<string_view, string_view> { return p; };  // implicit conversion
     using IT = base::it::CompoundIterator<decltype(f), detail::ListpackWrap::Iterator,
-                                          StringMap::iterator, tiering::SerializedMap::Iterator>;
+                                          StringMap::iterator>;
     auto cb = [f](auto& h) -> std::pair<IT, IT> {
       return {{f, h.begin()}, {std::nullopt, h.end()}};
     };
@@ -144,28 +134,28 @@ struct HMapWrap {
   }
 
   bool Erase(std::string_view key) {
-    Overloaded ov{[key](StringMap* s) { return s->Erase(key); },
+    Overloaded ov{[key](StringMap& s) { return s.Erase(key); },
                   [key](detail::ListpackWrap& lw) { return lw.Delete(key); }};
     return VisitMut(ov);
   }
 
   void AddOrUpdate(std::string_view key, std::string_view value) {
-    Overloaded ov{[&](StringMap* sm) { sm->AddOrUpdate(key, value, UINT32_MAX, true); },
+    Overloaded ov{[&](StringMap& sm) { sm.AddOrUpdate(key, value, UINT32_MAX, true); },
                   [&](detail::ListpackWrap& lw) { lw.Insert(key, value, false); }};
     VisitMut(ov);
   }
 
   void Launder(PrimeValue& pv) {
     Overloaded ov{
-        [](StringMap* s) {},
+        [](StringMap& s) {},
         [&](detail::ListpackWrap& lw) { pv.SetRObjPtr(lw.GetPointer()); },
     };
     VisitMut(ov);
   }
 
-  void Launder(tiering::SerializedMapDecoder* dec) {
+  void Launder(tiering::ListpackMapDecoder* dec) {
     Overloaded ov{
-        [](StringMap* s) {},
+        [](StringMap& s) {},
         [&](detail::ListpackWrap& lw) { *dec->GetMutable() = lw; },
     };
     VisitMut(ov);
@@ -178,8 +168,8 @@ struct HMapWrap {
   }
 
  private:
-  variant<StringMap*, tiering::SerializedMap*, detail::ListpackWrap> impl_;
-};  // namespace dfly
+  variant<StringMap*, detail::ListpackWrap> impl_;
+};
 
 // Delete if length is zero
 void DeleteHw(HMapWrap& hw, const OpArgs& op_args, std::string_view key) {
@@ -227,7 +217,7 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
 
     // Enqueue read for future values
     if (pv.IsExternal() && !pv.IsCool()) {
-      using D = tiering::SerializedMapDecoder;
+      using D = tiering::ListpackMapDecoder;
       util::fb2::Future<OpResult<T>> fut;
       auto read_cb = [fut, f = std::move(f)](io::Result<D*> res) mutable {
         if (!res) {
@@ -235,12 +225,7 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
           return;
         }
 
-        // Create wrapper from different types
-        Overloaded ov{
-            [](tiering::SerializedMap* sm) { return HMapWrap{sm}; },
-            [](detail::ListpackWrap* lw) { return HMapWrap{*lw}; },
-        };
-        auto hw = visit(ov, res.value()->Get());
+        HMapWrap hw{res.value()->Get()};
         fut.Resolve(f(hw));
       };
 
@@ -279,7 +264,7 @@ auto ExecuteW(Transaction* tx, F&& f,
 
     // Enqueue read for future values
     if (pv.IsExternal() && !pv.IsCool()) {
-      using D = tiering::SerializedMapDecoder;
+      using D = tiering::ListpackMapDecoder;
       util::fb2::Future<OpResult<T>> fut;
       auto read_cb = [fut, f = std::move(f)](io::Result<D*> res) mutable {
         if (!res) {
@@ -287,10 +272,9 @@ auto ExecuteW(Transaction* tx, F&& f,
           return;
         }
 
-        // Create wrapper from different types
         HMapWrap hw{*res.value()->GetMutable()};
         fut.Resolve(f(hw));
-        hw.Launder(*res);
+        hw.Launder(res.value());
       };
 
       es->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
@@ -528,7 +512,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
     if (op_sp.ttl != UINT32_MAX)
       return OpStatus::CANCELLED;  // Don't support expiry with offloaded hashes
 
-    using D = tiering::SerializedMapDecoder;
+    using D = tiering::ListpackMapDecoder;
     util::fb2::Future<OpResult<uint32_t>> fut;
     auto read_cb = [fut, values, op_sp](io::Result<D*> res) mutable {
       if (!res) {

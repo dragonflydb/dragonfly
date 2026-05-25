@@ -46,6 +46,10 @@ struct ListpackWrap {
   explicit ListpackWrap(uint8_t* lp) : lp_{lp} {
   }
 
+  // Create a read-only view over a listpack buffer.
+  // Mutations will DCHECK-fail in debug builds.
+  static ListpackWrap Readonly(uint8_t* lp);
+
   // Create listpack with capacity
   static ListpackWrap WithCapacity(size_t capacity);
 
@@ -67,6 +71,7 @@ struct ListpackWrap {
  private:
   uint8_t* lp_;            // the listpack itself
   mutable IntBuf intbuf_;  // buffer for integers decoded to strings
+  bool readonly_ = false;
 };
 
 }  // namespace dfly::detail
