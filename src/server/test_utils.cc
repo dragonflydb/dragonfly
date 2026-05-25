@@ -20,6 +20,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/oah_set.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
@@ -31,6 +32,7 @@ using namespace std;
 ABSL_DECLARE_FLAG(string, dbfilename);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
+ABSL_DECLARE_FLAG(bool, use_oah_set);
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
 ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
 ABSL_DECLARE_FLAG(bool, enable_heartbeat_rss_eviction);
@@ -215,6 +217,7 @@ void BaseFamilyTest::SetUpTestSuite() {
 
 void BaseFamilyTest::SetUp() {
   max_memory_limit = INT_MAX;
+  g_use_oah_set = absl::GetFlag(FLAGS_use_oah_set);
   ResetService();
 }
 
