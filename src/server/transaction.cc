@@ -1040,56 +1040,37 @@ void Transaction::Conclude() {
 
 bool Transaction::CancelScheduledTx() {
   DCHECK(coordinator_state_ & COORD_SCHED);
-
   bool is_readonly = cid_->IsReadOnly();
 
-  // Phase 1: Try to disarm all active shards atomically.
-  // We iterate shards and attempt to clear is_armed. If a shard was already disarmed
-  // (consumed by PollExecution/RunInShard), it means the callback already ran there.
-  unsigned disarmed_cnt = 0;
-  unsigned active_cnt = 0;
-
-  // Track which shards we successfully disarmed so we can re-arm them on failure.
-  // Using a bitset since shard_data_ is bounded at 1024.
+  // First, try to clear all is_armed flags
   std::bitset<1024> disarmed_shards;
-
   IterateActiveShards([&](auto& sd, ShardId i) {
-    active_cnt++;
-    if (sd.is_armed.exchange(false, memory_order_acquire)) {
+    if (sd.is_armed.exchange(false, memory_order_acquire))
       disarmed_shards.set(i);
-      disarmed_cnt++;
-    }
   });
 
-  // If we disarmed all shards, the callback never ran anywhere - safe to cancel.
-  // For readonly transactions, we can cancel even if some shards already ran
-  // (partial reads are harmless since they don't mutate state).
-  if (disarmed_cnt == active_cnt || is_readonly) {
-    // Remove the transaction from shard queues and release locks BEFORE unblocking
-    // the coordinator barrier. This prevents a race where the coordinator fiber wakes,
-    // the transaction is destroyed, and shard threads still reference it.
+  // For mutable transctions we can cancel only if all shards can be stopped.
+  // Reads do not cause any inconsistencies if stopped mid-read, so any condition is ok
+  unsigned disarmed_cnt = disarmed_shards.count();
+  if (disarmed_cnt == unique_shard_cnt_ || is_readonly) {
+    // Cancel the transaction
     auto is_active = [this](uint32_t i) { return IsActive(i); };
     shard_set->RunBriefInParallel([this](EngineShard* shard) { CancelShardCb(shard); }, is_active);
-
-    coordinator_state_ |= COORD_CANCELLED;
-    coordinator_state_ &= ~COORD_SCHED;
+    coordinator_state_ = (coordinator_state_ & ~COORD_SCHED) | COORD_CANCELLED;
     cb_ptr_.reset();
 
     // Signal the run_barrier_ for all shards we disarmed so the coordinator unblocks.
-    for (unsigned i = 0; i < disarmed_cnt; i++) {
+    for (unsigned i = 0; i < disarmed_cnt; i++)
       run_barrier_.Dec();
-    }
 
     // If readonly and some shards already ran, wait for them to finish naturally.
-    if (disarmed_cnt < active_cnt) {
+    if (disarmed_cnt < unique_shard_cnt_)
       run_barrier_.Wait();
-    }
 
     return true;
   }
 
-  // Phase 2: A mutable transaction already ran on at least one shard.
-  // We must re-arm the shards we disarmed so the transaction completes on all shards.
+  // A mutable transaction already ran on at least one shard. Re-arm to let it complete.
   std::atomic_thread_fence(memory_order_release);
   IterateActiveShards([&](auto& sd, ShardId i) {
     if (disarmed_shards.test(i)) {
