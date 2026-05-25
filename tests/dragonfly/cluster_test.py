@@ -3718,7 +3718,7 @@ async def _run_tiering_migration(
     *,
     maxmemory,
     min_tiered_entries,
-    with_deletes,
+    delete_keys_count=0,
 ):
     instances = [
         df_factory.create(
@@ -3761,13 +3761,12 @@ async def _run_tiering_migration(
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     delete_succeded = 0
-    if with_deletes:
-        delete_expected_num = 50_000
+    if delete_keys_count:
         migration_done = False
 
         async def delete_job():
             nonlocal delete_succeded
-            for i in range(delete_expected_num):
+            for i in range(delete_keys_count):
                 if migration_done:
                     break
                 try:
@@ -3780,7 +3779,7 @@ async def _run_tiering_migration(
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
 
-    if with_deletes:
+    if delete_keys_count:
         migration_done = True
         await delete_task
 
@@ -3810,7 +3809,6 @@ async def test_cluster_migration_with_tiering(df_factory):
         df_factory,
         maxmemory="512MB",
         min_tiered_entries=10_000,
-        with_deletes=False,
     )
 
 
@@ -3823,7 +3821,7 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
         df_factory,
         maxmemory="800MB",
         min_tiered_entries=50_000,
-        with_deletes=True,
+        delete_keys_count=50_000,
     )
 
 
