@@ -3,9 +3,9 @@
 This document describes how Dragonfly implements the Publish-Subscribe (Pub/Sub) messaging
 paradigm within its shared-nothing, multi-threaded architecture. It covers the global
 subscription registry backed by a `ShardedHashMap` with fine-grained per-shard locking,
-the RCU-style pointer swap used for lock-free reads on the publish path, the asynchronous
-message delivery pipeline, and the backpressure system that protects the server from
-slow-subscriber OOM.
+the RCU-style pointer swap and per-shard shared locking used for concurrent reads on the
+publish path, the asynchronous message delivery pipeline, and the backpressure system that
+protects the server from slow-subscriber OOM.
 
 ## Overview
 
@@ -45,10 +45,10 @@ Dragonfly supports three flavors of Pub/Sub:
 | `ChannelStore` | `src/server/channel_store.h` | Global registry mapping channels/patterns to subscribers. Backed by two `ShardedHashMap` instances (channels and patterns). |
 | `ChannelStoreUpdater` | `src/server/channel_store.h` | Batches subscribe/unsubscribe operations per shard and applies them via `ShardedHashMap::Mutate`. |
 | `ChannelStore::Subscriber` | `src/server/channel_store.h` | Represents a subscribed client. Wraps `facade::ConnectionRef` plus a pattern string. |
-| `ShardedHashMap` | `src/core/sharded_hash_map.h` | Thread-safe hash map split into 16 shards, each with independent `write_mu_` (Mutex) and `read_mu_` (SharedMutex). |
-| `ChannelStore::ChannelMap` | `src/server/channel_store.h` | `ShardedHashMap<string, UpdatablePointer, 16>` — maps channel/pattern names to subscriber lists across 16 independently-locked shards. |
+| `ShardedHashMap` | `src/core/sharded_hash_map.h` | Generic thread-safe sharded hash map template with independently locked shards (`write_mu_` and `read_mu_`); shard count depends on the template instantiation. |
+| `ChannelStore::ChannelMap` | `src/server/channel_store.h` | `ShardedHashMap<string, UpdatablePointer, 16, StringViewHash, std::equal_to<>>` — maps channel/pattern names to subscriber lists across 16 independently locked shards, supporting transparent `std::string_view` lookups. |
 | `ChannelStore::SubscribeMap` | `src/server/channel_store.h` | `flat_hash_map<ConnectionContext*, ThreadId>` — maps subscriber contexts to their owning thread. |
-| `ChannelStore::UpdatablePointer` | `src/server/channel_store.h` | Atomic wrapper around `SubscribeMap*`. Supports lock-free reads (`acquire`) and RCU-style swaps (`release`). |
+| `ChannelStore::UpdatablePointer` | `src/server/channel_store.h` | Atomic wrapper around `SubscribeMap*`. Supports concurrent reads (per-shard shared `read_mu_` + atomic acquire load) and RCU-style swaps (`release`). |
 | `ConnectionState::SubscribeInfo` | `src/server/conn_context.h` | Per-connection set of subscribed channels and patterns. Created lazily on first subscription. |
 | `Connection::PubMessage` | `src/facade/dragonfly_connection.h` | Carries a formatted pub/sub message through the async dispatch queue. |
 | `Connection::MessageHandle` | `src/facade/dragonfly_connection.h` | Variant wrapper (`PubMessage`, `MonitorMessage`, `MigrationRequest`, etc.) for the control-path dispatch queue. |
@@ -57,9 +57,41 @@ Dragonfly supports three flavors of Pub/Sub:
 
 ## Data Flow Overview
 
-<div align="center">
-  <img src="pubsub/pubsub_data_flow_overview.svg" alt="Pub/Sub Data Flow" width="1000"/>
-</div>
+```mermaid
+flowchart LR
+    subgraph Client
+        PUB[PUBLISH channel msg]
+        SUB[SUBSCRIBE channel]
+    end
+
+    subgraph ChannelStore
+        CM[ChannelMap<br/>16 shards]
+        PM[PatternMap<br/>16 shards]
+    end
+
+    subgraph Dispatch
+        FB[FetchSubscribers]
+        BP[Backpressure Gate]
+        DB[DispatchBrief<br/>all I/O threads]
+    end
+
+    subgraph Connections
+        C1[conn 1 dispatch_q_]
+        C2[conn 2 dispatch_q_]
+        C3[conn N dispatch_q_]
+    end
+
+    PUB --> FB
+    FB -->|read_mu_ shared| CM
+    FB -->|read_mu_ shared| PM
+    FB --> BP
+    BP --> DB
+    DB --> C1
+    DB --> C2
+    DB --> C3
+
+    SUB -->|write_mu_ exclusive| CM
+```
 
 ## Subscription Management (Shard-Locked ChannelStore)
 
@@ -69,9 +101,22 @@ The `ChannelStore` holds two `ChannelMap` instances — one for exact-channel su
 one for pattern subscriptions. Each `ChannelMap` is a `ShardedHashMap<string, UpdatablePointer, 16>`
 backed by 16 independently-locked shards:
 
-<div align="center">
-  <img src="pubsub/pubsub_data_structure_layout.svg" alt="Data Structure Layout" width="700"/>
-</div>
+```mermaid
+flowchart TD
+    CS[ChannelStore]
+    CS --> channels_["channels_ : ChannelMap"]
+    CS --> patterns_["patterns_ : ChannelMap"]
+
+    channels_ --> S0["Shard 0<br/>write_mu_ + read_mu_"]
+    channels_ --> S1["Shard 1<br/>write_mu_ + read_mu_"]
+    channels_ --> SN["Shard 15<br/>write_mu_ + read_mu_"]
+
+    S0 --> E0["&quot;news&quot; → UpdatablePointer"]
+    S1 --> E1["&quot;chat&quot; → UpdatablePointer"]
+
+    E0 --> SM0["SubscribeMap<br/>{cntx_A→tid0, cntx_B→tid1}"]
+    E1 --> SM1["SubscribeMap<br/>{cntx_C→tid2}"]
+```
 
 Each shard carries two fiber-aware locks:
 
@@ -103,9 +148,23 @@ in a single `Mutate()` call, minimizing lock acquisitions:
 
 ### Apply() Flow
 
-<div align="center">
-  <img src="pubsub/pubsub_apply.svg" alt="Apply Flow" width="1000"/>
-</div>
+```mermaid
+flowchart TD
+    Start["Apply() — for each shard with ops"]
+    Start --> Mutate["Mutate(ShardId{sid}, ...)<br/>acquires write_mu_"]
+
+    Mutate --> P1["Phase 1: RCU pointer swaps<br/>(write_mu_ held, read_mu_ NOT held)"]
+    P1 -->|"key exists"| Swap["Copy SubscribeMap → modify → Set()<br/>old ptr → freelist_"]
+    P1 -->|"key missing / last sub"| Mark["Mark needs_map_change"]
+
+    Mark --> P2["Phase 2: Structural changes<br/>AcquireReaderExclusiveLock → read_mu_ exclusive"]
+    P2 --> Insert["Insert new key + SubscribeMap"]
+    P2 --> Erase["Delete SubscribeMap + erase key"]
+
+    Mutate --> Release["Release write_mu_"]
+    Release --> P3["Phase 3: WithReadExclusiveLock<br/>acquires read_mu_ exclusive"]
+    P3 --> Del["Delete old SubscribeMap ptrs<br/>from freelist_"]
+```
 
 The `ChannelStoreUpdater::Apply()` method iterates over each shard that has pending
 operations and calls `map.Mutate(ShardId{sid}, ...)` to acquire `write_mu_` once per shard.
@@ -500,7 +559,7 @@ All Pub/Sub commands are registered in `Service::Register` (`src/server/main_ser
 | `PUBSUB` | -1 | `CO::LOADING \| CO::FAST` | `SLOW` |
 
 Notable flags:
-- `CO::FAST` on `PUBLISH`/`SPUBLISH` — these are non-transactional, lock-free reads.
+- `CO::FAST` on `PUBLISH`/`SPUBLISH` — these are non-transactional, concurrent reads (shared `read_mu_`).
 - `CO::NOSCRIPT` on all subscribe/unsubscribe — cannot be called from Lua scripts.
 - `CO::LOADING` — permitted during database loading.
 - None of the Pub/Sub commands are transactional (`IsTransactional() == false`).
