@@ -1854,16 +1854,11 @@ void Connection::ClearPipelinedMessages() {
 
     // For in-flight async commands that haven't completed yet:
     if (curr->IsDeferredReply() && !curr->CanReply()) {
+      // For V2 loop we can disown the commands instead of waiting for them
       if (ioloop_v2_) {
-        // Multi-shard commands are atomic — orphan instead of blocking.
-        size_t used_mem = curr->UsedMemory();
+        UnaccountParsedCommand(curr);
         curr->next = nullptr;
-        VLOG(1) << "Orphaning in-flight command from closed connection " << id_;
         OrphanedCommand::Adopt(curr);
-        parsed_cmd_q_len_--;
-        parsed_cmd_q_bytes_ -= used_mem;
-        tl_facade_stats->conn_stats.pipeline_queue_entries--;
-        tl_facade_stats->conn_stats.pipeline_queue_bytes -= used_mem;
         continue;
       }
       curr->Blocker()->Wait();
@@ -2780,18 +2775,8 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
-  size_t used_mem = cmd->UsedMemory();
   auto& conn_stats = tl_facade_stats->conn_stats;
-
-  DCHECK_GT(parsed_cmd_q_len_, 0u);
-  DCHECK_GE(parsed_cmd_q_bytes_, used_mem);
-  DCHECK_GT(conn_stats.pipeline_queue_entries, 0u);
-  DCHECK_GE(conn_stats.pipeline_queue_bytes, used_mem);
-  parsed_cmd_q_len_--;
-  parsed_cmd_q_bytes_ -= used_mem;
-
-  conn_stats.pipeline_queue_entries--;
-  conn_stats.pipeline_queue_bytes -= used_mem;
+  UnaccountParsedCommand(cmd);
 
   if (is_pipelined) {
     conn_stats.pipelined_cmd_cnt++;
@@ -2821,6 +2806,20 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
       delete cmd;
     }
   }
+}
+
+void Connection::UnaccountParsedCommand(ParsedCommand* cmd) {
+  size_t used_mem = cmd->UsedMemory();
+  auto& conn_stats = tl_facade_stats->conn_stats;
+
+  DCHECK_GT(parsed_cmd_q_len_, 0u);
+  DCHECK_GE(parsed_cmd_q_bytes_, used_mem);
+  DCHECK_GT(conn_stats.pipeline_queue_entries, 0u);
+  DCHECK_GE(conn_stats.pipeline_queue_bytes, used_mem);
+  parsed_cmd_q_len_--;
+  parsed_cmd_q_bytes_ -= used_mem;
+  conn_stats.pipeline_queue_entries--;
+  conn_stats.pipeline_queue_bytes -= used_mem;
 }
 
 void Connection::DestroyParsedQueue() {
