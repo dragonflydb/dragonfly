@@ -57,41 +57,9 @@ Dragonfly supports three flavors of Pub/Sub:
 
 ## Data Flow Overview
 
-```mermaid
-flowchart LR
-    subgraph Client
-        PUB[PUBLISH channel msg]
-        SUB[SUBSCRIBE channel]
-    end
-
-    subgraph ChannelStore
-        CM[ChannelMap<br/>16 shards]
-        PM[PatternMap<br/>16 shards]
-    end
-
-    subgraph Dispatch
-        FB[FetchSubscribers]
-        BP[Backpressure Gate]
-        DB[DispatchBrief<br/>all I/O threads]
-    end
-
-    subgraph Connections
-        C1[conn 1 dispatch_q_]
-        C2[conn 2 dispatch_q_]
-        C3[conn N dispatch_q_]
-    end
-
-    PUB --> FB
-    FB -->|read_mu_ shared| CM
-    FB -->|read_mu_ shared| PM
-    FB --> BP
-    BP --> DB
-    DB --> C1
-    DB --> C2
-    DB --> C3
-
-    SUB -->|write_mu_ exclusive| CM
-```
+<div align="center">
+  <img src="pubsub/Data_Flow_Overview.svg" alt="Pub/Sub Data Flow Overview" width="700"/>
+</div>
 
 ## Subscription Management (Shard-Locked ChannelStore)
 
@@ -101,22 +69,9 @@ The `ChannelStore` holds two `ChannelMap` instances — one for exact-channel su
 one for pattern subscriptions. Each `ChannelMap` is a `ShardedHashMap<string, UpdatablePointer, 16>`
 backed by 16 independently-locked shards:
 
-```mermaid
-flowchart TD
-    CS[ChannelStore]
-    CS --> channels_["channels_ : ChannelMap"]
-    CS --> patterns_["patterns_ : ChannelMap"]
-
-    channels_ --> S0["Shard 0<br/>write_mu_ + read_mu_"]
-    channels_ --> S1["Shard 1<br/>write_mu_ + read_mu_"]
-    channels_ --> SN["Shard 15<br/>write_mu_ + read_mu_"]
-
-    S0 --> E0["&quot;news&quot; → UpdatablePointer"]
-    S1 --> E1["&quot;chat&quot; → UpdatablePointer"]
-
-    E0 --> SM0["SubscribeMap<br/>{cntx_A→tid0, cntx_B→tid1}"]
-    E1 --> SM1["SubscribeMap<br/>{cntx_C→tid2}"]
-```
+<div align="center">
+  <img src="pubsub/Data_Structure_Layout.svg" alt="ChannelStore Data Structure Layout" width="700"/>
+</div>
 
 Each shard carries two fiber-aware locks:
 
@@ -148,23 +103,9 @@ in a single `Mutate()` call, minimizing lock acquisitions:
 
 ### Apply() Flow
 
-```mermaid
-flowchart TD
-    Start["Apply() — for each shard with ops"]
-    Start --> Mutate["Mutate(ShardId{sid}, ...)<br/>acquires write_mu_"]
-
-    Mutate --> P1["Phase 1: RCU pointer swaps<br/>(write_mu_ held, read_mu_ NOT held)"]
-    P1 -->|"key exists"| Swap["Copy SubscribeMap → modify → Set()<br/>old ptr → freelist_"]
-    P1 -->|"key missing / last sub"| Mark["Mark needs_map_change"]
-
-    Mark --> P2["Phase 2: Structural changes<br/>AcquireReaderExclusiveLock → read_mu_ exclusive"]
-    P2 --> Insert["Insert new key + SubscribeMap"]
-    P2 --> Erase["Delete SubscribeMap + erase key"]
-
-    Mutate --> Release["Release write_mu_"]
-    Release --> P3["Phase 3: WithReadExclusiveLock<br/>acquires read_mu_ exclusive"]
-    P3 --> Del["Delete old SubscribeMap ptrs<br/>from freelist_"]
-```
+<div align="center">
+  <img src="pubsub/Apply_Flow.svg" alt="ChannelStoreUpdater Apply() Flow" width="700"/>
+</div>
 
 The `ChannelStoreUpdater::Apply()` method iterates over each shard that has pending
 operations and calls `map.Mutate(ShardId{sid}, ...)` to acquire `write_mu_` once per shard.
