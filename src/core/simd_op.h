@@ -19,11 +19,11 @@
 namespace dfly {
 
 // SimdOp<T, N> wraps N consecutive uint64_t lanes behind the GCC/Clang
-// vector-extension type. Compare ops return another SimdOp with all-ones or
-// all-zeros lanes; ToBits() compresses such a mask to a uint32_t bitmask
-// (LSB = lane 0).
+// vector-extension type. Compare ops produce another SimdOp whose lanes are
+// all-ones or all-zeros, which GetMSBs() then compresses to a scalar.
 template <class T, std::size_t N> class SimdOp {
-  static_assert(std::is_same_v<T, std::uint64_t>, "only uint64_t is supported today");
+  static_assert(std::is_integral_v<T>, "lane type must be integral");
+  static_assert(sizeof(T) == 8, "only 64-bit lanes are supported today");
   static_assert(N == 2 || N == 4, "only N=2 (SSE/NEON) and N=4 (AVX2) are supported today");
 
   using Vec __attribute__((vector_size(sizeof(T) * N))) = T;
@@ -34,9 +34,9 @@ template <class T, std::size_t N> class SimdOp {
 
   SimdOp() = default;
 
-  // Broadcasting via `Vec{} + value` lowers to vpbroadcast on AVX2 / dup on
+  // Filling via `Vec{} + value` lowers to vpbroadcast on AVX2 / dup on
   // NEON; a per-lane scalar loop pessimizes to vpinsrq + vperm2i128.
-  static SimdOp Broadcast(T value) {
+  static SimdOp Fill(T value) {
     return Vec{} + value;
   }
 
@@ -70,10 +70,13 @@ template <class T, std::size_t N> class SimdOp {
     return Vec(v_ == (Vec{} + value));
   }
 
-  // The architecture branches exist because no portable formulation lowers to
-  // a single movemask instruction — every plain vector-extension version we
-  // tried measured ~5% slower on OAHSet's hot path.
-  BitsType ToBits() const {
+  // Packs the most-significant bit of every lane into a uint32_t bitmask
+  // (LSB = lane 0). For the output of `operator==` (lanes are all-ones or
+  // all-zeros) this is equivalent to "bit i set iff lane i is non-zero".
+  BitsType GetMSBs() const {
+    // We hand-write the per-ISA movemask because no portable C++ /
+    // vector-extension formulation lowers to a single movemask instruction
+    // — every alternative we tried measured ~5% slower on OAHSet's hot path.
 #if defined(__AVX2__)
     if constexpr (N == 4) {
       __m256i raw;
@@ -85,8 +88,9 @@ template <class T, std::size_t N> class SimdOp {
       return static_cast<BitsType>(_mm_movemask_pd(_mm_castsi128_pd(raw)));
     }
 #elif defined(__ARM_NEON)
-    // NEON has no movemask; shrn collapses each 64-bit lane to its top 32
-    // bits in one instruction. For N=4 we do it on both 128-bit halves.
+    // NEON has no movemask; vshrn_n_u64 collapses each 64-bit lane to its
+    // top 32 bits in one instruction. For N=4 we run it on both 128-bit
+    // halves and stitch the two 2-bit results together.
     uint64x2_t halves[N / 2];
     std::memcpy(halves, &v_, sizeof(v_));
     BitsType bits = 0;

@@ -14,52 +14,52 @@ namespace dfly {
 using U64x2 = SimdOp<std::uint64_t, 2>;
 using U64x4 = SimdOp<std::uint64_t, 4>;
 
-TEST(SimdOpTest, BroadcastAndLoadAreEquivalent) {
+TEST(SimdOpTest, FillAndLoadAreEquivalent) {
   std::uint64_t arr[4] = {7, 7, 7, 7};
-  auto a = U64x4::Broadcast(7);
+  auto a = U64x4::Fill(7);
   auto b = U64x4::Load(arr);
-  EXPECT_EQ((a == b).ToBits(), 0xFu);
+  EXPECT_EQ((a == b).GetMSBs(), 0xFu);
 }
 
 TEST(SimdOpTest, LoadKeepsLaneOrder) {
   std::uint64_t arr[4] = {1, 2, 3, 4};
   auto v = U64x4::Load(arr);
-  EXPECT_EQ((v == uint64_t(1)).ToBits(), 0x1u);
-  EXPECT_EQ((v == uint64_t(2)).ToBits(), 0x2u);
-  EXPECT_EQ((v == uint64_t(3)).ToBits(), 0x4u);
-  EXPECT_EQ((v == uint64_t(4)).ToBits(), 0x8u);
-  EXPECT_EQ((v == uint64_t(99)).ToBits(), 0x0u);
+  EXPECT_EQ((v == uint64_t(1)).GetMSBs(), 0x1u);
+  EXPECT_EQ((v == uint64_t(2)).GetMSBs(), 0x2u);
+  EXPECT_EQ((v == uint64_t(3)).GetMSBs(), 0x4u);
+  EXPECT_EQ((v == uint64_t(4)).GetMSBs(), 0x8u);
+  EXPECT_EQ((v == uint64_t(99)).GetMSBs(), 0x0u);
 }
 
 TEST(SimdOpTest, ScalarEqDetectsZeroLanes) {
   std::uint64_t arr[4] = {0, 5, 0, 9};
   auto v = U64x4::Load(arr);
-  EXPECT_EQ((v == uint64_t(0)).ToBits(), 0b0101u);
+  EXPECT_EQ((v == uint64_t(0)).GetMSBs(), 0b0101u);
 }
 
 TEST(SimdOpTest, BitwiseAndOrShift) {
   std::uint64_t arr[4] = {0xFF00FF00u, 0x00FF00FFu, 0xFFFF0000u, 0x0000FFFFu};
   auto v = U64x4::Load(arr);
-  auto masked = v & U64x4::Broadcast(0xFFFF0000ULL);
+  auto masked = v & U64x4::Fill(0xFFFF0000ULL);
   std::uint64_t expected[4] = {0xFF000000ULL, 0x00FF0000ULL, 0xFFFF0000ULL, 0x00000000ULL};
-  EXPECT_EQ((masked == U64x4::Load(expected)).ToBits(), 0xFu);
+  EXPECT_EQ((masked == U64x4::Load(expected)).GetMSBs(), 0xFu);
 
   auto shifted = masked >> 16;
   std::uint64_t shifted_expected[4] = {0xFF00ULL, 0xFFULL, 0xFFFFULL, 0x0ULL};
-  EXPECT_EQ((shifted == U64x4::Load(shifted_expected)).ToBits(), 0xFu);
+  EXPECT_EQ((shifted == U64x4::Load(shifted_expected)).GetMSBs(), 0xFu);
 
   std::uint64_t a_arr[4] = {0xAAAAULL, 0x0ULL, 0xAAAAULL, 0x0ULL};
   std::uint64_t b_arr[4] = {0x0ULL, 0x5555ULL, 0x5555ULL, 0x0ULL};
   std::uint64_t or_expected[4] = {0xAAAAULL, 0x5555ULL, 0xFFFFULL, 0x0ULL};
   auto a = U64x4::Load(a_arr);
   auto b = U64x4::Load(b_arr);
-  EXPECT_EQ(((a | b) == U64x4::Load(or_expected)).ToBits(), 0xFu);
+  EXPECT_EQ(((a | b) == U64x4::Load(or_expected)).GetMSBs(), 0xFu);
 }
 
 TEST(SimdOpTest, NotInvertsAllBits) {
   std::uint64_t arr[4] = {0, 0, 0, 0};
   auto v = U64x4::Load(arr);
-  EXPECT_EQ((~v == ~uint64_t(0)).ToBits(), 0xFu);
+  EXPECT_EQ((~v == ~uint64_t(0)).GetMSBs(), 0xFu);
 }
 
 TEST(SimdOpTest, ToBitsLsbIsLaneZero) {
@@ -67,20 +67,20 @@ TEST(SimdOpTest, ToBitsLsbIsLaneZero) {
   // pops out (regression for any byte-order surprise).
   std::uint64_t arr[4] = {42, 0, 0, 0};
   auto v = U64x4::Load(arr);
-  EXPECT_EQ((v == uint64_t(42)).ToBits(), 0x1u);
+  EXPECT_EQ((v == uint64_t(42)).GetMSBs(), 0x1u);
 }
 
 TEST(SimdOpTest, U64x2WorksForVectorSearch) {
   // The 2-lane version is used by OAHSet::ProbeExtensionVector.
   std::uint64_t arr[2] = {0xDEAD, 0xBEEF};
   auto v = U64x2::Load(arr);
-  EXPECT_EQ((v == uint64_t(0xDEAD)).ToBits(), 0x1u);
-  EXPECT_EQ((v == uint64_t(0xBEEF)).ToBits(), 0x2u);
-  EXPECT_EQ((v == uint64_t(0)).ToBits(), 0x0u);
+  EXPECT_EQ((v == uint64_t(0xDEAD)).GetMSBs(), 0x1u);
+  EXPECT_EQ((v == uint64_t(0xBEEF)).GetMSBs(), 0x2u);
+  EXPECT_EQ((v == uint64_t(0)).GetMSBs(), 0x0u);
 
   std::uint64_t with_zero[2] = {0, 0xBEEF};
   auto v2 = U64x2::Load(with_zero);
-  EXPECT_EQ((v2 == uint64_t(0)).ToBits(), 0x1u);
+  EXPECT_EQ((v2 == uint64_t(0)).GetMSBs(), 0x1u);
 }
 
 // Exercises the exact composition pattern from OAHSet::Add:
@@ -97,18 +97,18 @@ TEST(SimdOpTest, MimicsOAHSetProbeComposition) {
   };
 
   auto data_v = U64x4::Load(buckets);
-  auto hash_v = (data_v & U64x4::Broadcast(kExtHashMask)) >> kExtHashShift;
+  auto hash_v = (data_v & U64x4::Fill(kExtHashMask)) >> kExtHashShift;
   auto is_empty = data_v == uint64_t(0);
   auto candidate = ((hash_v == uint64_t(42)) | (hash_v == uint64_t(0))) & ~is_empty;
 
-  EXPECT_EQ(candidate.ToBits(), 0b0110u);
-  EXPECT_EQ(is_empty.ToBits(), 0b0001u);
+  EXPECT_EQ(candidate.GetMSBs(), 0b0110u);
+  EXPECT_EQ(is_empty.GetMSBs(), 0b0001u);
 }
 
 TEST(SimdOpTest, ToBitsIterationViaCountrZero) {
   std::uint64_t buckets[4] = {0, 5, 0, 5};
   auto v = U64x4::Load(buckets);
-  auto bits = (v == uint64_t(5)).ToBits();
+  auto bits = (v == uint64_t(5)).GetMSBs();
   std::vector<unsigned> found;
   while (bits) {
     found.push_back(std::countr_zero(bits));

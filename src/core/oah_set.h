@@ -200,7 +200,7 @@ class OAHSet {  // Open Addressing Hash Set
 
     auto data_v = EntryWide::Load(reinterpret_cast<const uint64_t*>(&entries_[bucket_id]));
     auto hash_v =
-        (data_v & EntryWide::Broadcast(OAHEntry::kExtHashShiftedMask)) >> OAHEntry::kExtHashShift;
+        (data_v & EntryWide::Fill(OAHEntry::kExtHashShiftedMask)) >> OAHEntry::kExtHashShift;
 
     // !is_empty guards an empty lane's zero hash_v from aliasing a hash
     // match when ext_hash==0 or the lazy-init (stored==0) branch.
@@ -209,7 +209,7 @@ class OAHSet {  // Open Addressing Hash Set
 
     OAHEntry* reuse_slot = nullptr;
 
-    auto cand_bits = candidate.ToBits();
+    auto cand_bits = candidate.GetMSBs();
     while (cand_bits) {
       const uint32_t i = std::countr_zero(cand_bits);
       cand_bits &= cand_bits - 1;
@@ -248,7 +248,7 @@ class OAHSet {  // Open Addressing Hash Set
       return true;
     }
 
-    if (auto empty_bits = is_empty.ToBits(); empty_bits) {
+    if (auto empty_bits = is_empty.GetMSBs(); empty_bits) {
       entries_[bucket_id + std::countr_zero(empty_bits)] = std::move(entry);
     } else {
       ptr_vectors_alloc_used_ += entries_[ext_bid].Insert(std::move(entry));
@@ -344,12 +344,12 @@ class OAHSet {  // Open Addressing Hash Set
 
     for (size_t base = 0; base < size; base += kVectorLaneStep) {
       auto data_v = VectorWide::Load(reinterpret_cast<const uint64_t*>(&raw_arr[base]));
-      auto hash_v = (data_v & VectorWide::Broadcast(OAHEntry::kExtHashShiftedMask)) >>
-                    OAHEntry::kExtHashShift;
+      auto hash_v =
+          (data_v & VectorWide::Fill(OAHEntry::kExtHashShiftedMask)) >> OAHEntry::kExtHashShift;
       auto is_empty = data_v == uint64_t(0);
       auto candidate = ((hash_v == ext_hash) | (hash_v == uint64_t(0))) & ~is_empty;
 
-      auto cand_bits = candidate.ToBits();
+      auto cand_bits = candidate.GetMSBs();
       while (cand_bits) {
         const uint32_t j = std::countr_zero(cand_bits);
         cand_bits &= cand_bits - 1;
