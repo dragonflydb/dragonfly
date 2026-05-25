@@ -3749,7 +3749,7 @@ async def _run_tiering_migration(
     assert info["oom_rejections"] == 0
     assert info["db0"]["keys"] == keys
 
-    async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED", timeout=120):
+    async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED", timeout=20):
         with breaker:
             logging.info(f"Tiered entries: {info['tiered_entries']}")
             assert info["tiered_entries"] >= min_tiered_entries
