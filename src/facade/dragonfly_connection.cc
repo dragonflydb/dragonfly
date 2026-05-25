@@ -1574,7 +1574,6 @@ io::Result<size_t> Connection::HandleRecvSocket() {
 }
 
 io::Result<Connection::ParserStatus> Connection::IoLoop() {
-  error_code ec;
   ParserStatus parse_status = OK;
   size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
