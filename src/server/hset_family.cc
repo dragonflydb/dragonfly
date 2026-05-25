@@ -13,6 +13,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include "absl/flags/flag.h"
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/overloaded.h"
@@ -32,6 +33,11 @@ extern "C" {
 #include "server/tiering/serialized_map.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
+
+ABSL_FLAG(size_t, listpack_max_field_len, 64,
+          "Maximum length of a hash field or value to be stored in listpack encoding");
+ABSL_FLAG(size_t, listpack_max_bytes, 1024,
+          "Maximum total bytes of a hash in listpack encoding before converting to a hash table");
 
 using namespace std;
 
