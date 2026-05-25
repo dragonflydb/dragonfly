@@ -52,6 +52,47 @@ namespace {
 constexpr XXH64_hash_t kHashSeed = 24061983;
 constexpr size_t kAlignSize = 8u;
 
+// Maximum size of the HUFFMAN_ENC varint size-delta header, in bytes.
+constexpr unsigned kMaxHuffHeaderSize = 2;
+
+// HUFFMAN_ENC varint size-delta header layout:
+//   * (b0 & 0x80) == 0 : 1-byte header; delta = b0 (0..127).
+//   * (b0 & 0x80) != 0 : 2-byte header; delta = ((b0 & 0x7F) << 8) | b1 (0..32767),
+//                        i.e. 7 high bits in byte 0 and 8 low bits in byte 1.
+// b1 is only accessed when b0's top bit is set.
+struct HuffHeader {
+  uint16_t delta;
+  uint8_t header_len;
+
+  explicit HuffHeader(uint16_t header) {
+    if ((header & 0x80) == 0) {
+      delta = header;
+      header_len = 1;
+    } else {
+      delta = ((header & 0x7F00) >> 8) | (header & 0x00FF);
+      header_len = 2;
+    }
+  }
+};
+
+inline uint8_t HuffHeaderLen(uint8_t b0) {
+  return (b0 & 0x80) ? 2 : 1;
+}
+
+// Encodes `delta` into a 1- or 2-byte varint header in the provided 2-byte window.
+// For 1-byte headers, the byte is written to window[1] so the caller can use
+// kMaxHuffHeaderSize - header_len as the start offset.
+inline uint8_t EncodeHuffHeader(uint16_t delta, uint8_t* window) {
+  DCHECK_LT(delta, 1u << 15);
+  if (delta < 128) {
+    window[1] = static_cast<uint8_t>(delta);
+    return 1;
+  }
+  window[0] = static_cast<uint8_t>(0x80 | ((delta >> 8) & 0x7F));
+  window[1] = static_cast<uint8_t>(delta & 0xFF);
+  return 2;
+}
+
 size_t UpdateSize(size_t size, int64_t update) {
   int64_t result = static_cast<int64_t>(size) + update;
   if (result < 0) {
@@ -397,6 +438,48 @@ thread_local TL tl;
 
 constexpr bool kUseAsciiEncoding = true;
 
+struct HuffEncodeResult {
+  // The encoded blob (varint size-delta header + compressed payload). Backed by tl.tmp_buf.
+  // Empty if compression was not produced (encoder absent, encoder error, or output not
+  // smaller than the input).
+  std::string_view blob;
+  unsigned dest_len = 0;  // compressed payload size, in bytes (blob.size() - header_len).
+};
+
+// Attempts to huffman-compress `str` into tl.tmp_buf with a varint size-delta header
+// prepended. Increments tl.huff_encode_total. Returns an empty blob if compression was
+// not produced; the caller decides whether to actually accept the encoding based on its
+// inline-fit / savings policy.
+HuffEncodeResult TryHuffEncode(std::string_view str, const HuffmanEncoder& encoder) {
+  HuffEncodeResult out;
+  unsigned dest_len = encoder.CompressedBound(str.size());
+  // Compress into offset kMaxHuffHeaderSize and then prepend either 1 or 2 header bytes
+  // so the blob always ends at offset kMaxHuffHeaderSize + dest_len. See HuffHeader for
+  // the wire layout.
+  tl.tmp_buf.resize(kMaxHuffHeaderSize + dest_len);
+  std::string err_msg;
+  ++tl.huff_encode_total;
+  bool res = encoder.Encode(str, tl.tmp_buf.data() + kMaxHuffHeaderSize, &dest_len, &err_msg);
+  if (!res) {
+    // Should not happen — the destination buffer is sized from CompressedBound.
+    LOG(DFATAL) << "Failed to encode string with huffman: " << err_msg;
+    return out;
+  }
+  // Reject outputs that are not strictly smaller than the input: the delta computation
+  // below would underflow and we'd reject them anyway on the savings check.
+  if (!dest_len || dest_len >= str.size())
+    return out;
+
+  unsigned delta = str.size() - dest_len;
+  uint8_t header_len = EncodeHuffHeader(delta, tl.tmp_buf.data());
+  size_t buf_start = kMaxHuffHeaderSize - header_len;
+  out.blob = std::string_view{reinterpret_cast<char*>(tl.tmp_buf.data() + buf_start),
+                              size_t(header_len) + dest_len};
+  out.dest_len = dest_len;
+
+  return out;
+}
+
 }  // namespace
 
 static_assert(sizeof(CompactObj) == 18);
@@ -535,20 +618,24 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
 }
 
 size_t CompactObj::Size() const {
-  auto decoded_str_size = [this](size_t raw_size, uint8_t first_byte) {
+  auto decoded_str_size = [this](size_t raw_size, uint16_t huff_header) {
     DCHECK_EQ(ObjType(), OBJ_STRING);
-    return GetStrEncoding().DecodedSize(raw_size, first_byte);
+    return GetStrEncoding().DecodedSize(raw_size, huff_header);
   };
 
+  // For non-HUFFMAN_ENC encodings the header argument is ignored, so we only assemble it
+  // when needed to avoid touching extra bytes that may not exist (e.g. taglen_ == 1).
+  uint16_t huff_header = (encoding_ == HUFFMAN_ENC) ? GetHuffHeader() : 0;
+
   if (IsInline())
-    return decoded_str_size(taglen_, u_.inline_str[0]);
+    return decoded_str_size(taglen_, huff_header);
 
   switch (taglen_) {
     case SMALL_TAG:
-      return decoded_str_size(u_.small_str.size(), u_.small_str.first_byte());
+      return decoded_str_size(u_.small_str.size(), huff_header);
     case EXTERNAL_TAG:
       if (ObjType() == OBJ_STRING)
-        return decoded_str_size(u_.ext_ptr.serialized_size, GetFirstByte());
+        return decoded_str_size(u_.ext_ptr.serialized_size, huff_header);
       else
         return u_.ext_ptr.serialized_size;
     case LIST_TAG: {
@@ -591,11 +678,11 @@ size_t CompactObj::Size() const {
       // For streams, Size() returns malloc bytes (tracked in r_obj.sz_).
       return u_.r_obj.Size();
     case LARGE_STR_TAG:
-      return decoded_str_size(u_.large_str.Size(), *(uint8_t*)u_.large_str.ptr);
+      return decoded_str_size(u_.large_str.Size(), huff_header);
     case INT_TAG:
       return absl::AlphaNum(u_.ival).size();
     case SDS_TTL_TAG:
-      return decoded_str_size(sdslen(u_.sds_ttl.sds_ptr), u_.sds_ttl.sds_ptr[0]);
+      return decoded_str_size(sdslen(u_.sds_ttl.sds_ptr), huff_header);
     case JSON_TAG:
       if (JsonEnconding() == kEncodingJsonFlat)
         return u_.json_obj.flat.json_len;
@@ -638,12 +725,14 @@ uint64_t CompactObj::HashCode() const {
   DCHECK(encoding_);
 
   if (IsInline()) {
-    // Buffer must accommodate maximum decompressed size from inline storage
-    // Highly compressible data can achieve ~8x compression (e.g., repeated character)
-    // kInlineLen (16 bytes) compressed -> up to 128 bytes decompressed
-    char buf[kInlineLen * 8];
-    size_t decoded_len = GetStrEncoding().Decode(string_view{u_.inline_str, taglen_}, buf);
-    return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
+    // Inline storage holds at most kInlineLen bytes of encoded data, but HUFFMAN_ENC can
+    // decompress up to kMaxHuffLen=16KB. Route through tl.tmp_str to avoid a large stack buf.
+    StrEncoding str_encoding = GetStrEncoding();
+    string_view blob{u_.inline_str, taglen_};
+    size_t decoded_len = str_encoding.DecodedSize(blob);
+    tl.tmp_str.resize(decoded_len);
+    str_encoding.Decode(blob, tl.tmp_str.data());
+    return XXH3_64bits_withSeed(tl.tmp_str.data(), decoded_len, kHashSeed);
   }
 
   string_view sv = GetSlice(&tl.tmp_str);
@@ -1099,16 +1188,17 @@ void CompactObj::GetString(char* dest) const {
 }
 
 void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep) {
-  uint8_t first_byte = 0;
+  uint16_t huff_header = 0;
   if (encoding_ == HUFFMAN_ENC) {
     CHECK(rep == ExternalRep::STRING);
-    first_byte = GetFirstByte();
+    huff_header = GetHuffHeader();
   }
   SetMeta(EXTERNAL_TAG, mask_);
 
   u_.ext_ptr.is_cool = 0;
   u_.ext_ptr.representation = static_cast<uint8_t>(rep);
-  u_.ext_ptr.first_byte = first_byte;
+  u_.ext_ptr.header_bytes[0] = uint8_t(huff_header & 0xFF);
+  u_.ext_ptr.header_bytes[1] = uint8_t((huff_header >> 8) & 0xFF);
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.offload.page_index = offset / 4096;
@@ -1166,8 +1256,9 @@ string_view CompactObj::GetEncodedBlob(StrEncoding str_encoding, char* opt_dest)
   auto& ss = u_.small_str;
   char* copy_dest = nullptr;
   if (opt_dest && str_encoding.enc_ != HUFFMAN_ENC) {
-    // Write to rightmost location of dest buffer to leave some bytes for inline unpacking
-    size_t decoded_len = str_encoding.DecodedSize(ss.size(), ss.first_byte());
+    // Write to rightmost location of dest buffer to leave some bytes for inline unpacking.
+    // huff_header is unused for non-HUFFMAN encodings; pass 0.
+    size_t decoded_len = str_encoding.DecodedSize(ss.size(), uint16_t{0});
     copy_dest = opt_dest + (decoded_len - ss.size());
   } else {
     tl.tmp_buf.resize(ss.size());
@@ -1230,7 +1321,48 @@ uint8_t CompactObj::GetFirstByte() const {
       const CompactObj& cooled_obj = u_.ext_ptr.cool_record->value;
       return cooled_obj.GetFirstByte();
     }
-    return u_.ext_ptr.first_byte;
+    return u_.ext_ptr.header_bytes[0];
+  }
+
+  LOG(DFATAL) << "Bad tag " << int(taglen_);
+  return 0;
+}
+
+uint16_t CompactObj::GetHuffHeader() const {
+  DCHECK_EQ(encoding_, HUFFMAN_ENC);
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
+  auto load_le16 = [](const char* p) {
+    return uint16_t(uint8_t(p[0])) | (uint16_t(uint8_t(p[1])) << 8);
+  };
+
+  if (IsInline()) {
+    DCHECK_GE(taglen_, 2);
+    return load_le16(u_.inline_str);
+  }
+
+  if (taglen_ == LARGE_STR_TAG) {
+    DCHECK(u_.large_str.ptr);
+    DCHECK_GE(u_.large_str.Size(), 2u);
+    return load_le16(reinterpret_cast<const char*>(u_.large_str.ptr));
+  }
+
+  if (taglen_ == SMALL_TAG) {
+    DCHECK_GE(u_.small_str.size(), 2u);
+    return u_.small_str.first_two_bytes();
+  }
+
+  if (taglen_ == SDS_TTL_TAG) {
+    DCHECK_GE(sdslen(u_.sds_ttl.sds_ptr), 2u);
+    return load_le16(u_.sds_ttl.sds_ptr);
+  }
+
+  if (taglen_ == EXTERNAL_TAG) {
+    if (u_.ext_ptr.is_cool) {
+      const CompactObj& cooled_obj = u_.ext_ptr.cool_record->value;
+      return cooled_obj.GetHuffHeader();
+    }
+    return uint16_t(u_.ext_ptr.header_bytes[0]) | (uint16_t(u_.ext_ptr.header_bytes[1]) << 8);
   }
 
   LOG(DFATAL) << "Bad tag " << int(taglen_);
@@ -1247,7 +1379,7 @@ bool CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
 
     if (!str_encoding.DecodeByte(decode_blob, idx, res)) {
       VLOG(1) << "Offset out of bounds for encoded string: " << idx
-              << " >= " << str_encoding.DecodedSize(decode_blob.size(), decode_blob[0]);
+              << " >= " << str_encoding.DecodedSize(decode_blob);
       *res = 0;
       return false;
     }
@@ -1303,7 +1435,8 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
   if (encoding_ && (encoding_ == ASCII1_ENC || encoding_ == ASCII2_ENC) &&
       taglen_ == LARGE_STR_TAG && absl::ascii_isascii(val)) {
     auto* buf = reinterpret_cast<uint8_t*>(u_.large_str.ptr);
-    size_t decoded_len = GetStrEncoding().DecodedSize(u_.large_str.Size(), buf[0]);
+    // ASCII encodings ignore the huff_header parameter.
+    size_t decoded_len = GetStrEncoding().DecodedSize(u_.large_str.Size(), uint16_t{0});
     if (idx >= decoded_len) {
       VLOG(1) << "Offset out of bounds for ASCII encoded string: " << idx << " >= " << decoded_len;
       return {false, false};
@@ -1462,17 +1595,6 @@ bool CompactObj::CmpEncoded(string_view sv) const {
     if (sv.size() != sz)
       return false;
 
-    if (IsInline()) {
-      // Buffer must accommodate maximum decompressed size from inline storage (~8x compression)
-      constexpr size_t kMaxHuffLen = kInlineLen * 8;
-      if (sz <= kMaxHuffLen) {
-        char buf[kMaxHuffLen];
-        auto domain = is_key_ ? HUFF_KEYS : HUFF_STRING_VALUES;
-        const auto& decoder = tl.GetHuffmanDecoder(domain);
-        CHECK(decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, sz, buf));
-        return sv == string_view(buf, sz);
-      }
-    }
     tl.tmp_str.resize(sz);
     GetString(tl.tmp_str.data());
     return sv == tl.tmp_str;
@@ -1564,11 +1686,8 @@ void CompactObj::EncodeString(string_view str) {
   string_view encoded = str;
   bool huff_encoded = false;
 
-  // We chose such length that we can store the decoded length delta into 1 byte.
-  // The maximum huffman compression is 1/8, so 288 / 8 = 36.
-  // 288 - 36 = 252, which is smaller than 256.
-  // TODO: introduce variable length huffman length.
-  constexpr unsigned kMaxHuffLen = 288;
+  // See CompactObj::kMaxHuffLen — the encoded blob carries a varint size-delta header
+  // (1 or 2 bytes) that recovers the decoded length from the cached header bytes.
 
   // For sizes 17, 18 we would like to test ascii encoding first as it's more efficient.
   // And if it succeeds we can squash into the inline buffer.
@@ -1577,35 +1696,24 @@ void CompactObj::EncodeString(string_view str) {
 
   // if !is_ascii, we try huffman encoding next.
   if (!is_ascii && str.size() <= kMaxHuffLen) {
-    auto& huffman = is_key_ ? tl.huff_keys : tl.huff_string_values;
+    const auto& huffman = is_key_ ? tl.huff_keys : tl.huff_string_values;
     if (huffman.encoder.valid()) {
-      unsigned dest_len = huffman.encoder.CompressedBound(str.size());
-      // 1 byte for storing the size delta.
-      tl.tmp_buf.resize(1 + dest_len);
-      string err_msg;
-      ++tl.huff_encode_total;
-      bool res = huffman.encoder.Encode(str, tl.tmp_buf.data() + 1, &dest_len, &err_msg);
-      if (res) {
-        // we accept huffman encoding only if it is:
-        // 1. smaller than the original string by 20%
-        // 2. allows us to store the encoded string in the inline buffer
-        if (dest_len && (dest_len < kInlineLen || (dest_len + dest_len / 5) < str.size())) {
-          huff_encoded = true;
-          tl.huff_encode_success++;
-          encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), dest_len + 1};
-          unsigned delta = str.size() - dest_len;
-          DCHECK_LT(delta, 256u);
-          tl.tmp_buf[0] = static_cast<uint8_t>(delta);
-          encoding_ = HUFFMAN_ENC;
-          if (encoded.size() <= kInlineLen) {
-            SetMeta(encoded.size(), mask_);
-            memcpy(u_.inline_str, tl.tmp_buf.data(), encoded.size());
-            return;
-          }
+      HuffEncodeResult huff = TryHuffEncode(str, huffman.encoder);
+
+      // we accept huffman encoding only if it:
+      // 1. allows us to store the encoded string in the inline buffer (header included), OR
+      // 2. is smaller than the original string by 20%.
+      if (!huff.blob.empty() &&
+          (huff.blob.size() <= kInlineLen || (huff.dest_len + huff.dest_len / 5) < str.size())) {
+        huff_encoded = true;
+        ++tl.huff_encode_success;
+        encoded = huff.blob;
+        encoding_ = HUFFMAN_ENC;
+        if (encoded.size() <= kInlineLen) {
+          SetMeta(encoded.size(), mask_);
+          memcpy(u_.inline_str, encoded.data(), encoded.size());
+          return;
         }
-      } else {
-        // Should not happen, means we have an internal buf.
-        LOG(DFATAL) << "Failed to encode string with huffman: " << err_msg;
       }
     }
   }
@@ -1805,18 +1913,33 @@ uint64_t CompactKey::GetExpireTime() const {
 }
 
 size_t CompactObj::StrEncoding::DecodedSize(string_view blob) const {
-  return DecodedSize(blob.size(), blob[0]);
+  uint16_t huff_header = 0;
+  if (enc_ == HUFFMAN_ENC) {
+    DCHECK_GE(blob.size(), 1u);
+    uint8_t b0 = uint8_t(blob[0]);
+    uint8_t b1 = 0;
+    if (HuffHeaderLen(b0) == 2) {
+      DCHECK_GE(blob.size(), 2u);
+      b1 = uint8_t(blob[1]);
+    }
+    huff_header = uint16_t(b0) | (uint16_t(b1) << 8);
+  }
+  return DecodedSize(blob.size(), huff_header);
 }
 
-size_t CompactObj::StrEncoding::DecodedSize(size_t blob_size, uint8_t first_byte) const {
+size_t CompactObj::StrEncoding::DecodedSize(size_t blob_size, uint16_t huff_header) const {
   switch (enc_) {
     case NONE_ENC:
       return blob_size;
     case ASCII1_ENC:
     case ASCII2_ENC:
       return ascii_len(blob_size) - (enc_ == ASCII1_ENC);
-    case HUFFMAN_ENC:
-      return blob_size + int(first_byte) - 1;
+    case HUFFMAN_ENC: {
+      // huff_header holds the first 2 bytes of the blob assembled little-endian. The actual
+      // header is a varint, so it occupies either 1 or 2 bytes of the blob.
+      HuffHeader h{huff_header};
+      return blob_size + size_t(h.delta) - h.header_len;
+    }
   };
   return 0;
 }
@@ -1836,7 +1959,7 @@ size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const 
     case HUFFMAN_ENC: {
       auto domain = is_key_ ? HUFF_KEYS : HUFF_STRING_VALUES;
       const auto& decoder = tl.GetHuffmanDecoder(domain);
-      decoder.Decode(blob.substr(1), decoded_len, dest);
+      decoder.Decode(blob.substr(HuffHeaderLen(blob[0])), decoded_len, dest);
       break;
     }
   };
@@ -1864,7 +1987,7 @@ bool CompactObj::StrEncoding::DecodeByte(std::string_view blob, size_t idx, uint
       std::string decoded_huff_string(decoded_len, 0);
       auto domain = is_key_ ? HUFF_KEYS : HUFF_STRING_VALUES;
       const auto& decoder = tl.GetHuffmanDecoder(domain);
-      decoder.Decode(blob.substr(1), decoded_len, decoded_huff_string.data());
+      decoder.Decode(blob.substr(HuffHeaderLen(blob[0])), decoded_len, decoded_huff_string.data());
       *dest = decoded_huff_string[idx];
       break;
     }

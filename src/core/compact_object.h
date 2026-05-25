@@ -144,6 +144,14 @@ uint32_t JsonEnconding();
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
 
+ public:
+  // Maximum input length, in bytes, that we attempt to compress with Huffman encoding.
+  // The on-wire blob carries a varint size-delta header (1 or 2 bytes), so 16 KB stays well
+  // inside the 15-bit delta budget. Also used by debug tooling that builds a representative
+  // symbol histogram from existing data to train the Huffman table.
+  static constexpr unsigned kMaxHuffLen = 16 * 1024;
+
+ private:
   void operator=(const CompactObj&) = delete;
   CompactObj(const CompactObj&) = delete;
 
@@ -194,7 +202,9 @@ class CompactObj {
         : enc_(static_cast<EncodingEnum>(enc)), is_key_(is_key) {
     }
 
-    size_t DecodedSize(size_t compr_size, uint8_t first_byte) const;
+    // For HUFFMAN_ENC, huff_header is the little-endian 16-bit delta header
+    // (decoded_size - compressed_size - 2). For other encodings the header is ignored.
+    size_t DecodedSize(size_t compr_size, uint16_t huff_header) const;
 
     EncodingEnum enc_;
     bool is_key_;
@@ -421,6 +431,11 @@ class CompactObj {
   }
 
   uint8_t GetFirstByte() const;
+
+  // For HUFFMAN_ENC strings, returns the first 2 bytes of the encoded blob assembled as a
+  // little-endian uint16_t. Those 2 bytes carry the delta header that maps compressed length
+  // to decoded length. Only meaningful when encoding_ == HUFFMAN_ENC.
+  uint16_t GetHuffHeader() const;
   // Returns true if the byte was decoded successfully, false if idx is out of bounds.
   bool GetByteAtIndex(size_t idx, uint8_t* res) const;
   // Returns a pair of booleans: {success, in_place}. success is false if offset is out of bounds
@@ -500,11 +515,16 @@ class CompactObj {
 
   struct ExternalPtr {
     uint32_t serialized_size;
-    uint16_t page_offset;  // 0 for multi-page blobs. != 0 for small blobs.
-    uint8_t is_cool : 1;
-    uint8_t representation : 2;  // See ExternalRep
-    uint8_t is_reserved : 5;
-    uint8_t first_byte;
+    // page_offset only needs 12 bits (0..4095). We use the remaining 4 bits of the 16-bit
+    // container to store flag bits, freeing up a full byte that we redirect to header_bytes.
+    uint16_t page_offset : 12;  // 0 for multi-page blobs. != 0 for small blobs.
+    uint16_t is_cool : 1;
+    uint16_t representation : 2;  // See ExternalRep
+    uint16_t is_reserved : 1;
+    // For HUFFMAN_ENC strings, holds the first 2 bytes of the encoded blob, which encode
+    // the huffman delta header (little-endian) used to recover decoded length. For other
+    // encodings, only header_bytes[0] is meaningful (cached first byte).
+    uint8_t header_bytes[2];
 
     // We do not have enough space in the common area to store page_index together with
     // cool_record pointer. Therefore, we moved this field into TieredCoolRecord itself.
