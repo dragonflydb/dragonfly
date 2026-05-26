@@ -4216,7 +4216,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
       auto info = dfly_cmd_->GetReplicaInfoFromConnection(&cntx->conn_state);
       DCHECK(info != nullptr);
       if (info) {
-        info->id = arg;
+        info->SetId(arg);
       }
     } else if (cmd == "CLIENT-VERSION" && args.size() == 2) {
       unsigned version;
