@@ -111,6 +111,29 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
   return 0.0f;
 }
 
+std::string_view VectorSimilarityToString(VectorSimilarity sim) {
+  switch (sim) {
+    case VectorSimilarity::L2:
+      return "L2";
+    case VectorSimilarity::IP:
+      return "IP";
+    case VectorSimilarity::COSINE:
+      return "COSINE";
+  }
+  return "L2";
+}
+
+float DistanceToSimilarity(float distance, VectorSimilarity sim) {
+  switch (sim) {
+    case VectorSimilarity::L2:
+      return 1.0f / (1.0f + distance * distance);
+    case VectorSimilarity::IP:
+    case VectorSimilarity::COSINE:
+      return (2.0f - distance) / 2.0f;
+  }
+  return 0.0f;
+}
+
 void InitSimSIMD() {
 #if defined(WITH_SIMSIMD)
   (void)simsimd_capabilities();
