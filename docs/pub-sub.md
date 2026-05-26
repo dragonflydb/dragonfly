@@ -58,7 +58,7 @@ Dragonfly supports three flavors of Pub/Sub:
 ## Data Flow Overview
 
 <div align="center">
-  <img src="pubsub/Data_Flow_Overview.svg" alt="Pub/Sub Data Flow Overview" width="700"/>
+  <img src="pubsub/pubsub_data_flow_overview.svg" alt="Pub/Sub Data Flow Overview" width="700"/>
 </div>
 
 ## Subscription Management (Shard-Locked ChannelStore)
@@ -70,7 +70,7 @@ one for pattern subscriptions. Each `ChannelMap` is a `ShardedHashMap<string, Up
 backed by 16 independently-locked shards:
 
 <div align="center">
-  <img src="pubsub/Data_Structure_Layout.svg" alt="ChannelStore Data Structure Layout" width="700"/>
+  <img src="pubsub/pubsub_data_structure_layout.svg" alt="ChannelStore Data Structure Layout" width="700"/>
 </div>
 
 Each shard carries two fiber-aware locks:
@@ -104,7 +104,7 @@ in a single `Mutate()` call, minimizing lock acquisitions:
 ### Apply() Flow
 
 <div align="center">
-  <img src="pubsub/Apply_Flow.svg" alt="ChannelStoreUpdater Apply() Flow" width="700"/>
+  <img src="pubsub/pubsub_apply_flow.svg" alt="ChannelStoreUpdater Apply() Flow" width="700"/>
 </div>
 
 The `ChannelStoreUpdater::Apply()` method iterates over each shard that has pending
