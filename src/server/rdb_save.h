@@ -129,13 +129,21 @@ class MemBufController {
   // 1. Prepends any data in the default buffer (from previously finished entries) as a prefix.
   // 2. If the active entry was split, a tag header is inserted before current_bytes.
   // 3. current_bytes is added.
-  // 3. Consumes all buffers used.
+  // 4. Consumes all buffers used.
   // current_bytes is typically CurrentBuffer()->InputBuffer(), passed explicitly because it works
   // on data returned by PrepareFlush.
   [[nodiscard]] std::string BuildBlob(io::Bytes current_bytes);
 
   void SetTagEntries(bool tag_entries) {
     send_tagged_entries_ = tag_entries;
+  }
+
+  bool TagEntriesEnabled() const {
+    return send_tagged_entries_;
+  }
+
+  size_t GetTotalBufferCapacity() const {
+    return default_buffer_.Capacity() + entry_buffer_.Capacity();
   }
 
  private:
@@ -258,7 +266,9 @@ class RdbSerializer {
                                bool ignore_crc = false);
 
   // Internal buffer size. Might shrink after flush due to compression.
-  size_t SerializedLen() const;
+  size_t SerializedLen() const {
+    return mem_buf_controller_.FlushableSize();
+  }
 
   // Flush internal buffer and return serialized blob.
   std::string Flush(FlushState flush_state);
@@ -313,13 +323,20 @@ class RdbSerializer {
 
   std::error_code SendEofAndChecksum();
 
+  // When enabled, entries that get flushed mid-serialization are wrapped in tagged chunk
+  // envelopes so that the loader can reassemble them.
+  void SetTagEntries(bool tag_entries) {
+    mem_buf_controller_.SetTagEntries(tag_entries);
+  }
+
  private:
   // Prepare internal buffer for flush. Compress it.
   io::Bytes PrepareFlush(FlushState flush_state);
 
-  // If membuf data is compressable use compression impl to compress the data and write it to membuf
   void CompressBlob();
   void AllocateCompressorOnce();
+
+  std::optional<std::string> CompressBlob(std::string_view input);
 
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
 
@@ -355,18 +372,23 @@ class RdbSerializer {
   };
 
   CompressionMode compression_mode_;
-  io::IoBuf mem_buf_;
   std::unique_ptr<detail::CompressorImpl> compressor_impl_;
   std::optional<CompressionStats> compression_stats_;
   base::PODArray<uint8_t> tmp_buf_;
   std::unique_ptr<LZF_HSLOT[]> lzf_;
-  size_t number_of_chunks_ = 0;
+
+  // Whether current entry has ever been flushed mid-serialization. Only read on legacy non tagged
+  // code path.
+  bool entry_was_split_ = false;
+
   uint64_t serialization_peak_bytes_ = 0;
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
   ConsumeFun consume_fun_;
   size_t flush_threshold_ = 0;
+
+  MemBufController mem_buf_controller_;
 };
 
 }  // namespace dfly
