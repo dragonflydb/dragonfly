@@ -120,6 +120,7 @@ std::string_view VectorSimilarityToString(VectorSimilarity sim) {
     case VectorSimilarity::COSINE:
       return "COSINE";
   }
+  DCHECK(false) << "Unhandled VectorSimilarity enum value: " << static_cast<int>(sim);
   return "L2";
 }
 
@@ -131,6 +132,7 @@ float DistanceToSimilarity(float distance, VectorSimilarity sim) {
     case VectorSimilarity::COSINE:
       return (2.0f - distance) / 2.0f;
   }
+  DCHECK(false) << "Unhandled VectorSimilarity enum value: " << static_cast<int>(sim);
   return 0.0f;
 }
 

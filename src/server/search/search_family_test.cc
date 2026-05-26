@@ -6262,6 +6262,56 @@ TEST_F(SearchFamilyTest, FtHybridRrfDocInBothRanksHigher) {
   EXPECT_EQ(HybridKeys(resp)[0], "d:1");
 }
 
+TEST_F(SearchFamilyTest, FtHybridRangeFilterRejected) {
+  CreateFlatHashIdx();
+  Run({"HSET", "d:1", "title", "apple", "vec", FloatVec1(1.0f)});
+
+  // VSIM RANGE combined with FILTER would be silently ignored otherwise.
+  auto resp = Run({"FT.HYBRID", "idx", "SEARCH", "apple", "VSIM", "@vec", "$v", "RANGE", "0.5",
+                   "FILTER", "apple", "LIMIT", "0", "5", "PARAMS", "2", "v", FloatVec1(1.0f)});
+  ASSERT_EQ(resp.type, RespExpr::ERROR);
+  EXPECT_THAT(string{resp.GetString()}, testing::HasSubstr("RANGE"));
+}
+
+TEST_F(SearchFamilyTest, FtHybridLoadWithYieldCombinedScore) {
+  CreateFlatHashIdx();
+  Run({"HSET", "d:1", "title", "hello world", "vec", FloatVec1(1.0f)});
+
+  // LOAD suppresses default __score, but YIELD_SCORE_AS must still surface the combined score.
+  auto resp = Run({"FT.HYBRID", "idx",          "SEARCH",
+                   "hello",     "VSIM",         "@vec",
+                   "$v",        "COMBINE",      "LINEAR",
+                   "6",         "ALPHA",        "0.5",
+                   "BETA",      "0.5",          "YIELD_SCORE_AS",
+                   "my_score",  "LOAD",         "1",
+                   "@title",    "LIMIT",        "0",
+                   "5",         "PARAMS",       "2",
+                   "v",         FloatVec1(1.0f)});
+  ASSERT_HYBRID_RESP(resp);
+  ASSERT_GE(HybridTotal(resp), 1);
+  const auto field_names = HybridDocFieldNames(resp, 0);
+  EXPECT_TRUE(field_names.count("title"));
+  EXPECT_TRUE(field_names.count("my_score")) << "YIELD_SCORE_AS must surface under LOAD";
+  EXPECT_FALSE(field_names.count("__score"));
+}
+
+TEST_F(SearchFamilyTest, FtHybridLargeOffsetReturnsAllPages) {
+  CreateFlatHashIdx();
+  for (int i = 1; i <= 12; i++) {
+    Run({"HSET", absl::StrCat("d:", i), "title", "foo bar", "vec",
+         FloatVec1(static_cast<float>(i))});
+  }
+
+  // num_candidates default must scale with offset+limit -- otherwise paging starves.
+  auto resp = Run({"FT.HYBRID", "idx",    "SEARCH", "foo",    "VSIM", "@vec", "$v",
+                   "COMBINE",   "LINEAR", "4",      "ALPHA",  "0.5",  "BETA", "0.5",
+                   "LIMIT",     "8",      "4",      "PARAMS", "2",    "v",    FloatVec1(1.0f)});
+  ASSERT_EQ(resp.type, RespExpr::ARRAY);
+  const auto* docs = HybridDocs(resp);
+  ASSERT_NE(docs, nullptr);
+  EXPECT_EQ(docs->size(), 4u);
+}
+
 TEST_F(SearchFamilyTest, FtHybridReturnFields) {
   Run({"FT.CREATE", "idx",   "ON",   "HASH",    "PREFIX", "1",   "d:",
        "SCHEMA",    "title", "TEXT", "body",    "TEXT",   "vec", "VECTOR",

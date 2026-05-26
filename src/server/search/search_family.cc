@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <variant>
 #include <vector>
 
@@ -1576,6 +1577,7 @@ struct HybridSearchParams {
   string yield_combined_score_as;
 
   size_t num_candidates = 0;
+  std::optional<size_t> ef_runtime;
 
   size_t limit_offset = 0;
   size_t limit_total = 10;
@@ -1630,11 +1632,14 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
   if (parser->Check("KNN")) {
     p.num_candidates = parser->Next<size_t>();
     if (parser->Check("K"))
-      parser->Next<size_t>();
+      p.num_candidates = parser->Next<size_t>();
     if (parser->Check("EF_RUNTIME"))
-      parser->Next<size_t>();
-    if (parser->Check("SHARD_K_RATIO"))
-      parser->Next();
+      p.ef_runtime = parser->Next<size_t>();
+    if (parser->Check("SHARD_K_RATIO")) {
+      const float ratio = parser->Next<float>();
+      p.num_candidates =
+          static_cast<size_t>(std::ceil(static_cast<float>(p.num_candidates) * ratio));
+    }
   } else if (parser->Check("RANGE")) {
     p.use_range = true;
     p.range_radius = parser->Next<float>();
@@ -1642,8 +1647,11 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       parser->Next<float>();
   }
 
-  if (parser->Check("FILTER"))
+  if (parser->Check("FILTER")) {
+    if (p.use_range)
+      return CreateSyntaxError("VSIM RANGE cannot be combined with FILTER"sv);
     p.vsim_filter = string{parser->Next()};
+  }
 
   if (parser->Check("YIELD_SCORE_AS"))
     p.yield_vsim_score_as = string{parser->Next()};
@@ -1727,8 +1735,10 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
     }
   }
 
-  if (p.num_candidates == 0)
-    p.num_candidates = (p.rrf_window > 0) ? p.rrf_window : std::max(p.limit_total, size_t{10});
+  if (p.num_candidates == 0) {
+    p.num_candidates =
+        (p.rrf_window > 0) ? p.rrf_window : std::max(p.limit_offset + p.limit_total, size_t{10});
+  }
 
   return p;
 }
@@ -1769,16 +1779,17 @@ void ComputeRrfCombined(float rrf_constant, absl::flat_hash_map<string, HybridDo
       knn_ranked.push_back(&e);
   }
 
-  std::sort(text_ranked.begin(), text_ranked.end(),
-            [](const HybridDocEntry* a, const HybridDocEntry* b) {
-              return a->text_score > b->text_score;
-            });
+  std::sort(
+      text_ranked.begin(), text_ranked.end(), [](const HybridDocEntry* a, const HybridDocEntry* b) {
+        return a->text_score != b->text_score ? a->text_score > b->text_score : a->key < b->key;
+      });
   for (size_t r = 0; r < text_ranked.size(); ++r)
     text_ranked[r]->text_rank = r + 1;
 
-  std::sort(
-      knn_ranked.begin(), knn_ranked.end(),
-      [](const HybridDocEntry* a, const HybridDocEntry* b) { return a->knn_dist < b->knn_dist; });
+  std::sort(knn_ranked.begin(), knn_ranked.end(),
+            [](const HybridDocEntry* a, const HybridDocEntry* b) {
+              return a->knn_dist != b->knn_dist ? a->knn_dist < b->knn_dist : a->key < b->key;
+            });
   for (size_t r = 0; r < knn_ranked.size(); ++r)
     knn_ranked[r]->knn_rank = r + 1;
 
@@ -1806,10 +1817,6 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
   const size_t offset = std::min(params.limit_offset, docs.size());
   const size_t limit = std::min(docs.size() - offset, params.limit_total);
 
-  const string_view score_field = params.yield_combined_score_as.empty()
-                                      ? "__score"sv
-                                      : string_view{params.yield_combined_score_as};
-
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->StartCollection(4, CollectionType::MAP);
 
@@ -1818,6 +1825,7 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
 
   const bool yield_text_score = !params.yield_text_score_as.empty();
   const bool yield_vsim_score = !params.yield_vsim_score_as.empty();
+  const bool yield_combined_score = !params.yield_combined_score_as.empty();
   const bool emit_fields = params.load_all_fields || params.return_fields.has_value();
 
   rb->SendBulkString("results");
@@ -1825,13 +1833,13 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
   for (size_t i = offset; i < offset + limit; i++) {
     const auto& doc = *docs[i];
     // Per-doc layout:
-    //   without LOAD: [text_alias, X]? [__key, key] [__score, val] [vsim_alias, X]?
-    //   with LOAD:    [text_alias, X]? [fields...]                 [vsim_alias, X]?
+    //   without LOAD: [text_alias, X]? [__key, key] [__score | combined_alias, val] [vsim_alias,
+    //   X]? with LOAD:    [text_alias, X]? [fields...]  [combined_alias, val]? [vsim_alias, X]?
     // Score aliases are skipped for docs missing from their pipeline to avoid an ambiguous 0.
     const bool emit_text = yield_text_score && doc.has_text;
     const bool emit_vsim = yield_vsim_score && doc.has_knn;
-    const size_t n_pairs =
-        (emit_text ? 1 : 0) + (emit_vsim ? 1 : 0) + (emit_fields ? doc.values.size() : 2);
+    const size_t n_pairs = (emit_text ? 1 : 0) + (emit_vsim ? 1 : 0) +
+                           (emit_fields ? doc.values.size() + (yield_combined_score ? 1 : 0) : 2);
     rb->StartArray(n_pairs * 2);
 
     if (emit_text) {
@@ -1843,10 +1851,15 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
         rb->SendBulkString(k);
         visit(SortableValueSender(rb), v);
       }
+      if (yield_combined_score) {
+        rb->SendBulkString(params.yield_combined_score_as);
+        rb->SendBulkString(absl::StrCat(doc.combined));
+      }
     } else {
       rb->SendBulkString("__key");
       rb->SendBulkString(doc.key);
-      rb->SendBulkString(score_field);
+      rb->SendBulkString(yield_combined_score ? string_view{params.yield_combined_score_as}
+                                              : "__score"sv);
       rb->SendBulkString(absl::StrCat(doc.combined));
     }
     if (emit_vsim) {
@@ -1928,7 +1941,7 @@ std::optional<string> RunHnswPreSearch(string_view index_name, const HybridSearc
   if (params.use_range)
     populate(hnsw_index->RangeQuery(vec.first.get(), params.range_radius));
   else
-    populate(hnsw_index->Knn(vec.first.get(), params.num_candidates, std::nullopt));
+    populate(hnsw_index->Knn(vec.first.get(), params.num_candidates, params.ef_runtime));
   return std::nullopt;
 }
 
@@ -1958,7 +1971,8 @@ std::optional<string> RunHnswFilteredSearch(string_view index_name,
   auto knn_results =
       prefilter_ids.size() < absl::GetFlag(FLAGS_subset_knn_search_threshold)
           ? hnsw_index->SubsetKnn(vec.first.get(), params.num_candidates, prefilter_ids)
-          : hnsw_index->Knn(vec.first.get(), params.num_candidates, std::nullopt, prefilter_ids);
+          : hnsw_index->Knn(vec.first.get(), params.num_candidates, params.ef_runtime,
+                            prefilter_ids);
 
   for (const auto& [dist, global_id] : knn_results) {
     auto it = prefilter_map.find(global_id);
@@ -2047,9 +2061,20 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   if (enable_profile)
     text_algo.EnableProfiling();
 
+  const bool emit_fields = params->load_all_fields || params->return_fields.has_value();
+
+  // When the reply doesn't need any field values (no LOAD), tell the pipeline to skip per-doc
+  // hash serialization by passing an explicit empty return_fields vector.
+  auto apply_return_fields = [&](SearchParams& sp) {
+    if (emit_fields)
+      sp.return_fields = params->return_fields;
+    else
+      sp.return_fields.emplace();
+  };
+
   SearchParams text_sp;
   text_sp.limit_total = params->num_candidates;
-  text_sp.return_fields = params->return_fields;
+  apply_return_fields(text_sp);
 
   const bool use_hnsw = GlobalHnswIndexRegistry::Instance().Exist(index_name, params->vsim_field);
   const bool have_filter = !params->vsim_filter.empty();
@@ -2069,15 +2094,19 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
                                   params->range_radius, params->vsim_param);
     } else {
       string_view prefix = have_filter ? string_view{params->vsim_filter} : "*"sv;
-      knn_query = absl::StrFormat("%s=>[KNN %zu @%s $%s AS __knn_dist_hybrid]", prefix,
-                                  params->num_candidates, params->vsim_field, params->vsim_param);
+      string ef_suffix;
+      if (params->ef_runtime)
+        ef_suffix = absl::StrFormat(" EF_RUNTIME %zu", *params->ef_runtime);
+      knn_query = absl::StrFormat("%s=>[KNN %zu @%s $%s%s AS __knn_dist_hybrid]", prefix,
+                                  params->num_candidates, params->vsim_field, params->vsim_param,
+                                  ef_suffix);
     }
     if (!knn_algo.Init(knn_query, &params->query_params, nullptr)) {
       rb->SendError("KNN query error for VSIM field");
       return false;
     }
     knn_sp.limit_total = params->num_candidates;
-    knn_sp.return_fields = params->return_fields;
+    apply_return_fields(knn_sp);
   }
 
   search::SearchAlgorithm filter_algo;
@@ -2089,7 +2118,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
       return false;
     }
     filter_sp.limit_total = params->num_candidates;
-    filter_sp.return_fields = params->return_fields;
+    apply_return_fields(filter_sp);
 
     // Pre-flight dim check spares us a multi-shard text+filter hop on a bad query vector.
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, params->vsim_field);
@@ -2182,9 +2211,11 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
         hnsw_filter_docs[sid] =
             idx->Search(t->GetOpArgs(es), filter_sp, &filter_algo, false, nullptr);
       } else {
+        // Empty optional vs unset: unset would serialize the full hash even when no LOAD is used.
+        const std::optional<std::vector<FieldReference>> empty_fields{std::in_place};
+        const auto& serialize_fields = emit_fields ? params->return_fields : empty_fields;
         for (auto& doc : hnsw_shard_docs[sid]) {
-          if (auto s =
-                  idx->SerializeDocWithKey(doc.id, t->GetOpArgs(es), schema, params->return_fields);
+          if (auto s = idx->SerializeDocWithKey(doc.id, t->GetOpArgs(es), schema, serialize_fields);
               s) {
             doc.key = string{s->first};
             doc.values = std::move(s->second);
