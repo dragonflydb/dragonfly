@@ -4,15 +4,16 @@
 
 #include "server/tiering/decoders.h"
 
+#include <cstring>
+
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/detail/listpack_wrap.h"
-#include "core/overloaded.h"
 #include "core/qlist.h"
-#include "server/tiering/serialized_map.h"
 
 extern "C" {
 #include "redis/redis_aux.h"  // for OBJ_HASH
+#include "redis/zmalloc.h"
 }
 
 namespace dfly::tiering {
@@ -69,58 +70,52 @@ std::string* StringDecoder::Write() {
   return value_.GetMutable();
 }
 
-SerializedMapDecoder::~SerializedMapDecoder() {
+ListpackMapDecoder::~ListpackMapDecoder() {
+  if (owned_lw_) {
+    zfree(owned_lw_->GetPointer());
+  }
 }
 
-std::unique_ptr<Decoder> SerializedMapDecoder::Clone() const {
-  return std::make_unique<SerializedMapDecoder>();
+std::unique_ptr<Decoder> ListpackMapDecoder::Clone() const {
+  return std::make_unique<ListpackMapDecoder>();
 }
 
-void SerializedMapDecoder::Initialize(std::string_view slice) {
-  map_ = std::make_unique<SerializedMap>(slice);
+void ListpackMapDecoder::Initialize(std::string_view slice) {
+  slice_ = slice;
 }
 
-Decoder::UploadMetrics SerializedMapDecoder::GetMetrics() const {
-  Overloaded ov{
-      [](const SerializedMap& sm) { return sm.DataBytes() + sm.size() * 8; },
-      [](const detail::ListpackWrap& lw) { return lw.DataBytes(); },
+Decoder::UploadMetrics ListpackMapDecoder::GetMetrics() const {
+  size_t bytes = owned_lw_ ? owned_lw_->UsedBytes() : slice_.size();
+  return UploadMetrics{
+      .modified = owned_lw_ != nullptr,
+      .estimated_mem_usage = bytes,
   };
-  size_t bytes = visit(Overloaded{ov, [&](const auto& ptr) { return ov(*ptr); }}, map_);
-  return UploadMetrics{.modified = modified_, .estimated_mem_usage = bytes};
 }
 
-void SerializedMapDecoder::Upload(void* robj) {
+void ListpackMapDecoder::Upload(void* robj) {
   auto* obj = static_cast<CompactObj*>(robj);
 
-  if (std::holds_alternative<std::unique_ptr<SerializedMap>>(map_))
-    MakeOwned();
+  if (!owned_lw_)
+    GetMutable();  // Need an owned copy to hand off
 
-  obj->InitRobj(OBJ_HASH, kEncodingListPack, GetMutable()->GetPointer());
+  obj->InitRobj(OBJ_HASH, kEncodingListPack, owned_lw_->GetPointer());
+  owned_lw_.reset();
 }
 
-std::variant<SerializedMap*, detail::ListpackWrap*> SerializedMapDecoder::Get() const {
-  using RT = std::variant<SerializedMap*, detail::ListpackWrap*>;
-  return std::visit([](auto& ptr) -> RT { return ptr.get(); }, map_);
+detail::ListpackWrap ListpackMapDecoder::Get() const {
+  if (owned_lw_)
+    return *owned_lw_;
+  return detail::ListpackWrap::Readonly(
+      const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(slice_.data())));
 }
 
-detail::ListpackWrap* SerializedMapDecoder::GetMutable() {
-  if (std::holds_alternative<std::unique_ptr<detail::ListpackWrap>>(map_))
-    return std::get<std::unique_ptr<detail::ListpackWrap>>(map_).get();
-
-  // Convert SerializedMap to listpack
-  MakeOwned();
-  modified_ = true;
-  return GetMutable();
-}
-
-void SerializedMapDecoder::MakeOwned() {
-  auto& map = std::get<std::unique_ptr<SerializedMap>>(map_);
-
-  auto lw = detail::ListpackWrap::WithCapacity(GetMetrics().estimated_mem_usage);
-  for (const auto& [key, value] : *map)
-    lw.Insert(key, value, true);
-
-  map_ = std::make_unique<detail::ListpackWrap>(lw);
+detail::ListpackWrap* ListpackMapDecoder::GetMutable() {
+  if (!owned_lw_) {
+    uint8_t* lp = (uint8_t*)zmalloc(slice_.size());
+    memcpy(lp, slice_.data(), slice_.size());
+    owned_lw_ = std::make_unique<detail::ListpackWrap>(lp);
+  }
+  return owned_lw_.get();
 }
 
 ListNodeDecoder::ListNodeDecoder(QList* ql) : ql_(ql) {

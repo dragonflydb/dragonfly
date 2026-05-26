@@ -31,9 +31,9 @@ class SinkReplyBuilder {
 
   struct PendingPin : public boost::intrusive::list_base_hook<
                           ::boost::intrusive::link_mode<::boost::intrusive::normal_link>> {
-    uint64_t timestamp_ns;
+    uint64_t timestamp_cycles;  // base::CycleClock::Now() value
 
-    PendingPin(uint64_t v = 0) : timestamp_ns(v) {
+    PendingPin(uint64_t v = 0) : timestamp_cycles(v) {
     }
   };
 
@@ -83,7 +83,7 @@ class SinkReplyBuilder {
   }
 
   bool IsSendActive() const {
-    return send_time_ns_ > 0;
+    return send_time_cycles_ > 0;
   }
 
   void SetBatchMode(bool b) {
@@ -115,7 +115,7 @@ class SinkReplyBuilder {
     return std::exchange(last_error_, {});
   }
 
-  uint64_t GetLastSendTimeNs() const;
+  uint64_t GetLastSendTimeCycles() const;
 
  protected:
   template <typename... Ts>
@@ -142,8 +142,8 @@ class SinkReplyBuilder {
   // external data (WriteRef). Validity is ensured by FinishScope that either flushes before ref
   // lifetime ends or copies refs to the buffer.
   absl::InlinedVector<iovec, 16> vecs_;
-  size_t guaranteed_pieces_ = 0;  // length of prefix of vecs_ that are guaranteed to be pieces
-  uint64_t send_time_ns_ = 0;
+  size_t guaranteed_pieces_ = 0;   // length of prefix of vecs_ that are guaranteed to be pieces
+  uint64_t send_time_cycles_ = 0;  // base::CycleClock::Now() at Send() entry, 0 when idle
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {

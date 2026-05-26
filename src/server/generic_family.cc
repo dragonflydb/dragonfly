@@ -2604,29 +2604,31 @@ void GenericFamily::RandomKey(CmdArgList args, CommandContext* cmd_cntx) {
   scan_opts.limit = 3;  // number of entries per shard
   std::vector<StringVec> candidates_collection(shard_set->size());
 
-  shard_set->RunBriefInParallel(
-      [&](EngineShard* shard) {
-        auto* prime_table = cntx->ns->GetDbSlice(shard->shard_id()).GetTables(db_cntx.db_index);
-        if (prime_table->size() == 0) {
-          return;
-        }
+  // OpScan can preempt (WaitForUnblockedJournalWrites suspends on CondVar during BGSAVE),
+  // so we must run on a regular fiber rather than the dispatcher (RunBriefInParallel).
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    auto* prime_table = cntx->ns->GetDbSlice(shard->shard_id()).GetTables(db_cntx.db_index);
+    if (prime_table->size() == 0) {
+      return;
+    }
 
-        StringVec* candidates = &candidates_collection[shard->shard_id()];
+    StringVec* candidates = &candidates_collection[shard->shard_id()];
 
-        for (size_t i = 0; i <= kMaxAttempts; ++i) {
-          if (!candidates->empty()) {
-            break;
-          }
-          uint64_t cursor = 0;  // scans from the start of the shard after reaching kMaxAttemps
-          if (i < kMaxAttempts) {
-            cursor = prime_table->GetRandomCursor(&bitgen).token();
-          }
-          OpScan({shard, 0u, db_cntx}, scan_opts, &cursor, candidates);
-        }
+    // Per-shard RNG; absl::BitGen is not thread-safe.
+    absl::BitGen local_gen;
+    for (size_t i = 0; i <= kMaxAttempts; ++i) {
+      if (!candidates->empty()) {
+        break;
+      }
+      uint64_t cursor = 0;  // scans from the start of the shard after reaching kMaxAttemps
+      if (i < kMaxAttempts) {
+        cursor = prime_table->GetRandomCursor(&local_gen).token();
+      }
+      OpScan({shard, 0u, db_cntx}, scan_opts, &cursor, candidates);
+    }
 
-        candidates_counter.fetch_add(candidates->size(), memory_order_relaxed);
-      },
-      [&](ShardId) { return true; });
+    candidates_counter.fetch_add(candidates->size(), memory_order_relaxed);
+  });
 
   auto candidates_count = candidates_counter.load(memory_order_relaxed);
 

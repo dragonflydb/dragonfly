@@ -511,12 +511,12 @@ static void RunFPeriodically(std::function<void()> f, std::chrono::milliseconds 
       return;
     }
 
-    int64_t now_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+    int64_t now_ms = absl::GetCurrentTimeNanos() / 1000000;
     if (now_ms - 5 * period_ms.count() > last_heartbeat_ms) {
       VLOG(1) << "This " << error_msg << " step took " << now_ms - last_heartbeat_ms << "ms";
     }
     f();
-    last_heartbeat_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+    last_heartbeat_ms = absl::GetCurrentTimeNanos() / 1000000;
   }
 }
 
@@ -1022,10 +1022,6 @@ size_t EngineShard::CalculateEvictionBytes() {
 }
 
 void EngineShard::CacheStats() {
-  uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs();
-  if (last_mem_params_.updated_at + 1000000 > now)  // 1ms
-    return;
-
   size_t used_mem = UsedMemory();
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
@@ -1047,7 +1043,7 @@ void EngineShard::CacheStats() {
   }
 
   db_slice.UpdateMemoryParams(free_mem / shard_set->size(), bytes_per_obj);
-  last_mem_params_ = {now, used_mem};
+  last_mem_params_ = {used_mem};
 }
 
 size_t EngineShard::UsedMemory() const {

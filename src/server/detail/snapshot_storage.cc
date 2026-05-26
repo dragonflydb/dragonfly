@@ -571,7 +571,8 @@ error_code AzureSnapshotStorage::CheckPath(const std::string& path) {
 }
 
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool https,
-                                           bool ec2_metadata, bool sign_payload) {
+                                           bool ec2_metadata, bool sign_payload)
+    : creds_provider_({}, endpoint) {
 #ifdef WITH_AWS
   use_helio_ = absl::GetFlag(FLAGS_s3_use_helio_client);
 #else
@@ -582,12 +583,6 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
     https_ = https;
     if (!ec2_metadata) {
       setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
-    }
-    // AwsCredsProvider reads AWS_S3_ENDPOINT at ServiceEndpoint() time; setting it here lets
-    // callers override the default S3 endpoint (e.g. for MinIO tests).
-    if (!endpoint.empty()) {
-      string endpoint_url = absl::StrCat(https ? "https://" : "http://", endpoint);
-      setenv("AWS_S3_ENDPOINT", endpoint_url.c_str(), 1);
     }
     (void)sign_payload;  // Uploads in cloud::aws always use UNSIGNED-PAYLOAD.
     LOG(INFO) << "Creating AWS S3 client (helio); https=" << std::boolalpha << https

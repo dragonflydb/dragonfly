@@ -994,8 +994,9 @@ void Connection::HandleRequests() {
 
 unsigned Connection::GetSendWaitTimeSec() const {
   if (reply_builder_ && reply_builder_->IsSendActive()) {
-    return (util::fb2::ProactorBase::GetMonotonicTimeNs() - reply_builder_->GetLastSendTimeNs()) /
-           1'000'000'000;
+    return base::CycleClock::ToUsec(base::CycleClock::Now() -
+                                    reply_builder_->GetLastSendTimeCycles()) /
+           1'000'000;
   }
 
   return 0;
@@ -1548,6 +1549,34 @@ void Connection::HandleMigrateRequest() {
   // Note: If cc_->subscriptions > 0, we skip the hop but leave migration_request_
   // set. This defers the migration, retrying at the start of every subsequent
   // loop iteration until all subscriptions are cleared.
+}
+
+bool Connection::ProcessControlMessages(uint32_t quota) {
+  uint32_t dispatched = 0;
+
+  while (!dispatch_q_.empty()) {
+    // If Quota reached: stop draining the dispatch queue and fall through to the data path.
+    if ((quota > 0) && (dispatched >= quota)) {
+      LOG_EVERY_T(INFO, 1) << "[" << id_ << "] V2 dispatch_q_ quota reached (" << dispatched << "/"
+                           << quota << "), falling through to data path";
+      return true;
+    }
+
+    auto msg = std::move(dispatch_q_.front());
+    dispatch_q_.pop_front();
+    UpdateDispatchStats(msg, false /* subtract */);
+    dispatched++;
+
+    // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
+    // and let the loop iterate back to HandleMigrateRequest() at the top.
+    if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
+      break;
+    }
+
+    std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
+  }
+
+  return false;
 }
 
 io::Result<size_t> Connection::HandleRecvSocket() {
@@ -2941,6 +2970,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   // to global pipeline-backpressure relief notifications.
   util::fb2::detail::Waiter backpressure_waiter{ioevent_cb};
 
+  const uint32_t async_dispatch_quota = GetFlag(FLAGS_async_dispatch_quota);
+
   do {
     HandleMigrateRequest();
 
@@ -2985,29 +3016,32 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     phase_ = PROCESS;
     bool reached_capacity = io_buf_.AppendLen() == 0;
 
-    // Temporary: Handle dispatch queue items (Control Path) one by one blocking command execution
+    // Handle dispatch queue items (Control Path) with a bounded quota to prevent
+    // starvation of the data path:
+    // - Under a PubSub flood, dispatch_q_ can accumulate thousands of messages.
+    // - Without a quota, the fiber would drain them all before parsing any new data from the
+    //   socket, starving GET/SET and other pipeline commands.
+    // - This mirrors V1's async_dispatch_quota / prefer_pipeline_execution mechanism in AsyncFiber.
     if (!dispatch_q_.empty()) {
-      while (!dispatch_q_.empty()) {
-        auto msg = std::move(dispatch_q_.front());
-        dispatch_q_.pop_front();
-        UpdateDispatchStats(msg, false /* subtract */);
+      bool quota_reached = ProcessControlMessages(async_dispatch_quota);
 
-        // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
-        // and let the loop iterate back to HandleMigrateRequest() at the top.
-        if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
-          break;
-        }
-
-        std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
-      }
-
-      // Note: No flush needed here: the `continue` below re-enters the loop, which either
-      // hits the data path (ParseLoop flushes via ReplyBatch) or the idle-await block
-      // (Flush 1), which always flushes before sleeping.
-
-      // TODO: Properly handle backpressure
       GetQueueBackpressure().pubsub_ec.notifyAll();
-      continue;
+
+      // We explicitly `continue` back to the top of the loop for two reasons:
+      // 1. Fresh Data: Processing dispatch_q_ takes time. Jumping to the top forces
+      //    ReadPendingInput() to pull any newly arrived TCP data from the OS buffer.
+      //    Falling through skips ReadPendingInput(), so the data path checks io_buf_.InputLen()
+      //    before new socket data is read - potentially missing an entire parse cycle.
+      // 2. Low Latency: PubSub replies have accumulated in reply_builder_. The idle-await
+      //    block at the top is where we naturally Flush() and sleep. `continue` acts as a
+      //    fast-path to push these replies to the network immediately, skipping dead code.
+      //
+      // Starvation prevention: We only fall through if we hit our processing quota.
+      // This ensures a continuous flood of PubSub messages cannot indefinitely starve
+      // the data path (pipelined commands).
+      if (!quota_reached) {
+        continue;
+      }
     }
 
     // Handle Parsed Commands Queue (Data Path)

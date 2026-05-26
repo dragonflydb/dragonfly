@@ -3713,11 +3713,13 @@ async def test_remove_docs_on_cluster_migration(df_factory):
     await verify_keys_match_number_of_index_docs(nodes[0].client, 0)
 
 
-@pytest.mark.large
-@pytest.mark.exclude_epoll
-@pytest.mark.opt_only
-@dfly_args({"cluster_mode": "yes"})
-async def test_cluster_migration_with_tiering(df_factory):
+async def _run_tiering_migration(
+    df_factory,
+    *,
+    maxmemory,
+    min_tiered_entries,
+    delete_keys_count=0,
+):
     instances = [
         df_factory.create(
             port=next(next_port),
@@ -3726,76 +3728,7 @@ async def test_cluster_migration_with_tiering(df_factory):
             tiered_prefix="/tmp/tiered/cluster_node",
             tiered_offload_threshold="0.2",
             tiered_experimental_cooling="False",
-            maxmemory="512MB",
-        ),
-        df_factory.create(
-            port=next(next_port), admin_port=next(next_port), proactor_threads=2, maxmemory="1024MB"
-        ),
-    ]
-    df_factory.start_all(instances)
-
-    nodes = [(await create_node_info(instance)) for instance in instances]
-    nodes[0].slots = [(0, 16383)]
-    nodes[1].slots = []
-
-    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-
-    keys = 1000000
-    await nodes[0].client.execute_command(f"DEBUG POPULATE {keys} size 440")
-
-    # Expect that number of added keys is 1000000
-    info = await nodes[0].client.info("keyspace")
-    assert info["db0"]["keys"] == keys
-
-    await asyncio.sleep(5)  # wait for tiering to offload data
-
-    # We need to wait for some tiered entries to verify migration works with tiering.
-    async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED"):
-        with breaker:
-            logging.info(f"Tiered entries: {info['tiered_entries']}")
-            assert info["tiered_entries"] >= 10_000
-
-    nodes[0].migrations.append(
-        MigrationInfo("127.0.0.1", instances[1].port, [(0, 16383)], nodes[1].id)
-    )
-
-    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-
-    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
-
-    nodes[0].migrations = []
-    nodes[0].slots = []
-    nodes[1].slots = [(0, 16383)]
-    logging.debug("finalize migration")
-    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-
-    info = await nodes[1].client.info("keyspace")
-    assert info["db0"]["keys"] == keys
-
-    async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED"):
-        with breaker:
-            assert info["tiered_entries"] == 0
-
-    await asyncio.sleep(5)  # wait for tiered deletions to finish
-
-    info = await nodes[0].client.info("keyspace")
-    assert info["db0"]["keys"] == 0
-
-
-@pytest.mark.large
-@pytest.mark.exclude_epoll
-@pytest.mark.opt_only
-@dfly_args({"cluster_mode": "yes"})
-async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstanceFactory):
-    instances = [
-        df_factory.create(
-            port=next(next_port),
-            admin_port=next(next_port),
-            proactor_threads=2,
-            tiered_prefix="/tmp/tiered/cluster_node",
-            tiered_offload_threshold="0.2",
-            tiered_experimental_cooling="False",
-            maxmemory="800MB",
+            maxmemory=maxmemory,
         ),
         df_factory.create(
             port=next(next_port), admin_port=next(next_port), proactor_threads=2, maxmemory="1024MB"
@@ -3812,19 +3745,14 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
     keys = 1000000
     await nodes[0].client.execute_command(f"DEBUG POPULATE {keys} key 440")
 
-    # Expect that number of added keys is 1000000
     info = await nodes[0].client.info()
     assert info["oom_rejections"] == 0
     assert info["db0"]["keys"] == keys
 
-    # Wait for some data to be offloaded to tiered storage
-    await asyncio.sleep(10)
-
-    # Wait for sufficient tiered entries
-    async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED"):
+    async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED", timeout=20):
         with breaker:
-            tiered_entries = info["tiered_entries"]
-            assert tiered_entries >= 50_000
+            logging.info(f"Tiered entries: {info['tiered_entries']}")
+            assert info["tiered_entries"] >= min_tiered_entries
 
     nodes[0].migrations.append(
         MigrationInfo("127.0.0.1", instances[1].port, [(0, 16383)], nodes[1].id)
@@ -3832,30 +3760,27 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    # Delete 50k keys during migration to create mutations and verify that they are applied correctly
-    delete_expected_num = 50_000
     delete_succeded = 0
+    if delete_keys_count:
+        migration_done = False
 
-    # Indicator that migration is done and we can stop deleting keys
-    migration_done = False
+        async def delete_job():
+            nonlocal delete_succeded
+            for i in range(delete_keys_count):
+                if migration_done:
+                    break
+                try:
+                    delete_succeded += await nodes[0].client.delete(f"key:{i}")
+                except Exception:
+                    pass
 
-    async def delete_job():
-        nonlocal delete_succeded
-        for i in range(delete_expected_num):
-            if migration_done:
-                break
-            try:
-                await nodes[0].client.delete(f"key:{i}")
-                delete_succeded += 1
-            except Exception as e:
-                pass
-
-    delete_task = asyncio.create_task(delete_job())
+        delete_task = asyncio.create_task(delete_job())
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
-    migration_done = True
 
-    await delete_task
+    if delete_keys_count:
+        migration_done = True
+        await delete_task
 
     nodes[0].migrations = []
     nodes[0].slots = []
@@ -3863,18 +3788,40 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
     logging.debug("finalize migration")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED"):
+    async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED", timeout=60):
         with breaker:
             assert info["tiered_entries"] == 0
-
-    await asyncio.sleep(5)  # wait for tiered deletions to finish
 
     info = await nodes[0].client.info("keyspace")
     assert info["db0"]["keys"] == 0
 
-    # Verify that mutations are applied on the target node after migration
     info = await nodes[1].client.info("keyspace")
     assert info["db0"]["keys"] == keys - delete_succeded
+
+
+@pytest.mark.large
+@pytest.mark.exclude_epoll
+@pytest.mark.opt_only
+@dfly_args({"cluster_mode": "yes"})
+async def test_cluster_migration_with_tiering(df_factory):
+    await _run_tiering_migration(
+        df_factory,
+        maxmemory="512MB",
+        min_tiered_entries=10_000,
+    )
+
+
+@pytest.mark.large
+@pytest.mark.exclude_epoll
+@pytest.mark.opt_only
+@dfly_args({"cluster_mode": "yes"})
+async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstanceFactory):
+    await _run_tiering_migration(
+        df_factory,
+        maxmemory="800MB",
+        min_tiered_entries=50_000,
+        delete_keys_count=50_000,
+    )
 
 
 @dfly_args(

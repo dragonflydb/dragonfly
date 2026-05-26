@@ -12,6 +12,7 @@
 #include <netinet/tcp.h>
 #endif
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/db_slice.h"
@@ -114,7 +115,7 @@ JournalStreamer::JournalStreamer(ExecutionState* cntx, JournalStreamer::Config c
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
   migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
   replication_dispatch_threshold = absl::GetFlag(FLAGS_replication_dispatch_threshold);
-  last_async_write_time_ = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+  last_async_write_time_ = base::CycleClock::Now();
 }
 
 JournalStreamer::~JournalStreamer() {
@@ -173,11 +174,13 @@ size_t JournalStreamer::UsedBytes() const {
 }
 
 std::string JournalStreamer::FormatInternalState() const {
+  uint64_t last_async_ms_ago =
+      base::CycleClock::ToUsec(base::CycleClock::Now() - last_async_write_time_) / 1000;
   return absl::StrCat(
       "pending_buf_size:", pending_buf_.Size(), " in_flight_bytes:", in_flight_bytes_,
       " total_sent:", total_sent_, " throttle_count:", throttle_count_,
       " total_throttle_wait_usec:", total_throttle_wait_usec_,
-      " throttle_waiters:", throttle_waiters_, " last_async_write_time_ms:", last_async_write_time_,
+      " throttle_waiters:", throttle_waiters_, " last_async_time_ms_ago:", last_async_ms_ago,
       " last_lsn_time_s:", last_lsn_time_, " last_lsn_writen_:", last_lsn_writen_);
 }
 
@@ -258,9 +261,9 @@ void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms
 
     // We don't want to force async write to replicate if last data
     // was written recent. Data needs to be stalled for period_ms duration.
+    const uint64_t period_cycles = base::CycleClock::FromUsec(period_ms.count() * 1000);
     if (!pending_buf_.Size() || in_flight_bytes_ > 0 ||
-        ((last_async_write_time_ + period_ms.count()) >
-         (fb2::ProactorBase::GetMonotonicTimeNs() / 1000000))) {
+        ((last_async_write_time_ + period_cycles) > base::CycleClock::Now())) {
       continue;
     }
 
@@ -286,7 +289,7 @@ void JournalStreamer::AsyncWrite(bool force_send) {
 
   in_flight_bytes_ = cur_buf.mem_size;
   total_sent_ += in_flight_bytes_;
-  last_async_write_time_ = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+  last_async_write_time_ = base::CycleClock::Now();
 
   const auto v_size = cur_buf.buf.size();
   absl::InlinedVector<iovec, 8> v(v_size);

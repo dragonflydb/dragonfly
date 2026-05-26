@@ -454,7 +454,7 @@ uint64_t ProtocolClient::LastIoTime() const {
 }
 
 void ProtocolClient::TouchIoTime() {
-  last_io_time_.store(Proactor()->GetMonotonicTimeNs(), std::memory_order_relaxed);
+  last_io_time_.store(TimeSec(), std::memory_order_relaxed);
 }
 
 }  // namespace dfly
