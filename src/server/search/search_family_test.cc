@@ -4252,22 +4252,27 @@ TEST_F(SearchFamilyTest, GeoSearchHash) {
   Run({"HSET", "city:2", "name", "Palo Alto", "location", "-122.143, 37.444"});
   Run({"HSET", "city:3", "name", "San Jose", "location", "-121.886, 37.338"});
   Run({"HSET", "city:4", "name", "San Francisco", "location", "-122.419, 37.774"});
+  Run({"HSET", "city:5", "name", "Shoreline", "location", "-122.08, 37.389"});
 
   // Search within 30 miles of Mountain View - should find nearby cities
   resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 30 mi]"});
-  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3"));
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:5"));
 
   // Search within 50 miles - should include San Francisco
   resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 50 mi]"});
-  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4", "city:5"));
 
-  // Search with very small radius - only exact match
+  // Search within 1 km - should include the nearby point.
   resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 1 km]"});
-  EXPECT_THAT(resp, AreDocIds("city:1"));
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:5"));
+
+  // Fractional radii should not be truncated before unit conversion.
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 0.5 km]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:5"));
 
   // Search with wildcard - return all geo indexed docs
   resp = Run({"FT.SEARCH", "geo_idx", "@location:*"});
-  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4", "city:5"));
 
   // Combine geo search with text search
   resp = Run({"FT.SEARCH", "geo_idx", "San* @location:[-122.08 37.386 50 mi]"});
