@@ -1551,6 +1551,34 @@ void Connection::HandleMigrateRequest() {
   // loop iteration until all subscriptions are cleared.
 }
 
+bool Connection::ProcessControlMessages(uint32_t quota) {
+  uint32_t dispatched = 0;
+
+  while (!dispatch_q_.empty()) {
+    // If Quota reached: stop draining the dispatch queue and fall through to the data path.
+    if ((quota > 0) && (dispatched >= quota)) {
+      LOG_EVERY_T(INFO, 1) << "[" << id_ << "] V2 dispatch_q_ quota reached (" << dispatched << "/"
+                           << quota << "), falling through to data path";
+      return true;
+    }
+
+    auto msg = std::move(dispatch_q_.front());
+    dispatch_q_.pop_front();
+    UpdateDispatchStats(msg, false /* subtract */);
+    dispatched++;
+
+    // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
+    // and let the loop iterate back to HandleMigrateRequest() at the top.
+    if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
+      break;
+    }
+
+    std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
+  }
+
+  return false;
+}
+
 io::Result<size_t> Connection::HandleRecvSocket() {
   phase_ = READ_SOCKET;
   auto& conn_stats = tl_facade_stats->conn_stats;
@@ -2995,40 +3023,22 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     //   socket, starving GET/SET and other pipeline commands.
     // - This mirrors V1's async_dispatch_quota / prefer_pipeline_execution mechanism in AsyncFiber.
     if (!dispatch_q_.empty()) {
-      uint32_t dispatched{};
-      bool quota_reached = false;
-
-      while (!dispatch_q_.empty()) {
-        // Quota reached: stop draining the dispatch queue and fall through to the data path.
-        if ((async_dispatch_quota > 0) && (dispatched >= async_dispatch_quota)) {
-          quota_reached = true;
-          LOG_EVERY_T(INFO, 1) << "[" << id_ << "] V2 dispatch_q_ quota reached (" << dispatched
-                               << "/" << async_dispatch_quota << "), falling through to data path";
-          break;
-        }
-
-        auto msg = std::move(dispatch_q_.front());
-        dispatch_q_.pop_front();
-        UpdateDispatchStats(msg, false /* subtract */);
-        dispatched++;
-
-        // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
-        // and let the loop iterate back to HandleMigrateRequest() at the top.
-        if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
-          break;
-        }
-
-        std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
-      }  // while
+      bool quota_reached = ProcessControlMessages(async_dispatch_quota);
 
       GetQueueBackpressure().pubsub_ec.notifyAll();
 
-      // Starvation prevention: if quota was hit, fall through to the data path so
-      // pipelined commands get a turn. Otherwise `continue` back to the top.
+      // We explicitly `continue` back to the top of the loop for two reasons:
+      // 1. Fresh Data: Processing dispatch_q_ takes time. Jumping to the top forces
+      //    ReadPendingInput() to pull any newly arrived TCP data from the OS buffer.
+      //    Falling through skips ReadPendingInput(), so the data path checks io_buf_.InputLen()
+      //    before new socket data is read - potentially missing an entire parse cycle.
+      // 2. Low Latency: PubSub replies have accumulated in reply_builder_. The idle-await
+      //    block at the top is where we naturally Flush() and sleep. `continue` acts as a
+      //    fast-path to push these replies to the network immediately, skipping dead code.
       //
-      // No flush here: both paths reach a flush before sleeping via the idle-await block
-      // at the top of the loop, allowing PubSub and command replies to be coalesced into
-      // one sendmsg syscall.
+      // Starvation prevention: We only fall through if we hit our processing quota.
+      // This ensures a continuous flood of PubSub messages cannot indefinitely starve
+      // the data path (pipelined commands).
       if (!quota_reached) {
         continue;
       }

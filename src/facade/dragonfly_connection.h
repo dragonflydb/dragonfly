@@ -364,6 +364,10 @@ class Connection : public util::Connection {
   void HandleMigrateRequest();
   io::Result<size_t> HandleRecvSocket();
 
+  // Drains dispatch_q_ (control path) up to the given quota.
+  // Returns true if the quota was reached.
+  bool ProcessControlMessages(uint32_t quota);
+
   bool ShouldEndAsyncFiber(const MessageHandle& msg);
 
   void LaunchAsyncFiberIfNeeded();  // Async fiber is started lazily
