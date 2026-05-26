@@ -19,6 +19,8 @@ extern "C" {
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/serializer.h"
+#include "server/journal/types.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
@@ -1441,6 +1443,49 @@ void AppendBinaryDouble(std::string* out, double val) {
   out->append(reinterpret_cast<const char*>(buf), sizeof(buf));
 }
 
+// Drives interleaving SaveEntry calls from the serializer's consume callback to exercise
+// tagged-chunk framing when a serialization is preempted mid-entry.
+struct InterleaveHarness {
+  struct Pending {
+    std::string key;
+    const PrimeValue* value;
+  };
+
+  std::vector<Pending> queued;
+  size_t next = 0;
+  std::string body;
+  RdbSerializer* serializer = nullptr;
+  std::optional<uint64_t> last_journal_offset;
+
+  void AddKey(std::string_view key, DbContext& ctx) {
+    auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, key, OBJ_HASH);
+    ASSERT_TRUE(it.ok());
+    queued.push_back(Pending{std::string{key}, &it.value()->second});
+  }
+
+  // Each invocation appends the supplied blob to the body, then injects a SaveEntry for the next
+  // queued key (sandwiched between a journal offset and a journal entry) to force interleaved
+  // tagged chunks.
+  void operator()(std::string blob) {
+    body += blob;
+    if (next >= queued.size())
+      return;
+
+    uint64_t offset = last_journal_offset.value_or(0) + 100;
+    last_journal_offset = offset;
+    ASSERT_FALSE(serializer->SendJournalOffset(offset));
+
+    const auto& entry = queued[next++];
+    ASSERT_TRUE(serializer->SaveEntry(PrimeKey{entry.key}, *entry.value, 0, 0, 0).has_value());
+
+    io::StringSink sink;
+    JournalWriter writer(&sink);
+    writer.Write(journal::Entry{journal::Op::PING, 0, std::nullopt});
+    ASSERT_FALSE(serializer->WriteJournalEntry(std::move(sink).str()));
+  }
+};
+
 }  // namespace
 
 // The following are tests that directly feed byte data to loader to exercise chunk loading.
@@ -1644,6 +1689,86 @@ TEST_F(RdbTest, SplitSBF) {
 
   for (size_t i = 0; i < 50; ++i) {
     EXPECT_THAT(Run({"BF.EXISTS", "bf_loaded", StrCat("item", i)}), IntArg(1));
+  }
+}
+
+TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
+  absl::FlagSaver fs;
+  SetTestFlag("cache_mode", "false");
+  SetTestFlag("num_shards", "1");
+  SetTestFlag("serialization_tagged_chunks", "true");
+  ResetService();
+
+  auto fill_hash = [&](std::string_view key, int count, char ch) {
+    for (int i = 0; i < count; ++i) {
+      EXPECT_THAT(Run({"HSET", std::string{key}, StrCat("field:", i), std::string(128, ch)}),
+                  IntArg(1));
+    }
+  };
+
+  // Larger keys force a mid-entry flush; smaller keys finish in a single chunk. Mixing both
+  // shapes ensures the harness sees both split and unsplit entries.
+  auto get_key_size = [](std::string s) {
+    if ((s[0] - 'A') % 3 == 2)
+      return 4;
+    return 200;
+  };
+
+  constexpr auto from = 'A';
+  constexpr auto to = 'F';
+  for (auto ch = from; ch <= to; ++ch) {
+    std::string s{ch};
+    fill_hash(s, get_key_size(s), ch);
+  }
+
+  std::string body;
+  std::optional<uint64_t> last_journal_offset;
+
+  pp_->at(0)->Await([&] {
+    DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+
+    InterleaveHarness harness;
+    // Queue up B..F to be injected when A yields mid-SaveEntry through PushToConsumerIfNeeded.
+    for (auto ch = 'B'; ch <= to; ++ch) {
+      std::string s{ch};
+      harness.AddKey(s, ctx);
+    }
+
+    RdbSerializer serializer(
+        CompressionMode::NONE, [&](std::string blob) { harness(std::move(blob)); }, 256);
+
+    harness.serializer = &serializer;
+    serializer.SetTagEntries(true);
+
+    auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, "A", OBJ_HASH);
+    ASSERT_TRUE(it.ok());
+
+    ASSERT_TRUE(serializer.SaveEntry(PrimeKey{"A"}, it.value()->second, 0, 0, 0).has_value());
+
+    if (auto tail = serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry); !tail.empty())
+      harness.body += tail;
+
+    body = std::move(harness.body);
+    last_journal_offset = harness.last_journal_offset;
+  });
+
+  EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+
+  auto ec = pp_->at(0)->Await(
+      [&] { return LoadRdbData(service_.get(), WrapInRdb(body), last_journal_offset); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  auto verify_hash = [&](std::string_view key, int count, char ch) {
+    EXPECT_EQ(CheckedInt({"HLEN", std::string{key}}), count);
+    for (int i = 0; i < count; ++i) {
+      EXPECT_EQ(Run({"HGET", std::string{key}, StrCat("field:", i)}), std::string(128, ch));
+    }
+  };
+
+  for (auto ch = from; ch <= to; ++ch) {
+    std::string s{ch};
+    verify_hash(s, get_key_size(s), ch);
   }
 }
 
