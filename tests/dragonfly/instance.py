@@ -466,6 +466,7 @@ class DflyInstanceFactory:
             if endpoint_host:
                 args.setdefault("s3_endpoint", endpoint_host)
                 args.setdefault("s3_use_https", "false" if parsed.scheme == "http" else "true")
+                args.setdefault("s3_use_helio_client", "true")
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v

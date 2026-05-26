@@ -448,6 +448,7 @@ async def test_s3_reload_snapshot_after_restart(df_factory, tmp_dir):
         assert await DebugPopulateSeeder.capture(new_async_client) == start_capture
 
     finally:
+        new_instance.stop()
         delete_s3_objects(
             os.environ["DRAGONFLY_S3_BUCKET"],
             str(tmp_dir)[1:],
