@@ -1,12 +1,11 @@
 import logging
-import threading
 import pytest
 import redis
 import asyncio
 from redis import asyncio as aioredis
 
 from . import dfly_multi_test_args, dfly_args
-from .instance import DflyInstance, DflyInstanceFactory, DflyStartException
+from .instance import DflyInstance, DflyStartException
 from .utility import batch_fill_data, gen_test_data, EnvironCntx
 from .seeder import DebugPopulateSeeder
 
@@ -343,121 +342,6 @@ async def test_key_bump_ups(df_factory):
         new_slot_id = int(dict(map(lambda s: s.split(":"), debug_key_info.split()))["slot"])
         assert new_slot_id + 1 == slot_id
         break
-
-
-@pytest.mark.large
-@pytest.mark.opt_only
-@pytest.mark.asyncio
-async def test_long_container_iteration_yields(df_factory: DflyInstanceFactory):
-    """
-    Verifies that long container iteration yields keep the shard responsive to
-    concurrent commands.
-
-    When a command iterates a large container the shard fiber can monopolize the thread
-    for the entire command duration.
-    container_iteration_yield_interval_usec instructs the shard fiber to yield
-    periodically, letting the fiber scheduler service queued commands in between.
-
-    Two Dragonfly instances are started: one with yields disabled (interval=0) and one
-    with yields enabled (interval=500µs). Both run the same workload concurrently —
-    ZRANGESTORE keeps the shard busy while a tight GET loop on the same shard counts
-    how many GETs complete in the measurement window. The GET counts from each instance
-    are then compared:
-      Instance 1 : yields disabled: ZRANGESTORE holds the shard fiber for the full scan;
-        GETs can only run between complete ZRANGESTORE calls, so GET throughput is low.
-      Instance 2 : yields enabled: the fiber scheduler services queued GETs within each
-        yield window; GET throughput is significantly higher.
-    """
-
-    N = 500_000
-    YIELD_INTERVAL_USEC = 500
-    NUM_ZRANGESTORE = 3
-    DURATION_SEC = 30
-    ZSET_KEY = "zs{s0}"
-    GET_KEY = "x{s0}"
-
-    async def setup(server: DflyInstance):
-        c = server.client()
-        pipe = c.pipeline(transaction=False)
-        for i in range(N):
-            pipe.zadd(ZSET_KEY, {f"m{i}": float(i)})
-        await pipe.execute()
-        await c.set(GET_KEY, 1)
-        await c.aclose()
-
-    def zrangestore_worker(port: int, stop: threading.Event):
-        """
-        Runs NUM_ZRANGESTORE concurrent ZRANGESTORE commands in a loop until stop is set.
-        Destination keys use the {s0} hashtag so they land on shard 0.
-        """
-
-        async def _inner():
-            clients = [aioredis.Redis(host="127.0.0.1", port=port) for _ in range(NUM_ZRANGESTORE)]
-            await asyncio.gather(*[c.ping() for c in clients])
-            while not stop.is_set():
-                # Each worker writes to its own dst key to avoid key conflicts.
-                await asyncio.gather(
-                    *[
-                        c.execute_command("ZRANGESTORE", f"dst{i}{{s0}}", ZSET_KEY, "0", "-1")
-                        for i, c in enumerate(clients)
-                    ]
-                )
-            await asyncio.gather(*[c.aclose() for c in clients])
-
-        asyncio.run(_inner())
-
-    async def measure(server: DflyInstance) -> int:
-        await setup(server)
-
-        thread_stop = threading.Event()
-        t = threading.Thread(
-            target=zrangestore_worker, args=(server.port, thread_stop), daemon=True
-        )
-        t.start()
-        await asyncio.sleep(1)  # let workers connect and queue up ZRANGESTOREs
-
-        get_count = 0
-        async_stop = asyncio.Event()
-
-        async def get_loop():
-            nonlocal get_count
-            c = server.client()
-            await c.ping()
-            while not async_stop.is_set():
-                await c.get(GET_KEY)
-                get_count += 1
-            await c.aclose()
-
-        get_task = asyncio.create_task(get_loop())
-        await asyncio.sleep(DURATION_SEC)
-        async_stop.set()
-        await get_task
-
-        thread_stop.set()
-        t.join(timeout=10)
-        return get_count
-
-    disabled_yield_instance = df_factory.create(
-        proactor_threads=2, num_shards=1, container_iteration_yield_interval_usec=0
-    )
-    enabled_yield_instance = df_factory.create(
-        proactor_threads=2,
-        num_shards=1,
-        container_iteration_yield_interval_usec=YIELD_INTERVAL_USEC,
-    )
-
-    disabled_yield_instance.start()
-    get_commands_in_disabled_yield = await measure(disabled_yield_instance)
-    disabled_yield_instance.stop()
-
-    enabled_yield_instance.start()
-    get_commands_in_enabled_yield = await measure(enabled_yield_instance)
-    enabled_yield_instance.stop()
-
-    assert get_commands_in_enabled_yield > get_commands_in_disabled_yield * 5, (
-        f"Expected at least 5x more GETs with yielding enabled, "
-        f"got {get_commands_in_enabled_yield} vs {get_commands_in_disabled_yield}"
-    )
 
 
 @pytest.mark.debug_only

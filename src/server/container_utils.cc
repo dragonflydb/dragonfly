@@ -230,7 +230,6 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func, bool allow_yield)
           success = false;
           break;
         }
-   
       }
     });
   }
