@@ -46,6 +46,13 @@ class SmallString {
     return prefix_[0];
   }
 
+  // Returns the first two bytes of the inline prefix assembled as a little-endian uint16_t.
+  // Used to recover the HUFFMAN_ENC 2-byte delta header without materializing the full blob.
+  // Precondition: size() >= 2.
+  uint16_t first_two_bytes() const {
+    return uint16_t(uint8_t(prefix_[0])) | (uint16_t(uint8_t(prefix_[1])) << 8);
+  }
+
  private:
   // The string is stored broken up into two parts, the first one - in this array
   char prefix_[kPrefLen];
