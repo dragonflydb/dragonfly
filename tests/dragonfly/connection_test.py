@@ -1,4 +1,6 @@
 import asyncio
+import ctypes
+import ctypes.util
 import logging
 import random
 import socket
@@ -1238,6 +1240,76 @@ async def test_tls_when_read_write_is_interleaved(
         pass
 
     # This deadlocks
+    client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
+    await client.execute_command("GET foo")
+    server.stop()
+
+
+def _ssl_key_update(ssl_sock: ssl.SSLSocket) -> None:
+    """Send a TLS 1.3 KeyUpdate(update_requested) via ctypes SSL_key_update."""
+    libssl = ctypes.CDLL(ctypes.util.find_library("ssl"))
+    libssl.SSL_key_update.restype = ctypes.c_int
+    libssl.SSL_key_update.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    # CPython _ssl._SSLSocket layout: ob_refcnt(8) + ob_type(8) + Socket(8) + SSL*(8) → offset 24
+    # ssl.SSLSocket._sslobj is the C _ssl._SSLSocket object directly (no extra Python wrapper).
+    ptr_sz = ctypes.sizeof(ctypes.c_void_p)
+    ssl_ptr = ctypes.c_void_p.from_address(id(ssl_sock._sslobj) + 3 * ptr_sz).value
+    SSL_KEY_UPDATE_REQUESTED = 1
+    assert libssl.SSL_key_update(ssl_ptr, SSL_KEY_UPDATE_REQUESTED) == 1
+
+
+async def test_tls_when_read_write_is_interleaved_tls13(
+    with_ca_tls_server_args, with_ca_tls_client_args, df_factory
+):
+    """
+    Tests that a write triggered on the read path while WRITE_IN_PROGRESS is set is handled
+    correctly on a TLS 1.3 connection.
+
+    The write fiber is blocked in HandleUpstreamWrite (WRITE_IN_PROGRESS=1) because the client
+    is not reading — TCP send buffers are full. While that is happening, the IoLoop reads a TLS
+    1.3 KeyUpdate(update_requested) from the client. SSL_read must respond with a
+    KeyUpdate(update_not_requested) ack, which requires writing to the BIO. The BIO is full
+    (4096 bytes of pending GET response data), so SSL_read returns SSL_ERROR_WANT_WRITE.
+    HandleOp(NEED_WRITE) calls MaybeSendOutput(), which sees WRITE_IN_PROGRESS already set.
+
+    In TLS 1.3 there is no renegotiation, so KeyUpdate is the only protocol message that causes
+    SSL_read to generate output. We trigger it each iteration via ctypes SSL_key_update().
+    """
+    server: DflyInstance = df_factory.create(**with_ca_tls_server_args, proactor_threads=1)
+    server.start()
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ssl_key = with_ca_tls_client_args["ssl_keyfile"]
+    ssl_cert = with_ca_tls_client_args["ssl_certfile"]
+    ssl_ca_cert = with_ca_tls_client_args["ssl_ca_certs"]
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(ssl_ca_cert)
+    context.load_cert_chain(certfile=ssl_cert, keyfile=ssl_key)
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+
+    ssl_sock = context.wrap_socket(s, server_hostname="localhost")
+    ssl_sock.connect(("127.0.0.1", server.port))
+    ssl_sock.settimeout(0.1)
+
+    # Large value so each GET response overflows the 4096-byte BIO ring buffer
+    tmp = "f" * 10_000
+    ssl_sock.send(f"SET foo {tmp}\r\n".encode())
+
+    try:
+        for i in range(0, 100_000):
+            res = random.randint(1, 4)
+            message = b"GET foo\r\n" * res
+            ssl_sock.send(message)
+            # Do NOT read responses — creates TCP backpressure so WRITE_IN_PROGRESS
+            # stays set while we send the KeyUpdate, maximising the race window.
+            _ssl_key_update(ssl_sock)
+    except Exception:
+        # Expected once TCP send buffers are full
+        pass
+
+    # Server must still be responsive after the DFATAL path was hit
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     await client.execute_command("GET foo")
 
