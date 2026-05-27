@@ -116,18 +116,18 @@ class DflyCmd {
     }
 
     // Immutable after construction; safe to read without locking.
-    const std::string& Address() const {
+    const std::string& GetAddress() const {
       return address_;
     }
-    uint32_t ListeningPort() const {
+    uint32_t GetListeningPort() const {
       return listening_port_;
     }
 
     // Returns the replica ID, or an empty view if SetId has not been called.
     // Thread-safe: id is written at most once via SetId, with release/acquire
     // ordering enforced by id_set_.
-    std::string_view Id() const {
-      if (id_set_.load(std::memory_order_acquire)) {
+    std::string_view GetId() const {
+      if (id_set_.load(std::memory_order_relaxed)) {
         return id_;
       }
       return {};
@@ -137,14 +137,14 @@ class DflyCmd {
     void SetId(std::string_view id) {
       DCHECK(!id_set_.load(std::memory_order_relaxed)) << "SetId called more than once";
       id_.assign(id);
-      id_set_.store(true, std::memory_order_release);
+      id_set_.store(true, std::memory_order_relaxed);
     }
 
     // Atomic to allow cross-thread access: SetDflyClientVersion writes from the
     // REPLCONF CLIENT-VERSION handler without locking, while Flow() reads under
-    // an exclusive lock on GetMutex(). Relaxed ordering: version is independent
-    // of other state.
-    DflyVersion Version() const {
+    // an exclusive lock on mutex(). Relaxed ordering: version is independent of
+    // other state.
+    DflyVersion GetVersion() const {
       return version_.load(std::memory_order_relaxed);
     }
     void SetVersion(DflyVersion v) {
@@ -153,19 +153,19 @@ class DflyCmd {
 
     // State machine field. Caller must hold GetMutex() exclusively for the setter
     // and at least in shared mode for the getter.
-    SyncState ReplicaState() const {
+    SyncState GetReplicaState() const {
       return replica_state_;
     }
     void SetReplicaState(SyncState s) {
       replica_state_ = s;
     }
 
-    // Per-shard fibers receive &ExecState() and pass it into StartFullSyncInThread
+    // Per-shard fibers receive &GetExecState() and pass it into StartFullSyncInThread
     // and friends. ExecutionState has its own internal synchronization.
-    ExecutionState& ExecState() {
+    ExecutionState& GetExecState() {
       return exec_st_;
     }
-    const ExecutionState& ExecState() const {
+    const ExecutionState& GetExecState() const {
       return exec_st_;
     }
 
@@ -177,7 +177,7 @@ class DflyCmd {
     const FlowInfo& GetFlow(size_t idx) const {
       return flows_[idx];
     }
-    size_t FlowCount() const {
+    size_t GetFlowCount() const {
       return flows_.size();
     }
 

@@ -96,12 +96,12 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
   while (flow->last_acked_lsn < journal::GetLsn()) {
     if (absl::Now() > end_time) {
       LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: "
-                   << replica->Address() << ":" << replica->ListeningPort()
+                   << replica->GetAddress() << ":" << replica->GetListeningPort()
                    << ", last acked: " << flow->last_acked_lsn << ", expecting "
                    << journal::GetLsn();
       return false;
     }
-    if (!replica->ExecState().IsRunning()) {
+    if (!replica->GetExecState().IsRunning()) {
       return false;
     }
     LOG_EVERY_T(INFO, 1) << "Replica lsn:" << flow->last_acked_lsn
@@ -282,7 +282,7 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
   {
     util::fb2::LockGuard lk{replica_ptr->GetMutex()};
 
-    if (replica_ptr->ReplicaState() != SyncState::PREPARATION) {
+    if (replica_ptr->GetReplicaState() != SyncState::PREPARATION) {
       return cmd_cntx->SendError(kInvalidState);
     }
 
@@ -300,7 +300,7 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
     conn_cntx->master_repl_flow = &flow;
     flow.conn = cmd_cntx->conn();
     flow.eof_token = eof_token;
-    flow.version = replica_ptr->Version();
+    flow.version = replica_ptr->GetVersion();
 
     if (!conn_cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
       // Listener::PreShutdown() triggered
@@ -366,7 +366,7 @@ void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
     // Use explicit assignment for replica_ptr, because capturing structured bindings is C++20.
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
       status = StartFullSyncInThread(&replica_ptr->GetFlow(shard->shard_id()),
-                                     &replica_ptr->ExecState(), shard);
+                                     &replica_ptr->GetExecState(), shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
 
@@ -375,8 +375,8 @@ void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(kInvalidState);
   }
 
-  LOG(INFO) << "Started sync with replica " << replica_ptr->Address() << ":"
-            << replica_ptr->ListeningPort();
+  LOG(INFO) << "Started sync with replica " << replica_ptr->GetAddress() << ":"
+            << replica_ptr->GetListeningPort();
 
   // protected by lk above.
   replica_ptr->SetReplicaState(SyncState::FULL_SYNC);
@@ -394,7 +394,7 @@ void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
     return;
 
   util::fb2::LockGuard lk{replica_ptr->GetMutex()};
-  auto repl_state = replica_ptr->ReplicaState();
+  auto repl_state = replica_ptr->GetReplicaState();
   if (repl_state != SyncState::FULL_SYNC && repl_state != SyncState::PREPARATION) {
     cmd_cntx->SendError(kInvalidState);
     return;
@@ -416,13 +416,13 @@ void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
       // We are doing partial sync. We never started FullSync so we don't need to stop it.
       bool is_partial = flow->start_partial_sync_at.has_value();
       if (!is_partial) {
-        status = StopFullSyncInThread(flow, &replica_ptr->ExecState(), shard);
+        status = StopFullSyncInThread(flow, &replica_ptr->GetExecState(), shard);
         if (*status != OpStatus::OK) {
           return;
         }
       }
 
-      StartStableSyncInThread(flow, &replica_ptr->ExecState(), shard);
+      StartStableSyncInThread(flow, &replica_ptr->GetExecState(), shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
 
@@ -430,8 +430,8 @@ void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(kInvalidState);
   }
 
-  LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->Address() << ":"
-            << replica_ptr->ListeningPort();
+  LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->GetAddress() << ":"
+            << replica_ptr->GetListeningPort();
 
   replica_ptr->SetReplicaState(SyncState::STABLE_SYNC);
   return cmd_cntx->SendOk();
@@ -622,7 +622,7 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
     LOG(INFO) << "ReconcileMasterSlots() early exit. Config already updated";
     return;
   }
-  sf_->service().cluster_family().ReconcileMasterSlots(replica_ptr->Id());
+  sf_->service().cluster_family().ReconcileMasterSlots(replica_ptr->GetId());
 }
 
 void DflyCmd::Expire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -878,7 +878,7 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
     // the same applies of course if its state is not STABLE_SYNC.
     shared_lock lk(info->GetMutex(), try_to_lock);
     if (lk.owns_lock()) {
-      state = info->ReplicaState();
+      state = info->GetReplicaState();
       // If the replica is not in stable sync, its lag is undefined, so we set it to 0.
       if (state != SyncState::STABLE_SYNC) {
         lag = 0;
@@ -886,8 +886,8 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
     } else {
       lag = 0;
     }
-    vec.push_back(ReplicaRoleInfo{std::string{info->Id()}, info->Address(), info->ListeningPort(),
-                                  SyncStateName(state), lag});
+    vec.push_back(ReplicaRoleInfo{std::string{info->GetId()}, info->GetAddress(),
+                                  info->GetListeningPort(), SyncStateName(state), lag});
   }
   return vec;
 }
@@ -902,8 +902,8 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
         dfly::SharedLock repl_lk{info->GetMutex()};
 
         // flows should not be empty.
-        DCHECK_GT(info->FlowCount(), 0u);
-        if (info->FlowCount() == 0)
+        DCHECK_GT(info->GetFlowCount(), 0u);
+        if (info->GetFlowCount() == 0)
           continue;
 
         const auto& flow = info->GetFlow(shard->shard_id());
@@ -978,7 +978,7 @@ void DflyCmd::SetDflyClientVersion(ConnectionState* state, DflyVersion version) 
 // block, leading to high contention in some case. Split it and avoid replying under a lock.
 bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& repl_info, SyncState expected,
                                        CommandContext* cmd_cntx) {
-  if (repl_info.ReplicaState() != expected) {
+  if (repl_info.GetReplicaState() != expected) {
     cmd_cntx->SendError(kInvalidState);
     return false;
   }
