@@ -248,7 +248,7 @@ I/O loop implementations, selected at connection setup time:
 | Loop | Flag / Condition | Protocols | Architecture |
 |------|-----------------|-----------|--------------|
 | **v1** (`IoLoop` + `AsyncFiber`) | Default for Redis, TLS | Redis (RESP), TLS connections | Two-fiber: blocking recv loop (producer) + `AsyncFiber` (consumer) |
-| **v2** (`IoLoopV2`) | `--experimental_io_loop_v2` (default: true), non-TLS Memcache only | Memcache | Single-fiber: event-driven via `RegisterOnRecv`, dispatch queue drained inline |
+| **v2** (`IoLoopV2`) | `--enable_memcache_io_loop_v2` (default: true) for Memcache; `--enable_resp_io_loop_v2` (default: false) for RESP | Memcache (and optionally RESP) | Single-fiber: event-driven via `RegisterOnRecv`, dispatch queue drained inline |
 
 ### v1: `IoLoop` + `AsyncFiber` (Redis connections)
 
@@ -276,7 +276,7 @@ starving the Data Path: after processing `async_dispatch_quota` dispatch queue i
 interleaving pipeline work, the fiber yields to let `IoLoop` parse pending socket data, then
 switches to pipeline processing.
 
-### v2: `IoLoopV2` (Memcache connections)
+### v2: `IoLoopV2` (Memcache and optional RESP connections)
 
 `IoLoopV2` is an event-driven, single-fiber loop that uses `socket->RegisterOnRecv()`
 instead of blocking on `recv()`. There is no separate `AsyncFiber` — the dispatch queue is
@@ -285,9 +285,9 @@ the same `AsyncOperations` handler as v1. Key differences: no `async_dispatch_qu
 interleaving, no pipeline squashing, and backpressure uses `notifyAll()` instead of
 per-publisher `notify()`.
 
-> **Note**: `IoLoopV2` is currently enabled only for non-TLS Memcache connections
-> (`--experimental_io_loop_v2`, default: true). Since Pub/Sub is a Redis-only feature,
-> **all Pub/Sub traffic flows through the v1 `AsyncFiber` path**.
+> **Note**: By default, Pub/Sub traffic flows through the v1 `AsyncFiber` path because
+> `--enable_resp_io_loop_v2` defaults to `false`. When `--enable_resp_io_loop_v2` is
+> enabled, non-TLS RESP connections (including Pub/Sub subscribers) use `IoLoopV2` instead.
 
 ### PubMessage Processing (shared by v1 and v2)
 

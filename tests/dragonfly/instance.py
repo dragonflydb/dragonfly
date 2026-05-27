@@ -479,8 +479,9 @@ class DflyInstanceFactory:
         if path is not None:
             params = dataclasses.replace(self.params, path=path)
 
-        if version < 1.35:
-            params.args.pop("experimental_io_loop_v2", None)
+        if version < 1.39:
+            args.pop("enable_memcache_io_loop_v2", None)
+            args.pop("enable_resp_io_loop_v2", None)
 
         instance = DflyInstance(params, args)
         self.instances.append(instance)

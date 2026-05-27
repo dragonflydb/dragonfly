@@ -24,16 +24,16 @@ from .utility import tick_timer, assert_eventually, parse_client_list
 BASE_PORT = 1111
 
 
-def is_io_loop_v2(server: DflyInstance) -> bool:
-    """Check if the server is running with experimental_io_loop_v2 enabled.
+def is_resp_io_loop_v2(server: DflyInstance) -> bool:
+    """Check if the server is running with enable_resp_io_loop_v2 enabled.
 
-    When the flag is passed as a bare flag (--experimental_io_loop_v2), the test runner
+    When the flag is passed as a bare flag (--enable_resp_io_loop_v2), the test runner
     stores its value as None instead of "true". This function checks both has_arg() and
     != "false" to correctly detect V2 while safely defaulting to V1 otherwise.
     """
     return (
-        server.has_arg("experimental_io_loop_v2")
-        and server.args.get("experimental_io_loop_v2") != "false"
+        server.has_arg("enable_resp_io_loop_v2")
+        and server.args.get("enable_resp_io_loop_v2") != "false"
     )
 
 
@@ -663,8 +663,8 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
 
 
 @dfly_multi_test_args(
-    {"max_busy_read_usec": 50000, "experimental_io_loop_v2": "false"},
-    {"max_busy_read_usec": 50000, "experimental_io_loop_v2": "true"},
+    {"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "false"},
+    {"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "true"},
 )
 async def test_reply_count(df_server: DflyInstance):
     """Make sure reply aggregations reduce reply counts for common cases"""
@@ -708,7 +708,7 @@ async def test_reply_count(df_server: DflyInstance):
     # MULTI-OK + the EXEC array.
     # V1 (dual-fiber) is aggressive (<=2).
     # V2 (single-fiber): MULTI/OK may flush separately before the EXEC batch (<=3).
-    is_v2 = is_io_loop_v2(df_server)
+    is_v2 = is_resp_io_loop_v2(df_server)
     multi_limit = 3 if is_v2 else 2
     assert await measure(e.execute()) <= multi_limit
 
@@ -736,7 +736,7 @@ async def test_reply_count(df_server: DflyInstance):
     assert await measure(async_client.ft("i1").search("*")) <= 2
 
 
-@dfly_args({"experimental_io_loop_v2": "true"})
+@dfly_args({"enable_resp_io_loop_v2": "true"})
 async def test_v2_conditional_flush_no_stall(df_server: DflyInstance):
     """Verify that V2 conditional flushing never stalls client replies.
 
@@ -907,8 +907,8 @@ async def test_parser_while_script_running(async_client: aioredis.Redis, df_serv
 
 
 @dfly_multi_test_args(
-    {"proactor_threads": "4", "pipeline_squash": 0, "experimental_io_loop_v2": "false"},
-    {"proactor_threads": "4", "pipeline_squash": 0, "experimental_io_loop_v2": "true"},
+    {"proactor_threads": "4", "pipeline_squash": 0, "enable_resp_io_loop_v2": "false"},
+    {"proactor_threads": "4", "pipeline_squash": 0, "enable_resp_io_loop_v2": "true"},
 )
 async def test_pipeline_batching_while_migrating(
     async_client: aioredis.Redis, df_server: DflyInstance
@@ -1342,14 +1342,14 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
         "proactor_threads": 1,
         "pipeline_squash": 9,
         "max_busy_read_usec": 50000,
-        "experimental_io_loop_v2": "false",
+        "enable_resp_io_loop_v2": "false",
     }
 )
 async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     server = df_factory.create()
     server.start()
 
-    if is_io_loop_v2(server):
+    if is_resp_io_loop_v2(server):
         pytest.skip("V2 does not use SquashPipeline; cache lifecycle differs")
 
     client = server.client()
@@ -1431,13 +1431,13 @@ async def test_pipeline_cache_size(df_server: DflyInstance):
         "proactor_threads": 4,
         "pipeline_queue_limit": 10,
         "pipeline_buffer_limit": "1024",
-        "experimental_io_loop_v2": "false",
+        "enable_resp_io_loop_v2": "false",
     },
     {
         "proactor_threads": 4,
         "pipeline_queue_limit": 10,
         "pipeline_buffer_limit": "1024",
-        "experimental_io_loop_v2": "true",
+        "enable_resp_io_loop_v2": "true",
     },
 )
 async def test_pipeline_overlimit(df_factory: DflyInstanceFactory):
@@ -1479,7 +1479,7 @@ async def test_pipeline_overlimit(df_factory: DflyInstanceFactory):
     # V2's self-regulating ParseLoop (parse→execute→reply) drains the queue each iteration,
     # so the throttle counter may not fire even though backpressure is applied internally.
     info = await client.info("stats")
-    is_v2 = server.args.get("experimental_io_loop_v2") == "true"
+    is_v2 = server.args.get("enable_resp_io_loop_v2") == "true"
     if not is_v2:
         assert int(info["pipeline_throttle_total"]) > 0, "Expected pipeline_throttle_total > 0"
 
@@ -1496,7 +1496,7 @@ async def test_pipeline_overlimit(df_factory: DflyInstanceFactory):
         "proactor_threads": 4,
         "pipeline_queue_limit": 10,
         "pipeline_buffer_limit": "1024",
-        "experimental_io_loop_v2": "true",
+        "enable_resp_io_loop_v2": "true",
     }
 )
 async def test_pipeline_backpressure_v2_correctness(df_server: DflyInstance):
@@ -1530,13 +1530,13 @@ async def test_pipeline_backpressure_v2_correctness(df_server: DflyInstance):
         "proactor_threads": 4,
         "pipeline_queue_limit": 10,
         "pipeline_buffer_limit": "1024",
-        "experimental_io_loop_v2": "false",
+        "enable_resp_io_loop_v2": "false",
     },
     {
         "proactor_threads": 4,
         "pipeline_queue_limit": 10,
         "pipeline_buffer_limit": "1024",
-        "experimental_io_loop_v2": "true",
+        "enable_resp_io_loop_v2": "true",
     },
 )
 async def test_pipeline_backpressure_disconnect(df_factory: DflyInstanceFactory):
@@ -1576,7 +1576,7 @@ async def test_pipeline_backpressure_disconnect(df_factory: DflyInstanceFactory)
     # V1 increments pipeline_throttle_total reliably because DispatchSingle parks the fiber.
     # V2's self-regulating ParseLoop drains the queue each iteration, so the counter may not fire.
     info = await client.info("stats")
-    is_v2 = server.args.get("experimental_io_loop_v2") == "true"
+    is_v2 = server.args.get("enable_resp_io_loop_v2") == "true"
     if not is_v2:
         assert int(info["pipeline_throttle_total"]) > 0, "Expected pipeline_throttle_total > 0"
 
@@ -1700,8 +1700,8 @@ async def test_tls_client_kill_preemption(
 
 
 @dfly_multi_test_args(
-    {"proactor_threads": 4, "experimental_io_loop_v2": "false"},
-    {"proactor_threads": 4, "experimental_io_loop_v2": "true"},
+    {"proactor_threads": 4, "enable_resp_io_loop_v2": "false"},
+    {"proactor_threads": 4, "enable_resp_io_loop_v2": "true"},
 )
 async def test_client_migrate(df_server: DflyInstance):
     """
@@ -1724,8 +1724,8 @@ async def test_client_migrate(df_server: DflyInstance):
 
 
 @dfly_multi_test_args(
-    {"proactor_threads": 4, "experimental_io_loop_v2": "false"},
-    {"proactor_threads": 4, "experimental_io_loop_v2": "true"},
+    {"proactor_threads": 4, "enable_resp_io_loop_v2": "false"},
+    {"proactor_threads": 4, "enable_resp_io_loop_v2": "true"},
 )
 async def test_client_migrate_no_conn_leak(df_server: DflyInstance):
     admin = df_server.client()
@@ -1774,13 +1774,13 @@ async def test_client_migrate_no_conn_leak(df_server: DflyInstance):
         "proactor_threads": 4,
         "pipeline_queue_limit": 10,
         "pipeline_buffer_limit": "1024",
-        "experimental_io_loop_v2": "false",
+        "enable_resp_io_loop_v2": "false",
     },
     {
         "proactor_threads": 4,
         "pipeline_queue_limit": 10,
         "pipeline_buffer_limit": "1024",
-        "experimental_io_loop_v2": "true",
+        "enable_resp_io_loop_v2": "true",
     },
 )
 @pytest.mark.timeout(30)
@@ -1832,7 +1832,7 @@ async def test_migration_during_backpressure(df_server: DflyInstance):
     # V1 increments pipeline_throttle_total reliably because DispatchSingle parks the fiber.
     # V2's self-regulating ParseLoop drains the queue each iteration, so the counter may not fire.
     info = await admin.info("stats")
-    is_v2 = df_server.args.get("experimental_io_loop_v2") == "true"
+    is_v2 = df_server.args.get("enable_resp_io_loop_v2") == "true"
     if not is_v2:
         assert int(info["pipeline_throttle_total"]) > 0, "Expected pipeline_throttle_total > 0"
 
@@ -1872,13 +1872,13 @@ async def test_migration_during_backpressure(df_server: DflyInstance):
         "proactor_threads": 4,
         "pipeline_buffer_limit": "1024",
         "pipeline_queue_limit": 10,
-        "experimental_io_loop_v2": "false",
+        "enable_resp_io_loop_v2": "false",
     },
     {
         "proactor_threads": 4,
         "pipeline_buffer_limit": "1024",
         "pipeline_queue_limit": 10,
-        "experimental_io_loop_v2": "true",
+        "enable_resp_io_loop_v2": "true",
     },
 )
 @pytest.mark.timeout(30)
@@ -1917,7 +1917,7 @@ async def test_pipeline_global_memory_relief(df_server: DflyInstance):
     # V1 increments pipeline_throttle_total reliably because DispatchSingle parks the fiber.
     # V2's self-regulating ParseLoop drains the queue each iteration, so the counter may not fire.
     info = await client.info("stats")
-    is_v2 = df_server.args.get("experimental_io_loop_v2") == "true"
+    is_v2 = df_server.args.get("enable_resp_io_loop_v2") == "true"
     if not is_v2:
         assert int(info["pipeline_throttle_total"]) > 0, "Expected pipeline_throttle_total > 0"
 
@@ -2148,8 +2148,8 @@ async def test_blocking_command_pipeline_flush(df_server: DflyInstance):
 
 
 @dfly_multi_test_args(
-    {"proactor_threads": 2, "async_dispatch_quota": 50, "experimental_io_loop_v2": "false"},
-    {"proactor_threads": 2, "async_dispatch_quota": 50, "experimental_io_loop_v2": "true"},
+    {"proactor_threads": 2, "async_dispatch_quota": 50, "enable_resp_io_loop_v2": "false"},
+    {"proactor_threads": 2, "async_dispatch_quota": 50, "enable_resp_io_loop_v2": "true"},
 )
 async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)

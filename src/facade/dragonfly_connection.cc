@@ -126,7 +126,10 @@ ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
           " events to come for the connection in case there is only one command in the pipeline. ");
 
-ABSL_FLAG(bool, experimental_io_loop_v2, true, "new io loop");
+ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
+          "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
+ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
+          "Enable the event-driven IoLoopV2 for non-TLS RESP connections.");
 
 using namespace util;
 using namespace std;
@@ -962,9 +965,10 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {  // non-http
-      // ioloop_v2 not supported for TLS & redis connections yet.
       ioloop_v2_ =
-          GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_ && protocol_ == Protocol::MEMCACHE;
+          !is_tls_ &&
+          ((protocol_ == Protocol::MEMCACHE && GetFlag(FLAGS_enable_memcache_io_loop_v2)) ||
+           (protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_resp_io_loop_v2)));
 
       socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       switch (protocol_) {
