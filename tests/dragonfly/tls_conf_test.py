@@ -217,9 +217,7 @@ async def test_tls_hot_reload(df_factory, with_tls_ca_cert_args, tmp_dir):
             new_key_tmp = os.path.join(tmp_dir, "reload-df-key-new.pem")
             new_cert_tmp = os.path.join(tmp_dir, "reload-df-cert-new.pem")
             new_req_tmp = os.path.join(tmp_dir, "reload-df-req-new.pem")
-            gen_certificate(
-                new_ca_key, new_ca_cert, new_req_tmp, new_key_tmp, new_cert_tmp
-            )
+            gen_certificate(new_ca_key, new_ca_cert, new_req_tmp, new_key_tmp, new_cert_tmp)
 
             # Atomic-ish overwrite of the files the server is watching.
             shutil.copy2(new_key_tmp, server_key)
@@ -240,7 +238,5 @@ async def test_tls_hot_reload(df_factory, with_tls_ca_cert_args, tmp_dir):
                 await bad_client.ping()
 
         # New connection with the NEW CA should succeed.
-        async with server.client(
-            ssl=True, password="XXX", ssl_ca_certs=new_ca_cert
-        ) as new_client:
+        async with server.client(ssl=True, password="XXX", ssl_ca_certs=new_ca_cert) as new_client:
             await new_client.ping()
