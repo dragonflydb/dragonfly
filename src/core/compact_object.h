@@ -8,6 +8,7 @@
 
 #include <optional>
 #include <type_traits>
+#include <utility>
 
 #include "base/pmr/memory_resource.h"
 #include "common/string_or_view.h"
@@ -94,7 +95,11 @@ struct LargeString {
 
   void* ptr;
   uint64_t sz : 56;
-  uint64_t reserved : 8;
+
+  // Hint: outstanding readers may be borrowing `ptr`. Mutations consult
+  // TL::pin_map and hand the buffer to its PendingRead instead of freeing.
+  uint64_t read_pending : 1;
+  uint64_t reserved : 7;
 
   size_t Size() const {
     return sz;
@@ -113,6 +118,7 @@ struct LargeString {
   }
 
   // Replace contents with s, growing the underlying allocation if needed.
+  // Precondition: !s.empty(). Use Free() for clearing a value.
   void SetString(std::string_view s, MemoryResource* mr);
 
   // Allocate room for `size` bytes; ptr must be null.
@@ -241,6 +247,77 @@ class CompactObj {
   size_t Size() const;
 
   std::string_view GetSlice(std::string* scratch) const;
+
+  // Borrowed view of the underlying LargeString storage, including the
+  // encoding metadata needed to decode it and the registered read pin.
+  // Returned by TryBorrow().
+  //
+  // For NONE_ENC: `encoded` is the user-visible bytes; the reply can stream
+  // them directly. For ASCII1/ASCII2_ENC: `encoded` is the packed source
+  // (`encoded.size() < decoded_size`) and the reply must decode in chunks.
+  //
+  struct BorrowedString {
+    BorrowedString(const BorrowedString&) = delete;
+    BorrowedString& operator=(const BorrowedString&) = delete;
+    BorrowedString(BorrowedString&& o) noexcept {
+      MoveFrom(std::move(o));
+    }
+
+    BorrowedString& operator=(BorrowedString&& o) noexcept {
+      if (this == &o)
+        return *this;
+      if (pin_)
+        Unpin();
+      MoveFrom(std::move(o));
+      return *this;
+    }
+
+    ~BorrowedString() noexcept {
+      if (pin_)
+        Unpin();
+    }
+
+    std::string_view encoded;
+    size_t decoded_size = 0;
+    uint8_t encoding = 0;
+
+    // Test helper: returns the current underlying pin refcount, or 0 if already unpinned.
+    uint32_t TEST_refcnt() const;
+
+    // Test helper: returns whether the underlying pin was orphaned by a writer.
+    bool TEST_orphaned() const;
+
+   private:
+    BorrowedString(std::string_view encoded_arg, size_t decoded_size_arg, uint8_t encoding_arg,
+                   void* pin_arg) noexcept
+        : encoded(encoded_arg),
+          decoded_size(decoded_size_arg),
+          encoding(encoding_arg),
+          pin_(pin_arg) {
+    }
+
+    // Any-thread: release this borrow.
+    void Unpin() noexcept;
+
+    void MoveFrom(BorrowedString&& o) noexcept {
+      encoded = o.encoded;
+      decoded_size = o.decoded_size;
+      encoding = o.encoding;
+      pin_ = std::exchange(o.pin_, nullptr);
+    }
+
+    void* pin_ = nullptr;  // Opaque pin handle owned by compact_object.cc internals.
+    friend class CompactObj;
+  };
+
+  // Read-only fast path. Returns a BorrowedString iff this CompactObj holds a
+  // string value that can be borrowed, otherwise std::nullopt (caller uses
+  // GetSlice/GetString/ToString). The borrowed bytes are valid until the
+  // pin is released.
+  //
+  // Side effects on success: stamps the LargeString's read_pending bit and
+  // registers an internal pin in the thread-local pin map.
+  std::optional<BorrowedString> TryBorrow() const;
 
   std::string ToString() const {
     std::string res;
@@ -449,6 +526,11 @@ class CompactObj {
 
   static Stats GetStatsThreadLocal();
   static void InitThreadLocal(MemoryResource* mr);
+
+  // Iterate the thread-local pin map and reap entries with refcnt==0:
+  // free orphaned buffers, erase the map slot. Typically called from
+  // EngineShard::Heartbeat.
+  static void DrainPendingReads();
 
   enum HuffmanDomain : uint8_t {
     HUFF_KEYS = 0,
