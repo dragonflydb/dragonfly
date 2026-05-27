@@ -1882,6 +1882,11 @@ void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
 void MemBufController::StartEntry() {
   DCHECK_EQ(entry_buffer_owner_, 0u);
   DCHECK_EQ(entry_buffer_.InputLen(), 0u);
+
+  // Roll over to 1, id=0 is a special case
+  if (next_id_ == std::numeric_limits<EntryId>::max())
+    next_id_ = 1;
+
   active_id_ = next_id_++;
   entry_buffer_owner_ = active_id_;
   current_buffer_ = &entry_buffer_;
@@ -1950,10 +1955,19 @@ void MemBufController::RestoreStateAfterConsume(EntryId id) {
 }
 
 std::string MemBufController::BuildBlob(Bytes current_bytes) {
+  // default buffer always lies behind current bytes (entry buffer) in temporal sense, so it is
+  // built as prefix. We can never reach here where default buffer content was written _after_ entry
+  // buffer due to FinishEntry semantics.
   const bool has_prefix = current_buffer_ != &default_buffer_ && default_buffer_.InputLen() > 0;
   const auto prefix = has_prefix ? default_buffer_.InputBuffer() : Bytes{};
-  const bool should_tag = send_tagged_entries_ && active_id_ != 0 &&
-                          split_entries_.contains(active_id_) && !current_bytes.empty();
+
+  bool should_tag = send_tagged_entries_;
+
+  // tag only data entries (active id > 0) which were split at some point
+  should_tag &= active_id_ != 0 && split_entries_.contains(active_id_);
+
+  // do not tag empty bytes, it will send a useless header
+  should_tag &= !current_bytes.empty();
 
   std::string out;
   out.reserve(prefix.size() + (should_tag ? kHeaderSize : 0) + current_bytes.size());

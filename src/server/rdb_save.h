@@ -153,6 +153,7 @@ class MemBufController {
   bool send_tagged_entries_ = false;
 
   EntryId next_id_ = 1;
+  // id for current entry: non zero for data entries. 0 for non data entries, eg journal items
   EntryId active_id_ = 0;
 
   io::IoBuf default_buffer_{4096};
