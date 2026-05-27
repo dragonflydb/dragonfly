@@ -266,15 +266,12 @@ class CompactObj {
     BorrowedString& operator=(BorrowedString&& o) noexcept {
       if (this == &o)
         return *this;
-      if (pin_)
-        Unpin();
       MoveFrom(std::move(o));
       return *this;
     }
 
     ~BorrowedString() noexcept {
-      if (pin_)
-        Unpin();
+      Unpin();
     }
 
     std::string_view encoded;

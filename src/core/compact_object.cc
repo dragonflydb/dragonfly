@@ -569,7 +569,9 @@ namespace detail {
 // map lookup either finds the active pin or falls through to deallocate.
 // Precondition: ls->ptr != nullptr.
 static void ReleasePtr(LargeString* ls, LargeString::MemoryResource* mr) {
-  DCHECK(ls->ptr != nullptr);
+  if (!ls->ptr)
+    return;
+
   bool orphaned = ls->read_pending && tl.pin_map.Orphan(ls->ptr);
   if (!orphaned)
     mr->deallocate(ls->ptr, 0, kAlignSize);
@@ -593,8 +595,6 @@ void LargeString::SetString(string_view s, MemoryResource* mr) {
   // (b) read_pending is set (in-place overwrite would corrupt pinned readers;
   // ReleasePtr hands the old buffer to its PendingRead).
   if (s.size() > zmalloc_size(ptr) || read_pending) {
-    if (ptr)
-      ReleasePtr(this, mr);
     ptr = mr->allocate(s.size(), kAlignSize);
   }
   memcpy(ptr, s.data(), s.size());
@@ -617,8 +617,6 @@ void LargeString::AppendString(string_view s, MemoryResource* mr) {
 }
 
 void LargeString::Free(MemoryResource* mr) {
-  if (!ptr)
-    return;
   ReleasePtr(this, mr);
   sz = 0;
 }
@@ -669,7 +667,9 @@ void CompactObj::DrainPendingReads() {
 }
 
 void CompactObj::BorrowedString::Unpin() noexcept {
-  DCHECK(pin_ != nullptr);
+  if (!pin_)
+    return;
+
   static_cast<PendingRead*>(pin_)->UnpinRead();
   pin_ = nullptr;
 }
@@ -1146,15 +1146,10 @@ std::optional<CompactObj::BorrowedString> CompactObj::TryBorrow() const {
     return std::nullopt;
   if (encoding_ != NONE_ENC && encoding_ != ASCII1_ENC && encoding_ != ASCII2_ENC)
     return std::nullopt;
-  auto view = u_.large_str.AsView();
-  size_t decoded_size;
-  if (encoding_ == NONE_ENC) {
-    decoded_size = view.size();
-  } else {
-    // ASCII1_ENC / ASCII2_ENC: derive decoded size from packed length and
-    // first byte (StrEncoding::DecodedSize knows the rounding semantics).
-    decoded_size = GetStrEncoding().DecodedSize(view.size(), *(uint8_t*)view.data());
-  }
+
+  string_view view = u_.large_str.AsView();
+  size_t decoded_size = Size();
+
   // Register the pin and stamp read_pending. The bit is bookkeeping; safe to
   // mutate via const_cast.
   PendingRead* pin = tl.pin_map.RegisterPin(view.data());
