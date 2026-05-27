@@ -1013,3 +1013,17 @@ class LogMonitor:
         assert not self.matched_lines, f"Log pattern '{self.pattern}' found:\n" + "\n".join(
             self.matched_lines
         )
+
+
+def parse_client_list(raw):
+    # The client library auto-parses bare CLIENT LIST but not its filtered forms - accept both.
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="replace")
+    out = []
+    for line in raw.strip().splitlines():
+        fields = dict(t.split("=", 1) for t in line.split(" ") if "=" in t)
+        if fields:
+            out.append(fields)
+    return out

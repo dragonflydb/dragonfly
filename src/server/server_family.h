@@ -306,6 +306,17 @@ class ServerFamily {
   // nullopt otherwise.
   std::optional<Metrics::ReplicaInfo> GetReplicaSummary() const;
 
+  struct MasterLinkClientInfo {
+    uint32_t client_id;
+    std::string info;
+  };
+
+  // One entry per attached outbound master link; empty if not replicating.
+  std::vector<MasterLinkClientInfo> GetMasterLinkClientInfo() const
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
+  bool IsMasterLinkClientId(uint32_t id) const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
   void OnClose(ConnectionContext* cntx);
 
   void CancelBlockingOnThread(std::function<facade::OpStatus(facade::ArgSlice)> = {});

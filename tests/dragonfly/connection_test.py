@@ -19,7 +19,7 @@ from redis.retry import Retry
 
 from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyInstanceFactory
-from .utility import tick_timer, assert_eventually
+from .utility import tick_timer, assert_eventually, parse_client_list
 
 BASE_PORT = 1111
 
@@ -2375,3 +2375,44 @@ async def test_blocking_command_close_eof(df_server: DflyInstance):
         assert int(info["blocked_clients"]) == 0, info["blocked_clients"]
 
     await wait_disconnected()
+
+
+async def test_client_list_filters(df_server: DflyInstance):
+    observer = df_server.client()
+    subscriber = df_server.client(single_connection_client=True)
+    await observer.ping()
+    await subscriber.ping()
+
+    subscriber_id = str(await subscriber.execute_command("CLIENT ID"))
+    observer_id = str(await observer.execute_command("CLIENT ID"))
+    await subscriber.connection.send_command("SUBSCRIBE", "ch1")
+    await subscriber.connection.read_response()
+
+    try:
+        pubsub = parse_client_list(await observer.execute_command("CLIENT LIST TYPE pubsub"))
+        assert [c["id"] for c in pubsub] == [subscriber_id]
+
+        normal_ids = {
+            c["id"]
+            for c in parse_client_list(await observer.execute_command("CLIENT LIST TYPE normal"))
+        }
+        assert subscriber_id not in normal_ids
+        assert observer_id in normal_ids
+
+        assert (
+            parse_client_list(await observer.execute_command("CLIENT LIST TYPE replica"))
+            == parse_client_list(await observer.execute_command("CLIENT LIST TYPE slave"))
+            == []
+        )
+
+        only_sub = parse_client_list(
+            await observer.execute_command("CLIENT LIST ID", subscriber_id)
+        )
+        assert [c["id"] for c in only_sub] == [subscriber_id]
+
+        miss = await observer.execute_command("CLIENT LIST ID", "999999999")
+        assert miss in (b"", "")
+    finally:
+        await subscriber.connection.send_command("UNSUBSCRIBE")
+        await subscriber.aclose()
+        await observer.aclose()

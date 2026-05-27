@@ -285,6 +285,36 @@ TEST_F(ServerFamilyTest, ClientPause) {
   EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
 }
 
+TEST_F(ServerFamilyTest, ClientListAccepted) {
+  const std::vector<std::vector<std::string>> ok = {
+      {"CLIENT", "LIST"},
+      {"CLIENT", "LIST", "TYPE", "normal"},
+      {"CLIENT", "LIST", "TYPE", "master"},
+      {"CLIENT", "LIST", "TYPE", "replica"},
+      {"CLIENT", "LIST", "TYPE", "slave"},
+      {"CLIENT", "LIST", "TYPE", "pubsub"},
+      {"CLIENT", "LIST", "ID", "1"},
+      {"CLIENT", "LIST", "ID", "1", "2", "3"},
+  };
+  for (const auto& args : ok) {
+    EXPECT_THAT(Run(args).GetString(), "") << absl::StrJoin(args, " ");
+  }
+}
+
+TEST_F(ServerFamilyTest, ClientListRejected) {
+  const std::vector<std::pair<std::vector<std::string>, std::string>> bad = {
+      {{"CLIENT", "LIST", "TYPE", "bogus"}, "Unknown client type 'bogus'"},
+      {{"CLIENT", "LIST", "TYPE"}, "syntax error"},
+      {{"CLIENT", "LIST", "ID"}, "syntax error"},
+      {{"CLIENT", "LIST", "ID", "abc"}, "Invalid client ID"},
+      {{"CLIENT", "LIST", "TYPE", "normal", "ID", "1"}, "syntax error"},
+      {{"CLIENT", "LIST", "FOO"}, "syntax error"},
+  };
+  for (const auto& [args, msg] : bad) {
+    EXPECT_THAT(Run(args), ErrArg(msg)) << absl::StrJoin(args, " ");
+  }
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
   // case 1. can't use the feature for resp2
   auto resp = Run({"CLIENT", "TRACKING", "ON"});

@@ -4722,3 +4722,66 @@ async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):
     assert master_capture == replica_capture
 
     await c_replica.execute_command("REPLICAOF", "NO", "ONE")
+
+
+async def test_client_list_replication_types(df_factory: DflyInstanceFactory):
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    assert parse_client_list(await c_replica.execute_command("CLIENT LIST TYPE master")) == []
+
+    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
+    await wait_available_async(c_replica)
+
+    replicas_on_master = parse_client_list(
+        await c_master.execute_command("CLIENT LIST TYPE replica")
+    )
+    assert len(replicas_on_master) >= 1
+    normal_on_master = parse_client_list(await c_master.execute_command("CLIENT LIST TYPE normal"))
+    normal_ids = {c["id"] for c in normal_on_master}
+    assert str(await c_master.execute_command("CLIENT ID")) in normal_ids
+    assert not ({c["id"] for c in replicas_on_master} & normal_ids)
+
+    masters_on_replica = parse_client_list(
+        await c_replica.execute_command("CLIENT LIST TYPE master")
+    )
+    assert len(masters_on_replica) == 1
+    entry = masters_on_replica[0]
+    assert entry["addr"].endswith(f":{master.port}")
+    assert entry["laddr"] != "-"
+    assert int(entry["fd"]) >= 0
+    assert entry["flags"] == "M"
+    assert int(entry["age"]) >= 0
+    assert int(entry["idle"]) >= 0
+    assert entry["repl-phase"] == "stable_sync"
+    assert "phase" not in entry  # master link reports replication state, not lifecycle phase
+
+    all_on_replica = parse_client_list(await c_replica.execute_command("CLIENT LIST"))
+    assert any(c.get("flags") == "M" for c in all_on_replica)
+    all_ids = [c["id"] for c in all_on_replica]
+    assert len(all_ids) == len(set(all_ids)), f"duplicate ids: {all_ids}"
+
+    by_id = parse_client_list(await c_replica.execute_command("CLIENT LIST ID", entry["id"]))
+    assert [c["id"] for c in by_id] == [entry["id"]]
+    assert by_id[0]["flags"] == "M"
+
+    # The master-link id is stable across successive CLIENT LIST calls.
+    again = parse_client_list(await c_replica.execute_command("CLIENT LIST TYPE master"))
+    assert again[0]["id"] == entry["id"]
+
+    # CLIENT KILL ID against the master-link id must be rejected explicitly.
+    with pytest.raises(aioredis.ResponseError) as exc:
+        await c_replica.execute_command("CLIENT", "KILL", "ID", entry["id"])
+    assert "REPLICAOF NO ONE" in str(exc.value)
+
+    await c_replica.execute_command("REPLICAOF", "NO", "ONE")
+
+    @assert_eventually(timeout=5)
+    async def link_gone():
+        assert parse_client_list(await c_replica.execute_command("CLIENT LIST TYPE master")) == []
+
+    await link_gone()
