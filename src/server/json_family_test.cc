@@ -398,16 +398,16 @@ TEST_F(JsonFamilyTest, StrLen) {
   /* Test simple response from only one value */
 
   resp = Run({"JSON.STRLEN", "json", "$.a.a"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   resp = Run({"JSON.STRLEN", "json", "$.a"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
 
   resp = Run({"JSON.STRLEN", "json", "$.a.*"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   resp = Run({"JSON.STRLEN", "json", "$.c.b"});
-  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(2)));
 
   resp = Run({"JSON.STRLEN", "non_existent_key", "$.c.b"});
   EXPECT_THAT(resp, ErrArg("no such key"));
@@ -481,22 +481,22 @@ TEST_F(JsonFamilyTest, ObjLen) {
   /* Test simple response from only one value */
 
   resp = Run({"JSON.OBJLEN", "json", "$.a"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 
   resp = Run({"JSON.OBJLEN", "json", "$.a.*"});
   EXPECT_THAT(resp.GetVec(), IsEmpty());
 
   resp = Run({"JSON.OBJLEN", "json", "$.b"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   resp = Run({"JSON.OBJLEN", "json", "$.b.*"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
 
   resp = Run({"JSON.OBJLEN", "json", "$.c"});
-  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(2)));
 
   resp = Run({"JSON.OBJLEN", "json", "$.d"});
-  EXPECT_THAT(resp, IntArg(3));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3)));
 
   resp = Run({"JSON.OBJLEN", "non_existent_key", "$.a"});
   EXPECT_THAT(resp, ErrArg("no such key"));
@@ -1216,7 +1216,7 @@ TEST_F(JsonFamilyTest, NumericOperationsResp2Resp3) {
   EXPECT_EQ(resp, "[2]");  // Currently returns string "[2]"
 
   resp = Run({"JSON.TYPE", "a", "$"});
-  EXPECT_EQ(resp, "integer");
+  EXPECT_THAT(resp, RespElementsAre("integer"));
 
   resp = Run({"JSON.TYPE", "a", "."});
   EXPECT_EQ(resp, "integer");
@@ -1233,17 +1233,17 @@ TEST_F(JsonFamilyTest, NumericOperationsResp2Resp3) {
 
   resp = Run({"JSON.NUMINCRBY", "a", "$", "1"});
   // In RESP3, this should return a proper array with integer: 1) (integer) 2
-  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(2)));
 
   resp = Run({"JSON.TYPE", "a", "$"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("integer")));
+  EXPECT_THAT(resp, RespElementsAre(RespArray(ElementsAre("integer"))));
 
   resp = Run({"JSON.TYPE", "a", "."});
-  EXPECT_EQ(resp, "integer");
+  EXPECT_THAT(resp, RespElementsAre("integer"));
 
   resp = Run({"JSON.NUMMULTBY", "a", "$", "2"});
   // In RESP3, this should return a proper array with integer: 1) (integer) 4
-  EXPECT_THAT(resp, IntArg(4));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(4)));
 }
 
 TEST_F(JsonFamilyTest, Del) {
@@ -1431,13 +1431,13 @@ TEST_F(JsonFamilyTest, ObjKeys) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.OBJKEYS", "json", "$"});
-  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "b", "c", "d", "e"));
+  EXPECT_THAT(resp, RespElementsAre(RespArray(ElementsAre("a", "b", "c", "d", "e"))));
 
   resp = Run({"JSON.OBJKEYS", "json", "$.a"});
-  EXPECT_THAT(resp.GetVec(), IsEmpty());
+  EXPECT_THAT(resp, RespElementsAre(RespArray(IsEmpty())));
 
   resp = Run({"JSON.OBJKEYS", "json", "$.b"});
-  EXPECT_THAT(resp.GetVec(), ElementsAre("a"));
+  EXPECT_THAT(resp, RespElementsAre(RespArray(ElementsAre("a"))));
 
   resp = Run({"JSON.OBJKEYS", "json", "$.*"});
   EXPECT_THAT(resp, ElementsAreArrays(IsEmpty(), ElementsAre("a"), ElementsAre("a", "b"),
@@ -1486,7 +1486,7 @@ TEST_F(JsonFamilyTest, ObjKeysLegacy) {
   EXPECT_THAT(resp.GetVec(), IsEmpty());
 
   resp = Run({"JSON.OBJKEYS", "json", ".b"});
-  EXPECT_THAT(resp, "a");
+  EXPECT_THAT(resp, RespElementsAre("a"));
 
   resp = Run({"JSON.OBJKEYS", "json", ".*"});
   EXPECT_THAT(resp.GetVec(), IsEmpty());
@@ -1526,7 +1526,7 @@ TEST_F(JsonFamilyTest, StrAppend) {
   /* Test simple response from only one value */
 
   resp = Run({"JSON.STRAPPEND", "json", "$.a.a", "\"ab\""});
-  EXPECT_THAT(resp, IntArg(3));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3)));
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(
@@ -1536,7 +1536,7 @@ TEST_F(JsonFamilyTest, StrAppend) {
   const char kVal[] = "\"a\"";
 
   resp = Run({"JSON.STRAPPEND", "json", "$.a.*", kVal});
-  EXPECT_THAT(resp, IntArg(4));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(4)));
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(
@@ -1544,7 +1544,7 @@ TEST_F(JsonFamilyTest, StrAppend) {
       R"({"a":{"a":"aaba"},"b":{"a":"a","b":1},"c":{"a":"a","b":"bb"},"d":{"a":1,"b":"b","c":3}})");
 
   resp = Run({"JSON.STRAPPEND", "json", "$.c.b", kVal});
-  EXPECT_THAT(resp, IntArg(3));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3)));
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(
@@ -2011,13 +2011,13 @@ TEST_F(JsonFamilyTest, ArrPopOutOfRange) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRPOP", "arr", "$", "-55"});
-  EXPECT_EQ(resp, "0");
+  EXPECT_THAT(resp, RespElementsAre("0"));
 
   resp = Run({"JSON.SET", "arr", "$", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRPOP", "arr", "$", "55"});
-  EXPECT_EQ(resp, "5");
+  EXPECT_THAT(resp, RespElementsAre("5"));
 
   // Test legacy mode
   resp = Run({"JSON.SET", "arr", ".", json});
@@ -2084,7 +2084,7 @@ TEST_F(JsonFamilyTest, ArrTrim) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "json", "$", "2", "3"});
-  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(2)));
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(resp, R"([3,4])");
@@ -2163,42 +2163,42 @@ TEST_F(JsonFamilyTest, ArrTrimOutOfRange) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "arr", "$", "-1", "3"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
   EXPECT_EQ(Run({"JSON.GET", "arr"}), "[]");
 
   resp = Run({"JSON.SET", "arr", "$", arr});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "arr", "$", "54", "55"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
   EXPECT_EQ(Run({"JSON.GET", "arr"}), "[]");
 
   resp = Run({"JSON.SET", "arr", "$", arr});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "arr", "$", "56", "55"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
   EXPECT_EQ(Run({"JSON.GET", "arr"}), "[]");
 
   resp = Run({"JSON.SET", "arr", "$", arr});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "arr", "$", "-55", "-55"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
   EXPECT_EQ(Run({"JSON.GET", "arr"}), "[0]");
 
   resp = Run({"JSON.SET", "arr", "$", arr});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "arr", "$", "-2", "-1"});
-  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(2)));
   EXPECT_EQ(Run({"JSON.GET", "arr"}), "[3,4]");
 
   resp = Run({"JSON.SET", "arr", "$", arr});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "arr", "$", "-1", "-2"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
   EXPECT_EQ(Run({"JSON.GET", "arr"}), "[]");
 }
 
@@ -2239,7 +2239,7 @@ TEST_F(JsonFamilyTest, ArrInsert) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINSERT", "json", "$.a", "0", R"("c")"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
 }
 
 TEST_F(JsonFamilyTest, ArrInsertLegacy) {
@@ -2300,7 +2300,7 @@ TEST_F(JsonFamilyTest, ArrInsertOutOfRange) {
   EXPECT_THAT(resp, ErrArg("index out of range"));
 
   resp = Run({"JSON.ARRINSERT", "arr", "$", "0", "2"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   resp = Run({"JSON.GET", "arr"});
   EXPECT_EQ(resp, "[2]");
@@ -2402,10 +2402,10 @@ TEST_F(JsonFamilyTest, ArrIndex) {
       {"JSON.SET", "json", ".", R"({"key" : ["Alice", "Bob", "Carol", "David", "Eve", "Frank"]})"});
   ASSERT_EQ(resp, "OK");
   resp = Run({"JSON.ARRINDEX", "json", "$.key", R"("Bob")"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   resp = Run({"JSON.ARRINDEX", "json", "$.key", R"("Bob")", "1", "2"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 TEST_F(JsonFamilyTest, ArrIndexLegacy) {
@@ -2445,10 +2445,10 @@ TEST_F(JsonFamilyTest, ArrIndexWithNumericValues) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINDEX", "json", "$", "3"});
-  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(2)));
 
   resp = Run({"JSON.ARRINDEX", "json", "$", "3.0"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   json = R"(
     [[1, 2, 3], [1.0, 2.0, 3.0], 2.0, [1,2,3]]
@@ -2458,10 +2458,10 @@ TEST_F(JsonFamilyTest, ArrIndexWithNumericValues) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINDEX", "json", "$", "[1,2,3]"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 
   resp = Run({"JSON.ARRINDEX", "json", "$", "[1.0,2.0,3.0]"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   json = R"(
     [{"a":2},{"a":2.0},2.0]
@@ -2471,10 +2471,10 @@ TEST_F(JsonFamilyTest, ArrIndexWithNumericValues) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINDEX", "json", "$", R"({"a":2})"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 
   resp = Run({"JSON.ARRINDEX", "json", "$", R"({"a":2.0})"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   json = R"(
     [{"arr":[1,2,3],"number":2},{"arr":[1.0,2.0,3.0],"number":2.0},2]
@@ -2484,16 +2484,16 @@ TEST_F(JsonFamilyTest, ArrIndexWithNumericValues) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINDEX", "json", "$", R"({"arr":[1,2,3],"number":2})"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 
   resp = Run({"JSON.ARRINDEX", "json", "$", R"({"arr":[1.0,2.0,3.0],"number":2.0})"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   resp = Run({"JSON.ARRINDEX", "json", "$", R"({"arr":[1,2,3],"number":2.0})"});
-  EXPECT_THAT(resp, IntArg(-1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(-1)));
 
   resp = Run({"JSON.ARRINDEX", "json", "$", R"({"arr":[1.0,2.0,3.0],"number":2})"});
-  EXPECT_THAT(resp, IntArg(-1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(-1)));
 }
 
 TEST_F(JsonFamilyTest, ArrIndexWithNumericValuesLegacy) {
@@ -2535,31 +2535,31 @@ TEST_F(JsonFamilyTest, ArrIndexOutOfRange) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINDEX", "arr", "$", "1", "-55", "-55"});
-  EXPECT_THAT(resp, IntArg(-1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(-1)));
 
   resp = Run({"JSON.ARRINDEX", "arr", "$", "1", "-55", "-56"});
-  EXPECT_THAT(resp, IntArg(-1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(-1)));
 
   resp = Run({"JSON.ARRINDEX", "arr", "$", "1", "-55", "-54"});
-  EXPECT_THAT(resp, IntArg(-1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(-1)));
 
   resp = Run({"JSON.ARRINDEX", "arr", "$", "1", "-2"});
-  EXPECT_THAT(resp, IntArg(3));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3)));
 
   resp = Run({"JSON.ARRINDEX", "arr", "$", "1", "-2", "-1"});
-  EXPECT_THAT(resp, IntArg(3));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3)));
 
   resp = Run({"JSON.ARRINDEX", "arr", "$", "1", "-2", "-3"});
-  EXPECT_THAT(resp, IntArg(-1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(-1)));
 
   resp = Run({"JSON.ARRINDEX", "arr", "$", "1", "55", "56"});
-  EXPECT_THAT(resp, IntArg(4));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(4)));
 
   resp = Run({"JSON.ARRINDEX", "arr", "$", "1", "55", "54"});
-  EXPECT_THAT(resp, IntArg(4));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(4)));
 
   resp = Run({"JSON.ARRINDEX", "arr", "$", "1", "5", "4"});
-  EXPECT_THAT(resp, IntArg(-1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(-1)));
 }
 
 TEST_F(JsonFamilyTest, MGet) {
@@ -2670,7 +2670,7 @@ TEST_F(JsonFamilyTest, DebugFields) {
                                          IntArg(0), IntArg(0), IntArg(2), IntArg(3)));
 
   resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
-  EXPECT_THAT(resp, IntArg(14));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(14)));
 
   json = R"(
     [[1,2,3, [4,5,6,[6,7,8]]], {"a": {"b": {"c": 1337}}}]
@@ -2684,7 +2684,7 @@ TEST_F(JsonFamilyTest, DebugFields) {
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(11), IntArg(3)));
 
   resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
-  EXPECT_THAT(resp, IntArg(16));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(16)));
 
   json = R"({"a":1, "b":2, "c":{"k1":1,"k2":2}})";
 
@@ -2692,10 +2692,10 @@ TEST_F(JsonFamilyTest, DebugFields) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.DEBUG", "FIELDS", "obj_doc", "$.a"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   resp = Run({"JSON.DEBUG", "fields", "obj_doc", "$.a"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 TEST_F(JsonFamilyTest, DebugFieldsLegacy) {
@@ -2759,20 +2759,20 @@ TEST_F(JsonFamilyTest, DebugMemory) {
   EXPECT_GT(resp.GetVec()[8].GetInt(), 0);
 
   resp = Run({"JSON.DEBUG", "memory", "json1", "$"});
-  EXPECT_GT(resp.GetInt(), 0);
+  EXPECT_GT(resp.GetVec()[0].GetInt().value_or(0), 0);
 
   resp = Run({"JSON.SET", "bigstr", "$",
               R"({"text":"This is a longer string that should definitely exceed SSO buffer"})"});
   EXPECT_EQ(resp, "OK");
   resp = Run({"JSON.DEBUG", "memory", "bigstr", "$.text"});
-  EXPECT_GT(resp.GetInt(), 0);
+  EXPECT_GT(resp.GetVec()[0].GetInt().value_or(0), 0);
 
   resp = Run({"JSON.SET", "obj_doc", "$", R"({"num":42, "obj":{"k1":1,"k2":2}})"});
   EXPECT_EQ(resp, "OK");
   resp = Run({"JSON.DEBUG", "MEMORY", "obj_doc", "$.num"});
-  EXPECT_EQ(resp.GetInt(), 0);
+  EXPECT_EQ(resp.GetVec()[0].GetInt().value_or(-1), 0);
   resp = Run({"JSON.DEBUG", "memory", "obj_doc", "$.obj"});
-  EXPECT_GT(resp.GetInt(), 0);
+  EXPECT_GT(resp.GetVec()[0].GetInt().value_or(0), 0);
 }
 
 TEST_F(JsonFamilyTest, DebugMemoryLegacy) {
@@ -2826,13 +2826,13 @@ TEST_F(JsonFamilyTest, Resp) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("New York", "NY", "21 2nd Street", "10021-3100"));
 
   resp = Run({"JSON.RESP", "json", "$.isAlive"});
-  EXPECT_THAT(resp, "true");
+  EXPECT_THAT(resp, RespElementsAre("true"));
 
   resp = Run({"JSON.RESP", "json", "$.age"});
-  EXPECT_THAT(resp, IntArg(27));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(27)));
 
   resp = Run({"JSON.RESP", "json", "$.weight"});
-  EXPECT_THAT(resp, "135.25");
+  EXPECT_THAT(resp, RespElementsAre("135.25"));
 }
 
 TEST_F(JsonFamilyTest, RespLegacy) {

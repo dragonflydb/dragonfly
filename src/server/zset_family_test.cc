@@ -189,8 +189,8 @@ TEST_F(ZSetFamilyTest, ZRem) {
 
   resp = Run({"zcard", "x"});
   EXPECT_THAT(resp, IntArg(1));
-  EXPECT_THAT(Run({"zrange", "x", "0", "3", "byscore"}), "a");
-  EXPECT_THAT(Run({"zrange", "x", "(-inf", "(+inf", "byscore"}), "a");
+  EXPECT_THAT(Run({"zrange", "x", "0", "3", "byscore"}), RespElementsAre("a"));
+  EXPECT_THAT(Run({"zrange", "x", "(-inf", "(+inf", "byscore"}), RespElementsAre("a"));
 }
 
 TEST_F(ZSetFamilyTest, ZRandMember) {
@@ -199,12 +199,11 @@ TEST_F(ZSetFamilyTest, ZRandMember) {
 
   // Test if count > 0
   resp = Run({"ZRandMember", "x"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
-  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
+  // ZRandMember always uses SendScoredArray which wraps in an array even without count arg.
+  EXPECT_THAT(resp, RespElementsAre(AnyOf("a", "b", "c")));
 
   resp = Run({"ZRandMember", "x", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
-  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
+  EXPECT_THAT(resp, RespElementsAre(AnyOf("a", "b", "c")));
 
   resp = Run({"ZRandMember", "x", "2"});
   ASSERT_THAT(resp, ArrLen(2));
@@ -216,8 +215,7 @@ TEST_F(ZSetFamilyTest, ZRandMember) {
 
   // Test if count < 0
   resp = Run({"ZRandMember", "x", "-1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
-  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
+  EXPECT_THAT(resp, RespElementsAre(AnyOf("a", "b", "c")));
 
   resp = Run({"ZRandMember", "x", "-2"});
   ASSERT_THAT(resp, ArrLen(2));
@@ -298,7 +296,7 @@ TEST_F(ZSetFamilyTest, ZMScore) {
 TEST_F(ZSetFamilyTest, ZMScoreNonExistentKeys) {
   // Case 1: Single member with non-existent key (ZMSCORE abc x)
   auto resp = Run({"zmscore", "abc", "x"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
 
   // Case 2: Multiple members with non-existent key (ZMSCORE abc x y z)
   resp = Run({"zmscore", "abc", "x", "y", "z"});
@@ -309,7 +307,7 @@ TEST_F(ZSetFamilyTest, ZMScoreNonExistentKeys) {
 TEST_F(ZSetFamilyTest, ByScore) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ArrLen(0));
-  EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1", "limit", "0", "10"}), "a");
+  EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1", "limit", "0", "10"}), RespElementsAre("a"));
 
   auto resp = Run({"zrangebyscore", "x", "-inf", "1.1", "limit", "0", "10", "WITHSCORES"});
   ASSERT_THAT(resp, ArrLen(2));
@@ -386,7 +384,7 @@ TEST_F(ZSetFamilyTest, ZRemRangeRank) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"ZREMRANGEBYRANK", "y", "0", "1"}), IntArg(0));
   EXPECT_THAT(Run({"ZREMRANGEBYRANK", "x", "0", "0"}), IntArg(1));
-  EXPECT_EQ(Run({"zrange", "x", "0", "5"}), "b");
+  EXPECT_THAT(Run({"zrange", "x", "0", "5"}), RespElementsAre("b"));
   EXPECT_THAT(Run({"ZREMRANGEBYRANK", "x", "0", "1"}), IntArg(1));
   EXPECT_EQ(Run({"type", "x"}), "none");
 }
@@ -395,7 +393,7 @@ TEST_F(ZSetFamilyTest, ZRemRangeScore) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "y", "0", "1"}), IntArg(0));
   EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "x", "-inf", "1.1"}), IntArg(1));
-  EXPECT_EQ(Run({"zrange", "x", "0", "5"}), "b");
+  EXPECT_THAT(Run({"zrange", "x", "0", "5"}), RespElementsAre("b"));
   EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "x", "(2.0", "+inf"}), IntArg(1));
   EXPECT_EQ(Run({"type", "x"}), "none");
   EXPECT_THAT(Run({"zremrangebyscore", "x", "1", "NaN"}), ErrArg("min or max is not a float"));
@@ -434,7 +432,7 @@ TEST_F(ZSetFamilyTest, ByLex) {
   ASSERT_THAT(resp.GetVec(), ElementsAre("cool", "down", "elephant"));
 
   resp = Run({"zrangebylex", "key", "-", "+", "LIMIT", "5", "1"});
-  ASSERT_THAT(resp, "foo");
+  ASSERT_THAT(resp, RespElementsAre("foo"));
 }
 
 TEST_F(ZSetFamilyTest, ZRevRangeByLex) {

@@ -653,7 +653,7 @@ TEST_F(GenericFamilyTest, Scan) {
   resp = Run({"keys", "*"});
   EXPECT_THAT(resp, RespArray(ElementsAre("bar", "")));
   resp = Run({"keys", ""});
-  EXPECT_EQ(resp, "");
+  EXPECT_THAT(resp, RespElementsAre(""));
 }
 
 TEST_F(GenericFamilyTest, ScanWithAttr) {
@@ -734,15 +734,15 @@ TEST_F(GenericFamilyTest, Sort) {
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "10"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "10.1"));
-  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "1", "1"}), "2.20");
-  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "4", "2"}), "200");
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "1", "1"}), RespElementsAre("2.20"));
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "4", "2"}), RespElementsAre("200"));
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "5", "2"}), ArrLen(0));
   // limits desc
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "0", "5"}).GetVec(),
               ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "2", "2"}).GetVec(),
               ElementsAre("3.5", "2.20"));
-  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "1", "1"}), "10.1");
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "1", "1"}), RespElementsAre("10.1"));
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "5", "2"}), ArrLen(0));
 
   // Test set sort
@@ -781,7 +781,7 @@ TEST_F(GenericFamilyTest, Sort) {
   ASSERT_THAT(Run({"sort", "foo"}), ErrArg("WRONGTYPE "));
 
   Run({"rpush", "list-3", ""});
-  ASSERT_THAT(Run({"sort", "list-3"}), "");
+  ASSERT_THAT(Run({"sort", "list-3"}), RespElementsAre(""));
 
   Run({"rpush", "list-3", "2", "0", "", "-0.14", "0.12", "-0", "-123123", "7654"});
   ASSERT_THAT(Run({"sort", "list-3"}).GetVec(),
@@ -844,10 +844,10 @@ TEST_F(GenericFamilyTest, SortStore) {
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(), ElementsAre("3.5", "10.1"));
   resp = Run({"sort", "list-1", "LIMIT", "1", "1", "store", "list-2"});
   EXPECT_EQ(1, resp.GetInt());
-  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), "2.20");
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), RespElementsAre("2.20"));
   resp = Run({"sort", "list-1", "LIMIT", "4", "2", "store", "list-2"});
   EXPECT_EQ(1, resp.GetInt());
-  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), "200");
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), RespElementsAre("200"));
   resp = Run({"sort", "list-1", "LIMIT", "5", "2", "store", "list-2"});
   EXPECT_EQ(0, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), ArrLen(0));
@@ -953,15 +953,15 @@ TEST_F(GenericFamilyTest, Sort_RO) {
   ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "0", "10"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "10.1"));
-  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "1", "1"}), "2.20");
-  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "4", "2"}), "200");
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "1", "1"}), RespElementsAre("2.20"));
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "4", "2"}), RespElementsAre("200"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "5", "2"}), ArrLen(0));
   // limits desc
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "0", "5"}).GetVec(),
               ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "2", "2"}).GetVec(),
               ElementsAre("3.5", "2.20"));
-  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "1", "1"}), "10.1");
+  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "1", "1"}), RespElementsAre("10.1"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "5", "2"}), ArrLen(0));
 
   // Test set sort
@@ -1003,7 +1003,7 @@ TEST_F(GenericFamilyTest, Sort_RO) {
   ASSERT_THAT(Run({"sort_ro", "foo"}), ErrArg("WRONGTYPE "));
 
   Run({"rpush", "list-3", ""});
-  ASSERT_THAT(Run({"sort_ro", "list-3"}), "");
+  ASSERT_THAT(Run({"sort_ro", "list-3"}), RespElementsAre(""));
 
   Run({"rpush", "list-3", "2", "0", "", "-0.14", "0.12", "-0", "-123123", "7654"});
   ASSERT_THAT(Run({"sort_ro", "list-3"}).GetVec(),
@@ -1221,7 +1221,7 @@ TEST_F(GenericFamilyTest, Restore) {
   resp = Run({"restore", "my-zset", "0", ToSV(ZSET_LISTPACK_DUMP)});
   EXPECT_EQ(resp.GetString(), "OK");
   resp = Run({"zrange", "my-zset", "0", "-1"});
-  EXPECT_EQ("elon", resp.GetString());
+  EXPECT_THAT(resp, RespElementsAre("elon"));
 
   // corrupt the dump file but keep the crc correct.
   ZSET_LISTPACK_DUMP[0] = 0x12;
