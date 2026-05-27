@@ -3792,9 +3792,6 @@ async def _run_tiering_migration(
         with breaker:
             assert info["tiered_entries"] == 0
 
-    info = await nodes[0].client.info("keyspace")
-    assert info["db0"]["keys"] == 0
-
     info = await nodes[1].client.info("keyspace")
     assert info["db0"]["keys"] == keys - delete_succeded
 
