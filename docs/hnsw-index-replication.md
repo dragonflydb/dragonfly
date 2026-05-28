@@ -41,7 +41,7 @@ master's shard id, it must be rewritten when shard counts differ (§6).
   are issued independently per shard; together with the shard id they form the
   `GlobalDocId` stored in the graph.
 - **Per-shard HNSW adapter.** Shard-local state associated with the global graph,
-  including the preservation list required by the borrowed-vector invariant (§4.4).
+  including the preservation list required by the borrowed-vector invariant (§5.4).
 
 ### 2.3 Serialized structure
 
@@ -100,81 +100,9 @@ repeated mapping_count times:
   doc_id      len
 ```
 
-## 4. Index States and Invariants
+## 4. Protocol
 
-### 4.1 States
-
-Each shard holds one state per index, drawn from the four values below. States on
-different shards and on different indices are independent.
-
-| State | When entered | Mutations | Exit |
-|-------|--------------|-----------|------|
-| `kProhibit` | Default at construction, on a replica that is still in LOADING. | Buffered into the pending-updates list. | Restore-side drain → `kBuilding`. |
-| `kRestoring` | Replica enters this when the local index is rebuilt with restored graph data, before vector hydration. | Buffered. | Restore-side drain → `kBuilding`, after hydration completes on every shard. |
-| `kSerializing` | Master enters this on every shard right before a graph dump. The promotion only takes effect on indices that are currently in `kBuilding`. | Buffered. | Save-side drain → `kBuilding`, after the dump completes. |
-| `kBuilding` | Steady state. Reached the first time an index is built, and re-entered after every drain. | Applied inline to the graph. | Promoted to `kSerializing` by a save. |
-
-**Transitions.** Every transition out of a non-`kBuilding` state is performed by a drain
-that replays the pending-updates list against the current database state (§4.2). The
-legal transitions are:
-
-1. `kProhibit → kBuilding` — restore-side drain at the end of post-load reconciliation.
-2. `kRestoring → kBuilding` — restore-side drain at the end of post-load
-   reconciliation.
-3. `kBuilding → kSerializing` — issued by the master at the start of the graph dump.
-4. `kSerializing → kBuilding` — save-side drain at the end of the graph dump.
-
-There is no direct transition between `kProhibit`, `kRestoring` and `kSerializing`.
-
-**Safety carve-outs.** Two asymmetries in the transition rules give the safety
-properties the protocol relies on:
-
-- The `kBuilding → kSerializing` promotion is the only way to enter `kSerializing`. An
-  index in `kProhibit` or `kRestoring` is left untouched by a save, so a save cannot
-  disturb a half-restored replica.
-- The save-side drain acts only on indices currently in `kSerializing`, so it cannot
-  promote a `kRestoring` or `kProhibit` index to `kBuilding` and replay buffered ops
-  before restore has finished.
-
-### 4.2 Single-writer invariant
-
-The global graph is mutated only when the owning shard is in `kBuilding`. All other
-states divert `Add` and `Remove` calls to a per-shard pending-updates list, which is
-replayed on drain.
-
-### 4.3 Consistent-snapshot invariant
-
-While a graph dump is in progress, shard-level writes are accepted at the key layer;
-their index side-effects are buffered. The MRMW read lock held on the graph prevents any
-buffered mutation from committing until the dump completes.
-
-### 4.4 Borrowed-vector invariant
-
-A graph can be configured to store pointers into hash field sds rather than copying
-vectors. In copy mode this invariant is a no-op. In borrowed mode, any mutation that
-would free or overwrite such an sds while the index is not in `kBuilding` must retain
-the original sds until the drain. Retention is per-shard, per-field. The containing
-`PrimeValue` additionally suppresses defragmentation for the lifetime of the node to
-prevent relocation of borrowed storage.
-
-### 4.5 Identifier uniqueness
-
-`GlobalDocId`s are unique across shards by construction. On fresh mapping load and on
-remap (§6), per-shard DocId counters issue DocIds in the same order in which keys are
-later installed, so counter values coincide with the DocIds materialized by the replica's
-key index.
-
-### 4.6 Restore ordering
-
-Graph structure is restored before vector payloads are hydrated. A node whose document
-is missing in the local database at hydration is removed from the graph. Nodes whose
-vector data cannot be installed immediately are deferred to the post-load drain (§4.2);
-they exist briefly with stale payloads but are never reachable by a search query, which
-requires the index to be in `kBuilding`.
-
-## 5. Protocol
-
-### 5.1 Master
+### 4.1 Master
 
 ![Serialization flow](./hnsw-replication-serialize.svg)
 
@@ -197,7 +125,7 @@ The graph dump is additionally gated by the `--serialize_hnsw_index` flag on the
 When the flag is off, steps 2 and 3 are skipped and the replica rebuilds every index
 from the key stream.
 
-### 5.2 Replica
+### 4.2 Replica
 
 ![Deserialization flow](./hnsw-replication-deserialize.svg)
 
@@ -217,8 +145,8 @@ Post-load reconciliation, run once after the stream has been fully consumed:
    replica shard whose id equals the master shard id in the block. If they differ, the
    remap of §6 runs first and each replica shard receives its pre-distributed slice.
 2. **Rebuild.** Each shard decides per index whether to take the restore path (graph
-   was installed in step 1) or to rebuild the index from scratch (graph missing or
-   inconsistent), and enters `kRestoring` in either case.
+   was installed in step 1, → `kRestoring`) or to rebuild the index from scratch
+   (graph missing or inconsistent, → `kBuilding` directly).
 3. **Synonyms.** Parked synonym commands are replayed; the replica waits for index
    construction to complete on all shards.
 4. **Hydrate.** Each shard iterates its key index, loads every live document, and
@@ -226,13 +154,101 @@ Post-load reconciliation, run once after the stream has been fully consumed:
    revalidated against the snapshot before any removal, because concurrent fibers may
    reuse freed DocIds. Nodes whose document is missing are removed from the graph; keys
    whose hydration cannot complete immediately are queued for the final drain.
-5. **Drain.** Once every shard has finished hydration, each shard replays its pending
-   updates and transitions its indices to `kBuilding`. The drain is deferred until all
-   shards have completed because the graph is global; a single shard cannot mark itself
-   ready while others may still install vector data into the same graph.
+5. **Drain.** Once every shard has finished hydration, each shard on the restore path
+   replays its pending updates and transitions `kRestoring → kBuilding`. The drain is
+   deferred until all shards have completed because the graph is global; a single
+   shard cannot mark itself ready while others may still install vector data into the
+   same graph. Shards that took the full-rebuild path are already in `kBuilding` and
+   skip the drain.
 
 The replica's `--deserialize_hnsw_index` flag mirrors the master flag: when off, both
 opcodes are skipped on arrival and every index is rebuilt from the key stream.
+
+## 5. Index States and Invariants
+
+### 5.1 States
+
+Each shard holds one state per index, drawn from the four values
+`{kProhibit, kRestoring, kSerializing, kBuilding}`. States on different shards and on
+different indices are independent. The state reflects the index's *phase* (loading,
+restoring, serializing, steady-state) rather than the node's role — any instance
+visits master-side states while saving and replica-side states while loading — but
+in a typical replication topology each side only visits its own subset.
+
+**Replica side.** The replica visits `kProhibit` first, then either rebuilds from
+scratch or hydrates a restored graph, ending in `kBuilding`.
+
+| State | When entered | Mutations | Exit |
+|-------|--------------|-----------|------|
+| `kProhibit` | Default at `InitIndex` while the shard is in LOADING. The shard has not yet decided whether to rebuild from scratch or restore from RDB graph data. | Buffered into the pending-updates list (may be discarded — see exit). | **Full-rebuild path:** directly to `kBuilding`; the pending-updates list is *cleared*, not replayed (the rebuild reindexes every document from the key stream). **Restore path:** to `kRestoring`. |
+| `kRestoring` | Restore path only: graph data was installed from RDB and `Rebuild(is_restored=true)` ran, leaving vector payloads to be hydrated from the key stream. | Buffered for replay. | Restore-side drain → `kBuilding`, after hydration completes on **every** shard. |
+| `kBuilding` | Reached directly via full rebuild, or via the restore-side drain. Terminal under a single full-sync. | Applied inline to the graph. | Promoted to `kSerializing` only if this replica later runs its own snapshot. |
+
+The distinction between `kProhibit` and `kRestoring` is *which path was chosen*:
+`kProhibit` means the shard is still buffering ops without a commitment to replay
+them, and the full-rebuild exit will discard the buffer; `kRestoring` means the shard
+has committed to keeping the buffer and replaying it on drain.
+
+**Master side.** The master starts in `kBuilding` and is briefly promoted to
+`kSerializing` for the duration of each graph dump.
+
+| State | When entered | Mutations | Exit |
+|-------|--------------|-----------|------|
+| `kBuilding` | Steady state on the master. | Applied inline to the graph. | Promoted to `kSerializing` at the start of every graph dump. |
+| `kSerializing` | Set right before a graph dump, only on indices currently in `kBuilding`. | Buffered for replay. | Save-side drain → `kBuilding`, after the dump completes. |
+
+**Transitions.** Drains replay the pending-updates list against the current database
+state; the full-rebuild exit out of `kProhibit` is the only state change that
+*discards* buffered ops instead of replaying them.
+
+1. `kProhibit → kBuilding` — full-rebuild path on the replica: the shard discards any buffered ops and rebuilds the index from scratch from the key stream.
+2. `kProhibit → kRestoring` — restore path on the replica: graph data was installed from RDB; the shard now needs to hydrate vector payloads.
+3. `kRestoring → kBuilding` — restore-side drain at the end of post-load reconciliation, after all shards finish hydration.
+4. `kBuilding → kSerializing` — issued at the start of the graph dump on the side that is saving.
+5. `kSerializing → kBuilding` — save-side drain at the end of the graph dump.
+
+There is no direct transition between `kRestoring` and `kSerializing`.
+
+**Safety carve-out.** Because `kSerializing` is reachable only from `kBuilding`, and
+the save-side drain acts only on `kSerializing`, a save cannot disturb a `kProhibit`
+or `kRestoring` index — neither the promotion nor the drain touches a half-restored
+replica.
+
+### 5.2 Single-writer invariant
+
+The global graph is mutated only when the owning shard is in `kBuilding`. All other
+states divert `Add` and `Remove` calls to a per-shard pending-updates list, which is
+replayed on drain.
+
+### 5.3 Consistent-snapshot invariant
+
+While a graph dump is in progress, shard-level writes are accepted at the key layer;
+their index side-effects are buffered. The MRMW read lock held on the graph prevents any
+buffered mutation from committing until the dump completes.
+
+### 5.4 Borrowed-vector invariant
+
+A graph can be configured to store pointers into hash field sds rather than copying
+vectors. In copy mode this invariant is a no-op. In borrowed mode, any mutation that
+would free or overwrite such an sds while the index is not in `kBuilding` must retain
+the original sds until the drain. Retention is per-shard, per-field. The containing
+`PrimeValue` additionally suppresses defragmentation for the lifetime of the node to
+prevent relocation of borrowed storage.
+
+### 5.5 Identifier uniqueness
+
+`GlobalDocId`s are unique across shards by construction. On fresh mapping load and on
+remap (§6), per-shard DocId counters issue DocIds in the same order in which keys are
+later installed, so counter values coincide with the DocIds materialized by the replica's
+key index.
+
+### 5.6 Restore ordering
+
+Graph structure is restored before vector payloads are hydrated. A node whose document
+is missing in the local database at hydration is removed from the graph. Nodes whose
+vector data cannot be installed immediately are deferred to the post-load drain (§5.2);
+they exist briefly with stale payloads but are never reachable by a search query, which
+requires the index to be in `kBuilding`.
 
 ## 6. Shard Count Remap
 
