@@ -782,6 +782,28 @@ TEST_F(SearchFamilyTest, TagNumbers) {
   EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|hello|2}"}), AreDocIds("d:1", "d:2"));
 }
 
+TEST_F(SearchFamilyTest, ReturnEmptyFieldValue) {
+  EXPECT_EQ(Run({"ft.create", "probe", "ON", "JSON", "PREFIX", "1", "probe:", "SCHEMA", "$.parent",
+                 "AS", "parent", "TAG", "$.body", "AS", "body", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"json.set", "probe:1", "$", R"({"parent":"","body":""})"}), "OK");
+  EXPECT_EQ(Run({"json.set", "probe:2", "$", R"({"parent":"a","body":"hello"})"}), "OK");
+
+  auto resp = Run({"ft.search", "probe", "*", "RETURN", "2", "parent", "body", "SORTBY", "parent"});
+  EXPECT_THAT(resp, IsMapWithSize("probe:1", IsMap("parent", "", "body", ""), "probe:2",
+                                  IsMap("parent", "a", "body", "hello")));
+
+  EXPECT_EQ(Run({"ft.create", "hprobe", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "parent",
+                 "TAG", "body", "TEXT"}),
+            "OK");
+  Run({"hset", "h:1", "parent", "", "body", ""});
+  Run({"hset", "h:2", "parent", "a", "body", "hello"});
+
+  resp = Run({"ft.search", "hprobe", "*", "RETURN", "2", "parent", "body", "SORTBY", "parent"});
+  EXPECT_THAT(resp, IsMapWithSize("h:1", IsMap("parent", "", "body", ""), "h:2",
+                                  IsMap("parent", "a", "body", "hello")));
+}
+
 TEST_F(SearchFamilyTest, TagEscapeCharacters) {
   EXPECT_EQ(Run({"ft.create", "item_idx", "ON", "JSON", "PREFIX", "1", "p", "SCHEMA", "$.name",
                  "AS", "name", "TAG"}),
