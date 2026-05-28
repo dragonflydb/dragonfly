@@ -13,11 +13,13 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/facade_test.h"
 #include "server/conn_context.h"
+#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
+ABSL_DECLARE_FLAG(uint32_t, container_iteration_yield_interval_usec);
 
 using namespace testing;
 using namespace std;
@@ -2001,6 +2003,41 @@ TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
   EXPECT_EQ(Run({"exists", "foo0"}), 0);
   EXPECT_EQ(Run({"exists", "bar0"}), 1);
   EXPECT_EQ(Run({"dbsize"}), 5);
+}
+
+// Verifies that long-running container iteration is yielding.
+// This test uses a sorted set iteration path, but the same yielding
+// behavior is expected for other containers (SET, HASH, LIST) with non
+// listpack encodings.
+TEST_F(GenericFamilyTest, ContainerIterationYields) {
+  // Build a large sorted set that will be encoded as SKIPLIST.
+  constexpr int N = 500'000;
+  for (int start = 0; start < N; start += 1'000) {
+    std::vector<std::string> args = {"zadd", "zs"};
+    for (int i = start; i < start + 1000; i++) {
+      args.push_back(StrCat(i));
+      args.push_back(StrCat("m:", i));
+    }
+    Run(absl::Span<const std::string>(args));
+  }
+
+  // Run IterateSortedSet directly on the shard and verify that the
+  // long-running iteration path triggers fiber preemption.
+  uint64_t delta = 0;
+  ShardId sid = Shard("zs", shard_set->size());
+  shard_set->Await(sid, [&delta] {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+    auto* table = db.GetDBTable(0);
+    auto it = table->prime.Find(string_view{"zs"});
+    ASSERT_EQ(it->second.Encoding(), OBJ_ENCODING_SKIPLIST);
+    uint64_t before = ThisFiber::GetPreemptCount();
+    container_utils::IterateSortedSet(it->second,
+                                      [](container_utils::ContainerEntry, double) { return true; });
+    delta = ThisFiber::GetPreemptCount() - before;
+  });
+
+  // Iteration should yield at least once during long-running execution.
+  EXPECT_GT(delta, 0);
 }
 
 // Regression test for SORT BY nosort STORE inside MULTI/EXEC does a
