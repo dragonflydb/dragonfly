@@ -546,7 +546,13 @@ class Transaction {
   // Should be called immediately after the last hop.
   void LogAutoJournalOnShard(EngineShard* shard, RunnableResult shard_result);
 
-  // Whether the callback can be run directly on this thread without dispatching on the shard queue
+  // Whether the callback can be run directly on this fiber without dispatching on the shard queue.
+  // It checks internally that there are no possible suspension points.
+  //
+  // We do not support suspendable shard callbacks. Because all locks are acquried as intent locks,
+  // we rely on a single ordering to determine if a transaction is able to run. When an inlined
+  // transaction suspends (even as it acquires the locks), there is no way to determine its presence
+  // from the shard queue fiber, so it can start executing a command on the same keys in parallel.
   bool CanRunInlined() const;
 
   uint32_t GetUseCount() const {
