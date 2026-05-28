@@ -3,27 +3,28 @@
 ## 1. Overview
 
 A Dragonfly cluster is a set of Dragonfly nodes that collectively own the 16384-slot
-hash space. Slot ownership is partitioned across master nodes; each master may have zero
-or more replicas. Nodes do not gossip with each other and share no state: the topology
-is authored by an external **cluster manager** and pushed to every node via a single
-command (`DFLYCLUSTER CONFIG`). The cluster manager is the only source of truth for
-cluster state. Each node accepts client requests only for keys whose slot it owns,
-redirecting all others with `-MOVED`.
+hash space. Slot ownership is partitioned across master nodes, and each master may
+have zero or more replicas.
 
-The cluster state explicitly includes any in-progress slot transfers between nodes:
-migrations are not a side channel but a declarative field of the configuration JSON, and
-a node starts, finishes, or cancels a migration purely as a consequence of receiving a
-config in which the corresponding `migrations[]` entry has appeared, advanced, or
-disappeared.
+Nodes do not gossip with each other and share no state. Topology is authored by an
+external **cluster manager** and pushed to every node with a single command
+(`DFLYCLUSTER CONFIG`); the cluster manager is the only source of truth for cluster
+state. Each node accepts client requests only for keys whose slot it owns, and
+redirects everything else with `-MOVED`.
 
-The intra-node sharding boundary (one thread-shard per core, shared-nothing) is
-orthogonal to slot ownership. A node's owned slots are spread across its thread-shards
-by a tag-derived hash (or, optionally, by slot id), so a hot slot's load is distributed
-across cores regardless of cluster topology.
+In-progress slot transfers are part of cluster state. A migration is not a side
+channel — it is a declarative field in the configuration JSON. A node starts,
+continues, or cancels a migration solely as a consequence of receiving a config in
+which the corresponding `migrations[]` entry has appeared, changed, or disappeared.
 
-This document specifies the cluster command surface, the configuration JSON, the slot
-routing rules, the migration protocol and state machine, and the invariants that make
-the scheme safe under concurrent writes.
+Each node is itself partitioned into thread-shards (one per core, shared-nothing).
+Intra-node sharding is orthogonal to slot ownership: a node's owned slots are spread
+across its thread-shards by a tag-derived hash — or, optionally, by slot id — so a
+hot slot's load is distributed across cores regardless of cluster topology.
+
+The rest of this document covers the cluster command surface, the configuration JSON,
+the slot-routing rules, and the migration protocol, including the invariants that
+keep the scheme safe under concurrent writes.
 
 ### 1.1 Terminology
 
@@ -53,20 +54,21 @@ provided for client-library compatibility.
 | Top-level | Subcommand | ACL flags | Scope |
 |-----------|------------|-----------|-------|
 | `CLUSTER` | `HELP`, `MYID`, `INFO`, `NODES`, `SHARDS`, `SLOTS`, `KEYSLOT <key>` | `SLOW` | Read-only introspection. Available on any listener. |
-| `READONLY`, `READWRITE` | — | `FAST \| CONNECTION` | Stubs in real-cluster mode. No replica-read routing today. |
+| `READONLY` | — | `FAST \| CONNECTION` | No-op stub (always replies `+OK`). Provided for client-library compatibility; no replica-read routing today. |
+| `READWRITE` | — | `FAST \| CONNECTION` | No-op stub only in `emulated` mode. In real cluster mode (`--cluster_mode=yes`) it returns `-ERR Cluster is disabled. Use --cluster_mode=yes to enable.` |
 | `DFLYCLUSTER` | `CONFIG <json>` | `ADMIN \| GLOBAL_TRANS \| HIDDEN`, ACL `ADMIN \| SLOW` | Installs new cluster state. Runs as a global transaction. |
 | `DFLYCLUSTER` | `GETSLOTINFO SLOTS <id\|a-b>...` | as above | Per-slot stats: `key_count`, `total_reads`, `total_writes`, `memory_bytes`. |
 | `DFLYCLUSTER` | `FLUSHSLOTS <start> <end> [...]` | as above | Deletes data in slot ranges. Journaled to replicas. |
 | `DFLYCLUSTER` | `SLOT-MIGRATION-STATUS [<peer_id>]` | as above | Per-migration status: `[direction, peer_id, state, keys_migrated, error]`. |
-| `DFLYMIGRATE` | `INIT <source_id> <flows_num> [start end]...` | `ADMIN \| HIDDEN`, ACL `ADMIN \| SLOW \| DANGEROUS` | Source → target: announce migration. |
+| `DFLYMIGRATE` | `INIT <source_id> <num_flows> [start end]...` | `ADMIN \| HIDDEN`, ACL `ADMIN \| SLOW \| DANGEROUS` | Source → target: announce migration. |
 | `DFLYMIGRATE` | `FLOW <source_id> <shard_id>` | as above | Source → target: open one per-shard data stream. |
 | `DFLYMIGRATE` | `ACK <source_id> <attempt>` | as above | Source → target: finalize attempt. |
 
 A few invariants on the surface:
 
-- **All `DFLYCLUSTER` commands require `--cluster_mode=yes`**, except that emulated mode
-  silently ignores them. They are the cluster manager's interface; clients should never
-  call them.
+- **All `DFLYCLUSTER` commands require `--cluster_mode=yes`** and are rejected on every
+  other mode (including `emulated`) with `-ERR Cluster is disabled. Use --cluster_mode=yes to enable.`
+  They are the cluster manager's interface; clients should never call them.
 - **`DFLYMIGRATE` is internal**, spoken only between Dragonfly masters during a
   migration. It is not part of the client-facing contract.
 - **The cluster manager must push to every node** — masters and replicas — before
@@ -82,6 +84,8 @@ A few invariants on the surface:
   command, transaction, or Lua script whose keys span more than one slot.
 - **`-ERR Invalid cluster configuration.`** — `DFLYCLUSTER CONFIG` rejection. The
   previous config is preserved untouched.
+- **`-ERR Cluster is not yet configured`** — returned for any data-plane command in
+  real-cluster mode before the first `DFLYCLUSTER CONFIG` has been installed.
 - **`-ERR Cluster is disabled. Use --cluster_mode=yes to enable.`** — sent when
   `DFLYCLUSTER` is invoked on a node that is not in real-cluster mode.
 
@@ -90,7 +94,8 @@ A few invariants on the surface:
 A cluster manager typically:
 
 1. Starts each node with `--cluster_mode=yes --admin_port=<p> [--cluster_node_id=<id>] [--cluster_announce_ip=<ip>]`.
-2. Calls `DFLYCLUSTER MYID` on each node's admin port to discover its identity.
+2. Calls `CLUSTER MYID` on each node to discover its identity. `CLUSTER MYID` is
+   available on every listener, not just the admin port.
 3. Issues `REPLICAOF <master_ip> <master_port>` to each intended replica. Replication is
    set up out-of-band from cluster state: the `replicas[]` field of the cluster config
    is descriptive (used by `CLUSTER NODES/SHARDS/SLOTS` to advertise topology and by
@@ -108,64 +113,60 @@ A cluster manager typically:
 
 ### 3.1 Slot identifiers
 
-`SlotId` is a 16-bit value in `[0, kMaxSlotNum]` where `kMaxSlotNum = 0x3FFF`. The
-mapping from key to slot is
+A slot id is a 16-bit unsigned integer in the range `[0, 16383]` — the 14-bit space
+produced by masking a CRC16 with `0x3FFF`. The mapping from key to slot is:
 
 ```
-SlotId KeySlot(key) = crc16(tag(key)) & 0x3FFF
+slot(key) = crc16(tag(key)) & 0x3FFF
 ```
 
-where `tag(key)` returns the content of the first balanced `{...}` substring if both
-braces are present and the content is non-empty, otherwise `key` itself.
+`tag(key)` is the content of the first balanced `{...}` substring of the key when
+both braces are present and the content is non-empty; otherwise it is the key itself.
 
-`SlotRange { start, end }` is the **closed** interval `[start, end]`. `SlotRanges` holds
-a sorted vector of disjoint closed ranges. Together they describe slot ownership and
-the per-shard migration scope. `SlotSet` is a 16384-bit bitset built from `SlotRanges`
-for O(1) ownership tests on the hot path.
+A *slot range* is a closed interval `[start, end]` with `start <= end`. A node's
+ownership is described as a sorted, disjoint list of such ranges. Internally each
+node also keeps a 16384-bit bitset of its owned slots, so the ownership check on the
+hot command path is a single bit lookup.
 
 ### 3.2 Hash tags and intra-node sharding
 
-The key tag is used independently in two places:
+The key tag is consulted in two independent places:
 
-1. **Cluster slot computation.** `KeySlot(key)` always uses the tag and always returns
-   a 14-bit value, regardless of whether cluster mode is enabled.
-2. **Thread-shard selection.** By default, a key's owning thread-shard is
-   `XXH64(tag(key)) % shard_count`. Under `--experimental_cluster_shard_by_slot`, it is
-   `KeySlot(key) % shard_count` instead.
+1. **Cluster slot computation** — `slot(key)` always uses the tag, even when cluster
+   mode is disabled.
+2. **Thread-shard selection** — by default the owning thread-shard is derived from a
+   fast non-cryptographic hash of the tag, modulo the node's shard count. Under
+   `--experimental_cluster_shard_by_slot`, the slot id itself is used in place of the
+   tag hash.
 
-Default tag-hash mode spreads any individual slot's keys across multiple thread shards
-on the owning node, so a hot slot does not become a hot core. Slot-modulo mode pins each
-slot to one shard and is reserved for future migration optimizations where bucket-level
-traversal is cheaper when slots are contiguous.
+Default tag-hash mode spreads a single slot's keys across multiple thread-shards, so a
+hot slot never collapses onto a single core. Slot-modulo mode pins each slot to a
+single thread-shard; it is reserved for future migration optimizations that benefit
+from contiguous-slot scans.
 
 ### 3.3 Cluster topology
 
-The topology is an array of `ClusterShardInfo`. Each shard is one master plus zero or
-more replicas, owning a disjoint set of slot ranges, with zero or more outgoing
-migrations attached.
+A cluster's topology is a list of shards. Each shard has:
 
-```
-ClusterShardInfo {
-  SlotRanges          slot_ranges;     // slots owned by this master, sorted, disjoint
-  ClusterExtendedNodeInfo master;       // node + health
-  vector<ClusterExtendedNodeInfo>  replicas;
-  vector<MigrationInfo>            migrations;  // outgoing from this master
-}
+| Field | Meaning |
+|-------|---------|
+| slot ranges | The closed slot intervals owned by this shard's master, sorted and disjoint. |
+| master | One node: id, ip, port, health. |
+| replicas | Zero or more nodes with the same fields as master. |
+| migrations | Zero or more outgoing slot migrations from this master to other masters. |
 
-ClusterNodeInfo         { string id; string ip; uint16 port; }
-ClusterExtendedNodeInfo { ClusterNodeInfo; NodeHealth health = ONLINE; }
-MigrationInfo           { SlotRanges slot_ranges; ClusterNodeInfo node_info; }
-enum NodeHealth         { FAIL, LOADING, ONLINE, HIDDEN }
-```
+A node is identified by a string id; an endpoint is `(ip, port)`. A health field
+attached to each node carries one of `online`, `loading`, `fail`, or `hidden`; it is
+purely informational for clients and never changes a node's slot ownership.
 
-`ClusterShardInfo`s are kept sorted by `master.id`, so a config that is byte-different
-but semantically identical compares equal under `operator==`.
+Shards in the list are kept sorted by master id, so two configs that differ only in
+shard order compare equal.
 
-`MigrationInfo` lives only on the source shard; the target shard learns of an incoming
-migration by inspecting `migrations` arrays in other shards whose `node_info.id` matches
-its own node id. **The migration is part of the cluster state**, not a control message:
-the act of receiving a config whose `migrations[]` differs from the previous config is
-what causes a source to start streaming or a finished migration to be cleaned up.
+A migration entry lives only on the source shard. The target shard discovers an
+incoming migration by scanning the migration entries of every other shard for one
+whose target id matches its own. **Migration is part of cluster state, not a control
+message**: adding, advancing, or removing a migration entry in a successor config is
+what drives a source to start streaming or a finished migration to clean up.
 
 ![Cluster topology](./cluster-topology.svg)
 
@@ -190,7 +191,7 @@ need the state to redirect clients via `-MOVED` and to participate in migration 
     "replicas": [
       { "id": "node-A-r1", "ip": "10.0.0.2", "port": 7000, "health": "loading" }
     ],
-    "migrations": [                  // optional; presence drives the migration FSM
+    "migrations": [                  // optional; presence drives the migration state machine
       {
         "node_id":     "node-B",
         "ip":          "10.0.0.3",
@@ -210,7 +211,7 @@ need the state to redirect clients via `-MOVED` and to participate in migration 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `slot_ranges[].start` / `.end` | uint16 | yes | Closed interval, `0..16383`, `start <= end`, ranges disjoint. |
-| `master.id` | string | yes | Matches the target node's `DFLYCLUSTER MYID`. |
+| `master.id` | string | yes | Matches the target node's `CLUSTER MYID`. |
 | `master.ip`, `.port` | string, uint16 | yes | Endpoint advertised to clients via `CLUSTER SLOTS/SHARDS/NODES` and embedded in MOVED replies. |
 | `master.health` | enum string | no | `online` \| `loading` \| `fail` \| `hidden`; default `online`. See [cluster-node-health.md](cluster-node-health.md) for filtering rules. |
 | `replicas[]` | array | yes (may be empty) | Descriptive only; replicas are wired up by `REPLICAOF` separately. |
@@ -239,76 +240,82 @@ config unchanged.
 
 A new config replaces the previous one atomically on each receiving node:
 
-1. Parse and validate the JSON into a new `ClusterConfig`.
-2. Diff against the previous config to compute four sets: `enable_slots`,
-   `disable_slots`, `new outgoing migrations`, `removed migrations`.
-3. `AwaitFiberOnAll(SetCurrent)` installs the new config on every proactor in lockstep
-   under a process-wide `set_config_mu` mutex.
-4. For each slot in `disable_slots`, start a background fiber that traverses every
-   shard and deletes entries belonging to those slots (§5.3). On the source side, "data
-   from migrated slots is permanently erased" once the slots leave its ownership.
-5. Start outgoing-migration fibers for newly added `migrations[]` entries and stop
-   fibers for removed ones.
+1. Parse the JSON and validate it; on failure, keep the previous config and reply
+   with the rejection error.
+2. Diff the new config against the previous one to compute four sets: newly enabled
+   slots, newly disabled slots, newly added outgoing migrations, and removed outgoing
+   migrations.
+3. Under a node-wide lock, switch every thread to the new config in lockstep so that
+   no command sees a half-updated view.
+4. For each newly disabled slot, kick off an incremental background deletion (§5.3)
+   that scans the local data and removes entries belonging to those slots. On the
+   source side, migrated keys are permanently erased once the closing config takes
+   their slots away.
+5. Start a migration fiber per newly added migration entry, and stop the fiber for
+   each removed entry.
 
-Steps 3-5 happen on the receiving node. Cross-node consistency is the cluster manager's
-responsibility: it must apply a new config to every node before authoring the next one,
-or clients may MOVED-bounce between disagreeing masters.
+These steps are local to the receiving node; cross-node consistency is the cluster
+manager's responsibility. The manager must apply a new config to every node before
+authoring the next one, or clients may bounce between disagreeing masters with stale
+`-MOVED` replies.
 
-A node owns no slots before the first config arrives, so user traffic to a freshly
-started node is rejected with the cluster-not-configured error. The cluster manager must
-also re-push the current config after any node restart and after every topology change.
+A node owns no slots until its first config arrives, and user traffic to a freshly
+started node is rejected with the cluster-not-configured error. The cluster manager
+must therefore re-push the current config after every node restart and after every
+topology change.
 
-The config itself is **not** carried over the replication stream; replicas receive their
-own `DFLYCLUSTER CONFIG` directly. The journal does carry slot-flush side effects
-(§5.3) so that replicas drop the same data their master does.
+Cluster config is **not** carried over the replication stream. Each node — master or
+replica — receives its own copy directly from the cluster manager. The journal does
+carry the slot-flush side effects of a config change, so a master and its replicas
+delete the same data when slots leave the master's ownership (§5.3).
 
 ## 5. Slot Routing
 
 ### 5.1 Owned-slot check
 
-Every command that touches a key fans its keys through `KeySlot()` and aggregates them
-into a `UniqueSlotChecker`. The transaction layer then enforces two properties before
-dispatch:
+Before dispatching any command in cluster mode, the node hashes every key in the
+command to its slot id and enforces two properties:
 
-1. **Single-slot transaction invariant.** If keys map to more than one distinct slot,
-   the command is rejected with `-CROSSSLOT`.
-2. **Ownership check.** For every key's slot, `SlotOwnershipError(slot)` runs:
-   - If no cluster config is installed, the command is rejected with the
+1. **Single-slot invariant.** If keys hash to more than one distinct slot, the command
+   is rejected with `-CROSSSLOT`. This applies to single multi-key commands,
+   `MULTI/EXEC` blocks, and Lua scripts.
+2. **Ownership check.** For each key's slot:
+   - If no cluster config has been installed yet, the command is rejected with the
      cluster-not-configured error.
-   - If the slot is not in this node's `SlotSet`, the command is rejected with
-     `-MOVED <slot> <master.ip>:<master.port>`, where `master` is the current owner per
-     the local config (which during a migration may already be the target).
+   - If the slot is not in the node's owned-slot bitset, the command is rejected with
+     `-MOVED <slot> <ip>:<port>`. The endpoint is the slot's owner per the local
+     config — during a migration it is already the target, even though the source
+     still holds the data (§6).
 
-These checks are O(1) per key after the bitset lookup; they run on every command in
-cluster mode.
+Ownership lookup is a single bit check, so this enforcement runs on every command in
+cluster mode without measurable overhead.
 
 ### 5.2 MOVED redirection
 
 A `-MOVED` reply carries the integer slot id and the endpoint of the master that the
-local config says owns that slot. Clients are expected to refresh their slot map via
-`CLUSTER SHARDS` or `CLUSTER SLOTS` and retry. During migration, the source returns
-MOVED for the migrating slots only after the finalizing config has been applied; until
-then the source continues to serve the slots from its own copy of the data while
-streaming updates to the target (§6).
+node's local config says owns that slot. Clients are expected to refresh their slot
+map (`CLUSTER SHARDS` or `CLUSTER SLOTS`) and retry. During a migration, the source
+keeps serving traffic from its own copy of the data and streams updates to the target;
+it begins replying `-MOVED` for the migrating slots only after its local view says it
+no longer owns them (§6).
 
 ### 5.3 Slot deletion
 
-A slot transition from "owned" to "not owned" triggers an incremental background
-deletion via `DbSlice::FlushSlots(slot_ranges)`:
+When slots leave a node's ownership, the node deletes their data with an incremental
+background sweep:
 
-- The DbSlice captures a monotonically increasing `next_version` value and installs an
-  on-change callback that deletes any newly inserted entry with `version < next_version`
-  in the flushed ranges. This catches inserts that race the traversal.
-- A detached fiber walks every hash-table bucket of the prime table on the owning
-  thread-shard, deleting entries whose `KeySlot()` falls in the flushed ranges and
-  whose version predates `next_version`. The fiber yields on every bucket so other
-  work proceeds.
-- After traversal, the channel store drops sharded-pub/sub subscriptions for the
-  flushed slots.
+- A version stamp is recorded at the moment the slots become unowned. An on-insert
+  hook deletes any newly written key in those slot ranges if its version predates the
+  stamp; this catches writes that race the sweep.
+- A detached fiber walks the local hash table, deleting entries whose slot id falls in
+  the unowned ranges and whose version predates the stamp. The fiber yields per bucket
+  so foreground commands keep making progress.
+- Once the walk completes, the node also drops sharded pub/sub subscriptions
+  associated with the flushed slots.
 
-The same path is invoked by `DFLYCLUSTER FLUSHSLOTS <start> <end> ...` and is replicated
-to replicas as a `DFLYCLUSTER FLUSHSLOTS` journal entry, so master and replicas drop the
-same data.
+The same path runs in response to `DFLYCLUSTER FLUSHSLOTS <start> <end> ...`. The
+master writes the flush as a `DFLYCLUSTER FLUSHSLOTS` journal entry so that every
+replica deletes exactly the data the master did.
 
 ### 5.4 Cluster-mode command restrictions
 
@@ -330,152 +337,244 @@ stands in for an entire cluster.
 
 ## 6. Migration Protocol
 
-A slot migration is initiated by adding a `migrations[]` entry to the source shard in
-the next `DFLYCLUSTER CONFIG`. Because migration is part of cluster state rather than a
-distinct command, the protocol becomes the reactive consequence of two configs landing
-on every node: the **opening** config introduces the entry, and the **closing** config
-removes the entry and reassigns the slots to the target. Adding the same entry twice is
-idempotent; the source's state machine ignores configs that do not change its
-outgoing-migration set. At most one migration may be in flight between any given source
-/ target pair — enforced by config validation (§4.2).
+A slot migration starts by adding a `migrations[]` entry to the source shard in the
+next `DFLYCLUSTER CONFIG`. Because migration is part of cluster state, the protocol
+is a reactive consequence of two configs landing on every node:
 
-The data path reuses the replication wire: a `RestoreStreamer` serializes the migrating
-slots as `RESTORE` commands and forwards subsequent journal mutations on the same slots
-as ordinary write commands, all over a single TCP connection per source thread-shard.
-`RESTORE` semantics give the target the same shard-local execution path as any other
-write, so updates flow through the target's transaction framework and onward to the
-target's replicas without any migration-specific code on the replica side.
+- the **opening** config introduces the migration entry, and
+- the **closing** config removes the entry and reassigns the slots to the target.
+
+Adding the same entry twice is idempotent; configs that do not change a source's
+outgoing-migration set leave its migration state machine alone. At most one migration
+may be in flight between any given source / target pair — enforced by config
+validation (§4.2).
+
+The data path is one dedicated TCP connection per source thread-shard, opened by the
+source to the target's admin port. It is a **separate** connection from the source's
+replication stream. Over that connection, the source emits write-side commands derived
+from its local data:
+
+- For strings and most collection types (`SET`, `HASH`, `LIST`, `ZSET`, top-level
+  `STRING`), the source emits decomposed write commands (`SET`, `SADD`, `HSET`,
+  `RPUSH`, `ZADD`), splitting large values into many small commands.
+- For types that cannot be decomposed cleanly (`STREAM`, `JSON`, `SBF`), the source
+  falls back to a single `RESTORE` command per key.
+
+Mutations to migrating slots that arrive while the snapshot walk is still running are
+streamed as ordinary write commands over the same connection, so the target catches
+up incrementally with no separate journal channel.
+
+The target executes every decoded command through its normal transaction framework,
+exactly as if it had arrived from a client. The writes therefore appear on the
+target's outbound replication stream like any other write, so target-side replicas
+converge without any migration-specific code on the replica side. The source's
+replicas are not affected by the migration channel — they keep replicating the
+source's full data, including writes to slots that are migrating away.
 
 ![Slot migration](./cluster-slot-migration.svg)
 
 ### 6.1 States
 
-Each source-side `OutgoingMigration` and each target-side `IncomingSlotMigration`
-carries a `MigrationState` from the ordered enum
+Each migration — source and target — moves through the following state machine:
 
 ```
-C_CONNECTING → C_SYNC → C_FINISHED        (happy path)
-              ↘ C_ERROR ↗                  (transient, retried)
-              ↘ C_FATAL                    (terminal, no retry)
+        ┌──────────────┐         ┌────────┐         ┌─────────────┐
+  ─────►│ C_CONNECTING │────────►│ C_SYNC │────────►│ C_FINISHED  │  (terminal)
+        └──────────────┘         └────────┘         └─────────────┘
+              ▲                       │
+              │ retry (500 ms)        │
+              │                       ▼
+              │                  ┌─────────┐
+              └──────────────────│ C_ERROR │
+                                 └─────────┘
+
+  Any state ── on OOM ──► ┌─────────┐
+                          │ C_FATAL │  (terminal)
+                          └─────────┘
 ```
 
 | State | Source meaning | Target meaning |
 |-------|----------------|----------------|
-| `C_CONNECTING` | Opening TCP, authenticating, waiting on INIT reply. | `INIT` received; flows not yet open. |
-| `C_SYNC` | Streaming snapshot + journal over all flows. | Reading and applying `RESTORE` and subsequent write commands. |
-| `C_ERROR` | Transient failure (peer disconnect, INIT rejected, ACK timeout). Retried after 500 ms. | Same; recoverable. |
-| `C_FINISHED` | ACK acknowledged; slots disabled locally via config diff. | LSN matched on every flow; `Join()` returned. |
-| `C_FATAL` | Target reported `INCOMING_MIGRATION_OOM`; will not retry. | Local apply hit `OOM`; flushed migrated keys. |
+| `C_CONNECTING` | Opening the migration connection, authenticating, waiting on the INIT reply. | INIT received; per-shard data flows have not yet been opened. |
+| `C_SYNC` | Streaming snapshot data and concurrent writes over every flow. | Reading and applying decomposed writes and `RESTORE` payloads. |
+| `C_ERROR` | A transient failure (peer disconnect, INIT rejected, ACK timeout). After a 500 ms wait the migration rewinds to `C_CONNECTING` and starts the sequence over. | Same — recoverable. The source's next INIT reuses the existing migration object on the target. |
+| `C_FINISHED` | The ACK round-trip succeeded; the source has dropped the migrated slots from its local ownership. **Terminal.** | The ACK round-trip succeeded; the target has added the migrated slots to its local ownership. **Terminal.** |
+| `C_FATAL` | Reached directly from `C_CONNECTING` when an INIT reply reports the target is out of memory, or from `C_SYNC` when an ACK reply reports the same. The retry loop exits. **Terminal.** | Reached from `C_SYNC` when applying a streamed command returns out-of-memory. The partially migrated keys are flushed. **Terminal.** |
 
-There is no `C_FATAL → C_ERROR` transition; recovery from `C_FATAL` requires the
-cluster manager to remove and re-add the migration after addressing the memory
-shortage.
+There is no exit from `C_FATAL` or `C_FINISHED`. Recovering from `C_FATAL` requires
+the cluster manager to remove the migration entry, address the memory shortage, and
+add a fresh migration entry in a later config.
 
-`DFLYCLUSTER SLOT-MIGRATION-STATUS` reports these states verbatim as
-`CONNECTING | SYNC | ERROR | FINISHED | FATAL` strings, alongside direction
-(`in`/`out`), peer id, count of migrated keys, and the last error message.
+`DFLYCLUSTER SLOT-MIGRATION-STATUS` exposes these states as the strings
+`CONNECTING | SYNC | ERROR | FINISHED | FATAL`, alongside the direction (`in` /
+`out`), the peer id, the count of migrated keys so far, and the last error message.
 
 ### 6.2 Source flow
 
-The source spawns one `OutgoingMigration` per `migrations[]` entry, owning a single
-fiber `SyncFb`:
+For each outgoing migration entry the source runs a dedicated migration fiber that
+walks the following sequence:
 
-1. **CONNECTING.** Open one TCP connection to the target's admin port; authenticate via
-   the same path used by replication. Timeout is
-   `--slot_migration_connection_timeout_ms` (default 2000).
-2. **INIT.** Send `DFLYMIGRATE INIT <my_id> <flows_num> <slot_start> <slot_end> ...`
-   over that socket, where `flows_num` is the source's thread-shard count. The target
-   replies `+OK` once it has created an `IncomingSlotMigration` keyed by `<my_id>` with
-   the announced slot ranges. Two error replies are special:
-   - `INCOMING_MIGRATION_OOM` → source moves to `C_FATAL` and stops retrying.
-   - `UNKNOWN_MIGRATION` (target has not yet applied the matching config) → sleep
-     500 ms and retry. After 30 s the source escalates to `C_ERROR` to surface a
-     cluster-manager misorder.
+1. **CONNECTING.** Open a TCP connection to the target's admin port and authenticate.
+   Connect attempts time out after `--slot_migration_connection_timeout_ms` (default
+   2000).
+2. **INIT.** Send `DFLYMIGRATE INIT <source_id> <num_flows> <slot_start> <slot_end> ...`
+   on that connection, where `<num_flows>` is the source's thread-shard count. The
+   target replies `+OK` once it has registered the migration. Two error replies are
+   special:
+   - `INCOMING_MIGRATION_OOM` — the target is out of memory. The source transitions
+     to `C_FATAL` and stops retrying.
+   - `UNKNOWN_MIGRATION` — the target has not yet applied the matching opening
+     config. The source sleeps 500 ms and retries; if the situation persists for 30 s
+     the source surfaces an error so the operator notices a cluster-manager
+     misordering.
 3. **Per-shard FLOW.** On every source thread-shard, open a fresh connection and send
-   `DFLYMIGRATE FLOW <my_id> <shard_id>`. The target replies `+OK` and detaches the
-   socket from the command dispatch loop, handing it to the flow consumer (§6.3).
-4. **SYNC.** Under a single global transactional cut, every flow's `RestoreStreamer`
-   registers as a journal listener and a db_slice change listener for its subset of the
-   migrating slot ranges. The streamer then walks the prime table emitting `RESTORE`
-   for each entry in the migrating slots while concurrent mutations are captured by the
-   journal listener and sent through the same socket. Once the bucket walk completes,
-   the streamer continues forwarding journal entries.
-5. **Finalization.** With `attempt = 1`, the source issues a node-wide client pause
-   (non-admin connections only), runs `Finalize(attempt)` on every flow to push an
-   `LSN(attempt)` opcode, then sends `DFLYMIGRATE ACK <my_id> <attempt>` and waits up
-   to `--migration_finalization_timeout_ms` (default 30000) for `+OK`. If the target
-   reports any flow as not yet quiesced, the source increments `attempt`, reopens the
-   ACK connection if needed, and retries.
-6. **C_FINISHED.** On a successful ACK, the source `CloneWithChanges(disable=migrating)`
-   the local config so the migrated slots immediately MOVED-redirect to the target.
-   The migration entry itself is not removed yet; that requires the closing
-   `DFLYCLUSTER CONFIG` from the cluster manager. On that config, the source's slot
-   deletion path (§5.3) runs and the migration object is destroyed.
+   `DFLYMIGRATE FLOW <source_id> <shard_id>`. The target replies `+OK`, detaches the
+   socket from its normal command dispatch loop, and hands it to a flow consumer
+   (§6.3).
+4. **SYNC.** Under a single global transactional cut, every flow attaches itself as a
+   listener for writes to the migrating slot ranges, then walks the local data and
+   emits the per-type wire form for each key (decomposed commands for most types, a
+   single `RESTORE` for the non-decomposable ones; see §6 intro). Concurrent writes
+   are appended to the same socket so the target sees a single, ordered stream per
+   shard.
+5. **Finalization.** Starting at `attempt = 1`, the source pauses non-admin client
+   traffic node-wide, marks the end of each flow's journal with an `LSN(attempt)`
+   opcode, then sends `DFLYMIGRATE ACK <source_id> <attempt>` and waits up to
+   `--migration_finalization_timeout_ms` (default 30000) for the reply. The target's
+   reply on success is the integer attempt number echoed back (RESP `:<attempt>`);
+   the source only treats the attempt as succeeded when the echoed value equals the
+   attempt it sent. If any flow has not yet quiesced at exactly that `LSN`, the
+   target echoes a stale attempt and the source increments its counter, re-pauses,
+   and retries.
+6. **C_FINISHED.** On a successful ACK, the source drops the migrated slots from its
+   local ownership immediately. From that moment its routing logic redirects clients
+   for those slots to the target (the migration entry in the local config provides
+   the target endpoint), even though the migration entry itself is still present.
+   The closing `DFLYCLUSTER CONFIG` from the cluster manager removes the entry; on
+   that config the source's slot-deletion sweep (§5.3) runs and the migration object
+   is destroyed.
 
 ### 6.3 Target flow
 
-The target maintains one `IncomingSlotMigration` per source node id, holding
-`flows_num` independent flow consumers:
+For each incoming migration, the target maintains an object keyed by the source's
+node id, with one independent consumer per source thread-shard:
 
-- On `DFLYMIGRATE INIT`: create the `IncomingSlotMigration` (or reuse the existing one
-  for this source if its slot ranges are unchanged), set state to `C_CONNECTING`, and
-  arm a `BlockingCounter` of size `flows_num` so `Join()` only succeeds when every
-  flow has matched the same `attempt`.
-- On each `DFLYMIGRATE FLOW`: validate the source id, look up the matching
-  `ClusterShardMigration`, hand it the socket, and reply `+OK`. The thread-shard
-  consumer then runs a `JournalReader` over the socket, decoding journal entries and
-  executing them with a `JournalExecutor` that applies `RESTORE` and subsequent writes
-  to the target's local state. The migrating slots are **not** marked as locally owned
-  yet, so client traffic for them still receives MOVED back to the source.
-- On `--slot_migration_throttle_us > 0`, the consumer sleeps `throttle_us` microseconds
-  every 100 µs of accumulated processing time to cap migration's CPU share.
-- An applied command that returns `OpStatus::OUT_OF_MEMORY` is reported as a fatal
-  error: the migration transitions to `C_FATAL`, the existing migrated keys are
-  flushed, and the source is sent `INCOMING_MIGRATION_OOM` on its next INIT/ACK.
-- On `DFLYMIGRATE ACK <source_id> <attempt>`: call `Join(attempt)` to wait, up to
-  `--migration_finalization_timeout_ms`, for every flow to receive an `LSN(attempt)`
-  opcode and decrement the counter. If any flow has consumed further journal entries
-  past that `LSN`, the attempt is treated as failed and the source must retry with
-  `attempt + 1`. On success, reply `+OK`.
+- **On INIT.** Create the incoming migration (or reuse the existing one if its slot
+  ranges match what the source announces), set state to `C_CONNECTING`, and prepare a
+  per-shard barrier so the eventual ACK only succeeds when every flow has caught up
+  to the same `attempt` number.
+- **On FLOW.** Validate the source id, route the socket to the matching shard
+  consumer, and reply `+OK`. The consumer takes over the socket and decodes the
+  stream into commands that it executes against the target's local data, just like
+  any other command. During SYNC the migrating slots are **not** yet in the target's
+  owned-slot set, so client traffic for those slots is still redirected back to the
+  source.
+- **Throttling.** When `--slot_migration_throttle_us > 0`, the consumer sleeps that
+  many microseconds for every 100 µs of accumulated processing time, capping the CPU
+  share that migration takes from foreground traffic.
+- **OOM during SYNC.** If a streamed command fails with out-of-memory, the target
+  transitions the migration to `C_FATAL`, flushes the partially migrated keys, and
+  replies `INCOMING_MIGRATION_OOM` to the source's next INIT or ACK so the source
+  can also enter `C_FATAL`.
+- **On ACK.** Wait up to `--migration_finalization_timeout_ms` for every flow to
+  reach the `LSN(attempt)` marker. If any flow has consumed further journal entries
+  past that marker, the attempt is rejected and the source must retry with
+  `attempt + 1`. On success the target adds the migrated slots to its owned-slot set
+  immediately and replies with the integer attempt number (RESP `:<attempt>`); the
+  source treats the round-trip as successful only when the echoed integer matches
+  the attempt it sent.
 
-The target does not enable the migrated slots on ACK. It enables them only when the
-closing `DFLYCLUSTER CONFIG` arrives with the slots assigned to it. Between ACK and that
-config, the slots are present in storage but routed to the source by the target's own
-`SlotOwnershipError`. This gap is what makes the protocol safe under cluster-manager
-asymmetry: a target that has ACKed but not yet been informed of its new ownership
-behaves as if the migration never happened.
+The ACK round-trip therefore looks atomic at the protocol level — both sides agree on
+ownership once it completes — but the two local updates are not simultaneous. The
+target updates its owned-slot set before sending its attempt-echo reply; the source
+updates its set only when that reply arrives and matches the sent attempt, which is
+also when its client pause is released.
+In the brief gap between those two events, the target already owns the slots, the
+source still claims them, and the source is no longer pausing user traffic. A write
+to a migrated slot landing in this gap would be accepted by the source, journaled to
+its replicas, and then erased by the source's slot-flush on the closing config. The
+cluster manager hides this by not promoting any client-facing endpoint change until
+both sides report `FINISHED`.
 
-### 6.4 Replicas and migration
+The closing `DFLYCLUSTER CONFIG` is still required after a successful ACK. Its job
+is to (a) inform replicas and any third-party nodes of the new ownership, and (b)
+remove the migration entry so the migration object can be destroyed and the source
+can run its slot-deletion sweep (§5.3).
 
-Migration data does not flow over the replication channel. Source and target replicas
-receive the migrated keys via their masters' normal replication stream — because the
-incoming side applies `RESTORE` and subsequent writes through its transaction
-framework, those mutations are journaled and replicated to its replicas exactly like
-client writes.
+### 6.4 Replicas during migration
 
-What replicas do see directly is the `DFLYCLUSTER CONFIG` itself, pushed to them by the
-cluster manager. A replica uses the config only for:
+The migration channel is a master-to-master connection; no replica sees its data
+directly. Replicas converge to the new state through two independent paths:
 
-- MOVED-target computation when its master is in `loading` or `fail`, or when a slot is
-  migrated away from its master.
-- Tracking that a migration is in progress, so if its master fails mid-migration the
-  cluster manager can promote it and remove the stale migration entry in the next
-  config.
+- **Target replicas** receive the migrated keys over their normal replication stream
+  from the target. The target re-runs every decoded migration command through its
+  regular transaction framework, so each one is journaled to its replicas exactly
+  like a client write.
+- **Source replicas** are unaffected by the migration channel altogether. They keep
+  replicating their master's full data, including writes that the source streams to
+  the target during SYNC.
 
-`DFLYCLUSTER FLUSHSLOTS` is journaled (§5.3); replicas drop the same keys their master
-drops when slot ownership shrinks.
+Each replica also receives its own copy of `DFLYCLUSTER CONFIG` directly from the
+cluster manager. A replica uses that config for two things:
+
+- Answering `CLUSTER SHARDS`, `CLUSTER SLOTS`, and `CLUSTER NODES` with the
+  cluster-wide topology, subject to the health-based filtering described in
+  [cluster-node-health.md](cluster-node-health.md).
+- Computing the MOVED target for any client command whose slot it does not own. The
+  computation ignores the `health` field and consults the migration entries: when a
+  slot is being migrated from this replica's master to some target, the MOVED reply
+  points clients at the target. This means clients are redirected to the new owner
+  as soon as a replica receives the opening config, even before the data has finished
+  moving.
+
+A replica does **not** start outgoing migration work in response to a config — that
+is the master's job — and it does not run its own slot deletion sweep. Slot-flush
+effects reach a replica through the master's normal replication stream, when the
+master writes a `DFLYCLUSTER FLUSHSLOTS` journal entry after slots leave its
+ownership (§5.3).
 
 ## 7. Failure Modes
 
+Failures are organized by the phase in which they occur and by the locus of the fault
+(network, peer, memory, cluster manager). For each, the table records the detection
+mechanism, the state transition each side undergoes, and the recovery action.
+
+### 7.1 CONNECTING phase
+
 | Failure | Detection | Recovery |
 |---------|-----------|----------|
-| Source-to-target TCP loss during SYNC | `JournalReader` read error on target; `RestoreStreamer` write error on source. | Both sides transition to `C_ERROR`. Source's `SyncFb` retries from CONNECTING after 500 ms; target keeps the partial state until the source reconnects with a new INIT that reuses the same migration object. |
-| Target rejects INIT with `UNKNOWN_MIGRATION` | Source parses error reply. | Source sleeps 500 ms and retries. Escalates to `C_ERROR` after 30 s to flag a cluster-manager misorder. |
-| Target reaches OOM applying a streamed command | `DispatchResult::OOM` returned from `JournalExecutor`. | Target moves to `C_FATAL`, flushes the partially migrated keys, and on the source's next INIT/ACK replies `INCOMING_MIGRATION_OOM`. Source moves to `C_FATAL` and stops retrying; cluster manager must remove the migration. |
-| ACK round-trip lost after target's `Join` succeeded | Source's ACK read times out; target is already in `C_FINISHED`. | Source increments `attempt` and re-runs finalization. Target's `Join(attempt+1)` returns immediately because every flow's `BlockingCounter` is already zero. |
-| Source dies between ACK and closing config | Target's `IncomingSlotMigration` is `C_FINISHED` with migrated keys present; target does not own the slots in its config. | Cluster manager detects the source failure and pushes a config that assigns the slots to the target. Target enables the slots on that config; no replay needed. |
-| Target dies during SYNC | Source's flow sockets close. | Source returns to `C_ERROR` and retries from CONNECTING. The replacement target (after cluster-manager promotion) starts a fresh migration from scratch. |
-| Replica of target loses connection to its master during SYNC | Replica's replication path retries normally. | The replica resyncs from its master; the migrated keys arrive as part of the normal replication catch-up. |
+| Cannot reach the target's admin port | The connect attempt times out (`--slot_migration_connection_timeout_ms`, default 2000). | The source records the error, sleeps 500 ms, and tries the whole connect-and-INIT sequence again. The state stays at `C_CONNECTING` between attempts and the migration retries indefinitely. |
+| Target rejects INIT with `UNKNOWN_MIGRATION` | The cluster manager has installed the opening config on the source but not yet on the target, so the target has no matching migration object. | The source sleeps 500 ms and retries. If the situation persists for 30 s, the source surfaces the error in its status so the operator can investigate. As soon as the target's config catches up, the next INIT succeeds. |
+| Target rejects INIT with `INCOMING_MIGRATION_OOM` | The target was already over its memory limit before INIT arrived. | The source moves to `C_FATAL` and stops retrying. The cluster manager must remove the migration entry, address the memory shortage, and re-add the entry in a later config. |
+| Authentication failure on the migration connection | The connect step's auth handshake fails. | Treated like a connect failure — the source keeps retrying. Indicates misconfigured admin credentials or TLS material; the loop continues until the cluster manager fixes them. |
+
+### 7.2 SYNC phase
+
+| Failure | Detection | Recovery |
+|---------|-----------|----------|
+| TCP loss on a single flow socket | The target's reader returns an error; the source's write to that flow fails. | The source surfaces the error, sleeps 500 ms, and restarts the whole INIT → FLOW → SYNC sequence by rewinding to `C_CONNECTING`. The target keeps the partially applied keys and reuses the existing migration object on the next INIT; the source re-streams the snapshot from the beginning, and the target tolerates the duplicates because each command is individually idempotent on the underlying data. |
+| Target reaches OOM applying a streamed command | A decoded write returns out-of-memory on the target. | The target moves the migration to `C_FATAL` and flushes the partially migrated keys. The source's next INIT or ACK receives `INCOMING_MIGRATION_OOM` and the source also moves to `C_FATAL`; recovery requires cluster-manager intervention. |
+| Source dies during SYNC | The target's flow sockets receive EOF and the consumer fibers exit. | The target keeps the migration object and the partially applied keys; the state remains `C_SYNC` (the source disconnected cleanly, so no error was reported). When the cluster manager restarts the source or assigns its slots elsewhere, a fresh INIT reuses the migration object. If the manager promotes a replica with a different node id, the orphaned migration is left to time out and the new migration starts from scratch. |
+| Target dies during SYNC | The source's writes fail. | The source enters the same retry loop as for TCP loss: rewind to `C_CONNECTING` and reconnect. If the manager fails the target over to a node with a different id, it rewrites the migration entry; the source sees the old migration as removed and the new one as added, cancels the first, and starts the second from scratch. |
+| Throttle starves user traffic on the target | Operator-observed; `--slot_migration_throttle_us` is the knob. | Lower the throttle (or raise it from `0` if the migration is itself starving foreground traffic). A starting value of `20` µs is usually reasonable. |
+
+### 7.3 FINALIZE phase
+
+| Failure | Detection | Recovery |
+|---------|-----------|----------|
+| A flow consumed journal entries past the attempt's `LSN` marker | The per-shard barrier never reaches the expected count within `--migration_finalization_timeout_ms` (default 30000). | The target replies with a finalize-timeout error. The source increments `attempt`, re-pauses clients, re-marks the journal on every flow, and re-sends the ACK with the new attempt number. The ACK socket is reopened if needed. |
+| ACK reply lost after the target finalized | The source's ACK read times out, but the target is already in `C_FINISHED` and has added the slots to its owned set. | The source retries with `attempt + 1`. The target's barrier is already satisfied, so the target idempotently re-applies its local ownership change and echoes the new attempt back. The source then drops the slots and the system converges. During the gap there is a brief window in which both sides claim the slots; both will reply to client commands until the source's ACK succeeds. |
+| Source dies after the target finalized but before the source dropped its slots | The target is in `C_FINISHED` with the slots in its owned set; the source is gone. | The cluster manager observes the source failure and pushes a closing config that reassigns the slots to the target and removes the migration entry. The replacement master (typically a promoted replica) installs the new config and stops claiming the slots; no data replay is needed. |
+| Cluster manager forgets to push the closing config | Both sides stay in `C_FINISHED`; the migration entry stays in the config; the migration objects are not freed. | No data is lost — both sides have correct local ownership and clients are redirected correctly. The operator simply needs to push the closing config. `DFLYCLUSTER SLOT-MIGRATION-STATUS` reports `FINISHED` so the manager can detect the stuck migration. |
+
+### 7.4 Cluster-manager misordering
+
+| Failure | Detection | Recovery |
+|---------|-----------|----------|
+| Opening config reaches source before target | The source's INIT receives `UNKNOWN_MIGRATION`. | Treated as a transient error (§7.1); the source retries every 500 ms for up to 30 s before surfacing. |
+| Closing config reaches source before target | The source removes the migration entry and runs its slot-deletion sweep. The target still has the migration entry and its migration object remains in `C_FINISHED`. | Harmless: the target already owns the slots; the migration object is destroyed when the closing config arrives on the target. Clients are correctly redirected throughout. |
+| Two configs applied out of order on the same node | Each config is installed atomically against whatever predecessor is currently present; the diff is computed against that predecessor. | A skipped intermediate config can cause migrations to be started and immediately stopped, or replicas to be added and immediately removed, but the final state matches the most recently applied config. The cluster manager is responsible for never authoring a successor config until the previous one has been applied everywhere. |
+| Config validation fails on one node but succeeds on others | The failing node replies `-ERR Invalid cluster configuration.` and keeps its previous config. | The cluster temporarily disagrees on topology; clients hitting the failing node receive stale MOVED targets. The cluster manager must observe the rejection and push a corrected config. |
 
 ## 8. Modes, Flags, Ports
 
@@ -492,10 +591,10 @@ drops when slot ownership shrinks.
 | `--admin_port` | `0` (off) | Required in real-cluster mode. `DFLYCLUSTER` and `DFLYMIGRATE` only accept connections on this listener; client-facing listeners reject them. |
 | `--cluster_node_id` | `""` (uses the master replication id) | Node identity in the config; must match what the cluster manager embeds in `master.id`, `replicas[].id`, and `migrations[].node_id`. Disallowed in `emulated` mode. |
 | `--cluster_announce_ip` | `""` (uses the local bind) | IP returned to clients in `CLUSTER SLOTS/SHARDS/NODES` and embedded in MOVED replies. |
-| `--experimental_cluster_shard_by_slot` | `false` | When `true`, thread-shard selection uses `KeySlot(key) % shard_count` instead of `XXH64(tag(key)) % shard_count`. |
-| `--slot_migration_throttle_us` | `0` (off) | Target-side throttle: sleep this many microseconds after every 100 µs of migration processing. Recommended `20` if migrations starve user traffic. |
-| `--slot_migration_connection_timeout_ms` | `2000` | Source-side TCP connect timeout for INIT, FLOW, and ACK reconnects. |
-| `--migration_finalization_timeout_ms` | `30000` | Source-side wait for ACK; target-side wait inside `Join()` for all flows to reach the same `attempt`. |
+| `--experimental_cluster_shard_by_slot` | `false` | When `true`, thread-shard selection uses the slot id modulo shard count instead of a tag-hash modulo shard count. |
+| `--slot_migration_throttle_us` | `0` (off) | Target-side throttle: sleep this many microseconds after every 100 µs of migration processing. A starting value of `20` is reasonable if migrations starve user traffic. |
+| `--slot_migration_connection_timeout_ms` | `2000` | Source-side TCP connect timeout for the migration's INIT, FLOW, and ACK reconnects. |
+| `--migration_finalization_timeout_ms` | `30000` | Source-side wait for the ACK reply; also the target-side wait for every flow to reach the same attempt marker before replying. |
 
 The wire format of `DFLYMIGRATE` is internal and not versioned. A mixed-version cluster
 during a rolling upgrade is unsupported for slot migrations: cluster topology may be
@@ -520,13 +619,9 @@ pushes it to every node before authoring the next one.
 
 ## 10. Open Issues
 
-1. Source-side replicas are not aware of in-progress outgoing migrations and do not
-   incrementally drop migrated keys on FLUSHSLOTS-equivalent journaled events until the
-   closing config update. This is correct but causes a transient memory bump until the
-   source's slot-flush journal entry catches up.
-2. `READWRITE` / `READONLY` are stubs in real-cluster mode; replicas do not currently
-   serve reads with client-driven routing.
-3. Per-slot blocking on the source during finalization is a node-wide client pause; a
+1. `READONLY` is a no-op stub on every mode and `READWRITE` is a no-op only in
+   `emulated` mode; replicas do not currently serve reads with client-driven routing,
+   so a real-cluster client that issues `READWRITE` to opt back into the writer
+   receives an error instead of being silently accepted.
+2. Per-slot blocking on the source during finalization is a node-wide client pause; a
    future change should pause only the migrating slots' keys.
-4. There is no in-band heartbeat between source and target during SYNC; failure
-   detection relies on TCP errors and the finalization timeout.
