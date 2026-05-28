@@ -36,11 +36,13 @@ extern "C" {
 #include "redis/redis_aux.h"
 }
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/histogram.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/dense_set.h"
+#include "core/oah_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
@@ -424,30 +426,120 @@ void ClientInfo(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendBulkString(info);
 }
 
-void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
-                CommandContext* cmd_cntx) {
-  if (!args.empty()) {
-    return cmd_cntx->SendError(facade::kSyntaxErr);
+enum class ClientListType { kNormal, kMaster, kReplica, kPubsub };
+
+struct ClientListFilter {
+  optional<ClientListType> type;
+  absl::flat_hash_set<uint32_t> ids;
+};
+
+optional<ClientListFilter> ParseClientListFilter(CmdArgList args, CommandContext* cmd_cntx) {
+  ClientListFilter filter;
+  CmdArgParser parser{args};
+  if (!parser.HasNext())
+    return filter;
+
+  if (parser.Check("TYPE")) {
+    if (!parser.HasNext()) {
+      cmd_cntx->SendError(facade::kSyntaxErr);
+      return nullopt;
+    }
+    string_view raw = parser.Peek();
+    auto mapped =
+        parser.TryMapNext("NORMAL", ClientListType::kNormal, "MASTER", ClientListType::kMaster,
+                          "REPLICA", ClientListType::kReplica, "SLAVE", ClientListType::kReplica,
+                          "PUBSUB", ClientListType::kPubsub);
+    if (!mapped) {
+      cmd_cntx->SendError(StrCat("Unknown client type '", raw, "'"));
+      return nullopt;
+    }
+    filter.type = *mapped;
+  } else if (parser.Check("ID")) {
+    if (!parser.HasNext()) {
+      cmd_cntx->SendError(facade::kSyntaxErr);
+      return nullopt;
+    }
+    while (parser.HasNext()) {
+      uint32_t id;
+      if (!absl::SimpleAtoi(parser.Next<string_view>(), &id)) {
+        cmd_cntx->SendError("Invalid client ID");
+        return nullopt;
+      }
+      filter.ids.insert(id);
+    }
+  } else {
+    cmd_cntx->SendError(facade::kSyntaxErr);
+    return nullopt;
   }
+
+  if (parser.HasNext() || parser.HasError()) {
+    cmd_cntx->SendError(facade::kSyntaxErr);
+    return nullopt;
+  }
+  return filter;
+}
+
+ClientListType ClassifyConnection(facade::Connection* conn) {
+  auto* base_cntx = conn->cntx();
+  if (base_cntx == nullptr)
+    return ClientListType::kNormal;
+
+  // Replica takes priority over PUBSUB; kMaster is added separately by
+  // GetMasterLinkClientInfo (not produced here).
+  if (base_cntx->replica_conn)
+    return ClientListType::kReplica;
+
+  auto* dfly_cntx = static_cast<const ConnectionContext*>(base_cntx);
+  const auto& sub_info = dfly_cntx->conn_state.subscribe_info;
+  if (sub_info && !sub_info->IsEmpty())
+    return ClientListType::kPubsub;
+
+  return ClientListType::kNormal;
+}
+
+void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
+                ServerFamily* server_family, CommandContext* cmd_cntx) {
+  auto filter = ParseClientListFilter(args, cmd_cntx);
+  if (!filter)
+    return;
 
   vector<string> client_info;
   absl::base_internal::SpinLock mu;
 
-  // we can not preempt the connection traversal, so we need to use a spinlock.
-  // alternatively we could lock when mutating the connection list, but it seems not important.
-  auto cb = [&](unsigned thread_index, util::Connection* conn) {
-    facade::Connection* dcon = static_cast<facade::Connection*>(conn);
-    string info = dcon->GetClientInfo(thread_index);
-    absl::base_internal::SpinLockHolder l(&mu);
-    client_info.push_back(std::move(info));
-  };
+  // No listener-attached connection classifies as kMaster; skip the walk.
+  if (filter->type != ClientListType::kMaster) {
+    // we can not preempt the connection traversal, so we need to use a spinlock.
+    // alternatively we could lock when mutating the connection list, but it seems not important.
+    auto cb = [&](unsigned thread_index, util::Connection* conn) {
+      facade::Connection* dcon = static_cast<facade::Connection*>(conn);
 
-  for (auto* listener : listeners) {
-    listener->TraverseConnections(cb);
+      if (!filter->ids.empty() && !filter->ids.contains(dcon->GetClientId()))
+        return;
+
+      if (filter->type.has_value() && ClassifyConnection(dcon) != *filter->type)
+        return;
+
+      string info = dcon->GetClientInfo(thread_index);
+      absl::base_internal::SpinLockHolder l(&mu);
+      client_info.push_back(std::move(info));
+    };
+
+    for (auto* listener : listeners) {
+      listener->TraverseConnections(cb);
+    }
+  }
+
+  bool want_master = !filter->type.has_value() || *filter->type == ClientListType::kMaster;
+  if (want_master) {
+    for (auto& entry : server_family->GetMasterLinkClientInfo()) {
+      if (filter->ids.empty() || filter->ids.contains(entry.client_id))
+        client_info.push_back(std::move(entry.info));
+    }
   }
 
   string result = absl::StrJoin(client_info, "\n");
-  result.append("\n");
+  if (!result.empty())
+    result.append("\n");
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   return rb->SendVerbatimString(result);
 }
@@ -577,7 +669,7 @@ void ClientId(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners,
-                CommandContext* cmd_cntx) {
+                ServerFamily* server_family, CommandContext* cmd_cntx) {
   std::function<bool(facade::Connection * conn)> evaluator;
 
   if (args.size() == 1) {
@@ -601,6 +693,9 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners,
     } else if (filter_type == "ID") {
       uint32_t id;
       if (absl::SimpleAtoi(filter_value, &id)) {
+        if (server_family->IsMasterLinkClientId(id)) {
+          return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
+        }
         evaluator = [id](facade::Connection* conn) { return conn->GetClientId() == id; };
       }
     }
@@ -761,13 +856,10 @@ nonstd::expected<ReplicaOfArgs, ErrorReply> ReplicaOfArgs::FromCmdArgs(CmdArgLis
   return replicaof_args;
 }
 
-uint64_t GetDelayMs(uint64_t ts) {
-  uint64_t now_ns = fb2::ProactorBase::GetMonotonicTimeNs();
-  uint64_t delay_ns = 0;
-  if (ts < now_ns - 1000000) {  // if more than 1ms has passed between ts and now_ns
-    delay_ns = (now_ns - ts) / 1000000;
-  }
-  return delay_ns;
+uint64_t GetDelayMs(uint64_t cycles_ts) {
+  if (cycles_ts == UINT64_MAX)  // sentinel: no pending sends on any thread
+    return 0;
+  return base::CycleClock::ToUsec(base::CycleClock::Now() - cycles_ts) / 1'000;
 }
 
 bool ReadProcStats(io::StatusData* sdata) {
@@ -1799,9 +1891,10 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("net_output_bytes_total", "", m.facade_stats.reply_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
   {
-    AppendMetricWithoutLabels("reply_duration_seconds", "",
-                              m.facade_stats.reply_stats.send_stats.total_duration * 1e-9,
-                              MetricType::COUNTER, &resp->body());
+    AppendMetricWithoutLabels(
+        "reply_duration_seconds", "",
+        base::CycleClock::ToUsec(m.facade_stats.reply_stats.send_stats.total_duration) * 1e-6,
+        MetricType::COUNTER, &resp->body());
     AppendMetricWithoutLabels("reply_total", "", m.facade_stats.reply_stats.send_stats.count,
                               MetricType::COUNTER, &resp->body());
   }
@@ -2258,6 +2351,29 @@ optional<Metrics::ReplicaInfo> ServerFamily::GetReplicaSummary() const {
   return info;
 }
 
+vector<ServerFamily::MasterLinkClientInfo> ServerFamily::GetMasterLinkClientInfo() const {
+  vector<MasterLinkClientInfo> out;
+  util::fb2::LockGuard lk(replicaof_mu_);
+  if (replica_ == nullptr)
+    return out;
+  out.push_back({replica_->GetClientId(), replica_->GetClientInfo()});
+  for (const auto& cl_repl : cluster_replicas_) {
+    out.push_back({cl_repl->GetClientId(), cl_repl->GetClientInfo()});
+  }
+  return out;
+}
+
+bool ServerFamily::IsMasterLinkClientId(uint32_t id) const {
+  util::fb2::LockGuard lk(replicaof_mu_);
+  if (replica_ && replica_->GetClientId() == id)
+    return true;
+  for (const auto& cl_repl : cluster_replicas_) {
+    if (cl_repl->GetClientId() == id)
+      return true;
+  }
+  return false;
+}
+
 void ServerFamily::OnClose(ConnectionContext* cntx) {
   dfly_cmd_->OnClose(cntx->conn_state.replication_info.repl_session_id);
 }
@@ -2686,7 +2802,7 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
   } else if (sub_cmd == "INFO") {
     return ClientInfo(sub_args, cmd_cntx);
   } else if (sub_cmd == "LIST") {
-    return ClientList(sub_args, absl::MakeSpan(listeners_), cmd_cntx);
+    return ClientList(sub_args, absl::MakeSpan(listeners_), this, cmd_cntx);
   } else if (sub_cmd == "PAUSE") {
     return ClientPauseCmd(sub_args, cmd_cntx);
   } else if (sub_cmd == "UNPAUSE") {
@@ -2694,7 +2810,7 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, cmd_cntx);
   } else if (sub_cmd == "KILL") {
-    return ClientKill(sub_args, absl::MakeSpan(listeners_), cmd_cntx);
+    return ClientKill(sub_args, absl::MakeSpan(listeners_), this, cmd_cntx);
   } else if (sub_cmd == "CACHING") {
     return ClientCaching(sub_args, cmd_cntx);
   } else if (sub_cmd == "SETINFO") {
@@ -2821,62 +2937,86 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
 
-    // First, do a read-only check: validate type/encoding and decide whether
-    // shrink is needed.  This avoids bumping the key version, firing WATCH
-    // invalidations, or running PostUpdate for no-op / WRONGTYPE paths.
+    // SET with --use_oah_set uses OAHSet; HASH (StringMap) and SET-without-OAH
+    // (StringSet) both inherit DenseSet, so the original code path covers them.
+    auto shrink = [&]<typename Set>() -> OpResult<int64_t> {
+      // First, do a read-only check: validate type/encoding and decide whether
+      // shrink is needed.  This avoids bumping the key version, firing WATCH
+      // invalidations, or running PostUpdate for no-op / WRONGTYPE paths.
+      {
+        auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
+        if (!IsValid(it)) {
+          return OpStatus::KEY_NOTFOUND;
+        }
+
+        const PrimeValue& pv = it->second;
+        unsigned encoding = pv.Encoding();
+        unsigned obj_type = pv.ObjType();
+
+        if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
+          return OpStatus::WRONG_TYPE;
+        }
+
+        Set* ds = static_cast<Set*>(pv.RObjPtr());
+        ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+        size_t current_size = ds->UpperBoundSize();
+        size_t bucket_count = ds->BucketCount();
+
+        if (current_size == 0 || bucket_count == 0) {
+          return 0;
+        }
+
+        size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
+        if (optimal_size >= bucket_count) {
+          return 0;
+        }
+      }
+
+      // Shrink is needed — use FindMutable so the AutoUpdater tracks the
+      // MallocUsed() delta (bucket array resize, link changes, expired-entry
+      // deletions) and keeps obj_memory_usage in sync.
+      auto it_res = db_slice.FindMutable(t->GetDbContext(), key);
+      if (!IsValid(it_res.it)) {
+        return OpStatus::KEY_NOTFOUND;  // raced away between the two lookups
+      }
+
+      PrimeValue& pv = it_res.it->second;
+      Set* ds = static_cast<Set*>(pv.RObjPtr());
+      ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+
+      // Bucket-array bytes only. We can't use SetMallocUsed() because it also
+      // counts collision-link / vector-bucket bytes which can grow when the
+      // table shrinks, and the SHRINK reply is meant to report the bucket-vector
+      // delta. DenseSet buckets are DensePtr (pointer-sized); OAHSet buckets are
+      // OAHEntry-sized and the entries vector includes displacement slots.
+      auto bucket_bytes = [](Set* s) -> size_t {
+        if constexpr (std::is_same_v<Set, OAHSet>)
+          return size_t{s->Capacity()} * sizeof(OAHEntry);
+        else
+          return s->BucketCount() * sizeof(void*);
+      };
+      size_t bytes_before = bucket_bytes(ds);
+      size_t optimal_size = std::max(size_t(8), absl::bit_ceil(ds->UpperBoundSize()));
+      ds->Shrink(optimal_size);
+      size_t bytes_after = bucket_bytes(ds);
+
+      // Shrink expires entries during bucket compaction.  If all entries expired,
+      // delete the now-empty key to prevent zombie keys that crash SAVE.
+      if (ds->Empty()) {
+        db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
+      }
+
+      return bytes_before - bytes_after;
+    };
+
+    bool use_oah;
     {
       auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
-      if (!IsValid(it)) {
+      if (!IsValid(it))
         return OpStatus::KEY_NOTFOUND;
-      }
-
-      const PrimeValue& pv = it->second;
-      unsigned encoding = pv.Encoding();
-      unsigned obj_type = pv.ObjType();
-
-      if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
-        return OpStatus::WRONG_TYPE;
-      }
-
-      pv.SetMemberTime(MemberTimeSeconds(t->GetDbContext().time_now_ms));
-      DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
-      size_t current_size = ds->UpperBoundSize();
-      size_t bucket_count = ds->BucketCount();
-
-      if (current_size == 0 || bucket_count == 0) {
-        return 0;
-      }
-
-      size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
-      if (optimal_size >= bucket_count) {
-        return 0;
-      }
+      use_oah = it->second.ObjType() == OBJ_SET && g_use_oah_set;
     }
-
-    // Shrink is needed — use FindMutable so the AutoUpdater tracks the
-    // MallocUsed() delta (bucket array resize, link changes, expired-entry
-    // deletions) and keeps obj_memory_usage in sync.
-    auto it_res = db_slice.FindMutable(t->GetDbContext(), key);
-    if (!IsValid(it_res.it)) {
-      return OpStatus::KEY_NOTFOUND;  // raced away between the two lookups
-    }
-
-    PrimeValue& pv = it_res.it->second;
-    pv.SetMemberTime(MemberTimeSeconds(t->GetDbContext().time_now_ms));
-    DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
-
-    size_t bucket_bytes_before = ds->BucketCount() * sizeof(void*);
-    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(ds->UpperBoundSize()));
-    ds->Shrink(optimal_size);
-    size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
-
-    // Shrink expires entries during bucket compaction.  If all entries expired,
-    // delete the now-empty key to prevent zombie keys that crash SAVE.
-    if (ds->Empty()) {
-      db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
-    }
-
-    return bucket_bytes_before - bucket_bytes_after;
+    return use_oah ? shrink.template operator()<OAHSet>() : shrink.template operator()<DenseSet>();
   };
 
   OpResult<int64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -3084,12 +3224,12 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     if (!send_list.empty()) {
       DCHECK(std::is_sorted(send_list.begin(), send_list.end(),
                             [](const auto& left, const auto& right) {
-                              return left.timestamp_ns < right.timestamp_ns;
+                              return left.timestamp_cycles < right.timestamp_cycles;
                             }));
 
       auto& oldest_member = send_list.front();
       result.oldest_pending_send_ts =
-          min<uint64_t>(result.oldest_pending_send_ts, oldest_member.timestamp_ns);
+          min<uint64_t>(result.oldest_pending_send_ts, oldest_member.timestamp_cycles);
     }
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
     result.interned_string_stats += GetInternedStringStats();
@@ -4217,7 +4357,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
       auto info = dfly_cmd_->GetReplicaInfoFromConnection(&cntx->conn_state);
       DCHECK(info != nullptr);
       if (info) {
-        info->id = arg;
+        info->SetId(arg);
       }
     } else if (cmd == "CLIENT-VERSION" && args.size() == 2) {
       unsigned version;

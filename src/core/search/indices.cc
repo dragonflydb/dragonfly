@@ -103,7 +103,7 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
 // Haversine with earth radius in meters. Used to calculate distance.
 boost::geometry::strategy::distance::haversine haversine_(6372797.560856);
 
-double ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
+double ConvertToRadiusInMeters(double radius, std::string_view arg) {
   const std::string unit = absl::AsciiStrToUpper(arg);
   if (unit == "M") {
     return radius * 1;

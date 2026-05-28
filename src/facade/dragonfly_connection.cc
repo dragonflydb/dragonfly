@@ -126,7 +126,10 @@ ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
           " events to come for the connection in case there is only one command in the pipeline. ");
 
-ABSL_FLAG(bool, experimental_io_loop_v2, true, "new io loop");
+ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
+          "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
+ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
+          "Enable the event-driven IoLoopV2 for non-TLS RESP connections.");
 
 using namespace util;
 using namespace std;
@@ -709,8 +712,6 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       ssl_ctx_(ctx),
       service_(service),
       flags_(0) {
-  static atomic_uint32_t next_id{1};
-
   constexpr size_t kReqSz = sizeof(ParsedCommand);
   static_assert(kReqSz <= 256);
 
@@ -728,7 +729,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   creation_time_ = time(nullptr);
   last_interaction_ = creation_time_;
-  id_ = next_id.fetch_add(1, memory_order_relaxed);
+  id_ = NextClientId();
 
   migration_enabled_ = GetFlag(FLAGS_migrate_connections);
 
@@ -964,9 +965,10 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {  // non-http
-      // ioloop_v2 not supported for TLS & redis connections yet.
       ioloop_v2_ =
-          GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_ && protocol_ == Protocol::MEMCACHE;
+          !is_tls_ &&
+          ((protocol_ == Protocol::MEMCACHE && GetFlag(FLAGS_enable_memcache_io_loop_v2)) ||
+           (protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_resp_io_loop_v2)));
 
       socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       switch (protocol_) {
@@ -994,8 +996,9 @@ void Connection::HandleRequests() {
 
 unsigned Connection::GetSendWaitTimeSec() const {
   if (reply_builder_ && reply_builder_->IsSendActive()) {
-    return (util::fb2::ProactorBase::GetMonotonicTimeNs() - reply_builder_->GetLastSendTimeNs()) /
-           1'000'000'000;
+    return base::CycleClock::ToUsec(base::CycleClock::Now() -
+                                    reply_builder_->GetLastSendTimeCycles()) /
+           1'000'000;
   }
 
   return 0;
@@ -1006,113 +1009,129 @@ void Connection::FlushReplies() {  // NOLINT must not be const due to flush side
   reply_builder_->Flush();
 }
 
-pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
+std::string FormatClientInfo(const ClientInfo& ci) {
+  string out;
+  absl::StrAppend(&out, "id=", ci.id, " addr=", ci.addr, " laddr=", ci.laddr, " fd=", ci.fd);
+  if (ci.is_http) {
+    absl::StrAppend(&out, " http=true");
+  } else {
+    absl::StrAppend(&out, " name=", ci.name);
+  }
+  if (!ci.tls.empty())
+    absl::StrAppend(&out, " tls=", ci.tls);
+  if (ci.send_wait_time.has_value())
+    absl::StrAppend(&out, " send-wait-time=", *ci.send_wait_time);
+  absl::StrAppend(&out, " tid=", ci.tid, " irqmatch=", int(ci.irqmatch));
+  if (ci.pipeline.has_value())
+    absl::StrAppend(&out, " pipeline=", *ci.pipeline, " pbuf=", ci.pbuf.value_or(0));
+  absl::StrAppend(&out, " age=", ci.age, " idle=", ci.idle, " tot-cmds=", ci.tot_cmds,
+                  " tot-net-in=", ci.tot_net_in, " tot-read-calls=", ci.tot_read_calls,
+                  " tot-dispatches=", ci.tot_dispatches);
+  if (ci.db.has_value())
+    absl::StrAppend(&out, " db=", *ci.db);
+  if (!ci.flags.empty())
+    absl::StrAppend(&out, " flags=", ci.flags);
+  if (!ci.phase.empty())
+    absl::StrAppend(&out, " phase=", ci.phase);
+  if (!ci.repl_phase.empty())
+    absl::StrAppend(&out, " repl-phase=", ci.repl_phase);
+  absl::StrAppend(&out, " lib-name=", ci.lib_name, " lib-ver=", ci.lib_ver);
+  return out;
+}
+
+ClientInfo Connection::BuildClientInfo(unsigned thread_id) const {
+  ClientInfo ci;
   if (!socket_) {
     LOG(DFATAL) << "unexpected null socket_ "
                 << " phase " << unsigned(phase_) << ", is_http: " << unsigned(is_http_);
-    return {};
+    return ci;
   }
-
   CHECK_LT(unsigned(phase_), NUM_PHASES);
-
-  string before;
-  auto le = LocalBindStr();
-  auto re = RemoteEndpointStr();
-  time_t now = time(nullptr);
-
-  int cpu = 0;
-  socklen_t len = sizeof(cpu);
-  getsockopt(socket_->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
-
-#ifdef __APPLE__
-  int my_cpu_id = -1;  // __APPLE__ does not have sched_getcpu()
-#else
-  int my_cpu_id = sched_getcpu();
-#endif
 
   static constexpr string_view PHASE_NAMES[] = {"setup", "readsock", "process", "shutting_down",
                                                 "preclose"};
   static_assert(NUM_PHASES == ABSL_ARRAYSIZE(PHASE_NAMES));
   static_assert(PHASE_NAMES[SHUTTING_DOWN] == "shutting_down");
 
-  absl::StrAppend(&before, "id=", id_, " addr=", re, " laddr=", le);
-  absl::StrAppend(&before, " fd=", socket_->native_handle());
-  if (is_http_) {
-    absl::StrAppend(&before, " http=true");
-  } else {
-    absl::StrAppend(&before, " name=", name_);
-  }
+  int cpu = 0;
+  socklen_t len = sizeof(cpu);
+  getsockopt(socket_->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
+#ifdef __APPLE__
+  int my_cpu_id = -1;  // __APPLE__ does not have sched_getcpu()
+#else
+  int my_cpu_id = sched_getcpu();
+#endif
+
+  time_t now = time(nullptr);
+  ci.id = id_;
+  ci.addr = RemoteEndpointStr();
+  ci.laddr = LocalBindStr();
+  ci.fd = socket_->native_handle();
+  ci.is_http = is_http_;
+  if (!is_http_)
+    ci.name = name_;
 #ifdef DFLY_USE_SSL
   if (is_tls_) {
     tls::TlsSocket* tls_sock = static_cast<tls::TlsSocket*>(socket_.get());
     string_view proto_version = SSL_get_version(tls_sock->ssl_handle());
     const SSL_CIPHER* cipher = SSL_get_current_cipher(tls_sock->ssl_handle());
-    absl::StrAppend(&before, " tls=", proto_version, "|", SSL_CIPHER_get_name(cipher));
+    ci.tls = absl::StrCat(proto_version, "|", SSL_CIPHER_get_name(cipher));
   }
 #endif
-  string after;
-  absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
+  if (IsSending())
+    ci.send_wait_time = GetSendWaitTimeSec();
+  ci.tid = thread_id;
+  ci.irqmatch = (cpu == my_cpu_id);
   if (parsed_cmd_q_len_ > 0) {
-    absl::StrAppend(&after, " pipeline=", parsed_cmd_q_len_);
-    absl::StrAppend(&after, " pbuf=", parsed_cmd_q_bytes_);
+    ci.pipeline = parsed_cmd_q_len_;
+    ci.pbuf = parsed_cmd_q_bytes_;
   }
-  absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
+  ci.age = now - creation_time_;
+  ci.idle = now - last_interaction_;
+  ci.tot_cmds = local_stats_.cmds;
+  ci.tot_net_in = local_stats_.net_bytes_in;
+  ci.tot_read_calls = local_stats_.read_cnt;
+  ci.tot_dispatches = local_stats_.dispatch_entries_added;
+
   string_view phase_name = PHASE_NAMES[phase_];
-
-  absl::StrAppend(&after, " tot-cmds=", local_stats_.cmds,
-                  " tot-net-in=", local_stats_.net_bytes_in,
-                  " tot-read-calls=", local_stats_.read_cnt,
-                  " tot-dispatches=", local_stats_.dispatch_entries_added);
-
   if (cc_) {
     auto ctx_info = service_->GetContextInfo(cc_.get());
-
-    // reply_builder_ may be null if the connection is in the setup phase, for example.
     if (reply_builder_ && reply_builder_->IsSendActive())
       phase_name = "send";
     else if (ctx_info.is_scheduled)
       phase_name = "scheduled";
-    absl::StrAppend(&after, " ", ctx_info.Format());
+    ci.db = ctx_info.db_index;
+    // ctx_info.Format() returns "db=N" or "db=N flags=X"; extract flags only.
+    size_t flags_pos = ctx_info.Format().find(" flags=");
+    if (flags_pos != string::npos)
+      ci.flags = ctx_info.Format().substr(flags_pos + sizeof(" flags=") - 1);
   }
-  absl::StrAppend(&after, " phase=", phase_name);
-
-  if (IsSending()) {
-    absl::StrAppend(&before, " send-wait-time=", GetSendWaitTimeSec());
-  }
-
-  return {std::move(before), std::move(after)};
+  ci.phase = string(phase_name);
+  ci.lib_name = lib_name_;
+  ci.lib_ver = lib_ver_;
+  return ci;
 }
 
 string Connection::GetClientInfo(unsigned thread_id) const {
-  auto [before, after] = GetClientInfoBeforeAfterTid();
-  absl::StrAppend(&before, " tid=", thread_id);
-  absl::StrAppend(&before, after);
-  absl::StrAppend(&before, " lib-name=", lib_name_, " lib-ver=", lib_ver_);
-  return before;
+  return FormatClientInfo(BuildClientInfo(thread_id));
 }
 
 string Connection::GetClientInfo() const {
-  auto [before, after] = GetClientInfoBeforeAfterTid();
-  absl::StrAppend(&before, after);
-  // The following are dummy fields and users should not rely on those unless
-  // we decide to implement them.
-  // This is only done because the redis pyclient parser for the field "client-info"
-  // for the command ACL LOG hardcodes the expected values. This behaviour does not
-  // conform to the actual expected values, since it's missing half of them.
-  // That is, even for redis-server, issuing an ACL LOG command via redis-cli and the pyclient
-  // will return different results! For example, the fields:
-  // addr=127.0.0.1:57275
-  // laddr=127.0.0.1:6379
-  // are missing from the pyclient.
-
-  absl::StrAppend(&before, " qbuf=0 ", "qbuf-free=0 ", "obl=0 ", "argv-mem=0 ");
-  absl::StrAppend(&before, "oll=0 ", "omem=0 ", "tot-mem=0 ", "multi=0 ");
-  absl::StrAppend(&before, "psub=0 ", "sub=0");
-  return before;
+  // CLIENT INFO appends dummy counters that redis-py's ACL LOG parser hard-codes.
+  // Real values for these fields are not tracked by Dragonfly today.
+  string info = FormatClientInfo(BuildClientInfo(0));
+  absl::StrAppend(&info, " qbuf=0 qbuf-free=0 obl=0 argv-mem=0 oll=0 omem=0 tot-mem=0 multi=0",
+                  " psub=0 sub=0");
+  return info;
 }
 
 uint32_t Connection::GetClientId() const {
   return id_;
+}
+
+uint32_t Connection::NextClientId() {
+  static std::atomic_uint32_t next_id{1};
+  return next_id.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool Connection::IsPrivileged() const {
@@ -1548,6 +1567,34 @@ void Connection::HandleMigrateRequest() {
   // Note: If cc_->subscriptions > 0, we skip the hop but leave migration_request_
   // set. This defers the migration, retrying at the start of every subsequent
   // loop iteration until all subscriptions are cleared.
+}
+
+bool Connection::ProcessControlMessages(uint32_t quota) {
+  uint32_t dispatched = 0;
+
+  while (!dispatch_q_.empty()) {
+    // If Quota reached: stop draining the dispatch queue and fall through to the data path.
+    if ((quota > 0) && (dispatched >= quota)) {
+      LOG_EVERY_T(INFO, 1) << "[" << id_ << "] V2 dispatch_q_ quota reached (" << dispatched << "/"
+                           << quota << "), falling through to data path";
+      return true;
+    }
+
+    auto msg = std::move(dispatch_q_.front());
+    dispatch_q_.pop_front();
+    UpdateDispatchStats(msg, false /* subtract */);
+    dispatched++;
+
+    // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
+    // and let the loop iterate back to HandleMigrateRequest() at the top.
+    if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
+      break;
+    }
+
+    std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
+  }
+
+  return false;
 }
 
 io::Result<size_t> Connection::HandleRecvSocket() {
@@ -2941,6 +2988,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   // to global pipeline-backpressure relief notifications.
   util::fb2::detail::Waiter backpressure_waiter{ioevent_cb};
 
+  const uint32_t async_dispatch_quota = GetFlag(FLAGS_async_dispatch_quota);
+
   do {
     HandleMigrateRequest();
 
@@ -2985,29 +3034,32 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     phase_ = PROCESS;
     bool reached_capacity = io_buf_.AppendLen() == 0;
 
-    // Temporary: Handle dispatch queue items (Control Path) one by one blocking command execution
+    // Handle dispatch queue items (Control Path) with a bounded quota to prevent
+    // starvation of the data path:
+    // - Under a PubSub flood, dispatch_q_ can accumulate thousands of messages.
+    // - Without a quota, the fiber would drain them all before parsing any new data from the
+    //   socket, starving GET/SET and other pipeline commands.
+    // - This mirrors V1's async_dispatch_quota / prefer_pipeline_execution mechanism in AsyncFiber.
     if (!dispatch_q_.empty()) {
-      while (!dispatch_q_.empty()) {
-        auto msg = std::move(dispatch_q_.front());
-        dispatch_q_.pop_front();
-        UpdateDispatchStats(msg, false /* subtract */);
+      bool quota_reached = ProcessControlMessages(async_dispatch_quota);
 
-        // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
-        // and let the loop iterate back to HandleMigrateRequest() at the top.
-        if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
-          break;
-        }
-
-        std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
-      }
-
-      // Note: No flush needed here: the `continue` below re-enters the loop, which either
-      // hits the data path (ParseLoop flushes via ReplyBatch) or the idle-await block
-      // (Flush 1), which always flushes before sleeping.
-
-      // TODO: Properly handle backpressure
       GetQueueBackpressure().pubsub_ec.notifyAll();
-      continue;
+
+      // We explicitly `continue` back to the top of the loop for two reasons:
+      // 1. Fresh Data: Processing dispatch_q_ takes time. Jumping to the top forces
+      //    ReadPendingInput() to pull any newly arrived TCP data from the OS buffer.
+      //    Falling through skips ReadPendingInput(), so the data path checks io_buf_.InputLen()
+      //    before new socket data is read - potentially missing an entire parse cycle.
+      // 2. Low Latency: PubSub replies have accumulated in reply_builder_. The idle-await
+      //    block at the top is where we naturally Flush() and sleep. `continue` acts as a
+      //    fast-path to push these replies to the network immediately, skipping dead code.
+      //
+      // Starvation prevention: We only fall through if we hit our processing quota.
+      // This ensures a continuous flood of PubSub messages cannot indefinitely starve
+      // the data path (pipelined commands).
+      if (!quota_reached) {
+        continue;
+      }
     }
 
     // Handle Parsed Commands Queue (Data Path)

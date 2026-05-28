@@ -124,8 +124,7 @@ struct Metrics {
   size_t lsn_buffer_size = 0;
   size_t lsn_buffer_bytes = 0;
 
-  // monotonic timestamp (ProactorBase::GetMonotonicTimeNs) of the connection stuck on send
-  // for longest time.
+  // CPU cycles timestamp (CycleClock) of the connection stuck on send for longest time.
   uint64_t oldest_pending_send_ts = uint64_t(-1);
 
   InterpreterManager::Stats lua_stats;
@@ -306,6 +305,17 @@ class ServerFamily {
   // Replica-side method. Returns replication summary if this server is a replica,
   // nullopt otherwise.
   std::optional<Metrics::ReplicaInfo> GetReplicaSummary() const;
+
+  struct MasterLinkClientInfo {
+    uint32_t client_id;
+    std::string info;
+  };
+
+  // One entry per attached outbound master link; empty if not replicating.
+  std::vector<MasterLinkClientInfo> GetMasterLinkClientInfo() const
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
+  bool IsMasterLinkClientId(uint32_t id) const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void OnClose(ConnectionContext* cntx);
 

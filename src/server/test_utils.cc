@@ -20,6 +20,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/oah_set.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
@@ -31,6 +32,7 @@ using namespace std;
 ABSL_DECLARE_FLAG(string, dbfilename);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
+ABSL_DECLARE_FLAG(bool, use_oah_set);
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
 ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
 ABSL_DECLARE_FLAG(bool, enable_heartbeat_rss_eviction);
@@ -120,7 +122,7 @@ class BaseFamilyTest::TestConnWrapper {
 
   CmdArgVec Args(ArgSlice list);
 
-  RespVec ParseResponse(bool fully_consumed);
+  RespExpr ParseResponse(bool fully_consumed);
 
   // returns: type(pmessage), pattern, channel, message.
   const facade::Connection::PubMessage& GetPubMessage(size_t index) const;
@@ -139,7 +141,6 @@ class BaseFamilyTest::TestConnWrapper {
 
   void ClearSink() {
     sink_.Clear();
-    expr_builder_.Clear();
   }
 
   TestConnection* conn() {
@@ -180,8 +181,6 @@ BaseFamilyTest::BaseFamilyTest() {
 }
 
 BaseFamilyTest::~BaseFamilyTest() {
-  for (auto* v : resp_vec_)
-    delete v;
 }
 
 void BaseFamilyTest::SetUpTestSuite() {
@@ -215,6 +214,7 @@ void BaseFamilyTest::SetUpTestSuite() {
 
 void BaseFamilyTest::SetUp() {
   max_memory_limit = INT_MAX;
+  g_use_oah_set = absl::GetFlag(FLAGS_use_oah_set);
   ResetService();
 }
 
@@ -480,16 +480,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   unique_lock lk(mu_);
   last_cmd_dbg_info_ = context->last_command_debug;
 
-  RespVec vec = conn_wrapper->ParseResponse(single_response_);
-  if (vec.size() == 1)
-    return vec.front();
-  RespVec* new_vec = new RespVec(vec);
-  resp_vec_.push_back(new_vec);
-  RespExpr e;
-  e.type = RespExpr::ARRAY;
-  e.u = new_vec;
-
-  return e;
+  return conn_wrapper->ParseResponse(single_response_);
 }
 
 void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) {
@@ -627,7 +618,7 @@ CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {
   return res;
 }
 
-RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
+RespExpr BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   tmp_str_vec_.emplace_back(new string{sink_.str()});
   auto& s = *tmp_str_vec_.back();
 
@@ -647,29 +638,11 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   // freeing it, since BuildExpr copies string data into owned_strings_.
   auto& parsed = *obj;
 
-  // The old RedisParser unwraps top-level arrays: elements go directly into res.
-  // We match that behavior here for compatibility with existing tests.
-  RespVec res;
-  auto type = parsed.GetType();
-  if (type == RESPObj::Type::ARRAY || type == RESPObj::Type::MAP || type == RESPObj::Type::SET) {
-    auto arr = parsed.As<RESPArray>();
-    if (arr.has_value() && arr->Size() != SIZE_MAX) {
-      for (size_t i = 0; i < arr->Size(); ++i) {
-        res.push_back(expr_builder_.BuildExpr((*arr)[i]));
-      }
-    } else {
-      // Null aggregate (e.g. *-1\r\n) — produce a NIL_ARRAY entry.
-      res.push_back(expr_builder_.BuildExpr(parsed));
-    }
-  } else {
-    res.push_back(expr_builder_.BuildExpr(parsed));
-  }
-
+  // BuildExpr handles scalars and arrays recursively, preserving array cardinality.
   // parsed (RESPObj) goes out of scope here, freeing zmalloc-allocated hiredis
   // reply data on this thread. All needed string data has been copied into
   // expr_builder_.owned_strings_.
-
-  return res;
+  return expr_builder_.BuildExpr(parsed);
 }
 
 const facade::Connection::PubMessage& BaseFamilyTest::TestConnWrapper::GetPubMessage(

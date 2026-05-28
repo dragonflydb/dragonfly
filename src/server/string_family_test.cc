@@ -222,7 +222,7 @@ TEST_F(StringFamilyTest, MSetLong) {
 TEST_F(StringFamilyTest, MGetSet) {
   Run({"mset", "z", "0"});         // single key
   auto resp = Run({"mget", "z"});  // single key
-  EXPECT_THAT(resp, "0");
+  EXPECT_THAT(resp, RespElementsAre("0"));
 
   Run({"mset", "x", "0", "b", "0"});
 

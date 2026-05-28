@@ -9,6 +9,7 @@
 
 #include <deque>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -49,6 +50,38 @@ class ConnectionContext;
 class ServiceInterface;
 class SinkReplyBuilder;
 class RespSrvParser;
+
+// Snapshot of fields rendered into one CLIENT LIST line. Both real
+// Connection rows and synthetic rows (outbound replication links) fill
+// this and call FormatClientInfo, ensuring the wire format stays in sync.
+struct ClientInfo {
+  uint32_t id = 0;
+  std::string addr;
+  std::string laddr;
+  int fd = -1;
+  bool is_http = false;
+  std::string name;
+  std::string tls;
+  std::optional<int> send_wait_time;
+  uint32_t tid = 0;
+  bool irqmatch = false;
+  std::optional<unsigned> pipeline;
+  std::optional<size_t> pbuf;
+  time_t age = 0;
+  time_t idle = 0;
+  uint64_t tot_cmds = 0;
+  uint64_t tot_net_in = 0;
+  uint64_t tot_read_calls = 0;
+  uint64_t tot_dispatches = 0;
+  std::optional<unsigned> db;
+  std::string flags;
+  std::string phase;       // connection lifecycle: setup/readsock/process/...
+  std::string repl_phase;  // replication state for outbound master link
+  std::string lib_name;
+  std::string lib_ver;
+};
+
+std::string FormatClientInfo(const ClientInfo& ci);
 
 // Connection represents an active connection for a client.
 //
@@ -178,6 +211,9 @@ class Connection : public util::Connection {
   std::string LocalBindAddress() const;
 
   uint32_t GetClientId() const;
+
+  // Reserves an id from the same monotonic pool Connection instances use.
+  static uint32_t NextClientId();
 
   virtual bool IsPrivileged() const;  // virtual because overwritten in test_utils
 
@@ -364,6 +400,10 @@ class Connection : public util::Connection {
   void HandleMigrateRequest();
   io::Result<size_t> HandleRecvSocket();
 
+  // Drains dispatch_q_ (control path) up to the given quota.
+  // Returns true if the quota was reached.
+  bool ProcessControlMessages(uint32_t quota);
+
   bool ShouldEndAsyncFiber(const MessageHandle& msg);
 
   void LaunchAsyncFiberIfNeeded();  // Async fiber is started lazily
@@ -374,7 +414,7 @@ class Connection : public util::Connection {
   // Clear pipelined messages, disaptching only intrusive ones.
   void ClearPipelinedMessages();
 
-  std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
+  ClientInfo BuildClientInfo(unsigned thread_id) const;
 
   void IncreaseConnStats();
   void DecreaseConnStats();

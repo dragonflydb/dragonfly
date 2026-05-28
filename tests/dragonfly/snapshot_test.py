@@ -448,6 +448,7 @@ async def test_s3_reload_snapshot_after_restart(df_factory, tmp_dir):
         assert await DebugPopulateSeeder.capture(new_async_client) == start_capture
 
     finally:
+        new_instance.stop()
         delete_s3_objects(
             os.environ["DRAGONFLY_S3_BUCKET"],
             str(tmp_dir)[1:],
@@ -669,6 +670,53 @@ async def test_debug_objhist_during_bgsave(df_factory: DflyInstanceFactory):
     await client.execute_command("DEBUG", "OBJHIST")
 
     # If we reach here the server did not crash — verify it is still responsive.
+    assert await client.ping()
+
+
+@pytest.mark.asyncio
+@dfly_args({**BASIC_ARGS})
+async def test_randomkey_during_bgsave(df_factory: DflyInstanceFactory):
+    """
+    Regression test for #7404. Before the fix, RANDOMKEY dispatched its per-shard
+    scan via RunBriefInParallel (dispatcher fiber, no preempt). The callback ran
+    OpScan -> DbSlice::WaitForUnblockedJournalWrites, which suspends on a CondVar
+    while a BGSAVE snapshot has buckets mid-serialization — tripping
+    "Should not preempt dispatcher" and aborting the process.
+    """
+    df = df_factory.create(
+        proactor_threads=4,
+        serialization_max_chunk_size=4096,
+        dbfilename=f"dump_{tmp_file_name()}",
+    )
+    df.start()
+    client = df.client()
+
+    # Big values + small chunk size force the snapshot serializer to yield mid-bucket,
+    # leaving deps_ non-empty so RANDOMKEY's scan callback hits WaitEmpty.
+    await client.execute_command("DEBUG", "POPULATE", "20000", "k", "8192", "RAND")
+
+    async def hammer_random(stop_evt):
+        c = df.client()
+        while not stop_evt.is_set():
+            try:
+                await c.execute_command("RANDOMKEY")
+            except Exception:
+                pass
+
+    stop = asyncio.Event()
+    workers = [asyncio.create_task(hammer_random(stop)) for _ in range(8)]
+
+    try:
+        async with timeout(60):
+            for _ in range(5):
+                await client.execute_command("BGSAVE")
+                while await is_saving(client):
+                    await asyncio.sleep(0.01)
+    finally:
+        stop.set()
+        await asyncio.gather(*workers, return_exceptions=True)
+
+    # If we get here the server did not crash — verify it is still responsive.
     assert await client.ping()
 
 

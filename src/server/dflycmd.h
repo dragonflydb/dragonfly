@@ -6,11 +6,13 @@
 
 #include <absl/container/btree_map.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 
 #include "server/conn_context.h"
 #include "server/execution_state.h"
+#include "server/synchronization.h"
 #include "util/fibers/synchronization.h"
 
 namespace facade {
@@ -102,32 +104,115 @@ class DflyCmd {
   enum class SyncState { PREPARATION, FULL_SYNC, STABLE_SYNC, CANCELLED };
 
   // Stores information related to a single replica.
-  struct ABSL_LOCKABLE ReplicaInfo {
+  class ABSL_LOCKABLE ReplicaInfo {
+   public:
     ReplicaInfo(unsigned flow_count, std::string address, uint32_t listening_port,
                 ExecutionState::ErrHandler err_handler)
-        : replica_state{SyncState::PREPARATION},
-          exec_st{std::move(err_handler)},
-          address{std::move(address)},
-          listening_port(listening_port),
-          flows{flow_count} {
+        : replica_state_{SyncState::PREPARATION},
+          exec_st_{std::move(err_handler)},
+          address_{std::move(address)},
+          listening_port_(listening_port),
+          flows_{flow_count} {
+    }
+
+    // Immutable after construction; safe to read without locking.
+    const std::string& GetAddress() const {
+      return address_;
+    }
+    uint32_t GetListeningPort() const {
+      return listening_port_;
+    }
+
+    // Returns the replica ID, or an empty view if SetId has not been called.
+    // Thread-safe: id is written at most once via SetId, with release/acquire
+    // ordering enforced by id_set_.
+    std::string_view GetId() const {
+      if (id_set_.load(std::memory_order_relaxed)) {
+        return id_;
+      }
+      return {};
+    }
+    // Sets the replica ID. Expected to be called at most once per ReplicaInfo
+    // lifetime (from the REPLCONF CLIENT-ID handler on the owner thread).
+    void SetId(std::string_view id) {
+      DCHECK(!id_set_.load(std::memory_order_relaxed)) << "SetId called more than once";
+      id_.assign(id);
+      id_set_.store(true, std::memory_order_relaxed);
+    }
+
+    // Atomic to allow cross-thread access: SetDflyClientVersion writes from the
+    // REPLCONF CLIENT-VERSION handler without locking, while Flow() reads under
+    // an exclusive lock on mutex(). Relaxed ordering: version is independent of
+    // other state.
+    DflyVersion GetVersion() const {
+      return version_.load(std::memory_order_relaxed);
+    }
+    void SetVersion(DflyVersion v) {
+      version_.store(v, std::memory_order_relaxed);
+    }
+
+    // State machine field. Caller must hold GetMutex() exclusively for the setter
+    // and at least in shared mode for the getter.
+    SyncState GetReplicaState() const {
+      return replica_state_;
+    }
+    void SetReplicaState(SyncState s) {
+      replica_state_ = s;
+    }
+
+    // Per-shard fibers receive &GetExecState() and pass it into StartFullSyncInThread
+    // and friends. ExecutionState has its own internal synchronization.
+    ExecutionState& GetExecState() {
+      return exec_st_;
+    }
+    const ExecutionState& GetExecState() const {
+      return exec_st_;
+    }
+
+    // Per-shard flow access; idx is the master shard index.
+    // Caller must hold GetMutex() for any read or write.
+    FlowInfo& GetFlow(size_t idx) {
+      return flows_[idx];
+    }
+    const FlowInfo& GetFlow(size_t idx) const {
+      return flows_[idx];
+    }
+    size_t GetFlowCount() const {
+      return flows_.size();
+    }
+
+    // Returns true if every flow has a live connection. Caller must hold a lock.
+    bool AllFlowsConnected() const {
+      return std::ranges::all_of(flows_, [](const FlowInfo& flow) { return flow.conn != nullptr; });
+    }
+
+    // Returns the per-replica mutex. Callers acquire it via util::fb2::LockGuard
+    // (exclusive), dfly::SharedLock (shared), or std::shared_lock(..., std::try_to_lock)
+    // (try-shared). Returned by reference rather than a factory-returned scoped lock
+    // because clang's -Wthread-safety-analysis cannot track ownership transfer
+    // through a factory function's return value.
+    util::fb2::SharedMutex& GetMutex() {
+      return shared_mu_;
     }
 
     // Transition into cancelled state, run cleanup.
     void Cancel();
 
-    SyncState replica_state;  // always guarded by shared_mu
-    ExecutionState exec_st;
+   private:
+    SyncState replica_state_;  // always guarded by shared_mu_
+    ExecutionState exec_st_;
 
-    std::string id;
-    std::string address;
-    uint32_t listening_port;
-    DflyVersion version = DflyVersion::VER1;
+    std::string id_;
+    // Publication guard for id_: SetId writes id_ then sets this flag with
+    // release; id() acquires this flag and reads id_ on true.
+    std::atomic<bool> id_set_{false};
+    std::string address_;
+    uint32_t listening_port_;
+    std::atomic<DflyVersion> version_{DflyVersion::VER1};
 
-    // Flows describe the state of shard-local flow.
-    // They are always indexed by the shard index on the master.
-    std::vector<FlowInfo> flows;
+    std::vector<FlowInfo> flows_;
 
-    util::fb2::SharedMutex shared_mu;  // See top of header for locking levels.
+    util::fb2::SharedMutex shared_mu_;
   };
 
  public:

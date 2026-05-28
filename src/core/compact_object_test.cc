@@ -906,11 +906,9 @@ TEST_F(CompactObjectTest, LargeStringSetReplacesContents) {
   EXPECT_EQ(ls.Size(), longer_str.size());
   EXPECT_EQ(ls.AsView(), longer_str);
 
-  // 5. Replace with an empty string.
-  ls.SetString("", mr);
-  EXPECT_EQ(ls.Size(), 0u);
-
+  // 5. Free() clears the value.
   ls.Free(mr);
+  EXPECT_EQ(ls.Size(), 0u);
 }
 
 TEST_F(CompactObjectTest, ExternalRepresentation) {
@@ -999,7 +997,57 @@ TEST_F(CompactObjectTest, Huffman) {
       visit(absl::Overload{[&](CompactKey& co) { EXPECT_EQ(co, data); }, [&](CompactValue& co) {}},
             obj_backing);
     }
+
+    // Exercise the extended huffman range (formerly capped at 288 bytes, now up to 16KB).
+    for (unsigned i : {1024u, 4096u, 8192u, 16384u}) {
+      string data(i, 'a');
+      CompactValue cobj;
+      cobj.SetString(data);
+      ASSERT_EQ(data.size(), cobj.Size()) << i;
+      ASSERT_EQ(CompactObj::HashCode(data), cobj.HashCode()) << i;
+
+      string actual;
+      cobj.GetString(&actual);
+      EXPECT_EQ(data, actual) << i;
+    }
   }
+}
+
+// Sweeps input lengths across the 1-byte vs 2-byte huffman header boundary (delta == 128).
+// All inputs are highly compressible (all-'a'), so SetString picks HUFFMAN_ENC for every n,
+// which means GetFirstByte() returns the raw header byte 0 and its top bit tells us which
+// header form was used.
+TEST_F(CompactObjectTest, HuffmanVarintHeader) {
+  HuffmanEncoder encoder;
+  BuildEncoderAB(&encoder);
+  auto bindata = encoder.Export();
+  ASSERT_TRUE(bindata.has_value());
+  // The thread-local encoder may already be installed by a previous test in this fixture;
+  // re-init is a no-op (and returns false). Either way, the encoder is valid afterwards.
+  CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_STRING_VALUES, *bindata);
+
+  bool seen_1byte = false, seen_2byte = false;
+  for (unsigned n = 100; n <= 1000; ++n) {
+    string data(n, 'a');
+    CompactValue cobj;
+    cobj.SetString(data);
+    ASSERT_EQ(n, cobj.Size()) << "Size mismatch at n=" << n;
+    ASSERT_EQ(CompactObj::HashCode(data), cobj.HashCode()) << "HashCode mismatch at n=" << n;
+
+    string actual;
+    cobj.GetString(&actual);
+    ASSERT_EQ(data, actual) << "Roundtrip failed at n=" << n;
+
+    // For HUFFMAN_ENC, byte 0's top bit distinguishes the 1-byte (clear) vs 2-byte (set)
+    // header form. Crossing happens as delta passes 127 -> 128.
+    if (cobj.GetFirstByte() & 0x80) {
+      seen_2byte = true;
+    } else {
+      seen_1byte = true;
+    }
+  }
+  EXPECT_TRUE(seen_1byte) << "Expected at least one 1-byte header (delta <= 127)";
+  EXPECT_TRUE(seen_2byte) << "Expected at least one 2-byte header (delta >= 128)";
 }
 
 TEST_F(CompactObjectTest, GetByteAtOffset) {
@@ -1221,6 +1269,124 @@ TEST_F(CompactObjectTest, SetByteAtOffset) {
     EXPECT_EQ(0u, res);
   }
 
+  cobj_.Reset();
+}
+
+TEST_F(CompactObjectTest, TryBorrow_NulloptForNonLargeStr) {
+  cobj_.SetString("hello");
+  EXPECT_FALSE(cobj_.TryBorrow().has_value());
+
+  cobj_.SetString("12345");
+  EXPECT_FALSE(cobj_.TryBorrow().has_value());
+
+  cobj_.Reset();
+}
+
+TEST_F(CompactObjectTest, TryBorrow_NoneEncLargeString) {
+  // 300 non-ASCII bytes → NONE_ENC + LARGE_STR_TAG (no compression applied).
+  string val(300, '\x80');
+  cobj_.SetString(val);
+  ASSERT_EQ(cobj_.Encoding(), 0u);  // NONE_ENC == 0
+
+  {
+    auto borrow = cobj_.TryBorrow();
+    ASSERT_TRUE(borrow.has_value());
+    EXPECT_EQ(borrow->encoding, 0u);  // NONE_ENC
+    EXPECT_EQ(borrow->decoded_size, val.size());
+    EXPECT_EQ(borrow->encoded, val);
+    EXPECT_EQ(borrow->TEST_refcnt(), 1u);
+  }
+
+  CompactObj::DrainPendingReads();
+  cobj_.Reset();
+}
+
+TEST_F(CompactObjectTest, TryBorrow_AsciiLargeString) {
+  // 300 ASCII bytes: packed size (263) exceeds SmallString::kMaxSize (255),
+  // so the value ends up as ASCII1_ENC or ASCII2_ENC + LARGE_STR_TAG.
+  string val(300, 'a');
+  for (size_t i = 0; i < val.size(); ++i)
+    val[i] = char('a' + (i % 26));
+  cobj_.SetString(val);
+
+  {
+    auto borrow = cobj_.TryBorrow();
+    ASSERT_TRUE(borrow.has_value());
+    EXPECT_TRUE(borrow->encoding == 1u || borrow->encoding == 2u);  // ASCII1 or ASCII2
+    EXPECT_EQ(borrow->decoded_size, val.size());
+    EXPECT_LT(borrow->encoded.size(), val.size());  // packed representation is smaller
+
+    // Verify the packed bytes decode back to the original string.
+    string decoded(borrow->decoded_size, '\0');
+    detail::ascii_unpack(reinterpret_cast<const uint8_t*>(borrow->encoded.data()),
+                         borrow->decoded_size, decoded.data());
+    EXPECT_EQ(decoded, val);
+  }
+
+  CompactObj::DrainPendingReads();
+  cobj_.Reset();
+}
+
+TEST_F(CompactObjectTest, TryBorrow_PinRefcountAndDrain) {
+  string val(300, '\x80');
+  cobj_.SetString(val);
+
+  auto b1 = cobj_.TryBorrow();
+  auto b2 = cobj_.TryBorrow();
+  ASSERT_TRUE(b1.has_value() && b2.has_value());
+  EXPECT_EQ(b1->TEST_refcnt(), 2u);
+  EXPECT_EQ(b2->TEST_refcnt(), 2u);
+
+  // Drain must not reap an entry with outstanding references.
+  CompactObj::DrainPendingReads();
+  EXPECT_EQ(b1->TEST_refcnt(), 2u);
+
+  b1.reset();
+  EXPECT_EQ(b2->TEST_refcnt(), 1u);
+  CompactObj::DrainPendingReads();  // still live
+  EXPECT_EQ(b2->TEST_refcnt(), 1u);
+
+  b2.reset();
+  CompactObj::DrainPendingReads();  // entry is now reaped; do not dereference pin after this
+  cobj_.Reset();
+}
+
+TEST_F(CompactObjectTest, TryBorrow_CowOnMutation) {
+  string val(3000, '\x80');
+  cobj_.SetString(val);
+
+  {
+    auto borrow = cobj_.TryBorrow();
+    ASSERT_TRUE(borrow.has_value());
+
+    // Mutate the value while the read pin is still held.
+    string new_val(3000, '\x81');
+    cobj_.SetString(new_val);
+
+    // SetString must orphan the old pinned buffer rather than freeing it inline.
+    EXPECT_TRUE(borrow->TEST_orphaned());
+    // Mutating while pinned should preserve correctness and not crash.
+    EXPECT_EQ(cobj_.ToString(), new_val);
+  }
+
+  // Drain frees the orphaned old buffer after borrow lifetime ends.
+  CompactObj::DrainPendingReads();
+  cobj_.Reset();
+}
+
+TEST_F(CompactObjectTest, TryBorrow_DefragSkipsWhenPinned) {
+  string val(300, '\x80');
+  cobj_.SetString(val);
+
+  {
+    auto borrow = cobj_.TryBorrow();
+    ASSERT_TRUE(borrow.has_value());
+
+    PageUsage page_usage{CollectPageStats::NO, 0.8};
+    EXPECT_FALSE(cobj_.DefragIfNeeded(&page_usage));
+  }
+
+  CompactObj::DrainPendingReads();
   cobj_.Reset();
 }
 

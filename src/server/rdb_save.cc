@@ -28,6 +28,7 @@ extern "C" {
 #include "core/bloom.h"
 #include "core/cms.h"
 #include "core/json/json_object.h"
+#include "core/oah_set.h"
 #include "core/qlist.h"
 #include "core/size_tracking_channel.h"
 #include "core/sorted_map.h"
@@ -175,10 +176,7 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       if (compact_enc == kEncodingIntSet)
         return RDB_TYPE_SET_INTSET;
       else if (compact_enc == kEncodingStrMap2) {
-        if (pv.HasMemberExpiration())
-          return RDB_TYPE_SET_WITH_EXPIRY;
-        else
-          return RDB_TYPE_SET;
+        return pv.HasMemberExpiration() ? RDB_TYPE_SET_WITH_EXPIRY : RDB_TYPE_SET;
       }
       break;
     case OBJ_ZSET:
@@ -435,29 +433,30 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
   if (obj.Encoding() == kEncodingStrMap2) {
-    // We don't expire any data during serialization
-    obj.SetMemberTime(0);
+    auto save_loop = [this](auto* set) -> error_code {
+      // set_time(0) disables lazy expiry during serialization. Restore on every
+      // exit path (including the early returns inside RETURN_ON_ERR) so a failed
+      // SAVE doesn't leave the set with expiry permanently disabled.
+      set->set_time(0);
+      absl::Cleanup restore_time = [set] { set->set_time(MemberTimeSeconds(GetCurrentTimeMs())); };
 
-    StringSet* set = (StringSet*)obj.RObjPtr();
-    const bool has_expiry = obj.HasMemberExpiration();
-
-    // due to we avoid expiring we can use UpperBoundSize() instead of SlowSize()
-    RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
-    for (auto it = set->begin(); it != set->end();) {
-      RETURN_ON_ERR(SaveString(string_view{*it, sdslen(*it)}));
-      if (has_expiry) {
-        int64_t expiry = -1;
-        if (it.HasExpiry())
-          expiry = it.ExpiryTime();
-        RETURN_ON_ERR(SaveLongLongAsString(expiry));
+      const bool has_expiry = set->ExpirationUsed();
+      RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
+      for (auto it = set->begin(); it != set->end();) {
+        RETURN_ON_ERR(SaveString(Key(it)));
+        if (has_expiry) {
+          int64_t expiry = it.HasExpiry() ? int64_t{it.ExpiryTime()} : -1;
+          RETURN_ON_ERR(SaveLongLongAsString(expiry));
+        }
+        ++it;
+        FlushState flush_state =
+            it == set->end() ? FlushState::kFlushEndEntry : FlushState::kFlushMidEntry;
+        PushToConsumerIfNeeded(flush_state);
       }
-      ++it;
-      FlushState flush_state = FlushState::kFlushMidEntry;
-      if (it == set->end())
-        flush_state = FlushState::kFlushEndEntry;
-      PushToConsumerIfNeeded(flush_state);
-    }
-    obj.SetMemberTime(MemberTimeSeconds(GetCurrentTimeMs()));
+      return error_code{};
+    };
+
+    RETURN_ON_ERR(VisitSet(obj.RObjPtr(), save_loop));
   } else {
     CHECK_EQ(obj.Encoding(), kEncodingIntSet);
     intset* is = (intset*)obj.RObjPtr();

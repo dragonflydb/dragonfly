@@ -301,7 +301,6 @@ class EngineShard {
   MiMemoryResource mi_resource_;
 
   struct {
-    uint64_t updated_at = 0;  // from GetMonotonicTimeNs
     size_t used_mem = 0;
   } last_mem_params_;
 

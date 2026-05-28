@@ -8,10 +8,13 @@
 #include <absl/random/random.h>
 #include <absl/types/span.h>
 
+#include <bit>
 #include <concepts>
 #include <vector>
 
 #include "core/detail/stateless_allocator.h"
+#include "core/simd_op.h"
+#include "core/string_set.h"
 #include "oah_entry.h"
 
 namespace dfly {
@@ -22,6 +25,10 @@ class OAHSet {  // Open Addressing Hash Set
   using Buckets = std::vector<OAHEntry, OAHEntryAllocator>;
 
  public:
+  static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
+  static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
+  static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
+
   class iterator {
    public:
     using iterator_category = std::forward_iterator_tag;
@@ -107,11 +114,19 @@ class OAHSet {  // Open Addressing Hash Set
     void SetEntryIt() {
       if (!owner_)
         return;
+      // time_now_ == 0 disables expiry (callers set it to 0 around serialization).
+      const uint32_t now = owner_->time_now_;
       for (auto num_entries = owner_->entries_.size(); bucket_ < num_entries; ++bucket_) {
         auto& bucket = owner_->entries_[bucket_];
         for (uint32_t bucket_size = bucket.ElementsNum(); pos_ < bucket_size; ++pos_) {
-          if (bucket[pos_])
-            return;
+          auto& entry = bucket[pos_];
+          if (!entry)
+            continue;
+          if (now != 0 && entry.HasExpiry() && entry.GetExpiry() <= now) {
+            entry.ExpireIfNeeded(now, &owner_->size_, &owner_->obj_alloc_used_);
+            continue;
+          }
+          return;
         }
         pos_ = 0;
       }
@@ -136,33 +151,108 @@ class OAHSet {  // Open Addressing Hash Set
 
   static constexpr uint32_t kMaxBatchLen = 32;
 
+  // SIMD wide of kDisplacementSize uint64 lanes; one lane per consecutive bucket.
+  // OAHEntry is a single uint64_t under the hood, so 4 entries are 32 contiguous
+  // bytes — perfect for an AVX2 256-bit register on x86_64.
+  static_assert(sizeof(OAHEntry) == sizeof(uint64_t));
+  static_assert(alignof(OAHEntry) == alignof(uint64_t));
+  using EntryWide = SimdOp<uint64_t, kDisplacementSize>;
+
+  // 2-lane SIMD for iterating the extension-point vector. Vectors are
+  // guaranteed power-of-2 capacity with minimum 2 (see OAHEntry::Insert), so a
+  // 2-lane (16-byte SSE) load is always within the heap allocation.
+  static constexpr std::uint32_t kVectorLaneStep = 2;
+  using VectorWide = SimdOp<uint64_t, kVectorLaneStep>;
+
   explicit OAHSet() = default;
 
   bool Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
+    // Bootstrap or grow before any bucket math: on first Add capacity_log_==0
+    // and entries_.data()==nullptr, so computing BucketId or prefetching
+    // would be UB (shift-by-64 + null deref-via-offset).
+    if (size_ >= entries_.size()) [[unlikely]] {
+      Reserve(BucketCount() * 2);
+    }
+    assert(Capacity() >= kDisplacementSize);
+
     uint64_t hash = Hash(str);
     auto bucket_id = BucketId(hash, capacity_log_);
     PREFETCH_READ(entries_.data() + bucket_id);
-    PREFETCH_READ(entries_.data() + bucket_id + 8);
 
-    if (size_ >= entries_.size()) {
-      Reserve(BucketCount() * 2);
-      bucket_id = BucketId(hash, capacity_log_);
-    }
-
-    uint32_t at = EntryTTL(ttl_sec);
-    // TODO maybe we should split memory allocation and copying for the case when we can't add it
-    // into set
-    OAHEntry entry(str, at);
-    SetEntryHash(entry, hash);
-
-    if (FastCheck(bucket_id, str, hash)) {
-      return false;
-    }
+    // Build the entry between the bucket prefetch and the SIMD probe so
+    // zmalloc + memcpy overlap with the cacheline fetch. On a duplicate
+    // hit below, ~OAHEntry frees this allocation on return.
+    // entry_alloc_size is read off zmalloc's tl counter, which zmalloc
+    // already updates internally, avoiding a second mi_usable_size call.
+    const ssize_t mem_before = zmalloc_used_memory_tl;
+    OAHEntry entry(str, EntryTTL(ttl_sec));
 
     if (ttl_sec != UINT32_MAX)
       expiration_used_ = true;
-    obj_alloc_used_ += entry.AllocSize();
-    AddUnique(std::move(entry), bucket_id, ttl_sec);
+
+    const size_t entry_alloc_size = zmalloc_used_memory_tl - mem_before;
+
+    const uint32_t ext_bid = GetExtensionPoint(bucket_id);
+    PREFETCH_READ(entries_[ext_bid].Raw());
+
+    const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
+    entry.SetExtHash(ext_hash);
+
+    auto data_v = EntryWide::Load(reinterpret_cast<const uint64_t*>(&entries_[bucket_id]));
+    auto hash_v =
+        (data_v & EntryWide::Fill(OAHEntry::kExtHashShiftedMask)) >> OAHEntry::kExtHashShift;
+
+    // !is_empty guards an empty lane's zero hash_v from aliasing a hash
+    // match when ext_hash==0 or the lazy-init (stored==0) branch.
+    auto is_empty = data_v == uint64_t(0);
+    auto candidate = ((hash_v == ext_hash) | (hash_v == uint64_t(0))) & ~is_empty;
+
+    OAHEntry* reuse_slot = nullptr;
+
+    auto cand_bits = candidate.GetMSBs();
+    while (cand_bits) {
+      const uint32_t i = std::countr_zero(cand_bits);
+      cand_bits &= cand_bits - 1;
+
+      OAHEntry& e = entries_[bucket_id + i];
+      if (e.IsVector())
+        continue;
+      if (e.Key() != str) {  // after rehash, the pointer can miss hash so we need to set it for
+                             // better performance
+        if (e.GetHash() != ext_hash) {
+          e.SetExtHash(CalcExtHash(Hash(e.Key()), capacity_log_));
+        }
+        e.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+        continue;
+      }
+      e.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+      if (!e.Empty())
+        return false;
+      reuse_slot = &e;
+      break;
+    }
+
+    if (reuse_slot == nullptr && entries_[ext_bid].IsVector()) {
+      if (OAHEntry* hit = ProbeExtensionVector(ext_bid, str, ext_hash)) {
+        if (!hit->Empty())
+          return false;
+        reuse_slot = hit;
+      }
+    }
+
+    obj_alloc_used_ += entry_alloc_size;
+    ++size_;
+
+    if (reuse_slot) {
+      *reuse_slot = std::move(entry);
+      return true;
+    }
+
+    if (auto empty_bits = is_empty.GetMSBs(); empty_bits) {
+      entries_[bucket_id + std::countr_zero(empty_bits)] = std::move(entry);
+    } else {
+      ptr_vectors_alloc_used_ += entries_[ext_bid].Insert(std::move(entry));
+    }
     return true;
   }
 
@@ -239,24 +329,45 @@ class OAHSet {  // Open Addressing Hash Set
     return end;
   }
 
-  // TODO should be removed, inefficient
-  void AddUnique(OAHEntry&& e, uint32_t bid, uint32_t ttl_sec = UINT32_MAX) {
-    ++size_;
-    assert(Capacity() >= kDisplacementSize);
-    for (uint32_t i = 0; i < kDisplacementSize; i++) {
-      const uint32_t bucket_id = bid + i;
-      if (entries_[bucket_id].Empty()) {
-        entries_[bucket_id] = std::move(e);
-        return;
+  // Walk the vector at ext_bid (vectors live only at the extension point)
+  // looking for str. Returns nullptr if not found. Returns a pointer if found:
+  // caller checks .Empty() to distinguish "live match" (return false from Add)
+  // from "match-but-expired" (slot is now vacant; reuse it for the new entry).
+  //
+  // Vectors have power-of-2 capacity with minimum 2, so we sweep in 2-lane
+  // SIMD strides.
+  OAHEntry* ProbeExtensionVector(uint32_t ext_bid, std::string_view str, uint64_t ext_hash) {
+    auto& vec = entries_[ext_bid].AsVector();
+    auto* raw_arr = vec.Raw();
+    const size_t size = vec.Size();
+    assert(size >= kVectorLaneStep && std::has_single_bit(size));
+
+    for (size_t base = 0; base < size; base += kVectorLaneStep) {
+      auto data_v = VectorWide::Load(reinterpret_cast<const uint64_t*>(&raw_arr[base]));
+      auto hash_v =
+          (data_v & VectorWide::Fill(OAHEntry::kExtHashShiftedMask)) >> OAHEntry::kExtHashShift;
+      auto is_empty = data_v == uint64_t(0);
+      auto candidate = ((hash_v == ext_hash) | (hash_v == uint64_t(0))) & ~is_empty;
+
+      auto cand_bits = candidate.GetMSBs();
+      while (cand_bits) {
+        const uint32_t j = std::countr_zero(cand_bits);
+        cand_bits &= cand_bits - 1;
+
+        OAHEntry& re = raw_arr[base + j];
+        if (re.Key() != str) {  // after rehash, the pointer can miss hash so we need to set it for
+                                // better performance
+          if (re.GetHash() != ext_hash) {
+            re.SetExtHash(CalcExtHash(Hash(re.Key()), capacity_log_));
+          }
+          re.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+          continue;
+        }
+        re.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+        return &re;
       }
-
-      // TODO add expiration logic
     }
-
-    bid = GetExtensionPoint(bid);
-    assert(bid < entries_.size());
-
-    ptr_vectors_alloc_used_ += entries_[bid].Insert(std::move(e));
+    return nullptr;
   }
 
   // keepttl=true: existing entries are left alone (current/legacy behavior).
@@ -468,11 +579,11 @@ class OAHSet {  // Open Addressing Hash Set
     return time_now_;
   }
 
-  size_t ObjAllocUsed() const {
+  size_t ObjMallocUsed() const {
     return obj_alloc_used_;
   }
 
-  size_t SetAllocUsed() const {
+  size_t SetMallocUsed() const {
     return entries_.capacity() * sizeof(OAHEntry) + ptr_vectors_alloc_used_;
   }
 
@@ -569,36 +680,6 @@ class OAHSet {  // Open Addressing Hash Set
     return bid | extension_point_shift;
   }
 
-  bool FastCheck(const uint32_t bid, std::string_view str, uint64_t hash) {
-    const auto ext_hash = CalcExtHash(hash, capacity_log_);
-    const auto ext_bid = GetExtensionPoint(bid);
-
-    bool res = true;
-    for (uint32_t i = 0; i < kDisplacementSize; i++) {
-      const uint32_t bucket_id = bid + i;
-      res &= entries_[bucket_id].CheckNoCollisions(ext_hash);
-    }
-
-    if (res) {
-      if (entries_[ext_bid].IsVector()) {
-        auto& vec = entries_[ext_bid].AsVector();
-        auto raw_arr = vec.Raw();
-        for (size_t i = 0, size = vec.Size(); i < size; ++i) {
-          res &= raw_arr[i].CheckNoCollisions(ext_hash);
-        }
-      }
-      if (!res) {
-        auto pos = FindInBucket(entries_[ext_bid], str, ext_hash);
-        if (pos) {
-          return true;
-        }
-      }
-    } else {
-      return FindInternal(bid, str, hash);
-    }
-    return false;
-  }
-
   template <std::invocable<std::string_view> T>
   bool ScanBucket(OAHEntry& entry, const T& cb, uint32_t bucket_id) {
     if (!entry.IsVector()) {
@@ -672,11 +753,6 @@ class OAHSet {  // Open Addressing Hash Set
     }
     return end();
   }
-
- private:
-  static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
-  static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
-  static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
 
   static uint64_t CalcExtHash(uint64_t hash, uint32_t capacity_log) {
     const uint32_t start_hash_bit = capacity_log > kShiftLog ? capacity_log - kShiftLog : 0;
@@ -761,5 +837,29 @@ class OAHSet {  // Open Addressing Hash Set
   bool expiration_used_ = false;
   Buckets entries_;
 };
+
+// Snapshot of --use_oah_set captured once at startup.
+inline bool g_use_oah_set = false;
+
+// Dispatches a generic lambda over the runtime-selected dense-set type backing
+// kEncodingStrMap2 SETs. Both StringSet and OAHSet expose the same surface
+// (set_time, Empty, BucketCount, Reserve, ObjMallocUsed, ...) so the lambda
+// can be written once and visit either concrete type.
+template <typename Fn> auto VisitSet(void* ptr, Fn&& fn) {
+  return g_use_oah_set ? fn(static_cast<OAHSet*>(ptr)) : fn(static_cast<StringSet*>(ptr));
+}
+
+// Extracts the current member as a string_view from either a StringSet or an
+// OAHSet iterator. Free functions so generic code (e.g. inside VisitSet
+// lambdas) can write `Key(it)` without a member-method asymmetry between the
+// two iterator types.
+inline std::string_view Key(StringSet::iterator it) {
+  sds s = *it;
+  return {s, sdslen(s)};
+}
+
+inline std::string_view Key(OAHSet::iterator it) {
+  return it->Key();
+}
 
 }  // namespace dfly

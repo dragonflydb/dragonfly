@@ -137,6 +137,52 @@ TEST_F(OAHSetTest, Basic) {
   EXPECT_EQ(2, ss_->UpperBoundSize());
 }
 
+// Regression: re-adding existing keys must never store a duplicate, even
+// across multiple rehashes (ClearHash → h_zero lazy path) and after entries
+// have overflowed into a vector at ext_bid. UpperBoundSize alone is
+// insufficient: a buggy AddUnique would still increment size_ exactly once. We
+// iterate and assert each key appears exactly once.
+TEST_F(OAHSetTest, NoDuplicateInsertion) {
+  constexpr int kNumKeys = 2000;  // enough for several Reserve→Rehash cycles
+  std::vector<std::string> keys;
+  keys.reserve(kNumKeys);
+  for (int i = 0; i < kNumKeys; ++i) {
+    keys.push_back(absl::StrCat("dup_key_", i));
+    EXPECT_TRUE(ss_->Add(keys.back())) << "first add of " << keys.back();
+  }
+  const uint32_t size_before = ss_->UpperBoundSize();
+
+  // Re-add every key.
+  for (const auto& k : keys) {
+    EXPECT_FALSE(ss_->Add(k)) << "re-add of " << k;
+  }
+  EXPECT_EQ(ss_->UpperBoundSize(), size_before);
+
+  // Erase half, then re-add them — exercises both the empty-slot reuse and
+  // the "key was here, now gone, must re-insert" paths in AddUnique.
+  for (size_t i = 0; i < keys.size(); i += 2) {
+    EXPECT_TRUE(ss_->Erase(keys[i]));
+  }
+  for (size_t i = 0; i < keys.size(); i += 2) {
+    EXPECT_TRUE(ss_->Add(keys[i])) << "re-add after erase of " << keys[i];
+  }
+  EXPECT_EQ(ss_->UpperBoundSize(), size_before);
+
+  // Final pass: re-add every key, none should be inserted.
+  for (const auto& k : keys) {
+    EXPECT_FALSE(ss_->Add(k)) << "final re-add of " << k;
+  }
+
+  std::unordered_set<std::string> seen;
+  size_t total = 0;
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    EXPECT_TRUE(seen.insert(std::string(it->Key())).second) << "duplicate: " << it->Key();
+    ++total;
+  }
+  EXPECT_EQ(seen.size(), keys.size());
+  EXPECT_EQ(total, keys.size());
+}
+
 TEST_F(OAHSetTest, StandardAddErase) {
   EXPECT_TRUE(ss_->Add("@@@@@@@@@@@@@@@@") != ss_->end());
   EXPECT_TRUE(ss_->Add("A@@@@@@@@@@@@@@@") != ss_->end());
@@ -614,7 +660,7 @@ TEST_F(OAHSetTest, ReallocIfNeededForceReallocates) {
   for (size_t i = 0; i < 50; ++i) {
     EXPECT_TRUE(ss_->Add(absl::StrCat("key_", i, "_xxxxxxxx"), 100 + i));
   }
-  size_t alloc_before = ss_->ObjAllocUsed();
+  size_t alloc_before = ss_->ObjMallocUsed();
   EXPECT_GT(alloc_before, 0u);
 
   PageUsage page_usage{CollectPageStats::NO, 0.9};
@@ -633,8 +679,8 @@ TEST_F(OAHSetTest, ReallocIfNeededForceReallocates) {
     ASSERT_NE(it, ss_->end());
     EXPECT_EQ(it.ExpiryTime(), 100u + i);
   }
-  // ObjAllocUsed remains roughly consistent (mimalloc usable size for same logical size).
-  EXPECT_GT(ss_->ObjAllocUsed(), 0u);
+  // ObjMallocUsed remains roughly consistent (mimalloc usable size for same logical size).
+  EXPECT_GT(ss_->ObjMallocUsed(), 0u);
 }
 
 TEST_F(OAHSetTest, ReallocIfNeededVectorEntry) {
@@ -743,7 +789,7 @@ TEST_F(OAHSetTest, ClearStepIncremental) {
   }
   EXPECT_EQ(cursor, total);
   EXPECT_EQ(ss_->UpperBoundSize(), 0u);
-  EXPECT_EQ(ss_->ObjAllocUsed(), 0u);
+  EXPECT_EQ(ss_->ObjMallocUsed(), 0u);
 }
 
 TEST_F(OAHSetTest, ClearStepFullBucketCount) {
@@ -753,7 +799,7 @@ TEST_F(OAHSetTest, ClearStepFullBucketCount) {
   uint32_t end = ss_->ClearStep(0, ss_->Capacity());
   EXPECT_EQ(end, ss_->Capacity());
   EXPECT_EQ(ss_->UpperBoundSize(), 0u);
-  EXPECT_EQ(ss_->ObjAllocUsed(), 0u);
+  EXPECT_EQ(ss_->ObjMallocUsed(), 0u);
 }
 
 TEST_F(OAHSetTest, GetRandomMemberEmpty) {
@@ -810,7 +856,7 @@ TEST_F(OAHSetTest, ClearStepResetsExpirationUsed) {
       << "ExpirationUsed must be false after ClearStep fully empties the set";
 }
 
-TEST_F(OAHSetTest, ReallocIfNeededObjAllocUsedConsistent) {
+TEST_F(OAHSetTest, ReallocIfNeededObjMallocUsedConsistent) {
   // Sanity: after force-realloc, obj_alloc_used_ remains the sum of all entries'
   // current AllocSize. Guards against signed-delta arithmetic going wrong on the counter.
   for (size_t i = 0; i < 100; ++i)
@@ -824,20 +870,20 @@ TEST_F(OAHSetTest, ReallocIfNeededObjAllocUsedConsistent) {
   size_t expected = 0;
   for (auto it = ss_->begin(); it != ss_->end(); ++it)
     expected += (*it).AllocSize();
-  EXPECT_EQ(ss_->ObjAllocUsed(), expected);
+  EXPECT_EQ(ss_->ObjMallocUsed(), expected);
 }
 
-TEST_F(OAHSetTest, ClearResetsObjAllocUsed) {
+TEST_F(OAHSetTest, ClearResetsObjMallocUsed) {
   for (size_t i = 0; i < 100; ++i) {
     ss_->Add(random_string(generator_, 10));
   }
 
-  EXPECT_GT(ss_->ObjAllocUsed(), 0u);
+  EXPECT_GT(ss_->ObjMallocUsed(), 0u);
   EXPECT_GT(ss_->UpperBoundSize(), 0u);
 
   ss_->Clear();
 
-  EXPECT_EQ(ss_->ObjAllocUsed(), 0u);
+  EXPECT_EQ(ss_->ObjMallocUsed(), 0u);
   EXPECT_EQ(ss_->UpperBoundSize(), 0u);
 }
 
@@ -849,7 +895,7 @@ TEST_F(OAHSetTest, IterateEmpty) {
 }
 
 static size_t MemUsed(OAHSet& obj) {
-  return obj.ObjAllocUsed() + obj.SetAllocUsed();
+  return obj.ObjMallocUsed() + obj.SetMallocUsed();
 }
 
 void BM_Clone(benchmark::State& state) {

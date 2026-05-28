@@ -95,7 +95,12 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
                  std::optional<cluster::SlotRange> slot_range)
-    : ProtocolClient(std::move(host), port), service_(*se), id_{id}, slot_range_(slot_range) {
+    : ProtocolClient(std::move(host), port),
+      service_(*se),
+      id_{id},
+      slot_range_(slot_range),
+      creation_time_(time(nullptr)),
+      client_id_(facade::Connection::NextClientId()) {
   proactor_ = ProactorBase::me();
 }
 
@@ -1022,7 +1027,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
   while (tx_reader.NextTxData(&reader, cntx, &tx_data)) {
     DVLOG(3) << "Lsn: " << tx_data.lsn;
 
-    last_io_time_ = Proactor()->GetMonotonicTimeNs();
+    last_io_time_ = TimeSec();
     if (tx_data.opcode == journal::Op::LSN) {
       //  Do nothing
     } else if (tx_data.opcode == journal::Op::PING) {
@@ -1070,6 +1075,7 @@ void Replica::RedisStreamAcksFb() {
     ack_cmd = absl::StrCat("REPLCONF ACK ", repl_offs_);
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
     if (auto ec = SendCommand(ack_cmd); ec) {
+      VLOG(1) << "RedisAcks SendCommand failed: " << ec.message() << " offset=" << repl_offs_;
       exec_st_.ReportError(ec);
       break;
     }
@@ -1079,6 +1085,8 @@ void Replica::RedisStreamAcksFb() {
         [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || (!exec_st_.IsRunning()); },
         next_ack_tp);
   }
+  VLOG(1) << "RedisAcks fiber exiting, exec_st_.IsRunning()=" << exec_st_.IsRunning()
+          << " last_acked_offset=" << ack_offs_ << " repl_offs=" << repl_offs_;
 }
 
 void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
@@ -1225,6 +1233,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     size_t pos = header.find(' ');
     if (pos != std::string_view::npos) {
       if (absl::SimpleAtoi(header.substr(pos + 1), &repl_offs_)) {
+        initial_repl_offs_ = repl_offs_;
         master_context_.master_repl_id = string(header.substr(0, pos));
         valid = true;
         VLOG(1) << "master repl_id " << master_context_.master_repl_id << " / " << repl_offs_;
@@ -1290,14 +1299,14 @@ auto Replica::GetSummary() const -> Summary {
     res.full_sync_in_progress = (state_mask_ & R_SYNCING);
     res.full_sync_done = (state_mask_ & R_SYNC_OK);
 
-    uint64_t current_time = ProactorBase::GetMonotonicTimeNs();
+    uint64_t current_time_sec = TimeSec();
     // last_io_time is derived above by reading last_io_time_ from all the flows,
     // by accessing them from a foreign thread, see the loop above. As a result some
     // threads may have last_io_time_ bigger than our current time, so we fix it here.
-    if (last_io_time > current_time) {
+    if (last_io_time > current_time_sec) {
       res.master_last_io_sec = 0;
     } else {
-      res.master_last_io_sec = (current_time - last_io_time) / 1000000000UL;
+      res.master_last_io_sec = current_time_sec - last_io_time;
     }
 
     res.master_id = master_context_.master_repl_id;
@@ -1331,6 +1340,45 @@ std::string Replica::GetSyncId() const {
   return master_context_.dfly_session_id;
 }
 
+string Replica::GetClientInfo() const {
+  auto f = [this]() {
+    facade::ClientInfo ci;
+    time_t now = time(nullptr);
+
+    // LastIoTime() is wall-clock seconds (see ProtocolClient::TimeSec).
+    uint64_t last_io_sec = LastIoTime();
+    for (const auto& flow : shard_flows_) {
+      last_io_sec = std::max(last_io_sec, flow->LastIoTime());
+    }
+    if (last_io_sec > 0 && static_cast<time_t>(last_io_sec) <= now) {
+      ci.idle = now - static_cast<time_t>(last_io_sec);
+    }
+
+    ci.id = client_id_;
+    ci.addr = StrCat(server().host, ":", server().port);
+    ci.laddr = "-";
+    if (auto* s = Sock(); s != nullptr && (state_mask_ & R_TCP_CONNECTED)) {
+      auto re = s->RemoteEndpoint();
+      ci.addr = StrCat(re.address().to_string(), ":", re.port());
+      auto le = s->LocalEndpoint();
+      ci.laddr = StrCat(le.address().to_string(), ":", le.port());
+      ci.fd = s->native_handle();
+    }
+    ci.tid = proactor_->GetPoolIndex();
+    ci.age = now - creation_time_;
+    for (uint64_t offs : GetReplicaOffset()) {
+      ci.tot_cmds += offs;
+    }
+    if (repl_offs_ >= initial_repl_offs_)
+      ci.tot_net_in = repl_offs_ - initial_repl_offs_;
+    ci.db = 0;
+    ci.flags = "M";
+    ci.repl_phase = absl::AsciiStrToLower(GetCurrentPhase());
+    return facade::FormatClientInfo(ci);
+  };
+  return proactor_->AwaitBrief(f);
+}
+
 std::string Replica::GetCurrentPhase() const {
   if (!(state_mask_ & R_ENABLED))
     return "DISABLED";
@@ -1338,10 +1386,11 @@ std::string Replica::GetCurrentPhase() const {
     return "TCP_CONNECTING";
   if (!(state_mask_ & R_GREETED))
     return "GREETING";
-  if (!(state_mask_ & R_SYNC_OK))
-    return "INITIAL_SYNC";
+  // R_SYNCING and R_SYNC_OK are exclusive; check R_SYNCING first.
   if (state_mask_ & R_SYNCING)
     return "FULL_SYNC_IN_PROGRESS";
+  if (!(state_mask_ & R_SYNC_OK))
+    return "INITIAL_SYNC";
 
   return "STABLE_SYNC";
 }
