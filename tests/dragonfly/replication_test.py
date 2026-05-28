@@ -4337,13 +4337,24 @@ async def test_sbf_chunked_replication_chunk_size(df_factory: DflyInstanceFactor
     assert peak_bytes < MAX_SBF_CHUNK_SIZE
 
 
+# Per-sync timeouts share the test-level budget so individual waits don't
+# trip earlier than pytest.mark.timeout on slower CI runners.
+HNSW_LARGE_TEST_TIMEOUT_SEC = 900
+HNSW_LARGE_MARKS = [pytest.mark.large, pytest.mark.timeout(HNSW_LARGE_TEST_TIMEOUT_SEC)]
+
+
+def _hnsw_sync_timeout(num_docs: int) -> int:
+    return HNSW_LARGE_TEST_TIMEOUT_SEC if num_docs >= 100_000 else 120
+
+
 @pytest.mark.parametrize(
-    "master_threads, replica_threads, num_dims",
+    "master_threads, replica_threads, num_dims, num_docs",
     [
-        pytest.param(3, 4, 4, id="3t-4t-copied"),
-        pytest.param(4, 4, 4, id="4t-4t-copied"),
-        pytest.param(4, 3, 4, id="4t-3t-copied"),
-        pytest.param(4, 4, 256, id="4t-4t-external"),
+        pytest.param(3, 4, 4, 500, id="3t-4t-copied"),
+        pytest.param(4, 4, 4, 500, id="4t-4t-copied"),
+        pytest.param(4, 3, 4, 500, id="4t-3t-copied"),
+        pytest.param(4, 4, 256, 100, id="4t-4t-external"),
+        pytest.param(4, 4, 8, 100_000, id="4t-4t-100k", marks=HNSW_LARGE_MARKS),
     ],
 )
 async def test_hnsw_search_replication_with_network_disruptions(
@@ -4351,6 +4362,7 @@ async def test_hnsw_search_replication_with_network_disruptions(
     master_threads: int,
     replica_threads: int,
     num_dims: int,
+    num_docs: int,
 ):
     """
     Test HNSW search index replication under continuous traffic and a network disruption.
@@ -4369,7 +4381,6 @@ async def test_hnsw_search_replication_with_network_disruptions(
     c_master = master.client()
     c_replica = replica.client()
 
-    num_docs = 100 if num_dims >= 256 else 500
     seeder = HnswSearchSeeder(num_initial_docs=num_docs, num_dims=num_dims)
     await seeder.create_index(c_master)
     await seeder.seed_initial_docs(c_master)
@@ -4382,10 +4393,12 @@ async def test_hnsw_search_replication_with_network_disruptions(
     search_task = asyncio.create_task(seeder.run_search_queries(c_master))
     await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
+    sync_timeout = _hnsw_sync_timeout(num_docs)
+
     # Wait for initial sync before running search queries on replica.
     # During HNSW graph restoration with external vectors, nodes have
     # uninitialized data pointers — search queries could dereference them.
-    await wait_available_async(c_replica)
+    await wait_available_async(c_replica, timeout=sync_timeout)
     replica_search_task = asyncio.create_task(seeder.run_search_queries(c_replica))
 
     try:
@@ -4395,7 +4408,7 @@ async def test_hnsw_search_replication_with_network_disruptions(
         # Give time to detect dropped connection and reconnect
         await asyncio.sleep(1.0)
 
-        await wait_available_async(c_replica)
+        await wait_available_async(c_replica, timeout=sync_timeout)
         seeder.stop()
         await traffic_task
         await search_task
@@ -4405,7 +4418,7 @@ async def test_hnsw_search_replication_with_network_disruptions(
         info = await c_replica.execute_command("FT.INFO", seeder.index_name)
         logging.info(f"Replica FT.INFO: {info}")
 
-        await check_all_replicas_finished([c_replica], c_master)
+        await check_all_replicas_finished([c_replica], c_master, timeout=sync_timeout)
         await seeder.verify(c_master, c_replica)
 
     finally:
@@ -4416,8 +4429,17 @@ async def test_hnsw_search_replication_with_network_disruptions(
         await proxy.close(proxy_task)
 
 
-@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
-async def test_hnsw_failover_chain(df_factory: DflyInstanceFactory, document_type: str):
+@pytest.mark.parametrize(
+    "document_type, num_docs",
+    [
+        pytest.param("HASH", 300, id="HASH"),
+        pytest.param("JSON", 300, id="JSON"),
+        pytest.param("HASH", 100_000, id="HASH-100k", marks=HNSW_LARGE_MARKS),
+    ],
+)
+async def test_hnsw_failover_chain(
+    df_factory: DflyInstanceFactory, document_type: str, num_docs: int
+):
     """
     Primary → replica1 → REPLTAKEOVER → attach replica2 to promoted node.
     The promoted node must still serve KNN, and a freshly attached replica
@@ -4432,13 +4454,14 @@ async def test_hnsw_failover_chain(df_factory: DflyInstanceFactory, document_typ
     c1 = replica1.client()
     c2 = replica2.client()
 
-    seeder = HnswSearchSeeder(num_initial_docs=300, num_dims=8, document_type=document_type)
+    sync_timeout = _hnsw_sync_timeout(num_docs)
+    seeder = HnswSearchSeeder(num_initial_docs=num_docs, num_dims=8, document_type=document_type)
     await seeder.create_index(c_master)
     await seeder.seed_initial_docs(c_master)
 
     await c1.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_available_async(c1)
-    await check_all_replicas_finished([c1], c_master)
+    await wait_available_async(c1, timeout=sync_timeout)
+    await check_all_replicas_finished([c1], c_master, timeout=sync_timeout)
     await seeder.verify(c_master, c1)
 
     # Promote replica1. The master exits after REPLTAKEOVER completes.
@@ -4447,8 +4470,8 @@ async def test_hnsw_failover_chain(df_factory: DflyInstanceFactory, document_typ
 
     # Attach replica2 to the promoted node and verify it rebuilds HNSW.
     await c2.execute_command(f"REPLICAOF localhost {replica1.port}")
-    await wait_available_async(c2)
-    await check_all_replicas_finished([c2], c1)
+    await wait_available_async(c2, timeout=sync_timeout)
+    await check_all_replicas_finished([c2], c1, timeout=sync_timeout)
     await seeder.verify(c1, c2)
 
 
