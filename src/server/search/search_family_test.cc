@@ -1588,12 +1588,19 @@ TEST_F(SearchFamilyTest, TextEscapedSpaceDoesNotForgeSynonymSentinel) {
   EXPECT_THAT(Run({"FT.SEARCH", "i", "word1", "DIALECT", "2"}), AreDocIds("d:1"));
 }
 
-TEST_F(SearchFamilyTest, TextTruncatedUtf8AfterEscapeIsDropped) {
+TEST_F(SearchFamilyTest, TextMalformedUtf8AfterEscapeIsSingleByte) {
   EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "val", "TEXT"}),
             "OK");
-  Run({"HSET", "d:1", "val", "foo\\\xe2"});
+  // Backslash followed by an invalid lead byte; the escape consumes exactly one byte
+  // (matching the query lexer), so the token is `foo<byte>` not `foo`.
+  Run({"HSET", "d:1", "val", "foo\\\xc2"});
+  // Backslash + bad lead + ASCII separator: the bad lead is consumed by the escape,
+  // then `.` splits, leaving two tokens; `bar` is searchable on its own.
+  Run({"HSET", "d:2", "val", "foo\\\xc2.bar"});
 
-  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo", "DIALECT", "2"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\\xc2", "DIALECT", "2"}), AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:bar", "DIALECT", "2"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo", "DIALECT", "2"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, TextNonAsciiBytesArePartOfWord) {

@@ -56,6 +56,10 @@ constexpr std::array<bool, 256> MakeSepTable() {
 }
 constexpr auto kTextSepTable = MakeSepTable();
 
+// Returns the byte length of the UTF-8 codepoint starting at `s[i]`. Returns 1 if the
+// lead byte announces a multi-byte sequence but the continuation bytes are missing or
+// not in 0x80..0xBF, matching the byte-oriented escape semantics of the query lexer
+// (which consumes exactly one byte after `\`).
 size_t Utf8CodepointLen(std::string_view s, size_t i) {
   unsigned char lead = static_cast<unsigned char>(s[i]);
   size_t len = 1;
@@ -65,22 +69,47 @@ size_t Utf8CodepointLen(std::string_view s, size_t i) {
     len = 3;
   else if ((lead & 0xF8) == 0xF0)
     len = 4;
-  return len <= s.size() - i ? len : 0;
+  if (len == 1)
+    return 1;
+  if (len > s.size() - i)
+    return 1;
+  for (size_t k = 1; k < len; ++k) {
+    unsigned char c = static_cast<unsigned char>(s[i + k]);
+    if ((c & 0xC0) != 0x80)
+      return 1;
+  }
+  return len;
 }
 
 // Split on ASCII punctuation separators; backslash glues the next codepoint into the
-// current word regardless of class. Non-ASCII bytes are always word bytes.
+// current word regardless of class. Non-ASCII bytes are always word bytes. Fast-path
+// for text without any backslash emits views into the original input.
 void SplitWithEscapes(std::string_view text, absl::FunctionRef<void(std::string_view)> emit) {
+  if (text.find('\\') == std::string_view::npos) {
+    size_t start = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+      unsigned char c = static_cast<unsigned char>(text[i]);
+      if (c < 0x80 && kTextSepTable[c]) {
+        if (i > start)
+          emit(text.substr(start, i - start));
+        start = i + 1;
+      }
+    }
+    if (start < text.size())
+      emit(text.substr(start));
+    return;
+  }
+
   std::string buf;
+  buf.reserve(text.size());
   size_t i = 0;
   while (i < text.size()) {
     unsigned char c = static_cast<unsigned char>(text[i]);
     if (c == '\\') {
       if (i + 1 >= text.size()) {
         ++i;
-      } else if (size_t cp_len = Utf8CodepointLen(text, i + 1); cp_len == 0) {
-        i = text.size();
       } else {
+        size_t cp_len = Utf8CodepointLen(text, i + 1);
         buf.append(text.data() + i + 1, cp_len);
         i += 1 + cp_len;
       }
