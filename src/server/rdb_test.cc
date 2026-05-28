@@ -1466,7 +1466,8 @@ struct InterleaveHarness {
 
   // Each invocation appends the supplied blob to the body, then injects a SaveEntry for the next
   // queued key (sandwiched between a journal offset and a journal entry) to force interleaved
-  // tagged chunks.
+  // tagged chunks. Passed to serializer as consume_fun_, so the blob is the flushed data
+  // accumulated in serializer.
   void operator()(std::string blob) {
     body += blob;
     if (next >= queued.size())
@@ -1477,6 +1478,11 @@ struct InterleaveHarness {
     ASSERT_FALSE(serializer->SendJournalOffset(offset));
 
     const auto& entry = queued[next++];
+    // SaveEntry calls get preempted (not by fiber but call stack) every time consume_fun_ is
+    // called. So the call stack looks like: SaveEntry(A) -> consume_fun_ -> SaveEntry(B) ->
+    // consume_fun_ -> ... The last entry in queue (next == queued size) does not add anything, it
+    // simply returns until the entry is completed. From that point on all entries simply flush
+    // repeatedly until completed, moving down the stack.
     ASSERT_TRUE(serializer->SaveEntry(PrimeKey{entry.key}, *entry.value, 0, 0, 0).has_value());
 
     io::StringSink sink;
@@ -1491,28 +1497,6 @@ struct InterleaveHarness {
 // The following are tests that directly feed byte data to loader to exercise chunk loading.
 // Some of these will become redundant once the saver starts sending chunked data, so instead of
 // hand-crafting data we will be able to load from the db directly.
-
-TEST_F(RdbTest, LoadTwoChunks) {
-  std::string first;
-  first.push_back(RDB_TYPE_HASH);
-  AppendString(&first, "h");
-  AppendLen(&first, 2);
-  AddKV(&first, "f1", "v1");
-
-  std::string second;
-  AddKV(&second, "f2", "v2");
-
-  std::string body;
-  // hash is split across two tagged chunks
-  body += MakeTaggedChunk(1, first);
-  body += MakeTaggedChunk(1, second);
-
-  const auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
-  ASSERT_FALSE(ec) << ec.message();
-
-  EXPECT_EQ(Run({"HGET", "h", "f1"}), "v1");
-  EXPECT_EQ(Run({"HGET", "h", "f2"}), "v2");
-}
 
 TEST_F(RdbTest, InterleavedLoad) {
   // must have >1 shards for non inlined path check. find a key that lands in shard 1 by hashing, to
@@ -1565,34 +1549,6 @@ TEST_F(RdbTest, InterleavedLoad) {
   EXPECT_EQ(Run({"SELECT", "1"}), "OK");
   EXPECT_THAT(Run({"EXISTS", key}), IntArg(0));
   EXPECT_EQ(Run({"SELECT", "0"}), "OK");
-}
-
-TEST_F(RdbTest, ChunksAroundJournalOffset) {
-  std::string a1;
-  a1.push_back(RDB_TYPE_HASH);
-  AppendString(&a1, "a");
-  AppendLen(&a1, 2);
-  AddKV(&a1, "f1", "v1");
-
-  std::string a2;
-  AddKV(&a2, "f2", "v2");
-
-  std::string body;
-  body += MakeTaggedChunk(1, a1);
-
-  // put the journal offset in the middle
-  body.push_back(static_cast<char>(RDB_OPCODE_JOURNAL_OFFSET));
-  uint8_t offset_bytes[8];
-  absl::little_endian::Store64(offset_bytes, 1234);
-  body.append(reinterpret_cast<const char*>(offset_bytes), sizeof(offset_bytes));
-
-  body += MakeTaggedChunk(1, a2);
-
-  auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body), 1234); });
-  ASSERT_FALSE(ec) << ec.message();
-
-  EXPECT_EQ(Run({"HGET", "a", "f1"}), "v1");
-  EXPECT_EQ(Run({"HGET", "a", "f2"}), "v2");
 }
 
 TEST_F(RdbTest, SplitSBF) {
@@ -1699,26 +1655,27 @@ TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
   SetTestFlag("serialization_tagged_chunks", "true");
   ResetService();
 
+  // create hset named key, then fill it with count fields each with 128 char long string
   auto fill_hash = [&](std::string_view key, int count, char ch) {
     for (int i = 0; i < count; ++i) {
-      EXPECT_THAT(Run({"HSET", std::string{key}, StrCat("field:", i), std::string(128, ch)}),
-                  IntArg(1));
+      auto res = Run({"HSET", key, StrCat("field:", i), std::string(128, ch)});
+      EXPECT_THAT(res, IntArg(1));
     }
   };
 
-  // Larger keys force a mid-entry flush; smaller keys finish in a single chunk. Mixing both
-  // shapes ensures the harness sees both split and unsplit entries.
-  auto get_key_size = [](std::string s) {
+  // Some hashes have many more fields to make them flush mid-entry during serialization
+  auto num_fields_in_hash_set = [](std::string s) {
     if ((s[0] - 'A') % 3 == 2)
       return 4;
     return 200;
   };
 
+  // note: going to Z causes stack size issues because of the recursive nature of the harness
   constexpr auto from = 'A';
   constexpr auto to = 'F';
   for (auto ch = from; ch <= to; ++ch) {
     std::string s{ch};
-    fill_hash(s, get_key_size(s), ch);
+    fill_hash(s, num_fields_in_hash_set(s), ch);
   }
 
   std::string body;
@@ -1768,7 +1725,7 @@ TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
 
   for (auto ch = from; ch <= to; ++ch) {
     std::string s{ch};
-    verify_hash(s, get_key_size(s), ch);
+    verify_hash(s, num_fields_in_hash_set(s), ch);
   }
 }
 
