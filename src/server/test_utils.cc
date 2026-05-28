@@ -16,6 +16,7 @@ extern "C" {
 #include <absl/strings/match.h>
 #include <absl/strings/str_split.h>
 #include <mimalloc.h>
+#include <unistd.h>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -349,7 +350,9 @@ void BaseFamilyTest::ShutdownService() {
 void BaseFamilyTest::InitWithDbFilename() {
   ShutdownService();
 
-  absl::SetFlag(&FLAGS_dbfilename, "rdbtestdump");
+  // Include PID so parallel ctest runs (different test binaries sharing the
+  // build dir) don't unlink each other's snapshot files via CleanupSnapshots.
+  absl::SetFlag(&FLAGS_dbfilename, absl::StrCat("rdbtestdump_", getpid()));
   CleanupSnapshots();
   ResetService();
 }
