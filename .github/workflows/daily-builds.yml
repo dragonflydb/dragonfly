@@ -56,7 +56,7 @@ jobs:
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
-            ctest -V -L DFLY
+            ctest -V -L DFLY -j$(nproc)
 
       - name: Send notification on failure
         if: failure() && github.ref == 'refs/heads/main'
@@ -129,7 +129,7 @@ jobs:
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
-            ctest -V -L DFLY
+            ctest -V -L DFLY -j$(sysctl -n hw.ncpu)
 
       - name: Send notification on failure
         if: failure() && github.ref == 'refs/heads/main'
