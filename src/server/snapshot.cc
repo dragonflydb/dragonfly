@@ -87,15 +87,11 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   RdbSerializer::ConsumeFun consume_fun;
   if (allow_flush == SnapshotFlush::kAllow) {
     flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
-    if (flush_threshold != 0) {
-      // The callback receives data directly from the serializer, no need to call back into it.
-      consume_fun = [this](std::string data) {
-        HandleFlushData(std::move(data));
-        VLOG(2) << "HandleFlushData via callback";
-        ++ServerState::tlocal()->stats.big_value_preemptions;
-      };
-    }
+    // The callback receives data directly from the serializer, no need to call back into it.
+    if (flush_threshold != 0)
+      consume_fun = std::bind_front(&SliceSnapshot::ConsumeBigValueChunk, this);
   }
+
   bool serialize_index = SaveMode() != dfly::SaveMode::RDB &&
                          absl::GetFlag(FLAGS_serialize_hnsw_index) &&
                          replica_dfly_version_ >= DflyVersion::VER6;
@@ -313,6 +309,14 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   }
 
   VLOG(2) << "Pushed with Serialize() " << serialized;
+}
+
+void SliceSnapshot::ConsumeBigValueChunk(std::string data) {
+  if (!cntx_->IsRunning())
+    return;  // Short circuit flush on cancel or error to finish
+
+  HandleFlushData(std::move(data));
+  ++ServerState::tlocal()->stats.big_value_preemptions;
 }
 
 size_t SliceSnapshot::FlushSerialized() {
