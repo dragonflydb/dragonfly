@@ -1039,8 +1039,12 @@ void Transaction::Conclude() {
 }
 
 bool Transaction::CancelScheduledTx() {
+  // For safety reasons we don't cancel those - requires more investigation
+  if (IsGlobal())
+    return false;
+
   DCHECK(coordinator_state_ & COORD_SCHED);
-  bool is_readonly = cid_->IsReadOnly();
+  bool is_safe = cid_->IsReadOnly();
 
   // First, try to clear all is_armed flags
   std::bitset<1024> disarmed_shards;
@@ -1065,7 +1069,7 @@ bool Transaction::CancelScheduledTx() {
   // For mutable transctions we can cancel only if all shards can be stopped.
   // Reads do not cause any inconsistencies if stopped mid-read, so any condition is ok
   unsigned disarmed_cnt = disarmed_shards.count();
-  if (disarmed_cnt == unique_shard_cnt_ || is_readonly) {
+  if (disarmed_cnt == unique_shard_cnt_ || is_safe) {
     // Cancel the transaction
     auto is_active = [this](uint32_t i) { return IsActive(i); };
     shard_set->RunBriefInParallel([this](EngineShard* shard) { CancelShardCb(shard); }, is_active);
