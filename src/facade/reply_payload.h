@@ -9,6 +9,7 @@
 #include <variant>
 
 #include "base/function2.hpp"
+#include "common/borrowed_string.h"
 #include "facade/facade_types.h"
 
 namespace facade {
@@ -25,7 +26,7 @@ struct SimpleString : public std::string {};  // SendSimpleString
 struct BulkString : public std::string {};    // SendBulkString
 
 using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
-                             std::unique_ptr<CollectionPayload>>;
+                             cmn::BorrowedString, std::unique_ptr<CollectionPayload>>;
 
 #if defined(__linux__) && !defined(_LIBCPP_VERSION)
 static_assert(sizeof(Payload) == 40);

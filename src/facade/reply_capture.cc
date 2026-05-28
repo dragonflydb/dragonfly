@@ -54,6 +54,13 @@ void CapturingReplyBuilder::SendBulkString(std::string_view str) {
   Capture(BulkString{string{str}});
 }
 
+// Capture the borrow into the payload, extending the pin's lifetime until
+// replay moves it into the real sink where it is parked across the writev.
+void CapturingReplyBuilder::SendBulkStringBorrowed(cmn::BorrowedString bs) {
+  SKIP_LESS(ReplyMode::FULL);
+  Capture(std::move(bs));
+}
+
 void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
   SKIP_LESS(ReplyMode::FULL);
   stack_.emplace(make_unique<CollectionPayload>(len, type),
@@ -121,6 +128,10 @@ struct CaptureVisitor {
 
   void operator()(const payload::BulkString& bs) {
     static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs);
+  }
+
+  void operator()(cmn::BorrowedString bs) {
+    static_cast<RedisReplyBuilder*>(rb)->SendBulkStringBorrowed(std::move(bs));
   }
 
   void operator()(payload::Null) {
