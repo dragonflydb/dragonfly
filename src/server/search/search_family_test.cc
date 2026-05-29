@@ -5777,6 +5777,26 @@ TEST_F(SearchFamilyTest, PhraseQueryIssue7294) {
   EXPECT_THAT(Run({"FT.SEARCH", "idx_phrase", "\"machine learning\""}), AreDocIds("p:1", "p:3"));
 }
 
+// A parenthesized field condition must accept the same atoms as the bare `@field:...` form
+// (quoted phrase, prefix/suffix/infix affix), including when combined with other clauses.
+TEST_F(SearchFamilyTest, ParenthesizedFieldCondition) {
+  Run({"FT.CREATE", "idx_paren", "SCHEMA", "prefix", "TEXT", "NOSTEM", "key", "TAG"});
+
+  Run({"HSET", "doc:1", "prefix", "hello world", "key", "doc1"});
+  Run({"HSET", "doc:2", "prefix", "goodbye", "key", "doc2"});
+
+  // Bare and parenthesized phrase forms return identical results.
+  EXPECT_THAT(Run({"FT.SEARCH", "idx_paren", R"(@prefix:"hello")"}), AreDocIds("doc:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx_paren", R"(@prefix:("hello"))"}), AreDocIds("doc:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx_paren", R"((@prefix:("hello")))"}), AreDocIds("doc:1"));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx_paren", "@prefix:(hel*)"}), AreDocIds("doc:1"));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx_paren", R"((@prefix:("hello") @key:{doc1}))"}),
+              AreDocIds("doc:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx_paren", R"((@prefix:("hello") @key:{doc2}))"}), kNoResults);
+}
+
 // Phrase queries against a NOOFFSETS index surface an error (positions aren't stored).
 TEST_F(SearchFamilyTest, PhraseOnNoOffsetsErrors) {
   Run({"FT.CREATE", "idx_no_off", "NOOFFSETS", "SCHEMA", "t", "TEXT"});

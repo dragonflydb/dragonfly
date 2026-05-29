@@ -544,4 +544,106 @@ TEST_F(SearchParserTest, PhraseParse) {
   EXPECT_TRUE(found_phrase);
 }
 
+// A parenthesized field condition must accept the same atoms as the bare `@field:...` form.
+TEST_F(SearchParserTest, FieldParenthesizedAtoms) {
+  auto field_child = [this](const std::string& q) -> AstNode {
+    EXPECT_EQ(0, Parse(q)) << q;
+    AstExpr e = query_driver_.Take();
+    if (auto* f = std::get_if<AstFieldNode>(&e))
+      return std::move(*f->node);
+    ADD_FAILURE() << "not a field node: " << q;
+    return e;
+  };
+
+  for (const auto& q : {R"(@prefix:("hello"))"s, R"((@prefix:("hello")))"s}) {
+    AstNode n = field_child(q);
+    ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(n)) << q;
+    EXPECT_EQ(std::get<AstPhraseNode>(n).raw, "hello");
+    EXPECT_EQ(std::get<AstPhraseNode>(n).slop, 0u);
+  }
+
+  {
+    AstNode n = field_child(R"(@title:("machine learning"~2))");
+    ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(n));
+    EXPECT_EQ(std::get<AstPhraseNode>(n).raw, "machine learning");
+    EXPECT_EQ(std::get<AstPhraseNode>(n).slop, 2u);
+  }
+
+  {
+    AstNode n = field_child("@prefix:(hel*)");
+    ASSERT_TRUE(std::holds_alternative<AstPrefixNode>(n));
+    EXPECT_EQ(std::get<AstPrefixNode>(n).affix, "hel");
+  }
+  {
+    AstNode n = field_child("@prefix:(*llo)");
+    ASSERT_TRUE(std::holds_alternative<AstSuffixNode>(n));
+    EXPECT_EQ(std::get<AstSuffixNode>(n).affix, "llo");
+  }
+  {
+    AstNode n = field_child("@prefix:(*ell*)");
+    ASSERT_TRUE(std::holds_alternative<AstInfixNode>(n));
+    EXPECT_EQ(std::get<AstInfixNode>(n).affix, "ell");
+  }
+
+  {
+    AstNode n = field_child(R"(@prefix:(-"world"))");
+    ASSERT_TRUE(std::holds_alternative<AstNegateNode>(n));
+    EXPECT_TRUE(std::holds_alternative<AstPhraseNode>(*std::get<AstNegateNode>(n).node));
+  }
+  {
+    AstNode n = field_child(R"(@prefix:(~"hello"))");
+    ASSERT_TRUE(std::holds_alternative<AstOptionalNode>(n));
+    EXPECT_TRUE(std::holds_alternative<AstPhraseNode>(*std::get<AstOptionalNode>(n).node));
+  }
+
+  {
+    AstNode n = field_child(R"(@title:("machine" | "deep"))");
+    ASSERT_TRUE(std::holds_alternative<AstLogicalNode>(n));
+    EXPECT_EQ(std::get<AstLogicalNode>(n).op, AstLogicalNode::OR);
+    EXPECT_EQ(std::get<AstLogicalNode>(n).nodes.size(), 2u);
+  }
+  {
+    AstNode n = field_child(R"(@title:("machine" "learning"))");
+    ASSERT_TRUE(std::holds_alternative<AstLogicalNode>(n));
+    EXPECT_EQ(std::get<AstLogicalNode>(n).op, AstLogicalNode::AND);
+    EXPECT_EQ(std::get<AstLogicalNode>(n).nodes.size(), 2u);
+  }
+
+  EXPECT_EQ(0, Parse(R"((@prefix:("u123\.documents") @key:{doc1}))"));
+
+  // `*` is the field-level "match all" only as the bare form, not as an atom in the grouping.
+  EXPECT_NE(0, Parse("@prefix:(*)"));
+}
+
+// A decimal literal tokenizes to DOUBLE and must be usable as a search term, both free-standing
+// and after a field colon, not only inside numeric ranges.
+TEST_F(SearchParserTest, DoubleAsTerm) {
+  ASSERT_EQ(0, Parse("3.14"));
+  AstExpr root = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstTermNode>(root));
+  EXPECT_EQ(std::get<AstTermNode>(root).affix, "3.14");
+
+  ASSERT_EQ(0, Parse("@title:3.14"));
+  AstExpr field = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(field));
+  ASSERT_TRUE(std::holds_alternative<AstTermNode>(*std::get<AstFieldNode>(field).node));
+  EXPECT_EQ(std::get<AstTermNode>(*std::get<AstFieldNode>(field).node).affix, "3.14");
+
+  // Decimal as a term inside a parenthesized field condition.
+  ASSERT_EQ(0, Parse("@title:(3.14)"));
+  AstExpr paren = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(paren));
+  EXPECT_TRUE(std::holds_alternative<AstTermNode>(*std::get<AstFieldNode>(paren).node));
+}
+
+// A failed parse on a reused driver must not leave the previous query's AST behind: ResetScanner()
+// clears it, so a syntax error (which never calls Set()) yields an empty result, not stale state.
+TEST_F(SearchParserTest, ResetClearsStaleAst) {
+  ASSERT_EQ(0, Parse("@field:hello"));
+  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(query_driver_.Take()));
+
+  EXPECT_NE(0, Parse("("));
+  EXPECT_TRUE(std::holds_alternative<std::monostate>(query_driver_.Take()));
+}
+
 }  // namespace dfly::search
