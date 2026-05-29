@@ -28,6 +28,8 @@
 
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
 ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
+ABSL_FLAG(bool, serialization_tagged_chunks, false,
+          "Allow serializer output to be split into tagged chunks and reassembled by receiver");
 
 namespace dfly {
 
@@ -98,6 +100,10 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
                          replica_dfly_version_ >= DflyVersion::VER6;
 
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_, consume_fun, flush_threshold);
+
+  if (allow_flush == SnapshotFlush::kAllow) {
+    serializer_->SetTagEntries(absl::GetFlag(FLAGS_serialization_tagged_chunks));
+  }
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 

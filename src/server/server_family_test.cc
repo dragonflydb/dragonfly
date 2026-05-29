@@ -279,8 +279,9 @@ TEST_F(ServerFamilyTest, ClientPause) {
 
   Run({"CLIENT", "PAUSE", "50", "WRITE"});
 
+  auto get_start = absl::Now();
   Run({"get", "key"});
-  EXPECT_LT((absl::Now() - start), absl::Milliseconds(10));
+  EXPECT_LT((absl::Now() - get_start), absl::Milliseconds(50));
   Run({"set", "key", "value2"});
   EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
 }

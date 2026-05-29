@@ -55,9 +55,26 @@ namespace dfly {
 
 class SearchFamilyTest : public BaseFamilyTest {
  protected:
+  // FT.CREATE returns before IndexBuilder finishes ingesting existing docs,
+  // so a follow-up FT.SEARCH can race with it. Poll FT.INFO until ready.
+  void WaitForIndexReady(std::string_view name, absl::Duration timeout = absl::Seconds(10)) {
+    absl::Time deadline = absl::Now() + timeout;
+    while (true) {
+      auto resp = Run({"ft.info", name});
+      auto arr = resp.GetVec();
+      auto it = std::find_if(arr.begin(), arr.end(), [](const auto& e) { return e == "indexing"; });
+      ASSERT_NE(it, arr.end()) << "ft.info missing 'indexing' field";
+      auto next = it + 1;
+      ASSERT_NE(next, arr.end());
+      if (next->GetInt() == 0)
+        return;
+      ASSERT_LE(absl::Now(), deadline) << "Index " << name << " not ready in time";
+      ThisFiber::SleepFor(std::chrono::milliseconds(5));
+    }
+  }
 };
 
-const auto kNoResults = IntArg(0);  // tests auto destruct single element arrays
+const auto kNoResults = RespElementsAre(IntArg(0));
 
 /* Asserts that response is array of two arrays. Used to test FT.PROFILE response */
 ::testing::AssertionResult AssertArrayOfTwoArrays(const RespExpr& resp) {
@@ -81,20 +98,21 @@ const auto kNoResults = IntArg(0);  // tests auto destruct single element arrays
 #define ASSERT_ARRAY_OF_TWO_ARRAYS(resp) ASSERT_PRED1(AssertArrayOfTwoArrays, resp)
 
 MATCHER_P2(DocIds, total, arg_ids, "") {
-  if (arg_ids.empty()) {
-    if (auto res = arg.GetInt(); !res || *res != 0) {
-      *result_listener << "Expected single zero";
-      return false;
-    }
-    return true;
-  }
-
   if (arg.type != RespExpr::ARRAY) {
     *result_listener << "Wrong response type: " << int(arg.type);
     return false;
   }
 
   auto results = arg.GetVec();
+
+  if (arg_ids.empty()) {
+    if (results.size() != 1 || !results[0].GetInt() || *results[0].GetInt() != 0) {
+      *result_listener << "Expected single zero";
+      return false;
+    }
+    return true;
+  }
+
   if (results.size() != arg_ids.size() * 2 + 1) {
     *result_listener << "Wrong resp vec size: " << results.size();
     return false;
@@ -246,7 +264,7 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_THAT(Run({"ft.dropindex", "idx-100"}), ErrArg("Index with name 'idx-100' not found"));
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
-  EXPECT_EQ(Run({"ft._list"}), "idx-3");
+  EXPECT_THAT(Run({"ft._list"}), RespElementsAre("idx-3"));
 }
 
 TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
@@ -270,7 +288,7 @@ TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
 
   // Search from db 1 should return 0 results (only db 0 is indexed)
   resp = Run({"ft.search", "idx-1", "*"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, kNoResults);
 
   // ft.dropindex must work from another database
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
@@ -505,11 +523,11 @@ TEST_F(SearchFamilyTest, Indexing) {
   EXPECT_GT(iterations, 0u);  // ensure we observed indexing-in-progress state at least once
 
   auto resp = Run({"ft.search", "i1", "@v1:[10 20]", "LIMIT", "0", "0"});
-  EXPECT_THAT(resp, IntArg(110));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(110)));
 
   // check added with alter field v2 is fully indexed
   resp = Run({"ft.search", "i1", "@v2:[0 10000]", "LIMIT", "0", "0"});
-  EXPECT_THAT(resp, IntArg(kNumDocs));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(kNumDocs)));
 }
 
 TEST_F(SearchFamilyTest, Simple) {
@@ -673,6 +691,7 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
        "numeric",   "$.areas[*]",
        "as",        "areas",
        "tag"});
+  WaitForIndexReady("i1");
 
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("k1", "k2", "k3"));
 
@@ -699,6 +718,22 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
   // Test invalid json path expression omits that field
   res = Run({"ft.search", "i1", "@name:alex", "return", "1", "::??INVALID??::", "as", "retval"});
   EXPECT_THAT(res, IsMapWithSize("k1", IsMap()));
+}
+
+// Removing WaitForIndexReady here makes FT.SEARCH see only a small fraction
+// of the documents, as IndexBuilder is still running.
+TEST_F(SearchFamilyTest, FtSearchWaitsForInitialIndexing) {
+  constexpr int kDocs = 5000;
+  for (int i = 0; i < kDocs; i++) {
+    Run({"json.set", absl::StrCat("k", i), ".",
+         R"({"name":"x","plays":[{"game":"Pacman","score":1}]})"});
+  }
+
+  Run({"ft.create", "i1", "on", "json", "schema", "$.name", "as", "name", "text"});
+  WaitForIndexReady("i1");
+
+  auto resp = Run({"ft.search", "i1", "*", "LIMIT", "0", "0"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(kDocs)));
 }
 
 TEST_F(SearchFamilyTest, Tags) {
@@ -781,6 +816,28 @@ TEST_F(SearchFamilyTest, TagNumbers) {
   EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|hello|2}"}), AreDocIds("d:1", "d:2"));
 }
 
+TEST_F(SearchFamilyTest, ReturnEmptyFieldValue) {
+  EXPECT_EQ(Run({"ft.create", "probe", "ON", "JSON", "PREFIX", "1", "probe:", "SCHEMA", "$.parent",
+                 "AS", "parent", "TAG", "$.body", "AS", "body", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"json.set", "probe:1", "$", R"({"parent":"","body":""})"}), "OK");
+  EXPECT_EQ(Run({"json.set", "probe:2", "$", R"({"parent":"a","body":"hello"})"}), "OK");
+
+  auto resp = Run({"ft.search", "probe", "*", "RETURN", "2", "parent", "body", "SORTBY", "parent"});
+  EXPECT_THAT(resp, IsMapWithSize("probe:1", IsMap("parent", "", "body", ""), "probe:2",
+                                  IsMap("parent", "a", "body", "hello")));
+
+  EXPECT_EQ(Run({"ft.create", "hprobe", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "parent",
+                 "TAG", "body", "TEXT"}),
+            "OK");
+  Run({"hset", "h:1", "parent", "", "body", ""});
+  Run({"hset", "h:2", "parent", "a", "body", "hello"});
+
+  resp = Run({"ft.search", "hprobe", "*", "RETURN", "2", "parent", "body", "SORTBY", "parent"});
+  EXPECT_THAT(resp, IsMapWithSize("h:1", IsMap("parent", "", "body", ""), "h:2",
+                                  IsMap("parent", "a", "body", "hello")));
+}
+
 TEST_F(SearchFamilyTest, TagEscapeCharacters) {
   EXPECT_EQ(Run({"ft.create", "item_idx", "ON", "JSON", "PREFIX", "1", "p", "SCHEMA", "$.name",
                  "AS", "name", "TAG"}),
@@ -848,7 +905,7 @@ TEST_F(SearchFamilyTest, TestLimit) {
   EXPECT_THAT(resp, ArrLen(10 * 2 + 1));
 
   resp = Run({"ft.search", "i1", "all", "limit", "0", "0"});
-  EXPECT_THAT(resp, IntArg(20));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(20)));
 
   resp = Run({"ft.search", "i1", "all", "limit", "0", "5"});
   EXPECT_THAT(resp, ArrLen(5 * 2 + 1));
@@ -1461,6 +1518,175 @@ TEST_F(SearchFamilyTest, EscapedSymbols) {
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
 }
 
+// Issue #7432: TEXT tokenization must honor backslash escapes symmetrically through
+// INDEX + QUERY for `\.`, `\-`, `\:` etc.
+TEST_F(SearchFamilyTest, TextEscapedPrefixCaseAJson) {
+  EXPECT_EQ(Run({"FT.CREATE", "probe", "ON", "JSON", "PREFIX", "1", "probe:", "SCHEMA", "$.prefix",
+                 "AS", "prefix", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"JSON.SET", "probe:1", "$", R"({"prefix":"u123\\.documents"})"}), "OK");
+
+  EXPECT_THAT(Run({"FT.SEARCH", "probe", "@prefix:u123\\.documents*", "DIALECT", "2"}),
+              AreDocIds("probe:1"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedPrefixCaseAHash) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "u123\\.documents"});
+  Run({"HSET", "t:2", "val", "u123.documents"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:u123\\.documents*", "DIALECT", "2"}), AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:u123*", "DIALECT", "2"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:documents", "DIALECT", "2"}), AreDocIds("t:2"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedHybridKnn) {
+  EXPECT_EQ(
+      Run({"FT.CREATE", "probe2",          "ON",    "JSON",   "PREFIX", "1",           "probe2:",
+           "SCHEMA",    "$.prefix",        "AS",    "prefix", "TEXT",   "$.embedding", "AS",
+           "embedding", "VECTOR",          "FLAT",  "6",      "TYPE",   "FLOAT32",     "DIM",
+           "4",         "DISTANCE_METRIC", "COSINE"}),
+      "OK");
+
+  EXPECT_EQ(Run({"JSON.SET", "probe2:a", "$", R"({"prefix":"ns\\.x","embedding":[1,0,0,0]})"}),
+            "OK");
+  EXPECT_EQ(Run({"JSON.SET", "probe2:b", "$", R"({"prefix":"ns\\.x","embedding":[0,1,0,0]})"}),
+            "OK");
+  EXPECT_EQ(Run({"JSON.SET", "probe2:c", "$", R"({"prefix":"ns\\.y","embedding":[0,0,1,0]})"}),
+            "OK");
+
+  const float vec[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+  std::string vec_bytes(reinterpret_cast<const char*>(vec), sizeof(vec));
+  auto resp = Run({"FT.SEARCH", "probe2", "@prefix:ns\\.x*=>[KNN 2 @embedding $v AS d]", "SORTBY",
+                   "d", "ASC", "DIALECT", "2", "PARAMS", "2", "v", vec_bytes});
+  EXPECT_THAT(resp, AreDocIds("probe2:a", "probe2:b"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedRoundTripDotDashColon) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "foo\\.bar"});
+  Run({"HSET", "t:2", "val", "foo\\-bar"});
+  Run({"HSET", "t:3", "val", "foo\\:bar"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\.bar", "DIALECT", "2"}), AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\-bar", "DIALECT", "2"}), AreDocIds("t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\:bar", "DIALECT", "2"}), AreDocIds("t:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:bar", "DIALECT", "2"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, TextEscapedSuffixAndInfix) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT",
+                 "WITHSUFFIXTRIE"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "foo\\.bar"});
+  Run({"HSET", "t:2", "val", "xxfoo\\.barxx"});
+  Run({"HSET", "t:3", "val", "foo.bar"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:*\\.bar", "DIALECT", "2"}), AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:*\\.b*", "DIALECT", "2"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:*foo*", "DIALECT", "2"}),
+              AreDocIds("t:1", "t:2", "t:3"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedPhrase) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "p:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "p:1", "val", "foo\\.bar baz"});
+  Run({"HSET", "p:2", "val", "foo.bar baz"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:\"foo\\.bar\"", "DIALECT", "2"}), AreDocIds("p:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:\"foo.bar\"", "DIALECT", "2"}), AreDocIds("p:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:\"foo\\.bar baz\"", "DIALECT", "2"}), AreDocIds("p:1"));
+}
+
+TEST_F(SearchFamilyTest, TextPunctuationSeparators) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "foo.bar"});
+  Run({"HSET", "t:2", "val", "foo:bar"});
+  Run({"HSET", "t:3", "val", "don't"});
+  Run({"HSET", "t:4", "val", "3.14"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo", "DIALECT", "2"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:bar", "DIALECT", "2"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:don", "DIALECT", "2"}), AreDocIds("t:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:t", "DIALECT", "2"}), AreDocIds("t:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:14", "DIALECT", "2"}), AreDocIds("t:4"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedSpaceJoinsTokens) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "foo\\ bar"});
+  Run({"HSET", "t:2", "val", "foo bar"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\ bar", "DIALECT", "2"}), AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo", "DIALECT", "2"}), AreDocIds("t:2"));
+}
+
+TEST_F(SearchFamilyTest, TextTrailingBackslashDropped) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "foo\\"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo", "DIALECT", "2"}), AreDocIds("t:1"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedSpaceDoesNotForgeSynonymSentinel) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "i", "sg", "word1", "word2"}), "OK");
+  Run({"HSET", "d:1", "val", "word1"});
+  Run({"HSET", "d:2", "val", "\\ sg"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "word1", "DIALECT", "2"}), AreDocIds("d:1"));
+}
+
+TEST_F(SearchFamilyTest, TextMalformedUtf8AfterEscapeIsSingleByte) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  // Backslash followed by an invalid lead byte; the escape consumes exactly one byte
+  // (matching the query lexer), so the token is `foo<byte>` not `foo`.
+  Run({"HSET", "d:1", "val", "foo\\\xc2"});
+  // Backslash + bad lead + ASCII separator: the bad lead is consumed by the escape,
+  // then `.` splits, leaving two tokens; `bar` is searchable on its own.
+  Run({"HSET", "d:2", "val", "foo\\\xc2.bar"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\\xc2", "DIALECT", "2"}), AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:bar", "DIALECT", "2"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo", "DIALECT", "2"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, TextNonAsciiBytesArePartOfWord) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val",
+       "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd1\x96\xd1\x82.\xd1\x81\xd0\xb2\xd1\x96\xd1\x82"});
+  Run({"HSET", "t:2", "val",
+       "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd1\x96\xd1\x82_\xd1\x81\xd0\xb2\xd1\x96\xd1\x82"});
+  Run({"HSET", "t:3", "val",
+       "foo\xe2\x82\xac"
+       "bar"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd1\x96\xd1\x82",
+                   "DIALECT", "2"}),
+              AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:\xd1\x81\xd0\xb2\xd1\x96\xd1\x82", "DIALECT", "2"}),
+              AreDocIds("t:1"));
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "i",
+           "@val:\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd1\x96\xd1\x82_\xd1\x81\xd0\xb2\xd1\x96\xd1\x82",
+           "DIALECT", "2"}),
+      AreDocIds("t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i",
+                   "@val:foo\xe2\x82\xac"
+                   "bar",
+                   "DIALECT", "2"}),
+              AreDocIds("t:3"));
+}
+
 TEST_F(SearchFamilyTest, FlushSearchIndices) {
   auto resp =
       Run({"FT.CREATE", "json", "ON", "JSON", "SCHEMA", "$.nested.value", "AS", "value", "TEXT"});
@@ -2047,7 +2273,7 @@ TEST_F(SearchFamilyTest, KnnSearchOptions) {
   // KNN 11929939, LIMIT 4 2
   resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 11929939 @vector $query_vector]", "PARAMS", "2",
               "query_vector", query_vector, "LIMIT", "4", "2"});
-  EXPECT_THAT(resp, IntArg(3));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3)));
 
   // KNN 11929939, LIMIT 0 10
   resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 11929939 @vector $query_vector]", "PARAMS", "2",
@@ -2317,7 +2543,6 @@ TEST_F(SearchFamilyTest, SynonymsWithSpaces) {
   EXPECT_THAT(Run({"HSET", "doc:2", "field", "syn_group"}), IntArg(1));
   EXPECT_THAT(Run({"HSET", "doc:3", "field", "word1"}), IntArg(1));
   EXPECT_THAT(Run({"HSET", "doc:4", "field", "word2"}), IntArg(1));
-  EXPECT_THAT(Run({"HSET", "doc:5", "field", R"(\ syn_group)"}), IntArg(1));
 
   auto resp = Run({"FT.SEARCH", "my_index", "word1"});
   EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
@@ -2326,14 +2551,10 @@ TEST_F(SearchFamilyTest, SynonymsWithSpaces) {
   EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
 
   resp = Run({"FT.SEARCH", "my_index", "syn_group"});
-  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1", "doc:5"));
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1"));
 
-  // FT.SEARCH my_index "\ syn_group"
-  // FT.SEARCH my_index " syn_group"
-  // The both transform to " syn_group" after syntax analysis
-  // " syn_group" passes to query_str in FtSearch
   resp = Run({"FT.SEARCH", "my_index", " syn_group"});
-  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:5"));
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
 }
 
 TEST_F(SearchFamilyTest, SynonymsWithLeadingSpaces) {
@@ -3248,7 +3469,7 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromNoMatches) {
       Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.str1", "idx2.num2",
            "idx2.str2", "LOAD_FROM", "idx2", "2", "idx2.num2=idx1.num1", "idx2.str2=idx1.str1"});
 
-  EXPECT_THAT(resp, IntArg(0));  // No matches, so result should be empty
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));  // No matches, so result should be empty
 }
 
 TEST_F(SearchFamilyTest, AggregateWithLoadFromQueries) {
@@ -3322,7 +3543,7 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromSyntaxErrors) {
   // Test when index does not exist
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
                    "idx4", "1", "idx4.num2=idx1.num1"}),
-              IntArg(0));
+              RespElementsAre(IntArg(0)));
 
   // Test when index exists but no LOAD_FROM is specified
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
@@ -3345,15 +3566,15 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromSyntaxErrors) {
   // Test when field of index does not exist
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
                    "idx2", "1", "idx2.num2=idx1.nonexistent_field"}),
-              IntArg(0));
+              RespElementsAre(IntArg(0)));
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
                    "idx2", "1", "idx2.nonexistent_field=idx1.num1"}),
-              IntArg(0));
+              RespElementsAre(IntArg(0)));
 
   // Test when field in QUERY does not exist in index
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
                    "idx2", "1", "idx2.num2=idx1.num1", "QUERY", "@nonexistent_tag:{tag1|tag2}"}),
-              IntArg(0));
+              RespElementsAre(IntArg(0)));
 
   // Test when field in LOAD does not exist in index
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.non_existent_field",
@@ -3552,8 +3773,9 @@ TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
   EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
 
   resp = Run({"FT.CONFIG", "HELP", "MAXSEARCHRESULTS"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
-                            "Maximum number of results from ft.search command", "Value", "1"));
+  EXPECT_THAT(resp, RespElementsAre(IsArray("MAXSEARCHRESULTS", "Description",
+                                            "Maximum number of results from ft.search command",
+                                            "Value", "1")));
 
   resp = Run({"FT.CONFIG", "GET", "*"});
   // Should contain MAXSEARCHRESULTS among other search config parameters
@@ -3728,7 +3950,7 @@ TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
 
   // Search on database 1 should return no results (only db 0 is indexed)
   auto resp = Run({"FT.SEARCH", "idx", "another_value"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, kNoResults);
 
   // Switch back to database 0
   EXPECT_THAT(Run({"SELECT", "0"}), "OK");
@@ -3809,12 +4031,12 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
 
   resp = Run({"FT.SEARCH", "knn_idx", "@even:{maybe} => [KNN 3 @pos $vec]", "PARAMS", "2", "vec",
               query_vec});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, kNoResults);
 
   // Verify that empty prefilter return zero results
   resp = Run({"FT.SEARCH", "knn_idx", "@even:{non_existing} => [KNN 3 @pos $vec]", "PARAMS", "2",
               "vec", query_vec});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, kNoResults);
 }
 
 TEST_F(SearchFamilyTest, KnnHnswCosineDistanceCalculation) {
@@ -4252,22 +4474,27 @@ TEST_F(SearchFamilyTest, GeoSearchHash) {
   Run({"HSET", "city:2", "name", "Palo Alto", "location", "-122.143, 37.444"});
   Run({"HSET", "city:3", "name", "San Jose", "location", "-121.886, 37.338"});
   Run({"HSET", "city:4", "name", "San Francisco", "location", "-122.419, 37.774"});
+  Run({"HSET", "city:5", "name", "Shoreline", "location", "-122.08, 37.389"});
 
   // Search within 30 miles of Mountain View - should find nearby cities
   resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 30 mi]"});
-  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3"));
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:5"));
 
   // Search within 50 miles - should include San Francisco
   resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 50 mi]"});
-  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4", "city:5"));
 
-  // Search with very small radius - only exact match
+  // Search within 1 km - should include the nearby point.
   resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 1 km]"});
-  EXPECT_THAT(resp, AreDocIds("city:1"));
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:5"));
+
+  // Fractional radii should not be truncated before unit conversion.
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 0.5 km]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:5"));
 
   // Search with wildcard - return all geo indexed docs
   resp = Run({"FT.SEARCH", "geo_idx", "@location:*"});
-  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4", "city:5"));
 
   // Combine geo search with text search
   resp = Run({"FT.SEARCH", "geo_idx", "San* @location:[-122.08 37.386 50 mi]"});
@@ -4573,7 +4800,7 @@ TEST_F(SearchFamilyTest, VectorRangeAggregate) {
   resp = Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
               "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
               "cnt"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 }
 
 TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
@@ -4625,7 +4852,7 @@ TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
   resp = Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
               "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
               "cnt"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 }
 
 TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
@@ -4970,7 +5197,7 @@ TEST_F(SearchFamilyTest, FtAggregateFilterEmptyResult) {
                    "FILTER", "@total > 100"});
   // clang-format on
   // When all rows are filtered out, FT.AGGREGATE returns integer 0
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 }
 
 TEST_F(SearchFamilyTest, FtAggregateFilterPipelineOrder) {

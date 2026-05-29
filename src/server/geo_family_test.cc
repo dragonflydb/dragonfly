@@ -56,12 +56,14 @@ TEST_F(GeoFamilyTest, GeoAddOptions) {
   // update 1 + CH + XX
   EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "CH", "XX", "10.361389", "38.115556", "Palermo"}));
   resp = Run({"geopos", "Sicily", "Palermo"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(DoubleArg(10.361389), DoubleArg(38.115556))));
+  EXPECT_THAT(resp,
+              RespElementsAre(RespArray(ElementsAre(DoubleArg(10.361389), DoubleArg(38.115556)))));
 
   // add 1 + CH + NX
   EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "CH", "NX", "14.25", "37.066667", "Gela"}));
   resp = Run({"geopos", "Sicily", "Gela"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(DoubleArg(14.25), DoubleArg(37.066667))));
+  EXPECT_THAT(resp,
+              RespElementsAre(RespArray(ElementsAre(DoubleArg(14.25), DoubleArg(37.066667)))));
 
   // add 1 + XX + NX
   resp = Run({"geoadd", "Sicily", "XX", "NX", "14.75", "36.933333", "Ragusa"});
@@ -350,7 +352,7 @@ TEST_F(GeoFamilyTest, GeoRadius) {
   EXPECT_THAT(resp, ErrArg("ERR COUNT must be > 0"));
 
   resp = Run("GEORADIUS Sicily 15 37 200 km COUNT 1");
-  EXPECT_THAT(resp, "Agrigento");
+  EXPECT_THAT(resp, RespElementsAre("Agrigento"));
 
   auto err =
       "ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORDS options"sv;
@@ -393,9 +395,9 @@ TEST_F(GeoFamilyTest, GeoRadiusByMemberUb) {
   auto resp = Run({"GEORADIUSBYMEMBER", "geo", "971", "200", "mi", "WITHCOORD", "WITHDIST", "COUNT",
                    "40", "ASC"});
   // Use DoubleArg(0) to tolerate tiny floating-point residuals (e.g. 5e-15) on AVX/FMA builds.
-  EXPECT_THAT(resp, RespArray(ElementsAre(
+  EXPECT_THAT(resp, RespElementsAre(RespArray(ElementsAre(
                         "971", DoubleArg(0),
-                        RespArray(ElementsAre("-122.41940170526505", "37.77490001056578")))));
+                        RespArray(ElementsAre("-122.41940170526505", "37.77490001056578"))))));
 }
 
 }  // namespace dfly

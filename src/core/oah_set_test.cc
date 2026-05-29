@@ -137,6 +137,52 @@ TEST_F(OAHSetTest, Basic) {
   EXPECT_EQ(2, ss_->UpperBoundSize());
 }
 
+// Regression: re-adding existing keys must never store a duplicate, even
+// across multiple rehashes (ClearHash → h_zero lazy path) and after entries
+// have overflowed into a vector at ext_bid. UpperBoundSize alone is
+// insufficient: a buggy AddUnique would still increment size_ exactly once. We
+// iterate and assert each key appears exactly once.
+TEST_F(OAHSetTest, NoDuplicateInsertion) {
+  constexpr int kNumKeys = 2000;  // enough for several Reserve→Rehash cycles
+  std::vector<std::string> keys;
+  keys.reserve(kNumKeys);
+  for (int i = 0; i < kNumKeys; ++i) {
+    keys.push_back(absl::StrCat("dup_key_", i));
+    EXPECT_TRUE(ss_->Add(keys.back())) << "first add of " << keys.back();
+  }
+  const uint32_t size_before = ss_->UpperBoundSize();
+
+  // Re-add every key.
+  for (const auto& k : keys) {
+    EXPECT_FALSE(ss_->Add(k)) << "re-add of " << k;
+  }
+  EXPECT_EQ(ss_->UpperBoundSize(), size_before);
+
+  // Erase half, then re-add them — exercises both the empty-slot reuse and
+  // the "key was here, now gone, must re-insert" paths in AddUnique.
+  for (size_t i = 0; i < keys.size(); i += 2) {
+    EXPECT_TRUE(ss_->Erase(keys[i]));
+  }
+  for (size_t i = 0; i < keys.size(); i += 2) {
+    EXPECT_TRUE(ss_->Add(keys[i])) << "re-add after erase of " << keys[i];
+  }
+  EXPECT_EQ(ss_->UpperBoundSize(), size_before);
+
+  // Final pass: re-add every key, none should be inserted.
+  for (const auto& k : keys) {
+    EXPECT_FALSE(ss_->Add(k)) << "final re-add of " << k;
+  }
+
+  std::unordered_set<std::string> seen;
+  size_t total = 0;
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    EXPECT_TRUE(seen.insert(std::string(it->Key())).second) << "duplicate: " << it->Key();
+    ++total;
+  }
+  EXPECT_EQ(seen.size(), keys.size());
+  EXPECT_EQ(total, keys.size());
+}
+
 TEST_F(OAHSetTest, StandardAddErase) {
   EXPECT_TRUE(ss_->Add("@@@@@@@@@@@@@@@@") != ss_->end());
   EXPECT_TRUE(ss_->Add("A@@@@@@@@@@@@@@@") != ss_->end());

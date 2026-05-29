@@ -8,8 +8,10 @@
 
 #include <optional>
 #include <type_traits>
+#include <utility>
 
 #include "base/pmr/memory_resource.h"
+#include "common/borrowed_string.h"
 #include "common/string_or_view.h"
 #include "core/json/json_object.h"
 #include "core/mi_memory_resource.h"
@@ -94,7 +96,11 @@ struct LargeString {
 
   void* ptr;
   uint64_t sz : 56;
-  uint64_t reserved : 8;
+
+  // Hint: outstanding readers may be borrowing `ptr`. Mutations consult
+  // TL::pin_map and hand the buffer to its PendingRead instead of freeing.
+  uint64_t read_pending : 1;
+  uint64_t reserved : 7;
 
   size_t Size() const {
     return sz;
@@ -113,6 +119,7 @@ struct LargeString {
   }
 
   // Replace contents with s, growing the underlying allocation if needed.
+  // Precondition: !s.empty(). Use Free() for clearing a value.
   void SetString(std::string_view s, MemoryResource* mr);
 
   // Allocate room for `size` bytes; ptr must be null.
@@ -189,18 +196,19 @@ class CompactObj {
  public:
   // Utility class for working with different string encodings (ascii, huffman, etc)
   struct StrEncoding {
+    StrEncoding(uint8_t enc, bool is_key) : enc_(static_cast<EncodingEnum>(enc)), is_key_(is_key) {
+    }
+
     size_t DecodedSize(std::string_view blob) const;         // Size of decoded blob
     size_t Decode(std::string_view blob, char* dest) const;  // Decode into dest, return size
     StringOrView Decode(std::string_view blob) const;
+
     // Decode a byte at offset into dest. Return true if decoded successfully,
     // false if idx is out of bounds.
     bool DecodeByte(std::string_view blob, size_t idx, uint8_t* dest) const;
 
    private:
     friend class CompactObj;
-    explicit StrEncoding(uint8_t enc, bool is_key)
-        : enc_(static_cast<EncodingEnum>(enc)), is_key_(is_key) {
-    }
 
     // For HUFFMAN_ENC, huff_header is the little-endian 16-bit delta header
     // (decoded_size - compressed_size - 2). For other encodings the header is ignored.
@@ -241,6 +249,27 @@ class CompactObj {
   size_t Size() const;
 
   std::string_view GetSlice(std::string* scratch) const;
+
+  // Read-only fast path. Returns a cmn::BorrowedString iff this CompactObj
+  // holds a string value that can be borrowed, otherwise std::nullopt
+  // (caller uses GetSlice/GetString/ToString). The borrowed bytes are valid
+  // until the pin is released.
+  //
+  // For NONE_ENC: `encoded` is the user-visible bytes; the reply can stream
+  // them directly. For ASCII1/ASCII2_ENC: `encoded` is the packed source
+  // (`encoded.size() < decoded_size`) and the reply must decode in chunks.
+  //
+  // Side effects on success: stamps the LargeString's read_pending bit and
+  // registers an internal pin in the thread-local pin map. The returned
+  // BorrowedString carries the pin and its release fn; destruction (or
+  // explicit Unpin()) releases it.
+  std::optional<cmn::BorrowedString> TryBorrow() const;
+
+  // Test helpers for inspecting the pin's refcount / orphaned state through
+  // an active BorrowedString. Implemented in compact_object.cc where the
+  // internal pin type is visible.
+  static uint32_t TEST_PinRefcnt(const cmn::BorrowedString& bs) noexcept;
+  static bool TEST_PinOrphaned(const cmn::BorrowedString& bs) noexcept;
 
   std::string ToString() const {
     std::string res;
@@ -449,6 +478,11 @@ class CompactObj {
 
   static Stats GetStatsThreadLocal();
   static void InitThreadLocal(MemoryResource* mr);
+
+  // Iterate the thread-local pin map and reap entries with refcnt==0:
+  // free orphaned buffers, erase the map slot. Typically called from
+  // EngineShard::Heartbeat.
+  static void DrainPendingReads();
 
   enum HuffmanDomain : uint8_t {
     HUFF_KEYS = 0,

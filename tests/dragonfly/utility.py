@@ -151,7 +151,7 @@ async def wait_available_async(
 ):
     if not isinstance(clients, aioredis.Redis):
         # Syntactic sugar to seamlessly handle an array of clients.
-        return await asyncio.gather(*(wait_available_async(c) for c in clients))
+        return await asyncio.gather(*(wait_available_async(c, timeout=timeout) for c in clients))
 
     """Block until instance exits loading phase"""
     # First we make sure that ping passes

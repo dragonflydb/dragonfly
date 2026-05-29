@@ -1,20 +1,20 @@
 import dataclasses
+import logging
 import os
+import random
+import re
+import signal
+import subprocess
 import threading
 import time
-import subprocess
-import random
-import aiohttp
-import logging
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Union
-import re
+
+import aiohttp
 import psutil
-import itertools
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
 from redis.asyncio import RedisCluster as RedisCluster
-import signal
 
 START_DELAY = 0.8
 START_GDB_DELAY = 5.0
@@ -444,6 +444,10 @@ class DflyInstanceFactory:
         if version >= 1.21 and "serialization_max_chunk_size" not in args:
             args.setdefault("serialization_max_chunk_size", 300000)
 
+        # TODO (abhijat) fix version once feature released
+        if version == 100 and "serialization_tagged_chunks" not in args:
+            args.setdefault("serialization_tagged_chunks", True)
+
         if version > 1.36:
             args.setdefault("serialize_hnsw_index", "true")
             args.setdefault("deserialize_hnsw_index", "true")
@@ -479,8 +483,9 @@ class DflyInstanceFactory:
         if path is not None:
             params = dataclasses.replace(self.params, path=path)
 
-        if version < 1.35:
-            params.args.pop("experimental_io_loop_v2", None)
+        if version < 1.39:
+            args.pop("enable_memcache_io_loop_v2", None)
+            args.pop("enable_resp_io_loop_v2", None)
 
         instance = DflyInstance(params, args)
         self.instances.append(instance)
