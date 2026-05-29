@@ -218,8 +218,7 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
     return with_offsets_;
   }
 
-  // Tokenize a quoted phrase query: split on whitespace, lowercase, drop stopwords.
-  // Stems are NOT applied — phrase queries match raw token positions only.
+  // Stems are NOT applied to phrase queries; they match raw token positions only.
   std::vector<std::string> TokenizePhraseQuery(std::string_view phrase) const;
 
  protected:

@@ -38,13 +38,8 @@ dq         \"
 sq         \'
 esc_chars  ['"\?\\abfnrtv]
 esc_seq    \\{esc_chars}
-term_ch    \w
-/* term_part: word char OR any backslash-escaped char.
- * This deliberately overlaps with tag_val_ch — both can match the same input
- * inside `{...}`. The grammar treats TERM and TAG_VAL interchangeably as
- * `tag_list_element`, so identical-length matches resolve to TERM (rule order)
- * and the unescaped text is the same. UnescapeTerm produces the literal text. */
-term_part  (\w|\\.)
+term_ch    (\w|[^\x00-\x7f])
+term_part  (\w|[^\x00-\x7f]|\\.)
 tag_val_base_ch [^,.<>{}\[\]\\\"\?':;!@#$%^&*()\-+=~\/| ]|\\.
 tag_val_ch {tag_val_base_ch}+(:+{tag_val_base_ch}*)*
 astrsk_ch  \*
@@ -105,10 +100,10 @@ astrsk_ch  \*
 %%
 
 Parser::symbol_type make_PhraseTok(string_view src, const Parser::location_type& loc) {
-  // src is the full match: opening quote, content, closing quote, optionally `~N`.
+  // Phrase content is passed verbatim; the phrase tokenizer is the single source of
+  // truth for `\X` semantics.
   uint32_t slop = 0;
   char quote = src.front();
-  // Locate closing quote (last char matching the opener, skipping escaped pairs).
   size_t close_idx = src.size() - 1;
   while (close_idx > 0 && src[close_idx] != quote)
     --close_idx;
@@ -118,11 +113,8 @@ Parser::symbol_type make_PhraseTok(string_view src, const Parser::location_type&
     if (!absl::SimpleAtoi(after.substr(1), &slop))
       throw Parser::syntax_error(loc, "bad phrase slop: " + string(after));
   }
-  string res;
-  if (!absl::CUnescape(inner, &res))
-    throw Parser::syntax_error(loc, "bad escaped string: " + string(inner));
 
-  return Parser::make_PHRASE(dfly::search::PhraseTok{std::move(res), slop}, loc);
+  return Parser::make_PHRASE(dfly::search::PhraseTok{string{inner}, slop}, loc);
 }
 
 string UnescapeTerm(string_view src) {

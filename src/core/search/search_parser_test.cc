@@ -92,7 +92,7 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_TOK(TOK_RPAREN);
 
   SetInput(R"( "hello\"world" )");
-  NEXT_PHRASE(R"(hello"world)", 0);
+  NEXT_PHRASE(R"(hello\"world)", 0);
 
   SetInput("@field:hello");
   NEXT_EQ(TOK_FIELD, string, "@field");
@@ -405,7 +405,7 @@ TEST_F(SearchParserTest, Quotes) {
   NEXT_PHRASE("fir  st", 0);
   NEXT_PHRASE("sec@o@nd", 0);
   NEXT_PHRASE(":third:", 0);
-  NEXT_PHRASE("four\"th", 0);
+  NEXT_PHRASE("four\\\"th", 0);
 }
 
 TEST_F(SearchParserTest, Numeric) {
