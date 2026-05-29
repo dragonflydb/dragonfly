@@ -720,6 +720,14 @@ auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestCon
   return it->second.get();
 }
 
+Transaction* BaseFamilyTest::GetTransaction(string_view conn_id) {
+  unique_lock lk(mu_);
+  auto it = connections_.find(conn_id);
+  if (it == connections_.end())
+    return nullptr;
+  return it->second->cmd_cntx()->transaction;
+}
+
 vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {
   CHECK(expr.type == RespExpr::ARRAY || expr.type == RespExpr::NIL_ARRAY);
   if (expr.type == RespExpr::NIL_ARRAY)

@@ -149,6 +149,63 @@ TEST_F(MultiTxTest, MultiUnlock) {
     EXPECT_FALSE(IsLocked(0, key));
 }
 
+// Test that CancelScheduledTx successfully cancels a multi-shard transaction
+// that has been scheduled and armed but not yet executed on any shard.
+TEST_F(MultiTxTest, CancelScheduledTx) {
+  // Set initial values on keys spanning multiple shards.
+  Run({"mset", kKeySid0, "v0", kKeySid1, "v1", kKeySid2, "v2"});
+
+  // Suspend all shards with a global transaction. This prevents any other transaction
+  // from executing, ensuring the MSET stays armed but unexecuted.
+  TransactionSuspension suspension;
+  pp_->at(0)->Await([&] { suspension.Start(); });
+
+  // Launch MSET on a fiber. It will schedule and arm but block in run_barrier_.Wait()
+  // because the global suspension transaction holds all shards.
+  auto mset_fb = pp_->at(0)->LaunchFiber([&] {
+    Run("mset_client", {"MSET", kKeySid0, "new0", kKeySid1, "new1", kKeySid2, "new2"});
+  });
+
+  // Wait for the MSET transaction to be scheduled.
+  Transaction* mset_tx = nullptr;
+  ExpectConditionWithinTimeout([&] {
+    bool ready = false;
+    pp_->at(0)->Await([&] {
+      mset_tx = GetTransaction("mset_client");
+      ready = mset_tx != nullptr && mset_tx->IsScheduled();
+    });
+    return ready;
+  });
+
+  // Cancel the MSET transaction from proactor 0.
+  bool cancelled = false;
+  pp_->at(0)->Await([&] { cancelled = mset_tx->CancelScheduledTx(); });
+  EXPECT_TRUE(cancelled);
+
+  // Release the suspension so everything can proceed.
+  pp_->at(0)->Await([&] { suspension.Terminate(); });
+
+  mset_fb.Join();
+
+  // Verify the MSET's values did NOT take effect.
+  EXPECT_EQ(Run({"get", kKeySid0}), "v0");
+  EXPECT_EQ(Run({"get", kKeySid1}), "v1");
+  EXPECT_EQ(Run({"get", kKeySid2}), "v2");
+
+  // Verify no locks are held.
+  EXPECT_FALSE(IsLocked(0, kKeySid0));
+  EXPECT_FALSE(IsLocked(0, kKeySid1));
+  EXPECT_FALSE(IsLocked(0, kKeySid2));
+
+  // Verify tx queues are empty.
+  atomic_bool tx_empty{true};
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    if (!shard->txq()->Empty())
+      tx_empty.store(false);
+  });
+  EXPECT_TRUE(tx_empty);
+}
+
 TEST_F(MultiTest, MultiGlobalCommands) {
   ASSERT_THAT(Run({"set", "key", "val"}), "OK");
 
