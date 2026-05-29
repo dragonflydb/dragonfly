@@ -55,6 +55,23 @@ namespace dfly {
 
 class SearchFamilyTest : public BaseFamilyTest {
  protected:
+  // FT.CREATE returns before IndexBuilder finishes ingesting existing docs,
+  // so a follow-up FT.SEARCH can race with it. Poll FT.INFO until ready.
+  void WaitForIndexReady(std::string_view name, absl::Duration timeout = absl::Seconds(10)) {
+    absl::Time deadline = absl::Now() + timeout;
+    while (true) {
+      auto resp = Run({"ft.info", name});
+      auto arr = resp.GetVec();
+      auto it = std::find_if(arr.begin(), arr.end(), [](const auto& e) { return e == "indexing"; });
+      ASSERT_NE(it, arr.end()) << "ft.info missing 'indexing' field";
+      auto next = it + 1;
+      ASSERT_NE(next, arr.end());
+      if (next->GetInt() == 0)
+        return;
+      ASSERT_LE(absl::Now(), deadline) << "Index " << name << " not ready in time";
+      ThisFiber::SleepFor(std::chrono::milliseconds(5));
+    }
+  }
 };
 
 const auto kNoResults = RespElementsAre(IntArg(0));
@@ -674,6 +691,7 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
        "numeric",   "$.areas[*]",
        "as",        "areas",
        "tag"});
+  WaitForIndexReady("i1");
 
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("k1", "k2", "k3"));
 
@@ -700,6 +718,22 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
   // Test invalid json path expression omits that field
   res = Run({"ft.search", "i1", "@name:alex", "return", "1", "::??INVALID??::", "as", "retval"});
   EXPECT_THAT(res, IsMapWithSize("k1", IsMap()));
+}
+
+// Removing WaitForIndexReady here makes FT.SEARCH see only a small fraction
+// of the documents, as IndexBuilder is still running.
+TEST_F(SearchFamilyTest, FtSearchWaitsForInitialIndexing) {
+  constexpr int kDocs = 5000;
+  for (int i = 0; i < kDocs; i++) {
+    Run({"json.set", absl::StrCat("k", i), ".",
+         R"({"name":"x","plays":[{"game":"Pacman","score":1}]})"});
+  }
+
+  Run({"ft.create", "i1", "on", "json", "schema", "$.name", "as", "name", "text"});
+  WaitForIndexReady("i1");
+
+  auto resp = Run({"ft.search", "i1", "*", "LIMIT", "0", "0"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(kDocs)));
 }
 
 TEST_F(SearchFamilyTest, Tags) {
