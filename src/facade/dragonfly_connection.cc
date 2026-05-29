@@ -2977,28 +2977,6 @@ error_code Connection::FlushAndAwaitInput() {
   return {};
 }
 
-void Connection::ProcessDispatchQueue() {
-  while (!dispatch_q_.empty()) {
-    auto msg = std::move(dispatch_q_.front());
-    dispatch_q_.pop_front();
-    UpdateDispatchStats(msg, false /* subtract */);
-
-    // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
-    // and let the ioloop iterate back to HandleMigrateRequest() at the start.
-    if (std::holds_alternative<MigrationRequestMessage>(msg.handle))
-      break;
-
-    std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
-  }
-
-  // Note: No flush needed here: the `continue` below re-enters the loop, which either
-  // hits the data path (ParseLoop flushes via ReplyBatch) or the idle-await block
-  // (Flush 1), which always flushes before sleeping.
-
-  // TODO: Properly handle backpressure
-  GetQueueBackpressure().pubsub_ec.notifyAll();
-}
-
 io::Result<Connection::ParserStatus> Connection::ParseAndExecuteCommands(
     bool reached_capacity, util::fb2::detail::Waiter* backpressure_waiter) {
   auto& conn_stats = GetLocalConnStats();

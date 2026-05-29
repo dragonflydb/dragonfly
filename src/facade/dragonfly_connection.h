@@ -365,9 +365,6 @@ class Connection : public util::Connection {
   // Returns a non-zero error_code if the flush failed, default (falsy) error_code on success.
   std::error_code FlushAndAwaitInput();
 
-  // Drains the dispatch queue (control path): processes admin/pubsub messages.
-  void ProcessDispatchQueue();
-
   // Parses available input, executes queued commands, and sends replies while
   // respecting pipeline memory backpressure. Parks the fiber when over the limit.
   // Returns the resulting ParserStatus, or an error_code on write failure.
