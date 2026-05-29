@@ -305,7 +305,9 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
   PrimeTable::Cursor cursor;
   unsigned steps = 0;
   string scratch;
-  constexpr size_t kMaxLen = 512;
+  // Sample up to kMaxHuffLen bytes per string so the trained huffman table matches the byte
+  // distribution of the data that EncodeString will actually compress.
+  constexpr size_t kMaxLen = CompactObj::kMaxHuffLen;
   PrimeTable& table = dbt->prime;
 
   do {

@@ -85,6 +85,7 @@ runs:
           -DWITH_GPERF=OFF
           -DWITH_ASAN="${ASAN}"
           -DWITH_USAN="${USAN}"
+          -DLEGACY_GLOG=OFF
         )
 
         # Execute CMake

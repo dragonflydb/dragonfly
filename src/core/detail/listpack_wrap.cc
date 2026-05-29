@@ -33,6 +33,12 @@ void ListpackWrap::Iterator::Read() {
   next_ptr_ = lpNext(lp_, next_ptr_);
 }
 
+ListpackWrap ListpackWrap::Readonly(uint8_t* lp) {
+  ListpackWrap w{lp};
+  w.readonly_ = true;
+  return w;
+}
+
 ListpackWrap ListpackWrap::WithCapacity(size_t capacity) {
   return ListpackWrap{lpNew(capacity)};
 }
@@ -50,6 +56,7 @@ ListpackWrap::Iterator ListpackWrap::Find(std::string_view key) const {
 }
 
 bool ListpackWrap::Delete(std::string_view key) {
+  DCHECK(!readonly_);
   if (size() == 0)
     return false;
 
@@ -62,6 +69,7 @@ bool ListpackWrap::Delete(std::string_view key) {
 }
 
 bool ListpackWrap::Insert(std::string_view key, std::string_view value, bool skip_exists) {
+  DCHECK(!readonly_);
   uint8_t* vptr;
   uint8_t* fptr = lpFirst(lp_);
   uint8_t* fsrc = key.empty() ? lp_ : (uint8_t*)key.data();

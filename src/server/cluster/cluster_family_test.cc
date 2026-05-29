@@ -168,30 +168,31 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:1"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
 
-  EXPECT_THAT(Run({"cluster", "shards"}),
-              RespArray(ElementsAre("slots",                                            //
-                                    RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
-                                    "nodes",                                            //
-                                    RespArray(ElementsAre(                              //
-                                        RespArray(ElementsAre(                          //
-                                            "id", "abcd1234",                           //
-                                            "endpoint", "10.0.0.1",                     //
-                                            "ip", "10.0.0.1",                           //
-                                            "port", IntArg(7000),                       //
-                                            "role", "master",                           //
-                                            "replication-offset", IntArg(0),            //
-                                            "health", "online")))))));
+  EXPECT_THAT(
+      Run({"cluster", "shards"}),
+      RespElementsAre(RespArray(ElementsAre("slots",                                            //
+                                            RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
+                                            "nodes",                                            //
+                                            RespArray(ElementsAre(                              //
+                                                RespArray(ElementsAre(                          //
+                                                    "id", "abcd1234",                           //
+                                                    "endpoint", "10.0.0.1",                     //
+                                                    "ip", "10.0.0.1",                           //
+                                                    "port", IntArg(7000),                       //
+                                                    "role", "master",                           //
+                                                    "replication-offset", IntArg(0),            //
+                                                    "health", "online"))))))));
 
   EXPECT_THAT(Run({"get", "x"}).GetString(),
               testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
 
   EXPECT_THAT(Run({"cluster", "slots"}),
-              RespArray(ElementsAre(IntArg(0),              //
-                                    IntArg(16'383),         //
-                                    RespArray(ElementsAre(  //
-                                        "10.0.0.1",         //
-                                        IntArg(7'000),      //
-                                        "abcd1234")))));
+              RespElementsAre(RespArray(ElementsAre(IntArg(0),              //
+                                                    IntArg(16'383),         //
+                                                    RespArray(ElementsAre(  //
+                                                        "10.0.0.1",         //
+                                                        IntArg(7'000),      //
+                                                        "abcd1234"))))));
 
   EXPECT_EQ(Run({"cluster", "nodes"}),
             "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\n");
@@ -232,39 +233,40 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:2"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
 
-  EXPECT_THAT(Run({"cluster", "shards"}),
-              RespArray(ElementsAre("slots",                                            //
-                                    RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
-                                    "nodes",                                            //
-                                    RespArray(ElementsAre(                              //
-                                        RespArray(ElementsAre(                          //
-                                            "id", "abcd1234",                           //
-                                            "endpoint", "10.0.0.1",                     //
-                                            "ip", "10.0.0.1",                           //
-                                            "port", IntArg(7000),                       //
-                                            "role", "master",                           //
-                                            "replication-offset", IntArg(0),            //
-                                            "health", "online")),                       //
-                                        RespArray(ElementsAre(                          //
-                                            "id", "wxyz",                               //
-                                            "endpoint", "10.0.0.10",                    //
-                                            "ip", "10.0.0.10",                          //
-                                            "port", IntArg(8000),                       //
-                                            "role", "replica",                          //
-                                            "replication-offset", IntArg(0),            //
-                                            "health", "online")))))));
+  EXPECT_THAT(
+      Run({"cluster", "shards"}),
+      RespElementsAre(RespArray(ElementsAre("slots",                                            //
+                                            RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
+                                            "nodes",                                            //
+                                            RespArray(ElementsAre(                              //
+                                                RespArray(ElementsAre(                          //
+                                                    "id", "abcd1234",                           //
+                                                    "endpoint", "10.0.0.1",                     //
+                                                    "ip", "10.0.0.1",                           //
+                                                    "port", IntArg(7000),                       //
+                                                    "role", "master",                           //
+                                                    "replication-offset", IntArg(0),            //
+                                                    "health", "online")),                       //
+                                                RespArray(ElementsAre(                          //
+                                                    "id", "wxyz",                               //
+                                                    "endpoint", "10.0.0.10",                    //
+                                                    "ip", "10.0.0.10",                          //
+                                                    "port", IntArg(8000),                       //
+                                                    "role", "replica",                          //
+                                                    "replication-offset", IntArg(0),            //
+                                                    "health", "online"))))))));
 
   EXPECT_THAT(Run({"cluster", "slots"}),
-              RespArray(ElementsAre(IntArg(0),              //
-                                    IntArg(16'383),         //
-                                    RespArray(ElementsAre(  //
-                                        "10.0.0.1",         //
-                                        IntArg(7'000),      //
-                                        "abcd1234")),       //
-                                    RespArray(ElementsAre(  //
-                                        "10.0.0.10",        //
-                                        IntArg(8'000),      //
-                                        "wxyz")))));
+              RespElementsAre(RespArray(ElementsAre(IntArg(0),              //
+                                                    IntArg(16'383),         //
+                                                    RespArray(ElementsAre(  //
+                                                        "10.0.0.1",         //
+                                                        IntArg(7'000),      //
+                                                        "abcd1234")),       //
+                                                    RespArray(ElementsAre(  //
+                                                        "10.0.0.10",        //
+                                                        IntArg(8'000),      //
+                                                        "wxyz"))))));
 
   EXPECT_EQ(Run({"cluster", "nodes"}),
             "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\n"
@@ -563,12 +565,14 @@ TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
 
   for (int i = 0; i <= 1'000; ++i) {
     EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespArray(ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _, _, _)));
+                RespElementsAre(RespArray(
+                    ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _, _, _))));
   }
 
   for (int i = 1'001; i <= 16'383; ++i) {
     EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _, _, _)));
+                RespElementsAre(
+                    RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _, _, _))));
   }
 }
 
@@ -837,9 +841,10 @@ TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
     EXPECT_THAT(Run({"cluster", "keyslot", "key:0"}), IntArg(2592));
     EXPECT_THAT(Run({"dbsize"}), IntArg(count));
     auto slot_size_response = Run({"dflycluster", "getslotinfo", "slots", "2592"});
-    EXPECT_THAT(slot_size_response, RespArray(ElementsAre(_, "key_count", _, "total_reads", _,
-                                                          "total_writes", _, "memory_bytes", _)));
-    auto slot_size = slot_size_response.GetVec()[2].GetInt();
+    EXPECT_THAT(slot_size_response,
+                RespElementsAre(RespArray(ElementsAre(_, "key_count", _, "total_reads", _,
+                                                      "total_writes", _, "memory_bytes", _))));
+    auto slot_size = slot_size_response.GetVec()[0].GetVec()[2].GetInt();
     EXPECT_TRUE(slot_size.has_value());
 
     EXPECT_EQ(Run({"dflycluster", "flushslots", "2592", "2592"}), "OK");
@@ -919,7 +924,7 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
   EXPECT_EQ(Run({"GET", "key"}), "value");
 
   EXPECT_EQ(Run({"MSET", "key", "value2"}), "OK");
-  EXPECT_EQ(Run({"MGET", "key"}), "value2");
+  EXPECT_THAT(Run({"MGET", "key"}), RespElementsAre("value2"));
 
   EXPECT_THAT(Run({"MSET", "key", "value", "key2", "value2"}), ErrArg("CROSSSLOT"));
   EXPECT_THAT(Run({"MGET", "key", "key2"}), ErrArg("CROSSSLOT"));
@@ -947,29 +952,30 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
 }
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterShardInfos) {
-  EXPECT_THAT(Run({"cluster", "shards"}),
-              RespArray(ElementsAre("slots",                                           //
-                                    RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //
-                                    "nodes",                                           //
-                                    RespArray(ElementsAre(                             //
-                                        RespArray(ElementsAre(                         //
-                                            "id", GetMyId(),                           //
-                                            "endpoint", "fake-host",                   //
-                                            "ip", "fake-host",                         //
-                                            "port", IntArg(6379),                      //
-                                            "role", "master",                          //
-                                            "replication-offset", IntArg(0),           //
-                                            "health", "online")))))));
+  EXPECT_THAT(
+      Run({"cluster", "shards"}),
+      RespElementsAre(RespArray(ElementsAre("slots",                                           //
+                                            RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //
+                                            "nodes",                                           //
+                                            RespArray(ElementsAre(                             //
+                                                RespArray(ElementsAre(                         //
+                                                    "id", GetMyId(),                           //
+                                                    "endpoint", "fake-host",                   //
+                                                    "ip", "fake-host",                         //
+                                                    "port", IntArg(6379),                      //
+                                                    "role", "master",                          //
+                                                    "replication-offset", IntArg(0),           //
+                                                    "health", "online"))))))));
 }
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterSlots) {
   EXPECT_THAT(Run({"cluster", "slots"}),
-              RespArray(ElementsAre(IntArg(0),              //
-                                    IntArg(16383),          //
-                                    RespArray(ElementsAre(  //
-                                        "fake-host",        //
-                                        IntArg(6379),       //
-                                        GetMyId())))));
+              RespElementsAre(RespArray(ElementsAre(IntArg(0),              //
+                                                    IntArg(16383),          //
+                                                    RespArray(ElementsAre(  //
+                                                        "fake-host",        //
+                                                        IntArg(6379),       //
+                                                        GetMyId()))))));
 }
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterNodes) {

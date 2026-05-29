@@ -339,7 +339,8 @@ class HnswSearchSeeder:
                 "JSON.SET", key, "$.embedding", json_mod.dumps(emb.tolist())
             )
 
-    async def seed_initial_docs(self, client: aioredis.Redis):
+    async def seed_initial_docs(self, client: aioredis.Redis, batch_size: int = 2000):
+        # Flush periodically to avoid unbounded pipeline buffering at high N.
         if self.document_type == "HASH":
             pipe = client.pipeline(transaction=False)
             for i in range(self.num_initial_docs):
@@ -352,6 +353,9 @@ class HnswSearchSeeder:
                         "embedding": emb.tobytes(),
                     },
                 )
+                if (i + 1) % batch_size == 0:
+                    await pipe.execute()
+                    pipe = client.pipeline(transaction=False)
             await pipe.execute()
         else:
             for i in range(self.num_initial_docs):

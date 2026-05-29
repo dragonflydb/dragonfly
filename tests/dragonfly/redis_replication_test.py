@@ -8,6 +8,26 @@ from .instance import DflyInstanceFactory
 from .proxy import Proxy
 
 
+async def _bounded(awaitable, timeout=5):
+    # Bounded so a stalled connection produces an exception instead of hanging the poll.
+    return await asyncio.wait_for(awaitable, timeout=timeout)
+
+
+async def _log_progress(c_master, c_replicas, interval=10):
+    # Periodic progress so a long-running test phase (seeder.run, REPLICAOF, check_data)
+    # is not silent. Caller cancels the task at teardown.
+    while True:
+        await asyncio.sleep(interval)
+        infos = await asyncio.gather(
+            _bounded(c_master.info("replication")),
+            *(_bounded(c.info("replication")) for c in c_replicas),
+            return_exceptions=True,
+        )
+        logging.info(f"progress master info={infos[0]}")
+        for i, info in enumerate(infos[1:]):
+            logging.info(f"progress replica[{i}] info={info}")
+
+
 # Checks that master redis and dragonfly replica are synced by writing a random key to master
 # and waiting for it to exist in replica. Foreach db in 0..dbcount-1.
 async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbcount=1, timeout=30):
@@ -15,24 +35,42 @@ async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbco
     key = "sync_key/" + rnd_str
     for db in range(dbcount):
         await c_master.set(key, "dummy")
-        logging.debug(f"set {key} MASTER db = {db}")
+        logging.info(f"await_synced: set {key} on MASTER db={db}, polling REPLICA up to {timeout}s")
         remaining = timeout
         while remaining > 0:
-            v = await c_replica.get(key)
-            logging.debug(f"get {key} from REPLICA db = {db} got {v}")
-            if v is not None:
+            # Run concurrently so a tick is bounded by the slowest single call (5s), not their sum.
+            # return_exceptions=True so a stalled call surfaces in its slot without aborting the rest.
+            v, master_info, replica_info, master_dbsize, replica_dbsize = await asyncio.gather(
+                c_replica.get(key),
+                _bounded(c_master.info("replication")),
+                _bounded(c_replica.info("replication")),
+                _bounded(c_master.dbsize()),
+                _bounded(c_replica.dbsize()),
+                return_exceptions=True,
+            )
+            if not isinstance(v, BaseException) and v is not None:
+                logging.info(f"await_synced: REPLICA db={db} synced after {timeout - remaining}s")
                 break
-            repl_state = await c_master.info("replication")
-            logging.debug(f"replication info: {repl_state}")
+            logging.info(
+                f"await_synced db={db} t={timeout - remaining}s "
+                f"dbsize master={master_dbsize} replica={replica_dbsize} "
+                f"master_info={master_info} replica_info={replica_info}"
+            )
             await asyncio.sleep(1)
-
             remaining -= 1
-        assert remaining > 0, "Timeout while waiting for replica to sync"
+        else:
+            logging.error(
+                f"await_synced TIMEOUT db={db} key={key} after {timeout}s "
+                f"dbsize master={master_dbsize} replica={replica_dbsize} "
+                f"master_info={master_info} replica_info={replica_info}"
+            )
+            assert False, "Timeout while waiting for replica to sync"
 
 
-async def await_synced_all(c_master, c_replicas, timeout=30):
-    for c_replica in c_replicas:
-        await await_synced(c_master, c_replica, timeout=timeout)
+async def await_synced_all(c_master, c_replicas, timeout=30, dbcount=1):
+    for i, c_replica in enumerate(c_replicas):
+        logging.info(f"await_synced_all: checking replica {i + 1}/{len(c_replicas)}")
+        await await_synced(c_master, c_replica, dbcount=dbcount, timeout=timeout)
 
 
 async def check_data(seeder, replicas, c_replicas):
@@ -159,29 +197,37 @@ async def test_redis_replication_all(
 
     c_replicas = [replica.client() for replica in replicas]
 
-    # Start data stream
-    stream_task = asyncio.create_task(seeder.run())
-    await asyncio.sleep(0.0)
+    progress = asyncio.create_task(_log_progress(c_master, c_replicas))
+    try:
+        # Start data stream
+        stream_task = asyncio.create_task(seeder.run())
+        await asyncio.sleep(0.0)
 
-    await replicate_all(c_replicas, master.port)
+        await replicate_all(c_replicas, master.port)
 
-    # Wait for streaming to finish
-    assert (
-        not stream_task.done()
-    ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
-    seeder.stop()
-    await stream_task
+        # Wait for streaming to finish
+        assert (
+            not stream_task.done()
+        ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
+        seeder.stop()
+        await stream_task
 
-    # Check data after full sync
-    await await_synced_all(c_master, c_replicas, timeout=60)
-    await check_data(seeder, replicas, c_replicas)
+        # Check data after full sync
+        await await_synced_all(c_master, c_replicas, timeout=60)
+        await check_data(seeder, replicas, c_replicas)
 
-    # Stream more data in stable state
-    await seeder.run(target_ops=2000)
+        # Stream more data in stable state
+        await seeder.run(target_ops=2000)
 
-    # Check data after stable state stream
-    await await_synced_all(c_master, c_replicas, timeout=60)
-    await check_data(seeder, replicas, c_replicas)
+        # Check data after stable state stream
+        await await_synced_all(c_master, c_replicas, timeout=60)
+        await check_data(seeder, replicas, c_replicas)
+    finally:
+        progress.cancel()
+        try:
+            await progress
+        except asyncio.CancelledError:
+            pass
 
 
 master_disconnect_cases = [

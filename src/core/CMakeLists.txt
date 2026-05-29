@@ -47,6 +47,7 @@ helio_cxx_test(interpreter_test dfly_core LABELS DFLY)
 
 helio_cxx_test(string_set_test dfly_core LABELS DFLY)
 helio_cxx_test(string_map_test dfly_core LABELS DFLY)
+helio_cxx_test(simd_op_test dfly_core LABELS DFLY)
 helio_cxx_test(oah_set_test dfly_core LABELS DFLY)
 helio_cxx_test(sorted_map_test dfly_core redis_test_lib LABELS DFLY)
 helio_cxx_test(bptree_set_test dfly_core LABELS DFLY)

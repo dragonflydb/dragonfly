@@ -646,6 +646,8 @@ class DbSlice {
   // Record whenever a key expired to DbTable::expired_keys_events_ for keyspace notifications
   bool expired_keys_events_recording_ = true;
 
+  bool journal_omit_redundant_writes_ = true;
+
   struct Hash {
     size_t operator()(const facade::ConnectionRef& c) const {
       return std::hash<uint32_t>()(c.GetClientId());

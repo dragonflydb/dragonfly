@@ -84,6 +84,11 @@ ABSL_DECLARE_FLAG(std::string, admin_bind);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, maxmemory);
 ABSL_DECLARE_FLAG(uint32_t, proactor_threads);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
+ABSL_DECLARE_FLAG(bool, use_oah_set);
+
+namespace dfly {
+extern bool g_use_oah_set;  // defined in core/oah_set.h
+}
 
 #ifdef USE_ABSL_LOG
 ABSL_FLAG(bool, alsologtostderr, false, "also log messages to stderr in addition to logfiles");
@@ -1139,6 +1144,7 @@ Usage: dragonfly [FLAGS]
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
 
   dfly::max_memory_limit = absl::GetFlag(FLAGS_maxmemory);
+  dfly::g_use_oah_set = absl::GetFlag(FLAGS_use_oah_set);
 
   if (dfly::max_memory_limit == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";

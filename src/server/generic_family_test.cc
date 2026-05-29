@@ -13,11 +13,13 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/facade_test.h"
 #include "server/conn_context.h"
+#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
+ABSL_DECLARE_FLAG(uint32_t, container_iteration_yield_interval_usec);
 
 using namespace testing;
 using namespace std;
@@ -653,7 +655,7 @@ TEST_F(GenericFamilyTest, Scan) {
   resp = Run({"keys", "*"});
   EXPECT_THAT(resp, RespArray(ElementsAre("bar", "")));
   resp = Run({"keys", ""});
-  EXPECT_EQ(resp, "");
+  EXPECT_THAT(resp, RespElementsAre(""));
 }
 
 TEST_F(GenericFamilyTest, ScanWithAttr) {
@@ -734,15 +736,15 @@ TEST_F(GenericFamilyTest, Sort) {
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "10"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "10.1"));
-  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "1", "1"}), "2.20");
-  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "4", "2"}), "200");
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "1", "1"}), RespElementsAre("2.20"));
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "4", "2"}), RespElementsAre("200"));
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "5", "2"}), ArrLen(0));
   // limits desc
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "0", "5"}).GetVec(),
               ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "2", "2"}).GetVec(),
               ElementsAre("3.5", "2.20"));
-  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "1", "1"}), "10.1");
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "1", "1"}), RespElementsAre("10.1"));
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "5", "2"}), ArrLen(0));
 
   // Test set sort
@@ -781,7 +783,7 @@ TEST_F(GenericFamilyTest, Sort) {
   ASSERT_THAT(Run({"sort", "foo"}), ErrArg("WRONGTYPE "));
 
   Run({"rpush", "list-3", ""});
-  ASSERT_THAT(Run({"sort", "list-3"}), "");
+  ASSERT_THAT(Run({"sort", "list-3"}), RespElementsAre(""));
 
   Run({"rpush", "list-3", "2", "0", "", "-0.14", "0.12", "-0", "-123123", "7654"});
   ASSERT_THAT(Run({"sort", "list-3"}).GetVec(),
@@ -844,10 +846,10 @@ TEST_F(GenericFamilyTest, SortStore) {
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(), ElementsAre("3.5", "10.1"));
   resp = Run({"sort", "list-1", "LIMIT", "1", "1", "store", "list-2"});
   EXPECT_EQ(1, resp.GetInt());
-  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), "2.20");
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), RespElementsAre("2.20"));
   resp = Run({"sort", "list-1", "LIMIT", "4", "2", "store", "list-2"});
   EXPECT_EQ(1, resp.GetInt());
-  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), "200");
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), RespElementsAre("200"));
   resp = Run({"sort", "list-1", "LIMIT", "5", "2", "store", "list-2"});
   EXPECT_EQ(0, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), ArrLen(0));
@@ -953,15 +955,15 @@ TEST_F(GenericFamilyTest, Sort_RO) {
   ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "0", "10"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "10.1"));
-  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "1", "1"}), "2.20");
-  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "4", "2"}), "200");
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "1", "1"}), RespElementsAre("2.20"));
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "4", "2"}), RespElementsAre("200"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "5", "2"}), ArrLen(0));
   // limits desc
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "0", "5"}).GetVec(),
               ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "2", "2"}).GetVec(),
               ElementsAre("3.5", "2.20"));
-  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "1", "1"}), "10.1");
+  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "1", "1"}), RespElementsAre("10.1"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "5", "2"}), ArrLen(0));
 
   // Test set sort
@@ -1003,7 +1005,7 @@ TEST_F(GenericFamilyTest, Sort_RO) {
   ASSERT_THAT(Run({"sort_ro", "foo"}), ErrArg("WRONGTYPE "));
 
   Run({"rpush", "list-3", ""});
-  ASSERT_THAT(Run({"sort_ro", "list-3"}), "");
+  ASSERT_THAT(Run({"sort_ro", "list-3"}), RespElementsAre(""));
 
   Run({"rpush", "list-3", "2", "0", "", "-0.14", "0.12", "-0", "-123123", "7654"});
   ASSERT_THAT(Run({"sort_ro", "list-3"}).GetVec(),
@@ -1221,7 +1223,7 @@ TEST_F(GenericFamilyTest, Restore) {
   resp = Run({"restore", "my-zset", "0", ToSV(ZSET_LISTPACK_DUMP)});
   EXPECT_EQ(resp.GetString(), "OK");
   resp = Run({"zrange", "my-zset", "0", "-1"});
-  EXPECT_EQ("elon", resp.GetString());
+  EXPECT_THAT(resp, RespElementsAre("elon"));
 
   // corrupt the dump file but keep the crc correct.
   ZSET_LISTPACK_DUMP[0] = 0x12;
@@ -2001,6 +2003,41 @@ TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
   EXPECT_EQ(Run({"exists", "foo0"}), 0);
   EXPECT_EQ(Run({"exists", "bar0"}), 1);
   EXPECT_EQ(Run({"dbsize"}), 5);
+}
+
+// Verifies that long-running container iteration is yielding.
+// This test uses a sorted set iteration path, but the same yielding
+// behavior is expected for other containers (SET, HASH, LIST) with non
+// listpack encodings.
+TEST_F(GenericFamilyTest, ContainerIterationYields) {
+  // Build a large sorted set that will be encoded as SKIPLIST.
+  constexpr int N = 500'000;
+  for (int start = 0; start < N; start += 1'000) {
+    std::vector<std::string> args = {"zadd", "zs"};
+    for (int i = start; i < start + 1000; i++) {
+      args.push_back(StrCat(i));
+      args.push_back(StrCat("m:", i));
+    }
+    Run(absl::Span<const std::string>(args));
+  }
+
+  // Run IterateSortedSet directly on the shard and verify that the
+  // long-running iteration path triggers fiber preemption.
+  uint64_t delta = 0;
+  ShardId sid = Shard("zs", shard_set->size());
+  shard_set->Await(sid, [&delta] {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+    auto* table = db.GetDBTable(0);
+    auto it = table->prime.Find(string_view{"zs"});
+    ASSERT_EQ(it->second.Encoding(), OBJ_ENCODING_SKIPLIST);
+    uint64_t before = ThisFiber::GetPreemptCount();
+    container_utils::IterateSortedSet(it->second,
+                                      [](container_utils::ContainerEntry, double) { return true; });
+    delta = ThisFiber::GetPreemptCount() - before;
+  });
+
+  // Iteration should yield at least once during long-running execution.
+  EXPECT_GT(delta, 0);
 }
 
 // Regression test for SORT BY nosort STORE inside MULTI/EXEC does a

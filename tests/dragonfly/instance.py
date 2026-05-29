@@ -1,21 +1,20 @@
 import dataclasses
+import logging
 import os
+import random
+import re
+import signal
+import subprocess
 import threading
 import time
-import subprocess
-import random
-import aiohttp
-import logging
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Union
-import re
+
+import aiohttp
 import psutil
-import itertools
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
 from redis.asyncio import RedisCluster as RedisCluster
-import signal
-
 
 START_DELAY = 0.8
 START_GDB_DELAY = 5.0
@@ -445,6 +444,10 @@ class DflyInstanceFactory:
         if version >= 1.21 and "serialization_max_chunk_size" not in args:
             args.setdefault("serialization_max_chunk_size", 300000)
 
+        # TODO (abhijat) fix version once feature released
+        if version == 100 and "serialization_tagged_chunks" not in args:
+            args.setdefault("serialization_tagged_chunks", True)
+
         if version > 1.36:
             args.setdefault("serialize_hnsw_index", "true")
             args.setdefault("deserialize_hnsw_index", "true")
@@ -467,6 +470,7 @@ class DflyInstanceFactory:
             if endpoint_host:
                 args.setdefault("s3_endpoint", endpoint_host)
                 args.setdefault("s3_use_https", "false" if parsed.scheme == "http" else "true")
+                args.setdefault("s3_use_helio_client", "true")
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
@@ -479,8 +483,9 @@ class DflyInstanceFactory:
         if path is not None:
             params = dataclasses.replace(self.params, path=path)
 
-        if version < 1.35:
-            params.args.pop("experimental_io_loop_v2", None)
+        if version < 1.39:
+            args.pop("enable_memcache_io_loop_v2", None)
+            args.pop("enable_resp_io_loop_v2", None)
 
         instance = DflyInstance(params, args)
         self.instances.append(instance)
@@ -556,15 +561,18 @@ class RedisServer:
         logging.info(f"Started {self.server_bin} on port {self.port}, pid={self.proc.pid}")
 
     def stop(self):
+        ident = f"{self.server_bin} (port={self.port}, pid={self.proc.pid})"
         ret = self.proc.poll()
         if ret is not None:
-            logging.error(
-                f"{self.server_bin} (port={self.port}, pid={self.proc.pid}) "
-                f"already exited with code {ret}"
-            )
+            logging.error(f"{ident} already exited with code {ret}")
             return
         self.proc.terminate()
         try:
             self.proc.wait(timeout=10)
-        except Exception as e:
-            pass
+        except subprocess.TimeoutExpired:
+            logging.error(f"{ident} did not terminate in 10s; sending SIGKILL")
+            self.proc.kill()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logging.error(f"{ident} did not exit after SIGKILL within 5s")

@@ -301,11 +301,11 @@ TEST_F(DflyEngineTest, ScriptFlush) {
   resp = Run({"evalsha", sha, "0"});
   EXPECT_THAT(5, resp.GetInt());
   resp = Run({"script", "exists", sha});
-  EXPECT_THAT(1, resp.GetInt());
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   resp = Run({"script", "flush"});
   resp = Run({"script", "exists", sha});
-  EXPECT_THAT(0, resp.GetInt());
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
   EXPECT_THAT(Run({"evalsha", sha, "0"}), ErrArg("NOSCRIPT No matching script. Please use EVAL."));
 
   resp = Run({"script", "load", "return 5"});
@@ -314,7 +314,7 @@ TEST_F(DflyEngineTest, ScriptFlush) {
   resp = Run({"evalsha", sha, "0"});
   EXPECT_THAT(5, resp.GetInt());
   resp = Run({"script", "exists", sha});
-  EXPECT_THAT(1, resp.GetInt());
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 TEST_F(DflyEngineTestWithRegistry, Hello) {
@@ -693,7 +693,7 @@ TEST_F(DflyEngineTest, Bug468) {
   ASSERT_EQ(resp, "QUEUED");
 
   resp = Run({"exec"});
-  ASSERT_THAT(resp, ErrArg("not an integer"));
+  ASSERT_THAT(resp, RespElementsAre(ErrArg("not an integer")));
 
   ASSERT_FALSE(IsLocked(0, "foo"));
 
@@ -1110,7 +1110,7 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   // test stats within multi-exec
   EXPECT_EQ(Run({"multi"}), "OK");
   EXPECT_EQ(Run({"___set", "a", "x"}), "QUEUED");
-  EXPECT_EQ(Run({"exec"}), "OK");
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("OK"));
 
   metrics = GetMetrics();
   EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("___set", Key(2))));

@@ -4,7 +4,9 @@
 #pragma once
 
 #include <absl/strings/escaping.h>
+#include <time.h>
 
+#include <cstdint>
 #include <queue>
 #include <variant>
 
@@ -153,10 +155,15 @@ class ProtocolClient {
   util::fb2::Mutex sock_mu_;
 
  protected:
+  static uint64_t TimeSec() {
+    return time(nullptr);
+  }
+
   std::string last_cmd_;
   std::string last_resp_;
 
-  std::atomic<uint64_t> last_io_time_ = 0;  // in ns, monotonic clock.
+  // Seconds (CLOCK_MONOTONIC_COARSE) — consumed only by master_last_io_sec.
+  std::atomic<uint64_t> last_io_time_ = 0;
 
 #ifdef DFLY_USE_SSL
 

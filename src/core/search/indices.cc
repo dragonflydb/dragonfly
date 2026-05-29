@@ -48,6 +48,86 @@ string ToLower(string_view word) {
   return IsAllAscii(word) ? absl::AsciiStrToLower(word) : una::cases::to_lowercase_utf8(word);
 }
 
+constexpr std::array<bool, 256> MakeSepTable() {
+  std::array<bool, 256> t{};
+  for (unsigned char c : std::string_view{" \t\n\r\v\f,.<>{}[]\"':;!@#$%^&*()-+=~?/|`"})
+    t[c] = true;
+  return t;
+}
+constexpr auto kTextSepTable = MakeSepTable();
+
+// Returns the byte length of the UTF-8 codepoint starting at `s[i]`. Returns 1 if the
+// lead byte announces a multi-byte sequence but the continuation bytes are missing or
+// not in 0x80..0xBF, matching the byte-oriented escape semantics of the query lexer
+// (which consumes exactly one byte after `\`).
+size_t Utf8CodepointLen(std::string_view s, size_t i) {
+  unsigned char lead = static_cast<unsigned char>(s[i]);
+  size_t len = 1;
+  if ((lead & 0xE0) == 0xC0)
+    len = 2;
+  else if ((lead & 0xF0) == 0xE0)
+    len = 3;
+  else if ((lead & 0xF8) == 0xF0)
+    len = 4;
+  if (len == 1)
+    return 1;
+  if (len > s.size() - i)
+    return 1;
+  for (size_t k = 1; k < len; ++k) {
+    unsigned char c = static_cast<unsigned char>(s[i + k]);
+    if ((c & 0xC0) != 0x80)
+      return 1;
+  }
+  return len;
+}
+
+// Split on ASCII punctuation separators; backslash glues the next codepoint into the
+// current word regardless of class. Non-ASCII bytes are always word bytes. Fast-path
+// for text without any backslash emits views into the original input.
+void SplitWithEscapes(std::string_view text, absl::FunctionRef<void(std::string_view)> emit) {
+  if (text.find('\\') == std::string_view::npos) {
+    size_t start = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+      unsigned char c = static_cast<unsigned char>(text[i]);
+      if (c < 0x80 && kTextSepTable[c]) {
+        if (i > start)
+          emit(text.substr(start, i - start));
+        start = i + 1;
+      }
+    }
+    if (start < text.size())
+      emit(text.substr(start));
+    return;
+  }
+
+  std::string buf;
+  buf.reserve(text.size());
+  size_t i = 0;
+  while (i < text.size()) {
+    unsigned char c = static_cast<unsigned char>(text[i]);
+    if (c == '\\') {
+      if (i + 1 >= text.size()) {
+        ++i;
+      } else {
+        size_t cp_len = Utf8CodepointLen(text, i + 1);
+        buf.append(text.data() + i + 1, cp_len);
+        i += 1 + cp_len;
+      }
+    } else if (c < 0x80 && kTextSepTable[c]) {
+      if (!buf.empty()) {
+        emit(buf);
+        buf.clear();
+      }
+      ++i;
+    } else {
+      buf.push_back(text[i]);
+      ++i;
+    }
+  }
+  if (!buf.empty())
+    emit(buf);
+}
+
 // Tokenize text into `out`, advancing *pos_counter per non-stopword token. Raw + stem +
 // synonym entries share the same position. Stopwords don't advance the counter.
 void TokenizeWords(std::string_view text, const TextIndex::StopWords& stopwords,
@@ -58,10 +138,14 @@ void TokenizeWords(std::string_view text, const TextIndex::StopWords& stopwords,
     info.freq++;
     info.positions.push_back(pos);
   };
-  for (std::string_view word : una::views::word_only::utf8(text)) {
+  SplitWithEscapes(text, [&](std::string_view word) {
     std::string word_lc = una::cases::to_lowercase_utf8(word);
+    // Leading-space tokens are reserved for synonym group sentinels; user input
+    // (e.g. an escaped leading space) must not be able to forge one.
+    if (word_lc.empty() || word_lc.front() == ' ')
+      return;
     if (stopwords.contains(word_lc))
-      continue;
+      return;
     uint32_t pos = ++(*pos_counter);
     if (synonyms) {
       if (auto group_id = synonyms->GetGroupToken(word_lc); group_id)
@@ -73,7 +157,7 @@ void TokenizeWords(std::string_view text, const TextIndex::StopWords& stopwords,
         emit(std::move(stem), pos);
     }
     emit(std::move(word_lc), pos);
-  }
+  });
 }
 
 // Split taglist, remove duplicates and convert all to lowercase. Freq is always 1 for tags;
@@ -103,7 +187,7 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
 // Haversine with earth radius in meters. Used to calculate distance.
 boost::geometry::strategy::distance::haversine haversine_(6372797.560856);
 
-double ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
+double ConvertToRadiusInMeters(double radius, std::string_view arg) {
   const std::string unit = absl::AsciiStrToUpper(arg);
   if (unit == "M") {
     return radius * 1;
@@ -637,12 +721,12 @@ void TextIndex::Tokenize(std::string_view value, uint32_t* pos_counter,
 std::vector<std::string> TextIndex::TokenizePhraseQuery(std::string_view phrase) const {
   std::vector<std::string> out;
   const StopWords* sw = stopwords_;
-  for (std::string_view word : una::views::word_only::utf8(phrase)) {
+  SplitWithEscapes(phrase, [&](std::string_view word) {
     std::string lc = una::cases::to_lowercase_utf8(word);
     if (sw && sw->contains(lc))
-      continue;
+      return;
     out.push_back(std::move(lc));
-  }
+  });
   return out;
 }
 

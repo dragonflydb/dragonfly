@@ -9,6 +9,7 @@
 #include <optional>
 #include <string_view>
 
+#include "common/borrowed_string.h"
 #include "facade/facade_stats.h"
 #include "facade/facade_types.h"
 #include "io/io.h"
@@ -31,9 +32,9 @@ class SinkReplyBuilder {
 
   struct PendingPin : public boost::intrusive::list_base_hook<
                           ::boost::intrusive::link_mode<::boost::intrusive::normal_link>> {
-    uint64_t timestamp_ns;
+    uint64_t timestamp_cycles;  // base::CycleClock::Now() value
 
-    PendingPin(uint64_t v = 0) : timestamp_ns(v) {
+    PendingPin(uint64_t v = 0) : timestamp_cycles(v) {
     }
   };
 
@@ -83,7 +84,7 @@ class SinkReplyBuilder {
   }
 
   bool IsSendActive() const {
-    return send_time_ns_ > 0;
+    return send_time_cycles_ > 0;
   }
 
   void SetBatchMode(bool b) {
@@ -115,12 +116,16 @@ class SinkReplyBuilder {
     return std::exchange(last_error_, {});
   }
 
-  uint64_t GetLastSendTimeNs() const;
+  uint64_t GetLastSendTimeCycles() const;
 
  protected:
   template <typename... Ts>
   void WritePieces(Ts&&... pieces);     // Copy pieces into buffer and reference buffer
   void WriteRef(std::string_view str);  // Add iovec bypassing buffer
+
+  // Chunk-decode `bs` (a packed source) directly into scratch. Used by
+  // SendBulkStringBorrowed for encoded variants.
+  void WriteDecodedAscii(const cmn::BorrowedString& bs);
 
   void FinishScope();  // Called when scope ends to flush buffer if needed
   void Send();
@@ -142,8 +147,8 @@ class SinkReplyBuilder {
   // external data (WriteRef). Validity is ensured by FinishScope that either flushes before ref
   // lifetime ends or copies refs to the buffer.
   absl::InlinedVector<iovec, 16> vecs_;
-  size_t guaranteed_pieces_ = 0;  // length of prefix of vecs_ that are guaranteed to be pieces
-  uint64_t send_time_ns_ = 0;
+  size_t guaranteed_pieces_ = 0;   // length of prefix of vecs_ that are guaranteed to be pieces
+  uint64_t send_time_cycles_ = 0;  // base::CycleClock::Now() at Send() entry, 0 when idle
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
@@ -187,6 +192,16 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
 
   void SendSimpleString(std::string_view str) override;
   virtual void SendBulkString(std::string_view str);  // RESP: Blob String
+
+  // Like SendBulkString, but takes ownership of a move-only cmn::BorrowedString
+  // whose bytes are borrowed from a stable in-memory source (e.g. a CompactObj
+  // LargeString under the read-only invariant). The default impl handles both
+  // raw (iovec ref) and packed (chunked decode into scratch) encodings and
+  // Flushes before returning, so ~BorrowedString releases the pin only after
+  // the source bytes are in the kernel. CapturingReplyBuilder overrides this
+  // to move `bs` into the captured payload, extending the pin's lifetime
+  // through replay.
+  virtual void SendBulkStringBorrowed(cmn::BorrowedString bs);
 
   void SendLong(long val) override;
   virtual void SendDouble(double val);  // RESP: Number

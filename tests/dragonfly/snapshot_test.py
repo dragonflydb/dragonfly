@@ -1,24 +1,30 @@
-import pytest
+import asyncio
+import glob
 import logging
 import os
-import glob
-import asyncio
-from async_timeout import timeout
-import redis
-from redis import asyncio as aioredis
 from pathlib import Path
+
+import async_timeout
 import boto3
+import pytest
+import redis
+from async_timeout import timeout
 from azure.storage.blob import BlobServiceClient
-from .instance import DflyInstanceFactory, RedisServer
-from random import randint as rand
-import string
-import random
 from pymemcache.client.base import Client as MCClient
+from redis import asyncio as aioredis
 
 from . import dfly_args
-from .utility import assert_eventually, wait_available_async, is_saving, tmp_file_name
-
-from .seeder import DebugPopulateSeeder
+from .instance import DflyInstanceFactory, RedisServer
+from .replication_test import compare_datasets
+from .seeder import DebugPopulateSeeder, Seeder
+from .utility import (
+    assert_eventually,
+    wait_available_async,
+    is_saving,
+    tmp_file_name,
+    wait_for_replicas_state,
+    check_all_replicas_finished,
+)
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/", "proactor_threads": 4}
 FILE_FORMATS = ["RDB", "DF"]
@@ -448,6 +454,7 @@ async def test_s3_reload_snapshot_after_restart(df_factory, tmp_dir):
         assert await DebugPopulateSeeder.capture(new_async_client) == start_capture
 
     finally:
+        new_instance.stop()
         delete_s3_objects(
             os.environ["DRAGONFLY_S3_BUCKET"],
             str(tmp_dir)[1:],
@@ -669,6 +676,53 @@ async def test_debug_objhist_during_bgsave(df_factory: DflyInstanceFactory):
     await client.execute_command("DEBUG", "OBJHIST")
 
     # If we reach here the server did not crash — verify it is still responsive.
+    assert await client.ping()
+
+
+@pytest.mark.asyncio
+@dfly_args({**BASIC_ARGS})
+async def test_randomkey_during_bgsave(df_factory: DflyInstanceFactory):
+    """
+    Regression test for #7404. Before the fix, RANDOMKEY dispatched its per-shard
+    scan via RunBriefInParallel (dispatcher fiber, no preempt). The callback ran
+    OpScan -> DbSlice::WaitForUnblockedJournalWrites, which suspends on a CondVar
+    while a BGSAVE snapshot has buckets mid-serialization — tripping
+    "Should not preempt dispatcher" and aborting the process.
+    """
+    df = df_factory.create(
+        proactor_threads=4,
+        serialization_max_chunk_size=4096,
+        dbfilename=f"dump_{tmp_file_name()}",
+    )
+    df.start()
+    client = df.client()
+
+    # Big values + small chunk size force the snapshot serializer to yield mid-bucket,
+    # leaving deps_ non-empty so RANDOMKEY's scan callback hits WaitEmpty.
+    await client.execute_command("DEBUG", "POPULATE", "20000", "k", "8192", "RAND")
+
+    async def hammer_random(stop_evt):
+        c = df.client()
+        while not stop_evt.is_set():
+            try:
+                await c.execute_command("RANDOMKEY")
+            except Exception:
+                pass
+
+    stop = asyncio.Event()
+    workers = [asyncio.create_task(hammer_random(stop)) for _ in range(8)]
+
+    try:
+        async with timeout(60):
+            for _ in range(5):
+                await client.execute_command("BGSAVE")
+                while await is_saving(client):
+                    await asyncio.sleep(0.01)
+    finally:
+        stop.set()
+        await asyncio.gather(*workers, return_exceptions=True)
+
+    # If we get here the server did not crash — verify it is still responsive.
     assert await client.ping()
 
 
@@ -974,3 +1028,68 @@ async def test_mc_flags_saving(memcached_client: MCClient, async_client: aioredi
 
     await check_flag("key1", 2)
     await check_flag("key2", 123456)
+
+
+@pytest.mark.parametrize("compression_mode", ["NONE", "MULTI_ENTRY_LZ4", "MULTI_ENTRY_ZSTD"])
+async def test_tagged_chunk_reload(df_factory, compression_mode: str):
+    instance = df_factory.create(
+        dbfilename=f"dump_{tmp_file_name()}",
+        serialization_tagged_chunks=True,
+        compression_mode=compression_mode,
+        proactor_threads=4,
+        serialization_max_chunk_size=4096,
+    )
+    instance.start()
+    cl = instance.client()
+
+    await DebugPopulateSeeder(key_target=5000, data_size=2000, variance=20, samples=20).run(cl)
+    start_capture = await DebugPopulateSeeder.capture(cl)
+    await cl.execute_command("DEBUG", "RELOAD")
+    preempts = (await cl.info())["big_value_preemptions"]
+    assert preempts > 10
+    res = await DebugPopulateSeeder.capture(cl)
+    assert res == start_capture
+
+
+@pytest.mark.parametrize("compression_mode", ["NONE", "MULTI_ENTRY_LZ4", "MULTI_ENTRY_ZSTD"])
+async def test_tagged_chunk_replication(df_factory, compression_mode: str):
+    master = df_factory.create(
+        proactor_threads=4,
+        serialization_tagged_chunks=True,
+        compression_mode=compression_mode,
+        serialization_max_chunk_size=4096,
+    )
+
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
+
+    cm = master.client()
+    cr = replica.client()
+
+    seeder = Seeder(
+        key_target=3000,
+        data_size=200,
+        huge_value_size=20000,
+        huge_value_target=50,
+    )
+
+    await seeder.run(cm, target_deviation=0.1)
+
+    stream_task = asyncio.create_task(seeder.run(cm))
+    await asyncio.sleep(0.0)
+
+    await cr.execute_command(f"REPLICAOF localhost {master.port}")
+    async with async_timeout.timeout(120):
+        await wait_for_replicas_state(cr)
+
+    await seeder.stop(cm)
+    await stream_task
+
+    preempts = (await cm.info())["big_value_preemptions"]
+    assert preempts > 0
+
+    await check_all_replicas_finished([cr], cm)
+    hashes = await asyncio.gather(Seeder.capture(cm), Seeder.capture(cr))
+    if hashes[0] != hashes[1]:
+        await compare_datasets(cm, cr)
+        assert False, "replica does not match master after full sync"

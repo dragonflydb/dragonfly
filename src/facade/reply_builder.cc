@@ -13,6 +13,7 @@
 
 #include "absl/strings/escaping.h"
 #include "absl/types/span.h"
+#include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "facade/error.h"
 #include "util/fibers/proactor_base.h"
@@ -126,6 +127,39 @@ template <typename... Ts> void SinkReplyBuilder::WritePieces(Ts&&... pieces) {
   total_size_ += written;
 }
 
+void SinkReplyBuilder::WriteDecodedAscii(const cmn::BorrowedString& bs) {
+  auto* ops = cmn::BorrowedStringOps::Get();
+  const size_t src_total = bs.view().size();
+  size_t src_offset = 0;
+
+  // Huge strings benefit from max scratch capacity. Going via Flush() (rather
+  // than EnsureCapacity directly) drains any pending iovecs first — otherwise
+  // a reallocate-grow would dangling-pointer the prefix iovec written by the
+  // caller into our own scratch.
+  if (buffer_.Capacity() < kMaxBufferSize)
+    Flush(kMaxBufferSize);
+
+  while (src_offset < src_total) {
+    // Ensure buffer_ has some room.
+    if (buffer_.AppendLen() < 64)
+      Flush();
+    if (ec_)
+      break;
+
+    char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
+    auto r =
+        ops->DecodeChunk(bs, src_total, src_offset, std::span<char>(dest, buffer_.AppendLen()));
+    DCHECK_GT(r.dec_written, 0u);
+    WriteRef(std::string_view(dest, r.dec_written));
+
+    // dest lives inside our scratch — advance the buffer's write cursor so
+    // the next iteration's AppendBuffer().data() doesn't return the same
+    // address and overwrite the chunk we just queued.
+    buffer_.CommitWrite(r.dec_written);
+    src_offset += r.src_consumed;
+  }
+}
+
 void SinkReplyBuilder::WriteRef(std::string_view str) {
   if (vecs_.size() >= IOV_MAX - 2)
     Flush();
@@ -156,8 +190,8 @@ void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
     buffer_.Reserve(expected_buffer_cap);
 }
 
-uint64_t SinkReplyBuilder::GetLastSendTimeNs() const {
-  return send_time_ns_;
+uint64_t SinkReplyBuilder::GetLastSendTimeCycles() const {
+  return send_time_cycles_;
 }
 
 void SinkReplyBuilder::Send() {
@@ -165,8 +199,8 @@ void SinkReplyBuilder::Send() {
   DCHECK(!vecs_.empty());
   auto& reply_stats = tl_facade_stats->reply_stats;
 
-  send_time_ns_ = util::fb2::ProactorBase::GetMonotonicTimeNs();
-  PendingPin pin(send_time_ns_);
+  send_time_cycles_ = base::CycleClock::Now();
+  PendingPin pin(send_time_cycles_);
 
   pending_list.push_back(pin);
 
@@ -179,11 +213,11 @@ void SinkReplyBuilder::Send() {
   auto it = PendingList::s_iterator_to(pin);
   pending_list.erase(it);
 
-  send_time_ns_ = 0;
+  send_time_cycles_ = 0;
 
-  uint64_t after_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
+  uint64_t after_cycles = base::CycleClock::Now();
   reply_stats.send_stats.count++;
-  reply_stats.send_stats.total_duration += (after_ns - pin.timestamp_ns);
+  reply_stats.send_stats.total_duration += (after_cycles - pin.timestamp_cycles);
   DVLOG(2) << "Finished writing " << total_size_ << " bytes";
 }
 
@@ -308,6 +342,26 @@ void RedisReplyBuilderBase::SendBulkString(std::string_view str) {
   WritePieces(kLengthPrefix, uint32_t(str.size()), kCRLF);
   WriteRef(str);
   WritePieces(kCRLF);
+}
+
+void RedisReplyBuilderBase::SendBulkStringBorrowed(cmn::BorrowedString bs) {
+  ReplyScope scope(this);
+  auto* ops = cmn::BorrowedStringOps::Get();
+  size_t total = ops->DecodedSize(bs);
+
+  DVLOG(1) << "SendBulkBorrowed " << total << " enc=" << unsigned(bs.encoding());
+  WritePieces(kLengthPrefix, total, kCRLF);
+  if (bs.IsEncoded()) {
+    WriteDecodedAscii(bs);
+  } else {
+    WriteRef(bs.view());
+  }
+  WritePieces(kCRLF);
+
+  // Drain all iovecs (including any WriteRef into bs.view()) before this
+  // function returns. ~BorrowedString releases the pin afterward — by then
+  // the source bytes are already in the kernel.
+  Flush();
 }
 
 void RedisReplyBuilderBase::SendLong(long val) {
