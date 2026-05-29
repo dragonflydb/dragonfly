@@ -5777,6 +5777,53 @@ TEST_F(SearchFamilyTest, PhraseQueryIssue7294) {
   EXPECT_THAT(Run({"FT.SEARCH", "idx_phrase", "\"machine learning\""}), AreDocIds("p:1", "p:3"));
 }
 
+// Glob wildcards via `w'...'`: `*` matches any run of characters, `?` exactly one. Supported on
+// TEXT fields, globally, and inside tag braces.
+TEST_F(SearchFamilyTest, WildcardQuery) {
+  Run({"FT.CREATE", "wq", "SCHEMA", "t", "TEXT", "NOSTEM", "tag", "TAG"});
+  Run({"HSET", "t:1", "t", "hello", "tag", "hello"});
+  Run({"HSET", "t:2", "t", "help", "tag", "help"});
+  Run({"HSET", "t:3", "t", "hero", "tag", "hero"});
+  Run({"HSET", "t:4", "t", "shell", "tag", "shell"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "wq", "w'hel*'"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "wq", "w'*llo'"}), AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "wq", "w'*ell*'"}), AreDocIds("t:1", "t:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "wq", "w'h?llo'"}), AreDocIds("t:1"));
+  // he?? is two single-char wildcards; raw string keeps it literal without a ??' trigraph.
+  EXPECT_THAT(Run({"FT.SEARCH", "wq", R"(@t:w'he??')"}), AreDocIds("t:2", "t:3"));
+
+  // The pattern is case-insensitive; the marker is not -- an uppercase W is a plain term.
+  EXPECT_THAT(Run({"FT.SEARCH", "wq", "w'HEL*'"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "wq", "W'hel*'"}), kNoResults);
+
+  EXPECT_THAT(Run({"FT.SEARCH", "wq", "@tag:{w'hel*'}"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "wq", "@tag:{w'*ell*'}"}), AreDocIds("t:1", "t:4"));
+}
+
+// `?` matches a whole UTF-8 codepoint (not a single byte), and results are identical with a suffix
+// trie present (which adds an early-exit path to wildcard matching).
+TEST_F(SearchFamilyTest, WildcardUnicode) {
+  Run({"FT.CREATE", "wu", "SCHEMA", "t", "TEXT", "NOSTEM", "WITHSUFFIXTRIE", "tag", "TAG",
+       "WITHSUFFIXTRIE"});
+  Run({"HSET", "u:1", "t", "кіт", "tag", "кіт"});  // 3 codepoints, 6 bytes
+  Run({"HSET", "u:2", "t", "кит", "tag", "кит"});  // differs in the middle codepoint
+  Run({"HSET", "u:3", "t", "café", "tag", "café"});
+
+  // `?` spans one codepoint: к?т matches both к_т words, ?іт only the one ending in іт.
+  EXPECT_THAT(Run({"FT.SEARCH", "wu", "w'к?т'"}), AreDocIds("u:1", "u:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "wu", "w'?іт'"}), AreDocIds("u:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "wu", "w'caf?'"}), AreDocIds("u:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "wu", "w'кіт'"}), AreDocIds("u:1"));
+
+  // `*` runs and the tag-brace form behave the same with the suffix trie.
+  EXPECT_THAT(Run({"FT.SEARCH", "wu", "w'к*т'"}), AreDocIds("u:1", "u:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "wu", "@tag:{w'к?т'}"}), AreDocIds("u:1", "u:2"));
+
+  // Early-exit: a literal segment absent from every term yields no match.
+  EXPECT_THAT(Run({"FT.SEARCH", "wu", "w'*xyz*'"}), kNoResults);
+}
+
 // Phrase queries against a NOOFFSETS index surface an error (positions aren't stored).
 TEST_F(SearchFamilyTest, PhraseOnNoOffsetsErrors) {
   Run({"FT.CREATE", "idx_no_off", "NOOFFSETS", "SCHEMA", "t", "TEXT"});
