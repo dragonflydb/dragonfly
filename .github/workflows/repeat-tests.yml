@@ -57,6 +57,14 @@ on:
           - arm64
           - both
         default: "x86_64"
+      legacy_glog:
+        description: "Build with legacy glog instead of Abseil logging"
+        required: false
+        type: choice
+        options:
+          - "OFF"
+          - "ON"
+        default: "OFF"
 
 jobs:
   build:
@@ -106,13 +114,24 @@ jobs:
 
       - name: Build Dragonfly
         if: ${{ inputs.use_release != 'yes' }}
-        uses: ./.github/actions/builder
-        with:
-          build-type: ${{matrix.build-type}}
-          targets: 'dragonfly'
+        shell: bash
+        run: |
+          cmake \
+            -S "${GITHUB_WORKSPACE}" \
+            -B "${GITHUB_WORKSPACE}/build" \
+            -DCMAKE_BUILD_TYPE="${{ matrix.build-type }}" \
+            -DCMAKE_CXX_FLAGS=-no-pie \
+            -DPRINT_STACKTRACES_ON_SIGNAL=ON \
+            -DWITH_AWS=ON \
+            -DWITH_GCP=OFF \
+            -DWITH_UNWIND=OFF \
+            -DWITH_GPERF=OFF \
+            -DWITH_ASAN=OFF \
+            -DWITH_USAN=OFF \
+            -DLEGACY_GLOG="${{ inputs.legacy_glog }}" \
+            -GNinja
+          ninja -C "${GITHUB_WORKSPACE}/build" dragonfly
 
-      - name: Sync valkey tests
-        uses: ./.github/actions/sync-valkey-tests
       - name: Authenticate to AWS
         if: github.repository_owner == 'dragonflydb' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: aws-actions/configure-aws-credentials@v6
@@ -121,17 +140,76 @@ jobs:
           aws-region: us-east-1
 
       - name: Run tests on repeat
-        uses: ./.github/actions/repeat
-        with:
-          run-only-on-ubuntu-latest: true
-          dfly-executable: dragonfly
-          build-folder-name: build
-          s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
-          expression: ${{ inputs.expression }}
-          count: ${{ inputs.count }}
-          timeout: ${{ inputs.timeout }}
-          epoll: ${{ inputs.epoll }}
-          vmodule_expression: ${{ inputs.vmodule_expression }}
+        shell: bash
+        env:
+          AWS_REGION: ${{ env.AWS_REGION || 'us-east-1' }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ env.AWS_ACCESS_KEY_ID }}
+          COUNT: ${{ inputs.count }}
+          DRAGONFLY_S3_BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
+          EPOLL: ${{ inputs.epoll }}
+          EXPRESSION: ${{ inputs.expression }}
+          TIMEOUT: ${{ inputs.timeout }}
+          VMODULE_EXPRESSION: ${{ inputs.vmodule_expression }}
+        run: |
+          cd "${GITHUB_WORKSPACE}/tests"
+          "${GITHUB_WORKSPACE}/.github/scripts/install-pytest-requirements.sh"
+
+          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly"
+          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+
+          FORCE_EPOLL=""
+          if [[ "${EPOLL}" == "epoll" ]]; then
+            FORCE_EPOLL="--df force_epoll=true"
+          fi
+
+          VMOD=""
+          if [[ -n "${VMODULE_EXPRESSION}" ]]; then
+            VMOD="--df vmodule=${VMODULE_EXPRESSION}"
+          fi
+          export FORCE_EPOLL VMOD
+
+          run_repeats() {
+            read -r -a pytest_args <<< "${EXPRESSION}"
+            failures=0
+            failed_repeats=()
+            for i in $(seq 1 "${COUNT}"); do
+              echo "Repeat ${i}/${COUNT}: pytest ${EXPRESSION} ${FORCE_EPOLL} ${VMOD}"
+              if pytest "${pytest_args[@]}" \
+                  ${FORCE_EPOLL} \
+                  ${VMOD} \
+                  --color=yes \
+                  --json-report \
+                  --json-report-file="report-${i}.json" \
+                  --log-cli-level=DEBUG; then
+                echo "Repeat ${i}/${COUNT}: passed"
+              else
+                failures=$((failures + 1))
+                failed_repeats+=("${i}")
+                echo "Repeat ${i}/${COUNT}: failed"
+              fi
+            done
+
+            echo "Repeat summary: ${failures}/${COUNT} failed"
+            if [[ "${failures}" -ne 0 ]]; then
+              mkdir -p /tmp/failed
+              printf 'Repeat summary: %s/%s failed\nFailed repeats: %s\n' \
+                "${failures}" "${COUNT}" "${failed_repeats[*]}" > /tmp/failed/repeat-summary.txt
+              return 1
+            fi
+            return 0
+          }
+
+          timeout "${TIMEOUT}" bash -c "$(declare -f run_repeats); run_repeats" || code=$?
+          if [[ "${code:-0}" -eq 124 ]]; then
+            echo "Tests timed out"
+            cat /tmp/last_test_log_dir.txt | xargs -I {} mv {}/ /tmp/failed/ || true
+            exit 1
+          fi
+          if [[ "${code:-0}" -ne 0 ]]; then
+            exit "${code}"
+          fi
 
       - name: Upload logs on failure
         if: failure()
