@@ -14,7 +14,7 @@ the last reader is done with it.
 ## What's covered
 
 - `LARGE_STR_TAG` (or `detail::LargeString`) values (heap-allocated, >> 1024 bytes).
-- Encodings `NONE_ENC`, `ASCII1_ENC`, `ASCII2_ENC`. Huffman-encoded can be added later
+- Raw and ASCII-packed encodings. Huffman-encoded strings can be added later
   if we prove their value.
 - `EXTERNAL_TAG` (tiered) values require an asynchronous disk fetch and are out of scope.
 
@@ -23,15 +23,16 @@ Currently, `GET` is the only command that uses this path. Mutating reads
 materializing `pv.ToString()` path. Can be fixed later.
 
 ## Threading model
+
 Dragonfly's shared-nothing design pins each shard to a single proactor
 thread with a thread-local mimalloc heap. A connection is bound to one
 proactor; `GET` for a foreign key hops to the owning shard via
 `SingleHopT(cb)`, then resumes on the connection's proactor for reply
 construction. The socket write itself is fiber-synchronous but may
 yield the fiber while waiting on the kernel — other commands on the
-same shard can run during that window. While mimalloc support cross thread frees,
-the design routes all deallocations back to the
-buffer's owning shard so we could track memory usage consistently.
+same shard can run during that window. While mimalloc supports cross-thread
+frees, the design routes all deallocations back to the buffer's owning
+shard so we can track memory usage consistently.
 
 ## Building blocks
 
@@ -51,9 +52,9 @@ struct LargeString {
 `read_pending` is set when one or more readers hold a borrowed view
 into `ptr`. While the bit is set, `LargeString::SetString` and
 `LargeString::Free` do not deallocate `ptr` directly; they look it up
-in the thread-local pin registry described below and hand the buffer
-off to the matching `PendingRead` entry (which becomes the sole owner
-of the buffer until the last reader unpins).
+in the thread-local pin registry and hand the buffer off to the matching
+`PendingRead` entry (which becomes the sole owner of the buffer until the
+last reader unpins).
 
 `LargeString::DefragIfNeeded` returns false (no defrag) while
 `read_pending` is set — a reallocation would invalidate outstanding
@@ -63,62 +64,67 @@ borrowed views.
 readers; it `CHECK`s `!IsReadPending()`. The only caller is
 `rdb_load`, which never produces values that have been pinned.
 
+### `cmn::BorrowedString`
 
-### `CompactObj::TryGetRaw`
+Move-only owning handle for a borrowed bulk string (`src/common/borrowed_string.h`).
+Carries the encoded view, an encoding tag (0 = raw, non-zero = packed), and an
+opaque pin. The user-visible decoded size is computed on demand by
+`BorrowedStringOps::DecodedSize` (the encoding plus the packed view determine
+it, so no need to store it in the handle). The destructor releases the pin via
+the registered `BorrowedStringOps`.
 
-Returns a borrowed view of the underlying `LargeString` along with the
-metadata needed to decode it:
+`CompactObj::TryBorrow()` is the sole producer; from that point the object is
+moved (never copied) through the reply path until destruction triggers the unpin.
+
+### `cmn::BorrowedStringOps`
+
+Abstract interface set once by `CompactObj::InitThreadLocal`. The destructor of
+`BorrowedString` detaches the pin and calls `Release(void*)` to decrement its
+refcount; `DecodeChunk(...)` unpacks up to `max_count` bytes of an ASCII-packed
+source into a destination buffer and returns the number of bytes written
+(non-final chunks may be smaller than `max_count` due to alignment).
+
+This is the only seam between `common/` (or `facade/`) and the core internals:
+the concrete impl (`CompactObjBorrowOps`, file-local in `compact_object.cc`)
+casts the pin to `PendingRead*` and calls `detail::ascii_unpack` — callers
+outside `core/` never see either type.
+
+### `CompactObj::TryBorrow`
+
+Returns a `cmn::BorrowedString` iff this `CompactObj` holds a large raw
+or packed string; otherwise `std::nullopt` (caller falls back to
+`GetSlice`/`ToString`).
 
 ```cpp
-struct RawBorrow {
-  std::string_view encoded;     // bytes as stored
-  size_t decoded_size;          // user-visible byte count
-  uint8_t encoding;             // NONE / ASCII1 / ASCII2
-  detail::PendingRead* pin;     // registered read pin
-};
-std::optional<RawBorrow> CompactObj::TryGetRaw() const;
+std::optional<cmn::BorrowedString> CompactObj::TryBorrow() const;
 ```
 
-For `NONE_ENC` the view is the user-visible bytes
-(`encoded.size() == decoded_size`). For `ASCII1`/`ASCII2` the view is
-the packed source and `decoded_size` is computed from the packed
-length and the first byte via the existing `StrEncoding::DecodedSize`.
-
-`TryGetRaw` does two more things on a successful return: it stamps
-the `LargeString`'s `read_pending` bit (via a controlled `const_cast`
-— the bit is bookkeeping, not part of the logical value) and
-registers a `PendingRead` in the thread-local pin map, returning
-the pointer via `RawBorrow::pin`. Caller's only obligation is to
-release the pin via `PendingRead::UnpinRead` once the reply is on
-the wire.
+On success: stamps `read_pending` on the `LargeString` (via a controlled
+`const_cast` — the bit is bookkeeping, not part of the logical value) and
+registers a `PendingRead` in the thread-local pin map. The returned
+`BorrowedString` owns the pin; no further action is required from the caller
+beyond letting it go out of scope (or calling `Unpin()` explicitly).
 
 ### Pin registry
 
-The registry lives in `compact_object`'s thread-local scope — the same
-scope that already holds `local_mr`, the huffman tables, and the
-small-string arena. It is not exposed beyond `detail::PendingRead` and
-a handful of static methods on `CompactObj`; `EngineShard` only invokes
-the periodic drain.
+Lives in `compact_object.cc`'s thread-local scope alongside `local_mr`
+and the huffman tables. Not exposed beyond a handful of `CompactObj`
+static methods; `EngineShard` only invokes the periodic drain.
 
 ```cpp
-namespace detail {
+// compact_object.cc (internal)
 struct PendingRead {
-  void* ptr;                     // buffer being tracked
-  std::atomic<uint32_t> refcnt;  // active reader count
-  bool orphaned;                 // writer detached from CompactObj
+  const void* ptr;
+  std::atomic<uint32_t> refcnt;
+  bool orphaned;
 
-  // Decrement refcnt. After this returns, the caller must not touch
-  // the pin again — the owning thread may reap it on the next drain.
-  void UnpinRead();
+  void UnpinRead();  // release-store fetch_sub; caller must not touch pin after
 };
-}  // namespace detail
-
-// Inside compact_object.cc, on the existing TL struct:
-absl::flat_hash_map<void*, detail::PendingRead*> pin_map;
 ```
 
 The map is single-threaded — only the owning thread mutates it. Other
-threads touch only individual `PendingRead::refcnt` via `UnpinRead`.
+threads touch only individual `PendingRead::refcnt` via `UnpinRead`
+(which is called indirectly through `BorrowedStringOps::Release`).
 There is no queue: `UnpinRead` is a single release-store `fetch_sub`,
 and the owning thread reaps refcnt==0 entries by iterating the map.
 
@@ -129,82 +135,56 @@ unpin-to-zero and the drain. Map iteration avoids the race entirely
 and costs O(N) per drain where N is the number of in-flight reads on
 this thread — small in practice (one pin per active GET reply).
 
-Public method surface:
+Public surface:
 
-- `CompactObj::TryGetRaw()` — owning thread. The entry point for
-  callers. Returns a `RawBorrow` with view, metadata, and the
-  already-registered pin (see above). Internally calls `PinRead`
-  to insert a `PendingRead` into the thread-local map and stamps
-  `read_pending`.
-- `detail::PendingRead::UnpinRead()` — any thread, instance method.
-  Single `fetch_sub` on `refcnt`. No queue push, no further pin
-  access.
+- `CompactObj::TryBorrow()` — owning thread. Entry point for callers.
+  Stamps `read_pending`, registers pin, returns the owning `BorrowedString`.
 - `CompactObj::DrainPendingReads()` — owning thread, static. Iterates
-  the map, observes each entry's `refcnt` under acquire ordering, and
-  reaps zero-refcnt entries: frees the buffer if orphaned, then
-  erases the map slot and deletes the entry. Called periodically
-  from `EngineShard::Heartbeat`.
-- `CompactObj::PinRead(ptr)` — owning thread, static. The primitive
-  TryGetRaw is built on; exposed for tests and any future caller
-  that needs to pin a known buffer pointer directly.
+  the map, reaps zero-refcnt entries: frees orphaned buffers, erases the
+  slot, deletes the entry. Called periodically from `EngineShard::Heartbeat`.
 
 The orphan transition is a private detail of `LargeString::SetString`
 and `LargeString::Free`: they look the ptr up in `tl.pin_map`, set
-`entry->orphaned = true`, and erase from the map. No callback
-indirection — all participants live in the same translation unit.
+`entry->orphaned = true`, and erase from the map.
 
 ### Reply builder integration
 
-`SinkReplyBuilder` is per-connection, lives on the connection's
-proactor thread, and accumulates `iovec` entries via `WritePieces`
-(copy into scratch) or `WriteRef` (push pointer only). `Send()` does a
-synchronous `writev` and returns when the bytes are in the kernel.
+`SinkReplyBuilder` accumulates iovecs via `WritePieces` (copy into scratch) or
+`WriteRef` (pointer-only), then `Send()` does a synchronous `writev`. The
+borrowed bytes must outlive that write.
 
-The borrow path needs the source bytes to outlive the socket write
-(which may suspend the fiber).
+`RedisReplyBuilderBase::SendBulkStringBorrowed(cmn::BorrowedString)` is the
+additional method that serializes borrowed strings. It's either writes raw string by reference,
+or iteratively decodes chunks into temporary buffer and writes them into a sink.
+Finally it calls `Flush()` so all references reach the kernel before the function
+returns — at which point `~BorrowedString` (on the parameter) releases the
+pin via `BorrowedStringOps::Release`. No deferred-release machinery is
+needed; pin lifetime is plain C++ scope-based.
 
-Implementation - TBD.
+### Capture / replay
 
-### Capture / replay (squashing, MULTI/EXEC)
-
-`MultiCommandSquasher` runs commands against a `CapturingReplyBuilder`
-that records replies into intermediate payloads, then replays them to
-the real sink. Borrowed strings must survive this boundary without
-materializing the full payload — both the borrowed (`NONE_ENC`) and
-streamed (ASCII) paths must reach the wire with the same pin-managed
-lifetime as the direct sink.
-
-Implementation - TBD.
+`payload::Payload` gains a `cmn::BorrowedString` alternative directly
+(`sizeof(Payload)` is preserved — `BorrowedString` fits in the variant's
+existing space). The `CapturingReplyBuilder` override of
+`SendBulkStringBorrowed` moves the borrow into the payload — the captured
+payload owns the pin for the capture's lifetime. On replay,
+`CaptureVisitor` moves it back into the real sink's
+`SendBulkStringBorrowed`, where the same Flush-then-release flow takes over.
 
 ## End-to-end path
 
-```cpp
-// shard thread, GET callback
-if (auto raw = pv.TryGetRaw()) {                  // optional<RawBorrow>
-  // TryGetRaw sets read_pending and registers raw->pin as side effects.
-  return BorrowedString{raw->encoded, raw->pin,
-                        raw->decoded_size, raw->encoding};
-}
-
-// proactor thread, GetReplies::Send(BorrowedString)
-if (bs.encoding == 0) {
-  rb->SendBulkStringBorrowed(bs.encoded);          // iovec ref (no copy)
-} else {
-  rb->SendBulkStringStreamed(bs.encoded.data(), bs.decoded_size, bs.encoding);
-}
-// After the bytes hit the wire: bs.pin->UnpinRead().
-```
-
-The reply builder is responsible for releasing `bs.pin` once the
-socket write that consumed the borrowed view has completed.
-Implementation - TBD.
+GET callback on the owning shard calls `pv.TryBorrow()`; on success the
+returned `BorrowedString` is moved through `SingleHopT` back to the
+connection's proactor, which calls `rb->SendBulkStringBorrowed(std::move(bs))`
+to emit the iovecs. The trailing `Flush()` drains everything via `writev`;
+`~BorrowedString` then releases the pin. `EngineShard::Heartbeat` periodically
+calls `CompactObj::DrainPendingReads()` to reap entries with `refcnt == 0`
+(freeing the buffer if orphaned).
 
 ## Concurrency picture
 
 A write racing a read on the same key. Shard A is the buffer's owning
-thread; Connection X's proactor is the IO thread that produced the
-GET reply. The mutating SET arrives via a second connection that
-hops to Shard A in parallel with X's reply construction.
+thread; Connection X's proactor is the IO thread constructing the GET reply.
 
 ```mermaid
 sequenceDiagram
@@ -213,21 +193,20 @@ sequenceDiagram
     participant X as Connection X (proactor)
 
     Note over A: GET k callback
-    A->>A: raw = pv.TryGetRaw()<br/>(sets read_pending, registers raw.pin in tl.pin_map)
-    A-->>X: BorrowedString{view, pin} (via SingleHopT)
+    A->>A: bs = pv.TryBorrow()<br/>(stamps read_pending, registers pin in tl.pin_map)
+    A-->>X: BorrowedString{view, pin} (via SingleHopT return value)
 
-    X->>X: rb->SendBulkStringStreamed(...)<br/>(NONE_ENC uses SendBulkStringBorrowed)
+    X->>X: rb->SendBulkStringBorrowed(std::move(bs))<br/>(raw → WriteRef; packed → WriteDecodedAscii)<br/>Flush() drains iovecs via writev
 
     Note over A: concurrent SET k newval (other connection hops to A)
     A->>A: LargeString::SetString sees read_pending=1
     A->>A: lookup old_ptr in tl.pin_map,<br/>mark orphaned, erase
     A->>A: allocate fresh buffer, clear read_pending
 
-    X->>X: rb->Flush, then Send, then sink->Write(vecs)<br/>(bytes in kernel)
-    X->>X: pin->UnpinRead<br/>(release fetch_sub, no further access)
+    X->>X: ~BorrowedString at function exit<br/>→ BorrowedStringOps::Release → UnpinRead<br/>(release fetch_sub, no further access)
 
     Note over A: Heartbeat
-    A->>A: CompactObj::DrainPendingReads()<br/>iterate tl.pin_map: for each entry with refcnt==0 + orphaned,<br/>deallocate, erase, delete
+    A->>A: DrainPendingReads()<br/>refcnt==0 + orphaned → deallocate old buffer
 ```
 
 If no mutation occurs between borrow and unpin, the drain finds the
@@ -239,10 +218,10 @@ entry with `orphaned=false` and just removes the map slot; the
 ### Drain vs re-pin
 
 If `UnpinRead` decrements an entry's `refcnt` to zero and another
-reader's `PinRead` bumps it back to 1 before the next drain, the
+reader's `TryBorrow` bumps it back to 1 before the next drain, the
 drain's iteration observes `refcnt > 0` under acquire ordering and
 skips the entry. The map slot continues to point at the same entry;
-the new reader's eventual `UnpinRead` brings it back to zero and the
+the new reader's eventual unpin brings it back to zero and the
 following drain cycle reaps it. No double-free.
 
 ### Post-drain mutation
@@ -272,29 +251,24 @@ next defrag pass picks up the same value.
 A pin allocated on shard A but unpinned by a different IO thread is
 reaped from A's `tl.pin_map` on A's next drain. The IO thread's only
 access to the pin is the `fetch_sub` inside `UnpinRead`; once that
-returns, the pin pointer is no longer referenced from the IO thread,
-so A is free to delete the entry whenever the drain observes
-`refcnt == 0`. The buffer is freed via
-`CompactObj::memory_resource()->deallocate(...)` on A's thread —
-mimalloc dispatches to A's heap, matching where the buffer was
-allocated. The `PendingRead` entry itself is `new`'d and `delete`'d
-on A's thread, so it lives on A's heap throughout.
+returns, the pin pointer is no longer referenced from the IO thread, so A is free to delete
+the entry whenever the drain observes `refcnt == 0`.
+The buffer is freed on A's thread via its mimalloc heap, matching where the buffer was allocated.
 
 ### Capture / replay window
 
-Captured payloads hold raw pointers into the borrowed source. The
-source's lifetime is governed by the same `PendingRead` pin that the
-originating `CmdGet` registered: the reply machinery (direct sink or
-capture-then-replay) is responsible for not releasing the pin until
-the bytes have reached the wire. Captured payloads therefore remain
-valid through the entire squashing / `MULTI`-`EXEC` pipeline.
+Captured payloads hold a `cmn::BorrowedString` that owns the pin. The pin
+is released only when the real sink's `SendBulkStringBorrowed` runs at
+replay time (its trailing `Flush()` drains the iovecs, then
+`~BorrowedString` releases). The borrowed source is therefore valid for
+the entire squashing / `MULTI`-`EXEC` pipeline.
 
 ## What's out of scope
 
 - **MGET.** `CollectKeys` today allocates a per-shard storage buffer
   and packs values into it. Zero-copy MGET would carry borrowed views
   per result instead.
-- **Huffman-encoded large strings.** `TryGetRaw` returns `nullopt` for
+- **Huffman-encoded large strings.** `TryBorrow` returns `nullopt` for
   `HUFFMAN_ENC`. Huffman codes are variable-length so decoding without
   materialisation would require a stateful streaming decoder.
 - **`EXTERNAL_TAG` (tiered) values.** Asynchronous disk fetch and
@@ -306,20 +280,15 @@ valid through the entire squashing / `MULTI`-`EXEC` pipeline.
 | Symbol | Where | Meaning |
 |---|---|---|
 | `LARGE_STR_TAG` | `CompactObj::TagEnum` | Heap-allocated raw large string |
-| `NONE_ENC` / `ASCII1_ENC` / `ASCII2_ENC` | `CompactObj::EncodingEnum` | Storage encoding |
 | `read_pending` | `detail::LargeString` | One or more readers may be borrowing `ptr` |
-| `--get_zero_copy` | `string_family.cc` flag | Master toggle for the borrow path |
-| `borrowed_string_views_total` | `EngineShard::Stats` | Shard-side: borrow decisions taken |
-| `borrowed_strings_sent_total` | `ServerState::Stats` | Reply-side: borrowed bulk strings sent (incl. via capture) |
 
 ## File map
 
 | Concern | File |
 |---|---|
-| `read_pending` bit, `TryGetRaw`, `PendingRead`, pin registry, `PinRead` / `DrainPendingReads` | `src/core/compact_object.{h,cc}` |
-| `Heartbeat` drain invocation | `src/server/engine_shard.{h,cc}` |
-| Reply builder pin release, `WriteDecodedChunks`, `SendBulkStringStreamed` | `src/facade/reply_builder.{h,cc}` |
-| Capture/replay overrides (borrowed + streamed) | `src/facade/reply_capture.{h,cc}`, `src/facade/reply_payload.h` |
-| GET fast path (borrow + pin + dispatch) | `src/server/string_family.cc` |
+| `BorrowedString`, `BorrowedStringOps` interface | `src/common/borrowed_string.h` |
+| `read_pending` bit, `TryBorrow`, pin registry, `DrainPendingReads`, `CompactObjBorrowOps` | `src/core/compact_object.{h,cc}` |
+| `SendBulkStringBorrowed`, `WriteDecodedAscii` | `src/facade/reply_builder.{h,cc}` |
+| Capture/replay override, `Payload` variant alternative | `src/facade/reply_capture.{h,cc}`, `src/facade/reply_payload.h` |
 | HTTP-API visitor materialization | `src/server/http_api.cc` |
-| Tests | `src/server/string_family_test.cc` |
+| Tests | `src/core/compact_object_test.cc` |

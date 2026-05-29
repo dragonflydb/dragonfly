@@ -127,6 +127,39 @@ template <typename... Ts> void SinkReplyBuilder::WritePieces(Ts&&... pieces) {
   total_size_ += written;
 }
 
+void SinkReplyBuilder::WriteDecodedAscii(const cmn::BorrowedString& bs) {
+  auto* ops = cmn::BorrowedStringOps::Get();
+  const size_t src_total = bs.view().size();
+  size_t src_offset = 0;
+
+  // Huge strings benefit from max scratch capacity. Going via Flush() (rather
+  // than EnsureCapacity directly) drains any pending iovecs first — otherwise
+  // a reallocate-grow would dangling-pointer the prefix iovec written by the
+  // caller into our own scratch.
+  if (buffer_.Capacity() < kMaxBufferSize)
+    Flush(kMaxBufferSize);
+
+  while (src_offset < src_total) {
+    // Ensure buffer_ has some room.
+    if (buffer_.AppendLen() < 64)
+      Flush();
+    if (ec_)
+      break;
+
+    char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
+    auto r =
+        ops->DecodeChunk(bs, src_total, src_offset, std::span<char>(dest, buffer_.AppendLen()));
+    DCHECK_GT(r.dec_written, 0u);
+    WriteRef(std::string_view(dest, r.dec_written));
+
+    // dest lives inside our scratch — advance the buffer's write cursor so
+    // the next iteration's AppendBuffer().data() doesn't return the same
+    // address and overwrite the chunk we just queued.
+    buffer_.CommitWrite(r.dec_written);
+    src_offset += r.src_consumed;
+  }
+}
+
 void SinkReplyBuilder::WriteRef(std::string_view str) {
   if (vecs_.size() >= IOV_MAX - 2)
     Flush();
@@ -309,6 +342,26 @@ void RedisReplyBuilderBase::SendBulkString(std::string_view str) {
   WritePieces(kLengthPrefix, uint32_t(str.size()), kCRLF);
   WriteRef(str);
   WritePieces(kCRLF);
+}
+
+void RedisReplyBuilderBase::SendBulkStringBorrowed(cmn::BorrowedString bs) {
+  ReplyScope scope(this);
+  auto* ops = cmn::BorrowedStringOps::Get();
+  size_t total = ops->DecodedSize(bs);
+
+  DVLOG(1) << "SendBulkBorrowed " << total << " enc=" << unsigned(bs.encoding());
+  WritePieces(kLengthPrefix, total, kCRLF);
+  if (bs.IsEncoded()) {
+    WriteDecodedAscii(bs);
+  } else {
+    WriteRef(bs.view());
+  }
+  WritePieces(kCRLF);
+
+  // Drain all iovecs (including any WriteRef into bs.view()) before this
+  // function returns. ~BorrowedString releases the pin afterward — by then
+  // the source bytes are already in the kernel.
+  Flush();
 }
 
 void RedisReplyBuilderBase::SendLong(long val) {

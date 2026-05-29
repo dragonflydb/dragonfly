@@ -9,6 +9,7 @@
 #include <optional>
 #include <string_view>
 
+#include "common/borrowed_string.h"
 #include "facade/facade_stats.h"
 #include "facade/facade_types.h"
 #include "io/io.h"
@@ -122,6 +123,10 @@ class SinkReplyBuilder {
   void WritePieces(Ts&&... pieces);     // Copy pieces into buffer and reference buffer
   void WriteRef(std::string_view str);  // Add iovec bypassing buffer
 
+  // Chunk-decode `bs` (a packed source) directly into scratch. Used by
+  // SendBulkStringBorrowed for encoded variants.
+  void WriteDecodedAscii(const cmn::BorrowedString& bs);
+
   void FinishScope();  // Called when scope ends to flush buffer if needed
   void Send();
 
@@ -187,6 +192,16 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
 
   void SendSimpleString(std::string_view str) override;
   virtual void SendBulkString(std::string_view str);  // RESP: Blob String
+
+  // Like SendBulkString, but takes ownership of a move-only cmn::BorrowedString
+  // whose bytes are borrowed from a stable in-memory source (e.g. a CompactObj
+  // LargeString under the read-only invariant). The default impl handles both
+  // raw (iovec ref) and packed (chunked decode into scratch) encodings and
+  // Flushes before returning, so ~BorrowedString releases the pin only after
+  // the source bytes are in the kernel. CapturingReplyBuilder overrides this
+  // to move `bs` into the captured payload, extending the pin's lifetime
+  // through replay.
+  virtual void SendBulkStringBorrowed(cmn::BorrowedString bs);
 
   void SendLong(long val) override;
   virtual void SendDouble(double val);  // RESP: Number

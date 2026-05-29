@@ -1291,10 +1291,11 @@ TEST_F(CompactObjectTest, TryBorrow_NoneEncLargeString) {
   {
     auto borrow = cobj_.TryBorrow();
     ASSERT_TRUE(borrow.has_value());
-    EXPECT_EQ(borrow->encoding, 0u);  // NONE_ENC
-    EXPECT_EQ(borrow->decoded_size, val.size());
-    EXPECT_EQ(borrow->encoded, val);
-    EXPECT_EQ(borrow->TEST_refcnt(), 1u);
+    EXPECT_EQ(borrow->encoding(), 0u);  // NONE_ENC
+    CompactObj::StrEncoding str_enc(borrow->encoding(), false);
+    EXPECT_EQ(str_enc.DecodedSize(borrow->view()), val.size());
+    EXPECT_EQ(borrow->view(), val);
+    EXPECT_EQ(CompactObj::TEST_PinRefcnt(*borrow), 1u);
   }
 
   CompactObj::DrainPendingReads();
@@ -1312,14 +1313,15 @@ TEST_F(CompactObjectTest, TryBorrow_AsciiLargeString) {
   {
     auto borrow = cobj_.TryBorrow();
     ASSERT_TRUE(borrow.has_value());
-    EXPECT_TRUE(borrow->encoding == 1u || borrow->encoding == 2u);  // ASCII1 or ASCII2
-    EXPECT_EQ(borrow->decoded_size, val.size());
-    EXPECT_LT(borrow->encoded.size(), val.size());  // packed representation is smaller
+    EXPECT_TRUE(borrow->encoding() == 1u || borrow->encoding() == 2u);  // ASCII1 or ASCII2
+    CompactObj::StrEncoding str_enc(borrow->encoding(), false);
+    EXPECT_EQ(str_enc.DecodedSize(borrow->view()), val.size());
+    EXPECT_LT(borrow->view().size(), val.size());  // packed representation is smaller
 
     // Verify the packed bytes decode back to the original string.
-    string decoded(borrow->decoded_size, '\0');
-    detail::ascii_unpack(reinterpret_cast<const uint8_t*>(borrow->encoded.data()),
-                         borrow->decoded_size, decoded.data());
+    string decoded(str_enc.DecodedSize(borrow->view()), '\0');
+    detail::ascii_unpack(reinterpret_cast<const uint8_t*>(borrow->view().data()),
+                         str_enc.DecodedSize(borrow->view()), decoded.data());
     EXPECT_EQ(decoded, val);
   }
 
@@ -1334,17 +1336,17 @@ TEST_F(CompactObjectTest, TryBorrow_PinRefcountAndDrain) {
   auto b1 = cobj_.TryBorrow();
   auto b2 = cobj_.TryBorrow();
   ASSERT_TRUE(b1.has_value() && b2.has_value());
-  EXPECT_EQ(b1->TEST_refcnt(), 2u);
-  EXPECT_EQ(b2->TEST_refcnt(), 2u);
+  EXPECT_EQ(CompactObj::TEST_PinRefcnt(*b1), 2u);
+  EXPECT_EQ(CompactObj::TEST_PinRefcnt(*b2), 2u);
 
   // Drain must not reap an entry with outstanding references.
   CompactObj::DrainPendingReads();
-  EXPECT_EQ(b1->TEST_refcnt(), 2u);
+  EXPECT_EQ(CompactObj::TEST_PinRefcnt(*b1), 2u);
 
   b1.reset();
-  EXPECT_EQ(b2->TEST_refcnt(), 1u);
+  EXPECT_EQ(CompactObj::TEST_PinRefcnt(*b2), 1u);
   CompactObj::DrainPendingReads();  // still live
-  EXPECT_EQ(b2->TEST_refcnt(), 1u);
+  EXPECT_EQ(CompactObj::TEST_PinRefcnt(*b2), 1u);
 
   b2.reset();
   CompactObj::DrainPendingReads();  // entry is now reaped; do not dereference pin after this
@@ -1364,7 +1366,7 @@ TEST_F(CompactObjectTest, TryBorrow_CowOnMutation) {
     cobj_.SetString(new_val);
 
     // SetString must orphan the old pinned buffer rather than freeing it inline.
-    EXPECT_TRUE(borrow->TEST_orphaned());
+    EXPECT_TRUE(CompactObj::TEST_PinOrphaned(*borrow));
     // Mutating while pinned should preserve correctness and not crash.
     EXPECT_EQ(cobj_.ToString(), new_val);
   }
