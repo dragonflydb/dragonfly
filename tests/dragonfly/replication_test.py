@@ -4794,3 +4794,57 @@ async def test_client_list_replication_types(df_factory: DflyInstanceFactory):
         assert parse_client_list(await c_replica.execute_command("CLIENT LIST TYPE master")) == []
 
     await link_gone()
+
+
+"""
+Test WAIT command: blocks until N replicas have acknowledged prior writes, or timeout.
+"""
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_wait_no_replicas(df_factory: DflyInstanceFactory):
+    """WAIT on a standalone server returns 0 immediately regardless of timeout."""
+    master = df_factory.create()
+    master.start()
+    c_master = master.client()
+
+    await c_master.set("k", "v")
+    # No replicas: should return 0 without blocking for the full timeout.
+    start = time.time()
+    result = await c_master.execute_command("WAIT", 1, 200)
+    elapsed_ms = (time.time() - start) * 1000
+    assert result == 0
+    # Should return quickly (well under 200ms) because there are nothing to wait for.
+    assert elapsed_ms < 150, f"WAIT took {elapsed_ms:.0f}ms with no replicas"
+
+    await c_master.connection_pool.disconnect()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_wait_with_replica(df_factory: DflyInstanceFactory):
+    """WAIT returns the number of replicas that acknowledged prior writes."""
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await start_replication(c_replica, master.port)
+    await wait_for_replicas_state(c_replica)
+
+    # Write some keys and wait for 1 replica to acknowledge.
+    await c_master.mset({f"key:{i}": f"val:{i}" for i in range(100)})
+    result = await c_master.execute_command("WAIT", 1, 5000)
+    assert result == 1, f"Expected 1 replica to ack, got {result}"
+
+    # Requesting more replicas than exist should timeout and return the actual count.
+    start = time.time()
+    result = await c_master.execute_command("WAIT", 2, 500)
+    elapsed_ms = (time.time() - start) * 1000
+    assert result == 1, f"Expected 1 replica even on timeout, got {result}"
+    # Should have waited roughly the timeout duration.
+    assert elapsed_ms >= 400, f"WAIT returned too quickly: {elapsed_ms:.0f}ms"
+
+    await c_master.connection_pool.disconnect()
+    await c_replica.connection_pool.disconnect()

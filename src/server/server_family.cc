@@ -4391,6 +4391,88 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
   return builder->SendOk();
 }
 
+void ServerFamily::Wait(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  int64_t num_replicas_arg, timeout_ms;
+  if (!absl::SimpleAtoi(ArgS(args, 0), &num_replicas_arg) || num_replicas_arg < 0 ||
+      !absl::SimpleAtoi(ArgS(args, 1), &timeout_ms) || timeout_ms < 0) {
+    return cmd_cntx->SendError(kInvalidIntErr);
+  }
+  auto num_replicas = static_cast<uint32_t>(num_replicas_arg);
+
+  // Collect currently tracked replicas.
+  auto replicas = dfly_cmd_->GetReplicaInfoSnapshot();
+
+  if (replicas.empty() || num_replicas == 0) {
+    return rb->SendLong(0);
+  }
+
+  uint32_t shard_count = shard_set->size();
+  std::vector<LSN> target_lsns(shard_count, 0);
+
+  // Capture the current LSN on each shard and send PING to force replicas to ACK immediately.
+  // PING causes replicas to skip their normal ACK interval and send REPLCONF ACK right away.
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    if (shard->journal()) {
+      uint32_t sid = shard->shard_id();
+      target_lsns[sid] = journal::GetLsn();
+      journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
+    }
+  });
+
+  // Count replicas that have acknowledged all shards up to their respective target LSN.
+  // Runs the check on each shard's proactor to safely read last_acked_lsn.
+  // Also returns the number of replicas still running (connected), so callers can detect
+  // that the required count can never be reached due to disconnections.
+  auto count_acked = [&]() ABSL_NO_THREAD_SAFETY_ANALYSIS -> std::pair<uint32_t, uint32_t> {
+    size_t n = replicas.size();
+    // Per-shard result: shard_acked[sid][i] == true means replica i caught up on shard sid.
+    std::vector<std::vector<bool>> shard_acked(shard_count, std::vector<bool>(n, true));
+
+    shard_set->RunBriefInParallel([&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+      uint32_t sid = shard->shard_id();
+      if (!shard->journal() || target_lsns[sid] == 0)
+        return;
+      for (size_t i = 0; i < n; i++) {
+        shard_acked[sid][i] = replicas[i]->GetFlow(sid).last_acked_lsn >= target_lsns[sid];
+      }
+    });
+
+    uint32_t acked = 0, running = 0;
+    for (size_t i = 0; i < n; i++) {
+      if (!replicas[i]->GetExecState().IsRunning())
+        continue;
+      ++running;
+      bool all_acked = true;
+      for (uint32_t sid = 0; sid < shard_count; sid++) {
+        if (!shard_acked[sid][i]) {
+          all_acked = false;
+          break;
+        }
+      }
+      if (all_acked)
+        ++acked;
+    }
+    return {acked, running};
+  };
+
+  constexpr auto kMaxWaitDuration = absl::Minutes(10);
+  absl::Time deadline = timeout_ms == 0 ? absl::Now() + kMaxWaitDuration
+                                        : absl::Now() + absl::Milliseconds(timeout_ms);
+  auto [count, running] = count_acked();
+  while (count < num_replicas && absl::Now() < deadline) {
+    // For infinite waits (timeout=0), exit early if connected replicas have dropped
+    // below the required count — the condition can never be satisfied.
+    if (timeout_ms == 0 && running < num_replicas)
+      break;
+    ThisFiber::SleepFor(100ms);
+    std::tie(count, running) = count_acked();
+  }
+
+  return rb->SendLong(count);
+}
+
 void ServerFamily::Role(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   util::fb2::LockGuard lk(replicaof_mu_);
@@ -4637,6 +4719,7 @@ constexpr uint32_t kReplicaOf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kReplTakeOver = DANGEROUS;
 constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
+constexpr uint32_t kWait = SLOW | CONNECTION;
 constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
 constexpr uint32_t kModule = ADMIN | SLOW | DANGEROUS;
@@ -4676,6 +4759,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, acl::kReplTakeOver}.HFUNC(
              ReplTakeOver)
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
+      << CI{"WAIT", CO::NOSCRIPT | CO::LOADING, 3, 0, 0, acl::kWait}.HFUNC(Wait)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)
       << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
