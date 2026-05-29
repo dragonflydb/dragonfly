@@ -1854,14 +1854,17 @@ void Connection::ClearPipelinedMessages() {
 
     // For in-flight async commands that haven't completed yet:
     if (curr->IsDeferredReply() && !curr->CanReply()) {
-      // For V2 loop we can disown the commands instead of waiting for them
-      if (ioloop_v2_) {
+      if (!ioloop_v2_) {
+        curr->Blocker()->Wait();
+        continue;
+      }
+
+      // Try cancelling the command, if not - let it finish and add it to the orphan list
+      if (!curr->TryCancel()) {
         UnaccountParsedCommand(curr);
         curr->next = nullptr;
         OrphanedCommand::Adopt(curr);
-        continue;
       }
-      curr->Blocker()->Wait();
     }
 
     ReleaseParsedCommand(curr, false);

@@ -301,6 +301,10 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
   return option_ == OPTIN ? match : !match;
 }
 
+bool CommandContext::TryCancel() {
+  return tx_->CancelScheduledTx();
+}
+
 void CommandContext::ReuseInternal() {
   cid_ = nullptr;
   tx_ = nullptr;

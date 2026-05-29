@@ -66,6 +66,11 @@ class ParsedCommand : public cmn::BackedArguments {
     return sizeof(ParsedCommand);
   }
 
+  // Try cancelling the current command execution. Returns true if successful
+  virtual bool TryCancel() {
+    return false;
+  }
+
   // time when the message was parsed as reported by CycleClock::Now()
   // Also serves as the enqueue timestamp for calculating pipeline wait latency.
   uint64_t parsed_cycle = 0;
