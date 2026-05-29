@@ -22,6 +22,7 @@
 #include "server/search/serialization_utils.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
@@ -312,8 +313,10 @@ void SliceSnapshot::HandleFlushData(std::string data) {
 }
 
 void SliceSnapshot::ConsumeBigValueChunk(std::string data) {
-  if (!cntx_->IsRunning())
-    return;  // Short circuit flush on cancel or error to finish
+  if (!cntx_->IsRunning()) {
+    ThisFiber::Yield();
+    return;  // Short circuit flush on cancel or error to finish faster
+  }
 
   HandleFlushData(std::move(data));
   ++ServerState::tlocal()->stats.big_value_preemptions;
