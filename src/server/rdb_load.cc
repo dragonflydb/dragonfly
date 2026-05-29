@@ -584,11 +584,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
 void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   QList* qlv2 = nullptr;
   if (config_.append) {
-    if (pv_->ObjType() != OBJ_LIST) {
-      ec_ = RdbError(errc::invalid_rdb_type);
+    if (!EnsureObjEncoding(OBJ_LIST, kEncodingQL2))
       return;
-    }
-    DCHECK_EQ(pv_->Encoding(), kEncodingQL2);
+
     qlv2 = static_cast<QList*>(pv_->RObjPtr());
   } else {
     qlv2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
@@ -664,10 +662,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   std::move(cleanup).Cancel();
 
   if (!config_.append) {
-    // Try to convert to listpack if it's a single-node quicklist
-    if (uint8_t* lp = qlv2->TryExtractListpack()) {
+    // Try to convert to listpack if it's a single-node quicklist, but only if there is no more data
+    // to come. In case of a chunked list, there can be a single node with more to come in future
+    // chunks.
+    // chunked=true and append=false is the first chunk (append is updated after reading object)
+    if (const auto list_ptr = config_.chunked ? nullptr : qlv2->TryExtractListpack()) {
       CompactObj::DeleteMR<QList>(qlv2);
-      pv_->InitRobj(OBJ_LIST, kEncodingListPack, lp);
+      pv_->InitRobj(OBJ_LIST, kEncodingListPack, list_ptr);
     } else {
       pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
     }
