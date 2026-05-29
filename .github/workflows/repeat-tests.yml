@@ -20,6 +20,16 @@ on:
         description: "A pytest expression which will filter the tests"
         required: true
         type: string
+      second_expression:
+        description: "Optional second pytest expression to run in a separate pytest process per repeat"
+        required: false
+        type: string
+        default: ""
+      second_expression_delay:
+        description: "Seconds to sleep between split pytest invocations"
+        required: false
+        type: number
+        default: 0
       timeout:
         description: "Overall timeout for all test runs"
         required: false
@@ -150,6 +160,8 @@ jobs:
           DRAGONFLY_S3_BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
           EPOLL: ${{ inputs.epoll }}
           EXPRESSION: ${{ inputs.expression }}
+          SECOND_EXPRESSION_DELAY: ${{ inputs.second_expression_delay }}
+          SECOND_EXPRESSION: ${{ inputs.second_expression }}
           TIMEOUT: ${{ inputs.timeout }}
           VMODULE_EXPRESSION: ${{ inputs.vmodule_expression }}
         run: |
@@ -172,17 +184,53 @@ jobs:
 
           run_repeats() {
             read -r -a pytest_args <<< "${EXPRESSION}"
+            read -r -a second_pytest_args <<< "${SECOND_EXPRESSION}"
             failures=0
             failed_repeats=()
             for i in $(seq 1 "${COUNT}"); do
-              echo "Repeat ${i}/${COUNT}: pytest ${EXPRESSION} ${FORCE_EPOLL} ${VMOD}"
-              if pytest "${pytest_args[@]}" \
-                  ${FORCE_EPOLL} \
-                  ${VMOD} \
-                  --color=yes \
-                  --json-report \
-                  --json-report-file="report-${i}.json" \
-                  --log-cli-level=DEBUG; then
+              repeat_failed=0
+
+              if [[ -n "${SECOND_EXPRESSION}" ]]; then
+                echo "Repeat ${i}/${COUNT} step 1/2: pytest ${EXPRESSION} ${FORCE_EPOLL} ${VMOD}"
+                if ! pytest "${pytest_args[@]}" \
+                    ${FORCE_EPOLL} \
+                    ${VMOD} \
+                    --color=yes \
+                    --json-report \
+                    --json-report-file="report-${i}-1.json" \
+                    --log-cli-level=DEBUG; then
+                  repeat_failed=1
+                fi
+
+                if [[ "${SECOND_EXPRESSION_DELAY}" -gt 0 ]]; then
+                  echo "Repeat ${i}/${COUNT}: sleeping ${SECOND_EXPRESSION_DELAY}s before step 2/2"
+                  sleep "${SECOND_EXPRESSION_DELAY}"
+                fi
+
+                echo "Repeat ${i}/${COUNT} step 2/2: pytest ${SECOND_EXPRESSION} ${FORCE_EPOLL} ${VMOD}"
+                if ! pytest "${second_pytest_args[@]}" \
+                    ${FORCE_EPOLL} \
+                    ${VMOD} \
+                    --color=yes \
+                    --json-report \
+                    --json-report-file="report-${i}-2.json" \
+                    --log-cli-level=DEBUG; then
+                  repeat_failed=1
+                fi
+              else
+                echo "Repeat ${i}/${COUNT}: pytest ${EXPRESSION} ${FORCE_EPOLL} ${VMOD}"
+                if ! pytest "${pytest_args[@]}" \
+                    ${FORCE_EPOLL} \
+                    ${VMOD} \
+                    --color=yes \
+                    --json-report \
+                    --json-report-file="report-${i}.json" \
+                    --log-cli-level=DEBUG; then
+                  repeat_failed=1
+                fi
+              fi
+
+              if [[ "${repeat_failed}" -eq 0 ]]; then
                 echo "Repeat ${i}/${COUNT}: passed"
               else
                 failures=$((failures + 1))
