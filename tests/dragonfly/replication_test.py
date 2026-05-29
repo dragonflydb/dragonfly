@@ -5125,3 +5125,105 @@ async def test_cf_chunked_replication_chunk_size(df_factory: DflyInstanceFactory
     assert len(lines) == 1
     peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", lines[0])
     assert peak_bytes < max_cf_chunk_size
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_wait_with_replica(df_factory: DflyInstanceFactory):
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.set("k", "v")
+    # No replicas yet: should return 0 without blocking for the full timeout.
+    start = time.time()
+    result = await c_master.execute_command("WAIT", 1, 200)
+    elapsed_ms = (time.time() - start) * 1000
+    assert result == 0
+    # Should return quickly (well under 200ms) because there is nothing to wait for.
+    assert elapsed_ms < 150, f"WAIT took {elapsed_ms:.0f}ms with no replicas"
+
+    await start_replication(c_replica, master.port)
+    await wait_for_replicas_state(c_replica)
+
+    # Write some keys and wait for 1 replica to acknowledge.
+    await c_master.mset({f"key:{i}": f"val:{i}" for i in range(100)})
+    result = await c_master.execute_command("WAIT", 1, 5000)
+    assert result == 1, f"Expected 1 replica to ack, got {result}"
+
+    # WAIT 0 must still report the actual acked count (a non-blocking probe), not force 0 just
+    # because the requested threshold was already trivially satisfied.
+    result = await c_master.execute_command("WAIT", 0, 100)
+    assert result == 1, f"WAIT 0 should report the real acked count, got {result}"
+
+    # Requesting more replicas than are tracked can never be satisfied (the replica snapshot is
+    # fixed at call time), so this should return the actual count quickly instead of burning the
+    # full timeout.
+    start = time.time()
+    result = await c_master.execute_command("WAIT", 2, 5000)
+    elapsed_ms = (time.time() - start) * 1000
+    assert result == 1, f"Expected 1 replica even though 2 were requested, got {result}"
+    assert (
+        elapsed_ms < 1000
+    ), f"WAIT should give up early once unsatisfiable, took {elapsed_ms:.0f}ms"
+
+    await c_master.connection_pool.disconnect()
+    await c_replica.connection_pool.disconnect()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_wait_semantics(df_factory: DflyInstanceFactory):
+    """
+    Exercises WAIT edge cases against real Valkey semantics:
+    1. WAIT on a replica instance is rejected with an error.
+    2. WAIT inside MULTI/EXEC returns immediately instead of blocking.
+    3. A long/blocked WAIT on the master doesn't stall a concurrent REPLTAKEOVER.
+    """
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await start_replication(c_replica, master.port)
+    await wait_for_replicas_state(c_replica)
+
+    # 1. WAIT is rejected on a replica instance.
+    with pytest.raises(redis.exceptions.ResponseError, match="WAIT cannot be used"):
+        await c_replica.execute_command("WAIT", 0, 0)
+
+    # 2. Inside MULTI/EXEC, WAIT must not block even if it can never be satisfied.
+    pipe = c_master.pipeline(transaction=True)
+    pipe.execute_command("SET", "multi_wait_key", "v")
+    pipe.execute_command("WAIT", 5, 5000)  # only 1 replica exists; would block ~5s outside MULTI.
+    start = time.time()
+    set_result, wait_result = await pipe.execute()
+    elapsed_ms = (time.time() - start) * 1000
+    assert elapsed_ms < 1000, f"WAIT blocked inside MULTI/EXEC for {elapsed_ms:.0f}ms"
+    assert isinstance(wait_result, int) and wait_result <= 1
+
+    # 3. A WAIT that can never be satisfied (2 replicas requested, only 1 exists) must not
+    # block a concurrent REPLTAKEOVER: the poll loop should notice the global state change
+    # and return well before its own (much larger) timeout.
+    c_wait = master.client()
+
+    async def long_wait():
+        start = time.time()
+        result = await c_wait.execute_command("WAIT", 2, 60000)
+        elapsed = time.time() - start
+        assert elapsed < 10, f"WAIT blocked the takeover for {elapsed:.1f}s"
+        return result
+
+    async def delayed_takeover():
+        await asyncio.sleep(0.5)
+        await c_replica.execute_command("REPLTAKEOVER 5")
+
+    await asyncio.gather(long_wait(), delayed_takeover())
+    assert await c_replica.execute_command("role") == ["master", []]
+
+    await c_master.connection_pool.disconnect()
+    await c_replica.connection_pool.disconnect()
+    await c_wait.connection_pool.disconnect()

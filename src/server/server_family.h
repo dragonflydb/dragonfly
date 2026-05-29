@@ -275,6 +275,7 @@ class ServerFamily {
   void ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx)
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void ReplConf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Role(facade::CmdArgParser parser, CommandContext* cmd_cntx)
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Save(facade::CmdArgParser parser, CommandContext* cmd_cntx);
