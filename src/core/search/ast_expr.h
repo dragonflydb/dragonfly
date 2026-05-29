@@ -37,13 +37,11 @@ using AstPrefixNode = AstAffixNode<TagType::PREFIX>;
 using AstSuffixNode = AstAffixNode<TagType::SUFFIX>;
 using AstInfixNode = AstAffixNode<TagType::INFIX>;
 
-// Quoted multi-word phrase. `raw` is the unsplit content between quotes;
-// the executor tokenizes via ICU word boundaries (same as indexing), lowercases,
-// drops stopwords (without advancing positions), then matches against raw
-// posting-list positions.
-// `slop` = max number of intervening tokens allowed between consecutive phrase
-// terms (in order). slop=0 = exact adjacency (the default for `"..."`); slop>0
-// comes from `"..."~N` syntax.
+// Quoted multi-word phrase. `raw` is the verbatim content between quotes; the
+// executor runs the shared text tokenizer over it and matches the resulting
+// tokens against posting-list positions.
+// `slop` = max intervening tokens allowed between consecutive phrase terms
+// (in order). slop=0 = exact adjacency; slop>0 comes from `"..."~N` syntax.
 struct AstPhraseNode {
   explicit AstPhraseNode(std::string raw, uint32_t slop = 0) : raw{std::move(raw)}, slop{slop} {
   }

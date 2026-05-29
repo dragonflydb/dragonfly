@@ -55,6 +55,23 @@ namespace dfly {
 
 class SearchFamilyTest : public BaseFamilyTest {
  protected:
+  // FT.CREATE returns before IndexBuilder finishes ingesting existing docs,
+  // so a follow-up FT.SEARCH can race with it. Poll FT.INFO until ready.
+  void WaitForIndexReady(std::string_view name, absl::Duration timeout = absl::Seconds(10)) {
+    absl::Time deadline = absl::Now() + timeout;
+    while (true) {
+      auto resp = Run({"ft.info", name});
+      auto arr = resp.GetVec();
+      auto it = std::find_if(arr.begin(), arr.end(), [](const auto& e) { return e == "indexing"; });
+      ASSERT_NE(it, arr.end()) << "ft.info missing 'indexing' field";
+      auto next = it + 1;
+      ASSERT_NE(next, arr.end());
+      if (next->GetInt() == 0)
+        return;
+      ASSERT_LE(absl::Now(), deadline) << "Index " << name << " not ready in time";
+      ThisFiber::SleepFor(std::chrono::milliseconds(5));
+    }
+  }
 };
 
 const auto kNoResults = RespElementsAre(IntArg(0));
@@ -674,6 +691,7 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
        "numeric",   "$.areas[*]",
        "as",        "areas",
        "tag"});
+  WaitForIndexReady("i1");
 
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("k1", "k2", "k3"));
 
@@ -700,6 +718,22 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
   // Test invalid json path expression omits that field
   res = Run({"ft.search", "i1", "@name:alex", "return", "1", "::??INVALID??::", "as", "retval"});
   EXPECT_THAT(res, IsMapWithSize("k1", IsMap()));
+}
+
+// Removing WaitForIndexReady here makes FT.SEARCH see only a small fraction
+// of the documents, as IndexBuilder is still running.
+TEST_F(SearchFamilyTest, FtSearchWaitsForInitialIndexing) {
+  constexpr int kDocs = 5000;
+  for (int i = 0; i < kDocs; i++) {
+    Run({"json.set", absl::StrCat("k", i), ".",
+         R"({"name":"x","plays":[{"game":"Pacman","score":1}]})"});
+  }
+
+  Run({"ft.create", "i1", "on", "json", "schema", "$.name", "as", "name", "text"});
+  WaitForIndexReady("i1");
+
+  auto resp = Run({"ft.search", "i1", "*", "LIMIT", "0", "0"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(kDocs)));
 }
 
 TEST_F(SearchFamilyTest, Tags) {
@@ -780,6 +814,28 @@ TEST_F(SearchFamilyTest, TagNumbers) {
   EXPECT_THAT(Run({"ft.search", "i1", "@number:{1.0|2|3.0}"}), AreDocIds("d:2"));
   EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2|3.0}"}), AreDocIds("d:1", "d:2"));
   EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|hello|2}"}), AreDocIds("d:1", "d:2"));
+}
+
+TEST_F(SearchFamilyTest, ReturnEmptyFieldValue) {
+  EXPECT_EQ(Run({"ft.create", "probe", "ON", "JSON", "PREFIX", "1", "probe:", "SCHEMA", "$.parent",
+                 "AS", "parent", "TAG", "$.body", "AS", "body", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"json.set", "probe:1", "$", R"({"parent":"","body":""})"}), "OK");
+  EXPECT_EQ(Run({"json.set", "probe:2", "$", R"({"parent":"a","body":"hello"})"}), "OK");
+
+  auto resp = Run({"ft.search", "probe", "*", "RETURN", "2", "parent", "body", "SORTBY", "parent"});
+  EXPECT_THAT(resp, IsMapWithSize("probe:1", IsMap("parent", "", "body", ""), "probe:2",
+                                  IsMap("parent", "a", "body", "hello")));
+
+  EXPECT_EQ(Run({"ft.create", "hprobe", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "parent",
+                 "TAG", "body", "TEXT"}),
+            "OK");
+  Run({"hset", "h:1", "parent", "", "body", ""});
+  Run({"hset", "h:2", "parent", "a", "body", "hello"});
+
+  resp = Run({"ft.search", "hprobe", "*", "RETURN", "2", "parent", "body", "SORTBY", "parent"});
+  EXPECT_THAT(resp, IsMapWithSize("h:1", IsMap("parent", "", "body", ""), "h:2",
+                                  IsMap("parent", "a", "body", "hello")));
 }
 
 TEST_F(SearchFamilyTest, TagEscapeCharacters) {
@@ -1460,6 +1516,175 @@ TEST_F(SearchFamilyTest, EscapedSymbols) {
   Run({"hset", "i1", "color", "blue]1#-"});
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\]1\\#\\-}"}), AreDocIds("i1"));
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+}
+
+// Issue #7432: TEXT tokenization must honor backslash escapes symmetrically through
+// INDEX + QUERY for `\.`, `\-`, `\:` etc.
+TEST_F(SearchFamilyTest, TextEscapedPrefixCaseAJson) {
+  EXPECT_EQ(Run({"FT.CREATE", "probe", "ON", "JSON", "PREFIX", "1", "probe:", "SCHEMA", "$.prefix",
+                 "AS", "prefix", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"JSON.SET", "probe:1", "$", R"({"prefix":"u123\\.documents"})"}), "OK");
+
+  EXPECT_THAT(Run({"FT.SEARCH", "probe", "@prefix:u123\\.documents*", "DIALECT", "2"}),
+              AreDocIds("probe:1"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedPrefixCaseAHash) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "u123\\.documents"});
+  Run({"HSET", "t:2", "val", "u123.documents"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:u123\\.documents*", "DIALECT", "2"}), AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:u123*", "DIALECT", "2"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:documents", "DIALECT", "2"}), AreDocIds("t:2"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedHybridKnn) {
+  EXPECT_EQ(
+      Run({"FT.CREATE", "probe2",          "ON",    "JSON",   "PREFIX", "1",           "probe2:",
+           "SCHEMA",    "$.prefix",        "AS",    "prefix", "TEXT",   "$.embedding", "AS",
+           "embedding", "VECTOR",          "FLAT",  "6",      "TYPE",   "FLOAT32",     "DIM",
+           "4",         "DISTANCE_METRIC", "COSINE"}),
+      "OK");
+
+  EXPECT_EQ(Run({"JSON.SET", "probe2:a", "$", R"({"prefix":"ns\\.x","embedding":[1,0,0,0]})"}),
+            "OK");
+  EXPECT_EQ(Run({"JSON.SET", "probe2:b", "$", R"({"prefix":"ns\\.x","embedding":[0,1,0,0]})"}),
+            "OK");
+  EXPECT_EQ(Run({"JSON.SET", "probe2:c", "$", R"({"prefix":"ns\\.y","embedding":[0,0,1,0]})"}),
+            "OK");
+
+  const float vec[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+  std::string vec_bytes(reinterpret_cast<const char*>(vec), sizeof(vec));
+  auto resp = Run({"FT.SEARCH", "probe2", "@prefix:ns\\.x*=>[KNN 2 @embedding $v AS d]", "SORTBY",
+                   "d", "ASC", "DIALECT", "2", "PARAMS", "2", "v", vec_bytes});
+  EXPECT_THAT(resp, AreDocIds("probe2:a", "probe2:b"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedRoundTripDotDashColon) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "foo\\.bar"});
+  Run({"HSET", "t:2", "val", "foo\\-bar"});
+  Run({"HSET", "t:3", "val", "foo\\:bar"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\.bar", "DIALECT", "2"}), AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\-bar", "DIALECT", "2"}), AreDocIds("t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\:bar", "DIALECT", "2"}), AreDocIds("t:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:bar", "DIALECT", "2"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, TextEscapedSuffixAndInfix) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT",
+                 "WITHSUFFIXTRIE"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "foo\\.bar"});
+  Run({"HSET", "t:2", "val", "xxfoo\\.barxx"});
+  Run({"HSET", "t:3", "val", "foo.bar"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:*\\.bar", "DIALECT", "2"}), AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:*\\.b*", "DIALECT", "2"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:*foo*", "DIALECT", "2"}),
+              AreDocIds("t:1", "t:2", "t:3"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedPhrase) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "p:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "p:1", "val", "foo\\.bar baz"});
+  Run({"HSET", "p:2", "val", "foo.bar baz"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:\"foo\\.bar\"", "DIALECT", "2"}), AreDocIds("p:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:\"foo.bar\"", "DIALECT", "2"}), AreDocIds("p:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:\"foo\\.bar baz\"", "DIALECT", "2"}), AreDocIds("p:1"));
+}
+
+TEST_F(SearchFamilyTest, TextPunctuationSeparators) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "foo.bar"});
+  Run({"HSET", "t:2", "val", "foo:bar"});
+  Run({"HSET", "t:3", "val", "don't"});
+  Run({"HSET", "t:4", "val", "3.14"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo", "DIALECT", "2"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:bar", "DIALECT", "2"}), AreDocIds("t:1", "t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:don", "DIALECT", "2"}), AreDocIds("t:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:t", "DIALECT", "2"}), AreDocIds("t:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:14", "DIALECT", "2"}), AreDocIds("t:4"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedSpaceJoinsTokens) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "foo\\ bar"});
+  Run({"HSET", "t:2", "val", "foo bar"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\ bar", "DIALECT", "2"}), AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo", "DIALECT", "2"}), AreDocIds("t:2"));
+}
+
+TEST_F(SearchFamilyTest, TextTrailingBackslashDropped) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val", "foo\\"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo", "DIALECT", "2"}), AreDocIds("t:1"));
+}
+
+TEST_F(SearchFamilyTest, TextEscapedSpaceDoesNotForgeSynonymSentinel) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "i", "sg", "word1", "word2"}), "OK");
+  Run({"HSET", "d:1", "val", "word1"});
+  Run({"HSET", "d:2", "val", "\\ sg"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "word1", "DIALECT", "2"}), AreDocIds("d:1"));
+}
+
+TEST_F(SearchFamilyTest, TextMalformedUtf8AfterEscapeIsSingleByte) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  // Backslash followed by an invalid lead byte; the escape consumes exactly one byte
+  // (matching the query lexer), so the token is `foo<byte>` not `foo`.
+  Run({"HSET", "d:1", "val", "foo\\\xc2"});
+  // Backslash + bad lead + ASCII separator: the bad lead is consumed by the escape,
+  // then `.` splits, leaving two tokens; `bar` is searchable on its own.
+  Run({"HSET", "d:2", "val", "foo\\\xc2.bar"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo\\\xc2", "DIALECT", "2"}), AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:bar", "DIALECT", "2"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:foo", "DIALECT", "2"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, TextNonAsciiBytesArePartOfWord) {
+  EXPECT_EQ(Run({"FT.CREATE", "i", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "val", "TEXT"}),
+            "OK");
+  Run({"HSET", "t:1", "val",
+       "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd1\x96\xd1\x82.\xd1\x81\xd0\xb2\xd1\x96\xd1\x82"});
+  Run({"HSET", "t:2", "val",
+       "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd1\x96\xd1\x82_\xd1\x81\xd0\xb2\xd1\x96\xd1\x82"});
+  Run({"HSET", "t:3", "val",
+       "foo\xe2\x82\xac"
+       "bar"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd1\x96\xd1\x82",
+                   "DIALECT", "2"}),
+              AreDocIds("t:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:\xd1\x81\xd0\xb2\xd1\x96\xd1\x82", "DIALECT", "2"}),
+              AreDocIds("t:1"));
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "i",
+           "@val:\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd1\x96\xd1\x82_\xd1\x81\xd0\xb2\xd1\x96\xd1\x82",
+           "DIALECT", "2"}),
+      AreDocIds("t:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "i",
+                   "@val:foo\xe2\x82\xac"
+                   "bar",
+                   "DIALECT", "2"}),
+              AreDocIds("t:3"));
 }
 
 TEST_F(SearchFamilyTest, FlushSearchIndices) {
@@ -2318,7 +2543,6 @@ TEST_F(SearchFamilyTest, SynonymsWithSpaces) {
   EXPECT_THAT(Run({"HSET", "doc:2", "field", "syn_group"}), IntArg(1));
   EXPECT_THAT(Run({"HSET", "doc:3", "field", "word1"}), IntArg(1));
   EXPECT_THAT(Run({"HSET", "doc:4", "field", "word2"}), IntArg(1));
-  EXPECT_THAT(Run({"HSET", "doc:5", "field", R"(\ syn_group)"}), IntArg(1));
 
   auto resp = Run({"FT.SEARCH", "my_index", "word1"});
   EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
@@ -2327,14 +2551,10 @@ TEST_F(SearchFamilyTest, SynonymsWithSpaces) {
   EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
 
   resp = Run({"FT.SEARCH", "my_index", "syn_group"});
-  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1", "doc:5"));
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1"));
 
-  // FT.SEARCH my_index "\ syn_group"
-  // FT.SEARCH my_index " syn_group"
-  // The both transform to " syn_group" after syntax analysis
-  // " syn_group" passes to query_str in FtSearch
   resp = Run({"FT.SEARCH", "my_index", " syn_group"});
-  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:5"));
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
 }
 
 TEST_F(SearchFamilyTest, SynonymsWithLeadingSpaces) {
