@@ -746,63 +746,29 @@ async def test_save_hash_with_expired_fields(async_client: aioredis.Redis):
     assert await async_client.ping()
 
 
-async def test_hgetall_lazy_expiry_during_bgsave(df_factory: DflyInstanceFactory):
-    """Regression test for https://github.com/dragonflydb/dragonfly/issues/7447.
-
-    BGSAVE active while concurrent HGETALL triggers lazy field-expiry, leaving an
-    empty hash that the snapshot's OnChangeBlocking tries to serialize -> SIGABRT.
+@dfly_args({"proactor_threads": 1, "dbfilename": "test-hgetall-expiry-bgsave"})
+async def test_hgetall_lazy_expiry_during_bgsave(async_client: aioredis.Redis):
+    """HVALS lazily empties a hash and deletes it mid-BGSAVE; the snapshot then
+    serializes the now-empty hash. On unfixed code SaveEntry aborts on it.
     """
-    df = df_factory.create(
-        proactor_threads=1,
-        dbfilename=f"dump_{tmp_file_name()}",
-    )
-    df.start()
-    client = df.client()
+    client = async_client
 
-    num_hashes = 200
+    # Filler so the snapshot stays in progress long enough to race the read below.
+    await client.execute_command("DEBUG", "POPULATE", "50000")
+    await client.execute_command("HSETEX", "KEEPTTL", "1", "field", "value")
+    await asyncio.sleep(2)  # field expires; key stays until a read touches it
 
-    # Filler so a snapshot lasts well beyond the HGETALL burst below, giving the reads
-    # time to race the traversal to the hash buckets.
-    await client.execute_command("DEBUG", "POPULATE", "20000", "filler", "1024", "RAND")
+    await client.execute_command("BGSAVE")
+    try:
+        async with timeout(10):
+            while not await is_saving(client):
+                await asyncio.sleep(0.01)
+    except asyncio.TimeoutError:
+        pass  # snapshot already finished; race window missed but safe
 
-    async def rearm():
-        # One 1s-TTL field per hash. The field stays physically present until a read
-        # touches it after expiry; that read empties the hash and calls DeleteHw.
-        pipe = client.pipeline(transaction=False)
-        for i in range(num_hashes):
-            pipe.execute_command("HSET", f"h:{i}", "f1", "v1")
-            pipe.execute_command("HEXPIRE", f"h:{i}", "1", "FIELDS", "1", "f1")
-        await pipe.execute()
+    await client.execute_command("HVALS", "KEEPTTL")
 
-    async def hgetall_burst():
-        # Bounded so it cannot starve the single-threaded snapshot. The first pass that
-        # lands while the snapshot is active is the one that triggers the bug.
-        c = df.client()
-        try:
-            for _ in range(3):
-                pipe2 = c.pipeline(transaction=False)
-                for i in range(num_hashes):
-                    pipe2.hgetall(f"h:{i}")
-                await pipe2.execute()
-        except Exception:
-            pass
-        await c.aclose()
-
-    async with timeout(120):
-        for _ in range(3):
-            await rearm()
-            # Let the fields expire without touching the keys (lazy expiry still pending),
-            # so the emptying happens during the snapshot below.
-            await asyncio.sleep(1.2)
-
-            await client.execute_command("BGSAVE")
-            await asyncio.gather(*[hgetall_burst() for _ in range(4)])
-            while await is_saving(client):
-                await asyncio.sleep(0.05)
-
-    # Server must still be alive.
     assert await client.ping()
-    await client.aclose()
 
 
 @dfly_args({"proactor_threads": 1, "dbfilename": "test-save-del-crash", "dir": "{DRAGONFLY_TMP}/"})

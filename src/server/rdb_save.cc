@@ -268,13 +268,12 @@ error_code RdbSerializer::SelectDb(uint32_t dbid) {
 io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
                                              uint64_t expire_ms, uint32_t mc_flags, DbIndex dbid) {
   if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
-    // An empty container can appear transiently when a read command (e.g. HGETALL)
-    // lazily expires all fields and calls DeleteHw while a snapshot is active.
-    // Skipping is correct: the key is deleted immediately after, so it must not
-    // appear in the snapshot.
+    // A read that lazily expires a container's last field deletes the key while a
+    // snapshot is active, so an empty value can reach here transiently; skipping is
+    // correct. ERROR (not DFATAL) still flags a genuinely empty key left by a bug.
     string_view key = pk.GetSlice(&tmp_str_);
-    LOG(WARNING) << "SaveEntry skipped empty PrimeValue with key: " << key << " with tag "
-                 << static_cast<int>(pv.Tag());
+    LOG(ERROR) << "SaveEntry skipped empty PrimeValue with key: " << key << " with tag "
+               << static_cast<int>(pv.Tag());
     return 0;
   }
 
