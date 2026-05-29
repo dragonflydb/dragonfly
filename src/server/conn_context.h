@@ -164,7 +164,6 @@ struct ConnectionState {
     uint32_t repl_flow_id = UINT32_MAX;
     std::string repl_ip_address;
     uint32_t repl_listening_port = 0;
-    DflyVersion repl_version = DflyVersion::VER1;
   };
 
   struct SquashingInfo {

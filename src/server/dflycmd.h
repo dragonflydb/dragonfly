@@ -46,8 +46,6 @@ struct FlowInfo {
   std::unique_ptr<JournalStreamer> streamer;  // Streamer for stable sync phase
   std::string eof_token;
 
-  DflyVersion version = DflyVersion::VER1;
-
   std::optional<LSN> start_partial_sync_at;
   uint64_t last_acked_lsn = 0;
 
@@ -208,6 +206,9 @@ class DflyCmd {
     std::atomic<bool> id_set_{false};
     std::string address_;
     uint32_t listening_port_;
+
+    // We expect to update version_ during handshaking, for now we set it to
+    // the oldest version to be safe.
     std::atomic<DflyVersion> version_{DflyVersion::VER1};
 
     std::vector<FlowInfo> flows_;
@@ -280,7 +281,8 @@ class DflyCmd {
   void Load(CmdArgList args, CommandContext* cmd_cntx);
 
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
-  facade::OpStatus StartFullSyncInThread(FlowInfo* flow, ExecutionState* cntx, EngineShard* shard);
+  facade::OpStatus StartFullSyncInThread(DflyVersion version, FlowInfo* flow, ExecutionState* cntx,
+                                         EngineShard* shard);
 
   // Stop full sync in thread. Run state switch cleanup.
   facade::OpStatus StopFullSyncInThread(FlowInfo* flow, ExecutionState* cntx, EngineShard* shard);

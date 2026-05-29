@@ -300,7 +300,6 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
     conn_cntx->master_repl_flow = &flow;
     flow.conn = cmd_cntx->conn();
     flow.eof_token = eof_token;
-    flow.version = replica_ptr->GetVersion();
 
     if (!conn_cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
       // Listener::PreShutdown() triggered
@@ -365,8 +364,9 @@ void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Use explicit assignment for replica_ptr, because capturing structured bindings is C++20.
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
-      status = StartFullSyncInThread(&replica_ptr->GetFlow(shard->shard_id()),
-                                     &replica_ptr->GetExecState(), shard);
+      status =
+          StartFullSyncInThread(replica_ptr->GetVersion(), &replica_ptr->GetFlow(shard->shard_id()),
+                                &replica_ptr->GetExecState(), shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
 
@@ -675,8 +675,8 @@ void DflyCmd::Load(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendOk();
 }
 
-OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
-                                        EngineShard* shard) {
+OpStatus DflyCmd::StartFullSyncInThread(DflyVersion version, FlowInfo* flow,
+                                        ExecutionState* exec_st, EngineShard* shard) {
   DCHECK(shard);
   DCHECK(flow->conn);
 
@@ -684,8 +684,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
   // of the flows also contain them.
   SaveMode save_mode =
       shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
-  flow->saver =
-      std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false, "", flow->version);
+  flow->saver = std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false, "", version);
 
   flow->cleanup = [flow, shard]() {
     // socket shutdown is needed before calling saver->Cancel(). Because
