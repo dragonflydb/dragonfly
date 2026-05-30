@@ -187,8 +187,7 @@ TEST_F(SetFamilyTest, SPop) {
 
   Run({"sadd", "y", "a", "b", "c"});
   resp = Run({"spop", "y", "1"});
-  EXPECT_THAT(resp, ArgType(RespExpr::STRING));
-  EXPECT_THAT(resp, testing::AnyOf("a", "b", "c"));
+  EXPECT_THAT(resp, RespElementsAre(testing::AnyOf("a", "b", "c")));
 
   resp = Run({"smembers", "y"});
   ASSERT_THAT(resp, ArrLen(2));
@@ -220,8 +219,7 @@ TEST_F(SetFamilyTest, SRandMember) {
   EXPECT_THAT(resp, AnyOf("1", "2", "3"));
 
   resp = Run({"SRandMember", "x", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
-  EXPECT_THAT(resp, AnyOf("1", "2", "3"));
+  EXPECT_THAT(resp, RespElementsAre(AnyOf("1", "2", "3")));
 
   resp = Run({"SRandMember", "x", "2"});
   ASSERT_THAT(resp, ArrLen(2));
@@ -238,8 +236,7 @@ TEST_F(SetFamilyTest, SRandMember) {
 
   // Test if count < 0 (IntSet)
   resp = Run({"SRandMember", "x", "-1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
-  EXPECT_THAT(resp, AnyOf("1", "2", "3"));
+  EXPECT_THAT(resp, RespElementsAre(AnyOf("1", "2", "3")));
 
   resp = Run({"SRandMember", "x", "-2"});
   ASSERT_THAT(resp, ArrLen(2));
@@ -263,8 +260,7 @@ TEST_F(SetFamilyTest, SRandMember) {
   EXPECT_THAT(resp, AnyOf("a", "b", "c"));
 
   resp = Run({"SRandMember", "y", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
-  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
+  EXPECT_THAT(resp, RespElementsAre(AnyOf("a", "b", "c")));
 
   resp = Run({"SRandMember", "y", "2"});
   ASSERT_THAT(resp, ArrLen(2));
@@ -281,8 +277,7 @@ TEST_F(SetFamilyTest, SRandMember) {
 
   // Test if count < 0 (StrSet)
   resp = Run({"SRandMember", "y", "-1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
-  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
+  EXPECT_THAT(resp, RespElementsAre(AnyOf("a", "b", "c")));
 
   resp = Run({"SRandMember", "y", "-2"});
   ASSERT_THAT(resp, ArrLen(2));
@@ -336,10 +331,10 @@ TEST_F(SetFamilyTest, SMIsMember) {
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), IntArg(0))));
 
   resp = Run({"smismember", "foo", "b"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   resp = Run({"smismember", "foo", "x"});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 }
 
 TEST_F(SetFamilyTest, Empty) {
@@ -770,7 +765,7 @@ TEST_F(SetFamilyTest, FieldExpireDeletesEmptySet) {
   // FIELDEXPIRE on an already-expired member should clean up the empty set.
   auto resp = Run({"fieldexpire", "key", "100", "a"});
   // -2 means the field was not found (expired).
-  EXPECT_THAT(resp, IntArg(-2));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(-2)));
   EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
 }
 

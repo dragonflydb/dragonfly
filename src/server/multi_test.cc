@@ -96,7 +96,7 @@ TEST_F(MultiTest, MultiWithError) {
 
   EXPECT_THAT(Run({"multi"}), "OK");
   EXPECT_THAT(Run({"set", "z", "y"}), "QUEUED");
-  EXPECT_THAT(Run({"exec"}), "OK");
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("OK"));
 
   EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
   EXPECT_THAT(Run({"get", "z"}), "y");
@@ -147,6 +147,63 @@ TEST_F(MultiTxTest, MultiUnlock) {
 
   for (auto key : keys)
     EXPECT_FALSE(IsLocked(0, key));
+}
+
+// Test that CancelScheduledTx successfully cancels a multi-shard transaction
+// that has been scheduled and armed but not yet executed on any shard.
+TEST_F(MultiTxTest, CancelScheduledTx) {
+  // Set initial values on keys spanning multiple shards.
+  Run({"mset", kKeySid0, "v0", kKeySid1, "v1", kKeySid2, "v2"});
+
+  // Suspend all shards with a global transaction. This prevents any other transaction
+  // from executing, ensuring the MSET stays armed but unexecuted.
+  TransactionSuspension suspension;
+  pp_->at(0)->Await([&] { suspension.Start(); });
+
+  // Launch MSET on a fiber. It will schedule and arm but block in run_barrier_.Wait()
+  // because the global suspension transaction holds all shards.
+  auto mset_fb = pp_->at(0)->LaunchFiber([&] {
+    Run("mset_client", {"MSET", kKeySid0, "new0", kKeySid1, "new1", kKeySid2, "new2"});
+  });
+
+  // Wait for the MSET transaction to be scheduled.
+  Transaction* mset_tx = nullptr;
+  ExpectConditionWithinTimeout([&] {
+    bool ready = false;
+    pp_->at(0)->Await([&] {
+      mset_tx = GetTransaction("mset_client");
+      ready = mset_tx != nullptr && mset_tx->IsScheduled();
+    });
+    return ready;
+  });
+
+  // Cancel the MSET transaction from proactor 0.
+  bool cancelled = false;
+  pp_->at(0)->Await([&] { cancelled = mset_tx->CancelScheduledTx(); });
+  EXPECT_TRUE(cancelled);
+
+  // Release the suspension so everything can proceed.
+  pp_->at(0)->Await([&] { suspension.Terminate(); });
+
+  mset_fb.Join();
+
+  // Verify the MSET's values did NOT take effect.
+  EXPECT_EQ(Run({"get", kKeySid0}), "v0");
+  EXPECT_EQ(Run({"get", kKeySid1}), "v1");
+  EXPECT_EQ(Run({"get", kKeySid2}), "v2");
+
+  // Verify no locks are held.
+  EXPECT_FALSE(IsLocked(0, kKeySid0));
+  EXPECT_FALSE(IsLocked(0, kKeySid1));
+  EXPECT_FALSE(IsLocked(0, kKeySid2));
+
+  // Verify tx queues are empty.
+  atomic_bool tx_empty{true};
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    if (!shard->txq()->Empty())
+      tx_empty.store(false);
+  });
+  EXPECT_TRUE(tx_empty);
 }
 
 TEST_F(MultiTest, MultiGlobalCommands) {
@@ -247,12 +304,12 @@ TEST_F(MultiTest, MultiEmpty) {
   Run({"multi"});
   ASSERT_EQ(Run({"ping", "foo"}), "QUEUED");
   resp = Run({"exec"});
-  EXPECT_EQ(resp, "foo");
+  EXPECT_THAT(resp, RespElementsAre("foo"));
 
   Run({"multi"});
   Run({"set", "a", ""});
   resp = Run({"exec"});
-  EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(resp, RespElementsAre("OK"));
 
   resp = Run({"get", "a"});
   EXPECT_EQ(resp, "");
@@ -432,7 +489,7 @@ TEST_F(MultiTest, MultiRename) {
   resp = Run({"rename", kKey4, kKey2});
   ASSERT_EQ(resp, "QUEUED");
   resp = Run({"exec"});
-  EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(resp, RespElementsAre("OK"));
 
   EXPECT_FALSE(IsLocked(0, kKey1));
   EXPECT_FALSE(IsLocked(0, kKey2));
@@ -445,7 +502,7 @@ TEST_F(MultiTest, MultiWithoutTx) {
   Run({"multi"});
   Run({"ping"});
   auto resp = Run({"exec"});
-  EXPECT_EQ(resp, "PONG");
+  EXPECT_THAT(resp, RespElementsAre("PONG"));
 
   // EVAL without keys and default script flags should be non-transactional
   Run({"multi"});
@@ -480,7 +537,7 @@ TEST_F(MultiTest, MultiCommandsWithBonusKeys) {
   Run({"multi"});
   Run({"zinterstore", "ze", "2", "za", "zb", "z one extra"});
   resp = Run({"exec"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, RespElementsAre(ErrArg("syntax error")));
 }
 
 TEST_F(MultiTest, MultiHop) {
@@ -590,7 +647,7 @@ TEST_F(MultiTest, Eval) {
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"hvals", "hmap"});
-  EXPECT_EQ(resp, "2222");
+  EXPECT_THAT(resp, RespElementsAre("2222"));
 
   Run({"sadd", "s1", "a", "b"});
   Run({"sadd", "s2", "a", "c"});
@@ -998,7 +1055,7 @@ TEST_F(MultiTest, UndeclaredKeyFlag) {
 
   // Clear all Lua scripts so we can configure the cache
   EXPECT_THAT(Run({"script", "flush"}), "OK");
-  EXPECT_THAT(Run({"script", "exists", sha}), IntArg(0));
+  EXPECT_THAT(Run({"script", "exists", sha}), RespElementsAre(IntArg(0)));
 
   EXPECT_THAT(
       Run({"config", "set", "lua_undeclared_keys_shas", absl::StrCat(sha, ",NON-EXISTING-HASH")}),
@@ -1459,7 +1516,7 @@ TEST_F(MultiEvalTest, MultiAndEval) {
   Run({"multi"});
   Run({"eval", "return 'OK';", "0"});
   auto resp = Run({"exec"});
-  EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(resp, RespElementsAre("OK"));
 
   // We had a bug running script load inside multi
   Run({"multi"});

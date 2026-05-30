@@ -282,7 +282,7 @@ TEST_F(ListFamilyTest, BLPopTimeout) {
   Run({"blpop", kKey1, "0"});
   resp = Run({"exec"});
 
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL_ARRAY)));
   ASSERT_FALSE(IsLocked(0, kKey1));
   ASSERT_EQ(0, NumWatched());
 }
@@ -482,7 +482,7 @@ TEST_F(ListFamilyTest, LRem) {
   ASSERT_THAT(Run({"lpush", kKey3, "bar", "bar", "foo"}), IntArg(3));
   ASSERT_THAT(Run({"lrem", kKey3, "-2", "bar"}), IntArg(2));
   resp = Run({"lrange", kKey3, "0", "-1"});
-  ASSERT_EQ(resp, "foo");
+  ASSERT_THAT(resp, RespElementsAre("foo"));
 }
 
 TEST_F(ListFamilyTest, DumpRestorePlain) {
@@ -491,7 +491,7 @@ TEST_F(ListFamilyTest, DumpRestorePlain) {
   auto buffer = Run({"DUMP", kKey1}).GetBuf();
   EXPECT_EQ(Run({"RESTORE", kKey2, "0", ToSV(buffer)}), "OK");
   EXPECT_EQ(CheckedInt({"LLEN", kKey2}), 1);
-  EXPECT_EQ(Run({"LRANGE", kKey2, "0", "1"}), kValue);
+  EXPECT_THAT(Run({"LRANGE", kKey2, "0", "1"}), RespElementsAre(kValue));
 }
 
 TEST_F(ListFamilyTest, LTrim) {
@@ -501,7 +501,7 @@ TEST_F(ListFamilyTest, LTrim) {
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec(), ElementsAre("c", "d"));
   ASSERT_EQ(Run({"ltrim", kKey1, "0", "0"}), "OK");
-  ASSERT_EQ(Run({"lrange", kKey1, "0", "1"}), "c");
+  ASSERT_THAT(Run({"lrange", kKey1, "0", "1"}), RespElementsAre("c"));
   Run({"set", "foo", "bar"});
   ASSERT_THAT(Run({"ltrim", "foo", "0", "1"}), ErrArg("WRONGTYPE"));
   ASSERT_EQ(Run({"ltrim", "nexists", "0", "1"}), "OK");
@@ -659,7 +659,7 @@ TEST_F(ListFamilyTest, LMove) {
   ASSERT_THAT(resp, "4");
 
   resp = Run({"lrange", kKey1, "0", "-1"});
-  ASSERT_EQ(resp, "3");
+  ASSERT_THAT(resp, RespElementsAre("3"));
 
   resp = Run({"lrange", kKey2, "0", "-1"});
   ASSERT_THAT(resp, ArrLen(4));
@@ -778,7 +778,7 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
   Run({"multi"});
   Run({"brpoplpush", "y", "x", "0"});
   RespExpr resp = Run({"exec"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
   ASSERT_FALSE(IsLocked(0, "x"));
   ASSERT_FALSE(IsLocked(0, "y"));
   ASSERT_EQ(0, NumWatched());
@@ -873,7 +873,7 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   Run({"lpush", "x", "val"});
   EXPECT_EQ(Run({"brpoplpush", "x", "z", "0"}), "val");
   resp = Run({"lrange", "z", "0", "-1"});
-  ASSERT_EQ(resp, "val");
+  ASSERT_THAT(resp, RespElementsAre("val"));
   Run({"del", "z"});
   ASSERT_EQ(0, NumWatched());
 
@@ -967,7 +967,7 @@ TEST_F(ListFamilyTest, BLMoveRings) {
 
   for (int i = 1; i < 10; i++)
     EXPECT_THAT(Run({"llen", to_string(i)}), IntArg(0));
-  EXPECT_EQ(Run({"lrange", "0", "0", "-1"}), "v1");
+  EXPECT_THAT(Run({"lrange", "0", "0", "-1"}), RespElementsAre("v1"));
 }
 
 // Move in waves where each wave layer has a fixed set of "vertices" through which all values travel
@@ -1056,7 +1056,7 @@ TEST_F(ListFamilyTest, LPushX) {
   EXPECT_THAT(Run({"llen", kKey1}), IntArg(0));
 
   EXPECT_THAT(Run({"lpush", kKey1, "val1"}), IntArg(1));
-  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}), "val1");
+  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}), RespElementsAre("val1"));
 
   EXPECT_THAT(Run({"lpushx", kKey1, "val2"}), IntArg(2));
   EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}).GetVec(), ElementsAre("val2", "val1"));
@@ -1068,7 +1068,7 @@ TEST_F(ListFamilyTest, RPushX) {
   EXPECT_THAT(Run({"llen", kKey1}), IntArg(0));
 
   EXPECT_THAT(Run({"rpush", kKey1, "val1"}), IntArg(1));
-  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}), "val1");
+  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}), RespElementsAre("val1"));
 
   EXPECT_THAT(Run({"rpushx", kKey1, "val2"}), IntArg(2));
   EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}).GetVec(), ElementsAre("val1", "val2"));

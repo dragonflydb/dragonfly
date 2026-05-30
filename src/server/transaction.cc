@@ -1038,6 +1038,70 @@ void Transaction::Conclude() {
   Execute(std::move(cb), true);
 }
 
+bool Transaction::CancelScheduledTx() {
+  // For safety reasons we don't cancel those - requires more investigation
+  if (IsGlobal())
+    return false;
+
+  DCHECK(coordinator_state_ & COORD_SCHED);
+  bool is_safe = cid_->IsReadOnly();
+
+  // First, try to clear all is_armed flags
+  std::bitset<1024> disarmed_shards;
+  IterateActiveShards([&](auto& sd, ShardId i) {
+    if (sd.is_armed.exchange(false, memory_order_acquire))
+      disarmed_shards.set(i);
+  });
+
+  // Issue PollExecutions to shards that were disarmed
+  auto poll_disarmed = [this, &disarmed_shards](const char* context) {
+    IterateActiveShards([&](auto& sd, ShardId i) {
+      if (disarmed_shards.test(i)) {
+        use_count_.fetch_add(1, memory_order_relaxed);
+        shard_set->Add(i, [this, context] {
+          EngineShard::tlocal()->PollExecution(context, this);
+          intrusive_ptr_release(this);
+        });
+      }
+    });
+  };
+
+  // For mutable transctions we can cancel only if all shards can be stopped.
+  // Reads do not cause any inconsistencies if stopped mid-read, so any condition is ok
+  unsigned disarmed_cnt = disarmed_shards.count();
+  if (disarmed_cnt == unique_shard_cnt_ || is_safe) {
+    // Cancel the transaction
+    auto is_active = [this](uint32_t i) { return IsActive(i); };
+    shard_set->RunBriefInParallel([this](EngineShard* shard) { CancelShardCb(shard); }, is_active);
+    coordinator_state_ = (coordinator_state_ & ~COORD_SCHED) | COORD_CANCELLED;
+
+    // Signal the run_barrier_ for all shards we disarmed so the coordinator unblocks.
+    for (unsigned i = 0; i < disarmed_cnt; i++)
+      run_barrier_.Dec();
+
+    // Issue polls after cancels (like in schedule)
+    poll_disarmed("cancel_cancel");
+
+    // If readonly and some shards already ran, wait for them to finish naturally.
+    if (disarmed_cnt < unique_shard_cnt_)
+      run_barrier_.Wait();
+
+    return true;
+  } else {
+    // Rearm to ensure atomicity of execution on all shards
+    std::atomic_thread_fence(memory_order_release);
+    IterateActiveShards([&](auto& sd, ShardId i) {
+      if (disarmed_shards.test(i)) {
+        sd.is_armed.store(true, memory_order_relaxed);
+      }
+    });
+
+    // Submit poll tasks for re-armed shards so they get picked up.
+    poll_disarmed("cancel_rearm");
+    return false;
+  }
+}
+
 void Transaction::Refurbish() {
   txid_ = 0;
   coordinator_state_ = 0;

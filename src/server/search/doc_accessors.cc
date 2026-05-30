@@ -45,18 +45,17 @@ string_view SdsToSafeSv(sds str) {
 using FieldValue = std::optional<search::SortableValue>;
 
 FieldValue ToSortableValue(search::SchemaField::FieldType type, string_view value) {
-  if (value.empty()) {
-    return std::nullopt;
-  }
-
   if (type == search::SchemaField::NUMERIC) {
     auto value_as_double = search::ParseNumericField(value);
-    if (!value_as_double) {  // temporary convert to double
+    if (!value_as_double) {
       return std::nullopt;
     }
     return value_as_double.value();
   }
   if (type == search::SchemaField::VECTOR) {
+    if (value.empty()) {
+      return std::nullopt;
+    }
     auto opt_vector = search::BytesToFtVectorSafe(value);
     if (!opt_vector) {
       return std::nullopt;
@@ -108,8 +107,11 @@ SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
   SearchDocData out{};
   for (const auto& field : fields) {
     string_view fident = field.Identifier(schema, false);
-    auto field_value =
-        ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident).value(), ","));
+    auto strings = GetStrings(fident);
+    if (!strings || strings->empty()) {
+      continue;
+    }
+    auto field_value = ExtractSortableValue(schema, fident, absl::StrJoin(*strings, ","));
     if (field_value) {
       out[field.OutputName()] = std::move(field_value).value();
     }

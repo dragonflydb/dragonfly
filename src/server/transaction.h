@@ -227,6 +227,15 @@ class Transaction {
   // Must be called from coordinator thread.
   void CancelBlocking(const std::function<OpStatus(ArgSlice)>&);
 
+  // Attempt to cancel a scheduled transaction that has been armed (hop dispatched).
+  // Tries to atomically disarm all active shards. If all shards are successfully disarmed,
+  // the transaction is cancelled and removed from shard queues. If any shard already executed
+  // (couldn't be disarmed), re-arms the previously disarmed shards so the transaction
+  // completes normally.
+  // Returns true if the transaction was successfully cancelled.
+  // Must be called from the coordinator thread after DispatchHop() but before run_barrier_.Wait().
+  bool CancelScheduledTx();
+
   // Prepare a squashed hop on given shards.
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
@@ -546,7 +555,13 @@ class Transaction {
   // Should be called immediately after the last hop.
   void LogAutoJournalOnShard(EngineShard* shard, RunnableResult shard_result);
 
-  // Whether the callback can be run directly on this thread without dispatching on the shard queue
+  // Whether the callback can be run directly on this fiber without dispatching on the shard queue.
+  // It checks internally that there are no possible suspension points.
+  //
+  // We do not support suspendable shard callbacks. Because all locks are acquired as intent locks,
+  // we rely on a single ordering to determine if a transaction is able to run. When an inlined
+  // transaction suspends (even as it acquires the locks), there is no way to determine its presence
+  // from the shard queue fiber, so it can start executing a command on the same keys in parallel.
   bool CanRunInlined() const;
 
   uint32_t GetUseCount() const {

@@ -136,6 +136,7 @@ class BaseFamilyTest : public ::testing::Test {
   }
 
   TestConnWrapper* AddFindConn(Protocol proto, std::string_view id);
+  Transaction* GetTransaction(std::string_view conn_id);
   static std::vector<std::string> StrArray(const RespExpr& expr);
 
   Metrics GetMetrics() const {
@@ -189,7 +190,6 @@ class BaseFamilyTest : public ::testing::Test {
   util::fb2::Mutex mu_;
   ConnectionContext::DebugInfo last_cmd_dbg_info_;
 
-  std::vector<RespVec*> resp_vec_;
   bool single_response_ = true;
   util::fb2::Fiber watchdog_fiber_;
   util::fb2::Done watchdog_done_;

@@ -162,7 +162,7 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"ACL", "LIST"});
-  EXPECT_THAT(resp.GetString(), "user default on nopass ~* &* +@all $all");
+  EXPECT_THAT(resp, RespElementsAre("user default on nopass ~* &* +@all $all"));
 
   Run({"ACL", "SETUSER", "michael", "ON"});
   Run({"ACL", "SETUSER", "kobe", "ON"});

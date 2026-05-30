@@ -38,20 +38,21 @@ using IterateKVFunc = std::function<bool(ContainerEntry, ContainerEntry)>;
 // as func return false. Returns true if it successfully processed all elements
 // without breaking.
 bool IterateList(const PrimeValue& pv, const IterateFunc& func, size_t start = 0,
-                 size_t end = SIZE_MAX);
+                 size_t end = SIZE_MAX, bool allow_yield = true);
 
 // Iterate over all values and call func(val). Iteration stops as soon
 // as func return false. Returns true if it successfully processed all elements
 // without stopping.
-bool IterateSet(const PrimeValue& pv, const IterateFunc& func);
+bool IterateSet(const PrimeValue& pv, const IterateFunc& func, bool allow_yield = true);
 
 // Iterate over all values and call func(val). Iteration stops as soon
 // as func return false. Returns true if it successfully processed all elements
 // without stopping.
 bool IterateSortedSet(const PrimeValue& pv, const IterateSortedFunc& func, size_t start = 0,
-                      size_t end = SIZE_MAX, bool reverse = false, bool use_score = false);
+                      size_t end = SIZE_MAX, bool reverse = false, bool use_score = false,
+                      bool allow_yield = true);
 
-bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func);
+bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func, bool allow_yield = true);
 
 // Get StringMap pointer from primetable value. Sets expire time from db_context
 StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context);
