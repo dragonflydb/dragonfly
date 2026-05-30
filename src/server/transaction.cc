@@ -644,6 +644,8 @@ bool Transaction::RunInShard(EngineShard* shard, bool allow_q_removal) {
 
 void Transaction::RunCallback(EngineShard* shard) {
   DCHECK_EQ(shard, EngineShard::tlocal());
+  DCHECK(shard->running_tx() == nullptr);
+  shard->set_running_tx(this);
 
   RunnableResult result;
   try {
@@ -686,6 +688,8 @@ void Transaction::RunCallback(EngineShard* shard) {
     LogAutoJournalOnShard(shard, result);
     MaybeInvokeTrackingCb();
   }
+
+  shard->set_running_tx(nullptr);
 }
 
 // TODO: For multi-transactions we should be able to deduce mode() at run-time based
@@ -727,6 +731,9 @@ void Transaction::ScheduleInternal() {
       // single shard schedule operation can't fail
       CHECK(ScheduleInShard(EngineShard::tlocal(), optimistic_exec));
       run_barrier_.Dec();
+
+      // Drain any work that was deferred while this inlined tx held running_tx_.
+      EngineShard::tlocal()->PollExecution("after_inline", nullptr);
       break;
     }
 
@@ -1005,12 +1012,13 @@ bool Transaction::CancelScheduledTx() {
   });
 
   // Issue PollExecutions to shards that were disarmed
-  auto poll_disarmed = [this, &disarmed_shards](const char* context) {
+  auto poll_disarmed = [this, &disarmed_shards](bool rearm) {
     IterateActiveShards([&](auto& sd, ShardId i) {
       if (disarmed_shards.test(i)) {
         use_count_.fetch_add(1, memory_order_relaxed);
-        shard_set->Add(i, [this, context] {
-          EngineShard::tlocal()->PollExecution(context, this);
+        shard_set->Add(i, [this, rearm] {
+          EngineShard::tlocal()->PollExecution(rearm ? "cancel_rearm" : "cancel_cancel",
+                                               rearm ? this : nullptr);
           intrusive_ptr_release(this);
         });
       }
@@ -1231,8 +1239,12 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
 
     DVLOG(3) << "Lock granted " << lock_granted << " for trans " << DebugId();
 
-    // Check if we can run immediately
-    if (lock_granted && execute_optimistic) {
+    // Check if we can run immediately. Skip if another transaction is already running on this shard
+    // (e.g., an inlined tx preempted). While lock_granted ensures no contention on keys, we must
+    // maintain the "running_tx == nullptr" invariant,
+    // since we only track one active transaction per shard.
+    bool immediate_run = execute_optimistic && lock_granted && shard->running_tx() == nullptr;
+    if (immediate_run) {
       sd.local_mask |= OPTIMISTIC_EXECUTION;
       shard->stats().tx_optimistic_total++;
 
@@ -1430,11 +1442,23 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto* shard = EngineShard::tlocal();
   auto& db_slice = GetDbSlice(shard->shard_id());
 
+  // In NON_ATOMIC mode SquashedHopCb is invoked directly, without a wrapping RunCallback,
+  // so this stub owns the running_tx_ slot. In atomic modes (LOCK_AHEAD / GLOBAL) the
+  // parent transaction's RunCallback has already set running_tx_ to itself.
+  bool owns_running_tx = multi_->mode == NON_ATOMIC;
+  if (owns_running_tx) {
+    DCHECK(shard->running_tx() == nullptr);
+    shard->set_running_tx(this);
+  }
+
   auto result = cb(this, shard);
   db_slice.OnCbFinishBlocking();
 
   LogAutoJournalOnShard(shard, result);
   MaybeInvokeTrackingCb();
+
+  if (owns_running_tx)
+    shard->set_running_tx(nullptr);
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
   return result;
@@ -1601,10 +1625,12 @@ bool Transaction::CanRunInlined() const {
 
   // Global transactions like SAVE can change the inlining rules, so run them non-inlined.
   // This guarantees that their PollExecution batch executes on the shard-queue fiber
-  // when the conditions update
+  // when the conditions update.
+  // We also refuse to inline when another transaction is already running on this shard:
+  // journal/db-slice callbacks invoked from RunCallback can preempt, and a nested inlined
+  // transaction would interleave its own callback loop with the outer one.
   if (unique_shard_cnt_ == 1 && unique_shard_id_ == ss->thread_index() &&
-      ss->AllowInlineScheduling() && !GetDbSlice(es->shard_id()).HasRegisteredCallbacks() &&
-      !IsGlobal()) {
+      ss->AllowInlineScheduling() && !IsGlobal() && es->running_tx() == nullptr) {
     ss->stats.tx_inline_runs++;
     return true;
   }

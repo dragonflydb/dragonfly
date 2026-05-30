@@ -189,14 +189,6 @@ bool ServerState::AllowInlineScheduling() const {
   if (gstate_ == GlobalState::LOADING)
     return false;
 
-  // Journal callbacks can preempt; This means we have to disallow inline scheduling
-  // because then we might interleave the callbacks loop from an inlined-scheduled command
-  // and a normally-scheduled command.
-  // The problematic loop is in JournalSlice::AddLogRecord, going over all the callbacks.
-
-  if (journal::HasRegisteredCallbacks())
-    return false;
-
   return true;
 }
 
