@@ -565,7 +565,6 @@ struct OrphanedCommand : public boost::intrusive::list_base_hook<
 
   void OnFinish() {
     sub_key->Drop();
-    sub_key.reset();
     unlink();
     delete this;
   }
