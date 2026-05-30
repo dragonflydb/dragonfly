@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "redis/redis_aux.h"
 #include "server/common_types.h"
@@ -20,6 +21,8 @@
 #include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
+
+ABSL_DECLARE_FLAG(bool, serialization_tagged_chunks);
 
 namespace dfly {
 
@@ -123,7 +126,9 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
 SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
     : DelayedEntryHandler(static_cast<BucketDependencies&>(*this)),
       db_slice_(slice),
-      base_cntx_(cntx) {
+      base_cntx_(cntx),
+      // Enable stream mutex if tagged chunks are disabled
+      stream_mu_(!absl::GetFlag(FLAGS_serialization_tagged_chunks)) {
   DCHECK(base_cntx_);
 }
 
