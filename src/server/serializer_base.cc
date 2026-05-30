@@ -211,6 +211,7 @@ void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_itera
   if (!absl::StartsWith(active_name, "shard_queue") &&  //
       !absl::StartsWith(active_name, "l2_queue") &&     // pipelining
       !absl::StartsWith(active_name, "SliceSnapshot") &&
+      !absl::StartsWith(active_name, "DflyConn") &&  // inline-scheduled tx on connection fiber
       active_name != "Dispatched" &&   // Comes from OnAllShards(... { migration->RunSync(); });
       active_name != "Debug/Traverse"  // DEBUG OBJHIST/UNIQ-STRS cleanup of lazy-expired empty
                                        // containers; runs on the shard proactor so ordering holds.
