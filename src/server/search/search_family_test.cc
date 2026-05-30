@@ -55,8 +55,9 @@ namespace dfly {
 
 class SearchFamilyTest : public BaseFamilyTest {
  protected:
-  // FT.CREATE returns before IndexBuilder finishes ingesting existing docs,
-  // so a follow-up FT.SEARCH can race with it. Poll FT.INFO until ready.
+  // FT.CREATE and FT.ALTER return before IndexBuilder finishes ingesting
+  // existing docs, so a follow-up FT.SEARCH can race with it. Poll FT.INFO
+  // until ready.
   void WaitForIndexReady(std::string_view name, absl::Duration timeout = absl::Seconds(10)) {
     absl::Time deadline = absl::Now() + timeout;
     while (true) {
@@ -302,10 +303,12 @@ TEST_F(SearchFamilyTest, AlterIndex) {
   Run({"ft.create", "idx-1", "ON", "HASH"});
 
   EXPECT_EQ(Run({"ft.alter", "idx-1", "schema", "add", "color", "tag"}), "OK");
+  WaitForIndexReady("idx-1");
   EXPECT_THAT(Run({"ft.search", "idx-1", "@color:{blue}"}), AreDocIds("d:1"));
   EXPECT_THAT(Run({"ft.search", "idx-1", "@color:{green}"}), AreDocIds("d:2"));
 
   EXPECT_EQ(Run({"ft.alter", "idx-1", "schema", "add", "cost", "numeric"}), "OK");
+  WaitForIndexReady("idx-1");
   EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[0 100]"}), kNoResults);
   EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[100 300]"}), AreDocIds("d:1", "d:2"));
 
@@ -537,6 +540,7 @@ TEST_F(SearchFamilyTest, Simple) {
 
   EXPECT_EQ(Run({"ft.create", "i1", "PREFIX", "1", "d:", "SCHEMA", "foo", "TEXT", "k", "TEXT"}),
             "OK");
+  WaitForIndexReady("i1");
 
   EXPECT_THAT(Run({"ft.search", "i1", "@foo:bar"}), AreDocIds("d:2"));
   EXPECT_THAT(Run({"ft.search", "i1", "@foo:bar | @foo:baz"}), AreDocIds("d:1", "d:2"));
@@ -594,6 +598,7 @@ TEST_F(SearchFamilyTest, NoPrefix) {
   Run({"hset", "d:3", "a", "three", "k", "v"});
 
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "a", "text", "k", "text"}), "OK");
+  WaitForIndexReady("i1");
 
   EXPECT_THAT(Run({"ft.search", "i1", "one | three"}), AreDocIds("d:1", "d:3"));
 }
@@ -606,6 +611,7 @@ TEST_F(SearchFamilyTest, Json) {
   EXPECT_EQ(Run({"ft.create", "i1", "on", "json", "schema", "$.a", "as", "a", "text", "$.b", "as",
                  "b", "text"}),
             "OK");
+  WaitForIndexReady("i1");
 
   EXPECT_THAT(Run({"ft.search", "i1", "some|more"}), AreDocIds("k1", "k2"));
   EXPECT_THAT(Run({"ft.search", "i1", "some|more|secret"}), AreDocIds("k1", "k2", "k3"));
@@ -626,6 +632,7 @@ TEST_F(SearchFamilyTest, JsonAttributesPaths) {
   EXPECT_EQ(
       Run({"ft.create", "i1", "on", "json", "schema", "$.nested.value", "as", "value", "text"}),
       "OK");
+  WaitForIndexReady("i1");
 
   EXPECT_THAT(Run({"ft.search", "i1", "yes"}), AreDocIds("k2"));
 }
@@ -640,6 +647,7 @@ TEST_F(SearchFamilyTest, JsonIdentifierWithBrackets) {
                  "$[\"population\"]", "as", "population", "numeric", "sortable", "$[\"continent\"]",
                  "as", "continent", "tag"}),
             "OK");
+  WaitForIndexReady("i1");
 
   EXPECT_THAT(Run({"ft.search", "i1", "(@continent:{Europe})"}), AreDocIds("k1", "k2"));
 }
@@ -746,6 +754,7 @@ TEST_F(SearchFamilyTest, Tags) {
 
   EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "color", "tag", "dummy", "numeric"}),
             "OK");
+  WaitForIndexReady("i1");
   EXPECT_THAT(Run({"ft.tagvals", "i2", "color"}), ErrArg("Index with name 'i2' not found"));
   EXPECT_THAT(Run({"ft.tagvals", "i1", "foo"}), ErrArg("No such field"));
   EXPECT_THAT(Run({"ft.tagvals", "i1", "dummy"}), ErrArg("Not a tag field"));
@@ -782,6 +791,7 @@ TEST_F(SearchFamilyTest, TagOptions) {
   EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "color", "tag", "casesensitive",
                  "separator", "/"}),
             "OK");
+  WaitForIndexReady("i1");
 
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{green}"}), AreDocIds("d:1", "d:4"));
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{GReeN}"}), AreDocIds("d:2"));
@@ -806,6 +816,7 @@ TEST_F(SearchFamilyTest, TagNumbers) {
   Run({"hset", "d:3", "number", "3"});
 
   EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "number", "tag"}), "OK");
+  WaitForIndexReady("i1");
 
   EXPECT_THAT(Run({"ft.search", "i1", "@number:{1}"}), AreDocIds("d:1"));
   EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2}"}), AreDocIds("d:1", "d:2"));
@@ -930,6 +941,7 @@ TEST_F(SearchFamilyTest, ReturnOption) {
   Run({"ft.create", "i1",     "SCHEMA", "longA",   "AS",    "justA", "TEXT",
        "longB",     "AS",     "justB",  "NUMERIC", "longC", "AS",    "justC",
        "NUMERIC",   "vector", "VECTOR", "FLAT",    "2",     "DIM",   "1"});
+  WaitForIndexReady("i1");
 
   // Check all fields are returned
   auto resp = Run({"ft.search", "i1", "@justA:0"});
@@ -979,6 +991,7 @@ TEST_F(SearchFamilyTest, ReturnOptionJson) {
   Run({"json.set", "k1", ".", j});
   Run({"ft.create", "i1", "on", "json", "schema", "$.name", "as", "name", "text", "$.actions[0]",
        "as", "primary_action", "tag", "$.size", "as", "size", "numeric"});
+  WaitForIndexReady("i1");
 
   // Return whole document as a single field by default
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), MatchEntry("k1", "$", j));
@@ -1229,6 +1242,7 @@ TEST_F(SearchFamilyTest, FtProfile) {
 TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
   Run({"json.set", "j1", ".", R"({"id":"1"})"});
   Run({"ft.create", "i1", "on", "json", "schema", "$.id", "as", "id", "tag"});
+  WaitForIndexReady("i1");
 
   auto resp = Run({"ft.profile", "i1", "search", "query", "@id:[1 1]"});
   ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
@@ -1282,6 +1296,7 @@ TEST_F(SearchFamilyTest, DocsEditing) {
 
   resp = Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT"});
   EXPECT_EQ(resp, "OK");
+  WaitForIndexReady("index");
 
   resp = Run({"FT.SEARCH", "index", "*"});
   EXPECT_THAT(resp, IsMapWithSize("k1", IsMap("$", R"({"a":"1"})")));
@@ -1444,6 +1459,7 @@ TEST_F(SearchFamilyTest, AggregateLoadGroupBy) {
          absl::StrCat(i)});
   }
   Run({"ft.create", "i1", "schema", "value", "numeric", "sortable"});
+  WaitForIndexReady("i1");
 
   // clang-format off
   auto resp = Run({"ft.aggregate", "i1", "*",
@@ -1461,6 +1477,7 @@ TEST_F(SearchFamilyTest, AggregateLoad) {
 
   auto resp = Run({"ft.create", "index", "ON", "HASH", "SCHEMA", "word", "TAG", "foo", "NUMERIC"});
   EXPECT_EQ(resp, "OK");
+  WaitForIndexReady("index");
 
   // ft.aggregate index "*" LOAD 1 @word LOAD 1 @foo
   resp = Run({"ft.aggregate", "index", "*", "LOAD", "1", "@word", "LOAD", "1", "@foo"});
@@ -1724,6 +1741,7 @@ TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
   auto resp = Run(
       {"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "word", "TAG", "foo", "NUMERIC", "text", "TEXT"});
   EXPECT_EQ(resp, "OK");
+  WaitForIndexReady("i1");
 
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "2", "foo", "text", "GROUPBY", "2", "@word",
               "@text", "REDUCE", "SUM", "1", "@foo", "AS", "foo_total"});
@@ -2628,6 +2646,7 @@ TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
 
   auto resp = Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.text", "AS", "text", "TEXT"});
   EXPECT_EQ(resp, "OK");
+  WaitForIndexReady("index");
 
   auto expect_expr = [](std::string_view text_field) {
     return IsArray(2, "json2", IsMap(text_field, "1", "$", R"({"text":"1"})"), "json1",
@@ -3750,6 +3769,7 @@ TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
   EXPECT_EQ(Run({"HSET", "s2", "phrase", "hello simple world"}), 1);
   EXPECT_EQ(Run({"HSET", "s3", "phrase", "hello somewhat less simple world"}), 1);
   EXPECT_EQ(Run({"FT.CREATE", "memes", "SCHEMA", "phrase", "TEXT"}), "OK");
+  WaitForIndexReady("memes");
 
   auto resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
   EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1000000"));
@@ -3843,7 +3863,7 @@ TEST_F(SearchFamilyTest, DropIndexWithDD) {
 
   // Create index again
   Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
-  ThisFiber::Yield();
+  WaitForIndexReady("idx");
 
   // Verify index works again
   resp = Run({"FT.SEARCH", "idx", "*"});
@@ -4985,6 +5005,7 @@ TEST_F(SearchFamilyTest, VectorFieldWrongSizeDoesNotCrash) {
   // Same scenario with 10-byte values and multiple keys.
   Run({"FT.CREATE", "idx2", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
        "DIM", "1", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx2");
   Run({"HSET", "a1", "v", "aaaaaaaaaa"});  // 10 bytes
   Run({"HSET", "a2", "v", "bbbbbbbbbb"});
   Run({"HSET", "a3", "v", "cccccccccc"});
