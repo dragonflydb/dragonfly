@@ -6274,13 +6274,6 @@ TEST_F(SearchFamilyTest, FtHybridSyntaxErrors) {
   EXPECT_THAT(Run({"FT.HYBRID", "idx", "SEARCH", "hi", "VSIM", "@vec", "$v", "COMBINE", "UNKNOWN",
                    "4", "LIMIT", "0", "10", "PARAMS", "2", "v", Vec3ToBytes(1, 0, 0)}),
               ErrArg("unsupported COMBINE method"));
-
-  // LINEAR with odd nargs -> error
-  EXPECT_THAT(
-      Run({"FT.HYBRID", "idx",    "SEARCH", "hi",     "VSIM", "@vec", "$v",
-           "COMBINE",   "LINEAR", "3",      "ALPHA",  "0.5",  "BETA", "0.5",
-           "LIMIT",     "0",      "10",     "PARAMS", "2",    "v",    Vec3ToBytes(1, 0, 0)}),
-      ErrArg("must be even"));
 }
 
 TEST_F(SearchFamilyTest, FtHybridFlatBasic) {

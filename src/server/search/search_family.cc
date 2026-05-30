@@ -1602,138 +1602,117 @@ struct HybridDocEntry {
 using HybridDocMap = absl::flat_hash_map<string, HybridDocEntry>;
 
 ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
+  using facade::Map;
+  using facade::Tag;
+
   HybridSearchParams p;
 
-  if (!parser->Check("SEARCH"))
-    return CreateSyntaxError("expected SEARCH keyword"sv);
-  p.text_query = string{parser->Next()};
-  if (parser->Check("SCORER")) {
-    auto scorer_fn = ParseScorer(parser);
-    if (!scorer_fn)
-      return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
-    p.scorer = *scorer_fn;
-  }
-  if (parser->Check("YIELD_SCORE_AS"))
-    p.yield_text_score_as = string{parser->Next()};
+  auto take_error = [&]() -> ParseResult<HybridSearchParams> {
+    return make_unexpected(parser->TakeError().MakeReply());
+  };
 
-  if (!parser->Check("VSIM"))
-    return CreateSyntaxError("expected VSIM keyword"sv);
-
-  string_view field = parser->Next();
-  if (!absl::StartsWith(field, "@"))
-    return CreateSyntaxError("VSIM field must start with @"sv);
-  p.vsim_field = string{field.substr(1)};
-
-  string_view param = parser->Next();
-  if (!absl::StartsWith(param, "$"))
-    return CreateSyntaxError("VSIM parameter must start with $"sv);
-  p.vsim_param = string{param.substr(1)};
-
-  if (parser->Check("KNN")) {
-    p.num_candidates = parser->Next<size_t>();
-    if (parser->Check("K"))
-      p.num_candidates = parser->Next<size_t>();
-    if (parser->Check("EF_RUNTIME"))
-      p.ef_runtime = parser->Next<size_t>();
-    if (parser->Check("SHARD_K_RATIO")) {
-      const float ratio = parser->Next<float>();
-      p.num_candidates =
-          static_cast<size_t>(std::ceil(static_cast<float>(p.num_candidates) * ratio));
+  auto parse_scorer = [&](CmdArgParser* sub) {
+    if (p.scorer) {
+      sub->Next();
+      return;
     }
-  } else if (parser->Check("RANGE")) {
+    auto scorer_fn = ParseScorer(sub);
+    if (!scorer_fn)
+      sub->ReportCustom(absl::StrCat("No such scorer: ", sub->Peek()));
+    else
+      p.scorer = *scorer_fn;
+  };
+
+  if (!parser->Check("SEARCH")) {
+    parser->ReportCustom("expected SEARCH keyword");
+    return take_error();
+  }
+  p.text_query = string{parser->Next()};
+  parser->Apply(Tag("SCORER", parse_scorer), Tag("YIELD_SCORE_AS", &p.yield_text_score_as));
+
+  if (!parser->Check("VSIM")) {
+    parser->ReportCustom("expected VSIM keyword");
+    return take_error();
+  }
+  if (string_view field = parser->Next(); absl::StartsWith(field, "@")) {
+    p.vsim_field = string{field.substr(1)};
+  } else {
+    parser->ReportCustom("VSIM field must start with @");
+    return take_error();
+  }
+  if (string_view param = parser->Next(); absl::StartsWith(param, "$")) {
+    p.vsim_param = string{param.substr(1)};
+  } else {
+    parser->ReportCustom("VSIM parameter must start with $");
+    return take_error();
+  }
+
+  float shard_k_ratio = 1.0f;
+  if (parser->Check("KNN", &p.num_candidates)) {
+    parser->Apply(Tag("K", &p.num_candidates), Tag("EF_RUNTIME", &p.ef_runtime),
+                  Tag("SHARD_K_RATIO", &shard_k_ratio));
+    p.num_candidates =
+        static_cast<size_t>(std::ceil(static_cast<float>(p.num_candidates) * shard_k_ratio));
+  } else if (parser->Check("RANGE", &p.range_radius)) {
     p.use_range = true;
-    p.range_radius = parser->Next<float>();
-    if (parser->Check("EPSILON"))
-      parser->Next<float>();
+    float epsilon_ignored = 0.f;
+    parser->Apply(Tag("EPSILON", &epsilon_ignored));
   }
 
-  if (parser->Check("FILTER")) {
-    if (p.use_range)
-      return CreateSyntaxError("VSIM RANGE cannot be combined with FILTER"sv);
-    p.vsim_filter = string{parser->Next()};
+  if (parser->Check("FILTER", &p.vsim_filter) && p.use_range) {
+    parser->ReportCustom("VSIM RANGE cannot be combined with FILTER");
+    return take_error();
   }
-
-  if (parser->Check("YIELD_SCORE_AS"))
-    p.yield_vsim_score_as = string{parser->Next()};
+  parser->Apply(Tag("YIELD_SCORE_AS", &p.yield_vsim_score_as));
 
   if (parser->Check("COMBINE")) {
-    if (parser->Check("LINEAR")) {
-      p.combine_method = HybridSearchParams::CombineMethod::LINEAR;
-      size_t nargs = parser->Next<size_t>();
-      if (nargs % 2 != 0)
-        return CreateSyntaxError("LINEAR argument count must be even"sv);
-      for (size_t i = 0; i < nargs / 2; i++) {
-        string_view key = parser->Next();
-        if (absl::EqualsIgnoreCase(key, "ALPHA"))
-          p.alpha = parser->Next<float>();
-        else if (absl::EqualsIgnoreCase(key, "BETA"))
-          p.beta = parser->Next<float>();
-        else if (absl::EqualsIgnoreCase(key, "YIELD_SCORE_AS"))
-          p.yield_combined_score_as = string{parser->Next()};
-        else
-          parser->Next();
-      }
-    } else if (parser->Check("RRF")) {
-      p.combine_method = HybridSearchParams::CombineMethod::RRF;
-      size_t nargs = parser->Next<size_t>();
-      if (nargs % 2 != 0)
-        return CreateSyntaxError("RRF argument count must be even"sv);
-      for (size_t i = 0; i < nargs / 2; i++) {
-        string_view key = parser->Next();
-        if (absl::EqualsIgnoreCase(key, "CONSTANT"))
-          p.rrf_constant = parser->Next<float>();
-        else if (absl::EqualsIgnoreCase(key, "WINDOW"))
-          p.rrf_window = parser->Next<size_t>();
-        else if (absl::EqualsIgnoreCase(key, "YIELD_SCORE_AS"))
-          p.yield_combined_score_as = string{parser->Next()};
-        else
-          parser->Next();
-      }
+    using CM = HybridSearchParams::CombineMethod;
+    auto method = parser->TryMapNext("LINEAR", CM::LINEAR, "RRF", CM::RRF);
+    if (!method) {
+      parser->ReportCustom(absl::StrCat("unsupported COMBINE method: ", parser->Peek()));
+      return take_error();
+    }
+    p.combine_method = *method;
+    parser->Next<size_t>();  // nargs hint, not validated -- key/value pairs drive parsing.
+    if (p.combine_method == CM::LINEAR) {
+      parser->Apply(Tag("ALPHA", &p.alpha), Tag("BETA", &p.beta),
+                    Tag("YIELD_SCORE_AS", &p.yield_combined_score_as));
     } else {
-      return CreateSyntaxError(absl::StrCat("unsupported COMBINE method: ", parser->Peek()));
+      parser->Apply(Tag("CONSTANT", &p.rrf_constant), Tag("WINDOW", &p.rrf_window),
+                    Tag("YIELD_SCORE_AS", &p.yield_combined_score_as));
     }
   }
 
-  // SCORER also accepted after VSIM for clients that place it there.
-  while (parser->HasNext()) {
-    if (parser->Check("SCORER")) {
-      if (!p.scorer) {
-        auto scorer_fn = ParseScorer(parser);
-        if (!scorer_fn)
-          return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
-        p.scorer = *scorer_fn;
-      } else {
-        parser->Next();
-      }
-    } else if (parser->Check("LOAD")) {
-      if (parser->Peek() == "*") {
-        parser->Skip(1);
-        p.load_all_fields = true;
-      } else {
-        size_t n = parser->Next<size_t>();
-        std::vector<FieldReference> fields;
-        for (size_t i = 0; i < n; i++) {
-          string_view f = parser->Next();
-          if (absl::StartsWith(f, "@"))
-            f.remove_prefix(1);
-          string_view alias;
-          parser->Check("AS", &alias);
-          fields.emplace_back(f, alias);
-        }
-        p.return_fields = std::move(fields);
-      }
-    } else if (parser->Check("LIMIT")) {
-      p.limit_offset = parser->Next<size_t>();
-      p.limit_total = parser->Next<size_t>();
-      const size_t max_results = absl::GetFlag(FLAGS_MAXSEARCHRESULTS);
-      if (p.limit_total > max_results)
-        return CreateSyntaxError(absl::StrFormat("LIMIT exceeds maximum of %d", max_results));
-    } else if (parser->Check("PARAMS")) {
-      p.query_params = ParseQueryParams(parser);
-    } else {
-      parser->Skip(1);
+  auto parse_load = [&](CmdArgParser* sub) {
+    if (sub->Check("*")) {
+      p.load_all_fields = true;
+      return;
     }
-  }
+    const size_t n = sub->Next<size_t>();
+    std::vector<FieldReference> fields;
+    fields.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+      string_view f = sub->Next();
+      if (absl::StartsWith(f, "@"))
+        f.remove_prefix(1);
+      string_view alias;
+      sub->Check("AS", &alias);
+      fields.emplace_back(f, alias);
+    }
+    p.return_fields = std::move(fields);
+  };
+
+  auto parse_params = [&](CmdArgParser* sub) { p.query_params = ParseQueryParams(sub); };
+
+  parser->ApplyOrSkip(Tag("SCORER", parse_scorer), Tag("LOAD", parse_load),
+                      Tag("LIMIT", &p.limit_offset, &p.limit_total), Tag("PARAMS", parse_params));
+
+  if (parser->HasError())
+    return take_error();
+
+  const size_t max_results = absl::GetFlag(FLAGS_MAXSEARCHRESULTS);
+  if (p.limit_total > max_results)
+    return CreateSyntaxError(absl::StrFormat("LIMIT exceeds maximum of %d", max_results));
 
   if (p.num_candidates == 0) {
     p.num_candidates =

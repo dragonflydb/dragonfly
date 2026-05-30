@@ -30,6 +30,8 @@ CmdArgParser::ErrorInfo CmdArgParser::TakeError() {
 
 ErrorReply CmdArgParser::ErrorInfo::MakeReply() const {
   DCHECK(operator bool());
+  if (!custom_msg.empty())
+    return ErrorReply{std::string{custom_msg}, kSyntaxErrType};
   switch (type) {
     case INVALID_INT:
       return ErrorReply{kInvalidIntErr};

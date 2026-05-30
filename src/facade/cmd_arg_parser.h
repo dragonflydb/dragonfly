@@ -101,6 +101,7 @@ struct CmdArgParser {
   struct ErrorInfo {
     int type = NO_ERROR;
     size_t index = 0;
+    std::string custom_msg;
 
     operator bool() const {
       return type != ErrorType::NO_ERROR;
@@ -247,13 +248,19 @@ struct CmdArgParser {
   // Reports a custom error (error_type >= CUSTOM_ERROR) at the previously-consumed index
   // (or 0 if called before any arg was consumed).
   void Report(int error_type) {
-    Report(error_type, cur_i_ > 0 ? cur_i_ - 1 : 0);
+    Report(error_type, cur_i_ > 0 ? cur_i_ - 1 : 0, {});
+  }
+
+  // Reports a custom error with a caller-supplied message. The message is surfaced by
+  // ErrorInfo::MakeReply() instead of the generic kSyntaxErr text.
+  void ReportCustom(std::string msg) {
+    Report(CUSTOM_ERROR, cur_i_ > 0 ? cur_i_ - 1 : 0, std::move(msg));
   }
 
  private:
-  void Report(int error_type, size_t idx) {
+  void Report(int error_type, size_t idx, std::string msg = {}) {
     if (!error_) {
-      error_ = {error_type, idx};
+      error_ = {error_type, idx, std::move(msg)};
       cur_i_ = args_.size();
     }
   }
