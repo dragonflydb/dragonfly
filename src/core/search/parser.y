@@ -92,6 +92,7 @@ double toDouble(string_view src);
 %token <std::string> UINT32 "uint32"
 %nterm <AstExpr> final_query filter star_expr search_expr search_unary_expr search_or_expr search_and_expr bracket_filter_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
+%nterm <AstExpr> term_atom
 %nterm <AstTagsNode::TagValueProxy> tag_list_element
 
 %nterm <AstKnnNode> knn_query
@@ -197,35 +198,32 @@ search_or_expr:
   search_expr OR_OP search_and_expr                { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
   | search_expr OR_OP search_unary_expr            { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
 
+// Leaf atoms shared by the top-level, field-condition, and field-grouping positions.
+term_atom:
+  TERM        { $$ = AstTermNode(std::move($1));   }
+  | PHRASE    { auto p = std::move($1); $$ = AstPhraseNode(std::move(p.raw), p.slop); }
+  | PREFIX    { $$ = AstPrefixNode(std::move($1)); }
+  | SUFFIX    { $$ = AstSuffixNode(std::move($1)); }
+  | INFIX     { $$ = AstInfixNode(std::move($1));  }
+  | WILDCARD  { $$ = AstWildcardNode(std::move($1)); }
+  | UINT32    { $$ = AstTermNode(std::move($1));   }
+  | DOUBLE    { $$ = AstTermNode(std::move($1));   }
+
 search_unary_expr:
   LPAREN search_expr RPAREN           { $$ = std::move($2);                  }
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2));   }
   | TILDE search_unary_expr           { $$ = AstOptionalNode(std::move($2)); }
-  | TERM                              { $$ = AstTermNode(std::move($1));     }
-  | PHRASE                            { auto p = std::move($1); $$ = AstPhraseNode(std::move(p.raw), p.slop); }
-  | PREFIX                            { $$ = AstPrefixNode(std::move($1));   }
-  | SUFFIX                            { $$ = AstSuffixNode(std::move($1));   }
-  | INFIX                             { $$ = AstInfixNode(std::move($1));    }
-  | WILDCARD                          { $$ = AstWildcardNode(std::move($1)); }
-  | UINT32                            { $$ = AstTermNode(std::move($1));     }
-  | DOUBLE                            { $$ = AstTermNode(std::move($1));     }
+  | term_atom                         { $$ = std::move($1);                  }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
 
 field_cond:
-  TERM                                                  { $$ = AstTermNode(std::move($1));   }
-  | PHRASE                                              { auto p = std::move($1); $$ = AstPhraseNode(std::move(p.raw), p.slop); }
-  | UINT32                                              { $$ = AstTermNode(std::move($1));   }
-  | DOUBLE                                              { $$ = AstTermNode(std::move($1));   }
+  term_atom                                             { $$ = std::move($1);                }
   | STAR                                                { $$ = AstStarFieldNode();           }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
   | TILDE field_cond                                    { $$ = AstOptionalNode(std::move($2)); }
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
   | LBRACKET bracket_filter_expr RBRACKET               { $$ = std::move($2); }
   | LCURLBR tag_list RCURLBR                            { $$ = std::move($2); }
-  | PREFIX                                              { $$ = AstPrefixNode(std::move($1)); }
-  | SUFFIX                                              { $$ = AstSuffixNode(std::move($1)); }
-  | INFIX                                               { $$ = AstInfixNode(std::move($1));  }
-  | WILDCARD                                            { $$ = AstWildcardNode(std::move($1)); }
 
 bracket_filter_expr:
   /* Numeric filter has form [(] UINT32|DOUBLE [COMMA] [(] UINT32|DOUBLE */
@@ -294,14 +292,7 @@ field_unary_expr:
   LPAREN field_cond_expr RPAREN { $$ = std::move($2);                  }
   | NOT_OP field_unary_expr     { $$ = AstNegateNode(std::move($2));   }
   | TILDE field_unary_expr      { $$ = AstOptionalNode(std::move($2)); }
-  | TERM                        { $$ = AstTermNode(std::move($1));     }
-  | WILDCARD                    { $$ = AstWildcardNode(std::move($1)); }
-  | PHRASE                      { auto p = std::move($1); $$ = AstPhraseNode(std::move(p.raw), p.slop); }
-  | PREFIX                      { $$ = AstPrefixNode(std::move($1));   }
-  | SUFFIX                      { $$ = AstSuffixNode(std::move($1));   }
-  | INFIX                       { $$ = AstInfixNode(std::move($1));    }
-  | UINT32                      { $$ = AstTermNode(std::move($1));     }
-  | DOUBLE                      { $$ = AstTermNode(std::move($1));     }
+  | term_atom                   { $$ = std::move($1);                  }
 
 tag_list:
   tag_list_element                       { $$ = AstTagsNode(std::move($1));                }
