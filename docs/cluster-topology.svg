@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" font-family="Helvetica, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/>
+    </marker>
+  </defs>
+
+  <rect x="360" y="40" width="240" height="60" rx="6" fill="#a5d8ff" stroke="#1971c2" stroke-width="2"/>
+  <text x="480" y="78" text-anchor="middle" font-size="18" font-weight="bold">Cluster manager</text>
+
+  <rect x="80" y="200" width="220" height="90" rx="6" fill="#b2f2bb" stroke="#2f9e44" stroke-width="2"/>
+  <text x="190" y="228" text-anchor="middle" font-weight="bold">master A (node-A)</text>
+  <text x="190" y="250" text-anchor="middle">slots 0-8191</text>
+  <text x="190" y="272" text-anchor="middle">health: online</text>
+
+  <rect x="660" y="200" width="220" height="90" rx="6" fill="#b2f2bb" stroke="#2f9e44" stroke-width="2"/>
+  <text x="770" y="228" text-anchor="middle" font-weight="bold">master B (node-B)</text>
+  <text x="770" y="250" text-anchor="middle">slots 8192-16383</text>
+  <text x="770" y="272" text-anchor="middle">health: online</text>
+
+  <rect x="80" y="360" width="220" height="70" rx="6" fill="#d0ebff" stroke="#1971c2" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="190" y="390" text-anchor="middle" font-weight="bold">replica A-r1</text>
+  <text x="190" y="412" text-anchor="middle">health: online</text>
+
+  <rect x="660" y="360" width="220" height="70" rx="6" fill="#d0ebff" stroke="#1971c2" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="770" y="390" text-anchor="middle" font-weight="bold">replica B-r1</text>
+  <text x="770" y="412" text-anchor="middle">health: loading</text>
+
+  <rect x="380" y="500" width="200" height="60" rx="6" fill="#ffd8a8" stroke="#e8590c" stroke-width="2"/>
+  <text x="480" y="535" text-anchor="middle" font-weight="bold">Cluster client</text>
+
+  <!-- control-plane -> nodes (blue) -->
+  <line x1="430" y1="100" x2="220" y2="200" stroke="#1971c2" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="530" y1="100" x2="740" y2="200" stroke="#1971c2" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="400" y1="100" x2="220" y2="360" stroke="#1971c2" stroke-width="2" stroke-dasharray="2 4" marker-end="url(#arrow)"/>
+  <line x1="560" y1="100" x2="740" y2="360" stroke="#1971c2" stroke-width="2" stroke-dasharray="2 4" marker-end="url(#arrow)"/>
+  <text x="120" y="158" fill="#1971c2" font-weight="bold">cluster manager — DFLYCLUSTER CONFIG (to every node)</text>
+
+  <!-- master -> replica (green replication) -->
+  <line x1="190" y1="290" x2="190" y2="360" stroke="#2f9e44" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="770" y1="290" x2="770" y2="360" stroke="#2f9e44" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="220" y="328" fill="#2f9e44" font-weight="bold">REPLICAOF</text>
+  <text x="800" y="328" fill="#2f9e44" font-weight="bold">REPLICAOF</text>
+
+  <!-- client -> masters (orange) -->
+  <line x1="420" y1="500" x2="270" y2="290" stroke="#e8590c" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="540" y1="500" x2="720" y2="290" stroke="#e8590c" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="225" y="490" fill="#e8590c" font-weight="bold">command / -MOVED &lt;slot&gt; ip:port</text>
+</svg>
