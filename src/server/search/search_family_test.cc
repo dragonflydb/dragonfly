@@ -738,7 +738,7 @@ TEST_F(SearchFamilyTest, FtSearchWaitsForInitialIndexing) {
   }
 
   Run({"ft.create", "i1", "on", "json", "schema", "$.name", "as", "name", "text"});
-  WaitForIndexReady("i1");
+  WaitForIndexReady("i1", absl::Seconds(60));
 
   auto resp = Run({"ft.search", "i1", "*", "LIMIT", "0", "0"});
   EXPECT_THAT(resp, RespElementsAre(IntArg(kDocs)));
