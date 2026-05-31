@@ -1570,6 +1570,10 @@ void Connection::HandleMigrateRequest() {
 }
 
 bool Connection::ProcessControlMessages(uint32_t quota) {
+  // Invariant: batched_ must be false on entry.
+  // PubSub replies flush immediately via FinishScope() only when batched_ is false.
+  // ReplyBatch() and ExecuteBatch() both reset it via absl::Cleanup guards on all return paths.
+  DCHECK(!reply_builder_->IsBatchMode());
   uint32_t dispatched = 0;
 
   while (!dispatch_q_.empty()) {
@@ -2561,6 +2565,10 @@ bool Connection::ParseMCBatch(base::IoBuf& io_buf) {
 }
 
 bool Connection::ExecuteBatch() {
+  // Invariant: batched_ must be false on entry.
+  // Both ReplyBatch() and ExecuteBatch() reset it via absl::Cleanup guards on all return paths.
+  DCHECK(!reply_builder_->IsBatchMode());
+  absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
   auto& conn_stats = tl_facade_stats->conn_stats;
   auto advance_head = [this]() -> ParsedCommand* {
     auto* cmd = parsed_head_;
@@ -2595,16 +2603,22 @@ bool Connection::ExecuteBatch() {
     if (!ioloop_v2_)  // only v2 loop supports any async commands so far
       mode = AsyncPreference::ONLY_SYNC;
 
+    // V2: Batch the head command's reply when more commands are queued behind it.
+    // This prevents sync-only commands from triggering immediate flushes, keeping
+    // sendmsg syscalls to a minimum. IoLoopV2's idle-await block handles the final flush.
+    reply_builder_->SetBatchMode(ioloop_v2_ && is_head && (cmd->next != nullptr));
+
     auto dispatch_res = (service_->*dispatch)(cmd, mode);
 
-    // Enforce the pipeline invariant between the IO loop (producer) and AsyncFiber (consumer).
-    // To prevent stream corruption, the command state must satisfy ONE of these rules:
-    // 1. It is the head command (safely writes to the socket directly).
-    // 2. It did not stall the pipeline (dispatch_res != WOULD_BLOCK) and therefore
-    //    must have buffered its reply locally (is_deferred == true).
-    // 3. It stalled the pipeline because it requires synchronous execution
-    //    (dispatch_res == WOULD_BLOCK) and therefore must NOT have buffered
-    //    a reply (is_deferred == false).
+    // Enforce the pipeline reply-ordering invariant: replies must reach the socket in parse order.
+    // V1 (ONLY_SYNC): all commands run serially, so parsed_to_execute_ always equals parsed_head_
+    //    (is_head is always true). The invariant holds trivially.
+    // V2 (async dispatch): the head may be an in-flight async command while later commands are
+    //    dispatched behind it. For those non-head commands the state must satisfy ONE of:
+    //    - dispatch_res != WOULD_BLOCK: ran async, must have buffered the reply locally
+    //      (is_deferred == true) to avoid corrupting the in-order socket stream.
+    //    - dispatch_res == WOULD_BLOCK: requires blocking, must NOT have buffered a reply
+    //      (is_deferred == false) - we break and wait for it to become head first.
     bool is_deferred = cmd->IsDeferredReply();
     DCHECK(is_head || (is_deferred == (dispatch_res != DispatchResult::WOULD_BLOCK)))
         << "Pipeline contract breach! Invalid state for non-head command. "
@@ -2639,6 +2653,7 @@ bool Connection::ExecuteBatch() {
 
 bool Connection::ReplyBatch() {
   reply_builder_->SetBatchMode(true);
+  absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
   while (HasInFlightCommands() && parsed_head_->CanReply()) {
     current_wait_.reset();  // Clear the subscription before moving to the next command
     auto* cmd = parsed_head_;
@@ -2657,8 +2672,6 @@ bool Connection::ReplyBatch() {
   if (ioloop_v2_) {
     io_event_.notify();
   }
-
-  reply_builder_->SetBatchMode(false);
 
   // V1: handles its pipeline batching inside AsyncFiber, so it flushes unconditionally here.
   //
@@ -3004,16 +3017,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     // await block (no data to read)
     if (io_buf_.InputLen() == 0) {
-      phase_ = READ_SOCKET;
-
-      // Flush replies deferred by ReplyBatch before sleeping - ensures the client
-      // gets its response even when no more data arrives (single commands, end of pipeline).
-      reply_builder_->Flush();
-      if (auto err = reply_builder_->GetError(); err) {
-        return err;
-      }
-
-      io_event_.await([this, &is_ready_to_migrate]() {
+      auto should_wake = [this, &is_ready_to_migrate]() {
         // TODO: optimize CanReply with looking up waiter key
         // io_buf_.InputLen() > 0 is still needed for multishot flow.
 
@@ -3028,7 +3032,24 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         return io_buf_.InputLen() > 0 || pending_input_ || HasCommandToExecute() ||
                (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
                is_ready_to_migrate();
-      });
+      };
+
+      // Only flush and park if the fiber is truly idle. When synchronous commands
+      // (e.g. PUBLISH) are pipelined, ExecuteBatch processes one at a time and loops
+      // back here with HasCommandToExecute() == true. Skipping the flush lets the
+      // entire pipeline execute in-memory before a single sendmsg at the end.
+      if (!should_wake()) {
+        phase_ = READ_SOCKET;
+
+        // Flush replies deferred by ReplyBatch before sleeping - ensures the client
+        // gets its response even when no more data arrives (single commands, end of pipeline).
+        reply_builder_->Flush();
+        if (auto err = reply_builder_->GetError(); err) {
+          return err;
+        }
+
+        io_event_.await(should_wake);
+      }
     }
 
     phase_ = PROCESS;
@@ -3072,7 +3093,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     bool pre_over_limit =
         (parsed_cmd_q_len_ > 0) &&
         qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
-    if (io_buf_.InputLen() > 0 && !pre_over_limit) {  // Parse, execute and reply
+    if ((io_buf_.InputLen() > 0) && !pre_over_limit) {
+      // Data Normal Path: we have input data AND memory budget - parse new commands, execute,
+      // reply.
       size_t mem_before = conn_stats.pipeline_queue_bytes;
       parse_status = ParseLoop();
 
@@ -3082,7 +3105,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       if (conn_stats.pipeline_queue_bytes < mem_before) {
         qbp.NotifyPipelineWaiters();
       }
-    } else {  // Execute and reply what we have, then wait if we are over the limit
+    } else {
+      // Data Backpressure Path: either no input (io_buf_ empty) or over memory limit.
+      // Do NOT parse - that would grow the queue further. Instead, drain already-queued
+      // commands (execute + reply) to free memory, then park until pressure is relieved.
       parse_status = NEED_MORE;
 
       size_t mem_before = conn_stats.pipeline_queue_bytes;
