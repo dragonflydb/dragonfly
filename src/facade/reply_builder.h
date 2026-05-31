@@ -91,6 +91,10 @@ class SinkReplyBuilder {
     batched_ = b;
   }
 
+  bool IsBatchMode() const {
+    return batched_;
+  }
+
   void CloseConnection();
 
   static const ReplyStats& GetThreadLocalStats() {
