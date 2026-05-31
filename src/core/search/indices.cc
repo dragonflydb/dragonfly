@@ -184,6 +184,85 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
   }
 }
 
+// Literal characters of `pat` up to the first unescaped `*` or `?`. Any term matching `pat` must
+// start with this, so it bounds the dictionary range that has to be scanned.
+string GlobLiteralPrefix(string_view pat) {
+  string prefix;
+  for (size_t i = 0; i < pat.size(); ++i) {
+    char c = pat[i];
+    if (c == '*' || c == '?')
+      break;
+    if (c == '\\' && i + 1 < pat.size())
+      c = pat[++i];
+    prefix.push_back(c);
+  }
+  return prefix;
+}
+
+// Longest run of literal characters in `pat` (bounded by unescaped `*`/`?`), with `\` escapes
+// resolved. Every term matching `pat` must contain this run as a contiguous substring, which the
+// suffix trie can test for a cheap early-exit.
+string GlobLongestLiteralSegment(string_view pat) {
+  string best, cur;
+  auto flush = [&] {
+    if (cur.size() > best.size())
+      best = cur;
+    cur.clear();
+  };
+  for (size_t i = 0; i < pat.size(); ++i) {
+    char c = pat[i];
+    if (c == '*' || c == '?') {
+      flush();
+      continue;
+    }
+    if (c == '\\' && i + 1 < pat.size())
+      c = pat[++i];
+    cur.push_back(c);
+  }
+  flush();
+  return best;
+}
+
+// Matches `text` against glob `pat`: `*` = any run (incl. empty), `?` = exactly one character,
+// `\` escapes the next character to a literal. Two-pointer scan with backtracking to the last `*`.
+// `?` and `*` advance over whole UTF-8 codepoints so single-character matching works on multibyte
+// text; literal bytes in the pattern still match the text byte-for-byte.
+bool GlobMatch(string_view text, string_view pat) {
+  size_t t = 0, p = 0;
+  size_t star_p = string_view::npos;  // pattern index just past the last `*`
+  size_t star_t = 0;                  // text index that `*` is currently matched up to
+  while (t < text.size()) {
+    if (p < pat.size()) {
+      char pc = pat[p];
+      if (pc == '*') {
+        star_p = ++p;
+        star_t = t;
+        continue;
+      }
+      if (pc == '?') {
+        ++p;
+        t += Utf8CodepointLen(text, t);
+        continue;
+      }
+      char lit = (pc == '\\' && p + 1 < pat.size()) ? pat[p + 1] : pc;
+      if (lit == text[t]) {
+        p += (pc == '\\' && p + 1 < pat.size()) ? 2 : 1;
+        ++t;
+        continue;
+      }
+    }
+    if (star_p == string_view::npos)
+      return false;
+    // Extend the last `*` by one codepoint so backtracking stays on character boundaries.
+    p = star_p;
+    star_t += Utf8CodepointLen(text, star_t);
+    t = star_t;
+  }
+  while (p < pat.size() && pat[p] == '*')
+    ++p;
+  return p == pat.size();
+}
+
 // Haversine with earth radius in meters. Used to calculate distance.
 boost::geometry::strategy::distance::haversine haversine_(6372797.560856);
 
@@ -509,6 +588,39 @@ void BaseStringIndex<C>::MatchInfixWithTerm(
     if (entry.first.find(infix) != string::npos)
       cb(entry.first, &entry.second);
   }
+}
+
+template <typename C>
+void BaseStringIndex<C>::MatchWildcardWithTerm(
+    std::string_view pattern,
+    absl::FunctionRef<void(std::string_view term, const Container*)> cb) const {
+  StringOrView pattern_norm{NormalizeQueryWord(pattern)};
+  pattern = pattern_norm.view();
+
+  // Early-exit via the suffix trie: every matching term must contain the pattern's longest literal
+  // segment as a substring, so if no term does, skip the dictionary scan. Mirrors
+  // MatchInfixWithTerm.
+  if (suffix_trie_) {
+    string segment = GlobLongestLiteralSegment(pattern);
+    if (!segment.empty()) {
+      auto it = suffix_trie_->lower_bound(segment);
+      if (it == suffix_trie_->end() || !(*it).first.starts_with(segment))
+        return;
+    }
+  }
+
+  string prefix = GlobLiteralPrefix(pattern);
+  for (auto it = entries_.lower_bound(prefix);
+       it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
+    if (GlobMatch((*it).first, pattern))
+      cb((*it).first, &(*it).second);
+  }
+}
+
+template <typename C>
+void BaseStringIndex<C>::MatchWildcard(std::string_view pattern,
+                                       absl::FunctionRef<void(const Container*)> cb) const {
+  MatchWildcardWithTerm(pattern, [&cb](string_view, const Container* c) { cb(c); });
 }
 
 template <typename C>
