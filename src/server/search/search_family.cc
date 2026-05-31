@@ -1607,10 +1607,6 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
 
   HybridSearchParams p;
 
-  auto take_error = [&]() -> ParseResult<HybridSearchParams> {
-    return make_unexpected(parser->TakeError().MakeReply());
-  };
-
   auto parse_scorer = [&](CmdArgParser* sub) {
     if (p.scorer) {
       sub->Next();
@@ -1623,29 +1619,13 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       p.scorer = *scorer_fn;
   };
 
-  if (!parser->Check("SEARCH")) {
-    parser->ReportCustom("expected SEARCH keyword");
-    return take_error();
-  }
-  p.text_query = string{parser->Next()};
+  parser->ExpectTag("SEARCH", "expected SEARCH keyword");
+  p.text_query = parser->Next<string>();
   parser->Apply(Tag("SCORER", parse_scorer), Tag("YIELD_SCORE_AS", &p.yield_text_score_as));
 
-  if (!parser->Check("VSIM")) {
-    parser->ReportCustom("expected VSIM keyword");
-    return take_error();
-  }
-  if (string_view field = parser->Next(); absl::StartsWith(field, "@")) {
-    p.vsim_field = string{field.substr(1)};
-  } else {
-    parser->ReportCustom("VSIM field must start with @");
-    return take_error();
-  }
-  if (string_view param = parser->Next(); absl::StartsWith(param, "$")) {
-    p.vsim_param = string{param.substr(1)};
-  } else {
-    parser->ReportCustom("VSIM parameter must start with $");
-    return take_error();
-  }
+  parser->ExpectTag("VSIM", "expected VSIM keyword");
+  p.vsim_field = string{parser->ExpectStartsWith("@", "VSIM field must start with @")};
+  p.vsim_param = string{parser->ExpectStartsWith("$", "VSIM parameter must start with $")};
 
   float shard_k_ratio = 1.0f;
   if (parser->Check("KNN", &p.num_candidates)) {
@@ -1659,27 +1639,24 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
     parser->Apply(Tag("EPSILON", &epsilon_ignored));
   }
 
-  if (parser->Check("FILTER", &p.vsim_filter) && p.use_range) {
+  if (parser->Check("FILTER", &p.vsim_filter) && p.use_range)
     parser->ReportCustom("VSIM RANGE cannot be combined with FILTER");
-    return take_error();
-  }
   parser->Apply(Tag("YIELD_SCORE_AS", &p.yield_vsim_score_as));
 
   if (parser->Check("COMBINE")) {
     using CM = HybridSearchParams::CombineMethod;
-    auto method = parser->TryMapNext("LINEAR", CM::LINEAR, "RRF", CM::RRF);
-    if (!method) {
-      parser->ReportCustom(absl::StrCat("unsupported COMBINE method: ", parser->Peek()));
-      return take_error();
-    }
-    p.combine_method = *method;
-    parser->Next<size_t>();  // nargs hint, not validated -- key/value pairs drive parsing.
-    if (p.combine_method == CM::LINEAR) {
-      parser->Apply(Tag("ALPHA", &p.alpha), Tag("BETA", &p.beta),
-                    Tag("YIELD_SCORE_AS", &p.yield_combined_score_as));
+    if (auto method = parser->TryMapNext("LINEAR", CM::LINEAR, "RRF", CM::RRF); method) {
+      p.combine_method = *method;
+      parser->Next<size_t>();  // nargs hint, not validated -- key/value pairs drive parsing.
+      if (p.combine_method == CM::LINEAR) {
+        parser->Apply(Tag("ALPHA", &p.alpha), Tag("BETA", &p.beta),
+                      Tag("YIELD_SCORE_AS", &p.yield_combined_score_as));
+      } else {
+        parser->Apply(Tag("CONSTANT", &p.rrf_constant), Tag("WINDOW", &p.rrf_window),
+                      Tag("YIELD_SCORE_AS", &p.yield_combined_score_as));
+      }
     } else {
-      parser->Apply(Tag("CONSTANT", &p.rrf_constant), Tag("WINDOW", &p.rrf_window),
-                    Tag("YIELD_SCORE_AS", &p.yield_combined_score_as));
+      parser->ReportCustom(absl::StrCat("unsupported COMBINE method: ", parser->Peek()));
     }
   }
 
@@ -1708,7 +1685,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
                       Tag("LIMIT", &p.limit_offset, &p.limit_total), Tag("PARAMS", parse_params));
 
   if (parser->HasError())
-    return take_error();
+    return make_unexpected(parser->TakeError().MakeReply());
 
   const size_t max_results = absl::GetFlag(FLAGS_MAXSEARCHRESULTS);
   if (p.limit_total > max_results)

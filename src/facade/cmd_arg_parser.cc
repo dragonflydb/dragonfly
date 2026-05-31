@@ -24,6 +24,33 @@ void CmdArgParser::ExpectTag(std::string_view tag) {
   }
 }
 
+void CmdArgParser::ExpectTag(std::string_view tag, std::string error_msg) {
+  if (cur_i_ >= args_.size()) {
+    Report(CUSTOM_ERROR, cur_i_, std::move(error_msg));
+    return;
+  }
+
+  auto idx = cur_i_++;
+  if (!absl::EqualsIgnoreCase(ToSV(args_[idx]), tag))
+    Report(CUSTOM_ERROR, idx, std::move(error_msg));
+}
+
+std::string_view CmdArgParser::ExpectStartsWith(std::string_view prefix, std::string error_msg) {
+  if (cur_i_ >= args_.size()) {
+    Report(CUSTOM_ERROR, cur_i_, std::move(error_msg));
+    return {};
+  }
+
+  auto idx = cur_i_++;
+  auto val = ToSV(args_[idx]);
+  if (!absl::StartsWith(val, prefix)) {
+    Report(CUSTOM_ERROR, idx, std::move(error_msg));
+    return {};
+  }
+  val.remove_prefix(prefix.size());
+  return val;
+}
+
 CmdArgParser::ErrorInfo CmdArgParser::TakeError() {
   return std::exchange(error_, {});
 }
