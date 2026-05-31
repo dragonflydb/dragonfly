@@ -2176,7 +2176,7 @@ async def test_multi_exec_phantom_connections(df_server: DflyInstance):
     """
     import struct
 
-    mc_port = 11311
+    mc_port = int(df_server["memcached_port"])
     control_client = df_server.client()
     await control_client.set("key", "v" * 1024 * 1024)
 

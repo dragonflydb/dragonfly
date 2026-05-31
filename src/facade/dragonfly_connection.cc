@@ -557,21 +557,23 @@ thread_local PipelineCacheSizeTracker tl_pipe_cache_sz_tracker;
 struct OrphanedCommand : public boost::intrusive::list_base_hook<
                              boost::intrusive::link_mode<boost::intrusive::auto_unlink>> {
   explicit OrphanedCommand(ParsedCommand* c)
-      : cmd(c),
+      : owner(fb2::ProactorBase::me()),
+        cmd(c),
         callback(std::bind_front(&OrphanedCommand::OnFinish, this)),
         waiter(util::fb2::detail::Waiter::Callback(callback)),
         sub_key(cmd->Blocker()->OnCompletion(&waiter)) {
   }
 
   void OnFinish() {
-    sub_key->Drop();
-    unlink();
-    delete this;
+    // Completion could've happened from any thread, so dispatch to owner thread
+    owner->DispatchBrief([this] {
+      sub_key->Drop();
+      unlink();
+      delete this;
+    });
   }
 
-  // Takes ownership of cmd: registers a self-deleting waiter, or deletes immediately if done.
-  static void Adopt(ParsedCommand* cmd);
-
+  fb2::ProactorBase* owner;            // original proactor of command
   std::unique_ptr<ParsedCommand> cmd;  // owned by this struct
 
   std::function<void()> callback;
@@ -582,13 +584,6 @@ struct OrphanedCommand : public boost::intrusive::list_base_hook<
 using OrphanedList =
     boost::intrusive::list<OrphanedCommand, boost::intrusive::constant_time_size<false>>;
 thread_local OrphanedList tl_orphaned_commands;
-
-void OrphanedCommand::Adopt(ParsedCommand* cmd) {
-  if (auto* orphan = new OrphanedCommand(cmd); orphan->sub_key)
-    tl_orphaned_commands.push_back(*orphan);
-  else
-    delete orphan;  // already completed
-}
 
 size_t Connection::MessageHandle::UsedMemory() const {
   struct MessageSize {
@@ -1853,17 +1848,22 @@ void Connection::ClearPipelinedMessages() {
 
     // For in-flight async commands that haven't completed yet:
     if (curr->IsDeferredReply() && !curr->CanReply()) {
-      if (!ioloop_v2_) {
-        curr->Blocker()->Wait();
-        continue;
-      }
-
-      // Try cancelling the command, if not - let it finish and add it to the orphan list
-      if (!curr->TryCancel()) {
+      // With v2, try cancelling the command, if not - let it finish and add it to the orphan list
+      if (ioloop_v2_ && !curr->TryCancel()) {
         UnaccountParsedCommand(curr);
         curr->next = nullptr;
-        OrphanedCommand::Adopt(curr);
+        if (auto* orphan = new OrphanedCommand(curr); orphan->sub_key) {
+          tl_orphaned_commands.push_back(*orphan);
+        } else {
+          DCHECK(curr->Blocker()->IsCompleted());
+          delete orphan;  // already completed
+        }
+
+        continue;  // Skip ReleaseParsedCommand below
       }
+
+      // Otherwise wait for its completion
+      curr->Blocker()->Wait();
     }
 
     ReleaseParsedCommand(curr, false);

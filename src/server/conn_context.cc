@@ -302,7 +302,7 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
 }
 
 bool CommandContext::TryCancel() {
-  return tx_->CancelScheduledTx();
+  return tx_ && tx_->CancelScheduledTx();
 }
 
 void CommandContext::ReuseInternal() {
