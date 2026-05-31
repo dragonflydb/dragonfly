@@ -492,6 +492,47 @@ void PinnedMap::Drain(MemoryResource* mr) {
   }
 }
 
+class CompactObjBorrowOps : public cmn::BorrowedStringOps {
+  void ReleaseInternal(cmn::BorrowedString& bs) noexcept override {
+    static_cast<PendingRead*>(bs.pin())->UnpinRead();
+  }
+
+  size_t DecodedSize(const cmn::BorrowedString& bs) noexcept override {
+    return CompactObj::StrEncoding{bs.encoding(), false}.DecodedSize(bs.view());
+  }
+
+  // ASCII1/2: 7 source bytes → 8 decoded bytes for the packed prefix; the
+  // last `decoded_size % 8` decoded bytes (if any) are stored verbatim and
+  // decode 1:1. ascii_unpack is parameterized by the *decoded* length: an
+  // ascii_len of N consumes (N/8)*7 + (N%8) source bytes. So we size the
+  // chunk in decoded space (using DecodedSize) and map back to source.
+  DecodeResult DecodeChunk(const cmn::BorrowedString& bs, size_t src_len, size_t src_offset,
+                           std::span<char> dest) noexcept override {
+    constexpr size_t kSrcGroup = 7;
+    constexpr size_t kDecGroup = 8;
+
+    const size_t total_dec = DecodedSize(bs);
+    // src_offset is always on a packed-group boundary (multiple of 7).
+    DCHECK_EQ(src_offset % kSrcGroup, 0u);
+    DCHECK_LE(src_offset, src_len);
+
+    const size_t dec_offset = (src_offset / kSrcGroup) * kDecGroup;
+    const size_t remaining_dec = total_dec - dec_offset;
+    size_t n = std::min(dest.size(), remaining_dec);
+    // Non-final chunks must be a multiple of 8 so the next iteration starts
+    // on a packed-group boundary.
+    if (dec_offset + n < total_dec)
+      n &= ~(kDecGroup - 1);
+
+    const uint8_t* src = reinterpret_cast<const uint8_t*>(bs.view().data()) + src_offset;
+    detail::ascii_unpack(src, n, dest.data());
+    size_t src_consume = (n / kDecGroup) * kSrcGroup + (n % kDecGroup);
+    return {src_consume, n};
+  }
+};
+
+CompactObjBorrowOps g_borrow_ops;
+
 struct TL {
   MemoryResource* local_mr = PMR_NS::get_default_resource();
   base::PODArray<uint8_t> tmp_buf;
@@ -592,9 +633,11 @@ void LargeString::SetString(string_view s, MemoryResource* mr) {
   DCHECK(!s.empty());
 
   // Force a fresh buffer when either (a) the new value doesn't fit, or
-  // (b) read_pending is set (in-place overwrite would corrupt pinned readers;
-  // ReleasePtr hands the old buffer to its PendingRead).
+  // (b) read_pending is set (in-place overwrite would corrupt pinned readers).
+  // ReleasePtr either deallocates the old buffer or orphans it to its pending
+  // PendingRead entry; either way `ptr` is reset before the new allocation.
   if (s.size() > zmalloc_size(ptr) || read_pending) {
+    ReleasePtr(this, mr);
     ptr = mr->allocate(s.size(), kAlignSize);
   }
   memcpy(ptr, s.data(), s.size());
@@ -660,30 +703,23 @@ auto CompactObj::GetStatsThreadLocal() -> Stats {
 void CompactObj::InitThreadLocal(MemoryResource* mr) {
   tl.local_mr = mr;
   tl.tmp_buf = base::PODArray<uint8_t>{mr};
+  cmn::BorrowedStringOps::Set(&g_borrow_ops);
 }
 
 void CompactObj::DrainPendingReads() {
   tl.pin_map.Drain(tl.local_mr);
 }
 
-void CompactObj::BorrowedString::Unpin() noexcept {
-  if (!pin_)
-    return;
-
-  static_cast<PendingRead*>(pin_)->UnpinRead();
-  pin_ = nullptr;
+uint32_t CompactObj::TEST_PinRefcnt(const cmn::BorrowedString& bs) noexcept {
+  void* pin = bs.pin();
+  DCHECK(pin);
+  return static_cast<PendingRead*>(pin)->refcnt.load(std::memory_order_acquire);
 }
 
-uint32_t CompactObj::BorrowedString::TEST_refcnt() const {
-  if (!pin_)
-    return 0;
-  return static_cast<PendingRead*>(pin_)->refcnt.load(std::memory_order_acquire);
-}
-
-bool CompactObj::BorrowedString::TEST_orphaned() const {
-  if (!pin_)
-    return false;
-  return static_cast<PendingRead*>(pin_)->orphaned;
+bool CompactObj::TEST_PinOrphaned(const cmn::BorrowedString& bs) noexcept {
+  void* pin = bs.pin();
+  DCHECK(pin);
+  return static_cast<PendingRead*>(pin)->orphaned;
 }
 
 bool CompactObj::InitHuffmanThreadLocal(HuffmanDomain domain, std::string_view hufftable) {
@@ -1141,7 +1177,7 @@ void CompactObj::AppendString(std::string_view str) {
   u_.large_str.AppendString(str, tl.local_mr);
 }
 
-std::optional<CompactObj::BorrowedString> CompactObj::TryBorrow() const {
+std::optional<cmn::BorrowedString> CompactObj::TryBorrow() const {
   if (taglen_ != LARGE_STR_TAG)
     return std::nullopt;
   if (encoding_ != NONE_ENC && encoding_ != ASCII1_ENC && encoding_ != ASCII2_ENC)
@@ -1155,7 +1191,7 @@ std::optional<CompactObj::BorrowedString> CompactObj::TryBorrow() const {
   PendingRead* pin = tl.pin_map.RegisterPin(view.data());
   const_cast<detail::LargeString&>(u_.large_str).read_pending = 1;
 
-  return BorrowedString{view, decoded_size, static_cast<uint8_t>(encoding_), pin};
+  return cmn::BorrowedString{view, decoded_size, static_cast<uint8_t>(encoding_), pin};
 }
 
 string_view CompactObj::GetSlice(string* scratch) const {
