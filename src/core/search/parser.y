@@ -208,12 +208,14 @@ search_unary_expr:
   | INFIX                             { $$ = AstInfixNode(std::move($1));    }
   | WILDCARD                          { $$ = AstWildcardNode(std::move($1)); }
   | UINT32                            { $$ = AstTermNode(std::move($1));     }
+  | DOUBLE                            { $$ = AstTermNode(std::move($1));     }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
 
 field_cond:
   TERM                                                  { $$ = AstTermNode(std::move($1));   }
   | PHRASE                                              { auto p = std::move($1); $$ = AstPhraseNode(std::move(p.raw), p.slop); }
   | UINT32                                              { $$ = AstTermNode(std::move($1));   }
+  | DOUBLE                                              { $$ = AstTermNode(std::move($1));   }
   | STAR                                                { $$ = AstStarFieldNode();           }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
   | TILDE field_cond                                    { $$ = AstOptionalNode(std::move($2)); }
@@ -294,7 +296,12 @@ field_unary_expr:
   | TILDE field_unary_expr      { $$ = AstOptionalNode(std::move($2)); }
   | TERM                        { $$ = AstTermNode(std::move($1));     }
   | WILDCARD                    { $$ = AstWildcardNode(std::move($1)); }
+  | PHRASE                      { auto p = std::move($1); $$ = AstPhraseNode(std::move(p.raw), p.slop); }
+  | PREFIX                      { $$ = AstPrefixNode(std::move($1));   }
+  | SUFFIX                      { $$ = AstSuffixNode(std::move($1));   }
+  | INFIX                       { $$ = AstInfixNode(std::move($1));    }
   | UINT32                      { $$ = AstTermNode(std::move($1));     }
+  | DOUBLE                      { $$ = AstTermNode(std::move($1));     }
 
 tag_list:
   tag_list_element                       { $$ = AstTagsNode(std::move($1));                }
