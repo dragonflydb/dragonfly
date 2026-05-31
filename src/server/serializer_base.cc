@@ -130,6 +130,28 @@ SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
 SerializerBase::~SerializerBase() {
 }
 
+void SerializerBase::SerializeEntry(BucketIdentity bucket, DbIndex db_index, const PrimeKey& pk,
+                                    const PrimeValue& pv) {
+  if (pv.IsExternal() && pv.IsCool())
+    return SerializeEntry(bucket, db_index, pk, pv.GetCool().record->value);
+
+  time_t expire_time = pk.GetExpireTime();
+  uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_index, pk) : 0;
+
+  if (pv.IsExternal()) {
+    // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
+    EnqueueOffloaded(bucket, db_index, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+  } else {
+    std::lock_guard lk{stream_mu_};
+    SerializeEntryLocked(db_index, pk, pv, expire_time, mc_flags);
+  }
+}
+
+void SerializerBase::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
+  std::lock_guard lk{stream_mu_};
+  SerializeEntryLocked(tde.dbid, tde.key, pv, tde.expire, tde.mc_flags);
+}
+
 // Ordering invariant:
 //   For any key K, the replica must receive K's baseline value strictly before any journal entry
 //   that mutates K.

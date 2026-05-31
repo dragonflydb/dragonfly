@@ -123,9 +123,19 @@ class SerializerBase : public BucketDependencies,
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.
-  // Currently runs with big_value_mu_ held.
   virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) = 0;
+
+  // Serialize single entry with expire/flags
+  virtual void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                                    time_t expire, uint32_t mc_flags) = 0;
+
+  // Serialize entry while automatically handling delayed/cooled values, calls SerializeEntryLocked
+  void SerializeEntry(BucketIdentity bucket, DbIndex db_index, const PrimeKey& pk,
+                      const PrimeValue& pv);
+
+  // Calls SerializeEntry internally under stream_mu_
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
 
   void OnChange(DbIndex db_index, const ChangeReq& req) override;
 

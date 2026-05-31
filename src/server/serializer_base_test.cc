@@ -114,8 +114,9 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                  bool on_update) override;
 
-  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override {
-    RecordSerialized(tde.key.ToString());
+  void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                            time_t expire, uint32_t mc_flags) override {
+    RecordSerialized(pk.ToString());
   }
 
   void ConsumeJournalChange(const journal::JournalChangeItem& item) override;

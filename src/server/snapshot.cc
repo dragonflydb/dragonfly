@@ -240,37 +240,18 @@ unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::buck
     ++serialized;
 
     // might preempt due to big value serialization.
-    SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
+    SerializerBase::SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
   }
 
   serialize_bucket_running_ = false;
   return serialized;
 }
 
-void SliceSnapshot::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
-  std::lock_guard lk{stream_mu_};
-  auto res = serializer_->SaveEntry(tde.key, pv, tde.expire, tde.mc_flags, tde.dbid);
+void SliceSnapshot::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                                         time_t expire, uint32_t mc_flags) {
+  io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire, mc_flags, db_index);
   CHECK(res);
-}
-
-void SliceSnapshot::SerializeEntry(BucketIdentity bucket, DbIndex db_indx, const PrimeKey& pk,
-                                   const PrimeValue& pv) {
-  if (pv.IsExternal() && pv.IsCool())
-    return SerializeEntry(bucket, db_indx, pk, pv.GetCool().record->value);
-
-  time_t expire_time = pk.GetExpireTime();
-  uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
-
-  if (pv.IsExternal()) {
-    // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    EnqueueOffloaded(bucket, db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
-    ++type_freq_map_[RDB_TYPE_STRING];
-  } else {
-    std::lock_guard lk{stream_mu_};
-    io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
-    CHECK(res);
-    ++type_freq_map_[*res];
-  }
+  ++type_freq_map_[*res];
 }
 
 void SliceSnapshot::HandleFlushData(std::string data) {

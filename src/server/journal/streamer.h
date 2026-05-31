@@ -127,17 +127,12 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                  bool on_update) override;
 
-  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
+  void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                            time_t expire, uint32_t mc_flags) override;
 
   bool ShouldWrite(const journal::JournalChangeItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
-
-  // Returns true if any entry was actually written
-  bool WriteBucket(PrimeTable::bucket_iterator it, bool on_db_change);
-
-  void WriteEntry(BucketIdentity bucket, std::string_view key, const PrimeKey& pk,
-                  const PrimeValue& pv, uint64_t expire_ms);
 
   struct Stats {
     uint64_t buckets_loop = 0;
