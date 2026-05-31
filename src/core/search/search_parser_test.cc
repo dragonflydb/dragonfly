@@ -544,6 +544,54 @@ TEST_F(SearchParserTest, PhraseParse) {
   EXPECT_TRUE(found_phrase);
 }
 
+TEST_F(SearchParserTest, WildcardLex) {
+  // Lowercase `w` marks a glob; one layer of `\` escapes is stripped at lex time.
+  SetInput("w'hel*'");
+  NEXT_EQ(TOK_WILDCARD, string, "hel*");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput(R"(w'hel\*')");
+  NEXT_EQ(TOK_WILDCARD, string, "hel*");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput(R"(w'hel\\*')");
+  NEXT_EQ(TOK_WILDCARD, string, R"(hel\*)");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput("w\"h?o\"");
+  NEXT_EQ(TOK_WILDCARD, string, "h?o");
+  NEXT_TOK(TOK_YYEOF);
+
+  // Uppercase `W` is not a wildcard: it rewinds to a term followed by a phrase.
+  SetInput("W'HEL*'");
+  NEXT_EQ(TOK_TERM, string, "W");
+  NEXT_PHRASE("HEL*", 0);
+}
+
+TEST_F(SearchParserTest, WildcardParse) {
+  ASSERT_EQ(0, Parse("w'hel*'"));
+  AstExpr root = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstWildcardNode>(root));
+  EXPECT_EQ(std::get<AstWildcardNode>(root).affix, "hel*");
+
+  // After a field colon, both bare and parenthesized.
+  ASSERT_EQ(0, Parse("@title:w'h?llo'"));
+  AstExpr field = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(field));
+  ASSERT_TRUE(std::holds_alternative<AstWildcardNode>(*std::get<AstFieldNode>(field).node));
+  ASSERT_EQ(0, Parse("@title:(w'h?llo')"));
+
+  // As a tag value.
+  ASSERT_EQ(0, Parse("@tag:{w'hel*'}"));
+  AstExpr tag_field = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(tag_field));
+  const AstNode& tags = *std::get<AstFieldNode>(tag_field).node;
+  ASSERT_TRUE(std::holds_alternative<AstTagsNode>(tags));
+  const auto& tn = std::get<AstTagsNode>(tags);
+  ASSERT_EQ(tn.tags.size(), 1u);
+  EXPECT_TRUE(std::holds_alternative<AstWildcardNode>(tn.tags[0]));
+}
+
 // A parenthesized field condition must accept the same atoms as the bare `@field:...` form.
 TEST_F(SearchParserTest, FieldParenthesizedAtoms) {
   auto field_child = [this](const std::string& q) -> AstNode {

@@ -87,7 +87,7 @@ jobs:
       - name: Run C++ Unit Tests
         run: |
           cd $GITHUB_WORKSPACE/build
-          ctest -V -L DFLY
+          ctest -V -L DFLY -j$(nproc)
 
       - name: Run Python Integration Tests
         run: |

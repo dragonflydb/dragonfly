@@ -752,6 +752,31 @@ async def test_save_hash_with_expired_fields(async_client: aioredis.Redis):
     assert await async_client.ping()
 
 
+@dfly_args({"proactor_threads": 1, "dbfilename": "test-hgetall-expiry-bgsave"})
+async def test_hgetall_lazy_expiry_during_bgsave(async_client: aioredis.Redis):
+    """HVALS lazily empties a hash and deletes it mid-BGSAVE; the snapshot then
+    serializes the now-empty hash. On unfixed code SaveEntry aborts on it.
+    """
+    client = async_client
+
+    # Filler so the snapshot stays in progress long enough to race the read below.
+    await client.execute_command("DEBUG", "POPULATE", "50000")
+    await client.execute_command("HSETEX", "KEEPTTL", "1", "field", "value")
+    await asyncio.sleep(2)  # field expires; key stays until a read touches it
+
+    await client.execute_command("BGSAVE")
+    try:
+        async with timeout(10):
+            while not await is_saving(client):
+                await asyncio.sleep(0.01)
+    except asyncio.TimeoutError:
+        pass  # snapshot already finished; race window missed but safe
+
+    await client.execute_command("HVALS", "KEEPTTL")
+
+    assert await client.ping()
+
+
 @dfly_args({"proactor_threads": 1, "dbfilename": "test-save-del-crash", "dir": "{DRAGONFLY_TMP}/"})
 async def test_save_with_concurrent_mutations(df_server):
     """

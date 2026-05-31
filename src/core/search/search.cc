@@ -65,6 +65,7 @@ struct ProfileBuilder {
         [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.affix, "}"); },
         [](const AstSuffixNode& n) { return absl::StrCat("Suffix{", n.affix, "}"); },
         [](const AstInfixNode& n) { return absl::StrCat("Infix{", n.affix, "}"); },
+        [](const AstWildcardNode& n) { return absl::StrCat("Wildcard{", n.affix, "}"); },
         [](const AstPhraseNode& n) { return absl::StrCat("Phrase{", n.raw, "}"); },
         [](const AstRangeNode& n) { return absl::StrCat("Range{", n.lo, "<>", n.hi, "}"); },
         [](const AstLogicalNode& n) {
@@ -259,6 +260,8 @@ struct BasicSearch {
         index->MatchSuffixWithTerm(node.affix, term_cb);
       else if constexpr (T == TagType::INFIX)
         index->MatchInfixWithTerm(node.affix, term_cb);
+      else if constexpr (T == TagType::WILDCARD)
+        index->MatchWildcardWithTerm(node.affix, term_cb);
       sub_results.push_back(std::move(per_index));
     }
 
@@ -522,6 +525,9 @@ struct BasicSearch {
                   },
                   [tag_index, this](const AstInfixNode& infix) {
                     return CollectMatches(tag_index, infix.affix, &TagIndex::MatchInfix);
+                  },
+                  [tag_index, this](const AstWildcardNode& wildcard) {
+                    return CollectMatches(tag_index, wildcard.affix, &TagIndex::MatchWildcard);
                   }};
     auto mapping = [ov](const auto& tag) { return visit(ov, tag); };
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
@@ -878,6 +884,8 @@ struct StatsCollector {
         idx->MatchSuffixWithTerm(node.affix, cb);
       else if constexpr (T == TagType::INFIX)
         idx->MatchInfixWithTerm(node.affix, cb);
+      else if constexpr (T == TagType::WILDCARD)
+        idx->MatchWildcardWithTerm(node.affix, cb);
     }
   }
 
