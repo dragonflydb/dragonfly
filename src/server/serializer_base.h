@@ -23,16 +23,22 @@ struct TestDriver;
 
 namespace detail {
 
+#ifdef __clang__
+#define NO_THREAD_SAFETY_ANALYSIS __attribute__((no_thread_safety_analysis))
+#else
+#define NO_THREAD_SAFETY_ANALYSIS
+#endif
+
 template <typename T> struct OptionalMutex {
   explicit OptionalMutex(bool active) : active_{active} {
   }
 
-  void lock() {
+  void lock() NO_THREAD_SAFETY_ANALYSIS {
     if (active_)
       mutex_.lock();
   }
 
-  void unlock() {
+  void unlock() NO_THREAD_SAFETY_ANALYSIS {
     if (active_)
       mutex_.unlock();
   }
@@ -44,6 +50,8 @@ template <typename T> struct OptionalMutex {
   T mutex_;
   const bool active_;
 };
+
+#undef NO_THREAD_SAFETY_ANALYSIS
 
 }  // namespace detail
 
