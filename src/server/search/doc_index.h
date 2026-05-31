@@ -399,6 +399,13 @@ class ShardDocIndex {
 
   DocIndexInfo GetInfo() const;
 
+  // Direct access to the underlying DocIndex (schema, prefixes, type). Prefer this over
+  // GetInfo().base_index for hot paths -- GetInfo() returns a freshly-copied DocIndexInfo
+  // (which contains the entire schema by value).
+  const DocIndex& base() const {
+    return *base_;
+  }
+
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
   // Get synonym manager for this shard
