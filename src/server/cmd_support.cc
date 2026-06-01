@@ -6,11 +6,14 @@
 
 #include <absl/cleanup/cleanup.h>
 
+#include <stdexcept>
+
 #include "base/logging.h"
+#include "facade/error.h"
 
 namespace dfly::cmd {
 
-bool SingleHopWaiter::await_ready() noexcept {
+bool SingleHopWaiter::await_ready() {
   auto* tx = cmd_cntx->tx();
 
   if (!cmd_cntx->IsDeferredReply()) {
@@ -35,6 +38,16 @@ facade::OpStatus SingleHopWaiter::await_resume() const noexcept {
 
 void CmdR::Coro::return_value(const facade::ErrorReply& err) const noexcept {
   cmd_cntx->SendError(err);
+}
+
+void CmdR::Coro::unhandled_exception() const noexcept {
+  try {
+    throw;
+  } catch (const facade::CancellationException&) {
+    cmd_cntx->SendError("Cancelled");
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Unhandled exception in command coroutine: " << e.what();
+  }
 }
 
 }  // namespace dfly::cmd
