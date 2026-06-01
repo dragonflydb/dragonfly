@@ -1134,6 +1134,14 @@ int64_t DbSlice::ExpireParams::Cap(int64_t value) {
   return min(value, kMaxExpireDeadlineMs);
 }
 
+bool DbSlice::ExpireParams::SafeSecToMs(int64_t sec, int64_t* out_ms) {
+  if (sec > kMaxExpireDeadlineSec || sec < 0) {
+    return false;
+  }
+  *out_ms = sec * 1000;
+  return true;
+}
+
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool cap) const {
   if (persist)
     return {0, 0};

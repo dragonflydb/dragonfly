@@ -227,6 +227,9 @@ class DbSlice {
 
     static int64_t Cap(int64_t value);
 
+    // Safely convert seconds to milliseconds. Returns false on overflow.
+    static bool SafeSecToMs(int64_t sec, int64_t* out_ms);
+
     // Calculate relative and absolue timepoints.
     std::pair<int64_t, int64_t> Calculate(uint64_t now_msec, bool cap) const;
 

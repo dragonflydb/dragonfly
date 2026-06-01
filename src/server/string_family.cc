@@ -1012,8 +1012,12 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
         return facade::ErrorReply{InvalidExpireTime("set")};
 
       bool is_ms = *exp_type == ExpT::PX || *exp_type == ExpT::PXAT;
+      int64_t msec_val;
+      if (!is_ms && !DbSlice::ExpireParams::SafeSecToMs(int_arg, &msec_val)) {
+        return facade::ErrorReply{InvalidExpireTime("set")};
+      }
       DbSlice::ExpireParams expiry{
-          .msec_val = is_ms ? int_arg : int_arg * 1000,
+          .msec_val = is_ms ? int_arg : msec_val,
           .absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT,
       };
 
@@ -1138,8 +1142,12 @@ cmd::CmdR CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
     co_return facade::ErrorReply{InvalidExpireTime(cmd_name)};
 
   bool is_ms = cmd_name.front() == 'P';
+  int64_t msec_val;
+  if (!is_ms && !DbSlice::ExpireParams::SafeSecToMs(exp_int, &msec_val)) {
+    co_return facade::ErrorReply{InvalidExpireTime(cmd_name)};
+  }
   DbSlice::ExpireParams expiry{
-      .msec_val = is_ms ? exp_int : exp_int * 1000,
+      .msec_val = is_ms ? exp_int : msec_val,
       .absolute = false,
   };
 
@@ -1307,7 +1315,10 @@ cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
 
       exp_params.absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
       bool is_ms = *exp_type == ExpT::PX || *exp_type == ExpT::PXAT;
-      exp_params.msec_val = is_ms ? int_arg : int_arg * 1000;
+      if (!is_ms && !DbSlice::ExpireParams::SafeSecToMs(int_arg, &exp_params.msec_val)) {
+        co_return facade::ErrorReply{InvalidExpireTime("getex")};
+      }
+      if (is_ms) exp_params.msec_val = int_arg;
       defined = true;
     } else if (parser.Check("PERSIST")) {
       exp_params.persist = true;
@@ -1513,8 +1524,12 @@ cmd::CmdR CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd::kAborted;
   }
   int64_t expire_ts = cmd_cntx->mc_command()->expire_ts;
+  int64_t msec_val;
+  if (!DbSlice::ExpireParams::SafeSecToMs(expire_ts, &msec_val)) {
+    msec_val = 0;  // persist if overflow
+  }
   DbSlice::ExpireParams expire_params{
-      .msec_val = expire_ts * 1000, .absolute = true, .persist = expire_ts == 0};
+      .msec_val = msec_val, .absolute = true, .persist = expire_ts == 0};
   return MGetGeneric(cmd_cntx, args, expire_params);
 }
 

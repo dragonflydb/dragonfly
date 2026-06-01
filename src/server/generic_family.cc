@@ -1368,7 +1368,11 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-  DbSlice::ExpireParams params{.msec_val = int_arg * 1000,
+  int64_t msec_val;
+  if (!DbSlice::ExpireParams::SafeSecToMs(int_arg, &msec_val)) {
+    return cmd_cntx->SendError(kExpiryOutOfRange);
+  }
+  DbSlice::ExpireParams params{.msec_val = msec_val,
                                .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1387,12 +1391,16 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
+  int64_t msec_val;
+  if (!DbSlice::ExpireParams::SafeSecToMs(int_arg, &msec_val)) {
+    return cmd_cntx->SendError(kExpiryOutOfRange);
+  }
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
   DbSlice::ExpireParams params{
-      .msec_val = int_arg * 1000, .absolute = true, .expire_options = expire_options.value()};
+      .msec_val = msec_val, .absolute = true, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
