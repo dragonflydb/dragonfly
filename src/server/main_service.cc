@@ -1557,7 +1557,10 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   }
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
-    cmd_cntx->SendError("Internal Error");
+    if (res == DispatchResult::CANCELLED)
+      cmd_cntx->SendError("Cancelled");
+    else
+      cmd_cntx->SendError("Internal Error");
     dfly_cntx->conn()->MarkForClose();
   }
 
@@ -1612,6 +1615,10 @@ class ReplyGuard {
     }
   }
 
+  void Cancel() {
+    cmd_cntx_ = nullptr;
+  }
+
  private:
   const CommandContext* cmd_cntx_ = nullptr;
   size_t replies_recorded_ = 0;
@@ -1655,8 +1662,10 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   try {
     cid->Invoke(tail_args, cmd_cntx);
   } catch (const facade::CancellationException& ce) {
-    builder->SendError("Cancelled");
-    return DispatchResult::ERROR;
+#ifndef NDEBUG
+    reply_guard.Cancel();
+#endif
+    return DispatchResult::CANCELLED;
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     res = DispatchResult::ERROR;
