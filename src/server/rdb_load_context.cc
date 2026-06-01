@@ -179,7 +179,6 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
 
   ConnectionContext cntx{nullptr, acl::UserCredentials{}};
   cntx.is_replicating = true;
-  cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
   cntx.ns = &namespaces->GetDefaultNamespace();
 

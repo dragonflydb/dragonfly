@@ -1224,15 +1224,20 @@ ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
 }
 
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
-                                shared_ptr<const DocIndex> index_ptr) {
+                                shared_ptr<const DocIndex> index_ptr, bool is_journal) {
   auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr));
   auto [it, _] = indices_.emplace(name, std::move(shard_index));
 
   it->second->InitHnswShardIndices();
 
-  // Don't build while loading, shutting down, etc.
-  // After loading, indices are rebuilt separately
-  if (ServerState::tlocal()->gstate() == GlobalState::ACTIVE)
+  // Build now when ACTIVE, or for a journaled FT.CREATE/FT.ALTER replayed
+  // during a replica's full sync (gstate==LOADING) so AddDoc has an
+  // initialized indices_ to write into. RDB-aux load defers to
+  // PerformPostLoad's RebuildAllIndices, which also re-runs for the journal
+  // case and covers any docs not yet present when this Rebuild started. Other
+  // states (SHUTTING_DOWN, TAKEN_OVER) don't build.
+  const GlobalState gstate = ServerState::tlocal()->gstate();
+  if (gstate == GlobalState::ACTIVE || (gstate == GlobalState::LOADING && is_journal))
     it->second->Rebuild(op_args, &local_mr_);
 
   op_args.GetDbSlice().SetDocDeletionCallback(

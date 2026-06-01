@@ -2357,9 +2357,10 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
+  const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
   cmd_cntx->tx()->Execute(
-      [idx_name, idx_ptr](auto* tx, auto* es) {
-        es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
+      [idx_name, idx_ptr, is_journal](auto* tx, auto* es) {
+        es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr, is_journal);
         return OpStatus::OK;
       },
       true);
@@ -2415,9 +2416,10 @@ void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Rebuild index
   // TODO: Introduce partial rebuild
-  auto upd_cb = [idx_name, index_info](Transaction* tx, EngineShard* es) {
+  const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
+  auto upd_cb = [idx_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
     (void)es->search_indices()->DropIndex(idx_name);
-    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info);
+    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info, is_journal);
     return OpStatus::OK;
   };
   cmd_cntx->tx()->Execute(upd_cb, true);
