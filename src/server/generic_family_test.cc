@@ -2010,6 +2010,8 @@ TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
 // behavior is expected for other containers (SET, HASH, LIST) with non
 // listpack encodings.
 TEST_F(GenericFamilyTest, ContainerIterationYields) {
+  GTEST_SKIP() << "Until --container_iteration_yield_interval_usec is re-enabled";
+
   // Build a large sorted set that will be encoded as SKIPLIST.
   constexpr int N = 500'000;
   for (int start = 0; start < N; start += 1'000) {
