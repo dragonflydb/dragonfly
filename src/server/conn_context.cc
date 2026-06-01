@@ -212,20 +212,22 @@ size_t ConnectionContext::UsedMemory() const {
 }
 
 void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
-  if (transaction) {
-    transaction->CancelBlocking(nullptr);
+  if (!transaction)
+    return;
 
-    if (!transaction->IsScheduled())
-      return;
+  transaction->CancelBlocking(nullptr);
 
-    // Try cancelleding a scheduled transaction
-    // Dispatch because CancelScheduledTx might fiber-block.
-    boost::intrusive_ptr<Transaction> tx_alive = transaction;
-    util::fb2::ProactorBase::me()->DispatchLocalBrief([this, tx_alive] {
-      if (tx_alive->IsScheduled() && !tx_alive->Blocker()->IsCompleted())
-        tx_alive->CancelScheduledTx();
-    });
-  }
+  if (!transaction->IsScheduled())
+    return;
+
+  // Try cancelleding a scheduled transaction
+  // Dispatch because CancelScheduledTx might fiber-block.
+  boost::intrusive_ptr<Transaction> tx_alive = transaction;
+  util::ProactorBase::me()->Dispatch([this, tx_alive] {
+    if (tx_alive->IsScheduled() && !tx_alive->Blocker()->IsCompleted()) {
+      tx_alive->CancelScheduledTx();
+    }
+  });
 }
 
 void ConnectionContext::Unsubscribe(std::string_view channel) {

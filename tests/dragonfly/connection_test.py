@@ -2368,3 +2368,108 @@ async def test_client_list_filters(df_server: DflyInstance):
         await subscriber.connection.send_command("UNSUBSCRIBE")
         await subscriber.aclose()
         await observer.aclose()
+
+
+async def test_fibers_unblock_on_conn_disconnect(df_factory: DflyInstanceFactory):
+    """Verify that disconnected clients whose transactions are blocked on a locked
+    shard get properly cleaned up after cancellation.
+
+    A global EVAL script blocks all transactions from running. Multiple connections
+    issue various commands (some pipelined) which block waiting for the shard.
+    When those connections are closed, their transactions are cancelled and all
+    connections are removed from CLIENT LIST.
+    """
+    COMMANDS = [
+        # Coroutine commands
+        b"GET key",
+        b"SET key val",
+        b"INCR counter",
+        b"GETDEL key",
+        b"SETNX key val",
+        b"APPEND key val",
+        b"DEL key",
+        # Non-coroutine commands (single shard)
+        b"LPUSH mylist val",
+        b"SADD myset val",
+        b"ZADD myzset 1 val",
+        b"HSET myhash f v",
+        ## Multi-shard commands
+        b"MGET a b c",
+        b"MSET a 1 b 2 c 3",
+        b"DEL a b c",
+        b"SUNION a b c",
+        b"SDIFF a b c",
+        b"SINTER a b c",
+        ## Multi-shard multi hop commands
+        # b"RENAME a b",
+        # b"RPOPLPUSH a b",
+    ]
+
+    server = df_factory.create(proactor_threads=1, admin_port=BASE_PORT)
+    server.start()
+
+    # Use admin port for control so it's not blocked by the global EVAL
+    control = server.admin_client()
+    await control.ping()
+
+    # Start an infinite EVAL script that locks all shards via raw socket
+    blocker_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker_sock.connect(("127.0.0.1", server.port))
+    blocker_sock.sendall(b"CLIENT SETNAME blocker\r\n")
+    blocker_sock.recv(64)  # +OK
+    # Send EVAL as RESP to preserve newlines in the script body
+    script = b"--!df flags=allow-undeclared-keys\nwhile true do redis.call('INFO', 'ALL') end"
+    eval_cmd = f"*3\r\n$4\r\nEVAL\r\n${len(script)}\r\n".encode() + script + b"\r\n$1\r\n0\r\n"
+    blocker_sock.sendall(eval_cmd)
+    await asyncio.sleep(0.1)
+
+    # Shuffle and group commands: some connections get 1 command, some get 2-3 (pipelined)
+    shuffled = list(COMMANDS)
+    random.shuffle(shuffled)
+
+    victim_socks = []
+    i = 0
+    victim_id = 0
+    while i < len(shuffled):
+        # TODO: Does not work with pipeline
+        # Pick 1, 2, or 3 commands for this connection
+        batch_size = random.choice([1])
+        batch = shuffled[i : i + batch_size]
+        i += len(batch)
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", server.port))
+        s.sendall(f"CLIENT SETNAME victim{victim_id}\r\n".encode())
+        s.recv(64)  # +OK
+        # Send all commands in one write (pipelined)
+        s.sendall(b"\r\n".join(batch) + b"\r\n")
+        victim_socks.append(s)
+        victim_id += 1
+
+    await asyncio.sleep(0.1)
+
+    # Verify all victims are visible in CLIENT LIST
+    clients = await control.client_list()
+    victim_names = {c.get("name") for c in clients if c.get("name", "").startswith("victim")}
+    assert len(victim_names) == len(
+        victim_socks
+    ), f"Expected {len(victim_socks)} victims, got {victim_names}"
+
+    # Close all victim connections while they're blocked
+    for s in victim_socks:
+        s.close()
+    await asyncio.sleep(0.1)
+
+    # All victims should be cleaned up from CLIENT LIST
+    @assert_eventually(timeout=5)
+    async def check_victims_gone():
+        clients = await control.client_list()
+        remaining = [c.get("name") for c in clients if c.get("name", "").startswith("victim")]
+        assert len(remaining) == 0, f"victims still in client list: {remaining}"
+
+    await check_victims_gone()
+
+    # Clean up
+    blocker_sock.close()
+    await control.aclose()
+    server.stop(kill=True)  # No way to stop the script
