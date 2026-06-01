@@ -135,6 +135,11 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
                                                      delay_driver_.Enqeue(delay), 0, 0);
       DelayedEntryHandler::delayed_entries_.emplace(bucket, std::move(de));
     } else {
+      while (absl::Bernoulli(bg_, 0.3)) {
+        for (unsigned it = absl::Uniform(bg_, 1, 10); it > 0; it--)
+          util::ThisFiber::Yield();
+      }
+
       RecordSerialized(std::move(key));
     }
   }
@@ -206,10 +211,7 @@ void TestDriver::Loop() {
       util::ThisFiber::Yield();
     } while (snapshot_cursor_);
 
-    {
-      std::lock_guard guard(stream_mu_);
-      ProcessDelayedEntries(true, 0, base_cntx_);
-    }
+    ProcessDelayedEntries(true, 0, base_cntx_);
 
     util::ThisFiber::Yield();
   }  // for (dbindex)
@@ -248,14 +250,9 @@ unsigned TestDriver::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
-    std::lock_guard lk{stream_mu_};
+    // Call custom serialize instead of SerializerBases' to overwrite yielding behaviour
     Serialize(it.bucket_address(), it->first.ToString(), it->second.ObjType());
     ++serialized;
-
-    while (absl::Bernoulli(bg_, 0.3)) {
-      for (unsigned it = absl::Uniform(bg_, 1, 10); it > 0; it--)
-        util::ThisFiber::Yield();
-    }
   }
   return serialized;
 }
