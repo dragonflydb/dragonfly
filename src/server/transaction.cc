@@ -11,6 +11,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_stats.h"
 #include "facade/op_status.h"
 #include "redis/redis_aux.h"
@@ -889,6 +890,10 @@ void Transaction::UnlockMulti(bool block) {
 
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   Execute(cb, true);
+
+  if (coordinator_state_ & COORD_CANCELLED)
+    throw facade::CancellationException{};
+
   return local_result_;
 }
 
@@ -1074,6 +1079,7 @@ bool Transaction::CancelScheduledTx() {
     auto is_active = [this](uint32_t i) { return IsActive(i); };
     shard_set->RunBriefInParallel([this](EngineShard* shard) { CancelShardCb(shard); }, is_active);
     coordinator_state_ = (coordinator_state_ & ~COORD_SCHED) | COORD_CANCELLED;
+    local_result_ = OpStatus::CANCELLED;
 
     // Signal the run_barrier_ for all shards we disarmed so the coordinator unblocks.
     for (unsigned i = 0; i < disarmed_cnt; i++)

@@ -5,6 +5,7 @@
 #include "server/conn_context.h"
 
 #include <atomic>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "base/logging.h"
 #include "common/heap_size.h"
@@ -17,6 +18,7 @@
 #include "server/server_state.h"
 #include "server/transaction.h"
 #include "src/facade/dragonfly_connection.h"
+#include "util/fibers/proactor_base.h"
 
 namespace dfly {
 
@@ -204,8 +206,20 @@ size_t ConnectionContext::UsedMemory() const {
 }
 
 void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
-  if (transaction)
+  if (transaction) {
     transaction->CancelBlocking(nullptr);
+
+    if (!transaction->IsScheduled())
+      return;
+
+    // Try cancelleding a scheduled transaction
+    // Dispatch because CancelScheduledTx might fiber-block.
+    boost::intrusive_ptr<Transaction> tx_alive = transaction;
+    util::fb2::ProactorBase::me()->DispatchLocalBrief([this, tx_alive] {
+      if (tx_alive->IsScheduled() && !tx_alive->Blocker()->IsCompleted())
+        tx_alive->CancelScheduledTx();
+    });
+  }
 }
 
 void ConnectionContext::Unsubscribe(std::string_view channel) {

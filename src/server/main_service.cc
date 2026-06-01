@@ -1606,6 +1606,9 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   builder->ConsumeLastError();  // throw away last error
   try {
     cid->Invoke(tail_args, cmd_cntx);
+  } catch (const facade::CancellationException& ce) {
+    builder->SendError("Cancelled");
+    return DispatchResult::ERROR;
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return DispatchResult::ERROR;
