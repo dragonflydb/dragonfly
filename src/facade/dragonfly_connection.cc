@@ -1574,6 +1574,12 @@ bool Connection::ProcessControlMessages(uint32_t quota) {
   // PubSub replies flush immediately via FinishScope() only when batched_ is false.
   // ReplyBatch() and ExecuteBatch() both reset it via absl::Cleanup guards on all return paths.
   DCHECK(!reply_builder_->IsBatchMode());
+
+  // Batch control-message replies when multiple are queued,
+  // avoiding per-message sendmsg syscalls while preserving latency for single-message wakeups.
+  reply_builder_->SetBatchMode(dispatch_q_.size() > 1);
+  absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
+
   uint32_t dispatched = 0;
 
   while (!dispatch_q_.empty()) {
