@@ -1011,9 +1011,9 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
       if (int_arg <= 0)
         return facade::ErrorReply{InvalidExpireTime("set")};
 
+      bool is_ms = *exp_type == ExpT::PX || *exp_type == ExpT::PXAT;
       DbSlice::ExpireParams expiry{
-          .value = int_arg,
-          .unit = *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC,
+          .msec_val = is_ms ? int_arg : int_arg * 1000,
           .absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT,
       };
 
@@ -1137,9 +1137,9 @@ cmd::CmdR CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   if (exp_int < 1)
     co_return facade::ErrorReply{InvalidExpireTime(cmd_name)};
 
+  bool is_ms = cmd_name.front() == 'P';
   DbSlice::ExpireParams expiry{
-      .value = exp_int,
-      .unit = cmd_name.front() == 'P' ? TimeUnit::MSEC : TimeUnit::SEC,
+      .msec_val = is_ms ? exp_int : exp_int * 1000,
       .absolute = false,
   };
 
@@ -1306,9 +1306,8 @@ cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
       }
 
       exp_params.absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
-      exp_params.value = int_arg;
-      exp_params.unit =
-          *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC;
+      bool is_ms = *exp_type == ExpT::PX || *exp_type == ExpT::PXAT;
+      exp_params.msec_val = is_ms ? int_arg : int_arg * 1000;
       defined = true;
     } else if (parser.Check("PERSIST")) {
       exp_params.persist = true;
@@ -1515,7 +1514,7 @@ cmd::CmdR CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
   }
   int64_t expire_ts = cmd_cntx->mc_command()->expire_ts;
   DbSlice::ExpireParams expire_params{
-      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
+      .msec_val = expire_ts * 1000, .absolute = true, .persist = expire_ts == 0};
   return MGetGeneric(cmd_cntx, args, expire_params);
 }
 
