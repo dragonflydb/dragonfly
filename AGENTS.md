@@ -35,6 +35,7 @@
    `ninja <unit_test> && ./unit_test`
 4. ✅ **Format Code** - `pre-commit run --files <files>`
 5. ✅ **Follow Architecture** - See [Architecture Patterns](#architecture-patterns) below
+6. ✅ **Never Push to Main** - Always create a feature branch and open a PR. Never run `git push origin main`.
 
 ### Pull Request Guidelines
 
