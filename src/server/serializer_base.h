@@ -155,7 +155,6 @@ class SerializerBase : public BucketDependencies,
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.
-  // Currently runs with stream_mu_ held.
   virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) = 0;
 
