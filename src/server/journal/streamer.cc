@@ -419,7 +419,6 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, Executi
   DCHECK(slice != nullptr);
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
-  db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 
   cmd_serializer_ = std::make_unique<CmdSerializer>(
       db_slice_,
@@ -568,7 +567,6 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-// TODO(vlad): 80% similar with Snapshot::SerializeBucket. Move common parts
 unsigned RestoreStreamer::SerializeBucketLocked(DbIndex /* unused */,
                                                 PrimeTable::bucket_iterator it, bool on_update) {
   auto& shard_stats = EngineShard::tlocal()->stats();
