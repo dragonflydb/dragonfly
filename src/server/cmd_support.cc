@@ -41,12 +41,15 @@ void CmdR::Coro::return_value(const facade::ErrorReply& err) const noexcept {
 }
 
 void CmdR::Coro::unhandled_exception() const noexcept {
+  // TODO: Maybe forward exceptions further to InvokeCmd to generate correct DispatchResult
+  // and not duplicate logic (not trivial with coros, needs to be done via return type).
   try {
     throw;
   } catch (const facade::CancellationException&) {
     cmd_cntx->SendError("Cancelled");
   } catch (const std::exception& e) {
     LOG(ERROR) << "Unhandled exception in command coroutine: " << e.what();
+    cmd_cntx->SendError("Internal error");
   }
 }
 
