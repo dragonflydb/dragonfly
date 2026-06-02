@@ -64,7 +64,7 @@ template <typename T> enable_if_t<is_integral_v<T>, char*> write_piece(T num, ch
 }
 
 char* write_piece(string_view str, char* dest) {
-  return (char*)memcpy(dest, str.data(), str.size()) + str.size();
+  return str.empty() ? dest : (char*)memcpy(dest, str.data(), str.size()) + str.size();
 }
 
 }  // namespace
@@ -346,6 +346,8 @@ void RedisReplyBuilderBase::SendBulkString(std::string_view str) {
 
 void RedisReplyBuilderBase::SendBulkStringBorrowed(cmn::BorrowedString bs) {
   ReplyScope scope(this);
+  tl_facade_stats->reply_stats.borrowed_string_sent_cnt++;
+
   auto* ops = cmn::BorrowedStringOps::Get();
   size_t total = ops->DecodedSize(bs);
 

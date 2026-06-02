@@ -2165,7 +2165,7 @@ async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
         await writer.wait_closed()
 
 
-@dfly_args({"proactor_threads": 1})
+@dfly_args({"proactor_threads": 1, "get_zero_copy": "false"})
 async def test_multi_exec_phantom_connections(df_server: DflyInstance):
     """Reproduce the addr=0.0.0.0 phantom connections from issue #7272.
 
@@ -2175,6 +2175,12 @@ async def test_multi_exec_phantom_connections(df_server: DflyInstance):
     run_barrier_.Wait() inside Transaction::Execute(), so the io_uring RST event goes
     unprocessed: the kernel moves the socket to TCP_CLOSE (addr=0.0.0.0) while phase
     shows "scheduled" (coordinator fiber waiting for shard callback to complete).
+
+    Note: zero-copy GET (--get_zero_copy=true, default) makes the EXEC callback complete
+    much faster (no 1 MB materialization into the captured payload), shrinking the
+    repro window below detection. Disabling it here keeps the test exercising the
+    materializing reply path it was written against — the underlying io_uring fiber
+    bug is not affected by the borrow path.
     """
     import struct
 
