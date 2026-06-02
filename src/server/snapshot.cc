@@ -54,8 +54,7 @@ SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
     : SerializerBase(slice, cntx),
       compression_mode_(compression_mode),
       replica_dfly_version_(replica_dfly_version),
-      consumer_(consumer),
-      cntx_(cntx) {
+      consumer_(consumer) {
   tl_slice_snapshots.insert(this);
 }
 
@@ -168,7 +167,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   }
 
   for (DbIndex snapshot_db_indx = 0; snapshot_db_indx < db_array_.size(); ++snapshot_db_indx) {
-    if (!cntx_->IsRunning())
+    if (!base_cntx_->IsRunning())
       return;
 
     if (!db_array_[snapshot_db_indx])
@@ -178,9 +177,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << snapshot_db_indx;
 
     do {
-      if (!cntx_->IsRunning()) {
+      if (!base_cntx_->IsRunning())
         return;
-      }
 
       snapshot_cursor_ = pt->TraverseBuckets(
           snapshot_cursor_,
@@ -203,7 +201,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     } while (snapshot_cursor_);
 
     // Wait for all the outstanding delayed entries and serialize them as well.
-    ProcessDelayedEntries(true, 0, cntx_);
+    ProcessDelayedEntries(true, 0, base_cntx_);
 
     PushSerialized(true);
   }  // for (dbindex)
@@ -301,7 +299,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
 
   // Blocking point.
-  consumer_->ConsumeData(std::move(data), cntx_);
+  consumer_->ConsumeData(std::move(data), base_cntx_);
 
   DCHECK_EQ(last_pushed_id_ + 1, id);
   last_pushed_id_ = id;
@@ -319,7 +317,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
 }
 
 void SliceSnapshot::ConsumeBigValueChunk(std::string data) {
-  if (!cntx_->IsRunning()) {
+  if (!base_cntx_->IsRunning()) {
     ThisFiber::Yield();
     return;  // Short circuit flush on cancel or error to finish faster
   }

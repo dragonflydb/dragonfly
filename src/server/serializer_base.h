@@ -135,13 +135,7 @@ class SerializerBase : public BucketDependencies,
 
   void WaitForNoBucketBlocked() const override;
 
-  // Called when an existing bucket is about to be mutated. Calls ProcessBucket.
-  void OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it);
-
-  // Called when a new key is about to be inserted. Calls ProcessBucket for the buckets.
-  void OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& set);
-
-  // --- Shared members (to be moved from subclasses in later PRs) ---
+  // --- Shared members ---
 
   DbSlice* const db_slice_;
   ExecutionState* const base_cntx_;

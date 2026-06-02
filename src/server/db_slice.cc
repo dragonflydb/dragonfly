@@ -8,7 +8,6 @@
 
 #include "core/dense_set.h"
 #include "core/oah_set.h"
-#include "core/overloaded.h"
 #include "strings/human_readable.h"
 
 extern "C" {
@@ -697,7 +696,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   if (res.ok()) {
     Iterator it(*res, StringOrView::FromView(key));
 
-    bool omitted_journal = IsOmittableWrite(cntx, it.GetInnerIt());
+    bool omitted_journal = IsOmittableWrite(cntx, ChangeReq{it.GetInnerIt()});
     if (!omitted_journal)
       PreUpdateBlocking(cntx.db_index, it);
 
@@ -725,7 +724,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
       auto bucket_set = db.prime.CVCUponInsert(key);
 
       // We skip calling callbacks, so the bucket set is consistent and we break
-      if (omit_journal = IsOmittableWrite(cntx, {bucket_set}); omit_journal)
+      if (omit_journal = IsOmittableWrite(cntx, bucket_set); omit_journal)
         break;
 
       CallChangeCallbacks(cntx.db_index, bucket_set);
@@ -965,15 +964,9 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
       }
     };
 
-    if (const auto* bit = std::get_if<PrimeTable::bucket_iterator>(&req)) {
-      if (!bit->is_done() && bit->GetVersion() < next_version) {
-        process_bucket(*bit);
-      }
-    } else {
-      for (auto it : std::get<PrimeTable::BucketSet>(req).buckets()) {
-        if (!it.is_done() && it.GetVersion() < next_version)
-          process_bucket(it);
-      }
+    for (auto it : req.buckets()) {
+      if (!it.is_done() && it.GetVersion() < next_version)
+        process_bucket(it);
     }
   };
 
@@ -1981,21 +1974,16 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
 // 2. there is a single eventually-consistent snapshot (i.e. replica full sync)
 // 3. there are no other journal consumers
 // 4. the snapshot did not reach the bucket yet
-bool DbSlice::IsOmittableWrite(const Context& cntx, ChangeReq req) {
+bool DbSlice::IsOmittableWrite(const Context& cntx, const ChangeReq& req) {
   if (!journal_omit_redundant_writes_)
     return false;
 
-  auto cb1 = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };
-  auto cb2 = [cb1](const PrimeTable::BucketSet& bs) -> uint64_t {
-    DCHECK(!std::ranges::empty(bs.buckets()));
-    return std::ranges::max(bs.buckets(), {}, cb1).GetVersion();
-  };
-
   bool omit_update = false;
   if (cntx.is_omittable_operation && change_cb_.size() == 1) {
-    uint64_t max_v = std::visit(Overloaded{cb1, cb2}, req);
+    uint64_t max_version = std::ranges::max(
+        req.buckets() | std::views::transform(&PrimeTable::bucket_iterator::GetVersion));
     auto* cb = change_cb_.front();
-    omit_update = cb->eventually_consistent_ && max_v < cb->snapshot_version_ &&
+    omit_update = cb->eventually_consistent_ && max_version < cb->snapshot_version_ &&
                   journal::GetCallbackCount() == 1;
     events_.journal_omit += unsigned(omit_update);
   }
