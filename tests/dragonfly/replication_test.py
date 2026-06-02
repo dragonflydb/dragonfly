@@ -2648,8 +2648,9 @@ async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
 
 
 def download_dragonfly_release(version):
+    arch = platform.machine()  # e.g. "x86_64" or "aarch64"
     path = f"/tmp/old_df/{version}"
-    binary = f"{path}/dragonfly-x86_64"
+    binary = f"{path}/dragonfly-{arch}"
     if os.path.isfile(binary):
         return binary
 
@@ -2659,13 +2660,9 @@ def download_dragonfly_release(version):
 
     os.makedirs(path)
     gzfile = f"{path}/dragonfly.tar.gz"
+    url = f"https://github.com/dragonflydb/dragonfly/releases/download/{version}/dragonfly-{arch}.tar.gz"
     logging.debug(f"Downloading Dragonfly release into {gzfile}...")
-
-    # Download
-    download_with_retries(
-        f"https://github.com/dragonflydb/dragonfly/releases/download/{version}/dragonfly-x86_64.tar.gz",
-        gzfile,
-    )
+    download_with_retries(url, gzfile)
 
     # Extract
     file = tarfile.open(gzfile)
@@ -2793,7 +2790,6 @@ async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
 
     dfly_version = "v1.21.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
-
     master = df_factory.create(path=released_dfly_path, version=1.21)
     master.start()
 
@@ -4918,3 +4914,46 @@ async def test_client_list_replication_types(df_factory: DflyInstanceFactory):
         assert parse_client_list(await c_replica.execute_command("CLIENT LIST TYPE master")) == []
 
     await link_gone()
+
+
+async def test_v134_replica_crashes_v138_master_on_reconnect(df_factory: DflyInstanceFactory):
+    dfly_version = "v1.34.2"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+
+    old_master = df_factory.create(path=released_dfly_path, version=1.34, proactor_threads=2)
+    new_master = df_factory.create(proactor_threads=2)
+    old_replica = df_factory.create(path=released_dfly_path, version=1.34, proactor_threads=2)
+    df_factory.start_all([old_master, new_master, old_replica])
+
+    c_old_master = old_master.client()
+    c_new_master = new_master.client()
+    c_old_replica = old_replica.client()
+
+    await c_old_master.set("key", "value")
+
+    # Both new_master and old_replica replicate from old_master and reach stable sync.
+    await start_replication(c_new_master, old_master.port)
+    await start_replication(c_old_replica, old_master.port)
+
+    await c_new_master.execute_command("REPLTAKEOVER 5")
+
+    await c_old_replica.execute_command(f"REPLICAOF localhost {new_master.port}")
+
+    @assert_eventually(timeout=10)
+    async def replica_connected():
+        info = await c_new_master.info("replication")
+        assert info.get("connected_slaves", 0) == 1
+
+    await replica_connected()
+
+    # Trigger cleanup: disconnect old_replica so new_master runs ~SliceSnapshot.
+    await c_old_replica.execute_command("REPLICAOF NO ONE")
+
+    @assert_eventually(timeout=5)
+    async def new_master_alive():
+        assert new_master.proc.poll() is None, (
+            f"new_master (v1.38+) crashed (exit={new_master.proc.poll()}) when a v1.34 replica "
+            "reconnected after promotion — regression of the v1.34→v1.38 rolling-upgrade crash."
+        )
+
+    await new_master_alive()
