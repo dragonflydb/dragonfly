@@ -318,14 +318,16 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   VLOG(2) << "Pushed with Serialize() " << serialized;
 }
 
-void SliceSnapshot::ConsumeBigValueChunk(std::string data) {
-  if (!cntx_->IsRunning()) {
-    ThisFiber::Yield();
-    return;  // Short circuit flush on cancel or error to finish faster
-  }
+std::error_code SliceSnapshot::ConsumeBigValueChunk(std::string data) {
+  if (cntx_->IsError())
+    return cntx_->GetError();
+
+  if (cntx_->IsCancelled())
+    return std::make_error_code(std::errc::operation_canceled);
 
   HandleFlushData(std::move(data));
   ++ServerState::tlocal()->stats.big_value_preemptions;
+  return {};
 }
 
 size_t SliceSnapshot::FlushSerialized() {

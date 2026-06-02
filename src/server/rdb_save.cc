@@ -327,7 +327,8 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   // We flush here because if the next element in the bucket we are serializing is a container,
   // it will first serialize the first entry and then flush the internal buffer, even if
   // crossed the limit.
-  PushToConsumerIfNeeded(FlushState::kFlushEndEntry);
+  if (auto ec = PushToConsumerIfNeeded(FlushState::kFlushEndEntry); ec)
+    return make_unexpected(ec);
   return rdb_type;
 }
 
@@ -387,7 +388,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
     size_t lp_bytes = lpBytes(lp);
     RETURN_ON_ERR(SaveString(lp, lp_bytes));
 
-    PushToConsumerIfNeeded(FlushState::kFlushEndEntry);
+    RETURN_ON_ERR(PushToConsumerIfNeeded(FlushState::kFlushEndEntry));
     return error_code{};
   }
 
@@ -419,7 +420,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
       FlushState flush_state = FlushState::kFlushMidEntry;
       if (node->next == nullptr)
         flush_state = FlushState::kFlushEndEntry;
-      PushToConsumerIfNeeded(flush_state);
+      RETURN_ON_ERR(PushToConsumerIfNeeded(flush_state));
     } else if (node->IsCompressed()) {
       void* data;
       size_t compress_len = node->GetLZF(&data);
@@ -429,7 +430,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
       FlushState flush_state = FlushState::kFlushMidEntry;
       if (node->next == nullptr)
         flush_state = FlushState::kFlushEndEntry;
-      PushToConsumerIfNeeded(flush_state);
+      RETURN_ON_ERR(PushToConsumerIfNeeded(flush_state));
     }
     node = node->next;
   }
@@ -456,7 +457,7 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
         ++it;
         FlushState flush_state =
             it == set->end() ? FlushState::kFlushEndEntry : FlushState::kFlushMidEntry;
-        PushToConsumerIfNeeded(flush_state);
+        RETURN_ON_ERR(PushToConsumerIfNeeded(flush_state));
       }
       return error_code{};
     };
@@ -500,13 +501,12 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
       FlushState flush_state = FlushState::kFlushMidEntry;
       if (it == string_map->end())
         flush_state = FlushState::kFlushEndEntry;
-      PushToConsumerIfNeeded(flush_state);
+      RETURN_ON_ERR(PushToConsumerIfNeeded(flush_state));
     }
 
     pv.SetMemberTime(MemberTimeSeconds(GetCurrentTimeMs()));
   } else {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
-
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
     size_t lp_bytes = lpBytes(lp);
     RETURN_ON_ERR(SaveString((uint8_t*)lp, lp_bytes));
@@ -541,7 +541,9 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
       if (count == total)
         flush_state = FlushState::kFlushEndEntry;
 
-      PushToConsumerIfNeeded(flush_state);
+      ec = PushToConsumerIfNeeded(flush_state);
+      if (ec)
+        return false;
       return true;
     });
   } else {
@@ -583,7 +585,7 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
     // but the stream metadata tail is expected to stay bundled with the last listpack chunk, not
     // in its own separate chunk.
     if (i + 1 < rax_size)
-      PushToConsumerIfNeeded(FlushState::kFlushMidEntry);
+      RETURN_ON_ERR(PushToConsumerIfNeeded(FlushState::kFlushMidEntry));
   }
 
   std::move(stop_listpacks_rax).Invoke();
@@ -652,7 +654,7 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
     }
   }
 
-  PushToConsumerIfNeeded(FlushState::kFlushEndEntry);
+  RETURN_ON_ERR(PushToConsumerIfNeeded(FlushState::kFlushEndEntry));
 
   return error_code{};
 }
@@ -689,11 +691,12 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
         size_t chunk_len = std::min(kFilterChunkSize, blob.size() - offset);
         RETURN_ON_ERR(SaveString(blob.substr(offset, chunk_len)));
         const bool is_last_chunk = (offset + chunk_len >= blob.size());
-        PushToConsumerIfNeeded(is_last_chunk ? flush_state : FlushState::kFlushMidEntry);
+        RETURN_ON_ERR(
+            PushToConsumerIfNeeded(is_last_chunk ? flush_state : FlushState::kFlushMidEntry));
       }
     } else {
       RETURN_ON_ERR(SaveString(blob));
-      PushToConsumerIfNeeded(flush_state);
+      RETURN_ON_ERR(PushToConsumerIfNeeded(flush_state));
     }
   }
 
@@ -1866,9 +1869,9 @@ void RdbSerializer::CompressBlob() {
   mem_buf->CommitWrite(compressed->size());
 }
 
-void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
+std::error_code RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
   if (!consume_fun_ || SerializedLen() <= flush_threshold_)
-    return;
+    return {};
 
   if (flush_state == FlushState::kFlushMidEntry)
     mem_buf_controller_.MarkEntrySplit();
@@ -1878,8 +1881,9 @@ void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
 
   // save and restore id around preempt point consume_fun_
   const auto id = mem_buf_controller_.SaveStateBeforeConsume();
-  consume_fun_(std::move(blob));
+  std::error_code ec = consume_fun_(std::move(blob));
   mem_buf_controller_.RestoreStateAfterConsume(id);
+  return ec;
 }
 
 void MemBufController::StartEntry() {
