@@ -12,6 +12,9 @@ extern "C" {
 #include <absl/flags/reflection.h>
 #include <mimalloc.h>
 
+#include <atomic>
+#include <chrono>
+
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -1434,6 +1437,12 @@ std::string MakeTaggedChunk(uint32_t id, std::string_view payload) {
   return out;
 }
 
+std::string MakeFullSyncCut() {
+  RdbSerializer serializer(CompressionMode::NONE);
+  CHECK(!serializer.SendFullSyncCut());
+  return serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry);
+}
+
 void AppendBinaryDouble(std::string* out, double val) {
   uint64_t bits;
   memcpy(&bits, &val, sizeof(bits));
@@ -1549,6 +1558,84 @@ TEST_F(RdbTest, InterleavedLoad) {
   EXPECT_EQ(Run({"SELECT", "1"}), "OK");
   EXPECT_THAT(Run({"EXISTS", key}), IntArg(0));
   EXPECT_EQ(Run({"SELECT", "0"}), "OK");
+}
+
+// https://github.com/dragonflydb/dragonfly/issues/7476
+// unlike the linked issue we test full sync cut vs flush, because it is easier to test with
+// callback which full sync cut works with rather than deletes. in the test we block the target
+// shard queue, and that may end up blocking the DEL command too
+TEST_F(RdbTest, FullSyncCutWaitsForTaggedShardLoads) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  std::string key;
+  // The issue is only seen on buffer queue on non-coordinator shards
+  for (unsigned i = 0; i < 1000; ++i) {
+    key = StrCat("full-sync-barrier-", i);
+    if (Shard(key, shard_set->size()) != 0)
+      break;
+  }
+  ASSERT_NE(Shard(key, shard_set->size()), 0u);
+  const ShardId sid = Shard(key, shard_set->size());
+
+  std::string entry;
+  entry.push_back(RDB_TYPE_STRING);
+  AppendString(&entry, key);
+  AppendString(&entry, "baseline");
+
+  std::string body;
+  // single tagged chunk and then full sync cut
+  body += MakeTaggedChunk(1, entry);
+  body += MakeFullSyncCut();
+
+  EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+
+  std::atomic_bool release_shard_queue{false};
+  bool visible_at_cut = false;
+
+  // block the task queue until releaser returns from its sleep (task queue for shard != 0)
+  // would cause test to fail if shard 0 could send full sync cut while sid was still blocked here
+  // this is enqueued before the key operations to test that key operations are performed before
+  // full sync cut
+  shard_set->Add(sid, [&] {
+    while (!release_shard_queue.load(std::memory_order_relaxed)) {
+      ThisFiber::SleepFor(chrono::milliseconds(1));
+    }
+  });
+
+  auto ec = pp_->at(0)->Await([&] {
+    Fiber releaser([&] {
+      ThisFiber::SleepFor(chrono::milliseconds(50));
+      // unblock the sid task queue
+      release_shard_queue.store(true, std::memory_order_relaxed);
+    });
+
+    auto full_sync_cut_cb = [&] {
+      // set to true if key is present in the db. full sync cut is called after FlushAllShards() so
+      // key must be visible after flush
+      visible_at_cut = pp_->at(sid)->Await([&] {
+        const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+        const auto& db = ctx.GetDbSlice(sid);
+        return db.FindReadOnly(ctx, key, OBJ_STRING).ok();
+      });
+    };
+
+    const std::string rdb = WrapInRdb(body);
+    io::BytesSource src{io::Buffer(rdb)};
+    RdbLoadContext load_context;
+    RdbLoader loader(service_.get(), &load_context);
+    loader.SetFullSyncCutCb(full_sync_cut_cb);
+
+    const auto ec_ = loader.Load(&src);
+    EXPECT_EQ(loader.journal_offset(), std::nullopt);
+    releaser.Join();
+    shard_set->Await(sid, [] {});
+    return ec_;
+  });
+
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_TRUE(visible_at_cut);
+  EXPECT_EQ(Run({"GET", key}), "baseline");
 }
 
 TEST_F(RdbTest, SplitSBF) {

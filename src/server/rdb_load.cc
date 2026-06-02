@@ -2274,7 +2274,7 @@ error_code RdbLoader::Load(io::Source* src) {
       RETURN_ON_ERR(ConsumeInput(8));  // ignore 8 bytes
 
       if (full_sync_cut_cb) {
-        FlushAllShards();  // Flush as the handler awakes post load handlers
+        FlushAllShards();  // Drain queued loads before waking post-load handlers.
         full_sync_cut_cb();
       }
       continue;
@@ -2359,7 +2359,7 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_JOURNAL_BLOB) {
-      FlushAllShards();  // Always flush before applying incremental on top
+      FlushAllShards();  // Always drain before applying incremental on top.
       RETURN_ON_ERR(HandleJournalBlob(service_));
       continue;
     }
@@ -2442,15 +2442,7 @@ error_code RdbLoader::Load(io::Source* src) {
 }
 
 void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
-  BlockingCounter bc(shard_set->size());
-  for (unsigned i = 0; i < shard_set->size(); ++i) {
-    // Flush the remaining items.
-    FlushShardAsync(i);
-
-    // Send sentinel callbacks to ensure that all previous messages have been processed.
-    shard_set->Add(i, [bc]() mutable { bc->Dec(); });
-  }
-  bc->Wait();  // wait for sentinels to report.
+  FlushAllShards();
   // Decrement local one if it exists
   if (EngineShard* es = EngineShard::tlocal(); es) {
     GetCurrentDbSlice().DecrLoadInProgress();
@@ -2826,8 +2818,14 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 }
 
 void RdbLoader::FlushAllShards() {
-  for (ShardId i = 0; i < shard_set->size(); i++)
+  BlockingCounter bc(shard_set->size());
+  for (ShardId i = 0; i < shard_set->size(); i++) {
     FlushShardAsync(i);
+
+    // Send sentinel callbacks to ensure that all previous messages have been processed.
+    shard_set->Add(i, [bc]() mutable { bc->Dec(); });
+  }
+  bc->Wait();  // wait for sentinels to report.
 }
 
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig config,
