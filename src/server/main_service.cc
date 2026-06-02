@@ -1319,7 +1319,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
   const GlobalState gstate = etl.gstate();
   switch (gstate) {
     case GlobalState::LOADING:
-      allowed_by_state = dfly_cntx.journal_emulated || (cid.opt_mask() & CO::LOADING);
+      allowed_by_state = dfly_cntx.is_replicating || (cid.opt_mask() & CO::LOADING);
       break;
     case GlobalState::SHUTTING_DOWN:
       allowed_by_state = false;

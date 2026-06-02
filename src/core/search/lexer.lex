@@ -29,6 +29,7 @@
   using dfly::search::TagType;
 
   Parser::symbol_type make_PhraseTok(string_view src, const Parser::location_type& loc);
+  Parser::symbol_type make_Wildcard(string_view src, const Parser::location_type& loc);
   Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc);
   // Strip backslashes from \X sequences in a term.
   string UnescapeTerm(string_view src);
@@ -79,6 +80,15 @@ astrsk_ch  \*
 [0-9]{1,9}                          return Parser::make_UINT32(str(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)       return Parser::make_DOUBLE(str(), loc());
 
+  /* w'...' / w"..." glob wildcard, where `*`/`?` inside are glob metacharacters interpreted at
+     query time. Only a lowercase `w` marks a wildcard; the lexer is case-insensitive, so an
+     uppercase `W` is rewound to a plain term and the quoted part re-scans as a phrase. Longest
+     match wins over the bare `w` term plus a following phrase. */
+w{sq}([^']|{esc_seq})*{sq}            { if (str()[0] != 'w') { matcher().less(1); return Parser::make_TERM(UnescapeTerm(str()), loc()); }
+                                        return make_Wildcard(str(), loc()); }
+w{dq}([^"]|{esc_seq})*{dq}            { if (str()[0] != 'w') { matcher().less(1); return Parser::make_TERM(UnescapeTerm(str()), loc()); }
+                                        return make_Wildcard(str(), loc()); }
+
   /* Quoted phrase, optionally followed by `~N` slop (no whitespace before `~`). With whitespace
      before `~`, the tilde tokenizes separately as the optional-term operator. */
 {dq}([^"]|{esc_seq})*{dq}(~[0-9]+)?   return make_PhraseTok(str(), loc());
@@ -115,6 +125,14 @@ Parser::symbol_type make_PhraseTok(string_view src, const Parser::location_type&
   }
 
   return Parser::make_PHRASE(dfly::search::PhraseTok{string{inner}, slop}, loc);
+}
+
+Parser::symbol_type make_Wildcard(string_view src, const Parser::location_type& loc) {
+  // src is `w'...'` or `w"..."`. Drop the marker and the surrounding quotes, then strip one layer
+  // of `\` escapes (as terms do). The glob matcher interprets any remaining `\`, so `w'a\*'` keeps
+  // `*` a metacharacter while `w'a\\*'` matches a literal `*`.
+  string_view inner = src.substr(2, src.size() - 3);
+  return Parser::make_WILDCARD(UnescapeTerm(inner), loc);
 }
 
 string UnescapeTerm(string_view src) {

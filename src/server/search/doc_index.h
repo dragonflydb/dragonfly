@@ -399,6 +399,13 @@ class ShardDocIndex {
 
   DocIndexInfo GetInfo() const;
 
+  // Direct access to the underlying DocIndex (schema, prefixes, type). Prefer this over
+  // GetInfo().base_index for hot paths -- GetInfo() returns a freshly-copied DocIndexInfo
+  // (which contains the entire schema by value).
+  const DocIndex& base() const {
+    return *base_;
+  }
+
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
   // Get synonym manager for this shard
@@ -543,9 +550,8 @@ class ShardDocIndices {
   ShardDocIndex* GetIndex(std::string_view name);
 
   // Init index: create shard local state for given index with given name.
-  // Build if instance is in active state.
   void InitIndex(const OpArgs& op_args, std::string_view name,
-                 std::shared_ptr<const DocIndex> index);
+                 std::shared_ptr<const DocIndex> index, bool is_journal = false);
 
   // Drop index, return the dropped index if it existed or nullptr otherwise
   std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);

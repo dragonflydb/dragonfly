@@ -22,4 +22,10 @@ float IPDistance(const float* u, const float* v, size_t dims);
 float CosineDistance(const float* u, const float* v, size_t dims);
 float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilarity sim);
 
+std::string_view VectorSimilarityToString(VectorSimilarity sim);
+
+// L2: 1/(1+d*d) -- knn_dist is raw L2 here, so squaring matches the 1/(1+L2_sq) similarity.
+// IP/COSINE: (2-d)/2 -- knn_dist is (1 - score) for both metrics.
+float DistanceToSimilarity(float distance, VectorSimilarity sim);
+
 }  // namespace dfly::search

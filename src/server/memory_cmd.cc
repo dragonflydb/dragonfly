@@ -251,7 +251,11 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (parser.Check("DECOMMIT")) {
-    if (parser.Check("COOL")) {
+    bool cool = parser.Check("COOL");
+    if (parser.HasNext()) {
+      return cmd_cntx_->SendError(kSyntaxErr);
+    }
+    if (cool) {
       shard_set->RunBriefInParallel([](EngineShard* shard) {
         if (auto* ts = shard->tiered_storage(); ts) {
           ts->ReclaimMemory(SIZE_MAX);

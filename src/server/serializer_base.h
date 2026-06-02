@@ -35,8 +35,6 @@ struct BucketDependencies {
 
   // Wait for all bucket dependencies to resolve
   void Wait(BucketIdentity bucket) const;
-  bool DEBUG_IsBusy(BucketIdentity) const;
-
   // Wait for no dependencies to exist
   void WaitEmpty() const;
   bool HasAny() const {
@@ -84,6 +82,40 @@ struct DelayedEntryHandler {
   // Entries that are waiting for tiered storage reads to complete before they can be serialized.
   std::multimap<BucketIdentity, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 };
+
+// Serialization pipeline overview:
+//
+// ┌────────────────────┐     ┌───────────────────┐
+// │  Traversal fiber   │     │ OnChange          │
+// │ (IterateBucketsFb) │     │ (db_slice change) │
+// └────────┬───────────┘     └────────┬──────────┘
+//          │                          │
+//          ▼                          ▼
+// ┌───────────────────────────────────────────────┐
+// │           SerializerBase::ProcessBucket       │  (serializer_base.cc)
+// │  Stamps bucket version, manages dependencies  │
+// └────────────────────┬──────────────────────────┘
+//                      │
+//                      ▼
+// ┌───────────────────────────────────────────────┐
+// │        SerializeBucketLocked (virtual)        │  (snapshot.cc / streamer.cc)
+// │  Iterates bucket entries, serializes each one │
+// └────────────────────┬──────────────────────────┘
+//                      │
+//          ┌───────────┴───────────┐
+//          ▼                       ▼
+// ┌─────────────────┐   ┌──────────────────────┐
+// │  Inline entry   │   │  Tiered (offloaded)  │
+// │  (SaveEntry /   │   │  EnqueueOffloaded →  │
+// │   CmdSerializer)│   │  ProcessDelayedEntry │
+// └────────┬────────┘   └──────────┬───────────┘
+//          │                       │
+//          ▼                       ▼
+// ┌───────────────────────────────────────────────┐
+// │     Output sink (consumer / socket write)     │
+// └───────────────────────────────────────────────┘
+//
+// See also: docs/shard-serialization.md for locking & ordering details.
 
 // Base class for operations relying on snapshotting and implementing SerializeBucket.
 // Progress should be driven externally by calling ProcessBucket().
@@ -151,7 +183,7 @@ class SerializerBase : public BucketDependencies,
   // Called when a new key is about to be inserted. Calls ProcessBucket for the buckets.
   void OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& set);
 
-  // --- Shared members (to be moved from subclasses in later PRs) ---
+  // --- Shared members ---
 
   DbSlice* const db_slice_;
   ExecutionState* const base_cntx_;
@@ -163,9 +195,6 @@ class SerializerBase : public BucketDependencies,
   // Guards output stream (serializer) to not be used from multiple fibers
   // as buffered changes can be flushed amid writing a value (logical stream)
   ThreadLocalMutex stream_mu_;
-
- private:
-  uint64_t change_cb_id_ = 0;
 };
 
 }  // namespace dfly
