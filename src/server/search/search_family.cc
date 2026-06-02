@@ -464,15 +464,23 @@ void ParseNumericFilter(CmdArgParser* parser, SearchParams* params) {
 }
 
 std::vector<FieldReference> ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
-  // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
+  // Count is the number of tokens that follow; a field-spec is 1 or 3 tokens.
   std::vector<FieldReference> fields;
-  size_t num_fields = parser->Next<size_t>();
+  size_t tokens_left = parser->Next<size_t>();
 
-  while (parser->HasNext() && num_fields--) {
+  while (parser->HasNext() && tokens_left > 0) {
     string_view field = is_load ? ParseField(parser) : parser->Next();
+    --tokens_left;
+
     string_view alias;
-    parser->Check("AS", &alias);
+    if (tokens_left >= 2 && parser->Check("AS", &alias)) {
+      tokens_left -= 2;
+    }
     fields.emplace_back(field, alias);
+  }
+
+  if (parser->HasNext() && absl::EqualsIgnoreCase(parser->Peek(), "AS")) {
+    parser->ReportCustom("Unexpected parameter `AS`");
   }
   return fields;
 }
