@@ -1825,6 +1825,9 @@ void CmdDebug(CmdArgList args, CommandContext* cmd_cntx) {
     string_view key = parser.Next();
     string_view path = parser.NextOrDefault();
 
+    if (auto err = parser.TakeError(); err)
+      return builder->SendError(err.MakeReply());
+
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
     ShardId sid = Shard(key, shard_set->size());
@@ -1845,6 +1848,9 @@ void CmdDebug(CmdArgList args, CommandContext* cmd_cntx) {
     // JSON.DEBUG FIELDS
     string_view key = parser.Next();
     string_view path = parser.NextOrDefault();
+
+    if (auto err = parser.TakeError(); err)
+      return builder->SendError(err.MakeReply());
 
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
