@@ -247,8 +247,7 @@ unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::buck
 
 void SliceSnapshot::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
   std::lock_guard lk{stream_mu_};
-  auto res = serializer_->SaveEntry(tde.key, pv, tde.expire, tde.mc_flags, tde.dbid);
-  CHECK(res);
+  serializer_->SaveEntry(tde.key, pv, tde.expire, tde.mc_flags, tde.dbid);
 }
 
 void SliceSnapshot::SerializeEntry(BucketIdentity bucket, DbIndex db_indx, const PrimeKey& pk,
@@ -265,9 +264,10 @@ void SliceSnapshot::SerializeEntry(BucketIdentity bucket, DbIndex db_indx, const
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
     std::lock_guard lk{stream_mu_};
-    io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
-    CHECK(res);
-    ++type_freq_map_[*res];
+    if (auto res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx); res)
+      ++type_freq_map_[*res];
+    else
+      LOG(ERROR) << "Serialization error: " << res.error();
   }
 }
 

@@ -546,6 +546,7 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
         return false;
       return true;
     });
+    return ec;
   } else {
     CHECK_EQ(pv.Encoding(), unsigned(OBJ_ENCODING_LISTPACK));
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
