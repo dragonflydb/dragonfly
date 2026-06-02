@@ -117,7 +117,7 @@ In order of appearance in the RDB stream:
    left as-is. It then acquires the read half of each global index's MRMW mutex in
    turn and emits one `RDB_OPCODE_VECTOR_INDEX` block per index, releasing the lock
    and flushing the serializer at the end of each one.
-4. **Save-side drain.** Every shard replays its pending updates for indices currently
+4. **Drain.** Every shard replays its pending updates for indices currently
    in `kSerializing` and returns those indices to `kBuilding`.
 5. **Key stream.** Bucket iteration proceeds as for any other data.
 
@@ -181,8 +181,8 @@ scratch or hydrates a restored graph, ending in `kBuilding`.
 | State | When entered | Mutations | Exit |
 |-------|--------------|-----------|------|
 | `kProhibit` | Default at `InitIndex` while the shard is in LOADING. The shard has not yet decided whether to rebuild from scratch or restore from RDB graph data. | Buffered into the pending-updates list (may be discarded — see exit). | **Full-rebuild path:** directly to `kBuilding`; the pending-updates list is *cleared*, not replayed (the rebuild reindexes every document from the key stream). **Restore path:** to `kRestoring`. |
-| `kRestoring` | Restore path only: graph data was installed from RDB and `Rebuild(is_restored=true)` ran, leaving vector payloads to be hydrated from the key stream. | Buffered for replay. | Restore-side drain → `kBuilding`, after hydration completes on **every** shard. |
-| `kBuilding` | Reached directly via full rebuild, or via the restore-side drain. Terminal under a single full-sync. | Applied inline to the graph. | Promoted to `kSerializing` only if this replica later runs its own snapshot. |
+| `kRestoring` | Restore path only: graph data was installed from RDB and `Rebuild(is_restored=true)` ran, leaving vector payloads to be hydrated from the key stream. | Buffered for replay. | Drain → `kBuilding`, after hydration completes on **every** shard. |
+| `kBuilding` | Reached directly via full rebuild, or via the drain out of `kRestoring`. Terminal under a single full-sync. | Applied inline to the graph. | Promoted to `kSerializing` only if this replica later runs its own snapshot. |
 
 The distinction between `kProhibit` and `kRestoring` is *which path was chosen*:
 `kProhibit` means the shard is still buffering ops without a commitment to replay
@@ -195,7 +195,7 @@ has committed to keeping the buffer and replaying it on drain.
 | State | When entered | Mutations | Exit |
 |-------|--------------|-----------|------|
 | `kBuilding` | Steady state on the master. | Applied inline to the graph. | Promoted to `kSerializing` at the start of every graph dump. |
-| `kSerializing` | Set right before a graph dump, only on indices currently in `kBuilding`. | Buffered for replay. | Save-side drain → `kBuilding`, after the dump completes. |
+| `kSerializing` | Set right before a graph dump, only on indices currently in `kBuilding`. | Buffered for replay. | Drain → `kBuilding`, after the dump completes. |
 
 **Transitions.** Drains replay the pending-updates list against the current database
 state; the full-rebuild exit out of `kProhibit` is the only state change that
@@ -203,16 +203,11 @@ state; the full-rebuild exit out of `kProhibit` is the only state change that
 
 1. `kProhibit → kBuilding` — full-rebuild path on the replica: the shard discards any buffered ops and rebuilds the index from scratch from the key stream.
 2. `kProhibit → kRestoring` — restore path on the replica: graph data was installed from RDB; the shard now needs to hydrate vector payloads.
-3. `kRestoring → kBuilding` — restore-side drain at the end of post-load reconciliation, after all shards finish hydration.
+3. `kRestoring → kBuilding` — drain at the end of post-load reconciliation, after all shards finish hydration.
 4. `kBuilding → kSerializing` — issued at the start of the graph dump on the side that is saving.
-5. `kSerializing → kBuilding` — save-side drain at the end of the graph dump.
+5. `kSerializing → kBuilding` — drain at the end of the graph dump.
 
 There is no direct transition between `kRestoring` and `kSerializing`.
-
-**Safety carve-out.** Because `kSerializing` is reachable only from `kBuilding`, and
-the save-side drain acts only on `kSerializing`, a save cannot disturb a `kProhibit`
-or `kRestoring` index — neither the promotion nor the drain touches a half-restored
-replica.
 
 ### 5.2 Single-writer invariant
 
@@ -246,9 +241,9 @@ key index.
 
 Graph structure is restored before vector payloads are hydrated. A node whose document
 is missing in the local database at hydration is removed from the graph. Nodes whose
-vector data cannot be installed immediately are deferred to the post-load drain (§5.2);
-they exist briefly with stale payloads but are never reachable by a search query, which
-requires the index to be in `kBuilding`.
+vector data cannot be installed immediately are deferred to the post-load drain
+(§4.2 step 5); they exist briefly with stale payloads but are never reachable by a
+search query, which requires the index to be in `kBuilding`.
 
 ## 6. Shard Count Remap
 
