@@ -29,14 +29,14 @@ $6
 newkey
 $5
 newvl
-*4
+*3
 $7
 HSTRLEN
 $3
 hx1
 $2
 f1
-*3
+*4
 $12
 HINCRBYFLOAT
 $3
@@ -46,7 +46,7 @@ f1
 $3
 1.5
 *3
-$9
+$10
 HRANDFIELD
 $3
 hx1
