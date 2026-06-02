@@ -145,4 +145,16 @@ TEST_F(BloomFamilyTest, LoadChunkErrors) {
   EXPECT_THAT(Run({"bf.loadchunk", "b1", "-1", "data"}), ErrArg("not an integer"));
 }
 
+// COPY of an SBF must survive the chunked serialize/deserialize round-trip.
+TEST_F(BloomFamilyTest, CopyChunkedRoundTrip) {
+  Run({"bf.reserve", "b1", "0.01", "1000"});
+  for (int i = 0; i < 100; ++i)
+    Run({"bf.add", "b1", absl::StrCat("item", i)});
+
+  EXPECT_THAT(Run({"copy", "b1", "b2"}), IntArg(1));
+
+  for (int i = 0; i < 100; ++i)
+    EXPECT_THAT(Run({"bf.exists", "b2", absl::StrCat("item", i)}), IntArg(1));
+}
+
 }  // namespace dfly

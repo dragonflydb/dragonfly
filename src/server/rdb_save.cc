@@ -686,7 +686,11 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
       RETURN_ON_ERR(SaveLen(blob.size()));
       for (size_t offset = 0; offset < blob.size(); offset += kFilterChunkSize) {
         size_t chunk_len = std::min(kFilterChunkSize, blob.size() - offset);
-        RETURN_ON_ERR(SaveString(blob.substr(offset, chunk_len)));
+        string_view chunk = blob.substr(offset, chunk_len);
+        // Verbatim length prefix + raw bytes: the loader reads chunks with LoadLen + FetchBuf.
+        RETURN_ON_ERR(SaveLen(chunk.size()));
+        RETURN_ON_ERR(
+            WriteRaw(io::Bytes{reinterpret_cast<const uint8_t*>(chunk.data()), chunk_len}));
         const bool is_last_chunk = (offset + chunk_len >= blob.size());
         PushToConsumerIfNeeded(is_last_chunk ? flush_state : FlushState::kFlushMidEntry);
       }
