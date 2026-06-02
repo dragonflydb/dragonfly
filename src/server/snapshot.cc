@@ -232,7 +232,7 @@ unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::buck
   unsigned serialized = 0;
 
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-    // Version is already stamped by SerializerBase::ProcessBucketInternal.
+    // Version is already stamped by SerializerBase::ProcessBucket.
     DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
     ++serialized;
@@ -342,7 +342,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
   return FlushSerialized();
 }
 
-// big_value_mu_ prevents expiry/eviction DEL journal entries from interleaving with an
+// stream_mu_ prevents expiry/eviction DEL journal entries from interleaving with an
 // in-progress SaveEntry for a large value. SaveEntry may yield mid-entry (emitting chunks
 // across multiple scheduler turns); expiry paths emit DEL via RecordDelete directly,
 // bypassing OnChange. Without the lock, such a DEL could be written between two chunks
@@ -355,7 +355,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
 //
 // Note: for transaction-driven mutations, baseline-before-journal ordering is already
 // guaranteed by call order on the mutation fiber (OnChange precedes ConsumeJournalChange);
-// big_value_mu_ is not needed for that ordering.
+// stream_mu_ is not needed for that ordering.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   std::lock_guard lk{stream_mu_};
 
