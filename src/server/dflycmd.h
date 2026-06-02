@@ -76,7 +76,7 @@ struct FlowInfo {
 //    access.
 //  3. Lock-free snapshot.
 //    A copy of `replica_infos_` is published to a thread-local on every proactor via
-//    `UpdateReplicaInfoState()` (which must be called from each mutator of replica_infos_).
+//    `UpdateReplicaInfoCacheLocked()` (which must be called from each mutator of replica_infos_).
 //    Readers (INFO REPLICATION, metrics) load this snapshot and access ReplicaInfo state via
 //    its atomic getters (GetReplicaState, etc.) without taking any lock.
 //
@@ -328,11 +328,11 @@ class DflyCmd {
 
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.
-  std::map<uint32_t, LSN> ReplicationLags(const ReplicaInfoMap& replicas) const;
+  std::map<uint32_t, LSN> ReplicationLags(const ReplicaInfoMap& replicas_local_cache) const;
 
   // Publishes a fresh copy of replica_infos_ to a thread-local on every proactor.
   // Caller must hold mu_. Readers (INFO/metrics) load this view lock-free.
-  void UpdateReplicaInfoState() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  void UpdateReplicaInfoCacheLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   ServerFamily* sf_;  // Not owned
   uint32_t next_sync_id_ = 1;

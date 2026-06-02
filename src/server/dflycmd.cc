@@ -70,7 +70,9 @@ const char kIdNotFound[] = "syncid not found";
 const char kInvalidSyncId[] = "bad sync id";
 const char kInvalidState[] = "invalid state";
 
-// Per-proactor view of replica_infos_. Published by UpdateReplicaInfoState.
+// Per-proactor cached view of replica_infos_.
+// Every mutation of centralized `replica_infos_` warrants subsequent call to
+// UpdateReplicaInfoCacheLocked.
 thread_local std::shared_ptr<const DflyCmd::ReplicaInfoMap> tl_replica_infos;
 
 bool ToSyncId(string_view str, uint32_t* num) {
@@ -785,7 +787,7 @@ auto DflyCmd::CreateSyncSession(ConnectionState* state) -> std::pair<uint32_t, u
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
 
-  UpdateReplicaInfoState();
+  UpdateReplicaInfoCacheLocked();
   return {it->first, flow_count};
 }
 
@@ -818,7 +820,7 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
 
   util::fb2::LockGuard lk(mu_);
   replica_infos_.erase(sync_id);
-  UpdateReplicaInfoState();
+  UpdateReplicaInfoCacheLocked();
 }
 
 // Because we need to annotate unique_lock
@@ -859,7 +861,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
     replica_infos_.erase(sync_id);
 
   if (!deleted.empty())
-    UpdateReplicaInfoState();
+    UpdateReplicaInfoCacheLocked();
 }
 
 shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
@@ -882,8 +884,9 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
 
   for (const auto& [id, info] : *replica_infos) {
     SyncState state = info->GetReplicaState();
-    // Lag is undefined unless the replica is in stable sync.
-    LSN lag = (state == SyncState::STABLE_SYNC) ? replication_lags[id] : 0;
+    // ReplicationLags only populates entries for STABLE_SYNC replicas, so a missing
+    // entry defaults to lag=0 — exactly what we want for any other state.
+    LSN lag = replication_lags[id];
     vec.push_back(ReplicaRoleInfo{std::string{info->GetId()}, info->GetAddress(),
                                   info->GetListeningPort(), SyncStateName(state), lag});
   }
@@ -940,8 +943,8 @@ pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
   return {sync_id, sync_it->second};
 }
 
-std::map<uint32_t, LSN> DflyCmd::ReplicationLags(const ReplicaInfoMap& replicas) const {
-  if (replicas.empty())
+std::map<uint32_t, LSN> DflyCmd::ReplicationLags(const ReplicaInfoMap& replicas_local_cache) const {
+  if (replicas_local_cache.empty())
     return {};
 
   // In each shard we calculate a map of replica id to replication lag in the shard.
@@ -950,13 +953,15 @@ std::map<uint32_t, LSN> DflyCmd::ReplicationLags(const ReplicaInfoMap& replicas)
   // transition out of (or into) STABLE_SYNC between this scan and the outer reader
   // are naturally handled: missing entries default to lag=0, and the outer reader
   // re-checks state before emitting the lag.
+  // We fan out via RunBriefInParallel only because journal::GetLsn() is per-shard
+  // thread-local state that must be read on each shard's own proactor.
   std::vector<std::map<uint32_t, LSN>> shard_lags(shard_set->size());
-  shard_set->RunBriefInParallel([&shard_lags, &replicas](EngineShard* shard) {
+  shard_set->RunBriefInParallel([&shard_lags, &replicas_local_cache](EngineShard* shard) {
     if (!shard->journal())
       return;
     auto& lags = shard_lags[shard->shard_id()];
     const LSN cur_lsn = journal::GetLsn();
-    for (const auto& info : replicas) {
+    for (const auto& info : replicas_local_cache) {
       const ReplicaInfo* replica = info.second.get();
       if (replica->GetReplicaState() != SyncState::STABLE_SYNC)
         continue;
@@ -974,10 +979,14 @@ std::map<uint32_t, LSN> DflyCmd::ReplicationLags(const ReplicaInfoMap& replicas)
   return rv;
 }
 
-void DflyCmd::UpdateReplicaInfoState() {
+void DflyCmd::UpdateReplicaInfoCacheLocked() {
   auto replica_infos = std::make_shared<const ReplicaInfoMap>(replica_infos_);
-  shard_set->pool()->AwaitFiberOnAll(
-      [&replica_infos](unsigned, ProactorBase*) { tl_replica_infos = replica_infos; });
+  // Dispatching under mu_ keeps
+  // the per-proactor caches consistent — concurrent callers enqueue their updates in a
+  // serialized order, so all proactors observe the same final snapshot. The shared_ptr is
+  // captured by value because the local goes out of scope before the lambda runs.
+  shard_set->pool()->DispatchBrief(
+      [replica_infos](unsigned, ProactorBase*) { tl_replica_infos = replica_infos; });
 }
 
 void DflyCmd::SetDflyClientVersion(ConnectionState* state, DflyVersion version) {
@@ -1012,7 +1021,7 @@ void DflyCmd::CancelReplicas() {
   {
     util::fb2::LockGuard lk(mu_);
     pending = std::move(replica_infos_);
-    UpdateReplicaInfoState();
+    UpdateReplicaInfoCacheLocked();
   }
 
   for (auto& [_, replica_ptr] : pending) {
