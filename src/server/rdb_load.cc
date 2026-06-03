@@ -923,8 +923,8 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
 
   if (rdb_type_ == RDB_TYPE_SET_INTSET || rdb_type_ == RDB_TYPE_SET_LISTPACK) {
     LoadBlobResult load_result = rdb_type_ == RDB_TYPE_SET_INTSET
-                                     ? SetFamily::LoadIntSetBlob(blob, pv_, config_.deep_integrity)
-                                     : SetFamily::LoadLPSetBlob(blob, pv_, config_.deep_integrity);
+                                     ? SetFamily::LoadIntSetBlob(blob, config_.deep_integrity, pv_)
+                                     : SetFamily::LoadLPSetBlob(blob, config_.deep_integrity, pv_);
     handle_load_result(load_result);
     return;
   }
@@ -933,7 +933,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     LoadBlobResult load_result =
         rdb_type_ == RDB_TYPE_HASH_ZIPLIST
             ? HSetFamily::LoadZiplistBlob(blob, pv_)
-            : HSetFamily::LoadListpackBlob(blob, pv_, config_.deep_integrity);
+            : HSetFamily::LoadListpackBlob(blob, config_.deep_integrity, pv_);
     handle_load_result(load_result);
     return;
   }
@@ -942,7 +942,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     LoadBlobResult load_result =
         rdb_type_ == RDB_TYPE_ZSET_ZIPLIST
             ? ZSetFamily::LoadZiplistBlob(blob, pv_)
-            : ZSetFamily::LoadListpackBlob(blob, pv_, config_.deep_integrity);
+            : ZSetFamily::LoadListpackBlob(blob, config_.deep_integrity, pv_);
     handle_load_result(load_result);
     return;
   } else if (rdb_type_ == RDB_TYPE_JSON) {

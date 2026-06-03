@@ -2991,7 +2991,7 @@ LoadBlobResult ZSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv
   return LoadBlobResult::kSuccess;
 }
 
-LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv, bool deep) {
+LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* pv) {
   if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), deep ? 1 : 0, nullptr, nullptr)) {
     LOG(ERROR) << "Zset listpack integrity check failed.";
     return LoadBlobResult::kCorrupted;
