@@ -135,16 +135,18 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
                                                      delay_driver_.Enqeue(delay), 0, 0);
       DelayedEntryHandler::delayed_entries_.emplace(bucket, std::move(de));
     } else {
-      while (absl::Bernoulli(bg_, 0.3)) {
-        for (unsigned it = absl::Uniform(bg_, 1, 10); it > 0; it--)
-          util::ThisFiber::Yield();
-      }
-
       RecordSerialized(std::move(key));
     }
   }
 
   void RecordSerialized(std::string key) {
+    // Lock stream mutex and simulate occasional yields due to big value flushes
+    std::lock_guard lk{stream_mu_};
+    while (absl::Bernoulli(bg_, 0.3)) {
+      for (unsigned it = absl::Uniform(bg_, 1, 10); it > 0; it--)
+        util::ThisFiber::Yield();
+    }
+
     CHECK(!emitted_baselines_.contains(key));
     CHECK(!journal_writes_.contains(key));  // No journal entries must exist for this key
     emitted_baselines_.emplace(std::move(key));
@@ -208,7 +210,9 @@ void TestDriver::Loop() {
         ProcessBucket(snapshot_db_indx, it, false);
       });
 
-      util::ThisFiber::Yield();
+      // Simualte yield due to socket flushes
+      for (unsigned i = 0; i < 2; ++i)
+        util::ThisFiber::Yield();
     } while (snapshot_cursor_);
 
     ProcessDelayedEntries(true, 0, base_cntx_);
