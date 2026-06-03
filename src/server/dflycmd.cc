@@ -872,6 +872,16 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   return {};
 }
 
+std::vector<std::shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoSnapshot() const {
+  util::fb2::LockGuard lk(mu_);
+  std::vector<std::shared_ptr<ReplicaInfo>> result;
+  result.reserve(replica_infos_.size());
+  for (const auto& [id, ptr] : replica_infos_) {
+    result.push_back(ptr);
+  }
+  return result;
+}
+
 std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
   std::vector<ReplicaRoleInfo> vec;
   auto replica_infos = tl_replica_infos;

@@ -249,6 +249,9 @@ class DflyCmd {
   // Master-side command. Provides Replica info.
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const ABSL_LOCKS_EXCLUDED(mu_);
 
+  // Returns a snapshot of currently tracked replicas (shared ownership).
+  std::vector<std::shared_ptr<ReplicaInfo>> GetReplicaInfoSnapshot() const ABSL_LOCKS_EXCLUDED(mu_);
+
   void GetReplicationMemoryStats(ReplicationMemoryStats* out) const ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
   // Sets metadata.

@@ -362,6 +362,7 @@ class ServerFamily {
   void AddReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
   void ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void ReplConf(CmdArgList args, CommandContext* cmd_cntx);
+  void Wait(CmdArgList args, CommandContext* cmd_cntx);
   void Role(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Save(CmdArgList args, CommandContext* cmd_cntx);
   void BgSave(CmdArgList args, CommandContext* cmd_cntx);
