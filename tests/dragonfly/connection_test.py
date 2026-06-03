@@ -2165,7 +2165,14 @@ async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
         await writer.wait_closed()
 
 
-@dfly_args({"proactor_threads": 1, "memcached_port": 11311, "experimental_io_loop_v2": "true"})
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "memcached_port": 11311,
+        "enable_memcache_io_loop_v2": "true",
+        "enable_resp_io_loop_v2": "true",
+    }
+)
 async def test_multi_exec_phantom_connections(df_server: DflyInstance):
     """With ioloopv2, commands from RST-closed connections must not be dropped.
 
