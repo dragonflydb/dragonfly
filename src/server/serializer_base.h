@@ -157,7 +157,7 @@ class SerializerBase : public BucketDependencies,
   // To be implemented by classses extending this base class.
   virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) = 0;
-  
+
   // Called before a set of buckets is mutated.
   void OnChange(DbIndex db_index, const ChangeReq& req) override;
 

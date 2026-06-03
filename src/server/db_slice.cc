@@ -1980,8 +1980,9 @@ bool DbSlice::IsOmittableWrite(const Context& cntx, const ChangeReq& req) {
 
   bool omit_update = false;
   if (cntx.is_omittable_operation && change_cb_.size() == 1) {
-    uint64_t max_version = std::ranges::max(
-        req.buckets() | std::views::transform(&PrimeTable::bucket_iterator::GetVersion));
+    auto gv = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };
+    uint64_t max_version = std::ranges::max(req.buckets(), {}, gv).GetVersion();
+
     auto* cb = change_cb_.front();
     omit_update = cb->eventually_consistent_ && max_version < cb->snapshot_version_ &&
                   journal::GetCallbackCount() == 1;
