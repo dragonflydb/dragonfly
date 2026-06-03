@@ -1638,8 +1638,8 @@ bool SetFamily::DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, st
   return false;
 }
 
-auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
-  if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), 0)) {
+auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv, bool deep) -> LoadBlobResult {
+  if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), deep ? 1 : 0)) {
     LOG(ERROR) << "Intset integrity check failed.";
     return LoadBlobResult::kCorrupted;
   }
@@ -1681,8 +1681,8 @@ template <typename Set> static Set* BuildSetFromLP(unsigned char* lp) {
   return set;
 }
 
-auto SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
-  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+auto SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv, bool deep) -> LoadBlobResult {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), deep ? 1 : 0, nullptr, nullptr)) {
     LOG(ERROR) << "ListPack integrity check failed.";
     return LoadBlobResult::kCorrupted;
   }

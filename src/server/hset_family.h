@@ -21,7 +21,7 @@ class HSetFamily {
   static void Register(CommandRegistry* registry);
 
   static LoadBlobResult LoadZiplistBlob(std::string_view blob, PrimeValue* pv);
-  static LoadBlobResult LoadListpackBlob(std::string_view blob, PrimeValue* pv);
+  static LoadBlobResult LoadListpackBlob(std::string_view blob, PrimeValue* pv, bool deep);
 
   // Does not free lp.
   static StringMap* ConvertToStrMap(uint8_t* lp);

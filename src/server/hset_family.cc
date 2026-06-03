@@ -1274,8 +1274,9 @@ auto HSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv) -> LoadB
   return LoadBlobResult::kSuccess;
 }
 
-auto HSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
-  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+auto HSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv, bool deep)
+    -> LoadBlobResult {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), deep ? 1 : 0, nullptr, nullptr)) {
     LOG(ERROR) << "Hash listpack integrity check failed.";
     return LoadBlobResult::kCorrupted;
   }

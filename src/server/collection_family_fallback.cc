@@ -40,12 +40,12 @@ uint32_t SetFamily::MaxIntsetEntries() {
   return 0;
 }
 
-LoadBlobResult SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv) {
+LoadBlobResult SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv, bool deep) {
   Fail();
   return LoadBlobResult::kCorrupted;
 }
 
-LoadBlobResult SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) {
+LoadBlobResult SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv, bool deep) {
   Fail();
   return LoadBlobResult::kCorrupted;
 }
@@ -55,7 +55,7 @@ LoadBlobResult HSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv
   return LoadBlobResult::kCorrupted;
 }
 
-LoadBlobResult HSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) {
+LoadBlobResult HSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv, bool deep) {
   Fail();
   return LoadBlobResult::kCorrupted;
 }
@@ -65,7 +65,7 @@ LoadBlobResult ZSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv
   return LoadBlobResult::kCorrupted;
 }
 
-LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) {
+LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv, bool deep) {
   Fail();
   return LoadBlobResult::kCorrupted;
 }
