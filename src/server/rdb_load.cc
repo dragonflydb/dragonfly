@@ -81,6 +81,11 @@ using namespace tiering::literals;
 
 namespace {
 
+bool ReproOrderKey(std::string_view key) {
+  return absl::StartsWith(key, "journal-del-barrier-") ||
+         absl::StartsWith(key, "journal-del-prime-");
+}
+
 int64_t LpGetIntegerIfValid(unsigned char* ele, int* valid) {
   int64_t v = 0;
   *valid = lpGetInteger(ele, &v);
@@ -2690,7 +2695,19 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     }
 
     DVLOG(2) << "Executing item: " << entry.ToString();
+    std::string repro_del_key;
+    if (entry.cmd.size() > 1 && absl::EqualsIgnoreCase(entry.cmd[0], "DEL") &&
+        ReproOrderKey(entry.cmd[1])) {
+      repro_del_key = entry.cmd[1];
+    }
+    const bool repro_del = !repro_del_key.empty();
+    if (repro_del) {
+      LOG(INFO) << "REPRO_ORDER journal_execute_begin cmd=DEL key=" << repro_del_key;
+    }
     journal_executor_->Execute(entry.dbid, entry.cmd);
+    if (repro_del) {
+      LOG(INFO) << "REPRO_ORDER journal_execute_end cmd=DEL key=" << repro_del_key;
+    }
   }
 
   return std::error_code{};
@@ -2810,7 +2827,26 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   if (out_buf.empty())
     return;
 
-  auto cb = [this, ib = std::move(out_buf)] {
+  std::string repro_key;
+  for (const auto* item : out_buf) {
+    if (ReproOrderKey(item->key)) {
+      repro_key = item->key;
+      break;
+    }
+  }
+  size_t item_count = out_buf.size();
+
+  if (!repro_key.empty()) {
+    LOG(INFO) << "REPRO_ORDER rdb_flush_enqueue_begin sid=" << sid << " key=" << repro_key
+              << " items=" << item_count;
+  }
+
+  auto cb = [this, ib = std::move(out_buf), sid, repro_key, item_count] {
+    if (!repro_key.empty()) {
+      LOG(INFO) << "REPRO_ORDER rdb_flush_cb_begin sid=" << sid << " key=" << repro_key
+                << " items=" << item_count;
+    }
+
     auto& db_slice = GetCurrentDbSlice();
 
     // Before we start loading, increment LoadInProgress.
@@ -2819,9 +2855,18 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
     db_slice.IncrLoadInProgress();
     this->LoadItemsBuffer(ib);
     db_slice.DecrLoadInProgress();
+
+    if (!repro_key.empty()) {
+      LOG(INFO) << "REPRO_ORDER rdb_flush_cb_end sid=" << sid << " key=" << repro_key
+                << " items=" << item_count;
+    }
   };
 
   bool preempted = shard_set->Add(sid, std::move(cb));
+  if (!repro_key.empty()) {
+    LOG(INFO) << "REPRO_ORDER rdb_flush_enqueue_end sid=" << sid << " key=" << repro_key
+              << " items=" << item_count << " preempted=" << preempted;
+  }
   VLOG_IF(2, preempted) << "FlushShardAsync was throttled";
 }
 
@@ -2932,12 +2977,22 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     return;
   }
 
+  if (ReproOrderKey(item->key)) {
+    LOG(INFO) << "REPRO_ORDER rdb_create_begin sid=" << EngineShard::tlocal()->shard_id()
+              << " key=" << item->key;
+  }
+
   auto op_res = db_slice->AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
   if (!op_res) {
     LOG(ERROR) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
     ec_ = RdbError(errc::out_of_memory);
     stop_early_ = true;
     return;
+  }
+
+  if (ReproOrderKey(item->key)) {
+    LOG(INFO) << "REPRO_ORDER rdb_create_end sid=" << EngineShard::tlocal()->shard_id()
+              << " key=" << item->key;
   }
 
   DbSlice::ItAndUpdater& updater = *op_res;

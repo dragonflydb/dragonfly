@@ -83,6 +83,11 @@ uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
 
+bool ReproOrderTx(const Transaction* tx) {
+  std::string_view name = tx->Name();
+  return name == "SET" || name == "DEL";
+}
+
 struct ScheduleContext {
   Transaction* trans;
   bool optimistic_execution = false;
@@ -772,14 +777,30 @@ void Transaction::ScheduleInternal() {
     }
 
     ScheduleContext schedule_ctx{this, optimistic_exec};
+    const std::string_view repro_key =
+        full_args_.empty() ? std::string_view{} : facade::ToSV(full_args_.front());
 
     if (unique_shard_cnt_ == 1) {
       // Single shard optimization. Note: we could apply the same optimization
       // to multi-shard transactions as well by creating a vector of ScheduleContext.
       schedule_queues[unique_shard_id_].queue.Push(&schedule_ctx);
+      if (ReproOrderTx(this)) {
+        LOG(INFO) << "REPRO_ORDER tx_schedule_push cmd=" << Name() << " sid=" << unique_shard_id_
+                  << " key=" << repro_key << " optimistic=" << optimistic_exec;
+      }
       bool current_val = false;
-      if (schedule_queues[unique_shard_id_].armed.compare_exchange_strong(current_val, true,
-                                                                          memory_order_acq_rel)) {
+      const bool added_batch = schedule_queues[unique_shard_id_].armed.compare_exchange_strong(
+          current_val, true, memory_order_acq_rel);
+      if (ReproOrderTx(this)) {
+        LOG(INFO) << "REPRO_ORDER tx_schedule_arm cmd=" << Name() << " sid=" << unique_shard_id_
+                  << " key=" << repro_key << " added_batch=" << added_batch
+                  << " observed_armed=" << current_val;
+      }
+      if (added_batch) {
+        if (ReproOrderTx(this)) {
+          LOG(INFO) << "REPRO_ORDER tx_schedule_add_batch cmd=" << Name()
+                    << " sid=" << unique_shard_id_ << " key=" << repro_key;
+        }
         shard_set->Add(unique_shard_id_, &Transaction::ScheduleBatchInShard);
       }
     } else {
@@ -1285,7 +1306,15 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
       sd.local_mask |= OPTIMISTIC_EXECUTION;
       shard->stats().tx_optimistic_total++;
 
+      if (ReproOrderTx(this)) {
+        LOG(INFO) << "REPRO_ORDER tx_run_optimistic_begin cmd=" << Name()
+                  << " sid=" << shard->shard_id() << " key=" << facade::ToSV(full_args_.front());
+      }
       RunCallback(shard);
+      if (ReproOrderTx(this)) {
+        LOG(INFO) << "REPRO_ORDER tx_run_optimistic_end cmd=" << Name()
+                  << " sid=" << shard->shard_id() << " key=" << facade::ToSV(full_args_.front());
+      }
 
       // Check state again, it could've been updated if the callback returned AVOID_CONCLUDING flag.
       // Only possible for single shard.
@@ -1337,6 +1366,8 @@ void Transaction::ScheduleBatchInShard() {
   ShardId sid = shard->shard_id();
   auto& sq = schedule_queues[sid];
 
+  LOG(INFO) << "REPRO_ORDER tx_batch_start sid=" << sid;
+
   for (unsigned j = 0;; ++j) {
     // We pull the items from the queue in a loop until we reach the stop condition.
     // TODO: we may have fairness problem here, where transactions being added up all the time
@@ -1348,8 +1379,22 @@ void Transaction::ScheduleBatchInShard() {
       if (!item)
         break;
 
+      if (ReproOrderTx(item->trans)) {
+        const std::string_view repro_key = item->trans->full_args_.empty()
+                                               ? std::string_view{}
+                                               : facade::ToSV(item->trans->full_args_.front());
+        LOG(INFO) << "REPRO_ORDER tx_batch_pop cmd=" << item->trans->Name() << " sid=" << sid
+                  << " key=" << repro_key << " optimistic=" << item->optimistic_execution;
+      }
       if (!item->trans->ScheduleInShard(shard, item->optimistic_execution)) {
         item->fail_cnt.fetch_add(1, memory_order_relaxed);
+      }
+      if (ReproOrderTx(item->trans)) {
+        const std::string_view repro_key = item->trans->full_args_.empty()
+                                               ? std::string_view{}
+                                               : facade::ToSV(item->trans->full_args_.front());
+        LOG(INFO) << "REPRO_ORDER tx_batch_scheduled cmd=" << item->trans->Name() << " sid=" << sid
+                  << " key=" << repro_key;
       }
       item->trans->FinishHop();
       stats.tx_batch_scheduled_items_total++;
@@ -1366,6 +1411,8 @@ void Transaction::ScheduleBatchInShard() {
     // adding the callback that fetches the transaction.
     sq.armed.exchange(false, memory_order_acq_rel);
   }
+
+  LOG(INFO) << "REPRO_ORDER tx_batch_end sid=" << sid;
 }
 
 bool Transaction::CancelShardCb(EngineShard* shard) {
