@@ -2567,7 +2567,7 @@ bool ServerFamily::TEST_IsSaving() const {
 }
 
 void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait) {
-  VLOG(1) << "Drakarys start db=" << db_ind << " wait=" << wait
+  VLOG(2) << "Drakarys start db=" << db_ind << " wait=" << wait
           << " rss=" << HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
 
   vector<fb2::Fiber> fibers(shard_set->size());
@@ -2582,7 +2582,7 @@ void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait)
   for (auto& f : fibers)
     (f.*action)();
 
-  VLOG(1) << (wait ? "Drakarys main done (shards joined)"
+  VLOG(2) << (wait ? "Drakarys main done (shards joined)"
                    : "Drakarys main dispatched (shards detached)")
           << " rss=" << HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
 }

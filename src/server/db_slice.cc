@@ -1015,13 +1015,13 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 
   ShardId shard_id = owner_->shard_id();
   auto cb = [flush_db_arr = std::move(flush_db_arr), shard_id]() mutable {
-    VLOG(1) << "Drakarys shard " << shard_id << " cb entered (pre-destructors)"
+    VLOG(2) << "Drakarys shard " << shard_id << " cb entered (pre-destructors)"
             << " rss="
             << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                           ServerState::kGlibcmalloc);
-    VLOG(1) << "Drakarys shard " << shard_id << " finished decommit"
+    VLOG(2) << "Drakarys shard " << shard_id << " finished decommit"
             << " rss="
             << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
   };
