@@ -2603,16 +2603,19 @@ bool Connection::ExecuteBatch() {
       continue;
     }
 
-    // We must continue with async execution if we already have executing commands
-    auto mode = is_head ? AsyncPreference::PREFER_ASYNC : AsyncPreference::ONLY_ASYNC;
-
-    if (!ioloop_v2_)  // only v2 loop supports any async commands so far
-      mode = AsyncPreference::ONLY_SYNC;
-
-    // V2: Batch the head command's reply when more commands are queued behind it.
-    // This prevents sync-only commands from triggering immediate flushes, keeping
-    // sendmsg syscalls to a minimum. IoLoopV2's idle-await block handles the final flush.
-    reply_builder_->SetBatchMode(ioloop_v2_ && is_head && (cmd->next != nullptr));
+    // V1 is always sync; V2 supports async dispatch with per-command mode selection.
+    auto mode = AsyncPreference::ONLY_SYNC;
+    if (ioloop_v2_) {
+      mode = is_head ? AsyncPreference::PREFER_ASYNC : AsyncPreference::ONLY_ASYNC;
+      // V2: Batch the head command's reply when more commands are queued behind it.
+      // This prevents sync-only commands from triggering immediate flushes.
+      // Also, keep batch mode for the last command if coalescing across TCP
+      // boundaries - replies stay in the buffer during the idle-await sleep so they can
+      // be merged with the next pipeline burst.
+      bool is_last = (cmd->next == nullptr);
+      bool coalesce_last = is_last && (pipeline_wait_batch_usec > 0) && (io_buf_.InputLen() == 0);
+      reply_builder_->SetBatchMode(is_head && (!is_last || coalesce_last));
+    }
 
     auto dispatch_res = (service_->*dispatch)(cmd, mode);
 
@@ -2971,7 +2974,22 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
 
+  // Apply a (up to) 50us coalescing delay by default when the flag is unset.
+  // TODO: at this stage, prefer not to over-engineer this to avoid impacting V1 or making wide
+  // flag-handling changes. Properly distinguishing "user explicitly passed 0" from the default 0
+  // (to allow disabling V2 coalescing via --pipeline_wait_batch_usec=0) should be formalized later.
+  constexpr uint32_t kDefaultV2CoalescingUsec = 50;
+  if (pipeline_wait_batch_usec == 0) {
+    pipeline_wait_batch_usec = kDefaultV2CoalescingUsec;
+  }
+
   auto is_ready_to_migrate = [this]() { return migration_request_ && (cc_->subscriptions == 0); };
+  // Flush buffered replies before handing the connection to another thread.
+  // Unflushed thread-local buffers cause data corruption or a hard crash on migration.
+  auto flush_before_migrate = [this]() -> error_code {
+    reply_builder_->Flush();
+    return reply_builder_->GetError();
+  };
 
   // Don't proceed with RegisterOnRecv() if socket is closed (possible cancellation)
   if (!peer->IsOpen())
@@ -3046,6 +3064,30 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // entire pipeline execute in-memory before a single sendmsg at the end.
       if (!should_wake()) {
         phase_ = READ_SOCKET;
+
+        // Coalescing delay - wait briefly before flushing to let the next TCP segment arrive.
+        // Uses an interruptible timed wait: if the recv callback (RegisterOnRecv) buffers new
+        // bytes, or any other wake condition triggers io_event_.notify() during the window,
+        // await_until returns immediately and we skip the flush to loop back and process.
+        // Parsing itself happens later in this loop (ReadPendingInput + ParseLoop), not in
+        // the recv callback.
+        if ((pipeline_wait_batch_usec > 0) && (parsed_cmd_q_len_ == 0)) {
+          io_event_.await_until(should_wake, chrono::steady_clock::now() +
+                                                 chrono::microseconds(pipeline_wait_batch_usec));
+          if (should_wake()) {
+            // If the coalescing sleep was interrupted by a migration request, flush before
+            // looping back - the dedicated "Flush before migrating" guard at the bottom of the
+            // loop is bypassed by this continue, so we must protect it here.
+            if (is_ready_to_migrate()) {
+              if (auto err = flush_before_migrate(); err) {
+                return err;
+              }
+              continue;
+            }
+            phase_ = PROCESS;
+            continue;
+          }
+        }
 
         // Flush replies deferred by ReplyBatch before sleeping - ensures the client
         // gets its response even when no more data arrives (single commands, end of pipeline).
@@ -3199,10 +3241,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     // Migration requested and actionable: skip buffer bookkeeping, jump to HandleMigrateRequest().
     if (is_ready_to_migrate()) {
-      // Flush before migrating: handing off unflushed thread-local buffers to a
-      // new thread will cause data corruption or a hard crash.
-      reply_builder_->Flush();
-      if (auto err = reply_builder_->GetError(); err) {
+      if (auto err = flush_before_migrate(); err) {
         return err;  // Connection is dead, no point migrating it cross-thread.
       }
       continue;
