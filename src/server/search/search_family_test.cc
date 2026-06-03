@@ -2387,6 +2387,80 @@ TEST_F(SearchFamilyTest, ReturnMixedAliasedAndBare) {
   EXPECT_THAT(resp, IsArray(IntArg(1), "j1", IsUnordArray("aliased_a", "alpha", "$.b", "beta")));
 }
 
+TEST_F(SearchFamilyTest, BareIdentifierOnJsonExpandsToJsonPath) {
+  EXPECT_EQ(Run({"FT.CREATE",       "bx",     "ON",     "JSON",    "PREFIX", "1",   "bx:",
+                 "SCHEMA",          "vector", "VECTOR", "HNSW",    "6",      "DIM", "8",
+                 "DISTANCE_METRIC", "COSINE", "TYPE",   "FLOAT32", "cat",    "TAG"}),
+            "OK");
+  Run({"JSON.SET", "bx:1", "$", R"({"vector":[0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1],"cat":"tech"})"});
+
+  std::string qv(32, '\0');
+  for (int i = 0; i < 8; ++i) {
+    float v = 0.1f;
+    memcpy(qv.data() + i * 4, &v, 4);
+  }
+
+  auto resp = Run({"FT.SEARCH", "bx", "*=>[KNN 3 @vector $qv]", "RETURN", "3", "$.cat", "AS",
+                   "catalias", "PARAMS", "2", "qv", qv, "DIALECT", "2"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "bx:1", IsArray("catalias", "tech")));
+
+  resp = Run({"FT.SEARCH", "bx", "@cat:{tech}", "RETURN", "1", "$.cat"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "bx:1", IsArray("$.cat", "tech")));
+}
+
+TEST_F(SearchFamilyTest, BareIdentifierWithExplicitAlias) {
+  EXPECT_EQ(Run({"FT.CREATE", "bx", "ON", "JSON", "PREFIX", "1", "bx:", "SCHEMA", "name", "AS",
+                 "person_name", "TEXT"}),
+            "OK");
+  Run({"JSON.SET", "bx:1", "$", R"({"name":"alpha"})"});
+  EXPECT_THAT(Run({"FT.SEARCH", "bx", "@person_name:alpha"}),
+              IsArray(IntArg(1), "bx:1", IsArray("$", R"({"name":"alpha"})")));
+}
+
+TEST_F(SearchFamilyTest, BareIdentifierCollisionRejected) {
+  EXPECT_THAT(Run({"FT.CREATE", "bx",   "ON",      "JSON",        "PREFIX",
+                   "1",         "bx:",  "SCHEMA",  "vector",      "VECTOR",
+                   "HNSW",      "6",    "DIM",     "4",           "DISTANCE_METRIC",
+                   "COSINE",    "TYPE", "FLOAT32", "$.something", "AS",
+                   "vector",    "TAG"}),
+              ErrArg("Duplicate field in schema"));
+}
+
+TEST_F(SearchFamilyTest, DuplicateIdentifierRejected) {
+  EXPECT_THAT(Run({"FT.CREATE", "bx",   "ON",      "JSON",     "PREFIX",
+                   "1",         "bx:",  "SCHEMA",  "vector",   "VECTOR",
+                   "HNSW",      "6",    "DIM",     "4",        "DISTANCE_METRIC",
+                   "COSINE",    "TYPE", "FLOAT32", "$.vector", "AS",
+                   "other",     "TAG"}),
+              ErrArg("Duplicate field in schema"));
+
+  EXPECT_THAT(
+      Run({"FT.CREATE",       "by",     "ON",    "JSON",    "PREFIX", "1",  "by:",    "SCHEMA",
+           "$.vec",           "AS",     "first", "VECTOR",  "HNSW",   "6",  "DIM",    "4",
+           "DISTANCE_METRIC", "COSINE", "TYPE",  "FLOAT32", "$.vec",  "AS", "second", "TAG"}),
+      ErrArg("Duplicate field in schema"));
+}
+
+TEST_F(SearchFamilyTest, BareIdentifierOnHashUnchanged) {
+  EXPECT_EQ(Run({"FT.CREATE", "hx", "ON", "HASH", "PREFIX", "1", "hx:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  Run({"HSET", "hx:1", "title", "alpha"});
+  EXPECT_THAT(Run({"FT.SEARCH", "hx", "@title:alpha"}),
+              IsArray(IntArg(1), "hx:1", IsArray("title", "alpha")));
+}
+
+TEST_F(SearchFamilyTest, HashAllowsSameIdentifierWithDifferentAliases) {
+  // redis-om's HashModel emits this shape for fields marked full_text_search=True:
+  //   description TAG SEPARATOR | description AS description_fts TEXT
+  // Same identifier, two aliases — must be accepted on HASH indexes.
+  EXPECT_EQ(Run({"FT.CREATE", "hx", "ON", "HASH", "PREFIX", "1", "hx:", "SCHEMA", "description",
+                 "TAG", "SEPARATOR", "|", "description", "AS", "description_fts", "TEXT"}),
+            "OK");
+  Run({"HSET", "hx:1", "description", "very fast and elegant"});
+  EXPECT_THAT(Run({"FT.SEARCH", "hx", "@description_fts:fast"}),
+              IsArray(IntArg(1), "hx:1", IsArray("description", "very fast and elegant")));
+}
+
 TEST_F(SearchFamilyTest, ReturnTrailingAsRejected) {
   Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT"});
   Run({"JSON.SET", "j1", ".", R"({"a":"alpha"})"});
