@@ -706,7 +706,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 }
 
 error_code Replica::ConsumeRedisStream() {
-  base::IoBuf io_buf(16_KB);
+  base::IoBuf io_buf(128_KB);
   ConnectionContext conn_context{nullptr, {}};
   conn_context.is_replicating = true;
   conn_context.journal_emulated = true;
@@ -726,7 +726,6 @@ error_code Replica::ConsumeRedisStream() {
   // or, alternatively, write commands stream coming from propagate() function.
   // Replica connection must send "REPLCONF ACK xxx" in order to make sure that master replication
   // buffer gets disposed of already processed commands, this is done in a separate fiber.
-  error_code ec;
   LOG(INFO) << "Transitioned into stable sync";
 
   // Set new error handler.
@@ -739,26 +738,18 @@ error_code Replica::ConsumeRedisStream() {
 
   acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
 
-  CommandContext cmnd_ctx;
-  cmnd_ctx.Init(&null_builder, &conn_context);
-  while (true) {
-    // Yield if the fiber has been running for long.
-    if (base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) > 1000) {  // 1ms
-      ThisFiber::Yield();
-    }
+  struct BatchCmd {
+    std::unique_ptr<cmn::BackedArguments> args;
+    size_t size;
+  };
 
-    // If the acks-fb or something else triggered a shutdown, then do not attempt to read from the
-    // stream.
-    if (!exec_st_.IsRunning()) {
-      DCHECK(exec_st_.IsError());
-      LOG_REPL_ERROR("Stopping stream consumer in phase "
-                     << GetCurrentPhase()
-                     << " because of external error: " << exec_st_.GetError().Format());
-      acks_fb_.JoinIfNeeded();
-      return exec_st_.GetError();
-    }
+  std::vector<BatchCmd> batch_cmds;
+  CommandContext single_cmd_ctx;
+  single_cmd_ctx.Init(&null_builder, &conn_context);
 
+  while (exec_st_.IsRunning()) {
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
+
     if (!response.has_value()) {
       LOG_REPL_ERROR("Error in Redis Stream at phase "
                      << GetCurrentPhase() << " with " << server().Description()
@@ -770,12 +761,14 @@ error_code Replica::ConsumeRedisStream() {
     }
 
     const auto& last_args = LastResponseArgs();
+    bool is_batched_cmd = false;
+
     if (!last_args.empty()) {
       string cmd = absl::CHexEscape(last_args[0].GetView());
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
-      // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we simply
-      // ignore MULTI/EXEC and execute their inner commands individually.
+      // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we
+      // simply ignore MULTI/EXEC and execute their inner commands individually.
       if (!absl::EqualsIgnoreCase(cmd, "MULTI") && !absl::EqualsIgnoreCase(cmd, "EXEC")) {
         VLOG(2) << "Got command " << cmd << "\n consumed: " << response->total_read;
 
@@ -784,17 +777,53 @@ error_code Replica::ConsumeRedisStream() {
             LOG(INFO) << absl::CHexEscape(ToSV(arg.GetBuf()));
           }
         }
-
-        FillBackedArgs(last_args, &cmnd_ctx);
-        service_.DispatchCommand(facade::ParsedArgs{cmnd_ctx}, &cmnd_ctx,
-                                 facade::AsyncPreference::ONLY_SYNC);
+        auto backed_args = std::make_unique<cmn::BackedArguments>();
+        FillBackedArgs(last_args, backed_args.get());
+        batch_cmds.push_back({std::move(backed_args), response->total_read});
+        is_batched_cmd = true;
       }
     }
 
     io_buf.ConsumeInput(response->left_in_buffer);
-    repl_offs_ += response->total_read;
-    replica_waker_.notify();  // Notify to trigger ACKs.
+
+    // If we didn't batch cmd we still need to account it's size.
+    if (!is_batched_cmd) {
+      repl_offs_ += response->total_read;
+    }
+
+    // Dispatch when:
+    // 1. Read buffer is drained
+    // 2. We have batched enough cmds
+    static constexpr size_t kMaxBatchSize = 1024;
+    if (io_buf.InputLen() == 0 || batch_cmds.size() >= kMaxBatchSize) {
+      if (!batch_cmds.empty()) {
+        if (batch_cmds.size() == 1) {
+          repl_offs_ += batch_cmds[0].size;
+          single_cmd_ctx.SwapArgs(*batch_cmds[0].args);
+          service_.DispatchCommand(facade::ParsedArgs{single_cmd_ctx}, &single_cmd_ctx,
+                                   facade::AsyncPreference::ONLY_SYNC);
+          batch_cmds.clear();
+        } else {
+          size_t i = 0;
+          auto result = service_.DispatchManyCommands(
+              [&]() -> facade::ParsedArgs { return facade::ParsedArgs{*batch_cmds[i++].args}; },
+              batch_cmds.size(), &null_builder, &conn_context);
+          std::for_each(batch_cmds.begin(), batch_cmds.begin() + result.processed,
+                        [&](const auto& cmd) { repl_offs_ += cmd.size; });
+          batch_cmds.erase(batch_cmds.begin(), batch_cmds.begin() + result.processed);
+        }
+      }
+      replica_waker_.notify();
+    }
   }
+
+  DCHECK(exec_st_.IsError());
+  LOG_REPL_ERROR("Stopping stream consumer in phase "
+                 << GetCurrentPhase()
+                 << " because of external error: " << exec_st_.GetError().Format());
+  acks_fb_.JoinIfNeeded();
+
+  return exec_st_.GetError();
 }
 
 error_code Replica::ConsumeDflyStream() {
