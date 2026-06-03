@@ -23,33 +23,12 @@ namespace search {
 using DocId = uint32_t;
 }  // namespace search
 
-// ┌────────────────┐   ┌─────────────┐
-// │IterateBucketsFb│   │  OnChange   │
-// └──────┬─────────┘   └─┬───────────┘
-//        │               │            OnChange forces whole bucket to be
-//        ▼               ▼            serialized if iterate didn't reach it yet
-// ┌──────────────────────────┐
-// │     DoSerializeBucket    │        Both might fall back to a temporary serializer
-// └────────────┬─────────────┘        if default is used on another db index
-//              │
-//              |                      Socket is left open in journal streaming mode
-//              ▼
-// ┌──────────────────────────┐          ┌─────────────────────────┐
-// │     SerializeEntry       │          │  ConsumeJournalChange   │
-// └─────────────┬────────────┘          └────────────┬────────────┘
-//               │                                    │
-//         PushBytes                                  │   into serializer buffer)
-//               │                                    ▼
-//               ▼                        ┌──────────────────────────┐
-//               ▼                        │     WriteJournalEntry    │
-// ┌──────────────────────────────┐       │  (appends journal entry  │
-// │     push_cb(buffer)          │       │   into serializer buffer)│
-// └──────────────────────────────┘       └──────────────────────────┘
-
 // SliceSnapshot is used for iterating over a shard at a specified point-in-time
-// and submitting all values to an output sink.
+// and submitting all values to an output sink via RdbSerializer.
 // In journal streaming mode, the snapshot continues submitting changes
 // over the sink until explicitly stopped.
+//
+// See serializer_base.h for the overall serialization pipeline diagram.
 class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInterface {
  public:
   // Represents a target sink for receiving snapshot data. Specifically designed

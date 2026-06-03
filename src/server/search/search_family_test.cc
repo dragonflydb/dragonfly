@@ -807,11 +807,11 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
 
   // Test complicated RETURN expression
   auto res = Run(
-      {"ft.search", "i1", "@name:bob", "return", "1", "max($.plays[*].score)", "as", "max-score"});
+      {"ft.search", "i1", "@name:bob", "return", "3", "max($.plays[*].score)", "as", "max-score"});
   EXPECT_THAT(res, IsMapWithSize("k2", IsMap("max-score", "15")));
 
   // Test invalid json path expression omits that field
-  res = Run({"ft.search", "i1", "@name:alex", "return", "1", "::??INVALID??::", "as", "retval"});
+  res = Run({"ft.search", "i1", "@name:alex", "return", "3", "::??INVALID??::", "as", "retval"});
   EXPECT_THAT(res, IsMapWithSize("k1", IsMap()));
 }
 
@@ -1047,11 +1047,11 @@ TEST_F(SearchFamilyTest, ReturnOption) {
   EXPECT_THAT(resp, MatchEntry("k0", "longA", "0"));
 
   // Check only one field is returned with right alias
-  resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "longB", "as", "madeupname"});
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "3", "longB", "as", "madeupname"});
   EXPECT_THAT(resp, MatchEntry("k0", "madeupname", "1"));
 
   // Check two fields
-  resp = Run({"ft.search", "i1", "@justA:0", "return", "2", "longB", "as", "madeupname", "longC"});
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "4", "longB", "as", "madeupname", "longC"});
   EXPECT_THAT(resp, MatchEntry("k0", "madeupname", "1", "longC", "2"));
 
   // Check non-existing field
@@ -1093,7 +1093,7 @@ TEST_F(SearchFamilyTest, ReturnOptionJson) {
               MatchEntry("k1", "$.actions", "[\"fly\",\"sleep\"]"));
 
   // RETURN by full path with alias
-  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "1", "$.name", "as", "n"}),
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "3", "$.name", "as", "n"}),
               MatchEntry("k1", "n", "dragon"));
 
   // RETURN by schema alias
@@ -1103,9 +1103,9 @@ TEST_F(SearchFamilyTest, ReturnOptionJson) {
               MatchEntry("k1", "primary_action", "fly"));
 
   // RETURN by schema alias with new alias
-  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "1", "name", "as", "n"}),
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "3", "name", "as", "n"}),
               MatchEntry("k1", "n", "dragon"));
-  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "1", "primary_action", "as", "pa"}),
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "3", "primary_action", "as", "pa"}),
               MatchEntry("k1", "pa", "fly"));
 
   // Whole document with SORTBY includes sortable field as return field
@@ -2351,6 +2351,51 @@ TEST_F(SearchFamilyTest, InvalidSearchOptions) {
   // Test with NOCONTENT and RETURN
   resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT", "RETURN", "2", "@field1", "@field2"});
   EXPECT_THAT(resp, IsArray(IntArg(1), "j1"));
+}
+
+TEST_F(SearchFamilyTest, ReturnWithAliasAndKnn) {
+  Run({"FT.CREATE",       "kx",     "ON",     "JSON",    "PREFIX", "1",  "kx:", "SCHEMA",
+       "$.vector",        "AS",     "vector", "VECTOR",  "HNSW",   "6",  "DIM", "8",
+       "DISTANCE_METRIC", "COSINE", "TYPE",   "FLOAT32", "$.cat",  "AS", "cat", "TAG"});
+
+  Run({"JSON.SET", "kx:1", "$", R"({"vector":[0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1],"cat":"tech"})"});
+
+  std::string qv(32, '\0');
+  for (int i = 0; i < 8; ++i) {
+    float v = 0.1f;
+    memcpy(qv.data() + i * 4, &v, 4);
+  }
+
+  auto resp = Run({"FT.SEARCH", "kx", "*=>[KNN 3 @vector $qv]", "RETURN", "3", "$.cat", "AS",
+                   "catalias", "PARAMS", "2", "qv", qv, "DIALECT", "2"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "kx:1", IsArray("catalias", "tech")));
+
+  resp = Run({"FT.SEARCH", "kx", "@cat:{tech}=>[KNN 3 @vector $qv]", "RETURN", "3", "$.cat", "AS",
+              "catalias", "PARAMS", "2", "qv", qv, "DIALECT", "2"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "kx:1", IsArray("catalias", "tech")));
+
+  resp = Run({"FT.SEARCH", "kx", "@cat:{tech}", "RETURN", "3", "$.cat", "AS", "catalias"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "kx:1", IsArray("catalias", "tech")));
+}
+
+TEST_F(SearchFamilyTest, ReturnMixedAliasedAndBare) {
+  Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT", "$.b", "AS", "b",
+       "TEXT"});
+  Run({"JSON.SET", "j1", ".", R"({"a":"alpha","b":"beta"})"});
+
+  auto resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "4", "$.a", "AS", "aliased_a", "$.b"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "j1", IsUnordArray("aliased_a", "alpha", "$.b", "beta")));
+}
+
+TEST_F(SearchFamilyTest, ReturnTrailingAsRejected) {
+  Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT"});
+  Run({"JSON.SET", "j1", ".", R"({"a":"alpha"})"});
+
+  auto resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "1", "$.a", "AS", "aliased"});
+  EXPECT_THAT(resp, ErrArg("Unexpected parameter `AS`"));
+
+  resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "0", "AS", "aliased"});
+  EXPECT_THAT(resp, ErrArg("Unexpected parameter `AS`"));
 }
 
 TEST_F(SearchFamilyTest, KnnSearchOptions) {

@@ -56,10 +56,6 @@ void BucketDependencies::WaitEmpty() const {
   empty_q_.wait(lock, [&] { return deps_.empty(); });
 }
 
-bool BucketDependencies::DEBUG_IsBusy(BucketIdentity bucket) const {
-  return deps_.contains(bucket);
-}
-
 void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_index, PrimeKey pk,
                                            const PrimeValue& pv, time_t expire_time,
                                            uint32_t mc_flags) {
@@ -135,7 +131,7 @@ SerializerBase::~SerializerBase() {
 //   that mutates K.
 // RegisterChangeListener registers the DbSlice callback that routes mutations through
 //   SerializerBase::OnChange. ConsumeJournalChange runs later on the
-//   same fiber, so the baseline is serialized first. big_value_mu_ prevents this callback path
+//   same fiber, so the baseline is serialized first. stream_mu_ prevents this callback path
 //   from interleaving with the traversal fiber's bucket serialization, which may preempt while
 //   emitting large values.
 void SerializerBase::RegisterChangeListener(bool replication) {

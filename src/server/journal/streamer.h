@@ -133,9 +133,6 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
-  // Returns true if any entry was actually written
-  bool WriteBucket(PrimeTable::bucket_iterator it, bool on_db_change);
-
   void WriteEntry(BucketIdentity bucket, std::string_view key, const PrimeKey& pk,
                   const PrimeValue& pv, uint64_t expire_ms);
 
