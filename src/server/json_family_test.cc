@@ -2656,6 +2656,16 @@ TEST_F(JsonFamilyTest, DebugHelp) {
   EXPECT_THAT(resp.GetVec()[2].GetString(), HasSubstr("HELP"));
 }
 
+TEST_F(JsonFamilyTest, DebugMissingKey) {
+  // Missing key: the default root path parses fine, so the unchecked parser error must
+  // still be surfaced rather than left to abort the parser destructor.
+  auto resp = Run({"JSON.DEBUG", "FIELDS"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"JSON.DEBUG", "MEMORY"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
 TEST_F(JsonFamilyTest, DebugFields) {
   string json = R"(
     [1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]]
