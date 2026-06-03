@@ -1728,4 +1728,96 @@ TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
   }
 }
 
+std::string MakeJournalDel(std::string_view key) {
+  io::StringSink sink;
+  JournalWriter writer(&sink);
+  writer.Write(journal::Entry{1, journal::Op::COMMAND, 0, std::nullopt,
+                              journal::Entry::Payload("DEL", ArgSlice{key})});
+
+  RdbSerializer serializer(CompressionMode::NONE);
+  CHECK(!serializer.WriteJournalEntry(std::move(sink).str()));
+  return serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry);
+}
+
+TEST_F(RdbTest, JournalDelWaitsForShardLoads) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  std::string key;
+  for (unsigned i = 0; i < 1000; ++i) {
+    key = StrCat("journal-del-barrier-", i);
+    if (Shard(key, shard_set->size()) != 0)
+      break;
+  }
+  ASSERT_NE(Shard(key, shard_set->size()), 0u);
+  const ShardId sid = Shard(key, shard_set->size());
+
+  // Priming key on same shard as key so that it can schedule before the RDB load callback.
+  std::string priming_key;
+  for (unsigned i = 0; i < 1000; ++i) {
+    priming_key = StrCat("journal-del-prime-", i);
+    if (Shard(priming_key, shard_set->size()) == sid)
+      break;
+  }
+  ASSERT_EQ(Shard(priming_key, shard_set->size()), sid);
+
+  EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+
+  std::atomic_bool release_shard_queue{false};
+
+  // block sid task queue for 50ms. releaser will unlock this after 50ms
+  shard_set->Add(sid, [&] {
+    while (!release_shard_queue.load(std::memory_order_relaxed)) {
+      ThisFiber::SleepFor(chrono::milliseconds(1));
+    }
+  });
+
+  const auto ec = pp_->at(0)->Await([&] {
+    Fiber releaser([&] {
+      ThisFiber::SleepFor(chrono::milliseconds(50));
+      release_shard_queue.store(true, std::memory_order_relaxed);
+    });
+
+    // Run priming key so that transaction scheduling is already in the shard set task queue by the
+    // time delete runs.
+    Fiber scheduler_primer([&] { EXPECT_EQ(Run({"SET", priming_key, "1"}), "OK"); });
+    ThisFiber::SleepFor(chrono::milliseconds(10));
+
+    std::string entry;
+    entry.push_back(RDB_TYPE_STRING);
+    AppendString(&entry, key);
+    AppendString(&entry, "baseline");
+
+    // create artificial rdb
+    // one entry key -> baseline
+    // one delete journal entry for same key
+    std::string body;
+
+    // this entry will be added to task set after the blocked entry from
+    // src/server/rdb_load.cc:2824
+    body += entry;
+    // this entry will be executed directly in the already running batch without going to task queue
+    // task queue will look like this for sid
+    // 1. 50ms blocker
+    // 2. schedule batch in shard (which will run SET priming_key and then DEL key in same batch)
+    // 3. then finally loader callback which creates the key
+    body += MakeJournalDel(key);
+
+    const std::string rdb = WrapInRdb(body);
+    io::BytesSource src{io::Buffer(rdb)};
+    RdbLoadContext load_context;
+    RdbLoader loader(service_.get(), &load_context);
+
+    const auto ec_ = loader.Load(&src);
+    EXPECT_EQ(loader.journal_offset(), std::nullopt);
+    scheduler_primer.Join();
+    releaser.Join();
+    shard_set->Await(sid, [] {});
+    return ec_;
+  });
+
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_THAT(Run({"GET", key}), ArgType(RespExpr::NIL));
+}
+
 }  // namespace dfly
