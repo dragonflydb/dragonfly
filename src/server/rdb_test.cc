@@ -1467,14 +1467,14 @@ struct InterleaveHarness {
   // queued key (sandwiched between a journal offset and a journal entry) to force interleaved
   // tagged chunks. Passed to serializer as consume_fun_, so the blob is the flushed data
   // accumulated in serializer.
-  void operator()(std::string blob) {
+  std::error_code operator()(std::string blob) {
     body += blob;
     if (next >= queued.size())
-      return;
+      return {};
 
     uint64_t offset = last_journal_offset.value_or(0) + 100;
     last_journal_offset = offset;
-    ASSERT_FALSE(serializer->SendJournalOffset(offset));
+    EXPECT_FALSE(serializer->SendJournalOffset(offset));
 
     const auto& entry = queued[next++];
     // SaveEntry calls get preempted (not by fiber but call stack) every time consume_fun_ is
@@ -1482,12 +1482,13 @@ struct InterleaveHarness {
     // consume_fun_ -> ... The last entry in queue (next == queued size) does not add anything, it
     // simply returns until the entry is completed. From that point on all entries simply flush
     // repeatedly until completed, moving down the stack.
-    ASSERT_TRUE(serializer->SaveEntry(PrimeKey{entry.key}, *entry.value, 0, 0, 0).has_value());
+    EXPECT_TRUE(serializer->SaveEntry(PrimeKey{entry.key}, *entry.value, 0, 0, 0).has_value());
 
     io::StringSink sink;
     JournalWriter writer(&sink);
     writer.Write(journal::Entry{journal::Op::PING, 0, std::nullopt});
-    ASSERT_FALSE(serializer->WriteJournalEntry(std::move(sink).str()));
+    EXPECT_FALSE(serializer->WriteJournalEntry(std::move(sink).str()));
+    return {};
   }
 };
 
@@ -1691,7 +1692,12 @@ TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
     }
 
     RdbSerializer serializer(
-        CompressionMode::NONE, [&](std::string blob) { harness(std::move(blob)); }, 256);
+        CompressionMode::NONE,
+        [&](std::string blob) -> std::error_code {
+          harness(std::move(blob));
+          return {};
+        },
+        256);
 
     harness.serializer = &serializer;
     serializer.SetTagEntries(true);
