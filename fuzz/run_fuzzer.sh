@@ -27,15 +27,7 @@ AFL_MEM_MB="${AFL_MEM_MB:-4096}"  # Memory limit (MB) passed to afl-fuzz -m; als
 # This ensures that on crash, ALL inputs that built the current server state are available
 # for replay. Without this, state from earlier iterations is lost and crashes become
 # non-reproducible. Max recommended by AFL++: 10000.
-# memcache defaults to a lower limit: its text protocol lets the fuzzer store large values
-# directly (up to --max_bulk_len), so accumulating 10000 iterations before a server restart
-# exhausts memory and the OOM killer kills the fuzzer (exit 137). Restarting more often
-# (every 1000 iterations) bounds resident memory.
-if [[ "$TARGET" == "memcache" ]]; then
-    AFL_LOOP_LIMIT="${AFL_LOOP_LIMIT:-1000}"
-else
-    AFL_LOOP_LIMIT="${AFL_LOOP_LIMIT:-10000}"
-fi
+AFL_LOOP_LIMIT="${AFL_LOOP_LIMIT:-10000}"
 
 print_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -111,7 +103,7 @@ show_config() {
     print_note "Usage: ./run_fuzzer.sh [resp|memcache]"
     print_note "To change proactor threads: export AFL_PROACTOR_THREADS=N (default: 1)"
     print_note "To change memory limit: export AFL_MEM_MB=N (default: 4096)"
-    print_note "To change loop limit: export AFL_LOOP_LIMIT=N (default: resp=10000, memcache=1000)"
+    print_note "To change loop limit: export AFL_LOOP_LIMIT=N (default: 10000)"
     echo ""
 }
 
