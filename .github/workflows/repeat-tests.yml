@@ -80,6 +80,14 @@ on:
         required: false
         type: string
         default: ""
+      disable_thp:
+        description: "Disable THP for dragonfly (MIMALLOC_ALLOW_LARGE_OS_PAGES=0) to test the THP hypothesis"
+        required: false
+        type: choice
+        options:
+          - "no"
+          - "yes"
+        default: "no"
 
 jobs:
   build:
@@ -148,6 +156,7 @@ jobs:
         shell: bash
         env:
           ALLOCATION_TRACKER: ${{ inputs.allocation_tracker }}
+          DISABLE_THP: ${{ inputs.disable_thp }}
           COUNT: ${{ inputs.count }}
           EPOLL: ${{ inputs.epoll }}
           EXPRESSION: ${{ inputs.expression }}
@@ -161,6 +170,14 @@ jobs:
 
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly"
           export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+
+          # THP hypothesis test: mimalloc default actively madvises THP (allow_large_os_pages=2);
+          # setting it to 0 disables THP for the dragonfly process. Inherited via Popen.
+          if [[ "${DISABLE_THP}" == "yes" ]]; then
+            export MIMALLOC_ALLOW_LARGE_OS_PAGES=0
+            export MIMALLOC_LARGE_OS_PAGES=0   # legacy alias, belt-and-suspenders
+            echo "THP disabled for dragonfly (MIMALLOC_ALLOW_LARGE_OS_PAGES=0)"
+          fi
 
           FORCE_EPOLL=""
           if [[ "${EPOLL}" == "epoll" ]]; then
