@@ -211,9 +211,11 @@ void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_itera
                                                       // has_registered_callbacks before save
                                                       // registers them, schedules inline, then
                                                       // triggers OnChange on the DflyConn_ fiber
-      active_name != "Dispatched" &&   // Comes from OnAllShards(... { migration->RunSync(); });
-      active_name != "Debug/Traverse"  // DEBUG OBJHIST/UNIQ-STRS cleanup of lazy-expired empty
-                                       // containers; runs on the shard proactor so ordering holds.
+      active_name != "Dispatched" &&  // Comes from OnAllShards(... { migration->RunSync(); });
+      active_name !=
+          "Debug/Traverse" &&  // DEBUG OBJHIST/UNIQ-STRS cleanup of lazy-expired empty
+                               // containers; runs on the shard proactor so ordering holds.
+      !absl::StartsWith(active_name, "shard_stable_sync_read")  // races with BGSAVE on replica
   ) {
     LOG(DFATAL) << "Unexpected fiber: " << active_name << " on " << util::fb2::GetStacktrace();
   }
