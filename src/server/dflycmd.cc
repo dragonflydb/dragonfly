@@ -892,36 +892,34 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
   return vec;
 }
 
-void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
-  atomic<size_t> streamer_bytes{0}, full_sync_bytes{0};
+ReplicationMemoryStats DflyCmd::GetReplicationMemoryStats(EngineShard* shard) {
+  // Must run on the shard's own proactor: it reads thread-local tl_replica_infos
+  // and the shard's flow saver/streamer, which only this thread mutates — so the
+  // read is lock-free and a wrong-thread call would report 0/stale stats.
+  DCHECK(shard && shard->IsMyThread());
+
+  ReplicationMemoryStats stats;
   auto replica_infos = tl_replica_infos;
   if (!replica_infos)
-    return;
+    return stats;
 
-  // Lock-free read: tl_replica_infos keeps each ReplicaInfo alive, and the cb
-  // runs on each flow's owner shard — the only thread that ever sets or resets
-  // these unique_ptrs. RunBriefInParallel enforces the non-yielding contract.
-  shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    for (const auto& [_, info] : *replica_infos) {
-      DCHECK_GT(info->GetFlowCount(), 0u);
-      if (info->GetFlowCount() == 0)
-        continue;
+  for (const auto& [_, info] : *replica_infos) {
+    DCHECK_GT(info->GetFlowCount(), 0u);
+    if (info->GetFlowCount() == 0)
+      continue;
 
-      const auto& flow = info->GetFlow(shard->shard_id());
-      if (flow.streamer)
-        streamer_bytes.fetch_add(flow.streamer->UsedBytes(), memory_order_relaxed);
-      if (flow.saver) {
-        // Replication-flow savers must be single-shard, otherwise the saver's
-        // GetTotalBuffersSize would internally call RunBriefInParallel and nest.
-        DCHECK(flow.saver->Mode() == SaveMode::SINGLE_SHARD ||
-               flow.saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY);
-        full_sync_bytes.fetch_add(flow.saver->GetTotalBuffersSize(), memory_order_relaxed);
-      }
+    const auto& flow = info->GetFlow(shard->shard_id());
+    if (flow.streamer)
+      stats.streamer_buf_capacity_bytes += flow.streamer->UsedBytes();
+    if (flow.saver) {
+      // Replication-flow savers must be single-shard, otherwise the saver's
+      // GetTotalBuffersSize would internally call RunBriefInParallel and nest.
+      DCHECK(flow.saver->Mode() == SaveMode::SINGLE_SHARD ||
+             flow.saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY);
+      stats.full_sync_buf_bytes += flow.saver->GetTotalBuffersSize();
     }
-  });
-
-  stats->streamer_buf_capacity_bytes += streamer_bytes.load(memory_order_relaxed);
-  stats->full_sync_buf_bytes += full_sync_bytes.load(memory_order_relaxed);
+  }
+  return stats;
 }
 
 pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
