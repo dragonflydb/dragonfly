@@ -42,6 +42,11 @@ inputs:
     required: false
     default: 'src/all'
     type: string
+  legacy-glog:
+    description: "Build with legacy glog (ON) or Abseil logging (OFF)"
+    required: false
+    default: 'ON'
+    type: string
 
 runs:
   using: "composite"
@@ -85,7 +90,7 @@ runs:
           -DWITH_GPERF=OFF
           -DWITH_ASAN="${ASAN}"
           -DWITH_USAN="${USAN}"
-          -DLEGACY_GLOG=ON
+          -DLEGACY_GLOG="${{ inputs.legacy-glog }}"
         )
 
         # Execute CMake
