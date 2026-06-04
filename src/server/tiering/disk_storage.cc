@@ -181,7 +181,8 @@ io::Result<std::pair<size_t, RegisteredSlice>> DiskStorage::PrepareStash(size_t 
 }
 
 void DiskStorage::Stash(DiskSegment segment, RegisteredSlice buf, StashCb cb) {
-  auto io_cb = [this, cb = std::move(cb), buf, segment](int io_res) {
+  size_t stash_len = segment.length;
+  auto io_cb = [this, cb = std::move(cb), buf, segment, stash_len](int io_res) {
     if (io_res < 0) {
       MarkAsFree(segment);
       cb(error_code{-io_res, std::system_category()});
@@ -190,9 +191,11 @@ void DiskStorage::Stash(DiskSegment segment, RegisteredSlice buf, StashCb cb) {
     }
     ReturnBuf(buf);
     pending_ops_--;
+    pending_stash_bytes_ -= stash_len;
   };
 
   pending_ops_++;
+  pending_stash_bytes_ += stash_len;
   size_t offset = segment.offset;
   if (buf.buf_idx != kHeapSliceId)
     backing_file_->WriteFixedAsync(buf.bytes, offset, buf.buf_idx, std::move(io_cb));
@@ -211,7 +214,7 @@ void DiskStorage::Stash(DiskSegment segment, RegisteredSlice buf, StashCb cb) {
 DiskStorage::Stats DiskStorage::GetStats() const {
   return {
       alloc_.allocated_bytes(),       alloc_.capacity(), heap_buf_alloc_cnt_, reg_buf_alloc_cnt_,
-      static_cast<size_t>(max_size_), pending_ops_};
+      static_cast<size_t>(max_size_), pending_ops_,      pending_stash_bytes_};
 }
 
 error_code DiskStorage::RequestGrow(off_t grow_size) {

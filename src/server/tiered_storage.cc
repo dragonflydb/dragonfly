@@ -29,6 +29,7 @@
 #include "server/tiering/decoders.h"
 #include "server/tiering/op_manager.h"
 #include "server/tiering/small_bins.h"
+#include "strings/human_readable.h"
 
 extern "C" {
 #include "redis/listpack.h"
@@ -44,8 +45,13 @@ ABSL_FLAG(bool, tiered_experimental_cooling, true,
           "If true, uses intermediate cooling layer "
           "when offloading values to storage");
 
-ABSL_FLAG(unsigned, tiered_storage_write_depth, 200,
-          "Maximum number of concurrent stash requests issued by background offload");
+ABSL_RETIRED_FLAG(unsigned, tiered_storage_write_depth, 200,
+                  "Maximum number of concurrent stash requests issued by background offload. "
+                  "Deprecated: prefer tiered_max_pending_stash_bytes.");
+
+ABSL_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes, 16_MB,
+          "Maximum bytes in-flight to disk before rejecting new stashes or applying client "
+          "backpressure. Allows batching writes to saturate disk I/O even with few clients");
 
 ABSL_FLAG(float, tiered_offload_threshold, 0.5,
           "Ratio of free memory (free/max memory) below which offloading starts");
@@ -508,8 +514,8 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
     return;
   }
 
-  // If we are in the active offloading phase, throttle stashes by providing backpressure future
-  if (backpressure && ShouldOffload()) {
+  // Throttle if we're low on memory and reached the offloading limit
+  if (backpressure && ShouldOffload() && WriteDepthUsage() >= 1.0f) {
     stats_.total_clients_throttled++;
     *backpressure = stash_backpressure_[{dbid, string{key}}];
   }
@@ -561,6 +567,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.pending_stash_cnt = op_stats.pending_stash_cnt;
     stats.allocated_bytes = op_stats.disk_stats.allocated_bytes;
     stats.capacity_bytes = op_stats.disk_stats.capacity_bytes;
+    stats.pending_stash_bytes = op_stats.disk_stats.pending_stash_bytes;
     stats.total_heap_buf_allocs = op_stats.disk_stats.heap_buf_alloc_count;
     stats.total_registered_buf_allocs = op_stats.disk_stats.registered_buf_alloc_count;
   }
@@ -585,14 +592,15 @@ TieredStats TieredStorage::GetStats() const {
 }
 
 float TieredStorage::WriteDepthUsage() const {
-  return 1.0f * op_manager_->GetStats().pending_stash_cnt / config_.write_depth_limit;
+  auto disk_stats = op_manager_->GetStats().disk_stats;
+  return 1.0f * float(disk_stats.pending_stash_bytes) / float(config_.max_pending_stash_bytes);
 }
 
 void TieredStorage::UpdateFromFlags() {
   config_ = {
       .min_value_size = absl::GetFlag(FLAGS_tiered_min_value_size),
       .experimental_cooling = absl::GetFlag(FLAGS_tiered_experimental_cooling),
-      .write_depth_limit = absl::GetFlag(FLAGS_tiered_storage_write_depth),
+      .max_pending_stash_bytes = absl::GetFlag(FLAGS_tiered_max_pending_stash_bytes),
       .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
       .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_support),
@@ -602,7 +610,7 @@ void TieredStorage::UpdateFromFlags() {
 
 std::vector<std::string> TieredStorage::GetMutableFlagNames() {
   return base::GetFlagNames(FLAGS_tiered_min_value_size, FLAGS_tiered_experimental_cooling,
-                            FLAGS_tiered_storage_write_depth, FLAGS_tiered_offload_threshold,
+                            FLAGS_tiered_max_pending_stash_bytes, FLAGS_tiered_offload_threshold,
                             FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
                             FLAGS_tiered_experimental_list_support);
 }
@@ -654,10 +662,12 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   do {
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
 
-    if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit)
+    // We hit backpressure limit, so stop
+    if (op_manager_->GetStats().disk_stats.pending_stash_bytes >= config_.max_pending_stash_bytes)
       break;
 
     // TODO: yield as background fiber to perform more work on idle
+    // Limit allowed cpu-timeslice
     cycles = base::CycleClock::Now() - start_cycles;
     if (base::CycleClock::ToUsec(cycles) >= 100)
       break;
@@ -720,13 +730,13 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref) const
   if (fragment_ref.ObjType() == OBJ_LIST && !OccupiesWholePages(estimated_size))
     return nullopt;
 
-  // Limit write depth. TODO: Provide backpressure?
-  if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit) {
+  // Don't oversaturate disk with too many writes (backpressure should try to avoid this branch)
+  const auto& disk_stats = op_manager_->GetStats().disk_stats;
+  if (disk_stats.pending_stash_bytes >= config_.max_pending_stash_bytes) {
     ++stats_.stash_overflow_cnt;
-    return {};
+    return nullopt;
   }
 
-  const auto& disk_stats = op_manager_->GetStats().disk_stats;
   if (disk_stats.allocated_bytes + tiering::kPageSize + estimated_size < disk_stats.max_file_size) {
     return blobs;
   }

@@ -26,6 +26,7 @@ ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
 ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
+ABSL_DECLARE_FLAG(size_t, tiered_max_pending_stash_bytes);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
@@ -498,6 +499,8 @@ TEST_F(TieredStorageTest, FlushPending) {
 TEST_F(PureDiskTSTest, ThrottleClients) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
+  // Set low pending bytes limit so throttling kicks in quickly
+  absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 32_MB);
   UpdateFromFlags();
 
   // issue client pause to accumualte SETs

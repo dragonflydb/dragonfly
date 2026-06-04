@@ -885,7 +885,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
         "dbfilename": "tiered-entries",
         "tiered_prefix": "/tmp/tiered/backing",
         "tiered_offload_threshold": "0.5",  # ask to keep below 0.5 * 2G
-        "tiered_storage_write_depth": 1000,
+        "tiered_max_pending_stash_bytes": "16MB",
         "tiered_experimental_cooling": "false",
     }
 )
@@ -962,7 +962,7 @@ async def test_rdb_load_with_tiering_6823(df_factory: DflyInstanceFactory):
         tiered_prefix="/tmp/tiered/rdb_load_test",
         tiered_offload_threshold="0.9",
         tiered_experimental_cooling="false",
-        tiered_storage_write_depth=10,
+        tiered_max_pending_stash_bytes="100KB",
     )
     tiered.start()
     tiered_client = tiered.client()

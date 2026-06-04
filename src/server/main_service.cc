@@ -2938,23 +2938,6 @@ void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
   conn_state.tracking_info_.SetClientTracking(false);
 }
 
-void Service::RegisterTieringFlags() {
-#ifdef WITH_TIERING
-  // TODO(vlad): Introduce templatable flag cache
-  auto update_tiered_storage = [](auto) {
-    shard_set->pool()->AwaitBrief([](unsigned, auto*) {
-      if (auto* es = EngineShard::tlocal(); es && es->tiered_storage()) {
-        es->tiered_storage()->UpdateFromFlags();
-      }
-    });
-  };
-  config_registry.RegisterSetter<bool>("tiered_experimental_cooling", update_tiered_storage);
-  config_registry.RegisterSetter<unsigned>("tiered_storage_write_depth", update_tiered_storage);
-  config_registry.RegisterSetter<float>("tiered_offload_threshold", update_tiered_storage);
-  config_registry.RegisterSetter<float>("tiered_upload_threshold", update_tiered_storage);
-#endif
-}
-
 Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) const {
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
   bool is_scheduled = server_cntx->transaction && server_cntx->transaction->IsScheduled() &&
