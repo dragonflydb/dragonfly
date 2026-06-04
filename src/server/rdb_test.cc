@@ -716,7 +716,6 @@ TEST_F(RdbTest, SBF) {
 }
 
 TEST_F(RdbTest, SBFLargeFilterChunking) {
-  absl::SetFlag(&FLAGS_rdb_sbf_chunked, true);
   max_memory_limit = 200000000;
 
   // Using this set of parameters for the BF.RESERVE command resulted in a

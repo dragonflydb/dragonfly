@@ -88,11 +88,11 @@ int64_t LpGetIntegerIfValid(unsigned char* ele, int* valid) {
 }
 
 // Returns 1 if the stream listpack entries structure is valid, 0 otherwise.
-int StreamValidateListpackIntegrity(unsigned char* lp, size_t size) {
+int StreamValidateListpackIntegrity(unsigned char* lp, size_t size, int deep) {
   int valid_record;
   unsigned char *p, *next;
 
-  if (!lpValidateIntegrity(lp, size, 0, NULL, NULL))
+  if (!lpValidateIntegrity(lp, size, deep, NULL, NULL))
     return 0;
 
   next = p = lpValidateFirst(lp);
@@ -617,7 +617,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
     if (rdb_type_ == RDB_TYPE_LIST_QUICKLIST_2) {
       uint8_t* src = (uint8_t*)sv.data();
-      if (!lpValidateIntegrity(src, sv.size(), 0, nullptr, nullptr)) {
+      if (!lpValidateIntegrity(src, sv.size(), config_.deep_integrity ? 1 : 0, nullptr, nullptr)) {
         LOG(ERROR) << "Listpack integrity check failed.";
         ec_ = RdbError(errc::rdb_file_corrupted);
         return false;
@@ -768,7 +768,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
 
     uint8_t* lp = (uint8_t*)data.data();
 
-    if (!StreamValidateListpackIntegrity(lp, data.size())) {
+    if (!StreamValidateListpackIntegrity(lp, data.size(), config_.deep_integrity ? 1 : 0)) {
       LOG(ERROR) << "Stream listpack integrity check failed.";
       ec_ = RdbError(errc::rdb_file_corrupted);
       return;
@@ -923,24 +923,26 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
 
   if (rdb_type_ == RDB_TYPE_SET_INTSET || rdb_type_ == RDB_TYPE_SET_LISTPACK) {
     LoadBlobResult load_result = rdb_type_ == RDB_TYPE_SET_INTSET
-                                     ? SetFamily::LoadIntSetBlob(blob, pv_)
-                                     : SetFamily::LoadLPSetBlob(blob, pv_);
+                                     ? SetFamily::LoadIntSetBlob(blob, config_.deep_integrity, pv_)
+                                     : SetFamily::LoadLPSetBlob(blob, config_.deep_integrity, pv_);
     handle_load_result(load_result);
     return;
   }
 
   if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
-    LoadBlobResult load_result = rdb_type_ == RDB_TYPE_HASH_ZIPLIST
-                                     ? HSetFamily::LoadZiplistBlob(blob, pv_)
-                                     : HSetFamily::LoadListpackBlob(blob, pv_);
+    LoadBlobResult load_result =
+        rdb_type_ == RDB_TYPE_HASH_ZIPLIST
+            ? HSetFamily::LoadZiplistBlob(blob, pv_)
+            : HSetFamily::LoadListpackBlob(blob, config_.deep_integrity, pv_);
     handle_load_result(load_result);
     return;
   }
 
   if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST || rdb_type_ == RDB_TYPE_ZSET_LISTPACK) {
-    LoadBlobResult load_result = rdb_type_ == RDB_TYPE_ZSET_ZIPLIST
-                                     ? ZSetFamily::LoadZiplistBlob(blob, pv_)
-                                     : ZSetFamily::LoadListpackBlob(blob, pv_);
+    LoadBlobResult load_result =
+        rdb_type_ == RDB_TYPE_ZSET_ZIPLIST
+            ? ZSetFamily::LoadZiplistBlob(blob, pv_)
+            : ZSetFamily::LoadListpackBlob(blob, config_.deep_integrity, pv_);
     handle_load_result(load_result);
     return;
   } else if (rdb_type_ == RDB_TYPE_JSON) {

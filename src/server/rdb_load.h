@@ -165,10 +165,11 @@ class RdbLoaderBase {
   };
 
   struct LoadConfig {
-    bool chunked = false;   // Big value streamed incrementally
-    size_t reserve = 0;     // Number of elements to reserve to optimize big value load
-    bool append = false;    // Append chunk to existing object
-    bool finalize = false;  // Last portion of chunked stream, finalize object
+    bool chunked = false;         // Big value streamed incrementally
+    size_t reserve = 0;           // Number of elements to reserve to optimize big value load
+    bool append = false;          // Append chunk to existing object
+    bool finalize = false;        // Last portion of chunked stream, finalize object
+    bool deep_integrity = false;  // Validate every entry (untrusted RESTORE input)
   };
 
   class OpaqueObjLoader;
