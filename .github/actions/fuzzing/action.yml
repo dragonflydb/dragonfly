@@ -129,14 +129,15 @@ runs:
         AFL_NO_UI: 1
         AFL_AUTORESUME: 1
         AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES: 1
-        # afl-fuzz RAM cap. memcache reaches a successful store on almost every mutated
-        # input (its text framing survives byte mutation), so the queue explodes and
-        # afl-fuzz's in-RAM test-case cache grows until the OOM killer kills it (exit 137,
-        # no crash). A small cache bounds afl-fuzz memory; the only cost is more re-reads
-        # from disk. This is the lever for the 137s, not the server's --maxmemory.
-        AFL_TESTCACHE_SIZE: ${{ inputs.mode == 'smoke' && '20' || '50' }}
+        AFL_TESTCACHE_SIZE: ${{ inputs.mode == 'smoke' && '50' || '500' }}
         AFL_SKIP_CPUFREQ: 1
         AFL_FAST_CAL: ${{ inputs.mode == 'long' && '1' || '' }}
+        # Custom mutator only — disable AFL's byte-level stages and the dictionary.
+        # Byte-level parser fuzzing was not finding anything, and it makes the queue
+        # explode (arbitrary keys/values => endless "new coverage"), which drives the
+        # afl-fuzz OOM (exit 137). The custom mutator uses a bounded command/key/value
+        # vocabulary, keeping the queue and memory bounded.
+        AFL_CUSTOM_MUTATOR_ONLY: 1
         AFL_ENABLE_SAVE: ${{ inputs.mode == 'long' && '1' || '' }}
         FUZZ_FOCUS_COMMANDS: ${{ inputs.focus-commands }}
 

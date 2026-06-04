@@ -71,16 +71,19 @@ gets rejected by the parser), they:
 | `resp` | `resp_mutator.py` | every registered command (~280), wraps in MULTI/EXEC |
 | `memcache` | `memcache_mutator.py` | Store/get/meta commands, noreply toggle |
 
-Mutators are loaded automatically by `run_fuzzer.sh`. AFL++'s built-in
-byte-level mutations and the dictionary (`dict/*.dict`) run alongside the custom
-mutator — this is intentional: the custom mutator keeps protocol framing valid
-to reach command execution, while the byte-level stages + dictionary exercise
-parser edge cases (malformed framing, inline commands, length overflows). Both
-the PR and long campaigns rely on this combination.
+Mutators are loaded automatically by `run_fuzzer.sh`. CI runs with
+`AFL_CUSTOM_MUTATOR_ONLY=1` (set in the fuzzing action), so **only** the custom
+mutator runs — AFL++'s byte-level stages and the dictionary are disabled. Reasons:
 
-To restrict fuzzing to the custom mutator only (skips byte-level stages and the
-dictionary): `export AFL_CUSTOM_MUTATOR_ONLY=1`. Not recommended for CI, since it
-disables parser-level fuzzing.
+- Byte-level parser fuzzing was not finding anything (the protocol parsers are
+  well-covered), so it mostly wasted cycles.
+- It made the AFL++ queue explode: byte mutation produces arbitrary keys/values,
+  so almost every input looks like "new coverage", the queue grows without bound,
+  and afl-fuzz is eventually OOM-killed (exit 137). The custom mutator uses a
+  bounded command/key/value vocabulary, keeping the queue and memory bounded.
+
+Locally you can drop `AFL_CUSTOM_MUTATOR_ONLY` to also run the byte-level stages
+and the dictionary (`dict/*.dict`) for ad-hoc parser-edge-case exploration.
 
 ## Crash Replay
 
