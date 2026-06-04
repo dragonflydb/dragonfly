@@ -75,6 +75,11 @@ on:
           - "OFF"
           - "ON"
         default: "OFF"
+      allocation_tracker:
+        description: "Enable dragonfly --allocation_tracker, eg 16384:43000 (perturbs RSS; leave empty for clean smaps)"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build:
@@ -142,6 +147,7 @@ jobs:
       - name: Run tests on repeat
         shell: bash
         env:
+          ALLOCATION_TRACKER: ${{ inputs.allocation_tracker }}
           COUNT: ${{ inputs.count }}
           EPOLL: ${{ inputs.epoll }}
           EXPRESSION: ${{ inputs.expression }}
@@ -165,7 +171,12 @@ jobs:
           if [[ -n "${VMODULE_EXPRESSION}" ]]; then
             VMOD="--df vmodule=${VMODULE_EXPRESSION}"
           fi
-          export FORCE_EPOLL VMOD
+
+          ALLOC=""
+          if [[ -n "${ALLOCATION_TRACKER}" ]]; then
+            ALLOC="--df allocation_tracker=${ALLOCATION_TRACKER}"
+          fi
+          export FORCE_EPOLL VMOD ALLOC
 
           run_repeats() {
             read -r -a pytest_args <<< "${EXPRESSION}"
@@ -177,7 +188,7 @@ jobs:
 
               if [[ -n "${SECOND_EXPRESSION}" ]]; then
                 echo "Repeat ${i}/${COUNT} step 1/2: pytest ${EXPRESSION} ${FORCE_EPOLL} ${VMOD}"
-                if ! pytest "${pytest_args[@]}" ${FORCE_EPOLL} ${VMOD} \
+                if ! pytest "${pytest_args[@]}" ${FORCE_EPOLL} ${VMOD} ${ALLOC} \
                     --color=yes --json-report --json-report-file="report-${i}-1.json" \
                     --log-cli-level=DEBUG; then
                   repeat_failed=1
@@ -189,14 +200,14 @@ jobs:
                 fi
 
                 echo "Repeat ${i}/${COUNT} step 2/2: pytest ${SECOND_EXPRESSION} ${FORCE_EPOLL} ${VMOD}"
-                if ! pytest "${second_pytest_args[@]}" ${FORCE_EPOLL} ${VMOD} \
+                if ! pytest "${second_pytest_args[@]}" ${FORCE_EPOLL} ${VMOD} ${ALLOC} \
                     --color=yes --json-report --json-report-file="report-${i}-2.json" \
                     --log-cli-level=DEBUG; then
                   repeat_failed=1
                 fi
               else
                 echo "Repeat ${i}/${COUNT}: pytest ${EXPRESSION} ${FORCE_EPOLL} ${VMOD}"
-                if ! pytest "${pytest_args[@]}" ${FORCE_EPOLL} ${VMOD} \
+                if ! pytest "${pytest_args[@]}" ${FORCE_EPOLL} ${VMOD} ${ALLOC} \
                     --color=yes --json-report --json-report-file="report-${i}.json" \
                     --log-cli-level=DEBUG; then
                   repeat_failed=1
@@ -232,12 +243,39 @@ jobs:
             exit "${code}"
           fi
 
-      - name: Upload logs on failure
-        if: failure()
+      - name: Allocation digest
+        if: ${{ always() && inputs.allocation_tracker != '' }}
+        shell: bash
+        run: |
+          # Concatenate all logs from the (second) test's dragonfly instance and
+          # run the alloc-track parser. Robust to glog/absl log filename differences;
+          # non-matching lines are ignored by the parser. Failing repeats are also
+          # preserved under /tmp/failed by conftest.
+          shopt -s nullglob
+          all="/tmp/denyoom_alloc.log"
+          : > "${all}"
+          cat /tmp/dragonfly_logs/test_denyoom_commands*/* /tmp/failed/test_denyoom_commands*/* >> "${all}" 2>/dev/null || true
+          if [[ -s "${all}" ]]; then
+            echo "## Allocation digest (test_denyoom_commands)" >> "${GITHUB_STEP_SUMMARY}"
+            echo '```' >> "${GITHUB_STEP_SUMMARY}"
+            python3 "${GITHUB_WORKSPACE}/tools/analyze_alloc_track.py" "${all}" \
+              --json /tmp/failed/alloc-digest.json >> "${GITHUB_STEP_SUMMARY}" 2>&1 \
+              || echo "(analyzer failed)" >> "${GITHUB_STEP_SUMMARY}"
+            echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "Allocation digest: no dragonfly logs found" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: logs
-          path: /tmp/failed/*
+          # Per-backend name so absl and glog dispatches don't collide on download.
+          name: logs-${{ inputs.legacy_glog == 'OFF' && 'absl' || 'glog' }}
+          path: |
+            /tmp/dragonfly_logs
+            /tmp/failed
+          if-no-files-found: ignore
 
       - name: Copy binary on a self hosted runner
         if: failure()

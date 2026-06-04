@@ -6,7 +6,7 @@ from redis import asyncio as aioredis
 
 from . import dfly_multi_test_args, dfly_args
 from .instance import DflyInstance, DflyStartException
-from .utility import batch_fill_data, gen_test_data, EnvironCntx
+from .utility import batch_fill_data, gen_test_data, EnvironCntx, dump_proc_memory
 from .seeder import DebugPopulateSeeder
 
 
@@ -240,6 +240,10 @@ async def test_denyoom_commands(df_factory):
     min_deny = 256 * 1024 * 1024  # 256mb
     info = await client.info("memory")
     print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
+    # Memory snapshot at the populate peak: decompose VmRSS (the number the
+    # rss_oom_deny check rides on) into anon / private-dirty / THP, to study the
+    # absl-vs-glog RSS gap (issue #7471). No-op off Linux.
+    dump_proc_memory(df_server.proc.pid, "denyoom-peak")
     assert info["used_memory"] > min_deny, "Weak testcase: too little used memory"
 
     # reject set due to oom

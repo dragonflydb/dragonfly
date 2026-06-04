@@ -28,6 +28,49 @@ def tmp_file_name():
     return "".join(random.choices(string.ascii_letters, k=10))
 
 
+def dump_proc_memory(pid, label=""):
+    """Snapshot process + system memory for `pid` and print it (issue #7471).
+
+    Dragonfly's RSS (used_memory_rss / the rss_oom_deny check) is just VmRSS
+    from /proc/self/status. This decomposes that same residency:
+      - /proc/<pid>/smaps_rollup : Rss / Anonymous / Private_Dirty / AnonHugePages
+        -> distinguishes live allocations from allocator/THP retention
+      - /proc/meminfo            : system MemAvailable / AnonHugePages
+        -> the only state two separate dragonfly processes can share
+      - THP enabled setting
+    Output is line-prefixed for easy grep in the CI job log. No-op off Linux.
+    """
+    if sys.platform != "linux":
+        return
+
+    tag = f"[proc-mem {label}]" if label else "[proc-mem]"
+
+    def _emit(title, text):
+        print(f"{tag} ===== {title} =====", flush=True)
+        for line in text.splitlines():
+            print(f"{tag} {line}", flush=True)
+
+    try:
+        with open(f"/proc/{pid}/smaps_rollup") as f:
+            _emit(f"/proc/{pid}/smaps_rollup", f.read().strip())
+    except OSError as e:
+        print(f"{tag} could not read smaps_rollup: {e}", flush=True)
+
+    wanted = ("MemTotal", "MemFree", "MemAvailable", "Cached", "AnonPages", "AnonHugePages")
+    try:
+        with open("/proc/meminfo") as f:
+            lines = [line.strip() for line in f if line.split(":")[0] in wanted]
+        _emit("/proc/meminfo", "\n".join(lines))
+    except OSError as e:
+        print(f"{tag} could not read meminfo: {e}", flush=True)
+
+    try:
+        with open("/sys/kernel/mm/transparent_hugepage/enabled") as f:
+            print(f"{tag} THP enabled: {f.read().strip()}", flush=True)
+    except OSError:
+        pass
+
+
 def chunked(n, iterable):
     """Transform iterable into iterator of chunks of size n"""
     it = iter(iterable)
