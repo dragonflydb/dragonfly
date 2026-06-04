@@ -892,7 +892,7 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
   return vec;
 }
 
-ReplicationMemoryStats DflyCmd::GetReplicationMemoryStats(EngineShard* shard) const {
+ReplicationMemoryStats DflyCmd::GetReplicationMemoryStats(EngineShard* shard) {
   // Must run on the shard's own proactor: it reads thread-local tl_replica_infos
   // and the shard's flow saver/streamer, which only this thread mutates — so the
   // read is lock-free and a wrong-thread call would report 0/stale stats.

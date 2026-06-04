@@ -252,8 +252,7 @@ class DflyCmd {
 
   // Must be called on the given shard's thread (e.g. from the GetMetrics
   // fan-out). Lock-free: reads thread-local replica infos.
-  ReplicationMemoryStats GetReplicationMemoryStats(EngineShard* shard) const
-      ABSL_NO_THREAD_SAFETY_ANALYSIS;
+  static ReplicationMemoryStats GetReplicationMemoryStats(EngineShard* shard);
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionState* state, DflyVersion version);
