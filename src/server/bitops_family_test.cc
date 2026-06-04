@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 
+#include "absl/flags/reflection.h"
 #include "absl/strings/str_cat.h"
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -1000,6 +1001,25 @@ TEST_F(BitOpsFamilyTest, BitFieldNoOps) {
   EXPECT_THAT(Run({"BITFIELD", "k"}), RespArray(ElementsAre()));
   EXPECT_THAT(Run({"BITFIELD_RO", "k", "OVERFLOW", "SAT"}), RespArray(ElementsAre()));
   EXPECT_THAT(Run({"BITFIELD_RO", "k"}), RespArray(ElementsAre()));
+}
+
+// A bit offset past max_bulk_len must be rejected, not grow the value unboundedly.
+// 16'000'000 bits == 2'000'000 bytes, above the 1MB cap (which keeps the test cheap).
+
+TEST_F(BitOpsFamilyTest, SetBitOffsetOutOfRange) {
+  absl::FlagSaver fs;
+  SetTestFlag("max_bulk_len", "1048576");
+
+  EXPECT_THAT(Run({"setbit", "sk", "16000000", "1"}), ErrArg("out of range"));
+}
+
+TEST_F(BitOpsFamilyTest, BitFieldOffsetOutOfRange) {
+  absl::FlagSaver fs;
+  SetTestFlag("max_bulk_len", "1048576");
+
+  EXPECT_THAT(Run({"bitfield", "bk", "set", "u8", "16000000", "1"}), ErrArg("out of range"));
+  EXPECT_THAT(Run({"bitfield", "bk", "incrby", "u8", "16000000", "1"}), ErrArg("out of range"));
+  EXPECT_THAT(Run({"bitfield", "bk", "get", "u8", "16000000"}), ErrArg("out of range"));
 }
 
 }  // end of namespace dfly

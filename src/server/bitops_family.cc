@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/flags/declare.h>
+#include <absl/flags/flag.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 
@@ -22,6 +24,8 @@
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 #include "util/varz.h"
+
+ABSL_DECLARE_FLAG(uint64_t, max_bulk_len);
 
 namespace rng = std::ranges;
 
@@ -975,6 +979,14 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
 const char kInvalidBitfieldTypeErr[] =
     "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 is.";
 
+const char kBitOffsetOutOfRange[] = "bit offset is not an integer or out of range";
+
+// Bounds the touched byte by max_bulk_len so a tiny request can't allocate unboundedly.
+bool IsBitOffsetInRange(size_t bit_offset, size_t bit_size) {
+  const uint64_t max_bytes = absl::GetFlag(FLAGS_max_bulk_len);
+  return bit_offset / 8 < max_bytes && (bit_offset + bit_size - 1) / 8 < max_bytes;
+}
+
 nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser) {
   CommonAttributes parsed;
   using nonstd::make_unexpected;
@@ -1024,7 +1036,14 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
     return make_unexpected(kSyntaxErr);
   }
   if (is_proxy) {
+    // guard against overflow when scaling the field index to a bit offset
+    if (parsed.offset > std::numeric_limits<size_t>::max() / parsed.encoding_bit_size) {
+      return make_unexpected(kBitOffsetOutOfRange);
+    }
     parsed.offset = parsed.offset * parsed.encoding_bit_size;
+  }
+  if (!IsBitOffsetInRange(parsed.offset, parsed.encoding_bit_size)) {
+    return make_unexpected(kBitOffsetOutOfRange);
   }
   return parsed;
 }
@@ -1254,6 +1273,10 @@ void SetBit(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(err.MakeReply());
   }
 
+  if (!IsBitOffsetInRange(offset, 1)) {
+    return cmd_cntx->SendError(kBitOffsetOutOfRange);
+  }
+
   auto cb = [&, &key = key, &offset = offset, &value = value](Transaction* t, EngineShard* shard) {
     return BitNewValue(t->GetOpArgs(shard), key, offset, value != 0);
   };
@@ -1405,9 +1428,10 @@ void RegisterBitopsFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::BITMAP);
   *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1}.SetHandler(&BitPos)
             << CI{"BITCOUNT", CO::READONLY, -2, 1, 1}.SetHandler(&BitCount)
-            << CI{"BITFIELD", CO::JOURNALED, -2, 1, 1}.SetHandler(&BitField)
+            << CI{"BITFIELD", CO::JOURNALED | CO::DENYOOM, -2, 1, 1}.SetHandler(&BitField)
             << CI{"BITFIELD_RO", CO::FAST | CO::READONLY, -2, 1, 1}.SetHandler(&BitFieldRo)
-            << CI{"BITOP", CO::JOURNALED | CO::NO_AUTOJOURNAL, -4, 2, -1}.SetHandler(&BitOp)
+            << CI{"BITOP", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::DENYOOM, -4, 2, -1}.SetHandler(
+                   &BitOp)
             << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1}.SetHandler(&GetBit)
             << CI{"SETBIT", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetHandler(&SetBit);
 }

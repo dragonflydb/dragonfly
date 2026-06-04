@@ -446,3 +446,42 @@ async def test_expiry_heartbeat_responsiveness(df_factory: DflyInstanceFactory):
     assert (
         worst_ping < 0.5
     ), f"Worst PING latency {worst_ping:.3f}s exceeded 500ms during mass expiry"
+
+
+# BITFIELD and BITOP must be denied on OOM, not abort the process under a hard
+# virtual-memory cap (the fuzzer runs with `ulimit -v`, no maxmemory). opt_only:
+# release builds start under the cap, sanitizer builds reserve far more and can't.
+BIT_OOM_VMEM_CAP = 2 * 1024 * 1024 * 1024
+BIT_OOM_FILLER_OFFSET = 2_400_000_000  # ~300MB
+BIT_OOM_MAXMEMORY = 256 * 1024 * 1024
+BIT_OOM_HUGE_OFFSET = 8_589_934_583
+
+
+async def _start_over_maxmemory(df_factory: DflyInstanceFactory):
+    df = df_factory.create(proactor_threads=1)
+    df.vmem_limit_bytes = BIT_OOM_VMEM_CAP
+    df.start()
+    client = df.client()
+    # SETBIT has the guard, so build the filler before lowering the limit below it.
+    await client.execute_command("SETBIT", "filler", BIT_OOM_FILLER_OFFSET, 1)
+    await client.config_set("maxmemory", BIT_OOM_MAXMEMORY)
+    assert int((await client.info("memory"))["used_memory"]) > BIT_OOM_MAXMEMORY
+    with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
+        await client.execute_command("SETBIT", "guard", 0, 1)
+    return client
+
+
+@pytest.mark.opt_only
+async def test_bitop_denyoom(df_factory: DflyInstanceFactory):
+    client = await _start_over_maxmemory(df_factory)
+    with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
+        await client.execute_command("BITOP", "AND", "dest", "filler", "filler")
+    assert await client.ping()
+
+
+@pytest.mark.opt_only
+async def test_bitfield_denyoom(df_factory: DflyInstanceFactory):
+    client = await _start_over_maxmemory(df_factory)
+    with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
+        await client.execute_command("BITFIELD", "bk", "SET", "u8", str(BIT_OOM_HUGE_OFFSET), "1")
+    assert await client.ping()

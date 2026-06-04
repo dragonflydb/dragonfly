@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import re
+import resource
 import signal
 import subprocess
 import threading
@@ -98,6 +99,8 @@ class DflyInstance:
         self.dynamic_port = False
         self.sed_proc = None
         self.clients = []
+        # Optional hard RLIMIT_AS cap (mirrors `ulimit -v`) for OOM tests.
+        self.vmem_limit_bytes: Optional[int] = None
 
         if self.params.existing_port:
             self._port = self.params.existing_port
@@ -282,11 +285,19 @@ class DflyInstance:
         if self.params.gdb:
             run_cmd = ["gdb", "--ex", "r", "--args"] + run_cmd
 
+        preexec_fn = None
+        if self.vmem_limit_bytes is not None:
+            limit = self.vmem_limit_bytes
+
+            def preexec_fn():
+                resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
         self.proc = subprocess.Popen(
             run_cmd,
             cwd=self.params.cwd,
             stdout=None if self.params.direct_output else subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            preexec_fn=preexec_fn,
         )
         logging.info(f"Starting {real_path} {' '.join(all_args)}, pid {self.proc.pid}")
 
