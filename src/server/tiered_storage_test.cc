@@ -8,6 +8,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <string>
+
 #include "absl/flags/internal/flag.h"
 #include "absl/flags/reflection.h"
 #include "base/flags.h"
@@ -15,6 +17,7 @@
 #include "facade/facade_test.h"
 #include "server/engine_shard_set.h"
 #include "server/test_utils.h"
+#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 
 using namespace std;
@@ -25,8 +28,7 @@ ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
-ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
-ABSL_DECLARE_FLAG(size_t, tiered_max_pending_stash_bytes);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
@@ -61,7 +63,7 @@ class TieredStorageTest : public BaseFamilyTest {
       SetFlag(&FLAGS_registered_buffer_size, 0);
     }
 
-    SetFlag(&FLAGS_tiered_storage_write_depth, 15000);
+    SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 32_MB);
     if (GetFlag(FLAGS_tiered_prefix).empty()) {
       SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_storage_test");
     }
@@ -500,7 +502,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
   // Set low pending bytes limit so throttling kicks in quickly
-  absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 32_MB);
+  absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 100);
   UpdateFromFlags();
 
   // issue client pause to accumualte SETs
