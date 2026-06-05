@@ -191,8 +191,6 @@ On each shard, `PollExecution` checks whether the transaction is at the head of 
 
 As described in [Scheduling a Transaction](#scheduling-a-transaction), single-shard transactions on uncontended keys bypass the global sequence counter, the tx-queue, and the separate execution phase entirely. The callback runs inline during scheduling. This is the most important optimization in the system: it means the vast majority of real-world commands execute with minimal overhead — a single message to the target shard, an inline callback, and done.
 
-Additionally, single-shard scheduling messages are buffered in per-shard MPSC queues. `ScheduleBatchInShard()` drains multiple transactions in a single shard callback, amortizing the per-message dispatch cost.
-
 ### Out-of-order execution
 
 The basic VLL algorithm processes transactions strictly in tx-queue order. The VLL paper addresses this limitation with Selective Contention Analysis (SCA), which scans the queue for blocked transactions whose locks have become available and unblocks them ahead of turn.
