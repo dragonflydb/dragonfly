@@ -36,7 +36,7 @@ COMMANDS = [
     (b"DECR", 1, 1), (b"INCRBY", 2, 2), (b"DECRBY", 2, 2), (b"INCRBYFLOAT", 2, 2),
     (b"GETDEL", 1, 1), (b"GETEX", 1, 4), (b"GETSET", 2, 2), (b"MGET", 1, 6),
     (b"MSET", 2, 8), (b"MSETNX", 2, 8), (b"STRLEN", 1, 1), (b"GETRANGE", 3, 3),
-    (b"SUBSTR", 3, 3), (b"SETRANGE", 3, 3), (b"GAT", 1, 6), (b"DIGEST", 1, 1),
+    (b"SUBSTR", 3, 3), (b"SETRANGE", 3, 3), (b"DIGEST", 1, 1),
     # Key / generic
     (b"DEL", 1, 6), (b"UNLINK", 1, 6), (b"EXISTS", 1, 6), (b"EXPIRE", 2, 4),
     (b"EXPIREAT", 2, 4), (b"PEXPIRE", 2, 4), (b"PEXPIREAT", 2, 4), (b"EXPIRETIME", 1, 1),
