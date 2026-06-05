@@ -934,8 +934,10 @@ TEST_F(BitOpsFamilyTest, BitFieldLargeOffset) {
   resp = Run({"get", "foo"});
   EXPECT_THAT(ToSV(resp.GetBuf()), Eq(std::string_view("bar\0", 4)));
 
+  // The u32 field at this offset extends past the uint32 bit-index space, so it
+  // is rejected instead of silently wrapping to a different position.
   resp = Run({"bitfield", "foo", "get", "u32", "4294967295"});
-  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
+  EXPECT_THAT(resp, ErrArg("out of range"));
 }
 
 TEST_F(BitOpsFamilyTest, BitFieldIssue5237_SetOverflowSat) {

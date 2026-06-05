@@ -3,7 +3,7 @@ import logging
 import os
 import random
 import re
-import resource
+import shlex
 import signal
 import subprocess
 import threading
@@ -285,19 +285,17 @@ class DflyInstance:
         if self.params.gdb:
             run_cmd = ["gdb", "--ex", "r", "--args"] + run_cmd
 
-        preexec_fn = None
         if self.vmem_limit_bytes is not None:
-            limit = self.vmem_limit_bytes
-
-            def preexec_fn():
-                resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+            # Apply the cap via a shell `ulimit` wrapper (exec keeps the dragonfly pid),
+            # avoiding the unsafe preexec_fn fork path.
+            cmd = " ".join(shlex.quote(a) for a in run_cmd)
+            run_cmd = ["/bin/sh", "-c", f"ulimit -v {self.vmem_limit_bytes // 1024}; exec {cmd}"]
 
         self.proc = subprocess.Popen(
             run_cmd,
             cwd=self.params.cwd,
             stdout=None if self.params.direct_output else subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            preexec_fn=preexec_fn,
         )
         logging.info(f"Starting {real_path} {' '.join(all_args)}, pid {self.proc.pid}")
 

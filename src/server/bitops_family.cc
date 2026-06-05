@@ -981,10 +981,15 @@ const char kInvalidBitfieldTypeErr[] =
 
 const char kBitOffsetOutOfRange[] = "bit offset is not an integer or out of range";
 
-// Bounds the touched byte by max_bulk_len so a tiny request can't allocate unboundedly.
+// Keeps the bit offset within the uint32 range used by the bit-index helpers and
+// bounds the touched byte by max_bulk_len, so a tiny request can neither wrap to a
+// different position nor allocate unboundedly.
 bool IsBitOffsetInRange(size_t bit_offset, size_t bit_size) {
-  const uint64_t max_bytes = absl::GetFlag(FLAGS_max_bulk_len);
-  return bit_offset / 8 < max_bytes && (bit_offset + bit_size - 1) / 8 < max_bytes;
+  if (bit_offset > std::numeric_limits<uint32_t>::max())
+    return false;
+  const uint64_t last_bit = bit_offset + bit_size - 1;
+  return last_bit <= std::numeric_limits<uint32_t>::max() &&
+         last_bit / 8 < absl::GetFlag(FLAGS_max_bulk_len);
 }
 
 nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser) {
