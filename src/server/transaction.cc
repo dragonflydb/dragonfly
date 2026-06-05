@@ -82,16 +82,6 @@ uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
 
-struct ScheduleContext {
-  Transaction* trans;
-  bool optimistic_execution = false;
-
-  std::atomic_uint32_t fail_cnt{0};
-
-  ScheduleContext(Transaction* t, bool optimistic) : trans(t), optimistic_execution(optimistic) {
-  }
-};
-
 }  // namespace
 
 bool Transaction::BatonBarrier::IsClaimed() const {
@@ -740,14 +730,13 @@ void Transaction::ScheduleInternal() {
       break;
     }
 
-    ScheduleContext schedule_ctx{this, optimistic_exec};
+    atomic_uint32_t fail_cnt{0};
 
-    auto cb = [&schedule_ctx] {
-      if (!schedule_ctx.trans->ScheduleInShard(EngineShard::tlocal(),
-                                               schedule_ctx.optimistic_execution)) {
-        schedule_ctx.fail_cnt.fetch_add(1, memory_order_relaxed);
+    auto cb = [this, optimistic_exec, &fail_cnt] {
+      if (!ScheduleInShard(EngineShard::tlocal(), optimistic_exec)) {
+        fail_cnt.fetch_add(1, memory_order_relaxed);
       }
-      schedule_ctx.trans->FinishHop();
+      FinishHop();
     };
 
     if (unique_shard_cnt_ == 1) {
@@ -764,7 +753,7 @@ void Transaction::ScheduleInternal() {
     }
     run_barrier_.Wait();
 
-    if (schedule_ctx.fail_cnt.load(memory_order_relaxed) == 0) {
+    if (fail_cnt.load(memory_order_relaxed) == 0) {
       break;
     }
 
