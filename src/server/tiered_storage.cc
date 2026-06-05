@@ -661,11 +661,11 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   // Loop over entry with time and max stash budget.
   uint64_t cycles = 0;
   do {
-    offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
-
     // We hit backpressure limit, so stop
     if (op_manager_->GetStats().disk_stats.pending_stash_bytes >= config_.max_pending_stash_bytes)
       break;
+
+    offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
 
     // TODO: yield as background fiber to perform more work on idle
     // Limit allowed cpu-timeslice
@@ -731,12 +731,10 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref) const
   if (fragment_ref.ObjType() == OBJ_LIST && !OccupiesWholePages(estimated_size))
     return nullopt;
 
-  // Don't oversaturate disk with too many writes (backpressure should try to avoid this branch)
+  // Track if we oversature disk (backpressure fails to stop clients, possibly many new)
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
-  if (disk_stats.pending_stash_bytes >= config_.max_pending_stash_bytes) {
+  if (disk_stats.pending_stash_bytes >= 2 * config_.max_pending_stash_bytes)
     ++stats_.stash_overflow_cnt;
-    return nullopt;
-  }
 
   if (disk_stats.allocated_bytes + tiering::kPageSize + estimated_size < disk_stats.max_file_size) {
     return blobs;

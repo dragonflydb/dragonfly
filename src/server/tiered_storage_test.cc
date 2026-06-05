@@ -8,8 +8,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include <string>
-
 #include "absl/flags/internal/flag.h"
 #include "absl/flags/reflection.h"
 #include "base/flags.h"
@@ -501,8 +499,8 @@ TEST_F(TieredStorageTest, FlushPending) {
 TEST_F(PureDiskTSTest, ThrottleClients) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
-  // Set low pending bytes limit so throttling kicks in quickly
-  absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 100);
+  // Set low limit so all clients are throttled
+  absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 1);
   UpdateFromFlags();
 
   // issue client pause to accumualte SETs
