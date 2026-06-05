@@ -392,6 +392,8 @@ class CommandContext : public facade::ParsedCommand {
     return sizeof(CommandContext);
   }
 
+  bool TryCancel() override;
+
   ConnectionContext* server_conn_cntx() const {
     return static_cast<ConnectionContext*>(conn_cntx_);
   }

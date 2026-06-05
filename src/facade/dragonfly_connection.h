@@ -475,6 +475,9 @@ class Connection : public util::Connection {
   // not be counted in stats.
   void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
 
+  // Decrease connection stats when removing this parsed command from the queue
+  void UnaccountParsedCommand(ParsedCommand*);
+
   void DestroyParsedQueue();
 
   // Dispatch Queue - Queue for the Control Path.

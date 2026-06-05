@@ -13,6 +13,7 @@
 #include <absl/time/time.h>
 
 #include <algorithm>
+#include <boost/intrusive/list.hpp>
 #include <numeric>
 #include <variant>
 
@@ -548,6 +549,41 @@ class PipelineCacheSizeTracker {
 };
 
 thread_local PipelineCacheSizeTracker tl_pipe_cache_sz_tracker;
+
+// An orphaned command is a command whose execution was aborted due to a client disconnect,
+// but which cannot be safely cancelled (due to transactional framework limitations),
+// so we wait for its execution to finish and keep it in a separate list.
+// TODO: Explore more safe ways to cancel a scheduled transaction atomically
+struct OrphanedCommand : public boost::intrusive::list_base_hook<
+                             boost::intrusive::link_mode<boost::intrusive::auto_unlink>> {
+  explicit OrphanedCommand(ParsedCommand* c)
+      : owner(fb2::ProactorBase::me()),
+        cmd(c),
+        callback(std::bind_front(&OrphanedCommand::OnFinish, this)),
+        waiter(util::fb2::detail::Waiter::Callback(callback)),
+        sub_key(cmd->Blocker()->OnCompletion(&waiter)) {
+  }
+
+  void OnFinish() {
+    // Completion could've happened from any thread, so dispatch to owner thread
+    owner->DispatchBrief([this] {
+      sub_key->Drop();
+      unlink();
+      delete this;
+    });
+  }
+
+  fb2::ProactorBase* owner;            // original proactor of command
+  std::unique_ptr<ParsedCommand> cmd;  // owned by this struct
+
+  std::function<void()> callback;
+  util::fb2::detail::Waiter waiter;
+  std::optional<util::fb2::EventCount::SubKey> sub_key;
+};
+
+using OrphanedList =
+    boost::intrusive::list<OrphanedCommand, boost::intrusive::constant_time_size<false>>;
+thread_local OrphanedList tl_orphaned_commands;
 
 size_t Connection::MessageHandle::UsedMemory() const {
   struct MessageSize {
@@ -1820,8 +1856,23 @@ void Connection::ClearPipelinedMessages() {
     auto* curr{parsed_head_};
     parsed_head_ = parsed_head_->next;
 
-    // Wait for the in-flight async commands processing by consumer to finish before recycling.
+    // For in-flight async commands that haven't completed yet:
     if (curr->IsDeferredReply() && !curr->CanReply()) {
+      // With v2, try cancelling the command, if not - let it finish and add it to the orphan list
+      if (ioloop_v2_ && !curr->TryCancel()) {
+        UnaccountParsedCommand(curr);
+        curr->next = nullptr;
+        if (auto* orphan = new OrphanedCommand(curr); orphan->sub_key) {
+          tl_orphaned_commands.push_back(*orphan);
+        } else {
+          DCHECK(curr->Blocker()->IsCompleted());
+          delete orphan;  // already completed
+        }
+
+        continue;  // Skip ReleaseParsedCommand below
+      }
+
+      // Otherwise wait for its completion
       curr->Blocker()->Wait();
     }
 
@@ -2167,6 +2218,17 @@ Connection::WeakRef Connection::Borrow() {
 
 void Connection::ShutdownThreadLocal() {
   pipeline_req_pool_.clear();
+
+  // Wait at most 10ms for orphaned commands to finish
+  for (size_t i = 0; i < 10 && !tl_orphaned_commands.empty(); i++)
+    util::ThisFiber::SleepFor(1ms);
+
+  // Force delete orphaned commands then
+  if (!tl_orphaned_commands.empty()) {
+    size_t cmds = std::distance(tl_orphaned_commands.begin(), tl_orphaned_commands.end());
+    LOG(WARNING) << "Shutting down with " << cmds << " orphaned commands still pending";
+    tl_orphaned_commands.clear_and_dispose([](OrphanedCommand* o) { delete o; });
+  }
 }
 
 bool Connection::IsCurrentlyDispatching() const {
@@ -2734,18 +2796,8 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
-  size_t used_mem = cmd->UsedMemory();
   auto& conn_stats = tl_facade_stats->conn_stats;
-
-  DCHECK_GT(parsed_cmd_q_len_, 0u);
-  DCHECK_GE(parsed_cmd_q_bytes_, used_mem);
-  DCHECK_GT(conn_stats.pipeline_queue_entries, 0u);
-  DCHECK_GE(conn_stats.pipeline_queue_bytes, used_mem);
-  parsed_cmd_q_len_--;
-  parsed_cmd_q_bytes_ -= used_mem;
-
-  conn_stats.pipeline_queue_entries--;
-  conn_stats.pipeline_queue_bytes -= used_mem;
+  UnaccountParsedCommand(cmd);
 
   if (is_pipelined) {
     conn_stats.pipelined_cmd_cnt++;
@@ -2775,6 +2827,20 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
       delete cmd;
     }
   }
+}
+
+void Connection::UnaccountParsedCommand(ParsedCommand* cmd) {
+  size_t used_mem = cmd->UsedMemory();
+  auto& conn_stats = tl_facade_stats->conn_stats;
+
+  DCHECK_GT(parsed_cmd_q_len_, 0u);
+  DCHECK_GE(parsed_cmd_q_bytes_, used_mem);
+  DCHECK_GT(conn_stats.pipeline_queue_entries, 0u);
+  DCHECK_GE(conn_stats.pipeline_queue_bytes, used_mem);
+  parsed_cmd_q_len_--;
+  parsed_cmd_q_bytes_ -= used_mem;
+  conn_stats.pipeline_queue_entries--;
+  conn_stats.pipeline_queue_bytes -= used_mem;
 }
 
 void Connection::DestroyParsedQueue() {
