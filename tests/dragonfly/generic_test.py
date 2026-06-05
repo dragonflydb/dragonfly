@@ -6,7 +6,13 @@ from redis import asyncio as aioredis
 
 from . import dfly_multi_test_args, dfly_args
 from .instance import DflyInstance, DflyStartException
-from .utility import batch_fill_data, gen_test_data, EnvironCntx, dump_proc_memory
+from .utility import (
+    batch_fill_data,
+    gen_test_data,
+    EnvironCntx,
+    dump_proc_memory,
+    record_rss_sample,
+)
 from .seeder import DebugPopulateSeeder
 
 
@@ -232,7 +238,17 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
 
 @pytest.mark.asyncio
 async def test_denyoom_commands(df_factory):
-    df_server = df_factory.create(proactor_threads=1, maxmemory="256mb", oom_deny_commands="get")
+    # rss_oom_deny_ratio=-1 disables the RSS-based deny (the #7446 fix), so DEBUG
+    # POPULATE always completes fully and the test never fails on the flaky RSS
+    # leg. That lets us collect a clean RSS sample at full populate on every
+    # repeat (glog vs absl, large N) for issue #7471. The set/get denials below
+    # still fire via the used_memory>maxmemory path, which this does not touch.
+    df_server = df_factory.create(
+        proactor_threads=1,
+        maxmemory="256mb",
+        oom_deny_commands="get",
+        rss_oom_deny_ratio=-1,
+    )
     df_server.start()
     client = df_server.client()
     await client.execute_command("DEBUG POPULATE 7000 size 44000")
@@ -243,7 +259,10 @@ async def test_denyoom_commands(df_factory):
     # Memory snapshot at the populate peak: decompose VmRSS (the number the
     # rss_oom_deny check rides on) into anon / private-dirty / THP, to study the
     # absl-vs-glog RSS gap (issue #7471). No-op off Linux.
-    dump_proc_memory(df_server.proc.pid, "denyoom-peak")
+    proc_mem = dump_proc_memory(df_server.proc.pid, "denyoom-peak")
+    # Append one CSV row per repeat to a /tmp file that survives across pytest
+    # invocations, so a large-N repeat run aggregates into a single dataset.
+    record_rss_sample(info["used_memory"], info["used_memory_rss"], proc_mem, "denyoom-peak")
     assert info["used_memory"] > min_deny, "Weak testcase: too little used memory"
 
     # reject set due to oom
@@ -256,6 +275,14 @@ async def test_denyoom_commands(df_factory):
 
     # mget should not be rejected
     await client.execute_command("mget x")
+
+    # Second RSS sample at end of test, after the OOM-deny path has run. That
+    # path logs on each denied command, so on absl it is a touch of extra heap
+    # churn the populate-peak snapshot doesn't see; this captures any drift
+    # between the two points (#7471).
+    info = await client.info("memory")
+    proc_mem = dump_proc_memory(df_server.proc.pid, "denyoom-end")
+    record_rss_sample(info["used_memory"], info["used_memory_rss"], proc_mem, "denyoom-end")
 
 
 @pytest.mark.parametrize("type", ["LIST", "HASH", "SET", "ZSET", "STRING", "STREAM"])

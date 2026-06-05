@@ -283,6 +283,73 @@ jobs:
             echo "Allocation digest: no dragonfly logs found" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
+      - name: RSS digest
+        if: always()
+        shell: bash
+        run: |
+          # Aggregate the per-repeat RSS samples (one CSV row per test_denyoom
+          # repeat, written by record_rss_sample) into a summary table. Lets a
+          # large-N passing run be compared glog-vs-absl at a glance (#7471).
+          csv="/tmp/denyoom_rss.csv"
+          backend="${{ inputs.legacy_glog == 'OFF' && 'absl' || 'glog' }}"
+          if [[ ! -s "${csv}" ]]; then
+            echo "RSS digest: no samples found at ${csv}" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          python3 - "${csv}" "${backend}" >> "${GITHUB_STEP_SUMMARY}" <<'PY'
+          import csv, sys, statistics as st
+          from collections import defaultdict
+
+          path, backend = sys.argv[1], sys.argv[2]
+          groups = defaultdict(list)
+          for r in csv.DictReader(open(path)):
+              groups[r.get("label", "") or "(none)"].append(r)
+
+          def col(rows, name):
+              out = []
+              for r in rows:
+                  v = r.get(name, "")
+                  if v not in ("", None):
+                      try:
+                          out.append(float(v))
+                      except ValueError:
+                          pass
+              return out
+
+          def pct(xs, p):
+              xs = sorted(xs)
+              k = (len(xs) - 1) * p
+              lo = int(k)
+              hi = min(lo + 1, len(xs) - 1)
+              return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+
+          MiB = 1.0 / (1024 * 1024)
+          KiB_MiB = 1.0 / 1024
+          metrics = [
+              ("used_memory (MiB)", "used_memory", MiB, 1),
+              ("used_memory_rss (MiB)", "used_memory_rss", MiB, 1),
+              ("rss/used ratio", "rss_used_ratio", 1.0, 4),
+              ("smaps Rss (MiB)", "smaps_rss_kib", KiB_MiB, 1),
+              ("AnonHugePages (MiB)", "anon_huge_kib", KiB_MiB, 1),
+              ("Private_Dirty (MiB)", "private_dirty_kib", KiB_MiB, 1),
+          ]
+          print(f"## RSS digest ({backend})\n")
+          for label in sorted(groups):
+              rows = groups[label]
+              print(f"### {label} (n={len(rows)})\n")
+              print("| metric | n | min | p50 | mean | p95 | max |")
+              print("|---|---|---|---|---|---|---|")
+              for title, name, scale, dec in metrics:
+                  xs = [v * scale for v in col(rows, name)]
+                  if not xs:
+                      print(f"| {title} | 0 | | | | | |")
+                      continue
+                  f = f"{{:.{dec}f}}"
+                  cells = [f.format(x) for x in (min(xs), pct(xs, 0.5), st.mean(xs), pct(xs, 0.95), max(xs))]
+                  print(f"| {title} | {len(xs)} | " + " | ".join(cells) + " |")
+              print()
+          PY
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -292,6 +359,7 @@ jobs:
           path: |
             /tmp/dragonfly_logs
             /tmp/failed
+            /tmp/denyoom_rss.csv
           if-no-files-found: ignore
 
       - name: Copy binary on a self hosted runner

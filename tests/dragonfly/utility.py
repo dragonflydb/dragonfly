@@ -29,7 +29,7 @@ def tmp_file_name():
 
 
 def dump_proc_memory(pid, label=""):
-    """Snapshot process + system memory for `pid` and print it (issue #7471).
+    """Snapshot process + system memory for `pid`, print it, and return it (#7471).
 
     Dragonfly's RSS (used_memory_rss / the rss_oom_deny check) is just VmRSS
     from /proc/self/status. This decomposes that same residency:
@@ -38,29 +38,45 @@ def dump_proc_memory(pid, label=""):
       - /proc/meminfo            : system MemAvailable / AnonHugePages
         -> the only state two separate dragonfly processes can share
       - THP enabled setting
-    Output is line-prefixed for easy grep in the CI job log. No-op off Linux.
+    Output is line-prefixed for easy grep in the CI job log. Returns a dict of
+    the parsed kB values (smaps keys verbatim; meminfo keys prefixed
+    "meminfo_"), or None off Linux.
     """
     if sys.platform != "linux":
-        return
+        return None
 
     tag = f"[proc-mem {label}]" if label else "[proc-mem]"
+    parsed = {}
 
     def _emit(title, text):
         print(f"{tag} ===== {title} =====", flush=True)
         for line in text.splitlines():
             print(f"{tag} {line}", flush=True)
 
+    def _collect(text, prefix=""):
+        # Parse "Key:   NNN kB" lines into ints (kB), keyed by prefix + name.
+        for line in text.splitlines():
+            name, _, rest = line.partition(":")
+            parts = rest.split()
+            if parts and parts[0].isdigit():
+                parsed[prefix + name.strip()] = int(parts[0])
+
     try:
         with open(f"/proc/{pid}/smaps_rollup") as f:
-            _emit(f"/proc/{pid}/smaps_rollup", f.read().strip())
+            text = f.read().strip()
+        _emit(f"/proc/{pid}/smaps_rollup", text)
+        _collect(text)
     except OSError as e:
         print(f"{tag} could not read smaps_rollup: {e}", flush=True)
 
     wanted = ("MemTotal", "MemFree", "MemAvailable", "Cached", "AnonPages", "AnonHugePages")
     try:
         with open("/proc/meminfo") as f:
-            lines = [line.strip() for line in f if line.split(":")[0] in wanted]
-        _emit("/proc/meminfo", "\n".join(lines))
+            text = "\n".join(line.strip() for line in f if line.split(":")[0] in wanted)
+        _emit("/proc/meminfo", text)
+        # meminfo also carries AnonHugePages (system-wide); prefix so it does not
+        # clobber the per-process smaps AnonHugePages.
+        _collect(text, prefix="meminfo_")
     except OSError as e:
         print(f"{tag} could not read meminfo: {e}", flush=True)
 
@@ -69,6 +85,55 @@ def dump_proc_memory(pid, label=""):
             print(f"{tag} THP enabled: {f.read().strip()}", flush=True)
     except OSError:
         pass
+
+    return parsed
+
+
+# CSV header for the RSS sample collector below. Kept module-level so the
+# offline analysis (tools) and the writer agree on column order.
+RSS_SAMPLE_COLUMNS = (
+    "label",
+    "used_memory",
+    "used_memory_rss",
+    "rss_used_ratio",
+    "smaps_rss_kib",
+    "anon_huge_kib",
+    "private_dirty_kib",
+    "mem_available_kib",
+)
+
+
+def record_rss_sample(used_memory, used_memory_rss, proc_mem, label="", path=None):
+    """Append one CSV row of an RSS sample (issue #7471).
+
+    Writes to a file that survives across pytest invocations (each repeat is a
+    separate pytest process), so a large-N repeat run accumulates into a single
+    dataset for glog-vs-absl comparison. Path comes from `path`, else
+    $DENYOOM_RSS_CSV, else /tmp/denyoom_rss.csv. `proc_mem` is the dict returned
+    by dump_proc_memory (may be None). No-op off Linux.
+    """
+    if sys.platform != "linux":
+        return
+
+    path = path or os.environ.get("DENYOOM_RSS_CSV", "/tmp/denyoom_rss.csv")
+    proc_mem = proc_mem or {}
+    ratio = (used_memory_rss / used_memory) if used_memory else 0.0
+    row = [
+        label,
+        used_memory,
+        used_memory_rss,
+        f"{ratio:.4f}",
+        proc_mem.get("Rss", ""),
+        proc_mem.get("AnonHugePages", ""),
+        proc_mem.get("Private_Dirty", ""),
+        proc_mem.get("meminfo_MemAvailable", ""),
+    ]
+    write_header = not os.path.exists(path) or os.path.getsize(path) == 0
+    with open(path, "a") as f:
+        if write_header:
+            f.write(",".join(RSS_SAMPLE_COLUMNS) + "\n")
+        f.write(",".join(str(v) for v in row) + "\n")
+    print(f"[rss-sample] appended to {path}: ratio={ratio:.4f} rss={used_memory_rss}", flush=True)
 
 
 def chunked(n, iterable):
