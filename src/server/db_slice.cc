@@ -1130,25 +1130,24 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddNew(const Context& cntx, string_view
   return DbSlice::ItAndUpdater{.it = res.it, .post_updater = std::move(res.post_updater)};
 }
 
-int64_t DbSlice::ExpireParams::Cap(int64_t value, TimeUnit unit) {
-  return unit == TimeUnit::SEC ? min(value, kMaxExpireDeadlineSec)
-                               : min(value, kMaxExpireDeadlineMs);
+DbSlice::ExpireParams::ExpireParams(TimeUnit unit, int64_t value, uint64_t now_ms, bool persist)
+    : persist(persist) {
+  uint64_t ms_value = value;
+  constexpr auto kMaxV = std::numeric_limits<decltype(ms_timestamp)>::max();
+  if (unit == TimeUnit::SEC) {
+    ms_value = (ms_value > (kMaxV / 1000)) ? kMaxV : ms_value * 1000;
+  }
+  ms_timestamp = ms_value > (kMaxV - now_ms) ? kMaxV : ms_value + now_ms;
 }
 
-pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool cap) const {
-  if (persist)
-    return {0, 0};
-
-  // return a negative absolute time if we overflow.
-  if (unit == TimeUnit::SEC && value > INT64_MAX / 1000) {
-    return {0, -1};
+std::pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(int64_t now_ms, bool cap) const {
+  int64_t rel = (int64_t)ms_timestamp - now_ms;
+  int64_t abs = (int64_t)ms_timestamp;
+  if (cap && rel > kMaxExpireDeadlineMs) {
+    rel = kMaxExpireDeadlineMs;
+    abs = now_ms + kMaxExpireDeadlineMs;
   }
-
-  int64_t msec = (unit == TimeUnit::SEC) ? value * 1000 : value;
-  int64_t rel_msec = absolute ? msec - now_ms : msec;
-  if (cap)
-    rel_msec = Cap(rel_msec, TimeUnit::MSEC);
-  return make_pair(rel_msec, now_ms + rel_msec);
+  return {rel, abs};
 }
 
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
@@ -1162,7 +1161,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return kPersistValue;
   }
 
-  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms, false);
+  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms);
   if (abs_msec < 0 || rel_msec > kMaxExpireDeadlineMs) {
     return OpStatus::OUT_OF_RANGE;
   }

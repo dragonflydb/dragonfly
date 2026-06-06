@@ -1011,14 +1011,12 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
       if (int_arg <= 0)
         return facade::ErrorReply{InvalidExpireTime("set")};
 
-      DbSlice::ExpireParams expiry{
-          .value = int_arg,
-          .unit = *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC,
-          .absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT,
-      };
-
-      int64_t now_ms = GetCurrentTimeMs();
-      auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
+      uint64_t now_ms = GetCurrentTimeMs();
+      bool absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
+      TimeUnit unit =
+          *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC;
+      DbSlice::ExpireParams expiry{unit, int_arg, absolute ? 0 : now_ms};
+      auto [rel_ms, abs_ms] = expiry.Calculate(now_ms);
       if (abs_ms < 0)
         return facade::ErrorReply{InvalidExpireTime("set")};
 
@@ -1026,7 +1024,7 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
       if (rel_ms < 0)
         return NegativeExpire{};
 
-      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
+      sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
     } else if (parser.Check("_MCFLAGS")) {
       sparams.memcache_flags = parser.Next<uint32_t>();
     } else {
@@ -1137,14 +1135,10 @@ cmd::CmdR CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   if (exp_int < 1)
     co_return facade::ErrorReply{InvalidExpireTime(cmd_name)};
 
-  DbSlice::ExpireParams expiry{
-      .value = exp_int,
-      .unit = cmd_name.front() == 'P' ? TimeUnit::MSEC : TimeUnit::SEC,
-      .absolute = false,
-  };
-
-  int64_t now_ms = GetCurrentTimeMs();
-  auto [_, abs_ms] = expiry.Calculate(now_ms, false);
+  uint64_t now_ms = GetCurrentTimeMs();
+  TimeUnit unit = cmd_name.front() == 'P' ? TimeUnit::MSEC : TimeUnit::SEC;
+  DbSlice::ExpireParams expiry{unit, exp_int, now_ms};
+  auto [rel_ms, abs_ms] = expiry.Calculate(now_ms);
   if (abs_ms < 0)
     co_return facade::ErrorReply{InvalidExpireTime("set")};
 
@@ -1305,10 +1299,11 @@ cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
         co_return facade::ErrorReply{InvalidExpireTime("getex")};
       }
 
-      exp_params.absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
-      exp_params.value = int_arg;
-      exp_params.unit =
+      bool absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
+      TimeUnit unit =
           *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC;
+      exp_params = DbSlice::ExpireParams{unit, int_arg,
+                                         absolute ? 0ULL : GetCurrentTimeMs()};
       defined = true;
     } else if (parser.Check("PERSIST")) {
       exp_params.persist = true;
@@ -1337,7 +1332,7 @@ cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
       if (exp_params.persist) {
         RecordJournal(op_args, "PERSIST", {key});
       } else {
-        auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms, false);
+        auto [_, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms);
         auto abs_time_str = absl::StrCat(abs_time);
         RecordJournal(op_args, "PEXPIREAT", {key, abs_time_str});
       }
@@ -1514,8 +1509,7 @@ cmd::CmdR CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd::kAborted;
   }
   int64_t expire_ts = cmd_cntx->mc_command()->expire_ts;
-  DbSlice::ExpireParams expire_params{
-      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
+  DbSlice::ExpireParams expire_params{TimeUnit::SEC, expire_ts, 0, expire_ts == 0};
   return MGetGeneric(cmd_cntx, args, expire_params);
 }
 
