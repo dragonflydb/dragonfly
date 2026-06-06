@@ -8,6 +8,7 @@ import async_timeout
 import boto3
 import pytest
 import redis
+import random
 from async_timeout import timeout
 from azure.storage.blob import BlobServiceClient
 from pymemcache.client.base import Client as MCClient
@@ -980,10 +981,13 @@ async def test_rdb_load_with_tiering_6823(df_factory: DflyInstanceFactory):
     info = await tiered_client.info("memory")
     used_mem = info["used_memory"]
     obj_mem = info["object_used_memory"]
-    assert used_mem > 20_000_000 and used_mem < 300_000_000
-    assert obj_mem > 20_000_000 and obj_mem < 300_000_000
+    assert used_mem < 50_000_000
+    assert obj_mem < 10_000_000
 
     assert info["num_entries"] == num_keys
+    keys = await tiered_client.keys()
+    for key in random.sample(keys, k=10):
+        assert (len(await tiered_client.get(key))) == 8192
 
 
 @dfly_args({"serialization_max_chunk_size": 4096, "proactor_threads": 1})

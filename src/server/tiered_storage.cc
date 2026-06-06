@@ -49,8 +49,8 @@ ABSL_RETIRED_FLAG(unsigned, tiered_storage_write_depth, 200,
                   "Maximum number of concurrent stash requests issued by background offload. "
                   "Deprecated: prefer tiered_max_pending_stash_bytes.");
 
-// 1MB is a realistic upper limit for moden NVMe drives: in-flight = avg latency * throughput/s
-ABSL_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes, 1_MB,
+// 256kb is a realistic limit for moden NVMe drives: in-flight = avg latency * throughput/s
+ABSL_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes, 256_KB,
           "Maximum bytes in-flight to disk before rejecting new stashes or applying client "
           "backpressure. Allows batching writes to saturate disk I/O even with few clients");
 
