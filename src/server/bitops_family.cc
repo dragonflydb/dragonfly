@@ -981,22 +981,21 @@ const char kInvalidBitfieldTypeErr[] =
 
 const char kBitOffsetOutOfRange[] = "bit offset is not an integer or out of range";
 
-// Keeps the bit offset within the uint32 range used by the bit-index helpers and
-// bounds the touched byte by max_bulk_len, so a tiny request can neither wrap to a
-// different position nor allocate unboundedly.
-bool IsBitOffsetInRange(size_t bit_offset, size_t bit_size) {
-  if (bit_offset > std::numeric_limits<uint32_t>::max())
+// The last touched bit (bit_offset + bit_size - 1) must fit the uint32 the bit-index
+// helpers use and within max_bulk_len, so a tiny request can neither wrap to a
+// different position nor allocate unboundedly. Arranged so the addition can't overflow.
+bool IsBitOffsetInRange(uint64_t bit_offset, uint64_t bit_size) {
+  constexpr uint64_t kMaxBit = std::numeric_limits<uint32_t>::max();
+  if (bit_offset > kMaxBit - (bit_size - 1))
     return false;
-  const uint64_t last_bit = bit_offset + bit_size - 1;
-  return last_bit <= std::numeric_limits<uint32_t>::max() &&
-         last_bit / 8 < absl::GetFlag(FLAGS_max_bulk_len);
+  return (bit_offset + bit_size - 1) / 8 < absl::GetFlag(FLAGS_max_bulk_len);
 }
 
 nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser) {
   CommonAttributes parsed;
   using nonstd::make_unexpected;
 
-  auto [encoding, offset_str] = parser->Next<string_view, string_view>();
+  auto encoding = parser->Next<string_view>();
 
   if (encoding.empty()) {
     return make_unexpected(kSyntaxErr);
@@ -1033,16 +1032,13 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
   }
 
   bool is_proxy = false;
-  if (absl::StartsWith(offset_str, "#")) {
-    offset_str = offset_str.substr(1);
-    is_proxy = true;
-  }
-  if (!absl::SimpleAtoi(offset_str, &parsed.offset)) {
+  parsed.offset = parser->NextWithPrefix<size_t>("#", &is_proxy);
+  if (parser->HasError()) {
     return make_unexpected(kSyntaxErr);
   }
   if (is_proxy) {
-    // guard against overflow when scaling the field index to a bit offset
-    if (parsed.offset > std::numeric_limits<size_t>::max() / parsed.encoding_bit_size) {
+    // the scaled offset must stay within the addressable range, so bound the field index by it
+    if (parsed.offset > std::numeric_limits<uint32_t>::max() / parsed.encoding_bit_size) {
       return make_unexpected(kBitOffsetOutOfRange);
     }
     parsed.offset = parsed.offset * parsed.encoding_bit_size;
