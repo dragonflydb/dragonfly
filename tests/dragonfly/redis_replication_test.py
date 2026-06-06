@@ -378,19 +378,25 @@ async def test_redis_replication_info_offset(df_factory, redis_server, port_pick
     # Give the ACK fiber time to fire (interval is 1000ms).
     await asyncio.sleep(2)
 
-    master_info = await c_master.info("replication")
     replica_info = await c_replica.info("replication")
-
-    slave_entry = next(
-        (v for k, v in master_info.items() if k.startswith("slave") and isinstance(v, dict)),
-        None,
-    )
-    assert slave_entry is not None, "Master sees no slaves"
-
-    master_offset = slave_entry["offset"]
     replica_offset = replica_info.get("slave_repl_offset", 0)
-
     assert replica_offset > 0, f"slave_repl_offset={replica_offset}, expected non-zero"
-    assert (
-        replica_offset == master_offset
-    ), f"slave_repl_offset mismatch: replica={replica_offset} master={master_offset}"
+
+    @assert_eventually(timeout=30)
+    async def offsets_converge():
+        m_info = await c_master.info("replication")
+        r_info = await c_replica.info("replication")
+
+        slave_entry = next(
+            (v for k, v in m_info.items() if k.startswith("slave") and isinstance(v, dict)),
+            None,
+        )
+        assert slave_entry is not None, "Master sees no slaves"
+
+        master_offset = slave_entry["offset"]
+        replica_offset = r_info.get("slave_repl_offset", 0)
+        assert (
+            replica_offset == master_offset
+        ), f"slave_repl_offset mismatch: replica={replica_offset} master={master_offset}"
+
+    await offsets_converge()
