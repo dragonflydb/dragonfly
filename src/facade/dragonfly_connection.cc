@@ -2577,6 +2577,8 @@ bool Connection::ExecuteBatch() {
   };
 
   // Execute sequentially all parsed commands.
+  unsigned total = 0;
+  unsigned batch_total = 0;
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
     if (reply_builder_->GetError())
       return false;
@@ -2602,6 +2604,7 @@ bool Connection::ExecuteBatch() {
     // V2: Batch the head command's reply when more commands are queued behind it.
     // This prevents sync-only commands from triggering immediate flushes, keeping
     // sendmsg syscalls to a minimum. IoLoopV2's idle-await block handles the final flush.
+    batch_total += int(ioloop_v2_ && is_head && (cmd->next != nullptr));
     reply_builder_->SetBatchMode(ioloop_v2_ && is_head && (cmd->next != nullptr));
 
     auto dispatch_res = service_->DispatchCommandSimple(cmd, mode);
@@ -2633,8 +2636,9 @@ bool Connection::ExecuteBatch() {
       DCHECK(is_head);       // only head can execute sync
       cmd = advance_head();  // advance it
     }
+    ++total;
   }
-
+  // LOG(INFO) << "Executed batch of " << total << " commands, batch_total: " << batch_total;
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
 
@@ -3038,11 +3042,13 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
         // Flush replies deferred by ReplyBatch before sleeping - ensures the client
         // gets its response even when no more data arrives (single commands, end of pipeline).
-        reply_builder_->Flush();
-        if (auto err = reply_builder_->GetError(); err) {
-          return err;
-        }
+        if (parsed_cmd_q_len_ == 0) {
+          reply_builder_->Flush();
 
+          if (auto err = reply_builder_->GetError(); err) {
+            return err;
+          }
+        }
         io_event_.await(should_wake);
       }
     }

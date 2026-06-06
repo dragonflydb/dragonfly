@@ -172,6 +172,9 @@ void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
   if (vecs_.empty() && (expected_buffer_cap == 0))
     return;
 
+  // LOG(INFO) << "SinkReplyBuilder::Flush() " << vecs_.size() << " iovecs, " << total_size_
+  //           << " bytes";
+
   if (!vecs_.empty())
     Send();
 
