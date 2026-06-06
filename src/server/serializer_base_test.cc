@@ -135,13 +135,13 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
                                                      delay_driver_.Enqeue(delay), 0, 0);
       DelayedEntryHandler::delayed_entries_.emplace(bucket, std::move(de));
     } else {
+      std::lock_guard lk{stream_mu_};
       RecordSerialized(std::move(key));
     }
   }
 
   void RecordSerialized(std::string key) {
-    // Lock stream mutex and simulate occasional yields due to big value flushes
-    std::lock_guard lk{stream_mu_};
+    // Simulate occasional yields due to big value flushes
     while (absl::Bernoulli(bg_, 0.3)) {
       for (unsigned it = absl::Uniform(bg_, 1, 10); it > 0; it--)
         util::ThisFiber::Yield();
