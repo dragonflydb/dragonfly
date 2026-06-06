@@ -366,7 +366,8 @@ async def test_redis_replication_info_offset(df_factory, redis_server, port_pick
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
 
-    await c_master.execute_command("DEBUG", "POPULATE", 100)
+    for i in range(100):
+        await c_master.set(f"key:{i}", f"value:{i}")
 
     replica = df_factory.create(port=port_picker.get_available_port(), proactor_threads=2)
     replica.start()
