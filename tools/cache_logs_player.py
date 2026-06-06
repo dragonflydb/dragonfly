@@ -6,19 +6,21 @@ import asyncio
 from aiocsv import AsyncReader
 import aiofiles
 
-'''
+"""
 To install: pip install -r requirements.txt
-'''
+"""
 
 
 class Command:
     args = None
-    sync_id = 0 # Commands with the same sync_id will be executed synchrnously
+    sync_id = 0  # Commands with the same sync_id will be executed synchrnously
+
 
 class TwitterCacheTraceParser:
     """
     https://github.com/twitter/cache-trace
     """
+
     def parse(self, csv) -> Command:
         operation = csv[5]
         key = csv[1] + "a"
@@ -33,28 +35,29 @@ class TwitterCacheTraceParser:
 
         if operation == "get":
             cmd.args = ["GET", key]
-        elif operation == 'gets':
+        elif operation == "gets":
             cmd.args = ["GET", key]
-        elif operation == 'set':
+        elif operation == "set":
             cmd.args = ["SET", key, synthetic_value]
-        elif operation == 'add':
+        elif operation == "add":
             cmd.args = ["SET", key, synthetic_value]
-        elif operation == 'replace':
+        elif operation == "replace":
             cmd.args = ["SET", key, synthetic_value]
-        elif operation == 'cas':
+        elif operation == "cas":
             cmd.args = ["SET", key, synthetic_value]
-        elif operation == 'append':
+        elif operation == "append":
             cmd.args = ["APPEND", key, synthetic_value]
-        elif operation == 'prepend':
+        elif operation == "prepend":
             cmd.args = ["SET", key, synthetic_value]
-        elif operation == 'delete':
+        elif operation == "delete":
             cmd.args = ["DEL", key]
-        elif operation == 'incr':
+        elif operation == "incr":
             cmd.args = ["INCR", key]
-        elif operation == 'decr':
+        elif operation == "decr":
             cmd.args = ["DECR", key]
 
         return cmd
+
 
 class AsyncWorker:
     QUEUE_SIZE = 100000
@@ -69,7 +72,7 @@ class AsyncWorker:
 
     async def work(self) -> None:
         self.working = True
-        while self.working or not self.queue.empty() :
+        while self.working or not self.queue.empty():
             batch = await self.queue.get()
             await self.execute(batch)
 
@@ -85,11 +88,13 @@ class AsyncWorker:
     def stop(self) -> None:
         self.working = False
 
+
 class AsyncWorkerPool:
     """
     Mangaes worker pool to send commands in parallel
     Maintains synchronous order for commands with the same sync_id
     """
+
     def __init__(self, redis_client, num_workers) -> None:
         self.redis_client = redis_client
         self.num_workers = num_workers
@@ -126,7 +131,9 @@ class AsyncPlayer:
 
     def __init__(self, redis_uri, num_workers) -> None:
         self.redis_uri = redis_uri
-        self.redis_client = aioredis.from_url(f"redis://{self.redis_uri}", encoding="utf-8", decode_responses=True)
+        self.redis_client = aioredis.from_url(
+            f"redis://{self.redis_uri}", encoding="utf-8", decode_responses=True
+        )
         self.worker_pool = AsyncWorkerPool(self.redis_client, 100)
 
         self.batch_by_sync_id = {}
@@ -149,7 +156,7 @@ class AsyncPlayer:
                 batch = self.batch_by_sync_id[cmd.sync_id]
                 batch.append(cmd)
                 line_count = line_count + 1
-                if (line_count >= self.READ_BATCH_SIZE):
+                if line_count >= self.READ_BATCH_SIZE:
                     await self.dispatch_batches()
                     line_count = 0
             # handle the remaining lines
@@ -183,16 +190,29 @@ class AsyncPlayer:
         print("all done")
         await self.print_stats()
 
+
 def main():
-    parser = argparse.ArgumentParser(description='Cache Logs Player')
-    parser.add_argument('-u', '--uri', type=str, default='localhost:6379', help='Redis server URI')
-    parser.add_argument('-f', '--csv_file', type=str, default='/home/ari/Downloads/cluster017.csv', help='Redis server URI')
-    parser.add_argument('--num_workers', type=int, default=100, help='Maximum number of workers sending commands in parllel')
+    parser = argparse.ArgumentParser(description="Cache Logs Player")
+    parser.add_argument("-u", "--uri", type=str, default="localhost:6379", help="Redis server URI")
+    parser.add_argument(
+        "-f",
+        "--csv_file",
+        type=str,
+        default="/home/ari/Downloads/cluster017.csv",
+        help="Redis server URI",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=100,
+        help="Maximum number of workers sending commands in parllel",
+    )
 
     args = parser.parse_args()
 
     player = AsyncPlayer(redis_uri=args.uri, num_workers=args.num_workers)
     asyncio.run(player.play(args.csv_file, TwitterCacheTraceParser()))
+
 
 if __name__ == "__main__":
     main()

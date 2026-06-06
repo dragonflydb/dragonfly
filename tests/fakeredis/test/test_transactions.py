@@ -35,9 +35,7 @@ def test_watch_state_is_cleared_after_abort(r: redis.Redis):
     with pytest.raises(redis.exceptions.ExecAbortError):
         testtools.raw_command(r, "exec")
 
-    testtools.raw_command(
-        r, "set", "foo", "bar"
-    )  # Should NOT trigger the watch from earlier
+    testtools.raw_command(r, "set", "foo", "bar")  # Should NOT trigger the watch from earlier
     testtools.raw_command(r, "multi")
     testtools.raw_command(r, "set", "abc", "done")
     testtools.raw_command(r, "exec")

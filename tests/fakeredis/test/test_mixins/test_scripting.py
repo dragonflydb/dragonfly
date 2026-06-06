@@ -65,8 +65,7 @@ def test_script_help(r: redis.Redis):
         b"DEBUG (YES|SYNC|NO)",
         b"    Set the debug mode for subsequent scripts executed.",
         b"EXISTS <sha1> [<sha1> ...]",
-        b"    Return information about the existence of the scripts in the script cach"
-        b"e.",
+        b"    Return information about the existence of the scripts in the script cach" b"e.",
         b"FLUSH [ASYNC|SYNC]",
         b"    Flush the Lua scripts cache. Very dangerous on replicas.",
         b"    When called without the optional mode argument, the behavior is determin"
@@ -90,8 +89,7 @@ def test_script_help71(r: redis.Redis):
         b"DEBUG (YES|SYNC|NO)",
         b"    Set the debug mode for subsequent scripts executed.",
         b"EXISTS <sha1> [<sha1> ...]",
-        b"    Return information about the existence of the scripts in the script cach"
-        b"e.",
+        b"    Return information about the existence of the scripts in the script cach" b"e.",
         b"FLUSH [ASYNC|SYNC]",
         b"    Flush the Lua scripts cache. Very dangerous on replicas.",
         b"    When called without the optional mode argument, the behavior is determin"
@@ -111,9 +109,7 @@ def test_script_help71(r: redis.Redis):
 @pytest.mark.max_server("7.1")
 def test_eval_blpop(r: redis.Redis):
     r.rpush("foo", "bar")
-    with pytest.raises(
-        redis.ResponseError, match="This Redis command is not allowed from script"
-    ):
+    with pytest.raises(redis.ResponseError, match="This Redis command is not allowed from script"):
         r.eval('return redis.pcall("BLPOP", KEYS[1], 1)', 1, "foo")
 
 

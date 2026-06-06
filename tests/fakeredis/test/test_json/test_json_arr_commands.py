@@ -257,11 +257,7 @@ def test_arrindex(r: redis.Redis):
         ".",
         [
             {"arr": ["bazzz", "bar", 2, "baz", 2, "ba", "baz", 3]},
-            {
-                "nested1_found": {
-                    "arr": [None, "baz2", "buzz", 2, 1, 0, 1, "2", "baz", 2, 4, 5]
-                }
-            },
+            {"nested1_found": {"arr": [None, "baz2", "buzz", 2, 1, 0, 1, "2", "baz", 2, 4, 5]}},
             {"nested2_not_found": {"arr": ["baz2", 4, 6]}},
             {"nested3_scalar": {"arr": "3"}},
             [
@@ -349,11 +345,7 @@ def test_arrindex(r: redis.Redis):
         ".",
         [
             {"arr": ["bazzz", "None", 2, None, 2, "ba", "baz", 3]},
-            {
-                "nested1_found": {
-                    "arr": ["zaz", "baz2", "buzz", 2, 1, 0, 1, "2", None, 2, 4, 5]
-                }
-            },
+            {"nested1_found": {"arr": ["zaz", "baz2", "buzz", 2, 1, 0, 1, "2", None, 2, 4, 5]}},
             {"nested2_not_found": {"arr": ["None", 4, 6]}},
             {"nested3_scalar": {"arr": None}},
             [
@@ -559,18 +551,14 @@ def test_arrtrim(r: redis.Redis):
         {"a": [], "nested1": {"a": [None, "world"]}, "nested2": {"a": 31}}
     ]
 
-    r.json().set(
-        "doc1", "$", {"a": [], "nested1": {"a": [None, "world"]}, "nested2": {"a": 31}}
-    )
+    r.json().set("doc1", "$", {"a": [], "nested1": {"a": [None, "world"]}, "nested2": {"a": 31}})
     assert r.json().arrtrim("doc1", "$..a", "1", "1") == [0, 1, None]
     assert r.json().get("doc1", "$") == [
         {"a": [], "nested1": {"a": ["world"]}, "nested2": {"a": 31}}
     ]
     # Test single
     assert r.json().arrtrim("doc1", "$.nested1.a", 1, 0) == [0]
-    assert r.json().get("doc1", "$") == [
-        {"a": [], "nested1": {"a": []}, "nested2": {"a": 31}}
-    ]
+    assert r.json().get("doc1", "$") == [{"a": [], "nested1": {"a": []}, "nested2": {"a": 31}}]
 
     # Test missing key
     with pytest.raises(redis.ResponseError):
