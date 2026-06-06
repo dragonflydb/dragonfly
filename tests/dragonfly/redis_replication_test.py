@@ -355,3 +355,42 @@ async def test_disconnect_master(
     await check_data(seeder, replicas, c_replicas)
 
     await proxy.close(proxy_task)
+
+
+@pytest.mark.asyncio
+async def test_redis_replication_info_offset(df_factory, redis_server, port_picker):
+    """
+    Dragonfly replica of a Redis master must report a non-zero slave_repl_offset
+    in INFO REPLICATION that matches the offset the master tracks for that slave.
+    """
+    master = redis_server
+    c_master = aioredis.Redis(port=master.port)
+
+    await c_master.execute_command("DEBUG", "POPULATE", 100)
+
+    replica = df_factory.create(port=port_picker.get_available_port(), proactor_threads=2)
+    replica.start()
+    c_replica = replica.client()
+
+    await run_replication(c_replica, master.port)
+    await await_synced(c_master, c_replica)
+
+    # Give the ACK fiber time to fire (interval is 1000ms).
+    await asyncio.sleep(2)
+
+    master_info = await c_master.info("replication")
+    replica_info = await c_replica.info("replication")
+
+    slave_entry = next(
+        (v for k, v in master_info.items() if k.startswith("slave") and isinstance(v, dict)),
+        None,
+    )
+    assert slave_entry is not None, "Master sees no slaves"
+
+    master_offset = slave_entry["offset"]
+    replica_offset = replica_info.get("slave_repl_offset", 0)
+
+    assert replica_offset > 0, f"slave_repl_offset={replica_offset}, expected non-zero"
+    assert (
+        replica_offset == master_offset
+    ), f"slave_repl_offset mismatch: replica={replica_offset} master={master_offset}"
