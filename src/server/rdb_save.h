@@ -253,8 +253,9 @@ class RdbSerializer {
   enum class FlushState : uint8_t { kFlushMidEntry, kFlushEndEntry };
 
   // ConsumeFun is called when internal buffer exceeds flush_threshold.
-  // The callback receives the extracted data.
-  using ConsumeFun = std::function<void(std::string)>;
+  // The callback receives the extracted data and returns an error_code to signal
+  // the serializer to stop early (e.g. on cancellation).
+  using ConsumeFun = std::function<std::error_code(std::string)>;
 
   explicit RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun = {},
                          size_t flush_threshold = 0);
@@ -359,7 +360,7 @@ class RdbSerializer {
   std::error_code SaveStreamConsumers(bool save_active, streamCG* cg);
 
   // Might preempt
-  void PushToConsumerIfNeeded(FlushState flush_state);
+  std::error_code PushToConsumerIfNeeded(FlushState flush_state);
 
   static constexpr size_t kFilterChunkSize = 1ULL << 26;
   static constexpr size_t kMinStrSizeToCompress = 256;

@@ -20,8 +20,8 @@ class SetFamily {
  public:
   static void Register(CommandRegistry* registry);
 
-  static LoadBlobResult LoadIntSetBlob(std::string_view blob, PrimeValue* pv);
-  static LoadBlobResult LoadLPSetBlob(std::string_view blob, PrimeValue* pv);
+  static LoadBlobResult LoadIntSetBlob(std::string_view blob, bool deep, PrimeValue* pv);
+  static LoadBlobResult LoadLPSetBlob(std::string_view blob, bool deep, PrimeValue* pv);
 
   static uint32_t MaxIntsetEntries();
 

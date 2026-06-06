@@ -4239,7 +4239,6 @@ async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
     master = df_factory.create(
         proactor_threads=1,
         maxmemory="6G",
-        rdb_sbf_chunked="true",
     )
     replica = df_factory.create(
         proactor_threads=1,
@@ -4270,7 +4269,6 @@ async def test_sbf_chunked_replication_chunk_size(df_factory: DflyInstanceFactor
     master = df_factory.create(
         proactor_threads=1,
         maxmemory="4G",
-        rdb_sbf_chunked="true",
     )
     replica = df_factory.create(
         proactor_threads=1,

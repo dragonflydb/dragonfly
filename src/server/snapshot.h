@@ -106,7 +106,7 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   void HandleFlushData(std::string data);
 
   // Callback of RdbSerializer to push big value chunks
-  void ConsumeBigValueChunk(std::string data);
+  std::error_code ConsumeBigValueChunk(std::string data);
 
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized();

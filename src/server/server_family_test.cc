@@ -778,4 +778,19 @@ TEST_F(ServerFamilyTest, MemoryParserErrorHandling) {
   EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT", "not-a-float"}), ErrArg("not a valid float"));
 }
 
+TEST_F(ServerFamilyTest, InfoReplicationMemoryNoReplicas) {
+  auto resp = Run({"INFO", "MEMORY"});
+  auto info = resp.GetString();
+  EXPECT_THAT(info, HasSubstr("replication_streaming_buffer_bytes:0"));
+  EXPECT_THAT(info, HasSubstr("replication_full_sync_buffer_bytes:0"));
+}
+
+TEST_F(ServerFamilyTest, InfoReplicationMemoryOnlyInMemorySection) {
+  EXPECT_THAT(Run({"INFO", "REPLICATION"}).GetString(),
+              Not(HasSubstr("replication_streaming_buffer_bytes")));
+  EXPECT_THAT(Run({"INFO", "MEMORY"}).GetString(), HasSubstr("replication_streaming_buffer_bytes"));
+  EXPECT_THAT(Run({"INFO"}).GetString(), HasSubstr("replication_streaming_buffer_bytes"));
+  EXPECT_THAT(Run({"INFO", "ALL"}).GetString(), HasSubstr("replication_streaming_buffer_bytes"));
+}
+
 }  // namespace dfly

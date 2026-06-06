@@ -1088,7 +1088,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // InitThreadLocals might block
   pp_.AwaitFiberOnAll(
       [&](uint32_t index, ProactorBase* pb) { sharding::InitThreadLocals(shard_set->size()); });
-  Transaction::Init(shard_num);
 
   shard_set->pool()->AwaitBrief([](unsigned, auto*) {
     facade::Connection::UpdateFromFlags();
@@ -1131,8 +1130,6 @@ void Service::Shutdown() {
 
   delete channel_store;
   channel_store = nullptr;
-
-  Transaction::Shutdown();
 
   pp_.AwaitFiberOnAll([](ProactorBase* pb) {
 #if defined(DFLY_USE_SSL)

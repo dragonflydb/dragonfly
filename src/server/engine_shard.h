@@ -37,12 +37,6 @@ class EngineShard {
     uint64_t tx_optimistic_total = 0;
     uint64_t tx_ooo_total = 0;
 
-    // Number of ScheduleBatchInShard calls.
-    uint64_t tx_batch_schedule_calls_total = 0;
-
-    // Number of transactions scheduled via ScheduleBatchInShard.
-    uint64_t tx_batch_scheduled_items_total = 0;
-
     uint64_t total_heartbeat_expired_keys = 0;
     uint64_t total_heartbeat_expired_bytes = 0;
     uint64_t total_heartbeat_expired_calls = 0;
