@@ -221,26 +221,25 @@ class DbSlice {
   using DocDeletionCallback = std::function<void(std::string_view, const Context&, PrimeValue& pv)>;
 
   struct ExpireParams {
+    ExpireParams() = default;
+    // now_ms is zero for absolute timestamps and the reference time for relative expiration.
+    ExpireParams(TimeUnit unit, int64_t value, uint64_t now_ms = 0, bool persist = false);
+
     bool IsDefined() const {
-      return persist || value > INT64_MIN;
+      return persist || ms_timestamp > 0;
     }
 
-    static int64_t Cap(int64_t value, TimeUnit unit);
-
-    // Calculate relative and absolue timepoints.
-    std::pair<int64_t, int64_t> Calculate(uint64_t now_msec, bool cap) const;
-
-    // Return true if relative expiration is in the past
+    // Return true if expiration is in the past.
     bool IsExpired(uint64_t now_msec) const {
-      return Calculate(now_msec, false).first < 0;
+      return ms_timestamp < now_msec;
     }
 
-   public:
-    int64_t value = INT64_MIN;  // undefined
-    TimeUnit unit = TimeUnit::SEC;
+    // Calculate relative and absolute timepoints.
+    // If cap is true, the relative value is capped to kMaxExpireDeadlineMs.
+    std::pair<int64_t, int64_t> Calculate(int64_t now_ms, bool cap = false) const;
 
-    bool absolute = false;
-    bool persist = false;        // persist means remove all expiry
+    uint64_t ms_timestamp = 0;  // Undefined (0 means not set); always in milliseconds.
+    bool persist = false;       // persist means remove all expiry
     int32_t expire_options = 0;  // ExpireFlags
   };
 
