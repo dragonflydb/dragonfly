@@ -99,6 +99,11 @@ void ParsedCommand::SendLong(long val) {
   rb_->SendLong(val);
 }
 
+void ParsedCommand::Resolve(payload::Payload&& pl) {
+  DCHECK(is_deferred_reply_);
+  reply_ = std::move(pl);
+}
+
 bool ParsedCommand::CanReply() const {
   DCHECK(is_deferred_reply_);
   dfly::Overloaded ov{[](const payload::Payload& pl) { return pl.index() > 0 /* not monostate */; },

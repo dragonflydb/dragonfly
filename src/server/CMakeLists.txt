@@ -92,6 +92,7 @@ add_library(dragonfly_lib
             detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc
             version.cc container_utils.cc
             multi_command_squasher.cc
+            pipeline_squasher.cc
             ${DF_TIERING_SRCS}
             ${DF_CLUSTER_SRCS}
             acl/user.cc acl/user_registry.cc acl/acl_family.cc

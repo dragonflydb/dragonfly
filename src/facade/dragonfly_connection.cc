@@ -2584,8 +2584,18 @@ bool Connection::ExecuteBatch() {
   unsigned total = 0;
   unsigned batch_total = 0;
   uint64_t start = base::CycleClock::Now();
-  uint64_t epoch = fb2::FiberSwitchEpoch();
   VLOG(1) << "Starting ExecuteBatch with " << parsed_cmd_q_len_ << " commands in the pipeline.";
+
+  // V2 vectorized squash phase: group single-shard commands by shard and execute in parallel.
+  if (ioloop_v2_ && parsed_cmd_q_len_ > 1 && protocol_ == Protocol::REDIS) {
+    unsigned squashed =
+        service_->DispatchSquashedBatch(parsed_to_execute_, parsed_cmd_q_len_, cc_.get());
+    for (unsigned i = 0; i < squashed && parsed_to_execute_; i++) {
+      parsed_to_execute_ = parsed_to_execute_->next;
+    }
+    total += squashed;
+    conn_stats.pipeline_dispatch_commands += squashed;
+  }
 
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
     if (reply_builder_->GetError())
@@ -2647,9 +2657,6 @@ bool Connection::ExecuteBatch() {
     ++total;
   }
   uint64_t end = base::CycleClock::Now();
-  uint64_t epoch_end = fb2::FiberSwitchEpoch();
-  CHECK_EQ(epoch, epoch_end);
-
   conn_stats.pipeline_dispatch_usec += base::CycleClock::ToUsec(end - start);
 
   VLOG(1) << "END: " << total << " commands, batch_total: " << batch_total;
@@ -2923,7 +2930,7 @@ void Connection::ReadPendingInput() {
       break;
     }
 
-    // LOG(INFO) << "Read " << *res << " bytes from socket, io_buf_len: " << buf.size();
+    LOG(INFO) << "Read " << *res << " bytes from socket, io_buf_len: " << buf.size();
     last_interaction_ = time(nullptr);
     io_buf_.CommitWrite(*res);
     buf = io_buf_.AppendBuffer();
