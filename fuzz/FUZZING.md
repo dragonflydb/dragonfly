@@ -68,13 +68,22 @@ gets rejected by the parser), they:
 
 | Target | Mutator | Details |
 |--------|---------|---------|
-| `resp` | `resp_mutator.py` | 150+ Redis commands, wraps in MULTI/EXEC |
+| `resp` | `resp_mutator.py` | every registered command (~280), wraps in MULTI/EXEC |
 | `memcache` | `memcache_mutator.py` | Store/get/meta commands, noreply toggle |
 
-Mutators are loaded automatically by `run_fuzzer.sh`. AFL++'s built-in
-byte-level mutations also run alongside them (useful for parser edge cases).
+Mutators are loaded automatically by `run_fuzzer.sh`. CI runs with
+`AFL_CUSTOM_MUTATOR_ONLY=1` (set in the fuzzing action), so **only** the custom
+mutator runs — AFL++'s byte-level stages and the dictionary are disabled. Reasons:
 
-To use only the custom mutator: `export AFL_CUSTOM_MUTATOR_ONLY=1`.
+- Byte-level parser fuzzing was not finding anything (the protocol parsers are
+  well-covered), so it mostly wasted cycles.
+- It made the AFL++ queue explode: byte mutation produces arbitrary keys/values,
+  so almost every input looks like "new coverage", the queue grows without bound,
+  and afl-fuzz is eventually OOM-killed (exit 137). The custom mutator uses a
+  bounded command/key/value vocabulary, keeping the queue and memory bounded.
+
+Locally you can drop `AFL_CUSTOM_MUTATOR_ONLY` to also run the byte-level stages
+and the dictionary (`dict/*.dict`) for ad-hoc parser-edge-case exploration.
 
 ## Crash Replay
 
@@ -163,10 +172,10 @@ python3 replay_crash.py crashes 000000 127.0.0.1 11211
 
 | Target | Directory | Seeds | Coverage |
 |--------|-----------|-------|----------|
-| `resp` | `seeds/resp/` | 96 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops, CMS, Top-K, field expiry, hash expiry, SADDEX, GEORADIUS |
+| `resp` | `seeds/resp/` | 112 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops, CMS, Top-K, field expiry, hash expiry, SADDEX, GEORADIUS, hybrid vector search (FT.HYBRID), sharded pub/sub, bloom SCANDUMP |
 | `memcache` | `seeds/memcache/` | 15 | set/get, add/replace, append/prepend, cas, incr/decr, delete, multiget, gat, noreply, meta commands, flush, stats |
 
-To add a new RESP seed:
+To add a new RESP seed (lines MUST be CRLF-terminated — `\r\n`, not `\n`):
 ```
 *3
 $3
@@ -176,6 +185,10 @@ key
 $5
 value
 ```
+RESP framing requires `\r\n`. A seed written with bare `\n` is rejected by the
+server (`invalid multibulk length`) and cannot be parsed by the custom mutator,
+so its commands never execute. Bulk lengths must match the byte count of the
+value, and the array length (`*N`) must match the number of elements.
 
 To add a new memcache seed:
 ```

@@ -114,8 +114,11 @@ def load_example_seeds(seeds_dir):
     examples = []
     for path in sorted(glob.glob(os.path.join(seeds_dir, "*.resp"))):
         name = os.path.basename(path)
-        with open(path) as f:
-            examples.append({"name": name, "content": f.read()})
+        # Read in binary: RESP is binary-safe, so seeds may contain non-UTF8 bytes
+        # (e.g. a packed FLOAT32 vector in ft_hybrid.resp). Decode with replacement so
+        # this never raises UnicodeDecodeError — exact bytes don't matter for LLM context.
+        with open(path, "rb") as f:
+            examples.append({"name": name, "content": f.read().decode("utf-8", errors="replace")})
     return examples
 
 
