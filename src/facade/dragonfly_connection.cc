@@ -3049,9 +3049,13 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
         // Flush replies deferred by ReplyBatch before sleeping - ensures the client
         // gets its response even when no more data arrives (single commands, end of pipeline).
-        reply_builder_->Flush();
-        if (auto err = reply_builder_->GetError(); err) {
-          return err;
+        // Skip the flush when there are still commands in the queue - they will produce
+        // more replies shortly and we want to batch them all into a single sendmsg.
+        if (parsed_cmd_q_len_ == 0) {
+          reply_builder_->Flush();
+          if (auto err = reply_builder_->GetError(); err) {
+            return err;
+          }
         }
 
         io_event_.await(should_wake);
