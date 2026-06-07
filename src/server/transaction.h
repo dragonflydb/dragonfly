@@ -454,6 +454,7 @@ class Transaction {
     COORD_SCHED = 1,
     COORD_CONCLUDING = 1 << 1,  // Whether its the last hop of a transaction
     COORD_CANCELLED = 1 << 2,
+    COORD_HOP_DONE = 1 << 3,  // Whether at least one hop has completed
   };
 
   // Auxiliary structure used during initialization

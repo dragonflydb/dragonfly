@@ -10,7 +10,6 @@
 #include <deque>
 #include <memory>
 #include <optional>
-#include <stdexcept>
 #include <string_view>
 #include <utility>
 #include <variant>

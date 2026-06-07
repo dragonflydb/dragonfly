@@ -848,10 +848,6 @@ void Transaction::UnlockMulti(bool block) {
 
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   Execute(cb, true);
-
-  if (coordinator_state_ & COORD_CANCELLED)
-    throw facade::CancellationException{};
-
   return local_result_;
 }
 
@@ -932,6 +928,11 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
 
   if (coordinator_state_ & COORD_CONCLUDING)
     coordinator_state_ &= ~COORD_SCHED;
+  else
+    coordinator_state_ |= COORD_HOP_DONE;
+
+  if (coordinator_state_ & COORD_CANCELLED)
+    throw facade::CancellationException{};
 }
 
 // Runs in coordinator thread.
@@ -1004,6 +1005,10 @@ void Transaction::Conclude() {
 bool Transaction::CancelScheduledTx() {
   // For safety reasons we don't cancel those - requires more investigation
   if (IsGlobal())
+    return false;
+
+  // We can't interrupt mid-execution, so we check if any hop ran
+  if (coordinator_state_ & COORD_HOP_DONE)
     return false;
 
   DCHECK(coordinator_state_ & COORD_SCHED);
