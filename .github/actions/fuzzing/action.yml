@@ -132,7 +132,11 @@ runs:
         AFL_TESTCACHE_SIZE: ${{ inputs.mode == 'smoke' && '50' || '500' }}
         AFL_SKIP_CPUFREQ: 1
         AFL_FAST_CAL: ${{ inputs.mode == 'long' && '1' || '' }}
-        AFL_PERSISTENT_RECORD: 1000
+        # Custom mutator only — disable AFL's byte-level stages and the dictionary.
+        # Byte-level parser fuzzing was not finding anything, and it makes the queue
+        # explode (arbitrary keys/values => endless "new coverage"), which drives the
+        # afl-fuzz OOM (exit 137). The custom mutator uses a bounded command/key/value
+        # vocabulary, keeping the queue and memory bounded.
         AFL_CUSTOM_MUTATOR_ONLY: 1
         AFL_ENABLE_SAVE: ${{ inputs.mode == 'long' && '1' || '' }}
         FUZZ_FOCUS_COMMANDS: ${{ inputs.focus-commands }}

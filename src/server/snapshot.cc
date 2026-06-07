@@ -246,7 +246,7 @@ unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::buck
 void SliceSnapshot::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
   std::lock_guard lk{stream_mu_};
   auto res = serializer_->SaveEntry(tde.key, pv, tde.expire, tde.mc_flags, tde.dbid);
-  CHECK(res);
+  LOG_IF(ERROR, !res.has_value()) << "Serialization error: " << res.error();
 }
 
 void SliceSnapshot::SerializeEntry(BucketIdentity bucket, DbIndex db_indx, const PrimeKey& pk,
@@ -263,9 +263,10 @@ void SliceSnapshot::SerializeEntry(BucketIdentity bucket, DbIndex db_indx, const
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
     std::lock_guard lk{stream_mu_};
-    io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
-    CHECK(res);
-    ++type_freq_map_[*res];
+    if (auto res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx); res)
+      ++type_freq_map_[*res];
+    else
+      LOG(ERROR) << "Serialization error: " << res.error();
   }
 }
 
@@ -316,14 +317,16 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   VLOG(2) << "Pushed with Serialize() " << serialized;
 }
 
-void SliceSnapshot::ConsumeBigValueChunk(std::string data) {
-  if (!base_cntx_->IsRunning()) {
-    ThisFiber::Yield();
-    return;  // Short circuit flush on cancel or error to finish faster
-  }
+std::error_code SliceSnapshot::ConsumeBigValueChunk(std::string data) {
+  if (base_cntx_->IsError())
+    return base_cntx_->GetError();
+
+  if (base_cntx_->IsCancelled())
+    return std::make_error_code(std::errc::operation_canceled);
 
   HandleFlushData(std::move(data));
   ++ServerState::tlocal()->stats.big_value_preemptions;
+  return {};
 }
 
 size_t SliceSnapshot::FlushSerialized() {

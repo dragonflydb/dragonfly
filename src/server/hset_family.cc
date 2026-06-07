@@ -492,12 +492,30 @@ OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, CmdArgList fields) {
 }
 
 struct OpSetParams {
-  bool skip_if_exists = false;
+  enum class Mode : uint8_t {
+    kNormal,  // overwrite every field
+    kNX,      // set each field only if it does not already exist
+    kFNX,     // set all fields only if none of them exist
+    kFXX,     // set all fields only if all of them exist
+  };
+
+  // Selects how OpSet reports its result: Dragonfly returns the number of created fields, Redis
+  // returns 1 when the fields were applied. (Tiering support is gated by ttl, not by format.)
+  enum class Format : uint8_t { kDragonfly, kRedis };
+
   uint32_t ttl = UINT32_MAX;
   bool keepttl = false;
+  Mode mode = Mode::kNormal;
+  Format format = Format::kDragonfly;
 
   optional<util::fb2::Future<bool>>* backpressure = nullptr;
 };
+
+// OpSet's reported result: Dragonfly returns the number of newly created fields, Redis returns 1
+// (the fields were applied — any FNX/FXX condition has already been verified by the caller).
+uint32_t SetReply(const OpSetParams& op_sp, uint32_t created) {
+  return op_sp.format == OpSetParams::Format::kRedis ? 1u : created;
+}
 
 OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
                                     const OpSetParams& op_sp = OpSetParams{}) {
@@ -513,14 +531,18 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
 
+  // Only Dragonfly NX skips existing fields; FNX/FXX were already resolved by the caller, so every
+  // other mode overwrites.
+  const bool skip_existing = op_sp.mode == OpSetParams::Mode::kNX;
+
   // If the value is external, enqueue read and modify it there
   if (pv.IsExternal() && !pv.IsCool()) {
     if (op_sp.ttl != UINT32_MAX)
-      return OpStatus::CANCELLED;  // Don't support expiry with offloaded hashes
+      return OpStatus::CANCELLED;  // member TTLs can't be stored in an offloaded hash
 
     using D = tiering::ListpackMapDecoder;
     util::fb2::Future<OpResult<uint32_t>> fut;
-    auto read_cb = [fut, values, op_sp](io::Result<D*> res) mutable {
+    auto read_cb = [fut, values, op_sp, skip_existing](io::Result<D*> res) mutable {
       if (!res) {
         fut.Resolve({OpStatus::IO_ERROR});
         return;
@@ -529,9 +551,9 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
       auto& lw = *res.value()->GetMutable();
       uint32_t created = 0;
       for (size_t i = 0; i < values.size(); i += 2) {
-        created += lw.Insert(values[i], values[i + 1], op_sp.skip_if_exists);
+        created += lw.Insert(values[i], values[i + 1], skip_existing);
       }
-      fut.Resolve(created);
+      fut.Resolve(SetReply(op_sp, created));
     };
 
     op_args.shard->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
@@ -575,7 +597,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
     }
     detail::ListpackWrap lw{lp};
     for (size_t i = 0; i < values.size(); i += 2) {
-      created += lw.Insert(values[i], values[i + 1], op_sp.skip_if_exists);
+      created += lw.Insert(values[i], values[i + 1], skip_existing);
     }
     pv.SetRObjPtr(lw.GetPointer());
   } else {
@@ -587,7 +609,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
     for (size_t i = 0; i < values.size(); i += 2) {
       string_view field = values[i];
       string_view value = values[i + 1];
-      if (op_sp.skip_if_exists)
+      if (skip_existing)
         added = sm->AddOrSkip(field, value, op_sp.ttl);
       else
         added = sm->AddOrUpdate(field, value, op_sp.ttl, op_sp.keepttl);
@@ -602,7 +624,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
     StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, op_sp.backpressure);
   }
 
-  return CbVariant<uint32_t>{created};
+  return CbVariant<uint32_t>{SetReply(op_sp, created)};
 }
 
 void HGetGeneric(CmdArgList args, uint8_t getall_mask, CommandContext* cmd_cntx) {
@@ -655,61 +677,140 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   return res;
 }
 
-// HSETEX key [NX] [KEEPTTL] tll_sec field value field value ...
-void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+// Evaluates the FNX/FXX collective condition of HSETEX.
+//   fnx=true  (FNX): holds only if NONE of the fields exist.
+//   fnx=false (FXX): holds only if ALL of the fields exist.
+// A missing key counts as "no fields exist".
+OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key, CmdArgList fields,
+                                    bool fnx) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  if (!res) {
+    if (res.status() == OpStatus::KEY_NOTFOUND)
+      return fnx;  // none exist: FNX holds, FXX fails
+    return res.status();
+  }
 
-  string_view key = parser.Next();
-  OpSetParams op_sp;
+  const PrimeValue& pv = (*res)->second;
+  if (pv.IsExternal() && !pv.IsCool())
+    return OpStatus::CANCELLED;  // can't inspect offloaded hashes synchronously
 
-  const auto option_already_set = [&cmd_cntx] {
-    return cmd_cntx->SendError(WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
-  };
-
-  while (true) {
-    if (parser.Check("NX")) {
-      if (op_sp.skip_if_exists) {
-        return option_already_set();
-      }
-      op_sp.skip_if_exists = true;
-    } else if (parser.Check("KEEPTTL")) {
-      if (op_sp.keepttl) {
-        return option_already_set();
-      }
-      op_sp.keepttl = true;
-    } else {
+  HMapWrap hw{pv, op_args.db_cntx};
+  bool holds = true;
+  for (size_t i = 0; i < fields.size(); i += 2) {
+    // FNX requires every field to be absent; FXX requires every field to be present.
+    if (fnx == bool(hw.Find(fields[i]))) {
+      holds = false;
       break;
     }
   }
+  if (hw.Length() == 0)  // Find() may have lazily expired fields and emptied the hash.
+    DeleteHw(hw, op_args, key);
+  return holds;
+}
 
-  op_sp.ttl = parser.Next<uint32_t>();
-  auto* rb = cmd_cntx->rb();
-  if (parser.HasError()) {
-    return cmd_cntx->SendError(parser.TakeError().MakeReply());
-  }
+struct HSetExParams {
+  OpSetParams op_sp;
+  CmdArgList fields;  // field/value pairs; valid only when the parser has no error.
+};
 
-  constexpr uint32_t kMaxTtl = (1UL << 26);
-  if (op_sp.ttl == 0 || op_sp.ttl > kMaxTtl) {
-    return cmd_cntx->SendError(kInvalidIntErr);
-  }
+// Parses HSETEX arguments after the key, reporting any error into `parser` (surfaced by the caller
+// via RETURN_ON_PARSE_ERROR). `cmd_name` is only used to format error messages.
+//
+// Dragonfly format: HSETEX key [NX | FNX | FXX] [KEEPTTL] ttl_sec field value [field value ...]
+// Redis format:     HSETEX key [FNX | FXX] [EX sec | PX ms | EXAT ts-sec | PXAT ts-ms | KEEPTTL]
+//                          FIELDS numfields field value [field value ...]
+//
+// The syntaxes are told apart by the token following the leading flags: the Redis format has its
+// mandatory FIELDS keyword, the Dragonfly format a bare numeric ttl_sec. NX (per-field skip) and
+// the collective FNX/FXX condition are mutually exclusive; FNX/FXX behave identically in both
+// syntaxes (set all-or-nothing). Only the reported value differs (see OpSetParams::Format).
+HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
+  using Mode = OpSetParams::Mode;
+  using Format = OpSetParams::Format;
+  constexpr int kMaxTtl = 1 << 26;
 
-  CmdArgList fields = parser.Tail();
+  HSetExParams res;
+  OpSetParams& op_sp = res.op_sp;
 
-  if (fields.empty() || fields.size() % 2 != 0) {
-    return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
-  }
+  bool has_exp = false;
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
+  // EX/PX are relative (now = 0), EXAT/PXAT absolute (now = current time); ms = true for PX/PXAT.
+  // The value must land in (now, now + kMaxTtl] so the resulting ttl_sec stays in [1, kMaxTtl].
+  const int64_t now_ms = GetCurrentTimeMs();
+  const auto expiry = [&](int64_t now, bool ms) {
+    return [&, now, ms](CmdArgParser* p) {
+      has_exp = true;
+      int64_t span = ms ? int64_t(kMaxTtl) * 1000 : kMaxTtl;
+      int64_t v = p->Next<int64_t>();
+      if (v <= now || v > now + span)
+        p->ReportCustom(
+            InvalidExpireTime(cmd_name));  // no-op if Next already reported a non-integer
+      else
+        op_sp.ttl = ms ? (v - now + 999) / 1000 : v - now;
+    };
   };
 
-  auto delayed_result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  OpResult<uint32_t> result = Unwrap(std::move(delayed_result));
-  if (result) {
-    rb->SendLong(*result);
+  // A single Map makes the set modes (NX/FNX/FXX) mutually exclusive; OneOf also rejects a repeated
+  // flag. Parsing stops at the first non-flag token (ttl_sec or FIELDS).
+  parser->Apply(
+      OneOf(Map(&op_sp.mode, "NX", Mode::kNX, "FNX", Mode::kFNX, "FXX", Mode::kFXX)),
+      OneOf(Exist("KEEPTTL", &op_sp.keepttl)),
+      OneOf(Tag("EX", expiry(0, false)), Tag("PX", expiry(0, true)),
+            Tag("EXAT", expiry(now_ms / 1000, false)), Tag("PXAT", expiry(now_ms, true))));
+
+  // FIELDS marks the Redis format, a bare ttl_sec the Dragonfly format. The parser short-circuits
+  // once errored, so the steps below need no per-step checks.
+  if (parser->Check("FIELDS")) {
+    op_sp.format = Format::kRedis;
+    uint32_t numfields = parser->Next<uint32_t>();
+    if (op_sp.mode == Mode::kNX || (op_sp.keepttl && has_exp))
+      parser->Report(CmdArgParser::CUSTOM_ERROR);  // NX is Dragonfly-only; one expiry option max
+
+    res.fields = parser->Tail();
+    if (numfields == 0 || res.fields.size() != size_t(numfields) * 2)
+      parser->ReportCustom("The `numfields` parameter must match the number of arguments");
+  } else if (has_exp) {
+    // EX/PX/EXAT/PXAT belong to the Redis form; without FIELDS the command is malformed.
+    parser->Report(CmdArgParser::CUSTOM_ERROR);
   } else {
-    cmd_cntx->SendError(result.status());
+    op_sp.format = Format::kDragonfly;
+    op_sp.ttl = parser->Next<FInt<1, kMaxTtl>>();
+
+    res.fields = parser->Tail();
+    if (res.fields.empty() || res.fields.size() % 2 != 0)
+      parser->ReportCustom(WrongNumArgsError(cmd_name));
   }
+  return res;
+}
+
+void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+  HSetExParams parsed = ParseHSetEx(&parser, cmd_cntx->cid()->name());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  // Evaluate the FNX/FXX condition (if any), then let OpSet set the fields and report the
+  // format-appropriate value (created count for Dragonfly, 1 for Redis).
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CbVariant<uint32_t>> {
+    using Mode = OpSetParams::Mode;
+    auto op_args = t->GetOpArgs(shard);
+    const OpSetParams& op_sp = parsed.op_sp;
+    if (op_sp.mode == Mode::kFNX || op_sp.mode == Mode::kFXX) {
+      OpResult<bool> cond =
+          CheckHSetExCondition(op_args, key, parsed.fields, op_sp.mode == Mode::kFNX);
+      RETURN_ON_BAD_STATUS(cond);
+      if (!*cond)
+        return CbVariant<uint32_t>{uint32_t(0)};  // condition not met -> nothing set
+    }
+    return OpSet(op_args, key, parsed.fields, op_sp);
+  };
+
+  OpResult<uint32_t> result = Unwrap(cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb)));
+  if (result)
+    cmd_cntx->rb()->SendLong(*result);
+  else
+    cmd_cntx->SendError(result.status());
 }
 
 struct HSetReplies {
@@ -1070,7 +1171,8 @@ void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args.subspan(1), OpSetParams{.skip_if_exists = true});
+    return OpSet(t->GetOpArgs(shard), key, args.subspan(1),
+                 OpSetParams{.mode = OpSetParams::Mode::kNX});
   };
   HSetReplies{cmd_cntx}.Send(Unwrap(cmd_cntx->tx()->ScheduleSingleHopT(cb)));
 }
@@ -1274,8 +1376,9 @@ auto HSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv) -> LoadB
   return LoadBlobResult::kSuccess;
 }
 
-auto HSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
-  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+auto HSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* pv)
+    -> LoadBlobResult {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), deep ? 1 : 0, nullptr, nullptr)) {
     LOG(ERROR) << "Hash listpack integrity check failed.";
     return LoadBlobResult::kCorrupted;
   }

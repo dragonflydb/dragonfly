@@ -231,7 +231,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
-  static_assert(sizeof(Stats) == 152);
+  static_assert(sizeof(Stats) == 136);
 
 #define ADD(x) x += o.x
 
@@ -244,8 +244,6 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
   ADD(poll_execution_total);
   ADD(tx_ooo_total);
   ADD(tx_optimistic_total);
-  ADD(tx_batch_schedule_calls_total);
-  ADD(tx_batch_scheduled_items_total);
   ADD(total_heartbeat_expired_keys);
   ADD(total_heartbeat_expired_bytes);
   ADD(total_heartbeat_expired_calls);

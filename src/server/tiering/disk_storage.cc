@@ -190,9 +190,11 @@ void DiskStorage::Stash(DiskSegment segment, RegisteredSlice buf, StashCb cb) {
     }
     ReturnBuf(buf);
     pending_ops_--;
+    pending_stash_bytes_ -= segment.length;
   };
 
   pending_ops_++;
+  pending_stash_bytes_ += segment.length;
   size_t offset = segment.offset;
   if (buf.buf_idx != kHeapSliceId)
     backing_file_->WriteFixedAsync(buf.bytes, offset, buf.buf_idx, std::move(io_cb));
@@ -211,7 +213,7 @@ void DiskStorage::Stash(DiskSegment segment, RegisteredSlice buf, StashCb cb) {
 DiskStorage::Stats DiskStorage::GetStats() const {
   return {
       alloc_.allocated_bytes(),       alloc_.capacity(), heap_buf_alloc_cnt_, reg_buf_alloc_cnt_,
-      static_cast<size_t>(max_size_), pending_ops_};
+      static_cast<size_t>(max_size_), pending_ops_,      pending_stash_bytes_};
 }
 
 error_code DiskStorage::RequestGrow(off_t grow_size) {
