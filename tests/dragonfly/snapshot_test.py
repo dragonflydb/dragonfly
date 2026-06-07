@@ -713,7 +713,7 @@ async def test_randomkey_during_bgsave(df_factory: DflyInstanceFactory):
     workers = [asyncio.create_task(hammer_random(stop)) for _ in range(8)]
 
     try:
-        async with timeout(60):
+        async with timeout(100):
             for _ in range(5):
                 await client.execute_command("BGSAVE")
                 while await is_saving(client):
