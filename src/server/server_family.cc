@@ -3283,7 +3283,10 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, bool collect_replication_memory)
     result.interned_string_stats = GetInternedStringStats();
   };  // cb
 
-  service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
+  // AwaitBrief (not AwaitFiberOnAll): the callback only reads thread-local/atomic state into
+  // its own partials slot and never yields, so it can run directly in each IO loop, avoiding
+  // a per-proactor fiber spawn on every INFO call.
+  service_.proactor_pool().AwaitBrief(std::move(cb));
 
   // Fold per-thread partials into the aggregate result on this thread.
   for (const Metrics& partial : partials)
