@@ -40,7 +40,7 @@ auto SingleHopT(const auto& f) -> SingleHopSentinelT<decltype(f(nullptr, nullptr
 // Avoids coroutine suspending in synchronous mode, doing a fiber suspend instead.
 // In asynchronous mode it registers the promise / blocker on the context.
 struct SingleHopWaiter {
-  bool await_ready() noexcept;
+  bool await_ready();
   void await_suspend(std::coroutine_handle<> handle) const noexcept;
   facade::OpStatus await_resume() const noexcept;
 
@@ -113,8 +113,7 @@ struct CmdR::Coro {
   CmdR get_return_object() {
     return {};
   }
-  void unhandled_exception() noexcept {
-  }
+  void unhandled_exception() const noexcept;
   std::suspend_never initial_suspend() noexcept {
     return {};
   }
