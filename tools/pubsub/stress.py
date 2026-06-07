@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Pub/sub stress test.
 
@@ -5,8 +7,37 @@ Phase 1 (--subscribe): ramp up --sub-max-channels additional subscriptions at --
                        (on top of any --pre-subscribe baseline).
                        Subscriptions remain open as background load during the publish phase.
 Phase 2 (--publish):  create --pub-sub-connections dedicated subscriber connections,
-                      publish at --pub-rate msgs/sec across --pub-workers publisher connections,
-                      and measure both publish RTT and end-to-end delivery latency per second.
+                      publish at --pub-rate pipelines/sec across --pub-workers publisher
+                      connections, and measure both publish RTT and end-to-end delivery latency
+                      per second.
+
+Quick tutorial:
+    # Start Dragonfly/Redis separately, then run against localhost:6379.
+    python3 tools/pubsub/stress.py --publish
+
+    # Publish 20k messages/sec for 60 seconds to 1k one-channel subscribers.
+    python3 tools/pubsub/stress.py --publish --pub-rate 20000 --pub-duration 60 \
+        --pub-workers 8 --pub-sub-connections 1000
+
+    # Send three 200k-command PUBLISH pipeline per second to K one-subscriber channels.
+    python3 tools/pubsub/stress.py --publish --pub-rate 3 --pub-duration 5 \
+        --pub-sub-connections K --pub-pipeline-depth 200000
+
+    # First add 100k long-lived background subscriptions, then run the publish phase.
+    python3 tools/pubsub/stress.py --subscribe --sub-max-channels 100000 --sub-channels 1000 \
+        --sub-rate 10 --publish --pub-rate 5000 --pub-duration 30
+
+    # Use a URI, including rediss:// and password support.
+    python3 tools/pubsub/stress.py --uri redis://localhost:6379 --publish
+
+What this tool can and cannot measure:
+    - It can ramp subscription count and report per-second publish RTT and delivery latency.
+    - --pub-rate is pipelines/second. Overall PUBLISH commands/second is
+        --pub-rate * --pub-pipeline-depth.
+    - With --pub-pipeline-depth > 1, publish latency is measured after the pipeline bytes are
+        flushed to the socket until all PUBLISH replies are read.
+    - --pub-sub-connections controls the number of publish-phase channels and subscriber
+    connections.
 """
 
 import argparse
@@ -81,19 +112,21 @@ def publish_phase(
     pub_duration: int,
     pub_workers: int = 1,
     pub_sub_connections: int = 128,
+    pub_pipeline_depth: int = 1,
 ):
     """Publish-latency benchmark with dedicated subscriber connections.
 
-    Creates pub_sub_connections subscriber connections (one channel each) that are
-    separate from the ramp-up subscriptions, so the two phases do not share a socket.
-    pub_workers publisher connections share the total pub_rate evenly.
+    Creates pub_sub_connections subscriber connections (one channel each) that are separate from
+    the ramp-up subscriptions, so the two phases do not share a socket.
+    pub_workers publisher connections share the total pub_rate pipelines/second evenly.
 
     Two latency columns are reported each second:
-      Publish   — time for r.publish() to return (round-trip to server)
+      Publish   — time for r.publish() to return, or for pipelined publishes: time after the
+                  pipeline bytes are flushed until all PUBLISH replies are read.
       Delivery  — time from publish() call to message receipt in the listener thread
     """
-    # Each subscriber connection owns exactly one channel so listener threads
-    # can call get_message() independently without sharing a socket.
+    # Each subscriber connection owns exactly one channel so listener threads can call
+    # get_message() independently without sharing a socket.
     channels = [f"publish/channel/{i}" for i in range(pub_sub_connections)]
 
     latencies: list[float] = []  # delivery latencies collected by listener threads
@@ -101,24 +134,39 @@ def publish_phase(
     total_received = [0]
     lock = threading.Lock()  # guards latencies, pub_latencies, total_received
     stop_event = threading.Event()
+    errors: queue.Queue[str] = queue.Queue()
+
+    def report_error(context: str, err: Exception):
+        if not stop_event.is_set():
+            errors.put(f"{context}: {err}")
+        stop_event.set()
+
+    def get_error() -> str | None:
+        try:
+            return errors.get_nowait()
+        except queue.Empty:
+            return None
 
     def make_listener(ps: redis.client.PubSub):
         """Return a listener function bound to a single pubsub handle."""
 
         def _listener():
-            while not stop_event.is_set():
-                msg = ps.get_message(ignore_subscribe_messages=True, timeout=0.1)
-                if msg and msg["type"] == "message":
-                    try:
-                        data = msg["data"]
-                        if isinstance(data, (bytes, bytearray)):
-                            data = data.decode()
-                        # Payload is the perf_counter timestamp set by the publisher.
-                        with lock:
-                            latencies.append((time.perf_counter() - float(data)) * 1000)
-                            total_received[0] += 1
-                    except (ValueError, TypeError):
-                        pass
+            try:
+                while not stop_event.is_set():
+                    msg = ps.get_message(ignore_subscribe_messages=True, timeout=0.1)
+                    if msg and msg["type"] == "message":
+                        try:
+                            data = msg["data"]
+                            if isinstance(data, (bytes, bytearray)):
+                                data = data.decode()
+                            # Payload is the perf_counter timestamp set by the publisher.
+                            with lock:
+                                latencies.append((time.perf_counter() - float(data)) * 1000)
+                                total_received[0] += 1
+                        except (ValueError, TypeError):
+                            pass
+            except redis.exceptions.RedisError as err:
+                report_error("subscriber connection error", err)
 
         return _listener
 
@@ -132,12 +180,20 @@ def publish_phase(
         f" publish/channel/0..{pub_sub_connections - 1}...",
         flush=True,
     )
-    for i, ps in enumerate(sub_pubsubs):
-        ps.subscribe(channels[i])
-        while True:
-            msg = ps.get_message(ignore_subscribe_messages=False, timeout=5.0)
-            if msg and msg["type"] == "subscribe":
-                break
+    try:
+        for i, ps in enumerate(sub_pubsubs):
+            ps.subscribe(channels[i])
+            while True:
+                msg = ps.get_message(ignore_subscribe_messages=False, timeout=5.0)
+                if msg and msg["type"] == "subscribe":
+                    break
+    except redis.exceptions.RedisError as err:
+        for ps in sub_pubsubs:
+            ps.close()
+        for r in sub_connections:
+            r.close()
+        print(f"[ERROR] Cannot subscribe publish clients — {err}")
+        sys.exit(1)
 
     listener_threads = [
         threading.Thread(target=make_listener(ps), daemon=True) for ps in sub_pubsubs
@@ -148,11 +204,14 @@ def publish_phase(
     # Distribute pub_rate evenly across workers; actual rate may differ slightly
     # from the requested rate when pub_rate is not divisible by pub_workers.
     rate_per_worker = max(1, pub_rate // pub_workers)
-    actual_rate = rate_per_worker * pub_workers
+    actual_pipeline_rate = rate_per_worker * pub_workers
+    actual_publish_rate = actual_pipeline_rate * pub_pipeline_depth
 
     print(
-        f"Publishing to {pub_sub_connections} channels at {actual_rate}/sec "
-        f"({pub_workers} worker(s) × {rate_per_worker}/sec) for {pub_duration}s\n"
+        f"Publishing to {pub_sub_connections} channels at {actual_pipeline_rate} "
+        f"pipeline(s)/sec ({pub_workers} worker(s) × {rate_per_worker}/sec) "
+        f"for {pub_duration}s, pipeline depth {pub_pipeline_depth}, "
+        f"PUBLISH rate {actual_publish_rate}/sec\n"
     )
     pub_hdr = "--- Publish ---".rjust(23).ljust(26)
     del_hdr = "--- Delivery ---".rjust(23).ljust(26)
@@ -168,27 +227,71 @@ def publish_phase(
     counters = [0] * pub_workers
 
     def publisher(worker_id: int, r: redis.Redis):
-        """Publish rate_per_worker messages per second for pub_duration seconds.
+        """Publish rate_per_worker pipelines per second for pub_duration seconds.
         Embeds a perf_counter timestamp as the payload so listeners can compute
         end-to-end delivery latency.
         """
         interval = 1.0 / rate_per_worker
-        for _ in range(pub_duration):
-            second_start = time.perf_counter()
-            for i in range(rate_per_worker):
-                target_t = second_start + i * interval
-                delay = target_t - time.perf_counter()
-                if delay > 0:
-                    time.sleep(delay)
-                t0 = time.perf_counter()
-                r.publish(random.choice(channels), str(t0))
-                with lock:
-                    pub_latencies.append((time.perf_counter() - t0) * 1000)
-                counters[worker_id] += 1
-            # Sleep out the remainder of the second so the next iteration starts cleanly.
-            elapsed = time.perf_counter() - second_start
-            if elapsed < 1.0:
-                time.sleep(1.0 - elapsed)
+
+        conn = None
+        try:
+            if pub_pipeline_depth <= 1:
+                for _ in range(pub_duration):
+                    second_start = time.perf_counter()
+                    for i in range(rate_per_worker):
+                        target_t = second_start + i * interval
+                        delay = target_t - time.perf_counter()
+                        if delay > 0:
+                            time.sleep(delay)
+                        t0 = time.perf_counter()
+                        r.publish(random.choice(channels), str(t0))
+                        with lock:
+                            pub_latencies.append((time.perf_counter() - t0) * 1000)
+                        counters[worker_id] += 1
+                    # Sleep out the remainder of the second so the next iteration starts cleanly.
+                    elapsed = time.perf_counter() - second_start
+                    if elapsed < 1.0:
+                        time.sleep(1.0 - elapsed)
+                return
+
+            pool = r.connection_pool
+            conn = pool.get_connection()
+
+            conn.connect()
+            for _ in range(pub_duration):
+                second_start = time.perf_counter()
+                pipelines_this_second = 0
+                while pipelines_this_second < rate_per_worker:
+                    target_t = second_start + pipelines_this_second * interval
+                    delay = target_t - time.perf_counter()
+                    if delay > 0:
+                        time.sleep(delay)
+
+                    batch_size = pub_pipeline_depth
+                    t0 = time.perf_counter()
+                    commands = [
+                        ("PUBLISH", random.choice(channels), str(t0)) for _ in range(batch_size)
+                    ]
+
+                    conn.send_packed_command(conn.pack_commands(commands))
+                    flushed_at = time.perf_counter()
+                    for _ in range(batch_size):
+                        conn.read_response()
+
+                    with lock:
+                        pub_latencies.append((time.perf_counter() - flushed_at) * 1000)
+                    counters[worker_id] += batch_size
+                    pipelines_this_second += 1
+
+                # Sleep out the remainder of the second so the next iteration starts cleanly.
+                elapsed = time.perf_counter() - second_start
+                if elapsed < 1.0:
+                    time.sleep(1.0 - elapsed)
+        except redis.exceptions.RedisError as err:
+            report_error(f"publisher {worker_id} connection error", err)
+        finally:
+            if conn is not None:
+                r.connection_pool.release(conn)
 
     pub_connections = [redis.Redis(**redis_kwargs) for _ in range(pub_workers)]
     worker_threads = [
@@ -201,15 +304,11 @@ def publish_phase(
     # Reporting loop: wake once per second and snapshot the shared counters.
     prev_received = 0
     prev_published = 0
-    next_tick = time.perf_counter() + 1.0
-    for sec in range(pub_duration):
-        delay = next_tick - time.perf_counter()
-        if delay > 0:
-            time.sleep(delay)
-        next_tick += 1.0
 
+    def print_snapshot(label: str):
+        nonlocal prev_received, prev_published
         total_published = sum(counters)
-        published_this_sec = total_published - prev_published
+        published_delta = total_published - prev_published
         prev_published = total_published
 
         with lock:
@@ -217,7 +316,7 @@ def publish_phase(
             latencies.clear()
             pub_snap = pub_latencies[:]
             pub_latencies.clear()
-            received_this_sec = total_received[0] - prev_received
+            received_delta = total_received[0] - prev_received
             prev_received = total_received[0]
 
         pub_avg = sum(pub_snap) / len(pub_snap) if pub_snap else 0.0
@@ -225,14 +324,44 @@ def publish_phase(
         del_avg = sum(del_snap) / len(del_snap) if del_snap else 0.0
         del_max = max(del_snap) if del_snap else 0.0
         print(
-            f"{sec + 1:>7}  {published_this_sec:>10,}  {received_this_sec:>10,}"
+            f"{label:>7}  {published_delta:>10,}  {received_delta:>10,}"
             f"  {pub_avg:>12.3f}  {pub_max:>12.3f}"
             f"  {del_avg:>12.3f}  {del_max:>12.3f}",
             flush=True,
         )
 
+    next_tick = time.perf_counter() + 1.0
+    first_error = None
+    for sec in range(pub_duration):
+        delay = next_tick - time.perf_counter()
+        if delay > 0:
+            time.sleep(delay)
+        next_tick += 1.0
+        print_snapshot(str(sec + 1))
+        first_error = get_error()
+        if first_error is not None:
+            break
+
     for t in worker_threads:
         t.join()
+
+    # A large pipeline may complete after the last per-second tick. Give subscriber listener
+    # threads a short chance to drain their sockets, then print the remaining measurements.
+    delivery_deadline = time.perf_counter() + 5.0
+    while time.perf_counter() < delivery_deadline:
+        first_error = first_error or get_error()
+        if first_error is not None:
+            break
+        total_published = sum(counters)
+        with lock:
+            done = total_received[0] >= total_published
+        if done:
+            break
+        time.sleep(0.05)
+
+    if sum(counters) != prev_published or total_received[0] != prev_received:
+        print_snapshot("final")
+
     for r in pub_connections:
         r.close()
 
@@ -243,6 +372,10 @@ def publish_phase(
         ps.close()
     for r in sub_connections:
         r.close()
+
+    if first_error is not None:
+        print(f"[ERROR] {first_error}")
+        sys.exit(1)
 
 
 def run(
@@ -258,6 +391,7 @@ def run(
     pub_duration: int,
     pub_workers: int = 1,
     pub_sub_connections: int = 128,
+    pub_pipeline_depth: int = 1,
     password: str | None = None,
     ssl: bool = False,
 ):
@@ -349,6 +483,7 @@ def run(
             pub_duration=pub_duration,
             pub_workers=pub_workers,
             pub_sub_connections=pub_sub_connections,
+            pub_pipeline_depth=pub_pipeline_depth,
         )
 
     if worker_thread is not None:
@@ -376,7 +511,12 @@ if __name__ == "__main__":
     parser.add_argument("--sub-max-channels", default=150_000, type=int)
     # Publish phase
     parser.add_argument("--publish", action="store_true", help="Run publish phase")
-    parser.add_argument("--pub-rate", default=100, type=int, help="Total publishes per second")
+    parser.add_argument(
+        "--pub-rate",
+        default=100,
+        type=int,
+        help="Total publish pipelines per second",
+    )
     parser.add_argument(
         "--pub-duration", default=60, type=int, help="Publish phase duration in seconds"
     )
@@ -387,7 +527,13 @@ if __name__ == "__main__":
         "--pub-sub-connections",
         default=128,
         type=int,
-        help="Number of subscriber connections in publish phase",
+        help="Number of channels in publish phase",
+    )
+    parser.add_argument(
+        "--pub-pipeline-depth",
+        default=1,
+        type=int,
+        help="Number of PUBLISH commands to send per pipeline batch",
     )
     args = parser.parse_args()
 
@@ -400,6 +546,8 @@ if __name__ == "__main__":
         errors.append("--pub-workers must be >= 1")
     if args.pub_sub_connections < 1:
         errors.append("--pub-sub-connections must be >= 1")
+    if args.pub_pipeline_depth < 1:
+        errors.append("--pub-pipeline-depth must be >= 1")
     if errors:
         parser.error("\n  ".join(errors))
 
@@ -421,6 +569,7 @@ if __name__ == "__main__":
         pub_duration=args.pub_duration,
         pub_workers=args.pub_workers,
         pub_sub_connections=args.pub_sub_connections,
+        pub_pipeline_depth=args.pub_pipeline_depth,
         password=password,
         ssl=ssl,
     )
