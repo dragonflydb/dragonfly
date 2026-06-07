@@ -147,8 +147,8 @@ class CommandId : public facade::CommandId {
     return can_be_monitored_;
   }
 
-  int8_t interleaved_step() const {
-    return interleave_step_;
+  uint8_t interleaved_step() const {
+    return interleaved_step_;
   }
 
   template <typename RT> CommandId&& SetAsyncHandler(RT f(CmdArgList, CommandContext*)) && {
@@ -215,7 +215,7 @@ class CommandId : public facade::CommandId {
   bool is_alias_{false};
   bool can_be_monitored_{true};
   bool support_async_{false};
-  int8_t interleave_step_{0};
+  uint8_t interleaved_step_{0};
 
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler handler_;
