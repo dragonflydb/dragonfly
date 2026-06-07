@@ -3331,7 +3331,7 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory, tagge
         await asyncio.sleep(random.random() + 0.5)
 
     # Wait for it to finish finally
-    async with async_timeout.timeout(90):
+    async with async_timeout.timeout(60):
         await wait_for_replicas_state(c_replica)
 
     done = True
@@ -4260,7 +4260,6 @@ async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
     master = df_factory.create(
         proactor_threads=1,
         maxmemory="6G",
-        rdb_sbf_chunked="true",
     )
     replica = df_factory.create(
         proactor_threads=1,
@@ -4291,7 +4290,6 @@ async def test_sbf_chunked_replication_chunk_size(df_factory: DflyInstanceFactor
     master = df_factory.create(
         proactor_threads=1,
         maxmemory="4G",
-        rdb_sbf_chunked="true",
     )
     replica = df_factory.create(
         proactor_threads=1,
@@ -4704,6 +4702,130 @@ async def test_hnsw_external_vector_replication_crash(df_factory: DflyInstanceFa
     await traffic_task
 
     await check_all_replicas_finished([c_replica], c_master, timeout=60)
+
+
+async def _ft_num_docs(client, index_name: str) -> int:
+    info = await client.execute_command("FT.INFO", index_name)
+    info_map = dict(zip(info[::2], info[1::2]))
+    return int(info_map["num_docs"])
+
+
+@dfly_args({"proactor_threads": 4})
+@pytest.mark.parametrize(
+    "docs_keep",
+    [
+        pytest.param(2000, id="small"),
+        pytest.param(100_000, id="100k", marks=HNSW_LARGE_MARKS),
+    ],
+)
+async def test_hnsw_multi_replica_with_concurrent_index_ops(
+    df_factory: DflyInstanceFactory, docs_keep: int
+):
+    """
+    Fan-out HNSW replication with a pre-existing index dropped and a new index
+    created shortly after the replicas connect. Verifies doc-count parity and
+    KNN coverage across master and every replica.
+
+    Covers next:
+      - Multiple replicas (3 fan-out)
+      - FT.DROPINDEX of a pre-existing index, 0.5-5s after replicas connect
+      - FT.CREATE of a new index, 0.5-5s after replicas connect
+      - Document-count parity master/replica per surviving index
+      - 100k-document HNSW main index (large variant)
+    """
+    master = df_factory.create()
+    replicas = [df_factory.create(proactor_threads=2) for _ in range(3)]
+    df_factory.start_all([master] + replicas)
+
+    c_master = master.client()
+    c_replicas = [r.client() for r in replicas]
+
+    seeder_keep = HnswSearchSeeder(
+        num_initial_docs=docs_keep, num_dims=8, index_name="idx_keep", prefix="keep:"
+    )
+    seeder_drop = HnswSearchSeeder(
+        num_initial_docs=1000, num_dims=8, index_name="idx_drop", prefix="drop:"
+    )
+    seeder_new = HnswSearchSeeder(
+        num_initial_docs=500, num_dims=8, index_name="idx_new", prefix="new:"
+    )
+
+    await seeder_keep.create_index(c_master)
+    await seeder_keep.seed_initial_docs(c_master)
+    await seeder_drop.create_index(c_master)
+    await seeder_drop.seed_initial_docs(c_master)
+
+    traffic_task = asyncio.create_task(seeder_keep.run_traffic(c_master))
+    sync_timeout = _hnsw_sync_timeout(docs_keep)
+
+    try:
+        await asyncio.gather(
+            *(c.execute_command(f"REPLICAOF localhost {master.port}") for c in c_replicas)
+        )
+
+        # Drop the pre-existing index and create the new one, each at an
+        # independent random offset in the (0.5, 5)s window after REPLICAOF.
+        # The randomness is intentional: it spreads the ops across the replica's
+        # full-sync window to exercise the indexing race. Log the offsets so a
+        # failure is reproducible.
+        drop_delay = random.uniform(0.5, 5)
+        create_delay = random.uniform(0.5, 5)
+        logging.info(f"drop_delay={drop_delay:.2f}s create_delay={create_delay:.2f}s")
+
+        async def drop_after_delay():
+            await asyncio.sleep(drop_delay)
+            await c_master.execute_command("FT.DROPINDEX", "idx_drop")
+
+        async def create_after_delay():
+            await asyncio.sleep(create_delay)
+            await seeder_new.create_index(c_master)
+            await seeder_new.seed_initial_docs(c_master)
+
+        await asyncio.gather(drop_after_delay(), create_after_delay())
+
+        master_indices = set(await c_master.execute_command("FT._LIST"))
+        assert master_indices == {
+            "idx_keep",
+            "idx_new",
+        }, f"Master indices unexpected: {master_indices}"
+
+        await wait_available_async(c_replicas, timeout=sync_timeout)
+        seeder_keep.stop()
+        await traffic_task
+        await check_all_replicas_finished(c_replicas, c_master, timeout=sync_timeout)
+
+        for c in c_replicas:
+            idx_list = set(await c.execute_command("FT._LIST"))
+            assert idx_list == {"idx_keep", "idx_new"}, f"Unexpected indices: {idx_list}"
+
+        # HNSW background indexing on the replica can lag the journal LSN, so
+        # poll until num_docs converges. Fan out across all (replica × index) pairs.
+        @assert_eventually(timeout=sync_timeout)
+        async def _converged(client, index_name: str, expected: int):
+            actual = await _ft_num_docs(client, index_name)
+            assert actual == expected, f"{index_name}: replica={actual} master={expected}"
+
+        index_to_expected = {
+            name: await _ft_num_docs(c_master, name) for name in ("idx_keep", "idx_new")
+        }
+        await asyncio.gather(
+            *(
+                _converged(c, name, expected)
+                for c in c_replicas
+                for name, expected in index_to_expected.items()
+            )
+        )
+
+        await asyncio.gather(*(seeder_keep.verify(c_master, c) for c in c_replicas))
+        await asyncio.gather(*(seeder_new.verify(c_master, c) for c in c_replicas))
+
+    finally:
+        seeder_keep.stop()
+        traffic_task.cancel()
+        try:
+            await traffic_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):

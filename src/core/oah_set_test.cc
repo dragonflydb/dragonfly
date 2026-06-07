@@ -262,6 +262,77 @@ TEST_F(OAHSetTest, DisplacedBug) {
   ss_->Add("HPq");
 }
 
+// Stresses the SIMD Find/Erase probe across every code path: the displacement
+// window, the extension vector (forced by many collisions into a tiny table),
+// the lazy-zero hash cache left behind by repeated rehashes, and TTL expiry
+// observed during a Find/Erase probe. Mixed live/erased/expired members must
+// be resolved correctly.
+TEST_F(OAHSetTest, SimdFindEraseStress) {
+  constexpr size_t kNum = 20000;
+  ss_->Reserve(4);  // start tiny so growth + vector overflow both happen
+  ss_->set_time(10);
+
+  std::vector<std::string> live;       // present, no TTL
+  std::vector<std::string> ttl_alive;  // present, TTL in the future
+  std::vector<std::string> ttl_dead;   // inserted with TTL that expires at time=50
+  std::vector<std::string> erased;     // inserted then erased
+
+  for (size_t i = 0; i < kNum; ++i) {
+    std::string s = absl::StrCat("simd_member_", i);
+    switch (i % 4) {
+      case 0:
+        EXPECT_TRUE(ss_->Add(s));
+        live.push_back(s);
+        break;
+      case 1:
+        EXPECT_TRUE(ss_->Add(s, 100));  // expires at 110, survives time=50
+        ttl_alive.push_back(s);
+        break;
+      case 2:
+        EXPECT_TRUE(ss_->Add(s, 5));  // expires at 15, dead by time=50
+        ttl_dead.push_back(s);
+        break;
+      default:
+        EXPECT_TRUE(ss_->Add(s));
+        EXPECT_TRUE(ss_->Erase(s));
+        erased.push_back(s);
+        break;
+    }
+  }
+
+  ss_->set_time(50);  // ttl_dead entries are now expired
+
+  for (const auto& s : live) {
+    auto it = ss_->Find(s);
+    ASSERT_NE(it, ss_->end()) << s;
+    EXPECT_EQ(it->Key(), s);
+    EXPECT_FALSE(it.HasExpiry());
+  }
+  for (const auto& s : ttl_alive) {
+    auto it = ss_->Find(s);
+    ASSERT_NE(it, ss_->end()) << s;
+    EXPECT_EQ(it.ExpiryTime(), 110u);
+  }
+  for (const auto& s : ttl_dead) {
+    EXPECT_EQ(ss_->Find(s), ss_->end()) << "should be expired: " << s;
+    EXPECT_FALSE(ss_->Erase(s)) << "expired erase: " << s;
+  }
+  for (const auto& s : erased) {
+    EXPECT_EQ(ss_->Find(s), ss_->end()) << "should be erased: " << s;
+    EXPECT_FALSE(ss_->Erase(s)) << "double erase: " << s;
+  }
+
+  // Erase every live + ttl_alive member via the SIMD probe; each must hit once.
+  for (const auto& s : live)
+    EXPECT_TRUE(ss_->Erase(s)) << s;
+  for (const auto& s : ttl_alive)
+    EXPECT_TRUE(ss_->Erase(s)) << s;
+  for (const auto& s : live)
+    EXPECT_EQ(ss_->Find(s), ss_->end()) << s;
+  for (const auto& s : ttl_alive)
+    EXPECT_EQ(ss_->Find(s), ss_->end()) << s;
+}
+
 TEST_F(OAHSetTest, Resizing) {
   constexpr size_t num_strs = 4096;
   unordered_set<string> strs;

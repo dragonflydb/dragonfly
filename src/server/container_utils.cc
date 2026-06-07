@@ -24,7 +24,7 @@ extern "C" {
 #include "redis/util.h"
 }
 
-ABSL_FLAG(uint32_t, container_iteration_yield_interval_usec, 500,
+ABSL_FLAG(uint32_t, container_iteration_yield_interval_usec, 0,
           "Yield the fiber every N microseconds during container iteration. "
           "0 disables yielding.");
 

@@ -107,6 +107,8 @@ if (HAS_SPLIT_DWARF_C)
   add_compile_options($<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:C>>:-gsplit-dwarf>)
 endif()
 
+set(LEGACY_GLOG OFF CACHE BOOL "Use legacy glog instead of absl")
+
 include(third_party)
 include(internal)
 

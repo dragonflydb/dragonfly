@@ -221,6 +221,7 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
     }
 
     LoadConfig config;
+    config.deep_integrity = true;  // RESTORE payloads are client-supplied and untrusted
     if (first_parse) {
       first_parse = false;
     } else {

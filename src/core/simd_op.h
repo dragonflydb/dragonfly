@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -32,48 +33,48 @@ template <class T, std::size_t N> class SimdOp {
   using BitsType = std::uint32_t;
   static constexpr std::size_t kLanes = N;
 
-  SimdOp() = default;
+  constexpr SimdOp() noexcept = default;
 
   // Filling via `Vec{} + value` lowers to vpbroadcast on AVX2 / dup on
   // NEON; a per-lane scalar loop pessimizes to vpinsrq + vperm2i128.
-  static SimdOp Fill(T value) {
+  static constexpr SimdOp Fill(T value) noexcept {
     return Vec{} + value;
   }
 
-  static SimdOp Load(const T* ptr) {
+  static SimdOp Load(const T* ptr) noexcept {
     Vec v;
     std::memcpy(&v, ptr, sizeof(Vec));
     return v;
   }
 
-  SimdOp operator&(const SimdOp& o) const {
+  constexpr SimdOp operator&(const SimdOp& o) const noexcept {
     return v_ & o.v_;
   }
 
-  SimdOp operator|(const SimdOp& o) const {
+  constexpr SimdOp operator|(const SimdOp& o) const noexcept {
     return v_ | o.v_;
   }
 
-  SimdOp operator>>(unsigned shift) const {
+  constexpr SimdOp operator>>(unsigned shift) const noexcept {
     return v_ >> shift;
   }
 
-  SimdOp operator~() const {
+  constexpr SimdOp operator~() const noexcept {
     return ~v_;
   }
 
-  SimdOp operator==(const SimdOp& o) const {  // NOLINT
+  constexpr SimdOp operator==(const SimdOp& o) const noexcept {  // NOLINT
     return Vec(v_ == o.v_);
   }
 
-  SimdOp operator==(T value) const {  // NOLINT
+  constexpr SimdOp operator==(T value) const noexcept {  // NOLINT
     return Vec(v_ == (Vec{} + value));
   }
 
   // Packs the most-significant bit of every lane into a uint32_t bitmask
   // (LSB = lane 0). For the output of `operator==` (lanes are all-ones or
   // all-zeros) this is equivalent to "bit i set iff lane i is non-zero".
-  BitsType GetMSBs() const {
+  BitsType GetMSBs() const noexcept {
     // We hand-write the per-ISA movemask because no portable C++ /
     // vector-extension formulation lowers to a single movemask instruction
     // — every alternative we tried measured ~5% slower on OAHSet's hot path.
@@ -110,7 +111,7 @@ template <class T, std::size_t N> class SimdOp {
   }
 
  private:
-  SimdOp(Vec v) : v_(v) {  // NOLINT(google-explicit-constructor)
+  constexpr SimdOp(Vec v) noexcept : v_(v) {  // NOLINT(google-explicit-constructor)
   }
 
   Vec v_{};

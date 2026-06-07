@@ -3577,6 +3577,7 @@ async def _run_tiering_migration(
             tiered_offload_threshold="0.2",
             tiered_experimental_cooling="False",
             maxmemory=maxmemory,
+            tiered_max_pending_stash_bytes="128KB",
         ),
         df_factory.create(
             port=next(next_port), admin_port=next(next_port), proactor_threads=2, maxmemory="1024MB"

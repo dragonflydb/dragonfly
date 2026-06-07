@@ -1311,9 +1311,15 @@ auto Replica::GetSummary() const -> Summary {
 
     res.master_id = master_context_.master_repl_id;
     res.reconnect_count = reconnect_count_;
-    res.repl_offset_sum = 0;
-    for (uint64_t offs : GetReplicaOffset()) {
-      res.repl_offset_sum += offs;
+    if (HasDflyMaster()) {
+      res.repl_offset_sum = 0;
+      for (uint64_t offs : GetReplicaOffset()) {
+        res.repl_offset_sum += offs;
+      }
+    } else {
+      // For Redis→Dragonfly replication, repl_offs_ tracks the byte offset
+      // in the Redis replication stream (sent via REPLCONF ACK to the master).
+      res.repl_offset_sum = repl_offs_;
     }
     res.psync_successes = psync_successes_;
     res.psync_attempts = psync_attempts_;
