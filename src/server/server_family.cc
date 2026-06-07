@@ -3529,6 +3529,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
     append("tiered_pending_read_cnt", m.tiered_stats.pending_read_cnt);
     append("tiered_pending_stash_cnt", m.tiered_stats.pending_stash_cnt);
+    append("tiered_pending_stash_bytes", m.tiered_stats.pending_stash_bytes);
 
     append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
