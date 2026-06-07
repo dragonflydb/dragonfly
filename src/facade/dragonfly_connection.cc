@@ -1499,12 +1499,15 @@ auto Connection::ParseLoop() -> ParserStatus {
   do {
     commands_parsed = (this->*parse_func)(io_buf_);
 
+    if (!commands_parsed)
+      break;
+
     if (!ExecuteBatch())
       return ERROR;
 
     if (!ReplyBatch())
       return ERROR;
-  } while (commands_parsed && io_buf_.InputLen() > 0);
+  } while (io_buf_.InputLen() > 0);
 
   return commands_parsed ? OK : NEED_MORE;
 }
@@ -1621,6 +1624,7 @@ io::Result<size_t> Connection::HandleRecvSocket() {
   // In case the socket was closed orderly, we get 0 bytes read.
   if (recv_sz && *recv_sz) {
     size_t commit_sz = *recv_sz;
+    LOG(INFO) << "Received " << commit_sz << " bytes of buffer size " << append_buf.size();
     io_buf_.CommitWrite(commit_sz);
 
     conn_stats.io_read_bytes += commit_sz;
@@ -2579,6 +2583,10 @@ bool Connection::ExecuteBatch() {
   // Execute sequentially all parsed commands.
   unsigned total = 0;
   unsigned batch_total = 0;
+  uint64_t start = base::CycleClock::Now();
+  uint64_t epoch = fb2::FiberSwitchEpoch();
+  VLOG(1) << "Starting ExecuteBatch with " << parsed_cmd_q_len_ << " commands in the pipeline.";
+
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
     if (reply_builder_->GetError())
       return false;
@@ -2638,7 +2646,13 @@ bool Connection::ExecuteBatch() {
     }
     ++total;
   }
-  // LOG(INFO) << "Executed batch of " << total << " commands, batch_total: " << batch_total;
+  uint64_t end = base::CycleClock::Now();
+  uint64_t epoch_end = fb2::FiberSwitchEpoch();
+  CHECK_EQ(epoch, epoch_end);
+
+  conn_stats.pipeline_dispatch_usec += base::CycleClock::ToUsec(end - start);
+
+  VLOG(1) << "END: " << total << " commands, batch_total: " << batch_total;
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
 
@@ -2653,15 +2667,19 @@ bool Connection::ExecuteBatch() {
 bool Connection::ReplyBatch() {
   reply_builder_->SetBatchMode(true);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
+  unsigned total = 0;
   while (HasInFlightCommands() && parsed_head_->CanReply()) {
     current_wait_.reset();  // Clear the subscription before moving to the next command
     auto* cmd = parsed_head_;
     parsed_head_ = cmd->next;
     cmd->SendReply();
     ReleaseParsedCommand(cmd, HasInFlightCommands() /* is_pipelined */);
+    ++total;
     if (reply_builder_->GetError())
       return false;
   }
+
+  // LOG(INFO) << "Replied batch of " << total << " commands " << fb2::FiberSwitchEpoch();
 
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
@@ -2905,6 +2923,7 @@ void Connection::ReadPendingInput() {
       break;
     }
 
+    // LOG(INFO) << "Read " << *res << " bytes from socket, io_buf_len: " << buf.size();
     last_interaction_ = time(nullptr);
     io_buf_.CommitWrite(*res);
     buf = io_buf_.AppendBuffer();
@@ -3117,6 +3136,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       if (parsed_head_) {
         if (HasCommandToExecute())
           ExecuteBatch();
+        // LOG(INFO) << "Replying for parsed_head_ " << fb2::FiberSwitchEpoch();
         ReplyBatch();
       }
 

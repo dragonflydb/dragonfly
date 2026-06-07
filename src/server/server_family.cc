@@ -1738,6 +1738,10 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_calls_total", "", conn_stats.pipeline_dispatch_calls,
                             MetricType::COUNTER, &resp->body());
+
+  AppendMetricWithoutLabels("pipeline_dispatch_calls_duration_seconds", "",
+                            conn_stats.pipeline_dispatch_usec * 1e-6, MetricType::COUNTER,
+                            &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_commands_total", "",
                             conn_stats.pipeline_dispatch_commands, MetricType::COUNTER,
                             &resp->body());

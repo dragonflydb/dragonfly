@@ -304,7 +304,11 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
       if (!sharded_[i].dispatched.empty())
         shard_set->AddL2(i, cb);
     }
+    uint64_t now = CycleClock::Now();
+    facade::tl_facade_stats->conn_stats.pipeline_dispatch_usec +=
+        CycleClock::ToUsec(now - dispatch_start_);
     bc->Wait();
+    dispatch_start_ = CycleClock::Now();
   }
 
   uint64_t after_hop = CycleClock::Now();
@@ -357,6 +361,11 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   }
 
   order_.clear();
+  auto now = CycleClock::Now();
+  facade::tl_facade_stats->conn_stats.pipeline_dispatch_flush_usec +=
+      CycleClock::ToUsec(now - dispatch_start_);
+  dispatch_start_ = now;
+
   return !aborted;
 }
 
@@ -364,6 +373,7 @@ void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
   DVLOG(1) << "Trying to squash " << cmds_.size() << " commands for transaction "
            << cntx_->transaction->DebugId();
 
+  dispatch_start_ = CycleClock::Now();
   for (auto& cmd : cmds_) {
     auto res = TrySquash(&cmd);
 
