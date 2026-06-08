@@ -2,8 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include <absl/flags/declare.h>
-#include <absl/flags/flag.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 
@@ -16,6 +14,7 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -24,8 +23,6 @@
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 #include "util/varz.h"
-
-ABSL_DECLARE_FLAG(uint64_t, max_bulk_len);
 
 namespace rng = std::ranges;
 
@@ -981,17 +978,21 @@ const char kInvalidBitfieldTypeErr[] =
 
 const char kBitOffsetOutOfRange[] = "bit offset is not an integer or out of range";
 
-// The last touched bit (bit_offset + bit_size - 1) must fit the uint32 the bit-index
-// helpers use and within max_bulk_len, so a tiny request can neither wrap to a
-// different position nor allocate unboundedly. Arranged so the addition can't overflow.
-bool IsBitOffsetInRange(uint64_t bit_offset, uint64_t bit_size) {
-  constexpr uint64_t kMaxBit = std::numeric_limits<uint32_t>::max();
-  if (bit_offset > kMaxBit - (bit_size - 1))
-    return false;
-  return (bit_offset + bit_size - 1) / 8 < absl::GetFlag(FLAGS_max_bulk_len);
+// A write grows the string up to the last touched byte, so it must stay within
+// kMaxStrLen (the same cap SETRANGE enforces). Since kMaxStrLen < 2^29, a passing
+// offset also fits the uint32 the bit-index helpers use; the short-circuit keeps
+// the addition from overflowing.
+bool IsBitWriteInRange(uint64_t bit_offset, uint64_t bit_size) {
+  return bit_offset < uint64_t{kMaxStrLen} * 8 && (bit_offset + bit_size - 1) / 8 < kMaxStrLen;
 }
 
-nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser) {
+// A read never grows the string and returns 0 past its end, so only guard against
+// offsets that wouldn't fit the uint32 bit-index helpers (which would truncate).
+bool IsBitReadInRange(uint64_t bit_offset) {
+  return bit_offset <= std::numeric_limits<uint32_t>::max();
+}
+
+nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser, bool is_write) {
   CommonAttributes parsed;
   using nonstd::make_unexpected;
 
@@ -1037,13 +1038,15 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
     return make_unexpected(kSyntaxErr);
   }
   if (is_proxy) {
-    // the scaled offset must stay within the addressable range, so bound the field index by it
+    // scaling the field index can't exceed the offsets the bit-index helpers handle
     if (parsed.offset > std::numeric_limits<uint32_t>::max() / parsed.encoding_bit_size) {
       return make_unexpected(kBitOffsetOutOfRange);
     }
     parsed.offset = parsed.offset * parsed.encoding_bit_size;
   }
-  if (!IsBitOffsetInRange(parsed.offset, parsed.encoding_bit_size)) {
+  const bool in_range = is_write ? IsBitWriteInRange(parsed.offset, parsed.encoding_bit_size)
+                                 : IsBitReadInRange(parsed.offset);
+  if (!in_range) {
     return make_unexpected(kBitOffsetOutOfRange);
   }
   return parsed;
@@ -1078,7 +1081,9 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
       return make_unexpected(kSyntaxErr);
     }
 
-    auto maybe_attr = ParseCommonAttr(&parser);
+    // GET only reads; SET/INCRBY grow the value and need the stricter write bound.
+    const bool is_write = !read_only && cmd != Cmds::GET_OPT;
+    auto maybe_attr = ParseCommonAttr(&parser, is_write);
     if (!maybe_attr.has_value()) {
       parser.TakeError();
       return make_unexpected(std::move(maybe_attr.error()));
@@ -1274,7 +1279,7 @@ void SetBit(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(err.MakeReply());
   }
 
-  if (!IsBitOffsetInRange(offset, 1)) {
+  if (!IsBitWriteInRange(offset, 1)) {
     return cmd_cntx->SendError(kBitOffsetOutOfRange);
   }
 

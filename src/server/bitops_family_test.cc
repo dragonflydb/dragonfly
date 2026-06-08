@@ -8,7 +8,6 @@
 #include <string>
 #include <string_view>
 
-#include "absl/flags/reflection.h"
 #include "absl/strings/str_cat.h"
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -934,10 +933,9 @@ TEST_F(BitOpsFamilyTest, BitFieldLargeOffset) {
   resp = Run({"get", "foo"});
   EXPECT_THAT(ToSV(resp.GetBuf()), Eq(std::string_view("bar\0", 4)));
 
-  // The u32 field at this offset extends past the uint32 bit-index space, so it
-  // is rejected instead of silently wrapping to a different position.
+  // A read past the value end returns 0 (offset still fits the uint32 bit-index space).
   resp = Run({"bitfield", "foo", "get", "u32", "4294967295"});
-  EXPECT_THAT(resp, ErrArg("out of range"));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 }
 
 TEST_F(BitOpsFamilyTest, BitFieldIssue5237_SetOverflowSat) {
@@ -1005,23 +1003,22 @@ TEST_F(BitOpsFamilyTest, BitFieldNoOps) {
   EXPECT_THAT(Run({"BITFIELD_RO", "k"}), RespArray(ElementsAre()));
 }
 
-// A bit offset past max_bulk_len must be rejected, not grow the value unboundedly.
-// 16'000'000 bits == 2'000'000 bytes, above the 1MB cap (which keeps the test cheap).
+// A bit offset whose byte index passes the max string size must be rejected, not
+// grow the value unboundedly. 2'200'000'000 bits == 275MB, above the 256MB cap.
 
 TEST_F(BitOpsFamilyTest, SetBitOffsetOutOfRange) {
-  absl::FlagSaver fs;
-  SetTestFlag("max_bulk_len", "1048576");
-
-  EXPECT_THAT(Run({"setbit", "sk", "16000000", "1"}), ErrArg("out of range"));
+  EXPECT_THAT(Run({"setbit", "sk", "2200000000", "1"}), ErrArg("out of range"));
 }
 
 TEST_F(BitOpsFamilyTest, BitFieldOffsetOutOfRange) {
-  absl::FlagSaver fs;
-  SetTestFlag("max_bulk_len", "1048576");
+  // Writes are bounded by the max string size and rejected up front (no allocation).
+  EXPECT_THAT(Run({"bitfield", "bk", "set", "u8", "2200000000", "1"}), ErrArg("out of range"));
+  EXPECT_THAT(Run({"bitfield", "bk", "incrby", "u8", "2200000000", "1"}), ErrArg("out of range"));
 
-  EXPECT_THAT(Run({"bitfield", "bk", "set", "u8", "16000000", "1"}), ErrArg("out of range"));
-  EXPECT_THAT(Run({"bitfield", "bk", "incrby", "u8", "16000000", "1"}), ErrArg("out of range"));
-  EXPECT_THAT(Run({"bitfield", "bk", "get", "u8", "16000000"}), ErrArg("out of range"));
+  // Reads return 0 past the value end; only offsets beyond the uint32 bit-index
+  // space (which would truncate) are rejected.
+  EXPECT_THAT(Run({"bitfield", "bk", "get", "u8", "2200000000"}), RespElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"bitfield", "bk", "get", "u8", "5000000000"}), ErrArg("out of range"));
 }
 
 }  // end of namespace dfly

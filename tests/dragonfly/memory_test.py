@@ -457,31 +457,24 @@ BIT_OOM_MAXMEMORY = 256 * 1024 * 1024
 BIT_OOM_HUGE_OFFSET = 8_589_934_583
 
 
-async def _start_over_maxmemory(df_factory: DflyInstanceFactory):
+@pytest.mark.opt_only
+async def test_bitops_denyoom(df_factory: DflyInstanceFactory):
     df = df_factory.create(proactor_threads=1)
     df.vmem_limit_bytes = BIT_OOM_VMEM_CAP
     df.start()
     client = df.client()
+
     # SETBIT has the guard, so build the filler before lowering the limit below it.
     await client.execute_command("SETBIT", "filler", BIT_OOM_FILLER_OFFSET, 1)
     await client.config_set("maxmemory", BIT_OOM_MAXMEMORY)
     assert int((await client.info("memory"))["used_memory"]) > BIT_OOM_MAXMEMORY
-    with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
-        await client.execute_command("SETBIT", "guard", 0, 1)
-    return client
 
-
-@pytest.mark.opt_only
-async def test_bitop_denyoom(df_factory: DflyInstanceFactory):
-    client = await _start_over_maxmemory(df_factory)
-    with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
-        await client.execute_command("BITOP", "AND", "dest", "filler", "filler")
-    assert await client.ping()
-
-
-@pytest.mark.opt_only
-async def test_bitfield_denyoom(df_factory: DflyInstanceFactory):
-    client = await _start_over_maxmemory(df_factory)
-    with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
-        await client.execute_command("BITFIELD", "bk", "SET", "u8", str(BIT_OOM_HUGE_OFFSET), "1")
+    # Over maxmemory, denyoom commands are rejected instead of allocating or aborting.
+    for cmd in (
+        ("SETBIT", "guard", 0, 1),
+        ("BITOP", "AND", "dest", "filler", "filler"),
+        ("BITFIELD", "bk", "SET", "u8", str(BIT_OOM_HUGE_OFFSET), "1"),
+    ):
+        with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
+            await client.execute_command(*cmd)
     assert await client.ping()
