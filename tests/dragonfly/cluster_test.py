@@ -3563,7 +3563,7 @@ async def test_remove_docs_on_cluster_migration(df_factory):
     await verify_keys_match_number_of_index_docs(nodes[0].client, 0)
 
 
-async def _poll_rss(clients: list, interval: float = 2.0):
+async def _poll_rss(clients: list, interval: float = 0.1):
     """Periodically log used_memory_rss for a list of (label, client) tuples."""
     while True:
         parts = []
