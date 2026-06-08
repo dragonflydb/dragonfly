@@ -47,6 +47,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
+#include "facade/string_socket.h"
 #include "facade/tls_helpers.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
@@ -3408,8 +3409,8 @@ void ServerFamily::Replicate(string_view host, string_view port) {
     args_vec.emplace_back(MutableSlice{s.data(), s.size()});
   }
   CmdArgList args_list = absl::MakeSpan(args_vec);
-  io::NullSink sink;
-  facade::RedisReplyBuilder rb(&sink);
+  facade::StringSocket sock;
+  facade::RedisReplyBuilder rb(&sock);
   CommandContext cmd_cntx{&rb, nullptr};
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
 }

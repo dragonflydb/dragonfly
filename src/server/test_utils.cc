@@ -21,13 +21,16 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "io/file_util.h"
+#include "util/fibers/pool.h"
+
+//
 #include "core/oah_set.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
-#include "io/file_util.h"
+#include "facade/string_socket.h"
 #include "server/acl/acl_log.h"
 #include "server/set_family.h"
-#include "util/fibers/pool.h"
 
 using namespace std;
 
@@ -158,7 +161,7 @@ class BaseFamilyTest::TestConnWrapper {
   }
 
  private:
-  ::io::StringSink sink_;  // holds the response blob
+  facade::StringSocket sink_;
 
   std::unique_ptr<TestConnection> dummy_conn_;
 
