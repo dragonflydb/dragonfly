@@ -3835,3 +3835,82 @@ async def test_cluster_config_slot_overflow_doesnt_crash(df_factory: DflyInstanc
     # CONFIG must return an error (not crash), MYID must still work
     assert isinstance(results[0], Exception)
     assert results[1] == node_id
+
+
+@dfly_args({"cluster_mode": "yes"})
+async def test_slot_migration_oom_replica_rollback(df_factory):
+    """
+    Regression test: when incoming slot migration fails with OOM, the target master rolls back the
+    migrated keys via DeleteSlots, but that deletion must also be propagated to the target's replica
+    via WriteFlushSlotsToJournal. Without the journal write, the replica retains the migrated keys
+    while the master has already deleted them, causing master/replica divergence.
+
+    After OOM rollback both target_master and target_replica must have 0 keys.
+    """
+    source = df_factory.create(
+        port=next(next_port),
+        admin_port=next(next_port),
+        proactor_threads=4,
+        maxmemory="1024MB",
+    )
+    target_master = df_factory.create(
+        port=next(next_port),
+        admin_port=next(next_port),
+        proactor_threads=2,
+        maxmemory="512MB",
+    )
+    target_replica = df_factory.create(
+        port=next(next_port),
+        admin_port=next(next_port),
+        proactor_threads=2,
+        maxmemory="512MB",
+    )
+
+    df_factory.start_all([source, target_master, target_replica])
+
+    source_node = await create_node_info(source)
+    target_node = await create_node_info(target_master)
+
+    source_node.slots = [(0, 16383)]
+    target_node.slots = []
+
+    # Apply initial cluster config to source and target only (replica is not a cluster member)
+    await apply_config([source_node, target_node])
+
+    # Populate source with large values that will OOM the target during migration
+    await source_node.client.execute_command("DEBUG POPULATE 100 test 10000000")
+
+    # Start replication: target_replica follows target_master before migration begins
+    c_replica_admin = target_replica.admin_client()
+    await c_replica_admin.execute_command(f"replicaof localhost {target_master.port}")
+    await wait_available_async(c_replica_admin)
+
+    # Kick off migration from source -> target (expects OOM on target)
+    source_node.migrations.append(
+        MigrationInfo("127.0.0.1", target_master.admin_port, [(0, 16383)], target_node.id)
+    )
+
+    logging.info("Starting migration (expect OOM on target)")
+    await apply_config([source_node, target_node])
+
+    # Wait for both sides to reach FATAL
+    await wait_for_status(source_node.admin_client, target_node.id, "FATAL", 300)
+    await wait_for_status(target_node.admin_client, source_node.id, "FATAL")
+
+    # Give the replica time to catch up with whatever the master has after rollback
+    await check_all_replicas_finished([c_replica_admin], target_node.admin_client)
+
+    master_keys = await target_node.admin_client.execute_command("DBSIZE")
+    replica_keys = await c_replica_admin.execute_command("DBSIZE")
+
+    logging.info("target_master DBSIZE=%d, target_replica DBSIZE=%d", master_keys, replica_keys)
+
+    # After OOM rollback the master must have 0 keys (DeleteSlots ran).
+    assert master_keys == 0, f"target_master still has {master_keys} keys after OOM rollback"
+
+    # The replica must also have 0 keys. This fails without the WriteFlushSlotsToJournal fix
+    # because the master's DeleteSlots is not written to the journal, so the replica never
+    # receives the deletion and retains the migrated keys.
+    assert (
+        replica_keys == 0
+    ), f"target_replica has {replica_keys} keys but master has 0 — replica was not rolled back"

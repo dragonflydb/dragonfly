@@ -976,7 +976,13 @@ void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
     auto slots = migration->GetSlots();
     LOG(INFO) << "Flushing slots during migration reinitialization " << migration->GetSourceID()
               << ", slots: " << slots.ToString();
+    // DFLYMIGRATE is not a global-trans command, so create a temporary transaction
+    // to hold the shard lock during FlushSlots (see #7153).
+    boost::intrusive_ptr<Transaction> flush_tx(
+        new Transaction{server_family_->service().FindCmd("DFLYCLUSTER")});
+    flush_tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
     DeleteSlots(slots);
+    WriteFlushSlotsToJournal(slots);
   }
 
   if (migration->GetState() == MigrationState::C_FATAL) {
