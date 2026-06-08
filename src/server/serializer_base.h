@@ -158,6 +158,7 @@ class SerializerBase : public BucketDependencies,
   virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) = 0;
 
+  // Called before a set of buckets is mutated.
   void OnChange(DbIndex db_index, const ChangeReq& req) override;
 
   bool IsAnyBucketBlocked() const override {
@@ -165,12 +166,6 @@ class SerializerBase : public BucketDependencies,
   }
 
   void WaitForNoBucketBlocked() const override;
-
-  // Called when an existing bucket is about to be mutated. Calls ProcessBucket.
-  void OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it);
-
-  // Called when a new key is about to be inserted. Calls ProcessBucket for the buckets.
-  void OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& set);
 
   // --- Shared members ---
 

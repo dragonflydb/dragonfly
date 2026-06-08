@@ -565,7 +565,7 @@ class DbSlice {
   void CreateDb(DbIndex index);
 
   // Returns true if this write could be ignored during replication without losing consistency
-  bool IsOmittableWrite(const Context& cntx, ChangeReq req);
+  bool IsOmittableWrite(const Context& cntx, const ChangeReq& req);
 
   enum class UpdateStatsMode : uint8_t {
     kReadStats,
