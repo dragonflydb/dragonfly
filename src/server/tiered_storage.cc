@@ -81,6 +81,10 @@ bool OccupiesWholePages(size_t size) {
 // Stashed bins no longer have bin ids, so this sentinel is used to differentiate from regular reads
 constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
 
+// Memory budget (UploadBudget) does not account for buffers allocated for in-flight defrag reads,
+// so we cap the number of concurrent defragmentation operations to avoid unbounded memory growth.
+constexpr uint32_t kMaxPendingDefrags = 100;
+
 // Called after setting new value in place of previous segment
 void RecordDeleted(const FragmentRef& fragment_ref, size_t tiered_len, DbTableStats* stats) {
   stats->AddTypeMemoryUsage(fragment_ref.ObjType(), fragment_ref.MallocUsed());
@@ -310,6 +314,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     uint64_t total_stashes = 0, total_cancels = 0, total_fetches = 0;
     uint64_t total_defrags = 0;
     uint64_t total_uploads = 0;
+    uint32_t pending_defrags = 0;
   } stats_;
 
   // When we don't have memory to upload a page for defragmentation, we save it here to do it later
@@ -361,6 +366,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     if (*i == kFragmentedBin) {  // Generally we read whole bins only for defrag
       auto* bdecoder = static_cast<tiering::BareDecoder*>(decoder);
       Defragment(segment, bdecoder->slice);
+      stats_.pending_defrags--;
       return true;  // delete
     }
   }
@@ -423,8 +429,8 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
   // If we have memory, upload the page for defrag. It will be reshuffled and offloaded more packed.
   // Otherwise, enqueue the bin to be defragmented later when memory is available
   if (bin.fragmented) {
-    const size_t kMaxDelayedMem = 1_MB;
-    if (ts_->UploadBudget() > 0) {
+    constexpr size_t kMaxDelayedMem = 1_MB;
+    if (stats_.pending_defrags < kMaxPendingDefrags && ts_->UploadBudget() > 0) {
       EnqueueForDefrag(bin.segment);
     } else if (delayed_defrag_queue_.size() * sizeof(uint32_t) < kMaxDelayedMem) {
       delayed_defrag_queue_.push_back(bin.segment.offset);
@@ -437,8 +443,9 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
 void TieredStorage::ShardOpManager::EnqueueForDefrag(tiering::DiskSegment segment) {
   // Trigger read to signal need for defragmentation. NotifyFetched will handle it.
   DVLOG(2) << "Enqueueing bin defragmentation for: " << segment.offset;
+  stats_.pending_defrags++;
   Enqueue(
-      kFragmentedBin, segment, tiering::BareDecoder{}, [](...) {}, true);
+      kFragmentedBin, segment, tiering::BareDecoder{}, [](auto) {}, true);
 }
 
 void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) {
@@ -701,14 +708,11 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 }
 
 void TieredStorage::ProcessDelayedDeframents() {
-  const size_t kMaxEntries = 100;
-
   auto& dd_queue = op_manager_->delayed_defrag_queue_;
   if (dd_queue.empty() || UploadBudget() <= 0)
     return;
 
-  size_t processed = 0;
-  while (processed < kMaxEntries && !dd_queue.empty()) {
+  while (op_manager_->stats_.pending_defrags < kMaxPendingDefrags && !dd_queue.empty()) {
     uint32_t offset = dd_queue.front();
     dd_queue.pop_front();
 
