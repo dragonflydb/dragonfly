@@ -71,11 +71,8 @@ class CommandAggregator {
 
 }  // namespace
 
-CmdSerializer::CmdSerializer(DbSlice* db_slice, FlushSerialized cb,
-                             size_t max_serialization_buffer_size)
-    : db_slice_(db_slice),
-      cb_(std::move(cb)),
-      max_serialization_buffer_size_(max_serialization_buffer_size) {
+CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size)
+    : cb_(std::move(cb)), max_serialization_buffer_size_(max_serialization_buffer_size) {
   serializer_ = std::make_unique<RdbSerializer>(GetDefaultCompressionMode());
 }
 

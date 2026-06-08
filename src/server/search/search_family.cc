@@ -327,12 +327,20 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
   }
 
   while (parser->HasNext()) {
-    string_view field = parser->Next();
-    string_view field_alias = field;
+    string_view field_token = parser->Next();
+    string field_path_storage;
+    string_view field_path = field_token;
+    string_view field_alias = field_token;
 
-    // Verify json path is correct
-    if (index->type == DocIndex::JSON && !IsValidJsonPath(field)) {
-      return CreateSyntaxError(absl::StrCat("Bad json path: "sv, field));
+    // On JSON indexes, a bare identifier (no leading $) expands to $.identifier,
+    // matching the Valkey-search relaxation of the JSONPath requirement.
+    if (index->type == DocIndex::JSON && !field_token.empty() && field_token[0] != '$') {
+      field_path_storage = absl::StrCat("$.", field_token);
+      field_path = field_path_storage;
+    }
+
+    if (index->type == DocIndex::JSON && !IsValidJsonPath(field_path)) {
+      return CreateSyntaxError(absl::StrCat("Bad json path: "sv, field_path));
     }
 
     // AS [alias]
@@ -340,6 +348,12 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 
     if (schema.field_names.contains(field_alias)) {
       return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_alias));
+    }
+    // Same identifier may appear twice on HASH (e.g. one TAG spec + one TEXT spec with
+    // different aliases). On JSON, a bare identifier expands to $.<id> and would silently
+    // shadow an earlier $.<id> spec; reject that collision instead of last-write-wins.
+    if (index->type == DocIndex::JSON && schema.fields.contains(field_path)) {
+      return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_path));
     }
 
     // Determine type
@@ -390,8 +404,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
       flags |= *flag;
     }
 
-    schema.fields[field] = {field_type, flags, string{field_alias}, params};
-    schema.field_names[field_alias] = field;
+    schema.fields[field_path] = {field_type, flags, string{field_alias}, params};
+    schema.field_names[field_alias] = field_path;
   }
 
   return false;

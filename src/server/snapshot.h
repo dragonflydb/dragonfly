@@ -108,7 +108,7 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   void HandleFlushData(std::string data);
 
   // Callback of RdbSerializer to push big value chunks
-  void ConsumeBigValueChunk(std::string data);
+  std::error_code ConsumeBigValueChunk(std::string data);
 
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized();
@@ -133,14 +133,12 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
   struct Stats {
-    size_t skipped = 0;
     size_t keys_total = 0;
     size_t jounal_changes = 0;
     size_t flushed_under_lock = 0;
   } stats_;
 
   SnapshotDataConsumerInterface* consumer_;
-  ExecutionState* cntx_;
 };
 
 }  // namespace dfly

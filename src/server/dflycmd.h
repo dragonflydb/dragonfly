@@ -25,6 +25,7 @@ class ListenerInterface;
 
 namespace dfly {
 
+class EngineShard;
 class EngineShardSet;
 class ServerFamily;
 class RdbSaver;
@@ -42,11 +43,14 @@ struct FlowInfo {
 
   facade::Connection* conn = nullptr;
 
+  // Owned by the shard that this flow corresponds to; only that shard's proactor
+  // ever reads or writes these pointers, so no synchronization is needed.
   std::unique_ptr<RdbSaver> saver;            // Saver for full sync phase.
   std::unique_ptr<JournalStreamer> streamer;  // Streamer for stable sync phase
   std::string eof_token;
 
   std::optional<LSN> start_partial_sync_at;
+  // Written by REPLCONF ACK on the owner-shard proactor; all readers also run there.
   uint64_t last_acked_lsn = 0;
 
   std::function<void()> cleanup;  // Optional cleanup for cancellation.
@@ -61,7 +65,7 @@ struct FlowInfo {
 // sync_id. Each per-thread connection is called a Flow and is represented by the FlowInfo
 // instance, accessible by its index.
 //
-// An important aspect is synchronization and efficient locking. Two levels of locking are used:
+// An important aspect is synchronization and efficient locking. Three patterns are used:
 //  1. Global locking.
 //    Member  mutex `mu_` is used for synchronizing operations connected with internal data
 //    structures.
@@ -69,6 +73,11 @@ struct FlowInfo {
 //    ReplicaInfo contains a separate mutex that is used for replica-only routines. It is held
 //    during state transitions (start full sync, start stable state sync), cancellation and member
 //    access.
+//  3. Lock-free snapshot.
+//    A copy of `replica_infos_` is published to a thread-local on every proactor via
+//    `UpdateReplicaInfoCacheLocked()` (which must be called from each mutator of replica_infos_).
+//    Readers (INFO REPLICATION, metrics) load this snapshot and access ReplicaInfo state via
+//    its atomic getters (GetReplicaState, etc.) without taking any lock.
 //
 // Upon first connection from the replica, a new ReplicaInfo is created.
 // It transitions through the following phases:
@@ -149,13 +158,14 @@ class DflyCmd {
       version_.store(v, std::memory_order_relaxed);
     }
 
-    // State machine field. Caller must hold GetMutex() exclusively for the setter
-    // and at least in shared mode for the getter.
+    // State machine field. Setter must hold GetMutex() exclusively — the value is
+    // only written under the lock so transitions remain serialized. Readers do not
+    // need any lock; the atomic load lets INFO/metrics observe state lock-free.
     SyncState GetReplicaState() const {
-      return replica_state_;
+      return replica_state_.load(std::memory_order_relaxed);
     }
     void SetReplicaState(SyncState s) {
-      replica_state_ = s;
+      replica_state_.store(s, std::memory_order_relaxed);
     }
 
     // Per-shard fibers receive &GetExecState() and pass it into StartFullSyncInThread
@@ -167,8 +177,12 @@ class DflyCmd {
       return exec_st_;
     }
 
-    // Per-shard flow access; idx is the master shard index.
-    // Caller must hold GetMutex() for any read or write.
+    // Per-shard flow access; idx is the master shard index. The flows_ vector
+    // is sized once at construction so addresses are stable for the ReplicaInfo's
+    // lifetime. Default contract: caller must hold GetMutex(). Exception: the
+    // saver/streamer/last_acked_lsn fields are touched only by the owner-shard
+    // proactor (idx == that proactor's shard_id) and may be accessed lock-free
+    // from that proactor — see the FlowInfo field comments.
     FlowInfo& GetFlow(size_t idx) {
       return flows_[idx];
     }
@@ -197,7 +211,8 @@ class DflyCmd {
     void Cancel();
 
    private:
-    SyncState replica_state_;  // always guarded by shared_mu_
+    // Transitions still serialized under shared_mu_; atomic so readers can load lock-free.
+    std::atomic<SyncState> replica_state_;
     ExecutionState exec_st_;
 
     std::string id_;
@@ -235,13 +250,17 @@ class DflyCmd {
   // Master-side command. Provides Replica info.
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const ABSL_LOCKS_EXCLUDED(mu_);
 
-  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const ABSL_NO_THREAD_SAFETY_ANALYSIS;
+  // Must be called on the given shard's thread (e.g. from the GetMetrics
+  // fan-out). Lock-free: reads thread-local replica infos.
+  static ReplicationMemoryStats GetReplicationMemoryStats(EngineShard* shard);
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionState* state, DflyVersion version);
 
   // Tries to break those flows that stuck on socket write for too long time.
   void BreakStalledFlowsInShard() ABSL_NO_THREAD_SAFETY_ANALYSIS;
+
+  using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;
 
  private:
   // JOURNAL [START/STOP]
@@ -314,12 +333,15 @@ class DflyCmd {
 
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.
-  std::map<uint32_t, LSN> ReplicationLagsLocked() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  std::map<uint32_t, LSN> ReplicationLags(const ReplicaInfoMap& replicas_local_cache) const;
+
+  // Publishes a fresh copy of replica_infos_ to a thread-local on every proactor.
+  // Caller must hold mu_. Readers (INFO/metrics) load this view lock-free.
+  void UpdateReplicaInfoCacheLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   ServerFamily* sf_;  // Not owned
   uint32_t next_sync_id_ = 1;
 
-  using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;
   ReplicaInfoMap replica_infos_ ABSL_GUARDED_BY(mu_);
 
   mutable util::fb2::Mutex mu_;  // Guard global operations. See header top for locking levels.
