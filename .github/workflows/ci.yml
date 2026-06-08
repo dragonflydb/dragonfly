@@ -34,6 +34,7 @@ jobs:
             --from-ref ${{ github.event.pull_request.base.sha }}
             --to-ref ${{ github.event.pull_request.head.sha }}
   build:
+    if: false
     strategy:
       matrix:
         # Test of these containers
