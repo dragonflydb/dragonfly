@@ -91,8 +91,10 @@ ABSL_FLAG(bool, lua_resp2_legacy_float, false,
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4096, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
-ABSL_DECLARE_FLAG(size_t, listpack_max_field_len);
-ABSL_DECLARE_FLAG(size_t, listpack_max_bytes);
+ABSL_FLAG(size_t, listpack_max_field_len, 64,
+          "Maximum length of a hash field or value to be stored in listpack encoding");
+ABSL_FLAG(size_t, listpack_max_bytes, 1024,
+          "Maximum total bytes of a hash in listpack encoding before converting to a hash table");
 ABSL_FLAG(bool, admin_nopass, false,
           "If set, would enable open admin access to console on the assigned port, without "
           "authorization needed.");
