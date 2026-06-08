@@ -993,6 +993,7 @@ void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
         new Transaction{server_family_->service().FindCmd("DFLYCLUSTER")});
     flush_tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
     DeleteSlots(flush_tx.get(), slots);
+    WriteFlushSlotsToJournal(slots);
   }
 
   if (migration->GetState() == MigrationState::C_FATAL) {
