@@ -16,6 +16,7 @@
 #include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "facade/error.h"
+#include "util/fiber_socket_base.h"
 #include "util/fibers/proactor_base.h"
 
 #ifdef __APPLE__
@@ -195,7 +196,7 @@ uint64_t SinkReplyBuilder::GetLastSendTimeCycles() const {
 }
 
 void SinkReplyBuilder::Send() {
-  DCHECK(sink_ != nullptr);
+  DCHECK(socket_ != nullptr);
   DCHECK(!vecs_.empty());
   auto& reply_stats = tl_facade_stats->reply_stats;
 
@@ -207,7 +208,7 @@ void SinkReplyBuilder::Send() {
   reply_stats.io_write_cnt++;
   reply_stats.io_write_bytes += total_size_;
   DVLOG(2) << "Writing " << total_size_ << " bytes";
-  if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
+  if (auto ec = socket_->Write(vecs_.data(), vecs_.size()); ec)
     ec_ = ec;
 
   auto it = PendingList::s_iterator_to(pin);
@@ -247,7 +248,7 @@ void SinkReplyBuilder::FinishScope() {
   guaranteed_pieces_ = vecs_.size();  // all vecs are pieces
 }
 
-MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
+MCReplyBuilder::MCReplyBuilder(util::FiberSocketBase* socket) : SinkReplyBuilder(socket) {
 }
 
 void MCReplyBuilder::SendValue(MemcacheCmdFlags cmd_flags, std::string_view key,

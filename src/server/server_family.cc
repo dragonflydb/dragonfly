@@ -47,6 +47,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
+#include "facade/string_socket.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "search/doc_index.h"
@@ -4128,8 +4129,8 @@ void ServerFamily::Replicate(string_view host, string_view port) {
     args_vec.emplace_back(MutableSlice{s.data(), s.size()});
   }
   CmdArgList args_list = absl::MakeSpan(args_vec);
-  io::NullSink sink;
-  facade::RedisReplyBuilder rb(&sink);
+  facade::StringSocket sock;
+  facade::RedisReplyBuilder rb(&sock);
   const bool use_replica_of_v2 = absl::GetFlag(FLAGS_experimental_replicaof_v2);
   CommandContext cmd_cntx{&rb, nullptr};
   if (use_replica_of_v2) {
