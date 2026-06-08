@@ -98,13 +98,10 @@ ssize_t OAHEntry::ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
           *realloced = true;
       }
     }
-    // Then defrag the vector's array buffer if its page is underutilized. ResizeLog
-    // with the same log_size allocates a fresh buffer, move-constructs each element
-    // (OAHEntry's move-ctor swaps data_, leaving sources empty), and frees the old
-    // buffer via Clear(). The vector's logical AllocSize is unchanged, so no delta
-    // is reported for ptr_vectors_alloc_used_.
+    // Then defrag the array buffer if its page is underutilized. Realloc() moves into a
+    // fresh same-size buffer; logical AllocSize is unchanged, so no delta is reported.
     if (page_usage->IsPageForObjectUnderUtilized(Raw())) {
-      vec.ResizeLog(vec.LogSize());
+      vec.Realloc();
       *realloced = true;
     }
     return obj_alloc_delta;
@@ -113,9 +110,8 @@ ssize_t OAHEntry::ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
   if (!page_usage->IsPageForObjectUnderUtilized(Raw()))
     return 0;
 
-  // Single-entry realloc via ctor + move-assignment: build a fresh OAHEntry from this
-  // one's key/expiry/ext_hash; move-assign to swap data_, then the temporary's
-  // destructor frees the old buffer.
+  // Single-entry realloc: build a fresh OAHEntry from this one's key/expiry/ext_hash,
+  // move-assign to swap data_, and let the temporary free the old buffer.
   const size_t old_alloc = AllocSize();
   const uint64_t saved_hash = GetHash();
   const uint32_t expiry = HasExpiry() ? GetExpiry() : UINT32_MAX;
@@ -131,16 +127,15 @@ ssize_t OAHEntry::ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
 
 // TODO refactor, because it's inefficient
 //
-// Vector capacity is always a power of 2 with a minimum of 2 (the initial
-// promotion from single-entry uses FromLogSize(1) below; ResizeLog doubles).
-// OAHSet::ProbeExtensionVector relies on this invariant to drive a 2-lane
-// SIMD probe over vector contents without ever reading past the allocation.
+// Vector capacity starts at 2 and grows by 2 (doubles past kLinearMax), so it stays
+// an even count >= 2 — OAHSet::ProbeExtensionVector relies on this for a tail-free
+// 2-lane probe.
 size_t OAHEntry::Insert(OAHEntry&& e) {
   if (Empty()) {
     *this = std::move(e);
     return 0;
   } else if (!IsVector()) {
-    OAHEntry tmp(PtrVector<OAHEntry>::FromLogSize(1));
+    OAHEntry tmp(PtrVector<OAHEntry>::FromSize(2));
     auto& arr = tmp.AsVector();
     arr[0] = std::move(*this);
     arr[1] = std::move(e);
@@ -158,7 +153,7 @@ size_t OAHEntry::Insert(OAHEntry&& e) {
     }
     size_t prev_alloc_size = arr.AllocSize();
     auto new_pos = arr.Size();
-    arr.ResizeLog(arr.LogSize() + 1);
+    arr.Grow();
     arr[new_pos] = (std::move(e));
     return arr.AllocSize() - prev_alloc_size;
   }
@@ -199,18 +194,6 @@ OAHEntry OAHEntry::Remove(uint32_t pos) {
     assert(pos < arr.Size());
     return std::move(arr[pos]);
   }
-}
-
-OAHEntry OAHEntry::Pop() {
-  if (IsVector()) {
-    auto& arr = AsVector();
-    for (auto& e : arr) {
-      if (e)
-        return std::move(e);
-    }
-    return {};
-  }
-  return std::move(*this);
 }
 
 void OAHEntry::Clear() {
