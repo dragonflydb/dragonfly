@@ -64,26 +64,29 @@ static string random_string(mt19937& rand, unsigned len) {
   return ret;
 }
 
-TEST_F(OAHSetTest, PtrVectorTest) {
-  PtrVector<int> vp(PtrVector<int>::FromLogSize(3));
-  EXPECT_EQ(vp.Size(), 8);
-  EXPECT_EQ(vp.LogSize(), 3);
-  size_t i = 0;
-  for (; i < vp.Size(); ++i) {
-    EXPECT_EQ(vp[i], 0);
-    vp[i] = i + 1;
-  }
-  vp.ResizeLog(4);
+TEST_F(OAHSetTest, PtrVectorLinearThenDouble) {
+  auto vp = PtrVector<int>::FromSize(2);
+  EXPECT_EQ(vp.Size(), 2u);
+  vp[0] = 1;
+  vp[1] = 2;
 
-  for (; i < vp.Size(); ++i) {
-    EXPECT_EQ(vp[i], 0);
-    vp[i] = i + 1;
+  // Linear growth (+2 elements) up to and including kLinearMax (128); sizes stay even.
+  for (size_t expected = 4; expected <= 128; expected += 2) {
+    const size_t prev = vp.Size();
+    vp.Grow();
+    EXPECT_EQ(vp.Size(), expected);
+    EXPECT_EQ(vp[0], 1);     // existing elements preserved across reallocation
+    EXPECT_EQ(vp[prev], 0);  // newly added slots are default-constructed
   }
-  EXPECT_EQ(vp.Size(), 16);
-  EXPECT_EQ(vp.LogSize(), 4);
-  for (size_t i = 0; i < vp.Size(); ++i) {
-    EXPECT_EQ(vp[i], i + 1);
-  }
+  EXPECT_EQ(vp.Size(), 128u);
+
+  // At/above kLinearMax the vector switches to doubling (log-mode encoding).
+  vp.Grow();
+  EXPECT_EQ(vp.Size(), 256u);
+  vp.Grow();
+  EXPECT_EQ(vp.Size(), 512u);
+  EXPECT_EQ(vp[0], 1);
+  EXPECT_EQ(vp[1], 2);
 }
 
 TEST_F(OAHSetTest, OAHEntryTest) {
@@ -94,15 +97,15 @@ TEST_F(OAHSetTest, OAHEntryTest) {
 
   OAHEntry first("123456789");
 
-  EXPECT_EQ(test.Insert(std::move(first)), 16);
+  EXPECT_EQ(test.Insert(std::move(first)), 16);  // promote to a 2-element vector (2 * 8 bytes)
 
-  EXPECT_EQ(test.Insert(OAHEntry("23456789")), 16);
+  EXPECT_EQ(test.Insert(OAHEntry("23456789")), 16);  // linear grow 2 -> 4 (two more 8-byte slots)
 
   EXPECT_TRUE(test.Remove(0));
   EXPECT_FALSE(test.Remove(0));
 
   EXPECT_EQ(test.Remove(2).Key(), "23456789");
-  EXPECT_EQ(test.Pop().Key(), "123456789");
+  EXPECT_EQ(test.Remove(1).Key(), "123456789");
 }
 
 TEST_F(OAHSetTest, OAHSetAddFindTest) {
@@ -122,7 +125,8 @@ TEST_F(OAHSetTest, OAHSetAddFindTest) {
     EXPECT_EQ(e->Key(), s);
   }
 
-  EXPECT_EQ(ss.BucketCount(), 16384);
+  // ~10000 elements at load factor 2 (grow only when size_ >= 2 * table size).
+  EXPECT_EQ(ss.BucketCount(), 8192);
 }
 
 TEST_F(OAHSetTest, Basic) {
@@ -519,34 +523,6 @@ TEST_F(OAHSetTest, XtremeScanGrow) {
   }
 
   EXPECT_EQ(seen.size(), to_see.size());
-}
-
-TEST_F(OAHSetTest, Pop) {
-  constexpr size_t num_items = 8;
-  unordered_set<string> to_insert;
-
-  while (to_insert.size() != num_items) {
-    auto str = random_string(generator_, 10);
-    if (to_insert.count(str)) {
-      continue;
-    }
-
-    to_insert.insert(str);
-    EXPECT_TRUE(ss_->Add(str));
-  }
-
-  while (!ss_->Empty()) {
-    size_t size = ss_->UpperBoundSize();
-    auto str = ss_->Pop();
-    DCHECK(ss_->UpperBoundSize() == to_insert.size() - 1);
-    DCHECK(str);
-    DCHECK(to_insert.count(std::string(str.Key())));
-    DCHECK_EQ(ss_->UpperBoundSize(), size - 1);
-    to_insert.erase(std::string(str.Key()));
-  }
-
-  DCHECK(ss_->Empty());
-  DCHECK(to_insert.empty());
 }
 
 TEST_F(OAHSetTest, Iteration) {
