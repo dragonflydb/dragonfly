@@ -1,5 +1,7 @@
+import asyncio
 import copy
 from binascii import crc_hqx
+from contextlib import suppress
 from dataclasses import dataclass
 
 from redis.cluster import ClusterNode
@@ -3561,6 +3563,20 @@ async def test_remove_docs_on_cluster_migration(df_factory):
     await verify_keys_match_number_of_index_docs(nodes[0].client, 0)
 
 
+async def _poll_rss(clients: list, interval: float = 2.0):
+    """Periodically log used_memory_rss for a list of (label, client) tuples."""
+    while True:
+        parts = []
+        for label, client in clients:
+            try:
+                rss = await get_memory(client, "used_memory_rss")
+                parts.append(f"{label}={rss / (1024 * 1024):.1f}MB")
+            except Exception:
+                parts.append(f"{label}=N/A")
+        logging.info(f"RSS: {', '.join(parts)}")
+        await asyncio.sleep(interval)
+
+
 async def _run_tiering_migration(
     df_factory,
     *,
@@ -3590,6 +3606,10 @@ async def _run_tiering_migration(
     nodes[1].slots = []
 
     await apply_config(nodes)
+
+    rss_task = asyncio.create_task(
+        _poll_rss([("node0", nodes[0].client), ("node1", nodes[1].client)])
+    )
 
     keys = 1000000
     await nodes[0].client.execute_command(f"DEBUG POPULATE {keys} key 440")
@@ -3644,6 +3664,10 @@ async def _run_tiering_migration(
 
     info = await nodes[1].client.info("keyspace")
     assert info["db0"]["keys"] == keys - delete_succeded
+
+    rss_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await rss_task
 
 
 @pytest.mark.large
