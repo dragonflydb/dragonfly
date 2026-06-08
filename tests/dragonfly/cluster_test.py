@@ -3595,6 +3595,7 @@ async def _run_tiering_migration(
     await nodes[0].client.execute_command(f"DEBUG POPULATE {keys} key 440")
 
     info = await nodes[0].client.info()
+    logging.info(f"INFO: {info}")
     assert info["oom_rejections"] == 0
     assert info["db0"]["keys"] == keys
 
