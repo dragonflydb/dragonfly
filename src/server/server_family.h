@@ -388,17 +388,12 @@ class ServerFamily {
                            // failure
   };
 
-  // REPLICAOF implementation. See arguments above
   void ReplicaOfInternal(CmdArgList args, CommandContext* cmnd_cntx,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void StartJournalInShardThreads(Replica* repl_ptr);
 
   void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  // REPLICAOF implementation without two phase locking.
-  void ReplicaOfInternalV2(CmdArgList args, CommandContext* cmnd_cntx,
-                           ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   struct LoadOptions {
     std::string snapshot_id;
