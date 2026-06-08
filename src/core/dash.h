@@ -625,6 +625,14 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
            ids_[0] == other.ids_[0] && ids_[1] == other.ids_[1];
   }
 
+  // Construct a BucketSet containing a single bucket.
+  explicit BucketSet(bucket_iterator it)
+      : owner_{&it.owner()},
+        seg_id_{static_cast<uint32_t>(it.segment_id())},
+        limit_{1},
+        ids_{static_cast<uint8_t>(it.bucket_id()), 0} {
+  }
+
  private:
   friend class DashTable;
 

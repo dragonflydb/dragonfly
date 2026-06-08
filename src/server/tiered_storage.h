@@ -150,7 +150,7 @@ class TieredStorage : public TieredStorageBase {
   struct {
     size_t min_value_size;
     bool experimental_cooling;
-    unsigned write_depth_limit;
+    size_t max_pending_stash_bytes;
     float offload_threshold;
     float upload_threshold;
     bool experimental_hash_offload;

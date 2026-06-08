@@ -421,7 +421,6 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, Executi
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
 
   cmd_serializer_ = std::make_unique<CmdSerializer>(
-      db_slice_,
       [&](std::string s) {
         Write(std::move(s));
         ThrottleIfNeeded();

@@ -221,10 +221,6 @@ void SerializerBase::WaitForNoBucketBlocked() const {
 }
 
 void SerializerBase::OnChange(DbIndex db_index, const ChangeReq& req) {
-  std::visit([&](auto it) { OnChangeBlocking(db_index, it); }, req);
-}
-
-void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it) {
   std::string_view active_name = util::fb2::detail::FiberActive()->name();
   if (!absl::StartsWith(active_name, "shard_queue") &&  //
       !absl::StartsWith(active_name, "l2_queue") &&     // pipelining
@@ -233,19 +229,17 @@ void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_itera
                                                       // has_registered_callbacks before save
                                                       // registers them, schedules inline, then
                                                       // triggers OnChange on the DflyConn_ fiber
-      active_name != "Dispatched" &&   // Comes from OnAllShards(... { migration->RunSync(); });
-      active_name != "Debug/Traverse"  // DEBUG OBJHIST/UNIQ-STRS cleanup of lazy-expired empty
-                                       // containers; runs on the shard proactor so ordering holds.
+      active_name != "Dispatched" &&  // Comes from OnAllShards(... { migration->RunSync(); });
+      active_name !=
+          "Debug/Traverse" &&  // DEBUG OBJHIST/UNIQ-STRS cleanup of lazy-expired empty
+                               // containers; runs on the shard proactor so ordering holds.
+      !absl::StartsWith(active_name, "shard_stable_sync_read")  // races with BGSAVE on replica
   ) {
     LOG(DFATAL) << "Unexpected fiber: " << active_name << " on " << util::fb2::GetStacktrace();
   }
 
-  ProcessBucket(db_index, it, true);
-}
-
-void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& bucket_set) {
   // We call Process even for up-to-date buckets to ensure all operations (delayed) are finished.
-  for (auto it : bucket_set.buckets())
+  for (auto it : req.buckets())
     ProcessBucket(db_index, it, true);
 }
 
