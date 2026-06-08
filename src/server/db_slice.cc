@@ -1481,14 +1481,26 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     }
   }
 
-  // Send and clear accumulated expired key events
-  if (auto& events = db_arr_[cntx.db_index]->expired_keys_events_; !events.empty()) {
-    channel_store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events,
-                                false);
-    events.clear();
-  }
+  // Send and clear accumulated expired key events are deferred to SendExpiredKeyEvents(),
+  // which is called by the heartbeat outside the atomic section to avoid suspending
+  // inside a fiber-atomic section (see issue #7052).
 
   return result;
+}
+
+void DbSlice::SendExpiredKeyEvents() {
+  for (DbIndex i = 0; i < db_arr_.size(); ++i) {
+    if (!db_arr_[i])
+      continue;
+    // Swap out the events before calling SendMessages: EnsureMemoryBudget inside SendMessages
+    // can preempt, allowing other fibers to append to expired_keys_events_ and potentially
+    // reallocate the vector, invalidating any view into it.
+    vector<string> events;
+    std::swap(events, db_arr_[i]->expired_keys_events_);
+    if (events.empty())
+      continue;
+    channel_store->SendMessages(absl::StrCat("__keyevent@", i, "__:expired"), events, false);
+  }
 }
 
 int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const {

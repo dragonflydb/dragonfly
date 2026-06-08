@@ -435,6 +435,10 @@ class DbSlice {
   // Deletes some amount of possible expired items.
   DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count);
 
+  // Sends keyspace notifications for all expired keys accumulated during DeleteExpiredStep.
+  // Must be called outside any fiber-atomic section (see issue #7052).
+  void SendExpiredKeyEvents();
+
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
   // Returns number of (elements,bytes) freed due to evictions.

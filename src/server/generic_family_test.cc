@@ -20,6 +20,7 @@ extern "C" {
 
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(uint32_t, container_iteration_yield_interval_usec);
+ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 
 using namespace testing;
 using namespace std;
@@ -2111,6 +2112,43 @@ TEST_F(GenericFamilyTest, SortByNosortStoreInMulti) {
   // Verify the store actually happened and the server is healthy.
   EXPECT_THAT(Run({"lrange", "dest", "0", "-1"}), ArrLen(3));
   EXPECT_EQ(Run({"get", "x"}), "9");
+}
+
+// Regression test for https://github.com/dragonflydb/dragonfly/issues/7052
+// Heartbeat-driven key expiry must not call SendMessages inside a fiber-atomic section.
+TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
+  // Enable expired-key keyspace notifications.
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  Run({"set", "mykey", "myval"});
+  Run({"expire", "mykey", "1"});
+  AdvanceTime(1100);
+
+  // Drive expiry the same way the heartbeat does: DeleteExpiredStep accumulates events,
+  // SendExpiredKeyEvents flushes them — both must run outside the atomic section.
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    DbContext db_cntx;
+    db_cntx.db_index = 0;
+    db_cntx.time_now_ms = TEST_current_time_ms;
+    db_slice.DeleteExpiredStep(db_cntx, 100);
+    db_slice.SendExpiredKeyEvents();
+  });
+
+  // Flush all async dispatch callbacks so the subscriber's thread receives the message.
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_EQ("__keyevent@0__:expired", msg.channel);
+  EXPECT_EQ("mykey", msg.message);
+
+  // Restore the flag so it doesn't bleed into other tests.
+  Run({"CONFIG", "SET", "notify_keyspace_events", ""});
 }
 
 }  // namespace dfly
