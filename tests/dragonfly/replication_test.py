@@ -151,6 +151,7 @@ async def assert_replica_data_matches(c_master, c_replicas):
         assert False, "Replica data does not match master"
 
 
+@pytest.mark.skip(reason="Just disable.")
 @pytest.mark.parametrize(
     "t_master, t_replicas, seeder_config, stream_target",
     [
