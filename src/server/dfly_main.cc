@@ -84,7 +84,7 @@ ABSL_DECLARE_FLAG(std::string, admin_bind);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, maxmemory);
 ABSL_DECLARE_FLAG(uint32_t, proactor_threads);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
-ABSL_DECLARE_FLAG(bool, use_oah_set);
+ABSL_FLAG(bool, use_oah_set, false, "If true, store SET values in OAHSet instead of StringSet.");
 
 namespace dfly {
 extern bool g_use_oah_set;  // defined in core/oah_set.h

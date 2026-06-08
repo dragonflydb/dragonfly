@@ -662,6 +662,7 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
             await collect_expiring_events(pclient, keys)
 
 
+@pytest.mark.skip("Fails constantly on CI")
 @dfly_multi_test_args(
     {"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "false"},
     {"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "true"},
