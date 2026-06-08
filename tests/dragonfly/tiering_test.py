@@ -21,7 +21,7 @@ BASIC_ARGS = {
     "proactor_threads": 4,
     "tiered_prefix": "/tmp/tiered/backing",
     "tiered_offload_threshold": "1.0",  # offload immediately
-    "tiered_storage_write_depth": 1000,
+    "tiered_max_pending_stash_bytes": "16MB",
     "maxmemory": "1G",
 }
 
@@ -118,7 +118,7 @@ async def test_tiered_replication_strings_with_append(df_factory: DflyInstanceFa
         tiered_prefix="/tmp/tiered/backing_master",
         tiered_offload_threshold="0.6",
         tiered_upload_threshold="0.2",
-        tiered_storage_write_depth=1500,
+        tiered_max_pending_stash_bytes="16MB",
         **args,
     )
     master.start()
@@ -134,7 +134,7 @@ async def test_tiered_replication_strings_with_append(df_factory: DflyInstanceFa
         maxmemory="512MB",
         tiered_prefix="/tmp/tiered/backing_replica",
         tiered_offload_threshold="0.5",
-        tiered_storage_write_depth=1500,
+        tiered_max_pending_stash_bytes="16MB",
     )
     replica.start()
     replica_client = replica.client()
@@ -258,7 +258,7 @@ async def test_tiered_replication_with_lists(df_factory: DflyInstanceFactory):
         maxmemory="512MB",
         tiered_prefix="/tmp/tiered/backing_master_list",
         tiered_offload_threshold="1.0",
-        tiered_storage_write_depth=1500,
+        tiered_max_pending_stash_bytes="16MB",
         tiered_experimental_cooling="false",
         list_max_listpack_size=1,
         list_tiering_threshold=2,

@@ -2048,18 +2048,17 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   } else {  // Master side
     string replication_lag_metrics;
     vector<ReplicaRoleInfo> replicas_info = dfly_cmd->GetReplicasRoleInfo();
-    ReplicationMemoryStats repl_mem;
-    dfly_cmd->GetReplicationMemoryStats(&repl_mem);
     if (legacy) {
       AppendMetricWithoutLabels(
           "replication_streaming_bytes", "Stable sync replication memory usage",
-          repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
+          m.replication_stats.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
       AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
-                                repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
+                                m.replication_stats.full_sync_buf_bytes, MetricType::GAUGE,
+                                &resp->body());
     }
-    AppendMetricValue("memory_by_class_bytes", repl_mem.streamer_buf_capacity_bytes, {"class"},
-                      {"replication_streaming"}, &memory_by_class_bytes);
-    AppendMetricValue("memory_by_class_bytes", repl_mem.full_sync_buf_bytes, {"class"},
+    AppendMetricValue("memory_by_class_bytes", m.replication_stats.streamer_buf_capacity_bytes,
+                      {"class"}, {"replication_streaming"}, &memory_by_class_bytes);
+    AppendMetricValue("memory_by_class_bytes", m.replication_stats.full_sync_buf_bytes, {"class"},
                       {"replication_full_sync"}, &memory_by_class_bytes);
 
     AppendMetricWithoutLabels("replication_psync_count", "Pync count",
@@ -3151,7 +3150,7 @@ void ServerFamily::ResetStat(Namespace* ns) {
       });
 }
 
-Metrics ServerFamily::GetMetrics(Namespace* ns) const {
+Metrics ServerFamily::GetMetrics(Namespace* ns, bool collect_replication_memory) const {
   Metrics result;
   util::fb2::Mutex mu;
 
@@ -3207,6 +3206,11 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
         result.lsn_buffer_size += journal::LsnBufferSize();
         result.lsn_buffer_bytes += journal::LsnBufferBytes();
       }
+
+      // Fold the per-shard replication-memory collection into this fan-out
+      // instead of a dedicated RunBriefInParallel in DflyCmd.
+      if (collect_replication_memory)
+        result.replication_stats += dfly_cmd_->GetReplicationMemoryStats(shard);
     }  // if (shard)
 
     result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
@@ -3435,10 +3439,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
     // master
     if (!m.replica_side_info) {
-      ReplicationMemoryStats repl_mem;
-      dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
-      append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes);
-      append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes);
+      append("replication_streaming_buffer_bytes", m.replication_stats.streamer_buf_capacity_bytes);
+      append("replication_full_sync_buffer_bytes", m.replication_stats.full_sync_buf_bytes);
     }
 
     if (auto controller_copy = GetSaveController()) {
@@ -3527,6 +3529,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
     append("tiered_pending_read_cnt", m.tiered_stats.pending_read_cnt);
     append("tiered_pending_stash_cnt", m.tiered_stats.pending_stash_cnt);
+    append("tiered_pending_stash_bytes", m.tiered_stats.pending_stash_bytes);
 
     append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
@@ -3600,8 +3603,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("tx_normal_total", m.coordinator_stats.tx_normal_cnt);
     append("tx_inline_runs_total", m.coordinator_stats.tx_inline_runs);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
-    append("tx_batch_scheduled_items_total", m.shard_stats.tx_batch_scheduled_items_total);
-    append("tx_batch_schedule_calls_total", m.shard_stats.tx_batch_schedule_calls_total);
     append("tx_with_freq", absl::StrJoin(m.coordinator_stats.tx_width_freq_arr, ","));
     append("squash_with_freq", absl::StrJoin(m.coordinator_stats.squash_width_freq_arr, ","));
     append("tx_queue_len", m.tx_queue_len);
@@ -3822,6 +3823,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 void ServerFamily::Info(CmdArgList args, CommandContext* cmd_cntx) {
   std::vector<std::string> sections;
   bool need_metrics{false};  // Save time - do not fetch metrics if we don't need them.
+  bool need_repl_mem{false};
   Metrics metrics;
 
   sections.reserve(args.size());
@@ -3831,10 +3833,15 @@ void ServerFamily::Info(CmdArgList args, CommandContext* cmd_cntx) {
     if (!need_metrics && (section != "SERVER") && (section != "REPLICATION")) {
       need_metrics = true;
     }
+    // Mirror should_enter()'s MEMORY gate: the section is rendered for an exact
+    // match or for "ALL" (the empty/no-args case is handled below).
+    if (section == "MEMORY" || section == "ALL") {
+      need_repl_mem = true;
+    }
   }
 
   if (need_metrics || sections.empty()) {
-    metrics = GetMetrics(cmd_cntx->server_conn_cntx()->ns);
+    metrics = GetMetrics(cmd_cntx->server_conn_cntx()->ns, need_repl_mem || sections.empty());
   } else if (!IsMaster()) {
     metrics.replica_side_info = GetReplicaSummary();
   }

@@ -25,6 +25,7 @@ class ListenerInterface;
 
 namespace dfly {
 
+class EngineShard;
 class EngineShardSet;
 class ServerFamily;
 class RdbSaver;
@@ -249,7 +250,9 @@ class DflyCmd {
   // Master-side command. Provides Replica info.
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const ABSL_LOCKS_EXCLUDED(mu_);
 
-  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const ABSL_NO_THREAD_SAFETY_ANALYSIS;
+  // Must be called on the given shard's thread (e.g. from the GetMetrics
+  // fan-out). Lock-free: reads thread-local replica infos.
+  static ReplicationMemoryStats GetReplicationMemoryStats(EngineShard* shard);
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionState* state, DflyVersion version);

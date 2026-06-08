@@ -64,6 +64,12 @@ struct ReplicaRoleInfo {
 struct ReplicationMemoryStats {
   size_t streamer_buf_capacity_bytes = 0;  // total capacities of streamer buffers
   size_t full_sync_buf_bytes = 0;          // total bytes used for full sync buffers
+
+  ReplicationMemoryStats& operator+=(const ReplicationMemoryStats& o) {
+    streamer_buf_capacity_bytes += o.streamer_buf_capacity_bytes;
+    full_sync_buf_bytes += o.full_sync_buf_bytes;
+    return *this;
+  }
 };
 
 struct LoadingStats {
@@ -123,6 +129,9 @@ struct Metrics {
 
   size_t lsn_buffer_size = 0;
   size_t lsn_buffer_bytes = 0;
+
+  // Meaningful only on a master (zero on replicas / no replicas).
+  ReplicationMemoryStats replication_stats;
 
   // CPU cycles timestamp (CycleClock) of the connection stuck on send for longest time.
   uint64_t oldest_pending_send_ts = uint64_t(-1);
@@ -240,7 +249,9 @@ class ServerFamily {
 
   void ResetStat(Namespace* ns);
 
-  Metrics GetMetrics(Namespace* ns) const;
+  // Pass collect_replication_memory=false to skip the per-shard replication
+  // collection when no consumer (INFO MEMORY / metrics) needs it.
+  Metrics GetMetrics(Namespace* ns, bool collect_replication_memory = true) const;
 
   std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section,
                                 bool priveleged) const;

@@ -7,7 +7,6 @@
 #include <absl/strings/match.h>
 
 #include <memory>
-#include <new>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -83,35 +82,6 @@ uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
 
-struct ScheduleContext {
-  Transaction* trans;
-  bool optimistic_execution = false;
-
-  std::atomic<ScheduleContext*> next{nullptr};
-
-  std::atomic_uint32_t fail_cnt{0};
-
-  ScheduleContext(Transaction* t, bool optimistic) : trans(t), optimistic_execution(optimistic) {
-  }
-};
-
-constexpr size_t kAvoidFalseSharingSize = 64;
-struct ScheduleQ {
-  alignas(kAvoidFalseSharingSize) base::MPSCIntrusiveQueue<ScheduleContext> queue;
-  alignas(kAvoidFalseSharingSize) atomic_bool armed{false};
-};
-
-void MPSC_intrusive_store_next(ScheduleContext* dest, ScheduleContext* next_node) {
-  dest->next.store(next_node, std::memory_order_relaxed);
-}
-
-ScheduleContext* MPSC_intrusive_load_next(const ScheduleContext& src) {
-  return src.next.load(std::memory_order_acquire);
-}
-
-// of shard_num arity.
-ScheduleQ* schedule_queues = nullptr;
-
 }  // namespace
 
 bool Transaction::BatonBarrier::IsClaimed() const {
@@ -165,17 +135,6 @@ Transaction::Guard::~Guard() {
   };
   tx->Execute(cb, true);
   tx->Refurbish();
-}
-
-void Transaction::Init(unsigned num_shards) {
-  DCHECK(schedule_queues == nullptr);
-  schedule_queues = new ScheduleQ[num_shards];
-}
-
-void Transaction::Shutdown() {
-  DCHECK(schedule_queues);
-  delete[] schedule_queues;
-  schedule_queues = nullptr;
 }
 
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
@@ -771,26 +730,18 @@ void Transaction::ScheduleInternal() {
       break;
     }
 
-    ScheduleContext schedule_ctx{this, optimistic_exec};
+    atomic_uint32_t fail_cnt{0};
+
+    auto cb = [this, optimistic_exec, &fail_cnt] {
+      if (!ScheduleInShard(EngineShard::tlocal(), optimistic_exec)) {
+        fail_cnt.fetch_add(1, memory_order_relaxed);
+      }
+      FinishHop();
+    };
 
     if (unique_shard_cnt_ == 1) {
-      // Single shard optimization. Note: we could apply the same optimization
-      // to multi-shard transactions as well by creating a vector of ScheduleContext.
-      schedule_queues[unique_shard_id_].queue.Push(&schedule_ctx);
-      bool current_val = false;
-      if (schedule_queues[unique_shard_id_].armed.compare_exchange_strong(current_val, true,
-                                                                          memory_order_acq_rel)) {
-        shard_set->Add(unique_shard_id_, &Transaction::ScheduleBatchInShard);
-      }
+      shard_set->Add(unique_shard_id_, cb);
     } else {
-      auto cb = [&schedule_ctx] {
-        if (!schedule_ctx.trans->ScheduleInShard(EngineShard::tlocal(),
-                                                 schedule_ctx.optimistic_execution)) {
-          schedule_ctx.fail_cnt.fetch_add(1, memory_order_relaxed);
-        }
-        schedule_ctx.trans->FinishHop();
-      };
-
       IterateActiveShards([cb](const auto& sd, ShardId i) { shard_set->Add(i, cb); });
 
       // Add this debugging function to print more information when we experience deadlock
@@ -802,7 +753,7 @@ void Transaction::ScheduleInternal() {
     }
     run_barrier_.Wait();
 
-    if (schedule_ctx.fail_cnt.load(memory_order_relaxed) == 0) {
+    if (fail_cnt.load(memory_order_relaxed) == 0) {
       break;
     }
 
@@ -1327,45 +1278,6 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   DVLOG(1) << "Insert into tx-queue, sid(" << sid << ") " << DebugId() << ", qlen " << txq->size();
 
   return true;
-}
-
-void Transaction::ScheduleBatchInShard() {
-  EngineShard* shard = EngineShard::tlocal();
-  auto& stats = shard->stats();
-  stats.tx_batch_schedule_calls_total++;
-
-  ShardId sid = shard->shard_id();
-  auto& sq = schedule_queues[sid];
-
-  for (unsigned j = 0;; ++j) {
-    // We pull the items from the queue in a loop until we reach the stop condition.
-    // TODO: we may have fairness problem here, where transactions being added up all the time
-    // and we never break from the loop. It is possible to break early but it's not trivial
-    // because we must ensure that there is another ScheduleBatchInShard callback in the queue.
-    // Can be checked with testing sq.armed is true when j == 1.
-    while (true) {
-      ScheduleContext* item = sq.queue.Pop();
-      if (!item)
-        break;
-
-      if (!item->trans->ScheduleInShard(shard, item->optimistic_execution)) {
-        item->fail_cnt.fetch_add(1, memory_order_relaxed);
-      }
-      item->trans->FinishHop();
-      stats.tx_batch_scheduled_items_total++;
-    };
-
-    // j==1 means we already signalled that we're done with the current batch.
-    if (j == 1)
-      break;
-
-    // We signal that we're done with the current batch but then we check if there are more
-    // transactions to fetch in the next iteration.
-    // We do this to avoid the situation where we have a data race, where
-    // a transaction is added to the queue, we've checked that sq.armed is true and skipped
-    // adding the callback that fetches the transaction.
-    sq.armed.exchange(false, memory_order_acq_rel);
-  }
 }
 
 bool Transaction::CancelShardCb(EngineShard* shard) {
