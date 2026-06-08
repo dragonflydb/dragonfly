@@ -452,9 +452,8 @@ async def test_expiry_heartbeat_responsiveness(df_factory: DflyInstanceFactory):
 # virtual-memory cap (the fuzzer runs with `ulimit -v`, no maxmemory). opt_only:
 # release builds start under the cap, sanitizer builds reserve far more and can't.
 BIT_OOM_VMEM_CAP = 2 * 1024 * 1024 * 1024
-BIT_OOM_FILLER_OFFSET = 2_400_000_000  # ~300MB
-BIT_OOM_MAXMEMORY = 256 * 1024 * 1024
-BIT_OOM_HUGE_OFFSET = 8_589_934_583
+BIT_OOM_FILLER_OFFSET = 200 * 1024 * 1024 * 8  # 200MiB string, within the max string size
+BIT_OOM_MAXMEMORY = 128 * 1024 * 1024  # below the filler, so the server ends up over maxmemory
 
 
 @pytest.mark.opt_only
@@ -473,7 +472,7 @@ async def test_bitops_denyoom(df_factory: DflyInstanceFactory):
     for cmd in (
         ("SETBIT", "guard", 0, 1),
         ("BITOP", "AND", "dest", "filler", "filler"),
-        ("BITFIELD", "bk", "SET", "u8", str(BIT_OOM_HUGE_OFFSET), "1"),
+        ("BITFIELD", "bk", "SET", "u8", 0, 1),
     ):
         with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
             await client.execute_command(*cmd)
