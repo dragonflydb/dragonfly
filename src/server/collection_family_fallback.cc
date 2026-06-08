@@ -9,6 +9,7 @@
 #include "server/set_family.h"
 #include "server/stream_family.h"
 #include "server/zset_family.h"
+
 namespace dfly {
 
 using namespace std;
@@ -38,6 +39,18 @@ void* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
 uint32_t SetFamily::MaxIntsetEntries() {
   Fail();
   return 0;
+}
+
+bool SetFamily::DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
+                                 const PrimeValue& pv) {
+  Fail();
+  return false;
+}
+
+bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
+                               const PrimeValue& pv) {
+  Fail();
+  return false;
 }
 
 LoadBlobResult SetFamily::LoadLPSetBlob(std::string_view blob, bool deep, PrimeValue* pv) {
