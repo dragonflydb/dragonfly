@@ -576,6 +576,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.total_cancels = shard_stats.total_cancels;
     stats.total_defrags = shard_stats.total_defrags;
     stats.total_uploads = shard_stats.total_uploads;
+    stats.delayed_defrag_queue_size = op_manager_->delayed_defrag_queue_.size();
   }
 
   {  // OpManager stats
