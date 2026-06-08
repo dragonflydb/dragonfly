@@ -18,6 +18,7 @@
 #include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
 #include "facade/resp_expr_test_utils.h"
+#include "facade/string_socket.h"
 
 using namespace testing;
 using namespace std;
@@ -169,7 +170,7 @@ class RedisReplyBuilderTest : public testing::Test {
   // Call the redis parser with the data in the sink
   ParsingResults Parse();
 
-  io::StringSink sink_;
+  StringSocket sink_;
   std::unique_ptr<RedisReplyBuilder> builder_;
   std::unique_ptr<std::uint8_t[]> parser_buffer_;
 };
@@ -981,7 +982,7 @@ TEST_F(RedisReplyBuilderTest, Issue4424) {
 }
 
 TEST_F(RedisReplyBuilderTest, MCMetaGetLargeValue) {
-  io::StringSink mc_sink;
+  StringSocket mc_sink;
   MCReplyBuilder mc_builder(&mc_sink);
 
   MemcacheCmdFlags flags;

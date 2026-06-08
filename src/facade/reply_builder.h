@@ -14,6 +14,10 @@
 #include "facade/facade_types.h"
 #include "io/io.h"
 
+namespace util {
+class FiberSocketBase;
+}  // namespace util
+
 namespace facade {
 
 enum class RespVersion { kResp2, kResp3 };
@@ -44,7 +48,11 @@ class SinkReplyBuilder {
 
   static thread_local PendingList pending_list;
 
-  explicit SinkReplyBuilder(io::Sink* sink) : sink_(sink) {
+  explicit SinkReplyBuilder(util::FiberSocketBase* socket) : socket_(socket) {
+  }
+
+  util::FiberSocketBase* socket() {
+    return socket_;
   }
 
   virtual ~SinkReplyBuilder() = default;
@@ -139,7 +147,7 @@ class SinkReplyBuilder {
   std::string last_error_;
 
  private:
-  io::Sink* sink_;
+  util::FiberSocketBase* socket_;
   std::error_code ec_;
 
   bool scoped_ = false, batched_ = false;
@@ -157,7 +165,7 @@ class SinkReplyBuilder {
 
 class MCReplyBuilder : public SinkReplyBuilder {
  public:
-  explicit MCReplyBuilder(::io::Sink* sink);
+  explicit MCReplyBuilder(util::FiberSocketBase* socket);
 
   ~MCReplyBuilder() override = default;
 
@@ -183,7 +191,7 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
  public:
   enum VerbatimFormat : uint8_t { TXT, MARKDOWN };
 
-  explicit RedisReplyBuilderBase(io::Sink* sink) : SinkReplyBuilder(sink) {
+  explicit RedisReplyBuilderBase(util::FiberSocketBase* socket) : SinkReplyBuilder(socket) {
   }
 
   ~RedisReplyBuilderBase() override = default;
@@ -243,7 +251,7 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
  public:
   using ScoredArray = absl::Span<const std::pair<std::string, double>>;
 
-  RedisReplyBuilder(io::Sink* sink) : RedisReplyBuilderBase(sink) {
+  RedisReplyBuilder(util::FiberSocketBase* socket) : RedisReplyBuilderBase(socket) {
   }
 
   ~RedisReplyBuilder() override = default;
