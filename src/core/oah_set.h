@@ -25,7 +25,7 @@ class OAHSet {  // Open Addressing Hash Set
   using Buckets = std::vector<OAHEntry, OAHEntryAllocator>;
 
  public:
-  static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
+  static constexpr std::uint32_t kShiftLog = 5;                         // TODO make template
   static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
 
@@ -91,9 +91,8 @@ class OAHSet {  // Open Addressing Hash Set
       return owner_;
     }
 
-    // Reallocates fragmented buffers in this entry's bucket. For vector buckets, the
-    // inner entries and the array buffer are all checked. Returns true iff anything
-    // moved. Idempotent: repeated calls within a defrag pass hit fresh pages and no-op.
+    // Reallocates fragmented buffers in this bucket (inner entries + array buffer for
+    // vectors). Returns true iff anything moved. Idempotent within a defrag pass.
     bool ReallocIfNeeded(PageUsage* page_usage) {
       auto& bucket = owner_->entries_[bucket_];
       bool realloced = false;
@@ -151,23 +150,24 @@ class OAHSet {  // Open Addressing Hash Set
 
   static constexpr uint32_t kMaxBatchLen = 32;
 
-  // SIMD wide of kDisplacementSize uint64 lanes; one lane per consecutive bucket.
-  // OAHEntry is a single uint64_t under the hood, so 4 entries are 32 contiguous
-  // bytes — perfect for an AVX2 256-bit register on x86_64.
+  // OAHEntry is one uint64_t, so 4 entries fill a 32-byte AVX2 register. The window is
+  // probed in kEntryLaneStep-lane strides, so kDisplacementSize must be a multiple of
+  // the stride and <= 32 (masks fit a uint32_t).
   static_assert(sizeof(OAHEntry) == sizeof(uint64_t));
   static_assert(alignof(OAHEntry) == alignof(uint64_t));
-  using EntryWide = SimdOp<uint64_t, kDisplacementSize>;
+  static constexpr std::uint32_t kEntryLaneStep = 4;
+  using EntryWide = SimdOp<uint64_t, kEntryLaneStep>;
+  static_assert(kDisplacementSize % kEntryLaneStep == 0 && kDisplacementSize <= 32);
 
-  // 2-lane SIMD for iterating the extension-point vector. Vectors are
-  // guaranteed power-of-2 capacity with minimum 2 (see OAHEntry::Insert), so a
-  // 2-lane (16-byte SSE) load is always within the heap allocation.
+  // 2-lane SIMD for iterating the extension-point vector. Vector sizes are always
+  // even with a minimum of 2 (see OAHEntry::Insert / PtrVector::Grow), so a 2-lane
+  // (16-byte SSE) load always stays within the heap allocation.
   static constexpr std::uint32_t kVectorLaneStep = 2;
   using VectorWide = SimdOp<uint64_t, kVectorLaneStep>;
 
   explicit OAHSet() = default;
 
-  // Inserts `str` (optional TTL); returns false if already present. Thin
-  // out-of-line entry point over the FORCE_INLINE AddImpl.
+  // Inserts `str` (optional TTL); returns false if already present.
   bool Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX);
 
   void Reserve(size_t sz) {
@@ -182,25 +182,10 @@ class OAHSet {  // Open Addressing Hash Set
     assert(entries_.size() >= kDisplacementSize);
   }
 
-  // Shrinks the table to the specified size. The new_size must be a power of 2,
-  // >= kMinCapacity (which is 1 << kMinCapacityLog), and >= current number of elements.
-  // This method should be called explicitly when memory reclamation is needed.
-  void Shrink(size_t new_size) {
-    assert(absl::has_single_bit(new_size));
-    assert(new_size >= (1u << kMinCapacityLog));
-    assert(new_size < entries_.size());
-
-    size_t prev_size = entries_.size();
-    capacity_log_ = absl::bit_width(new_size) - 1;
-
-    // Process from low to high (opposite of Grow/Rehash).
-    for (size_t i = 0; i < prev_size; ++i) {
-      ShrinkBucket(i);
-    }
-
-    entries_.resize(Capacity());
-    entries_.shrink_to_fit();
-  }
+  // TODO rewrite using extended hash approach
+  //
+  // Shrinks the table to new_size (power of 2, >= 1 << kMinCapacityLog and >= element count).
+  void Shrink(size_t new_size);
 
   void Clear() {
     capacity_log_ = 0;
@@ -211,9 +196,8 @@ class OAHSet {  // Open Addressing Hash Set
     expiration_used_ = false;
   }
 
-  // Incrementally clears entries in [start, start+count). Returns the next bucket index;
-  // when the returned value equals Capacity() (i.e. entries_.size()), the table is empty.
-  // Mirrors DenseSet::ClearStep, used by AsyncDeleter for cooperative deletion.
+  // Incrementally clears [start, start+count). Returns the next bucket index; equals
+  // Capacity() when the table is empty. Mirrors DenseSet::ClearStep (AsyncDeleter).
   uint32_t ClearStep(uint32_t start, uint32_t count) {
     const uint32_t total = entries_.size();
     const uint32_t end = std::min(total, start + count);
@@ -299,24 +283,6 @@ class OAHSet {  // Open Addressing Hash Set
     return bucket_id << (32 - capacity_log_);
   }
 
-  OAHEntry Pop() {
-    for (auto& bucket : entries_) {
-      if (auto res = bucket.Pop(); !res.Empty()) {
-        assert(!res.IsVector());
-        --size_;
-        obj_alloc_used_ -= res.AllocSize();
-        if (bucket.IsVector()) {
-          if (bucket.AsVector().Empty()) {
-            ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
-            bucket = OAHEntry();
-          }
-        }
-        return res;
-      }
-    }
-    return {};
-  }
-
   bool Erase(std::string_view str);
 
   iterator Find(std::string_view member);
@@ -325,48 +291,8 @@ class OAHSet {  // Open Addressing Hash Set
     return Find(member) != end();
   }
 
-  // Returns iterator to a uniformly random non-empty entry, or end() if the set is empty.
-  // Mirrors StringSet::GetRandomMember (used by SPOP/SRANDMEMBER).
-  iterator GetRandomMember() {
-    if (entries_.empty() || size_ == 0)
-      return end();
-
-    static thread_local absl::InsecureBitGen rng;
-    const uint32_t num_buckets = entries_.size();
-    uint32_t start_bucket = absl::Uniform<uint32_t>(rng, 0u, num_buckets);
-
-    for (uint32_t n = 0; n < num_buckets; ++n) {
-      uint32_t bucket_id = start_bucket + n;
-      if (bucket_id >= num_buckets)
-        bucket_id -= num_buckets;
-      auto& bucket = entries_[bucket_id];
-      if (bucket.Empty())
-        continue;
-
-      if (!bucket.IsVector()) {
-        bucket.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
-        if (!bucket.Empty())
-          return iterator{this, bucket_id, 0};
-        continue;
-      }
-
-      auto& vec = bucket.AsVector();
-      const uint32_t vec_size = vec.Size();
-      uint32_t start_pos = absl::Uniform<uint32_t>(rng, 0u, vec_size);
-      for (uint32_t p = 0; p < vec_size; ++p) {
-        uint32_t pos = start_pos + p;
-        if (pos >= vec_size)
-          pos -= vec_size;
-        auto& entry = vec[pos];
-        if (!entry)
-          continue;
-        entry.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
-        if (entry)
-          return iterator{this, bucket_id, pos};
-      }
-    }
-    return end();
-  }
+  // Iterator to a uniformly random non-empty entry, or end() if empty (SPOP/SRANDMEMBER).
+  iterator GetRandomMember();
 
   // Returns the number of elements in the map. Note that it might be that some of these elements
   // have expired and can't be accessed.
@@ -424,43 +350,7 @@ class OAHSet {  // Open Addressing Hash Set
     return hash >> (64 - capacity_log);
   }
   // was Grow in StringSet
-  void Rehash(uint32_t prev_capacity_log, uint32_t prev_size) {
-    if (prev_size == 0) {
-      return;
-    }
-    // we should prevent moving elements before current possition to avoid double processing
-    constexpr size_t mix_size = (2 << kShiftLog) - 1;
-    std::array<OAHEntry, mix_size> old_buckets{};
-    for (size_t i = 0; i < mix_size; ++i) {
-      old_buckets[i] = std::move(entries_[i]);
-    }
-
-    for (size_t bucket_id = prev_size - 1; bucket_id >= mix_size; --bucket_id) {
-      auto bucket = std::move(entries_[bucket_id]);
-      for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
-        if (bucket[pos]) {
-          auto new_bucket_id = RehashEntry(bucket[pos], bucket_id, prev_capacity_log);
-          new_bucket_id = FindEmptyAround(new_bucket_id);
-          ptr_vectors_alloc_used_ += entries_[new_bucket_id].Insert(std::move(bucket[pos]));
-        }
-      }
-      if (bucket.IsVector())
-        ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
-    }
-
-    for (size_t bucket_id = 0; bucket_id < mix_size; ++bucket_id) {
-      auto& bucket = old_buckets[bucket_id];
-      for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
-        if (bucket[pos]) {
-          auto new_bucket_id = RehashEntry(bucket[pos], bucket_id, prev_capacity_log);
-          new_bucket_id = FindEmptyAround(new_bucket_id);
-          ptr_vectors_alloc_used_ += entries_[new_bucket_id].Insert(std::move(bucket[pos]));
-        }
-      }
-      if (bucket.IsVector())
-        ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
-    }
-  }
+  void Rehash(uint32_t prev_capacity_log, uint32_t prev_size);
 
   // it is inefficient for now,
   // TODO predict new position by current position and extended hash
@@ -491,7 +381,7 @@ class OAHSet {  // Open Addressing Hash Set
     }
   }
 
-  uint32_t GetExtensionPoint(const uint32_t bid) const {
+  static uint32_t GetExtensionPoint(uint32_t bid) {
     constexpr uint32_t extension_point_shift = kDisplacementSize - 1;
     return bid | extension_point_shift;
   }
@@ -523,46 +413,46 @@ class OAHSet {  // Open Addressing Hash Set
     return ttl_sec == UINT32_MAX ? ttl_sec : time_now_ + ttl_sec;
   }
 
-  uint32_t FindEmptyAround(uint32_t bid) {
-    for (uint32_t i = 0; i < kDisplacementSize; i++) {
-      const uint32_t bucket_id = bid + i;
-      if (entries_[bucket_id].Empty())
-        return bucket_id;
-      // TODO add expiration logic
-    }
+  // First empty slot in the window [bid, bid+kDisplacementSize), or the extension
+  // point if full. SIMD over EntryWide strides.
+  uint32_t FindEmptyAround(uint32_t bid);
 
-    bid = GetExtensionPoint(bid);
-    assert(bid < entries_.size());
-    return bid;
-  }
+  // Returns an iterator to a live entry in bucket `b` (skipping just-expired ones for
+  // single entries and walking vector entries in order), or end() if none remain.
+  // FORCE_INLINE: it sits inside ScanRange's hot SIMD inner loop.
+  iterator PickFromBucket(uint32_t b);
+
+  // Linear [lo, hi) scan returning the first live entry or end(). SIMD strides over
+  // EntryWide::kLanes plus a scalar tail for the < kLanes trailing buckets. Kept
+  // out-of-line so GetRandomMember can call it twice (hot range + rare wrap) without
+  // duplicating the body in the cold path.
+  iterator ScanRange(uint32_t lo, uint32_t hi);
 
   // The body of Add, FORCE_INLINE so it folds into Add and AddMany.
   bool AddImpl(std::string_view str, uint32_t ttl_sec);
 
   // Result of a SIMD probe over a run of OAHEntry lanes.
   struct LaneMasks {
-    // Non-empty lanes whose stored ext-hash matches or is lazily zero: key-compare
-    // candidates the caller confirms by key.
-    uint32_t candidates;
-    uint32_t empties;  // empty lanes (data_ == 0); Add uses these to pick a slot.
+    uint32_t candidates;  // non-empty lanes whose ext-hash matches or is lazily zero
+    uint32_t empties;     // empty lanes (data_ == 0); Add picks a slot from these
   };
 
-  // Vectorized hash probe over Wide::kLanes consecutive OAHEntry lanes from
-  // `base`. Backs the displacement-window (EntryWide) and extension-vector
-  // (VectorWide) scans. Defined in oah_set.cc.
+  // Vectorized hash probe over Wide::kLanes consecutive lanes from `base`. Backs
+  // the window (EntryWide) and extension-vector (VectorWide) scans.
   template <typename Wide>
   static LaneMasks ProbeLanes(const OAHEntry* base, uint64_t ext_hash) noexcept;
+
+  // Combined candidate/empty masks over the whole window (lane i -> bit i).
+  LaneMasks ProbeWindow(const OAHEntry* base, uint64_t ext_hash) noexcept;
 
   // Searches the extension-point vector for `str`. Returns the matched slot
   // (possibly now-empty after expiry, which the caller reuses) or nullptr.
   OAHEntry* ProbeExtensionVector(uint32_t ext_bid, std::string_view str, uint64_t ext_hash);
 
-  // Outcome of a key probe. A raw slot (not an iterator) so the caller can
-  // inspect/overwrite a matched-but-just-expired entry: it is Empty(), and
-  // dereferencing an iterator to it would hit OAHEntry::operator[]'s !Empty() assert.
+  // Outcome of a key probe. A raw slot (not an iterator) so the caller can reuse a
+  // matched-but-just-expired entry, which is Empty() and would trip operator[]'s assert.
   struct MatchResult {
-    OAHEntry* matched;    // matched entry, or null if the key is absent;
-                          // may be Empty() (just expired) — the caller reuses it
+    OAHEntry* matched;    // matched entry, or null if absent; may be Empty() (just expired)
     uint32_t bucket_id;   // location of `matched`, for building an iterator
     uint32_t pos_in_vec;  // position within a vector bucket (0 for single entries)
   };
@@ -655,18 +545,14 @@ class OAHSet {  // Open Addressing Hash Set
 // Snapshot of --use_oah_set captured once at startup.
 inline bool g_use_oah_set = false;
 
-// Dispatches a generic lambda over the runtime-selected dense-set type backing
-// kEncodingStrMap2 SETs. Both StringSet and OAHSet expose the same surface
-// (set_time, Empty, BucketCount, Reserve, ObjMallocUsed, ...) so the lambda
-// can be written once and visit either concrete type.
+// Dispatches a generic lambda over the runtime-selected set type (StringSet or
+// OAHSet) backing kEncodingStrMap2 SETs; both expose the same surface.
 template <typename Fn> auto VisitSet(void* ptr, Fn&& fn) {
   return g_use_oah_set ? fn(static_cast<OAHSet*>(ptr)) : fn(static_cast<StringSet*>(ptr));
 }
 
-// Extracts the current member as a string_view from either a StringSet or an
-// OAHSet iterator. Free functions so generic code (e.g. inside VisitSet
-// lambdas) can write `Key(it)` without a member-method asymmetry between the
-// two iterator types.
+// Current member as a string_view from either iterator type. Free functions so
+// generic code (e.g. VisitSet lambdas) can write `Key(it)` uniformly.
 inline std::string_view Key(StringSet::iterator it) {
   sds s = *it;
   return {s, sdslen(s)};
