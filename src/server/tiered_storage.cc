@@ -220,6 +220,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   bool NotifyDelete(tiering::DiskSegment segment) override;
 
+  void EnqueueForDefrag(tiering::DiskSegment segment);
+
   // If we are low on memory, remove entries from the ColdQueue,
   // and promote their PrimeValues to be fully external.
   void RetireColdEntries(size_t additional_memory);
@@ -309,6 +311,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     uint64_t total_defrags = 0;
     uint64_t total_uploads = 0;
   } stats_;
+
+  // When we don't have memory to upload a page for defragmentation, we save it here to do it later
+  std::deque<uint32_t /* offset */> delayed_defrag_queue_;
 
   TieredStorage* ts_;
   DbSlice& db_slice_;
@@ -415,14 +420,25 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
     return true;
   }
 
+  // If we have memory, upload the page for defrag. It will be reshuffled and offloaded more packed.
+  // Otherwise, enqueue the bin to be defragmented later when memory is available
   if (bin.fragmented) {
-    // Trigger read to signal need for defragmentation. NotifyFetched will handle it.
-    DVLOG(2) << "Enqueueing bin defragmentation for: " << bin.segment.offset;
-    Enqueue(
-        kFragmentedBin, bin.segment, tiering::BareDecoder{}, [](auto res) {}, true);
+    const size_t kMaxDelayedMem = 1_MB;
+    if (ts_->UploadBudget() > 0) {
+      EnqueueForDefrag(bin.segment);
+    } else if (delayed_defrag_queue_.size() * sizeof(uint32_t) < kMaxDelayedMem) {
+      delayed_defrag_queue_.push_back(bin.segment.offset);
+    }
   }
 
   return false;
+}
+
+void TieredStorage::ShardOpManager::EnqueueForDefrag(tiering::DiskSegment segment) {
+  // Trigger read to signal need for defragmentation. NotifyFetched will handle it.
+  DVLOG(2) << "Enqueueing bin defragmentation for: " << segment.offset;
+  Enqueue(
+      kFragmentedBin, segment, tiering::BareDecoder{}, [](...) {}, true);
 }
 
 void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) {
@@ -607,6 +623,10 @@ void TieredStorage::UpdateFromFlags() {
       .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_support),
       .experimental_list_offload = absl::GetFlag(FLAGS_tiered_experimental_list_support),
   };
+
+  LOG_IF(WARNING, config_.upload_threshold > config_.offload_threshold)
+      << "tiered_upload_threshold should be less than tiered_offload_threshold to maximize cache "
+         "and defragmentation effectiveness";
 }
 
 std::vector<std::string> TieredStorage::GetMutableFlagNames() {
@@ -617,16 +637,17 @@ std::vector<std::string> TieredStorage::GetMutableFlagNames() {
 }
 
 bool TieredStorage::ShouldOffload() const {
-  size_t free_memory = op_manager_->db_slice_.memory_budget();
-  size_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
-  // Cool values are already offloadeded, so don't count them as used memory
-  return (free_memory + CoolMemoryUsage()) < config_.offload_threshold * per_shard;
+  // Cool values can be dropped, so count as free as well
+  int64_t actual_free = op_manager_->db_slice_.memory_budget() + CoolMemoryUsage();
+  int64_t expected_free = double(config_.offload_threshold) *
+                          max_memory_limit.load(memory_order_relaxed) / shard_set->size();
+  return actual_free < expected_free;
 }
 
 int64_t TieredStorage::UploadBudget() const {
-  size_t free_memory = op_manager_->db_slice_.memory_budget();
-  size_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
-  return int64_t(free_memory) - int64_t(config_.upload_threshold * per_shard);
+  int64_t free_memory = op_manager_->db_slice_.memory_budget();
+  int64_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
+  return free_memory - double(config_.upload_threshold) * per_shard;
 }
 
 void TieredStorage::RunOffloading(DbIndex dbid) {
@@ -635,6 +656,9 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
     return;
 
   const auto start_cycles = base::CycleClock::Now();
+
+  // Takes up a small fixed amount of time and is best done before offloading (to be picked up)
+  ProcessDelayedDeframents();
 
   // Don't run offloading if there's only very little space left
   auto disk_stats = op_manager_->GetStats().disk_stats;
@@ -673,6 +697,24 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
     if (base::CycleClock::ToUsec(cycles) >= 100)
       break;
   } while (offloading_cursor_);
+}
+
+void TieredStorage::ProcessDelayedDeframents() {
+  const size_t kMaxEntries = 100;
+
+  auto& dd_queue = op_manager_->delayed_defrag_queue_;
+  if (dd_queue.empty() || UploadBudget() <= 0)
+    return;
+
+  size_t processed = 0;
+  while (processed < kMaxEntries && !dd_queue.empty()) {
+    uint32_t offset = dd_queue.front();
+    dd_queue.pop_front();
+
+    if (!bins_->IsFragmented(offset))
+      continue;
+    op_manager_->EnqueueForDefrag({offset, tiering::kPageSize});
+  }
 }
 
 size_t TieredStorage::ReclaimMemory(size_t goal) {

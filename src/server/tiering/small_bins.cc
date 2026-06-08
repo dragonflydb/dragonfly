@@ -158,6 +158,12 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
   return {segment};
 }
 
+bool SmallBins::IsFragmented(uint32_t offset) {
+  if (auto it = stashed_bins_.find(offset); it != stashed_bins_.end())
+    return it->second.bytes < kPageSize / 2;
+  return false;
+}
+
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
                .stashed_entries_cnt = stats_.stashed_entries_cnt,

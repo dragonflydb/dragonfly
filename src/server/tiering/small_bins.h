@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
 #include "server/tiering/entry_map.h"
 
@@ -75,6 +76,9 @@ class SmallBins {
   // Delete a stored segment. Returns information about the current bin, which might indicate
   // the need for external actions like deleting empty segments or triggering defragmentation
   BinInfo Delete(DiskSegment segment);
+
+  // Returns true if the page exists and is fragmented
+  bool IsFragmented(uint32_t offset);
 
   // Delete stashed bin. Returns list of recovered item key hashes and db indices.
   // Mainly used for defragmentation
