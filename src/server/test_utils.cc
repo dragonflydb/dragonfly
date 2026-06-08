@@ -493,16 +493,13 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, GetId());
   auto* context = conn_wrapper->cmd_cntx();
   context->ns = &namespaces->GetDefaultNamespace();
-  vector<cmn::BackedArguments> backed_args_vec(cmds.size());
+  vector<CommandContext> cmd_cntxs(cmds.size());
   for (size_t i = 0; i < cmds.size(); ++i) {
-    backed_args_vec[i] = cmn::BackedArguments(cmds[i].begin(), cmds[i].end(), cmds[i].size());
+    cmd_cntxs[i].Assign(cmds[i].begin(), cmds[i].end(), cmds[i].size());
+    if (i + 1 < cmds.size())
+      cmd_cntxs[i].next = &cmd_cntxs[i + 1];
   }
-  auto next_fn = [it = backed_args_vec.begin()]() mutable {
-    ParsedArgs args(*it);
-    ++it;
-    return args;
-  };
-  service_->DispatchManyCommands(next_fn, cmds.size(), conn_wrapper->builder(), context);
+  service_->DispatchManyCommands(&cmd_cntxs[0], cmds.size(), conn_wrapper->builder(), context);
   DCHECK(context->transaction == nullptr);
 }
 

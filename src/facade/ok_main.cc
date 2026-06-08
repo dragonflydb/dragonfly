@@ -33,16 +33,15 @@ class OkService : public ServiceInterface {
     return DispatchResult::OK;
   }
 
-  DispatchManyResult DispatchManyCommands(std::function<ParsedArgs()> arg_gen, unsigned count,
+  DispatchManyResult DispatchManyCommands(ParsedCommand* head, unsigned count,
                                           SinkReplyBuilder* builder,
                                           ConnectionContext* cntx) final {
     for (unsigned i = 0; i < count; i++) {
-      ParsedArgs args = arg_gen();
-      ParsedCommand* cmd = AllocateParsedCommand();
+      ParsedCommand* cmd = head;
+      head = head->next;
       cmd->Init(builder, cntx);
-
+      ParsedArgs args{*cmd};
       DispatchCommand(args, cmd, AsyncPreference::ONLY_SYNC);
-      delete cmd;
     }
     DispatchManyResult result{
         .processed = static_cast<uint32_t>(count),

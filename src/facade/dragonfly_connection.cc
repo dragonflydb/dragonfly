@@ -1738,21 +1738,12 @@ void Connection::SquashPipeline() {
 
   uint64_t start = CycleClock::Now();
 
-  // Define a "Feeder" Lambda
-  // This lambda advances a temporary pointer exec_cmd_ptr to feed the execution engine.
-  // We do not modify parsed_to_execute_ yet, in case execution throws/fails.
-  auto exec_cmd_ptr{parsed_to_execute_};
-  auto get_next_fn = [&exec_cmd_ptr]() mutable -> ParsedArgs {
-    DCHECK(exec_cmd_ptr);
-    return ParsedArgs{*std::exchange(exec_cmd_ptr, exec_cmd_ptr->next)};
-  };
-
   // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
   // it must guard the Flush() as well.
   cc_->async_dispatch = true;
 
-  DispatchManyResult result =
-      service_->DispatchManyCommands(get_next_fn, pipeline_count, reply_builder_.get(), cc_.get());
+  DispatchManyResult result = service_->DispatchManyCommands(parsed_to_execute_, pipeline_count,
+                                                             reply_builder_.get(), cc_.get());
 
   local_stats_.cmds += result.processed;
   last_interaction_ = time(nullptr);
@@ -2705,7 +2696,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   cmd->next = nullptr;
   auto& conn_stats = tl_facade_stats->conn_stats;
 
-  cmd->parsed_cycle = base::CycleClock::Now();
+  cmd->FinalizeParsing();
 
   if (parsed_head_ == nullptr) {
     parsed_head_ = cmd;
@@ -2719,7 +2710,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   }
   parsed_tail_ = cmd;
 
-  size_t used_mem = cmd->UsedMemory();
+  size_t used_mem = cmd->EnqueuedBytes();
   parsed_cmd_q_len_++;
   parsed_cmd_q_bytes_ += used_mem;
   local_stats_.dispatch_entries_added++;
@@ -2734,7 +2725,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
-  size_t used_mem = cmd->UsedMemory();
+  size_t used_mem = cmd->EnqueuedBytes();
   auto& conn_stats = tl_facade_stats->conn_stats;
 
   DCHECK_GT(parsed_cmd_q_len_, 0u);

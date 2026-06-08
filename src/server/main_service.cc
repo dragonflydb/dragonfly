@@ -885,11 +885,16 @@ pair<intrusive_ptr<Transaction>, OpStatus> PrepareTransaction(const CommandId* c
   return {std::move(res), OpStatus::OK};
 }
 
-void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid, ArgSlice tail_args) {
+void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid,
+                       facade::ParsedCommand* parsed_cmd, uint8_t tail_index) {
   // TODO: protect against aggregating huge transactions.
   auto& exec_info = dfly_cntx->conn_state.exec_info;
   const size_t old_size = exec_info.GetStoredCmdBytes();
-  exec_info.AddStoredCmd(cid, tail_args);  // Deep copy of args.
+
+  // Moves arguments from parsed_cmd to body.
+  exec_info.body.emplace_back(cid, parsed_cmd, tail_index);
+  exec_info.stored_cmd_bytes += exec_info.body.back().UsedMemory();
+  exec_info.is_write |= cid->IsJournaled();
   ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
 }
 
@@ -1508,7 +1513,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   // If inside MULTI block, store command
   bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
-    StoreInMultiBlock(dfly_cntx, cid, tail_args);
+    uint8_t tail_index = args.size() - args_no_cmd.size();
+    StoreInMultiBlock(dfly_cntx, cid, parsed_cmd, tail_index);
     cmd_cntx->SendSimpleString("QUEUED");
     return DispatchResult::OK;
   }
@@ -1642,8 +1648,8 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   return res;
 }
 
-DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
-                                                 unsigned count, SinkReplyBuilder* builder,
+DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, unsigned count,
+                                                 SinkReplyBuilder* builder,
                                                  facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
@@ -1655,17 +1661,15 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
   if (ss->IsPaused())
     return {.processed = 0, .account_in_stats = false};
 
-  vector<StoredCmd> stored_cmds;
+  vector<CmdRef> cmd_refs;
   intrusive_ptr<Transaction> dist_trans;
   uint32_t dispatched = 0;
   MultiCommandSquasher::Stats stats;
 
   uint64_t start_cycles = base::CycleClock::Now();
-  CommandContext dummy_cmd_cntx;
-  dummy_cmd_cntx.Init(builder, dfly_cntx);
 
   auto perform_squash = [&] {
-    if (stored_cmds.empty())
+    if (cmd_refs.empty())
       return;
 
     if (!dist_trans) {
@@ -1681,17 +1685,24 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
     opts.verify_commands = true;
     opts.max_squash_size = ss->max_squash_cmd_num;
 
-    stats += MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
-                                           static_cast<RedisReplyBuilder*>(builder), dfly_cntx,
-                                           this, opts);
+    auto cmd_gen = [it = cmd_refs.begin(), end = cmd_refs.end()]() mutable -> CmdRef {
+      return (it == end) ? CmdRef{} : *it++;
+    };
+    stats += MultiCommandSquasher::Execute(
+        std::move(cmd_gen), static_cast<RedisReplyBuilder*>(builder), dfly_cntx, this, opts);
     dfly_cntx->transaction = nullptr;
 
-    dispatched += stored_cmds.size();
-    stored_cmds.clear();
+    dispatched += cmd_refs.size();
+    cmd_refs.clear();
   };
 
   for (unsigned i = 0; i < count; i++) {
-    ParsedArgs args = arg_gen();
+    ParsedCommand* parsed_cmd = head;
+    head = head->next;
+    CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
+    cmd_cntx->Init(builder, dfly_cntx);
+
+    ParsedArgs args{*parsed_cmd};
     const auto [cid, tail_args] = registry_.FindExtended(args);
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
@@ -1708,8 +1719,8 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
     const bool is_blocking = cid != nullptr && cid->IsBlocking();
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
-      stored_cmds.reserve(count);
-      stored_cmds.emplace_back(cid, tail_args);  // Shallow copy
+      cmd_refs.reserve(count);
+      cmd_refs.push_back(CmdRef{cid, tail_args});
       continue;
     }
 
@@ -1720,8 +1731,9 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
     if (ss->IsPaused())
       break;
 
-    // Dispatch non squashed command only after all squshed commands were executed and replied
-    DispatchCommand(args, &dummy_cmd_cntx, AsyncPreference::ONLY_SYNC);
+    // Dispatch non squashed command only after all squashed commands were executed and replied
+    cmd_cntx->UpdateCid(cid);
+    DispatchCommand(args, cmd_cntx, AsyncPreference::ONLY_SYNC);
     dispatched++;
   }
 
@@ -1991,7 +2003,10 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   opts.verify_commands = true;
   opts.error_abort = true;
   opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
-  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, opts);
+  auto cmd_gen = [it = info->async_cmds.begin(), end = info->async_cmds.end()]() mutable -> CmdRef {
+    return (it == end) ? CmdRef{} : (it++)->Ref();
+  };
+  MultiCommandSquasher::Execute(std::move(cmd_gen), &crb, cntx, this, opts);
 
   info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();
@@ -2516,9 +2531,12 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
 
     if (GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
+      auto cmd_gen = [it = exec_info.body.begin(), end = exec_info.body.end()]() mutable -> CmdRef {
+        return (it == end) ? CmdRef{} : (it++)->Ref();
+      };
       MultiCommandSquasher::Opts opts;
       opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
-      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this, opts);
+      MultiCommandSquasher::Execute(std::move(cmd_gen), rb, cntx, this, opts);
     } else {
       CmdArgVec arg_vec;
       DCHECK_EQ(cmd_cntx->cid(), exec_cid_);
