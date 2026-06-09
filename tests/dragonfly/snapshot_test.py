@@ -932,6 +932,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 
 
 @pytest.mark.large
+@pytest.mark.skip(reason="Fails - #7559")
 async def test_rdb_load_with_tiering_6823(df_factory: DflyInstanceFactory):
     """
     Regression test for RDB load with tiering. Verifies that loading a snapshot

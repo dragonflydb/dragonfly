@@ -7,6 +7,7 @@
 #include <coroutine>
 #include <variant>
 
+#include "base/cycle_clock.h"
 #include "base/function2.hpp"
 #include "common/backed_args.h"
 #include "facade/memcache_parser.h"
@@ -105,6 +106,15 @@ class ParsedCommand : public cmn::BackedArguments {
     return sz;
   }
 
+  size_t EnqueuedBytes() const {
+    return enqueued_bytes_;
+  }
+
+  void FinalizeParsing() {
+    parsed_cycle = base::CycleClock::Now();
+    enqueued_bytes_ = UsedMemory();
+  }
+
   // Marks this command as having reply stored in its payload instead of being sent directly.
   void SetDeferredReply() {
     is_deferred_reply_ = true;
@@ -187,11 +197,13 @@ class ParsedCommand : public cmn::BackedArguments {
   // otherwise, moved asynchronously into reply_payload_
   bool is_deferred_reply_ = false;
 
+  size_t enqueued_bytes_ = 0;
+
   std::variant<payload::Payload, SuspendedCommand> reply_;
 };
 
 #ifdef __linux__
-static_assert(sizeof(ParsedCommand) == 232);
+static_assert(sizeof(ParsedCommand) == 240);
 #endif
 
 }  // namespace facade
