@@ -152,6 +152,28 @@ struct CmdArgParser {
   // arguments.
   std::string_view ExpectStartsWith(std::string_view prefix, std::string error_msg);
 
+  // Consumes the next arg as integer T, allowing an optional leading `prefix` (sets *prefixed when
+  // present). Reports INVALID_INT if the remaining text isn't an integer. Use for offsets like
+  // BITFIELD's "#index" form.
+  template <class T> T NextWithPrefix(std::string_view prefix, bool* prefixed) {
+    static_assert(std::is_integral_v<T>);
+    if (cur_i_ >= args_.size()) {
+      Report(OUT_OF_BOUNDS, cur_i_);
+      return {};
+    }
+    size_t idx = cur_i_++;
+    std::string_view val = SafeSV(idx);
+    *prefixed = absl::StartsWith(val, prefix);
+    if (*prefixed)
+      val.remove_prefix(prefix.size());
+    T out{};
+    if (!absl::SimpleAtoi(val, &out)) {
+      Report(INVALID_INT, idx);
+      return {};
+    }
+    return out;
+  }
+
   template <class... Cases> auto MapNext(Cases&&... cases) {
     if (cur_i_ >= args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);

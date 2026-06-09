@@ -58,8 +58,6 @@ using CI = CommandId;
 
 enum class ExpT { EX, PX, EXAT, PXAT };
 
-constexpr uint32_t kMaxStrLen = 1 << 28;
-
 // Either immediately available value or tiering future + result
 template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
 
