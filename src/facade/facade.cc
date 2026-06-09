@@ -23,9 +23,10 @@ using namespace std;
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
-  static_assert(kSizeConnStats == 272);
+  static_assert(kSizeConnStats == 280);
 
   ADD(read_buf_capacity);
+  ADD(connection_memory_bytes);
   ADD(dispatch_queue_entries);
   ADD(dispatch_queue_bytes);
   ADD(pipeline_queue_entries);

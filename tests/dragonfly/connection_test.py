@@ -966,6 +966,14 @@ async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
         stats = await async_client.execute_command("memory stats")
         assert stats["connections.direct_bytes"] > 130000
 
+        metrics = await df_server.metrics()
+        connection_memory_bytes = metrics["dragonfly_connection_memory_bytes"].samples[0].value
+        assert connection_memory_bytes > 130000
+        assert any(
+            sample.labels["class"] == "connection" and sample.value == connection_memory_bytes
+            for sample in metrics["dragonfly_memory_by_class_bytes"].samples
+        )
+
     await check_stats()
 
 
