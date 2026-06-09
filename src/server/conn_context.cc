@@ -65,6 +65,14 @@ StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyM
   args_ = facade::ParsedArgs{*backed_};
 }
 
+StoredCmd::StoredCmd(const CommandId* cid, cmn::BackedArguments* src, uint8_t tail_index,
+                     facade::ReplyMode mode)
+    : cid_{cid}, reply_mode_{mode} {
+  backed_ = std::make_unique<cmn::BackedArguments>();
+  backed_->SwapArgs(*src);
+  args_ = facade::ParsedArgs{*backed_, tail_index};
+}
+
 CmdArgList StoredCmd::Slice(CmdArgVec* scratch) const {
   return args_.ToSlice(scratch);
 }
@@ -74,6 +82,10 @@ std::string StoredCmd::FirstArg() const {
     return {};
   }
   return string{args_.Front()};
+}
+
+CmdRef StoredCmd::Ref() const {
+  return CmdRef{cid_, args_, reply_mode_};
 }
 
 ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredentials cred)
@@ -170,12 +182,6 @@ void ConnectionContext::PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder
 
 size_t ConnectionState::ExecInfo::UsedMemory() const {
   return HeapSize(body) + HeapSize(watched_keys);
-}
-
-void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, ArgSlice args) {
-  body.emplace_back(cid, args);
-  stored_cmd_bytes += body.back().UsedMemory();
-  is_write |= cid->IsJournaled();
 }
 
 size_t ConnectionState::ExecInfo::ClearStoredCmds() {
