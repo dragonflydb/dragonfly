@@ -9,7 +9,7 @@ import redis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory
-from .utility import tmp_file_name
+from .utility import assert_eventually, tmp_file_name
 
 
 @pytest.mark.large
@@ -113,18 +113,22 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     df_server.start()
 
     client = df_server.client()
-    await client.execute_command("DEBUG POPULATE 10000 key 40000 RAND")
+    await client.execute_command("DEBUG POPULATE 10100 key 40000 RAND")
 
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 
     new_client = df_server.admin_client() if admin_port else df_server.client()
-    await new_client.ping()
-
-    info = await new_client.info("memory")
-    logging.debug(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
-
     reject_limit = 256 * 1024 * 1024  # 256mb
-    assert info["used_memory_rss"] > reject_limit
+
+    @assert_eventually(timeout=5)
+    async def rss_compare(gt: bool):
+        info = await new_client.info("memory")
+        rss = info["used_memory_rss"]
+        used = info["used_memory"]
+        logging.info(f"Used memory {used}, rss {rss}")
+        assert (rss > reject_limit) if gt else (rss < reject_limit)
+
+    await rss_compare(True)
 
     # get command from existing connection should not be rejected
     await client.execute_command("get x")
@@ -142,11 +146,8 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     # flush to free memory
     await new_client.flushall()
 
-    await asyncio.sleep(2)  # Wait for another RSS heartbeat update in Dragonfly
-
-    info = await new_client.info("memory")
-    logging.debug(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
-    assert info["used_memory_rss"] < reject_limit
+    await rss_compare(False)
+    await asyncio.sleep(0.5)  # Wait for another RSS heartbeat update in Dragonfly
 
     # new client create shoud not fail after memory usage decrease
     client = df_server.client()
