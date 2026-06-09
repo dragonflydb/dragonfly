@@ -310,6 +310,7 @@ class CompositionPayload:
     commit_range: str
     analyzed: list[AnalyzedCommit]
     user_facing: list[CompositionCommit]
+    demoted_user_facing: list[CompositionCommit]
     promoted_themes: dict[str, list[CompositionCommit]]
     full_changelog: list[str]
     announce_highlights: list[CompositionCommit]
@@ -1400,6 +1401,50 @@ def _has_signal(text: str) -> bool:
     return bool(text.strip())
 
 
+def _normalize_blacklist_terms(raw_terms: list[str]) -> tuple[str, ...]:
+    terms: list[str] = []
+    for raw in raw_terms:
+        for part in raw.split(","):
+            normalized = part.strip().lower()
+            if normalized:
+                terms.append(normalized)
+    return tuple(dict.fromkeys(terms))
+
+
+def _canonicalize_blacklist_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def _matches_highlight_blacklist(
+    analyzed_commit: AnalyzedCommit,
+    blacklist_terms: tuple[str, ...],
+) -> bool:
+    if not blacklist_terms:
+        return False
+
+    fields = [
+        analyzed_commit.analysis.theme,
+        analyzed_commit.analysis.summary,
+        analyzed_commit.analysis.use_case,
+        analyzed_commit.analysis.audience,
+        analyzed_commit.analysis.adoption_notes,
+        analyzed_commit.analysis.technical_details,
+        analyzed_commit.analysis.competitive_context,
+        analyzed_commit.analysis.validation_notes,
+        analyzed_commit.analysis.caveats,
+        analyzed_commit.commit.subject,
+        analyzed_commit.commit.body,
+    ]
+    haystacks = [field.strip().lower() for field in fields if field.strip()]
+    haystacks_canonical = [_canonicalize_blacklist_text(field) for field in haystacks]
+
+    for term in blacklist_terms:
+        canonical_term = _canonicalize_blacklist_text(term)
+        if canonical_term and any(canonical_term in haystack for haystack in haystacks_canonical):
+            return True
+    return False
+
+
 def _score_announce_candidate(analyzed_commit: AnalyzedCommit, promoted_theme_size: int) -> float:
     analysis = analyzed_commit.analysis
     score = _ANNOUNCE_CATEGORY_WEIGHTS.get(analysis.category, 1.0)
@@ -1464,14 +1509,23 @@ def build_composition_payload(
     commit_range: str,
     analyzed: list[AnalyzedCommit],
     top_highlights_override: Optional[int] = None,
+    highlight_blacklist_terms: tuple[str, ...] = (),
 ) -> CompositionPayload:
     user_facing = [a for a in analyzed if a.analysis.user_facing]
-    promoted = detect_promoted_themes(user_facing)
+    narrative_candidates = [
+        a for a in user_facing if not _matches_highlight_blacklist(a, highlight_blacklist_terms)
+    ]
+    demoted_candidates = [
+        a for a in user_facing if _matches_highlight_blacklist(a, highlight_blacklist_terms)
+    ]
+
+    promoted = detect_promoted_themes(narrative_candidates)
     promoted_sizes = {theme: len(commits) for theme, commits in promoted.items()}
 
     normalized_user_facing: list[CompositionCommit] = []
+    demoted_user_facing: list[CompositionCommit] = []
     by_sha: dict[str, CompositionCommit] = {}
-    for analyzed_commit in user_facing:
+    for analyzed_commit in narrative_candidates + demoted_candidates:
         theme = analyzed_commit.analysis.theme.strip().lower()
         promoted_theme_size = promoted_sizes.get(theme, 0)
         item = CompositionCommit(
@@ -1480,11 +1534,17 @@ def build_composition_payload(
             promoted_theme_size=promoted_theme_size,
             announce_score=_score_announce_candidate(analyzed_commit, promoted_theme_size),
         )
-        normalized_user_facing.append(item)
+        if analyzed_commit in demoted_candidates:
+            demoted_user_facing.append(item)
+        else:
+            normalized_user_facing.append(item)
         by_sha[analyzed_commit.commit.sha] = item
 
+    narrative_shas = {item.commit.sha for item in normalized_user_facing}
     normalized_promoted = {
-        theme: [by_sha[a.commit.sha] for a in commits] for theme, commits in promoted.items()
+        theme: [by_sha[a.commit.sha] for a in commits]
+        for theme, commits in promoted.items()
+        if all(a.commit.sha in narrative_shas for a in commits)
     }
     announce_highlights = _select_announce_highlights(
         normalized_user_facing,
@@ -1495,6 +1555,7 @@ def build_composition_payload(
         commit_range=commit_range,
         analyzed=analyzed,
         user_facing=normalized_user_facing,
+        demoted_user_facing=demoted_user_facing,
         promoted_themes=normalized_promoted,
         full_changelog=[f"- {a.commit.subject}" for a in analyzed],
         announce_highlights=announce_highlights,
@@ -1795,6 +1856,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--highlight-blacklist",
+        action="append",
+        default=[],
+        metavar="TERM[,TERM...]",
+        help=(
+            "Comma-separated theme or feature terms to demote from second-phase narrative "
+            "generation. Matching user-facing commits stay only in the full changelog and "
+            "are excluded from curated sections, promoted themes, and announce highlights."
+        ),
+    )
+    parser.add_argument(
         "--max-parallel",
         type=_positive_int,
         default=DEFAULT_PARALLEL,
@@ -1901,6 +1973,7 @@ async def _run_async(
     cache_dir: Optional[Path],
     output_dir: Path,
     top_highlights_override: Optional[int],
+    highlight_blacklist_terms: tuple[str, ...],
 ) -> None:
     analyzed, stats = await analyze_with_retries(
         backend,
@@ -1925,7 +1998,14 @@ async def _run_async(
         commit_range,
         analyzed,
         top_highlights_override=top_highlights_override,
+        highlight_blacklist_terms=highlight_blacklist_terms,
     )
+
+    if payload.demoted_user_facing:
+        print(
+            "  Demoted from narrative due to highlight blacklist: "
+            + ", ".join(item.ref for item in payload.demoted_user_facing)
+        )
 
     print(f"\nAll commits analyzed. Composing {target.name} ...")
     notes = await compose_target(backend, target, payload)
@@ -1979,6 +2059,7 @@ def main() -> int:
     backend = _build_backend(args.backend)
     target = TARGETS[args.target]
     cache_dir = _resolve_cache_dir(args.no_cache, args.cache_dir, repo, backend)
+    highlight_blacklist_terms = _normalize_blacklist_terms(args.highlight_blacklist)
 
     try:
         asyncio.run(
@@ -1992,6 +2073,7 @@ def main() -> int:
                 cache_dir,
                 Path(args.output_dir).resolve(),
                 args.top_highlights,
+                highlight_blacklist_terms,
             )
         )
     except _AnalysisIncompleteError as e:
