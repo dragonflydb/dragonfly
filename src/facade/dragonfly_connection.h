@@ -264,6 +264,13 @@ class Connection : public util::Connection {
 
   ConnectionContext* cntx();
 
+  // For non replication connections refresh memory usage field as well as update tl stats if conn.
+  // is still live.
+  void RefreshConnectionMemoryUsage();
+
+  // Sets to false on switching to replication to remove accounting for direct bytes
+  void SetConnectionMemoryAccounting(bool enabled);
+
   // Requests that at some point, this connection will be migrated to `dest` thread.
   // If force is false, the connection will migrate at most once,
   // and only when the flag --migrate_connections is true.
@@ -605,6 +612,13 @@ class Connection : public util::Connection {
   uint32_t id_;
   Protocol protocol_;
   Phase phase_ = SETUP;
+  // memory is not accounted before this flag is set in IncreaseConnStats
+  // to prevent duplicate increment etc before migration
+  bool conn_stats_registered_ = false;
+  // should conn. memory be counted at all, replication conn. is counted separately so this is set
+  // to false
+  bool account_connection_memory_ = true;
+  size_t accounted_connection_memory_bytes_ = 0;
 
   struct {
     size_t read_cnt = 0;                // total number of read calls

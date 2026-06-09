@@ -14,6 +14,7 @@ namespace facade {
 
 struct ConnectionStats {
   size_t read_buf_capacity = 0;  // total capacity of input buffers
+  size_t connection_memory_bytes = 0;
   // Count of pending messages in dispatch queue
   uint64_t dispatch_queue_entries = 0;
   // Memory used by pending messages in dispatch queue
