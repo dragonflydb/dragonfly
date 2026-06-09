@@ -136,6 +136,8 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
   void SendLong(long val);
+
+  // Deprecated: use Resolve instead for deferred replies.
   template <typename F> void ReplyWith(F&& func) {
     assert(!is_deferred_reply_);
     using RbType = decltype(OnlyArgType(&std::decay_t<F>::operator()));
@@ -155,12 +157,14 @@ class ParsedCommand : public cmn::BackedArguments {
   // Assumes CanReply() is true. Sends reply
   void SendReply();
 
-  // Resolve deferred command with reply
+  // Resolve deferred command immediately with an error reply.
   void Resolve(const facade::ErrorReply& error) {
     SendError(error);
   }
 
-  // Resolve deferred command with async task
+  // Suspend the deferred command until `blocker` reaches zero.
+  // When that happens, CanReply() returns true and SendReply() will resume `coro`,
+  // which is expected to write the reply directly to the reply builder.
   void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, std::coroutine_handle<> coro) {
     reply_ = SuspendedCommand{blocker, coro};
   }
