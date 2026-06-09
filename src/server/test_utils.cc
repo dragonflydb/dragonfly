@@ -530,7 +530,7 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, MCArgs args) -
 
   DCHECK(context->transaction == nullptr);
 
-  service_->DispatchMC(&cmd_cntx, AsyncPreference::ONLY_SYNC);
+  service_->DispatchCommandSimple(&cmd_cntx, AsyncPreference::ONLY_SYNC);
 
   DCHECK(context->transaction == nullptr);
 
@@ -566,7 +566,7 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
   }
 
   cmd_cntx.Assign(src, list.end(), list.end() - src);
-  service_->DispatchMC(&cmd_cntx, AsyncPreference::ONLY_SYNC);
+  service_->DispatchCommandSimple(&cmd_cntx, AsyncPreference::ONLY_SYNC);
 
   return conn->SplitLines();
 }

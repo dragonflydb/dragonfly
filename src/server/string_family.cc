@@ -1040,6 +1040,26 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
   if (auto err = parser.TakeError(); err)
     return err.MakeReply();
 
+  if (auto* mc = cmd_cntx->mc_command()) {
+    using MP = facade::MemcacheParser;
+    if (mc->type == MP::ADD)
+      sparams.flags |= SetCmd::SET_IF_NOTEXIST;
+    else if (mc->type == MP::REPLACE)
+      sparams.flags |= SetCmd::SET_IF_EXISTS;
+
+    if (mc->expire_ts > 0) {
+      sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
+      DbSlice::ExpireParams expiry{.value = mc->expire_ts, .unit = TimeUnit::SEC, .absolute = true};
+      int64_t now_ms = GetCurrentTimeMs();
+      auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
+      if (abs_ms < 0)
+        return facade::ErrorReply{InvalidExpireTime("set")};
+      if (rel_ms < 0)
+        return NegativeExpire{};
+      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
+    }
+  }
+
   auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
   if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
       has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
@@ -1352,7 +1372,8 @@ cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
 
 cmd::CmdR CmdIncr(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(cmd_cntx, key, 1);
+  int64_t delta = cmd_cntx->mc_command() ? int64_t(cmd_cntx->mc_command()->delta) : 1;
+  return IncrByGeneric(cmd_cntx, key, delta);
 }
 
 cmd::CmdR CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1392,7 +1413,8 @@ cmd::CmdR CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
 
 cmd::CmdR CmdDecr(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(cmd_cntx, key, -1);
+  int64_t delta = cmd_cntx->mc_command() ? int64_t(cmd_cntx->mc_command()->delta) : 1;
+  return IncrByGeneric(cmd_cntx, key, -delta);
 }
 
 cmd::CmdR CmdDecrBy(CmdArgList args, CommandContext* cmd_cntx) {

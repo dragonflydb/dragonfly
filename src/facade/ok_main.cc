@@ -50,11 +50,6 @@ class OkService : public ServiceInterface {
     return result;
   }
 
-  DispatchResult DispatchMC(ParsedCommand* cmd, AsyncPreference) final {
-    cmd->rb()->SendError("");
-    return DispatchResult::OK;
-  }
-
   ConnectionContext* CreateContext(Connection* owner) final {
     return new ConnectionContext{owner};
   }

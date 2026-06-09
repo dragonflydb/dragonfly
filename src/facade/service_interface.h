@@ -19,7 +19,6 @@ namespace facade {
 class ConnectionContext;
 class Connection;
 class SinkReplyBuilder;
-class MCReplyBuilder;
 
 // Controls asynchronicity of command dispatch
 enum class AsyncPreference : uint8_t {
@@ -54,8 +53,6 @@ class ServiceInterface {
   virtual DispatchManyResult DispatchManyCommands(ParsedCommand* head, unsigned count,
                                                   SinkReplyBuilder* builder,
                                                   ConnectionContext* cntx) = 0;
-
-  virtual DispatchResult DispatchMC(ParsedCommand* cmd, AsyncPreference) = 0;
 
   virtual ConnectionContext* CreateContext(Connection* owner) = 0;
 

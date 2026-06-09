@@ -2574,9 +2574,6 @@ bool Connection::ExecuteBatch() {
     return parsed_head_;
   };
 
-  auto dispatch = protocol_ == Protocol::MEMCACHE ? &ServiceInterface::DispatchMC
-                                                  : &ServiceInterface::DispatchCommandSimple;
-
   // Execute sequentially all parsed commands.
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
     if (reply_builder_->GetError())
@@ -2605,7 +2602,7 @@ bool Connection::ExecuteBatch() {
     // sendmsg syscalls to a minimum. IoLoopV2's idle-await block handles the final flush.
     reply_builder_->SetBatchMode(ioloop_v2_ && is_head && (cmd->next != nullptr));
 
-    auto dispatch_res = (service_->*dispatch)(cmd, mode);
+    auto dispatch_res = service_->DispatchCommandSimple(cmd, mode);
 
     // Enforce the pipeline reply-ordering invariant: replies must reach the socket in parse order.
     // V1 (ONLY_SYNC): all commands run serially, so parsed_to_execute_ always equals parsed_head_
@@ -2619,8 +2616,7 @@ bool Connection::ExecuteBatch() {
     bool is_deferred = cmd->IsDeferredReply();
     DCHECK(is_head || (is_deferred == (dispatch_res != DispatchResult::WOULD_BLOCK)))
         << "Pipeline contract breach! Invalid state for non-head command. "
-        << "DispatchResult: " << static_cast<int>(dispatch_res) << ", IsDeferred: " << is_deferred
-        << ", Command Type: " << cmd->mc_command()->type;
+        << "DispatchResult: " << static_cast<int>(dispatch_res) << ", IsDeferred: " << is_deferred;
 
     if (dispatch_res == DispatchResult::WOULD_BLOCK)
       break;  // Sync command. Wait for current async commands to finish
