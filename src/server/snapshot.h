@@ -90,11 +90,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
                                  bool on_update) override;
 
-  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
-
-  // Serialize entry into passed serializer.
-  void SerializeEntry(BucketIdentity bucket, DbIndex db_index, const PrimeKey& pk,
-                      const PrimeValue& pv);
+  // Called under stream_mu_ to perform RDB serialization of a single entry.
+  void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                            time_t expire, uint32_t mc_flags) override;
 
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.

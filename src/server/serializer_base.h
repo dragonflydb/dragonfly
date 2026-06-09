@@ -158,6 +158,17 @@ class SerializerBase : public BucketDependencies,
   virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) = 0;
 
+  // Serialize single entry with expire/flags
+  virtual void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                                    time_t expire, uint32_t mc_flags) = 0;
+
+  // Serialize entry while automatically handling delayed/cooled values, calls SerializeEntryLocked
+  void SerializeEntry(BucketIdentity bucket, DbIndex db_index, const PrimeKey& pk,
+                      const PrimeValue& pv);
+
+  // Calls SerializeEntry internally under stream_mu_
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
+
   // Called before a set of buckets is mutated.
   void OnChange(DbIndex db_index, const ChangeReq& req) override;
 

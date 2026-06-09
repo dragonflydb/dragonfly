@@ -114,8 +114,9 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                  bool on_update) override;
 
-  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override {
-    RecordSerialized(tde.key.ToString());
+  void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                            time_t expire, uint32_t mc_flags) override {
+    RecordSerialized(pk.ToString());
   }
 
   void ConsumeJournalChange(const journal::JournalChangeItem& item) override;
@@ -134,11 +135,18 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
                                                      delay_driver_.Enqeue(delay), 0, 0);
       DelayedEntryHandler::delayed_entries_.emplace(bucket, std::move(de));
     } else {
+      std::lock_guard lk{stream_mu_};
       RecordSerialized(std::move(key));
     }
   }
 
   void RecordSerialized(std::string key) {
+    // Simulate occasional yields due to big value flushes
+    while (absl::Bernoulli(bg_, 0.3)) {
+      for (unsigned it = absl::Uniform(bg_, 1, 10); it > 0; it--)
+        util::ThisFiber::Yield();
+    }
+
     CHECK(!emitted_baselines_.contains(key));
     CHECK(!journal_writes_.contains(key));  // No journal entries must exist for this key
     emitted_baselines_.emplace(std::move(key));
@@ -202,13 +210,12 @@ void TestDriver::Loop() {
         ProcessBucket(snapshot_db_indx, it, false);
       });
 
-      util::ThisFiber::Yield();
+      // Simualte yield due to socket flushes
+      for (unsigned i = 0; i < 2; ++i)
+        util::ThisFiber::Yield();
     } while (snapshot_cursor_);
 
-    {
-      std::lock_guard guard(stream_mu_);
-      ProcessDelayedEntries(true, 0, base_cntx_);
-    }
+    ProcessDelayedEntries(true, 0, base_cntx_);
 
     util::ThisFiber::Yield();
   }  // for (dbindex)
@@ -247,14 +254,9 @@ unsigned TestDriver::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
-    std::lock_guard lk{stream_mu_};
+    // Call custom serialize instead of SerializerBases' to overwrite yielding behaviour
     Serialize(it.bucket_address(), it->first.ToString(), it->second.ObjType());
     ++serialized;
-
-    while (absl::Bernoulli(bg_, 0.3)) {
-      for (unsigned it = absl::Uniform(bg_, 1, 10); it > 0; it--)
-        util::ThisFiber::Yield();
-    }
   }
   return serialized;
 }
