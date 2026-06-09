@@ -12,8 +12,6 @@ extern "C" {
 #include "redis/util.h"  // for string2ll
 }
 
-#include <base/flags.h>
-
 #include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
@@ -30,8 +28,6 @@ extern "C" {
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/transaction.h"
-
-ABSL_FLAG(bool, use_oah_set, false, "If true, store SET values in OAHSet instead of StringSet.");
 
 namespace rng = std::ranges;
 

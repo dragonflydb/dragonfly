@@ -446,6 +446,14 @@ class PinnedMap {
   absl::flat_hash_map<const void*, PendingRead*> pin_map_;
 
  public:
+  ~PinnedMap() {
+    // Thread shutdown: free any PendingRead entries that EngineShard::Heartbeat
+    // never had a chance to drain. Orphan buffers are best-effort — the
+    // thread's mimalloc heap is going away anyway.
+    for (auto& [_, pin] : pin_map_)
+      delete pin;
+  }
+
   PendingRead* RegisterPin(const void* ptr);
   // Returns true if `ptr` was pinned.
   bool Orphan(const void* ptr);

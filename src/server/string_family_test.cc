@@ -1,6 +1,8 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <random>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -992,6 +994,217 @@ TEST_F(StringFamilyTest, MSetNxOddArgs) {
 
   resp = Run({"mset", "key", "value", "key2"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+}
+
+// Exercises the zero-copy GET fast path (CompactObj::TryBorrow() →
+// BorrowStringOrRead). The value must be a NONE_ENC large string: random
+// binary avoids inline storage and the ASCII/Huffman heuristics in
+// EncodeString. All sizes must clear BorrowStringOrRead's borrow threshold
+// (currently 16 KiB) so TryBorrow actually fires; we test a spread above it.
+TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
+  auto get_info_stat = [this](std::string_view name) -> uint64_t {
+    std::string stats = Run({"info", "stats"}).GetString();
+    std::string needle = absl::StrCat(name, ":");
+    size_t pos = stats.find(needle);
+    EXPECT_NE(pos, std::string::npos) << name;
+    if (pos == std::string::npos)
+      return 0;
+    pos += needle.size();
+    size_t line_end = stats.find("\r\n", pos);
+    EXPECT_NE(line_end, std::string::npos) << name;
+    if (line_end == std::string::npos)
+      return 0;
+    uint64_t value = 0;
+    EXPECT_TRUE(absl::SimpleAtoi(stats.substr(pos, line_end - pos), &value)) << name;
+    return value;
+  };
+
+  uint64_t initial_sent = get_info_stat("borrowed_strings_sent_total");
+  std::mt19937 rng{0xDF1FDF1F};
+  std::uniform_int_distribution<int> dist(0, 255);
+
+  for (size_t sz : {size_t{16384}, size_t{32768}, size_t{65536}}) {
+    std::string value(sz, '\0');
+    for (char& c : value)
+      c = static_cast<char>(dist(rng));
+
+    EXPECT_THAT(Run({"set", "k", value}), "OK");
+    auto resp = Run({"get", "k"});
+    EXPECT_EQ(resp, value) << "size " << sz;
+  }
+
+  EXPECT_EQ(get_info_stat("borrowed_strings_sent_total"), initial_sent + 3);
+}
+
+// Same as GetLargeRawBorrowed, but executes the GETs through MULTI/EXEC so the
+// reply round-trips through MultiCommandSquasher's CapturingReplyBuilder.
+// Without the SendBulkStringBorrowed override the captured payload would
+// materialize a std::string copy and silently defeat the zero-copy path on
+// pipelined / EXEC workloads. The borrow path must still fire
+// (borrowed_strings_sent_total advances) and the bytes must round-trip
+// correctly through capture and replay.
+TEST_F(StringFamilyTest, GetLargeRawBorrowedSquashed) {
+  auto get_info_stat = [this](std::string_view name) -> uint64_t {
+    std::string stats = Run({"info", "stats"}).GetString();
+    std::string needle = absl::StrCat(name, ":");
+    size_t pos = stats.find(needle);
+    EXPECT_NE(pos, std::string::npos) << name;
+    if (pos == std::string::npos)
+      return 0;
+    pos += needle.size();
+    size_t line_end = stats.find("\r\n", pos);
+    EXPECT_NE(line_end, std::string::npos) << name;
+    if (line_end == std::string::npos)
+      return 0;
+    uint64_t value = 0;
+    EXPECT_TRUE(absl::SimpleAtoi(stats.substr(pos, line_end - pos), &value)) << name;
+    return value;
+  };
+
+  uint64_t initial_sent = get_info_stat("borrowed_strings_sent_total");
+  std::mt19937 rng{0xDF1FDF1F};
+  std::uniform_int_distribution<int> dist(0, 255);
+
+  std::vector<std::string> values;
+  for (size_t sz : {size_t{16384}, size_t{32768}, size_t{65536}}) {
+    std::string value(sz, '\0');
+    for (char& c : value)
+      c = static_cast<char>(dist(rng));
+    values.push_back(std::move(value));
+  }
+
+  // Seed three keys with raw-encoded large strings.
+  EXPECT_THAT(Run({"set", "k0", values[0]}), "OK");
+  EXPECT_THAT(Run({"set", "k1", values[1]}), "OK");
+  EXPECT_THAT(Run({"set", "k2", values[2]}), "OK");
+
+  // GET them inside MULTI/EXEC — this dispatches through MultiCommandSquasher,
+  // so each GET reply is first captured then replayed to the real sink.
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"get", "k0"}), "QUEUED");
+  EXPECT_EQ(Run({"get", "k1"}), "QUEUED");
+  EXPECT_EQ(Run({"get", "k2"}), "QUEUED");
+  auto resp = Run({"exec"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(values[0], values[1], values[2])));
+
+  EXPECT_EQ(get_info_stat("borrowed_strings_sent_total"), initial_sent + 3);
+}
+
+// Exercises the PendingRead pin/orphan/drain cycle through CompactObj's
+// TryBorrow + SetString (CoW mutation) + DrainPendingReads. Two readers pin
+// the same buffer; a writer mutates the value, orphaning the old buffer;
+// then both readers unpin and drain reclaims the orphaned buffer.
+TEST_F(StringFamilyTest, PendingReadPinOrphanDrain) {
+  pp_->at(0)->Await([&] {
+    CompactValue cobj;
+    std::string val(300, '\x80');
+    cobj.SetString(val);
+
+    // Two readers borrow the same value → shared pin, refcnt = 2.
+    auto b1 = cobj.TryBorrow();
+    auto b2 = cobj.TryBorrow();
+    ASSERT_TRUE(b1.has_value() && b2.has_value());
+    EXPECT_EQ(CompactObj::TEST_PinRefcnt(*b1), 2u);
+    EXPECT_FALSE(CompactObj::TEST_PinOrphaned(*b1));
+
+    // Writer mutates: old buffer is orphaned to the pin.
+    std::string new_val(300, '\x81');
+    cobj.SetString(new_val);
+    EXPECT_TRUE(CompactObj::TEST_PinOrphaned(*b1));
+
+    // One unpin — refcnt 2 → 1, no drain yet.
+    b1.reset();
+    EXPECT_EQ(CompactObj::TEST_PinRefcnt(*b2), 1u);
+
+    // Second unpin — refcnt 1 → 0.
+    b2.reset();
+
+    // Drain reclaims the orphaned buffer and deletes the pin entry.
+    CompactObj::DrainPendingReads();
+  });
+}
+
+// Exercises the chunked ASCII decode path for zero-copy GET. Values must be
+// all-ASCII and large enough to clear BorrowStringOrRead's borrow threshold
+// (currently 16 KiB) so TryBorrow + chunked decode actually fires. Tests both
+// ASCII1_ENC (decoded size not at the 8-byte binpacked boundary) and
+// ASCII2_ENC (at the boundary). Also crosses the SinkReplyBuilder scratch
+// flush threshold (kMaxBufferSize = 8192) to validate intermediate Flushes
+// during chunked streaming.
+TEST_F(StringFamilyTest, GetLargeAsciiBorrowedChunked) {
+  // A varied ASCII pattern catches per-byte decode errors that a uniform
+  // 'a' filler would miss.
+  auto build = [](size_t sz) {
+    std::string v(sz, 0);
+    for (size_t i = 0; i < sz; ++i)
+      v[i] = static_cast<char>(0x20 + (i % 0x5F));  // printable ASCII range
+    return v;
+  };
+
+  struct Case {
+    size_t size;
+    const char* label;
+  };
+  Case cases[] = {
+      {16384, "16KiB ASCII2 (at borrow threshold + alignment boundary)"},
+      {16391, "ASCII1 (just above threshold, non-aligned tail)"},
+      {32768, "32KiB ASCII2 (multiple scratch flushes)"},
+      {65535, "ASCII1 (large, with unaligned tail)"},
+  };
+  for (const Case& c : cases) {
+    std::string value = build(c.size);
+    EXPECT_THAT(Run({"set", "k", value}), "OK") << c.label;
+    auto resp = Run({"get", "k"});
+    EXPECT_EQ(resp, value) << c.label << " size=" << c.size;
+  }
+}
+
+// Same as above but inside MULTI/EXEC to exercise the
+// CapturingReplyBuilder::SendBulkStringBorrowed override + visitor replay
+// path. Without the override, captured ASCII-encoded GETs would silently
+// fall back to the materializing SendBulkString.
+TEST_F(StringFamilyTest, GetLargeAsciiBorrowedChunkedSquashed) {
+  auto build = [](size_t sz) {
+    std::string v(sz, 0);
+    for (size_t i = 0; i < sz; ++i)
+      v[i] = static_cast<char>(0x20 + (i % 0x5F));
+    return v;
+  };
+
+  std::string v0 = build(16384);
+  std::string v1 = build(32768);
+
+  EXPECT_THAT(Run({"set", "k0", v0}), "OK");
+  EXPECT_THAT(Run({"set", "k1", v1}), "OK");
+
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"get", "k0"}), "QUEUED");
+  EXPECT_EQ(Run({"get", "k1"}), "QUEUED");
+  auto resp = Run({"exec"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(v0, v1)));
+}
+
+// Drain on a non-orphaned entry (no mutation during the read window) just
+// removes the entry from the map without freeing the buffer; the CompactObj
+// retains ownership of the storage for its normal lifecycle.
+TEST_F(StringFamilyTest, PendingReadDrainNonOrphaned) {
+  pp_->at(0)->Await([&] {
+    CompactValue cobj;
+    std::string val(300, '\x80');
+    cobj.SetString(val);
+
+    auto borrow = cobj.TryBorrow();
+    ASSERT_TRUE(borrow.has_value());
+    EXPECT_EQ(CompactObj::TEST_PinRefcnt(*borrow), 1u);
+    EXPECT_FALSE(CompactObj::TEST_PinOrphaned(*borrow));
+
+    // Unpin without any mutation — refcnt 1 → 0, no orphan.
+    borrow.reset();
+
+    // Drain removes the map entry; the buffer stays with the CompactObj.
+    CompactObj::DrainPendingReads();
+    cobj.Reset();
+  });
 }
 
 }  // namespace dfly

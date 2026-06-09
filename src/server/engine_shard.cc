@@ -749,6 +749,9 @@ void EngineShard::Heartbeat() {
   DVLOG(3) << " Hearbeat";
   DCHECK(namespaces);
 
+  // Reap zero-copy GET pins whose refcnt has dropped to 0. Cheap and idempotent.
+  CompactObj::DrainPendingReads();
+
   CacheStats();
 
   // TODO: iterate over all namespaces
