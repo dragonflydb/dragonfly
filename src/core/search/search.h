@@ -155,6 +155,10 @@ class FieldIndices {
 
   const Synonyms* GetSynonyms() const;
 
+  // True if `term` (case-folded) is a stopword for this index. Mirrors the index-time stopword
+  // check so query terms that are stopwords can be dropped instead of matching nothing.
+  bool IsStopWord(std::string_view term) const;
+
   SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
 
   void FinalizeInitialization();
