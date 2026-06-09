@@ -41,6 +41,11 @@
 
 ABSL_FLAG(bool, mget_dedup_keys, false, "If true, MGET will deduplicate keys");
 
+ABSL_FLAG(bool, get_zero_copy, true,
+          "If true, GET returns a borrowed view into the CompactObj raw payload "
+          "(zero-copy) for large raw strings; if false, falls back to the "
+          "materializing path. Toggle to A/B benchmark the zero-copy GET path.");
+
 namespace dfly {
 
 namespace {
@@ -57,11 +62,35 @@ constexpr uint32_t kMaxStrLen = 1 << 28;
 
 // Either immediately available value or tiering future + result
 template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
-using StringResult = TResultOrT<string>;
+
+// StringResult has either a borrowed-view of a string or a future result from tiered storage or
+// the classical materialized string.
+// BorrowedString is used by read-only commands (GET) that can borrow the
+// value directly from the shard's CompactObj instead of materializing an
+// owned std::string.
+//
+// cmn::BorrowedString carries its own pin + release fn; ownership flows
+// from CompactObj::TryBorrow through the variant into SendBulkStringBorrowed,
+// which parks the borrow until reply is complete and view is not needed anymore.
+using StringResult =
+    std::variant<std::string, cmn::BorrowedString, TieredStorage::TResult<std::string>>;
 
 StringResult ReadString(DbIndex dbid, string_view key, const PrimeValue& pv, EngineShard* es) {
   return pv.IsExternal() ? StringResult{ReadTieredString(dbid, key, pv, es->tiered_storage())}
                          : StringResult{pv.ToString()};
+}
+
+StringResult BorrowStringOrRead(DbIndex dbid, string_view key, const PrimeValue& pv,
+                                EngineShard* es) {
+  static bool zero_copy_enabled = absl::GetFlag(FLAGS_get_zero_copy);
+  constexpr size_t kBorrowThreshold = 16_KB;  // only borrow if value is at least this big
+
+  if (zero_copy_enabled && !pv.IsExternal() && pv.Size() >= kBorrowThreshold) {
+    if (auto raw = pv.TryBorrow()) {
+      return StringResult{std::move(*raw)};
+    }
+  }
+  return ReadString(dbid, key, pv, es);
 }
 
 // Helper for performing SET operations with various options
@@ -678,11 +707,34 @@ struct GetReplies {
       Send(iores.error().message());
   }
 
+  void Send(StringResult&& res) const {
+    if (holds_alternative<std::string>(res))
+      return Send(get<std::string>(res));
+    if (holds_alternative<cmn::BorrowedString>(res)) {
+      // Move the BorrowedString into SendBulkStringBorrowed; the reply builder takes ownership
+      // of the borrow (and associated pin) and parks the pin until all the writes complete.
+      rb->SendBulkStringBorrowed(std::move(get<cmn::BorrowedString>(res)));
+      return;
+    }
+    auto fut = get<TieredStorage::TResult<std::string>>(std::move(res));
+    io::Result<std::string> iores = fut.Get();
+    if (iores.has_value())
+      Send(*iores);
+    else
+      Send(iores.error().message());
+  }
+
   void Send(size_t val) const {
     rb->SendLong(val);
   }
 
+  // TODO: to remove.
   void Send(string_view str) const {
+    LOG(FATAL) << "SHOULD NOT SEND STRINGVIEW DIRECTLY";
+    rb->SendBulkString(str);
+  }
+
+  void Send(const std::string& str) const {
     rb->SendBulkString(str);
   }
 
@@ -1199,7 +1251,7 @@ cmd::CmdR CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
     if (!it_res.ok())
       return it_res.status();
 
-    return ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
+    return BorrowStringOrRead(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
   GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));

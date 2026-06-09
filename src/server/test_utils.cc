@@ -33,7 +33,7 @@ using namespace std;
 ABSL_DECLARE_FLAG(string, dbfilename);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
-ABSL_DECLARE_FLAG(bool, use_oah_set);
+ABSL_FLAG(bool, use_oah_set, false, "If true, store SET values in OAHSet instead of StringSet.");
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
 ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
 ABSL_DECLARE_FLAG(bool, enable_heartbeat_rss_eviction);
