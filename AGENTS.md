@@ -273,6 +273,19 @@ ctest -V -L DFLY                                    # Run all tests
 ./generic_family_test --gtest_filter="Set.*"        # Run specific test case
 ```
 
+**Python Integration Tests (pytest)**:
+```bash
+# Run from the repo root. The binary path defaults to build-dbg/dragonfly.
+# Override with the DRAGONFLY_PATH env var:
+DRAGONFLY_PATH=build-dbg/dragonfly python3 -m pytest tests/dragonfly/pymemcached_test.py -xvs
+
+# Run a single test:
+python3 -m pytest tests/dragonfly/pymemcached_test.py::TestMemcached::test_basic -xvs
+```
+
+- `DRAGONFLY_PATH` — sets the path to the Dragonfly binary the test harness starts. Defaults to `build-dbg/dragonfly` relative to the `tests/dragonfly/` directory.
+- `--df` — passes **extra flags to the Dragonfly process** (not the binary path). For example: `--df logtostdout --df "vmodule=*=1"`.
+
 ---
 
 ## CI/CD Pipeline

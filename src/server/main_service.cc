@@ -902,6 +902,38 @@ bool ShouldLogError(const CommandId& cid, string_view reason, CmdArgList tail_ar
   return tail_args.empty() || !absl::EqualsIgnoreCase(tail_args.front(), "maint_notifications");
 }
 
+string_view McTypeToCmdName(MemcacheParser::CmdType type) {
+  using MP = MemcacheParser;
+  switch (type) {
+    case MP::SET:
+    case MP::ADD:
+    case MP::REPLACE:
+      return "SET";
+    case MP::DELETE:
+      return "DEL";
+    case MP::INCR:
+      return "INCR";
+    case MP::DECR:
+      return "DECR";
+    case MP::APPEND:
+      return "APPEND";
+    case MP::PREPEND:
+      return "PREPEND";
+    case MP::GET:
+    case MP::GETS:
+      return "MGET";
+    case MP::GAT:
+    case MP::GATS:
+      return "GAT";
+    case MP::FLUSHALL:
+      return "FLUSHDB";
+    case MP::QUIT:
+      return "QUIT";
+    default:
+      return {};
+  }
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1417,19 +1449,32 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
 
 DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
                                         facade::AsyncPreference async_pref) {
-  DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
-  // We must resolve the command ID (cid) before the guard block.
-  // The following switch statement relies on the command's metadata
-  // (e.g., SupportsAsync()) to evaluate execution preferences,
-  // making this lookup a hard dependency for the logic below.
-  const auto [cid, args_no_cmd] = registry_.FindExtended(args);
+  const CommandId* cid = nullptr;
+  ParsedArgs args_no_cmd;
+
+  if (parsed_cmd->mc_command()) {
+    auto mc_res = HandleMemcacheCommand(parsed_cmd, async_pref);
+    if (std::holds_alternative<facade::DispatchResult>(mc_res)) {
+      return std::get<facade::DispatchResult>(mc_res);
+    }
+    cid = std::get<CommandId*>(mc_res);
+    args_no_cmd = args;  // MC args have no command name prefix
+  } else {
+    DCHECK(!args.empty());
+    std::tie(cid, args_no_cmd) = registry_.FindExtended(args);
+  }
+
   if (cid == nullptr) {
     if (async_pref != AsyncPreference::ONLY_SYNC) {
       parsed_cmd->SetDeferredReply();
     }
-    parsed_cmd->SendError(ReportUnknownCmd(absl::AsciiStrToUpper(args.Front())));
+    if (parsed_cmd->mc_command()) {
+      parsed_cmd->SendSimpleString("CLIENT_ERROR bad command line format");
+    } else {
+      parsed_cmd->SendError(ReportUnknownCmd(absl::AsciiStrToUpper(args.Front())));
+    }
     return DispatchResult::ERROR;
   }
 
@@ -1532,6 +1577,31 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   }
 
   return res;
+}
+
+std::variant<CommandId*, facade::DispatchResult> Service::HandleMemcacheCommand(
+    ParsedCommand* parsed_cmd, AsyncPreference async_pref) {
+  auto* mc = parsed_cmd->mc_command();
+  DCHECK(mc != nullptr);
+
+  if (mc->type == MemcacheParser::STATS || mc->type == MemcacheParser::VERSION) {
+    if (async_pref == AsyncPreference::ONLY_ASYNC)
+      return {facade::DispatchResult::WOULD_BLOCK};
+
+    auto* cmd_ctx = static_cast<CommandContext*>(parsed_cmd);
+    if (mc->type == MemcacheParser::STATS) {
+      server_family_.StatsMC(mc->key(), cmd_ctx);
+    } else {
+      cmd_ctx->SendSimpleString("VERSION 1.6.0 DF");
+    }
+    return {facade::DispatchResult::OK};  // replied to the client
+  }
+
+  string_view cmd_name = McTypeToCmdName(mc->type);
+  if (cmd_name.empty())
+    return nullptr;
+
+  return registry_.Find(cmd_name);
 }
 
 class ReplyGuard {
@@ -1642,8 +1712,8 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   return res;
 }
 
-DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
-                                                 unsigned count, SinkReplyBuilder* builder,
+DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, unsigned count,
+                                                 SinkReplyBuilder* builder,
                                                  facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
@@ -1661,8 +1731,6 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
   MultiCommandSquasher::Stats stats;
 
   uint64_t start_cycles = base::CycleClock::Now();
-  CommandContext dummy_cmd_cntx;
-  dummy_cmd_cntx.Init(builder, dfly_cntx);
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1691,7 +1759,12 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
   };
 
   for (unsigned i = 0; i < count; i++) {
-    ParsedArgs args = arg_gen();
+    ParsedCommand* parsed_cmd = head;
+    head = head->next;
+    CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
+    cmd_cntx->Init(builder, dfly_cntx);
+
+    ParsedArgs args{*parsed_cmd};
     const auto [cid, tail_args] = registry_.FindExtended(args);
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
@@ -1720,8 +1793,9 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
     if (ss->IsPaused())
       break;
 
-    // Dispatch non squashed command only after all squshed commands were executed and replied
-    DispatchCommand(args, &dummy_cmd_cntx, AsyncPreference::ONLY_SYNC);
+    // Dispatch non squashed command only after all squashed commands were executed and replied
+    cmd_cntx->UpdateCid(cid);
+    DispatchCommand(args, cmd_cntx, AsyncPreference::ONLY_SYNC);
     dispatched++;
   }
 
@@ -1742,106 +1816,6 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
     ss->stats.squash_stats_ignored++;
   }
   return {.processed = dispatched, .account_in_stats = account_in_stats};
-}
-
-DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
-                                   facade::AsyncPreference apref) {
-  CommandContext* cmd_ctx = static_cast<CommandContext*>(parsed_cmd);
-  const auto& cmd = *parsed_cmd->mc_command();
-
-  auto* cntx = cmd_ctx->server_conn_cntx();
-  DCHECK(cntx->transaction == nullptr);
-
-  string_view cmd_name, cmd_opt;
-  char buffer[absl::numbers_internal::kFastToBufferSize];
-
-  switch (cmd.type) {
-    case MemcacheParser::REPLACE:
-      cmd_name = "SET";
-      cmd_opt = "XX";
-      break;
-    case MemcacheParser::SET:
-      cmd_name = "SET";
-      break;
-    case MemcacheParser::ADD:
-      cmd_name = "SET";
-      cmd_opt = "NX";
-      break;
-    case MemcacheParser::DELETE:
-      cmd_name = "DEL";
-      break;
-    case MemcacheParser::INCR:
-      cmd_name = "INCRBY";
-      absl::numbers_internal::FastIntToBuffer(cmd.delta, buffer);
-      cmd_opt = buffer;
-      break;
-    case MemcacheParser::DECR:
-      cmd_name = "DECRBY";
-      absl::numbers_internal::FastIntToBuffer(cmd.delta, buffer);
-      cmd_opt = buffer;
-      break;
-    case MemcacheParser::APPEND:
-      cmd_name = "APPEND";
-      break;
-    case MemcacheParser::PREPEND:
-      cmd_name = "PREPEND";
-      break;
-    case MemcacheParser::GAT:
-    case MemcacheParser::GATS:
-      cmd_name = "GAT";
-      break;
-    case MemcacheParser::GET:
-    case MemcacheParser::GETS:
-      cmd_name = "MGET";
-      break;
-    case MemcacheParser::FLUSHALL:
-      cmd_name = "FLUSHDB";
-      break;
-    case MemcacheParser::QUIT:
-      cmd_name = "QUIT";
-      break;
-    case MemcacheParser::STATS:
-      if (apref == AsyncPreference::ONLY_ASYNC)
-        return DispatchResult::WOULD_BLOCK;
-      server_family_.StatsMC(cmd.key(), cmd_ctx);
-      return DispatchResult::OK;
-    case MemcacheParser::VERSION:
-      if (apref == AsyncPreference::ONLY_ASYNC)
-        return DispatchResult::WOULD_BLOCK;
-      cmd_ctx->SendSimpleString("VERSION 1.6.0 DF");
-      return DispatchResult::OK;
-    default:
-      if (apref != AsyncPreference::ONLY_SYNC) {
-        parsed_cmd->SetDeferredReply();
-      }
-      cmd_ctx->SendSimpleString("CLIENT_ERROR bad command line format");
-      return DispatchResult::ERROR;
-  }
-
-  absl::InlinedVector<string_view, 8> args = {cmd_name};
-
-  bool is_store = MemcacheParser::IsStoreCmd(cmd.type);
-  bool is_read = !is_store && cmd.type < MemcacheParser::QUIT;
-  if (!is_read) {
-    if (!cmd.backed_args->empty())
-      args.emplace_back(cmd.key());
-
-    if (is_store)
-      args.emplace_back(cmd.value());
-    if (!cmd_opt.empty())
-      args.emplace_back(cmd_opt);
-
-    if (cmd.expire_ts && cmd_name == "SET") {
-      args.emplace_back("EXAT");
-      absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, buffer);
-      args.emplace_back(buffer);
-    }
-  } else {  // is_read
-    auto view = cmd.backed_args->view();
-    args.insert(args.end(), view.begin(), view.end());
-  }
-
-  return DispatchCommand(ParsedArgs{args}, parsed_cmd, apref);
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {

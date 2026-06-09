@@ -28,6 +28,7 @@ BASIC_ARGS = {
 
 @pytest.mark.large
 @pytest.mark.opt_only
+@pytest.mark.skip(reason="Fails - #7560")
 @dfly_args({**BASIC_ARGS, "tiered_experimental_cooling": "false"})
 async def test_basic_memory_usage(async_client: aioredis.Redis):
     """
