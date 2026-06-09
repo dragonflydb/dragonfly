@@ -731,10 +731,14 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref) const
   if (fragment_ref.ObjType() == OBJ_LIST && !OccupiesWholePages(estimated_size))
     return nullopt;
 
-  // Track if we oversature disk (backpressure fails to stop clients, possibly many new)
+  // Track if we oversature disk (backpressure fails to stop clients, possibly many new).
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
-  if (disk_stats.pending_stash_bytes >= 2 * config_.max_pending_stash_bytes)
+  if (disk_stats.pending_stash_bytes >= 2 * config_.max_pending_stash_bytes) {
     ++stats_.stash_overflow_cnt;
+    // Discard the write if we don't require offloading to not oversaturate the disk
+    if (!ShouldOffload())
+      return std::nullopt;
+  }
 
   if (disk_stats.allocated_bytes + tiering::kPageSize + estimated_size < disk_stats.max_file_size) {
     return blobs;
