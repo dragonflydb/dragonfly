@@ -125,14 +125,12 @@ class MemBufController {
   // buffer to entry_buffer_.
   void RestoreStateAfterConsume(EntryId id);
 
-  // Assembles a flush blob in the following steps:
+  // Assembles a flush blob from the current buffer in the following steps:
   // 1. Prepends any data in the default buffer (from previously finished entries) as a prefix.
-  // 2. If the active entry was split, a tag header is inserted before current_bytes.
-  // 3. current_bytes is added.
+  // 2. If the active entry was split, a tag header is inserted before the current bytes.
+  // 3. Current bytes are added.
   // 4. Consumes all buffers used.
-  // current_bytes is typically CurrentBuffer()->InputBuffer(), passed explicitly because it works
-  // on data returned by PrepareFlush.
-  [[nodiscard]] std::string BuildBlob(io::Bytes current_bytes);
+  [[nodiscard]] std::string BuildBlob();
 
   void SetTagEntries(bool tag_entries) {
     send_tagged_entries_ = tag_entries;
@@ -332,9 +330,6 @@ class RdbSerializer {
   }
 
  private:
-  // Prepare internal buffer for flush. Compress it.
-  io::Bytes PrepareFlush(FlushState flush_state);
-
   void CompressBlob();
   void AllocateCompressorOnce();
 
