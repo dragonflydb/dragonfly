@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
+#include <uni_algo/case.h>
 
 #include <chrono>
 #include <type_traits>
@@ -497,8 +498,18 @@ struct BasicSearch {
 
   // logical query: unify all sub results
   IndexResult Search(const AstLogicalNode& node, string_view active_field) {
-    auto mapping = [&](auto& node) { return SearchGeneric(node, active_field); };
-    return UnifyResults(GetSubResults(node.nodes, mapping), node.op);
+    // Stopwords are never indexed, so a bare stopword operand matches nothing: as an AND term it
+    // would zero the whole result (e.g. `@title:(foo) and bar`), as an OR term it adds nothing.
+    // Drop such operands so the surrounding query still matches.
+    vector<IndexResult> sub_results;
+    sub_results.reserve(node.nodes.size());
+    for (const auto& sub : node.nodes) {
+      if (const auto* term = get_if<AstTermNode>(&sub.Variant());
+          term && indices_->IsStopWord(term->affix))
+        continue;
+      sub_results.push_back(SearchGeneric(sub, active_field));
+    }
+    return UnifyResults(std::move(sub_results), node.op);
   }
 
   // @field: set active field for sub tree
@@ -849,6 +860,11 @@ struct StatsCollector {
   }
 
   void Visit(const AstTermNode& node, string_view active_field) {
+    // Stopwords are dropped from queries (see BasicSearch), so they never contribute matches and
+    // must not be recorded as scoring terms either.
+    if (indices_->IsStopWord(node.affix))
+      return;
+
     string term = node.affix;
     bool strip_whitespace = true;
     if (auto* syn = indices_->GetSynonyms(); syn) {
@@ -1136,6 +1152,12 @@ DefragmentResult FieldIndices::Defragment(PageUsage* page_usage) {
 
 const Synonyms* FieldIndices::GetSynonyms() const {
   return synonyms_;
+}
+
+bool FieldIndices::IsStopWord(std::string_view term) const {
+  if (options_.stopwords.empty())
+    return false;
+  return options_.stopwords.contains(una::cases::to_lowercase_utf8(term));
 }
 
 SearchAlgorithm::SearchAlgorithm() = default;

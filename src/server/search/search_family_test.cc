@@ -1133,6 +1133,35 @@ TEST_F(SearchFamilyTest, TestStopWords) {
   EXPECT_THAT(Run({"ft.search", "i1", "whale"}), AreDocIds("d:3"));
 }
 
+// A default stopword (the, and, or, ...) appearing in a query must be dropped rather than kept
+// as a required term, otherwise the implicit-AND query silently returns no results. This unblocks
+// query builders that join clauses with the literal word " AND " (relying on it being a stopword).
+TEST_F(SearchFamilyTest, StopWordsInQueryAreDropped) {
+  Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT",
+       "user_id", "TAG"});
+
+  Run({"hset", "d:1", "content", "python", "user_id", "u1"});
+  Run({"hset", "d:2", "content", "rust", "user_id", "u2"});
+
+  // Trailing default stopword must be dropped (issue #7556 reproduction).
+  EXPECT_THAT(Run({"ft.search", "idx", "@content:(python) and"}), AreDocIds("d:1"));
+
+  // Case-insensitive: an uppercased stopword is recognized too.
+  EXPECT_THAT(Run({"ft.search", "idx", "@content:(python) AND"}), AreDocIds("d:1"));
+
+  // Query-builder style join: text clause AND tag filter glued by the literal " AND ".
+  EXPECT_THAT(Run({"ft.search", "idx", "@content:(python) AND @user_id:{u1}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"ft.search", "idx", "@content:(python) AND @user_id:{u2}"}), kNoResults);
+
+  // A non-stopword tail still constrains and yields no match.
+  EXPECT_THAT(Run({"ft.search", "idx", "@content:(python) xyzzy"}), kNoResults);
+
+  // STOPWORDS 0 disables the default list, so the same term is required again and matches nothing.
+  Run({"ft.create", "idx0", "ON", "HASH", "PREFIX", "1", "d:", "STOPWORDS", "0", "SCHEMA",
+       "content", "TEXT"});
+  EXPECT_THAT(Run({"ft.search", "idx0", "@content:(python) and"}), kNoResults);
+}
+
 TEST_F(SearchFamilyTest, SimpleUpdates) {
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "visits", "numeric"}), "OK");
 

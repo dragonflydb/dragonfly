@@ -550,6 +550,46 @@ TEST_F(SearchTest, StopWords) {
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
 }
 
+// A stopword among query terms must be dropped, not kept as a required term. Otherwise the
+// implicit-AND query reduces to an empty result because stopwords are never indexed.
+TEST_F(SearchTest, StopWordsDroppedFromQuery) {
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
+  IndicesOptions options{{"some", "words", "are", "left", "out"}};
+
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  vector<string> documents = {"some words left out",      //
+                              "some can be found",        //
+                              "words are never matched",  //
+                              "explicitly found!"};
+  for (size_t i = 0; i < documents.size(); i++) {
+    MockedDocument doc{{{"title", documents[i]}}};
+    indices.Add(i, doc);
+  }
+
+  // Trailing stopword is dropped -> query behaves like "found".
+  algo.Init("found some", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+
+  // Stopword between two real terms is dropped -> "explicitly found".
+  algo.Init("explicitly are found", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(3));
+
+  // Stopword as an OR operand contributes nothing; the real operand still matches.
+  algo.Init("found | some", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+
+  // Field-scoped group with a trailing stopword still matches.
+  algo.Init("@title:(found are)", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+
+  // A non-stopword term still constrains the result as usual.
+  algo.Init("found matched", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre());
+}
+
 class SearchRaxTest
     : public SearchTest,
       public testing::WithParamInterface<pair<bool /* build suffix trie */, bool /* tag index */>> {
