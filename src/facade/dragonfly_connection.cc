@@ -515,7 +515,7 @@ ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
   return tl_facade_stats->conn_stats;
 }
 
-thread_local uint64_t max_busy_read_cycles_cached = 1ULL << 32;
+thread_local uint32_t max_busy_read_cycles_cached = UINT32_MAX;
 thread_local bool always_flush_pipeline_cached = absl::GetFlag(FLAGS_always_flush_pipeline);
 thread_local uint32_t pipeline_squash_limit_cached = absl::GetFlag(FLAGS_pipeline_squash_limit);
 
@@ -1401,8 +1401,10 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 }
 
-Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, unsigned max_busy_cycles,
+Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t max_busy_cycles,
                                                 bool enqueue_only) {
+  DCHECK_GT(max_busy_cycles, 0u);
+
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
 
