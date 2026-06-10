@@ -113,6 +113,9 @@ struct CmdArgParser {
   CmdArgParser(ArgSlice args) : args_{args} {
   }
 
+  CmdArgParser(const cmn::BackedArguments& bargs, uint32_t offset = 0) : args_{bargs, offset} {
+  }
+
   // DCHECKs that any error was consumed.
   ~CmdArgParser();
 
@@ -337,7 +340,7 @@ struct CmdArgParser {
     using namespace std::literals::string_view_literals;
     if (i >= args_.size())
       return ""sv;
-    return args_[i].empty() ? ""sv : ToSV(args_[i]);
+    return args_[i].empty() ? ""sv : args_[i];
   }
 
   template <typename T> T Num(size_t idx) {
@@ -371,7 +374,7 @@ struct CmdArgParser {
 
  private:
   size_t cur_i_ = 0;
-  ArgSlice args_;
+  ParsedArgs args_;
 
   ErrorInfo error_;
 };
