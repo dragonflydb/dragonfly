@@ -441,11 +441,16 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
 }
 
 void TieredStorage::ShardOpManager::EnqueueForDefrag(tiering::DiskSegment segment) {
-  // Trigger read to signal need for defragmentation. NotifyFetched will handle it.
+  // Trigger read to signal need for defragmentation. NotifyFetched will handle it on success.
   DVLOG(2) << "Enqueueing bin defragmentation for: " << segment.offset;
   stats_.pending_defrags++;
   Enqueue(
-      kFragmentedBin, segment, tiering::BareDecoder{}, [](auto) {}, true);
+      kFragmentedBin, segment, tiering::BareDecoder{},
+      [this](io::Result<tiering::Decoder*> res) {
+        if (!res)
+          stats_.pending_defrags--;
+      },
+      true);
 }
 
 void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) {
