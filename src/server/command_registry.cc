@@ -19,6 +19,7 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/conn_context.h"
 
 using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
@@ -39,6 +40,10 @@ ABSL_FLAG(bool, latency_tracking, false, "If true, track latency for commands");
 namespace dfly {
 
 using namespace facade;
+
+CmdArgParser MakeParserFromContext(CommandContext* cntx) {
+  return CmdArgParser{cntx->tail_args()};
+}
 
 using absl::AsciiStrToUpper;
 using absl::GetFlag;

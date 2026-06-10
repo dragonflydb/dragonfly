@@ -10,6 +10,7 @@
 #include <coroutine>
 #include <variant>
 
+#include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "facade/op_status.h"
 #include "server/conn_context.h"
@@ -82,11 +83,11 @@ constexpr CmdR kAborted = {};
 // Underlying driver (promise) of coroutine that defines its context
 struct CmdR::Coro {
   // Coroutine created of a top level command
-  Coro(facade::CmdArgList arg, CommandContext* cmd_cntx) : cmd_cntx{cmd_cntx} {
+  Coro(facade::CmdArgParser, CommandContext* cmd) : cmd_cntx{cmd} {
   }
 
   // Coroutine created of a internal function with arguments
-  template <typename... Ts> Coro(CommandContext* cmd_cntx, const Ts&... ts) : cmd_cntx{cmd_cntx} {
+  template <typename... Ts> explicit Coro(CommandContext* cmd, const Ts&... ts) : cmd_cntx{cmd} {
   }
 
   // Use it waiter directly cases when it needs to stay in scope to keep the transaction alive

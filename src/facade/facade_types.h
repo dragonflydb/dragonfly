@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <optional>
 #include <ranges>
 #include <string>
@@ -89,6 +90,7 @@ class ParsedArgs {
   struct WrapperBacked {
     WrapperBacked(const cmn::BackedArguments* args, uint32_t index = 0)  // NOLINT
         : args_(args), index_(index) {
+      assert(index <= args->size());
     }
 
     const cmn::BackedArguments* args_;

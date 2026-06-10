@@ -304,6 +304,7 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
 void CommandContext::ReuseInternal() {
   cid_ = nullptr;
   tx_ = nullptr;
+  tail_args_ = {};
   arg_slice_backing.clear();
   start_time_ns = 0;
 }

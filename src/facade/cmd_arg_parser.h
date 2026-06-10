@@ -116,6 +116,9 @@ struct CmdArgParser {
   CmdArgParser(const cmn::BackedArguments& bargs, uint32_t offset = 0) : args_{bargs, offset} {
   }
 
+  CmdArgParser(ParsedArgs args) : args_{args} {
+  }
+
   // DCHECKs that any error was consumed.
   ~CmdArgParser();
 
