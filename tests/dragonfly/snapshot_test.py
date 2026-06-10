@@ -287,7 +287,7 @@ async def test_parallel_snapshot(async_client):
         try:
             await async_client.execute_command("save", "rdb", "dump")
             return True
-        except Exception as e:
+        except Exception:
             return False
 
     save_successes = sum(await asyncio.gather(*(save() for _ in range(2))), 0)
