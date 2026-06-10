@@ -78,7 +78,7 @@ class SmallBins {
   BinInfo Delete(DiskSegment segment);
 
   // Returns true if the page exists and is fragmented
-  bool IsFragmented(uint32_t offset);
+  bool IsFragmented(size_t offset);
 
   // Delete stashed bin. Returns list of recovered item key hashes and db indices.
   // Mainly used for defragmentation

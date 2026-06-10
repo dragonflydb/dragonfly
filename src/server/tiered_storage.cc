@@ -318,7 +318,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   } stats_;
 
   // When we don't have memory to upload a page for defragmentation, we save it here to do it later
-  std::deque<uint32_t /* offset */> delayed_defrag_queue_;
+  std::deque<uint32_t /* page index (kPageSize) */> delayed_defrag_queue_;
 
   TieredStorage* ts_;
   DbSlice& db_slice_;
@@ -366,7 +366,6 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     if (*i == kFragmentedBin) {  // Generally we read whole bins only for defrag
       auto* bdecoder = static_cast<tiering::BareDecoder*>(decoder);
       Defragment(segment, bdecoder->slice);
-      stats_.pending_defrags--;
       return true;  // delete
     }
   }
@@ -433,7 +432,8 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
     if (stats_.pending_defrags < kMaxPendingDefrags && ts_->UploadBudget() > 0) {
       EnqueueForDefrag(bin.segment);
     } else if (delayed_defrag_queue_.size() * sizeof(uint32_t) < kMaxDelayedMem) {
-      delayed_defrag_queue_.push_back(bin.segment.offset);
+      uint32_t page_index = bin.segment.offset / tiering::kPageSize;
+      delayed_defrag_queue_.push_back(page_index);
     }
   }
 
@@ -446,11 +446,7 @@ void TieredStorage::ShardOpManager::EnqueueForDefrag(tiering::DiskSegment segmen
   stats_.pending_defrags++;
   Enqueue(
       kFragmentedBin, segment, tiering::BareDecoder{},
-      [this](io::Result<tiering::Decoder*> res) {
-        if (!res)
-          stats_.pending_defrags--;
-      },
-      true);
+      [this](io::Result<tiering::Decoder*> res) { stats_.pending_defrags--; }, true);
 }
 
 void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) {
@@ -718,7 +714,7 @@ void TieredStorage::ProcessDelayedDeframents() {
     return;
 
   while (op_manager_->stats_.pending_defrags < kMaxPendingDefrags && !dd_queue.empty()) {
-    uint32_t offset = dd_queue.front();
+    size_t offset = dd_queue.front() * tiering::kPageSize;
     dd_queue.pop_front();
 
     if (!bins_->IsFragmented(offset))
