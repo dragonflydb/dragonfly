@@ -723,7 +723,7 @@ struct HSetExParams {
 // mandatory FIELDS keyword, the Dragonfly format a bare numeric ttl_sec. NX (per-field skip) and
 // the collective FNX/FXX condition are mutually exclusive; FNX/FXX behave identically in both
 // syntaxes (set all-or-nothing). Only the reported value differs (see OpSetParams::Format).
-HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
+HSetExParams ParseHSetEx(CmdArgParser* parser, CmdArgList args, string_view cmd_name) {
   using Mode = OpSetParams::Mode;
   using Format = OpSetParams::Format;
   constexpr int kMaxTtl = 1 << 26;
@@ -765,7 +765,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
     if (op_sp.mode == Mode::kNX || (op_sp.keepttl && has_exp))
       parser->Report(CmdArgParser::CUSTOM_ERROR);  // NX is Dragonfly-only; one expiry option max
 
-    res.fields = parser->Tail();
+    res.fields = args.subspan(parser->UnparsedStart());
     if (numfields == 0 || res.fields.size() != size_t(numfields) * 2)
       parser->ReportCustom("The `numfields` parameter must match the number of arguments");
   } else if (has_exp) {
@@ -775,7 +775,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
     op_sp.format = Format::kDragonfly;
     op_sp.ttl = parser->Next<FInt<1, kMaxTtl>>();
 
-    res.fields = parser->Tail();
+    res.fields = args.subspan(parser->UnparsedStart());
     if (res.fields.empty() || res.fields.size() % 2 != 0)
       parser->ReportCustom(WrongNumArgsError(cmd_name));
   }
@@ -785,7 +785,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
 void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
-  HSetExParams parsed = ParseHSetEx(&parser, cmd_cntx->cid()->name());
+  HSetExParams parsed = ParseHSetEx(&parser, args, cmd_cntx->cid()->name());
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   // Evaluate the FNX/FXX condition (if any), then let OpSet set the fields and report the
@@ -862,7 +862,7 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
 
   uint32_t numFields = parser.Next<uint32_t>();
 
-  CmdArgList fields = parser.Tail();
+  CmdArgList fields = args.subspan(parser.UnparsedStart());
   if (fields.size() != numFields) {
     return rb->SendError("The `numfields` parameter must match the number of arguments",
                          kSyntaxErrType);
@@ -929,7 +929,7 @@ void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
 
   uint32_t numFields = parser.Next<uint32_t>();
 
-  CmdArgList fields = parser.Tail();
+  CmdArgList fields = args.subspan(parser.UnparsedStart());
   if (fields.size() != numFields) {
     return rb->SendError("The `numfields` parameter must match the number of arguments",
                          kSyntaxErrType);

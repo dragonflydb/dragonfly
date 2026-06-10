@@ -640,7 +640,7 @@ ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
   known_indexes->insert(join_params.index_alias);
 
   size_t num_fields = parser->Next<size_t>();
-  join_params.conditions.reserve(std::min(num_fields, parser->Tail().size()));
+  join_params.conditions.reserve(num_fields);
   // Conditions are in the form index.field=foreign_index.field or foreign_index.field=index.field
   while (parser->HasNext() && num_fields > 0) {
     auto [left, right] = Split(parser->Next(), '=');
@@ -718,7 +718,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       size_t num_fields = parser->Next<size_t>();
 
       std::vector<std::string> fields;
-      fields.reserve(std::min(num_fields, parser->Tail().size()));
+      fields.reserve(num_fields);
       while (parser->HasNext() && num_fields > 0) {
         auto parsed_field = ParseFieldWithAtSign(parser);
         if (!parsed_field) {

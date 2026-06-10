@@ -58,7 +58,7 @@ namespace facade {
 //   if (parser.HasAtLeast(3)) { ... }                           // at least N args remain?
 //   auto peek = parser.Peek();                                  // look at next without consuming
 //   parser.Skip(n);                                             // advance n args
-//   CmdArgList rest = parser.Tail();                            // remaining args (e.g. k/v pairs)
+//   size_t start = parser.UnparsedStart();                       // index of first unparsed arg
 //
 // Error surfacing (at the end of parse):
 //   if (!parser.Finalize())                                     // also reports UNPROCESSED on
@@ -253,8 +253,8 @@ struct CmdArgParser {
     return !HasError();
   }
 
-  ArgSlice Tail() const {
-    return args_.subspan(cur_i_);
+  size_t UnparsedStart() const {
+    return cur_i_;
   }
 
   bool HasNext() {
@@ -269,10 +269,6 @@ struct CmdArgParser {
 
   bool HasAtLeast(size_t i) const {
     return !error_ && i <= args_.size() - cur_i_;
-  }
-
-  size_t GetCurrentIndex() const {
-    return cur_i_;
   }
 
   // Reports a custom error (error_type >= CUSTOM_ERROR) at the previously-consumed index

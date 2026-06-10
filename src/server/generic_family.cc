@@ -2257,7 +2257,7 @@ void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
-  CmdArgList fields = parser.Tail();
+  CmdArgList fields = args.subspan(parser.UnparsedStart());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpFieldExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
