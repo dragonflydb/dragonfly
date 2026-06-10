@@ -559,6 +559,77 @@ class Connection : public util::Connection {
     size_t cmds = 0;                    // total number of commands executed
   } local_stats_;
 
+  // Fiber-level time profiling for IoLoopV2.
+  // Plain integer counters, single-thread access only (no atomics). All sites that
+  // mutate these run on the connection's owning fiber/proactor thread.
+  struct V2LoopStats {
+    // Phase 1 — always-on event counters.
+    uint64_t loop_iterations = 0;
+    uint64_t idle_awaits = 0;
+    uint64_t backpressure_parks = 0;
+    uint64_t parse_calls_fiber = 0;
+    uint64_t control_msgs_processed = 0;
+    uint64_t read_pending_calls = 0;
+    uint64_t bytes_read_total = 0;
+    uint64_t bytes_sent_total = 0;
+    // Flush attribution.
+    uint64_t flush_calls = 0;
+    uint64_t flush_syscalls = 0;
+    uint64_t flush_reason_idle = 0;
+    uint64_t flush_reason_backpressure = 0;
+    uint64_t flush_reason_other = 0;
+    // 2D state captured only when a real flush (syscall) occurs.
+    uint64_t flush_queue_depth_accum = 0;
+    uint64_t flush_io_buf_input_accum = 0;
+    uint64_t flush_inflight_count = 0;
+    // Wake latency (always-on; non-suspending TSC sites only).
+    uint64_t wakeup_latency_cycles = 0;
+    uint64_t wakeup_latency_count = 0;
+    // Fiber preemptions during active work (excludes idle awaits).
+    uint64_t fiber_preemptions = 0;
+    // Snapshot of SinkReplyBuilder counters (saved before builder is destroyed).
+    uint64_t rb_send_count = 0;
+    uint64_t rb_sent_bytes = 0;
+
+    // TCP fragment starvation diagnostics (prove the batch-density-halving hypothesis).
+    // Tracks whether data is arriving mid-execution that V2 can't read until the next
+    // main-loop iteration.
+
+    // Total ParseLoop() invocations (one per do-while iteration inside ParseLoop).
+    uint64_t parseloop_calls = 0;
+    // Histogram of commands parsed per ParseLoop call (buckets: 1, 2-4, 5-9, 10-19,
+    // 20-49, 50-99, >=100). Reveals whether each call processes a full pipeline or a fragment.
+    uint64_t parse_cmds_hist[7] = {};
+    // Times the idle-flush fired while pending_input_ was already true.
+    // Non-zero → data arrived during ExecuteBatch but wasn't seen before the flush.
+    uint64_t idle_flush_with_pending_input = 0;
+    // Times FIONREAD showed bytes in kernel buffer at the idle-flush moment
+    // (superset of idle_flush_with_pending_input — catches cases where NotifyOnRecv
+    // hasn't fired yet but bytes are physically present in the kernel).
+    uint64_t idle_flush_kernel_had_data = 0;
+    // Fiber yield events detected across ExecuteBatch() calls (FiberSwitchEpoch delta).
+    // At 1 thread these should be ~0; at 4 threads they track cross-shard barrier suspensions.
+    uint64_t executebatch_fiber_yields = 0;
+    // Times pending_input_ was true when entering ExecuteBatch (data ready but not yet parsed).
+    uint64_t executebatch_entered_with_pending = 0;
+    // Commands added to the queue AFTER ExecuteBatch started (by checking queue length growth).
+    // Non-zero only if we add in-loop reading; currently expected to be 0 (proves the gap).
+    uint64_t executebatch_cmds_added_mid_exec = 0;
+
+    // --- Distribution histograms (6 buckets each) ---
+    // Buckets for wake_latency and cmds_between_idle: [<1µs, 1-2, 2-5, 5-10, 10-50, >=50µs]
+    // Buckets for flush_qdepth: [0, 1, 2-4, 5-9, 10-24, >=25 cmds]
+    uint64_t wake_latency_hist[6] = {};       // distribution of notify→loop-top latency
+    uint64_t cmds_between_idle_hist[6] = {};  // commands executed between idle-awaits
+    uint64_t flush_qdepth_hist[6] = {};       // parsed_cmd_q_len_ at each real flush
+    // Running counter reset on each idle-await, used to populate cmds_between_idle_hist.
+    uint64_t cmds_since_last_idle = 0;
+  };
+  V2LoopStats stats_v2_;
+  // TSC captured in the RegisterOnRecv callback right before io_event_.notify().
+  // Cleared at loop-top after the latency is accounted for.
+  uint64_t last_notify_tsc_ = 0;
+
   std::unique_ptr<SinkReplyBuilder> reply_builder_;
   util::HttpListenerBase* http_listener_;
   SSL_CTX* ssl_ctx_;

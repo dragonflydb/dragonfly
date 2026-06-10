@@ -6,6 +6,7 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <boost/intrusive/list.hpp>
+#include <functional>
 #include <optional>
 #include <string_view>
 
@@ -71,6 +72,21 @@ class SinkReplyBuilder {
 
   void Flush(size_t expected_buffer_cap = 0);  // Send all accumulated data and reset to clear state
 
+  // Bytes currently buffered (will be sent on the next Flush()).
+  // Used by IoLoopV2 profiling to distinguish real flushes from no-op fast-paths.
+  size_t PendingBytes() const {
+    return total_size_;
+  }
+
+  // Per-connection counters of real Send() syscalls and bytes written.
+  // Captures every flush regardless of caller (incl. FinishScope auto-flushes).
+  size_t SendCount() const {
+    return send_count_;
+  }
+  size_t SentBytesTotal() const {
+    return sent_bytes_total_;
+  }
+
   std::error_code GetError() const {
     return ec_;
   }
@@ -93,6 +109,13 @@ class SinkReplyBuilder {
 
   bool IsBatchMode() const {
     return batched_;
+  }
+
+  // Callback fired on every real Send() — lets IoLoopV2 capture per-flush
+  // stats (qlen, iobuf) regardless of call site (FinishScope or explicit Flush).
+  using OnSendCallback = std::function<void(size_t bytes)>;
+  void SetOnSendCallback(OnSendCallback cb) {
+    on_send_cb_ = std::move(cb);
   }
 
   void CloseConnection();
@@ -153,6 +176,9 @@ class SinkReplyBuilder {
   absl::InlinedVector<iovec, 16> vecs_;
   size_t guaranteed_pieces_ = 0;   // length of prefix of vecs_ that are guaranteed to be pieces
   uint64_t send_time_cycles_ = 0;  // base::CycleClock::Now() at Send() entry, 0 when idle
+  size_t send_count_ = 0;          // number of real Send() syscalls made
+  size_t sent_bytes_total_ = 0;    // total bytes written across all Send() calls
+  OnSendCallback on_send_cb_;      // optional callback fired on every Send()
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {

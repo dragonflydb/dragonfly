@@ -206,6 +206,10 @@ void SinkReplyBuilder::Send() {
 
   reply_stats.io_write_cnt++;
   reply_stats.io_write_bytes += total_size_;
+  send_count_++;
+  sent_bytes_total_ += total_size_;
+  if (on_send_cb_)
+    on_send_cb_(total_size_);
   DVLOG(2) << "Writing " << total_size_ << " bytes";
   if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
     ec_ = ec;
