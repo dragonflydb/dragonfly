@@ -614,6 +614,16 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
 
+  // If another transaction is currently running on this shard (e.g. an inlined tx preempted
+  // on the connection fiber), we must not run any callbacks to avoid interleaving.
+  if (running_tx_) {
+    // The transaction (if any) if armed, must be in the txq so a future PollExecution picks it up.
+    DCHECK(trans == nullptr || !trans->DEBUG_IsArmedInShard(sid) ||
+           trans->DEBUG_GetTxqPosInShard(sid) != TxQueue::kEnd)
+        << context << " " << trans->DebugId();
+    return;
+  }
+
   // If any of the following flags are present, we are guaranteed to run in this function:
   // 1. AWAKED_Q -> Blocking transactions are executed immediately after waking up, they don't
   // occupy a place in txq and have highest priority
