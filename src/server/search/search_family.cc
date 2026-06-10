@@ -680,32 +680,41 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   AggregateParams params;
   tie(params.index, params.query) = parser->Next<string_view, string_view>();
 
-  // Parse LOAD count field [field ...]
-  // LOAD options are at the beginning of the query, so we need to parse them first
-  while (parser->HasNext() && parser->Check("LOAD")) {
-    auto fields = ParseLoadOrReturnFields(parser, true);
-    if (!params.load_fields.has_value())
-      params.load_fields = std::move(fields);
-    else
-      params.load_fields->insert(params.load_fields->end(), make_move_iterator(fields.begin()),
-                                 make_move_iterator(fields.end()));
-  }
-
   // Used for join params
   absl::flat_hash_set<std::string> current_known_indexes;
   current_known_indexes.insert(std::string{params.index});
-  while (parser->HasNext() && parser->Check("LOAD_FROM")) {
-    auto join_params = ParseAggregatorJoinParams(parser, &current_known_indexes);
-    if (!join_params) {
-      return make_unexpected(join_params.error());
-    }
-    params.joins.emplace_back(std::move(join_params).value());
-  }
-  const bool joining_enabled = !params.joins.empty();
+
+  // LOAD/LOAD_FROM are rejected only after a projector or reducer step, not after
+  // query-level keywords such as SCORER/ADDSCORES.
+  bool has_pipeline_step = false;
 
   while (parser->HasNext()) {
+    // LOAD count field [field ...]
+    if (parser->Check("LOAD")) {
+      if (has_pipeline_step)
+        return CreateSyntaxError("LOAD cannot be applied after projectors or reducers"sv);
+      auto fields = ParseLoadOrReturnFields(parser, true);
+      if (!params.load_fields.has_value())
+        params.load_fields = std::move(fields);
+      else
+        params.load_fields->insert(params.load_fields->end(), make_move_iterator(fields.begin()),
+                                   make_move_iterator(fields.end()));
+      continue;
+    }
+
+    if (parser->Check("LOAD_FROM")) {
+      if (has_pipeline_step)
+        return CreateSyntaxError("LOAD_FROM cannot be applied after projectors or reducers"sv);
+      auto join_params = ParseAggregatorJoinParams(parser, &current_known_indexes);
+      if (!join_params)
+        return make_unexpected(join_params.error());
+      params.joins.emplace_back(std::move(join_params).value());
+      continue;
+    }
+
     // GROUPBY nargs property [property ...]
     if (parser->Check("GROUPBY")) {
+      has_pipeline_step = true;
       size_t num_fields = parser->Next<size_t>();
 
       std::vector<std::string> fields;
@@ -752,12 +761,13 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
 
     // SORTBY nargs
     if (parser->Check("SORTBY")) {
+      has_pipeline_step = true;
       auto sort_params = ParseAggregatorSortParams(parser);
       if (!sort_params) {
         return make_unexpected(sort_params.error());  // Propagate the specific error
       }
 
-      if (!joining_enabled || params.join_agg_params.HasValue()) {
+      if (params.joins.empty() || params.join_agg_params.HasValue()) {
         params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
       } else {
         params.join_agg_params.sort = std::move(sort_params).value();
@@ -767,8 +777,9 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
 
     // LIMIT
     if (parser->Check("LIMIT")) {
+      has_pipeline_step = true;
       auto [offset, num] = parser->Next<size_t, size_t>();
-      if (!joining_enabled || params.join_agg_params.HasLimit()) {
+      if (params.joins.empty() || params.join_agg_params.HasLimit()) {
         params.steps.push_back(aggregate::MakeLimitStep(offset, num));
       } else {
         params.join_agg_params.limit_offset = offset;
@@ -779,6 +790,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
 
     // FILTER "expr"
     if (parser->Check("FILTER")) {
+      has_pipeline_step = true;
       std::string filter_expr{parser->Next<std::string_view>()};
       auto step_or_err = aggregate::MakeFilterStep(filter_expr);
       if (std::holds_alternative<std::string>(step_or_err)) {
@@ -803,6 +815,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
 
     // APPLY "expr" AS alias
     if (parser->Check("APPLY")) {
+      has_pipeline_step = true;
       string expr{parser->Next<string_view>()};
       parser->ExpectTag("AS");
       string alias = parser->Next<string>();
@@ -832,14 +845,6 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
     if (parser->Check("WITHSCORES")) {
       // Silently ignored for FT.AGGREGATE (use ADDSCORES instead)
       continue;
-    }
-
-    if (parser->Check("LOAD")) {
-      return CreateSyntaxError("LOAD cannot be applied after projectors or reducers"sv);
-    }
-
-    if (parser->Check("LOAD_FROM")) {
-      return CreateSyntaxError("LOAD_FROM cannot be applied after projectors or reducers"sv);
     }
 
     return CreateSyntaxError(absl::StrCat("Unknown clause: ", parser->Peek()));

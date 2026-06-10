@@ -6363,6 +6363,59 @@ TEST_F(SearchFamilyTest, AggregateAddScoresAutoVisible) {
   EXPECT_TRUE(found_score) << "__score should be visible with ADDSCORES even without LOAD/pipeline";
 }
 
+// LOAD after SCORER/ADDSCORES must be accepted (rejected only after a projector or
+// reducer), and ADDSCORES must populate @__score for a downstream APPLY.
+TEST_F(SearchFamilyTest, AggregateLoadAfterScorer) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT"}),
+      "OK");
+
+  Run({"hset", "d:1", "content", "python tutorial"});
+  Run({"hset", "d:2", "content", "python python advanced"});
+
+  auto resp = Run({"ft.aggregate", "idx", "@content:(python)", "SCORER", "BM25STD", "ADDSCORES",
+                   "LOAD", "1", "content"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+  ASSERT_GE(results.size(), 3u);  // count + 2 results
+  for (size_t i = 1; i < results.size(); ++i) {
+    auto row = results[i].GetVec();
+    bool has_content = false, has_score = false;
+    for (size_t j = 0; j + 1 < row.size(); j += 2) {
+      if (row[j].GetString() == "content")
+        has_content = true;
+      if (row[j].GetString() == "__score")
+        has_score = true;
+    }
+    EXPECT_TRUE(has_content) << "LOAD after SCORER/ADDSCORES should load 'content'";
+    EXPECT_TRUE(has_score) << "ADDSCORES should inject '__score'";
+  }
+
+  // @__score from ADDSCORES must be usable by a downstream APPLY.
+  resp = Run({"ft.aggregate", "idx", "@content:(python)", "SCORER", "BM25STD", "ADDSCORES", "LOAD",
+              "1", "content", "APPLY", "@__score + 100", "AS", "boosted"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  results = resp.GetVec();
+  ASSERT_GE(results.size(), 2u);
+  for (size_t i = 1; i < results.size(); ++i) {
+    auto row = results[i].GetVec();
+    double score = 0, boosted = 0;
+    for (size_t j = 0; j + 1 < row.size(); j += 2) {
+      if (row[j].GetString() == "__score")
+        score = std::stod(row[j + 1].GetString());
+      if (row[j].GetString() == "boosted")
+        boosted = std::stod(row[j + 1].GetString());
+    }
+    EXPECT_GT(score, 0.0);
+    EXPECT_NEAR(boosted, score + 100, 1e-6) << "APPLY should read @__score injected by ADDSCORES";
+  }
+
+  // LOAD after a real projector/reducer is still rejected.
+  resp = Run({"ft.aggregate", "idx", "@content:(python)", "APPLY", "1 + 1", "AS", "two", "LOAD",
+              "1", "content"});
+  EXPECT_THAT(resp, ErrArg("LOAD cannot be applied after projectors or reducers"));
+}
+
 // DocKeyIndex: empty-key documents must survive Serialize/Restore and not be
 // confused with freed slots (which also have keys_[id] == "").
 
