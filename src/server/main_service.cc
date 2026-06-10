@@ -532,7 +532,7 @@ optional<ErrorReply> EvalValidator(CmdArgList args) {
   if (auto err = parser.TakeError(); err)
     return err.MakeReply();
 
-  if (num_keys > parser.Tail().size())
+  if (!parser.HasAtLeast(num_keys))
     return ErrorReply{"Number of keys can't be greater than number of args", kSyntaxErrType};
 
   return nullopt;

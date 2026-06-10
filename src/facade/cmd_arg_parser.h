@@ -58,7 +58,7 @@ namespace facade {
 //   if (parser.HasAtLeast(3)) { ... }                           // at least N args remain?
 //   auto peek = parser.Peek();                                  // look at next without consuming
 //   parser.Skip(n);                                             // advance n args
-//   CmdArgList rest = parser.Tail();                            // remaining args (e.g. k/v pairs)
+//   size_t start = parser.UnparsedStart();                       // index of first unparsed arg
 //
 // Error surfacing (at the end of parse):
 //   if (!parser.Finalize())                                     // also reports UNPROCESSED on
@@ -111,6 +111,9 @@ struct CmdArgParser {
 
  public:
   CmdArgParser(ArgSlice args) : args_{args} {
+  }
+
+  CmdArgParser(const cmn::BackedArguments& bargs, uint32_t offset = 0) : args_{bargs, offset} {
   }
 
   // DCHECKs that any error was consumed.
@@ -253,8 +256,8 @@ struct CmdArgParser {
     return !HasError();
   }
 
-  ArgSlice Tail() const {
-    return args_.subspan(cur_i_);
+  size_t UnparsedStart() const {
+    return cur_i_;
   }
 
   bool HasNext() {
@@ -269,10 +272,6 @@ struct CmdArgParser {
 
   bool HasAtLeast(size_t i) const {
     return !error_ && i <= args_.size() - cur_i_;
-  }
-
-  size_t GetCurrentIndex() const {
-    return cur_i_;
   }
 
   // Reports a custom error (error_type >= CUSTOM_ERROR) at the previously-consumed index
@@ -341,7 +340,7 @@ struct CmdArgParser {
     using namespace std::literals::string_view_literals;
     if (i >= args_.size())
       return ""sv;
-    return args_[i].empty() ? ""sv : ToSV(args_[i]);
+    return args_[i].empty() ? ""sv : args_[i];
   }
 
   template <typename T> T Num(size_t idx) {
@@ -375,7 +374,7 @@ struct CmdArgParser {
 
  private:
   size_t cur_i_ = 0;
-  ArgSlice args_;
+  ParsedArgs args_;
 
   ErrorInfo error_;
 };

@@ -3276,7 +3276,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
 }
 
 void HelpSubCmd(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
-  XGroupHelp(parser->Tail(), cmd_cntx);
+  XGroupHelp({}, cmd_cntx);
 }
 
 bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder* builder) {
@@ -3355,12 +3355,12 @@ void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Save the index of the stream ID in the arguments list.
   // We need this during journaling
-  // It is (parser.GetCurrentIndex() - 1) because the stream id is the last parsed argument in the
+  // It is (parser.UnparsedStart() - 1) because the stream id is the last parsed argument in the
   // ParseAddOpts
-  const size_t stream_id_index_in_args = parser.GetCurrentIndex() - 1;
+  const size_t stream_id_index_in_args = parser.UnparsedStart() - 1;
   AddArgsJournaler journaler{{args.begin(), args.end()}, stream_id_index_in_args};
 
-  CmdArgList fields = parser.Tail();
+  CmdArgList fields = args.subspan(parser.UnparsedStart());
   if (fields.empty() || fields.size() % 2 != 0) {
     return rb->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
   }

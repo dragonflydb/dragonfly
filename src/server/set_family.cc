@@ -1597,7 +1597,7 @@ void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kInvalidIntErr);
   }
 
-  CmdArgList vals = parser.Tail();
+  CmdArgList vals = args.subspan(parser.UnparsedStart());
   if (vals.empty()) {
     return cmd_cntx->SendError(WrongNumArgsError("SADDEX"));
   }

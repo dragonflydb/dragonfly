@@ -46,8 +46,8 @@ class ParsedArgs {
   ParsedArgs() = default;
 
   // References backed arguments. The object must outlive this ParsedArgs.
-  ParsedArgs(const cmn::BackedArguments& bargs)  // NOLINT google-explicit-constructor
-      : args_(&bargs) {
+  ParsedArgs(const cmn::BackedArguments& bargs, uint32_t offset = 0)  // NOLINT
+      : args_(WrapperBacked{&bargs, offset}) {
   }
 
   ParsedArgs(ArgSlice slice)  // NOLINT google-explicit-constructor
@@ -73,6 +73,10 @@ class ParsedArgs {
     return std::visit([](const auto& args) { return args.front(); }, args_);
   }
 
+  std::string_view operator[](size_t i) const {
+    return std::visit([i](const auto& args) { return args.at(i); }, args_);
+  }
+
   ArgSlice ToSlice(CmdArgVec* scratch) const {
     return std::visit([scratch](const auto& args) { return args.ToSlice(scratch); }, args_);
   }
@@ -83,7 +87,8 @@ class ParsedArgs {
 
  private:
   struct WrapperBacked {
-    WrapperBacked(const cmn::BackedArguments* args) : args_(args) {  // NOLINT
+    WrapperBacked(const cmn::BackedArguments* args, uint32_t index = 0)  // NOLINT
+        : args_(args), index_(index) {
     }
 
     const cmn::BackedArguments* args_;
@@ -104,6 +109,10 @@ class ParsedArgs {
       return args_->at(index_);
     }
 
+    std::string_view at(size_t i) const {
+      return args_->at(index_ + i);
+    }
+
     ArgSlice ToSlice(CmdArgVec* scratch) const {
       ToVec(scratch);
       return *scratch;
@@ -120,6 +129,10 @@ class ParsedArgs {
   struct Slice : public ArgSlice {
     using ArgSlice::ArgSlice;
     Slice(ArgSlice other) : ArgSlice(other) {  // NOLINT
+    }
+
+    std::string_view at(size_t i) const {
+      return ArgSlice::operator[](i);
     }
 
     ParsedArgs Tail() const {

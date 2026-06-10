@@ -18,7 +18,7 @@ void CmdArgParser::ExpectTag(std::string_view tag) {
   }
 
   auto idx = cur_i_++;
-  auto val = ToSV(args_[idx]);
+  auto val = args_[idx];
   if (!absl::EqualsIgnoreCase(val, tag)) {
     Report(INVALID_NEXT, idx);
   }
@@ -31,7 +31,7 @@ void CmdArgParser::ExpectTag(std::string_view tag, std::string error_msg) {
   }
 
   auto idx = cur_i_++;
-  if (!absl::EqualsIgnoreCase(ToSV(args_[idx]), tag))
+  if (!absl::EqualsIgnoreCase(args_[idx], tag))
     Report(CUSTOM_ERROR, idx, std::move(error_msg));
 }
 
@@ -42,7 +42,7 @@ std::string_view CmdArgParser::ExpectStartsWith(std::string_view prefix, std::st
   }
 
   auto idx = cur_i_++;
-  auto val = ToSV(args_[idx]);
+  auto val = args_[idx];
   if (!absl::StartsWith(val, prefix)) {
     Report(CUSTOM_ERROR, idx, std::move(error_msg));
     return {};
