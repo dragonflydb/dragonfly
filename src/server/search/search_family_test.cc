@@ -5004,6 +5004,154 @@ TEST_F(SearchFamilyTest, FlatVectorRangeYieldDistanceAs) {
   EXPECT_EQ(resp.GetVec()[1].GetString(), "k5");
 }
 
+TEST_F(SearchFamilyTest, FlatVectorRangeWithFilter) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+  for (int i = 0; i < 10; i++)
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", F(static_cast<float>(i)), "route",
+         (i % 2 == 0) ? "a" : "b"});
+
+  string vec = F(5.0f);
+
+  auto extract = [](const RespExpr& resp) {
+    std::map<string, double> out;
+    auto& arr = resp.GetVec();
+    for (size_t i = 1; i + 1 < arr.size(); i += 2) {
+      auto& flds = arr[i + 1].GetVec();
+      for (size_t j = 0; j + 1 < flds.size(); j += 2) {
+        if (flds[j].GetString() == "dist")
+          out[arr[i].GetString()] = std::stod(flds[j + 1].GetString());
+      }
+    }
+    return out;
+  };
+
+  // Parenthesized VECTOR_RANGE AND-ed with a filter: pos 4,5,6 within radius 1.5 of 5.0,
+  // route "a" keeps k4 and k6 (dist 1).
+  auto resp = Run({"FT.SEARCH", "idx",
+                   "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{a})", "PARAMS",
+                   "2", "v", vec, "SORTBY", "dist", "ASC", "RETURN", "1", "dist"});
+  ASSERT_EQ(resp.GetVec()[0].GetInt(), 2);
+  auto d = extract(resp);
+  EXPECT_EQ(d.size(), 2u);
+  EXPECT_DOUBLE_EQ(d["k4"], 1.0);
+  EXPECT_DOUBLE_EQ(d["k6"], 1.0);
+
+  // Parens without a filter == bare range: all of k4,k5,k6.
+  resp = Run({"FT.SEARCH", "idx", "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist})",
+              "PARAMS", "2", "v", vec, "RETURN", "1", "dist"});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 3);
+
+  // Only k5 (pos 5, route "b") is within radius 0.4; filtering route "a" excludes it -> empty.
+  resp = Run({"FT.SEARCH", "idx",
+              "(@pos:[VECTOR_RANGE 0.4 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{a})", "PARAMS", "2",
+              "v", vec});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 0);
+
+  // Same result (k4, k6) regardless of order or parentheses.
+  for (const char* q : {
+           "(@route:{a} @pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist})",  // filter first
+           "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{a}",    // no parens
+       }) {
+    resp = Run({"FT.SEARCH", "idx", q, "PARAMS", "2", "v", vec, "RETURN", "1", "dist"});
+    ASSERT_EQ(resp.GetVec()[0].GetInt(), 2) << q;
+    d = extract(resp);
+    EXPECT_DOUBLE_EQ(d["k4"], 1.0) << q;
+    EXPECT_DOUBLE_EQ(d["k6"], 1.0) << q;
+  }
+
+  // Multiple VECTOR_RANGE clauses are allowed on FLAT (intersected natively): radius 1.5 ->
+  // k4,k5,k6 AND radius 2.5 -> k3..k7 = k4,k5,k6.
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v] @pos:[VECTOR_RANGE 2.5 $v]", "PARAMS",
+              "2", "v", vec, "NOCONTENT"});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 3);
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeWithFilter) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+  for (int i = 0; i < 10; i++)
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", F(static_cast<float>(i)), "route",
+         (i % 2 == 0) ? "a" : "b"});
+
+  string vec = F(5.0f);
+
+  auto extract = [](const RespExpr& resp) {
+    std::map<string, double> out;
+    auto& arr = resp.GetVec();
+    for (size_t i = 1; i + 1 < arr.size(); i += 2) {
+      auto& flds = arr[i + 1].GetVec();
+      for (size_t j = 0; j + 1 < flds.size(); j += 2) {
+        if (flds[j].GetString() == "dist")
+          out[arr[i].GetString()] = std::stod(flds[j + 1].GetString());
+      }
+    }
+    return out;
+  };
+
+  // Bare range on HNSW still works (k4, k5, k6 within radius 1.5).
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist}",
+                   "PARAMS", "2", "v", vec});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 3);
+
+  // Range AND-ed with a filter: RangeQuery results intersected with route "a" keep k4, k6.
+  resp = Run({"FT.SEARCH", "idx",
+              "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{a})", "PARAMS", "2",
+              "v", vec, "SORTBY", "dist", "ASC", "RETURN", "1", "dist"});
+  ASSERT_EQ(resp.GetVec()[0].GetInt(), 2);
+  auto d = extract(resp);
+  EXPECT_DOUBLE_EQ(d["k4"], 1.0);
+  EXPECT_DOUBLE_EQ(d["k6"], 1.0);
+
+  // In-range docs all excluded by the filter -> empty.
+  resp = Run({"FT.SEARCH", "idx",
+              "(@pos:[VECTOR_RANGE 0.4 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{a})", "PARAMS", "2",
+              "v", vec});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 0);
+
+  // Pre-filter matches nothing -> empty.
+  resp = Run({"FT.SEARCH", "idx",
+              "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{zzz})", "PARAMS",
+              "2", "v", vec});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 0);
+
+  // OR with range -> unsupported on HNSW.
+  resp = Run({"FT.SEARCH", "idx",
+              "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} | @route:{a}", "PARAMS", "2",
+              "v", vec});
+  EXPECT_THAT(resp, ErrArg("not supported"));
+
+  // Multiple VECTOR_RANGE clauses on HNSW -> rejected (would otherwise be silently mishandled).
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v] @pos:[VECTOR_RANGE 2.5 $v]", "PARAMS",
+              "2", "v", vec});
+  EXPECT_THAT(resp, ErrArg("not supported"));
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeWithFilterScores) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "title", "TEXT"});
+  for (int i = 1; i <= 3; i++)
+    Run({"HSET", absl::StrFormat("d%d", i), "pos", F(static_cast<float>(i)), "title",
+         "hello world"});
+
+  string v = F(2.0f);
+
+  // WITHSCORES on a range AND-ed with a text filter must return BM25 scores from the prefilter
+  // search, like the KNN-with-prefilter path. Format: [total, key, score, fields, ...].
+  auto resp = Run({"FT.SEARCH", "idx", "@title:hello @pos:[VECTOR_RANGE 1.5 $v]", "PARAMS", "2",
+                   "v", v, "WITHSCORES"});
+  auto arr = resp.GetVec();
+  ASSERT_EQ(arr[0].GetInt(), 3);
+  for (size_t i = 1; i + 1 < arr.size(); i += 3)
+    EXPECT_GT(std::stod(arr[i + 1].GetString()), 0.0) << arr[i].GetString();
+}
+
 TEST_F(SearchFamilyTest, VectorRangeAggregate) {
   auto FloatToBytes = [](float f) -> string {
     return string(reinterpret_cast<const char*>(&f), sizeof(float));
@@ -5108,6 +5256,76 @@ TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
               "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
               "cnt"});
   EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeAggregateWithFilter) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+  // Both routes share positions, so the filter narrows the range result.
+  for (int i : {1, 2, 3})
+    Run({"HSET", absl::StrFormat("t%d", i), "pos", F(static_cast<float>(i)), "route", "tech"});
+  for (int i : {1, 2, 3})
+    Run({"HSET", absl::StrFormat("s%d", i), "pos", F(static_cast<float>(i)), "route", "sports"});
+
+  string q = F(2.0f);
+
+  // radius 1.5 from 2.0 -> pos 1,2,3 -> t1..t3,s1..s3; pre-filter route tech keeps 3.
+  auto resp =
+      Run({"FT.AGGREGATE", "idx",
+           "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{tech})", "PARAMS", "2",
+           "v", q, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "cnt", "3")));
+
+  // Pre-filter matches nothing -> empty.
+  resp = Run({"FT.AGGREGATE", "idx",
+              "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{none})", "PARAMS",
+              "2", "v", q, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
+
+  // OR with range has no HNSW execution path -> explicit error.
+  resp = Run({"FT.AGGREGATE", "idx",
+              "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} | @route:{tech}", "PARAMS",
+              "2", "v", q, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, ErrArg("not supported"));
+
+  // Multiple VECTOR_RANGE clauses on HNSW -> rejected.
+  resp =
+      Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 1.5 $v] @pos:[VECTOR_RANGE 2.5 $v]", "PARAMS",
+           "2", "v", q, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, ErrArg("not supported"));
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeAggregateAddScores) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "title", "TEXT"});
+  for (int i = 1; i <= 3; i++)
+    Run({"HSET", absl::StrFormat("d%d", i), "pos", F(static_cast<float>(i)), "title",
+         "hello world"});
+
+  string v = F(2.0f);
+
+  // ADDSCORES on a range AND-ed with a text filter must inject __score (the filter's text score),
+  // not silently drop it.
+  auto resp = Run({"FT.AGGREGATE", "idx", "(@title:hello @pos:[VECTOR_RANGE 1.5 $v])", "PARAMS",
+                   "2", "v", v, "ADDSCORES"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto rows = resp.GetVec();
+  ASSERT_GE(rows.size(), 2u);
+  bool found = false;
+  for (size_t r = 1; r < rows.size(); r++) {
+    auto row = rows[r].GetVec();
+    for (size_t j = 0; j + 1 < row.size(); j += 2) {
+      if (row[j].GetString() == "__score") {
+        found = true;
+        EXPECT_GT(std::stod(row[j + 1].GetString()), 0.0);
+      }
+    }
+  }
+  EXPECT_TRUE(found) << "__score should be injected for ADDSCORES range+filter aggregate";
 }
 
 TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
