@@ -33,6 +33,13 @@ enum class GlobalState : uint8_t {
 
 enum class TimeUnit : uint8_t { SEC, MSEC };
 
+enum class ExpT : uint8_t {
+  EX,    // relative seconds
+  PX,    // relative milliseconds
+  EXAT,  // absolute seconds
+  PXAT   // absolute milliseconds
+};
+
 enum class LoadBlobResult : uint8_t {
   kSuccess,
   kCorrupted,
