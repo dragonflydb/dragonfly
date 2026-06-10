@@ -1495,6 +1495,42 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
   return results;
 }
 
+// Runs RangeQuery and keeps results that also appear in `sharded_prefilter_docs` (the filter
+// matches, already loaded), reusing the loaded docs without an extra transaction hop. Exact for
+// a range query, unlike top-k KNN where dropping out-of-set docs after the scan loses results.
+vector<SearchResult> SearchGlobalHnswIndexRangePrefiltered(
+    const search::AstVectorRangeNode* range, const shared_ptr<search::HnswVectorIndex>& index,
+    std::vector<SearchResult>& sharded_prefilter_docs) {
+  // Sort each shard's prefilter docs by local id so a range hit can be matched with binary search.
+  for (auto& shard : sharded_prefilter_docs)
+    std::sort(
+        shard.docs.begin(), shard.docs.end(),
+        [](const SerializedSearchDoc& a, const SerializedSearchDoc& b) { return a.id < b.id; });
+
+  auto range_results = index->RangeQuery(range->vec.first.get(), static_cast<float>(range->radius));
+
+  std::vector<SerializedSearchDoc> out;
+  out.reserve(range_results.size());
+  for (const auto& [dist, global_doc_id] : range_results) {
+    auto [shard_id, local_id] = search::DecomposeGlobalDocId(global_doc_id);
+    if (shard_id >= sharded_prefilter_docs.size())
+      continue;
+    auto& docs = sharded_prefilter_docs[shard_id].docs;
+    auto it =
+        std::lower_bound(docs.begin(), docs.end(), local_id,
+                         [](const SerializedSearchDoc& d, search::DocId id) { return d.id < id; });
+    if (it != docs.end() && it->id == local_id) {
+      out.emplace_back(std::move(*it));
+      out.back().knn_score = dist;
+    }
+  }
+
+  std::vector<SearchResult> results(1);
+  results[0].total_hits = out.size();
+  results[0].docs = std::move(out);
+  return results;
+}
+
 // Try creating global hnsw indices for given fields and return true on success
 bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
   std::vector<std::string> created_vector_indices;
@@ -2785,14 +2821,35 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, index_name);
 
-  // Check for HNSW vector range query (mutually exclusive with KNN)
+  // HNSW range (mutually exclusive with KNN): bare -> RangeQuery directly; AND-ed with a filter
+  // -> pre-filter then intersect; OR/NOT -> no execution path.
   const search::AstVectorRangeNode* hnsw_range = nullptr;
+  std::unique_ptr<search::AstNode> hnsw_range_holder;
+  const search::AstVectorRangeNode* hnsw_range_prefilter = nullptr;
   if (!knn) {
+    auto ranges = search_algo.CollectVectorRangeNodes();
+    if (ranges.size() > 1 &&
+        std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
+          return GlobalHnswIndexRegistry::Instance().Exist(index_name, r->field);
+        })) {
+      return builder->SendError(
+          "Combining multiple VECTOR_RANGE clauses with an HNSW index is not supported");
+    }
     if (auto* vr = search_algo.GetVectorRangeNode(); vr != nullptr) {
-      if (GlobalHnswIndexRegistry::Instance().Exist(index_name, vr->field))
-        hnsw_range = vr;
+      if (GlobalHnswIndexRegistry::Instance().Exist(index_name, vr->field)) {
+        if (search_algo.IsBareVectorRange()) {
+          hnsw_range = vr;
+        } else if (search_algo.IsAndedVectorRange()) {
+          hnsw_range_holder = search_algo.ExtractVectorRangeAsPrefilter();
+          hnsw_range_prefilter = &std::get<search::AstVectorRangeNode>(*hnsw_range_holder);
+        } else {
+          return builder->SendError(
+              "Combining VECTOR_RANGE with OR/NOT is not supported on HNSW indexes");
+        }
+      }
     }
   }
+  const bool hnsw_range_has_prefilter = hnsw_range_prefilter != nullptr;
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic<bool> index_not_found{false};
@@ -2802,7 +2859,7 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   bool empty_prefilter_result = true;
 
   // Phase 1 collects per-shard counts; phase 2 scores with the global aggregate.
-  // Skipped for KNN/HNSW and single-shard.
+  // Skipped for bare KNN/HNSW range and single-shard; the prefilter search still scores its filter.
   const bool scoring_active =
       (params->scorer || params->with_scores) && (!knn || knn_has_prefilter) && !hnsw_range;
   const bool needs_global_stats = scoring_active && shard_set->size() > 1;
@@ -2836,8 +2893,9 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   if ((!knn || knn_has_prefilter) && !hnsw_range) {
     auto search_cb = [&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index)
-        docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo,
-                                             knn_has_prefilter, global_stats_ptr);
+        docs[es->shard_id()] =
+            index->Search(t->GetOpArgs(es), *params, &search_algo,
+                          knn_has_prefilter || hnsw_range_has_prefilter, global_stats_ptr);
       else
         index_not_found.store(true, memory_order_relaxed);
       return OpStatus::OK;
@@ -2877,6 +2935,18 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
           search::KnnScoreSortOption{hnsw_range->score_alias, std::numeric_limits<size_t>::max()};
     docs = SearchGlobalHnswIndexRange(hnsw_range, hnsw_index, index_name, knn_sort_option, *params,
                                       *cmd_cntx);
+  }
+
+  // `docs` holds the pre-filter matches from the per-shard search above; intersect RangeQuery
+  // with them. Empty pre-filter -> empty result, so `docs` is left as-is.
+  if (hnsw_range_prefilter && !empty_prefilter_result) {
+    auto hnsw_index = GetValidatedHnswRangeIndex(index_name, hnsw_range_prefilter, builder);
+    if (!hnsw_index)
+      return;
+    if (!hnsw_range_prefilter->score_alias.empty())
+      knn_sort_option = search::KnnScoreSortOption{hnsw_range_prefilter->score_alias,
+                                                   std::numeric_limits<size_t>::max()};
+    docs = SearchGlobalHnswIndexRangePrefiltered(hnsw_range_prefilter, hnsw_index, docs);
   }
 
   // FLAT VECTOR_RANGE alias: HNSW is handled above. For FLAT, the per-shard Search()
@@ -3101,6 +3171,166 @@ void CmdFtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendBulkStrArr(vec, CollectionType::SET);
 }
 
+// Runs the ids-only prefilter search (a non-finalizing tx hop) and returns the matched global ids.
+// When ADDSCORES is on, also records per-shard text scores for later __score injection.
+static std::vector<search::GlobalDocId> RunAggregatePrefilter(
+    CommandContext* cmd_cntx, const AggregateParams& params, search::SearchAlgorithm& search_algo,
+    std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores) {
+  std::vector<SearchResult> prefilter_docs(shard_set->size());
+  cmd_cntx->tx()->Execute(
+      [&](Transaction* t, EngineShard* es) {
+        if (auto* index = es->search_indices()->GetIndex(params.index); index) {
+          SearchParams sp;
+          sp.limit_total = std::numeric_limits<size_t>::max();
+          sp.return_fields.emplace();  // ids-only, skip field serialization
+          prefilter_docs[es->shard_id()] = index->Search(t->GetOpArgs(es), sp, &search_algo,
+                                                         /*is_knn_prefilter=*/true, nullptr);
+        }
+        return OpStatus::OK;
+      },
+      false);
+
+  if (params.add_scores) {
+    for (size_t shard_id = 0; shard_id < prefilter_docs.size(); shard_id++)
+      for (const auto& doc : prefilter_docs[shard_id].docs)
+        text_scores[shard_id][doc.id] = doc.text_score;
+  }
+  return CollectPrefilterGlobalIds(prefilter_docs);
+}
+
+// Loads HNSW result docs (KNN or VECTOR_RANGE) into query_results. Finalizes the multi-hop tx when
+// `finalize` is set (a prefilter hop already ran), otherwise schedules a single hop.
+static void RunHnswAggregateLoad(
+    CommandContext* cmd_cntx, const AggregateParams& params,
+    std::vector<std::vector<SearchDocData>>& query_results,
+    const std::vector<std::vector<std::pair<search::DocId, float>>>& shard_docs,
+    std::string_view score_alias,
+    const std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores, bool finalize) {
+  auto cb = [&query_results, &params, &shard_docs, score_alias, &text_scores](Transaction* t,
+                                                                              EngineShard* es) {
+    auto* index = es->search_indices()->GetIndex(params.index);
+    if (!index || shard_docs[es->shard_id()].empty())
+      return OpStatus::OK;
+    DCHECK_LT(es->shard_id(), text_scores.size());
+    query_results[es->shard_id()] =
+        index->LoadHnswRangeDocsForAggregator(t->GetOpArgs(es), params, shard_docs[es->shard_id()],
+                                              score_alias, text_scores[es->shard_id()]);
+    return OpStatus::OK;
+  };
+  if (finalize)
+    cmd_cntx->tx()->Execute(std::move(cb), true);
+  else
+    cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+}
+
+// FT.AGGREGATE over a global HNSW KNN query. Returns false if an error was already sent.
+static bool AggregateHnswKnn(CommandContext* cmd_cntx, AggregateParams& params,
+                             search::SearchAlgorithm& search_algo, const search::AstKnnNode* knn,
+                             std::vector<std::vector<SearchDocData>>& query_results) {
+  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(params.index, knn->field);
+  if (!hnsw_index) {
+    cmd_cntx->rb()->SendError(string{params.index} + ": no such global hnsw index");
+    return false;
+  }
+
+  const bool has_prefilter = knn->HasPreFilter();
+  std::vector<absl::flat_hash_map<search::DocId, float>> text_scores(shard_set->size());
+  std::optional<std::vector<search::GlobalDocId>> prefilter_ids;
+  if (has_prefilter)
+    prefilter_ids = RunAggregatePrefilter(cmd_cntx, params, search_algo, text_scores);
+
+  auto knn_results =
+      prefilter_ids
+          ? hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, *prefilter_ids)
+          : hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+  auto shard_docs = GroupByShardId(knn_results, shard_set->size());
+  RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, knn->score_alias, text_scores,
+                       has_prefilter);
+  return true;
+}
+
+// FT.AGGREGATE over a global HNSW VECTOR_RANGE query. Bare range -> RangeQuery directly; AND-ed
+// with a filter -> pre-filter then intersect; OR/NOT -> unsupported. Returns false on error.
+static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params,
+                               search::SearchAlgorithm& search_algo,
+                               const search::AstVectorRangeNode* vr,
+                               std::vector<std::vector<SearchDocData>>& query_results) {
+  auto* builder = cmd_cntx->rb();
+  std::unique_ptr<search::AstNode> range_holder;
+  const search::AstVectorRangeNode* hnsw_range = vr;
+  bool has_prefilter = false;
+  if (!search_algo.IsBareVectorRange()) {
+    if (!search_algo.IsAndedVectorRange()) {
+      builder->SendError("Combining VECTOR_RANGE with OR/NOT is not supported on HNSW indexes");
+      return false;
+    }
+    range_holder = search_algo.ExtractVectorRangeAsPrefilter();
+    hnsw_range = &std::get<search::AstVectorRangeNode>(*range_holder);
+    has_prefilter = true;
+  }
+
+  auto hnsw_index = GetValidatedHnswRangeIndex(params.index, hnsw_range, builder);
+  if (!hnsw_index)
+    return false;
+
+  std::vector<absl::flat_hash_map<search::DocId, float>> text_scores(shard_set->size());
+  std::optional<std::vector<search::GlobalDocId>> prefilter_ids;
+  if (has_prefilter) {
+    auto ids = RunAggregatePrefilter(cmd_cntx, params, search_algo, text_scores);
+    std::sort(ids.begin(), ids.end());  // sorted for the binary_search intersection below
+    prefilter_ids = std::move(ids);
+  }
+
+  // Intersect the range hits with the filter matches: keep only range results whose global id is
+  // in the sorted prefilter id set. Memory is O(filter matches) of ids plus O(range hits).
+  auto range_results =
+      hnsw_index->RangeQuery(hnsw_range->vec.first.get(), static_cast<float>(hnsw_range->radius));
+  if (prefilter_ids) {
+    erase_if(range_results, [&](const auto& r) {
+      return !std::binary_search(prefilter_ids->begin(), prefilter_ids->end(), r.second);
+    });
+  }
+  auto shard_docs = GroupByShardId(range_results, shard_set->size());
+  RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, hnsw_range->score_alias,
+                       text_scores, has_prefilter);
+  return true;
+}
+
+// FT.AGGREGATE over a non-vector query: optional global-stats phase, then per-shard search.
+static void AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
+                             search::SearchAlgorithm& search_algo,
+                             std::vector<std::vector<SearchDocData>>& query_results) {
+  // Same global-stats phase as FT.SEARCH so SORTBY @__score is stable across shard counts.
+  const bool scoring_active = params.scorer || params.add_scores;
+  const bool needs_global_stats = scoring_active && shard_set->size() > 1;
+  search::GlobalScoringStats global_stats;
+
+  if (needs_global_stats) {
+    std::vector<search::ShardScoringStats> shard_stats(shard_set->size());
+    cmd_cntx->tx()->Execute(
+        [&](Transaction* t, EngineShard* es) {
+          if (auto* index = es->search_indices()->GetIndex(params.index); index)
+            shard_stats[es->shard_id()] = index->CollectScoringStats(&search_algo);
+          return OpStatus::OK;
+        },
+        false);
+    for (auto& s : shard_stats)
+      global_stats.Merge(s);
+    params.global_scoring_stats = &global_stats;
+  }
+
+  auto search_cb = [&](Transaction* t, EngineShard* es) {
+    if (auto* index = es->search_indices()->GetIndex(params.index); index)
+      query_results[es->shard_id()] =
+          index->SearchForAggregator(t->GetOpArgs(es), params, &search_algo);
+    return OpStatus::OK;
+  };
+  if (needs_global_stats)
+    cmd_cntx->tx()->Execute(std::move(search_cb), true);
+  else
+    cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
+}
+
 void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto* builder = cmd_cntx->rb();
@@ -3129,136 +3359,30 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     else if (params->add_scores)
       search_algo.SetScorer(&search::BM25Std);
 
-    using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
-        declval<OpArgs>(), params.value(), &search_algo));
-
-    vector<ResultContainer> query_results(shard_set->size());
+    std::vector<std::vector<SearchDocData>> query_results(shard_set->size());
 
     auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, params->index);
 
-    // Per-shard text scores from prefilter for __score injection in ADDSCORES mode.
-    // Indexed by shard_id because local DocIds are not unique across shards.
-    // Always allocated to shard_set->size() so the callback can index unconditionally.
-    std::vector<absl::flat_hash_map<search::DocId, float>> prefilter_text_scores(shard_set->size());
-
-    // Build a shard-load callback for HNSW results (KNN or VECTOR_RANGE).
-    // The returned lambda captures shard_docs and text_scores by const-reference —
-    // the caller must ensure they outlive the ScheduleSingleHop / Execute call.
-    auto make_load_cb =
-        [&](const std::vector<std::vector<std::pair<search::DocId, float>>>& shard_docs,
-            std::string_view score_alias,
-            const std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores) {
-          return [&query_results, &params, &shard_docs, score_alias, &text_scores](
-                     Transaction* t, EngineShard* es) {
-            auto* index = es->search_indices()->GetIndex(params->index);
-            if (!index || shard_docs[es->shard_id()].empty())
-              return OpStatus::OK;
-            DCHECK_LT(es->shard_id(), text_scores.size());
-            query_results[es->shard_id()] = index->LoadHnswRangeDocsForAggregator(
-                t->GetOpArgs(es), params.value(), shard_docs[es->shard_id()], score_alias,
-                text_scores[es->shard_id()]);
-            return OpStatus::OK;
-          };
-        };
+    if (!knn) {
+      auto ranges = search_algo.CollectVectorRangeNodes();
+      if (ranges.size() > 1 &&
+          std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
+            return GlobalHnswIndexRegistry::Instance().Exist(params->index, r->field);
+          })) {
+        return builder->SendError(
+            "Combining multiple VECTOR_RANGE clauses with an HNSW index is not supported");
+      }
+    }
 
     if (knn) {
-      auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(params->index, knn->field);
-      if (!hnsw_index) {
-        return builder->SendError(string{params->index} + ": no such global hnsw index");
-      }
-
-      // Run per-shard prefilter and collect GlobalDocIds if KNN has a filter expression
-      const bool knn_has_prefilter = knn->HasPreFilter();
-      std::optional<std::vector<search::GlobalDocId>> prefilter_global_ids;
-
-      if (knn_has_prefilter) {
-        vector<SearchResult> prefilter_docs(shard_set->size());
-        cmd_cntx->tx()->Execute(
-            [&](Transaction* t, EngineShard* es) {
-              if (auto* index = es->search_indices()->GetIndex(params->index); index) {
-                SearchParams sp;
-                sp.limit_total = std::numeric_limits<size_t>::max();
-                sp.return_fields.emplace();  // ids-only, skip field serialization
-                prefilter_docs[es->shard_id()] =
-                    index->Search(t->GetOpArgs(es), sp, &search_algo, /*is_knn_prefilter=*/true,
-                                  /*global_stats=*/nullptr);
-              }
-              return OpStatus::OK;
-            },
-            false);
-        prefilter_global_ids = CollectPrefilterGlobalIds(prefilter_docs);
-
-        // Collect text scores per-shard from prefilter results for __score injection
-        if (params->add_scores) {
-          for (size_t shard_id = 0; shard_id < prefilter_docs.size(); shard_id++) {
-            for (const auto& doc : prefilter_docs[shard_id].docs) {
-              prefilter_text_scores[shard_id][doc.id] = doc.text_score;
-            }
-          }
-        }
-      }
-
-      // Run global HNSW KNN search
-      auto knn_results = prefilter_global_ids
-                             ? hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime,
-                                               *prefilter_global_ids)
-                             : hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
-
-      auto shard_docs = GroupByShardId(knn_results, shard_set->size());
-
-      if (knn_has_prefilter) {
-        cmd_cntx->tx()->Execute(make_load_cb(shard_docs, knn->score_alias, prefilter_text_scores),
-                                true);  // finalize multi-hop
-      } else {
-        cmd_cntx->tx()->ScheduleSingleHop(
-            make_load_cb(shard_docs, knn->score_alias, prefilter_text_scores));
-      }
+      if (!AggregateHnswKnn(cmd_cntx, params.value(), search_algo, knn, query_results))
+        return;
     } else if (auto* vr = search_algo.GetVectorRangeNode();
                vr && GlobalHnswIndexRegistry::Instance().Exist(params->index, vr->field)) {
-      const search::AstVectorRangeNode* hnsw_range = vr;
-      auto hnsw_index = GetValidatedHnswRangeIndex(params->index, hnsw_range, builder);
-      if (!hnsw_index)
+      if (!AggregateHnswRange(cmd_cntx, params.value(), search_algo, vr, query_results))
         return;
-
-      auto range_results = hnsw_index->RangeQuery(hnsw_range->vec.first.get(),
-                                                  static_cast<float>(hnsw_range->radius));
-
-      auto shard_docs = GroupByShardId(range_results, shard_set->size());
-
-      cmd_cntx->tx()->ScheduleSingleHop(
-          make_load_cb(shard_docs, hnsw_range->score_alias, prefilter_text_scores));
     } else {
-      // Same global-stats phase as FT.SEARCH so SORTBY @__score is stable
-      // across shard counts.
-      const bool agg_scoring_active = params->scorer || params->add_scores;
-      const bool agg_needs_global_stats = agg_scoring_active && shard_set->size() > 1;
-      search::GlobalScoringStats agg_global_stats;
-
-      if (agg_needs_global_stats) {
-        std::vector<search::ShardScoringStats> shard_stats(shard_set->size());
-        cmd_cntx->tx()->Execute(
-            [&](Transaction* t, EngineShard* es) {
-              if (auto* index = es->search_indices()->GetIndex(params->index); index)
-                shard_stats[es->shard_id()] = index->CollectScoringStats(&search_algo);
-              return OpStatus::OK;
-            },
-            false);
-        for (auto& s : shard_stats)
-          agg_global_stats.Merge(s);
-        params->global_scoring_stats = &agg_global_stats;
-      }
-
-      auto agg_search_cb = [&](Transaction* t, EngineShard* es) {
-        if (auto* index = es->search_indices()->GetIndex(params->index); index) {
-          query_results[es->shard_id()] =
-              index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
-        }
-        return OpStatus::OK;
-      };
-      if (agg_needs_global_stats)
-        cmd_cntx->tx()->Execute(std::move(agg_search_cb), true);
-      else
-        cmd_cntx->tx()->ScheduleSingleHop(std::move(agg_search_cb));
+      AggregateGeneric(cmd_cntx, params.value(), search_algo, query_results);
     }
 
     // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>

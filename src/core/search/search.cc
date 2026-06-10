@@ -564,7 +564,8 @@ struct BasicSearch {
     knn_distances_.resize(prefix_size);
   }
 
-  void SearchVectorRangeFlat(FlatVectorIndex* vec_index, const AstVectorRangeNode& node) {
+  void SearchVectorRangeFlat(FlatVectorIndex* vec_index, const AstVectorRangeNode& node,
+                             vector<DocId>* out) {
     const auto& all_docs = indices_->GetAllDocs();
     auto [dim, sim] = vec_index->Info();
     for (DocId doc : all_docs) {
@@ -573,7 +574,8 @@ struct BasicSearch {
         continue;
       float dist = VectorDistance(node.vec.first.get(), vec, dim, sim);
       if (dist <= static_cast<float>(node.radius)) {
-        knn_scores_.emplace_back(doc, dist);
+        knn_scores_[doc] = dist;
+        out->push_back(doc);
       }
     }
   }
@@ -606,12 +608,9 @@ struct BasicSearch {
     // HNSW fields are not stored in FieldIndices::indices_, so GetIndex<BaseVectorIndex> above
     // returns nullptr for HNSW before we reach this point.
     // HNSW range search support is planned separately (see hnsw_index.h).
+    vector<DocId> out;
     if (auto* flat_index = dynamic_cast<FlatVectorIndex*>(vec_index); flat_index)
-      SearchVectorRangeFlat(flat_index, node);
-
-    vector<DocId> out(knn_scores_.size());
-    for (size_t i = 0; i < knn_scores_.size(); i++)
-      out[i] = knn_scores_[i].first;
+      SearchVectorRangeFlat(flat_index, node, &out);
     return IndexResult{std::move(out)};
   }
 
@@ -643,8 +642,9 @@ struct BasicSearch {
     vector<DocId> out(knn_distances_.size());
     knn_scores_.reserve(knn_distances_.size());
 
+    // `out` carries KNN distance order; knn_scores_ is a by-id distance lookup.
     for (size_t i = 0; i < knn_distances_.size(); i++) {
-      knn_scores_.emplace_back(knn_distances_[i].second, knn_distances_[i].first);
+      knn_scores_[knn_distances_[i].second] = knn_distances_[i].first;
       out[i] = knn_distances_[i].second;
     }
 
@@ -684,23 +684,6 @@ struct BasicSearch {
     if (scorer_ && !matched_text_terms_.empty()) {
       // Score ALL matched docs and return top-K by score (not arbitrary cutoff).
       auto [out, total_size, text_scores] = TakeScoredTopK(std::move(result), cuttoff_limit);
-
-      // KNN populated knn_scores_ in distance order; TakeScoredTopK reordered
-      // `out` by text score, so realign knn_scores_ to the new id order.
-      // Consumers (e.g. search_family.cc) index ids and knn_scores by position.
-      if (!knn_scores_.empty()) {
-        absl::flat_hash_map<DocId, float> knn_by_id;
-        knn_by_id.reserve(knn_scores_.size());
-        for (auto& [doc, dist] : knn_scores_)
-          knn_by_id.emplace(doc, dist);
-        knn_scores_.clear();
-        knn_scores_.reserve(out.size());
-        for (DocId doc : out) {
-          if (auto it = knn_by_id.find(doc); it != knn_by_id.end())
-            knn_scores_.emplace_back(doc, it->second);
-        }
-      }
-
       return SearchResult{
           total_size,         std::move(out),   std::move(knn_scores_), std::move(text_scores),
           std::move(profile), std::move(error_)};
@@ -731,12 +714,12 @@ struct BasicSearch {
 
   // Score all matched docs via cursor-based posting list traversal and return top-K by score.
   // Total work: O(sum of posting_list_sizes) for cursors + O(N log K) for partial sort.
-  std::tuple<vector<DocId>, size_t, vector<pair<DocId, float>>> TakeScoredTopK(IndexResult&& result,
-                                                                               size_t limit) {
+  std::tuple<vector<DocId>, size_t, absl::flat_hash_map<DocId, float>> TakeScoredTopK(
+      IndexResult&& result, size_t limit) {
     auto [all_docs, total_size] = result.Take();  // all matched docs
 
     if (all_docs.empty())
-      return std::make_tuple(vector<DocId>{}, total_size, vector<pair<DocId, float>>{});
+      return std::make_tuple(vector<DocId>{}, total_size, absl::flat_hash_map<DocId, float>{});
 
     // Ensure sorted for cursor-based scoring
     sort(all_docs.begin(), all_docs.end());
@@ -782,14 +765,14 @@ struct BasicSearch {
       scored.resize(k);
     }
 
-    // Build output: docs in score order, paired scores
+    // `out` carries score order; text_scores is a by-id score lookup.
     vector<DocId> out;
-    vector<pair<DocId, float>> text_scores;
+    absl::flat_hash_map<DocId, float> text_scores;
     out.reserve(k);
     text_scores.reserve(k);
     for (auto& [score, doc] : scored) {
       out.push_back(doc);
-      text_scores.emplace_back(doc, score);
+      text_scores[doc] = score;
     }
 
     return std::make_tuple(std::move(out), total_size, std::move(text_scores));
@@ -807,7 +790,7 @@ struct BasicSearch {
   string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
 
-  std::vector<pair<DocId, float>> knn_scores_;
+  absl::flat_hash_map<DocId, float> knn_scores_;
   vector<pair<float, DocId>> knn_distances_;
 
   // Tracked text terms for scoring: (TextIndex*, normalized_term)
@@ -1247,8 +1230,66 @@ void SearchAlgorithm::SetScorer(ScorerFn scorer) {
   scorer_ = scorer;
 }
 
+// Visits `node` and recurses into its sub-expressions, invoking `cb` on every node in DFS order.
+template <typename F> void WalkAst(const AstNode& node, const F& cb) {
+  cb(node);
+  visit(Overloaded{
+            [&](const AstLogicalNode& n) {
+              for (const auto& child : n.nodes)
+                WalkAst(child, cb);
+            },
+            [&](const AstKnnNode& n) { WalkAst(*n.filter, cb); },
+            // Negate/Optional/Field all wrap a single child `node`; leaves have none (no-op).
+            [&](const auto& n) {
+              if constexpr (requires { n.node; })
+                WalkAst(*n.node, cb);
+            },
+        },
+        node.Variant());
+}
+
+vector<const AstVectorRangeNode*> SearchAlgorithm::CollectVectorRangeNodes() const {
+  vector<const AstVectorRangeNode*> out;
+  if (query_) {
+    WalkAst(*query_, [&out](const AstNode& node) {
+      if (auto* r = get_if<AstVectorRangeNode>(&node))
+        out.push_back(r);
+    });
+  }
+  return out;
+}
+
 const AstVectorRangeNode* SearchAlgorithm::GetVectorRangeNode() const {
-  return get_if<AstVectorRangeNode>(query_.get());
+  auto all = CollectVectorRangeNodes();
+  return all.empty() ? nullptr : all.front();
+}
+
+bool SearchAlgorithm::IsBareVectorRange() const {
+  DCHECK(query_);
+  return holds_alternative<AstVectorRangeNode>(*query_);
+}
+
+bool SearchAlgorithm::IsAndedVectorRange() const {
+  DCHECK(query_);
+  auto* logical = get_if<AstLogicalNode>(query_.get());
+  if (!logical || logical->op != AstLogicalNode::AND)
+    return false;
+  return any_of(logical->nodes.begin(), logical->nodes.end(),
+                [](const AstNode& n) { return holds_alternative<AstVectorRangeNode>(n); });
+}
+
+std::unique_ptr<AstNode> SearchAlgorithm::ExtractVectorRangeAsPrefilter() {
+  auto* logical = get_if<AstLogicalNode>(query_.get());
+  DCHECK(logical && logical->op == AstLogicalNode::AND);
+  for (auto& child : logical->nodes) {
+    if (holds_alternative<AstVectorRangeNode>(child)) {
+      auto extracted = make_unique<AstNode>(std::move(child));
+      child = AstStarNode{};  // match-all in its place, leaving query_ as the pure pre-filter
+      return extracted;
+    }
+  }
+  LOG(DFATAL) << "ExtractVectorRangeAsPrefilter called without an AND-ed VECTOR_RANGE";
+  return nullptr;
 }
 
 }  // namespace dfly::search
