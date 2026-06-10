@@ -738,14 +738,11 @@ error_code Replica::ConsumeRedisStream() {
 
   acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
 
-  struct BatchCmd {
-    std::unique_ptr<cmn::BackedArguments> args;
-    size_t size;
-  };
+  static constexpr size_t kMaxBatchSize = 1024;
 
+  using BatchCmd = std::pair<std::unique_ptr<CommandContext>, size_t>;
   std::vector<BatchCmd> batch_cmds;
-  CommandContext single_cmd_ctx;
-  single_cmd_ctx.Init(&null_builder, &conn_context);
+  batch_cmds.reserve(kMaxBatchSize);
 
   while (exec_st_.IsRunning()) {
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
@@ -777,9 +774,15 @@ error_code Replica::ConsumeRedisStream() {
             LOG(INFO) << absl::CHexEscape(ToSV(arg.GetBuf()));
           }
         }
-        auto backed_args = std::make_unique<cmn::BackedArguments>();
-        FillBackedArgs(last_args, backed_args.get());
-        batch_cmds.push_back({std::move(backed_args), response->total_read});
+
+        auto ctx = std::make_unique<CommandContext>();
+        ctx->Init(&null_builder, &conn_context);
+        FillBackedArgs(last_args, ctx.get());
+        if (!batch_cmds.empty()) {
+          batch_cmds.back().first->next = ctx.get();
+        }
+        ctx->next = nullptr;
+        batch_cmds.emplace_back(std::move(ctx), response->total_read);
         is_batched_cmd = true;
       }
     }
@@ -794,24 +797,23 @@ error_code Replica::ConsumeRedisStream() {
     // Dispatch when:
     // 1. Read buffer is drained
     // 2. We have batched enough cmds
-    static constexpr size_t kMaxBatchSize = 1024;
     if (io_buf.InputLen() == 0 || batch_cmds.size() >= kMaxBatchSize) {
       if (!batch_cmds.empty()) {
+        size_t processed = 0;
         if (batch_cmds.size() == 1) {
-          repl_offs_ += batch_cmds[0].size;
-          single_cmd_ctx.SwapArgs(*batch_cmds[0].args);
-          service_.DispatchCommand(facade::ParsedArgs{single_cmd_ctx}, &single_cmd_ctx,
-                                   facade::AsyncPreference::ONLY_SYNC);
-          batch_cmds.clear();
+          service_.DispatchCommand(facade::ParsedArgs{*batch_cmds[0].first},
+                                   batch_cmds[0].first.get(), facade::AsyncPreference::ONLY_SYNC);
+          processed = 1;
         } else {
-          size_t i = 0;
-          auto result = service_.DispatchManyCommands(
-              [&]() -> facade::ParsedArgs { return facade::ParsedArgs{*batch_cmds[i++].args}; },
-              batch_cmds.size(), &null_builder, &conn_context);
-          std::for_each(batch_cmds.begin(), batch_cmds.begin() + result.processed,
-                        [&](const auto& cmd) { repl_offs_ += cmd.size; });
-          batch_cmds.erase(batch_cmds.begin(), batch_cmds.begin() + result.processed);
+          processed = service_
+                          .DispatchManyCommands(batch_cmds[0].first.get(), batch_cmds.size(),
+                                                &null_builder, &conn_context)
+                          .processed;
         }
+        for (size_t j = 0; j < processed; j++) {
+          repl_offs_ += batch_cmds[j].second;
+        }
+        batch_cmds.erase(batch_cmds.begin(), batch_cmds.begin() + processed);
       }
       replica_waker_.notify();
     }
