@@ -1358,21 +1358,17 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(err.MakeReply());
   }
 
-  int_arg = std::max<int64_t>(int_arg, -1);
-
-  // silently cap the expire time to kMaxExpireDeadlineSec which is more than 8 years.
-  if (int_arg > kMaxExpireDeadlineSec) {
-    int_arg = kMaxExpireDeadlineSec;
-  }
-
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-  DbSlice::ExpireParams params{.value = int_arg, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpExpire(t->GetOpArgs(shard), key, params);
+    auto op_args = t->GetOpArgs(shard);
+    DbSlice::ExpireParams params{TimeUnit::SEC, int_arg, op_args.db_cntx.time_now_ms,
+                                 /*cap=*/true};
+    params.expire_options = expire_options.value();
+    return OpExpire(op_args, key, params);
   };
 
   OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
@@ -1386,13 +1382,13 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(err.MakeReply());
   }
 
-  int_arg = std::max<int64_t>(int_arg, 0L);
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-  DbSlice::ExpireParams params{
-      .value = int_arg, .absolute = true, .expire_options = expire_options.value()};
+  // ExpireParams normalizes 0/negative inputs internally.
+  DbSlice::ExpireParams params{TimeUnit::SEC, int_arg};
+  params.expire_options = expire_options.value();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -1435,15 +1431,13 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(err.MakeReply());
   }
 
-  int_arg = std::max<int64_t>(int_arg, 0L);
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-  DbSlice::ExpireParams params{.value = int_arg,
-                               .unit = TimeUnit::MSEC,
-                               .absolute = true,
-                               .expire_options = expire_options.value()};
+  // ExpireParams normalizes 0/negative inputs internally.
+  DbSlice::ExpireParams params{TimeUnit::MSEC, int_arg};
+  params.expire_options = expire_options.value();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -1463,22 +1457,18 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
-  int_arg = std::max<int64_t>(int_arg, -1);
-
-  // to be more compatible with redis, we silently cap the expire time to kMaxExpireDeadlineSec
-  if (int_arg > kMaxExpireDeadlineMs) {
-    int_arg = kMaxExpireDeadlineMs;
-  }
 
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-  DbSlice::ExpireParams params{
-      .value = int_arg, .unit = TimeUnit::MSEC, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpExpire(t->GetOpArgs(shard), key, params);
+    auto op_args = t->GetOpArgs(shard);
+    DbSlice::ExpireParams params{TimeUnit::MSEC, int_arg, op_args.db_cntx.time_now_ms,
+                                 /*cap=*/true};
+    params.expire_options = expire_options.value();
+    return OpExpire(op_args, key, params);
   };
   OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 

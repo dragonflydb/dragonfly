@@ -56,8 +56,6 @@ using namespace util;
 
 using CI = CommandId;
 
-enum class ExpT { EX, PX, EXAT, PXAT };
-
 // Either immediately available value or tiering future + result
 template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
 
@@ -1060,13 +1058,9 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
       if (int_arg <= 0)
         return facade::ErrorReply{InvalidExpireTime("set")};
 
-      DbSlice::ExpireParams expiry{
-          .value = int_arg,
-          .unit = *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC,
-          .absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT,
-      };
+      const uint64_t now_ms = GetCurrentTimeMs();
+      DbSlice::ExpireParams expiry{*exp_type, int_arg, now_ms};
 
-      int64_t now_ms = GetCurrentTimeMs();
       auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
       if (abs_ms < 0)
         return facade::ErrorReply{InvalidExpireTime("set")};
@@ -1098,7 +1092,7 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
 
     if (mc->expire_ts > 0) {
       sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-      DbSlice::ExpireParams expiry{.value = mc->expire_ts, .unit = TimeUnit::SEC, .absolute = true};
+      DbSlice::ExpireParams expiry{TimeUnit::SEC, mc->expire_ts};
       int64_t now_ms = GetCurrentTimeMs();
       auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
       if (abs_ms < 0)
@@ -1202,13 +1196,10 @@ cmd::CmdR CmdSetExGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (exp_int < 1)
     co_return facade::ErrorReply{InvalidExpireTime(cmd_name)};
 
-  DbSlice::ExpireParams expiry{
-      .value = exp_int,
-      .unit = cmd_name.front() == 'P' ? TimeUnit::MSEC : TimeUnit::SEC,
-      .absolute = false,
-  };
+  const ExpT type = cmd_name.front() == 'P' ? ExpT::PX : ExpT::EX;
+  const uint64_t now_ms = GetCurrentTimeMs();
+  DbSlice::ExpireParams expiry{type, exp_int, now_ms};
 
-  int64_t now_ms = GetCurrentTimeMs();
   auto [_, abs_ms] = expiry.Calculate(now_ms, false);
   if (abs_ms < 0)
     co_return facade::ErrorReply{InvalidExpireTime("set")};
@@ -1349,38 +1340,36 @@ cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
-  DbSlice::ExpireParams exp_params;
+  ExpT exp_type_value = ExpT::EX;
+  int64_t int_arg = 0;
+  bool persist = false;
   bool defined = false;
-  while (parser.HasNext()) {
-    if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
-                                          "PXAT", ExpT::PXAT);
-        exp_type) {
-      auto int_arg = parser.Next<int64_t>();
-      if (auto err = parser.TakeError(); err)
-        co_return err.MakeReply();
 
-      if (defined) {
-        co_return facade::ErrorReply{kSyntaxErr, kSyntaxErrType};
-      }
-
-      if (int_arg <= 0) {
-        co_return facade::ErrorReply{InvalidExpireTime("getex")};
-      }
-
-      exp_params.absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
-      exp_params.value = int_arg;
-      exp_params.unit =
-          *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC;
+  auto expiry = [&](ExpT type) {
+    return [&, type](CmdArgParser* p) {
+      exp_type_value = type;
+      int_arg = p->Next<int64_t>();
       defined = true;
-    } else if (parser.Check("PERSIST")) {
-      exp_params.persist = true;
-    } else {
-      co_return facade::ErrorReply{kSyntaxErr};
-    }
+    };
+  };
+  parser.Apply(OneOf(Tag("EX", expiry(ExpT::EX)), Tag("PX", expiry(ExpT::PX)),
+                     Tag("EXAT", expiry(ExpT::EXAT)), Tag("PXAT", expiry(ExpT::PXAT)),
+                     Exist("PERSIST", &persist)));
+  if (!parser.Finalize()) {
+    co_return parser.TakeError().MakeReply();
+  }
+  if (defined && int_arg <= 0) {
+    co_return facade::ErrorReply{InvalidExpireTime("getex")};
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringResult> {
     auto op_args = t->GetOpArgs(shard);
+
+    DbSlice::ExpireParams exp_params;
+    if (defined) {
+      exp_params = DbSlice::ExpireParams{exp_type_value, int_arg, op_args.db_cntx.time_now_ms};
+    }
+    exp_params.persist = persist;
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
     if (!it_res)
@@ -1395,7 +1384,7 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
 
     // Replicate GETEX as PEXPIREAT or PERSIST
-    if (shard->journal()) {
+    if (shard->journal() && exp_params.IsDefined()) {
       if (exp_params.persist) {
         RecordJournal(op_args, "PERSIST", {key});
       } else {
@@ -1589,8 +1578,8 @@ cmd::CmdR CmdGAT(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd::kAborted;
   }
   int64_t expire_ts = cmd_cntx->mc_command()->expire_ts;
-  DbSlice::ExpireParams expire_params{
-      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
+  DbSlice::ExpireParams expire_params{TimeUnit::SEC, expire_ts};
+  expire_params.persist = expire_ts == 0;
   return MGetGeneric(cmd_cntx, expire_params);
 }
 

@@ -77,6 +77,69 @@ TEST_F(GenericFamilyTest, Expire) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
+TEST_F(GenericFamilyTest, ExpireCornerCases) {
+  // EXPIRE / PEXPIRE with non-positive TTL deletes the key immediately and reports success.
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expire", "key", "-1"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expire", "key", "0"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expire", "key", "-100"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"pexpire", "key", "-1"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"pexpire", "key", "0"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  // EXPIREAT / PEXPIREAT with a past absolute timestamp (including 0 and negatives) deletes
+  // the key.
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expireat", "key", "0"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expireat", "key", "-100"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"pexpireat", "key", "0"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"pexpireat", "key", "-1"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  // Huge absolute timestamps overflow the kMaxExpireDeadlineMs cap and surface OUT_OF_RANGE.
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expireat", "key", absl::StrCat(INT64_MAX)}), ErrArg("expiry is out of range"));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(1));
+
+  EXPECT_THAT(Run({"pexpireat", "key", absl::StrCat(INT64_MAX)}), ErrArg("expiry is out of range"));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(1));
+
+  // Huge relative TTLs are silently capped to kMaxExpireDeadlineSec (~8.5 years).
+  EXPECT_THAT(Run({"expire", "key", "99999999999"}), IntArg(1));
+  EXPECT_EQ(CheckedInt({"ttl", "key"}), kMaxExpireDeadlineSec);
+
+  EXPECT_THAT(Run({"pexpire", "key", absl::StrCat(int64_t{kMaxExpireDeadlineMs} * 10)}), IntArg(1));
+  EXPECT_EQ(CheckedInt({"pttl", "key"}), kMaxExpireDeadlineMs);
+
+  // Expire commands on a missing key return 0 regardless of the TTL value.
+  EXPECT_THAT(Run({"del", "missing"}), IntArg(0));
+  EXPECT_THAT(Run({"expire", "missing", "5"}), IntArg(0));
+  EXPECT_THAT(Run({"expire", "missing", "-1"}), IntArg(0));
+  EXPECT_THAT(Run({"expireat", "missing", "0"}), IntArg(0));
+  EXPECT_THAT(Run({"pexpireat", "missing", "0"}), IntArg(0));
+}
+
 TEST_F(GenericFamilyTest, ExpireOptions) {
   // NX and XX are mutually exclusive
   Run({"set", "key", "val"});

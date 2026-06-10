@@ -626,6 +626,16 @@ TEST_F(StringFamilyTest, GetEx) {
   resp = Run({"getex", "foo", "PERSIST", "1"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
 
+  // PERSIST and EX/PX/EXAT/PXAT are mutually exclusive in either order.
+  resp = Run({"getex", "foo", "PERSIST", "EX", "1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+  resp = Run({"getex", "foo", "EX", "1", "PERSIST"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+  resp = Run({"getex", "foo", "PXAT", absl::StrCat(TEST_current_time_ms + 1000), "PERSIST"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+  resp = Run({"getex", "foo", "PERSIST", "PERSIST"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
   resp = Run({"getex", "foo", "PXAT"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
 
