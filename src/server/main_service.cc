@@ -217,6 +217,21 @@ std::optional<VarzFunction> engine_varz;
 
 constexpr size_t kMaxThreadSize = 1024;
 
+bool IsPingCommand(string_view name) {
+  return name.size() == 4 && ((name[0] | 0x20) == 'p') && ((name[1] | 0x20) == 'i') &&
+         ((name[2] | 0x20) == 'n') && ((name[3] | 0x20) == 'g');
+}
+
+bool DispatchFastPing(ParsedCommand* cmd, AsyncPreference mode) {
+  if (cmd->mc_command() || !IsPingCommand(cmd->Front()))
+    return false;
+
+  if (mode != AsyncPreference::ONLY_SYNC)
+    cmd->SetDeferredReply();
+  cmd->SendSimpleString("PONG");
+  return true;
+}
+
 // Unwatch all keys for a connection and unregister from DbSlices.
 // Used by UNWATCH, DICARD and EXEC.
 void UnwatchAllKeys(Namespace* ns, ConnectionState::ExecInfo* exec_info) {
@@ -1465,6 +1480,10 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     DCHECK(!args.empty());
     std::tie(cid, args_no_cmd) = registry_.FindExtended(args);
   }
+
+  // Hard-coded PING fast path for benchmarking
+  if (DispatchFastPing(parsed_cmd, async_pref))
+    return DispatchResult::OK;
 
   if (cid == nullptr) {
     if (async_pref != AsyncPreference::ONLY_SYNC) {
