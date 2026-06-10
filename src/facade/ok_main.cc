@@ -43,7 +43,7 @@ namespace {
 thread_local absl::flat_hash_map<string, string> shard_db;
 
 // Determine the owning shard for a given key.
-const uint64_t kShardHashSeed = 120577240643ULL;
+constexpr uint64_t kShardHashSeed = 120577240643ULL;
 unsigned KeyShard(string_view key, unsigned num_shards) {
   XXH64_hash_t hash = XXH64(key.data(), key.size(), kShardHashSeed);
   return hash % num_shards;
@@ -57,10 +57,8 @@ struct AsyncCmd {
   // C++20 coroutine contract: every coroutine return type must contain a nested
   // "promise_type" that the compiler uses to control the coroutine lifecycle.
   struct promise_type {
-    // Called once to create the return object that the caller receives.
-    // We stash the coroutine_handle so we can later pass it to ParsedCommand::Resolve().
     AsyncCmd get_return_object() {
-      return AsyncCmd{std::coroutine_handle<promise_type>::from_promise(*this)};
+      return AsyncCmd{};
     }
 
     // Called before the coroutine body runs. suspend_never means "start executing
@@ -86,10 +84,6 @@ struct AsyncCmd {
       LOG(FATAL) << "Unhandled exception in AsyncCmd coroutine";
     }
   };
-
-  // The handle is no longer accessed externally since ResolveAwaiter
-  // registers it internally at the suspension point.
-  std::coroutine_handle<> handle;
 
   // Allow `return SetAsync(...)` in DispatchCommand.
   operator DispatchResult() const noexcept {
@@ -167,6 +161,7 @@ AsyncCmd GetAsync(CmdContext* ctx, ProactorPool* pool) {
 
   co_await ResolveAwaiter{ctx};
 
+  DCHECK(!ctx->mc_command());  // We do not support MC protocol.
   // Resumed by Connection::SendReply() — write directly to reply builder.
   auto* rb = static_cast<RedisReplyBuilder*>(ctx->rb());
   if (ctx->get_result) {
@@ -202,7 +197,7 @@ class OkService : public ServiceInterface {
   ProactorPool* pool_;
 };
 
-DispatchResult OkService::DispatchCommand(ParsedArgs args, ParsedCommand* cmd,
+DispatchResult OkService::DispatchCommand([[maybe_unused]] ParsedArgs args, ParsedCommand* cmd,
                                           AsyncPreference mode) {
   if (cmd->empty()) {
     cmd->rb()->SendError("ERR empty command");
@@ -251,6 +246,10 @@ DispatchResult OkService::DispatchCommand(ParsedArgs args, ParsedCommand* cmd,
   return DispatchResult::OK;
 }
 
+// Relevant only for V1 pipelining flow.
+// Currently does not implement squashing and is very naive.
+// Use --enable_resp_io_loop_v2=true to go through the more optimized V2 flow
+// that doesn't call DispatchManyCommands at all.
 DispatchManyResult OkService::DispatchManyCommands(ParsedCommand* head, unsigned count,
                                                    SinkReplyBuilder* builder,
                                                    ConnectionContext* cntx) {
@@ -271,7 +270,9 @@ DispatchResult OkService::HandleSetSync(ParsedCommand* cmd) {
   string_view value = cmd->at(2);
   unsigned shard_id = KeyShard(key, pool_->size());
 
-  pool_->at(shard_id)->AwaitBrief([key, value] { shard_db[string(key)] = string(value); });
+  pool_->at(shard_id)->AwaitBrief([k = string(key), v = string(value)]() mutable {
+    shard_db.insert_or_assign(std::move(k), std::move(v));
+  });
 
   cmd->rb()->SendOk();
   return DispatchResult::OK;
