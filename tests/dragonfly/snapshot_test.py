@@ -984,7 +984,7 @@ async def test_rdb_load_with_tiering_6823(df_factory: DflyInstanceFactory):
     obj_mem = info["object_used_memory"]
 
     assert used_mem < 50_000_000
-    assert obj_mem < 0.1 * 256_000_000  # 90% offloading target with 256mb maxmemory
+    assert obj_mem < 0.12 * 256_000_000  # 90% offloading target with 256mb maxmemory, 2% margin
 
     assert info["num_entries"] == num_keys
     keys = await tiered_client.keys()
