@@ -152,11 +152,7 @@ const CommandId* GeneratePopulateCommand(string_view type, std::string key, size
     }
   }
 
-  absl::InlinedVector<string_view, 5> views;
-  for (const auto& arg : args) {
-    views.push_back(arg);
-  }
-  out->Assign(views.begin(), views.end(), views.size());
+  out->Assign(args.begin(), args.end(), args.size());
   return cid;
 }
 
