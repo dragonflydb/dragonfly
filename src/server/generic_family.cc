@@ -318,8 +318,8 @@ OpStatus OpPersist(const OpArgs& op_args, string_view key);
 
 class Renamer {
  public:
-  Renamer(Transaction* t, std::string_view src_key, std::string_view dest_key, unsigned shard_count,
-          bool do_copy = false)
+  Renamer(TransactionBase* t, std::string_view src_key, std::string_view dest_key,
+          unsigned shard_count, bool do_copy = false)
       : transaction_(t),
         src_key_(src_key),
         dest_key_(dest_key),
@@ -334,11 +334,11 @@ class Renamer {
   void FetchData();
   facade::OpStatus FinalizeRename();
 
-  bool KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const;
-  void SerializeSrc(Transaction* t, EngineShard* shard);
+  bool KeyExists(TransactionBase* t, EngineShard* shard, std::string_view key) const;
+  void SerializeSrc(TransactionBase* t, EngineShard* shard);
 
-  OpStatus DelSrc(Transaction* t, EngineShard* shard);
-  OpStatus DeserializeDest(Transaction* t, EngineShard* shard);
+  OpStatus DelSrc(TransactionBase* t, EngineShard* shard);
+  OpStatus DeserializeDest(TransactionBase* t, EngineShard* shard);
 
   struct SerializedValue {
     std::string value;
@@ -347,7 +347,7 @@ class Renamer {
     bool sticky;
   };
 
-  Transaction* const transaction_;
+  TransactionBase* const transaction_;
 
   const std::string_view src_key_;
   const std::string_view dest_key_;
@@ -388,7 +388,7 @@ ErrorReply Renamer::Rename(bool destination_should_not_exist) {
 }
 
 void Renamer::FetchData() {
-  auto cb = [this](Transaction* t, EngineShard* shard) {
+  auto cb = [this](TransactionBase* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
     DCHECK(1 == args.Size() || do_copy_);
 
@@ -411,7 +411,7 @@ void Renamer::FetchData() {
 OpStatus Renamer::FinalizeRename() {
   OpStatus del_status = OpStatus::OK;
   OpStatus deserialize_status = OpStatus::OK;
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     const ShardId shard_id = shard->shard_id();
 
     if (!do_copy_ && shard_id == src_sid_) {
@@ -432,13 +432,13 @@ OpStatus Renamer::FinalizeRename() {
   return deserialize_status != OpStatus::OK ? deserialize_status : del_status;
 }
 
-bool Renamer::KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const {
+bool Renamer::KeyExists(TransactionBase* t, EngineShard* shard, std::string_view key) const {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
   return IsValid(it);
 }
 
-void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
+void Renamer::SerializeSrc(TransactionBase* t, EngineShard* shard) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto it = db_slice.FindReadOnly(t->GetDbContext(), src_key_);
 
@@ -458,7 +458,7 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
   }
 }
 
-OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
+OpStatus Renamer::DelSrc(TransactionBase* t, EngineShard* shard) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto res = db_slice.FindMutable(t->GetDbContext(), src_key_);
   auto& it = res.it;
@@ -475,7 +475,7 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
   return OpStatus::OK;
 }
 
-OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
+OpStatus Renamer::DeserializeDest(TransactionBase* t, EngineShard* shard) {
   DCHECK(serialized_value_);  // Verified in FetchData
 
   OpArgs op_args = t->GetOpArgs(shard);
@@ -863,7 +863,8 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
 
 // returns -2 if the key was not found, -3 if the field was not found,
 // -1 if ttl on the field was not found.
-OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
+OpResult<long> OpFieldTtl(TransactionBase* t, EngineShard* shard, string_view key,
+                          string_view field) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   const DbContext& db_cntx = t->GetDbContext();
   auto it = db_slice.FindReadOnly(db_cntx, key);
@@ -889,7 +890,8 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
                                      CmdArgList values) {
   return OpStatus::SKIPPED;
 }
-OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
+OpResult<long> OpFieldTtl(TransactionBase* t, EngineShard* shard, string_view key,
+                          string_view field) {
   return OpStatus::SKIPPED;
 }
 
@@ -912,7 +914,7 @@ OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
   return res;
 }
 
-OpResult<uint64_t> OpExpireTime(Transaction* t, EngineShard* shard, string_view key) {
+OpResult<uint64_t> OpExpireTime(TransactionBase* t, EngineShard* shard, string_view key) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
   if (!IsValid(it))
@@ -1039,7 +1041,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   return OpStatus::OK;
 }
 
-OpResult<uint64_t> OpTtl(Transaction* t, EngineShard* shard, string_view key) {
+OpResult<uint64_t> OpTtl(TransactionBase* t, EngineShard* shard, string_view key) {
   auto opExpireTimeResult = OpExpireTime(t, shard, key);
 
   if (opExpireTimeResult) {
@@ -1054,12 +1056,12 @@ OpResult<uint64_t> OpTtl(Transaction* t, EngineShard* shard, string_view key) {
   }
 }
 
-ErrorReply RenameGeneric(CmdArgList args, bool destination_should_not_exist, Transaction* tx) {
+ErrorReply RenameGeneric(CmdArgList args, bool destination_should_not_exist, TransactionBase* tx) {
   string_view key[2] = {ArgS(args, 0), ArgS(args, 1)};
 
   if (tx->GetUniqueShardCnt() == 1) {
     tx->ReviveAutoJournal();  // Safe to use RENAME with single shard
-    auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto cb = [&](TransactionBase* t, EngineShard* shard) {
       return OpRen(t->GetOpArgs(shard), key[0], key[1], destination_should_not_exist);
     };
     OpResult<void> result = tx->ScheduleSingleHopT(std::move(cb));
@@ -1074,7 +1076,7 @@ ErrorReply RenameGeneric(CmdArgList args, bool destination_should_not_exist, Tra
 void ExpireTimeGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpExpireTime(t, shard, key); };
+  auto cb = [&](TransactionBase* t, EngineShard* shard) { return OpExpireTime(t, shard, key); };
   OpResult<uint64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
@@ -1098,7 +1100,7 @@ void ExpireTimeGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx)
 void TtlGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpTtl(t, shard, key); };
+  auto cb = [&](TransactionBase* t, EngineShard* shard) { return OpTtl(t, shard, key); };
   OpResult<uint64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
@@ -1170,7 +1172,7 @@ static cmd::CmdR CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
       cmd_cntx->cid()->name() == "UNLINK" && absl::GetFlag(FLAGS_unlink_experimental_async);
 
   std::atomic_uint32_t result = 0;
-  auto cb = [&](Transaction* tx, EngineShard* es) {
+  auto cb = [&](TransactionBase* tx, EngineShard* es) {
     auto args = tx->GetShardArgs(es->shard_id());
     auto op_args = tx->GetOpArgs(es);
     auto res = GenericFamily::OpDel(op_args, args, async_unlink);
@@ -1243,7 +1245,7 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   // Execute conditional delete
-  auto cb = [key, compare_str](Transaction* tx, EngineShard* es) -> OpResult<uint32_t> {
+  auto cb = [key, compare_str](TransactionBase* tx, EngineShard* es) -> OpResult<uint32_t> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
 
@@ -1328,7 +1330,7 @@ void GenericFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
 
   atomic_uint32_t result{0};
 
-  auto cb = [&result](Transaction* t, EngineShard* shard) {
+  auto cb = [&result](TransactionBase* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
     auto res = OpExists(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
@@ -1345,7 +1347,9 @@ void GenericFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
 void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
+    return OpPersist(t->GetOpArgs(shard), key);
+  };
 
   OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   cmd_cntx->SendLong(status == OpStatus::OK);
@@ -1371,7 +1375,7 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   }
   DbSlice::ExpireParams params{.value = int_arg, .expire_options = expire_options.value()};
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
 
@@ -1394,7 +1398,7 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   DbSlice::ExpireParams params{
       .value = int_arg, .absolute = true, .expire_options = expire_options.value()};
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
   OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
@@ -1445,7 +1449,7 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
                                .absolute = true,
                                .expire_options = expire_options.value()};
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
   OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
@@ -1477,7 +1481,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   DbSlice::ExpireParams params{
       .value = int_arg, .unit = TimeUnit::MSEC, .expire_options = expire_options.value()};
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
   OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
@@ -1489,12 +1493,12 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Stick(CmdArgList args, CommandContext* cmd_cntx) {
-  Transaction* transaction = cmd_cntx->tx();
+  TransactionBase* transaction = cmd_cntx->tx();
   VLOG(1) << "Stick " << ArgS(args, 0);
 
   atomic_uint32_t result{0};
 
-  auto cb = [&result](const Transaction* t, EngineShard* shard) {
+  auto cb = [&result](const TransactionBase* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
     auto res = OpStick(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
@@ -1921,7 +1925,7 @@ struct SortVisitor {
       OpResult<uint32_t> store_len;
       bool has_get_patterns = !params.get_patterns.empty();
 
-      auto store_callback = [&](Transaction* t, EngineShard* shard) {
+      auto store_callback = [&](TransactionBase* t, EngineShard* shard) {
         ShardId shard_id = shard->shard_id();
         if (shard_id == dest_sid) {
           auto [start_it, end_it] = GetSortRange(entries, params.bounds);
@@ -2056,7 +2060,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
     // Step 1: Fetch container elements (strings only, no parsing)
     OpResult<pair<vector<string>, CompactObjType>> elem_result;
 
-    auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
+    auto fetch_cb = [&](TransactionBase* t, EngineShard* shard) {
       if (shard->shard_id() == source_sid) {
         elem_result = OpFetchContainerElements(t->GetOpArgs(shard), key);
       }
@@ -2093,7 +2097,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
           PopulateSortEntriesFromByPattern(params, raw_elements, db_cntx, &sorted_entries);
     } else {  // No BY pattern, sort directly on fetched elements
       OpResult<CompactObjType> fetch_result;
-      auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
+      auto fetch_cb = [&](TransactionBase* t, EngineShard* shard) {
         // in case of SORT option, we fetch only on the source shard
         if (shard->shard_id() == source_sid) {
           fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, &sorted_entries);
@@ -2163,7 +2167,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
     OpResult<uint32_t> store_len;
     bool has_get_patterns = !params.get_patterns.empty();
 
-    auto store_cb = [&](Transaction* t, EngineShard* shard) {
+    auto store_cb = [&](TransactionBase* t, EngineShard* shard) {
       if (shard->shard_id() == dest_sid) {
         store_len = OpStore(t->GetOpArgs(shard), store_key_sv, entries.begin(), entries.end(),
                             has_get_patterns);
@@ -2231,7 +2235,7 @@ void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpRestore(t->GetOpArgs(shard), key, serialized_value, restore_args.value(),
                      rdb_version.value());
   };
@@ -2259,7 +2263,7 @@ void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
   }
   CmdArgList fields = args.subspan(parser.UnparsedStart());
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpFieldExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
   };
 
@@ -2281,7 +2285,9 @@ void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpFieldTtl(t, shard, key, field); };
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
+    return OpFieldTtl(t, shard, key, field);
+  };
 
   OpResult<long> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
@@ -2312,7 +2318,7 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
   ShardId target_shard = Shard(key, shard_set->size());
   // Holds the serialized target_db for the journal record (ArgSlice cannot own storage).
   string target_db_str = absl::StrCat(target_db);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     // MOVE runs as a global transaction and is therefore scheduled on every shard.
     if (target_shard == shard->shard_id()) {
       auto op_args = t->GetOpArgs(shard);
@@ -2421,7 +2427,7 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
   // Only global/non-atomic multi transactions can change dbs safely,
   // locked-ahead transactions acquired keys ahead for a specific dbindex
   if (auto* tx = cmd_cntx->tx(); tx && tx->IsMulti()) {
-    if (tx->GetMultiMode() == Transaction::LOCK_AHEAD)
+    if (static_cast<Transaction*>(tx)->GetMultiMode() == Transaction::LOCK_AHEAD)
       return cmd_cntx->SendError("SELECT is not allowed in regular EXEC/EVAL");
   }
 
@@ -2443,7 +2449,9 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
 void GenericFamily::Dump(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   DVLOG(1) << "Dumping before ::ScheduleSingleHopT " << key;
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpDump(t->GetOpArgs(shard), key); };
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
+    return OpDump(t->GetOpArgs(shard), key);
+  };
   OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
@@ -2459,7 +2467,7 @@ void GenericFamily::Dump(CmdArgList args, CommandContext* cmd_cntx) {
 void GenericFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CompactObjType> {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) -> OpResult<CompactObjType> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
     auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
     if (!it.is_done()) {

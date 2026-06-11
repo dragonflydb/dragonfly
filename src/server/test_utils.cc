@@ -108,7 +108,7 @@ void TransactionSuspension::Start() {
   auto st = transaction_->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
   CHECK_EQ(st, OpStatus::OK);
 
-  transaction_->Execute([](Transaction* t, EngineShard* shard) { return OpStatus::OK; }, false);
+  transaction_->Execute([](TransactionBase* t, EngineShard* shard) { return OpStatus::OK; }, false);
 }
 
 void TransactionSuspension::Terminate() {
@@ -294,7 +294,7 @@ void BaseFamilyTest::ResetService() {
             auto head = txq->Head();
             auto it = head;
             do {
-              Transaction* trans = std::get<Transaction*>(es->txq()->At(it));
+              TransactionBase* trans = std::get<TransactionBase*>(es->txq()->At(it));
               LOG(ERROR) << "Transaction " << trans->DebugId(es->shard_id());
               it = txq->Next(it);
             } while (it != head);
@@ -725,7 +725,7 @@ Transaction* BaseFamilyTest::GetTransaction(string_view conn_id) {
   auto it = connections_.find(conn_id);
   if (it == connections_.end())
     return nullptr;
-  return it->second->cmd_cntx()->transaction;
+  return static_cast<Transaction*>(it->second->cmd_cntx()->transaction);
 }
 
 vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {

@@ -301,7 +301,7 @@ class ConnectionContext : public facade::ConnectionContext {
 
   // TODO: to introduce proper accessors.
   Namespace* ns = nullptr;
-  Transaction* transaction = nullptr;
+  TransactionBase* transaction = nullptr;
 
   ConnectionState conn_state;
 
@@ -382,7 +382,7 @@ class CommandContext : public facade::ParsedCommand {
     Init(rb, conn_cntx);
   }
 
-  void SetupTx(const CommandId* cid, Transaction* tx) {
+  void SetupTx(const CommandId* cid, TransactionBase* tx) {
     cid_ = cid;
     tx_ = tx;
   }
@@ -409,7 +409,7 @@ class CommandContext : public facade::ParsedCommand {
     return std::exchange(rb_, new_rb);
   }
 
-  Transaction* tx() const {
+  TransactionBase* tx() const {
     return tx_;
   }
 
@@ -438,7 +438,7 @@ class CommandContext : public facade::ParsedCommand {
   // owned by this CommandContext (or StoredCmd for EXEC), so it survives async execution.
   facade::ParsedArgs tail_args_;
 
-  Transaction* tx_ = nullptr;
+  TransactionBase* tx_ = nullptr;
   const CommandId* cid_ = nullptr;
 };
 

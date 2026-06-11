@@ -34,41 +34,7 @@ thread_local Transaction::TLTmpSpace Transaction::tmp_space;
 
 namespace {
 
-// Global txid sequence
-atomic_uint64_t op_seq{1};
-
 constexpr size_t kTransSize [[maybe_unused]] = sizeof(Transaction);
-
-void AnalyzeTxQueue(const EngineShard* shard, const TxQueue* txq) {
-  unsigned q_limit = absl::GetFlag(FLAGS_tx_queue_warning_len);
-  if (txq->size() > q_limit) {
-    static thread_local time_t last_log_time = 0;
-    // TODO: glog provides LOG_EVERY_T, which uses precise clock.
-    // We should introduce inside helio LOG_PERIOD_ATLEAST macro that takes seconds and
-    // uses low precision clock.
-    time_t now = time(nullptr);
-    if (now >= last_log_time + 10) {
-      last_log_time = now;
-      EngineShard::TxQueueInfo info = shard->AnalyzeTxQueue();
-      string msg = StrCat("TxQueue is too long. ", info.Format());
-      absl::StrAppend(&msg, "poll_executions:", shard->stats().poll_execution_total);
-
-      const Transaction* cont_tx = shard->GetContTx();
-      if (cont_tx) {
-        absl::StrAppend(&msg, " continuation_tx: ", cont_tx->DebugId(shard->shard_id()), " ",
-                        cont_tx->DEBUG_IsArmedInShard(shard->shard_id()) ? " armed" : "");
-      }
-
-      LOG(WARNING) << msg;
-    }
-  }
-}
-
-void RecordTxScheduleStats(const Transaction* tx) {
-  auto* ss = ServerState::tlocal();
-  ++(tx->IsGlobal() ? ss->stats.tx_global_cnt : ss->stats.tx_normal_cnt);
-  ++ss->stats.tx_width_freq_arr[tx->GetUniqueShardCnt() - 1];
-}
 
 std::string FormatTp(Transaction::time_point tp) {
   using namespace chrono;
@@ -121,7 +87,7 @@ cv_status Transaction::BatonBarrier::Wait(time_point tp) {
 
 Transaction::Guard::Guard(Transaction* tx) : tx(tx) {
   DCHECK(tx->cid_->opt_mask() & CO::GLOBAL_TRANS);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
     return OpStatus::OK;
   };
@@ -129,7 +95,7 @@ Transaction::Guard::Guard(Transaction* tx) : tx(tx) {
 }
 
 Transaction::Guard::~Guard() {
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
     return OpStatus::OK;
   };
@@ -137,8 +103,7 @@ Transaction::Guard::~Guard() {
   tx->Refurbish();
 }
 
-Transaction::Transaction(const CommandId* cid) : cid_{cid} {
-  InitTxTime();
+Transaction::Transaction(const CommandId* cid) : TransactionBase(cid) {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVAL_RO" || cmd_name == "EVALSHA" ||
       cmd_name == "EVALSHA_RO") {
@@ -149,10 +114,10 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
 }
 
 Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id)
-    : multi_{make_unique<MultiData>()},
-      txid_{parent->txid()},
-      unique_shard_cnt_{1},
-      unique_shard_id_{shard_id} {
+    : multi_{make_unique<MultiData>()} {
+  txid_ = parent->txid();
+  unique_shard_cnt_ = 1;
+  unique_shard_id_ = shard_id;
   if (parent->multi_) {
     multi_->mode = parent->multi_->mode;
   } else {
@@ -449,9 +414,7 @@ void Transaction::StartMultiNonAtomic() {
   multi_->mode = NON_ATOMIC;
 }
 
-void Transaction::InitTxTime() {
-  time_now_ms_ = GetCurrentTimeMs();
-}
+// InitTxTime moved to TransactionBase
 
 void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
@@ -984,15 +947,12 @@ void Transaction::DispatchHop() {
   });
 }
 
-void Transaction::FinishHop() {
-  boost::intrusive_ptr<Transaction> guard(this);  // Keep alive until Dec() fully finishes
-  run_barrier_.Dec();
-}
+// FinishHop moved to TransactionBase
 
 void Transaction::Conclude() {
   if (!IsScheduled())
     return;
-  auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+  auto cb = [](TransactionBase* t, EngineShard* shard) { return OpStatus::OK; };
   Execute(std::move(cb), true);
 }
 
@@ -1130,15 +1090,6 @@ void Transaction::ExpireBlocking(WaitKeys wkeys) {
   DVLOG(1) << "ExpireBlocking finished " << DebugId();
 }
 
-string_view Transaction::Name() const {
-  return cid_ ? cid_->name() : "null-command";
-}
-
-ShardId Transaction::GetUniqueShard() const {
-  DCHECK_EQ(GetUniqueShardCnt(), 1U);
-  return unique_shard_id_;
-}
-
 optional<SlotId> Transaction::GetUniqueSlotId() const {
   return unique_slot_checker_.GetUniqueSlotId();
 }
@@ -1187,10 +1138,6 @@ bool Transaction::IsActive(ShardId sid) const {
   }
 
   return shard_data_[SidToId(sid)].local_mask & ACTIVE;
-}
-
-IntentLock::Mode Transaction::LockMode() const {
-  return cid_->IsReadOnly() ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
 }
 
 OpArgs Transaction::GetOpArgs(EngineShard* shard) const {
@@ -1305,7 +1252,7 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
   TxQueue* txq = shard->txq();
   bool was_head = txq->Head() == q_pos;
 
-  Transaction* trans = absl::get<Transaction*>(txq->At(q_pos));
+  TransactionBase* trans = absl::get<TransactionBase*>(txq->At(q_pos));
   DCHECK(trans == this) << txq->size() << ' ' << sd.pq_pos << ' ' << trans->DebugId();
   txq->Remove(q_pos);
 
@@ -1351,13 +1298,13 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
   DCHECK(!IsAtomicMulti());  // blocking inside MULTI is not allowed
 
   // Register keys on active shards blocking controllers and mark shard state as suspended.
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [this, &wkeys, krc](TransactionBase* t, EngineShard* shard) {
     if (wkeys) {  // single string_view.
       IndexSlice is(0, 1);
       ShardArgs sa(absl::MakeSpan(&wkeys.value(), 1), absl::MakeSpan(&is, 1));
-      t->WatchInShard(&t->GetNamespace(), sa, shard, krc);
+      WatchInShard(&GetNamespace(), sa, shard, krc);
     } else {
-      t->WatchInShard(&t->GetNamespace(), t->GetShardArgs(shard->shard_id()), shard, krc);
+      WatchInShard(&GetNamespace(), GetShardArgs(shard->shard_id()), shard, krc);
     }
     return OpStatus::OK;
   };
@@ -1430,11 +1377,6 @@ void Transaction::ExpireShardCb(ShardArgs keys, EngineShard* shard) {
   shard->PollExecution("unwatchcb", nullptr);
 }
 
-DbSlice& Transaction::GetDbSlice(ShardId shard_id) const {
-  CHECK(namespace_ != nullptr);
-  return namespace_->GetDbSlice(shard_id);
-}
-
 OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   DCHECK(multi_ && multi_->role == SQUASHED_STUB);
   DCHECK_EQ(unique_shard_cnt_, 1u);
@@ -1484,19 +1426,13 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
 
     TxQueue* txq = shard->txq();
     DCHECK(!txq->Empty());
-    DCHECK_EQ(absl::get<Transaction*>(txq->At(sd.pq_pos)), this);
+    DCHECK_EQ(absl::get<TransactionBase*>(txq->At(sd.pq_pos)), this);
 
     txq->Remove(sd.pq_pos);
     sd.pq_pos = TxQueue::kEnd;
   }
 
   shard->FinalizeMulti(this);
-}
-
-bool Transaction::IsGlobal() const {
-  // Please note that a transaction can be non-global even if multi_->mode == GLOBAL.
-  // It happens when a transaction is squashed and switches to execute differrent commands.
-  return global_;
 }
 
 // Runs only in the shard thread.
@@ -1617,24 +1553,6 @@ void Transaction::CancelBlocking(const std::function<OpStatus(ArgSlice)>& status
   // don't use local_result_ because it can be overwirtten if we cancel ahead
   block_cancel_result_ = status;
   blocking_barrier_.Close();
-}
-
-bool Transaction::CanRunInlined() const {
-  auto* ss = ServerState::tlocal();
-  auto* es = EngineShard::tlocal();
-
-  // Global transactions like SAVE can change the inlining rules, so run them non-inlined.
-  // This guarantees that their PollExecution batch executes on the shard-queue fiber
-  // when the conditions update.
-  // We also refuse to inline when another transaction is already running on this shard:
-  // journal/db-slice callbacks invoked from RunCallback can preempt, and a nested inlined
-  // transaction would interleave its own callback loop with the outer one.
-  if (unique_shard_cnt_ == 1 && unique_shard_id_ == ss->thread_index() &&
-      ss->AllowInlineScheduling() && !IsGlobal() && es->running_tx() == nullptr) {
-    ss->stats.tx_inline_runs++;
-    return true;
-  }
-  return false;
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {

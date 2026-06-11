@@ -536,7 +536,7 @@ using SearchConst = SearchKey<DbSlice::ConstIterator>;
 
 template <typename Iter>
 MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheCmdFlags cmd_flags,
-                         const Transaction* t, EngineShard* shard, SearchKey<Iter> find_op) {
+                         const TransactionBase* t, EngineShard* shard, SearchKey<Iter> find_op) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
@@ -746,7 +746,7 @@ cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
   if (cmd_cntx->mc_command() == nullptr) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto cb = [&](TransactionBase* t, EngineShard* shard) {
       return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
 
@@ -754,7 +754,7 @@ cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
     GetReplies{rb}.Send(co_await cmd::SingleHopT(cb));
   } else {
     // Memcached skips if key is missing
-    auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto cb = [&](TransactionBase* t, EngineShard* shard) {
       return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
     };
 
@@ -773,7 +773,7 @@ cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
 cmd::CmdR IncrByGeneric(CommandContext* cmd_cntx, string_view key, int64_t val) {
   bool skip_on_missing = (cmd_cntx->mc_command() != nullptr);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
     return res;
   };
@@ -801,7 +801,7 @@ cmd::CmdR IncrByGeneric(CommandContext* cmd_cntx, string_view key, int64_t val) 
 }
 
 struct GetAndTouchParams {
-  const Transaction* t;
+  const TransactionBase* t;
   EngineShard* shard;
   const DbSlice::ExpireParams& expire_params;
   const string_view key;
@@ -840,7 +840,7 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
 }
 
 MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, MemcacheCmdFlags cmd_flags,
-                    const Transaction* t, EngineShard* shard,
+                    const TransactionBase* t, EngineShard* shard,
                     const DbSlice::ExpireParams* gat_params = nullptr) {
   if (gat_params) {
     SearchMut find_op = [&](string_view key) {
@@ -1126,7 +1126,7 @@ cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
     co_return get<facade::ErrorReply>(params_result);
 
   if (holds_alternative<NegativeExpire>(params_result)) {
-    auto del_cb = [](const Transaction* tx, EngineShard* es) {
+    auto del_cb = [](const TransactionBase* tx, EngineShard* es) {
       ShardArgs args = tx->GetShardArgs(es->shard_id());
       GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
       return OpStatus::OK;
@@ -1151,7 +1151,7 @@ cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   optional<util::fb2::Future<bool>> backpressure;
   sparams.backpressure = &backpressure;
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return SetCmd(t->GetOpArgs(shard), true).Set(sparams, key, value);
   };
 
@@ -1218,7 +1218,7 @@ cmd::CmdR CmdSetExGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
 
   bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
   };
 
@@ -1236,7 +1236,7 @@ cmd::CmdR CmdSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
     sparams.memcache_flags = cmd_cntx->mc_command()->flags;
 
   bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
   };
 
@@ -1258,7 +1258,7 @@ cmd::CmdR CmdSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto cb = [key = parser.Next()](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
+  auto cb = [key = parser.Next()](TransactionBase* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
@@ -1271,7 +1271,7 @@ cmd::CmdR CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR CmdGetDel(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto cb = [key = parser.Next()](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
+  auto cb = [key = parser.Next()](TransactionBase* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
@@ -1288,7 +1288,7 @@ cmd::CmdR CmdGetDel(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  auto cb = [&key](Transaction* tx, EngineShard* es) -> OpResult<string> {
+  auto cb = [&key](TransactionBase* tx, EngineShard* es) -> OpResult<string> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok()) {
       return it_res.status();
@@ -1333,7 +1333,7 @@ cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   SetCmd::SetParams sparams{.prev_val = &prev};
 
   bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
   };
 
@@ -1379,7 +1379,7 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringResult> {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) -> OpResult<StringResult> {
     auto op_args = t->GetOpArgs(shard);
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
@@ -1444,7 +1444,7 @@ cmd::CmdR CmdIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
     co_return facade::ErrorReply{kInvalidFloatErr};
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpIncrFloat(t->GetOpArgs(shard), key, val);
   };
 
@@ -1488,7 +1488,7 @@ cmd::CmdR CmdDecrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 // Reorder per-shard results according to argument order of primary command
-void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* t,
+void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const TransactionBase* t,
                          absl::Span<optional<GetResp>> dest) {
   for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
     if (!t->IsActive(sid))
@@ -1524,7 +1524,7 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
   unique_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
 
   auto gat_ptr = gat_params ? &*gat_params : nullptr;
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     mget_resp[shard->shard_id()] = OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_ptr);
     return OpStatus::OK;
   };
@@ -1604,7 +1604,7 @@ void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   AggregateStatus result;
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
     if (auto status = OpMSet(t->GetOpArgs(shard), args); status != OpStatus::OK)
       result = status;
@@ -1624,7 +1624,7 @@ void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   atomic_bool exists{false};
 
-  auto cb = [&](Transaction* t, EngineShard* es) {
+  auto cb = [&](TransactionBase* t, EngineShard* es) {
     auto sid = es->shard_id();
     auto args = t->GetShardArgs(sid);
     auto op_args = t->GetOpArgs(es);
@@ -1644,7 +1644,7 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   const bool to_skip = exists.load(memory_order_relaxed);
 
   AggregateStatus result;
-  auto epilog_cb = [&](Transaction* t, EngineShard* shard) {
+  auto epilog_cb = [&](TransactionBase* t, EngineShard* shard) {
     if (to_skip)
       return OpStatus::OK;
 
@@ -1659,7 +1659,7 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR CmdStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto cb = [key = parser.Next()](Transaction* t, EngineShard* shard) {
+  auto cb = [key = parser.Next()](TransactionBase* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
   GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
@@ -1672,7 +1672,7 @@ cmd::CmdR CmdGetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (auto err = parser.TakeError(); err)
     co_return err.MakeReply();
 
-  auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &start = start, &end = end](TransactionBase* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
@@ -1694,7 +1694,8 @@ cmd::CmdR CmdSetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
     co_return facade::ErrorReply{"string exceeds maximum allowed size"};
   }
 
-  auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &start = start, &value = value](TransactionBase* t,
+                                                            EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
   GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
@@ -1774,11 +1775,11 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kInvalidIntErr);
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
     return OpThrottle(t->GetOpArgs(shard), key, limit, emission_interval_ns, quantity);
   };
 
-  Transaction* trans = cmd_cntx->tx();
+  TransactionBase* trans = cmd_cntx->tx();
   OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
