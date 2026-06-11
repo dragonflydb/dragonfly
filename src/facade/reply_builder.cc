@@ -16,6 +16,7 @@
 #include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "facade/error.h"
+#include "util/fiber_socket_base.h"
 #include "util/fibers/proactor_base.h"
 
 #ifdef __APPLE__
@@ -172,6 +173,9 @@ void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
   if (vecs_.empty() && (expected_buffer_cap == 0))
     return;
 
+  // LOG(INFO) << "SinkReplyBuilder::Flush() " << vecs_.size() << " iovecs, " << total_size_
+  //           << " bytes";
+
   if (!vecs_.empty())
     Send();
 
@@ -207,8 +211,24 @@ void SinkReplyBuilder::Send() {
   reply_stats.io_write_cnt++;
   reply_stats.io_write_bytes += total_size_;
   DVLOG(2) << "Writing " << total_size_ << " bytes";
+
+#if 1
+  util::FiberSocketBase* sock = static_cast<util::FiberSocketBase*>(sink_);
+  struct MyStruct {
+    base::IoBuf buffer;
+    absl::InlinedVector<iovec, 16> vecs;
+  };
+  shared_ptr<MyStruct> data = make_shared<MyStruct>();
+  data->buffer = std::move(buffer_);
+  data->vecs = std::move(vecs_);
+
+  const iovec* base = data->vecs.data();
+  size_t len = data->vecs.size();
+  sock->AsyncWrite(base, len, [data = std::move(data)](std::error_code ec) { CHECK(!ec); });
+#else
   if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
     ec_ = ec;
+#endif
 
   auto it = PendingList::s_iterator_to(pin);
   pending_list.erase(it);

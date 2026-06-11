@@ -55,6 +55,7 @@ extern "C" {
 #include "server/http_api.h"
 #include "server/multi_command_squasher.h"
 #include "server/namespaces.h"
+#include "server/pipeline_squasher.h"
 #include "server/script_mgr.h"
 #include "server/search/search_family.h"
 #include "server/server_state.h"
@@ -1813,6 +1814,49 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
     ss->stats.squash_stats_ignored++;
   }
   return {.processed = dispatched, .account_in_stats = account_in_stats};
+}
+
+unsigned Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
+                                        facade::ConnectionContext* cntx) {
+  auto* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
+
+  auto* rb = static_cast<RedisReplyBuilder*>(first->rb());
+  RespVersion resp_v = rb->GetRespVersion();
+  auto* ss = ServerState::tlocal();
+
+  if (ss->IsPaused())
+    return 0;
+
+  PipelineSquasher squasher(dfly_cntx, this, exec_cid_);
+  unsigned processed = 0;
+  auto* cmd = first;
+
+  for (unsigned i = 0; i < count && cmd; i++) {
+    auto* cmd_cntx = static_cast<CommandContext*>(cmd);
+    ParsedArgs args{*cmd};
+    const auto [cid, tail_args] = registry_.FindExtended(args);
+
+    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() ||
+                          (cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EXEC);
+    const bool is_eval = cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EVAL;
+    const bool is_blocking = cid != nullptr && cid->IsBlocking();
+
+    if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
+      if (squasher.TrySquash(cmd_cntx, cid, tail_args)) {
+        processed++;
+        cmd = cmd->next;
+        continue;
+      }
+    }
+
+    // Non-squashable command: flush pending batch and stop.
+    // ExecuteBatch's sequential loop handles the rest.
+    break;
+  }
+
+  squasher.ExecuteSquashed(resp_v);
+  return processed;
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {

@@ -96,7 +96,7 @@ class MultiCommandSquasher {
 
   bool atomic_;                // Whether working in any of the atomic modes
   const CommandId* base_cid_;  // underlying cid (exec or eval) for executing batch hops
-
+  uint64_t dispatch_start_ = 0;
   Opts opts_;
 
   std::vector<ShardExecInfo> sharded_;
