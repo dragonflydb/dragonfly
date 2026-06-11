@@ -2439,7 +2439,7 @@ void Connection::RefreshConnectionMemoryUsage() {
     return;
 
   size_t current = account_connection_memory_ ? GetMemoryUsage() : 0;
-  auto& conn_stats = tl_facade_stats->conn_stats;
+  ConnectionStats& conn_stats = GetLocalConnStats();
 
   if (current >= accounted_connection_memory_bytes_) {
     conn_stats.connection_memory_bytes += current - accounted_connection_memory_bytes_;
