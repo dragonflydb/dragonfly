@@ -96,6 +96,30 @@ async def test_rss_used_mem_gap(df_factory: DflyInstanceFactory, type, keys, val
 
 
 @pytest.mark.asyncio
+async def test_rss_ratio_canary(df_factory: DflyInstanceFactory):
+    """
+    tests that RSS is within a fixed ratio of used_mem, less than 1.5x.
+    serves as a signal that memory usage has gone beyond acceptable
+    limit for fixed workload
+    """
+    df_server = df_factory.create(proactor_threads=1)
+    df_server.start()
+    client = df_server.client()
+
+    await client.execute_command("DEBUG POPULATE 7000 size 44000")
+    await asyncio.sleep(2)
+
+    info = await client.info("memory")
+    used = info["used_memory"]
+    rss = info["used_memory_rss"]
+    assert used > 256 * 1024 * 1024, "Weak testcase: too little used memory"
+
+    ratio = rss / used
+    logging.info(f"Used memory {used}, rss {rss}, ratio {ratio:.4f}")
+    assert ratio < 1.5, f"RSS ratio {ratio:.3f} over canary threshold (used={used}, rss={rss})"
+
+
+@pytest.mark.asyncio
 @dfly_args(
     {
         "maxmemory": "512mb",
