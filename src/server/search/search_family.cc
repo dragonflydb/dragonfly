@@ -2606,7 +2606,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   const auto& schema = info.base_index.schema;
 
   bool has_custom_stopwords = info.base_index.options.custom_stopwords;
-  rb->StartCollection(has_custom_stopwords ? 8 : 7, CollectionType::MAP);
+  // Reply with a flat array under RESP3 too, not a map.
+  rb->StartArray((has_custom_stopwords ? 8 : 7) * 2);
 
   rb->SendSimpleString("index_name");
   rb->SendSimpleString(idx_name);
@@ -2614,7 +2615,7 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendSimpleString("index_definition");
   {
     const bool has_lang_field = !schema.language_field.empty();
-    rb->StartCollection(has_lang_field ? 5 : 4, CollectionType::MAP);
+    rb->StartArray((has_lang_field ? 5 : 4) * 2);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
     rb->SendSimpleString("prefixes");
