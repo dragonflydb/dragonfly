@@ -86,7 +86,7 @@ class ZSetFamily {
   static void ZAddGeneric(std::string_view key, const ZParams& zparams, ScoredMemberSpan memb_sp,
                           CommandContext* cmd_cntx);
 
-  static OpResult<MScoreResponse> ZGetMembers(CmdArgList args, Transaction* tx,
+  static OpResult<MScoreResponse> ZGetMembers(CmdArgList args, TransactionBase* tx,
                                               SinkReplyBuilder* builder);
 
   static OpResult<std::vector<ScoredArray>> OpRanges(const std::vector<ZRangeSpec>& range_specs,

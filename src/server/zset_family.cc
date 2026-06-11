@@ -857,7 +857,7 @@ double GetKeyWeight(const vector<double>& weights, unsigned windex) {
   return weights[windex];
 }
 
-OpResult<KeyIterWeightVec> PrepareWeightedSets(const Transaction& trans, bool store,
+OpResult<KeyIterWeightVec> PrepareWeightedSets(const TransactionBase& trans, bool store,
                                                string_view dest, const vector<double>& weights,
                                                EngineShard* shard) {
   ShardArgs keys = trans.GetShardArgs(shard->shard_id());
@@ -907,8 +907,8 @@ OpResult<KeyIterWeightVec> PrepareWeightedSets(const Transaction& trans, bool st
   return key_weight_vec;
 }
 
-OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
-                            const vector<double>& weights, bool store) {
+OpResult<ScoredMap> OpUnion(EngineShard* shard, TransactionBase* t, string_view dest,
+                            AggType agg_type, const vector<double>& weights, bool store) {
   OpResult<KeyIterWeightVec> key_vec_res = PrepareWeightedSets(*t, store, dest, weights, shard);
   if (!key_vec_res)
     return key_vec_res.status();
@@ -921,8 +921,8 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
   return UnionShardKeysWithScore(*key_vec_res, agg_type, db_slice, t->GetDbContext());
 }
 
-OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
-                            const vector<double>& weights, bool store) {
+OpResult<ScoredMap> OpInter(EngineShard* shard, TransactionBase* t, string_view dest,
+                            AggType agg_type, const vector<double>& weights, bool store) {
   OpResult<KeyIterWeightVec> key_vec_res = PrepareWeightedSets(*t, store, dest, weights, shard);
   if (!key_vec_res)
     return key_vec_res.status();
@@ -1111,7 +1111,7 @@ OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
   return op_args;
 }
 
-ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bool is_max) {
+ScoredArray OpBZPop(TransactionBase* t, EngineShard* shard, std::string_view key, bool is_max) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto it_res = db_slice.FindMutable(t->GetDbContext(), key, OBJ_ZSET);
   CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
@@ -1170,7 +1170,7 @@ void BZPopMinMax(CmdArgList args, bool is_max, CommandContext* cmd_cntx) {
 
   optional<std::string> callback_ran_key;
   OpResult<ScoredArray> popped_array;
-  auto cb = [is_max, &popped_array, &callback_ran_key](Transaction* t, EngineShard* shard,
+  auto cb = [is_max, &popped_array, &callback_ran_key](TransactionBase* t, EngineShard* shard,
                                                        std::string_view key) {
     callback_ran_key = key;
     popped_array = OpBZPop(t, shard, key, is_max);
@@ -1178,8 +1178,8 @@ void BZPopMinMax(CmdArgList args, bool is_max, CommandContext* cmd_cntx) {
 
   auto* cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx(), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
-      &cntx->paused);
+      static_cast<Transaction*>(cmd_cntx->tx()), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000),
+      &cntx->blocked, &cntx->paused);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (popped_key) {
@@ -1212,7 +1212,7 @@ void BZPopMinMax(CmdArgList args, bool is_max, CommandContext* cmd_cntx) {
   return rb->SendNullArray();
 }
 
-OpResult<vector<ScoredMap>> OpFetch(EngineShard* shard, Transaction* t, bool skip_dest_key) {
+OpResult<vector<ScoredMap>> OpFetch(EngineShard* shard, TransactionBase* t, bool skip_dest_key) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
@@ -1637,9 +1637,9 @@ void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool sto
   if (op_args->num_keys == 0) {
     return cmd_cntx->SendError(absl::StrCat("at least 1 input key is needed for ", cmd));
   }
-  Transaction* tx = cmd_cntx->tx();
+  TransactionBase* tx = cmd_cntx->tx();
   vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     maps[shard->shard_id()] =
         shard_func(shard, t, dest_key, op_args->agg_type, op_args->weights, store);
     return OpStatus::OK;
@@ -1676,7 +1676,7 @@ void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool sto
   SinkReplyBuilder* builder = cmd_cntx->rb();
   if (store) {
     // TODO: Use variant collection to avoid smvec copy for store operation
-    auto store_cb = [&, dest_shard = Shard(dest_key, maps.size())](Transaction* t,
+    auto store_cb = [&, dest_shard = Shard(dest_key, maps.size())](TransactionBase* t,
                                                                    EngineShard* shard) {
       if (shard->shard_id() == dest_shard)
         ZSetFamily::OpAdd(t->GetOpArgs(shard),
@@ -1705,7 +1705,7 @@ void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool sto
 enum class FilterShards : uint8_t { NO = 0, YES = 1 };
 
 OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards should_filter_shards,
-                                         uint32 count, bool reverse, Transaction* tx) {
+                                         uint32 count, bool reverse, TransactionBase* tx) {
   ZSetFamily::RangeParams range_params;
   range_params.reverse = reverse;
   range_params.with_scores = true;
@@ -1720,7 +1720,7 @@ OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards shou
   if (should_filter_shards == FilterShards::YES) {
     key_shard = Shard(key, shard_set->size());
   }
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     if (!key_shard.has_value() || *key_shard == shard->shard_id()) {
       result = OpPopCount(range_spec, t->GetOpArgs(shard), key);
     }
@@ -1786,7 +1786,7 @@ void ZRangeInternal(CmdArgList args, ZSetFamily::RangeParams range_params,
 
   OpResult<ScoredArray> range_result;
   ShardId src_shard = Shard(key, shard_set->size());
-  auto range_cb = [&](Transaction* t, EngineShard* shard) {
+  auto range_cb = [&](TransactionBase* t, EngineShard* shard) {
     if (shard->shard_id() != src_shard) {
       // Only run ZRANGE on the source shard.
       return OpStatus::OK;
@@ -1816,7 +1816,7 @@ void ZRangeInternal(CmdArgList args, ZSetFamily::RangeParams range_params,
 
   OpResult<ZSetFamily::AddResult> add_result;
   ShardId dest_shard = Shard(*range_params.store_key, shard_set->size());
-  auto add_cb = [&](Transaction* t, EngineShard* shard) {
+  auto add_cb = [&](TransactionBase* t, EngineShard* shard) {
     if (shard->shard_id() != dest_shard) {
       // Only write the result on the target shard.
       return OpStatus::OK;
@@ -1915,7 +1915,7 @@ void ZRankGeneric(CmdArgList args, bool reverse, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpRank(t->GetOpArgs(shard), key, member, reverse, with_score);
   };
 
@@ -1938,7 +1938,7 @@ void ZRankGeneric(CmdArgList args, bool reverse, CommandContext* cmd_cntx) {
 
 void ZRemRangeGeneric(string_view key, const ZSetFamily::ZRangeSpec& range_spec,
                       CommandContext* cmd_cntx) {
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpRemRange(t->GetOpArgs(shard), key, range_spec);
   };
 
@@ -1952,7 +1952,7 @@ void ZRemRangeGeneric(string_view key, const ZSetFamily::ZRangeSpec& range_spec,
 
 // Returns the key of the first non empty set found in the list of shard arguments.
 // Returns nullopt if none.
-std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, Transaction* t) {
+std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, TransactionBase* t) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
@@ -2030,7 +2030,7 @@ bool ValidateZMPopCommand(CmdArgList args, bool is_blocking, CommandContext* cmd
 
 void ZSetFamily::ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemberSpan memb_sp,
                              CommandContext* cmd_cntx) {
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return ZSetFamily::OpAdd(t->GetOpArgs(shard), zparams, key, memb_sp);
   };
 
@@ -2059,11 +2059,11 @@ void ZSetFamily::ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemb
   }
 }
 
-OpResult<MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, Transaction* tx,
+OpResult<MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, TransactionBase* tx,
                                                  SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
   auto members = args.subspan(1);
-  auto cb = [key, members](Transaction* t, EngineShard* shard) {
+  auto cb = [key, members](TransactionBase* t, EngineShard* shard) {
     return OpMScore(t->GetOpArgs(shard), key, members);
   };
 
@@ -2324,7 +2324,7 @@ void CmdZAdd(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdZCard(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) -> OpResult<uint32_t> {
     auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_ZSET);
     if (!find_res) {
       return find_res.status();
@@ -2353,7 +2353,7 @@ void CmdZCount(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kFloatRangeErr);
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpCount(t->GetOpArgs(shard), key, si);
   };
 
@@ -2414,7 +2414,7 @@ vector<ScoredMemberView> ZDiffOp(ShardId key_sid, vector<OpResult<vector<ScoredM
 void CmdZDiff(CmdArgList args, CommandContext* cmd_cntx) {
   vector<OpResult<vector<ScoredMap>>> maps(shard_set->size(), OpStatus::OK);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     maps[shard->shard_id()] = OpFetch(shard, t, false /* no destination key */);
     return OpStatus::OK;
   };
@@ -2464,7 +2464,7 @@ void CmdZDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
   const string_view dest_key = ArgS(args, 0);
   const ShardId dest_shard = Shard(dest_key, shard_set->size());
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     // We skip destkey if shard id matches
     const bool skip_dest_key = shard->shard_id() == dest_shard;
     maps[shard->shard_id()] = OpFetch(shard, t, skip_dest_key);
@@ -2492,7 +2492,7 @@ void CmdZDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
   // Calculate diff between sets. We stil need to write  destination key even it is empty set
   vector<ScoredMemberView> smvec = ZDiffOp(sid, std::move(maps), &result);
 
-  auto store_cb = [&](Transaction* t, EngineShard* shard) {
+  auto store_cb = [&](TransactionBase* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard)
       ZSetFamily::OpAdd(t->GetOpArgs(shard),
                         ZSetFamily::ZParams{.override = true, .journal_update = true}, dest_key,
@@ -2525,7 +2525,7 @@ void CmdZIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   ZSetFamily::ZParams zparams;
   zparams.flags = ZADD_IN_INCR;
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return ZSetFamily::OpAdd(t->GetOpArgs(shard), zparams, key,
                              ScoredMemberSpan{&scored_member, 1});
   };
@@ -2573,7 +2573,7 @@ void CmdZInterCard(CmdArgList args, CommandContext* cmd_cntx) {
 
   vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     maps[shard->shard_id()] = OpInter(shard, t, "", AggType::NOOP, {}, false);
     return OpStatus::OK;
   };
@@ -2603,7 +2603,7 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
   std::vector<std::optional<std::string_view>> first_found_key_per_shard_vec(shard_set->size(),
                                                                              std::nullopt);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     std::optional<std::string_view> result = GetFirstNonEmptyKeyFound(shard, t);
     if (result.has_value()) {
       first_found_key_per_shard_vec[shard->shard_id()] = result;
@@ -2644,7 +2644,7 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
   }
   // if we don't have any key to pop and it's blocking then we will block it using `WaitOnWatch`
   if (is_blocking && !key_to_pop.has_value()) {
-    auto trans = cmd_cntx->tx();
+    auto* trans = static_cast<Transaction*>(cmd_cntx->tx());
     auto* cntx = cmd_cntx->server_conn_cntx();
     auto* ns = &trans->GetNamespace();
 
@@ -2664,8 +2664,7 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
       return KeyReadyResult::kKeyNotFound;
     };
 
-    DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
-                                   // `WaitOnWatch`
+    DCHECK(trans->IsScheduled());
     auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, &cntx->blocked,
                                      &cntx->paused);
 
@@ -2674,8 +2673,8 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
       return;
     }
 
-    auto cb = [&key_to_pop](Transaction* t, EngineShard* shard) {
-      if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
+    auto cb = [&key_to_pop](TransactionBase* t, EngineShard* shard) {
+      if (auto wake_key = static_cast<Transaction*>(t)->GetWakeKey(shard->shard_id()); wake_key) {
         key_to_pop = *wake_key;
       }
       return OpStatus::OK;
@@ -2724,7 +2723,7 @@ void CmdZLexCount(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kLexRangeErr);
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpLexCount(t->GetOpArgs(shard), key, li);
   };
 
@@ -2827,7 +2826,7 @@ void CmdZRemRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdZRem(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto members = args.subspan(1);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, members);
   };
 
@@ -2859,7 +2858,7 @@ void CmdZRandMember(CmdArgList args, CommandContext* cmd_cntx) {
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpRandMember(count, params, t->GetOpArgs(shard), key);
   };
 
@@ -2881,7 +2880,7 @@ void CmdZScore(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view member = ArgS(args, 1);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return ZSetFamily::OpScore(t->GetOpArgs(shard), key, member);
   };
 
@@ -2934,7 +2933,7 @@ void CmdZScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
   const ScanOpts& scan_op = ops.value();
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 

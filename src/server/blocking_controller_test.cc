@@ -82,14 +82,14 @@ void BlockingControllerTest::TearDown() {
 }
 
 TEST_F(BlockingControllerTest, Basic) {
-  trans_->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
+  trans_->ScheduleSingleHop([&](TransactionBase* t, EngineShard* shard) {
     BlockingController bc(shard, &namespaces->GetDefaultNamespace());
     auto keys = t->GetShardArgs(shard->shard_id());
     bc.AddWatched(
-        keys, [](auto...) { return KeyReadyResult::kReady; }, t);
+        keys, [](auto...) { return KeyReadyResult::kReady; }, static_cast<Transaction*>(t));
     EXPECT_EQ(1, bc.NumWatched(0));
 
-    bc.RemovedWatched(keys, t);
+    bc.RemovedWatched(keys, static_cast<Transaction*>(t));
     EXPECT_EQ(0, bc.NumWatched(0));
     return OpStatus::OK;
   });

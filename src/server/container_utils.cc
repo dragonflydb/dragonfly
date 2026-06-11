@@ -66,7 +66,7 @@ OpResult<string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_ty
                                               BlockingResultCb func) {
   DCHECK_EQ(trans->GetUniqueShardCnt(), 1u);
   string key;
-  auto cb = [&](Transaction* t, EngineShard* shard) -> Transaction::RunnableResult {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) -> Transaction::RunnableResult {
     ShardId sid = shard->shard_id();
     auto args = t->GetShardArgs(sid);
     auto ff_res = FindFirstReadOnly(t->GetDbSlice(sid), t->GetDbContext(), args, req_obj_type);
@@ -79,7 +79,7 @@ OpResult<string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_ty
 
     CHECK(ff_res.ok());  // No other errors possible
     ff_res->first->first.GetString(&key);
-    func(t, shard, key);
+    func(static_cast<Transaction*>(t), shard, key);
     return OpStatus::OK;
   };
 
@@ -103,7 +103,7 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
   std::vector<OpResult<FFResult>> find_res(shard_set->size());
   std::fill(find_res.begin(), find_res.end(), OpStatus::KEY_NOTFOUND);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     auto args = t->GetShardArgs(sid);
     auto ff_res = FindFirstReadOnly(t->GetDbSlice(sid), t->GetDbContext(), args, req_obj_type);
@@ -354,10 +354,10 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
 
   // If a non-empty key exists, execute the callback immediately
   if (result.ok()) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto cb = [&](TransactionBase* t, EngineShard* shard) {
       if (shard->shard_id() == result->sid) {
         result_key = result->key;
-        func(t, shard, result_key);
+        func(static_cast<Transaction*>(t), shard, result_key);
       }
       return OpStatus::OK;
     };
@@ -404,10 +404,10 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   if (status != OpStatus::OK)
     return status;
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
+    if (auto wake_key = static_cast<Transaction*>(t)->GetWakeKey(shard->shard_id()); wake_key) {
       result_key = *wake_key;
-      func(t, shard, result_key);
+      func(static_cast<Transaction*>(t), shard, result_key);
     }
     return OpStatus::OK;
   };

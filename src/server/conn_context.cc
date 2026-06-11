@@ -211,7 +211,7 @@ size_t ConnectionContext::UsedMemory() const {
 
 void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
   if (transaction)
-    transaction->CancelBlocking(nullptr);
+    static_cast<Transaction*>(transaction)->CancelBlocking(nullptr);
 }
 
 void ConnectionContext::Unsubscribe(std::string_view channel) {

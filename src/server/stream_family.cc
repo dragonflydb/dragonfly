@@ -2434,7 +2434,7 @@ void CreateGroup(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
 
   RETURN_ON_PARSE_ERROR(*parser, cmd_cntx);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpCreate(t->GetOpArgs(shard), key, opts);
   };
 
@@ -2455,7 +2455,7 @@ void DestroyGroup(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   if (parser->HasNext())
     return cmd_cntx->SendError(UnknownSubCmd("DESTROY", "XGROUP"));
 
-  auto cb = [&, &key = key, &gname = gname](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &gname = gname](TransactionBase* t, EngineShard* shard) {
     return OpDestroyGroup(t->GetOpArgs(shard), key, gname);
   };
 
@@ -2480,7 +2480,7 @@ void CreateConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   if (parser->HasNext())
     return cmd_cntx->SendError(UnknownSubCmd("CREATECONSUMER", "XGROUP"));
 
-  auto cb = [&, &key = key, &gname = gname, &consumer = consumer](Transaction* t,
+  auto cb = [&, &key = key, &gname = gname, &consumer = consumer](TransactionBase* t,
                                                                   EngineShard* shard) {
     return OpCreateConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
@@ -2508,7 +2508,7 @@ void DelConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   if (parser->HasNext())
     return cmd_cntx->SendError(UnknownSubCmd("DELCONSUMER", "XGROUP"));
 
-  auto cb = [&, &key = key, &gname = gname, &consumer = consumer](Transaction* t,
+  auto cb = [&, &key = key, &gname = gname, &consumer = consumer](TransactionBase* t,
                                                                   EngineShard* shard) {
     return OpDelConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
@@ -2544,7 +2544,7 @@ void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
 
   RETURN_ON_PARSE_ERROR(*parser, cmd_cntx);
 
-  auto cb = [&, &key = key, &gname = gname, &id = id](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &gname = gname, &id = id](TransactionBase* t, EngineShard* shard) {
     return OpSetId(t->GetOpArgs(shard), key, gname, id, entries_read);
   };
 
@@ -2916,7 +2916,7 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
   range_opts.end = re.parsed_id;
   range_opts.is_rev = is_rev;
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpRange(t->GetOpArgs(shard), key, range_opts);
   };
 
@@ -3052,8 +3052,8 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   // transaction to proceed.
   OpResult<RecordVec> result;
   std::string key;
-  auto range_cb = [&](Transaction* t, EngineShard* shard) {
-    if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
+  auto range_cb = [&](TransactionBase* t, EngineShard* shard) {
+    if (auto wake_key = static_cast<Transaction*>(t)->GetWakeKey(shard->shard_id()); wake_key) {
       RangeOpts range_opts;
       range_opts.end = ParsedStreamId{.val = streamID{
                                           .ms = UINT64_MAX,
@@ -3187,14 +3187,15 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
   }
 
   if (!have_entries.load(memory_order_relaxed))
-    return XReadBlock(&*opts, tx, cmd_cntx->rb(), cmd_cntx->server_conn_cntx());
+    return XReadBlock(&*opts, static_cast<Transaction*>(tx), cmd_cntx->rb(),
+                      cmd_cntx->server_conn_cntx());
 
   vector<vector<RecordVec>> xread_resp;
   if (is_single_shard && have_entries.load(memory_order_relaxed)) {
     xread_resp = {std::move(fastread_prefetched)};
   } else {
     xread_resp.resize(shard_set->size());
-    auto read_cb = [&](Transaction* t, EngineShard* shard) {
+    auto read_cb = [&](TransactionBase* t, EngineShard* shard) {
       ShardId sid = shard->shard_id();
       auto op_args = tx->GetOpArgs(shard);
       xread_resp[sid] = OpRead(op_args, t->GetShardArgs(sid), *opts);
@@ -3365,7 +3366,7 @@ void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, parsed_add_opts.value(), fields, journaler);
   };
 
@@ -3487,7 +3488,7 @@ void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
   if (opts.delivery_time < 0 || static_cast<uint64_t>(opts.delivery_time) > now)
     opts.delivery_time = now;
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpClaim(t->GetOpArgs(shard), key, opts, absl::Span{ids.data(), ids.size()});
   };
   OpResult<ClaimInfo> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -3519,7 +3520,7 @@ void CmdXDel(CmdArgList args, CommandContext* cmd_cntx) {
     ids[i] = parsed_id.val;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpDel(t->GetOpArgs(shard), key, absl::Span{ids.data(), ids.size()});
   };
 
@@ -3805,7 +3806,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
 void CmdXLen(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
+  auto cb = [&](TransactionBase* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
@@ -3826,7 +3827,7 @@ void CmdXPending(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpPending(t->GetOpArgs(shard), key, opts);
   };
   OpResult<PendingResult> op_result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
@@ -3991,7 +3992,7 @@ void CmdXSetId(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   facade::ErrorReply reply(OpStatus::OK);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     reply = OpXSetId(t->GetOpArgs(shard), key, parsed_id.val);
     return OpStatus::OK;
   };
@@ -4024,7 +4025,7 @@ void CmdXTrim(CmdArgList args, CommandContext* cmd_cntx) {
     cmd_cntx->tx()->ReviveAutoJournal();
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, trim_opts, !enable_auto_journaling);
   };
 
@@ -4051,7 +4052,7 @@ void CmdXAck(CmdArgList args, CommandContext* cmd_cntx) {
     ids[i] = parsed_id.val;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpAck(t->GetOpArgs(shard), key, group, absl::Span{ids.data(), ids.size()});
   };
 
@@ -4116,7 +4117,7 @@ void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpAutoClaim(t->GetOpArgs(shard), key, opts);
   };
   OpResult<ClaimInfo> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));

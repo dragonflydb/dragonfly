@@ -563,7 +563,7 @@ void BitPos(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return FindFirstBitWithValue(t->GetOpArgs(shard), key, value, start, end, as_bit);
   };
   OpResult<int64_t> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -590,7 +590,7 @@ void BitCount(CmdArgList args, CommandContext* cmd_cntx) {
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
-  auto cb = [&, start_end](Transaction* t, EngineShard* shard) {
+  auto cb = [&, start_end](TransactionBase* t, EngineShard* shard) {
     return CountBitsForValue(t->GetOpArgs(shard), key, start_end.first, start_end.second, as_bit);
   };
   OpResult<std::size_t> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1136,7 +1136,8 @@ void SendResults(const vector<ResultType>& results, SinkReplyBuilder* builder) {
   }
 }
 
-void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReplyBuilder* builder) {
+void BitFieldGeneric(CmdArgList args, bool read_only, TransactionBase* tx,
+                     SinkReplyBuilder* builder) {
   if (args.size() == 1) {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->SendEmptyArray();
@@ -1151,7 +1152,8 @@ void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReply
   }
   CommandList cmd_list = std::move(maybe_ops_list.value());
 
-  auto cb = [&cmd_list, &key](Transaction* t, EngineShard* shard) -> OpResult<vector<ResultType>> {
+  auto cb = [&cmd_list, &key](TransactionBase* t,
+                              EngineShard* shard) -> OpResult<vector<ResultType>> {
     StateExecutor executor(ElementAccess(key, t->GetOpArgs(shard)));
     return executor.Execute(cmd_list);
   };
@@ -1194,7 +1196,7 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
   ShardStringResults result_set(shard_set->size(), OpStatus::KEY_NOTFOUND);
   ShardId dest_shard = Shard(dest_key, result_set.size());
 
-  auto shard_bitop = [&](Transaction* t, EngineShard* shard) {
+  auto shard_bitop = [&](TransactionBase* t, EngineShard* shard) {
     ShardArgs largs = t->GetShardArgs(shard->shard_id());
     DCHECK(!largs.Empty());
     ShardArgs::Iterator start = largs.begin(), end = largs.end();
@@ -1220,7 +1222,7 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   } else {
     auto op_result = joined_results.value();
-    auto store_cb = [&](Transaction* t, EngineShard* shard) {
+    auto store_cb = [&](TransactionBase* t, EngineShard* shard) {
       if (shard->shard_id() == dest_shard) {
         ElementAccess operation{dest_key, t->GetOpArgs(shard)};
         auto find_res = operation.Find(true);
@@ -1261,7 +1263,7 @@ void GetBit(CmdArgList args, CommandContext* cmd_cntx) {
   if (!absl::SimpleAtoi(ArgS(args, 1), &offset)) {
     return cmd_cntx->SendError(kInvalidIntErr);
   }
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return ReadValueBitsetAt(t->GetOpArgs(shard), key, offset);
   };
   OpResult<bool> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1283,7 +1285,8 @@ void SetBit(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kBitOffsetOutOfRange);
   }
 
-  auto cb = [&, &key = key, &offset = offset, &value = value](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &offset = offset, &value = value](TransactionBase* t,
+                                                              EngineShard* shard) {
     return BitNewValue(t->GetOpArgs(shard), key, offset, value != 0);
   };
 

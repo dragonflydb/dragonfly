@@ -7,14 +7,13 @@
 
 namespace dfly {
 
-TxQueue::TxQueue(std::function<uint64_t(const Transaction*)> sf)
-    : score_fun_(sf), vec_(32) {
+TxQueue::TxQueue(std::function<uint64_t(const TransactionBase*)> sf) : score_fun_(sf), vec_(32) {
   for (size_t i = 0; i < vec_.size(); ++i) {
     vec_[i].next = i + 1;
   }
 }
 
-auto TxQueue::Insert(Transaction* t) -> Iterator {
+auto TxQueue::Insert(TransactionBase* t) -> Iterator {
   if (next_free_ >= vec_.size()) {
     Grow();
   }

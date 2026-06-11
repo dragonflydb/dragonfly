@@ -31,7 +31,7 @@ struct SaveStagesInputs {
   bool use_dfs_format_;
   std::string_view cloud_uri_;
   std::string_view basename_;
-  Transaction* trans_;
+  TransactionBase* trans_;
   Service* service_;
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
   std::shared_ptr<SnapshotStorage> snapshot_storage_;

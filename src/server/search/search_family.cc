@@ -1363,7 +1363,7 @@ vector<SearchResult> SearchGlobalHnswIndex(
   std::vector<std::vector<bool>> shard_docs_serialized_indicator(shard_size);
 
   // Fetch all docs from shards
-  cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx.tx()->ScheduleSingleHop([&](TransactionBase* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(index_name);
 
     // No index found or no docs on this shard
@@ -1458,7 +1458,7 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
     }
   }
 
-  cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx.tx()->ScheduleSingleHop([&](TransactionBase* t, EngineShard* es) {
     auto* idx = es->search_indices()->GetIndex(index_name);
     if (!idx || shard_docs[es->shard_id()].empty())
       return OpStatus::OK;
@@ -1897,12 +1897,12 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
 
 // Returns false if the index is not found on any shard; caller must Conclude() the tx.
 bool CollectGlobalScoringStats(string_view index_name, search::SearchAlgorithm& text_algo,
-                               Transaction* tx, size_t shard_count,
+                               TransactionBase* tx, size_t shard_count,
                                search::GlobalScoringStats& out_stats) {
   atomic<bool> not_found{false};
   vector<search::ShardScoringStats> shard_stats(shard_count);
   tx->Execute(
-      [&](Transaction* t, EngineShard* es) {
+      [&](TransactionBase* t, EngineShard* es) {
         if (auto* idx = es->search_indices()->GetIndex(index_name); idx)
           shard_stats[es->shard_id()] = idx->CollectScoringStats(&text_algo);
         else
@@ -2187,7 +2187,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   vector<absl::Duration> shard_text_durations(shard_count);
   vector<absl::Duration> shard_knn_durations(shard_count);
 
-  auto shard_cb = [&](Transaction* t, EngineShard* es) {
+  auto shard_cb = [&](TransactionBase* t, EngineShard* es) {
     auto* idx = es->search_indices()->GetIndex(index_name);
     if (!idx) {
       index_not_found.store(true, std::memory_order_relaxed);
@@ -2481,7 +2481,7 @@ void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
   // Rebuild index
   // TODO: Introduce partial rebuild
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
-  auto upd_cb = [idx_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
+  auto upd_cb = [idx_name, index_info, is_journal](TransactionBase* tx, EngineShard* es) {
     (void)es->search_indices()->DropIndex(idx_name);
     es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info, is_journal);
     return OpStatus::OK;
@@ -2506,7 +2506,7 @@ void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
   // to the same FiberQueue (via shard_set->Await), joining from within the FiberQueue deadlocks.
   vector<unique_ptr<ShardDocIndex>> dropped(shard_set->size());
 
-  auto cb = [&](Transaction* t, EngineShard* es) {
+  auto cb = [&](TransactionBase* t, EngineShard* es) {
     // Get index info from first shard for global cleanup
     if (es->shard_id() == 0) {
       if (auto* idx = es->search_indices()->GetIndex(idx_name); idx != nullptr) {
@@ -2570,7 +2570,7 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   vector<DocIndexInfo> infos(shard_set->size());
 
-  cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx()->ScheduleSingleHop([&](TransactionBase* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(idx_name);
     if (index != nullptr)
       infos[es->shard_id()] = index->GetInfo();
@@ -2720,7 +2720,7 @@ void CmdFtList(CmdArgList args, CommandContext* cmd_cntx) {
   atomic_int first{0};
   vector<string> names;
 
-  cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx()->ScheduleSingleHop([&](TransactionBase* t, EngineShard* es) {
     // Using `first` to assign `names` only once without a race
     if (first.fetch_add(1) == 0)
       names = es->search_indices()->GetIndexNames();
@@ -2871,7 +2871,7 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   if (needs_global_stats) {
     std::vector<search::ShardScoringStats> shard_stats(shard_set->size());
     cmd_cntx->tx()->Execute(
-        [&](Transaction* t, EngineShard* es) {
+        [&](TransactionBase* t, EngineShard* es) {
           if (auto* index = es->search_indices()->GetIndex(index_name); index)
             shard_stats[es->shard_id()] = index->CollectScoringStats(&search_algo);
           else
@@ -2893,7 +2893,7 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   // If the query does not contain knn component, or it is a hybrid query.
   // HNSW vector range has no prefilter, so skip per-shard search entirely.
   if ((!knn || knn_has_prefilter) && !hnsw_range) {
-    auto search_cb = [&](Transaction* t, EngineShard* es) {
+    auto search_cb = [&](TransactionBase* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index) {
         docs[es->shard_id()] =
             index->Search(t->GetOpArgs(es), *params, &search_algo,
@@ -3068,7 +3068,7 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   std::vector<SearchResult> search_results(shards_count);
   std::vector<absl::Duration> profile_results(shards_count);
 
-  cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx()->ScheduleSingleHop([&](TransactionBase* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(index_name);
     if (!index) {
       index_not_found.store(true, memory_order_relaxed);
@@ -3145,7 +3145,7 @@ void CmdFtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
 
   vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
 
-  cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx()->ScheduleSingleHop([&](TransactionBase* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(index_name); index)
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
     else
@@ -3181,7 +3181,7 @@ static std::vector<search::GlobalDocId> RunAggregatePrefilter(
     std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores) {
   std::vector<SearchResult> prefilter_docs(shard_set->size());
   cmd_cntx->tx()->Execute(
-      [&](Transaction* t, EngineShard* es) {
+      [&](TransactionBase* t, EngineShard* es) {
         if (auto* index = es->search_indices()->GetIndex(params.index); index) {
           SearchParams sp;
           sp.limit_total = std::numeric_limits<size_t>::max();
@@ -3209,7 +3209,7 @@ static void RunHnswAggregateLoad(
     const std::vector<std::vector<std::pair<search::DocId, float>>>& shard_docs,
     std::string_view score_alias,
     const std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores, bool finalize) {
-  auto cb = [&query_results, &params, &shard_docs, score_alias, &text_scores](Transaction* t,
+  auto cb = [&query_results, &params, &shard_docs, score_alias, &text_scores](TransactionBase* t,
                                                                               EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(params.index);
     if (!index || shard_docs[es->shard_id()].empty())
@@ -3311,7 +3311,7 @@ static void AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
   if (needs_global_stats) {
     std::vector<search::ShardScoringStats> shard_stats(shard_set->size());
     cmd_cntx->tx()->Execute(
-        [&](Transaction* t, EngineShard* es) {
+        [&](TransactionBase* t, EngineShard* es) {
           if (auto* index = es->search_indices()->GetIndex(params.index); index)
             shard_stats[es->shard_id()] = index->CollectScoringStats(&search_algo);
           return OpStatus::OK;
@@ -3322,7 +3322,7 @@ static void AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
     params.global_scoring_stats = &global_stats;
   }
 
-  auto search_cb = [&](Transaction* t, EngineShard* es) {
+  auto search_cb = [&](TransactionBase* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(params.index); index)
       query_results[es->shard_id()] =
           index->SearchForAggregator(t->GetOpArgs(es), params, &search_algo);
@@ -3438,7 +3438,7 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     std::vector<std::vector<JoinDataVector>> preaggregated_shard_data(
         shard_set->size(), std::vector<JoinDataVector>(indexes_count));
     cmd_cntx->tx()->Execute(
-        [&](Transaction* t, EngineShard* es) {
+        [&](TransactionBase* t, EngineShard* es) {
           auto& shard_data = preaggregated_shard_data[es->shard_id()];
           for (size_t i = 0; i < indexes_count; ++i) {
             if (auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]); index) {
@@ -3469,7 +3469,7 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     std::vector<std::vector<ShardDocIndex::FieldsValuesPerDocId>> shard_keys_data_per_index(
         shard_set->size(), std::vector<ShardDocIndex::FieldsValuesPerDocId>(indexes_count));
     cmd_cntx->tx()->Execute(
-        [&](Transaction* t, EngineShard* es) {
+        [&](TransactionBase* t, EngineShard* es) {
           const ShardId shard_id = es->shard_id();
           auto& shard_keys_data = shard_keys_data_per_index[shard_id];
           const auto& doc_ids_per_index = doc_ids_per_shard[shard_id];
@@ -3544,7 +3544,7 @@ void CmdFtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Collect synonym data from all shards
   cmd_cntx->tx()->Execute(
-      [&](Transaction* t, EngineShard* es) {
+      [&](TransactionBase* t, EngineShard* es) {
         auto* index = es->search_indices()->GetIndex(index_name);
         if (!index)
           return OpStatus::OK;
@@ -3714,7 +3714,7 @@ void CmdFtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Update synonym groups in all shards
   cmd_cntx->tx()->Execute(
-      [&](Transaction* t, EngineShard* es) {
+      [&](TransactionBase* t, EngineShard* es) {
         auto* index = es->search_indices()->GetIndex(index_name);
         if (!index)
           return OpStatus::OK;
