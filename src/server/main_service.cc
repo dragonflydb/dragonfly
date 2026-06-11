@@ -1500,6 +1500,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     cmd_cntx->conn()->FlushReplies();
   }
 
+  cmd_cntx->SetTailArgs(args_no_cmd);
+
   ArgSlice tail_args;
   if (cmd_cntx->IsDeferredReply()) {
     args_no_cmd.ToVec(&cmd_cntx->arg_slice_backing);  // Ensure lifetime
@@ -2512,6 +2514,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
         // TODO: we will have to create a CommandContext per command if we want to support async
         // execution inside exec.
         cmd_cntx->UpdateCid(scmd.Cid());
+        cmd_cntx->SetTailArgs(scmd.Args());
         auto invoke_res = InvokeCmd(args, cmd_cntx);
         if ((invoke_res != DispatchResult::OK) ||
             rb->GetError())  // checks for i/o error, not logical error.

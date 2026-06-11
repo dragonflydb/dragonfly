@@ -12,6 +12,7 @@
 #include <optional>
 
 #include "base/function2.hpp"
+#include "facade/cmd_arg_parser.h"
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
 
@@ -66,6 +67,8 @@ using CmdCallStats = std::pair<uint64_t, uint64_t>;
 
 class CommandId;
 class CommandContext;
+
+facade::CmdArgParser MakeParserFromContext(CommandContext* cntx);
 
 // TODO: move it to helio
 // Makes sure that the POD T that is passed to the constructor is reset to default state
@@ -151,9 +154,10 @@ class CommandId : public facade::CommandId {
     return interleave_step_;
   }
 
-  template <typename RT> CommandId&& SetAsyncHandler(RT f(CmdArgList, CommandContext*)) && {
+  template <typename RT>
+  CommandId&& SetAsyncHandler(RT f(facade::CmdArgParser, CommandContext*)) && {
     support_async_ = true;
-    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(args, cntx); };
+    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(MakeParserFromContext(cntx), cntx); };
     return std::move(*this);
   }
 

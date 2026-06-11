@@ -177,6 +177,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
   }
   CommandContext cmd_cntx{rb, cntx_};
   cmd_cntx.SetupTx(cmd->Cid(), tx);
+  cmd_cntx.SetTailArgs(cmd->Args());
   service_->InvokeCmd(args, &cmd_cntx);
   return true;
 }
@@ -218,6 +219,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       crb.SendError(status);
     } else {
       cmd_cntx.UpdateCid(dispatched.cmd->Cid());
+      cmd_cntx.SetTailArgs(dispatched.cmd->Args());
       service_->InvokeCmd(args, &cmd_cntx);
     }
     move_reply(crb.Take(), &dispatched.reply);

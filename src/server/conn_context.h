@@ -42,6 +42,9 @@ class StoredCmd {
   }
 
   facade::ArgSlice Slice(CmdArgVec* scratch) const;
+  const facade::ParsedArgs& Args() const {
+    return args_;
+  }
   std::string FirstArg() const;
 
   const CommandId* Cid() const {
@@ -414,6 +417,14 @@ class CommandContext : public facade::ParsedCommand {
     return cid_;
   }
 
+  void SetTailArgs(facade::ParsedArgs args) {
+    tail_args_ = args;
+  }
+
+  const facade::ParsedArgs& tail_args() const {
+    return tail_args_;
+  }
+
   uint64_t start_time_ns = 0;
 
   // Stores backing array for tail args slice
@@ -421,6 +432,11 @@ class CommandContext : public facade::ParsedCommand {
 
  protected:
   void ReuseInternal() final;
+
+  // Command arguments without the command name. Replaces arg_slice_backing as the
+  // canonical arg source once all handlers are migrated. Points into BackedArguments
+  // owned by this CommandContext (or StoredCmd for EXEC), so it survives async execution.
+  facade::ParsedArgs tail_args_;
 
   Transaction* tx_ = nullptr;
   const CommandId* cid_ = nullptr;

@@ -1165,7 +1165,7 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
   return res;
 }
 
-static cmd::CmdR CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
+static cmd::CmdR CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool async_unlink =
       cmd_cntx->cid()->name() == "UNLINK" && absl::GetFlag(FLAGS_unlink_experimental_async);
 
