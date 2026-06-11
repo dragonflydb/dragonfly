@@ -12,6 +12,7 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "server/channel_store.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -2128,15 +2129,16 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
   Run({"expire", "mykey", "1"});
   AdvanceTime(1100);
 
-  // Drive expiry the same way the heartbeat does: DeleteExpiredStep accumulates events,
-  // SendExpiredKeyEvents flushes them — both must run outside the atomic section.
+  // Drive expiry the same way the heartbeat does: DeleteExpiredStep returns events,
+  // which are sent outside the atomic section (see issue #7052).
   shard_set->RunBriefInParallel([](EngineShard* shard) {
     DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     DbContext db_cntx;
     db_cntx.db_index = 0;
     db_cntx.time_now_ms = TEST_current_time_ms;
-    db_slice.DeleteExpiredStep(db_cntx, 100);
-    db_slice.SendExpiredKeyEvents();
+    DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, 100);
+    if (!stats.key_events.empty())
+      channel_store->SendMessages("__keyevent@0__:expired", stats.key_events, false);
   });
 
   // Flush all async dispatch callbacks so the subscriber's thread receives the message.

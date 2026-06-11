@@ -20,6 +20,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 #include "server/blocking_controller.h"
+#include "server/channel_store.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -857,6 +858,9 @@ void EngineShard::RetireExpiredAndEvict() {
   size_t deleted_bytes = 0;
   size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
 
+  // Accumulate keyspace notification events per-db during the atomic section; send after.
+  vector<vector<string>> per_db_events(db_slice.db_array_size());
+
   {
     // Disable journal flush to prevent preemption. Scoped so that SendMessages below,
     // which may suspend on backpressure, runs outside the atomic section.
@@ -883,6 +887,9 @@ void EngineShard::RetireExpiredAndEvict() {
         DbSlice::DeleteExpiredStats stats =
             db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
 
+        if (!stats.key_events.empty())
+          per_db_events[i] = std::move(stats.key_events);
+
         deleted_bytes += stats.deleted_bytes;
         eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
         counter_[TTL_TRAVERSE].IncBy(stats.traversed);
@@ -897,8 +904,8 @@ void EngineShard::RetireExpiredAndEvict() {
 
       if (eviction_goal) {
         uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-        auto [evicted_items, evicted_bytes] =
-            db_slice.FreeMemWithEvictionStepAtomic(i, db_cntx, starting_segment_id, eviction_goal);
+        auto [evicted_items, evicted_bytes] = db_slice.FreeMemWithEvictionStepAtomic(
+            i, db_cntx, starting_segment_id, eviction_goal, &per_db_events[i]);
 
         VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
                 << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
@@ -911,9 +918,14 @@ void EngineShard::RetireExpiredAndEvict() {
     }
   }  // journal_flush_guard destroyed here — atomic section ends before SendMessages
 
-  // Send keyspace notifications for expired keys. This must happen outside the atomic section
+  // Send keyspace notifications for expired/evicted keys outside the atomic section
   // because SendMessages may suspend on connection backpressure (see issue #7052).
-  db_slice.SendExpiredKeyEvents();
+  for (unsigned i = 0; i < per_db_events.size(); ++i) {
+    if (per_db_events[i].empty())
+      continue;
+    channel_store->SendMessages(absl::StrCat("__keyevent@", i, "__:expired"), per_db_events[i],
+                                false);
+  }
 
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
