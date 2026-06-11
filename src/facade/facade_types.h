@@ -78,6 +78,11 @@ class ParsedArgs {
     return std::visit([i](const auto& args) { return args.at(i); }, args_);
   }
 
+  auto view() const {
+    return std::views::iota(size_t{0}, size()) |
+           std::views::transform([this](size_t i) { return (*this)[i]; });
+  }
+
   ArgSlice ToSlice(CmdArgVec* scratch) const {
     return std::visit([scratch](const auto& args) { return args.ToSlice(scratch); }, args_);
   }

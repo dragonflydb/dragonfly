@@ -59,10 +59,14 @@ vector<string> FormatEvalSlowlog(const ConnectionState& state) {
 
 }  // namespace
 
-StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyMode mode)
-    : cid_{cid}, args_{args}, reply_mode_{mode} {
-  backed_ = std::make_unique<cmn::BackedArguments>(args.begin(), args.end(), args.size());
-  args_ = facade::ParsedArgs{*backed_};
+StoredCmd StoredCmd::DeepCopy(const CommandId* cid, facade::ParsedArgs args,
+                              facade::ReplyMode mode) {
+  StoredCmd cmd(cid, args);
+  cmd.reply_mode_ = mode;
+  auto v = args.view();
+  cmd.backed_ = std::make_unique<cmn::BackedArguments>(v.begin(), v.end(), args.size());
+  cmd.args_ = facade::ParsedArgs{*cmd.backed_};
+  return cmd;
 }
 
 CmdArgList StoredCmd::Slice(CmdArgVec* scratch) const {
@@ -172,8 +176,8 @@ size_t ConnectionState::ExecInfo::UsedMemory() const {
   return HeapSize(body) + HeapSize(watched_keys);
 }
 
-void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, ArgSlice args) {
-  body.emplace_back(cid, args);
+void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, facade::ParsedArgs args) {
+  body.push_back(StoredCmd::DeepCopy(cid, args));
   stored_cmd_bytes += body.back().UsedMemory();
   is_write |= cid->IsJournaled();
 }
