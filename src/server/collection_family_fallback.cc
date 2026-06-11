@@ -83,7 +83,7 @@ LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, bool deep, Pr
   return LoadBlobResult::kCorrupted;
 }
 
-OpResult<ZSetFamily::MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, Transaction* tx,
+OpResult<ZSetFamily::MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, TransactionBase* tx,
                                                              SinkReplyBuilder* builder) {
   Fail();
   return {};

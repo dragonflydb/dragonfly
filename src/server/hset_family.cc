@@ -187,7 +187,7 @@ void DeleteHw(HMapWrap& hw, const OpArgs& op_args, std::string_view key) {
   }
 }
 
-auto KeyAndArgs(Transaction* t, EngineShard* es) {
+auto KeyAndArgs(TransactionBase* t, EngineShard* es) {
   return std::make_pair(t->GetShardArgs(es->shard_id()).Front(), t->GetOpArgs(es));
 }
 
@@ -210,8 +210,8 @@ template <typename T> OpResult<T> Unwrap(OpResult<CbVariant<T>> result) {
 
 // Execute callback on generic HMapWrap, possibly on offloaded value and waiting for result
 template <typename F, typename T = typename std::invoke_result_t<F, HMapWrap>::Type>
-OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
-  auto shard_cb = [f = std::forward<F>(f)](Transaction* t,
+OpResult<T> ExecuteRO(TransactionBase* tx, F&& f) {
+  auto shard_cb = [f = std::forward<F>(f)](TransactionBase* t,
                                            EngineShard* es) -> OpResult<CbVariant<T>> {
     // Fetch value of hash type
     auto [key, op_args] = KeyAndArgs(t, es);
@@ -254,11 +254,11 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
 
 // Wrap write handler
 template <typename F>
-auto ExecuteW(Transaction* tx, F&& f,
+auto ExecuteW(TransactionBase* tx, F&& f,
               absl::InlinedVector<std::string_view, 4> modified_fields = {}) {
   using T = typename std::invoke_result_t<F, HMapWrap&>::Type;
   auto shard_cb = [f = std::forward<F>(f), fields = std::move(modified_fields)](
-                      Transaction* t, EngineShard* es) -> OpResult<CbVariant<T>> {
+                      TransactionBase* t, EngineShard* es) -> OpResult<CbVariant<T>> {
     // Fetch value of hash type
     auto [key, op_args] = KeyAndArgs(t, es);
 
@@ -790,7 +790,7 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Evaluate the FNX/FXX condition (if any), then let OpSet set the fields and report the
   // format-appropriate value (created count for Dragonfly, 1 for Redis).
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CbVariant<uint32_t>> {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) -> OpResult<CbVariant<uint32_t>> {
     using Mode = OpSetParams::Mode;
     auto op_args = t->GetOpArgs(shard);
     const OpSetParams& op_sp = parsed.op_sp;
@@ -870,7 +870,7 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, flags, fields);
   };
   OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -885,7 +885,7 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-OpResult<vector<long>> OpHTtl(Transaction* t, EngineShard* shard, string_view key,
+OpResult<vector<long>> OpHTtl(TransactionBase* t, EngineShard* shard, string_view key,
                               CmdArgList fields) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   const DbContext& db_cntx = t->GetDbContext();
@@ -937,7 +937,7 @@ void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpHTtl(t, shard, key, fields); };
+  auto cb = [&](TransactionBase* t, EngineShard* shard) { return OpHTtl(t, shard, key, fields); };
   OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   switch (result.status()) {
@@ -1024,7 +1024,7 @@ void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
 
   IncrByParam param{ival};
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
   };
 
@@ -1063,7 +1063,7 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
 
   IncrByParam param{dval};
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
   };
 
@@ -1148,7 +1148,7 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   OpSetParams params{.backpressure = &tiered_backpressure};
 
   args.remove_prefix(1);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args, params);
   };
 
@@ -1168,7 +1168,7 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args.subspan(1),
                  OpSetParams{.mode = OpSetParams::Mode::kNX});
   };
@@ -1206,7 +1206,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
       with_values = true;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
     DbContext db_context = t->GetDbContext();
     auto it_res = db_slice.FindReadOnly(db_context, key, OBJ_HASH);

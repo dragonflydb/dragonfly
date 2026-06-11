@@ -147,7 +147,7 @@ void BlockingController::RemovedWatched(Keys keys, Transaction* tx) {
 
 // Runs on the shard thread.
 void BlockingController::NotifyPending() {
-  const Transaction* tx = owner_->GetContTx();
+  const TransactionBase* tx = owner_->GetContTx();
   CHECK(tx == nullptr) << tx->DebugId();
 
   DbContext context;

@@ -15,17 +15,18 @@
 #include "facade/op_status.h"
 #include "server/conn_context.h"
 #include "server/engine_shard.h"
-#include "server/transaction.h"
+#include "server/transaction_base.h"
 #include "util/fibers/synchronization.h"
 
 namespace dfly::cmd {
 
 // Awaitable sentinel for the single hop of a transaction. Used instead of the
 // actual awaitable to allow Promise to inject context implicitly and make command code simple.
-using SingleHopSentinel = Transaction::RunnableType;
+using SingleHopSentinel = TransactionBase::RunnableType;
 
 // Awaitable in command context for the single hop of a transaction with return value
-template <typename RT> using SingleHopSentinelT = absl::FunctionRef<RT(Transaction*, EngineShard*)>;
+template <typename RT>
+using SingleHopSentinelT = absl::FunctionRef<RT(TransactionBase*, EngineShard*)>;
 
 // Perform single hop. Returns awaitable that resolves to resulting OpStatus
 SingleHopSentinel SingleHop(const auto& f) {
@@ -46,8 +47,8 @@ struct SingleHopWaiter {
   facade::OpStatus await_resume() const noexcept;
 
   CommandContext* cmd_cntx;
-  Transaction::RunnableType callback;
-  boost::intrusive_ptr<Transaction> tx_keepalive_ = nullptr;
+  TransactionBase::RunnableType callback;
+  boost::intrusive_ptr<TransactionBase> tx_keepalive_ = nullptr;
 };
 
 // Extension of SingleHopWaiter capturing the return value of the callback
@@ -55,11 +56,11 @@ template <typename RT> struct SingleHopWaiterT : public SingleHopWaiter {
   static_assert(std::is_base_of_v<facade::OpResultBase, RT>);
 
   SingleHopWaiterT(CommandContext* cmd_cntx,
-                   absl::FunctionRef<RT(Transaction*, EngineShard*)> callback)
+                   absl::FunctionRef<RT(TransactionBase*, EngineShard*)> callback)
       : SingleHopWaiter{cmd_cntx, *this}, callback{callback} {
   }
 
-  OpStatus operator()(Transaction* tx, EngineShard* es) const {
+  OpStatus operator()(TransactionBase* tx, EngineShard* es) const {
     result = callback(tx, es);
     return result.status();
   }
@@ -68,7 +69,7 @@ template <typename RT> struct SingleHopWaiterT : public SingleHopWaiter {
     return std::move(result);
   }
 
-  absl::FunctionRef<RT(Transaction*, EngineShard*)> callback;
+  absl::FunctionRef<RT(TransactionBase*, EngineShard*)> callback;
   mutable RT result;
 };
 

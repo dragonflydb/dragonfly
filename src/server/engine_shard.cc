@@ -79,11 +79,11 @@ namespace {
 
 constexpr uint64_t kCursorDoneState = 0u;
 
-bool HasContendedLocks(ShardId shard_id, Transaction* trx, const DbTable* table) {
+bool HasContendedLocks(ShardId shard_id, TransactionBase* trx, const DbTable* table) {
   auto is_contended = [table](LockFp fp) { return table->trans_locks.Find(fp)->IsContended(); };
 
   if (trx->IsMulti()) {
-    auto fps = trx->GetMultiFps();
+    auto fps = static_cast<Transaction*>(trx)->GetMultiFps();
     for (const auto& [sid, fp] : fps) {
       if (sid == shard_id && is_contended(fp))
         return true;
@@ -468,7 +468,7 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : txq_([](const Transaction* t) { return t->txid(); }),
+    : txq_([](const TransactionBase* t) { return t->txid(); }),
       queue_(kQueueLen, 1, 1),
       queue2_(kQueueLen / 2, 2, 2),
       shard_id_(pb->GetPoolIndex()),
@@ -608,7 +608,7 @@ void EngineShard::DestroyThreadLocal() {
 
 // Is called by Transaction::ExecuteAsync in order to run transaction tasks.
 // Only runs in its own thread.
-void EngineShard::PollExecution(const char* context, Transaction* trans) {
+void EngineShard::PollExecution(const char* context, TransactionBase* trans) {
   DVLOG(2) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "") << " "
            << txq_.size() << " " << (continuation_trans_ ? continuation_trans_->DebugId() : "");
 
@@ -660,7 +660,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   bool update_stats = false;
   ++poll_concurrent_factor_;
 
-  auto run = [this, &update_stats](Transaction* tx, bool allow_removal) -> bool /* concluding */ {
+  auto run = [this, &update_stats](TransactionBase* tx,
+                                   bool allow_removal) -> bool /* concluding */ {
     update_stats = true;
     return tx->RunInShard(this, allow_removal);
   };
@@ -682,10 +683,10 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   }
 
   // Progress on the transaction queue if no transaction is running currently.
-  Transaction* head = nullptr;
+  TransactionBase* head = nullptr;
 
   while (continuation_trans_ == nullptr && !txq_.Empty()) {
-    head = get<Transaction*>(txq_.Front());
+    head = get<TransactionBase*>(txq_.Front());
 
     // Break if there are any awakened transactions, as we must give way to them
     // before continuing to handle regular transactions from the queue.
@@ -749,7 +750,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   }
 }
 
-void EngineShard::RemoveContTx(Transaction* tx) {
+void EngineShard::RemoveContTx(TransactionBase* tx) {
   if (continuation_trans_ == tx) {
     continuation_trans_ = nullptr;
     continuation_debug_id_.clear();
@@ -1118,13 +1119,13 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
 
   {
     auto value = queue->At(cur);
-    Transaction* trx = std::get<Transaction*>(value);
+    TransactionBase* trx = std::get<TransactionBase*>(value);
     info.head.debug_id_info = trx->DebugId(sid);
   }
 
   do {
     auto value = queue->At(cur);
-    Transaction* trx = std::get<Transaction*>(value);
+    TransactionBase* trx = std::get<TransactionBase*>(value);
     // find maximum index of databases used by transactions
     if (trx->GetDbIndex() > max_db_id) {
       max_db_id = trx->GetDbIndex();
@@ -1135,7 +1136,8 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
     if (is_armed) {
       info.tx_armed++;
 
-      if (trx->IsGlobal() || (trx->IsMulti() && trx->GetMultiMode() == Transaction::GLOBAL)) {
+      if (trx->IsGlobal() || (trx->IsMulti() && static_cast<Transaction*>(trx)->GetMultiMode() ==
+                                                    TransactionBase::GLOBAL)) {
         info.tx_global++;
       } else {
         const DbTable* table = db_slice.GetDBTable(trx->GetDbIndex());

@@ -493,13 +493,13 @@ namespace {
 
 // FlushSlots calls RegisterOnChange which requires the shard lock to be held (see #7153).
 // Execute under a global transaction so the shard lock is acquired properly.
-void DeleteSlots(Transaction* trans, const SlotRanges& slots_ranges) {
+void DeleteSlots(TransactionBase* trans, const SlotRanges& slots_ranges) {
   if (slots_ranges.Empty()) {
     return;
   }
 
   trans->Execute(
-      [&slots_ranges](Transaction* t, EngineShard* shard) {
+      [&slots_ranges](TransactionBase* t, EngineShard* shard) {
         namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
         return OpStatus::OK;
       },

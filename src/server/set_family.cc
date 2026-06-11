@@ -669,19 +669,19 @@ class Mover {
       : src_(src), dest_(dest), member_(member), journal_rewrite_(journal_rewrite) {
   }
 
-  void Find(Transaction* t);
-  OpResult<unsigned> Commit(Transaction* t);
+  void Find(TransactionBase* t);
+  OpResult<unsigned> Commit(TransactionBase* t);
 
  private:
-  OpStatus OpFind(Transaction* t, EngineShard* es);
-  OpStatus OpMutate(Transaction* t, EngineShard* es);
+  OpStatus OpFind(TransactionBase* t, EngineShard* es);
+  OpStatus OpMutate(TransactionBase* t, EngineShard* es);
 
   string_view src_, dest_, member_;
   OpResult<bool> found_[2];
   bool journal_rewrite_;
 };
 
-OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
+OpStatus Mover::OpFind(TransactionBase* t, EngineShard* es) {
   auto& db_slice = t->GetDbSlice(es->shard_id());
   ShardArgs largs = t->GetShardArgs(es->shard_id());
 
@@ -705,7 +705,7 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
   return OpStatus::OK;
 }
 
-OpStatus Mover::OpMutate(Transaction* t, EngineShard* es) {
+OpStatus Mover::OpMutate(TransactionBase* t, EngineShard* es) {
   ShardArgs largs = t->GetShardArgs(es->shard_id());
   DCHECK_LE(largs.Size(), 2u);
 
@@ -723,12 +723,12 @@ OpStatus Mover::OpMutate(Transaction* t, EngineShard* es) {
   return OpStatus::OK;
 }
 
-void Mover::Find(Transaction* t) {
+void Mover::Find(TransactionBase* t) {
   // non-concluding step.
-  t->Execute([this](Transaction* t, EngineShard* es) { return this->OpFind(t, es); }, false);
+  t->Execute([this](TransactionBase* t, EngineShard* es) { return this->OpFind(t, es); }, false);
 }
 
-OpResult<unsigned> Mover::Commit(Transaction* t) {
+OpResult<unsigned> Mover::Commit(TransactionBase* t) {
   OpResult<unsigned> res;
   bool noop = false;
 
@@ -746,7 +746,7 @@ OpResult<unsigned> Mover::Commit(Transaction* t) {
   if (noop) {
     t->Conclude();
   } else {
-    t->Execute([this](Transaction* t, EngineShard* es) { return this->OpMutate(t, es); }, true);
+    t->Execute([this](TransactionBase* t, EngineShard* es) { return this->OpMutate(t, es); }, true);
   }
 
   return res;
@@ -838,7 +838,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
 }
 
 // Read-only OpInter op on sets.
-OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_first) {
+OpResult<StringVec> OpInter(const TransactionBase* t, EngineShard* es, bool remove_first) {
   auto& db_slice = t->GetDbSlice(es->shard_id());
   ShardArgs args = t->GetShardArgs(es->shard_id());
   auto it = args.begin();
@@ -1125,7 +1125,7 @@ void CmdSAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto values = args.subspan(1);
 
-  auto cb = [key, values](Transaction* t, EngineShard* shard) {
+  auto cb = [key, values](TransactionBase* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, values, false, false);
   };
 
@@ -1141,7 +1141,7 @@ void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view val = ArgS(args, 1);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
     auto find_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_SET);
 
@@ -1166,7 +1166,7 @@ void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
 
   vector<int32_t> memberships(members.size());
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     DbContext db_cntx = t->GetDbContext();
     auto& db_slice = t->GetDbSlice(shard->shard_id());
     auto find_res = db_slice.FindReadOnly(db_cntx, key, OBJ_SET);
@@ -1214,7 +1214,7 @@ void CmdSRem(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto vals = args.subspan(1);
 
-  auto cb = [key, vals](Transaction* t, EngineShard* shard) {
+  auto cb = [key, vals](TransactionBase* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, vals, false);
   };
 
@@ -1225,7 +1225,7 @@ void CmdSRem(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdSCard(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) -> OpResult<uint32_t> {
     auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_SET);
     if (!find_res) {
       return find_res.status();
@@ -1249,7 +1249,7 @@ void CmdSPop(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpPop(t->GetOpArgs(shard), key, count);
   };
 
@@ -1281,7 +1281,7 @@ void CmdSDiff(CmdArgList args, CommandContext* cmd_cntx) {
   string_view src_key = ArgS(args, 0);
   ShardId src_shard = Shard(src_key, result_set.size());
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardArgs largs = t->GetShardArgs(shard->shard_id());
     if (shard->shard_id() == src_shard) {
       CHECK_EQ(src_key, largs.Front());
@@ -1308,7 +1308,7 @@ void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
   VLOG(1) << "SDiffStore " << src_key << " " << src_shard;
 
   // read-only op
-  auto diff_cb = [&](Transaction* t, EngineShard* shard) {
+  auto diff_cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardArgs largs = t->GetShardArgs(shard->shard_id());
     OpArgs op_args = t->GetOpArgs(shard);
     DCHECK(!largs.Empty());
@@ -1340,7 +1340,7 @@ void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   size_t result_size = rsv.value().size();
-  auto store_cb = [&](Transaction* t, EngineShard* shard) {
+  auto store_cb = [&](TransactionBase* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard) {
       OpAdd(t->GetOpArgs(shard), dest_key, std::move(rsv.value()), true, true);
     }
@@ -1353,7 +1353,7 @@ void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdSMembers(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [](Transaction* t, EngineShard* shard) { return OpInter(t, shard, false); };
+  auto cb = [](TransactionBase* t, EngineShard* shard) { return OpInter(t, shard, false); };
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
@@ -1377,7 +1377,7 @@ void CmdSRandMember(CmdArgList args, CommandContext* cmd_cntx) {
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) -> OpResult<StringVec> {
     return OpRandMember(t->GetOpArgs(shard), key, count);
   };
 
@@ -1403,7 +1403,7 @@ void CmdSRandMember(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdSInter(CmdArgList args, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     result_set[shard->shard_id()] = OpInter(t, shard, false);
 
     return OpStatus::OK;
@@ -1424,7 +1424,7 @@ void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
   ShardId dest_shard = Shard(dest_key, result_set.size());
   atomic_uint32_t inter_shard_cnt{0};
 
-  auto inter_cb = [&](Transaction* t, EngineShard* shard) {
+  auto inter_cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardArgs largs = t->GetShardArgs(shard->shard_id());
     if (shard->shard_id() == dest_shard) {
       CHECK_EQ(largs.Front(), dest_key);
@@ -1445,7 +1445,7 @@ void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  auto store_cb = [&](Transaction* t, EngineShard* shard) {
+  auto store_cb = [&](TransactionBase* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard) {
       OpAdd(t->GetOpArgs(shard), dest_key, result.value(), true, true);
     }
@@ -1470,7 +1470,7 @@ void CmdSInterCard(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
 
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     result_set[shard->shard_id()] = OpInter(t, shard, false);
     return OpStatus::OK;
   };
@@ -1487,7 +1487,7 @@ void CmdSInterCard(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdSUnion(CmdArgList args, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size());
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardArgs largs = t->GetShardArgs(shard->shard_id());
     result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), largs.begin(), largs.end());
     return OpStatus::OK;
@@ -1504,7 +1504,7 @@ void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
   string_view dest_key = ArgS(args, 0);
   ShardId dest_shard = Shard(dest_key, result_set.size());
 
-  auto union_cb = [&](Transaction* t, EngineShard* shard) {
+  auto union_cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardArgs largs = t->GetShardArgs(shard->shard_id());
     ShardArgs::Iterator start = largs.begin(), end = largs.end();
     if (shard->shard_id() == dest_shard) {
@@ -1527,7 +1527,7 @@ void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   size_t result_size = unionset.value().size();
-  auto store_cb = [&](Transaction* t, EngineShard* shard) {
+  auto store_cb = [&](TransactionBase* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard) {
       OpAdd(t->GetOpArgs(shard), dest_key, std::move(unionset.value()), true, true);
     }
@@ -1563,7 +1563,7 @@ void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
 
   const ScanOpts& scan_op = ops.value();
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
@@ -1602,7 +1602,7 @@ void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(WrongNumArgsError("SADDEX"));
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, vals, keepttl);
   };
 

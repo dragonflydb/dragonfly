@@ -63,6 +63,7 @@ extern "C" {
 #include "server/stream_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "server/uni_transaction.h"
 #include "server/version.h"
 #include "server/zset_family.h"
 #include "strings/human_readable.h"
@@ -806,7 +807,7 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
     return;
   }
 
-  if (auto* tx = cmd_cntx->tx(); tx) {
+  if (auto* tx = static_cast<Transaction*>(cmd_cntx->tx()); tx) {
     // Reset it, because in multi/exec the transaction pointer is the same and
     // we will end up triggerring the callback on the following commands. To avoid this
     // we reset it.
@@ -840,22 +841,29 @@ void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, con
 // Return value:
 //   first  - newly created top-level transaction (or nullptr if none).
 //   second - result: overall status of preparation.
-pair<intrusive_ptr<Transaction>, OpStatus> PrepareTransaction(const CommandId* cid,
-                                                              ArgSlice tail_args,
-                                                              CommandContext* cmd_ctx) {
+pair<intrusive_ptr<TransactionBase>, OpStatus> PrepareTransaction(const CommandId* cid,
+                                                                  ArgSlice tail_args,
+                                                                  CommandContext* cmd_ctx) {
   auto* dfly_cntx = cmd_ctx->server_conn_cntx();
   bool init = false;
-  intrusive_ptr<Transaction> res;
+  intrusive_ptr<TransactionBase> res;
   if (dfly_cntx->transaction) {  // Existing transaction context (e.g., MULTI/EXEC or script)
     DCHECK(dfly_cntx->transaction->IsMulti());  // dispatching in multi
     if (cid->IsTransactional()) {
-      dfly_cntx->transaction->MultiSwitchCmd(cid);
+      static_cast<Transaction*>(dfly_cntx->transaction)->MultiSwitchCmd(cid);
       init = true;
     }
   } else {
     if (cid->IsTransactional()) {
-      res.reset(new Transaction{cid});
-      init = !res->IsMulti();  // Multi command initialize themselves based on their mode
+      bool can_use_uni =
+          cid->first_key_pos() > 0 && cid->last_key_pos() == cid->first_key_pos() &&
+          !(cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL | CO::BLOCKING |
+                               CO::VARIADIC_KEYS | CO::STORE_LAST_KEY));
+      if (can_use_uni)
+        res.reset(new UniTransaction{cid});
+      else
+        res.reset(new Transaction{cid});
+      init = !res->IsMulti();
     }
     dfly_cntx->transaction = res.get();
   }
@@ -1419,7 +1427,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
     DCHECK(tx);
     // The following commands access shards arbitrarily without having keys, so they can only be run
     // non atomically or globally.
-    Transaction::MultiMode mode = tx->GetMultiMode();
+    Transaction::MultiMode mode = static_cast<Transaction*>(tx)->GetMultiMode();
     bool shard_access = (cid.opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
       return ErrorReply("This Redis command is not allowed from script");
@@ -1914,7 +1922,7 @@ void Service::Watch(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   atomic_uint32_t keys_existed = 0;
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardId shard_id = shard->shard_id();
     ShardArgs largs = t->GetShardArgs(shard_id);
     for (auto k : largs) {
@@ -1955,7 +1963,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 
   auto* eval_cid = registry_.Find("EVAL");
   DCHECK(eval_cid);
-  tx->MultiSwitchCmd(eval_cid);
+  static_cast<Transaction*>(tx)->MultiSwitchCmd(eval_cid);
 
   CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
   MultiCommandSquasher::Opts opts;
@@ -2013,7 +2021,7 @@ void Service::TryEnqueueEvalAsyncCmd(const Interpreter::CallArgs& ca, CommandCon
 
 void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
   using CT = Interpreter::CallArgs::Type;  // TODO: use c++20 using enum
-  auto* tx = cmd_cntx->tx();
+  auto* tx = static_cast<Transaction*>(cmd_cntx->tx());
   DCHECK(tx);
 
   auto* cntx = cmd_cntx->server_conn_cntx();
@@ -2063,7 +2071,7 @@ void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   }
 
   auto* cntx = cmd_cntx->server_conn_cntx();
-  BorrowedInterpreter interpreter{cmd_cntx->tx(), &cntx->conn_state};
+  BorrowedInterpreter interpreter{static_cast<Transaction*>(cmd_cntx->tx()), &cntx->conn_state};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
     return cmd_cntx->SendError(res.error().Format(), facade::kScriptErrType);
@@ -2080,7 +2088,7 @@ void Service::EvalRo(CmdArgList args, CommandContext* cmd_cntx) {
 void Service::EvalSha(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   string sha = absl::AsciiStrToLower(ArgS(args, 0));
   auto* cntx = cmd_cntx->server_conn_cntx();
-  BorrowedInterpreter interpreter{cmd_cntx->tx(), &cntx->conn_state};
+  BorrowedInterpreter interpreter{static_cast<Transaction*>(cmd_cntx->tx()), &cntx->conn_state};
   CallSHA(args, sha, interpreter, read_only, cmd_cntx);
 }
 
@@ -2135,7 +2143,7 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
 // Starts multi transaction. Returns true if transaction was scheduled.
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
 bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgList keys) {
-  Transaction* tx = cntx->transaction;
+  Transaction* tx = static_cast<Transaction*>(cntx->transaction);
   DCHECK(tx);
   Namespace* ns = cntx->ns;
   const DbIndex dbid = cntx->db_index();
@@ -2224,7 +2232,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   }
 
   sinfo->async_cmds_heap_limit = GetFlag(FLAGS_multi_eval_squash_buffer);
-  Transaction* tx = cmd_cntx->tx();
+  Transaction* tx = static_cast<Transaction*>(cmd_cntx->tx());
   CHECK(tx != nullptr);
 
   Interpreter::RunResult result;
@@ -2260,7 +2268,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     tx->PrepareSingleSquash(conn_cntx->ns, real_sid, conn_cntx->db_index(), eval_args.keys,
                             script_mode);
 
-    tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
+    tx->ScheduleSingleHop([&](TransactionBase*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
           new Transaction{tx, real_sid, slot_checker.GetUniqueSlotId()};
       conn_cntx->transaction = stub_tx.get();
@@ -2347,7 +2355,7 @@ void Service::Discard(CmdArgList args, CommandContext* cmd_cntx) {
 bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandId* exists_cid,
                            const CommandId* exec_cid) {
   auto& exec_info = cntx->conn_state.exec_info;
-  auto* tx = cntx->transaction;
+  auto* tx = static_cast<Transaction*>(cntx->transaction);
 
   CmdArgVec str_list(exec_info.watched_keys.size());
   for (size_t i = 0; i < str_list.size(); i++) {
@@ -2356,7 +2364,7 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandId* exists_cid,
   }
 
   atomic_uint32_t watch_exist_count{0};
-  auto cb = [&watch_exist_count](Transaction* t, EngineShard* shard) {
+  auto cb = [&watch_exist_count](TransactionBase* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), args);
     watch_exist_count.fetch_add(res.value_or(0), memory_order_relaxed);
@@ -2454,7 +2462,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   // We borrow a single interpreter for all the EVALs/Script load inside. Returned by MultiCleanup
   if (state != ExecScriptUse::NONE) {
     exec_info.preborrowed_interpreter =
-        BorrowedInterpreter(cmd_cntx->tx(), &cntx->conn_state).Release();
+        BorrowedInterpreter(static_cast<Transaction*>(cmd_cntx->tx()), &cntx->conn_state).Release();
   }
 
   // Determine according multi mode, not only only flag, but based on presence of global commands
@@ -2469,7 +2477,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   // EXEC should not run if any of the watched keys expired.
   if (!exec_info.watched_keys.empty() &&
       !CheckWatchedKeyExpiry(cntx, registry_.Find("EXISTS"), exec_cid_)) {
-    cmd_cntx->tx()->UnlockMulti();
+    static_cast<Transaction*>(cmd_cntx->tx())->UnlockMulti();
     return rb->SendNull();
   }
 
@@ -2498,7 +2506,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
         CmdArgList args = scmd.Slice(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
-          cmd_cntx->tx()->MultiSwitchCmd(scmd.Cid());
+          static_cast<Transaction*>(cmd_cntx->tx())->MultiSwitchCmd(scmd.Cid());
           OpStatus st = cmd_cntx->tx()->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
           if (st != OpStatus::OK) {
             cmd_cntx->SendError(st);
@@ -2521,7 +2529,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (scheduled) {
     VLOG(2) << "Exec unlocking " << exec_info.body.size() << " commands";
-    cmd_cntx->tx()->UnlockMulti();
+    static_cast<Transaction*>(cmd_cntx->tx())->UnlockMulti();
   }
 
   // Dispatch at the end manually to have (MULTI, cmds..., EXEC) order

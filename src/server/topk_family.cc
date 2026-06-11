@@ -224,7 +224,7 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("width * depth is too large");
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpReserve(t->GetOpArgs(shard), key, k, width, depth, decay);
   };
 
@@ -245,7 +245,7 @@ void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
   if (items.empty()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, items);
   };
 
@@ -290,7 +290,7 @@ void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   if (items.empty()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpIncrBy(t->GetOpArgs(shard), key, items);
   };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -322,7 +322,7 @@ void TopkFamily::Query(CmdArgList args, CommandContext* cmd_cntx) {
   if (items.empty()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpQuery(t->GetOpArgs(shard), key, items);
   };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -351,7 +351,7 @@ void TopkFamily::Count(CmdArgList args, CommandContext* cmd_cntx) {
   if (items.empty()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpCount(t->GetOpArgs(shard), key, items);
   };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -388,7 +388,9 @@ void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(kSyntaxErr);
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpList(t->GetOpArgs(shard), key); };
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
+    return OpList(t->GetOpArgs(shard), key);
+  };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (HandleOpError(result.status(), cmd_cntx))
     return;
@@ -416,7 +418,9 @@ void TopkFamily::Info(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(kSyntaxErr);
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpInfo(t->GetOpArgs(shard), key); };
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
+    return OpInfo(t->GetOpArgs(shard), key);
+  };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (HandleOpError(result.status(), cmd_cntx))
     return;

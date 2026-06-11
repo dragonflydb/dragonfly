@@ -2436,7 +2436,8 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 }
 
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
-                                               Transaction* trans, DoSaveCheckAndStartOpts opts) {
+                                               TransactionBase* trans,
+                                               DoSaveCheckAndStartOpts opts) {
   auto [ignore_state, bg_save] = opts;
   auto state = ServerState::tlocal()->gstate();
 
@@ -2493,7 +2494,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
   return {};
 }
 
-GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore_state) {
+GenericError ServerFamily::WaitUntilSaveFinished(TransactionBase* trans, bool ignore_state) {
   std::shared_ptr<SaveStagesController> controller;
   {
     util::fb2::LockGuard lk(save_mu_);
@@ -2545,7 +2546,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   return save_info.error;
 }
 
-GenericError ServerFamily::DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
+GenericError ServerFamily::DoSave(const SaveCmdOptions& save_cmd_opts, TransactionBase* trans,
                                   bool ignore_state) {
   DoSaveCheckAndStartOpts opts{.ignore_state = ignore_state};
   if (auto ec = DoSaveCheckAndStart(save_cmd_opts, trans, opts); ec) {
@@ -2564,13 +2565,13 @@ bool ServerFamily::TEST_IsSaving() const {
   return is_saving.load(std::memory_order_relaxed);
 }
 
-void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait) {
+void ServerFamily::Drakarys(TransactionBase* transaction, DbIndex db_ind, bool wait) {
   VLOG(2) << "Drakarys start db=" << db_ind << " wait=" << wait
           << " rss=" << HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
 
   vector<fb2::Fiber> fibers(shard_set->size());
   transaction->Execute(
-      [db_ind, &fibers](Transaction* t, EngineShard* shard) {
+      [db_ind, &fibers](TransactionBase* t, EngineShard* shard) {
         fibers[shard->shard_id()] = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
         return OpStatus::OK;
       },
@@ -2608,7 +2609,7 @@ void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> stat
     if (auto fcntx = static_cast<facade::Connection*>(conn)->cntx(); fcntx) {
       auto* cntx = static_cast<ConnectionContext*>(fcntx);
       if (cntx->transaction) {
-        cntx->transaction->CancelBlocking(status_cb);
+        static_cast<Transaction*>(cntx->transaction)->CancelBlocking(status_cb);
       }
     }
   };
@@ -2931,7 +2932,7 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
+  auto cb = [key](TransactionBase* t, EngineShard* shard) -> OpResult<int64_t> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
 
     // SET with --use_oah_set uses OAHSet; HASH (StringMap) and SET-without-OAH
@@ -3031,7 +3032,7 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendLong(*result);
 }
 
-void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans) {
+void ServerFamily::BgSaveFb(boost::intrusive_ptr<TransactionBase> trans) {
   GenericError ec = WaitUntilSaveFinished(trans.get());
   if (ec) {
     LOG(INFO) << "Error in BgSaveFb: " << ec.Format();
@@ -3098,7 +3099,7 @@ void ServerFamily::BgSave(CmdArgList args, CommandContext* cmd_cntx) {
   }
   bg_save_fb_.JoinIfNeeded();
   bg_save_fb_ = fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this,
-                           boost::intrusive_ptr<Transaction>(cmd_cntx->tx()));
+                           boost::intrusive_ptr<TransactionBase>(cmd_cntx->tx()));
   cmd_cntx->rb()->SendOk();
 }
 
@@ -4325,7 +4326,8 @@ void ServerFamily::Role(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void ServerFamily::Script(CmdArgList args, CommandContext* cmd_cntx) {
-  script_mgr_->Run(args, cmd_cntx->tx(), cmd_cntx->rb(), cmd_cntx->server_conn_cntx());
+  script_mgr_->Run(args, static_cast<Transaction*>(cmd_cntx->tx()), cmd_cntx->rb(),
+                   cmd_cntx->server_conn_cntx());
 }
 
 void ServerFamily::LastSave(CmdArgList args, CommandContext* cmd_cntx) {

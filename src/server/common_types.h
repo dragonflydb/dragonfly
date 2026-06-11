@@ -50,6 +50,7 @@ enum ExpireFlags {
 
 // Forward declarations for commonly used classes (to reduce header dependencies)
 class EngineShard;
+class TransactionBase;
 class Transaction;
 class DbSlice;
 class ConnectionContext;

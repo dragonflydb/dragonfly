@@ -121,7 +121,7 @@ void CmdInitByDim(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("CMS: width and depth must be greater than 0");
   }
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpInitByDim(t->GetOpArgs(shard), key, width, depth);
   };
 
@@ -151,7 +151,7 @@ void CmdInitByProb(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("CMS: probability must be between 0 and 1 exclusive");
   }
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpInitByProb(t->GetOpArgs(shard), key, error, probability);
   };
 
@@ -189,7 +189,7 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
     items.emplace_back(item, incr);
   }
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpIncrBy(t->GetOpArgs(shard), key, items);
   };
 
@@ -217,7 +217,7 @@ void CmdQuery(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpQuery(t->GetOpArgs(shard), key, args);
   };
 
@@ -242,7 +242,7 @@ void CmdInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpInfo(t->GetOpArgs(shard), key);
   };
 
@@ -359,11 +359,11 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   // multi-shard implementation
   // 1. fetch from all shards
   // 2. merge to dest
-  Transaction* tx = cmd_cntx->tx();
+  TransactionBase* tx = cmd_cntx->tx();
 
   vector<OpResult<vector<CmsShardData>>> shard_results(shard_set->size(), OpStatus::SKIPPED);
 
-  auto read_cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
+  auto read_cb = [&](TransactionBase* t, EngineShard* shard) -> OpStatus {
     auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
     const DbContext& db_cntx = t->GetDbContext();
     vector<CmsShardData> cms_list;
@@ -434,7 +434,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   ShardId dest_shard_id = Shard(merge_args.dest_key, shard_set->size());
   OpStatus write_result = OpStatus::OK;
 
-  auto write_cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
+  auto write_cb = [&](TransactionBase* t, EngineShard* shard) -> OpStatus {
     if (shard->shard_id() != dest_shard_id) {
       return OpStatus::OK;
     }
