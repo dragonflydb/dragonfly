@@ -1,7 +1,18 @@
+import asyncio
 import copy
+import itertools
+import json
+import logging
+import random
+import re
+import string
+import subprocess
+import time
 from binascii import crc_hqx
 from dataclasses import dataclass
 
+import pytest
+from redis import asyncio as aioredis
 from redis.cluster import ClusterNode
 from redis.cluster import RedisCluster
 from redis.exceptions import MovedError
@@ -11,7 +22,18 @@ from .instance import DflyInstanceFactory, DflyInstance
 from .proxy import Proxy
 from .replication_test import check_all_replicas_finished
 from .seeder import DebugPopulateSeeder
-from .utility import *
+from .utility import (
+    DflySeederFactory,
+    ExpirySeeder,
+    assert_eventually,
+    extract_int_after_prefix,
+    info_tick_timer,
+    is_saving,
+    skip_if_not_in_github,
+    tick_timer,
+    tmp_file_name,
+    wait_available_async,
+)
 
 BASE_PORT = 30001
 
@@ -58,7 +80,7 @@ class RedisClusterNode:
         self.proc.terminate()
         try:
             self.proc.wait(timeout=10)
-        except Exception as e:
+        except Exception:
             pass
 
 
@@ -74,7 +96,7 @@ def redis_cluster(port_picker):
         for node in nodes:
             node.start()
             time.sleep(1)
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         skip_if_not_in_github()
         raise
 
@@ -273,20 +295,18 @@ class TestNotEmulated:
 
 @dfly_args({"cluster_mode": "emulated"})
 class TestEmulated:
-    def test_cluster_slots_command(self, df_server, cluster_client: redis.RedisCluster):
+    def test_cluster_slots_command(self, df_server, cluster_client: RedisCluster):
         expected = {(0, 16383): {"primary": ("127.0.0.1", df_server.port), "replicas": []}}
         res = cluster_client.execute_command("CLUSTER SLOTS")
         assert expected == res
 
-    def test_cluster_help_command(self, cluster_client: redis.RedisCluster):
+    def test_cluster_help_command(self, cluster_client: RedisCluster):
         # `target_nodes` is necessary because CLUSTER HELP is not mapped on redis-py
-        res = cluster_client.execute_command(
-            "CLUSTER", "HELP", target_nodes=redis.RedisCluster.RANDOM
-        )
+        res = cluster_client.execute_command("CLUSTER", "HELP", target_nodes=RedisCluster.RANDOM)
         assert "HELP" in res
         assert "SLOTS" in res
 
-    def test_cluster_pipeline(self, cluster_client: redis.RedisCluster):
+    def test_cluster_pipeline(self, cluster_client: RedisCluster):
         pipeline = cluster_client.pipeline()
         pipeline.set("foo", "bar")
         pipeline.get("foo")
@@ -298,7 +318,7 @@ class TestEmulated:
 # throw if it can't access the port in `CLUSTER SLOTS` :|
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 class TestEmulatedWithAnnounceIp:
-    def test_cluster_slots_command(self, df_server, cluster_client: redis.RedisCluster):
+    def test_cluster_slots_command(self, df_server, cluster_client: RedisCluster):
         expected = {(0, 16383): {"primary": ("127.0.0.2", df_server.port), "replicas": []}}
         res = cluster_client.execute_command("CLUSTER SLOTS")
         assert expected == res
@@ -306,7 +326,7 @@ class TestEmulatedWithAnnounceIp:
 
 @dataclass
 class ReplicaInfo:
-    id: string
+    id: str
     port: int
 
 
@@ -1033,7 +1053,7 @@ async def test_cluster_blocking_command(df_server):
     await c_master.lpush("keep-local", "WORKS")
 
     assert (await v1) == ("keep-local", "WORKS")
-    with pytest.raises(MovedError) as e_info:
+    with pytest.raises(MovedError):
         await v2
 
 
@@ -1197,7 +1217,7 @@ async def test_cluster_native_client(
     for c in c_replicas:
         try:
             assert await c.get("key0")
-        except MovedError as e:
+        except MovedError:
             pass
 
     # Push new config
@@ -1598,7 +1618,7 @@ async def test_cluster_fuzzymigration(
     segments: int,
     keys: int,
     huge_values: int,
-    cache_mode: string,
+    cache_mode: str,
 ):
     instances, nodes = await create_cluster(
         df_factory,
@@ -1997,7 +2017,7 @@ async def test_snapshoting_during_migration(
 
     async def start_save():
         logging.debug("BGSAVE")
-        await nodes[0].client.execute_command(f"BGSAVE")
+        await nodes[0].client.execute_command("BGSAVE")
 
     if migration_first:
         await start_migration()
@@ -2086,7 +2106,7 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
     logging.debug("Migration finalized")
 
     while 0 != await nodes[0].client.dbsize():
-        logging.debug(f"wait until source dbsize is empty")
+        logging.debug("wait until source dbsize is empty")
         await asyncio.sleep(0.1)
 
     for i in range(SIZE):
@@ -2953,7 +2973,7 @@ async def test_migration_restart(df_factory: DflyInstanceFactory, df_seeder_fact
     await seeder.run(target_deviation=0.1)
     capture = await seeder.capture()
 
-    logging.debug(f"Start migration")
+    logging.debug("Start migration")
     nodes[0].migrations.append(
         MigrationInfo(
             "127.0.0.1",
@@ -2965,14 +2985,14 @@ async def test_migration_restart(df_factory: DflyInstanceFactory, df_seeder_fact
     await apply_config(nodes)
 
     await asyncio.sleep(random.randint(1, 10) / 5)
-    logging.debug(f"Restart migration")
+    logging.debug("Restart migration")
     final_migration_range = (random.randint(1, 8000), random.randint(8001, 16382))
     nodes[0].migrations[0] = MigrationInfo(
         "127.0.0.1", nodes[1].instance.admin_port, [final_migration_range], nodes[1].id
     )
     await apply_config(nodes)
 
-    logging.debug(f"wait migration to finish")
+    logging.debug("wait migration to finish")
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=50)
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", timeout=50)
 
@@ -3244,7 +3264,7 @@ async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: Dfl
 
     await wait_for_status(nodes[0].client, nodes[1].id, "FINISHED")
 
-    with pytest.raises(aioredis.ResponseError) as e_info:
+    with pytest.raises(aioredis.ResponseError):
         await blpop_task
 
     assert await c_nodes[1].type("list") == "none"
@@ -3504,7 +3524,7 @@ async def test_SortedSearchRequest(df_factory: DflyInstanceFactory):
 
 async def verify_keys_match_number_of_index_docs(client, expected_num_keys):
     # Get number of docs in index
-    index_info = await client.execute_command(f"FT.INFO idx")
+    index_info = await client.execute_command("FT.INFO idx")
     index_info_num_docs = index_info[9]
 
     # Get number of keys in database
@@ -3645,7 +3665,6 @@ async def _run_tiering_migration(
     assert info["db0"]["keys"] == keys - delete_succeded
 
 
-@pytest.mark.skip("Fails constantly on CI")
 @pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.opt_only
@@ -3653,7 +3672,7 @@ async def _run_tiering_migration(
 async def test_cluster_migration_with_tiering(df_factory):
     await _run_tiering_migration(
         df_factory,
-        maxmemory="512MB",
+        maxmemory="800MB",
         min_tiered_entries=10_000,
     )
 
@@ -3666,7 +3685,7 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
     await _run_tiering_migration(
         df_factory,
         maxmemory="800MB",
-        min_tiered_entries=50_000,
+        min_tiered_entries=10_000,
         delete_keys_count=50_000,
     )
 
