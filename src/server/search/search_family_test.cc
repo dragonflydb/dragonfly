@@ -6349,6 +6349,25 @@ TEST_F(SearchFamilyTest, NoOffsetsAbsentByDefault) {
               IsArray(_, _, _, _, "index_options", RespArray(IsEmpty()), _, _, _, _, _, _, _, _));
 }
 
+// FT.INFO replies with a flat array under both RESP2 and RESP3.
+TEST_F(SearchFamilyTest, FtInfoResp2AndResp3) {
+  Run({"FT.CREATE", "idx", "ON", "JSON", "PREFIX", "1", "d:", "SCHEMA", "$.id", "AS", "id", "TAG"});
+
+  auto definition = IsArray("key_type", "JSON", "prefixes", IsArray("d:"), "default_language",
+                            "english", "default_score", 1);
+  auto attributes =
+      IsArray(IsArray("identifier", "$.id", "attribute", "id", "type", "TAG", "SEPARATOR", ","));
+
+  for (string_view proto : {"2", "3"}) {
+    Run({"HELLO", proto});
+    EXPECT_THAT(Run({"FT.INFO", "idx"}),
+                IsArray("index_name", "idx", "index_definition", definition, "index_options",
+                        RespArray(IsEmpty()), "attributes", attributes, "num_docs", _, "indexing",
+                        _, "percent_indexed", _))
+        << "RESP" << proto;
+  }
+}
+
 // FT.INFO surfaces NOSTEM per-attribute and language in index_definition.
 TEST_F(SearchFamilyTest, StemmingInfoSurface) {
   Run({"FT.CREATE", "info_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT",
