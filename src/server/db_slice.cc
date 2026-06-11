@@ -1123,24 +1123,25 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddNew(const Context& cntx, string_view
   return DbSlice::ItAndUpdater{.it = res.it, .post_updater = std::move(res.post_updater)};
 }
 
-int64_t DbSlice::ExpireParams::Cap(int64_t value, TimeUnit unit) {
-  return unit == TimeUnit::SEC ? min(value, kMaxExpireDeadlineSec)
-                               : min(value, kMaxExpireDeadlineMs);
+int64_t DbSlice::ExpireParams::Cap(int64_t value) {
+  return min(value, kMaxExpireDeadlineMs);
+}
+
+bool DbSlice::ExpireParams::SafeSecToMs(int64_t sec, int64_t* out_ms) {
+  if (sec > kMaxExpireDeadlineSec || sec < 0) {
+    return false;
+  }
+  *out_ms = sec * 1000;
+  return true;
 }
 
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool cap) const {
   if (persist)
     return {0, 0};
 
-  // return a negative absolute time if we overflow.
-  if (unit == TimeUnit::SEC && value > INT64_MAX / 1000) {
-    return {0, -1};
-  }
-
-  int64_t msec = (unit == TimeUnit::SEC) ? value * 1000 : value;
-  int64_t rel_msec = absolute ? msec - now_ms : msec;
+  int64_t rel_msec = absolute ? msec_val - now_ms : msec_val;
   if (cap)
-    rel_msec = Cap(rel_msec, TimeUnit::MSEC);
+    rel_msec = Cap(rel_msec);
   return make_pair(rel_msec, now_ms + rel_msec);
 }
 
