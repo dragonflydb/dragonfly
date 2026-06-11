@@ -1244,8 +1244,7 @@ class MemBufControllerTest : public Test {
   }
 
   std::string Flush() {
-    auto current = controller_.CurrentBuffer()->InputBuffer();
-    const auto blob = controller_.BuildBlob(current);
+    const auto blob = controller_.BuildBlob();
     EXPECT_EQ(controller_.FlushableSize(), 0);
     return blob;
   }
