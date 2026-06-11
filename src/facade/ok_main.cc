@@ -17,6 +17,7 @@
 #include "absl/strings/str_cat.h"
 #include "base/cycle_clock.h"
 #include "base/init.h"
+#include "base/proc_util.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
@@ -29,7 +30,18 @@
 #include "util/http/http_handler.h"
 #include "util/http/http_server_utils.h"
 
+#ifdef __linux__
+#include "util/fibers/uring_proactor.h"
+#endif
+
 ABSL_FLAG(uint32_t, port, 6379, "server port");
+// No-op flags accepted for compatibility with bench_v2.sh / Dragonfly invocation patterns.
+// ok_backend always binds 0.0.0.0 (AcceptServer default) and has no persistence.
+ABSL_FLAG(std::string, bind, "0.0.0.0", "Bind address (no-op in ok_backend)");
+ABSL_FLAG(std::string, dbfilename, "", "DB filename (no-op in ok_backend)");
+ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
+          "How many buffer ring entries to allocate per thread for io_uring receive "
+          "operations. Requires kernel >= 6.2 and io_uring proactor.");
 
 using namespace util;
 using namespace std;
@@ -453,6 +465,34 @@ int main(int argc, char* argv[]) {
   unique_ptr<util::ProactorPool> pp(fb2::Pool::Epoll());
 #endif
   pp->Run();
+
+#ifdef __linux__
+  // Register io_uring buffer rings for multishot recv if requested.
+  // Mirrors the RegisterBufRings logic in dfly_main.cc.
+  {
+    auto bufcnt = absl::GetFlag(FLAGS_uring_recv_buffer_cnt);
+    if (bufcnt > 0) {
+      base::sys::KernelVersion kver;
+      base::sys::GetKernelVersion(&kver);
+      int kver_num = kver.kernel * 100 + kver.major;
+      if (kver_num < 602 || pp->at(0)->GetKind() != util::fb2::ProactorBase::IOURING) {
+        LOG(WARNING) << "--uring_recv_buffer_cnt requires kernel >= 6.2 and io_uring; ignoring.";
+      } else {
+        bufcnt = absl::bit_ceil(uint16_t(bufcnt));
+        pp->AwaitBrief([bufcnt](unsigned, util::ProactorBase* pb) {
+          auto* up = static_cast<util::fb2::UringProactor*>(pb);
+          int res = up->RegisterBufferRing(facade::kRecvSockGid, bufcnt, facade::kRecvBufSize);
+          if (res != 0) {
+            LOG(ERROR) << "RegisterBufferRing failed: " << res;
+            exit(1);
+          }
+        });
+        LOG(INFO) << "ok_backend: registered buf ring with " << bufcnt << " entries of size "
+                  << facade::kRecvBufSize << " per thread.";
+      }
+    }
+  }
+#endif
 
   AcceptServer acceptor(pp.get());
   facade::RunEngine(pp.get(), &acceptor);
