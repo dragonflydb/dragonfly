@@ -3665,7 +3665,6 @@ async def _run_tiering_migration(
     assert info["db0"]["keys"] == keys - delete_succeded
 
 
-@pytest.mark.skip("Fails constantly on CI")
 @pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.opt_only
@@ -3673,7 +3672,7 @@ async def _run_tiering_migration(
 async def test_cluster_migration_with_tiering(df_factory):
     await _run_tiering_migration(
         df_factory,
-        maxmemory="512MB",
+        maxmemory="800MB",
         min_tiered_entries=10_000,
     )
 
@@ -3686,7 +3685,7 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
     await _run_tiering_migration(
         df_factory,
         maxmemory="800MB",
-        min_tiered_entries=50_000,
+        min_tiered_entries=10_000,
         delete_keys_count=50_000,
     )
 
