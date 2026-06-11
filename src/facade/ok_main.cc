@@ -17,19 +17,27 @@
 #include "absl/strings/str_cat.h"
 #include "base/cycle_clock.h"
 #include "base/init.h"
+#include "base/proc_util.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_stats.h"
+#include "facade/facade_types.h"
 #include "facade/reply_builder.h"
 #include "facade/service_interface.h"
 #include "util/accept_server.h"
 #include "util/fibers/pool.h"
+#ifdef __linux__
+#include "util/fibers/uring_proactor.h"
+#endif
 #include "util/http/http_common.h"
 #include "util/http/http_handler.h"
 #include "util/http/http_server_utils.h"
 
 ABSL_FLAG(uint32_t, port, 6379, "server port");
+ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
+          "How many buffer ring entries to allocate per thread for io_uring receive operations. "
+          "Relevant only for modern kernels with io_uring enabled");
 
 using namespace util;
 using namespace std;
@@ -442,6 +450,40 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 #define USE_URING 0
 #endif
 
+void RegisterBufRings(util::ProactorPool* pool) {
+#ifdef __linux__
+  auto bufcnt = GetFlag(FLAGS_uring_recv_buffer_cnt);
+  if (bufcnt == 0) {
+    return;
+  }
+
+  if (pool->at(0)->GetKind() != util::ProactorBase::IOURING) {
+    LOG(WARNING) << "uring_recv_buffer_cnt requires io_uring proactor";
+    return;
+  }
+
+  base::sys::KernelVersion kver;
+  base::sys::GetKernelVersion(&kver);
+  unsigned ver = kver.kernel * 100 + kver.major;
+  if (ver < 602) {
+    LOG(WARNING) << "uring_recv_buffer_cnt requires kernel >= 6.2";
+    return;
+  }
+
+  bufcnt = absl::bit_ceil(bufcnt);
+  pool->AwaitBrief([&](unsigned, util::ProactorBase* pb) {
+    auto* up = static_cast<fb2::UringProactor*>(pb);
+    int res = up->RegisterBufferRing(facade::kRecvSockGid, bufcnt, facade::kRecvBufSize);
+    if (res != 0) {
+      LOG(ERROR) << "Failed to register buf ring: " << util::detail::SafeErrorMessage(res);
+      exit(1);
+    }
+  });
+  LOG(INFO) << "Registered a bufring with " << bufcnt << " buffers of size " << facade::kRecvBufSize
+            << " per thread";
+#endif
+}
+
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
@@ -453,6 +495,8 @@ int main(int argc, char* argv[]) {
   unique_ptr<util::ProactorPool> pp(fb2::Pool::Epoll());
 #endif
   pp->Run();
+
+  RegisterBufRings(pp.get());
 
   AcceptServer acceptor(pp.get());
   facade::RunEngine(pp.get(), &acceptor);

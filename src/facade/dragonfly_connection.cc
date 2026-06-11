@@ -1491,6 +1491,38 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   return ERROR;
 }
 
+void Connection::ParseRedis(io::Bytes buf) {
+  uint32_t consumed = 0;
+  RespSrvParser::Result result = RespSrvParser::OK;
+
+  while (buf.size() > 0) {
+    DCHECK(parsed_cmd_);
+    result = redis_parser_->Parse(buf, &consumed, parsed_cmd_);
+    request_consumed_bytes_ += consumed;
+    buf.remove_prefix(consumed);
+
+    if (result == RespSrvParser::OK) {
+      DCHECK(!parsed_cmd_->empty());
+
+      if (io_req_size_hist)
+        io_req_size_hist->Add(request_consumed_bytes_);
+      request_consumed_bytes_ = 0;
+
+      PipelineMessagePtr ptr = GetFromPoolOrCreate();
+      auto* cmd = std::exchange(parsed_cmd_, ptr.release());
+      EnqueueParsedCommand(cmd);
+    } else {
+      break;
+    }
+  }
+
+  parser_error_ = result;
+
+  if (result == RespSrvParser::INPUT_PENDING) {
+    CHECK_EQ(buf.size(), 0u);
+  }
+}
+
 auto Connection::ParseLoop() -> ParserStatus {
   auto parse_func =
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
@@ -2867,11 +2899,9 @@ void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 
     pending_input_ = true;
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
+    CHECK(io_buf_.InputLen() == 0);
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
-    {
-      ReadBufTracker tracker(io_buf_);
-      io_buf_.WriteAndCommit(buf.data(), buf.size());
-    }
+    ParseRedis(buf);
     last_interaction_ = time(nullptr);
   } else {
     LOG(FATAL) << "Should not reach here";

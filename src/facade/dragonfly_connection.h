@@ -389,6 +389,10 @@ class Connection : public util::Connection {
 
   ParserStatus ParseRedis(base::IoBuf& buf, uint32_t max_busy_cycles, bool enqueue_only = false);
 
+  // Non-preemptive variant for provided buffers in io_loop_v2.
+  // Fully consumes the input by parsing and enqueuing commands.
+  void ParseRedis(io::Bytes buf);
+
   void OnBreakCb(int32_t mask);
 
   // Shrink pipeline pool by a little while handling regular commands.
