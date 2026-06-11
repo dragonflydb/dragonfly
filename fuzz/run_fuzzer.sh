@@ -120,10 +120,10 @@ write_repro_env() {
         echo "--proactor_threads=${AFL_PROACTOR_THREADS}"
         echo "--dbfilename=${DB_FILENAME}"
         echo "--omit_basic_usage"
-        echo "--rename_command=SHUTDOWN="
-        echo "--rename_command=DEBUG="
-        echo "--rename_command=FLUSHALL="
-        echo "--rename_command=FLUSHDB="
+        echo "--restricted_commands=SHUTDOWN"
+        echo "--restricted_commands=DEBUG"
+        echo "--restricted_commands=FLUSHALL"
+        echo "--restricted_commands=FLUSHDB"
         echo "--max_bulk_len=1048576"
         [[ "$TARGET" == "memcache" ]] && echo "--memcached_port=11211"
     } > "$out"
@@ -158,10 +158,10 @@ run_fuzzer() {
         --bind=::
         --dbfilename="${DB_FILENAME}"
         --omit_basic_usage
-        --rename_command=SHUTDOWN=
-        --rename_command=DEBUG=
-        --rename_command=FLUSHALL=
-        --rename_command=FLUSHDB=
+        --restricted_commands=SHUTDOWN
+        --restricted_commands=DEBUG
+        --restricted_commands=FLUSHALL
+        --restricted_commands=FLUSHDB
         --max_bulk_len=1048576
     )
 

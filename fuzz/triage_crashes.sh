@@ -206,10 +206,10 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
             --proactor_threads=1
             --dbfilename=
             --omit_basic_usage
-            --rename_command=SHUTDOWN=
-            --rename_command=DEBUG=
-            --rename_command=FLUSHALL=
-            --rename_command=FLUSHDB=
+            --restricted_commands=SHUTDOWN
+            --restricted_commands=DEBUG
+            --restricted_commands=FLUSHALL
+            --restricted_commands=FLUSHDB
             --max_bulk_len=1048576
         )
         [[ "$MODE" == "memcache" ]] && DF_ARGS+=(--memcached_port="$MC_PORT")

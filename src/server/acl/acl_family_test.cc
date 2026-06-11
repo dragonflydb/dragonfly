@@ -18,21 +18,12 @@
 
 using namespace testing;
 
-ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
 
 namespace dfly {
 
 class AclFamilyTest : public BaseFamilyTest {
  protected:
-};
-
-class AclFamilyTestRename : public BaseFamilyTest {
-  void SetUp() override {
-    absl::SetFlag(&FLAGS_rename_command, {"ACL=ROCKS"});
-    absl::SetFlag(&FLAGS_command_alias, {"___SET=SET"});
-    ResetService();
-  }
 };
 
 TEST_F(AclFamilyTest, AclSetUser) {
@@ -439,17 +430,6 @@ TEST_F(AclFamilyTest, AclGenPass) {
   // and the pattern continues
   resp = Run({"ACL", "GENPASS", "9"});
   EXPECT_THAT(resp.GetString().length(), 3);
-}
-
-TEST_F(AclFamilyTestRename, AclRename) {
-  auto resp = Run({"ACL", "SETUSER", "billy"});
-  EXPECT_THAT(resp, ErrArg("ERR unknown command `ACL`"));
-
-  resp = Run({"ROCKS", "SETUSER", "billy", "ON", ">mypass"});
-  EXPECT_THAT(resp.GetString(), "OK");
-
-  resp = Run({"ROCKS", "DELUSER", "billy"});
-  EXPECT_THAT(resp, IntArg(1));
 }
 
 TEST_F(AclFamilyTest, TestKeys) {
