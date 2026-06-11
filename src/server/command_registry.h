@@ -271,8 +271,6 @@ class CommandRegistry {
 
   void StartFamily(std::optional<uint32_t> acl_category = std::nullopt);
 
-  std::string_view RenamedOrOriginal(std::string_view orig) const;
-
   using FamiliesVec = std::vector<std::vector<std::string>>;
   FamiliesVec GetFamilies();
 
@@ -282,9 +280,7 @@ class CommandRegistry {
 
  private:
   absl::flat_hash_map<std::string, CommandId> cmd_map_;
-  absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
   absl::flat_hash_set<std::string> restricted_cmds_;
-  absl::flat_hash_set<std::string> oomdeny_cmds_;
 
   FamiliesVec family_of_commands_;
   size_t bit_index_;

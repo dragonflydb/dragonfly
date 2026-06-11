@@ -22,14 +22,9 @@
 #include "server/conn_context.h"
 
 using namespace std;
-ABSL_FLAG(vector<string>, rename_command, {},
-          "Change the name of commands, format is: <cmd1_name>=<cmd1_new_name>, "
-          "<cmd2_name>=<cmd2_new_name>");
+
 ABSL_FLAG(vector<string>, restricted_commands, {},
           "Commands restricted to connections on the admin port");
-
-ABSL_FLAG(vector<string>, oom_deny_commands, {},
-          "Additinal commands that will be marked as denyoom");
 
 ABSL_FLAG(vector<string>, command_alias, {},
           "Add an alias for given command(s), format is: <alias>=<original>, <alias>=<original>. "
@@ -48,7 +43,6 @@ CmdArgParser MakeParserFromContext(CommandContext* cntx) {
 using absl::AsciiStrToUpper;
 using absl::GetFlag;
 using absl::StrCat;
-using absl::StrSplit;
 
 namespace {
 
@@ -246,14 +240,8 @@ void CommandId::RecordLatency(unsigned tid, uint64_t latency_usec) const {
 }
 
 CommandRegistry::CommandRegistry() {
-  cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
-
   for (const string& name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
-  }
-
-  for (const string& name : GetFlag(FLAGS_oom_deny_commands)) {
-    oomdeny_cmds_.emplace(AsciiStrToUpper(name));
   }
 }
 
@@ -276,22 +264,10 @@ void CommandRegistry::Init(unsigned int thread_count) {
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   string k = string(cmd.name());
-
-  absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
-  const bool is_sub_command = maybe_subcommand.size() == 2;
-  if (const auto it = cmd_rename_map_.find(maybe_subcommand.front()); it != cmd_rename_map_.end()) {
-    if (it->second.empty()) {
-      return *this;  // Incase of empty string we want to remove the command from registry.
-    }
-    k = is_sub_command ? StrCat(it->second, " ", maybe_subcommand[1]) : it->second;
-  }
+  const bool is_sub_command = k.find(' ') != string::npos;
 
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
     cmd.SetRestricted(true);
-  }
-
-  if (oomdeny_cmds_.find(k) != oomdeny_cmds_.end()) {
-    cmd.SetFlag(CO::DENYOOM);
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);
@@ -317,13 +293,6 @@ void CommandRegistry::StartFamily(std::optional<uint32_t> acl_category) {
   acl_category_ = acl_category;
 }
 
-std::string_view CommandRegistry::RenamedOrOriginal(std::string_view orig) const {
-  if (!cmd_rename_map_.empty() && cmd_rename_map_.contains(orig)) {
-    return cmd_rename_map_.find(orig)->second;
-  }
-  return orig;
-}
-
 CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {
   return std::move(family_of_commands_);
 }
@@ -334,7 +303,7 @@ std::pair<const CommandId*, ParsedArgs> CommandRegistry::FindExtended(ParsedArgs
   string cmd = absl::AsciiStrToUpper(args.Front());
   auto tail_args = args.Tail();
 
-  if (cmd == RenamedOrOriginal("ACL"sv)) {
+  if (cmd == "ACL") {
     if (tail_args.empty()) {
       return {Find(cmd), {}};
     }

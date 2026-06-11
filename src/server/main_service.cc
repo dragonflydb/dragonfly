@@ -112,11 +112,6 @@ ABSL_FLAG(strings::MemoryBytesFlag, maxmemory, strings::MemoryBytesFlag{},
           "0 - value will be automatically defined based on the env (ex: machine's capacity). "
           "default: 0");
 
-ABSL_RETIRED_FLAG(
-    double, oom_deny_ratio, 1.1,
-    "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
-    "memory is above this value");
-
 ABSL_FLAG(uint32_t, shard_thread_busy_polling_usec, 0,
           "If non-zero, overrides the busy polling parameter for shard threads.");
 
@@ -1186,7 +1181,7 @@ OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
   // Sharded pub-sub acts as if it's sharded by its channel name (just for checks)
   if (cid->PubSubKind() == CO::PubSubKind::SHARDED) {
     // SPUBLISH has only one key, the rest is data
-    if (cid->name() == registry_.RenamedOrOriginal("SPUBLISH"))
+    if (cid->name() == "SPUBLISH")
       return KeyIndex(0, 1);
     return {KeyIndex(0, args.size())};  // sub/unsub list of channels
   }
@@ -1863,7 +1858,7 @@ facade::ParsedCommand* Service::AllocateParsedCommand() {
 }
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {
-  return registry_.Find(registry_.RenamedOrOriginal(cmd));
+  return registry_.Find(cmd);
 }
 
 bool Service::IsLocked(Namespace* ns, DbIndex db_index, std::string_view key) const {
