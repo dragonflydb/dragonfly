@@ -92,8 +92,28 @@ endif()
 
 option(WITH_USAN "Enable -fsanitize=undefined" OFF)
 if (SUPPORT_USAN AND WITH_USAN)
-  message(STATUS "ub sanitizer enabled")
+  message(STATUS "UndefinedBehaviorSanitizer enabled (-fsanitize=undefined)")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=undefined")
+  # implicit-conversion covers implicit integer truncation and sign change.
+  # These are not UB by C++ standard but routinely hide real bugs (e.g. PR #7562)
+  # where 1ULL<<32 silently truncated to 0 when passed as unsigned). Clang-only.
+  if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=implicit-conversion")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=local-bounds")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=nullability")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=float-divide-by-zero")
+    message(STATUS "  + Clang extra checks: implicit-conversion, local-bounds, nullability, float-divide-by-zero")
+  endif()
+endif()
+
+# Stricter UBSan: also catches unsigned-integer-overflow. Very noisy on legitimate
+# wrap-around (hashing, length math). Recommended only for scheduled/nightly CI,
+# not per-PR. Requires WITH_USAN=ON and Clang.
+option(WITH_USAN_STRICT "Enable -fsanitize=integer (noisy: unsigned overflow etc.)" OFF)
+if (SUPPORT_USAN AND WITH_USAN AND WITH_USAN_STRICT
+    AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  message(STATUS "UndefinedBehaviorSanitizer STRICT enabled (-fsanitize=integer, adds unsigned overflow)")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=integer")
 endif()
 
 # Split debug info into .dwo files so the linker handles much less data.
