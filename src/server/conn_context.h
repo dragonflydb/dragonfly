@@ -25,10 +25,11 @@ struct FlowInfo;
 // Used for storing MULTI/EXEC commands.
 class StoredCmd {
  public:
-  // Deep copy of args, creates backing storage internally.
-  StoredCmd(const CommandId* cid, ArgSlice args, facade::ReplyMode mode = facade::ReplyMode::FULL);
+  // Deep copy of args, creates owned backing storage.
+  static StoredCmd DeepCopy(const CommandId* cid, facade::ParsedArgs args,
+                            facade::ReplyMode mode = facade::ReplyMode::FULL);
 
-  // Shallow copy of args.
+  // Shallow copy of args — caller must ensure the referenced data outlives this object.
   StoredCmd(const CommandId* cid, facade::ParsedArgs args)
       : cid_{cid}, args_{args}, reply_mode_(facade::ReplyMode::FULL) {
   }
@@ -91,7 +92,7 @@ struct ConnectionState {
     size_t UsedMemory() const;
 
     // Deep copies arguments and updates the stored_cmd_bytes.
-    void AddStoredCmd(const CommandId* cid, ArgSlice args);
+    void AddStoredCmd(const CommandId* cid, facade::ParsedArgs args);
 
     // Empties the body vector and resets stored_cmd_bytes to 0. Returns the size before data was
     // cleared.
