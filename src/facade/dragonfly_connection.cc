@@ -1559,6 +1559,7 @@ auto Connection::ParseLoop() -> ParserStatus {
   bool commands_parsed = false;
   do {
     const uint64_t cmds_before = local_stats_.cmds;
+    uint64_t batch_start = CycleClock::Now();
     commands_parsed = (this->*parse_func)(io_buf_);
 
     if (!ExecuteBatch())
@@ -1566,6 +1567,14 @@ auto Connection::ParseLoop() -> ParserStatus {
 
     if (!ReplyBatch())
       return ERROR;
+
+    uint64_t batch_elapsed_us = CycleClock::ToUsec(CycleClock::Now() - batch_start);
+    if (batch_elapsed_us > 5000) {  // > 5ms
+      LOG(WARNING) << "SLOW BATCH: " << batch_elapsed_us << "us"
+                   << " cmds=" << (local_stats_.cmds - cmds_before)
+                   << " q_depth_before=" << parsed_cmd_q_len_
+                   << " pending_input=" << pending_input_;
+    }
 
     if (VLOG_IS_ON(1)) {
       // Track how many commands were executed in this ParseLoop do-while iteration.
@@ -1580,6 +1589,13 @@ auto Connection::ParseLoop() -> ParserStatus {
                          : (n >= 2)  ? 1
                                      : 0;
       stats_v2_.parse_cmds_hist[bucket]++;
+    }
+
+    // Yield if we've held the thread too long across multiple inner ParseLoop iterations.
+    // In the common case (single iteration, buffer exhausted), this is a no-op.
+    // Fires only when io_buf_ had enough data for multiple consecutive batches.
+    if (ioloop_v2_ && ThisFiber::GetRunningTimeCycles() > max_busy_read_cycles_cached) {
+      ThisFiber::Yield();
     }
   } while (commands_parsed && io_buf_.InputLen() > 0);
 
@@ -2719,6 +2735,14 @@ bool Connection::ExecuteBatch() {
       DCHECK(is_head);       // only head can execute sync
       cmd = advance_head();  // advance it
     }
+
+    // Yield if we've held the thread too long during command dispatch.
+    // Each synchronous DispatchCommandSimple call can take hundreds of µs.
+    // Without this yield, 15 commands × ~500µs = ~7ms of starvation for sibling connections.
+    // With no contention (1 conn/thread), Yield() returns immediately — zero overhead.
+    if (ioloop_v2_ && ThisFiber::GetRunningTimeCycles() > max_busy_read_cycles_cached) {
+      ThisFiber::Yield();
+    }
   }
 
   if (parsed_head_ == nullptr)
@@ -3085,6 +3109,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   ParserStatus parse_status = OK;
 
+  // Ensure max_busy_read_cycles_cached is initialized from flags for this thread.
+  // Normally set by UpdateFromFlags(); ok_backend doesn't call that, so we set it here.
+  if (max_busy_read_cycles_cached == UINT32_MAX) {
+    max_busy_read_cycles_cached = base::CycleClock::FromUsec(GetFlag(FLAGS_max_busy_read_usec));
+    LOG(WARNING) << "Initialized max_busy_read_cycles_cached to " << max_busy_read_cycles_cached
+                 << " cycles (" << GetFlag(FLAGS_max_busy_read_usec) << " usec)";
+  }
+
   // Callback that wakes the currrent V2 fiber by bumping the io_event_ epoch.
   // Multiple waiters (e.g command completion, backpressure relief) can use the same callback since
   // they all wake the same fiber.
@@ -3149,6 +3181,16 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   do {
     stats_v2_.loop_iterations++;
+
+    // Yield if we've held the thread too long since the last suspension.
+    // Fires on every iteration of the outer loop — including those that `continue`
+    // back here (control-message path, migration path) without reaching the bottom.
+    // After io_event_.await() or a Yield(), GetRunningTimeCycles() resets to 0,
+    // so this is a no-op immediately after sleeping.
+    if (ThisFiber::GetRunningTimeCycles() > max_busy_read_cycles_cached) {
+      ThisFiber::Yield();
+    }
+
     // Check for mid-work fiber preemptions from the previous iteration.
     // Must be at loop-top so that all exit paths (including continues) are covered.
     if (VLOG_IS_ON(1) && (fb2::FiberSwitchEpoch() != epoch_at_process)) {
@@ -3234,7 +3276,12 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         stats_v2_.cmds_between_idle_hist[BucketIdx6(cmds_this_wake, {1, 2, 5, 10, 50})]++;
         stats_v2_.cmds_since_last_idle = 0;  // kept for external visibility
         cmds_at_last_idle = local_stats_.cmds;
+        uint64_t await_start = CycleClock::Now();
         io_event_.await(should_wake);
+        uint64_t await_us = CycleClock::ToUsec(CycleClock::Now() - await_start);
+        if (await_us > 5000) {
+          LOG(WARNING) << "LONG IDLE AWAIT: " << await_us << "us";
+        }
       }
     }
 
@@ -3303,9 +3350,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       size_t mem_before = conn_stats.pipeline_queue_bytes;
 
       if (parsed_head_) {
+        uint64_t bp_exec_start = CycleClock::Now();
         if (HasCommandToExecute())
           ExecuteBatch();
         ReplyBatch();
+        uint64_t bp_exec_us = CycleClock::ToUsec(CycleClock::Now() - bp_exec_start);
+        if (bp_exec_us > 5000) {
+          LOG(WARNING) << "SLOW BP DRAIN: " << bp_exec_us << "us";
+        }
       }
 
       // After draining commands, notify all connections parked on backpressure relief
@@ -3346,6 +3398,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         }
 
         stats_v2_.backpressure_parks++;
+        uint64_t await_start = CycleClock::Now();
         io_event_.await([this, &is_ready_to_migrate]() {
           bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
           bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
@@ -3359,6 +3412,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
           return under_limit || cmd_ready || !dispatch_q_.empty() || io_ec_ ||
                  is_ready_to_migrate();
         });
+        uint64_t await_us = CycleClock::ToUsec(CycleClock::Now() - await_start);
+        if (await_us > 5000) {
+          LOG(WARNING) << "LONG BP AWAIT: " << await_us << "us";
+        }
       }
     }  // else Execute and reply
 
