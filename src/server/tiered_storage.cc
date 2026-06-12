@@ -648,9 +648,9 @@ std::vector<std::string> TieredStorage::GetMutableFlagNames() {
 bool TieredStorage::ShouldOffload() const {
   // Cool values can be dropped, so count as free as well
   int64_t actual_free = op_manager_->db_slice_.memory_budget() + int64_t(CoolMemoryUsage());
-  int64_t expected_free = double(config_.offload_threshold) *
-                          max_memory_limit.load(memory_order_relaxed) / shard_set->size();
-  return actual_free < expected_free;
+  int64_t target_free = double(config_.offload_threshold) *
+                        max_memory_limit.load(memory_order_relaxed) / shard_set->size();
+  return actual_free < target_free;
 }
 
 int64_t TieredStorage::UploadBudget() const {
