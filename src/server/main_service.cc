@@ -1307,24 +1307,6 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
   return nullopt;
 }
 
-bool ShouldDenyOnOOM(const CommandContext& cmd_cntx) {
-  DCHECK_NE(cmd_cntx.start_time_ns, 0u);
-  ServerState& etl = *ServerState::tlocal();
-  if ((cmd_cntx.cid()->opt_mask() & CO::DENYOOM) && etl.is_master) {
-    auto memory_stats = etl.GetMemoryUsage(cmd_cntx.start_time_ns);
-
-    size_t limit = max_memory_limit.load(memory_order_relaxed);
-    if (memory_stats.used_mem > limit ||
-        (etl.rss_oom_deny_ratio > 0 && memory_stats.rss_mem > (limit * etl.rss_oom_deny_ratio))) {
-      DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
-                    << memory_stats.rss_mem << " ,limit " << limit;
-      etl.stats.oom_error_cmd_cnt++;
-      return true;
-    }
-  }
-  return false;
-}
-
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdArgList tail_args,
                                                       const ConnectionContext& dfly_cntx) {
   ServerState& etl = *ServerState::tlocal();
@@ -1635,75 +1617,79 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  cmd_cntx->start_time_ns = absl::GetCurrentTimeNanos();
+  cmd_cntx->start_time_usec = base::CycleClock::ToUsec(base::CycleClock::Now());
 
   ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   auto* builder = cmd_cntx->rb();
   DCHECK(builder);
   DCHECK(cntx);
 
-  if (ShouldDenyOnOOM(*cmd_cntx)) {
+  ServerState& ss = *ServerState::tlocal();
+
+  if ((cid->opt_mask() & CO::DENYOOM) && ss.ShouldDenyOnOOM(cmd_cntx->start_time_usec)) {
     cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
     return DispatchResult::OOM;
   }
 
-  bool has_monitors = !ServerState::tlocal()->Monitors().Empty();
-  if (cid->CanBeMonitored() && has_monitors) {
+  bool has_monitors = !ss.Monitors().Empty();
+  if (has_monitors && cid->CanBeMonitored()) {
     DispatchMonitor(cntx, cid, tail_args);
   }
 
-  ServerState::tlocal()->RecordCmd(cntx->has_main_or_memcache_listener);
+  ss.RecordCmd(cntx->has_main_or_memcache_listener);
   TrackIfNeeded(cmd_cntx);
   auto* tx = cmd_cntx->tx();
-
-  // For EVAL[] and EXEC/DISCARD, clean up state.
-  // We don't do it directly in commands to allow some introspection after execution (slowlog).
-  absl::Cleanup mck_cleanup = [cntx, cid, mck = cid->MultiControlKind()]() {
-    if (mck && *mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
-      MultiCleanup(cntx);
-    else if (mck && *mck == CO::MultiControlKind::EVAL)
-      cntx->conn_state.script_info.reset();
-  };
 
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(*cmd_cntx);
 #endif
   builder->ConsumeLastError();  // throw away last error
+  DispatchResult res = DispatchResult::OK;
   try {
     cid->Invoke(tail_args, cmd_cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
-    return DispatchResult::ERROR;
+    res = DispatchResult::ERROR;
   }
 
-  DispatchResult res = DispatchResult::OK;
-  if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
-    // Set flag if OOM reported
-    if (reason == kOutOfMemory) {
-      res = DispatchResult::OOM;
+  if (res == DispatchResult::OK) {
+    if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
+      // Set flag if OOM reported
+      if (reason == kOutOfMemory) {
+        res = DispatchResult::OOM;
+      }
+      VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
+      if (ShouldLogError(*cid, reason, tail_args)) {
+        LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
+      }
     }
-    VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
-    if (ShouldLogError(*cid, reason, tail_args)) {
-      LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
+
+    if (cntx->conn_state.tracking_info_.IsTrackingOn()) {
+      if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
+        // Each time we execute a command we need to increase the sequence number in
+        // order to properly track clients when OPTIN is used.
+        // We don't do this for `multi/exec` because it would break the
+        // semantics, i.e, CACHING should stick for all commands following
+        // the CLIENT CACHING ON within a multi/exec block
+        cntx->conn_state.tracking_info_.IncrementSequenceNumber();
+      }
+    }
+
+    cmd_cntx->RecordLatency(tail_args);
+
+    if (tx && !cntx->conn_state.exec_info.IsRunning() && cntx->conn_state.script_info == nullptr) {
+      cntx->last_command_debug.clock = tx->txid();
     }
   }
 
-  if (cntx->conn_state.tracking_info_.IsTrackingOn()) {
-    if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
-      // Each time we execute a command we need to increase the sequence number in
-      // order to properly track clients when OPTIN is used.
-      // We don't do this for `multi/exec` because it would break the
-      // semantics, i.e, CACHING should stick for all commands following
-      // the CLIENT CACHING ON within a multi/exec block
-      cntx->conn_state.tracking_info_.IncrementSequenceNumber();
-    }
-  }
-
-  cmd_cntx->RecordLatency(tail_args);
-
-  if (tx && !cntx->conn_state.exec_info.IsRunning() && cntx->conn_state.script_info == nullptr) {
-    cntx->last_command_debug.clock = tx->txid();
+  // For EVAL[] and EXEC/DISCARD, clean up state.
+  // We don't do it directly in commands to allow some introspection after execution (slowlog).
+  if (auto mck = cid->MultiControlKind(); mck) {
+    if (*mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
+      MultiCleanup(cntx);
+    else if (*mck == CO::MultiControlKind::EVAL)
+      cntx->conn_state.script_info.reset();
   }
 
   return res;

@@ -306,15 +306,15 @@ void CommandContext::ReuseInternal() {
   tx_ = nullptr;
   tail_args_ = {};
   arg_slice_backing.clear();
-  start_time_ns = 0;
+  start_time_usec = 0;
 }
 
 void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
-  DCHECK_GT(start_time_ns, 0u);
-  int64_t after = absl::GetCurrentTimeNanos();
+  DCHECK_GT(start_time_usec, 0u);
+  int64_t after = base::CycleClock::ToUsec(base::CycleClock::Now());
 
   ServerState* ss = ServerState::SafeTLocal();  // Might have migrated thread, read after invocation
-  int64_t execution_time_usec = (after - start_time_ns) / 1000;
+  int64_t execution_time_usec = after - start_time_usec;
 
   cid_->RecordLatency(ss->thread_index(), execution_time_usec);
   DCHECK(conn_cntx_ != nullptr);
@@ -325,8 +325,9 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
     return;
 
   if (!ss->ShouldLogSlowCmd(execution_time_usec))  // It was not a slow command
-    return;
+    return;                                        // fast path - no logging is required
 
+  // Slow path - logging is required.
   auto* cntx = static_cast<dfly::ConnectionContext*>(conn_cntx());
 
   // Log nested commands of scripts that made it into slowlog

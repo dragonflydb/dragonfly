@@ -425,7 +425,7 @@ class CommandContext : public facade::ParsedCommand {
     return tail_args_;
   }
 
-  uint64_t start_time_ns = 0;
+  uint64_t start_time_usec = 0;
 
   // Stores backing array for tail args slice
   CmdArgVec arg_slice_backing;
