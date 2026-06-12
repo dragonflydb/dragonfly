@@ -303,6 +303,7 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
 
     auto& flow = replica_ptr->GetFlow(flow_id);
     conn_cntx->master_repl_flow = &flow;
+    conn_cntx->conn()->SetConnectionMemoryAccounting(false);
     flow.conn = cmd_cntx->conn();
     flow.eof_token = eof_token;
 

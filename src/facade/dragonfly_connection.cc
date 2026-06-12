@@ -178,6 +178,18 @@ struct ReadBufTracker {
   size_t last_capacity_;
 };
 
+struct ConnectionMemoryTracker {
+  explicit ConnectionMemoryTracker(Connection* conn) : conn_(conn) {
+  }
+
+  ~ConnectionMemoryTracker() {
+    conn_->RefreshConnectionMemoryUsage();
+  }
+
+ private:
+  Connection* conn_;
+};
+
 size_t UsedMemoryInternal(const ParsedCommand& msg) {
   return msg.GetSize() + msg.HeapMemory();
 }
@@ -1427,6 +1439,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   // TODO(kostas): follow up on this
   size_t total_consumed = 0;
   do {
+    bool stop_parsing = false;
     DCHECK(parsed_cmd_);
     result = redis_parser_->Parse(read_buffer, &consumed, parsed_cmd_);
     request_consumed_bytes_ += consumed;
@@ -1452,7 +1465,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
         if (GetQueueBackpressure().IsPipelineBufferOverLimit(
                 GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_)) {
           DVLOG(2) << "Pipeline buffer over limit, breaking from parsing loop.";
-          break;
+          stop_parsing = true;
         }
       } else {
         DispatchSingle(has_more, dispatch_sync, dispatch_async);
@@ -1461,8 +1474,13 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
     if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
       LOG_IF(WARNING, cntx()->replica_conn)
-          << "Redis parser error: " << result << " during parse: " << io::View(read_buffer);
+          << "Redis parser error: " << static_cast<unsigned int>(result)
+          << " during parse: " << io::View(read_buffer);
     }
+    RefreshConnectionMemoryUsage();
+    if (stop_parsing)
+      break;
+
     read_buffer.remove_prefix(consumed);
 
     // We must yield from time to time to allow other fibers to run.
@@ -1472,7 +1490,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
       GetLocalConnStats().num_read_yields++;
       ThisFiber::Yield();
     }
-  } while (RespSrvParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
+  } while (RespSrvParser::OK == result && !read_buffer.empty() && !reply_builder_->GetError());
 
   io_buf.ConsumeInput(total_consumed);
 
@@ -2416,8 +2434,36 @@ size_t Connection::GetMemoryUsage() const {
   return mem;
 }
 
+void Connection::RefreshConnectionMemoryUsage() {
+  if (!conn_stats_registered_)
+    return;
+
+  size_t current = account_connection_memory_ ? GetMemoryUsage() : 0;
+  ConnectionStats& conn_stats = GetLocalConnStats();
+
+  if (current >= accounted_connection_memory_bytes_) {
+    conn_stats.connection_memory_bytes += current - accounted_connection_memory_bytes_;
+  } else {
+    const size_t delta = accounted_connection_memory_bytes_ - current;
+    DCHECK_GE(conn_stats.connection_memory_bytes, delta);
+    conn_stats.connection_memory_bytes -= delta;
+  }
+
+  accounted_connection_memory_bytes_ = current;
+}
+
+void Connection::SetConnectionMemoryAccounting(bool enabled) {
+  if (account_connection_memory_ == enabled)
+    return;
+
+  account_connection_memory_ = enabled;
+  // reduce memory to 0 and tl stat contribution to 0 on enabled=false
+  RefreshConnectionMemoryUsage();
+}
+
 void Connection::IncreaseConnStats() {
   DCHECK(tl_facade_stats);
+  DCHECK(!conn_stats_registered_);
   auto& conn_stats = tl_facade_stats->conn_stats;
   if (IsMainOrMemcache())
     ++conn_stats.num_conns_main;
@@ -2434,11 +2480,22 @@ void Connection::IncreaseConnStats() {
     conn_stats.dispatch_queue_subscriber_bytes += dispatch_q_subscriber_bytes_;
     qbp.subscriber_bytes.fetch_add(dispatch_q_subscriber_bytes_, std::memory_order_relaxed);
   }
+
+  conn_stats_registered_ = true;
+  accounted_connection_memory_bytes_ = account_connection_memory_ ? GetMemoryUsage() : 0;
+  conn_stats.connection_memory_bytes += accounted_connection_memory_bytes_;
 }
 
 void Connection::DecreaseConnStats() {
   DCHECK(tl_facade_stats);
+  DCHECK(conn_stats_registered_);
   auto& conn_stats = tl_facade_stats->conn_stats;
+  RefreshConnectionMemoryUsage();
+  DCHECK_GE(conn_stats.connection_memory_bytes, accounted_connection_memory_bytes_);
+  conn_stats.connection_memory_bytes -= accounted_connection_memory_bytes_;
+  accounted_connection_memory_bytes_ = 0;
+  conn_stats_registered_ = false;
+
   if (IsMainOrMemcache()) {
     DCHECK_GT(conn_stats.num_conns_main, 0u);
     --conn_stats.num_conns_main;
@@ -2521,8 +2578,10 @@ bool Connection::ParseMCBatch(base::IoBuf& io_buf) {
 
     DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
              << unsigned(parsed_cmd_->mc_command()->type);
-    if (result == MemcacheParser::INPUT_PENDING)
+    if (result == MemcacheParser::INPUT_PENDING) {
+      RefreshConnectionMemoryUsage();
       return false;
+    }
 
     if (result == MemcacheParser::OK && tl_traffic_logger.log_file &&
         tl_traffic_logger.listener_type == listener_type_) {
@@ -2559,6 +2618,7 @@ bool Connection::ParseMCBatch(base::IoBuf& io_buf) {
           break;
       }
     }
+    RefreshConnectionMemoryUsage();
   } while (parsed_cmd_q_len_ < 128 && io_buf.InputLen() > 0);
   return true;
 }
@@ -2578,6 +2638,7 @@ bool Connection::ExecuteBatch() {
 
   // Execute sequentially all parsed commands.
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
+    ConnectionMemoryTracker memory_tracker(this);
     if (reply_builder_->GetError())
       return false;
     bool is_head = cmd == parsed_head_;
@@ -2723,6 +2784,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
+  ConnectionMemoryTracker memory_tracker(this);
   size_t used_mem = cmd->EnqueuedBytes();
   auto& conn_stats = tl_facade_stats->conn_stats;
 
@@ -2767,6 +2829,7 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
 }
 
 void Connection::DestroyParsedQueue() {
+  ConnectionMemoryTracker memory_tracker(this);
   while (parsed_head_ != nullptr) {
     auto* cmd = parsed_head_;
     parsed_head_ = cmd->next;
