@@ -11,6 +11,7 @@
 #include <xxhash.h>
 
 #include <coroutine>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/match.h"
@@ -191,6 +192,8 @@ class OkService : public ServiceInterface {
   DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference mode) final;
   DispatchManyResult DispatchManyCommands(ParsedCommand* head, unsigned count,
                                           SinkReplyBuilder* builder, ConnectionContext* cntx) final;
+  unsigned DispatchSquashedBatch(ParsedCommand* first, unsigned count,
+                                 ConnectionContext* cntx) final;
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
 
   ConnectionContext* CreateContext(Connection* owner) final {
@@ -308,6 +311,110 @@ DispatchResult OkService::HandleGetSync(ParsedCommand* cmd) {
     rb->SendNull();
   }
   return DispatchResult::OK;
+}
+
+// V2 vectorized batch dispatch: groups commands by shard and executes all per-shard work
+// in a single DispatchBrief per shard, reducing cross-thread hops from N to num_shards.
+unsigned OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
+                                          ConnectionContext* /*cntx*/) {
+  const unsigned num_shards = pool_->size();
+
+  // Per-shard batch entry: stores key, value for SET, and a pointer to the cmd for result storage.
+  struct CmdEntry {
+    CmdContext* ctx;
+    string key;
+    string value;  // empty for GET
+    bool is_set;
+  };
+
+  // Group commands by shard.
+  std::vector<std::vector<CmdEntry>> per_shard(num_shards);
+
+  unsigned processed = 0;
+  auto* cmd = first;
+  for (unsigned i = 0; i < count && cmd; i++) {
+    if (cmd->empty() || cmd->size() < 2)
+      break;
+
+    string_view cmd_name = cmd->Front();
+    bool is_set = absl::EqualsIgnoreCase(cmd_name, "SET");
+    bool is_get = absl::EqualsIgnoreCase(cmd_name, "GET");
+
+    if (!is_set && !is_get)
+      break;  // Non-squashable command, stop here.
+    if (is_set && cmd->size() < 3)
+      break;
+
+    string_view key = cmd->at(1);
+    unsigned shard_id = KeyShard(key, num_shards);
+
+    auto* ctx = static_cast<CmdContext*>(cmd);
+    ctx->SetDeferredReply();
+
+    CmdEntry entry;
+    entry.ctx = ctx;
+    entry.key = string(key);
+    entry.value = is_set ? string(cmd->at(2)) : string();
+    entry.is_set = is_set;
+    per_shard[shard_id].push_back(std::move(entry));
+
+    processed++;
+    cmd = cmd->next;
+  }
+
+  if (processed == 0)
+    return 0;
+
+  // Count active shards for the blocking counter.
+  unsigned active_shards = 0;
+  for (auto& batch : per_shard) {
+    if (!batch.empty())
+      active_shards++;
+  }
+
+  // Dispatch one DispatchBrief per shard with all that shard's commands batched.
+  fb2::BlockingCounter bc(active_shards);
+  for (unsigned sid = 0; sid < num_shards; sid++) {
+    auto& batch = per_shard[sid];
+    if (batch.empty())
+      continue;
+
+    pool_->at(sid)->DispatchBrief([&batch, &bc]() {
+      for (auto& entry : batch) {
+        if (entry.is_set) {
+          shard_db.insert_or_assign(std::move(entry.key), std::move(entry.value));
+        } else {
+          auto it = shard_db.find(entry.key);
+          if (it != shard_db.end()) {
+            entry.ctx->get_result = it->second;
+          }
+        }
+      }
+      bc->Dec();
+    });
+  }
+
+  // Wait for all shards to complete — single suspension point instead of N.
+  bc->Wait();
+
+  // Resolve each command with its reply payload.
+  auto* reply_cmd = first;
+  for (unsigned i = 0; i < processed && reply_cmd; i++) {
+    auto* ctx = static_cast<CmdContext*>(reply_cmd);
+    string_view cmd_name = reply_cmd->Front();
+    if (absl::EqualsIgnoreCase(cmd_name, "SET")) {
+      ctx->Resolve(payload::SimpleString{"OK"});
+    } else {
+      if (ctx->get_result) {
+        ctx->Resolve(payload::BulkString{*ctx->get_result});
+      } else {
+        ctx->Resolve(payload::Null{});
+      }
+    }
+    reply_cmd = reply_cmd->next;
+  }
+
+  return processed;
 }
 
 void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpContext* send) {

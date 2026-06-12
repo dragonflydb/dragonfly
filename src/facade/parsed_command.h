@@ -162,6 +162,11 @@ class ParsedCommand : public cmn::BackedArguments {
     SendError(error);
   }
 
+  // Resolve deferred command with a pre-built payload (used by vectorized squash).
+  void Resolve(payload::Payload payload) {
+    reply_ = std::move(payload);
+  }
+
   // Suspend the deferred command until `blocker` reaches zero.
   // When that happens, CanReply() returns true and SendReply() will resume `coro`,
   // which is expected to write the reply directly to the reply builder.

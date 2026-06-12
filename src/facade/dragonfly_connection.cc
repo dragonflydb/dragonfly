@@ -2750,6 +2750,18 @@ bool Connection::ExecuteBatch() {
   };
 
   // Execute sequentially all parsed commands.
+
+  // V2 vectorized squash phase: group single-shard commands by shard and execute in parallel.
+  if (ioloop_v2_ && parsed_cmd_q_len_ > 1) {
+    unsigned squashed =
+        service_->DispatchSquashedBatch(parsed_to_execute_, parsed_cmd_q_len_, cc_.get());
+    for (unsigned i = 0; i < squashed && parsed_to_execute_; i++) {
+      parsed_to_execute_ = parsed_to_execute_->next;
+    }
+    conn_stats.pipeline_dispatch_commands += squashed;
+    local_stats_.cmds += squashed;
+  }
+
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
     if (reply_builder_->GetError())
       return false;

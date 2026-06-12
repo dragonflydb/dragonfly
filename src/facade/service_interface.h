@@ -61,6 +61,13 @@ class ServiceInterface {
   virtual void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
   }
 
+  // V2 vectorized pipeline squash: group single-shard commands by shard and execute in parallel.
+  // Returns number of commands successfully squashed. Default returns 0 (no squashing).
+  virtual unsigned DispatchSquashedBatch(ParsedCommand* /*first*/, unsigned /*count*/,
+                                         ConnectionContext* /*cntx*/) {
+    return 0;
+  }
+
   virtual void OnConnectionClose(ConnectionContext* cntx) {
   }
 
