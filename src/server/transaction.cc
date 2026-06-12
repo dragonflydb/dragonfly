@@ -551,14 +551,20 @@ void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, Cm
 // Runs in the dbslice thread. Returns true if the transaction concluded.
 bool Transaction::RunInShard(EngineShard* shard, bool allow_q_removal) {
   DCHECK_GT(txid_, 0u);
-  CHECK(cb_ptr_) << DebugId();
+
+  // run_barrier_.IsCompleted() is true when the coordinator already cancelled Execute() —
+  // it set the cancel flag and then Dec'd, leaving kCancelFlag|0. UnlockMulti(block=false)
+  // deliberately skips touching run_barrier_ so the cancel flag is preserved here.
+  // The coordinator has already reset cb_ptr_, so guard the CHECK before reading it.
+  const bool is_cancelled = run_barrier_.IsCompleted();
+  CHECK(is_cancelled || cb_ptr_) << DebugId();
 
   unsigned idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
 
   sd.stats.total_runs++;
 
-  DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
+  DCHECK(is_cancelled || run_barrier_.DEBUG_Count() > 0u);
   VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id() << " " << sd.local_mask;
 
   // was_suspended is true meaning that this transaction was suspended and then
@@ -574,7 +580,11 @@ bool Transaction::RunInShard(EngineShard* shard, bool allow_q_removal) {
 
   /*************************************************************************/
 
-  RunCallback(shard);
+  // Skip the callback if the owning connection has already closed — saves wasted work
+  // and avoids sending replies to dead sockets. Cleanup (lock release, txq removal) still runs.
+  if (!is_cancelled) {
+    RunCallback(shard);
+  }
 
   /*************************************************************************/
   // at least the coordinator thread owns the reference.
@@ -824,7 +834,13 @@ void Transaction::UnlockMulti(bool block) {
       continue;
     occupied_shards++;
   }
-  run_barrier_.Start(occupied_shards);
+  // Only use run_barrier_ when the caller will block-wait for unlock to complete.
+  // When block=false (the common case) nobody waits, so the Start/Dec dance is pointless.
+  // More importantly, leaving run_barrier_ untouched preserves the cancel flag that
+  // Execute()'s cancel path set — allowing RunInShard / FinishHop to detect cancellation
+  // via IsCompleted() without a separate cancelled_ flag.
+  if (block)
+    run_barrier_.Start(occupied_shards);
   use_count_.fetch_add(occupied_shards, std::memory_order_relaxed);
 
   // Dispatch callbacks to unlock on shards
@@ -832,9 +848,10 @@ void Transaction::UnlockMulti(bool block) {
     if (!is_active(sid))
       continue;
 
-    shard_set->Add(sid, [this, fps = std::move(sharded_keys[sid])] {
+    shard_set->Add(sid, [this, fps = std::move(sharded_keys[sid]), block] {
       this->UnlockMultiShardCb(fps, EngineShard::tlocal());
-      run_barrier_.Dec();
+      if (block)
+        run_barrier_.Dec();
       intrusive_ptr_release(this);
     });
   }
@@ -922,7 +939,32 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
   }
 
   DispatchHop();
-  run_barrier_.Wait();
+  if (!run_barrier_.Wait()) {
+    // run_barrier_ was cancelled — the owning connection is closing.
+    // For atomic-multi, UnlockMulti() called by the Exec handler will clean up the shard side.
+    // For non-multi, dispatch CancelShardCb to remove from the txq and release key locks now,
+    // so we don't leave orphaned intent locks blocking unrelated transactions.
+    cb_ptr_.reset();
+    if (!IsAtomicMulti()) {
+      auto is_active = [this](uint32_t i) { return IsActive(i); };
+      atomic_bool need_poll{false};
+      shard_set->RunBriefInParallel(
+          [&need_poll, this](EngineShard* shard) {
+            if (CancelShardCb(shard))
+              need_poll.store(true, memory_order_relaxed);
+          },
+          is_active);
+      if (need_poll.load(memory_order_relaxed)) {
+        IterateActiveShards([](const auto& sd, auto i) {
+          shard_set->Add(i,
+                         [] { EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr); });
+        });
+      }
+    }
+    // Balance the run_barrier_.Start() from DispatchHop so future Start() calls are valid.
+    run_barrier_.Dec();
+    return;
+  }
   cb_ptr_.reset();
 
   if (coordinator_state_ & COORD_CONCLUDING)
@@ -986,6 +1028,10 @@ void Transaction::DispatchHop() {
 
 void Transaction::FinishHop() {
   boost::intrusive_ptr<Transaction> guard(this);  // Keep alive until Dec() fully finishes
+  // IsCompleted() is true when Execute()'s cancel path already decremented the barrier,
+  // leaving kCancelFlag|0. Skip Dec() to avoid corrupting the counter.
+  if (run_barrier_.IsCompleted())
+    return;
   run_barrier_.Dec();
 }
 
@@ -1308,6 +1354,10 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
   Transaction* trans = absl::get<Transaction*>(txq->At(q_pos));
   DCHECK(trans == this) << txq->size() << ' ' << sd.pq_pos << ' ' << trans->DebugId();
   txq->Remove(q_pos);
+
+  // Disarm so that any pending poll_cb lambda that calls PollExecution("exec_cb", this)
+  // sees trans_mask == 0 and returns early without re-executing.
+  sd.is_armed.store(false, memory_order_release);
 
   if (IsGlobal()) {
     shard->shard_lock()->Release(LockMode());
