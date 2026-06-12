@@ -3120,56 +3120,70 @@ void ServerFamily::Save(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-// Folds a per-proactor partial Metrics (filled lock-free in the fan-out callback)
-// into the aggregate `dest`. Mirrors the combine semantics used while collecting:
-// almost everything sums, tx_queue_len takes the max and oldest_pending_send_ts the min.
-static void MergeShardMetrics(const Metrics& src, Metrics* dest) {
+void Metrics::Merge(const Metrics& src) {
+  // Sum of all member sizes plus alignment padding (4 bytes after blocked_tasks).
+  // Expressed via sizeof so it adapts to different STL/Abseil implementations.
+  // If this fires, a field was added/removed — update Merge() and InitFromThread().
+  static_assert(
+      sizeof(Metrics) == sizeof(SliceEvents) + sizeof(std::vector<DbStats>) +
+                             sizeof(EngineShard::Stats) + sizeof(facade::FacadeStats) +
+                             sizeof(TieredStats) + sizeof(SearchStats) +
+                             sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
+                             sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
+                             sizeof(std::map<std::string, std::pair<uint64_t, uint64_t>>) +
+                             sizeof(absl::flat_hash_map<std::string, uint64_t>) +
+                             sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
+                             sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
+                             sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
+                             176,  // scalar fields (19 fields) + 4-byte alignment padding
+      "Metrics size changed — update Merge() and InitFromThread()");
+
   // Per-db stats / events / small_string_bytes are merged element-wise.
-  if (src.db_stats.size() > dest->db_stats.size())
-    dest->db_stats.resize(src.db_stats.size());
+  if (src.db_stats.size() > db_stats.size())
+    db_stats.resize(src.db_stats.size());
   for (size_t i = 0; i < src.db_stats.size(); ++i)
-    dest->db_stats[i] += src.db_stats[i];
-  dest->events += src.events;
-  dest->small_string_bytes += src.small_string_bytes;
+    db_stats[i] += src.db_stats[i];
+  events += src.events;
+  small_string_bytes += src.small_string_bytes;
 
   // Aggregate sub-structs.
-  dest->shard_stats += src.shard_stats;
-  dest->facade_stats += src.facade_stats;
-  dest->tiered_stats += src.tiered_stats;
-  dest->search_stats += src.search_stats;
-  dest->coordinator_stats.Add(src.coordinator_stats);
-  dest->qlist_stats += src.qlist_stats;
-  dest->replication_stats += src.replication_stats;
-  dest->lua_stats += src.lua_stats;
-  dest->interned_string_stats += src.interned_string_stats;
+  shard_stats += src.shard_stats;
+  facade_stats += src.facade_stats;
+  tiered_stats += src.tiered_stats;
+  search_stats += src.search_stats;
+  coordinator_stats.Add(src.coordinator_stats);
+  qlist_stats += src.qlist_stats;
+  replication_stats += src.replication_stats;
+  lua_stats += src.lua_stats;
+  interned_string_stats += src.interned_string_stats;
 
   // Scalar sums.
-  dest->qps += src.qps;
-  dest->heap_used_bytes += src.heap_used_bytes;
-  dest->serialization_bytes += src.serialization_bytes;
-  dest->traverse_ttl_per_sec += src.traverse_ttl_per_sec;
-  dest->delete_ttl_per_sec += src.delete_ttl_per_sec;
-  dest->fiber_switch_cnt += src.fiber_switch_cnt;
-  dest->fiber_switch_delay_usec += src.fiber_switch_delay_usec;
-  dest->fiber_longrun_cnt += src.fiber_longrun_cnt;
-  dest->fiber_longrun_usec += src.fiber_longrun_usec;
-  dest->worker_fiber_stack_size += src.worker_fiber_stack_size;
-  dest->worker_fiber_count += src.worker_fiber_count;
-  dest->blocked_tasks += src.blocked_tasks;
-  dest->tls_bytes += src.tls_bytes;
-  dest->refused_conn_max_clients_reached_count += src.refused_conn_max_clients_reached_count;
-  dest->lsn_buffer_size += src.lsn_buffer_size;
-  dest->lsn_buffer_bytes += src.lsn_buffer_bytes;
+  qps += src.qps;
+  heap_used_bytes += src.heap_used_bytes;
+  serialization_bytes += src.serialization_bytes;
+  traverse_ttl_per_sec += src.traverse_ttl_per_sec;
+  delete_ttl_per_sec += src.delete_ttl_per_sec;
+  fiber_switch_cnt += src.fiber_switch_cnt;
+  fiber_switch_delay_usec += src.fiber_switch_delay_usec;
+  fiber_longrun_cnt += src.fiber_longrun_cnt;
+  fiber_longrun_usec += src.fiber_longrun_usec;
+  worker_fiber_stack_size += src.worker_fiber_stack_size;
+  worker_fiber_count += src.worker_fiber_count;
+  blocked_tasks += src.blocked_tasks;
+  tls_bytes += src.tls_bytes;
+  refused_conn_max_clients_reached_count += src.refused_conn_max_clients_reached_count;
+  lsn_buffer_size += src.lsn_buffer_size;
+  lsn_buffer_bytes += src.lsn_buffer_bytes;
 
   // Non-sum reductions.
-  dest->tx_queue_len = std::max(dest->tx_queue_len, src.tx_queue_len);
-  dest->oldest_pending_send_ts = std::min(dest->oldest_pending_send_ts, src.oldest_pending_send_ts);
+  tx_queue_len = std::max(tx_queue_len, src.tx_queue_len);
+  oldest_pending_send_ts = std::min(oldest_pending_send_ts, src.oldest_pending_send_ts);
 
   // Map merges.
   for (const auto& [k, v] : src.connections_lib_name_ver_map)
-    dest->connections_lib_name_ver_map[k] += v;
+    connections_lib_name_ver_map[k] += v;
   for (const auto& [name, stat] : src.cmd_stats_map) {
-    auto& [calls, sum] = dest->cmd_stats_map[name];
+    auto& [calls, sum] = cmd_stats_map[name];
     calls += stat.first;
     sum += stat.second;
   }
@@ -3193,6 +3207,95 @@ void ServerFamily::ResetStat(Namespace* ns) {
       });
 }
 
+void Metrics::InitFromThread(Namespace* ns, CommandRegistry* registry, unsigned proactor_index,
+                             bool collect_replication_memory, DflyCmd* dfly_cmd) {
+  static_assert(
+      sizeof(Metrics) == sizeof(SliceEvents) + sizeof(std::vector<DbStats>) +
+                             sizeof(EngineShard::Stats) + sizeof(facade::FacadeStats) +
+                             sizeof(TieredStats) + sizeof(SearchStats) +
+                             sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
+                             sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
+                             sizeof(std::map<std::string, std::pair<uint64_t, uint64_t>>) +
+                             sizeof(absl::flat_hash_map<std::string, uint64_t>) +
+                             sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
+                             sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
+                             sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
+                             176,  // scalar fields (19 fields) + 4-byte alignment padding
+      "Metrics size changed — update Merge() and InitFromThread()");
+  EngineShard* shard = EngineShard::tlocal();
+  ServerState* ss = ServerState::tlocal();
+
+  fiber_switch_cnt = fb2::FiberSwitchEpoch();
+  fiber_switch_delay_usec = fb2::FiberSwitchDelayUsec();
+  fiber_longrun_cnt = fb2::FiberLongRunCnt();
+  fiber_longrun_usec = fb2::FiberLongRunSumUsec();
+  worker_fiber_stack_size = fb2::WorkerFibersStackSize();
+  worker_fiber_count = fb2::WorkerFibersCount();
+  blocked_tasks = TaskQueue::blocked_submitters();
+
+  coordinator_stats.Add(ss->stats);
+
+  qps = uint64_t(ss->MovingSum6());
+  facade_stats = *tl_facade_stats;
+  serialization_bytes = SliceSnapshot::GetThreadLocalMemoryUsage();
+
+  if (shard) {
+    heap_used_bytes = shard->UsedMemory();
+    const DbSlice::Stats slice_stats = ns->GetDbSlice(shard->shard_id()).GetStats();
+    db_stats = slice_stats.db_stats;
+    events = slice_stats.events;
+    small_string_bytes = slice_stats.small_string_bytes;
+    shard_stats = shard->stats();
+
+    if (shard->tiered_storage()) {
+      tiered_stats = shard->tiered_storage()->GetStats();
+    }
+
+    if (shard->search_indices()) {
+      search_stats = shard->search_indices()->GetStats();
+    }
+
+    qlist_stats = QList::stats;
+
+    traverse_ttl_per_sec = shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
+    delete_ttl_per_sec = shard->GetMovingSum6(EngineShard::TTL_DELETE);
+    tx_queue_len = shard->txq()->size();
+
+    if (shard->journal()) {
+      lsn_buffer_size = journal::LsnBufferSize();
+      lsn_buffer_bytes = journal::LsnBufferBytes();
+    }
+
+    if (collect_replication_memory)
+      replication_stats = dfly_cmd->GetReplicationMemoryStats(shard);
+  }
+
+  tls_bytes = Listener::TLSUsedMemoryThreadLocal();
+  refused_conn_max_clients_reached_count = Listener::RefusedConnectionMaxClientsCount();
+
+  lua_stats = InterpreterManager::tl_stats();
+
+  connections_lib_name_ver_map = facade::Connection::GetLibStatsTL();
+
+  auto& send_list = facade::SinkReplyBuilder::pending_list;
+  if (!send_list.empty()) {
+    DCHECK(
+        std::is_sorted(send_list.begin(), send_list.end(), [](const auto& left, const auto& right) {
+          return left.timestamp_cycles < right.timestamp_cycles;
+        }));
+    oldest_pending_send_ts = send_list.front().timestamp_cycles;
+  }
+
+  auto cmd_stat_cb = [this](string_view name, const CmdCallStats& stat) {
+    auto& [calls, sum] = cmd_stats_map[absl::AsciiStrToLower(name)];
+    calls += stat.first;
+    sum += stat.second;
+  };
+  registry->MergeCallStats(proactor_index, cmd_stat_cb);
+
+  interned_string_stats = GetInternedStringStats();
+}
+
 Metrics ServerFamily::GetMetrics(Namespace* ns, bool collect_replication_memory) const {
   Metrics result;
 
@@ -3203,85 +3306,10 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, bool collect_replication_memory)
   // per-thread partials are folded into `result` on this thread afterwards.
   std::vector<Metrics> partials(service_.proactor_pool().size());
 
-  auto cb = [&](unsigned index, ProactorBase* pb) {
-    EngineShard* shard = EngineShard::tlocal();
-    ServerState* ss = ServerState::tlocal();
-    // Each proactor writes its own freshly-zeroed slot exactly once, so plain assignment
-    // is enough — cross-thread accumulation happens later in MergeShardMetrics. Named
-    // `result` (shadowing the outer aggregate) to keep this body close to the original.
-    Metrics& result = partials[index];
-
-    auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
-      auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];
-      calls += stat.first;
-      sum += stat.second;
-    };
-
-    result.fiber_switch_cnt = fb2::FiberSwitchEpoch();
-    result.fiber_switch_delay_usec = fb2::FiberSwitchDelayUsec();
-    result.fiber_longrun_cnt = fb2::FiberLongRunCnt();
-    result.fiber_longrun_usec = fb2::FiberLongRunSumUsec();
-    result.worker_fiber_stack_size = fb2::WorkerFibersStackSize();
-    result.worker_fiber_count = fb2::WorkerFibersCount();
-    result.blocked_tasks = TaskQueue::blocked_submitters();
-
-    result.coordinator_stats.Add(ss->stats);  // ServerState::Stats is not copy-assignable
-
-    result.qps = uint64_t(ss->MovingSum6());
-    result.facade_stats = *tl_facade_stats;
-    result.serialization_bytes = SliceSnapshot::GetThreadLocalMemoryUsage();
-
-    if (shard) {
-      result.heap_used_bytes = shard->UsedMemory();
-      const DbSlice::Stats slice_stats = ns->GetDbSlice(shard->shard_id()).GetStats();
-      result.db_stats = slice_stats.db_stats;
-      result.events = slice_stats.events;
-      result.small_string_bytes = slice_stats.small_string_bytes;
-      result.shard_stats = shard->stats();
-
-      if (shard->tiered_storage()) {
-        result.tiered_stats = shard->tiered_storage()->GetStats();
-      }
-
-      if (shard->search_indices()) {
-        result.search_stats = shard->search_indices()->GetStats();
-      }
-
-      result.qlist_stats = QList::stats;
-
-      result.traverse_ttl_per_sec = shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
-      result.delete_ttl_per_sec = shard->GetMovingSum6(EngineShard::TTL_DELETE);
-      result.tx_queue_len = shard->txq()->size();
-
-      if (shard->journal()) {
-        result.lsn_buffer_size = journal::LsnBufferSize();
-        result.lsn_buffer_bytes = journal::LsnBufferBytes();
-      }
-
-      // Fold the per-shard replication-memory collection into this fan-out
-      // instead of a dedicated RunBriefInParallel in DflyCmd.
-      if (collect_replication_memory)
-        result.replication_stats = dfly_cmd_->GetReplicationMemoryStats(shard);
-    }  // if (shard)
-
-    result.tls_bytes = Listener::TLSUsedMemoryThreadLocal();
-    result.refused_conn_max_clients_reached_count = Listener::RefusedConnectionMaxClientsCount();
-
-    result.lua_stats = InterpreterManager::tl_stats();
-
-    result.connections_lib_name_ver_map = facade::Connection::GetLibStatsTL();
-
-    auto& send_list = facade::SinkReplyBuilder::pending_list;
-    if (!send_list.empty()) {
-      DCHECK(std::is_sorted(send_list.begin(), send_list.end(),
-                            [](const auto& left, const auto& right) {
-                              return left.timestamp_cycles < right.timestamp_cycles;
-                            }));
-      result.oldest_pending_send_ts = send_list.front().timestamp_cycles;
-    }
-    service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
-    result.interned_string_stats = GetInternedStringStats();
-  };  // cb
+  auto cb = [&partials, ns, registry = service_.mutable_registry(), collect_replication_memory,
+             dfly_cmd = dfly_cmd_.get()](unsigned index, ProactorBase* pb) {
+    partials[index].InitFromThread(ns, registry, index, collect_replication_memory, dfly_cmd);
+  };
 
   // AwaitBrief (not AwaitFiberOnAll): the callback only reads thread-local/atomic state into
   // its own partials slot and never yields, so it can run directly in each IO loop, avoiding
@@ -3290,7 +3318,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, bool collect_replication_memory)
 
   // Fold per-thread partials into the aggregate result on this thread.
   for (const Metrics& partial : partials)
-    MergeShardMetrics(partial, &result);
+    result.Merge(partial);
 
 #ifdef WITH_SEARCH
   // HNSW indices live in a single global registry shared across shards, so their
