@@ -751,27 +751,76 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   migration_allowed_to_register_ = false;
 }
 
-Connection::~Connection() {
-#ifdef DFLY_USE_SSL
-  SSL_CTX_free(ssl_ctx_);
-#endif
-  UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
+void Connection::MaybeYieldWithStats(int site_idx) {
+  DCHECK(site_idx >= 0 && site_idx < 3);
 
-  // Dump IoLoopV2 fiber-level profiling stats. Skipped for connections
-  // that never ran V2 (all counters zero).
-  if (VLOG_IS_ON(1) && stats_v2_.loop_iterations > 0) {
-    const auto& s = stats_v2_;
-    const size_t rb_sends = s.rb_send_count;
-    const size_t rb_bytes = s.rb_sent_bytes;
-    const double density = rb_sends ? double(local_stats_.cmds) / double(rb_sends) : 0.0;
-    const double avg_qdepth = rb_sends ? double(s.flush_queue_depth_accum) / double(rb_sends) : 0.0;
-    const double avg_iobuf = rb_sends ? double(s.flush_io_buf_input_accum) / double(rb_sends) : 0.0;
-    const double wake_lat = s.wakeup_latency_count
-                                ? double(s.wakeup_latency_cycles) / double(s.wakeup_latency_count)
-                                : 0.0;
-    // Parse-cmds histogram: [1, 2-4, 5-9, 10-19, 20-49, 50-99, >=100]
-    const auto& h = s.parse_cmds_hist;
-    VLOG(1) << "[v2stats conn=" << id_ << "] iters=" << s.loop_iterations
+  const uint64_t run_cycles = ThisFiber::GetRunningTimeCycles();
+  stats_v2_.yield_checks[site_idx]++;
+  if (run_cycles > stats_v2_.yield_check_cycles_max) {
+    stats_v2_.yield_check_cycles_max = run_cycles;
+  }
+
+  const uint64_t run_us = base::CycleClock::ToUsec(run_cycles);
+  // Buckets: [<10, 10-50, 50-200, 200-1000, 1000-5000, >=5000] µs
+  const unsigned ck_bucket = (run_us < 10)     ? 0
+                             : (run_us < 50)   ? 1
+                             : (run_us < 200)  ? 2
+                             : (run_us < 1000) ? 3
+                             : (run_us < 5000) ? 4
+                                               : 5;
+  stats_v2_.yield_check_us_hist[ck_bucket]++;
+
+  if (run_cycles <= max_busy_read_cycles_cached) {
+    return;
+  }
+
+  stats_v2_.yield_fires[site_idx]++;
+
+  const uint64_t epoch_before = fb2::FiberSwitchEpoch();
+  const uint64_t tsc_before = base::CycleClock::Now();
+  ThisFiber::Yield();
+  const uint64_t tsc_after = base::CycleClock::Now();
+  const uint64_t epoch_after = fb2::FiberSwitchEpoch();
+
+  const uint64_t yield_us = base::CycleClock::ToUsec(tsc_after - tsc_before);
+  // Buckets: [<1, 1-10, 10-50, 50-200, 200-1000, >=1000] µs
+  const unsigned yd_bucket = (yield_us < 1)      ? 0
+                             : (yield_us < 10)   ? 1
+                             : (yield_us < 50)   ? 2
+                             : (yield_us < 200)  ? 3
+                             : (yield_us < 1000) ? 4
+                                                 : 5;
+  stats_v2_.yield_duration_us_hist[yd_bucket]++;
+
+  // Epoch delta == 2 means we did exactly one switch-out / switch-in pair
+  // (active -> dispatcher -> active) with no third fiber running in between.
+  const uint64_t epoch_delta = epoch_after - epoch_before;
+  // Buckets: [<=2, 3, 4-5, 6-20, >20]
+  const unsigned ed_bucket = (epoch_delta <= 2)    ? 0
+                             : (epoch_delta == 3)  ? 1
+                             : (epoch_delta <= 5)  ? 2
+                             : (epoch_delta <= 20) ? 3
+                                                   : 4;
+  stats_v2_.yield_epoch_delta_hist[ed_bucket]++;
+}
+
+void Connection::DumpV2StatsOnClose() const {
+  const auto& s = stats_v2_;
+  const size_t rb_sends = s.rb_send_count;
+  const size_t rb_bytes = s.rb_sent_bytes;
+  const double density = rb_sends ? double(local_stats_.cmds) / double(rb_sends) : 0.0;
+  const double avg_qdepth = rb_sends ? double(s.flush_queue_depth_accum) / double(rb_sends) : 0.0;
+  const double avg_iobuf = rb_sends ? double(s.flush_io_buf_input_accum) / double(rb_sends) : 0.0;
+  const double wake_lat = s.wakeup_latency_count
+                              ? double(s.wakeup_latency_cycles) / double(s.wakeup_latency_count)
+                              : 0.0;
+  // Parse-cmds histogram: [1, 2-4, 5-9, 10-19, 20-49, 50-99, >=100]
+  const auto& h = s.parse_cmds_hist;
+  const uint64_t yc_total = s.yield_checks[0] + s.yield_checks[1] + s.yield_checks[2];
+  const uint64_t yf_total = s.yield_fires[0] + s.yield_fires[1] + s.yield_fires[2];
+  const uint64_t max_check_us = base::CycleClock::ToUsec(s.yield_check_cycles_max);
+
+  LOG(INFO) << "[v2stats conn=" << id_ << "] iters=" << s.loop_iterations
             << " idle_awaits=" << s.idle_awaits << " bp_parks=" << s.backpressure_parks
             << " parse_calls=" << s.parse_calls_fiber << " ctrl_msgs=" << s.control_msgs_processed
             << " reads=" << s.read_pending_calls << " bytes_in=" << s.bytes_read_total
@@ -794,21 +843,47 @@ Connection::~Connection() {
             << " exec_entered_pending=" << s.executebatch_entered_with_pending << " exec_cmds_mid="
             << s.executebatch_cmds_added_mid_exec
             // Distribution histograms
-            // wake_latency_hist: [<1µs, 1-2, 2-5, 5-10, 10-50, >=50]
             << " wake_lat_hist=[<1:" << s.wake_latency_hist[0] << " 1-2:" << s.wake_latency_hist[1]
             << " 2-5:" << s.wake_latency_hist[2] << " 5-10:" << s.wake_latency_hist[3]
-            << " 10-50:" << s.wake_latency_hist[4] << " >=50:" << s.wake_latency_hist[5]
-            << "]"
-            // cmds_between_idle_hist: [0, 1, 2-4, 5-9, 10-49, >=50]
+            << " 10-50:" << s.wake_latency_hist[4] << " >=50:" << s.wake_latency_hist[5] << "]"
             << " cmds_idle_hist=[0:" << s.cmds_between_idle_hist[0]
             << " 1:" << s.cmds_between_idle_hist[1] << " 2-4:" << s.cmds_between_idle_hist[2]
             << " 5-9:" << s.cmds_between_idle_hist[3] << " 10-49:" << s.cmds_between_idle_hist[4]
-            << " >=50:" << s.cmds_between_idle_hist[5]
-            << "]"
-            // flush_qdepth_hist: [0, 1, 2-4, 5-9, 10-24, >=25]
+            << " >=50:" << s.cmds_between_idle_hist[5] << "]"
             << " flush_qdepth_hist=[0:" << s.flush_qdepth_hist[0] << " 1:" << s.flush_qdepth_hist[1]
             << " 2-4:" << s.flush_qdepth_hist[2] << " 5-9:" << s.flush_qdepth_hist[3]
-            << " 10-24:" << s.flush_qdepth_hist[4] << " >=25:" << s.flush_qdepth_hist[5] << "]";
+            << " 10-24:" << s.flush_qdepth_hist[4] << " >=25:" << s.flush_qdepth_hist[5]
+            << "]"
+            // Yield instrumentation
+            << " yield_checks=[top:" << s.yield_checks[0] << " parse:" << s.yield_checks[1]
+            << " exec:" << s.yield_checks[2] << " total:" << yc_total << "]"
+            << " yield_fires=[top:" << s.yield_fires[0] << " parse:" << s.yield_fires[1]
+            << " exec:" << s.yield_fires[2] << " total:" << yf_total << "]"
+            << " yield_check_us_hist=[<10:" << s.yield_check_us_hist[0]
+            << " 10-50:" << s.yield_check_us_hist[1] << " 50-200:" << s.yield_check_us_hist[2]
+            << " 200-1k:" << s.yield_check_us_hist[3] << " 1k-5k:" << s.yield_check_us_hist[4]
+            << " >=5k:" << s.yield_check_us_hist[5] << "]"
+            << " yield_check_max_us=" << max_check_us
+            << " yield_dur_us_hist=[<1:" << s.yield_duration_us_hist[0]
+            << " 1-10:" << s.yield_duration_us_hist[1] << " 10-50:" << s.yield_duration_us_hist[2]
+            << " 50-200:" << s.yield_duration_us_hist[3]
+            << " 200-1k:" << s.yield_duration_us_hist[4] << " >=1k:" << s.yield_duration_us_hist[5]
+            << "]"
+            << " yield_epoch_delta_hist=[<=2:" << s.yield_epoch_delta_hist[0]
+            << " 3:" << s.yield_epoch_delta_hist[1] << " 4-5:" << s.yield_epoch_delta_hist[2]
+            << " 6-20:" << s.yield_epoch_delta_hist[3] << " >20:" << s.yield_epoch_delta_hist[4]
+            << "]";
+}
+
+Connection::~Connection() {
+#ifdef DFLY_USE_SSL
+  SSL_CTX_free(ssl_ctx_);
+#endif
+  UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
+
+  // Dump V2 stats unconditionally on close (skipped for connections that never ran V2).
+  if (stats_v2_.loop_iterations > 0) {
+    DumpV2StatsOnClose();
   }
 }
 
@@ -1591,11 +1666,8 @@ auto Connection::ParseLoop() -> ParserStatus {
       stats_v2_.parse_cmds_hist[bucket]++;
     }
 
-    // Yield if we've held the thread too long across multiple inner ParseLoop iterations.
-    // In the common case (single iteration, buffer exhausted), this is a no-op.
-    // Fires only when io_buf_ had enough data for multiple consecutive batches.
-    if (ioloop_v2_ && ThisFiber::GetRunningTimeCycles() > max_busy_read_cycles_cached) {
-      ThisFiber::Yield();
+    if (ioloop_v2_) {
+      MaybeYieldWithStats(/*site_idx=*/1);
     }
   } while (commands_parsed && io_buf_.InputLen() > 0);
 
@@ -2736,12 +2808,8 @@ bool Connection::ExecuteBatch() {
       cmd = advance_head();  // advance it
     }
 
-    // Yield if we've held the thread too long during command dispatch.
-    // Each synchronous DispatchCommandSimple call can take hundreds of µs.
-    // Without this yield, 15 commands × ~500µs = ~7ms of starvation for sibling connections.
-    // With no contention (1 conn/thread), Yield() returns immediately — zero overhead.
-    if (ioloop_v2_ && ThisFiber::GetRunningTimeCycles() > max_busy_read_cycles_cached) {
-      ThisFiber::Yield();
+    if (ioloop_v2_) {
+      MaybeYieldWithStats(/*site_idx=*/2);
     }
   }
 
@@ -3182,14 +3250,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   do {
     stats_v2_.loop_iterations++;
 
-    // Yield if we've held the thread too long since the last suspension.
-    // Fires on every iteration of the outer loop — including those that `continue`
-    // back here (control-message path, migration path) without reaching the bottom.
-    // After io_event_.await() or a Yield(), GetRunningTimeCycles() resets to 0,
-    // so this is a no-op immediately after sleeping.
-    if (ThisFiber::GetRunningTimeCycles() > max_busy_read_cycles_cached) {
-      ThisFiber::Yield();
-    }
+    MaybeYieldWithStats(/*site_idx=*/0);
 
     // Check for mid-work fiber preemptions from the previous iteration.
     // Must be at loop-top so that all exit paths (including continues) are covered.
