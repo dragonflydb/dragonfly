@@ -190,7 +190,8 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t rss_mem = 0;
   };
 
-  MemoryUsageStats GetMemoryUsage(uint64_t now_ns);
+  MemoryUsageStats GetMemoryUsage(uint64_t now_usec) const;
+  bool ShouldDenyOnOOM(uint64_t now_usec);
 
   bool AllowInlineScheduling() const;
 
@@ -326,8 +327,9 @@ class ServerState {  // public struct - to allow initialization.
   absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
   uint32_t thread_index_ = 0;
 
-  uint64_t used_mem_last_update_ = 0;
-  MemoryUsageStats memory_stats_cached_;  // thread local cache of used and rss memory current
+  mutable uint64_t used_mem_last_read_usec_ = 0;
+  mutable MemoryUsageStats
+      memory_stats_cached_;  // thread local cache of used and rss memory current
 
   static __thread ServerState* state_;
 };
