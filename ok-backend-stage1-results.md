@@ -126,17 +126,22 @@ Despite this, OKB V1 still achieves 557.9k at p=100 because: (a) the engine work
 
 Tail latency: V2 p99.9 = 42 ms vs V1 = 16 ms at p=100.
 
-### E. V2 has a severe tail-latency starvation bug (Row 5 + Row 8)
+### E. V2 has a severe tail-latency problem (Row 5 + Row 8)
 
 **This is the strongest actionable signal in the dataset.**
 
-OKB V2 at p=100 with 50 connections shows p99.9 = **95 ms** while the engine work (flat_hash_map insert) takes ~50 ns. This means some connections are parked for almost 100 ms with nothing to do — a ~2,000,000× amplification of actual work time.
+OKB V2 at p=100 with 50 connections shows p99.9 = **95 ms** while the engine work (flat_hash_map insert) takes ~50 ns. This means some connections are stalled for almost 100 ms — a ~2,000,000× amplification of actual work time.
 
 DF V2 shows the same pattern: p99.9 = 42 ms vs V1's 16 ms.
 
-**Root cause hypothesis:** V2's `IoLoopV2` reads aggressively from the socket, fills `parsed_cmd_q_len_` instantly (because OKB's engine is near-zero-cost), triggers backpressure (`post_over_limit` → `io_event_.await()`), and stays parked until the waiter fires. The wake-up logic in V2's backpressure path is either too slow or too contentious under 50 concurrent connections.
+**Possible causes (not yet proven — profiling required):**
 
-**Priority 1 action:** Profile the backpressure await/wake path in `IoLoopV2` (lines ~2900-2950 of `dragonfly_connection.cc`). This likely explains most of the DF regression too.
+1. **Backpressure starvation:** V2's `IoLoopV2` reads aggressively from the socket, fills `parsed_cmd_q_len_` quickly, triggers `post_over_limit` → `io_event_.await()`, and the wake-up logic may be too slow or unfair under 50 concurrent connections.
+2. **Fiber scheduling unfairness:** With 50 connections per thread, the proactor's fiber scheduler may starve some fibers while others monopolise the CPU — especially if V2's single-fiber-per-connection model doesn't yield often enough during batch execution.
+3. **Reply flushing delays:** V2 defers flushing until idle-await. If the fiber never reaches idle (always has more commands to parse), replies pile up and the client blocks waiting, creating a feedback loop.
+4. **Lock contention on shared structures:** The global `QueueBackpressure` notification (`NotifyPipelineWaiters`) wakes all connections on a thread simultaneously — thundering herd under high concurrency.
+
+**Priority 1 action:** Profile which of these causes dominates. Start with tracing the time connections spend parked in `io_event_.await()` vs actively executing.
 
 ### F. Multishot HURTS OKB (Row 5 V2 vs Row 6)
 
@@ -197,7 +202,7 @@ OKB is built on **helio** — Dragonfly's I/O and fiber scheduling library. This
 
 3. **The DF production regression is real: 16–21%** (Insight D) plus much worse tail latency (42 ms vs 16 ms p99.9).
 
-4. **V2 has a severe backpressure starvation bug** (Insight E): p99.9 = 95 ms on OKB, 42 ms on DF. This is the #1 profiling target.
+4. **V2 has a severe tail-latency problem** (Insight E): p99.9 = 95 ms on OKB, 42 ms on DF. Root cause not yet proven — could be backpressure starvation, fiber scheduling unfairness, flush timing, or contention. Profiling is the #1 next step.
 
 5. **Multishot's sign depends on engine weight** (Insight F/G): hurts OKB (−22%), helps DF (+14%).
 
@@ -207,12 +212,42 @@ OKB is built on **helio** — Dragonfly's I/O and fiber scheduling library. This
 
 ---
 
+## Finding: Latency Distribution at pipeline=100 (OKB V2, 4t, multi-conn, SET 2048B)
+
+Reproduced on 2026-06-12 with `memtier_benchmark -s 172.31.30.209 -p 6379 -t 2 -c 25 --pipeline=100 --ratio=1:0 -d 2048 --key-pattern=R:R --key-prefix=bench --test-time=15`:
+
+- **593k ops/s**, AVG latency **8.4ms**, p50=6.9ms, p99=25.3ms, p99.9=213ms
+
+Key percentiles from the full histogram:
+
+| Percentile | Latency (ms) | Observation |
+|---:|---:|---|
+| 50% | 6.9 | Median per-command — dominated by position-in-batch |
+| 90% | 14.5 | Still normal: last ~10 commands in a typical batch |
+| 99% | 25.3 | 1% of commands > 25ms — moderately slow batches |
+| 99.86% | 52.5 | End of the "normal" distribution |
+| 99.87% | 205.8 | **JUMP** — bimodal: separate failure mode begins |
+| 99.95% | 430-630 | Severe stalls (~0.05% of commands) |
+| 100% | 835 | Worst case: single command saw 835ms latency |
+
+**Key insight**: The distribution is bimodal. Commands up to p99.86 follow a smooth curve (normal V2 processing). Above that, latencies jump 4× to 200ms+ — a completely different failure mode affecting <0.15% of batches. These are rare catastrophic stalls, not accumulation of per-command overhead.
+
+**Investigation approach**: Added timing instrumentation to identify the stall source:
+1. `ParseLoop` batch timing (parse→execute→reply cycle) — catches slow batches
+2. `IoLoopV2` idle-await timing — catches fiber sleeping too long between batches
+3. `IoLoopV2` backpressure-await timing — catches memory-limit parking stalls
+
+---
+
 ## Recommended Next Steps
 
 | Priority | Action | Driven by |
 |---:|--------|-----------|
-| 1 | Profile V2 backpressure await/wake path (`IoLoopV2` post_over_limit) | Insight E: 95ms / 42ms p99.9 starvation |
-| 2 | Prototype squashing in OKB V1 `DispatchManyCommands` to get the true V1 baseline | Insight C: current V1 is crippled without it |
+| 1 | Run instrumented build to identify which mechanism causes the 200ms+ bimodal stalls (batch processing? idle-await? backpressure?) | Finding above |
+| 2 | Profile what causes the 95ms / 42ms p99.9 tail latency in V2 (backpressure? scheduling? flush timing? contention?) | Insight E |
+| 3 | Prototype squashing in OKB V1 `DispatchManyCommands` to get the true V1 baseline | Insight C: current V1 is crippled without it |
+
+**Note**: Roman is already implementing V2 squashing on `origin/FixV3` branch (`feat: add vectorized pipeline squashing for V2 dispatch`). Priority 3 may be superseded by his work.
 
 ---
 
