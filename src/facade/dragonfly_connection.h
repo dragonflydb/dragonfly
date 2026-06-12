@@ -477,6 +477,18 @@ class Connection : public util::Connection {
 
   void DestroyParsedQueue();
 
+  // Yield-site instrumentation helper.
+  // site_idx: 0=top-of-IoLoopV2, 1=end-of-ParseLoop, 2=inside-ExecuteBatch.
+  // Records check counter / running-time histogram unconditionally;
+  // if the threshold is crossed, calls ThisFiber::Yield() and additionally records
+  // yield duration and FiberSwitchEpoch delta around the call.
+  void MaybeYieldWithStats(int site_idx);
+
+  // Emits an INFO-level dump of stats_v2_ (event counters + histograms).
+  // Called from the destructor for every V2 connection so we capture per-connection
+  // distributions without requiring SIGUSR1 or admin commands.
+  void DumpV2StatsOnClose() const;
+
   // Dispatch Queue - Queue for the Control Path.
   // Handles asynchronous administrative tasks, events, and high-priority control
   // messages (e.g., PubSub, Monitor, Migration requests, Checkpoints) processed
@@ -624,6 +636,22 @@ class Connection : public util::Connection {
     uint64_t flush_qdepth_hist[6] = {};       // parsed_cmd_q_len_ at each real flush
     // Running counter reset on each idle-await, used to populate cmds_between_idle_hist.
     uint64_t cmds_since_last_idle = 0;
+    // --- Yield-site instrumentation (proves whether Yield() actually descheduled) ---
+    // Index legend: 0=top-of-IoLoopV2, 1=end-of-ParseLoop iteration, 2=inside-ExecuteBatch.
+    uint64_t yield_checks[3] = {};  // times each site was visited
+    uint64_t yield_fires[3] = {};   // times each site's `cycles > threshold` was true
+    // Distribution of GetRunningTimeCycles() value (in µs) at each visit — across all sites.
+    // Buckets: [<10, 10-50, 50-200, 200-1000, 1000-5000, >=5000] µs.
+    uint64_t yield_check_us_hist[6] = {};
+    // Distribution of cycles spent INSIDE Yield() in µs — only when Yield was actually called.
+    // Buckets: [<1, 1-10, 10-50, 50-200, 200-1000, >=1000] µs.
+    // <1µs == Yield() returned immediately ⇒ nobody else ran.
+    uint64_t yield_duration_us_hist[6] = {};
+    // Distribution of FiberSwitchEpoch delta around Yield() — only when Yield was called.
+    // Buckets: [<=2, 3, 4-5, 6-20, >20]. Delta == 2 means A→dispatcher→A (no other fiber ran).
+    uint64_t yield_epoch_delta_hist[5] = {};
+    // Max GetRunningTimeCycles() value ever observed at any check site (in cycles).
+    uint64_t yield_check_cycles_max = 0;
   };
   V2LoopStats stats_v2_;
   // TSC captured in the RegisterOnRecv callback right before io_event_.notify().
