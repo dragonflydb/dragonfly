@@ -566,8 +566,8 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-unsigned RestoreStreamer::SerializeBucketLocked(DbIndex /* unused */,
-                                                PrimeTable::bucket_iterator it, bool on_update) {
+unsigned RestoreStreamer::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                                bool on_update) {
   auto& shard_stats = EngineShard::tlocal()->stats();
 
   unsigned written = 0;
@@ -580,8 +580,7 @@ unsigned RestoreStreamer::SerializeBucketLocked(DbIndex /* unused */,
     string_view key = it->first.GetSlice(&key_buffer);
     if (ShouldWrite(key)) {
       ++shard_stats.total_migrated_keys;
-      uint64_t expire = it->first.GetExpireTime();
-      WriteEntry(it.bucket_address(), key, it->first, pv, expire);
+      SerializerBase::SerializeEntry(it.bucket_address(), db_index, it->first, pv);
       ++written;
     } else {
       stats_.keys_skipped++;
@@ -592,28 +591,13 @@ unsigned RestoreStreamer::SerializeBucketLocked(DbIndex /* unused */,
   return written;
 }
 
-void RestoreStreamer::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
-  std::lock_guard lk{stream_mu_};
-  cmd_serializer_->SerializeEntry(tde.key.ToString(), tde.key, pv, tde.expire);
-}
-
 // TODO: Update those
 // stats_.throttle_on_db_update += throttle_count_ - throttle_start;
 // stats_.throttle_usec_on_db_update += total_throttle_wait_usec_ - throttle_usec_start;
 
-void RestoreStreamer::WriteEntry(BucketIdentity bucket, string_view key, const PrimeKey& pk,
-                                 const PrimeValue& pv, uint64_t expire_ms) {
-  if (pv.IsExternal()) {
-    if (pv.IsCool()) {
-      WriteEntry(bucket, key, pk, pv.GetCool().record->value, expire_ms);
-    } else {
-      uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(0, pk) : 0;
-      EnqueueOffloaded(bucket, 0, PrimeKey{key}, pv, expire_ms, mc_flags);
-    }
-  } else {
-    std::lock_guard lk{stream_mu_};
-    stats_.commands += cmd_serializer_->SerializeEntry(key, pk, pv, expire_ms);
-  }
+void RestoreStreamer::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk,
+                                           const PrimeValue& pv, time_t expire, uint32_t mc_flags) {
+  stats_.commands += cmd_serializer_->SerializeEntry(pk.ToString(), pk, pv, expire);
 }
 
 }  // namespace dfly

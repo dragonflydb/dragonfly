@@ -303,7 +303,7 @@ bool ParseMergeArgs(CmdArgList args, RedisReplyBuilder* rb, CmsMergeArgs* out) {
     return false;
   }
 
-  if (parser.Tail().size() < num_keys) {
+  if (!parser.HasAtLeast(num_keys)) {
     rb->SendError(kSyntaxErr);
     return false;
   }

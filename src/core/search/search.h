@@ -155,6 +155,10 @@ class FieldIndices {
 
   const Synonyms* GetSynonyms() const;
 
+  // True if `term` (case-folded) is a stopword for this index. Mirrors the index-time stopword
+  // check so query terms that are stopwords can be dropped instead of matching nothing.
+  bool IsStopWord(std::string_view term) const;
+
   SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
 
   void FinalizeInitialization();
@@ -196,14 +200,14 @@ struct AlgorithmProfile {
 struct SearchResult {
   size_t total;  // how many documents were matched in total
 
-  // The ids of the matched documents
+  // The ids of the matched documents, in result order
   std::vector<DocId> ids;
 
-  // Contains final scores if an aggregation was present
-  std::vector<std::pair<DocId, float>> knn_scores;
+  // Vector distances keyed by DocId (order is carried by `ids`). Populated for KNN/VECTOR_RANGE.
+  absl::flat_hash_map<DocId, float> knn_scores;
 
-  // Text relevance scores (DocId -> score). Populated when a scorer is active.
-  std::vector<std::pair<DocId, float>> text_scores;
+  // Text relevance scores keyed by DocId. Populated when a scorer is active.
+  absl::flat_hash_map<DocId, float> text_scores;
 
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;
@@ -246,6 +250,18 @@ class SearchAlgorithm {
   std::unique_ptr<AstNode> PopKnnNode();
 
   const AstVectorRangeNode* GetVectorRangeNode() const;
+
+  // All VECTOR_RANGE leaves in the query tree, in DFS order.
+  std::vector<const AstVectorRangeNode*> CollectVectorRangeNodes() const;
+
+  bool IsBareVectorRange() const;
+
+  // True when the query is `AND[VECTOR_RANGE, filters...]`.
+  bool IsAndedVectorRange() const;
+
+  // Detaches the range from the top-level AND (replacing it with match-all) and returns it,
+  // leaving query_ as the runnable pre-filter. Requires IsAndedVectorRange().
+  std::unique_ptr<AstNode> ExtractVectorRangeAsPrefilter();
 
   void EnableProfiling();
 

@@ -14,6 +14,7 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -975,11 +976,27 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
 const char kInvalidBitfieldTypeErr[] =
     "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 is.";
 
-nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser) {
+const char kBitOffsetOutOfRange[] = "bit offset is not an integer or out of range";
+
+// A write grows the string up to the last touched byte, so it must stay within
+// kMaxStrLen (the same cap SETRANGE enforces). Since kMaxStrLen < 2^29, a passing
+// offset also fits the uint32 the bit-index helpers use; the short-circuit keeps
+// the addition from overflowing.
+bool IsBitWriteInRange(uint64_t bit_offset, uint64_t bit_size) {
+  return bit_offset < uint64_t{kMaxStrLen} * 8 && (bit_offset + bit_size - 1) / 8 < kMaxStrLen;
+}
+
+// A read never grows the string and returns 0 past its end, so only guard against
+// offsets that wouldn't fit the uint32 bit-index helpers (which would truncate).
+bool IsBitReadInRange(uint64_t bit_offset) {
+  return bit_offset <= std::numeric_limits<uint32_t>::max();
+}
+
+nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser, bool is_write) {
   CommonAttributes parsed;
   using nonstd::make_unexpected;
 
-  auto [encoding, offset_str] = parser->Next<string_view, string_view>();
+  auto encoding = parser->Next<string_view>();
 
   if (encoding.empty()) {
     return make_unexpected(kSyntaxErr);
@@ -1016,15 +1033,21 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
   }
 
   bool is_proxy = false;
-  if (absl::StartsWith(offset_str, "#")) {
-    offset_str = offset_str.substr(1);
-    is_proxy = true;
-  }
-  if (!absl::SimpleAtoi(offset_str, &parsed.offset)) {
+  parsed.offset = parser->NextWithPrefix<size_t>("#", &is_proxy);
+  if (parser->HasError()) {
     return make_unexpected(kSyntaxErr);
   }
   if (is_proxy) {
+    // scaling the field index can't exceed the offsets the bit-index helpers handle
+    if (parsed.offset > std::numeric_limits<uint32_t>::max() / parsed.encoding_bit_size) {
+      return make_unexpected(kBitOffsetOutOfRange);
+    }
     parsed.offset = parsed.offset * parsed.encoding_bit_size;
+  }
+  const bool in_range = is_write ? IsBitWriteInRange(parsed.offset, parsed.encoding_bit_size)
+                                 : IsBitReadInRange(parsed.offset);
+  if (!in_range) {
+    return make_unexpected(kBitOffsetOutOfRange);
   }
   return parsed;
 }
@@ -1058,7 +1081,9 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
       return make_unexpected(kSyntaxErr);
     }
 
-    auto maybe_attr = ParseCommonAttr(&parser);
+    // GET only reads; SET/INCRBY grow the value and need the stricter write bound.
+    const bool is_write = !read_only && cmd != Cmds::GET_OPT;
+    auto maybe_attr = ParseCommonAttr(&parser, is_write);
     if (!maybe_attr.has_value()) {
       parser.TakeError();
       return make_unexpected(std::move(maybe_attr.error()));
@@ -1254,6 +1279,10 @@ void SetBit(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(err.MakeReply());
   }
 
+  if (!IsBitWriteInRange(offset, 1)) {
+    return cmd_cntx->SendError(kBitOffsetOutOfRange);
+  }
+
   auto cb = [&, &key = key, &offset = offset, &value = value](Transaction* t, EngineShard* shard) {
     return BitNewValue(t->GetOpArgs(shard), key, offset, value != 0);
   };
@@ -1405,9 +1434,10 @@ void RegisterBitopsFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::BITMAP);
   *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1}.SetHandler(&BitPos)
             << CI{"BITCOUNT", CO::READONLY, -2, 1, 1}.SetHandler(&BitCount)
-            << CI{"BITFIELD", CO::JOURNALED, -2, 1, 1}.SetHandler(&BitField)
+            << CI{"BITFIELD", CO::JOURNALED | CO::DENYOOM, -2, 1, 1}.SetHandler(&BitField)
             << CI{"BITFIELD_RO", CO::FAST | CO::READONLY, -2, 1, 1}.SetHandler(&BitFieldRo)
-            << CI{"BITOP", CO::JOURNALED | CO::NO_AUTOJOURNAL, -4, 2, -1}.SetHandler(&BitOp)
+            << CI{"BITOP", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::DENYOOM, -4, 2, -1}.SetHandler(
+                   &BitOp)
             << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1}.SetHandler(&GetBit)
             << CI{"SETBIT", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetHandler(&SetBit);
 }

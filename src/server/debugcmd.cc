@@ -99,9 +99,10 @@ std::string GenerateValue(size_t val_size, bool random_value, absl::InsecureBitG
   }
 }
 
-tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
-    string_view type, std::string key, size_t val_size, bool random_value, uint32_t elements,
-    const CommandRegistry& registry, absl::InsecureBitGen* gen) {
+const CommandId* GeneratePopulateCommand(string_view type, std::string key, size_t val_size,
+                                         bool random_value, uint32_t elements,
+                                         const CommandRegistry& registry, absl::InsecureBitGen* gen,
+                                         cmn::BackedArguments* out) {
   absl::InlinedVector<string, 5> args;
   args.push_back(std::move(key));
 
@@ -151,7 +152,8 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
     }
   }
 
-  return {cid, args};
+  out->Assign(args.begin(), args.end(), args.size());
+  return cid;
 }
 
 struct ObjHist {
@@ -688,8 +690,10 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    per second.",
         "SEGMENTS",
         "    Prints segment info for the current database.",
-        "COMPACT-TABLE threshold",
-        "    Attempts to merge underutilized segments in dash table",
+        "COMPACT-TABLE [threshold]",
+        "    Merge underutilized buddy-segment pairs in the dash table to reclaim memory.",
+        "    <threshold> is the maximum combined fill ratio (0, 1] below which two buddy",
+        "    segments are merged; defaults to 0.25. Returns the number of segments merged.",
         "UNIQ-STRS",
         "    Prints per-object unique string stats and estimated dedup savings across shards.",
         "HELP",
@@ -1818,11 +1822,25 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
   boost::intrusive_ptr<Transaction> stub_tx =
       new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
 
-  absl::InlinedVector<string_view, 5> args_view;
+  cmn::BackedArguments backed_args;
+  CmdArgVec arg_vec;
   facade::CapturingReplyBuilder crb;
   absl::InsecureBitGen gen;
   CommandContext cmd_cntx{&crb, cntx_};
   cmd_cntx.SetupTx(exec_cid, stub_tx.get());
+
+  auto invoke = [&](const CommandId* cid) {
+    arg_vec.clear();
+    for (auto sv : backed_args.view())
+      arg_vec.push_back(sv);
+    auto args_span = absl::MakeSpan(arg_vec);
+    stub_tx->MultiSwitchCmd(cid);
+    crb.SetReplyMode(ReplyMode::NONE);
+    stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args_span);
+    cmd_cntx.UpdateCid(cid);
+    cmd_cntx.SetTailArgs(facade::ParsedArgs{backed_args});
+    sf_.service().InvokeCmd(args_span, &cmd_cntx);
+  };
 
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = StrCat(options.prefix, ":", batch.index[i]);
@@ -1839,24 +1857,14 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
         populate_elements -= (populate_elements % 4);
       }
       elements_left -= populate_elements;
-      auto [cid, args] = GeneratePopulateCommand(options.type, key, options.val_size,
-                                                 options.populate_random_values, populate_elements,
-                                                 *sf_.service().mutable_registry(), &gen);
+      auto* cid = GeneratePopulateCommand(options.type, key, options.val_size,
+                                          options.populate_random_values, populate_elements,
+                                          *sf_.service().mutable_registry(), &gen, &backed_args);
       if (!cid) {
         LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
         break;
       }
-
-      args_view.clear();
-      for (auto& arg : args) {
-        args_view.push_back(arg);
-      }
-      auto args_span = absl::MakeSpan(args_view);
-      stub_tx->MultiSwitchCmd(cid);
-      crb.SetReplyMode(ReplyMode::NONE);
-      stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args_span);
-      cmd_cntx.UpdateCid(cid);
-      sf_.service().InvokeCmd(args_span, &cmd_cntx);
+      invoke(cid);
     }
 
     if (options.expire_ttl_range.has_value()) {
@@ -1864,20 +1872,11 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       uint32_t end = options.expire_ttl_range->second;
       uint32_t expire_ttl = rand() % (end - start) + start;
       VLOG(1) << "set key " << key << " expire ttl as " << expire_ttl;
-      auto cid = sf_.service().mutable_registry()->Find("EXPIRE");
-      absl::InlinedVector<string, 5> args;
-      args.push_back(std::move(key));
-      args.push_back(to_string(expire_ttl));
-      args_view.clear();
-      for (auto& arg : args) {
-        args_view.push_back(arg);
-      }
-      auto args_span = absl::MakeSpan(args_view);
-      crb.SetReplyMode(ReplyMode::NONE);
-      stub_tx->MultiSwitchCmd(cid);
-      stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args_span);
-      cmd_cntx.UpdateCid(cid);
-      sf_.service().InvokeCmd(args_span, &cmd_cntx);
+      auto* cid = sf_.service().mutable_registry()->Find("EXPIRE");
+      auto ttl_str = to_string(expire_ttl);
+      string_view expire_args[] = {key, ttl_str};
+      backed_args.Assign(std::begin(expire_args), std::end(expire_args), 2);
+      invoke(cid);
     }
   }
 

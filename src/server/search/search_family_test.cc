@@ -1133,6 +1133,35 @@ TEST_F(SearchFamilyTest, TestStopWords) {
   EXPECT_THAT(Run({"ft.search", "i1", "whale"}), AreDocIds("d:3"));
 }
 
+// A default stopword (the, and, or, ...) appearing in a query must be dropped rather than kept
+// as a required term, otherwise the implicit-AND query silently returns no results. This unblocks
+// query builders that join clauses with the literal word " AND " (relying on it being a stopword).
+TEST_F(SearchFamilyTest, StopWordsInQueryAreDropped) {
+  Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT",
+       "user_id", "TAG"});
+
+  Run({"hset", "d:1", "content", "python", "user_id", "u1"});
+  Run({"hset", "d:2", "content", "rust", "user_id", "u2"});
+
+  // Trailing default stopword must be dropped (issue #7556 reproduction).
+  EXPECT_THAT(Run({"ft.search", "idx", "@content:(python) and"}), AreDocIds("d:1"));
+
+  // Case-insensitive: an uppercased stopword is recognized too.
+  EXPECT_THAT(Run({"ft.search", "idx", "@content:(python) AND"}), AreDocIds("d:1"));
+
+  // Query-builder style join: text clause AND tag filter glued by the literal " AND ".
+  EXPECT_THAT(Run({"ft.search", "idx", "@content:(python) AND @user_id:{u1}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"ft.search", "idx", "@content:(python) AND @user_id:{u2}"}), kNoResults);
+
+  // A non-stopword tail still constrains and yields no match.
+  EXPECT_THAT(Run({"ft.search", "idx", "@content:(python) xyzzy"}), kNoResults);
+
+  // STOPWORDS 0 disables the default list, so the same term is required again and matches nothing.
+  Run({"ft.create", "idx0", "ON", "HASH", "PREFIX", "1", "d:", "STOPWORDS", "0", "SCHEMA",
+       "content", "TEXT"});
+  EXPECT_THAT(Run({"ft.search", "idx0", "@content:(python) and"}), kNoResults);
+}
+
 TEST_F(SearchFamilyTest, SimpleUpdates) {
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "visits", "numeric"}), "OK");
 
@@ -4975,6 +5004,154 @@ TEST_F(SearchFamilyTest, FlatVectorRangeYieldDistanceAs) {
   EXPECT_EQ(resp.GetVec()[1].GetString(), "k5");
 }
 
+TEST_F(SearchFamilyTest, FlatVectorRangeWithFilter) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+  for (int i = 0; i < 10; i++)
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", F(static_cast<float>(i)), "route",
+         (i % 2 == 0) ? "a" : "b"});
+
+  string vec = F(5.0f);
+
+  auto extract = [](const RespExpr& resp) {
+    std::map<string, double> out;
+    auto& arr = resp.GetVec();
+    for (size_t i = 1; i + 1 < arr.size(); i += 2) {
+      auto& flds = arr[i + 1].GetVec();
+      for (size_t j = 0; j + 1 < flds.size(); j += 2) {
+        if (flds[j].GetString() == "dist")
+          out[arr[i].GetString()] = std::stod(flds[j + 1].GetString());
+      }
+    }
+    return out;
+  };
+
+  // Parenthesized VECTOR_RANGE AND-ed with a filter: pos 4,5,6 within radius 1.5 of 5.0,
+  // route "a" keeps k4 and k6 (dist 1).
+  auto resp = Run({"FT.SEARCH", "idx",
+                   "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{a})", "PARAMS",
+                   "2", "v", vec, "SORTBY", "dist", "ASC", "RETURN", "1", "dist"});
+  ASSERT_EQ(resp.GetVec()[0].GetInt(), 2);
+  auto d = extract(resp);
+  EXPECT_EQ(d.size(), 2u);
+  EXPECT_DOUBLE_EQ(d["k4"], 1.0);
+  EXPECT_DOUBLE_EQ(d["k6"], 1.0);
+
+  // Parens without a filter == bare range: all of k4,k5,k6.
+  resp = Run({"FT.SEARCH", "idx", "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist})",
+              "PARAMS", "2", "v", vec, "RETURN", "1", "dist"});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 3);
+
+  // Only k5 (pos 5, route "b") is within radius 0.4; filtering route "a" excludes it -> empty.
+  resp = Run({"FT.SEARCH", "idx",
+              "(@pos:[VECTOR_RANGE 0.4 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{a})", "PARAMS", "2",
+              "v", vec});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 0);
+
+  // Same result (k4, k6) regardless of order or parentheses.
+  for (const char* q : {
+           "(@route:{a} @pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist})",  // filter first
+           "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{a}",    // no parens
+       }) {
+    resp = Run({"FT.SEARCH", "idx", q, "PARAMS", "2", "v", vec, "RETURN", "1", "dist"});
+    ASSERT_EQ(resp.GetVec()[0].GetInt(), 2) << q;
+    d = extract(resp);
+    EXPECT_DOUBLE_EQ(d["k4"], 1.0) << q;
+    EXPECT_DOUBLE_EQ(d["k6"], 1.0) << q;
+  }
+
+  // Multiple VECTOR_RANGE clauses are allowed on FLAT (intersected natively): radius 1.5 ->
+  // k4,k5,k6 AND radius 2.5 -> k3..k7 = k4,k5,k6.
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v] @pos:[VECTOR_RANGE 2.5 $v]", "PARAMS",
+              "2", "v", vec, "NOCONTENT"});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 3);
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeWithFilter) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+  for (int i = 0; i < 10; i++)
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", F(static_cast<float>(i)), "route",
+         (i % 2 == 0) ? "a" : "b"});
+
+  string vec = F(5.0f);
+
+  auto extract = [](const RespExpr& resp) {
+    std::map<string, double> out;
+    auto& arr = resp.GetVec();
+    for (size_t i = 1; i + 1 < arr.size(); i += 2) {
+      auto& flds = arr[i + 1].GetVec();
+      for (size_t j = 0; j + 1 < flds.size(); j += 2) {
+        if (flds[j].GetString() == "dist")
+          out[arr[i].GetString()] = std::stod(flds[j + 1].GetString());
+      }
+    }
+    return out;
+  };
+
+  // Bare range on HNSW still works (k4, k5, k6 within radius 1.5).
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist}",
+                   "PARAMS", "2", "v", vec});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 3);
+
+  // Range AND-ed with a filter: RangeQuery results intersected with route "a" keep k4, k6.
+  resp = Run({"FT.SEARCH", "idx",
+              "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{a})", "PARAMS", "2",
+              "v", vec, "SORTBY", "dist", "ASC", "RETURN", "1", "dist"});
+  ASSERT_EQ(resp.GetVec()[0].GetInt(), 2);
+  auto d = extract(resp);
+  EXPECT_DOUBLE_EQ(d["k4"], 1.0);
+  EXPECT_DOUBLE_EQ(d["k6"], 1.0);
+
+  // In-range docs all excluded by the filter -> empty.
+  resp = Run({"FT.SEARCH", "idx",
+              "(@pos:[VECTOR_RANGE 0.4 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{a})", "PARAMS", "2",
+              "v", vec});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 0);
+
+  // Pre-filter matches nothing -> empty.
+  resp = Run({"FT.SEARCH", "idx",
+              "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{zzz})", "PARAMS",
+              "2", "v", vec});
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 0);
+
+  // OR with range -> unsupported on HNSW.
+  resp = Run({"FT.SEARCH", "idx",
+              "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} | @route:{a}", "PARAMS", "2",
+              "v", vec});
+  EXPECT_THAT(resp, ErrArg("not supported"));
+
+  // Multiple VECTOR_RANGE clauses on HNSW -> rejected (would otherwise be silently mishandled).
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v] @pos:[VECTOR_RANGE 2.5 $v]", "PARAMS",
+              "2", "v", vec});
+  EXPECT_THAT(resp, ErrArg("not supported"));
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeWithFilterScores) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "title", "TEXT"});
+  for (int i = 1; i <= 3; i++)
+    Run({"HSET", absl::StrFormat("d%d", i), "pos", F(static_cast<float>(i)), "title",
+         "hello world"});
+
+  string v = F(2.0f);
+
+  // WITHSCORES on a range AND-ed with a text filter must return BM25 scores from the prefilter
+  // search, like the KNN-with-prefilter path. Format: [total, key, score, fields, ...].
+  auto resp = Run({"FT.SEARCH", "idx", "@title:hello @pos:[VECTOR_RANGE 1.5 $v]", "PARAMS", "2",
+                   "v", v, "WITHSCORES"});
+  auto arr = resp.GetVec();
+  ASSERT_EQ(arr[0].GetInt(), 3);
+  for (size_t i = 1; i + 1 < arr.size(); i += 3)
+    EXPECT_GT(std::stod(arr[i + 1].GetString()), 0.0) << arr[i].GetString();
+}
+
 TEST_F(SearchFamilyTest, VectorRangeAggregate) {
   auto FloatToBytes = [](float f) -> string {
     return string(reinterpret_cast<const char*>(&f), sizeof(float));
@@ -5079,6 +5256,76 @@ TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
               "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
               "cnt"});
   EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeAggregateWithFilter) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+  // Both routes share positions, so the filter narrows the range result.
+  for (int i : {1, 2, 3})
+    Run({"HSET", absl::StrFormat("t%d", i), "pos", F(static_cast<float>(i)), "route", "tech"});
+  for (int i : {1, 2, 3})
+    Run({"HSET", absl::StrFormat("s%d", i), "pos", F(static_cast<float>(i)), "route", "sports"});
+
+  string q = F(2.0f);
+
+  // radius 1.5 from 2.0 -> pos 1,2,3 -> t1..t3,s1..s3; pre-filter route tech keeps 3.
+  auto resp =
+      Run({"FT.AGGREGATE", "idx",
+           "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{tech})", "PARAMS", "2",
+           "v", q, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "cnt", "3")));
+
+  // Pre-filter matches nothing -> empty.
+  resp = Run({"FT.AGGREGATE", "idx",
+              "(@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} @route:{none})", "PARAMS",
+              "2", "v", q, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
+
+  // OR with range has no HNSW execution path -> explicit error.
+  resp = Run({"FT.AGGREGATE", "idx",
+              "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist} | @route:{tech}", "PARAMS",
+              "2", "v", q, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, ErrArg("not supported"));
+
+  // Multiple VECTOR_RANGE clauses on HNSW -> rejected.
+  resp =
+      Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 1.5 $v] @pos:[VECTOR_RANGE 2.5 $v]", "PARAMS",
+           "2", "v", q, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, ErrArg("not supported"));
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeAggregateAddScores) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "title", "TEXT"});
+  for (int i = 1; i <= 3; i++)
+    Run({"HSET", absl::StrFormat("d%d", i), "pos", F(static_cast<float>(i)), "title",
+         "hello world"});
+
+  string v = F(2.0f);
+
+  // ADDSCORES on a range AND-ed with a text filter must inject __score (the filter's text score),
+  // not silently drop it.
+  auto resp = Run({"FT.AGGREGATE", "idx", "(@title:hello @pos:[VECTOR_RANGE 1.5 $v])", "PARAMS",
+                   "2", "v", v, "ADDSCORES"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto rows = resp.GetVec();
+  ASSERT_GE(rows.size(), 2u);
+  bool found = false;
+  for (size_t r = 1; r < rows.size(); r++) {
+    auto row = rows[r].GetVec();
+    for (size_t j = 0; j + 1 < row.size(); j += 2) {
+      if (row[j].GetString() == "__score") {
+        found = true;
+        EXPECT_GT(std::stod(row[j + 1].GetString()), 0.0);
+      }
+    }
+  }
+  EXPECT_TRUE(found) << "__score should be injected for ADDSCORES range+filter aggregate";
 }
 
 TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
@@ -6102,6 +6349,25 @@ TEST_F(SearchFamilyTest, NoOffsetsAbsentByDefault) {
               IsArray(_, _, _, _, "index_options", RespArray(IsEmpty()), _, _, _, _, _, _, _, _));
 }
 
+// FT.INFO replies with a flat array under both RESP2 and RESP3.
+TEST_F(SearchFamilyTest, FtInfoResp2AndResp3) {
+  Run({"FT.CREATE", "idx", "ON", "JSON", "PREFIX", "1", "d:", "SCHEMA", "$.id", "AS", "id", "TAG"});
+
+  auto definition = IsArray("key_type", "JSON", "prefixes", IsArray("d:"), "default_language",
+                            "english", "default_score", 1);
+  auto attributes =
+      IsArray(IsArray("identifier", "$.id", "attribute", "id", "type", "TAG", "SEPARATOR", ","));
+
+  for (string_view proto : {"2", "3"}) {
+    Run({"HELLO", proto});
+    EXPECT_THAT(Run({"FT.INFO", "idx"}),
+                IsArray("index_name", "idx", "index_definition", definition, "index_options",
+                        RespArray(IsEmpty()), "attributes", attributes, "num_docs", _, "indexing",
+                        _, "percent_indexed", _))
+        << "RESP" << proto;
+  }
+}
+
 // FT.INFO surfaces NOSTEM per-attribute and language in index_definition.
 TEST_F(SearchFamilyTest, StemmingInfoSurface) {
   Run({"FT.CREATE", "info_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT",
@@ -6361,6 +6627,59 @@ TEST_F(SearchFamilyTest, AggregateAddScoresAutoVisible) {
     }
   }
   EXPECT_TRUE(found_score) << "__score should be visible with ADDSCORES even without LOAD/pipeline";
+}
+
+// LOAD after SCORER/ADDSCORES must be accepted (rejected only after a projector or
+// reducer), and ADDSCORES must populate @__score for a downstream APPLY.
+TEST_F(SearchFamilyTest, AggregateLoadAfterScorer) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT"}),
+      "OK");
+
+  Run({"hset", "d:1", "content", "python tutorial"});
+  Run({"hset", "d:2", "content", "python python advanced"});
+
+  auto resp = Run({"ft.aggregate", "idx", "@content:(python)", "SCORER", "BM25STD", "ADDSCORES",
+                   "LOAD", "1", "content"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+  ASSERT_GE(results.size(), 3u);  // count + 2 results
+  for (size_t i = 1; i < results.size(); ++i) {
+    auto row = results[i].GetVec();
+    bool has_content = false, has_score = false;
+    for (size_t j = 0; j + 1 < row.size(); j += 2) {
+      if (row[j].GetString() == "content")
+        has_content = true;
+      if (row[j].GetString() == "__score")
+        has_score = true;
+    }
+    EXPECT_TRUE(has_content) << "LOAD after SCORER/ADDSCORES should load 'content'";
+    EXPECT_TRUE(has_score) << "ADDSCORES should inject '__score'";
+  }
+
+  // @__score from ADDSCORES must be usable by a downstream APPLY.
+  resp = Run({"ft.aggregate", "idx", "@content:(python)", "SCORER", "BM25STD", "ADDSCORES", "LOAD",
+              "1", "content", "APPLY", "@__score + 100", "AS", "boosted"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  results = resp.GetVec();
+  ASSERT_GE(results.size(), 2u);
+  for (size_t i = 1; i < results.size(); ++i) {
+    auto row = results[i].GetVec();
+    double score = 0, boosted = 0;
+    for (size_t j = 0; j + 1 < row.size(); j += 2) {
+      if (row[j].GetString() == "__score")
+        score = std::stod(row[j + 1].GetString());
+      if (row[j].GetString() == "boosted")
+        boosted = std::stod(row[j + 1].GetString());
+    }
+    EXPECT_GT(score, 0.0);
+    EXPECT_NEAR(boosted, score + 100, 1e-6) << "APPLY should read @__score injected by ADDSCORES";
+  }
+
+  // LOAD after a real projector/reducer is still rejected.
+  resp = Run({"ft.aggregate", "idx", "@content:(python)", "APPLY", "1 + 1", "AS", "two", "LOAD",
+              "1", "content"});
+  EXPECT_THAT(resp, ErrArg("LOAD cannot be applied after projectors or reducers"));
 }
 
 // DocKeyIndex: empty-key documents must survive Serialize/Restore and not be

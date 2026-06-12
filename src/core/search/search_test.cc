@@ -550,6 +550,46 @@ TEST_F(SearchTest, StopWords) {
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
 }
 
+// A stopword among query terms must be dropped, not kept as a required term. Otherwise the
+// implicit-AND query reduces to an empty result because stopwords are never indexed.
+TEST_F(SearchTest, StopWordsDroppedFromQuery) {
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
+  IndicesOptions options{{"some", "words", "are", "left", "out"}};
+
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  vector<string> documents = {"some words left out",      //
+                              "some can be found",        //
+                              "words are never matched",  //
+                              "explicitly found!"};
+  for (size_t i = 0; i < documents.size(); i++) {
+    MockedDocument doc{{{"title", documents[i]}}};
+    indices.Add(i, doc);
+  }
+
+  // Trailing stopword is dropped -> query behaves like "found".
+  algo.Init("found some", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+
+  // Stopword between two real terms is dropped -> "explicitly found".
+  algo.Init("explicitly are found", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(3));
+
+  // Stopword as an OR operand contributes nothing; the real operand still matches.
+  algo.Init("found | some", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+
+  // Field-scoped group with a trailing stopword still matches.
+  algo.Init("@title:(found are)", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+
+  // A non-stopword term still constrains the result as usual.
+  algo.Init("found matched", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre());
+}
+
 class SearchRaxTest
     : public SearchTest,
       public testing::WithParamInterface<pair<bool /* build suffix trie */, bool /* tag index */>> {
@@ -791,6 +831,32 @@ TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
   EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 1, 2));
   // knn_scores should contain distances for all matched docs
   EXPECT_EQ(result.knn_scores.size(), 3u);
+}
+
+TEST_F(VectorRangeTest, RangeOrFilterScoresByDoc) {
+  // OR-ing a range with a filter makes the result larger than the range-match set. knn_scores is
+  // keyed by DocId: only in-range docs carry a distance, filter-only docs are simply absent.
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}, {"route", SchemaField::TAG}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  for (size_t i = 0; i < 10; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i)})}, {"route", (i % 2 == 0) ? "a" : "b"}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({5.0f});
+
+  // range (pos 4,5,6 -> docs 4,5,6) OR route "a" (docs 0,2,4,6,8) = union {0,2,4,5,6,8}.
+  ASSERT_TRUE(
+      algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist} | @route:{a}", &params));
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 2, 4, 5, 6, 8));
+  // Distances exist only for the in-range docs; filter-only docs (0, 2, 8) are absent.
+  EXPECT_THAT(result.knn_scores,
+              testing::UnorderedElementsAre(testing::Key(4u), testing::Key(5u), testing::Key(6u)));
+  EXPECT_FLOAT_EQ(result.knn_scores.at(5), 0.0f);
 }
 
 TEST_F(VectorRangeTest, FlatStarQueryZeroVectorIsValid) {
@@ -3231,9 +3297,9 @@ TEST_F(ScoringTest, ScorerTopKCutoff) {
   EXPECT_TRUE(returned.count(8)) << "Doc8 (TF=9) should be in top-3";
   EXPECT_TRUE(returned.count(7)) << "Doc7 (TF=8) should be in top-3";
 
-  // Verify scores are in descending order
-  for (size_t i = 1; i < result.text_scores.size(); i++) {
-    EXPECT_GE(result.text_scores[i - 1].second, result.text_scores[i].second)
+  // Verify scores are in descending order along result.ids, which carries the ranking.
+  for (size_t i = 1; i < result.ids.size(); i++) {
+    EXPECT_GE(result.text_scores.at(result.ids[i - 1]), result.text_scores.at(result.ids[i]))
         << "Scores should be in descending order";
   }
 }
@@ -3401,7 +3467,7 @@ TEST_F(SearchTest, MatchNestedOptionalNoDoubleScore) {
 
   ASSERT_EQ(single.text_scores.size(), 1u);
   ASSERT_EQ(nested.text_scores.size(), 1u);
-  EXPECT_NEAR(single.text_scores[0].second, nested.text_scores[0].second, 1e-6)
+  EXPECT_NEAR(single.text_scores.at(0), nested.text_scores.at(0), 1e-6)
       << "Nested optionals must not inflate the score";
 }
 
@@ -3479,11 +3545,9 @@ TEST_F(SearchTest, MatchOptionalKnnIdsScoresAligned) {
 
   ASSERT_TRUE(result.error.empty()) << result.error;
   ASSERT_EQ(result.ids.size(), result.knn_scores.size())
-      << "ids and knn_scores must have matching size";
-  for (size_t i = 0; i < result.ids.size(); ++i) {
-    EXPECT_EQ(result.ids[i], result.knn_scores[i].first)
-        << "ids[" << i << "] (" << result.ids[i] << ") must align with knn_scores[" << i
-        << "].first (" << result.knn_scores[i].first << ")";
+      << "every KNN result must carry a distance";
+  for (DocId id : result.ids) {
+    EXPECT_TRUE(result.knn_scores.contains(id)) << "id " << id << " must have a knn_score entry";
   }
 }
 

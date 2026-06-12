@@ -331,10 +331,9 @@ TEST_F(SearchParserTest, TildeParse) {
 }
 
 TEST_F(SearchParserTest, TildeInvalidGrammar) {
-  // ~ cannot precede top-level KNN or vector-range constructs (they live at
-  // final_query level, not search_unary_expr). Must be a clean syntax error.
+  // ~ cannot precede a top-level KNN construct (it lives at final_query level, not
+  // search_unary_expr). Must be a clean syntax error.
   EXPECT_EQ(1, Parse("~*=>[KNN 3 @v vec]"));
-  EXPECT_EQ(1, Parse("~@v:[VECTOR_RANGE 1 vec]"));
 
   // ~ followed by closing paren or empty group — syntax errors.
   EXPECT_EQ(1, Parse("~)"));
@@ -434,6 +433,31 @@ TEST_F(SearchParserTest, VectorRangeParse) {
 
   // Basic syntax parses without error
   EXPECT_EQ(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist}"));
+}
+
+TEST_F(SearchParserTest, VectorRangeCombinations) {
+  QueryParams params;
+  params["radius"] = "1";
+  // 4 bytes = one float dimension
+  params["vec"] = std::string(4, '\0');
+  SetParams(&params);
+
+  // VECTOR_RANGE is a regular predicate: parenthesized, AND-ed in any order, without parens,
+  // OR-ed, negated and nested must all parse.
+  EXPECT_EQ(0, Parse("(@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist})"));
+  EXPECT_EQ(0, Parse("(@f:[VECTOR_RANGE $radius $vec])"));
+  EXPECT_EQ(0, Parse("(@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist} @name:(idxA))"));
+  EXPECT_EQ(0, Parse("(@name:(idxA) @f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist})"));
+  EXPECT_EQ(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist} @name:(idxA)"));
+  EXPECT_EQ(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist} | @name:(idxA)"));
+  EXPECT_EQ(0, Parse("-@f:[VECTOR_RANGE $radius $vec]"));
+  EXPECT_EQ(0, Parse("~@f:[VECTOR_RANGE $radius $vec]"));
+  EXPECT_EQ(0, Parse("((@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist}))"));
+
+  // A lone (parenthesized) range still reduces to the range node itself.
+  EXPECT_EQ(0, Parse("(@f:[VECTOR_RANGE $radius $vec])"));
+  auto ast = query_driver_.Take();
+  EXPECT_TRUE(std::holds_alternative<AstVectorRangeNode>(ast.Variant()));
 }
 
 TEST_F(SearchParserTest, KNN) {

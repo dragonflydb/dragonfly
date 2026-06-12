@@ -911,13 +911,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       if (params.ShouldReturnAllFields())
         return_fields.push_back(so.field);
     }
-
-    // If we sorted with knn_scores present, rearrange them
-    if (!sort_scores.empty() && !result.knn_scores.empty()) {
-      unordered_map<DocId, float> score_lookup(result.knn_scores.begin(), result.knn_scores.end());
-      for (size_t i = 0; i < min(limit, result.ids.size()); i++)
-        result.knn_scores[i] = {result.ids[i], score_lookup[result.ids[i]]};
-    }
   }
 
   // Re-rank by (score, key) so per-shard top-K matches what a global merge
@@ -943,34 +936,32 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
                         return a.key < b.key;
                       });
 
-    // Trim text_scores to the surviving top-K so the score map below stays small.
+    // Keep only the surviving top-K, both in result order (ids) and in the by-id score map.
     result.ids.clear();
     result.ids.reserve(take);
-    result.text_scores.clear();
-    result.text_scores.reserve(take);
+    absl::flat_hash_map<search::DocId, float> top_scores;
+    top_scores.reserve(take);
     for (size_t i = 0; i < take; i++) {
       result.ids.push_back(entries[i].doc);
-      result.text_scores.emplace_back(entries[i].doc, entries[i].score);
+      top_scores[entries[i].doc] = entries[i].score;
     }
+    result.text_scores = std::move(top_scores);
   }
 
   // Cut off unnecessary items
   result.ids.resize(min(result.ids.size(), limit));
 
-  // Build text score lookup (DocId -> score) if available
-  absl::flat_hash_map<search::DocId, float> text_score_map;
-  for (const auto& [doc, score] : result.text_scores)
-    text_score_map[doc] = score;
-
-  // Serialize documents
+  // Serialize documents. knn_scores/text_scores are keyed by DocId (looked up per result id).
   vector<SerializedSearchDoc> out;
   out.reserve(min(limit, result.ids.size()));
 
   size_t expired_count = 0;
   for (size_t i = 0; i < result.ids.size(); i++) {
-    float knn_score = result.knn_scores.empty() ? 0 : result.knn_scores[i].second;
+    float knn_score = 0;
+    if (auto it = result.knn_scores.find(result.ids[i]); it != result.knn_scores.end())
+      knn_score = it->second;
     float text_score = 0;
-    if (auto it = text_score_map.find(result.ids[i]); it != text_score_map.end())
+    if (auto it = result.text_scores.find(result.ids[i]); it != result.text_scores.end())
       text_score = it->second;
     auto sort_score = sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i]);
 
@@ -1017,24 +1008,19 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   if (!search_results.error.empty())
     return {};
 
-  // Build distance lookup for FLAT VECTOR_RANGE so the YIELD_DISTANCE_AS alias is
-  // available in the aggregation pipeline. HNSW VECTOR_RANGE uses LoadHnswRangeDocsForAggregator.
+  // Distance lookup for FLAT VECTOR_RANGE so the YIELD_DISTANCE_AS alias is available in the
+  // aggregation pipeline. HNSW VECTOR_RANGE uses LoadHnswRangeDocsForAggregator. Both score maps
+  // are already keyed by DocId, so move them through directly when requested.
   absl::flat_hash_map<DocId, float> knn_score_map;
   std::string score_alias;
   if (auto* vr = search_algo->GetVectorRangeNode(); vr && !vr->score_alias.empty()) {
     score_alias = vr->score_alias;
-    knn_score_map.reserve(search_results.knn_scores.size());
-    for (auto& [doc_id, dist] : search_results.knn_scores)
-      knn_score_map[doc_id] = dist;
+    knn_score_map = std::move(search_results.knn_scores);
   }
 
-  // Build text score lookup for ADDSCORES injection (keyed by DocId, safe across expired docs)
   absl::flat_hash_map<DocId, float> text_score_map;
-  if (params.add_scores && !search_results.text_scores.empty()) {
-    text_score_map.reserve(search_results.text_scores.size());
-    for (auto& [doc_id, score] : search_results.text_scores)
-      text_score_map[doc_id] = score;
-  }
+  if (params.add_scores)
+    text_score_map = std::move(search_results.text_scores);
 
   return LoadDocEntriesWithScores(op_args, params, search_results.ids, score_alias, knn_score_map,
                                   text_score_map);

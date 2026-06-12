@@ -287,9 +287,13 @@ jobs:
 
     - name: Install helm
       uses: azure/setup-helm@v5
+      with:
+        version: "v3.21.0"
 
     - name: Setup Go
       uses: actions/setup-go@v6
+      with:
+        go-version-file: go.work
 
     - name: Update helm chart
       if: env.IS_PRERELEASE != 'true'

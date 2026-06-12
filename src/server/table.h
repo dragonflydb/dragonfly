@@ -132,9 +132,6 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   // Stores a list of dependant dirty flags for each watched key.
   absl::flat_hash_map<std::string, std::vector<std::atomic_bool*>> watched_keys;
 
-  // Keyspace notifications: list of expired keys since last batch of messages was published.
-  mutable std::vector<std::string> expired_keys_events_;
-
   mutable DbTableStats stats;
   std::unique_ptr<SlotStats[]> slots_stats;
   PrimeTable::Cursor expire_cursor;

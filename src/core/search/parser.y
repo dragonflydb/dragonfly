@@ -88,6 +88,12 @@ double toDouble(string_view src);
 %right NOT_OP TILDE
 %precedence LPAREN RPAREN
 
+// Dangling-else for the optional VECTOR_RANGE YIELD: at `]` with `=>` ahead, ARROW outranks the
+// no-yield rule (tagged %prec NO_YIELD), so bison shifts into the YIELD clause instead of reducing
+// and treating `=>` as a top-level KNN arrow.
+%precedence NO_YIELD
+%precedence ARROW
+
 %token <std::string> DOUBLE "double"
 %token <std::string> UINT32 "uint32"
 %nterm <AstExpr> final_query filter star_expr search_expr search_unary_expr search_or_expr search_and_expr bracket_filter_expr
@@ -111,8 +117,6 @@ final_query:
       { driver->Set(std::move($1)); }
   | filter ARROW knn_query
       { driver->Set(AstKnnNode(std::move($1), std::move($3))); }
-  | vector_range_query
-      { driver->Set(std::move($1)); }
 
 knn_query:
   LBRACKET KNN UINT32 FIELD TERM opt_ef_runtime opt_knn_alias RBRACKET
@@ -157,7 +161,7 @@ vector_range_query:
                                 std::move(alias));
       }
     }
-  | FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET
+  | FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET %prec NO_YIELD
     {
       double radius = $5;
       auto field = std::move($1);
@@ -215,6 +219,7 @@ search_unary_expr:
   | TILDE search_unary_expr           { $$ = AstOptionalNode(std::move($2)); }
   | term_atom                         { $$ = std::move($1);                  }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
+  | vector_range_query                { $$ = std::move($1);                  }
 
 field_cond:
   term_atom                                             { $$ = std::move($1);                }

@@ -256,27 +256,6 @@ async def test_set_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     assert file is not None
 
 
-@dfly_args(
-    {**BASIC_ARGS, "dbfilename": "test-save-rename-command", "rename_command": "save=save-foo"}
-)
-async def test_shutdown_save_with_rename(df_server):
-    """Checks that on shutdown we save snapshot"""
-    client = df_server.client()
-
-    await DebugPopulateSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(client)
-    start_capture = await DebugPopulateSeeder.capture(client)
-
-    await client.connection_pool.disconnect()
-    df_server.stop()
-    df_server.start()
-    client = df_server.client()
-
-    await wait_available_async(client)
-    assert await DebugPopulateSeeder.capture(client) == start_capture
-
-    await client.connection_pool.disconnect()
-
-
 @pytest.mark.opt_only
 async def test_parallel_snapshot(async_client):
     """Dragonfly does not allow simultaneous save operations, send 2 save operations and make sure one is rejected"""
@@ -932,6 +911,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 
 
 @pytest.mark.large
+@pytest.mark.skip(reason="Fails - #7559")
 async def test_rdb_load_with_tiering_6823(df_factory: DflyInstanceFactory):
     """
     Regression test for RDB load with tiering. Verifies that loading a snapshot

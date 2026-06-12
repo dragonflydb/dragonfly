@@ -42,8 +42,8 @@ class Service : public facade::ServiceInterface {
                                          facade::AsyncPreference apref) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  facade::DispatchManyResult DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
-                                                  unsigned count, facade::SinkReplyBuilder* builder,
+  facade::DispatchManyResult DispatchManyCommands(facade::ParsedCommand* head, unsigned count,
+                                                  facade::SinkReplyBuilder* builder,
                                                   facade::ConnectionContext* cntx) final;
 
   // Check OOM and invoke command with args
@@ -54,9 +54,6 @@ class Service : public facade::ServiceInterface {
   // when the command is queued for execution, not before the execution itself.
   std::optional<facade::ErrorReply> VerifyCommandState(const CommandId& cid, ArgSlice tail_args,
                                                        const ConnectionContext& cntx);
-
-  facade::DispatchResult DispatchMC(facade::ParsedCommand* parsed_cmd,
-                                    facade::AsyncPreference apref) final;
 
   facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
   facade::ParsedCommand* AllocateParsedCommand() final;
@@ -182,6 +179,9 @@ class Service : public facade::ServiceInterface {
                               facade::RedisReplyBuilder* replier);
 
   void CallFromScript(Interpreter::CallArgs& args, CommandContext* cmd_cntx);
+
+  std::variant<CommandId*, facade::DispatchResult> HandleMemcacheCommand(
+      facade::ParsedCommand* parsed_cmd, facade::AsyncPreference async_pref);
 
   OpResult<KeyIndex> FindKeys(const CommandId* cid, CmdArgList args);
 

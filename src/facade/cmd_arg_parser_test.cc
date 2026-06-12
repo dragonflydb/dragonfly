@@ -520,4 +520,33 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
   }
 }
 
+TEST_F(CmdArgParserTest, BackedArguments) {
+  cmn::BackedArguments bargs;
+  string_view args[] = {"SET", "mykey", "42", "EX", "100"};
+  bargs.Assign(std::begin(args), std::end(args), 5);
+
+  // Full range
+  {
+    CmdArgParser parser(bargs);
+    EXPECT_EQ(parser.Next(), "SET");
+    EXPECT_EQ(parser.Next(), "mykey");
+    EXPECT_EQ(parser.Next<int>(), 42);
+    EXPECT_TRUE(parser.Check("EX"));
+    EXPECT_EQ(parser.Next<int>(), 100);
+    EXPECT_TRUE(parser.Finalize());
+  }
+
+  // With offset (skip command name)
+  {
+    CmdArgParser parser(bargs, 1);
+    EXPECT_EQ(parser.Next(), "mykey");
+    EXPECT_EQ(parser.Next<int>(), 42);
+    EXPECT_EQ(parser.UnparsedStart(), 2u);
+    EXPECT_TRUE(parser.HasAtLeast(2));
+    EXPECT_FALSE(parser.HasAtLeast(3));
+    parser.Skip(2);
+    EXPECT_TRUE(parser.Finalize());
+  }
+}
+
 }  // namespace facade

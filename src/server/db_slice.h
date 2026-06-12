@@ -427,9 +427,10 @@ class DbSlice {
   void FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound);
 
   struct DeleteExpiredStats {
-    uint32_t deleted = 0;        // number of deleted items due to expiry.
-    uint32_t deleted_bytes = 0;  // total bytes of deleted items.
-    uint32_t traversed = 0;      // total number of traversed entries in the prime table.
+    uint32_t deleted = 0;                 // number of deleted items due to expiry.
+    uint32_t deleted_bytes = 0;           // total bytes of deleted items.
+    uint32_t traversed = 0;               // total number of traversed entries in the prime table.
+    std::vector<std::string> key_events;  // expired key names for keyspace notifications.
   };
 
   // Deletes some amount of possible expired items.
@@ -438,9 +439,11 @@ class DbSlice {
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
   // Returns number of (elements,bytes) freed due to evictions.
+  // key_events: if non-null, evicted key names are appended for keyspace notifications.
   std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx, const Context& cntx,
                                                             size_t starting_segment_id,
-                                                            size_t increase_goal_bytes);
+                                                            size_t increase_goal_bytes,
+                                                            std::vector<std::string>* key_events);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
 
@@ -572,7 +575,10 @@ class DbSlice {
     kMutableStats,
   };
 
-  PrimeIterator ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
+  // events: if non-null, the expired key is appended to it (caller is in an atomic section and
+  // will send notifications later). If null, the notification is sent immediately (read path).
+  PrimeIterator ExpireIfNeeded(const Context& cntx, PrimeIterator it,
+                               std::vector<std::string>* events = nullptr) const;
 
   OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
                                            std::optional<unsigned> req_obj_type);
@@ -643,7 +649,6 @@ class DbSlice {
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;
 
-  // Record whenever a key expired to DbTable::expired_keys_events_ for keyspace notifications
   bool expired_keys_events_recording_ = true;
 
   bool journal_omit_redundant_writes_ = true;

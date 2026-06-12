@@ -515,7 +515,7 @@ ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
   return tl_facade_stats->conn_stats;
 }
 
-thread_local uint64_t max_busy_read_cycles_cached = 1ULL << 32;
+thread_local uint32_t max_busy_read_cycles_cached = UINT32_MAX;
 thread_local bool always_flush_pipeline_cached = absl::GetFlag(FLAGS_always_flush_pipeline);
 thread_local uint32_t pipeline_squash_limit_cached = absl::GetFlag(FLAGS_pipeline_squash_limit);
 
@@ -1401,8 +1401,10 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 }
 
-Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, unsigned max_busy_cycles,
+Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t max_busy_cycles,
                                                 bool enqueue_only) {
+  DCHECK_GT(max_busy_cycles, 0u);
+
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
 
@@ -1738,21 +1740,12 @@ void Connection::SquashPipeline() {
 
   uint64_t start = CycleClock::Now();
 
-  // Define a "Feeder" Lambda
-  // This lambda advances a temporary pointer exec_cmd_ptr to feed the execution engine.
-  // We do not modify parsed_to_execute_ yet, in case execution throws/fails.
-  auto exec_cmd_ptr{parsed_to_execute_};
-  auto get_next_fn = [&exec_cmd_ptr]() mutable -> ParsedArgs {
-    DCHECK(exec_cmd_ptr);
-    return ParsedArgs{*std::exchange(exec_cmd_ptr, exec_cmd_ptr->next)};
-  };
-
   // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
   // it must guard the Flush() as well.
   cc_->async_dispatch = true;
 
-  DispatchManyResult result =
-      service_->DispatchManyCommands(get_next_fn, pipeline_count, reply_builder_.get(), cc_.get());
+  DispatchManyResult result = service_->DispatchManyCommands(parsed_to_execute_, pipeline_count,
+                                                             reply_builder_.get(), cc_.get());
 
   local_stats_.cmds += result.processed;
   last_interaction_ = time(nullptr);
@@ -2583,9 +2576,6 @@ bool Connection::ExecuteBatch() {
     return parsed_head_;
   };
 
-  auto dispatch = protocol_ == Protocol::MEMCACHE ? &ServiceInterface::DispatchMC
-                                                  : &ServiceInterface::DispatchCommandSimple;
-
   // Execute sequentially all parsed commands.
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
     if (reply_builder_->GetError())
@@ -2614,7 +2604,7 @@ bool Connection::ExecuteBatch() {
     // sendmsg syscalls to a minimum. IoLoopV2's idle-await block handles the final flush.
     reply_builder_->SetBatchMode(ioloop_v2_ && is_head && (cmd->next != nullptr));
 
-    auto dispatch_res = (service_->*dispatch)(cmd, mode);
+    auto dispatch_res = service_->DispatchCommandSimple(cmd, mode);
 
     // Enforce the pipeline reply-ordering invariant: replies must reach the socket in parse order.
     // V1 (ONLY_SYNC): all commands run serially, so parsed_to_execute_ always equals parsed_head_
@@ -2628,8 +2618,7 @@ bool Connection::ExecuteBatch() {
     bool is_deferred = cmd->IsDeferredReply();
     DCHECK(is_head || (is_deferred == (dispatch_res != DispatchResult::WOULD_BLOCK)))
         << "Pipeline contract breach! Invalid state for non-head command. "
-        << "DispatchResult: " << static_cast<int>(dispatch_res) << ", IsDeferred: " << is_deferred
-        << ", Command Type: " << cmd->mc_command()->type;
+        << "DispatchResult: " << static_cast<int>(dispatch_res) << ", IsDeferred: " << is_deferred;
 
     if (dispatch_res == DispatchResult::WOULD_BLOCK)
       break;  // Sync command. Wait for current async commands to finish
@@ -2705,7 +2694,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   cmd->next = nullptr;
   auto& conn_stats = tl_facade_stats->conn_stats;
 
-  cmd->parsed_cycle = base::CycleClock::Now();
+  cmd->FinalizeParsing();
 
   if (parsed_head_ == nullptr) {
     parsed_head_ = cmd;
@@ -2719,7 +2708,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   }
   parsed_tail_ = cmd;
 
-  size_t used_mem = cmd->UsedMemory();
+  size_t used_mem = cmd->EnqueuedBytes();
   parsed_cmd_q_len_++;
   parsed_cmd_q_bytes_ += used_mem;
   local_stats_.dispatch_entries_added++;
@@ -2734,7 +2723,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
-  size_t used_mem = cmd->UsedMemory();
+  size_t used_mem = cmd->EnqueuedBytes();
   auto& conn_stats = tl_facade_stats->conn_stats;
 
   DCHECK_GT(parsed_cmd_q_len_, 0u);

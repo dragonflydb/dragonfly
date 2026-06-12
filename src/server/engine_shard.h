@@ -161,6 +161,14 @@ class EngineShard {
     return continuation_trans_;
   }
 
+  Transaction* running_tx() const {
+    return running_tx_;
+  }
+
+  void set_running_tx(Transaction* tx) {
+    running_tx_ = tx;
+  }
+
   void StopPeriodicFiber();
 
   struct TxQueueItem {
@@ -301,6 +309,7 @@ class EngineShard {
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;
   Transaction* continuation_trans_ = nullptr;
+  Transaction* running_tx_ = nullptr;
   std::string continuation_debug_id_;
   unsigned poll_concurrent_factor_ = 0;
 
