@@ -50,10 +50,6 @@ class ServiceInterface {
   virtual DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference) = 0;
   DispatchResult DispatchCommandSimple(ParsedCommand* cmd, AsyncPreference mode);
 
-  virtual DispatchManyResult DispatchManyCommands(ParsedCommand* head, unsigned count,
-                                                  SinkReplyBuilder* builder,
-                                                  ConnectionContext* cntx) = 0;
-
   // Dispatches a batch of pipelined commands, squashing consecutive single-shard commands.
   // Replies are deferred into the parsed commands and are sent by the connection afterwards.
   virtual DispatchManyResult DispatchSquashedBatch(ParsedCommand* first, unsigned count,
