@@ -162,6 +162,9 @@ class ParsedCommand : public cmn::BackedArguments {
     SendError(error);
   }
 
+  // Resolve deferred command with a captured payload.
+  void Resolve(payload::Payload&& pl);
+
   // Suspend the deferred command until `blocker` reaches zero.
   // When that happens, CanReply() returns true and SendReply() will resume `coro`,
   // which is expected to write the reply directly to the reply builder.

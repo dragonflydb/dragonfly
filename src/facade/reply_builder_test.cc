@@ -913,6 +913,37 @@ TEST_F(RedisReplyBuilderTest, BasicCapture) {
   builder_->SetRespVersion(RespVersion::kResp2);
 }
 
+// Regression: applying a captured payload into a CapturingReplyBuilder that is in the middle
+// of building a collection must append to the open collection, not overwrite the root value.
+// Before the fix, SendDirect() ignored the open collection on the stack and stored the value
+// into current_, so the collection was left unfilled and Take() crashed on CHECK(stack_.empty()).
+// This is the path hit when MULTI/EXEC array replies are re-applied during pipeline squashing.
+TEST_F(RedisReplyBuilderTest, CaptureApplyIntoOpenCollection) {
+  // The expected bytes: an array [1, "two"] built directly on a real builder.
+  builder_->StartArray(2);
+  builder_->SendLong(1);
+  builder_->SendBulkString("two");
+  const string expected = TakePayload();
+
+  // Pre-capture the two element replies as standalone payloads.
+  CapturingReplyBuilder elem{};
+  elem.SendLong(1);
+  auto p1 = elem.Take();
+  elem.SendBulkString("two");
+  auto p2 = elem.Take();
+
+  // Build the same array on a capturing builder, but fill the elements via Apply() — which
+  // routes through SendDirect() because the target is itself a CapturingReplyBuilder.
+  CapturingReplyBuilder outer{};
+  outer.StartArray(2);
+  CapturingReplyBuilder::Apply(std::move(p1), &outer);
+  CapturingReplyBuilder::Apply(std::move(p2), &outer);
+
+  // Would crash here (CHECK stack_.empty()) before the fix.
+  CapturingReplyBuilder::Apply(outer.Take(), builder_.get());
+  EXPECT_EQ(expected, TakePayload());
+}
+
 TEST_F(RedisReplyBuilderTest, FormatDouble) {
   char buf[64];
 

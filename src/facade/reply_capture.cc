@@ -82,8 +82,8 @@ void CapturingReplyBuilder::SendDirect(Payload&& val) {
   bool is_err = holds_alternative<Error>(val);
   ReplyMode min_mode = is_err ? ReplyMode::ONLY_ERR : ReplyMode::FULL;
   if (reply_mode_ >= min_mode) {
-    DCHECK_EQ(current_.index(), 0u);
-    current_ = std::move(val);
+    // Capture() appends to an open collection if one exists, otherwise stores into current_.
+    Capture(std::move(val));
   } else {
     current_ = monostate{};
   }
