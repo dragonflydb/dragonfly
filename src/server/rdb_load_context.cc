@@ -356,8 +356,8 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   // with the doc_ids assigned during key mapping restoration.
   // RebuildAllIndices decides per-index whether to use the restore path or rebuild from
   // scratch, based on the index's actual graph + key_index state.
-  LOG(INFO) << "PostLoad: rebuilding search indices across shards rss="
-            << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
+  VLOG(2) << "PostLoad: rebuilding search indices across shards rss="
+          << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
@@ -372,8 +372,8 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   // Wait until index building ends (all shards' vector data populated).
   shard_set->RunBlockingInParallel([](EngineShard* es) {
     es->search_indices()->BlockUntilConstructionEnd();
-    LOG(INFO) << "PostLoad: search index rebuild phase returned rss="
-              << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
+    VLOG(2) << "PostLoad: search index rebuild phase returned rss="
+            << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
   });
 
   // Transition every search index out of kRestoring/kSerializing into kBuilding and
