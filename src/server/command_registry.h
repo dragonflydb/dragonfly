@@ -112,7 +112,7 @@ class CommandId : public facade::CommandId {
   [[nodiscard]] CommandId Clone(std::string_view name) const;
 
   void Init(unsigned thread_count) {
-    command_stats_ = std::make_unique<CmdCallStats[]>(thread_count);
+    command_stats_ = std::make_unique<StatsCell[]>(thread_count);
   }
 
   using Handler = fu2::function_base<true, true, fu2::capacity_default, false, false,
@@ -179,7 +179,7 @@ class CommandId : public facade::CommandId {
   void ResetStats(unsigned thread_index);
 
   CmdCallStats GetStats(unsigned thread_index) const {
-    return command_stats_[thread_index];
+    return command_stats_[thread_index].stats;
   }
 
   void SetAclCategory(uint32_t mask) {
@@ -221,7 +221,11 @@ class CommandId : public facade::CommandId {
   bool support_async_{false};
   int8_t interleave_step_{0};
 
-  std::unique_ptr<CmdCallStats[]> command_stats_;
+  struct alignas(64) StatsCell {
+    CmdCallStats stats;
+  };
+
+  std::unique_ptr<StatsCell[]> command_stats_;
   Handler handler_;
   ArgValidator validator_;
   MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec

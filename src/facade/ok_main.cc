@@ -25,6 +25,7 @@
 #include "facade/service_interface.h"
 #include "util/accept_server.h"
 #include "util/fibers/pool.h"
+#include "util/fibers/synchronization.h"
 #include "util/http/http_common.h"
 #include "util/http/http_handler.h"
 #include "util/http/http_server_utils.h"
@@ -303,7 +304,11 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
 
   // Aggregate facade stats from all proactor threads.
   FacadeStats total;
-  pool->AwaitFiberOnAll([&total](auto*) { total += *tl_facade_stats; });
+  fb2::Mutex mu;
+  pool->AwaitFiberOnAll([&](auto*) {
+    std::lock_guard lk(mu);
+    total += *tl_facade_stats;
+  });
 
   const auto& conn = total.conn_stats;
   const auto& reply = total.reply_stats;
