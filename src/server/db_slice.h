@@ -227,17 +227,10 @@ class DbSlice {
     // if now_ms = 0 the value is absolute; cap applies to relative dispatch only;
     // cap=true silently clamps to kMaxExpireDeadlineMs;
     ExpireParams(TimeUnit unit, int64_t value, uint64_t now_ms = 0, bool cap = false);
-
-    // if now_ms = 0 the value is absolute; cap applies to relative dispatch only;
-    // cap=true silently clamps to kMaxExpireDeadlineMs;
     ExpireParams(ExpT type, int64_t value, uint64_t now_ms = 0, bool cap = false);
 
     bool IsDefined() const {
       return persist || ms_timestamp >= 0;
-    }
-
-    bool IsExpired(int64_t now_msec) const {
-      return ms_timestamp >= 0 && ms_timestamp < now_msec;
     }
 
     // Returns (relative_ms, absolute_ms). On overflow returns {0, -1}.
