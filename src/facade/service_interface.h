@@ -54,6 +54,13 @@ class ServiceInterface {
                                                   SinkReplyBuilder* builder,
                                                   ConnectionContext* cntx) = 0;
 
+  // Dispatches a batch of pipelined commands, squashing consecutive single-shard commands.
+  // Replies are deferred into the parsed commands and are sent by the connection afterwards.
+  virtual DispatchManyResult DispatchSquashedBatch(ParsedCommand* first, unsigned count,
+                                                   ConnectionContext* cntx) {
+    return {.processed = 0, .account_in_stats = false};
+  }
+
   virtual ConnectionContext* CreateContext(Connection* owner) = 0;
 
   virtual ParsedCommand* AllocateParsedCommand() = 0;
