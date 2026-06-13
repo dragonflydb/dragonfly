@@ -133,7 +133,8 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
                      int8_t last_key, std::optional<uint32_t> acl_categories)
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
                         acl_categories.value_or(ImplicitAclCategories(mask))) {
-  implicit_acl_ = !acl_categories.has_value();
+  if (!acl_categories.has_value())
+    kind_mask_ |= IMPLICIT_ACL;
   bool is_latency_tracked = GetFlag(FLAGS_latency_tracking);
   if (is_latency_tracked) {
     hdr_histogram* hist = nullptr;
@@ -143,17 +144,29 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     latency_histogram_ = hist;
   }
 
-  if (name_.rfind("EVAL", 0) == 0)
-    kind_multi_ctr_ = CO::MultiControlKind::EVAL;
-  else if (base::_in(name_, {"EXEC", "MULTI", "DISCARD"}))
-    kind_multi_ctr_ = CO::MultiControlKind::EXEC;
-  else if (base::_in(name_, {"PUBLISH", "SUBSCRIBE", "UNSUBSCRIBE"}))
-    kind_pubsub_ = CO::PubSubKind::REGULAR;
-  else if (base::_in(name_, {"PSUBSCRIBE", "PUNSUBSCRIBE"}))
-    kind_pubsub_ = CO::PubSubKind::PATTERN;
-  else if (base::_in(name_, {"SPUBLISH", "SSUBSCRIBE", "SUNSUBSCRIBE"}))
-    kind_pubsub_ = CO::PubSubKind::SHARDED;
-  can_be_monitored_ = (opt_mask_ & CO::ADMIN) == 0 && name_ != "EXEC";
+  if (name_.rfind("EVAL", 0) == 0) {
+    kind_mask_ |= EVAL_CTRL;
+  } else if (base::_in(name_, {"EXEC", "MULTI", "DISCARD"})) {
+    kind_mask_ |= EXEC_CTRL;
+    if (name_ == "EXEC")
+      kind_mask_ |= EXEC;
+    else if (name_ == "MULTI")
+      kind_mask_ |= MULTI;
+  } else if (base::_in(name_, {"PUBLISH", "SUBSCRIBE", "UNSUBSCRIBE"})) {
+    kind_mask_ |= PUBSUB_REGULAR;
+    if (name_ == "PUBLISH")
+      kind_mask_ |= PUBLISH;
+  } else if (base::_in(name_, {"PSUBSCRIBE", "PUNSUBSCRIBE"})) {
+    kind_mask_ |= PUBSUB_PATTERN;
+  } else if (base::_in(name_, {"SPUBLISH", "SSUBSCRIBE", "SUNSUBSCRIBE"})) {
+    kind_mask_ |= PUBSUB_SHARDED;
+    if (name_ == "SPUBLISH")
+      kind_mask_ |= SPUBLISH;
+  } else if (name_ == "REPLCONF") {
+    kind_mask_ |= REPLCONF;
+  }
+  if ((opt_mask_ & CO::ADMIN) == 0 && name_ != "EXEC")
+    kind_mask_ |= CAN_MONITOR;
 
   if (base::_in(name_, {"MSET", "MSETNX"}))
     interleave_step_ = 2;
@@ -163,7 +176,7 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
 
 CommandId::~CommandId() {
   // Aliases share the same latency histogram, so we only close it if this is not an alias.
-  if (latency_histogram_ && !is_alias_) {
+  if (latency_histogram_ && !IsAlias()) {
     hdr_close(latency_histogram_);
   }
 }
@@ -174,9 +187,12 @@ CommandId CommandId::Clone(const std::string_view name) const {
   cloned.handler_ = handler_;
   cloned.opt_mask_ = opt_mask_ | CO::HIDDEN;
   cloned.acl_categories_ = acl_categories_;
-  cloned.implicit_acl_ = implicit_acl_;
   cloned.interleave_step_ = interleave_step_;
-  cloned.is_alias_ = true;
+  // An alias is semantically the same command, so inherit the source's full derived identity and
+  // attributes (incl. SUPPORT_ASYNC, pub/sub & exec/eval identity, CAN_MONITOR, IMPLICIT_ACL) -
+  // the ctor recomputed these from the alias name, which is not what we want - and mark it as an
+  // alias.
+  cloned.kind_mask_ = kind_mask_ | IS_ALIAS;
 
   // explicit sharing of the object since it's an alias we can do that.
   // I am assuming that the source object lifetime is at least as of the cloned object.
@@ -191,15 +207,12 @@ bool CommandId::IsTransactional() const {
   if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_TRANSACTIONAL))
     return true;
 
-  if (name_ == "EVAL" || name_ == "EVALSHA" || name_ == "EVAL_RO" || name_ == "EVALSHA_RO" ||
-      name_ == "EXEC")
-    return true;
-
-  return false;
+  // EVAL family (incl. *_RO) and EXEC (but not MULTI/DISCARD) are transactional.
+  return (kind_mask_ & EVAL_CTRL) || (kind_mask_ & EXEC);
 }
 
 bool CommandId::IsMultiTransactional() const {
-  return kind_multi_ctr_.has_value();
+  return kind_mask_ & (EVAL_CTRL | EXEC_CTRL);
 }
 
 optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
