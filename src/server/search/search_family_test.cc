@@ -1033,7 +1033,7 @@ TEST_F(SearchFamilyTest, ReturnOption) {
   // Check all fields are returned
   auto resp = Run({"ft.search", "i1", "@justA:0"});
   EXPECT_THAT(resp, MatchEntry("k0", "longA", "0", "longB", "1", "longC", "2", "secret", "3",
-                               "vector", "[0]"));
+                               "vector", FloatVec1(0.0f)));
 
   // Check no fields are returned
   resp = Run({"ft.search", "i1", "@justA:0", "return", "0"});
@@ -1115,6 +1115,50 @@ TEST_F(SearchFamilyTest, ReturnOptionJson) {
   // RETURN with SORTBY doesn't include sortable field
   EXPECT_THAT(Run({"ft.search", "i1", "*", "sortby", "size", "return", "1", "name"}),
               MatchEntry("k1", "name", "dragon"));
+}
+
+// A returned HASH vector field echoes the raw stored binary buffer.
+TEST_F(SearchFamilyTest, VectorReturnRawBytesHash) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "FLAT", "6",
+       "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  const string vec = Vec3ToBytes(1.0f, 2.0f, 3.0f);  // 12 raw bytes
+  Run({"HSET", "d:a", "v", vec});
+
+  // Explicit RETURN of the vector field.
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "RETURN", "1", "v"}), MatchEntry("d:a", "v", vec));
+
+  // Default serialization (no RETURN) echoes the same raw buffer.
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*"}), MatchEntry("d:a", "v", vec));
+}
+
+// A JSON vector field is returned as its array text, not omitted.
+TEST_F(SearchFamilyTest, VectorReturnJson) {
+  Run({"FT.CREATE", "idx",     "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",     "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT32", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"v": [1, 2, 3]})"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "RETURN", "1", "v"}),
+              MatchEntry("d:a", "v", "[1,2,3]"));
+}
+
+// A KNN query that also returns the candidate vectors: score numeric, vector raw.
+TEST_F(SearchFamilyTest, VectorReturnWithKnn) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "FLAT", "6",
+       "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  const string va = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  Run({"HSET", "d:a", "v", va});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "* => [KNN 1 @v $q AS dist]", "RETURN", "2", "v", "dist",
+                   "PARAMS", "2", "q", q, "DIALECT", "2"}),
+              MatchEntry("d:a", "v", va, "dist", "0"));
 }
 
 TEST_F(SearchFamilyTest, TestStopWords) {
