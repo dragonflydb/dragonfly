@@ -367,10 +367,13 @@ class HnswSearchSeeder:
 
     async def _search_knn(self, client, query_vec, k=5):
         """Run a KNN search and return (total_count, set_of_doc_ids)."""
+        # NOCONTENT: only keys are needed, and it avoids returning the raw binary
+        # embedding field that a decode_responses client cannot decode.
         r = await client.execute_command(
             "FT.SEARCH",
             self.index_name,
             "*=>[KNN {k} @embedding $vec]".format(k=k),
+            "NOCONTENT",
             "PARAMS",
             "2",
             "vec",
@@ -379,7 +382,7 @@ class HnswSearchSeeder:
             "0",
             str(k),
         )
-        doc_ids = set(r[i] for i in range(1, len(r), 2))
+        doc_ids = set(r[1:])
         return r[0], doc_ids
 
     async def _search_knn_filtered(self, client, query_vec, doc_id, k=5):
@@ -394,6 +397,7 @@ class HnswSearchSeeder:
             "FT.SEARCH",
             self.index_name,
             "@doc_id:{{{id}}}=>[KNN {k} @embedding $vec]".format(id=doc_num, k=k),
+            "NOCONTENT",
             "PARAMS",
             "2",
             "vec",
@@ -490,6 +494,7 @@ class HnswSearchSeeder:
                     "FT.SEARCH",
                     self.index_name,
                     "*=>[KNN 5 @embedding $vec]",
+                    "NOCONTENT",
                     "PARAMS",
                     "2",
                     "vec",

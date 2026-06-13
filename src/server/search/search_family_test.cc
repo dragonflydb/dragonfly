@@ -1123,7 +1123,7 @@ TEST_F(SearchFamilyTest, VectorReturnRawBytesHash) {
        "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
   WaitForIndexReady("idx");
 
-  const string vec = Vec3ToBytes(1.0f, 2.0f, 3.0f);  // 12 raw little-endian bytes
+  const string vec = Vec3ToBytes(1.0f, 2.0f, 3.0f);  // 12 raw bytes
   Run({"HSET", "d:a", "v", vec});
 
   // Explicit RETURN of the vector field.
