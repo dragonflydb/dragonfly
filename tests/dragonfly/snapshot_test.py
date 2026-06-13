@@ -911,7 +911,6 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 
 
 @pytest.mark.large
-@pytest.mark.skip(reason="Fails - #7559")
 async def test_rdb_load_with_tiering_6823(df_factory: DflyInstanceFactory):
     """
     Regression test for RDB load with tiering. Verifies that loading a snapshot
@@ -928,6 +927,7 @@ async def test_rdb_load_with_tiering_6823(df_factory: DflyInstanceFactory):
     plain.start()
     plain_client = plain.client()
 
+    # Around 400MB
     await plain_client.execute_command("DEBUG POPULATE 50000 key 8192 RAND")
     num_keys = await plain_client.dbsize()
 
@@ -961,8 +961,9 @@ async def test_rdb_load_with_tiering_6823(df_factory: DflyInstanceFactory):
     info = await tiered_client.info("memory")
     used_mem = info["used_memory"]
     obj_mem = info["object_used_memory"]
+
     assert used_mem < 50_000_000
-    assert obj_mem < 10_000_000
+    assert obj_mem < 0.12 * 256_000_000  # 90% offloading target with 256mb maxmemory, 2% margin
 
     assert info["num_entries"] == num_keys
     keys = await tiered_client.keys()
