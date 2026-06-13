@@ -27,6 +27,7 @@ struct CmdRef {
   const CommandId* cid = nullptr;
   facade::ParsedArgs args;
   facade::ReplyMode reply_mode = facade::ReplyMode::FULL;
+  CommandContext* cmd_cntx = nullptr;
 
   bool IsValid() const {
     return cid != nullptr;

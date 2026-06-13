@@ -1320,6 +1320,24 @@ TEST_F(MultiTest, TestSquashing) {
   Run({"exec"});
 }
 
+// Regression: squashing_current_reply_size must return to zero after a squash that spans
+// multiple flushes. A single MultiCommandSquasher instance flushes once per batch that
+// reaches max_squash_cmd_num; reply_size_delta was not reset between flushes, so
+// total_reply_size double-counted earlier batches and the counter underflowed.
+TEST_F(MultiTest, SquashReplySizeAccounting) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_squash, true);
+
+  // Must exceed max_squashed_cmd_num (default 100) so the squash spans multiple flushes.
+  const int kNumCmds = 300;
+  Run({"multi"});
+  for (int i = 0; i < kNumCmds; ++i)
+    Run({"set", kKey1, "v"});
+  Run({"exec"});
+
+  EXPECT_EQ(GetMetrics().facade_stats.reply_stats.squashing_current_reply_size, 0u);
+}
+
 TEST_F(MultiTest, MultiLeavesTxQueue) {
   // Tests the scenario, where the OOO multi-tx is scheduled into tx queue and there is another
   // tx (mget) after it that runs and tests for atomicity.
