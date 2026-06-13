@@ -131,6 +131,8 @@ class TieredStorage : public TieredStorageBase {
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
 
+  void ProcessDelayedDeframents();
+
   PrimeValue DeleteCool(tiering::TieredCoolRecord* record);
   tiering::TieredCoolRecord* PopCool();
 
