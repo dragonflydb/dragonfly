@@ -337,23 +337,18 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
   auto* cntx = static_cast<dfly::ConnectionContext*>(conn_cntx());
 
   // Log nested commands of scripts that made it into slowlog
-  if (auto sinfo = cntx->conn_state.script_info.get(); !cid_->MultiControlKind() && sinfo)
+  if (auto sinfo = cntx->conn_state.script_info.get(); !cid_->IsMultiTransactional() && sinfo)
     sinfo->stats.slow_commands.fetch_add(1, memory_order_relaxed);
 
   vector<string> aux_params;
   CmdArgVec aux_slice;
 
   // Rewrite arguments for exec/eval with stats
-  if (auto mck = cid_->MultiControlKind(); mck) {
-    switch (*mck) {
-      case CO::MultiControlKind::EXEC:
-        if (cid_->name() == "EXEC")
-          aux_params = FormatExecSlowlog(cntx->conn_state);
-        break;
-      case CO::MultiControlKind::EVAL:
-        aux_params = FormatEvalSlowlog(cntx->conn_state);
-        break;
-    };
+  if (cid_->IsMultiTransactional()) {
+    if (cid_->IsExec())
+      aux_params = FormatExecSlowlog(cntx->conn_state);
+    else if (cid_->IsEvalGroup())
+      aux_params = FormatEvalSlowlog(cntx->conn_state);
     aux_slice = {aux_params.begin(), aux_params.end()};
     if (tail_args.size() > 0) {
       if (!aux_params.empty())

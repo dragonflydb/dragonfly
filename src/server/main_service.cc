@@ -542,7 +542,7 @@ enum class ExecScriptUse : uint8_t {
 ExecScriptUse DetermineScriptPresense(const std::vector<StoredCmd>& body) {
   bool script_load = false;
   for (const auto& scmd : body) {
-    if (scmd.Cid()->MultiControlKind() == CO::MultiControlKind::EVAL) {
+    if (scmd.Cid()->IsEvalGroup()) {
       return ExecScriptUse::SCRIPT_RUN;
     }
 
@@ -826,8 +826,9 @@ void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, con
   auto& etl = *ServerState::tlocal();
   if (etl.IsPaused() && !conn->IsPrivileged()) {
     bool is_write = cid->IsJournaled();
-    is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
-    is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
+    // PUBLISH and writable EVAL/EVALSHA (not the *_RO variants) count as writes here.
+    is_write |= cid->IsPublish() || (cid->IsEvalGroup() && !cid->IsReadOnly());
+    is_write |= cid->IsExec() && dfly_cntx->conn_state.exec_info.is_write;
 
     dfly_cntx->paused = true;
     etl.AwaitPauseState(is_write);
@@ -1184,9 +1185,9 @@ void Service::Shutdown() {
 
 OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
   // Sharded pub-sub acts as if it's sharded by its channel name (just for checks)
-  if (cid->PubSubKind() == CO::PubSubKind::SHARDED) {
+  if (cid->IsShardedPubSub()) {
     // SPUBLISH has only one key, the rest is data
-    if (cid->name() == "SPUBLISH")
+    if (cid->IsSPublish())
       return KeyIndex(0, 1);
     return {KeyIndex(0, args.size())};  // sub/unsub list of channels
   }
@@ -1201,7 +1202,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid, CmdArgLis
     return nullopt;
   }
 
-  if (cid.first_key_pos() == 0 && cid.PubSubKind() != CO::PubSubKind::SHARDED) {
+  if (cid.first_key_pos() == 0 && !cid.IsShardedPubSub()) {
     return nullopt;  // No key command.
   }
 
@@ -1237,7 +1238,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid, CmdArgLis
 // TODO(kostas) refactor. Almost 1-1 with CheckKeyOwnership() above.
 std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId& cid, CmdArgList args,
                                                               const ConnectionContext& dfly_cntx) {
-  if (cid.first_key_pos() == 0 && cid.PubSubKind() != CO::PubSubKind::SHARDED) {
+  if (cid.first_key_pos() == 0 && !cid.IsShardedPubSub()) {
     return nullopt;  // No key command.
   }
 
@@ -1380,7 +1381,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
     return ErrorReply{"Replica can't interact with the keyspace"};
 
   bool is_write_cmd = cid.IsJournaled();
-  bool is_trans_cmd = cid.MultiControlKind() == CO::MultiControlKind::EXEC;
+  bool is_trans_cmd = cid.IsExecGroup();
   bool under_script = dfly_cntx.conn_state.script_info != nullptr;
   bool multi_active = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
@@ -1516,7 +1517,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
 
-    if (cid->name() == "REPLCONF") {
+    if (cid->IsReplConf()) {
       DCHECK_GE(args_no_cmd.size(), 1u);
       // We should not reply to REPLCONF ACKS.
       if (absl::EqualsIgnoreCase(args_no_cmd.Front(), "ACK")) {
@@ -1535,7 +1536,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
       << ConnectionLogContext(dfly_cntx->conn());
 
   // If inside MULTI block, store command
-  bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
+  bool is_trans_cmd = cid->IsExecGroup();
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     uint8_t tail_index = args.size() - args_no_cmd.size();
     StoreInMultiBlock(dfly_cntx, cid, parsed_cmd, tail_index);
@@ -1672,7 +1673,7 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
     }
 
     if (cntx->conn_state.tracking_info_.IsTrackingOn()) {
-      if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
+      if ((!tx && !cid->IsMulti()) || (tx && !tx->IsMulti())) {
         // Each time we execute a command we need to increase the sequence number in
         // order to properly track clients when OPTIN is used.
         // We don't do this for `multi/exec` because it would break the
@@ -1691,12 +1692,10 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
 
   // For EVAL[] and EXEC/DISCARD, clean up state.
   // We don't do it directly in commands to allow some introspection after execution (slowlog).
-  if (auto mck = cid->MultiControlKind(); mck) {
-    if (*mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
-      MultiCleanup(cntx);
-    else if (*mck == CO::MultiControlKind::EVAL)
-      cntx->conn_state.script_info.reset();
-  }
+  if (cid->IsExecGroup() && !cid->IsMulti())
+    MultiCleanup(cntx);
+  else if (cid->IsEvalGroup())
+    cntx->conn_state.script_info.reset();
 
   return res;
 }
@@ -1760,15 +1759,15 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
-    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() ||
-                          (cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EXEC);
+    const bool is_multi =
+        dfly_cntx->conn_state.exec_info.IsCollecting() || (cid != nullptr && cid->IsExecGroup());
 
     // Generally, executing any multi-transactions (including eval) is not possible because they
     // might request a stricter multi mode than non-atomic which is used for squashing.
     // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
     // invocations, we can potentially execute multiple eval in parallel, which is very powerful
     // paired with shardlocal eval
-    const bool is_eval = cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EVAL;
+    const bool is_eval = cid != nullptr && cid->IsEvalGroup();
     const bool is_blocking = cid != nullptr && cid->IsBlocking();
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
@@ -2534,7 +2533,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void Service::Publish(CmdArgList args, CommandContext* cmd_cntx) {
-  bool sharded = cmd_cntx->cid()->PubSubKind() == CO::PubSubKind::SHARDED;
+  bool sharded = cmd_cntx->cid()->IsShardedPubSub();
   if (!sharded && IsClusterEnabled())
     return cmd_cntx->SendError("PUBLISH is not supported in cluster mode yet");
 
@@ -2545,7 +2544,7 @@ void Service::Publish(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void Service::Subscribe(CmdArgList args, CommandContext* cmd_cntx) {
-  bool sharded = cmd_cntx->cid()->PubSubKind() == CO::PubSubKind::SHARDED;
+  bool sharded = cmd_cntx->cid()->IsShardedPubSub();
   if (!sharded && IsClusterEnabled())
     return cmd_cntx->SendError("SUBSCRIBE is not supported in cluster mode yet");
 
@@ -2555,7 +2554,7 @@ void Service::Subscribe(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void Service::Unsubscribe(CmdArgList args, CommandContext* cmd_cntx) {
-  bool sharded = cmd_cntx->cid()->PubSubKind() == CO::PubSubKind::SHARDED;
+  bool sharded = cmd_cntx->cid()->IsShardedPubSub();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
   if (!sharded && IsClusterEnabled())
