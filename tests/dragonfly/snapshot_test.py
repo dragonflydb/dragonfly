@@ -4,13 +4,11 @@ import logging
 import os
 from pathlib import Path
 
-import async_timeout
+from async_timeout import timeout
 import boto3
 import pytest
 import redis
 import random
-from async_timeout import timeout
-from azure.storage.blob import BlobServiceClient
 from pymemcache.client.base import Client as MCClient
 from redis import asyncio as aioredis
 
@@ -496,6 +494,8 @@ def _missing_azure_test_env():
 
 
 def delete_azure_objects(container, prefix):
+    from azure.storage.blob import BlobServiceClient
+
     conn_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
     blob_service = BlobServiceClient.from_connection_string(conn_str)
     container_client = blob_service.get_container_client(container)
@@ -1108,7 +1108,7 @@ async def test_tagged_chunk_replication(df_factory, compression_mode: str):
     await asyncio.sleep(0.0)
 
     await cr.execute_command(f"REPLICAOF localhost {master.port}")
-    async with async_timeout.timeout(120):
+    async with timeout(120):
         await wait_for_replicas_state(cr)
 
     await seeder.stop(cm)
