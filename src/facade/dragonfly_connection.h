@@ -598,7 +598,8 @@ class Connection : public util::Connection {
       // if the flag is set.
       bool is_tls_ : 1;
       bool is_main_ : 1;
-      bool ioloop_v2_ : 1;  // whether this connection is running on ioloop v2
+      bool ioloop_v2_ : 1;              // whether this connection is running on ioloop v2
+      bool pipeline_squashing_v2_ : 1;  // whether V2 pipeline squashing is enabled
 
       // If post migration is allowed to call RegisterRecv
       bool migration_allowed_to_register_ : 1;

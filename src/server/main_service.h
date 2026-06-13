@@ -46,6 +46,9 @@ class Service : public facade::ServiceInterface {
                                                   facade::SinkReplyBuilder* builder,
                                                   facade::ConnectionContext* cntx) final;
 
+  unsigned DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
+                                 facade::ConnectionContext* cntx) final;
+
   // Check OOM and invoke command with args
   facade::DispatchResult InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx);
 

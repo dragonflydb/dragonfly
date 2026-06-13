@@ -130,6 +130,9 @@ ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
           "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
 ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
           "Enable the event-driven IoLoopV2 for non-TLS RESP connections.");
+ABSL_FLAG(bool, enable_pipeline_squashing_v2, true,
+          "Enable vectorized pipeline squashing for the V2 dispatch loop. Groups consecutive "
+          "single-shard pipeline commands by shard and executes them in parallel.");
 
 using namespace util;
 using namespace std;
@@ -969,6 +972,7 @@ void Connection::HandleRequests() {
           !is_tls_ &&
           ((protocol_ == Protocol::MEMCACHE && GetFlag(FLAGS_enable_memcache_io_loop_v2)) ||
            (protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_resp_io_loop_v2)));
+      pipeline_squashing_v2_ = ioloop_v2_ && GetFlag(FLAGS_enable_pipeline_squashing_v2);
 
       socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       switch (protocol_) {
@@ -2575,6 +2579,16 @@ bool Connection::ExecuteBatch() {
     ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
     return parsed_head_;
   };
+
+  // V2 vectorized squash phase: group single-shard commands by shard and execute in parallel.
+  if (pipeline_squashing_v2_ && parsed_cmd_q_len_ > 1 && protocol_ == Protocol::REDIS) {
+    unsigned squashed =
+        service_->DispatchSquashedBatch(parsed_to_execute_, parsed_cmd_q_len_, cc_.get());
+    for (unsigned i = 0; i < squashed && parsed_to_execute_; i++) {
+      parsed_to_execute_ = parsed_to_execute_->next;
+    }
+    conn_stats.pipeline_dispatch_commands += squashed;
+  }
 
   // Execute sequentially all parsed commands.
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {

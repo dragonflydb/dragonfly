@@ -1174,10 +1174,11 @@ Usage: dragonfly [FLAGS]
   // _default functions override the default options vaues but if the options were set
   // via the environment variables, they will not be overridden.
   mi_option_set_enabled_default(mi_option_show_errors, true);
-  mi_option_set_default(mi_option_purge_delay, 0);
+
+  // mi_option_set_default(mi_option_purge_delay, 0);
 
   // To see the options after the override, use:
-  // mi_options_print();
+  mi_options_print();
 
   fb2::SetDefaultStackResource(&g_mi_resource, kFiberDefaultStackSize);
 

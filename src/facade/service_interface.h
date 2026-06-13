@@ -54,6 +54,11 @@ class ServiceInterface {
                                                   SinkReplyBuilder* builder,
                                                   ConnectionContext* cntx) = 0;
 
+  virtual unsigned DispatchSquashedBatch(ParsedCommand* first, unsigned count,
+                                         ConnectionContext* cntx) {
+    return 0;
+  }
+
   virtual ConnectionContext* CreateContext(Connection* owner) = 0;
 
   virtual ParsedCommand* AllocateParsedCommand() = 0;
