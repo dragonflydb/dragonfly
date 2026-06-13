@@ -1809,6 +1809,105 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
   return {.processed = dispatched, .account_in_stats = account_in_stats};
 }
 
+DispatchManyResult Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
+                                                  facade::ConnectionContext* cntx) {
+  auto* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
+
+  auto* rb = static_cast<RedisReplyBuilder*>(first->rb());
+  auto* ss = ServerState::tlocal();
+
+  // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
+  if (ss->IsPaused())
+    return {.processed = 0, .account_in_stats = false};
+
+  vector<CmdRef> cmd_refs;
+  cmd_refs.reserve(count);
+  intrusive_ptr<Transaction> dist_trans;
+  unsigned dispatched = 0;
+  MultiCommandSquasher::Stats stats;
+
+  uint64_t start_cycles = base::CycleClock::Now();
+
+  auto perform_squash = [&] {
+    if (cmd_refs.empty())
+      return;
+
+    if (!dist_trans) {
+      dist_trans.reset(new Transaction{exec_cid_});
+      dist_trans->StartMultiNonAtomic();
+    } else {
+      // Reset to original command id as it's changed during squashing
+      dist_trans->MultiSwitchCmd(exec_cid_);
+    }
+
+    dfly_cntx->transaction = dist_trans.get();
+    MultiCommandSquasher::Opts opts;
+    opts.verify_commands = true;
+    opts.pipeline_mode = true;
+    opts.max_squash_size = ss->max_squash_cmd_num;
+
+    auto cmd_gen = [it = cmd_refs.begin(), end = cmd_refs.end()]() mutable -> CmdRef {
+      return (it == end) ? CmdRef{} : *it++;
+    };
+    stats += MultiCommandSquasher::Execute(std::move(cmd_gen), rb, dfly_cntx, this, opts);
+    dfly_cntx->transaction = nullptr;
+
+    dispatched += cmd_refs.size();
+    cmd_refs.clear();
+  };
+
+  auto* cmd = first;
+  for (unsigned i = 0; i < count && cmd; i++) {
+    auto* cmd_cntx = static_cast<CommandContext*>(cmd);
+
+    ParsedArgs args{*cmd_cntx};
+    const auto [cid, tail_args] = registry_.FindExtended(args);
+
+    // Only consecutive transactional single-shard commands are squashed. Stop the batch at the
+    // first command that can't join it; the connection's regular dispatch path then handles it
+    // (and the rest of the pipeline) with the real reply builder, after the replies squashed so
+    // far are flushed in order. Commands that stop the batch:
+    //  - unknown commands (cid == nullptr): dispatched standalone to produce their error reply;
+    //  - MULTI/EXEC and the commands queued between them: sequential, stored in ExecInfo;
+    //  - EVAL: scripts may require a stricter multi mode than the non-atomic squashing tx;
+    //  - blocking commands: prior replies must be flushed before the fiber blocks;
+    //  - QUIT: closes the reply builder, dropping any deferred replies not yet sent;
+    //  - subscribe/unsubscribe: emit one reply per channel (multiple top-level replies), which the
+    //    CapturingReplyBuilder backing deferred replies cannot represent.
+    if (cid == nullptr)
+      break;
+
+    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() ||
+                          cid->MultiControlKind() == CO::MultiControlKind::EXEC;
+    const bool is_eval = cid->MultiControlKind() == CO::MultiControlKind::EVAL;
+    if (is_multi || is_eval || cid->IsBlocking() || string_view{cid->name()} == "QUIT" ||
+        absl::EndsWith(cid->name(), "SUBSCRIBE"))
+      break;
+
+    cmd_refs.push_back(CmdRef{cid, tail_args, ReplyMode::FULL, cmd_cntx});
+    cmd = cmd->next;
+  }
+
+  perform_squash();
+
+  if (dist_trans)
+    dist_trans->UnlockMulti();
+
+  uint64_t total_usec = base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
+  bool account_in_stats = total_usec > squash_stats_latency_lower_limit_cached;
+  if (account_in_stats) {
+    ss->stats.multi_squash_exec_hop_usec += stats.hop_usec;
+    ss->stats.multi_squash_exec_reply_usec += stats.reply_usec;
+    ss->stats.multi_squash_hops += stats.hops;
+    ss->stats.squashed_commands += stats.squashed_commands;
+  } else {
+    ss->stats.squash_stats_ignored++;
+  }
+
+  return {.processed = dispatched, .account_in_stats = account_in_stats};
+}
+
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
   constexpr uint8_t kMaxUknownCommands = 64;
   constexpr uint8_t kMaxUknownCommandLength = 20;

@@ -100,8 +100,10 @@ void ParsedCommand::SendLong(long val) {
 }
 
 void ParsedCommand::Resolve(payload::Payload&& pl) {
-  DCHECK(is_deferred_reply_);
+  DCHECK(!is_deferred_reply_);
   DCHECK_GT(pl.index(), 0u);  // not monostate
+
+  is_deferred_reply_ = true;
   reply_ = std::move(pl);
 }
 

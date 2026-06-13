@@ -2,7 +2,6 @@ import asyncio
 import logging
 import random
 import socket
-import ssl
 import string
 import time
 from dataclasses import dataclass
@@ -532,14 +531,14 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
         for i in range(0, 150):
             try:
                 async with async_timeout.timeout(1):
-                    message = await channel.get_message(ignore_subscribe_messages=True)
+                    await channel.get_message(ignore_subscribe_messages=True)
             except asyncio.TimeoutError:
                 break
 
     async def subscribe_worker():
         client = aioredis.Redis(connection_pool=async_pool)
         pubsub = client.pubsub()
-        async with pubsub as p:
+        async with pubsub:
             await pubsub.subscribe("channel")
             await channel_reader(pubsub)
             await pubsub.unsubscribe("channel")
@@ -832,10 +831,9 @@ async def test_send_delay_metric(df_server: DflyInstance):
 
 
 async def test_match_http(df_server: DflyInstance):
-    client = df_server.client()
     reader, writer = await asyncio.open_connection("localhost", df_server.port)
     for i in range(2000):
-        writer.write(f"foo bar ".encode())
+        writer.write("foo bar ".encode())
         await writer.drain()
 
 
@@ -1076,6 +1074,52 @@ async def test_squashed_pipeline_multi(async_client: aioredis.Redis):
     await p.execute()
 
 
+"""
+Regression: subscribe/unsubscribe commands emit one reply per channel (multiple top-level
+replies), which the CapturingReplyBuilder backing deferred replies cannot represent. When such
+a command lands in a squashed pipeline it must be routed to the regular dispatch path, not
+captured — otherwise the server crashes (reply_capture: current_.index() == 0).
+"""
+
+
+@dfly_args({"proactor_threads": "1", "pipeline_squash": 1})
+async def test_squashed_pipeline_pubsub(df_server: DflyInstance):
+    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+
+    def enc(*args):
+        out = f"*{len(args)}\r\n".encode()
+        for a in args:
+            b = str(a).encode()
+            out += f"${len(b)}\r\n".encode() + b + b"\r\n"
+        return out
+
+    # A large pipeline forces SquashPipeline; the multi-channel (s)unsubscribe commands sit
+    # among squashable SETs. A trailing PING marker confirms the whole batch was processed in
+    # order without crashing.
+    req = enc("SET", "k", "v") * 40
+    req += enc("SUNSUBSCRIBE", "chA", "chB")
+    req += enc("UNSUBSCRIBE", "chC", "chD")
+    req += enc("SET", "k", "v") * 40
+    req += enc("PING", "squash_survived")
+    writer.write(req)
+    await writer.drain()
+
+    data = b""
+    async with async_timeout.timeout(5):
+        while b"squash_survived" not in data:
+            chunk = await reader.read(65536)
+            if not chunk:
+                break
+            data += chunk
+
+    assert b"squash_survived" in data, "server did not finish the pipeline (crash?)"
+    # Both unsubscribe commands produced their per-channel replies, in order.
+    assert b"chA" in data and b"chB" in data  # SUNSUBSCRIBE
+    assert b"chC" in data and b"chD" in data  # UNSUBSCRIBE
+    writer.close()
+    await writer.wait_closed()
+
+
 async def test_unix_domain_socket(df_factory, tmp_dir):
     server = df_factory.create(proactor_threads=1, port=BASE_PORT, unixsocket="./df.sock")
     server.start()
@@ -1245,7 +1289,7 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
 @dfly_args({"send_timeout": 3})
 async def test_send_timeout(df_server, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
-    writer.write(f"client setname writer_test\n".encode())
+    writer.write("client setname writer_test\n".encode())
     await writer.drain()
     assert "OK" in (await reader.readline()).decode()
     clients = await async_client.client_list()
@@ -1256,7 +1300,7 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
 
     async def get_task():
         while True:
-            writer.write(f"GET a\n".encode())
+            writer.write("GET a\n".encode())
             await writer.drain()
             await asyncio.sleep(0.1)
 
@@ -1302,23 +1346,24 @@ async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     await client.ping()  # Make sure the connection and the protocol were established
 
     async def push_pipeline(size):
-        p = client.pipeline(transaction=True)
+        # Plain (non-transactional) pipeline: MULTI/EXEC is no longer squash-dispatched
+        # (it falls back to regular dispatch), so use squashable commands to exercise the
+        # SquashPipeline cache lifecycle.
+        p = client.pipeline(transaction=False)
         for i in range(size):
             p.info()
         res = await p.execute()
         return res
 
-    # Dispatch only async command/pipelines and force squashing. pipeline_cache_bytes,
-    # should be zero because:
-    # We always dispatch the items that will be squashed, so when `INFO` gets called
-    # the cache is empty because the pipeline consumed it throughout its execution
+    # Dispatch only async command/pipelines and force squashing. pipeline_cache_bytes
+    # should be zero because the squashed batch consumes the parsed commands and releases
+    # them only after execution, so while `INFO` runs the cache is empty.
     # high max_busy_read_usec ensures that the connection fiber has enough time to push
     # all the commands to reach the squashing limit.
     for i in range(0, 10):
-        # it's actually 11 commands. 8 INFO + 2 from the MULTI/EXEC block that is injected
-        # by the client. The minimum to squash is 9 so it will squash the pipeline
-        # and INFO ALL should return zero for all the squashed commands in the pipeline
-        res = await push_pipeline(8)
+        # 10 INFO commands exceed pipeline_squash=9, so the whole pipeline is squashed and
+        # INFO should report pipeline_cache_bytes == 0 for every command in it.
+        res = await push_pipeline(10)
         for r in res:
             assert r["pipeline_cache_bytes"] == 0
 
@@ -1675,8 +1720,6 @@ async def test_client_migrate(df_server: DflyInstance):
 )
 async def test_client_migrate_no_conn_leak(df_server: DflyInstance):
     admin = df_server.client()
-    resp = await admin.execute_command("DFLY THREAD")
-    num_threads = resp[1]
 
     # Create multiple clients and migrate them all to the same thread.
     # If DecreaseConnStats is called twice per migration (double-decrement bug),
@@ -1902,7 +1945,7 @@ async def test_issue_5931_malformed_protocol_crash(df_server: DflyInstance):
         await writer.drain()
 
         try:
-            response = await asyncio.wait_for(reader.read(1024), timeout=2.0)
+            await asyncio.wait_for(reader.read(1024), timeout=2.0)
             # If we get a response, it should be an error, not a crash
             # The server is still running if we got here
         except asyncio.TimeoutError:
@@ -1947,7 +1990,7 @@ async def test_issue_5949_nil_bulk_string_crash(df_server: DflyInstance):
         await writer.drain()
 
         try:
-            response = await asyncio.wait_for(reader.read(1024), timeout=2.0)
+            await asyncio.wait_for(reader.read(1024), timeout=2.0)
             # If we get a response, it should be an error, not a crash
         except asyncio.TimeoutError:
             # Timeout is acceptable - connection might be closed
@@ -1981,6 +2024,17 @@ async def test_issue_6165_squash_invalid_syntax(async_client):
     res = await pip.execute(raise_on_error=False)
     assert res[0] == True  # SET key1
     assert isinstance(res[1], aioredis.ResponseError)  # INVALID SYNTAX
+
+    # Unknown command (cid == nullptr) takes the inline non-squashable path in
+    # DispatchSquashedBatch; its error must be captured and replies kept in order.
+    pip = async_client.pipeline(transaction=False)
+    pip.set("k", "v")
+    pip.execute_command("FOOBAR", "arg1", "arg2")
+    pip.get("k")
+    res = await pip.execute(raise_on_error=False)
+    assert res[0] == True  # SET
+    assert isinstance(res[1], aioredis.ResponseError)  # unknown command
+    assert res[2] == "v"  # GET after the unknown command, order preserved
 
 
 @dfly_args({"proactor_threads": "2", "pipeline_squash": 1})
