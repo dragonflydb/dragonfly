@@ -188,9 +188,11 @@ CommandId CommandId::Clone(const std::string_view name) const {
   cloned.opt_mask_ = opt_mask_ | CO::HIDDEN;
   cloned.acl_categories_ = acl_categories_;
   cloned.interleave_step_ = interleave_step_;
-  // Preserve the source's IMPLICIT_ACL bit (the ctor cleared it since we pass acl_categories_),
-  // and mark this command as an alias.
-  cloned.kind_mask_ = (cloned.kind_mask_ & ~IMPLICIT_ACL) | (kind_mask_ & IMPLICIT_ACL) | IS_ALIAS;
+  // An alias is semantically the same command, so inherit the source's full derived identity and
+  // attributes (incl. SUPPORT_ASYNC, pub/sub & exec/eval identity, CAN_MONITOR, IMPLICIT_ACL) -
+  // the ctor recomputed these from the alias name, which is not what we want - and mark it as an
+  // alias.
+  cloned.kind_mask_ = kind_mask_ | IS_ALIAS;
 
   // explicit sharing of the object since it's an alias we can do that.
   // I am assuming that the source object lifetime is at least as of the cloned object.
