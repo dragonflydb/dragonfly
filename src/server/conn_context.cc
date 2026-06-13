@@ -65,6 +65,14 @@ StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyM
   args_ = facade::ParsedArgs{*backed_};
 }
 
+StoredCmd::StoredCmd(const CommandId* cid, cmn::BackedArguments* src, uint8_t tail_index,
+                     facade::ReplyMode mode)
+    : cid_{cid}, reply_mode_{mode} {
+  backed_ = std::make_unique<cmn::BackedArguments>();
+  backed_->SwapArgs(*src);
+  args_ = facade::ParsedArgs{*backed_, tail_index};
+}
+
 CmdArgList StoredCmd::Slice(CmdArgVec* scratch) const {
   return args_.ToSlice(scratch);
 }
@@ -74,6 +82,10 @@ std::string StoredCmd::FirstArg() const {
     return {};
   }
   return string{args_.Front()};
+}
+
+CmdRef StoredCmd::Ref() const {
+  return CmdRef{cid_, args_, reply_mode_};
 }
 
 ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredentials cred)
@@ -170,12 +182,6 @@ void ConnectionContext::PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder
 
 size_t ConnectionState::ExecInfo::UsedMemory() const {
   return HeapSize(body) + HeapSize(watched_keys);
-}
-
-void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, ArgSlice args) {
-  body.emplace_back(cid, args);
-  stored_cmd_bytes += body.back().UsedMemory();
-  is_write |= cid->IsJournaled();
 }
 
 size_t ConnectionState::ExecInfo::ClearStoredCmds() {
@@ -306,15 +312,15 @@ void CommandContext::ReuseInternal() {
   tx_ = nullptr;
   tail_args_ = {};
   arg_slice_backing.clear();
-  start_time_ns = 0;
+  start_time_usec = 0;
 }
 
 void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
-  DCHECK_GT(start_time_ns, 0u);
-  int64_t after = absl::GetCurrentTimeNanos();
+  DCHECK_GT(start_time_usec, 0u);
+  int64_t after = base::CycleClock::ToUsec(base::CycleClock::Now());
 
   ServerState* ss = ServerState::SafeTLocal();  // Might have migrated thread, read after invocation
-  int64_t execution_time_usec = (after - start_time_ns) / 1000;
+  int64_t execution_time_usec = after - start_time_usec;
 
   cid_->RecordLatency(ss->thread_index(), execution_time_usec);
   DCHECK(conn_cntx_ != nullptr);
@@ -325,8 +331,9 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
     return;
 
   if (!ss->ShouldLogSlowCmd(execution_time_usec))  // It was not a slow command
-    return;
+    return;                                        // fast path - no logging is required
 
+  // Slow path - logging is required.
   auto* cntx = static_cast<dfly::ConnectionContext*>(conn_cntx());
 
   // Log nested commands of scripts that made it into slowlog

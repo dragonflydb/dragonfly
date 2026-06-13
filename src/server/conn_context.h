@@ -21,6 +21,23 @@ class ChannelStore;
 class Interpreter;
 struct FlowInfo;
 
+// Non-owning view of a command for the squasher. Can be constructed from StoredCmd or
+// CommandContext.
+struct CmdRef {
+  const CommandId* cid = nullptr;
+  facade::ParsedArgs args;
+  facade::ReplyMode reply_mode = facade::ReplyMode::FULL;
+  CommandContext* cmd_cntx = nullptr;
+
+  bool IsValid() const {
+    return cid != nullptr;
+  }
+
+  facade::ArgSlice Slice(CmdArgVec* scratch) const {
+    return args.ToSlice(scratch);
+  }
+};
+
 // Stores command id and arguments for delayed invocation.
 // Used for storing MULTI/EXEC commands.
 class StoredCmd {
@@ -28,10 +45,10 @@ class StoredCmd {
   // Deep copy of args, creates backing storage internally.
   StoredCmd(const CommandId* cid, ArgSlice args, facade::ReplyMode mode = facade::ReplyMode::FULL);
 
-  // Shallow copy of args.
-  StoredCmd(const CommandId* cid, facade::ParsedArgs args)
-      : cid_{cid}, args_{args}, reply_mode_(facade::ReplyMode::FULL) {
-  }
+  // Moves args from src via swap. src's BackedArguments will be empty after this.
+  // tail_index specifies how many leading args to skip (e.g., 1 to skip the command name).
+  StoredCmd(const CommandId* cid, cmn::BackedArguments* src, uint8_t tail_index,
+            facade::ReplyMode mode = facade::ReplyMode::FULL);
 
   size_t NumArgs() const {
     return args_.size();
@@ -54,6 +71,8 @@ class StoredCmd {
   facade::ReplyMode ReplyMode() const {
     return reply_mode_;
   }
+
+  CmdRef Ref() const;
 
  private:
   const CommandId* cid_;     // underlying command
@@ -89,9 +108,6 @@ struct ConnectionState {
     void ClearWatched();
 
     size_t UsedMemory() const;
-
-    // Deep copies arguments and updates the stored_cmd_bytes.
-    void AddStoredCmd(const CommandId* cid, ArgSlice args);
 
     // Empties the body vector and resets stored_cmd_bytes to 0. Returns the size before data was
     // cleared.
@@ -425,7 +441,7 @@ class CommandContext : public facade::ParsedCommand {
     return tail_args_;
   }
 
-  uint64_t start_time_ns = 0;
+  uint64_t start_time_usec = 0;
 
   // Stores backing array for tail args slice
   CmdArgVec arg_slice_backing;

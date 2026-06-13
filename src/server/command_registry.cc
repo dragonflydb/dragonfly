@@ -221,7 +221,7 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
 }
 
 void CommandId::ResetStats(unsigned thread_index) {
-  command_stats_[thread_index] = {0, 0};
+  command_stats_[thread_index].stats = {0, 0};
   if (hdr_histogram* h = latency_histogram_; h != nullptr) {
     hdr_reset(h);
     std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -231,8 +231,8 @@ void CommandId::ResetStats(unsigned thread_index) {
 void CommandId::RecordLatency(unsigned tid, uint64_t latency_usec) const {
   auto& ent = command_stats_[tid];
 
-  ++ent.first;
-  ent.second += latency_usec;
+  ++ent.stats.first;
+  ent.stats.second += latency_usec;
 
   if (latency_histogram_) {
     hdr_record_value_atomic(latency_histogram_, latency_usec);

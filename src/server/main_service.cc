@@ -880,11 +880,16 @@ pair<intrusive_ptr<Transaction>, OpStatus> PrepareTransaction(const CommandId* c
   return {std::move(res), OpStatus::OK};
 }
 
-void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid, ArgSlice tail_args) {
+void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid,
+                       facade::ParsedCommand* parsed_cmd, uint8_t tail_index) {
   // TODO: protect against aggregating huge transactions.
   auto& exec_info = dfly_cntx->conn_state.exec_info;
   const size_t old_size = exec_info.GetStoredCmdBytes();
-  exec_info.AddStoredCmd(cid, tail_args);  // Deep copy of args.
+
+  // Moves arguments from parsed_cmd to body.
+  exec_info.body.emplace_back(cid, parsed_cmd, tail_index);
+  exec_info.stored_cmd_bytes += exec_info.body.back().UsedMemory();
+  exec_info.is_write |= cid->IsJournaled();
   ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
 }
 
@@ -1307,24 +1312,6 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
   return nullopt;
 }
 
-bool ShouldDenyOnOOM(const CommandContext& cmd_cntx) {
-  DCHECK_NE(cmd_cntx.start_time_ns, 0u);
-  ServerState& etl = *ServerState::tlocal();
-  if ((cmd_cntx.cid()->opt_mask() & CO::DENYOOM) && etl.is_master) {
-    auto memory_stats = etl.GetMemoryUsage(cmd_cntx.start_time_ns);
-
-    size_t limit = max_memory_limit.load(memory_order_relaxed);
-    if (memory_stats.used_mem > limit ||
-        (etl.rss_oom_deny_ratio > 0 && memory_stats.rss_mem > (limit * etl.rss_oom_deny_ratio))) {
-      DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
-                    << memory_stats.rss_mem << " ,limit " << limit;
-      etl.stats.oom_error_cmd_cnt++;
-      return true;
-    }
-  }
-  return false;
-}
-
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdArgList tail_args,
                                                       const ConnectionContext& dfly_cntx) {
   ServerState& etl = *ServerState::tlocal();
@@ -1550,7 +1537,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   // If inside MULTI block, store command
   bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
-    StoreInMultiBlock(dfly_cntx, cid, tail_args);
+    uint8_t tail_index = args.size() - args_no_cmd.size();
+    StoreInMultiBlock(dfly_cntx, cid, parsed_cmd, tail_index);
     cmd_cntx->SendSimpleString("QUEUED");
     return DispatchResult::OK;
   }
@@ -1635,75 +1623,79 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  cmd_cntx->start_time_ns = absl::GetCurrentTimeNanos();
+  cmd_cntx->start_time_usec = base::CycleClock::ToUsec(base::CycleClock::Now());
 
   ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   auto* builder = cmd_cntx->rb();
   DCHECK(builder);
   DCHECK(cntx);
 
-  if (ShouldDenyOnOOM(*cmd_cntx)) {
+  ServerState& ss = *ServerState::tlocal();
+
+  if ((cid->opt_mask() & CO::DENYOOM) && ss.ShouldDenyOnOOM(cmd_cntx->start_time_usec)) {
     cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
     return DispatchResult::OOM;
   }
 
-  bool has_monitors = !ServerState::tlocal()->Monitors().Empty();
-  if (cid->CanBeMonitored() && has_monitors) {
+  bool has_monitors = !ss.Monitors().Empty();
+  if (has_monitors && cid->CanBeMonitored()) {
     DispatchMonitor(cntx, cid, tail_args);
   }
 
-  ServerState::tlocal()->RecordCmd(cntx->has_main_or_memcache_listener);
+  ss.RecordCmd(cntx->has_main_or_memcache_listener);
   TrackIfNeeded(cmd_cntx);
   auto* tx = cmd_cntx->tx();
-
-  // For EVAL[] and EXEC/DISCARD, clean up state.
-  // We don't do it directly in commands to allow some introspection after execution (slowlog).
-  absl::Cleanup mck_cleanup = [cntx, cid, mck = cid->MultiControlKind()]() {
-    if (mck && *mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
-      MultiCleanup(cntx);
-    else if (mck && *mck == CO::MultiControlKind::EVAL)
-      cntx->conn_state.script_info.reset();
-  };
 
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(*cmd_cntx);
 #endif
   builder->ConsumeLastError();  // throw away last error
+  DispatchResult res = DispatchResult::OK;
   try {
     cid->Invoke(tail_args, cmd_cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
-    return DispatchResult::ERROR;
+    res = DispatchResult::ERROR;
   }
 
-  DispatchResult res = DispatchResult::OK;
-  if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
-    // Set flag if OOM reported
-    if (reason == kOutOfMemory) {
-      res = DispatchResult::OOM;
+  if (res == DispatchResult::OK) {
+    if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
+      // Set flag if OOM reported
+      if (reason == kOutOfMemory) {
+        res = DispatchResult::OOM;
+      }
+      VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
+      if (ShouldLogError(*cid, reason, tail_args)) {
+        LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
+      }
     }
-    VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
-    if (ShouldLogError(*cid, reason, tail_args)) {
-      LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
+
+    if (cntx->conn_state.tracking_info_.IsTrackingOn()) {
+      if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
+        // Each time we execute a command we need to increase the sequence number in
+        // order to properly track clients when OPTIN is used.
+        // We don't do this for `multi/exec` because it would break the
+        // semantics, i.e, CACHING should stick for all commands following
+        // the CLIENT CACHING ON within a multi/exec block
+        cntx->conn_state.tracking_info_.IncrementSequenceNumber();
+      }
+    }
+
+    cmd_cntx->RecordLatency(tail_args);
+
+    if (tx && !cntx->conn_state.exec_info.IsRunning() && cntx->conn_state.script_info == nullptr) {
+      cntx->last_command_debug.clock = tx->txid();
     }
   }
 
-  if (cntx->conn_state.tracking_info_.IsTrackingOn()) {
-    if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
-      // Each time we execute a command we need to increase the sequence number in
-      // order to properly track clients when OPTIN is used.
-      // We don't do this for `multi/exec` because it would break the
-      // semantics, i.e, CACHING should stick for all commands following
-      // the CLIENT CACHING ON within a multi/exec block
-      cntx->conn_state.tracking_info_.IncrementSequenceNumber();
-    }
-  }
-
-  cmd_cntx->RecordLatency(tail_args);
-
-  if (tx && !cntx->conn_state.exec_info.IsRunning() && cntx->conn_state.script_info == nullptr) {
-    cntx->last_command_debug.clock = tx->txid();
+  // For EVAL[] and EXEC/DISCARD, clean up state.
+  // We don't do it directly in commands to allow some introspection after execution (slowlog).
+  if (auto mck = cid->MultiControlKind(); mck) {
+    if (*mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
+      MultiCleanup(cntx);
+    else if (*mck == CO::MultiControlKind::EVAL)
+      cntx->conn_state.script_info.reset();
   }
 
   return res;
@@ -1722,7 +1714,7 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
   if (ss->IsPaused())
     return {.processed = 0, .account_in_stats = false};
 
-  vector<StoredCmd> stored_cmds;
+  vector<CmdRef> cmd_refs;
   intrusive_ptr<Transaction> dist_trans;
   uint32_t dispatched = 0;
   MultiCommandSquasher::Stats stats;
@@ -1730,7 +1722,7 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
   uint64_t start_cycles = base::CycleClock::Now();
 
   auto perform_squash = [&] {
-    if (stored_cmds.empty())
+    if (cmd_refs.empty())
       return;
 
     if (!dist_trans) {
@@ -1746,13 +1738,15 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
     opts.verify_commands = true;
     opts.max_squash_size = ss->max_squash_cmd_num;
 
-    stats += MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
-                                           static_cast<RedisReplyBuilder*>(builder), dfly_cntx,
-                                           this, opts);
+    auto cmd_gen = [it = cmd_refs.begin(), end = cmd_refs.end()]() mutable -> CmdRef {
+      return (it == end) ? CmdRef{} : *it++;
+    };
+    stats += MultiCommandSquasher::Execute(
+        std::move(cmd_gen), static_cast<RedisReplyBuilder*>(builder), dfly_cntx, this, opts);
     dfly_cntx->transaction = nullptr;
 
-    dispatched += stored_cmds.size();
-    stored_cmds.clear();
+    dispatched += cmd_refs.size();
+    cmd_refs.clear();
   };
 
   for (unsigned i = 0; i < count; i++) {
@@ -1778,8 +1772,8 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
     const bool is_blocking = cid != nullptr && cid->IsBlocking();
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
-      stored_cmds.reserve(count);
-      stored_cmds.emplace_back(cid, tail_args);  // Shallow copy
+      cmd_refs.reserve(count);
+      cmd_refs.push_back(CmdRef{cid, tail_args});
       continue;
     }
 
@@ -1962,7 +1956,10 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   opts.verify_commands = true;
   opts.error_abort = true;
   opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
-  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, opts);
+  auto cmd_gen = [it = info->async_cmds.begin(), end = info->async_cmds.end()]() mutable -> CmdRef {
+    return (it == end) ? CmdRef{} : (it++)->Ref();
+  };
+  MultiCommandSquasher::Execute(std::move(cmd_gen), &crb, cntx, this, opts);
 
   info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();
@@ -2487,9 +2484,12 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
 
     if (GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
+      auto cmd_gen = [it = exec_info.body.begin(), end = exec_info.body.end()]() mutable -> CmdRef {
+        return (it == end) ? CmdRef{} : (it++)->Ref();
+      };
       MultiCommandSquasher::Opts opts;
       opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
-      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this, opts);
+      MultiCommandSquasher::Execute(std::move(cmd_gen), rb, cntx, this, opts);
     } else {
       CmdArgVec arg_vec;
       DCHECK_EQ(cmd_cntx->cid(), exec_cid_);

@@ -172,14 +172,30 @@ void ServerState::EnterLameDuck() {
   watcher_cv_.notify_all();
 }
 
-ServerState::MemoryUsageStats ServerState::GetMemoryUsage(uint64_t now_ns) {
-  static constexpr uint64_t kCacheEveryNs = 1000;
-  if (now_ns > used_mem_last_update_ + kCacheEveryNs) {
-    used_mem_last_update_ = now_ns;
+ServerState::MemoryUsageStats ServerState::GetMemoryUsage(uint64_t now_usec) const {
+  if (now_usec != used_mem_last_read_usec_) {
+    used_mem_last_read_usec_ = now_usec;
     memory_stats_cached_.used_mem = used_mem_current.load(std::memory_order_relaxed);
     memory_stats_cached_.rss_mem = rss_mem_current.load(std::memory_order_relaxed);
   }
   return memory_stats_cached_;
+}
+
+bool ServerState::ShouldDenyOnOOM(uint64_t now_usec) {
+  DCHECK_NE(now_usec, 0u);
+  if (is_master) {
+    auto memory_stats = GetMemoryUsage(now_usec);
+
+    size_t limit = max_memory_limit.load(memory_order_relaxed);
+    if (memory_stats.used_mem > limit ||
+        (rss_oom_deny_ratio > 0 && memory_stats.rss_mem > (limit * rss_oom_deny_ratio))) {
+      DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
+                    << memory_stats.rss_mem << " ,limit " << limit;
+      stats.oom_error_cmd_cnt++;
+      return true;
+    }
+  }
+  return false;
 }
 
 bool ServerState::AllowInlineScheduling() const {
