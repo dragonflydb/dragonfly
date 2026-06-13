@@ -46,6 +46,14 @@ class ServiceInterface {
   virtual uint32_t DispatchManyCommands(ParsedCommand* head, unsigned count,
                                         SinkReplyBuilder* builder, ConnectionContext* cntx) = 0;
 
+  // Dispatches a batch of pipelined commands, squashing consecutive single-shard commands.
+  // Replies are deferred into the parsed commands and are sent by the connection afterwards.
+  // Returns the number of squashed commands.
+  virtual uint32_t DispatchSquashedBatch(ParsedCommand* first, unsigned count,
+                                         ConnectionContext* cntx) {
+    return 0;
+  }
+
   virtual ConnectionContext* CreateContext(Connection* owner) = 0;
 
   virtual ParsedCommand* AllocateParsedCommand() = 0;
