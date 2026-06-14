@@ -178,8 +178,6 @@ class OkService : public ServiceInterface {
   }
 
   DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference mode) final;
-  uint32_t DispatchManyCommands(ParsedCommand* head, unsigned count, SinkReplyBuilder* builder,
-                                ConnectionContext* cntx) final;
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
 
   ConnectionContext* CreateContext(Connection* owner) final {
@@ -245,21 +243,6 @@ DispatchResult OkService::DispatchCommand([[maybe_unused]] ParsedArgs args, Pars
     cmd->SendError("ERR unknown command");
   }
   return DispatchResult::OK;
-}
-
-// Relevant only for V1 pipelining flow.
-// Currently does not implement squashing and is very naive.
-// Use --enable_resp_io_loop_v2=true to go through the more optimized V2 flow
-// that doesn't call DispatchManyCommands at all.
-uint32_t OkService::DispatchManyCommands(ParsedCommand* head, unsigned count,
-                                         SinkReplyBuilder* builder, ConnectionContext* cntx) {
-  for (unsigned i = 0; i < count; i++) {
-    ParsedCommand* cmd = head;
-    head = head->next;
-    cmd->Init(builder, cntx);
-    DispatchCommand(ParsedArgs{*cmd}, cmd, AsyncPreference::ONLY_SYNC);
-  }
-  return count;
 }
 
 DispatchResult OkService::HandleSetSync(ParsedCommand* cmd) {

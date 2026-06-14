@@ -42,10 +42,6 @@ class ServiceInterface {
   virtual DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference) = 0;
   DispatchResult DispatchCommandSimple(ParsedCommand* cmd, AsyncPreference mode);
 
-  // Returns how many commands out of `count` were actually processed.
-  virtual uint32_t DispatchManyCommands(ParsedCommand* head, unsigned count,
-                                        SinkReplyBuilder* builder, ConnectionContext* cntx) = 0;
-
   // Dispatches a batch of pipelined commands, squashing consecutive single-shard commands.
   // Replies are deferred into the parsed commands and are sent by the connection afterwards.
   // Returns the number of squashed commands.
