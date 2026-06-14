@@ -12,6 +12,7 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "server/channel_store.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -20,6 +21,7 @@ extern "C" {
 
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(uint32_t, container_iteration_yield_interval_usec);
+ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 
 using namespace testing;
 using namespace std;
@@ -2053,8 +2055,6 @@ TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
 // behavior is expected for other containers (SET, HASH, LIST) with non
 // listpack encodings.
 TEST_F(GenericFamilyTest, ContainerIterationYields) {
-  GTEST_SKIP() << "Until --container_iteration_yield_interval_usec is re-enabled";
-
   // Build a large sorted set that will be encoded as SKIPLIST.
   constexpr int N = 500'000;
   for (int start = 0; start < N; start += 1'000) {
@@ -2085,6 +2085,60 @@ TEST_F(GenericFamilyTest, ContainerIterationYields) {
   EXPECT_GT(delta, 0);
 }
 
+// Verifies that a yielding container iteration observes a consistent view.
+// While LRANGE iterates over a large list and yields, a concurrent fiber
+// performs RPUSH operations. The returned result must remain consistent with
+// the list state at the start of LRANGE.
+TEST_F(GenericFamilyTest, ConcurrentWritesDuringContainerYield) {
+  constexpr int kListSize = 50'000;
+  constexpr int kIterations = 25;
+  const char* key = "list1";
+  constexpr int kBatch = 1'000;
+
+  vector<string> batch_args = {"RPUSH", key};
+  batch_args.insert(batch_args.end(), kBatch, "A");
+  for (int start = 0; start < kListSize; start += kBatch) {
+    Run(absl::Span<const string>(batch_args));
+  }
+
+  atomic_bool done{false};
+  uint64_t total_yields = 0;
+
+  // LLEN is executed immediately before LRANGE, so it reflects the list size
+  // seen by LRANGE at start. Even if LRANGE yields during iteration, the
+  // returned result should remain consistent.
+  auto reader = pp_->at(0)->LaunchFiber([&] {
+    for (int i = 0; i < kIterations; i++) {
+      size_t expected_size = *Run("reader", {"LLEN", key}).GetInt();
+      uint64_t preempt_before = ThisFiber::GetPreemptCount();
+      auto resp = Run("reader", {"LRANGE", key, "0", "-1"});
+      total_yields += ThisFiber::GetPreemptCount() - preempt_before;
+      EXPECT_EQ(StrArray(resp).size(), expected_size);
+    }
+    done.store(true);
+  });
+
+  // Writer in same shard.
+  auto writer_same_shard = pp_->at(0)->LaunchFiber([&] {
+    while (!done.load()) {
+      Run("writer_same_shard", {"RPUSH", key, "B"});
+    }
+  });
+
+  // Writer from differnt shard.
+  auto writer_different_shard = pp_->at(1)->LaunchFiber([&] {
+    while (!done.load()) {
+      Run("writer_different_shard", {"RPUSH", key, "C"});
+    }
+  });
+
+  reader.Join();
+  writer_same_shard.Join();
+  writer_different_shard.Join();
+
+  EXPECT_GT(total_yields, 0);
+}
+
 // Regression test for SORT BY nosort STORE inside MULTI/EXEC does a
 // non-concluding Execute() hop to fetch elements, then falls through to the
 // unsorted reply path without a concluding hop or Conclude().
@@ -2111,6 +2165,44 @@ TEST_F(GenericFamilyTest, SortByNosortStoreInMulti) {
   // Verify the store actually happened and the server is healthy.
   EXPECT_THAT(Run({"lrange", "dest", "0", "-1"}), ArrLen(3));
   EXPECT_EQ(Run({"get", "x"}), "9");
+}
+
+// Regression test for https://github.com/dragonflydb/dragonfly/issues/7052
+// Heartbeat-driven key expiry must not call SendMessages inside a fiber-atomic section.
+TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
+  // Enable expired-key keyspace notifications.
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  Run({"set", "mykey", "myval"});
+  Run({"expire", "mykey", "1"});
+  AdvanceTime(1100);
+
+  // Drive expiry the same way the heartbeat does: DeleteExpiredStep returns events,
+  // which are sent outside the atomic section (see issue #7052).
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    DbContext db_cntx;
+    db_cntx.db_index = 0;
+    db_cntx.time_now_ms = TEST_current_time_ms;
+    DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, 100);
+    if (!stats.key_events.empty())
+      channel_store->SendMessages("__keyevent@0__:expired", stats.key_events, false);
+  });
+
+  // Flush all async dispatch callbacks so the subscriber's thread receives the message.
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_EQ("__keyevent@0__:expired", msg.channel);
+  EXPECT_EQ("mykey", msg.message);
+
+  // Restore the flag so it doesn't bleed into other tests.
+  Run({"CONFIG", "SET", "notify_keyspace_events", ""});
 }
 
 }  // namespace dfly

@@ -958,33 +958,29 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-io::Bytes RdbSerializer::PrepareFlush(FlushState flush_state) {
-  using enum CompressionMode;
-  auto* mem_buf = mem_buf_controller_.CurrentBuffer();
-  if (mem_buf_controller_.TagEntriesEnabled())
-    return mem_buf->InputBuffer();
-
-  const bool is_last_chunk = flush_state == FlushState::kFlushEndEntry;
-  const bool has_current_bytes = mem_buf->InputLen() != 0;
-  const bool is_compression_enabled =
-      compression_mode_ == MULTI_ENTRY_ZSTD || compression_mode_ == MULTI_ENTRY_LZ4;
-  VLOG(2) << "PrepareFlush: is_last_chunk" << is_last_chunk << " split=" << entry_was_split_;
-
-  // Legacy compressed blobs must contain a complete top-level RDB sequence, so only compress
-  // the current buffer when this is the only flush of an entry that never split. Otherwise, the
-  // latter half of an object might end up in its own compressed packet. The loader main loop will
-  // not be able to handle such values which begin from the middle.
-  if (is_last_chunk && !entry_was_split_ && is_compression_enabled && has_current_bytes)
-    CompressBlob();
-
-  entry_was_split_ = !is_last_chunk;
-
-  return mem_buf->InputBuffer();
-}
-
 string RdbSerializer::Flush(FlushState flush_state) {
-  const auto bytes = PrepareFlush(flush_state);
-  string result = mem_buf_controller_.BuildBlob(bytes);
+  using enum CompressionMode;
+  const IoBuf* mem_buf = mem_buf_controller_.CurrentBuffer();
+
+  if (!mem_buf_controller_.TagEntriesEnabled()) {
+    const bool is_last_chunk = flush_state == FlushState::kFlushEndEntry;
+    const bool has_current_bytes = mem_buf->InputLen() != 0;
+    const bool is_compression_enabled =
+        compression_mode_ == MULTI_ENTRY_ZSTD || compression_mode_ == MULTI_ENTRY_LZ4;
+    VLOG(2) << "Flush: is_last_chunk" << is_last_chunk << " split=" << entry_was_split_;
+
+    // Legacy compressed blobs must contain a complete top-level RDB sequence, so only compress
+    // the current buffer when this is the only flush of an entry that never split. Otherwise, the
+    // latter half of an object might end up in its own compressed packet. The loader main loop will
+    // not be able to handle such values which begin from the middle.
+    if (is_last_chunk && !entry_was_split_ && is_compression_enabled && has_current_bytes)
+      // replaces the current buffer with compressed content
+      CompressBlob();
+
+    entry_was_split_ = !is_last_chunk;
+  }
+
+  string result = mem_buf_controller_.BuildBlob();
   if (result.empty())
     return {};
 
@@ -1965,12 +1961,13 @@ void MemBufController::RestoreStateAfterConsume(EntryId id) {
   current_buffer_ = &entry_buffer_;
 }
 
-std::string MemBufController::BuildBlob(Bytes current_bytes) {
+std::string MemBufController::BuildBlob() {
   // default buffer always lies behind current bytes (entry buffer) in temporal sense, so it is
   // built as prefix. We can never reach here where default buffer content was written _after_ entry
   // buffer due to FinishEntry semantics.
+  const Bytes current_bytes = current_buffer_->InputBuffer();
   const bool has_prefix = current_buffer_ != &default_buffer_ && default_buffer_.InputLen() > 0;
-  const auto prefix = has_prefix ? default_buffer_.InputBuffer() : Bytes{};
+  const Bytes prefix = has_prefix ? default_buffer_.InputBuffer() : Bytes{};
 
   bool should_tag = send_tagged_entries_;
 

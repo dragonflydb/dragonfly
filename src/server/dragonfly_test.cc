@@ -18,13 +18,13 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
+#include "server/command_registry.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
 
 ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
-ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
@@ -110,38 +110,6 @@ TEST_F(DflyEngineTest, Sds) {
   EXPECT_STREQ("abc\xf0", argv[0]);
   EXPECT_STREQ("oops\n", argv[1]);
   sdsfreesplitres(argv, argc);
-}
-
-class DflyRenameCommandTest : public DflyEngineTest {
- protected:
-  DflyRenameCommandTest() {
-    // rename flushall to myflushall, flushdb command will not be able to execute
-    absl::SetFlag(
-        &FLAGS_rename_command,
-        std::vector<std::string>({"flushall=myflushall", "flushdb=", "ping=abcdefghijklmnop"}));
-  }
-
-  absl::FlagSaver _saver;
-};
-
-TEST_F(DflyRenameCommandTest, RenameCommand) {
-  Run({"set", "a", "1"});
-  ASSERT_EQ(1, CheckedInt({"dbsize"}));
-  // flushall should not execute anything and should return error, as it was renamed.
-  ASSERT_THAT(Run({"flushall"}), ErrArg("unknown command `FLUSHALL`"));
-
-  ASSERT_EQ(1, CheckedInt({"dbsize"}));
-
-  ASSERT_EQ(Run({"myflushall"}), "OK");
-
-  ASSERT_EQ(0, CheckedInt({"dbsize"}));
-
-  ASSERT_THAT(Run({"flushdb", "0"}), ErrArg("unknown command `FLUSHDB`"));
-
-  ASSERT_THAT(Run({""}), ErrArg("unknown command ``"));
-
-  ASSERT_THAT(Run({"ping"}), ErrArg("unknown command `PING`"));
-  ASSERT_THAT(Run({"abcdefghijklmnop"}), "PONG");
 }
 
 TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {
@@ -1132,5 +1100,41 @@ TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {
   EXPECT_EQ(command_histograms.at("set"), command_histograms.at("___set"));
   EXPECT_EQ(command_histograms.at("ping"), command_histograms.at("___ping"));
 }
+
+static void BM_FindExtended(benchmark::State& state) {
+  CommandRegistry registry;
+
+  registry.StartFamily();
+  registry << CommandId{"SET", CO::JOURNALED | CO::DENYOOM, -3, 1, 1}
+           << CommandId{"GET", CO::READONLY | CO::FAST, 2, 1, 1}
+           << CommandId{"DEL", CO::JOURNALED, -2, 1, -1}
+           << CommandId{"MGET", CO::READONLY | CO::FAST, -2, 1, -1}
+           << CommandId{"MSET", CO::JOURNALED | CO::DENYOOM, -3, 1, -1}
+           << CommandId{"PING", CO::FAST, -1, 0, 0}
+           << CommandId{"EXPIRE", CO::JOURNALED | CO::FAST, 3, 1, 1}
+           << CommandId{"TTL", CO::READONLY | CO::FAST, 2, 1, 1}
+           << CommandId{"LPUSH", CO::JOURNALED | CO::DENYOOM, -3, 1, 1}
+           << CommandId{"SADD", CO::JOURNALED | CO::DENYOOM, -3, 1, 1}
+           << CommandId{"ZADD", CO::JOURNALED | CO::DENYOOM, -4, 1, 1}
+           << CommandId{"HSET", CO::JOURNALED | CO::DENYOOM, -4, 1, 1}
+           << CommandId{"SUBSCRIBE", CO::LOADING, -2, 0, 0}
+           << CommandId{"PUBLISH", CO::LOADING, 3, 0, 0}
+           << CommandId{"EVAL", CO::NOSCRIPT, -3, 0, 0}
+           << CommandId{"XADD", CO::JOURNALED | CO::DENYOOM, -5, 1, 1};
+
+  registry.Init(1);
+
+  const string_view kCommands[] = {"set", "get", "del", "ping", "hset", "zadd", "mget", "eval"};
+  constexpr size_t kNumCommands = sizeof(kCommands) / sizeof(kCommands[0]);
+
+  size_t i = 0;
+  while (state.KeepRunning()) {
+    string_view cmd = kCommands[i++ % kNumCommands];
+    facade::ParsedArgs args(CmdArgList{&cmd, 1});
+    auto [cid, tail] = registry.FindExtended(args);
+    benchmark::DoNotOptimize(cid);
+  }
+}
+BENCHMARK(BM_FindExtended);
 
 }  // namespace dfly

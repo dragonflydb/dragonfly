@@ -2270,8 +2270,8 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_FULLSYNC_END) {
-      LOG(INFO) << "Read RDB_OPCODE_FULLSYNC_END rss="
-                << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
+      VLOG(2) << "Read RDB_OPCODE_FULLSYNC_END rss="
+              << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
       RETURN_ON_ERR(EnsureRead(8));
       RETURN_ON_ERR(ConsumeInput(8));  // ignore 8 bytes
 

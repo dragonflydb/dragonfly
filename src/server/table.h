@@ -132,9 +132,6 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   // Stores a list of dependant dirty flags for each watched key.
   absl::flat_hash_map<std::string, std::vector<std::atomic_bool*>> watched_keys;
 
-  // Keyspace notifications: list of expired keys since last batch of messages was published.
-  mutable std::vector<std::string> expired_keys_events_;
-
   mutable DbTableStats stats;
   std::unique_ptr<SlotStats[]> slots_stats;
   PrimeTable::Cursor expire_cursor;
@@ -182,7 +179,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 // the snapshot process. We copy the pointers in StartSnapshotInShard function.
 using DbTableArray = std::vector<boost::intrusive_ptr<DbTable>>;
 
-// ChangeReq - describes the change to the table: either single bucket or whole bucket set.
-using ChangeReq = std::variant<PrimeTable::bucket_iterator, PrimeTable::BucketSet>;
+// ChangeReq - describes the set of buckets about to be mutated.
+using ChangeReq = PrimeTable::BucketSet;
 
 }  // namespace dfly

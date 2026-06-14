@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <bit>
 #include <cassert>
 #include <cstring>
 #include <string_view>
@@ -22,17 +23,25 @@ class PageUsage;
 #define FORCE_INLINE __attribute__((always_inline))
 
 // TODO add allocator support
+//
+// Capacity grows by 2 below kLinearMax (sizes stay even, keeping the 2-lane SIMD
+// probe tail-free), then doubles at/above it. The 11-bit tag field holds either a
+// literal count or, with kLogModeBit set, its base-2 log (power-of-2 sizes).
 template <class T> class PtrVector {
   static constexpr size_t kVectorBit = 1ULL << 0;          // first 3 bits aren't used by pointer
   static constexpr size_t kTagMask = (4095ULL << 52) | 7;  // we reserve 12 high bits and 3 low bits
 
-  static constexpr size_t kLogSizeShift = 56;
-  static constexpr size_t kLogSizeMask = 0xFFULL;
-  static constexpr size_t kLogSizeShiftedMask = kLogSizeMask << kLogSizeShift;
+  static constexpr size_t kSizeShift = 52;
+  static constexpr size_t kSizeMask = 0x7FFULL;  // 11-bit field: count, or log2 in log mode
+  static constexpr size_t kLogModeBit = 1ULL << 63;
+  static constexpr size_t kSizeFieldMask = (kSizeMask << kSizeShift) | kLogModeBit;
+
+  static constexpr size_t kLinearMax = 128;
 
  public:
-  static PtrVector FromLogSize(uint64_t log_size) {
-    return PtrVector(log_size);
+  // Allocates exactly `count` elements (used for the initial small vector).
+  static PtrVector FromSize(size_t count) {
+    return PtrVector(count);
   }
 
   T* begin() const {
@@ -52,12 +61,11 @@ template <class T> class PtrVector {
     Clear();
   }
 
-  size_t LogSize() const {
-    return (uptr_ >> kLogSizeShift) & kLogSizeMask;
-  }
-
+  // Number of elements. Normal mode stores the count directly; log mode stores
+  // its base-2 log.
   size_t Size() const {
-    return 1 << LogSize();
+    const uint64_t field = (uptr_ >> kSizeShift) & kSizeMask;
+    return (uptr_ & kLogModeBit) ? (size_t(1) << field) : size_t(field);
   }
 
   uint64_t Release() {
@@ -77,19 +85,16 @@ template <class T> class PtrVector {
     return true;
   }
 
-  void ResizeLog(uint64_t new_log_size) {
-    auto new_ptr = reinterpret_cast<T*>(zmalloc(sizeof(T) << new_log_size));
-    size_t new_size = 1 << new_log_size;
-    const size_t size = std::min(Size(), new_size);
-    for (size_t i = 0; i < size; ++i) {
-      new (new_ptr + i) T(std::move(Raw()[i]));
-    }
-    for (size_t i = size; i < new_size; ++i) {
-      new (new_ptr + i) T();
-    }
-    Clear();
-    uptr_ = reinterpret_cast<uint64_t>(new_ptr);
-    SetLogSize(new_log_size);
+  // Grows per policy: +2 elements below kLinearMax, doubling at/above it. Starting
+  // from an even size (2), this keeps Size() even (a multiple of the 2-lane probe).
+  void Grow() {
+    const size_t cur = Size();
+    Reallocate(cur < kLinearMax ? cur + 2 : cur * 2);
+  }
+
+  // Reallocates to the same size (defrag), preserving contents.
+  void Realloc() {
+    Reallocate(Size());
   }
 
   T& operator[](size_t idx) {
@@ -122,19 +127,39 @@ template <class T> class PtrVector {
     zfree(Raw());
     uptr_ = 0;
   }
-  // because of log_size I prefer to hide it
-  PtrVector(uint64_t log_size) {
-    assert(log_size <= 32);
-    uptr_ = reinterpret_cast<uint64_t>(zmalloc(sizeof(T) << log_size));
-    const uint64_t size = 1 << log_size;
-    for (uint64_t i = 0; i < size; ++i) {
-      new (reinterpret_cast<T*>(uptr_) + i) T();
+
+  // Allocates `new_count` slots, moves existing elements over, frees the old
+  // buffer, and records the new size.
+  void Reallocate(size_t new_count) {
+    auto* new_ptr = reinterpret_cast<T*>(zmalloc(sizeof(T) * new_count));
+    const size_t keep = std::min(Size(), new_count);
+    for (size_t i = 0; i < keep; ++i) {
+      new (new_ptr + i) T(std::move(Raw()[i]));
     }
-    SetLogSize(log_size);
+    for (size_t i = keep; i < new_count; ++i) {
+      new (new_ptr + i) T();
+    }
+    Clear();
+    uptr_ = reinterpret_cast<uint64_t>(new_ptr);
+    SetSize(new_count);
   }
 
-  void SetLogSize(uint64_t log_size) {
-    uptr_ = (uptr_ & ~kLogSizeShiftedMask) | kVectorBit | (uint64_t(log_size) << kLogSizeShift);
+  explicit PtrVector(size_t count) {
+    uptr_ = reinterpret_cast<uint64_t>(zmalloc(sizeof(T) * count));
+    for (size_t i = 0; i < count; ++i) {
+      new (reinterpret_cast<T*>(uptr_) + i) T();
+    }
+    SetSize(count);
+  }
+
+  // Encodes the element count: a literal count below kLinearMax, or its base-2
+  // log at/above it (countr_zero == log2 since such sizes are powers of two).
+  void SetSize(size_t count) {
+    const bool log_mode = count >= kLinearMax;
+    const uint64_t field = log_mode ? std::countr_zero(count) : count;
+    assert(field <= kSizeMask);
+    uptr_ = (uptr_ & ~kSizeFieldMask) | kVectorBit | (field << kSizeShift) |
+            (log_mode ? kLogModeBit : 0);
   }
 
   uint64_t uptr_ = 0;
@@ -245,11 +270,9 @@ class OAHEntry {
 
   void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* alloc_used);
 
-  // Reallocates fragmented buffers under this entry. For a single entry, that's its own
-  // string buffer. For a vector entry, recurses into every inner entry AND the vector's
-  // own array buffer. Returns the cumulative change in zmalloc_usable_size across inner
-  // entry buffers (the vector array buffer is realloc'd to the same logical size so its
-  // AllocSize is unchanged). *realloced is set to true iff any buffer was moved.
+  // Reallocates fragmented buffers under this entry: its string buffer, or for a vector
+  // every inner entry plus the array buffer. Returns the cumulative zmalloc_usable_size
+  // delta across inner buffers (the array buffer keeps its size). *realloced = any moved.
   ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced);
 
   // TODO refactor, because it's inefficient
@@ -262,8 +285,6 @@ class OAHEntry {
   OAHEntry& operator[](uint32_t pos);
 
   OAHEntry Remove(uint32_t pos);
-
-  OAHEntry Pop();
 
   char* Raw() const {
     return (char*)(data_ & ~kTagMask);

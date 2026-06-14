@@ -8,7 +8,6 @@
 
 #include "core/dense_set.h"
 #include "core/oah_set.h"
-#include "core/overloaded.h"
 #include "strings/human_readable.h"
 
 extern "C" {
@@ -697,7 +696,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   if (res.ok()) {
     Iterator it(*res, StringOrView::FromView(key));
 
-    bool omitted_journal = IsOmittableWrite(cntx, it.GetInnerIt());
+    bool omitted_journal = IsOmittableWrite(cntx, ChangeReq{it.GetInnerIt()});
     if (!omitted_journal)
       PreUpdateBlocking(cntx.db_index, it);
 
@@ -725,7 +724,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
       auto bucket_set = db.prime.CVCUponInsert(key);
 
       // We skip calling callbacks, so the bucket set is consistent and we break
-      if (omit_journal = IsOmittableWrite(cntx, {bucket_set}); omit_journal)
+      if (omit_journal = IsOmittableWrite(cntx, bucket_set); omit_journal)
         break;
 
       CallChangeCallbacks(cntx.db_index, bucket_set);
@@ -965,15 +964,9 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
       }
     };
 
-    if (const auto* bit = std::get_if<PrimeTable::bucket_iterator>(&req)) {
-      if (!bit->is_done() && bit->GetVersion() < next_version) {
-        process_bucket(*bit);
-      }
-    } else {
-      for (auto it : std::get<PrimeTable::BucketSet>(req).buckets()) {
-        if (!it.is_done() && it.GetVersion() < next_version)
-          process_bucket(it);
-      }
+    for (auto it : req.buckets()) {
+      if (!it.is_done() && it.GetVersion() < next_version)
+        process_bucket(it);
     }
   };
 
@@ -1323,7 +1316,8 @@ DbSlice::Iterator DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) cons
   return Iterator::FromPrime(ExpireIfNeeded(cntx, it.GetInnerIt()));
 }
 
-PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
+PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
+                                      vector<string>* events) const {
   if (!it->first.HasExpire()) {
     LOG(DFATAL) << "Invalid call to ExpireIfNeeded";
     return it;
@@ -1347,8 +1341,15 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) con
   }
 
   auto& db = db_arr_[cntx.db_index];
-  if (expired_keys_events_recording_)
-    db->expired_keys_events_.emplace_back(key);
+  if (expired_keys_events_recording_) {
+    if (events) {
+      events->emplace_back(key);
+    } else {
+      // Read path: not in an atomic section, safe to send immediately.
+      channel_store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"),
+                                  absl::Span<const string_view>{&key, 1}, false);
+    }
+  }
 
   auto obj_type = it->second.ObjType();
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
@@ -1369,24 +1370,35 @@ void DbSlice::ExpireAllIfNeeded() {
   // we don't preempt in ExpireIfNeeded
   WaitForUnblockedJournalWrites();
 
-  // Disable flush journal changes to prevent preemtion in traverse.
-  journal::DisableFlushGuard journal_flush_guard(owner_->journal());
+  vector<vector<string>> per_db_events(db_arr_.size());
+  {
+    // Disable flush journal changes to prevent preemtion in traverse.
+    journal::DisableFlushGuard journal_flush_guard(owner_->journal());
 
-  for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
-    if (!db_arr_[db_index])
+    for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
+      if (!db_arr_[db_index])
+        continue;
+      auto& db = *db_arr_[db_index];
+
+      auto cb = [&](PrimeTable::iterator prime_it) {
+        if (prime_it->first.HasExpire()) {
+          ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it,
+                         &per_db_events[db_index]);
+        }
+      };
+
+      PrimeTable::Cursor cursor;
+      do {
+        cursor = db.prime.Traverse(cursor, cb);
+      } while (cursor);
+    }
+  }
+
+  for (DbIndex i = 0; i < per_db_events.size(); ++i) {
+    if (per_db_events[i].empty())
       continue;
-    auto& db = *db_arr_[db_index];
-
-    auto cb = [&](PrimeTable::iterator prime_it) {
-      if (prime_it->first.HasExpire()) {
-        ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it);
-      }
-    };
-
-    PrimeTable::Cursor cursor;
-    do {
-      cursor = db.prime.Traverse(cursor, cb);
-    } while (cursor);
+    channel_store->SendMessages(absl::StrCat("__keyevent@", i, "__:expired"), per_db_events[i],
+                                false);
   }
 }
 
@@ -1465,7 +1477,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     int64_t ttl = it->first.GetExpireTime() - cntx.time_now_ms;
     if (ttl <= 0) {
       result.deleted_bytes += it->first.MallocUsed() + it->second.MallocUsed();
-      ExpireIfNeeded(cntx, it);
+      ExpireIfNeeded(cntx, it, &result.key_events);
       ++result.deleted;
     }
   };
@@ -1488,13 +1500,6 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     }
   }
 
-  // Send and clear accumulated expired key events
-  if (auto& events = db_arr_[cntx.db_index]->expired_keys_events_; !events.empty()) {
-    channel_store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events,
-                                false);
-    events.clear();
-  }
-
   return result;
 }
 
@@ -1506,7 +1511,8 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
 
 pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, const Context& cntx,
                                                               size_t starting_segment_id,
-                                                              size_t increase_goal_bytes) {
+                                                              size_t increase_goal_bytes,
+                                                              vector<string>* key_events) {
   // Disable flush journal changes to prevent preemtion
   journal::DisableFlushGuard journal_flush_guard(shard_owner()->journal());
   FiberAtomicGuard guard;
@@ -1584,8 +1590,8 @@ finish:
       // Won't block because we disabled journal flushing. See first line of this function.
       RecordExpiryBlocking(db_ind, key);
 
-    if (expired_keys_events_recording_)
-      db_table->expired_keys_events_.emplace_back(key);
+    if (expired_keys_events_recording_ && key_events)
+      key_events->emplace_back(key);
   }
 
   // This might not always be atomic on exceptional cases -- see comments on the function
@@ -1981,21 +1987,17 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
 // 2. there is a single eventually-consistent snapshot (i.e. replica full sync)
 // 3. there are no other journal consumers
 // 4. the snapshot did not reach the bucket yet
-bool DbSlice::IsOmittableWrite(const Context& cntx, ChangeReq req) {
+bool DbSlice::IsOmittableWrite(const Context& cntx, const ChangeReq& req) {
   if (!journal_omit_redundant_writes_)
     return false;
 
-  auto cb1 = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };
-  auto cb2 = [cb1](const PrimeTable::BucketSet& bs) -> uint64_t {
-    DCHECK(!std::ranges::empty(bs.buckets()));
-    return std::ranges::max(bs.buckets(), {}, cb1).GetVersion();
-  };
-
   bool omit_update = false;
   if (cntx.is_omittable_operation && change_cb_.size() == 1) {
-    uint64_t max_v = std::visit(Overloaded{cb1, cb2}, req);
+    auto gv = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };
+    uint64_t max_version = std::ranges::max(req.buckets(), {}, gv).GetVersion();
+
     auto* cb = change_cb_.front();
-    omit_update = cb->eventually_consistent_ && max_v < cb->snapshot_version_ &&
+    omit_update = cb->eventually_consistent_ && max_version < cb->snapshot_version_ &&
                   journal::GetCallbackCount() == 1;
     events_.journal_omit += unsigned(omit_update);
   }

@@ -41,6 +41,11 @@
 
 ABSL_FLAG(bool, mget_dedup_keys, false, "If true, MGET will deduplicate keys");
 
+ABSL_FLAG(bool, get_zero_copy, true,
+          "If true, GET returns a borrowed view into the CompactObj raw payload "
+          "(zero-copy) for large raw strings; if false, falls back to the "
+          "materializing path. Toggle to A/B benchmark the zero-copy GET path.");
+
 namespace dfly {
 
 namespace {
@@ -53,15 +58,37 @@ using CI = CommandId;
 
 enum class ExpT { EX, PX, EXAT, PXAT };
 
-constexpr uint32_t kMaxStrLen = 1 << 28;
-
 // Either immediately available value or tiering future + result
 template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
-using StringResult = TResultOrT<string>;
+
+// StringResult has either a borrowed-view of a string or a future result from tiered storage or
+// the classical materialized string.
+// BorrowedString is used by read-only commands (GET) that can borrow the
+// value directly from the shard's CompactObj instead of materializing an
+// owned std::string.
+//
+// cmn::BorrowedString carries its own pin + release fn; ownership flows
+// from CompactObj::TryBorrow through the variant into SendBulkStringBorrowed,
+// which parks the borrow until reply is complete and view is not needed anymore.
+using StringResult =
+    std::variant<std::string, cmn::BorrowedString, TieredStorage::TResult<std::string>>;
 
 StringResult ReadString(DbIndex dbid, string_view key, const PrimeValue& pv, EngineShard* es) {
   return pv.IsExternal() ? StringResult{ReadTieredString(dbid, key, pv, es->tiered_storage())}
                          : StringResult{pv.ToString()};
+}
+
+StringResult BorrowStringOrRead(DbIndex dbid, string_view key, const PrimeValue& pv,
+                                EngineShard* es) {
+  static bool zero_copy_enabled = absl::GetFlag(FLAGS_get_zero_copy);
+  constexpr size_t kBorrowThreshold = 16_KB;  // only borrow if value is at least this big
+
+  if (zero_copy_enabled && !pv.IsExternal() && pv.Size() >= kBorrowThreshold) {
+    if (auto raw = pv.TryBorrow()) {
+      return StringResult{std::move(*raw)};
+    }
+  }
+  return ReadString(dbid, key, pv, es);
 }
 
 // Helper for performing SET operations with various options
@@ -678,20 +705,42 @@ struct GetReplies {
       Send(iores.error().message());
   }
 
+  void Send(StringResult&& res) const {
+    if (holds_alternative<std::string>(res))
+      return Send(get<std::string>(res));
+    if (holds_alternative<cmn::BorrowedString>(res)) {
+      // Move the BorrowedString into SendBulkStringBorrowed; the reply builder takes ownership
+      // of the borrow (and associated pin) and parks the pin until all the writes complete.
+      rb->SendBulkStringBorrowed(std::move(get<cmn::BorrowedString>(res)));
+      return;
+    }
+    auto fut = get<TieredStorage::TResult<std::string>>(std::move(res));
+    io::Result<std::string> iores = fut.Get();
+    if (iores.has_value())
+      Send(*iores);
+    else
+      Send(iores.error().message());
+  }
+
   void Send(size_t val) const {
     rb->SendLong(val);
   }
 
+  // TODO: to remove.
   void Send(string_view str) const {
+    LOG(FATAL) << "SHOULD NOT SEND STRINGVIEW DIRECTLY";
+    rb->SendBulkString(str);
+  }
+
+  void Send(const std::string& str) const {
     rb->SendBulkString(str);
   }
 
   RedisReplyBuilder* rb;
 };
 
-cmd::CmdR ExtendGeneric(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view value = ArgS(args, 1);
+cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, value] = parser.Next<string_view, string_view>();
   bool prepend = cmd_cntx->cid()->name().starts_with('P');
 
   VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
@@ -1040,6 +1089,26 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
   if (auto err = parser.TakeError(); err)
     return err.MakeReply();
 
+  if (auto* mc = cmd_cntx->mc_command()) {
+    using MP = facade::MemcacheParser;
+    if (mc->type == MP::ADD)
+      sparams.flags |= SetCmd::SET_IF_NOTEXIST;
+    else if (mc->type == MP::REPLACE)
+      sparams.flags |= SetCmd::SET_IF_EXISTS;
+
+    if (mc->expire_ts > 0) {
+      sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
+      DbSlice::ExpireParams expiry{.value = mc->expire_ts, .unit = TimeUnit::SEC, .absolute = true};
+      int64_t now_ms = GetCurrentTimeMs();
+      auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
+      if (abs_ms < 0)
+        return facade::ErrorReply{InvalidExpireTime("set")};
+      if (rel_ms < 0)
+        return NegativeExpire{};
+      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
+    }
+  }
+
   auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
   if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
       has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
@@ -1049,9 +1118,7 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
   return sparams;
 }
 
-cmd::CmdR CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
-
+cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, value] = parser.Next<string_view, string_view>();
   auto params_result = ParseSetParams(parser, cmd_cntx);
 
@@ -1125,10 +1192,8 @@ cmd::CmdR CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 /// (P)SETEX key seconds (milliseconds) value
-cmd::CmdR CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSetExGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view cmd_name = cmd_cntx->cid()->name();
-
-  CmdArgParser parser{args};
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
 
   if (auto err = parser.TakeError(); err)
@@ -1162,9 +1227,8 @@ cmd::CmdR CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdSetNx(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view value = ArgS(args, 1);
+cmd::CmdR CmdSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, value] = parser.Next<string_view, string_view>();
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
@@ -1193,21 +1257,21 @@ cmd::CmdR CmdSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
+cmd::CmdR CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto cb = [key = parser.Next()](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
-    return ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
+    return BorrowStringOrRead(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
   GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
+cmd::CmdR CmdGetDel(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto cb = [key = parser.Next()](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
@@ -1262,9 +1326,8 @@ void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-cmd::CmdR CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view value = ArgS(args, 1);
+cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, value] = parser.Next<string_view, string_view>();
 
   optional<StringResult> prev;
   SetCmd::SetParams sparams{.prev_val = &prev};
@@ -1283,8 +1346,7 @@ cmd::CmdR CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   DbSlice::ExpireParams exp_params;
@@ -1350,14 +1412,21 @@ cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdIncr(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  return IncrByGeneric(cmd_cntx, key, 1);
+cmd::CmdR CmdIncr(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  int64_t delta = 1;
+  if (auto* mc = cmd_cntx->mc_command()) {
+    if (mc->delta > static_cast<uint64_t>(INT64_MAX)) {
+      cmd_cntx->SendError(kInvalidIntErr);
+      return cmd::kAborted;
+    }
+    delta = static_cast<int64_t>(mc->delta);
+  }
+  return IncrByGeneric(cmd_cntx, key, delta);
 }
 
-cmd::CmdR CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view sval = ArgS(args, 1);
+cmd::CmdR CmdIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, sval] = parser.Next<string_view, string_view>();
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
@@ -1367,9 +1436,8 @@ cmd::CmdR CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   return IncrByGeneric(cmd_cntx, key, val);
 }
 
-cmd::CmdR CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view sval = ArgS(args, 1);
+cmd::CmdR CmdIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, sval] = parser.Next<string_view, string_view>();
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
@@ -1390,14 +1458,21 @@ cmd::CmdR CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdDecr(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  return IncrByGeneric(cmd_cntx, key, -1);
+cmd::CmdR CmdDecr(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  int64_t delta = 1;
+  if (auto* mc = cmd_cntx->mc_command()) {
+    if (mc->delta > static_cast<uint64_t>(INT64_MAX)) {
+      cmd_cntx->SendError(kInvalidIntErr);
+      return cmd::kAborted;
+    }
+    delta = static_cast<int64_t>(mc->delta);
+  }
+  return IncrByGeneric(cmd_cntx, key, -delta);
 }
 
-cmd::CmdR CmdDecrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view sval = ArgS(args, 1);
+cmd::CmdR CmdDecrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, sval] = parser.Next<string_view, string_view>();
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
@@ -1433,9 +1508,9 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
   }
 }
 
-cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, CmdArgList args,
-                      std::optional<DbSlice::ExpireParams> gat_params) {
-  DCHECK_GE(args.size(), 1U);
+cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpireParams> gat_params) {
+  const auto& tail_args = cmd_cntx->tail_args();
+  DCHECK_GE(tail_args.size(), 1U);
 
   MemcacheCmdFlags cmd_flags;
 
@@ -1466,7 +1541,7 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, CmdArgList args,
     co_return std::nullopt;
   }
 
-  size_t arg_len = args.size();
+  size_t arg_len = tail_args.size();
 
   unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
   ReorderShardResults(absl::MakeSpan(mget_resp.get(), shard_set->size()), cmd_cntx->tx(),
@@ -1501,14 +1576,14 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, CmdArgList args,
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
-  return MGetGeneric(cmd_cntx, args, std::nullopt);
+cmd::CmdR CmdMGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  return MGetGeneric(cmd_cntx, std::nullopt);
 }
 
 // Implements the memcache GAT command. The expected input is
 // GAT key [keys...]
 // The expiry argument is stored in mc_command()->expire_ts
-cmd::CmdR CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGAT(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!cmd_cntx->mc_command()) {
     cmd_cntx->SendError("GAT is a memcache-only command");
     return cmd::kAborted;
@@ -1516,7 +1591,7 @@ cmd::CmdR CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t expire_ts = cmd_cntx->mc_command()->expire_ts;
   DbSlice::ExpireParams expire_params{
       .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
-  return MGetGeneric(cmd_cntx, args, expire_params);
+  return MGetGeneric(cmd_cntx, expire_params);
 }
 
 void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1583,16 +1658,15 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
-cmd::CmdR CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [key = ArgS(args, 0)](Transaction* t, EngineShard* shard) {
+cmd::CmdR CmdStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto cb = [key = parser.Next()](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
   GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdGetRange(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+cmd::CmdR CmdGetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
   if (auto err = parser.TakeError(); err)
@@ -1606,8 +1680,7 @@ cmd::CmdR CmdGetRange(CmdArgList args, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdSetRange(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+cmd::CmdR CmdSetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
 
   if (auto err = parser.TakeError(); err)

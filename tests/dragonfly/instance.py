@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -98,6 +99,8 @@ class DflyInstance:
         self.dynamic_port = False
         self.sed_proc = None
         self.clients = []
+        # Optional hard RLIMIT_AS cap (mirrors `ulimit -v`) for OOM tests.
+        self.vmem_limit_bytes: Optional[int] = None
 
         if self.params.existing_port:
             self._port = self.params.existing_port
@@ -281,6 +284,12 @@ class DflyInstance:
         run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
             run_cmd = ["gdb", "--ex", "r", "--args"] + run_cmd
+
+        if self.vmem_limit_bytes is not None:
+            # Apply the cap via a shell `ulimit` wrapper (exec keeps the dragonfly pid),
+            # avoiding the unsafe preexec_fn fork path.
+            cmd = " ".join(shlex.quote(a) for a in run_cmd)
+            run_cmd = ["/bin/sh", "-c", f"ulimit -v {self.vmem_limit_bytes // 1024}; exec {cmd}"]
 
         self.proc = subprocess.Popen(
             run_cmd,

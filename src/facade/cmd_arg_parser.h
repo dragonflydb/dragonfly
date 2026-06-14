@@ -58,7 +58,7 @@ namespace facade {
 //   if (parser.HasAtLeast(3)) { ... }                           // at least N args remain?
 //   auto peek = parser.Peek();                                  // look at next without consuming
 //   parser.Skip(n);                                             // advance n args
-//   CmdArgList rest = parser.Tail();                            // remaining args (e.g. k/v pairs)
+//   size_t start = parser.UnparsedStart();                       // index of first unparsed arg
 //
 // Error surfacing (at the end of parse):
 //   if (!parser.Finalize())                                     // also reports UNPROCESSED on
@@ -113,6 +113,12 @@ struct CmdArgParser {
   CmdArgParser(ArgSlice args) : args_{args} {
   }
 
+  CmdArgParser(const cmn::BackedArguments& bargs, uint32_t offset = 0) : args_{bargs, offset} {
+  }
+
+  CmdArgParser(ParsedArgs args) : args_{args} {
+  }
+
   // DCHECKs that any error was consumed.
   ~CmdArgParser();
 
@@ -151,6 +157,28 @@ struct CmdArgParser {
   // reports a custom error and returns an empty view. Use for "@field" / "$param" style positional
   // arguments.
   std::string_view ExpectStartsWith(std::string_view prefix, std::string error_msg);
+
+  // Consumes the next arg as integer T, allowing an optional leading `prefix` (sets *prefixed when
+  // present). Reports INVALID_INT if the remaining text isn't an integer. Use for offsets like
+  // BITFIELD's "#index" form.
+  template <class T> T NextWithPrefix(std::string_view prefix, bool* prefixed) {
+    static_assert(std::is_integral_v<T>);
+    if (cur_i_ >= args_.size()) {
+      Report(OUT_OF_BOUNDS, cur_i_);
+      return {};
+    }
+    size_t idx = cur_i_++;
+    std::string_view val = SafeSV(idx);
+    *prefixed = absl::StartsWith(val, prefix);
+    if (*prefixed)
+      val.remove_prefix(prefix.size());
+    T out{};
+    if (!absl::SimpleAtoi(val, &out)) {
+      Report(INVALID_INT, idx);
+      return {};
+    }
+    return out;
+  }
 
   template <class... Cases> auto MapNext(Cases&&... cases) {
     if (cur_i_ >= args_.size()) {
@@ -231,8 +259,8 @@ struct CmdArgParser {
     return !HasError();
   }
 
-  ArgSlice Tail() const {
-    return args_.subspan(cur_i_);
+  size_t UnparsedStart() const {
+    return cur_i_;
   }
 
   bool HasNext() {
@@ -247,10 +275,6 @@ struct CmdArgParser {
 
   bool HasAtLeast(size_t i) const {
     return !error_ && i <= args_.size() - cur_i_;
-  }
-
-  size_t GetCurrentIndex() const {
-    return cur_i_;
   }
 
   // Reports a custom error (error_type >= CUSTOM_ERROR) at the previously-consumed index
@@ -319,7 +343,7 @@ struct CmdArgParser {
     using namespace std::literals::string_view_literals;
     if (i >= args_.size())
       return ""sv;
-    return args_[i].empty() ? ""sv : ToSV(args_[i]);
+    return args_[i].empty() ? ""sv : args_[i];
   }
 
   template <typename T> T Num(size_t idx) {
@@ -353,7 +377,7 @@ struct CmdArgParser {
 
  private:
   size_t cur_i_ = 0;
-  ArgSlice args_;
+  ParsedArgs args_;
 
   ErrorInfo error_;
 };

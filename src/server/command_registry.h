@@ -12,6 +12,7 @@
 #include <optional>
 
 #include "base/function2.hpp"
+#include "facade/cmd_arg_parser.h"
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
 
@@ -67,6 +68,8 @@ using CmdCallStats = std::pair<uint64_t, uint64_t>;
 class CommandId;
 class CommandContext;
 
+facade::CmdArgParser MakeParserFromContext(CommandContext* cntx);
+
 // TODO: move it to helio
 // Makes sure that the POD T that is passed to the constructor is reset to default state
 template <typename T> class MoveOnly {
@@ -109,7 +112,7 @@ class CommandId : public facade::CommandId {
   [[nodiscard]] CommandId Clone(std::string_view name) const;
 
   void Init(unsigned thread_count) {
-    command_stats_ = std::make_unique<CmdCallStats[]>(thread_count);
+    command_stats_ = std::make_unique<StatsCell[]>(thread_count);
   }
 
   using Handler = fu2::function_base<true, true, fu2::capacity_default, false, false,
@@ -151,9 +154,10 @@ class CommandId : public facade::CommandId {
     return interleave_step_;
   }
 
-  template <typename RT> CommandId&& SetAsyncHandler(RT f(CmdArgList, CommandContext*)) && {
+  template <typename RT>
+  CommandId&& SetAsyncHandler(RT f(facade::CmdArgParser, CommandContext*)) && {
     support_async_ = true;
-    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(args, cntx); };
+    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(MakeParserFromContext(cntx), cntx); };
     return std::move(*this);
   }
 
@@ -175,7 +179,7 @@ class CommandId : public facade::CommandId {
   void ResetStats(unsigned thread_index);
 
   CmdCallStats GetStats(unsigned thread_index) const {
-    return command_stats_[thread_index];
+    return command_stats_[thread_index].stats;
   }
 
   void SetAclCategory(uint32_t mask) {
@@ -217,7 +221,11 @@ class CommandId : public facade::CommandId {
   bool support_async_{false};
   int8_t interleave_step_{0};
 
-  std::unique_ptr<CmdCallStats[]> command_stats_;
+  struct alignas(64) StatsCell {
+    CmdCallStats stats;
+  };
+
+  std::unique_ptr<StatsCell[]> command_stats_;
   Handler handler_;
   ArgValidator validator_;
   MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
@@ -267,8 +275,6 @@ class CommandRegistry {
 
   void StartFamily(std::optional<uint32_t> acl_category = std::nullopt);
 
-  std::string_view RenamedOrOriginal(std::string_view orig) const;
-
   using FamiliesVec = std::vector<std::vector<std::string>>;
   FamiliesVec GetFamilies();
 
@@ -278,9 +284,7 @@ class CommandRegistry {
 
  private:
   absl::flat_hash_map<std::string, CommandId> cmd_map_;
-  absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
   absl::flat_hash_set<std::string> restricted_cmds_;
-  absl::flat_hash_set<std::string> oomdeny_cmds_;
 
   FamiliesVec family_of_commands_;
   size_t bit_index_;

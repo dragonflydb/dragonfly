@@ -21,6 +21,10 @@ class GlobMatcher;
 constexpr int64_t kMaxExpireDeadlineSec = (1u << 28) - 1;  // 8.5 years
 constexpr int64_t kMaxExpireDeadlineMs = kMaxExpireDeadlineSec * 1000;
 
+// Largest size a single string value may occupy. Enforced by SETRANGE and the
+// bit commands that grow a string (SETBIT, BITFIELD SET/INCRBY).
+constexpr uint32_t kMaxStrLen = 1 << 28;
+
 using facade::ArgS;
 using facade::CmdArgList;
 using facade::CmdArgVec;

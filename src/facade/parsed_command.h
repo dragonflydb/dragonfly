@@ -7,6 +7,7 @@
 #include <coroutine>
 #include <variant>
 
+#include "base/cycle_clock.h"
 #include "base/function2.hpp"
 #include "common/backed_args.h"
 #include "facade/memcache_parser.h"
@@ -105,6 +106,15 @@ class ParsedCommand : public cmn::BackedArguments {
     return sz;
   }
 
+  size_t EnqueuedBytes() const {
+    return enqueued_bytes_;
+  }
+
+  void FinalizeParsing() {
+    parsed_cycle = base::CycleClock::Now();
+    enqueued_bytes_ = UsedMemory();
+  }
+
   // Marks this command as having reply stored in its payload instead of being sent directly.
   void SetDeferredReply() {
     is_deferred_reply_ = true;
@@ -126,6 +136,8 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
   void SendLong(long val);
+
+  // Deprecated: use Resolve instead for deferred replies.
   template <typename F> void ReplyWith(F&& func) {
     assert(!is_deferred_reply_);
     using RbType = decltype(OnlyArgType(&std::decay_t<F>::operator()));
@@ -145,12 +157,17 @@ class ParsedCommand : public cmn::BackedArguments {
   // Assumes CanReply() is true. Sends reply
   void SendReply();
 
-  // Resolve deferred command with reply
+  // Resolve deferred command immediately with an error reply.
   void Resolve(const facade::ErrorReply& error) {
     SendError(error);
   }
 
-  // Resolve deferred command with async task
+  // Resolve deferred command with a captured payload.
+  void Resolve(payload::Payload&& pl);
+
+  // Suspend the deferred command until `blocker` reaches zero.
+  // When that happens, CanReply() returns true and SendReply() will resume `coro`,
+  // which is expected to write the reply directly to the reply builder.
   void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, std::coroutine_handle<> coro) {
     reply_ = SuspendedCommand{blocker, coro};
   }
@@ -187,11 +204,13 @@ class ParsedCommand : public cmn::BackedArguments {
   // otherwise, moved asynchronously into reply_payload_
   bool is_deferred_reply_ = false;
 
+  size_t enqueued_bytes_ = 0;
+
   std::variant<payload::Payload, SuspendedCommand> reply_;
 };
 
 #ifdef __linux__
-static_assert(sizeof(ParsedCommand) == 232);
+static_assert(sizeof(ParsedCommand) == 240);
 #endif
 
 }  // namespace facade

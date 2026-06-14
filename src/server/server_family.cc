@@ -171,7 +171,6 @@ ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
-ABSL_DECLARE_FLAG(bool, experimental_replicaof_v2);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 #define RETURN_ON_ERROR(cond, m)                                           \
@@ -3494,6 +3493,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
+    append("borrowed_strings_sent_total", reply_stats.borrowed_string_sent_cnt);
 
     // Number of connections that are currently blocked on grabbing interpreter.
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
@@ -3520,6 +3520,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("tiered_total_cancels", m.tiered_stats.total_cancels);
     append("tiered_total_deletes", m.tiered_stats.total_deletes);
     append("tiered_total_uploads", m.tiered_stats.total_uploads);
+    append("tiered_total_defrags", m.tiered_stats.total_defrags);
+    append("tiered_delayed_defrag_queue_size", m.tiered_stats.delayed_defrag_queue_size);
     append("tiered_total_stash_overflows", m.tiered_stats.total_stash_overflows);
     append("tiered_heap_buf_allocations", m.tiered_stats.total_heap_buf_allocs);
     append("tiered_registered_buf_allocations", m.tiered_stats.total_registered_buf_allocs);
@@ -3995,113 +3997,6 @@ void ServerFamily::AddReplicaOf(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendOk();
 }
 
-void ServerFamily::ReplicaOfInternal(CmdArgList args, CommandContext* cmd_cntx,
-                                     ActionOnConnectionFail on_err) {
-  std::shared_ptr<Replica> new_replica;
-  std::optional<Replica::LastMasterSyncData> last_master_data;
-  {
-    util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
-
-    // We should not execute replica of command while loading from snapshot.
-    ServerState* ss = ServerState::tlocal();
-    if (ss->is_master && ss->gstate() == GlobalState::LOADING) {
-      cmd_cntx->SendError(kLoadingErr);
-      return;
-    }
-
-    auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args);
-    if (!replicaof_args.has_value()) {
-      cmd_cntx->SendError(replicaof_args.error());
-      return;
-    }
-
-    LOG(INFO) << "Replicating " << *replicaof_args;
-
-    // If NO ONE was supplied, just stop the current replica (if it exists)
-    if (replicaof_args->IsReplicaOfNoOne()) {
-      if (!ss->is_master) {
-        CHECK(replica_);
-
-        SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
-        // No partial sync for NO ONE flow
-        replica_->Stop();
-        replica_.reset();
-
-        StopAllClusterReplicas();
-      }
-
-      // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-
-      return cmd_cntx->rb()->SendOk();
-    }
-
-    // If any replication is in progress, stop it, cancellation should kick in immediately
-
-    if (replica_)
-      last_master_data = replica_->Stop();
-    StopAllClusterReplicas();
-
-    const GlobalState gstate = ServerState::tlocal()->gstate();
-    if (gstate == GlobalState::TAKEN_OVER) {
-      service_.SwitchState(GlobalState::TAKEN_OVER, GlobalState::LOADING);
-    } else if (auto prev_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-               prev_state != GlobalState::ACTIVE) {
-      LOG(WARNING) << prev_state << " in progress, ignored";
-      cmd_cntx->SendError("Invalid state");
-      return;
-    }
-
-    // Create a new replica and assign it
-    new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
-                                       master_replid(), replicaof_args->slot_range);
-
-    replica_ = new_replica;
-
-    // TODO: disconnect pending blocked clients (pubsub, blocking commands)
-    SetMasterFlagOnAllThreads(false);  // Flip flag after assiging replica
-
-  }  // release the lock, lk.unlock()
-  // We proceed connecting below without the lock to allow interrupting the replica immediately.
-  // From this point and onward, it should be highly responsive.
-
-  GenericError ec{};
-  switch (on_err) {
-    case ActionOnConnectionFail::kReturnOnError:
-      ec = new_replica->Start();
-      break;
-    case ActionOnConnectionFail::kContinueReplication:
-      new_replica->EnableReplication();
-      break;
-  };
-
-  // If the replication attempt failed, clean up global state. The replica should have stopped
-  // internally.
-  util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
-
-  // If there was an error above during Start we must not start the main replication fiber.
-  // However, it could be the case that Start() above connected succefully and by the time
-  // we acquire the lock, the context got cancelled because another ReplicaOf command
-  // executed and acquired the replicaof_mu_ before us.
-  const bool cancelled = new_replica->IsContextCancelled();
-  if (ec || cancelled) {
-    if (replica_ == new_replica) {
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-      SetMasterFlagOnAllThreads(true);
-      replica_.reset();
-    }
-    cmd_cntx->SendError(ec ? ec.Format() : "replication cancelled");
-    return;
-  }
-  // Successfully connected now we flush
-  // If we are called by "Replicate", tx will be null but we do not need
-  // to flush anything.
-  if (on_err == ActionOnConnectionFail::kReturnOnError) {
-    new_replica->StartMainReplicationFiber(last_master_data);
-  }
-  cmd_cntx->rb()->SendOk();
-}
-
 void ServerFamily::StopAllClusterReplicas() {
   // Stop all cluster replication.
   for (auto& replica : cluster_replicas_) {
@@ -4112,11 +4007,6 @@ void ServerFamily::StopAllClusterReplicas() {
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, CommandContext* cmd_cntx) {
-  const bool use_replica_of_v2 = absl::GetFlag(FLAGS_experimental_replicaof_v2);
-  if (use_replica_of_v2) {
-    ReplicaOfInternalV2(args, cmd_cntx, ActionOnConnectionFail::kReturnOnError);
-    return;
-  }
   ReplicaOfInternal(args, cmd_cntx, ActionOnConnectionFail::kReturnOnError);
 }
 
@@ -4130,12 +4020,7 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   CmdArgList args_list = absl::MakeSpan(args_vec);
   io::NullSink sink;
   facade::RedisReplyBuilder rb(&sink);
-  const bool use_replica_of_v2 = absl::GetFlag(FLAGS_experimental_replicaof_v2);
   CommandContext cmd_cntx{&rb, nullptr};
-  if (use_replica_of_v2) {
-    ReplicaOfInternalV2(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
-    return;
-  }
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
 }
 
@@ -4174,8 +4059,8 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   return builder->SendOk();
 }
 
-void ServerFamily::ReplicaOfInternalV2(CmdArgList args, CommandContext* cmd_cntx,
-                                       ActionOnConnectionFail on_error)
+void ServerFamily::ReplicaOfInternal(CmdArgList args, CommandContext* cmd_cntx,
+                                     ActionOnConnectionFail on_error)
     ABSL_LOCKS_EXCLUDED(replicaof_mu_) {
   auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args);
   if (!replicaof_args.has_value()) {

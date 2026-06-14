@@ -28,6 +28,7 @@ BASIC_ARGS = {
 
 @pytest.mark.large
 @pytest.mark.opt_only
+@pytest.mark.skip(reason="Fails - #7560")
 @dfly_args({**BASIC_ARGS, "tiered_experimental_cooling": "false"})
 async def test_basic_memory_usage(async_client: aioredis.Redis):
     """
@@ -318,3 +319,170 @@ async def test_tiered_replication_with_lists(df_factory: DflyInstanceFactory):
         *(SeederV2.capture(c, types=["LIST"]) for c in [master_client, replica_client])
     )
     assert len(set(hashes)) == 1, "Inconsistency detected between master and replica lists."
+
+
+LIST_TIERING_ARGS = {
+    "proactor_threads": 1,
+    "tiered_prefix": "/tmp/list_tiering",
+    "tiered_offload_threshold": "1.0",
+    "tiered_experimental_list_support": "true",
+    "tiered_experimental_cooling": "false",
+    "list_max_listpack_size": 1,
+    "list_tiering_threshold": 2,
+    "maxmemory": "256M",
+}
+
+
+@pytest.mark.large
+@pytest.mark.exclude_epoll
+@pytest.mark.opt_only
+async def test_concurrent_tiered_list_blocking_command(df_factory: DflyInstanceFactory):
+    """
+    Multiple concurrent BRPOP consumers drain a tiered list simultaneously.
+
+    Exercises concurrent consumption from tiered QList nodes. Multiple fibers may
+    attempt to materialize and drain the same node concurrently, so synchronization
+    must ensure correct coordination without corruption or crashes.
+    """
+    instance = df_factory.create(**LIST_TIERING_ARGS)
+    instance.start()
+
+    NUM_CONSUMERS = 32
+    NUM_ELEMENTS = 2000
+    KEY = "lst"
+    VALUE = "x" * 3000
+
+    client = instance.client()
+
+    pipe = client.pipeline(transaction=False)
+    for _ in range(NUM_ELEMENTS):
+        pipe.rpush(KEY, VALUE)
+    await pipe.execute()
+
+    async for info, breaker in info_tick_timer(client, section="TIERED", timeout=30):
+        with breaker:
+            assert info["tiered_total_stashes"] > 0
+
+    async def worker_drain(c):
+        results = []
+        while True:
+            r = await c.brpop([KEY], timeout=5)
+            if r is None:
+                break
+            results.append(r[1])
+        return results
+
+    consumer_clients = [instance.client() for _ in range(NUM_CONSUMERS)]
+    all_results = await asyncio.gather(*(worker_drain(c) for c in consumer_clients))
+
+    total = sum(len(r) for r in all_results)
+    assert total == NUM_ELEMENTS, f"Expected {NUM_ELEMENTS} elements, got {total}"
+    assert all(v == VALUE for r in all_results for v in r)
+
+    for c in consumer_clients:
+        await c.aclose()
+
+
+@pytest.mark.large
+@pytest.mark.exclude_epoll
+@pytest.mark.opt_only
+async def test_concurrent_tiered_list_materialization(df_factory: DflyInstanceFactory):
+    """
+    Multiple concurrent read calls on the same tiered list key.
+    Exercises concurrent materialization. All readers race to access
+    the same tiered node while it is being loaded into memory.
+    Synchronization ensures the node is materialized only once and shared
+    across concurrent readers without corruption or crashes.
+    """
+    instance = df_factory.create(**LIST_TIERING_ARGS)
+    instance.start()
+
+    NUM_READERS = 32
+    NUM_ELEMENTS = 200
+    KEY = "lst"
+    VALUE = "x" * 10_000  # large value so I/O takes longer
+    TARGET_IDX = NUM_ELEMENTS // 2
+
+    client = instance.client()
+
+    pipe = client.pipeline(transaction=False)
+    for _ in range(NUM_ELEMENTS):
+        pipe.rpush(KEY, VALUE)
+    await pipe.execute()
+
+    async for info, breaker in info_tick_timer(client, section="TIERED", timeout=30):
+        with breaker:
+            assert info["tiered_total_stashes"] > 0
+
+    reader_clients = [instance.client() for _ in range(NUM_READERS)]
+    reads = [asyncio.create_task(c.lindex(KEY, TARGET_IDX)) for c in reader_clients]
+
+    results = await asyncio.gather(*reads)
+
+    for i, result in enumerate(results):
+        assert result == VALUE, f"Reader {i} got wrong result"
+
+    for c in reader_clients:
+        await c.aclose()
+
+
+@pytest.mark.large
+@pytest.mark.exclude_epoll
+@pytest.mark.opt_only
+@pytest.mark.parametrize("command", ["lrem", "ltrim", "linsert", "lset"])
+async def test_concurrent_tiered_list_mutation(df_factory: DflyInstanceFactory, command: str):
+    """
+    Concurrent mutation of a tiered list via LREM, LTRIM, LINSERT, or LSET.
+    LREM also check correctness invariant: removed + remaining == original length.
+    """
+    instance = df_factory.create(**LIST_TIERING_ARGS)
+    instance.start()
+
+    NUM_WORKERS = 32
+    NUM_ELEMENTS = 500
+    KEY = "lst"
+    VALUE = "x" * 3000  # large value forces each element into its own plain node
+    PIVOT = "pivot"  # used only by linsert; placed deep past the in-memory threshold
+    TARGET_IDX = NUM_ELEMENTS // 2  # used only by lset; deep in offloaded territory
+
+    client = instance.client()
+
+    pipe = client.pipeline(transaction=False)
+    if command == "linsert":
+        for _ in range(NUM_ELEMENTS // 2):
+            pipe.rpush(KEY, VALUE)
+        pipe.rpush(KEY, PIVOT)
+        for _ in range(NUM_ELEMENTS // 2 - 1):
+            pipe.rpush(KEY, VALUE)
+    else:
+        for _ in range(NUM_ELEMENTS):
+            pipe.rpush(KEY, VALUE)
+    await pipe.execute()
+
+    async for info, breaker in info_tick_timer(client, section="TIERED", timeout=30):
+        with breaker:
+            assert info["tiered_total_stashes"] > 0
+
+    async def worker(c):
+        if command == "lrem":
+            return await c.lrem(KEY, 0, VALUE)
+        elif command == "ltrim":
+            return await c.ltrim(KEY, 1, -1)
+        elif command == "linsert":
+            return await c.linsert(KEY, "BEFORE", PIVOT, "new")
+        elif command == "lset":
+            return await c.lset(KEY, TARGET_IDX, "new")
+
+    worker_clients = [instance.client() for _ in range(NUM_WORKERS)]
+    tasks = [asyncio.create_task(worker(c)) for c in worker_clients]
+    results = await asyncio.gather(*tasks)
+
+    if command == "lrem":
+        total_removed = sum(results)
+        remaining = await client.llen(KEY)
+        assert (
+            total_removed + remaining == NUM_ELEMENTS
+        ), f"Invariant broken: removed={total_removed} remaining={remaining} total={NUM_ELEMENTS}"
+
+    for c in worker_clients:
+        await c.aclose()

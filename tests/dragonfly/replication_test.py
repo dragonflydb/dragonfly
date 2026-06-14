@@ -4937,3 +4937,76 @@ async def test_client_list_replication_types(df_factory: DflyInstanceFactory):
         assert parse_client_list(await c_replica.execute_command("CLIENT LIST TYPE master")) == []
 
     await link_gone()
+
+
+@pytest.mark.asyncio
+async def test_bgsave_during_stable_sync(df_factory: DflyInstanceFactory):
+    """
+    shard_stable_sync_read when a BGSAVE is running on the replica concurrently
+    """
+    master = df_factory.create(proactor_threads=8, num_shards=8)
+    replica = df_factory.create(
+        proactor_threads=8,
+        num_shards=8,
+        dir="{DRAGONFLY_TMP}/",
+        dbfilename="test-replica-bgsave",
+    )
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+    del_clients = [master.client() for _ in range(16)]
+
+    await c_master.execute_command("DEBUG", "POPULATE", "100000", "k", "100")
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    stop_event = asyncio.Event()
+
+    async def del_loop(client, slot):
+        i = slot
+        while not stop_event.is_set():
+            try:
+                pipe = client.pipeline(transaction=False)
+                for j in range(50):
+                    pipe.delete(f"k:{(i + j) % 100000}")
+                    pipe.set(f"k:{(i + j) % 100000}", f"v{i + j}")
+                await pipe.execute()
+                i += 50
+            except Exception:
+                stop_event.set()
+                break
+
+    async def bgsave_loop():
+        for _ in range(20):
+            if stop_event.is_set():
+                break
+            try:
+                await c_replica.execute_command("BGSAVE")
+                while await is_saving(c_replica):
+                    await asyncio.sleep(0)
+            except Exception:
+                stop_event.set()
+                break
+        stop_event.set()
+
+    await asyncio.gather(
+        bgsave_loop(),
+        *[del_loop(c, i * 6250) for i, c in enumerate(del_clients)],
+        return_exceptions=True,
+    )
+
+    for c in del_clients:
+        await c.aclose()
+
+    await c_master.aclose()
+    await c_replica.aclose()
+    master.stop()
+    replica.stop()
+
+    bad_lines = replica.find_in_logs("Unexpected fiber")
+    assert not bad_lines, (
+        "DbSlice change callback fired from shard_stable_sync_read during BGSAVE "
+        "(SerializerBase::OnChangeBlocking invariant violated).\n" + "\n".join(bad_lines)
+    )

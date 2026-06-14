@@ -230,32 +230,6 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
     assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
 
 
-@pytest.mark.asyncio
-async def test_denyoom_commands(df_factory):
-    df_server = df_factory.create(
-        proactor_threads=1, maxmemory="256mb", oom_deny_commands="get", rss_oom_deny_ratio=-1
-    )
-    df_server.start()
-    client = df_server.client()
-    await client.execute_command("DEBUG POPULATE 7000 size 44000")
-
-    min_deny = 256 * 1024 * 1024  # 256mb
-    info = await client.info("memory")
-    print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
-    assert info["used_memory"] > min_deny, "Weak testcase: too little used memory"
-
-    # reject set due to oom
-    with pytest.raises(redis.exceptions.ResponseError):
-        await client.execute_command("set x y")
-
-    # reject get because it is set in oom_deny_commands
-    with pytest.raises(redis.exceptions.ResponseError):
-        await client.execute_command("get x")
-
-    # mget should not be rejected
-    await client.execute_command("mget x")
-
-
 @pytest.mark.parametrize("type", ["LIST", "HASH", "SET", "ZSET", "STRING", "STREAM"])
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.asyncio

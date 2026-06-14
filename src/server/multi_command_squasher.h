@@ -25,6 +25,7 @@ class MultiCommandSquasher {
   struct Opts {
     bool verify_commands = false;   // Whether commands need to be verified before execution
     bool error_abort = false;       // Abort upon receiving error
+    bool pipeline_mode = false;     // Whether to expect pipeline command contexts
     unsigned max_squash_size = 32;  // How many commands to squash at once
   };
 
@@ -37,10 +38,12 @@ class MultiCommandSquasher {
     Stats& operator+=(const Stats& o);
   };
 
-  // Returns number of processed commands.
-  static Stats Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
-                       ConnectionContext* cntx, Service* service, const Opts& opts) {
-    MultiCommandSquasher sq{cmds, cntx, service, opts};
+  // cmd_gen returns CmdRef one at a time; an invalid CmdRef (cid==nullptr) signals the end.
+  using CmdGenerator = std::function<CmdRef()>;
+
+  static Stats Execute(CmdGenerator cmd_gen, facade::RedisReplyBuilder* rb, ConnectionContext* cntx,
+                       Service* service, const Opts& opts) {
+    MultiCommandSquasher sq{std::move(cmd_gen), cntx, service, opts};
     sq.Run(rb);
     return sq.stats_;
   }
@@ -55,7 +58,7 @@ class MultiCommandSquasher {
     }
 
     struct Command {
-      const StoredCmd* cmd;
+      CmdRef cmd;
       facade::CapturingReplyBuilder::Payload reply;
     };
     std::vector<Command> dispatched;  // Dispatched commands
@@ -68,17 +71,17 @@ class MultiCommandSquasher {
 
   enum class SquashResult : uint8_t { SQUASHED, SQUASHED_FULL, NOT_SQUASHED };
 
-  MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, Service* Service,
+  MultiCommandSquasher(CmdGenerator cmd_gen, ConnectionContext* cntx, Service* Service,
                        const Opts& opts);
 
   // Lazy initialize shard info.
   ShardExecInfo& PrepareShardInfo(ShardId sid);
 
   // Retrun squash flags
-  SquashResult TrySquash(const StoredCmd* cmd);
+  SquashResult TrySquash(CmdRef cmd);
 
   // Execute separate non-squashed cmd. Return false if aborting on error.
-  bool ExecuteStandalone(facade::RedisReplyBuilder* rb, const StoredCmd* cmd);
+  bool ExecuteStandalone(facade::RedisReplyBuilder* rb, CmdRef cmd);
 
   // Callback that runs on shards during squashed hop.
   facade::OpStatus SquashedHopCb(EngineShard* es, facade::RespVersion resp_v);
@@ -90,8 +93,8 @@ class MultiCommandSquasher {
 
   bool IsAtomic() const;
 
-  absl::Span<StoredCmd> cmds_;  // Input range of stored commands
-  ConnectionContext* cntx_;     // Underlying context
+  CmdGenerator cmd_gen_;     // Pulls commands one at a time
+  ConnectionContext* cntx_;  // Underlying context
   Service* service_;
 
   bool atomic_;                // Whether working in any of the atomic modes
@@ -103,6 +106,7 @@ class MultiCommandSquasher {
   std::vector<ShardId> order_;  // reply order for squashed cmds
 
   size_t num_shards_ = 0;
+  size_t num_commands_ = 0;  // Total commands processed
 
   std::vector<MutableSlice> tmp_keylist_;
   Stats stats_;

@@ -90,11 +90,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
                                  bool on_update) override;
 
-  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
-
-  // Serialize entry into passed serializer.
-  void SerializeEntry(BucketIdentity bucket, DbIndex db_index, const PrimeKey& pk,
-                      const PrimeValue& pv);
+  // Called under stream_mu_ to perform RDB serialization of a single entry.
+  void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                            time_t expire, uint32_t mc_flags) override;
 
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.
@@ -133,14 +131,12 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
   struct Stats {
-    size_t skipped = 0;
     size_t keys_total = 0;
     size_t jounal_changes = 0;
     size_t flushed_under_lock = 0;
   } stats_;
 
   SnapshotDataConsumerInterface* consumer_;
-  ExecutionState* cntx_;
 };
 
 }  // namespace dfly
