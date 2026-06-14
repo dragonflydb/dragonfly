@@ -3,10 +3,12 @@
 //
 // A minimal demo that implements SET/GET commands with Dragonfly's
 // shard-per-thread architecture: each proactor thread owns a thread-local
-// hash map, and commands are dispatched to the correct shard via
-// ProactorBase::DispatchBrief (non-blocking) using the SuspendedCommand
-// async mechanism. Falls back to synchronous AwaitBrief when async is
-// not supported by the caller.
+// hash map, and commands are dispatched to the correct shard through a
+// per-shard fb2::FiberQueue (MPSC) using the SuspendedCommand async
+// mechanism. Each proactor runs a consumer fiber draining its own queue,
+// while connection fibers on any thread enqueue callbacks via Add().
+// The synchronous fallback uses FiberQueue::Await when async is not
+// supported by the caller.
 
 #include <xxhash.h>
 
@@ -24,6 +26,7 @@
 #include "facade/reply_builder.h"
 #include "facade/service_interface.h"
 #include "util/accept_server.h"
+#include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/pool.h"
 #include "util/fibers/synchronization.h"
 #include "util/http/http_common.h"
@@ -31,6 +34,7 @@
 #include "util/http/http_server_utils.h"
 
 ABSL_FLAG(uint32_t, port, 6379, "server port");
+ABSL_FLAG(uint32_t, fq_size, 256, "per-shard FiberQueue capacity");
 
 using namespace util;
 using namespace std;
@@ -42,6 +46,13 @@ namespace {
 
 // Thread-local shard storage — each proactor thread has its own hash map.
 thread_local absl::flat_hash_map<string, string> shard_db;
+
+// One MPSC FiberQueue per shard (indexed by proactor index). Each queue is created and
+// drained by a consumer fiber running on its owning proactor thread (see RunEngine), but
+// callbacks are enqueued into it from connection fibers on any thread via Add()/Await().
+// g_shard_consumers holds the consumer fibers so they can be joined on shutdown.
+vector<unique_ptr<fb2::FiberQueue>> g_shard_queues;
+vector<fb2::Fiber> g_shard_consumers;
 
 // Determine the owning shard for a given key.
 constexpr uint64_t kShardHashSeed = 120577240643ULL;
@@ -136,7 +147,7 @@ AsyncCmd SetAsync(CmdContext* ctx, ProactorPool* pool) {
   unsigned shard_id = KeyShard(key, pool->size());
 
   ctx->blocker.Start(1);
-  pool->at(shard_id)->DispatchBrief([k = std::move(key), v = std::move(value), ctx]() mutable {
+  g_shard_queues[shard_id]->Add([k = std::move(key), v = std::move(value), ctx]() mutable {
     shard_db.insert_or_assign(std::move(k), std::move(v));
     ctx->blocker.Dec();
   });
@@ -153,7 +164,7 @@ AsyncCmd GetAsync(CmdContext* ctx, ProactorPool* pool) {
   unsigned shard_id = KeyShard(key, pool->size());
 
   ctx->blocker.Start(1);
-  pool->at(shard_id)->DispatchBrief([k = std::move(key), ctx] {
+  g_shard_queues[shard_id]->Add([k = std::move(key), ctx] {
     auto it = shard_db.find(k);
     if (it != shard_db.end())
       ctx->get_result = it->second;
@@ -271,7 +282,7 @@ DispatchResult OkService::HandleSetSync(ParsedCommand* cmd) {
   string_view value = cmd->at(2);
   unsigned shard_id = KeyShard(key, pool_->size());
 
-  pool_->at(shard_id)->AwaitBrief([k = string(key), v = string(value)]() mutable {
+  g_shard_queues[shard_id]->Await([k = string(key), v = string(value)]() mutable {
     shard_db.insert_or_assign(std::move(k), std::move(v));
   });
 
@@ -283,7 +294,7 @@ DispatchResult OkService::HandleGetSync(ParsedCommand* cmd) {
   string_view key = cmd->at(1);
   unsigned shard_id = KeyShard(key, pool_->size());
 
-  optional<string> result = pool_->at(shard_id)->AwaitBrief([key]() -> optional<string> {
+  optional<string> result = g_shard_queues[shard_id]->Await([key]() -> optional<string> {
     auto it = shard_db.find(key);
     if (it == shard_db.end())
       return nullopt;
@@ -430,11 +441,32 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   Connection::Init(pool->size());
   pool->Await([](auto*) { tl_facade_stats = new FacadeStats; });
 
+  // Create a FiberQueue per shard and start a consumer fiber draining it on the owning
+  // proactor thread. The queue and its consumer fiber both live on that thread, so cross-thread
+  // producers (connection fibers) only touch the lock-free queue + EventCount.
+  const unsigned num_shards = pool->size();
+  const uint32_t fq_size = GetFlag(FLAGS_fq_size);
+  g_shard_queues.resize(num_shards);
+  g_shard_consumers.resize(num_shards);
+  pool->AwaitFiberOnAll([fq_size](unsigned index, ProactorBase*) {
+    g_shard_queues[index] = make_unique<fb2::FiberQueue>(fq_size);
+    g_shard_consumers[index] =
+        fb2::Fiber(absl::StrCat("shard_q", index), [index] { g_shard_queues[index]->Run(); });
+  });
+
   acceptor->AddListener(GetFlag(FLAGS_port),
                         new Listener{Protocol::REDIS, &service, Listener::Role::MAIN});
 
   acceptor->Run();
   acceptor->Wait();
+
+  // Stop each consumer fiber on its owning proactor thread and join it there.
+  pool->AwaitFiberOnAll([](unsigned index, ProactorBase*) {
+    g_shard_queues[index]->Shutdown();
+    g_shard_consumers[index].Join();
+  });
+  g_shard_consumers.clear();
+  g_shard_queues.clear();
 }
 
 }  // namespace
