@@ -212,8 +212,7 @@ async def test_replication_all(
         args["cache_mode"] = "true"
         args["maxmemory"] = str(t_master * 256) + "mb"
 
-    if tagged_chunks:
-        args["serialization_tagged_chunks"] = True
+    args["serialization_tagged_chunks"] = tagged_chunks
 
     master = df_factory.create(
         admin_port=ADMIN_PORT,
