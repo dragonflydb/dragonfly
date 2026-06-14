@@ -468,12 +468,14 @@ class Connection : public util::Connection {
   ParsedCommand* CreateParsedCommand();
   void EnqueueParsedCommand(ParsedCommand* cmd);
 
-  // Releases the command memory back to the pool without recording any stats.
-  // Use for commands that are dropped/cleaned up without execution.
+  // Releases the command memory back to the pool, updating pipeline queue accounting
+  // (queue length/bytes) but NOT per-command latency/throughput stats.
+  // Use for commands that are dropped/cleaned up without execution. It is also the common
+  // release path that ReleasePipelinedCommand delegates to.
   void ReleaseParsedCommand(ParsedCommand* cmd);
 
-  // Records pipeline latency/throughput stats for a successfully executed command, then releases
-  // its memory back to the pool.
+  // Records per-command pipeline latency/throughput stats for a successfully executed command,
+  // then delegates to ReleaseParsedCommand for the memory release and queue accounting.
   void ReleasePipelinedCommand(ParsedCommand* cmd);
 
   void DestroyParsedQueue();
