@@ -833,7 +833,7 @@ TEST_F(ServerFamilyTest, CommandInfo) {
 
   // CASE: No args
   resp = Run({"command", "info"});
-  EXPECT_EQ(resp.GetVec().size(), 0);
+  EXPECT_EQ(resp.GetVec().size(), CheckedInt({"command", "count"}));
 }
 
 TEST_F(ServerFamilyTest, CommandList) {

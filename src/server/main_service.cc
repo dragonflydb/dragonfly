@@ -2711,14 +2711,19 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
     }
   };
 
-  // If no arguments are specified, reply with all commands
-  if (args.empty()) {
+  // Helper to return all non-hidden commands
+  auto send_all_commands = [rb, &serialize_command, &cmd_cnt, this]() {
     rb->StartArray(cmd_cnt);
-    registry_.Traverse([&](string_view name, const CommandId& cid) {
+    registry_.Traverse([&](const string_view name, const CommandId& cid) {
       if (cid.opt_mask() & CO::HIDDEN)
         return;
       serialize_command(name, cid);
     });
+  };
+
+  // If no arguments are specified, reply with all commands
+  if (args.empty()) {
+    send_all_commands();
     return;
   }
 
@@ -2731,6 +2736,12 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
 
   // INFO [command-name [command-name ...]]
   if (subcmd == "INFO") {
+    // Returning all available commands when COMMAND INFO with no args called
+    if (args.size() == 1) {
+      send_all_commands();
+      return;
+    }
+
     const auto total_cmds = static_cast<uint32_t>(args.size() - 1);
     rb->StartArray(total_cmds);
 
@@ -2781,7 +2792,8 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
         });
 
         auto dist = std::distance(rev_table.begin(), it);
-        if (it == rev_table.end() || dist >= 32)
+        // Enforce 32-bit width of the acl_categories bitmask.
+        if (it == rev_table.end() || std::cmp_greater_equal(dist, sizeof(acl::AclCat) * CHAR_BIT))
           return rb->SendEmptyArray();
         cat_bit = dist;
       } else {
