@@ -1741,8 +1741,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_dispatch_commands_total", "",
                             conn_stats.pipeline_dispatch_commands, MetricType::COUNTER,
                             &resp->body());
-  AppendMetricWithoutLabels("pipeline_dispatch_skip_flush_total", "",
-                            conn_stats.skip_pipeline_flushing, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_dispatch_flush_total", "",
+                            conn_stats.pipeline_dispatch_flush_count, MetricType::COUNTER,
+                            &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_flush_duration_seconds", "",
                             conn_stats.pipeline_dispatch_flush_usec * 1e-6, MetricType::COUNTER,
                             &resp->body());
@@ -1762,10 +1763,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendPipelineLatencySummary("pipeline_latency_seconds", "Pipeline command latency distribution",
                                conn_stats.pipelined_latency_hist, conn_stats.pipelined_cmd_cnt,
                                conn_stats.pipelined_cmd_latency, &resp->body());
-
-  AppendMetricWithoutLabels("cmd_squash_stats_ignored_total", "",
-                            m.coordinator_stats.squash_stats_ignored, MetricType::COUNTER,
-                            &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_hops,
                             MetricType::COUNTER, &resp->body());

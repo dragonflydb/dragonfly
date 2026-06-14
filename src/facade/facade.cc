@@ -54,7 +54,7 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(pipeline_dispatch_calls);
   ADD(pipeline_dispatch_commands);
   ADD(pipeline_dispatch_flush_usec);
-  ADD(skip_pipeline_flushing);
+  ADD(pipeline_dispatch_flush_count);
 
   return *this;
 }

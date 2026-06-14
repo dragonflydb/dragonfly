@@ -178,8 +178,8 @@ class OkService : public ServiceInterface {
   }
 
   DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference mode) final;
-  DispatchManyResult DispatchManyCommands(ParsedCommand* head, unsigned count,
-                                          SinkReplyBuilder* builder, ConnectionContext* cntx) final;
+  uint32_t DispatchManyCommands(ParsedCommand* head, unsigned count, SinkReplyBuilder* builder,
+                                ConnectionContext* cntx) final;
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
 
   ConnectionContext* CreateContext(Connection* owner) final {
@@ -251,19 +251,15 @@ DispatchResult OkService::DispatchCommand([[maybe_unused]] ParsedArgs args, Pars
 // Currently does not implement squashing and is very naive.
 // Use --enable_resp_io_loop_v2=true to go through the more optimized V2 flow
 // that doesn't call DispatchManyCommands at all.
-DispatchManyResult OkService::DispatchManyCommands(ParsedCommand* head, unsigned count,
-                                                   SinkReplyBuilder* builder,
-                                                   ConnectionContext* cntx) {
+uint32_t OkService::DispatchManyCommands(ParsedCommand* head, unsigned count,
+                                         SinkReplyBuilder* builder, ConnectionContext* cntx) {
   for (unsigned i = 0; i < count; i++) {
     ParsedCommand* cmd = head;
     head = head->next;
     cmd->Init(builder, cntx);
     DispatchCommand(ParsedArgs{*cmd}, cmd, AsyncPreference::ONLY_SYNC);
   }
-  return DispatchManyResult{
-      .processed = static_cast<uint32_t>(count),
-      .account_in_stats = true,
-  };
+  return count;
 }
 
 DispatchResult OkService::HandleSetSync(ParsedCommand* cmd) {
@@ -377,9 +373,9 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
   absl::StrAppend(&body, "pipeline_dispatch_flush_seconds ",
                   conn.pipeline_dispatch_flush_usec * 1e-6, "\n");
 
-  absl::StrAppend(&body, "# HELP pipeline_skip_flush_total Times pipeline flush was skipped\n");
-  absl::StrAppend(&body, "# TYPE pipeline_skip_flush_total counter\n");
-  absl::StrAppend(&body, "pipeline_skip_flush_total ", conn.skip_pipeline_flushing, "\n");
+  absl::StrAppend(&body, "# TYPE pipeline_dispatch_flush_total counter\n");
+  absl::StrAppend(&body, "pipeline_dispatch_flush_total ", conn.pipeline_dispatch_flush_count,
+                  "\n");
 
   // Network I/O metrics
   absl::StrAppend(&body, "# HELP net_input_bytes_total Total bytes read from network\n");

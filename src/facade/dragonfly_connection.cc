@@ -1744,47 +1744,36 @@ void Connection::SquashPipeline() {
   // it must guard the Flush() as well.
   cc_->async_dispatch = true;
 
-  DispatchManyResult result = service_->DispatchManyCommands(parsed_to_execute_, pipeline_count,
-                                                             reply_builder_.get(), cc_.get());
+  uint32_t num_dispatched_cmds = service_->DispatchManyCommands(parsed_to_execute_, pipeline_count,
+                                                                reply_builder_.get(), cc_.get());
 
-  local_stats_.cmds += result.processed;
+  local_stats_.cmds += num_dispatched_cmds;
   last_interaction_ = time(nullptr);
-  uint32_t num_dispatched_cmds = result.processed;
-  uint64_t flush_start_cycle_cnt = CycleClock::Now();
-  //
+
   // TODO: to investigate if always flushing will improve P99 latency because otherwise we
   // wait for the next batch to finish before fully flushing the current response.
   if (parsed_cmd_q_len_ == pipeline_count ||
       always_flush_pipeline_cached) {  // Flush if no new commands appeared
+    uint64_t flush_start_cycle = CycleClock::Now();
     reply_builder_->Flush();
+    conn_stats.pipeline_dispatch_flush_count++;
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
-  } else {
-    conn_stats.skip_pipeline_flushing++;
+    conn_stats.pipeline_dispatch_flush_usec +=
+        CycleClock::ToUsec(CycleClock::Now() - flush_start_cycle);
   }
 
   cc_->async_dispatch = false;
 
-  if (result.account_in_stats) {
-    conn_stats.pipeline_dispatch_calls++;
-    conn_stats.pipeline_dispatch_commands += num_dispatched_cmds;
-    conn_stats.pipeline_dispatch_flush_usec +=
-        CycleClock::ToUsec(CycleClock::Now() - flush_start_cycle_cnt);
-  }
+  conn_stats.pipeline_dispatch_calls++;
+  conn_stats.pipeline_dispatch_commands += num_dispatched_cmds;
 
-  auto* current{parsed_head_};
-  for (size_t i = 0; (i < num_dispatched_cmds) && current; ++i) {
-    auto* next{current->next};
+  for (size_t i = 0; (i < num_dispatched_cmds) && parsed_head_; ++i) {
+    auto* next = parsed_head_->next;
 
-    if (result.account_in_stats) {
-      conn_stats.pipelined_wait_latency += CycleClock::ToUsec(start - current->parsed_cycle);
-    }
+    conn_stats.pipelined_wait_latency += CycleClock::ToUsec(start - parsed_head_->parsed_cycle);
 
-    ReleaseParsedCommand(current, result.account_in_stats /* is_pipelined */);
-    current = next;
-  }
-  parsed_head_ = current;
-  if (!parsed_head_) {
-    parsed_tail_ = nullptr;
+    ReleasePipelinedCommand(parsed_head_);
+    AdvanceParsedHead(next);
   }
   parsed_to_execute_ = parsed_head_;
 
@@ -1818,7 +1807,7 @@ void Connection::ClearPipelinedMessages() {
       curr->Blocker()->Wait();
     }
 
-    ReleaseParsedCommand(curr, false);
+    ReleaseParsedCommand(curr);
   }
 
   DCHECK_EQ(parsed_cmd_q_len_, 0u);
@@ -1896,14 +1885,11 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
   return false;
 }
 
-void Connection::ProcessPipelineCommand() {
+void Connection::ProcessPipelineCommandV1() {
   DCHECK(parsed_head_ && parsed_to_execute_) << DebugInfo();
   auto* cmd = parsed_to_execute_;
   parsed_to_execute_ = cmd->next;
-  parsed_head_ = parsed_to_execute_;
-  if (!parsed_head_) {
-    parsed_tail_ = nullptr;
-  }
+  AdvanceParsedHead(parsed_to_execute_);
 
   tl_facade_stats->conn_stats.pipelined_wait_latency +=
       CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
@@ -1915,7 +1901,7 @@ void Connection::ProcessPipelineCommand() {
   skip_next_squashing_ = false;
   cc_->async_dispatch = false;
 
-  ReleaseParsedCommand(cmd, true);
+  ReleasePipelinedCommand(cmd);
 
   // If we drained the pipeline and no admin messages are waiting, flush.
   if (!HasPendingMessages()) {
@@ -2052,7 +2038,7 @@ void Connection::AsyncFiber() {
             << ", dispatch quota reached: " << quota_reached
             << ", async_dispatch_quota: " << async_dispatch_quota
             << ", dispatch_q_cmd_processed: " << dispatch_q_cmd_processed;
-        ProcessPipelineCommand();
+        ProcessPipelineCommandV1();
         dispatch_q_cmd_processed = 0;
       } else {  // 3. Process admin Queue
         msg = std::move(dispatch_q_.front());
@@ -2567,12 +2553,23 @@ bool Connection::ExecuteBatch() {
   // Invariant: batched_ must be false on entry.
   // Both ReplyBatch() and ExecuteBatch() reset it via absl::Cleanup guards on all return paths.
   DCHECK(!reply_builder_->IsBatchMode());
+
+  if (parsed_to_execute_ == nullptr) {
+    return true;  // no errors.
+  }
+
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
   auto& conn_stats = tl_facade_stats->conn_stats;
-  auto advance_head = [this]() -> ParsedCommand* {
+
+  bool is_true_pipeline = (parsed_to_execute_->next) != nullptr;
+
+  auto advance_head = [&] {
     auto* cmd = parsed_head_;
-    parsed_head_ = cmd->next;
-    ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
+    AdvanceParsedHead(parsed_head_->next);
+    if (is_true_pipeline)  // pipeline mode as we have
+      ReleasePipelinedCommand(cmd);
+    else
+      ReleaseParsedCommand(cmd);
     return parsed_head_;
   };
 
@@ -2635,9 +2632,6 @@ bool Connection::ExecuteBatch() {
     }
   }
 
-  if (parsed_head_ == nullptr)
-    parsed_tail_ = nullptr;
-
   // Since we are done executing a batch, and advance_head might be called which release commands,
   // notify waiters that backpressure might be relieved.
   if (ioloop_v2_) {
@@ -2647,35 +2641,38 @@ bool Connection::ExecuteBatch() {
 }
 
 bool Connection::ReplyBatch() {
+  if (!HasInFlightCommands())
+    return true;
+
   reply_builder_->SetBatchMode(true);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
-  while (HasInFlightCommands() && parsed_head_->CanReply()) {
+  while (parsed_head_->CanReply()) {
     current_wait_.reset();  // Clear the subscription before moving to the next command
     auto* cmd = parsed_head_;
-    parsed_head_ = cmd->next;
+    AdvanceParsedHead(parsed_head_->next);
+
     cmd->SendReply();
-    ReleaseParsedCommand(cmd, HasInFlightCommands() /* is_pipelined */);
+
+    // An in-flight command is considered to be a pipelined command.
+    ReleasePipelinedCommand(cmd);
     if (reply_builder_->GetError())
       return false;
+
+    if (!HasInFlightCommands())
+      break;
   }
 
-  if (parsed_head_ == nullptr)
-    parsed_tail_ = nullptr;
-
-  // Since we are done replying a batch, and ReleaseParsedCommand might be called which release
-  // commands, notify waiters that backpressure might be relieved.
-  if (ioloop_v2_) {
-    io_event_.notify();
-  }
-
-  // V1: handles its pipeline batching inside AsyncFiber, so it flushes unconditionally here.
-  //
   // V2: operates as a single-fiber event loop where reading, parsing, and executing happen
   // sequentially. Because ParseLoop processes pipelines in chunks, flushing here would trigger a
   // sendmsg syscall for every single chunk. Instead, V2 delegates flushing to IoLoopV2, which
   // safely flushes the coalesced buffer right before the fiber yields (await) or when memory limits
   // are reached.
-  if (!ioloop_v2_) {
+  if (ioloop_v2_) {
+    // Since we are done replying a batch, and ReleaseParsedCommand might be called which release
+    // commands, notify waiters that backpressure might be relieved.
+    io_event_.notify();
+  } else {
+    // V1: handles its pipeline batching inside AsyncFiber, so it flushes unconditionally here.
     reply_builder_->Flush();
   }
 
@@ -2722,7 +2719,24 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   }
 }
 
-void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
+void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
+  auto& conn_stats = tl_facade_stats->conn_stats;
+  conn_stats.pipelined_cmd_cnt++;
+  uint64_t latency_usec = CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
+  conn_stats.pipelined_cmd_latency += latency_usec;
+  conn_stats.pipelined_latency_hist.Add(latency_usec);
+  // Decay the histogram every kPipelineLatencyDecayPeriod samples to
+  // approximate a moving-window distribution; older observations contribute
+  // half as much after each decay period.
+  constexpr uint64_t kPipelineLatencyDecayPeriod = 1 << 14;  // 16384
+  if ((conn_stats.pipelined_latency_hist.count() & (kPipelineLatencyDecayPeriod - 1)) == 0) {
+    conn_stats.pipelined_latency_hist.Decay();
+  }
+
+  ReleaseParsedCommand(cmd);
+}
+
+void Connection::ReleaseParsedCommand(ParsedCommand* cmd) {
   size_t used_mem = cmd->EnqueuedBytes();
   auto& conn_stats = tl_facade_stats->conn_stats;
 
@@ -2735,20 +2749,6 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
 
   conn_stats.pipeline_queue_entries--;
   conn_stats.pipeline_queue_bytes -= used_mem;
-
-  if (is_pipelined) {
-    conn_stats.pipelined_cmd_cnt++;
-    uint64_t latency_usec = CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
-    conn_stats.pipelined_cmd_latency += latency_usec;
-    conn_stats.pipelined_latency_hist.Add(latency_usec);
-    // Decay the histogram every kPipelineLatencyDecayPeriod samples to
-    // approximate a moving-window distribution; older observations contribute
-    // half as much after each decay period.
-    constexpr uint64_t kPipelineLatencyDecayPeriod = 1 << 14;  // 16384
-    if ((conn_stats.pipelined_latency_hist.count() & (kPipelineLatencyDecayPeriod - 1)) == 0) {
-      conn_stats.pipelined_latency_hist.Decay();
-    }
-  }
 
   if (parsed_cmd_ == nullptr) {
     parsed_cmd_ = cmd;
@@ -2775,7 +2775,7 @@ void Connection::DestroyParsedQueue() {
     // at all to any context data - too costly for now! (maybe let it own the arguments?)
     if (cmd->IsDeferredReply() && !cmd->CanReply())
       cmd->Blocker()->Wait();  // explicitly wait for it to finish
-    ReleaseParsedCommand(cmd, false);
+    ReleaseParsedCommand(cmd);
   }
 
   parsed_tail_ = nullptr;
