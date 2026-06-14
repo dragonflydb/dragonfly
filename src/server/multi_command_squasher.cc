@@ -168,7 +168,6 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
   optional<CapturingReplyBuilder> crb;
   if (opts_.pipeline_mode) {
     DCHECK(cmd.cmd_cntx);
-    cmd.cmd_cntx->SetDeferredReply();
     DCHECK(cmd.reply_mode == ReplyMode::FULL);
     crb.emplace(ReplyMode::FULL, rb->GetRespVersion());
     rb = &*crb;
@@ -232,8 +231,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       if (auto err = service_->VerifyCommandState(*dispatched.cmd.cid, args, *cntx_); err) {
         crb.SendError(std::move(*err));
         auto payload = crb.Take();
-        if (opts_.pipeline_mode) {
-          DCHECK(dispatched.cmd.cmd_cntx);
+        if (dispatched.cmd.cmd_cntx) {
           dispatched.cmd.cmd_cntx->Resolve(std::move(payload));
         } else {
           move_reply(std::move(payload), &dispatched.reply);
@@ -254,8 +252,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       service_->InvokeCmd(args, &cmd_cntx);
     }
     auto payload = crb.Take();
-    if (opts_.pipeline_mode) {
-      DCHECK(dispatched.cmd.cmd_cntx);
+    if (dispatched.cmd.cmd_cntx) {
       dispatched.cmd.cmd_cntx->Resolve(std::move(payload));
     } else {
       move_reply(std::move(payload), &dispatched.reply);
@@ -284,16 +281,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   base::SpinLock lock;
   uint64_t fiber_running_cycles{0}, proactor_running_cycles{0};
   uint32_t max_sched_thread_id{0}, max_sched_seq_num{0};
-
-  // Mark pipeline commands as deferred before dispatching to shards.
-  if (opts_.pipeline_mode) {
-    for (auto& sinfo : sharded_) {
-      for (auto& cmd : sinfo.dispatched) {
-        DCHECK(cmd.cmd.cmd_cntx);
-        cmd.cmd.cmd_cntx->SetDeferredReply();
-      }
-    }
-  }
 
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
   // stubs, non-atomic ones just run the commands in parallel.

@@ -1740,20 +1740,47 @@ void Connection::SquashPipeline() {
 
   uint64_t start = CycleClock::Now();
 
-  // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
-  // it must guard the Flush() as well.
+  // async_dispatch guards the whole batch: it gates sync dispatch and reply_builder_ writes
+  // (incl. Flush), and marks the connection as dispatching for DispatchTracker checkpoints.
+  // It must be set before DispatchSquashedBatch, which can preempt on shard hops.
   cc_->async_dispatch = true;
 
-  uint32_t num_dispatched_cmds = service_->DispatchManyCommands(parsed_to_execute_, pipeline_count,
-                                                                reply_builder_.get(), cc_.get());
+  uint32_t squashed =
+      service_->DispatchSquashedBatch(parsed_to_execute_, pipeline_count, cc_.get());
 
-  local_stats_.cmds += num_dispatched_cmds;
+  // Nothing was squashed (the head command can't join a batch, e.g. MULTI/EXEC, EVAL,
+  // subscribe, blocking, or unknown). Hand it off to regular dispatch without flushing or
+  // resetting batch mode here — doing so would break reply aggregation for the rest of the
+  // pipeline (e.g. a pipelined MULTI/EXEC would flush once per command).
+  if (squashed == 0) {
+    cc_->async_dispatch = false;
+    skip_next_squashing_ = true;
+    return;
+  }
+
+  // Send the deferred replies in linked-list order, then release the commands. SendReply() may
+  // preempt, allowing the producer to append new commands, so re-read the next pointer after it
+  // and advance the list incrementally to keep it consistent at any preemption point.
+  for (unsigned i = 0; i < squashed && parsed_head_; ++i) {
+    auto* current = parsed_head_;
+
+    DCHECK(current->CanReply());
+    current->SendReply();
+
+    conn_stats.pipelined_wait_latency += CycleClock::ToUsec(start - current->parsed_cycle);
+
+    auto* next = current->next;
+    ReleasePipelinedCommand(current);
+    AdvanceParsedHead(next);
+  }
+  parsed_to_execute_ = parsed_head_;
+
+  local_stats_.cmds += squashed;
   last_interaction_ = time(nullptr);
 
-  // TODO: to investigate if always flushing will improve P99 latency because otherwise we
-  // wait for the next batch to finish before fully flushing the current response.
-  if (parsed_cmd_q_len_ == pipeline_count ||
-      always_flush_pipeline_cached) {  // Flush if no new commands appeared
+  // Flush if no new commands appeared while we dispatched. The released commands were already
+  // subtracted from parsed_cmd_q_len_, so add them back for the comparison.
+  if (parsed_cmd_q_len_ + squashed == pipeline_count || always_flush_pipeline_cached) {
     uint64_t flush_start_cycle = CycleClock::Now();
     reply_builder_->Flush();
     conn_stats.pipeline_dispatch_flush_count++;
@@ -1765,20 +1792,10 @@ void Connection::SquashPipeline() {
   cc_->async_dispatch = false;
 
   conn_stats.pipeline_dispatch_calls++;
-  conn_stats.pipeline_dispatch_commands += num_dispatched_cmds;
+  conn_stats.pipeline_dispatch_commands += squashed;
 
-  for (size_t i = 0; (i < num_dispatched_cmds) && parsed_head_; ++i) {
-    auto* next = parsed_head_->next;
-
-    conn_stats.pipelined_wait_latency += CycleClock::ToUsec(start - parsed_head_->parsed_cycle);
-
-    ReleasePipelinedCommand(parsed_head_);
-    AdvanceParsedHead(next);
-  }
-  parsed_to_execute_ = parsed_head_;
-
-  // If interrupted due to pause, fall back to regular dispatch
-  skip_next_squashing_ = (num_dispatched_cmds != pipeline_count);
+  // If interrupted due to pause or a non-squashable command, fall back to regular dispatch.
+  skip_next_squashing_ = (squashed != pipeline_count);
 }
 
 void Connection::ClearPipelinedMessages() {
