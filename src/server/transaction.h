@@ -317,9 +317,8 @@ class Transaction {
     return &run_barrier_;
   }
 
-  // Temporary
-  OpStatus* LocalResultPtr() {
-    return &local_result_;
+  OpStatus GetLocalResult() const {
+    return local_result_;
   }
 
   // Whether the transaction is multi and runs in an atomic mode.

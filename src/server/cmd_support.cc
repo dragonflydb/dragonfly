@@ -33,7 +33,8 @@ void SingleHopWaiter::await_suspend(std::coroutine_handle<> handle) const noexce
 }
 
 facade::OpStatus SingleHopWaiter::await_resume() const noexcept {
-  return *cmd_cntx->tx()->LocalResultPtr();
+  // Ignore OpStatus::CANCELLED for error throws as it is handled separately by the io loop (v2)
+  return cmd_cntx->tx()->GetLocalResult();
 }
 
 void CmdR::Coro::return_value(const facade::ErrorReply& err) const noexcept {
