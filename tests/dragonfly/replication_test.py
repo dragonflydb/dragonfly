@@ -1,6 +1,9 @@
+import asyncio
+import logging
 import os
 import platform
 import random
+import re
 import shutil
 import signal
 import struct
@@ -10,13 +13,31 @@ from itertools import chain, repeat
 
 import async_timeout
 import pymemcache
+import pytest
+import redis
+from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory, DflyInstance
 from .proxy import Proxy
 from .seeder import DebugPopulateSeeder, HnswSearchSeeder
 from .seeder import Seeder as SeederV2
-from .utility import *
+from .utility import (
+    assert_eventually,
+    batch_fill_data,
+    check_all_replicas_finished,
+    DflySeederFactory,
+    download_with_retries,
+    ExpirySeeder,
+    extract_int_after_prefix,
+    gen_test_data,
+    info_tick_timer,
+    is_saving,
+    parse_client_list,
+    tmp_file_name,
+    wait_available_async,
+    wait_for_replicas_state,
+)
 
 ADMIN_PORT = 1211
 
@@ -789,16 +810,16 @@ async def test_rewrites(df_factory):
         await check("SPOP k-set 2", r"DEL k-set")
 
         # Check SET + {EX/PX/EXAT} + {XX/NX/GET} arguments turns into SET PXAT
-        await check(f"SET k v EX 100 NX GET", r"SET k v PXAT (.*?)")
+        await check("SET k v EX 100 NX GET", r"SET k v PXAT (.*?)")
         await check_expire("k")
-        await check(f"SET k v PX 50000", r"SET k v PXAT (.*?)")
+        await check("SET k v PX 50000", r"SET k v PXAT (.*?)")
         await check_expire("k")
         # Exact expiry is skewed
-        await check(f"SET k v XX EXAT {CLOSE_TIMESTAMP}", rf"SET k v PXAT (.*?)")
+        await check(f"SET k v XX EXAT {CLOSE_TIMESTAMP}", r"SET k v PXAT (.*?)")
         await check_expire("k")
 
         # Check SET + KEEPTTL doesn't loose KEEPTTL
-        await check(f"SET k v KEEPTTL", r"SET k v KEEPTTL")
+        await check("SET k v KEEPTTL", r"SET k v KEEPTTL")
 
         # Check SETEX/PSETEX turn into SET PXAT
         await check("SETEX k 100 v", r"SET k v PXAT (.*?)")
@@ -851,10 +872,10 @@ async def test_rewrites(df_factory):
         # Check BITOP turns into SET
         await check("BITOP OR kdest k1 k2", r"SET kdest 1100")
         # See gh issue #3528
-        await c_master.execute_command(f"HSET foo bar val")
+        await c_master.execute_command("HSET foo bar val")
         await skip_cmd()
         await check("BITOP NOT foo tmp", r"DEL foo")
-        await c_master.execute_command(f"HSET foo bar val")
+        await c_master.execute_command("HSET foo bar val")
         await skip_cmd()
         await c_master.set("k3", "-")
         await skip_cmd()
@@ -1483,7 +1504,7 @@ async def test_readonly_script(df_factory):
 
     await c_replica.eval(READONLY_SCRIPT, 3, "A", "B", "WORKS") == "YES"
 
-    with pytest.raises(aioredis.ResponseError) as roe:
+    with pytest.raises(aioredis.ResponseError):
         await c_replica.eval(WRITE_SCRIPT, 1, "A")
 
 
@@ -1522,7 +1543,7 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
         while time.time() - start < 20:
             try:
                 value = await c_master.execute_command(f"INCR {key}")
-            except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
+            except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError):
                 break
         else:
             assert False, "The incrementing loop should be exited with a connection error"
@@ -1538,7 +1559,7 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
 
     async def delayed_takeover():
         await asyncio.sleep(1)
-        await c1.execute_command(f"REPLTAKEOVER 5")
+        await c1.execute_command("REPLTAKEOVER 5")
 
     _, _, *results = await asyncio.gather(
         delayed_takeover(), block_during_takeover(), *[counter(f"key{i}") for i in range(16)]
@@ -1582,7 +1603,7 @@ async def test_take_over_seeder(
     # Give the seeder a bit of time.
     await asyncio.sleep(3)
     logging.debug("running repltakover")
-    await c_replica.execute_command(f"REPLTAKEOVER 30 SAVE")
+    await c_replica.execute_command("REPLTAKEOVER 30 SAVE")
     logging.debug("after running repltakover")
     seeder.stop()
     await fill_task
@@ -1634,7 +1655,7 @@ async def test_take_over_read_commands(df_factory, master_threads, replica_threa
             assert res == "bar"
 
     promt_task = asyncio.create_task(prompt())
-    await c_replica.execute_command(f"REPLTAKEOVER 5")
+    await c_replica.execute_command("REPLTAKEOVER 5")
 
     assert await c_replica.execute_command("role") == ["master", []]
     await promt_task
@@ -1659,7 +1680,7 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
     # Give the seeder a bit of time.
     await asyncio.sleep(1)
     try:
-        await c_replica.execute_command(f"REPLTAKEOVER 0")
+        await c_replica.execute_command("REPLTAKEOVER 0")
     except redis.exceptions.ResponseError as e:
         # Should fail with detailed error message
         assert str(e).startswith("Couldn't execute takeover")
@@ -2228,7 +2249,7 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
 
     c_replica = replica.client()
 
-    await c_replica.execute_command(f"DEBUG POPULATE 1000 key 500 RAND type set elements 500")
+    await c_replica.execute_command("DEBUG POPULATE 1000 key 500 RAND type set elements 500")
 
     replica.stop()
     replica.start()
@@ -2752,14 +2773,14 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
         assert await old_c_master.execute_command("HGETALL foo") == []
 
     await check_if_empty()
-    assert await old_c_master.execute_command(f"EXISTS foo") == 1
+    assert await old_c_master.execute_command("EXISTS foo") == 1
     await old_c_master.aclose()
 
     async def assert_body(client, result=1, state="online", node_role="slave"):
         async with async_timeout.timeout(10):
             await wait_for_replicas_state(client, state=state, node_role=node_role)
 
-        assert await client.execute_command(f"EXISTS foo") == result
+        assert await client.execute_command("EXISTS foo") == result
         assert await client.execute_command("REPLTAKEOVER 1") == "OK"
 
     index = 0
@@ -2807,7 +2828,7 @@ async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
         assert await c_master.execute_command("HGETALL foo") == []
 
     await check_if_empty()
-    assert await c_master.execute_command(f"EXISTS foo") == 1
+    assert await c_master.execute_command("EXISTS foo") == 1
 
     replica = df_factory.create()
     replica.start()
@@ -2815,7 +2836,7 @@ async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_for_replicas_state(c_replica)
-    assert await c_replica.execute_command(f"dbsize") == 0
+    assert await c_replica.execute_command("dbsize") == 0
 
 
 async def test_replicate_search_index_to_old_replica(df_factory: DflyInstanceFactory):
@@ -2971,7 +2992,7 @@ async def test_double_take_over(df_factory, df_seeder_factory):
     await start_replication(c_replica, master.admin_port)
 
     logging.debug("running repltakover")
-    await c_replica.execute_command(f"REPLTAKEOVER 10")
+    await c_replica.execute_command("REPLTAKEOVER 10")
     assert await c_replica.execute_command("role") == ["master", []]
 
     @assert_eventually
@@ -2988,7 +3009,7 @@ async def test_double_take_over(df_factory, df_seeder_factory):
     await start_replication(c_master, replica.admin_port)
 
     logging.debug("running second repltakover")
-    await c_master.execute_command(f"REPLTAKEOVER 10")
+    await c_master.execute_command("REPLTAKEOVER 10")
     assert await c_master.execute_command("role") == ["master", []]
 
     assert await seeder.compare(capture, port=master.port)
@@ -3438,14 +3459,14 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
 
     if use_takeover:
         # Promote first replica to master
-        await c_replica1.execute_command(f"REPLTAKEOVER 5")
+        await c_replica1.execute_command("REPLTAKEOVER 5")
         if backlog_len > 1:
             await c_replica1.execute_command("SET bar foo")
             await c_replica1.execute_command("SET foo bar")
 
     else:
         # Promote first replica to master
-        await c_replica1.execute_command(f"REPLICAOF NO ONE")
+        await c_replica1.execute_command("REPLICAOF NO ONE")
         await c_master.set("x", "y")
         await c_master.set("x", "y")
         await check_all_replicas_finished([c_replica2], c_master)
@@ -3465,7 +3486,7 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
         assert s1 == s2
 
     # Check we can takeover to the second replica
-    await c_replica2.execute_command(f"REPLTAKEOVER 5")
+    await c_replica2.execute_command("REPLTAKEOVER 5")
 
     replica1.stop()
     replica2.stop()
@@ -3502,7 +3523,7 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     await wait_for_replicas_state(c_s3)
 
     # Promote server 2 to master
-    await c_s2.execute_command(f"REPLTAKEOVER 20")
+    await c_s2.execute_command("REPLTAKEOVER 20")
     # Make server 4 replica of server 2
     await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
     # Send some write command for lsn inc
@@ -3905,7 +3926,7 @@ async def test_takeover_timeout_on_unresponsive_master(df_factory):
         elapsed = time.time() - start_time
         pytest.fail(
             f"BUG: REPLTAKEOVER hung for {elapsed:.1f}s without timeout. "
-            f"SendNextPhaseRequest in replica.cc has no socket timeout."
+            "SendNextPhaseRequest in replica.cc has no socket timeout."
         )
     except Exception as e:
         # Expected: connection error or timeout error
@@ -3960,7 +3981,7 @@ async def test_repl_offset(df_factory):
     await check_all_replicas_finished([c_replica1, c_replica2, c_replica3], c_master)
 
     # Promote first replica to master
-    await c_replica1.execute_command(f"REPLTAKEOVER 5")
+    await c_replica1.execute_command("REPLTAKEOVER 5")
 
     # issue 4183
     async def with_timeout_link_down(client):
@@ -3991,7 +4012,7 @@ async def test_repl_offset(df_factory):
     assert info["slave_repl_offset"] > proactors
     assert info["psync_successes"] == 1
 
-    await c_replica1.execute_command(f"REPLTAKEOVER 5")
+    await c_replica1.execute_command("REPLTAKEOVER 5")
     await with_timeout_link_down(c_replica3)
 
 
