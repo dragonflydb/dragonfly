@@ -1172,7 +1172,6 @@ OpResult<uint32_t> OpDelV2(const OpArgs& op_args, const ShardArgs& keys, bool as
 
   if (journal_enabled && !journal_args.empty())
     RecordJournal(op_args, "DEL", journal_args);
-  // else record NO-OP?
 
   return deleted_cnt;
 }
