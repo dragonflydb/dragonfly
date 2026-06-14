@@ -131,8 +131,9 @@ ABSL_FLAG(uint32_t, scheduler_background_sleep_prob, 50,
 ABSL_FLAG(uint32_t, scheduler_background_warrant, 5,
           "Percentage of guaranteed cpu time for background fibers");
 
-ABSL_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
-          "If set, will not track latency stats below this threshold (usec). ");
+ABSL_RETIRED_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
+                  "Deprecated. Squash latency stats are now tracked unconditionally; "
+                  "use the pipeline_latency_seconds histogram for percentiles instead.");
 
 namespace {
 
@@ -676,18 +677,14 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   return result;
 }
 
-thread_local uint32_t squash_stats_latency_lower_limit_cached;
-
 void UpdateFromFlagsOnThread() {
   if (uint32_t poll = GetFlag(FLAGS_shard_thread_busy_polling_usec);
       poll > 0 && EngineShard::tlocal())
     ProactorBase::me()->SetBusyPollUsec(poll);
-  squash_stats_latency_lower_limit_cached = GetFlag(FLAGS_squash_stats_latency_lower_limit);
 }
 
 std::vector<std::string> GetMutableFlagNames() {
-  return base::GetFlagNames(FLAGS_shard_thread_busy_polling_usec,
-                            FLAGS_squash_stats_latency_lower_limit);
+  return base::GetFlagNames(FLAGS_shard_thread_busy_polling_usec);
 }
 
 void UpdateSchedulerFlagsOnThread() {
@@ -1701,9 +1698,8 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   return res;
 }
 
-DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, unsigned count,
-                                                 SinkReplyBuilder* builder,
-                                                 facade::ConnectionContext* cntx) {
+uint32_t Service::DispatchManyCommands(facade::ParsedCommand* head, unsigned count,
+                                       SinkReplyBuilder* builder, facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
   DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
@@ -1712,14 +1708,12 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
   auto* ss = dfly::ServerState::tlocal();
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
   if (ss->IsPaused())
-    return {.processed = 0, .account_in_stats = false};
+    return 0;
 
   vector<CmdRef> cmd_refs;
   intrusive_ptr<Transaction> dist_trans;
   uint32_t dispatched = 0;
   MultiCommandSquasher::Stats stats;
-
-  uint64_t start_cycles = base::CycleClock::Now();
 
   auto perform_squash = [&] {
     if (cmd_refs.empty())
@@ -1795,18 +1789,11 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
   if (dist_trans)
     dist_trans->UnlockMulti();
 
-  uint64_t total_usec = base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
-  bool account_in_stats = total_usec > squash_stats_latency_lower_limit_cached;
-  if (account_in_stats) {
-    auto* ss = ServerState::tlocal();
-    ss->stats.multi_squash_exec_hop_usec += stats.hop_usec;
-    ss->stats.multi_squash_exec_reply_usec += stats.reply_usec;
-    ss->stats.multi_squash_hops += stats.hops;
-    ss->stats.squashed_commands += stats.squashed_commands;
-  } else {
-    ss->stats.squash_stats_ignored++;
-  }
-  return {.processed = dispatched, .account_in_stats = account_in_stats};
+  ss->stats.multi_squash_exec_hop_usec += stats.hop_usec;
+  ss->stats.multi_squash_exec_reply_usec += stats.reply_usec;
+  ss->stats.multi_squash_hops += stats.hops;
+  ss->stats.squashed_commands += stats.squashed_commands;
+  return dispatched;
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {

@@ -1763,10 +1763,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                                conn_stats.pipelined_latency_hist, conn_stats.pipelined_cmd_cnt,
                                conn_stats.pipelined_cmd_latency, &resp->body());
 
-  AppendMetricWithoutLabels("cmd_squash_stats_ignored_total", "",
-                            m.coordinator_stats.squash_stats_ignored, MetricType::COUNTER,
-                            &resp->body());
-
   AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_hops,
                             MetricType::COUNTER, &resp->body());
 

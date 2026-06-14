@@ -42,9 +42,9 @@ class Service : public facade::ServiceInterface {
                                          facade::AsyncPreference apref) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  facade::DispatchManyResult DispatchManyCommands(facade::ParsedCommand* head, unsigned count,
-                                                  facade::SinkReplyBuilder* builder,
-                                                  facade::ConnectionContext* cntx) final;
+  uint32_t DispatchManyCommands(facade::ParsedCommand* head, unsigned count,
+                                facade::SinkReplyBuilder* builder,
+                                facade::ConnectionContext* cntx) final;
 
   // Check OOM and invoke command with args
   facade::DispatchResult InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx);

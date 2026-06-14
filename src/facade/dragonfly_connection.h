@@ -378,7 +378,7 @@ class Connection : public util::Connection {
   bool ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op);
 
   // Processes the next Pipeline command from parsed_head_.
-  void ProcessPipelineCommand();
+  void ProcessPipelineCommandV1();
 
   void SendAsync(MessageHandle msg);
 
@@ -468,14 +468,21 @@ class Connection : public util::Connection {
   ParsedCommand* CreateParsedCommand();
   void EnqueueParsedCommand(ParsedCommand* cmd);
 
-  // Releases the command memory back to the pool.
-  // - Set is_pipelined=true if the command was successfully executed and should be counted
-  // in latency/throughput stats.
-  // - Set is_pipelined=false if the command is being dropped/cleaned up without execution or should
-  // not be counted in stats.
-  void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
+  // Releases the command memory back to the pool without recording any stats.
+  // Use for commands that are dropped/cleaned up without execution.
+  void ReleaseParsedCommand(ParsedCommand* cmd);
+
+  // Records pipeline latency/throughput stats for a successfully executed command, then releases
+  // its memory back to the pool.
+  void ReleasePipelinedCommand(ParsedCommand* cmd);
 
   void DestroyParsedQueue();
+  void AdvanceParsedHead(ParsedCommand* new_head) {
+    parsed_head_ = new_head;
+    if (!parsed_head_) {
+      parsed_tail_ = nullptr;
+    }
+  }
 
   // Dispatch Queue - Queue for the Control Path.
   // Handles asynchronous administrative tasks, events, and high-priority control
