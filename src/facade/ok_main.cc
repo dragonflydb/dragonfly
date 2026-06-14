@@ -10,6 +10,7 @@
 // The synchronous fallback uses FiberQueue::Await when async is not
 // supported by the caller.
 
+#include <mimalloc-new-delete.h>  // Routes global operator new/delete through mimalloc.
 #include <xxhash.h>
 
 #include <coroutine>
