@@ -470,8 +470,8 @@ class Connection : public util::Connection {
 
   // Releases the command memory back to the pool, updating pipeline queue accounting
   // (queue length/bytes) but NOT per-command latency/throughput stats.
-  // Use for commands that are dropped/cleaned up without execution. It is also the common
-  // release path that ReleasePipelinedCommand delegates to.
+  // Used both for cleanup/dropped commands and for executed commands where do not wish to
+  // account for pipeline stats.
   void ReleaseParsedCommand(ParsedCommand* cmd);
 
   // Records per-command pipeline latency/throughput stats for a successfully executed command,

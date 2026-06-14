@@ -1749,24 +1749,23 @@ void Connection::SquashPipeline() {
 
   local_stats_.cmds += num_dispatched_cmds;
   last_interaction_ = time(nullptr);
-  uint64_t flush_start_cycle_cnt = CycleClock::Now();
-  //
+
   // TODO: to investigate if always flushing will improve P99 latency because otherwise we
   // wait for the next batch to finish before fully flushing the current response.
   if (parsed_cmd_q_len_ == pipeline_count ||
       always_flush_pipeline_cached) {  // Flush if no new commands appeared
+    uint64_t flush_start_cycle = CycleClock::Now();
     reply_builder_->Flush();
+    conn_stats.pipeline_dispatch_flush_count++;
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
-  } else {
-    conn_stats.skip_pipeline_flushing++;
+    conn_stats.pipeline_dispatch_flush_usec +=
+        CycleClock::ToUsec(CycleClock::Now() - flush_start_cycle);
   }
 
   cc_->async_dispatch = false;
 
   conn_stats.pipeline_dispatch_calls++;
   conn_stats.pipeline_dispatch_commands += num_dispatched_cmds;
-  conn_stats.pipeline_dispatch_flush_usec +=
-      CycleClock::ToUsec(CycleClock::Now() - flush_start_cycle_cnt);
 
   for (size_t i = 0; (i < num_dispatched_cmds) && parsed_head_; ++i) {
     auto* next = parsed_head_->next;
@@ -2554,12 +2553,20 @@ bool Connection::ExecuteBatch() {
   // Invariant: batched_ must be false on entry.
   // Both ReplyBatch() and ExecuteBatch() reset it via absl::Cleanup guards on all return paths.
   DCHECK(!reply_builder_->IsBatchMode());
+
+  if (parsed_to_execute_ == nullptr) {
+    return true;  // no errors.
+  }
+
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
   auto& conn_stats = tl_facade_stats->conn_stats;
-  auto advance_head = [this]() -> ParsedCommand* {
+
+  bool is_true_pipeline = (parsed_to_execute_->next) != nullptr;
+
+  auto advance_head = [&] {
     auto* cmd = parsed_head_;
-    parsed_head_ = cmd->next;
-    if (parsed_head_ != nullptr)
+    AdvanceParsedHead(parsed_head_->next);
+    if (is_true_pipeline)  // pipeline mode as we have
       ReleasePipelinedCommand(cmd);
     else
       ReleaseParsedCommand(cmd);
@@ -2625,9 +2632,6 @@ bool Connection::ExecuteBatch() {
     }
   }
 
-  if (parsed_head_ == nullptr)
-    parsed_tail_ = nullptr;
-
   // Since we are done executing a batch, and advance_head might be called which release commands,
   // notify waiters that backpressure might be relieved.
   if (ioloop_v2_) {
@@ -2637,38 +2641,38 @@ bool Connection::ExecuteBatch() {
 }
 
 bool Connection::ReplyBatch() {
+  if (!HasInFlightCommands())
+    return true;
+
   reply_builder_->SetBatchMode(true);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
-  while (HasInFlightCommands() && parsed_head_->CanReply()) {
+  while (parsed_head_->CanReply()) {
     current_wait_.reset();  // Clear the subscription before moving to the next command
     auto* cmd = parsed_head_;
-    parsed_head_ = cmd->next;
+    AdvanceParsedHead(parsed_head_->next);
+
     cmd->SendReply();
-    if (HasInFlightCommands())
-      ReleasePipelinedCommand(cmd);
-    else
-      ReleaseParsedCommand(cmd);
+
+    // An in-flight command is considered to be a pipelined command.
+    ReleasePipelinedCommand(cmd);
     if (reply_builder_->GetError())
       return false;
+
+    if (!HasInFlightCommands())
+      break;
   }
 
-  if (parsed_head_ == nullptr)
-    parsed_tail_ = nullptr;
-
-  // Since we are done replying a batch, and ReleaseParsedCommand might be called which release
-  // commands, notify waiters that backpressure might be relieved.
-  if (ioloop_v2_) {
-    io_event_.notify();
-  }
-
-  // V1: handles its pipeline batching inside AsyncFiber, so it flushes unconditionally here.
-  //
   // V2: operates as a single-fiber event loop where reading, parsing, and executing happen
   // sequentially. Because ParseLoop processes pipelines in chunks, flushing here would trigger a
   // sendmsg syscall for every single chunk. Instead, V2 delegates flushing to IoLoopV2, which
   // safely flushes the coalesced buffer right before the fiber yields (await) or when memory limits
   // are reached.
-  if (!ioloop_v2_) {
+  if (ioloop_v2_) {
+    // Since we are done replying a batch, and ReleaseParsedCommand might be called which release
+    // commands, notify waiters that backpressure might be relieved.
+    io_event_.notify();
+  } else {
+    // V1: handles its pipeline batching inside AsyncFiber, so it flushes unconditionally here.
     reply_builder_->Flush();
   }
 

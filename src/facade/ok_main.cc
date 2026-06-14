@@ -373,9 +373,9 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
   absl::StrAppend(&body, "pipeline_dispatch_flush_seconds ",
                   conn.pipeline_dispatch_flush_usec * 1e-6, "\n");
 
-  absl::StrAppend(&body, "# HELP pipeline_skip_flush_total Times pipeline flush was skipped\n");
-  absl::StrAppend(&body, "# TYPE pipeline_skip_flush_total counter\n");
-  absl::StrAppend(&body, "pipeline_skip_flush_total ", conn.skip_pipeline_flushing, "\n");
+  absl::StrAppend(&body, "# TYPE pipeline_dispatch_flush_total counter\n");
+  absl::StrAppend(&body, "pipeline_dispatch_flush_total ", conn.pipeline_dispatch_flush_count,
+                  "\n");
 
   // Network I/O metrics
   absl::StrAppend(&body, "# HELP net_input_bytes_total Total bytes read from network\n");

@@ -61,7 +61,8 @@ struct ConnectionStats {
   uint64_t pipeline_dispatch_commands = 0;
   uint64_t pipeline_dispatch_flush_usec = 0;
 
-  uint64_t skip_pipeline_flushing = 0;  // number of times we skipped flushing the pipeline
+  // number of times we flushed when dispatching the pipeline.
+  uint64_t pipeline_dispatch_flush_count = 0;
 
   ConnectionStats& operator+=(const ConnectionStats& o);
 };
