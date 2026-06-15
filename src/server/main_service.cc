@@ -131,8 +131,9 @@ ABSL_FLAG(uint32_t, scheduler_background_sleep_prob, 50,
 ABSL_FLAG(uint32_t, scheduler_background_warrant, 5,
           "Percentage of guaranteed cpu time for background fibers");
 
-ABSL_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
-          "If set, will not track latency stats below this threshold (usec). ");
+ABSL_RETIRED_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
+                  "Deprecated. Squash latency stats are now tracked unconditionally; "
+                  "use the pipeline_latency_seconds histogram for percentiles instead.");
 
 namespace {
 
@@ -676,18 +677,14 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   return result;
 }
 
-thread_local uint32_t squash_stats_latency_lower_limit_cached;
-
 void UpdateFromFlagsOnThread() {
   if (uint32_t poll = GetFlag(FLAGS_shard_thread_busy_polling_usec);
       poll > 0 && EngineShard::tlocal())
     ProactorBase::me()->SetBusyPollUsec(poll);
-  squash_stats_latency_lower_limit_cached = GetFlag(FLAGS_squash_stats_latency_lower_limit);
 }
 
 std::vector<std::string> GetMutableFlagNames() {
-  return base::GetFlagNames(FLAGS_shard_thread_busy_polling_usec,
-                            FLAGS_squash_stats_latency_lower_limit);
+  return base::GetFlagNames(FLAGS_shard_thread_busy_polling_usec);
 }
 
 void UpdateSchedulerFlagsOnThread() {
@@ -1713,25 +1710,23 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   return res;
 }
 
-DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, unsigned count,
-                                                 SinkReplyBuilder* builder,
-                                                 facade::ConnectionContext* cntx) {
-  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
+                                        facade::ConnectionContext* cntx) {
+  auto* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
-  DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
-  DCHECK_GT(count, 1u);
 
-  auto* ss = dfly::ServerState::tlocal();
+  auto* rb = static_cast<RedisReplyBuilder*>(first->rb());
+  auto* ss = ServerState::tlocal();
+
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
   if (ss->IsPaused())
-    return {.processed = 0, .account_in_stats = false};
+    return 0;
 
   vector<CmdRef> cmd_refs;
+  cmd_refs.reserve(count);
   intrusive_ptr<Transaction> dist_trans;
-  uint32_t dispatched = 0;
+  unsigned dispatched = 0;
   MultiCommandSquasher::Stats stats;
-
-  uint64_t start_cycles = base::CycleClock::Now();
 
   auto perform_squash = [&] {
     if (cmd_refs.empty())
@@ -1748,58 +1743,49 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
     dfly_cntx->transaction = dist_trans.get();
     MultiCommandSquasher::Opts opts;
     opts.verify_commands = true;
+    opts.pipeline_mode = true;
     opts.max_squash_size = ss->max_squash_cmd_num;
 
     auto cmd_gen = [it = cmd_refs.begin(), end = cmd_refs.end()]() mutable -> CmdRef {
       return (it == end) ? CmdRef{} : *it++;
     };
-    stats += MultiCommandSquasher::Execute(
-        std::move(cmd_gen), static_cast<RedisReplyBuilder*>(builder), dfly_cntx, this, opts);
+    stats += MultiCommandSquasher::Execute(std::move(cmd_gen), rb, dfly_cntx, this, opts);
     dfly_cntx->transaction = nullptr;
 
     dispatched += cmd_refs.size();
     cmd_refs.clear();
   };
 
-  for (unsigned i = 0; i < count; i++) {
-    ParsedCommand* parsed_cmd = head;
-    head = head->next;
-    CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
-    cmd_cntx->Init(builder, dfly_cntx);
+  auto* cmd = first;
+  for (unsigned i = 0; i < count && cmd; i++) {
+    auto* cmd_cntx = static_cast<CommandContext*>(cmd);
 
-    ParsedArgs args{*parsed_cmd};
+    ParsedArgs args{*cmd_cntx};
     const auto [cid, tail_args] = registry_.FindExtended(args);
 
-    // MULTI...EXEC commands need to be collected into a single context, so squashing is not
-    // possible
-    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() ||
-                          (cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EXEC);
-
-    // Generally, executing any multi-transactions (including eval) is not possible because they
-    // might request a stricter multi mode than non-atomic which is used for squashing.
-    // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
-    // invocations, we can potentially execute multiple eval in parallel, which is very powerful
-    // paired with shardlocal eval
-    const bool is_eval = cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EVAL;
-    const bool is_blocking = cid != nullptr && cid->IsBlocking();
-
-    if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
-      cmd_refs.reserve(count);
-      cmd_refs.push_back(CmdRef{cid, tail_args});
-      continue;
-    }
-
-    // Squash accumulated commands
-    perform_squash();
-
-    // Stop accumulating when a pause is requested, fall back to regular dispatch
-    if (ss->IsPaused())
+    // Stop the batch at the first command that can't join it;
+    // the connection's regular dispatch path then handles exceptions
+    // (and the rest of the pipeline) with the real reply builder, after the replies squashed so
+    // far are flushed in order. Commands that stop the batch:
+    //  - unknown commands (cid == nullptr): dispatched standalone to produce their error reply;
+    //  - MULTI/EXEC and the commands queued between them: sequential, stored in ExecInfo;
+    //  - EVAL: scripts may require a stricter multi mode than the non-atomic squashing tx;
+    //  - blocking commands: prior replies must be flushed before the fiber blocks;
+    //  - QUIT: closes the reply builder, dropping any deferred replies not yet sent;
+    //  - subscribe/unsubscribe: emit one reply per channel (multiple top-level replies), which the
+    //    CapturingReplyBuilder backing deferred replies cannot represent.
+    if (cid == nullptr)
       break;
 
-    // Dispatch non squashed command only after all squashed commands were executed and replied
-    cmd_cntx->UpdateCid(cid);
-    DispatchCommand(args, cmd_cntx, AsyncPreference::ONLY_SYNC);
-    dispatched++;
+    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() ||
+                          cid->MultiControlKind() == CO::MultiControlKind::EXEC;
+    const bool is_eval = cid->MultiControlKind() == CO::MultiControlKind::EVAL;
+    if (is_multi || is_eval || cid->IsBlocking() || string_view{cid->name()} == "QUIT" ||
+        absl::EndsWith(cid->name(), "SUBSCRIBE"))
+      break;
+
+    cmd_refs.push_back(CmdRef{cid, tail_args, ReplyMode::FULL, cmd_cntx});
+    cmd = cmd->next;
   }
 
   perform_squash();
@@ -1807,18 +1793,12 @@ DispatchManyResult Service::DispatchManyCommands(facade::ParsedCommand* head, un
   if (dist_trans)
     dist_trans->UnlockMulti();
 
-  uint64_t total_usec = base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
-  bool account_in_stats = total_usec > squash_stats_latency_lower_limit_cached;
-  if (account_in_stats) {
-    auto* ss = ServerState::tlocal();
-    ss->stats.multi_squash_exec_hop_usec += stats.hop_usec;
-    ss->stats.multi_squash_exec_reply_usec += stats.reply_usec;
-    ss->stats.multi_squash_hops += stats.hops;
-    ss->stats.squashed_commands += stats.squashed_commands;
-  } else {
-    ss->stats.squash_stats_ignored++;
-  }
-  return {.processed = dispatched, .account_in_stats = account_in_stats};
+  ss->stats.multi_squash_exec_hop_usec += stats.hop_usec;
+  ss->stats.multi_squash_exec_reply_usec += stats.reply_usec;
+  ss->stats.multi_squash_hops += stats.hops;
+  ss->stats.squashed_commands += stats.squashed_commands;
+
+  return dispatched;
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {

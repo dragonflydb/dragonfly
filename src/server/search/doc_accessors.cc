@@ -52,16 +52,9 @@ FieldValue ToSortableValue(search::SchemaField::FieldType type, string_view valu
     }
     return value_as_double.value();
   }
-  if (type == search::SchemaField::VECTOR) {
-    if (value.empty()) {
-      return std::nullopt;
-    }
-    auto opt_vector = search::BytesToFtVectorSafe(value);
-    if (!opt_vector) {
-      return std::nullopt;
-    }
-    auto& [ptr, size] = opt_vector.value();
-    return absl::StrCat("[", absl::StrJoin(absl::Span<const float>{ptr.get(), size}, ","), "]");
+  // An empty vector field is dropped rather than returned as an empty value.
+  if (type == search::SchemaField::VECTOR && value.empty()) {
+    return std::nullopt;
   }
   return string{value};
 }

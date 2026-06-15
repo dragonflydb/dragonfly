@@ -35,14 +35,6 @@ enum class DispatchResult : uint8_t {
   WOULD_BLOCK  // Returned if ONLY_ASYNC was set, but only synchronous execution is possible
 };
 
-struct DispatchManyResult {
-  uint32_t processed;  // how many commands out of passed were actually processed
-
-  // whether to account the processed commands in stats. This is needed to consistently
-  // account commands that were included based on squash_stats_latency_lower_limit filter.
-  bool account_in_stats;
-};
-
 class ServiceInterface {
  public:
   virtual ~ServiceInterface() {
@@ -51,9 +43,13 @@ class ServiceInterface {
   virtual DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference) = 0;
   DispatchResult DispatchCommandSimple(ParsedCommand* cmd, AsyncPreference mode);
 
-  virtual DispatchManyResult DispatchManyCommands(ParsedCommand* head, unsigned count,
-                                                  SinkReplyBuilder* builder,
-                                                  ConnectionContext* cntx) = 0;
+  // Dispatches a batch of pipelined commands, squashing consecutive single-shard commands.
+  // Replies are deferred into the parsed commands and are sent by the connection afterwards.
+  // Returns the number of squashed commands.
+  virtual uint32_t DispatchSquashedBatch(ParsedCommand* first, unsigned count,
+                                         ConnectionContext* cntx) {
+    return 0;
+  }
 
   virtual ConnectionContext* CreateContext(Connection* owner) = 0;
 

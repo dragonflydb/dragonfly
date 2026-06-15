@@ -21,6 +21,40 @@ namespace dfly {
 class ExecutionState;
 struct TestDriver;
 
+namespace detail {
+
+#ifdef __clang__
+#define NO_THREAD_SAFETY_ANALYSIS __attribute__((no_thread_safety_analysis))
+#else
+#define NO_THREAD_SAFETY_ANALYSIS
+#endif
+
+template <typename T> struct OptionalMutex {
+  explicit OptionalMutex(bool active) : active_{active} {
+  }
+
+  void lock() NO_THREAD_SAFETY_ANALYSIS {
+    if (active_)
+      mutex_.lock();
+  }
+
+  void unlock() NO_THREAD_SAFETY_ANALYSIS {
+    if (active_)
+      mutex_.unlock();
+  }
+
+  bool is_locked() const {
+    return active_ && mutex_.is_locked();
+  }
+
+  T mutex_;
+  const bool active_;
+};
+
+#undef NO_THREAD_SAFETY_ANALYSIS
+
+}  // namespace detail
+
 // Opaque identity for a physical DashTable bucket — its memory address.
 // Unique across all databases/segments for the lifetime of a serialization.
 using BucketIdentity = uintptr_t;
@@ -189,7 +223,7 @@ class SerializerBase : public BucketDependencies,
 
   // Guards output stream (serializer) to not be used from multiple fibers
   // as buffered changes can be flushed amid writing a value (logical stream)
-  ThreadLocalMutex stream_mu_;
+  detail::OptionalMutex<ThreadLocalMutex> stream_mu_;
 };
 
 }  // namespace dfly

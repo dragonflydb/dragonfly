@@ -163,9 +163,25 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
 
   auto args = cmd.Slice(&tmp_keylist_);
 
+  // In pipeline mode the reply is captured and deferred into the parsed command, preserving
+  // the reply order with squashed commands whose replies are sent later by the connection.
+  optional<CapturingReplyBuilder> crb;
+  if (opts_.pipeline_mode) {
+    DCHECK(cmd.cmd_cntx);
+    DCHECK(cmd.reply_mode == ReplyMode::FULL);
+    crb.emplace(ReplyMode::FULL, rb->GetRespVersion());
+    rb = &*crb;
+  }
+
+  auto resolve = [&] {
+    if (crb)
+      cmd.cmd_cntx->Resolve(crb->Take());
+  };
+
   if (opts_.verify_commands) {
     if (auto err = service_->VerifyCommandState(*cmd.cid, args, *cntx_); err) {
       rb->SendError(std::move(*err));
+      resolve();
       return !opts_.error_abort;
     }
   }
@@ -176,13 +192,17 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
     auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
       rb->SendError(status);
+      resolve();
       return !opts_.error_abort;
     }
   }
+
   CommandContext cmd_cntx{rb, cntx_};
   cmd_cntx.SetupTx(cmd.cid, tx);
   cmd_cntx.SetTailArgs(cmd.args);
   service_->InvokeCmd(args, &cmd_cntx);
+  resolve();
+
   return true;
 }
 
@@ -210,7 +230,12 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       // The shared context is used for state verification, the local one is only for replies
       if (auto err = service_->VerifyCommandState(*dispatched.cmd.cid, args, *cntx_); err) {
         crb.SendError(std::move(*err));
-        move_reply(crb.Take(), &dispatched.reply);
+        auto payload = crb.Take();
+        if (dispatched.cmd.cmd_cntx) {
+          dispatched.cmd.cmd_cntx->Resolve(std::move(payload));
+        } else {
+          move_reply(std::move(payload), &dispatched.reply);
+        }
         continue;
       }
     }
@@ -226,7 +251,12 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       cmd_cntx.SetTailArgs(dispatched.cmd.args);
       service_->InvokeCmd(args, &cmd_cntx);
     }
-    move_reply(crb.Take(), &dispatched.reply);
+    auto payload = crb.Take();
+    if (dispatched.cmd.cmd_cntx) {
+      dispatched.cmd.cmd_cntx->Resolve(std::move(payload));
+    } else {
+      move_reply(std::move(payload), &dispatched.reply);
+    }
   }
 
   return OpStatus::OK;
@@ -314,21 +344,26 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   uint64_t after_hop = CycleClock::Now();
   bool aborted = false;
 
-  size_t total_reply_size = 0;
-  for (auto& sinfo : sharded_) {
-    total_reply_size += sinfo.reply_size_delta;
-  }
+  if (!opts_.pipeline_mode) {
+    size_t total_reply_size = 0;
+    for (auto& sinfo : sharded_) {
+      total_reply_size += sinfo.reply_size_delta;
+    }
 
-  for (auto idx : order_) {
-    auto& sinfo = sharded_[idx];
-    DCHECK_LT(sinfo.reply_id, sinfo.dispatched.size());
+    for (auto idx : order_) {
+      auto& sinfo = sharded_[idx];
+      DCHECK_LT(sinfo.reply_id, sinfo.dispatched.size());
 
-    auto& reply = sinfo.dispatched[sinfo.reply_id++].reply;
-    aborted |= opts_.error_abort && CapturingReplyBuilder::TryExtractError(reply);
+      auto& reply = sinfo.dispatched[sinfo.reply_id++].reply;
+      aborted |= opts_.error_abort && CapturingReplyBuilder::TryExtractError(reply);
 
-    CapturingReplyBuilder::Apply(std::move(reply), rb);
-    if (aborted)
-      break;
+      CapturingReplyBuilder::Apply(std::move(reply), rb);
+      if (aborted)
+        break;
+    }
+
+    tl_facade_stats->reply_stats.squashing_current_reply_size.fetch_sub(total_reply_size,
+                                                                        std::memory_order_release);
   }
 
   uint64_t after_reply = CycleClock::Now();
@@ -353,11 +388,12 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
         << CycleClock::ToUsec(ProactorBase::me()->GetCurrentBusyCycles());
   }
 
-  tl_facade_stats->reply_stats.squashing_current_reply_size.fetch_sub(total_reply_size,
-                                                                      std::memory_order_release);
   for (auto& sinfo : sharded_) {
     sinfo.dispatched.clear();
     sinfo.reply_id = 0;
+    // Reset so a subsequent flush of the same instance does not re-count this batch's
+    // reply size into total_reply_size and underflow squashing_current_reply_size.
+    sinfo.reply_size_delta = 0;
   }
 
   order_.clear();
