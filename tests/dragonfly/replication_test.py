@@ -197,7 +197,7 @@ async def assert_replica_data_matches(c_master, c_replicas):
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
-@pytest.mark.parametrize("background_snapshotting", [False, True])
+@pytest.mark.parametrize("tagged_chunks", [True, False])
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
     t_master,
@@ -205,16 +205,14 @@ async def test_replication_all(
     seeder_config,
     stream_target,
     mode,
-    background_snapshotting,
+    tagged_chunks,
 ):
     args = {}
     if mode:
         args["cache_mode"] = "true"
         args["maxmemory"] = str(t_master * 256) + "mb"
 
-    if background_snapshotting:
-        args["background_heartbeat"] = None
-        args["background_snapshotting"] = None
+    args["serialization_tagged_chunks"] = tagged_chunks
 
     master = df_factory.create(
         admin_port=ADMIN_PORT,
@@ -3335,13 +3333,16 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
 
 @pytest.mark.large
 @pytest.mark.opt_only
+@pytest.mark.parametrize("tagged_chunks", [True, False])
 @dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
-async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
+async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory, tagged_chunks):
     """
     Restart replicating instance with huge values. Tests that interrupting the streaming process doesn't hinder retrying replication
     """
 
-    master, replica = df_factory.create(), df_factory.create(proactor_threads=1)
+    master, replica = df_factory.create(
+        serialization_tagged_chunks=tagged_chunks
+    ), df_factory.create(proactor_threads=1)
     df_factory.start_all([master, replica])
     c_master, c_replica = master.client(), replica.client()
 
@@ -3350,14 +3351,33 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
         "debug", "populate", "2", "test", "1000", "rand", "type", "zset", "elements", "1000000"
     )
 
+    done = False
+
+    async def ticker(c):
+        while not done:
+            await c_master.incr(f"key-{c}")
+
+    tickers = [asyncio.create_task(ticker(c)) for c in range(3)]
+
     # Restart replication a few times
     for _ in range(3):
+        print("Loop")
         assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
         await asyncio.sleep(random.random() + 0.5)
 
     # Wait for it to finish finally
-    async with async_timeout.timeout(70):
+    async with async_timeout.timeout(75):
         await wait_for_replicas_state(c_replica)
+
+    done = True
+    for t in tickers:
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+
+    await check_all_replicas_finished([c_replica], c_master)
 
     # Check that everything is in sync
     hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master, c_replica]))
@@ -3920,7 +3940,7 @@ async def test_takeover_timeout_on_unresponsive_master(df_factory):
         elapsed = time.time() - start_time
         pytest.fail(
             f"BUG: REPLTAKEOVER hung for {elapsed:.1f}s without timeout. "
-            f"SendNextPhaseRequest in replica.cc has no socket timeout."
+            "SendNextPhaseRequest in replica.cc has no socket timeout."
         )
     except Exception as e:
         # Expected: connection error or timeout error
