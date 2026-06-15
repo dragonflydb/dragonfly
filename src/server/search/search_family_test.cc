@@ -40,6 +40,22 @@ auto vector_score = [](std::string_view score_name, const RespExpr::Vec& score_f
   return score;
 };
 
+auto map_score = [](std::string_view score_name, const RespExpr::Vec& fields) -> float {
+  for (size_t i = 0; i + 1 < fields.size(); i += 2) {
+    if (fields[i].GetString() == score_name) {
+      float score = 0.0f;
+      bool success = absl::SimpleAtof(fields[i + 1].GetView(), &score);
+      if (!success) {
+        ADD_FAILURE() << "Could not parse score field: " << score_name;
+        return 0.0f;
+      }
+      return score;
+    }
+  }
+  ADD_FAILURE() << "Score field not found: " << score_name;
+  return -1.0f;
+};
+
 // Helper to convert float array to binary format
 auto Vec3ToBytes = [](float x, float y, float z) -> string {
   string result;
@@ -1159,6 +1175,133 @@ TEST_F(SearchFamilyTest, VectorReturnWithKnn) {
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "* => [KNN 1 @v $q AS dist]", "RETURN", "2", "v", "dist",
                    "PARAMS", "2", "q", q, "DIALECT", "2"}),
               MatchEntry("d:a", "v", va, "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnImplicitVectorScore) {
+  Run({"FT.CREATE",
+       "idx",
+       "ON",
+       "JSON",
+       "PREFIX",
+       "1",
+       "d:",
+       "SCHEMA",
+       "$.content",
+       "AS",
+       "content",
+       "TEXT",
+       "$.v",
+       "AS",
+       "v",
+       "VECTOR",
+       "FLAT",
+       "6",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       "3",
+       "DISTANCE_METRIC",
+       "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"content":"a","v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"content":"b","v":[2,0,0]})"});
+  Run({"JSON.SET", "d:c", "$", R"({"content":"c","v":[4,0,0]})"});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 3 @v $q]", "RETURN", "2", "content",
+                   "__vector_score", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, IsArray(IntArg(3), "d:a", IsMap("content", "a", "__vector_score", "0"), "d:b",
+                            IsMap("content", "b", "__vector_score", "1"), "d:c",
+                            IsMap("content", "c", "__vector_score", "3")));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnImplicitVectorScoreSortBy) {
+  Run({"FT.CREATE", "idx",     "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",     "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT32", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"v":[2,0,0]})"});
+  Run({"JSON.SET", "d:c", "$", R"({"v":[4,0,0]})"});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 2 @v $q]", "SORTBY", "__vector_score", "RETURN",
+                   "1", "__vector_score", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, IsArray(IntArg(2), "d:a", IsMap("__vector_score", "0"), "d:b",
+                            IsMap("__vector_score", "1")));
+}
+
+TEST_F(SearchFamilyTest, JsonHnswKnnImplicitVectorScore) {
+  Run({"FT.CREATE",
+       "idx",
+       "ON",
+       "JSON",
+       "PREFIX",
+       "1",
+       "d:",
+       "SCHEMA",
+       "$.content",
+       "AS",
+       "content",
+       "TEXT",
+       "$.v",
+       "AS",
+       "v",
+       "VECTOR",
+       "HNSW",
+       "8",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       "3",
+       "DISTANCE_METRIC",
+       "L2",
+       "M",
+       "16"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"content":"a","v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"content":"b","v":[2,0,0]})"});
+  Run({"JSON.SET", "d:c", "$", R"({"content":"c","v":[4,0,0]})"});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 2 @v $q]", "RETURN", "2", "content",
+                   "__vector_score", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, IsArray(IntArg(2), "d:a", IsMap("content", "a", "__vector_score", "0"), "d:b",
+                            IsMap("content", "b", "__vector_score", "1")));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnExplicitAliasDoesNotReturnImplicitVectorScore) {
+  Run({"FT.CREATE", "idx",     "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",     "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT32", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"v":[1,0,0]})"});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS myscore]", "RETURN", "2", "myscore",
+                   "__vector_score", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "myscore", "0"));
+}
+
+TEST_F(SearchFamilyTest, HashKnnDoesNotReturnImplicitVectorScore) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "FLAT", "6",
+       "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  const string va = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  Run({"HSET", "d:a", "v", va});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q]", "RETURN", "1", "__vector_score",
+                   "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a"));
+
+  resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q]", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "v", va));
 }
 
 TEST_F(SearchFamilyTest, TestStopWords) {
@@ -5807,6 +5950,91 @@ TEST_F(SearchFamilyTest, FtAggregateFilterAfterLimit) {
   // clang-format on
   // After SORTBY + LIMIT 0 2 we have the 2 smallest values (10, 20); FILTER keeps only 20
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("value", "20")));
+}
+
+TEST_F(SearchFamilyTest, AggregateJsonFlatKnnImplicitVectorScore) {
+  Run({"FT.CREATE",
+       "idx",
+       "ON",
+       "JSON",
+       "PREFIX",
+       "1",
+       "d:",
+       "SCHEMA",
+       "$.content",
+       "AS",
+       "content",
+       "TEXT",
+       "$.v",
+       "AS",
+       "v",
+       "VECTOR",
+       "FLAT",
+       "6",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       "3",
+       "DISTANCE_METRIC",
+       "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"content":"a","v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"content":"b","v":[2,0,0]})"});
+  Run({"JSON.SET", "d:c", "$", R"({"content":"c","v":[4,0,0]})"});
+
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @v $q]", "LOAD", "2", "@content",
+                   "@__vector_score", "PARAMS", "2", "q", Vec3ToBytes(1.0f, 0.0f, 0.0f), "SORTBY",
+                   "2", "@__vector_score", "ASC", "DIALECT", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  const auto& results = resp.GetVec();
+  ASSERT_GE(results.size(), 3u);
+  EXPECT_FLOAT_EQ(map_score("__vector_score", results[1].GetVec()), 0.0f);
+  EXPECT_FLOAT_EQ(map_score("__vector_score", results[2].GetVec()), 1.0f);
+}
+
+TEST_F(SearchFamilyTest, AggregateJsonHnswKnnImplicitVectorScore) {
+  Run({"FT.CREATE",
+       "idx",
+       "ON",
+       "JSON",
+       "PREFIX",
+       "1",
+       "d:",
+       "SCHEMA",
+       "$.content",
+       "AS",
+       "content",
+       "TEXT",
+       "$.v",
+       "AS",
+       "v",
+       "VECTOR",
+       "HNSW",
+       "8",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       "3",
+       "DISTANCE_METRIC",
+       "L2",
+       "M",
+       "16"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"content":"a","v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"content":"b","v":[2,0,0]})"});
+  Run({"JSON.SET", "d:c", "$", R"({"content":"c","v":[4,0,0]})"});
+
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @v $q]", "LOAD", "2", "@content",
+                   "@__vector_score", "PARAMS", "2", "q", Vec3ToBytes(1.0f, 0.0f, 0.0f), "SORTBY",
+                   "2", "@__vector_score", "ASC", "DIALECT", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  const auto& results = resp.GetVec();
+  ASSERT_EQ(results[0].GetInt().value_or(-1), 2);
+  ASSERT_GE(results.size(), 3u);
+  EXPECT_FLOAT_EQ(map_score("__vector_score", results[1].GetVec()), 0.0f);
+  EXPECT_FLOAT_EQ(map_score("__vector_score", results[2].GetVec()), 1.0f);
 }
 
 TEST_F(SearchFamilyTest, FtAggregateFilterSemanticRouting) {

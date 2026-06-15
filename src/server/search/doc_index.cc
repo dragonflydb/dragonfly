@@ -166,6 +166,26 @@ bool SearchParams::ShouldReturnField(std::string_view alias) const {
   return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
 }
 
+std::string_view DefaultKnnScoreAlias(DocIndex::DataType index_type) {
+  return index_type == DocIndex::JSON ? kDefaultVectorScoreAlias : ""sv;
+}
+
+search::KnnScoreSortOption ApplyDefaultKnnScoreAlias(search::KnnScoreSortOption option,
+                                                     DocIndex::DataType index_type) {
+  if (option.score_field_alias.empty())
+    option.score_field_alias = DefaultKnnScoreAlias(index_type);
+  return option;
+}
+
+std::optional<search::KnnScoreSortOption> GetEffectiveKnnScoreSortOption(
+    const search::SearchAlgorithm& search_algo, DocIndex::DataType index_type) {
+  // Shard-local callers already know the index type, so they can apply the default alias directly.
+  auto option = search_algo.GetKnnScoreSortOption();
+  if (!option)
+    return nullopt;
+  return ApplyDefaultKnnScoreAlias(*option, index_type);
+}
+
 string_view SearchFieldTypeToString(search::SchemaField::FieldType type) {
   switch (type) {
     case search::SchemaField::TAG:
@@ -859,11 +879,12 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
   // Disable BasicSearch's per-shard cutoff; we re-rank by (score, key) below.
   const bool sort_by_text_score = params.scorer || params.with_scores;
+  const auto knn_sort_option = GetEffectiveKnnScoreSortOption(*search_algo, base_->type);
 
   // If we don't sort the documents, we don't need to copy more ids than are requested
   // Also for HNSW KNN search we don't cut results at the search stage.
-  bool can_cut = !params.sort_option && !search_algo->GetKnnScoreSortOption() &&
-                 !is_knn_prefilter && !sort_by_text_score;
+  bool can_cut =
+      !params.sort_option && !knn_sort_option && !is_knn_prefilter && !sort_by_text_score;
   size_t id_cutoff_limit = can_cut ? limit : numeric_limits<size_t>::max();
 
   auto result = search_algo->Search(&*indices_, id_cutoff_limit, global_stats);
@@ -875,14 +896,14 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
   // Tune sort for KNN: Skip if it's on the knn field, otherwise extend the limit if needed
   bool skip_sort = false;
-  if (auto ko = search_algo->GetKnnScoreSortOption(); ko) {
-    skip_sort = !params.sort_option || params.sort_option->IsSame(*ko);
+  if (knn_sort_option) {
+    skip_sort = !params.sort_option || params.sort_option->IsSame(*knn_sort_option);
     if (skip_sort) {
       // Caller (SearchReply) will globally reorder by knn_score. Don't cut at the
       // shard level — otherwise multi-shard top-K-by-distance can drop true winners.
       limit = numeric_limits<size_t>::max();
     } else {
-      limit = max(limit, ko->limit);
+      limit = max(limit, knn_sort_option->limit);
     }
   }
 
@@ -1008,12 +1029,15 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   if (!search_results.error.empty())
     return {};
 
-  // Distance lookup for FLAT VECTOR_RANGE so the YIELD_DISTANCE_AS alias is available in the
-  // aggregation pipeline. HNSW VECTOR_RANGE uses LoadHnswRangeDocsForAggregator. Both score maps
-  // are already keyed by DocId, so move them through directly when requested.
+  // Distance lookup for FLAT KNN/VECTOR_RANGE so the score alias is available in the
+  // aggregation pipeline. HNSW paths use LoadHnswRangeDocsForAggregator.
   absl::flat_hash_map<DocId, float> knn_score_map;
   std::string score_alias;
-  if (auto* vr = search_algo->GetVectorRangeNode(); vr && !vr->score_alias.empty()) {
+  if (auto option = GetEffectiveKnnScoreSortOption(*search_algo, base_->type);
+      option && !option->score_field_alias.empty()) {
+    score_alias = option->score_field_alias;
+    knn_score_map = std::move(search_results.knn_scores);
+  } else if (auto* vr = search_algo->GetVectorRangeNode(); vr && !vr->score_alias.empty()) {
     score_alias = vr->score_alias;
     knn_score_map = std::move(search_results.knn_scores);
   }
