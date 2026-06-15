@@ -308,12 +308,16 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
 
-  struct DebugInfo {
-    uint32_t shards_count = 0;
-    TxClock clock = 0;
+  // Per-client introspection about the most recent command executed on this
+  // connection (akin to the info Redis exposes via CLIENT INFO). Captured live
+  // during command execution because the underlying Transaction is per-command
+  // and freed once dispatch returns.
+  struct LastCommandStats {
+    uint32_t shards_count = 0;  // unique shards touched by the command's transaction
+    TxClock clock = 0;          // transaction id (txid) of the command
   };
 
-  DebugInfo last_command_debug;
+  LastCommandStats last_cmd_stats;
 
   // TODO: to introduce proper accessors.
   Namespace* ns = nullptr;

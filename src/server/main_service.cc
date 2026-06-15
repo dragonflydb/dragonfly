@@ -871,7 +871,7 @@ pair<intrusive_ptr<Transaction>, OpStatus> PrepareTransaction(const CommandId* c
     }
 
     if (res)  // new transaction
-      dfly_cntx->last_command_debug.shards_count = cmd_ctx->tx()->GetUniqueShardCnt();
+      dfly_cntx->last_cmd_stats.shards_count = cmd_ctx->tx()->GetUniqueShardCnt();
   }
 
   return {std::move(res), OpStatus::OK};
@@ -1550,6 +1550,11 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   DispatchResult res = InvokeCmd(tail_args, cmd_cntx);
   if (dispatched_tx) {
     DCHECK(dfly_cntx->transaction == dispatched_tx.get());
+    // A new top-level transaction is created here only for top-level commands. Nested commands
+    // (EXEC body, script CALLs, squashed sub-commands) reuse an existing transaction or run on a
+    // different dispatch path, so recording last-command stats here naturally excludes them and
+    // avoids racing on the shared ConnectionContext from squashing shard threads.
+    dfly_cntx->last_cmd_stats.clock = dispatched_tx->txid();
     dfly_cntx->transaction = nullptr;
   }
 
@@ -1680,10 +1685,6 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
     }
 
     cmd_cntx->RecordLatency(tail_args);
-
-    if (tx && !cntx->conn_state.exec_info.IsRunning() && cntx->conn_state.script_info == nullptr) {
-      cntx->last_command_debug.clock = tx->txid();
-    }
   }
 
   // For EVAL[] and EXEC/DISCARD, clean up state.
