@@ -495,11 +495,18 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   context->ns = &namespaces->GetDefaultNamespace();
   vector<CommandContext> cmd_cntxs(cmds.size());
   for (size_t i = 0; i < cmds.size(); ++i) {
+    cmd_cntxs[i].Init(conn_wrapper->builder(), context);
     cmd_cntxs[i].Assign(cmds[i].begin(), cmds[i].end(), cmds[i].size());
     if (i + 1 < cmds.size())
       cmd_cntxs[i].next = &cmd_cntxs[i + 1];
   }
-  service_->DispatchManyCommands(cmd_cntxs.data(), cmds.size(), conn_wrapper->builder(), context);
+  service_->DispatchSquashedBatch(cmd_cntxs.data(), cmds.size(), context);
+
+  // DispatchSquashedBatch defers replies into the parsed commands; flush them in order.
+  for (auto& cmd_cntx : cmd_cntxs) {
+    if (cmd_cntx.IsDeferredReply())
+      cmd_cntx.SendReply();
+  }
   DCHECK(context->transaction == nullptr);
 }
 

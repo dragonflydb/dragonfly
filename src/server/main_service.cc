@@ -1698,104 +1698,6 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   return res;
 }
 
-uint32_t Service::DispatchManyCommands(facade::ParsedCommand* head, unsigned count,
-                                       SinkReplyBuilder* builder, facade::ConnectionContext* cntx) {
-  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
-  DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
-  DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
-  DCHECK_GT(count, 1u);
-
-  auto* ss = dfly::ServerState::tlocal();
-  // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
-  if (ss->IsPaused())
-    return 0;
-
-  vector<CmdRef> cmd_refs;
-  intrusive_ptr<Transaction> dist_trans;
-  uint32_t dispatched = 0;
-  MultiCommandSquasher::Stats stats;
-
-  auto perform_squash = [&] {
-    if (cmd_refs.empty())
-      return;
-
-    if (!dist_trans) {
-      dist_trans.reset(new Transaction{exec_cid_});
-      dist_trans->StartMultiNonAtomic();
-    } else {
-      // Reset to original command id as it's changed during squashing
-      dist_trans->MultiSwitchCmd(exec_cid_);
-    }
-
-    dfly_cntx->transaction = dist_trans.get();
-    MultiCommandSquasher::Opts opts;
-    opts.verify_commands = true;
-    opts.max_squash_size = ss->max_squash_cmd_num;
-
-    auto cmd_gen = [it = cmd_refs.begin(), end = cmd_refs.end()]() mutable -> CmdRef {
-      return (it == end) ? CmdRef{} : *it++;
-    };
-    stats += MultiCommandSquasher::Execute(
-        std::move(cmd_gen), static_cast<RedisReplyBuilder*>(builder), dfly_cntx, this, opts);
-    dfly_cntx->transaction = nullptr;
-
-    dispatched += cmd_refs.size();
-    cmd_refs.clear();
-  };
-
-  for (unsigned i = 0; i < count; i++) {
-    ParsedCommand* parsed_cmd = head;
-    head = head->next;
-    CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
-    cmd_cntx->Init(builder, dfly_cntx);
-
-    ParsedArgs args{*parsed_cmd};
-    const auto [cid, tail_args] = registry_.FindExtended(args);
-
-    // MULTI...EXEC commands need to be collected into a single context, so squashing is not
-    // possible
-    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() ||
-                          (cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EXEC);
-
-    // Generally, executing any multi-transactions (including eval) is not possible because they
-    // might request a stricter multi mode than non-atomic which is used for squashing.
-    // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
-    // invocations, we can potentially execute multiple eval in parallel, which is very powerful
-    // paired with shardlocal eval
-    const bool is_eval = cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EVAL;
-    const bool is_blocking = cid != nullptr && cid->IsBlocking();
-
-    if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
-      cmd_refs.reserve(count);
-      cmd_refs.push_back(CmdRef{cid, tail_args});
-      continue;
-    }
-
-    // Squash accumulated commands
-    perform_squash();
-
-    // Stop accumulating when a pause is requested, fall back to regular dispatch
-    if (ss->IsPaused())
-      break;
-
-    // Dispatch non squashed command only after all squashed commands were executed and replied
-    cmd_cntx->UpdateCid(cid);
-    DispatchCommand(args, cmd_cntx, AsyncPreference::ONLY_SYNC);
-    dispatched++;
-  }
-
-  perform_squash();
-
-  if (dist_trans)
-    dist_trans->UnlockMulti();
-
-  ss->stats.multi_squash_exec_hop_usec += stats.hop_usec;
-  ss->stats.multi_squash_exec_reply_usec += stats.reply_usec;
-  ss->stats.multi_squash_hops += stats.hops;
-  ss->stats.squashed_commands += stats.squashed_commands;
-  return dispatched;
-}
-
 uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
                                         facade::ConnectionContext* cntx) {
   auto* dfly_cntx = static_cast<ConnectionContext*>(cntx);
@@ -1849,8 +1751,8 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     ParsedArgs args{*cmd_cntx};
     const auto [cid, tail_args] = registry_.FindExtended(args);
 
-    // Only consecutive transactional single-shard commands are squashed. Stop the batch at the
-    // first command that can't join it; the connection's regular dispatch path then handles it
+    // Stop the batch at the first command that can't join it;
+    // the connection's regular dispatch path then handles exceptions
     // (and the rest of the pipeline) with the real reply builder, after the replies squashed so
     // far are flushed in order. Commands that stop the batch:
     //  - unknown commands (cid == nullptr): dispatched standalone to produce their error reply;

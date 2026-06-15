@@ -42,10 +42,6 @@ class Service : public facade::ServiceInterface {
                                          facade::AsyncPreference apref) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  uint32_t DispatchManyCommands(facade::ParsedCommand* head, unsigned count,
-                                facade::SinkReplyBuilder* builder,
-                                facade::ConnectionContext* cntx) final;
-
   uint32_t DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
                                  facade::ConnectionContext* cntx) final;
 
