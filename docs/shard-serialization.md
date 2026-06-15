@@ -1,999 +1,598 @@
 # Shard Serialization
 
-This document describes how Dragonfly serializes a single shard's data via `SliceSnapshot`. It
-covers both point-in-time (PIT) and non-PIT serialization modes, their correctness guarantees,
-and the mechanisms used to coordinate concurrent mutations with the serialization process.
+This document describes how Dragonfly serializes a single shard's data. It covers the
+point-in-time (PIT) snapshot mechanism, its correctness guarantees, and the machinery used to
+coordinate concurrent mutations with the serialization process.
 
 ## Overview
 
-Shard serialization is used for two purposes:
+Shard serialization is used for three purposes:
 
-1. **Backups (RDB save)** — Must produce a consistent point-in-time snapshot. Always uses PIT mode.
-2. **Replication (full sync)** — Serializes baseline data and then streams journal changes. Can
-   use either PIT or non-PIT mode, controlled by the `--point_in_time_snapshot` flag (default: true).
+1. **Backups (RDB / DFS save)** — produces a consistent point-in-time snapshot.
+2. **Replication (full sync)** — serializes baseline data and then streams journal changes.
+3. **Slot migration** — `RestoreStreamer` serializes a subset of slots and streams changes.
 
-Both modes share the same traversal infrastructure (`IterateBucketsFb` → `BucketSaveCb` →
-`SerializeBucket` → `SerializeEntry`) and the same flushing/backpressure machinery
-(`HandleFlushData` → `consumer_->ConsumeData`). They differ in **how they handle concurrent
-mutations** during the traversal.
+All three share the same base class, **`SerializerBase`**, which owns the bucket traversal
+coordination, point-in-time isolation via DashTable bucket versioning, the change-listener
+callback, delayed (tiered) entry handling, and per-bucket dependency tracking. Concrete
+subclasses implement only how a single bucket/entry is turned into bytes:
 
-| | PIT mode | Non-PIT mode |
-|---|----------|-------------|
-| Flag | `use_snapshot_version_ == true` | `use_snapshot_version_ == false` |
-| Used for | Backups and replication | Replication only |
-| Consistency | Exact point-in-time snapshot | Eventual consistency (baseline + journal) |
-| `OnDbChange` | Serializes bucket before mutation | Barrier only (no serialization) |
-| `OnMoved` | Not registered | Handles DashTable item reshuffling |
-| Bucket versioning | Yes — skip already-serialized buckets | No — serialize every bucket visited |
-| Throughput | Lower (mutation path does serialization work) | Higher (mutation path only acquires mutex) |
+| Subclass | Location | Output format | Use case |
+|----------|----------|---------------|----------|
+| `SliceSnapshot` | `src/server/snapshot.{h,cc}` | RDB (`RdbSerializer`) | Backups + replication full sync |
+| `RestoreStreamer` | `src/server/journal/streamer.h` | `RESTORE` commands (`CmdSerializer`) | Cluster slot migration |
+
+> **Historical note.** Earlier revisions of this document described a `--point_in_time_snapshot`
+> flag that toggled between a "PIT" mode and a "non-PIT" (eventual consistency) mode, the latter
+> using an `OnMoved` callback and cursor-based `IsPositionSerialized` tracking. **That flag and
+> the non-PIT mode no longer exist.** All snapshots now use bucket versioning. DashTable item
+> displacement is handled for every snapshot through `CVCUponInsert` (see
+> [Inserts and Item Displacement](#inserts-and-item-displacement)). The only remaining trace of
+> "eventual consistency" is the `eventually_consistent_` flag, which now gates a *journal-omit
+> optimization* rather than a separate serialization mode (see
+> [Journal-Omit Optimization](#journal-omit-optimization)).
 
 ## Core Types
 
 | Type | Location | Role |
 |------|----------|------|
-| `SliceSnapshot` | `src/server/snapshot.h` | Orchestrates shard serialization |
+| `SerializerBase` | `src/server/serializer_base.h` | Shared base: traversal coordination, PIT isolation, change listener |
+| `SliceSnapshot` | `src/server/snapshot.h` | RDB serialization of a shard |
+| `RestoreStreamer` | `src/server/journal/streamer.h` | `RESTORE`-command serialization for slot migration |
 | `RdbSerializer` | `src/server/rdb_save.h` | Serializes entries into RDB-format buffers |
-| `SnapshotDataConsumerInterface` | `src/server/snapshot.h` | Downstream sink interface |
-| `RdbSaver::Impl` | `src/server/rdb_save.cc` | Consumer impl: writes to socket or channel |
-| `ThreadLocalMutex` | `src/server/synchronization.h` | Fiber-aware mutex for atomicity barrier |
-| `ChangeReq` | `src/server/table.h` | Describes a table mutation (update or insert) |
+| `SnapshotDataConsumerInterface` | `src/server/snapshot.h` | Downstream sink interface (socket or file) |
+| `DbSlice::ChangeConsumerInterface` | `src/server/db_slice.h` | Change-listener interface implemented by `SerializerBase` |
+| `BucketDependencies` | `src/server/serializer_base.h` | Per-bucket dependency counter for in-flight async work |
+| `DelayedEntryHandler` | `src/server/serializer_base.h` | Owns delayed tiered entries, keyed by bucket |
+| `ThreadLocalMutex` | `src/server/synchronization.h` | Fiber-aware mutex guarding the serializer buffer (`stream_mu_`) |
+| `ChangeReq` | `src/server/table.h` | `PrimeTable::BucketSet` — the set of buckets about to be mutated |
+| `BucketIdentity` | `src/server/serializer_base.h` | `uintptr_t` bucket address, stable bucket key |
 
 ## Data Flow Overview
 
 ```mermaid
 flowchart TD
   subgraph ShardThread[Shard thread / fibers]
-    MUT[DB mutation] -->|change callback| ODC[OnDbChange]
-    ODC -->|lock big_value_mu_| SB1["SerializeBucket<br/>(PIT only)"]
-    SB1 --> SE1[SerializeEntry]
-    SE1 --> SAVE1[RdbSerializer::SaveEntry]
+    MUT[DB mutation] -->|change callback| ODC["OnChange<br/>(SerializerBase)"]
+    ODC -->|per affected bucket| PB1["ProcessBucket<br/>(on_update = true)"]
+    PB1 -->|version &lt; snapshot_version_| SBL1["SerializeBucketLocked"]
+    PB1 -->|already serialized| WAIT["BucketDependencies::Wait<br/>(block mutation until<br/>in-flight work resolves)"]
+    SBL1 --> SE1["SerializeEntry"]
 
-    TRAV[Snapshot fiber: IterateBucketsFb] --> BSCB[BucketSaveCb]
-    BSCB -->|lock big_value_mu_ + GetLatch| SB2[SerializeBucket]
-    SB2 --> SE2[SerializeEntry]
-    SE2 --> SAVE2[RdbSerializer::SaveEntry]
+    TRAV["Snapshot fiber: IterateBucketsFb"] --> PB2["ProcessBucket<br/>(on_update = false)"]
+    PB2 --> FCE["FlushChangeToEarlierCallbacks"]
+    PB2 --> SBL2["SerializeBucketLocked"]
+    SBL2 --> SE2["SerializeEntry"]
 
-    MOV[DashTable move] -->|non-PIT only| OMV[OnMoved]
-    OMV -->|lock big_value_mu_| SB3["SerializeBucket<br/>(if moved across cursor)"]
+    SE2 -->|in-memory| SAVE2["SerializeEntryLocked<br/>(lock stream_mu_)"]
+    SE2 -->|tiered/external| ENQ["EnqueueOffloaded<br/>(delayed_entries_)"]
+    SE1 --> SAVE2
 
-    EXP["Expiry / Eviction<br/>(heartbeat, inline, lazy)"] -->|"RecordDelete<br/>(no OnDbChange)"| JRN_DIRECT["journal::RecordEntry<br/>(DEL)"]
+    EXP["Expiry / Eviction<br/>(heartbeat, inline, lazy, SCAN-del)"]
+    EXP -->|"eviction: bail if<br/>WillBlockOnJournalWrite"| SKIP[skip]
+    EXP -->|"expiry/SCAN-del:<br/>WaitForUnblockedJournalWrites"| JRN_DIRECT["journal::RecordEntry (DEL)"]
     JRN_DIRECT --> CJC
 
-    JRN[Journal change] --> CJC[ConsumeJournalChange]
-    CJC -->|lock big_value_mu_| WJE[serializer_->WriteJournalEntry]
+    JRN[Journal change] --> CJC["ConsumeJournalChange<br/>(lock stream_mu_)"]
+    CJC --> WJE["serializer_->WriteJournalEntry"]
   end
 
-  SAVE1 -->|consume_fun_ if buffer > threshold| HFD[HandleFlushData]
-  SAVE2 -->|consume_fun_ if buffer > threshold| HFD
+  SAVE2 -->|consume_fun_ if buffer &gt; threshold| CBC["ConsumeBigValueChunk"]
+  CBC --> HFD[HandleFlushData]
 
-  TRAV -->|between buckets| PS[PushSerialized]
+  TRAV -->|between buckets| PS["PushSerialized"]
+  PDE["ProcessDelayedEntries<br/>(drain resolved tiered reads)"] --> SAVE2
   PS --> FS[FlushSerialized]
   FS --> HFD
 
-  HFD --> SEQ[seq_cond_.wait - ordering gate]
-  SEQ --> CD[consumer_->ConsumeData]
-  CD --> SINK[(Replica socket / sink)]
+  HFD --> SEQ["seq_cond_.wait - ordering gate"]
+  SEQ --> CD["consumer_->ConsumeData"]
+  CD --> SINK[(Replica socket / file sink)]
 ```
 
-## PIT Mode (Point-in-Time Snapshot)
-
-PIT mode captures an exact snapshot of the shard at the logical moment `snapshot_version_` was
-assigned. It is the default for both backups and replication.
+## Point-in-Time Snapshot via Bucket Versioning
 
 ### Bucket Versioning
 
 Dragonfly's `DashTable` ([dashtable.md](dashtable.md)) maintains a version counter per physical
-bucket. The snapshot must serialize all buckets with version `< snapshot_version_`.
+bucket. The snapshot serializes all buckets with version `< snapshot_version_`.
 
-- `SerializeBucket` sets the bucket version to `snapshot_version_`, ensuring each bucket is
-  serialized exactly once.
-- Mutations bump bucket versions, so buckets mutated after the snapshot started will have
-  version `>= snapshot_version_` and are skipped by the traversal.
+- `snapshot_version_` is assigned in `DbSlice::RegisterOnChange` (= `NextVersion()`), when the
+  `SerializerBase` registers itself as a change listener at `Start`.
+- `ProcessBucket` stamps the bucket version to `snapshot_version_` *before* calling
+  `SerializeBucketLocked`, ensuring each physical bucket is serialized exactly once.
+- Mutations bump bucket versions, so a bucket mutated after the snapshot started has version
+  `>= snapshot_version_` and is skipped by the traversal.
 - Buckets not yet traversed but about to be mutated require **serialize-before-mutate**,
-  enforced by `OnDbChange()`.
+  enforced by the change-listener callback `OnChange` (see below).
 
 ### Ordering Invariant
 
 > For any key, the replica must receive the baseline value **strictly before** any journal entry
 > that mutates that key.
 
-We will use two terms for journal changes:
+Two terms for journal changes:
+
 - **Self-contained**: the journal entry fully determines the resulting logical state and can be
   replayed without the prior value (for example `SET`, `DEL`).
 - **Baseline-dependent**: the journal entry describes a mutation of an existing value and requires
   the baseline state to be reconstructed first (for example `HSET`, `LPUSH`).
 
-For **transaction-driven mutations** this is guaranteed because:
-1. `OnDbChange` runs before the mutation commits and serializes the bucket if needed.
-2. `OnDbChange` unconditionally acquires `big_value_mu_` first, so the mutation and its
-  subsequent journal emission cannot overtake an in-progress bucket serialization.
+For **transaction-driven mutations** the invariant holds because:
 
-**Important caveat:** not all journal entries follow the
-`OnDbChange` → mutation → `RecordJournal` → `ConsumeJournalChange` sequence. Several code
-paths emit journal entries via `journal::RecordEntry` directly, bypassing `PreUpdateBlocking`
-and `OnDbChange` entirely. See [Journal Entries Without `OnDbChange`](#journal-entries-without-ondbchange)
-below.
+1. `OnChange` runs before the mutation commits and serializes the affected buckets if needed.
+2. The mutation, and its subsequent journal emission (`RecordJournal` → `ConsumeJournalChange`),
+   run **after** `OnChange` returns, on the same fiber. So the baseline is serialized first.
 
-### Journal Entries Without `OnDbChange`
+Several code paths emit journal entries **without** going through `OnChange` — these are the
+expiry/eviction/SCAN-delete deletions. They are handled separately; see
+[Journal Ordering for Non-Transaction Deletes](#journal-ordering-for-non-transaction-deletes).
 
-Not all journal entries follow the transaction-driven
-`PreUpdateBlocking` → `OnDbChange` → mutation → `RecordJournal` → `ConsumeJournalChange`
-sequence. Several code paths call `journal::RecordEntry` directly (→
-`JournalSlice::AddLogRecord` → `ConsumeJournalChange`), bypassing `OnDbChange` entirely:
+## The Change-Listener Path: `OnChange`
 
-| Source | Journal command | Trigger |
-|--------|----------------|---------|
-| `ExpireIfNeeded` (`db_slice.cc`) | `DEL` | Lazy expiry during key lookup, active expiry sweep (`DeleteExpiredStep`), heartbeat-driven eviction (`FreeMemWithEvictionStepAtomic`) |
-| `PrimeEvictionPolicy::Evict` (`db_slice.cc`) | `DEL` | Inline eviction when a DashTable bucket overflows during insert |
-| `generic_family.cc` (SCAN-based deletion) | `DEL` | `RecordDelete` after `DbSlice::Del` in the RM command |
-| `dflycmd.cc`, `replica.cc`, `cluster_family.cc` | `PING` / `DFLYCLUSTER` | Control signals: takeover sync, PING propagation, cluster config |
-
-All data-mutating entries above are self-contained `DEL` commands. The non-mutating entries
-(`PING`, `DFLYCLUSTER`) carry no key-level semantics.
-
-**Why this matters for `ConsumeJournalChange` and `big_value_mu_`:** these journal entries
-still flow through `ConsumeJournalChange`, which acquires `big_value_mu_`. Today the mutex
-serves two purposes on these paths:
-
-1. **Serializer buffer exclusivity** — preventing a journal write from interleaving with an
-   in-progress `SerializeBucket` call that shares the same `serializer_` instance.
-2. **Baseline-before-journal ordering** — a `DEL K` must not reach the output stream (or a
-   separate journal stream) while K's baseline is still being serialized. Even with separate
-   serializer buffers and tagged-chunk interleaving, the consumer could process `DEL K` before
-   receiving the full baseline, violating the ordering invariant. The mutex prevents this today
-   by blocking the journal write until `SerializeBucket` completes.
-
-The lock is *not* needed for transaction-style ordering against `OnDbChange` (these paths
-bypass it entirely), but it is needed for both concerns above. Removing it requires (a) separate
-serializer buffers (Phase 2, item 7) **and** (b) a mechanism to defer the `DEL` until the
-bucket's baseline is fully emitted (Phase 1, item 6 — deferred deletion queue).
-
-**Could these paths call `OnDbChange` before deleting?** Not safely:
-
-- **`ExpireIfNeeded`:** `SerializeBucket` (called from `OnDbChange`) can preempt, but
-  `ExpireIfNeeded` must not — `ExpireAllIfNeeded` calls `serialization_latch_.Wait()` and
-  lazy expiry in `FindInternal` relies on cooperative scheduling.
-- **`PrimeEvictionPolicy::Evict`:** `Evict` runs inside DashTable's insert path while the
-  table is mid-structural-mutation. `OnDbChange` calls `SerializeBucket` (iterates the
-  bucket) and `CVCUponInsert` (probes the table) — both unsafe here. Re-entrancy risk.
-- **`FreeMemWithEvictionStepAtomic`:** runs from heartbeat with `serialization_latch_` held;
-  `OnDbChange` per evicted key would add overhead and preemption points inside the loop.
-
-The ordering issue is twofold: byte-stream integrity
-([§1](#1-shard-wide-stall-under-big_value_mu_)) and baseline-before-journal correctness — a
-`DEL` must not be emitted (even to a separate stream) while the same key's baseline is still
-being serialized. Roadmap item 6 proposes a **deferred deletion queue** to address this
-without blocking or re-entrancy.
-
-### Mutation Path: `OnDbChange` (PIT)
+`SerializerBase` implements `DbSlice::ChangeConsumerInterface::OnChange`. The `DbSlice`
+invokes it (via `CallChangeCallbacks`) right before a set of buckets is mutated, passing a
+`ChangeReq` — which is simply a `PrimeTable::BucketSet`, the set of physical buckets the
+mutation will touch.
 
 ```
-OnDbChange(db_index, req)
-  lock(big_value_mu_)
-  if req is update (existing bucket):
-    bit = *req.update()
-    if !bit.is_done() && bit.GetVersion() < snapshot_version_:
-      -> SerializeBucket(db_index, *bit)
-  else (insert, new key):
-    key = get<string_view>(req.change)
-    -> table->CVCUponInsert(snapshot_version_, key, callback)
-         callback(bucket_iterator):
-           -> SerializeBucket(db_index, it)
-  unlock(big_value_mu_)
+OnChange(db_index, req)             // req is a PrimeTable::BucketSet
+  for each bucket it in req.buckets():
+    ProcessBucket(db_index, it, /*on_update=*/true)
 ```
 
-For updates, `ChangeReq::update()` returns a `PrimeTable::bucket_iterator`. If the bucket has not
-been serialized yet (version `< snapshot_version_`), it is serialized now.
+`OnChange` always calls `ProcessBucket` for every affected bucket — even already-serialized ones —
+so that any in-flight asynchronous serialization of those buckets is allowed to finish before the
+mutation proceeds (see `BucketDependencies::Wait`).
 
-For inserts, `CVCUponInsert` (`src/core/dash.h`) simulates the insert to identify which buckets'
-versions would change, and serializes each one with version `< snapshot_version_` via the callback.
+### Inserts and Item Displacement
 
-### Traversal Path: `BucketSaveCb` (PIT)
-
-```
-BucketSaveCb(db_index, bucket_iterator)
-  lock(big_value_mu_)
-  if bucket version >= snapshot_version_:
-    skip (already serialized by OnDbChange or a previous visit)
-  FlushChangeToEarlierCallbacks(...)
-  lock(*db_slice_->GetLatch())
-  -> SerializeBucket(db_index, bucket_iterator)
-       set bucket version = snapshot_version_
-       for each occupied slot:
-         -> SerializeEntry -> SaveEntry -> PushToConsumerIfNeeded
-```
-
-The version check is the key optimization: buckets already serialized by `OnDbChange` are skipped.
-
-## Non-PIT Mode (Eventual Consistency)
-
-Non-PIT mode is available **only for replication** (`stream_journal == true`) and is enabled by
-setting `--point_in_time_snapshot=false`. It improves server throughput during full sync by
-eliminating serialization work from the mutation path.
-
-### Design Rationale
-
-A replica does not need an exact point-in-time snapshot. It needs to reach eventual consistency:
-after the full sync baseline is delivered and the journal stream catches up, the replica's state
-must match the master's current state. This weaker guarantee allows the snapshot to be "fuzzy" —
-it may include some mutations that happened after the snapshot started and miss others, as long as
-the journal stream fills in the gaps.
-
-### How It Differs from PIT
-
-**`OnDbChange` does no serialization.** In non-PIT mode, the `if (use_snapshot_version_)` block
-is skipped entirely. `OnDbChange` only acquires `big_value_mu_` and returns immediately. This
-serves as a **barrier** — it prevents mutations from modifying a bucket while it is being
-serialized by the traversal fiber — but it does not serialize anything itself.
-
-**No bucket version tracking.** `SerializeBucket` does not set the bucket version. `BucketSaveCb`
-does not check or skip based on version. Every bucket visited by the traversal is serialized
-unconditionally.
-
-**`OnMoved` handles DashTable reshuffling.** When items are inserted into DashTable, existing items
-may be moved between buckets (due to hash table splitting/merging). In PIT mode this is handled by
-`OnDbChange` + bucket versioning. In non-PIT mode, since `OnDbChange` does no serialization, a
-separate `OnMoved` callback is needed to catch items that "jump" across the traversal cursor:
+When inserting a new key, `DbSlice` computes the set of buckets the insert may touch — including
+buckets into which existing items would be **displaced** by DashTable splitting/rehashing — using
+`PrimeTable::CVCUponInsert(key)` (`src/core/dash.h`). That bucket set is passed to the change
+callbacks before the insert commits:
 
 ```
-OnMoved(db_index, items)
-  lock(big_value_mu_)
-  for each (source_cursor, dest_cursor) in items:
-    if IsPositionSerialized(dest_cursor) && !IsPositionSerialized(source_cursor):
-      -> SerializeBucket(db_index, CursorToBucketIt(dest))
-```
-
-An item needs re-serialization when it moves **from** a not-yet-visited bucket **to** an
-already-visited bucket. Without this, the item would be missed entirely: the traversal already
-passed the destination, and the source bucket still has the item removed.
-
-**`CVCUponInsert` is not used.** In PIT mode, `OnDbChange` calls `CVCUponInsert` for inserts
-to proactively serialize *all* buckets the insert would touch (home, neighbor, stash — or the
-entire segment on a split) **before** the insert commits. This is necessary because PIT must
-capture the pre-mutation state of every affected bucket. Non-PIT has no such requirement.
-Instead, the insert proceeds, and `OnMoved` reactively handles any items that were displaced
-across the traversal cursor. For truly new keys (not displaced existing items), non-PIT relies on
-the cursor visiting the key's bucket later, or on the journal stream capturing the insert.
-
-### `IsPositionSerialized` — Cursor-Based Position Tracking
-
-```cpp
-bool IsPositionSerialized(DbIndex id, PrimeTable::Cursor cursor) {
-  uint8_t depth = db_slice_->GetTables(id).first->depth();
-  return id < snapshot_db_index_ ||
-         (id == snapshot_db_index_ &&
-          (cursor.bucket_id() < snapshot_cursor_.bucket_id() ||
-           (cursor.bucket_id() == snapshot_cursor_.bucket_id() &&
-            cursor.segment_id(depth) < snapshot_cursor_.segment_id(depth))));
+// db_slice.cc, insert path
+for (bool consistent = false; !consistent;) {
+  auto bucket_set = db.prime.CVCUponInsert(key);
+  if (omit_journal = IsOmittableWrite(cntx, bucket_set); omit_journal)
+    break;                                  // see Journal-Omit Optimization
+  CallChangeCallbacks(cntx.db_index, bucket_set);   // -> OnChange -> ProcessBucket
+  consistent = (bucket_set == db.prime.CVCUponInsert(key));  // re-check; finite
 }
 ```
 
-Compares a cursor position against the current traversal position (`snapshot_cursor_`,
-`snapshot_db_index_`). A position is "serialized" if it is behind the cursor — i.e., the
-traversal has already visited it.
+This single mechanism replaces the separate `OnMoved` callback that older designs used for
+"non-PIT" mode: an item that would jump across the traversal cursor is part of the affected
+bucket set and is therefore serialized before the insert via `OnChange`.
 
-### Traversal Path: `BucketSaveCb` (Non-PIT)
+## Traversal and Bucket Processing
 
-```
-BucketSaveCb(db_index, bucket_iterator)
-  lock(big_value_mu_)
-  // no version check — serialize every bucket unconditionally
-  lock(*db_slice_->GetLatch())
-  -> SerializeBucket(db_index, bucket_iterator)
-       // no version update
-       for each occupied slot:
-         -> SerializeEntry -> SaveEntry -> PushToConsumerIfNeeded
-```
-
-### Correctness in Non-PIT Mode
-
-Non-PIT mode guarantees:
-- Every key that existed when the traversal started and was not deleted before being visited will
-  be serialized at least once (by the traversal or by `OnMoved`).
-- Keys inserted after the traversal started will appear in the journal stream.
-- Keys may be serialized in a state newer than the snapshot start (since mutations are not blocked
-  by `OnDbChange` serialization, only by the mutex barrier).
-- The journal stream, combined with the baseline, produces an eventually consistent replica.
-
-What it does **not** guarantee:
-- Point-in-time consistency. The serialized baseline is a "fuzzy" view spanning the traversal
-  duration.
-
-## Shared Infrastructure
-
-The following sections apply to both PIT and non-PIT modes.
-
-### Traversal: `IterateBucketsFb`
+### Traversal Fiber: `IterateBucketsFb`
 
 ```
-IterateBucketsFb(send_full_sync_cut)
+IterateBucketsFb(send_full_sync_cut)         // snapshot.cc
+  accumulate stats_.keys_total over all dbs
   for each database:
-    for each logical bucket via PrimeTable::TraverseBuckets():
-      -> BucketSaveCb(db_index, bucket_iterator)
-      PushSerialized(false)  // explicit flush between buckets
-      yield if CPU time > ~15us
-    PushSerialized(true)     // force-flush after each database
-  if send_full_sync_cut:
+    while cursor not exhausted:
+      cursor = pt->TraverseBuckets(cursor,
+                   it -> ProcessBucket(db_index, it, /*on_update=*/false),
+                   /*include empty buckets=*/true)
+      PushSerialized(false)                  // explicit flush between buckets
+      yield if background mode, or if CPU time > ~15us
+    ProcessDelayedEntries(force=true, ...)   // drain outstanding tiered reads
+    PushSerialized(true)                     // force-flush after each database
+  if send_full_sync_cut:                     // replication only
     serializer_->SendFullSyncCut()
     PushSerialized(true)
 ```
 
-### Serialization: `SerializeBucket` and `SerializeEntry`
-
-`SerializeBucket` iterates all occupied slots in a physical bucket and calls `SerializeEntry` for
-each. `SerializeEntry` looks up expiry and memcache flags, then calls
-`serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_index)`.
-
-### Journal Path: `ConsumeJournalChange`
+### `ProcessBucket` (shared, both traversal and `OnChange`)
 
 ```
-ConsumeJournalChange(item)
-  lock(big_value_mu_)
-  serializer_->WriteJournalEntry(item.journal_item.data)
-  unlock(big_value_mu_)
+ProcessBucket(db_index, it, on_update):      // serializer_base.cc
+  // Stale / already-serialized bucket:
+  if it.is_done() || it.GetVersion() >= snapshot_version_:
+    buckets_skipped++
+    if it.GetVersion() < snapshot_version_:        // empty bucket: mark visited
+      it.SetVersion(snapshot_version_)
+    if tiered enabled && on_update:                // flush this bucket's delayed entries
+      ProcessDelayedEntries(force=false, it.bucket_address(), cntx)
+    BucketDependencies::Wait(it.bucket_address())  // block until in-flight work resolves
+    return false
+
+  // Traversal flow only: let earlier-registered snapshots serialize this bucket first.
+  if !on_update:
+    db_slice_->FlushChangeToEarlierCallbacks(db_index, it, snapshot_version_)
+  if it.GetVersion() >= snapshot_version_:         // re-check (callbacks can preempt)
+    return ProcessBucket(db_index, it, on_update)
+
+  it.SetVersion(snapshot_version_)                 // stamp BEFORE serializing
+  BucketDependencies::Increment(it.bucket_address())
+  keys_serialized += SerializeBucketLocked(db_index, it, on_update)
+  buckets_serialized++; buckets_on_change += on_update
+  BucketDependencies::Decrement(it.bucket_address())
+
+  if tiered enabled:
+    ProcessDelayedEntries(force=false, on_update ? it.bucket_address() : 0, cntx)
+  return true
 ```
 
-Active in both modes when `stream_journal == true`. Acquires `big_value_mu_` to ensure journal
-entries are not interleaved with bucket serialization. Does **not** flush data — only appends to
-the serializer buffer. Flushing happens later via `ThrottleIfNeeded` → `PushSerialized(false)`,
-called from `JournalSlice` after the journal callback returns.
+The version check is the key PIT optimization: buckets already serialized by `OnChange` (or a
+previous traversal visit) are skipped.
 
-### Flushing and Backpressure
+`FlushChangeToEarlierCallbacks` (`db_slice.cc`) exists because multiple snapshots can be
+registered at once (e.g. a backup overlapping a replica full sync). When the current snapshot's
+traversal reaches a bucket and is about to stamp it with `snapshot_version_`, any
+earlier-registered snapshot (lower version) that has not yet serialized this bucket must do so
+first — otherwise the version stamp would cause the earlier snapshot's traversal/callbacks to skip
+it and miss the bucket entirely.
 
-#### `HandleFlushData(std::string data)` — Common Blocking Sink
+### `SerializeBucketLocked` and `SerializeEntry`
 
-All serialized data ultimately flows through `HandleFlushData`:
+`SerializeBucketLocked` (implemented per subclass) iterates the occupied slots of a physical
+bucket and calls the shared `SerializerBase::SerializeEntry` for each. The base sets the sanity
+flag `serialize_bucket_running_` for the duration.
 
-1. Assigns monotonically increasing record ID (`rec_id_++`).
-2. Optionally yields (background mode).
-3. **Blocks** on `seq_cond_.wait` until `id == last_pushed_id_ + 1` (sequential ordering).
-4. **Blocks** on `consumer_->ConsumeData(data, cntx_)` (downstream write).
-5. Updates `last_pushed_id_`, notifies waiters via `seq_cond_.notify_all()`.
-6. Optionally sleeps to throttle CPU (non-background mode, up to 2ms proportional to CPU spent).
+`SerializeEntry` (in `serializer_base.cc`) dispatches based on value location:
 
-#### `FlushSerialized(RdbSerializer* serializer)`
+```
+SerializeEntry(bucket, db_index, pk, pv):
+  if pv is external && cool:           // cool tiered: recurse on the in-memory cool copy
+    return SerializeEntry(bucket, db_index, pk, pv.GetCool().record->value)
+  expire = pk.GetExpireTime(); mc_flags = ...
+  if pv is external:                   // on-disk tiered: defer
+    EnqueueOffloaded(bucket, db_index, key, pv, expire, mc_flags)
+  else:                                // in-memory: serialize now
+    lock_guard(stream_mu_)
+    SerializeEntryLocked(db_index, pk, pv, expire, mc_flags)
+```
 
-Calls `serializer->Flush(kFlushEndEntry)` to extract and optionally compress the buffer, then
-passes the result to `HandleFlushData`. Uses the main `serializer_` if no argument is given.
+`SerializeEntryLocked` (per subclass) is where the actual format-specific write happens — for
+`SliceSnapshot` it calls `serializer_->SaveEntry(...)`, which may exceed the flush threshold and
+trigger a mid-entry chunk flush (see [Flushing and Backpressure](#flushing-and-backpressure)).
 
-#### `PushSerialized(bool force)`
+> **Lock scope.** `stream_mu_` is taken **per entry** inside `SerializeEntry`, not held across an
+> entire bucket (PR #7150 reduced the mutex scope). The buffer is therefore only locked while a
+> single entry is being written or a chunk flushed.
 
-Skips if `!force` and `serializer_->SerializedLen() < kMinBlobSize` (8KB). Otherwise calls
-`FlushSerialized()` to drain the main serializer buffer.
+## Delayed Serialization of Tiered Entries
 
-#### `RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state)`
+Tiered (on-disk, external) string values are not read synchronously. `SerializeEntry` calls
+`DelayedEntryHandler::EnqueueOffloaded`, which:
+
+1. Issues an async tiered read (`ReadTieredString`) returning a `Future`.
+2. Increments the bucket's dependency count (`BucketDependencies::Increment`).
+3. Stores a `TieredDelayedEntry` in `delayed_entries_`, a
+   **`std::multimap<BucketIdentity, unique_ptr<TieredDelayedEntry>>`** keyed by the originating
+   bucket.
+
+`ProcessDelayedEntries(force, flush_bucket, cntx)` drains entries:
+
+- If `flush_bucket` is set, all entries for that bucket are extracted and serialized.
+- Otherwise, entries whose futures are already resolved are serialized (or **all** entries if
+  `force` is true, or if the queue exceeds `kMaxDelayedEntries == 512`).
+- Each drained entry is serialized via `SerializeFetchedEntry` (which takes `stream_mu_` and calls
+  `SerializeEntryLocked`), then its bucket dependency is decremented.
+
+Because delayed entries are **keyed by bucket** and hold a `BucketDependencies` reference, a bucket
+is not considered free of in-flight work until all its tiered reads have been serialized. This is
+what makes the ordering invariant hold for tiered values: a mutation or deletion of a tiered key
+is blocked (via `BucketDependencies::Wait` / `WaitForUnblockedJournalWrites`) until the key's
+delayed baseline has been emitted.
+
+> Both `SliceSnapshot` and `RestoreStreamer` use this same per-bucket `DelayedEntryHandler`. (An
+> earlier design had `SliceSnapshot` use a global deque and `RestoreStreamer` a separate keyed
+> map; they are now unified, fixing the ordering hazard tracked in PR #6824.)
+
+## `BucketDependencies` — Per-Bucket In-Flight Work
+
+`BucketDependencies` (`serializer_base.cc`) tracks asynchronous work that must complete before a
+bucket can be considered fully serialized. Each tracked bucket holds a `shared_ptr<LocalLatch>`
+whose lock count equals its outstanding dependencies (big-value chunk streaming, tiered reads).
 
 ```cpp
-void RdbSerializer::PushToConsumerIfNeeded(SerializerBase::FlushState flush_state) {
-  if (consume_fun_ && SerializedLen() > flush_threshold_) {
-    string blob = Flush(flush_state);
-    consume_fun_(std::move(blob));  // synchronous!
-  }
+void Increment(BucketIdentity);   // counter->lock()
+void Decrement(BucketIdentity);   // counter->unlock(); erase if zero; notify if map empty
+void Wait(BucketIdentity) const;  // block until this bucket's dependencies resolve
+void WaitEmpty() const;           // block until NO bucket has dependencies
+bool HasAny() const;              // any bucket currently has dependencies?
+```
+
+`SerializerBase` exposes these to the `DbSlice` through the change-consumer interface:
+
+- `IsAnyBucketBlocked()` → `BucketDependencies::HasAny()`
+- `WaitForNoBucketBlocked()` → `BucketDependencies::WaitEmpty()`
+
+This is the mechanism that makes mutations and deletions wait for in-progress (possibly
+preempting) bucket serialization, replacing the older single `db_slice_->GetLatch()` /
+`serialization_latch_`.
+
+## Journal Path
+
+### `ConsumeJournalChange`
+
+```
+ConsumeJournalChange(item):                  // snapshot.cc
+  lock_guard(stream_mu_)
+  LOG_IF(DFATAL, serialize_bucket_running_)  // interleaving not yet supported
+  serializer_->WriteJournalEntry(item.journal_item.data)
+  ++stats_.jounal_changes
+```
+
+Active only when streaming the journal (replication / migration). It acquires `stream_mu_` so the
+journal write cannot interleave with an in-progress entry serialization that shares the same
+`serializer_` buffer. It only appends to the buffer; flushing happens later via `ThrottleIfNeeded`
+→ `PushSerialized(false)`, called by `JournalSlice` after the journal callback returns.
+
+The `DFATAL` guard asserts that a journal write never lands in the middle of a bucket
+serialization. This holds because the bucket being serialized has an outstanding
+`BucketDependencies` entry, and the deletion/journal paths that could race are gated on it (next
+section). The guard's comment notes it can be removed once the wire format supports interleaved
+(tagged) chunks for journal vs bucket streams.
+
+### Journal Ordering for Non-Transaction Deletes
+
+Not every journal entry goes through `OnChange`. Expiry, eviction, and SCAN-based deletion call
+`journal::RecordEntry` / `RecordDelete` directly:
+
+| Source | Journal command | Trigger |
+|--------|----------------|---------|
+| `ExpireIfNeeded` (`db_slice.cc`) | `DEL` | Lazy expiry on lookup, active sweep (`DeleteExpiredStep`), heartbeat eviction |
+| `PrimeEvictionPolicy::Evict` / `GarbageCollect` (`db_slice.cc`) | `DEL` | Inline eviction/GC when a bucket overflows on insert |
+| `generic_family.cc` (SCAN-based deletion) | `DEL` | `RecordDelete` after `DbSlice::Del` |
+| `dflycmd.cc`, `replica.cc`, `cluster_family.cc` | `PING` / `DFLYCLUSTER` | Control signals |
+
+These bypass `OnChange`, so their baseline-before-journal ordering is enforced differently — via
+the `BucketDependencies` state surfaced as `WillBlockOnJournalWrite()`:
+
+- **Eviction & GC bail out.** `PrimeEvictionPolicy::Evict` and `GarbageCollect` return early
+  (delete nothing) if `db_slice_->WillBlockOnJournalWrite()` is true — i.e. while any bucket is
+  mid-serialization. So an inline eviction can never emit a `DEL` for a key whose baseline is
+  partially written.
+- **Expiry & SCAN-delete wait.** These paths call `DbSlice::WaitForUnblockedJournalWrites()`
+  before deleting, which blocks until `WaitForNoBucketBlocked()` reports no bucket has
+  outstanding dependencies.
+
+```cpp
+bool DbSlice::WillBlockOnJournalWrite() const {           // db_slice.cc
+  return ranges::any_of(change_cb_, &ChangeConsumerInterface::IsAnyBucketBlocked);
+}
+void DbSlice::WaitForUnblockedJournalWrites() const {
+  std::lock_guard lk{change_cb_latch_};
+  while (WillBlockOnJournalWrite())
+    ranges::for_each(change_cb_, &ChangeConsumerInterface::WaitForNoBucketBlocked);
 }
 ```
 
-Only fires when `consume_fun_` is set **and** the buffer exceeds `flush_threshold_`. When it
-fires, it **synchronously** invokes the callback, which for `SliceSnapshot` is `HandleFlushData`.
+This is the implemented replacement for the "deferred deletion queue" that older designs
+proposed: rather than queueing a `DEL` and replaying it after the bucket completes, the deleter
+waits for (or skips, for best-effort eviction) the in-flight serialization.
 
-## All Code Paths That Acquire `big_value_mu_`
+## Tagged Chunks
 
-Currently there are **five** call sites in `snapshot.cc` that lock `big_value_mu_`. The diagrams
-below show the complete call chain from lock acquisition to potential blocking points.
+When a single value is large enough to be flushed across multiple scheduler turns, its chunks must
+be distinguishable on the wire. The **tagged-chunk** wire format wraps such split entries so the
+receiver can reassemble them.
 
-### Path 1: `BucketSaveCb` (traversal fiber, both modes)
+- Enabled master-side via the `--serialization_tagged_chunks` flag, propagated to the serializer
+  with `RdbSerializer::SetTagEntries(...)` in `SliceSnapshot::Start`.
+- `RdbSerializer::PushToConsumerIfNeeded` calls `mem_buf_controller_.MarkEntrySplit()` on a
+  `kFlushMidEntry` flush so the chunk is tagged; single-chunk entries are emitted unchanged (no
+  overhead).
+- The loader detects tagged chunks by the flag bit and reassembles transparently.
 
-```mermaid
-flowchart LR
-  A[IterateBucketsFb] --> B["BucketSaveCb<br/><b>lock big_value_mu_</b><br/>lock GetLatch()"]
-  B --> C[SerializeBucket]
-  C --> D[SerializeEntry]
-  D --> E[SaveEntry]
-  E -->|"if buffer > threshold"| F["consume_fun_()<br/>= HandleFlushData"]
-  F --> G["seq_cond_.wait<br/>consumer_->ConsumeData<br/><b>BLOCKS</b>"]
+This format is currently used to allow a *single* large value to be split. The serializer buffer
+is still **shared** between bucket serialization and journal entries (one `serializer_` per
+`SliceSnapshot`); interleaving independent bucket and journal streams over tagged chunks is not
+yet implemented (see [Remaining Work](#remaining-work)).
 
-  classDef lock fill:#FFF3E0,stroke:#EF6C00;
-  classDef block fill:#FFEBEE,stroke:#C62828;
-  class B lock;
-  class G block;
+## Journal-Omit Optimization
+
+For replica full sync, a write to a bucket the traversal **has not yet reached** is redundant: the
+traversal will serialize the post-mutation value anyway. In that case Dragonfly can skip *both* the
+serialize-before-mutate callback *and* the journal entry ("skip both").
+
+`DbSlice::IsOmittableWrite` decides this:
+
+```cpp
+// db_slice.cc — omit a journal write when:
+// 1. the command supports mutation hints and uses a single key (is_omittable_operation)
+// 2. there is exactly one change consumer that is eventually_consistent_ (a replica full sync)
+// 3. there is exactly one journal callback
+// 4. the snapshot has not reached the bucket yet (max bucket version < snapshot_version_)
+bool DbSlice::IsOmittableWrite(const Context& cntx, const ChangeReq& req) {
+  if (!journal_omit_redundant_writes_) return false;
+  if (cntx.is_omittable_operation && change_cb_.size() == 1) {
+    uint64_t max_version = std::ranges::max(req.buckets(), {}, gv).GetVersion();
+    auto* cb = change_cb_.front();
+    return cb->eventually_consistent_ && max_version < cb->snapshot_version_ &&
+           journal::GetCallbackCount() == 1;
+  }
+  return false;
+}
 ```
 
-### Path 2: `OnDbChange` (mutation fiber, PIT only)
+When this returns true, the insert/update path skips `CallChangeCallbacks`/`PreUpdateBlocking`
+(no serialize-before-mutate) and sets `omitted_journal` so the journal write is suppressed. This
+is the only surviving role of the `eventually_consistent_` flag.
 
-```mermaid
-flowchart LR
-  A[DB mutation] --> B["OnDbChange<br/><b>lock big_value_mu_</b>"]
-  B -->|PIT| C[SerializeBucket]
-  C --> D[SerializeEntry]
-  D --> E[SaveEntry]
-  E -->|"if buffer > threshold"| F["consume_fun_()<br/>= HandleFlushData"]
-  F --> G["seq_cond_.wait<br/>consumer_->ConsumeData<br/><b>BLOCKS</b>"]
-  B -->|non-PIT| H["return<br/>(barrier only)"]
+- Controlled by `--journal_omit_redundant_writes` (default: true).
+- `is_omittable_operation` is currently set only by self-contained single-key writes
+  (e.g. `SET` in `string_family.cc`). Baseline-dependent commands are not yet eligible.
 
-  classDef lock fill:#FFF3E0,stroke:#EF6C00;
-  classDef block fill:#FFEBEE,stroke:#C62828;
-  classDef safe fill:#E8F5E9,stroke:#2E7D32;
-  class B lock;
-  class G block;
-  class H safe;
+## Flushing and Backpressure
+
+### `HandleFlushData(std::string data)` — Common Blocking Sink
+
+All serialized data ultimately flows through `HandleFlushData` (`snapshot.cc`):
+
+1. If `stream_mu_.is_locked()`, increments `stats_.flushed_under_lock` (observability).
+2. Assigns a monotonically increasing record ID (`rec_id_++`).
+3. Optionally yields (background mode).
+4. **Blocks** on `seq_cond_.wait` until `id == last_pushed_id_ + 1` (sequential ordering gate).
+5. **Blocks** on `consumer_->ConsumeData(data, base_cntx_)` (downstream write).
+6. Updates `last_pushed_id_`, notifies waiters via `seq_cond_.notify_all()`.
+7. In non-background mode, sleeps up to 2ms proportional to CPU spent, to throttle.
+
+### `ConsumeBigValueChunk(std::string data)`
+
+The serializer's `consume_fun_` callback, bound in `Start`. On a mid-entry flush it checks for
+cancellation/error, then forwards to `HandleFlushData` and bumps
+`ServerState::stats.big_value_preemptions`.
+
+### `FlushSerialized()`
+
+Calls `serializer_->Flush(kFlushEndEntry)` to extract (and optionally compress) the buffer, then
+passes the result to `HandleFlushData`.
+
+### `PushSerialized(bool force)`
+
+Skips if `!force` and `serializer_->SerializedLen() < kMinBlobSize` (8KB). Otherwise calls
+`FlushSerialized()` to drain the serializer buffer. Returns whether it pushed.
+
+### `RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state)`
+
+```cpp
+std::error_code RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
+  if (!consume_fun_ || SerializedLen() <= flush_threshold_)
+    return {};
+  if (flush_state == FlushState::kFlushMidEntry)
+    mem_buf_controller_.MarkEntrySplit();           // tagged-chunk boundary
+  string blob = Flush(flush_state);
+  const auto id = mem_buf_controller_.SaveStateBeforeConsume();
+  std::error_code ec = consume_fun_(std::move(blob));  // synchronous; may preempt
+  mem_buf_controller_.RestoreStateAfterConsume(id);
+  return ec;
+}
 ```
 
-### Path 3: `OnMoved` (non-PIT only)
+Fires only when `consume_fun_` is set **and** the buffer exceeds `flush_threshold_`
+(= `serialization_max_chunk_size`, when chunked flushing is allowed). For `SliceSnapshot` the
+callback is `ConsumeBigValueChunk`.
 
-```mermaid
-flowchart LR
-  A[DashTable move] --> B["OnMoved<br/><b>lock big_value_mu_</b>"]
-  B -->|"moved across cursor"| C[SerializeBucket]
-  C --> D[SerializeEntry]
-  D --> E[SaveEntry]
-  E -->|"if buffer > threshold"| F["consume_fun_()<br/>= HandleFlushData"]
-  F --> G["seq_cond_.wait<br/>consumer_->ConsumeData<br/><b>BLOCKS</b>"]
-  B -->|"same side of cursor"| H[skip]
+## Locking and Synchronization
 
-  classDef lock fill:#FFF3E0,stroke:#EF6C00;
-  classDef block fill:#FFEBEE,stroke:#C62828;
-  class B lock;
-  class G block;
-```
+### `stream_mu_` (ThreadLocalMutex)
 
-### Path 4: `ConsumeJournalChange` (journal callback, both modes)
+A `ThreadLocalMutex` (`src/server/synchronization.cc`) declared in `SerializerBase`. It guards the
+shared `serializer_` buffer so two fibers cannot write to it concurrently, and so a journal write
+cannot land mid-entry. It is taken **per entry** in `SerializeEntry`/`SerializeFetchedEntry` and
+around the journal write in `ConsumeJournalChange`.
 
-```mermaid
-flowchart LR
-  A[Journal change] --> B["ConsumeJournalChange<br/><b>lock big_value_mu_</b>"]
-  B --> C["serializer_->WriteJournalEntry<br/>(buffer append only)"]
-  C --> D[returns]
+**Important:** `ThreadLocalMutex::lock()`/`unlock()` are **no-ops** when
+`serialization_max_chunk_size == 0`. The mutex provides real mutual exclusion only when big-value
+chunked flushing is enabled. When disabled, serialization never preempts mid-bucket and
+correctness relies on cooperative scheduling.
 
-  classDef lock fill:#FFF3E0,stroke:#EF6C00;
-  class B lock;
-```
+| Path | Mode | Takes `stream_mu_` | Notes |
+|------|------|--------------------|-------|
+| `SerializeEntry` → `SerializeEntryLocked` | both | per entry | in-memory values |
+| `SerializeFetchedEntry` | both | per delayed entry | tiered values |
+| `ConsumeJournalChange` | replication/migration | per journal entry | DFATAL if mid-bucket |
 
-This path does **not** reach `HandleFlushData`. It only appends to the serializer buffer.
+### `BucketDependencies` (per-bucket `LocalLatch`)
 
-## All Code Paths That Reach `HandleFlushData`
+Tracks in-flight async serialization per bucket (see
+[`BucketDependencies`](#bucketdependencies--per-bucket-in-flight-work)). Replaces the old
+shard-wide `GetLatch()` / `serialization_latch_`. Mutations and non-transaction deletes wait on it
+before touching a bucket.
+
+### `change_cb_latch_` (LocalLatch in `DbSlice`)
+
+A non-preempting latch guarding the `change_cb_` consumer list. Held during `CallChangeCallbacks`,
+`FlushChangeToEarlierCallbacks`, and `WaitForUnblockedJournalWrites` so the consumer set cannot
+change underneath an iteration.
+
+### `seq_cond_` (CondVarAny)
+
+Condition variable in `HandleFlushData` ensuring records reach the consumer in `rec_id_` order. If
+fiber A has `id=5` and fiber B `id=6`, B waits until A pushes and advances `last_pushed_id_` to 5.
+Needed because fibers wake in arbitrary order and reordering flushed chunks would corrupt the wire
+protocol.
+
+## Code Paths That Reach `HandleFlushData`
 
 ```mermaid
 flowchart TD
-  subgraph HAZARD["Under big_value_mu_ (HAZARD)"]
-    A1["OnDbChange — PIT only<br/>lock big_value_mu_"] --> SB1["SerializeBucket → SerializeEntry → SaveEntry"]
-    A2["BucketSaveCb — both modes<br/>lock big_value_mu_ + GetLatch()"] --> SB2["SerializeBucket → SerializeEntry → SaveEntry"]
-    A3["OnMoved — non-PIT only<br/>lock big_value_mu_"] --> SB3["SerializeBucket → SerializeEntry → SaveEntry"]
-    SB1 --> CF["PushToConsumerIfNeeded<br/>consume_fun_()"]
-    SB2 --> CF
-    SB3 --> CF
-    CF --> HFD1[HandleFlushData]
+  subgraph PERENTRY["Per-entry serialization (stream_mu_ held briefly)"]
+    A1["OnChange → ProcessBucket(on_update=true)"] --> SBL1["SerializeBucketLocked → SerializeEntry"]
+    A2["IterateBucketsFb → ProcessBucket(on_update=false)"] --> SBL2["SerializeBucketLocked → SerializeEntry"]
+    A3["ProcessDelayedEntries → SerializeFetchedEntry"] --> SBL3["SerializeEntryLocked (tiered)"]
+    SBL1 --> SE["SaveEntry"]
+    SBL2 --> SE
+    SBL3 --> SE
+    SE -->|"buffer > threshold (large value)"| CBC["ConsumeBigValueChunk"]
+    CBC --> HFD1[HandleFlushData]
   end
 
-  subgraph SAFE["Outside big_value_mu_ (SAFE)"]
-    B1["IterateBucketsFb loop<br/>(between buckets)"] --> PS1["PushSerialized(false)"]
-    B2["IterateBucketsFb<br/>(end of database)"] --> PS2["PushSerialized(true)"]
-    B3["IterateBucketsFb<br/>(full sync cut)"] --> PS3["PushSerialized(true)"]
-    B4[FinalizeJournalStream] --> PS4["PushSerialized(true)"]
-    B5["ThrottleIfNeeded<br/>(from JournalSlice)"] --> PS5["PushSerialized(false)"]
+  subgraph EXPLICIT["Explicit flushes (outside stream_mu_)"]
+    B1["IterateBucketsFb (between buckets)"] --> PS1["PushSerialized(false)"]
+    B2["IterateBucketsFb (end of db / full-sync cut)"] --> PS2["PushSerialized(true)"]
+    B3["FinalizeJournalStream"] --> PS3["PushSerialized(true)"]
+    B4["ThrottleIfNeeded (from JournalSlice)"] --> PS4["PushSerialized(false)"]
     PS1 --> FS[FlushSerialized]
     PS2 --> FS
     PS3 --> FS
     PS4 --> FS
-    PS5 --> FS
     FS --> HFD2[HandleFlushData]
   end
 
-  HFD1 --> BLOCK["seq_cond_.wait<br/>consumer_->ConsumeData<br/>(BLOCKING)"]
+  HFD1 --> BLOCK["seq_cond_.wait → consumer_->ConsumeData (BLOCKING)"]
   HFD2 --> BLOCK
 
-  classDef hazard fill:#FFEBEE,stroke:#C62828,stroke-width:2px,color:#B71C1C;
-  classDef safe fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20;
-  classDef block fill:#FFF3E0,stroke:#EF6C00;
-  class A1,A2,A3,CF,HFD1 hazard;
-  class B1,B2,B3,B4,B5,PS1,PS2,PS3,PS4,PS5,FS,HFD2 safe;
+  classDef perentry fill:#FFF3E0,stroke:#EF6C00;
+  classDef explicit fill:#E8F5E9,stroke:#2E7D32;
+  classDef block fill:#FFEBEE,stroke:#C62828;
+  class A1,A2,A3,SBL1,SBL2,SBL3,SE,CBC,HFD1 perentry;
+  class B1,B2,B3,B4,PS1,PS2,PS3,PS4,FS,HFD2 explicit;
   class BLOCK block;
 ```
 
-## Delayed Serialization of tiered entities
-
-Tiered string values are not read synchronously under `big_value_mu_`. Instead,
-`SerializeExternal` pushes a `TieredDelayedEntry` into `delayed_entries_`; the actual read and
-serialization happen later in `PushSerialized()`, outside the bucket-serialization critical
-section. The current implementation is fragile — delayed entries live in a global side queue
-rather than being associated with their originating bucket, and this can corrupt the output
-stream — a delayed tiered value may be emitted after a journal entry for the same key,
-violating baseline-before-journal ordering (see PR #6824).
-
-Note: `RestoreStreamer` (used for slot migration) has its own delayed-entry mechanism via
-`CmdSerializer`, which uses a keyed `flat_hash_map` rather than a plain deque. The analysis
-below focuses on `SliceSnapshot`; the `RestoreStreamer` path has analogous concerns but a
-different data structure.
-
-This creates two distinct notions of "bucket finished":
-
-1. **Traversal finished** — `SerializeBucket` has iterated every entry and returned.
-2. **Baseline fully emitted** — all delayed tiered entries from that bucket have also been
-   read, serialized, and flushed.
-
-For in-memory values these coincide; for tiered values they do not.
-
-The ordering invariant (`baseline(K)` before `journal(K)`) still applies. Because the baseline
-for a tiered key `K` may only materialize when `PushSerialized()` drains `delayed_entries_`,
-a bucket's completion point extends from "finished iterating" to "all delayed values serialized
-and flushed".
-
-## Locking and Synchronization
-
-### `big_value_mu_` (ThreadLocalMutex)
-
-A `ThreadLocalMutex` (`src/server/synchronization.cc`) serving as the primary synchronization
-barrier.
-
-**Important:** `ThreadLocalMutex::lock()` and `unlock()` are **no-ops** when
-`serialization_max_chunk_size == 0`. This means `big_value_mu_` only provides actual
-synchronization when big-value streaming is enabled. When it is disabled, all `lock_guard`
-calls on this mutex are effectively free, and the system relies on cooperative scheduling
-(no preemption during serialization) for correctness.
-
-Its role differs by mode:
-
-**PIT mode:** Prevents mutations from modifying a bucket while it is being serialized, and
-prevents journal entries from being written during bucket serialization. This enforces both
-serialize-before-mutate and the ordering invariant.
-
-**Non-PIT mode:** Prevents mutations from modifying a bucket while `BucketSaveCb` is serializing
-it (data consistency within a single bucket). Also serves as a barrier for `ConsumeJournalChange`
-and `OnMoved`.
-
-| Path | Mode | Lock held | Additional locks |
-|------|------|-----------|-----------------|
-| `BucketSaveCb` | Both | `big_value_mu_` | `GetLatch()` |
-| `OnDbChange` | Both | `big_value_mu_` | none |
-| `OnMoved` | Non-PIT | `big_value_mu_` | none |
-| `ConsumeJournalChange` | Both | `big_value_mu_` | none |
-
-### `GetLatch()` (LocalLatch)
-
-Acquired by `BucketSaveCb` in addition to `big_value_mu_`. This is a non-preempting latch
-(`src/server/synchronization.h`) that increments a blocking counter, preventing `Heartbeat()`
-from running if `SerializeBucket` preempts (e.g., during large value serialization).
-
-### `seq_cond_` (CondVarAny)
-
-Condition variable used in `HandleFlushData` to ensure records are pushed to the consumer
-in sequential order of their `rec_id_`. If fiber A has `id=5` and fiber B has `id=6`, B waits
-until A finishes pushing and updates `last_pushed_id_` to 5.
-This is needed because fibers are awakened in arbitrary order and reordering flushed chunks breaks
-the wire protocol.
-
-
-## Inefficiencies and Improvement Goals
-
-This section identifies concrete problems in the current serialization design and the
-improvements that address them. The [Technical Roadmap](#technical-roadmap) maps these into an ordered execution
-plan.
-
-**Hard constraints** (apply to all improvements):
-- **Backpressure must be maintained.** A slow consumer must slow down the producer; we cannot
-  buffer unboundedly.
-- **Bounded serialization memory.** Intermediate buffers must not grow proportionally to the
-  dataset size.
-
-
-### 1. Shard-wide stall under `big_value_mu_`
-
-**Problem.** `big_value_mu_` is a single shard-wide mutex that guards three distinct concerns simultaneously:
-
-1. **Bucket atomicity** — the bucket must not be mutated while `SerializeBucket` iterates it.
-2. **Serializer buffer exclusivity** — `serializer_` must not be written to by two fibers.
-3. **Journal ordering** — journal entries must not interleave with bucket serialization.
-
-When `consume_fun_` fires under the lock (large value → `PushToConsumerIfNeeded` →
-`HandleFlushData`), the mutex is held across blocking I/O (`seq_cond_.wait`,
-`consumer_->ConsumeData`). This stalls the entire shard: traversal, mutations, journal writes,
-and `OnMoved` all contend on the same lock.
-
-**Why the mutex is needed in `ConsumeJournalChange`.**
-Transaction paths are already ordered by `OnDbChange` (it acquires `big_value_mu_` first, so
-`ConsumeJournalChange` on the same fiber cannot start while traversal holds the lock). The
-mutex matters for [paths that bypass `OnDbChange`](#journal-entries-without-ondbchange) —
-inline eviction and heartbeat-driven deletions. Without it, inline eviction could produce:
-
-**Counter-example without the `ConsumeJournalChange` mutex — inline eviction via `PrimeEvictionPolicy::Evict`:**
-1. Traversal calls `SerializeBucket(B)` and begins iterating it; the bucket contains key `K`
-   (a large hash, serialized element-by-element). The traversal preempts mid-entry via
-   `consume_fun_`.
-2. While the traversal is preempted, a client command triggers a DashTable insert on a different
-   bucket. The insert finds no free slot in its home bucket and calls
-   `PrimeEvictionPolicy::Evict`, which selects `K` as the victim.
-3. `Evict` removes `K` from the table and — still on the same fiber, inside the DashTable
-  insert — calls `journal::RecordEntry(DEL K)` directly, bypassing `OnDbChange`.
-4. `ConsumeJournalChange` appends `DEL K` to the shared serializer buffer immediately, even
-  though traversal has already emitted only a prefix of `K`'s baseline.
-5. Traversal resumes and appends the remaining bytes of `K`'s baseline.
-
-Result: the replica's byte stream contains `[partial baseline of K] [DEL K] [rest of baseline
-of K]`. The RDB decoder sees a truncated entry followed by an unexpected journal opcode, or
-parses garbage if the lengths happen to align. Even if the `DEL` is parsed out-of-band, the
-subsequent baseline bytes reconstruct `K` on the replica, reversing the deletion.
-
-**Goal.** Separate the three concerns so that:
-- bucket atomicity uses bucket-level mechanisms (versioning + bucket completion state);
-- buffer exclusivity uses per-serializer isolation (each producer owns its buffer);
-- journal ordering uses bucket completion state and deferred deletion queues;
-- no code path blocks on downstream I/O while holding a shard-wide lock.
-
-**Approach.** See [§5 summary table](#5-summary-mutex-roles-and-their-replacements) for the
-full mapping. Key mechanisms: bucket completion state ([§2](#2-imprecise-bucket-completion-tracking)),
-separate serializer instances ([§3](#3-shared-serializer-buffer-and-wire-format-coupling)),
-and non-preempting chunk production. See Roadmap items 6, 7, 8, 9.
-
-### 2. Imprecise bucket completion tracking
-
-**Problem.** The system has no explicit notion of when a bucket's baseline is *fully emitted*
-(see [Delayed Serialization of tiered entities](#delayed-serialization-of-tiered-entities)
-for details on how tiered values extend bucket completion beyond `SerializeBucket`'s return).
-This creates two issues:
-
-- A journal entry for key K can reach the output buffer (via `ConsumeJournalChange`) before
-  K's delayed tiered baseline is drained — violating the
-  [ordering invariant](#ordering-invariant) (see PR #6824).
-- [Non-transaction journal entries](#journal-entries-without-ondbchange) (expiry, eviction)
-  bypass `OnDbChange` entirely. Since there is no bucket completion state to consult, `DEL`
-  entries can interleave mid-serialization of the deleted key's baseline.
-
-**Goal.** Make "baseline fully emitted" precise for every bucket — including tiered values —
-so that ordering decisions can be expressed through per-bucket state rather than shard-wide mutex exclusion.
-
-**Approach.**
-- Introduce a per snapshot instance/bucket state machine:
-  `NotVisited` → `Serializing` → `DelayedPending` → `Covered`.
-  Each bucket is identified by a stable `BucketIdentity`. A bucket must remain in the
-  tracking map (`currently_serialized_: map<BucketIdentity, State>`) until all work completes; otherwise `version >= snapshot_version_` + absent-from-map would falsely read as `Covered`.
-  State encoding:
-
-  | State | Encoding | Meaning |
-  |-------|----------|---------|
-  | **NotVisited** | `version < snapshot_version_`, not in map | Traversal has not reached this bucket |
-  | **Serializing** | `version >= snapshot_version_`, in map as `Serializing` | Traversal is iterating this bucket |
-  | **DelayedPending** | `version >= snapshot_version_`, in map as `DelayedPending` | Iteration done, tiered entries still pending |
-  | **Covered** | `version >= snapshot_version_`, not in map | Baseline fully emitted |
-
-- Associate delayed tiered entries with their originating bucket instead of the global queue.
-  Transition to `Covered` only after all delayed entries are flushed.
-- **Transaction-driven mutations:** `OnDbChange` blocks (fiber-aware wait) on
-  `Serializing`/`DelayedPending` buckets; proceeds immediately on `NotVisited` (serialize
-  now) or `Covered` (baseline already emitted). Since `OnDbChange` → mutation →
-  `RecordJournal` → `ConsumeJournalChange` is sequential on the mutation fiber, blocking
-  `OnDbChange` guarantees baseline-before-journal.
-- **Non-transaction deletions (expiry, eviction):** `OnDbChange` is
-  [infeasible on these paths](#journal-entries-without-ondbchange). Instead, use a **deferred
-  deletion queue**: enqueue the key when the bucket is `Serializing`/`DelayedPending`; drain
-  (emit `DEL`) when the bucket transitions to `Covered`. See roadmap item 6 for details.
-- **Latency tradeoff:** blocking `OnDbChange` on `DelayedPending` means a mutation fiber can
-  stall for the duration of a tiered disk read (see roadmap item 6 for mitigation).
-
-See Roadmap items 3, 5, 6.
-
-### 3. Shared serializer buffer and wire-format coupling
-
-**Problem.** `ConsumeJournalChange` and `SerializeBucket` write to the same `serializer_`
-buffer (the "buffer exclusivity" role from [§1](#1-shard-wide-stall-under-big_value_mu_)).
-Even with separate buffers, interleaved output from two serializers cannot be demuxed by the
-consumer without a framing protocol — a journal entry injected mid-RDB-entry produces an
-unparseable byte stream (see the [eviction counter-example](#1-shard-wide-stall-under-big_value_mu_)
-for a concrete scenario).
-
-**Goal.** Decouple journal and bucket serialization so they can produce data independently,
-without sharing a buffer or requiring a shard-wide lock for output integrity.
-
-**Approach.**
-- **Tagged-chunk wire format.** Extend the serialization format with tagged chunks: each
-  mid-entry flush produces a chunk tagged with a stream ID. The consumer reassembles same-ID
-  chunks before decoding. Small values (single chunk) use the existing format unchanged —
-  no overhead. Controlled by a master-side flag (`--serialization_tagged_chunks`).
-- **Separate `RdbSerializer` per producer.** Give journal entries and bucket serialization
-  their own serializer instances. Each produces tagged chunks independently. With separate
-  buffers, `ConsumeJournalChange` no longer needs `big_value_mu_` for buffer exclusivity.
-- **Flushing strategy:** small values serialize the entire bucket without preemption; large
-  values release the lock between chunks and apply backpressure outside the critical section.
-  Bucket contents remain stable across the gap because PIT versioning prevents re-serialization and `OnDbChange` blocking (§1) prevents mutation.
-
-See Roadmap items 4, 7.
-
-### 4. Non-PIT redundant journal traffic
-
-**Problem.** Non-PIT mode (eventual consistency for replication) emits every journal entry regardless of whether the snapshot traversal will cover the mutation. For self-contained entries (`SET`, `DEL`) this is redundant but harmless. For baseline-dependent entries (`HSET`, `LPUSH`, etc.) the system emits both the baseline value and the journal entry for
-every mutation, even when the traversal has not yet reached the bucket and will serialize the
-post-mutation value.
-
-**Goal.** In non-PIT mode, reduce journal traffic by skipping entries that are guaranteed to
-be covered by the traversal, without compromising eventual consistency.
-
-**Approach.** Use the bucket completion state machine (§1) to classify mutations:
-
-- **Self-contained entries** (`SET`, `DEL`, `EXPIRE`): skip for `NotVisited` buckets (traversal will see post-mutation value); emit for `Covered` buckets; emit conservatively for
-  `Serializing`/`DelayedPending`. Classification is by **emitted journal command form**, not
-  the user-facing command — commands like `JSON.SET` may be self-contained or not depending
-  on arguments and must be validated individually.
-
-- **Baseline-dependent entries** (`HSET`, `LPUSH`, `SADD`, `ZADD`, `XADD`, `APPEND`, etc.):
-  **SkipBoth** — suppress both baseline serialization and journal entry — when the bucket is
-  `NotVisited`/`Serializing`, the mutation is a single-key in-memory update (no delete, no
-  rehash, no insert), and no delayed tiered entry is in flight. Otherwise fall back to emit
-  journal only or keep both. Each `SliceSnapshot` instance marks suppressed mutations locally;
-  `ConsumeJournalChange` skips them without cross-instance coordination.
-
-See Roadmap items 10–15.
-
-### 5. Summary: mutex roles and their replacements
-
-The previous subsections identify `big_value_mu_`'s three roles and the mechanisms that
-replace each:
-
-| Mutex role | Replacement | Source |
-|-----------|-------------|--------|
-| Journal ordering | Bucket completion state + deferred deletion queue | §1 |
-| Buffer exclusivity | Separate `RdbSerializer` per producer + tagged chunks | §3 |
-| Bucket atomicity (PIT) | Bucket versioning + `OnDbChange` blocking | §1, §2 |
-| Bucket atomicity (non-PIT) | Non-preempting chunk production | §2, §3 |
-
-Once all replacements are in place and validated, the mutex can be narrowed per mode and path,
-and eventually removed entirely. The roadmap structures this as a sequence of incremental
-steps (Phases 0–4), each validated before the next begins.
-
-## Technical Roadmap
-
-The improvements identified above are interdependent. The safest path is to split them into
-small, verifiable steps that first improve observability and correctness scaffolding, then
-improve PIT and PIT+tiered correctness/robustness, and only after that tackle non-PIT
-optimizations and deeper serializer / lock-removal changes. Some of the groundwork —
-especially bucket-level completion state — is shared and should be laid early even if the
-first consumers are PIT-oriented. Because non-PIT is currently experimental and unused, the
-roadmap below does **not** treat current non-PIT behavior as a compatibility constraint. Later
-non-PIT phases may simplify, replace, or remove experimental behavior rather than preserving it.
-
-### Phase 0 — Baseline and guardrails
-
-1. **Document current invariants in code comments and tests.**
-   - Make the key ordering rules explicit near `SliceSnapshot::OnDbChange`,
-     `SliceSnapshot::ConsumeJournalChange`, `RestoreStreamer::OnDbChange`, and
-     `DbSlice::FlushChangeToEarlierCallbacks`.
-   - Prefer focused replication tests over purely end-to-end hash comparisons. The current
-     broad replication suite is useful, but Phase 0 needs tests that fail specifically when an
-     ordering invariant is broken.
-   - Add focused tests for:
-     - PIT: baseline-before-journal for baseline-dependent mutations.
-     - tiered values: delayed serialization still preserves baseline-before-journal.
-   - Suggested test strategy:
-     - **PIT ordering guardrail:** add a test in `tests/dragonfly/replication_test.py` that
-       starts full sync with `point_in_time_snapshot=true`, performs a small controlled set of
-       baseline-dependent updates during full sync (`HSET`, `LPUSH`, `APPEND`, `XADD`), waits for
-       stable sync, and then asserts exact key/value equality for only those keys. The intent is
-       to make a baseline-before-journal violation fail on a tiny, debuggable workload.
-     - **tiered delayed-entry guardrail:** rehabilitate the currently skipped tiered replication
-       test in `tests/dragonfly/tiering_test.py` and make it assert not just final equivalence,
-       but that concurrent writes to tiered keys during full sync do not lose updates.
-   - Suggested assertions:
-     - assert exact values for a small curated key set, not just whole-dataset hashes;
-     - assert replica reaches stable sync and catches up via `check_all_replicas_finished`;
-     - assert path-activation counters from logs where available (`side_saved`, `moved_saved`);
-     - for tricky cases, prefer deterministic key-level checks over probabilistic stress-only
-       validation.
-   - Suggested scope split:
-     - keep the existing large/stress replication tests as coarse regression coverage;
-     - add a handful of small, deterministic Phase 0 tests whose only purpose is to guard the
-       invariants this roadmap depends on.
-   - Goal: freeze the current correctness contract before changing behavior.
-
-2. **Add lightweight observability for snapshot/journal interleavings.**
-   - Count how often `ConsumeJournalChange` runs while a bucket is being serialized.
-   - Count flushes triggered under `big_value_mu_` versus outside it.
-   - Suggested locations for counters / debug stats:
-     - increment a counter when `ConsumeJournalChange` acquires the barrier while
-       `serialize_bucket_running_` is true;
-     - increment separate counters for `HandleFlushData` reached from under `big_value_mu_`
-       versus from `PushSerialized` outside the critical section;
-   - Suggested exposure:
-     - start with log lines in the existing `Exit SnapshotSerializer` / replication progress logs;
-     - if the signals become broadly useful, promote them to INFO/stats fields later.
-   - Suggested rollout rule:
-     - add observability before optimization, and require each new fast path to demonstrate that
-       the expected path was actually exercised in tests.
-   - Goal: validate which paths are actually hot and which optimizations are worth the risk.
-
-### Phase 1 — PIT and PIT+tiered foundation
-
-3. **Introduce explicit bucket-level completion state.**
-   - **Prerequisites:** Phase 0.1–0.2.
-   - Implement the per-snapshot-instance state machine described in
-     [§1](#1-imprecise-bucket-completion-tracking): `NotVisited` → `Serializing` →
-     `DelayedPending` → `Covered`, keyed by `BucketIdentity`.
-   - Keep this state entirely instance-local to `SliceSnapshot` / `RestoreStreamer`.
-   - Goal: replace vague "bucket iteration finished" reasoning with an explicit state machine
-     that will later serve both PIT+tiered correctness and non-PIT decisions.
-
-4. **Extend the wire format with tagged chunks.**
-   - **Prerequisites:** none.
-   - Implements the tagged-chunk format described in
-     [§3](#3-shared-serializer-buffer-and-wire-format-coupling). Entries that may be split
-     across preemption points are wrapped in a per-stream-tag envelope; single-chunk entries
-     use the existing format unchanged (no overhead).
-   - **Wire format:** `RDB_OPCODE_DF_MASK`-style flag bit (`DF_MASK_FLAG_CHUNKED`). When set,
-     payload is `stream_tag: uint32, payload_length: uint32, payload: bytes`. Entries without
-     the flag are unchanged.
-   - **Enablement:** master-side flag (`--serialization_tagged_chunks`), not `DflyVersion`
-     (which doesn't apply to DFS backups). The loader detects tagged chunks by the flag bit
-     and reassembles transparently.
-   - Pure format + loader-side work — no changes to serialization logic or locking. Can be
-     developed independently of Phases 0–1.
-   - **Scope:** replication and DFS backups. Only legacy `.rdb` format does not need tagged
-     chunks (`SnapshotFlush::kDisallow`, no concurrent bucket serialization).
-   - Why early: Phase 2 (item 7) needs separate serializers whose interleaved output requires
-     tagged chunks for demuxing.
-   - Goal: have the wire-format infrastructure ready before Phase 2 needs it.
-
-5. **Associate delayed tiered serialization with bucket state.**
-   - **Prerequisites:** 1.3.
-   - Address the [tiered completion gap](#delayed-serialization-of-tiered-entities): associate
-     `delayed_entries_` with their originating bucket instead of the global queue.
-   - Only transition a bucket to `Covered` once its delayed tiered entries are emitted.
-   - Goal: make "baseline fully emitted" precise, not just "bucket iteration finished".
-
-6. **Use bucket completion state to harden PIT ordering guarantees.**
-   - **Prerequisites:** 1.3 and 1.5.
-   - Re-express the PIT ordering rule in terms of bucket completion state, not just mutex
-     exclusion and `bucket.version`.
-   - For in-memory values, PIT ordering is already sound by construction (sequential
-     `OnDbChange` → mutation → `ConsumeJournalChange` on the same fiber). The real gap is
-     **tiered delayed entries** (see
-     [Delayed Serialization](#delayed-serialization-of-tiered-entities)): a journal entry
-     can reach the buffer before the delayed baseline is drained.
-   - **`OnDbChange` blocking:** block (fiber-aware wait) when the bucket is `Serializing` or
-     `DelayedPending`; proceed on `NotVisited` (serialize now → `Covered`) or `Covered`
-     (baseline already emitted). Because `OnDbChange` → mutation → `RecordJournal` →
-     `ConsumeJournalChange` is sequential on the mutation fiber, blocking `OnDbChange`
-     guarantees baseline-before-journal for all transaction-driven mutations.
-   - **Deferred deletion queue** for
-     [non-transaction journal paths](#journal-entries-without-ondbchange) (expiry, eviction —
-     where `OnDbChange` is infeasible). When a deletion encounters a bucket in
-     `Serializing`/`DelayedPending`, enqueue the key into a per-bucket
-     `pending_deletions: vector<string>` (bounded by bucket capacity, typically 12–14 slots).
-     The traversal fiber drains the queue — emitting deferred `DEL` entries — when
-     transitioning the bucket to `Covered`. For `NotVisited`/`Covered` buckets, `DEL` is
-     emitted immediately as today. Properties:
-     - no blocking, re-entrancy, or preemption on the deletion fiber;
-     - baseline-before-journal ordering preserved by construction.
-   - After this item, `big_value_mu_` is no longer needed for journal ordering, but is still
-     needed for [buffer exclusivity](#3-shared-serializer-buffer-and-wire-format-coupling)
-     (items 7–8).
-   - **Latency tradeoff:** blocking `OnDbChange` on `DelayedPending` can stall a mutation
-     fiber for the duration of a tiered disk read (`Future<io::Result<string>>`). Acceptable
-     for correctness; monitor and consider `KeepBoth` fallback if latency is excessive.
-   - Use Phase 0 tests to validate PIT+tiered behavior under preemption and backpressure.
-   - Goal: make the existing production path easier to reason about before adding new behavior.
-
-### Phase 2 — Reduce PIT blocking and serializer fragility
-
-7. **Give journal and bucket serialization separate `RdbSerializer` instances.**
-   - **Prerequisites:** 1.4 and 1.6.
-   - NOTE: maybe unnecessary if rely on 1.4.
-   - Addresses the [shared buffer problem](#3-shared-serializer-buffer-and-wire-format-coupling)
-     and the primary [shard-wide stall hazard](#blocking-under-big_value_mu_).
-   - The fix: give journal entries their own `RdbSerializer` instance. Bucket serialization
-     and journal serialization never share a buffer. Each produces tagged chunks (item 4)
-     that the consumer (replica or DFS loader) reassembles by stream tag.
-   - The same separation is needed for **DFS backups** (no journal, but still PIT): once
-     per-bucket locks (item 6) replace the shard-wide `big_value_mu_`, two concurrent
-     `SerializeBucket` calls can run on different buckets (traversal fiber on bucket A
-     preempts mid-entry via `consume_fun_`, `OnDbChange` serializes bucket B). Each call
-     needs its own buffer; tagged chunks allow their interleaved output to be reassembled.
-   - With separate serializers, `big_value_mu_` is no longer needed for buffer exclusivity.
-     `ConsumeJournalChange` writes to its own serializer without acquiring `big_value_mu_`
-     at all (journal ordering is already guaranteed by bucket completion state from item 6).
-   - The flushing strategy depends on value size:
-     - **Small values (typical case):** `consume_fun_` is disabled (or made a no-op) while
-       the lock is held. `SerializeBucket` serializes the entire bucket into the bucket
-       serializer's buffer without preempting — the buffer grows but stays bounded because
-       most buckets contain only small entries. After `SerializeBucket` returns and the lock
-       is released, the accumulated buffer is flushed as a tagged chunk outside the lock.
-     - **Large values (e.g., a 1 GB set):** the existing `kFlushMidEntry` boundaries become
-       lock-release points. After serializing a bounded batch of elements, the lock is
-       released, the accumulated chunk is flushed (with backpressure) outside the lock, and
-       the lock is re-acquired for the next batch. Bucket contents remain stable across the
-       gap because (a) PIT versioning prevents re-serialization and (b) `OnDbChange` blocking
-       (item 6) prevents the mutation from committing. Both are required: (a) alone prevents
-       double-serialization but not mid-value mutation; (b) alone prevents mutation but not
-       concurrent `SerializeBucket` entry.
-   - Goal: eliminate blocking under `big_value_mu_` by removing the shared-buffer reason for
-     holding it, rather than by restructuring the lock/unlock pattern around the same buffer.
-
-8. **Simplify `rec_id_` / `seq_cond_` ordering once tagged-chunk delivery is proven.**
-   - **Prerequisites:** 2.7, 1.4.
-   - With tagged chunks support, we may not need a consistent global order between different
-     fibers. In that case `rec_id_` / `seq_cond_.wait` become redundant.
-   - Remove `rec_id_` / `seq_cond_` only after demonstrating (via tests and observability)
-     that we do not corrupt the replication stream.
-   - Goal: avoid removing an ordering mechanism before its replacement is demonstrably sound.
-
-9. **Narrow `big_value_mu_` for PIT only after the above is proven.**
-   - **Prerequisites:** 2.7–2.8.
-   - Keep serialize-before-mutate semantics intact.
-   - Remove or narrow mutex roles only where bucket state, serializer isolation, and
-     tagged-chunk delivery already provide an equivalent correctness guarantee.
-   - Goal: simplify the active production path incrementally, not speculatively.
-
-### Phase 3 — Bring non-PIT onto the new foundation
-
-10. **Add non-PIT-specific guardrails before changing non-PIT behavior.**
-    - **Prerequisites:** 1.3 and 1.5.
-    - Add focused tests for:
-      - self-contained journal entries produce correct final state when baseline is fully
-        emitted before or after the journal entry (no mid-entry interleaving);
-      - moved items that cross the cursor are not lost;
-      - any first non-PIT bucket-state redesign still converges under concurrent full-sync writes.
-    - Suggested test strategy:
-      - add a dedicated test with `point_in_time_snapshot=false` that mutates only with
-        self-contained emitted commands (`SET`, `DEL`, `BITOP` rewritten to `SET`/`DEL`);
-      - rehabilitate the currently skipped `test_replication_onmove_flow` instead of replacing
-        it; if it is too flaky for CI, first reduce it to a smaller deterministic reproducer that
-        still asserts both replica equality and `moved_saved > 0` from snapshot logs;
-      - add non-PIT-specific observability such as counting how often `OnMoved` actually
-        serializes a bucket and optionally classifying self-contained vs baseline-dependent
-        journal entries by emitted command.
-    - Goal: avoid touching experimental non-PIT behavior without dedicated guardrails.
-
-11. **Stamp bucket version in non-PIT mode behind a feature flag.**
-    - **Prerequisites:** 1.3 and 1.5 and 3.10.
-    - Teach non-PIT `SerializeBucket` to call `SetVersion(snapshot_version_)`.
-    - Since non-PIT is experimental, prefer the simplest implementation that matches the new
-      bucket-state model rather than preserving legacy bookkeeping.
-    - Validate that traversal, `OnMoved`, and any remaining bucket-version assumptions remain
-      correct under the new design.
-    - Goal: align non-PIT with the new foundation, not preserve its old implementation details.
-
-12. **Implement self-contained journal classification in `ConsumeJournalChange`.**
-    - **Prerequisites:** 3.11.
-    - Classify emitted journal commands as self-contained vs baseline-dependent.
-    - Initially use a conservative allowlist (`SET`, `DEL`, rewritten `BITOP`).
-    - Skip `big_value_mu_` only for self-contained entries in non-PIT mode.
-    - Goal: harvest the simplest safe non-PIT redesign win first, on top of the PIT-hardened
-      foundation.
-
-13. **Add instance-local suppression state for `SkipBoth`.**
-    - **Prerequisites:** 1.3 and 1.5 and 3.11.
-    - Let `OnDbChange` record a local suppression decision for mutations whose effects will be
-      covered by future traversal.
-    - Let the same snapshot instance's `ConsumeJournalChange` consult and clear that state.
-    - Do not introduce shard-wide or cross-instance aggregation.
-    - Goal: keep the redesign entirely within the existing per-instance callback pair, without
-      carrying forward unnecessary experimental structure.
-
-14. **Implement `SkipBoth` for the narrowest safe mutation subset.**
-    - **Prerequisites:** 3.13.
-    - Start with single-key, single-bucket, in-memory updates only.
-    - Exclude inserts, deletes, rehash-triggering operations, and tiered cases.
-    - Require bucket state to be `NotVisited` or `Serializing`.
-    - Goal: prove the mechanism on a subset where correctness is easy to reason about.
-
-15. **Expand `SkipBoth` eligibility only after targeted validation.**
-    - **Prerequisites:** 3.14.
-    - Re-evaluate `DelayedPending` once delayed-entry ownership is explicit.
-    - Re-evaluate inserts only if bucket-touch coverage can be proven cheaply.
-    - Re-evaluate tiered keys only if suppression can be tied to delayed-entry completion.
-    - Goal: expand cautiously instead of generalizing the hard cases upfront.
-
-### Phase 4 — Reassess `big_value_mu_` globally
-
-16. **Narrow the lock's role by mode and path.**
-    - **Prerequisites:** 2.9 for PIT changes; 3.12–3.15 for non-PIT changes.
-    - PIT: keep only what is still required for serialize-before-mutate correctness.
-    - non-PIT: remove it from self-contained journal entries first; then reconsider `OnMoved`
-      and traversal interactions once serialization becomes non-preempting.
-    - Goal: shrink the lock surface incrementally instead of attempting full removal at once;
-      for non-PIT there is no obligation to preserve locking structure that exists only because
-      of the experimental implementation.
-
-17. **Attempt full `big_value_mu_` removal only after all prerequisites are in place.**
-    - **Prerequisites:** 4.16.
-    - Preconditions:
-      - non-preempting bounded serialization chunks,
-      - precise bucket coverage state,
-      - delayed tiered ownership tracked to completion,
-      - journal ordering independent of the mutex,
-      - tests covering PIT, non-PIT, `OnMoved`, and tiered cases.
-    - Goal: ensure lock removal is the final simplification step, not the first risky rewrite.
+`ConsumeJournalChange` does **not** reach `HandleFlushData` — it only appends to the serializer
+buffer; the flush happens later from `ThrottleIfNeeded`/`PushSerialized`.
+
+## Remaining Work
+
+Much of what earlier revisions of this document listed as a roadmap is now implemented: bucket
+completion tracking (`BucketDependencies` + versioning), per-bucket delayed tiered entries, the
+tagged-chunk wire format, and the journal-omit optimization for self-contained single-key writes.
+The following items remain open:
+
+1. **Separate serializer per producer + interleaved tagged streams.** Bucket serialization and
+   journal entries still share one `serializer_` buffer, and `ConsumeJournalChange` still asserts
+   (`DFATAL`) that it never runs mid-bucket. Giving journal and bucket serialization independent
+   serializers — and reassembling their interleaved tagged chunks on the consumer — would let the
+   journal write without waiting on bucket serialization.
+
+2. **Narrow / remove `stream_mu_`.** Once buffer exclusivity is provided by per-producer
+   serializers, `stream_mu_` would no longer be needed for buffer exclusivity and could be
+   narrowed or removed.
+
+3. **Bandwidth-based pacing of the snapshot loop.** Backups and full sync can saturate outgoing
+   network bandwidth, starving foreground client traffic. The only throughput-shaping the snapshot
+   loop does today is **CPU-based**: in non-background mode `HandleFlushData` sleeps up to 2ms
+   proportional to the CPU cycles just spent serializing/compressing, and background mode yields to
+   lower-priority fibers. The remaining brake is consumer write backpressure (`ConsumeData`
+   blocking on a full socket), which only engages once the link is *already* saturated. None of
+   these caps the **bytes/sec** the snapshot emits.
+
+   Add an explicit outgoing-bandwidth limiter: track bytes pushed over a rolling window (e.g. a
+   token-bucket refilled at a configurable `--snapshot_max_bytes_per_sec` rate) and inject sleeps
+   at the flush point (`HandleFlushData` / `PushSerialized`) to keep emission under the cap.
+   Considerations:
+   - **Per-shard vs. global budget.** Each shard runs its own snapshot fiber, so total egress is
+     the sum across shards. The configured cap must be divided across shards (or coordinated via a
+     shared shard-set rate limiter) rather than applied per-fiber.
+   - **Compose with existing pacing,** not replace it: keep the CPU-proportional sleep and
+     consumer backpressure; the bandwidth limiter is an additional upper bound.
+   - **Account post-compression bytes** (what actually hits the wire), measured where the chunk is
+     handed to `ConsumeData`.
+   - Interaction with background mode and with the `seq_cond_` ordering gate (the sleep must not be
+     held while blocking other producers behind the ordering gate).
+
+4. **Broaden journal-omit eligibility.** `is_omittable_operation` is currently set only for
+   self-contained single-key writes (e.g. `SET`). Extending "skip both" to a wider, individually
+   validated set of self-contained commands — and eventually to baseline-dependent commands whose
+   post-mutation value the traversal will capture — would further reduce full-sync journal traffic.
