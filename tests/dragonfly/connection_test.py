@@ -2,7 +2,7 @@ import asyncio
 import logging
 import random
 import socket
-import ssl
+
 import string
 import time
 from dataclasses import dataclass
@@ -532,14 +532,14 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
         for i in range(0, 150):
             try:
                 async with async_timeout.timeout(1):
-                    message = await channel.get_message(ignore_subscribe_messages=True)
+                    await channel.get_message(ignore_subscribe_messages=True)
             except asyncio.TimeoutError:
                 break
 
     async def subscribe_worker():
         client = aioredis.Redis(connection_pool=async_pool)
         pubsub = client.pubsub()
-        async with pubsub as p:
+        async with pubsub:
             await pubsub.subscribe("channel")
             await channel_reader(pubsub)
             await pubsub.unsubscribe("channel")
@@ -832,10 +832,9 @@ async def test_send_delay_metric(df_server: DflyInstance):
 
 
 async def test_match_http(df_server: DflyInstance):
-    client = df_server.client()
-    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+    _, writer = await asyncio.open_connection("localhost", df_server.port)
     for i in range(2000):
-        writer.write(f"foo bar ".encode())
+        writer.write("foo bar ".encode())
         await writer.drain()
 
 
@@ -1245,7 +1244,7 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
 @dfly_args({"send_timeout": 3})
 async def test_send_timeout(df_server, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
-    writer.write(f"client setname writer_test\n".encode())
+    writer.write("client setname writer_test\n".encode())
     await writer.drain()
     assert "OK" in (await reader.readline()).decode()
     clients = await async_client.client_list()
@@ -1256,7 +1255,7 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
 
     async def get_task():
         while True:
-            writer.write(f"GET a\n".encode())
+            writer.write("GET a\n".encode())
             await writer.drain()
             await asyncio.sleep(0.1)
 
@@ -1675,8 +1674,7 @@ async def test_client_migrate(df_server: DflyInstance):
 )
 async def test_client_migrate_no_conn_leak(df_server: DflyInstance):
     admin = df_server.client()
-    resp = await admin.execute_command("DFLY THREAD")
-    num_threads = resp[1]
+    await admin.execute_command("DFLY THREAD")
 
     # Create multiple clients and migrate them all to the same thread.
     # If DecreaseConnStats is called twice per migration (double-decrement bug),
@@ -1902,7 +1900,7 @@ async def test_issue_5931_malformed_protocol_crash(df_server: DflyInstance):
         await writer.drain()
 
         try:
-            response = await asyncio.wait_for(reader.read(1024), timeout=2.0)
+            await asyncio.wait_for(reader.read(1024), timeout=2.0)
             # If we get a response, it should be an error, not a crash
             # The server is still running if we got here
         except asyncio.TimeoutError:
@@ -1947,7 +1945,7 @@ async def test_issue_5949_nil_bulk_string_crash(df_server: DflyInstance):
         await writer.drain()
 
         try:
-            response = await asyncio.wait_for(reader.read(1024), timeout=2.0)
+            await asyncio.wait_for(reader.read(1024), timeout=2.0)
             # If we get a response, it should be an error, not a crash
         except asyncio.TimeoutError:
             # Timeout is acceptable - connection might be closed
@@ -2291,7 +2289,7 @@ async def test_fibers_unblock_on_conn_disconnect(df_factory: DflyInstanceFactory
         # b"RPOPLPUSH a b",
     ]
 
-    server = df_factory.create(proactor_threads=1, admin_port=BASE_PORT)
+    server = df_factory.create(proactor_threads=2, num_shards=2, admin_port=BASE_PORT)
     server.start()
 
     # Use admin port for control so it's not blocked by the global EVAL
@@ -2325,7 +2323,9 @@ async def test_fibers_unblock_on_conn_disconnect(df_factory: DflyInstanceFactory
 
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect(("127.0.0.1", server.port))
-        s.sendall(f"CLIENT SETNAME victim{victim_id}\r\n".encode())
+
+        cmd_descriptor = "-".join(s.decode().split()[0] for s in batch)
+        s.sendall(f"CLIENT SETNAME victim{victim_id}-{cmd_descriptor}\r\n".encode())
         s.recv(64)  # +OK
         # Send all commands in one write (pipelined)
         s.sendall(b"\r\n".join(batch) + b"\r\n")
