@@ -2085,13 +2085,18 @@ TEST_F(GenericFamilyTest, ContainerIterationYields) {
   EXPECT_GT(delta, 0);
 }
 
-// Verifies that a yielding container iteration observes a consistent view.
-// While LRANGE iterates over a large list and yields, a concurrent fiber
-// performs RPUSH operations. The returned result must remain consistent with
-// the list state at the start of LRANGE.
+// Verifies that a yielding container iteration is protected by its read transaction.
+// While a read transaction iterates over a large list and yields, a concurrent
+// fiber performs RPUSH operations. The key must not be modified while the read
+// transaction is running.
 TEST_F(GenericFamilyTest, ConcurrentWritesDuringContainerYield) {
-  constexpr int kListSize = 50'000;
-  constexpr int kIterations = 25;
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_container_iteration_yield_interval_usec, 1);
+
+  constexpr int kListSize = 100'000;
+  constexpr int kIterations = 100;
+  constexpr int kPushIterations = 100'000;
+  constexpr int kWriterFibersPerShard = 8;
   const char* key = "list1";
   constexpr int kBatch = 1'000;
 
@@ -2102,41 +2107,73 @@ TEST_F(GenericFamilyTest, ConcurrentWritesDuringContainerYield) {
   }
 
   atomic_bool done{false};
-  uint64_t total_yields = 0;
 
-  // LLEN is executed immediately before LRANGE, so it reflects the list size
-  // seen by LRANGE at start. Even if LRANGE yields during iteration, the
-  // returned result should remain consistent.
+  // Run the iterator through a read-only transaction so the size check happens
+  // while the key's shared lock is held, including across iteration yields. Calling
+  // LRANGE directly would not let the test atomically observe whether the key changed
+  // during the command, so this uses the same transaction shape and checks the QList
+  // size inside the transaction callback.
+  auto verify_yielding_iteration_is_protected = [&] {
+    static CommandId cid{"CONTAINER_ITERATION", CO::READONLY, 1, 1, 1};
+    boost::intrusive_ptr<Transaction> tx(new Transaction{&cid});
+
+    CmdArgVec args{key};
+    OpStatus init_status = tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, CmdArgList{args});
+    CHECK_EQ(init_status, OpStatus::OK);
+
+    auto cb = [&](Transaction* tx, EngineShard* shard) -> OpResult<void> {
+      auto op_args = tx->GetOpArgs(shard);
+      auto res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+      CHECK(res);
+      const auto& it = res.value();
+      EXPECT_EQ(it->second.Encoding(), kEncodingQL2);
+      // Compare size before/after iteration to verify that the key was not modified.
+      size_t size_before = it->second.Size();
+      uint64_t preempt_before = ThisFiber::GetPreemptCount();
+      container_utils::IterateList(it->second,
+                                   [](container_utils::ContainerEntry) { return true; });
+      uint64_t preempt_delta = ThisFiber::GetPreemptCount() - preempt_before;
+      EXPECT_EQ(size_before, it->second.Size());
+      EXPECT_GT(preempt_delta, 0);
+      return OpStatus::OK;
+    };
+
+    OpResult<void> result = tx->ScheduleSingleHopT(std::move(cb));
+    EXPECT_EQ(result.status(), OpStatus::OK);
+  };
+
   auto reader = pp_->at(0)->LaunchFiber([&] {
     for (int i = 0; i < kIterations; i++) {
-      size_t expected_size = *Run("reader", {"LLEN", key}).GetInt();
-      uint64_t preempt_before = ThisFiber::GetPreemptCount();
-      auto resp = Run("reader", {"LRANGE", key, "0", "-1"});
-      total_yields += ThisFiber::GetPreemptCount() - preempt_before;
-      EXPECT_EQ(StrArray(resp).size(), expected_size);
+      verify_yielding_iteration_is_protected();
     }
     done.store(true);
   });
 
-  // Writer in same shard.
-  auto writer_same_shard = pp_->at(0)->LaunchFiber([&] {
-    while (!done.load()) {
-      Run("writer_same_shard", {"RPUSH", key, "B"});
-    }
-  });
+  vector<Fiber> writer_fibers;
+  writer_fibers.reserve(2 * kWriterFibersPerShard);
 
-  // Writer from differnt shard.
-  auto writer_different_shard = pp_->at(1)->LaunchFiber([&] {
-    while (!done.load()) {
-      Run("writer_different_shard", {"RPUSH", key, "C"});
+  auto launch_writers = [&](unsigned proactor_index, string_view id_prefix, string_view value) {
+    for (int fiber_index = 0; fiber_index < kWriterFibersPerShard; fiber_index++) {
+      writer_fibers.push_back(
+          pp_->at(proactor_index)->LaunchFiber([&, fiber_index, id_prefix, value] {
+            string id = StrCat(id_prefix, fiber_index);
+            for (int i = 0; i < kPushIterations && !done.load(); i++) {
+              Run(id, {"RPUSH", key, value});
+            }
+          }));
     }
-  });
+  };
+
+  // Writers in same shard.
+  launch_writers(0, "writer_same_shard", "B");
+
+  // Writers from different shard.
+  launch_writers(1, "writer_different_shard", "C");
 
   reader.Join();
-  writer_same_shard.Join();
-  writer_different_shard.Join();
-
-  EXPECT_GT(total_yields, 0);
+  for (Fiber& writer : writer_fibers) {
+    writer.Join();
+  }
 }
 
 // Regression test for SORT BY nosort STORE inside MULTI/EXEC does a
