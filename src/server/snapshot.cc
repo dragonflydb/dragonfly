@@ -340,10 +340,6 @@ bool SliceSnapshot::PushSerialized(bool force) {
 // stream_mu_ is not needed for that ordering.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   std::lock_guard lk{stream_mu_};
-
-  // remove when we support interleaving chunks.
-  LOG_IF(DFATAL, serialize_bucket_running_)
-      << "Internal error: can not run interleave journal and bucket serialization";
   std::ignore = serializer_->WriteJournalEntry(item.journal_item.data);
   ++stats_.jounal_changes;
 }
