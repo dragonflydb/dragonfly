@@ -251,7 +251,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
     // With tiered storage enabled, it makes sense to dispatch async commands concurrently
     // to allow concurrent disk operations. Tiered futures are only blocked on during replies
-    bool do_async = es->tiered_storage() && !IsAtomic() && dispatched.cid->SupportsAsync();
+    bool do_async = es->tiered_storage() && !IsAtomic() && opts_.pipeline_mode &&
+                    dispatched.cid->SupportsAsync();
     if (do_async) {
       // Create new transaction for the command (high overhead, but worth for disk hits)
       boost::intrusive_ptr<Transaction> stx = new Transaction{dispatched.cid};
@@ -267,7 +268,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
     auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
-      crb.SendError(status);
+      ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
     } else {
       ctx->UpdateCid(dispatched.cid);
       ctx->SetTailArgs(dispatched.args);
@@ -283,9 +284,6 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     auto* ctx = de.cmd->cmd_cntx;
     if (!ctx->CanReply())
       ctx->Blocker()->Wait();
-
-    ctx->SendReply();
-    move_reply(de.cmd);
   }
 
   return OpStatus::OK;
