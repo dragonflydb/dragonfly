@@ -88,6 +88,7 @@ struct PeakStats {
 };
 
 // Aggregated metrics over multiple sources on all shards
+// TODO: move into metrics.h/cc.
 struct Metrics {
   SliceEvents events;              // general keyspace stats
   std::vector<DbStats> db_stats;   // dbsize stats
@@ -162,6 +163,14 @@ struct Metrics {
   InternedStringStats interned_string_stats;
 
   acl::UserRegistry::AclStats acl_stats;
+
+  // Collects all thread-local / per-shard stats on the current proactor thread.
+  void InitFromThread(Namespace* ns, CommandRegistry* registry, unsigned proactor_index,
+                      bool collect_replication_memory, DflyCmd* dfly_cmd);
+
+  // Folds `src` into *this. Almost everything sums; tx_queue_len takes the max
+  // and oldest_pending_send_ts the min.
+  void Merge(const Metrics& src);
 };
 
 // Contains the state of the last save operation.
