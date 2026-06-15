@@ -3468,6 +3468,38 @@ TEST_F(SearchFamilyTest, SortStoreDoesNotUpdateIndexesBug) {
   EXPECT_THAT(resp, AreDocIds("k1"));
 }
 
+TEST_F(SearchFamilyTest, FtCreateNoHl) {
+  // Test NOHL option appears in FT.INFO when specified
+  auto resp = Run({"FT.CREATE", "idx1", "NOHL", "SCHEMA", "title", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  auto info = Run({"FT.INFO", "idx1"});
+  EXPECT_THAT(info, IsArray(_, _, _, _, "index_options", RespArray(ElementsAre("NOHL")), _, _, _, _,
+                            _, _, _, _));
+
+  Run({"FT.DROPINDEX", "idx1"});
+
+  // Test NOHL does not appear when only NOOFFSETS is specified
+  resp = Run({"FT.CREATE", "idx2", "NOOFFSETS", "SCHEMA", "title", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  info = Run({"FT.INFO", "idx2"});
+  EXPECT_THAT(info, IsArray(_, _, _, _, "index_options", RespArray(ElementsAre("NOOFFSETS")), _, _,
+                            _, _, _, _, _, _));
+
+  Run({"FT.DROPINDEX", "idx2"});
+
+  // Test NOHL and NOOFFSETS can coexist
+  resp = Run({"FT.CREATE", "idx3", "NOHL", "NOOFFSETS", "SCHEMA", "title", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  info = Run({"FT.INFO", "idx3"});
+  EXPECT_THAT(info,
+              IsArray(_, _, _, _, "index_options",
+                      RespArray(UnorderedElementsAre("NOHL", "NOOFFSETS")),  // Both should appear
+                      _, _, _, _, _, _, _, _));
+}
+
 TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
   // Create an index with a block size option
   auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "number1", "NUMERIC", "BLOCKSIZE",

@@ -130,6 +130,9 @@ struct IndicesOptions {
   // When true, TEXT posting lists do not store token positions. Saves memory but
   // disables phrase queries. Set via NOOFFSETS in FT.CREATE.
   bool no_offsets = false;
+
+  // When true, disables highlighting support. Saves memory. Set via NOHL in FT.CREATE.
+  bool no_hl = false;
 };
 
 // BM25 scoring statistics are now tracked per-field inside each TextIndex.

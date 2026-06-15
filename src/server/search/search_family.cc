@@ -299,6 +299,12 @@ ParseResult<bool> ParseNoOffsets(CmdArgParser* /*parser*/, DocIndex* index) {
   return true;
 }
 
+// NOHL: placeholder for future HIGHLIGHT disable support.
+ParseResult<bool> ParseNoHl(CmdArgParser* /*parser*/, DocIndex* index) {
+  index->options.no_hl = true;
+  return true;
+}
+
 // STOPWORDS count [words...]
 ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   index->options.stopwords.clear();
@@ -423,7 +429,7 @@ ParseResult<DocIndex> CreateDocIndex(std::string_view name, CmdArgParser* parser
     auto option_parser = parser->TryMapNext(
         "ON"sv, &ParseOnOption, "PREFIX"sv, &ParsePrefix, "STOPWORDS"sv, &ParseStopwords,
         "LANGUAGE"sv, &ParseIndexLanguage, "LANGUAGE_FIELD"sv, &ParseIndexLanguageField,
-        "NOOFFSETS"sv, &ParseNoOffsets, "SCHEMA"sv, &ParseSchema);
+        "NOOFFSETS"sv, &ParseNoOffsets, "NOHL"sv, &ParseNoHl, "SCHEMA"sv, &ParseSchema);
 
     if (!option_parser) {
       // Unsupported parameters are ignored for now
@@ -2638,6 +2644,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
     std::vector<std::string_view> opts;
     if (info.base_index.options.no_offsets)
       opts.emplace_back("NOOFFSETS");
+    if (info.base_index.options.no_hl)
+      opts.emplace_back("NOHL");
     rb->StartArray(opts.size());
     for (auto opt : opts)
       rb->SendSimpleString(opt);
