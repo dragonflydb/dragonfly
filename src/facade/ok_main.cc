@@ -191,8 +191,9 @@ AsyncCmd GetAsync(CmdContext* ctx, ProactorPool* pool) {
 
   ctx->blocker.Start(1);
   g_shards[shard_id].queue->Add([k = std::move(key), ctx] {
-    auto it = MyShard().db.find(k);
-    if (it != MyShard().db.end())
+    auto& shard = MyShard();
+    auto it = shard.db.find(k);
+    if (it != shard.db.end())
       ctx->get_result = it->second;
     ctx->blocker.Dec();
   });
@@ -288,7 +289,6 @@ DispatchResult OkService::DispatchCommand([[maybe_unused]] ParsedArgs args, Pars
 // stops at the first command whose target shard is already full.
 constexpr unsigned kMaxSquashSize = 32;
 
-// Pipeline squasher, mirroring dragonfly's --enable_pipeline_squashing_v2 path
 // (Service::DispatchSquashedBatch): group a leading run of single-key SET/GET commands by shard,
 // dispatch one task per shard, block the connection fiber until all shards finish, then store each
 // reply as a captured payload via Resolve() (which also marks the command deferred). The connection
@@ -314,7 +314,9 @@ uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
     string_view name = cmd->Front();
     bool is_get = absl::EqualsIgnoreCase(name, "GET");
     bool is_set = absl::EqualsIgnoreCase(name, "SET");
-    if (is_get ? cmd->size() < 2 : (is_set ? cmd->size() < 3 : true))
+    if (!is_get && !is_set)
+      break;
+    if ((is_get && cmd->size() < 2) || (is_set && cmd->size() < 3))
       break;
 
     auto* ctx = static_cast<CmdContext*>(cmd);
@@ -322,7 +324,7 @@ uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
     if (bucket.size() == kMaxSquashSize)  // this shard is full -> end the run here
       break;
     ctx->batch_is_get = is_get;
-    active += bucket.empty();  // first command for this shard -> one more active shard
+    active += unsigned(bucket.empty());  // first command for this shard -> one more active shard
     bucket.push_back(ctx);
     processed++;
   }
@@ -339,12 +341,13 @@ uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
       continue;
     g_shards[sid].queue->Add([cmds = &per_shard[sid], bc]() mutable {
       for (auto* ctx : *cmds) {
+        auto& shard = MyShard();
         if (ctx->batch_is_get) {
-          auto it = MyShard().db.find(ctx->at(1));
-          if (it != MyShard().db.end())
+          auto it = shard.db.find(ctx->at(1));
+          if (it != shard.db.end())
             ctx->get_result = it->second;
         } else {
-          MyShard().db.insert_or_assign(string(ctx->at(1)), string(ctx->at(2)));
+          shard.db.insert_or_assign(string(ctx->at(1)), string(ctx->at(2)));
         }
       }
       bc->Dec();
@@ -357,11 +360,11 @@ uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
   for (auto& bucket : per_shard) {
     for (auto* ctx : bucket) {
       if (!ctx->batch_is_get) {
-        ctx->Resolve(payload::SimpleString{std::string("OK")});
+        ctx->Resolve(payload::SimpleString{"OK"});
       } else if (ctx->get_result) {
         ctx->Resolve(payload::BulkString{std::move(*ctx->get_result)});
       } else {
-        ctx->Resolve(payload::Payload{payload::Null{}});
+        ctx->Resolve(payload::Null{});
       }
     }
   }
@@ -387,8 +390,9 @@ DispatchResult OkService::HandleGetSync(ParsedCommand* cmd) {
   unsigned shard_id = KeyShard(key, pool_->size());
 
   optional<string> result = g_shards[shard_id].queue->Await([key]() -> optional<string> {
-    auto it = MyShard().db.find(key);
-    if (it == MyShard().db.end())
+    auto& shard = MyShard();
+    auto it = shard.db.find(key);
+    if (it == shard.db.end())
       return nullopt;
     return it->second;
   });
@@ -549,6 +553,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   pool->AwaitFiberOnAll([](unsigned index, ProactorBase*) {
     g_shards[index].queue->Shutdown();
     g_shards[index].consumer.Join();
+    g_shards[index].db.clear();
   });
   g_shards.clear();
 }
