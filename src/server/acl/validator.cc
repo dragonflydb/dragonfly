@@ -81,8 +81,8 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
 
   std::pair<bool, AclLog::Reason> auth_res;
 
-  if (auto pkind = id.PubSubKind(); pkind) {
-    bool is_pattern = *pkind == CO::PubSubKind::PATTERN;
+  if (id.IsPubSub()) {
+    bool is_pattern = id.IsPatternPubSub();
     auth_res =
         IsPubSubCommandAuthorized(is_pattern, cntx.acl_commands, cntx.pub_sub, tail_args, id);
   } else {
