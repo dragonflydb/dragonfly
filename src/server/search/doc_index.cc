@@ -204,6 +204,14 @@ string DocIndexInfo::BuildRestoreCommand() const {
       absl::StrAppend(&out, " ", sw);
   }
 
+  if (base_index.options.no_offsets)
+    absl::StrAppend(&out, " NOOFFSETS");
+
+  absl::StrAppend(&out, " LANGUAGE ", base_index.schema.default_language);
+
+  if (!base_index.schema.language_field.empty())
+    absl::StrAppend(&out, " LANGUAGE_FIELD ", base_index.schema.language_field);
+
   absl::StrAppend(&out, " SCHEMA");
   for (const auto& [fident, finfo] : base_index.schema.fields) {
     // Store field name, alias and type
@@ -234,6 +242,8 @@ string DocIndexInfo::BuildRestoreCommand() const {
         [out = &out](const search::SchemaField::TextParams& params) {
           if (params.with_suffixtrie)
             absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
+          if (params.no_stem)
+            absl::StrAppend(out, " ", "NOSTEM");
         },
         [out = &out](const search::SchemaField::NumericParams& params) {
           absl::StrAppend(out, " ", "BLOCKSIZE", " ", std::to_string(params.block_size));

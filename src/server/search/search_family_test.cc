@@ -6107,6 +6107,30 @@ TEST(BuildRestoreCommandTest, TextWithSuffixTriePreserved) {
   EXPECT_THAT(info.BuildRestoreCommand(), HasSubstr("WITHSUFFIXTRIE"));
 }
 
+// Verify that BuildRestoreCommand preserves TEXT stemming options.
+TEST(BuildRestoreCommandTest, TextNoStemPreserved) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+
+  SchemaField field;
+  field.type = SchemaField::TEXT;
+  field.flags = 0;
+  field.short_name = "title";
+  field.special_params = SchemaField::TextParams{.no_stem = true};
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["title"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+
+  EXPECT_THAT(info.BuildRestoreCommand(), HasSubstr("NOSTEM"));
+}
+
 // Verify that BuildRestoreCommand preserves WITHSUFFIXTRIE for TAG fields.
 TEST(BuildRestoreCommandTest, TagWithSuffixTriePreserved) {
   using dfly::DocIndex;
@@ -6132,6 +6156,35 @@ TEST(BuildRestoreCommandTest, TagWithSuffixTriePreserved) {
   std::string cmd = info.BuildRestoreCommand();
   EXPECT_THAT(cmd, HasSubstr("WITHSUFFIXTRIE"));
   EXPECT_THAT(cmd, HasSubstr("SEPARATOR"));
+}
+
+// Verify that BuildRestoreCommand preserves index-level search options.
+TEST(BuildRestoreCommandTest, IndexOptionsPreserved) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+
+  SchemaField field;
+  field.type = SchemaField::TEXT;
+  field.flags = 0;
+  field.short_name = "title";
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.options.no_offsets = true;
+  base.schema.default_language = "german";
+  base.schema.language_field = "lang";
+  base.schema.fields["title"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+
+  std::string cmd = info.BuildRestoreCommand();
+  EXPECT_THAT(cmd, HasSubstr("NOOFFSETS"));
+  EXPECT_THAT(cmd, HasSubstr("LANGUAGE german"));
+  EXPECT_THAT(cmd, HasSubstr("LANGUAGE_FIELD lang"));
 }
 
 // Verify that FT.INFO returns all VECTOR field parameters.

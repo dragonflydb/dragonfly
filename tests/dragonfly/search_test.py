@@ -3,9 +3,15 @@ Test compatibility with the redis-py client search module.
 Search correctness should be ensured with unit tests.
 """
 
+import asyncio
 import copy
+import json
+import time
 
 import numpy as np
+import pytest
+import redis
+from redis import asyncio as aioredis
 from redis.commands.search.field import TextField, NumericField, TagField, VectorField, GeoField
 
 try:
@@ -17,7 +23,12 @@ from redis.commands.search.query import Query
 from . import dfly_args
 from .instance import DflyInstanceFactory
 from .seeder import HnswSearchSeeder
-from .utility import *
+from .utility import (
+    check_all_replicas_finished,
+    skip_if_not_in_github,
+    tmp_file_name,
+    wait_available_async,
+)
 
 TEST_DATA = [
     {
@@ -101,6 +112,139 @@ def contains_test_data(itype, res, td_indices):
             return False
 
     return True
+
+
+def _search_response(value):
+    if isinstance(value, bytes):
+        return value.decode()
+    if isinstance(value, list):
+        return [_search_response(v) for v in value]
+    return value
+
+
+def _search_info_dict(info):
+    info = _search_response(info)
+    return {info[i]: info[i + 1] for i in range(0, len(info), 2)}
+
+
+def _search_attribute(info, identifier):
+    for attribute in _search_info_dict(info)["attributes"]:
+        try:
+            if attribute[attribute.index("identifier") + 1] == identifier:
+                return attribute
+        except ValueError:
+            pass
+    raise AssertionError(f"Missing search attribute {identifier}")
+
+
+def _search_doc_ids(response):
+    response = _search_response(response)
+    return set(response[1::2])
+
+
+async def _create_search_option_indexes(client: aioredis.Redis):
+    await client.execute_command(
+        "FT.CREATE",
+        "idx_nooff",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "nooff:",
+        "NOOFFSETS",
+        "SCHEMA",
+        "t",
+        "TEXT",
+    )
+    await client.hset("nooff:1", mapping={"t": "machine learning"})
+
+    await client.execute_command(
+        "FT.CREATE",
+        "idx_nostem",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "nostem:",
+        "SCHEMA",
+        "t",
+        "TEXT",
+        "NOSTEM",
+    )
+    await client.hset("nostem:1", mapping={"t": "running"})
+
+    await client.execute_command(
+        "FT.CREATE",
+        "idx_lang",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "de:",
+        "LANGUAGE",
+        "german",
+        "SCHEMA",
+        "body",
+        "TEXT",
+    )
+    await client.hset("de:1", mapping={"body": "viele Häuser hier"})
+    await client.hset("de:2", mapping={"body": "ein altes Haus"})
+    await client.hset("de:3", mapping={"body": "des Hauses Wert"})
+
+    await client.execute_command(
+        "FT.CREATE",
+        "idx_lang_field",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "lf:",
+        "LANGUAGE",
+        "english",
+        "LANGUAGE_FIELD",
+        "lang",
+        "SCHEMA",
+        "body",
+        "TEXT",
+        "lang",
+        "TEXT",
+        "NOSTEM",
+    )
+    await client.hset("lf:en", mapping={"body": "machine learning", "lang": "english"})
+    await client.hset("lf:de", mapping={"body": "viele Häuser", "lang": "german"})
+    await client.hset("lf:fallback", mapping={"body": "she learned"})
+
+
+async def _assert_search_option_indexes(client: aioredis.Redis):
+    nooff_info = _search_info_dict(await client.execute_command("FT.INFO", "idx_nooff"))
+    assert nooff_info["index_options"] == ["NOOFFSETS"]
+    with pytest.raises(redis.exceptions.ResponseError, match="phrase queries require offsets"):
+        await client.execute_command("FT.SEARCH", "idx_nooff", '"machine learning"')
+
+    nostem_info = await client.execute_command("FT.INFO", "idx_nostem")
+    assert "NOSTEM" in _search_attribute(nostem_info, "t")
+    assert (
+        _search_doc_ids(await client.execute_command("FT.SEARCH", "idx_nostem", "@t:(run)"))
+        == set()
+    )
+
+    lang_info = _search_info_dict(await client.execute_command("FT.INFO", "idx_lang"))
+    lang_definition = _search_info_dict(lang_info["index_definition"])
+    assert lang_definition["default_language"] == "german"
+    assert _search_doc_ids(
+        await client.execute_command("FT.SEARCH", "idx_lang", "@body:(Haus)")
+    ) == {
+        "de:1",
+        "de:2",
+        "de:3",
+    }
+
+    lang_field_info = _search_info_dict(await client.execute_command("FT.INFO", "idx_lang_field"))
+    lang_field_definition = _search_info_dict(lang_field_info["index_definition"])
+    assert lang_field_definition["language_field"] == "lang"
+    assert _search_doc_ids(
+        await client.execute_command("FT.SEARCH", "idx_lang_field", "@body:(Haus)")
+    ) == {"lf:de"}
 
 
 @dfly_args({"proactor_threads": 4})
@@ -495,6 +639,43 @@ async def test_hnsw_reload_different_threads(
         ), f"doc {key} lost from index after reload"
 
 
+async def test_search_options_reload(df_factory: DflyInstanceFactory):
+    dbfilename = f"search_options_{tmp_file_name()}"
+    inst = df_factory.create(proactor_threads=4, dbfilename=dbfilename)
+    inst.start()
+    client = inst.client()
+
+    await _create_search_option_indexes(client)
+    await _assert_search_option_indexes(client)
+
+    await client.execute_command("SAVE")
+    inst.stop()
+
+    inst2 = df_factory.create(proactor_threads=2, dbfilename=dbfilename)
+    inst2.start()
+    client2 = inst2.client()
+    await wait_available_async(client2)
+
+    await _assert_search_option_indexes(client2)
+
+
+async def test_search_options_full_sync_replication(df_factory: DflyInstanceFactory):
+    master = df_factory.create(proactor_threads=4)
+    master.start()
+    c_master = master.client()
+
+    await _create_search_option_indexes(c_master)
+    await _assert_search_option_indexes(c_master)
+
+    replica = df_factory.create(proactor_threads=2, replicaof=f"localhost:{master.port}")
+    replica.start()
+    c_replica = replica.client()
+    await wait_available_async(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    await _assert_search_option_indexes(c_replica)
+
+
 @dfly_args({"proactor_threads": 4})
 async def test_knn_score_return(async_client: aioredis.Redis):
     i1 = async_client.ft("i1")
@@ -831,8 +1012,6 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     Tests with different thread counts between master and replica to ensure proper
     shard handling during replication.
     """
-    from .instance import DflyInstanceFactory
-
     master = df_factory.create(proactor_threads=master_threads)
     # logbuflevel=-1 forces glog to flush every log line immediately, so INFO messages
     # are visible in the log file when we read it (before the process exits).
