@@ -115,6 +115,7 @@ enum Protocol : uint8_t { RESP, MC_TEXT } protocol;
 enum DistType : uint8_t { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
 
 constexpr uint16_t kNumSlots = 16384;
+constexpr uint32_t kDnsResolveTimeoutMs = 2000;
 constexpr string_view kMovedErrorKey = "MOVED"sv;
 enum class BenchOp : uint8_t { kSet = 0, kGet = 1, kUnknown = 2 };
 constexpr size_t kTrackedOpCount = 2;
@@ -161,7 +162,7 @@ using SlotRange = pair<uint16_t, uint16_t>;
 
 namespace {
 
-optional<tcp::endpoint> ResolveMovedEndpoint(string_view endpoint) {
+optional<tcp::endpoint> ResolveMovedEndpoint(string_view endpoint, ProactorBase* proactor) {
   string_view host;
   string_view port_str;
 
@@ -193,7 +194,8 @@ optional<tcp::endpoint> ResolveMovedEndpoint(string_view endpoint) {
   auto address = boost::asio::ip::make_address(host, ec);
   if (ec) {
     char ip_addr[INET6_ADDRSTRLEN];
-    if (const std::error_code dns_ec = fb2::DnsResolve(string(host), ip_addr)) {
+    if (const std::error_code dns_ec =
+            fb2::DnsResolve(string(host), kDnsResolveTimeoutMs, ip_addr, proactor)) {
       LOG(ERROR) << "Could not resolve MOVED endpoint " << endpoint << ": " << dns_ec;
       return nullopt;
     }
@@ -209,7 +211,7 @@ optional<tcp::endpoint> ResolveMovedEndpoint(string_view endpoint) {
   return tcp::endpoint(address, port);
 }
 
-optional<pair<uint16_t, tcp::endpoint>> ParseMovedError(string_view error) {
+optional<pair<uint16_t, tcp::endpoint>> ParseMovedError(string_view error, ProactorBase* proactor) {
   error = error.substr(kMovedErrorKey.length());
   vector<string_view> parts =
       absl::StrSplit(absl::StripTrailingAsciiWhitespace(error), ' ', absl::SkipEmpty());
@@ -225,7 +227,7 @@ optional<pair<uint16_t, tcp::endpoint>> ParseMovedError(string_view error) {
     return nullopt;
   }
 
-  auto endpoint = ResolveMovedEndpoint(parts[1]);
+  auto endpoint = ResolveMovedEndpoint(parts[1], proactor);
   if (!endpoint)
     return nullopt;
 
@@ -565,8 +567,12 @@ class Driver {
  public:
   explicit Driver(uint32_t num_reqs, uint32_t time_limit, ClientStats* stats, ProactorBase* p,
                   ShardSlots* ss)
-      : num_reqs_(num_reqs), time_limit_(time_limit), shard_slots_(*ss), stats_(*stats) {
-    socket_.reset(p->CreateSocket());
+      : num_reqs_(num_reqs),
+        time_limit_(time_limit),
+        shard_slots_(*ss),
+        stats_(*stats),
+        proactor_(p) {
+    socket_.reset(proactor_->CreateSocket());
     if (time_limit_ > 0)
       num_reqs_ = UINT32_MAX;
   }
@@ -608,6 +614,7 @@ class Driver {
   tcp::endpoint ep_;
   ShardSlots& shard_slots_;
   ClientStats& stats_;
+  ProactorBase* proactor_;
   unique_ptr<FiberSocketBase> socket_;
   fb2::Fiber receive_fb_;
   queue<Req> reqs_;
@@ -976,7 +983,7 @@ void Driver::ParseRESP() {
         string_view error = parse_args[0].GetView();
         VLOG(2) << "Error " << error;
         if (absl::StartsWith(error, kMovedErrorKey)) {
-          if (const auto moved = ParseMovedError(error); moved) {
+          if (const auto moved = ParseMovedError(error, proactor_); moved) {
             shard_slots_.MoveSlot(ep_, moved->second, moved->first);
           }
         }
@@ -1430,7 +1437,7 @@ ClusterShards FetchClusterInfo(const tcp::endpoint& ep, ProactorBase* proactor) 
     CHECK_EQ(2u, addr_parts.size());
     string host(addr_parts[0]);
     char ip_addr[INET6_ADDRSTRLEN];
-    std::error_code ec = fb2::DnsResolve(host, ip_addr);
+    std::error_code ec = fb2::DnsResolve(host, kDnsResolveTimeoutMs, ip_addr, proactor);
     CHECK(!ec) << "Could not resolve " << host << " " << ec;
     auto address = ::boost::asio::ip::make_address(ip_addr);
 
@@ -1478,7 +1485,6 @@ int main(int argc, char* argv[]) {
   pp.reset(fb2::Pool::Epoll());
 #endif
   pp->Run();
-  fb2::InitDnsResolver(2000);
 
   ProactorBase::RegisterSignal({SIGTERM}, pp->GetNextProactor(), [](int) {
     CONSOLE_INFO << "terminate requested";
@@ -1518,8 +1524,8 @@ int main(int argc, char* argv[]) {
   auto* proactor = pp->GetNextProactor();
   char ip_addr[128];
 
-  error_code ec =
-      proactor->Await([&] { return fb2::DnsResolve(GetFlag(FLAGS_h), 2000, ip_addr, proactor); });
+  error_code ec = proactor->Await(
+      [&] { return fb2::DnsResolve(GetFlag(FLAGS_h), kDnsResolveTimeoutMs, ip_addr, proactor); });
   CHECK(!ec) << "Could not resolve " << GetFlag(FLAGS_h) << " " << ec;
 
   auto address = ::boost::asio::ip::make_address(ip_addr);
