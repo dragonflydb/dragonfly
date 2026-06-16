@@ -532,6 +532,68 @@ async def test_knn_score_return(async_client: aioredis.Redis):
     await i1.dropindex()
 
 
+@dfly_args({"proactor_threads": 4, "dbfilename": "search-options-persistence"})
+async def test_index_level_options_persist_after_restart(df_server):
+    """Test that index-level options (LANGUAGE, LANGUAGE_FIELD, NOOFFSETS, NOSTEM) persist after server restart."""
+    client = df_server.client()
+    await client.execute_command(
+        "FT.CREATE idx "
+        "ON HASH "
+        "PREFIX 1 test: "
+        "LANGUAGE spanish "
+        "LANGUAGE_FIELD lang "
+        "NOOFFSETS "
+        "SCHEMA "
+        "title TEXT NOSTEM "
+    )
+
+    def verify_index_options(info, is_after_restart=False):
+        msg = "after restart" if is_after_restart else "before restart"
+
+        index_options_idx = info.index("index_options") + 1
+        assert "NOOFFSETS" in info[index_options_idx], f"NOOFFSETS option lost {msg}"
+
+        def_idx = info.index("index_definition") + 1
+        index_def = info[def_idx]
+
+        lang_pos = index_def.index("default_language") + 1
+        assert index_def[lang_pos] == "spanish", f"LANGUAGE lost {msg}"
+
+        lang_field_pos = index_def.index("language_field") + 1
+
+        assert index_def[lang_field_pos] == "lang", f"LANGUAGE_FIELD lost {msg}"
+
+        attributes_idx = info.index("attributes") + 1
+        attributes = info[attributes_idx]
+
+        title_field = None
+        for field in attributes:
+            for i, val in enumerate(field):
+                if val == "attribute" and i + 1 < len(field) and field[i + 1] == "title":
+                    title_field = field
+                    break
+            if title_field:
+                break
+        assert title_field is not None, "title field not found in attributes"
+        assert "NOSTEM" in title_field, f"NOSTEM option lost {msg}"
+
+    info_before = await client.execute_command("FT.INFO idx")
+    verify_index_options(info_before, False)
+
+    await client.execute_command("SAVE")
+    df_server.stop()
+    df_server.start()
+    async with df_server.client() as client:
+        await wait_available_async(client)
+
+    new_client = df_server.client()
+    info_after = await new_client.execute_command("FT.INFO idx")
+
+    verify_index_options(info_after, is_after_restart=True)
+
+    await new_client.execute_command("FT.DROPINDEX idx")
+
+
 @dfly_args({"proactor_threads": 4, "dbfilename": "search-data"})
 async def test_index_persistence(df_server):
     client = aioredis.Redis(port=df_server.port)
