@@ -111,8 +111,11 @@ std::optional<search::KnnScoreSortOption> ApplyCapturedIndexType(
     std::optional<search::KnnScoreSortOption> option, const atomic<int>& index_type) {
   // Coordinator paths only learn the index type inside shard callbacks; capture it there and
   // apply the JSON-only default alias after the existing hop, without adding a pre-hop.
+  if (!option)
+    return nullopt;
+
   auto type = LoadIndexType(index_type);
-  if (option && type)
+  if (type)
     option = ApplyDefaultKnnScoreAlias(*option, *type);
   return option;
 }
