@@ -21,14 +21,12 @@ BASIC_ARGS = {
     "proactor_threads": 4,
     "tiered_prefix": "/tmp/tiered/backing",
     "tiered_offload_threshold": "1.0",  # offload immediately
-    "tiered_max_pending_stash_bytes": "16MB",
     "maxmemory": "1G",
 }
 
 
 @pytest.mark.large
 @pytest.mark.opt_only
-@pytest.mark.skip(reason="Fails - #7560")
 @dfly_args({**BASIC_ARGS, "tiered_experimental_cooling": "false"})
 async def test_basic_memory_usage(async_client: aioredis.Redis):
     """
@@ -43,19 +41,17 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     # Wait for tiering stashes
     async for info, breaker in info_tick_timer(async_client, section="TIERED", timeout=60):
         with breaker:
-            assert info["tiered_entries"] > 195_000
+            assert info["tiered_entries"] > 199_000
 
     info = await async_client.info("ALL")
     assert info["num_entries"] == 200_000
 
     assert (
-        info["tiered_allocated_bytes"] > 195_000 * 2048 * 0.8
+        info["tiered_allocated_bytes"] > 199_000 * 2048 * 0.8
     )  # 0.8 just to be sure because it fluctuates due to variance
 
-    assert info["used_memory"] < 50 * 1024 * 1024
-    assert (
-        info["used_memory_rss"] < 500 * 1024 * 1024
-    )  # the grown table itself takes up lots of space
+    assert info["used_memory"] < 50 * 1024 * 1024, info
+    assert info["used_memory_rss"] < 100 * 1024 * 1024
 
 
 @pytest.mark.large
