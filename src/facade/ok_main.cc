@@ -128,6 +128,7 @@ struct AsyncCmd {
 struct CmdContext : public facade::ParsedCommand {
   void ReuseInternal() final {
     get_result.reset();
+    batch_is_get = false;
   }
 
   fb2::EmbeddedBlockingCounter blocker{0};
@@ -417,102 +418,96 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
 
   string body;
 
+#define APPEND_BODY(...) absl::StrAppend(&body, __VA_ARGS__)
+
   // Connection metrics
-  absl::StrAppend(&body, "# HELP connections_received_total Total connections received\n");
-  absl::StrAppend(&body, "# TYPE connections_received_total counter\n");
-  absl::StrAppend(&body, "connections_received_total ", conn.conn_received_cnt, "\n");
+  APPEND_BODY("# HELP connections_received_total Total connections received\n");
+  APPEND_BODY("# TYPE connections_received_total counter\n");
+  APPEND_BODY("connections_received_total ", conn.conn_received_cnt, "\n");
 
-  absl::StrAppend(&body, "# HELP connected_clients Number of connected clients\n");
-  absl::StrAppend(&body, "# TYPE connected_clients gauge\n");
-  absl::StrAppend(&body, "connected_clients ", conn.num_conns_main, "\n");
+  APPEND_BODY("# HELP connected_clients Number of connected clients\n");
+  APPEND_BODY("# TYPE connected_clients gauge\n");
+  APPEND_BODY("connected_clients ", conn.num_conns_main, "\n");
 
-  absl::StrAppend(&body, "# HELP blocked_clients Number of blocked clients\n");
-  absl::StrAppend(&body, "# TYPE blocked_clients gauge\n");
-  absl::StrAppend(&body, "blocked_clients ", conn.num_blocked_clients, "\n");
+  APPEND_BODY("# HELP blocked_clients Number of blocked clients\n");
+  APPEND_BODY("# TYPE blocked_clients gauge\n");
+  APPEND_BODY("blocked_clients ", conn.num_blocked_clients, "\n");
 
-  absl::StrAppend(&body, "# HELP num_migrations Connection migrations between threads\n");
-  absl::StrAppend(&body, "# TYPE num_migrations counter\n");
-  absl::StrAppend(&body, "num_migrations ", conn.num_migrations, "\n");
+  APPEND_BODY("# HELP num_migrations Connection migrations between threads\n");
+  APPEND_BODY("# TYPE num_migrations counter\n");
+  APPEND_BODY("num_migrations ", conn.num_migrations, "\n");
 
   // Command metrics
-  absl::StrAppend(&body, "# HELP commands_processed_total Total commands processed\n");
-  absl::StrAppend(&body, "# TYPE commands_processed_total counter\n");
-  absl::StrAppend(&body, "commands_processed_total ", conn.command_cnt_main, "\n");
+  APPEND_BODY("# HELP commands_processed_total Total commands processed\n");
+  APPEND_BODY("# TYPE commands_processed_total counter\n");
+  APPEND_BODY("commands_processed_total ", conn.command_cnt_main, "\n");
 
   // Pipeline metrics
-  absl::StrAppend(&body, "# HELP pipelined_commands_total Total pipelined commands\n");
-  absl::StrAppend(&body, "# TYPE pipelined_commands_total counter\n");
-  absl::StrAppend(&body, "pipelined_commands_total ", conn.pipelined_cmd_cnt, "\n");
+  APPEND_BODY("# HELP pipelined_commands_total Total pipelined commands\n");
+  APPEND_BODY("# TYPE pipelined_commands_total counter\n");
+  APPEND_BODY("pipelined_commands_total ", conn.pipelined_cmd_cnt, "\n");
 
-  absl::StrAppend(&body,
-                  "# HELP pipelined_commands_duration_seconds Total pipelined cmd latency\n");
-  absl::StrAppend(&body, "# TYPE pipelined_commands_duration_seconds counter\n");
-  absl::StrAppend(&body, "pipelined_commands_duration_seconds ", conn.pipelined_cmd_latency * 1e-6,
-                  "\n");
+  APPEND_BODY("# HELP pipelined_commands_duration_seconds Total pipelined cmd latency\n");
+  APPEND_BODY("# TYPE pipelined_commands_duration_seconds counter\n");
+  APPEND_BODY("pipelined_commands_duration_seconds ", conn.pipelined_cmd_latency * 1e-6, "\n");
 
-  absl::StrAppend(&body, "# HELP pipelined_wait_duration_seconds Pipeline queue wait latency\n");
-  absl::StrAppend(&body, "# TYPE pipelined_wait_duration_seconds counter\n");
-  absl::StrAppend(&body, "pipelined_wait_duration_seconds ", conn.pipelined_wait_latency * 1e-6,
-                  "\n");
+  APPEND_BODY("# HELP pipelined_wait_duration_seconds Pipeline queue wait latency\n");
+  APPEND_BODY("# TYPE pipelined_wait_duration_seconds counter\n");
+  APPEND_BODY("pipelined_wait_duration_seconds ", conn.pipelined_wait_latency * 1e-6, "\n");
 
-  absl::StrAppend(&body, "# HELP pipeline_queue_length Pending commands in pipeline queue\n");
-  absl::StrAppend(&body, "# TYPE pipeline_queue_length gauge\n");
-  absl::StrAppend(&body, "pipeline_queue_length ", conn.pipeline_queue_entries, "\n");
+  APPEND_BODY("# HELP pipeline_queue_length Pending commands in pipeline queue\n");
+  APPEND_BODY("# TYPE pipeline_queue_length gauge\n");
+  APPEND_BODY("pipeline_queue_length ", conn.pipeline_queue_entries, "\n");
 
-  absl::StrAppend(&body, "# HELP pipeline_throttle_total Pipeline throttle events\n");
-  absl::StrAppend(&body, "# TYPE pipeline_throttle_total counter\n");
-  absl::StrAppend(&body, "pipeline_throttle_total ", conn.pipeline_throttle_count, "\n");
+  APPEND_BODY("# HELP pipeline_throttle_total Pipeline throttle events\n");
+  APPEND_BODY("# TYPE pipeline_throttle_total counter\n");
+  APPEND_BODY("pipeline_throttle_total ", conn.pipeline_throttle_count, "\n");
 
-  absl::StrAppend(&body, "# HELP pipeline_dispatch_calls_total Pipeline batch dispatch calls\n");
-  absl::StrAppend(&body, "# TYPE pipeline_dispatch_calls_total counter\n");
-  absl::StrAppend(&body, "pipeline_dispatch_calls_total ", conn.pipeline_dispatch_calls, "\n");
+  APPEND_BODY("# HELP pipeline_dispatch_calls_total Pipeline batch dispatch calls\n");
+  APPEND_BODY("# TYPE pipeline_dispatch_calls_total counter\n");
+  APPEND_BODY("pipeline_dispatch_calls_total ", conn.pipeline_dispatch_calls, "\n");
 
-  absl::StrAppend(&body,
-                  "# HELP pipeline_dispatch_commands_total Commands via pipeline dispatch\n");
-  absl::StrAppend(&body, "# TYPE pipeline_dispatch_commands_total counter\n");
-  absl::StrAppend(&body, "pipeline_dispatch_commands_total ", conn.pipeline_dispatch_commands,
-                  "\n");
+  APPEND_BODY("# HELP pipeline_dispatch_commands_total Commands via pipeline dispatch\n");
+  APPEND_BODY("# TYPE pipeline_dispatch_commands_total counter\n");
+  APPEND_BODY("pipeline_dispatch_commands_total ", conn.pipeline_dispatch_commands, "\n");
 
-  absl::StrAppend(&body,
-                  "# HELP pipeline_dispatch_flush_seconds Pipeline dispatch flush duration\n");
-  absl::StrAppend(&body, "# TYPE pipeline_dispatch_flush_seconds counter\n");
-  absl::StrAppend(&body, "pipeline_dispatch_flush_seconds ",
-                  conn.pipeline_dispatch_flush_usec * 1e-6, "\n");
+  APPEND_BODY("# HELP pipeline_dispatch_flush_seconds Pipeline dispatch flush duration\n");
+  APPEND_BODY("# TYPE pipeline_dispatch_flush_seconds counter\n");
+  APPEND_BODY("pipeline_dispatch_flush_seconds ", conn.pipeline_dispatch_flush_usec * 1e-6, "\n");
 
-  absl::StrAppend(&body, "# TYPE pipeline_dispatch_flush_total counter\n");
-  absl::StrAppend(&body, "pipeline_dispatch_flush_total ", conn.pipeline_dispatch_flush_count,
-                  "\n");
+  APPEND_BODY("# TYPE pipeline_dispatch_flush_total counter\n");
+  APPEND_BODY("pipeline_dispatch_flush_total ", conn.pipeline_dispatch_flush_count, "\n");
 
   // Network I/O metrics
-  absl::StrAppend(&body, "# HELP net_input_bytes_total Total bytes read from network\n");
-  absl::StrAppend(&body, "# TYPE net_input_bytes_total counter\n");
-  absl::StrAppend(&body, "net_input_bytes_total ", conn.io_read_bytes, "\n");
+  APPEND_BODY("# HELP net_input_bytes_total Total bytes read from network\n");
+  APPEND_BODY("# TYPE net_input_bytes_total counter\n");
+  APPEND_BODY("net_input_bytes_total ", conn.io_read_bytes, "\n");
 
-  absl::StrAppend(&body, "# HELP net_output_bytes_total Total bytes written to network\n");
-  absl::StrAppend(&body, "# TYPE net_output_bytes_total counter\n");
-  absl::StrAppend(&body, "net_output_bytes_total ", reply.io_write_bytes, "\n");
+  APPEND_BODY("# HELP net_output_bytes_total Total bytes written to network\n");
+  APPEND_BODY("# TYPE net_output_bytes_total counter\n");
+  APPEND_BODY("net_output_bytes_total ", reply.io_write_bytes, "\n");
 
-  absl::StrAppend(&body, "# HELP net_input_recv_total Total read syscalls\n");
-  absl::StrAppend(&body, "# TYPE net_input_recv_total counter\n");
-  absl::StrAppend(&body, "net_input_recv_total ", conn.io_read_cnt, "\n");
+  APPEND_BODY("# HELP net_input_recv_total Total read syscalls\n");
+  APPEND_BODY("# TYPE net_input_recv_total counter\n");
+  APPEND_BODY("net_input_recv_total ", conn.io_read_cnt, "\n");
 
-  absl::StrAppend(&body, "# HELP net_output_send_total Total write syscalls\n");
-  absl::StrAppend(&body, "# TYPE net_output_send_total counter\n");
-  absl::StrAppend(&body, "net_output_send_total ", reply.io_write_cnt, "\n");
+  APPEND_BODY("# HELP net_output_send_total Total write syscalls\n");
+  APPEND_BODY("# TYPE net_output_send_total counter\n");
+  APPEND_BODY("net_output_send_total ", reply.io_write_cnt, "\n");
 
-  absl::StrAppend(&body, "# HELP net_read_yields_total Read yields due to busy limit\n");
-  absl::StrAppend(&body, "# TYPE net_read_yields_total counter\n");
-  absl::StrAppend(&body, "net_read_yields_total ", conn.num_read_yields, "\n");
+  APPEND_BODY("# HELP net_read_yields_total Read yields due to busy limit\n");
+  APPEND_BODY("# TYPE net_read_yields_total counter\n");
+  APPEND_BODY("net_read_yields_total ", conn.num_read_yields, "\n");
 
   // Reply metrics
-  absl::StrAppend(&body, "# HELP reply_total Total reply send calls\n");
-  absl::StrAppend(&body, "# TYPE reply_total counter\n");
-  absl::StrAppend(&body, "reply_total ", reply.send_stats.count, "\n");
+  APPEND_BODY("# HELP reply_total Total reply send calls\n");
+  APPEND_BODY("# TYPE reply_total counter\n");
+  APPEND_BODY("reply_total ", reply.send_stats.count, "\n");
 
-  absl::StrAppend(&body, "# HELP reply_duration_seconds Total reply send duration\n");
-  absl::StrAppend(&body, "# TYPE reply_duration_seconds counter\n");
-  absl::StrAppend(&body, "reply_duration_seconds ",
-                  base::CycleClock::ToUsec(reply.send_stats.total_duration) * 1e-6, "\n");
+  APPEND_BODY("# HELP reply_duration_seconds Total reply send duration\n");
+  APPEND_BODY("# TYPE reply_duration_seconds counter\n");
+  APPEND_BODY("reply_duration_seconds ",
+              base::CycleClock::ToUsec(reply.send_stats.total_duration) * 1e-6, "\n");
 
   util::http::StringResponse resp = util::http::MakeStringResponse(h2::status::ok);
   util::http::SetMime(util::http::kTextMime, &resp);
@@ -587,6 +582,8 @@ void RegisterBufRings(util::ProactorPool* pool) {
     LOG(WARNING) << "uring_recv_buffer_cnt requires kernel >= 6.2";
     return;
   }
+
+  CHECK_LE(bufcnt, 16384u);
 
   bufcnt = absl::bit_ceil(bufcnt);
   pool->AwaitBrief([&](unsigned, util::ProactorBase* pb) {
