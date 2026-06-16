@@ -186,7 +186,8 @@ class Connection : public util::Connection {
   // Add InvalidationMessage to dispatch queue.
   virtual void SendInvalidationMessageAsync(InvalidationMessage);
 
-  void FlushReplies();
+  // Flushes pending replies and returns the reply builder's error code (empty on success).
+  std::error_code FlushReplies();
 
   // Manually shutdown self.
   void ShutdownSelfBlocking();
@@ -462,6 +463,22 @@ class Connection : public util::Connection {
   // Loop over finished async commands and let them reply.
   // Returns true on successful execution, false on reply builder error.
   bool ReplyBatch();
+
+  // True if this connection is actively contributing to the pipeline queue and that queue is
+  // over the per-thread backpressure limit. The single source of truth for parse throttling.
+  bool IsOverPipelineLimit() const;
+
+  // Notifies other connections that pipeline memory may have been freed, by comparing the
+  // current thread pipeline byte count against `bytes_before`.
+  void NotifyIfMemReleased(size_t bytes_before);
+
+  // True if a thread migration was requested and is actionable now (no active subscriptions).
+  bool IsReadyToMigrate() const;
+
+  // Control events that warrant leaving any park (idle or backpressure), independent of new input
+  // or pipeline memory: a reply became ready, control messages are queued, the socket errored, or
+  // a migration is pending.
+  bool HasControlEvent() const;
 
   // Guard of the current subscription to a parsed commands async task blocker
   struct WaitEvent {
