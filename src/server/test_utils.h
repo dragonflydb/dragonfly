@@ -129,9 +129,9 @@ class BaseFamilyTest : public ::testing::Test {
   void CleanupSnapshots();
 
   bool IsLocked(DbIndex db_index, std::string_view key) const;
-  ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
+  ConnectionContext::LastCommandStats GetDebugInfo(const std::string& id) const;
 
-  ConnectionContext::DebugInfo GetDebugInfo() const {
+  ConnectionContext::LastCommandStats GetDebugInfo() const {
     return GetDebugInfo("IO0");
   }
 
@@ -188,7 +188,7 @@ class BaseFamilyTest : public ::testing::Test {
 
   absl::flat_hash_map<std::string, std::unique_ptr<TestConnWrapper>> connections_;
   util::fb2::Mutex mu_;
-  ConnectionContext::DebugInfo last_cmd_dbg_info_;
+  ConnectionContext::LastCommandStats last_cmd_dbg_info_;
 
   bool single_response_ = true;
   util::fb2::Fiber watchdog_fiber_;

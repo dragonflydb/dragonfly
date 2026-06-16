@@ -481,7 +481,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   }
 
   unique_lock lk(mu_);
-  last_cmd_dbg_info_ = context->last_command_debug;
+  last_cmd_dbg_info_ = context->last_cmd_stats;
 
   return conn_wrapper->ParseResponse(single_response_);
 }
@@ -705,11 +705,11 @@ const facade::Connection::InvalidationMessage& BaseFamilyTest::GetInvalidationMe
   return it->second->GetInvalidationMessage(index);
 }
 
-ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id) const {
+ConnectionContext::LastCommandStats BaseFamilyTest::GetDebugInfo(const std::string& id) const {
   auto it = connections_.find(id);
   CHECK(it != connections_.end());
 
-  return it->second->cmd_cntx()->last_command_debug;
+  return it->second->cmd_cntx()->last_cmd_stats;
 }
 
 auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestConnWrapper* {
