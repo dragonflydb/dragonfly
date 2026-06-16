@@ -166,26 +166,6 @@ bool SearchParams::ShouldReturnField(std::string_view alias) const {
   return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
 }
 
-std::string_view DefaultKnnScoreAlias(DocIndex::DataType index_type) {
-  return index_type == DocIndex::JSON ? kDefaultVectorScoreAlias : ""sv;
-}
-
-search::KnnScoreSortOption ApplyDefaultKnnScoreAlias(search::KnnScoreSortOption option,
-                                                     DocIndex::DataType index_type) {
-  if (option.score_field_alias.empty())
-    option.score_field_alias = DefaultKnnScoreAlias(index_type);
-  return option;
-}
-
-std::optional<search::KnnScoreSortOption> GetEffectiveKnnScoreSortOption(
-    const search::SearchAlgorithm& search_algo, DocIndex::DataType index_type) {
-  // Shard-local callers already know the index type, so they can apply the default alias directly.
-  auto option = search_algo.GetKnnScoreSortOption();
-  if (!option)
-    return nullopt;
-  return ApplyDefaultKnnScoreAlias(*option, index_type);
-}
-
 string_view SearchFieldTypeToString(search::SchemaField::FieldType type) {
   switch (type) {
     case search::SchemaField::TAG:
@@ -879,7 +859,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
   // Disable BasicSearch's per-shard cutoff; we re-rank by (score, key) below.
   const bool sort_by_text_score = params.scorer || params.with_scores;
-  const auto knn_sort_option = GetEffectiveKnnScoreSortOption(*search_algo, base_->type);
+  const auto knn_sort_option = search_algo->GetKnnScoreSortOption();
 
   // If we don't sort the documents, we don't need to copy more ids than are requested
   // Also for HNSW KNN search we don't cut results at the search stage.
@@ -1033,7 +1013,7 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   // aggregation pipeline. HNSW paths use LoadHnswRangeDocsForAggregator.
   absl::flat_hash_map<DocId, float> knn_score_map;
   std::string score_alias;
-  if (auto option = GetEffectiveKnnScoreSortOption(*search_algo, base_->type);
+  if (auto option = search_algo->GetKnnScoreSortOption();
       option && !option->score_field_alias.empty()) {
     score_alias = option->score_field_alias;
     knn_score_map = std::move(search_results.knn_scores);

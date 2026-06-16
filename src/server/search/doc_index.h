@@ -221,16 +221,6 @@ struct DocIndex {
   DataType type{HASH};
 };
 
-inline constexpr std::string_view kDefaultVectorScoreAlias = "__vector_score";
-
-std::string_view DefaultKnnScoreAlias(DocIndex::DataType index_type);
-
-search::KnnScoreSortOption ApplyDefaultKnnScoreAlias(search::KnnScoreSortOption option,
-                                                     DocIndex::DataType index_type);
-
-std::optional<search::KnnScoreSortOption> GetEffectiveKnnScoreSortOption(
-    const search::SearchAlgorithm& search_algo, DocIndex::DataType index_type);
-
 struct DocIndexInfo {
   DocIndex base_index;
   size_t num_docs = 0;
