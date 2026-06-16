@@ -422,7 +422,7 @@ void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
   ExecuteSquashed(rb);  // Flush leftover
 
   // Set last txid.
-  cntx_->last_command_debug.clock = cntx_->transaction->txid();
+  cntx_->last_cmd_stats.clock = cntx_->transaction->txid();
 
   // UnlockMulti is a no-op for non-atomic multi transactions,
   // still called for correctness and future changes

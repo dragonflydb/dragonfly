@@ -215,7 +215,7 @@ By default, Dragonfly allows HTTP access via its main TCP port (6379). That's ri
 
 Go to the URL `:6379/metrics` to view Prometheus-compatible metrics.
 
-The Prometheus exported metrics are compatible with the Grafana dashboard, [see here](tools/local/monitoring/grafana/provisioning/dashboards/dashboard.json).
+The Prometheus exported metrics are compatible with the Grafana dashboard, [see here](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json).
 
 
 Important! The HTTP console is meant to be accessed within a safe network. If you expose Dragonfly's TCP port externally, we advise you to disable the console with `--http_admin_console=false` or `--nohttp_admin_console`.

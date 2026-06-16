@@ -156,7 +156,7 @@ Dragonfly와 Redis의 만료 기한에 대한 구현의 차이는 [여기서 확
 
 `:6379/metrics` 에 접근하게 되면, Prometheus 호환 매트릭을 확인할 수 있습니다.
 
-Prometheus에서 내보내는 매트릭들은 Grafana 대시보드와 호환됩니다. 자세한 내용은 [여기](tools/local/monitoring/grafana/provisioning/dashboards/dashboard.json)를 참조해주세요.
+Prometheus에서 내보내는 매트릭들은 Grafana 대시보드와 호환됩니다. 자세한 내용은 [여기](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json)를 참조해주세요.
 
 중요! HTTP 노솔은 안전한 네트워크 내에서 접근하도록 설계되었습니다. Dragonfly의 TCP 포트를 외부로 노출한다면, `--http_admin_console=false` 혹은 `--nohttp_admin_console`과 같은 인수를 활용하여 콘솔을 비활성화하는 것을 조언해드립니다.
 
