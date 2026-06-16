@@ -43,13 +43,12 @@ auto vector_score = [](std::string_view score_name, const RespExpr::Vec& score_f
 auto map_score = [](std::string_view score_name, const RespExpr::Vec& fields) -> float {
   for (size_t i = 0; i + 1 < fields.size(); i += 2) {
     if (fields[i].GetString() == score_name) {
-      float score = 0.0f;
-      bool success = absl::SimpleAtof(fields[i + 1].GetView(), &score);
-      if (!success) {
+      if (float score = 0.0f; absl::SimpleAtof(fields[i + 1].GetView(), &score)) {
+        return score;
+      } else {
         ADD_FAILURE() << "Could not parse score field: " << score_name;
         return 0.0f;
       }
-      return score;
     }
   }
   ADD_FAILURE() << "Score field not found: " << score_name;

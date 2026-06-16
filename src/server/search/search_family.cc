@@ -96,25 +96,25 @@ bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
   return false;
 }
 
-void StoreIndexType(DocIndex::DataType type, atomic<int>& dest) {
-  dest.store(static_cast<int>(type), memory_order_relaxed);
+void StoreIndexType(DocIndex::DataType type, ShardId shard_id, vector<int>& dest) {
+  dest[shard_id] = static_cast<int>(type);
 }
 
-std::optional<DocIndex::DataType> LoadIndexType(const atomic<int>& index_type) {
-  int value = index_type.load(memory_order_relaxed);
-  if (value == kUnknownIndexType)
+std::optional<DocIndex::DataType> LoadIndexType(const vector<int>& index_types) {
+  auto it = rng::find_if(index_types, [](int value) { return value != kUnknownIndexType; });
+  if (it == index_types.end())
     return nullopt;
-  return static_cast<DocIndex::DataType>(value);
+  return static_cast<DocIndex::DataType>(*it);
 }
 
 std::optional<search::KnnScoreSortOption> ApplyCapturedIndexType(
-    std::optional<search::KnnScoreSortOption> option, const atomic<int>& index_type) {
+    std::optional<search::KnnScoreSortOption> option, const vector<int>& index_types) {
   // Coordinator paths only learn the index type inside shard callbacks; capture it there and
   // apply the JSON-only default alias after the existing hop, without adding a pre-hop.
   if (!option)
     return nullopt;
 
-  auto type = LoadIndexType(index_type);
+  auto type = LoadIndexType(index_types);
   if (type)
     option = ApplyDefaultKnnScoreAlias(*option, *type);
   return option;
@@ -1286,12 +1286,47 @@ void WarmupQueryParser() {
   });
 }
 
+struct HnswLoadOptions {
+  bool set_sort_score = false;
+  bool remove_sort_field = false;
+  std::optional<std::vector<FieldReference>> return_fields;
+};
+
+HnswLoadOptions PrepareHnswLoadOptions(const SearchParams& params,
+                                       std::optional<search::KnnScoreSortOption> knn_score_option,
+                                       DocIndex::DataType index_type) {
+  HnswLoadOptions options;
+  options.return_fields = params.return_fields;
+
+  if (knn_score_option)
+    knn_score_option = ApplyDefaultKnnScoreAlias(*knn_score_option, index_type);
+
+  options.set_sort_score =
+      params.sort_option && (!knn_score_option || !params.sort_option->IsSame(*knn_score_option));
+  if (!options.return_fields || !options.set_sort_score)
+    return options;
+
+  bool found_sort_return_field = false;
+  for (const auto& return_field : *options.return_fields) {
+    if (params.sort_option->field.Name() == return_field.Name()) {
+      found_sort_return_field = true;
+      break;
+    }
+  }
+
+  if (!found_sort_return_field) {
+    options.return_fields->push_back(params.sort_option->field);
+    options.remove_sort_field = true;
+  }
+  return options;
+}
+
 vector<SearchResult> SearchGlobalHnswIndex(
     const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
     const std::string_view index_name,
     const std::optional<search::KnnScoreSortOption>& knn_score_option,
     const std::vector<SearchResult>& sharded_prefilter_docs, const SearchParams& params,
-    const CommandContext& cmd_cntx, atomic<int>& index_type) {
+    const CommandContext& cmd_cntx, vector<int>& index_types) {
   std::vector<SearchResult> results(1);
 
   std::optional<std::vector<search::GlobalDocId>> prefilter_global_docs_ids = std::nullopt;
@@ -1369,50 +1404,25 @@ vector<SearchResult> SearchGlobalHnswIndex(
       return OpStatus::OK;
     }
 
-    StoreIndexType(index->base().type, index_type);
+    StoreIndexType(index->base().type, es->shard_id(), index_types);
     const auto& schema = index->base().schema;
-    auto effective_knn_score_option = knn_score_option;
-    if (effective_knn_score_option) {
-      effective_knn_score_option =
-          ApplyDefaultKnnScoreAlias(*effective_knn_score_option, index->base().type);
-    }
-
-    // The JSON/HASH distinction is only available in this existing shard hop, so keep the
-    // SORTBY/RETURN preprocessing here instead of adding a coordinator pre-hop.
-    bool set_sort_score =
-        params.sort_option &&
-        (!effective_knn_score_option || !params.sort_option->IsSame(*effective_knn_score_option));
-    bool remove_sort_field = false;
-    std::optional<std::vector<FieldReference>> return_fields = params.return_fields;
-    if (return_fields && set_sort_score) {
-      bool found_sort_return_field = false;
-      for (const auto& return_field : *return_fields) {
-        if (params.sort_option->field.Name() == return_field.Name()) {
-          found_sort_return_field = true;
-          break;
-        }
-      }
-      if (!found_sort_return_field) {
-        return_fields->push_back(params.sort_option->field);
-        remove_sort_field = true;
-      }
-    }
+    auto load_options = PrepareHnswLoadOptions(params, knn_score_option, index->base().type);
 
     // Resize shard with default `true` value
     shard_docs_serialized_indicator[es->shard_id()].resize(shard_docs[es->shard_id()].size(), true);
 
     for (size_t i = 0; i < shard_docs[es->shard_id()].size(); i++) {
       auto& shard_doc = shard_docs[es->shard_id()][i];
-      if (auto doc =
-              index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema, return_fields);
+      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema,
+                                                load_options.return_fields);
           doc) {
         auto& [key, fields] = *doc;
 
         // Handle sort_score and remove field if we don't need it
         search::SortableValue sort_score = std::monostate{};
-        if (set_sort_score) {
+        if (load_options.set_sort_score) {
           sort_score = fields[params.sort_option->field.Name()];
-          if (remove_sort_field) {
+          if (load_options.remove_sort_field) {
             fields.erase(params.sort_option->field.Name());
           }
         }
@@ -2882,7 +2892,7 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic<bool> index_not_found{false};
-  atomic<int> index_type{kUnknownIndexType};
+  vector<int> index_types(shard_set->size(), kUnknownIndexType);
   vector<SearchResult> docs(shard_set->size());
 
   const bool knn_has_prefilter = knn && knn->HasPreFilter();
@@ -2923,7 +2933,7 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   if ((!knn || knn_has_prefilter) && !hnsw_range) {
     auto search_cb = [&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index) {
-        StoreIndexType(index->base().type, index_type);
+        StoreIndexType(index->base().type, es->shard_id(), index_types);
         docs[es->shard_id()] =
             index->Search(t->GetOpArgs(es), *params, &search_algo,
                           knn_has_prefilter || hnsw_range_has_prefilter, global_stats_ptr);
@@ -2953,10 +2963,10 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
       return builder->SendError(string{index_name} + ": no such global hnsw index");
     }
     docs = SearchGlobalHnswIndex(knn, hnsw_index, index_name, search_algo.GetKnnScoreSortOption(),
-                                 docs, *params, *cmd_cntx, index_type);
+                                 docs, *params, *cmd_cntx, index_types);
   }
 
-  auto knn_sort_option = ApplyCapturedIndexType(search_algo.GetKnnScoreSortOption(), index_type);
+  auto knn_sort_option = ApplyCapturedIndexType(search_algo.GetKnnScoreSortOption(), index_types);
 
   if (hnsw_range) {
     auto hnsw_index = GetValidatedHnswRangeIndex(index_name, hnsw_range, builder);
@@ -3094,7 +3104,7 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   std::atomic<bool> index_not_found{false};
-  std::atomic<int> index_type{kUnknownIndexType};
+  std::vector<int> index_types(shards_count, kUnknownIndexType);
   std::vector<SearchResult> search_results(shards_count);
   std::vector<absl::Duration> profile_results(shards_count);
 
@@ -3105,7 +3115,7 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
       return OpStatus::OK;
     }
 
-    StoreIndexType(index->base().type, index_type);
+    StoreIndexType(index->base().type, es->shard_id(), index_types);
     const ShardId shard_id = es->shard_id();
 
     auto shard_start = absl::Now();
@@ -3140,7 +3150,7 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Result of the search command
   if (!result_is_empty) {
-    auto knn_sort_option = ApplyCapturedIndexType(search_algo.GetKnnScoreSortOption(), index_type);
+    auto knn_sort_option = ApplyCapturedIndexType(search_algo.GetKnnScoreSortOption(), index_types);
     SearchReply(*params, knn_sort_option, {}, absl::MakeSpan(search_results), rb, false);
   } else {
     rb->StartArray(1);
