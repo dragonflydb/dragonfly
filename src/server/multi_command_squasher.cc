@@ -260,10 +260,11 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       service_->InvokeCmd(args, ctx);
     }
 
-    if (!do_async)
-      move_reply(&dispatched);
-    else if (!ctx->CanReply())
-      ctx->Blocker()->Wait();  // Might have been blocked on a key
+    if (!do_async) {
+      move_reply(&dispatched);  // Async commands resolve the context directly
+    } else if (!ctx->CanReply()) {
+      ctx->Blocker()->Wait();  // Transaction didn't finish inline (likely locked key), wait for it
+    }
   }
 
   return OpStatus::OK;

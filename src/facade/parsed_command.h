@@ -144,17 +144,17 @@ class ParsedCommand : public cmn::BackedArguments {
     func(static_cast<RbType>(rb_));
   }
 
-  // Below are main commands for the async api and all assume that the command defers replies
-
-  // Whether SendReply() can be called. If not, it must be waited via Blocker()
+  // Whether SendReply() can be called. Only valid in deferred mode.
+  // If the reply is not ready yet, it is guaranteed to be tracked by non-null Blocker()
   bool CanReply() const;
 
-  // Reaching zero on blocker means CanReply() turns true
+  // Reaching zero on blocker means CanReply() will turn true.
+  // Waits for underlying awaitable (usually transaction)
   util::fb2::EmbeddedBlockingCounter* Blocker() const {
     return std::get<SuspendedCommand>(reply_).blocker;
   }
 
-  // Assumes CanReply() is true. Sends reply
+  // Requires CanReply(). Either sends stored reply or wakes up coroutine to send reply
   void SendReply();
 
   // Resolve deferred command immediately with an error reply.
@@ -165,9 +165,7 @@ class ParsedCommand : public cmn::BackedArguments {
   // Resolve deferred command with a captured payload.
   void Resolve(payload::Payload&& pl);
 
-  // Suspend the deferred command until `blocker` reaches zero.
-  // When that happens, CanReply() returns true and SendReply() will resume `coro`,
-  // which is expected to write the reply directly to the reply builder.
+  // Resolve deferred command with coroutine + blocker. See CanReply(), Blocker() and SendReply()
   void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, std::coroutine_handle<> coro) {
     reply_ = SuspendedCommand{blocker, coro};
   }
