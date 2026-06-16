@@ -851,17 +851,15 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 }
 
 void Transaction::SingleHopAsync(RunnableType cb) {
-  CHECK(!multi_);
+  CHECK(!IsAtomicMulti());
   CHECK_EQ(coordinator_state_, 0u);
 
   coordinator_state_ |= COORD_CONCLUDING;
   cb_ptr_ = cb;
 
   if (unique_shard_cnt_ == 1) {
-    CHECK_EQ(shard_data_.size(), 1u);
-
     // Arm immediately
-    shard_data_.front().is_armed.store(true, memory_order_relaxed);
+    shard_data_[SidToId(unique_shard_id_)].is_armed.store(true, memory_order_relaxed);
 
     // Keep alive till end and set barrier
     run_barrier_.Add(1);
@@ -871,7 +869,8 @@ void Transaction::SingleHopAsync(RunnableType cb) {
       bool success = ScheduleInShard(EngineShard::tlocal(), true);
       CHECK(success);  // single shard scheduling can't fail
 
-      if (shard_data_.front().local_mask & OPTIMISTIC_EXECUTION) {  // executed during schedule
+      auto mask = shard_data_[SidToId(unique_shard_id_)].local_mask;
+      if (mask & OPTIMISTIC_EXECUTION) {  // executed during schedule
         run_barrier_.Dec();
         intrusive_ptr_release(this);
       } else {

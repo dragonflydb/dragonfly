@@ -6,8 +6,6 @@
 
 #include <absl/container/inlined_vector.h>
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "base/cycle_clock.h"
 #include "base/flag_utils.h"
 #include "base/flags.h"
@@ -227,14 +225,6 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     sinfo.reply_size_total_ptr->fetch_add(sz, std::memory_order_relaxed);
   };
 
-  // Command dispatched asynchronously
-  struct AsyncDispatched {
-    ShardExecInfo::Command* cmd;
-    boost::intrusive_ptr<Transaction> trans;
-    CmdArgVec local_vec;
-  };
-  std::vector<AsyncDispatched> async_commands;
-
   for (auto& dispatched : sinfo.dispatched) {
     auto* ctx = &local_cntx;
     auto args = dispatched.Slice(&arg_vec);
@@ -254,17 +244,12 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     bool do_async = es->tiered_storage() && !IsAtomic() && opts_.pipeline_mode &&
                     dispatched.cid->SupportsAsync();
     if (do_async) {
-      // Create new transaction for the command (high overhead, but worth for disk hits)
-      boost::intrusive_ptr<Transaction> stx = new Transaction{dispatched.cid};
-      dispatched.cmd_cntx->SetupTx(dispatched.cid, stx.get());
-
-      // Create entry to keep transaction and arguemnt backing, enable new contex + async mode
-      async_commands.push_back({&dispatched, stx, std::move(arg_vec)});
       ctx = dispatched.cmd_cntx;
       ctx->SetDeferredReply();
-    } else {
-      ctx->tx()->MultiSwitchCmd(dispatched.cid);
     }
+
+    ctx->SetupTx(dispatched.cid, local_cntx.tx());
+    ctx->tx()->MultiSwitchCmd(dispatched.cid);
 
     auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
@@ -277,13 +262,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
     if (!do_async)
       move_reply(&dispatched);
-  }
-
-  // Collect replies from async commands
-  for (auto& de : async_commands) {
-    auto* ctx = de.cmd->cmd_cntx;
-    if (!ctx->CanReply())
-      ctx->Blocker()->Wait();
+    else if (!ctx->CanReply())
+      ctx->Blocker()->Wait();  // Might have been blocked on a key
   }
 
   return OpStatus::OK;
