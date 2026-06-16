@@ -435,12 +435,17 @@ class Connection : public util::Connection {
 
   bool IsReplySizeOverLimit() const;
 
-  // Returns true if one or more commands were parsed from the read buffer,
-  // and false if no complete commands could be parsed (for example, when
-  // parsing is pending more input).
-  bool ParseMCBatch(base::IoBuf& buf);
+  // Parse a batch of commands from the read buffer, enqueueing each complete command.
+  // Returns:
+  //   OK        - parsing stopped at a clean command boundary; more may follow (keep going).
+  //   NEED_MORE - the buffer ends mid-command (or parsing was throttled by backpressure);
+  //               any complete commands seen so far are still enqueued.
+  //   ERROR     - a protocol error was hit; the caller must report it and close.
+  // Note: a non-OK result does NOT mean "no commands were parsed" - complete commands ahead
+  // of the boundary/error are enqueued regardless.
+  ParserStatus ParseMCBatch(base::IoBuf& buf);
 
-  bool ParseRedisBatch(base::IoBuf& buf);
+  ParserStatus ParseRedisBatch(base::IoBuf& buf);
 
   // Call the appropriate ParseMCBatch or ParseRedisBatch based on the protocol.
   // Only CPU-bound work; must not perform I/O or fiber suspension.

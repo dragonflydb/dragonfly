@@ -1496,18 +1496,25 @@ auto Connection::ParseLoop() -> ParserStatus {
   auto parse_func =
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
 
-  bool commands_parsed = false;
+  ParserStatus parse_status = NEED_MORE;
   do {
-    commands_parsed = (this->*parse_func)(io_buf_);
+    parse_status = (this->*parse_func)(io_buf_);
 
+    // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
+    // earlier replies in order before we report it.
     if (!ExecuteBatch())
       return ERROR;
 
     if (!ReplyBatch())
       return ERROR;
-  } while (commands_parsed && io_buf_.InputLen() > 0);
 
-  return commands_parsed ? OK : NEED_MORE;
+    // Surface a protocol error to the caller (HandleRequests/IoLoopV2) so it can send the
+    // protocol error reply (using parser_error_) and close the connection.
+    if (parse_status == ERROR)
+      return ERROR;
+  } while (parse_status == OK && io_buf_.InputLen() > 0);
+
+  return parse_status;  // OK or NEED_MORE
 }
 
 void Connection::OnBreakCb(int32_t mask) {
@@ -2492,7 +2499,7 @@ bool Connection::IsReplySizeOverLimit() const {
   return over_limit;
 }
 
-bool Connection::ParseRedisBatch(base::IoBuf& buf) {
+Connection::ParserStatus Connection::ParseRedisBatch(base::IoBuf& buf) {
   QueueBackpressure& qbp = GetQueueBackpressure();
 
   // Only throttle parsing if this connection is actively contributing to the queue.
@@ -2500,15 +2507,17 @@ bool Connection::ParseRedisBatch(base::IoBuf& buf) {
   // administrative commands (CONFIG SET, etc.) can execute and relieve backpressure.
   if ((parsed_cmd_q_len_ > 0) &&
       qbp.IsPipelineBufferOverLimit(GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_)) {
-    // Signal ParseLoop to stop. IoLoopV2 will drain before resuming.
+    // Signal ParseLoop to stop (NEED_MORE, not an error). IoLoopV2 will drain before resuming.
     DVLOG(2) << "Pipeline buffer over limit. Avoid parsing Redis batch.";
     GetLocalConnStats().pipeline_throttle_count++;
-    return false;
+    return NEED_MORE;
   }
-  return ParseRedis(buf, max_busy_read_cycles_cached, true) == ParserStatus::OK;
+  // Forward ParseRedis's status verbatim (OK / NEED_MORE / ERROR) so a protocol error
+  // propagates to ParseLoop instead of being flattened into "no commands parsed".
+  return ParseRedis(buf, max_busy_read_cycles_cached, true);
 }
 
-bool Connection::ParseMCBatch(base::IoBuf& io_buf) {
+Connection::ParserStatus Connection::ParseMCBatch(base::IoBuf& io_buf) {
   CHECK(io_buf.InputLen() > 0);
 
   do {
@@ -2526,7 +2535,7 @@ bool Connection::ParseMCBatch(base::IoBuf& io_buf) {
     DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
              << unsigned(parsed_cmd_->mc_command()->type);
     if (result == MemcacheParser::INPUT_PENDING)
-      return false;
+      return NEED_MORE;
 
     if (result == MemcacheParser::OK && tl_traffic_logger.log_file &&
         tl_traffic_logger.listener_type == listener_type_) {
@@ -2564,7 +2573,8 @@ bool Connection::ParseMCBatch(base::IoBuf& io_buf) {
       }
     }
   } while (parsed_cmd_q_len_ < 128 && io_buf.InputLen() > 0);
-  return true;
+  // Memcache parse errors are turned into deferred replies above, so we never return ERROR here.
+  return OK;
 }
 
 bool Connection::ExecuteBatch() {

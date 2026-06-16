@@ -771,6 +771,37 @@ async def test_v2_conditional_flush_no_stall(df_server: DflyInstance):
     await writer.wait_closed()
 
 
+@dfly_args({"enable_resp_io_loop_v2": "true"})
+async def test_v2_protocol_error_closes_connection(df_server: DflyInstance):
+    """A RESP protocol error on the event-driven (V2) loop must reply and close.
+
+    Regression test: ParseRedisBatch used to collapse ParseRedis's 3-valued status into a
+    bool, so a protocol error became indistinguishable from "need more input". ParseLoop
+    then never returned ERROR and the malformed command was silently treated as a partial
+    one - the client got no error and the connection hung instead of being closed.
+    """
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+
+    # A valid command first confirms the connection is healthy on the V2 path.
+    writer.write(b"PING\r\n")
+    await writer.drain()
+    assert await asyncio.wait_for(reader.readline(), timeout=2.0) == b"+PONG\r\n"
+
+    # Malformed multibulk header (length is not a number) -> protocol error.
+    writer.write(b"*x\r\n")
+    await writer.drain()
+
+    err = await asyncio.wait_for(reader.readline(), timeout=2.0)
+    assert err.startswith(b"-ERR Protocol error"), f"expected protocol error, got {err!r}"
+
+    # The server must close the connection after a protocol error (read() returns b"" at EOF).
+    eof = await asyncio.wait_for(reader.read(), timeout=2.0)
+    assert eof == b"", f"expected connection close after protocol error, got {eof!r}"
+
+    writer.close()
+    await writer.wait_closed()
+
+
 async def test_big_command(df_server, size=8 * 1024):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
 
