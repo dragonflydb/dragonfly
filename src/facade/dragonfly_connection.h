@@ -521,6 +521,14 @@ class Connection : public util::Connection {
     }
   }
 
+  // Advance parsed_to_execute_ past the command it currently points at (now dispatched), keeping
+  // dispatch_waiting_count_ in sync. Returns the new parsed_to_execute_.
+  ParsedCommand* AdvanceToExecute() {
+    --dispatch_waiting_count_;
+    parsed_to_execute_ = parsed_to_execute_->next;
+    return parsed_to_execute_;
+  }
+
   // Dispatch Queue - Queue for the Control Path.
   // Handles asynchronous administrative tasks, events, and high-priority control
   // messages (e.g., PubSub, Monitor, Migration requests, Checkpoints) processed
@@ -568,6 +576,12 @@ class Connection : public util::Connection {
 
   // Total number of commands in parsed command queue
   size_t parsed_cmd_q_len_ = 0;
+
+  // Number of parsed commands not yet dispatched: the run [parsed_to_execute_, ..., parsed_tail_].
+  // Maintained incrementally (incremented on enqueue, decremented as parsed_to_execute_ advances)
+  // so the V2 squasher can pass an exact count starting at parsed_to_execute_ even when earlier
+  // commands are still in flight. Always <= parsed_cmd_q_len_.
+  size_t dispatch_waiting_count_ = 0;
 
   // Total bytes used by commands in parsed command queue
   size_t parsed_cmd_q_bytes_ = 0;
