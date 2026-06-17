@@ -3119,9 +3119,6 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       continue;
     }
 
-    // Handle Parsed Commands Queue (Data Path)
-    auto& conn_stats = GetLocalConnStats();
-
     // Only parse data if we are under the memory limit (backpressure).
     // Exception: If the queue is empty, we always parse to allow admin commands
     // (like CONFIG SET) to run so they can fix the memory limits if needed.
@@ -3132,6 +3129,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // Do NOT parse - that would grow the queue further. Instead, drain already-queued
       // commands (execute + reply) to free memory, then park until pressure is relieved.
       parse_status = NEED_MORE;
+
+      // Handle Parsed Commands Queue (Data Path)
+      auto& conn_stats = GetLocalConnStats();
 
       size_t mem_before = conn_stats.pipeline_queue_bytes;
 
