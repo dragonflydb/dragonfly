@@ -186,7 +186,8 @@ class Connection : public util::Connection {
   // Add InvalidationMessage to dispatch queue.
   virtual void SendInvalidationMessageAsync(InvalidationMessage);
 
-  void FlushReplies();
+  // Flushes pending replies and returns the reply builder's error code (empty on success).
+  std::error_code FlushReplies();
 
   // Manually shutdown self.
   void ShutdownSelfBlocking();
@@ -435,12 +436,17 @@ class Connection : public util::Connection {
 
   bool IsReplySizeOverLimit() const;
 
-  // Returns true if one or more commands were parsed from the read buffer,
-  // and false if no complete commands could be parsed (for example, when
-  // parsing is pending more input).
-  bool ParseMCBatch(base::IoBuf& buf);
+  // Parse a batch of commands from the read buffer, enqueueing each complete command.
+  // Returns:
+  //   OK        - parsing stopped at a clean command boundary; more may follow (keep going).
+  //   NEED_MORE - the buffer ends mid-command (or parsing was throttled by backpressure);
+  //               any complete commands seen so far are still enqueued.
+  //   ERROR     - a protocol error was hit; the caller must report it and close.
+  // Note: a non-OK result does NOT mean "no commands were parsed" - complete commands ahead
+  // of the boundary/error are enqueued regardless.
+  ParserStatus ParseMCBatch(base::IoBuf& buf);
 
-  bool ParseRedisBatch(base::IoBuf& buf);
+  ParserStatus ParseRedisBatch(base::IoBuf& buf);
 
   // Call the appropriate ParseMCBatch or ParseRedisBatch based on the protocol.
   // Only CPU-bound work; must not perform I/O or fiber suspension.
@@ -457,6 +463,35 @@ class Connection : public util::Connection {
   // Loop over finished async commands and let them reply.
   // Returns true on successful execution, false on reply builder error.
   bool ReplyBatch();
+
+  // True if this connection is actively contributing to the pipeline queue and that queue is
+  // over the per-thread backpressure limit. The single source of truth for parse throttling.
+  bool IsOverPipelineLimit() const;
+
+  // Notifies other connections that pipeline memory may have been freed, by comparing the
+  // current thread pipeline byte count against `bytes_before`.
+  void NotifyIfMemReleased(size_t bytes_before);
+
+  // True if a thread migration was requested and is actionable now (no active subscriptions).
+  bool IsReadyToMigrate() const;
+
+  // Control events that warrant leaving any park (idle or backpressure), independent of new input
+  // or pipeline memory: a reply became ready, control messages are queued, the socket errored, or
+  // a migration is pending.
+  bool HasControlEvent() const;
+
+  // Wake condition for the idle park: HasControlEvent() plus incoming data and a head command
+  // ready to run.
+  bool ShouldWakeIdle() const;
+
+  // IoLoopV2 control path: drains dispatch_q_ up to `quota`. Returns true if the caller should
+  // restart the loop (so freshly arrived socket data is read before the data path runs), false to
+  // fall through to the data path.
+  bool DrainControlPath(uint32_t quota);
+
+  // IoLoopV2 data path when input is available and we are under the pipeline limit: parse, execute
+  // and reply. Returns the parser status.
+  ParserStatus RunParsePath();
 
   // Guard of the current subscription to a parsed commands async task blocker
   struct WaitEvent {
