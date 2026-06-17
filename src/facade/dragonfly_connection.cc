@@ -3161,6 +3161,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       io_event_.await([this] { return ShouldWakeIdle(); });
     }
 
+    // If the park woke us on a recv notification (pending_input_ set) but the data is not yet in
+    // io_buf_, restart the loop so ReadPendingInput() pulls it from the socket ASAP instead of
+    // running the data path on an empty buffer. Guarded by an empty io_buf_ so we never skip
+    // processing already-buffered input (and never busy-spin when the buffer is full).
+    if (pending_input_ && io_buf_.InputLen() == 0) {
+      continue;
+    }
+
     phase_ = PROCESS;
     bool reached_capacity = io_buf_.AppendLen() == 0;
 
