@@ -5045,3 +5045,99 @@ async def test_bgsave_during_stable_sync(df_factory: DflyInstanceFactory):
         "DbSlice change callback fired from shard_stable_sync_read during BGSAVE "
         "(SerializerBase::OnChangeBlocking invariant violated).\n" + "\n".join(bad_lines)
     )
+
+
+@pytest.mark.skip(reason="Manual benchmark; run by removing skip locally")
+@dfly_args({"proactor_threads": 4, "serialization_max_chunk_size": 4096, "compression_mode": 0})
+async def test_tagged_chunk_replication_compare(df_factory):
+    results = {}
+
+    for tagged_chunks in (False, True):
+        master = df_factory.create(serialization_tagged_chunks=tagged_chunks)
+        replica = df_factory.create(proactor_threads=2)
+        df_factory.start_all([master, replica])
+
+        c_master = master.client()
+        c_replica = replica.client()
+
+        await c_master.execute_command(
+            "DEBUG",
+            "POPULATE",
+            "20",
+            "big-zset",
+            "100",
+            "RAND",
+            "TYPE",
+            "ZSET",
+            "ELEMENTS",
+            "200000",
+        )
+        done = False
+        latencies = []
+        ops = 0
+
+        async def workload(worker_id):
+            nonlocal ops
+            client = master.client()
+            try:
+                while not done:
+                    key = f"bench:{worker_id}:{ops}"
+                    start = time.perf_counter()
+                    await client.set(key, "v")
+                    latencies.append((time.perf_counter() - start) * 1000)
+                    ops += 1
+            finally:
+                await client.aclose()
+
+        workers = [asyncio.create_task(workload(i)) for i in range(8)]
+
+        start = time.perf_counter()
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_for_replicas_state(c_replica)
+
+        repl_elapsed = time.perf_counter() - start
+        done = True
+
+        await asyncio.gather(*workers)
+        await check_all_replicas_finished([c_replica], c_master)
+
+        latencies.sort()
+        p50 = latencies[int(len(latencies) * 0.50)] if latencies else 0
+        p99 = latencies[int(len(latencies) * 0.99)] if latencies else 0
+        max_latency = max(latencies) if latencies else 0
+
+        results[tagged_chunks] = {
+            "repl_elapsed": repl_elapsed,
+            "ops": ops,
+            "throughput": ops / repl_elapsed if repl_elapsed else 0,
+            "p50": p50,
+            "p99": p99,
+            "max": max_latency,
+            "preemptions": (await c_master.info()).get("big_value_preemptions", 0),
+        }
+
+        await df_factory.stop_all()
+    logging.info(
+        "\n"
+        "============================================================\n"
+        "REPLICATION BENCHMARK: serialization_tagged_chunks\n"
+        "  Foreground write latency during full sync\n"
+        "============================================================\n"
+        f"  Without tagged_chunks:\n"
+        f"    repl_time={results[False]['repl_elapsed']:.2f}s, "
+        f"ops={results[False]['ops']}, "
+        f"throughput={results[False]['throughput']:.0f} ops/s\n"
+        f"    p50={results[False]['p50']:.2f}ms, "
+        f"p99={results[False]['p99']:.2f}ms, "
+        f"max={results[False]['max']:.2f}ms, "
+        f"big value preemptions={results[False]['preemptions']}\n"
+        f"  With tagged_chunks:\n"
+        f"    repl_time={results[True]['repl_elapsed']:.2f}s, "
+        f"ops={results[True]['ops']}, "
+        f"throughput={results[True]['throughput']:.0f} ops/s\n"
+        f"    p50={results[True]['p50']:.2f}ms, "
+        f"p99={results[True]['p99']:.2f}ms, "
+        f"max={results[True]['max']:.2f}ms, "
+        f"big value preemptions={results[True]['preemptions']}\n"
+        "============================================================"
+    )
