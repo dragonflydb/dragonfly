@@ -619,7 +619,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   if (auto* ts = op_args.shard->tiered_storage(); ts) {
-    StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, op_sp.backpressure);
+    StashPrimeValue(op_args.db_cntx.db_index, key, &it->first, &pv, ts, op_sp.backpressure);
   }
 
   return CbVariant<uint32_t>{SetReply(op_sp, created)};

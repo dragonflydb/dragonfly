@@ -541,6 +541,29 @@ TEST_F(TieredStorageTest, Expiry) {
   EXPECT_EQ(resp, val);
 }
 
+TEST_F(TieredStorageTest, DontStashShortTTL) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+  UpdateFromFlags();
+
+  const string value = BuildString(3000);
+
+  Run({"SET", "k1", value, "EX", "60"});
+  Run({"SET", "k2", value, "EX", "2"});
+  Run({"SET", "k3", value});
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 2; });
+  EXPECT_EQ(GetMetrics().tiered_stats.total_stashes, 2);
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 2);
+
+  AdvanceTime(1000);
+  Run({"EXPIRE", "k2", "100"});
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 3; });
+
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 3);
+}
+
 TEST_F(PureDiskTSTest, SetExistingExpire) {
   const int kNum = 20;
   for (size_t i = 0; i < kNum; i++) {

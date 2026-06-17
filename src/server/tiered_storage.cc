@@ -64,6 +64,9 @@ ABSL_FLAG(bool, tiered_experimental_hash_support, false, "Experimental hash data
 
 ABSL_FLAG(bool, tiered_experimental_list_support, false, "Experimental list node offloading");
 
+ABSL_FLAG(uint32, tiered_min_ttl_to_offload_ms, 5000,
+          "Min remaining TTL in ms for a value to be eligible for offloading");
+
 namespace dfly {
 
 using namespace std;
@@ -631,6 +634,7 @@ void TieredStorage::UpdateFromFlags() {
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
       .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_support),
       .experimental_list_offload = absl::GetFlag(FLAGS_tiered_experimental_list_support),
+      .min_ttl_to_offload_ms = absl::GetFlag(FLAGS_tiered_min_ttl_to_offload_ms),
   };
 
   LOG_IF(WARNING, config_.upload_threshold > config_.offload_threshold)
@@ -642,7 +646,8 @@ std::vector<std::string> TieredStorage::GetMutableFlagNames() {
   return base::GetFlagNames(FLAGS_tiered_min_value_size, FLAGS_tiered_experimental_cooling,
                             FLAGS_tiered_max_pending_stash_bytes, FLAGS_tiered_offload_threshold,
                             FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
-                            FLAGS_tiered_experimental_list_support);
+                            FLAGS_tiered_experimental_list_support,
+                            FLAGS_tiered_min_ttl_to_offload_ms);
 }
 
 bool TieredStorage::ShouldOffload() const {
@@ -677,7 +682,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   string tmp;
   auto cb = [this, dbid, &tmp](PrimeIterator it) mutable {
     stats_.offloading_steps++;
-    auto blobs = ShouldStash(it->second);
+    auto blobs = ShouldStash(it->second, StashContext{.key_expire_ms = it->first.GetExpireTime()});
     if (blobs) {
       if (it->second.WasTouched()) {
         it->second.SetTouched(false);
@@ -755,11 +760,17 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
   return gained;
 }
 
-auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref) const
+auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
+                                const StashContext& stash_ctx) const
     -> std::optional<StashDescriptor> {
   // Check value state
   if (fragment_ref.IsOffloaded() || fragment_ref.HasStashPending())
     return nullopt;
+
+  if (stash_ctx.key_expire_ms > 0 && config_.min_ttl_to_offload_ms > 0) {
+    if (stash_ctx.key_expire_ms <= GetCurrentTimeMs() + config_.min_ttl_to_offload_ms)
+      return nullopt;
+  }
 
   // For now, hash offloading is conditional
   if (fragment_ref.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
@@ -838,9 +849,11 @@ TieredCoolRecord* TieredStorage::PopCool() {
   return &res;
 }
 
-void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
-                     BackPressureFuture* backpressure) {
-  if (auto blobs = ts->ShouldStash(*pv); blobs) {
+void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeKey* pk, PrimeValue* pv,
+                     TieredStorage* ts, BackPressureFuture* backpressure) {
+  if (auto blobs =
+          ts->ShouldStash(*pv, TieredStorage::StashContext{.key_expire_ms = pk->GetExpireTime()});
+      blobs) {
     pv->SetStashPending(true);
     ts->StashPrimeValue(dbid, key, *blobs, backpressure);
   }
@@ -848,7 +861,7 @@ void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredS
 
 bool StashListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts,
                    BackPressureFuture* backpressure) {
-  if (auto blobs = ts->ShouldStash(*node); blobs) {
+  if (auto blobs = ts->ShouldStash(*node, {}); blobs) {
     // Increment before stashing; decremented on failure in `ClearStashPending`
     ql->AdjustOffloadNodeCount(1);
     node->io_pending = 1;

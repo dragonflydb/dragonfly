@@ -130,7 +130,7 @@ class SetCmd {
               std::string_view value);
 
   // Called at the end of AddNew of SetExisting
-  void PostEdit(const SetParams& params, std::string_view key, std::string_view value,
+  void PostEdit(const SetParams& params, std::string_view key, std::string_view value, PrimeKey* pk,
                 PrimeValue* pv);
 
   void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);
@@ -951,7 +951,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 
   DCHECK_EQ(has_expire, key.HasExpire());
 
-  PostEdit(params, it_upd->it.key(), value, &prime_value);
+  PostEdit(params, it_upd->it.key(), value, &key, &prime_value);
   return OpStatus::OK;
 }
 
@@ -974,18 +974,18 @@ void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::s
     it->first.SetSticky(true);
   }
 
-  PostEdit(params, key, value, &it->second);
+  PostEdit(params, key, value, &it->first, &it->second);
 }
 
 void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string_view value,
-                      PrimeValue* pv) {
+                      PrimeKey* pk, PrimeValue* pv) {
   EngineShard* shard = op_args_.shard;
 
   // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
   // If we are beyond the offloading threshold, StashPrimeValue may populate a backpressure future
   // via the provided out-parameter.
   if (auto* ts = shard->tiered_storage(); ts) {
-    StashPrimeValue(op_args_.db_cntx.db_index, key, pv, ts, params.backpressure);
+    StashPrimeValue(op_args_.db_cntx.db_index, key, pk, pv, ts, params.backpressure);
   }
 
   if (explicit_journal_ && op_args_.shard->journal()) {

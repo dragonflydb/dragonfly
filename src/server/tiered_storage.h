@@ -41,6 +41,10 @@ struct TieredStorageBase {
     size_t Serialize(io::MutableBytes buffer) const;
   };
 
+  struct StashContext {
+    uint64_t key_expire_ms = 0;  // 0 means no expiry
+  };
+
   template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
 };
 
@@ -75,7 +79,8 @@ class TieredStorage : public TieredStorageBase {
   }
 
   // Returns StashDescriptor if a value should be stashed.
-  std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment_ref) const;
+  std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment_ref,
+                                             const StashContext& stash_ctx) const;
 
   // Stash value identified by (dbid, key), returns optional future for backpressure is not null.
   // if `provide_bp` is set and conditions are met.
@@ -157,6 +162,7 @@ class TieredStorage : public TieredStorageBase {
     float upload_threshold;
     bool experimental_hash_offload;
     bool experimental_list_offload;
+    uint32_t min_ttl_to_offload_ms;
   } config_;
 
   mutable struct {
@@ -206,8 +212,8 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
 
 // Stash prime value if it meets criteria. If the value was stashed and `backpressure` is not
 // nullptr, assign/set the backpressure future to `*backpressure`.
-void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
-                     BackPressureFuture* backpressure);
+void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeKey* pk, PrimeValue* pv,
+                     TieredStorage* ts, BackPressureFuture* backpressure);
 
 // Stash list node if it meets criteria.
 // Returns true if stash was initiated, false otherwise.
@@ -249,7 +255,8 @@ class TieredStorage : public TieredStorageBase {
     return {};
   }
 
-  std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment) const {
+  std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment,
+                                             const StashContext& stash_ctx) const {
     return {};
   }
 
@@ -338,8 +345,8 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
   return {};
 }
 
-inline void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
-                            BackPressureFuture* backpressure) {
+inline void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeKey* pk, PrimeValue* pv,
+                            TieredStorage* ts, BackPressureFuture* backpressure) {
 }
 
 inline bool StashListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts,
