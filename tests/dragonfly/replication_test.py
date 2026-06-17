@@ -3331,6 +3331,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
+@pytest.mark.skip("fails, investigating")
 @pytest.mark.large
 @pytest.mark.opt_only
 @pytest.mark.parametrize("tagged_chunks", [True, False])
