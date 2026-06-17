@@ -26,7 +26,7 @@ CuckooFilter::CuckooFilter(uint64_t capacity, std::pmr::memory_resource* mr,
   if (num_buckets_ == 0)
     num_buckets_ = 1;
   DCHECK(IsPowerOfTwo(num_buckets_));
-  DCHECK(AddNewSubFilter()) << "Failed to allocate initial SubFilter";
+  AddNewSubFilter();
 }
 
 bool CuckooFilter::Insert(uint64_t hash) {
