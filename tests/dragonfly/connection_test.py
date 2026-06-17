@@ -1106,15 +1106,21 @@ async def test_squashed_pipeline_multi(async_client: aioredis.Redis):
 
 
 """
-Regression: subscribe/unsubscribe commands emit one reply per channel (multiple top-level
-replies), which the CapturingReplyBuilder backing deferred replies cannot represent. When such
-a command lands in a squashed pipeline it must be routed to the regular dispatch path, not
-captured — otherwise the server crashes (reply_capture: current_.index() == 0).
+Regression: some commands cannot be represented by the CapturingReplyBuilder that backs deferred
+replies, so when they land in a squashed pipeline they must be routed to the regular dispatch
+path rather than captured. This test pipelines such commands among squashable SETs (a large
+pipeline forces SquashPipeline) and confirms the whole batch is processed in order without the
+server crashing. The two command classes exercised:
+
+  - subscribe/unsubscribe emit one reply per channel (multiple top-level replies), which a single
+    captured payload cannot hold -> previously crashed in reply_capture (current_.index() == 0);
+  - admin commands may produce no top-level reply at all (e.g. REPLCONF ACK), leaving an empty
+    captured payload -> previously crashed resolving it (parsed_command.cc DCHECK pl.index() > 0).
 """
 
 
 @dfly_args({"proactor_threads": "1", "pipeline_squash": 1})
-async def test_squashed_pipeline_pubsub(df_server: DflyInstance):
+async def test_squashed_pipeline_control_commands(df_server: DflyInstance):
     reader, writer = await asyncio.open_connection("localhost", df_server.port)
 
     def enc(*args):
@@ -1124,12 +1130,12 @@ async def test_squashed_pipeline_pubsub(df_server: DflyInstance):
             out += f"${len(b)}\r\n".encode() + b + b"\r\n"
         return out
 
-    # A large pipeline forces SquashPipeline; the multi-channel (s)unsubscribe commands sit
-    # among squashable SETs. A trailing PING marker confirms the whole batch was processed in
-    # order without crashing.
+    # The control commands sit between two blocks of squashable SETs; a trailing PING marker
+    # confirms the whole batch was processed in order without crashing.
     req = enc("SET", "k", "v") * 40
-    req += enc("SUNSUBSCRIBE", "chA", "chB")
-    req += enc("UNSUBSCRIBE", "chC", "chD")
+    req += enc("SUNSUBSCRIBE", "chA", "chB")  # multi-reply (one per channel)
+    req += enc("UNSUBSCRIBE", "chC", "chD")  # multi-reply (one per channel)
+    req += enc("REPLCONF", "ACK", "1")  # no reply at all
     req += enc("SET", "k", "v") * 40
     req += enc("PING", "squash_survived")
     writer.write(req)

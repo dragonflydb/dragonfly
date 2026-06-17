@@ -1763,13 +1763,16 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     //  - blocking commands: prior replies must be flushed before the fiber blocks;
     //  - QUIT: closes the reply builder, dropping any deferred replies not yet sent;
     //  - subscribe/unsubscribe: emit one reply per channel (multiple top-level replies), which the
-    //    CapturingReplyBuilder backing deferred replies cannot represent.
+    //    CapturingReplyBuilder backing deferred replies cannot represent;
+    //  - admin commands (e.g. REPLCONF, DFLY): control commands that may produce no top-level
+    //    reply (e.g. REPLCONF ACK), which a deferred (captured) reply cannot represent.
     if (cid == nullptr)
       break;
 
     const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() || cid->IsExecGroup();
     const bool is_eval = cid->IsEvalGroup();
-    if (is_multi || is_eval || cid->IsBlocking() || cid->IsQuit() || cid->IsSubscribeFamily())
+    if (is_multi || is_eval || cid->IsBlocking() || (cid->opt_mask() & CO::ADMIN) ||
+        cid->IsQuit() || cid->IsSubscribeFamily())
       break;
 
     cmd_refs.push_back(CmdRef{cid, tail_args, ReplyMode::FULL, cmd_cntx});
