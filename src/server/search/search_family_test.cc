@@ -40,19 +40,46 @@ auto vector_score = [](std::string_view score_name, const RespExpr::Vec& score_f
   return score;
 };
 
-// Helper to convert float array to binary format
-auto Vec3ToBytes = [](float x, float y, float z) -> string {
+auto map_score = [](std::string_view score_name, const RespExpr::Vec& fields) -> float {
+  for (size_t i = 0; i + 1 < fields.size(); i += 2) {
+    if (fields[i].GetString() == score_name) {
+      if (float score = 0.0f; absl::SimpleAtof(fields[i + 1].GetView(), &score)) {
+        return score;
+      } else {
+        ADD_FAILURE() << "Could not parse score field: " << score_name;
+        return 0.0f;
+      }
+    }
+  }
+  ADD_FAILURE() << "Score field not found: " << score_name;
+  return -1.0f;
+};
+
+auto map_string = [](std::string_view field_name, const RespExpr::Vec& fields) -> std::string {
+  for (size_t i = 0; i + 1 < fields.size(); i += 2) {
+    if (fields[i].GetString() == field_name)
+      return std::string{fields[i + 1].GetView()};
+  }
+  ADD_FAILURE() << "Field not found: " << field_name;
+  return {};
+};
+
+// Helper to convert float arrays to binary format.
+auto FloatVec = []<typename... Args>(Args... args) -> string {
   string result;
-  result.append(reinterpret_cast<const char*>(&x), sizeof(float));
-  result.append(reinterpret_cast<const char*>(&y), sizeof(float));
-  result.append(reinterpret_cast<const char*>(&z), sizeof(float));
+  result.reserve(sizeof(float) * sizeof...(args));
+  auto append = [&result](float value) {
+    result.append(reinterpret_cast<const char*>(&value), sizeof(value));
+  };
+  (append(static_cast<float>(args)), ...);
   return result;
 };
+auto Vec3ToBytes = FloatVec;
 
 // Helpers shared by FT.HYBRID tests.
 // FT.HYBRID response layout: {total_results: N, results: [...], warnings: [], execution_time: "X"}
 // In RESP2 the map is flattened to an array of 8 elements.
-auto FloatVec1 = [](float x) -> string { return string(reinterpret_cast<const char*>(&x), 4); };
+auto FloatVec1 = FloatVec;
 
 auto HybridTotal = [](const RespExpr& resp) -> int64_t {
   if (resp.type != RespExpr::ARRAY || resp.GetVec().size() < 2)
@@ -1159,6 +1186,149 @@ TEST_F(SearchFamilyTest, VectorReturnWithKnn) {
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "* => [KNN 1 @v $q AS dist]", "RETURN", "2", "v", "dist",
                    "PARAMS", "2", "q", q, "DIALECT", "2"}),
               MatchEntry("d:a", "v", va, "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnImplicitVectorScore) {
+  Run({"FT.CREATE",
+       "idx",
+       "ON",
+       "JSON",
+       "PREFIX",
+       "1",
+       "d:",
+       "SCHEMA",
+       "$.content",
+       "AS",
+       "content",
+       "TEXT",
+       "$.v",
+       "AS",
+       "v",
+       "VECTOR",
+       "FLAT",
+       "6",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       "3",
+       "DISTANCE_METRIC",
+       "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"content":"a","v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"content":"b","v":[2,0,0]})"});
+  Run({"JSON.SET", "d:c", "$", R"({"content":"c","v":[4,0,0]})"});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 3 @v $q]", "RETURN", "2", "content", "__v_score",
+                   "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, IsArray(IntArg(3), "d:a", IsMap("content", "a", "__v_score", "0"), "d:b",
+                            IsMap("content", "b", "__v_score", "1"), "d:c",
+                            IsMap("content", "c", "__v_score", "3")));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnImplicitVectorScoreSortBy) {
+  Run({"FT.CREATE", "idx",     "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",     "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT32", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"v":[2,0,0]})"});
+  Run({"JSON.SET", "d:c", "$", R"({"v":[4,0,0]})"});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 2 @v $q]", "SORTBY", "__v_score", "RETURN", "1",
+                   "__v_score", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp,
+              IsArray(IntArg(2), "d:a", IsMap("__v_score", "0"), "d:b", IsMap("__v_score", "1")));
+}
+
+TEST_F(SearchFamilyTest, JsonHnswKnnImplicitVectorScore) {
+  Run({"FT.CREATE",
+       "idx",
+       "ON",
+       "JSON",
+       "PREFIX",
+       "1",
+       "d:",
+       "SCHEMA",
+       "$.content",
+       "AS",
+       "content",
+       "TEXT",
+       "$.v",
+       "AS",
+       "v",
+       "VECTOR",
+       "HNSW",
+       "8",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       "3",
+       "DISTANCE_METRIC",
+       "L2",
+       "M",
+       "16"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"content":"a","v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"content":"b","v":[2,0,0]})"});
+  Run({"JSON.SET", "d:c", "$", R"({"content":"c","v":[4,0,0]})"});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 2 @v $q]", "RETURN", "2", "content", "__v_score",
+                   "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, IsArray(IntArg(2), "d:a", IsMap("content", "a", "__v_score", "0"), "d:b",
+                            IsMap("content", "b", "__v_score", "1")));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnExplicitAliasDoesNotReturnImplicitVectorScore) {
+  Run({"FT.CREATE", "idx",     "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",     "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT32", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"v":[1,0,0]})"});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS myscore]", "RETURN", "2", "myscore",
+                   "__v_score", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "myscore", "0"));
+}
+
+TEST_F(SearchFamilyTest, HashKnnReturnsImplicitVectorScore) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "FLAT", "6",
+       "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  const string va = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  Run({"HSET", "d:a", "v", va});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q]", "RETURN", "1", "__v_score", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "__v_score", "0"));
+
+  resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q]", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "__v_score", "0", "v", va));
+}
+
+TEST_F(SearchFamilyTest, HashHnswKnnReturnsImplicitVectorScore) {
+  Run({"FT.CREATE", "idx",  "ON", "HASH", "PREFIX",  "1",   "d:", "SCHEMA",          "v",
+       "VECTOR",    "HNSW", "8",  "TYPE", "FLOAT32", "DIM", "3",  "DISTANCE_METRIC", "L2",
+       "M",         "16"});
+  WaitForIndexReady("idx");
+
+  Run({"HSET", "d:a", "v", Vec3ToBytes(1.0f, 0.0f, 0.0f)});
+  Run({"HSET", "d:b", "v", Vec3ToBytes(2.0f, 0.0f, 0.0f)});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 2 @v $q]", "RETURN", "1", "__v_score", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp,
+              IsArray(IntArg(2), "d:a", IsMap("__v_score", "0"), "d:b", IsMap("__v_score", "1")));
 }
 
 TEST_F(SearchFamilyTest, TestStopWords) {
@@ -5807,6 +5977,218 @@ TEST_F(SearchFamilyTest, FtAggregateFilterAfterLimit) {
   // clang-format on
   // After SORTBY + LIMIT 0 2 we have the 2 smallest values (10, 20); FILTER keeps only 20
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("value", "20")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateSortBySparseFieldsReturnsRows) {
+  Run({"FT.CREATE", "idx_sparse", "ON", "HASH", "PREFIX", "1", "sp:", "SCHEMA", "name", "TEXT",
+       "SORTABLE", "price", "NUMERIC", "SORTABLE"});
+  Run({"HSET", "sp:1", "name", "foo"});
+  Run({"HSET", "sp:2", "name", "bar"});
+
+  auto resp = Run(
+      {"FT.AGGREGATE", "idx_sparse", "*", "LOAD", "2", "@name", "@price", "SORTBY", "1", "@price"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec()[0].GetInt().value_or(-1), 2);
+
+  std::set<std::string> names;
+  for (size_t i = 1; i < resp.GetVec().size(); ++i) {
+    names.insert(map_string("name", resp.GetVec()[i].GetVec()));
+  }
+  EXPECT_THAT(names, UnorderedElementsAre("bar", "foo"));
+
+  Run({"FT.CREATE", "idx_tiebreak", "ON", "HASH", "PREFIX", "1", "tb:", "SCHEMA", "a", "NUMERIC",
+       "SORTABLE", "b", "NUMERIC", "SORTABLE"});
+  Run({"HSET", "tb:1", "a", "2"});
+  Run({"HSET", "tb:2", "a", "1"});
+
+  resp = Run({"FT.AGGREGATE", "idx_tiebreak", "*", "LOAD", "2", "@a", "@b", "SORTBY", "4", "@a",
+              "ASC", "@b", "ASC"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec()[0].GetInt().value_or(-1), 2);
+  ASSERT_EQ(resp.GetVec().size(), 3u);
+  EXPECT_FLOAT_EQ(map_score("a", resp.GetVec()[1].GetVec()), 1.0f);
+  EXPECT_FLOAT_EQ(map_score("a", resp.GetVec()[2].GetVec()), 2.0f);
+}
+
+TEST_F(SearchFamilyTest, AggregateHashFlatKnnExplicitAlias) {
+  Run({"FT.CREATE", "tri",     "ON",   "HASH",      "PREFIX",          "1",     "tri:",
+       "SCHEMA",    "content", "TEXT", "embedding", "VECTOR",          "FLAT",  "6",
+       "TYPE",      "FLOAT32", "DIM",  "4",         "DISTANCE_METRIC", "COSINE"});
+  WaitForIndexReady("tri");
+
+  Run({"HSET", "tri:a", "content", "doc a", "embedding", FloatVec(1.0f, 0.0f, 0.0f, 0.0f)});
+  Run({"HSET", "tri:b", "content", "doc b", "embedding", FloatVec(0.0f, 1.0f, 0.0f, 0.0f)});
+  Run({"HSET", "tri:c", "content", "doc c", "embedding", FloatVec(0.7f, 0.7f, 0.0f, 0.0f)});
+
+  auto aggregate_knn_args = [](string query_vec) {
+    return vector<string>{"FT.AGGREGATE",
+                          "tri",
+                          "*=>[KNN 3 @embedding $v AS vector_distance]",
+                          "LOAD",
+                          "2",
+                          "content",
+                          "vector_distance",
+                          "APPLY",
+                          "(2 - @vector_distance)/2",
+                          "AS",
+                          "sim",
+                          "SORTBY",
+                          "2",
+                          "@vector_distance",
+                          "ASC",
+                          "PARAMS",
+                          "2",
+                          "v",
+                          std::move(query_vec),
+                          "DIALECT",
+                          "2"};
+  };
+
+  auto resp = Run(aggregate_knn_args(FloatVec(1.0f, 0.0f, 0.0f, 0.0f)));
+
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  const auto& results = resp.GetVec();
+  ASSERT_EQ(results[0].GetInt().value_or(-1), 3);
+  ASSERT_EQ(results.size(), 4u);
+
+  EXPECT_EQ(map_string("content", results[1].GetVec()), "doc a");
+  EXPECT_NEAR(map_score("vector_distance", results[1].GetVec()), 0.0f, 1e-6);
+  EXPECT_NEAR(map_score("sim", results[1].GetVec()), 1.0f, 1e-6);
+
+  EXPECT_EQ(map_string("content", results[2].GetVec()), "doc c");
+  EXPECT_NEAR(map_score("vector_distance", results[2].GetVec()), 0.29289323f, 1e-6);
+  EXPECT_NEAR(map_score("sim", results[2].GetVec()), 0.8535534f, 1e-6);
+
+  EXPECT_EQ(map_string("content", results[3].GetVec()), "doc b");
+  EXPECT_NEAR(map_score("vector_distance", results[3].GetVec()), 1.0f, 1e-6);
+  EXPECT_NEAR(map_score("sim", results[3].GetVec()), 0.5f, 1e-6);
+}
+
+TEST_F(SearchFamilyTest, AggregateHashFlatKnnImplicitVectorScore) {
+  Run({"FT.CREATE", "idx",     "ON",   "HASH", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "content", "TEXT", "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT32", "DIM",  "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"HSET", "d:a", "content", "a", "v", Vec3ToBytes(1.0f, 0.0f, 0.0f)});
+  Run({"HSET", "d:b", "content", "b", "v", Vec3ToBytes(2.0f, 0.0f, 0.0f)});
+  Run({"HSET", "d:c", "content", "c", "v", Vec3ToBytes(4.0f, 0.0f, 0.0f)});
+
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @v $q]", "LOAD", "2", "@content", "@__v_score",
+                   "PARAMS", "2", "q", Vec3ToBytes(1.0f, 0.0f, 0.0f), "SORTBY", "2", "@__v_score",
+                   "ASC", "DIALECT", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  const auto& results = resp.GetVec();
+  ASSERT_GE(results.size(), 3u);
+  EXPECT_FLOAT_EQ(map_score("__v_score", results[1].GetVec()), 0.0f);
+  EXPECT_FLOAT_EQ(map_score("__v_score", results[2].GetVec()), 1.0f);
+}
+
+TEST_F(SearchFamilyTest, AggregateHashHnswKnnImplicitVectorScore) {
+  Run({"FT.CREATE", "idx",     "ON",   "HASH", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "content", "TEXT", "v",    "VECTOR",          "HNSW", "8",
+       "TYPE",      "FLOAT32", "DIM",  "3",    "DISTANCE_METRIC", "L2",   "M",
+       "16"});
+  WaitForIndexReady("idx");
+
+  Run({"HSET", "d:a", "content", "a", "v", Vec3ToBytes(1.0f, 0.0f, 0.0f)});
+  Run({"HSET", "d:b", "content", "b", "v", Vec3ToBytes(2.0f, 0.0f, 0.0f)});
+  Run({"HSET", "d:c", "content", "c", "v", Vec3ToBytes(4.0f, 0.0f, 0.0f)});
+
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @v $q]", "LOAD", "2", "@content", "@__v_score",
+                   "PARAMS", "2", "q", Vec3ToBytes(1.0f, 0.0f, 0.0f), "SORTBY", "2", "@__v_score",
+                   "ASC", "DIALECT", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  const auto& results = resp.GetVec();
+  ASSERT_EQ(results[0].GetInt().value_or(-1), 2);
+  ASSERT_GE(results.size(), 3u);
+  EXPECT_FLOAT_EQ(map_score("__v_score", results[1].GetVec()), 0.0f);
+  EXPECT_FLOAT_EQ(map_score("__v_score", results[2].GetVec()), 1.0f);
+}
+
+TEST_F(SearchFamilyTest, AggregateJsonFlatKnnImplicitVectorScore) {
+  Run({"FT.CREATE",
+       "idx",
+       "ON",
+       "JSON",
+       "PREFIX",
+       "1",
+       "d:",
+       "SCHEMA",
+       "$.content",
+       "AS",
+       "content",
+       "TEXT",
+       "$.v",
+       "AS",
+       "v",
+       "VECTOR",
+       "FLAT",
+       "6",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       "3",
+       "DISTANCE_METRIC",
+       "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"content":"a","v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"content":"b","v":[2,0,0]})"});
+  Run({"JSON.SET", "d:c", "$", R"({"content":"c","v":[4,0,0]})"});
+
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @v $q]", "LOAD", "2", "@content", "@__v_score",
+                   "PARAMS", "2", "q", Vec3ToBytes(1.0f, 0.0f, 0.0f), "SORTBY", "2", "@__v_score",
+                   "ASC", "DIALECT", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  const auto& results = resp.GetVec();
+  ASSERT_GE(results.size(), 3u);
+  EXPECT_FLOAT_EQ(map_score("__v_score", results[1].GetVec()), 0.0f);
+  EXPECT_FLOAT_EQ(map_score("__v_score", results[2].GetVec()), 1.0f);
+}
+
+TEST_F(SearchFamilyTest, AggregateJsonHnswKnnImplicitVectorScore) {
+  Run({"FT.CREATE",
+       "idx",
+       "ON",
+       "JSON",
+       "PREFIX",
+       "1",
+       "d:",
+       "SCHEMA",
+       "$.content",
+       "AS",
+       "content",
+       "TEXT",
+       "$.v",
+       "AS",
+       "v",
+       "VECTOR",
+       "HNSW",
+       "8",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       "3",
+       "DISTANCE_METRIC",
+       "L2",
+       "M",
+       "16"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"content":"a","v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"content":"b","v":[2,0,0]})"});
+  Run({"JSON.SET", "d:c", "$", R"({"content":"c","v":[4,0,0]})"});
+
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @v $q]", "LOAD", "2", "@content", "@__v_score",
+                   "PARAMS", "2", "q", Vec3ToBytes(1.0f, 0.0f, 0.0f), "SORTBY", "2", "@__v_score",
+                   "ASC", "DIALECT", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  const auto& results = resp.GetVec();
+  ASSERT_EQ(results[0].GetInt().value_or(-1), 2);
+  ASSERT_GE(results.size(), 3u);
+  EXPECT_FLOAT_EQ(map_score("__v_score", results[1].GetVec()), 0.0f);
+  EXPECT_FLOAT_EQ(map_score("__v_score", results[2].GetVec()), 1.0f);
 }
 
 TEST_F(SearchFamilyTest, FtAggregateFilterSemanticRouting) {

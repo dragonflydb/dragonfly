@@ -5,6 +5,7 @@
 #include "core/search/ast_expr.h"
 
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
 
 #include <algorithm>
 #include <cmath>
@@ -67,7 +68,8 @@ AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec
       limit{limit},
       field{field.substr(1)},
       vec{std::move(vec)},
-      score_alias{score_alias},
+      score_alias{score_alias.empty() ? absl::StrCat("__", field.substr(1), "_score")
+                                      : std::string{score_alias}},
       ef_runtime{ef_runtime} {
 }
 

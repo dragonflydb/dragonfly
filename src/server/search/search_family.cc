@@ -65,7 +65,6 @@ using namespace facade;
 namespace {
 // we use it to find which flags are belong to search
 const std::string kCurrentFile = std::filesystem::path(__FILE__).filename().string();
-
 using nonstd::make_unexpected;
 
 template <typename T> using ParseResult = io::Result<T, ErrorReply>;
@@ -1179,7 +1178,8 @@ void SearchReply(const SearchParams& params,
     docs.resize(min(docs.size(), knn_sort_option->limit));
 
     ignore_sort = !params.sort_option || params.sort_option->IsSame(*knn_sort_option);
-    if (params.ShouldReturnField(knn_sort_option->score_field_alias))
+    if (!knn_sort_option->score_field_alias.empty() &&
+        params.ShouldReturnField(knn_sort_option->score_field_alias))
       knn_score_ret_field = knn_sort_option->score_field_alias;
   } else if (!inject_score_alias.empty() && params.ShouldReturnField(inject_score_alias)) {
     // FLAT VECTOR_RANGE without distance-based SORTBY: expose the alias without
@@ -1260,6 +1260,34 @@ void WarmupQueryParser() {
   });
 }
 
+struct HnswLoadOptions {
+  bool set_sort_score = false;
+  bool remove_sort_field = false;
+  std::optional<std::vector<FieldReference>> return_fields;
+};
+
+HnswLoadOptions PrepareHnswLoadOptions(const SearchParams& params,
+                                       std::optional<search::KnnScoreSortOption> knn_score_option) {
+  HnswLoadOptions options;
+  options.return_fields = params.return_fields;
+
+  options.set_sort_score =
+      params.sort_option && (!knn_score_option || !params.sort_option->IsSame(*knn_score_option));
+  if (!options.return_fields || !options.set_sort_score)
+    return options;
+
+  auto sort_field = params.sort_option->field.Name();
+  auto sort_return_field = rng::find_if(
+      *options.return_fields,
+      [sort_field](const FieldReference& field) { return field.Name() == sort_field; });
+
+  if (sort_return_field == options.return_fields->end()) {
+    options.return_fields->push_back(params.sort_option->field);
+    options.remove_sort_field = true;
+  }
+  return options;
+}
+
 vector<SearchResult> SearchGlobalHnswIndex(
     const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
     const std::string_view index_name,
@@ -1331,34 +1359,6 @@ vector<SearchResult> SearchGlobalHnswIndex(
     return results;
   }
 
-  // Do we need to set sort score
-  bool set_sort_score = params.sort_option && !params.sort_option->IsSame(*knn_score_option);
-
-  // Do we need to remove sort field from response
-  bool remove_sort_field = false;
-
-  std::optional<std::vector<FieldReference>> return_fields = params.return_fields;
-
-  // If we don't return all fields
-  if (return_fields) {
-    // We have sort_option and it's different than knn score
-    if (set_sort_score) {
-      bool found_sort_return_field = false;
-      for (const auto& return_field : *return_fields) {
-        if (params.sort_option->field.Name() == return_field.Name()) {
-          found_sort_return_field = true;
-          break;
-        }
-      }
-      // Sort return field is not found so we need to add it for request and
-      // remove this field in response
-      if (!found_sort_return_field) {
-        (*return_fields).push_back(params.sort_option->field);
-        remove_sort_field = true;
-      }
-    }
-  }
-
   // Indicator if we serialized document on shard
   std::vector<std::vector<bool>> shard_docs_serialized_indicator(shard_size);
 
@@ -1372,22 +1372,23 @@ vector<SearchResult> SearchGlobalHnswIndex(
     }
 
     const auto& schema = index->base().schema;
+    auto load_options = PrepareHnswLoadOptions(params, knn_score_option);
 
     // Resize shard with default `true` value
     shard_docs_serialized_indicator[es->shard_id()].resize(shard_docs[es->shard_id()].size(), true);
 
     for (size_t i = 0; i < shard_docs[es->shard_id()].size(); i++) {
       auto& shard_doc = shard_docs[es->shard_id()][i];
-      if (auto doc =
-              index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema, return_fields);
+      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema,
+                                                load_options.return_fields);
           doc) {
         auto& [key, fields] = *doc;
 
         // Handle sort_score and remove field if we don't need it
         search::SortableValue sort_score = std::monostate{};
-        if (set_sort_score) {
+        if (load_options.set_sort_score) {
           sort_score = fields[params.sort_option->field.Name()];
-          if (remove_sort_field) {
+          if (load_options.remove_sort_field) {
             fields.erase(params.sort_option->field.Name());
           }
         }
@@ -1447,14 +1448,11 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
   std::optional<std::vector<FieldReference>> return_fields = params.return_fields;
 
   if (set_sort_score && return_fields) {
-    bool found_sort_field = false;
-    for (const auto& rf : *return_fields) {
-      if (rf.Name() == params.sort_option->field.Name()) {
-        found_sort_field = true;
-        break;
-      }
-    }
-    if (!found_sort_field) {
+    auto sort_field = params.sort_option->field.Name();
+    auto sort_return_field = rng::find_if(
+        *return_fields,
+        [sort_field](const FieldReference& field) { return field.Name() == sort_field; });
+    if (sort_return_field == return_fields->end()) {
       return_fields->push_back(params.sort_option->field);
       remove_sort_field = true;
     }
@@ -2896,12 +2894,13 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   // HNSW vector range has no prefilter, so skip per-shard search entirely.
   if ((!knn || knn_has_prefilter) && !hnsw_range) {
     auto search_cb = [&](Transaction* t, EngineShard* es) {
-      if (auto* index = es->search_indices()->GetIndex(index_name); index)
+      if (auto* index = es->search_indices()->GetIndex(index_name); index) {
         docs[es->shard_id()] =
             index->Search(t->GetOpArgs(es), *params, &search_algo,
                           knn_has_prefilter || hnsw_range_has_prefilter, global_stats_ptr);
-      else
+      } else {
         index_not_found.store(true, memory_order_relaxed);
+      }
       return OpStatus::OK;
     };
     if (needs_global_stats)
@@ -3110,8 +3109,8 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Result of the search command
   if (!result_is_empty) {
-    SearchReply(*params, search_algo.GetKnnScoreSortOption(), {}, absl::MakeSpan(search_results),
-                rb, false);
+    auto knn_sort_option = search_algo.GetKnnScoreSortOption();
+    SearchReply(*params, knn_sort_option, {}, absl::MakeSpan(search_results), rb, false);
   } else {
     rb->StartArray(1);
     rb->SendLong(0);
