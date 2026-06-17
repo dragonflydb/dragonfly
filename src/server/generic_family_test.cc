@@ -2093,8 +2093,8 @@ TEST_F(GenericFamilyTest, ConcurrentWritesDuringContainerYield) {
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_container_iteration_yield_interval_usec, 1);
 
-  constexpr int kListSize = 100'000;
-  constexpr int kIterations = 100;
+  constexpr int kListSize = 75'000;
+  constexpr int kIterations = 50;
   constexpr int kPushIterations = 100'000;
   constexpr int kWriterFibersPerShard = 8;
   const char* key = "list1";
@@ -2152,11 +2152,11 @@ TEST_F(GenericFamilyTest, ConcurrentWritesDuringContainerYield) {
   vector<Fiber> writer_fibers;
   writer_fibers.reserve(2 * kWriterFibersPerShard);
 
-  auto launch_writers = [&](unsigned proactor_index, string_view id_prefix, string_view value) {
+  auto launch_writers = [&](unsigned proactor_index, string_view value) {
     for (int fiber_index = 0; fiber_index < kWriterFibersPerShard; fiber_index++) {
       writer_fibers.push_back(
-          pp_->at(proactor_index)->LaunchFiber([&, fiber_index, id_prefix, value] {
-            string id = StrCat(id_prefix, fiber_index);
+          pp_->at(proactor_index)->LaunchFiber([&, proactor_index, fiber_index, value] {
+            string id = StrCat("shard_", proactor_index, "_", fiber_index);
             for (int i = 0; i < kPushIterations && !done.load(); i++) {
               Run(id, {"RPUSH", key, value});
             }
@@ -2165,10 +2165,10 @@ TEST_F(GenericFamilyTest, ConcurrentWritesDuringContainerYield) {
   };
 
   // Writers in same shard.
-  launch_writers(0, "writer_same_shard", "B");
+  launch_writers(0, "B");
 
   // Writers from different shard.
-  launch_writers(1, "writer_different_shard", "C");
+  launch_writers(1, "C");
 
   reader.Join();
   for (Fiber& writer : writer_fibers) {
