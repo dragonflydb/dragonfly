@@ -64,28 +64,22 @@ auto map_string = [](std::string_view field_name, const RespExpr::Vec& fields) -
   return {};
 };
 
-// Helper to convert float array to binary format
-auto Vec3ToBytes = [](float x, float y, float z) -> string {
+// Helper to convert float arrays to binary format.
+auto FloatVec = []<typename... Args>(Args... args) -> string {
   string result;
-  result.append(reinterpret_cast<const char*>(&x), sizeof(float));
-  result.append(reinterpret_cast<const char*>(&y), sizeof(float));
-  result.append(reinterpret_cast<const char*>(&z), sizeof(float));
+  result.reserve(sizeof(float) * sizeof...(args));
+  auto append = [&result](float value) {
+    result.append(reinterpret_cast<const char*>(&value), sizeof(value));
+  };
+  (append(static_cast<float>(args)), ...);
   return result;
 };
-
-auto Vec4ToBytes = [](float x, float y, float z, float w) -> string {
-  string result;
-  result.append(reinterpret_cast<const char*>(&x), sizeof(float));
-  result.append(reinterpret_cast<const char*>(&y), sizeof(float));
-  result.append(reinterpret_cast<const char*>(&z), sizeof(float));
-  result.append(reinterpret_cast<const char*>(&w), sizeof(float));
-  return result;
-};
+auto Vec3ToBytes = FloatVec;
 
 // Helpers shared by FT.HYBRID tests.
 // FT.HYBRID response layout: {total_results: N, results: [...], warnings: [], execution_time: "X"}
 // In RESP2 the map is flattened to an array of 8 elements.
-auto FloatVec1 = [](float x) -> string { return string(reinterpret_cast<const char*>(&x), 4); };
+auto FloatVec1 = FloatVec;
 
 auto HybridTotal = [](const RespExpr& resp) -> int64_t {
   if (resp.type != RespExpr::ARRAY || resp.GetVec().size() < 2)
@@ -6022,31 +6016,35 @@ TEST_F(SearchFamilyTest, AggregateHashFlatKnnExplicitAlias) {
        "TYPE",      "FLOAT32", "DIM",  "4",         "DISTANCE_METRIC", "COSINE"});
   WaitForIndexReady("tri");
 
-  Run({"HSET", "tri:a", "content", "doc a", "embedding", Vec4ToBytes(1.0f, 0.0f, 0.0f, 0.0f)});
-  Run({"HSET", "tri:b", "content", "doc b", "embedding", Vec4ToBytes(0.0f, 1.0f, 0.0f, 0.0f)});
-  Run({"HSET", "tri:c", "content", "doc c", "embedding", Vec4ToBytes(0.7f, 0.7f, 0.0f, 0.0f)});
+  Run({"HSET", "tri:a", "content", "doc a", "embedding", FloatVec(1.0f, 0.0f, 0.0f, 0.0f)});
+  Run({"HSET", "tri:b", "content", "doc b", "embedding", FloatVec(0.0f, 1.0f, 0.0f, 0.0f)});
+  Run({"HSET", "tri:c", "content", "doc c", "embedding", FloatVec(0.7f, 0.7f, 0.0f, 0.0f)});
 
-  auto resp = Run({"FT.AGGREGATE",
-                   "tri",
-                   "*=>[KNN 3 @embedding $v AS vector_distance]",
-                   "LOAD",
-                   "2",
-                   "content",
-                   "vector_distance",
-                   "APPLY",
-                   "(2 - @vector_distance)/2",
-                   "AS",
-                   "sim",
-                   "SORTBY",
-                   "2",
-                   "@vector_distance",
-                   "ASC",
-                   "PARAMS",
-                   "2",
-                   "v",
-                   Vec4ToBytes(1.0f, 0.0f, 0.0f, 0.0f),
-                   "DIALECT",
-                   "2"});
+  auto aggregate_knn_args = [](string query_vec) {
+    return vector<string>{"FT.AGGREGATE",
+                          "tri",
+                          "*=>[KNN 3 @embedding $v AS vector_distance]",
+                          "LOAD",
+                          "2",
+                          "content",
+                          "vector_distance",
+                          "APPLY",
+                          "(2 - @vector_distance)/2",
+                          "AS",
+                          "sim",
+                          "SORTBY",
+                          "2",
+                          "@vector_distance",
+                          "ASC",
+                          "PARAMS",
+                          "2",
+                          "v",
+                          std::move(query_vec),
+                          "DIALECT",
+                          "2"};
+  };
+
+  auto resp = Run(aggregate_knn_args(FloatVec(1.0f, 0.0f, 0.0f, 0.0f)));
 
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   const auto& results = resp.GetVec();

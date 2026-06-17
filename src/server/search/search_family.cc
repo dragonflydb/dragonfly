@@ -1276,15 +1276,12 @@ HnswLoadOptions PrepareHnswLoadOptions(const SearchParams& params,
   if (!options.return_fields || !options.set_sort_score)
     return options;
 
-  bool found_sort_return_field = false;
-  for (const auto& return_field : *options.return_fields) {
-    if (params.sort_option->field.Name() == return_field.Name()) {
-      found_sort_return_field = true;
-      break;
-    }
-  }
+  auto sort_field = params.sort_option->field.Name();
+  auto sort_return_field = rng::find_if(
+      *options.return_fields,
+      [sort_field](const FieldReference& field) { return field.Name() == sort_field; });
 
-  if (!found_sort_return_field) {
+  if (sort_return_field == options.return_fields->end()) {
     options.return_fields->push_back(params.sort_option->field);
     options.remove_sort_field = true;
   }
@@ -1451,14 +1448,11 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
   std::optional<std::vector<FieldReference>> return_fields = params.return_fields;
 
   if (set_sort_score && return_fields) {
-    bool found_sort_field = false;
-    for (const auto& rf : *return_fields) {
-      if (rf.Name() == params.sort_option->field.Name()) {
-        found_sort_field = true;
-        break;
-      }
-    }
-    if (!found_sort_field) {
+    auto sort_field = params.sort_option->field.Name();
+    auto sort_return_field = rng::find_if(
+        *return_fields,
+        [sort_field](const FieldReference& field) { return field.Name() == sort_field; });
+    if (sort_return_field == return_fields->end()) {
       return_fields->push_back(params.sort_option->field);
       remove_sort_field = true;
     }
