@@ -858,9 +858,6 @@ void Transaction::SingleHopAsync(RunnableType cb) {
   cb_ptr_ = cb;
 
   if (unique_shard_cnt_ == 1) {
-    // Arm immediately
-    shard_data_[SidToId(unique_shard_id_)].is_armed.store(true, memory_order_relaxed);
-
     // Keep alive till end and set barrier
     run_barrier_.Add(1);
     use_count_.fetch_add(1, memory_order_relaxed);
@@ -869,11 +866,12 @@ void Transaction::SingleHopAsync(RunnableType cb) {
       bool success = ScheduleInShard(EngineShard::tlocal(), true);
       CHECK(success);  // single shard scheduling can't fail
 
-      auto mask = shard_data_[SidToId(unique_shard_id_)].local_mask;
-      if (mask & OPTIMISTIC_EXECUTION) {  // executed during schedule
+      auto& sd = shard_data_[SidToId(unique_shard_id_)];
+      if (sd.local_mask & OPTIMISTIC_EXECUTION) {  // executed during schedule
         run_barrier_.Dec();
         intrusive_ptr_release(this);
       } else {
+        sd.is_armed.store(true, memory_order_relaxed);
         // do we really need to submit a shard callback?
         // an armed transaction will be driven by the next previous txq entry
 
