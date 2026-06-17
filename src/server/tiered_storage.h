@@ -212,7 +212,7 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
 
 // Stash prime value if it meets criteria. If the value was stashed and `backpressure` is not
 // nullptr, assign/set the backpressure future to `*backpressure`.
-void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeKey* pk, PrimeValue* pv,
+void StashPrimeValue(DbIndex dbid, std::string_view key, const PrimeKey& pk, PrimeValue* pv,
                      TieredStorage* ts, BackPressureFuture* backpressure);
 
 // Stash list node if it meets criteria.
@@ -345,7 +345,7 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
   return {};
 }
 
-inline void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeKey* pk, PrimeValue* pv,
+inline void StashPrimeValue(DbIndex dbid, std::string_view key, const PrimeKey& pk, PrimeValue* pv,
                             TieredStorage* ts, BackPressureFuture* backpressure) {
 }
 

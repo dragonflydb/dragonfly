@@ -852,10 +852,10 @@ TieredCoolRecord* TieredStorage::PopCool() {
   return &res;
 }
 
-void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeKey* pk, PrimeValue* pv,
+void StashPrimeValue(DbIndex dbid, std::string_view key, const PrimeKey& pk, PrimeValue* pv,
                      TieredStorage* ts, BackPressureFuture* backpressure) {
   if (auto blobs =
-          ts->ShouldStash(*pv, TieredStorage::StashContext{.key_expire_ms = pk->GetExpireTime()});
+          ts->ShouldStash(*pv, TieredStorage::StashContext{.key_expire_ms = pk.GetExpireTime()});
       blobs) {
     pv->SetStashPending(true);
     ts->StashPrimeValue(dbid, key, *blobs, backpressure);

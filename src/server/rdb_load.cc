@@ -2961,7 +2961,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     // bogus negative memory delta and crash in AccountObjectMemory.
     auto it = updater.it;
     updater.post_updater.Run();
-    StashPrimeValue(db_cntx.db_index, item->key, &it->first, &it->second, ts, nullptr);
+    StashPrimeValue(db_cntx.db_index, item->key, it->first, &it->second, ts, nullptr);
 
     // Block, if tiered storage is active, but can't keep up
     while (db_slice->shard_owner()->ShouldThrottleForTiering())

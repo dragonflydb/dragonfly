@@ -985,7 +985,7 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   // If we are beyond the offloading threshold, StashPrimeValue may populate a backpressure future
   // via the provided out-parameter.
   if (auto* ts = shard->tiered_storage(); ts) {
-    StashPrimeValue(op_args_.db_cntx.db_index, key, pk, pv, ts, params.backpressure);
+    StashPrimeValue(op_args_.db_cntx.db_index, key, *pk, pv, ts, params.backpressure);
   }
 
   if (explicit_journal_ && op_args_.shard->journal()) {
