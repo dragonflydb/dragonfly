@@ -1170,8 +1170,12 @@ OpResult<uint32_t> OpDelV2(const OpArgs& op_args, const ShardArgs& keys, bool as
       journal_args.push_back(key);
   }
 
-  if (journal_enabled && !journal_args.empty())
-    RecordJournal(op_args, "DEL", journal_args);
+  if (journal_enabled) {
+    if (!journal_args.empty())
+      RecordJournal(op_args, "DEL", journal_args);
+    else if (deleted_cnt > 0)  // operations that are not in lsn log
+      journal::ClearBuffer();
+  }
 
   return deleted_cnt;
 }
