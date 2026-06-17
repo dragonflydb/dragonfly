@@ -183,6 +183,9 @@ struct ConnectionMemoryTracker {
   explicit ConnectionMemoryTracker(Connection* conn) : conn_(conn) {
   }
 
+  ConnectionMemoryTracker(const ConnectionMemoryTracker&) = delete;
+  ConnectionMemoryTracker& operator=(const ConnectionMemoryTracker&) = delete;
+
   ~ConnectionMemoryTracker() {
     conn_->RefreshConnectionMemoryUsage();
   }
@@ -1763,6 +1766,7 @@ bool Connection::ShouldEndAsyncFiber(const MessageHandle& msg) {
 void Connection::SquashPipeline() {
   DCHECK_EQ(GetPendingMessageCount(), parsed_cmd_q_len_);
   DCHECK_EQ(reply_builder_->GetProtocol(), Protocol::REDIS);  // Only Redis is supported.
+  ConnectionMemoryTracker memory_tracker(this);
   unsigned pipeline_count = std::min<uint32_t>(parsed_cmd_q_len_, pipeline_squash_limit_cached);
   auto& conn_stats = tl_facade_stats->conn_stats;
 
@@ -1935,6 +1939,7 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
 
 void Connection::ProcessPipelineCommandV1() {
   DCHECK(parsed_head_ && parsed_to_execute_) << DebugInfo();
+  ConnectionMemoryTracker memory_tracker(this);
   auto* cmd = parsed_to_execute_;
   AdvanceParsedHead(AdvanceToExecute());
 
@@ -2453,6 +2458,9 @@ void Connection::RefreshConnectionMemoryUsage() {
   if (!conn_stats_registered_)
     return;
 
+  DCHECK(socket());
+  DCHECK_EQ(socket()->proactor(), ProactorBase::me());
+
   size_t current = account_connection_memory_ ? GetMemoryUsage() : 0;
   ConnectionStats& conn_stats = GetLocalConnStats();
 
@@ -2460,8 +2468,13 @@ void Connection::RefreshConnectionMemoryUsage() {
     conn_stats.connection_memory_bytes += current - accounted_connection_memory_bytes_;
   } else {
     const size_t delta = accounted_connection_memory_bytes_ - current;
-    DCHECK_GE(conn_stats.connection_memory_bytes, delta);
-    conn_stats.connection_memory_bytes -= delta;
+    if (ABSL_PREDICT_FALSE(delta > conn_stats.connection_memory_bytes)) {
+      LOG(DFATAL) << "Connection memory accounting underflow: total="
+                  << conn_stats.connection_memory_bytes << " delta=" << delta;
+      conn_stats.connection_memory_bytes = 0;
+    } else {
+      conn_stats.connection_memory_bytes -= delta;
+    }
   }
 
   accounted_connection_memory_bytes_ = current;
@@ -2479,6 +2492,8 @@ void Connection::SetConnectionMemoryAccounting(bool enabled) {
 void Connection::IncreaseConnStats() {
   DCHECK(tl_facade_stats);
   DCHECK(!conn_stats_registered_);
+  DCHECK(socket());
+  DCHECK_EQ(socket()->proactor(), ProactorBase::me());
   auto& conn_stats = tl_facade_stats->conn_stats;
   if (IsMainOrMemcache())
     ++conn_stats.num_conns_main;
@@ -2506,8 +2521,14 @@ void Connection::DecreaseConnStats() {
   DCHECK(conn_stats_registered_);
   auto& conn_stats = tl_facade_stats->conn_stats;
   RefreshConnectionMemoryUsage();
-  DCHECK_GE(conn_stats.connection_memory_bytes, accounted_connection_memory_bytes_);
-  conn_stats.connection_memory_bytes -= accounted_connection_memory_bytes_;
+  if (ABSL_PREDICT_FALSE(accounted_connection_memory_bytes_ > conn_stats.connection_memory_bytes)) {
+    LOG(DFATAL) << "Connection memory accounting underflow on unregister: total="
+                << conn_stats.connection_memory_bytes
+                << " delta=" << accounted_connection_memory_bytes_;
+    conn_stats.connection_memory_bytes = 0;
+  } else {
+    conn_stats.connection_memory_bytes -= accounted_connection_memory_bytes_;
+  }
   accounted_connection_memory_bytes_ = 0;
   conn_stats_registered_ = false;
 
@@ -2644,6 +2665,7 @@ bool Connection::ExecuteBatch() {
     return true;  // no errors.
   }
 
+  ConnectionMemoryTracker memory_tracker(this);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
   auto& conn_stats = tl_facade_stats->conn_stats;
 
@@ -2669,7 +2691,6 @@ bool Connection::ExecuteBatch() {
   // dispatch; it advances as commands are dispatched, and parsed_head_ advances with it whenever a
   // command retires (executes synchronously or replies immediately).
   while (parsed_to_execute_ != nullptr) {
-    ConnectionMemoryTracker memory_tracker(this);
     if (reply_builder_->GetError())
       return false;
 
@@ -2743,6 +2764,7 @@ bool Connection::ReplyBatch() {
   if (!HasInFlightCommands())
     return true;
 
+  ConnectionMemoryTracker memory_tracker(this);
   reply_builder_->SetBatchMode(true);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
   while (parsed_head_->CanReply()) {
@@ -2820,7 +2842,6 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
-  ConnectionMemoryTracker memory_tracker(this);
   auto& conn_stats = tl_facade_stats->conn_stats;
   conn_stats.pipelined_cmd_cnt++;
   uint64_t latency_usec = CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
