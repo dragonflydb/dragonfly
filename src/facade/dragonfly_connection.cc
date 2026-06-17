@@ -1783,6 +1783,8 @@ void Connection::SquashPipeline() {
     ReleasePipelinedCommand(current);
     AdvanceParsedHead(next);
   }
+  DCHECK_GE(dispatch_waiting_count_, squashed);
+  dispatch_waiting_count_ -= squashed;  // the squashed run was waiting; it is now fully handled
   parsed_to_execute_ = parsed_head_;
 
   local_stats_.cmds += squashed;
@@ -1841,6 +1843,7 @@ void Connection::ClearPipelinedMessages() {
   DCHECK_EQ(parsed_cmd_q_bytes_, 0u);
   parsed_tail_ = nullptr;
   parsed_to_execute_ = nullptr;
+  dispatch_waiting_count_ = 0;
 
   QueueBackpressure& qbp = GetQueueBackpressure();
   qbp.NotifyPipelineWaiters();
@@ -1915,8 +1918,7 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
 void Connection::ProcessPipelineCommandV1() {
   DCHECK(parsed_head_ && parsed_to_execute_) << DebugInfo();
   auto* cmd = parsed_to_execute_;
-  parsed_to_execute_ = cmd->next;
-  AdvanceParsedHead(parsed_to_execute_);
+  AdvanceParsedHead(AdvanceToExecute());
 
   tl_facade_stats->conn_stats.pipelined_wait_latency +=
       CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
@@ -2587,29 +2589,39 @@ bool Connection::ExecuteBatch() {
 
   bool is_true_pipeline = (parsed_to_execute_->next) != nullptr;
 
-  auto advance_head = [&] {
-    auto* cmd = parsed_head_;
-    AdvanceParsedHead(parsed_head_->next);
-    if (is_true_pipeline)  // pipeline mode as we have
+  // Retires the head command once its reply has been handled: removes it from the queue and
+  // releases it. Only reached when the head is also the command we just processed
+  // (parsed_head_ == parsed_to_execute_), so both pointers advance together to head->next.
+  auto retire_head = [&] {
+    DCHECK_EQ(parsed_head_, parsed_to_execute_);
+    ParsedCommand* cmd = parsed_head_;
+    // Advance both pointers to cmd->next in lockstep: AdvanceToExecute() moves parsed_to_execute_
+    // (keeping dispatch_waiting_count_ in sync) and returns the new value for parsed_head_.
+    AdvanceParsedHead(AdvanceToExecute());
+    DCHECK_EQ(parsed_head_, parsed_to_execute_);
+    if (is_true_pipeline)
       ReleasePipelinedCommand(cmd);
     else
       ReleaseParsedCommand(cmd);
-    return parsed_head_;
   };
 
-  // Execute sequentially all parsed commands.
-  for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
+  // Execute sequentially all parsed commands. parsed_to_execute_ points to the next command to
+  // dispatch; it advances as commands are dispatched, and parsed_head_ advances with it whenever a
+  // command retires (executes synchronously or replies immediately).
+  while (parsed_to_execute_ != nullptr) {
     if (reply_builder_->GetError())
       return false;
+
+    ParsedCommand* cmd = parsed_to_execute_;
     bool is_head = cmd == parsed_head_;
 
     // parser errors are stored as deferred replies
     if (cmd->IsDeferredReply() && cmd->CanReply()) {
       if (is_head) {
         cmd->SendReply();
-        cmd = advance_head();
+        retire_head();
       } else {
-        cmd = cmd->next;
+        AdvanceToExecute();
       }
       continue;
     }
@@ -2625,6 +2637,7 @@ bool Connection::ExecuteBatch() {
     // sendmsg syscalls to a minimum. IoLoopV2's idle-await block handles the final flush.
     reply_builder_->SetBatchMode(ioloop_v2_ && is_head && (cmd->next != nullptr));
 
+    uint64_t dispatch_start = CycleClock::Now();
     auto dispatch_res = service_->DispatchCommandSimple(cmd, mode);
 
     // Enforce the pipeline reply-ordering invariant: replies must reach the socket in parse order.
@@ -2644,19 +2657,20 @@ bool Connection::ExecuteBatch() {
     if (dispatch_res == DispatchResult::WOULD_BLOCK)
       break;  // Sync command. Wait for current async commands to finish
 
+    conn_stats.pipelined_wait_latency += CycleClock::ToUsec(dispatch_start - cmd->parsed_cycle);
     conn_stats.pipeline_dispatch_commands++;
     if (is_head)
       conn_stats.pipeline_dispatch_calls++;
 
     if (cmd->IsDeferredReply()) {
-      cmd = cmd->next;
+      AdvanceToExecute();
     } else {
-      DCHECK(is_head);       // only head can execute sync
-      cmd = advance_head();  // advance it
+      DCHECK(is_head);  // only head can execute sync
+      retire_head();
     }
   }
 
-  // Since we are done executing a batch, and advance_head might be called which release commands,
+  // Since we are done executing a batch, and retire_head might be called which releases commands,
   // notify waiters that backpressure might be relieved.
   if (ioloop_v2_) {
     io_event_.notify();
@@ -2731,6 +2745,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
 
   size_t used_mem = cmd->EnqueuedBytes();
   parsed_cmd_q_len_++;
+  dispatch_waiting_count_++;  // the newly appended tail command is not yet dispatched
   parsed_cmd_q_bytes_ += used_mem;
   local_stats_.dispatch_entries_added++;
   conn_stats.pipeline_queue_entries++;
@@ -2803,10 +2818,21 @@ void Connection::DestroyParsedQueue() {
   }
 
   parsed_tail_ = nullptr;
+  parsed_to_execute_ = nullptr;
+  dispatch_waiting_count_ = 0;
   CHECK_EQ(parsed_cmd_q_len_, 0u);
   CHECK_EQ(parsed_cmd_q_bytes_, 0u);
   delete parsed_cmd_;
   parsed_cmd_ = nullptr;
+}
+
+ParsedCommand* Connection::AdvanceToExecute() {
+  DCHECK(parsed_to_execute_ != nullptr);
+  DCHECK_GT(dispatch_waiting_count_, 0u);
+
+  --dispatch_waiting_count_;
+  parsed_to_execute_ = parsed_to_execute_->next;
+  return parsed_to_execute_;
 }
 
 void Connection::UpdateFromFlags() {
@@ -3201,7 +3227,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       return std::exchange(io_ec_, {});
     }
 
-    if ((parse_status != OK) && (parse_status != NEED_MORE)) {
+    if (parse_status == ERROR) {
       break;
     }
 
