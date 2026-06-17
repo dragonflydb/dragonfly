@@ -480,6 +480,19 @@ class Connection : public util::Connection {
   // a migration is pending.
   bool HasControlEvent() const;
 
+  // Wake condition for the idle park: HasControlEvent() plus incoming data and a head command
+  // ready to run.
+  bool ShouldWakeIdle() const;
+
+  // IoLoopV2 control path: drains dispatch_q_ up to `quota`. Returns true if the caller should
+  // restart the loop (so freshly arrived socket data is read before the data path runs), false to
+  // fall through to the data path.
+  bool DrainControlPath(uint32_t quota);
+
+  // IoLoopV2 data path when input is available and we are under the pipeline limit: parse, execute
+  // and reply. Returns the parser status.
+  ParserStatus RunParsePath();
+
   // Guard of the current subscription to a parsed commands async task blocker
   struct WaitEvent {
     explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w);

@@ -3006,6 +3006,40 @@ bool Connection::HasControlEvent() const {
          IsReadyToMigrate();
 }
 
+bool Connection::ShouldWakeIdle() const {
+  // TODO: optimize CanReply with looking up waiter key
+  // io_buf_.InputLen() > 0 is still needed for multishot flow.
+
+  // On top of the control events, the idle park also wakes for incoming data and for a head command
+  // that is now ready to run.
+  return io_buf_.InputLen() > 0 || pending_input_ || HasCommandToExecute() || HasControlEvent();
+}
+
+bool Connection::DrainControlPath(uint32_t quota) {
+  // Bounded quota prevents the control path from starving the data path: under a PubSub flood
+  // dispatch_q_ can accumulate thousands of messages, and without a quota the fiber would drain
+  // them all before parsing any socket data. Mirrors V1's async_dispatch_quota mechanism.
+  if (dispatch_q_.empty())
+    return false;
+
+  bool quota_reached = ProcessControlMessages(quota);
+  GetQueueBackpressure().pubsub_ec.notifyAll();
+
+  // Restart the loop unless the quota was hit. Restarting forces ReadPendingInput() to pull newly
+  // arrived TCP data (so the data path doesn't miss a parse cycle) and acts as a fast path to flush
+  // the accumulated PubSub replies via the idle-await block. Falling through only when the quota is
+  // reached guarantees a continuous flood cannot indefinitely starve pipelined commands.
+  return !quota_reached;
+}
+
+Connection::ParserStatus Connection::RunParsePath() {
+  // We have input data AND memory budget - parse new commands, execute, reply.
+  size_t mem_before = GetLocalConnStats().pipeline_queue_bytes;
+  ParserStatus parse_status = ParseLoop();
+  NotifyIfMemReleased(mem_before);
+  return parse_status;
+}
+
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
@@ -3058,83 +3092,46 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       ReadPendingInput();
     }
 
-    // await block (no data to read)
-    if (io_buf_.InputLen() == 0) {
-      auto should_wake = [this]() {
-        // TODO: optimize CanReply with looking up waiter key
-        // io_buf_.InputLen() > 0 is still needed for multishot flow.
+    // Idle park: flush and sleep when there is nothing to do (ShouldWakeIdle is false only when
+    // the read buffer is also empty).
+    if (!ShouldWakeIdle()) {
+      // Only flush and park if the fiber is truly idle. When synchronous commands (e.g. PUBLISH)
+      // are pipelined, ExecuteBatch processes one at a time and loops back here with
+      // HasCommandToExecute() == true. Skipping the flush lets the entire pipeline execute
+      // in-memory before a single sendmsg at the end.
+      phase_ = READ_SOCKET;
 
-        // On top of the control events, the idle park also wakes for incoming data and for a head
-        // command that is now ready to run.
-        return io_buf_.InputLen() > 0 || pending_input_ || HasCommandToExecute() ||
-               HasControlEvent();
-      };
-
-      // Only flush and park if the fiber is truly idle. When synchronous commands
-      // (e.g. PUBLISH) are pipelined, ExecuteBatch processes one at a time and loops
-      // back here with HasCommandToExecute() == true. Skipping the flush lets the
-      // entire pipeline execute in-memory before a single sendmsg at the end.
-      if (!should_wake()) {
-        phase_ = READ_SOCKET;
-
-        // Flush replies deferred by ReplyBatch before sleeping - ensures the client
-        // gets its response even when no more data arrives (single commands, end of pipeline).
-        if (auto ec = FlushReplies(); ec) {
-          return ec;
-        }
-
-        io_event_.await(should_wake);
+      // Flush replies deferred by ReplyBatch before sleeping - ensures the client gets its response
+      // even when no more data arrives (single commands, end of pipeline).
+      if (auto ec = FlushReplies(); ec) {
+        return ec;
       }
+
+      io_event_.await([this] { return ShouldWakeIdle(); });
     }
 
     phase_ = PROCESS;
     bool reached_capacity = io_buf_.AppendLen() == 0;
 
-    // Handle dispatch queue items (Control Path) with a bounded quota to prevent
-    // starvation of the data path:
-    // - Under a PubSub flood, dispatch_q_ can accumulate thousands of messages.
-    // - Without a quota, the fiber would drain them all before parsing any new data from the
-    //   socket, starving GET/SET and other pipeline commands.
-    // - This mirrors V1's async_dispatch_quota / prefer_pipeline_execution mechanism in AsyncFiber.
-    if (!dispatch_q_.empty()) {
-      bool quota_reached = ProcessControlMessages(async_dispatch_quota);
-
-      GetQueueBackpressure().pubsub_ec.notifyAll();
-
-      // We explicitly `continue` back to the top of the loop for two reasons:
-      // 1. Fresh Data: Processing dispatch_q_ takes time. Jumping to the top forces
-      //    ReadPendingInput() to pull any newly arrived TCP data from the OS buffer.
-      //    Falling through skips ReadPendingInput(), so the data path checks io_buf_.InputLen()
-      //    before new socket data is read - potentially missing an entire parse cycle.
-      // 2. Low Latency: PubSub replies have accumulated in reply_builder_. The idle-await
-      //    block at the top is where we naturally Flush() and sleep. `continue` acts as a
-      //    fast-path to push these replies to the network immediately, skipping dead code.
-      //
-      // Starvation prevention: We only fall through if we hit our processing quota.
-      // This ensures a continuous flood of PubSub messages cannot indefinitely starve
-      // the data path (pipelined commands).
-      if (!quota_reached) {
-        continue;
-      }
+    // Control path: drain dispatch_q_. Restart the loop (so fresh socket data is read first) unless
+    // we hit the quota, in which case fall through to the data path to avoid starving it.
+    if (DrainControlPath(async_dispatch_quota)) {
+      continue;
     }
-
-    // Handle Parsed Commands Queue (Data Path)
-    auto& conn_stats = GetLocalConnStats();
 
     // Only parse data if we are under the memory limit (backpressure).
     // Exception: If the queue is empty, we always parse to allow admin commands
     // (like CONFIG SET) to run so they can fix the memory limits if needed.
     if ((io_buf_.InputLen() > 0) && !IsOverPipelineLimit()) {
-      // Data Normal Path: we have input data AND memory budget - parse new commands, execute,
-      // reply.
-      size_t mem_before = conn_stats.pipeline_queue_bytes;
-      parse_status = ParseLoop();
-      NotifyIfMemReleased(mem_before);
+      parse_status = RunParsePath();
     } else {
       // Data Backpressure Path: either no input (io_buf_ empty) or over memory limit.
       // Do NOT parse - that would grow the queue further. Instead, drain already-queued
       // commands (execute + reply) to free memory, then park until pressure is relieved.
       parse_status = NEED_MORE;
+
+      // Handle Parsed Commands Queue (Data Path)
+      auto& conn_stats = GetLocalConnStats();
 
       size_t mem_before = conn_stats.pipeline_queue_bytes;
 
