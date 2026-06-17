@@ -207,6 +207,10 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
   // through replay.
   virtual void SendBulkStringBorrowed(cmn::BorrowedString bs);
 
+  // Like SendBulkStringBorrowed, but does not take ownership and does not flush.
+  // Caller must guarantee the BorrowedString outlives any enqueued refs (e.g. via ReplyScope).
+  void SendBulkStringBorrowedRef(const cmn::BorrowedString& bs);
+
   void SendLong(long val) override;
   virtual void SendDouble(double val);  // RESP: Number
 

@@ -366,6 +366,24 @@ void RedisReplyBuilderBase::SendBulkStringBorrowed(cmn::BorrowedString bs) {
   Flush();
 }
 
+void RedisReplyBuilderBase::SendBulkStringBorrowedRef(const cmn::BorrowedString& bs) {
+  ReplyScope scope(this);
+  tl_facade_stats->reply_stats.borrowed_string_sent_cnt++;
+
+  auto* ops = cmn::BorrowedStringOps::Get();
+  size_t total = ops->DecodedSize(bs);
+
+  DVLOG(1) << "SendBulkBorrowedRef " << total << " enc=" << unsigned(bs.encoding());
+  WritePieces(kLengthPrefix, total, kCRLF);
+  if (bs.IsEncoded()) {
+    WriteDecodedAscii(bs);
+  } else {
+    WriteRef(bs.view());
+  }
+  WritePieces(kCRLF);
+  // No flush — caller guarantees bs outlives any enqueued refs.
+}
+
 void RedisReplyBuilderBase::SendLong(long val) {
   ReplyScope scope(this);
   WritePieces(kLongPref, val, kCRLF);
