@@ -767,9 +767,12 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
   if (fragment_ref.IsOffloaded() || fragment_ref.HasStashPending())
     return nullopt;
 
-  if (stash_ctx.key_expire_ms > 0 && config_.min_ttl_to_offload_ms > 0) {
-    if (stash_ctx.key_expire_ms <= GetCurrentTimeMs() + config_.min_ttl_to_offload_ms)
+  const bool should_offload = ShouldOffload();
+
+  if (!should_offload && stash_ctx.key_expire_ms > 0 && config_.min_ttl_to_offload_ms > 0) {
+    if (stash_ctx.key_expire_ms <= GetCurrentTimeMs() + config_.min_ttl_to_offload_ms) {
       return nullopt;
+    }
   }
 
   // For now, hash offloading is conditional
@@ -795,7 +798,7 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
   if (disk_stats.pending_stash_bytes >= 2 * config_.max_pending_stash_bytes) {
     ++stats_.stash_overflow_cnt;
     // Discard the write if we don't require offloading to not oversaturate the disk
-    if (!ShouldOffload())
+    if (!should_offload)
       return std::nullopt;
   }
 
