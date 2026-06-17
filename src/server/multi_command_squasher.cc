@@ -151,7 +151,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
 
   auto& sinfo = PrepareShardInfo(last_sid);
 
-  sinfo.dispatched.push_back({.cmd = cmd, .reply = {}});
+  sinfo.dispatched.push_back({cmd, {}});
   order_.push_back(last_sid);
 
   bool need_flush = sinfo.dispatched.size() >= opts_.max_squash_size;
@@ -210,52 +210,60 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   auto& sinfo = sharded_[es->shard_id()];
   DCHECK(!sinfo.dispatched.empty());
 
-  auto* local_tx = sinfo.local_tx.get();
   CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
   CmdArgVec arg_vec;
-  CommandContext cmd_cntx{&crb, cntx_};
-  cmd_cntx.SetupTx(nullptr, local_tx);
+  CommandContext local_cntx{&crb, cntx_};
+  local_cntx.SetupTx(nullptr, sinfo.local_tx.get());
 
-  auto move_reply = [&sinfo](CapturingReplyBuilder::Payload&& src,
-                             CapturingReplyBuilder::Payload* dst) {
-    *dst = std::move(src);
-    size_t sz = Size(*dst);
+  auto move_reply = [&sinfo, &crb](ShardExecInfo::Command* cmd) {
+    if (cmd->cmd_cntx)
+      return cmd->cmd_cntx->Resolve(crb.Take());
+
+    cmd->reply = crb.Take();
+    size_t sz = Size(cmd->reply);
     sinfo.reply_size_delta += sz;
     sinfo.reply_size_total_ptr->fetch_add(sz, std::memory_order_relaxed);
   };
 
   for (auto& dispatched : sinfo.dispatched) {
-    auto args = dispatched.cmd.Slice(&arg_vec);
+    auto* ctx = &local_cntx;
+    auto args = dispatched.Slice(&arg_vec);
     if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
-      if (auto err = service_->VerifyCommandState(*dispatched.cmd.cid, args, *cntx_); err) {
+      if (auto err = service_->VerifyCommandState(*dispatched.cid, args, *cntx_); err) {
         crb.SendError(std::move(*err));
-        auto payload = crb.Take();
-        if (dispatched.cmd.cmd_cntx) {
-          dispatched.cmd.cmd_cntx->Resolve(std::move(payload));
-        } else {
-          move_reply(std::move(payload), &dispatched.reply);
-        }
+        move_reply(&dispatched);
         continue;
       }
     }
 
-    crb.SetReplyMode(dispatched.cmd.reply_mode);
+    crb.SetReplyMode(dispatched.reply_mode);
 
-    local_tx->MultiSwitchCmd(dispatched.cmd.cid);
-    auto status = local_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
-    if (status != OpStatus::OK) {
-      crb.SendError(status);
-    } else {
-      cmd_cntx.UpdateCid(dispatched.cmd.cid);
-      cmd_cntx.SetTailArgs(dispatched.cmd.args);
-      service_->InvokeCmd(args, &cmd_cntx);
+    // With tiered storage enabled, it makes sense to dispatch async commands concurrently
+    // to allow concurrent disk operations. Tiered futures are only blocked on during replies
+    bool do_async = es->tiered_storage() && !IsAtomic() && opts_.pipeline_mode &&
+                    dispatched.cid->SupportsAsync();
+    if (do_async) {
+      ctx = dispatched.cmd_cntx;
+      ctx->SetDeferredReply();
     }
-    auto payload = crb.Take();
-    if (dispatched.cmd.cmd_cntx) {
-      dispatched.cmd.cmd_cntx->Resolve(std::move(payload));
+
+    ctx->SetupTx(dispatched.cid, local_cntx.tx());
+    ctx->tx()->MultiSwitchCmd(dispatched.cid);
+
+    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
+    if (status != OpStatus::OK) {
+      ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
     } else {
-      move_reply(std::move(payload), &dispatched.reply);
+      ctx->UpdateCid(dispatched.cid);
+      ctx->SetTailArgs(dispatched.args);
+      service_->InvokeCmd(args, ctx);
+    }
+
+    if (!do_async) {
+      move_reply(&dispatched);  // Async commands resolve the context directly
+    } else if (!ctx->CanReply()) {
+      ctx->Blocker()->Wait();  // Transaction didn't finish inline (likely locked key), wait for it
     }
   }
 

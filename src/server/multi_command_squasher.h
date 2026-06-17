@@ -57,8 +57,7 @@ class MultiCommandSquasher {
     ShardExecInfo() : local_tx{nullptr} {
     }
 
-    struct Command {
-      CmdRef cmd;
+    struct Command : public CmdRef {
       facade::CapturingReplyBuilder::Payload reply;
     };
     std::vector<Command> dispatched;  // Dispatched commands
