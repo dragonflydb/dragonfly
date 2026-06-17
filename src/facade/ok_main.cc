@@ -16,8 +16,10 @@
 #include <coroutine>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/inlined_vector.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
 #include "base/cycle_clock.h"
 #include "base/init.h"
 #include "base/proc_util.h"
@@ -65,6 +67,17 @@ namespace {
 //    Add()/Await() -- which is why g_shards is global, not thread-local.
 //  - `db`: this shard's slice of the keyspace (touched only by the owning thread).
 struct Shard {
+  void Set(string_view key, string_view value) {
+    db.insert_or_assign(string(key), string(value));
+  }
+
+  optional<string> Get(string_view key) const {
+    auto it = db.find(key);
+    if (it == db.end())
+      return nullopt;
+    return it->second;
+  }
+
   unique_ptr<fb2::FiberQueue> queue;
   fb2::Fiber consumer;
   absl::flat_hash_map<string, string> db;
@@ -172,45 +185,108 @@ struct ResolveAwaiter {
 
 // Async SET: dispatches write to shard, suspends, then sends OK on resume.
 AsyncCmd SetAsync(CmdContext* ctx, ProactorPool* pool) {
-  string key(ctx->at(1));
-  string value(ctx->at(2));
+  string_view key = ctx->at(1);
+  string_view value = ctx->at(2);
   unsigned shard_id = KeyShard(key, pool->size());
 
   ctx->blocker.Start(1);
-  g_shards[shard_id].queue->Add([k = std::move(key), v = std::move(value), ctx]() mutable {
-    MyShard().db.insert_or_assign(std::move(k), std::move(v));
+  g_shards[shard_id].queue->Add([key, value, ctx] {
+    MyShard().Set(key, value);
     ctx->blocker.Dec();
   });
 
   co_await ResolveAwaiter{ctx};
 
-  // Resumed by Connection::SendReply() — write directly to reply builder.
+  // Resumed by CmdContext::SendReply() — write directly to reply builder.
   ctx->rb()->SendOk();
 }
 
 // Async GET: dispatches read to shard, suspends, then sends result on resume.
 AsyncCmd GetAsync(CmdContext* ctx, ProactorPool* pool) {
-  string key(ctx->at(1));
+  string_view key = ctx->at(1);
   unsigned shard_id = KeyShard(key, pool->size());
 
   ctx->blocker.Start(1);
-  g_shards[shard_id].queue->Add([k = std::move(key), ctx] {
-    auto& shard = MyShard();
-    auto it = shard.db.find(k);
-    if (it != shard.db.end())
-      ctx->get_result = it->second;
+  g_shards[shard_id].queue->Add([key, ctx] {
+    ctx->get_result = MyShard().Get(key);
     ctx->blocker.Dec();
   });
 
   co_await ResolveAwaiter{ctx};
 
   DCHECK(!ctx->mc_command());  // We do not support MC protocol.
-  // Resumed by Connection::SendReply() — write directly to reply builder.
+
+  // Resumed by CmdContext::SendReply() — write directly to reply builder.
   auto* rb = static_cast<RedisReplyBuilder*>(ctx->rb());
   if (ctx->get_result) {
     rb->SendBulkString(*ctx->get_result);
   } else {
     rb->SendNull();
+  }
+}
+
+// Maximum number of commands a single destination shard may take in one squashed batch; the run
+// stops at the first command whose target shard is already full. Bounds the work one shard callback
+// does (and that shard's result residency), independent of pipeline depth.
+constexpr unsigned kMaxSquashSize = 80;
+
+// A leading run of squashable commands grouped by destination shard. per_shard[sid] holds the
+// commands targeting shard sid, in parse order.
+using ShardBuckets = vector<absl::InlinedVector<CmdContext*, 4>>;
+
+// Result of the (shared) grouping pass: the run length and the number of distinct shards it spans.
+struct GroupResult {
+  unsigned processed = 0;   // number of commands folded into the batch
+  unsigned num_active = 0;  // number of shards with at least one command
+};
+
+// Shared pass 1 for both squashers: classify a leading run of single-key SET/GET commands and group
+// them by destination shard, setting batch_is_get on each accepted command. Stops at the first
+// command that can't join: non-squashable (wrong arity, PING, COMMAND, unknown), or one whose
+// destination shard has already taken kMaxSquashSize commands.
+GroupResult GroupSquashableRun(ParsedCommand* first, unsigned count, unsigned num_shards,
+                               ShardBuckets* per_shard) {
+  GroupResult res;
+  auto* cmd = first;
+  for (unsigned i = 0; i < count; i++, cmd = cmd->next) {
+    DCHECK(cmd && !cmd->empty());
+
+    string_view name = cmd->Front();
+    bool is_get = absl::EqualsIgnoreCase(name, "GET");
+    bool is_set = absl::EqualsIgnoreCase(name, "SET");
+    if (!is_get && !is_set)
+      break;
+    if ((is_get && cmd->size() < 2) || (is_set && cmd->size() < 3))
+      break;
+
+    auto* ctx = static_cast<CmdContext*>(cmd);
+    unsigned sid = KeyShard(ctx->at(1), num_shards);
+    DCHECK_LT(sid, num_shards);
+    auto& bucket = (*per_shard)[sid];
+
+    if (bucket.size() == kMaxSquashSize)  // this shard is full -> end the run here
+      break;
+    ctx->batch_is_get = is_get;
+
+    // first command for this shard -> one more active shard
+    res.num_active += unsigned(bucket.empty());
+    bucket.push_back(ctx);
+    res.processed++;
+  }
+  return res;
+}
+
+// Runs one shard's batched ops on the owning proactor thread (so MyShard() is this shard's slice):
+// GET reads into the command's get_result, SET writes the value. Shared by both squashers' shard
+// callbacks.
+void RunShardOps(absl::Span<CmdContext* const> cmds) {
+  auto& shard = MyShard();
+  for (auto* ctx : cmds) {
+    if (ctx->batch_is_get) {
+      ctx->get_result = shard.Get(ctx->at(1));
+    } else {
+      shard.Set(ctx->at(1), ctx->at(2));
+    }
   }
 }
 
@@ -233,6 +309,11 @@ class OkService : public ServiceInterface {
   }
 
  private:
+  // Dispatches the run already grouped into per_shard (active = number of non-empty buckets): one
+  // task per active shard, blocks the connection fiber until they finish, then stores a captured
+  // payload per command for the connection to emit in parse order.
+  void EmitBlockingBatch(unsigned num_active_shards, ShardBuckets* per_shard);
+
   // Synchronous fallback handlers (used when async is not available).
   DispatchResult HandleSetSync(ParsedCommand* cmd);
   DispatchResult HandleGetSync(ParsedCommand* cmd);
@@ -289,79 +370,43 @@ DispatchResult OkService::DispatchCommand([[maybe_unused]] ParsedArgs args, Pars
   return DispatchResult::OK;
 }
 
-// Maximum number of commands a single destination shard may take in one squashed batch; the run
-// stops at the first command whose target shard is already full.
-constexpr unsigned kMaxSquashSize = 32;
-
-// (Service::DispatchSquashedBatch): group a leading run of single-key SET/GET commands by shard,
-// dispatch one task per shard, block the connection fiber until all shards finish, then store each
-// reply as a captured payload via Resolve() (which also marks the command deferred). The connection
-// applies the payloads in parse order afterwards. Cross-thread cost drops from one Add + one Dec
-// per command to one Add + one Dec per active shard.
+// Squash a leading run of single-key SET/GET commands. The grouping pass (GroupSquashableRun) folds
+// the run into per-shard buckets; EmitBlockingBatch then dispatches one task per active shard, so
+// cross-thread cost drops from one Add + one Dec per command to one Add + one Dec per active shard.
+// Returns the run length consumed.
 uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
                                           [[maybe_unused]] ConnectionContext* cntx) {
   const unsigned num_shards = pool_->size();
 
-  // Grouping scratch, private to this call (stays valid on the parked fiber's stack while pass 2
-  // tasks run on shard threads).
-  vector<absl::InlinedVector<CmdContext*, 4>> per_shard(num_shards);
-
-  // Pass 1: classify and group a leading run of single-key SET/GET commands by shard. Stop at the
-  // first command that can't join: non-squashable (wrong arity, PING, COMMAND, unknown), or one
-  // whose destination shard has already taken kMaxSquashSize commands.
-  unsigned processed = 0;
-  unsigned active = 0;
-  auto* cmd = first;
-  for (unsigned i = 0; i < count && cmd != nullptr; i++, cmd = cmd->next) {
-    if (cmd->empty())
-      break;
-    string_view name = cmd->Front();
-    bool is_get = absl::EqualsIgnoreCase(name, "GET");
-    bool is_set = absl::EqualsIgnoreCase(name, "SET");
-    if (!is_get && !is_set)
-      break;
-    if ((is_get && cmd->size() < 2) || (is_set && cmd->size() < 3))
-      break;
-
-    auto* ctx = static_cast<CmdContext*>(cmd);
-    auto& bucket = per_shard[KeyShard(ctx->at(1), num_shards)];
-    if (bucket.size() == kMaxSquashSize)  // this shard is full -> end the run here
-      break;
-    ctx->batch_is_get = is_get;
-    active += unsigned(bucket.empty());  // first command for this shard -> one more active shard
-    bucket.push_back(ctx);
-    processed++;
-  }
-
-  if (processed == 0)
+  // Grouping scratch, private to this call: the squasher can preempt in FiberQueue::Add() when a
+  // shard queue is full, so a shared buffer could be corrupted by a re-entrant call on this thread.
+  ShardBuckets per_shard(num_shards);
+  GroupResult group = GroupSquashableRun(first, count, num_shards, &per_shard);
+  if (group.processed == 0)
     return 0;
 
-  // Pass 2: dispatch one task per active shard; each runs all of its ops then decrements the
-  // counter. Block here until every shard finishes (this parks the connection fiber, like
-  // dragonfly's squasher blocking on its transaction hops).
-  fb2::BlockingCounter bc(active);
-  for (unsigned sid = 0; sid < num_shards; sid++) {
-    if (per_shard[sid].empty())
+  EmitBlockingBatch(group.num_active, &per_shard);
+  return group.processed;
+}
+
+// Blocking squasher: dispatch one task per active shard, block the connection fiber until every
+// shard finishes (like dragonfly's squasher blocking on its transaction hops), then store each
+// reply as a captured payload. Resolve() also marks the command deferred; the connection emits the
+// payloads in parse order afterwards, so bucket order here does not matter. per_shard stays valid
+// on this parked fiber's stack while the tasks run, so the shard callbacks reference it by pointer.
+void OkService::EmitBlockingBatch(unsigned num_active_shards, ShardBuckets* per_shard) {
+  fb2::BlockingCounter bc(num_active_shards);
+  for (unsigned sid = 0; sid < per_shard->size(); sid++) {
+    if (per_shard->at(sid).empty())
       continue;
-    g_shards[sid].queue->Add([cmds = &per_shard[sid], bc]() mutable {
-      for (auto* ctx : *cmds) {
-        auto& shard = MyShard();
-        if (ctx->batch_is_get) {
-          auto it = shard.db.find(ctx->at(1));
-          if (it != shard.db.end())
-            ctx->get_result = it->second;
-        } else {
-          shard.db.insert_or_assign(string(ctx->at(1)), string(ctx->at(2)));
-        }
-      }
+    g_shards[sid].queue->Add([cmds = per_shard->at(sid), bc]() mutable {
+      RunShardOps(cmds);
       bc->Dec();
     });
   }
   bc->Wait();
 
-  // Pass 3: store each command's reply as a captured payload. Resolve() also marks the command
-  // deferred; the connection emits them in parse order, so bucket order here does not matter.
-  for (auto& bucket : per_shard) {
+  for (auto& bucket : *per_shard) {
     for (auto* ctx : bucket) {
       if (!ctx->batch_is_get) {
         ctx->Resolve(payload::SimpleString{"OK"});
@@ -372,8 +417,6 @@ uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
       }
     }
   }
-
-  return processed;
 }
 
 DispatchResult OkService::HandleSetSync(ParsedCommand* cmd) {
@@ -381,9 +424,7 @@ DispatchResult OkService::HandleSetSync(ParsedCommand* cmd) {
   string_view value = cmd->at(2);
   unsigned shard_id = KeyShard(key, pool_->size());
 
-  g_shards[shard_id].queue->Await([k = string(key), v = string(value)]() mutable {
-    MyShard().db.insert_or_assign(std::move(k), std::move(v));
-  });
+  g_shards[shard_id].queue->Await([key, value] { MyShard().Set(key, value); });
 
   cmd->rb()->SendOk();
   return DispatchResult::OK;
@@ -393,13 +434,8 @@ DispatchResult OkService::HandleGetSync(ParsedCommand* cmd) {
   string_view key = cmd->at(1);
   unsigned shard_id = KeyShard(key, pool_->size());
 
-  optional<string> result = g_shards[shard_id].queue->Await([key]() -> optional<string> {
-    auto& shard = MyShard();
-    auto it = shard.db.find(key);
-    if (it == shard.db.end())
-      return nullopt;
-    return it->second;
-  });
+  optional<string> result =
+      g_shards[shard_id].queue->Await([key]() -> optional<string> { return MyShard().Get(key); });
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd->rb());
   if (result) {
