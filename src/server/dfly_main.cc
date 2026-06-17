@@ -786,6 +786,8 @@ void RegisterBufRings(ProactorPool* pool) {
     return;
   }
 
+  CHECK_LE(bufcnt, 16384u);
+
   // We need a power of 2 length.
   bufcnt = absl::bit_ceil(bufcnt);
   pool->AwaitBrief([&](unsigned, ProactorBase* pb) {

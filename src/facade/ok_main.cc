@@ -2,9 +2,9 @@
 // See LICENSE for licensing terms.
 //
 // A minimal demo that implements SET/GET commands with Dragonfly's
-// shard-per-thread architecture: each proactor thread owns a thread-local
-// hash map, and commands are dispatched to the correct shard through a
-// per-shard fb2::FiberQueue (MPSC) using the SuspendedCommand async
+// shard-per-thread architecture: each proactor thread owns one shard (its entry in the global
+// g_shards vector, holding that shard's hash map), and commands are dispatched to the correct shard
+// through a per-shard fb2::FiberQueue (MPSC) using the SuspendedCommand async
 // mechanism. Each proactor runs a consumer fiber draining its own queue,
 // while connection fibers on any thread enqueue callbacks via Add().
 // The synchronous fallback uses FiberQueue::Await when async is not
@@ -20,22 +20,31 @@
 #include "absl/strings/str_cat.h"
 #include "base/cycle_clock.h"
 #include "base/init.h"
+#include "base/proc_util.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_stats.h"
+#include "facade/facade_types.h"
 #include "facade/reply_builder.h"
+#include "facade/reply_payload.h"
 #include "facade/service_interface.h"
 #include "util/accept_server.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/pool.h"
 #include "util/fibers/synchronization.h"
+#ifdef __linux__
+#include "util/fibers/uring_proactor.h"
+#endif
 #include "util/http/http_common.h"
 #include "util/http/http_handler.h"
 #include "util/http/http_server_utils.h"
 
 ABSL_FLAG(uint32_t, port, 6379, "server port");
 ABSL_FLAG(uint32_t, fq_size, 256, "per-shard FiberQueue capacity");
+ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
+          "How many buffer ring entries to allocate per thread for io_uring receive operations. "
+          "Relevant only for modern kernels with io_uring enabled");
 
 using namespace util;
 using namespace std;
@@ -45,15 +54,27 @@ namespace facade {
 
 namespace {
 
-// Thread-local shard storage — each proactor thread has its own hash map.
-thread_local absl::flat_hash_map<string, string> shard_db;
+// All state for one shard. g_shards[sid] is owned by shard sid: in the shared-nothing model each
+// proactor thread owns exactly one shard and initializes its own slot (see RunEngine).
+//  - `queue`/`consumer`: the MPSC FiberQueue and the fiber draining it. Both live on the owning
+//    proactor thread, but callbacks are enqueued from connection fibers on ANY thread via
+//    Add()/Await() -- which is why g_shards is global, not thread-local.
+//  - `db`: this shard's slice of the keyspace (touched only by the owning thread).
+struct Shard {
+  unique_ptr<fb2::FiberQueue> queue;
+  fb2::Fiber consumer;
+  absl::flat_hash_map<string, string> db;
+};
 
-// One MPSC FiberQueue per shard (indexed by proactor index). Each queue is created and
-// drained by a consumer fiber running on its owning proactor thread (see RunEngine), but
-// callbacks are enqueued into it from connection fibers on any thread via Add()/Await().
-// g_shard_consumers holds the consumer fibers so they can be joined on shutdown.
-vector<unique_ptr<fb2::FiberQueue>> g_shard_queues;
-vector<fb2::Fiber> g_shard_consumers;
+// One entry per shard, indexed by proactor index. Resized once in RunEngine; each proactor thread
+// then initializes its own entry.
+vector<Shard> g_shards;
+
+// The shard owned by the calling proactor thread. Queue callbacks run on their shard's owning
+// thread, so inside a callback MyShard() is that shard.
+Shard& MyShard() {
+  return g_shards[fb2::ProactorBase::me()->GetPoolIndex()];
+}
 
 // Determine the owning shard for a given key.
 constexpr uint64_t kShardHashSeed = 120577240643ULL;
@@ -107,10 +128,14 @@ struct AsyncCmd {
 struct CmdContext : public facade::ParsedCommand {
   void ReuseInternal() final {
     get_result.reset();
+    batch_is_get = false;
   }
 
   fb2::EmbeddedBlockingCounter blocker{0};
   optional<string> get_result;
+
+  // Set by DispatchSquashedBatch so the reply payload can be built after the shard work completes.
+  bool batch_is_get = false;
 };
 
 // Custom awaiter that registers the coroutine with the connection at the exact
@@ -148,8 +173,8 @@ AsyncCmd SetAsync(CmdContext* ctx, ProactorPool* pool) {
   unsigned shard_id = KeyShard(key, pool->size());
 
   ctx->blocker.Start(1);
-  g_shard_queues[shard_id]->Add([k = std::move(key), v = std::move(value), ctx]() mutable {
-    shard_db.insert_or_assign(std::move(k), std::move(v));
+  g_shards[shard_id].queue->Add([k = std::move(key), v = std::move(value), ctx]() mutable {
+    MyShard().db.insert_or_assign(std::move(k), std::move(v));
     ctx->blocker.Dec();
   });
 
@@ -165,9 +190,10 @@ AsyncCmd GetAsync(CmdContext* ctx, ProactorPool* pool) {
   unsigned shard_id = KeyShard(key, pool->size());
 
   ctx->blocker.Start(1);
-  g_shard_queues[shard_id]->Add([k = std::move(key), ctx] {
-    auto it = shard_db.find(k);
-    if (it != shard_db.end())
+  g_shards[shard_id].queue->Add([k = std::move(key), ctx] {
+    auto& shard = MyShard();
+    auto it = shard.db.find(k);
+    if (it != shard.db.end())
       ctx->get_result = it->second;
     ctx->blocker.Dec();
   });
@@ -190,6 +216,8 @@ class OkService : public ServiceInterface {
   }
 
   DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference mode) final;
+  uint32_t DispatchSquashedBatch(ParsedCommand* first, unsigned count,
+                                 ConnectionContext* cntx) final;
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
 
   ConnectionContext* CreateContext(Connection* owner) final {
@@ -257,13 +285,100 @@ DispatchResult OkService::DispatchCommand([[maybe_unused]] ParsedArgs args, Pars
   return DispatchResult::OK;
 }
 
+// Maximum number of commands a single destination shard may take in one squashed batch; the run
+// stops at the first command whose target shard is already full.
+constexpr unsigned kMaxSquashSize = 32;
+
+// (Service::DispatchSquashedBatch): group a leading run of single-key SET/GET commands by shard,
+// dispatch one task per shard, block the connection fiber until all shards finish, then store each
+// reply as a captured payload via Resolve() (which also marks the command deferred). The connection
+// applies the payloads in parse order afterwards. Cross-thread cost drops from one Add + one Dec
+// per command to one Add + one Dec per active shard.
+uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
+                                          [[maybe_unused]] ConnectionContext* cntx) {
+  const unsigned num_shards = pool_->size();
+
+  // Grouping scratch, private to this call (stays valid on the parked fiber's stack while pass 2
+  // tasks run on shard threads).
+  vector<absl::InlinedVector<CmdContext*, 4>> per_shard(num_shards);
+
+  // Pass 1: classify and group a leading run of single-key SET/GET commands by shard. Stop at the
+  // first command that can't join: non-squashable (wrong arity, PING, COMMAND, unknown), or one
+  // whose destination shard has already taken kMaxSquashSize commands.
+  unsigned processed = 0;
+  unsigned active = 0;
+  auto* cmd = first;
+  for (unsigned i = 0; i < count && cmd != nullptr; i++, cmd = cmd->next) {
+    if (cmd->empty())
+      break;
+    string_view name = cmd->Front();
+    bool is_get = absl::EqualsIgnoreCase(name, "GET");
+    bool is_set = absl::EqualsIgnoreCase(name, "SET");
+    if (!is_get && !is_set)
+      break;
+    if ((is_get && cmd->size() < 2) || (is_set && cmd->size() < 3))
+      break;
+
+    auto* ctx = static_cast<CmdContext*>(cmd);
+    auto& bucket = per_shard[KeyShard(ctx->at(1), num_shards)];
+    if (bucket.size() == kMaxSquashSize)  // this shard is full -> end the run here
+      break;
+    ctx->batch_is_get = is_get;
+    active += unsigned(bucket.empty());  // first command for this shard -> one more active shard
+    bucket.push_back(ctx);
+    processed++;
+  }
+
+  if (processed == 0)
+    return 0;
+
+  // Pass 2: dispatch one task per active shard; each runs all of its ops then decrements the
+  // counter. Block here until every shard finishes (this parks the connection fiber, like
+  // dragonfly's squasher blocking on its transaction hops).
+  fb2::BlockingCounter bc(active);
+  for (unsigned sid = 0; sid < num_shards; sid++) {
+    if (per_shard[sid].empty())
+      continue;
+    g_shards[sid].queue->Add([cmds = &per_shard[sid], bc]() mutable {
+      for (auto* ctx : *cmds) {
+        auto& shard = MyShard();
+        if (ctx->batch_is_get) {
+          auto it = shard.db.find(ctx->at(1));
+          if (it != shard.db.end())
+            ctx->get_result = it->second;
+        } else {
+          shard.db.insert_or_assign(string(ctx->at(1)), string(ctx->at(2)));
+        }
+      }
+      bc->Dec();
+    });
+  }
+  bc->Wait();
+
+  // Pass 3: store each command's reply as a captured payload. Resolve() also marks the command
+  // deferred; the connection emits them in parse order, so bucket order here does not matter.
+  for (auto& bucket : per_shard) {
+    for (auto* ctx : bucket) {
+      if (!ctx->batch_is_get) {
+        ctx->Resolve(payload::SimpleString{"OK"});
+      } else if (ctx->get_result) {
+        ctx->Resolve(payload::BulkString{std::move(*ctx->get_result)});
+      } else {
+        ctx->Resolve(payload::Null{});
+      }
+    }
+  }
+
+  return processed;
+}
+
 DispatchResult OkService::HandleSetSync(ParsedCommand* cmd) {
   string_view key = cmd->at(1);
   string_view value = cmd->at(2);
   unsigned shard_id = KeyShard(key, pool_->size());
 
-  g_shard_queues[shard_id]->Await([k = string(key), v = string(value)]() mutable {
-    shard_db.insert_or_assign(std::move(k), std::move(v));
+  g_shards[shard_id].queue->Await([k = string(key), v = string(value)]() mutable {
+    MyShard().db.insert_or_assign(std::move(k), std::move(v));
   });
 
   cmd->rb()->SendOk();
@@ -274,9 +389,10 @@ DispatchResult OkService::HandleGetSync(ParsedCommand* cmd) {
   string_view key = cmd->at(1);
   unsigned shard_id = KeyShard(key, pool_->size());
 
-  optional<string> result = g_shard_queues[shard_id]->Await([key]() -> optional<string> {
-    auto it = shard_db.find(key);
-    if (it == shard_db.end())
+  optional<string> result = g_shards[shard_id].queue->Await([key]() -> optional<string> {
+    auto& shard = MyShard();
+    auto it = shard.db.find(key);
+    if (it == shard.db.end())
       return nullopt;
     return it->second;
   });
@@ -306,102 +422,96 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
 
   string body;
 
+#define APPEND_BODY(...) absl::StrAppend(&body, __VA_ARGS__)
+
   // Connection metrics
-  absl::StrAppend(&body, "# HELP connections_received_total Total connections received\n");
-  absl::StrAppend(&body, "# TYPE connections_received_total counter\n");
-  absl::StrAppend(&body, "connections_received_total ", conn.conn_received_cnt, "\n");
+  APPEND_BODY("# HELP connections_received_total Total connections received\n");
+  APPEND_BODY("# TYPE connections_received_total counter\n");
+  APPEND_BODY("connections_received_total ", conn.conn_received_cnt, "\n");
 
-  absl::StrAppend(&body, "# HELP connected_clients Number of connected clients\n");
-  absl::StrAppend(&body, "# TYPE connected_clients gauge\n");
-  absl::StrAppend(&body, "connected_clients ", conn.num_conns_main, "\n");
+  APPEND_BODY("# HELP connected_clients Number of connected clients\n");
+  APPEND_BODY("# TYPE connected_clients gauge\n");
+  APPEND_BODY("connected_clients ", conn.num_conns_main, "\n");
 
-  absl::StrAppend(&body, "# HELP blocked_clients Number of blocked clients\n");
-  absl::StrAppend(&body, "# TYPE blocked_clients gauge\n");
-  absl::StrAppend(&body, "blocked_clients ", conn.num_blocked_clients, "\n");
+  APPEND_BODY("# HELP blocked_clients Number of blocked clients\n");
+  APPEND_BODY("# TYPE blocked_clients gauge\n");
+  APPEND_BODY("blocked_clients ", conn.num_blocked_clients, "\n");
 
-  absl::StrAppend(&body, "# HELP num_migrations Connection migrations between threads\n");
-  absl::StrAppend(&body, "# TYPE num_migrations counter\n");
-  absl::StrAppend(&body, "num_migrations ", conn.num_migrations, "\n");
+  APPEND_BODY("# HELP num_migrations Connection migrations between threads\n");
+  APPEND_BODY("# TYPE num_migrations counter\n");
+  APPEND_BODY("num_migrations ", conn.num_migrations, "\n");
 
   // Command metrics
-  absl::StrAppend(&body, "# HELP commands_processed_total Total commands processed\n");
-  absl::StrAppend(&body, "# TYPE commands_processed_total counter\n");
-  absl::StrAppend(&body, "commands_processed_total ", conn.command_cnt_main, "\n");
+  APPEND_BODY("# HELP commands_processed_total Total commands processed\n");
+  APPEND_BODY("# TYPE commands_processed_total counter\n");
+  APPEND_BODY("commands_processed_total ", conn.command_cnt_main, "\n");
 
   // Pipeline metrics
-  absl::StrAppend(&body, "# HELP pipelined_commands_total Total pipelined commands\n");
-  absl::StrAppend(&body, "# TYPE pipelined_commands_total counter\n");
-  absl::StrAppend(&body, "pipelined_commands_total ", conn.pipelined_cmd_cnt, "\n");
+  APPEND_BODY("# HELP pipelined_commands_total Total pipelined commands\n");
+  APPEND_BODY("# TYPE pipelined_commands_total counter\n");
+  APPEND_BODY("pipelined_commands_total ", conn.pipelined_cmd_cnt, "\n");
 
-  absl::StrAppend(&body,
-                  "# HELP pipelined_commands_duration_seconds Total pipelined cmd latency\n");
-  absl::StrAppend(&body, "# TYPE pipelined_commands_duration_seconds counter\n");
-  absl::StrAppend(&body, "pipelined_commands_duration_seconds ", conn.pipelined_cmd_latency * 1e-6,
-                  "\n");
+  APPEND_BODY("# HELP pipelined_commands_duration_seconds Total pipelined cmd latency\n");
+  APPEND_BODY("# TYPE pipelined_commands_duration_seconds counter\n");
+  APPEND_BODY("pipelined_commands_duration_seconds ", conn.pipelined_cmd_latency * 1e-6, "\n");
 
-  absl::StrAppend(&body, "# HELP pipelined_wait_duration_seconds Pipeline queue wait latency\n");
-  absl::StrAppend(&body, "# TYPE pipelined_wait_duration_seconds counter\n");
-  absl::StrAppend(&body, "pipelined_wait_duration_seconds ", conn.pipelined_wait_latency * 1e-6,
-                  "\n");
+  APPEND_BODY("# HELP pipelined_wait_duration_seconds Pipeline queue wait latency\n");
+  APPEND_BODY("# TYPE pipelined_wait_duration_seconds counter\n");
+  APPEND_BODY("pipelined_wait_duration_seconds ", conn.pipelined_wait_latency * 1e-6, "\n");
 
-  absl::StrAppend(&body, "# HELP pipeline_queue_length Pending commands in pipeline queue\n");
-  absl::StrAppend(&body, "# TYPE pipeline_queue_length gauge\n");
-  absl::StrAppend(&body, "pipeline_queue_length ", conn.pipeline_queue_entries, "\n");
+  APPEND_BODY("# HELP pipeline_queue_length Pending commands in pipeline queue\n");
+  APPEND_BODY("# TYPE pipeline_queue_length gauge\n");
+  APPEND_BODY("pipeline_queue_length ", conn.pipeline_queue_entries, "\n");
 
-  absl::StrAppend(&body, "# HELP pipeline_throttle_total Pipeline throttle events\n");
-  absl::StrAppend(&body, "# TYPE pipeline_throttle_total counter\n");
-  absl::StrAppend(&body, "pipeline_throttle_total ", conn.pipeline_throttle_count, "\n");
+  APPEND_BODY("# HELP pipeline_throttle_total Pipeline throttle events\n");
+  APPEND_BODY("# TYPE pipeline_throttle_total counter\n");
+  APPEND_BODY("pipeline_throttle_total ", conn.pipeline_throttle_count, "\n");
 
-  absl::StrAppend(&body, "# HELP pipeline_dispatch_calls_total Pipeline batch dispatch calls\n");
-  absl::StrAppend(&body, "# TYPE pipeline_dispatch_calls_total counter\n");
-  absl::StrAppend(&body, "pipeline_dispatch_calls_total ", conn.pipeline_dispatch_calls, "\n");
+  APPEND_BODY("# HELP pipeline_dispatch_calls_total Pipeline batch dispatch calls\n");
+  APPEND_BODY("# TYPE pipeline_dispatch_calls_total counter\n");
+  APPEND_BODY("pipeline_dispatch_calls_total ", conn.pipeline_dispatch_calls, "\n");
 
-  absl::StrAppend(&body,
-                  "# HELP pipeline_dispatch_commands_total Commands via pipeline dispatch\n");
-  absl::StrAppend(&body, "# TYPE pipeline_dispatch_commands_total counter\n");
-  absl::StrAppend(&body, "pipeline_dispatch_commands_total ", conn.pipeline_dispatch_commands,
-                  "\n");
+  APPEND_BODY("# HELP pipeline_dispatch_commands_total Commands via pipeline dispatch\n");
+  APPEND_BODY("# TYPE pipeline_dispatch_commands_total counter\n");
+  APPEND_BODY("pipeline_dispatch_commands_total ", conn.pipeline_dispatch_commands, "\n");
 
-  absl::StrAppend(&body,
-                  "# HELP pipeline_dispatch_flush_seconds Pipeline dispatch flush duration\n");
-  absl::StrAppend(&body, "# TYPE pipeline_dispatch_flush_seconds counter\n");
-  absl::StrAppend(&body, "pipeline_dispatch_flush_seconds ",
-                  conn.pipeline_dispatch_flush_usec * 1e-6, "\n");
+  APPEND_BODY("# HELP pipeline_dispatch_flush_seconds Pipeline dispatch flush duration\n");
+  APPEND_BODY("# TYPE pipeline_dispatch_flush_seconds counter\n");
+  APPEND_BODY("pipeline_dispatch_flush_seconds ", conn.pipeline_dispatch_flush_usec * 1e-6, "\n");
 
-  absl::StrAppend(&body, "# TYPE pipeline_dispatch_flush_total counter\n");
-  absl::StrAppend(&body, "pipeline_dispatch_flush_total ", conn.pipeline_dispatch_flush_count,
-                  "\n");
+  APPEND_BODY("# TYPE pipeline_dispatch_flush_total counter\n");
+  APPEND_BODY("pipeline_dispatch_flush_total ", conn.pipeline_dispatch_flush_count, "\n");
 
   // Network I/O metrics
-  absl::StrAppend(&body, "# HELP net_input_bytes_total Total bytes read from network\n");
-  absl::StrAppend(&body, "# TYPE net_input_bytes_total counter\n");
-  absl::StrAppend(&body, "net_input_bytes_total ", conn.io_read_bytes, "\n");
+  APPEND_BODY("# HELP net_input_bytes_total Total bytes read from network\n");
+  APPEND_BODY("# TYPE net_input_bytes_total counter\n");
+  APPEND_BODY("net_input_bytes_total ", conn.io_read_bytes, "\n");
 
-  absl::StrAppend(&body, "# HELP net_output_bytes_total Total bytes written to network\n");
-  absl::StrAppend(&body, "# TYPE net_output_bytes_total counter\n");
-  absl::StrAppend(&body, "net_output_bytes_total ", reply.io_write_bytes, "\n");
+  APPEND_BODY("# HELP net_output_bytes_total Total bytes written to network\n");
+  APPEND_BODY("# TYPE net_output_bytes_total counter\n");
+  APPEND_BODY("net_output_bytes_total ", reply.io_write_bytes, "\n");
 
-  absl::StrAppend(&body, "# HELP net_input_recv_total Total read syscalls\n");
-  absl::StrAppend(&body, "# TYPE net_input_recv_total counter\n");
-  absl::StrAppend(&body, "net_input_recv_total ", conn.io_read_cnt, "\n");
+  APPEND_BODY("# HELP net_input_recv_total Total read syscalls\n");
+  APPEND_BODY("# TYPE net_input_recv_total counter\n");
+  APPEND_BODY("net_input_recv_total ", conn.io_read_cnt, "\n");
 
-  absl::StrAppend(&body, "# HELP net_output_send_total Total write syscalls\n");
-  absl::StrAppend(&body, "# TYPE net_output_send_total counter\n");
-  absl::StrAppend(&body, "net_output_send_total ", reply.io_write_cnt, "\n");
+  APPEND_BODY("# HELP net_output_send_total Total write syscalls\n");
+  APPEND_BODY("# TYPE net_output_send_total counter\n");
+  APPEND_BODY("net_output_send_total ", reply.io_write_cnt, "\n");
 
-  absl::StrAppend(&body, "# HELP net_read_yields_total Read yields due to busy limit\n");
-  absl::StrAppend(&body, "# TYPE net_read_yields_total counter\n");
-  absl::StrAppend(&body, "net_read_yields_total ", conn.num_read_yields, "\n");
+  APPEND_BODY("# HELP net_read_yields_total Read yields due to busy limit\n");
+  APPEND_BODY("# TYPE net_read_yields_total counter\n");
+  APPEND_BODY("net_read_yields_total ", conn.num_read_yields, "\n");
 
   // Reply metrics
-  absl::StrAppend(&body, "# HELP reply_total Total reply send calls\n");
-  absl::StrAppend(&body, "# TYPE reply_total counter\n");
-  absl::StrAppend(&body, "reply_total ", reply.send_stats.count, "\n");
+  APPEND_BODY("# HELP reply_total Total reply send calls\n");
+  APPEND_BODY("# TYPE reply_total counter\n");
+  APPEND_BODY("reply_total ", reply.send_stats.count, "\n");
 
-  absl::StrAppend(&body, "# HELP reply_duration_seconds Total reply send duration\n");
-  absl::StrAppend(&body, "# TYPE reply_duration_seconds counter\n");
-  absl::StrAppend(&body, "reply_duration_seconds ",
-                  base::CycleClock::ToUsec(reply.send_stats.total_duration) * 1e-6, "\n");
+  APPEND_BODY("# HELP reply_duration_seconds Total reply send duration\n");
+  APPEND_BODY("# TYPE reply_duration_seconds counter\n");
+  APPEND_BODY("reply_duration_seconds ",
+              base::CycleClock::ToUsec(reply.send_stats.total_duration) * 1e-6, "\n");
 
   util::http::StringResponse resp = util::http::MakeStringResponse(h2::status::ok);
   util::http::SetMime(util::http::kTextMime, &resp);
@@ -426,12 +536,11 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   // producers (connection fibers) only touch the lock-free queue + EventCount.
   const unsigned num_shards = pool->size();
   const uint32_t fq_size = GetFlag(FLAGS_fq_size);
-  g_shard_queues.resize(num_shards);
-  g_shard_consumers.resize(num_shards);
+  g_shards.resize(num_shards);
   pool->AwaitFiberOnAll([fq_size](unsigned index, ProactorBase*) {
-    g_shard_queues[index] = make_unique<fb2::FiberQueue>(fq_size);
-    g_shard_consumers[index] =
-        fb2::Fiber(absl::StrCat("shard_q", index), [index] { g_shard_queues[index]->Run(); });
+    g_shards[index].queue = make_unique<fb2::FiberQueue>(fq_size);
+    g_shards[index].consumer =
+        fb2::Fiber(absl::StrCat("shard_q", index), [index] { g_shards[index].queue->Run(); });
   });
 
   acceptor->AddListener(GetFlag(FLAGS_port),
@@ -442,11 +551,11 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   // Stop each consumer fiber on its owning proactor thread and join it there.
   pool->AwaitFiberOnAll([](unsigned index, ProactorBase*) {
-    g_shard_queues[index]->Shutdown();
-    g_shard_consumers[index].Join();
+    g_shards[index].queue->Shutdown();
+    g_shards[index].consumer.Join();
+    g_shards[index].db.clear();
   });
-  g_shard_consumers.clear();
-  g_shard_queues.clear();
+  g_shards.clear();
 }
 
 }  // namespace
@@ -459,6 +568,42 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 #define USE_URING 0
 #endif
 
+void RegisterBufRings(util::ProactorPool* pool) {
+#ifdef __linux__
+  auto bufcnt = GetFlag(FLAGS_uring_recv_buffer_cnt);
+  if (bufcnt == 0) {
+    return;
+  }
+
+  if (pool->at(0)->GetKind() != util::ProactorBase::IOURING) {
+    LOG(WARNING) << "uring_recv_buffer_cnt requires io_uring proactor";
+    return;
+  }
+
+  base::sys::KernelVersion kver;
+  base::sys::GetKernelVersion(&kver);
+  unsigned ver = kver.kernel * 100 + kver.major;
+  if (ver < 602) {
+    LOG(WARNING) << "uring_recv_buffer_cnt requires kernel >= 6.2";
+    return;
+  }
+
+  CHECK_LE(bufcnt, 16384u);
+
+  bufcnt = absl::bit_ceil(bufcnt);
+  pool->AwaitBrief([&](unsigned, util::ProactorBase* pb) {
+    auto* up = static_cast<fb2::UringProactor*>(pb);
+    int res = up->RegisterBufferRing(facade::kRecvSockGid, bufcnt, facade::kRecvBufSize);
+    if (res != 0) {
+      LOG(ERROR) << "Failed to register buf ring: " << util::detail::SafeErrorMessage(res);
+      exit(1);
+    }
+  });
+  LOG(INFO) << "Registered a bufring with " << bufcnt << " buffers of size " << facade::kRecvBufSize
+            << " per thread";
+#endif
+}
+
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
@@ -470,6 +615,8 @@ int main(int argc, char* argv[]) {
   unique_ptr<util::ProactorPool> pp(fb2::Pool::Epoll());
 #endif
   pp->Run();
+
+  RegisterBufRings(pp.get());
 
   AcceptServer acceptor(pp.get());
   facade::RunEngine(pp.get(), &acceptor);
