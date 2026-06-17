@@ -45,6 +45,10 @@ ABSL_FLAG(uint32_t, fq_size, 256, "per-shard FiberQueue capacity");
 ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
           "How many buffer ring entries to allocate per thread for io_uring receive operations. "
           "Relevant only for modern kernels with io_uring enabled");
+// No-op flags accepted for compatibility with Dragonfly invocation patterns.
+// ok_backend always binds on all interfaces (AcceptServer default) and has no persistence.
+ABSL_FLAG(std::string, bind, "", "Bind address (no-op in ok_backend)");
+ABSL_FLAG(std::string, dbfilename, "", "DB filename (no-op in ok_backend)");
 
 using namespace util;
 using namespace std;
