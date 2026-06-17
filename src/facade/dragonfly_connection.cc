@@ -2825,6 +2825,15 @@ void Connection::DestroyParsedQueue() {
   parsed_cmd_ = nullptr;
 }
 
+ParsedCommand* Connection::AdvanceToExecute() {
+  DCHECK(parsed_to_execute_ != nullptr);
+  DCHECK_GT(dispatch_waiting_count_, 0u);
+
+  --dispatch_waiting_count_;
+  parsed_to_execute_ = parsed_to_execute_->next;
+  return parsed_to_execute_;
+}
+
 void Connection::UpdateFromFlags() {
   unsigned tid = fb2::ProactorBase::me()->GetPoolIndex();
   thread_queue_backpressure[tid].pipeline_queue_max_len = GetFlag(FLAGS_pipeline_queue_limit);

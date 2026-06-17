@@ -523,11 +523,7 @@ class Connection : public util::Connection {
 
   // Advance parsed_to_execute_ past the command it currently points at (now dispatched), keeping
   // dispatch_waiting_count_ in sync. Returns the new parsed_to_execute_.
-  ParsedCommand* AdvanceToExecute() {
-    --dispatch_waiting_count_;
-    parsed_to_execute_ = parsed_to_execute_->next;
-    return parsed_to_execute_;
-  }
+  ParsedCommand* AdvanceToExecute();
 
   // Dispatch Queue - Queue for the Control Path.
   // Handles asynchronous administrative tasks, events, and high-priority control
