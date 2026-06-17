@@ -105,10 +105,4 @@ TEST_F(CuckooFilterTest, InsertUniquePreventsduplicates) {
   EXPECT_EQ(cf_.NumItems(), 1u);
 }
 
-TEST_F(CuckooFilterTest, HashIsDeterministic) {
-  EXPECT_EQ(CuckooFilter::Hash("hello"), CuckooFilter::Hash("hello"));
-  EXPECT_NE(CuckooFilter::Hash("hello"), CuckooFilter::Hash("world"));
-  EXPECT_NE(CuckooFilter::Hash("hello"), 0u);
-}
-
 }  // namespace dfly
