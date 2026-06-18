@@ -15,6 +15,7 @@
 #include "absl/types/span.h"
 #include "base/cycle_clock.h"
 #include "base/logging.h"
+#include "common/borrowed_string.h"
 #include "facade/error.h"
 #include "util/fibers/proactor_base.h"
 
@@ -344,7 +345,7 @@ void RedisReplyBuilderBase::SendBulkString(std::string_view str) {
   WritePieces(kCRLF);
 }
 
-void RedisReplyBuilderBase::SendBulkStringBorrowed(cmn::BorrowedString bs) {
+void RedisReplyBuilderBase::SendBulkStringBorrowed(const cmn::BorrowedString& bs) {
   ReplyScope scope(this);
   tl_facade_stats->reply_stats.borrowed_string_sent_cnt++;
 
@@ -359,29 +360,10 @@ void RedisReplyBuilderBase::SendBulkStringBorrowed(cmn::BorrowedString bs) {
     WriteRef(bs.view());
   }
   WritePieces(kCRLF);
-
-  // Drain all iovecs (including any WriteRef into bs.view()) before this
-  // function returns. ~BorrowedString releases the pin afterward — by then
-  // the source bytes are already in the kernel.
-  Flush();
 }
 
-void RedisReplyBuilderBase::SendBulkStringBorrowedRef(const cmn::BorrowedString& bs) {
-  ReplyScope scope(this);
-  tl_facade_stats->reply_stats.borrowed_string_sent_cnt++;
-
-  auto* ops = cmn::BorrowedStringOps::Get();
-  size_t total = ops->DecodedSize(bs);
-
-  DVLOG(1) << "SendBulkBorrowedRef " << total << " enc=" << unsigned(bs.encoding());
-  WritePieces(kLengthPrefix, total, kCRLF);
-  if (bs.IsEncoded()) {
-    WriteDecodedAscii(bs);
-  } else {
-    WriteRef(bs.view());
-  }
-  WritePieces(kCRLF);
-  // No flush — caller guarantees bs outlives any enqueued refs.
+void RedisReplyBuilderBase::SendBulkStringBorrowed(cmn::BorrowedString&& bs) {
+  SendBulkStringBorrowed(static_cast<const cmn::BorrowedString&>(bs));
 }
 
 void RedisReplyBuilderBase::SendLong(long val) {

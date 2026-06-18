@@ -56,7 +56,7 @@ void CapturingReplyBuilder::SendBulkString(std::string_view str) {
 
 // Capture the borrow into the payload, extending the pin's lifetime until
 // replay moves it into the real sink where it is parked across the writev.
-void CapturingReplyBuilder::SendBulkStringBorrowed(cmn::BorrowedString bs) {
+void CapturingReplyBuilder::SendBulkStringBorrowed(cmn::BorrowedString&& bs) {
   SKIP_LESS(ReplyMode::FULL);
   Capture(std::move(bs));
 }
@@ -130,8 +130,8 @@ struct CaptureVisitor {
     static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs);
   }
 
-  void operator()(cmn::BorrowedString bs) {
-    static_cast<RedisReplyBuilder*>(rb)->SendBulkStringBorrowed(std::move(bs));
+  void operator()(const cmn::BorrowedString& bs) {
+    static_cast<RedisReplyBuilder*>(rb)->SendBulkStringBorrowed(bs);
   }
 
   void operator()(payload::Null) {
@@ -160,70 +160,17 @@ struct CaptureVisitor {
   SinkReplyBuilder* rb;
 };
 
-// Const-ref visitor: replays a payload without consuming it. String views into the payload
-// remain valid after the visit, which is required for batched ReplyScope use.
-struct ConstCaptureVisitor {
-  void operator()(monostate) {
-  }
-
-  void operator()(long v) {
-    rb->SendLong(v);
-  }
-
-  void operator()(double v) {
-    static_cast<RedisReplyBuilder*>(rb)->SendDouble(v);
-  }
-
-  void operator()(const payload::SimpleString& ss) {
-    rb->SendSimpleString(ss);
-  }
-
-  void operator()(const payload::BulkString& bs) {
-    static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs);
-  }
-
-  void operator()(const cmn::BorrowedString& bs) {
-    static_cast<RedisReplyBuilderBase*>(rb)->SendBulkStringBorrowedRef(bs);
-  }
-
-  void operator()(payload::Null) {
-    static_cast<RedisReplyBuilder*>(rb)->SendNull();
-  }
-
-  void operator()(const payload::Error& err) {
-    rb->SendError(err->first, err->second);
-  }
-
-  void operator()(const unique_ptr<payload::CollectionPayload>& cp) {
-    auto* builder = static_cast<RedisReplyBuilder*>(rb);
-    if (!cp) {
-      builder->SendNullArray();
-      return;
-    }
-    if (cp->len == 0 && cp->type == CollectionType::ARRAY) {
-      builder->SendEmptyArray();
-      return;
-    }
-    builder->StartCollection(cp->len, cp->type);
-    for (const auto& pl : cp->arr)
-      visit(*this, pl);
-  }
-
-  SinkReplyBuilder* rb;
-};
-
 void CapturingReplyBuilder::Apply(Payload&& pl, SinkReplyBuilder* rb) {
   if (auto* crb = dynamic_cast<CapturingReplyBuilder*>(rb); crb != nullptr) {
     crb->SendDirect(std::move(pl));
     return;
   }
 
-  CaptureVisitor cv{rb};
-  visit(cv, std::move(pl));
+  Apply(static_cast<const Payload&>(pl), rb);
 }
 
 void CapturingReplyBuilder::Apply(const Payload& pl, SinkReplyBuilder* rb) {
-  ConstCaptureVisitor cv{rb};
+  CaptureVisitor cv{rb};
   visit(cv, pl);
 }
 

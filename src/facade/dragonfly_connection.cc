@@ -1796,21 +1796,22 @@ void Connection::SquashPipeline() {
     return;
   }
 
-  // Send the deferred replies in linked-list order, then release the commands.
-  // Wrap all replies under a single ReplyScope so the reply builder can use vectorized IO
-  // (writev) with zero intermediate copies — string refs stay valid until we release commands.
+  // Send all replies under a ReplyScope before releasing the commands.
+  // This allows the reply builder to flush without copies
   {
     SinkReplyBuilder::ReplyScope scope(reply_builder_.get());
     auto* cmd = parsed_head_;
-    for (unsigned i = 0; i < squashed && cmd; ++i) {
+    for (unsigned i = 0; i < squashed && cmd; i++, cmd = cmd->next) {
       DCHECK(cmd->CanReply());
+      // TODO: Coroutine replies don't preserve lifetimes after running, so pause the scope
+      std::optional<SinkReplyBuilder::ScopePause> pause;
+      if (cmd->IsSuspendedReply())
+        pause.emplace(reply_builder_.get());
       cmd->SendReply();
       conn_stats.pipelined_wait_latency += CycleClock::ToUsec(start - cmd->parsed_cycle);
-      cmd = cmd->next;
     }
   }
 
-  // Release all commands after the scope has flushed — refs into payloads are no longer needed.
   for (unsigned i = 0; i < squashed && parsed_head_; ++i) {
     auto* current = parsed_head_;
     auto* next = current->next;
