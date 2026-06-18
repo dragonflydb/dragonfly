@@ -622,6 +622,20 @@ TEST_F(GenericFamilyTest, Move) {
   fb_blpop.Join();
 }
 
+TEST_F(GenericFamilyTest, MoveUpdatesMemoryAccounting) {
+  EXPECT_EQ(1, CheckedInt({"lpush", "list", "elem"}));
+
+  Metrics metrics = GetMetrics();
+  size_t list_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  ASSERT_GT(list_usage, 0);
+
+  EXPECT_THAT(Run({"move", "list", "1"}), IntArg(1));
+
+  metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].memory_usage_by_type[OBJ_LIST], 0u);
+  EXPECT_EQ(metrics.db_stats[1].memory_usage_by_type[OBJ_LIST], list_usage);
+}
+
 using testing::AnyOf;
 using testing::Each;
 using testing::StartsWith;
