@@ -1209,9 +1209,11 @@ void QList::DelNode(Node* node) {
    * now have compressed nodes needing to be decompressed. */
   CompressByDepth(NULL);
 
-  // Head and tail must always be uncompressed. A deletion may promote a
-  // ZSTD-compressed interior node to head or tail.
+  // Head and tail must always be materialized and uncompressed. A deletion may promote an
+  // offloaded, pending, or ZSTD-compressed interior node to head or tail.
   if (head_) {
+    Materialize(head_);
+    Materialize(head_->prev);
     if (head_->IsCompressed()) {
       malloc_size_ += TryDecompressInternal(false, head_);
     }

@@ -1021,6 +1021,26 @@ TEST_F(ListNodeTieringTest, RPopStashedNodes) {
   EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
 }
 
+TEST_F(ListNodeTieringTest, PushAfterOffloadedNodePromotedToTail) {
+  // Allow appending into an existing tail listpack after it is promoted by LTRIM.
+  SetFlag(&FLAGS_list_max_listpack_size, -2);
+
+  const int kItems = 10;
+  for (int i = 0; i < kItems; i++) {
+    Run({"RPUSH", "mylist", BuildString(3000, static_cast<char>('A' + i))});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  const int kTrimmedItems = 6;
+  EXPECT_EQ(Run({"LTRIM", "mylist", "0", "5"}), "OK");
+
+  string appended = BuildString(64, 'z');
+  EXPECT_THAT(Run({"RPUSH", "mylist", appended}), IntArg(kTrimmedItems + 1));
+  EXPECT_EQ(Run({"RPOP", "mylist"}), appended);
+  EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kTrimmedItems));
+}
+
 // Test MEMORY DECOMMIT COOL command flushes the cool queue
 TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
   absl::FlagSaver saver;
