@@ -1,0 +1,203 @@
+{
+  "configuration": {
+    "server": "10.0.0.10",
+    "port": 6380,
+    "clients": 400,
+    "threads": 8,
+    "pipeline": 1,
+    "ratio": "0:1"
+  },
+  "ALL STATS": {
+    "Runtime": {
+      "Total duration": 30000
+    },
+    "Gets": {
+      "Count": 24384570,
+      "Average Latency": 286.4,
+      "Percentile 50.00": 382,
+      "Percentile 99.00": 1007,
+      "Time-Serie": {
+        "0": {
+          "Count": 796838,
+          "Average Latency": 302.1,
+          "Percentile 50.00": 403,
+          "Percentile 99.00": 1007
+        },
+        "1": {
+          "Count": 804382,
+          "Average Latency": 281.4,
+          "Percentile 50.00": 375,
+          "Percentile 99.00": 938
+        },
+        "2": {
+          "Count": 803775,
+          "Average Latency": 281.7,
+          "Percentile 50.00": 376,
+          "Percentile 99.00": 939
+        },
+        "3": {
+          "Count": 816775,
+          "Average Latency": 301.2,
+          "Percentile 50.00": 402,
+          "Percentile 99.00": 1004
+        },
+        "4": {
+          "Count": 824695,
+          "Average Latency": 293.1,
+          "Percentile 50.00": 391,
+          "Percentile 99.00": 977
+        },
+        "5": {
+          "Count": 809416,
+          "Average Latency": 273.3,
+          "Percentile 50.00": 364,
+          "Percentile 99.00": 911
+        },
+        "6": {
+          "Count": 824110,
+          "Average Latency": 271.8,
+          "Percentile 50.00": 362,
+          "Percentile 99.00": 906
+        },
+        "7": {
+          "Count": 825641,
+          "Average Latency": 272.7,
+          "Percentile 50.00": 364,
+          "Percentile 99.00": 909
+        },
+        "8": {
+          "Count": 824650,
+          "Average Latency": 299.7,
+          "Percentile 50.00": 400,
+          "Percentile 99.00": 999
+        },
+        "9": {
+          "Count": 806939,
+          "Average Latency": 296.1,
+          "Percentile 50.00": 395,
+          "Percentile 99.00": 987
+        },
+        "10": {
+          "Count": 802613,
+          "Average Latency": 272.4,
+          "Percentile 50.00": 363,
+          "Percentile 99.00": 908
+        },
+        "11": {
+          "Count": 802805,
+          "Average Latency": 297.0,
+          "Percentile 50.00": 396,
+          "Percentile 99.00": 990
+        },
+        "12": {
+          "Count": 801901,
+          "Average Latency": 302.4,
+          "Percentile 50.00": 403,
+          "Percentile 99.00": 1008
+        },
+        "13": {
+          "Count": 802131,
+          "Average Latency": 290.7,
+          "Percentile 50.00": 388,
+          "Percentile 99.00": 969
+        },
+        "14": {
+          "Count": 814721,
+          "Average Latency": 279.9,
+          "Percentile 50.00": 373,
+          "Percentile 99.00": 933
+        },
+        "15": {
+          "Count": 823009,
+          "Average Latency": 286.8,
+          "Percentile 50.00": 382,
+          "Percentile 99.00": 956
+        },
+        "16": {
+          "Count": 821213,
+          "Average Latency": 271.8,
+          "Percentile 50.00": 362,
+          "Percentile 99.00": 906
+        },
+        "17": {
+          "Count": 810384,
+          "Average Latency": 267.6,
+          "Percentile 50.00": 357,
+          "Percentile 99.00": 892
+        },
+        "18": {
+          "Count": 815589,
+          "Average Latency": 302.1,
+          "Percentile 50.00": 403,
+          "Percentile 99.00": 1007
+        },
+        "19": {
+          "Count": 819989,
+          "Average Latency": 290.4,
+          "Percentile 50.00": 387,
+          "Percentile 99.00": 968
+        },
+        "20": {
+          "Count": 798543,
+          "Average Latency": 286.2,
+          "Percentile 50.00": 382,
+          "Percentile 99.00": 954
+        },
+        "21": {
+          "Count": 815817,
+          "Average Latency": 300.9,
+          "Percentile 50.00": 401,
+          "Percentile 99.00": 1003
+        },
+        "22": {
+          "Count": 823293,
+          "Average Latency": 282.9,
+          "Percentile 50.00": 377,
+          "Percentile 99.00": 943
+        },
+        "23": {
+          "Count": 819469,
+          "Average Latency": 298.5,
+          "Percentile 50.00": 398,
+          "Percentile 99.00": 995
+        },
+        "24": {
+          "Count": 818504,
+          "Average Latency": 297.0,
+          "Percentile 50.00": 396,
+          "Percentile 99.00": 990
+        },
+        "25": {
+          "Count": 810340,
+          "Average Latency": 274.8,
+          "Percentile 50.00": 366,
+          "Percentile 99.00": 916
+        },
+        "26": {
+          "Count": 801355,
+          "Average Latency": 276.3,
+          "Percentile 50.00": 368,
+          "Percentile 99.00": 921
+        },
+        "27": {
+          "Count": 819674,
+          "Average Latency": 277.8,
+          "Percentile 50.00": 370,
+          "Percentile 99.00": 926
+        },
+        "28": {
+          "Count": 805975,
+          "Average Latency": 275.7,
+          "Percentile 50.00": 368,
+          "Percentile 99.00": 919
+        },
+        "29": {
+          "Count": 820024,
+          "Average Latency": 288.3,
+          "Percentile 50.00": 384,
+          "Percentile 99.00": 961
+        }
+      }
+    }
+  }
+}
