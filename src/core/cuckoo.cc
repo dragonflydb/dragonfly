@@ -9,9 +9,41 @@
 #include <cmath>
 #include <numeric>
 
+#include "absl/numeric/bits.h"
 #include "base/logging.h"
 
 namespace dfly {
+
+namespace {
+
+bool IsPowerOfTwo(uint64_t n) {
+  return absl::has_single_bit(n);
+}
+
+uint64_t NextPowerOfTwo(uint64_t n) {
+  return absl::bit_ceil(n);
+}
+
+// Result is in [1, 255] — 0 is reserved as "empty slot".
+uint8_t Fingerprint(uint64_t hash) {
+  return static_cast<uint8_t>(hash % 255 + 1);
+}
+
+// 0x5bd1e995 is the MurmurHash2 mixing constant (Austin Appleby),
+// chosen for good bit-avalanche properties.
+// AltIndex symmetry requires num_buckets to be a power of two. Power-of-2 modulo
+// is a bitmask (x % N == x & (N-1)), and bitmasks commute with XOR:
+//   (a XOR b) & mask == (a & mask) XOR (b & mask)
+// This means AltIndex(fp, h1 & mask) & mask == AltIndex(fp, h1) & mask, so
+//   AltIndex(fp, AltIndex(fp, i) % N) % N == i % N  holds.
+// With arbitrary N, modulo is not a bitmask and the identity breaks, corrupting
+// KO-insert rollback and deletions.
+// Requirement from: Fan et al., "Cuckoo Filter: Practically Better Than Bloom" (2014).
+uint64_t AltIndex(uint8_t fp, uint64_t index) {
+  return index ^ (static_cast<uint64_t>(fp) * 0x5bd1e995);
+}
+
+}  // namespace
 
 CuckooFilter::CuckooFilter(uint64_t capacity, std::pmr::memory_resource* mr,
                            uint8_t slots_per_bucket, uint16_t max_iterations, uint16_t expansion)
@@ -158,6 +190,9 @@ bool CuckooFilter::KOInsert(const LookupParams& p, SubFilter& sf) {
   uint8_t victim_slot = 0;
 
   for (uint16_t i = 0; i < max_iterations_; ++i) {
+    // Evict the fingerprint at victim_slot in bucket idx and take its place.
+    // Then jump to the evicted fingerprint's alternate bucket and try to place it there.
+    // victim_slot cycles across slots to avoid getting stuck in displacement cycles.
     std::swap(sf[idx * slots_per_bucket_ + victim_slot], fp);
     idx = AltIndex(fp, idx) % n;
 

@@ -4,14 +4,11 @@
 
 #pragma once
 
-#include <cmath>
 #include <cstdint>
 #include <memory_resource>
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#include "absl/numeric/bits.h"
 
 namespace dfly {
 
@@ -37,7 +34,7 @@ class CuckooFilter {
 
   // Returns true if hash is present in the filter. May return false positives
   // but never false negatives.
-  // TODO(kostas): SIMD for the inner bucket scan. Establish a baseline bench and then add SIMD..
+  // TODO(kostas): SIMD for the inner bucket scan. Establish a baseline bench and then add SIMD.
   bool Exists(uint64_t hash) const;
 
   // Removes one occurrence of hash from the filter. Returns true if found and removed.
@@ -65,39 +62,6 @@ class CuckooFilter {
     uint64_t h1;  // raw (unmodded) first candidate index
     uint64_t h2;  // raw (unmodded) alternate index
   };
-
-  static bool IsPowerOfTwo(uint64_t n) {
-    return absl::has_single_bit(n);
-  }
-
-  static uint64_t NextPowerOfTwo(uint64_t n) {
-    return absl::bit_ceil(n);
-  }
-
-  // Result is in [1, 255] — 0 is reserved as "empty slot".
-  static uint8_t Fingerprint(uint64_t hash) {
-    return static_cast<uint8_t>(hash % 255 + 1);
-  }
-
-  // 0x5bd1e995 is the MurmurHash2 mixing constant (Austin Appleby),
-  // chosen for good bit-avalanche properties.
-  // AltIndex symmetry requires num_buckets to be a power of two. Power-of-2 modulo
-  // is a bitmask (x % N == x & (N-1)), and bitmasks commute with XOR:
-  //   (a XOR b) & mask == (a & mask) XOR (b & mask)
-  // This means AltIndex(fp, h1 & mask) & mask == AltIndex(fp, h1) & mask, so
-  //   AltIndex(fp, AltIndex(fp, i) % N) % N == i % N  holds.
-  // With arbitrary N, modulo is not a bitmask and the identity breaks, corrupting
-  // KO-insert rollback and deletions.
-  // Requirement from: Fan et al., "Cuckoo Filter: Practically Better Than Bloom" (2014).
-  static uint64_t AltIndex(uint8_t fp, uint64_t index) {
-    return index ^ (static_cast<uint64_t>(fp) * 0x5bd1e995);
-  }
-
-  // Returns the number of buckets for SubFilter at position i.
-  // Each successive SubFilter grows by expansion^i relative to base num_buckets_.
-  static uint64_t SubFilterBucketCount(uint64_t num_buckets, uint64_t expansion, size_t i) {
-    return num_buckets * static_cast<uint64_t>(std::pow(expansion, i));
-  }
 
   LookupParams LookupParamsFromHash(uint64_t hash) const;
 
