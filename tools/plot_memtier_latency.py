@@ -29,10 +29,8 @@ Note: If plotly is not available, falls back to static SVG charts.
 
 import json
 import matplotlib.pyplot as plt
-import numpy as np
 from pathlib import Path
 import webbrowser
-import tempfile
 import os
 
 # Try to import plotly for interactive charts
@@ -162,13 +160,18 @@ def plot_latency_chart_interactive(data, output_file="latency_chart.html", open_
         specs = [[{"secondary_y": False}] for _ in range(rows)]
         subplot_titles = [f"{op} Latency" for op in operations] + ["Throughput"]
 
+    # Plotly's default subplot title placement gets cramped once we have multiple rows.
+    # Use a taller layout and more inter-row spacing so titles do not overlap the plots below.
+    vertical_spacing = 0.18 if rows == 2 else 0.14
+    figure_height = 360 * rows
+
     # Create subplots
     fig = make_subplots(
         rows=rows,
         cols=cols,
         subplot_titles=subplot_titles,
         specs=specs,
-        vertical_spacing=0.12,
+        vertical_spacing=vertical_spacing,
         horizontal_spacing=0.1,
     )
 
@@ -289,11 +292,15 @@ def plot_latency_chart_interactive(data, output_file="latency_chart.html", open_
     # Update layout
     fig.update_layout(
         title_text="Memtier Benchmark - Latency Analysis (Interactive - Click legend to toggle)",
-        height=300 * rows,
+        height=figure_height,
         hovermode="x unified",
         showlegend=True,
         legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
+        margin=dict(t=110, b=120, l=80, r=220),
     )
+
+    for annotation in fig.layout.annotations[: len(subplot_titles)]:
+        annotation.update(font=dict(size=13), yshift=12)
 
     # Add annotation with statistics
     stats_lines = ["<b>Overall Statistics (last 3 seconds excluded):</b><br>"]
@@ -482,7 +489,7 @@ def print_summary(data):
     config = data["configuration"]
     runtime = data["ALL STATS"]["Runtime"]
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  Server: {config['server']}:{config['port']}")
     print(f"  Clients: {config['clients']}")
     print(f"  Threads: {config['threads']}")
@@ -534,10 +541,10 @@ def main():
     if not Path(input_file).exists():
         print(f"Error: Input file '{input_file}' not found!")
         print(f"\nUsage: {sys.argv[0]} [input_file.json] [output_file.html|.svg]")
-        print(f"\nTo generate the JSON file, run memtier_benchmark with --json-out-file:")
-        print(f"  memtier_benchmark --server <host> --port <port> \\")
-        print(f"      --json-out-file memtier_out.json \\")
-        print(f"      [other options...]")
+        print("\nTo generate the JSON file, run memtier_benchmark with --json-out-file:")
+        print("  memtier_benchmark --server <host> --port <port> \\")
+        print("      --json-out-file memtier_out.json \\")
+        print("      [other options...]")
         sys.exit(1)
 
     # Load and process data
@@ -548,7 +555,7 @@ def main():
     print_summary(data)
 
     # Generate chart
-    print(f"Generating latency chart...")
+    print("Generating latency chart...")
 
     # Use interactive chart if output is .html, otherwise use matplotlib
     if output_file.endswith(".html"):
@@ -556,9 +563,9 @@ def main():
     else:
         plot_latency_chart(data, output_file)
 
-    print(f"\nDone!")
+    print("\nDone!")
     if PLOTLY_AVAILABLE:
-        print(f"Tip: Use .html extension for interactive charts with toggleable series")
+        print("Tip: Use .html extension for interactive charts with toggleable series")
 
 
 if __name__ == "__main__":

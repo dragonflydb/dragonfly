@@ -8,6 +8,7 @@ extern "C" {
 
 #include <absl/container/flat_hash_set.h>
 #include <absl/random/random.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
@@ -117,9 +118,9 @@ enum DistType : uint8_t { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFO
 constexpr uint16_t kNumSlots = 16384;
 constexpr uint32_t kDnsResolveTimeoutMs = 2000;
 constexpr string_view kMovedErrorKey = "MOVED"sv;
-enum class BenchOp : uint8_t { kSet = 0, kGet = 1, kUnknown = 2 };
+enum class BenchOp : int8_t { kUnknown = -1, kSet = 0, kGet = 1, kCustom = 0 };
 constexpr size_t kTrackedOpCount = 2;
-constexpr std::array<string_view, kTrackedOpCount> kTrackedOpNames = {"Sets", "Gets"};
+constexpr std::array<string_view, kTrackedOpCount> kBuiltInOpNames = {"Sets", "Gets"};
 
 static string GetRandomBlob(size_t len, bool ascii) {
   static bool is_random = GetFlag(FLAGS_random_data);
@@ -235,6 +236,19 @@ optional<pair<uint16_t, tcp::endpoint>> ParseMovedError(string_view error, Proac
 }
 
 }  // namespace
+
+vector<string> GetTrackedOpNames() {
+  const string command = GetFlag(FLAGS_command);
+
+  if (command.empty()) {
+    return {string(kBuiltInOpNames[0]), string(kBuiltInOpNames[1])};
+  }
+
+  vector<string_view> parts = absl::StrSplit(command, ' ', absl::SkipEmpty());
+  CHECK(!parts.empty()) << "--command must not be whitespace only";
+
+  return {absl::AsciiStrToUpper(parts.front())};
+}
 
 struct ShardInfo {
   vector<SlotRange> slots;  // list of [start, end] pairs. inclusive.
@@ -413,6 +427,7 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
   }
 
   vector<string_view> parts = absl::StrSplit(command_, ' ', absl::SkipEmpty());
+  CHECK(!parts.empty()) << "--command must not be whitespace only";
   for (string_view p : parts) {
     if (p == "__key__"sv) {
       cmd_parts_.emplace_back(KEY);
@@ -451,6 +466,7 @@ string CommandGenerator::Next(SlotRange range) {
   }
 
   // For custom commands, we select a random slot and then use it for key generation.
+  op_ = BenchOp::kCustom;
   uint16_t slot_id = 0;
 
   if (keygen_->IsClusterEnabled()) {
@@ -529,8 +545,8 @@ struct ClientStats {
   unsigned num_clients = 0;
 
   void AddLatencySample(BenchOp op, uint64_t usec, uint64_t elapsed_ns) {
-    unsigned index = unsigned(op);
-    if (index >= kTrackedOpCount)
+    int index = static_cast<int>(op);
+    if (index < 0 || index >= int(kTrackedOpCount))
       return;
 
     op_stats[index].Add(usec);
@@ -1230,6 +1246,20 @@ void WriteSampleStatsJson(std::ostream& os, const base::Histogram& hist, uint64_
   }
 }
 
+base::Histogram AggregateTimeSeriesSample(const ClientStats& summary, uint64_t sec) {
+  base::Histogram sample;
+
+  auto it = summary.time_series.find(sec);
+  if (it == summary.time_series.end())
+    return sample;
+
+  for (const base::Histogram& hist : it->second) {
+    sample.Merge(hist);
+  }
+
+  return sample;
+}
+
 void WriteTimeSeriesJson(std::ostream& os, const ClientStats& summary, size_t op_index,
                          uint64_t bucket_count, unsigned indent) {
   WriteIndent(os, indent);
@@ -1240,6 +1270,30 @@ void WriteTimeSeriesJson(std::ostream& os, const ClientStats& summary, size_t op
     if (auto it = summary.time_series.find(sec); it != summary.time_series.end()) {
       sample = it->second[op_index];
     }
+
+    WriteIndent(os, indent + 2);
+    os << '"' << sec << "\": {\n";
+    WriteSampleStatsJson(os, sample, 1000, indent + 4, false);
+    os << "\n";
+    WriteIndent(os, indent + 2);
+    os << '}';
+    if (sec + 1 != bucket_count) {
+      os << ',';
+    }
+    os << "\n";
+  }
+
+  WriteIndent(os, indent);
+  os << '}';
+}
+
+void WriteTotalsTimeSeriesJson(std::ostream& os, const ClientStats& summary, uint64_t bucket_count,
+                               unsigned indent) {
+  WriteIndent(os, indent);
+  os << "\"Time-Serie\": {\n";
+
+  for (uint64_t sec = 0; sec < bucket_count; ++sec) {
+    base::Histogram sample = AggregateTimeSeriesSample(summary, sec);
 
     WriteIndent(os, indent + 2);
     os << '"' << sec << "\": {\n";
@@ -1274,11 +1328,28 @@ void WriteOperationJson(std::ostream& os, string_view op_name, const ClientStats
   os << "\n";
 }
 
+void WriteTotalsJson(std::ostream& os, const ClientStats& summary, uint64_t total_ms,
+                     uint64_t bucket_count, unsigned indent, bool trailing_comma) {
+  WriteIndent(os, indent);
+  os << "\"Totals\": {\n";
+  WriteSampleStatsJson(os, summary.total_hist, total_ms, indent + 2, true);
+  os << ",\n";
+  WriteTotalsTimeSeriesJson(os, summary, bucket_count, indent + 2);
+  os << "\n";
+  WriteIndent(os, indent);
+  os << '}';
+  if (trailing_comma) {
+    os << ',';
+  }
+  os << "\n";
+}
+
 void WriteLatencyJsonReport(const ClientStats& summary, absl::Duration duration,
                             size_t thread_count) {
   const string output_path = GetFlag(FLAGS_json_out_file);
   if (output_path.empty())
     return;
+  const vector<string> op_names = GetTrackedOpNames();
 
   const uint64_t total_ms = std::max<uint64_t>(1, absl::ToInt64Milliseconds(duration));
   uint64_t bucket_count = std::max<uint64_t>(1, (total_ms + 999) / 1000);
@@ -1314,8 +1385,11 @@ void WriteLatencyJsonReport(const ClientStats& summary, absl::Duration duration,
   os << "\"Total duration\": " << total_ms << "\n";
   WriteIndent(os, 4);
   os << "},\n";
-  WriteOperationJson(os, kTrackedOpNames[0], summary, 0, total_ms, bucket_count, 4, true);
-  WriteOperationJson(os, kTrackedOpNames[1], summary, 1, total_ms, bucket_count, 4, false);
+  WriteTotalsJson(os, summary, total_ms, bucket_count, 4, !op_names.empty());
+  for (size_t i = 0; i < op_names.size(); ++i) {
+    WriteOperationJson(os, op_names[i], summary, i, total_ms, bucket_count, 4,
+                       i + 1 != op_names.size());
+  }
   WriteIndent(os, 2);
   os << "}\n";
   os << "}\n";
@@ -1503,8 +1577,6 @@ int main(int argc, char* argv[]) {
   string json_out_file = GetFlag(FLAGS_json_out_file);
 
   if (!json_out_file.empty()) {
-    CHECK(GetFlag(FLAGS_command).empty())
-        << "--json_out_file is supported only with the built-in GET/SET workload";
     CHECK(!GetFlag(FLAGS_noreply)) << "--json_out_file is not supported together with --noreply";
     CHECK(!GetFlag(FLAGS_connect_only)) << "--json_out_file requires sending benchmark commands";
   }
