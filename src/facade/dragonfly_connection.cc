@@ -2670,11 +2670,6 @@ bool Connection::ExecuteBatch() {
     }
   }
 
-  // Since we are done executing a batch, and retire_head might be called which releases commands,
-  // notify waiters that backpressure might be relieved.
-  if (ioloop_v2_) {
-    io_event_.notify();
-  }
   return true;
 }
 
@@ -2700,17 +2695,14 @@ bool Connection::ReplyBatch() {
       break;
   }
 
+  // V1: handles its pipeline batching inside AsyncFiber, so it flushes unconditionally here.
+  //
   // V2: operates as a single-fiber event loop where reading, parsing, and executing happen
   // sequentially. Because ParseLoop processes pipelines in chunks, flushing here would trigger a
   // sendmsg syscall for every single chunk. Instead, V2 delegates flushing to IoLoopV2, which
   // safely flushes the coalesced buffer right before the fiber yields (await) or when memory limits
   // are reached.
-  if (ioloop_v2_) {
-    // Since we are done replying a batch, and ReleaseParsedCommand might be called which release
-    // commands, notify waiters that backpressure might be relieved.
-    io_event_.notify();
-  } else {
-    // V1: handles its pipeline batching inside AsyncFiber, so it flushes unconditionally here.
+  if (!ioloop_v2_) {
     reply_builder_->Flush();
   }
 
