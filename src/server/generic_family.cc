@@ -950,6 +950,7 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = from_res.it->first.GetExpireTime();
   from_res.post_updater.Run();
+  RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, from_res.it->second, op_args.shard);
   PrimeValue from_obj = std::move(from_res.it->second);
 
   db_slice.Del(op_args.db_cntx, from_res.it);
@@ -957,6 +958,7 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   RETURN_ON_BAD_STATUS(op_result);
   auto& add_res = *op_result;
   add_res.it->first.SetSticky(sticky);
+  AddKeyToIndexesIfNeeded(key, target_cntx, add_res.it->second, op_args.shard);
 
   // When tiering is enabled, update tiered-storage metadata for partial moved values.
   if (EngineShard::tlocal()->tiered_storage()) {
