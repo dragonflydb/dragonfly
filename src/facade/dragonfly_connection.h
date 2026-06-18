@@ -333,6 +333,11 @@ class Connection : public util::Connection {
 
   void MarkForClose();
 
+  // Adjusts the pipeline queue byte counter by `delta`.
+  // Used when command dispatch mutates a ParsedCommand's backing storage
+  // (e.g. SwapArgs during MULTI/EXEC collection).
+  void AdjustParsedCmdBytes(ssize_t delta);
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;

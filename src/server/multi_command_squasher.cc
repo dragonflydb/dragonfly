@@ -219,6 +219,13 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     auto* ctx = &local_cntx;
     crb.SetReplyMode(dispatched.reply_mode);
 
+    // Allow captured replies to be stored in argument storage.
+    // Some commands might include arguments in replies, so we have a limited set
+    if (dispatched.cmd_cntx && dispatched.cid->SupportsAsync())
+      crb.ProvideInlineBuffer(dispatched.cmd_cntx->GetInlineBuffer());
+    else
+      crb.ProvideInlineBuffer({});  // reset buffer
+
     // With tiered storage enabled, it makes sense to dispatch async commands concurrently
     // to allow concurrent disk operations. Tiered futures are only blocked on during replies
     bool do_async = es->tiered_storage() && !IsAtomic() && opts_.pipeline_mode &&
