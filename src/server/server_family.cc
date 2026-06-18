@@ -2007,6 +2007,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
   AppendMetricValue("memory_by_class_bytes", m.interned_string_stats.pool_table_bytes, {"class"},
                     {"interned_string_table"}, &memory_by_class_bytes);
+  AppendMetricValue("memory_by_class_bytes", m.lsn_buffer_bytes, {"class"}, {"repl_backlog_buffer"},
+                    &memory_by_class_bytes);
 
   // Interned string stats
   AppendMetricWithoutLabels("interned_string_entries", "Number of unique interned strings",
