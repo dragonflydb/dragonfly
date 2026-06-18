@@ -8,6 +8,10 @@ HELIO_WITH_UNWIND ?= OFF
 RELEASE_DIR=build-release
 WITH_SIMSIMD ?= ON
 
+# Release build use glog. Everything else (local dev, CI tests) use absl logging through the root CMakeLists.txt cache
+# default.
+LEGACY_GLOG ?= ON
+
 # Some distributions (old fedora) have incorrect dependencies for crypto
 # so we add -lz for them.
 LINKER_FLAGS=-lz
@@ -35,7 +39,9 @@ HELIO_FLAGS = -DHELIO_RELEASE_FLAGS="-g" \
               -DOPENSSL_USE_STATIC_LIBS=$(HELIO_OPENSSL_USE_STATIC_LIBS) \
               -DENABLE_GIT_VERSION=$(HELIO_ENABLE_GIT_VERSION) \
               -DWITH_SIMSIMD=$(WITH_SIMSIMD) \
-              -DWITH_UNWIND=$(HELIO_WITH_UNWIND) -DMARCH_OPT="$(HELIO_MARCH_OPT)"
+              -DWITH_UNWIND=$(HELIO_WITH_UNWIND) \
+              -DMARCH_OPT="$(HELIO_MARCH_OPT)" \
+              -DLEGACY_GLOG=$(LEGACY_GLOG)
 
 .PHONY: default
 
