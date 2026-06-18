@@ -3056,7 +3056,7 @@ void Connection::DrainQueuedCommands() {
   NotifyIfMemReleased(mem_before);
 }
 
-void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* bp_waiter) {
+void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_waiter) {
   // Draining (by the caller) may have freed enough memory; only park if still over the limit, to
   // prevent a busy-spin.
   if (!IsOverPipelineLimit())
@@ -3077,7 +3077,8 @@ void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* bp_waiter) {
   // waking this fiber. Must be persistent because io_event_.await()'s internal loop may re-sleep
   // if the predicate is still false after the first notification. A one-shot subscription would be
   // consumed on the first wake, leaving us "deaf" to future memory relief.
-  auto sub_key = GetQueueBackpressure().v2_pipeline_backpressure_ec.subscribe_persistent(bp_waiter);
+  auto sub_key =
+      GetQueueBackpressure().v2_pipeline_backpressure_ec.subscribe_persistent(backpressure_waiter);
 
   // Exit on error, the caller will propagate the reply_builder error further.
   if (auto ec = FlushReplies(); ec)

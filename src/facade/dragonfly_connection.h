@@ -485,8 +485,8 @@ class Connection : public util::Connection {
   bool ShouldWakeIdle() const;
 
   // IoLoopV2 control path: drains dispatch_q_, processing up to `quota` control messages.
-  // Expects dispatch_q_ to be non-empty. Returns true if dispatch_q_ was depleted, false if the
-  // quota was reached first.
+  // Expects dispatch_q_ to be non-empty. Returns true if dispatch_q_ was depleted or it had to
+  // stop draining, false if the quota was reached.
   bool DrainControlPath(uint32_t quota);
 
   // IoLoopV2 data path when input is available and we are under the pipeline limit: parse, execute
