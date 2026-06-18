@@ -1,4 +1,5 @@
 name: Experimental AFL++ Persistent Fuzzing
+run-name: Experimental persistent AFL++ fuzzing - ${{ github.event_name }} - ${{ github.ref_name }}
 
 on:
   schedule:
