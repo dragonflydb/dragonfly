@@ -369,9 +369,18 @@ void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Use explicit assignment for replica_ptr, because capturing structured bindings is C++20.
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
-      status =
-          StartFullSyncInThread(replica_ptr->GetVersion(), &replica_ptr->GetFlow(shard->shard_id()),
-                                &replica_ptr->GetExecState(), shard);
+      FlowInfo* flow = &replica_ptr->GetFlow(shard->shard_id());
+      // By the time DFLY SYNC arrives, all DFLY FLOW responses have already been sent (the replica
+      // sends SYNC only after receiving all FLOW replies), so start_partial_sync_at is settled.
+      // If partial sync was arranged, reject DFLY SYNC: the replica sent SYNC after receiving
+      // PARTIAL, which means it does not properly implement the partial sync protocol and would
+      // deadlock or corrupt state if we proceeded.
+      if (flow->start_partial_sync_at.has_value()) {
+        status = OpStatus::INVALID_VALUE;
+        return;
+      }
+      status = StartFullSyncInThread(replica_ptr->GetVersion(), flow, &replica_ptr->GetExecState(),
+                                     shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
 
