@@ -26,6 +26,7 @@ fuzz/artifacts/
 fuzz/corpus/
 tools/replay/traffic-replay
 .claude/settings.local.json
+.claude/agent-memory/
 # Valkey-search integration tests (synced from external repo)
 tests/dragonfly/valkey_search/integration/
 _codeql_build_dir/
