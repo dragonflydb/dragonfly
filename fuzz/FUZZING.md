@@ -8,7 +8,7 @@ AFL++ must be built from source with `AFL_PERSISTENT_RECORD` enabled for crash r
 sudo apt update
 sudo apt install llvm-18-dev clang-18 lld-18 gcc-13-plugin-dev
 
-git clone --depth=1 --branch v4.34c https://github.com/AFLplusplus/AFLplusplus.git
+git clone --depth=1 --branch v5.00c https://github.com/AFLplusplus/AFLplusplus.git
 cd AFLplusplus
 
 # Enable AFL_PERSISTENT_RECORD (required for stateful crash replay)
@@ -84,6 +84,39 @@ mutator runs — AFL++'s byte-level stages and the dictionary are disabled. Reas
 
 Locally you can drop `AFL_CUSTOM_MUTATOR_ONLY` to also run the byte-level stages
 and the dictionary (`dict/*.dict`) for ad-hoc parser-edge-case exploration.
+
+## Experimental Persistent Nightly
+
+`.github/workflows/fuzz-experimental-persistent.yml` runs an experimental nightly
+campaign at 00:00 UTC, two hours before the regular long fuzzing campaign. It is
+separate from the PR and long fuzzing workflows and intentionally keeps its state
+between runs.
+
+Differences from the regular long campaign:
+
+- SAVE/BGSAVE testing is disabled (`AFL_ENABLE_SAVE` is not set).
+- `AFL_CUSTOM_MUTATOR_ONLY` is not set, so AFL++ byte-level stages and dictionaries
+  run together with the protocol mutators.
+- AFL output and corpus state are stored under
+  `fuzz/artifacts/experimental-persistent/<target>` and
+  `fuzz/corpus/experimental-persistent/<target>`.
+- The workflow restores the previous AFL state from cache and saves the updated
+  state after each run when it stays under the cache size guard.
+- Manual dispatch has a `reset_state` input that drops the restored state and starts
+  again from the seed corpus.
+- Exit 137 is treated as an experimental resource stop, not a Dragonfly failure,
+  unless crash or hang artifacts were produced.
+- Health statistics and warnings are written to the job log, the GitHub step
+  summary, and `fuzz-experimental-persistent-<target>-health-*` artifacts.
+
+The experimental layout keeps AFL's usual `default/crashes` structure, so existing
+crash packaging and replay scripts still work by passing the experimental crashes
+directory explicitly.
+
+Before saving restored state for the next run, the workflow removes transient
+`default/crashes` and `default/hangs` directories but keeps the AFL queue and
+resume metadata. A known issue can therefore be rediscovered until the queue is
+manually reset or curated.
 
 ## Crash Replay
 
