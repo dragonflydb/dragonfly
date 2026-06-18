@@ -2686,8 +2686,6 @@ bool Connection::SquashPipelineV2() {
     AdvanceToExecute();
   }
 
-  reply_builder_->Flush();
-
   conn_stats.pipeline_dispatch_calls++;
   conn_stats.pipeline_dispatch_commands += squashed;
   return true;
@@ -3087,8 +3085,16 @@ void Connection::ReadPendingInput() {
 
     DVLOG(1) << "Read " << *res << " bytes from socket";
 
+    auto& conn_stats = tl_facade_stats->conn_stats;
+    size_t commit_sz = *res;
+    conn_stats.io_read_bytes += commit_sz;
+    local_stats_.net_bytes_in += commit_sz;
+
+    ++conn_stats.io_read_cnt;
+    ++local_stats_.read_cnt;
+
     last_interaction_ = time(nullptr);
-    io_buf_.CommitWrite(*res);
+    io_buf_.CommitWrite(commit_sz);
     buf = io_buf_.AppendBuffer();
   }
 }
