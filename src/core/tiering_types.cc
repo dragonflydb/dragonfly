@@ -20,7 +20,10 @@ bool FragmentRef::IsOffloaded() const {
 
 void FragmentRef::ClearOffloaded() {
   std::visit(Overloaded{[](CompactValue* pv) { pv->RemoveExternal(); },
-                        [](QList::Node* node) { node->offloaded = 0; }},
+                        [](QList::Node* node) {
+                          node->offloaded = 0;
+                          node->entry = nullptr;
+                        }},
              val_);
 }
 

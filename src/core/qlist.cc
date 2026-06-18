@@ -1220,7 +1220,8 @@ void QList::DelNode(Node* node) {
     }
   }
 
-  if (!node->offloaded) {
+  if (!node->offloaded && node->entry) {
+    DCHECK(node->entry != nullptr);
     zfree(node->entry);
   }
 
