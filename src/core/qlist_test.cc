@@ -257,6 +257,20 @@ TEST_F(QListTest, InsertDelete) {
   EXPECT_EQ(0, ql_.Size());
 }
 
+TEST_F(QListTest, InsertBeforeHeadPreservesOrder) {
+  // Each qlist node can hold up to 2 entries.
+  ql_ = QList(2, QUICKLIST_NOCOMPRESS);
+
+  ql_.Push("v0", QList::TAIL);
+  ql_.Push("v1", QList::TAIL);
+  ql_.Push("v2", QList::TAIL);
+  ASSERT_EQ(2u, ql_.node_count());
+
+  EXPECT_TRUE(ql_.Insert("v0", "x", QList::BEFORE));
+
+  EXPECT_THAT(ToItems(), ElementsAre("x", "v0", "v1", "v2"));
+}
+
 TEST_F(QListTest, EraseLastElementInNodeAdvancesToNextNode) {
   // Regression test for iterator semantics: when erasing the last element
   // within a multi-entry node and another node follows, the iterator should

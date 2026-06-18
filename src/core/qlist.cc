@@ -779,7 +779,7 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
 
   if (!after && (it.offset_ == 0 || it.offset_ == -(node->count))) {
     at_head = 1;
-    if (NodeAllowInsert(node->prev, fill_, sz)) {
+    if (node != head_ && NodeAllowInsert(node->prev, fill_, sz)) {
       avail_prev = 1;
     }
   }
