@@ -1792,6 +1792,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", m.used_mem_peak, MetricType::GAUGE,
                             &resp->body());
+  AppendMetricWithoutLabels(
+      "connection_memory_bytes",
+      "Approximate direct memory used by active non-replication-flow connections, excluding "
+      "separately tracked read buffers and queues.",
+      conn_stats.connection_memory_bytes, MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
                             &resp->body());
   AppendMetricWithoutLabels("blocked_tasks", "", m.blocked_tasks, MetricType::GAUGE, &resp->body());
@@ -1981,6 +1986,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
   AppendMetricValue("memory_by_class_bytes", conn_stats.read_buf_capacity, {"class"},
                     {"client_read_buffer"}, &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", conn_stats.connection_memory_bytes, {"class"},
+                    {"connection"}, &memory_by_class_bytes);
 
   AppendMetricValue("memory_by_class_bytes", total.table_mem_usage, {"class"}, {"table_used"},
                     &memory_by_class_bytes);
