@@ -58,7 +58,7 @@ jobs:
       OUTPUT_DIR: ${{ github.workspace }}/fuzz/artifacts/experimental-persistent/${{ matrix.target }}
       CORPUS_DIR: ${{ github.workspace }}/fuzz/corpus/experimental-persistent/${{ matrix.target }}
       HEALTH_DIR: ${{ github.workspace }}/fuzz/health/experimental-persistent/${{ matrix.target }}
-      CACHE_KEY: experimental-afl-${{ runner.os }}-${{ matrix.target }}-v1-${{ github.run_number }}-${{ github.run_attempt }}
+      CACHE_KEY: experimental-afl-Linux-${{ matrix.target }}-v1-${{ github.run_number }}-${{ github.run_attempt }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
