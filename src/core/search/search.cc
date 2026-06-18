@@ -746,6 +746,8 @@ struct BasicSearch {
     scored.reserve(all_docs.size());
     vector<ScoringTermInfo> term_infos(cursors.size());
 
+    float default_score = indices_->GetSchema().score;
+
     for (DocId doc : all_docs) {
       for (size_t t = 0; t < cursors.size(); t++) {
         term_infos[t].term_docs = cursors[t].term_docs;
@@ -755,7 +757,8 @@ struct BasicSearch {
           term_infos[t].field_avg_doc_len = cursors[t].field_avg_doc_len;
         }
       }
-      scored.emplace_back(static_cast<float>(ScoreDocument(scorer_, ctx, term_infos)), doc);
+      scored.emplace_back(
+          static_cast<float>((ScoreDocument(scorer_, ctx, term_infos)) * default_score), doc);
     }
 
     // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)

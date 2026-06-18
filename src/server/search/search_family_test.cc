@@ -382,6 +382,127 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_THAT(Run({"ft._list"}), RespElementsAre("idx-3"));
 }
 
+// Test SCORE parameter parsing: FT.INFO should return correct default_score
+TEST_F(SearchFamilyTest, CreateIndexWithDefaultScore) {
+  // Custom SCORE = 1.5
+
+  EXPECT_EQ(Run({"ft.create", "idx-default-score", "ON", "HASH", "PREFIX", "1", "s:", "SCORE",
+                 "1.5", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  auto info = Run({"ft.info", "idx-default-score"});
+
+  auto descriptor_matcher = IsArray("key_type", "HASH", "prefixes", IsArray("s:"),
+                                    "default_language", "english", "default_score", DoubleArg(1.5));
+  auto schema_matcher =
+      IsArray(IsArray("identifier", "title", "attribute", "title", "type", "TEXT"));
+
+  EXPECT_THAT(info, IsArray(_, _, _, descriptor_matcher, "index_options", RespArray(IsEmpty()),
+                            "attributes", schema_matcher, "num_docs", IntArg(0), "indexing",
+                            IntArg(0), "percent_indexed", "1"));
+
+  // Default SCORE = 1 (when not specified)
+  EXPECT_EQ(Run({"ft.create", "idx-default", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title",
+                 "TEXT"}),
+            "OK");
+
+  auto info2 = Run({"ft.info", "idx-default"});
+
+  auto descriptor_matcher2 = IsArray("key_type", "HASH", "prefixes", IsArray("d:"),
+                                     "default_language", "english", "default_score", IntArg(1));
+  EXPECT_THAT(info2, IsArray(_, _, _, descriptor_matcher2, "index_options", RespArray(IsEmpty()),
+                             "attributes", schema_matcher, "num_docs", IntArg(0), "indexing",
+                             IntArg(0), "percent_indexed", "1"));
+}
+
+// Test SCORE parameter affects scores: Final score = BM25 score × SCORE
+TEST_F(SearchFamilyTest, DefaultScoreMultipliesTextScore) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx-test", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  WaitForIndexReady("idx-test");
+
+  Run({"hset", "d:1", "title", "hello world hello hello"});
+  Run({"hset", "d:2", "title", "hello there"});
+
+  auto resp_default = Run({"ft.search", "idx-test", "hello", "WITHSCORES"}).GetVec();
+  std::map<std::string, double> scores;
+  for (size_t i = 1; i + 1 < resp_default.size(); i += 3) {
+    scores[resp_default[i].GetString()] = std::stod(resp_default[i + 1].GetString());
+  }
+  ASSERT_EQ(scores.size(), 2u);
+
+  EXPECT_EQ(Run({"ft.dropindex", "idx-test"}), "OK");
+  EXPECT_EQ(Run({"ft.create", "idx-test", "ON", "HASH", "PREFIX", "1", "d:", "SCORE", "2.0",
+                 "SCHEMA", "title", "TEXT"}),
+            "OK");
+  WaitForIndexReady("idx-test");
+
+  Run({"hset", "d:1", "title", "hello world hello hello"});
+  Run({"hset", "d:2", "title", "hello there"});
+
+  auto resp_score2 = Run({"ft.search", "idx-test", "hello", "WITHSCORES"}).GetVec();
+  std::map<std::string, double> score2_scores;
+  for (size_t i = 1; i + 1 < resp_score2.size(); i += 3) {
+    score2_scores[resp_score2[i].GetString()] = std::stod(resp_score2[i + 1].GetString());
+  }
+  ASSERT_EQ(score2_scores.size(), 2u);
+
+  for (const auto& [k, s1] : scores) {
+    auto it = score2_scores.find(k);
+    ASSERT_NE(it, score2_scores.end()) << "Key " << k << " not found in SCORE=2.0 results";
+    EXPECT_NEAR(it->second / s1, 2.0, 1e-3)
+        << "SCORE=2.0 should multiply text score by 2 (key=" << k << ")";
+  }
+
+  EXPECT_GT(scores["d:1"], scores["d:2"]);
+  EXPECT_GT(score2_scores["d:1"], score2_scores["d:2"]);
+}
+
+// Test SCORE=0 produces zero scores for all documents
+TEST_F(SearchFamilyTest, DefaultScoreZeroProducesZeroScores) {
+  EXPECT_EQ(Run({"ft.create", "idx0", "ON", "HASH", "PREFIX", "1", "z:", "SCORE", "0", "SCHEMA",
+                 "title", "TEXT"}),
+            "OK");
+  WaitForIndexReady("idx0");
+
+  Run({"hset", "z:1", "title", "hello world hello hello"});
+  Run({"hset", "z:2", "title", "hello there"});
+  Run({"hset", "z:3", "title", "world hello"});
+
+  auto resp = Run({"ft.search", "idx0", "hello", "WITHSCORES"}).GetVec();
+  ASSERT_GE(resp.size(), 1 + 3u);
+
+  for (size_t i = 1; i + 1 < resp.size(); i += 3) {
+    double score = std::stod(resp[i + 1].GetString());
+    EXPECT_NEAR(score, 0.0, 1e-6) << "SCORE=0 should make all scores 0 (key=" << resp[i].GetString()
+                                  << ")";
+  }
+}
+
+// Test SCORE parameter affects scores: Final score = BM25 score × SCORE
+TEST_F(SearchFamilyTest, DefaultScoreNegative) {
+  EXPECT_EQ(Run({"ft.create", "idx-neg", "ON", "HASH", "PREFIX", "1", "n:", "SCORE", "-1", "SCHEMA",
+                 "title", "TEXT"}),
+            "OK");
+  WaitForIndexReady("idx-neg");
+
+  Run({"hset", "n:1", "title", "hello world"});
+
+  EXPECT_EQ(
+      Run({"ft.create", "idx-pos", "ON", "HASH", "PREFIX", "1", "p:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  WaitForIndexReady("idx-pos");
+  Run({"hset", "p:1", "title", "hello world"});
+  auto resp_pos = Run({"ft.search", "idx-pos", "hello", "WITHSCORES"}).GetVec();
+  double pos_score = std::stod(resp_pos[2].GetString());
+
+  auto resp_neg = Run({"ft.search", "idx-neg", "hello", "WITHSCORES"}).GetVec();
+  double neg_score = std::stod(resp_neg[2].GetString());
+
+  EXPECT_NEAR(neg_score, -pos_score, 1e-6);
+}
+
 TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
   // Create index on db 0
   auto resp =
@@ -6567,6 +6688,31 @@ TEST(BuildRestoreCommandTest, IndexOptionsPreserved) {
   EXPECT_THAT(cmd, HasSubstr("NOOFFSETS"));
   EXPECT_THAT(cmd, HasSubstr("LANGUAGE german"));
   EXPECT_THAT(cmd, HasSubstr("LANGUAGE_FIELD lang"));
+}
+
+// Verify that BuildRestoreCommand preserves SCORE parameter.
+TEST(BuildRestoreCommandTest, DefaultScorePreserved) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+
+  SchemaField field;
+  field.type = SchemaField::TEXT;
+  field.flags = 0;
+  field.short_name = "title";
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.score = 2.5f;
+  base.schema.fields["title"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+
+  std::string cmd = info.BuildRestoreCommand();
+  EXPECT_THAT(cmd, HasSubstr("SCORE 2.5"));
 }
 
 // Verify that FT.INFO returns all VECTOR field parameters.

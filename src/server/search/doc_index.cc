@@ -212,6 +212,8 @@ string DocIndexInfo::BuildRestoreCommand() const {
   if (!base_index.schema.language_field.empty())
     absl::StrAppend(&out, " LANGUAGE_FIELD ", base_index.schema.language_field);
 
+  absl::StrAppend(&out, " SCORE ", absl::StrFormat("%.9g", base_index.schema.score));
+
   absl::StrAppend(&out, " SCHEMA");
   for (const auto& [fident, finfo] : base_index.schema.fields) {
     // Store field name, alias and type

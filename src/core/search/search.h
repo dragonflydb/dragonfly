@@ -112,6 +112,8 @@ struct Schema {
   std::string default_language = "english";
   std::string language_field;  // doc field providing per-doc language; empty = none
 
+  float score = 1.0f;  // Default relevance score multiplier for the index
+
   // Return identifier for alias if found, otherwise return passed value
   std::string_view LookupAlias(std::string_view alias) const;
 

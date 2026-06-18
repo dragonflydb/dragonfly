@@ -291,6 +291,14 @@ ParseResult<bool> ParseIndexLanguageField(CmdArgParser* parser, DocIndex* index)
   return true;
 }
 
+ParseResult<bool> ParseScore(CmdArgParser* parser, DocIndex* index) {
+  index->schema.score = parser->Next<float>();
+  if (!std::isfinite(index->schema.score)) {
+    return CreateSyntaxError(std::string_view("SCORE must be a finite number"));
+  }
+  return true;
+}
+
 // NOOFFSETS (index-level): disable storing token positions in TEXT posting lists.
 // Saves memory but breaks phrase queries.
 ParseResult<bool> ParseNoOffsets(CmdArgParser* /*parser*/, DocIndex* index) {
@@ -422,7 +430,7 @@ ParseResult<DocIndex> CreateDocIndex(std::string_view name, CmdArgParser* parser
     auto option_parser = parser->TryMapNext(
         "ON"sv, &ParseOnOption, "PREFIX"sv, &ParsePrefix, "STOPWORDS"sv, &ParseStopwords,
         "LANGUAGE"sv, &ParseIndexLanguage, "LANGUAGE_FIELD"sv, &ParseIndexLanguageField,
-        "NOOFFSETS"sv, &ParseNoOffsets, "SCHEMA"sv, &ParseSchema);
+        "NOOFFSETS"sv, &ParseNoOffsets, "SCHEMA"sv, &ParseSchema, "SCORE"sv, &ParseScore);
 
     if (!option_parser) {
       // Unsupported parameters are ignored for now
@@ -2628,7 +2636,13 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
       rb->SendSimpleString(schema.language_field);
     }
     rb->SendSimpleString("default_score");
-    rb->SendLong(1);
+    float default_score = schema.score;
+    if (default_score >= LONG_MIN && default_score <= LONG_MAX &&
+        std::floor(default_score) == default_score) {
+      rb->SendLong(static_cast<long>(default_score));
+    } else {
+      rb->SendDouble(static_cast<double>(default_score));
+    }
   }
 
   rb->SendSimpleString("index_options");
