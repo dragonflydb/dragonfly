@@ -2341,37 +2341,26 @@ async def test_multi_exec_phantom_connections(df_server: DflyInstance):
     for s in ghosts:
         s.close()
 
-    @assert_eventually(times=50)
-    async def check_phantoms():
-        clients = await control_client.client_list()
-        phantoms = [
-            c
-            for c in clients
-            if c.get("addr", "").startswith("0.0.0.0") and c.get("phase") == "scheduled"
-        ]
-        logging.info("phantoms: %s", [(c["name"], c["addr"], c["phase"]) for c in phantoms])
-        assert len(phantoms) >= 3, f"got {[(c['addr'], c['phase']) for c in clients]}"
+    # With the fix: OnSocketError cancels run_barrier_ and sets the cancelled_ flag, so ghost
+    # coordinators wake immediately and the connections close without lingering as
+    # addr=0.0.0.0 / phase=scheduled. Verify that no scheduled phantoms accumulate.
+    await asyncio.sleep(0.2)
+    clients = await control_client.client_list()
+    phantoms = [
+        c
+        for c in clients
+        if c.get("addr", "").startswith("0.0.0.0") and c.get("phase") == "scheduled"
+    ]
+    logging.info(
+        "after RST - remaining clients: %s", [(c.get("name"), c.get("phase")) for c in clients]
+    )
+    assert len(phantoms) == 0, (
+        f"Ghost connections still stuck as scheduled phantoms: "
+        f"{[(c['name'], c['addr'], c['phase']) for c in phantoms]}"
+    )
 
-    await check_phantoms()
-
-    # # A competing MULTI/SET confirms the shard lock is still held while we observe.
-    # other = df_server.client()
-    # pipe = other.pipeline(transaction=True)
-    # pipe.set("key", "new")
-    # compete = asyncio.create_task(pipe.execute())
-
-    # await asyncio.sleep(0.5)
-    # assert not compete.done(), "Competing MULTI/EXEC should be stuck waiting for the shard lock"
-
-    # logging.info("Holding stuck state — inspect with: redis-cli -p %d client list", df_server.port)
-    # await asyncio.sleep(300)
-
-    # RST-close the clogger: Write() fails, fiber resumes, UnlockMulti() is called,
-    # the competing transaction unblocks, and phantom connections clean up.
+    # RST-close the clogger; server must stay responsive.
     writer.transport.abort()
-
-    # result = await asyncio.wait_for(compete, timeout=5.0)
-    # assert result == [True]
     assert await control_client.ping()
 
 
