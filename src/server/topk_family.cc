@@ -219,11 +219,6 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(kSyntaxErr);
   }
 
-  // Guard against overflow: width * depth * sizeof(uint32_t) must fit in size_t.
-  if (width > SIZE_MAX / sizeof(uint32_t) / depth) {
-    return rb->SendError("width * depth is too large");
-  }
-
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpReserve(t->GetOpArgs(shard), key, k, width, depth, decay);
   };

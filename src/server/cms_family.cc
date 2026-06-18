@@ -2,6 +2,11 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/strings/str_cat.h>
+
+#include <cmath>
+#include <limits>
+
 #include "core/cms.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
@@ -27,6 +32,41 @@ constexpr char kCmsWrongNumKeys[] = "CMS: wrong number of keys";
 constexpr char kCmsWrongNumKeysWeights[] = "CMS: wrong number of keys/weights";
 constexpr char kCmsCannotParseNumber[] = "CMS: Cannot parse number";
 
+constexpr uint32_t kMaxCmsWidth = 1'000'000;
+constexpr uint32_t kMaxCmsDepth = 100;
+
+bool ValidateCmsDimensions(uint32_t width, uint32_t depth, RedisReplyBuilder* rb) {
+  if (width == 0 || depth == 0) {
+    rb->SendError("CMS: width and depth must be greater than 0");
+    return false;
+  }
+
+  if ((width > kMaxCmsWidth) || (depth > kMaxCmsDepth)) {
+    rb->SendError(absl::StrCat("CMS: width must not exceed ", kMaxCmsWidth,
+                               " and depth must not exceed ", kMaxCmsDepth));
+    return false;
+  }
+
+  return true;
+}
+
+bool ComputeCmsDimensions(double error, double probability, RedisReplyBuilder* rb, uint32_t* width,
+                          uint32_t* depth) {
+  double computed_width = std::ceil(M_E / error);
+  double computed_depth = std::ceil(std::log(1.0 / probability));
+
+  if (!std::isfinite(computed_width) || !std::isfinite(computed_depth) || computed_width <= 0 ||
+      computed_depth <= 0 || computed_width > std::numeric_limits<uint32_t>::max() ||
+      computed_depth > std::numeric_limits<uint32_t>::max()) {
+    rb->SendError("CMS: invalid error/probability");
+    return false;
+  }
+
+  *width = static_cast<uint32_t>(computed_width);
+  *depth = static_cast<uint32_t>(computed_depth);
+  return ValidateCmsDimensions(*width, *depth, rb);
+}
+
 OpStatus OpInitByDim(const OpArgs& op_args, string_view key, uint32_t width, uint32_t depth) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CMS);
@@ -37,22 +77,6 @@ OpStatus OpInitByDim(const OpArgs& op_args, string_view key, uint32_t width, uin
 
   PrimeValue& pv = op_res->it->second;
   pv.SetCMS(width, depth);
-
-  return OpStatus::OK;
-}
-
-OpStatus OpInitByProb(const OpArgs& op_args, string_view key, double error, double probability) {
-  auto& db_slice = op_args.GetDbSlice();
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CMS);
-  RETURN_ON_BAD_STATUS(op_res);
-
-  if (!op_res->is_new)
-    return OpStatus::KEY_EXISTS;
-
-  PrimeValue& pv = op_res->it->second;
-  CMS* cms = CompactObj::AllocateMR<CMS>(CMS::ErrorRateTag{}, error, probability,
-                                         CompactObj::memory_resource());
-  pv.SetCMS(cms);
 
   return OpStatus::OK;
 }
@@ -117,9 +141,8 @@ void CmdInitByDim(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RETURN_ON_PARSE_ERROR(parser, rb);
 
-  if (width == 0 || depth == 0) {
-    return rb->SendError("CMS: width and depth must be greater than 0");
-  }
+  if (!ValidateCmsDimensions(width, depth, rb))
+    return;
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpInitByDim(t->GetOpArgs(shard), key, width, depth);
@@ -151,8 +174,12 @@ void CmdInitByProb(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("CMS: probability must be between 0 and 1 exclusive");
   }
 
+  uint32_t width = 0, depth = 0;
+  if (!ComputeCmsDimensions(error, probability, rb, &width, &depth))
+    return;
+
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpInitByProb(t->GetOpArgs(shard), key, error, probability);
+    return OpInitByDim(t->GetOpArgs(shard), key, width, depth);
   };
 
   OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
