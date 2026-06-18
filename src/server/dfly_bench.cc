@@ -118,9 +118,23 @@ enum DistType : uint8_t { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFO
 constexpr uint16_t kNumSlots = 16384;
 constexpr uint32_t kDnsResolveTimeoutMs = 2000;
 constexpr string_view kMovedErrorKey = "MOVED"sv;
-enum class BenchOp : int8_t { kUnknown = -1, kSet = 0, kGet = 1, kCustom = 0 };
+enum class BenchOp : uint8_t { kSet, kGet, kCustom, kUnknown };
 constexpr size_t kTrackedOpCount = 2;
 constexpr std::array<string_view, kTrackedOpCount> kBuiltInOpNames = {"Sets", "Gets"};
+
+optional<size_t> TrackedOpIndex(BenchOp op) {
+  switch (op) {
+    case BenchOp::kSet:
+    case BenchOp::kCustom:
+      return 0;
+    case BenchOp::kGet:
+      return 1;
+    case BenchOp::kUnknown:
+      return nullopt;
+  }
+
+  return nullopt;
+}
 
 static string GetRandomBlob(size_t len, bool ascii) {
   static bool is_random = GetFlag(FLAGS_random_data);
@@ -545,12 +559,12 @@ struct ClientStats {
   unsigned num_clients = 0;
 
   void AddLatencySample(BenchOp op, uint64_t usec, uint64_t elapsed_ns) {
-    int index = static_cast<int>(op);
-    if (index < 0 || index >= int(kTrackedOpCount))
+    optional<size_t> index = TrackedOpIndex(op);
+    if (!index || *index >= kTrackedOpCount)
       return;
 
-    op_stats[index].Add(usec);
-    time_series[elapsed_ns / 1'000'000'000ULL][index].Add(usec);
+    op_stats[*index].Add(usec);
+    time_series[elapsed_ns / 1'000'000'000ULL][*index].Add(usec);
   }
 
   ClientStats& operator+=(const ClientStats& o) {
