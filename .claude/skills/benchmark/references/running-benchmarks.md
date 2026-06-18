@@ -259,14 +259,14 @@ with a memory snapshot in between.
 
 ```bash
 ./dfly_bench -h <server> -p 6380 --qps=0 -d 64 --key_maximum=$KMAX -c $CONN \
-    --pipeline 30 -n $N --json_out_file df_write.json --command "setex __key__ 10000 __data__"
+    --pipeline 30 -n $N --ratio 1:0 --json_out_file df_write.json
 ```
 
-Note: with `--command`, `--json_out_file` is ignored — for the canonical strings
-test use the built-in SET path (`--ratio 1:0`) instead if you need the JSON/time
-series, and reserve `--command "setex ..."` for when TTLs matter. For SETEX,
-save stdout and parse/chart the periodic `RPS(now/agg)` lines or
-`monitor_fill.sh` output.
+The canonical strings test uses the built-in SET path (`--ratio 1:0`) so it
+produces the JSON/time series the charts need. If TTLs matter, swap in
+`--command "setex __key__ 10000 __data__"` — but note `--json_out_file` is then
+ignored, so for SETEX save stdout and parse/chart the periodic `RPS(now/agg)`
+lines or `monitor_fill.sh` output instead.
 
 **Memory snapshot** (immediately after writes — see next section).
 

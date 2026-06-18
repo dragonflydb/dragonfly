@@ -24,6 +24,7 @@ sess=${3:-bench}; abort=${4:-92}; iv=${5:-10}; maxp=${6:-60}; port=${7:-6380}
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10"
 
 total=$($SSH "$srv" 'free -b | awk "/^Mem:/{print \$2}"')
+[[ "$total" =~ ^[0-9]+$ ]] || { echo "monitor: could not read host total memory (got '$total') — aborting"; exit 4; }
 echo "host total bytes=$total, abort at ${abort}% RSS"
 
 for i in $(seq 1 "$maxp"); do
@@ -34,6 +35,9 @@ for i in $(seq 1 "$maxp"); do
   read -r db rss host_used host_free < <($SSH "$srv" "D=\$(redis-cli -p $port dbsize); \
       R=\$(redis-cli -p $port info memory | grep '^used_memory_rss:' | cut -d: -f2 | tr -d '\r'); \
       HU=\$(free -b | awk '/^Mem:/{print \$3}'); HF=\$(free -b | awk '/^Mem:/{print \$4}'); echo \$D \$R \$HU \$HF")
+  # Fail closed: a dropped SSH/redis-cli read yields an empty rss, which would
+  # otherwise make the abort comparison silently pass and the fill run unguarded.
+  [[ "$rss" =~ ^[0-9]+$ ]] || { echo "poll $i: could not read used_memory_rss (got '$rss') — aborting"; exit 4; }
   pct=$(awk "BEGIN{printf \"%.0f\", $rss/$total*100}")
   rssg=$(awk "BEGIN{printf \"%.2f\", $rss/2^30}")
   host_used_g=$(awk "BEGIN{printf \"%.2f\", $host_used/2^30}")

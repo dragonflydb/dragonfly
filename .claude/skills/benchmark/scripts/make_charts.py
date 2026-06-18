@@ -49,10 +49,19 @@ def load_series(path, metric, op_hint):
     if op_hint:
         op_block = find_first(stats, op_hint)
     if op_block is None:
-        for name, blk in stats.items():
-            if isinstance(blk, dict) and find_first(blk, "Time-Serie") is not None:
-                op_block = blk
-                break
+        # dfly_bench emits a Sets block before Gets, but a read-only run leaves Sets
+        # at zero count (and vice versa). Picking the first op would plot the empty
+        # series, so choose the op whose time series actually has traffic.
+        def _activity(blk):
+            ts = find_first(blk, "Time-Serie") or {}
+            return sum(find_first(v, "Count") or 0 for v in ts.values() if isinstance(v, dict))
+
+        candidates = [
+            blk
+            for blk in stats.values()
+            if isinstance(blk, dict) and find_first(blk, "Time-Serie") is not None
+        ]
+        op_block = max(candidates, key=_activity, default=None)
     if op_block is None:
         raise ValueError(f"no time series found in {path}")
 

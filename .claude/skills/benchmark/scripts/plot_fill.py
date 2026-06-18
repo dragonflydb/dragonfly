@@ -45,6 +45,12 @@ def main():
     ap.add_argument(
         "--ram-gib", type=float, default=0, help="host RAM for the abort-line annotation"
     )
+    ap.add_argument(
+        "--abort-pct",
+        type=float,
+        default=92,
+        help="RSS abort threshold for the guard line (match monitor_fill.sh)",
+    )
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -62,7 +68,13 @@ def main():
         ax2.plot(db, rss, m + "-", label=label, lw=2)
 
     if args.ram_gib:
-        ax1.axhline(args.ram_gib * 0.92, ls="--", color="r", alpha=0.6, label="92% RSS guard")
+        ax1.axhline(
+            args.ram_gib * args.abort_pct / 100,
+            ls="--",
+            color="r",
+            alpha=0.6,
+            label=f"{args.abort_pct:g}% RSS guard",
+        )
         ax1.set_ylim(0, args.ram_gib)
     ax1.set_xlabel("Time (s)")
     ax1.set_ylabel("Server RSS (GiB)")
