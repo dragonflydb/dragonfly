@@ -1,0 +1,24 @@
+Benchmark run notes (raw artifacts in this directory)
+
+Hardware:
+  Server: m7g.2xlarge (8 vCPU) and m7g.4xlarge (16 vCPU), Ubuntu 24.04.2, kernel 6.8.0
+  Client: c7gn.4xlarge (16 vCPU) running dfly_bench
+  Network tuning: IRQ SMP affinity spread across CPUs (applied)
+
+Servers launched on port 6380:
+  Dragonfly: ./dragonfly --conn_use_incoming_cpu --dbfilename= --logtostderr --port 6380
+  Valkey 9.0: docker run --network=host --rm valkey/valkey:9.0 --save "" --appendonly no --io-threads 8 --protected-mode no --port 6380
+
+Workload: simple strings, 64-byte values.
+  Write: ./dfly_bench -p 6380 --qps=0 -d 64 --key_maximum=$KMAX -c 50 --ratio 1:0 --json_out_file <f>
+  Read:  ./dfly_bench -p 6380 --qps=0 -d 64 --key_maximum=$KMAX -c 50 --ratio 0:1 --json_out_file <f>
+
+DBSIZE captured after the write phase:
+  m7g.2xlarge: Dragonfly 50,000,000 keys ; Valkey 50,000,000 keys
+  m7g.4xlarge: Dragonfly 80,000,000 keys ; Valkey 80,000,000 keys
+
+Files:
+  df_2xl_write.json df_2xl_read.json valkey_2xl_write.json valkey_2xl_read.json
+  df_2xl_info_memory.txt valkey_2xl_info_memory.txt
+  df_4xl_write.json df_4xl_read.json valkey_4xl_write.json valkey_4xl_read.json
+  df_4xl_info_memory.txt valkey_4xl_info_memory.txt
