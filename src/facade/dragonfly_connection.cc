@@ -2675,6 +2675,9 @@ bool Connection::SquashPipelineV2() {
   unsigned squashed =
       service_->DispatchSquashedBatch(parsed_to_execute_, dispatch_waiting_count_, cc_.get());
 
+  if (squashed == 0)
+    return false;
+
   // Like V1's SquashPipeline, sample once before the blocking squash and attribute it to every
   // squashed command's parse->dispatch wait.
   for (unsigned i = 0; i < squashed; i++) {
@@ -2682,8 +2685,6 @@ bool Connection::SquashPipelineV2() {
     conn_stats.pipelined_wait_latency += usec;
     AdvanceToExecute();
   }
-  if (squashed == 0)
-    return false;
 
   reply_builder_->Flush();
 
@@ -2734,7 +2735,7 @@ bool Connection::ExecuteBatch() {
 
     if (pipeline_squashing_v2_ && dispatch_waiting_count_ > 1) {
       // if we squashed any commands, continue the loop to check if there are
-      // non-squashable commands commands to process.
+      // non-squashable commands to process.
       DVLOG(2) << "Squashing pipeline " << dispatch_waiting_count_ << " commands " << pending_input_
                << " " << io_buf_.InputLen();
 
@@ -3061,6 +3062,7 @@ void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 void Connection::ReadPendingInput() {
   if (!pending_input_)
     return;
+
   // Drain available socket data into io_buf_.
   io::MutableBytes buf = io_buf_.AppendBuffer();
   // A recv call can return fewer bytes than requested even if the
@@ -3271,8 +3273,6 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       }
 
       io_event_.await([this] { return ShouldWakeIdle(); });
-      if (pending_input_)
-        continue;
     }
 
     phase_ = PROCESS;
