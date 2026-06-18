@@ -7245,6 +7245,46 @@ TEST_F(SearchFamilyTest, SynUpdateExpiredDocCrash) {
 
 // --- FT.HYBRID tests ---------------------------------------------------------
 
+TEST_F(SearchFamilyTest, FtHybridStaleDocIdAfterMoveAndHashRewrite) {
+  const string vec = FloatVec(1.0f, 1.0f);
+
+  EXPECT_EQ(Run({"FT.CREATE", "vidx", "ON", "HASH", "SCHEMA", "t", "TEXT", "v", "VECTOR", "FLAT",
+                 "6", "DIM", "2", "DISTANCE_METRIC", "L2", "TYPE", "FLOAT32"}),
+            "OK");
+  EXPECT_EQ(Run({"HSET", "1", "t", "hello", "v", vec}), 2);
+  EXPECT_EQ(Run({"MOVE", "1", "1"}), 1);
+  EXPECT_EQ(Run({"HMSET", "1", "100", "RIGHT", "src", "v", "hello", ""}), "OK");
+  EXPECT_EQ(Run({"DEL", "1", "v", "BYSCORE", "FIELDS", "WITHVALUES", "*0\r\n"}), 1);
+
+  auto resp = Run({"FT.HYBRID", "vidx", "SEARCH", "hello", "VSIM", "@v", "$b", "KNN", "5", "PARAMS",
+                   "2", "b", vec});
+  ASSERT_HYBRID_RESP(resp);
+  EXPECT_EQ(HybridTotal(resp), 0);
+}
+
+TEST_F(SearchFamilyTest, MoveFromIndexedDbRemovesSearchDocument) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+  EXPECT_EQ(Run({"HSET", "doc", "field", "value"}), 1);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value"}), AreDocIds("doc"));
+
+  EXPECT_EQ(Run({"MOVE", "doc", "1"}), 1);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value"}), kNoResults);
+
+  EXPECT_EQ(Run({"SELECT", "1"}), "OK");
+  EXPECT_EQ(Run({"EXISTS", "doc"}), 1);
+  EXPECT_EQ(Run({"SELECT", "0"}), "OK");
+}
+
+TEST_F(SearchFamilyTest, MoveIntoIndexedDbAddsSearchDocument) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+  EXPECT_EQ(Run({"SELECT", "1"}), "OK");
+  EXPECT_EQ(Run({"HSET", "doc", "field", "value"}), 1);
+
+  EXPECT_EQ(Run({"MOVE", "doc", "0"}), 1);
+  EXPECT_EQ(Run({"SELECT", "0"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value"}), AreDocIds("doc"));
+}
+
 TEST_F(SearchFamilyTest, FtHybridUnknownIndex) {
   auto resp =
       Run({"FT.HYBRID", "no_such_idx", "SEARCH", "hello",  "VSIM", "@vec", "$v",
