@@ -89,13 +89,13 @@ TEST_F(CuckooFilterTest, NoExpansionRejectWhenFull) {
   EXPECT_EQ(small.NumItems(), inserted);
 }
 
-TEST_F(CuckooFilterTest, UsedMemoryGrowsOnExpansion) {
-  const size_t before = cf_.UsedMemory();
+TEST_F(CuckooFilterTest, MallocUsedGrowsOnExpansion) {
+  const size_t before = cf_.MallocUsed();
   // Force expansion by filling past capacity.
   for (size_t i = 0; i < 500; ++i) {
     cf_.Insert(CuckooFilter::Hash(to_string(i)));
   }
-  EXPECT_GT(cf_.UsedMemory(), before);
+  EXPECT_GT(cf_.MallocUsed(), before);
 }
 
 TEST_F(CuckooFilterTest, InsertUniquePreventsduplicates) {

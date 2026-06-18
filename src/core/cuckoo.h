@@ -47,12 +47,15 @@ class CuckooFilter {
     return num_items_;
   }
 
+  // For tests. Returns the number of times an insertion found both candidate buckets full
+  // and had to evict an existing fingerprint to its alternate bucket before the new
+  // fingerprint could be placed.
   size_t NumKOInserts() const {
     return num_ko_inserts_;
   }
 
   // Returns approximate heap bytes used by this filter's SubFilter data.
-  size_t UsedMemory() const;
+  size_t MallocUsed() const;
 
  private:
   using SubFilter = std::pmr::vector<uint8_t>;
@@ -80,9 +83,9 @@ class CuckooFilter {
   // Repeats up to max_iterations_ times. On failure, rolls back all swaps.
   bool KOInsert(const LookupParams& p, SubFilter& sf);
 
-  const uint8_t slots_per_bucket_;
-  const uint16_t max_iterations_;
-  const uint16_t expansion_;
+  uint8_t slots_per_bucket_;
+  uint16_t max_iterations_;
+  uint16_t expansion_;
 
   uint64_t num_buckets_ = 0;
   uint64_t num_items_ = 0;
