@@ -10,7 +10,7 @@
 #
 # Example:
 #   capture_result.sh dev@SERVER dev@CLIENT /tmp/prebuilt_write.log /tmp/bench-run/prebuilt prebuilt 6380
-set -uo pipefail
+set -euo pipefail
 srv=${1:?server ssh}; cli=${2:?client ssh}; log=${3:?client log path}; out=${4:?outdir}
 label=${5:-run}; port=${6:-6380}
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=12"
@@ -25,7 +25,7 @@ read -r host_free host_total < <($SSH "$srv" 'free -b | awk "/^Mem:/{print \$4, 
 $SSH "$srv" 'free -h' > "$out/host_memory.txt"
 host_used_pct=$(awk "BEGIN{printf \"%.1f\", ($host_total-$host_free)/$host_total*100}")
 
-summary=$(grep -E 'Total time' "$out/write.log" | tail -1)
+summary=$(grep -E 'Total time' "$out/write.log" | tail -1 || true)
 errline=$(grep -iE 'error responses' "$out/write.log" | tail -1 || true)
 errs=$(echo "$errline" | grep -oE '[0-9]+' | head -1)
 errs=${errs:-0}

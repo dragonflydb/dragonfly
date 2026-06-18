@@ -36,7 +36,7 @@ OS: <distro + kernel>. Network tuning: <applied / none — one line on what>.
 Write command:
 
     ./dfly_bench -n $N -p 6380 --qps=0 -d 64 --key_maximum=$KMAX -c $CONN \
-        --command "setex __key__ 10000 __data__"
+        --pipeline 30 --command "setex __key__ 10000 __data__"
 
 Read command:
 

@@ -46,4 +46,4 @@ for i in $(seq 1 "$maxp"); do
   fi
   [ "$state" = "DONE" ] && { echo "write finished"; exit 0; }
 done
-echo "monitor: max polls reached, write still running"
+echo "monitor: max polls reached, write still running"; exit 2
