@@ -1152,14 +1152,16 @@ TOPK* CompactObj::GetTOPK() const {
 
 void CompactObj::SetCuckooFilter(uint64_t capacity, uint8_t slots_per_bucket,
                                  uint16_t max_iterations, uint16_t expansion) {
+  // Allocate before touching taglen_/u_: if constructor throws (e.g. bad_alloc)
+  // this object must stay in its previous, valid state.
+  CuckooFilter* cf =
+      AllocateMR<CuckooFilter>(capacity, tl.local_mr, slots_per_bucket, max_iterations, expansion);
   if (taglen_ == CUCKOO_FILTER_TAG) {
-    *u_.cuckoo_filter =
-        CuckooFilter(capacity, tl.local_mr, slots_per_bucket, max_iterations, expansion);
+    DeleteMR<CuckooFilter>(u_.cuckoo_filter);
   } else {
     SetMeta(CUCKOO_FILTER_TAG);
-    u_.cuckoo_filter = AllocateMR<CuckooFilter>(capacity, tl.local_mr, slots_per_bucket,
-                                                max_iterations, expansion);
   }
+  u_.cuckoo_filter = cf;
 }
 
 CuckooFilter* CompactObj::GetCuckooFilter() const {
