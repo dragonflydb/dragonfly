@@ -51,6 +51,10 @@ ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
 // ok_backend always binds on all interfaces (AcceptServer default) and has no persistence.
 ABSL_FLAG(std::string, bind, "", "Bind address (no-op in ok_backend)");
 ABSL_FLAG(std::string, dbfilename, "", "DB filename (no-op in ok_backend)");
+ABSL_FLAG(bool, coro_squash, false,
+          "Squash pipelined SET/GET batches with the coroutine-based squasher (a shared blocker "
+          "plus a per-command reply coroutine, no connection-fiber blocking) instead of the "
+          "default blocking squasher (block the connection fiber, then store captured payloads).");
 
 using namespace util;
 using namespace std;
@@ -290,6 +294,50 @@ void RunShardOps(absl::Span<CmdContext* const> cmds) {
   }
 }
 
+// Shared state for one coroutine-squashed batch. Owns the single blocker that every command in the
+// batch awaits. Kept alive by the shared_ptr captured in each reply coroutine frame (and in the
+// shard callbacks), so it outlives the cross-thread work and all reply resumes.
+struct BatchState {
+  fb2::EmbeddedBlockingCounter blocker{0};
+};
+
+// Awaiter variant that suspends a command on an explicit (shared) blocker rather than the command's
+// own. Like ResolveAwaiter, await_suspend registers (blocker, handle) with the ParsedCommand so the
+// connection can resume it via SendReply().
+struct BatchAwaiter {
+  CmdContext* ctx;
+  fb2::EmbeddedBlockingCounter* blocker;
+
+  bool await_ready() const noexcept {
+    return false;  // always suspend.
+  }
+
+  void await_suspend(std::coroutine_handle<> h) const noexcept {
+    ctx->Resolve(blocker, h);
+  }
+
+  void await_resume() const noexcept {
+  }
+};
+
+// Reply coroutine for one coroutine-squashed command: the back half of SetAsync/GetAsync. The
+// cross-thread dispatch (the per-command Add) is hoisted into the squasher as one Add per shard;
+// here we only register on the shared blocker, suspend, and -- once the whole batch is fulfilled
+// and the connection resumes us in parse order -- write this command's reply from its result slot.
+AsyncCmd EmitBatchedReply(CmdContext* ctx, shared_ptr<BatchState> batch) {
+  co_await BatchAwaiter{ctx, &batch->blocker};
+
+  if (ctx->batch_is_get) {
+    auto* rb = static_cast<RedisReplyBuilder*>(ctx->rb());
+    if (ctx->get_result)
+      rb->SendBulkString(*ctx->get_result);
+    else
+      rb->SendNull();
+  } else {
+    ctx->rb()->SendOk();
+  }
+}
+
 class OkService : public ServiceInterface {
  public:
   explicit OkService(ProactorPool* pool) : pool_(pool) {
@@ -309,10 +357,13 @@ class OkService : public ServiceInterface {
   }
 
  private:
-  // Dispatches the run already grouped into per_shard (active = number of non-empty buckets): one
-  // task per active shard, blocks the connection fiber until they finish, then stores a captured
-  // payload per command for the connection to emit in parse order.
-  void EmitBlockingBatch(unsigned num_active_shards, ShardBuckets* per_shard);
+  // The two squashers selected by --coro_squash; both consume the run already grouped into
+  // per_shard (active = number of non-empty buckets) and both block until the shards finish (the
+  // connection's SquashPipeline needs every reply ready on return). They differ in how the reply is
+  // delivered: EmitBlockingBatch stores a captured payload per command; EmitCoroBatch has every
+  // command share one blocker and a per-command reply coroutine the connection resumes afterwards.
+  static void EmitBlockingBatch(unsigned num_active_shards, ShardBuckets* per_shard);
+  static void EmitCoroBatch(unsigned num_active_shards, ShardBuckets& per_shard);
 
   // Synchronous fallback handlers (used when async is not available).
   DispatchResult HandleSetSync(ParsedCommand* cmd);
@@ -385,7 +436,11 @@ uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
   if (group.processed == 0)
     return 0;
 
-  EmitBlockingBatch(group.num_active, &per_shard);
+  if (absl::GetFlag(FLAGS_coro_squash))
+    EmitCoroBatch(group.num_active, per_shard);
+  else
+    EmitBlockingBatch(group.num_active, &per_shard);
+
   return group.processed;
 }
 
@@ -417,6 +472,50 @@ void OkService::EmitBlockingBatch(unsigned num_active_shards, ShardBuckets* per_
       }
     }
   }
+}
+
+// Coroutine squasher (Variant A, see docs/coroutine-batch-squasher.md): every command shares one
+// BatchState blocker and registers a thread-local reply coroutine that suspends on it. We arm the
+// blocker, register the coroutines, issue one cross-thread Add per active shard (each Decs once),
+// then wait for the shared blocker. The shard callbacks own their command vectors (the lambdas move
+// them out of per_shard). Replies are written by resuming the per-command coroutines -- the only
+// difference from the blocking squasher, which instead stores captured payloads. Because the
+// connection's SquashPipeline expects every reply ready on return, we still block here; the win is
+// the cross-thread reduction (one Add + one Dec per active shard) plus the single shared blocker.
+void OkService::EmitCoroBatch(unsigned num_active_shards, ShardBuckets& per_shard) {
+  auto batch = make_shared<BatchState>();
+  batch->blocker.Start(
+      num_active_shards);  // (A) arm before any registration or Dec can be observed
+
+  // (B) register a reply coroutine per command. Each runs eagerly to its co_await, registers
+  // (shared blocker, handle) on the command, and suspends -- so all handles are in place before any
+  // shard can Dec the blocker (docs §5a). Order doesn't matter (the connection replies in parse
+  // order), so we iterate the buckets directly.
+  for (auto& bucket : per_shard) {
+    for (auto* ctx : bucket) {
+      ctx->SetDeferredReply();
+      EmitBatchedReply(ctx, batch);
+    }
+  }
+
+  // (C) one cross-thread enqueue per active shard; each runs all of its ops then a single Dec.
+  for (unsigned sid = 0; sid < per_shard.size(); sid++) {
+    if (per_shard[sid].empty())
+      continue;
+    g_shards[sid].queue->Add([batch, cmds = std::move(per_shard[sid])]() mutable {
+      RunShardOps(cmds);
+      batch->blocker.Dec();  // one Dec per shard
+    });
+  }
+
+  // (D) block the connection fiber until every shard has decremented the shared blocker. The
+  // connection's SquashPipeline requires CanReply() (== blocker->IsCompleted()) to hold for every
+  // command the moment we return, so we must reach zero here -- exactly like the blocking
+  // squasher's bc->Wait(). The replies themselves are still emitted by the per-command coroutines,
+  // which the connection resumes via SendReply() afterwards. batch stays alive past this return
+  // because each coroutine frame holds its own shared_ptr until SendReply() drives it to
+  // completion.
+  batch->blocker.Wait();
 }
 
 DispatchResult OkService::HandleSetSync(ParsedCommand* cmd) {
