@@ -434,7 +434,7 @@ struct ClientListFilter {
 
 optional<ClientListFilter> ParseClientListFilter(CmdArgList args, CommandContext* cmd_cntx) {
   ClientListFilter filter;
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args().Tail()};
   if (!parser.HasNext())
     return filter;
 
@@ -549,7 +549,7 @@ void ClientTracking(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(
         "Client tracking is currently not supported for RESP2. Please use RESP3.");
 
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args().Tail()};
   if (!parser.HasAtLeast(1) || args.size() > 3)
     return cmd_cntx->SendError(kSyntaxErr);
 
@@ -613,7 +613,7 @@ void ClientCaching(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   using Tracking = ConnectionState::ClientTracking;
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args().Tail()};
 
   if (parser.Check("YES")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTIN)) {
@@ -810,7 +810,7 @@ struct ReplicaOfArgs {
   string host;
   uint16_t port;
   std::optional<cluster::SlotRange> slot_range;
-  static nonstd::expected<ReplicaOfArgs, ErrorReply> FromCmdArgs(CmdArgList args);
+  static nonstd::expected<ReplicaOfArgs, ErrorReply> FromCmdArgs(facade::ParsedArgs args);
   bool IsReplicaOfNoOne() const {
     return port == 0;
   }
@@ -827,7 +827,7 @@ struct ReplicaOfArgs {
   }
 };
 
-nonstd::expected<ReplicaOfArgs, ErrorReply> ReplicaOfArgs::FromCmdArgs(CmdArgList args) {
+nonstd::expected<ReplicaOfArgs, ErrorReply> ReplicaOfArgs::FromCmdArgs(facade::ParsedArgs args) {
   ReplicaOfArgs replicaof_args;
   CmdArgParser parser(args);
 
@@ -2662,7 +2662,7 @@ void ServerFamily::FlushDb(CmdArgList args, CommandContext* cmd_cntx) {
   if (args.size() > 1)
     return cmd_cntx->SendError(kSyntaxErr);
 
-  bool sync = CmdArgParser{args}.Check("SYNC");
+  bool sync = CmdArgParser{cmd_cntx->tail_args()}.Check("SYNC");
   string_view cmd_name = cmd_cntx->tx()->GetCId()->name();
   DbIndex index = cmd_name == "FLUSHALL" ? DbSlice::kDbAll : cmd_cntx->tx()->GetDbIndex();
   Drakarys(cmd_cntx->tx(), index, sync);
@@ -4065,7 +4065,7 @@ void ServerFamily::AddReplicaOf(CmdArgList args, CommandContext* cmd_cntx) {
   }
   CHECK(replica_);
 
-  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args);
+  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(cmd_cntx->tail_args());
   if (!replicaof_args.has_value()) {
     return cmd_cntx->SendError(replicaof_args.error());
   }
@@ -4095,21 +4095,19 @@ void ServerFamily::StopAllClusterReplicas() {
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, CommandContext* cmd_cntx) {
-  ReplicaOfInternal(args, cmd_cntx, ActionOnConnectionFail::kReturnOnError);
+  ReplicaOfInternal(cmd_cntx->tail_args(), cmd_cntx, ActionOnConnectionFail::kReturnOnError);
 }
 
 void ServerFamily::Replicate(string_view host, string_view port) {
-  StringVec replicaof_params{string(host), string(port)};
+  cmn::BackedArguments bargs;
+  bargs.PushArg(host);
+  bargs.PushArg(port);
 
-  CmdArgVec args_vec;
-  for (auto& s : replicaof_params) {
-    args_vec.emplace_back(MutableSlice{s.data(), s.size()});
-  }
-  CmdArgList args_list = absl::MakeSpan(args_vec);
   io::NullSink sink;
   facade::RedisReplyBuilder rb(&sink);
   CommandContext cmd_cntx{&rb, nullptr};
-  ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
+  ReplicaOfInternal(facade::ParsedArgs{bargs}, &cmd_cntx,
+                    ActionOnConnectionFail::kContinueReplication);
 }
 
 void ServerFamily::StartJournalInShardThreads(Replica* repl_ptr) {
@@ -4147,7 +4145,7 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   return builder->SendOk();
 }
 
-void ServerFamily::ReplicaOfInternal(CmdArgList args, CommandContext* cmd_cntx,
+void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmd_cntx,
                                      ActionOnConnectionFail on_error)
     ABSL_LOCKS_EXCLUDED(replicaof_mu_) {
   auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args);
@@ -4225,7 +4223,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, CommandContext* cmd_cntx,
 void ServerFamily::ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   VLOG(1) << "ReplTakeOver start";
 
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
 
   int timeout_sec = parser.Next<int>();
   bool save_flag = static_cast<bool>(parser.Check("SAVE"));
@@ -4447,7 +4445,7 @@ void ServerFamily::ShutdownCmd(CmdArgList args, CommandContext* cmd_cntx) {
 
   uint32_t sb = 0;
 
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   while (parser.HasNext()) {
     // Map SAFE to SAVE directly (fallthrough behavior)
     ShutBits opt = parser.MapNext("SAVE", SB_SAVE, "NOSAVE", SB_NOSAVE, "NOW", SB_NOW, "FORCE",
@@ -4560,7 +4558,7 @@ void ServerFamily::Module(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void ServerFamily::ClientPauseCmd(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args().Tail());
   auto listeners = GetNonPriviligedListeners();
 
   auto timeout = parser.Next<uint64_t>();

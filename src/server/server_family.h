@@ -397,7 +397,7 @@ class ServerFamily {
                            // failure
   };
 
-  void ReplicaOfInternal(CmdArgList args, CommandContext* cmnd_cntx,
+  void ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmnd_cntx,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void StartJournalInShardThreads(Replica* repl_ptr);

@@ -643,7 +643,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, CommandContext* cmd_cntx)
 }
 
 void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args().Tail());
   parser.ExpectTag("SLOTS");
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -734,7 +734,7 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, CommandContext* cmd_c
 
   std::vector<SlotRange> slot_ranges;
 
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args().Tail());
   do {
     auto [slot_start, slot_end] = parser.Next<ParsedSlotId, ParsedSlotId>();
     RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
@@ -788,7 +788,7 @@ static string_view StateToStr(MigrationState state) {
 }
 
 void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args().Tail());
 
   util::fb2::LockGuard lk(migration_mu_);
 
@@ -948,7 +948,7 @@ SlotRanges ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationIn
 
 void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
   VLOG(1) << "Create incoming migration, args: " << args;
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args().Tail()};
 
   auto [source_id, flows_num] = parser.Next<string_view, uint32_t>();
 
@@ -1006,7 +1006,7 @@ void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void ClusterFamily::DflyMigrateFlow(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args().Tail()};
   auto [source_id, shard_id] = parser.Next<std::string_view, uint32_t>();
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
@@ -1092,7 +1092,7 @@ void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
 }
 
 void ClusterFamily::DflyMigrateAck(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args().Tail()};
   auto [source_id, attempt] = parser.Next<std::string_view, long>();
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);

@@ -884,7 +884,7 @@ enum PopulateFlag { FLAG_RAND, FLAG_TYPE, FLAG_ELEMENTS, FLAG_SLOT, FLAG_EXPIRE,
 // optional: [RAND | TYPE typename | ELEMENTS element num | SLOTS (key value)+ | EXPIRE start end]
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
                                                                 CommandContext* cmd_cntx) {
-  CmdArgParser parser(args.subspan(1));
+  CmdArgParser parser(cmd_cntx->tail_args().Tail());
   PopulateOptions options;
 
   options.total_count = parser.Next<uint64_t>();
@@ -1073,7 +1073,7 @@ void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
   // A recording captures exactly one source; LISTENER and REPLICA are mutually
   // exclusive. REPLICA captures commands received from a master via the
   // replication stream (only meaningful while this server is a replica).
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args().Tail());
   if (parser.Check("STOP")) {
     if (!parser.Finalize())
       return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -1570,7 +1570,7 @@ static size_t PostProcessHist(HufHist* dest) {
 
 void DebugCmd::Compression(CmdArgList args, CommandContext* cmd_cntx) {
   CompactObjType type = kInvalidCompactObjType;
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args().Tail());
   string bintable;
   bool print_bintable = false;
 

@@ -2374,7 +2374,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
     return builder->SendError("Cannot create index on db != 0"sv);
   }
 
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view idx_name = parser.Next();
 
   // Parse optional NX (Only create if not exists) parameter for internal usage
@@ -2433,7 +2433,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view idx_name = parser.Next();
   parser.ExpectTag("SCHEMA");
   parser.ExpectTag("ADD");
@@ -2783,7 +2783,7 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
 }
 
 void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view index_name = parser.Next();
   string_view query_str = parser.Next();
 
@@ -3021,7 +3021,7 @@ void CmdFtProfileHybrid(string_view index_name, CmdArgParser* parser, CommandCon
 }
 
 void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
 
   string_view index_name = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -3335,7 +3335,7 @@ static void AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
 }
 
 void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   auto* builder = cmd_cntx->rb();
 
   auto params = ParseAggregatorParams(&parser);
@@ -3679,7 +3679,7 @@ void FtConfigSet(CmdArgParser* parser, CommandContext* cmd_cntx) {
 }
 
 void CmdFtConfig(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   auto func = parser.MapNext("GET", &FtConfigGet, "SET", &FtConfigSet, "HELP", &FtConfigHelp);
 
   if (auto err = parser.TakeError(); err) {
@@ -3690,7 +3690,7 @@ void CmdFtConfig(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdFtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser{cmd_cntx->tail_args()};
   auto [index_name, group_id] = parser.Next<string_view, string>();
 
   // Redis ignores this parameter. Checked on redis_version:6.2.13
@@ -3740,7 +3740,7 @@ void CmdFtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdFtDebug(CmdArgList args, CommandContext* cmd_cntx) {
   // FT._DEBUG command stub for test compatibility
   // This command is used by integration tests to control internal behavior
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (args.empty() || parser.Check("HELP")) {
@@ -3768,7 +3768,7 @@ void CmdFtDebug(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdFtHybrid(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view index_name = parser.Next();
 
   auto params = ParseHybridParams(&parser);

@@ -500,7 +500,7 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
 // timeout_sec - number of seconds to wait for TAKEOVER to converge.
 // SAVE option is used only by tests.
 void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   parser.Next();
   float timeout = std::ceil(parser.Next<float>());
   if (timeout < 0) {
@@ -660,7 +660,7 @@ void DflyCmd::ReplicaOffset(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void DflyCmd::Load(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   parser.ExpectTag("LOAD");
   string filename = parser.Next<string>();
   ServerFamily::LoadExistingKeys existing_keys = ServerFamily::LoadExistingKeys::kFail;
