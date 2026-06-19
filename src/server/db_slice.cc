@@ -571,13 +571,16 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   RETURN_ON_BAD_STATUS(res);
 
   auto it = Iterator(*res, StringOrView::FromView(key));
-  PreUpdateBlocking(cntx.db_index, it);
+
+  bool omitted = IsOmittableWrite(cntx, ChangeReq{it.GetInnerIt()});
+  if (!omitted)
+    PreUpdateBlocking(cntx.db_index, it);
 
   // PreUpdate() might have caused a deletion of `it`
   if (res->IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, (*res)->second.MallocUsed());
 
-    return {{it, AutoUpdater{cntx.db_index, key, it, this}}};
+    return {{it, AutoUpdater{cntx.db_index, key, it, this}, false, omitted}};
   } else {
     return OpStatus::KEY_NOTFOUND;
   }

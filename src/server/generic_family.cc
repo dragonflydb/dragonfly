@@ -4,6 +4,7 @@
 
 #include "server/generic_family.h"
 
+#include <absl/container/inlined_vector.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
@@ -12,6 +13,7 @@
 
 #include "facade/cmd_arg_parser.h"
 #include "facade/reply_builder.h"
+#include "server/tx_base.h"
 
 extern "C" {
 #include "redis/crc64.h"
@@ -1147,6 +1149,39 @@ io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
   return flags;
 }
 
+// New version of OpDel with possible journal omits - autojournaling must be disabled
+OpResult<uint32_t> OpDelV2(const OpArgs& op_args, const ShardArgs& keys, bool async) {
+  bool journal_enabled = op_args.shard->journal();
+  auto& db_slice = op_args.GetDbSlice();
+
+  uint32_t deleted_cnt = 0;
+  absl::InlinedVector<std::string_view, 5> journal_args;
+
+  for (string_view key : keys) {
+    auto it = db_slice.FindMutable(op_args.db_cntx, key);
+    it.post_updater.Run();  // Run before Del
+
+    if (!IsValid(it.it))
+      continue;
+
+    db_slice.Del(op_args.db_cntx, it.it, nullptr, async);
+    ++deleted_cnt;
+
+    // If journal write was not omitted, append to journal
+    if (journal_enabled && !it.omitted_journal)
+      journal_args.push_back(key);
+  }
+
+  if (journal_enabled) {
+    if (!journal_args.empty())
+      RecordJournal(op_args, "DEL", journal_args);
+    else if (deleted_cnt > 0)  // operations that are not in lsn log
+      journal::ClearBuffer();
+  }
+
+  return deleted_cnt;
+}
+
 }  // namespace
 
 OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys, bool async) {
@@ -1175,7 +1210,10 @@ static cmd::CmdR CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* tx, EngineShard* es) {
     auto args = tx->GetShardArgs(es->shard_id());
     auto op_args = tx->GetOpArgs(es);
-    auto res = GenericFamily::OpDel(op_args, args, async_unlink);
+
+    op_args.db_cntx.is_omittable_operation = true;
+    auto res = OpDelV2(op_args, args, async_unlink);
+
     result.fetch_add(res.value_or(0), memory_order_relaxed);
     return OpStatus::OK;
   };
@@ -2693,7 +2731,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST;
   registry->StartFamily();
   *registry
-      << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.SetAsyncHandler(CmdDel)
+      << CI{"DEL", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kDel}.SetAsyncHandler(CmdDel)
       << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDel}.HFUNC(Delex)
       /* Redis compatibility:
        * We don't allow PING during loading since in Redis PING is used as
@@ -2727,7 +2765,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
-      << CI{"UNLINK", CO::JOURNALED, -2, 1, -1, acl::kUnlink}.SetAsyncHandler(CmdDel)
+      << CI{"UNLINK", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kUnlink}.SetAsyncHandler(
+             CmdDel)
       << CI{"STICK", CO::JOURNALED, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
