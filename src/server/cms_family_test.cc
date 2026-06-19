@@ -27,6 +27,20 @@ TEST_F(CmsFamilyTest, InitByDim) {
   EXPECT_THAT(resp, ErrArg("width and depth must be greater than 0"));
 }
 
+TEST_F(CmsFamilyTest, InitByDimRejectsOversizedDimensionsAndPreservesState) {
+  auto resp = Run({"cms.initbydim", "k", "2147483648", "1073741824"});
+  EXPECT_THAT(resp, ErrArg("width must not exceed"));
+  EXPECT_THAT(Run({"exists", "k"}), IntArg(0));
+
+  resp = Run({"cms.incrby", "k", "a", "1"});
+  EXPECT_THAT(resp, ErrArg("CMS: key does not exist"));
+  EXPECT_THAT(Run({"exists", "k"}), IntArg(0));
+
+  EXPECT_EQ(Run({"cms.initbydim", "safe", "100", "5"}), "OK");
+  EXPECT_THAT(Run({"cms.incrby", "safe", "a", "1"}), RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"cms.query", "safe", "a"}), RespElementsAre(IntArg(1)));
+}
+
 TEST_F(CmsFamilyTest, InitByProb) {
   auto resp = Run("cms.initbyprob cms1 0.01 0.01");
   EXPECT_EQ(resp, "OK");
@@ -39,6 +53,12 @@ TEST_F(CmsFamilyTest, InitByProb) {
 
   resp = Run("cms.initbyprob cms3 0.01 0");
   EXPECT_THAT(resp, ErrArg("probability must be between 0 and 1"));
+}
+
+TEST_F(CmsFamilyTest, InitByProbRejectsOversizedDerivedDimensions) {
+  auto resp = Run({"cms.initbyprob", "cms", "0.000001", "0.01"});
+  EXPECT_THAT(resp, ErrArg("width must not exceed"));
+  EXPECT_THAT(Run({"exists", "cms"}), IntArg(0));
 }
 
 TEST_F(CmsFamilyTest, IncrBy) {

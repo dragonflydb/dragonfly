@@ -2040,8 +2040,8 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
 
   SET_OR_UNEXPECT(LoadLen(nullptr), res.total_incr_count);
 
-  // Safely check for multiplication overflow BEFORE multiplying
-  if (depth > 0 && width > (SIZE_MAX / depth))
+  // Reject dimensions whose counter buffer (num_counters * sizeof(int64_t)) would overflow size_t.
+  if (width > (SIZE_MAX / sizeof(int64_t)) / depth)
     return Unexpected(errc::rdb_file_corrupted);
 
   res.width = static_cast<uint32_t>(width);
