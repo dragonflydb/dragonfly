@@ -531,9 +531,11 @@ void DbSlice::AutoUpdater::Run() {
     // from a counter that never had the original bytes added to it.
     AccountObjectMemory(fields_.key, fields_.orig_obj_type,
                         -static_cast<int64_t>(fields_.orig_value_heap_size), table);
-    AccountObjectMemory(fields_.key, current_type, current_size, table);
+    AccountObjectMemory(fields_.key, current_type,
+                        current_size - fields_.already_accounted_object_size, table);
   } else {
     ssize_t delta = current_size - static_cast<int64_t>(fields_.orig_value_heap_size);
+    delta -= fields_.already_accounted_object_size;
     AccountObjectMemory(fields_.key, current_type, delta, table);
   }
 

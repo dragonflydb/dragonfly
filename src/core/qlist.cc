@@ -430,6 +430,7 @@ void QList::Node::Upload(QList* ql, std::string_view val) {
   entry = static_cast<unsigned char*>(zmalloc(val.size()));
   memcpy(entry, val.data(), val.size());
   ql->AdjustMallocSize(val.size());
+  ql->AdjustAccountedObjectSize(val.size());
   ql->AdjustOffloadNodeCount(-1);
   offloaded = 0;
 }

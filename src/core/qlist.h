@@ -119,8 +119,14 @@ class QList {
   using IterateFunc = absl::FunctionRef<bool(Entry)>;
   enum InsertOpt : uint8_t { BEFORE, AFTER };
 
-  void AdjustMallocSize(ssize_t delta) {
+  void AdjustMallocSize(size_t delta) {
     malloc_size_ += delta;
+  }
+
+  void AdjustAccountedObjectSize(size_t delta) {
+    if (tiering_enabled_) {
+      tiering_params_->accounted_object_size += delta;
+    }
   }
 
   // Add to the number of offloaded nodes by one.
@@ -133,9 +139,11 @@ class QList {
   DbIndex GetDbIndex() const {
     return db_id_;
   }
+
   struct TieringParams {
     uint32_t num_offloaded_nodes = 0;
     uint32_t node_depth_threshold = 0;
+    int32_t accounted_object_size = 0;
     void (*offload)(QList* ql, Node* node) = nullptr;
     void (*load)(QList* ql, Node* node) = nullptr;
     void (*cleanup)(QList* ql, Node* node) = nullptr;
@@ -279,6 +287,15 @@ class QList {
   void EnableTiering(const TieringParams& params) {
     tiering_enabled_ = 1;
     tiering_params_ = std::make_unique<TieringParams>(params);
+  }
+
+  int32_t ConsumeAccountedObjectSize() {
+    if (tiering_enabled_) {
+      int32_t n = tiering_params_->accounted_object_size;
+      tiering_params_->accounted_object_size = 0;
+      return n;
+    }
+    return 0;
   }
 
   // Updates the db index associated with this list.

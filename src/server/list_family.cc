@@ -268,6 +268,12 @@ class ListWrapper {
     return VisitMut([&](auto& list) { return ReplaceInternal(index, elem, list); });
   }
 
+  int64_t AccountedObjectSize() {
+    return visit(Overload{[](QList* ql) -> int64_t { return ql->ConsumeAccountedObjectSize(); },
+                          [](const LP&) -> int64_t { return 0; }},
+                 impl_);
+  }
+
   void Erase(long start, long count) {
     VisitMut([&](auto& list) { list.Erase(start, count); });
   }
@@ -404,6 +410,8 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   lw.Launder(&it->second);
   len = lw.Size();
 
+  it_res->post_updater.SetAccountedObjectSize(lw.AccountedObjectSize());
+
   it_res->post_updater.Run();
 
   OpArgs op_args = t->GetOpArgs(shard);
@@ -451,6 +459,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     val = srcql_v2.Pop(ToWhere(src_dir));
     srcql_v2.Push(val, ToWhere(dest_dir));
     srcql_v2.Launder(&src_it->second);
+    src_res->post_updater.SetAccountedObjectSize(srcql_v2.AccountedObjectSize());
     return val;
   }
 
@@ -471,6 +480,9 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 
   dest_lw.Push(val, ToWhere(dest_dir));
   dest_lw.Launder(&dest_res.it->second);
+
+  src_res->post_updater.SetAccountedObjectSize(srcql_v2.AccountedObjectSize());
+  dest_res.post_updater.SetAccountedObjectSize(dest_lw.AccountedObjectSize());
 
   src_res->post_updater.Run();
   dest_res.post_updater.Run();
@@ -527,6 +539,8 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   lw.Launder(&res.it->second);
   len = lw.Size();
 
+  res.post_updater.SetAccountedObjectSize(lw.AccountedObjectSize());
+
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
     vector<string_view> mapped(vals.Size() + 1);
@@ -571,6 +585,8 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
     }
   }
   lw.Launder(&it->second);
+
+  it_res->post_updater.SetAccountedObjectSize(lw.AccountedObjectSize());
 
   it_res->post_updater.Run();
 
@@ -711,6 +727,8 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
     res = int(lw.Size());
   }
 
+  it_res->post_updater.SetAccountedObjectSize(lw.AccountedObjectSize());
+
   return res;
 }
 
@@ -731,6 +749,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   unsigned removed = lw.Remove(elem, count, where);
   size_t len = lw.Size();
   lw.Launder(&it_res->it->second);
+  it_res->post_updater.SetAccountedObjectSize(lw.AccountedObjectSize());
   it_res->post_updater.Run();
 
   if (len == 0) {
@@ -752,6 +771,8 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
     lw.Launder(&it_res->it->second);
     status = OpStatus::OK;
   }
+  it_res->post_updater.SetAccountedObjectSize(lw.AccountedObjectSize());
+
   return status;
 }
 
@@ -792,6 +813,8 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   lw.Erase(0, ltrim);
   lw.Erase(-rtrim, rtrim);
   lw.Launder(&it->second);
+
+  it_res->post_updater.SetAccountedObjectSize(lw.AccountedObjectSize());
 
   it_res->post_updater.Run();
 
