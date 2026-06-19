@@ -184,7 +184,7 @@ MemoryCmd::MemoryCmd(ServerFamily* owner, CommandContext* cmd_cntx)
 }
 
 void MemoryCmd::Run(CmdArgList args) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx_->tail_args());
 
   if (parser.Check("HELP")) {
     string_view help_arr[] = {
@@ -495,7 +495,7 @@ void MemoryCmd::Track(CmdArgList args) {
   return cmd_cntx_->SendError("MEMORY TRACK must be enabled at build time.");
 #endif
 
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx_->tail_args().Tail());
 
   if (parser.Check("ADD")) {
     AllocationTracker::TrackingInfo tracking_info;

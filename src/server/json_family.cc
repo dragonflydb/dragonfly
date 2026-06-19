@@ -1710,7 +1710,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
 }
 
 void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   auto [key, path, json_str] = parser.Next<string_view, string_view, string_view>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
@@ -1768,7 +1768,7 @@ void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
 // JSON.MERGE key path value
 // Based on https://datatracker.ietf.org/doc/html/rfc7386 spec
 void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.Next();
   string_view value = parser.Next();
@@ -1787,7 +1787,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdResp(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -1803,7 +1803,7 @@ void CmdResp(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdDebug(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view command = parser.Next();
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1912,7 +1912,7 @@ void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.Next();
 
@@ -2024,7 +2024,7 @@ void CmdArrTrim(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdArrPop(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
   int index = parser.NextOrDefault<int>(-1);
@@ -2043,7 +2043,7 @@ void CmdArrPop(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdClear(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2082,7 +2082,7 @@ void CmdStrAppend(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2098,7 +2098,7 @@ void CmdObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2146,7 +2146,7 @@ void CmdNumMultBy(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdToggle(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2161,7 +2161,7 @@ void CmdToggle(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdType(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2177,7 +2177,7 @@ void CmdType(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdArrLen(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2193,7 +2193,7 @@ void CmdArrLen(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdObjLen(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2209,7 +2209,7 @@ void CmdObjLen(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2227,7 +2227,7 @@ void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 

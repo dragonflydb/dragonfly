@@ -575,7 +575,7 @@ void BitCount(CmdArgList args, CommandContext* cmd_cntx) {
   // See details at https://redis.io/commands/bitcount/
   // Please note that if the key don't exists, it would return 0
 
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   auto key = parser.Next<string_view>();
 
   std::pair<int64_t, int64_t> start_end;
@@ -1055,7 +1055,7 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser,
 // Parses a list of arguments (without key) to a CommandList.
 // Returns the CommandList if the parsing completed succefully or string
 // to indicate an error
-nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool read_only) {
+nonstd::expected<CommandList, string> ParseToCommandList(facade::ParsedArgs args, bool read_only) {
   enum class Cmds { OVERFLOW_OPT, GET_OPT, SET_OPT, INCRBY_OPT };
   CommandList result;
 
@@ -1136,14 +1136,15 @@ void SendResults(const vector<ResultType>& results, SinkReplyBuilder* builder) {
   }
 }
 
-void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReplyBuilder* builder) {
+void BitFieldGeneric(facade::ParsedArgs args, bool read_only, Transaction* tx,
+                     SinkReplyBuilder* builder) {
   if (args.size() == 1) {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->SendEmptyArray();
     return;
   }
-  auto key = ArgS(args, 0);
-  auto maybe_ops_list = ParseToCommandList(args.subspan(1), read_only);
+  auto key = args[0];
+  auto maybe_ops_list = ParseToCommandList(args.Tail(), read_only);
 
   if (!maybe_ops_list.has_value()) {
     builder->SendError(maybe_ops_list.error());
@@ -1167,11 +1168,11 @@ void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReply
 }
 
 void BitField(CmdArgList args, CommandContext* cmd_cntx) {
-  BitFieldGeneric(args, false, cmd_cntx->tx(), cmd_cntx->rb());
+  BitFieldGeneric(cmd_cntx->tail_args(), false, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
 void BitFieldRo(CmdArgList args, CommandContext* cmd_cntx) {
-  BitFieldGeneric(args, true, cmd_cntx->tx(), cmd_cntx->rb());
+  BitFieldGeneric(cmd_cntx->tail_args(), true, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
 #ifndef __clang__
@@ -1272,7 +1273,7 @@ void SetBit(CmdArgList args, CommandContext* cmd_cntx) {
   // Support for the command "SETBIT key offset new_value"
   // see https://redis.io/commands/setbit/
 
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   auto [key, offset, value] = parser.Next<string_view, uint32_t, FInt<0, 1>>();
 
   if (auto err = parser.TakeError(); err) {
