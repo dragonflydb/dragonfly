@@ -338,6 +338,17 @@ TEST_F(InterpreterTest, CallTableFirstArg) {
 
   // A valid string command name still works.
   EXPECT_TRUE(Execute("return redis.call('ping')")) << error_;
+
+  // A numeric command name is converted deterministically (not via the
+  // evaluation-order-dependent lua_tostring/lua_rawlen path).
+  string captured;
+  auto capture_cb = [&captured](auto ca) {
+    captured = string{ca.args->at(0)};
+    ca.translator->OnStatus("OK");
+  };
+  intptr_.SetRedisFunc(capture_cb);
+  EXPECT_TRUE(Execute("return redis.call(123)")) << error_;
+  EXPECT_EQ("123", captured);
 }
 
 TEST_F(InterpreterTest, CallArray) {
