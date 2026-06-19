@@ -1289,8 +1289,6 @@ optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_i
   if (!key_index_res)
     return ErrorReply{key_index_res.status()};
 
-  // TODO: Switch to transaction internal locked keys once single hop multi transactions are merged
-  // const auto& locked_keys = trans->GetMultiKeys();
   const auto& locked_tags = eval_info.lock_tags;
   for (string_view key : key_index_res->Range(args)) {
     if (!locked_tags.contains(LockTag{key})) {
@@ -1965,14 +1963,14 @@ void Service::TryEnqueueEvalAsyncCmd(const Interpreter::CallArgs& ca, CommandCon
 
   // Full command verification happens during squashed execution
   if (async_call) {
-    if (auto [cid, tail] = registry_.FindExtended(ca.args); cid != nullptr) {
+    ParsedArgs parsed_args{*ca.args};
+    if (auto [cid, tail] = registry_.FindExtended(parsed_args); cid != nullptr) {
       auto reply_mode = abort_on_error ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
-      auto tail_slice = ca.args.subspan(ca.args.size() - tail.size());
-
-      info->async_cmds.emplace_back(cid, tail_slice, reply_mode);
+      CmdArgVec scratch;
+      info->async_cmds.emplace_back(cid, tail.ToSlice(&scratch), reply_mode);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
     } else if (abort_on_error) {  // If we don't abort on errors, we can ignore it completely
-      early_async_error = ReportUnknownCmd(ca.args[0]);
+      early_async_error = ReportUnknownCmd(ca.args->at(0));
     }
   }
 
@@ -2015,22 +2013,34 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
       if (tx->GetMultiMode() != Transaction::NON_ATOMIC)
         return;
 
-      info->key_backing.resize(ca.args.size());
-      for (size_t i = 0; i < ca.args.size(); i++) {
-        info->key_backing[i] = ca.args[i];  // copy key
+      info->key_backing.resize(ca.args->size());
+      for (size_t i = 0; i < ca.args->size(); i++) {
+        info->key_backing[i] = ca.args->at(i);  // copy key
         info->lock_tags.insert(LockTag(info->key_backing[i]));
       }
 
-      tx->MultiSwitchCmd(registry_.Find("EVAL"));  // change cid + refurbish
-      tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args, false);
+      {
+        CmdArgVec keys(info->key_backing.begin(), info->key_backing.end());
+        tx->MultiSwitchCmd(registry_.Find("EVAL"));
+        tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), keys, false);
+      }
       return;
     case CT::ACALL:
     case CT::APCALL:  // was handled above
       return;
-    default:  // regular call
+    default: {
+      // Save EVAL's state that DispatchCommand overwrites.
+      auto saved_tail = cmd_cntx->tail_args();
+      CmdArgVec saved_backing;
+      saved_backing.swap(cmd_cntx->arg_slice_backing);
+
       auto* prev = cmd_cntx->SwapReplier(&replier);
-      DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
+      DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
       cmd_cntx->SwapReplier(prev);
+
+      saved_backing.swap(cmd_cntx->arg_slice_backing);
+      cmd_cntx->SetTailArgs(saved_tail);
+    }
   }
 }
 

@@ -288,9 +288,9 @@ TEST_F(InterpreterTest, Execute) {
 TEST_F(InterpreterTest, Call) {
   auto cb = [](auto ca) {
     auto* reply = ca.translator;
-    auto span = ca.args;
-    CHECK_GE(span.size(), 1u);
-    string_view cmd{span[0].data(), span[0].size()};
+    auto* span = ca.args;
+    CHECK_GE(span->size(), 1u);
+    string_view cmd = span->at(0);
     if (cmd == "string") {
       reply->OnString("foo");
     } else if (cmd == "double") {

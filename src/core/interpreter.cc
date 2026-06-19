@@ -5,7 +5,6 @@
 #include "core/interpreter.h"
 
 #include <absl/base/casts.h>
-#include <absl/container/fixed_array.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <absl/time/clock.h>
@@ -1177,85 +1176,52 @@ void Interpreter::UpdateGCParameters() {
              gc);
 }
 
-std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() {
+bool Interpreter::PrepareArgs() {
   int argc = lua_gettop(lua_);
+  backed_args_.clear();
+
   if (argc == 0)
-    return {{}};
+    return true;
 
-  size_t blob_len = 0;
-  char tmpbuf[64];
-
-  // Determine size required for backing storage for all args.
-  // Skip command name (idx=1), as its stored in a separate buffer.
+  // Validate argument types (skip command name at idx=1).
   for (int idx = 2; idx <= argc; idx++) {
-    switch (lua_type(lua_, idx)) {
-      case LUA_TNUMBER:
-        if (lua_isinteger(lua_, idx)) {
-          blob_len += absl::AlphaNum(lua_tointeger(lua_, idx)).size();
-        } else {
-          int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
-          CHECK_GT(fmt_len, 0);
-          blob_len += fmt_len;
-        }
-        continue;
-      case LUA_TSTRING:
-        blob_len += lua_rawlen(lua_, idx) + 1;
-        continue;
-      default:
-        PushError(lua_, "Lua redis() command arguments must be strings or integers");
-        return std::nullopt;
+    int t = lua_type(lua_, idx);
+    if (t != LUA_TNUMBER && t != LUA_TSTRING) {
+      PushError(lua_, "Lua redis() command arguments must be strings or integers");
+      return false;
     }
   }
 
-  absl::FixedArray<string_view, 4> args(argc);
+  // Copy command name.
+  backed_args_.PushArg(string_view{lua_tostring(lua_, 1), lua_rawlen(lua_, 1)});
 
-  // Copy command name to name_buffer and set it as first arg.
-  unsigned name_len = lua_rawlen(lua_, 1);
-  if (name_len >= sizeof(name_buffer_)) {
-    PushError(lua_, "Lua redis() command name too long");
-    return std::nullopt;
-  }
-
-  memcpy(name_buffer_, lua_tostring(lua_, 1), name_len);
-  args[0] = {name_buffer_, name_len};
-  buffer_.resize(blob_len + 4, '\0');  // backing storage for args
-
-  char* cur = buffer_.data();
-  char* end = cur + blob_len;
+  // Copy remaining arguments directly into backed_args_.
+  char tmpbuf[64];
   for (int idx = 2; idx <= argc; idx++) {
-    size_t len = 0;
     switch (lua_type(lua_, idx)) {
       case LUA_TNUMBER:
         if (lua_isinteger(lua_, idx)) {
-          char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), cur);
-          len = next - cur;
+          char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), tmpbuf);
+          backed_args_.PushArg(string_view{tmpbuf, size_t(next - tmpbuf)});
         } else if (lua_isnumber(lua_, idx)) {
-          // we pass `end - cur + 1` because we do not want to skip the last character
-          // if it's the last argument.
-          int fmt_len = absl::SNPrintF(cur, end - cur + 1, "%.17g", lua_tonumber(lua_, idx));
+          int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
           CHECK_GT(fmt_len, 0);
-          len = fmt_len;
+          backed_args_.PushArg(string_view{tmpbuf, size_t(fmt_len)});
         }
         break;
       case LUA_TSTRING:
-        len = lua_rawlen(lua_, idx);
-        memcpy(cur, lua_tostring(lua_, idx), len + 1);  // + 1 for null terminator
-    };
-
-    args[idx - 1] = {cur, len};
-    cur += len;
+        backed_args_.PushArg(string_view{lua_tostring(lua_, idx), lua_rawlen(lua_, idx)});
+        break;
+    }
   }
 
-  /* Pop all arguments from the stack, we do not need them anymore
-   * and this way we guaranty we will have room on the stack for the result. */
   lua_pop(lua_, argc);
-  return args;
+  return true;
 }
 
 // Calls redis function
 // Returns false if error needs to be raised.
-bool Interpreter::CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer,
-                                    SliceSpan args) {
+bool Interpreter::CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer) {
   bool raise_error = (call_type & CallArgs::PCALL) == 0;
   bool async = call_type & CallArgs::ACALL;
   bool tx = call_type & (CallArgs::LOCK | CallArgs::UNLOCK);
@@ -1269,15 +1235,12 @@ bool Interpreter::CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* ex
     translator.emplace(lua_);
     explorer = &*translator;
   }
+
   cmd_depth_++;
-  redis_func_(CallArgs{args, &buffer_, explorer, call_type, &raise_error});
+  redis_func_(CallArgs{&backed_args_, explorer, call_type, &raise_error});
   cmd_depth_--;
 
-  // Shrink reusable buffer if it's too big.
-  if (buffer_.capacity() > 128) {
-    buffer_.clear();
-    buffer_.shrink_to_fit();
-  }
+  backed_args_.MaybeShrink();
 
   if (!translator)
     return true;
@@ -1320,20 +1283,12 @@ int Interpreter::RedisGenericCommand(CallArgs::Type call_type, ObjectExplorer* e
     return 1;
   }
 
-  // IMPORTANT! all allocations within this funciton must be freed
-  // BEFORE calling RaiseErrorAndAbort in case of script error. RaiseErrorAndAbort
-  // uses longjmp which bypasses stack unwinding and skips the destruction of objects.
-  {
-    std::optional<absl::FixedArray<std::string_view, 4>> args = PrepareArgs();
-
-    // Verify argument are non-empty for all calls but unlock
-    if (args->empty() && (call_type & CallArgs::UNLOCK) == 0) {
+  // RaiseErrorAndAbort uses longjmp, which skips destructors. Avoid local allocations below.
+  if (PrepareArgs()) {
+    if (backed_args_.empty() && (call_type & CallArgs::UNLOCK) == 0) {
       PushError(lua_, "Please specify at least one argument for this call");
-      args = nullopt;
-    }
-
-    if (args.has_value()) {
-      raise_error = !CallRedisFunction(call_type, explorer, SliceSpan{*args});
+    } else {
+      raise_error = !CallRedisFunction(call_type, explorer);
     }
   }
   if (!raise_error) {
