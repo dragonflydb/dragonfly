@@ -1183,8 +1183,8 @@ bool Interpreter::PrepareArgs() {
   if (argc == 0)
     return true;
 
-  // Validate argument types (skip command name at idx=1).
-  for (int idx = 2; idx <= argc; idx++) {
+  // Validate argument types, including the command name at idx=1.
+  for (int idx = 1; idx <= argc; idx++) {
     int t = lua_type(lua_, idx);
     if (t != LUA_TNUMBER && t != LUA_TSTRING) {
       PushError(lua_, "Lua redis() command arguments must be strings or integers");
