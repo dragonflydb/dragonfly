@@ -217,7 +217,7 @@ bool CommandId::IsMultiTransactional() const {
   return kind_mask_ & (EVAL_CTRL | EXEC_CTRL);
 }
 
-optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
+optional<facade::ErrorReply> CommandId::Validate(const facade::ParsedArgs& tail_args) const {
   if ((arity() > 0 && tail_args.size() + 1 != size_t(arity())) ||
       (arity() < 0 && tail_args.size() + 1 < size_t(-arity()))) {
     string prefix;

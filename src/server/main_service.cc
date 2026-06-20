@@ -520,7 +520,7 @@ bool IsSHA(string_view str) {
   return rng::all_of(str, [](unsigned char c) { return absl::ascii_isxdigit(c); });
 }
 
-optional<ErrorReply> EvalValidator(CmdArgList args) {
+optional<ErrorReply> EvalValidator(const ParsedArgs& args) {
   facade::CmdArgParser parser{args};
   parser.Skip(1);  // script body / sha
   uint32_t num_keys = parser.Next<uint32_t>();

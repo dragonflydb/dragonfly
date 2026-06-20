@@ -60,7 +60,7 @@ vector<string> FormatEvalSlowlog(const ConnectionState& state) {
 }  // namespace
 
 StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyMode mode)
-    : cid_{cid}, args_{args}, reply_mode_{mode} {
+    : cid_{cid}, reply_mode_{mode} {
   backed_ = std::make_unique<cmn::BackedArguments>(args.begin(), args.end(), args.size());
   args_ = facade::ParsedArgs{*backed_};
 }

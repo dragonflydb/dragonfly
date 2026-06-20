@@ -1365,7 +1365,7 @@ void CmdSMembers(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdSRandMember(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
 
   bool is_count = parser.HasNext();
@@ -1555,7 +1555,7 @@ void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(cmd_cntx->tail_args().Tail(2));
   if (!ops) {
     DVLOG(1) << "SScan invalid args - return " << ops << " to the user";
     return cmd_cntx->SendError(ops.status());
@@ -1583,7 +1583,7 @@ void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
 
 // Syntax: saddex key [KEEPTTL] ttl_sec member [member...]
 void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
 
   const std::string_view key = parser.Next<std::string_view>();
   const bool keepttl = parser.Check("KEEPTTL");
