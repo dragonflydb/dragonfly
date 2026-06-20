@@ -168,6 +168,18 @@ ostream& operator<<(ostream& os, facade::CmdArgList ras) {
   return os;
 }
 
+ostream& operator<<(ostream& os, const facade::ParsedArgs& args) {
+  os << "[";
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (i)
+      os << ",";
+    os << absl::CHexEscape(args[i]);
+  }
+  os << "]";
+
+  return os;
+}
+
 ostream& operator<<(ostream& os, const facade::RespExpr& e) {
   using facade::RespExpr;
   using facade::ToSV;

@@ -11,6 +11,7 @@
 
 #include "base/iterator.h"
 #include "common/arg_range.h"
+#include "facade/facade_types.h"
 #include "server/common_types.h"
 
 namespace dfly {
@@ -47,7 +48,8 @@ struct KeyIndex {
     return base::it::Range(*this, KeyIndex{end, end, step, std::nullopt});
   }
 
-  auto Range(const cmn::ArgSlice& args) const {
+  // Accepts any indexable argument container (cmn::ArgSlice, facade::ParsedArgs, ...).
+  template <typename Args> auto Range(const Args& args) const {
     return base::it::Transform([args](unsigned idx) { return args[idx]; }, Range());
   }
 
@@ -128,12 +130,12 @@ using IndexSlice = std::pair<uint32_t, uint32_t>;  // [begin, end)
 // ShardArgs - hold a span to full arguments and a span of sub-ranges
 // referencing those arguments.
 class ShardArgs {
-  using ArgsIndexPair = std::pair<cmn::ArgSlice, absl::Span<const IndexSlice>>;
+  using ArgsIndexPair = std::pair<facade::ParsedArgs, absl::Span<const IndexSlice>>;
   ArgsIndexPair slice_;
 
  public:
   class Iterator {
-    cmn::ArgSlice arglist_;
+    facade::ParsedArgs arglist_;
     absl::Span<const IndexSlice>::const_iterator index_it_;
     uint32_t delta_ = 0;
 
@@ -145,12 +147,13 @@ class ShardArgs {
     using reference = value_type&;
 
     // First version, corresponds to spans over arguments.
-    Iterator(cmn::ArgSlice list, absl::Span<const IndexSlice>::const_iterator it)
+    Iterator(facade::ParsedArgs list, absl::Span<const IndexSlice>::const_iterator it)
         : arglist_(list), index_it_(it) {
     }
 
     bool operator==(const Iterator& o) const {
-      return index_it_ == o.index_it_ && delta_ == o.delta_ && arglist_.data() == o.arglist_.data();
+      // begin()/end() always come from the same ShardArgs, so position identifies them.
+      return index_it_ == o.index_it_ && delta_ == o.delta_;
     }
 
     bool operator!=(const Iterator& o) const {
@@ -183,7 +186,7 @@ class ShardArgs {
 
   using const_iterator = Iterator;
 
-  ShardArgs(cmn::ArgSlice fa, absl::Span<const IndexSlice> s) : slice_(ArgsIndexPair(fa, s)) {
+  ShardArgs(facade::ParsedArgs fa, absl::Span<const IndexSlice> s) : slice_(ArgsIndexPair(fa, s)) {
   }
 
   ShardArgs() : slice_(ArgsIndexPair{}) {
