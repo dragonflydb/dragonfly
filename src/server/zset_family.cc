@@ -1746,11 +1746,11 @@ void ZPopMinMaxFromArgs(CmdArgList args, bool reverse, CommandContext* cmd_cntx)
                           cmd_cntx->rb());
 }
 
-void ZRangeInternal(CmdArgList args, ZSetFamily::RangeParams range_params,
+void ZRangeInternal(facade::ParsedArgs args, ZSetFamily::RangeParams range_params,
                     CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view min_s = ArgS(args, 1);
-  string_view max_s = ArgS(args, 2);
+  string_view key = args[0];
+  string_view min_s = args[1];
+  string_view max_s = args[2];
 
   ZSetFamily::ZRangeSpec range_spec;
   range_spec.params = range_params;
@@ -1844,9 +1844,9 @@ void ZRangeInternal(CmdArgList args, ZSetFamily::RangeParams range_params,
   return cmd_cntx->SendLong(range_result->size());
 }
 
-void ZRangeGeneric(CmdArgList args, ZSetFamily::RangeParams range_params,
+void ZRangeGeneric(facade::ParsedArgs args, ZSetFamily::RangeParams range_params,
                    CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args.subspan(3)};
+  facade::CmdArgParser parser{args.Tail().Tail().Tail()};
   using RP = ZSetFamily::RangeParams;
 
   while (true) {
@@ -1891,7 +1891,7 @@ void ZRangeGeneric(CmdArgList args, ZSetFamily::RangeParams range_params,
     return rb->SendEmptyArray();
   }
 
-  ZRangeInternal(args.subspan(0, 3), range_params, cmd_cntx);
+  ZRangeInternal(args, range_params, cmd_cntx);
 }
 
 void ZRankGeneric(CmdArgList args, bool reverse, CommandContext* cmd_cntx) {
@@ -1900,7 +1900,7 @@ void ZRankGeneric(CmdArgList args, bool reverse, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(WrongNumArgsError(reverse ? "ZREVRANK" : "ZRANK"));
   }
 
-  facade::CmdArgParser parser(args);
+  facade::CmdArgParser parser(cmd_cntx->tail_args());
 
   string_view key = parser.Next();
   string_view member = parser.Next();
@@ -1973,7 +1973,7 @@ std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, Tra
 // If the arguments are invalid sends the appropiate error to builder and returns false.
 bool ValidateZMPopCommand(CmdArgList args, bool is_blocking, CommandContext* cmd_cntx,
                           ValidateZMPopResult* result) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
 
   if (is_blocking) {
     if (!absl::SimpleAtof(parser.Next(), &result->timeout)) {
@@ -2739,7 +2739,7 @@ void CmdZLexCount(CmdArgList args, CommandContext* cmd_cntx) {
 using RangeParams = ZSetFamily::RangeParams;
 
 void CmdZRange(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, RangeParams{}, cmd_cntx);
+  ZRangeGeneric(cmd_cntx->tail_args(), RangeParams{}, cmd_cntx);
 }
 
 void CmdZRank(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2747,20 +2747,22 @@ void CmdZRank(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdZRevRange(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, RangeParams{.reverse = true}, cmd_cntx);
+  ZRangeGeneric(cmd_cntx->tail_args(), RangeParams{.reverse = true}, cmd_cntx);
 }
 
 void CmdZRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, RangeParams{.interval_type = RangeParams::SCORE}, cmd_cntx);
+  ZRangeGeneric(cmd_cntx->tail_args(), RangeParams{.interval_type = RangeParams::SCORE}, cmd_cntx);
 }
 
 void CmdZRangeStore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args.subspan(1), RangeParams{.with_scores = true, .store_key = ArgS(args, 0)},
+  ZRangeGeneric(cmd_cntx->tail_args().Tail(),
+                RangeParams{.with_scores = true, .store_key = cmd_cntx->tail_args().Front()},
                 cmd_cntx);
 }
 
 void CmdZRevRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, RangeParams{.reverse = true, .interval_type = RangeParams::SCORE}, cmd_cntx);
+  ZRangeGeneric(cmd_cntx->tail_args(),
+                RangeParams{.reverse = true, .interval_type = RangeParams::SCORE}, cmd_cntx);
 }
 
 void CmdZRevRank(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2768,11 +2770,12 @@ void CmdZRevRank(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdZRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, RangeParams{.interval_type = RangeParams::LEX}, cmd_cntx);
+  ZRangeGeneric(cmd_cntx->tail_args(), RangeParams{.interval_type = RangeParams::LEX}, cmd_cntx);
 }
 
 void CmdZRevRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, RangeParams{.reverse = true, .interval_type = RangeParams::LEX}, cmd_cntx);
+  ZRangeGeneric(cmd_cntx->tail_args(),
+                RangeParams{.reverse = true, .interval_type = RangeParams::LEX}, cmd_cntx);
 }
 
 void CmdZRemRangeByRank(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2845,7 +2848,7 @@ void CmdZRandMember(CmdArgList args, CommandContext* cmd_cntx) {
   if (args.size() > 3)
     return rb->SendError(WrongNumArgsError("ZRANDMEMBER"));
 
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
 
   bool is_count = parser.HasNext();
@@ -2927,7 +2930,7 @@ void CmdZScan(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("invalid cursor");
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(cmd_cntx->tail_args().Tail(2));
   if (!ops) {
     DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
     return cmd_cntx->SendError(ops.status());

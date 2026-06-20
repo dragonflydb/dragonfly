@@ -882,7 +882,7 @@ void RPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser{cmd_cntx->tail_args()};
   auto [src, dest] = parser.Next<string_view, string_view>();
   float timeout = parser.Next<float>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -913,7 +913,7 @@ void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser{cmd_cntx->tail_args()};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
@@ -1043,7 +1043,7 @@ void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandConte
 }
 
 void PopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
 
   uint32_t count = 1;
@@ -1157,7 +1157,7 @@ optional<pair<string_view, bool>> GetFirstNonEmptyKeyFound(EngineShard* shard, T
 void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   parser.Skip(parser.Next<size_t>());  // skip numkeys and keys
 
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
@@ -1238,7 +1238,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   float timeout = parser.Next<float>();
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
@@ -1313,7 +1313,7 @@ void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser{cmd_cntx->tail_args()};
   auto [key, elem] = parser.Next<string_view, string_view>();
 
   int rank = 1;
@@ -1379,7 +1379,7 @@ void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
 
 /* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
 void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   QList::InsertOpt ins_opt = parser.MapNext("AFTER", QList::AFTER, "BEFORE", QList::BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
@@ -1498,7 +1498,7 @@ void CmdBRPop(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdLMove(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser{cmd_cntx->tail_args()};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);

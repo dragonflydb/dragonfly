@@ -66,8 +66,8 @@ class ParsedArgs {
     return size() == 0;
   }
 
-  ParsedArgs Tail() const {
-    return std::visit([](const auto& args) { return args.Tail(); }, args_);
+  ParsedArgs Tail(unsigned offset = 1) const {
+    return std::visit([offset](const auto& args) { return args.Tail(offset); }, args_);
   }
 
   std::string_view Front() const {
@@ -96,10 +96,10 @@ class ParsedArgs {
     const cmn::BackedArguments* args_;
     uint32_t index_ = 0;
 
-    ParsedArgs Tail() const {
+    ParsedArgs Tail(unsigned offset = 1) const {
       ParsedArgs res(*args_);
       WrapperBacked* wb = std::get_if<WrapperBacked>(&res.args_);
-      wb->index_ = index_ + 1;
+      wb->index_ = index_ + offset;
       return res;
     };
 
@@ -137,8 +137,8 @@ class ParsedArgs {
       return ArgSlice::operator[](i);
     }
 
-    ParsedArgs Tail() const {
-      return ParsedArgs{subspan(1)};
+    ParsedArgs Tail(unsigned offset = 1) const {
+      return ParsedArgs{subspan(offset)};
     }
 
     ArgSlice ToSlice(void* /*scratch*/) const {

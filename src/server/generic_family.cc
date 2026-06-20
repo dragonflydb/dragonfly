@@ -169,7 +169,7 @@ class RestoreArgs {
 
   [[nodiscard]] bool UpdateExpiration(int64_t now_msec);
 
-  static OpResult<RestoreArgs> TryFrom(const CmdArgList& args);
+  static OpResult<RestoreArgs> TryFrom(facade::ParsedArgs args);
 };
 
 class RdbRestoreValue : protected RdbLoaderBase {
@@ -270,7 +270,7 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
 // args[2] == serialized value (list of chars that are used for the actual restore).
 // args[3] .. args[n]: optional arguments that can be [REPLACE] [ABSTTL] [IDLETIME seconds]
 //            [FREQ frequency], in any order
-OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
+OpResult<RestoreArgs> RestoreArgs::TryFrom(facade::ParsedArgs args) {
   using namespace facade;
   RestoreArgs out_args;
   CmdArgParser parser(args);
@@ -1268,7 +1268,7 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
 
   // If no condition, delegate to standard DEL
   if (cond == Condition::NONE) {
-    CmdDel(args, cmd_cntx);
+    CmdDel(MakeParserFromContext(cmd_cntx), cmd_cntx);
     return;
   }
 
@@ -1392,7 +1392,8 @@ void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
+
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1420,7 +1421,7 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1469,7 +1470,7 @@ void GenericFamily::Keys(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1498,7 +1499,7 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -2029,7 +2030,7 @@ OpStatus PopulateSortEntriesFromByPattern(const SortParams& params,
 }
 
 void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   std::string_view key = parser.Next();
   SortParams params;
   params.is_read_only = is_read_only;
@@ -2262,7 +2263,7 @@ void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kInvalidDumpValueErr);
   }
 
-  OpResult<RestoreArgs> restore_args = RestoreArgs::TryFrom(args);
+  OpResult<RestoreArgs> restore_args = RestoreArgs::TryFrom(cmd_cntx->tail_args());
   if (!restore_args) {
     if (restore_args.status() == OpStatus::OUT_OF_RANGE) {
       return cmd_cntx->SendError("Invalid IDLETIME value, must be >= 0");
@@ -2291,7 +2292,7 @@ void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser = MakeParserFromContext(cmd_cntx);
   string_view key = parser.Next();
   uint32_t ttl_sec = parser.Next<FInt<1u, kMaxTtl>>();
   if (auto err = parser.TakeError(); err) {
@@ -2334,7 +2335,7 @@ void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
   auto [key, target_db] = parser.Next<string_view, int32_t>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -2394,7 +2395,7 @@ void GenericFamily::RenameNx(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   auto [k1, k2] = parser.Next<std::string_view, std::string_view>();
   bool replace = parser.Check("REPLACE");
   if (!parser.Finalize()) {
@@ -2441,7 +2442,7 @@ void GenericFamily::Pttl(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
   int64_t index = parser.Next<int64_t>();
   if (parser.TakeError()) {
     return cmd_cntx->SendError(kInvalidDbIndErr);
@@ -2567,7 +2568,7 @@ void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("invalid cursor");
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(1));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(cmd_cntx->tail_args().Tail());
   if (!ops) {
     DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
     return cmd_cntx->SendError(ops.status());
@@ -2606,7 +2607,7 @@ void GenericFamily::Rm(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("invalid cursor", kSyntaxErrType);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(1));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(cmd_cntx->tail_args().Tail());
   if (!ops) {
     return cmd_cntx->SendError(ops.status());
   }
