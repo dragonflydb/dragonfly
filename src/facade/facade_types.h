@@ -78,6 +78,55 @@ class ParsedArgs {
     return std::visit([i](const auto& args) { return args.at(i); }, args_);
   }
 
+  // Index-based const iterator, so ParsedArgs can be iterated (e.g. as a journal
+  // Payload alternative) without exposing its underlying span/BackedArguments.
+  class const_iterator {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = std::string_view;
+    using difference_type = ptrdiff_t;
+    using pointer = const std::string_view*;
+    using reference = std::string_view;
+
+    const_iterator(const ParsedArgs* args, size_t index) : args_(args), index_(index) {
+    }
+
+    std::string_view operator*() const {
+      return (*args_)[index_];
+    }
+
+    const_iterator& operator++() {
+      ++index_;
+      return *this;
+    }
+
+    const_iterator operator++(int) {
+      const_iterator copy = *this;
+      ++index_;
+      return copy;
+    }
+
+    bool operator==(const const_iterator& o) const {
+      return index_ == o.index_;
+    }
+
+    bool operator!=(const const_iterator& o) const {
+      return index_ != o.index_;
+    }
+
+   private:
+    const ParsedArgs* args_;
+    size_t index_;
+  };
+
+  const_iterator begin() const {
+    return const_iterator{this, 0};
+  }
+
+  const_iterator end() const {
+    return const_iterator{this, size()};
+  }
+
   ArgSlice ToSlice(CmdArgVec* scratch) const {
     return std::visit([scratch](const auto& args) { return args.ToSlice(scratch); }, args_);
   }
@@ -234,6 +283,7 @@ constexpr size_t kRecvBufSize = 1500;
 
 namespace std {
 ostream& operator<<(ostream& os, cmn::ArgSlice args);
+ostream& operator<<(ostream& os, const facade::ParsedArgs& args);
 ostream& operator<<(ostream& os, facade::Protocol protocol);
 
 }  // namespace std

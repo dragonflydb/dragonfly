@@ -630,7 +630,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
         auto blocking_controller = t->GetNamespace().GetBlockingController(shard->shard_id());
         if (blocking_controller) {
           IndexSlice slice(0, 1);
-          ShardArgs sa{absl::MakeSpan(&src, 1), absl::MakeSpan(&slice, 1)};
+          ShardArgs sa{cmn::ArgSlice{&src, 1}, absl::MakeSpan(&slice, 1)};
 
           // hack, again. since we hacked which queue we are waiting on (see RunPair)
           // we must clean-up src key here manually. See RunPair why we do this.

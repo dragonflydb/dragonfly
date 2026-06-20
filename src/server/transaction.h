@@ -607,8 +607,10 @@ class Transaction {
   // Fingerprints of keys, precomputed once during the transaction initialization.
   absl::InlinedVector<LockFp, 4> kv_fp_;
 
-  // Stores the full undivided command.
-  CmdArgList full_args_;
+  // Stores the full undivided command. Backed either by a caller-owned span (legacy
+  // callers, via implicit ArgSlice conversion) or a caller-owned BackedArguments
+  // (migrated callers). The backing storage must outlive the transaction's hops.
+  facade::ParsedArgs full_args_;
 
   // Set if a NO_AUTOJOURNAL command asked to enable auto journal again
   bool re_enabled_auto_journal_ = false;

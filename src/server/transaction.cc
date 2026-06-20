@@ -202,7 +202,7 @@ void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShar
 
   auto& shard_index = *out;
   for (unsigned i : key_index.Range()) {
-    string_view key = ArgS(full_args_, i);
+    string_view key = full_args_[i];
     unique_slot_checker_.Add(key);
     ShardId sid = Shard(key, shard_data_.size());
 
@@ -329,7 +329,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
 
   DCHECK(!multi_ || multi_->mode != LOCK_AHEAD || !multi_->tag_fps.empty());
 
-  DVLOG(1) << "InitByArgs " << DebugId() << facade::ToSV(full_args_.front());
+  DVLOG(1) << "InitByArgs " << DebugId() << full_args_.Front();
 
   // Compress shard data, if we occupy only one shard.
   if (unique_shard_cnt_ == 1) {
@@ -1115,7 +1115,7 @@ void Transaction::ExpireBlocking(WaitKeys wkeys) {
     EngineShard* es = EngineShard::tlocal();
     if (wkeys) {
       IndexSlice is(0, 1);
-      ShardArgs sa(absl::MakeSpan(&wkeys.value(), 1), absl::MakeSpan(&is, 1));
+      ShardArgs sa(cmn::ArgSlice{&wkeys.value(), 1}, absl::MakeSpan(&is, 1));
       ExpireShardCb(sa, es);
     } else {
       ExpireShardCb(GetShardArgs(es->shard_id()), es);
@@ -1351,7 +1351,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
   auto cb = [&](Transaction* t, EngineShard* shard) {
     if (wkeys) {  // single string_view.
       IndexSlice is(0, 1);
-      ShardArgs sa(absl::MakeSpan(&wkeys.value(), 1), absl::MakeSpan(&is, 1));
+      ShardArgs sa(cmn::ArgSlice{&wkeys.value(), 1}, absl::MakeSpan(&is, 1));
       t->WatchInShard(&t->GetNamespace(), sa, shard, krc);
     } else {
       t->WatchInShard(&t->GetNamespace(), t->GetShardArgs(shard->shard_id()), shard, krc);
@@ -1535,7 +1535,7 @@ optional<string_view> Transaction::GetWakeKey(ShardId sid) const {
     return nullopt;
 
   CHECK_LT(sd.wake_key_pos, full_args_.size());
-  return ArgS(full_args_, sd.wake_key_pos);
+  return full_args_[sd.wake_key_pos];
 }
 
 void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult result) {
