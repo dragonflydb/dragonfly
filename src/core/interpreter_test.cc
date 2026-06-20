@@ -323,6 +323,34 @@ TEST_F(InterpreterTest, Call) {
   EXPECT_EQ("[str(table) status(mystatus)]", ser_.res);
 }
 
+TEST_F(InterpreterTest, CallTableFirstArg) {
+  auto cb = [](auto ca) { ca.translator->OnStatus("OK"); };
+
+  intptr_.SetRedisFunc(cb);
+  // The command name (first argument) must be validated like the rest: a non-empty
+  // table used to crash because lua_tostring(.,1) returns null while lua_rawlen(.,1)
+  // returns 3, causing a memcpy from null in BackedArguments::PushArg.
+  EXPECT_FALSE(Execute("return redis.call({1,2,3})"));
+  EXPECT_THAT(error_, testing::HasSubstr("must be strings or integers"));
+
+  // Userdata as the command name is rejected as well.
+  EXPECT_FALSE(Execute("return redis.call(redis)"));
+
+  // A valid string command name still works.
+  EXPECT_TRUE(Execute("return redis.call('ping')")) << error_;
+
+  // A numeric command name is converted deterministically (not via the
+  // evaluation-order-dependent lua_tostring/lua_rawlen path).
+  string captured;
+  auto capture_cb = [&captured](auto ca) {
+    captured = string{ca.args->at(0)};
+    ca.translator->OnStatus("OK");
+  };
+  intptr_.SetRedisFunc(capture_cb);
+  EXPECT_TRUE(Execute("return redis.call(123)")) << error_;
+  EXPECT_EQ("123", captured);
+}
+
 TEST_F(InterpreterTest, CallArray) {
   auto cb = [](auto ca) {
     auto* reply = ca.translator;

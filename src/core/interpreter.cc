@@ -1183,8 +1183,8 @@ bool Interpreter::PrepareArgs() {
   if (argc == 0)
     return true;
 
-  // Validate argument types (skip command name at idx=1).
-  for (int idx = 2; idx <= argc; idx++) {
+  // Validate argument types, including the command name at idx=1.
+  for (int idx = 1; idx <= argc; idx++) {
     int t = lua_type(lua_, idx);
     if (t != LUA_TNUMBER && t != LUA_TSTRING) {
       PushError(lua_, "Lua redis() command arguments must be strings or integers");
@@ -1192,12 +1192,11 @@ bool Interpreter::PrepareArgs() {
     }
   }
 
-  // Copy command name.
-  backed_args_.PushArg(string_view{lua_tostring(lua_, 1), lua_rawlen(lua_, 1)});
-
-  // Copy remaining arguments directly into backed_args_.
+  // Copy all arguments (including the command name at idx=1) into backed_args_.
+  // Numbers go through deterministic formatting; doing the same for the command name
+  // avoids relying on unspecified evaluation order between lua_tostring and lua_rawlen.
   char tmpbuf[64];
-  for (int idx = 2; idx <= argc; idx++) {
+  for (int idx = 1; idx <= argc; idx++) {
     switch (lua_type(lua_, idx)) {
       case LUA_TNUMBER:
         if (lua_isinteger(lua_, idx)) {
