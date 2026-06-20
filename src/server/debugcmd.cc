@@ -1836,7 +1836,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
     auto args_span = absl::MakeSpan(arg_vec);
     stub_tx->MultiSwitchCmd(cid);
     crb.SetReplyMode(ReplyMode::NONE);
-    stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args_span);
+    stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, facade::ParsedArgs{backed_args});
     cmd_cntx.UpdateCid(cid);
     cmd_cntx.SetTailArgs(facade::ParsedArgs{backed_args});
     sf_.service().InvokeCmd(args_span, &cmd_cntx);
