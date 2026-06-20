@@ -386,7 +386,7 @@ class BPopPusher {
 };
 
 // Called as a callback from BPopGeneric after we've determined which key to pop.
-std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, ListDir dir) {
+std::string OpBPop(TransactionBase* t, EngineShard* shard, std::string_view key, ListDir dir) {
   DVLOG(2) << "popping from " << key << " " << t->DebugId();
 
   auto& db_slice = t->GetDbSlice(shard->shard_id());
@@ -598,7 +598,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
   // 2.  If everything is ok, pop from source and push the peeked value into
   //     the destination.
   //
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
     DCHECK_EQ(1u, args.Size());
     bool is_dest = args.Front() == dest;
@@ -614,7 +614,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
       trans->Conclude();
   } else {
     // Everything is ok, lets proceed with the mutations.
-    auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto cb = [&](TransactionBase* t, EngineShard* shard) {
       auto args = t->GetShardArgs(shard->shard_id());
       auto key = args.Front();
       bool is_dest = (key == dest);
@@ -635,7 +635,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
           // hack, again. since we hacked which queue we are waiting on (see RunPair)
           // we must clean-up src key here manually. See RunPair why we do this.
           // in short- we suspended on "src" on both shards.
-          blocking_controller->RemovedWatched(sa, t);
+          blocking_controller->RemovedWatched(sa, static_cast<Transaction*>(t));
         }
       } else {
         DVLOG(1) << "Popping value from list: " << key;
@@ -840,7 +840,7 @@ void MoveGeneric(string_view src, string_view dest, ListDir src_dir, ListDir des
   OpResult<string> result;
 
   if (tx->GetUniqueShardCnt() == 1) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto cb = [&](TransactionBase* t, EngineShard* shard) {
       OpArgs op_args = t->GetOpArgs(shard);
       auto op_res = OpMoveSingleShard(op_args, src, dest, src_dir, dest_dir);
       if (op_res) {
@@ -878,7 +878,8 @@ void RPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
   string_view src = ArgS(args, 0);
   string_view dest = ArgS(args, 1);
 
-  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx->tx(), cmd_cntx->rb());
+  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, static_cast<Transaction*>(cmd_cntx->tx()),
+              cmd_cntx->rb());
 }
 
 void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
@@ -894,7 +895,8 @@ void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res =
-      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx(), cmd_cntx->server_conn_cntx());
+      bpop_pusher.Run(unsigned(timeout * 1000), static_cast<Transaction*>(cmd_cntx->tx()),
+                      cmd_cntx->server_conn_cntx());
 
   if (op_res) {
     return builder->SendBulkString(*op_res);
@@ -927,7 +929,8 @@ void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res =
-      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx(), cmd_cntx->server_conn_cntx());
+      bpop_pusher.Run(unsigned(timeout * 1000), static_cast<Transaction*>(cmd_cntx->tx()),
+                      cmd_cntx->server_conn_cntx());
 
   if (op_res) {
     return builder->SendBulkString(*op_res);
@@ -972,7 +975,7 @@ OpResult<string> BPopPusher::Run(unsigned limit_ms, Transaction* tx, ConnectionC
 OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, ConnectionContext* cntx) {
   OpResult<string> op_res;
   bool is_multi = tx->IsMulti();
-  auto cb_move = [&](Transaction* t, EngineShard* shard) {
+  auto cb_move = [&](TransactionBase* t, EngineShard* shard) {
     OpArgs op_args = t->GetOpArgs(shard);
     op_res = OpMoveSingleShard(op_args, pop_key_, push_key_, popdir_, pushdir_);
     if (op_res) {
@@ -1030,7 +1033,7 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
 void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.subspan(1), false);
   };
 
@@ -1055,7 +1058,7 @@ void PopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpPop(t->GetOpArgs(shard), key, dir, count, true, false);
   };
 
@@ -1091,12 +1094,12 @@ void BPopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
   VLOG(1) << "BPop timeout(" << timeout << ")";
 
   std::string popped_value;
-  auto cb = [dir, &popped_value](Transaction* t, EngineShard* shard, std::string_view key) {
+  auto cb = [dir, &popped_value](TransactionBase* t, EngineShard* shard, std::string_view key) {
     popped_value = OpBPop(t, shard, key, dir);
   };
 
   auto* cntx = cmd_cntx->server_conn_cntx();
-  Transaction* tx = cmd_cntx->tx();
+  Transaction* tx = static_cast<Transaction*>(cmd_cntx->tx());
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
       tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused);
 
@@ -1170,9 +1173,10 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   // Create a vector to store first found key for each shard
   vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     // Each shard writes results to its own space
-    found_keys_per_shard[shard->shard_id()] = GetFirstNonEmptyKeyFound(shard, t);
+    found_keys_per_shard[shard->shard_id()] =
+        GetFirstNonEmptyKeyFound(shard, static_cast<Transaction*>(t));
     return OpStatus::OK;
   };
 
@@ -1216,7 +1220,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   optional<ShardId> key_shard = Shard(*key_to_pop, shard_set->size());
   OpResult<StringVec> result;
 
-  auto cb_pop = [dir, pop_count, key_shard, &result, key = *key_to_pop](Transaction* t,
+  auto cb_pop = [dir, pop_count, key_shard, &result, key = *key_to_pop](TransactionBase* t,
                                                                         EngineShard* shard) {
     if (*key_shard == shard->shard_id()) {
       result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, true);
@@ -1256,15 +1260,15 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
   OpResult<StringVec> result;
-  auto cb = [&](Transaction* t, EngineShard* shard, string_view key) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard, string_view key) {
     result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, true);
     return result.status();
   };
 
   ConnectionContext* conn_cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx(), OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
-      &conn_cntx->paused);
+      static_cast<Transaction*>(cmd_cntx->tx()), OBJ_LIST, std::move(cb), unsigned(timeout * 1000),
+      &conn_cntx->blocked, &conn_cntx->paused);
 
   if (popped_key.ok()) {
     response_builder->StartArray(2);
@@ -1301,7 +1305,7 @@ void CmdRPop(CmdArgList args, CommandContext* cmd_cntx) {
 
 void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto key = ArgS(args, 0);
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
+  auto cb = [&](TransactionBase* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     cmd_cntx->SendLong(result.value());
@@ -1328,11 +1332,11 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   if (rank == 0)
     return rb->SendError(kInvalidIntErr);
 
-  auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &elem = elem](TransactionBase* t, EngineShard* shard) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count.value_or(1), max_len);
   };
 
-  Transaction* trans = cmd_cntx->tx();
+  auto* trans = cmd_cntx->tx();
   auto result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
@@ -1363,7 +1367,7 @@ void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpIndex(t->GetOpArgs(shard), key, index);
   };
 
@@ -1389,7 +1393,7 @@ void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
 
   DCHECK(pivot.data() && elem.data());
 
-  auto cb = [&, &pivot = pivot, &elem = elem](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &pivot = pivot, &elem = elem](TransactionBase* t, EngineShard* shard) {
     return OpInsert(t->GetOpArgs(shard), key, pivot, elem, ins_opt);
   };
 
@@ -1412,7 +1416,7 @@ void CmdLTrim(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
   };
   OpStatus st = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
@@ -1433,7 +1437,7 @@ void CmdLRange(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpRange(t->GetOpArgs(shard), key, start, end);
   };
 
@@ -1457,7 +1461,7 @@ void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
   };
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1478,7 +1482,7 @@ void CmdLSet(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, elem, count);
   };
   OpResult<void> result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
@@ -1506,7 +1510,8 @@ void CmdLMove(CmdArgList args, CommandContext* cmd_cntx) {
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
 
-  MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx->tx(), cmd_cntx->rb());
+  MoveGeneric(src, dest, src_dir, dest_dir, static_cast<Transaction*>(cmd_cntx->tx()),
+              cmd_cntx->rb());
 }
 
 }  // namespace

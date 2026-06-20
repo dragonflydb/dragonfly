@@ -78,8 +78,9 @@ MultiCommandSquasher::MultiCommandSquasher(CmdGenerator cmd_gen, ConnectionConte
       service_{service},
       base_cid_{nullptr},
       opts_{opts} {
-  auto mode = cntx->transaction->GetMultiMode();
-  base_cid_ = cntx->transaction->GetCId();
+  auto* tx = static_cast<Transaction*>(cntx->transaction);
+  auto mode = tx->GetMultiMode();
+  base_cid_ = tx->GetCId();
   atomic_ = mode != Transaction::NON_ATOMIC;
 }
 
@@ -94,7 +95,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
     if (IsAtomic()) {
-      sinfo.local_tx = new Transaction{cntx_->transaction, sid, nullopt};
+      sinfo.local_tx = new Transaction{static_cast<Transaction*>(cntx_->transaction), sid, nullopt};
     } else {
       // Non-atomic squashing does not use the transactional framework for fan out, so local
       // transactions have to be fully standalone, check locks and release them immediately.
@@ -186,7 +187,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
     }
   }
 
-  auto* tx = cntx_->transaction;
+  auto* tx = static_cast<Transaction*>(cntx_->transaction);
   if (cmd.cid->IsTransactional()) {
     tx->MultiSwitchCmd(cmd.cid);
     auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
@@ -249,9 +250,10 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     }
 
     ctx->SetupTx(dispatched.cid, local_cntx.tx());
-    ctx->tx()->MultiSwitchCmd(dispatched.cid);
+    auto* tx = static_cast<Transaction*>(ctx->tx());
+    tx->MultiSwitchCmd(dispatched.cid);
 
-    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
+    auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
       ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
     } else {
@@ -282,7 +284,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
       ++num_shards;
   }
 
-  Transaction* tx = cntx_->transaction;
+  Transaction* tx = static_cast<Transaction*>(cntx_->transaction);
   ServerState::tlocal()->stats.squash_width_freq_arr[num_shards - 1]++;
   uint64_t start = CycleClock::Now();
   atomic_uint64_t max_sched_cycles{0}, max_exec_cycles{0};

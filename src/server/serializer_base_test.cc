@@ -296,7 +296,7 @@ class SerializerBaseTest : public BaseFamilyTest {
     boost::intrusive_ptr<Transaction> tx = new Transaction{reg->Find("SAVE")};
     tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
 
-    tx->ScheduleSingleHop([this, reg](Transaction* t, EngineShard* es) {
+    tx->ScheduleSingleHop([this, reg](TransactionBase* t, EngineShard* es) {
       driver_.emplace(driver_params, &t->GetDbSlice(es->shard_id()), &cntx_, reg);
       driver_->Start();
       return OpStatus::OK;

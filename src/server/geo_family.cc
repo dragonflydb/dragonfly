@@ -446,7 +446,7 @@ void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
   }
 }
 
-void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
+void GeoSearchStoreGeneric(TransactionBase* tx, facade::SinkReplyBuilder* builder,
                            const GeoShape& shape_ref, string_view key, string_view member,
                            const GeoSearchOpts& geo_ops) {
   GeoShape* shape = &(const_cast<GeoShape&>(shape_ref));
@@ -457,7 +457,7 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
   if (!member.empty()) {
     // get shape.xy from member
     OpResult<double> member_score;
-    auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto cb = [&](TransactionBase* t, EngineShard* shard) {
       if (shard->shard_id() == from_shard) {
         member_score = ZSetFamily::OpScore(t->GetOpArgs(shard), key, member);
       }
@@ -482,7 +482,7 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
   } else {
     // verify key is valid
     OpResult<void> result;
-    auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto cb = [&](TransactionBase* t, EngineShard* shard) {
       if (shard->shard_id() == from_shard) {
         result = ZSetFamily::OpKeyExisted(t->GetOpArgs(shard), key);
       }
@@ -511,7 +511,7 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
   auto range_specs = GetGeoRangeSpec(georadius);
   // get all the matching members and add them to the potential result list
   vector<OpResult<vector<ScoredArray>>> result_arrays;
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     auto res_it = ZSetFamily::OpRanges(range_specs, t->GetOpArgs(shard), key);
     if (res_it) {
       result_arrays.emplace_back(res_it);
@@ -591,7 +591,7 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
       }
     }
 
-    auto store_cb = [&](Transaction* t, EngineShard* shard) {
+    auto store_cb = [&](TransactionBase* t, EngineShard* shard) {
       if (shard->shard_id() == dest_shard) {
         ZSetFamily::ZParams zparams;
         zparams.override = true;

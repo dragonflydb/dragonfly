@@ -160,7 +160,7 @@ void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
   if (!params.ok())
     return rb->SendError("error rate is out of range", kSyntaxErrType);
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpReserve(params, t->GetOpArgs(shard), key);
   };
 
@@ -175,7 +175,7 @@ void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, args);
   };
 
@@ -194,7 +194,7 @@ void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpExists(t->GetOpArgs(shard), key, args);
   };
 
@@ -210,7 +210,7 @@ void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, args);
   };
 
@@ -241,7 +241,7 @@ void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
   if (const auto err = parser.TakeError(); err)
     return rb->SendError(err.MakeReply());
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<SBFChunk> {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) -> OpResult<SBFChunk> {
     const auto& db_slice = t->GetDbSlice(shard->shard_id());
     OpResult op_res = db_slice.FindReadOnly(t->GetOpArgs(shard).db_cntx, key, OBJ_SBF);
     if (!op_res)
@@ -280,7 +280,7 @@ void CmdLoadChunk(CmdArgList args, CommandContext* cmd_cntx) {
 
   const std::string_view blob = parser.Next();
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpLoadChunk(t->GetOpArgs(shard), blob, key, cursor);
   };
 
@@ -296,7 +296,7 @@ void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) {
+  const auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpExists(t->GetOpArgs(shard), key, args);
   };
 

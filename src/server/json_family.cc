@@ -1038,7 +1038,7 @@ auto OpToggle(const OpArgs& op_args, string_view key,
 
 template <typename T>
 auto ExecuteToggle(string_view key, const WrappedJsonPath& json_path, CommandContext* cmd_cntx) {
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpToggle<T>(t->GetOpArgs(shard), key, json_path);
   };
 
@@ -1501,7 +1501,7 @@ OpResult<JsonCallbackResult<optional<long>>> OpArrIndex(const OpArgs& op_args, s
 
 // Returns string vector that represents the query result of each supplied key.
 std::vector<std::optional<std::string>> OpJsonMGet(const WrappedJsonPath& json_path,
-                                                   const Transaction* t, EngineShard* shard) {
+                                                   const TransactionBase* t, EngineShard* shard) {
   ShardArgs args = t->GetShardArgs(shard->shard_id());
   DCHECK(!args.Empty());
   std::vector<std::optional<std::string>> response(args.Size());
@@ -1721,7 +1721,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
   if (parser.TakeError() || parser.HasNext())  // also clear the parser error dcheck
     return builder->SendError(kSyntaxErr);
 
-  auto cb = [&, &key = key, &path = path, &json_str = json_str](Transaction* t,
+  auto cb = [&, &key = key, &path = path, &json_str = json_str](TransactionBase* t,
                                                                 EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, path, json_path, json_str, is_nx_condition,
                  is_xx_condition);
@@ -1750,7 +1750,7 @@ void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   AggregateStatus status;
-  auto cb = [&status](Transaction* t, EngineShard* shard) {
+  auto cb = [&status](TransactionBase* t, EngineShard* shard) {
     auto op_args = t->GetOpArgs(shard);
     ShardArgs args = t->GetShardArgs(shard->shard_id());
     if (auto result = OpMSet(op_args, args); result != OpStatus::OK)
@@ -1776,7 +1776,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpMerge(t->GetOpArgs(shard), key, path, json_path, value);
   };
 
@@ -1794,7 +1794,7 @@ void CmdResp(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpResp(t->GetOpArgs(shard), key, json_path);
   };
 
@@ -1882,7 +1882,7 @@ void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
   unsigned shard_count = shard_set->size();
   std::vector<std::vector<std::optional<std::string>>> mget_resp(shard_count);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     mget_resp[sid] = OpJsonMGet(json_path, t, shard);
     return OpStatus::OK;
@@ -1939,7 +1939,7 @@ void CmdArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpArrIndex(t->GetOpArgs(shard), key, json_path, search_value, start_index, end_index);
   };
 
@@ -1966,7 +1966,7 @@ void CmdArrInsert(CmdArgList args, CommandContext* cmd_cntx) {
     new_values.emplace_back(ArgS(args, i));
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpArrInsert(t->GetOpArgs(shard), key, json_path, index, new_values);
   };
 
@@ -1986,7 +1986,7 @@ void CmdArrAppend(CmdArgList args, CommandContext* cmd_cntx) {
     append_values.emplace_back(ArgS(args, i));
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpArrAppend(t->GetOpArgs(shard), key, json_path, append_values);
   };
 
@@ -2015,7 +2015,7 @@ void CmdArrTrim(CmdArgList args, CommandContext* cmd_cntx) {
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpArrTrim(t->GetOpArgs(shard), key, json_path, start_index, stop_index);
   };
 
@@ -2034,7 +2034,7 @@ void CmdArrPop(CmdArgList args, CommandContext* cmd_cntx) {
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpArrPop(t->GetOpArgs(shard), key, json_path, index);
   };
 
@@ -2050,7 +2050,7 @@ void CmdClear(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpClear(t->GetOpArgs(shard), key, json_path);
   };
 
@@ -2073,7 +2073,7 @@ void CmdStrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   string_view json_string = parsed_json->as_string_view();
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpStrAppend(t->GetOpArgs(shard), key, json_path, json_string);
   };
 
@@ -2089,7 +2089,7 @@ void CmdObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpObjKeys(t->GetOpArgs(shard), key, json_path);
   };
 
@@ -2105,7 +2105,7 @@ void CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpDel(t->GetOpArgs(shard), key, path, json_path);
   };
 
@@ -2121,7 +2121,7 @@ void CmdNumIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_ADD);
   };
 
@@ -2137,7 +2137,7 @@ void CmdNumMultBy(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_MULTIPLY);
   };
 
@@ -2168,7 +2168,7 @@ void CmdType(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpType(t->GetOpArgs(shard), key, json_path);
   };
 
@@ -2184,7 +2184,7 @@ void CmdArrLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpArrLen(t->GetOpArgs(shard), key, json_path);
   };
 
@@ -2200,7 +2200,7 @@ void CmdObjLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpObjLen(t->GetOpArgs(shard), key, json_path);
   };
 
@@ -2216,7 +2216,7 @@ void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key, json_path);
   };
 
@@ -2238,7 +2238,7 @@ void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return OpJsonGet(t->GetOpArgs(shard), key, params.value());
   };
 

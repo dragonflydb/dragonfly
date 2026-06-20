@@ -286,7 +286,7 @@ void SaveStagesController::SaveDfs() {
   SaveDfsSingle(nullptr, snapshot_id);
 
   // Save shard files.
-  auto cb = [this, &snapshot_id](Transaction* t, EngineShard* shard) {
+  auto cb = [this, &snapshot_id](TransactionBase* t, EngineShard* shard) {
     SaveDfsSingle(shard, snapshot_id);
     return OpStatus::OK;
   };
@@ -330,7 +330,7 @@ void SaveStagesController::SaveRdb() {
     return;
   }
 
-  auto cb = [snapshot = snapshot.get()](Transaction* t, EngineShard* shard) {
+  auto cb = [snapshot = snapshot.get()](TransactionBase* t, EngineShard* shard) {
     snapshot->StartInShard(shard);
     return OpStatus::OK;
   };

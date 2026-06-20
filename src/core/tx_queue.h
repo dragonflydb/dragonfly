@@ -10,7 +10,7 @@
 
 namespace dfly {
 
-class Transaction;
+class TransactionBase;
 
 // TxQueue implemmented as a circular doubly-linked list.
 class TxQueue {
@@ -24,14 +24,14 @@ class TxQueue {
 
  public:
   // uint64_t is used for unit-tests.
-  using ValueType = std::variant<Transaction*, uint64_t>;
+  using ValueType = std::variant<TransactionBase*, uint64_t>;
   using Iterator = uint32_t;
   enum { kEnd = Iterator(-1) };
 
-  TxQueue(std::function<uint64_t(const Transaction*)> score_fun = nullptr);
+  TxQueue(std::function<uint64_t(const TransactionBase*)> score_fun = nullptr);
 
   // returns iterator to that item the list
-  Iterator Insert(Transaction* t);
+  Iterator Insert(TransactionBase* t);
 
   Iterator Insert(uint64_t val);
   void Remove(Iterator);
@@ -91,7 +91,7 @@ class TxQueue {
 
   struct QRecord {
     union {
-      Transaction* trans;
+      TransactionBase* trans;
       uint64_t uval;
     } u;
 
@@ -107,7 +107,7 @@ class TxQueue {
 
   uint64_t Rank(const QRecord& r) const;
 
-  std::function<uint64_t(const Transaction*)> score_fun_;
+  std::function<uint64_t(const TransactionBase*)> score_fun_;
   std::vector<QRecord> vec_;
   uint32_t next_free_ = 0, head_ = kEnd;
   size_t size_ = 0;

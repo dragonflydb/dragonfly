@@ -275,7 +275,7 @@ class ServerFamily {
 
   void StatsMC(std::string_view section, CommandContext* cmd_ctx);
 
-  GenericError DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* transaction,
+  GenericError DoSave(const SaveCmdOptions& save_cmd_opts, TransactionBase* transaction,
                       bool ignore_state = false);
 
   // Calls DoSave with a default generated transaction and with the format
@@ -285,7 +285,7 @@ class ServerFamily {
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
   // `wait` makes it wait for all fibers to finish and decommit
-  void Drakarys(Transaction* transaction, DbIndex db_ind, bool wait);
+  void Drakarys(TransactionBase* transaction, DbIndex db_ind, bool wait);
 
   SaveInfoData GetLastSaveInfo() const;
 
@@ -422,17 +422,17 @@ class ServerFamily {
 
   std::optional<SaveCmdOptions> GetSaveCmdOpts(CmdArgList args, CommandContext* cmd_cntx);
 
-  void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
+  void BgSaveFb(boost::intrusive_ptr<TransactionBase> trans);
 
   struct DoSaveCheckAndStartOpts {
     bool ignore_state = false;
     bool bg_save = false;
   };
 
-  GenericError DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
+  GenericError DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts, TransactionBase* trans,
                                    DoSaveCheckAndStartOpts opts) ABSL_LOCKS_EXCLUDED(save_mu_);
 
-  GenericError WaitUntilSaveFinished(Transaction* trans,
+  GenericError WaitUntilSaveFinished(TransactionBase* trans,
                                      bool ignore_state = false) ABSL_NO_THREAD_SAFETY_ANALYSIS;
   void StopAllClusterReplicas() ABSL_EXCLUSIVE_LOCKS_REQUIRED(replicaof_mu_);
 

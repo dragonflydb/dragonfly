@@ -134,7 +134,7 @@ void PFAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     return AddToHll(t->GetOpArgs(shard), key, args);
   };
 
@@ -214,7 +214,7 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, CommandContext* cmd_cntx) {
   hlls.resize(shard_set->size());
 
   atomic<OpStatus> error_status{OpStatus::OK};
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     ShardArgs shard_args = t->GetShardArgs(shard->shard_id());
     auto result = ReadValues(t->GetOpArgs(shard), shard_args);
@@ -248,7 +248,7 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, CommandContext* cmd_cntx) {
 void PFCount(CmdArgList args, CommandContext* cmd_cntx) {
   if (args.size() == 1) {
     string_view key = ArgS(args, 0);
-    auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto cb = [&](TransactionBase* t, EngineShard* shard) {
       return CountHllsSingle(t->GetOpArgs(shard), key);
     };
 
@@ -259,12 +259,12 @@ void PFCount(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+OpResult<int> PFMergeInternal(CmdArgList args, TransactionBase* tx, SinkReplyBuilder* builder) {
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
   atomic<OpStatus> error_status{OpStatus::OK};
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](TransactionBase* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     ShardArgs shard_args = t->GetShardArgs(shard->shard_id());
     auto result = ReadValues(t->GetOpArgs(shard), shard_args);
@@ -291,7 +291,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
   createDenseHll(StringToHllPtr(hll));
   int result = pfmerge(ptrs.data(), ptrs.size(), StringToHllPtr(hll));
 
-  auto set_cb = [&](Transaction* t, EngineShard* shard) {
+  auto set_cb = [&](TransactionBase* t, EngineShard* shard) {
     string_view key = ArgS(args, 0);
     const OpArgs& op_args = t->GetOpArgs(shard);
     auto& db_slice = op_args.GetDbSlice();

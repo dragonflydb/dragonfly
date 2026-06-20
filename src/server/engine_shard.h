@@ -90,7 +90,7 @@ class EngineShard {
 
   // Processes TxQueue, blocked transactions or any other execution state related to that
   // shard. Tries executing the passed transaction if possible (does not guarantee though).
-  void PollExecution(const char* context, Transaction* trans);
+  void PollExecution(const char* context, TransactionBase* trans);
 
   // Returns transaction queue.
   TxQueue* txq() {
@@ -112,7 +112,7 @@ class EngineShard {
   }
 
   // Remove current continuation trans if its equal to tx.
-  void RemoveContTx(Transaction* tx);
+  void RemoveContTx(TransactionBase* tx);
 
   const Stats& stats() const {
     return stats_;
@@ -157,15 +157,15 @@ class EngineShard {
     return is_replica_;
   }
 
-  const Transaction* GetContTx() const {
+  const TransactionBase* GetContTx() const {
     return continuation_trans_;
   }
 
-  Transaction* running_tx() const {
+  TransactionBase* running_tx() const {
     return running_tx_;
   }
 
-  void set_running_tx(Transaction* tx) {
+  void set_running_tx(TransactionBase* tx) {
     running_tx_ = tx;
   }
 
@@ -308,8 +308,8 @@ class EngineShard {
 
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;
-  Transaction* continuation_trans_ = nullptr;
-  Transaction* running_tx_ = nullptr;
+  TransactionBase* continuation_trans_ = nullptr;
+  TransactionBase* running_tx_ = nullptr;
   std::string continuation_debug_id_;
   unsigned poll_concurrent_factor_ = 0;
 
