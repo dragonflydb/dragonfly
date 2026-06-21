@@ -171,7 +171,7 @@ bool HandleOpError(OpStatus status, CommandContext* cmd_cntx) {
 }  // namespace
 
 void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   uint32_t k = parser.Next<uint32_t>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -230,7 +230,7 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   vector<string_view> items;
 
@@ -264,7 +264,7 @@ void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   vector<pair<string_view, uint32_t>> items;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -307,7 +307,7 @@ void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void TopkFamily::Query(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   vector<string_view> items;
 
@@ -336,7 +336,7 @@ void TopkFamily::Query(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void TopkFamily::Count(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   vector<string_view> items;
 
@@ -365,7 +365,7 @@ void TopkFamily::Count(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   bool with_count = false;
 
@@ -403,7 +403,7 @@ void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void TopkFamily::Info(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 

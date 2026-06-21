@@ -621,7 +621,7 @@ void CmdGeoSearch(CmdArgList args, CommandContext* cmd_cntx) {
   int by_set = 0;
   auto* builder = cmd_cntx->rb();
 
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
 
   while (parser.HasNext()) {
@@ -794,7 +794,7 @@ void GeoRadiusGeneric(CmdArgList args, CommandContext* cmd_cntx, bool read_only)
 
   auto* builder = cmd_cntx->rb();
 
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
 
   string_view key = parser.Next();
   ParseLongLat(&parser, shape.xy);
