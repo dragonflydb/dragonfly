@@ -1976,9 +1976,7 @@ void MemBufController::MaybeTagEntryTail() {
   dest.reserve(buffer_.InputLen() + kHeaderSize);
   ConsumePrefix(&dest);
 
-  // TODO store in place, not append later, store directly in `dest`
-  const auto header = MakeTagHeader(buffer_.InputLen());
-  dest.append(reinterpret_cast<const char*>(header.data()), kHeaderSize);
+  PushTagHeader(buffer_.InputLen(), &dest);
 
   const auto bytes = io::View(buffer_.InputBuffer());
   dest.append(bytes.data(), bytes.size());
@@ -1994,15 +1992,17 @@ void MemBufController::ConsumePrefix(std::string* out) {
   prefix_len_ = 0;
 }
 
-std::array<uint8_t, 9> MemBufController::MakeTagHeader(size_t size) const {
+void MemBufController::PushTagHeader(size_t size, std::string* dest) const {
   DCHECK_NE(active_id_, 0u) << "tagging when active entry is invalid";
   DCHECK_LT(size, std::numeric_limits<uint32>::max());
 
-  std::array<uint8_t, 9> header;
-  header[0] = RDB_OPCODE_TAGGED_CHUNK;
-  absl::little_endian::Store32(header.data() + 1, active_id_);
-  absl::little_endian::Store32(header.data() + 5, size);
-  return header;
+  const size_t old_size = dest->size();
+  dest->resize(dest->size() + kHeaderSize);
+  char* data = dest->data() + old_size;
+
+  *data = RDB_OPCODE_TAGGED_CHUNK;
+  absl::little_endian::Store32(data + 1, active_id_);
+  absl::little_endian::Store32(data + 5, size);
 }
 
 MemBufController::EntryId MemBufController::SaveStateBeforeConsume() {
@@ -2044,10 +2044,8 @@ std::string MemBufController::BuildBlob() {
 
   ConsumePrefix(&out);
 
-  if (should_tag) {
-    const auto header = MakeTagHeader(buffer_.InputLen());
-    out.append(reinterpret_cast<const char*>(header.data()), header.size());
-  }
+  if (should_tag)
+    PushTagHeader(buffer_.InputLen(), &out);
 
   out.append(io::View(buffer_.InputBuffer()));
   buffer_.ConsumeInput(buffer_.InputLen());

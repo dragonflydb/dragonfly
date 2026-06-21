@@ -150,8 +150,8 @@ class MemBufController {
   // Consumes upto the prefix_len_ from the buffer, and appends into the string. Clears prefix_len_.
   void ConsumePrefix(std::string* out);
 
-  // Builds a 9-byte tagged chunk header for the active entry with the given payload size.
-  std::array<uint8_t, 9> MakeTagHeader(size_t size) const;
+  // Injects a 9-byte tagged chunk header for the active entry with the given payload size.
+  void PushTagHeader(size_t size, std::string* dest) const;
 
   bool send_tagged_entries_ = false;
 
