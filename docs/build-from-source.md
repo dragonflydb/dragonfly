@@ -65,12 +65,53 @@ cd build-opt && ninja dragonfly
 | WITH_COLLECTION_CMDS | Include commands for collections (SET, HSET, ZSET)                                                                                                                                                                                       |
 | WITH_EXTENSION_CMDS  | Include extension commands (Bloom, HLL, JSON, ...)                                                                                                                                                                                       |
 | USE_MOLD             | Uses the mold linker to reduce link time overhead while enabling Link Time Optimization (LTO) for improved runtime performance. Recommended for benchmarking and production. |
+| WITH_ASAN            | Enable AddressSanitizer (`-fsanitize=address`). Debug builds only. Clang and GCC. |
+| WITH_UBSAN            | Enable UndefinedBehaviorSanitizer. Adds the stock `-fsanitize=undefined` check group (alignment, array-bounds, null, shift, signed-integer-overflow, ...). Debug builds only. Clang and GCC. |
+| WITH_UBSAN_STRICT    | Extends `WITH_UBSAN` with Clang-only checks: `implicit-conversion` (silent integer truncation / sign-change, e.g. the bug class from PR #7562), `nullability`, `float-divide-by-zero`, `integer` (unsigned overflow + shift), `function`, `vptr`, and `object-size` (effective only at `-O1+`). Default `ON`, but inert unless `WITH_UBSAN` is also `ON`. Excludes third-party / vendored code via `tools/sanitizers/ubsan/ubsan-ignorelist.txt`. Noisy on code that intentionally uses unsigned wrap-around (hashing, length math). |
 
 Minimal debug build:
 
 ```bash
 ./helio/blaze.sh -DWITH_GPERF=OFF -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_TIERING=OFF -DWITH_SEARCH=OFF -DWITH_COLLECTION_CMDS=OFF -DWITH_EXTENSION_CMDS=OFF
 ```
+
+### Running UBSan locally
+
+The extended UBSan checks are Clang-only. Configure a debug build with both flags
+(`WITH_UBSAN_STRICT` is `ON` by default but shown here explicitly):
+
+```bash
+./helio/blaze.sh -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DWITH_USAN=ON -DWITH_UBSAN_STRICT=ON -DWITH_AWS=OFF -DWITH_GCP=OFF
+cd build-dbg && ninja dragonfly
+```
+
+Add `-DCMAKE_CXX_FLAGS=-O1` if you want the `object-size` check (it is inert at
+the default `-O0`).
+
+UBSan behaviour at runtime is controlled by the `UBSAN_OPTIONS` environment
+variable (colon-separated):
+
+```bash
+UBSAN_OPTIONS="print_stacktrace=1:report_error_type=1:halt_on_error=1:\
+log_path=$(pwd)/ubsan-logs/dfly:dedup_token_length=3:\
+suppressions=$(git rev-parse --show-toplevel)/tools/sanitizers/ubsan/ubsan-suppressions.txt" \
+  ./build-dbg/dragonfly --alsologtostderr
+```
+
+| Option | Effect |
+| --- | --- |
+| `print_stacktrace=1` | Print a symbolized stack for every finding. |
+| `report_error_type=1` | Name the exact check (e.g. `implicit-integer-sign-change`) in the summary line. |
+| `halt_on_error=1` | Abort on the first finding. Omit it to print every finding and keep running. |
+| `log_path=DIR/PREFIX` | Write diagnostics to `PREFIX.<pid>` instead of stderr. Keep logs inside the build dir, not `/tmp`. |
+| `dedup_token_length=N` | Hash the top `N` frames for cross-run dedup. `N=3` separates findings that share a common top frame. |
+| `suppressions=FILE` | Skip findings matching `tools/sanitizers/ubsan/ubsan-suppressions.txt`. |
+| `silence_unsigned_overflow=1` | Mute the (often intentional) unsigned-overflow check. |
+
+Third-party and standard-library code is excluded from instrumentation via a
+Clang ignore-list (see `tools/sanitizers/ubsan/ubsan-ignorelist.txt`), so findings should always
+point at first-party Dragonfly code.
 
 ## Step 4 - voilà
 

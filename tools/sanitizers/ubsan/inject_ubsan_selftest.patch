@@ -1,0 +1,44 @@
+UBSan self-test injection patch.
+
+Apply this patch to a sanitized dragonfly build to run RunUbsanSelfTest() at
+startup -- it triggers one example of every enabled UBSan check, then exits.
+Use it to verify that UBSan is live before trusting a clean sweep result.
+
+This patch is NOT meant to be committed to the tree.
+
+Apply:   git apply --whitespace=nowarn tools/sanitizers/ubsan/inject_ubsan_selftest.patch
+Revert:  git apply -R --whitespace=nowarn tools/sanitizers/ubsan/inject_ubsan_selftest.patch
+
+diff --git a/src/server/dfly_main.cc b/src/server/dfly_main.cc
+--- a/src/server/dfly_main.cc
++++ b/src/server/dfly_main.cc
+@@ -124,6 +124,8 @@
+           "Relevant only for modern kernels with io_uring enabled");
+
+ ABSL_FLAG(bool, omit_basic_usage, false, "Omit printing basic usage info.");
++
++extern "C" void RunUbsanSelfTest();  // defined in tools/sanitizers/ubsan/ubsan_selftest.cc
+
+ #ifdef USE_AFL
+ ABSL_FLAG(uint32_t, afl_loop_limit, UINT_MAX,
+@@ -1082,5 +1082,9 @@ int main(int argc, char* argv[]) {
+   MainInitGuard guard(&argc, &argv);
+
+   ParseFlagsFromEnv();
++
++  // UBSan self-test build: run the checks and exit before starting the server.
++  RunUbsanSelfTest();
++  return 0;
+
+ #ifdef USE_ABSL_LOG
+diff --git a/src/server/CMakeLists.txt b/src/server/CMakeLists.txt
+--- a/src/server/CMakeLists.txt
++++ b/src/server/CMakeLists.txt
+@@ -11,5 +11,6 @@ endif()
+ endif()
+
+-add_executable(dragonfly dfly_main.cc version_monitor.cc)
++add_executable(dragonfly dfly_main.cc version_monitor.cc
++               ${CMAKE_SOURCE_DIR}/tools/sanitizers/ubsan/ubsan_selftest.cc)
+ add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
+ cxx_link(dragonfly base dragonfly_lib)

@@ -32,6 +32,11 @@ inputs:
     required: false
     default: 'NoSanitizers'
     type: string
+  ubsan-strict:
+    description: "Enable extended UBSan checks (WITH_UBSAN_STRICT). Off by default; enable for sanitizer sweeps."
+    required: false
+    default: 'OFF'
+    type: string
   with-aws:
     description: "Build with AWS support"
     required: false
@@ -51,11 +56,11 @@ runs:
       run: |
         # Set sanitizer flags
         ASAN="OFF"
-        USAN="OFF"
+        UBSAN="OFF"
         if [ '${{ inputs.sanitizers }}' = 'Sanitizers' ]; then
-          echo "Enabling ASAN/USAN"
+          echo "Enabling ASAN/UBSAN"
           ASAN="ON"
-          USAN="ON"
+          UBSAN="ON"
         fi
 
         # Build cmake command array
@@ -84,7 +89,8 @@ runs:
           -DWITH_UNWIND=OFF
           -DWITH_GPERF=OFF
           -DWITH_ASAN="${ASAN}"
-          -DWITH_USAN="${USAN}"
+          -DWITH_UBSAN="${UBSAN}"
+          -DWITH_UBSAN_STRICT="${{ inputs.ubsan-strict }}"
           -DLEGACY_GLOG=OFF
         )
 

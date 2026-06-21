@@ -49,7 +49,7 @@ set(CMAKE_REQUIRED_FLAGS "-fsanitize=address")
 check_cxx_source_compiles("int main() { return 0; }" SUPPORT_ASAN)
 
 set(CMAKE_REQUIRED_FLAGS "-fsanitize=undefined")
-check_cxx_source_compiles("int main() { return 0; }" SUPPORT_USAN)
+check_cxx_source_compiles("int main() { return 0; }" SUPPORT_UBSAN)
 set(CMAKE_REQUIRED_FLAGS "")
 
 # We must define all the required variables from the root cmakefile, otherwise
@@ -76,7 +76,7 @@ if(USE_AFL)
   # Force disable sanitizers when fuzzing (AFL++ incompatible with ASAN/UBSAN)
   message(STATUS "Disabling sanitizers (incompatible with AFL++ fuzzing)")
   set(WITH_ASAN OFF CACHE BOOL "Disable ASAN for fuzzing" FORCE)
-  set(WITH_USAN OFF CACHE BOOL "Disable UBSAN for fuzzing" FORCE)
+  set(WITH_UBSAN OFF CACHE BOOL "Disable UBSAN for fuzzing" FORCE)
 
   # Disable AWS and GCP for fuzzing builds (not needed, reduces build time)
   message(STATUS "Disabling AWS and GCP integrations for fuzzing")
@@ -90,10 +90,53 @@ if (SUPPORT_ASAN AND WITH_ASAN)
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address")
 endif()
 
-option(WITH_USAN "Enable -fsanitize=undefined" OFF)
-if (SUPPORT_USAN AND WITH_USAN)
-  message(STATUS "ub sanitizer enabled")
+# UndefinedBehaviorSanitizer (UBSan). Check reference:
+# https://releases.llvm.org/18.1.8/tools/clang/docs/UndefinedBehaviorSanitizer.html
+#
+# WITH_UBSAN        -> set `-fsanitize=undefined` checks only.
+# WITH_UBSAN_STRICT -> additional Clang-only checks: 1) implicit integer conversions (truncation, sign-change), 2) integer overflow (signed and unsigned),
+#                      3) indirect call type mismatches (function), 4) vtable type confusion (vptr), and 5) out-of-bounds object access (object-size).
+option(WITH_UBSAN "Enable -fsanitize=undefined" OFF)
+if (SUPPORT_UBSAN AND WITH_UBSAN)
+  message(STATUS "UndefinedBehaviorSanitizer enabled (-fsanitize=undefined)")
+  # -fsanitize=undefined: the default UBSan umbrella (~18 true-UB checks: alignment,
+  # array-bounds, bool, builtin, enum, float-cast-overflow, integer-divide-by-zero,
+  # nonnull-attribute, null, pointer-overflow, return, shift, signed-integer-overflow,
+  # unreachable, vla-bound, ...). Note: function & vptr are NOT in this group.
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=undefined")
+endif()
+
+# Extended UBSan checks. Inert unless WITH_UBSAN is also ON. Clang only -- GCC
+# implements none of these.
+option(WITH_UBSAN_STRICT "Enable extended UBSan checks (implicit-conversion, integer, function, vptr, object-size). Clang only." ON)
+if (SUPPORT_UBSAN AND WITH_UBSAN AND WITH_UBSAN_STRICT AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  message(STATUS "UndefinedBehaviorSanitizer STRICT enabled (extended checks)")
+  # Exclude third-party / vendored code from instrumentation so findings point
+  # at first-party Dragonfly code (see tools/sanitizers/ubsan/ubsan-ignorelist.txt).
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize-ignorelist=${CMAKE_SOURCE_DIR}/tools/sanitizers/ubsan/ubsan-ignorelist.txt")
+  # -- #7562 bug class: lossy/sign-changing implicit integer conversions --
+  # implicit-conversion = implicit-unsigned-integer-truncation +
+  #   implicit-signed-integer-truncation + implicit-integer-sign-change.
+  #   Not UB, but caught the PR #7562 bug (1ULL<<32 silently truncated to 0).
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=implicit-conversion")
+  # nullability: passing/assigning/returning null where _Nonnull is annotated.
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=nullability")
+  # float-divide-by-zero: floating-point division by zero (IEEE-defined, usually a bug).
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=float-divide-by-zero")
+  # -- noisy integer / dispatch / object-size checks --
+  # integer: signed-integer-overflow + unsigned-integer-overflow + shift +
+  #   unsigned-shift-base + integer-divide-by-zero + the 3 implicit-conversion checks.
+  #   Noisy: unsigned wrap is well-defined and intentional in hashing / length math.
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=integer")
+  # function: indirect call through a function pointer of the WRONG type (needs RTTI,
+  #   which Dragonfly already builds with). Catches ABI / type-confusion bugs.
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=function")
+  # vptr: use of an object whose vptr indicates the wrong dynamic type, or whose
+  #   lifetime has not begun / has ended (needs RTTI; link with clang++).
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=vptr")
+  # object-size: access beyond an object's __builtin_object_size.
+  #   Only effective at -O1+ (inert at -O0).
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=object-size")
 endif()
 
 # Split debug info into .dwo files so the linker handles much less data.

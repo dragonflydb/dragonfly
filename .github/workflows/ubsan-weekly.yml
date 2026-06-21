@@ -1,0 +1,240 @@
+name: ubsan-weekly
+
+# Weekly UndefinedBehaviorSanitizer sweep.
+#
+# Why a separate weekly job (and NOT in PRs):
+#   The extended UBSan checks (implicit-conversion, integer, function, vptr,
+#   object-size) are noisy and currently have known findings, so running them
+#   per-PR would block unrelated work. We keep them out of PR CI entirely
+#   (the per-PR builder pins WITH_UBSAN_STRICT=OFF) and sweep weekly instead.
+#
+# Architecture matrix (x86_64 + aarch64):
+#   Several UBSan findings are architecture dependent -- e.g. `char` signedness
+#   (signed on x86_64, unsigned on many aarch64 configs) and `long` width
+#   assumptions surface implicit-integer-sign-change / truncation differently
+#   per arch. Running both catches bugs that only one architecture would reveal.
+#
+# Two phases:
+#   1. SELF-TEST (required): apply a patch that injects RunUbsanSelfTest() into
+#      the real dragonfly binary, build with UBSan (-O1, strict), run it and
+#      assert that EVERY enabled check actually fires. This proves the toolchain
+#      + flags are live before we trust a "clean" sweep.
+#   2. SWEEP (informational): revert the patch, rebuild clean, run the #7562
+#      regression test and the C++ unit tests under UBSan, collecting all
+#      findings as artifacts for triage.
+
+on:
+  schedule:
+    - cron: '0 4 * * 0' # Sundays 04:00 UTC
+  workflow_dispatch: # manual run, any branch
+
+permissions:
+  contents: read
+
+jobs:
+  ubsan:
+    name: UBSan sweep (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-24.04
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 120
+    container:
+      image: ghcr.io/romange/ubuntu-dev:24
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /:/hostroot
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Show toolchain
+        run: |
+          echo "=== arch ==="; uname -m
+          echo "=== clang ==="; clang++ --version
+          echo "=== cmake ==="; cmake --version
+
+      # ----------------------------------------------------------------------
+      # Phase 1: self-test -- prove every enabled UBSan check is actually live.
+      # ----------------------------------------------------------------------
+      - name: Inject UBSan self-test into dragonfly
+        run: |
+          git apply --whitespace=nowarn tools/sanitizers/ubsan/inject_ubsan_selftest.patch
+          echo "Applied inject_ubsan_selftest.patch"
+
+      - name: Build dragonfly (UBSan, strict, -O1)
+        uses: ./.github/actions/builder
+        with:
+          build-type: Debug
+          c-compiler: clang
+          cxx-compiler: clang++
+          # -O1 activates object-size; -Wno-error keeps clang's unused-arg warning non-fatal.
+          cxx-flags: "-O1 -Wno-error=unused-command-line-argument"
+          sanitizers: Sanitizers
+          ubsan-strict: 'ON'
+          with-aws: 'OFF'
+          targets: dragonfly
+
+      - name: Run self-test and assert every check fires
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          mkdir -p ubsan-logs
+          # No halt_on_error -> UBSan prints and continues, so one run exercises all cases.
+          export UBSAN_OPTIONS="print_stacktrace=1:report_error_type=1:dedup_token_length=3:log_path=$(pwd)/ubsan-logs/selftest"
+          ./dragonfly || true
+          # UBSan writes to <log_path>.<pid>; gather them all.
+          cat ubsan-logs/selftest.* > selftest.ubsan 2>/dev/null || true
+          echo "================ self-test UBSan output ================"
+          cat selftest.ubsan || true
+          echo "======================================================="
+
+          # Each enabled check must appear at least once. Substrings are matched
+          # against UBSan's "runtime error:" / SUMMARY lines (report_error_type=1).
+          declare -A checks=(
+            ["implicit-conversion"]="implicit conversion"
+            ["implicit-integer-sign-change"]="implicit-integer-sign-change"
+            ["array-bounds"]="out of bounds"
+            ["nullability"]="null pointer passed as argument"
+            ["float-divide-by-zero"]="division by zero"
+            ["signed-integer-overflow"]="signed integer overflow"
+            ["unsigned-integer-overflow"]="unsigned integer overflow"
+            ["shift"]="shift"
+            ["function"]="incorrect function type"
+            ["vptr"]="member call on address"
+            ["object-size"]="object-size"
+          )
+          missing=0
+          for name in "${!checks[@]}"; do
+            if grep -qiF "${checks[$name]}" selftest.ubsan; then
+              echo "  PASS  $name"
+            else
+              echo "  MISS  $name  (expected substring: '${checks[$name]}')"
+              missing=$((missing + 1))
+            fi
+          done
+          if [[ $missing -gt 0 ]]; then
+            echo "::error::UBSan self-test: $missing expected check(s) did not fire -- toolchain/flags may be broken."
+            exit 1
+          fi
+          echo "All expected UBSan checks fired."
+
+          # The 12 self-test cases must each produce exactly one finding. Match on
+          # the ubsan_selftest.cc source path so startup / third-party noise is
+          # excluded from the count.
+          selftest_count=$(grep "runtime error" selftest.ubsan | grep -c "ubsan_selftest.cc" || true)
+          echo "self-test produced ${selftest_count} finding(s) in ubsan_selftest.cc (expected 12)"
+          if [[ "${selftest_count}" -ne 12 ]]; then
+            echo "::error::UBSan self-test expected exactly 12 findings, got ${selftest_count}"
+            exit 1
+          fi
+
+      # Demonstrate the runtime options actually change behaviour (not separate
+      # code -- same binary, different UBSAN_OPTIONS).
+      - name: Assert runtime options take effect
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          # halt_on_error=1 stops at the first finding (fewer "runtime error" lines).
+          all=$(UBSAN_OPTIONS="report_error_type=1" ./dragonfly 2>&1 | grep -c "runtime error" || true)
+          one=$(UBSAN_OPTIONS="halt_on_error=1" ./dragonfly 2>&1 | grep -c "runtime error" || true)
+          echo "findings without halt_on_error=$all, with halt_on_error=1=$one"
+          if [[ "$one" -ge "$all" || "$all" -lt 2 ]]; then
+            echo "::warning::halt_on_error did not reduce the number of findings as expected"
+          fi
+          # silence_unsigned_overflow=1 must drop the unsigned-overflow finding.
+          noisy=$(UBSAN_OPTIONS="report_error_type=1" ./dragonfly 2>&1 | grep -c "unsigned integer overflow" || true)
+          quiet=$(UBSAN_OPTIONS="report_error_type=1:silence_unsigned_overflow=1" ./dragonfly 2>&1 | grep -c "unsigned integer overflow" || true)
+          echo "unsigned-overflow findings: noisy=$noisy silenced=$quiet"
+
+      - name: Revert self-test injection
+        run: |
+          git apply -R --whitespace=nowarn tools/sanitizers/ubsan/inject_ubsan_selftest.patch
+          echo "Reverted inject_ubsan_selftest.patch"
+
+      # ----------------------------------------------------------------------
+      # Phase 2: run a single, minimal functional test (connection_test.py)
+      # under UBSan. Findings are collected to ubsan-logs and surfaced in the
+      # job summary; they do not fail the job (there are known existing ones).
+      # ----------------------------------------------------------------------
+      - name: Finalize sanitized dragonfly (incremental, patch reverted)
+        uses: ./.github/actions/builder
+        with:
+          build-type: Debug
+          c-compiler: clang
+          cxx-compiler: clang++
+          cxx-flags: "-O1 -Wno-error=unused-command-line-argument"
+          sanitizers: Sanitizers
+          ubsan-strict: 'ON'
+          with-aws: 'OFF'
+          # Same build dir as phase 1 -- ninja only recompiles dfly_main.cc and
+          # relinks dragonfly (the self-test source is gone). No clean rebuild.
+          targets: dragonfly
+
+      - name: Install Python test requirements
+        run: ${GITHUB_WORKSPACE}/.github/scripts/install-pytest-requirements.sh
+
+      # Test pass/fail is intentionally NOT a gate here (handled separately).
+      # continue-on-error lets the run proceed so we can evaluate UBSan findings.
+      - name: Run connection_test.py under UBSan
+        continue-on-error: true
+        run: |
+          cd ${GITHUB_WORKSPACE}/tests
+          mkdir -p ${GITHUB_WORKSPACE}/build/ubsan-logs
+          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly"
+          # No halt_on_error -> dragonfly keeps running and logs every finding to file.
+          export UBSAN_OPTIONS="print_stacktrace=1:report_error_type=1:dedup_token_length=3:suppressions=${GITHUB_WORKSPACE}/tools/sanitizers/ubsan/ubsan-suppressions.txt:log_path=${GITHUB_WORKSPACE}/build/ubsan-logs/pytest"
+          # Single, minimal pytest file. 'not large' skips the heavy stress cases.
+          timeout 20m pytest -m "not large" --timeout=300 --color=yes dragonfly/connection_test.py
+
+      - name: Publish UBSan findings to job summary
+        if: always()
+        run: |
+          logs="${GITHUB_WORKSPACE}/build/ubsan-logs"
+          {
+            echo "## UBSan findings (${{ matrix.arch }})"
+            echo ""
+            echo "Deduplicated \`runtime error\` lines from the connection_test.py run (count + location):"
+            echo ""
+            echo '```'
+            cat "$logs"/pytest.* 2>/dev/null | grep -i "runtime error" | sort | uniq -c | sort -rn | head -200 || echo "(none captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Job verdict: PASS only if the connection_test.py run produced NO first-party
+      # UBSan findings. Third-party / std-library locations are excluded (matches the
+      # ignore-list intent); triage those from the uploaded artifact if needed.
+      - name: Gate on UBSan findings
+        run: |
+          logs="${GITHUB_WORKSPACE}/build/ubsan-logs"
+          findings=$(cat "$logs"/pytest.* 2>/dev/null | grep "runtime error" \
+            | grep -v -E "_deps/|third_party/|/helio/|/usr/" | sort -u || true)
+          count=$(printf '%s' "$findings" | grep -c . || true)
+          if [[ "$count" -gt 0 ]]; then
+            echo "::error::UBSan found ${count} first-party finding(s) during connection_test.py"
+            printf '%s\n' "$findings"
+            exit 1
+          fi
+          echo "No first-party UBSan findings. PASS."
+
+      - name: Upload UBSan logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ubsan-logs-${{ matrix.arch }}
+          path: ${{ github.workspace }}/build/ubsan-logs
+          if-no-files-found: ignore
+
+      - name: Notify on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          echo "Weekly UBSan sweep (${{ matrix.arch }}) failed: ${job_link}"

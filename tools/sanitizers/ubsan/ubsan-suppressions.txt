@@ -1,0 +1,41 @@
+# UndefinedBehaviorSanitizer suppression file for Dragonfly.
+#
+# Used by the scheduled weekly UBSan job (see .github/workflows/ubsan-weekly.yml)
+# and for local runs:
+#
+#   UBSAN_OPTIONS="suppressions=$(pwd)/tools/sanitizers/ubsan/ubsan-suppressions.txt" ./build-dbg/dragonfly
+#
+# -----------------------------------------------------------------------------
+# Format
+# -----------------------------------------------------------------------------
+# One rule per line:
+#
+#   <check>:<pattern>
+#
+#   <check>   The UBSan check that produced the report, e.g.:
+#               alignment, signed-integer-overflow, unsigned-integer-overflow,
+#               implicit-conversion, shift, vptr, function, null, ...
+#             Use the token from the report's "runtime error:" / SUMMARY line.
+#             (Run with UBSAN_OPTIONS=report_error_type=1 to print the exact token.)
+#
+#   <pattern> A substring/regex matched against the symbolized function name OR
+#             the source file path of the top frame. Module-name matching uses
+#             the mangled/demangled symbol; file matching uses the file path.
+#
+# Examples:
+#   unsigned-integer-overflow:MurmurHash*       # silence intentional hash wrap
+#   implicit-conversion:*/third_party/*         # ignore vendored code
+#   vptr:absl::*                                 # known abseil false positive
+#
+# Notes:
+#   * Suppressions only apply to checks compiled in "recoverable" mode. Checks
+#     that abort (the default for some groups) are not suppressible at runtime;
+#     use -fno-sanitize-recover= / -fsanitize-recover= at compile time to control
+#     that, and prefer keeping everything recoverable for the weekly sweep.
+#   * Keep this list EMPTY by default. Only add an entry with a one-line comment
+#     explaining (a) why the finding is benign and (b) a tracking issue link.
+#   * A growing suppression list is a smell: prefer fixing the narrowing/overflow
+#     or annotating intent (e.g. explicit static_cast) over suppressing.
+# -----------------------------------------------------------------------------
+
+# (no suppressions yet)
