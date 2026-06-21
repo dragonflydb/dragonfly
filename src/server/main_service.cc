@@ -1736,7 +1736,6 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
 
     dfly_cntx->transaction = dist_trans.get();
     MultiCommandSquasher::Opts opts;
-    opts.verify_commands = true;
     opts.pipeline_mode = true;
     opts.max_squash_size = ss->max_squash_cmd_num;
 
@@ -1778,6 +1777,15 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     if (is_multi || is_eval || cid->IsBlocking() || (cid->opt_mask() & CO::ADMIN) ||
         cid->IsQuit() || cid->IsSubscribeFamily())
       break;
+
+    if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
+      CapturingReplyBuilder crb{ReplyMode::FULL, rb->GetRespVersion()};
+      crb.SendError(std::move(*err));
+      cmd_cntx->Resolve(crb.Take());
+      ++dispatched;
+      cmd = cmd->next;
+      continue;
+    }
 
     cmd_refs.push_back(CmdRef{cid, tail_args, ReplyMode::FULL, cmd_cntx});
     cmd = cmd->next;
@@ -1938,9 +1946,20 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   DCHECK(eval_cid);
   tx->MultiSwitchCmd(eval_cid);
 
+  for (auto& scmd : info->async_cmds) {
+    auto ref = scmd.Ref();
+    if (auto err = VerifyCommandState(*ref.cid, ref.args, *cntx); err) {
+      info->async_cmds_heap_mem = 0;
+      info->async_cmds.clear();
+      CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
+      crb.SendError(std::move(*err));
+      auto reply = crb.Take();
+      return make_optional(std::move(reply));
+    }
+  }
+
   CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
   MultiCommandSquasher::Opts opts;
-  opts.verify_commands = true;
   opts.error_abort = true;
   opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
   auto cmd_gen = [it = info->async_cmds.begin(), end = info->async_cmds.end()]() mutable -> CmdRef {

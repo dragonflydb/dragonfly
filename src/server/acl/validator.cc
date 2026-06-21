@@ -55,11 +55,10 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
   if (!pub_sub.all_channels) {
     std::string_view name = id.name();
     if (name == "PUBLISH" || name == "SPUBLISH") {
-      auto channel = tail_args[0];
-      allowed &= iterate_globs(facade::ToSV(channel));
+      allowed &= iterate_globs(tail_args[0]);
     } else {
       for (auto channel : tail_args) {
-        allowed &= iterate_globs(facade::ToSV(channel));
+        allowed &= iterate_globs(channel);
       }
     }
   }

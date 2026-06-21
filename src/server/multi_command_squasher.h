@@ -23,7 +23,6 @@ namespace dfly {
 class MultiCommandSquasher {
  public:
   struct Opts {
-    bool verify_commands = false;   // Whether commands need to be verified before execution
     bool error_abort = false;       // Abort upon receiving error
     bool pipeline_mode = false;     // Whether to expect pipeline command contexts
     unsigned max_squash_size = 32;  // How many commands to squash at once
