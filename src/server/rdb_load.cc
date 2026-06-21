@@ -2253,17 +2253,16 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_EOF) {
-      if (current_chunk_state_) {
-        LOG(ERROR) << "eof seen while a previous chunk is not yet finished, stream id "
-                   << current_chunk_state_->stream_id << ", remaining bytes "
-                   << current_chunk_state_->remaining_payload_bytes
-                   << ", pending stream states: " << stream_states_.size();
-        return RdbError(errc::rdb_chunk_payload_remaining);
-      }
+      if (current_chunk_state_)
+        LOG(WARNING) << "eof seen while a previous chunk is not yet finished, stream id "
+                     << current_chunk_state_->stream_id << ", remaining bytes "
+                     << current_chunk_state_->remaining_payload_bytes
+                     << ", pending stream states: " << stream_states_.size();
 
       if (!stream_states_.empty()) {
-        LOG(ERROR) << "eof seen while pending stream states: " << stream_states_.size();
-        return RdbError(errc::rdb_chunk_payload_remaining);
+        LOG(WARNING) << "eof seen while pending stream states: " << stream_states_.size();
+        for (const auto& [id, state] : stream_states_)
+          LOG(WARNING) << "id=" << id << ", key=" << state.key;
       }
       /* EOF: End of file, exit the main loop. */
       break;
