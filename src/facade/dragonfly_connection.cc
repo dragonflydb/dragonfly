@@ -130,6 +130,9 @@ ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
           "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
 ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
           "Enable the event-driven IoLoopV2 for non-TLS RESP connections.");
+ABSL_FLAG(bool, enable_pipeline_squashing_v2, true,
+          "Enable vectorized pipeline squashing for the V2 dispatch loop. Groups consecutive "
+          "single-shard pipeline commands by shard and executes them in parallel.");
 ABSL_RETIRED_FLAG(bool, experimental_io_loop_v2, true, "retired.");
 
 using namespace util;
@@ -986,6 +989,8 @@ void Connection::HandleRequests() {
           !is_tls_ &&
           ((protocol_ == Protocol::MEMCACHE && GetFlag(FLAGS_enable_memcache_io_loop_v2)) ||
            (protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_resp_io_loop_v2)));
+      pipeline_squashing_v2_ =
+          ioloop_v2_ && GetFlag(FLAGS_enable_pipeline_squashing_v2) && protocol_ == Protocol::REDIS;
 
       socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       switch (protocol_) {
@@ -1520,7 +1525,9 @@ auto Connection::ParseLoop() -> ParserStatus {
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
 
   ParserStatus parse_status = NEED_MORE;
+
   do {
+    DCHECK_GT(io_buf_.InputLen(), 0u);
     parse_status = (this->*parse_func)(io_buf_);
 
     // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
@@ -1652,6 +1659,8 @@ io::Result<size_t> Connection::HandleRecvSocket() {
   // In case the socket was closed orderly, we get 0 bytes read.
   if (recv_sz && *recv_sz) {
     size_t commit_sz = *recv_sz;
+    DVLOG(2) << "Received " << commit_sz << " bytes from socket";
+
     io_buf_.CommitWrite(commit_sz);
 
     conn_stats.io_read_bytes += commit_sz;
@@ -2656,6 +2665,32 @@ Connection::ParserStatus Connection::ParseMCBatch(base::IoBuf& io_buf) {
   return OK;
 }
 
+bool Connection::SquashPipelineV2() {
+  // vectorized squash phase: pack multiple commands and dispatch at once.
+  // dispatch_waiting_count_ is the exact length of the run starting at parsed_to_execute_, so the
+  // squash works even when earlier commands are still in flight.
+  auto& conn_stats = tl_facade_stats->conn_stats;
+
+  uint64_t dispatch_start = CycleClock::Now();
+  unsigned squashed =
+      service_->DispatchSquashedBatch(parsed_to_execute_, dispatch_waiting_count_, cc_.get());
+
+  if (squashed == 0)
+    return false;
+
+  // Like V1's SquashPipeline, sample once before the blocking squash and attribute it to every
+  // squashed command's parse->dispatch wait.
+  for (unsigned i = 0; i < squashed; i++) {
+    auto usec = CycleClock::ToUsec(dispatch_start - parsed_to_execute_->parsed_cycle);
+    conn_stats.pipelined_wait_latency += usec;
+    AdvanceToExecute();
+  }
+
+  conn_stats.pipeline_dispatch_calls++;
+  conn_stats.pipeline_dispatch_commands += squashed;
+  return true;
+}
+
 bool Connection::ExecuteBatch() {
   // Invariant: batched_ must be false on entry.
   // Both ReplyBatch() and ExecuteBatch() reset it via absl::Cleanup guards on all return paths.
@@ -2690,9 +2725,27 @@ bool Connection::ExecuteBatch() {
   // Execute sequentially all parsed commands. parsed_to_execute_ points to the next command to
   // dispatch; it advances as commands are dispatched, and parsed_head_ advances with it whenever a
   // command retires (executes synchronously or replies immediately).
+  DVLOG(2) << "ExecuteBatch: " << dispatch_waiting_count_ << " commands ";
+
   while (parsed_to_execute_ != nullptr) {
     if (reply_builder_->GetError())
       return false;
+
+    if (pipeline_squashing_v2_ && dispatch_waiting_count_ > 1) {
+      // if we squashed any commands, continue the loop to check if there are
+      // non-squashable commands to process.
+      DVLOG(2) << "Squashing pipeline " << dispatch_waiting_count_ << " commands " << pending_input_
+               << " " << io_buf_.InputLen();
+
+      if (SquashPipelineV2()) {
+        // This helps with throughput. Explanation:
+        // when we suspend the thread calls io-callbacks that fill up the input buffer.
+        // By breaking now we give the io-loop a chance to add more commands to the pipeline.
+        if (pending_input_ || io_buf_.InputLen() > 0)
+          break;
+        continue;
+      }
+    }
 
     ParsedCommand* cmd = parsed_to_execute_;
     bool is_head = cmd == parsed_head_;
@@ -3007,6 +3060,7 @@ void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 void Connection::ReadPendingInput() {
   if (!pending_input_)
     return;
+
   // Drain available socket data into io_buf_.
   io::MutableBytes buf = io_buf_.AppendBuffer();
   // A recv call can return fewer bytes than requested even if the
@@ -3029,8 +3083,18 @@ void Connection::ReadPendingInput() {
       break;
     }
 
+    DVLOG(1) << "Read " << *res << " bytes from socket";
+
+    auto& conn_stats = tl_facade_stats->conn_stats;
+    size_t commit_sz = *res;
+    conn_stats.io_read_bytes += commit_sz;
+    local_stats_.net_bytes_in += commit_sz;
+
+    ++conn_stats.io_read_cnt;
+    ++local_stats_.read_cnt;
+
     last_interaction_ = time(nullptr);
-    io_buf_.CommitWrite(*res);
+    io_buf_.CommitWrite(commit_sz);
     buf = io_buf_.AppendBuffer();
   }
 }

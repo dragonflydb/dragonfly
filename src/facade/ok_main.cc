@@ -428,6 +428,7 @@ DispatchResult OkService::DispatchCommand([[maybe_unused]] ParsedArgs args, Pars
 uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
                                           [[maybe_unused]] ConnectionContext* cntx) {
   const unsigned num_shards = pool_->size();
+  VLOG(1) << "DispatchSquashedBatch: " << count << " commands";
 
   // Grouping scratch, private to this call: the squasher can preempt in FiberQueue::Add() when a
   // shard queue is full, so a shared buffer could be corrupted by a re-entrant call on this thread.
@@ -564,60 +565,46 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
 #define APPEND_BODY(...) absl::StrAppend(&body, __VA_ARGS__)
 
   // Connection metrics
-  APPEND_BODY("# HELP dragonfly_connections_received_total Total connections received\n");
   APPEND_BODY("# TYPE dragonfly_connections_received_total counter\n");
   APPEND_BODY("dragonfly_connections_received_total ", conn.conn_received_cnt, "\n");
 
-  APPEND_BODY("# HELP dragonfly_connected_clients Number of connected clients\n");
   APPEND_BODY("# TYPE dragonfly_connected_clients gauge\n");
   APPEND_BODY("dragonfly_connected_clients ", conn.num_conns_main, "\n");
 
-  APPEND_BODY("# HELP dragonfly_blocked_clients Number of blocked clients\n");
   APPEND_BODY("# TYPE dragonfly_blocked_clients gauge\n");
   APPEND_BODY("dragonfly_blocked_clients ", conn.num_blocked_clients, "\n");
 
-  APPEND_BODY("# HELP dragonfly_num_migrations Connection migrations between threads\n");
   APPEND_BODY("# TYPE dragonfly_num_migrations counter\n");
   APPEND_BODY("dragonfly_num_migrations ", conn.num_migrations, "\n");
 
   // Command metrics
-  APPEND_BODY("# HELP dragonfly_commands_processed_total Total commands processed\n");
   APPEND_BODY("# TYPE dragonfly_commands_processed_total counter\n");
   APPEND_BODY("dragonfly_commands_processed_total ", conn.command_cnt_main, "\n");
 
   // Pipeline metrics
-  APPEND_BODY("# HELP dragonfly_pipelined_commands_total Total pipelined commands\n");
   APPEND_BODY("# TYPE dragonfly_pipelined_commands_total counter\n");
   APPEND_BODY("dragonfly_pipelined_commands_total ", conn.pipelined_cmd_cnt, "\n");
 
-  APPEND_BODY("# HELP dragonfly_pipelined_commands_duration_seconds Total pipelined cmd latency\n");
   APPEND_BODY("# TYPE dragonfly_pipelined_commands_duration_seconds counter\n");
   APPEND_BODY("dragonfly_pipelined_commands_duration_seconds ", conn.pipelined_cmd_latency * 1e-6,
               "\n");
 
-  APPEND_BODY("# HELP dragonfly_pipelined_wait_duration_seconds Pipeline queue wait latency\n");
   APPEND_BODY("# TYPE dragonfly_pipelined_wait_duration_seconds counter\n");
   APPEND_BODY("dragonfly_pipelined_wait_duration_seconds ", conn.pipelined_wait_latency * 1e-6,
               "\n");
 
-  APPEND_BODY("# HELP dragonfly_pipeline_queue_length Pending commands in pipeline queue\n");
   APPEND_BODY("# TYPE dragonfly_pipeline_queue_length gauge\n");
   APPEND_BODY("dragonfly_pipeline_queue_length ", conn.pipeline_queue_entries, "\n");
 
-  APPEND_BODY("# HELP dragonfly_pipeline_throttle_total Pipeline throttle events\n");
   APPEND_BODY("# TYPE dragonfly_pipeline_throttle_total counter\n");
   APPEND_BODY("dragonfly_pipeline_throttle_total ", conn.pipeline_throttle_count, "\n");
 
-  APPEND_BODY("# HELP dragonfly_pipeline_dispatch_calls_total Pipeline batch dispatch calls\n");
   APPEND_BODY("# TYPE dragonfly_pipeline_dispatch_calls_total counter\n");
   APPEND_BODY("dragonfly_pipeline_dispatch_calls_total ", conn.pipeline_dispatch_calls, "\n");
 
-  APPEND_BODY("# HELP dragonfly_pipeline_dispatch_commands_total Commands via pipeline dispatch\n");
   APPEND_BODY("# TYPE dragonfly_pipeline_dispatch_commands_total counter\n");
   APPEND_BODY("dragonfly_pipeline_dispatch_commands_total ", conn.pipeline_dispatch_commands, "\n");
 
-  APPEND_BODY(
-      "# HELP dragonfly_pipeline_dispatch_flush_seconds Pipeline dispatch flush duration\n");
   APPEND_BODY("# TYPE dragonfly_pipeline_dispatch_flush_seconds counter\n");
   APPEND_BODY("dragonfly_pipeline_dispatch_flush_seconds ",
               conn.pipeline_dispatch_flush_usec * 1e-6, "\n");
@@ -626,32 +613,25 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
   APPEND_BODY("dragonfly_pipeline_dispatch_flush_total ", conn.pipeline_dispatch_flush_count, "\n");
 
   // Network I/O metrics
-  APPEND_BODY("# HELP dragonfly_net_input_bytes_total Total bytes read from network\n");
   APPEND_BODY("# TYPE dragonfly_net_input_bytes_total counter\n");
   APPEND_BODY("dragonfly_net_input_bytes_total ", conn.io_read_bytes, "\n");
 
-  APPEND_BODY("# HELP dragonfly_net_output_bytes_total Total bytes written to network\n");
   APPEND_BODY("# TYPE dragonfly_net_output_bytes_total counter\n");
   APPEND_BODY("dragonfly_net_output_bytes_total ", reply.io_write_bytes, "\n");
 
-  APPEND_BODY("# HELP dragonfly_net_input_recv_total Total read syscalls\n");
   APPEND_BODY("# TYPE dragonfly_net_input_recv_total counter\n");
   APPEND_BODY("dragonfly_net_input_recv_total ", conn.io_read_cnt, "\n");
 
-  APPEND_BODY("# HELP dragonfly_net_output_send_total Total write syscalls\n");
   APPEND_BODY("# TYPE dragonfly_net_output_send_total counter\n");
   APPEND_BODY("dragonfly_net_output_send_total ", reply.io_write_cnt, "\n");
 
-  APPEND_BODY("# HELP dragonfly_net_read_yields_total Read yields due to busy limit\n");
   APPEND_BODY("# TYPE dragonfly_net_read_yields_total counter\n");
   APPEND_BODY("dragonfly_net_read_yields_total ", conn.num_read_yields, "\n");
 
   // Reply metrics
-  APPEND_BODY("# HELP dragonfly_reply_total Total reply send calls\n");
   APPEND_BODY("# TYPE dragonfly_reply_total counter\n");
   APPEND_BODY("dragonfly_reply_total ", reply.send_stats.count, "\n");
 
-  APPEND_BODY("# HELP dragonfly_reply_duration_seconds Total reply send duration\n");
   APPEND_BODY("# TYPE dragonfly_reply_duration_seconds counter\n");
   APPEND_BODY("dragonfly_reply_duration_seconds ",
               base::CycleClock::ToUsec(reply.send_stats.total_duration) * 1e-6, "\n");
