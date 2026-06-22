@@ -1165,6 +1165,31 @@ async def test_squashed_pipeline_control_commands(df_server: DflyInstance):
     await writer.wait_closed()
 
 
+"""
+Regression: verify-failed commands inside a squashed pipeline must still advance the
+reply loop; otherwise already-resolved commands can be left queued and resolved again.
+"""
+
+
+@dfly_args({"proactor_threads": "1", "pipeline_squash": 1, "restricted_commands": "SET"})
+async def test_squashed_pipeline_verify_fail(async_client: aioredis.Redis):
+    p = async_client.pipeline(transaction=False)
+    # N=3 reproduces the double-Resolve; use one extra pair for margin.
+    N = 4
+    for i in range(N):
+        p.get(f"k{i}")  # passes VerifyCommandState
+        p.set(f"k{i}", "v")  # fails VerifyCommandState (restricted command)
+    p.ping()  # liveness marker — never arrives if the server crashed
+
+    results = await p.execute(raise_on_error=False)
+
+    # aioredis returns True for PING in pipelines; a crash would raise ConnectionError instead
+    assert results[-1] is True, f"server crashed or wrong final reply: {results[-1]}"
+    for i in range(N):
+        assert results[i * 2] is None  # GET: key was never written (SET was denied)
+        assert isinstance(results[i * 2 + 1], aioredis.ResponseError)  # SET: denied
+
+
 async def test_unix_domain_socket(df_factory, tmp_dir):
     server = df_factory.create(proactor_threads=1, port=BASE_PORT, unixsocket="./df.sock")
     server.start()
