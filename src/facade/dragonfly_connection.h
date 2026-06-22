@@ -14,6 +14,7 @@
 #include <utility>
 #include <variant>
 
+#include "base/histogram.h"
 #include "facade/connection_ref.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
@@ -372,7 +373,12 @@ class Connection : public util::Connection {
   void MaybeEnableRecvMultishot();
 
   // Drains currently available bytes from socket into io_buf_ using non-blocking reads.
-  void ReadPendingInput();
+  // from_proactor_cb=true marks calls made from the proactor's OnRecv callback (connection fiber
+  // suspended), used to update conn_stats.proactor_reads.
+  // force=true bypasses the pending_input_ guard and always attempts TryRecv. Use this when
+  // the fiber is running (no proactor callbacks fire, so pending_input_ is never refreshed)
+  // but the kernel socket buffer may already contain data that arrived during execution.
+  void ReadPendingInput(bool from_proactor_cb = false, bool force = false);
 
   void CheckIoBufCapacity(bool reached_capacity, base::IoBuf* buf);
 
@@ -406,7 +412,11 @@ class Connection : public util::Connection {
   // If add is true, stats are incremented, otherwise decremented.
   void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
-  ParserStatus ParseRedis(base::IoBuf& buf, uint32_t max_busy_cycles, bool enqueue_only = false);
+  // allow_yield=false disables the periodic ThisFiber::Yield() inside the parse loop. It MUST be
+  // passed false when called from a proactor callback (OnRecvNotification), which runs on the
+  // proactor and must never suspend the connection fiber.
+  ParserStatus ParseRedis(base::IoBuf& buf, uint32_t max_busy_cycles, bool enqueue_only = false,
+                          bool allow_yield = true);
 
   void OnBreakCb(int32_t mask);
 
@@ -637,6 +647,13 @@ class Connection : public util::Connection {
   Protocol protocol_;
   Phase phase_ = SETUP;
 
+  // Finer-grained "what is the fiber doing right now" marker, used only by the V2 diagnostics to
+  // attribute proactor OnRecv reads to the suspension point the fiber was parked at. Set right
+  // before a suspension point and reset to kRun after. (phase_ is too coarse: parse and execute
+  // are both PROCESS.)
+  enum class FiberSpot : uint8_t { kRun, kIdleAwait, kSquashHop, kParseYield };
+  FiberSpot fiber_spot_ = FiberSpot::kRun;
+
   // True after IncreaseConnStats registers this connection in the current thread's stats.
   // False before registration and after DecreaseConnStats unregisters it during close/migration.
   bool conn_stats_registered_ = false;
@@ -656,6 +673,64 @@ class Connection : public util::Connection {
     size_t dispatch_entries_added = 0;  // total number of dispatch queue entries
     size_t cmds = 0;                    // total number of commands executed
   } local_stats_;
+
+  // TODO(remove): temporary per-connection parse-ahead / idle-await diagnostics. These are NOT
+  // metrics; they are dumped once to the INFO log when the connection closes (see ConnectionFlow)
+  // to help diagnose V2 pipeline throughput variance. Remove together with the dump site.
+  struct {
+    uint64_t parseloop_iters = 0;  // ParseLoop inner-loop iterations (parse passes)
+    uint64_t pa_attempts = 0;      // parse-ahead top-up reads attempted
+    uint64_t pa_read_hits = 0;     // parse-ahead read appended bytes (continued parsing)
+    uint64_t pa_read_misses = 0;   // parse-ahead read returned nothing (socket drained, EAGAIN)
+    uint64_t idle_awaits = 0;      // times the loop parked in the idle await (slept)
+    uint64_t stalled_awaits = 0;   // subset of idle_awaits entered while stalled on a partial
+    uint64_t squash_calls = 0;     // SquashPipelineV2 calls that squashed >= 1 command
+    uint64_t squash_cmds = 0;      // total commands squashed
+    uint64_t max_batch = 0;        // largest single squash batch
+
+    // Per-event timing: used to compute average intervals between reads and parses.
+    // Tracks the cycle counter at the PREVIOUS event so we can accumulate gaps.
+    // Both work for V1 and V2 because we reset last_*_cycle on the first event.
+    uint64_t read_calls = 0;          // # of times any recv/TryRecv actually delivered bytes
+    uint64_t read_interval_usec = 0;  // cumulative usec between consecutive read-delivery events
+    uint64_t last_read_cycle = 0;     // CycleClock at the last successful read (0 = never)
+
+    uint64_t parse_calls = 0;          // # of times we entered a parse pass (ParseLoop outer iter)
+    uint64_t parse_interval_usec = 0;  // cumulative usec between consecutive parse-entry events
+    uint64_t last_parse_cycle = 0;     // CycleClock at the last parse-entry (0 = never)
+
+    uint64_t read_eagain_cnt = 0;      // # times TryRecv/Recv returned EAGAIN (nothing to read)
+    uint64_t parse_need_more_cnt = 0;  // # times parse stopped because buffer was exhausted
+    base::Histogram read_size_hist;    // distribution of individual read sizes (bytes)
+
+    // Entry-point call counts: how many times we attempted to pull bytes from the kernel.
+    // One entry-point call may issue many individual TryRecv/Recv calls internally.
+    // Compare rpi_calls (V2) vs hrs_calls (V1) to see the read-attempt frequency difference.
+    uint64_t rpi_calls = 0;  // ReadPendingInput invocations that passed the pending_input guard
+    uint64_t hrs_calls = 0;  // HandleRecvSocket invocations (V1 blocking read entry point)
+
+    // Where was the connection fiber suspended when a proactor OnRecv read landed bytes?
+    // V2 only (V1 has no OnRecv callback). One bump per ReadPendingInput-from-callback that read.
+    uint64_t pread_idle = 0;    // fiber parked in the idle await (no work to do)
+    uint64_t pread_squash = 0;  // fiber blocked inside DispatchSquashedBatch (cross-shard hop)
+    uint64_t pread_parse = 0;   // fiber yielded mid-parse (max_busy_cycles)
+    uint64_t pread_other = 0;   // anything else (flush, backpressure, between states)
+
+    // Wall time spent strictly inside DispatchSquashedBatch (the shared squash dispatch call),
+    // measured identically in V1 and V2. Divide by squash_calls / squash_cmds to compare the
+    // per-batch and per-command squash cost between the two loops at the same batch size.
+    uint64_t squash_dispatch_usec = 0;  // cumulative usec inside DispatchSquashedBatch
+
+    // Parse-in-proactor (V2): parses performed from the OnRecv callback while the fiber was
+    // blocked in a squash hop, and how many commands they enqueued (the batch growth bought).
+    uint64_t proactor_parse_calls = 0;
+    uint64_t proactor_parse_cmds = 0;
+
+    // Parse-ahead buffer growth (V2): ParseLoop passes that saw the buffer full (reached_capacity)
+    // and, of those, how many actually enlarged io_buf_ via CheckIoBufCapacity.
+    uint64_t pa_reached_cap = 0;
+    uint64_t pa_grow_cnt = 0;
+  } tmp_pa_stats_;
 
   std::unique_ptr<SinkReplyBuilder> reply_builder_;
   util::HttpListenerBase* http_listener_;
@@ -702,6 +777,17 @@ class Connection : public util::Connection {
       // If post migration is allowed to call RegisterRecv
       bool migration_allowed_to_register_ : 1;
       bool pending_input_ : 1;
+
+      // True when io_uring multishot recv is active for this socket. When set, the kernel
+      // owns the recv path and delivers data via provided buffers. This conflicts with TryRecv that
+      // would would steal/interleave bytes and corrupt the stream.
+      bool recv_multishot_active_ : 1;
+
+      // True when the last parse stopped on a partial command (NEED_MORE) and the socket is
+      // drained: io_buf_ holds bytes, but they are not actionable until more arrive. Used by
+      // ShouldWakeIdle() to avoid busy-spinning on a stuck partial. Cleared the moment fresh
+      // bytes are appended (ReadPendingInput / proactor OnRecv).
+      bool input_stalled_ : 1;
     };
   };
 

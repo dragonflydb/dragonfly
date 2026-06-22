@@ -47,6 +47,9 @@ struct ConnectionStats {
 
   // number of times the connection yielded due to max_busy_read_usec limit
   uint32_t num_read_yields = 0;
+  // Number of times the V2 proactor OnRecv callback drained socket bytes
+  // into io_buf_
+  uint64_t proactor_reads = 0;
   uint64_t num_migrations = 0;
   uint64_t num_recv_provided_calls = 0;
 
@@ -64,6 +67,24 @@ struct ConnectionStats {
 
   // number of times we flushed when dispatching the pipeline.
   uint64_t pipeline_dispatch_flush_count = 0;
+
+  // (squash_cmd_cnt / squash_call_cnt) is the average squash batch size.
+  //
+  // squash dispatches that packed >= 1 command.
+  uint64_t squash_call_cnt = 0;
+  // total commands packed across those calls
+  uint64_t squash_cmd_cnt = 0;
+  // distribution of commands per squash call
+  base::Histogram squash_batch_size_hist;
+
+  // (parse_iteration_cmd_cnt / parse_iteration_cnt) is the average number of commands a single
+  // fiber pass parses before it must execute (bounded by max_client_iobuf_len at large value
+  // sizes).
+  //
+  // number of fiber parse passes over the read buffer.
+  uint64_t parse_iteration_cnt = 0;
+  // commands enqueued across those passes.
+  uint64_t parse_iteration_cmd_cnt = 0;
 
   ConnectionStats& operator+=(const ConnectionStats& o);
 };

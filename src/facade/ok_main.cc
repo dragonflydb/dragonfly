@@ -617,6 +617,33 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
   APPEND_BODY("# TYPE dragonfly_pipeline_dispatch_flush_total counter\n");
   APPEND_BODY("dragonfly_pipeline_dispatch_flush_total ", conn.pipeline_dispatch_flush_count, "\n");
 
+  // Squash batch-size visibility
+  APPEND_BODY("# TYPE dragonfly_pipeline_squash_calls_total counter\n");
+  APPEND_BODY("dragonfly_pipeline_squash_calls_total ", conn.squash_call_cnt, "\n");
+
+  APPEND_BODY("# TYPE dragonfly_pipeline_squash_commands_total counter\n");
+  APPEND_BODY("dragonfly_pipeline_squash_commands_total ", conn.squash_cmd_cnt, "\n");
+
+  APPEND_BODY("# TYPE dragonfly_pipeline_parse_iterations_total counter\n");
+  APPEND_BODY("dragonfly_pipeline_parse_iterations_total ", conn.parse_iteration_cnt, "\n");
+
+  APPEND_BODY("# TYPE dragonfly_pipeline_parse_iteration_commands_total counter\n");
+  APPEND_BODY("dragonfly_pipeline_parse_iteration_commands_total ", conn.parse_iteration_cmd_cnt,
+              "\n");
+
+  APPEND_BODY(
+      "# HELP dragonfly_pipeline_squash_batch_size Distribution of commands packed per squash "
+      "dispatch\n");
+  APPEND_BODY("# TYPE dragonfly_pipeline_squash_batch_size summary\n");
+  if (conn.squash_batch_size_hist.count() > 0) {
+    auto pctls = conn.squash_batch_size_hist.Percentiles(50, 95, 99);
+    APPEND_BODY("dragonfly_pipeline_squash_batch_size{quantile=\"0.5\"} ", pctls[0], "\n");
+    APPEND_BODY("dragonfly_pipeline_squash_batch_size{quantile=\"0.95\"} ", pctls[1], "\n");
+    APPEND_BODY("dragonfly_pipeline_squash_batch_size{quantile=\"0.99\"} ", pctls[2], "\n");
+  }
+  APPEND_BODY("dragonfly_pipeline_squash_batch_size_sum ", conn.squash_cmd_cnt, "\n");
+  APPEND_BODY("dragonfly_pipeline_squash_batch_size_count ", conn.squash_call_cnt, "\n");
+
   // Network I/O metrics
   APPEND_BODY("# TYPE dragonfly_net_input_bytes_total counter\n");
   APPEND_BODY("dragonfly_net_input_bytes_total ", conn.io_read_bytes, "\n");
@@ -632,6 +659,9 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
 
   APPEND_BODY("# TYPE dragonfly_net_read_yields_total counter\n");
   APPEND_BODY("dragonfly_net_read_yields_total ", conn.num_read_yields, "\n");
+
+  APPEND_BODY("# TYPE dragonfly_proactor_reads_total counter\n");
+  APPEND_BODY("dragonfly_proactor_reads_total ", conn.proactor_reads, "\n");
 
   // Reply metrics
   APPEND_BODY("# TYPE dragonfly_reply_total counter\n");

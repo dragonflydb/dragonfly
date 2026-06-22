@@ -1752,6 +1752,36 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             conn_stats.pipeline_dispatch_flush_usec * 1e-6, MetricType::COUNTER,
                             &resp->body());
 
+  AppendMetricWithoutLabels("pipeline_squash_calls_total",
+                            "Squash dispatches that packed at least one command",
+                            conn_stats.squash_call_cnt, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_squash_commands_total",
+                            "Commands packed across all squash dispatches",
+                            conn_stats.squash_cmd_cnt, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_parse_iterations_total",
+                            "Fiber parse passes over the client read buffer",
+                            conn_stats.parse_iteration_cnt, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_parse_iteration_commands_total",
+                            "Commands enqueued across all parse iterations",
+                            conn_stats.parse_iteration_cmd_cnt, MetricType::COUNTER, &resp->body());
+  {
+    AppendMetricHeader("pipeline_squash_batch_size",
+                       "Distribution of commands packed per squash dispatch", MetricType::SUMMARY,
+                       &resp->body());
+    const string sbs_full = GetMetricFullName("pipeline_squash_batch_size");
+    if (conn_stats.squash_batch_size_hist.count() > 0) {
+      auto pctls = conn_stats.squash_batch_size_hist.Percentiles(50, 95, 99);
+      AppendMetricValue("pipeline_squash_batch_size", pctls[0], {"quantile"}, {"0.5"},
+                        &resp->body());
+      AppendMetricValue("pipeline_squash_batch_size", pctls[1], {"quantile"}, {"0.95"},
+                        &resp->body());
+      AppendMetricValue("pipeline_squash_batch_size", pctls[2], {"quantile"}, {"0.99"},
+                        &resp->body());
+    }
+    absl::StrAppend(&resp->body(), sbs_full, "_sum ", conn_stats.squash_cmd_cnt, "\n");
+    absl::StrAppend(&resp->body(), sbs_full, "_count ", conn_stats.squash_call_cnt, "\n");
+  }
+
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
@@ -1889,6 +1919,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("net_read_yields_total", "", conn_stats.num_read_yields,
                             MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("proactor_reads_total",
+                            "V2 socket reads drained from the proactor during OnRecv callback",
+                            conn_stats.proactor_reads, MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
@@ -3559,6 +3592,19 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);
     append("connection_recv_provided_calls", conn_stats.num_recv_provided_calls);
+    append("pipeline_squash_calls", conn_stats.squash_call_cnt);
+    append("pipeline_squash_commands", conn_stats.squash_cmd_cnt);
+    append("pipeline_avg_squash_size",
+           conn_stats.squash_call_cnt
+               ? static_cast<double>(conn_stats.squash_cmd_cnt) / conn_stats.squash_call_cnt
+               : 0.0);
+    append("pipeline_parse_iterations", conn_stats.parse_iteration_cnt);
+    append("pipeline_parse_iteration_commands", conn_stats.parse_iteration_cmd_cnt);
+    const double avg_parse_iteration_size =
+        conn_stats.parse_iteration_cnt ? static_cast<double>(conn_stats.parse_iteration_cmd_cnt) /
+                                             conn_stats.parse_iteration_cnt
+                                       : 0.0;
+    append("pipeline_avg_parse_iteration_size", avg_parse_iteration_size);
     append("total_net_output_bytes", reply_stats.io_write_bytes);
     append("rdb_save_usec", m.coordinator_stats.rdb_save_usec);
     append("rdb_save_count", m.coordinator_stats.rdb_save_count);
