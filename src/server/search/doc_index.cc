@@ -826,28 +826,34 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
                                                             const OpArgs& op_args) const {
   DCHECK_GT(limit, 0u) << "Limit=0 still has O(ids->size()) complexity";
 
-  auto comp = [order = sort.order](const auto& lhs, const auto& rhs) {
-    return order == SortOrder::ASC ? lhs < rhs : lhs > rhs;
-  };
-  // Priority queue keeps top-k values in reverse order (to compare against top - worst value)
   using QPair = std::pair<search::SortableValue, DocId>;
-  std::priority_queue<QPair, std::vector<QPair>, decltype(comp)> q(comp);
+  // Docs missing the sort field are kept but rank worst (sorted last) in both directions;
+  // returns true when `a` should outrank `b` so q.top() is always the worst kept value.
+  auto better = [order = sort.order](const QPair& a, const QPair& b) {
+    bool a_null = std::holds_alternative<std::monostate>(a.first);
+    bool b_null = std::holds_alternative<std::monostate>(b.first);
+    if (a_null != b_null)
+      return b_null;
+    return order == SortOrder::ASC ? a < b : b < a;
+  };
+  std::priority_queue<QPair, std::vector<QPair>, decltype(better)> q(better);
 
-  // Iterate over all documents, extract sortable field and update the queue
+  // Iterate over all documents, extract the sortable field (monostate if absent) and update the
+  // queue, keeping the top-k by sort order.
   for (DocId id : *ids) {
     auto entry = LoadEntry(id, op_args);
     if (!entry)
       continue;
 
-    auto result = entry->second->Serialize(base_->schema, {sort.field});
-    if (result.empty())
-      continue;
+    search::SortableValue value = std::monostate{};
+    if (auto result = entry->second->Serialize(base_->schema, {sort.field}); !result.empty())
+      value = std::move(result.begin()->second);
 
-    // Check if the extracted value is better than the worst (q.top())
-    if (q.size() < limit || comp(result.begin()->second, q.top().first)) {
+    QPair candidate{std::move(value), id};
+    if (q.size() < limit || better(candidate, q.top())) {
       if (q.size() >= limit)
         q.pop();
-      q.emplace(std::move(result.begin()->second), id);
+      q.push(std::move(candidate));
     }
   }
 
@@ -1003,6 +1009,39 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   }
 
   return {result.total - expired_count, std::move(out), std::move(result.profile)};
+}
+
+SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParams& params,
+                                        search::SearchAlgorithm* search_algo,
+                                        const search::GlobalScoringStats* global_stats) const {
+  auto result = search_algo->Search(&*indices_, numeric_limits<size_t>::max(), global_stats);
+  if (!result.error.empty())
+    return {facade::ErrorReply(std::move(result.error))};
+
+  if (!params.IdsOnly()) {
+    vector<DocId> live_ids;
+    absl::flat_hash_map<DocId, float> live_text_scores;
+    live_ids.reserve(result.ids.size());
+    if (!result.text_scores.empty())
+      live_text_scores.reserve(result.text_scores.size());
+
+    for (DocId id : result.ids) {
+      if (!LoadEntry(id, op_args))
+        continue;
+
+      live_ids.push_back(id);
+      if (auto it = result.text_scores.find(id); it != result.text_scores.end())
+        live_text_scores[id] = it->second;
+    }
+
+    return {live_ids.size(), std::move(live_ids), std::move(live_text_scores),
+            std::move(result.profile)};
+  }
+
+  // NOCONTENT returns ids without a per-id liveness check (ignore-expiration fast path); a winner
+  // deleted before the load hop is dropped there, which can yield <k results — acceptable here.
+  return {result.total, std::move(result.ids), std::move(result.text_scores),
+          std::move(result.profile)};
 }
 
 search::ShardScoringStats ShardDocIndex::CollectScoringStats(

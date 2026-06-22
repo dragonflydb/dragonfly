@@ -1583,6 +1583,18 @@ TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
   EXPECT_THAT(resp, ErrArg("query syntax error"));
 }
 
+TEST_F(SearchFamilyTest, FtProfileSearchFilterParam) {
+  Run({"ft.create", "i1", "schema", "title", "text", "n", "numeric"});
+
+  Run({"hset", "doc1", "title", "hello", "n", "1"});
+  Run({"hset", "doc2", "title", "hello", "n", "2"});
+  Run({"hset", "doc3", "title", "hello", "n", "3"});
+
+  auto resp = Run({"ft.profile", "i1", "search", "query", "hello", "FILTER", "n", "2", "3"});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
+  EXPECT_THAT(resp.GetVec()[0], AreDocIds("doc2", "doc3"));
+}
+
 TEST_F(SearchFamilyTest, FtProfileErrorReply) {
   Run({"ft.create", "i1", "schema", "name", "text"});
 
@@ -4508,6 +4520,190 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   EXPECT_THAT(resp, kNoResults);
 }
 
+TEST_F(SearchFamilyTest, FilteredKnnHnswSearchLoadsOnlyWinners) {
+  auto resp = Run({"FT.CREATE", "knn_idx", "ON",     "HASH",    "SCHEMA",
+                   "grp",       "TAG",     "rank",   "NUMERIC", "payload",
+                   "TEXT",      "pos",     "VECTOR", "HNSW",    "6",
+                   "TYPE",      "FLOAT32", "DIM",    "1",       "DISTANCE_METRIC",
+                   "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  for (int i = 0; i < 20; i++) {
+    string group = i < 15 ? "yes" : "no";
+    Run({"HSET", absl::StrCat("doc", i), "grp", group, "rank", absl::StrCat(100 - i), "payload",
+         absl::StrCat("value", i), "pos", FloatVec1(static_cast<float>(i))});
+  }
+
+  string query_vec = FloatVec1(8.0f);
+
+  resp = Run({"FT.SEARCH", "knn_idx", "@grp:{yes}=>[KNN 3 @pos $vec AS dist]", "PARAMS", "2", "vec",
+              query_vec, "NOCONTENT", "SORTBY", "dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+  ASSERT_EQ(results.size(), 4);
+  EXPECT_THAT(results[0], IntArg(3));
+  EXPECT_EQ(results[1].GetString(), "doc8");
+  vector<string> tied_docs{string{results[2].GetString()}, string{results[3].GetString()}};
+  EXPECT_THAT(tied_docs, UnorderedElementsAre("doc7", "doc9"));
+
+  resp = Run({"FT.SEARCH", "knn_idx", "@grp:{yes}=>[KNN 3 @pos $vec AS dist]", "PARAMS", "2", "vec",
+              query_vec, "RETURN", "2", "payload", "dist", "SORTBY", "dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  results = resp.GetVec();
+  ASSERT_EQ(results.size(), 7);
+  EXPECT_EQ(results[1].GetString(), "doc8");
+  EXPECT_EQ(map_string("payload", results[2].GetVec()), "value8");
+  EXPECT_LT(map_score("dist", results[2].GetVec()), 0.01);
+
+  resp = Run({"FT.SEARCH", "knn_idx", "@grp:{yes}=>[KNN 3 @pos $vec AS dist]", "PARAMS", "2", "vec",
+              query_vec, "RETURN", "1", "rank", "SORTBY", "rank"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  results = resp.GetVec();
+  ASSERT_EQ(results.size(), 7);
+  vector<string> sorted_docs{string{results[1].GetString()}, string{results[3].GetString()},
+                             string{results[5].GetString()}};
+  EXPECT_THAT(sorted_docs, ElementsAre("doc9", "doc8", "doc7"));
+
+  resp = Run({"FT.SEARCH", "knn_idx", "@grp:{yes}=>[KNN 3 @pos $vec AS dist]", "PARAMS", "2", "vec",
+              query_vec, "RETURN", "3", "rank", "AS", "r", "SORTBY", "rank"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  results = resp.GetVec();
+  ASSERT_EQ(results.size(), 7);
+  sorted_docs = {string{results[1].GetString()}, string{results[3].GetString()},
+                 string{results[5].GetString()}};
+  EXPECT_THAT(sorted_docs, ElementsAre("doc9", "doc8", "doc7"));
+  EXPECT_THAT(map_string("r", results[2].GetVec()), "91");
+}
+
+// A filter-matched doc that is the vector-nearest neighbor must stay a KNN candidate even when it
+// lacks the (non-sortable) SORTBY field; the pre-fix code dropped it from the candidate set.
+TEST_F(SearchFamilyTest, FilteredKnnHnswKeepsDocMissingSortField) {
+  auto resp =
+      Run({"FT.CREATE", "ms_idx", "ON", "HASH", "SCHEMA", "n", "NUMERIC", "s", "NUMERIC", "pos",
+           "VECTOR", "HNSW", "6", "TYPE", "FLOAT32", "DIM", "1", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  for (int i = 0; i < 10; i++) {
+    if (i == 5)  // doc5 is the nearest to the query vector but deliberately has no 's'
+      Run({"HSET", "doc5", "n", "50", "pos", FloatVec1(5.0f)});
+    else
+      Run({"HSET", absl::StrCat("doc", i), "n", "50", "s", absl::StrCat(i), "pos",
+           FloatVec1(static_cast<float>(i))});
+  }
+
+  string query_vec = FloatVec1(5.0f);
+  resp = Run({"FT.SEARCH", "ms_idx", "@n:[0 100]=>[KNN 3 @pos $vec AS dist]", "PARAMS", "2", "vec",
+              query_vec, "NOCONTENT", "SORTBY", "s", "ASC"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+  ASSERT_EQ(results.size(), 4);
+  EXPECT_THAT(results[0], IntArg(3));
+  // The 3 vector-nearest to 5.0 are doc5 (missing 's'), doc4 and doc6 — doc5 must not be dropped.
+  vector<string> ids{string{results[1].GetString()}, string{results[2].GetString()},
+                     string{results[3].GetString()}};
+  EXPECT_THAT(ids, UnorderedElementsAre("doc4", "doc5", "doc6"));
+}
+
+// WITHSCORES on a filtered KNN must carry the prefilter BM25 text score onto the KNN winners.
+// Exercises the multi-shard global-scoring two-hop path that other KNN tests don't cover.
+TEST_F(SearchFamilyTest, FilteredKnnHnswWithScores) {
+  auto resp = Run({"FT.CREATE", "ws_idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "pos", "VECTOR",
+                   "HNSW", "6", "TYPE", "FLOAT32", "DIM", "1", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  // h2 has the highest term frequency for "hello", so it must get the highest BM25 score.
+  Run({"HSET", "h0", "title", "hello", "pos", FloatVec1(0.0f)});
+  Run({"HSET", "h1", "title", "hello world", "pos", FloatVec1(1.0f)});
+  Run({"HSET", "h2", "title", "hello hello hello", "pos", FloatVec1(2.0f)});
+  Run({"HSET", "h3", "title", "hello", "pos", FloatVec1(3.0f)});
+  Run({"HSET", "n0", "title", "goodbye", "pos", FloatVec1(2.0f)});  // does not match the filter
+
+  string query_vec = FloatVec1(2.0f);
+  resp = Run({"FT.SEARCH", "ws_idx", "@title:hello=>[KNN 3 @pos $vec]", "PARAMS", "2", "vec",
+              query_vec, "WITHSCORES", "NOCONTENT", "DIALECT", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+  ASSERT_EQ(results.size(), 7);  // count + 3 * (id, score)
+  EXPECT_THAT(results[0], IntArg(3));
+
+  absl::flat_hash_map<string, float> scores;
+  for (size_t i = 1; i + 1 < results.size(); i += 2) {
+    float s = -1.0f;
+    ASSERT_TRUE(absl::SimpleAtof(results[i + 1].GetView(), &s));
+    scores[string{results[i].GetString()}] = s;
+  }
+  // The 3 nearest "hello" docs to pos=2.0 are h2, h1, h3; n0 is filtered out before KNN.
+  ASSERT_EQ(scores.size(), 3);
+  EXPECT_TRUE(scores.contains("h1") && scores.contains("h2") && scores.contains("h3"));
+  for (const auto& [k, s] : scores)
+    EXPECT_GT(s, 0.0f) << "score for " << k;
+  EXPECT_GT(scores["h2"], scores["h1"]);
+  EXPECT_GT(scores["h2"], scores["h3"]);
+}
+
+TEST_F(SearchFamilyTest, FtProfileSearchFilteredKnnHnsw) {
+  auto resp = Run({"FT.CREATE", "knn_idx", "ON", "HASH", "SCHEMA", "grp", "TAG", "pos", "VECTOR",
+                   "HNSW", "6", "TYPE", "FLOAT32", "DIM", "1", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  for (int i = 0; i < 20; i++) {
+    string group = i < 15 ? "yes" : "no";
+    Run({"HSET", absl::StrCat("doc", i), "grp", group, "pos", FloatVec1(static_cast<float>(i))});
+  }
+
+  string query_vec = FloatVec1(8.0f);
+  resp = Run({"FT.PROFILE", "knn_idx", "SEARCH", "QUERY", "@grp:{yes}=>[KNN 3 @pos $vec AS dist]",
+              "NOCONTENT", "SORTBY", "dist", "PARAMS", "2", "vec", query_vec});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
+
+  const auto& search_result = resp.GetVec()[0].GetVec();
+  ASSERT_EQ(search_result.size(), 4);
+  EXPECT_THAT(search_result[0], IntArg(3));
+  EXPECT_EQ(search_result[1].GetString(), "doc8");
+  vector<string> tied_docs{string{search_result[2].GetString()},
+                           string{search_result[3].GetString()}};
+  EXPECT_THAT(tied_docs, UnorderedElementsAre("doc7", "doc9"));
+
+  const auto& stats = resp.GetVec()[1].GetVec()[0].GetVec();
+  EXPECT_THAT(stats, ElementsAre("took", _, "hits", IntArg(3), "serialized", IntArg(3)));
+}
+
+TEST_F(SearchFamilyTest, FtProfileSearchHnswVectorRange) {
+  auto FloatToBytes = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(f)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  for (int i = 0; i < 10; i++)
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", FloatToBytes(static_cast<float>(i))});
+
+  string query_vec = FloatToBytes(5.0f);
+  auto resp = Run({"FT.PROFILE", "idx", "SEARCH", "QUERY",
+                   "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}", "PARAMS", "2", "vec",
+                   query_vec, "LIMIT", "0", "10"});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
+  EXPECT_THAT(resp.GetVec()[0], AreDocIds("k4", "k5", "k6"));
+}
+
+TEST_F(SearchFamilyTest, FtProfileSearchFlatVectorRangeDistanceAlias) {
+  CreateFlatHashIdx();
+  Run({"HSET", "d:1", "title", "a", "vec", FloatVec1(1.0f)});
+  Run({"HSET", "d:2", "title", "a", "vec", FloatVec1(1.2f)});
+  Run({"HSET", "d:3", "title", "a", "vec", FloatVec1(5.0f)});
+
+  string query_vec = FloatVec1(1.0f);
+  auto resp = Run({"FT.PROFILE", "idx", "SEARCH", "QUERY",
+                   "@vec:[VECTOR_RANGE 0.5 $vec]=>{$YIELD_DISTANCE_AS: dist}", "PARAMS", "2", "vec",
+                   query_vec, "RETURN", "1", "dist", "SORTBY", "dist"});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
+
+  const auto& search_result = resp.GetVec()[0].GetVec();
+  ASSERT_EQ(search_result.size(), 5);
+  EXPECT_THAT(search_result[0], IntArg(2));
+  EXPECT_EQ(search_result[1].GetString(), "d:1");
+  EXPECT_LT(map_score("dist", search_result[2].GetVec()), 0.01);
+}
+
 TEST_F(SearchFamilyTest, KnnHnswCosineDistanceCalculation) {
   // Create index with 3D vectors using COSINE distance metric with HNSW
   auto resp = Run({"FT.CREATE", "cosine_idx", "ON", "HASH", "SCHEMA", "vec", "VECTOR", "HNSW", "6",
@@ -5137,6 +5333,16 @@ TEST_F(SearchFamilyTest, HnswVectorRange) {
   }
   EXPECT_THAT(vals_asc, ElementsAre(40, 50, 60));
 
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "SORTBY", "val", "ASC", "RETURN", "3", "val", "AS",
+              "v", "LIMIT", "0", "10"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto& asc_alias_arr = resp.GetVec();
+  vector<int> vals_asc_alias;
+  for (size_t i = 2; i < asc_alias_arr.size(); i += 2)
+    vals_asc_alias.push_back(stoi(map_string("v", asc_alias_arr[i].GetVec())));
+  EXPECT_THAT(vals_asc_alias, ElementsAre(40, 50, 60));
+
   // SORTBY val DESC
   resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
               "PARAMS", "2", "vec", query_vec, "SORTBY", "val", "DESC", "RETURN", "1", "val",
@@ -5683,9 +5889,9 @@ TEST_F(SearchFamilyTest, VectorFieldWrongSizeDoesNotCrash) {
   EXPECT_THAT(resp, Not(ErrArg("")));
 }
 
-TEST_F(SearchFamilyTest, SortBySkipsDocsWithoutSortField) {
-  // KeepTopKSorted skips docs that don't have the sort field, returning fewer sort scores
-  // than result.ids.size(). The loop then accesses sort_scores[i] out-of-bounds.
+TEST_F(SearchFamilyTest, SortByKeepsDocsWithoutSortFieldLast) {
+  // Docs missing the SORTBY field are kept and ranked last, not dropped. Also guards the historical
+  // out-of-bounds crash: KeepTopKSorted must emit one sort score per kept id.
   Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "val", "NUMERIC"});
 
   Run({"HSET", "valid:1", "val", "123"});
@@ -5693,19 +5899,54 @@ TEST_F(SearchFamilyTest, SortBySkipsDocsWithoutSortField) {
   Run({"HSET", "valid:3", "val", "789"});
 
   // These docs are indexed (no prefix restriction) but lack the sort field.
-  // They appear in '*' search results but are skipped by KeepTopKSorted.
   for (int i = 0; i < 97; i++)
     Run({"HSET", absl::StrCat("nofield:", i), "txt", "garbage"});
 
-  auto resp = Run({"FT.SEARCH", "idx", "*", "SORTBY", "val", "LIMIT", "0", "100"});
+  auto resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT", "SORTBY", "val", "LIMIT", "0", "100"});
   auto vec = resp.GetVec();
 
-  // Extract doc keys from the response (indices 1, 3, 5, ...).
+  ASSERT_THAT(vec[0], IntArg(100));
   vector<string> keys;
-  for (size_t i = 1; i < vec.size(); i += 2)
-    keys.push_back(vec[i].GetString());
+  for (size_t i = 1; i < vec.size(); i++)
+    keys.push_back(string{vec[i].GetString()});
+  ASSERT_EQ(keys.size(), 100u);
 
-  EXPECT_THAT(keys, ElementsAre("valid:1", "valid:2", "valid:3"));
+  // Docs with the field sort first by value; the 97 field-less docs follow (in any order).
+  EXPECT_THAT((vector<string>{keys[0], keys[1], keys[2]}),
+              ElementsAre("valid:1", "valid:2", "valid:3"));
+  size_t nofield = 0;
+  for (const auto& k : keys)
+    nofield += (k.rfind("nofield:", 0) == 0);
+  EXPECT_EQ(nofield, 97u);
+}
+
+TEST_F(SearchFamilyTest, SortByNonSortableFieldNullsLast) {
+  // Missing-field docs rank last in both directions and never steal a top-K slot.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "n", "NUMERIC", "s", "NUMERIC"});
+  for (int i = 0; i < 5; i++) {
+    if (i == 2)
+      Run({"HSET", "d2", "n", "50"});  // deliberately lacks 's'
+    else
+      Run({"HSET", absl::StrCat("d", i), "n", "50", "s", absl::StrCat(i)});
+  }
+
+  auto ids = [](const RespExpr& r) {
+    vector<string> v;
+    for (size_t i = 1; i < r.GetVec().size(); i++)
+      v.push_back(string{r.GetVec()[i].GetString()});
+    return v;
+  };
+
+  EXPECT_THAT(ids(Run({"FT.SEARCH", "idx", "@n:[0 100]", "NOCONTENT", "SORTBY", "s", "ASC", "LIMIT",
+                       "0", "10"})),
+              ElementsAre("d0", "d1", "d3", "d4", "d2"));
+  EXPECT_THAT(ids(Run({"FT.SEARCH", "idx", "@n:[0 100]", "NOCONTENT", "SORTBY", "s", "DESC",
+                       "LIMIT", "0", "10"})),
+              ElementsAre("d4", "d3", "d1", "d0", "d2"));
+  // The field-less doc must not occupy a top-2 slot.
+  EXPECT_THAT(ids(Run({"FT.SEARCH", "idx", "@n:[0 100]", "NOCONTENT", "SORTBY", "s", "ASC", "LIMIT",
+                       "0", "2"})),
+              ElementsAre("d0", "d1"));
 }
 
 TEST_F(SearchFamilyTest, NumericIndexRejectsNonFiniteValues) {
