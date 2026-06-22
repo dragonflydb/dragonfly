@@ -1109,11 +1109,12 @@ void CompactObj::SetJson(const uint8_t* buf, size_t len) {
 }
 
 void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor) {
-  if (taglen_ == SBF_TAG) {  // already json
+  if (taglen_ == SBF_TAG) {
     *u_.sbf = SBF(initial_capacity, fp_prob, grow_factor, tl.local_mr);
   } else {
+    SBF* sbf = AllocateMR<SBF>(initial_capacity, fp_prob, grow_factor, tl.local_mr);
     SetMeta(SBF_TAG);
-    u_.sbf = AllocateMR<SBF>(initial_capacity, fp_prob, grow_factor, tl.local_mr);
+    u_.sbf = sbf;
   }
 }
 
@@ -1126,8 +1127,9 @@ void CompactObj::SetCMS(uint32_t width, uint32_t depth) {
   if (taglen_ == CMS_TAG) {
     *u_.cms = CMS(width, depth, tl.local_mr);
   } else {
+    CMS* cms = AllocateMR<CMS>(width, depth, tl.local_mr);  // may throw; CompactObj unchanged
     SetMeta(CMS_TAG);
-    u_.cms = AllocateMR<CMS>(width, depth, tl.local_mr);
+    u_.cms = cms;
   }
 }
 
@@ -1140,8 +1142,9 @@ void CompactObj::SetTOPK(uint32_t k, uint32_t width, uint32_t depth, double deca
   if (taglen_ == TOPK_TAG) {
     *u_.topk = TOPK(memory_resource(), k, width, depth, decay);
   } else {
+    TOPK* topk = AllocateMR<TOPK>(memory_resource(), k, width, depth, decay);
     SetMeta(TOPK_TAG);
-    u_.topk = AllocateMR<TOPK>(memory_resource(), k, width, depth, decay);
+    u_.topk = topk;
   }
 }
 
@@ -1156,9 +1159,10 @@ void CompactObj::SetCuckooFilter(uint64_t capacity, uint8_t slots_per_bucket,
     *u_.cuckoo_filter =
         CuckooFilter(capacity, tl.local_mr, slots_per_bucket, max_iterations, expansion);
   } else {
-    SetMeta(CUCKOO_FILTER_TAG);
-    u_.cuckoo_filter = AllocateMR<CuckooFilter>(capacity, tl.local_mr, slots_per_bucket,
+    CuckooFilter* cf = AllocateMR<CuckooFilter>(capacity, tl.local_mr, slots_per_bucket,
                                                 max_iterations, expansion);
+    SetMeta(CUCKOO_FILTER_TAG);
+    u_.cuckoo_filter = cf;
   }
 }
 
