@@ -1058,26 +1058,23 @@ OpResult<uint64_t> OpTtl(Transaction* t, EngineShard* shard, string_view key) {
   }
 }
 
-ErrorReply RenameGeneric(CmdArgList args, bool destination_should_not_exist, Transaction* tx) {
-  string_view key[2] = {ArgS(args, 0), ArgS(args, 1)};
-
+ErrorReply RenameGeneric(string_view src_key, string_view dest_key,
+                         bool destination_should_not_exist, Transaction* tx) {
   if (tx->GetUniqueShardCnt() == 1) {
     tx->ReviveAutoJournal();  // Safe to use RENAME with single shard
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpRen(t->GetOpArgs(shard), key[0], key[1], destination_should_not_exist);
+      return OpRen(t->GetOpArgs(shard), src_key, dest_key, destination_should_not_exist);
     };
     OpResult<void> result = tx->ScheduleSingleHopT(std::move(cb));
 
     return result.status();
   }
 
-  Renamer renamer{tx, key[0], key[1], shard_set->size()};
+  Renamer renamer{tx, src_key, dest_key, shard_set->size()};
   return renamer.Rename(destination_should_not_exist);
 }
 
-void ExpireTimeGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-
+void ExpireTimeGeneric(string_view key, TimeUnit unit, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpExpireTime(t, shard, key); };
   OpResult<uint64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
@@ -1099,9 +1096,7 @@ void ExpireTimeGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx)
   }
 }
 
-void TtlGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-
+void TtlGeneric(string_view key, TimeUnit unit, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpTtl(t, shard, key); };
   OpResult<uint64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
@@ -1123,9 +1118,9 @@ void TtlGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx) {
   }
 }
 
-io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
+io::Result<int32_t, string> ParseExpireOptionsOrReply(const facade::ParsedArgs& args) {
   int32_t flags = ExpireFlags::EXPIRE_ALWAYS;
-  for (auto& arg : args) {
+  for (auto arg : args) {
     string arg_sv = absl::AsciiStrToUpper(ToSV(arg));
     if (arg_sv == "NX") {
       flags |= ExpireFlags::EXPIRE_NX;
@@ -1231,24 +1226,31 @@ static cmd::CmdR CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
+  }
 
   // Parse optional condition
   enum class Condition : uint8_t { NONE, IFEQ, IFNE, IFDEQ, IFDNE };
   Condition cond = Condition::NONE;
   string_view compare_value;
 
-  if (args.size() == 1) {
+  if (!parser.HasNext()) {
     // DELEX key - no condition, behaves like DEL
     cond = Condition::NONE;
-  } else if (args.size() == 2) {
-    // DELEX key <something> - invalid, needs both condition and value
-    // TODO: include error type in error reply
-    return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
-  } else if (args.size() == 3) {
-    string_view opt = ArgS(args, 1);
-    compare_value = ArgS(args, 2);
+  } else {
+    string_view opt = parser.Next();
+    if (!parser.HasNext()) {
+      // DELEX key <something> - invalid, needs both condition and value
+      // TODO: include error type in error reply
+      return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+    }
+    compare_value = parser.Next();
+    if (parser.HasNext()) {
+      return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+    }
 
     if (absl::EqualsIgnoreCase(opt, "IFEQ")) {
       cond = Condition::IFEQ;
@@ -1261,14 +1263,17 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
     } else {
       return cmd_cntx->SendError(facade::UnknownSubCmd(opt, "DELEX"), kSyntaxErrType);
     }
-  } else {
-    // args.size() > 3
+  }
+
+  if (auto err = parser.TakeError(); err) {
+    // DELEX key <something> - invalid, needs both condition and value
+    // TODO: include error type in error reply
     return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
   }
 
   // If no condition, delegate to standard DEL
   if (cond == Condition::NONE) {
-    CmdDel(MakeParserFromContext(cmd_cntx), cmd_cntx);
+    CmdDel(facade::CmdArgParser{cmd_cntx->tail_args()}, cmd_cntx);
     return;
   }
 
@@ -1331,20 +1336,19 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GenericFamily::Ping(CmdArgList args, CommandContext* cmd_cntx) {
-  if (args.size() > 1) {
+void GenericFamily::Ping(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view msg;
+  const bool has_msg = parser.HasNext();
+  if (has_msg) {
+    msg = parser.Next();
+  }
+  if (parser.HasNext()) {
     return cmd_cntx->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
   }
-
-  string_view msg;
 
   // If a client in the subscribe state and in resp2 mode, it returns an array for some reason.
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (cmd_cntx->server_conn_cntx()->conn_state.subscribe_info && !rb->IsResp3()) {
-    if (args.size() == 1) {
-      msg = ArgS(args, 0);
-    }
-
     auto replier = [msg = string(msg)](RedisReplyBuilder* rb) {
       string_view resp[2] = {"pong", msg};
       rb->SendBulkStrArr(resp);
@@ -1352,19 +1356,18 @@ void GenericFamily::Ping(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->ReplyWith(std::move(replier));
   }
 
-  if (args.size() == 0) {
+  if (!has_msg) {
     return cmd_cntx->SendSimpleString("PONG");
   }
 
-  msg = ArgS(args, 0);
   DVLOG(2) << "Ping " << msg;
 
   auto replier = [msg = string(msg)](RedisReplyBuilder* rb) { rb->SendBulkString(msg); };
   return cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
-  VLOG(1) << "Exists " << ArgS(args, 0);
+void GenericFamily::Exists(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  VLOG(1) << "Exists " << parser.Peek();
 
   atomic_uint32_t result{0};
 
@@ -1382,8 +1385,8 @@ void GenericFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendLong(result.load(memory_order_acquire));
 }
 
-void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void GenericFamily::Persist(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
 
@@ -1391,9 +1394,7 @@ void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
-
+void GenericFamily::Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1406,7 +1407,7 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
     int_arg = kMaxExpireDeadlineSec;
   }
 
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
+  auto expire_options = ParseExpireOptionsOrReply(cmd_cntx->tail_args().Tail(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
@@ -1420,15 +1421,14 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
+void GenericFamily::ExpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
+  auto expire_options = ParseExpireOptionsOrReply(cmd_cntx->tail_args().Tail(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
@@ -1447,8 +1447,8 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Keys(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view pattern(ArgS(args, 0));
+void GenericFamily::Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view pattern = parser.Next();
   uint64_t cursor = 0;
 
   StringVec keys;
@@ -1469,15 +1469,14 @@ void GenericFamily::Keys(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
+void GenericFamily::PexpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
+  auto expire_options = ParseExpireOptionsOrReply(cmd_cntx->tail_args().Tail(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
@@ -1498,8 +1497,7 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
+void GenericFamily::Pexpire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1511,7 +1509,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
     int_arg = kMaxExpireDeadlineMs;
   }
 
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
+  auto expire_options = ParseExpireOptionsOrReply(cmd_cntx->tail_args().Tail(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
@@ -1529,9 +1527,9 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Stick(CmdArgList args, CommandContext* cmd_cntx) {
+void GenericFamily::Stick(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   Transaction* transaction = cmd_cntx->tx();
-  VLOG(1) << "Stick " << ArgS(args, 0);
+  VLOG(1) << "Stick " << parser.Peek();
 
   atomic_uint32_t result{0};
 
@@ -2029,8 +2027,7 @@ OpStatus PopulateSortEntriesFromByPattern(const SortParams& params,
   return OpStatus::OK;
 }
 
-void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
-  CmdArgParser parser(cmd_cntx->tail_args());
+void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_only) {
   std::string_view key = parser.Next();
   SortParams params;
   params.is_read_only = is_read_only;
@@ -2245,17 +2242,21 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Sort(CmdArgList args, CommandContext* cmd_cntx) {
-  SortGeneric(args, cmd_cntx, false);
+void GenericFamily::Sort(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  SortGeneric(std::move(parser), cmd_cntx, false);
 }
 
-void GenericFamily::Sort_RO(CmdArgList args, CommandContext* cmd_cntx) {
-  SortGeneric(args, cmd_cntx, true);
+void GenericFamily::Sort_RO(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  SortGeneric(std::move(parser), cmd_cntx, true);
 }
 
-void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
-  std::string_view serialized_value = ArgS(args, 2);
+void GenericFamily::Restore(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  std::string_view key = parser.Next();
+  parser.Skip(1);
+  std::string_view serialized_value = parser.Next();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
+  }
 
   auto rdb_version =
       GetRdbVersion(serialized_value, cmd_cntx->server_conn_cntx()->journal_emulated);
@@ -2291,14 +2292,14 @@ void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser = MakeParserFromContext(cmd_cntx);
+void GenericFamily::FieldExpire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   uint32_t ttl_sec = parser.Next<FInt<1u, kMaxTtl>>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
-  CmdArgList fields = args.subspan(parser.UnparsedStart());
+  facade::CmdArgVec fields;
+  cmd_cntx->tail_args().Tail(parser.UnparsedStart()).ToVec(&fields);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpFieldExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
@@ -2318,9 +2319,11 @@ void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
 
 // Returns -2 if key not found, WRONG_TYPE if key is not a set or hash
 // -1 if the field does not have associated TTL on it, and -3 if field is not found.
-void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view field = ArgS(args, 1);
+void GenericFamily::FieldTtl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, field] = parser.Next<string_view, string_view>();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
+  }
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpFieldTtl(t, shard, key, field); };
 
@@ -2334,8 +2337,7 @@ void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
+void GenericFamily::Move(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, target_db] = parser.Next<string_view, int32_t>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -2373,13 +2375,21 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(res == OpStatus::OK);
 }
 
-void GenericFamily::Rename(CmdArgList args, CommandContext* cmd_cntx) {
-  auto reply = RenameGeneric(args, false, cmd_cntx->tx());
+void GenericFamily::Rename(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [src_key, dest_key] = parser.Next<string_view, string_view>();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
+  }
+  auto reply = RenameGeneric(src_key, dest_key, false, cmd_cntx->tx());
   cmd_cntx->SendError(reply);
 }
 
-void GenericFamily::RenameNx(CmdArgList args, CommandContext* cmd_cntx) {
-  auto reply = RenameGeneric(args, true, cmd_cntx->tx());
+void GenericFamily::RenameNx(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [src_key, dest_key] = parser.Next<string_view, string_view>();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
+  }
+  auto reply = RenameGeneric(src_key, dest_key, true, cmd_cntx->tx());
   if (!reply.status) {
     return cmd_cntx->SendError(reply.ToSv(), reply.kind);
   }
@@ -2394,8 +2404,7 @@ void GenericFamily::RenameNx(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(cmd_cntx->tail_args());
+void GenericFamily::Copy(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [k1, k2] = parser.Next<std::string_view, std::string_view>();
   bool replace = parser.Check("REPLACE");
   if (!parser.Finalize()) {
@@ -2425,24 +2434,39 @@ void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GenericFamily::ExpireTime(CmdArgList args, CommandContext* cmd_cntx) {
-  ExpireTimeGeneric(args, TimeUnit::SEC, cmd_cntx);
+void GenericFamily::ExpireTime(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
+  }
+  ExpireTimeGeneric(key, TimeUnit::SEC, cmd_cntx);
 }
 
-void GenericFamily::PExpireTime(CmdArgList args, CommandContext* cmd_cntx) {
-  ExpireTimeGeneric(args, TimeUnit::MSEC, cmd_cntx);
+void GenericFamily::PExpireTime(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
+  }
+  ExpireTimeGeneric(key, TimeUnit::MSEC, cmd_cntx);
 }
 
-void GenericFamily::Ttl(CmdArgList args, CommandContext* cmd_cntx) {
-  TtlGeneric(args, TimeUnit::SEC, cmd_cntx);
+void GenericFamily::Ttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
+  }
+  TtlGeneric(key, TimeUnit::SEC, cmd_cntx);
 }
 
-void GenericFamily::Pttl(CmdArgList args, CommandContext* cmd_cntx) {
-  TtlGeneric(args, TimeUnit::MSEC, cmd_cntx);
+void GenericFamily::Pttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
+  }
+  TtlGeneric(key, TimeUnit::MSEC, cmd_cntx);
 }
 
-void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser = MakeParserFromContext(cmd_cntx);
+void GenericFamily::Select(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   int64_t index = parser.Next<int64_t>();
   if (parser.TakeError()) {
     return cmd_cntx->SendError(kInvalidDbIndErr);
@@ -2481,8 +2505,8 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendOk();
 }
 
-void GenericFamily::Dump(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
+void GenericFamily::Dump(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  std::string_view key = parser.Next();
   DVLOG(1) << "Dumping before ::ScheduleSingleHopT " << key;
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpDump(t->GetOpArgs(shard), key); };
   OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -2497,8 +2521,8 @@ void GenericFamily::Dump(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GenericFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
+void GenericFamily::Type(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  std::string_view key = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CompactObjType> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
@@ -2517,7 +2541,9 @@ void GenericFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GenericFamily::Time(CmdArgList args, CommandContext* cmd_cntx) {
+void GenericFamily::Time(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  (void)parser;
+
   uint64_t now_usec;
   if (cmd_cntx->tx()) {
     now_usec = cmd_cntx->tx()->GetDbContext().time_now_ms * 1000;
@@ -2534,16 +2560,16 @@ void GenericFamily::Time(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Echo(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void GenericFamily::Echo(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
   auto replier = [key = string(key)](RedisReplyBuilder* rb) { rb->SendBulkString(key); };
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
 // SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [BUCKET <bucket_id>]
 // [ATTR <mask>] [MLCGE <len>]
-void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view token = ArgS(args, 0);
+void GenericFamily::Scan(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view token = parser.Next();
   uint64_t cursor = 0;
   if (!absl::SimpleAtoi(token, &cursor)) {
     if (absl::EqualsIgnoreCase(token, "HELP")) {
@@ -2588,8 +2614,8 @@ void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Rm(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view token = ArgS(args, 0);
+void GenericFamily::Rm(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view token = parser.Next();
   uint64_t cursor = 0;
   if (!absl::SimpleAtoi(token, &cursor)) {
     if (absl::EqualsIgnoreCase(token, "HELP")) {
@@ -2635,7 +2661,9 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArg
   return res;
 }
 
-void GenericFamily::RandomKey(CmdArgList args, CommandContext* cmd_cntx) {
+void GenericFamily::RandomKey(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  (void)parser;
+
   const static size_t kMaxAttempts = 3;
 
   absl::BitGen bitgen;

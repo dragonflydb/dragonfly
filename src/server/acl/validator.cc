@@ -34,7 +34,7 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
 
 [[nodiscard]] std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(
     bool literal_match, const std::vector<uint64_t>& acl_commands, const AclPubSub& pub_sub,
-    CmdArgList tail_args, const CommandId& id) {
+    const facade::ParsedArgs& tail_args, const CommandId& id) {
   if (!ValidateCommand(acl_commands, id)) {
     return {false, AclLog::Reason::COMMAND};
   }
@@ -55,11 +55,10 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
   if (!pub_sub.all_channels) {
     std::string_view name = id.name();
     if (name == "PUBLISH" || name == "SPUBLISH") {
-      auto channel = tail_args[0];
-      allowed &= iterate_globs(facade::ToSV(channel));
+      allowed &= iterate_globs(tail_args[0]);
     } else {
       for (auto channel : tail_args) {
-        allowed &= iterate_globs(facade::ToSV(channel));
+        allowed &= iterate_globs(channel);
       }
     }
   }
@@ -70,7 +69,7 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
 }  // namespace
 
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
-                                                ArgSlice tail_args) {
+                                                const facade::ParsedArgs& tail_args) {
   if (cntx.skip_acl_validation) {
     return true;
   }
@@ -100,7 +99,7 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
 }
 
 [[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
-    const ConnectionContext& cntx, const CommandId& id, CmdArgList tail_args) {
+    const ConnectionContext& cntx, const CommandId& id, const facade::ParsedArgs& tail_args) {
   const size_t max = std::numeric_limits<size_t>::max();
   // Once we support ranges this must change
   const bool reject_move_command = cntx.acl_db_idx != max && id.name() == "MOVE";

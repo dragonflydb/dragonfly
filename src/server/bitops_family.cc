@@ -43,13 +43,13 @@ using BitsStrVec = vector<string>;
 
 // The following is the list of the functions that would handle the
 // commands that handle the bit operations
-void BitPos(CmdArgList args, CommandContext* cmd_cntx);
-void BitCount(CmdArgList args, CommandContext* cmd_cntx);
-void BitField(CmdArgList args, CommandContext* cmd_cntx);
-void BitFieldRo(CmdArgList args, CommandContext* cmd_cntx);
-void BitOp(CmdArgList args, CommandContext* cmd_cntx);
-void GetBit(CmdArgList args, CommandContext* cmd_cntx);
-void SetBit(CmdArgList args, CommandContext* cmd_cntx);
+void BitPos(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void BitCount(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void BitField(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void BitFieldRo(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void BitOp(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void GetBit(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void SetBit(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
 OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShard* shard);
 OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset);
@@ -519,48 +519,49 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
 
 // ------------------------------------------------------------------------- //
 //  Impl for the command functions
-void BitPos(CmdArgList args, CommandContext* cmd_cntx) {
+void BitPos(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Support for the command BITPOS
   // See details at https://redis.io/commands/bitpos/
   auto* builder = cmd_cntx->rb();
-  if (args.size() < 1 || args.size() > 5) {
-    return builder->SendError(kSyntaxErr);
+
+  auto key = parser.Next<string_view>();
+  auto value = parser.Next<int32_t>();
+
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
-  string_view key = ArgS(args, 0);
+  if (value != 0 && value != 1) {
+    return builder->SendError("The bit argument must be 1 or 0");
+  }
 
-  int32_t value{0};
   int64_t start = 0;
   int64_t end = std::numeric_limits<int64_t>::max();
   bool as_bit = false;
 
-  if (!absl::SimpleAtoi(ArgS(args, 1), &value)) {
-    return builder->SendError(kInvalidIntErr);
-  } else if (value != 0 && value != 1) {
-    return builder->SendError("The bit argument must be 1 or 0");
-  }
-
-  if (args.size() >= 3) {
-    if (!absl::SimpleAtoi(ArgS(args, 2), &start)) {
-      return builder->SendError(kInvalidIntErr);
+  if (parser.HasNext()) {
+    start = parser.Next<int64_t>();
+    if (auto err = parser.TakeError(); err) {
+      return builder->SendError(err.MakeReply());
     }
 
-    if (args.size() >= 4) {
-      if (!absl::SimpleAtoi(ArgS(args, 3), &end)) {
-        return builder->SendError(kInvalidIntErr);
+    if (parser.HasNext()) {
+      end = parser.Next<int64_t>();
+      if (auto err = parser.TakeError(); err) {
+        return builder->SendError(err.MakeReply());
       }
 
-      if (args.size() >= 5) {
-        string arg = absl::AsciiStrToUpper(ArgS(args, 4));
-        if (arg == "BIT") {
-          as_bit = true;
-        } else if (arg == "BYTE") {
-          as_bit = false;
-        } else {
+      if (parser.HasNext()) {
+        as_bit = parser.MapNext("BIT", true, "BYTE", false);
+        if (auto err = parser.TakeError(); err) {
           return builder->SendError(kSyntaxErr);
         }
       }
     }
+  }
+
+  if (!parser.Finalize()) {
+    return builder->SendError(parser.TakeError().MakeReply());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -570,12 +571,11 @@ void BitPos(CmdArgList args, CommandContext* cmd_cntx) {
   HandleOpValueResult(res, builder);
 }
 
-void BitCount(CmdArgList args, CommandContext* cmd_cntx) {
+void BitCount(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Support for the command BITCOUNT
   // See details at https://redis.io/commands/bitcount/
   // Please note that if the key don't exists, it would return 0
 
-  CmdArgParser parser(args);
   auto key = parser.Next<string_view>();
 
   std::pair<int64_t, int64_t> start_end;
@@ -1055,13 +1055,12 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser,
 // Parses a list of arguments (without key) to a CommandList.
 // Returns the CommandList if the parsing completed succefully or string
 // to indicate an error
-nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool read_only) {
+nonstd::expected<CommandList, string> ParseToCommandList(CmdArgParser parser, bool read_only) {
   enum class Cmds { OVERFLOW_OPT, GET_OPT, SET_OPT, INCRBY_OPT };
   CommandList result;
 
   using nonstd::make_unexpected;
 
-  CmdArgParser parser(args);
   while (parser.HasNext()) {
     auto cmd = parser.MapNext("OVERFLOW", Cmds::OVERFLOW_OPT, "GET", Cmds::GET_OPT, "SET",
                               Cmds::SET_OPT, "INCRBY", Cmds::INCRBY_OPT);
@@ -1136,14 +1135,15 @@ void SendResults(const vector<ResultType>& results, SinkReplyBuilder* builder) {
   }
 }
 
-void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReplyBuilder* builder) {
-  if (args.size() == 1) {
+void BitFieldGeneric(CmdArgParser parser, bool read_only, Transaction* tx,
+                     SinkReplyBuilder* builder) {
+  if (!parser.HasAtLeast(2)) {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->SendEmptyArray();
     return;
   }
-  auto key = ArgS(args, 0);
-  auto maybe_ops_list = ParseToCommandList(args.subspan(1), read_only);
+  auto key = parser.Next<string_view>();
+  auto maybe_ops_list = ParseToCommandList(parser, read_only);
 
   if (!maybe_ops_list.has_value()) {
     builder->SendError(maybe_ops_list.error());
@@ -1166,27 +1166,37 @@ void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReply
   SendResults(*res, builder);
 }
 
-void BitField(CmdArgList args, CommandContext* cmd_cntx) {
-  BitFieldGeneric(args, false, cmd_cntx->tx(), cmd_cntx->rb());
+void BitField(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  BitFieldGeneric(parser, false, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
-void BitFieldRo(CmdArgList args, CommandContext* cmd_cntx) {
-  BitFieldGeneric(args, true, cmd_cntx->tx(), cmd_cntx->rb());
+void BitFieldRo(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  BitFieldGeneric(parser, true, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
 #ifndef __clang__
 #pragma GCC diagnostic pop
 #endif
 
-void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
+void BitOp(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   static const std::array<string_view, 4> BITOP_OP_NAMES{OR_OP_NAME, XOR_OP_NAME, AND_OP_NAME,
                                                          NOT_OP_NAME};
-  string op = absl::AsciiStrToUpper(ArgS(args, 0));
-  string_view dest_key = ArgS(args, 1);
+  string op = absl::AsciiStrToUpper(parser.Next<string_view>());
+  string_view dest_key = parser.Next<string_view>();
+
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->rb()->SendError(err.MakeReply());
+  }
+
   bool illegal = rng::none_of(BITOP_OP_NAMES, [&op](auto val) { return op == val; });
 
+  // Count remaining args (src keys); for NOT there must be exactly one src key.
+  // The transaction args include dest_key + src_keys, so src key count = total tail - 2.
+  // We check via cmd_cntx->tail_args() which has all args including op and dest.
+  size_t num_src_keys = cmd_cntx->tail_args().size() - 2;
+
   auto* builder = cmd_cntx->rb();
-  if (illegal || (op == NOT_OP_NAME && args.size() > 3)) {
+  if (illegal || (op == NOT_OP_NAME && num_src_keys > 1)) {
     return builder->SendError(kSyntaxErr);  // too many arguments
   }
 
@@ -1251,15 +1261,14 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GetBit(CmdArgList args, CommandContext* cmd_cntx) {
+void GetBit(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Support for the command "GETBIT key offset"
   // see https://redis.io/commands/getbit/
 
-  uint32_t offset{0};
-  string_view key = ArgS(args, 0);
+  auto [key, offset] = parser.Next<string_view, uint32_t>();
 
-  if (!absl::SimpleAtoi(ArgS(args, 1), &offset)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
   }
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return ReadValueBitsetAt(t->GetOpArgs(shard), key, offset);
@@ -1268,11 +1277,10 @@ void GetBit(CmdArgList args, CommandContext* cmd_cntx) {
   HandleOpValueResult(res, cmd_cntx->rb());
 }
 
-void SetBit(CmdArgList args, CommandContext* cmd_cntx) {
+void SetBit(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Support for the command "SETBIT key offset new_value"
   // see https://redis.io/commands/setbit/
 
-  CmdArgParser parser(args);
   auto [key, offset, value] = parser.Next<string_view, uint32_t, FInt<0, 1>>();
 
   if (auto err = parser.TakeError(); err) {

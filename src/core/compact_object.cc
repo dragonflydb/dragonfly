@@ -29,6 +29,7 @@ extern "C" {
 #include "base/pod_array.h"
 #include "core/bloom.h"
 #include "core/cms.h"
+#include "core/cuckoo.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
 #include "core/oah_set.h"
@@ -857,6 +858,8 @@ size_t CompactObj::Size() const {
       return 0;
     case TOPK_TAG:
       return u_.topk->Size();
+    case CUCKOO_FILTER_TAG:
+      return u_.cuckoo_filter->NumItems();
     default:
       LOG(DFATAL) << "Should not reach " << int(taglen_);
       return 0;
@@ -940,6 +943,8 @@ CompactObjType CompactObj::ObjType() const {
       return OBJ_CMS;
     case TOPK_TAG:
       return OBJ_TOPK;
+    case CUCKOO_FILTER_TAG:
+      return OBJ_CUCKOOFILTER;
   }
 
   LOG(FATAL) << "TBD " << int(taglen_);
@@ -1145,6 +1150,23 @@ TOPK* CompactObj::GetTOPK() const {
   return u_.topk;
 }
 
+void CompactObj::SetCuckooFilter(uint64_t capacity, uint8_t slots_per_bucket,
+                                 uint16_t max_iterations, uint16_t expansion) {
+  if (taglen_ == CUCKOO_FILTER_TAG) {
+    *u_.cuckoo_filter =
+        CuckooFilter(capacity, tl.local_mr, slots_per_bucket, max_iterations, expansion);
+  } else {
+    SetMeta(CUCKOO_FILTER_TAG);
+    u_.cuckoo_filter = AllocateMR<CuckooFilter>(capacity, tl.local_mr, slots_per_bucket,
+                                                max_iterations, expansion);
+  }
+}
+
+CuckooFilter* CompactObj::GetCuckooFilter() const {
+  DCHECK_EQ(CUCKOO_FILTER_TAG, taglen_);
+  return u_.cuckoo_filter;
+}
+
 void CompactObj::SetString(std::string_view str) {
   CHECK(!IsExternal());
   encoding_ = NONE_ENC;
@@ -1316,14 +1338,14 @@ bool CompactObj::HasAllocated() const {
     return u_.large_str.ptr != nullptr;
 
   DCHECK(taglen_ == SMALL_TAG || taglen_ == JSON_TAG || taglen_ == SBF_TAG || taglen_ == CMS_TAG ||
-         taglen_ == SDS_TTL_TAG || taglen_ == TOPK_TAG);
+         taglen_ == SDS_TTL_TAG || taglen_ == TOPK_TAG || taglen_ == CUCKOO_FILTER_TAG);
   return true;
 }
 
 bool CompactObj::TagAllowsEmptyValue() const {
   const auto type = ObjType();
   return type == OBJ_JSON || type == OBJ_STREAM || type == OBJ_STRING || type == OBJ_SBF ||
-         type == OBJ_CMS || type == OBJ_TOPK || type == OBJ_SET;
+         type == OBJ_CMS || type == OBJ_TOPK || type == OBJ_SET || type == OBJ_CUCKOOFILTER;
 }
 
 void __attribute__((noinline)) CompactObj::GetString(string* res) const {
@@ -1683,6 +1705,8 @@ void CompactObj::Free() {
     DeleteMR<TOPK>(u_.topk);
   } else if (taglen_ == CMS_TAG) {
     DeleteMR<CMS>(u_.cms);
+  } else if (taglen_ == CUCKOO_FILTER_TAG) {
+    DeleteMR<CuckooFilter>(u_.cuckoo_filter);
   } else if (taglen_ == SDS_TTL_TAG) {
     sdsfree(u_.sds_ttl.sds_ptr);
   } else {
@@ -1747,6 +1771,10 @@ size_t CompactObj::MallocUsed(bool slow) const {
 
   if (taglen_ == TOPK_TAG) {
     return u_.topk->MallocUsed();
+  }
+
+  if (taglen_ == CUCKOO_FILTER_TAG) {
+    return u_.cuckoo_filter->MallocUsed();
   }
 
   LOG(DFATAL) << "should not reach";
@@ -2011,11 +2039,18 @@ bool CompactObj::JsonWrapper::DefragIfNeeded(PageUsage* page_usage) {
 }
 
 constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[] = {
-    {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},     {OBJ_SET, "set"sv},
-    {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},     {OBJ_STREAM, "stream"sv},
+    {OBJ_STRING, "string"sv},
+    {OBJ_LIST, "list"sv},
+    {OBJ_SET, "set"sv},
+    {OBJ_ZSET, "zset"sv},
+    {OBJ_HASH, "hash"sv},
+    {OBJ_STREAM, "stream"sv},
     {OBJ_KEY, "key"sv},  // pseudo-type used for memory tracking
-    {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}, {OBJ_CMS, "CMSk-TYPE"sv},
-    {OBJ_TOPK, "TopK-TYPE"sv}};
+    {OBJ_JSON, "ReJSON-RL"sv},
+    {OBJ_SBF, "MBbloom--"sv},
+    {OBJ_CMS, "CMSk-TYPE"sv},
+    {OBJ_TOPK, "TopK-TYPE"sv},
+    {OBJ_CUCKOOFILTER, "MBbloomCF"sv}};
 
 std::string_view ObjTypeToString(CompactObjType type) {
   for (auto& p : kObjTypeToString) {

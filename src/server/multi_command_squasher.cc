@@ -178,14 +178,6 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
       cmd.cmd_cntx->Resolve(crb->Take());
   };
 
-  if (opts_.verify_commands) {
-    if (auto err = service_->VerifyCommandState(*cmd.cid, args, *cntx_); err) {
-      rb->SendError(std::move(*err));
-      resolve();
-      return !opts_.error_abort;
-    }
-  }
-
   auto* tx = cntx_->transaction;
   if (cmd.cid->IsTransactional()) {
     tx->MultiSwitchCmd(cmd.cid);
@@ -228,15 +220,6 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   for (auto& dispatched : sinfo.dispatched) {
     auto* ctx = &local_cntx;
     auto args = dispatched.Slice(&arg_vec);
-    if (opts_.verify_commands) {
-      // The shared context is used for state verification, the local one is only for replies
-      if (auto err = service_->VerifyCommandState(*dispatched.cid, args, *cntx_); err) {
-        crb.SendError(std::move(*err));
-        move_reply(&dispatched);
-        continue;
-      }
-    }
-
     crb.SetReplyMode(dispatched.reply_mode);
 
     // With tiered storage enabled, it makes sense to dispatch async commands concurrently

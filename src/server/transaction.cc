@@ -173,7 +173,7 @@ Transaction::~Transaction() {
            << " destroyed";
 }
 
-void Transaction::InitBase(Namespace* ns, DbIndex dbid, CmdArgList args) {
+void Transaction::InitBase(Namespace* ns, DbIndex dbid, const facade::ParsedArgs& args) {
   global_ = false;
   db_index_ = dbid;
   full_args_ = args;
@@ -357,7 +357,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   }
 }
 
-OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) {
+OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args) {
   InitBase(ns, index, args);
 
   if ((cid_->opt_mask() & CO::GLOBAL_TRANS) > 0) {
@@ -1634,7 +1634,7 @@ bool Transaction::CanRunInlined() const {
   return false;
 }
 
-OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
+OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs& args) {
   if (cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL))
     return KeyIndex{};
 
@@ -1655,7 +1655,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     // Determine based on STREAMS argument position
     if (name == "XREAD" || name == "XREADGROUP") {
       for (size_t i = 0; i < args.size(); ++i) {
-        string_view arg = ArgS(args, i);
+        string_view arg = args[i];
         if (absl::EqualsIgnoreCase(arg, "STREAMS")) {
           size_t left = args.size() - i - 1;
           return KeyIndex(i + 1, i + 1 + (left / 2));
@@ -1673,7 +1673,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     else
       num_keys_index = bonus ? *bonus + 1 : 0;
 
-    string_view num = ArgS(args, num_keys_index);
+    string_view num = args[num_keys_index];
     if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0)
       return OpStatus::INVALID_INT;
 
@@ -1708,7 +1708,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
       if ((name == "GEORADIUSBYMEMBER" && args.size() >= 5) ||
           (name == "GEORADIUS" && args.size() >= 6)) {
         // key member radius .. STORE destkey
-        string_view opt = ArgS(args, args.size() - 2);
+        string_view opt = args[args.size() - 2];
         if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
           bonus = args.size() - 1;
         }
@@ -1717,7 +1717,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
       if (name == "SORT") {
         if (args.size() >= 3) {
           // SORT key ... STORE destkey
-          string_view opt = ArgS(args, args.size() - 2);
+          string_view opt = args[args.size() - 2];
           if (absl::EqualsIgnoreCase(opt, "STORE")) {
             bonus = args.size() - 1;
           }

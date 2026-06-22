@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "facade/cmd_arg_parser.h"
 #include "server/conn_context.h"
 
 namespace dfly {
@@ -19,9 +20,9 @@ class MemoryCmd {
  private:
   void Stats();
   void MallocStats();
-  void ArenaStats(CmdArgList args);
+  void ArenaStats(facade::CmdArgParser parser);
   void Usage(std::string_view key, bool account_key_memory_usage);
-  void Track(CmdArgList args);
+  void Track(facade::CmdArgParser parser);
 
   CommandContext* cmd_cntx_;
   ServerFamily* owner_;

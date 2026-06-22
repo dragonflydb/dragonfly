@@ -22,13 +22,13 @@ using namespace std;
 using namespace facade;
 
 struct TopkFamily {
-  static void Reserve(CmdArgList args, CommandContext* cmd_cntx);
-  static void Add(CmdArgList args, CommandContext* cmd_cntx);
-  static void IncrBy(CmdArgList args, CommandContext* cmd_cntx);
-  static void Query(CmdArgList args, CommandContext* cmd_cntx);
-  static void Count(CmdArgList args, CommandContext* cmd_cntx);
-  static void List(CmdArgList args, CommandContext* cmd_cntx);
-  static void Info(CmdArgList args, CommandContext* cmd_cntx);
+  static void Reserve(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Add(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void IncrBy(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Query(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Count(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void List(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Info(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 };
 
 namespace {
@@ -170,8 +170,7 @@ bool HandleOpError(OpStatus status, CommandContext* cmd_cntx) {
 
 }  // namespace
 
-void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::Reserve(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   uint32_t k = parser.Next<uint32_t>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -229,8 +228,7 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendOk();
 }
 
-void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::Add(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   vector<string_view> items;
 
@@ -263,8 +261,7 @@ void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::IncrBy(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   vector<pair<string_view, uint32_t>> items;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -306,8 +303,7 @@ void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void TopkFamily::Query(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::Query(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   vector<string_view> items;
 
@@ -335,8 +331,7 @@ void TopkFamily::Query(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void TopkFamily::Count(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::Count(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   vector<string_view> items;
 
@@ -364,8 +359,7 @@ void TopkFamily::Count(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::List(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   bool with_count = false;
 
@@ -402,8 +396,7 @@ void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void TopkFamily::Info(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 

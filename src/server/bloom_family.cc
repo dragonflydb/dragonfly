@@ -148,7 +148,7 @@ OpStatus OpLoadChunk(const OpArgs& op_args, std::string_view blob, std::string_v
 }
 
 void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   SbfParams params;
 
@@ -231,7 +231,7 @@ void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const string_view key = parser.Next();
   const int64_t cursor = parser.Next<int64_t>();
@@ -267,7 +267,7 @@ void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdLoadChunk(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const std::string_view key = parser.Next();
 

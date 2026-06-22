@@ -242,7 +242,7 @@ void TestDriver::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   str_vec.erase(str_vec.begin());
 
   // Check all keys were baseline emitted before
-  auto keys = DetermineKeys(cid, str_vec);
+  auto keys = DetermineKeys(cid, CmdArgList{str_vec});
   CHECK(keys);
   for (auto key : keys->Range(str_vec))
     journal_writes_[key]++;
