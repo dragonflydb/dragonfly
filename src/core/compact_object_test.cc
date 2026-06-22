@@ -1583,4 +1583,23 @@ static void BM_LpString2Int(benchmark::State& state) {
 }
 BENCHMARK(BM_LpString2Int)->Arg(1)->Arg(2);
 
+TEST_F(CompactObjectTest, CMSHugeAllocLeavesNoOrphan) {
+  constexpr uint32_t kHugeWidth = std::numeric_limits<uint32_t>::max();
+  constexpr uint32_t kHugeDepth = 10000;
+  EXPECT_THROW(cobj_.SetCMS(kHugeWidth, kHugeDepth), std::bad_alloc);
+  EXPECT_NE(cobj_.ObjType(), OBJ_CMS);
+}
+
+TEST_F(CompactObjectTest, CMSHugeAllocLeavesNoLeak) {
+  constexpr uint32_t kHugeWidth = std::numeric_limits<uint32_t>::max();
+  constexpr uint32_t kHugeDepth = 10000;
+
+  auto* mr = static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  const size_t used_before = mr->used();
+
+  EXPECT_THROW(cobj_.SetCMS(kHugeWidth, kHugeDepth), std::bad_alloc);
+
+  EXPECT_EQ(mr->used(), used_before);
+}
+
 }  // namespace dfly
