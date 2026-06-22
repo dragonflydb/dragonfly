@@ -130,12 +130,15 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   return std::min(updated, 1);
 }
 
-void PFAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void PFAdd(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  facade::CmdArgVec values;
+  while (parser.HasNext()) {
+    values.push_back(parser.Next());
+  }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return AddToHll(t->GetOpArgs(shard), key, args);
+    return AddToHll(t->GetOpArgs(shard), key, values);
   };
 
   OpResult<int> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -209,7 +212,7 @@ vector<HllBufferPtr> ConvertShardVector(const vector<vector<string>>& hlls) {
   return ptrs;
 }
 
-OpResult<int64_t> PFCountMulti(CmdArgList args, CommandContext* cmd_cntx) {
+OpResult<int64_t> PFCountMulti(CommandContext* cmd_cntx) {
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
@@ -245,9 +248,9 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void PFCount(CmdArgList args, CommandContext* cmd_cntx) {
-  if (args.size() == 1) {
-    string_view key = ArgS(args, 0);
+void PFCount(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  if (!parser.HasNext()) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return CountHllsSingle(t->GetOpArgs(shard), key);
     };
@@ -255,11 +258,11 @@ void PFCount(CmdArgList args, CommandContext* cmd_cntx) {
     OpResult<int64_t> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
     HandleOpValueResult(res, cmd_cntx->rb());
   } else {
-    HandleOpValueResult(PFCountMulti(args, cmd_cntx), cmd_cntx->rb());
+    HandleOpValueResult(PFCountMulti(cmd_cntx), cmd_cntx->rb());
   }
 }
 
-OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+OpResult<int> PFMergeInternal(string_view key, Transaction* tx, SinkReplyBuilder* builder) {
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
@@ -290,9 +293,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
   hll.resize(getDenseHllSize());
   createDenseHll(StringToHllPtr(hll));
   int result = pfmerge(ptrs.data(), ptrs.size(), StringToHllPtr(hll));
-
   auto set_cb = [&](Transaction* t, EngineShard* shard) {
-    string_view key = ArgS(args, 0);
     const OpArgs& op_args = t->GetOpArgs(shard);
     auto& db_slice = op_args.GetDbSlice();
     auto op_res = db_slice.AddOrFind(t->GetDbContext(), key, OBJ_STRING);
@@ -311,9 +312,10 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
   return result;
 }
 
-void PFMerge(CmdArgList args, CommandContext* cmd_cntx) {
+void PFMerge(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  OpResult<int> result = PFMergeInternal(args, cmd_cntx->tx(), rb);
+  OpResult<int> result = PFMergeInternal(key, cmd_cntx->tx(), rb);
   if (result.ok()) {
     if (result.value() == 0) {
       rb->SendOk();
