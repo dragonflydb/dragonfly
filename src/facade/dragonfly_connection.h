@@ -355,6 +355,12 @@ class Connection : public util::Connection {
 
   void NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n);
 
+  // Registered as the proactor OnRecv hook for V2 connections. Processes the notification,
+  // eagerly drains the socket into io_buf_, and wakes the fiber if actionable input arrived.
+  // Suppresses spurious wakeups when no new data was harvested.
+  // Only called from the proactor event loop while the connection fiber is suspended.
+  void OnRecvNotification(const util::FiberSocketBase::RecvNotification& n);
+
   // Enables io_uring multishot receives for the connection if the current thread supports it.
   // This is required during initial setup or after migrating to a new thread/proactor,
   // provided the buffer ring is configured and the connection is not using TLS.
@@ -610,6 +616,13 @@ class Connection : public util::Connection {
   // Returns true if the head command is ready to execute (nothing in-flight ahead of it).
   bool HasCommandToExecute() const {
     return parsed_head_ && !HasInFlightCommands();
+  }
+
+  // Returns true if a network completion produced actionable input: a socket error, pending data,
+  // or newly buffered bytes relative to input_before_len. Used to suppress spurious fiber wakeups
+  // from completions that harvested nothing.
+  bool HasNetworkEvent(size_t input_before_len) const {
+    return io_ec_ || pending_input_ || (io_buf_.InputLen() != input_before_len);
   }
 
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
