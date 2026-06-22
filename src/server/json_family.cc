@@ -1709,8 +1709,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
   return OpStatus::SYNTAX_ERR;
 }
 
-void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, path, json_str] = parser.Next<string_view, string_view, string_view>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
@@ -1741,11 +1740,9 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 // JSON.MSET key path value [key path value ...]
-void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
-  DCHECK_GE(args.size(), 3u);
-
+void CmdMSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (args.size() % 3 != 0) {
+  if (cmd_cntx->tail_args().size() % 3 != 0) {
     return builder->SendError(facade::WrongNumArgsError("json.mset"));
   }
 
@@ -1767,8 +1764,7 @@ void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
 
 // JSON.MERGE key path value
 // Based on https://datatracker.ietf.org/doc/html/rfc7386 spec
-void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdMerge(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.Next();
   string_view value = parser.Next();
@@ -1786,8 +1782,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(status);
 }
 
-void CmdResp(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdResp(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -1802,8 +1797,7 @@ void CmdResp(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdDebug(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdDebug(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view command = parser.Next();
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1871,10 +1865,9 @@ void CmdDebug(CmdArgList args, CommandContext* cmd_cntx) {
   builder->SendError(facade::UnknownSubCmd(command, "JSON.DEBUG"), facade::kSyntaxErrType);
 }
 
-void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
-  DCHECK_GE(args.size(), 1U);
-
-  string_view path = ArgS(args, args.size() - 1);
+void CmdMGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  const facade::ParsedArgs& tail = cmd_cntx->tail_args();
+  string_view path = tail[tail.size() - 1];
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
@@ -1891,7 +1884,7 @@ void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
 
-  std::vector<std::optional<std::string>> results(args.size() - 1);
+  std::vector<std::optional<std::string>> results(tail.size() - 1);  // last arg is path
   for (ShardId sid = 0; sid < shard_count; ++sid) {
     if (!cmd_cntx->tx()->IsActive(sid))
       continue;
@@ -1911,8 +1904,7 @@ void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(results.begin(), results.end(), cmd_cntx);
 }
 
-void CmdArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdArrIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.Next();
 
@@ -1924,7 +1916,7 @@ void CmdArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
   int start_index = 0;
   if (parser.HasNext()) {
     if (!absl::SimpleAtoi(parser.Next(), &start_index)) {
-      VLOG(1) << "Failed to convert the start index to numeric" << ArgS(args, 3);
+      VLOG(1) << "Failed to convert the start index to numeric";
       builder->SendError(kInvalidIntErr);
       return;
     }
@@ -1933,7 +1925,7 @@ void CmdArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
   int end_index = 0;
   if (parser.HasNext()) {
     if (!absl::SimpleAtoi(parser.Next(), &end_index)) {
-      VLOG(1) << "Failed to convert the stop index to numeric" << ArgS(args, 4);
+      VLOG(1) << "Failed to convert the stop index to numeric";
       builder->SendError(kInvalidIntErr);
       return;
     }
@@ -1947,14 +1939,15 @@ void CmdArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdArrInsert(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view path = ArgS(args, 1);
+void CmdArrInsert(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view path = parser.Next();
   int index = -1;
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (!absl::SimpleAtoi(ArgS(args, 2), &index)) {
-    VLOG(1) << "Failed to convert the following value to numeric: " << ArgS(args, 2);
+  string_view index_sv = parser.Next();
+  if (!absl::SimpleAtoi(index_sv, &index)) {
+    VLOG(1) << "Failed to convert the following value to numeric: " << index_sv;
     builder->SendError(kInvalidIntErr);
     return;
   }
@@ -1962,8 +1955,8 @@ void CmdArrInsert(CmdArgList args, CommandContext* cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   vector<string_view> new_values;
-  for (size_t i = 3; i < args.size(); i++) {
-    new_values.emplace_back(ArgS(args, i));
+  while (parser.HasNext()) {
+    new_values.emplace_back(parser.Next());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1974,16 +1967,16 @@ void CmdArrInsert(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdArrAppend(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view path = ArgS(args, 1);
+void CmdArrAppend(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view path = parser.Next();
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   vector<string_view> append_values;
-  for (size_t i = 2; i < args.size(); ++i) {
-    append_values.emplace_back(ArgS(args, i));
+  while (parser.HasNext()) {
+    append_values.emplace_back(parser.Next());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1994,20 +1987,20 @@ void CmdArrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdArrTrim(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view path = ArgS(args, 1);
+void CmdArrTrim(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view path = parser.Next();
   int start_index;
   int stop_index;
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (!absl::SimpleAtoi(ArgS(args, 2), &start_index)) {
+  if (!absl::SimpleAtoi(parser.Next(), &start_index)) {
     VLOG(1) << "Failed to parse array start index";
     builder->SendError(kInvalidIntErr);
     return;
   }
 
-  if (!absl::SimpleAtoi(ArgS(args, 3), &stop_index)) {
+  if (!absl::SimpleAtoi(parser.Next(), &stop_index)) {
     VLOG(1) << "Failed to parse array stop index";
     builder->SendError(kInvalidIntErr);
     return;
@@ -2023,8 +2016,7 @@ void CmdArrTrim(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdArrPop(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdArrPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
   int index = parser.NextOrDefault<int>(-1);
@@ -2042,8 +2034,7 @@ void CmdArrPop(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdClear(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdClear(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2058,10 +2049,10 @@ void CmdClear(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdStrAppend(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view path = ArgS(args, 1);
-  string_view value = ArgS(args, 2);
+void CmdStrAppend(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view path = parser.Next();
+  string_view value = parser.Next();
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
@@ -2081,8 +2072,7 @@ void CmdStrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdObjKeys(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2097,8 +2087,7 @@ void CmdObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2113,10 +2102,10 @@ void CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdNumIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view path = ArgS(args, 1);
-  string_view num = ArgS(args, 2);
+void CmdNumIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view path = parser.Next();
+  string_view num = parser.Next();
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
@@ -2129,10 +2118,10 @@ void CmdNumIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::SendJsonString(result, cmd_cntx);
 }
 
-void CmdNumMultBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view path = ArgS(args, 1);
-  string_view num = ArgS(args, 2);
+void CmdNumMultBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view path = parser.Next();
+  string_view num = parser.Next();
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
@@ -2145,8 +2134,7 @@ void CmdNumMultBy(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::SendJsonString(result, cmd_cntx);
 }
 
-void CmdToggle(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdToggle(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2160,8 +2148,7 @@ void CmdToggle(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdType(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdType(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2176,8 +2163,7 @@ void CmdType(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdArrLen(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdArrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2192,8 +2178,7 @@ void CmdArrLen(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdObjLen(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdObjLen(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2208,8 +2193,7 @@ void CmdObjLen(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
@@ -2224,10 +2208,7 @@ void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
-  DCHECK_GE(args.size(), 1U);
-
-  facade::CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 

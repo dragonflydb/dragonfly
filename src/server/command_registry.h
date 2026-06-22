@@ -146,11 +146,15 @@ class CommandId : public facade::CommandId {
     return interleave_step_;
   }
 
+  template <typename RT> CommandId&& SetHandler(RT f(facade::CmdArgParser, CommandContext*)) && {
+    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(MakeParserFromContext(cntx), cntx); };
+    return std::move(*this);
+  }
+
   template <typename RT>
   CommandId&& SetAsyncHandler(RT f(facade::CmdArgParser, CommandContext*)) && {
     kind_mask_ |= SUPPORT_ASYNC;
-    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(MakeParserFromContext(cntx), cntx); };
-    return std::move(*this);
+    return std::move(*this).SetHandler(f);
   }
 
   CommandId&& SetHandler(Handler f, bool async_support = false) && {
