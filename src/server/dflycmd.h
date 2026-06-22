@@ -10,6 +10,7 @@
 #include <atomic>
 #include <memory>
 
+#include "facade/cmd_arg_parser.h"
 #include "server/conn_context.h"
 #include "server/execution_state.h"
 #include "server/synchronization.h"
@@ -234,7 +235,7 @@ class DflyCmd {
  public:
   DflyCmd(ServerFamily* server_family);
 
-  void Run(CmdArgList args, CommandContext* cmd_cntx);
+  void Run(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   void OnClose(unsigned sync_id);
 
@@ -269,35 +270,35 @@ class DflyCmd {
 
   // THREAD [to_thread]
   // Return connection thread index or migrate to another thread.
-  void Thread(CmdArgList args, CommandContext* cmd_cntx);
+  void Thread(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   // FLOW <masterid> <syncid> <flowid> [<seqid>]
   // Register connection as flow for sync session.
   // If seqid is given, it means the client wants to try partial sync.
   // If it is possible, return Ok and prepare for a partial sync, else
   // return error and ask the replica to execute FLOW again.
-  void Flow(CmdArgList args, CommandContext* cmd_cntx);
+  void Flow(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   // SYNC <syncid>
   // Initiate full sync.
-  void Sync(CmdArgList args, CommandContext* cmd_cntx);
+  void Sync(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   // STARTSTABLE <syncid>
   // Switch to stable state replication.
-  void StartStable(CmdArgList args, CommandContext* cmd_cntx);
+  void StartStable(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   // TAKEOVER <syncid>
   // Shut this master down atomically with replica promotion.
-  void TakeOver(CmdArgList args, CommandContext* cmd_cntx);
+  void TakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   // EXPIRE
   // Check all keys for expiry.
-  void Expire(CmdArgList args, CommandContext* cmd_cntx);
+  void Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   // REPLICAOFFSET
   // Return journal records num sent for each flow of replication.
-  void ReplicaOffset(CmdArgList args, CommandContext* cmd_cntx);
+  void ReplicaOffset(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
-  void Load(CmdArgList args, CommandContext* cmd_cntx);
+  void Load(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(DflyVersion version, FlowInfo* flow, ExecutionState* cntx,

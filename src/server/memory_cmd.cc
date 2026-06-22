@@ -183,9 +183,7 @@ MemoryCmd::MemoryCmd(ServerFamily* owner, CommandContext* cmd_cntx)
     : cmd_cntx_(cmd_cntx), owner_(owner) {
 }
 
-void MemoryCmd::Run(CmdArgList) {
-  CmdArgParser parser(cmd_cntx_->tail_args());
-
+void MemoryCmd::Run(CmdArgParser parser) {
   if (parser.Check("HELP")) {
     string_view help_arr[] = {
         "MEMORY <subcommand> [<arg> ...]. Subcommands are:",
