@@ -374,6 +374,8 @@ class OkService : public ServiceInterface {
 
 DispatchResult OkService::DispatchCommand([[maybe_unused]] ParsedArgs args, ParsedCommand* cmd,
                                           AsyncPreference mode) {
+  ++tl_facade_stats->conn_stats.command_cnt_main;
+
   if (cmd->empty()) {
     cmd->rb()->SendError("ERR empty command");
     return DispatchResult::OK;
@@ -436,6 +438,8 @@ uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
   GroupResult group = GroupSquashableRun(first, count, num_shards, &per_shard);
   if (group.processed == 0)
     return 0;
+
+  tl_facade_stats->conn_stats.command_cnt_main += group.processed;
 
   if (absl::GetFlag(FLAGS_coro_squash))
     EmitCoroBatch(group.num_active, per_shard);
