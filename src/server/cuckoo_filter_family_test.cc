@@ -1,6 +1,8 @@
 // Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <absl/strings/str_cat.h>
+
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
 
@@ -51,6 +53,43 @@ TEST_F(CuckooFilterFamilyTest, DumpFailsCleanly) {
   ASSERT_EQ(Run("cf.reserve cf1 1000"), "OK");
   auto resp = Run({"dump", "cf1"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
+TEST_F(CuckooFilterFamilyTest, AddAutoCreatesAndAllowsDuplicates) {
+  EXPECT_THAT(Run({"cf.add", "f1", "foo"}), IntArg(1));
+  EXPECT_EQ(Run("type f1"), "MBbloomCF");
+
+  // CF.ADD allows duplicate insertions.
+  EXPECT_THAT(Run({"cf.add", "f1", "foo"}), IntArg(1));
+}
+
+TEST_F(CuckooFilterFamilyTest, AddNxPreventsDuplicates) {
+  EXPECT_THAT(Run({"cf.addnx", "cf", "k1"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.addnx", "cf", "k1"}), IntArg(0));
+
+  // CF.ADD still allows the duplicate that CF.ADDNX rejected.
+  EXPECT_THAT(Run({"cf.add", "cf", "k1"}), IntArg(1));
+}
+
+TEST_F(CuckooFilterFamilyTest, AddWrongArity) {
+  EXPECT_THAT(Run({"cf.add"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"cf.add", "f1"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"cf.addnx"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"cf.addnx", "f1"}), ErrArg("wrong number of arguments"));
+}
+
+TEST_F(CuckooFilterFamilyTest, AddWrongType) {
+  Run("set str1 foo");
+  EXPECT_THAT(Run({"cf.add", "str1", "foo"}), ErrArg("WRONGTYPE"));
+  EXPECT_THAT(Run({"cf.addnx", "str1", "foo"}), ErrArg("WRONGTYPE"));
+}
+
+TEST_F(CuckooFilterFamilyTest, AddFilterFull) {
+  ASSERT_EQ(Run("cf.reserve cf 4 expansion 0"), "OK");
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_THAT(Run({"cf.add", "cf", absl::StrCat(i)}), IntArg(1));
+  }
+  EXPECT_THAT(Run({"cf.add", "cf", "overflow"}), ErrArg("Filter is full"));
 }
 
 }  // namespace dfly

@@ -56,6 +56,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return kTieredIoError;
     case OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS:
       return kBloomFilterLoadInProgress;
+    case OpStatus::CUCKOO_FILTER_FULL:
+      return kCuckooFilterFull;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       return "Internal error";
