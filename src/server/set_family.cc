@@ -1121,12 +1121,14 @@ struct SetReplies {
   bool script;
 };
 
-void CmdSAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  auto values = args.subspan(1);
+void CmdSAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  vector<string_view> values;
+  while (parser.HasNext())
+    values.push_back(parser.Next());
 
-  auto cb = [key, values](Transaction* t, EngineShard* shard) {
-    return OpAdd(t->GetOpArgs(shard), key, values, false, false);
+  auto cb = [key, &values](Transaction* t, EngineShard* shard) {
+    return OpAdd(t->GetOpArgs(shard), key, ArgSlice{values}, false, false);
   };
 
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1137,9 +1139,9 @@ void CmdSAdd(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view val = ArgS(args, 1);
+void CmdSIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view val = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
@@ -1160,9 +1162,11 @@ void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   SendNumeric(result ? OpResult<uint32_t>(1) : result.status(), cmd_cntx);
 }
 
-void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  auto members = args.subspan(1);
+void CmdSMIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  vector<string_view> members;
+  while (parser.HasNext())
+    members.push_back(parser.Next());
 
   vector<int32_t> memberships(members.size());
 
@@ -1174,7 +1178,7 @@ void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
       const PrimeValue& pv = (*find_res)->second;
       SetType st{pv.RObjPtr(), pv.Encoding()};
       for (size_t i = 0; i < members.size(); ++i)
-        memberships[i] = IsInSet(db_cntx, st, ToSV(members[i]));
+        memberships[i] = IsInSet(db_cntx, st, members[i]);
       SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, pv);
       return OpStatus::OK;
     }
@@ -1194,10 +1198,10 @@ void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void CmdSMove(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view src = ArgS(args, 0);
-  string_view dest = ArgS(args, 1);
-  string_view member = ArgS(args, 2);
+void CmdSMove(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view src = parser.Next();
+  string_view dest = parser.Next();
+  string_view member = parser.Next();
 
   Mover mover{src, dest, member, true};
   mover.Find(cmd_cntx->tx());
@@ -1210,20 +1214,22 @@ void CmdSMove(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result.value());
 }
 
-void CmdSRem(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  auto vals = args.subspan(1);
+void CmdSRem(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  vector<string_view> vals;
+  while (parser.HasNext())
+    vals.push_back(parser.Next());
 
-  auto cb = [key, vals](Transaction* t, EngineShard* shard) {
-    return OpRem(t->GetOpArgs(shard), key, vals, false);
+  auto cb = [key, &vals](Transaction* t, EngineShard* shard) {
+    return OpRem(t->GetOpArgs(shard), key, ArgSlice{vals}, false);
   };
 
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   SendNumeric(result, cmd_cntx);
 }
 
-void CmdSCard(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdSCard(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
     auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_SET);
@@ -1238,11 +1244,12 @@ void CmdSCard(CmdArgList args, CommandContext* cmd_cntx) {
   SendNumeric(result, cmd_cntx);
 }
 
-void CmdSPop(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdSPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  const size_t args_size = cmd_cntx->tail_args().size();
+  string_view key = parser.Next();
   unsigned count = 1;
-  if (args.size() > 1) {
-    string_view arg = ArgS(args, 1);
+  if (parser.HasNext()) {
+    string_view arg = parser.Next();
     if (!absl::SimpleAtoi(arg, &count)) {
       cmd_cntx->SendError(kInvalidIntErr);
       return;
@@ -1255,7 +1262,7 @@ void CmdSPop(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   auto replier = [result = std::move(result),
-                  pop_single = (args.size() == 1)](facade::SinkReplyBuilder* builder) {
+                  pop_single = (args_size == 1)](facade::SinkReplyBuilder* builder) {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     if (result || result.status() == OpStatus::KEY_NOTFOUND) {
       if (pop_single) {  // SPOP key
@@ -1276,9 +1283,9 @@ void CmdSPop(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void CmdSDiff(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSDiff(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view src_key = ArgS(args, 0);
+  string_view src_key = parser.Next();
   ShardId src_shard = Shard(src_key, result_set.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1298,11 +1305,11 @@ void CmdSDiff(CmdArgList args, CommandContext* cmd_cntx) {
   SetReplies{cmd_cntx}.Send(rsv);
 }
 
-void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSDiffStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 0);
+  string_view dest_key = parser.Next();
   ShardId dest_shard = Shard(dest_key, result_set.size());
-  string_view src_key = ArgS(args, 1);
+  string_view src_key = parser.Next();
   ShardId src_shard = Shard(src_key, result_set.size());
 
   VLOG(1) << "SDiffStore " << src_key << " " << src_shard;
@@ -1352,7 +1359,7 @@ void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result_size);
 }
 
-void CmdSMembers(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSMembers(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [](Transaction* t, EngineShard* shard) { return OpInter(t, shard, false); };
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1364,8 +1371,7 @@ void CmdSMembers(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdSRandMember(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdSRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   bool is_count = parser.HasNext();
@@ -1400,7 +1406,7 @@ void CmdSRandMember(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void CmdSInter(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSInter(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1418,9 +1424,9 @@ void CmdSInter(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSInterStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 0);
+  string_view dest_key = parser.Next();
   ShardId dest_shard = Shard(dest_key, result_set.size());
   atomic_uint32_t inter_shard_cnt{0};
 
@@ -1457,14 +1463,16 @@ void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result->size());
 }
 
-void CmdSInterCard(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
+  const facade::ParsedArgs& args = cmd_cntx->tail_args();
+
   unsigned num_keys;
-  if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys))
+  if (!absl::SimpleAtoi(parser.Next(), &num_keys))
     return cmd_cntx->SendError(kSyntaxErr);
 
   unsigned limit = 0;
-  if (args.size() == (num_keys + 3) && ArgS(args, 1 + num_keys) == "LIMIT") {
-    if (!absl::SimpleAtoi(ArgS(args, num_keys + 2), &limit))
+  if (args.size() == (num_keys + 3) && args[1 + num_keys] == "LIMIT") {
+    if (!absl::SimpleAtoi(args[num_keys + 2], &limit))
       return cmd_cntx->SendError("limit can't be negative");
   } else if (args.size() > (num_keys + 1))
     return cmd_cntx->SendError(kSyntaxErr);
@@ -1484,7 +1492,7 @@ void CmdSInterCard(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdSUnion(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSUnion(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1499,9 +1507,9 @@ void CmdSUnion(CmdArgList args, CommandContext* cmd_cntx) {
   SetReplies{cmd_cntx}.Send(unionset);
 }
 
-void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSUnionStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 0);
+  string_view dest_key = parser.Next();
   ShardId dest_shard = Shard(dest_key, result_set.size());
 
   auto union_cb = [&](Transaction* t, EngineShard* shard) {
@@ -1539,9 +1547,10 @@ void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result_size);
 }
 
-void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view token = ArgS(args, 1);
+void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
+  const size_t args_size = cmd_cntx->tail_args().size();
+  string_view key = parser.Next();
+  string_view token = parser.Next();
 
   uint64_t cursor = 0;
 
@@ -1550,8 +1559,8 @@ void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   // SSCAN key cursor [MATCH pattern] [COUNT count]
-  if (args.size() > 6) {
-    DVLOG(1) << "got " << args.size() << " this is more than it should be";
+  if (args_size > 6) {
+    DVLOG(1) << "got " << args_size << " this is more than it should be";
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
@@ -1582,9 +1591,7 @@ void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 // Syntax: saddex key [KEEPTTL] ttl_sec member [member...]
-void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(cmd_cntx->tail_args());
-
+void CmdSAddEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   const std::string_view key = parser.Next<std::string_view>();
   const bool keepttl = parser.Check("KEEPTTL");
   const uint32_t ttl_sec = parser.Next<uint32_t>();
@@ -1597,13 +1604,15 @@ void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kInvalidIntErr);
   }
 
-  CmdArgList vals = args.subspan(parser.UnparsedStart());
+  vector<string_view> vals;
+  while (parser.HasNext())
+    vals.push_back(parser.Next());
   if (vals.empty()) {
     return cmd_cntx->SendError(WrongNumArgsError("SADDEX"));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, vals, keepttl);
+    return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, ArgSlice{vals}, keepttl);
   };
 
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));

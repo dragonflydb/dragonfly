@@ -625,7 +625,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
   return CbVariant<uint32_t>{SetReply(op_sp, created)};
 }
 
-void HGetGeneric(CmdArgList args, uint8_t getall_mask, CommandContext* cmd_cntx) {
+void HGetGeneric(uint8_t getall_mask, CommandContext* cmd_cntx) {
   auto cb = [getall_mask](const HMapWrap& hw) -> OpResult<vector<string>> {
     vector<string> res;
     bool keyval = (getall_mask == (FIELDS | VALUES));
@@ -782,8 +782,12 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, CmdArgList args, string_view cmd_
   return res;
 }
 
-void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void HSetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Materialize the tail args so ParseHSetEx can slice the unparsed fields into a CmdArgList that
+  // outlives the synchronous ScheduleSingleHopT call below.
+  const ParsedArgs& tail = cmd_cntx->tail_args();
+  vector<string_view> args(tail.begin(), tail.end());
+
   string_view key = parser.Next();
   HSetExParams parsed = ParseHSetEx(&parser, args, cmd_cntx->cid()->name());
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
@@ -825,9 +829,12 @@ struct HSetReplies {
   CommandContext* cmd_cntx;
 };
 
-void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHDel(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
   // Collect field names for HNSW data preservation.
-  auto fields_span = args.subspan(1);
+  vector<string_view> fields_span;
+  while (parser.HasNext())
+    fields_span.push_back(parser.Next());
   absl::InlinedVector<std::string_view, 4> field_names;
   for (auto f : fields_span)
     field_names.push_back(f);
@@ -841,8 +848,7 @@ void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
   HSetReplies{cmd_cntx}.Send(ExecuteW(cmd_cntx->tx(), std::move(cb), std::move(field_names)));
 }
 
-void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdHExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
   using MinMaxTtl = FInt<0, (1 << 26)>;
   auto [key, ttl_sec] = parser.Next<string_view, MinMaxTtl>();
 
@@ -862,7 +868,12 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
 
   uint32_t numFields = parser.Next<uint32_t>();
 
-  CmdArgList fields = args.subspan(parser.UnparsedStart());
+  // Collect the remaining (unparsed) args as the field list. Indexing into tail_args is
+  // independent of the parser's error short-circuit, matching the original args.subspan().
+  const ParsedArgs& tail = cmd_cntx->tail_args();
+  vector<string_view> fields;
+  for (size_t i = parser.UnparsedStart(); i < tail.size(); ++i)
+    fields.push_back(tail[i]);
   if (fields.size() != numFields) {
     return rb->SendError("The `numfields` parameter must match the number of arguments",
                          kSyntaxErrType);
@@ -914,8 +925,7 @@ OpResult<vector<long>> OpHTtl(Transaction* t, EngineShard* shard, string_view ke
   return res;
 }
 
-void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdHTtl(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -929,7 +939,12 @@ void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
 
   uint32_t numFields = parser.Next<uint32_t>();
 
-  CmdArgList fields = args.subspan(parser.UnparsedStart());
+  // Collect the remaining (unparsed) args as the field list. Indexing into tail_args is
+  // independent of the parser's error short-circuit, matching the original args.subspan().
+  const ParsedArgs& tail = cmd_cntx->tail_args();
+  vector<string_view> fields;
+  for (size_t i = parser.UnparsedStart(); i < tail.size(); ++i)
+    fields.push_back(tail[i]);
   if (fields.size() != numFields) {
     return rb->SendError("The `numfields` parameter must match the number of arguments",
                          kSyntaxErrType);
@@ -950,8 +965,9 @@ void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<string> {
+void CmdHGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  auto cb = [field = parser.Next()](const HMapWrap& hw) -> OpResult<string> {
     if (auto it = hw.Find(field); it)
       return string{it->second};
     return OpStatus::KEY_NOTFOUND;
@@ -969,9 +985,12 @@ void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
-  auto fields = args.subspan(1);
-  auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
+void CmdHMGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  vector<string_view> fields;
+  while (parser.HasNext())
+    fields.push_back(parser.Next());
+  auto cb = [&fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
   OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx->tx(), cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -991,8 +1010,9 @@ void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [field = ArgS(args, 1)](const HMapWrap& hw) -> OpResult<uint32_t> {
+void CmdHStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  auto cb = [field = parser.Next()](const HMapWrap& hw) -> OpResult<uint32_t> {
     if (auto it = hw.Find(field); it)
       return it->second.length();
     return OpStatus::KEY_NOTFOUND;
@@ -1000,22 +1020,23 @@ void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void CmdHLen(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHLen(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
   HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void CmdHExists(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
+void CmdHExists(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  auto cb = [field = parser.Next()](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
   HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view field = ArgS(args, 1);
-  string_view incrs = ArgS(args, 2);
+void CmdHIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view field = parser.Next();
+  string_view incrs = parser.Next();
   int64_t ival = 0;
 
   if (!absl::SimpleAtoi(incrs, &ival)) {
@@ -1047,10 +1068,10 @@ void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view field = ArgS(args, 1);
-  string_view incrs = ArgS(args, 2);
+void CmdHIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view field = parser.Next();
+  string_view incrs = parser.Next();
   double dval = 0;
 
   if (!absl::SimpleAtod(incrs, &dval)) {
@@ -1084,20 +1105,21 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHKeys(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, FIELDS, cmd_cntx);
+void CmdHKeys(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HGetGeneric(FIELDS, cmd_cntx);
 }
 
-void CmdHVals(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, VALUES, cmd_cntx);
+void CmdHVals(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HGetGeneric(VALUES, cmd_cntx);
 }
 
-void CmdHGetAll(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx);
+void CmdHGetAll(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HGetGeneric(GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx);
 }
 
-void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view token = ArgS(args, 1);
+void CmdHScan(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  std::string_view token = parser.Next();
   uint64_t cursor = 0;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(token, &cursor)) {
@@ -1105,8 +1127,8 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   // HSCAN key cursor [MATCH pattern] [COUNT count] [NOVALUES]
-  if (args.size() > 7) {
-    DVLOG(1) << "got " << args.size() << " this is more than it should be";
+  if (cmd_cntx->tail_args().size() > 7) {
+    DVLOG(1) << "got " << cmd_cntx->tail_args().size() << " this is more than it should be";
     return rb->SendError(kSyntaxErr);
   }
 
@@ -1135,21 +1157,24 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-
+void CmdHSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view cmd{cmd_cntx->cid()->name()};
   auto* rb = cmd_cntx->rb();
-  if (args.size() % 2 != 1) {
+  // tail_args = key + field/value pairs; a valid command has an odd count.
+  if (cmd_cntx->tail_args().size() % 2 != 1) {
     return rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
+
+  string_view key = parser.Next();
 
   optional<util::fb2::Future<bool>> tiered_backpressure;
   OpSetParams params{.backpressure = &tiered_backpressure};
 
-  args.remove_prefix(1);
+  vector<string_view> values;
+  while (parser.HasNext())
+    values.push_back(parser.Next());
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args, params);
+    return OpSet(t->GetOpArgs(shard), key, values, params);
   };
 
   auto delayed_result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1165,12 +1190,14 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdHSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
+  vector<string_view> values;
+  while (parser.HasNext())
+    values.push_back(parser.Next());
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args.subspan(1),
-                 OpSetParams{.mode = OpSetParams::Mode::kNX});
+    return OpSet(t->GetOpArgs(shard), key, values, OpSetParams{.mode = OpSetParams::Mode::kNX});
   };
   HSetReplies{cmd_cntx}.Send(Unwrap(cmd_cntx->tx()->ScheduleSingleHopT(cb)));
 }
@@ -1183,23 +1210,24 @@ void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
   str_vec.emplace_back(absl::StrCat(lp.lval));
 }
 
-void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (args.size() > 3) {
-    DVLOG(1) << "Wrong number of command arguments: " << args.size();
+  const size_t argc = cmd_cntx->tail_args().size();
+  if (argc > 3) {
+    DVLOG(1) << "Wrong number of command arguments: " << argc;
     return rb->SendError(kSyntaxErr);
   }
 
-  string_view key = ArgS(args, 0);
+  string_view key = parser.Next();
   int32_t count;
   bool with_values = false;
 
-  if ((args.size() > 1) && (!SimpleAtoi(ArgS(args, 1), &count))) {
+  if ((argc > 1) && (!SimpleAtoi(parser.Next(), &count))) {
     return rb->SendError("count value is not an integer", kSyntaxErrType);
   }
 
-  if (args.size() == 3) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, 2));
+  if (argc == 3) {
+    string arg = absl::AsciiStrToUpper(parser.Next());
     if (arg != "WITHVALUES")
       return rb->SendError(kSyntaxErr);
     else
@@ -1220,7 +1248,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
     if (pv.Encoding() == kEncodingStrMap2) {
       StringMap* string_map = GetStringMap(pv, db_context);
 
-      if (args.size() == 1) {
+      if (argc == 1) {
         auto opt_pair = string_map->RandomPair();
         if (opt_pair.has_value()) {
           auto [key, value] = *opt_pair;
@@ -1258,7 +1286,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
       size_t lplen = lpLength(lp);
       CHECK(lplen > 0 && lplen % 2 == 0);
       size_t hlen = lplen / 2;
-      if (args.size() == 1) {
+      if (argc == 1) {
         listpackEntry key;
         lpRandomPair(lp, hlen, &key, NULL);
         StrVecEmplaceBack(str_vec, key);
@@ -1292,7 +1320,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    if (result->size() == 1 && args.size() == 1)
+    if (result->size() == 1 && argc == 1)
       rb->SendBulkString(result->front());
     else if (with_values) {
       const auto result_size = result->size();
@@ -1310,7 +1338,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
     } else
       rb->SendBulkStrArr(*result, CollectionType::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    if (args.size() == 1)
+    if (argc == 1)
       rb->SendNull();
     else
       rb->SendEmptyArray();
