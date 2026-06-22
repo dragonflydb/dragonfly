@@ -51,7 +51,8 @@ class Service : public facade::ServiceInterface {
   // Verify command prepares execution in correct state.
   // It's usually called before command execution. Only for multi/exec transactions it's checked
   // when the command is queued for execution, not before the execution itself.
-  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId& cid, ArgSlice tail_args,
+  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId& cid,
+                                                       const facade::ParsedArgs& tail_args,
                                                        const ConnectionContext& cntx);
 
   facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
@@ -157,12 +158,14 @@ class Service : public facade::ServiceInterface {
   };
 
   // Return error if not all keys are owned by the server when running in cluster mode
-  std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId& cid, CmdArgList args,
+  std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId& cid,
+                                                       const facade::ParsedArgs& args,
                                                        const ConnectionContext& dfly_cntx);
 
   // Return moved error if we *own* the slot. This function is used from flows that assume our
   // state is TAKEN_OVER which happens after a replica takeover.
-  std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId& cid, CmdArgList args,
+  std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId& cid,
+                                                       const facade::ParsedArgs& args,
                                                        const ConnectionContext& dfly_cntx);
 
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
@@ -182,7 +185,7 @@ class Service : public facade::ServiceInterface {
   std::variant<CommandId*, facade::DispatchResult> HandleMemcacheCommand(
       facade::ParsedCommand* parsed_cmd, facade::AsyncPreference async_pref);
 
-  OpResult<KeyIndex> FindKeys(const CommandId* cid, CmdArgList args);
+  OpResult<KeyIndex> FindKeys(const CommandId* cid, const facade::ParsedArgs& args);
 
   void RegisterCommands();
   void Register(CommandRegistry* registry);

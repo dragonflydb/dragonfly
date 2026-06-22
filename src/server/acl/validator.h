@@ -15,10 +15,9 @@ namespace dfly::acl {
 struct AclKeys;
 struct AclPubSub;
 
-std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(const ConnectionContext& cntx,
-                                                                    const CommandId& id,
-                                                                    facade::CmdArgList tail_args);
+std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
+    const ConnectionContext& cntx, const CommandId& id, const facade::ParsedArgs& tail_args);
 
 bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
-                                  facade::CmdArgList tail_args);
+                                  const facade::ParsedArgs& tail_args);
 }  // namespace dfly::acl
