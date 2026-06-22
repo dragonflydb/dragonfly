@@ -14,6 +14,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/cuckoo.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
 #include "core/mi_memory_resource.h"
@@ -581,6 +582,21 @@ TEST_F(CompactObjectTest, SBF) {
   cobj_.SetSBF(1000, 0.001, 2);
   EXPECT_EQ(cobj_.ObjType(), OBJ_SBF);
   EXPECT_GT(cobj_.MallocUsed(), 0);
+}
+
+TEST_F(CompactObjectTest, CuckooFilter) {
+  cobj_.SetCuckooFilter(1000, CuckooFilter::kDefaultSlotsPerBucket,
+                        CuckooFilter::kDefaultMaxIterations, CuckooFilter::kDefaultExpansion);
+  EXPECT_EQ(cobj_.ObjType(), OBJ_CUCKOOFILTER);
+  EXPECT_GT(cobj_.MallocUsed(), 0);
+
+  CuckooFilter* cf = cobj_.GetCuckooFilter();
+  uint64_t hash = CuckooFilter::Hash("foo");
+  EXPECT_TRUE(cf->Insert(hash));
+  EXPECT_TRUE(cf->Exists(hash));
+  EXPECT_EQ(cobj_.Size(), 1u);
+  EXPECT_TRUE(cf->Delete(hash));
+  EXPECT_FALSE(cf->Exists(hash));
 }
 
 TEST_F(CompactObjectTest, MimallocUnderutilzation) {

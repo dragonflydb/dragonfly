@@ -7,7 +7,6 @@
 #include <xxhash.h>
 
 #include <cmath>
-#include <numeric>
 
 #include "absl/numeric/bits.h"
 #include "base/logging.h"
@@ -143,9 +142,12 @@ uint64_t CuckooFilter::Hash(std::string_view item) {
   return XXH3_64bits_withSeed(item.data(), item.size(), 0xc6a4a7935bd1e995ULL);
 }
 
-size_t CuckooFilter::UsedMemory() const {
-  return std::transform_reduce(filters_.begin(), filters_.end(), size_t{0}, std::plus<>{},
-                               [](const SubFilter& sf) { return sf.size(); });
+size_t CuckooFilter::MallocUsed() const {
+  size_t res = sizeof(CuckooFilter) + filters_.capacity() * sizeof(SubFilter);
+  for (const SubFilter& sf : filters_) {
+    res += sf.size();
+  }
+  return res;
 }
 
 CuckooFilter::LookupParams CuckooFilter::LookupParamsFromHash(uint64_t hash) const {
