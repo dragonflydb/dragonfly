@@ -808,6 +808,85 @@ TEST_F(StringFamilyTest, ClThrottle) {
               ElementsAre(IntArg(0), IntArg(limit), IntArg(limit - 2), IntArg(-1), IntArg(1)));
 }
 
+TEST_F(StringFamilyTest, ClProbe) {
+  const int64_t limit = 5;
+  const char* const max_burst = "4";  // limit - 1
+  const char* const count = "1";
+  const char* const period = "10";
+
+  const char* const missing_key = "probe-missing";
+  auto resp = Run({"cl.probe", missing_key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
+  EXPECT_THAT(Run({"exists", missing_key}), IntArg(0));
+
+  resp = Run({"cl.probe", missing_key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
+  EXPECT_THAT(Run({"exists", missing_key}), IntArg(0));
+
+  const char* const quantity_key = "probe-quantity";
+  resp = Run({"cl.probe", quantity_key, max_burst, count, period, "2"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(3), IntArg(-1), IntArg(21)));
+  EXPECT_THAT(Run({"exists", quantity_key}), IntArg(0));
+
+  resp = Run({"cl.throttle", quantity_key, max_burst, count, period, "2"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(3), IntArg(-1), IntArg(21)));
+  EXPECT_THAT(Run({"pttl", quantity_key}), IntArg(20000));
+
+  const char* const key = "probe-used";
+  resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
+  EXPECT_THAT(Run({"pttl", key}), IntArg(10000));
+
+  resp = Run({"cl.probe", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(3), IntArg(-1), IntArg(21)));
+  EXPECT_THAT(Run({"pttl", key}), IntArg(10000));
+
+  resp = Run({"cl.probe", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(3), IntArg(-1), IntArg(21)));
+  EXPECT_THAT(Run({"pttl", key}), IntArg(10000));
+
+  resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(3), IntArg(-1), IntArg(21)));
+  EXPECT_THAT(Run({"pttl", key}), IntArg(20000));
+
+  resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(2), IntArg(-1), IntArg(31)));
+
+  resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(1), IntArg(-1), IntArg(41)));
+
+  resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(0), IntArg(-1), IntArg(51)));
+
+  resp = Run({"cl.probe", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(1), IntArg(limit), IntArg(0), IntArg(11), IntArg(51)));
+  EXPECT_THAT(Run({"pttl", key}), IntArg(50000));
+}
+
 TEST_F(StringFamilyTest, SetMGetWithNilResp3) {
   Run({"hello", "3"});
 
