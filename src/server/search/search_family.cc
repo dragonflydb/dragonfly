@@ -1148,7 +1148,7 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
 
 template <typename T>
 void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder order,
-                 T SerializedSearchDoc::*field) {
+                 T SerializedSearchDoc::* field) {
   auto cb = [order, field](SerializedSearchDoc* l, SerializedSearchDoc* r) {
     return order == SortOrder::ASC ? l->*field < r->*field : r->*field < l->*field;
   };
@@ -2730,50 +2730,93 @@ void CmdFtList(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendBulkStrArr(names);
 }
 
-static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view query,
-                                        std::string_view args_str, const SearchParams& params) {
-  vector<SearchResult> results;
-  const bool sorted = params.sort_option.has_value();
-  const std::string_view with_sortkeys = sorted && !params.with_sortkeys ? " WITHSORTKEYS"sv : ""sv;
-  std::string cmd = absl::StrCat("FT.SEARCH ", idx, " ", query, " CSS ", args_str, with_sortkeys);
+bool ParseFtSearchCSSResponse(const RESPObj& resp_obj, const SearchParams& params,
+                              SearchResult* result) {
+  RESPIterator it{resp_obj};
+  result->total_hits = it.Next<uint64_t>();
 
-  util::fb2::Mutex mu_;
-  auto req_future = cluster::Coordinator::Current().DispatchAll(cmd, [&](const RESPObj& resp_obj) {
-    RESPIterator it{resp_obj};
-    const auto size = it.Next<uint64_t>();
+  const bool read_scores = params.with_scores || params.scorer;
+  const bool read_sortkeys = params.sort_option.has_value() || params.with_sortkeys;
+  while (it.HasNext()) {
+    auto key = it.Next<std::string>();
+    if (it.HasError())
+      break;
 
-    std::lock_guard lock{mu_};
-    auto& res = results.emplace_back();
-    results.back().total_hits = size;
+    auto& search_doc = result->docs.emplace_back();
+    search_doc.key = std::move(key);
 
-    while (it.HasNext()) {
-      auto& search_doc = res.docs.emplace_back();
-      search_doc.key = it.Next<std::string>();
-      if (sorted) {
-        auto sort_score = it.Next<std::string_view>();
-        if (sort_score.empty() || (sort_score[0] != '#' && sort_score[0] != '$')) {
+    if (read_scores) {
+      double text_score = 0;
+      auto score = it.Next<std::string_view>();
+      if (it.HasError() || !ParseDouble(score, &text_score)) {
+        it.SetError();
+        break;
+      }
+      search_doc.text_score = static_cast<float>(text_score);
+    }
+
+    if (read_sortkeys) {
+      auto sort_obj = it.Next<RESPObj>();
+      if (it.HasError())
+        break;
+
+      if (sort_obj.GetType() != RESPObj::Type::NIL) {
+        auto sort_score = sort_obj.As<std::string_view>();
+        if (!sort_score || sort_score->empty() ||
+            ((*sort_score)[0] != '#' && (*sort_score)[0] != '$')) {
           it.SetError();
           break;
         }
-        if (sort_score[0] == '#') {  // It's a double
+
+        if ((*sort_score)[0] == '#') {  // It's a double
           double sort_res = 0;
-          if (ParseDouble(sort_score.substr(1), &sort_res)) {
+          if (ParseDouble(sort_score->substr(1), &sort_res)) {
             search_doc.sort_score = sort_res;
           } else {
             it.SetError();
             break;
           }
         } else {  // It's a string
-          search_doc.sort_score = std::string(sort_score.substr(1));
+          search_doc.sort_score = std::string(sort_score->substr(1));
         }
       }
+    }
 
-      for (auto arr_fields = it.Next<RESPIterator>(); arr_fields.HasNext();) {
+    if (!params.IdsOnly()) {
+      auto arr_fields = it.Next<RESPIterator>();
+      if (it.HasError())
+        break;
+
+      while (arr_fields.HasNext()) {
         auto [key, value] = arr_fields.Next<std::string, std::string>();
         search_doc.values.emplace(std::move(key), std::move(value));
       }
+      if (arr_fields.HasError()) {
+        it.SetError();
+        break;
+      }
     }
-    if (it.HasError()) {
+  }
+
+  return !it.HasError();
+}
+
+static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view query,
+                                        std::string_view args_str, const SearchParams& params) {
+  vector<SearchResult> results;
+  const bool sorted = params.sort_option.has_value();
+  // SCORER needs hidden scores for coordinator-side merge ordering, even when the client did not
+  // request WITHSCORES in the final reply.
+  const std::string_view with_scores =
+      params.scorer && !params.with_scores ? " WITHSCORES"sv : ""sv;
+  const std::string_view with_sortkeys = sorted && !params.with_sortkeys ? " WITHSORTKEYS"sv : ""sv;
+  std::string cmd =
+      absl::StrCat("FT.SEARCH ", idx, " ", query, " CSS ", args_str, with_scores, with_sortkeys);
+
+  util::fb2::Mutex mu_;
+  auto req_future = cluster::Coordinator::Current().DispatchAll(cmd, [&](const RESPObj& resp_obj) {
+    std::lock_guard lock{mu_};
+    if (!ParseFtSearchCSSResponse(resp_obj, params, &results.emplace_back())) {
       LOG(ERROR) << "FT.SEARCH CSS reply parsing error: " << resp_obj;
     }
   });
@@ -2803,9 +2846,6 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   vector<SearchResult> css_docs;
   if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
-    if (params->with_scores || params->scorer) {
-      return builder->SendError("WITHSCORES/SCORER is not yet supported in cluster search mode");
-    }
     std::string args_str = absl::StrJoin(args.subspan(2), " ");
 
     css_docs = FtSearchCSS(index_name, query_str, args_str, *params);

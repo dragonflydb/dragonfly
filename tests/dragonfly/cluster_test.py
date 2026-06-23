@@ -3522,6 +3522,73 @@ async def test_SortedSearchRequest(df_factory: DflyInstanceFactory):
     await asyncio.gather(*(search_test() for _ in range(2)))
 
 
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "cluster_search": "yes"})
+async def test_SearchWithScoresRequest(df_factory: DflyInstanceFactory):
+    """
+    Create cluster of 3 nodes.
+    Execute Search request with scores on documents spread across the cluster.
+    """
+
+    _, nodes = await create_cluster(
+        df_factory, 3, vmodule="coordinator=2,search_family=3,protocol_client=3"
+    )
+    nodes[0].slots = [(0, 5259)]
+    nodes[1].slots = [(5260, 10519)]
+    nodes[2].slots = [(10520, 16383)]
+
+    await apply_config(nodes)
+
+    assert (
+        await nodes[0].client.execute_command(
+            "FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"
+        )
+        == "OK"
+    )
+
+    for node in nodes:
+        await wait_for_ft_index_creation(node.client, "idx")
+
+    def key_for_node(prefix, node):
+        for i in itertools.count():
+            key = f"{prefix}:{i}"
+            if any(start <= key_slot(key) <= end for start, end in node.slots):
+                return key
+
+    docs = [
+        (nodes[0], key_for_node("score-rich", nodes[0]), "hello hello hello"),
+        (nodes[1], key_for_node("score-mid", nodes[1]), "hello hello"),
+        (nodes[2], key_for_node("score-plain", nodes[2]), "hello"),
+    ]
+
+    for node, key, title in docs:
+        assert await node.client.execute_command("HSET", key, "title", title) == 1
+
+    with_scores = await nodes[0].client.execute_command(
+        "FT.SEARCH", "idx", "hello", "WITHSCORES", "RETURN", "1", "title", "LIMIT", "0", "10"
+    )
+    assert with_scores[0] == len(docs)
+
+    score_by_key = {}
+    keys_by_score = []
+    for i in range(1, len(with_scores), 3):
+        key = with_scores[i]
+        score = float(with_scores[i + 1])
+        fields = dict(zip(with_scores[i + 2][0::2], with_scores[i + 2][1::2]))
+        assert fields["title"] in {title for _, _, title in docs}
+        assert score > 0
+        score_by_key[key] = score
+        keys_by_score.append(key)
+
+    assert set(score_by_key) == {key for _, key, _ in docs}
+    assert keys_by_score == sorted(keys_by_score, key=lambda key: (-score_by_key[key], key))
+
+    scorer_only = await nodes[0].client.execute_command(
+        "FT.SEARCH", "idx", "hello", "SCORER", "BM25STD", "RETURN", "1", "title", "LIMIT", "0", "10"
+    )
+    assert scorer_only[0] == len(docs)
+    assert [scorer_only[i] for i in range(1, len(scorer_only), 2)] == keys_by_score
+
+
 async def verify_keys_match_number_of_index_docs(client, expected_num_keys):
     # Get number of docs in index
     index_info = await client.execute_command("FT.INFO idx")
