@@ -30,8 +30,13 @@ scrape_configs:
   - job_name: dragonfly
     scrape_interval: 1s
     static_configs:
+      # ok_backend serves /metrics on the MAIN port only (no admin-port listener),
+      # so scrape 6379. The full `dragonfly` binary also exposes it on --admin_port (8099).
+      #- targets: ['100.48.169.205:6379']
       - targets: ['host.docker.internal:6379']
 
+        labels:
+          instance: dragonfly
   - job_name: 'prometheus'
     scrape_interval: 1s
     static_configs:
