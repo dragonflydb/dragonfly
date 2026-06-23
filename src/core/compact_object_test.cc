@@ -14,6 +14,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/cms.h"
 #include "core/cuckoo.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
@@ -1584,11 +1585,16 @@ static void BM_LpString2Int(benchmark::State& state) {
 }
 BENCHMARK(BM_LpString2Int)->Arg(1)->Arg(2);
 
-TEST_F(CompactObjectTest, CMSHugeAllocLeavesNoOrphan) {
+// CMS's constructor never allocates (CompactObj::SetCMS adopts a trivially-constructed CMS
+// before calling CMS::Init()), so a huge alloc failure is left as a valid, empty, correctly
+// tagged CMS object rather than an orphaned/corrupted union.
+TEST_F(CompactObjectTest, CMSHugeAllocLeavesValidEmptyObject) {
   constexpr uint32_t kHugeWidth = std::numeric_limits<uint32_t>::max();
   constexpr uint32_t kHugeDepth = 10000;
   EXPECT_THROW(cobj_.SetCMS(kHugeWidth, kHugeDepth), std::bad_alloc);
-  EXPECT_NE(cobj_.ObjType(), OBJ_CMS);
+  EXPECT_EQ(cobj_.ObjType(), OBJ_CMS);
+  EXPECT_EQ(cobj_.GetCMS()->NumCounters(), 0u);
+  EXPECT_NO_THROW(cobj_.MallocUsed());
 }
 
 TEST_F(CompactObjectTest, CMSHugeAllocLeavesNoLeak) {
@@ -1599,6 +1605,7 @@ TEST_F(CompactObjectTest, CMSHugeAllocLeavesNoLeak) {
   const size_t used_before = mr->used();
 
   EXPECT_THROW(cobj_.SetCMS(kHugeWidth, kHugeDepth), std::bad_alloc);
+  cobj_.Reset();
 
   EXPECT_EQ(mr->used(), used_before);
 }

@@ -9,9 +9,20 @@ namespace dfly {
 
 using namespace std;
 
+namespace {
+CuckooFilter MakeCuckooFilter(uint64_t capacity, std::pmr::memory_resource* mr,
+                              uint8_t slots_per_bucket = CuckooFilter::kDefaultSlotsPerBucket,
+                              uint16_t max_iterations = CuckooFilter::kDefaultMaxIterations,
+                              uint16_t expansion = CuckooFilter::kDefaultExpansion) {
+  CuckooFilter cf(mr);
+  cf.Init(capacity, slots_per_bucket, max_iterations, expansion);
+  return cf;
+}
+}  // namespace
+
 class CuckooFilterTest : public ::testing::Test {
  protected:
-  CuckooFilterTest() : cf_(128, std::pmr::get_default_resource()) {
+  CuckooFilterTest() : cf_(MakeCuckooFilter(128, std::pmr::get_default_resource())) {
   }
 
   CuckooFilter cf_;
@@ -73,9 +84,10 @@ TEST_F(CuckooFilterTest, FillBeyondCapacityExpands) {
 
 TEST_F(CuckooFilterTest, NoExpansionRejectWhenFull) {
   // A small filter with expansion=0 must reject inserts once full.
-  CuckooFilter small(4, std::pmr::get_default_resource(), CuckooFilter::kDefaultSlotsPerBucket,
-                     CuckooFilter::kDefaultMaxIterations,
-                     /*expansion=*/0);
+  CuckooFilter small =
+      MakeCuckooFilter(4, std::pmr::get_default_resource(), CuckooFilter::kDefaultSlotsPerBucket,
+                       CuckooFilter::kDefaultMaxIterations,
+                       /*expansion=*/0);
 
   size_t inserted = 0;
   for (size_t i = 0; i < 1000; ++i) {

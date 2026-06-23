@@ -44,20 +44,33 @@ uint64_t AltIndex(uint8_t fp, uint64_t index) {
 
 }  // namespace
 
-CuckooFilter::CuckooFilter(uint64_t capacity, std::pmr::memory_resource* mr,
-                           uint8_t slots_per_bucket, uint16_t max_iterations, uint16_t expansion)
-    : slots_per_bucket_(slots_per_bucket),
-      max_iterations_(max_iterations),
-      expansion_(expansion ? NextPowerOfTwo(expansion) : 0),
-      mr_(mr),
-      filters_(mr) {
+CuckooFilter::CuckooFilter(std::pmr::memory_resource* mr) : mr_(mr), filters_(mr) {
   DCHECK(mr);
-  DCHECK_GT(slots_per_bucket_, 0);
-  num_buckets_ = slots_per_bucket_ ? NextPowerOfTwo(capacity / slots_per_bucket_) : 1;
-  if (num_buckets_ == 0)
-    num_buckets_ = 1;
-  DCHECK(IsPowerOfTwo(num_buckets_));
-  AddNewSubFilter();
+}
+
+void CuckooFilter::Init(uint64_t capacity, uint8_t slots_per_bucket, uint16_t max_iterations,
+                        uint16_t expansion) {
+  DCHECK_GT(slots_per_bucket, 0);
+  uint16_t new_expansion = expansion ? NextPowerOfTwo(expansion) : 0;
+  uint64_t new_num_buckets = slots_per_bucket ? NextPowerOfTwo(capacity / slots_per_bucket) : 1;
+  if (new_num_buckets == 0)
+    new_num_buckets = 1;
+  DCHECK(IsPowerOfTwo(new_num_buckets));
+
+  // Build the first SubFilter before touching any existing state: if this throws,
+  // *this is left completely unchanged.
+  SubFilter sf(new_num_buckets * slots_per_bucket, uint8_t{0}, mr_);
+
+  // Nothing below can throw.
+  filters_.clear();
+  filters_.push_back(std::move(sf));
+  slots_per_bucket_ = slots_per_bucket;
+  max_iterations_ = max_iterations;
+  expansion_ = new_expansion;
+  num_buckets_ = new_num_buckets;
+  num_items_ = 0;
+  num_deletes_ = 0;
+  num_ko_inserts_ = 0;
 }
 
 bool CuckooFilter::Insert(uint64_t hash) {
