@@ -6,6 +6,7 @@
 
 #include <absl/strings/str_join.h>
 
+#include <functional>
 #include <memory>
 #include <queue>
 #include <ranges>
@@ -827,50 +828,50 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
   DCHECK_GT(limit, 0u) << "Limit=0 still has O(ids->size()) complexity";
 
   using QPair = std::pair<search::SortableValue, DocId>;
-  // priority_queue comparator: q.top() is the worst kept entry, evicted first when a better
-  // candidate arrives. better(a, b) is true when a should rank before b. Docs missing the sort
-  // field hold a monostate value and always rank last, in both directions. Cases (a, b -> result):
-  //   present, present -> order by (value, doc id): a < b for ASC, b < a for DESC
-  //   present, missing -> true   (present ranks before missing)
-  //   missing, present -> false  (missing ranks after present)
-  //   missing, missing -> order by (value, doc id); values are equal, so deterministic by doc id
-  auto better = [order = sort.order](const QPair& a, const QPair& b) {
-    bool a_null = std::holds_alternative<std::monostate>(a.first);
-    bool b_null = std::holds_alternative<std::monostate>(b.first);
-    if (a_null != b_null)
-      return b_null;
-    return order == SortOrder::ASC ? a < b : b < a;
-  };
-  std::priority_queue<QPair, std::vector<QPair>, decltype(better)> q(better);
 
-  // Iterate over all documents, extract the sortable field (monostate if absent) and update the
-  // queue, keeping the top-k by sort order.
-  for (DocId id : *ids) {
-    auto entry = LoadEntry(id, op_args);
-    if (!entry)
-      continue;
+  // ValueCmp (std::less/std::greater) selects the direction for present values; docs missing the
+  // sort field hold a monostate value and always rank last, independent of direction, so that rule
+  // wraps ValueCmp. ranks_before(a, b) is true when a should rank before b; the priority queue
+  // keeps the max (worst) on top, so it is evicted first when a better candidate arrives.
+  auto select = [&](auto value_cmp) {
+    auto ranks_before = [value_cmp](const QPair& a, const QPair& b) {
+      bool a_missing = std::holds_alternative<std::monostate>(a.first);
+      bool b_missing = std::holds_alternative<std::monostate>(b.first);
+      if (a_missing != b_missing)
+        return !a_missing;  // present ranks before missing
+      return value_cmp(a, b);
+    };
+    std::priority_queue<QPair, std::vector<QPair>, decltype(ranks_before)> q(ranks_before);
 
-    search::SortableValue value = std::monostate{};
-    if (auto result = entry->second->Serialize(base_->schema, {sort.field}); !result.empty())
-      value = std::move(result.begin()->second);
+    for (DocId id : *ids) {
+      auto entry = LoadEntry(id, op_args);
+      if (!entry)
+        continue;
 
-    QPair candidate{std::move(value), id};
-    if (q.size() < limit || better(candidate, q.top())) {
-      if (q.size() >= limit)
-        q.pop();
-      q.push(std::move(candidate));
+      search::SortableValue value = std::monostate{};
+      if (auto result = entry->second->Serialize(base_->schema, {sort.field}); !result.empty())
+        value = std::move(result.begin()->second);
+
+      QPair candidate{std::move(value), id};
+      if (q.size() < limit || ranks_before(candidate, q.top())) {
+        if (q.size() >= limit)
+          q.pop();
+        q.push(std::move(candidate));
+      }
     }
-  }
 
-  // Reorder ids and collect scores
-  vector<search::SortableValue> out(q.size());
-  for (int i = 0; !q.empty(); i++) {
-    auto [v, id] = q.top();
-    (*ids)[i] = id;
-    out[i] = std::move(v);
-    q.pop();
-  }
-  return out;
+    // Reorder ids and collect scores
+    vector<search::SortableValue> out(q.size());
+    for (int i = 0; !q.empty(); i++) {
+      auto [v, id] = q.top();
+      (*ids)[i] = id;
+      out[i] = std::move(v);
+      q.pop();
+    }
+    return out;
+  };
+
+  return sort.order == SortOrder::ASC ? select(std::less<QPair>{}) : select(std::greater<QPair>{});
 }
 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,

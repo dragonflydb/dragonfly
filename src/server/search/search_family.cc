@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cmath>
 #include <exception>
+#include <functional>
 #include <variant>
 #include <vector>
 
@@ -1157,22 +1158,25 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
   partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
 }
 
-// Global SORTBY merge across shards. cb(l, r) is true when l should rank before r. Docs missing the
-// sort field hold a monostate sort_score and always rank last, in both directions (a plain variant
-// comparison would sort monostate first in ASC). Cases (l, r -> result):
-//   present, present -> order by value: l < r for ASC, r < l for DESC
-//   present, missing -> true   (present ranks before missing)
-//   missing, present -> false  (missing ranks after present)
-//   missing, missing -> false  (equal)
+// Global SORTBY merge across shards. ValueCmp (std::less/std::greater) selects the direction for
+// present values; docs missing the field hold a monostate sort_score and always rank last,
+// independent of direction, so that rule wraps ValueCmp (a plain variant comparison would sort
+// monostate first in ASC). ranks_before(l, r) is true when l should be ordered before r.
 void PartialSortBySortScore(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder order) {
-  auto cb = [order](SerializedSearchDoc* l, SerializedSearchDoc* r) {
-    bool l_null = std::holds_alternative<std::monostate>(l->sort_score);
-    bool r_null = std::holds_alternative<std::monostate>(r->sort_score);
-    if (l_null != r_null)
-      return r_null;
-    return order == SortOrder::ASC ? l->sort_score < r->sort_score : r->sort_score < l->sort_score;
+  auto run = [&](auto value_cmp) {
+    auto ranks_before = [value_cmp](SerializedSearchDoc* l, SerializedSearchDoc* r) {
+      bool l_missing = std::holds_alternative<std::monostate>(l->sort_score);
+      bool r_missing = std::holds_alternative<std::monostate>(r->sort_score);
+      if (l_missing != r_missing)
+        return !l_missing;  // present ranks before missing
+      return value_cmp(l->sort_score, r->sort_score);
+    };
+    partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), ranks_before);
   };
-  partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
+  if (order == SortOrder::ASC)
+    run(std::less<>{});
+  else
+    run(std::greater<>{});
 }
 
 void SearchReply(const SearchParams& params,
