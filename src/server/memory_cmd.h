@@ -15,7 +15,7 @@ class MemoryCmd {
  public:
   MemoryCmd(ServerFamily* owner, CommandContext* cmd_cntx);
 
-  void Run(CmdArgList args);
+  void Run(facade::CmdArgParser parser);
 
  private:
   void Stats();

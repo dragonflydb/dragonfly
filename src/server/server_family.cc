@@ -2937,10 +2937,10 @@ void ServerFamily::Debug(CmdArgList args, CommandContext* cmd_cntx) {
   return dbg_cmd.Run(args, cmd_cntx);
 }
 
-void ServerFamily::Memory(CmdArgList args, CommandContext* cmd_cntx) {
+void ServerFamily::Memory(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   MemoryCmd mem_cmd{this, cmd_cntx};
 
-  return mem_cmd.Run(args);
+  return mem_cmd.Run(parser);
 }
 
 void ServerFamily::Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -4421,8 +4421,8 @@ void ServerFamily::Role(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 }
 
-void ServerFamily::Script(CmdArgList args, CommandContext* cmd_cntx) {
-  script_mgr_->Run(args, cmd_cntx->tx(), cmd_cntx->rb(), cmd_cntx->server_conn_cntx());
+void ServerFamily::Script(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  script_mgr_->Run(parser, cmd_cntx->tx(), cmd_cntx->rb(), cmd_cntx->server_conn_cntx());
 }
 
 void ServerFamily::LastSave(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -4492,8 +4492,8 @@ void ServerFamily::ShutdownCmd(facade::CmdArgParser parser, CommandContext* cmd_
   facade::g_shutdown_fast.store(false, std::memory_order_seq_cst);
 }
 
-void ServerFamily::Dfly(CmdArgList args, CommandContext* cmd_cntx) {
-  dfly_cmd_->Run(args, cmd_cntx);
+void ServerFamily::Dfly(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  dfly_cmd_->Run(parser, cmd_cntx);
 }
 
 void ServerFamily::SlowLog(CmdArgList args, CommandContext* cmd_cntx) {

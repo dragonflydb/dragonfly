@@ -371,8 +371,8 @@ class ServerFamily {
   void Config(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void DbSize(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Debug(CmdArgList args, CommandContext* cmd_cntx);
-  void Dfly(CmdArgList args, CommandContext* cmd_cntx);
-  void Memory(CmdArgList args, CommandContext* cmd_cntx);
+  void Dfly(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Memory(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void FlushDb(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Info(facade::CmdArgParser parser, CommandContext* cmd_cntx)
@@ -389,7 +389,7 @@ class ServerFamily {
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Save(CmdArgList args, CommandContext* cmd_cntx);
   void BgSave(CmdArgList args, CommandContext* cmd_cntx);
-  void Script(CmdArgList args, CommandContext* cmd_cntx);
+  void Script(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void SlowLog(CmdArgList args, CommandContext* cmd_cntx);
   void Module(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 

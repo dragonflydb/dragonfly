@@ -150,40 +150,40 @@ void DflyCmd::ReplicaInfo::Cancel() {
 DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
 }
 
-void DflyCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
-  DCHECK_GE(args.size(), 1u);
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+void DflyCmd::Run(CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Remaining-arg counts below are relative to the position after the subcommand token.
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next<string_view>());
 
   if (sub_cmd == "THREAD") {
-    return Thread(args, cmd_cntx);
+    return Thread(parser, cmd_cntx);
   }
 
-  if (sub_cmd == "FLOW" && (args.size() >= 4 && args.size() <= 6)) {
-    return Flow(args, cmd_cntx);
+  if (sub_cmd == "FLOW" && parser.HasAtLeast(3) && !parser.HasAtLeast(6)) {
+    return Flow(parser, cmd_cntx);
   }
 
-  if (sub_cmd == "SYNC" && args.size() == 2) {
-    return Sync(args, cmd_cntx);
+  if (sub_cmd == "SYNC" && parser.HasAtLeast(1) && !parser.HasAtLeast(2)) {
+    return Sync(parser, cmd_cntx);
   }
 
-  if (sub_cmd == "STARTSTABLE" && args.size() == 2) {
-    return StartStable(args, cmd_cntx);
+  if (sub_cmd == "STARTSTABLE" && parser.HasAtLeast(1) && !parser.HasAtLeast(2)) {
+    return StartStable(parser, cmd_cntx);
   }
 
-  if (sub_cmd == "TAKEOVER" && (args.size() == 3 || args.size() == 4)) {
-    return TakeOver(args, cmd_cntx);
+  if (sub_cmd == "TAKEOVER" && parser.HasAtLeast(2) && !parser.HasAtLeast(4)) {
+    return TakeOver(parser, cmd_cntx);
   }
 
   if (sub_cmd == "EXPIRE") {
-    return Expire(args, cmd_cntx);
+    return Expire(parser, cmd_cntx);
   }
 
-  if (sub_cmd == "REPLICAOFFSET" && args.size() == 1) {
-    return ReplicaOffset(args, cmd_cntx);
+  if (sub_cmd == "REPLICAOFFSET" && !parser.HasNext()) {
+    return ReplicaOffset(parser, cmd_cntx);
   }
 
   if (sub_cmd == "LOAD") {
-    return Load(args, cmd_cntx);
+    return Load(parser, cmd_cntx);
   }
 
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
@@ -212,11 +212,11 @@ void DflyCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(kSyntaxErr);
 }
 
-void DflyCmd::Thread(CmdArgList args, CommandContext* cmd_cntx) {
+void DflyCmd::Thread(CmdArgParser parser, CommandContext* cmd_cntx) {
   util::ProactorPool* pool = shard_set->pool();
 
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
-  if (args.size() == 1) {  // DFLY THREAD : returns connection thread index and number of threads.
+  if (!parser.HasNext()) {  // DFLY THREAD : returns connection thread index and number of threads.
     rb->StartArray(2);
     rb->SendLong(ProactorBase::me()->GetPoolIndex());
     rb->SendLong(long(pool->size()));
@@ -224,9 +224,8 @@ void DflyCmd::Thread(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   // DFLY THREAD to_thread : migrates current connection to a different thread.
-  string_view arg = ArgS(args, 1);
-  unsigned num_thread;
-  if (!absl::SimpleAtoi(arg, &num_thread)) {
+  unsigned num_thread = parser.Next<unsigned>();
+  if (parser.TakeError()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
@@ -248,22 +247,22 @@ void DflyCmd::Thread(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(kInvalidIntErr);
 }
 
-void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view master_id = ArgS(args, 1);
-  string_view sync_id_str = ArgS(args, 2);
-  string_view flow_id_str = ArgS(args, 3);
+void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view master_id = parser.Next<string_view>();
+  string_view sync_id_str = parser.Next<string_view>();
+  string_view flow_id_str = parser.Next<string_view>();
 
   std::optional<LSN> seqid;
   std::optional<string> last_master_id;
   std::optional<string> last_master_lsn;
-  if (args.size() == 5) {
-    seqid.emplace();
-    if (!absl::SimpleAtoi(ArgS(args, 4), &seqid.value())) {
+  if (parser.HasAtLeast(2)) {
+    last_master_id = parser.Next<string>();
+    last_master_lsn = parser.Next<string>();
+  } else if (parser.HasNext()) {
+    seqid = parser.Next<LSN>();
+    if (parser.TakeError()) {
       return cmd_cntx->SendError(facade::kInvalidIntErr);
     }
-  } else if (args.size() == 6) {
-    last_master_id = ArgS(args, 4);
-    last_master_lsn = ArgS(args, 5);
   }
 
   VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
@@ -350,8 +349,8 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendSimpleString(eof_token);
 }
 
-void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view sync_id_str = ArgS(args, 1);
+void DflyCmd::Sync(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view sync_id_str = parser.Next<string_view>();
 
   VLOG(1) << "Got DFLY SYNC " << sync_id_str;
 
@@ -399,8 +398,8 @@ void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendOk();
 }
 
-void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view sync_id_str = ArgS(args, 1);
+void DflyCmd::StartStable(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view sync_id_str = parser.Next<string_view>();
 
   VLOG(1) << "Got DFLY STARTSTABLE " << sync_id_str;
 
@@ -499,9 +498,7 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
 // DFLY TAKEOVER <timeout_sec> [SAVE] <sync_id>
 // timeout_sec - number of seconds to wait for TAKEOVER to converge.
 // SAVE option is used only by tests.
-void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
-  parser.Next();
+void DflyCmd::TakeOver(CmdArgParser parser, CommandContext* cmd_cntx) {
   float timeout = std::ceil(parser.Next<float>());
   if (timeout < 0) {
     // allow 0s timeout for tests.
@@ -639,7 +636,7 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   sf_->service().cluster_family().ReconcileMasterSlots(replica_ptr->GetId());
 }
 
-void DflyCmd::Expire(CmdArgList args, CommandContext* cmd_cntx) {
+void DflyCmd::Expire(CmdArgParser parser, CommandContext* cmd_cntx) {
   cmd_cntx->tx()->ScheduleSingleHop([](Transaction* t, EngineShard* shard) {
     t->GetDbSlice(shard->shard_id()).ExpireAllIfNeeded();
     return OpStatus::OK;
@@ -648,7 +645,7 @@ void DflyCmd::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendOk();
 }
 
-void DflyCmd::ReplicaOffset(CmdArgList args, CommandContext* cmd_cntx) {
+void DflyCmd::ReplicaOffset(CmdArgParser parser, CommandContext* cmd_cntx) {
   std::vector<LSN> lsns(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     lsns[shard->shard_id()] = shard->journal() ? journal::GetLsn() : 0;
@@ -658,9 +655,7 @@ void DflyCmd::ReplicaOffset(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendLongArr(absl::MakeConstSpan(lsns));
 }
 
-void DflyCmd::Load(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
-  parser.ExpectTag("LOAD");
+void DflyCmd::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
   string filename = parser.Next<string>();
   ServerFamily::LoadExistingKeys existing_keys = ServerFamily::LoadExistingKeys::kFail;
 
