@@ -123,7 +123,7 @@ class QList {
     malloc_size_ += delta;
   }
 
-  void AddReportedMemorySizeDelta(size_t delta) {
+  void AddReportedMemorySizeDelta(int32_t delta) {
     if (tiering_enabled_) {
       tiering_params_->reported_memory_size_delta += delta;
     }

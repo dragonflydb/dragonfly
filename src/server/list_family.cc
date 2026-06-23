@@ -271,9 +271,9 @@ class ListWrapper {
     return VisitMut([&](auto& list) { return ReplaceInternal(index, elem, list); });
   }
 
-  int64_t ReportedMemorySizeDelta() {
-    return visit(Overload{[](QList* ql) -> int64_t { return ql->TakeReportedMemorySizeDelta(); },
-                          [](const LP&) -> int64_t { return 0; }},
+  int32_t ReportedMemorySizeDelta() {
+    return visit(Overload{[](QList* ql) -> int32_t { return ql->TakeReportedMemorySizeDelta(); },
+                          [](const LP&) -> int32_t { return 0; }},
                  impl_);
   }
 

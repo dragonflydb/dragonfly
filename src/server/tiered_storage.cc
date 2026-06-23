@@ -299,8 +299,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
     // Adjust parent QList node malloc size / number of offloaded nodes.
     ql->AdjustMallocSize(-segment.length);
+    ql->AddReportedMemorySizeDelta(-static_cast<int32_t>(segment.length));
     node->SetExternal(segment.offset, segment.length);
-
     stats->AddTypeMemoryUsage(OBJ_LIST, -segment.length);
   }
 

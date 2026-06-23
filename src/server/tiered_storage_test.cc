@@ -1117,7 +1117,6 @@ TEST_F(ListNodeTieringTest, ListTieringMemoryAccounting) {
   EXPECT_GT(GetMetrics().tiered_stats.total_fetches, fetches_before);
   expect_list_memory(kReadWritListeKey);
 
-  fetches_before = GetMetrics().tiered_stats.total_fetches;
   EXPECT_EQ(Run({"LPOP", kReadWritListeKey}), BuildString(kNodeSize, 'a'));
   expect_list_memory(kReadWritListeKey);
 }
