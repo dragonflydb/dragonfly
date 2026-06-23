@@ -61,6 +61,8 @@ jobs:
           build-folder-name: build
           filter: ${{ matrix.build-type == 'Release' && 'not empty' || 'not opt_only' }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           # Chain ternary oprator of the form (which can be nested)
           # (expression == condition && <true expression> || <false expression>)
           epoll: ${{ matrix.proactor == 'Epoll' && 'epoll' || 'iouring' }}

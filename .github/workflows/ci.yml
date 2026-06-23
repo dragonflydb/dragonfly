@@ -34,6 +34,14 @@ jobs:
             --from-ref ${{ github.event.pull_request.base.sha }}
             --to-ref ${{ github.event.pull_request.head.sha }}
   build:
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+
+    env:
+      CPP_JUNIT_DIR: ${{ github.workspace }}/test-results/junit/cpp
+
     strategy:
       matrix:
         # Test of these containers
@@ -120,23 +128,40 @@ jobs:
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
+          JUNIT_DIR="${CPP_JUNIT_DIR}"
+          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
+          GTEST_IOURING_DIR="${JUNIT_DIR}/gtest/iouring"
+          GTEST_MANUAL_DIR="${JUNIT_DIR}/gtest/iouring-manual"
+          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_IOURING_DIR}" "${GTEST_MANUAL_DIR}"
 
+          run_manual_gtest() {
+            GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" timeout 5m "$@"
+          }
+
+          GTEST_OUTPUT="xml:${GTEST_IOURING_DIR}/" \
           GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
-          FLAGS_fiber_safety_margin=4096 timeout 20m ctest -V -L DFLY -E allocation_tracker_test
+          FLAGS_fiber_safety_margin=4096 timeout 20m ctest -V -L DFLY -E allocation_tracker_test \
+            --output-junit "${CTEST_JUNIT_DIR}/iouring.xml"
 
           # Run allocation tracker test separately without alsologtostderr because it generates a TON of logs.
-          FLAGS_fiber_safety_margin=4096 timeout 5m ./allocation_tracker_test
+          GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" FLAGS_fiber_safety_margin=4096 \
+            timeout 5m ./allocation_tracker_test
 
-          timeout 5m ./dragonfly_test
-          timeout 5m ./json_family_test --jsonpathv2=false
-          timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
-          timeout 5m ./search_test --use_numeric_range_tree=false
-          timeout 5m ./search_family_test --use_numeric_range_tree=false
+          run_manual_gtest ./dragonfly_test
+          run_manual_gtest ./json_family_test --jsonpathv2=false
+          run_manual_gtest ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
+          run_manual_gtest ./search_test --use_numeric_range_tree=false
+          run_manual_gtest ./search_family_test --use_numeric_range_tree=false
 
 
       - name: C++ Unit Tests - Epoll
         run: |
           cd ${GITHUB_WORKSPACE}/build
+          JUNIT_DIR="${CPP_JUNIT_DIR}"
+          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
+          GTEST_EPOLL_DIR="${JUNIT_DIR}/gtest/epoll"
+          GTEST_MANUAL_DIR="${JUNIT_DIR}/gtest/epoll-manual"
+          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_EPOLL_DIR}" "${GTEST_MANUAL_DIR}"
 
           # Create a rule that automatically prints stacktrace upon segfault
           cat > ./init.gdb <<EOF
@@ -146,21 +171,37 @@ jobs:
           end
           EOF
 
-          gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
+          GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" \
+            gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
+          GTEST_OUTPUT="xml:${GTEST_EPOLL_DIR}/" \
           GLOG_alsologtostderr=1 FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
-          timeout 20m ctest -V -L DFLY -E allocation_tracker_test
+          timeout 20m ctest -V -L DFLY -E allocation_tracker_test \
+            --output-junit "${CTEST_JUNIT_DIR}/epoll.xml"
 
-          FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
+          GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" FLAGS_fiber_safety_margin=4096 \
+            FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
 
       - name: C++ Unit Tests - IoUring with cluster mode
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
+          JUNIT_DIR="${CPP_JUNIT_DIR}"
+          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
+          GTEST_CLUSTER_DIR="${JUNIT_DIR}/gtest/cluster"
+          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_CLUSTER_DIR}"
+          GTEST_OUTPUT="xml:${GTEST_CLUSTER_DIR}/" FLAGS_fiber_safety_margin=4096 \
+            FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY \
+            --output-junit "${CTEST_JUNIT_DIR}/cluster.xml"
 
       - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
+          JUNIT_DIR="${CPP_JUNIT_DIR}"
+          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
+          GTEST_CLUSTER_DIR="${JUNIT_DIR}/gtest/cluster-hashtags"
+          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_CLUSTER_DIR}"
+          GTEST_OUTPUT="xml:${GTEST_CLUSTER_DIR}/" FLAGS_fiber_safety_margin=4096 \
+            FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY \
+            --output-junit "${CTEST_JUNIT_DIR}/cluster-hashtags.xml"
 
       - name: Upload unit logs on failure
         if: failure()
@@ -179,6 +220,8 @@ jobs:
           # Non-release build will not run tests marked as opt_only
           # "not empty" string is needed for release build because pytest command can not get empty string for filter
           filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
+          junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           azure-container: ${{ secrets.AZURE_REGTEST_CONTAINER }}
           azure-storage-connection-string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
 
@@ -188,6 +231,40 @@ jobs:
         with:
           name: regression_logs
           path: /tmp/failed/*
+
+      - name: Prepare JUnit artifact name
+        if: always()
+        run: |
+          NAME="junit-ci-${{ matrix.container }}-${{ matrix.build-type }}-${{ matrix.compiler.cxx }}-${{ matrix.sanitizers }}"
+          SAFE_NAME=$(printf '%s' "${NAME}" | tr -c 'A-Za-z0-9._-' '-' | sed -E 's/-+/-/g; s/^-//; s/-$//')
+          echo "CI_JUNIT_ARTIFACT=${SAFE_NAME}" >> "${GITHUB_ENV}"
+
+      - name: Upload JUnit test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.CI_JUNIT_ARTIFACT }}
+          path: ${{ github.workspace }}/test-results/junit/**/*.xml
+          if-no-files-found: ignore
+
+      - name: Refresh AWS credentials for C++ JUnit upload
+        if: always() && github.repository_owner == 'dragonflydb' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+          unset-current-credentials: true
+
+      - name: Upload C++ JUnit results to S3
+        if: always() && github.repository_owner == 'dragonflydb' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          S3_REGTEST_BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
+        run: |
+          JUNIT_DIR="${CPP_JUNIT_DIR}"
+          MATRIX_NAME="container-${{ matrix.container }}-build-${{ matrix.build-type }}-compiler-${{ matrix.compiler.cxx }}-sanitizers-${{ matrix.sanitizers }}"
+
+          "${GITHUB_WORKSPACE}/.github/scripts/upload-junit-to-s3.sh" \
+            "${JUNIT_DIR}" "${S3_REGTEST_BUCKET}" "cpp" "${MATRIX_NAME}" "C++ JUnit"
 
       - name: Upload dragonfly binary for cgroup test
         if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Release' && matrix.sanitizers == 'NoSanitizers' && matrix.compiler.cxx == 'g++'
@@ -326,6 +403,8 @@ jobs:
           run-only-on-ubuntu-latest: true
           filter: large
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           azure-container: ${{ secrets.AZURE_REGTEST_CONTAINER }}
           azure-storage-connection-string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
 

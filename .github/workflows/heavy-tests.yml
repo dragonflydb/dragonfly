@@ -62,6 +62,8 @@ jobs:
           build-folder-name: build
           filter: large
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
 
       - name: Upload logs on failure
         if: failure()
