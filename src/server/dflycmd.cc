@@ -625,10 +625,9 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   // For non-cluster mode we shutdown
   if (detail::cluster_mode != detail::ClusterMode::kRealCluster) {
     VLOG(1) << "Takeover accepted, shutting down.";
-    std::string save_arg = "NOSAVE";
-    MutableSlice sargs(save_arg);
     CommandContext child_cmd_cntx{cmd_cntx->rb(), nullptr};
-    sf_->ShutdownCmd(CmdArgList(&sargs, 1), &child_cmd_cntx);
+    child_cmd_cntx.PushArg("NOSAVE");
+    sf_->ShutdownCmd(facade::CmdArgParser{child_cmd_cntx, 0}, &child_cmd_cntx);
     return;
   }
 
