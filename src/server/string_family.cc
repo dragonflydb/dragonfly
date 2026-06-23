@@ -10,6 +10,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <variant>
 
 #include "base/flags.h"
@@ -405,7 +406,7 @@ bool IsValueWithinBounds(const int64_t value, const int64_t bound) {
 // limit is assumed to be positive
 OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view key,
                                        const int64_t limit, const int64_t emission_interval_ns,
-                                       const uint64_t quantity) {
+                                       const uint64_t quantity, bool probe = false) {
   constexpr uint64_t kSecondToMilliSecond = 1000;
   constexpr uint64_t kMilliSecondToNanoSecond = 1000000;
   auto& db_slice = op_args.GetDbSlice();
@@ -420,19 +421,34 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   // Cost of this request
   const int64_t increment_ns = emission_interval_ns * quantity;  // should be nonnegative
 
-  auto res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
   const int64_t now_ns = GetCurrentTimeNs();
 
   int64_t tat_ns = now_ns;
-  if (res) {
-    // Type is already checked by FindMutable (OBJ_STRING)
-    auto opt_prev = res->it->second.TryGetInt();
-    if (!opt_prev) {
-      return OpStatus::INVALID_VALUE;
+  optional<OpResult<DbSlice::ItAndUpdater>> mutable_res;
+  if (probe) {
+    auto res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+    if (res) {
+      // Type is already checked by FindReadOnly (OBJ_STRING)
+      auto opt_prev = (*res)->second.TryGetInt();
+      if (!opt_prev) {
+        return OpStatus::INVALID_VALUE;
+      }
+      tat_ns = *opt_prev;
+    } else if (res.status() == OpStatus::WRONG_TYPE) {
+      return res.status();
     }
-    tat_ns = *opt_prev;
-  } else if (res.status() == OpStatus::WRONG_TYPE) {
-    return res.status();
+  } else {
+    mutable_res.emplace(db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING));
+    if (*mutable_res) {
+      // Type is already checked by FindMutable (OBJ_STRING)
+      auto opt_prev = (*mutable_res)->it->second.TryGetInt();
+      if (!opt_prev) {
+        return OpStatus::INVALID_VALUE;
+      }
+      tat_ns = *opt_prev;
+    } else if (mutable_res->status() == OpStatus::WRONG_TYPE) {
+      return mutable_res->status();
+    }
   }
 
   int64_t new_tat_ns = max(tat_ns, now_ns);
@@ -485,7 +501,9 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   }
   reset_after_ms = (ttl_ns + kMilliSecondToNanoSecond - 1) / kMilliSecondToNanoSecond;
 
-  if (!limited) {
+  if (!limited && !probe) {
+    DCHECK(mutable_res.has_value());
+    auto& res = *mutable_res;
     // Although most computation so far is in nanoseconds, we must store expiry as milliseconds.
     // While this causes loss of precision, the value stored against the throttle key is still in
     // the nanosecond units. When the key is loaded, that value will be read and used as tat_ns. The
@@ -1701,7 +1719,9 @@ cmd::CmdR CmdSetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-/* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
+/* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>]
+ * CL.PROBE <key> <max_burst> <count per period> <period> [<quantity>]
+ */
 /* Response is array of 5 integers. The meaning of each array item is:
  *  1. Whether the action was limited:
  *   - 0 indicates the action is allowed.
@@ -1714,7 +1734,7 @@ cmd::CmdR CmdSetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
  *  5. The number of seconds until the limit will reset to its maximum capacity.
  * Equivalent to X-RateLimit-Reset.
  */
-void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdClThrottleOrProbe(CmdArgList args, CommandContext* cmd_cntx, bool probe) {
   constexpr uint64_t kSecondToNanoSecond = 1000000000;
   const string_view key = ArgS(args, 0);
 
@@ -1775,7 +1795,7 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
-    return OpThrottle(t->GetOpArgs(shard), key, limit, emission_interval_ns, quantity);
+    return OpThrottle(t->GetOpArgs(shard), key, limit, emission_interval_ns, quantity, probe);
   };
 
   Transaction* trans = cmd_cntx->tx();
@@ -1820,6 +1840,14 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdClThrottleOrProbe(args, cmd_cntx, false);
+}
+
+void CmdClProbe(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdClThrottleOrProbe(args, cmd_cntx, true);
+}
+
 }  // namespace
 
 #define HFUNC(x) SetHandler(&Cmd##x)
@@ -1860,6 +1888,7 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetAsyncHandler(CmdSetRange)
       << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
              ClThrottle)
+      << CI{"CL.PROBE", CO::READONLY | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(ClProbe)
       << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}
              .SetAsyncHandler(CmdGAT);
 }
