@@ -9,10 +9,19 @@ namespace dfly {
 
 using namespace std;
 
+namespace {
+CuckooFilter MakeCuckooFilter(const CuckooFilter::Options& options,
+                              std::pmr::memory_resource* mr) {
+  CuckooFilter cf(mr);
+  cf.Init(options);
+  return cf;
+}
+}  // namespace
+
 class CuckooFilterTest : public ::testing::Test {
  protected:
   CuckooFilterTest()
-      : cf_(CuckooFilter::Options{.capacity = 128}, std::pmr::get_default_resource()) {
+      : cf_(MakeCuckooFilter({.capacity = 128}, std::pmr::get_default_resource())) {
   }
 
   CuckooFilter cf_;
@@ -74,7 +83,8 @@ TEST_F(CuckooFilterTest, FillBeyondCapacityExpands) {
 
 TEST_F(CuckooFilterTest, NoExpansionRejectWhenFull) {
   // A small filter with expansion=0 must reject inserts once full.
-  CuckooFilter small({.capacity = 4, .expansion = 0}, std::pmr::get_default_resource());
+  CuckooFilter small =
+      MakeCuckooFilter({.capacity = 4, .expansion = 0}, std::pmr::get_default_resource());
 
   size_t inserted = 0;
   for (size_t i = 0; i < 1000; ++i) {

@@ -462,7 +462,8 @@ void CmdMerge(CmdArgParser parser, CommandContext* cmd_cntx) {
         continue;
 
       for (const auto& cms_data : result.value()) {
-        CMS temp_cms(cms_data.width, cms_data.depth, CompactObj::memory_resource());
+        CMS temp_cms(CompactObj::memory_resource());
+        temp_cms.Init(cms_data.width, cms_data.depth);
         temp_cms.Load(cms_data.count, cms_data.counters.data());
 
         if (!dest_cms->MergeFrom(temp_cms, merge_args.weights[cms_data.src_index])) {

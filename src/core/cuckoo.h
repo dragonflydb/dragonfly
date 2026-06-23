@@ -28,7 +28,13 @@ class CuckooFilter {
  public:
   using Options = CuckooFilterOptions;
 
-  CuckooFilter(const Options& options, std::pmr::memory_resource* mr);
+  // Constructs an empty, uninitialized CuckooFilter bound to mr. This is the only
+  // constructor; it never allocates and never throws. Call Init() before use.
+  explicit CuckooFilter(std::pmr::memory_resource* mr);
+
+  // (Re)initializes this filter with the given options, discarding any previous content.
+  // May throw std::bad_alloc; on failure this object is left unchanged.
+  void Init(const Options& options);
 
   // Inserts a pre-computed hash. Returns false only if the filter is full
   // and expansion is disabled (expansion_ == 0) or memory allocation fails.
@@ -163,9 +169,9 @@ class CuckooFilter {
   // Returns false if no earlier sub-filter had room
   bool RelocateSlot(size_t filter_idx, uint64_t bucket_idx, uint8_t slot_idx);
 
-  uint8_t slots_per_bucket_;
-  uint16_t max_iterations_;
-  uint16_t expansion_;
+  uint8_t slots_per_bucket_ = 0;
+  uint16_t max_iterations_ = 0;
+  uint16_t expansion_ = 0;
 
   uint64_t num_buckets_ = 0;
   uint64_t num_items_ = 0;

@@ -1109,13 +1109,12 @@ void CompactObj::SetJson(const uint8_t* buf, size_t len) {
 }
 
 void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor) {
-  if (taglen_ == SBF_TAG) {
-    *u_.sbf = SBF(initial_capacity, fp_prob, grow_factor, tl.local_mr);
-  } else {
-    SBF* sbf = AllocateMR<SBF>(initial_capacity, fp_prob, grow_factor, tl.local_mr);
+  if (taglen_ != SBF_TAG) {
     SetMeta(SBF_TAG);
-    u_.sbf = sbf;
+    u_.sbf = AllocateMR<SBF>(tl.local_mr);  // trivial ctor, never throws
   }
+  // may throw; u_.sbf is already safely owned either way
+  u_.sbf->Init(initial_capacity, fp_prob, grow_factor, tl.local_mr);
 }
 
 SBF* CompactObj::GetSBF() const {
@@ -1124,13 +1123,11 @@ SBF* CompactObj::GetSBF() const {
 }
 
 void CompactObj::SetCMS(uint32_t width, uint32_t depth) {
-  if (taglen_ == CMS_TAG) {
-    *u_.cms = CMS(width, depth, tl.local_mr);
-  } else {
-    CMS* cms = AllocateMR<CMS>(width, depth, tl.local_mr);  // may throw; CompactObj unchanged
+  if (taglen_ != CMS_TAG) {
     SetMeta(CMS_TAG);
-    u_.cms = cms;
+    u_.cms = AllocateMR<CMS>(tl.local_mr);  // trivial ctor, never throws
   }
+  u_.cms->Init(width, depth);  // may throw; u_.cms is already safely owned either way
 }
 
 CMS* CompactObj::GetCMS() const {
@@ -1139,13 +1136,11 @@ CMS* CompactObj::GetCMS() const {
 }
 
 void CompactObj::SetTOPK(uint32_t k, uint32_t width, uint32_t depth, double decay) {
-  if (taglen_ == TOPK_TAG) {
-    *u_.topk = TOPK(memory_resource(), k, width, depth, decay);
-  } else {
-    TOPK* topk = AllocateMR<TOPK>(memory_resource(), k, width, depth, decay);
+  if (taglen_ != TOPK_TAG) {
     SetMeta(TOPK_TAG);
-    u_.topk = topk;
+    u_.topk = AllocateMR<TOPK>(memory_resource());  // trivial ctor, never throws
   }
+  u_.topk->Init(k, width, depth, decay);  // may throw; u_.topk is already safely owned either way
 }
 
 TOPK* CompactObj::GetTOPK() const {
@@ -1154,11 +1149,12 @@ TOPK* CompactObj::GetTOPK() const {
 }
 
 void CompactObj::SetCuckooFilter(const CuckooFilterOptions& options) {
-  // Allocate before touching taglen_/u_: if constructor throws (e.g. bad_alloc)
-  // this object must stay in its previous, valid state.
-  CuckooFilter* cf = AllocateMR<CuckooFilter>(options, tl.local_mr);
-  SetMeta(CUCKOO_FILTER_TAG);  // frees the previous value, whatever tag it had
-  u_.cuckoo_filter = cf;
+  if (taglen_ != CUCKOO_FILTER_TAG) {
+    SetMeta(CUCKOO_FILTER_TAG);
+    u_.cuckoo_filter = AllocateMR<CuckooFilter>(tl.local_mr);  // trivial ctor, never throws
+  }
+  // may throw; u_.cuckoo_filter is already safely owned either way
+  u_.cuckoo_filter->Init(options);
 }
 
 CuckooFilter* CompactObj::GetCuckooFilter() const {

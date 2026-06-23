@@ -163,10 +163,24 @@ inline bool Bloom::Set(size_t bit_idx) {
 ///////////////////////////////////////////////////////////////////////////////
 // SBF implementation
 ///////////////////////////////////////////////////////////////////////////////
-SBF::SBF(uint64_t initial_capacity, double fp_prob, double grow_factor, PMR_NS::memory_resource* mr)
-    : filters_(1, mr), grow_factor_(grow_factor), fp_prob_(fp_prob * kSBFErrorFactor) {
-  filters_.front().Init(initial_capacity, fp_prob_, mr);
+void SBF::Init(uint64_t initial_capacity, double fp_prob, double grow_factor,
+               PMR_NS::memory_resource* mr) {
+  // Build and initialize the new filter before touching any existing state: if Bloom::Init
+  // throws, *this is left completely unchanged.
+  double new_fp_prob = fp_prob * kSBFErrorFactor;
+  Bloom b;
+  b.Init(initial_capacity, new_fp_prob, mr);
+
+  // Nothing below can throw.
+  for (auto& f : filters_)
+    f.Destroy(mr);
+  filters_.clear();
+  filters_.push_back(std::move(b));
+  grow_factor_ = grow_factor;
+  fp_prob_ = new_fp_prob;
   max_capacity_ = filters_.front().Capacity(fp_prob_);
+  prev_size_ = 0;
+  current_size_ = 0;
 }
 
 SBF::SBF(double grow_factor, double fp_prob, size_t max_capacity, size_t prev_size,
@@ -183,6 +197,15 @@ SBF::~SBF() {
   PMR_NS::memory_resource* mr = filters_.get_allocator().resource();
   for (auto& f : filters_)
     f.Destroy(mr);
+}
+
+SBF::SBF(SBF&& src) noexcept
+    : filters_(std::move(src.filters_)),
+      grow_factor_(src.grow_factor_),
+      fp_prob_(src.fp_prob_),
+      prev_size_(src.prev_size_),
+      current_size_(src.current_size_),
+      max_capacity_(src.max_capacity_) {
 }
 
 SBF& SBF::operator=(SBF&& src) noexcept {

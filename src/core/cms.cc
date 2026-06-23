@@ -27,11 +27,21 @@ uint32_t Offset(uint64_t h1, uint64_t h2, uint32_t row, uint32_t width) {
 
 }  // namespace
 
-CMS::CMS(uint32_t width, uint32_t depth, PMR_NS::memory_resource* mr)
-    : width_(width), depth_(depth), mr_(mr) {
-  size_t len = NumCounters();
-  counters_ = static_cast<int64_t*>(mr_->allocate(AllocationSize(len), alignof(int64_t)));
-  std::fill_n(counters_, len, 0);
+void CMS::Init(uint32_t width, uint32_t depth) {
+  size_t len = static_cast<size_t>(width) * depth;
+  // Allocate the new buffer before touching any existing state: if this throws,
+  // *this is left completely unchanged.
+  int64_t* new_counters =
+      static_cast<int64_t*>(mr_->allocate(AllocationSize(len), alignof(int64_t)));
+  std::fill_n(new_counters, len, 0);
+
+  if (counters_) {
+    mr_->deallocate(counters_, AllocationSize(NumCounters()), alignof(int64_t));
+  }
+  width_ = width;
+  depth_ = depth;
+  counters_ = new_counters;
+  count_ = 0;
 }
 
 CMS::~CMS() {
@@ -70,9 +80,9 @@ CMS& CMS::operator=(CMS&& other) noexcept {
   return *this;
 }
 
-CMS::CMS(ErrorRateTag /*tag*/, double error, double probability, PMR_NS::memory_resource* mr)
-    : CMS(static_cast<uint32_t>(std::ceil(M_E / error)),
-          static_cast<uint32_t>(std::ceil(std::log(1.0 / probability))), mr) {
+void CMS::Init(ErrorRateTag, double error, double probability) {
+  Init(static_cast<uint32_t>(std::ceil(M_E / error)),
+       static_cast<uint32_t>(std::ceil(std::log(1.0 / probability))));
 }
 
 int64_t CMS::IncrBy(std::string_view item, int64_t increment) {
