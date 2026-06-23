@@ -1157,8 +1157,13 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
   partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
 }
 
-// SORTBY merge: orders by sort_score, placing docs missing the field (monostate) last in both
-// directions. A plain value comparison would otherwise sort monostate first in ASC.
+// Global SORTBY merge across shards. cb(l, r) is true when l should rank before r. Docs missing the
+// sort field hold a monostate sort_score and always rank last, in both directions (a plain variant
+// comparison would sort monostate first in ASC). Cases (l, r -> result):
+//   present, present -> order by value: l < r for ASC, r < l for DESC
+//   present, missing -> true   (present ranks before missing)
+//   missing, present -> false  (missing ranks after present)
+//   missing, missing -> false  (equal)
 void PartialSortBySortScore(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder order) {
   auto cb = [order](SerializedSearchDoc* l, SerializedSearchDoc* r) {
     bool l_null = std::holds_alternative<std::monostate>(l->sort_score);

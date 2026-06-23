@@ -827,8 +827,13 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
   DCHECK_GT(limit, 0u) << "Limit=0 still has O(ids->size()) complexity";
 
   using QPair = std::pair<search::SortableValue, DocId>;
-  // Docs missing the sort field are kept but rank worst (sorted last) in both directions;
-  // returns true when `a` should outrank `b` so q.top() is always the worst kept value.
+  // priority_queue comparator: q.top() is the worst kept entry, evicted first when a better
+  // candidate arrives. better(a, b) is true when a should rank before b. Docs missing the sort
+  // field hold a monostate value and always rank last, in both directions. Cases (a, b -> result):
+  //   present, present -> order by (value, doc id): a < b for ASC, b < a for DESC
+  //   present, missing -> true   (present ranks before missing)
+  //   missing, present -> false  (missing ranks after present)
+  //   missing, missing -> order by (value, doc id); values are equal, so deterministic by doc id
   auto better = [order = sort.order](const QPair& a, const QPair& b) {
     bool a_null = std::holds_alternative<std::monostate>(a.first);
     bool b_null = std::holds_alternative<std::monostate>(b.first);
