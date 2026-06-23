@@ -10,6 +10,7 @@
 #include <string>
 
 #include "core/qlist.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/facade_stats.h"
 #include "facade/facade_types.h"
 #include "server/acl/user_registry.h"
@@ -250,7 +251,7 @@ class ServerFamily {
   void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Public because is used by DflyCmd.
-  void ShutdownCmd(CmdArgList args, CommandContext* cmd_cntx);
+  void ShutdownCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   Service& service() {
     return service_;
@@ -365,29 +366,32 @@ class ServerFamily {
     return shard_set->size();
   }
 
-  void Auth(CmdArgList args, CommandContext* cmd_cntx);
+  void Auth(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Client(CmdArgList args, CommandContext* cmd_cntx);
-  void Config(CmdArgList args, CommandContext* cmd_cntx);
-  void DbSize(CmdArgList args, CommandContext* cmd_cntx);
+  void Config(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void DbSize(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Debug(CmdArgList args, CommandContext* cmd_cntx);
-  void Dfly(CmdArgList args, CommandContext* cmd_cntx);
-  void Memory(CmdArgList args, CommandContext* cmd_cntx);
-  void Shrink(CmdArgList args, CommandContext* cmd_cntx);
-  void FlushDb(CmdArgList args, CommandContext* cmd_cntx);
-  void Info(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Dfly(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Memory(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void FlushDb(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Info(facade::CmdArgParser parser, CommandContext* cmd_cntx)
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Hello(CmdArgList args, CommandContext* cmd_cntx);
-  void LastSave(CmdArgList args, CommandContext* cmd_cntx);
-  void Latency(CmdArgList args, CommandContext* cmd_cntx);
+  void LastSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Latency(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void ReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
   void AddReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
-  void ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx)
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void ReplConf(CmdArgList args, CommandContext* cmd_cntx);
-  void Role(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Role(facade::CmdArgParser parser, CommandContext* cmd_cntx)
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Save(CmdArgList args, CommandContext* cmd_cntx);
   void BgSave(CmdArgList args, CommandContext* cmd_cntx);
-  void Script(CmdArgList args, CommandContext* cmd_cntx);
+  void Script(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void SlowLog(CmdArgList args, CommandContext* cmd_cntx);
-  void Module(CmdArgList args, CommandContext* cmd_cntx);
+  void Module(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
@@ -438,7 +442,7 @@ class ServerFamily {
 
   static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
 
-  void ClientPauseCmd(CmdArgList args, CommandContext* cmd_cntx);
+  void ClientPauseCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void ClientUnPauseCmd(CmdArgList args, CommandContext* cmd_cntx);
 
   // Set accepting_connections_ and update listners according to it

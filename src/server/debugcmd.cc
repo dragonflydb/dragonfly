@@ -752,7 +752,7 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (subcmd == "TRAFFIC") {
-    return LogTraffic(args.subspan(1), cmd_cntx);
+    return LogTraffic(CmdArgParser{args.subspan(1)}, cmd_cntx);
   }
 
   if (subcmd == "RECVSIZE" && args.size() == 2) {
@@ -771,7 +771,7 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
     return Values(args.subspan(1), cmd_cntx);
   }
   if (subcmd == "COMPRESSION") {
-    return Compression(args.subspan(1), cmd_cntx);
+    return Compression(CmdArgParser{args.subspan(1)}, cmd_cntx);
   }
 
   if (subcmd == "IOSTATS") {
@@ -882,9 +882,9 @@ enum PopulateFlag { FLAG_RAND, FLAG_TYPE, FLAG_ELEMENTS, FLAG_SLOT, FLAG_EXPIRE,
 // Populate arguments format:
 // required: (total count) (key prefix) (val size)
 // optional: [RAND | TYPE typename | ELEMENTS element num | SLOTS (key value)+ | EXPIRE start end]
-optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
+optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgParser parser,
                                                                 CommandContext* cmd_cntx) {
-  CmdArgParser parser(args.subspan(1));
+  parser.Skip(1);
   PopulateOptions options;
 
   options.total_count = parser.Next<uint64_t>();
@@ -919,7 +919,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         break;
       }
       default:
-        LOG(FATAL) << "Unexpected flag in PopulateArgs. Args: " << args;
+        LOG(FATAL) << "Unexpected flag in PopulateArgs";
         break;
     }
   }
@@ -935,7 +935,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
 }
 
 void DebugCmd::Populate(CmdArgList args, CommandContext* cmd_cntx) {
-  optional<PopulateOptions> options = ParsePopulateArgs(args, cmd_cntx);
+  optional<PopulateOptions> options = ParsePopulateArgs(CmdArgParser{args}, cmd_cntx);
   if (!options.has_value()) {
     return;
   }
@@ -1058,7 +1058,7 @@ void DebugCmd::Exec(CommandContext* cmd_cntx) {
   rb->SendVerbatimString(res);
 }
 
-void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
+void DebugCmd::LogTraffic(CmdArgParser parser, CommandContext* cmd_cntx) {
   using facade::Connection;
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1073,7 +1073,6 @@ void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
   // A recording captures exactly one source; LISTENER and REPLICA are mutually
   // exclusive. REPLICA captures commands received from a master via the
   // replication stream (only meaningful while this server is a replica).
-  CmdArgParser parser(args);
   if (parser.Check("STOP")) {
     if (!parser.Finalize())
       return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -1568,9 +1567,8 @@ static size_t PostProcessHist(HufHist* dest) {
   return total_freq;
 }
 
-void DebugCmd::Compression(CmdArgList args, CommandContext* cmd_cntx) {
+void DebugCmd::Compression(CmdArgParser parser, CommandContext* cmd_cntx) {
   CompactObjType type = kInvalidCompactObjType;
-  CmdArgParser parser(args);
   string bintable;
   bool print_bintable = false;
 
@@ -1836,7 +1834,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
     auto args_span = absl::MakeSpan(arg_vec);
     stub_tx->MultiSwitchCmd(cid);
     crb.SetReplyMode(ReplyMode::NONE);
-    stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args_span);
+    stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, facade::ParsedArgs{backed_args});
     cmd_cntx.UpdateCid(cid);
     cmd_cntx.SetTailArgs(facade::ParsedArgs{backed_args});
     sf_.service().InvokeCmd(args_span, &cmd_cntx);

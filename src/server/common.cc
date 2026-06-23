@@ -162,9 +162,9 @@ bool ParseDouble(string_view src, double* value) {
   return true;
 }
 
-OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args, bool allow_novalues) {
+OpResult<ScanOpts> ScanOpts::TryFrom(const facade::ParsedArgs& args, bool allow_novalues) {
   ScanOpts scan_opts;
-  facade::CmdArgParser parser(args);
+  facade::CmdArgParser parser{args};
 
   while (parser.HasNext()) {
     std::string_view pattern;

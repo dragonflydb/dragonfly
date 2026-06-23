@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "facade/cmd_arg_parser.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/conn_context.h"
 
@@ -39,7 +40,7 @@ class DebugCmd {
 
  private:
   void Populate(CmdArgList args, CommandContext* cmd_cntx);
-  static std::optional<PopulateOptions> ParsePopulateArgs(CmdArgList args,
+  static std::optional<PopulateOptions> ParsePopulateArgs(facade::CmdArgParser parser,
                                                           CommandContext* cmd_cntx);
   void PopulateRangeFiber(uint64_t from, uint64_t count, const PopulateOptions& opts);
 
@@ -54,12 +55,12 @@ class DebugCmd {
   void ObjHist(CommandContext* cmd_cntx);
   void Stacktrace(CommandContext* cmd_cntx);
   void Shards(CommandContext* cmd_cntx);
-  void LogTraffic(CmdArgList, CommandContext* cmd_cntx);
+  void LogTraffic(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void RecvSize(std::string_view param, CommandContext* cmd_cntx);
   void Topk(CmdArgList args, CommandContext* cmd_cntx);
   void Keys(CmdArgList args, CommandContext* cmd_cntx);
   void Values(CmdArgList args, CommandContext* cmd_cntx);
-  void Compression(CmdArgList args, CommandContext* cmd_cntx);
+  void Compression(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void IOStats(CmdArgList args, CommandContext* cmd_cntx);
   void Segments(CmdArgList args, CommandContext* cmd_cntx);
   void CompactTable(CmdArgList args, CommandContext* cmd_cntx);

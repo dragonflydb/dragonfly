@@ -260,9 +260,16 @@ using http::StringResponse;
 using strings::HumanReadableNumBytes;
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, CommandContext*);
+using EngineFuncParser = void (ServerFamily::*)(CmdArgParser, CommandContext*);
 
 inline CommandId::Handler HandlerFunc(ServerFamily* se, EngineFunc f) {
   return [=](CmdArgList args, CommandContext* cntx) { return (se->*f)(args, cntx); };
+}
+
+inline CommandId::Handler HandlerFunc(ServerFamily* se, EngineFuncParser f) {
+  return [=](CmdArgList args, CommandContext* cntx) {
+    return (se->*f)(MakeParserFromContext(cntx), cntx);
+  };
 }
 
 namespace {
@@ -432,9 +439,8 @@ struct ClientListFilter {
   absl::flat_hash_set<uint32_t> ids;
 };
 
-optional<ClientListFilter> ParseClientListFilter(CmdArgList args, CommandContext* cmd_cntx) {
+optional<ClientListFilter> ParseClientListFilter(CmdArgParser parser, CommandContext* cmd_cntx) {
   ClientListFilter filter;
-  CmdArgParser parser{args};
   if (!parser.HasNext())
     return filter;
 
@@ -498,7 +504,7 @@ ClientListType ClassifyConnection(facade::Connection* conn) {
 
 void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
                 ServerFamily* server_family, CommandContext* cmd_cntx) {
-  auto filter = ParseClientListFilter(args, cmd_cntx);
+  auto filter = ParseClientListFilter(CmdArgParser{args}, cmd_cntx);
   if (!filter)
     return;
 
@@ -543,14 +549,13 @@ void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
   return rb->SendVerbatimString(result);
 }
 
-void ClientTracking(CmdArgList args, CommandContext* cmd_cntx) {
+void ClientTracking(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!rb->IsResp3())
     return cmd_cntx->SendError(
         "Client tracking is currently not supported for RESP2. Please use RESP3.");
 
-  CmdArgParser parser{args};
-  if (!parser.HasAtLeast(1) || args.size() > 3)
+  if (!parser.HasAtLeast(1) || parser.HasAtLeast(4))
     return cmd_cntx->SendError(kSyntaxErr);
 
   bool is_on = false;
@@ -595,13 +600,13 @@ void ClientTracking(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendOk();
 }
 
-void ClientCaching(CmdArgList args, CommandContext* cmd_cntx) {
+void ClientCaching(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!rb->IsResp3())
     return cmd_cntx->SendError(
         "Client caching is currently not supported for RESP2. Please use RESP3.");
 
-  if (args.size() != 1) {
+  if (!parser.HasAtLeast(1) || parser.HasAtLeast(2)) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
@@ -613,7 +618,6 @@ void ClientCaching(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   using Tracking = ConnectionState::ClientTracking;
-  CmdArgParser parser{args};
 
   if (parser.Check("YES")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTIN)) {
@@ -2596,7 +2600,7 @@ SaveInfoData ServerFamily::GetLastSaveInfo() const {
   return thread_safe_save_info_.Get();
 }
 
-void ServerFamily::DbSize(CmdArgList args, CommandContext* cmd_cntx) {
+void ServerFamily::DbSize(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   atomic_ulong num_keys{0};
 
   auto* cntx = cmd_cntx->server_conn_cntx();
@@ -2658,11 +2662,11 @@ void ServerFamily::SendInvalidationMessages() const {
   }
 }
 
-void ServerFamily::FlushDb(CmdArgList args, CommandContext* cmd_cntx) {
-  if (args.size() > 1)
+void ServerFamily::FlushDb(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  if (parser.HasAtLeast(2))
     return cmd_cntx->SendError(kSyntaxErr);
 
-  bool sync = CmdArgParser{args}.Check("SYNC");
+  bool sync = parser.Check("SYNC");
   string_view cmd_name = cmd_cntx->tx()->GetCId()->name();
   DbIndex index = cmd_name == "FLUSHALL" ? DbSlice::kDbAll : cmd_cntx->tx()->GetDbIndex();
   Drakarys(cmd_cntx->tx(), index, sync);
@@ -2699,18 +2703,22 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
   return is_authorized;
 }
 
-void ServerFamily::Auth(CmdArgList args, CommandContext* cmd_cntx) {
-  if (args.size() > 2) {
+void ServerFamily::Auth(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  if (parser.HasAtLeast(3)) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
+
+  std::string_view arg0 = parser.Next<string_view>();
+  std::optional<std::string_view> arg1;
+  if (parser.HasNext())
+    arg1 = parser.Next<string_view>();
 
   ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   // non admin port auth
   if (!cntx->conn()->IsPrivileged()) {
-    const bool one_arg = args.size() == 1;
-    std::string_view username = one_arg ? "default" : facade::ToSV(args[0]);
-    const size_t index = one_arg ? 0 : 1;
-    std::string_view password = facade::ToSV(args[index]);
+    const bool one_arg = !arg1.has_value();
+    std::string_view username = one_arg ? "default" : arg0;
+    std::string_view password = one_arg ? arg0 : *arg1;
     if (DoAuth(cntx, username, password)) {
       return cmd_cntx->rb()->SendOk();
     }
@@ -2726,7 +2734,7 @@ void ServerFamily::Auth(CmdArgList args, CommandContext* cmd_cntx) {
         "admin port. Are you sure your configuration is correct?");
   }
 
-  string_view pass = ArgS(args, 0);
+  string_view pass = arg0;
   if (pass == GetPassword()) {
     cntx->authenticated = true;
     cmd_cntx->rb()->SendOk();
@@ -2808,15 +2816,15 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), this, cmd_cntx);
   } else if (sub_cmd == "PAUSE") {
-    return ClientPauseCmd(sub_args, cmd_cntx);
+    return ClientPauseCmd(CmdArgParser{sub_args}, cmd_cntx);
   } else if (sub_cmd == "UNPAUSE") {
     return ClientUnPauseCmd(sub_args, cmd_cntx);
   } else if (sub_cmd == "TRACKING") {
-    return ClientTracking(sub_args, cmd_cntx);
+    return ClientTracking(CmdArgParser{sub_args}, cmd_cntx);
   } else if (sub_cmd == "KILL") {
     return ClientKill(sub_args, absl::MakeSpan(listeners_), this, cmd_cntx);
   } else if (sub_cmd == "CACHING") {
-    return ClientCaching(sub_args, cmd_cntx);
+    return ClientCaching(CmdArgParser{sub_args}, cmd_cntx);
   } else if (sub_cmd == "SETINFO") {
     return ClientSetInfo(sub_args, cmd_cntx);
   } else if (sub_cmd == "ID") {
@@ -2830,8 +2838,9 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
-void ServerFamily::Config(CmdArgList args, CommandContext* cmd_cntx) {
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+void ServerFamily::Config(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  const facade::ParsedArgs& args = cmd_cntx->tail_args();
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next<string_view>());
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (sub_cmd == "HELP") {
@@ -2857,9 +2866,9 @@ void ServerFamily::Config(CmdArgList args, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(WrongNumArgsError("config|set"), kConfigErrType);
     }
 
-    string param = absl::AsciiStrToLower(ArgS(args, 1));
+    string param = absl::AsciiStrToLower(args[1]);
 
-    ConfigRegistry::SetResult result = config_registry.Set(param, ArgS(args, 2));
+    ConfigRegistry::SetResult result = config_registry.Set(param, args[2]);
 
     const char kErrPrefix[] = "CONFIG SET failed (possibly related to argument '";
     switch (result) {
@@ -2882,7 +2891,7 @@ void ServerFamily::Config(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (sub_cmd == "GET" && args.size() == 2) {
     vector<string> res;
-    string_view param = ArgS(args, 1);
+    string_view param = args[1];
 
     // Support 'databases' for backward compatibility.
     if (param == "databases") {
@@ -2928,14 +2937,14 @@ void ServerFamily::Debug(CmdArgList args, CommandContext* cmd_cntx) {
   return dbg_cmd.Run(args, cmd_cntx);
 }
 
-void ServerFamily::Memory(CmdArgList args, CommandContext* cmd_cntx) {
+void ServerFamily::Memory(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   MemoryCmd mem_cmd{this, cmd_cntx};
 
-  return mem_cmd.Run(args);
+  return mem_cmd.Run(parser);
 }
 
-void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void ServerFamily::Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next<string_view>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
@@ -3910,15 +3919,15 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   return info;
 }
 
-void ServerFamily::Info(CmdArgList args, CommandContext* cmd_cntx) {
+void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   std::vector<std::string> sections;
   bool need_metrics{false};  // Save time - do not fetch metrics if we don't need them.
   bool need_repl_mem{false};
   Metrics metrics;
 
-  sections.reserve(args.size());
-  for (const auto& arg : args) {
-    sections.emplace_back(absl::AsciiStrToUpper(arg));
+  sections.reserve(cmd_cntx->tail_args().size());
+  while (parser.HasNext()) {
+    sections.emplace_back(absl::AsciiStrToUpper(parser.Next<string_view>()));
     const auto& section = sections.back();
     if (!need_metrics && (section != "SERVER") && (section != "REPLICATION")) {
       need_metrics = true;
@@ -4222,10 +4231,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, CommandContext* cmd_cntx,
 
 // REPLTAKEOVER <seconds> [SAVE]
 // SAVE is used only by tests.
-void ServerFamily::ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) {
+void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   VLOG(1) << "ReplTakeOver start";
-
-  CmdArgParser parser{args};
 
   int timeout_sec = parser.Next<int>();
   bool save_flag = static_cast<bool>(parser.Check("SAVE"));
@@ -4370,7 +4377,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
   return builder->SendOk();
 }
 
-void ServerFamily::Role(CmdArgList args, CommandContext* cmd_cntx) {
+void ServerFamily::Role(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   util::fb2::LockGuard lk(replicaof_mu_);
   // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
@@ -4414,18 +4421,18 @@ void ServerFamily::Role(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void ServerFamily::Script(CmdArgList args, CommandContext* cmd_cntx) {
-  script_mgr_->Run(args, cmd_cntx->tx(), cmd_cntx->rb(), cmd_cntx->server_conn_cntx());
+void ServerFamily::Script(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  script_mgr_->Run(parser, cmd_cntx->tx(), cmd_cntx->rb(), cmd_cntx->server_conn_cntx());
 }
 
-void ServerFamily::LastSave(CmdArgList args, CommandContext* cmd_cntx) {
+void ServerFamily::LastSave(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto info = thread_safe_save_info_.Get();
   cmd_cntx->rb()->SendLong(info.save_time);
 }
 
-void ServerFamily::Latency(CmdArgList args, CommandContext* cmd_cntx) {
+void ServerFamily::Latency(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next<string_view>());
 
   if (sub_cmd == "LATEST" || sub_cmd == "HISTOGRAM") {
     return rb->SendEmptyArray();
@@ -4434,7 +4441,7 @@ void ServerFamily::Latency(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(UnknownSubCmd(sub_cmd, "LATENCY"), kSyntaxErrType);
 }
 
-void ServerFamily::ShutdownCmd(CmdArgList args, CommandContext* cmd_cntx) {
+void ServerFamily::ShutdownCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Supported options (case-insensitive):
   // SAVE | NOSAVE, NOW, FORCE, ABORT, SAFE (Valkey-specific, the same as SAVE in Dragonfly)
   enum ShutBits : uint32_t {
@@ -4446,8 +4453,6 @@ void ServerFamily::ShutdownCmd(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   uint32_t sb = 0;
-
-  CmdArgParser parser(args);
   while (parser.HasNext()) {
     // Map SAFE to SAVE directly (fallthrough behavior)
     ShutBits opt = parser.MapNext("SAVE", SB_SAVE, "NOSAVE", SB_NOSAVE, "NOW", SB_NOW, "FORCE",
@@ -4487,8 +4492,8 @@ void ServerFamily::ShutdownCmd(CmdArgList args, CommandContext* cmd_cntx) {
   facade::g_shutdown_fast.store(false, std::memory_order_seq_cst);
 }
 
-void ServerFamily::Dfly(CmdArgList args, CommandContext* cmd_cntx) {
-  dfly_cmd_->Run(args, cmd_cntx);
+void ServerFamily::Dfly(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  dfly_cmd_->Run(parser, cmd_cntx);
 }
 
 void ServerFamily::SlowLog(CmdArgList args, CommandContext* cmd_cntx) {
@@ -4535,8 +4540,8 @@ void ServerFamily::SlowLog(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
-void ServerFamily::Module(CmdArgList args, CommandContext* cmd_cntx) {
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+void ServerFamily::Module(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next<string_view>());
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (sub_cmd != "LIST")
@@ -4559,8 +4564,7 @@ void ServerFamily::Module(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendLong(21'015);  // we target v2
 }
 
-void ServerFamily::ClientPauseCmd(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void ServerFamily::ClientPauseCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto listeners = GetNonPriviligedListeners();
 
   auto timeout = parser.Next<uint64_t>();

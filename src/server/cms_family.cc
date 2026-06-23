@@ -133,7 +133,7 @@ OpResult<CmsInfo> OpInfo(const OpArgs& op_args, string_view key) {
 }
 
 void CmdInitByDim(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   uint32_t width, depth;
 
@@ -159,7 +159,7 @@ void CmdInitByDim(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdInitByProb(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   double error, probability;
 
@@ -314,7 +314,7 @@ struct CmsMergeArgs {
   vector<int64_t> weights;
 };
 
-bool ParseMergeArgs(CmdArgList args, RedisReplyBuilder* rb, CmsMergeArgs* out) {
+bool ParseMergeArgs(facade::ParsedArgs args, RedisReplyBuilder* rb, CmsMergeArgs* out) {
   CmdArgParser parser(args);
   uint32_t num_keys;
 
@@ -379,7 +379,7 @@ bool ParseMergeArgs(CmdArgList args, RedisReplyBuilder* rb, CmsMergeArgs* out) {
 void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   CmsMergeArgs merge_args;
-  if (!ParseMergeArgs(args, rb, &merge_args)) {
+  if (!ParseMergeArgs(cmd_cntx->tail_args(), rb, &merge_args)) {
     return;
   }
 

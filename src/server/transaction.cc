@@ -173,7 +173,7 @@ Transaction::~Transaction() {
            << " destroyed";
 }
 
-void Transaction::InitBase(Namespace* ns, DbIndex dbid, CmdArgList args) {
+void Transaction::InitBase(Namespace* ns, DbIndex dbid, const facade::ParsedArgs& args) {
   global_ = false;
   db_index_ = dbid;
   full_args_ = args;
@@ -202,7 +202,7 @@ void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShar
 
   auto& shard_index = *out;
   for (unsigned i : key_index.Range()) {
-    string_view key = ArgS(full_args_, i);
+    string_view key = full_args_[i];
     unique_slot_checker_.Add(key);
     ShardId sid = Shard(key, shard_data_.size());
 
@@ -329,7 +329,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
 
   DCHECK(!multi_ || multi_->mode != LOCK_AHEAD || !multi_->tag_fps.empty());
 
-  DVLOG(1) << "InitByArgs " << DebugId() << facade::ToSV(full_args_.front());
+  DVLOG(1) << "InitByArgs " << DebugId() << full_args_.Front();
 
   // Compress shard data, if we occupy only one shard.
   if (unique_shard_cnt_ == 1) {
@@ -357,7 +357,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   }
 }
 
-OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) {
+OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args) {
   InitBase(ns, index, args);
 
   if ((cid_->opt_mask() & CO::GLOBAL_TRANS) > 0) {
@@ -1115,7 +1115,7 @@ void Transaction::ExpireBlocking(WaitKeys wkeys) {
     EngineShard* es = EngineShard::tlocal();
     if (wkeys) {
       IndexSlice is(0, 1);
-      ShardArgs sa(absl::MakeSpan(&wkeys.value(), 1), absl::MakeSpan(&is, 1));
+      ShardArgs sa(cmn::ArgSlice{&wkeys.value(), 1}, absl::MakeSpan(&is, 1));
       ExpireShardCb(sa, es);
     } else {
       ExpireShardCb(GetShardArgs(es->shard_id()), es);
@@ -1351,7 +1351,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
   auto cb = [&](Transaction* t, EngineShard* shard) {
     if (wkeys) {  // single string_view.
       IndexSlice is(0, 1);
-      ShardArgs sa(absl::MakeSpan(&wkeys.value(), 1), absl::MakeSpan(&is, 1));
+      ShardArgs sa(cmn::ArgSlice{&wkeys.value(), 1}, absl::MakeSpan(&is, 1));
       t->WatchInShard(&t->GetNamespace(), sa, shard, krc);
     } else {
       t->WatchInShard(&t->GetNamespace(), t->GetShardArgs(shard->shard_id()), shard, krc);
@@ -1535,7 +1535,7 @@ optional<string_view> Transaction::GetWakeKey(ShardId sid) const {
     return nullopt;
 
   CHECK_LT(sd.wake_key_pos, full_args_.size());
-  return ArgS(full_args_, sd.wake_key_pos);
+  return full_args_[sd.wake_key_pos];
 }
 
 void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult result) {
@@ -1634,7 +1634,7 @@ bool Transaction::CanRunInlined() const {
   return false;
 }
 
-OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
+OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs& args) {
   if (cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL))
     return KeyIndex{};
 
@@ -1655,7 +1655,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     // Determine based on STREAMS argument position
     if (name == "XREAD" || name == "XREADGROUP") {
       for (size_t i = 0; i < args.size(); ++i) {
-        string_view arg = ArgS(args, i);
+        string_view arg = args[i];
         if (absl::EqualsIgnoreCase(arg, "STREAMS")) {
           size_t left = args.size() - i - 1;
           return KeyIndex(i + 1, i + 1 + (left / 2));
@@ -1673,7 +1673,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     else
       num_keys_index = bonus ? *bonus + 1 : 0;
 
-    string_view num = ArgS(args, num_keys_index);
+    string_view num = args[num_keys_index];
     if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0)
       return OpStatus::INVALID_INT;
 
@@ -1708,7 +1708,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
       if ((name == "GEORADIUSBYMEMBER" && args.size() >= 5) ||
           (name == "GEORADIUS" && args.size() >= 6)) {
         // key member radius .. STORE destkey
-        string_view opt = ArgS(args, args.size() - 2);
+        string_view opt = args[args.size() - 2];
         if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
           bonus = args.size() - 1;
         }
@@ -1717,7 +1717,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
       if (name == "SORT") {
         if (args.size() >= 3) {
           // SORT key ... STORE destkey
-          string_view opt = ArgS(args, args.size() - 2);
+          string_view opt = args[args.size() - 2];
           if (absl::EqualsIgnoreCase(opt, "STORE")) {
             bonus = args.size() - 1;
           }

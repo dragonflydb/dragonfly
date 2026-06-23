@@ -783,7 +783,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, CmdArgList args, string_view cmd_
 }
 
 void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
   HSetExParams parsed = ParseHSetEx(&parser, args, cmd_cntx->cid()->name());
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
@@ -842,7 +842,7 @@ void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   using MinMaxTtl = FInt<0, (1 << 26)>;
   auto [key, ttl_sec] = parser.Next<string_view, MinMaxTtl>();
 
@@ -915,7 +915,7 @@ OpResult<vector<long>> OpHTtl(Transaction* t, EngineShard* shard, string_view ke
 }
 
 void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1110,7 +1110,7 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2), true);
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(cmd_cntx->tail_args().Tail(2), true);
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
     return cmd_cntx->SendError(ops.status());

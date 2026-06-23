@@ -66,8 +66,8 @@ class ParsedArgs {
     return size() == 0;
   }
 
-  ParsedArgs Tail() const {
-    return std::visit([](const auto& args) { return args.Tail(); }, args_);
+  ParsedArgs Tail(unsigned offset = 1) const {
+    return std::visit([offset](const auto& args) { return args.Tail(offset); }, args_);
   }
 
   std::string_view Front() const {
@@ -76,6 +76,55 @@ class ParsedArgs {
 
   std::string_view operator[](size_t i) const {
     return std::visit([i](const auto& args) { return args.at(i); }, args_);
+  }
+
+  // Index-based const iterator, so ParsedArgs can be iterated (e.g. as a journal
+  // Payload alternative) without exposing its underlying span/BackedArguments.
+  class const_iterator {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = std::string_view;
+    using difference_type = ptrdiff_t;
+    using pointer = const std::string_view*;
+    using reference = std::string_view;
+
+    const_iterator(const ParsedArgs* args, size_t index) : args_(args), index_(index) {
+    }
+
+    std::string_view operator*() const {
+      return (*args_)[index_];
+    }
+
+    const_iterator& operator++() {
+      ++index_;
+      return *this;
+    }
+
+    const_iterator operator++(int) {
+      const_iterator copy = *this;
+      ++index_;
+      return copy;
+    }
+
+    bool operator==(const const_iterator& o) const {
+      return index_ == o.index_;
+    }
+
+    bool operator!=(const const_iterator& o) const {
+      return index_ != o.index_;
+    }
+
+   private:
+    const ParsedArgs* args_;
+    size_t index_;
+  };
+
+  const_iterator begin() const {
+    return const_iterator{this, 0};
+  }
+
+  const_iterator end() const {
+    return const_iterator{this, size()};
   }
 
   ArgSlice ToSlice(CmdArgVec* scratch) const {
@@ -96,10 +145,10 @@ class ParsedArgs {
     const cmn::BackedArguments* args_;
     uint32_t index_ = 0;
 
-    ParsedArgs Tail() const {
+    ParsedArgs Tail(unsigned offset = 1) const {
       ParsedArgs res(*args_);
       WrapperBacked* wb = std::get_if<WrapperBacked>(&res.args_);
-      wb->index_ = index_ + 1;
+      wb->index_ = index_ + offset;
       return res;
     };
 
@@ -137,8 +186,8 @@ class ParsedArgs {
       return ArgSlice::operator[](i);
     }
 
-    ParsedArgs Tail() const {
-      return ParsedArgs{subspan(1)};
+    ParsedArgs Tail(unsigned offset = 1) const {
+      return ParsedArgs{subspan(offset)};
     }
 
     ArgSlice ToSlice(void* /*scratch*/) const {
@@ -234,6 +283,7 @@ constexpr size_t kRecvBufSize = 1500;
 
 namespace std {
 ostream& operator<<(ostream& os, cmn::ArgSlice args);
+ostream& operator<<(ostream& os, const facade::ParsedArgs& args);
 ostream& operator<<(ostream& os, facade::Protocol protocol);
 
 }  // namespace std

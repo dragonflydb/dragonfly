@@ -70,9 +70,9 @@ ScriptMgr::ScriptKey::ScriptKey(string_view sha) : array{} {
   memcpy(data(), sha.data(), size());
 }
 
-void ScriptMgr::Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+void ScriptMgr::Run(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder,
                     ConnectionContext* cntx) {
-  string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  string subcmd = absl::AsciiStrToUpper(parser.Next<string_view>());
 
   if (subcmd == "HELP") {
     string_view kHelp[] = {
@@ -102,11 +102,11 @@ void ScriptMgr::Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
     return rb->SendSimpleStrArr(kHelp);
   }
 
-  if (subcmd == "EXISTS" && args.size() > 1)
-    return ExistsCmd(args, tx, builder);
+  if (subcmd == "EXISTS" && parser.HasNext())
+    return ExistsCmd(parser, tx, builder);
 
   if (subcmd == "FLUSH")
-    return FlushCmd(args, tx, builder);
+    return FlushCmd(tx, builder);
 
   if (subcmd == "LIST")
     return ListCmd(tx, builder);
@@ -114,11 +114,11 @@ void ScriptMgr::Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   if (subcmd == "LATENCY")
     return LatencyCmd(tx, builder);
 
-  if (subcmd == "LOAD" && args.size() == 2)
-    return LoadCmd(args, tx, builder, cntx);
+  if (subcmd == "LOAD" && parser.HasAtLeast(1) && !parser.HasAtLeast(2))
+    return LoadCmd(parser, tx, builder, cntx);
 
-  if (subcmd == "FLAGS" && args.size() > 2)
-    return ConfigCmd(args, tx, builder);
+  if (subcmd == "FLAGS" && parser.HasAtLeast(2))
+    return ConfigCmd(parser, tx, builder);
 
   if (subcmd == "GC")
     return GCCmd(tx, builder);
@@ -128,12 +128,11 @@ void ScriptMgr::Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   builder->SendError(err, kSyntaxErrType);
 }
 
-void ScriptMgr::ExistsCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) const {
-  vector<uint8_t> res(args.size() - 1, 0);
-  for (size_t i = 1; i < args.size(); ++i) {
-    if (string_view sha = ArgS(args, i); Find(sha)) {
-      res[i - 1] = 1;
-    }
+void ScriptMgr::ExistsCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder) const {
+  vector<uint8_t> res;
+  while (parser.HasNext()) {
+    string_view sha = parser.Next<string_view>();
+    res.push_back(Find(sha) ? 1 : 0);
   }
 
   auto rb = static_cast<RedisReplyBuilder*>(builder);
@@ -143,15 +142,15 @@ void ScriptMgr::ExistsCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
   }
 }
 
-void ScriptMgr::FlushCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ScriptMgr::FlushCmd(Transaction* tx, SinkReplyBuilder* builder) {
   FlushAllScript();
 
   return builder->SendOk();
 }
 
-void ScriptMgr::LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+void ScriptMgr::LoadCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder,
                         ConnectionContext* cntx) {
-  string_view body = ArgS(args, 1);
+  string_view body = parser.Next<string_view>();
   auto rb = static_cast<RedisReplyBuilder*>(builder);
   if (body.empty()) {
     char sha[41];
@@ -171,8 +170,8 @@ void ScriptMgr::LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   return rb->SendBulkString(res.value());
 }
 
-void ScriptMgr::ConfigCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  string_view sha = ArgS(args, 1);
+void ScriptMgr::ConfigCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder) {
+  string_view sha = parser.Next<string_view>();
   if (sha.size() != ScriptKey{}.size()) {
     return builder->SendError(kSyntaxErr);
   }
@@ -181,8 +180,8 @@ void ScriptMgr::ConfigCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
   ScriptKey key{sha};
   auto& data = db_[key];
 
-  for (auto flag : args.subspan(2)) {
-    if (auto err = ScriptParams::ApplyFlags(facade::ToSV(flag), &data); err)
+  while (parser.HasNext()) {
+    if (auto err = ScriptParams::ApplyFlags(parser.Next<string_view>(), &data); err)
       return builder->SendError("Invalid config format: " + err.Format());
   }
 

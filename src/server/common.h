@@ -77,7 +77,7 @@ struct ScanOpts {
   ScanOpts(ScanOpts&& other) = default;
 
   bool Matches(std::string_view val_name) const;
-  static OpResult<ScanOpts> TryFrom(CmdArgList args, bool allow_novalues = false);
+  static OpResult<ScanOpts> TryFrom(const facade::ParsedArgs& args, bool allow_novalues = false);
 
   std::unique_ptr<GlobMatcher> matcher;
   size_t limit = 10;

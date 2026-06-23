@@ -110,13 +110,17 @@ struct CmdArgParser {
   };
 
  public:
-  CmdArgParser(ArgSlice args) : args_{args} {
+  explicit CmdArgParser(ArgSlice args) : args_{args} {
   }
 
-  CmdArgParser(const cmn::BackedArguments& bargs, uint32_t offset = 0) : args_{bargs, offset} {
+  explicit CmdArgParser(const cmn::BackedArguments& bargs, uint32_t offset = 0)
+      : args_{bargs, offset} {
   }
 
-  CmdArgParser(ParsedArgs args) : args_{args} {
+  explicit CmdArgParser(const ParsedArgs& args) : args_{args} {
+  }
+
+  CmdArgParser(const ParsedArgs& args, uint32_t offset) : args_{args.Tail(offset)} {
   }
 
   // DCHECKs that any error was consumed.

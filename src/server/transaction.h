@@ -182,7 +182,7 @@ class Transaction {
   explicit Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id);
 
   // Initialize from command (args) on specific db.
-  OpStatus InitByArgs(Namespace* ns, DbIndex index, CmdArgList args);
+  OpStatus InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args);
 
   // Get command arguments for specific shard. Called from shard thread.
   ShardArgs GetShardArgs(ShardId sid) const;
@@ -486,7 +486,7 @@ class Transaction {
   };
 
   // Init basic fields and reset re-usable.
-  void InitBase(Namespace* ns, DbIndex dbid, CmdArgList args);
+  void InitBase(Namespace* ns, DbIndex dbid, const facade::ParsedArgs& args);
 
   // Init as a global transaction.
   void InitGlobal();
@@ -607,8 +607,10 @@ class Transaction {
   // Fingerprints of keys, precomputed once during the transaction initialization.
   absl::InlinedVector<LockFp, 4> kv_fp_;
 
-  // Stores the full undivided command.
-  CmdArgList full_args_;
+  // Stores the full undivided command. Backed either by a caller-owned span (legacy
+  // callers, via implicit ArgSlice conversion) or a caller-owned BackedArguments
+  // (migrated callers). The backing storage must outlive the transaction's hops.
+  facade::ParsedArgs full_args_;
 
   // Set if a NO_AUTOJOURNAL command asked to enable auto journal again
   bool re_enabled_auto_journal_ = false;
@@ -672,6 +674,6 @@ template <typename F> auto Transaction::ScheduleSingleHopT(F&& f) -> decltype(f(
   return res;
 }
 
-OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args);
+OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs& args);
 
 }  // namespace dfly

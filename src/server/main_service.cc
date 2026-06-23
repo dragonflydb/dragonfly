@@ -293,7 +293,7 @@ auto CmdEntryToMonitorFormat(std::string_view str) -> std::string {
 }
 
 std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* cid,
-                               CmdArgList tail_args) {
+                               const facade::ParsedArgs& tail_args) {
   std::string message = absl::StrCat(CreateMonitorTimestamp(), " [", cntx->conn_state.db_index);
 
   string endpoint;
@@ -312,12 +312,13 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
     return message;
 
   for (auto arg : tail_args)
-    absl::StrAppend(&message, " ", CmdEntryToMonitorFormat(facade::ToSV(arg)));
+    absl::StrAppend(&message, " ", CmdEntryToMonitorFormat(arg));
 
   return message;
 }
 
-void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid, CmdArgList tail_args) {
+void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid,
+                     const facade::ParsedArgs& tail_args) {
   auto cb = [msg = MakeMonitorMessage(cntx, cid, tail_args)](unsigned idx, util::ProactorBase*) {
     const auto& monitors = ServerState::tlocal()->Monitors().monitors();
     if (monitors.empty())
@@ -520,7 +521,7 @@ bool IsSHA(string_view str) {
   return rng::all_of(str, [](unsigned char c) { return absl::ascii_isxdigit(c); });
 }
 
-optional<ErrorReply> EvalValidator(CmdArgList args) {
+optional<ErrorReply> EvalValidator(const ParsedArgs& args) {
   facade::CmdArgParser parser{args};
   parser.Skip(1);  // script body / sha
   uint32_t num_keys = parser.Next<uint32_t>();
@@ -627,7 +628,7 @@ string ConnectionLogContext(const facade::Connection* conn) {
   return absl::StrCat("(", conn->RemoteEndpointStr(), ")");
 }
 
-string FailedCommandToString(std::string_view command, facade::CmdArgList args,
+string FailedCommandToString(std::string_view command, const facade::ParsedArgs& args,
                              std::string_view reason) {
   constexpr size_t kMaxArgCount = 31;
   constexpr size_t kMaxArgLength = 128;
@@ -652,12 +653,12 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   } else if (is_eval) {
     // log only script/SHA and numkeys, skip KEYS and ARGV to avoid PII leaks
     for (size_t i = 0; i < std::min(args.size(), size_t{2}); ++i) {
-      AppendArg(facade::ArgS(args, i));
+      AppendArg(args[i]);
     }
   } else {
     size_t num_args = std::min(args.size(), kMaxArgCount);
     for (size_t i = 0; i < num_args; ++i) {
-      AppendArg(facade::ArgS(args, i));
+      AppendArg(args[i]);
     }
     if (args.size() > kMaxArgCount) {
       absl::StrAppend(&result, " ... (", args.size() - kMaxArgCount, " more arguments)");
@@ -839,7 +840,7 @@ void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, con
 //   first  - newly created top-level transaction (or nullptr if none).
 //   second - result: overall status of preparation.
 pair<intrusive_ptr<Transaction>, OpStatus> PrepareTransaction(const CommandId* cid,
-                                                              ArgSlice tail_args,
+                                                              const facade::ParsedArgs& tail_args,
                                                               CommandContext* cmd_ctx) {
   auto* dfly_cntx = cmd_ctx->server_conn_cntx();
   bool init = false;
@@ -891,13 +892,13 @@ void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid,
   ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
 }
 
-bool ShouldLogError(const CommandId& cid, string_view reason, CmdArgList tail_args) {
+bool ShouldLogError(const CommandId& cid, string_view reason, const facade::ParsedArgs& tail_args) {
   if (absl::StartsWith(reason, "-BUSYGROUP"))
     return false;
 
   if (cid.name() != "CLIENT")
     return true;
-  return tail_args.empty() || !absl::EqualsIgnoreCase(tail_args.front(), "maint_notifications");
+  return tail_args.empty() || !absl::EqualsIgnoreCase(tail_args.Front(), "maint_notifications");
 }
 
 string_view McTypeToCmdName(MemcacheParser::CmdType type) {
@@ -1180,7 +1181,7 @@ void Service::Shutdown() {
   shutdown_watchdog->Disarm();
 }
 
-OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
+OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, const facade::ParsedArgs& args) {
   // Sharded pub-sub acts as if it's sharded by its channel name (just for checks)
   if (cid->IsShardedPubSub()) {
     // SPUBLISH has only one key, the rest is data
@@ -1192,7 +1193,8 @@ OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
   return DetermineKeys(cid, args);
 }
 
-optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid, CmdArgList args,
+optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid,
+                                                 const facade::ParsedArgs& args,
                                                  const ConnectionContext& dfly_cntx) {
   if (dfly_cntx.is_replicating) {
     // Always allow commands on the replication port, as it might be for future-owned keys.
@@ -1233,7 +1235,8 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid, CmdArgLis
 }
 
 // TODO(kostas) refactor. Almost 1-1 with CheckKeyOwnership() above.
-std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId& cid, CmdArgList args,
+std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId& cid,
+                                                              const facade::ParsedArgs& args,
                                                               const ConnectionContext& dfly_cntx) {
   if (cid.first_key_pos() == 0 && !cid.IsShardedPubSub()) {
     return nullopt;  // No key command.
@@ -1278,7 +1281,7 @@ std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId& c
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
 optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info,
-                                       const CommandId* cid, CmdArgList args,
+                                       const CommandId* cid, const facade::ParsedArgs& args,
                                        Transaction::MultiMode multi_mode) {
   // We either scheduled on all shards or re-schedule for each operation,
   // so we are not restricted to any keys.
@@ -1301,14 +1304,16 @@ optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_i
 
 static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
                                                       const ConnectionContext* cntx,
-                                                      string_view error_msg, ArgSlice tail_args) {
+                                                      string_view error_msg,
+                                                      const facade::ParsedArgs& tail_args) {
   if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid, tail_args)) {
     return ErrorReply(absl::StrCat("-NOPERM ", cntx->authed_username, " ", error_msg));
   }
   return nullopt;
 }
 
-std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdArgList tail_args,
+std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
+                                                      const facade::ParsedArgs& tail_args,
                                                       const ConnectionContext& dfly_cntx) {
   ServerState& etl = *ServerState::tlocal();
 
@@ -1495,7 +1500,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     if (VLOG_IS_ON(2)) {
       bool under_script = bool(dfly_cntx->conn_state.script_info);
       LOG(INFO) << "Got (" << conn->GetClientId() << "): " << (under_script ? "LUA " : "")
-                << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;
+                << cid->name() << " " << args_no_cmd
+                << " in dbid=" << dfly_cntx->conn_state.db_index;
     }
 
     // Check pause state only if it is a top level transaction.
@@ -1504,7 +1510,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   }
 
   // Verify command state
-  if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
+  if (auto err = VerifyCommandState(*cid, args_no_cmd, *dfly_cntx); err) {
     LOG_IF(WARNING, dfly_cntx->replica_conn || !dfly_cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
@@ -1541,7 +1547,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     return DispatchResult::OK;
   }
 
-  auto [dispatched_tx, status] = PrepareTransaction(cid, tail_args, cmd_cntx);
+  auto [dispatched_tx, status] = PrepareTransaction(cid, args_no_cmd, cmd_cntx);
   if (status != OpStatus::OK) {
     DCHECK(!dispatched_tx);
     cmd_cntx->SendError(StatusToMsg(status));
@@ -1730,7 +1736,6 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
 
     dfly_cntx->transaction = dist_trans.get();
     MultiCommandSquasher::Opts opts;
-    opts.verify_commands = true;
     opts.pipeline_mode = true;
     opts.max_squash_size = ss->max_squash_cmd_num;
 
@@ -1772,6 +1777,15 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     if (is_multi || is_eval || cid->IsBlocking() || (cid->opt_mask() & CO::ADMIN) ||
         cid->IsQuit() || cid->IsSubscribeFamily())
       break;
+
+    if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
+      CapturingReplyBuilder crb{ReplyMode::FULL, rb->GetRespVersion()};
+      crb.SendError(std::move(*err));
+      cmd_cntx->Resolve(crb.Take());
+      ++dispatched;
+      cmd = cmd->next;
+      continue;
+    }
 
     cmd_refs.push_back(CmdRef{cid, tail_args, ReplyMode::FULL, cmd_cntx});
     cmd = cmd->next;
@@ -1932,9 +1946,20 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   DCHECK(eval_cid);
   tx->MultiSwitchCmd(eval_cid);
 
+  for (auto& scmd : info->async_cmds) {
+    auto ref = scmd.Ref();
+    if (auto err = VerifyCommandState(*ref.cid, ref.args, *cntx); err) {
+      info->async_cmds_heap_mem = 0;
+      info->async_cmds.clear();
+      CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
+      crb.SendError(std::move(*err));
+      auto reply = crb.Take();
+      return make_optional(std::move(reply));
+    }
+  }
+
   CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
   MultiCommandSquasher::Opts opts;
-  opts.verify_commands = true;
   opts.error_abort = true;
   opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
   auto cmd_gen = [it = info->async_cmds.begin(), end = info->async_cmds.end()]() mutable -> CmdRef {

@@ -3341,7 +3341,7 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
 }  // namespace
 
 void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   string_view key = parser.Next();
@@ -3532,7 +3532,7 @@ void CmdXDel(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdXGroup(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+  facade::CmdArgParser parser{cmd_cntx->tail_args()};
 
   auto sub_cmd_func = parser.MapNext("HELP", &HelpSubCmd, "CREATE", &CreateGroup, "DESTROY",
                                      &DestroyGroup, "CREATECONSUMER", &CreateConsumer,
@@ -4004,7 +4004,7 @@ void CmdXSetId(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdXTrim(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+  CmdArgParser parser{cmd_cntx->tail_args()};
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   std::string_view key = parser.Next();
