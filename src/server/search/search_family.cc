@@ -4,6 +4,7 @@
 
 #include "server/search/search_family.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/strings/match.h>
@@ -14,6 +15,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <exception>
+#include <functional>
 #include <variant>
 #include <vector>
 
@@ -1155,6 +1158,27 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
   partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
 }
 
+// Global SORTBY merge across shards. ValueCmp (std::less/std::greater) selects the direction for
+// present values; docs missing the field hold a monostate sort_score and always rank last,
+// independent of direction, so that rule wraps ValueCmp (a plain variant comparison would sort
+// monostate first in ASC). ranks_before(l, r) is true when l should be ordered before r.
+void PartialSortBySortScore(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder order) {
+  auto run = [&](auto value_cmp) {
+    auto ranks_before = [value_cmp](SerializedSearchDoc* l, SerializedSearchDoc* r) {
+      bool l_missing = std::holds_alternative<std::monostate>(l->sort_score);
+      bool r_missing = std::holds_alternative<std::monostate>(r->sort_score);
+      if (l_missing != r_missing)
+        return !l_missing;  // present ranks before missing
+      return value_cmp(l->sort_score, r->sort_score);
+    };
+    partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), ranks_before);
+  };
+  if (order == SortOrder::ASC)
+    run(std::less<>{});
+  else
+    run(std::greater<>{});
+}
+
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
                  std::string_view inject_score_alias, absl::Span<SearchResult> results,
@@ -1214,8 +1238,7 @@ void SearchReply(const SearchParams& params,
 
   // Apply SORTBY if its different from the KNN sort
   if (params.sort_option && !ignore_sort)
-    PartialSort(absl::MakeSpan(docs), end, params.sort_option->order,
-                &SerializedSearchDoc::sort_score);
+    PartialSortBySortScore(absl::MakeSpan(docs), end, params.sort_option->order);
 
   const bool reply_with_ids_only = params.IdsOnly();
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -1263,6 +1286,7 @@ void WarmupQueryParser() {
 struct HnswLoadOptions {
   bool set_sort_score = false;
   bool remove_sort_field = false;
+  std::string sort_score_field;
   std::optional<std::vector<FieldReference>> return_fields;
 };
 
@@ -1273,10 +1297,15 @@ HnswLoadOptions PrepareHnswLoadOptions(const SearchParams& params,
 
   options.set_sort_score =
       params.sort_option && (!knn_score_option || !params.sort_option->IsSame(*knn_score_option));
-  if (!options.return_fields || !options.set_sort_score)
+  if (!options.set_sort_score)
     return options;
 
   auto sort_field = params.sort_option->field.Name();
+  options.sort_score_field = sort_field;
+
+  if (!options.return_fields)
+    return options;
+
   auto sort_return_field = rng::find_if(
       *options.return_fields,
       [sort_field](const FieldReference& field) { return field.Name() == sort_field; });
@@ -1284,86 +1313,31 @@ HnswLoadOptions PrepareHnswLoadOptions(const SearchParams& params,
   if (sort_return_field == options.return_fields->end()) {
     options.return_fields->push_back(params.sort_option->field);
     options.remove_sort_field = true;
+  } else {
+    options.sort_score_field = sort_return_field->OutputName();
   }
   return options;
 }
 
-vector<SearchResult> SearchGlobalHnswIndex(
-    const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
+vector<SearchResult> LoadHnswSearchDocs(
     const std::string_view index_name,
-    const std::optional<search::KnnScoreSortOption>& knn_score_option,
-    const std::vector<SearchResult>& sharded_prefilter_docs, const SearchParams& params,
-    const CommandContext& cmd_cntx) {
+    const std::optional<search::KnnScoreSortOption>& knn_score_option, const SearchParams& params,
+    const CommandContext& cmd_cntx, std::vector<std::vector<SerializedSearchDoc>> shard_docs,
+    bool finalize) {
   std::vector<SearchResult> results(1);
-
-  std::optional<std::vector<search::GlobalDocId>> prefilter_global_docs_ids = std::nullopt;
-
-  // Quick lookup to match global id to serialized doc
-  std::map<search::GlobalDocId, const SerializedSearchDoc*> prefilter_docs_lookup;
-
-  const bool has_prefilter_docs = knn->HasPreFilter();
-  const ShardId shard_size = sharded_prefilter_docs.size();
-
-  // We have pre filter docs so all documents should already be fetched
-  if (has_prefilter_docs) {
-    std::vector<search::GlobalDocId> global_doc_ids;
-    for (size_t shard_id = 0; shard_id < shard_size; shard_id++) {
-      for (auto& doc : sharded_prefilter_docs[shard_id].docs) {
-        auto global_doc_id = search::CreateGlobalDocId(shard_id, doc.id);
-        global_doc_ids.emplace_back(global_doc_id);
-        prefilter_docs_lookup[global_doc_id] = &doc;
-      }
-    }
-    prefilter_global_docs_ids = std::move(global_doc_ids);
-  }
-
-  // Search HNSW index
-  std::vector<std::pair<float, search::GlobalDocId>> knn_results;
-
-  if (prefilter_global_docs_ids) {
-    VLOG(1) << "Searching HNSW index with prefilter size: " << prefilter_global_docs_ids->size();
-    if (prefilter_global_docs_ids->size() < absl::GetFlag(FLAGS_subset_knn_search_threshold)) {
-      knn_results = index->SubsetKnn(knn->vec.first.get(), knn->limit, *prefilter_global_docs_ids);
-    } else {
-      knn_results =
-          index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, *prefilter_global_docs_ids);
-    }
-  } else {
-    knn_results = index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
-  }
+  const ShardId shard_size = shard_docs.size();
 
   std::vector<SerializedSearchDoc> knn_search_serialized_docs;
-  knn_search_serialized_docs.reserve(knn_results.size());
-
-  // Serialized docs for each shard
-  std::vector<std::vector<SerializedSearchDoc>> shard_docs(shard_size);
-
-  for (const auto& [score, global_doc_id] : knn_results) {
-    if (has_prefilter_docs) {
-      knn_search_serialized_docs.emplace_back(*prefilter_docs_lookup[global_doc_id]);
-      knn_search_serialized_docs.back().knn_score = score;
-    } else {
-      // Create SerializedSearchDoc and fill only knn information
-      auto [shard_id, local_doc_id] = search::DecomposeGlobalDocId(global_doc_id);
-      SerializedSearchDoc doc;
-      doc.id = local_doc_id;
-      doc.knn_score = score;
-      shard_docs[shard_id].emplace_back(doc);
-    }
-  }
-
-  // If we have prefilter docs we don't need to fetch docs so can return early
-  if (has_prefilter_docs) {
-    results[0].total_hits = knn_search_serialized_docs.size();
-    results[0].docs = std::move(knn_search_serialized_docs);
-    return results;
-  }
+  size_t docs_count = 0;
+  for (const auto& shard : shard_docs)
+    docs_count += shard.size();
+  knn_search_serialized_docs.reserve(docs_count);
 
   // Indicator if we serialized document on shard
   std::vector<std::vector<bool>> shard_docs_serialized_indicator(shard_size);
 
   // Fetch all docs from shards
-  cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  auto cb = [&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(index_name);
 
     // No index found or no docs on this shard
@@ -1373,12 +1347,24 @@ vector<SearchResult> SearchGlobalHnswIndex(
 
     const auto& schema = index->base().schema;
     auto load_options = PrepareHnswLoadOptions(params, knn_score_option);
+    const bool ids_only_without_sort_load = params.IdsOnly() && !load_options.set_sort_score;
 
     // Resize shard with default `true` value
     shard_docs_serialized_indicator[es->shard_id()].resize(shard_docs[es->shard_id()].size(), true);
 
     for (size_t i = 0; i < shard_docs[es->shard_id()].size(); i++) {
       auto& shard_doc = shard_docs[es->shard_id()][i];
+
+      if (ids_only_without_sort_load) {
+        const auto& keys = index->key_index();
+        if (keys.IsValid(shard_doc.id)) {
+          shard_doc.key = std::string{keys.Get(shard_doc.id)};
+        } else {
+          shard_docs_serialized_indicator[es->shard_id()][i] = false;
+        }
+        continue;
+      }
+
       if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema,
                                                 load_options.return_fields);
           doc) {
@@ -1387,9 +1373,10 @@ vector<SearchResult> SearchGlobalHnswIndex(
         // Handle sort_score and remove field if we don't need it
         search::SortableValue sort_score = std::monostate{};
         if (load_options.set_sort_score) {
-          sort_score = fields[params.sort_option->field.Name()];
+          if (auto it = fields.find(load_options.sort_score_field); it != fields.end())
+            sort_score = it->second;
           if (load_options.remove_sort_field) {
-            fields.erase(params.sort_option->field.Name());
+            fields.erase(load_options.sort_score_field);
           }
         }
         shard_doc.key = std::string{key};
@@ -1401,17 +1388,21 @@ vector<SearchResult> SearchGlobalHnswIndex(
       }
     }
     return OpStatus::OK;
-  });
+  };
+  if (finalize)
+    cmd_cntx.tx()->Execute(std::move(cb), true);
+  else
+    cmd_cntx.tx()->ScheduleSingleHop(std::move(cb));
 
-  // Transform shard results back to
+  // Transform shard results back to a flat list of serialized docs. A shard whose index went
+  // missing during the hop (e.g. dropped between hops) leaves its indicator empty, not resized.
   size_t shard_id = 0;
   std::for_each(shard_docs.begin(), shard_docs.end(),
                 [&](const std::vector<SerializedSearchDoc>& shard) {
+                  const auto& serialized = shard_docs_serialized_indicator[shard_id];
                   for (size_t doc_index = 0; doc_index < shard.size(); ++doc_index) {
-                    // Check if we serialized doc
-                    if (shard_docs_serialized_indicator[shard_id][doc_index]) {
+                    if (doc_index < serialized.size() && serialized[doc_index])
                       knn_search_serialized_docs.push_back(shard[doc_index]);
-                    }
                   }
                   shard_id++;
                 });
@@ -1420,6 +1411,91 @@ vector<SearchResult> SearchGlobalHnswIndex(
   results[0].docs = std::move(knn_search_serialized_docs);
 
   return results;
+}
+
+std::vector<std::pair<float, search::GlobalDocId>> SearchHnswWithPrefilter(
+    const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
+    std::optional<std::vector<search::GlobalDocId>> prefilter_global_docs_ids) {
+  if (!prefilter_global_docs_ids)
+    return index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+
+  auto& ids = *prefilter_global_docs_ids;
+  VLOG(1) << "Searching HNSW index with prefilter size: " << ids.size();
+
+  if (ids.size() < absl::GetFlag(FLAGS_subset_knn_search_threshold))
+    return index->SubsetKnn(knn->vec.first.get(), knn->limit, ids);
+
+  // HnswVectorIndex::Knn(... allowed) uses binary_search for membership.
+  if (!is_sorted(ids.begin(), ids.end()))
+    sort(ids.begin(), ids.end());
+
+  return index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, ids);
+}
+
+vector<SearchResult> SearchGlobalHnswIndex(
+    const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
+    const std::string_view index_name,
+    const std::optional<search::KnnScoreSortOption>& knn_score_option, const SearchParams& params,
+    const CommandContext& cmd_cntx, ShardId shard_size) {
+  auto knn_results = SearchHnswWithPrefilter(knn, index, std::nullopt);
+
+  std::vector<std::vector<SerializedSearchDoc>> shard_docs(shard_size);
+  for (const auto& [score, global_doc_id] : knn_results) {
+    auto [shard_id, local_doc_id] = search::DecomposeGlobalDocId(global_doc_id);
+    SerializedSearchDoc doc;
+    doc.id = local_doc_id;
+    doc.knn_score = score;
+    shard_docs[shard_id].emplace_back(std::move(doc));
+  }
+
+  return LoadHnswSearchDocs(index_name, knn_score_option, params, cmd_cntx, std::move(shard_docs),
+                            false);
+}
+
+vector<SearchResult> SearchGlobalHnswIndex(
+    const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
+    const std::string_view index_name,
+    const std::optional<search::KnnScoreSortOption>& knn_score_option,
+    const std::vector<SearchIdResult>& sharded_prefilter_docs, const SearchParams& params,
+    const CommandContext& cmd_cntx) {
+  std::vector<search::GlobalDocId> prefilter_global_docs_ids;
+  absl::flat_hash_map<search::GlobalDocId, float> text_scores;
+  const bool keep_text_scores = params.with_scores || params.scorer;
+
+  for (size_t shard_id = 0; shard_id < sharded_prefilter_docs.size(); shard_id++) {
+    const auto& shard = sharded_prefilter_docs[shard_id];
+    prefilter_global_docs_ids.reserve(prefilter_global_docs_ids.size() + shard.ids.size());
+    if (keep_text_scores)
+      text_scores.reserve(text_scores.size() + shard.text_scores.size());
+
+    for (search::DocId doc_id : shard.ids) {
+      auto global_doc_id = search::CreateGlobalDocId(shard_id, doc_id);
+      prefilter_global_docs_ids.emplace_back(global_doc_id);
+      if (keep_text_scores) {
+        if (auto it = shard.text_scores.find(doc_id); it != shard.text_scores.end())
+          text_scores[global_doc_id] = it->second;
+      }
+    }
+  }
+
+  auto knn_results =
+      SearchHnswWithPrefilter(knn, index, std::make_optional(std::move(prefilter_global_docs_ids)));
+
+  std::vector<std::vector<SerializedSearchDoc>> shard_docs(sharded_prefilter_docs.size());
+  for (const auto& [score, global_doc_id] : knn_results) {
+    auto [shard_id, local_doc_id] = search::DecomposeGlobalDocId(global_doc_id);
+    SerializedSearchDoc doc;
+    doc.id = local_doc_id;
+    doc.knn_score = score;
+    if (keep_text_scores) {
+      if (auto it = text_scores.find(global_doc_id); it != text_scores.end())
+        doc.text_score = it->second;
+    }
+    shard_docs[shard_id].emplace_back(std::move(doc));
+  }
+
+  return LoadHnswSearchDocs(index_name, knn_score_option, params, cmd_cntx, std::move(shard_docs),
+                            true);
 }
 
 // Search HNSW index for all documents within the given radius.
@@ -1442,21 +1518,7 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
     shard_docs[shard_id].emplace_back(doc);
   }
 
-  bool set_sort_score =
-      params.sort_option && (!knn_score_option || !params.sort_option->IsSame(*knn_score_option));
-  bool remove_sort_field = false;
-  std::optional<std::vector<FieldReference>> return_fields = params.return_fields;
-
-  if (set_sort_score && return_fields) {
-    auto sort_field = params.sort_option->field.Name();
-    auto sort_return_field = rng::find_if(
-        *return_fields,
-        [sort_field](const FieldReference& field) { return field.Name() == sort_field; });
-    if (sort_return_field == return_fields->end()) {
-      return_fields->push_back(params.sort_option->field);
-      remove_sort_field = true;
-    }
-  }
+  auto load_options = PrepareHnswLoadOptions(params, knn_score_option);
 
   cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* idx = es->search_indices()->GetIndex(index_name);
@@ -1464,15 +1526,16 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
       return OpStatus::OK;
     const auto& schema = idx->base().schema;
     for (auto& shard_doc : shard_docs[es->shard_id()]) {
-      if (auto doc =
-              idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema, return_fields);
+      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema,
+                                              load_options.return_fields);
           doc) {
         auto& [key, fields] = *doc;
         search::SortableValue sort_score = std::monostate{};
-        if (set_sort_score) {
-          sort_score = fields[params.sort_option->field.Name()];
-          if (remove_sort_field)
-            fields.erase(params.sort_option->field.Name());
+        if (load_options.set_sort_score) {
+          if (auto it = fields.find(load_options.sort_score_field); it != fields.end())
+            sort_score = it->second;
+          if (load_options.remove_sort_field)
+            fields.erase(load_options.sort_score_field);
         }
         shard_doc.key = std::string{key};
         shard_doc.values = std::move(fields);
@@ -2853,9 +2916,18 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   }
   const bool hnsw_range_has_prefilter = hnsw_range_prefilter != nullptr;
 
+  // The KNN-prefilter flow leaves the transaction open between hops; conclude it if an exception
+  // unwinds out of the command, otherwise the scheduled global tx leaks and stalls the shards.
+  const int uncaught_on_entry = std::uncaught_exceptions();
+  absl::Cleanup conclude_on_unwind = [&] {
+    if (std::uncaught_exceptions() > uncaught_on_entry)
+      cmd_cntx->tx()->Conclude();
+  };
+
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
+  vector<SearchIdResult> knn_prefilter_docs(shard_set->size());
 
   const bool knn_has_prefilter = knn && knn->HasPreFilter();
   bool empty_prefilter_result = true;
@@ -2895,36 +2967,65 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   if ((!knn || knn_has_prefilter) && !hnsw_range) {
     auto search_cb = [&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index) {
-        docs[es->shard_id()] =
-            index->Search(t->GetOpArgs(es), *params, &search_algo,
-                          knn_has_prefilter || hnsw_range_has_prefilter, global_stats_ptr);
+        if (knn_has_prefilter) {
+          knn_prefilter_docs[es->shard_id()] =
+              index->SearchIds(t->GetOpArgs(es), *params, &search_algo, global_stats_ptr);
+        } else {
+          docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo,
+                                               hnsw_range_has_prefilter, global_stats_ptr);
+        }
       } else {
         index_not_found.store(true, memory_order_relaxed);
       }
       return OpStatus::OK;
     };
-    if (needs_global_stats)
+    if (knn_has_prefilter) {
+      cmd_cntx->tx()->Execute(std::move(search_cb), false);
+    } else if (needs_global_stats) {
       cmd_cntx->tx()->Execute(std::move(search_cb), true);
-    else
+    } else {
       cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
+    }
 
-    if (index_not_found.load(memory_order_relaxed))
+    if (index_not_found.load(memory_order_relaxed)) {
+      if (knn_has_prefilter)
+        cmd_cntx->tx()->Conclude();
       return cmd_cntx->SendError(string{index_name} + ": no such index");
+    }
 
-    for (const auto& res : docs) {
-      empty_prefilter_result &= res.docs.empty();
-      if (res.error)
-        return cmd_cntx->SendError(*res.error);
+    if (knn_has_prefilter) {
+      for (const auto& res : knn_prefilter_docs) {
+        empty_prefilter_result &= res.ids.empty();
+        if (res.error) {
+          cmd_cntx->tx()->Conclude();
+          return cmd_cntx->SendError(*res.error);
+        }
+      }
+      if (empty_prefilter_result)
+        cmd_cntx->tx()->Conclude();
+    } else {
+      for (const auto& res : docs) {
+        empty_prefilter_result &= res.docs.empty();
+        if (res.error)
+          return cmd_cntx->SendError(*res.error);
+      }
     }
   }
 
   if (knn_node && (!knn_has_prefilter || !empty_prefilter_result)) {
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, knn->field);
     if (!hnsw_index) {
+      if (knn_has_prefilter)
+        cmd_cntx->tx()->Conclude();
       return builder->SendError(string{index_name} + ": no such global hnsw index");
     }
-    docs = SearchGlobalHnswIndex(knn, hnsw_index, index_name, search_algo.GetKnnScoreSortOption(),
-                                 docs, *params, *cmd_cntx);
+    if (knn_has_prefilter) {
+      docs = SearchGlobalHnswIndex(knn, hnsw_index, index_name, search_algo.GetKnnScoreSortOption(),
+                                   knn_prefilter_docs, *params, *cmd_cntx);
+    } else {
+      docs = SearchGlobalHnswIndex(knn, hnsw_index, index_name, search_algo.GetKnnScoreSortOption(),
+                                   *params, *cmd_cntx, shard_set->size());
+    }
   }
 
   auto knn_sort_option = search_algo.GetKnnScoreSortOption();
@@ -3020,6 +3121,59 @@ void CmdFtProfileHybrid(string_view index_name, CmdArgParser* parser, CommandCon
   }
 }
 
+void SendFtProfileSearchResponse(const SearchParams& params,
+                                 std::optional<search::KnnScoreSortOption> knn_sort_option,
+                                 std::string_view inject_score_alias,
+                                 absl::Span<SearchResult> search_results,
+                                 absl::Span<SearchResult> profile_results,
+                                 absl::Span<const absl::Duration> shard_durations,
+                                 absl::Duration took, RedisReplyBuilder* rb, bool limited) {
+  bool result_is_empty = false;
+  size_t total_docs = 0;
+  size_t total_serialized = 0;
+  for (const auto& result : search_results) {
+    if (!result.error) {
+      total_docs += result.total_hits;
+      total_serialized += result.docs.size();
+    } else {
+      result_is_empty = true;
+    }
+  }
+
+  // First element -> Result of the search command
+  // Second element -> Profile information
+  rb->StartArray(2);
+
+  // Result of the search command
+  if (!result_is_empty) {
+    SearchReply(params, knn_sort_option, inject_score_alias, search_results, rb, false);
+  } else {
+    rb->StartArray(1);
+    rb->SendLong(0);
+  }
+
+  // Profile information
+  rb->StartArray(profile_results.size() + 1);
+
+  // General stats
+  rb->StartCollection(3, CollectionType::MAP);
+  rb->SendBulkString("took");
+  rb->SendLong(absl::ToInt64Microseconds(took));
+  rb->SendBulkString("hits");
+  rb->SendLong(static_cast<long>(total_docs));
+  rb->SendBulkString("serialized");
+  rb->SendLong(static_cast<long>(total_serialized));
+
+  // Per-shard stats
+  for (size_t shard_id = 0; shard_id < profile_results.size(); shard_id++) {
+    rb->StartCollection(2, CollectionType::MAP);
+    rb->SendBulkString("took");
+    rb->SendLong(absl::ToInt64Microseconds(shard_durations[shard_id]));
+    rb->SendBulkString("tree");
+    RenderShardProfileTree(rb, profile_results[shard_id], limited);
+  }
+}
+
 void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
 
@@ -3049,7 +3203,7 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str, &params->query_params))
+  if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return cmd_cntx->SendError("query syntax error");
 
   // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
@@ -3063,12 +3217,227 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   absl::Time start = absl::Now();
   const size_t shards_count = shard_set->size();
 
+  // Prefilter/range profile flows leave the transaction open between hops; conclude it if an
+  // exception unwinds out of the command so the scheduled global tx cannot leak.
+  const int uncaught_on_entry = std::uncaught_exceptions();
+  absl::Cleanup conclude_on_unwind = [&] {
+    if (std::uncaught_exceptions() > uncaught_on_entry)
+      cmd_cntx->tx()->Conclude();
+  };
+
+  auto [profile_knn_node, profile_knn] = TryPopHnswKnnNode(search_algo, index_name);
+  if (profile_knn) {
+    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, profile_knn->field);
+    if (!hnsw_index)
+      return rb->SendError(std::string{index_name} + ": no such global hnsw index");
+
+    std::vector<SearchResult> search_results(shards_count);
+    std::vector<SearchResult> profile_search_results(shards_count);
+    std::vector<absl::Duration> profile_results(shards_count);
+
+    const bool knn_has_prefilter = profile_knn->HasPreFilter();
+    const bool needs_global_stats =
+        knn_has_prefilter && (params->scorer || params->with_scores) && shards_count > 1;
+    search::GlobalScoringStats global_scoring_stats;
+    const search::GlobalScoringStats* global_stats_ptr = nullptr;
+
+    if (needs_global_stats) {
+      if (!CollectGlobalScoringStats(index_name, search_algo, cmd_cntx->tx(), shards_count,
+                                     global_scoring_stats)) {
+        cmd_cntx->tx()->Conclude();
+        return rb->SendError(std::string{index_name} + ": no such index");
+      }
+      global_stats_ptr = &global_scoring_stats;
+    }
+
+    if (knn_has_prefilter) {
+      std::atomic<bool> index_not_found{false};
+      std::vector<SearchIdResult> knn_prefilter_docs(shards_count);
+
+      cmd_cntx->tx()->Execute(
+          [&](Transaction* t, EngineShard* es) {
+            auto* index = es->search_indices()->GetIndex(index_name);
+            if (!index) {
+              index_not_found.store(true, memory_order_relaxed);
+              return OpStatus::OK;
+            }
+
+            const ShardId shard_id = es->shard_id();
+            auto shard_start = absl::Now();
+            knn_prefilter_docs[shard_id] =
+                index->SearchIds(t->GetOpArgs(es), *params, &search_algo, global_stats_ptr);
+            profile_results[shard_id] = absl::Now() - shard_start;
+            return OpStatus::OK;
+          },
+          false);
+
+      if (index_not_found.load(memory_order_relaxed)) {
+        cmd_cntx->tx()->Conclude();
+        return rb->SendError(std::string{index_name} + ": no such index");
+      }
+
+      bool empty_prefilter_result = true;
+      for (size_t shard_id = 0; shard_id < knn_prefilter_docs.size(); shard_id++) {
+        auto& res = knn_prefilter_docs[shard_id];
+        empty_prefilter_result &= res.ids.empty();
+        if (res.error) {
+          cmd_cntx->tx()->Conclude();
+          return cmd_cntx->SendError(*res.error);
+        }
+        profile_search_results[shard_id].total_hits = res.total_hits;
+        profile_search_results[shard_id].profile = std::move(res.profile);
+      }
+
+      if (empty_prefilter_result) {
+        cmd_cntx->tx()->Conclude();
+      } else {
+        search_results = SearchGlobalHnswIndex(profile_knn, hnsw_index, index_name,
+                                               search_algo.GetKnnScoreSortOption(),
+                                               knn_prefilter_docs, *params, *cmd_cntx);
+      }
+    } else {
+      search_results = SearchGlobalHnswIndex(profile_knn, hnsw_index, index_name,
+                                             search_algo.GetKnnScoreSortOption(), *params,
+                                             *cmd_cntx, shards_count);
+      profile_search_results.clear();
+      profile_results.clear();
+    }
+
+    auto took = absl::Now() - start;
+    SendFtProfileSearchResponse(
+        *params, search_algo.GetKnnScoreSortOption(), {}, absl::MakeSpan(search_results),
+        absl::MakeSpan(profile_search_results), absl::MakeSpan(profile_results), took, rb, limited);
+    return;
+  }
+
+  const search::AstVectorRangeNode* hnsw_range = nullptr;
+  std::unique_ptr<search::AstNode> hnsw_range_holder;
+  const search::AstVectorRangeNode* hnsw_range_prefilter = nullptr;
+  auto ranges = search_algo.CollectVectorRangeNodes();
+  if (ranges.size() > 1 &&
+      std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
+        return GlobalHnswIndexRegistry::Instance().Exist(index_name, r->field);
+      })) {
+    return rb->SendError(
+        "Combining multiple VECTOR_RANGE clauses with an HNSW index is not "
+        "supported");
+  }
+  if (auto* vr = search_algo.GetVectorRangeNode(); vr != nullptr) {
+    if (GlobalHnswIndexRegistry::Instance().Exist(index_name, vr->field)) {
+      if (search_algo.IsBareVectorRange()) {
+        hnsw_range = vr;
+      } else if (search_algo.IsAndedVectorRange()) {
+        hnsw_range_holder = search_algo.ExtractVectorRangeAsPrefilter();
+        hnsw_range_prefilter = &std::get<search::AstVectorRangeNode>(*hnsw_range_holder);
+      } else {
+        return rb->SendError("Combining VECTOR_RANGE with OR/NOT is not supported on HNSW indexes");
+      }
+    }
+  }
+
+  std::optional<search::KnnScoreSortOption> hnsw_range_sort_option;
+  if (hnsw_range || hnsw_range_prefilter) {
+    const auto* range_node = hnsw_range ? hnsw_range : hnsw_range_prefilter;
+    if (!range_node->score_alias.empty())
+      hnsw_range_sort_option =
+          search::KnnScoreSortOption{range_node->score_alias, std::numeric_limits<size_t>::max()};
+  }
+
+  if (hnsw_range) {
+    auto hnsw_index = GetValidatedHnswRangeIndex(index_name, hnsw_range, rb);
+    if (!hnsw_index)
+      return;
+
+    auto search_results = SearchGlobalHnswIndexRange(hnsw_range, hnsw_index, index_name,
+                                                     hnsw_range_sort_option, *params, *cmd_cntx);
+    std::vector<SearchResult> profile_search_results;
+    std::vector<absl::Duration> profile_results;
+    auto took = absl::Now() - start;
+    SendFtProfileSearchResponse(*params, hnsw_range_sort_option, {}, absl::MakeSpan(search_results),
+                                absl::MakeSpan(profile_search_results),
+                                absl::MakeSpan(profile_results), took, rb, limited);
+    return;
+  }
+
+  if (hnsw_range_prefilter) {
+    std::atomic<bool> index_not_found{false};
+    std::vector<SearchResult> prefilter_results(shards_count);
+    std::vector<absl::Duration> profile_results(shards_count);
+
+    const bool needs_global_stats = (params->scorer || params->with_scores) && shards_count > 1;
+    search::GlobalScoringStats global_scoring_stats;
+    const search::GlobalScoringStats* global_stats_ptr = nullptr;
+    if (needs_global_stats) {
+      if (!CollectGlobalScoringStats(index_name, search_algo, cmd_cntx->tx(), shards_count,
+                                     global_scoring_stats)) {
+        cmd_cntx->tx()->Conclude();
+        return rb->SendError(std::string{index_name} + ": no such index");
+      }
+      global_stats_ptr = &global_scoring_stats;
+    }
+
+    cmd_cntx->tx()->Execute(
+        [&](Transaction* t, EngineShard* es) {
+          auto* index = es->search_indices()->GetIndex(index_name);
+          if (!index) {
+            index_not_found.store(true, memory_order_relaxed);
+            return OpStatus::OK;
+          }
+          const ShardId shard_id = es->shard_id();
+          auto shard_start = absl::Now();
+          prefilter_results[shard_id] = index->Search(t->GetOpArgs(es), *params, &search_algo,
+                                                      /*is_knn_prefilter=*/true, global_stats_ptr);
+          profile_results[shard_id] = absl::Now() - shard_start;
+          return OpStatus::OK;
+        },
+        true);
+
+    if (index_not_found.load(memory_order_relaxed))
+      return rb->SendError(std::string{index_name} + ": no such index");
+
+    bool result_is_empty = true;
+    for (const auto& res : prefilter_results) {
+      result_is_empty &= res.docs.empty();
+      if (res.error)
+        return cmd_cntx->SendError(*res.error);
+    }
+
+    std::vector<SearchResult> search_results;
+    if (result_is_empty) {
+      search_results = prefilter_results;
+    } else {
+      auto hnsw_index = GetValidatedHnswRangeIndex(index_name, hnsw_range_prefilter, rb);
+      if (!hnsw_index)
+        return;
+      search_results = SearchGlobalHnswIndexRangePrefiltered(hnsw_range_prefilter, hnsw_index,
+                                                             prefilter_results);
+    }
+
+    auto took = absl::Now() - start;
+    SendFtProfileSearchResponse(*params, hnsw_range_sort_option, {}, absl::MakeSpan(search_results),
+                                absl::MakeSpan(prefilter_results), absl::MakeSpan(profile_results),
+                                took, rb, limited);
+    return;
+  }
+
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   std::atomic<bool> index_not_found{false};
   std::vector<SearchResult> search_results(shards_count);
   std::vector<absl::Duration> profile_results(shards_count);
 
-  cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  const bool needs_global_stats = (params->scorer || params->with_scores) && shards_count > 1;
+  search::GlobalScoringStats global_scoring_stats;
+  const search::GlobalScoringStats* global_stats_ptr = nullptr;
+  if (needs_global_stats) {
+    if (!CollectGlobalScoringStats(index_name, search_algo, cmd_cntx->tx(), shards_count,
+                                   global_scoring_stats)) {
+      cmd_cntx->tx()->Conclude();
+      return rb->SendError(std::string{index_name} + ": no such index");
+    }
+    global_stats_ptr = &global_scoring_stats;
+  }
+
+  auto search_cb = [&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(index_name);
     if (!index) {
       index_not_found.store(true, memory_order_relaxed);
@@ -3079,63 +3448,37 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
     auto shard_start = absl::Now();
     search_results[shard_id] = index->Search(t->GetOpArgs(es), *params, &search_algo,
-                                             /*is_knn_prefilter=*/false,
-                                             /*global_stats=*/nullptr);
+                                             /*is_knn_prefilter=*/false, global_stats_ptr);
     profile_results[shard_id] = {absl::Now() - shard_start};
 
     return OpStatus::OK;
-  });
+  };
+  if (needs_global_stats)
+    cmd_cntx->tx()->Execute(std::move(search_cb), true);
+  else
+    cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
 
   if (index_not_found.load())
     return rb->SendError(std::string{index_name} + ": no such index");
 
   auto took = absl::Now() - start;
 
-  bool result_is_empty = false;
-  size_t total_docs = 0;
-  size_t total_serialized = 0;
-  for (const auto& result : search_results) {
-    if (!result.error) {
-      total_docs += result.total_hits;
-      total_serialized += result.docs.size();
-    } else {
-      result_is_empty = true;
+  auto knn_sort_option = search_algo.GetKnnScoreSortOption();
+  std::string_view inject_score_alias;
+  if (!knn_sort_option) {
+    if (auto* vr = search_algo.GetVectorRangeNode(); vr && !vr->score_alias.empty()) {
+      search::KnnScoreSortOption opt{vr->score_alias, std::numeric_limits<size_t>::max()};
+      if (params->sort_option && params->sort_option->IsSame(opt)) {
+        knn_sort_option = opt;
+      } else {
+        inject_score_alias = vr->score_alias;
+      }
     }
   }
 
-  // First element -> Result of the search command
-  // Second element -> Profile information
-  rb->StartArray(2);
-
-  // Result of the search command
-  if (!result_is_empty) {
-    auto knn_sort_option = search_algo.GetKnnScoreSortOption();
-    SearchReply(*params, knn_sort_option, {}, absl::MakeSpan(search_results), rb, false);
-  } else {
-    rb->StartArray(1);
-    rb->SendLong(0);
-  }
-
-  // Profile information
-  rb->StartArray(shards_count + 1);
-
-  // General stats
-  rb->StartCollection(3, CollectionType::MAP);
-  rb->SendBulkString("took");
-  rb->SendLong(absl::ToInt64Microseconds(took));
-  rb->SendBulkString("hits");
-  rb->SendLong(static_cast<long>(total_docs));
-  rb->SendBulkString("serialized");
-  rb->SendLong(static_cast<long>(total_serialized));
-
-  // Per-shard stats
-  for (size_t shard_id = 0; shard_id < shards_count; shard_id++) {
-    rb->StartCollection(2, CollectionType::MAP);
-    rb->SendBulkString("took");
-    rb->SendLong(absl::ToInt64Microseconds(profile_results[shard_id]));
-    rb->SendBulkString("tree");
-    RenderShardProfileTree(rb, search_results[shard_id], limited);
-  }
+  SendFtProfileSearchResponse(*params, knn_sort_option, inject_score_alias,
+                              absl::MakeSpan(search_results), absl::MakeSpan(search_results),
+                              absl::MakeSpan(profile_results), took, rb, limited);
 }
 
 void CmdFtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
