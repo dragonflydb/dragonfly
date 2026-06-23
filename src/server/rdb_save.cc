@@ -206,6 +206,8 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       return RDB_TYPE_CMS;
     case OBJ_TOPK:
       return RDB_TYPE_TOPK;
+    case OBJ_CUCKOOFILTER:
+      return RDB_TYPE_CUCKOO;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */

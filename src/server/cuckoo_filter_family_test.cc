@@ -45,4 +45,12 @@ TEST_F(CuckooFilterFamilyTest, WrongType) {
   EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
 }
 
+// RDB serialization isn't implemented yet for cuckoo filters (see rdb_save.cc). DUMP must fail
+// cleanly instead of crashing the server until that lands.
+TEST_F(CuckooFilterFamilyTest, DumpFailsCleanly) {
+  ASSERT_EQ(Run("cf.reserve cf1 1000"), "OK");
+  auto resp = Run({"dump", "cf1"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
 }  // namespace dfly

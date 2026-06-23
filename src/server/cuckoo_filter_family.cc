@@ -33,7 +33,7 @@ OpStatus OpReserve(const OpArgs& op_args, string_view key, uint64_t capacity, ui
 }
 
 void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+  CmdArgParser parser(cmd_cntx->tail_args());
   string_view key = parser.Next();
   uint64_t capacity = parser.Next<uint64_t>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());

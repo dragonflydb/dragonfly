@@ -129,6 +129,7 @@ class AclFamily final {
                                       {"CONNECTION", CONNECTION},
                                       {"TRANSACTION", TRANSACTION},
                                       {"SCRIPTING", SCRIPTING},
+                                      {"CUCKOO_FILTER", CUCKOO_FILTER},
                                       {"TOPK", TOPK},
                                       {"CMS", CMS},
                                       {"BLOOM", BLOOM},
@@ -142,11 +143,12 @@ class AclFamily final {
   // bit 1 at index 1
   // bit n at index n
   const ReverseCategoryIndexTable reverse_cat_table_{
-      "KEYSPACE",  "READ",      "WRITE",     "SET",       "SORTEDSET",  "LIST",        "HASH",
-      "STRING",    "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",     "PUBSUB",      "ADMIN",
-      "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS", "CONNECTION", "TRANSACTION", "SCRIPTING",
-      "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "TOPK",        "CMS",
-      "BLOOM",     "FT_SEARCH", "THROTTLE",  "JSON"};
+      "KEYSPACE",   "READ",          "WRITE",     "SET",       "SORTEDSET", "LIST",
+      "HASH",       "STRING",        "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",
+      "PUBSUB",     "ADMIN",         "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS",
+      "CONNECTION", "TRANSACTION",   "SCRIPTING", "_RESERVED", "_RESERVED", "_RESERVED",
+      "_RESERVED",  "CUCKOO_FILTER", "TOPK",      "CMS",       "BLOOM",     "FT_SEARCH",
+      "THROTTLE",   "JSON"};
 
   // We need this to act as a const member, since the initialization of const data members
   // must be done on the constructor. However, these are initialized a little later, when
