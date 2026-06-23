@@ -59,6 +59,7 @@ namespace facade {
 //   auto peek = parser.Peek();                                  // look at next without consuming
 //   parser.Skip(n);                                             // advance n args
 //   size_t start = parser.UnparsedStart();                       // index of first unparsed arg
+//   ParsedArgs rest = parser.UnparsedArgs();                     // view of remaining args
 //
 // Error surfacing (at the end of parse):
 //   if (!parser.Finalize())                                     // also reports UNPROCESSED on
@@ -265,6 +266,10 @@ struct CmdArgParser {
 
   size_t UnparsedStart() const {
     return cur_i_;
+  }
+
+  ParsedArgs UnparsedArgs() const {
+    return args_.Tail(cur_i_);
   }
 
   bool HasNext() {
