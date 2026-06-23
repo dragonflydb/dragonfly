@@ -19,6 +19,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/crtp_string_set.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "redis/sds.h"
 
@@ -1044,6 +1045,501 @@ TEST_F(StringSetTest, ScanWithShrinkBetweenCalls) {
     EXPECT_TRUE(seen.count(str)) << "Missing element after shrink: " << str;
   }
   EXPECT_EQ(seen.size(), must_see.size()) << "Should see exactly all original elements";
+}
+
+// PROTOTYPE correctness check for the hash-tag change in crtp_dense_set.h.
+TEST_F(StringSetTest, CrtpHashTagCorrectness) {
+  crtp_bench::CrtpStringSet ss;
+  mt19937 gen(42);
+  vector<string> keys;
+  for (int i = 0; i < 50000; i++) {
+    string k;
+    for (int j = 0; j < 10; j++)
+      k += char('a' + gen() % 26);
+    if (ss.Add(k))
+      keys.push_back(k);
+  }
+  int missing = 0;
+  for (auto& k : keys) {
+    if (ss.Find(k) == ss.end())
+      missing++;
+  }
+  EXPECT_EQ(missing, 0) << "tag check incorrectly rejected a real key";
+  EXPECT_TRUE(ss.Find("definitely_not_in_set_xyz") == ss.end());
+  for (auto& k : keys) {
+    EXPECT_TRUE(ss.Erase(k));
+  }
+}
+
+// PROTOTYPE correctness check for the "devirt only" rung (CrtpStringSetNoTag,
+// CrtpDenseSet<..., false>) - the cached-hash-tag fast-reject is compiled out
+// here, so this only needs to confirm the fallback ObjEqual()-only path is
+// still correct, not the tag logic itself (that's CrtpHashTagCorrectness above).
+TEST_F(StringSetTest, CrtpNoTagCorrectness) {
+  crtp_bench::CrtpStringSetNoTag ss;
+  mt19937 gen(42);
+  vector<string> keys;
+  for (int i = 0; i < 50000; i++) {
+    string k;
+    for (int j = 0; j < 10; j++)
+      k += char('a' + gen() % 26);
+    if (ss.Add(k))
+      keys.push_back(k);
+  }
+  int missing = 0;
+  for (auto& k : keys) {
+    if (ss.Find(k) == ss.end())
+      missing++;
+  }
+  EXPECT_EQ(missing, 0) << "lookup incorrectly rejected a real key";
+  EXPECT_TRUE(ss.Find("definitely_not_in_set_xyz") == ss.end());
+  for (auto& k : keys) {
+    EXPECT_TRUE(ss.Erase(k));
+  }
+}
+
+// PROTOTYPE correctness check for the lean-blob member format (no sds) in
+// crtp_string_set.h's CrtpStringSetBlob.
+TEST_F(StringSetTest, CrtpBlobCorrectness) {
+  crtp_bench::CrtpStringSetBlob ss;
+  mt19937 gen(7);
+  vector<string> keys;
+  // Lengths spanning both the short-form (<=127, 1-byte header) and
+  // long-form (>127, 5-byte header) descriptor paths, plus the exact
+  // boundary on both sides (127/128) where a bug would most likely hide.
+  for (int i = 0; i < 50000; i++) {
+    string k;
+    int len;
+    switch (i % 5) {
+      case 0:
+        len = 5 + (gen() % 50);
+        break;  // short
+      case 1:
+        len = 127;
+        break;  // short boundary
+      case 2:
+        len = 128;
+        break;  // long boundary
+      case 3:
+        len = 200 + (gen() % 800);
+        break;  // long
+      default:
+        len = 1 + (gen() % 3);
+        break;  // tiny
+    }
+    for (int j = 0; j < len; j++)
+      k += char('a' + gen() % 26);
+    if (ss.Add(k))
+      keys.push_back(k);
+  }
+  int missing = 0;
+  for (auto& k : keys) {
+    if (ss.Find(k) == ss.end())
+      missing++;
+  }
+  EXPECT_EQ(missing, 0) << "blob lookup incorrectly rejected a real key";
+  EXPECT_TRUE(ss.Find("definitely_not_in_set_xyz") == ss.end());
+  EXPECT_TRUE(ss.Find(string(500, 'z')) == ss.end());
+
+  // TTL path: blob layout puts expiry right after the key bytes, for both
+  // header shapes.
+  EXPECT_TRUE(ss.Add("ttl_key_short", 100));
+  EXPECT_TRUE(ss.Add(string(300, 'q'), 200));
+  {
+    auto it = ss.Find("ttl_key_short");
+    ASSERT_TRUE(it != ss.end());
+    EXPECT_TRUE(it.HasExpiry());
+    EXPECT_GT(it.ExpiryTime(), 0u);
+  }
+  {
+    auto it = ss.Find(string(300, 'q'));
+    ASSERT_TRUE(it != ss.end());
+    EXPECT_TRUE(it.HasExpiry());
+    EXPECT_GT(it.ExpiryTime(), 0u);
+  }
+
+  for (auto& k : keys) {
+    EXPECT_TRUE(ss.Erase(k));
+  }
+  EXPECT_TRUE(ss.Erase("ttl_key_short"));
+  EXPECT_TRUE(ss.Erase(string(300, 'q')));
+}
+
+// PROTOTYPE correctness check for the fused Add() path (rung 5,
+// CrtpStringSetBlobFused) - FindOrEmptyAround must agree with the unfused
+// FindInternal+AddUnique path on every duplicate-reject and every insert, or
+// this benchmark's numbers would be meaningless.
+TEST_F(StringSetTest, CrtpFusedCorrectness) {
+  crtp_bench::CrtpStringSetBlobFused ss;
+  mt19937 gen(13);
+  vector<string> keys;
+  for (int i = 0; i < 50000; i++) {
+    string k;
+    int len;
+    switch (i % 5) {
+      case 0:
+        len = 5 + (gen() % 50);
+        break;
+      case 1:
+        len = 127;
+        break;
+      case 2:
+        len = 128;
+        break;
+      case 3:
+        len = 200 + (gen() % 800);
+        break;
+      default:
+        len = 1 + (gen() % 3);
+        break;
+    }
+    for (int j = 0; j < len; j++)
+      k += char('a' + gen() % 26);
+    bool added = ss.Add(k);
+    if (added) {
+      keys.push_back(k);
+    } else {
+      // Re-Add of a key already present must still be correctly rejected -
+      // exercises FindOrEmptyAround's "found" branch, not just its
+      // "empty slot" branch.
+      EXPECT_FALSE(ss.Add(k)) << "duplicate not rejected on second attempt: " << k;
+    }
+  }
+  int missing = 0;
+  for (auto& k : keys) {
+    if (ss.Find(k) == ss.end())
+      missing++;
+  }
+  EXPECT_EQ(missing, 0) << "fused Add() lost a key the unfused path would have kept";
+  EXPECT_TRUE(ss.Find("definitely_not_in_set_xyz") == ss.end());
+  for (auto& k : keys) {
+    EXPECT_FALSE(ss.Add(k)) << "fused Add() incorrectly accepted a duplicate: " << k;
+  }
+  for (auto& k : keys) {
+    EXPECT_TRUE(ss.Erase(k));
+  }
+  EXPECT_EQ(ss.UpperBoundSize(), 0u);
+}
+
+using crtp_bench::CrtpStringSetNoTag;
+
+// Rung 1 of the ladder: devirtualization only, no hash-tag cache.
+void BM_Add_NoTag(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSetNoTag ss;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
+  for (size_t i = 0; i < elems; ++i)
+    strs.push_back(random_string(generator, keySize));
+  ss.Reserve(elems);
+  size_t mem_used = 0;
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Add(str);
+    state.PauseTiming();
+    mem_used += ss.ObjMallocUsed() + ss.SetMallocUsed();
+    ss.Clear();
+    ss.Reserve(elems);
+    state.ResumeTiming();
+  }
+  state.counters["Memory_Used"] = mem_used / state.iterations();
+}
+BENCHMARK(BM_Add_NoTag)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Get_NoTag(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSetNoTag ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long i = 0; i < elems; ++i) {
+    string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Find(str);
+  }
+}
+BENCHMARK(BM_Get_NoTag)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Erase_NoTag(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSetNoTag ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long i = 0; i < elems; ++i) {
+    string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Erase(str);
+    state.PauseTiming();
+    for (auto& str : strs)
+      ss.Add(str);
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Erase_NoTag)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+using crtp_bench::CrtpStringSet;
+
+// Rung 2 of the ladder: devirtualization + hash-tag cache, still sds-backed.
+void BM_Add_Crtp(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSet ss;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
+  for (size_t i = 0; i < elems; ++i)
+    strs.push_back(random_string(generator, keySize));
+  ss.Reserve(elems);
+  size_t mem_used = 0;
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Add(str);
+    state.PauseTiming();
+    mem_used += ss.ObjMallocUsed() + ss.SetMallocUsed();
+    ss.Clear();
+    ss.Reserve(elems);
+    state.ResumeTiming();
+  }
+  state.counters["Memory_Used"] = mem_used / state.iterations();
+}
+BENCHMARK(BM_Add_Crtp)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Get_Crtp(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSet ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long i = 0; i < elems; ++i) {
+    string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Find(str);
+  }
+}
+BENCHMARK(BM_Get_Crtp)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Erase_Crtp(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSet ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long i = 0; i < elems; ++i) {
+    string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Erase(str);
+    state.PauseTiming();
+    for (auto& str : strs)
+      ss.Add(str);
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Erase_Crtp)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+using crtp_bench::CrtpStringSetBlob;
+
+void BM_Add_Blob(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSetBlob ss;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
+  for (size_t i = 0; i < elems; ++i)
+    strs.push_back(random_string(generator, keySize));
+  ss.Reserve(elems);
+  size_t mem_used = 0;
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Add(str);
+    state.PauseTiming();
+    mem_used += ss.ObjMallocUsed() + ss.SetMallocUsed();
+    ss.Clear();
+    ss.Reserve(elems);
+    state.ResumeTiming();
+  }
+  state.counters["Memory_Used"] = mem_used / state.iterations();
+}
+BENCHMARK(BM_Add_Blob)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Get_Blob(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSetBlob ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long i = 0; i < elems; ++i) {
+    string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Find(str);
+  }
+}
+BENCHMARK(BM_Get_Blob)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Erase_Blob(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSetBlob ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long i = 0; i < elems; ++i) {
+    string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Erase(str);
+    state.PauseTiming();
+    for (auto& str : strs)
+      ss.Add(str);
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Erase_Blob)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+using crtp_bench::CrtpStringSetBlobFused;
+
+// Rung 5 of the ladder: devirt + tag + blob (rung 4, CrtpStringSetBlob) PLUS
+// the fused single-pass Add() (FindOrEmptyAround/PlaceNew) - a completely
+// separate benchmark/class from BM_Add_Blob above, so the fusion's effect
+// can be isolated cell-by-cell against rung 4 instead of being baked into it.
+void BM_Add_Fused(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSetBlobFused ss;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
+  for (size_t i = 0; i < elems; ++i)
+    strs.push_back(random_string(generator, keySize));
+  ss.Reserve(elems);
+  size_t mem_used = 0;
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Add(str);
+    state.PauseTiming();
+    mem_used += ss.ObjMallocUsed() + ss.SetMallocUsed();
+    ss.Clear();
+    ss.Reserve(elems);
+    state.ResumeTiming();
+  }
+  state.counters["Memory_Used"] = mem_used / state.iterations();
+}
+BENCHMARK(BM_Add_Fused)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Get_Fused(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSetBlobFused ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long i = 0; i < elems; ++i) {
+    string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Find(str);
+  }
+}
+BENCHMARK(BM_Get_Fused)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Erase_Fused(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  CrtpStringSetBlobFused ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long i = 0; i < elems; ++i) {
+    string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Erase(str);
+    state.PauseTiming();
+    for (auto& str : strs)
+      ss.Add(str);
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Erase_Fused)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+TEST_F(StringSetTest, ProbeBlobVsSdsBinSizes) {
+  // sds for a 10-byte key: SDS_TYPE_5, 1-byte header + 10 + 1 null = 12 raw.
+  // blob for a 10-byte key: 1-byte header + 10 = 11 raw.
+  sds s10 = sdsnewlen("0123456789", 10);
+  LOG(WARNING) << "sds(10) raw=12 usable=" << zmalloc_usable_size(sdsAllocPtr(s10));
+  sdsfree(s10);
+  void* b10 = zmalloc(11);
+  LOG(WARNING) << "blob(10) raw=11 usable=" << zmalloc_usable_size(b10);
+  zfree(b10);
+
+  // sds for a 100-byte key: SDS_TYPE_8, 3-byte header + 100 + 1 null = 104 raw.
+  // blob for a 100-byte key: 1-byte header (short form) + 100 = 101 raw.
+  string k100(100, 'x');
+  sds s100 = sdsnewlen(k100.data(), 100);
+  LOG(WARNING) << "sds(100) raw=104 usable=" << zmalloc_usable_size(sdsAllocPtr(s100));
+  sdsfree(s100);
+  void* b100 = zmalloc(101);
+  LOG(WARNING) << "blob(100) raw=101 usable=" << zmalloc_usable_size(b100);
+  zfree(b100);
+
+  // sds for a 1000-byte key: SDS_TYPE_16, 5-byte header + 1000 + 1 null = 1006.
+  // blob for a 1000-byte key: 5-byte header (long form) + 1000 = 1005 raw.
+  string k1000(1000, 'x');
+  sds s1000 = sdsnewlen(k1000.data(), 1000);
+  LOG(WARNING) << "sds(1000) raw=1006 usable=" << zmalloc_usable_size(sdsAllocPtr(s1000));
+  sdsfree(s1000);
+  void* b1000 = zmalloc(1005);
+  LOG(WARNING) << "blob(1000) raw=1005 usable=" << zmalloc_usable_size(b1000);
+  zfree(b1000);
 }
 
 }  // namespace dfly

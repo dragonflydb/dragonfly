@@ -25,7 +25,7 @@ class OAHSet {  // Open Addressing Hash Set
   using Buckets = std::vector<OAHEntry, OAHEntryAllocator>;
 
  public:
-  static constexpr std::uint32_t kShiftLog = 5;                         // TODO make template
+  static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
   static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
 
