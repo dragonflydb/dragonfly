@@ -729,11 +729,14 @@ void Transaction::ScheduleInternal() {
       // in the lower-level code. It's not really needed otherwise because we run inline.
 
       // single shard schedule operation can't fail
-      CHECK(ScheduleInShard(EngineShard::tlocal(), optimistic_exec));
+      auto* es = EngineShard::tlocal();
+      uint64_t polls_before = es->stats().poll_execution_total;
+      CHECK(ScheduleInShard(es, optimistic_exec));
       run_barrier_.Dec();
 
       // Drain any work that was deferred while this inlined tx held running_tx_.
-      EngineShard::tlocal()->PollExecution("after_inline", nullptr);
+      if (es->stats().poll_execution_total != polls_before)
+        es->PollExecution("after_inline", nullptr);
       break;
     }
 
