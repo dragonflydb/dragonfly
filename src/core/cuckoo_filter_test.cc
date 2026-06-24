@@ -11,7 +11,8 @@ using namespace std;
 
 class CuckooFilterTest : public ::testing::Test {
  protected:
-  CuckooFilterTest() : cf_(128, std::pmr::get_default_resource()) {
+  CuckooFilterTest()
+      : cf_(CuckooFilter::Options{.capacity = 128}, std::pmr::get_default_resource()) {
   }
 
   CuckooFilter cf_;
@@ -73,9 +74,7 @@ TEST_F(CuckooFilterTest, FillBeyondCapacityExpands) {
 
 TEST_F(CuckooFilterTest, NoExpansionRejectWhenFull) {
   // A small filter with expansion=0 must reject inserts once full.
-  CuckooFilter small(4, std::pmr::get_default_resource(), CuckooFilter::kDefaultSlotsPerBucket,
-                     CuckooFilter::kDefaultMaxIterations,
-                     /*expansion=*/0);
+  CuckooFilter small({.capacity = 4, .expansion = 0}, std::pmr::get_default_resource());
 
   size_t inserted = 0;
   for (size_t i = 0; i < 1000; ++i) {

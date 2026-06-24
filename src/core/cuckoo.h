@@ -12,16 +12,22 @@
 
 namespace dfly {
 
-class CuckooFilter {
- public:
+struct CuckooFilterOptions {
   static constexpr uint8_t kDefaultSlotsPerBucket = 2;
   static constexpr uint16_t kDefaultMaxIterations = 20;
   static constexpr uint16_t kDefaultExpansion = 1;
 
-  explicit CuckooFilter(uint64_t capacity, std::pmr::memory_resource* mr,
-                        uint8_t slots_per_bucket = kDefaultSlotsPerBucket,
-                        uint16_t max_iterations = kDefaultMaxIterations,
-                        uint16_t expansion = kDefaultExpansion);
+  uint64_t capacity = 0;
+  uint8_t slots_per_bucket = kDefaultSlotsPerBucket;
+  uint16_t max_iterations = kDefaultMaxIterations;
+  uint16_t expansion = kDefaultExpansion;
+};
+
+class CuckooFilter {
+ public:
+  using Options = CuckooFilterOptions;
+
+  CuckooFilter(const Options& options, std::pmr::memory_resource* mr);
 
   // Inserts a pre-computed hash. Returns false only if the filter is full
   // and expansion is disabled (expansion_ == 0) or memory allocation fails.

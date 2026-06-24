@@ -3027,6 +3027,7 @@ void Service::RegisterCommands() {
   RegisterBloomFamily(&registry_);
   RegisterCmsFamily(&registry_);
   RegisterTopkFamily(&registry_);
+  RegisterCuckooFilterFamily(&registry_);
   RegisterJsonFamily(&registry_);
 #endif
 

@@ -501,7 +501,7 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 }
 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
-                          bool skip_notexist, const facade::ArgRange& vals, bool journal_rewrite) {
+                          bool skip_notexist, const ParsedArgs& vals, bool journal_rewrite) {
   DbSlice::ItAndUpdater res;
 
   if (skip_notexist) {
@@ -529,7 +529,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
-    vector<string_view> mapped(vals.Size() + 1);
+    vector<string_view> mapped(vals.size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
     RecordJournal(op_args, command, mapped, 2);
@@ -874,15 +874,14 @@ void MoveGeneric(string_view src, string_view dest, ListDir src_dir, ListDir des
   }
 }
 
-void RPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view src = ArgS(args, 0);
-  string_view dest = ArgS(args, 1);
+void RPopLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view src = parser.Next();
+  string_view dest = parser.Next();
 
   MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
-void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{cmd_cntx->tail_args()};
+void BRPopLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
   float timeout = parser.Next<float>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -912,8 +911,7 @@ void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{cmd_cntx->tail_args()};
+void BLMove(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
@@ -1027,11 +1025,11 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
   return MoveTwoShards(tx, pop_key_, push_key_, popdir_, pushdir_, true);
 }
 
-void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
+void PushGeneric(ListDir dir, bool skip_notexists, ParsedArgs args, CommandContext* cmd_cntx) {
+  std::string_view key = args[0];
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.subspan(1), false);
+    return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.Tail(1), false);
   };
 
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1042,8 +1040,7 @@ void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandConte
   return cmd_cntx->SendError(result.status());
 }
 
-void PopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{cmd_cntx->tail_args()};
+void PopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   uint32_t count = 1;
@@ -1077,11 +1074,11 @@ void PopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void BPopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
+void BPopGeneric(ListDir dir, ParsedArgs args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 2u);
 
   float timeout;
-  auto timeout_str = ArgS(args, args.size() - 1);
+  auto timeout_str = args[args.size() - 1];
   if (!absl::SimpleAtof(timeout_str, &timeout)) {
     return cmd_cntx->SendError("timeout is not a float or out of range");
   }
@@ -1154,10 +1151,9 @@ optional<pair<string_view, bool>> GetFirstNonEmptyKeyFound(EngineShard* shard, T
   return result;
 }
 
-void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  CmdArgParser parser{cmd_cntx->tail_args()};
   parser.Skip(parser.Next<size_t>());  // skip numkeys and keys
 
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
@@ -1235,10 +1231,9 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  CmdArgParser parser{cmd_cntx->tail_args()};
   float timeout = parser.Next<float>();
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
@@ -1275,32 +1270,32 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdLPush(CmdArgList args, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, false, args, cmd_cntx);
+void CmdLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::LEFT, false, parser.UnparsedArgs(), cmd_cntx);
 }
 
-void CmdLPushX(CmdArgList args, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, true, args, cmd_cntx);
+void CmdLPushX(CmdArgParser parser, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::LEFT, true, parser.UnparsedArgs(), cmd_cntx);
 }
 
-void CmdLPop(CmdArgList args, CommandContext* cmd_cntx) {
-  return PopGeneric(ListDir::LEFT, args, cmd_cntx);
+void CmdLPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  return PopGeneric(ListDir::LEFT, std::move(parser), cmd_cntx);
 }
 
-void CmdRPush(CmdArgList args, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx);
+void CmdRPush(CmdArgParser parser, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::RIGHT, false, parser.UnparsedArgs(), cmd_cntx);
 }
 
-void CmdRPushX(CmdArgList args, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx);
+void CmdRPushX(CmdArgParser parser, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::RIGHT, true, parser.UnparsedArgs(), cmd_cntx);
 }
 
-void CmdRPop(CmdArgList args, CommandContext* cmd_cntx) {
-  return PopGeneric(ListDir::RIGHT, args, cmd_cntx);
+void CmdRPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  return PopGeneric(ListDir::RIGHT, std::move(parser), cmd_cntx);
 }
 
-void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
-  auto key = ArgS(args, 0);
+void CmdLLen(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto key = parser.Next();
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
@@ -1312,8 +1307,7 @@ void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdLPos(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, elem] = parser.Next<string_view, string_view>();
 
   int rank = 1;
@@ -1352,9 +1346,9 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
-  std::string_view index_str = ArgS(args, 1);
+void CmdLIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
+  std::string_view key = parser.Next();
+  std::string_view index_str = parser.Next();
   int32_t index;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -1378,8 +1372,7 @@ void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 /* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
-void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdLInsert(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   QList::InsertOpt ins_opt = parser.MapNext("AFTER", QList::AFTER, "BEFORE", QList::BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
@@ -1401,10 +1394,10 @@ void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendError(result.status());
 }
 
-void CmdLTrim(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view s_str = ArgS(args, 1);
-  string_view e_str = ArgS(args, 2);
+void CmdLTrim(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view s_str = parser.Next();
+  string_view e_str = parser.Next();
   int32_t start, end;
 
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
@@ -1421,10 +1414,10 @@ void CmdLTrim(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(st);
 }
 
-void CmdLRange(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
-  std::string_view s_str = ArgS(args, 1);
-  std::string_view e_str = ArgS(args, 2);
+void CmdLRange(CmdArgParser parser, CommandContext* cmd_cntx) {
+  std::string_view key = parser.Next();
+  std::string_view s_str = parser.Next();
+  std::string_view e_str = parser.Next();
   int32_t start, end;
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1446,10 +1439,10 @@ void CmdLRange(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
-void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
-  std::string_view index_str = ArgS(args, 1);
-  std::string_view elem = ArgS(args, 2);
+void CmdLRem(CmdArgParser parser, CommandContext* cmd_cntx) {
+  std::string_view key = parser.Next();
+  std::string_view index_str = parser.Next();
+  std::string_view elem = parser.Next();
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
@@ -1467,10 +1460,10 @@ void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdLSet(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
-  std::string_view index_str = ArgS(args, 1);
-  std::string_view elem = ArgS(args, 2);
+void CmdLSet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  std::string_view key = parser.Next();
+  std::string_view index_str = parser.Next();
+  std::string_view elem = parser.Next();
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
@@ -1489,16 +1482,15 @@ void CmdLSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdBLPop(CmdArgList args, CommandContext* cmd_cntx) {
-  BPopGeneric(ListDir::LEFT, args, cmd_cntx);
+void CmdBLPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  BPopGeneric(ListDir::LEFT, parser.UnparsedArgs(), cmd_cntx);
 }
 
-void CmdBRPop(CmdArgList args, CommandContext* cmd_cntx) {
-  BPopGeneric(ListDir::RIGHT, args, cmd_cntx);
+void CmdBRPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  BPopGeneric(ListDir::RIGHT, parser.UnparsedArgs(), cmd_cntx);
 }
 
-void CmdLMove(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdLMove(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);

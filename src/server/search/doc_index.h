@@ -60,12 +60,41 @@ struct SearchResult {
   SearchResult(facade::ErrorReply error) : error{std::move(error)} {
   }
 
-  size_t total_hits;
+  size_t total_hits = 0;
   std::vector<SerializedSearchDoc> docs;
   std::optional<search::AlgorithmProfile> profile;
 
   std::optional<facade::ErrorReply> error;
 };
+
+struct SearchIdResult {
+  SearchIdResult() = default;
+
+  SearchIdResult(size_t total_hits, std::vector<search::DocId> ids,
+                 absl::flat_hash_map<search::DocId, float> text_scores,
+                 std::optional<search::AlgorithmProfile> profile);
+
+  SearchIdResult(facade::ErrorReply error);
+
+  size_t total_hits = 0;
+  std::vector<search::DocId> ids;
+  absl::flat_hash_map<search::DocId, float> text_scores;
+  std::optional<search::AlgorithmProfile> profile;
+
+  std::optional<facade::ErrorReply> error;
+};
+
+inline SearchIdResult::SearchIdResult(size_t total_hits, std::vector<search::DocId> ids,
+                                      absl::flat_hash_map<search::DocId, float> text_scores,
+                                      std::optional<search::AlgorithmProfile> profile)
+    : total_hits{total_hits},
+      ids{std::move(ids)},
+      text_scores{std::move(text_scores)},
+      profile{std::move(profile)} {
+}
+
+inline SearchIdResult::SearchIdResult(facade::ErrorReply error) : error{std::move(error)} {
+}
 
 // Field reference with optional alias as parsed from RETURN [field AS alias], LOAD, etc...
 struct FieldReference {
@@ -359,6 +388,12 @@ class ShardDocIndex {
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
                       search::SearchAlgorithm* search_algo, bool is_knn_prefilter,
                       const search::GlobalScoringStats* global_stats) const;
+
+  // Perform search and return only matched document ids. Used by HNSW prefilters where
+  // serializing every filtered key before KNN would dominate wide-filter queries.
+  SearchIdResult SearchIds(const OpArgs& op_args, const SearchParams& params,
+                           search::SearchAlgorithm* search_algo,
+                           const search::GlobalScoringStats* global_stats) const;
 
   // This shard's contribution to a GlobalScoringStats. search_algo must be
   // Init()-ed.

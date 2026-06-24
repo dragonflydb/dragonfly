@@ -36,6 +36,7 @@ class SBF;
 class TOPK;
 class CMS;
 class CuckooFilter;
+struct CuckooFilterOptions;
 class PageUsage;
 
 using cmn::StringOrView;
@@ -405,8 +406,7 @@ class CompactObj {
     u_.cuckoo_filter = cf;
   }
 
-  void SetCuckooFilter(uint64_t capacity, uint8_t slots_per_bucket, uint16_t max_iterations,
-                       uint16_t expansion);
+  void SetCuckooFilter(const CuckooFilterOptions& options);
   CuckooFilter* GetCuckooFilter() const;
 
   // dest must have at least Size() bytes available

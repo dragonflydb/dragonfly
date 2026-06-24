@@ -541,6 +541,44 @@ TEST_F(TieredStorageTest, Expiry) {
   EXPECT_EQ(resp, val);
 }
 
+TEST_F(TieredStorageTest, ShortTtlOffloadUnderMemoryPressure) {
+  absl::FlagSaver saver;
+  // Without memory pressure, short-lived keys are not worth offloading.
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.1f);
+  UpdateFromFlags();
+
+  const string value = BuildString(3000);
+
+  Run({"SET", "k1", value, "EX", "60"});
+  Run({"SET", "k2", value, "EX", "2"});
+  Run({"SET", "k3", value});
+
+  auto IsOffloaded = [&](string_view key) {
+    bool result = false;
+    pp_->at(0)->AwaitBrief([&] {
+      EngineShard* shard = EngineShard::tlocal();
+      if (!shard)
+        return;
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+      auto it = db.GetDBTable(0)->prime.Find(key);
+      result = IsValid(it) && it->second.IsExternal();
+    });
+    return result;
+  };
+
+  // k1 has enough TTL and k3 has none, while k2 expires too soon.
+  ExpectConditionWithinTimeout([&] { return IsOffloaded("k1") && IsOffloaded("k3"); });
+  EXPECT_FALSE(IsOffloaded("k2"));
+
+  // Simulate low memory so offloading protects the system despite short TTL.
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+  UpdateFromFlags();
+
+  // k4 has the same short TTL as k2, but low memory should still offload it.
+  Run({"SET", "k4", value, "EX", "2"});
+  ExpectConditionWithinTimeout([&] { return IsOffloaded("k4"); });
+}
+
 TEST_F(PureDiskTSTest, SetExistingExpire) {
   const int kNum = 20;
   for (size_t i = 0; i < kNum; i++) {
