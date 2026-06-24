@@ -43,6 +43,12 @@ class CuckooFilter {
   // TODO(kostas): SIMD for the inner bucket scan. Establish a baseline bench and then add SIMD.
   bool Exists(uint64_t hash) const;
 
+  // Returns the number of fingerprint matches for hash across both candidate buckets and
+  // all sub-filters. Each successful Insert of the same item occupies its own slot (Insert
+  // never deduplicates), so this reflects how many times the item was added minus how many
+  // times it was deleted. Like Exists, can overcount on fingerprint collisions.
+  size_t Count(uint64_t hash) const;
+
   // Removes one occurrence of hash from the filter. Returns true if found and removed.
   // This is the key advantage over Bloom filters, which do not support deletion.
   bool Delete(uint64_t hash);
@@ -62,6 +68,33 @@ class CuckooFilter {
 
   // Returns approximate heap bytes used by this filter's SubFilter data.
   size_t MallocUsed() const;
+
+  // Base bucket count from construction; never changes as the filter grows (each new
+  // sub-filter scales its own bucket count by expansion_ instead).
+  uint64_t NumBuckets() const {
+    return num_buckets_;
+  }
+
+  size_t NumFilters() const {
+    return filters_.size();
+  }
+
+  uint64_t NumDeletes() const {
+    return num_deletes_;
+  }
+
+  uint8_t SlotsPerBucket() const {
+    return slots_per_bucket_;
+  }
+
+  uint16_t MaxIterations() const {
+    return max_iterations_;
+  }
+
+  // Already rounded up to the next power of two (or 0 if expansion is disabled).
+  uint16_t Expansion() const {
+    return expansion_;
+  }
 
  private:
   using SubFilter = std::pmr::vector<uint8_t>;
