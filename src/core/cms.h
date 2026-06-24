@@ -14,10 +14,10 @@ namespace dfly {
 /// Count-Min Sketch implementation compatible with Redis CMS commands.
 class CMS {
  public:
-  // Create a CMS with given width and depth dimensions.
-  // width: number of counters per row
-  // depth: number of rows (hash functions)
-  CMS(uint32_t width, uint32_t depth, PMR_NS::memory_resource* mr);
+  // Constructs an empty, uninitialized CMS bound to mr. This is the only constructor;
+  // it never allocates and never throws. Call Init() before use.
+  explicit CMS(PMR_NS::memory_resource* mr) : mr_(mr) {
+  }
 
   CMS(const CMS&) = delete;
   CMS& operator=(const CMS&) = delete;
@@ -27,14 +27,19 @@ class CMS {
 
   ~CMS();
 
+  // (Re)initializes this CMS with the given dimensions. May throw std::bad_alloc; on failure
+  // this object is left unchanged (the old counters, if any, are preserved).
+  void Init(uint32_t width, uint32_t depth);
+
   // Tag type to disambiguate CMS construction by error rate and probability.
   struct ErrorRateTag {};
 
-  // Create a CMS from error rate and probability parameters.
+  // Computes width/depth from error rate and probability and calls Init(). May throw
+  // std::bad_alloc.
   // error: relative error (e.g. 0.01 for 1%), must be in (0, 1).
   // probability: probability of exceeding the error, must be in (0, 1).
   // width = ceil(e / error), depth = ceil(ln(1 / probability)).
-  CMS(ErrorRateTag, double error, double probability, PMR_NS::memory_resource* mr);
+  void Init(ErrorRateTag, double error, double probability);
 
   // Increment the count for an item by the given value.
   // Returns the new estimated count for the item.
@@ -82,8 +87,8 @@ class CMS {
   }
 
  private:
-  uint32_t width_;
-  uint32_t depth_;
+  uint32_t width_ = 0;
+  uint32_t depth_ = 0;
   PMR_NS::memory_resource* mr_ = nullptr;
   int64_t count_ = 0;  // Total count of all IncrBy operations
   int64_t* counters_ = nullptr;

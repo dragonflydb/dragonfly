@@ -100,16 +100,26 @@ class Bloom {
  */
 class SBF {
  public:
-  SBF(uint64_t initial_capacity, double fp_prob, double grow_factor, PMR_NS::memory_resource* mr);
+  // Constructs an empty, uninitialized SBF bound to mr. Never allocates, never throws.
+  // Call Init() before use.
+  explicit SBF(PMR_NS::memory_resource* mr) : filters_(mr) {
+  }
+
   SBF(const SBF&) = delete;
 
-  // C'tor used for loading persisted filters into SBF.
+  // C'tor used for loading persisted filters into SBF. Never allocates, never throws.
   // Should be followed by AllocateFilter.
   SBF(double grow_factor, double fp_prob, size_t max_capacity, size_t prev_size,
       size_t current_size, PMR_NS::memory_resource* mr);
   ~SBF();
 
+  SBF(SBF&& src) noexcept;
   SBF& operator=(SBF&& src) noexcept;
+
+  // (Re)initializes this SBF, discarding any previous filters. May throw std::bad_alloc; on
+  // failure this object is left unchanged.
+  void Init(uint64_t initial_capacity, double fp_prob, double grow_factor,
+            PMR_NS::memory_resource* mr);
 
   uint8_t* AllocateFilter(size_t alloc_size, unsigned hash_cnt);
 
@@ -168,11 +178,11 @@ class SBF {
  private:
   // multiple filters from the smallest to the largest.
   std::vector<Bloom, PMR_NS::polymorphic_allocator<Bloom>> filters_;
-  double grow_factor_;
-  double fp_prob_;
+  double grow_factor_ = 0;
+  double fp_prob_ = 0;
   size_t prev_size_ = 0;
   size_t current_size_ = 0;
-  size_t max_capacity_;
+  size_t max_capacity_ = 0;
 };
 
 // Pair of values returned to a client.

@@ -18,10 +18,15 @@ class CuckooFilter {
   static constexpr uint16_t kDefaultMaxIterations = 20;
   static constexpr uint16_t kDefaultExpansion = 1;
 
-  explicit CuckooFilter(uint64_t capacity, std::pmr::memory_resource* mr,
-                        uint8_t slots_per_bucket = kDefaultSlotsPerBucket,
-                        uint16_t max_iterations = kDefaultMaxIterations,
-                        uint16_t expansion = kDefaultExpansion);
+  // Constructs an empty, uninitialized CuckooFilter bound to mr. This is the only
+  // constructor; it never allocates and never throws. Call Init() before use.
+  explicit CuckooFilter(std::pmr::memory_resource* mr);
+
+  // (Re)initializes this filter with the given parameters, discarding any previous content.
+  // May throw std::bad_alloc; on failure this object is left unchanged.
+  void Init(uint64_t capacity, uint8_t slots_per_bucket = kDefaultSlotsPerBucket,
+            uint16_t max_iterations = kDefaultMaxIterations,
+            uint16_t expansion = kDefaultExpansion);
 
   // Inserts a pre-computed hash. Returns false only if the filter is full
   // and expansion is disabled (expansion_ == 0) or memory allocation fails.
@@ -83,9 +88,9 @@ class CuckooFilter {
   // Repeats up to max_iterations_ times. On failure, rolls back all swaps.
   bool KOInsert(const LookupParams& p, SubFilter& sf);
 
-  uint8_t slots_per_bucket_;
-  uint16_t max_iterations_;
-  uint16_t expansion_;
+  uint8_t slots_per_bucket_ = 0;
+  uint16_t max_iterations_ = 0;
+  uint16_t expansion_ = 0;
 
   uint64_t num_buckets_ = 0;
   uint64_t num_items_ = 0;
