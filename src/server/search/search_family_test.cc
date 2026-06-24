@@ -7906,6 +7906,29 @@ TEST_F(SearchFamilyTest, FtHybridLinearNoTextRescale) {
   EXPECT_NEAR(HybridScore(hybrid, 1), map_score("__score", agg.GetVec()[2].GetVec()), 1e-6);
 }
 
+TEST_F(SearchFamilyTest, FtHybridScorerBM25StdNorm) {
+  CreateFlatHashIdx();
+  Run({"HSET", "d:1", "title", "apple apple apple", "vec", FloatVec1(1.0f)});
+  Run({"HSET", "d:2", "title", "apple", "vec", FloatVec1(2.0f)});
+
+  auto search = Run({"FT.SEARCH", "idx", "apple", "NOCONTENT", "WITHSCORES", "SCORER",
+                     "BM25STD.NORM", "LIMIT", "0", "2"});
+  ASSERT_THAT(search, ArgType(RespExpr::ARRAY));
+  ASSERT_GE(search.GetVec().size(), 5u);
+
+  auto hybrid = Run({"FT.HYBRID", "idx",    "SEARCH", "apple",   "SCORER",       "BM25STD.NORM",
+                     "VSIM",      "@vec",   "$v",     "COMBINE", "LINEAR",       "4",
+                     "ALPHA",     "1.0",    "BETA",   "0.0",     "LIMIT",        "0",
+                     "2",         "PARAMS", "2",      "v",       FloatVec1(1.0f)});
+  ASSERT_HYBRID_RESP(hybrid);
+  ASSERT_EQ(HybridKeys(hybrid).size(), 2u);
+
+  EXPECT_EQ(HybridKeys(hybrid)[0], search.GetVec()[1].GetString());
+  EXPECT_EQ(HybridKeys(hybrid)[1], search.GetVec()[3].GetString());
+  EXPECT_NEAR(HybridScore(hybrid, 0), std::stod(search.GetVec()[2].GetString()), 1e-6);
+  EXPECT_NEAR(HybridScore(hybrid, 1), std::stod(search.GetVec()[4].GetString()), 1e-6);
+}
+
 TEST_F(SearchFamilyTest, FtHybridScorerBM25StdTanh) {
   CreateFlatHashIdx();
   Run({"HSET", "d:1", "title", "apple apple apple", "vec", FloatVec1(1.0f)});

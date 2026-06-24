@@ -1810,7 +1810,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       sub->Next();
       return;
     }
-    auto scorer_fn = ParseScorer(sub);
+    auto scorer_fn = ParseScorer(sub, /*allow_bm25std_tanh=*/true, /*allow_bm25std_norm=*/true);
     if (!scorer_fn)
       sub->ReportCustom(absl::StrCat("No such scorer: ", sub->Peek()));
     else
@@ -2178,6 +2178,19 @@ HybridDocMap MergeHybridResults(const vector<SearchResult>& text_docs,
   return doc_map;
 }
 
+void NormalizeHybridTextScores(absl::Span<SearchResult> text_docs) {
+  float max_text_score = 0.0f;
+  for (const auto& shard : text_docs)
+    max_text_score = std::max(max_text_score, shard.max_text_score);
+  if (max_text_score == 0)
+    return;
+
+  for (auto& shard : text_docs) {
+    for (auto& doc : shard.docs)
+      doc.text_score /= max_text_score;
+  }
+}
+
 struct HybridExecResult {
   HybridDocMap doc_map;
   search::VectorSimilarity vsim_metric = search::VectorSimilarity::L2;
@@ -2417,6 +2430,8 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   }
 
   const absl::Time t_combine = absl::Now();
+  if (IsBM25StdNorm(params->scorer))
+    NormalizeHybridTextScores(absl::MakeSpan(text_docs));
   auto doc_map = MergeHybridResults(text_docs, hnsw_shard_docs, flat_knn_docs, use_hnsw);
   if (params->combine_method == HybridSearchParams::CombineMethod::LINEAR)
     ComputeLinearCombined(params->alpha, params->beta, captured_metric, doc_map);
