@@ -1014,7 +1014,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
         {result.ids[i], string{key}, std::move(fields), knn_score, text_score, sort_score});
   }
 
-  return {result.total - expired_count, std::move(out), std::move(result.profile)};
+  return {result.total - expired_count, std::move(out), std::move(result.profile),
+          result.max_text_score};
 }
 
 SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParams& params,
@@ -1041,13 +1042,13 @@ SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParam
     }
 
     return {live_ids.size(), std::move(live_ids), std::move(live_text_scores),
-            std::move(result.profile)};
+            std::move(result.profile), result.max_text_score};
   }
 
   // NOCONTENT returns ids without a per-id liveness check (ignore-expiration fast path); a winner
   // deleted before the load hop is dropped there, which can yield <k results — acceptable here.
   return {result.total, std::move(result.ids), std::move(result.text_scores),
-          std::move(result.profile)};
+          std::move(result.profile), result.max_text_score};
 }
 
 search::ShardScoringStats ShardDocIndex::CollectScoringStats(

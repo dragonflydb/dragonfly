@@ -54,8 +54,11 @@ struct SearchResult {
   SearchResult() = default;
 
   SearchResult(size_t total_hits, std::vector<SerializedSearchDoc> docs,
-               std::optional<search::AlgorithmProfile> profile)
-      : total_hits{total_hits}, docs{std::move(docs)}, profile{std::move(profile)} {
+               std::optional<search::AlgorithmProfile> profile, float max_text_score = 0)
+      : total_hits{total_hits},
+        docs{std::move(docs)},
+        max_text_score{max_text_score},
+        profile{std::move(profile)} {
   }
 
   SearchResult(facade::ErrorReply error) : error{std::move(error)} {
@@ -63,6 +66,7 @@ struct SearchResult {
 
   size_t total_hits = 0;
   std::vector<SerializedSearchDoc> docs;
+  float max_text_score = 0;
   std::optional<search::AlgorithmProfile> profile;
 
   std::optional<facade::ErrorReply> error;
@@ -73,13 +77,14 @@ struct SearchIdResult {
 
   SearchIdResult(size_t total_hits, std::vector<search::DocId> ids,
                  absl::flat_hash_map<search::DocId, float> text_scores,
-                 std::optional<search::AlgorithmProfile> profile);
+                 std::optional<search::AlgorithmProfile> profile, float max_text_score = 0);
 
   SearchIdResult(facade::ErrorReply error);
 
   size_t total_hits = 0;
   std::vector<search::DocId> ids;
   absl::flat_hash_map<search::DocId, float> text_scores;
+  float max_text_score = 0;
   std::optional<search::AlgorithmProfile> profile;
 
   std::optional<facade::ErrorReply> error;
@@ -87,10 +92,12 @@ struct SearchIdResult {
 
 inline SearchIdResult::SearchIdResult(size_t total_hits, std::vector<search::DocId> ids,
                                       absl::flat_hash_map<search::DocId, float> text_scores,
-                                      std::optional<search::AlgorithmProfile> profile)
+                                      std::optional<search::AlgorithmProfile> profile,
+                                      float max_text_score)
     : total_hits{total_hits},
       ids{std::move(ids)},
       text_scores{std::move(text_scores)},
+      max_text_score{max_text_score},
       profile{std::move(profile)} {
 }
 

@@ -684,15 +684,16 @@ struct BasicSearch {
 
     if (scorer_ && !matched_text_terms_.empty()) {
       // Score ALL matched docs and return top-K by score (not arbitrary cutoff).
-      auto [out, total_size, text_scores] = TakeScoredTopK(std::move(result), cuttoff_limit);
+      auto [out, total_size, text_scores, max_text_score] =
+          TakeScoredTopK(std::move(result), cuttoff_limit);
       return SearchResult{
-          total_size,         std::move(out),   std::move(knn_scores_), std::move(text_scores),
-          std::move(profile), std::move(error_)};
+          total_size,     std::move(out),     std::move(knn_scores_), std::move(text_scores),
+          max_text_score, std::move(profile), std::move(error_)};
     }
 
     auto [out, total_size] = result.Take(cuttoff_limit);
-    return SearchResult{total_size, std::move(out),     std::move(knn_scores_),
-                        {},         std::move(profile), std::move(error_)};
+    return SearchResult{total_size, std::move(out),     std::move(knn_scores_), {},
+                        0.0f,       std::move(profile), std::move(error_)};
   }
 
  private:
@@ -715,12 +716,13 @@ struct BasicSearch {
 
   // Score all matched docs via cursor-based posting list traversal and return top-K by score.
   // Total work: O(sum of posting_list_sizes) for cursors + O(N log K) for partial sort.
-  std::tuple<vector<DocId>, size_t, absl::flat_hash_map<DocId, float>> TakeScoredTopK(
+  std::tuple<vector<DocId>, size_t, absl::flat_hash_map<DocId, float>, float> TakeScoredTopK(
       IndexResult&& result, size_t limit) {
     auto [all_docs, total_size] = result.Take();  // all matched docs
 
     if (all_docs.empty())
-      return std::make_tuple(vector<DocId>{}, total_size, absl::flat_hash_map<DocId, float>{});
+      return std::make_tuple(vector<DocId>{}, total_size, absl::flat_hash_map<DocId, float>{},
+                             0.0f);
 
     // Ensure sorted for cursor-based scoring
     sort(all_docs.begin(), all_docs.end());
@@ -758,6 +760,8 @@ struct BasicSearch {
       }
       scored.emplace_back(static_cast<float>(ScoreDocument(*scorer_, ctx, term_infos)), doc);
     }
+    auto max_it = max_element(scored.begin(), scored.end());
+    float max_text_score = max_it == scored.end() ? 0.0f : max_it->first;
 
     // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)
     size_t k = min(limit, scored.size());
@@ -776,7 +780,7 @@ struct BasicSearch {
       text_scores[doc] = score;
     }
 
-    return std::make_tuple(std::move(out), total_size, std::move(text_scores));
+    return std::make_tuple(std::move(out), total_size, std::move(text_scores), max_text_score);
   }
 
   void AddMatchedTerm(TextIndex* index, string term) {

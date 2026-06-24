@@ -3067,6 +3067,8 @@ TEST_F(ScoringTest, ScoreDocumentDispatchesByScorerType) {
       .term_freq = 2, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
 
   EXPECT_DOUBLE_EQ(ScoreDocument(&BM25Std, ctx, {term}), BM25Std(ctx, term));
+  EXPECT_DOUBLE_EQ(ScoreDocument(ScorerSpec{ScorerKind::BM25STD_NORM}, ctx, {term}),
+                   BM25Std(ctx, term));
   EXPECT_DOUBLE_EQ(ScoreDocument(&TfIdf, ctx, {term}), TfIdf(ctx, term));
   EXPECT_DOUBLE_EQ(ScoreDocument(&TfIdfDocNorm, ctx, {term}), TfIdfDocNorm(ctx, term));
 }

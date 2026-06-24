@@ -7331,6 +7331,63 @@ TEST_F(SearchFamilyTest, FtSearchScorerBM25StdTanh) {
   EXPECT_GT(tanh_default["d:1"], tanh_default["d:2"]);
 }
 
+TEST_F(SearchFamilyTest, FtSearchScorerBM25StdNorm) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT"}),
+      "OK");
+  Run({"hset", "d:1", "content", "hello world hello hello"});
+  Run({"hset", "d:2", "content", "hello there"});
+
+  auto search_scores = [&](std::initializer_list<std::string_view> extra_args) {
+    std::vector<std::string> cmd{"ft.search", "idx", "hello", "NOCONTENT", "WITHSCORES"};
+    for (std::string_view arg : extra_args)
+      cmd.emplace_back(arg);
+
+    auto resp = Run(absl::Span<const std::string>(cmd));
+    EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+
+    std::map<std::string, double> scores;
+    const auto& vals = resp.GetVec();
+    for (size_t i = 1; i + 1 < vals.size(); i += 2)
+      scores[vals[i].GetString()] = std::stod(vals[i + 1].GetString());
+    return scores;
+  };
+
+  auto raw = search_scores({"SCORER", "BM25STD"});
+  auto norm = search_scores({"SCORER", "BM25STD.NORM"});
+
+  ASSERT_EQ(raw.size(), 2u);
+  ASSERT_EQ(norm.size(), raw.size());
+  double max_raw = std::max_element(raw.begin(), raw.end(), [](const auto& a, const auto& b) {
+                     return a.second < b.second;
+                   })->second;
+  for (const auto& [key, score] : raw)
+    EXPECT_NEAR(norm[key], score / max_raw, 1e-5);
+  EXPECT_DOUBLE_EQ(norm["d:1"], 1.0);
+  EXPECT_GT(norm["d:2"], 0.0);
+}
+
+TEST_F(SearchFamilyTest, FtSearchBM25StdNormLimitStable) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT"}),
+      "OK");
+  Run({"hset", "d:1", "content", "hello world hello hello"});
+  Run({"hset", "d:2", "content", "hello there"});
+
+  auto full =
+      Run({"ft.search", "idx", "hello", "NOCONTENT", "WITHSCORES", "SCORER", "BM25STD.NORM"});
+  auto limited = Run({"ft.search", "idx", "hello", "NOCONTENT", "WITHSCORES", "SCORER",
+                      "BM25STD.NORM", "LIMIT", "0", "1"});
+  ASSERT_THAT(full, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(limited, ArgType(RespExpr::ARRAY));
+  ASSERT_GE(full.GetVec().size(), 3u);
+  ASSERT_GE(limited.GetVec().size(), 3u);
+
+  EXPECT_EQ(full.GetVec()[1].GetString(), limited.GetVec()[1].GetString());
+  EXPECT_DOUBLE_EQ(std::stod(full.GetVec()[2].GetString()),
+                   std::stod(limited.GetVec()[2].GetString()));
+}
+
 TEST_F(SearchFamilyTest, FtSearchBM25StdTanhFactorValidation) {
   EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "SCHEMA", "content", "TEXT"}), "OK");
   Run({"hset", "d:1", "content", "hello"});

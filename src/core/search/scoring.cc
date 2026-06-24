@@ -17,6 +17,7 @@ double ScoreDocument(ScorerFn scorer, const ScoringContext& ctx,
 ScorerFn RawScorer(const ScorerSpec& scorer) {
   switch (scorer.kind) {
     case ScorerKind::BM25STD:
+    case ScorerKind::BM25STD_NORM:
     case ScorerKind::BM25STD_TANH:
       return &BM25Std;
     case ScorerKind::TFIDF:

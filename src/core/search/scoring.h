@@ -42,6 +42,7 @@ inline constexpr uint64_t kDefaultBM25StdTanhFactor = 4;
 
 enum class ScorerKind {
   BM25STD,
+  BM25STD_NORM,
   BM25STD_TANH,
   TFIDF,
   TFIDF_DOCNORM,

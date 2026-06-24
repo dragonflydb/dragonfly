@@ -208,6 +208,7 @@ struct SearchResult {
 
   // Text relevance scores keyed by DocId. Populated when a scorer is active.
   absl::flat_hash_map<DocId, float> text_scores;
+  float max_text_score = 0;
 
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;
