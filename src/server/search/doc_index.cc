@@ -1132,9 +1132,11 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
         out.back()[string{score_alias}] = static_cast<double>(it->second);
     }
 
-    if (!text_score_map.empty()) {
+    if (params.add_scores) {
+      double text_score = 0;
       if (auto it = text_score_map.find(doc); it != text_score_map.end())
-        out.back()["__score"] = static_cast<double>(it->second);
+        text_score = it->second;
+      out.back()["__score"] = text_score;
       // Hidden tie-breaker for SORTBY @__score; not added to fields_to_print.
       out.back()["__key"] = string{key};
     }

@@ -512,22 +512,11 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   return params;
 }
 
-std::optional<search::ScorerSpec> ParseScorer(CmdArgParser* parser, bool allow_bm25std_tanh = true,
-                                              bool allow_bm25std_norm = false) {
-  auto kind = allow_bm25std_tanh
-                  ? (allow_bm25std_norm
-                         ? parser->TryMapNext("BM25STD", search::ScorerKind::BM25STD,
-                                              "BM25STD.NORM", search::ScorerKind::BM25STD_NORM,
-                                              "BM25STD.TANH", search::ScorerKind::BM25STD_TANH,
-                                              "TFIDF", search::ScorerKind::TFIDF, "TFIDF.DOCNORM",
-                                              search::ScorerKind::TFIDF_DOCNORM)
-                         : parser->TryMapNext("BM25STD", search::ScorerKind::BM25STD,
-                                              "BM25STD.TANH", search::ScorerKind::BM25STD_TANH,
-                                              "TFIDF", search::ScorerKind::TFIDF, "TFIDF.DOCNORM",
-                                              search::ScorerKind::TFIDF_DOCNORM))
-                  : parser->TryMapNext("BM25STD", search::ScorerKind::BM25STD,  //
-                                       "TFIDF", search::ScorerKind::TFIDF,      //
-                                       "TFIDF.DOCNORM", search::ScorerKind::TFIDF_DOCNORM);
+std::optional<search::ScorerSpec> ParseScorer(CmdArgParser* parser) {
+  auto kind = parser->TryMapNext(
+      "BM25STD", search::ScorerKind::BM25STD, "BM25STD.NORM", search::ScorerKind::BM25STD_NORM,
+      "BM25STD.TANH", search::ScorerKind::BM25STD_TANH, "TFIDF", search::ScorerKind::TFIDF,
+      "TFIDF.DOCNORM", search::ScorerKind::TFIDF_DOCNORM);
   if (!kind)
     return nullopt;
   return search::ScorerSpec{*kind};
@@ -593,7 +582,7 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
     } else if (parser->Check("WITHSCORES")) {
       params.with_scores = true;
     } else if (parser->Check("SCORER")) {
-      auto scorer = ParseScorer(parser, /*allow_bm25std_tanh=*/true, /*allow_bm25std_norm=*/true);
+      auto scorer = ParseScorer(parser);
       if (!scorer)
         return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
       params.scorer = *scorer;
@@ -1810,7 +1799,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       sub->Next();
       return;
     }
-    auto scorer_fn = ParseScorer(sub, /*allow_bm25std_tanh=*/true, /*allow_bm25std_norm=*/true);
+    auto scorer_fn = ParseScorer(sub);
     if (!scorer_fn)
       sub->ReportCustom(absl::StrCat("No such scorer: ", sub->Peek()));
     else
@@ -2188,6 +2177,29 @@ void NormalizeHybridTextScores(absl::Span<SearchResult> text_docs) {
   for (auto& shard : text_docs) {
     for (auto& doc : shard.docs)
       doc.text_score /= max_text_score;
+  }
+}
+
+void NormalizeAggregateScores(absl::Span<aggregate::DocValues> values) {
+  static constexpr std::string_view kScoreField = "__score";
+
+  double max_score = 0;
+  for (const auto& row : values) {
+    auto it = row.find(kScoreField);
+    if (it == row.end())
+      continue;
+    if (const auto* score = std::get_if<double>(&it->second))
+      max_score = std::max(max_score, *score);
+  }
+  if (max_score == 0)
+    return;
+
+  for (auto& row : values) {
+    auto it = row.find(kScoreField);
+    if (it == row.end())
+      continue;
+    if (auto* score = std::get_if<double>(&it->second))
+      *score /= max_score;
   }
 }
 
@@ -3913,6 +3925,9 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     values =
         MergeJoinedKeysWithData(*params, *data_for_join, joined_entries, shard_keys_data_per_index);
   }
+
+  if (params->add_scores && IsBM25StdNorm(params->scorer))
+    NormalizeAggregateScores(absl::MakeSpan(values));
 
   std::vector<std::string_view> load_fields;
   if (params->load_fields) {

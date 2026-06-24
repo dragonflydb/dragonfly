@@ -7423,6 +7423,84 @@ TEST_F(SearchFamilyTest, FtAggregateBM25StdTanhAddScores) {
   EXPECT_GT(first_score, second_score);
 }
 
+TEST_F(SearchFamilyTest, FtAggregateBM25StdNormAddScores) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT"}),
+      "OK");
+  Run({"hset", "d:1", "content", "hello world hello hello"});
+  Run({"hset", "d:2", "content", "hello there"});
+
+  auto raw = Run({"ft.aggregate", "idx", "hello", "ADDSCORES", "SCORER", "BM25STD", "LOAD", "2",
+                  "__key", "__score", "SORTBY", "2", "@__score", "DESC"});
+  auto norm = Run({"ft.aggregate", "idx", "hello", "ADDSCORES", "SCORER", "BM25STD.NORM", "LOAD",
+                   "2", "__key", "__score", "SORTBY", "2", "@__score", "DESC", "APPLY",
+                   "@__score + 1", "AS", "boosted"});
+  ASSERT_THAT(raw, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(norm, ArgType(RespExpr::ARRAY));
+  ASSERT_GE(raw.GetVec().size(), 3u);
+  ASSERT_GE(norm.GetVec().size(), 3u);
+
+  double max_raw = map_score("__score", raw.GetVec()[1].GetVec());
+  EXPECT_DOUBLE_EQ(map_score("__score", norm.GetVec()[1].GetVec()), 1.0);
+  EXPECT_NEAR(map_score("__score", norm.GetVec()[2].GetVec()),
+              map_score("__score", raw.GetVec()[2].GetVec()) / max_raw, 1e-5);
+  EXPECT_NEAR(map_score("boosted", norm.GetVec()[1].GetVec()), 2.0, 1e-6);
+}
+
+TEST_F(SearchFamilyTest, FtAggregateBM25StdNormVectorFinalStream) {
+  CreateHnswHashIdx();
+  Run({"HSET", "h:1", "title", "apple apple apple apple apple", "vec", FloatVec1(100.0f)});
+  Run({"HSET", "h:2", "title", "apple", "vec", FloatVec1(1.0f)});
+  Run({"HSET", "h:3", "title", "apple apple", "vec", FloatVec1(2.0f)});
+
+  auto resp = Run({"FT.AGGREGATE",
+                   "idx",
+                   "(@title:apple)=>[KNN 2 @vec $v AS dist]",
+                   "ADDSCORES",
+                   "SCORER",
+                   "BM25STD.NORM",
+                   "LOAD",
+                   "3",
+                   "__key",
+                   "__score",
+                   "dist",
+                   "SORTBY",
+                   "2",
+                   "@__score",
+                   "DESC",
+                   "PARAMS",
+                   "2",
+                   "v",
+                   FloatVec1(1.0f),
+                   "DIALECT",
+                   "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  const auto& rows = resp.GetVec();
+  ASSERT_GE(rows.size(), 3u);
+
+  EXPECT_EQ(map_string("__key", rows[1].GetVec()), "h:3");
+  EXPECT_EQ(map_string("__key", rows[2].GetVec()), "h:2");
+  EXPECT_DOUBLE_EQ(map_score("__score", rows[1].GetVec()), 1.0);
+  EXPECT_GT(map_score("__score", rows[2].GetVec()), 0.0);
+  EXPECT_LT(map_score("__score", rows[2].GetVec()), 1.0);
+}
+
+TEST_F(SearchFamilyTest, FtAggregateBM25StdNormVectorOnlyScoreZero) {
+  CreateHnswHashIdx();
+  Run({"HSET", "h:1", "title", "apple", "vec", FloatVec1(1.0f)});
+  Run({"HSET", "h:2", "title", "banana", "vec", FloatVec1(2.0f)});
+
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 1 @vec $v AS dist]", "ADDSCORES", "SCORER",
+                   "BM25STD.NORM", "LOAD", "3", "__key", "__score", "dist", "PARAMS", "2", "v",
+                   FloatVec1(1.0f), "DIALECT", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  const auto& rows = resp.GetVec();
+  ASSERT_GE(rows.size(), 2u);
+
+  EXPECT_EQ(map_string("__key", rows[1].GetVec()), "h:1");
+  EXPECT_DOUBLE_EQ(map_score("__score", rows[1].GetVec()), 0.0);
+}
+
 // Verify per-field BM25 scoring: a long "body" field shouldn't penalize a short "title" match
 TEST_F(SearchFamilyTest, SearchWithScoresPerField) {
   EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
