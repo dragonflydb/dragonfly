@@ -19,6 +19,42 @@ using namespace std;
 
 namespace {
 
+constexpr uint64_t kDefaultCapacity = 1024;
+
+OpResult<CuckooFilter*> FindOrCreate(const OpArgs& op_args, string_view key) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  RETURN_ON_BAD_STATUS(op_res);
+
+  PrimeValue& pv = op_res->it->second;
+  if (op_res->is_new) {
+    pv.SetCuckooFilter(CuckooFilterOptions{.capacity = kDefaultCapacity});
+  }
+  return pv.GetCuckooFilter();
+}
+
+OpResult<bool> OpAdd(const OpArgs& op_args, string_view key, string_view item) {
+  OpResult<CuckooFilter*> cf = FindOrCreate(op_args, key);
+  RETURN_ON_BAD_STATUS(cf);
+
+  if (!(*cf)->Insert(CuckooFilter::Hash(item)))
+    return OpStatus::CUCKOO_FILTER_FULL;
+  return true;
+}
+
+OpResult<bool> OpAddNx(const OpArgs& op_args, string_view key, string_view item) {
+  OpResult<CuckooFilter*> cf = FindOrCreate(op_args, key);
+  RETURN_ON_BAD_STATUS(cf);
+
+  uint64_t hash = CuckooFilter::Hash(item);
+  if ((*cf)->Exists(hash))
+    return false;
+
+  if (!(*cf)->Insert(hash))
+    return OpStatus::CUCKOO_FILTER_FULL;
+  return true;
+}
+
 OpStatus OpReserve(const OpArgs& op_args, string_view key, const CuckooFilterOptions& options) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
@@ -82,6 +118,34 @@ void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
+void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
+  string_view key = ArgS(args, 0);
+  string_view item = ArgS(args, 1);
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpAdd(t->GetOpArgs(shard), key, item);
+  };
+
+  OpResult<bool> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res)
+    return cmd_cntx->SendError(res.status());
+  cmd_cntx->SendLong(*res);
+}
+
+void CmdAddNx(CmdArgList args, CommandContext* cmd_cntx) {
+  string_view key = ArgS(args, 0);
+  string_view item = ArgS(args, 1);
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpAddNx(t->GetOpArgs(shard), key, item);
+  };
+
+  OpResult<bool> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res)
+    return cmd_cntx->SendError(res.status());
+  cmd_cntx->SendLong(*res);
+}
+
 }  // namespace
 
 using CI = CommandId;
@@ -91,7 +155,9 @@ using CI = CommandId;
 void RegisterCuckooFilterFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::CUCKOO_FILTER);
 
-  *registry << CI{"CF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1}.HFUNC(Reserve);
+  *registry << CI{"CF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1}.HFUNC(Reserve)
+            << CI{"CF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Add)
+            << CI{"CF.ADDNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(AddNx);
 }
 
 }  // namespace dfly
