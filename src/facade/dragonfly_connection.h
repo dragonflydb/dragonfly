@@ -353,7 +353,18 @@ class Connection : public util::Connection {
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoop();
 
-  void NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n);
+  // Ingests a single proactor recv notification, updating connection I/O state:
+  // - io_ec_ on error/abort, pending_input_ for multishot completions
+  // - io_buf_ for provided buffers.
+  // May return early on error.
+  // The caller (OnRecvNotification) wakes the fiber regardless so the loop can observe io_ec_ and
+  // close.
+  void ProcessRecvNotification(const util::FiberSocketBase::RecvNotification& n);
+
+  // Callback: registered as the proactor OnRecv hook for V2 connections.
+  // Processes the notification, eagerly drains the socket into io_buf_, and wakes the connection
+  // fiber. Only called from the proactor event loop while the connection fiber is suspended.
+  void OnRecvNotification(const util::FiberSocketBase::RecvNotification& n);
 
   // Enables io_uring multishot receives for the connection if the current thread supports it.
   // This is required during initial setup or after migrating to a new thread/proactor,
