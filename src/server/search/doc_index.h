@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -159,8 +160,9 @@ struct SearchParams {
 
   search::QueryParams query_params;
 
-  bool with_scores = false;           // WITHSCORES flag
-  search::ScorerFn scorer = nullptr;  // SCORER parameter (null = not set)
+  bool with_scores = false;                  // WITHSCORES flag
+  std::optional<search::ScorerSpec> scorer;  // SCORER parameter (null = not set)
+  uint64_t bm25std_tanh_factor = search::kDefaultBM25StdTanhFactor;
 
   bool ShouldReturnAllFields() const {
     return !return_fields.has_value();
@@ -225,8 +227,9 @@ struct AggregateParams {
   std::optional<std::vector<FieldReference>> load_fields;
   std::vector<aggregate::AggregationStep> steps;
 
-  bool add_scores = false;            // ADDSCORES flag
-  search::ScorerFn scorer = nullptr;  // SCORER parameter (null = not set)
+  bool add_scores = false;                   // ADDSCORES flag
+  std::optional<search::ScorerSpec> scorer;  // SCORER parameter (null = not set)
+  uint64_t bm25std_tanh_factor = search::kDefaultBM25StdTanhFactor;
 
   // Set only for multi-shard scoring queries; not owned.
   const search::GlobalScoringStats* global_scoring_stats = nullptr;

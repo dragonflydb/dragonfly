@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/strings/match.h>
+#include <absl/strings/numbers.h>
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
@@ -511,10 +512,30 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   return params;
 }
 
-std::optional<search::ScorerFn> ParseScorer(CmdArgParser* parser) {
-  return parser->TryMapNext("BM25STD", &search::BM25Std,  //
-                            "TFIDF", &search::TfIdf,      //
-                            "TFIDF.DOCNORM", &search::TfIdfDocNorm);
+std::optional<search::ScorerSpec> ParseScorer(CmdArgParser* parser,
+                                              bool allow_bm25std_tanh = true) {
+  auto kind = allow_bm25std_tanh
+                  ? parser->TryMapNext("BM25STD", search::ScorerKind::BM25STD,            //
+                                       "BM25STD.TANH", search::ScorerKind::BM25STD_TANH,  //
+                                       "TFIDF", search::ScorerKind::TFIDF,                //
+                                       "TFIDF.DOCNORM", search::ScorerKind::TFIDF_DOCNORM)
+                  : parser->TryMapNext("BM25STD", search::ScorerKind::BM25STD,  //
+                                       "TFIDF", search::ScorerKind::TFIDF,      //
+                                       "TFIDF.DOCNORM", search::ScorerKind::TFIDF_DOCNORM);
+  if (!kind)
+    return nullopt;
+  return search::ScorerSpec{*kind};
+}
+
+ParseResult<uint64_t> ParseBM25StdTanhFactor(CmdArgParser* parser) {
+  constexpr string_view kErr = "BM25STD_TANH_FACTOR must be between 1 and 10000 inclusive";
+  if (!parser->HasNext())
+    return CreateSyntaxError(kErr);
+
+  uint64_t factor = 0;
+  if (!absl::SimpleAtoi(parser->Next(), &factor) || factor == 0)
+    return CreateSyntaxError(kErr);
+  return factor;
 }
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
@@ -561,6 +582,11 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       if (!scorer)
         return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
       params.scorer = *scorer;
+    } else if (parser->Check("BM25STD_TANH_FACTOR")) {
+      auto factor = ParseBM25StdTanhFactor(parser);
+      if (!factor)
+        return make_unexpected(factor.error());
+      params.bm25std_tanh_factor = *factor;
     } else if (parser->Check("DIALECT")) {
       parser->Skip(1);  // Accepted and ignored — DF always behaves as dialect 2
     } else {
@@ -570,6 +596,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   }
 
   params.limit_total = std::min(params.limit_total, max_results);
+  if (params.scorer)
+    params.scorer->bm25std_tanh_factor = params.bm25std_tanh_factor;
 
   return params;
 }
@@ -812,6 +840,14 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       continue;
     }
 
+    if (parser->Check("BM25STD_TANH_FACTOR")) {
+      auto factor = ParseBM25StdTanhFactor(parser);
+      if (!factor)
+        return make_unexpected(factor.error());
+      params.bm25std_tanh_factor = *factor;
+      continue;
+    }
+
     // DIALECT (accepted and ignored — DF always behaves as dialect 2)
     if (parser->Check("DIALECT")) {
       parser->Skip(1);
@@ -854,6 +890,9 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
 
     return CreateSyntaxError(absl::StrCat("Unknown clause: ", parser->Peek()));
   }
+
+  if (params.scorer)
+    params.scorer->bm25std_tanh_factor = params.bm25std_tanh_factor;
 
   return params;
 }
@@ -1687,7 +1726,7 @@ struct HybridSearchParams {
 
   string text_query;
   string yield_text_score_as;
-  search::ScorerFn scorer = nullptr;
+  std::optional<search::ScorerSpec> scorer;
 
   string vsim_field;
   string vsim_param;
@@ -1739,7 +1778,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       sub->Next();
       return;
     }
-    auto scorer_fn = ParseScorer(sub);
+    auto scorer_fn = ParseScorer(sub, /*allow_bm25std_tanh=*/false);
     if (!scorer_fn)
       sub->ReportCustom(absl::StrCat("No such scorer: ", sub->Peek()));
     else
@@ -2140,7 +2179,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     rb->SendError("Query syntax error in SEARCH clause");
     return false;
   }
-  text_algo.SetScorer(params->scorer ? params->scorer : &search::BM25Std);
+  text_algo.SetScorer(params->scorer ? *params->scorer : search::ScorerSpec{});
   if (enable_profile)
     text_algo.EnableProfiling();
 
@@ -2880,9 +2919,9 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
   if (params->scorer)
-    search_algo.SetScorer(params->scorer);
+    search_algo.SetScorer(*params->scorer);
   else if (params->with_scores)
-    search_algo.SetScorer(&search::BM25Std);
+    search_algo.SetScorer(search::ScorerSpec{});
 
   auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, index_name);
 
@@ -3208,9 +3247,9 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
   if (params->scorer)
-    search_algo.SetScorer(params->scorer);
+    search_algo.SetScorer(*params->scorer);
   else if (params->with_scores)
-    search_algo.SetScorer(&search::BM25Std);
+    search_algo.SetScorer(search::ScorerSpec{});
 
   search_algo.EnableProfiling();
 
@@ -3701,9 +3740,9 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Enable scorer: explicit SCORER param, or default BM25STD when ADDSCORES is set
     if (params->scorer)
-      search_algo.SetScorer(params->scorer);
+      search_algo.SetScorer(*params->scorer);
     else if (params->add_scores)
-      search_algo.SetScorer(&search::BM25Std);
+      search_algo.SetScorer(search::ScorerSpec{});
 
     std::vector<std::vector<SearchDocData>> query_results(shard_set->size());
 

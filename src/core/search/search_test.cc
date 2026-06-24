@@ -3071,6 +3071,29 @@ TEST_F(ScoringTest, ScoreDocumentDispatchesByScorerType) {
   EXPECT_DOUBLE_EQ(ScoreDocument(&TfIdfDocNorm, ctx, {term}), TfIdfDocNorm(ctx, term));
 }
 
+TEST_F(ScoringTest, BM25StdTanhAppliesDefaultFactor) {
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{
+      .term_freq = 2, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
+
+  ScorerSpec scorer{ScorerKind::BM25STD_TANH};
+  double raw = ScoreDocument(ScorerSpec{ScorerKind::BM25STD}, ctx, {term});
+
+  EXPECT_NEAR(ScoreDocument(scorer, ctx, {term}), std::tanh(raw / kDefaultBM25StdTanhFactor),
+              1e-12);
+}
+
+TEST_F(ScoringTest, BM25StdTanhAppliesCustomFactor) {
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{
+      .term_freq = 2, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
+
+  ScorerSpec scorer{.kind = ScorerKind::BM25STD_TANH, .bm25std_tanh_factor = 20};
+  double raw = ScoreDocument(ScorerSpec{ScorerKind::BM25STD}, ctx, {term});
+
+  EXPECT_NEAR(ScoreDocument(scorer, ctx, {term}), std::tanh(raw / 20), 1e-12);
+}
+
 TEST_F(ScoringTest, SearchWithScorer) {
   // Integration test: build index, search with scorer, verify scores are non-zero
   Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});

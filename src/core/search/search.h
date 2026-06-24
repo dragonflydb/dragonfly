@@ -265,11 +265,12 @@ class SearchAlgorithm {
 
   void EnableProfiling();
 
+  void SetScorer(ScorerSpec scorer);
   void SetScorer(ScorerFn scorer);
 
  private:
   bool profiling_enabled_ = false;
-  ScorerFn scorer_ = nullptr;
+  std::optional<ScorerSpec> scorer_;
   std::unique_ptr<AstNode> query_;
   std::optional<KnnScoreSortOption> knn_hnsw_score_sort_option_;
 };

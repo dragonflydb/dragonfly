@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <string_view>
 
 #include "base/flags.h"
@@ -7292,6 +7293,77 @@ TEST_F(SearchFamilyTest, AggregateAddScoresSimple) {
   EXPECT_GT(score1, 0.0) << "First result should have positive score";
   EXPECT_GT(score2, 0.0) << "Second result should have positive score";
   EXPECT_GE(score1, score2) << "Results should be sorted by score DESC";
+}
+
+TEST_F(SearchFamilyTest, FtSearchScorerBM25StdTanh) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT"}),
+      "OK");
+  Run({"hset", "d:1", "content", "hello world hello hello"});
+  Run({"hset", "d:2", "content", "hello there"});
+
+  auto search_scores = [&](std::initializer_list<std::string_view> extra_args) {
+    std::vector<std::string> cmd{"ft.search", "idx", "hello", "NOCONTENT", "WITHSCORES"};
+    for (std::string_view arg : extra_args)
+      cmd.emplace_back(arg);
+
+    auto resp = Run(absl::Span<const std::string>(cmd));
+    EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+
+    std::map<std::string, double> scores;
+    const auto& vals = resp.GetVec();
+    for (size_t i = 1; i + 1 < vals.size(); i += 2)
+      scores[vals[i].GetString()] = std::stod(vals[i + 1].GetString());
+    return scores;
+  };
+
+  auto raw = search_scores({"SCORER", "BM25STD"});
+  auto tanh_default = search_scores({"SCORER", "BM25STD.TANH"});
+  auto tanh_custom = search_scores({"SCORER", "BM25STD.TANH", "BM25STD_TANH_FACTOR", "20"});
+  auto factor_ignored = search_scores({"SCORER", "BM25STD", "BM25STD_TANH_FACTOR", "20"});
+
+  ASSERT_EQ(raw.size(), 2u);
+  EXPECT_EQ(raw, factor_ignored);
+  for (const auto& [key, score] : raw) {
+    EXPECT_NEAR(tanh_default[key], std::tanh(score / 4), 1e-6);
+    EXPECT_NEAR(tanh_custom[key], std::tanh(score / 20), 1e-6);
+  }
+  EXPECT_GT(tanh_default["d:1"], tanh_default["d:2"]);
+}
+
+TEST_F(SearchFamilyTest, FtSearchBM25StdTanhFactorValidation) {
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "SCHEMA", "content", "TEXT"}), "OK");
+  Run({"hset", "d:1", "content", "hello"});
+
+  auto resp = Run({"ft.search", "idx", "hello", "WITHSCORES", "SCORER", "BM25STD.TANH",
+                   "BM25STD_TANH_FACTOR", "0"});
+  ASSERT_EQ(resp.type, RespExpr::ERROR);
+  EXPECT_THAT(string{resp.GetString()},
+              HasSubstr("BM25STD_TANH_FACTOR must be between 1 and 10000 inclusive"));
+
+  resp = Run({"ft.search", "idx", "hello", "WITHSCORES", "SCORER", "BM25STD.TANH",
+              "BM25STD_TANH_FACTOR", "10001"});
+  EXPECT_NE(resp.type, RespExpr::ERROR);
+}
+
+TEST_F(SearchFamilyTest, FtAggregateBM25StdTanhAddScores) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT"}),
+      "OK");
+  Run({"hset", "d:1", "content", "hello world hello hello"});
+  Run({"hset", "d:2", "content", "hello there"});
+
+  auto resp = Run({"ft.aggregate", "idx", "hello", "ADDSCORES", "SCORER", "BM25STD.TANH",
+                   "BM25STD_TANH_FACTOR", "20", "SORTBY", "2", "@__score", "DESC"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+
+  const auto& results = resp.GetVec();
+  ASSERT_GE(results.size(), 3u);
+  double first_score = map_score("__score", results[1].GetVec());
+  double second_score = map_score("__score", results[2].GetVec());
+  EXPECT_GT(first_score, 0.0);
+  EXPECT_GT(second_score, 0.0);
+  EXPECT_GT(first_score, second_score);
 }
 
 // Verify per-field BM25 scoring: a long "body" field shouldn't penalize a short "title" match

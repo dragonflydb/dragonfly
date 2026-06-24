@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -34,9 +35,22 @@ struct ScoringContext {
 };
 
 // Scorer function signature: computes the score for a single (term, document) pair.
-// Register new scorers by adding a function with this signature and exposing it via
-// ParseScorer in the command layer.
+// ScorerSpec below applies optional document-level post processing on top of these raw scorers.
 using ScorerFn = double (*)(const ScoringContext&, const ScoringTermInfo&);
+
+inline constexpr uint64_t kDefaultBM25StdTanhFactor = 4;
+
+enum class ScorerKind {
+  BM25STD,
+  BM25STD_TANH,
+  TFIDF,
+  TFIDF_DOCNORM,
+};
+
+struct ScorerSpec {
+  ScorerKind kind = ScorerKind::BM25STD;
+  uint64_t bm25std_tanh_factor = kDefaultBM25StdTanhFactor;
+};
 
 // Compute BM25STD score for a single term in a document.
 //
@@ -94,6 +108,10 @@ inline double TfIdfDocNorm(const ScoringContext& ctx, const ScoringTermInfo& ter
 // Returns sum of per-term scores produced by the given scorer function.
 double ScoreDocument(ScorerFn scorer, const ScoringContext& ctx,
                      const std::vector<ScoringTermInfo>& terms);
+double ScoreDocument(const ScorerSpec& scorer, const ScoringContext& ctx,
+                     const std::vector<ScoringTermInfo>& terms);
+
+ScorerFn RawScorer(const ScorerSpec& scorer);
 
 // Single-shard slice of the counts a scorer needs. Keys are schema canonical
 // names; terms are post-synonym-resolution.

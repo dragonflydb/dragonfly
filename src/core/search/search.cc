@@ -119,7 +119,8 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices, ScorerFn scorer, const GlobalScoringStats* global_stats)
+  BasicSearch(const FieldIndices* indices, optional<ScorerSpec> scorer,
+              const GlobalScoringStats* global_stats)
       : indices_{indices}, scorer_{scorer}, global_stats_{global_stats} {
   }
 
@@ -755,7 +756,7 @@ struct BasicSearch {
           term_infos[t].field_avg_doc_len = cursors[t].field_avg_doc_len;
         }
       }
-      scored.emplace_back(static_cast<float>(ScoreDocument(scorer_, ctx, term_infos)), doc);
+      scored.emplace_back(static_cast<float>(ScoreDocument(*scorer_, ctx, term_infos)), doc);
     }
 
     // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)
@@ -784,7 +785,7 @@ struct BasicSearch {
   }
 
   const FieldIndices* indices_;
-  ScorerFn scorer_ = nullptr;
+  optional<ScorerSpec> scorer_;
   const GlobalScoringStats* global_stats_ = nullptr;
 
   string error_;
@@ -1226,8 +1227,19 @@ void SearchAlgorithm::EnableProfiling() {
   profiling_enabled_ = true;
 }
 
-void SearchAlgorithm::SetScorer(ScorerFn scorer) {
+void SearchAlgorithm::SetScorer(ScorerSpec scorer) {
   scorer_ = scorer;
+}
+
+void SearchAlgorithm::SetScorer(ScorerFn scorer) {
+  if (scorer == &BM25Std)
+    scorer_ = ScorerSpec{ScorerKind::BM25STD};
+  else if (scorer == &TfIdf)
+    scorer_ = ScorerSpec{ScorerKind::TFIDF};
+  else if (scorer == &TfIdfDocNorm)
+    scorer_ = ScorerSpec{ScorerKind::TFIDF_DOCNORM};
+  else
+    scorer_ = nullopt;
 }
 
 // Visits `node` and recurses into its sub-expressions, invoking `cb` on every node in DFS order.
