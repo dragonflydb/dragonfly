@@ -239,12 +239,13 @@ jobs:
           SAFE_NAME=$("${GITHUB_WORKSPACE}/.github/scripts/sanitize-token.sh" "${NAME}")
           echo "CI_JUNIT_ARTIFACT=${SAFE_NAME}" >> "${GITHUB_ENV}"
 
-      - name: Upload JUnit test results
+      - name: Upload C++ JUnit test results
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.CI_JUNIT_ARTIFACT }}
-          path: ${{ github.workspace }}/test-results/junit/**/*.xml
+          # Scope to cpp/ only: regression XMLs are uploaded by the regression action itself.
+          path: ${{ github.workspace }}/test-results/junit/cpp/**/*.xml
           if-no-files-found: ignore
 
       - name: Refresh AWS credentials for C++ JUnit upload
