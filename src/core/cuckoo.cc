@@ -154,6 +154,25 @@ bool CuckooFilter::Delete(uint64_t hash) {
   return false;
 }
 
+void CuckooFilter::Deserialize(const SerializedDataView& data) {
+  std::pmr::vector<SubFilter> new_filters(filters_.get_allocator());
+  new_filters.reserve(data.filters.size());
+  for (const std::string& blob : data.filters) {
+    SubFilter sf(blob.begin(), blob.end(), mr_);
+    new_filters.push_back(std::move(sf));
+  }
+
+  // Nothing below can throw.
+  slots_per_bucket_ = data.slots_per_bucket;
+  max_iterations_ = data.max_iterations;
+  expansion_ = data.expansion;
+  num_buckets_ = data.num_buckets;
+  num_items_ = data.num_items;
+  num_deletes_ = data.num_deletes;
+  num_ko_inserts_ = 0;
+  filters_.swap(new_filters);
+}
+
 uint64_t CuckooFilter::Hash(std::string_view item) {
   return XXH3_64bits_withSeed(item.data(), item.size(), 0xc6a4a7935bd1e995ULL);
 }

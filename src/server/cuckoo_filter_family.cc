@@ -32,7 +32,7 @@ struct CuckooInfo {
   uint16_t max_iterations = 0;
 };
 
-OpResult<CuckooFilter*> FindOrCreate(const OpArgs& op_args, string_view key) {
+OpResult<bool> OpAdd(const OpArgs& op_args, string_view key, string_view item) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
   RETURN_ON_BAD_STATUS(op_res);
@@ -41,27 +41,27 @@ OpResult<CuckooFilter*> FindOrCreate(const OpArgs& op_args, string_view key) {
   if (op_res->is_new) {
     pv.SetCuckooFilter(CuckooFilterOptions{.capacity = kDefaultCapacity});
   }
-  return pv.GetCuckooFilter();
-}
 
-OpResult<bool> OpAdd(const OpArgs& op_args, string_view key, string_view item) {
-  OpResult<CuckooFilter*> cf = FindOrCreate(op_args, key);
-  RETURN_ON_BAD_STATUS(cf);
-
-  if (!(*cf)->Insert(CuckooFilter::Hash(item)))
+  if (!pv.GetCuckooFilter()->Insert(CuckooFilter::Hash(item)))
     return OpStatus::CUCKOO_FILTER_FULL;
   return true;
 }
 
 OpResult<bool> OpAddNx(const OpArgs& op_args, string_view key, string_view item) {
-  OpResult<CuckooFilter*> cf = FindOrCreate(op_args, key);
-  RETURN_ON_BAD_STATUS(cf);
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  RETURN_ON_BAD_STATUS(op_res);
+
+  PrimeValue& pv = op_res->it->second;
+  if (op_res->is_new) {
+    pv.SetCuckooFilter(CuckooFilterOptions{.capacity = kDefaultCapacity});
+  }
 
   uint64_t hash = CuckooFilter::Hash(item);
-  if ((*cf)->Exists(hash))
+  if (pv.GetCuckooFilter()->Exists(hash))
     return false;
 
-  if (!(*cf)->Insert(hash))
+  if (!pv.GetCuckooFilter()->Insert(hash))
     return OpStatus::CUCKOO_FILTER_FULL;
   return true;
 }

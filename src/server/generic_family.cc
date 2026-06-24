@@ -300,10 +300,6 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(facade::ParsedArgs args) {
 OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArgs& op_args) {
   string str_res;
 
-  // TODO: cuckoo filter RDB serialization is not implemented yet.
-  if (pv.ObjType() == OBJ_CUCKOOFILTER)
-    return OpStatus::INVALID_VALUE;
-
   if (pv.IsExternal() && !pv.IsCool()) {
     // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
     auto res =
