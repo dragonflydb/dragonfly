@@ -45,7 +45,7 @@ using SetType = pair<void*, unsigned>;
 namespace {
 
 // Possible sources of new set entries
-using NewEntries = std::variant<ArgSlice, absl::flat_hash_set<std::string_view>>;
+using NewEntries = std::variant<ArgSlice, ParsedArgs, absl::flat_hash_set<std::string_view>>;
 
 auto EntriesRange(const NewEntries& entries) {
   return base::it::Wrap(cmn::kToSV, entries);
@@ -125,7 +125,7 @@ struct StringSetWrapper {
     return res;
   }
 
-  pair<unsigned, bool> Remove(const facade::ArgRange& entries) const {
+  pair<unsigned, bool> Remove(const ParsedArgs& entries) const {
     return VisitSet(obj_, [&](auto* s) {
       unsigned removed = 0;
       for (string_view member : entries)
@@ -190,7 +190,7 @@ struct StringSetWrapper {
 };
 
 // returns (removed, isempty)
-pair<unsigned, bool> RemoveSet(const DbContext& db_context, const facade::ArgRange& vals,
+pair<unsigned, bool> RemoveSet(const DbContext& db_context, const ParsedArgs& vals,
                                CompactObj* set) {
   if (set->Encoding() == kEncodingIntSet) {
     intset* is = (intset*)set->RObjPtr();
@@ -304,9 +304,8 @@ void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, String
   });
 }
 
-template <typename C = absl::flat_hash_set<string>>
-StringVec RandMemberStrSetPicky(const StringSetWrapper& strset, size_t count) {
-  C picks;
+void RandMemberUnique(const StringSetWrapper& strset, size_t count, cmn::BackedArguments* dest) {
+  absl::flat_hash_set<string> picks;
   picks.reserve(count);
 
   VisitSet(strset.obj(), [&](auto* s) {
@@ -315,26 +314,35 @@ StringVec RandMemberStrSetPicky(const StringSetWrapper& strset, size_t count) {
       auto it = s->GetRandomMember();
       if (it == s->end())
         break;
-      picks.insert(picks.end(), string{Key(it)});
+      auto [_, inserted] = picks.insert(string{Key(it)});
+      if (inserted)
+        dest->PushArg(Key(it));
     }
   });
-
-  if constexpr (is_same_v<StringVec, C>)
-    return picks;
-  return StringVec{make_move_iterator(picks.begin()), make_move_iterator(picks.end())};
 }
 
-StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
-                           PicksGenerator& generator, size_t picks_count) {
+void RandMemberRepeat(const StringSetWrapper& strset, size_t count, cmn::BackedArguments* dest) {
+  VisitSet(strset.obj(), [&](auto* s) {
+    while (dest->size() < count) {
+      auto it = s->GetRandomMember();
+      if (it == s->end())
+        break;
+      dest->PushArg(Key(it));
+    }
+  });
+}
+
+void RandMemberStrSet(const DbContext& db_context, const CompactObj& co, PicksGenerator& generator,
+                      size_t picks_count, cmn::BackedArguments* dest) {
   CHECK(IsDenseEncoding(co));
   StringSetWrapper strset{co, db_context};
 
   // If the set is small, extract entries with random sampling.
   if (picks_count * 5 < strset.UpperBoundSize()) {
     if (bool unique = (dynamic_cast<UniquePicksGenerator*>(&generator) != nullptr); unique)
-      return RandMemberStrSetPicky(strset, picks_count);
+      return RandMemberUnique(strset, picks_count, dest);
     else
-      return RandMemberStrSetPicky<StringVec>(strset, picks_count);
+      return RandMemberRepeat(strset, picks_count, dest);
   }
 
   std::unordered_map<RandomPick, std::uint32_t> times_index_is_picked;
@@ -357,16 +365,13 @@ StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
   absl::BitGen gen;
   std::shuffle(result.begin(), result.end(), gen);
 
-  return result;
+  dest->Assign(result.begin(), result.end(), result.size());
 }
 
-StringVec RandMemberSet(const DbContext& db_context, const CompactObj& co,
-                        PicksGenerator& generator, std::size_t picks_count) {
+void RandMemberSet(const DbContext& db_context, const CompactObj& co, PicksGenerator& generator,
+                   std::size_t picks_count, cmn::BackedArguments* dest) {
   if (co.Encoding() == kEncodingIntSet) {
     intset* is = static_cast<intset*>(co.RObjPtr());
-
-    StringVec result;
-    result.reserve(picks_count);
 
     for (std::size_t i = 0; i < picks_count; i++) {
       const std::size_t picked_index = generator.Generate();
@@ -374,11 +379,11 @@ StringVec RandMemberSet(const DbContext& db_context, const CompactObj& co,
       int64_t value = 0;
       CHECK_GT(intsetGet(is, picked_index, &value), std::uint8_t(0));
 
-      result.push_back(absl::StrCat(value));
+      dest->PushArg(absl::StrCat(value));
     }
-    return result;
+    return;
   }
-  return RandMemberStrSet(db_context, co, generator, picks_count);
+  RandMemberStrSet(db_context, co, generator, picks_count, dest);
 }
 
 vector<string> ToVec(absl::flat_hash_set<string>&& set) {
@@ -634,7 +639,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   return StringSetWrapper{co, op_args.db_cntx}.Add(vals, ttl_sec, keepttl);
 }
 
-OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const facade::ArgRange& vals,
+OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const ParsedArgs& vals,
                          bool journal_rewrite) {
   auto& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
@@ -651,7 +656,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const facade::A
     db_slice.Del(op_args.db_cntx, find_res->it);
   }
   if (removed && journal_rewrite && op_args.shard->journal()) {
-    vector<string_view> mapped(vals.Size() + 1);
+    vector<string_view> mapped(vals.size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
     RecordJournal(op_args, "SREM"sv, mapped);
@@ -931,7 +936,8 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
   return result;
 }
 
-OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, int count) {
+OpStatus OpRandMember(const OpArgs& op_args, std::string_view key, int count,
+                      cmn::BackedArguments* dest) {
   auto& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_SET);
   if (!find_res)
@@ -952,17 +958,16 @@ OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, in
     }
   }();
 
-  auto result = RandMemberSet(op_args.db_cntx, pv, *generator, picks_count);
+  RandMemberSet(op_args.db_cntx, pv, *generator, picks_count, dest);
 
   // pv may be invalidated by DeleteSetIfEmpty (FindMutable + DelMutable), so
   // we must not reference it afterwards.
   SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, pv);
-
-  return result;
+  return OpStatus::OK;
 }
 
 // count - how many elements to pop.
-OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count) {
+OpStatus OpPop(const OpArgs& op_args, string_view key, unsigned count, cmn::BackedArguments* dest) {
   auto& db_cntx = op_args.db_cntx;
   auto& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindMutable(db_cntx, key, OBJ_SET);
@@ -981,11 +986,8 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   if (count >= size) {
     co.SetMemberTime(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
 
-    StringVec result;
-    result.reserve(picks_count);
-
-    container_utils::IterateSet(co, [&result](container_utils::ContainerEntry ce) {
-      result.push_back(ce.ToString());
+    container_utils::IterateSet(co, [dest](container_utils::ContainerEntry ce) {
+      dest->PushArg(ce.ToString());
       return true;
     });
 
@@ -993,7 +995,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     db_slice.DelMutable(op_args.db_cntx, std::move(*find_res));
 
     // All members may have expired during iteration (lazy expiry), leaving the result empty.
-    if (result.empty()) {
+    if (dest->empty()) {
       return OpStatus::KEY_NOTFOUND;
     }
 
@@ -1001,7 +1003,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     if (op_args.shard->journal()) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     }
-    return result;
+    return OpStatus::OK;
   }
 
   /* CASE 2:
@@ -1010,10 +1012,10 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   UniquePicksGenerator generator{picks_count, size};
 
   // Select random members
-  StringVec result = RandMemberSet(db_cntx, co, generator, picks_count);
+  RandMemberSet(db_cntx, co, generator, picks_count, dest);
 
   // Remove selected members
-  auto [removed, is_empty] = RemoveSet(db_cntx, result, &co);
+  auto [removed, is_empty] = RemoveSet(db_cntx, *dest, &co);
   find_res->post_updater.Run();
 
   // Lazy per-member TTL expiry during RandMemberSet iteration may have emptied
@@ -1026,28 +1028,30 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     // Return KEY_NOTFOUND when nothing was actually popped so that CmdSPop
     // replies with NULL for the single-arg form instead of dereferencing an
     // empty vector.
-    if (result.empty()) {
+    if (dest->empty()) {
       return OpStatus::KEY_NOTFOUND;
     }
-    return result;
+
+    return OpStatus::OK;
   }
 
   // Lazy expiry may have removed all picked members even though the set is
   // not fully empty yet (Size() counts stale entries). Return KEY_NOTFOUND so
   // CmdSPop replies with NULL instead of dereferencing an empty vector.
-  if (result.empty()) {
+  if (dest->empty()) {
     return OpStatus::KEY_NOTFOUND;
   }
 
   // Replicate as SREM with removed keys, because SPOP is not deterministic.
   if (removed && op_args.shard->journal()) {
-    vector<string_view> mapped(result.size() + 1);
+    vector<string_view> mapped(dest->size() + 1);
     mapped[0] = key;
-    copy(result.begin(), result.end(), mapped.begin() + 1);
+    ParsedArgs vals(*dest);
+    std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
     RecordJournal(op_args, "SREM"sv, mapped);
   }
 
-  return result;
+  return OpStatus::OK;
 }
 
 OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor,
@@ -1121,9 +1125,9 @@ struct SetReplies {
   bool script;
 };
 
-void CmdSAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  auto values = args.subspan(1);
+void CmdSAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs values = parser.UnparsedArgs();
 
   auto cb = [key, values](Transaction* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, values, false, false);
@@ -1137,9 +1141,9 @@ void CmdSAdd(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view val = ArgS(args, 1);
+void CmdSIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view val = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
@@ -1160,9 +1164,9 @@ void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   SendNumeric(result ? OpResult<uint32_t>(1) : result.status(), cmd_cntx);
 }
 
-void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  auto members = args.subspan(1);
+void CmdSMIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs members = parser.UnparsedArgs();
 
   vector<int32_t> memberships(members.size());
 
@@ -1174,7 +1178,7 @@ void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
       const PrimeValue& pv = (*find_res)->second;
       SetType st{pv.RObjPtr(), pv.Encoding()};
       for (size_t i = 0; i < members.size(); ++i)
-        memberships[i] = IsInSet(db_cntx, st, ToSV(members[i]));
+        memberships[i] = IsInSet(db_cntx, st, members[i]);
       SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, pv);
       return OpStatus::OK;
     }
@@ -1194,10 +1198,10 @@ void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void CmdSMove(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view src = ArgS(args, 0);
-  string_view dest = ArgS(args, 1);
-  string_view member = ArgS(args, 2);
+void CmdSMove(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view src = parser.Next();
+  string_view dest = parser.Next();
+  string_view member = parser.Next();
 
   Mover mover{src, dest, member, true};
   mover.Find(cmd_cntx->tx());
@@ -1210,9 +1214,9 @@ void CmdSMove(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result.value());
 }
 
-void CmdSRem(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  auto vals = args.subspan(1);
+void CmdSRem(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs vals = parser.UnparsedArgs();
 
   auto cb = [key, vals](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, vals, false);
@@ -1222,8 +1226,8 @@ void CmdSRem(CmdArgList args, CommandContext* cmd_cntx) {
   SendNumeric(result, cmd_cntx);
 }
 
-void CmdSCard(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdSCard(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
     auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_SET);
@@ -1238,47 +1242,49 @@ void CmdSCard(CmdArgList args, CommandContext* cmd_cntx) {
   SendNumeric(result, cmd_cntx);
 }
 
-void CmdSPop(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdSPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  const size_t args_size = cmd_cntx->tail_args().size();
+  string_view key = parser.Next();
   unsigned count = 1;
-  if (args.size() > 1) {
-    string_view arg = ArgS(args, 1);
+  if (parser.HasNext()) {
+    string_view arg = parser.Next();
     if (!absl::SimpleAtoi(arg, &count)) {
       cmd_cntx->SendError(kInvalidIntErr);
       return;
     }
   }
 
+  cmn::BackedArguments vals;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPop(t->GetOpArgs(shard), key, count);
+    return OpPop(t->GetOpArgs(shard), key, count, &vals);
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  auto replier = [result = std::move(result),
-                  pop_single = (args.size() == 1)](facade::SinkReplyBuilder* builder) {
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-      if (pop_single) {  // SPOP key
-        if (result.status() == OpStatus::KEY_NOTFOUND) {
-          rb->SendNull();
-        } else {
-          DCHECK_EQ(1u, result.value().size());
-          rb->SendBulkString(result.value().front());
-        }
-      } else {  // SPOP key cnt
-        rb->SendBulkStrArr(*result, CollectionType::SET);
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND) {
+    if (args_size == 1) {  // SPOP key
+      if (status == OpStatus::KEY_NOTFOUND) {
+        rb->SendNull();
+      } else {
+        DCHECK_EQ(1u, vals.size());
+        rb->SendBulkString(vals.Front());
       }
-      return;
+    } else {  // SPOP key cnt
+      RedisReplyBuilder::ReplyScope scope(rb);
+      rb->StartCollection(vals.size(), CollectionType::SET);
+      for (size_t i = 0; i < vals.size(); ++i) {
+        rb->SendBulkString(vals[i]);
+      }
     }
+    return;
+  }
 
-    rb->SendError(result.status());
-  };
-  cmd_cntx->ReplyWith(std::move(replier));
+  rb->SendError(status);
 }
 
-void CmdSDiff(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSDiff(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view src_key = ArgS(args, 0);
+  string_view src_key = parser.Next();
   ShardId src_shard = Shard(src_key, result_set.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1298,11 +1304,11 @@ void CmdSDiff(CmdArgList args, CommandContext* cmd_cntx) {
   SetReplies{cmd_cntx}.Send(rsv);
 }
 
-void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSDiffStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 0);
+  string_view dest_key = parser.Next();
   ShardId dest_shard = Shard(dest_key, result_set.size());
-  string_view src_key = ArgS(args, 1);
+  string_view src_key = parser.Next();
   ShardId src_shard = Shard(src_key, result_set.size());
 
   VLOG(1) << "SDiffStore " << src_key << " " << src_shard;
@@ -1352,7 +1358,7 @@ void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result_size);
 }
 
-void CmdSMembers(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSMembers(CmdArgParser, CommandContext* cmd_cntx) {
   auto cb = [](Transaction* t, EngineShard* shard) { return OpInter(t, shard, false); };
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1364,8 +1370,7 @@ void CmdSMembers(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdSRandMember(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdSRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   bool is_count = parser.HasNext();
@@ -1377,30 +1382,32 @@ void CmdSRandMember(CmdArgList args, CommandContext* cmd_cntx) {
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
-    return OpRandMember(t->GetOpArgs(shard), key, count);
+  cmn::BackedArguments vals;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpRandMember(t->GetOpArgs(shard), key, count, &vals);
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(cb);
 
-  auto replier = [is_count, result = std::move(result)](facade::SinkReplyBuilder* builder) {
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    if (result || result == OpStatus::KEY_NOTFOUND) {
-      if (is_count) {
-        rb->SendBulkStrArr(*result, CollectionType::SET);
-      } else if (result->size()) {
-        rb->SendBulkString(result->front());
-      } else {
-        rb->SendNull();
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND) {
+    if (is_count) {
+      RedisReplyBuilder::ReplyScope scope(rb);
+      rb->StartCollection(vals.size(), CollectionType::SET);
+      for (size_t i = 0; i < vals.size(); ++i) {
+        rb->SendBulkString(vals[i]);
       }
-      return;
+    } else if (!vals.empty()) {
+      rb->SendBulkString(vals.Front());
+    } else {
+      rb->SendNull();
     }
-    rb->SendError(result.status());
-  };
-  cmd_cntx->ReplyWith(std::move(replier));
+    return;
+  }
+  cmd_cntx->SendError(status);
 }
 
-void CmdSInter(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSInter(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1418,9 +1425,9 @@ void CmdSInter(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSInterStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 0);
+  string_view dest_key = parser.Next();
   ShardId dest_shard = Shard(dest_key, result_set.size());
   atomic_uint32_t inter_shard_cnt{0};
 
@@ -1457,14 +1464,16 @@ void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result->size());
 }
 
-void CmdSInterCard(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
+  const facade::ParsedArgs& args = cmd_cntx->tail_args();
+
   unsigned num_keys;
-  if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys))
+  if (!absl::SimpleAtoi(parser.Next(), &num_keys))
     return cmd_cntx->SendError(kSyntaxErr);
 
   unsigned limit = 0;
-  if (args.size() == (num_keys + 3) && ArgS(args, 1 + num_keys) == "LIMIT") {
-    if (!absl::SimpleAtoi(ArgS(args, num_keys + 2), &limit))
+  if (args.size() == (num_keys + 3) && args[1 + num_keys] == "LIMIT") {
+    if (!absl::SimpleAtoi(args[num_keys + 2], &limit))
       return cmd_cntx->SendError("limit can't be negative");
   } else if (args.size() > (num_keys + 1))
     return cmd_cntx->SendError(kSyntaxErr);
@@ -1484,7 +1493,7 @@ void CmdSInterCard(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdSUnion(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSUnion(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1499,9 +1508,9 @@ void CmdSUnion(CmdArgList args, CommandContext* cmd_cntx) {
   SetReplies{cmd_cntx}.Send(unionset);
 }
 
-void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSUnionStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 0);
+  string_view dest_key = parser.Next();
   ShardId dest_shard = Shard(dest_key, result_set.size());
 
   auto union_cb = [&](Transaction* t, EngineShard* shard) {
@@ -1539,9 +1548,10 @@ void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result_size);
 }
 
-void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view token = ArgS(args, 1);
+void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
+  const size_t args_size = cmd_cntx->tail_args().size();
+  string_view key = parser.Next();
+  string_view token = parser.Next();
 
   uint64_t cursor = 0;
 
@@ -1550,8 +1560,8 @@ void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   // SSCAN key cursor [MATCH pattern] [COUNT count]
-  if (args.size() > 6) {
-    DVLOG(1) << "got " << args.size() << " this is more than it should be";
+  if (args_size > 6) {
+    DVLOG(1) << "got " << args_size << " this is more than it should be";
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
@@ -1582,9 +1592,7 @@ void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 // Syntax: saddex key [KEEPTTL] ttl_sec member [member...]
-void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(cmd_cntx->tail_args());
-
+void CmdSAddEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   const std::string_view key = parser.Next<std::string_view>();
   const bool keepttl = parser.Check("KEEPTTL");
   const uint32_t ttl_sec = parser.Next<uint32_t>();
@@ -1597,7 +1605,7 @@ void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kInvalidIntErr);
   }
 
-  CmdArgList vals = args.subspan(parser.UnparsedStart());
+  ParsedArgs vals = parser.UnparsedArgs();
   if (vals.empty()) {
     return cmd_cntx->SendError(WrongNumArgsError("SADDEX"));
   }
