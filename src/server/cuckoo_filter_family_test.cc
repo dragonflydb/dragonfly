@@ -30,7 +30,7 @@ TEST_F(CuckooFilterFamilyTest, ReserveWithOptions) {
   EXPECT_THAT(resp, ErrArg("bucket size must be between 1 and 255"));
 
   resp = Run("cf.reserve cf3 1000 bucketsize 256");
-  EXPECT_THAT(resp, ErrArg("bucket size must be between 1 and 255"));
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 
   resp = Run("cf.reserve cf4 1000 maxiterations 0");
   EXPECT_THAT(resp, ErrArg("max iterations must be between 1 and 65535"));

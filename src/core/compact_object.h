@@ -36,6 +36,7 @@ class SBF;
 class TOPK;
 class CMS;
 class CuckooFilter;
+struct CuckooFilterOptions;
 class PageUsage;
 
 using cmn::StringOrView;
@@ -405,8 +406,7 @@ class CompactObj {
     u_.cuckoo_filter = cf;
   }
 
-  void SetCuckooFilter(uint64_t capacity, uint8_t slots_per_bucket, uint16_t max_iterations,
-                       uint16_t expansion);
+  void SetCuckooFilter(const CuckooFilterOptions& options);
   CuckooFilter* GetCuckooFilter() const;
 
   // dest must have at least Size() bytes available
@@ -506,15 +506,10 @@ class CompactObj {
 
   template <typename T, typename... Args> static T* AllocateMR(Args&&... args) {
     void* ptr = memory_resource()->allocate(sizeof(T), alignof(T));
-    try {
-      if constexpr (std::is_constructible_v<T, decltype(memory_resource())> && sizeof...(args) == 0)
-        return new (ptr) T{memory_resource()};
-      else
-        return new (ptr) T{std::forward<Args>(args)...};
-    } catch (...) {
-      memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
-      throw;
-    }
+    if constexpr (std::is_constructible_v<T, decltype(memory_resource())> && sizeof...(args) == 0)
+      return new (ptr) T{memory_resource()};
+    else
+      return new (ptr) T{std::forward<Args>(args)...};
   }
 
   template <typename T> static void DeleteMR(void* ptr) {

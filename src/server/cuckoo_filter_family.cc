@@ -19,8 +19,7 @@ using namespace std;
 
 namespace {
 
-OpStatus OpReserve(const OpArgs& op_args, string_view key, uint64_t capacity, uint8_t bucket_size,
-                   uint16_t max_iterations, uint16_t expansion) {
+OpStatus OpReserve(const OpArgs& op_args, string_view key, const CuckooFilterOptions& options) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
   RETURN_ON_BAD_STATUS(op_res);
@@ -28,7 +27,7 @@ OpStatus OpReserve(const OpArgs& op_args, string_view key, uint64_t capacity, ui
   if (!op_res->is_new)
     return OpStatus::KEY_EXISTS;
 
-  op_res->it->second.SetCuckooFilter(capacity, bucket_size, max_iterations, expansion);
+  op_res->it->second.SetCuckooFilter(options);
   return OpStatus::OK;
 }
 
@@ -43,9 +42,9 @@ void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("CF: capacity must be greater than 0");
   }
 
-  uint32_t bucket_size = CuckooFilter::kDefaultSlotsPerBucket;
-  uint32_t max_iterations = CuckooFilter::kDefaultMaxIterations;
-  uint32_t expansion = CuckooFilter::kDefaultExpansion;
+  uint8_t bucket_size = CuckooFilterOptions::kDefaultSlotsPerBucket;
+  uint16_t max_iterations = CuckooFilterOptions::kDefaultMaxIterations;
+  uint16_t expansion = CuckooFilterOptions::kDefaultExpansion;
 
   parser.Apply(Tag("BUCKETSIZE", &bucket_size), Tag("MAXITERATIONS", &max_iterations),
                Tag("EXPANSION", &expansion));
@@ -54,19 +53,23 @@ void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(parser.TakeError().MakeReply());
   }
 
-  if (bucket_size == 0 || bucket_size > 255) {
+  // The parser already rejects values that overflow the field width above (e.g. bucketsize
+  // 256) with the standard "value is not an integer or out of range" error. Only the
+  // business-rule bounds below (zero, and CF's tighter expansion cap) need manual checks.
+  if (bucket_size == 0) {
     return rb->SendError("CF: bucket size must be between 1 and 255");
   }
-  if (max_iterations == 0 || max_iterations > 65535) {
+  if (max_iterations == 0) {
     return rb->SendError("CF: max iterations must be between 1 and 65535");
   }
   if (expansion > 32767) {
     return rb->SendError("CF: expansion must be between 0 and 32767");
   }
 
+  CuckooFilterOptions options{capacity, bucket_size, max_iterations, expansion};
+
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpReserve(t->GetOpArgs(shard), key, capacity, static_cast<uint8_t>(bucket_size),
-                     static_cast<uint16_t>(max_iterations), static_cast<uint16_t>(expansion));
+    return OpReserve(t->GetOpArgs(shard), key, options);
   };
 
   OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
