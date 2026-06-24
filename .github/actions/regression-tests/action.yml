@@ -27,9 +27,23 @@ inputs:
     required: false
     type: string
     description: "AWS secret access key (optional if using OIDC - credentials set by workflow)"
-  s3-bucket:
-    required: true
+  aws-role-to-assume:
+    required: false
     type: string
+    description: "AWS role ARN to assume before uploading JUnit XML to S3"
+  aws-region:
+    required: false
+    type: string
+    default: us-east-1
+    description: "AWS region for S3 JUnit XML uploads"
+  s3-bucket:
+    required: false
+    type: string
+    description: "S3 bucket for Dragonfly snapshot tests; when empty, the S3 snapshot tests are skipped"
+  junit-s3-bucket:
+    required: false
+    type: string
+    description: "S3 bucket for JUnit XML uploads"
   azure-container:
     required: false
     type: string
@@ -67,6 +81,33 @@ runs:
       shell: bash
       run: ${GITHUB_WORKSPACE}/.github/scripts/install-pytest-requirements.sh
 
+    - name: Prepare regression JUnit environment
+      if: always()
+      shell: bash
+      run: |
+        JUNIT_DIR="${GITHUB_WORKSPACE}/test-results/junit/regression"
+        mkdir -p "${JUNIT_DIR}"
+
+        KIND="iouring"
+        if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
+          KIND="epoll"
+        fi
+
+        FILTER="${{inputs.filter}}"
+        if [[ -z "${FILTER}" ]]; then
+          FILTER="all"
+        fi
+
+        SAFE_FILTER=$("${GITHUB_WORKSPACE}/.github/scripts/sanitize-token.sh" "${FILTER}" all)
+
+        UNIQUE_SUFFIX="$(date +%s%N)-${RANDOM}"
+        {
+          echo "REGRESSION_JUNIT_DIR=${JUNIT_DIR}"
+          echo "REGRESSION_JUNIT_KIND=${KIND}"
+          echo "REGRESSION_JUNIT_S3_SUFFIX=${RUNNER_OS}-${RUNNER_ARCH}-${KIND}-${FILTER}"
+          echo "REGRESSION_JUNIT_ARTIFACT=junit-regression-${GITHUB_JOB}-${RUNNER_OS}-${RUNNER_ARCH}-${KIND}-${SAFE_FILTER}-${UNIQUE_SUFFIX}"
+        } >> "${GITHUB_ENV}"
+
     - name: Run S3 snapshot tests with MinIO
       if: inputs.s3-bucket != ''
       shell: bash
@@ -91,6 +132,7 @@ runs:
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
         export FILTER="${{inputs.filter}}"
+        JUNIT_DIR="${REGRESSION_JUNIT_DIR}"
 
         # Exclude large tests unless explicitly requested
         if [[ "$FILTER" == "large" ]]; then
@@ -101,13 +143,19 @@ runs:
           FILTER="not large"
         fi
 
-        if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
+        if [[ "${REGRESSION_JUNIT_KIND}" == 'epoll' ]]; then
           FILTER="$FILTER and not exclude_epoll"
           # Run only replication tests with epoll
-          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes \
+            --json-report --json-report-file=report.json \
+            --junitxml="${JUNIT_DIR}/pytest-${REGRESSION_JUNIT_KIND}.xml" \
+            dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
         else
           # Run only replication tests with iouring
-          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes \
+            --json-report --json-report-file=report.json \
+            --junitxml="${JUNIT_DIR}/pytest-${REGRESSION_JUNIT_KIND}.xml" \
+            dragonfly --log-cli-level=INFO || code=$?
         fi
 
         # timeout returns 124 if we exceeded the timeout duration
@@ -138,6 +186,30 @@ runs:
         # Azure credentials for snapshot tests (optional)
         DRAGONFLY_AZURE_CONTAINER: ${{ inputs.azure-container }}
         AZURE_STORAGE_CONNECTION_STRING: ${{ inputs.azure-storage-connection-string }}
+
+    - name: Upload regression JUnit results
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.REGRESSION_JUNIT_ARTIFACT }}
+        path: ${{ github.workspace }}/test-results/junit/regression/**/*.xml
+        if-no-files-found: ignore
+
+    - name: Refresh AWS credentials for regression JUnit upload
+      if: always() && inputs.junit-s3-bucket != '' && inputs.aws-role-to-assume != ''
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ inputs.aws-role-to-assume }}
+        aws-region: ${{ inputs.aws-region }}
+        unset-current-credentials: true
+
+    - name: Upload regression JUnit results to S3
+      if: always() && inputs.junit-s3-bucket != '' && inputs.aws-role-to-assume != ''
+      shell: bash
+      run: |
+        "${GITHUB_WORKSPACE}/.github/scripts/upload-junit-to-s3.sh" \
+          "${REGRESSION_JUNIT_DIR}" "${{ inputs.junit-s3-bucket }}" "regression" \
+          "${REGRESSION_JUNIT_S3_SUFFIX}" "regression JUnit"
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'
