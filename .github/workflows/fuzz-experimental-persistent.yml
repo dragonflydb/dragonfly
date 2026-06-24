@@ -15,7 +15,7 @@ on:
       memcache_duration:
         description: 'Memcache fuzzing duration in minutes'
         required: false
-        default: '60'
+        default: '30'
         type: string
       reset_state:
         description: 'Drop restored AFL state and start from seeds'
@@ -25,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   experimental-persistent-fuzz:
@@ -43,7 +44,7 @@ jobs:
           - target: resp
             duration: '90'
           - target: memcache
-            duration: '60'
+            duration: '30'
 
     container:
       image: ghcr.io/romange/ubuntu-dev:24-afl
@@ -61,6 +62,10 @@ jobs:
       HEALTH_DIR: ${{ github.workspace }}/fuzz/health/experimental-persistent/${{ matrix.target }}
       CACHE_KEY: experimental-afl-Linux-${{ matrix.target }}-v1-${{ github.run_number }}-${{ github.run_attempt }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout code
@@ -118,6 +123,70 @@ jobs:
           restore-keys: |
             experimental-afl-${{ runner.os }}-${{ matrix.target }}-v1-
 
+      - name: Find previous experimental AFL state artifact
+        id: previous-state
+        if: env.RESET_STATE != 'true' && steps.restore-afl-state.outputs.cache-hit != 'true' && steps.restore-afl-state.outputs.cache-matched-key == ''
+        uses: actions/github-script@v8
+        env:
+          ARTIFACT_NAME: fuzz-experimental-persistent-${{ matrix.target }}-state
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const branch = context.ref.startsWith('refs/heads/')
+              ? context.ref.substring('refs/heads/'.length)
+              : undefined;
+            const runParams = {
+              owner,
+              repo,
+              workflow_id: 'fuzz-experimental-persistent.yml',
+              status: 'completed',
+              per_page: 100,
+            };
+
+            if (branch) {
+              runParams.branch = branch;
+            }
+
+            const runs = await github.paginate(
+              'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs',
+              runParams,
+            );
+
+            for (const run of runs) {
+              if (run.id === context.runId) {
+                continue;
+              }
+
+              const artifacts = await github.paginate(
+                'GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts',
+                {owner, repo, run_id: run.id, per_page: 100},
+              );
+              const stateArtifact = artifacts.find(
+                (artifact) => artifact.name === process.env.ARTIFACT_NAME && !artifact.expired,
+              );
+              if (!stateArtifact) {
+                continue;
+              }
+
+              core.info(`Found ${process.env.ARTIFACT_NAME} in run ${run.id}`);
+              core.setOutput('run-id', String(run.id));
+              core.setOutput('artifact-name', process.env.ARTIFACT_NAME);
+              return;
+            }
+
+            core.info(`No previous ${process.env.ARTIFACT_NAME} artifact found`);
+            core.setOutput('run-id', '');
+            core.setOutput('artifact-name', process.env.ARTIFACT_NAME);
+
+      - name: Restore experimental AFL state artifact
+        if: env.RESET_STATE != 'true' && steps.previous-state.outputs.run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ steps.previous-state.outputs.artifact-name }}
+          path: fuzz
+          run-id: ${{ steps.previous-state.outputs.run-id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Capture pre-run health snapshot
         run: |
           python3 fuzz/fuzz_health.py snapshot \
@@ -140,8 +209,8 @@ jobs:
         run: |
           echo "started=true" >> "${GITHUB_OUTPUT}"
           echo "Starting experimental persistent AFL++ fuzzing..."
-          echo "This mode intentionally keeps AFL byte-level stages enabled."
-          echo "AFL_CUSTOM_MUTATOR_ONLY is unset; AFL_ENABLE_SAVE is unset."
+          echo "This mode uses AFL custom mutators only for both RESP and memcache."
+          echo "AFL_CUSTOM_MUTATOR_ONLY=1; AFL_ENABLE_SAVE is unset."
 
           cd fuzz
           export BUILD_DIR="${GITHUB_WORKSPACE}/build-dbg"
@@ -154,7 +223,7 @@ jobs:
           export AFL_TESTCACHE_SIZE=500
           export AFL_SKIP_CPUFREQ=1
           export AFL_FAST_CAL=1
-          unset AFL_CUSTOM_MUTATOR_ONLY
+          export AFL_CUSTOM_MUTATOR_ONLY=1
           unset AFL_ENABLE_SAVE
 
           set +e
@@ -168,7 +237,7 @@ jobs:
           elif [[ "${exit_code}" -eq 0 ]]; then
             echo "Fuzzing completed normally"
           elif [[ "${exit_code}" -eq 137 ]]; then
-            echo "::warning::Fuzzer was killed with exit 137; treating it as an experimental resource stop"
+            echo "::warning::Fuzzer was killed with exit 137; preserving artifacts before failing"
           else
             echo "::warning::Fuzzer exited with code ${exit_code}; preserving artifacts before failing"
           fi
@@ -185,6 +254,7 @@ jobs:
           CRASH_COUNT=0
           HANG_COUNT=0
           CORPUS_SIZE=0
+          STATS_FOUND=false
 
           if [[ -d "${CRASHES_DIR}" ]]; then
             CRASH_COUNT=$(find "${CRASHES_DIR}" -maxdepth 1 -type f -name 'id:*' | wc -l)
@@ -206,6 +276,7 @@ jobs:
           echo "  stats file: ${STATS_FILE}"
 
           if [[ -f "${STATS_FILE}" ]]; then
+            STATS_FOUND=true
             echo "Key AFL statistics:"
             grep -E "execs_done|execs_per_sec|paths_total|corpus_count|saved_crashes|saved_hangs|unique_crashes|unique_hangs|last_find|last_crash|last_hang|bitmap_cvg|stability|cycles_done|cycles_wo_finds" "${STATS_FILE}" || true
           else
@@ -215,6 +286,7 @@ jobs:
           echo "crash_count=${CRASH_COUNT}" >> "${GITHUB_OUTPUT}"
           echo "hang_count=${HANG_COUNT}" >> "${GITHUB_OUTPUT}"
           echo "corpus_size=${CORPUS_SIZE}" >> "${GITHUB_OUTPUT}"
+          echo "stats_found=${STATS_FOUND}" >> "${GITHUB_OUTPUT}"
 
       - name: Package experimental crash artifacts
         if: always() && steps.analyze.outputs.crash_count > 0
@@ -246,7 +318,7 @@ jobs:
       - name: Write experimental health report
         if: always() && steps.run-fuzzer.outputs.started == 'true'
         env:
-          CACHE_RESTORED: ${{ steps.restore-afl-state.outputs.cache-hit == 'true' || steps.restore-afl-state.outputs.cache-matched-key != '' }}
+          CACHE_RESTORED: ${{ steps.restore-afl-state.outputs.cache-hit == 'true' || steps.restore-afl-state.outputs.cache-matched-key != '' || steps.previous-state.outputs.run-id != '' }}
         run: |
           python3 fuzz/fuzz_health.py report \
             --target "${TARGET}" \
@@ -337,6 +409,22 @@ jobs:
             echo "save_cache=true" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Upload experimental AFL state artifact
+        if: always() && steps.run-fuzzer.outputs.started == 'true' && steps.cache-size.outputs.save_cache == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-experimental-persistent-${{ matrix.target }}-state
+          path: |
+            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/queue
+            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/.state
+            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/fuzzer_stats
+            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/plot_data
+            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/repro.env
+            fuzz/corpus/experimental-persistent/${{ matrix.target }}
+          retention-days: 7
+          if-no-files-found: ignore
+          include-hidden-files: true
+
       - name: Save experimental AFL state
         if: always() && steps.run-fuzzer.outputs.started == 'true' && steps.cache-size.outputs.save_cache == 'true'
         uses: actions/cache/save@v5
@@ -357,11 +445,24 @@ jobs:
           EXIT_CODE="${{ steps.run-fuzzer.outputs.exit_code || '0' }}"
           CRASH_COUNT="${{ steps.analyze.outputs.crash_count || '0' }}"
           HANG_COUNT="${{ steps.analyze.outputs.hang_count || '0' }}"
+          CORPUS_SIZE="${{ steps.analyze.outputs.corpus_size || '0' }}"
+          STATS_FOUND="${{ steps.analyze.outputs.stats_found || 'false' }}"
 
           if [[ "${EXIT_CODE}" == "137" ]]; then
-            echo "::warning::Experimental fuzzer stopped with exit 137; not failing without crash/hang artifacts"
+            echo "::error::Experimental fuzzer was killed with exit 137"
+            exit 1
           elif [[ "${EXIT_CODE}" != "0" && "${EXIT_CODE}" != "124" ]]; then
             echo "::error::Experimental fuzzer failed with exit code ${EXIT_CODE}"
+            exit 1
+          fi
+
+          if [[ "${STATS_FOUND}" != "true" ]]; then
+            echo "::error::Experimental fuzzer_stats was not found"
+            exit 1
+          fi
+
+          if [[ "${CORPUS_SIZE}" -le 0 ]]; then
+            echo "::error::Experimental AFL queue is empty"
             exit 1
           fi
 
