@@ -544,6 +544,7 @@ ParseResult<uint64_t> ParseBM25StdTanhFactor(CmdArgParser* parser) {
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   SearchParams params;
+  uint64_t tanh_factor = search::kDefaultBM25StdTanhFactor;
 
   const size_t max_results = absl::GetFlag(FLAGS_MAXSEARCHRESULTS);
 
@@ -590,7 +591,7 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       auto factor = ParseBM25StdTanhFactor(parser);
       if (!factor)
         return make_unexpected(factor.error());
-      params.bm25std_tanh_factor = *factor;
+      tanh_factor = *factor;
     } else if (parser->Check("DIALECT")) {
       parser->Skip(1);  // Accepted and ignored — DF always behaves as dialect 2
     } else {
@@ -601,7 +602,7 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
 
   params.limit_total = std::min(params.limit_total, max_results);
   if (params.scorer)
-    params.scorer->bm25std_tanh_factor = params.bm25std_tanh_factor;
+    params.scorer->bm25std_tanh_factor = tanh_factor;
 
   return params;
 }
@@ -714,6 +715,7 @@ ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
 
 ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   AggregateParams params;
+  uint64_t tanh_factor = search::kDefaultBM25StdTanhFactor;
   tie(params.index, params.query) = parser->Next<string_view, string_view>();
 
   // Used for join params
@@ -848,7 +850,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       auto factor = ParseBM25StdTanhFactor(parser);
       if (!factor)
         return make_unexpected(factor.error());
-      params.bm25std_tanh_factor = *factor;
+      tanh_factor = *factor;
       continue;
     }
 
@@ -896,7 +898,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   }
 
   if (params.scorer)
-    params.scorer->bm25std_tanh_factor = params.bm25std_tanh_factor;
+    params.scorer->bm25std_tanh_factor = tanh_factor;
 
   return params;
 }
@@ -1226,6 +1228,15 @@ bool IsBM25StdNorm(const std::optional<search::ScorerSpec>& scorer) {
   return scorer && scorer->kind == search::ScorerKind::BM25STD_NORM;
 }
 
+// Global max raw text score across per-shard results, used to normalize BM25STD.NORM by the
+// max over the full matched set. Returns 0 when there are no scored docs.
+float GlobalMaxTextScore(absl::Span<const SearchResult> results) {
+  float max_text_score = 0.0f;
+  for (const auto& shard : results)
+    max_text_score = std::max(max_text_score, shard.max_text_score);
+  return max_text_score;
+}
+
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
                  std::string_view inject_score_alias, absl::Span<SearchResult> results,
@@ -1241,10 +1252,7 @@ void SearchReply(const SearchParams& params,
   }
 
   if (IsBM25StdNorm(params.scorer)) {
-    float max_text_score = 0.0f;
-    for (const auto& shard_results : results)
-      max_text_score = std::max(max_text_score, shard_results.max_text_score);
-    if (max_text_score > 0) {
+    if (float max_text_score = GlobalMaxTextScore(results); max_text_score > 0) {
       for (auto* doc : docs)
         doc->text_score /= max_text_score;
     }
@@ -1746,8 +1754,7 @@ struct HybridSearchParams {
 
   string text_query;
   string yield_text_score_as;
-  std::optional<search::ScorerSpec> scorer;
-  uint64_t bm25std_tanh_factor = search::kDefaultBM25StdTanhFactor;
+  std::optional<search::ScorerSpec> scorer;  // carries the BM25STD.TANH factor when applicable
 
   string vsim_field;
   string vsim_param;
@@ -1793,6 +1800,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
   using facade::Tag;
 
   HybridSearchParams p;
+  uint64_t tanh_factor = search::kDefaultBM25StdTanhFactor;
 
   auto parse_scorer = [&](CmdArgParser* sub) {
     if (p.scorer) {
@@ -1810,7 +1818,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
     if (!factor)
       sub->ReportCustom(std::string{kBM25StdTanhFactorErr});
     else
-      p.bm25std_tanh_factor = *factor;
+      tanh_factor = *factor;
   };
 
   parser->ExpectTag("SEARCH", "expected SEARCH keyword");
@@ -1818,7 +1826,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
   parser->Apply(Tag("SCORER", parse_scorer), Tag("BM25STD_TANH_FACTOR", parse_tanh_factor),
                 Tag("YIELD_SCORE_AS", &p.yield_text_score_as));
   if (p.scorer)
-    p.scorer->bm25std_tanh_factor = p.bm25std_tanh_factor;
+    p.scorer->bm25std_tanh_factor = tanh_factor;
 
   parser->ExpectTag("VSIM", "expected VSIM keyword");
   p.vsim_field = string{parser->ExpectStartsWith("@", "VSIM field must start with @")};
@@ -2168,9 +2176,7 @@ HybridDocMap MergeHybridResults(const vector<SearchResult>& text_docs,
 }
 
 void NormalizeHybridTextScores(absl::Span<SearchResult> text_docs) {
-  float max_text_score = 0.0f;
-  for (const auto& shard : text_docs)
-    max_text_score = std::max(max_text_score, shard.max_text_score);
+  float max_text_score = GlobalMaxTextScore(text_docs);
   if (max_text_score == 0)
     return;
 

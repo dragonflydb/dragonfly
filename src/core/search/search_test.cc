@@ -3113,7 +3113,7 @@ TEST_F(ScoringTest, SearchWithScorer) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hello", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   auto result = algo.Search(&index);
 
@@ -3153,7 +3153,7 @@ TEST_F(ScoringTest, SearchPrefixWithScorer) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hel*", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   auto result = algo.Search(&index);
 
@@ -3260,7 +3260,7 @@ TEST_F(ScoringTest, BM25StdAfterDocRemoval) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hello", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   auto result_before = algo.Search(&index);
   ASSERT_EQ(result_before.ids.size(), 3u);
@@ -3272,7 +3272,7 @@ TEST_F(ScoringTest, BM25StdAfterDocRemoval) {
   // Re-search
   SearchAlgorithm algo2;
   ASSERT_TRUE(algo2.Init("hello", &params));
-  algo2.SetScorer(&BM25Std);
+  algo2.SetScorer(ScorerSpec{});
 
   auto result_after = algo2.Search(&index);
   ASSERT_EQ(result_after.ids.size(), 2u);
@@ -3307,7 +3307,7 @@ TEST_F(ScoringTest, ScorerTopKCutoff) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hello", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   // Request only top 3 - should return docs 9, 8, 7 (highest TF)
   auto result = algo.Search(&index, 3);
@@ -3363,7 +3363,7 @@ TEST_F(SearchTest, MatchOptionalScoreBoost) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("~hello", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   auto result = algo.Search(&index);
 
@@ -3483,7 +3483,7 @@ TEST_F(SearchTest, MatchNestedOptionalNoDoubleScore) {
     SearchAlgorithm algo;
     QueryParams params;
     EXPECT_TRUE(algo.Init(query, &params));
-    algo.SetScorer(&BM25Std);
+    algo.SetScorer(ScorerSpec{});
     return algo.Search(&index);
   };
 
@@ -3565,7 +3565,7 @@ TEST_F(SearchTest, MatchOptionalKnnIdsScoresAligned) {
   QueryParams params;
   params["v"] = ToBytes({2.5f});  // closest is doc:1 (pos=2) and doc:2 (pos=3)
   ASSERT_TRUE(algo.Init("~hello => [KNN 4 @vec $v]", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
   auto result = algo.Search(&index);
 
   ASSERT_TRUE(result.error.empty()) << result.error;
@@ -3813,7 +3813,7 @@ TEST_F(PhraseTest, PhraseMatchedDocsAreScored) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("\"machine learning\"", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   auto result = algo.Search(&index);
   ASSERT_EQ(result.ids.size(), 2u);

@@ -7403,6 +7403,133 @@ TEST_F(SearchFamilyTest, FtSearchBM25StdTanhFactorValidation) {
   EXPECT_NE(resp.type, RespExpr::ERROR);
 }
 
+// Runs with the default multi-shard fixture (num_shards == 2). BM25STD.NORM must use ONE
+// global max across shards: only the single global best document gets 1.0. A per-shard
+// normalization bug would make one document per shard reach 1.0.
+TEST_F(SearchFamilyTest, FtSearchBM25StdNormMultiShard) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT"}),
+      "OK");
+  // Distinct "hello" frequencies -> distinct scores; several keys spread across shards.
+  Run({"hset", "d:1", "content", "hello"});
+  Run({"hset", "d:2", "content", "hello hello"});
+  Run({"hset", "d:3", "content", "hello hello hello"});
+  Run({"hset", "d:4", "content", "hello hello hello hello"});
+  Run({"hset", "d:5", "content", "hello hello hello hello hello"});
+  Run({"hset", "d:6", "content", "hello hello hello hello hello hello"});
+
+  auto scores = [&](std::string_view scorer) {
+    std::vector<std::string> cmd{"ft.search", "idx",          "hello", "NOCONTENT", "WITHSCORES",
+                                 "SCORER",    string{scorer}, "LIMIT", "0",         "100"};
+    auto resp = Run(absl::Span<const std::string>(cmd));
+    EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+    std::map<std::string, double> out;
+    const auto& vals = resp.GetVec();
+    for (size_t i = 1; i + 1 < vals.size(); i += 2)
+      out[string{vals[i].GetString()}] = std::stod(string{vals[i + 1].GetString()});
+    return out;
+  };
+
+  auto raw = scores("BM25STD");
+  auto norm = scores("BM25STD.NORM");
+  ASSERT_EQ(raw.size(), 6u);
+  ASSERT_EQ(norm.size(), 6u);
+
+  double max_raw = 0;
+  for (const auto& [key, score] : raw)
+    max_raw = std::max(max_raw, score);
+
+  int winners = 0;
+  for (const auto& [key, score] : norm) {
+    EXPECT_NEAR(score, raw[key] / max_raw, 1e-5) << "key=" << key;
+    EXPECT_LE(score, 1.0 + 1e-9);
+    if (std::abs(score - 1.0) < 1e-9)
+      winners++;
+  }
+  EXPECT_EQ(winners, 1) << "exactly one global winner should reach 1.0";
+}
+
+// FT.PROFILE SEARCH must not change score semantics: BM25STD.NORM through profile yields the
+// same normalized scores as a plain FT.SEARCH.
+TEST_F(SearchFamilyTest, FtProfileSearchBM25StdNorm) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT"}),
+      "OK");
+  Run({"hset", "d:1", "content", "hello world hello hello"});
+  Run({"hset", "d:2", "content", "hello there"});
+
+  auto parse_scores = [](const RespExpr::Vec& vals) {
+    std::map<std::string, double> out;
+    for (size_t i = 1; i + 1 < vals.size(); i += 2)
+      out[string{vals[i].GetString()}] = std::stod(string{vals[i + 1].GetString()});
+    return out;
+  };
+
+  auto search =
+      Run({"ft.search", "idx", "hello", "NOCONTENT", "WITHSCORES", "SCORER", "BM25STD.NORM"});
+  ASSERT_THAT(search, ArgType(RespExpr::ARRAY));
+  auto search_scores = parse_scores(search.GetVec());
+
+  auto profile = Run({"ft.profile", "idx", "SEARCH", "QUERY", "hello", "NOCONTENT", "WITHSCORES",
+                      "SCORER", "BM25STD.NORM"});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(profile);
+  auto profile_scores = parse_scores(profile.GetVec()[0].GetVec());
+
+  ASSERT_EQ(search_scores.size(), 2u);
+  EXPECT_EQ(profile_scores.size(), search_scores.size());
+  EXPECT_DOUBLE_EQ(search_scores["d:1"], 1.0);
+  for (const auto& [key, score] : search_scores)
+    EXPECT_NEAR(profile_scores[key], score, 1e-6) << "key=" << key;
+}
+
+// FT.SEARCH with a KNN vector query + text prefilter: BM25STD.NORM normalizes the per-doc
+// text prefilter score (returned via WITHSCORES) by the max over the KNN-selected docs.
+TEST_F(SearchFamilyTest, FtSearchKnnPrefilterBM25StdNorm) {
+  CreateFlatHashIdx();  // title TEXT + vec FLAT DIM 1 L2, prefix "d:"
+  Run({"HSET", "d:1", "title", "apple apple apple", "vec", FloatVec1(1.0f)});
+  Run({"HSET", "d:2", "title", "apple", "vec", FloatVec1(2.0f)});
+  Run({"HSET", "d:3", "title", "apple apple", "vec", FloatVec1(3.0f)});
+
+  auto scores = [&](std::string_view scorer) {
+    std::vector<std::string> cmd{"FT.SEARCH",
+                                 "idx",
+                                 "(@title:apple)=>[KNN 3 @vec $q]",
+                                 "NOCONTENT",
+                                 "WITHSCORES",
+                                 "SCORER",
+                                 string{scorer},
+                                 "PARAMS",
+                                 "2",
+                                 "q",
+                                 FloatVec1(1.0f),
+                                 "DIALECT",
+                                 "2"};
+    auto resp = Run(absl::Span<const std::string>(cmd));
+    EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+    std::map<std::string, double> out;
+    const auto& vals = resp.GetVec();
+    for (size_t i = 1; i + 1 < vals.size(); i += 2)
+      out[string{vals[i].GetString()}] = std::stod(string{vals[i + 1].GetString()});
+    return out;
+  };
+
+  auto raw = scores("BM25STD");
+  auto norm = scores("BM25STD.NORM");
+  ASSERT_EQ(raw.size(), 3u);
+  ASSERT_EQ(norm.size(), 3u);
+
+  double max_raw = 0;
+  for (const auto& [key, score] : raw)
+    max_raw = std::max(max_raw, score);
+  int winners = 0;
+  for (const auto& [key, score] : norm) {
+    EXPECT_NEAR(score, raw[key] / max_raw, 1e-5) << "key=" << key;
+    if (std::abs(score - 1.0) < 1e-9)
+      winners++;
+  }
+  EXPECT_EQ(winners, 1);
+}
+
 TEST_F(SearchFamilyTest, FtAggregateBM25StdTanhAddScores) {
   EXPECT_EQ(
       Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "content", "TEXT"}),

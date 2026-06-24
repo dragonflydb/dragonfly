@@ -168,8 +168,8 @@ struct SearchParams {
   search::QueryParams query_params;
 
   bool with_scores = false;                  // WITHSCORES flag
-  std::optional<search::ScorerSpec> scorer;  // SCORER parameter (null = not set)
-  uint64_t bm25std_tanh_factor = search::kDefaultBM25StdTanhFactor;
+  std::optional<search::ScorerSpec> scorer;  // SCORER parameter (null = not set); carries the
+                                             // BM25STD.TANH factor when applicable
 
   bool ShouldReturnAllFields() const {
     return !return_fields.has_value();
@@ -235,8 +235,8 @@ struct AggregateParams {
   std::vector<aggregate::AggregationStep> steps;
 
   bool add_scores = false;                   // ADDSCORES flag
-  std::optional<search::ScorerSpec> scorer;  // SCORER parameter (null = not set)
-  uint64_t bm25std_tanh_factor = search::kDefaultBM25StdTanhFactor;
+  std::optional<search::ScorerSpec> scorer;  // SCORER parameter (null = not set); carries the
+                                             // BM25STD.TANH factor when applicable
 
   // Set only for multi-shard scoring queries; not owned.
   const search::GlobalScoringStats* global_scoring_stats = nullptr;

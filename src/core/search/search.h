@@ -267,7 +267,6 @@ class SearchAlgorithm {
   void EnableProfiling();
 
   void SetScorer(ScorerSpec scorer);
-  void SetScorer(ScorerFn scorer);
 
  private:
   bool profiling_enabled_ = false;

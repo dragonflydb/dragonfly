@@ -749,6 +749,9 @@ struct BasicSearch {
     scored.reserve(all_docs.size());
     vector<ScoringTermInfo> term_infos(cursors.size());
 
+    // Track the max score over the full matched set (before top-K trimming) so the command
+    // layer can normalize BM25STD.NORM by the global max. Cheap byproduct of scoring.
+    float max_text_score = 0.0f;
     for (DocId doc : all_docs) {
       for (size_t t = 0; t < cursors.size(); t++) {
         term_infos[t].term_docs = cursors[t].term_docs;
@@ -758,10 +761,10 @@ struct BasicSearch {
           term_infos[t].field_avg_doc_len = cursors[t].field_avg_doc_len;
         }
       }
-      scored.emplace_back(static_cast<float>(ScoreDocument(*scorer_, ctx, term_infos)), doc);
+      float score = static_cast<float>(ScoreDocument(*scorer_, ctx, term_infos));
+      max_text_score = max(max_text_score, score);
+      scored.emplace_back(score, doc);
     }
-    auto max_it = max_element(scored.begin(), scored.end());
-    float max_text_score = max_it == scored.end() ? 0.0f : max_it->first;
 
     // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)
     size_t k = min(limit, scored.size());
@@ -1233,17 +1236,6 @@ void SearchAlgorithm::EnableProfiling() {
 
 void SearchAlgorithm::SetScorer(ScorerSpec scorer) {
   scorer_ = scorer;
-}
-
-void SearchAlgorithm::SetScorer(ScorerFn scorer) {
-  if (scorer == &BM25Std)
-    scorer_ = ScorerSpec{ScorerKind::BM25STD};
-  else if (scorer == &TfIdf)
-    scorer_ = ScorerSpec{ScorerKind::TFIDF};
-  else if (scorer == &TfIdfDocNorm)
-    scorer_ = ScorerSpec{ScorerKind::TFIDF_DOCNORM};
-  else
-    scorer_ = nullopt;
 }
 
 // Visits `node` and recurses into its sub-expressions, invoking `cb` on every node in DFS order.
