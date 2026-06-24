@@ -7826,6 +7826,91 @@ TEST_F(SearchFamilyTest, FtHybridLinearOrdering) {
   EXPECT_EQ(HybridKeys(resp_text)[0], "d:2");
 }
 
+TEST_F(SearchFamilyTest, FtHybridLinearNoTextRescale) {
+  CreateFlatHashIdx();
+  Run({"HSET", "d:1", "title", "apple apple apple", "vec", FloatVec1(1.0f)});
+  Run({"HSET", "d:2", "title", "apple", "vec", FloatVec1(2.0f)});
+
+  auto agg = Run({"FT.AGGREGATE", "idx", "apple", "ADDSCORES", "SCORER", "BM25STD", "LOAD", "2",
+                  "__key", "__score", "SORTBY", "2", "@__score", "DESC"});
+  ASSERT_THAT(agg, ArgType(RespExpr::ARRAY));
+  ASSERT_GE(agg.GetVec().size(), 3u);
+
+  auto hybrid =
+      Run({"FT.HYBRID", "idx",     "SEARCH", "apple",  "SCORER", "BM25STD", "VSIM",         "@vec",
+           "$v",        "COMBINE", "LINEAR", "4",      "ALPHA",  "1.0",     "BETA",         "0.0",
+           "LIMIT",     "0",       "2",      "PARAMS", "2",      "v",       FloatVec1(1.0f)});
+  ASSERT_HYBRID_RESP(hybrid);
+  ASSERT_EQ(HybridKeys(hybrid).size(), 2u);
+
+  EXPECT_EQ(HybridKeys(hybrid)[0], map_string("__key", agg.GetVec()[1].GetVec()));
+  EXPECT_EQ(HybridKeys(hybrid)[1], map_string("__key", agg.GetVec()[2].GetVec()));
+  EXPECT_NEAR(HybridScore(hybrid, 0), map_score("__score", agg.GetVec()[1].GetVec()), 1e-6);
+  EXPECT_NEAR(HybridScore(hybrid, 1), map_score("__score", agg.GetVec()[2].GetVec()), 1e-6);
+}
+
+TEST_F(SearchFamilyTest, FtHybridScorerBM25StdTanh) {
+  CreateFlatHashIdx();
+  Run({"HSET", "d:1", "title", "apple apple apple", "vec", FloatVec1(1.0f)});
+  Run({"HSET", "d:2", "title", "apple", "vec", FloatVec1(2.0f)});
+
+  auto agg = Run({"FT.AGGREGATE", "idx", "apple", "ADDSCORES", "SCORER", "BM25STD.TANH",
+                  "BM25STD_TANH_FACTOR", "20", "LOAD", "2", "__key", "__score", "SORTBY", "2",
+                  "@__score", "DESC"});
+  ASSERT_THAT(agg, ArgType(RespExpr::ARRAY));
+  ASSERT_GE(agg.GetVec().size(), 3u);
+
+  auto hybrid = Run({"FT.HYBRID",
+                     "idx",
+                     "SEARCH",
+                     "apple",
+                     "SCORER",
+                     "BM25STD.TANH",
+                     "BM25STD_TANH_FACTOR",
+                     "20",
+                     "VSIM",
+                     "@vec",
+                     "$v",
+                     "COMBINE",
+                     "LINEAR",
+                     "4",
+                     "ALPHA",
+                     "1.0",
+                     "BETA",
+                     "0.0",
+                     "LIMIT",
+                     "0",
+                     "2",
+                     "PARAMS",
+                     "2",
+                     "v",
+                     FloatVec1(1.0f)});
+  ASSERT_HYBRID_RESP(hybrid);
+  ASSERT_EQ(HybridKeys(hybrid).size(), 2u);
+
+  EXPECT_EQ(HybridKeys(hybrid)[0], map_string("__key", agg.GetVec()[1].GetVec()));
+  EXPECT_EQ(HybridKeys(hybrid)[1], map_string("__key", agg.GetVec()[2].GetVec()));
+  EXPECT_NEAR(HybridScore(hybrid, 0), map_score("__score", agg.GetVec()[1].GetVec()), 1e-6);
+  EXPECT_NEAR(HybridScore(hybrid, 1), map_score("__score", agg.GetVec()[2].GetVec()), 1e-6);
+}
+
+TEST_F(SearchFamilyTest, FtHybridLinearVectorSimilarity) {
+  CreateFlatHashIdx();
+  Run({"HSET", "d:1", "title", "foo", "vec", FloatVec1(1.0f)});
+  Run({"HSET", "d:2", "title", "foo", "vec", FloatVec1(2.0f)});
+  Run({"HSET", "d:3", "title", "foo", "vec", FloatVec1(3.0f)});
+
+  auto resp = Run({"FT.HYBRID", "idx",    "SEARCH", "foo",    "VSIM", "@vec", "$v",
+                   "COMBINE",   "LINEAR", "4",      "ALPHA",  "0.0",  "BETA", "1.0",
+                   "LIMIT",     "0",      "3",      "PARAMS", "2",    "v",    FloatVec1(1.0f)});
+  ASSERT_HYBRID_RESP(resp);
+  ASSERT_EQ(HybridKeys(resp), (vector<string>{"d:1", "d:2", "d:3"}));
+
+  EXPECT_NEAR(HybridScore(resp, 0), 1.0, 1e-6);
+  EXPECT_NEAR(HybridScore(resp, 1), 0.5, 1e-6);
+  EXPECT_NEAR(HybridScore(resp, 2), 0.2, 1e-6);
+}
+
 TEST_F(SearchFamilyTest, FtHybridRrfDocInBothRanksHigher) {
   CreateFlatHashIdx();
   Run({"HSET", "d:1", "title", "apple", "vec", FloatVec1(1.0f)});                // in both

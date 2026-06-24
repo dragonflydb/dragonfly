@@ -527,15 +527,24 @@ std::optional<search::ScorerSpec> ParseScorer(CmdArgParser* parser,
   return search::ScorerSpec{*kind};
 }
 
-ParseResult<uint64_t> ParseBM25StdTanhFactor(CmdArgParser* parser) {
-  constexpr string_view kErr = "BM25STD_TANH_FACTOR must be between 1 and 10000 inclusive";
+constexpr string_view kBM25StdTanhFactorErr =
+    "BM25STD_TANH_FACTOR must be between 1 and 10000 inclusive";
+
+std::optional<uint64_t> TryParseBM25StdTanhFactor(CmdArgParser* parser) {
   if (!parser->HasNext())
-    return CreateSyntaxError(kErr);
+    return nullopt;
 
   uint64_t factor = 0;
   if (!absl::SimpleAtoi(parser->Next(), &factor) || factor == 0)
-    return CreateSyntaxError(kErr);
+    return nullopt;
   return factor;
+}
+
+ParseResult<uint64_t> ParseBM25StdTanhFactor(CmdArgParser* parser) {
+  auto factor = TryParseBM25StdTanhFactor(parser);
+  if (!factor)
+    return CreateSyntaxError(kBM25StdTanhFactorErr);
+  return *factor;
 }
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
@@ -1727,6 +1736,7 @@ struct HybridSearchParams {
   string text_query;
   string yield_text_score_as;
   std::optional<search::ScorerSpec> scorer;
+  uint64_t bm25std_tanh_factor = search::kDefaultBM25StdTanhFactor;
 
   string vsim_field;
   string vsim_param;
@@ -1778,16 +1788,26 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       sub->Next();
       return;
     }
-    auto scorer_fn = ParseScorer(sub, /*allow_bm25std_tanh=*/false);
+    auto scorer_fn = ParseScorer(sub);
     if (!scorer_fn)
       sub->ReportCustom(absl::StrCat("No such scorer: ", sub->Peek()));
     else
       p.scorer = *scorer_fn;
   };
+  auto parse_tanh_factor = [&](CmdArgParser* sub) {
+    auto factor = TryParseBM25StdTanhFactor(sub);
+    if (!factor)
+      sub->ReportCustom(std::string{kBM25StdTanhFactorErr});
+    else
+      p.bm25std_tanh_factor = *factor;
+  };
 
   parser->ExpectTag("SEARCH", "expected SEARCH keyword");
   p.text_query = parser->Next<string>();
-  parser->Apply(Tag("SCORER", parse_scorer), Tag("YIELD_SCORE_AS", &p.yield_text_score_as));
+  parser->Apply(Tag("SCORER", parse_scorer), Tag("BM25STD_TANH_FACTOR", parse_tanh_factor),
+                Tag("YIELD_SCORE_AS", &p.yield_text_score_as));
+  if (p.scorer)
+    p.scorer->bm25std_tanh_factor = p.bm25std_tanh_factor;
 
   parser->ExpectTag("VSIM", "expected VSIM keyword");
   p.vsim_field = string{parser->ExpectStartsWith("@", "VSIM field must start with @")};
@@ -1865,29 +1885,14 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
   return p;
 }
 
-void ComputeLinearCombined(float alpha, float beta,
+void ComputeLinearCombined(float alpha, float beta, search::VectorSimilarity vsim_metric,
                            absl::flat_hash_map<string, HybridDocEntry>& docs) {
-  float max_text = 0.0f;
-  float min_dist = std::numeric_limits<float>::max();
-  float max_dist = 0.0f;
-
-  for (const auto& [_, e] : docs) {
-    if (e.has_text)
-      max_text = std::max(max_text, e.text_score);
-    if (e.has_knn) {
-      min_dist = std::min(min_dist, e.knn_dist);
-      max_dist = std::max(max_dist, e.knn_dist);
-    }
-  }
-
-  const float dist_range = (max_dist > min_dist) ? max_dist - min_dist : 0.0f;
-
   for (auto& [_, e] : docs) {
-    float norm_text = (e.has_text && max_text > 0.f) ? e.text_score / max_text : 0.f;
-    float norm_knn = 0.f;
+    float text_score = e.has_text ? e.text_score : 0.f;
+    float knn_score = 0.f;
     if (e.has_knn)
-      norm_knn = (dist_range > 0.f) ? 1.f - (e.knn_dist - min_dist) / dist_range : 1.f;
-    e.combined = alpha * norm_text + beta * norm_knn;  // ALPHA=text, BETA=vector
+      knn_score = search::DistanceToSimilarity(e.knn_dist, vsim_metric);
+    e.combined = alpha * text_score + beta * knn_score;  // ALPHA=text, BETA=vector
   }
 }
 
@@ -2392,7 +2397,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   const absl::Time t_combine = absl::Now();
   auto doc_map = MergeHybridResults(text_docs, hnsw_shard_docs, flat_knn_docs, use_hnsw);
   if (params->combine_method == HybridSearchParams::CombineMethod::LINEAR)
-    ComputeLinearCombined(params->alpha, params->beta, doc_map);
+    ComputeLinearCombined(params->alpha, params->beta, captured_metric, doc_map);
   else
     ComputeRrfCombined(params->rrf_constant, doc_map);
   const absl::Duration combine_took = absl::Now() - t_combine;
