@@ -6,11 +6,14 @@
 
 #include <absl/cleanup/cleanup.h>
 
+#include <stdexcept>
+
 #include "base/logging.h"
+#include "facade/error.h"
 
 namespace dfly::cmd {
 
-bool SingleHopWaiter::await_ready() noexcept {
+bool SingleHopWaiter::await_ready() {
   auto* tx = cmd_cntx->tx();
 
   if (!cmd_cntx->IsDeferredReply()) {
@@ -30,11 +33,25 @@ void SingleHopWaiter::await_suspend(std::coroutine_handle<> handle) const noexce
 }
 
 facade::OpStatus SingleHopWaiter::await_resume() const noexcept {
-  return *cmd_cntx->tx()->LocalResultPtr();
+  // Ignore OpStatus::CANCELLED for error throws as it is handled separately by the io loop (v2)
+  return cmd_cntx->tx()->GetLocalResult();
 }
 
 void CmdR::Coro::return_value(const facade::ErrorReply& err) const noexcept {
   cmd_cntx->SendError(err);
+}
+
+void CmdR::Coro::unhandled_exception() const noexcept {
+  // TODO: Maybe forward exceptions further to InvokeCmd to generate correct DispatchResult
+  // and not duplicate logic (not trivial with coros, needs to be done via return type).
+  try {
+    throw;
+  } catch (const facade::CancellationException&) {
+    cmd_cntx->SendError("Cancelled");
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Unhandled exception in command coroutine: " << e.what();
+    cmd_cntx->SendError("Internal error");
+  }
 }
 
 }  // namespace dfly::cmd

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -54,5 +55,10 @@ inline constexpr char kNoAuthErrType[] = "no_auth";
 
 inline constexpr char kBloomFilterLoadInProgress[] = "bloom filter load in progress";
 inline constexpr char kCuckooFilterFull[] = "Filter is full";
+
+struct CancellationException : public std::runtime_error {
+  CancellationException() : std::runtime_error("Command cancelled") {
+  }
+};
 
 }  // namespace facade

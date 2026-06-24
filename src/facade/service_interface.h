@@ -31,6 +31,7 @@ enum class DispatchResult : uint8_t {
   OK,
   OOM,
   ERROR,
+  CANCELLED,
   WOULD_BLOCK  // Returned if ONLY_ASYNC was set, but only synchronous execution is possible
 };
 

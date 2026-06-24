@@ -862,7 +862,7 @@ async def test_send_delay_metric(df_server: DflyInstance):
 
 
 async def test_match_http(df_server: DflyInstance):
-    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+    _, writer = await asyncio.open_connection("localhost", df_server.port)
     for i in range(2000):
         writer.write("foo bar ".encode())
         await writer.drain()
@@ -2286,120 +2286,6 @@ async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
         await writer.wait_closed()
 
 
-@dfly_args({"proactor_threads": 1, "get_zero_copy": "false"})
-async def test_multi_exec_phantom_connections(df_server: DflyInstance):
-    """Reproduce the addr=0.0.0.0 phantom connections from issue #7272.
-
-    Clogger floods MULTI/GET <1 MB key>/EXEC without reading, blocking Send() mid-EXEC
-    while holding the shard lock.  Ghost connections send MULTI/SET/EXEC one command at a
-    time (sync-dispatch mode) then RST-close.  The main connection fiber is stuck in
-    run_barrier_.Wait() inside Transaction::Execute(), so the io_uring RST event goes
-    unprocessed: the kernel moves the socket to TCP_CLOSE (addr=0.0.0.0) while phase
-    shows "scheduled" (coordinator fiber waiting for shard callback to complete).
-
-    Note: zero-copy GET (--get_zero_copy=true, default) makes the EXEC callback complete
-    much faster (no 1 MB materialization into the captured payload), shrinking the
-    repro window below detection. Disabling it here keeps the test exercising the
-    materializing reply path it was written against — the underlying io_uring fiber
-    bug is not affected by the borrow path.
-    """
-    import struct
-
-    control_client = df_server.client()
-    await control_client.set("key", "v" * 1024 * 1024)
-
-    # Clogger: floods MULTI/GET/EXEC without reading — fills the TCP send buffer,
-    # blocking Send() mid-EXEC while the shard lock on "key" is still held.
-    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
-    linger_rst = struct.pack("ii", 1, 0)
-    writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger_rst)
-    writer.write(b"CLIENT SETNAME clogger\r\n")
-    await writer.drain()
-    await reader.readline()  # +OK
-
-    # Stop asyncio from draining incoming data — to simulate server replies getting stuck.
-    writer.transport.pause_reading()
-
-    # A few commands are enough: each EXEC reply is ~1 MB; the OS receive buffer
-    # (~4 MB) fills after 4 replies, TCP window drops to 0, and the server's
-    # Send() blocks mid-EXEC while still holding the shard lock.
-    cmd = b"MULTI\r\nGET key\r\nEXEC\r\n"
-    for _ in range(10):
-        writer.write(cmd)
-    await writer.drain()
-
-    @assert_eventually
-    async def wait_clogger_stuck():
-        clients = await control_client.client_list()
-        v = next((c for c in clients if c.get("name") == "clogger"), None)
-        assert v is not None and v["phase"] == "send"
-
-    await wait_clogger_stuck()
-
-    # Ghost connections: preamble commands sent+ack'd one-by-one (sync-dispatch,
-    # tot-dispatches stays 0), then EXEC fired without reading.  EXEC blocks in
-    # ScheduleSingleHop on the shard lock held by the clogger.
-    def recv_line(s):
-        buf = b""
-        while not buf.endswith(b"\r\n"):
-            buf += s.recv(256)
-        return buf
-
-    ghosts = []
-    for i in range(3):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger_rst)
-        s.connect(("127.0.0.1", df_server.port))
-        s.sendall(f"CLIENT SETNAME ghost{i}\r\n".encode())
-        recv_line(s)  # +OK
-        s.sendall(b"MULTI\r\n")
-        recv_line(s)  # +OK
-        s.sendall(b"SET key v\r\n")
-        recv_line(s)  # +QUEUED
-        s.sendall(b"EXEC\r\n")  # after this call, this connection is blocked on stuck tx queue.
-        ghosts.append(s)
-
-    await asyncio.sleep(0.2)  # let EXEC bytes reach server's receive buffer
-
-    # RST-close: kernel moves server-side sockets to TCP_CLOSE.
-    # getpeername() → ENOTCONN → addr=0.0.0.0 in CLIENT LIST.
-    for s in ghosts:
-        s.close()
-
-    @assert_eventually(times=50)
-    async def check_phantoms():
-        clients = await control_client.client_list()
-        phantoms = [
-            c
-            for c in clients
-            if c.get("addr", "").startswith("0.0.0.0") and c.get("phase") == "scheduled"
-        ]
-        logging.info("phantoms: %s", [(c["name"], c["addr"], c["phase"]) for c in phantoms])
-        assert len(phantoms) >= 3, f"got {[(c['addr'], c['phase']) for c in clients]}"
-
-    await check_phantoms()
-
-    # # A competing MULTI/SET confirms the shard lock is still held while we observe.
-    # other = df_server.client()
-    # pipe = other.pipeline(transaction=True)
-    # pipe.set("key", "new")
-    # compete = asyncio.create_task(pipe.execute())
-
-    # await asyncio.sleep(0.5)
-    # assert not compete.done(), "Competing MULTI/EXEC should be stuck waiting for the shard lock"
-
-    # logging.info("Holding stuck state — inspect with: redis-cli -p %d client list", df_server.port)
-    # await asyncio.sleep(300)
-
-    # RST-close the clogger: Write() fails, fiber resumes, UnlockMulti() is called,
-    # the competing transaction unblocks, and phantom connections clean up.
-    writer.transport.abort()
-
-    # result = await asyncio.wait_for(compete, timeout=5.0)
-    # assert result == [True]
-    assert await control_client.ping()
-
-
 async def test_blocking_command_close_eof(df_server: DflyInstance):
     """Server must drop a connection that is parked on a blocking command
     when the client closes its socket.
@@ -2492,3 +2378,110 @@ async def test_client_list_filters(df_server: DflyInstance):
         await subscriber.connection.send_command("UNSUBSCRIBE")
         await subscriber.aclose()
         await observer.aclose()
+
+
+async def test_fibers_unblock_on_conn_disconnect(df_factory: DflyInstanceFactory):
+    """Verify that disconnected clients whose transactions are blocked on a locked
+    shard get properly cleaned up after cancellation.
+
+    A global EVAL script blocks all transactions from running. Multiple connections
+    issue various commands (some pipelined) which block waiting for the shard.
+    When those connections are closed, their transactions are cancelled and all
+    connections are removed from CLIENT LIST.
+    """
+    COMMANDS = [
+        # Coroutine commands
+        b"GET key",
+        b"SET key val",
+        b"INCR counter",
+        b"GETDEL key",
+        b"SETNX key val",
+        b"APPEND key val",
+        b"DEL key",
+        # Non-coroutine commands (single shard)
+        b"LPUSH mylist val",
+        b"SADD myset val",
+        b"ZADD myzset 1 val",
+        b"HSET myhash f v",
+        ## Multi-shard commands
+        b"MGET a b c",
+        b"MSET a 1 b 2 c 3",
+        b"DEL a b c",
+        b"SUNION a b c",
+        b"SDIFF a b c",
+        b"SINTER a b c",
+        ## Multi-shard multi hop commands
+        # b"RENAME a b",
+        # b"RPOPLPUSH a b",
+    ]
+
+    server = df_factory.create(proactor_threads=2, num_shards=2, admin_port=BASE_PORT)
+    server.start()
+
+    # Use admin port for control so it's not blocked by the global EVAL
+    control = server.admin_client()
+    await control.ping()
+
+    # Start an infinite EVAL script that locks all shards via raw socket
+    blocker_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker_sock.connect(("127.0.0.1", server.port))
+    blocker_sock.sendall(b"CLIENT SETNAME blocker\r\n")
+    blocker_sock.recv(64)  # +OK
+    # Send EVAL as RESP to preserve newlines in the script body
+    script = b"--!df flags=allow-undeclared-keys\nwhile true do redis.call('INFO', 'ALL') end"
+    eval_cmd = f"*3\r\n$4\r\nEVAL\r\n${len(script)}\r\n".encode() + script + b"\r\n$1\r\n0\r\n"
+    blocker_sock.sendall(eval_cmd)
+    await asyncio.sleep(0.1)
+
+    # Shuffle and group commands: some connections get 1 command, some get 2-3 (pipelined)
+    shuffled = list(COMMANDS)
+    random.shuffle(shuffled)
+
+    victim_socks = []
+    i = 0
+    victim_id = 0
+    while i < len(shuffled):
+        # TODO: Does not work with pipeline
+        # Pick 1, 2, or 3 commands for this connection
+        batch_size = random.choice([1])
+        batch = shuffled[i : i + batch_size]
+        i += len(batch)
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", server.port))
+
+        cmd_descriptor = "-".join(s.decode().split()[0] for s in batch)
+        s.sendall(f"CLIENT SETNAME victim{victim_id}-{cmd_descriptor}\r\n".encode())
+        s.recv(64)  # +OK
+        # Send all commands in one write (pipelined)
+        s.sendall(b"\r\n".join(batch) + b"\r\n")
+        victim_socks.append(s)
+        victim_id += 1
+
+    await asyncio.sleep(0.1)
+
+    # Verify all victims are visible in CLIENT LIST
+    clients = await control.client_list()
+    victim_names = {c.get("name") for c in clients if c.get("name", "").startswith("victim")}
+    assert len(victim_names) == len(
+        victim_socks
+    ), f"Expected {len(victim_socks)} victims, got {victim_names}"
+
+    # Close all victim connections while they're blocked
+    for s in victim_socks:
+        s.close()
+    await asyncio.sleep(0.1)
+
+    # All victims should be cleaned up from CLIENT LIST
+    @assert_eventually(timeout=5)
+    async def check_victims_gone():
+        clients = await control.client_list()
+        remaining = [c.get("name") for c in clients if c.get("name", "").startswith("victim")]
+        assert len(remaining) == 0, f"victims still in client list: {remaining}"
+
+    await check_victims_gone()
+
+    # Clean up
+    blocker_sock.close()
+    await control.aclose()
+    server.stop(kill=True)  # No way to stop the script
