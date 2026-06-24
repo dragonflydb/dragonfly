@@ -56,7 +56,7 @@ OpStatus OpReserve(const SbfParams& params, const OpArgs& op_args, string_view k
 }
 
 // Returns true, if item was added, false if it was already "present".
-OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, CmdArgList items) {
+OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, ParsedArgs items) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_SBF);
@@ -79,7 +79,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, CmdArgList ite
   return result;
 }
 
-OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, CmdArgList items) {
+OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, ParsedArgs items) {
   auto& db_slice = op_args.GetDbSlice();
   OpResult op_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_SBF);
   if (!op_res)
@@ -147,8 +147,7 @@ OpStatus OpLoadChunk(const OpArgs& op_args, std::string_view blob, std::string_v
   return OpStatus::OK;
 }
 
-void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(cmd_cntx->tail_args());
+void CmdReserve(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   SbfParams params;
 
@@ -171,12 +170,12 @@ void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
-void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs items = parser.UnparsedArgs();
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAdd(t->GetOpArgs(shard), key, args);
+    return OpAdd(t->GetOpArgs(shard), key, items);
   };
 
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -191,11 +190,11 @@ void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(status);
 }
 
-void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdExists(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs items = parser.UnparsedArgs();
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpExists(t->GetOpArgs(shard), key, args);
+    return OpExists(t->GetOpArgs(shard), key, items);
   };
 
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -206,12 +205,12 @@ void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendLong(res ? res->front() : 0);
 }
 
-void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdMAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs items = parser.UnparsedArgs();
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAdd(t->GetOpArgs(shard), key, args);
+    return OpAdd(t->GetOpArgs(shard), key, items);
   };
 
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -230,8 +229,7 @@ void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(cmd_cntx->tail_args());
+void CmdScanDump(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const string_view key = parser.Next();
   const int64_t cursor = parser.Next<int64_t>();
@@ -266,8 +264,7 @@ void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendBulkString(res->data);
 }
 
-void CmdLoadChunk(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(cmd_cntx->tail_args());
+void CmdLoadChunk(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const std::string_view key = parser.Next();
 
@@ -292,12 +289,12 @@ void CmdLoadChunk(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
-void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdMExists(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs items = parser.UnparsedArgs();
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpExists(t->GetOpArgs(shard), key, args);
+    return OpExists(t->GetOpArgs(shard), key, items);
   };
 
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -306,8 +303,8 @@ void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
   if (!res && res.status() == OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS)
     return rb->SendError(res.status());
 
-  RedisReplyBuilder::ArrayScope scope{rb, args.size()};
-  for (size_t i = 0; i < args.size(); ++i) {
+  RedisReplyBuilder::ArrayScope scope{rb, items.size()};
+  for (size_t i = 0; i < items.size(); ++i) {
     rb->SendLong(res ? res->at(i) : 0);
   }
 }

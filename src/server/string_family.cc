@@ -1286,8 +1286,8 @@ cmd::CmdR CmdGetDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdDigest(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
   auto cb = [&key](Transaction* tx, EngineShard* es) -> OpResult<string> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok()) {
@@ -1594,11 +1594,12 @@ cmd::CmdR CmdGAT(CmdArgParser parser, CommandContext* cmd_cntx) {
   return MGetGeneric(cmd_cntx, expire_params);
 }
 
-void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdMSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (VLOG_IS_ON(2)) {
+    const facade::ParsedArgs& args = cmd_cntx->tail_args();
     string str;
     for (size_t i = 1; i < args.size(); ++i) {
-      absl::StrAppend(&str, " ", ArgS(args, i));
+      absl::StrAppend(&str, " ", args[i]);
     }
     LOG(INFO) << "MSET/" << cmd_cntx->tx()->GetUniqueShardCnt() << str;
   }
@@ -1621,7 +1622,7 @@ void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdMSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
   atomic_bool exists{false};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
@@ -1714,40 +1715,19 @@ cmd::CmdR CmdSetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
  *  5. The number of seconds until the limit will reset to its maximum capacity.
  * Equivalent to X-RateLimit-Reset.
  */
-void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdClThrottle(CmdArgParser parser, CommandContext* cmd_cntx) {
   constexpr uint64_t kSecondToNanoSecond = 1000000000;
-  const string_view key = ArgS(args, 0);
+  const string_view key = parser.Next();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  // Allow max burst in number of tokens
-  uint64_t max_burst;
-  const string_view max_burst_str = ArgS(args, 1);
-  if (!absl::SimpleAtoi(max_burst_str, &max_burst)) {
+  // Allow max burst in number of tokens, count of tokens per period, and the period itself.
+  // An optional quantity of tokens to apply now defaults to 1.
+  uint64_t max_burst = parser.Next<uint64_t>();
+  uint64_t count = parser.Next<uint64_t>();
+  uint64_t period = parser.Next<uint64_t>();
+  uint64_t quantity = parser.NextOrDefault<uint64_t>(1);
+  if (parser.TakeError()) {
     return rb->SendError(kInvalidIntErr);
-  }
-
-  // Emit count of tokens per period
-  uint64_t count;
-  const string_view count_str = ArgS(args, 2);
-  if (!absl::SimpleAtoi(count_str, &count)) {
-    return rb->SendError(kInvalidIntErr);
-  }
-
-  // Period of emitting count of tokens
-  uint64_t period;
-  const string_view period_str = ArgS(args, 3);
-  if (!absl::SimpleAtoi(period_str, &period)) {
-    return rb->SendError(kInvalidIntErr);
-  }
-
-  // Apply quantity of tokens now
-  uint64_t quantity = 1;
-  if (args.size() > 4) {
-    const string_view quantity_str = ArgS(args, 4);
-
-    if (!absl::SimpleAtoi(quantity_str, &quantity)) {
-      return rb->SendError(kInvalidIntErr);
-    }
   }
 
   if (max_burst > INT64_MAX - 1) {

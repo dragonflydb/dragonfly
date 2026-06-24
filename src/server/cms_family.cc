@@ -99,7 +99,7 @@ OpResult<vector<int64_t>> OpIncrBy(const OpArgs& op_args, string_view key,
   return result;
 }
 
-OpResult<vector<int64_t>> OpQuery(const OpArgs& op_args, string_view key, CmdArgList items) {
+OpResult<vector<int64_t>> OpQuery(const OpArgs& op_args, string_view key, ParsedArgs items) {
   auto& db_slice = op_args.GetDbSlice();
   OpResult op_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_CMS);
   if (!op_res)
@@ -132,8 +132,7 @@ OpResult<CmsInfo> OpInfo(const OpArgs& op_args, string_view key) {
   return CmsInfo{cms->width(), cms->depth(), cms->total_count()};
 }
 
-void CmdInitByDim(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(cmd_cntx->tail_args());
+void CmdInitByDim(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   uint32_t width, depth;
 
@@ -158,8 +157,7 @@ void CmdInitByDim(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
-void CmdInitByProb(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(cmd_cntx->tail_args());
+void CmdInitByProb(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   double error, probability;
 
@@ -192,22 +190,22 @@ void CmdInitByProb(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
-void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
-  // Parse item/increment pairs
-  if (args.size() < 2 || args.size() % 2 != 0) {
+  // Parse item/increment pairs. tail_args() includes the key, so subtract it.
+  size_t num_pair_args = cmd_cntx->tail_args().size() - 1;
+  if (num_pair_args < 2 || num_pair_args % 2 != 0) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
   vector<pair<string_view, int64_t>> items;
-  items.reserve(args.size() / 2);
+  items.reserve(num_pair_args / 2);
 
-  for (size_t i = 0; i < args.size(); i += 2) {
-    string_view item = ToSV(args[i]);
+  while (parser.HasNext()) {
+    string_view item = parser.Next();
     int64_t incr;
-    if (!absl::SimpleAtoi(ToSV(args[i + 1]), &incr)) {
+    if (!absl::SimpleAtoi(parser.Next(), &incr)) {
       return cmd_cntx->SendError(kCmsCannotParseNumber);
     }
     if (incr <= 0) {
@@ -236,16 +234,16 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdQuery(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdQuery(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
-  if (args.empty()) {
+  ParsedArgs items = parser.UnparsedArgs();
+  if (items.empty()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpQuery(t->GetOpArgs(shard), key, args);
+    return OpQuery(t->GetOpArgs(shard), key, items);
   };
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -264,8 +262,8 @@ void CmdQuery(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdInfo(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -314,8 +312,7 @@ struct CmsMergeArgs {
   vector<int64_t> weights;
 };
 
-bool ParseMergeArgs(facade::ParsedArgs args, RedisReplyBuilder* rb, CmsMergeArgs* out) {
-  CmdArgParser parser(args);
+bool ParseMergeArgs(CmdArgParser parser, RedisReplyBuilder* rb, CmsMergeArgs* out) {
   uint32_t num_keys;
 
   out->dest_key = parser.Next();
@@ -376,10 +373,10 @@ bool ParseMergeArgs(facade::ParsedArgs args, RedisReplyBuilder* rb, CmsMergeArgs
 }
 
 // Merge multiple CMS structures into a destination key.
-void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdMerge(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   CmsMergeArgs merge_args;
-  if (!ParseMergeArgs(cmd_cntx->tail_args(), rb, &merge_args)) {
+  if (!ParseMergeArgs(parser, rb, &merge_args)) {
     return;
   }
 
