@@ -44,16 +44,15 @@ uint64_t AltIndex(uint8_t fp, uint64_t index) {
 
 }  // namespace
 
-CuckooFilter::CuckooFilter(uint64_t capacity, std::pmr::memory_resource* mr,
-                           uint8_t slots_per_bucket, uint16_t max_iterations, uint16_t expansion)
-    : slots_per_bucket_(slots_per_bucket),
-      max_iterations_(max_iterations),
-      expansion_(expansion ? NextPowerOfTwo(expansion) : 0),
+CuckooFilter::CuckooFilter(const Options& options, std::pmr::memory_resource* mr)
+    : slots_per_bucket_(options.slots_per_bucket),
+      max_iterations_(options.max_iterations),
+      expansion_(options.expansion ? NextPowerOfTwo(options.expansion) : 0),
       mr_(mr),
       filters_(mr) {
   DCHECK(mr);
   DCHECK_GT(slots_per_bucket_, 0);
-  num_buckets_ = slots_per_bucket_ ? NextPowerOfTwo(capacity / slots_per_bucket_) : 1;
+  num_buckets_ = slots_per_bucket_ ? NextPowerOfTwo(options.capacity / slots_per_bucket_) : 1;
   if (num_buckets_ == 0)
     num_buckets_ = 1;
   DCHECK(IsPowerOfTwo(num_buckets_));

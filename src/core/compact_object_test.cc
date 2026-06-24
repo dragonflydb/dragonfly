@@ -585,8 +585,7 @@ TEST_F(CompactObjectTest, SBF) {
 }
 
 TEST_F(CompactObjectTest, CuckooFilter) {
-  cobj_.SetCuckooFilter(1000, CuckooFilter::kDefaultSlotsPerBucket,
-                        CuckooFilter::kDefaultMaxIterations, CuckooFilter::kDefaultExpansion);
+  cobj_.SetCuckooFilter(CuckooFilterOptions{.capacity = 1000});
   EXPECT_EQ(cobj_.ObjType(), OBJ_CUCKOOFILTER);
   EXPECT_GT(cobj_.MallocUsed(), 0);
 
