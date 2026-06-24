@@ -24,7 +24,14 @@
       std::string raw;
       uint32_t slop = 0;
     };
+    struct KnnAttributes {
+      std::string score_alias;
+      std::optional<size_t> ef_runtime;
+    };
     inline std::ostream& operator<<(std::ostream& os, const PhraseTok&) {
+      return os;  // bison debug trace requires this; content not material to traces.
+    }
+    inline std::ostream& operator<<(std::ostream& os, const KnnAttributes&) {
       return os;  // bison debug trace requires this; content not material to traces.
     }
   }
@@ -67,6 +74,7 @@ double toDouble(string_view src);
   RCURLBR     "}"
   OR_OP       "|"
   COMMA       ","
+  SEMICOLON   ";"
   TILDE       "~"
   KNN         "KNN"
   AS          "AS"
@@ -103,6 +111,7 @@ double toDouble(string_view src);
 
 %nterm <AstKnnNode> knn_query
 %nterm <std::string> opt_knn_alias
+%nterm <KnnAttributes> opt_knn_attrs knn_attrs knn_attr
 %nterm <std::string> geounit
 %nterm <std::optional<size_t>> opt_ef_runtime
 %nterm <AstVectorRangeNode> vector_range_query
@@ -119,13 +128,18 @@ final_query:
       { driver->Set(AstKnnNode(std::move($1), std::move($3))); }
 
 knn_query:
-  LBRACKET KNN UINT32 FIELD TERM opt_ef_runtime opt_knn_alias RBRACKET
+  LBRACKET KNN UINT32 FIELD TERM opt_ef_runtime opt_knn_alias RBRACKET opt_knn_attrs
     {
       // Accept any string as vector - validation happens later during search execution
       uint32_t knn_count = toUint32($3);
       auto field = std::move($4);
       auto alias = std::move($7);
-      auto ef = $6;
+      auto attrs = std::move($9);
+      if (!attrs.score_alias.empty())
+        alias = std::move(attrs.score_alias);
+      std::optional<size_t> ef = $6;
+      if (attrs.ef_runtime)
+        ef = attrs.ef_runtime;
 
       auto vec_result = BytesToFtVectorSafe($5);
       if (!vec_result) {
@@ -144,6 +158,38 @@ opt_knn_alias:
 opt_ef_runtime:
   /* empty */ { $$ = std::nullopt; }
   | EF_RUNTIME UINT32 { $$ = toUint32($2); }
+
+opt_knn_attrs:
+  /* empty */ { $$ = KnnAttributes{}; }
+  | ARROW LCURLBR knn_attrs opt_knn_attr_trailer RCURLBR { $$ = std::move($3); }
+
+opt_knn_attr_trailer:
+  /* empty */
+  | SEMICOLON
+
+knn_attrs:
+  knn_attr { $$ = std::move($1); }
+  | knn_attrs SEMICOLON knn_attr
+    {
+      $$ = std::move($1);
+      auto attr = std::move($3);
+      if (attr.ef_runtime)
+        $$.ef_runtime = attr.ef_runtime;
+      if (!attr.score_alias.empty())
+        $$.score_alias = std::move(attr.score_alias);
+    }
+
+knn_attr:
+  EF_RUNTIME COLON UINT32
+    {
+      $$ = KnnAttributes{};
+      $$.ef_runtime = toUint32($3);
+    }
+  | YIELD_DISTANCE_AS COLON TERM
+    {
+      $$ = KnnAttributes{};
+      $$.score_alias = std::move($3);
+    }
 
 vector_range_query:
   FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET ARROW LCURLBR YIELD_DISTANCE_AS COLON TERM RCURLBR

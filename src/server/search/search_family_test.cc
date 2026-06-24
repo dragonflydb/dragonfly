@@ -4520,6 +4520,116 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   EXPECT_THAT(resp, kNoResults);
 }
 
+TEST_F(SearchFamilyTest, KnnHnswQueryAttributesEfRuntime) {
+  auto resp = Run({"FT.CREATE", "attr_idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "8",
+                   "TYPE", "FLOAT32", "DIM", "1", "DISTANCE_METRIC", "L2", "EF_RUNTIME", "11"});
+  EXPECT_EQ(resp, "OK");
+
+  Run({"HSET", "doc1", "pos", FloatVec1(1.0f)});
+  Run({"HSET", "doc2", "pos", FloatVec1(2.0f)});
+  Run({"HSET", "doc3", "pos", FloatVec1(3.0f)});
+
+  // Each query must return the single nearest doc (doc2) and yield its distance under alias "dist".
+  auto expect_nearest_doc2 = [&](const RespExpr& resp) {
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    auto results = resp.GetVec();
+    ASSERT_EQ(results.size(), 3);
+    EXPECT_THAT(results[0], IntArg(1));
+    EXPECT_EQ(results[1].GetString(), "doc2");
+    EXPECT_LT(map_score("dist", results[2].GetVec()), 0.01);
+  };
+
+  // Attribute block overrides the inline alias ("inline" -> "dist") and passes EF_RUNTIME via
+  // param.
+  resp = Run({"FT.SEARCH", "attr_idx",
+              "*=>[KNN $k @pos $vec AS inline]=>{$EF_RUNTIME: $ef; $YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "6", "k", "1", "vec", FloatVec1(2.0f), "ef", "30", "RETURN", "1", "dist",
+              "SORTBY", "dist", "DIALECT", "2"});
+  expect_nearest_doc2(resp);
+
+  // Attribute block with only EF_RUNTIME and a trailing ';'; the inline AS alias is kept.
+  resp =
+      Run({"FT.SEARCH", "attr_idx", "*=>[KNN 1 @pos $vec AS dist]=>{$EF_RUNTIME: 7;}", "PARAMS",
+           "2", "vec", FloatVec1(2.0f), "RETURN", "1", "dist", "SORTBY", "dist", "DIALECT", "2"});
+  expect_nearest_doc2(resp);
+
+  // No EF_RUNTIME given anywhere -> the index-level default (11) is used for the search.
+  resp =
+      Run({"FT.SEARCH", "attr_idx", "*=>[KNN 1 @pos $vec]=>{$YIELD_DISTANCE_AS: dist}", "PARAMS",
+           "2", "vec", FloatVec1(2.0f), "RETURN", "1", "dist", "SORTBY", "dist", "DIALECT", "2"});
+  expect_nearest_doc2(resp);
+}
+
+// EF_RUNTIME widens the HNSW candidate list at query time: a large value explores enough of the
+// graph to return the exact nearest neighbor, while ef=1 is greedy and provably misses many. The
+// gap proves the per-query EF_RUNTIME attribute actually reaches and steers the search instead of
+// being parsed and dropped. Dataset, seed and shard count are fixed, so the recall counts below are
+// deterministic.
+TEST_F(SearchFamilyTest, KnnHnswEfRuntimeWidensSearch) {
+  auto pack = [](const std::vector<float>& v) {
+    return string(reinterpret_cast<const char*>(v.data()), v.size() * sizeof(float));
+  };
+  constexpr int kDim = 8;
+  auto gen_vec = [](uint32_t seed) {
+    std::vector<float> v(kDim);
+    uint32_t s = seed * 2654435761u + 1013904223u;
+    for (int d = 0; d < kDim; d++) {
+      s = s * 1103515245u + 12345u;
+      v[d] = static_cast<float>((s >> 16) & 0x3ff) / 100.0f;
+    }
+    return v;
+  };
+
+  // A sparse graph (small M / EF_CONSTRUCTION) makes greedy search easy to trap in a local minimum.
+  Run({"FT.CREATE", "ef_idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "10", "TYPE",
+       "FLOAT32", "DIM", std::to_string(kDim), "DISTANCE_METRIC", "L2", "M", "4", "EF_CONSTRUCTION",
+       "20"});
+
+  constexpr int kPoints = 400;
+  std::vector<std::vector<float>> pts(kPoints);
+  for (int i = 0; i < kPoints; i++) {
+    pts[i] = gen_vec(static_cast<uint32_t>(i));
+    Run({"HSET", absl::StrCat("doc", i), "pos", pack(pts[i])});
+  }
+  WaitForIndexReady("ef_idx");
+
+  auto knn_top1 = [&](const std::vector<float>& qv, int ef) -> int {
+    auto resp = Run({"FT.SEARCH", "ef_idx", "*=>[KNN 1 @pos $v]=>{$EF_RUNTIME: $e}", "PARAMS", "4",
+                     "v", pack(qv), "e", std::to_string(ef), "NOCONTENT", "DIALECT", "2"});
+    auto vec = resp.GetVec();
+    if (vec.size() < 2)
+      return -1;
+    return std::stoi(string{vec[1].GetString()}.substr(3));  // "docN" -> N
+  };
+
+  constexpr int kQueries = 60;
+  int wide_hits = 0, greedy_hits = 0;
+  for (int q = 0; q < kQueries; q++) {
+    auto qv = gen_vec(static_cast<uint32_t>(100000 + q));
+
+    // Exact nearest neighbor by brute force.
+    int exact = -1;
+    float best = 1e30f;
+    for (int i = 0; i < kPoints; i++) {
+      float dist = 0;
+      for (int d = 0; d < kDim; d++) {
+        float diff = qv[d] - pts[i][d];
+        dist += diff * diff;
+      }
+      if (dist < best) {
+        best = dist;
+        exact = i;
+      }
+    }
+
+    wide_hits += (knn_top1(qv, 500) == exact);
+    greedy_hits += (knn_top1(qv, 1) == exact);
+  }
+
+  EXPECT_GE(wide_hits, kQueries - 2);     // wide search ~ exhaustive -> exact recall
+  EXPECT_LT(greedy_hits + 5, wide_hits);  // ef=1 greedy provably misses several of them
+}
+
 TEST_F(SearchFamilyTest, FilteredKnnHnswSearchLoadsOnlyWinners) {
   auto resp = Run({"FT.CREATE", "knn_idx", "ON",     "HASH",    "SCHEMA",
                    "grp",       "TAG",     "rank",   "NUMERIC", "payload",
@@ -6646,7 +6756,7 @@ TEST_F(SearchFamilyTest, AggregateKnnWithApply) {
 }
 
 // Verify that BuildRestoreCommand round-trips all HNSW vector parameters
-// including TYPE, M, and EF_CONSTRUCTION.
+// including TYPE, M, EF_CONSTRUCTION and EF_RUNTIME.
 TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
   using dfly::DocIndex;
   using dfly::DocIndexInfo;
@@ -6666,6 +6776,7 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
   vparams.capacity = 500;
   vparams.hnsw_m = 32;
   vparams.hnsw_ef_construction = 400;
+  vparams.hnsw_ef_runtime = 75;
   field.special_params = vparams;
 
   DocIndex base;
@@ -6679,14 +6790,16 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
 
   std::string cmd = info.BuildRestoreCommand();
 
-  // HNSW 12 = 6 key-value pairs: TYPE, DIM, DISTANCE_METRIC, INITIAL_CAP, M, EF_CONSTRUCTION
-  EXPECT_THAT(cmd, HasSubstr("HNSW 12"));
+  // HNSW 14 = 7 key-value pairs:
+  // TYPE, DIM, DISTANCE_METRIC, INITIAL_CAP, M, EF_CONSTRUCTION, EF_RUNTIME.
+  EXPECT_THAT(cmd, HasSubstr("HNSW 14"));
   EXPECT_THAT(cmd, HasSubstr("TYPE FLOAT32"));
   EXPECT_THAT(cmd, HasSubstr("DIM 4"));
   EXPECT_THAT(cmd, HasSubstr("DISTANCE_METRIC COSINE"));
   EXPECT_THAT(cmd, HasSubstr("INITIAL_CAP 500"));
   EXPECT_THAT(cmd, HasSubstr("M 32"));
   EXPECT_THAT(cmd, HasSubstr("EF_CONSTRUCTION 400"));
+  EXPECT_THAT(cmd, HasSubstr("EF_RUNTIME 75"));
 }
 
 // FT.CREATE with a VECTOR FLAT field whose DIM is enormous (e.g. 99999999999)
@@ -6823,7 +6936,7 @@ TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
                  "embedding",
                  "VECTOR",
                  "HNSW",
-                 "10",
+                 "12",
                  "TYPE",
                  "FLOAT32",
                  "DIM",
@@ -6833,7 +6946,9 @@ TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
                  "M",
                  "16",
                  "EF_CONSTRUCTION",
-                 "200"}),
+                 "200",
+                 "EF_RUNTIME",
+                 "150"}),
             "OK");
 
   auto info = Run({"ft.info", "idx"});
@@ -6841,7 +6956,7 @@ TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
   auto vector_field_matcher =
       IsArray("identifier", "embedding", "attribute", "embedding", "type", "VECTOR", "algorithm",
               "HNSW", "data_type", "FLOAT32", "dim", "4", "distance_metric", "COSINE", "M", "16",
-              "ef_construction", "200");
+              "ef_construction", "200", "ef_runtime", "150");
 
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, "attributes", IsArray(vector_field_matcher), _, _, _,
                             _, _, _));

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <iosfwd>
 #include <memory>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -167,7 +168,7 @@ struct AstKnnNode {
   std::string field;
   OwnedFtVector vec;
   std::string score_alias;
-  std::optional<float> ef_runtime;
+  std::optional<size_t> ef_runtime;
 
   bool HasPreFilter() const;
 };

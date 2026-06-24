@@ -189,10 +189,6 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     }
   };
 
-  void setEf(size_t ef) {
-    ef_ = ef;
-  }
-
   inline std::mutex& getLabelOpMutex(labeltype label) const {
     // calculate hash
     size_t lock_id = label & (MAX_LABEL_OPERATION_LOCKS - 1);
@@ -1380,7 +1376,14 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   }
 
   std::priority_queue<std::pair<dist_t, labeltype>> searchKnn(
-      const void* query_data, size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const {
+      const void* query_data, size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const override {
+    return searchKnnWithEf(query_data, k, isIdAllowed, ef_);
+  }
+
+  std::priority_queue<std::pair<dist_t, labeltype>> searchKnnWithEf(const void* query_data,
+                                                                    size_t k,
+                                                                    BaseFilterFunctor* isIdAllowed,
+                                                                    size_t ef_runtime) const {
     std::priority_queue<std::pair<dist_t, labeltype>> result;
     if (cur_element_count == 0)
       return result;
@@ -1421,9 +1424,11 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         top_candidates;
     bool bare_bone_search = !num_deleted_ && !isIdAllowed;
     if (bare_bone_search) {
-      top_candidates = searchBaseLayerST<true>(currObj, query_data, std::max(ef_, k), isIdAllowed);
+      top_candidates =
+          searchBaseLayerST<true>(currObj, query_data, std::max(ef_runtime, k), isIdAllowed);
     } else {
-      top_candidates = searchBaseLayerST<false>(currObj, query_data, std::max(ef_, k), isIdAllowed);
+      top_candidates =
+          searchBaseLayerST<false>(currObj, query_data, std::max(ef_runtime, k), isIdAllowed);
     }
 
     while (top_candidates.size() > k) {

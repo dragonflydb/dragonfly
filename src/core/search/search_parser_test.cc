@@ -487,6 +487,26 @@ TEST_F(SearchParserTest, KNNfull) {
   NEXT_TOK(TOK_RBRACKET);
 }
 
+TEST_F(SearchParserTest, KnnQueryAttributes) {
+  QueryParams params;
+  params["k"] = "3";
+  params["ef"] = "25";
+  // 4 bytes = one float dimension
+  params["vec"] = std::string(4, '\0');
+  SetParams(&params);
+
+  EXPECT_EQ(0, Parse("*=>[KNN $k @vector $vec EF_RUNTIME 7 AS inline_score]"
+                     "=>{$EF_RUNTIME: $ef; $YIELD_DISTANCE_AS: attr_score}"));
+
+  auto ast = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstKnnNode>(ast.Variant()));
+  const auto& knn = std::get<AstKnnNode>(ast.Variant());
+  EXPECT_EQ(knn.limit, 3u);
+  EXPECT_EQ(knn.score_alias, "attr_score");
+  ASSERT_TRUE(knn.ef_runtime);
+  EXPECT_EQ(*knn.ef_runtime, 25u);
+}
+
 TEST_F(SearchParserTest, PhraseSlopLex) {
   // `"..."~N` (no whitespace before ~) → PHRASE token with slop=N.
   SetInput("\"foo bar\"~3");

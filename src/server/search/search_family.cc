@@ -121,8 +121,7 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
     } else if (parser->Check("TYPE")) {
       params.data_type = absl::AsciiStrToUpper(parser->Next<string_view>());
     } else if (parser->Check("EF_RUNTIME")) {
-      parser->Next<size_t>();
-      LOG(WARNING) << "EF_RUNTIME not supported";
+      params.hnsw_ef_runtime = parser->Next<size_t>();
     } else if (parser->Check("EPSILON")) {
       parser->Next<double>();
       LOG(WARNING) << "EPSILON not supported";
@@ -2735,6 +2734,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
         info.emplace_back(std::to_string(vparams.hnsw_m));
         info.emplace_back("ef_construction");
         info.emplace_back(std::to_string(vparams.hnsw_ef_construction));
+        info.emplace_back("ef_runtime");
+        info.emplace_back(std::to_string(vparams.hnsw_ef_runtime));
       }
     } else if (field_info.type == search::SchemaField::TAG) {
       auto& tparams = std::get<search::SchemaField::TagParams>(field_info.special_params);
