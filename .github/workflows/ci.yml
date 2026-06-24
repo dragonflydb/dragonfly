@@ -236,7 +236,7 @@ jobs:
         if: always()
         run: |
           NAME="junit-ci-${{ matrix.container }}-${{ matrix.build-type }}-${{ matrix.compiler.cxx }}-${{ matrix.sanitizers }}"
-          SAFE_NAME=$(printf '%s' "${NAME}" | tr -c 'A-Za-z0-9._-' '-' | sed -E 's/-+/-/g; s/^-//; s/-$//')
+          SAFE_NAME=$("${GITHUB_WORKSPACE}/.github/scripts/sanitize-token.sh" "${NAME}")
           echo "CI_JUNIT_ARTIFACT=${SAFE_NAME}" >> "${GITHUB_ENV}"
 
       - name: Upload JUnit test results

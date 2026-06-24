@@ -98,10 +98,7 @@ runs:
           FILTER="all"
         fi
 
-        SAFE_FILTER=$(printf '%s' "${FILTER}" | tr -c 'A-Za-z0-9._-' '-' | sed -E 's/-+/-/g; s/^-//; s/-$//')
-        if [[ -z "${SAFE_FILTER}" ]]; then
-          SAFE_FILTER="all"
-        fi
+        SAFE_FILTER=$("${GITHUB_WORKSPACE}/.github/scripts/sanitize-token.sh" "${FILTER}" all)
 
         UNIQUE_SUFFIX="$(date +%s%N)-${RANDOM}"
         {
