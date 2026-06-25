@@ -220,6 +220,61 @@ bool CuckooFilter::AddNewSubFilter() {
   return true;
 }
 
+bool CuckooFilter::RelocateSlot(size_t filter_idx, uint64_t bucket_idx, uint8_t slot_idx) {
+  SubFilter& sf = filters_[filter_idx];
+  uint8_t& slot = sf[bucket_idx * slots_per_bucket_ + slot_idx];
+  if (slot == 0)
+    return true;
+
+  const uint8_t fp = slot;
+  // bucket_idx is this sub-filter's bucket index, not the raw hash. Reusing it works because
+  // each sub-filter's bucket count is a power-of-two multiple of every earlier sub-filter's
+  // count, so bucket_idx % earlier_n == raw_hash % earlier_n. Same symmetry argument as the
+  // one documented above AltIndex's definition.
+  const uint64_t alt_bucket_idx = AltIndex(fp, bucket_idx);
+
+  for (size_t prior = 0; prior < filter_idx; ++prior) {
+    SubFilter& prior_sf = filters_[prior];
+    const uint64_t n = NumBuckets(prior_sf);
+    for (uint64_t idx : {bucket_idx % n, alt_bucket_idx % n}) {
+      const size_t base = idx * slots_per_bucket_;
+      for (uint8_t s = 0; s < slots_per_bucket_; ++s) {
+        if (prior_sf[base + s] == 0) {
+          prior_sf[base + s] = fp;
+          slot = 0;
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+bool CuckooFilter::CompactSingleFilter(size_t filter_idx) {
+  const uint64_t n = NumBuckets(filters_[filter_idx]);
+  bool fully_emptied = true;
+  for (uint64_t bucket_idx = 0; bucket_idx < n; ++bucket_idx) {
+    for (uint8_t slot_idx = 0; slot_idx < slots_per_bucket_; ++slot_idx) {
+      if (!RelocateSlot(filter_idx, bucket_idx, slot_idx))
+        fully_emptied = false;
+    }
+  }
+  // Only the newest sub-filter can ever be freed: freeing a middle one would leave a gap that
+  // breaks the "bucket count grows by expansion_ per index" invariant RelocateSlot relies on.
+  if (fully_emptied && filter_idx == filters_.size() - 1) {
+    filters_.pop_back();
+  }
+  return fully_emptied;
+}
+
+void CuckooFilter::Compact(bool cont) {
+  for (size_t i = filters_.size(); i-- > 1;) {
+    if (!CompactSingleFilter(i) && !cont)
+      break;
+  }
+  num_deletes_ = 0;
+}
+
 bool CuckooFilter::KOInsert(const LookupParams& p, SubFilter& sf) {
   const uint64_t n = NumBuckets(sf);
   uint64_t idx = p.h1 % n;
