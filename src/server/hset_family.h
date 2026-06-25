@@ -36,7 +36,7 @@ class HSetFamily {
 
   static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
                                                ExpireFlags flags, std::string_view key,
-                                               CmdArgList values, PrimeValue* pv);
+                                               const facade::ParsedArgs& fields, PrimeValue* pv);
 };
 
 }  // namespace dfly
