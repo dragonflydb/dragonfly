@@ -4520,9 +4520,49 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   EXPECT_THAT(resp, kNoResults);
 }
 
+TEST_F(SearchFamilyTest, KnnHnswQueryAttributesEfRuntime) {
+  auto resp = Run({"FT.CREATE", "attr_idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "8",
+                   "TYPE", "FLOAT32", "DIM", "1", "DISTANCE_METRIC", "L2", "EF_RUNTIME", "11"});
+  EXPECT_EQ(resp, "OK");
+
+  Run({"HSET", "doc1", "pos", FloatVec1(1.0f)});
+  Run({"HSET", "doc2", "pos", FloatVec1(2.0f)});
+  Run({"HSET", "doc3", "pos", FloatVec1(3.0f)});
+
+  // Each query must return the single nearest doc (doc2) and yield its distance under alias "dist".
+  auto expect_nearest_doc2 = [&](const RespExpr& resp) {
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    auto results = resp.GetVec();
+    ASSERT_EQ(results.size(), 3);
+    EXPECT_THAT(results[0], IntArg(1));
+    EXPECT_EQ(results[1].GetString(), "doc2");
+    EXPECT_LT(map_score("dist", results[2].GetVec()), 0.01);
+  };
+
+  // Attribute block overrides the inline alias ("inline" -> "dist") and passes EF_RUNTIME via
+  // param.
+  resp = Run({"FT.SEARCH", "attr_idx",
+              "*=>[KNN $k @pos $vec AS inline]=>{$EF_RUNTIME: $ef; $YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "6", "k", "1", "vec", FloatVec1(2.0f), "ef", "30", "RETURN", "1", "dist",
+              "SORTBY", "dist", "DIALECT", "2"});
+  expect_nearest_doc2(resp);
+
+  // Attribute block with only EF_RUNTIME and a trailing ';'; the inline AS alias is kept.
+  resp =
+      Run({"FT.SEARCH", "attr_idx", "*=>[KNN 1 @pos $vec AS dist]=>{$EF_RUNTIME: 7;}", "PARAMS",
+           "2", "vec", FloatVec1(2.0f), "RETURN", "1", "dist", "SORTBY", "dist", "DIALECT", "2"});
+  expect_nearest_doc2(resp);
+
+  // No EF_RUNTIME given anywhere -> the index-level default (11) is used for the search.
+  resp =
+      Run({"FT.SEARCH", "attr_idx", "*=>[KNN 1 @pos $vec]=>{$YIELD_DISTANCE_AS: dist}", "PARAMS",
+           "2", "vec", FloatVec1(2.0f), "RETURN", "1", "dist", "SORTBY", "dist", "DIALECT", "2"});
+  expect_nearest_doc2(resp);
+}
+
 // EF_RUNTIME widens the HNSW candidate list at query time: a large value explores enough of the
 // graph to return the exact nearest neighbor, while ef=1 is greedy and provably misses many. The
-// gap proves the per-query EF_RUNTIME override actually reaches and steers the search instead of
+// gap proves the per-query EF_RUNTIME attribute actually reaches and steers the search instead of
 // being parsed and dropped. Dataset, seed and shard count are fixed, so the recall counts below are
 // deterministic.
 TEST_F(SearchFamilyTest, KnnHnswEfRuntimeWidensSearch) {
@@ -4554,8 +4594,8 @@ TEST_F(SearchFamilyTest, KnnHnswEfRuntimeWidensSearch) {
   WaitForIndexReady("ef_idx");
 
   auto knn_top1 = [&](const std::vector<float>& qv, int ef) -> int {
-    auto resp = Run({"FT.SEARCH", "ef_idx", "*=>[KNN 1 @pos $v EF_RUNTIME $e]", "PARAMS", "4", "v",
-                     pack(qv), "e", std::to_string(ef), "NOCONTENT", "DIALECT", "2"});
+    auto resp = Run({"FT.SEARCH", "ef_idx", "*=>[KNN 1 @pos $v]=>{$EF_RUNTIME: $e}", "PARAMS", "4",
+                     "v", pack(qv), "e", std::to_string(ef), "NOCONTENT", "DIALECT", "2"});
     auto vec = resp.GetVec();
     if (vec.size() < 2)
       return -1;
