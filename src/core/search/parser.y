@@ -104,7 +104,7 @@ double toDouble(string_view src);
 %nterm <AstKnnNode> knn_query
 %nterm <std::string> opt_knn_alias
 %nterm <std::string> geounit
-%nterm <std::optional<size_t>> opt_ef_runtime
+%nterm <std::optional<uint32_t>> opt_ef_runtime
 %nterm <AstVectorRangeNode> vector_range_query
 %nterm <double> vec_range_radius
 
@@ -125,7 +125,7 @@ knn_query:
       uint32_t knn_count = toUint32($3);
       auto field = std::move($4);
       auto alias = std::move($7);
-      auto ef = $6;
+      std::optional<uint32_t> ef = $6;
 
       auto vec_result = BytesToFtVectorSafe($5);
       if (!vec_result) {

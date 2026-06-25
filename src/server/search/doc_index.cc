@@ -225,9 +225,10 @@ string DocIndexInfo::BuildRestoreCommand() const {
         [out = &out](const search::SchemaField::VectorParams& params) {
           auto sim = search::VectorSimilarityToString(params.sim);
           if (params.use_hnsw) {
-            absl::StrAppend(out, " HNSW 12 TYPE ", params.data_type, " DIM ", params.dim,
+            absl::StrAppend(out, " HNSW 14 TYPE ", params.data_type, " DIM ", params.dim,
                             " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity, " M ",
-                            params.hnsw_m, " EF_CONSTRUCTION ", params.hnsw_ef_construction);
+                            params.hnsw_m, " EF_CONSTRUCTION ", params.hnsw_ef_construction,
+                            " EF_RUNTIME ", params.hnsw_ef_runtime);
           } else {
             absl::StrAppend(out, " FLAT 8 TYPE ", params.data_type, " DIM ", params.dim,
                             " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity);

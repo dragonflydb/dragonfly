@@ -349,6 +349,8 @@ async def test_management(async_client: aioredis.Redis):
             "16",
             "ef_construction",
             "200",
+            "ef_runtime",
+            "10",
         ],
     ]
 

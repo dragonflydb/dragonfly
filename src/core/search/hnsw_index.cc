@@ -67,8 +67,6 @@ class HnswSpace : public hnswlib::SpaceInterface<float> {
 
 // TODO: to replace it and use HierarchicalNSW directly.
 struct HnswlibAdapter {
-  // Default setting of hnswlib/hnswalg
-  constexpr static size_t kDefaultEfRuntime = 10;
   constexpr static size_t kSeed = 100;
 
   explicit HnswlibAdapter(const SchemaField::VectorParams& params, bool copy_vector)
@@ -79,6 +77,7 @@ struct HnswlibAdapter {
         capacity_{params.capacity},
         M_{params.hnsw_m},
         ef_construction_{params.hnsw_ef_construction},
+        ef_runtime_{params.hnsw_ef_runtime},
         data_size_{params.dim * sizeof(float)},
         stub_vector_(data_size_ / sizeof(float), 1.0f) {
   }
@@ -93,13 +92,13 @@ struct HnswlibAdapter {
     DoRemove(id);
   }
 
-  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
-    world_.setEf(ef.value_or(kDefaultEfRuntime));
+  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<uint32_t> ef) {
+    uint32_t ef_runtime = ef.value_or(ef_runtime_);
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    return QueueToVec(world_.searchKnn(target, k));
+    return QueueToVec(world_.searchKnnWithEf(target, k, nullptr, ef_runtime));
   }
 
-  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
+  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<uint32_t> ef,
                                        const vector<GlobalDocId>& allowed) {
     struct BinsearchFilter : hnswlib::BaseFilterFunctor {
       virtual bool operator()(hnswlib::labeltype id) {
@@ -111,10 +110,10 @@ struct HnswlibAdapter {
       const vector<GlobalDocId>* allowed;
     };
 
-    world_.setEf(ef.value_or(kDefaultEfRuntime));
+    uint32_t ef_runtime = ef.value_or(ef_runtime_);
     BinsearchFilter filter{&allowed};
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    return QueueToVec(world_.searchKnn(target, k, &filter));
+    return QueueToVec(world_.searchKnnWithEf(target, k, &filter, ef_runtime));
   }
 
   // Brute-force KNN search over a specific subset of documents.
@@ -446,6 +445,7 @@ struct HnswlibAdapter {
   size_t capacity_;                 // Initial max_elements_ — used to reconstruct world_.
   size_t M_;                        // hnsw_m — used to reconstruct world_.
   size_t ef_construction_;          // hnsw_ef_construction — used to reconstruct world_.
+  uint32_t ef_runtime_;             // Default runtime search breadth.
   size_t data_size_;                // Byte size of a single vector.
   std::vector<float> stub_vector_;  // Non-zero data for deleted nodes in borrowed mode.
 };
@@ -485,12 +485,12 @@ bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::stri
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(float* target, size_t k,
-                                                                std::optional<size_t> ef) const {
+                                                                std::optional<uint32_t> ef) const {
   return adapter_->Knn(target, k, ef);
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
-    float* target, size_t k, std::optional<size_t> ef,
+    float* target, size_t k, std::optional<uint32_t> ef,
     const std::vector<GlobalDocId>& allowed) const {
   return adapter_->Knn(target, k, ef, allowed);
 }

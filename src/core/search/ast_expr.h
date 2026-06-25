@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <iosfwd>
 #include <memory>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -148,7 +149,7 @@ struct AstTagsNode {
 struct AstKnnNode {
   AstKnnNode() = default;
   AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec,
-             std::string_view score_alias, std::optional<size_t> ef_runtime);
+             std::string_view score_alias, std::optional<uint32_t> ef_runtime);
 
   AstKnnNode(AstNode&& sub, AstKnnNode&& self);
 
@@ -167,7 +168,7 @@ struct AstKnnNode {
   std::string field;
   OwnedFtVector vec;
   std::string score_alias;
-  std::optional<float> ef_runtime;
+  std::optional<uint32_t> ef_runtime;
 
   bool HasPreFilter() const;
 };
@@ -223,6 +224,6 @@ using AstExpr = AstNode;
 }  // namespace dfly
 
 namespace std {
-ostream& operator<<(ostream& os, optional<size_t> o);
+ostream& operator<<(ostream& os, optional<uint32_t> o);
 ostream& operator<<(ostream& os, dfly::search::AstTagsNode::TagValueProxy o);
 }  // namespace std
