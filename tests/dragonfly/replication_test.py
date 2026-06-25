@@ -1779,44 +1779,38 @@ async def test_tls_replication(
     db_size = await c_master.execute_command("DBSIZE")
     assert 100 == db_size
 
-    proxy = Proxy(
-        "127.0.0.1", 1114, "127.0.0.1", master.port if not test_admin_port else master.admin_port
-    )
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+    async with Proxy(
+        "127.0.0.1", 0, "127.0.0.1", master.port if not test_admin_port else master.admin_port
+    ) as proxy:
+        # 2. Spin up a replica and initiate a REPLICAOF
+        replica = df_factory.create(
+            tls_replication="true",
+            **with_ca_tls_server_args,
+            proactor_threads=t_replica,
+        )
+        replica.start()
+        c_replica = replica.client(**with_ca_tls_client_args)
+        res = await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port))
+        assert "OK" == res
+        await check_all_replicas_finished([c_replica], c_master)
 
-    # 2. Spin up a replica and initiate a REPLICAOF
-    replica = df_factory.create(
-        tls_replication="true",
-        **with_ca_tls_server_args,
-        proactor_threads=t_replica,
-    )
-    replica.start()
-    c_replica = replica.client(**with_ca_tls_client_args)
-    res = await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port))
-    assert "OK" == res
-    await check_all_replicas_finished([c_replica], c_master)
+        # 3. Verify that replica dbsize == debug populate key size -- replication works
+        db_size = await c_replica.execute_command("DBSIZE")
+        assert 100 == db_size
 
-    # 3. Verify that replica dbsize == debug populate key size -- replication works
-    db_size = await c_replica.execute_command("DBSIZE")
-    assert 100 == db_size
+        # 4. Break the connection between master and replica
+        await proxy.close()
+        await asyncio.sleep(3)
+        await proxy.start_serving()
 
-    # 4. Break the connection between master and replica
-    await proxy.close(proxy_task)
-    await asyncio.sleep(3)
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+        # Check replica gets new keys
+        await c_master.execute_command("SET MY_KEY 1")
+        db_size = await c_master.execute_command("DBSIZE")
+        assert 101 == db_size
 
-    # Check replica gets new keys
-    await c_master.execute_command("SET MY_KEY 1")
-    db_size = await c_master.execute_command("DBSIZE")
-    assert 101 == db_size
-
-    await check_all_replicas_finished([c_replica], c_master)
-    db_size = await c_replica.execute_command("DBSIZE")
-    assert 101 == db_size
-
-    await proxy.close(proxy_task)
+        await check_all_replicas_finished([c_replica], c_master)
+        db_size = await c_replica.execute_command("DBSIZE")
+        assert 101 == db_size
 
 
 @dfly_args({"proactor_threads": 2})
@@ -2026,10 +2020,7 @@ async def test_network_disconnect(
     async with replica.client() as c_replica, master.client() as c_master:
         await seeder.run(target_deviation=0.1)
 
-        proxy = Proxy("127.0.0.1", 0, "127.0.0.1", master.port)
-        await proxy.start()
-        task = asyncio.create_task(proxy.serve())
-        try:
+        async with Proxy("127.0.0.1", 0, "127.0.0.1", master.port) as proxy:
             await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
             if check_stale_log:
@@ -2060,8 +2051,6 @@ async def test_network_disconnect(
 
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
-        finally:
-            await proxy.close(task)
 
     if check_stale_log:
         master.stop()
@@ -2079,10 +2068,7 @@ async def test_replica_reconnections_after_network_disconnect(df_factory, df_see
     async with replica.client() as c_replica:
         await seeder.run(target_deviation=0.1)
 
-        proxy = Proxy("127.0.0.1", 1115, "127.0.0.1", master.port)
-        await proxy.start()
-        task = asyncio.create_task(proxy.serve())
-        try:
+        async with Proxy("127.0.0.1", 0, "127.0.0.1", master.port) as proxy:
             await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
             # Wait replica to be up and synchronized with master
@@ -2091,15 +2077,14 @@ async def test_replica_reconnections_after_network_disconnect(df_factory, df_see
             initial_reconnects_count = await get_replica_reconnects_count(replica)
 
             # Fully drop the server
-            await proxy.close(task)
+            await proxy.close()
 
             # After dropping the connection replica should try to reconnect
             await wait_for_replica_status(c_replica, status="down")
             await asyncio.sleep(2)
 
             # Restart the proxy
-            await proxy.start()
-            task = asyncio.create_task(proxy.serve())
+            await proxy.start_serving()
 
             # Wait replica to be reconnected and synchronized with master
             await wait_available_async(c_replica)
@@ -2109,9 +2094,6 @@ async def test_replica_reconnections_after_network_disconnect(df_factory, df_see
 
             # Assert replica reconnects metrics increased
             await assert_replica_reconnections(replica, initial_reconnects_count)
-
-        finally:
-            await proxy.close(task)
 
 
 async def test_search(df_factory):
@@ -3631,11 +3613,7 @@ async def test_partial_sync(df_factory, proactors, backlog_len):
         seeder = SeederV2(key_target=keys)
         await seeder.run(c_master, target_deviation=0.01)
 
-        proxy = Proxy("127.0.0.1", 1113, "127.0.0.1", master.port)
-        await proxy.start()
-        task = asyncio.create_task(proxy.serve())
-
-        try:
+        async with Proxy("127.0.0.1", 0, "127.0.0.1", master.port) as proxy:
             await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
             # Reach stable sync
             await wait_for_replicas_state(c_replica)
@@ -3655,7 +3633,7 @@ async def test_partial_sync(df_factory, proactors, backlog_len):
             await proxy.close()
             # Whoops we moved too much, no partial sync here
             await stream(c_master, backlog_len + 10)
-            await proxy.start()
+            await proxy.start_serving()
             await asyncio.sleep(1.0)
 
             await check_all_replicas_finished([c_replica], c_master)
@@ -3664,8 +3642,6 @@ async def test_partial_sync(df_factory, proactors, backlog_len):
                 *(SeederV2.capture(c) for c in (c_master, c_replica))
             )
             assert hash1 == hash2
-        finally:
-            await proxy.close(task)
 
     master.stop()
     replica.stop()
@@ -4425,48 +4401,44 @@ async def test_hnsw_search_replication_with_network_disruptions(
     await seeder.create_index(c_master)
     await seeder.seed_initial_docs(c_master)
 
-    proxy = Proxy("127.0.0.1", 0, "127.0.0.1", master.port)
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+    async with Proxy("127.0.0.1", 0, "127.0.0.1", master.port) as proxy:
+        traffic_task = asyncio.create_task(seeder.run_traffic(c_master))
+        search_task = asyncio.create_task(seeder.run_search_queries(c_master))
+        await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
-    traffic_task = asyncio.create_task(seeder.run_traffic(c_master))
-    search_task = asyncio.create_task(seeder.run_search_queries(c_master))
-    await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+        sync_timeout = _hnsw_sync_timeout(num_docs)
 
-    sync_timeout = _hnsw_sync_timeout(num_docs)
-
-    # Wait for initial sync before running search queries on replica.
-    # During HNSW graph restoration with external vectors, nodes have
-    # uninitialized data pointers — search queries could dereference them.
-    await wait_available_async(c_replica, timeout=sync_timeout)
-    replica_search_task = asyncio.create_task(seeder.run_search_queries(c_replica))
-
-    try:
-        await asyncio.sleep(random.uniform(0, 10))
-        proxy.drop_connection()
-
-        # Give time to detect dropped connection and reconnect
-        await asyncio.sleep(1.0)
-
+        # Wait for initial sync before running search queries on replica.
+        # During HNSW graph restoration with external vectors, nodes have
+        # uninitialized data pointers — search queries could dereference them.
         await wait_available_async(c_replica, timeout=sync_timeout)
-        seeder.stop()
-        await traffic_task
-        await search_task
-        await replica_search_task
+        replica_search_task = asyncio.create_task(seeder.run_search_queries(c_replica))
 
-        # Log replica FT.INFO for debugging if assertion fails later
-        info = await c_replica.execute_command("FT.INFO", seeder.index_name)
-        logging.info(f"Replica FT.INFO: {info}")
+        try:
+            await asyncio.sleep(random.uniform(0, 10))
+            proxy.drop_connection()
 
-        await check_all_replicas_finished([c_replica], c_master, timeout=sync_timeout)
-        await seeder.verify(c_master, c_replica)
+            # Give time to detect dropped connection and reconnect
+            await asyncio.sleep(1.0)
 
-    finally:
-        seeder.stop()
-        traffic_task.cancel()
-        search_task.cancel()
-        replica_search_task.cancel()
-        await proxy.close(proxy_task)
+            await wait_available_async(c_replica, timeout=sync_timeout)
+            seeder.stop()
+            await traffic_task
+            await search_task
+            await replica_search_task
+
+            # Log replica FT.INFO for debugging if assertion fails later
+            info = await c_replica.execute_command("FT.INFO", seeder.index_name)
+            logging.info(f"Replica FT.INFO: {info}")
+
+            await check_all_replicas_finished([c_replica], c_master, timeout=sync_timeout)
+            await seeder.verify(c_master, c_replica)
+
+        finally:
+            seeder.stop()
+            traffic_task.cancel()
+            search_task.cancel()
+            replica_search_task.cancel()
 
 
 @pytest.mark.parametrize(

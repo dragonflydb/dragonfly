@@ -1558,12 +1558,12 @@ async def test_network_disconnect_during_migration(df_factory):
     await DebugPopulateSeeder(key_target=100000).run(nodes[0].client)
     start_capture = await DebugPopulateSeeder.capture(nodes[0].client)
 
-    proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", nodes[1].instance.admin_port)
-    await proxy.start()
-    task = asyncio.create_task(proxy.serve())
-
-    nodes[0].migrations.append(MigrationInfo("127.0.0.1", proxy.port, [(0, 16383)], nodes[1].id))
-    try:
+    async with Proxy(
+        "127.0.0.1", next(next_port), "127.0.0.1", nodes[1].instance.admin_port
+    ) as proxy:
+        nodes[0].migrations.append(
+            MigrationInfo("127.0.0.1", proxy.port, [(0, 16383)], nodes[1].id)
+        )
         logging.debug("Start migration")
         await apply_config(nodes)
 
@@ -1577,12 +1577,10 @@ async def test_network_disconnect_during_migration(df_factory):
             )
 
         await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC", 20)
-    finally:
-        await proxy.close(task)
 
-    await proxy.start()
-    task = asyncio.create_task(proxy.serve())
-    try:
+        await proxy.close()
+        await proxy.start_serving()
+
         await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
         nodes[0].migrations = []
         nodes[0].slots = []
@@ -1591,8 +1589,6 @@ async def test_network_disconnect_during_migration(df_factory):
         await apply_config(nodes)
 
         assert (await DebugPopulateSeeder.capture(nodes[1].client)) == start_capture
-    finally:
-        await proxy.close(task)
 
 
 @pytest.mark.parametrize(
@@ -2446,55 +2442,49 @@ async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_
 
     fill_task = asyncio.create_task(seeder.run())
 
-    proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", cluster_nodes[0].port)
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+    async with Proxy("127.0.0.1", next(next_port), "127.0.0.1", cluster_nodes[0].port) as proxy:
+        # Start replication
+        await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port) + " 0 5259")
+        await c_replica.execute_command(
+            "ADDREPLICAOF localhost " + str(cluster_nodes[1].port) + " 5260 16383"
+        )
 
-    # Start replication
-    await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port) + " 0 5259")
-    await c_replica.execute_command(
-        "ADDREPLICAOF localhost " + str(cluster_nodes[1].port) + " 5260 16383"
-    )
+        # wait for replication to reach stable state on all nodes
+        await asyncio.gather(
+            *(asyncio.create_task(await_stable_sync(c, replica.port)) for c in c_nodes)
+        )
 
-    # wait for replication to reach stable state on all nodes
-    await asyncio.gather(
-        *(asyncio.create_task(await_stable_sync(c, replica.port)) for c in c_nodes)
-    )
+        # break connection between first node and replica
+        await proxy.close()
+        await asyncio.sleep(3)
 
-    # break connection between first node and replica
-    await proxy.close(proxy_task)
-    await asyncio.sleep(3)
+        async def is_first_master_conn_down(conn):
+            info = await conn.execute_command("INFO REPLICATION")
+            print(info)
+            statuses = re.findall("master_link_status:(down|up)\r\n", info)
+            assert len(statuses) == 2
+            assert statuses[0] == "down"
+            assert statuses[1] == "up"
 
-    async def is_first_master_conn_down(conn):
-        info = await conn.execute_command("INFO REPLICATION")
-        print(info)
-        statuses = re.findall("master_link_status:(down|up)\r\n", info)
-        assert len(statuses) == 2
-        assert statuses[0] == "down"
-        assert statuses[1] == "up"
+        await is_first_master_conn_down(c_replica)
 
-    await is_first_master_conn_down(c_replica)
+        # start connection again
+        await proxy.start_serving()
 
-    # start connection again
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+        seeder.stop()
+        await fill_task
 
-    seeder.stop()
-    await fill_task
+        # wait for stable sync on first master
+        await await_stable_sync(c_nodes[0], replica.port)
+        # wait for no lag on all cluster nodes
+        await asyncio.gather(*(asyncio.create_task(await_no_lag(c)) for c in c_nodes))
 
-    # wait for stable sync on first master
-    await await_stable_sync(c_nodes[0], replica.port)
-    # wait for no lag on all cluster nodes
-    await asyncio.gather(*(asyncio.create_task(await_no_lag(c)) for c in c_nodes))
-
-    # promote replica to master and compare data
-    await c_replica.execute_command("REPLICAOF NO ONE")
-    capture = await seeder.capture()
-    assert await seeder.compare(capture, replica.port)
-    fake_capture = await seeder.capture_fake_redis()
-    assert await seeder.compare(fake_capture, replica.port)
-
-    await proxy.close(proxy_task)
+        # promote replica to master and compare data
+        await c_replica.execute_command("REPLICAOF NO ONE")
+        capture = await seeder.capture()
+        assert await seeder.compare(capture, replica.port)
+        fake_capture = await seeder.capture_fake_redis()
+        assert await seeder.compare(fake_capture, replica.port)
 
 
 def is_offset_eq_master_repl_offset(replication_info: str):
@@ -2603,63 +2593,62 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
 
     fill_task = asyncio.create_task(seeder.run())
 
-    proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", redis_cluster_nodes[1].port)
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+    async with Proxy(
+        "127.0.0.1", next(next_port), "127.0.0.1", redis_cluster_nodes[1].port
+    ) as proxy:
+        # Start replication
+        await c_replica.execute_command(
+            "REPLICAOF localhost " + str(redis_cluster_nodes[0].port) + " 0 5460"
+        )
+        await c_replica.execute_command("ADDREPLICAOF localhost " + str(proxy.port) + " 5461 10922")
+        await c_replica.execute_command(
+            "ADDREPLICAOF localhost " + str(redis_cluster_nodes[2].port) + " 10923 16383"
+        )
 
-    # Start replication
-    await c_replica.execute_command(
-        "REPLICAOF localhost " + str(redis_cluster_nodes[0].port) + " 0 5460"
-    )
-    await c_replica.execute_command("ADDREPLICAOF localhost " + str(proxy.port) + " 5461 10922")
-    await c_replica.execute_command(
-        "ADDREPLICAOF localhost " + str(redis_cluster_nodes[2].port) + " 10923 16383"
-    )
+        # give seeder time to run.
+        await asyncio.sleep(1)
 
-    # give seeder time to run.
-    await asyncio.sleep(1)
+        # break connection between second node and replica
+        await proxy.close()
+        await asyncio.sleep(3)
 
-    # break connection between second node and replica
-    await proxy.close(proxy_task)
-    await asyncio.sleep(3)
+        # check second node connection is down
+        info = await c_replica.execute_command("INFO REPLICATION")
+        statuses = re.findall("master_link_status:(down|up)\r\n", info)
+        assert len(statuses) == 3
+        assert statuses[0] == "up"
+        assert statuses[1] == "down"
+        assert statuses[2] == "up"
 
-    # check second node connection is down
-    info = await c_replica.execute_command("INFO REPLICATION")
-    statuses = re.findall("master_link_status:(down|up)\r\n", info)
-    assert len(statuses) == 3
-    assert statuses[0] == "up"
-    assert statuses[1] == "down"
-    assert statuses[2] == "up"
+        # start connection again
+        await proxy.start_serving()
 
-    # start connection again
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+        # give seeder more time to run
+        await asyncio.sleep(1)
 
-    # give seeder more time to run
-    await asyncio.sleep(1)
+        # check second node connection is up
+        info = await c_replica.execute_command("INFO REPLICATION")
+        statuses = re.findall("master_link_status:(down|up)\r\n", info)
+        assert len(statuses) == 3
+        assert statuses[0] == "up"
+        assert statuses[1] == "up"
+        assert statuses[2] == "up"
 
-    # check second node connection is up
-    info = await c_replica.execute_command("INFO REPLICATION")
-    statuses = re.findall("master_link_status:(down|up)\r\n", info)
-    assert len(statuses) == 3
-    assert statuses[0] == "up"
-    assert statuses[1] == "up"
-    assert statuses[2] == "up"
+        # give seeder time to run.
+        await asyncio.sleep(1)
 
-    # give seeder time to run.
-    await asyncio.sleep(1)
+        # Stop seeder
+        seeder.stop()
+        await fill_task
 
-    # Stop seeder
-    seeder.stop()
-    await fill_task
+        # wait for replication to finish
+        await asyncio.gather(
+            *(asyncio.create_task(await_eq_offset(client)) for client in node_clients)
+        )
 
-    # wait for replication to finish
-    await asyncio.gather(*(asyncio.create_task(await_eq_offset(client)) for client in node_clients))
-
-    await c_replica.execute_command("REPLICAOF NO ONE")
-    capture = await seeder.capture()
-    assert await seeder.compare(capture, replica.port)
-    await proxy.close(proxy_task)
+        await c_replica.execute_command("REPLICAOF NO ONE")
+        capture = await seeder.capture()
+        assert await seeder.compare(capture, replica.port)
 
 
 @pytest.mark.large
