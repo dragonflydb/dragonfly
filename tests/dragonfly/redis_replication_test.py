@@ -330,60 +330,53 @@ async def test_disconnect_master(
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
 
-    proxy = Proxy("127.0.0.1", 0, "127.0.0.1", master.port)
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
     stream_task = None
     seeder = None
 
-    try:
-        replicas = [
-            df_factory.create(port=port_picker.get_available_port(), proactor_threads=t)
-            for i, t in enumerate(t_replicas)
-        ]
-
-        # Fill master with test data
-        seeder = df_seeder_factory.create(port=master.port, **seeder_config)
-        await seeder.run(target_deviation=0.1)
-
-        # Start replicas
-        df_factory.start_all(replicas)
-
-        c_replicas = [replica.client() for replica in replicas]
-
-        # Start data stream
-        stream_task = asyncio.create_task(seeder.run())
-        await asyncio.sleep(0.5)
-
-        await replicate_all(c_replicas, proxy.port)
-
-        # Break the connection between master and replica
-        await proxy.close(proxy_task)
-        proxy_task = None
-        await asyncio.sleep(2)
-        await proxy.start()
-        proxy_task = asyncio.create_task(proxy.serve())
-
-        # finish streaming data
-        await asyncio.sleep(1)
-        seeder.stop()
-        await stream_task
-        stream_task = None
-
-        # Check data after stable state stream
-        await wait_available_async(c_replicas)
-        await await_synced_all(c_master, c_replicas)
-        await check_data(seeder, replicas, c_replicas)
-        seeder = None
-
-    finally:
+    async with Proxy("127.0.0.1", 0, "127.0.0.1", master.port) as proxy:
         try:
+            replicas = [
+                df_factory.create(port=port_picker.get_available_port(), proactor_threads=t)
+                for i, t in enumerate(t_replicas)
+            ]
+
+            # Fill master with test data
+            seeder = df_seeder_factory.create(port=master.port, **seeder_config)
+            await seeder.run(target_deviation=0.1)
+
+            # Start replicas
+            df_factory.start_all(replicas)
+
+            c_replicas = [replica.client() for replica in replicas]
+
+            # Start data stream
+            stream_task = asyncio.create_task(seeder.run())
+            await asyncio.sleep(0.5)
+
+            await replicate_all(c_replicas, proxy.port)
+
+            # Break the connection between master and replica
+            await proxy.close()
+            await asyncio.sleep(2)
+            await proxy.start_serving()
+
+            # finish streaming data
+            await asyncio.sleep(1)
+            seeder.stop()
+            await stream_task
+            stream_task = None
+
+            # Check data after stable state stream
+            await wait_available_async(c_replicas)
+            await await_synced_all(c_master, c_replicas)
+            await check_data(seeder, replicas, c_replicas)
+            seeder = None
+
+        finally:
             if seeder is not None:
                 seeder.stop()
             if stream_task is not None:
                 await asyncio.gather(stream_task, return_exceptions=True)
-        finally:
-            await proxy.close(proxy_task)
 
 
 @pytest.mark.asyncio
