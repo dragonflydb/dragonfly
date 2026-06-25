@@ -183,9 +183,27 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: ${{ steps.previous-state.outputs.artifact-name }}
-          path: fuzz
+          path: fuzz/packaged_experimental_state
           run-id: ${{ steps.previous-state.outputs.run-id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Unpack experimental AFL state artifact
+        id: unpack-state
+        if: env.RESET_STATE != 'true' && steps.previous-state.outputs.run-id != ''
+        run: |
+          state_archive="fuzz/packaged_experimental_state/state-${TARGET}.tar.gz"
+          restored=false
+
+          if [[ ! -f "${state_archive}" ]]; then
+            echo "::warning::Experimental AFL state artifact ${state_archive} was not found"
+          elif tar -xzf "${state_archive}" -C .; then
+            restored=true
+            echo "Restored experimental AFL state from ${state_archive}"
+          else
+            echo "::warning::Failed to unpack ${state_archive}; starting from seeds"
+          fi
+
+          echo "restored=${restored}" >> "${GITHUB_OUTPUT}"
 
       - name: Capture pre-run health snapshot
         run: |
@@ -318,7 +336,7 @@ jobs:
       - name: Write experimental health report
         if: always() && steps.run-fuzzer.outputs.started == 'true'
         env:
-          CACHE_RESTORED: ${{ steps.restore-afl-state.outputs.cache-hit == 'true' || steps.restore-afl-state.outputs.cache-matched-key != '' || steps.previous-state.outputs.run-id != '' }}
+          CACHE_RESTORED: ${{ steps.restore-afl-state.outputs.cache-hit == 'true' || steps.restore-afl-state.outputs.cache-matched-key != '' || steps.unpack-state.outputs.restored == 'true' }}
         run: |
           python3 fuzz/fuzz_health.py report \
             --target "${TARGET}" \
@@ -355,7 +373,6 @@ jobs:
           name: fuzz-experimental-persistent-${{ matrix.target }}-crashes-${{ github.run_number }}
           path: |
             fuzz/packaged_experimental/*.tar.gz
-            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/crashes/**
             fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/fuzzer_stats
           retention-days: 30
           if-no-files-found: ignore
@@ -367,7 +384,6 @@ jobs:
           name: fuzz-experimental-persistent-${{ matrix.target }}-hangs-${{ github.run_number }}
           path: |
             fuzz/packaged_experimental_hangs/*.tar.gz
-            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/hangs/**
             fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/fuzzer_stats
           retention-days: 30
           if-no-files-found: ignore
@@ -409,21 +425,45 @@ jobs:
             echo "save_cache=true" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Package experimental AFL state artifact
+        if: always() && steps.run-fuzzer.outputs.started == 'true' && steps.cache-size.outputs.save_cache == 'true'
+        run: |
+          state_package_dir="fuzz/packaged_experimental_state"
+          state_package="${state_package_dir}/state-${TARGET}.tar.gz"
+          mkdir -p "${state_package_dir}"
+
+          state_paths=(
+            "fuzz/artifacts/experimental-persistent/${TARGET}/default/queue"
+            "fuzz/artifacts/experimental-persistent/${TARGET}/default/.state"
+            "fuzz/artifacts/experimental-persistent/${TARGET}/default/fuzzer_stats"
+            "fuzz/artifacts/experimental-persistent/${TARGET}/default/plot_data"
+            "fuzz/artifacts/experimental-persistent/${TARGET}/repro.env"
+            "fuzz/corpus/experimental-persistent/${TARGET}"
+          )
+
+          existing_paths=()
+          for path in "${state_paths[@]}"; do
+            if [[ -e "${path}" ]]; then
+              existing_paths+=("${path}")
+            fi
+          done
+
+          if (( ${#existing_paths[@]} == 0 )); then
+            echo "::warning::No experimental AFL state paths found to package"
+            exit 0
+          fi
+
+          tar -czf "${state_package}" "${existing_paths[@]}"
+          ls -lh "${state_package}"
+
       - name: Upload experimental AFL state artifact
         if: always() && steps.run-fuzzer.outputs.started == 'true' && steps.cache-size.outputs.save_cache == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-experimental-persistent-${{ matrix.target }}-state
-          path: |
-            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/queue
-            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/.state
-            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/fuzzer_stats
-            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/default/plot_data
-            fuzz/artifacts/experimental-persistent/${{ matrix.target }}/repro.env
-            fuzz/corpus/experimental-persistent/${{ matrix.target }}
+          path: fuzz/packaged_experimental_state/state-${{ matrix.target }}.tar.gz
           retention-days: 7
           if-no-files-found: ignore
-          include-hidden-files: true
 
       - name: Save experimental AFL state
         if: always() && steps.run-fuzzer.outputs.started == 'true' && steps.cache-size.outputs.save_cache == 'true'

@@ -104,4 +104,20 @@ TEST_F(CuckooFilterTest, InsertUniquePreventsduplicates) {
   EXPECT_EQ(cf_.NumItems(), 1u);
 }
 
+TEST_F(CuckooFilterTest, CountTracksDuplicateInsertsAndDeletes) {
+  const uint64_t h = CuckooFilter::Hash("counted");
+  EXPECT_EQ(cf_.Count(h), 0u);
+
+  EXPECT_TRUE(cf_.Insert(h));
+  EXPECT_EQ(cf_.Count(h), 1u);
+
+  // Insert (not InsertUnique) never dedups — a second insert of the same item occupies
+  // its own slot, so Count reflects how many times it was added.
+  EXPECT_TRUE(cf_.Insert(h));
+  EXPECT_EQ(cf_.Count(h), 2u);
+
+  EXPECT_TRUE(cf_.Delete(h));
+  EXPECT_EQ(cf_.Count(h), 1u);
+}
+
 }  // namespace dfly

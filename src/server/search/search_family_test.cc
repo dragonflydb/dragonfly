@@ -4520,6 +4520,76 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   EXPECT_THAT(resp, kNoResults);
 }
 
+// EF_RUNTIME widens the HNSW candidate list at query time: a large value explores enough of the
+// graph to return the exact nearest neighbor, while ef=1 is greedy and provably misses many. The
+// gap proves the per-query EF_RUNTIME override actually reaches and steers the search instead of
+// being parsed and dropped. Dataset, seed and shard count are fixed, so the recall counts below are
+// deterministic.
+TEST_F(SearchFamilyTest, KnnHnswEfRuntimeWidensSearch) {
+  auto pack = [](const std::vector<float>& v) {
+    return string(reinterpret_cast<const char*>(v.data()), v.size() * sizeof(float));
+  };
+  constexpr int kDim = 8;
+  auto gen_vec = [](uint32_t seed) {
+    std::vector<float> v(kDim);
+    uint32_t s = seed * 2654435761u + 1013904223u;
+    for (int d = 0; d < kDim; d++) {
+      s = s * 1103515245u + 12345u;
+      v[d] = static_cast<float>((s >> 16) & 0x3ff) / 100.0f;
+    }
+    return v;
+  };
+
+  // A sparse graph (small M / EF_CONSTRUCTION) makes greedy search easy to trap in a local minimum.
+  Run({"FT.CREATE", "ef_idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "10", "TYPE",
+       "FLOAT32", "DIM", std::to_string(kDim), "DISTANCE_METRIC", "L2", "M", "4", "EF_CONSTRUCTION",
+       "20"});
+
+  constexpr int kPoints = 400;
+  std::vector<std::vector<float>> pts(kPoints);
+  for (int i = 0; i < kPoints; i++) {
+    pts[i] = gen_vec(static_cast<uint32_t>(i));
+    Run({"HSET", absl::StrCat("doc", i), "pos", pack(pts[i])});
+  }
+  WaitForIndexReady("ef_idx");
+
+  auto knn_top1 = [&](const std::vector<float>& qv, int ef) -> int {
+    auto resp = Run({"FT.SEARCH", "ef_idx", "*=>[KNN 1 @pos $v EF_RUNTIME $e]", "PARAMS", "4", "v",
+                     pack(qv), "e", std::to_string(ef), "NOCONTENT", "DIALECT", "2"});
+    auto vec = resp.GetVec();
+    if (vec.size() < 2)
+      return -1;
+    return std::stoi(string{vec[1].GetString()}.substr(3));  // "docN" -> N
+  };
+
+  constexpr int kQueries = 60;
+  int wide_hits = 0, greedy_hits = 0;
+  for (int q = 0; q < kQueries; q++) {
+    auto qv = gen_vec(static_cast<uint32_t>(100000 + q));
+
+    // Exact nearest neighbor by brute force.
+    int exact = -1;
+    float best = 1e30f;
+    for (int i = 0; i < kPoints; i++) {
+      float dist = 0;
+      for (int d = 0; d < kDim; d++) {
+        float diff = qv[d] - pts[i][d];
+        dist += diff * diff;
+      }
+      if (dist < best) {
+        best = dist;
+        exact = i;
+      }
+    }
+
+    wide_hits += (knn_top1(qv, 500) == exact);
+    greedy_hits += (knn_top1(qv, 1) == exact);
+  }
+
+  EXPECT_GE(wide_hits, kQueries - 2);     // wide search ~ exhaustive -> exact recall
+  EXPECT_LT(greedy_hits + 5, wide_hits);  // ef=1 greedy provably misses several of them
+}
+
 TEST_F(SearchFamilyTest, KnnHnswQueryAttributesEfRuntime) {
   auto resp = Run({"FT.CREATE", "attr_idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "8",
                    "TYPE", "FLOAT32", "DIM", "1", "DISTANCE_METRIC", "L2", "EF_RUNTIME", "11"});

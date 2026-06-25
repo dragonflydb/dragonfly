@@ -84,7 +84,7 @@ endif()
 add_library(dragonfly_lib
             engine_shard.cc engine_shard_set.cc
             config_registry.cc conn_context.cc
-            debugcmd.cc dflycmd.cc error.cc family_utils.cc string_stats.cc ${DF_SEARCH_SRCS}
+            debugcmd.cc dflycmd.cc error.cc family_utils.cc metrics.cc string_stats.cc ${DF_SEARCH_SRCS}
             server_family.cc string_family.cc list_family.cc generic_family.cc
             ${DF_FAMILY_SRCS}
             main_service.cc memory_cmd.cc rdb_load.cc rdb_load_context.cc rdb_save.cc replica.cc http_api.cc

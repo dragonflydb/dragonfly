@@ -50,12 +50,12 @@ using OptStr = std::optional<std::string>;
 enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
 
 // TODO: replace all the listpack code with our detail::Listpack wrapper.
-bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
+bool IsGoodForListpack(const ParsedArgs& args, const uint8_t* lp) {
   DCHECK_GE(args.size(), 2u);
 
   // For a single field-value pair on an empty or single-entry listpack, approve automatically
   // even with large values. A one-field hash is efficient to look-up or mutate.
-  if (args.size() == 2 && args.front().size() < 4096) {
+  if (args.size() == 2 && args[0].size() < 4096) {
     if (lpLength((uint8_t*)lp) == 0)
       return true;
 
@@ -65,7 +65,7 @@ bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
       unsigned slen = 0;
       long long lval;
       uint8_t* vstr = lpGetValue(first, &slen, &lval);
-      if (vstr && args.front().size() == slen && memcmp(vstr, args.front().data(), slen) == 0) {
+      if (vstr && args[0].size() == slen && memcmp(vstr, args[0].data(), slen) == 0) {
         return true;
       }
     }
@@ -308,7 +308,7 @@ auto ExecuteW(Transaction* tx, F&& f,
   return Unwrap(tx->ScheduleSingleHopT(std::move(shard_cb)));
 }
 
-size_t EstimateListpackMinBytes(CmdArgList members) {
+size_t EstimateListpackMinBytes(const ParsedArgs& members) {
   size_t bytes = 0;
   for (const auto& member : members) {
     bytes += (member.size() + 1);  // string + at least 1 byte for string header.
@@ -459,7 +459,7 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
   return res;
 }
 
-OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, CmdArgList fields) {
+OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, const ParsedArgs& fields) {
   DCHECK(!fields.empty());
 
   std::vector<OptStr> result(fields.size());
@@ -473,7 +473,7 @@ OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, CmdArgList fields) {
     absl::flat_hash_map<string_view, absl::InlinedVector<size_t, 3>> reverse;
     reverse.reserve(fields.size() + 1);
     for (size_t i = 0; i < fields.size(); ++i) {
-      reverse[ArgS(fields, i)].push_back(i);  // map fields to their index.
+      reverse[fields[i]].push_back(i);  // map fields to their index.
     }
 
     for (const auto [key, value] : hw.Range()) {
@@ -515,7 +515,8 @@ uint32_t SetReply(const OpSetParams& op_sp, uint32_t created) {
   return op_sp.format == OpSetParams::Format::kRedis ? 1u : created;
 }
 
-OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
+OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
+                                    const ParsedArgs& values,
                                     const OpSetParams& op_sp = OpSetParams{}) {
   DCHECK(!values.empty() && 0 == values.size() % 2);
   VLOG(2) << "OpSet(" << key << ")";
@@ -625,7 +626,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
   return CbVariant<uint32_t>{SetReply(op_sp, created)};
 }
 
-void HGetGeneric(CmdArgList args, uint8_t getall_mask, CommandContext* cmd_cntx) {
+void HGetGeneric(uint8_t getall_mask, CommandContext* cmd_cntx) {
   auto cb = [getall_mask](const HMapWrap& hw) -> OpResult<vector<string>> {
     vector<string> res;
     bool keyval = (getall_mask == (FIELDS | VALUES));
@@ -655,7 +656,7 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, CommandContext* cmd_cntx)
 }
 
 OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
-                                 ExpireFlags flags, CmdArgList values) {
+                                 ExpireFlags flags, const ParsedArgs& values) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(op_res);
@@ -679,8 +680,8 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
 //   fnx=true  (FNX): holds only if NONE of the fields exist.
 //   fnx=false (FXX): holds only if ALL of the fields exist.
 // A missing key counts as "no fields exist".
-OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key, CmdArgList fields,
-                                    bool fnx) {
+OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key,
+                                    const ParsedArgs& fields, bool fnx) {
   auto& db_slice = op_args.GetDbSlice();
   auto res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
   if (!res) {
@@ -709,7 +710,7 @@ OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key, CmdA
 
 struct HSetExParams {
   OpSetParams op_sp;
-  CmdArgList fields;  // field/value pairs; valid only when the parser has no error.
+  ParsedArgs fields;  // field/value pairs; valid only when the parser has no error.
 };
 
 // Parses HSETEX arguments after the key, reporting any error into `parser` (surfaced by the caller
@@ -723,7 +724,7 @@ struct HSetExParams {
 // mandatory FIELDS keyword, the Dragonfly format a bare numeric ttl_sec. NX (per-field skip) and
 // the collective FNX/FXX condition are mutually exclusive; FNX/FXX behave identically in both
 // syntaxes (set all-or-nothing). Only the reported value differs (see OpSetParams::Format).
-HSetExParams ParseHSetEx(CmdArgParser* parser, CmdArgList args, string_view cmd_name) {
+HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
   using Mode = OpSetParams::Mode;
   using Format = OpSetParams::Format;
   constexpr int kMaxTtl = 1 << 26;
@@ -765,7 +766,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, CmdArgList args, string_view cmd_
     if (op_sp.mode == Mode::kNX || (op_sp.keepttl && has_exp))
       parser->Report(CmdArgParser::CUSTOM_ERROR);  // NX is Dragonfly-only; one expiry option max
 
-    res.fields = args.subspan(parser->UnparsedStart());
+    res.fields = parser->UnparsedArgs();
     if (numfields == 0 || res.fields.size() != size_t(numfields) * 2)
       parser->ReportCustom("The `numfields` parameter must match the number of arguments");
   } else if (has_exp) {
@@ -775,7 +776,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, CmdArgList args, string_view cmd_
     op_sp.format = Format::kDragonfly;
     op_sp.ttl = parser->Next<FInt<1, kMaxTtl>>();
 
-    res.fields = args.subspan(parser->UnparsedStart());
+    res.fields = parser->UnparsedArgs();
     if (res.fields.empty() || res.fields.size() % 2 != 0)
       parser->ReportCustom(WrongNumArgsError(cmd_name));
   }
@@ -785,7 +786,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, CmdArgList args, string_view cmd_
 void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
-  HSetExParams parsed = ParseHSetEx(&parser, args, cmd_cntx->cid()->name());
+  HSetExParams parsed = ParseHSetEx(&parser, cmd_cntx->cid()->name());
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   // Evaluate the FNX/FXX condition (if any), then let OpSet set the fields and report the
@@ -825,9 +826,10 @@ struct HSetReplies {
   CommandContext* cmd_cntx;
 };
 
-void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHDel(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
   // Collect field names for HNSW data preservation.
-  auto fields_span = args.subspan(1);
+  ParsedArgs fields_span = parser.UnparsedArgs();
   absl::InlinedVector<std::string_view, 4> field_names;
   for (auto f : fields_span)
     field_names.push_back(f);
@@ -841,8 +843,7 @@ void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
   HSetReplies{cmd_cntx}.Send(ExecuteW(cmd_cntx->tx(), std::move(cb), std::move(field_names)));
 }
 
-void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdHExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
   using MinMaxTtl = FInt<0, (1 << 26)>;
   auto [key, ttl_sec] = parser.Next<string_view, MinMaxTtl>();
 
@@ -862,7 +863,7 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
 
   uint32_t numFields = parser.Next<uint32_t>();
 
-  CmdArgList fields = args.subspan(parser.UnparsedStart());
+  ParsedArgs fields = parser.UnparsedArgs();
   if (fields.size() != numFields) {
     return rb->SendError("The `numfields` parameter must match the number of arguments",
                          kSyntaxErrType);
@@ -886,7 +887,7 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 OpResult<vector<long>> OpHTtl(Transaction* t, EngineShard* shard, string_view key,
-                              CmdArgList fields) {
+                              const ParsedArgs& fields) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   const DbContext& db_cntx = t->GetDbContext();
   auto it_res = db_slice.FindReadOnly(db_cntx, key, OBJ_HASH);
@@ -914,8 +915,7 @@ OpResult<vector<long>> OpHTtl(Transaction* t, EngineShard* shard, string_view ke
   return res;
 }
 
-void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdHTtl(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -929,7 +929,7 @@ void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
 
   uint32_t numFields = parser.Next<uint32_t>();
 
-  CmdArgList fields = args.subspan(parser.UnparsedStart());
+  ParsedArgs fields = parser.UnparsedArgs();
   if (fields.size() != numFields) {
     return rb->SendError("The `numfields` parameter must match the number of arguments",
                          kSyntaxErrType);
@@ -950,8 +950,9 @@ void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<string> {
+void CmdHGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  auto cb = [field = parser.Next()](const HMapWrap& hw) -> OpResult<string> {
     if (auto it = hw.Find(field); it)
       return string{it->second};
     return OpStatus::KEY_NOTFOUND;
@@ -969,8 +970,9 @@ void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
-  auto fields = args.subspan(1);
+void CmdHMGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  ParsedArgs fields = parser.UnparsedArgs();
   auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
   OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx->tx(), cb);
@@ -991,8 +993,9 @@ void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [field = ArgS(args, 1)](const HMapWrap& hw) -> OpResult<uint32_t> {
+void CmdHStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  auto cb = [field = parser.Next()](const HMapWrap& hw) -> OpResult<uint32_t> {
     if (auto it = hw.Find(field); it)
       return it->second.length();
     return OpStatus::KEY_NOTFOUND;
@@ -1000,22 +1003,23 @@ void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void CmdHLen(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHLen(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
   HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void CmdHExists(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
+void CmdHExists(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  auto cb = [field = parser.Next()](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
   HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view field = ArgS(args, 1);
-  string_view incrs = ArgS(args, 2);
+void CmdHIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view field = parser.Next();
+  string_view incrs = parser.Next();
   int64_t ival = 0;
 
   if (!absl::SimpleAtoi(incrs, &ival)) {
@@ -1047,10 +1051,10 @@ void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view field = ArgS(args, 1);
-  string_view incrs = ArgS(args, 2);
+void CmdHIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view field = parser.Next();
+  string_view incrs = parser.Next();
   double dval = 0;
 
   if (!absl::SimpleAtod(incrs, &dval)) {
@@ -1084,20 +1088,21 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHKeys(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, FIELDS, cmd_cntx);
+void CmdHKeys(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HGetGeneric(FIELDS, cmd_cntx);
 }
 
-void CmdHVals(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, VALUES, cmd_cntx);
+void CmdHVals(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HGetGeneric(VALUES, cmd_cntx);
 }
 
-void CmdHGetAll(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx);
+void CmdHGetAll(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HGetGeneric(GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx);
 }
 
-void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view token = ArgS(args, 1);
+void CmdHScan(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  std::string_view token = parser.Next();
   uint64_t cursor = 0;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(token, &cursor)) {
@@ -1105,8 +1110,8 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   // HSCAN key cursor [MATCH pattern] [COUNT count] [NOVALUES]
-  if (args.size() > 7) {
-    DVLOG(1) << "got " << args.size() << " this is more than it should be";
+  if (cmd_cntx->tail_args().size() > 7) {
+    DVLOG(1) << "got " << cmd_cntx->tail_args().size() << " this is more than it should be";
     return rb->SendError(kSyntaxErr);
   }
 
@@ -1135,21 +1140,22 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-
+void CmdHSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view cmd{cmd_cntx->cid()->name()};
   auto* rb = cmd_cntx->rb();
-  if (args.size() % 2 != 1) {
+  // tail_args = key + field/value pairs; a valid command has an odd count.
+  if (cmd_cntx->tail_args().size() % 2 != 1) {
     return rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
+
+  string_view key = parser.Next();
 
   optional<util::fb2::Future<bool>> tiered_backpressure;
   OpSetParams params{.backpressure = &tiered_backpressure};
 
-  args.remove_prefix(1);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args, params);
+  ParsedArgs values = parser.UnparsedArgs();
+  auto cb = [&, values](Transaction* t, EngineShard* shard) {
+    return OpSet(t->GetOpArgs(shard), key, values, params);
   };
 
   auto delayed_result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1165,12 +1171,12 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdHSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args.subspan(1),
-                 OpSetParams{.mode = OpSetParams::Mode::kNX});
+  ParsedArgs values = parser.UnparsedArgs();
+  auto cb = [&, values](Transaction* t, EngineShard* shard) {
+    return OpSet(t->GetOpArgs(shard), key, values, OpSetParams{.mode = OpSetParams::Mode::kNX});
   };
   HSetReplies{cmd_cntx}.Send(Unwrap(cmd_cntx->tx()->ScheduleSingleHopT(cb)));
 }
@@ -1183,23 +1189,24 @@ void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
   str_vec.emplace_back(absl::StrCat(lp.lval));
 }
 
-void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (args.size() > 3) {
-    DVLOG(1) << "Wrong number of command arguments: " << args.size();
+  const size_t argc = cmd_cntx->tail_args().size();
+  if (argc > 3) {
+    DVLOG(1) << "Wrong number of command arguments: " << argc;
     return rb->SendError(kSyntaxErr);
   }
 
-  string_view key = ArgS(args, 0);
+  string_view key = parser.Next();
   int32_t count;
   bool with_values = false;
 
-  if ((args.size() > 1) && (!SimpleAtoi(ArgS(args, 1), &count))) {
+  if ((argc > 1) && (!SimpleAtoi(parser.Next(), &count))) {
     return rb->SendError("count value is not an integer", kSyntaxErrType);
   }
 
-  if (args.size() == 3) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, 2));
+  if (argc == 3) {
+    string arg = absl::AsciiStrToUpper(parser.Next());
     if (arg != "WITHVALUES")
       return rb->SendError(kSyntaxErr);
     else
@@ -1220,7 +1227,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
     if (pv.Encoding() == kEncodingStrMap2) {
       StringMap* string_map = GetStringMap(pv, db_context);
 
-      if (args.size() == 1) {
+      if (argc == 1) {
         auto opt_pair = string_map->RandomPair();
         if (opt_pair.has_value()) {
           auto [key, value] = *opt_pair;
@@ -1258,7 +1265,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
       size_t lplen = lpLength(lp);
       CHECK(lplen > 0 && lplen % 2 == 0);
       size_t hlen = lplen / 2;
-      if (args.size() == 1) {
+      if (argc == 1) {
         listpackEntry key;
         lpRandomPair(lp, hlen, &key, NULL);
         StrVecEmplaceBack(str_vec, key);
@@ -1292,7 +1299,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    if (result->size() == 1 && args.size() == 1)
+    if (result->size() == 1 && argc == 1)
       rb->SendBulkString(result->front());
     else if (with_values) {
       const auto result_size = result->size();
@@ -1310,7 +1317,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
     } else
       rb->SendBulkStrArr(*result, CollectionType::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    if (args.size() == 1)
+    if (argc == 1)
       rb->SendNull();
     else
       rb->SendEmptyArray();
@@ -1452,7 +1459,7 @@ bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std:
 // 0 if the specified NX | XX | GT | LT condition has not been met.
 // 1 if the expiration time was set/updated.
 // 2 when HEXPIRE/HPEXPIRE is called with 0 seconds and the field is deleted.
-static std::vector<long> UpdateTTL(facade::CmdArgList values, uint32_t ttl_sec, ExpireFlags flags,
+static std::vector<long> UpdateTTL(ParsedArgs values, uint32_t ttl_sec, ExpireFlags flags,
                                    StringMap* owner) {
   std::vector<long> res;
   res.reserve(values.size());
@@ -1505,11 +1512,11 @@ static std::vector<long> UpdateTTL(facade::CmdArgList values, uint32_t ttl_sec, 
 }
 
 vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                             ExpireFlags flags, string_view key, CmdArgList values,
-                                             PrimeValue* pv) {
+                                             ExpireFlags flags, string_view key,
+                                             const ParsedArgs& fields, PrimeValue* pv) {
   DCHECK_EQ(OBJ_HASH, pv->ObjType());
   // values contains field names — collect them for HNSW field data preservation.
-  absl::InlinedVector<std::string_view, 4> field_names(values.begin(), values.end());
+  absl::InlinedVector<std::string_view, 4> field_names(fields.begin(), fields.end());
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv, field_names);
 
   if (pv->Encoding() == kEncodingListPack) {
@@ -1521,7 +1528,7 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
 
   // This needs to be explicitly fetched again since the pv might have changed.
   StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
-  vector<long> res = UpdateTTL(values, ttl_sec, flags, sm);
+  vector<long> res = UpdateTTL(fields, ttl_sec, flags, sm);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
   return res;
 }

@@ -92,4 +92,98 @@ TEST_F(CuckooFilterFamilyTest, AddFilterFull) {
   EXPECT_THAT(Run({"cf.add", "cf", "overflow"}), ErrArg("Filter is full"));
 }
 
+TEST_F(CuckooFilterFamilyTest, Exists) {
+  EXPECT_THAT(Run({"cf.add", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.exists", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.exists", "f1", "bar"}), IntArg(0));
+
+  // Missing key returns 0, not an error.
+  EXPECT_THAT(Run({"cf.exists", "nonexist-key", "blah"}), IntArg(0));
+}
+
+TEST_F(CuckooFilterFamilyTest, ExistsWrongArity) {
+  EXPECT_THAT(Run({"cf.exists"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"cf.exists", "key"}), ErrArg("wrong number of arguments"));
+}
+
+TEST_F(CuckooFilterFamilyTest, ExistsWrongType) {
+  Run("set str1 foo");
+  EXPECT_THAT(Run({"cf.exists", "str1", "foo"}), IntArg(0));
+}
+
+TEST_F(CuckooFilterFamilyTest, MExists) {
+  EXPECT_THAT(Run({"cf.add", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.add", "f1", "bar"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.add", "f1", "baz"}), IntArg(1));
+
+  EXPECT_THAT(Run({"cf.mexists", "f1", "foo", "bar", "baz"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+  EXPECT_THAT(Run({"cf.mexists", "f1", "foo", "nope"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(0))));
+
+  // Missing key returns an all-zero array, not an error.
+  EXPECT_THAT(Run({"cf.mexists", "nonexist-key", "blah"}), RespArray(ElementsAre(IntArg(0))));
+}
+
+TEST_F(CuckooFilterFamilyTest, MExistsWrongArity) {
+  EXPECT_THAT(Run({"cf.mexists"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"cf.mexists", "key"}), ErrArg("wrong number of arguments"));
+}
+
+TEST_F(CuckooFilterFamilyTest, MExistsWrongType) {
+  Run("set str1 foo");
+  EXPECT_THAT(Run({"cf.mexists", "str1", "foo"}), RespArray(ElementsAre(IntArg(0))));
+}
+
+TEST_F(CuckooFilterFamilyTest, Info) {
+  ASSERT_EQ(Run("cf.reserve cf1 1000 bucketsize 4 maxiterations 10 expansion 2"), "OK");
+  EXPECT_THAT(Run({"cf.add", "cf1", "foo"}), IntArg(1));
+
+  auto resp = Run({"cf.info", "cf1"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(
+                        "Size", testing::_, "Number of buckets", testing::_, "Number of filters",
+                        IntArg(1), "Number of items inserted", IntArg(1), "Number of items deleted",
+                        IntArg(0), "Bucket size", IntArg(4), "Expansion rate", IntArg(2),
+                        "Max iterations", IntArg(10))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InfoMissingKey) {
+  EXPECT_THAT(Run({"cf.info", "nonexist-key"}), ErrArg("no such key"));
+}
+
+TEST_F(CuckooFilterFamilyTest, Count) {
+  EXPECT_THAT(Run({"cf.add", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.count", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.count", "f1", "bar"}), IntArg(0));
+
+  // Missing key returns 0, not an error.
+  EXPECT_THAT(Run({"cf.count", "nonexist-key", "blah"}), IntArg(0));
+}
+
+TEST_F(CuckooFilterFamilyTest, CountAfterDuplicateAdds) {
+  // CF.ADD never dedups, so repeated adds of the same item should each bump the count.
+  EXPECT_THAT(Run({"cf.add", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.add", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.add", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.count", "f1", "foo"}), IntArg(3));
+
+  EXPECT_THAT(Run({"cf.del", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.count", "f1", "foo"}), IntArg(2));
+}
+
+TEST_F(CuckooFilterFamilyTest, Del) {
+  EXPECT_THAT(Run({"cf.add", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.del", "f1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.exists", "f1", "foo"}), IntArg(0));
+}
+
+TEST_F(CuckooFilterFamilyTest, DelNonExistentItem) {
+  ASSERT_EQ(Run("cf.reserve cf1 1000"), "OK");
+  EXPECT_THAT(Run({"cf.del", "cf1", "nope"}), IntArg(0));
+}
+
+TEST_F(CuckooFilterFamilyTest, DelMissingKey) {
+  EXPECT_THAT(Run({"cf.del", "nonexist-key", "foo"}), ErrArg("no such key"));
+}
+
 }  // namespace dfly

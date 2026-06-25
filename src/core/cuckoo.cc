@@ -115,6 +115,23 @@ bool CuckooFilter::Exists(uint64_t hash) const {
   return false;
 }
 
+size_t CuckooFilter::Count(uint64_t hash) const {
+  const LookupParams p = LookupParamsFromHash(hash);
+
+  size_t count = 0;
+  for (const SubFilter& sf : filters_) {
+    auto [i1, i2] = BucketIndices(sf, p);
+    for (uint64_t idx : {i1, i2}) {
+      const size_t base = idx * slots_per_bucket_;
+      for (uint8_t s = 0; s < slots_per_bucket_; ++s) {
+        if (sf[base + s] == p.fp)
+          ++count;
+      }
+    }
+  }
+  return count;
+}
+
 bool CuckooFilter::Delete(uint64_t hash) {
   DCHECK(!filters_.empty());
   const LookupParams p = LookupParamsFromHash(hash);

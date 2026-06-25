@@ -11,7 +11,6 @@
 // supported by the caller.
 
 #include <mimalloc-new-delete.h>  // Routes global operator new/delete through mimalloc.
-#include <xxhash.h>
 
 #include <coroutine>
 
@@ -23,6 +22,7 @@
 #include "base/cycle_clock.h"
 #include "base/init.h"
 #include "base/proc_util.h"
+#include "common/rapidhash.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
@@ -97,11 +97,16 @@ Shard& MyShard() {
   return g_shards[fb2::ProactorBase::me()->GetPoolIndex()];
 }
 
+// Note we must use `uint32_t` hash here otherwise the result of `reduce` will be wrong
+// due to overflow.
+unsigned reduce(uint32_t h, unsigned n) {
+  return (uint64_t(h) * uint64_t(n)) >> 32;
+}
+
 // Determine the owning shard for a given key.
-constexpr uint64_t kShardHashSeed = 120577240643ULL;
 unsigned KeyShard(string_view key, unsigned num_shards) {
-  XXH64_hash_t hash = XXH64(key.data(), key.size(), kShardHashSeed);
-  return hash % num_shards;
+  uint64_t hash = rapidhashMicro(key.data(), key.size());
+  return reduce(hash, num_shards);
 }
 
 // Minimal coroutine type for async command dispatch.
