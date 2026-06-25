@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <atomic>
+#include <limits>
 
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
@@ -221,26 +222,25 @@ class DbSlice {
   using DocDeletionCallback = std::function<void(std::string_view, const Context&, PrimeValue& pv)>;
 
   struct ExpireParams {
+    ExpireParams() = default;
+
+    // if now_ms = 0 the value is absolute; cap applies to relative dispatch only;
+    // cap=true silently clamps to kMaxExpireDeadlineMs;
+    ExpireParams(TimeUnit unit, int64_t value, uint64_t now_ms = 0, bool cap = false);
+    ExpireParams(ExpT type, int64_t value, uint64_t now_ms = 0, bool cap = false);
+
     bool IsDefined() const {
-      return persist || value > INT64_MIN;
+      return persist || ms_timestamp >= 0;
     }
 
-    static int64_t Cap(int64_t value, TimeUnit unit);
-
-    // Calculate relative and absolue timepoints.
+    // Returns (relative_ms, absolute_ms). On overflow returns {0, -1}.
     std::pair<int64_t, int64_t> Calculate(uint64_t now_msec, bool cap) const;
 
-    // Return true if relative expiration is in the past
-    bool IsExpired(uint64_t now_msec) const {
-      return Calculate(now_msec, false).first < 0;
-    }
+    // INT64_MAX is the year 292M AD — never a real expiration.
+    static constexpr int64_t kOverflow = std::numeric_limits<int64_t>::max();
 
-   public:
-    int64_t value = INT64_MIN;  // undefined
-    TimeUnit unit = TimeUnit::SEC;
-
-    bool absolute = false;
-    bool persist = false;        // persist means remove all expiry
+    int64_t ms_timestamp = -1;  // -1 = undefined; 0 = expire now; kOverflow = overflow.
+    bool persist = false;
     int32_t expire_options = 0;  // ExpireFlags
   };
 

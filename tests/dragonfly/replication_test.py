@@ -832,6 +832,11 @@ async def test_rewrites(df_factory):
         await check("GETEX k EX 100", r"PEXPIREAT k (.*?)")
         await check_expire("k")
 
+        # Bare GETEX (no EX/PX/EXAT/PXAT/PERSIST) is read-only and must not journal.
+        # If it did, the next SET would not be the next replicated command.
+        await c_master.execute_command("GETEX k")
+        await check("SET marker after-bare-getex", r"SET marker after-bare-getex")
+
         # Check SDIFFSTORE turns into DEL and SADD
         await c_master.sadd("set1", "v1", "v2", "v3")
         await c_master.sadd("set2", "v1", "v2")
