@@ -201,6 +201,7 @@ async def test_redis_replication_all(
     c_replicas = [replica.client() for replica in replicas]
 
     progress = asyncio.create_task(_log_progress(c_master, c_replicas))
+    stream_task = None
     try:
         # Start data stream
         stream_task = asyncio.create_task(seeder.run())
@@ -214,6 +215,7 @@ async def test_redis_replication_all(
         ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
         seeder.stop()
         await stream_task
+        stream_task = None
 
         # Check data after full sync
         await await_synced_all(c_master, c_replicas, timeout=60)
@@ -226,11 +228,16 @@ async def test_redis_replication_all(
         await await_synced_all(c_master, c_replicas, timeout=60)
         await check_data(seeder, replicas, c_replicas)
     finally:
-        progress.cancel()
         try:
-            await progress
-        except asyncio.CancelledError:
-            pass
+            if stream_task is not None:
+                seeder.stop()
+                await asyncio.gather(stream_task, return_exceptions=True)
+        finally:
+            progress.cancel()
+            try:
+                await progress
+            except asyncio.CancelledError:
+                pass
 
 
 master_disconnect_cases = [
@@ -269,29 +276,35 @@ async def test_redis_master_restart(
 
     # Start data stream
     stream_task = asyncio.create_task(seeder.run())
-    await asyncio.sleep(0.0)
+    try:
+        await asyncio.sleep(0.0)
 
-    await replicate_all(c_replicas, master.port)
+        await replicate_all(c_replicas, master.port)
 
-    # Wait for streaming to finish
-    assert (
-        not stream_task.done()
-    ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
-    seeder.stop()
-    await stream_task
+        # Wait for streaming to finish
+        assert (
+            not stream_task.done()
+        ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
+        seeder.stop()
+        await stream_task
+        stream_task = None
 
-    for _ in range(t_disconnect):
-        master.stop()
-        await asyncio.sleep(1)
-        master.start()
-        await asyncio.sleep(1)
-        # fill master with data
-        await seeder.run(target_deviation=0.1)
+        for _ in range(t_disconnect):
+            master.stop()
+            await asyncio.sleep(1)
+            master.start()
+            await asyncio.sleep(1)
+            # fill master with data
+            await seeder.run(target_deviation=0.1)
 
-    # Check data after stable state stream
-    await wait_available_async(c_replicas)
-    await await_synced_all(c_master, c_replicas)
-    await check_data(seeder, replicas, c_replicas)
+        # Check data after stable state stream
+        await wait_available_async(c_replicas)
+        await await_synced_all(c_master, c_replicas)
+        await check_data(seeder, replicas, c_replicas)
+    finally:
+        if stream_task is not None:
+            seeder.stop()
+            await asyncio.gather(stream_task, return_exceptions=True)
 
 
 master_disconnect_cases = [
@@ -320,6 +333,8 @@ async def test_disconnect_master(
     proxy = Proxy("127.0.0.1", 0, "127.0.0.1", master.port)
     await proxy.start()
     proxy_task = asyncio.create_task(proxy.serve())
+    stream_task = None
+    seeder = None
 
     try:
         replicas = [
