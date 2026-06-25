@@ -26,7 +26,7 @@
     };
     struct KnnAttributes {
       std::string score_alias;
-      std::optional<size_t> ef_runtime;
+      std::optional<uint32_t> ef_runtime;
     };
     inline std::ostream& operator<<(std::ostream& os, const PhraseTok&) {
       return os;  // bison debug trace requires this; content not material to traces.
@@ -113,7 +113,7 @@ double toDouble(string_view src);
 %nterm <std::string> opt_knn_alias
 %nterm <KnnAttributes> opt_knn_attrs knn_attrs knn_attr
 %nterm <std::string> geounit
-%nterm <std::optional<size_t>> opt_ef_runtime
+%nterm <std::optional<uint32_t>> opt_ef_runtime
 %nterm <AstVectorRangeNode> vector_range_query
 %nterm <double> vec_range_radius
 
@@ -137,7 +137,7 @@ knn_query:
       auto attrs = std::move($9);
       if (!attrs.score_alias.empty())
         alias = std::move(attrs.score_alias);
-      std::optional<size_t> ef = $6;
+      std::optional<uint32_t> ef = $6;
       if (attrs.ef_runtime)
         ef = attrs.ef_runtime;
 

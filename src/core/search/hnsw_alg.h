@@ -1383,7 +1383,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   std::priority_queue<std::pair<dist_t, labeltype>> searchKnnWithEf(const void* query_data,
                                                                     size_t k,
                                                                     BaseFilterFunctor* isIdAllowed,
-                                                                    size_t ef_runtime) const {
+                                                                    uint32_t ef_runtime) const {
     std::priority_queue<std::pair<dist_t, labeltype>> result;
     if (cur_element_count == 0)
       return result;
@@ -1423,12 +1423,11 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
                         CompareByFirst>
         top_candidates;
     bool bare_bone_search = !num_deleted_ && !isIdAllowed;
+    size_t effective_ef = std::max<size_t>(ef_runtime, k);
     if (bare_bone_search) {
-      top_candidates =
-          searchBaseLayerST<true>(currObj, query_data, std::max(ef_runtime, k), isIdAllowed);
+      top_candidates = searchBaseLayerST<true>(currObj, query_data, effective_ef, isIdAllowed);
     } else {
-      top_candidates =
-          searchBaseLayerST<false>(currObj, query_data, std::max(ef_runtime, k), isIdAllowed);
+      top_candidates = searchBaseLayerST<false>(currObj, query_data, effective_ef, isIdAllowed);
     }
 
     while (top_candidates.size() > k) {

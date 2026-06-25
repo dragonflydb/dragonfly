@@ -121,7 +121,7 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
     } else if (parser->Check("TYPE")) {
       params.data_type = absl::AsciiStrToUpper(parser->Next<string_view>());
     } else if (parser->Check("EF_RUNTIME")) {
-      params.hnsw_ef_runtime = parser->Next<size_t>();
+      params.hnsw_ef_runtime = parser->Next<uint32_t>();
     } else if (parser->Check("EPSILON")) {
       parser->Next<double>();
       LOG(WARNING) << "EPSILON not supported";
@@ -1703,7 +1703,7 @@ struct HybridSearchParams {
   string yield_combined_score_as;
 
   size_t num_candidates = 0;
-  std::optional<size_t> ef_runtime;
+  std::optional<uint32_t> ef_runtime;
 
   size_t limit_offset = 0;
   size_t limit_total = 10;
@@ -2178,7 +2178,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
       string_view prefix = have_filter ? string_view{params->vsim_filter} : "*"sv;
       string ef_suffix;
       if (params->ef_runtime)
-        ef_suffix = absl::StrFormat(" EF_RUNTIME %zu", *params->ef_runtime);
+        ef_suffix = absl::StrFormat(" EF_RUNTIME %u", *params->ef_runtime);
       knn_query = absl::StrFormat("%s=>[KNN %zu @%s $%s%s AS __knn_dist_hybrid]", prefix,
                                   params->num_candidates, params->vsim_field, params->vsim_param,
                                   ef_suffix);

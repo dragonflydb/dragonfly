@@ -92,13 +92,13 @@ struct HnswlibAdapter {
     DoRemove(id);
   }
 
-  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
-    size_t ef_runtime = ef.value_or(ef_runtime_);
+  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<uint32_t> ef) {
+    uint32_t ef_runtime = ef.value_or(ef_runtime_);
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return QueueToVec(world_.searchKnnWithEf(target, k, nullptr, ef_runtime));
   }
 
-  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
+  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<uint32_t> ef,
                                        const vector<GlobalDocId>& allowed) {
     struct BinsearchFilter : hnswlib::BaseFilterFunctor {
       virtual bool operator()(hnswlib::labeltype id) {
@@ -110,7 +110,7 @@ struct HnswlibAdapter {
       const vector<GlobalDocId>* allowed;
     };
 
-    size_t ef_runtime = ef.value_or(ef_runtime_);
+    uint32_t ef_runtime = ef.value_or(ef_runtime_);
     BinsearchFilter filter{&allowed};
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return QueueToVec(world_.searchKnnWithEf(target, k, &filter, ef_runtime));
@@ -445,7 +445,7 @@ struct HnswlibAdapter {
   size_t capacity_;                 // Initial max_elements_ — used to reconstruct world_.
   size_t M_;                        // hnsw_m — used to reconstruct world_.
   size_t ef_construction_;          // hnsw_ef_construction — used to reconstruct world_.
-  size_t ef_runtime_;               // Default runtime search breadth.
+  uint32_t ef_runtime_;             // Default runtime search breadth.
   size_t data_size_;                // Byte size of a single vector.
   std::vector<float> stub_vector_;  // Non-zero data for deleted nodes in borrowed mode.
 };
@@ -485,12 +485,12 @@ bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::stri
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(float* target, size_t k,
-                                                                std::optional<size_t> ef) const {
+                                                                std::optional<uint32_t> ef) const {
   return adapter_->Knn(target, k, ef);
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
-    float* target, size_t k, std::optional<size_t> ef,
+    float* target, size_t k, std::optional<uint32_t> ef,
     const std::vector<GlobalDocId>& allowed) const {
   return adapter_->Knn(target, k, ef, allowed);
 }

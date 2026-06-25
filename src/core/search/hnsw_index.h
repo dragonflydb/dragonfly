@@ -55,8 +55,9 @@ class HnswVectorIndex {
   }
 
   std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
-                                                 std::optional<size_t> ef) const;
-  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
+                                                 std::optional<uint32_t> ef) const;
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
+                                                 std::optional<uint32_t> ef,
                                                  const std::vector<GlobalDocId>& allowed) const;
   std::vector<std::pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
                                                        const std::vector<GlobalDocId>& docs) const;
