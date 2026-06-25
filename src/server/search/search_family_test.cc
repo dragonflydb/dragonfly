@@ -7396,8 +7396,16 @@ TEST_F(SearchFamilyTest, FtSearchBM25StdTanhFactorValidation) {
                    "BM25STD_TANH_FACTOR", "0"});
   ASSERT_EQ(resp.type, RespExpr::ERROR);
   EXPECT_THAT(string{resp.GetString()},
-              HasSubstr("BM25STD_TANH_FACTOR must be between 1 and 10000 inclusive"));
+              HasSubstr("BM25STD_TANH_FACTOR must be a positive integer"));
 
+  // A non-integer factor is rejected with the same message.
+  resp = Run({"ft.search", "idx", "hello", "WITHSCORES", "SCORER", "BM25STD.TANH",
+              "BM25STD_TANH_FACTOR", "abc"});
+  ASSERT_EQ(resp.type, RespExpr::ERROR);
+  EXPECT_THAT(string{resp.GetString()},
+              HasSubstr("BM25STD_TANH_FACTOR must be a positive integer"));
+
+  // No upper bound (matches the reference engine's >= 1 rule).
   resp = Run({"ft.search", "idx", "hello", "WITHSCORES", "SCORER", "BM25STD.TANH",
               "BM25STD_TANH_FACTOR", "10001"});
   EXPECT_NE(resp.type, RespExpr::ERROR);

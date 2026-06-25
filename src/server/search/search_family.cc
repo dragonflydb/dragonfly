@@ -18,6 +18,7 @@
 #include <cmath>
 #include <exception>
 #include <functional>
+#include <ranges>
 #include <variant>
 #include <vector>
 
@@ -522,24 +523,13 @@ std::optional<search::ScorerSpec> ParseScorer(CmdArgParser* parser) {
   return search::ScorerSpec{*kind};
 }
 
-constexpr string_view kBM25StdTanhFactorErr =
-    "BM25STD_TANH_FACTOR must be between 1 and 10000 inclusive";
+constexpr string_view kBM25StdTanhFactorErr = "BM25STD_TANH_FACTOR must be a positive integer";
 
-std::optional<uint64_t> TryParseBM25StdTanhFactor(CmdArgParser* parser) {
-  if (!parser->HasNext())
-    return nullopt;
-
-  uint64_t factor = 0;
-  if (!absl::SimpleAtoi(parser->Next(), &factor) || factor == 0)
-    return nullopt;
-  return factor;
-}
-
-ParseResult<uint64_t> ParseBM25StdTanhFactor(CmdArgParser* parser) {
-  auto factor = TryParseBM25StdTanhFactor(parser);
-  if (!factor)
-    return CreateSyntaxError(kBM25StdTanhFactorErr);
-  return *factor;
+// Parses a BM25STD_TANH_FACTOR value: an integer >= 1 (no upper bound). On a missing or invalid
+// value the parser reports kBM25StdTanhFactorErr, surfaced by the caller's error handling.
+uint64_t ParseBM25StdTanhFactor(CmdArgParser* parser) {
+  return parser->NextBounded<uint64_t>(1, std::numeric_limits<uint64_t>::max(),
+                                       kBM25StdTanhFactorErr);
 }
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
@@ -588,10 +578,7 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
         return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
       params.scorer = *scorer;
     } else if (parser->Check("BM25STD_TANH_FACTOR")) {
-      auto factor = ParseBM25StdTanhFactor(parser);
-      if (!factor)
-        return make_unexpected(factor.error());
-      tanh_factor = *factor;
+      tanh_factor = ParseBM25StdTanhFactor(parser);
     } else if (parser->Check("DIALECT")) {
       parser->Skip(1);  // Accepted and ignored — DF always behaves as dialect 2
     } else {
@@ -847,10 +834,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
     }
 
     if (parser->Check("BM25STD_TANH_FACTOR")) {
-      auto factor = ParseBM25StdTanhFactor(parser);
-      if (!factor)
-        return make_unexpected(factor.error());
-      tanh_factor = *factor;
+      tanh_factor = ParseBM25StdTanhFactor(parser);
       continue;
     }
 
@@ -1231,10 +1215,12 @@ bool IsBM25StdNorm(const std::optional<search::ScorerSpec>& scorer) {
 // Global max raw text score across per-shard results, used to normalize BM25STD.NORM by the
 // max over the full matched set. Returns 0 when there are no scored docs.
 float GlobalMaxTextScore(absl::Span<const SearchResult> results) {
-  float max_text_score = 0.0f;
-  for (const auto& shard : results)
-    max_text_score = std::max(max_text_score, shard.max_text_score);
-  return max_text_score;
+  if (results.empty())
+    return 0.0f;
+  return std::max_element(
+             results.begin(), results.end(),
+             [](const auto& a, const auto& b) { return a.max_text_score < b.max_text_score; })
+      ->max_text_score;
 }
 
 void SearchReply(const SearchParams& params,
@@ -1813,13 +1799,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
     else
       p.scorer = *scorer_fn;
   };
-  auto parse_tanh_factor = [&](CmdArgParser* sub) {
-    auto factor = TryParseBM25StdTanhFactor(sub);
-    if (!factor)
-      sub->ReportCustom(std::string{kBM25StdTanhFactorErr});
-    else
-      tanh_factor = *factor;
-  };
+  auto parse_tanh_factor = [&](CmdArgParser* sub) { tanh_factor = ParseBM25StdTanhFactor(sub); };
 
   parser->ExpectTag("SEARCH", "expected SEARCH keyword");
   p.text_query = parser->Next<string>();
@@ -1908,9 +1888,7 @@ void ComputeLinearCombined(float alpha, float beta, search::VectorSimilarity vsi
                            absl::flat_hash_map<string, HybridDocEntry>& docs) {
   for (auto& [_, e] : docs) {
     float text_score = e.has_text ? e.text_score : 0.f;
-    float knn_score = 0.f;
-    if (e.has_knn)
-      knn_score = search::DistanceToSimilarity(e.knn_dist, vsim_metric);
+    float knn_score = e.has_knn ? search::DistanceToSimilarity(e.knn_dist, vsim_metric) : 0.f;
     e.combined = alpha * text_score + beta * knn_score;  // ALPHA=text, BETA=vector
   }
 }
@@ -2180,33 +2158,36 @@ void NormalizeHybridTextScores(absl::Span<SearchResult> text_docs) {
   if (max_text_score == 0)
     return;
 
-  for (auto& shard : text_docs) {
-    for (auto& doc : shard.docs)
-      doc.text_score /= max_text_score;
-  }
+  std::ranges::for_each(text_docs, [max_text_score](SearchResult& shard) {
+    std::ranges::for_each(shard.docs,
+                          [max_text_score](auto& doc) { doc.text_score /= max_text_score; });
+  });
 }
 
 void NormalizeAggregateScores(absl::Span<aggregate::DocValues> values) {
   static constexpr std::string_view kScoreField = "__score";
 
-  double max_score = 0;
-  for (const auto& row : values) {
-    auto it = row.find(kScoreField);
-    if (it == row.end())
-      continue;
-    if (const auto* score = std::get_if<double>(&it->second))
-      max_score = std::max(max_score, *score);
-  }
+  auto get_score = [](const aggregate::DocValues& row) -> double {
+    if (auto it = row.find(kScoreField); it != row.end())
+      if (const auto* score = std::get_if<double>(&it->second))
+        return *score;
+    return 0.0;
+  };
+
+  if (values.empty())
+    return;
+
+  double max_score = get_score(*std::max_element(
+      values.begin(), values.end(),
+      [&get_score](const auto& a, const auto& b) { return get_score(a) < get_score(b); }));
   if (max_score == 0)
     return;
 
-  for (auto& row : values) {
-    auto it = row.find(kScoreField);
-    if (it == row.end())
-      continue;
-    if (auto* score = std::get_if<double>(&it->second))
-      *score /= max_score;
-  }
+  std::ranges::for_each(values, [max_score](aggregate::DocValues& row) {
+    if (auto it = row.find(kScoreField); it != row.end())
+      if (auto* score = std::get_if<double>(&it->second))
+        *score /= max_score;
+  });
 }
 
 struct HybridExecResult {

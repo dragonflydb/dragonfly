@@ -26,6 +26,8 @@ namespace facade {
 //   auto [src, dst] = parser.Next<string_view, string_view>();  // read several at once (tuple)
 //   auto db = parser.Next<FInt<0, 15>>();                       // range-restricted int
 //                                                               // (INVALID_INT if out of range)
+//   auto f  = parser.NextBounded<uint32_t>(1, 99, "bad f");     // range-restricted int with a
+//                                                               // custom out-of-range message
 //   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
 //
 // Tag matching:
@@ -179,6 +181,25 @@ struct CmdArgParser {
     T out{};
     if (!absl::SimpleAtoi(val, &out)) {
       Report(INVALID_INT, idx);
+      return {};
+    }
+    return out;
+  }
+
+  // Consumes the next arg as an integer of type T constrained to [min, max]. Unlike
+  // Next<FInt<lo,hi>>(), an out-of-range or non-integer value reports a caller-supplied
+  // CUSTOM_ERROR message (surfaced verbatim) instead of the generic INVALID_INT text. A missing
+  // arg reports OUT_OF_BOUNDS.
+  template <class T> T NextBounded(T min, T max, std::string_view err_msg) {
+    static_assert(std::is_integral_v<T>);
+    if (cur_i_ >= args_.size()) {
+      Report(OUT_OF_BOUNDS, cur_i_);
+      return {};
+    }
+    size_t idx = cur_i_++;
+    T out{};
+    if (!absl::SimpleAtoi(SafeSV(idx), &out) || out < min || out > max) {
+      Report(CUSTOM_ERROR, idx, std::string{err_msg});
       return {};
     }
     return out;

@@ -1018,8 +1018,10 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   // so the pre-filter result.max_text_score could otherwise normalize BM25STD.NORM by a document
   // that is not returned, pushing the best returned document below 1.0.
   float max_text_score = 0.0f;
-  for (const auto& doc : out)
-    max_text_score = std::max(max_text_score, doc.text_score);
+  if (!out.empty())
+    max_text_score = std::max_element(out.begin(), out.end(), [](const auto& a, const auto& b) {
+                       return a.text_score < b.text_score;
+                     })->text_score;
 
   return {result.total - expired_count, std::move(out), std::move(result.profile), max_text_score};
 }
@@ -1050,8 +1052,11 @@ SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParam
     // Recompute the max over live docs only, mirroring ShardDocIndex::Search: a dropped
     // top-scoring doc must not inflate the BM25STD.NORM denominator.
     float max_text_score = 0.0f;
-    for (const auto& [id, score] : live_text_scores)
-      max_text_score = std::max(max_text_score, score);
+    if (!live_text_scores.empty())
+      max_text_score =
+          std::max_element(live_text_scores.begin(), live_text_scores.end(),
+                           [](const auto& a, const auto& b) { return a.second < b.second; })
+              ->second;
 
     return {live_ids.size(), std::move(live_ids), std::move(live_text_scores),
             std::move(result.profile), max_text_score};
@@ -1145,10 +1150,8 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
     }
 
     if (params.add_scores) {
-      double text_score = 0;
-      if (auto it = text_score_map.find(doc); it != text_score_map.end())
-        text_score = it->second;
-      out.back()["__score"] = text_score;
+      auto it = text_score_map.find(doc);
+      out.back()["__score"] = it != text_score_map.end() ? static_cast<double>(it->second) : 0.0;
       // Hidden tie-breaker for SORTBY @__score; not added to fields_to_print.
       out.back()["__key"] = string{key};
     }
