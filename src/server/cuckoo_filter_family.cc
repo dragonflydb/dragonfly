@@ -21,6 +21,17 @@ namespace {
 
 constexpr uint64_t kDefaultCapacity = 1024;
 
+struct CuckooInfo {
+  size_t size = 0;
+  uint64_t num_buckets = 0;
+  size_t num_filters = 0;
+  size_t num_items = 0;
+  uint64_t num_deletes = 0;
+  uint8_t bucket_size = 0;
+  uint16_t expansion = 0;
+  uint16_t max_iterations = 0;
+};
+
 OpResult<CuckooFilter*> FindOrCreate(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
@@ -67,6 +78,38 @@ OpResult<vector<bool>> OpExists(const OpArgs& op_args, string_view key, ParsedAr
     result[i] = cf->Exists(CuckooFilter::Hash(items[i]));
   }
   return result;
+}
+
+OpResult<CuckooInfo> OpInfo(const OpArgs& op_args, string_view key) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  if (!op_res)
+    return op_res.status();
+
+  const CuckooFilter* cf = op_res.value()->second.GetCuckooFilter();
+  return CuckooInfo{cf->MallocUsed(), cf->NumBuckets(),     cf->NumFilters(), cf->NumItems(),
+                    cf->NumDeletes(), cf->SlotsPerBucket(), cf->Expansion(),  cf->MaxIterations()};
+}
+
+OpResult<size_t> OpCount(const OpArgs& op_args, string_view key, string_view item) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  if (!op_res)
+    return op_res.status();
+
+  const CuckooFilter* cf = op_res.value()->second.GetCuckooFilter();
+  return cf->Count(CuckooFilter::Hash(item));
+}
+
+OpResult<bool> OpDel(const OpArgs& op_args, string_view key, string_view item) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  RETURN_ON_BAD_STATUS(op_res);
+
+  // RedisBloom auto-compacts (merges sub-filters) once deletes exceed 10% of items, to
+  // reclaim space from sparse sub-filters. CuckooFilter has no compaction/merge support;
+  // this is an intentional, known parity gap that doesn't affect Delete's correctness.
+  return op_res->it->second.GetCuckooFilter()->Delete(CuckooFilter::Hash(item));
 }
 
 OpStatus OpReserve(const OpArgs& op_args, string_view key, const CuckooFilterOptions& options) {
@@ -191,6 +234,66 @@ void CmdMExists(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 }
 
+void CmdInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpInfo(t->GetOpArgs(shard), key);
+  };
+
+  OpResult<CuckooInfo> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res)
+    return rb->SendError(res.status());
+
+  SinkReplyBuilder::ReplyScope scope(rb);
+  rb->StartArray(16);
+  rb->SendBulkString("Size");
+  rb->SendLong(static_cast<long>(res->size));
+  rb->SendBulkString("Number of buckets");
+  rb->SendLong(static_cast<long>(res->num_buckets));
+  rb->SendBulkString("Number of filters");
+  rb->SendLong(static_cast<long>(res->num_filters));
+  rb->SendBulkString("Number of items inserted");
+  rb->SendLong(static_cast<long>(res->num_items));
+  rb->SendBulkString("Number of items deleted");
+  rb->SendLong(static_cast<long>(res->num_deletes));
+  rb->SendBulkString("Bucket size");
+  rb->SendLong(res->bucket_size);
+  rb->SendBulkString("Expansion rate");
+  rb->SendLong(res->expansion);
+  rb->SendBulkString("Max iterations");
+  rb->SendLong(res->max_iterations);
+}
+
+void CmdCount(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view item = parser.Next();
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpCount(t->GetOpArgs(shard), key, item);
+  };
+
+  OpResult<size_t> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res && res.status() != OpStatus::KEY_NOTFOUND && res.status() != OpStatus::WRONG_TYPE)
+    return cmd_cntx->SendError(res.status());
+  cmd_cntx->SendLong(res ? static_cast<long>(*res) : 0);
+}
+
+void CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view item = parser.Next();
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpDel(t->GetOpArgs(shard), key, item);
+  };
+
+  OpResult<bool> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res)
+    return cmd_cntx->SendError(res.status());
+  cmd_cntx->SendLong(*res);
+}
+
 }  // namespace
 
 using CI = CommandId;
@@ -204,7 +307,10 @@ void RegisterCuckooFilterFamily(CommandRegistry* registry) {
             << CI{"CF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Add)
             << CI{"CF.ADDNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(AddNx)
             << CI{"CF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(Exists)
-            << CI{"CF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(MExists);
+            << CI{"CF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(MExists)
+            << CI{"CF.INFO", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Info)
+            << CI{"CF.COUNT", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(Count)
+            << CI{"CF.DEL", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Del);
 }
 
 }  // namespace dfly
