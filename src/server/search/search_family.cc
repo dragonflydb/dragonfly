@@ -528,8 +528,8 @@ constexpr string_view kBM25StdTanhFactorErr = "BM25STD_TANH_FACTOR must be a pos
 // Parses a BM25STD_TANH_FACTOR value: an integer >= 1 (no upper bound). On a missing or invalid
 // value the parser reports kBM25StdTanhFactorErr, surfaced by the caller's error handling.
 uint64_t ParseBM25StdTanhFactor(CmdArgParser* parser) {
-  return parser->NextBounded<uint64_t>(1, std::numeric_limits<uint64_t>::max(),
-                                       kBM25StdTanhFactorErr);
+  using TanhFactorInt = facade::FInt<uint64_t{1}, std::numeric_limits<uint64_t>::max()>;
+  return parser->Next<TanhFactorInt>(kBM25StdTanhFactorErr);
 }
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
@@ -1215,12 +1215,9 @@ bool IsBM25StdNorm(const std::optional<search::ScorerSpec>& scorer) {
 // Global max raw text score across per-shard results, used to normalize BM25STD.NORM by the
 // max over the full matched set. Returns 0 when there are no scored docs.
 float GlobalMaxTextScore(absl::Span<const SearchResult> results) {
-  if (results.empty())
-    return 0.0f;
-  return std::max_element(
-             results.begin(), results.end(),
-             [](const auto& a, const auto& b) { return a.max_text_score < b.max_text_score; })
-      ->max_text_score;
+  auto max_it = std::ranges::max_element(
+      results, [](const auto& a, const auto& b) { return a.max_text_score < b.max_text_score; });
+  return max_it == results.end() ? 0.0f : max_it->max_text_score;
 }
 
 void SearchReply(const SearchParams& params,
@@ -2158,10 +2155,10 @@ void NormalizeHybridTextScores(absl::Span<SearchResult> text_docs) {
   if (max_text_score == 0)
     return;
 
-  std::ranges::for_each(text_docs, [max_text_score](SearchResult& shard) {
-    std::ranges::for_each(shard.docs,
-                          [max_text_score](auto& doc) { doc.text_score /= max_text_score; });
-  });
+  for (auto& shard : text_docs) {
+    for (auto& doc : shard.docs)
+      doc.text_score /= max_text_score;
+  }
 }
 
 void NormalizeAggregateScores(absl::Span<aggregate::DocValues> values) {
@@ -2177,17 +2174,15 @@ void NormalizeAggregateScores(absl::Span<aggregate::DocValues> values) {
   if (values.empty())
     return;
 
-  double max_score = get_score(*std::max_element(
-      values.begin(), values.end(),
-      [&get_score](const auto& a, const auto& b) { return get_score(a) < get_score(b); }));
+  double max_score = std::ranges::max(values | std::views::transform(get_score));
   if (max_score == 0)
     return;
 
-  std::ranges::for_each(values, [max_score](aggregate::DocValues& row) {
+  for (auto& row : values) {
     if (auto it = row.find(kScoreField); it != row.end())
       if (auto* score = std::get_if<double>(&it->second))
         *score /= max_score;
-  });
+  }
 }
 
 struct HybridExecResult {

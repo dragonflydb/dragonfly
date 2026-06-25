@@ -1017,11 +1017,9 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   // Recompute the max over docs that survived loading. Expired/missing docs were dropped above,
   // so the pre-filter result.max_text_score could otherwise normalize BM25STD.NORM by a document
   // that is not returned, pushing the best returned document below 1.0.
-  float max_text_score = 0.0f;
-  if (!out.empty())
-    max_text_score = std::max_element(out.begin(), out.end(), [](const auto& a, const auto& b) {
-                       return a.text_score < b.text_score;
-                     })->text_score;
+  auto max_it = std::ranges::max_element(
+      out, [](const auto& a, const auto& b) { return a.text_score < b.text_score; });
+  float max_text_score = max_it == out.end() ? 0.0f : max_it->text_score;
 
   return {result.total - expired_count, std::move(out), std::move(result.profile), max_text_score};
 }
@@ -1051,12 +1049,9 @@ SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParam
 
     // Recompute the max over live docs only, mirroring ShardDocIndex::Search: a dropped
     // top-scoring doc must not inflate the BM25STD.NORM denominator.
-    float max_text_score = 0.0f;
-    if (!live_text_scores.empty())
-      max_text_score =
-          std::max_element(live_text_scores.begin(), live_text_scores.end(),
-                           [](const auto& a, const auto& b) { return a.second < b.second; })
-              ->second;
+    auto max_it = std::ranges::max_element(
+        live_text_scores, [](const auto& a, const auto& b) { return a.second < b.second; });
+    float max_text_score = max_it == live_text_scores.end() ? 0.0f : max_it->second;
 
     return {live_ids.size(), std::move(live_ids), std::move(live_text_scores),
             std::move(result.profile), max_text_score};
