@@ -170,7 +170,8 @@ void SerializerBase::RegisterChangeListener(bool replication) {
 void SerializerBase::UnregisterChangeListener() {
   DCHECK(!IsAnyBucketBlocked());
   if (snapshot_version_ > 0)
-    CHECK(db_slice_->UnregisterOnChange(this));
+    if (!db_slice_->UnregisterOnChange(this))
+      LOG(DFATAL) << "UnregisterOnChange failed for snapshot_version_ " << snapshot_version_;
 }
 
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,

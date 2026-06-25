@@ -920,7 +920,8 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
-  CHECK(UnregisterOnChange(consumer));
+  if (!UnregisterOnChange(consumer))
+    LOG(DFATAL) << "UnregisterOnChange failed";
 
   if (absl::GetFlag(FLAGS_cluster_flush_decommit_memory)) {
     int64_t start = absl::GetCurrentTimeNanos();
