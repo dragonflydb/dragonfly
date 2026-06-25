@@ -82,15 +82,15 @@ def extract_latency_timeseries(data, operation, ignore_last_seconds=3):
     for time_point in sorted_times:
         interval_data = time_serie[time_point]
         times.append(int(time_point))
-        avg_latencies.append(interval_data["Average Latency"])
-        p50_latencies.append(interval_data.get("p50.00", 0))
-        p99_latencies.append(interval_data.get("p99.00", 0))
-        p99_9_latencies.append(interval_data.get("p99.90", 0))
-        min_latencies.append(interval_data["Min Latency"])
-        max_latencies.append(interval_data["Max Latency"])
+        avg_latencies.append(interval_data.get("Average Latency"))
+        p50_latencies.append(interval_data.get("p50.00"))
+        p99_latencies.append(interval_data.get("p99.00"))
+        p99_9_latencies.append(interval_data.get("p99.90"))
+        min_latencies.append(interval_data.get("Min Latency"))
+        max_latencies.append(interval_data.get("Max Latency"))
 
         # Calculate ops/sec for this interval (count per second)
-        ops_per_sec.append(interval_data["Count"])
+        ops_per_sec.append(interval_data.get("Count", 0))
 
     return {
         "times": times,
@@ -102,6 +102,20 @@ def extract_latency_timeseries(data, operation, ignore_last_seconds=3):
         "max": max_latencies,
         "ops_per_sec": ops_per_sec,
     }
+
+
+def get_latency_operations(all_stats):
+    """Return operations with latency time-series samples."""
+    operations = []
+    for key, op_stats in all_stats.items():
+        if key == "Runtime" or not isinstance(op_stats, dict) or "Time-Serie" not in op_stats:
+            continue
+
+        time_serie = op_stats["Time-Serie"]
+        if any("Average Latency" in interval for interval in time_serie.values()):
+            operations.append(key)
+
+    return operations
 
 
 def plot_latency_chart_interactive(data, output_file="latency_chart.html", open_browser=True):
@@ -121,11 +135,7 @@ def plot_latency_chart_interactive(data, output_file="latency_chart.html", open_
 
     # Get all available operations from ALL STATS (excluding 'Runtime')
     all_stats = data["ALL STATS"]
-    operations = [
-        key
-        for key in all_stats.keys()
-        if key != "Runtime" and isinstance(all_stats[key], dict) and "Time-Serie" in all_stats[key]
-    ]
+    operations = get_latency_operations(all_stats)
 
     if not operations:
         print("Error: No operation data found in JSON")
@@ -351,11 +361,7 @@ def plot_latency_chart(data, output_file="latency_chart.svg", open_browser=True)
     """
     # Get all available operations from ALL STATS (excluding 'Runtime')
     all_stats = data["ALL STATS"]
-    operations = [
-        key
-        for key in all_stats.keys()
-        if key != "Runtime" and isinstance(all_stats[key], dict) and "Time-Serie" in all_stats[key]
-    ]
+    operations = get_latency_operations(all_stats)
 
     if not operations:
         print("Error: No operation data found in JSON")
