@@ -4591,6 +4591,46 @@ TEST_F(SearchFamilyTest, KnnHnswEfRuntimeWidensSearch) {
   EXPECT_LT(greedy_hits + 5, wide_hits);  // ef=1 greedy provably misses several of them
 }
 
+TEST_F(SearchFamilyTest, KnnHnswQueryAttributesEfRuntime) {
+  auto resp = Run({"FT.CREATE", "attr_idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "8",
+                   "TYPE", "FLOAT32", "DIM", "1", "DISTANCE_METRIC", "L2", "EF_RUNTIME", "11"});
+  EXPECT_EQ(resp, "OK");
+
+  Run({"HSET", "doc1", "pos", FloatVec1(1.0f)});
+  Run({"HSET", "doc2", "pos", FloatVec1(2.0f)});
+  Run({"HSET", "doc3", "pos", FloatVec1(3.0f)});
+
+  // Each query must return the single nearest doc (doc2) and yield its distance under alias "dist".
+  auto expect_nearest_doc2 = [&](const RespExpr& resp) {
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    auto results = resp.GetVec();
+    ASSERT_EQ(results.size(), 3);
+    EXPECT_THAT(results[0], IntArg(1));
+    EXPECT_EQ(results[1].GetString(), "doc2");
+    EXPECT_LT(map_score("dist", results[2].GetVec()), 0.01);
+  };
+
+  // Attribute block overrides the inline alias ("inline" -> "dist") and passes EF_RUNTIME via
+  // param.
+  resp = Run({"FT.SEARCH", "attr_idx",
+              "*=>[KNN $k @pos $vec AS inline]=>{$EF_RUNTIME: $ef; $YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "6", "k", "1", "vec", FloatVec1(2.0f), "ef", "30", "RETURN", "1", "dist",
+              "SORTBY", "dist", "DIALECT", "2"});
+  expect_nearest_doc2(resp);
+
+  // Attribute block with only EF_RUNTIME and a trailing ';'; the inline AS alias is kept.
+  resp =
+      Run({"FT.SEARCH", "attr_idx", "*=>[KNN 1 @pos $vec AS dist]=>{$EF_RUNTIME: 7;}", "PARAMS",
+           "2", "vec", FloatVec1(2.0f), "RETURN", "1", "dist", "SORTBY", "dist", "DIALECT", "2"});
+  expect_nearest_doc2(resp);
+
+  // No EF_RUNTIME given anywhere -> the index-level default (11) is used for the search.
+  resp =
+      Run({"FT.SEARCH", "attr_idx", "*=>[KNN 1 @pos $vec]=>{$YIELD_DISTANCE_AS: dist}", "PARAMS",
+           "2", "vec", FloatVec1(2.0f), "RETURN", "1", "dist", "SORTBY", "dist", "DIALECT", "2"});
+  expect_nearest_doc2(resp);
+}
+
 TEST_F(SearchFamilyTest, FilteredKnnHnswSearchLoadsOnlyWinners) {
   auto resp = Run({"FT.CREATE", "knn_idx", "ON",     "HASH",    "SCHEMA",
                    "grp",       "TAG",     "rank",   "NUMERIC", "payload",
