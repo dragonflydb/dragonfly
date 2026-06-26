@@ -169,14 +169,14 @@ struct CmdArgParser {
 
   double NextPositiveDouble(std::string_view err_msg) {
     double val = Next<double>(err_msg);
-    if (!HasError() && (!(val > 0) || std::isinf(val)))
+    if (!HasError() && (!(val > 0) || !std::isfinite(val)))
       ReportCustom(std::string{err_msg});
     return val;
   }
 
   double NextNonNegativeDouble(std::string_view err_msg) {
     double val = Next<double>(err_msg);
-    if (!HasError() && (val < 0 || std::isnan(val)))
+    if (!HasError() && (!(val >= 0) || !std::isfinite(val)))
       ReportCustom(std::string{err_msg});
     return val;
   }
@@ -274,11 +274,11 @@ struct CmdArgParser {
     }
 
     ++cur_i_;  // Consume nargs.
-    size_t end = cur_i_ + nargs;
-    if (end > args_.size()) {
-      Report(OUT_OF_BOUNDS, args_.size());
+    if (nargs > args_.size() - cur_i_) {
+      Report(OUT_OF_BOUNDS, cur_i_);
       return true;
     }
+    size_t end = cur_i_ + nargs;
 
     while (cur_i_ < end && !error_) {
       std::string_view tag = Next();

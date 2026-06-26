@@ -5414,6 +5414,14 @@ TEST_F(SearchFamilyTest, HnswVectorRange) {
               "2", "vec", query_vec, "LIMIT", "0", "10"});
   EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
 
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE inf $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec});
+  EXPECT_THAT(resp, ErrArg("radius"));
+
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$EPSILON: 2000000}", "PARAMS",
+              "2", "vec", query_vec});
+  EXPECT_THAT(resp, ErrArg("Query syntax error"));
+
   // Score alias is returned in each document by default
   resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
               "PARAMS", "2", "vec", query_vec, "RETURN", "1", "dist"});
@@ -6998,6 +7006,12 @@ TEST_F(SearchFamilyTest, VectorEpsilonValidation) {
             "OK");
   EXPECT_THAT(Run({"FT.CREATE", "idx_hnsw_neg", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "8",
                    "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2", "EPSILON", "-0.1"}),
+              ErrArg("Parse error"));
+  EXPECT_EQ(Run({"FT.CREATE", "idx_hnsw_5000", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "8",
+                 "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2", "EPSILON", "5000"}),
+            "OK");
+  EXPECT_THAT(Run({"FT.CREATE", "idx_hnsw_big", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "8",
+                   "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2", "EPSILON", "2000000"}),
               ErrArg("Parse error"));
   EXPECT_THAT(Run({"FT.CREATE", "idx_flat_eps", "ON", "HASH", "SCHEMA", "v", "VECTOR", "FLAT", "8",
                    "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2", "EPSILON", "0.1"}),
@@ -8804,8 +8818,20 @@ TEST_F(SearchFamilyTest, FtHybridRangeHnsw) {
            "LIMIT",     "0",   "5",       "PARAMS", "2",    "v",     FloatVec1(1.0f)});
   EXPECT_THAT(resp, ErrArg("RADIUS"));
 
+  resp =
+      Run({"FT.HYBRID", "idx", "SEARCH",  "apple",  "VSIM", "@vec",  "$v",           "RANGE", "2",
+           "RADIUS",    "inf", "COMBINE", "LINEAR", "4",    "ALPHA", "0.5",          "BETA",  "0.5",
+           "LIMIT",     "0",   "5",       "PARAMS", "2",    "v",     FloatVec1(1.0f)});
+  EXPECT_THAT(resp, ErrArg("RADIUS"));
+
   resp = Run({"FT.HYBRID", "idx", "SEARCH", "apple", "VSIM",    "@vec",         "$v",
               "RANGE",     "4",   "RADIUS", "0.5",   "EPSILON", "inf",          "COMBINE",
+              "LINEAR",    "4",   "ALPHA",  "0.5",   "BETA",    "0.5",          "LIMIT",
+              "0",         "5",   "PARAMS", "2",     "v",       FloatVec1(1.0f)});
+  EXPECT_THAT(resp, ErrArg("EPSILON"));
+
+  resp = Run({"FT.HYBRID", "idx", "SEARCH", "apple", "VSIM",    "@vec",         "$v",
+              "RANGE",     "4",   "RADIUS", "0.5",   "EPSILON", "2000000",      "COMBINE",
               "LINEAR",    "4",   "ALPHA",  "0.5",   "BETA",    "0.5",          "LIMIT",
               "0",         "5",   "PARAMS", "2",     "v",       FloatVec1(1.0f)});
   EXPECT_THAT(resp, ErrArg("EPSILON"));

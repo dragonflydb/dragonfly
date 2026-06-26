@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <string>
@@ -60,6 +61,27 @@ struct SchemaField {
   enum FieldFlags : uint8_t { NOINDEX = 1 << 0, SORTABLE = 1 << 1 };
 
   struct VectorParams {
+    static constexpr double kDefaultHnswEpsilon = 0.01;
+    // Deliberate sanity cap: rejects non-finite and absurd values. Set far above any practical
+    // overscan factor (epsilon of a few already explores almost the whole graph), so it never
+    // rejects a realistic value.
+    static constexpr double kMaxHnswEpsilon = 1e6;
+
+    // Schema epsilon (FT.CREATE) allows 0, which maps to the default via
+    // NormalizeSchemaHnswEpsilon.
+    static bool IsValidSchemaHnswEpsilon(double epsilon) {
+      return epsilon >= 0 && epsilon <= kMaxHnswEpsilon && std::isfinite(epsilon);
+    }
+
+    // Runtime override ($EPSILON / RANGE EPSILON) must be strictly positive.
+    static bool IsValidRuntimeHnswEpsilon(double epsilon) {
+      return epsilon > 0 && epsilon <= kMaxHnswEpsilon && std::isfinite(epsilon);
+    }
+
+    static double NormalizeSchemaHnswEpsilon(double epsilon) {
+      return epsilon == 0 ? kDefaultHnswEpsilon : epsilon;
+    }
+
     bool use_hnsw = false;
 
     size_t dim = 0u;                              // dimension of knn vectors
@@ -69,7 +91,7 @@ struct SchemaField {
     size_t hnsw_m = 16;
     std::string data_type = "FLOAT32";
     uint32_t hnsw_ef_runtime = 10;
-    double hnsw_epsilon = 0.01;
+    double hnsw_epsilon = kDefaultHnswEpsilon;
   };
 
   struct TagParams {

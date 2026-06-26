@@ -593,7 +593,7 @@ struct BasicSearch {
     if (node.vec.second == 0)
       return IndexResult{};
 
-    if (node.radius < 0 || std::isnan(node.radius)) {
+    if (!(node.radius >= 0) || !std::isfinite(node.radius)) {
       error_ = absl::StrCat("VECTOR_RANGE radius must be non-negative, got: ", node.radius);
       return IndexResult{};
     }

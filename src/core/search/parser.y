@@ -51,6 +51,7 @@
 
 #include <absl/strings/ascii.h>
 #include "core/search/query_driver.h"
+#include "core/search/search.h"
 #include "core/search/vector_utils.h"
 
 #define yylex driver->scanner()->Lex
@@ -268,7 +269,7 @@ vector_range_attr:
   | EPSILON COLON vec_range_radius
     {
       double epsilon = $3;
-      if (!(epsilon > 0) || std::isinf(epsilon))
+      if (!SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(epsilon))
         YYABORT;
       $$ = VectorRangeAttributes{};
       $$.epsilon = epsilon;

@@ -849,6 +849,22 @@ TEST_F(VectorRangeTest, FlatRangeRejectsEpsilon) {
   EXPECT_THAT(result.error, testing::HasSubstr("EPSILON"));
 }
 
+TEST_F(VectorRangeTest, FlatRangeRejectsInfiniteRadius) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({1.0f});
+
+  ASSERT_TRUE(algo.Init("@pos:[VECTOR_RANGE inf $vec]", &params));
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.error, testing::HasSubstr("radius"));
+}
+
 TEST_F(VectorRangeTest, RangeOrFilterScoresByDoc) {
   // OR-ing a range with a filter makes the result larger than the range-match set. knn_scores is
   // keyed by DocId: only in-range docs carry a distance, filter-only docs are simply absent.

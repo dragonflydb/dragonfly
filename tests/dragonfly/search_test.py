@@ -345,12 +345,16 @@ async def test_management(async_client: aioredis.Redis):
             "1",
             "distance_metric",
             "L2",
+            "initial_cap",
+            "100",
             "M",
             "16",
             "ef_construction",
             "200",
             "ef_runtime",
             "10",
+            "epsilon",
+            "0.010000",
         ],
     ]
 

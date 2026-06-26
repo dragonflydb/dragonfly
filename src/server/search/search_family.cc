@@ -128,10 +128,11 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
       double epsilon = parser->Next<double>("Invalid EPSILON value");
       if (!params.use_hnsw) {
         parser->ReportCustom("EPSILON is supported only for HNSW vector indexes");
-      } else if (epsilon < 0 || !std::isfinite(epsilon)) {
+      } else if (!search::SchemaField::VectorParams::IsValidSchemaHnswEpsilon(epsilon)) {
         parser->ReportCustom("Invalid EPSILON value");
       } else {
-        params.hnsw_epsilon = epsilon == 0 ? 0.01 : epsilon;
+        params.hnsw_epsilon =
+            search::SchemaField::VectorParams::NormalizeSchemaHnswEpsilon(epsilon);
       }
     } else {
       parser->Skip(2);
@@ -1689,12 +1690,13 @@ std::shared_ptr<search::HnswVectorIndex> GetValidatedHnswRangeIndex(
     builder->SendError("Parse error of vector parameters");
     return nullptr;
   }
-  if (hnsw_range->radius < 0 || std::isnan(hnsw_range->radius)) {
+  if (!(hnsw_range->radius >= 0) || !std::isfinite(hnsw_range->radius)) {
     builder->SendError(
         absl::StrCat("VECTOR_RANGE radius must be non-negative, got: ", hnsw_range->radius));
     return nullptr;
   }
-  if (hnsw_range->epsilon && *hnsw_range->epsilon <= 0) {
+  if (hnsw_range->epsilon &&
+      !search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(*hnsw_range->epsilon)) {
     builder->SendError("VECTOR_RANGE EPSILON must be greater than zero");
     return nullptr;
   }
@@ -1827,7 +1829,13 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
           opt_parser->ReportCustom("Duplicate EPSILON argument");
           return;
         }
-        p.range_epsilon = opt_parser->NextPositiveDouble("Invalid EPSILON value");
+        double epsilon = opt_parser->NextPositiveDouble("Invalid EPSILON value");
+        if (!opt_parser->HasError() &&
+            !search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(epsilon)) {
+          opt_parser->ReportCustom("Invalid EPSILON value");
+          return;
+        }
+        p.range_epsilon = epsilon;
         has_epsilon = !opt_parser->HasError();
       }
     };
@@ -1841,7 +1849,12 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
 
     p.range_radius = sub->NextNonNegativeDouble("Invalid RADIUS value");
     if (sub->Check("EPSILON"))
-      p.range_epsilon = sub->NextPositiveDouble("Invalid EPSILON value");
+      if (double epsilon = sub->NextPositiveDouble("Invalid EPSILON value"); !sub->HasError()) {
+        if (!search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(epsilon))
+          sub->ReportCustom("Invalid EPSILON value");
+        else
+          p.range_epsilon = epsilon;
+      }
   };
 
   parser->ExpectTag("SEARCH", "expected SEARCH keyword");

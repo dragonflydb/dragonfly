@@ -4,6 +4,10 @@
 #include <hnswlib/visited_list_pool.h>
 #include <mimalloc.h>
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
 #pragma once
 
 namespace dfly::search {
@@ -1581,7 +1585,15 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     // because the entry point is farther than radius.
     dist_t ep_dist = curdist;
     dist_t dynamic_range = std::max(ep_dist, radius);
-    dist_t dyn_boundary = static_cast<dist_t>(dynamic_range * (1.0 + epsilon));
+    auto boundary = [](dist_t range, double eps) {
+      double bound = static_cast<double>(range) * (1.0 + eps);
+      if (!std::isfinite(bound))
+        return std::numeric_limits<dist_t>::max();
+      return static_cast<dist_t>(
+          std::min(bound, static_cast<double>(std::numeric_limits<dist_t>::max())));
+    };
+
+    dist_t dyn_boundary = boundary(dynamic_range, epsilon);
 
     if (!isMarkedDeleted(currObj) && ep_dist <= radius)
       result.emplace_back(ep_dist, getExternalLabel(currObj));
@@ -1602,7 +1614,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       // Shrink dynamic_range only with closer out-of-radius candidates, matching VecSim.
       if (curr_dist < dynamic_range && curr_dist >= radius) {
         dynamic_range = curr_dist;
-        dyn_boundary = static_cast<dist_t>(dynamic_range * (1.0 + epsilon));
+        dyn_boundary = boundary(dynamic_range, epsilon);
       }
 
       int* data = (int*)get_linklist0(curr_id);
