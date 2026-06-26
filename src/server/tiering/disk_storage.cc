@@ -237,14 +237,13 @@ DiskStorage::Stats DiskStorage::GetStats() const {
 
 error_code DiskStorage::RequestGrow(off_t min_size) {
   // Request the file to grow by (default ExternalAllocator::kExtAlignment = 256_MB):
-  // - take max(5% of capacity, 256 MB)
+  // - take 5% of capacity
   // - round up to 256 MB boundary
   // - ensure result is at least min_size
   auto ComputeGrowSize = [](size_t capacity, size_t min_size) -> size_t {
     const size_t kGrowPercent = 5;
     const size_t kAlign = ExternalAllocator::kExtAlignment;
-    size_t grow = std::max((capacity * kGrowPercent) / 100, kAlign);
-    grow = AlignUp(grow, kAlign);
+    size_t grow = AlignUp((capacity * kGrowPercent) / 100, kAlign);
     return std::max(grow, min_size);
   };
 
