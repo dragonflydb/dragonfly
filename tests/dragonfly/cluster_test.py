@@ -1919,10 +1919,11 @@ async def test_start_replication_during_migration(
         json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
     )
 
-    await check_all_replicas_finished([r1_node.client], m1_node.client)
-
     seeder.stop()
     await seed
+
+    await check_all_replicas_finished([r1_node.client], m1_node.client)
+
     fake_capture = await seeder.capture_fake_redis()
     assert await seeder.compare(fake_capture, r1_node.instance.port)
 
