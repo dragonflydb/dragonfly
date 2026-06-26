@@ -234,4 +234,60 @@ TEST_F(CuckooFilterFamilyTest, CompactMissingKey) {
   EXPECT_THAT(Run({"cf.compact", "nonexist-key"}), ErrArg("no such key"));
 }
 
+TEST_F(CuckooFilterFamilyTest, Insert) {
+  auto resp = Run({"cf.insert", "cf", "items", "a", "b", "c"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+  EXPECT_EQ(Run("type cf"), "MBbloomCF");
+
+  // Duplicates are allowed (like CF.ADD).
+  resp = Run({"cf.insert", "cf", "items", "a", "a"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(1))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertWithCapacity) {
+  auto resp = Run({"cf.insert", "cf", "capacity", "500", "items", "x"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertNocreate) {
+  // NOCREATE on missing key returns an error.
+  EXPECT_THAT(Run({"cf.insert", "cf", "nocreate", "items", "a"}), ErrArg("no such key"));
+
+  // NOCREATE on existing key works fine.
+  ASSERT_EQ(Run("cf.reserve cf 1000"), "OK");
+  auto resp = Run({"cf.insert", "cf", "nocreate", "items", "a"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertMissingItemsKeyword) {
+  EXPECT_THAT(Run({"cf.insert", "cf", "a", "b"}), ErrArg("ITEMS"));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertWrongType) {
+  Run("set str1 foo");
+  EXPECT_THAT(Run({"cf.insert", "str1", "items", "a"}), ErrArg("WRONGTYPE"));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertNx) {
+  auto resp = Run({"cf.insertnx", "cf", "items", "a", "b", "c"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+
+  // Existing items return 0 (like CF.ADDNX).
+  resp = Run({"cf.insertnx", "cf", "items", "a", "d"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), IntArg(1))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertNxNocreate) {
+  EXPECT_THAT(Run({"cf.insertnx", "cf", "nocreate", "items", "a"}), ErrArg("no such key"));
+
+  ASSERT_EQ(Run("cf.reserve cf 1000"), "OK");
+  auto resp = Run({"cf.insertnx", "cf", "nocreate", "items", "a"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertNxWrongType) {
+  Run("set str1 foo");
+  EXPECT_THAT(Run({"cf.insertnx", "str1", "items", "a"}), ErrArg("WRONGTYPE"));
+}
+
 }  // namespace dfly
