@@ -1012,45 +1012,6 @@ OpResult<ScoredMap> IntersectResults(vector<OpResult<ScoredMap>>& results, AggTy
   return result;
 }
 
-OpResult<void> FillAggType(string_view agg, SetOpArgs* op_args) {
-  if (agg == "SUM") {
-    op_args->agg_type = AggType::SUM;
-  } else if (agg == "MIN") {
-    op_args->agg_type = AggType::MIN;
-  } else if (agg == "MAX") {
-    op_args->agg_type = AggType::MAX;
-  } else {
-    return OpStatus::SYNTAX_ERR;
-  }
-  return OpStatus::OK;
-}
-
-// AGGREGATE <SUM|MIN|MAX>: consumes the aggregation type from the parser.
-OpResult<void> ParseAggregate(CmdArgParser* parser, SetOpArgs* op_args) {
-  if (!parser->HasNext()) {
-    return OpStatus::SYNTAX_ERR;
-  }
-  return FillAggType(absl::AsciiStrToUpper(parser->Next()), op_args);
-}
-
-// WEIGHTS <w1> ... <wN>: consumes num_keys weights from the parser.
-OpResult<void> ParseWeights(CmdArgParser* parser, SetOpArgs* op_args) {
-  if (!parser->HasAtLeast(op_args->num_keys)) {
-    return OpStatus::SYNTAX_ERR;
-  }
-
-  op_args->weights.resize(op_args->num_keys, 1);
-  for (unsigned i = 0; i < op_args->num_keys; ++i) {
-    op_args->weights[i] = parser->Next<double>();
-  }
-
-  // Consume (don't just peek) any parse error so the parser doesn't trip its destructor DCHECK.
-  if (parser->TakeError()) {
-    return OpStatus::INVALID_FLOAT;
-  }
-  return OpStatus::OK;
-}
-
 OpResult<SetOpArgs> ParseSetOpArgs(CmdArgParser parser, bool store) {
   SetOpArgs op_args;
 
@@ -1063,24 +1024,25 @@ OpResult<SetOpArgs> ParseSetOpArgs(CmdArgParser parser, bool store) {
   // The source keys are resolved via the command's key spec; skip past them to the options.
   parser.Skip(op_args.num_keys);
 
-  while (parser.HasNext()) {
-    if (parser.Check("WEIGHTS")) {
-      if (auto res = ParseWeights(&parser, &op_args); !res) {
-        return res.status();
-      }
-    } else if (parser.Check("AGGREGATE")) {
-      if (auto res = ParseAggregate(&parser, &op_args); !res) {
-        return res.status();
-      }
-    } else if (parser.Check("WITHSCORES")) {
-      // Commands with store capability do not offer the WITHSCORES option.
-      if (store) {
-        return OpStatus::SYNTAX_ERR;
-      }
-      op_args.with_scores = true;
-    } else {
-      return OpStatus::SYNTAX_ERR;
-    }
+  parser.Apply(Tag("WEIGHTS",
+                   [&op_args](CmdArgParser* p) {
+                     op_args.weights.resize(op_args.num_keys, 1);
+                     for (unsigned i = 0; i < op_args.num_keys; ++i)
+                       op_args.weights[i] = p->Next<double>();
+                   }),
+               Tag("AGGREGATE", Map(&op_args.agg_type, "SUM", AggType::SUM, "MIN", AggType::MIN,
+                                    "MAX", AggType::MAX)),
+               // The *STORE variants do not offer the WITHSCORES option.
+               If(!store, Exist("WITHSCORES", &op_args.with_scores)));
+
+  // A non-float WEIGHTS value surfaces as INVALID_FLOAT; any other failure (unknown option, bad
+  // AGGREGATE type, or leftover args caught by Finalize) is a plain syntax error.
+  if (auto err = parser.TakeError(); err) {
+    return err.type == CmdArgParser::INVALID_FLOAT ? OpStatus::INVALID_FLOAT : OpStatus::SYNTAX_ERR;
+  }
+  if (!parser.Finalize()) {
+    (void)parser.TakeError();
+    return OpStatus::SYNTAX_ERR;
   }
 
   return op_args;
@@ -1712,12 +1674,9 @@ OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards shou
 
 void ZPopMinMaxFromArgs(CmdArgParser parser, bool reverse, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  uint32 count = 1;
-  if (parser.HasNext()) {
-    count = parser.Next<uint32>();
-    if (parser.TakeError()) {
-      return cmd_cntx->SendError(kUintErr);
-    }
+  uint32 count = parser.NextOrDefault<uint32>(1);
+  if (parser.TakeError()) {
+    return cmd_cntx->SendError(kUintErr);
   }
 
   OutputScoredArrayResult(ZPopMinMaxInternal(key, FilterShards::NO, count, reverse, cmd_cntx->tx()),
@@ -2532,20 +2491,23 @@ void CmdZInterStore(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdZInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
-  facade::ParsedArgs args = parser.UnparsedArgs();
-  unsigned num_keys;
   auto* builder = cmd_cntx->rb();
 
-  if (!absl::SimpleAtoi(args[0], &num_keys)) {
+  unsigned num_keys = parser.Next<unsigned>();
+  if (parser.TakeError()) {
     return cmd_cntx->SendError(OpStatus::SYNTAX_ERR);
   }
 
+  // After numkeys is consumed, the remaining args are the keys followed by an optional LIMIT
+  // clause.
+  facade::ParsedArgs args = parser.UnparsedArgs();
+
   uint64_t limit = 0;
-  if (args.size() == (1 + num_keys + 2) && args[1 + num_keys] == "LIMIT") {
-    if (!absl::SimpleAtoi(args[1 + num_keys + 1], &limit)) {
+  if (args.size() == (num_keys + 2) && args[num_keys] == "LIMIT") {
+    if (!absl::SimpleAtoi(args[num_keys + 1], &limit)) {
       return builder->SendError("limit value is not a positive integer", kSyntaxErrType);
     }
-  } else if (args.size() != 1 + num_keys) {
+  } else if (args.size() != num_keys) {
     return builder->SendError(kSyntaxErr);
   }
 
@@ -2610,9 +2572,8 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
   // first key (in command order) that exists and is non-empty on some shard. The string_views point
   // into the command's backing args, which outlive this call.
   parser.Skip(1 + is_blocking);
-  facade::ParsedArgs arg_keys = parser.UnparsedArgs();
   for (size_t i = 0; i < zmpop_args.num_keys; ++i) {
-    std::string_view key = arg_keys[i];
+    std::string_view key = parser.Next();
     if (first_found_keys_for_shard.contains(key)) {
       key_to_pop = key;
       break;
