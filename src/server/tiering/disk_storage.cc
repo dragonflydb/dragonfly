@@ -41,6 +41,10 @@ namespace {
 
 constexpr unsigned kHeapSliceId = UINT_MAX;
 
+size_t AlignUp(size_t value, size_t alignment) {
+  return (value + alignment - 1) & ~(alignment - 1);
+}
+
 RegisteredSlice AllocateTmpBuf(size_t size) {
   size = (size + kPageSize - 1) / kPageSize * kPageSize;
   VLOG(2) << "Fallback to temporary allocation: " << size;
@@ -97,7 +101,18 @@ error_code DiskStorage::Open(string_view path) {
   int fd = backing_file_->fd();
 
   off_t disk_initial_size = absl::GetFlag(FLAGS_tiering_disk_storage_initial_size);
-  auto ec = DoFiberCall(&SubmitEntry::PrepFallocate, fd, 0, 0L, disk_initial_size);
+
+  if (!disk_initial_size || (disk_initial_size % ExternalAllocator::kExtAlignment) != 0) {
+    disk_initial_size = !disk_initial_size
+                            ? ExternalAllocator::kExtAlignment
+                            : AlignUp(disk_initial_size, ExternalAllocator::kExtAlignment);
+    LOG(WARNING) << "Flag tiering_disk_storage_initial_size is not aligned to "
+                 << strings::HumanReadableNumBytes(ExternalAllocator::kExtAlignment)
+                 << " bytes; rounded up to " << strings::HumanReadableNumBytes(disk_initial_size);
+  }
+
+  auto ec =
+      DoFiberCall(&SubmitEntry::PrepFallocate, fd, 0, 0L, static_cast<off_t>(disk_initial_size));
   VLOG_IF(1, ec) << "Fallocate not supported";
 
   RETURN_ON_ERR(DoFiberCall(&SubmitEntry::PrepFadvise, fd, 0L, 0L, POSIX_FADV_RANDOM));
@@ -229,7 +244,7 @@ error_code DiskStorage::RequestGrow(off_t min_size) {
     const size_t kGrowPercent = 5;
     const size_t kAlign = ExternalAllocator::kExtAlignment;
     size_t grow = std::max((capacity * kGrowPercent) / 100, kAlign);
-    grow = (grow + kAlign - 1) & ~(kAlign - 1);
+    grow = AlignUp(grow, kAlign);
     return std::max(grow, min_size);
   };
 
