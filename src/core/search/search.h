@@ -209,6 +209,7 @@ struct SearchResult {
 
   // Text relevance scores keyed by DocId. Populated when a scorer is active.
   absl::flat_hash_map<DocId, float> text_scores;
+  float max_text_score = 0;
 
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;
@@ -266,11 +267,11 @@ class SearchAlgorithm {
 
   void EnableProfiling();
 
-  void SetScorer(ScorerFn scorer);
+  void SetScorer(ScorerSpec scorer);
 
  private:
   bool profiling_enabled_ = false;
-  ScorerFn scorer_ = nullptr;
+  std::optional<ScorerSpec> scorer_;
   std::unique_ptr<AstNode> query_;
   std::optional<KnnScoreSortOption> knn_hnsw_score_sort_option_;
 };

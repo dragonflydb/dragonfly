@@ -1544,7 +1544,9 @@ async def _index_and_query_with_scorer(client, scorer: str, query: str, k: int):
     return total, docs
 
 
-@pytest.mark.parametrize("scorer", ["BM25STD", "TFIDF", "TFIDF.DOCNORM"])
+@pytest.mark.parametrize(
+    "scorer", ["BM25STD", "TFIDF", "TFIDF.DOCNORM", "BM25STD.NORM", "BM25STD.TANH"]
+)
 async def test_scorer_consistent_across_shards(df_factory: DflyInstanceFactory, scorer: str):
     """Top-K and scores must be identical regardless of proactor_threads count.
 
@@ -1642,7 +1644,9 @@ async def _aggregate_with_scorer(client, scorer: str, query: str, k: int):
     return docs
 
 
-@pytest.mark.parametrize("scorer", ["BM25STD", "TFIDF", "TFIDF.DOCNORM"])
+@pytest.mark.parametrize(
+    "scorer", ["BM25STD", "TFIDF", "TFIDF.DOCNORM", "BM25STD.NORM", "BM25STD.TANH"]
+)
 async def test_aggregate_scorer_consistent_across_shards(
     df_factory: DflyInstanceFactory, scorer: str
 ):
@@ -1664,6 +1668,68 @@ async def test_aggregate_scorer_consistent_across_shards(
     for (k1, s1), (k4, s4) in zip(docs1, docs4):
         denom = max(abs(s1), abs(s4), 1e-9)
         assert abs(s1 - s4) / denom < 1e-4, f"score for {k1} differs: {s1} vs {s4}"
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_bm25std_norm_single_global_winner(async_client: aioredis.Redis):
+    """Multi-shard BM25STD.NORM uses one global max: only the single global-best document
+    reaches 1.0. A per-shard normalization bug would make one document per shard reach 1.0."""
+    await async_client.execute_command(
+        "FT.CREATE", "norm_win_idx", "ON", "HASH", "PREFIX", "1", "nw:", "SCHEMA", "content", "TEXT"
+    )
+    # Distinct "hello" frequencies -> distinct scores; keys spread across the 4 shards.
+    for i in range(1, 13):
+        await async_client.hset(f"nw:{i}", mapping={"content": " ".join(["hello"] * i)})
+
+    def parse(res):
+        out = {}
+        i = 1
+        while i + 1 < len(res):
+            key = res[i].decode() if isinstance(res[i], bytes) else res[i]
+            s = res[i + 1]
+            out[key] = float(s.decode() if isinstance(s, bytes) else s)
+            i += 2  # NOCONTENT -> (key, score) pairs
+        return out
+
+    raw = parse(
+        await async_client.execute_command(
+            "FT.SEARCH",
+            "norm_win_idx",
+            "hello",
+            "NOCONTENT",
+            "WITHSCORES",
+            "SCORER",
+            "BM25STD",
+            "LIMIT",
+            "0",
+            "100",
+        )
+    )
+    norm = parse(
+        await async_client.execute_command(
+            "FT.SEARCH",
+            "norm_win_idx",
+            "hello",
+            "NOCONTENT",
+            "WITHSCORES",
+            "SCORER",
+            "BM25STD.NORM",
+            "LIMIT",
+            "0",
+            "100",
+        )
+    )
+
+    assert len(raw) == 12
+    assert len(norm) == 12
+    max_raw = max(raw.values())
+    winners = [k for k, v in norm.items() if abs(v - 1.0) < 1e-6]
+    assert len(winners) == 1, f"expected exactly one global winner, got {winners}"
+    for k, v in norm.items():
+        assert v == pytest.approx(raw[k] / max_raw, abs=1e-5)
+        assert v <= 1.0 + 1e-9
+
+    await async_client.execute_command("FT.DROPINDEX", "norm_win_idx")
 
 
 async def test_sortby_with_scores_alignment(async_client: aioredis.Redis):

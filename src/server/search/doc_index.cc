@@ -1015,7 +1015,14 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
         {result.ids[i], string{key}, std::move(fields), knn_score, text_score, sort_score});
   }
 
-  return {result.total - expired_count, std::move(out), std::move(result.profile)};
+  // Recompute the max over docs that survived loading. Expired/missing docs were dropped above,
+  // so the pre-filter result.max_text_score could otherwise normalize BM25STD.NORM by a document
+  // that is not returned, pushing the best returned document below 1.0.
+  auto max_it = std::ranges::max_element(
+      out, [](const auto& a, const auto& b) { return a.text_score < b.text_score; });
+  float max_text_score = max_it == out.end() ? 0.0f : max_it->text_score;
+
+  return {result.total - expired_count, std::move(out), std::move(result.profile), max_text_score};
 }
 
 SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParams& params,
@@ -1041,14 +1048,20 @@ SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParam
         live_text_scores[id] = it->second;
     }
 
+    // Recompute the max over live docs only, mirroring ShardDocIndex::Search: a dropped
+    // top-scoring doc must not inflate the BM25STD.NORM denominator.
+    auto max_it = std::ranges::max_element(
+        live_text_scores, [](const auto& a, const auto& b) { return a.second < b.second; });
+    float max_text_score = max_it == live_text_scores.end() ? 0.0f : max_it->second;
+
     return {live_ids.size(), std::move(live_ids), std::move(live_text_scores),
-            std::move(result.profile)};
+            std::move(result.profile), max_text_score};
   }
 
   // NOCONTENT returns ids without a per-id liveness check (ignore-expiration fast path); a winner
   // deleted before the load hop is dropped there, which can yield <k results — acceptable here.
   return {result.total, std::move(result.ids), std::move(result.text_scores),
-          std::move(result.profile)};
+          std::move(result.profile), result.max_text_score};
 }
 
 search::ShardScoringStats ShardDocIndex::CollectScoringStats(
@@ -1132,9 +1145,9 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
         out.back()[string{score_alias}] = static_cast<double>(it->second);
     }
 
-    if (!text_score_map.empty()) {
-      if (auto it = text_score_map.find(doc); it != text_score_map.end())
-        out.back()["__score"] = static_cast<double>(it->second);
+    if (params.add_scores) {
+      auto it = text_score_map.find(doc);
+      out.back()["__score"] = it != text_score_map.end() ? static_cast<double>(it->second) : 0.0;
       // Hidden tie-breaker for SORTBY @__score; not added to fields_to_print.
       out.back()["__key"] = string{key};
     }

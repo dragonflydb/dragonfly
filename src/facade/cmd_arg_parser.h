@@ -26,6 +26,8 @@ namespace facade {
 //   auto [src, dst] = parser.Next<string_view, string_view>();  // read several at once (tuple)
 //   auto db = parser.Next<FInt<0, 15>>();                       // range-restricted int
 //                                                               // (INVALID_INT if out of range)
+//   auto f  = parser.Next<FInt<1, 99>>("bad f");                // FInt with a custom out-of-range
+//                                                               // / non-integer error message
 //   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
 //
 // Tag matching:
@@ -146,6 +148,19 @@ struct CmdArgParser {
       cur_i_ += sizeof...(Ts) + 1;
       return res;
     }
+  }
+
+  // Like Next<T>(), but on a failed read (non-numeric, out-of-range FInt, or missing arg) replaces
+  // the generic error with a caller-supplied CUSTOM_ERROR message. Pair with FInt<lo,hi> to attach
+  // a custom out-of-range / non-integer message: parser.Next<FInt<1u, 99u>>("bad f").
+  template <class T = std::string_view> T Next(std::string_view err_msg) {
+    bool prior = bool(error_);
+    T val = Next<T>();
+    if (!prior && error_ && !err_msg.empty()) {
+      error_.type = CUSTOM_ERROR;
+      error_.custom_msg = std::string{err_msg};
+    }
+    return val;
   }
 
   template <class T = std::string_view> auto NextOrDefault(T default_value = {}) {

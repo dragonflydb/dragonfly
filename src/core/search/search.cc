@@ -119,7 +119,8 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices, ScorerFn scorer, const GlobalScoringStats* global_stats)
+  BasicSearch(const FieldIndices* indices, optional<ScorerSpec> scorer,
+              const GlobalScoringStats* global_stats)
       : indices_{indices}, scorer_{scorer}, global_stats_{global_stats} {
   }
 
@@ -683,15 +684,16 @@ struct BasicSearch {
 
     if (scorer_ && !matched_text_terms_.empty()) {
       // Score ALL matched docs and return top-K by score (not arbitrary cutoff).
-      auto [out, total_size, text_scores] = TakeScoredTopK(std::move(result), cuttoff_limit);
+      auto [out, total_size, text_scores, max_text_score] =
+          TakeScoredTopK(std::move(result), cuttoff_limit);
       return SearchResult{
-          total_size,         std::move(out),   std::move(knn_scores_), std::move(text_scores),
-          std::move(profile), std::move(error_)};
+          total_size,     std::move(out),     std::move(knn_scores_), std::move(text_scores),
+          max_text_score, std::move(profile), std::move(error_)};
     }
 
     auto [out, total_size] = result.Take(cuttoff_limit);
-    return SearchResult{total_size, std::move(out),     std::move(knn_scores_),
-                        {},         std::move(profile), std::move(error_)};
+    return SearchResult{total_size, std::move(out),     std::move(knn_scores_), {},
+                        0.0f,       std::move(profile), std::move(error_)};
   }
 
  private:
@@ -714,12 +716,13 @@ struct BasicSearch {
 
   // Score all matched docs via cursor-based posting list traversal and return top-K by score.
   // Total work: O(sum of posting_list_sizes) for cursors + O(N log K) for partial sort.
-  std::tuple<vector<DocId>, size_t, absl::flat_hash_map<DocId, float>> TakeScoredTopK(
+  std::tuple<vector<DocId>, size_t, absl::flat_hash_map<DocId, float>, float> TakeScoredTopK(
       IndexResult&& result, size_t limit) {
     auto [all_docs, total_size] = result.Take();  // all matched docs
 
     if (all_docs.empty())
-      return std::make_tuple(vector<DocId>{}, total_size, absl::flat_hash_map<DocId, float>{});
+      return std::make_tuple(vector<DocId>{}, total_size, absl::flat_hash_map<DocId, float>{},
+                             0.0f);
 
     // Ensure sorted for cursor-based scoring
     sort(all_docs.begin(), all_docs.end());
@@ -746,6 +749,9 @@ struct BasicSearch {
     scored.reserve(all_docs.size());
     vector<ScoringTermInfo> term_infos(cursors.size());
 
+    // Track the max score over the full matched set (before top-K trimming) so the command
+    // layer can normalize BM25STD.NORM by the global max. Cheap byproduct of scoring.
+    float max_text_score = 0.0f;
     for (DocId doc : all_docs) {
       for (size_t t = 0; t < cursors.size(); t++) {
         term_infos[t].term_docs = cursors[t].term_docs;
@@ -755,7 +761,9 @@ struct BasicSearch {
           term_infos[t].field_avg_doc_len = cursors[t].field_avg_doc_len;
         }
       }
-      scored.emplace_back(static_cast<float>(ScoreDocument(scorer_, ctx, term_infos)), doc);
+      float score = static_cast<float>(ScoreDocument(*scorer_, ctx, term_infos));
+      max_text_score = max(max_text_score, score);
+      scored.emplace_back(score, doc);
     }
 
     // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)
@@ -775,7 +783,7 @@ struct BasicSearch {
       text_scores[doc] = score;
     }
 
-    return std::make_tuple(std::move(out), total_size, std::move(text_scores));
+    return std::make_tuple(std::move(out), total_size, std::move(text_scores), max_text_score);
   }
 
   void AddMatchedTerm(TextIndex* index, string term) {
@@ -784,7 +792,7 @@ struct BasicSearch {
   }
 
   const FieldIndices* indices_;
-  ScorerFn scorer_ = nullptr;
+  optional<ScorerSpec> scorer_;
   const GlobalScoringStats* global_stats_ = nullptr;
 
   string error_;
@@ -1226,7 +1234,7 @@ void SearchAlgorithm::EnableProfiling() {
   profiling_enabled_ = true;
 }
 
-void SearchAlgorithm::SetScorer(ScorerFn scorer) {
+void SearchAlgorithm::SetScorer(ScorerSpec scorer) {
   scorer_ = scorer;
 }
 

@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/strings/match.h>
+#include <absl/strings/numbers.h>
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
@@ -17,6 +18,7 @@
 #include <cmath>
 #include <exception>
 #include <functional>
+#include <ranges>
 #include <variant>
 #include <vector>
 
@@ -510,14 +512,28 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   return params;
 }
 
-std::optional<search::ScorerFn> ParseScorer(CmdArgParser* parser) {
-  return parser->TryMapNext("BM25STD", &search::BM25Std,  //
-                            "TFIDF", &search::TfIdf,      //
-                            "TFIDF.DOCNORM", &search::TfIdfDocNorm);
+std::optional<search::ScorerSpec> ParseScorer(CmdArgParser* parser) {
+  auto kind = parser->TryMapNext(
+      "BM25STD", search::ScorerKind::BM25STD, "BM25STD.NORM", search::ScorerKind::BM25STD_NORM,
+      "BM25STD.TANH", search::ScorerKind::BM25STD_TANH, "TFIDF", search::ScorerKind::TFIDF,
+      "TFIDF.DOCNORM", search::ScorerKind::TFIDF_DOCNORM);
+  if (!kind)
+    return nullopt;
+  return search::ScorerSpec{*kind};
+}
+
+constexpr string_view kBM25StdTanhFactorErr = "BM25STD_TANH_FACTOR must be a positive integer";
+
+// Parses a BM25STD_TANH_FACTOR value: an integer >= 1 (no upper bound). On a missing or invalid
+// value the parser reports kBM25StdTanhFactorErr, surfaced by the caller's error handling.
+uint64_t ParseBM25StdTanhFactor(CmdArgParser* parser) {
+  using TanhFactorInt = facade::FInt<uint64_t{1}, std::numeric_limits<uint64_t>::max()>;
+  return parser->Next<TanhFactorInt>(kBM25StdTanhFactorErr);
 }
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   SearchParams params;
+  uint64_t tanh_factor = search::kDefaultBM25StdTanhFactor;
 
   const size_t max_results = absl::GetFlag(FLAGS_MAXSEARCHRESULTS);
 
@@ -560,6 +576,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       if (!scorer)
         return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
       params.scorer = *scorer;
+    } else if (parser->Check("BM25STD_TANH_FACTOR")) {
+      tanh_factor = ParseBM25StdTanhFactor(parser);
     } else if (parser->Check("DIALECT")) {
       parser->Skip(1);  // Accepted and ignored — DF always behaves as dialect 2
     } else {
@@ -569,6 +587,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   }
 
   params.limit_total = std::min(params.limit_total, max_results);
+  if (params.scorer)
+    params.scorer->bm25std_tanh_factor = tanh_factor;
 
   return params;
 }
@@ -681,6 +701,7 @@ ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
 
 ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   AggregateParams params;
+  uint64_t tanh_factor = search::kDefaultBM25StdTanhFactor;
   tie(params.index, params.query) = parser->Next<string_view, string_view>();
 
   // Used for join params
@@ -811,6 +832,11 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       continue;
     }
 
+    if (parser->Check("BM25STD_TANH_FACTOR")) {
+      tanh_factor = ParseBM25StdTanhFactor(parser);
+      continue;
+    }
+
     // DIALECT (accepted and ignored — DF always behaves as dialect 2)
     if (parser->Check("DIALECT")) {
       parser->Skip(1);
@@ -853,6 +879,9 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
 
     return CreateSyntaxError(absl::StrCat("Unknown clause: ", parser->Peek()));
   }
+
+  if (params.scorer)
+    params.scorer->bm25std_tanh_factor = tanh_factor;
 
   return params;
 }
@@ -1178,6 +1207,18 @@ void PartialSortBySortScore(absl::Span<SerializedSearchDoc*> docs, size_t limit,
     run(std::greater<>{});
 }
 
+bool IsBM25StdNorm(const std::optional<search::ScorerSpec>& scorer) {
+  return scorer && scorer->kind == search::ScorerKind::BM25STD_NORM;
+}
+
+// Global max raw text score across per-shard results, used to normalize BM25STD.NORM by the
+// max over the full matched set. Returns 0 when there are no scored docs.
+float GlobalMaxTextScore(absl::Span<const SearchResult> results) {
+  auto max_it = std::ranges::max_element(
+      results, [](const auto& a, const auto& b) { return a.max_text_score < b.max_text_score; });
+  return max_it == results.end() ? 0.0f : max_it->max_text_score;
+}
+
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
                  std::string_view inject_score_alias, absl::Span<SearchResult> results,
@@ -1189,6 +1230,13 @@ void SearchReply(const SearchParams& params,
     total_hits += shard_results.total_hits;
     for (auto& doc : shard_results.docs) {
       docs.push_back(&doc);
+    }
+  }
+
+  if (IsBM25StdNorm(params.scorer)) {
+    if (float max_text_score = GlobalMaxTextScore(results); max_text_score > 0) {
+      for (auto* doc : docs)
+        doc->text_score /= max_text_score;
     }
   }
 
@@ -1407,6 +1455,8 @@ vector<SearchResult> LoadHnswSearchDocs(
                 });
 
   results[0].total_hits = knn_search_serialized_docs.size();
+  for (const auto& doc : knn_search_serialized_docs)
+    results[0].max_text_score = std::max(results[0].max_text_score, doc.text_score);
   results[0].docs = std::move(knn_search_serialized_docs);
 
   return results;
@@ -1686,7 +1736,7 @@ struct HybridSearchParams {
 
   string text_query;
   string yield_text_score_as;
-  search::ScorerFn scorer = nullptr;
+  std::optional<search::ScorerSpec> scorer;  // carries the BM25STD.TANH factor when applicable
 
   string vsim_field;
   string vsim_param;
@@ -1732,6 +1782,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
   using facade::Tag;
 
   HybridSearchParams p;
+  uint64_t tanh_factor = search::kDefaultBM25StdTanhFactor;
 
   auto parse_scorer = [&](CmdArgParser* sub) {
     if (p.scorer) {
@@ -1744,10 +1795,14 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
     else
       p.scorer = *scorer_fn;
   };
+  auto parse_tanh_factor = [&](CmdArgParser* sub) { tanh_factor = ParseBM25StdTanhFactor(sub); };
 
   parser->ExpectTag("SEARCH", "expected SEARCH keyword");
   p.text_query = parser->Next<string>();
-  parser->Apply(Tag("SCORER", parse_scorer), Tag("YIELD_SCORE_AS", &p.yield_text_score_as));
+  parser->Apply(Tag("SCORER", parse_scorer), Tag("BM25STD_TANH_FACTOR", parse_tanh_factor),
+                Tag("YIELD_SCORE_AS", &p.yield_text_score_as));
+  if (p.scorer)
+    p.scorer->bm25std_tanh_factor = tanh_factor;
 
   parser->ExpectTag("VSIM", "expected VSIM keyword");
   p.vsim_field = string{parser->ExpectStartsWith("@", "VSIM field must start with @")};
@@ -1825,29 +1880,12 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
   return p;
 }
 
-void ComputeLinearCombined(float alpha, float beta,
+void ComputeLinearCombined(float alpha, float beta, search::VectorSimilarity vsim_metric,
                            absl::flat_hash_map<string, HybridDocEntry>& docs) {
-  float max_text = 0.0f;
-  float min_dist = std::numeric_limits<float>::max();
-  float max_dist = 0.0f;
-
-  for (const auto& [_, e] : docs) {
-    if (e.has_text)
-      max_text = std::max(max_text, e.text_score);
-    if (e.has_knn) {
-      min_dist = std::min(min_dist, e.knn_dist);
-      max_dist = std::max(max_dist, e.knn_dist);
-    }
-  }
-
-  const float dist_range = (max_dist > min_dist) ? max_dist - min_dist : 0.0f;
-
   for (auto& [_, e] : docs) {
-    float norm_text = (e.has_text && max_text > 0.f) ? e.text_score / max_text : 0.f;
-    float norm_knn = 0.f;
-    if (e.has_knn)
-      norm_knn = (dist_range > 0.f) ? 1.f - (e.knn_dist - min_dist) / dist_range : 1.f;
-    e.combined = alpha * norm_text + beta * norm_knn;  // ALPHA=text, BETA=vector
+    float text_score = e.has_text ? e.text_score : 0.f;
+    float knn_score = e.has_knn ? search::DistanceToSimilarity(e.knn_dist, vsim_metric) : 0.f;
+    e.combined = alpha * text_score + beta * knn_score;  // ALPHA=text, BETA=vector
   }
 }
 
@@ -2111,6 +2149,41 @@ HybridDocMap MergeHybridResults(const vector<SearchResult>& text_docs,
   return doc_map;
 }
 
+void NormalizeHybridTextScores(absl::Span<SearchResult> text_docs) {
+  float max_text_score = GlobalMaxTextScore(text_docs);
+  if (max_text_score == 0)
+    return;
+
+  for (auto& shard : text_docs) {
+    for (auto& doc : shard.docs)
+      doc.text_score /= max_text_score;
+  }
+}
+
+void NormalizeAggregateScores(absl::Span<aggregate::DocValues> values) {
+  static constexpr std::string_view kScoreField = "__score";
+
+  auto get_score = [](const aggregate::DocValues& row) -> double {
+    if (auto it = row.find(kScoreField); it != row.end())
+      if (const auto* score = std::get_if<double>(&it->second))
+        return *score;
+    return 0.0;
+  };
+
+  if (values.empty())
+    return;
+
+  double max_score = std::ranges::max(values | std::views::transform(get_score));
+  if (max_score == 0)
+    return;
+
+  for (auto& row : values) {
+    if (auto it = row.find(kScoreField); it != row.end())
+      if (auto* score = std::get_if<double>(&it->second))
+        *score /= max_score;
+  }
+}
+
 struct HybridExecResult {
   HybridDocMap doc_map;
   search::VectorSimilarity vsim_metric = search::VectorSimilarity::L2;
@@ -2139,7 +2212,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     rb->SendError("Query syntax error in SEARCH clause");
     return false;
   }
-  text_algo.SetScorer(params->scorer ? params->scorer : &search::BM25Std);
+  text_algo.SetScorer(params->scorer ? *params->scorer : search::ScorerSpec{});
   if (enable_profile)
     text_algo.EnableProfiling();
 
@@ -2350,9 +2423,11 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   }
 
   const absl::Time t_combine = absl::Now();
+  if (IsBM25StdNorm(params->scorer))
+    NormalizeHybridTextScores(absl::MakeSpan(text_docs));
   auto doc_map = MergeHybridResults(text_docs, hnsw_shard_docs, flat_knn_docs, use_hnsw);
   if (params->combine_method == HybridSearchParams::CombineMethod::LINEAR)
-    ComputeLinearCombined(params->alpha, params->beta, doc_map);
+    ComputeLinearCombined(params->alpha, params->beta, captured_metric, doc_map);
   else
     ComputeRrfCombined(params->rrf_constant, doc_map);
   const absl::Duration combine_took = absl::Now() - t_combine;
@@ -2881,9 +2956,9 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
   if (params->scorer)
-    search_algo.SetScorer(params->scorer);
+    search_algo.SetScorer(*params->scorer);
   else if (params->with_scores)
-    search_algo.SetScorer(&search::BM25Std);
+    search_algo.SetScorer(search::ScorerSpec{});
 
   auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, index_name);
 
@@ -3209,9 +3284,9 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
   if (params->scorer)
-    search_algo.SetScorer(params->scorer);
+    search_algo.SetScorer(*params->scorer);
   else if (params->with_scores)
-    search_algo.SetScorer(&search::BM25Std);
+    search_algo.SetScorer(search::ScorerSpec{});
 
   search_algo.EnableProfiling();
 
@@ -3702,9 +3777,9 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Enable scorer: explicit SCORER param, or default BM25STD when ADDSCORES is set
     if (params->scorer)
-      search_algo.SetScorer(params->scorer);
+      search_algo.SetScorer(*params->scorer);
     else if (params->add_scores)
-      search_algo.SetScorer(&search::BM25Std);
+      search_algo.SetScorer(search::ScorerSpec{});
 
     std::vector<std::vector<SearchDocData>> query_results(shard_set->size());
 
@@ -3833,6 +3908,9 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     values =
         MergeJoinedKeysWithData(*params, *data_for_join, joined_entries, shard_keys_data_per_index);
   }
+
+  if (params->add_scores && IsBM25StdNorm(params->scorer))
+    NormalizeAggregateScores(absl::MakeSpan(values));
 
   std::vector<std::string_view> load_fields;
   if (params->load_fields) {
