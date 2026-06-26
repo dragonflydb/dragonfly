@@ -11,6 +11,7 @@ class Proxy:
         self.stop_connections = []
         self.server = None
         self._handler_tasks = set()
+        self._serve_task = None
 
     async def handle(self, reader, writer):
         task = asyncio.current_task()
@@ -65,9 +66,23 @@ class Proxy:
             _, port = self.server.sockets[0].getsockname()[:2]
             self.port = port
 
-    async def serve(self):
-        async with self.server:
-            await self.server.serve_forever()
+    async def start_serving(self):
+        await self.start()
+        self._serve_task = asyncio.create_task(self.serve(self.server))
+
+    async def serve(self, server=None):
+        server = server or self.server
+        if server is None:
+            return
+        async with server:
+            await server.serve_forever()
+
+    async def __aenter__(self):
+        await self.start_serving()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
 
     def drop_connection(self):
         """
@@ -79,6 +94,11 @@ class Proxy:
             cb()
 
     async def close(self, task=None):
+        if task is None:
+            task = self._serve_task
+        if task is self._serve_task:
+            self._serve_task = None
+
         if self.server is not None:
             self.server.close()
             self.server = None
