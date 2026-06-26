@@ -69,6 +69,7 @@ struct SchemaField {
     size_t hnsw_m = 16;
     std::string data_type = "FLOAT32";
     uint32_t hnsw_ef_runtime = 10;
+    double hnsw_epsilon = 0.01;
   };
 
   struct TagParams {

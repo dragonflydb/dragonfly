@@ -597,6 +597,10 @@ struct BasicSearch {
       error_ = absl::StrCat("VECTOR_RANGE radius must be non-negative, got: ", node.radius);
       return IndexResult{};
     }
+    if (node.epsilon) {
+      error_ = "EPSILON is supported only for HNSW VECTOR_RANGE";
+      return IndexResult{};
+    }
 
     if (auto [dim, _] = vec_index->Info(); dim != node.vec.second) {
       error_ = absl::StrCat("Wrong vector index dimensions, got: ", node.vec.second,

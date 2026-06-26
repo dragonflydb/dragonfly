@@ -6,8 +6,12 @@
 
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
 
+#include <algorithm>
+#include <cmath>
 #include <concepts>
+#include <initializer_list>
 #include <optional>
 #include <string_view>
 #include <tuple>
@@ -163,6 +167,20 @@ struct CmdArgParser {
     return val;
   }
 
+  double NextPositiveDouble(std::string_view err_msg) {
+    double val = Next<double>(err_msg);
+    if (!HasError() && (!(val > 0) || std::isinf(val)))
+      ReportCustom(std::string{err_msg});
+    return val;
+  }
+
+  double NextNonNegativeDouble(std::string_view err_msg) {
+    double val = Next<double>(err_msg);
+    if (!HasError() && (val < 0 || std::isnan(val)))
+      ReportCustom(std::string{err_msg});
+    return val;
+  }
+
   template <class T = std::string_view> auto NextOrDefault(T default_value = {}) {
     return HasNext() ? Next<T>() : default_value;
   }
@@ -227,6 +245,59 @@ struct CmdArgParser {
     auto res = MapImpl(SafeSV(cur_i_), std::forward<Cases>(cases)...);
     cur_i_ = res ? cur_i_ + 1 : cur_i_;
     return res;
+  }
+
+  template <class Func>
+  bool TryParseCountedKeyValueList(std::initializer_list<std::string_view> count_forcing_tags,
+                                   std::initializer_list<std::string_view> tags,
+                                   std::string_view context, Func func) {
+    if (cur_i_ + 1 >= args_.size() || error_)
+      return false;
+
+    auto matches_any = [](std::string_view arg, std::initializer_list<std::string_view> options) {
+      return std::any_of(options.begin(), options.end(),
+                         [arg](std::string_view opt) { return absl::EqualsIgnoreCase(arg, opt); });
+    };
+
+    std::string_view next = SafeSV(cur_i_ + 1);
+    bool force_count = matches_any(next, count_forcing_tags);
+    if (!force_count && !matches_any(next, tags))
+      return false;
+
+    size_t nargs = 0;
+    bool valid_count = absl::SimpleAtoi(SafeSV(cur_i_), &nargs) && nargs > 0 && (nargs % 2 == 0);
+    if (!valid_count) {
+      if (!force_count)
+        return false;
+      ReportCustom(absl::StrCat("Invalid argument count in ", context));
+      return true;
+    }
+
+    ++cur_i_;  // Consume nargs.
+    size_t end = cur_i_ + nargs;
+    if (end > args_.size()) {
+      Report(OUT_OF_BOUNDS, args_.size());
+      return true;
+    }
+
+    while (cur_i_ < end && !error_) {
+      std::string_view tag = Next();
+      if (!matches_any(tag, tags)) {
+        ReportCustom(absl::StrCat("Unknown argument `", tag, "` in ", context));
+        return true;
+      }
+
+      size_t before_value = cur_i_;
+      func(this, tag);
+      if (!error_ && cur_i_ != before_value + 1) {
+        ReportCustom(absl::StrCat("Invalid argument count in ", context));
+        return true;
+      }
+    }
+
+    if (!error_ && cur_i_ < args_.size() && matches_any(SafeSV(cur_i_), tags))
+      ReportCustom(absl::StrCat("Unknown argument `", SafeSV(cur_i_), "` in ", context));
+    return true;
   }
 
   // If the next arg matches `tag`, consume it and the following args-into-pointers; else no-op.

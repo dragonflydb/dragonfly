@@ -78,6 +78,7 @@ struct HnswlibAdapter {
         M_{params.hnsw_m},
         ef_construction_{params.hnsw_ef_construction},
         ef_runtime_{params.hnsw_ef_runtime},
+        epsilon_{params.hnsw_epsilon},
         data_size_{params.dim * sizeof(float)},
         stub_vector_(data_size_ / sizeof(float), 1.0f) {
   }
@@ -127,9 +128,11 @@ struct HnswlibAdapter {
   // Returns all documents within the given radius, with their distances.
   // Uses dynamic-range exploration (searchRange) to correctly handle cases where
   // the entry point is farther than radius.
-  vector<pair<float, GlobalDocId>> RangeSearch(float* target, float radius) {
+  vector<pair<float, GlobalDocId>> RangeSearch(float* target, float radius,
+                                               std::optional<double> epsilon) {
+    double effective_epsilon = epsilon.value_or(epsilon_);
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    return world_.searchRange(target, radius);
+    return world_.searchRange(target, radius, effective_epsilon);
   }
 
   HnswIndexMetadata GetMetadata() const {
@@ -446,6 +449,7 @@ struct HnswlibAdapter {
   size_t M_;                        // hnsw_m — used to reconstruct world_.
   size_t ef_construction_;          // hnsw_ef_construction — used to reconstruct world_.
   uint32_t ef_runtime_;             // Default runtime search breadth.
+  double epsilon_;                  // Default range-search overscan.
   size_t data_size_;                // Byte size of a single vector.
   std::vector<float> stub_vector_;  // Non-zero data for deleted nodes in borrowed mode.
 };
@@ -500,9 +504,9 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::SubsetKnn(
   return adapter_->SubsetKnn(target, k, docs);
 }
 
-std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::RangeQuery(float* target,
-                                                                       float radius) const {
-  return adapter_->RangeSearch(target, radius);
+std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::RangeQuery(
+    float* target, float radius, std::optional<double> epsilon) const {
+  return adapter_->RangeSearch(target, radius, epsilon);
 }
 
 void HnswVectorIndex::Remove(GlobalDocId id) {
