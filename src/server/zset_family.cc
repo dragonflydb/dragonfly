@@ -1012,102 +1012,39 @@ OpResult<ScoredMap> IntersectResults(vector<OpResult<ScoredMap>>& results, AggTy
   return result;
 }
 
-OpResult<void> FillAggType(string_view agg, SetOpArgs* op_args) {
-  if (agg == "SUM") {
-    op_args->agg_type = AggType::SUM;
-  } else if (agg == "MIN") {
-    op_args->agg_type = AggType::MIN;
-  } else if (agg == "MAX") {
-    op_args->agg_type = AggType::MAX;
-  } else {
-    return OpStatus::SYNTAX_ERR;
-  }
-  return OpStatus::OK;
-}
-
-// Parse functions return the number of arguments read from CmdArgList
-OpResult<unsigned> ParseAggregate(CmdArgList args, bool store, SetOpArgs* op_args) {
-  if (args.size() <= 1) {
-    return OpStatus::SYNTAX_ERR;
-  }
-
-  string agg_type = absl::AsciiStrToUpper(ArgS(args, 1));
-  auto filled = FillAggType(agg_type, op_args);
-  if (!filled) {
-    return filled.status();
-  }
-  return 1;
-}
-
-OpResult<unsigned> ParseWeights(CmdArgList args, SetOpArgs* op_args) {
-  if (args.size() <= op_args->num_keys) {
-    return OpStatus::SYNTAX_ERR;
-  }
-
-  op_args->weights.resize(op_args->num_keys, 1);
-  for (unsigned i = 0; i < op_args->num_keys; ++i) {
-    string_view weight = ArgS(args, i + 1);
-    if (!absl::SimpleAtod(weight, &op_args->weights[i])) {
-      return OpStatus::INVALID_FLOAT;
-    }
-  }
-
-  return op_args->num_keys;
-}
-
-OpResult<void> ParseKeyCount(string_view arg_num_keys, SetOpArgs* op_args) {
-  // we parsed the structure before, when transaction has been initialized.
-  if (!absl::SimpleAtoi(arg_num_keys, &op_args->num_keys)) {
-    return OpStatus::SYNTAX_ERR;
-  }
-  return OpStatus::OK;
-}
-
-OpResult<unsigned> ParseWithScores(CmdArgList args, SetOpArgs* op_args) {
-  op_args->with_scores = true;
-  return 0;
-}
-
-OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
-  string_view num_keys_str = store ? ArgS(args, 1) : ArgS(args, 0);
+OpResult<SetOpArgs> ParseSetOpArgs(CmdArgParser parser, bool store) {
   SetOpArgs op_args;
 
-  auto parsed = ParseKeyCount(num_keys_str, &op_args);
-  if (!parsed) {
-    return parsed.status();
+  // numkeys was already validated against the arg count during key resolution.
+  op_args.num_keys = parser.Next<unsigned>();
+  if (parser.TakeError() || op_args.num_keys == 0) {
+    return OpStatus::SYNTAX_ERR;
   }
 
-  unsigned opt_args_start = op_args.num_keys + (store ? 2 : 1);
-  DCHECK_LE(opt_args_start, args.size());  // Checked inside DetermineKeys
+  // The source keys are resolved via the command's key spec; skip past them to the options.
+  parser.Skip(op_args.num_keys);
 
-  for (size_t i = opt_args_start; i < args.size(); ++i) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, i));
-    if (arg == "WEIGHTS") {
-      auto parsed_cnt = ParseWeights(args.subspan(i), &op_args);
-      if (!parsed_cnt) {
-        return parsed_cnt.status();
-      }
-      i += *parsed_cnt;
-    } else if (arg == "AGGREGATE") {
-      auto parsed_cnt = ParseAggregate(args.subspan(i), store, &op_args);
-      if (!parsed_cnt) {
-        return parsed_cnt.status();
-      }
-      i += *parsed_cnt;
-    } else if (arg == "WITHSCORES") {
-      // Commands with store capability does not offer WITHSCORES option
-      if (store) {
-        return OpStatus::SYNTAX_ERR;
-      }
-      auto parsed_cnt = ParseWithScores(args.subspan(i), &op_args);
-      if (!parsed_cnt) {
-        return parsed_cnt.status();
-      }
-      i += *parsed_cnt;
-    } else {
-      return OpStatus::SYNTAX_ERR;
-    }
+  parser.Apply(Tag("WEIGHTS",
+                   [&op_args](CmdArgParser* p) {
+                     op_args.weights.resize(op_args.num_keys, 1);
+                     for (unsigned i = 0; i < op_args.num_keys; ++i)
+                       op_args.weights[i] = p->Next<double>();
+                   }),
+               Tag("AGGREGATE", Map(&op_args.agg_type, "SUM", AggType::SUM, "MIN", AggType::MIN,
+                                    "MAX", AggType::MAX)),
+               // The *STORE variants do not offer the WITHSCORES option.
+               If(!store, Exist("WITHSCORES", &op_args.with_scores)));
+
+  // A non-float WEIGHTS value surfaces as INVALID_FLOAT; any other failure (unknown option, bad
+  // AGGREGATE type, or leftover args caught by Finalize) is a plain syntax error.
+  if (auto err = parser.TakeError(); err) {
+    return err.type == CmdArgParser::INVALID_FLOAT ? OpStatus::INVALID_FLOAT : OpStatus::SYNTAX_ERR;
   }
+  if (!parser.Finalize()) {
+    (void)parser.TakeError();
+    return OpStatus::SYNTAX_ERR;
+  }
+
   return op_args;
 }
 
@@ -1155,11 +1092,11 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   return res;
 }
 
-void BZPopMinMax(CmdArgList args, bool is_max, CommandContext* cmd_cntx) {
+void BZPopMinMax(facade::ParsedArgs args, bool is_max, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 2u);
 
   float timeout;
-  auto timeout_str = ArgS(args, args.size() - 1);
+  auto timeout_str = args[args.size() - 1];
   if (!absl::SimpleAtof(timeout_str, &timeout)) {
     return cmd_cntx->SendError("timeout is not a float or out of range");
   }
@@ -1479,7 +1416,7 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
   return count;
 }
 
-OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, const facade::ArgRange& members) {
+OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ParsedArgs members) {
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
@@ -1619,13 +1556,16 @@ OpResult<ScoredArray> OpRandMember(int count, const ZSetFamily::RangeParams& par
 }
 
 // Boolean operation: union or intersection, optionally storing output to destination key
-void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool store,
+void ZBooleanOperation(CmdArgParser parser, string_view cmd, bool is_union, bool store,
                        CommandContext* cmd_cntx) {
   auto shard_func = is_union ? OpUnion : OpInter;
   auto merge_func = is_union ? UnionScoredMap : InterScoredMap;
 
-  string_view dest_key = ArgS(args, 0);
-  OpResult<SetOpArgs> op_args = ParseSetOpArgs(args, store);
+  // Only the store variants (ZUNIONSTORE/ZINTERSTORE) take a leading destination key.
+  string_view dest_key;
+  if (store)
+    dest_key = parser.Next();
+  OpResult<SetOpArgs> op_args = ParseSetOpArgs(parser, store);
   if (!op_args) {
     switch (op_args.status()) {
       case OpStatus::INVALID_FLOAT:
@@ -1732,21 +1672,18 @@ OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards shou
   return result;
 }
 
-void ZPopMinMaxFromArgs(CmdArgList args, bool reverse, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  uint32 count = 1;
-  if (args.size() > 1) {
-    string_view count_str = ArgS(args, 1);
-    if (!SimpleAtoi(count_str, &count)) {
-      return cmd_cntx->SendError(kUintErr);
-    }
+void ZPopMinMaxFromArgs(CmdArgParser parser, bool reverse, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  uint32 count = parser.NextOrDefault<uint32>(1);
+  if (parser.TakeError()) {
+    return cmd_cntx->SendError(kUintErr);
   }
 
   OutputScoredArrayResult(ZPopMinMaxInternal(key, FilterShards::NO, count, reverse, cmd_cntx->tx()),
                           cmd_cntx->rb());
 }
 
-void ZRangeInternal(facade::ParsedArgs args, ZSetFamily::RangeParams range_params,
+void ZRangeInternal(const facade::ParsedArgs& args, ZSetFamily::RangeParams range_params,
                     CommandContext* cmd_cntx) {
   string_view key = args[0];
   string_view min_s = args[1];
@@ -1894,13 +1831,11 @@ void ZRangeGeneric(facade::ParsedArgs args, ZSetFamily::RangeParams range_params
   ZRangeInternal(args, range_params, cmd_cntx);
 }
 
-void ZRankGeneric(CmdArgList args, bool reverse, CommandContext* cmd_cntx) {
+void ZRankGeneric(CmdArgParser parser, bool reverse, CommandContext* cmd_cntx) {
   // send this error exact as redis does, it checks number of arguments first
-  if (args.size() > 3) {
+  if (parser.UnparsedArgs().size() > 3) {
     return cmd_cntx->SendError(WrongNumArgsError(reverse ? "ZREVRANK" : "ZRANK"));
   }
-
-  facade::CmdArgParser parser(cmd_cntx->tail_args());
 
   string_view key = parser.Next();
   string_view member = parser.Next();
@@ -1971,10 +1906,8 @@ std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, Tra
 
 // Validates the ZMPop and BZMPop command arguments and extracts the values to the output params.
 // If the arguments are invalid sends the appropiate error to builder and returns false.
-bool ValidateZMPopCommand(CmdArgList args, bool is_blocking, CommandContext* cmd_cntx,
+bool ValidateZMPopCommand(CmdArgParser parser, bool is_blocking, CommandContext* cmd_cntx,
                           ValidateZMPopResult* result) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
-
   if (is_blocking) {
     if (!absl::SimpleAtof(parser.Next(), &result->timeout)) {
       cmd_cntx->SendError("timeout is not a float or out of range");
@@ -2215,21 +2148,22 @@ OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, str
 
 namespace {
 
-void CmdBZPopMin(CmdArgList args, CommandContext* cmd_cntx) {
-  BZPopMinMax(args, false, cmd_cntx);
+void CmdBZPopMin(CmdArgParser parser, CommandContext* cmd_cntx) {
+  BZPopMinMax(parser.UnparsedArgs(), false, cmd_cntx);
 }
 
-void CmdBZPopMax(CmdArgList args, CommandContext* cmd_cntx) {
-  BZPopMinMax(args, true, cmd_cntx);
+void CmdBZPopMax(CmdArgParser parser, CommandContext* cmd_cntx) {
+  BZPopMinMax(parser.UnparsedArgs(), true, cmd_cntx);
 }
 
-void CmdZAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdZAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
+  facade::ParsedArgs args = parser.UnparsedArgs();
+  string_view key = args[0];
 
   ZSetFamily::ZParams zparams;
   size_t i = 1;
   for (; i < args.size() - 1; ++i) {
-    string cur_arg = absl::AsciiStrToUpper(ArgS(args, i));
+    string cur_arg = absl::AsciiStrToUpper(args[i]);
 
     if (cur_arg == "XX") {
       zparams.flags |= ZADD_IN_XX;  // update only
@@ -2288,7 +2222,7 @@ void CmdZAdd(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   for (; i < args.size(); i += 2) {
-    string_view cur_arg = ArgS(args, i);
+    string_view cur_arg = args[i];
     double val = 0;
 
     // Parse the score. Treats Nan as invalid double.
@@ -2297,7 +2231,7 @@ void CmdZAdd(CmdArgList args, CommandContext* cmd_cntx) {
       return builder->SendError(kInvalidFloatErr);
     }
 
-    string_view member = ArgS(args, i + 1);
+    string_view member = args[i + 1];
     if (to_sort_fields) {
       auto [_, inserted] = members_set.insert(member);
       to_sort_fields &= inserted;
@@ -2321,8 +2255,8 @@ void CmdZAdd(CmdArgList args, CommandContext* cmd_cntx) {
   ZSetFamily::ZAddGeneric(key, zparams, memb_sp, cmd_cntx);
 }
 
-void CmdZCard(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdZCard(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
     auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_ZSET);
@@ -2342,11 +2276,11 @@ void CmdZCard(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result.value());
 }
 
-void CmdZCount(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdZCount(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
-  string_view min_s = ArgS(args, 1);
-  string_view max_s = ArgS(args, 2);
+  string_view min_s = parser.Next();
+  string_view max_s = parser.Next();
 
   ZSetFamily::ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
@@ -2411,7 +2345,8 @@ vector<ScoredMemberView> ZDiffOp(ShardId key_sid, vector<OpResult<vector<ScoredM
   return smvec;
 }
 
-void CmdZDiff(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdZDiff(CmdArgParser parser, CommandContext* cmd_cntx) {
+  facade::ParsedArgs args = parser.UnparsedArgs();
   vector<OpResult<vector<ScoredMap>>> maps(shard_set->size(), OpStatus::OK);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2431,7 +2366,7 @@ void CmdZDiff(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  const string_view key = ArgS(args, 1);
+  const string_view key = args[1];
   const ShardId sid = Shard(key, shard_set->size());
 
   // We need to have result stored and not be destructed before function ends because
@@ -2446,7 +2381,7 @@ void CmdZDiff(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  const bool with_scores = absl::EqualsIgnoreCase(ArgS(args, args.size() - 1), "WITHSCORES");
+  const bool with_scores = absl::EqualsIgnoreCase(args[args.size() - 1], "WITHSCORES");
   bool is_resp3 = rb->IsResp3();
   rb->StartArray(smvec.size() * ((with_scores && !is_resp3) ? 2 : 1));
   for (const auto& [score, key] : smvec) {
@@ -2459,9 +2394,10 @@ void CmdZDiff(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdZDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdZDiffStore(CmdArgParser parser, CommandContext* cmd_cntx) {
+  facade::ParsedArgs args = parser.UnparsedArgs();
   vector<OpResult<vector<ScoredMap>>> maps(shard_set->size(), OpStatus::OK);
-  const string_view dest_key = ArgS(args, 0);
+  const string_view dest_key = args[0];
   const ShardId dest_shard = Shard(dest_key, shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2483,7 +2419,7 @@ void CmdZDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  const string_view key = ArgS(args, 2);
+  const string_view key = args[2];
   const ShardId sid = Shard(key, shard_set->size());
 
   // We need to have result stored and not be destructed before function ends because
@@ -2504,12 +2440,12 @@ void CmdZDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendLong(smvec.size());
 }
 
-void CmdZIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view score_arg = ArgS(args, 1);
+void CmdZIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view score_arg = parser.Next();
 
   ScoredMemberView scored_member;
-  scored_member.second = ArgS(args, 2);
+  scored_member.second = parser.Next();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -2546,28 +2482,32 @@ void CmdZIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendDouble(add_result->new_score);
 }
 
-void CmdZInter(CmdArgList args, CommandContext* cmd_cntx) {
-  ZBooleanOperation(args, "zinter", false, false, cmd_cntx);
+void CmdZInter(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZBooleanOperation(std::move(parser), "zinter", false, false, cmd_cntx);
 }
 
-void CmdZInterStore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZBooleanOperation(args, "zinterstore", false, true, cmd_cntx);
+void CmdZInterStore(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZBooleanOperation(std::move(parser), "zinterstore", false, true, cmd_cntx);
 }
 
-void CmdZInterCard(CmdArgList args, CommandContext* cmd_cntx) {
-  unsigned num_keys;
+void CmdZInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
 
-  if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys)) {
+  unsigned num_keys = parser.Next<unsigned>();
+  if (parser.TakeError()) {
     return cmd_cntx->SendError(OpStatus::SYNTAX_ERR);
   }
 
+  // After numkeys is consumed, the remaining args are the keys followed by an optional LIMIT
+  // clause.
+  facade::ParsedArgs args = parser.UnparsedArgs();
+
   uint64_t limit = 0;
-  if (args.size() == (1 + num_keys + 2) && ArgS(args, 1 + num_keys) == "LIMIT") {
-    if (!absl::SimpleAtoi(ArgS(args, 1 + num_keys + 1), &limit)) {
+  if (args.size() == (num_keys + 2) && args[num_keys] == "LIMIT") {
+    if (!absl::SimpleAtoi(args[num_keys + 1], &limit)) {
       return builder->SendError("limit value is not a positive integer", kSyntaxErrType);
     }
-  } else if (args.size() != 1 + num_keys) {
+  } else if (args.size() != num_keys) {
     return builder->SendError(kSyntaxErr);
   }
 
@@ -2591,9 +2531,10 @@ void CmdZInterCard(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 // Generic function for ZMPop and BZMPop commands
-void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
+void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blocking) {
   ValidateZMPopResult zmpop_args;
-  if (!ValidateZMPopCommand(args, is_blocking, cmd_cntx, &zmpop_args)) {
+  // Validate on a copy so `parser` stays positioned at the start for reading the keys below.
+  if (!ValidateZMPopCommand(parser, is_blocking, cmd_cntx, &zmpop_args)) {
     return;
   }
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -2627,10 +2568,12 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
   // Now that we have the first non empty key from each shard, find the first overall first key
   // and pop elements from it.
   std::optional<std::string_view> key_to_pop = std::nullopt;
-  // BZMPOP have 1 extra argument as compared to ZMPOP hence adding 1 is is_blocking is true
-  ArgRange arg_keys(args.subspan(1 + is_blocking, zmpop_args.num_keys));
-  // Find the first arg_key which exists in any shard and is not empty.
-  for (std::string_view key : arg_keys) {
+  // Skip the leading [timeout] (BZMPOP only) and numkeys args to reach the key list, then find the
+  // first key (in command order) that exists and is non-empty on some shard. The string_views point
+  // into the command's backing args, which outlive this call.
+  parser.Skip(1 + is_blocking);
+  for (size_t i = 0; i < zmpop_args.num_keys; ++i) {
+    std::string_view key = parser.Next();
     if (first_found_keys_for_shard.contains(key)) {
       key_to_pop = key;
       break;
@@ -2697,27 +2640,27 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
   response_builder->SendLabeledScoredArray(*key_to_pop, pop_result.value());
 }
 
-void CmdZMPop(CmdArgList args, CommandContext* cmd_cntx) {
-  ZMPopGeneric(args, cmd_cntx, false);
+void CmdZMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZMPopGeneric(std::move(parser), cmd_cntx, false);
 }
 
-void CmdBZMPop(CmdArgList args, CommandContext* cmd_cntx) {
-  ZMPopGeneric(args, cmd_cntx, true);
+void CmdBZMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZMPopGeneric(std::move(parser), cmd_cntx, true);
 }
 
-void CmdZPopMax(CmdArgList args, CommandContext* cmd_cntx) {
-  ZPopMinMaxFromArgs(args, true, cmd_cntx);
+void CmdZPopMax(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZPopMinMaxFromArgs(std::move(parser), true, cmd_cntx);
 }
 
-void CmdZPopMin(CmdArgList args, CommandContext* cmd_cntx) {
-  ZPopMinMaxFromArgs(args, false, cmd_cntx);
+void CmdZPopMin(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZPopMinMaxFromArgs(std::move(parser), false, cmd_cntx);
 }
 
-void CmdZLexCount(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdZLexCount(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
-  string_view min_s = ArgS(args, 1);
-  string_view max_s = ArgS(args, 2);
+  string_view min_s = parser.Next();
+  string_view max_s = parser.Next();
 
   ZSetFamily::LexInterval li;
   if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
@@ -2738,50 +2681,49 @@ void CmdZLexCount(CmdArgList args, CommandContext* cmd_cntx) {
 
 using RangeParams = ZSetFamily::RangeParams;
 
-void CmdZRange(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(cmd_cntx->tail_args(), RangeParams{}, cmd_cntx);
+void CmdZRange(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZRangeGeneric(parser.UnparsedArgs(), RangeParams{}, cmd_cntx);
 }
 
-void CmdZRank(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRankGeneric(args, false, cmd_cntx);
+void CmdZRank(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZRankGeneric(parser, false, cmd_cntx);
 }
 
-void CmdZRevRange(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(cmd_cntx->tail_args(), RangeParams{.reverse = true}, cmd_cntx);
+void CmdZRevRange(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZRangeGeneric(parser.UnparsedArgs(), RangeParams{.reverse = true}, cmd_cntx);
 }
 
-void CmdZRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(cmd_cntx->tail_args(), RangeParams{.interval_type = RangeParams::SCORE}, cmd_cntx);
+void CmdZRangeByScore(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZRangeGeneric(parser.UnparsedArgs(), RangeParams{.interval_type = RangeParams::SCORE}, cmd_cntx);
 }
 
-void CmdZRangeStore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(cmd_cntx->tail_args().Tail(),
-                RangeParams{.with_scores = true, .store_key = cmd_cntx->tail_args().Front()},
-                cmd_cntx);
+void CmdZRangeStore(CmdArgParser parser, CommandContext* cmd_cntx) {
+  facade::ParsedArgs args = parser.UnparsedArgs();
+  ZRangeGeneric(args.Tail(), RangeParams{.with_scores = true, .store_key = args.Front()}, cmd_cntx);
 }
 
-void CmdZRevRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(cmd_cntx->tail_args(),
+void CmdZRevRangeByScore(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZRangeGeneric(parser.UnparsedArgs(),
                 RangeParams{.reverse = true, .interval_type = RangeParams::SCORE}, cmd_cntx);
 }
 
-void CmdZRevRank(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRankGeneric(args, true, cmd_cntx);
+void CmdZRevRank(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZRankGeneric(parser, true, cmd_cntx);
 }
 
-void CmdZRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(cmd_cntx->tail_args(), RangeParams{.interval_type = RangeParams::LEX}, cmd_cntx);
+void CmdZRangeByLex(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZRangeGeneric(parser.UnparsedArgs(), RangeParams{.interval_type = RangeParams::LEX}, cmd_cntx);
 }
 
-void CmdZRevRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(cmd_cntx->tail_args(),
+void CmdZRevRangeByLex(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZRangeGeneric(parser.UnparsedArgs(),
                 RangeParams{.reverse = true, .interval_type = RangeParams::LEX}, cmd_cntx);
 }
 
-void CmdZRemRangeByRank(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view min_s = ArgS(args, 1);
-  string_view max_s = ArgS(args, 2);
+void CmdZRemRangeByRank(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view min_s = parser.Next();
+  string_view max_s = parser.Next();
 
   ZSetFamily::IndexInterval ii;
   if (!SimpleAtoi(min_s, &ii.first) || !SimpleAtoi(max_s, &ii.second)) {
@@ -2793,10 +2735,10 @@ void CmdZRemRangeByRank(CmdArgList args, CommandContext* cmd_cntx) {
   ZRemRangeGeneric(key, range_spec, cmd_cntx);
 }
 
-void CmdZRemRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view min_s = ArgS(args, 1);
-  string_view max_s = ArgS(args, 2);
+void CmdZRemRangeByScore(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view min_s = parser.Next();
+  string_view max_s = parser.Next();
 
   ZSetFamily::ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
@@ -2810,10 +2752,10 @@ void CmdZRemRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
   ZRemRangeGeneric(key, range_spec, cmd_cntx);
 }
 
-void CmdZRemRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view min_s = ArgS(args, 1);
-  string_view max_s = ArgS(args, 2);
+void CmdZRemRangeByLex(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view min_s = parser.Next();
+  string_view max_s = parser.Next();
 
   ZSetFamily::LexInterval li;
   if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
@@ -2827,9 +2769,9 @@ void CmdZRemRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
   ZRemRangeGeneric(key, range_spec, cmd_cntx);
 }
 
-void CmdZRem(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  auto members = args.subspan(1);
+void CmdZRem(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  facade::ParsedArgs members = parser.UnparsedArgs();
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, members);
   };
@@ -2842,13 +2784,12 @@ void CmdZRem(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdZRandMember(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdZRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (args.size() > 3)
+  if (parser.UnparsedArgs().size() > 3)
     return rb->SendError(WrongNumArgsError("ZRANDMEMBER"));
 
-  CmdArgParser parser{cmd_cntx->tail_args()};
   string_view key = parser.Next();
 
   bool is_count = parser.HasNext();
@@ -2880,9 +2821,9 @@ void CmdZRandMember(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdZScore(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view member = ArgS(args, 1);
+void CmdZScore(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view member = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return ZSetFamily::OpScore(t->GetOpArgs(shard), key, member);
@@ -2918,9 +2859,9 @@ void CmdZMScore(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdZScan(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view token = ArgS(args, 1);
+void CmdZScan(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view token = parser.Next();
 
   uint64_t cursor = 0;
 
@@ -2930,7 +2871,7 @@ void CmdZScan(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("invalid cursor");
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(cmd_cntx->tail_args().Tail(2));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(parser.UnparsedArgs());
   if (!ops) {
     DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
     return cmd_cntx->SendError(ops.status());
@@ -2954,12 +2895,12 @@ void CmdZScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdZUnion(CmdArgList args, CommandContext* cmd_cntx) {
-  ZBooleanOperation(args, "zunion", true, false, cmd_cntx);
+void CmdZUnion(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZBooleanOperation(std::move(parser), "zunion", true, false, cmd_cntx);
 }
 
-void CmdZUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZBooleanOperation(args, "zunionstore", true, true, cmd_cntx);
+void CmdZUnionStore(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ZBooleanOperation(std::move(parser), "zunionstore", true, true, cmd_cntx);
 }
 
 }  // namespace
