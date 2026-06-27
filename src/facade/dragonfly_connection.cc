@@ -2683,6 +2683,7 @@ bool Connection::SquashPipelineV2() {
     AdvanceToExecute();
   }
 
+  last_interaction_ = time(nullptr);
   conn_stats.pipeline_dispatch_calls++;
   conn_stats.pipeline_dispatch_commands += squashed;
   return true;
