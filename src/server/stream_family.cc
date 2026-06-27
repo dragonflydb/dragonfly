@@ -566,13 +566,25 @@ struct AddOpts {
 /* Used to journal the XADD command.
    The actual stream ID assigned after adding may differ from the one specified in the command.
    So, for the replica, we need to specify the exact ID that was actually added. */
+// Holds the verbatim XADD command args so the normal journal path can replay it with only the
+// resolved stream ID substituted in. The fields (value pairs) are the tail after the stream ID.
 struct AddArgsJournaler {
-  void SetStreamId(std::string_view stream_id) {
-    add_args[stream_id_index] = stream_id;
+  ParsedArgs add_args;
+  size_t stream_id_index;
+
+  // Field/value pairs to append: everything after the stream ID.
+  ParsedArgs Fields() const {
+    return add_args.Tail(stream_id_index + 1);
   }
 
-  CmdArgVec add_args;
-  size_t stream_id_index;
+  // Builds the journal payload, substituting the resolved stream ID at stream_id_index.
+  CmdArgVec BuildJournalArgs(std::string_view resolved_id) const {
+    CmdArgVec res;
+    res.reserve(add_args.size());
+    for (size_t i = 0; i < add_args.size(); ++i)
+      res.emplace_back(i == stream_id_index ? resolved_id : add_args[i]);
+    return res;
+  }
 };
 
 struct NACKInfo {
@@ -852,7 +864,7 @@ inline void StreamEncodeID(uint8_t* buf, const streamID& id) {
  *    current top ID is greater or equal, it returns EDOM.
  * 2. If a size of a single element or the sum of the elements is too big to
  *    be stored into the stream. it returns ERANGE. */
-int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* added_id,
+int StreamAppendItem(stream* s, ParsedArgs fields, uint64_t now_ms, streamID* added_id,
                      streamID* use_id, int seq_given) {
   /* Generate the new entry ID. */
   streamID id;
@@ -1162,8 +1174,9 @@ bool JournalAsMinId(const TrimOpts& opts) {
 }
 
 OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& opts,
-                         CmdArgList args, AddArgsJournaler journaler) {
-  DCHECK(!args.empty() && args.size() % 2 == 0);
+                         AddArgsJournaler journaler) {
+  ParsedArgs fields = journaler.Fields();
+  DCHECK(!fields.empty() && fields.size() % 2 == 0);
 
   auto& db_slice = op_args.GetDbSlice();
 
@@ -1192,7 +1205,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
   streamID result_id;
   const auto& parsed_id = opts.parsed_id;
   streamID passed_id = parsed_id.val;
-  int res = StreamAppendItem(stream_inst, args, op_args.db_cntx.time_now_ms, &result_id,
+  int res = StreamAppendItem(stream_inst, fields, op_args.db_cntx.time_now_ms, &result_id,
                              parsed_id.id_given ? &passed_id : nullptr, parsed_id.has_seq);
 
   if (res != 0) {
@@ -1227,7 +1240,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
       std::string last_id;
 
       CmdArgVec journal_args = {key};
-      journal_args.reserve(args.size() + 4);
+      journal_args.reserve(fields.size() + 4);
 
       if (stream_is_empty) {
         // We need remove the whole stream in replica
@@ -1247,14 +1260,14 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
       journal_args.emplace_back(result_id_as_string);
 
-      for (size_t i = 0; i < args.size(); i++) {
-        journal_args.emplace_back(args[i]);
+      for (string_view field : fields) {
+        journal_args.emplace_back(field);
       }
 
       RecordJournal(op_args, "XADD"sv, journal_args);
     } else {
-      journaler.SetStreamId(result_id_as_string);
-      RecordJournal(op_args, "XADD"sv, journaler.add_args);
+      CmdArgVec journal_args = journaler.BuildJournalArgs(result_id_as_string);
+      RecordJournal(op_args, "XADD"sv, journal_args);
     }
   }
 
@@ -2559,7 +2572,7 @@ void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   }
 }
 
-void XGroupHelp(CmdArgList args, CommandContext* cmd_cntx) {
+void XGroupHelp(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view help_arr[] = {"XGROUP <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
                             "CREATE <key> <groupname> <id|$> [option]",
                             "    Create a new consumer group. Options are:",
@@ -2739,7 +2752,7 @@ struct StreamReplies {
   RedisReplyBuilder* rb;
 };
 
-std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
+std::optional<ReadOpts> ParseReadArgsOrReply(ParsedArgs args, bool read_group,
                                              SinkReplyBuilder* builder) {
   size_t streams_count = 0;
 
@@ -2748,7 +2761,7 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
   size_t id_indx = 0;
 
   if (opts.read_group) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, id_indx));
+    string arg = absl::AsciiStrToUpper(args[id_indx]);
 
     if (arg.size() - 1 < 2) {
       builder->SendError(kSyntaxErr);
@@ -2761,8 +2774,8 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
       return std::nullopt;
     }
     id_indx++;
-    opts.group_name = ArgS(args, id_indx);
-    opts.consumer_name = ArgS(args, ++id_indx);
+    opts.group_name = args[id_indx];
+    opts.consumer_name = args[++id_indx];
     if (opts.consumer_name.empty()) {
       builder->SendError("consumer name can't be empty", kSyntaxErrType);
       return std::nullopt;
@@ -2771,19 +2784,19 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
   }
 
   for (; id_indx < args.size(); ++id_indx) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, id_indx));
+    string arg = absl::AsciiStrToUpper(args[id_indx]);
 
     bool remaining_args = args.size() - id_indx - 1 > 0;
     if (arg == "BLOCK" && remaining_args) {
       id_indx++;
-      arg = ArgS(args, id_indx);
+      arg = args[id_indx];
       if (!absl::SimpleAtoi(arg, &opts.timeout)) {
         builder->SendError(kInvalidIntErr);
         return std::nullopt;
       }
     } else if (arg == "COUNT" && remaining_args) {
       id_indx++;
-      arg = ArgS(args, id_indx);
+      arg = args[id_indx];
       if (!absl::SimpleAtoi(arg, &opts.count)) {
         builder->SendError(kInvalidIntErr);
         return std::nullopt;
@@ -2819,8 +2832,8 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
 
   // Parse the stream IDs.
   for (size_t i = opts.streams_arg + streams_count; i < args.size(); i++) {
-    string_view key = ArgS(args, i - streams_count);
-    string_view idstr = ArgS(args, i);
+    string_view key = args[i - streams_count];
+    string_view idstr = args[i];
 
     StreamIDsItem sitem;
     ParsedStreamId id;
@@ -2882,7 +2895,7 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
 }
 
 void XRangeGeneric(std::string_view key, std::string_view start, std::string_view end,
-                   CmdArgList args, bool is_rev, CommandContext* cmd_cntx) {
+                   ParsedArgs args, bool is_rev, CommandContext* cmd_cntx) {
   RangeOpts range_opts;
   RangeId rs, re;
 
@@ -2904,8 +2917,8 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
       return cmd_cntx->SendError(WrongNumArgsError("XRANGE"), kSyntaxErrType);
     }
 
-    string opt = absl::AsciiStrToUpper(ArgS(args, 0));
-    string_view val = ArgS(args, 1);
+    string opt = absl::AsciiStrToUpper(args[0]);
+    string_view val = args[1];
 
     if (opt != "COUNT" || !absl::SimpleAtoi(val, &range_opts.count)) {
       return cmd_cntx->SendError(kSyntaxErr);
@@ -3135,7 +3148,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   return rb->SendNullArray();
 }
 
-void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
+void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
   optional<ReadOpts> opts = ParseReadArgsOrReply(args, read_group, cmd_cntx->rb());
   if (!opts)
     return;
@@ -3241,13 +3254,13 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
     if (rb->IsResp3()) {
       rb->StartCollection(opts->stream_ids.size(), CollectionType::MAP);
       for (size_t i = 0; i < opts->stream_ids.size(); i++) {
-        string_view key = ArgS(args, i + opts->streams_arg);
+        string_view key = args[i + opts->streams_arg];
         StreamReplies{rb}.SendStreamRecords(key, results[i]);
       }
     } else {
       rb->StartArray(opts->stream_ids.size());
       for (size_t i = 0; i < opts->stream_ids.size(); i++) {
-        string_view key = ArgS(args, i + opts->streams_arg);
+        string_view key = args[i + opts->streams_arg];
         rb->StartArray(2);
         StreamReplies{rb}.SendStreamRecords(key, results[i]);
       }
@@ -3259,7 +3272,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
         if (results[i].empty()) {
           continue;
         }
-        string_view key = ArgS(args, i + opts->streams_arg);
+        string_view key = args[i + opts->streams_arg];
         StreamReplies{rb}.SendStreamRecords(key, results[i]);
       }
     } else {
@@ -3267,7 +3280,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
       for (size_t i = 0; i < results.size(); i++) {
         if (results[i].empty())
           continue;
-        string_view key = ArgS(args, i + opts->streams_arg);
+        string_view key = args[i + opts->streams_arg];
         rb->StartArray(2);
         StreamReplies{rb}.SendStreamRecords(key, results[i]);
       }
@@ -3276,22 +3289,22 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
 }
 
 void HelpSubCmd(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
-  XGroupHelp({}, cmd_cntx);
+  XGroupHelp(CmdArgParser{ParsedArgs{}}, cmd_cntx);
 }
 
-bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder* builder) {
+bool ParseXpendingOptions(ParsedArgs args, PendingOpts& opts, SinkReplyBuilder* builder) {
   size_t id_indx = 0;
-  string arg = absl::AsciiStrToUpper(ArgS(args, id_indx));
+  string arg = absl::AsciiStrToUpper(args[id_indx]);
 
   if (arg == "IDLE" && args.size() > 4) {
     id_indx++;
-    if (!absl::SimpleAtoi(ArgS(args, id_indx), &opts.min_idle_time)) {
+    if (!absl::SimpleAtoi(args[id_indx], &opts.min_idle_time)) {
       builder->SendError(kInvalidIntErr, kSyntaxErrType);
       return false;
     }
     // Ignore negative min_idle_time
     opts.min_idle_time = std::max(opts.min_idle_time, static_cast<int64_t>(0));
-    args.remove_prefix(2);
+    args = args.Tail(2);
     id_indx = 0;
   }
   if (args.size() < 3) {
@@ -3301,9 +3314,9 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
 
   // Parse start and end
   RangeId rs, re;
-  string_view start = ArgS(args, id_indx);
+  string_view start = args[id_indx];
   id_indx++;
-  string_view end = ArgS(args, id_indx);
+  string_view end = args[id_indx];
   if (!ParseRangeId(start, RangeBoundary::kStart, &rs) ||
       !ParseRangeId(end, RangeBoundary::kEnd, &re)) {
     builder->SendError(kInvalidStreamId, kSyntaxErrType);
@@ -3324,7 +3337,7 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
   opts.end = re.parsed_id;
 
   // Parse count
-  if (!absl::SimpleAtoi(ArgS(args, id_indx), &opts.count)) {
+  if (!absl::SimpleAtoi(args[id_indx], &opts.count)) {
     builder->SendError(kInvalidIntErr, kSyntaxErrType);
     return false;
   }
@@ -3333,16 +3346,18 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
   opts.count = std::max(opts.count, static_cast<int64_t>(0));
   if (args.size() - id_indx - 1) {
     id_indx++;
-    opts.consumer_name = ArgS(args, id_indx);
+    opts.consumer_name = args[id_indx];
   }
   return true;
 }
 
 }  // namespace
 
-void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdXAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  // Capture the full tail before consuming any args so indices match the original `args`.
+  ParsedArgs args = parser.UnparsedArgs();
 
   string_view key = parser.Next();
 
@@ -3358,15 +3373,14 @@ void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
   // It is (parser.UnparsedStart() - 1) because the stream id is the last parsed argument in the
   // ParseAddOpts
   const size_t stream_id_index_in_args = parser.UnparsedStart() - 1;
-  AddArgsJournaler journaler{{args.begin(), args.end()}, stream_id_index_in_args};
+  AddArgsJournaler journaler{args, stream_id_index_in_args};
 
-  CmdArgList fields = args.subspan(parser.UnparsedStart());
-  if (fields.empty() || fields.size() % 2 != 0) {
+  if (ParsedArgs fields = journaler.Fields(); fields.empty() || fields.size() % 2 != 0) {
     return rb->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAdd(t->GetOpArgs(shard), key, parsed_add_opts.value(), fields, journaler);
+    return OpAdd(t->GetOpArgs(shard), key, parsed_add_opts.value(), journaler);
   };
 
   OpResult<streamID> add_result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
@@ -3384,12 +3398,13 @@ void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-absl::InlinedVector<streamID, 8> GetXclaimIds(CmdArgList& args) {
-  size_t i;
+// Parses leading stream IDs. The number consumed equals the returned vector's size, so the caller
+// advances past them with args.Tail(ids.size()).
+absl::InlinedVector<streamID, 8> GetXclaimIds(ParsedArgs args) {
   absl::InlinedVector<streamID, 8> ids;
-  for (i = 0; i < args.size(); ++i) {
+  for (size_t i = 0; i < args.size(); ++i) {
     ParsedStreamId parsed_id;
-    string_view str_id = ArgS(args, i);
+    string_view str_id = args[i];
     if (!ParseID(str_id, true, 0, &parsed_id)) {
       if (i > 0) {
         break;
@@ -3398,32 +3413,31 @@ absl::InlinedVector<streamID, 8> GetXclaimIds(CmdArgList& args) {
     }
     ids.push_back(parsed_id.val);
   }
-  args.remove_prefix(i);
   return ids;
 }
 
-bool ParseXclaimOptions(CmdArgList args, ClaimOpts& opts, CommandContext* cmd_cntx) {
+bool ParseXclaimOptions(ParsedArgs args, ClaimOpts& opts, CommandContext* cmd_cntx) {
   for (size_t i = 0; i < args.size(); ++i) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, i));
+    string arg = absl::AsciiStrToUpper(args[i]);
     bool remaining_args = args.size() - i - 1 > 0;
 
     if (remaining_args) {
       if (arg == "IDLE") {
-        arg = ArgS(args, ++i);
+        arg = args[++i];
         if (!absl::SimpleAtoi(arg, &opts.delivery_time)) {
           cmd_cntx->SendError(kInvalidIntErr);
           return false;
         }
         continue;
       } else if (arg == "TIME") {
-        arg = ArgS(args, ++i);
+        arg = args[++i];
         if (!absl::SimpleAtoi(arg, &opts.delivery_time)) {
           cmd_cntx->SendError(kInvalidIntErr);
           return false;
         }
         continue;
       } else if (arg == "RETRYCOUNT") {
-        arg = ArgS(args, ++i);
+        arg = args[++i];
         if (!absl::SimpleAtoi(arg, &opts.retry)) {
           cmd_cntx->SendError(kInvalidIntErr);
           return false;
@@ -3431,7 +3445,7 @@ bool ParseXclaimOptions(CmdArgList args, ClaimOpts& opts, CommandContext* cmd_cn
         continue;
       } else if (arg == "LASTID") {
         opts.flags |= kClaimLastID;
-        arg = ArgS(args, ++i);
+        arg = args[++i];
         ParsedStreamId parsed_id;
         if (ParseID(arg, true, 0, &parsed_id)) {
           opts.last_id = parsed_id.val;
@@ -3454,22 +3468,23 @@ bool ParseXclaimOptions(CmdArgList args, ClaimOpts& opts, CommandContext* cmd_cn
   return true;
 }
 
-void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
   ClaimOpts opts;
-  string_view key = ArgS(args, 0);
-  opts.group = ArgS(args, 1);
-  opts.consumer = ArgS(args, 2);
+  string_view key = parser.Next();
+  opts.group = parser.Next();
+  opts.consumer = parser.Next();
 
   if (opts.group.empty() || opts.consumer.empty()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
-  if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
+  if (!absl::SimpleAtoi(parser.Next(), &opts.min_idle_time)) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
   // Ignore negative min-idle-time
   opts.min_idle_time = std::max(opts.min_idle_time, static_cast<int64>(0));
-  args.remove_prefix(4);
+
+  ParsedArgs args = parser.UnparsedArgs();
 
   auto ids = GetXclaimIds(args);
   if (ids.empty()) {
@@ -3477,8 +3492,8 @@ void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
-  // parse the options
-  if (!ParseXclaimOptions(args, opts, cmd_cntx))
+  // parse the options following the IDs
+  if (!ParseXclaimOptions(args.Tail(ids.size()), opts, cmd_cntx))
     return;
 
   uint64_t now = cmd_cntx->tx()->GetDbContext().time_now_ms;
@@ -3504,15 +3519,16 @@ void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
   StreamReplies{cmd_cntx->rb()}.SendClaimInfo(result.value());
 }
 
-void CmdXDel(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdXDel(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+
+  ParsedArgs args = parser.UnparsedArgs();
 
   absl::InlinedVector<streamID, 8> ids(args.size());
 
   for (size_t i = 0; i < args.size(); ++i) {
     ParsedStreamId parsed_id;
-    string_view str_id = ArgS(args, i);
+    string_view str_id = args[i];
     if (!ParseID(str_id, true, 0, &parsed_id)) {
       return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
     }
@@ -3531,9 +3547,7 @@ void CmdXDel(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdXGroup(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{cmd_cntx->tail_args()};
-
+void CmdXGroup(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto sub_cmd_func = parser.MapNext("HELP", &HelpSubCmd, "CREATE", &CreateGroup, "DESTROY",
                                      &DestroyGroup, "CREATECONSUMER", &CreateConsumer,
                                      "DELCONSUMER", &DelConsumer, "SETID", &SetId);
@@ -3544,9 +3558,10 @@ void CmdXGroup(CmdArgList args, CommandContext* cmd_cntx) {
   sub_cmd_func(&parser, cmd_cntx);
 }
 
-void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ParsedArgs args = parser.UnparsedArgs();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  string sub_cmd = absl::AsciiStrToUpper(args[0]);
 
   if (sub_cmd == "HELP") {
     string_view help_arr[] = {"CONSUMERS <key> <groupname>",
@@ -3562,7 +3577,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   if (args.size() >= 2) {
-    string_view key = ArgS(args, 1);
+    string_view key = args[1];
     ShardId sid = Shard(key, shard_set->size());
 
     if (sub_cmd == "GROUPS") {
@@ -3615,14 +3630,14 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
       if (args.size() >= 3) {
         full = 1;
-        string full_arg = absl::AsciiStrToUpper(ArgS(args, 2));
+        string full_arg = absl::AsciiStrToUpper(args[2]);
         if (full_arg != "FULL") {
           return rb->SendError(
               "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
         }
         if (args.size() > 3) {
-          string count_arg = absl::AsciiStrToUpper(ArgS(args, 3));
-          string_view count_value_arg = ArgS(args, 4);
+          string count_arg = absl::AsciiStrToUpper(args[3]);
+          string_view count_value_arg = args[4];
           if (count_arg != "COUNT") {
             return rb->SendError(
                 "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
@@ -3767,8 +3782,8 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
       if (args.size() < 3) {
         return cmd_cntx->SendError(kSyntaxErr);
       }
-      string_view stream_name = ArgS(args, 1);
-      string_view group_name = ArgS(args, 2);
+      string_view stream_name = args[1];
+      string_view group_name = args[2];
       auto cb = [&]() {
         return OpConsumers(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()},
                            EngineShard::tlocal(), stream_name, group_name);
@@ -3803,8 +3818,8 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
 }
 
-void CmdXLen(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdXLen(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
@@ -3815,11 +3830,12 @@ void CmdXLen(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(result.status());
 }
 
-void CmdXPending(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdXPending(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
   PendingOpts opts;
-  opts.group_name = ArgS(args, 1);
-  args.remove_prefix(2);
+  opts.group_name = parser.Next();
+
+  ParsedArgs args = parser.UnparsedArgs();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!args.empty() && !ParseXpendingOptions(args, opts, rb)) {
@@ -3873,20 +3889,20 @@ void CmdXPending(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdXRange(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = args[0];
-  string_view start = args[1];
-  string_view end = args[2];
+void CmdXRange(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view start = parser.Next();
+  string_view end = parser.Next();
 
-  XRangeGeneric(key, start, end, args.subspan(3), false, cmd_cntx);
+  XRangeGeneric(key, start, end, parser.UnparsedArgs(), false, cmd_cntx);
 }
 
-void CmdXRevRange(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = args[0];
-  string_view start = args[1];
-  string_view end = args[2];
+void CmdXRevRange(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view start = parser.Next();
+  string_view end = parser.Next();
 
-  XRangeGeneric(key, end, start, args.subspan(3), true, cmd_cntx);
+  XRangeGeneric(key, end, start, parser.UnparsedArgs(), true, cmd_cntx);
 }
 
 // If opts.read_group is true then this is a WRITE command. We don't however journal the consumer
@@ -3973,17 +3989,17 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   return streamCompareID(&last_id, &requested_sitem.id.val) >= 0;
 }
 
-void CmdXRead(CmdArgList args, CommandContext* cmd_cntx) {
-  XReadGeneric2(args, false, cmd_cntx);
+void CmdXRead(CmdArgParser parser, CommandContext* cmd_cntx) {
+  XReadGeneric2(parser.UnparsedArgs(), false, cmd_cntx);
 }
 
-void CmdXReadGroup(CmdArgList args, CommandContext* cmd_cntx) {
-  XReadGeneric2(args, true, cmd_cntx);
+void CmdXReadGroup(CmdArgParser parser, CommandContext* cmd_cntx) {
+  XReadGeneric2(parser.UnparsedArgs(), true, cmd_cntx);
 }
 
-void CmdXSetId(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view idstr = ArgS(args, 1);
+void CmdXSetId(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view idstr = parser.Next();
 
   ParsedStreamId parsed_id;
   if (!ParseID(idstr, true, 0, &parsed_id)) {
@@ -4003,8 +4019,7 @@ void CmdXSetId(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(reply);
 }
 
-void CmdXTrim(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void CmdXTrim(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   std::string_view key = parser.Next();
@@ -4036,15 +4051,15 @@ void CmdXTrim(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdXAck(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view group = ArgS(args, 1);
-  args.remove_prefix(2);
+void CmdXAck(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view group = parser.Next();
+  ParsedArgs args = parser.UnparsedArgs();
   absl::InlinedVector<streamID, 8> ids(args.size());
 
   for (size_t i = 0; i < args.size(); ++i) {
     ParsedStreamId parsed_id;
-    string_view str_id = ArgS(args, i);
+    string_view str_id = args[i];
     if (!ParseID(str_id, true, 0, &parsed_id)) {
       return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
     }
@@ -4063,24 +4078,25 @@ void CmdXAck(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXAutoClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ParsedArgs args = parser.UnparsedArgs();
   ClaimOpts opts;
-  string_view key = ArgS(args, 0);
-  opts.group = ArgS(args, 1);
-  opts.consumer = ArgS(args, 2);
+  string_view key = args[0];
+  opts.group = args[1];
+  opts.consumer = args[2];
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (opts.group.empty() || opts.consumer.empty()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
-  if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
+  if (!absl::SimpleAtoi(args[3], &opts.min_idle_time)) {
     return rb->SendError(kSyntaxErr);
   }
 
   opts.min_idle_time = std::max((int64)0, opts.min_idle_time);
 
-  string_view start = ArgS(args, 4);
+  string_view start = args[4];
   RangeId rs;
 
   if (!ParseRangeId(start, RangeBoundary::kStart, &rs)) {
@@ -4093,13 +4109,13 @@ void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
   opts.start = rs.parsed_id.val;
 
   for (size_t i = 5; i < args.size(); ++i) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, i));
+    string arg = absl::AsciiStrToUpper(args[i]);
 
     bool remaining_args = args.size() - i - 1 > 0;
 
     if (remaining_args) {
       if (arg == "COUNT") {
-        arg = ArgS(args, ++i);
+        arg = args[++i];
         if (!absl::SimpleAtoi(arg, &opts.count)) {
           return rb->SendError(kInvalidIntErr);
         }
