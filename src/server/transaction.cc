@@ -1652,14 +1652,46 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs&
 
     string_view name{cid->name()};
 
-    // Determine based on STREAMS argument position
+    // Determine based on the STREAMS option position.
     if (name == "XREAD" || name == "XREADGROUP") {
-      for (size_t i = 0; i < args.size(); ++i) {
+      size_t i = 0;
+      if (name == "XREADGROUP") {
+        i = 3;  // GROUP <group> <consumer>
+      }
+
+      while (i < args.size()) {
         string_view arg = args[i];
         if (absl::EqualsIgnoreCase(arg, "STREAMS")) {
           size_t left = args.size() - i - 1;
           return KeyIndex(i + 1, i + 1 + (left / 2));
         }
+
+        if (absl::EqualsIgnoreCase(arg, "COUNT")) {
+          if (i + 1 >= args.size())
+            return OpStatus::SYNTAX_ERR;
+          uint32_t count;
+          if (!absl::SimpleAtoi(args[i + 1], &count))
+            return OpStatus::INVALID_INT;
+          i += 2;
+          continue;
+        }
+
+        if (absl::EqualsIgnoreCase(arg, "BLOCK")) {
+          if (i + 1 >= args.size())
+            return OpStatus::SYNTAX_ERR;
+          int64_t timeout;
+          if (!absl::SimpleAtoi(args[i + 1], &timeout))
+            return OpStatus::INVALID_INT;
+          i += 2;
+          continue;
+        }
+
+        if (name == "XREADGROUP" && absl::EqualsIgnoreCase(arg, "NOACK")) {
+          ++i;
+          continue;
+        }
+
+        break;
       }
       return OpStatus::SYNTAX_ERR;
     }
