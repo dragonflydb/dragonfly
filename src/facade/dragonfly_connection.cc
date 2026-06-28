@@ -2685,6 +2685,7 @@ bool Connection::SquashPipelineV2() {
 
   conn_stats.pipeline_dispatch_calls++;
   conn_stats.pipeline_dispatch_commands += squashed;
+  local_stats_.cmds += squashed;
   return true;
 }
 
@@ -2793,6 +2794,7 @@ bool Connection::ExecuteBatch() {
     conn_stats.pipeline_dispatch_commands++;
     if (is_head)
       conn_stats.pipeline_dispatch_calls++;
+    local_stats_.cmds++;
 
     if (cmd->IsDeferredReply()) {
       AdvanceToExecute();
