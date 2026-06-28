@@ -133,10 +133,10 @@ class Service : public facade::ServiceInterface {
   static void Unwatch(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   void Discard(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only = false);
-  void EvalRo(CmdArgList args, CommandContext* cmd_cntx);
-  void EvalSha(CmdArgList args, CommandContext* cmd_cntx, bool read_only = false);
-  void EvalShaRo(CmdArgList args, CommandContext* cmd_cntx);
+  void Eval(facade::CmdArgParser parser, CommandContext* cmd_cntx, bool read_only = false);
+  void EvalRo(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void EvalSha(facade::CmdArgParser parser, CommandContext* cmd_cntx, bool read_only = false);
+  void EvalShaRo(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Exec(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Publish(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Subscribe(facade::CmdArgParser parser, CommandContext* cmd_cntx);
@@ -154,7 +154,8 @@ class Service : public facade::ServiceInterface {
 
   struct EvalArgs {
     std::string_view sha;
-    CmdArgList keys, args;
+    facade::ParsedArgs keys_args;
+    uint32_t num_keys = 0;
   };
 
   // Return error if not all keys are owned by the server when running in cluster mode
@@ -168,10 +169,10 @@ class Service : public facade::ServiceInterface {
                                                        const facade::ParsedArgs& args,
                                                        const ConnectionContext& dfly_cntx);
 
-  void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                    bool read_only, CommandContext* cmd_cntx);
-  void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter, bool read_only,
-               CommandContext* cmd_cntx);
+  void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, bool read_only,
+                    CommandContext* cmd_cntx);
+  void CallSHA(const facade::ParsedArgs& args, std::string_view sha, Interpreter* interpreter,
+               bool read_only, CommandContext* cmd_cntx);
 
   // Return optional payload - first received error that occured when executing commands.
   std::optional<facade::payload::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,

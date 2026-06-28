@@ -2069,8 +2069,8 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   }
 }
 
-void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
-  string_view body = ArgS(args, 0);
+void Service::Eval(CmdArgParser parser, CommandContext* cmd_cntx, bool read_only) {
+  string_view body = parser.Next();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (body.empty()) {
@@ -2085,36 +2085,37 @@ void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
 
   string sha{std::move(res.value())};
 
-  CallSHA(args, sha, interpreter, read_only, cmd_cntx);
+  CallSHA(parser.UnparsedArgs(), sha, interpreter, read_only, cmd_cntx);
 }
 
-void Service::EvalRo(CmdArgList args, CommandContext* cmd_cntx) {
-  Eval(args, cmd_cntx, true);
+void Service::EvalRo(CmdArgParser parser, CommandContext* cmd_cntx) {
+  Eval(parser, cmd_cntx, true);
 }
 
-void Service::EvalSha(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
-  string sha = absl::AsciiStrToLower(ArgS(args, 0));
+void Service::EvalSha(CmdArgParser parser, CommandContext* cmd_cntx, bool read_only) {
+  string sha = absl::AsciiStrToLower(parser.Next());
   auto* cntx = cmd_cntx->server_conn_cntx();
   BorrowedInterpreter interpreter{cmd_cntx->tx(), &cntx->conn_state};
-  CallSHA(args, sha, interpreter, read_only, cmd_cntx);
+  CallSHA(parser.UnparsedArgs(), sha, interpreter, read_only, cmd_cntx);
 }
 
-void Service::EvalShaRo(CmdArgList args, CommandContext* cmd_cntx) {
-  EvalSha(args, cmd_cntx, true);
+void Service::EvalShaRo(CmdArgParser parser, CommandContext* cmd_cntx) {
+  EvalSha(parser, cmd_cntx, true);
 }
 
-void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter, bool read_only,
-                      CommandContext* cmd_cntx) {
-  uint32_t num_keys;
-  CHECK(absl::SimpleAtoi(ArgS(args, 1), &num_keys));  // we already validated this
+void Service::CallSHA(const facade::ParsedArgs& args, string_view sha, Interpreter* interpreter,
+                      bool read_only, CommandContext* cmd_cntx) {
+  CHECK_GT(args.size(), 0u);
+  uint32_t num_keys = 0;
+  CHECK(absl::SimpleAtoi(args[0], &num_keys));
 
   EvalArgs ev_args;
   ev_args.sha = sha;
-  ev_args.keys = args.subspan(2, num_keys);
-  ev_args.args = args.subspan(2 + num_keys);
+  ev_args.keys_args = args.Tail();
+  ev_args.num_keys = num_keys;
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(args, ev_args, interpreter, read_only, cmd_cntx);
+  EvalInternal(ev_args, interpreter, read_only, cmd_cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
@@ -2191,8 +2192,8 @@ static bool CanRunSingleShardMulti(bool one_shard, Transaction::MultiMode multi_
   return one_shard && multi_mode == Transaction::LOCK_AHEAD;
 }
 
-void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                           bool read_only, CommandContext* cmd_cntx) {
+void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, bool read_only,
+                           CommandContext* cmd_cntx) {
   const static size_t kShaSize = 40;
   static_assert(sizeof(ConnectionState::ScriptInfo::Stats::sha) == kShaSize);
 
@@ -2218,22 +2219,23 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   // we can do it once during script insertion into script mgr.
   auto& sinfo = conn_cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
-  sinfo->lock_tags.reserve(eval_args.keys.size());
+  sinfo->lock_tags.reserve(eval_args.num_keys);
   sinfo->read_only = read_only;
   memcpy(sinfo->stats.sha, eval_args.sha.data(), eval_args.sha.size());
 
   optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
-  for (size_t i = 0; i < eval_args.keys.size(); ++i) {
-    string_view key = ArgS(eval_args.keys, i);
+  bool first_key = true;
+
+  for (unsigned i = 0; i < eval_args.num_keys; ++i) {
+    string_view key = eval_args.keys_args[i];
     slot_checker.Add(key);
     sinfo->lock_tags.insert(LockTag(key));
-
     ShardId cur_sid = Shard(key, shard_count());
-    if (i == 0) {
+    if (first_key) {
       sid = cur_sid;
-    }
-    if (sid.has_value() && *sid != cur_sid) {
+      first_key = false;
+    } else if (sid.has_value() && *sid != cur_sid) {
       sid = nullopt;
     }
   }
@@ -2244,15 +2246,30 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   Interpreter::RunResult result;
   Transaction::MultiMode script_mode = DetermineMultiMode(*params);
-
-  interpreter->SetGlobalArray("KEYS", eval_args.keys);
-  interpreter->SetGlobalArray("ARGV", eval_args.args);
+  {
+    auto builder = interpreter->CreateGlobalStringArray(eval_args.num_keys, "KEYS");
+    for (size_t i = 0; i < eval_args.num_keys; ++i) {
+      builder.AddElem(i, eval_args.keys_args[i]);
+    }
+  }
+  {
+    unsigned num_args = eval_args.keys_args.size() - eval_args.num_keys;
+    auto builder = interpreter->CreateGlobalStringArray(num_args, "ARGV");
+    for (size_t i = 0; i < num_args; ++i) {
+      builder.AddElem(i, eval_args.keys_args[i + eval_args.num_keys]);
+    }
+  }
 
   // Reset cid to EVAL[] as the context is reused during command dispatch
   absl::Cleanup clean = [interpreter, cmd_cntx, cid = cmd_cntx->cid()]() {
     interpreter->ResetStack();
     cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };
+
+  CmdArgVec tx_keys;  // TODO: remove this once we get rid of CmdArgList in transaction
+  tx_keys.reserve(eval_args.num_keys);
+  for (unsigned i = 0; i < eval_args.num_keys; ++i)
+    tx_keys.push_back(eval_args.keys_args[i]);
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
     sinfo->stats.tx_shards = 1;
@@ -2272,8 +2289,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ss->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareSingleSquash(conn_cntx->ns, real_sid, conn_cntx->db_index(), eval_args.keys,
-                            script_mode);
+    tx->PrepareSingleSquash(conn_cntx->ns, real_sid, conn_cntx->db_index(), tx_keys, script_mode);
 
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
@@ -2305,7 +2321,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
         return cmd_cntx->SendError(err);
       }
     } else {
-      scheduled = StartMulti(conn_cntx, script_mode, eval_args.keys);
+      scheduled = StartMulti(conn_cntx, script_mode, tx_keys);
       sinfo->stats.tx_shards = tx->GetUniqueShardCnt();
     }
 
@@ -2936,9 +2952,6 @@ Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) co
 }
 
 #define HFUNC(x) SetHandler(&Service::x)
-#define MFUNC_OLD(x) \
-  SetHandler([this](CmdArgList sp, CommandContext* cntx) { this->x(std::move(sp), cntx); })
-
 #define MFUNC(x) \
   SetHandler(    \
       [this](CmdArgList, CommandContext* cntx) { this->x(MakeParserFromContext(cntx), cntx); })
@@ -2975,17 +2988,17 @@ void Service::Register(CommandRegistry* registry) {
       << CI{"UNWATCH", CO::LOADING, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
       << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDiscard}.MFUNC(Discard)
       << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEval}
-             .MFUNC_OLD(Eval)
+             .MFUNC(Eval)
              .SetValidator(&EvalValidator)
       << CI{"EVAL_RO", CO::NOSCRIPT | CO::READONLY | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEvalRo}
-             .MFUNC_OLD(EvalRo)
+             .MFUNC(EvalRo)
              .SetValidator(&EvalValidator)
       << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEvalSha}
-             .MFUNC_OLD(EvalSha)
+             .MFUNC(EvalSha)
              .SetValidator(&EvalValidator)
       << CI{"EVALSHA_RO",   CO::NOSCRIPT | CO::READONLY | CO::VARIADIC_KEYS, -3, 3, 3,
             acl::kEvalShaRo}
-             .MFUNC_OLD(EvalShaRo)
+             .MFUNC(EvalShaRo)
              .SetValidator(&EvalValidator)
       << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, acl::kExec}.MFUNC(Exec)
       << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(Publish)
