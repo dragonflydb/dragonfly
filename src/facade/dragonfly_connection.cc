@@ -150,6 +150,8 @@ using absl::GetFlag;
 using base::CycleClock;
 using nonstd::make_unexpected;
 
+#define CONN_ID "[" << id_ << "] "
+
 namespace facade {
 
 namespace {
@@ -833,7 +835,7 @@ void Connection::OnPreMigrateThread() {
 }
 
 void Connection::OnPostMigrateThread() {
-  DVLOG(1) << "[" << id_ << "] OnPostMigrateThread";
+  DVLOG(1) << CONN_ID << "OnPostMigrateThread";
 
   // Once we migrated, we should rearm OnBreakCb callback.
   if (socket()->IsOpen()) {
@@ -882,7 +884,7 @@ void Connection::OnConnectionStart() {
 }
 
 void Connection::HandleRequests() {
-  VLOG(1) << "[" << id_ << "] HandleRequests";
+  VLOG(1) << CONN_ID << "HandleRequests";
   DCHECK(tl_facade_stats);
   auto& conn_stats = tl_facade_stats->conn_stats;
 
@@ -1277,7 +1279,8 @@ void Connection::ConnectionFlow() {
   if (io_buf_.InputLen() > 0) {
     phase_ = PROCESS;
     if (redis_parser_ && !ioloop_v2_) {
-      parse_status = ParseRedis(io_buf_, 10000);
+      parse_status = ParseRedis(io_buf_, 10000, /*enqueue_only=*/false, /*allow_yield=*/true,
+                                /*max_parse=*/0);
     } else {
       parse_status = ParseLoop();
     }
@@ -1621,9 +1624,9 @@ void Connection::OnBreakCb(int32_t mask) {
     return;
   }
 
-  DCHECK(reply_builder_) << "[" << id_ << "] " << unsigned(phase_) << " " << migration_in_process_;
+  DCHECK(reply_builder_) << CONN_ID << unsigned(phase_) << " " << migration_in_process_;
 
-  VLOG(1) << "[" << id_ << "] Got event " << mask << " " << unsigned(phase_) << " "
+  VLOG(1) << CONN_ID << "Got event " << mask << " " << unsigned(phase_) << " "
           << reply_builder_->IsSendActive() << " " << reply_builder_->GetError();
 
   cc_->conn_closing = true;
@@ -1690,7 +1693,7 @@ bool Connection::ProcessControlMessages(uint32_t quota) {
   while (!dispatch_q_.empty()) {
     // If Quota reached: stop draining the dispatch queue and fall through to the data path.
     if ((quota > 0) && (dispatched >= quota)) {
-      LOG_EVERY_T(INFO, 1) << "[" << id_ << "] V2 dispatch_q_ quota reached (" << dispatched << "/"
+      LOG_EVERY_T(INFO, 1) << CONN_ID << "V2 dispatch_q_ quota reached (" << dispatched << "/"
                            << quota << "), falling through to data path";
       return true;
     }
@@ -1760,7 +1763,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
     bool reached_capacity = io_buf_.AppendLen() == 0;
 
     if (redis_parser_) {
-      parse_status = ParseRedis(io_buf_, max_busy_read_cycles_cached);
+      parse_status = ParseRedis(io_buf_, max_busy_read_cycles_cached, /*enqueue_only=*/false,
+                                /*allow_yield=*/true, /*max_parse=*/0);
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseLoop();
@@ -2161,7 +2165,7 @@ void Connection::AsyncFiber() {
       }
       if (dispatch_q_.empty() || prefer_pipeline_execution) {  // 2. Process pipeline Queue
         VLOG_IF(1, prefer_pipeline_execution)
-            << "[" << id_ << "] Preferring pipeline execution over admin queue. "
+            << CONN_ID << "Preferring pipeline execution over admin queue. "
             << "Migration requested: " << is_migration_req
             << ", dispatch quota reached: " << quota_reached
             << ", async_dispatch_quota: " << async_dispatch_quota
@@ -2314,7 +2318,7 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 void Connection::LaunchAsyncFiberIfNeeded() {
   DCHECK(!ioloop_v2_);
   if (!async_fb_.IsJoinable() && !migration_in_process_) {
-    VLOG(1) << "[" << id_ << "] LaunchAsyncFiberIfNeeded ";
+    VLOG(1) << CONN_ID << "LaunchAsyncFiberIfNeeded ";
     async_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch", [this]() { AsyncFiber(); });
   }
 }
@@ -2666,7 +2670,8 @@ Connection::ParserStatus Connection::ParseRedisBatch(base::IoBuf& buf) {
   }
   // Forward ParseRedis's status verbatim (OK / NEED_MORE / ERROR) so a protocol error
   // propagates to ParseLoop instead of being flattened into "no commands parsed".
-  return ParseRedis(buf, max_busy_read_cycles_cached, true);
+  return ParseRedis(buf, max_busy_read_cycles_cached, /*enqueue_only=*/true, /*allow_yield=*/true,
+                    /*max_parse=*/0);
 }
 
 Connection::ParserStatus Connection::ParseMCBatch(base::IoBuf& io_buf) {
@@ -3107,7 +3112,7 @@ bool ConnectionRef::operator==(const ConnectionRef& other) const {
 }
 
 void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotification& n) {
-  DVLOG(2) << "OnRecvNotification: [c" << id_ << "] io_buf_ input_len=" << io_buf_.InputLen()
+  DVLOG(2) << CONN_ID << "OnRecvNotification: io_buf_ input_len=" << io_buf_.InputLen()
            << " pending_input=" << pending_input_;
   ProcessRecvNotification(n);
 
@@ -3140,7 +3145,7 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
     // IoLoopV2 surfaces ParserStatus::ERROR and sends the protocol-error reply.
     if (st == ERROR)
       proactor_parse_error_ = true;
-    DVLOG(1) << "[c" << id_ << "] Parse-in-proactor added " << (parsed_cmd_q_len_ - cmds_before)
+    DVLOG(1) << CONN_ID << "Parse-in-proactor added " << (parsed_cmd_q_len_ - cmds_before)
              << " commands, pq_len=" << parsed_cmd_q_len_;
   }
 

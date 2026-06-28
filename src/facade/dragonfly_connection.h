@@ -413,8 +413,8 @@ class Connection : public util::Connection {
   // allow_yield=false: disables the periodic yield, MUST be false when called from a proactor
   // callback (OnRecvNotification) which must never suspend the connection fiber.
   // max_parse: caps how many commands one call parses (0 = unlimited).
-  ParserStatus ParseRedis(base::IoBuf& buf, uint32_t max_busy_cycles, bool enqueue_only = false,
-                          bool allow_yield = true, uint32_t max_parse = 0);
+  ParserStatus ParseRedis(base::IoBuf& buf, uint32_t max_busy_cycles, bool enqueue_only,
+                          bool allow_yield, uint32_t max_parse);
 
   void OnBreakCb(int32_t mask);
 
