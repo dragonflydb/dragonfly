@@ -2686,6 +2686,7 @@ bool Connection::SquashPipelineV2() {
   conn_stats.pipeline_dispatch_calls++;
   conn_stats.pipeline_dispatch_commands += squashed;
   local_stats_.cmds += squashed;
+  last_interaction_ = time(nullptr);
   return true;
 }
 
@@ -2795,6 +2796,7 @@ bool Connection::ExecuteBatch() {
     if (is_head)
       conn_stats.pipeline_dispatch_calls++;
     local_stats_.cmds++;
+    last_interaction_ = time(nullptr);
 
     if (cmd->IsDeferredReply()) {
       AdvanceToExecute();
