@@ -65,6 +65,12 @@ struct ConnectionStats {
   // number of times we flushed when dispatching the pipeline.
   uint64_t pipeline_dispatch_flush_count = 0;
 
+  // Number of times the V2 proactor OnRecv callback drained socket bytes into io_buf_
+  uint64_t proactor_reads = 0;
+
+  // distribution of commands per squash call. count() == number of squash dispatches.
+  base::Histogram squash_batch_size_hist;
+
   ConnectionStats& operator+=(const ConnectionStats& o);
 };
 

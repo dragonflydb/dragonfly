@@ -163,6 +163,26 @@ void Metrics::Print(uint64_t uptime, DflyCmd* dfly_cmd, util::http::StringRespon
                             conn_stats.pipeline_dispatch_flush_usec * 1e-6, MetricType::COUNTER,
                             &resp->body());
 
+  {
+    AppendMetricHeader("pipeline_squash_batch_size",
+                       "Distribution of commands packed per squash dispatch", MetricType::SUMMARY,
+                       &resp->body());
+    const string sbs_full = GetMetricFullName("pipeline_squash_batch_size");
+    if (conn_stats.squash_batch_size_hist.count() > 0) {
+      auto pctls = conn_stats.squash_batch_size_hist.Percentiles(50, 95, 99);
+      AppendMetricValue("pipeline_squash_batch_size", pctls[0], {"quantile"}, {"0.5"},
+                        &resp->body());
+      AppendMetricValue("pipeline_squash_batch_size", pctls[1], {"quantile"}, {"0.95"},
+                        &resp->body());
+      AppendMetricValue("pipeline_squash_batch_size", pctls[2], {"quantile"}, {"0.99"},
+                        &resp->body());
+    }
+    absl::StrAppend(&resp->body(), sbs_full, "_sum ", conn_stats.squash_batch_size_hist.sum(),
+                    "\n");
+    absl::StrAppend(&resp->body(), sbs_full, "_count ", conn_stats.squash_batch_size_hist.count(),
+                    "\n");
+  }
+
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
@@ -300,7 +320,9 @@ void Metrics::Print(uint64_t uptime, DflyCmd* dfly_cmd, util::http::StringRespon
                             &resp->body());
   AppendMetricWithoutLabels("net_read_yields_total", "", conn_stats.num_read_yields,
                             MetricType::COUNTER, &resp->body());
-
+  AppendMetricWithoutLabels("proactor_reads_total",
+                            "V2 socket reads drained from the proactor during OnRecv callback",
+                            conn_stats.proactor_reads, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
 

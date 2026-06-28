@@ -126,6 +126,15 @@ ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
           " events to come for the connection in case there is only one command in the pipeline. ");
 
+ABSL_FLAG(
+    bool, pipeline_parse_ahead, true,
+    "V2 only: before executing a parsed pipeline batch, opportunistically read and parse "
+    "more already-available input so the squash sees one large batch instead of many small ones.");
+
+ABSL_FLAG(bool, pipeline_parse_in_proactor, true,
+          "V2 only: parse newly-arrived bytes from the proactor OnRecv callback while the fiber "
+          "is blocked in a squash hop, so the next batch is already grown when execution resumes.");
+
 ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
           "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
 ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
@@ -446,6 +455,11 @@ void LogMemcacheTraffic(uint32_t id, bool has_more, const MemcacheParser::Comman
 
 constexpr size_t kMinReadSize = 256;
 
+// General heuristic upper bound, used in two different parse contexts: once to cap the pipeline
+// queue depth (MaybeParseAhead), and once to cap the number of commands parsed in a single
+// ParseRedis call (parse-in-proactor).
+constexpr uint32_t kParseMaxBatch = 256;
+
 const char* kPhaseName[Connection::NUM_PHASES] = {"SETUP", "READ", "PROCESS", "SHUTTING_DOWN",
                                                   "PRECLOSE"};
 
@@ -537,6 +551,9 @@ ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
 thread_local uint32_t max_busy_read_cycles_cached = UINT32_MAX;
 thread_local bool always_flush_pipeline_cached = absl::GetFlag(FLAGS_always_flush_pipeline);
 thread_local uint32_t pipeline_squash_limit_cached = absl::GetFlag(FLAGS_pipeline_squash_limit);
+thread_local bool pipeline_parse_ahead_cached = absl::GetFlag(FLAGS_pipeline_parse_ahead);
+thread_local bool pipeline_parse_in_proactor_cached =
+    absl::GetFlag(FLAGS_pipeline_parse_in_proactor);
 
 }  // namespace
 
@@ -1422,7 +1439,8 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
 }
 
 Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t max_busy_cycles,
-                                                bool enqueue_only) {
+                                                bool enqueue_only, bool allow_yield,
+                                                uint32_t max_parse) {
   DCHECK_GT(max_busy_cycles, 0u);
 
   uint32_t consumed = 0;
@@ -1446,6 +1464,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   // test fail.
   // TODO(kostas): follow up on this
   size_t total_consumed = 0;
+  uint32_t parsed_cmds = 0;  // commands parsed this call; capped by max_parse when non-zero
   do {
     bool stop_parsing = false;
     DCHECK(parsed_cmd_);
@@ -1478,6 +1497,10 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
       } else {
         DispatchSingle(has_more, dispatch_sync, dispatch_async);
       }
+
+      // Bound commands parsed per call (0 = unlimited). Unparsed bytes remain in io_buf_.
+      if ((max_parse != 0) && (++parsed_cmds >= max_parse))
+        stop_parsing = true;
     }
     if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
@@ -1494,9 +1517,23 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
     // We must yield from time to time to allow other fibers to run.
     // Specifically, if a client sends a huge chunk of data resulting in a very long pipeline,
     // we want to yield to allow AsyncFiber to actually execute on the pending pipeline.
-    if (ThisFiber::GetRunningTimeCycles() > max_busy_cycles) {
+    //
+    // Note: if allow_yield == false, current context can't yield and won't respect max_busy_cycles.
+    // That is fine, since caller has option to bound parsing also by setting max_parse>0.
+    if (allow_yield && ThisFiber::GetRunningTimeCycles() > max_busy_cycles) {
       GetLocalConnStats().num_read_yields++;
+
+      fiber_park_spot_ = FiberParkSpot::kParseYield;
+      const size_t remaining = read_buffer.size();
       ThisFiber::Yield();
+      fiber_park_spot_ = FiberParkSpot::kNone;
+
+      // A proactor recv callback may have run during the yield and moved io_buf_'s data
+      // (Compact: memmove to front) or grown it (Reserve: realloc). Either way, the pointer
+      // inside read_buffer may be stale. Rebuild it from scratch.
+      read_buffer = io_buf.InputBuffer();
+      read_buffer.remove_prefix(total_consumed);
+      read_buffer = read_buffer.first(remaining);
     }
   } while (RespSrvParser::OK == result && !read_buffer.empty() && !reply_builder_->GetError());
 
@@ -1517,15 +1554,42 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   return ERROR;
 }
 
+bool Connection::MaybeParseAhead() {
+  if (!pending_input_ || (parsed_cmd_q_len_ <= 1) || recv_multishot_active_ ||
+      (parsed_cmd_q_len_ >= kParseMaxBatch) || IsOverPipelineLimit())
+    return false;
+
+  // Grow the buffer if at capacity, so subsequent reads absorb larger batches.
+  // Only for real pipelines (>1); single-command connections use IoLoopV2's own grow path.
+  if (io_buf_.AppendLen() == 0) {
+    CheckIoBufCapacity(/*reached_capacity=*/true, &io_buf_);
+    // If growth hit max_client_iobuf_len, compact to reclaim the consumed prefix.
+    if (io_buf_.AppendLen() == 0)
+      io_buf_.Compact();
+    if (io_buf_.AppendLen() == 0)
+      return false;
+  }
+
+  const size_t before = io_buf_.InputLen();
+  ReadPendingInput();
+  return io_buf_.InputLen() > before;
+}
+
 auto Connection::ParseLoop() -> ParserStatus {
   auto parse_func =
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
 
   ParserStatus parse_status = NEED_MORE;
 
-  do {
+  // Why while(true)+continue: a parse-ahead hit must (unconditionally) re-enter parse without
+  // executing.
+  while (true) {
     DCHECK_GT(io_buf_.InputLen(), 0u);
     parse_status = (this->*parse_func)(io_buf_);
+
+    // V2 parse-ahead: top-up the buffer and re-parse if new bytes arrived.
+    if (ioloop_v2_ && pipeline_parse_ahead_cached && (parse_status != ERROR) && MaybeParseAhead())
+      continue;
 
     // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
     // earlier replies in order before we report it.
@@ -1539,7 +1603,11 @@ auto Connection::ParseLoop() -> ParserStatus {
     // protocol error reply (using parser_error_) and close the connection.
     if (parse_status == ERROR)
       return ERROR;
-  } while (parse_status == OK && io_buf_.InputLen() > 0);
+
+    // Keep as is, see comment at loop's top.
+    if (parse_status != OK || io_buf_.InputLen() == 0)
+      break;
+  }
 
   return parse_status;  // OK or NEED_MORE
 }
@@ -1833,6 +1901,8 @@ void Connection::SquashPipeline() {
 
   conn_stats.pipeline_dispatch_calls++;
   conn_stats.pipeline_dispatch_commands += squashed;
+
+  conn_stats.squash_batch_size_hist.Add(squashed);
 
   // If interrupted due to pause or a non-squashable command, fall back to regular dispatch.
   skip_next_squashing_ = (squashed != pipeline_count);
@@ -2669,8 +2739,10 @@ bool Connection::SquashPipelineV2() {
   auto& conn_stats = tl_facade_stats->conn_stats;
 
   uint64_t dispatch_start = CycleClock::Now();
+  fiber_park_spot_ = FiberParkSpot::kSquashHop;
   unsigned squashed =
       service_->DispatchSquashedBatch(parsed_to_execute_, dispatch_waiting_count_, cc_.get());
+  fiber_park_spot_ = FiberParkSpot::kNone;
 
   if (squashed == 0)
     return false;
@@ -2685,6 +2757,7 @@ bool Connection::SquashPipelineV2() {
 
   conn_stats.pipeline_dispatch_calls++;
   conn_stats.pipeline_dispatch_commands += squashed;
+  conn_stats.squash_batch_size_hist.Add(squashed);
   return true;
 }
 
@@ -2735,10 +2808,12 @@ bool Connection::ExecuteBatch() {
                << " " << io_buf_.InputLen();
 
       if (SquashPipelineV2()) {
-        // This helps with throughput. Explanation:
-        // when we suspend the thread calls io-callbacks that fill up the input buffer.
-        // By breaking now we give the io-loop a chance to add more commands to the pipeline.
-        if (pending_input_ || io_buf_.InputLen() > 0)
+        // - This helps with throughput. Explanation:
+        //   when we suspend the thread calls io-callbacks that fill up the input buffer.
+        //   By breaking now we give the io-loop a chance to add more commands to the pipeline.
+        // - Skip the break when parse-in-proactor is on: the proactor already parsed those bytes
+        //   into the queue during the squash wait, so keep squashing in place instead.
+        if (!pipeline_parse_in_proactor_cached && (pending_input_ || io_buf_.InputLen() > 0))
           break;
         continue;
       }
@@ -2971,12 +3046,15 @@ void Connection::UpdateFromFlags() {
   always_flush_pipeline_cached = GetFlag(FLAGS_always_flush_pipeline);
   pipeline_squash_limit_cached = GetFlag(FLAGS_pipeline_squash_limit);
   pipeline_wait_batch_usec = GetFlag(FLAGS_pipeline_wait_batch_usec);
+  pipeline_parse_ahead_cached = GetFlag(FLAGS_pipeline_parse_ahead);
+  pipeline_parse_in_proactor_cached = GetFlag(FLAGS_pipeline_parse_in_proactor);
 }
 
 std::vector<std::string> Connection::GetMutableFlagNames() {
   return base::GetFlagNames(FLAGS_pipeline_queue_limit, FLAGS_pipeline_buffer_limit,
                             FLAGS_max_busy_read_usec, FLAGS_always_flush_pipeline,
-                            FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec);
+                            FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec,
+                            FLAGS_pipeline_parse_ahead, FLAGS_pipeline_parse_in_proactor);
 }
 
 void Connection::GetRequestSizeHistogramThreadLocal(std::string* hist) {
@@ -3029,10 +3107,43 @@ bool ConnectionRef::operator==(const ConnectionRef& other) const {
 }
 
 void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotification& n) {
-  DVLOG(2) << "OnRecvNotification iobuf_len: " << io_buf_.InputLen();
+  DVLOG(2) << "OnRecvNotification: [c" << id_ << "] io_buf_ input_len=" << io_buf_.InputLen()
+           << " pending_input=" << pending_input_;
   ProcessRecvNotification(n);
-  // Eagerly drain the socket while the fiber is suspended to prevent receive buffer starvation.
+
+  // Compact the buffer when it is full so that ReadPendingInput() has room to append new bytes.
+  // Compact() moves the unconsumed data to the front of the buffer (memmove). This is safe even
+  // when a parser is suspended and holds a pointer into io_buf_:
+  //   - FiberParkSpot::kSquashHop: the squash batch was already fixed before the hop, so the
+  //     dispatch is not reading io_buf_ at this point.
+  //   - FiberParkSpot::kParseYield: ParseRedis refreshes its local buffer pointer from
+  //     io_buf_.InputBuffer() right after waking up, so the move happens before it reads again.
+  if (io_buf_.AppendLen() == 0)
+    io_buf_.Compact();
+
+  // Drain the socket while the fiber is suspended.
+  const size_t before = io_buf_.InputLen();
   ReadPendingInput();
+  if (io_buf_.InputLen() > before)
+    ++GetLocalConnStats().proactor_reads;
+
+  // Parse In Proactor : parse newly-read bytes now, while the fiber is parked in a squash hop, so
+  // the next batch is already larger on resume.
+  // This is safe since parser state is idle. allow_yield=false because callbacks must not suspend
+  // the proactor.
+  if (pipeline_parse_in_proactor_cached && (fiber_park_spot_ == FiberParkSpot::kSquashHop) &&
+      redis_parser_ && (io_buf_.InputLen() > 0) && !IsOverPipelineLimit()) {
+    size_t cmds_before = parsed_cmd_q_len_;
+    ParserStatus st = ParseRedis(io_buf_, max_busy_read_cycles_cached, /*enqueue_only=*/true,
+                                 /*allow_yield=*/false, /*max_parse=*/kParseMaxBatch);
+    // The recv callback cannot return a status. If parsing hit a protocol error, flag it so
+    // IoLoopV2 surfaces ParserStatus::ERROR and sends the protocol-error reply.
+    if (st == ERROR)
+      proactor_parse_error_ = true;
+    DVLOG(1) << "[c" << id_ << "] Parse-in-proactor added " << (parsed_cmd_q_len_ - cmds_before)
+             << " commands, pq_len=" << parsed_cmd_q_len_;
+  }
+
   io_event_.notify();
 }
 
@@ -3156,6 +3267,7 @@ void Connection::MaybeEnableRecvMultishot() {
     if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_) {
       static_cast<fb2::UringSocket*>(socket_.get())->EnableRecvMultishot();
       pending_input_ = false;
+      recv_multishot_active_ = true;
     }
   }
 #endif
@@ -3335,7 +3447,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         return ec;
       }
 
+      fiber_park_spot_ = FiberParkSpot::kIdleAwait;
       io_event_.await([this] { return ShouldWakeIdle(); });
+      fiber_park_spot_ = FiberParkSpot::kNone;
     }
 
     phase_ = PROCESS;
@@ -3361,6 +3475,13 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     } else {
       // Input available and under budget: parse, execute, reply.
       parse_status = RunParsePath();
+    }
+
+    // A protocol error detected by parse-in-proactor (which runs in the recv callback and cannot
+    // return a status) is surfaced here by setting parse_status = ERROR.
+    if (proactor_parse_error_) {
+      proactor_parse_error_ = false;
+      parse_status = ERROR;
     }
 
     if (reply_builder_->GetError()) {
@@ -3412,6 +3533,8 @@ void ResetStats() {
   cstats.command_cnt_other = 0;
   cstats.io_read_cnt = 0;
   cstats.io_read_bytes = 0;
+  cstats.squash_batch_size_hist.Clear();
+  cstats.proactor_reads = 0;
 
   tl_facade_stats->reply_stats = {};
   if (io_req_size_hist)

@@ -406,7 +406,15 @@ class Connection : public util::Connection {
   // If add is true, stats are incremented, otherwise decremented.
   void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
-  ParserStatus ParseRedis(base::IoBuf& buf, uint32_t max_busy_cycles, bool enqueue_only = false);
+  // Parse RESP commands from buf until the buffer is exhausted, a protocol error is hit, or
+  // max_busy_cycles CPU time elapses (triggering a yield to avoid starving other fibers).
+  //
+  // enqueue_only=true (V2): all parsed commands are enqueued without inline dispatch.
+  // allow_yield=false: disables the periodic yield, MUST be false when called from a proactor
+  // callback (OnRecvNotification) which must never suspend the connection fiber.
+  // max_parse: caps how many commands one call parses (0 = unlimited).
+  ParserStatus ParseRedis(base::IoBuf& buf, uint32_t max_busy_cycles, bool enqueue_only = false,
+                          bool allow_yield = true, uint32_t max_parse = 0);
 
   void OnBreakCb(int32_t mask);
 
@@ -472,6 +480,11 @@ class Connection : public util::Connection {
 
   // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
   ParserStatus ParseLoop();
+
+  // V2 parse-ahead helper, only called when pipeline_parse_ahead is on.
+  // Grows io_buf_ if at capacity, then attempts one non-blocking top-up read.
+  // Returns true if new bytes arrived and ParseLoop should re-parse.
+  bool MaybeParseAhead();
 
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
@@ -637,6 +650,12 @@ class Connection : public util::Connection {
   Protocol protocol_;
   Phase phase_ = SETUP;
 
+  // Where the V2 fiber is currently parked (suspended). Used as a safety gate, for example:
+  // parse-in-proactor only fires when parked at kSquashHop (ensuring the parser is idle). kNone =
+  // fiber is running.
+  enum class FiberParkSpot : uint8_t { kNone, kIdleAwait, kSquashHop, kParseYield };
+  FiberParkSpot fiber_park_spot_ = FiberParkSpot::kNone;
+
   // True after IncreaseConnStats registers this connection in the current thread's stats.
   // False before registration and after DecreaseConnStats unregisters it during close/migration.
   bool conn_stats_registered_ = false;
@@ -702,6 +721,12 @@ class Connection : public util::Connection {
       // If post migration is allowed to call RegisterRecv
       bool migration_allowed_to_register_ : 1;
       bool pending_input_ : 1;
+      bool recv_multishot_active_ : 1;
+
+      // Set by parse-in-proactor (OnRecvNotification) when its ParseRedis hits a protocol error.
+      // The recv callback cannot return a status, so IoLoopV2 observes this flag and surfaces
+      // ParserStatus::ERROR to close the connection and send the protocol-error reply.
+      bool proactor_parse_error_ : 1;
     };
   };
 

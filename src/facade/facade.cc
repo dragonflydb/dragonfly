@@ -23,7 +23,7 @@ using namespace std;
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
-  static_assert(kSizeConnStats == 280);
+  static_assert(kSizeConnStats == 344);
 
   ADD(read_buf_capacity);
   ADD(connection_memory_bytes);
@@ -56,6 +56,8 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(pipeline_dispatch_commands);
   ADD(pipeline_dispatch_flush_usec);
   ADD(pipeline_dispatch_flush_count);
+  ADD(proactor_reads);
+  squash_batch_size_hist.Merge(o.squash_batch_size_hist);
 
   return *this;
 }
