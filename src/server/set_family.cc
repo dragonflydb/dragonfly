@@ -947,8 +947,11 @@ OpStatus OpRandMember(const OpArgs& op_args, std::string_view key, int count,
 
   const std::uint32_t size = pv.Size();
   const bool picks_are_unique = count >= 0;
+  // Widen to int64_t before std::abs: for count == INT_MIN, std::abs(count) on an int is UB
+  // (the magnitude isn't representable in int). The magnitude fits in int64_t and uint32_t.
   const std::uint32_t picks_count =
-      picks_are_unique ? std::min(static_cast<std::uint32_t>(count), size) : std::abs(count);
+      picks_are_unique ? std::min(static_cast<std::uint32_t>(count), size)
+                       : static_cast<std::uint32_t>(std::abs(static_cast<std::int64_t>(count)));
 
   auto generator = [picks_are_unique, picks_count, size]() -> std::unique_ptr<PicksGenerator> {
     if (picks_are_unique) {
@@ -1243,15 +1246,14 @@ void CmdSCard(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdSPop(CmdArgParser parser, CommandContext* cmd_cntx) {
-  const size_t args_size = cmd_cntx->tail_args().size();
+  const size_t args_size = parser.UnparsedArgs().size();
+
   string_view key = parser.Next();
-  unsigned count = 1;
-  if (parser.HasNext()) {
-    string_view arg = parser.Next();
-    if (!absl::SimpleAtoi(arg, &count)) {
-      cmd_cntx->SendError(kInvalidIntErr);
-      return;
-    }
+  unsigned count = parser.NextOrDefault<unsigned>(1);
+
+  // SPOP only accepts `key` or `key count`; reject a bad count or any trailing args.
+  if (!parser.Finalize()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
   cmn::BackedArguments vals;
@@ -1465,17 +1467,18 @@ void CmdSInterStore(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdSInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
-  const facade::ParsedArgs& args = cmd_cntx->tail_args();
+  unsigned num_keys = parser.Next<unsigned>();
 
-  unsigned num_keys;
-  if (!absl::SimpleAtoi(parser.Next(), &num_keys))
-    return cmd_cntx->SendError(kSyntaxErr);
+  if (parser.HasError())
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
   unsigned limit = 0;
-  if (args.size() == (num_keys + 3) && args[1 + num_keys] == "LIMIT") {
-    if (!absl::SimpleAtoi(args[num_keys + 2], &limit))
+  // num_keys has already been consumed, so args holds only the keys and an optional LIMIT clause.
+  auto args = parser.UnparsedArgs();
+  if (args.size() == (num_keys + 2) && args[num_keys] == "LIMIT") {
+    if (!absl::SimpleAtoi(args[num_keys + 1], &limit))
       return cmd_cntx->SendError("limit can't be negative");
-  } else if (args.size() > (num_keys + 1))
+  } else if (args.size() > num_keys)
     return cmd_cntx->SendError(kSyntaxErr);
 
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
@@ -1493,7 +1496,7 @@ void CmdSInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdSUnion(CmdArgParser parser, CommandContext* cmd_cntx) {
+void CmdSUnion(CmdArgParser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1551,11 +1554,9 @@ void CmdSUnionStore(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
   const size_t args_size = cmd_cntx->tail_args().size();
   string_view key = parser.Next();
-  string_view token = parser.Next();
+  uint64_t cursor = parser.Next<uint64_t>();
 
-  uint64_t cursor = 0;
-
-  if (!absl::SimpleAtoi(token, &cursor)) {
+  if (parser.TakeError()) {
     return cmd_cntx->SendError("invalid cursor");
   }
 

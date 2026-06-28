@@ -207,6 +207,9 @@ TEST_F(SetFamilyTest, SPop) {
 
   resp = Run({"scard", "xlarge"});
   EXPECT_THAT(resp, IntArg(98));
+
+  // SPOP accepts only `key` or `key count`; trailing args must be rejected, not silently ignored.
+  EXPECT_THAT(Run({"spop", "xlarge", "2", "3"}), ErrArg("syntax error"));
 }
 
 TEST_F(SetFamilyTest, SRandMember) {
@@ -386,6 +389,16 @@ TEST_F(SetFamilyTest, SScan) {
   resp = Run({"sscan", "mystrset", "0", "match", "1*"});
   vec = StrArray(resp.GetVec()[1]);
   EXPECT_THAT(vec.size(), 0);
+
+  // An invalid (non-numeric) cursor must be rejected without crashing. Previously the
+  // CmdArgParser parse error went unchecked, tripping a DCHECK in its destructor.
+  EXPECT_THAT(Run({"sscan", "mystrset", "abc"}), ErrArg("invalid cursor"));
+  EXPECT_THAT(Run({"sscan", "mystrset", R"({"a":1})", "LIST"}), ErrArg("invalid cursor"));
+
+  // The server must still be responsive after the rejected cursors.
+  resp = Run({"sscan", "mystrset", "0", "match", "str-1*"});
+  vec = StrArray(resp.GetVec()[1]);
+  EXPECT_THAT(vec, UnorderedElementsAre("str-1", "str-10", "str-11", "str-12", "str-13", "str-14"));
 }
 
 TEST_F(SetFamilyTest, HugeSScan) {
