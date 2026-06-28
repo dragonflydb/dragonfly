@@ -613,9 +613,11 @@ DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionCo
 }
 
 void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
-  CmdArgVec scratch;
-  CmdArgList args = parser.UnparsedArgs().ToSlice(&scratch);
-  string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  string subcmd = absl::AsciiStrToUpper(parser.Next());
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
+  }
+
   if (subcmd == "HELP") {
     string_view help_arr[] = {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -708,29 +710,28 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   VLOG(1) << "subcmd " << subcmd;
 
   if (subcmd == "POPULATE") {
-    return Populate(args, cmd_cntx);
+    return Populate(parser, cmd_cntx);
   }
 
   if (subcmd == "RELOAD") {
-    return Reload(args, cmd_cntx);
+    return Reload(parser, cmd_cntx);
   }
 
-  if (subcmd == "REPLICA" && args.size() == 2) {
-    return Replica(args, cmd_cntx);
+  if (subcmd == "REPLICA" && parser.UnparsedArgs().size() == 1) {
+    return Replica(parser, cmd_cntx);
   }
 
-  if (subcmd == "MIGRATION" && args.size() == 2) {
-    return Migration(args, cmd_cntx);
+  if (subcmd == "MIGRATION" && parser.UnparsedArgs().size() == 1) {
+    return Migration(parser, cmd_cntx);
   }
 
   if (subcmd == "WATCHED") {
     return Watched(cmd_cntx);
   }
 
-  if (subcmd == "OBJECT" && args.size() >= 2) {
-    string_view key = ArgS(args, 1);
-    args.remove_prefix(2);
-    return Inspect(key, args, cmd_cntx);
+  if (subcmd == "OBJECT" && parser.HasNext()) {
+    string_view key = parser.Next();
+    return Inspect(key, parser, cmd_cntx);
   }
 
   if (subcmd == "TX") {
@@ -754,37 +755,37 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   if (subcmd == "TRAFFIC") {
-    return LogTraffic(CmdArgParser{args.subspan(1)}, cmd_cntx);
+    return LogTraffic(parser, cmd_cntx);
   }
 
-  if (subcmd == "RECVSIZE" && args.size() == 2) {
-    return RecvSize(ArgS(args, 1), cmd_cntx);
+  if (subcmd == "RECVSIZE" && parser.UnparsedArgs().size() == 1) {
+    return RecvSize(parser.Next(), cmd_cntx);
   }
 
-  if (subcmd == "TOPK" && args.size() >= 2) {
-    return Topk(args.subspan(1), cmd_cntx);
+  if (subcmd == "TOPK" && parser.HasNext()) {
+    return Topk(parser, cmd_cntx);
   }
 
-  if (subcmd == "KEYS" && args.size() >= 2) {
-    return Keys(args.subspan(1), cmd_cntx);
+  if (subcmd == "KEYS" && parser.HasNext()) {
+    return Keys(parser, cmd_cntx);
   }
 
-  if (subcmd == "VALUES" && args.size() >= 2) {
-    return Values(args.subspan(1), cmd_cntx);
+  if (subcmd == "VALUES" && parser.HasNext()) {
+    return Values(parser, cmd_cntx);
   }
   if (subcmd == "COMPRESSION") {
-    return Compression(CmdArgParser{args.subspan(1)}, cmd_cntx);
+    return Compression(parser, cmd_cntx);
   }
 
   if (subcmd == "IOSTATS") {
-    return IOStats(args.subspan(1), cmd_cntx);
+    return IOStats(parser, cmd_cntx);
   }
   if (subcmd == "SEGMENTS") {
-    return Segments(args.subspan(1), cmd_cntx);
+    return Segments(parser, cmd_cntx);
   }
 
   if (subcmd == "COMPACT-TABLE") {
-    return CompactTable(args.subspan(1), cmd_cntx);
+    return CompactTable(parser, cmd_cntx);
   }
 
   if (subcmd == "UNIQ-STRS") {
@@ -800,12 +801,12 @@ void DebugCmd::Shutdown() {
   shard_set->pool()->AwaitFiberOnAll([](auto*) { facade::Connection::StopTrafficLogging(); });
 }
 
-void DebugCmd::Reload(CmdArgList args, CommandContext* cmd_cntx) {
+void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   bool save = true;
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  for (size_t i = 1; i < args.size(); ++i) {
-    string opt = absl::AsciiStrToUpper(ArgS(args, i));
+  while (parser.HasNext()) {
+    string opt = absl::AsciiStrToUpper(parser.Next());
     VLOG(1) << "opt " << opt;
 
     if (opt == "NOSAVE") {
@@ -841,10 +842,8 @@ void DebugCmd::Reload(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendOk();
 }
 
-void DebugCmd::Replica(CmdArgList args, CommandContext* cmd_cntx) {
-  args.remove_prefix(1);
-
-  string opt = absl::AsciiStrToUpper(ArgS(args, 0));
+void DebugCmd::Replica(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string opt = absl::AsciiStrToUpper(parser.Next());
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (opt == "PAUSE" || opt == "RESUME") {
@@ -867,10 +866,8 @@ void DebugCmd::Replica(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(UnknownSubCmd("replica", "DEBUG"));
 }
 
-void DebugCmd::Migration(CmdArgList args, CommandContext* cmd_cntx) {
-  args.remove_prefix(1);
-
-  string opt = absl::AsciiStrToUpper(ArgS(args, 0));
+void DebugCmd::Migration(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string opt = absl::AsciiStrToUpper(parser.Next());
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (opt == "PAUSE" || opt == "RESUME") {
     cf_.PauseAllIncomingMigrations(opt == "PAUSE");
@@ -886,7 +883,6 @@ enum PopulateFlag { FLAG_RAND, FLAG_TYPE, FLAG_ELEMENTS, FLAG_SLOT, FLAG_EXPIRE,
 // optional: [RAND | TYPE typename | ELEMENTS element num | SLOTS (key value)+ | EXPIRE start end]
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgParser parser,
                                                                 CommandContext* cmd_cntx) {
-  parser.Skip(1);
   PopulateOptions options;
 
   options.total_count = parser.Next<uint64_t>();
@@ -936,8 +932,8 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgParser par
   return options;
 }
 
-void DebugCmd::Populate(CmdArgList args, CommandContext* cmd_cntx) {
-  optional<PopulateOptions> options = ParsePopulateArgs(CmdArgParser{args}, cmd_cntx);
+void DebugCmd::Populate(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  optional<PopulateOptions> options = ParsePopulateArgs(parser, cmd_cntx);
   if (!options.has_value()) {
     return;
   }
@@ -1160,14 +1156,14 @@ void DebugCmd::LogTraffic(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->SendOk();
 }
 
-void DebugCmd::Inspect(string_view key, CmdArgList args, CommandContext* cmd_cntx) {
+void DebugCmd::Inspect(string_view key, facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   EngineShardSet& ess = *shard_set;
   ShardId sid = Shard(key, ess.size());
   VLOG(1) << "DebugCmd::Inspect " << key;
 
   bool check_compression = false;
-  if (args.size() == 1) {
-    check_compression = absl::AsciiStrToUpper(ArgS(args, 0)) == "COMPRESS";
+  if (parser.UnparsedArgs().size() == 1) {
+    check_compression = absl::EqualsIgnoreCase(parser.Peek(), "COMPRESS");
   }
   string resp;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1429,17 +1425,15 @@ void DebugCmd::RecvSize(string_view param, CommandContext* cmd_cntx) {
   rb->SendVerbatimString(hist);
 }
 
-void DebugCmd::Topk(CmdArgList args, CommandContext* cmd_cntx) {
+void DebugCmd::Topk(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  DCHECK_GE(args.size(), 1u);
 
-  string_view subcmd = ArgS(args, 0);
+  string_view subcmd = parser.Next();
   if (absl::EqualsIgnoreCase(subcmd, "ON")) {
-    uint32_t min_freq = 100;
-    if (args.size() > 1) {
-      if (!absl::SimpleAtoi(ArgS(args, 1), &min_freq))
-        return cmd_cntx->SendError(kUintErr);
-    }
+    uint32_t min_freq = parser.NextOrDefault<uint32_t>(100);
+    if (parser.TakeError())
+      return cmd_cntx->SendError(kUintErr);
+
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       cntx_->ns->GetDbSlice(es->shard_id()).StartSampleTopK(cntx_->db_index(), min_freq);
     });
@@ -1448,12 +1442,10 @@ void DebugCmd::Topk(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
     vector<DbSlice::SamplingResult> results(shard_set->size());
-    uint32_t max_keys = 50;
+    uint32_t max_keys = parser.NextOrDefault<uint32_t>(50);
 
-    if (args.size() > 1) {
-      if (!absl::SimpleAtoi(ArgS(args, 1), &max_keys))
-        return cmd_cntx->SendError(kUintErr);
-    }
+    if (parser.TakeError())
+      return cmd_cntx->SendError(kUintErr);
 
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       results[es->shard_id()] =
@@ -1486,8 +1478,8 @@ void DebugCmd::Topk(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(kSyntaxErr);
 }
 
-void DebugCmd::Keys(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view subcmd = ArgS(args, 0);
+void DebugCmd::Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view subcmd = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (absl::EqualsIgnoreCase(subcmd, "ON")) {
     shard_set->RunBriefInParallel([&](EngineShard* es) {
@@ -1512,8 +1504,8 @@ void DebugCmd::Keys(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(kSyntaxErr);
 }
 
-void DebugCmd::Values(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view subcmd = ArgS(args, 0);
+void DebugCmd::Values(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view subcmd = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (absl::EqualsIgnoreCase(subcmd, "ON")) {
     shard_set->RunBriefInParallel([&](EngineShard* es) {
@@ -1676,10 +1668,10 @@ void DebugCmd::Compression(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 }
 
-void DebugCmd::IOStats(CmdArgList args, CommandContext* cmd_cntx) {
+void DebugCmd::IOStats(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  bool per_second = !args.empty() && absl::EqualsIgnoreCase(args[0], "PS");
+  bool per_second = parser.HasNext() && absl::EqualsIgnoreCase(parser.Peek(), "PS");
   vector<IOStat> stats(shard_set->pool()->size());
 
   shard_set->pool()->AwaitBrief(
@@ -1703,7 +1695,7 @@ void DebugCmd::IOStats(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void DebugCmd::Segments(CmdArgList args, CommandContext* cmd_cntx) {
+void DebugCmd::Segments(facade::CmdArgParser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   vector<SegmentInfo> info(shard_set->size());
 
@@ -1724,17 +1716,15 @@ void DebugCmd::Segments(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendVerbatimString(result);
 }
 
-void DebugCmd::CompactTable(CmdArgList args, CommandContext* cmd_cntx) {
+void DebugCmd::CompactTable(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  double threshold = 0.25;
-  if (args.size() > 0) {
-    if (!absl::SimpleAtod(facade::ToSV(args[0]), &threshold)) {
-      return rb->SendError("Invalid threshold value");
-    }
-    if (threshold <= 0.0 || threshold > 1.0) {
-      return rb->SendError("Threshold must be between 0 and 1");
-    }
+  double threshold = parser.NextOrDefault<double>(0.25);
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError("Invalid threshold value");
+
+  if (threshold <= 0.0 || threshold > 1.0) {
+    return rb->SendError("Threshold must be between 0 and 1");
   }
 
   const DbIndex db_idx = cmd_cntx->server_conn_cntx()->db_index();
@@ -1823,23 +1813,19 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
 
   cmn::BackedArguments backed_args;
-  CmdArgVec arg_vec;
   facade::CapturingReplyBuilder crb;
   absl::InsecureBitGen gen;
   CommandContext cmd_cntx{&crb, cntx_};
   cmd_cntx.SetupTx(exec_cid, stub_tx.get());
 
   auto invoke = [&](const CommandId* cid) {
-    arg_vec.clear();
-    for (auto sv : backed_args.view())
-      arg_vec.push_back(sv);
-    auto args_span = absl::MakeSpan(arg_vec);
+    facade::ParsedArgs args{backed_args};
     stub_tx->MultiSwitchCmd(cid);
     crb.SetReplyMode(ReplyMode::NONE);
-    stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, facade::ParsedArgs{backed_args});
+    stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     cmd_cntx.UpdateCid(cid);
-    cmd_cntx.SetTailArgs(facade::ParsedArgs{backed_args});
-    sf_.service().InvokeCmd(args_span, &cmd_cntx);
+    cmd_cntx.SetTailArgs(args);
+    sf_.service().InvokeCmd(args, &cmd_cntx);
   };
 
   for (unsigned i = 0; i < batch.sz; ++i) {

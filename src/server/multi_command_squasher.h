@@ -106,7 +106,6 @@ class MultiCommandSquasher {
   size_t num_shards_ = 0;
   size_t num_commands_ = 0;  // Total commands processed
 
-  std::vector<MutableSlice> tmp_keylist_;
   Stats stats_;
 };
 

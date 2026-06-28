@@ -32,10 +32,6 @@ struct CmdRef {
   bool IsValid() const {
     return cid != nullptr;
   }
-
-  facade::ArgSlice Slice(CmdArgVec* scratch) const {
-    return args.ToSlice(scratch);
-  }
 };
 
 // Stores command id and arguments for delayed invocation.
@@ -43,7 +39,8 @@ struct CmdRef {
 class StoredCmd {
  public:
   // Deep copy of args, creates backing storage internally.
-  StoredCmd(const CommandId* cid, ArgSlice args, facade::ReplyMode mode = facade::ReplyMode::FULL);
+  StoredCmd(const CommandId* cid, const facade::ParsedArgs& args,
+            facade::ReplyMode mode = facade::ReplyMode::FULL);
 
   // Moves args from src via swap. src's BackedArguments will be empty after this.
   // tail_index specifies how many leading args to skip (e.g., 1 to skip the command name).
@@ -58,7 +55,6 @@ class StoredCmd {
     return backed_ ? backed_->HeapMemory() + sizeof(*backed_) : 0;
   }
 
-  facade::ArgSlice Slice(CmdArgVec* scratch) const;
   const facade::ParsedArgs& Args() const {
     return args_;
   }
@@ -419,7 +415,7 @@ class CommandContext : public facade::ParsedCommand {
     return static_cast<ConnectionContext*>(conn_cntx_);
   }
 
-  void RecordLatency(facade::ArgSlice tail_args) const;
+  void RecordLatency(const facade::ParsedArgs& tail_args) const;
 
   facade::Connection* conn() const {
     return conn_cntx_->conn();
@@ -447,15 +443,11 @@ class CommandContext : public facade::ParsedCommand {
 
   uint64_t start_time_usec = 0;
 
-  // Stores backing array for tail args slice
-  CmdArgVec arg_slice_backing;
-
  protected:
   void ReuseInternal() final;
 
-  // Command arguments without the command name. Replaces arg_slice_backing as the
-  // canonical arg source once all handlers are migrated. Points into BackedArguments
-  // owned by this CommandContext (or StoredCmd for EXEC), so it survives async execution.
+  // Command arguments without the command name. Points into BackedArguments owned by this
+  // CommandContext (or StoredCmd for EXEC), so it survives async execution.
   facade::ParsedArgs tail_args_;
 
   Transaction* tx_ = nullptr;

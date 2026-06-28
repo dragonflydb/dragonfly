@@ -119,24 +119,23 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
     return SquashResult::NOT_SQUASHED;
   }
 
-  auto args = cmd.Slice(&tmp_keylist_);
-  if (args.empty())
+  if (cmd.args.empty())
     return SquashResult::NOT_SQUASHED;
 
   // Instead of returning an error, we treat command as non-squashable, allowing the
   // standalone execution path to handle it.
   // Validate returns an optional ErrorReply
-  if (cid.Validate(args).has_value())
+  if (cid.Validate(cmd.args).has_value())
     return SquashResult::NOT_SQUASHED;
 
-  auto keys = DetermineKeys(&cid, args);
+  auto keys = DetermineKeys(&cid, cmd.args);
   if (!keys.ok() || keys->NumArgs() == 0)
     return SquashResult::NOT_SQUASHED;
 
   // Check if all command keys belong to one shard
   ShardId last_sid = kInvalidSid;
 
-  for (string_view key : keys->Range(args)) {
+  for (string_view key : keys->Range(cmd.args)) {
     ShardId sid = Shard(key, shard_set->size());
     if (last_sid == kInvalidSid || last_sid == sid)
       last_sid = sid;
@@ -161,8 +160,6 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
 bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
-  auto args = cmd.Slice(&tmp_keylist_);
-
   // In pipeline mode the reply is captured and deferred into the parsed command, preserving
   // the reply order with squashed commands whose replies are sent later by the connection.
   optional<CapturingReplyBuilder> crb;
@@ -181,7 +178,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
   auto* tx = cntx_->transaction;
   if (cmd.cid->IsTransactional()) {
     tx->MultiSwitchCmd(cmd.cid);
-    auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
+    auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, cmd.args);
     if (status != OpStatus::OK) {
       rb->SendError(status);
       resolve();
@@ -192,7 +189,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
   CommandContext cmd_cntx{rb, cntx_};
   cmd_cntx.SetupTx(cmd.cid, tx);
   cmd_cntx.SetTailArgs(cmd.args);
-  service_->InvokeCmd(args, &cmd_cntx);
+  service_->InvokeCmd(cmd.args, &cmd_cntx);
   resolve();
 
   return true;
@@ -203,7 +200,6 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   DCHECK(!sinfo.dispatched.empty());
 
   CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
-  CmdArgVec arg_vec;
   CommandContext local_cntx{&crb, cntx_};
   local_cntx.SetupTx(nullptr, sinfo.local_tx.get());
 
@@ -219,7 +215,6 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
   for (auto& dispatched : sinfo.dispatched) {
     auto* ctx = &local_cntx;
-    auto args = dispatched.Slice(&arg_vec);
     crb.SetReplyMode(dispatched.reply_mode);
 
     // With tiered storage enabled, it makes sense to dispatch async commands concurrently
@@ -234,13 +229,13 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     ctx->SetupTx(dispatched.cid, local_cntx.tx());
     ctx->tx()->MultiSwitchCmd(dispatched.cid);
 
-    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
+    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args);
     if (status != OpStatus::OK) {
       ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
     } else {
       ctx->UpdateCid(dispatched.cid);
       ctx->SetTailArgs(dispatched.args);
-      service_->InvokeCmd(args, ctx);
+      service_->InvokeCmd(dispatched.args, ctx);
     }
 
     if (!do_async) {

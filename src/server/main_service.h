@@ -46,7 +46,7 @@ class Service : public facade::ServiceInterface {
                                  facade::ConnectionContext* cntx) final;
 
   // Check OOM and invoke command with args
-  facade::DispatchResult InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx);
+  facade::DispatchResult InvokeCmd(const facade::ParsedArgs& tail_args, CommandContext* cmd_cntx);
 
   // Verify command prepares execution in correct state.
   // It's usually called before command execution. Only for multi/exec transactions it's checked

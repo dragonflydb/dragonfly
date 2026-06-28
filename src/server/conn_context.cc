@@ -59,7 +59,7 @@ vector<string> FormatEvalSlowlog(const ConnectionState& state) {
 
 }  // namespace
 
-StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyMode mode)
+StoredCmd::StoredCmd(const CommandId* cid, const facade::ParsedArgs& args, facade::ReplyMode mode)
     : cid_{cid}, reply_mode_{mode} {
   backed_ = std::make_unique<cmn::BackedArguments>(args.begin(), args.end(), args.size());
   args_ = facade::ParsedArgs{*backed_};
@@ -71,10 +71,6 @@ StoredCmd::StoredCmd(const CommandId* cid, cmn::BackedArguments* src, uint8_t ta
   backed_ = std::make_unique<cmn::BackedArguments>();
   backed_->SwapArgs(*src);
   args_ = facade::ParsedArgs{*backed_, tail_index};
-}
-
-CmdArgList StoredCmd::Slice(CmdArgVec* scratch) const {
-  return args_.ToSlice(scratch);
 }
 
 std::string StoredCmd::FirstArg() const {
@@ -313,11 +309,10 @@ void CommandContext::ReuseInternal() {
   cid_ = nullptr;
   tx_ = nullptr;
   tail_args_ = {};
-  arg_slice_backing.clear();
   start_time_usec = 0;
 }
 
-void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
+void CommandContext::RecordLatency(const facade::ParsedArgs& tail_args) const {
   DCHECK_GT(start_time_usec, 0u);
   int64_t after = base::CycleClock::ToUsec(base::CycleClock::Now());
 
@@ -344,6 +339,7 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
 
   vector<string> aux_params;
   CmdArgVec aux_slice;
+  facade::ParsedArgs slowlog_args = tail_args;
 
   // Rewrite arguments for exec/eval with stats
   if (cid_->IsMultiTransactional()) {
@@ -351,16 +347,18 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
       aux_params = FormatExecSlowlog(cntx->conn_state);
     else if (cid_->IsEvalGroup())
       aux_params = FormatEvalSlowlog(cntx->conn_state);
+
     aux_slice = {aux_params.begin(), aux_params.end()};
     if (tail_args.size() > 0) {
+      facade::ParsedArgs args_suffix = tail_args;
       if (!aux_params.empty())
-        tail_args.remove_prefix(1);  // remove script/sha from eval/evalsha
-      aux_slice.insert(aux_slice.end(), tail_args.begin(), tail_args.end());
+        args_suffix = args_suffix.Tail(1);  // remove script/sha from eval/evalsha
+      aux_slice.insert(aux_slice.end(), args_suffix.begin(), args_suffix.end());
     }
-    tail_args = aux_slice;
+    slowlog_args = facade::ArgSlice{aux_slice};
   }
 
-  ServerState::SafeTLocal()->GetSlowLog().Add(cid_->name(), tail_args, conn->GetName(),
+  ServerState::SafeTLocal()->GetSlowLog().Add(cid_->name(), slowlog_args, conn->GetName(),
                                               conn->RemoteEndpointStr(), execution_time_usec,
                                               absl::GetCurrentTimeNanos() / 1000);
 }
