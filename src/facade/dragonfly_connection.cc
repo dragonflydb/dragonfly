@@ -457,11 +457,6 @@ void LogMemcacheTraffic(uint32_t id, bool has_more, const MemcacheParser::Comman
 
 constexpr size_t kMinReadSize = 256;
 
-// General heuristic upper bound, used in two different parse contexts: once to cap the pipeline
-// queue depth (MaybeParseAhead), and once to cap the number of commands parsed in a single
-// ParseRedis call (parse-in-proactor).
-constexpr uint32_t kParseMaxBatch = 256;
-
 const char* kPhaseName[Connection::NUM_PHASES] = {"SETUP", "READ", "PROCESS", "SHUTTING_DOWN",
                                                   "PRECLOSE"};
 
@@ -1279,8 +1274,7 @@ void Connection::ConnectionFlow() {
   if (io_buf_.InputLen() > 0) {
     phase_ = PROCESS;
     if (redis_parser_ && !ioloop_v2_) {
-      parse_status = ParseRedis(io_buf_, 10000, /*enqueue_only=*/false, /*allow_yield=*/true,
-                                /*max_parse=*/0);
+      parse_status = ParseRedis(io_buf_, 10000, /*enqueue_only=*/false, /*allow_yield=*/true);
     } else {
       parse_status = ParseLoop();
     }
@@ -1442,8 +1436,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
 }
 
 Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t max_busy_cycles,
-                                                bool enqueue_only, bool allow_yield,
-                                                uint32_t max_parse) {
+                                                bool enqueue_only, bool allow_yield) {
   DCHECK_GT(max_busy_cycles, 0u);
 
   uint32_t consumed = 0;
@@ -1467,7 +1460,6 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   // test fail.
   // TODO(kostas): follow up on this
   size_t total_consumed = 0;
-  uint32_t parsed_cmds = 0;  // commands parsed this call; capped by max_parse when non-zero
   do {
     bool stop_parsing = false;
     DCHECK(parsed_cmd_);
@@ -1500,10 +1492,6 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
       } else {
         DispatchSingle(has_more, dispatch_sync, dispatch_async);
       }
-
-      // Bound commands parsed per call (0 = unlimited). Unparsed bytes remain in io_buf_.
-      if ((max_parse != 0) && (++parsed_cmds >= max_parse))
-        stop_parsing = true;
     }
     if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
@@ -1522,7 +1510,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
     // we want to yield to allow AsyncFiber to actually execute on the pending pipeline.
     //
     // Note: if allow_yield == false, current context can't yield and won't respect max_busy_cycles.
-    // That is fine, since caller has option to bound parsing also by setting max_parse>0.
+    // That is fine - parse-in-proactor is the only such caller, and io_buf_'s size bounds its work.
     if (allow_yield && ThisFiber::GetRunningTimeCycles() > max_busy_cycles) {
       GetLocalConnStats().num_read_yields++;
 
@@ -1558,6 +1546,9 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
 }
 
 bool Connection::MaybeParseAhead() {
+  // Upper bound on the pipeline queue depth that MaybeParseAhead accumulates before it stops
+  // reading ahead and lets execution proceed.
+  constexpr uint32_t kParseMaxBatch = 256;
   if (!pending_input_ || (parsed_cmd_q_len_ <= 1) || recv_multishot_active_ ||
       (parsed_cmd_q_len_ >= kParseMaxBatch) || IsOverPipelineLimit())
     return false;
@@ -1764,7 +1755,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
 
     if (redis_parser_) {
       parse_status = ParseRedis(io_buf_, max_busy_read_cycles_cached, /*enqueue_only=*/false,
-                                /*allow_yield=*/true, /*max_parse=*/0);
+                                /*allow_yield=*/true);
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseLoop();
@@ -2670,8 +2661,7 @@ Connection::ParserStatus Connection::ParseRedisBatch(base::IoBuf& buf) {
   }
   // Forward ParseRedis's status verbatim (OK / NEED_MORE / ERROR) so a protocol error
   // propagates to ParseLoop instead of being flattened into "no commands parsed".
-  return ParseRedis(buf, max_busy_read_cycles_cached, /*enqueue_only=*/true, /*allow_yield=*/true,
-                    /*max_parse=*/0);
+  return ParseRedis(buf, max_busy_read_cycles_cached, /*enqueue_only=*/true, /*allow_yield=*/true);
 }
 
 Connection::ParserStatus Connection::ParseMCBatch(base::IoBuf& io_buf) {
@@ -3116,37 +3106,29 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
            << " pending_input=" << pending_input_;
   ProcessRecvNotification(n);
 
-  // Compact the buffer when it is full so that ReadPendingInput() has room to append new bytes.
-  // Compact() moves the unconsumed data to the front of the buffer (memmove). This is safe even
-  // when a parser is suspended and holds a pointer into io_buf_:
-  //   - FiberParkSpot::kSquashHop: the squash batch was already fixed before the hop, so the
-  //     dispatch is not reading io_buf_ at this point.
-  //   - FiberParkSpot::kParseYield: ParseRedis refreshes its local buffer pointer from
-  //     io_buf_.InputBuffer() right after waking up, so the move happens before it reads again.
-  if (io_buf_.AppendLen() == 0)
-    io_buf_.Compact();
+  if (!IsOverPipelineLimit()) {
+    // Drain the socket while the fiber is suspended (no-op when io_buf_ is full / no append room).
+    const size_t before = io_buf_.InputLen();
+    ReadPendingInput();
+    if (io_buf_.InputLen() > before)
+      ++GetLocalConnStats().proactor_reads;
 
-  // Drain the socket while the fiber is suspended.
-  const size_t before = io_buf_.InputLen();
-  ReadPendingInput();
-  if (io_buf_.InputLen() > before)
-    ++GetLocalConnStats().proactor_reads;
-
-  // Parse In Proactor : parse newly-read bytes now, while the fiber is parked in a squash hop, so
-  // the next batch is already larger on resume.
-  // This is safe since parser state is idle. allow_yield=false because callbacks must not suspend
-  // the proactor.
-  if (pipeline_parse_in_proactor_cached && (fiber_park_spot_ == FiberParkSpot::kSquashHop) &&
-      redis_parser_ && (io_buf_.InputLen() > 0) && !IsOverPipelineLimit()) {
-    size_t cmds_before = parsed_cmd_q_len_;
-    ParserStatus st = ParseRedis(io_buf_, max_busy_read_cycles_cached, /*enqueue_only=*/true,
-                                 /*allow_yield=*/false, /*max_parse=*/kParseMaxBatch);
-    // The recv callback cannot return a status. If parsing hit a protocol error, flag it so
-    // IoLoopV2 surfaces ParserStatus::ERROR and sends the protocol-error reply.
-    if (st == ERROR)
-      proactor_parse_error_ = true;
-    DVLOG(1) << CONN_ID << "Parse-in-proactor added " << (parsed_cmd_q_len_ - cmds_before)
-             << " commands, pq_len=" << parsed_cmd_q_len_;
+    // Parse In Proactor: parse newly-read bytes while the fiber is parked in a squash hop, so the
+    // next batch is already larger on resume.
+    // - This is safe because the parser is idle at kSquashHop.
+    // - allow_yield=false: callbacks must not suspend.
+    if (pipeline_parse_in_proactor_cached && (fiber_park_spot_ == FiberParkSpot::kSquashHop) &&
+        redis_parser_ && (io_buf_.InputLen() > 0)) {
+      size_t cmds_before = parsed_cmd_q_len_;
+      ParserStatus st = ParseRedis(io_buf_, max_busy_read_cycles_cached, /*enqueue_only=*/true,
+                                   /*allow_yield=*/false);
+      // The recv callback cannot return a status. If parsing hit a protocol error, flag it so
+      // IoLoopV2 surfaces ParserStatus::ERROR and sends the protocol-error reply.
+      if (st == ERROR)
+        proactor_parse_error_ = true;
+      DVLOG(1) << CONN_ID << "Parse-in-proactor added " << (parsed_cmd_q_len_ - cmds_before)
+               << " commands, pq_len=" << parsed_cmd_q_len_;
+    }
   }
 
   io_event_.notify();
