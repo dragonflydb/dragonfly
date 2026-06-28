@@ -480,15 +480,6 @@ class Connection : public util::Connection {
   // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
   ParserStatus ParseLoop();
 
-  // V2 parse-ahead helper, only called when pipeline_parse_ahead is on.
-  // Grows io_buf_ if at capacity, then attempts one non-blocking top-up read.
-  // Returns true if new bytes arrived and ParseLoop should re-parse.
-  bool MaybeParseAhead();
-
-  // Defer-variant predicate for parse-ahead (PR comment #3): true if ParseLoop should return
-  // without executing and let IoLoopV2's read path grow the batch from more socket data.
-  bool ShouldReadMore() const;
-
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
   // Returns true on successful execution, false on reply builder error.

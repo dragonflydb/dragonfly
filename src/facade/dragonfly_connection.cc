@@ -127,9 +127,10 @@ ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           " events to come for the connection in case there is only one command in the pipeline. ");
 
 ABSL_FLAG(
-    bool, pipeline_parse_ahead, true,
-    "V2 only: before executing a parsed pipeline batch, opportunistically read and parse "
-    "more already-available input so the squash sees one large batch instead of many small ones.");
+    bool, pipeline_prioritize_large_batches, true,
+    "V2 only: in ParseLoop, defer executing a parsed pipeline batch and return to the read loop "
+    "to accumulate more already-available input, so the squasher sees one large batch instead of "
+    "many small ones.");
 
 ABSL_FLAG(bool, pipeline_parse_in_proactor, true,
           "V2 only: parse newly-arrived bytes from the proactor OnRecv callback while the fiber "
@@ -548,7 +549,8 @@ ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
 thread_local uint32_t max_busy_read_cycles_cached = UINT32_MAX;
 thread_local bool always_flush_pipeline_cached = absl::GetFlag(FLAGS_always_flush_pipeline);
 thread_local uint32_t pipeline_squash_limit_cached = absl::GetFlag(FLAGS_pipeline_squash_limit);
-thread_local bool pipeline_parse_ahead_cached = absl::GetFlag(FLAGS_pipeline_parse_ahead);
+thread_local bool pipeline_prioritize_large_batches_cached =
+    absl::GetFlag(FLAGS_pipeline_prioritize_large_batches);
 thread_local bool pipeline_parse_in_proactor_cached =
     absl::GetFlag(FLAGS_pipeline_parse_in_proactor);
 
@@ -1545,49 +1547,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   return ERROR;
 }
 
-bool Connection::MaybeParseAhead() {
-  // Upper bound on the pipeline queue depth that MaybeParseAhead accumulates before it stops
-  // reading ahead and lets execution proceed.
-  constexpr uint32_t kParseMaxBatch = 256;
-  if (!pending_input_ || (parsed_cmd_q_len_ <= 1) || recv_multishot_active_ ||
-      (parsed_cmd_q_len_ >= kParseMaxBatch) || IsOverPipelineLimit())
-    return false;
-
-  // Grow the buffer if at capacity, so subsequent reads absorb larger batches.
-  // Only for real pipelines (>1); single-command connections use IoLoopV2's own grow path.
-  if (io_buf_.AppendLen() == 0) {
-    CheckIoBufCapacity(/*reached_capacity=*/true, &io_buf_);
-    // If growth hit max_client_iobuf_len, compact to reclaim the consumed prefix.
-    if (io_buf_.AppendLen() == 0)
-      io_buf_.Compact();
-    if (io_buf_.AppendLen() == 0)
-      return false;
-  }
-
-  const size_t before = io_buf_.InputLen();
-  ReadPendingInput();
-  return io_buf_.InputLen() > before;
-}
-
-bool Connection::ShouldReadMore() const {
-  // Defer-variant predicate (PR comment #3): true if ParseLoop should stop short of executing and
-  // return to IoLoopV2's read path to grow the batch from more socket data. Only worthwhile for a
-  // real pipeline (>1 queued) when more bytes are expected (pending_input_), and we are not in
-  // multishot mode nor over the backpressure limit. This is the negation of MaybeParseAhead's
-  // bail-out set; the kParseMaxBatch cap is dropped because the main loop's IsOverPipelineLimit
-  // gate bounds the queue instead.
-  return pending_input_ && (parsed_cmd_q_len_ > 1) && !recv_multishot_active_ &&
-         !IsOverPipelineLimit();
-}
-
 auto Connection::ParseLoop() -> ParserStatus {
-  // ===== PR comment #3 A/B benchmark toggle: flip this, recompile, compare. =====
-  // true  = defer variant (romange): on a parse-ahead opportunity, return WITHOUT executing so
-  //         IoLoopV2's single canonical read path tops up the buffer and re-enters ParseLoop.
-  // false = inline variant (original): MaybeParseAhead does one top-up read here and we re-parse
-  //         into the same batch via continue, before executing.
-  const bool defer_to_main_loop = true;
-
   auto parse_func =
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
 
@@ -1597,18 +1557,16 @@ auto Connection::ParseLoop() -> ParserStatus {
     DCHECK_GT(io_buf_.InputLen(), 0u);
     parse_status = (this->*parse_func)(io_buf_);
 
-    // V2 parse-ahead: grow the squash batch from bytes still arriving on the socket.
-    if (ioloop_v2_ && pipeline_parse_ahead_cached && (parse_status != ERROR)) {
-      if (defer_to_main_loop) {
-        // Defer execution; IoLoopV2's top reads more and calls ParseLoop again, accumulating into
-        // the same queue. ShouldReadMore() stops the deferral once the socket drains.
-        if (ShouldReadMore())
-          return parse_status;
-      } else if (MaybeParseAhead()) {
-        // Inline top-up read hit new bytes; re-parse into the same batch before executing.
-        continue;
-      }
-    }
+    // V2 large-batch prioritization (pipeline_prioritize_large_batches): when a real pipeline is
+    // forming (>1 queued) and more socket data is expected (pending_input_), return without
+    // executing so IoLoopV2's read path tops up the buffer and re-enters ParseLoop, accumulating
+    // into the same queue for one larger squash batch instead of many small ones. Self-terminates
+    // once the socket drains (pending_input_ clears), and bails in multishot mode or under pipeline
+    // backpressure (IsOverPipelineLimit also bounds queue growth).
+    if (ioloop_v2_ && pipeline_prioritize_large_batches_cached && (parse_status != ERROR) &&
+        pending_input_ && (parsed_cmd_q_len_ > 1) && !recv_multishot_active_ &&
+        !IsOverPipelineLimit())
+      return parse_status;
 
     // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
     // earlier replies in order before we report it.
@@ -1623,7 +1581,7 @@ auto Connection::ParseLoop() -> ParserStatus {
     if (parse_status == ERROR)
       return ERROR;
 
-    // Keep as is, see comment at loop's top.
+    // Loop again only if more input remains after a clean parse, otherwise return OK/NEED_MORE.
     if (parse_status != OK || io_buf_.InputLen() == 0)
       break;
   }
@@ -3066,15 +3024,15 @@ void Connection::UpdateFromFlags() {
   always_flush_pipeline_cached = GetFlag(FLAGS_always_flush_pipeline);
   pipeline_squash_limit_cached = GetFlag(FLAGS_pipeline_squash_limit);
   pipeline_wait_batch_usec = GetFlag(FLAGS_pipeline_wait_batch_usec);
-  pipeline_parse_ahead_cached = GetFlag(FLAGS_pipeline_parse_ahead);
+  pipeline_prioritize_large_batches_cached = GetFlag(FLAGS_pipeline_prioritize_large_batches);
   pipeline_parse_in_proactor_cached = GetFlag(FLAGS_pipeline_parse_in_proactor);
 }
 
 std::vector<std::string> Connection::GetMutableFlagNames() {
-  return base::GetFlagNames(FLAGS_pipeline_queue_limit, FLAGS_pipeline_buffer_limit,
-                            FLAGS_max_busy_read_usec, FLAGS_always_flush_pipeline,
-                            FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec,
-                            FLAGS_pipeline_parse_ahead, FLAGS_pipeline_parse_in_proactor);
+  return base::GetFlagNames(
+      FLAGS_pipeline_queue_limit, FLAGS_pipeline_buffer_limit, FLAGS_max_busy_read_usec,
+      FLAGS_always_flush_pipeline, FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec,
+      FLAGS_pipeline_prioritize_large_batches, FLAGS_pipeline_parse_in_proactor);
 }
 
 void Connection::GetRequestSizeHistogramThreadLocal(std::string* hist) {
