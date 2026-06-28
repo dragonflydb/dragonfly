@@ -1569,21 +1569,46 @@ bool Connection::MaybeParseAhead() {
   return io_buf_.InputLen() > before;
 }
 
+bool Connection::ShouldReadMore() const {
+  // Defer-variant predicate (PR comment #3): true if ParseLoop should stop short of executing and
+  // return to IoLoopV2's read path to grow the batch from more socket data. Only worthwhile for a
+  // real pipeline (>1 queued) when more bytes are expected (pending_input_), and we are not in
+  // multishot mode nor over the backpressure limit. This is the negation of MaybeParseAhead's
+  // bail-out set; the kParseMaxBatch cap is dropped because the main loop's IsOverPipelineLimit
+  // gate bounds the queue instead.
+  return pending_input_ && (parsed_cmd_q_len_ > 1) && !recv_multishot_active_ &&
+         !IsOverPipelineLimit();
+}
+
 auto Connection::ParseLoop() -> ParserStatus {
+  // ===== PR comment #3 A/B benchmark toggle: flip this, recompile, compare. =====
+  // true  = defer variant (romange): on a parse-ahead opportunity, return WITHOUT executing so
+  //         IoLoopV2's single canonical read path tops up the buffer and re-enters ParseLoop.
+  // false = inline variant (original): MaybeParseAhead does one top-up read here and we re-parse
+  //         into the same batch via continue, before executing.
+  const bool defer_to_main_loop = true;
+
   auto parse_func =
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
 
   ParserStatus parse_status = NEED_MORE;
 
-  // Why while(true)+continue: a parse-ahead hit must (unconditionally) re-enter parse without
-  // executing.
   while (true) {
     DCHECK_GT(io_buf_.InputLen(), 0u);
     parse_status = (this->*parse_func)(io_buf_);
 
-    // V2 parse-ahead: top-up the buffer and re-parse if new bytes arrived.
-    if (ioloop_v2_ && pipeline_parse_ahead_cached && (parse_status != ERROR) && MaybeParseAhead())
-      continue;
+    // V2 parse-ahead: grow the squash batch from bytes still arriving on the socket.
+    if (ioloop_v2_ && pipeline_parse_ahead_cached && (parse_status != ERROR)) {
+      if (defer_to_main_loop) {
+        // Defer execution; IoLoopV2's top reads more and calls ParseLoop again, accumulating into
+        // the same queue. ShouldReadMore() stops the deferral once the socket drains.
+        if (ShouldReadMore())
+          return parse_status;
+      } else if (MaybeParseAhead()) {
+        // Inline top-up read hit new bytes; re-parse into the same batch before executing.
+        continue;
+      }
+    }
 
     // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
     // earlier replies in order before we report it.

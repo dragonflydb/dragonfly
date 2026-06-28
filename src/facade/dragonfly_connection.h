@@ -485,6 +485,10 @@ class Connection : public util::Connection {
   // Returns true if new bytes arrived and ParseLoop should re-parse.
   bool MaybeParseAhead();
 
+  // Defer-variant predicate for parse-ahead (PR comment #3): true if ParseLoop should return
+  // without executing and let IoLoopV2's read path grow the batch from more socket data.
+  bool ShouldReadMore() const;
+
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
   // Returns true on successful execution, false on reply builder error.
