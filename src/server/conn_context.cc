@@ -128,7 +128,8 @@ void ConnectionContext::ChangeMonitor(bool start) {
 }
 
 void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, bool sharded,
-                                           CmdArgList args, facade::RedisReplyBuilder* rb) {
+                                           const facade::ParsedArgs& args,
+                                           facade::RedisReplyBuilder* rb) {
   vector<unsigned> result = ChangeSubscriptions(args, false, to_add, to_reply);
 
   if (to_reply) {
@@ -137,12 +138,13 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, bool shar
     const absl::Span<const string_view> action = sharded ? actionSharded : actionRegular;
     SinkReplyBuilder::ReplyScope scope{rb};
     for (size_t i = 0; i < result.size(); ++i) {
-      SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i], rb);
+      SendSubscriptionChangedResponse(action[to_add], args[i], result[i], rb);
     }
   }
 }
 
-void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply, CmdArgList args,
+void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply,
+                                            const facade::ParsedArgs& args,
                                             facade::RedisReplyBuilder* rb) {
   vector<unsigned> result = ChangeSubscriptions(args, true, to_add, to_reply);
 
@@ -154,7 +156,7 @@ void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply, CmdArgLi
 
     SinkReplyBuilder::ReplyScope scope{rb};
     for (size_t i = 0; i < result.size(); ++i) {
-      SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i], rb);
+      SendSubscriptionChangedResponse(action[to_add], args[i], result[i], rb);
     }
   }
 }
@@ -226,7 +228,7 @@ void ConnectionContext::Unsubscribe(std::string_view channel) {
   }
 }
 
-vector<unsigned> ConnectionContext::ChangeSubscriptions(CmdArgList channels, bool pattern,
+vector<unsigned> ConnectionContext::ChangeSubscriptions(facade::ParsedArgs channels, bool pattern,
                                                         bool to_add, bool to_reply) {
   vector<unsigned> result(to_reply ? channels.size() : 0, 0);
 

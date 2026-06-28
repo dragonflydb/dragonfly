@@ -1874,7 +1874,7 @@ absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
   return unknown_cmds_;
 }
 
-void Service::Quit(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Quit(CmdArgParser, CommandContext* cmd_cntx) {
   if (cmd_cntx->rb()->GetProtocol() == Protocol::REDIS)
     cmd_cntx->rb()->SendOk();
 
@@ -1883,7 +1883,7 @@ void Service::Quit(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->conn()->MarkForClose();
 }
 
-void Service::Multi(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Multi(CmdArgParser, CommandContext* cmd_cntx) {
   auto& conn_state = cmd_cntx->server_conn_cntx()->conn_state;
   if (conn_state.exec_info.IsCollecting()) {
     return cmd_cntx->SendError("MULTI calls can not be nested");
@@ -1893,7 +1893,7 @@ void Service::Multi(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendOk();
 }
 
-void Service::Watch(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Watch(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& exec_info = cntx->conn_state.exec_info;
 
@@ -1918,14 +1918,14 @@ void Service::Watch(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
-  for (string_view key : args) {
+  for (string_view key : parser.UnparsedArgs()) {
     exec_info.watched_keys.emplace_back(cntx->db_index(), key);
   }
 
   return cmd_cntx->rb()->SendOk();
 }
 
-void Service::Unwatch(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Unwatch(CmdArgParser, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   UnwatchAllKeys(cntx->ns, &cntx->conn_state.exec_info);
   return cmd_cntx->rb()->SendOk();
@@ -2348,7 +2348,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   }
 }
 
-void Service::Discard(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Discard(CmdArgParser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   auto* cntx = cmd_cntx->server_conn_cntx();
   if (!cntx->conn_state.exec_info.IsCollecting()) {
@@ -2428,7 +2428,7 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
   return out;
 }
 
-void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& exec_info = cntx->conn_state.exec_info;
@@ -2545,73 +2545,75 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   // Dispatch at the end manually to have (MULTI, cmds..., EXEC) order
   if (!ServerState::tlocal()->Monitors().Empty()) {
     LOG_IF(DFATAL, exec_cid_->opt_mask() & CO::ADMIN) << "EXEC should be non admin command";
-    DispatchMonitor(cntx, exec_cid_, args);
+    DispatchMonitor(cntx, exec_cid_, {});
   }
 
   VLOG(2) << "Exec completed";
 }
 
-void Service::Publish(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Publish(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool sharded = cmd_cntx->cid()->IsShardedPubSub();
   if (!sharded && IsClusterEnabled())
     return cmd_cntx->SendError("PUBLISH is not supported in cluster mode yet");
 
-  string_view channel = ArgS(args, 0);
-  string_view messages[] = {ArgS(args, 1)};
+  string_view channel = parser.Next();
+  string_view messages[] = {parser.Next()};
 
   cmd_cntx->SendLong(channel_store->SendMessages(channel, messages, sharded));
 }
 
-void Service::Subscribe(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Subscribe(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool sharded = cmd_cntx->cid()->IsShardedPubSub();
   if (!sharded && IsClusterEnabled())
     return cmd_cntx->SendError("SUBSCRIBE is not supported in cluster mode yet");
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
-  conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, sharded, args, rb);
+  conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, sharded, parser.UnparsedArgs(), rb);
 }
 
-void Service::Unsubscribe(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Unsubscribe(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool sharded = cmd_cntx->cid()->IsShardedPubSub();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
   if (!sharded && IsClusterEnabled())
     return rb->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
 
-  if (args.size() == 0) {
+  ParsedArgs channels = parser.UnparsedArgs();
+  if (channels.empty()) {
     conn_cntx->UnsubscribeAll(true, rb);
   } else {
-    conn_cntx->ChangeSubscription(false, true, sharded, args, rb);
+    conn_cntx->ChangeSubscription(false, true, sharded, channels, rb);
   }
 }
 
-void Service::PSubscribe(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::PSubscribe(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (IsClusterEnabled()) {
     return rb->SendError("PSUBSCRIBE is not supported in cluster mode yet");
   }
-  cmd_cntx->server_conn_cntx()->ChangePSubscription(true, true, args, rb);
+  cmd_cntx->server_conn_cntx()->ChangePSubscription(true, true, parser.UnparsedArgs(), rb);
 }
 
-void Service::PUnsubscribe(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::PUnsubscribe(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (IsClusterEnabled()) {
     return rb->SendError("PUNSUBSCRIBE is not supported in cluster mode yet");
   }
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
-  if (args.size() == 0) {
+  ParsedArgs patterns = parser.UnparsedArgs();
+  if (patterns.empty()) {
     conn_cntx->PUnsubscribeAll(true, rb);
   } else {
-    conn_cntx->ChangePSubscription(false, true, args, rb);
+    conn_cntx->ChangePSubscription(false, true, patterns, rb);
   }
 }
 
 // Not a real implementation. Serves as a decorator to accept some function commands
 // for testing.
-void Service::Function(CmdArgList args, CommandContext* cmd_cntx) {
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+void Service::Function(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next());
 
   if (sub_cmd == "FLUSH") {
     return cmd_cntx->rb()->SendOk();
@@ -2631,16 +2633,16 @@ void Service::PubsubPatterns(SinkReplyBuilder* builder) {
   builder->SendLong(pattern_count);
 }
 
-void Service::PubsubNumSub(CmdArgList args, SinkReplyBuilder* builder) {
+void Service::PubsubNumSub(ParsedArgs channels, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->StartArray(args.size() * 2);
-  for (string_view channel : args) {
+  rb->StartArray(channels.size() * 2);
+  for (string_view channel : channels) {
     rb->SendBulkString(channel);
     rb->SendLong(channel_store->FetchSubscribers(channel).size());
   }
 }
 
-void Service::Monitor(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Monitor(CmdArgParser, CommandContext* cmd_cntx) {
   VLOG(1) << "starting monitor on this connection: "
           << cmd_cntx->server_conn_cntx()->conn()->GetClientId();
   // we are registering the current connection for all threads so they will be aware of
@@ -2649,15 +2651,15 @@ void Service::Monitor(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->server_conn_cntx()->ChangeMonitor(true /* start */);
 }
 
-void Service::Pubsub(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Pubsub(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (args.size() < 1) {
+  if (!parser.HasNext()) {
     rb->SendError(WrongNumArgsError(cmd_cntx->cid()->name()));
     return;
   }
 
-  string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  string subcmd = absl::AsciiStrToUpper(parser.Next());
 
   if (subcmd == "HELP") {
     string_view help_arr[] = {
@@ -2689,22 +2691,18 @@ void Service::Pubsub(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (subcmd == "CHANNELS" || subcmd == "SHARDCHANNELS") {
-    string_view pattern;
-    if (args.size() > 1) {
-      pattern = ArgS(args, 1);
-    }
+    string_view pattern = parser.NextOrDefault();
     PubsubChannels(pattern, rb);
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(rb);
   } else if (subcmd == "NUMSUB" || subcmd == "SHARDNUMSUB") {
-    args.remove_prefix(1);
-    PubsubNumSub(args, rb);
+    PubsubNumSub(parser.UnparsedArgs(), rb);
   } else {
     rb->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
   }
 }
 
-void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
+void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
   unsigned cmd_cnt = 0;
   registry_.Traverse([&](string_view name, const CommandId& cd) {
     if ((cd.opt_mask() & CO::HIDDEN) == 0) {
@@ -2743,7 +2741,7 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   // If no arguments are specified, reply with all commands
-  if (args.empty()) {
+  if (!parser.HasNext()) {
     rb->StartArray(cmd_cnt);
     registry_.Traverse([&](string_view name, const CommandId& cid) {
       if (cid.opt_mask() & CO::HIDDEN)
@@ -2753,18 +2751,16 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  string subcmd = absl::AsciiStrToUpper(parser.Next());
 
   // COUNT
   if (subcmd == "COUNT") {
     return rb->SendLong(cmd_cnt);
   }
 
-  bool sufficient_args = (args.size() == 2);
-
   // INFO [cmd]
-  if (subcmd == "INFO" && sufficient_args) {
-    string cmd = absl::AsciiStrToUpper(ArgS(args, 1));
+  if (subcmd == "INFO" && parser.HasNext()) {
+    string cmd = absl::AsciiStrToUpper(parser.Next());
 
     if (const auto* cid = registry_.Find(cmd); cid) {
       rb->StartArray(1);
@@ -2776,14 +2772,13 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  sufficient_args = (args.size() == 1);
-  if (subcmd == "DOCS" && sufficient_args) {
+  if (subcmd == "DOCS" && !parser.HasNext()) {
     // Returning an error here forces the interactive CLI client to fall back to static hints and
     // tab completion
     return rb->SendError("COMMAND DOCS Not Implemented");
   }
 
-  if (subcmd == "HELP" && sufficient_args) {
+  if (subcmd == "HELP" && !parser.HasNext()) {
     // Return help information for supported COMMAND subcommands
     constexpr string_view help[] = {
         "(no subcommand)",
@@ -2941,8 +2936,12 @@ Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) co
 }
 
 #define HFUNC(x) SetHandler(&Service::x)
-#define MFUNC(x) \
+#define MFUNC_OLD(x) \
   SetHandler([this](CmdArgList sp, CommandContext* cntx) { this->x(std::move(sp), cntx); })
+
+#define MFUNC(x) \
+  SetHandler(    \
+      [this](CmdArgList, CommandContext* cntx) { this->x(MakeParserFromContext(cntx), cntx); })
 
 namespace acl {
 constexpr uint32_t kQuit = FAST | CONNECTION;
@@ -2976,17 +2975,17 @@ void Service::Register(CommandRegistry* registry) {
       << CI{"UNWATCH", CO::LOADING, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
       << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDiscard}.MFUNC(Discard)
       << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEval}
-             .MFUNC(Eval)
+             .MFUNC_OLD(Eval)
              .SetValidator(&EvalValidator)
       << CI{"EVAL_RO", CO::NOSCRIPT | CO::READONLY | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEvalRo}
-             .MFUNC(EvalRo)
+             .MFUNC_OLD(EvalRo)
              .SetValidator(&EvalValidator)
       << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEvalSha}
-             .MFUNC(EvalSha)
+             .MFUNC_OLD(EvalSha)
              .SetValidator(&EvalValidator)
       << CI{"EVALSHA_RO",   CO::NOSCRIPT | CO::READONLY | CO::VARIADIC_KEYS, -3, 3, 3,
             acl::kEvalShaRo}
-             .MFUNC(EvalShaRo)
+             .MFUNC_OLD(EvalShaRo)
              .SetValidator(&EvalValidator)
       << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, acl::kExec}.MFUNC(Exec)
       << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(Publish)
