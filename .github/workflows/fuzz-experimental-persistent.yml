@@ -69,7 +69,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -109,7 +109,7 @@ jobs:
       - name: Restore experimental AFL state
         id: restore-afl-state
         if: env.RESET_STATE != 'true'
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         continue-on-error: true
         with:
           path: |
@@ -126,7 +126,7 @@ jobs:
       - name: Find previous experimental AFL state artifact
         id: previous-state
         if: env.RESET_STATE != 'true' && steps.restore-afl-state.outputs.cache-hit != 'true' && steps.restore-afl-state.outputs.cache-matched-key == ''
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           ARTIFACT_NAME: fuzz-experimental-persistent-${{ matrix.target }}-state
         with:
@@ -469,7 +469,7 @@ jobs:
 
       - name: Save experimental AFL state
         if: always() && steps.run-fuzzer.outputs.started == 'true' && steps.cache-size.outputs.save_cache == 'true'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         continue-on-error: true
         with:
           path: |

@@ -30,7 +30,7 @@ jobs:
         - /:/hostroot
         - /mnt:/mnt
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -76,5 +76,5 @@ jobs:
     if: github.repository == 'dragonflydb/dragonfly'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/lint-test-chart
