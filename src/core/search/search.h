@@ -101,9 +101,18 @@ struct SchemaField {
   };
 
   struct TextParams {
+    // Sanity cap mirroring VectorParams::kMaxHnswEpsilon: rejects absurd weights so the schema
+    // weight folded into the effective term frequency cannot overflow BM25 to inf/NaN.
+    static constexpr double kMaxWeight = 1e6;
+
+    static bool IsValidWeight(double weight) {
+      return weight >= 0 && weight <= kMaxWeight && std::isfinite(weight);
+    }
+
     // if enabled, suffix trie is build for efficient suffix and infix queries
     bool with_suffixtrie = false;
     bool no_stem = false;
+    double weight = 1.0;
   };
 
   struct NumericParams {

@@ -222,7 +222,7 @@ knn_attr:
   | WEIGHT COLON vec_range_radius
     {
       double weight = $3;
-      if (!(weight >= 0) || !std::isfinite(weight))
+      if (!SchemaField::TextParams::IsValidWeight(weight))
         YYABORT;
       $$ = KnnAttributes{};
       $$.weight = weight;
@@ -307,7 +307,7 @@ vector_range_attr:
   | WEIGHT COLON vec_range_radius
     {
       double weight = $3;
-      if (!(weight >= 0) || !std::isfinite(weight))
+      if (!SchemaField::TextParams::IsValidWeight(weight))
         YYABORT;
       $$ = VectorRangeAttributes{};
       $$.weight = weight;
@@ -342,7 +342,7 @@ text_attr:
   WEIGHT COLON vec_range_radius
     {
       double weight = $3;
-      if (!(weight >= 0) || !std::isfinite(weight))
+      if (!SchemaField::TextParams::IsValidWeight(weight))
         YYABORT;
       $$ = TextAttributes{};
       $$.weight = weight;

@@ -246,14 +246,17 @@ struct BasicSearch {
     sub_results.reserve(indices.size());
     for (auto* index : indices) {
       IndexResult per_index{};
-      auto term_cb = [&per_index, this, index](string_view term, const auto* container) {
+      absl::flat_hash_set<string> scored_terms;
+      auto term_cb = [&per_index, &scored_terms, this, index](string_view term,
+                                                              const auto* container) {
         if (scorer_) {
           std::string resolved{term};
           if (auto synonyms = indices_->GetSynonyms(); synonyms) {
             if (auto group_id = synonyms->GetGroupToken(resolved); group_id)
               resolved = std::move(*group_id);
           }
-          AddMatchedTerm(index, std::move(resolved));
+          if (scored_terms.insert(resolved).second)
+            AddMatchedTerm(index, std::move(resolved));
         }
         Merge(IndexResult{container}, &per_index, LogicOp::OR);
       };
@@ -499,6 +502,9 @@ struct BasicSearch {
   }
 
   IndexResult Search(const AstAttributeNode& node, string_view active_field) {
+    double previous_weight = current_weight_;
+    current_weight_ *= node.weight;
+    absl::Cleanup restore_weight = [&] { current_weight_ = previous_weight; };
     return SearchGeneric(*node.node, active_field);
   }
 
@@ -712,6 +718,8 @@ struct BasicSearch {
     TextIndex* index;
     size_t term_docs;
     double field_avg_doc_len;  // pre-resolved (global or local)
+    double query_weight;       // post-hoc scalar (query-time $weight)
+    double field_weight;       // folded into effective TF (schema TEXT WEIGHT)
     TextIndex::Container::BlockListIterator it;
     TextIndex::Container::BlockListIterator end;
   };
@@ -739,16 +747,18 @@ struct BasicSearch {
     // Open cursors on posting lists for each matched term.
     vector<TermCursor> cursors;
     cursors.reserve(matched_text_terms_.size());
-    for (const auto& [index, term] : matched_text_terms_) {
-      auto* container = index->Matching(term, /*strip_whitespace=*/false);
+    for (const auto& matched : matched_text_terms_) {
+      auto* index = matched.index;
+      auto* container = index->Matching(matched.term, /*strip_whitespace=*/false);
       if (!container)
         continue;
       string_view field_ident = index->field_ident();
       size_t term_docs =
-          global_stats_ ? global_stats_->GetTermDocs(field_ident, term) : container->Size();
+          global_stats_ ? global_stats_->GetTermDocs(field_ident, matched.term) : container->Size();
       double avg = global_stats_ ? global_stats_->GetFieldAvgDocLen(field_ident)
                                  : index->GetFieldAvgDocLen();
-      cursors.push_back({index, term_docs, avg, container->begin(), container->end()});
+      cursors.push_back({index, term_docs, avg, matched.weight, GetSchemaTextWeight(index),
+                         container->begin(), container->end()});
     }
 
     ScoringContext ctx{global_stats_ ? global_stats_->num_docs : indices_->GetAllDocs().size()};
@@ -769,6 +779,8 @@ struct BasicSearch {
           term_infos[t].field_doc_len = cursors[t].index->GetFieldDocLength(doc);
           term_infos[t].field_avg_doc_len = cursors[t].field_avg_doc_len;
         }
+        term_infos[t].query_weight = cursors[t].query_weight;
+        term_infos[t].field_weight = cursors[t].field_weight;
       }
       float score = static_cast<float>(ScoreDocument(*scorer_, ctx, term_infos));
       max_text_score = max(max_text_score, score);
@@ -795,14 +807,28 @@ struct BasicSearch {
     return std::make_tuple(std::move(out), total_size, std::move(text_scores), max_text_score);
   }
 
+  double GetSchemaTextWeight(TextIndex* index) const {
+    string_view field_ident = index->field_ident();
+    auto it = indices_->GetSchema().fields.find(field_ident);
+    if (it == indices_->GetSchema().fields.end() || it->second.type != SchemaField::TEXT)
+      return 1.0;
+    return std::get<SchemaField::TextParams>(it->second.special_params).weight;
+  }
+
   void AddMatchedTerm(TextIndex* index, string term) {
-    if (matched_terms_set_.emplace(index, term).second)
-      matched_text_terms_.emplace_back(index, std::move(term));
+    auto [it, inserted] =
+        matched_terms_index_.try_emplace(std::make_pair(index, term), matched_text_terms_.size());
+    if (inserted) {
+      matched_text_terms_.push_back({index, std::move(term), current_weight_});
+    } else {
+      matched_text_terms_[it->second].weight += current_weight_;
+    }
   }
 
   const FieldIndices* indices_;
   optional<ScorerSpec> scorer_;
   const GlobalScoringStats* global_stats_ = nullptr;
+  double current_weight_ = 1.0;
 
   string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
@@ -810,11 +836,16 @@ struct BasicSearch {
   absl::flat_hash_map<DocId, float> knn_scores_;
   vector<pair<float, DocId>> knn_distances_;
 
-  // Tracked text terms for scoring: (TextIndex*, normalized_term)
-  // Deduplicated via matched_terms_set_ to avoid double-counting synonyms resolved to same
-  // group_id.
-  vector<pair<TextIndex*, string>> matched_text_terms_;
-  absl::flat_hash_set<pair<TextIndex*, string>> matched_terms_set_;
+  struct MatchedTextTerm {
+    TextIndex* index;
+    string term;
+    double weight;
+  };
+
+  // Tracked text terms for scoring. Repeated query occurrences accumulate weight per
+  // (TextIndex*, term); individual expansion sites still dedupe their own synonym aliases.
+  vector<MatchedTextTerm> matched_text_terms_;
+  absl::flat_hash_map<pair<TextIndex*, string>, size_t> matched_terms_index_;
 };
 
 #ifndef __clang__
