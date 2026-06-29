@@ -258,30 +258,30 @@ class ServerFamily {
   }
 
   void Auth(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Client(CmdArgList args, CommandContext* cmd_cntx);
+  void Client(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Config(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void DbSize(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Debug(CmdArgList args, CommandContext* cmd_cntx);
+  void Debug(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Dfly(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Memory(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void FlushDb(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Info(facade::CmdArgParser parser, CommandContext* cmd_cntx)
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void Hello(CmdArgList args, CommandContext* cmd_cntx);
+  void Hello(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void LastSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Latency(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void ReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
-  void AddReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
+  void ReplicaOf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void AddReplicaOf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx)
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void ReplConf(CmdArgList args, CommandContext* cmd_cntx);
+  void ReplConf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Role(facade::CmdArgParser parser, CommandContext* cmd_cntx)
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void Save(CmdArgList args, CommandContext* cmd_cntx);
-  void BgSave(CmdArgList args, CommandContext* cmd_cntx);
+  void Save(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void BgSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Script(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void SlowLog(CmdArgList args, CommandContext* cmd_cntx);
+  void SlowLog(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Module(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
@@ -292,7 +292,7 @@ class ServerFamily {
                            // failure
   };
 
-  void ReplicaOfInternal(CmdArgList args, CommandContext* cmnd_cntx,
+  void ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmnd_cntx,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void StartJournalInShardThreads(Replica* repl_ptr);
@@ -315,7 +315,7 @@ class ServerFamily {
 
   void SendInvalidationMessages() const;
 
-  std::optional<SaveCmdOptions> GetSaveCmdOpts(CmdArgList args, CommandContext* cmd_cntx);
+  std::optional<SaveCmdOptions> GetSaveCmdOpts(facade::ParsedArgs args, CommandContext* cmd_cntx);
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
@@ -334,7 +334,7 @@ class ServerFamily {
   static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
 
   void ClientPauseCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void ClientUnPauseCmd(CmdArgList args, CommandContext* cmd_cntx);
+  void ClientUnPauseCmd(facade::ParsedArgs args, CommandContext* cmd_cntx);
 
   // Set accepting_connections_ and update listners according to it
   void ChangeConnectionAccept(bool accept);

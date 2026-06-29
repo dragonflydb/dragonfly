@@ -612,7 +612,9 @@ DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionCo
     : sf_(*owner), cf_(*cf), cntx_(cntx) {
 }
 
-void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
+void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  CmdArgVec scratch;
+  CmdArgList args = parser.UnparsedArgs().ToSlice(&scratch);
   string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
   if (subcmd == "HELP") {
     string_view help_arr[] = {
