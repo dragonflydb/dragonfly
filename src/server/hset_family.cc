@@ -49,8 +49,11 @@ using IncrByParam = std::variant<double, int64_t>;
 using OptStr = std::optional<std::string>;
 enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
 
+constexpr char kNumFieldsMismatch[] =
+    "The `numfields` parameter must match the number of arguments";
+
 // TODO: replace all the listpack code with our detail::Listpack wrapper.
-bool IsGoodForListpack(const ParsedArgs& args, const uint8_t* lp) {
+bool IsGoodForListpack(CmdArgParser::Range args, const uint8_t* lp) {
   DCHECK_GE(args.size(), 2u);
 
   // For a single field-value pair on an empty or single-entry listpack, approve automatically
@@ -308,7 +311,7 @@ auto ExecuteW(Transaction* tx, F&& f,
   return Unwrap(tx->ScheduleSingleHopT(std::move(shard_cb)));
 }
 
-size_t EstimateListpackMinBytes(const ParsedArgs& members) {
+size_t EstimateListpackMinBytes(CmdArgParser::Range members) {
   size_t bytes = 0;
   for (const auto& member : members) {
     bytes += (member.size() + 1);  // string + at least 1 byte for string header.
@@ -516,7 +519,7 @@ uint32_t SetReply(const OpSetParams& op_sp, uint32_t created) {
 }
 
 OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
-                                    const ParsedArgs& values,
+                                    CmdArgParser::Range values,
                                     const OpSetParams& op_sp = OpSetParams{}) {
   DCHECK(!values.empty() && 0 == values.size() % 2);
   VLOG(2) << "OpSet(" << key << ")";
@@ -656,7 +659,7 @@ void HGetGeneric(uint8_t getall_mask, CommandContext* cmd_cntx) {
 }
 
 OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
-                                 ExpireFlags flags, const ParsedArgs& values) {
+                                 ExpireFlags flags, facade::CmdArgParser::Range values) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(op_res);
@@ -684,7 +687,7 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
 //   fnx=false (FXX): holds only if ALL of the fields exist.
 // A missing key counts as "no fields exist".
 OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key,
-                                    const ParsedArgs& fields, bool fnx) {
+                                    CmdArgParser::Range fields, bool fnx) {
   auto& db_slice = op_args.GetDbSlice();
   auto res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
   if (!res) {
@@ -713,7 +716,7 @@ OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key,
 
 struct HSetExParams {
   OpSetParams op_sp;
-  ParsedArgs fields;  // field/value pairs; valid only when the parser has no error.
+  CmdArgParser::Range fields;  // field/value pairs; valid only when the parser has no error.
 };
 
 // Parses HSETEX arguments after the key, reporting any error into `parser` (surfaced by the caller
@@ -765,13 +768,11 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
   // once errored, so the steps below need no per-step checks.
   if (parser->Check("FIELDS")) {
     op_sp.format = Format::kRedis;
-    uint32_t numfields = parser->Next<uint32_t>();
+    res.fields = parser->NextRange(2, kNumFieldsMismatch);  // numfields field/value pairs
+    if (parser->HasNext())
+      parser->ReportCustom(kNumFieldsMismatch);  // extra trailing args
     if (op_sp.mode == Mode::kNX || (op_sp.keepttl && has_exp))
       parser->Report(CmdArgParser::CUSTOM_ERROR);  // NX is Dragonfly-only; one expiry option max
-
-    res.fields = parser->UnparsedArgs();
-    if (numfields == 0 || res.fields.size() != size_t(numfields) * 2)
-      parser->ReportCustom("The `numfields` parameter must match the number of arguments");
   } else if (has_exp) {
     // EX/PX/EXAT/PXAT belong to the Redis form; without FIELDS the command is malformed.
     parser->Report(CmdArgParser::CUSTOM_ERROR);
@@ -779,7 +780,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
     op_sp.format = Format::kDragonfly;
     op_sp.ttl = parser->Next<FInt<1, kMaxTtl>>();
 
-    res.fields = parser->UnparsedArgs();
+    res.fields = parser->RemainingRange();
     if (res.fields.empty() || res.fields.size() % 2 != 0)
       parser->ReportCustom(WrongNumArgsError(cmd_name));
   }
@@ -864,14 +865,9 @@ void CmdHExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
                                kSyntaxErrType);
   }
 
-  uint32_t numFields = parser.Next<uint32_t>();
-
-  ParsedArgs fields = parser.UnparsedArgs();
-  if (fields.size() != numFields) {
-    return rb->SendError("The `numfields` parameter must match the number of arguments",
-                         kSyntaxErrType);
-  }
-
+  CmdArgParser::Range fields = parser.NextRange(1, kNumFieldsMismatch);
+  if (parser.HasNext())  // extra trailing args
+    parser.ReportCustom(kNumFieldsMismatch);
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -883,7 +879,7 @@ void CmdHExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
     case OpStatus::OK:
       return rb->SendLongArr(absl::MakeConstSpan(result.value()));
     case OpStatus::KEY_NOTFOUND:
-      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(numFields, -2)));
+      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(fields.size(), -2)));
     default:
       return cmd_cntx->SendError(result.status());
   };
@@ -929,8 +925,6 @@ OpResult<vector<int64_t>> OpHExpireTime(Transaction* t, EngineShard* shard, stri
   return res;
 }
 
-// Shared handler for HTTL and HPEXPIRETIME; the per-field value format differs via kOut. A missing
-// key replies with -2 for every requested field.
 template <FieldExpireOutput kOut>
 void HExpireTimeGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
@@ -943,8 +937,7 @@ void HExpireTimeGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   if (fields.size() != numFields) {
-    return rb->SendError("The `numfields` parameter must match the number of arguments",
-                         kSyntaxErrType);
+    return rb->SendError(kNumFieldsMismatch, kSyntaxErrType);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1293,7 +1286,7 @@ void CmdHSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   optional<util::fb2::Future<bool>> tiered_backpressure;
   OpSetParams params{.backpressure = &tiered_backpressure};
 
-  ParsedArgs values = parser.UnparsedArgs();
+  CmdArgParser::Range values = parser.RemainingRange();
   auto cb = [&, values](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, values, params);
   };
@@ -1314,7 +1307,7 @@ void CmdHSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdHSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
-  ParsedArgs values = parser.UnparsedArgs();
+  CmdArgParser::Range values = parser.RemainingRange();
   auto cb = [&, values](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, values, OpSetParams{.mode = OpSetParams::Mode::kNX});
   };
@@ -1601,7 +1594,8 @@ bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std:
 // 0 if the specified NX | XX | GT | LT condition has not been met.
 // 1 if the expiration time was set/updated.
 // 2 when HEXPIRE/HPEXPIRE is called with 0 seconds and the field is deleted.
-static std::vector<long> UpdateTTL(ParsedArgs values, uint32_t ttl_sec, ExpireFlags flags,
+template <class FieldList>
+static std::vector<long> UpdateTTL(FieldList values, uint32_t ttl_sec, ExpireFlags flags,
                                    StringMap* owner) {
   std::vector<long> res;
   res.reserve(values.size());
@@ -1653,9 +1647,10 @@ static std::vector<long> UpdateTTL(ParsedArgs values, uint32_t ttl_sec, ExpireFl
   return res;
 }
 
+template <class FieldList>
 vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                             ExpireFlags flags, string_view key,
-                                             const ParsedArgs& fields, PrimeValue* pv) {
+                                             ExpireFlags flags, string_view key, FieldList fields,
+                                             PrimeValue* pv) {
   DCHECK_EQ(OBJ_HASH, pv->ObjType());
   // values contains field names — collect them for HNSW field data preservation.
   absl::InlinedVector<std::string_view, 4> field_names(fields.begin(), fields.end());
@@ -1674,5 +1669,11 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
   return res;
 }
+
+template vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs&, uint32_t, ExpireFlags,
+                                                      string_view, facade::ParsedArgs, PrimeValue*);
+template vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs&, uint32_t, ExpireFlags,
+                                                      string_view, facade::CmdArgParser::Range,
+                                                      PrimeValue*);
 
 }  // namespace dfly

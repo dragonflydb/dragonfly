@@ -520,6 +520,42 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
   }
 }
 
+TEST_F(CmdArgParserTest, RangeList) {
+  // [count, e1..eN] -> iterable view; default element type is string_view.
+  {
+    auto parser = Make({"2", "a", "b", "TAIL"});
+    auto fields = parser.NextRange();
+    EXPECT_EQ(fields.size(), 2u);
+    EXPECT_THAT(std::vector<string_view>(fields.begin(), fields.end()), ElementsAre("a", "b"));
+    EXPECT_FALSE(parser.HasError());
+    EXPECT_EQ(parser.Peek(), "TAIL");  // leftover preserved
+  }
+  // count == 0 -> validated as an error in the parser.
+  {
+    auto parser = Make({"0", "x"});
+    auto fields = parser.NextRange();
+    EXPECT_TRUE(fields.empty());
+    EXPECT_TRUE(parser.TakeError());
+  }
+  // Not enough args -> count/args mismatch (INVALID_CASES, not a bounds error).
+  {
+    auto parser = Make({"2", "a"});
+    auto fields = parser.NextRange();
+    EXPECT_TRUE(fields.empty());
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
+  }
+  // RemainingRange: all remaining args, no leading count.
+  {
+    auto parser = Make({"a", "b", "c"});
+    auto rest = parser.RemainingRange();
+    EXPECT_EQ(rest.size(), 3u);
+    EXPECT_THAT(std::vector<string_view>(rest.begin(), rest.end()), ElementsAre("a", "b", "c"));
+    EXPECT_FALSE(parser.HasNext());
+  }
+}
+
 TEST_F(CmdArgParserTest, BackedArguments) {
   cmn::BackedArguments bargs;
   string_view args[] = {"SET", "mykey", "42", "EX", "100"};

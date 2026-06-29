@@ -29,6 +29,8 @@ namespace facade {
 //   auto f  = parser.Next<FInt<1, 99>>("bad f");                // FInt with a custom out-of-range
 //                                                               // / non-integer error message
 //   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
+//   for (auto fld : parser.NextRange())  ...                    // [N, e1..eN] counted list
+//   for (auto a : parser.RemainingRange())  ...                 // all remaining args, no count
 //
 // Tag matching:
 //   parser.ExpectTag("LOAD");                                   // required literal keyword
@@ -112,6 +114,66 @@ struct CmdArgParser {
     ErrorReply MakeReply() const;
   };
 
+  // View over a counted arg list, from NextRange(). Yields string_view; size() for reserve().
+  class Range {
+   public:
+    Range() = default;
+
+    class iterator {
+     public:
+      using iterator_category = std::input_iterator_tag;
+      using value_type = std::string_view;
+      using difference_type = ptrdiff_t;
+      using pointer = const std::string_view*;
+      using reference = std::string_view;
+
+      iterator(const CmdArgParser* parser, size_t index) : parser_{parser}, index_{index} {
+      }
+      std::string_view operator*() const {
+        return parser_->SafeSV(index_);
+      }
+      iterator& operator++() {
+        ++index_;
+        return *this;
+      }
+      bool operator==(const iterator& o) const {
+        return index_ == o.index_;
+      }
+      bool operator!=(const iterator& o) const {
+        return index_ != o.index_;
+      }
+
+     private:
+      const CmdArgParser* parser_;
+      size_t index_;
+    };
+
+    iterator begin() const {
+      return {parser_, base_};
+    }
+    iterator end() const {
+      return {parser_, base_ + count_};
+    }
+    std::string_view operator[](size_t i) const {
+      return parser_->SafeSV(base_ + i);
+    }
+    size_t size() const {
+      return count_;
+    }
+    bool empty() const {
+      return count_ == 0;
+    }
+
+   private:
+    friend struct CmdArgParser;
+    Range(const CmdArgParser* parser, size_t base, size_t count)
+        : parser_{parser}, base_{base}, count_{count} {
+    }
+    const CmdArgParser* parser_ = nullptr;
+    size_t base_ = 0;
+    size_t count_ = 0;
+  };
+
  public:
   explicit CmdArgParser(ArgSlice args) : args_{args} {
   }
@@ -136,7 +198,8 @@ struct CmdArgParser {
   template <class T = std::string_view, class... Ts> auto Next() {
     if (cur_i_ + sizeof...(Ts) >= args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);
-      return std::conditional_t<sizeof...(Ts) == 0, T, std::tuple<T, Ts...>>();
+      return std::conditional_t<sizeof...(Ts) == 0, decltype(Convert<T>(0)),
+                                std::tuple<T, Ts...>>();
     }
 
     if constexpr (sizeof...(Ts) == 0) {
@@ -153,14 +216,47 @@ struct CmdArgParser {
   // Like Next<T>(), but on a failed read (non-numeric, out-of-range FInt, or missing arg) replaces
   // the generic error with a caller-supplied CUSTOM_ERROR message. Pair with FInt<lo,hi> to attach
   // a custom out-of-range / non-integer message: parser.Next<FInt<1u, 99u>>("bad f").
-  template <class T = std::string_view> T Next(std::string_view err_msg) {
+  template <class T = std::string_view> auto Next(std::string_view err_msg) {
     bool prior = bool(error_);
-    T val = Next<T>();
+    auto val = Next<T>();
     if (!prior && error_ && !err_msg.empty()) {
       error_.type = CUSTOM_ERROR;
       error_.custom_msg = std::string{err_msg};
     }
     return val;
+  }
+
+  // Reads [count, e1..e(count*group)]; group=2 reads count pairs. Errors if count is 0 or short.
+  Range NextRange(size_t group = 1) {
+    uint32_t count = Next<uint32_t>();
+    size_t base = cur_i_;
+    // count==0 or fewer than count*group trailing args is a count/args mismatch, not a truncated
+    // command: report INVALID_CASES (syntax) at the count arg.
+    if (!error_ && (count == 0 || !HasAtLeast(count * group)))
+      Report(INVALID_CASES, base > 0 ? base - 1 : 0);
+    if (error_)
+      return {};
+    cur_i_ += count * group;
+    return Range{this, base, count * group};
+  }
+
+  // NextRange() with a custom error message on failure.
+  Range NextRange(size_t group, std::string_view err_msg) {
+    bool prior = bool(error_);
+    Range r = NextRange(group);
+    if (!prior && error_ && !err_msg.empty()) {
+      error_.type = CUSTOM_ERROR;
+      error_.custom_msg = std::string{err_msg};
+    }
+    return r;
+  }
+
+  // Consumes all remaining args as a Range (no leading count).
+  Range RemainingRange() {
+    size_t base = cur_i_;
+    size_t count = args_.size() - cur_i_;
+    cur_i_ = args_.size();
+    return Range{this, base, count};
   }
 
   template <class T = std::string_view> auto NextOrDefault(T default_value = {}) {
@@ -350,7 +446,7 @@ struct CmdArgParser {
     } else if constexpr (std::is_constructible_v<T, std::string_view>) {
       return static_cast<T>(SafeSV(idx));
     } else if constexpr (is_fint<T>) {
-      return {ConvertFInt<T::kMin, T::kMax>(idx)};
+      return ConvertFInt<T::kMin, T::kMax>(idx);
     }
   }
 

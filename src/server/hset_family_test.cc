@@ -883,6 +883,7 @@ TEST_F(HSetFamilyTest, HTtl) {
   // Syntax errors
   EXPECT_THAT(Run({"HTTL", "key", "1", "k0"}), ErrArg("Mandatory argument FIELDS"));
   EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "2", "k0"}), ErrArg("numfields"));
+  EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "1", "k0", "k1"}), ErrArg("numfields"));
 }
 
 TEST_F(HSetFamilyTest, HPExpireTime) {
