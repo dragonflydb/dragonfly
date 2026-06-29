@@ -936,7 +936,7 @@ void HExpireTimeGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
   uint32_t numFields =
-      parser.Next<FInt<1u, UINT32_MAX>>("Number of fields must be a positive integer");
+      parser.Next<VNum<1u, UINT32_MAX>>("Number of fields must be a positive integer");
   ParsedArgs fields = parser.UnparsedArgs();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1059,7 +1059,7 @@ void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
                      Exist("PERSIST", &exp_params.persist)));
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
   uint32_t numFields =
-      parser.Next<FInt<1u, UINT32_MAX>>("Number of fields must be a positive integer");
+      parser.Next<VNum<1u, UINT32_MAX>>("Number of fields must be a positive integer");
   ParsedArgs fields = parser.UnparsedArgs();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
