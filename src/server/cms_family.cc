@@ -315,36 +315,39 @@ struct CmsMergeArgs {
 bool ParseMergeArgs(CmdArgParser parser, RedisReplyBuilder* rb, CmsMergeArgs* out) {
   out->dest_key = parser.Next();
 
-  auto keys = parser.NextRange(1, kCmsWrongNumKeys);
+  // numkeys is non-terminal: an optional WEIGHTS clause may follow.
+  CmdArgParser::Range keys = parser.NextRange(1, kCmsWrongNumKeys);
   if (auto err = parser.TakeError(); err) {
     rb->SendError(err.MakeReply());
     return false;
   }
   out->src_keys.assign(keys.begin(), keys.end());
-  uint32_t num_keys = out->src_keys.size();
+  uint32_t num_keys = keys.size();
 
-  if (parser.HasNext()) {
-    if (!parser.Check("WEIGHTS")) {
-      rb->SendError(kCmsWrongNumKeysWeights);
-      return false;
-    }
-
-    auto weights = parser.RemainingRange();
-    if (weights.size() != num_keys) {
-      rb->SendError(kCmsWrongNumKeysWeights);
-      return false;
-    }
-    out->weights.reserve(num_keys);
-    for (string_view w : weights) {
-      int64_t weight;
-      if (!absl::SimpleAtoi(w, &weight)) {
-        rb->SendError(kCmsCannotParseNumber);
-        return false;
-      }
-      out->weights.push_back(weight);
-    }
-  } else {
+  if (!parser.HasNext()) {
     out->weights.resize(num_keys, 1);
+    return true;
+  }
+
+  if (!parser.Check("WEIGHTS")) {
+    rb->SendError(kCmsWrongNumKeysWeights);
+    return false;
+  }
+
+  CmdArgParser::Range weights = parser.RemainingRange();
+  if (weights.size() != num_keys) {
+    rb->SendError(kCmsWrongNumKeysWeights);
+    return false;
+  }
+
+  out->weights.reserve(num_keys);
+  for (string_view w : weights) {
+    int64_t weight;
+    if (!absl::SimpleAtoi(w, &weight)) {
+      rb->SendError(kCmsCannotParseNumber);
+      return false;
+    }
+    out->weights.push_back(weight);
   }
 
   return true;

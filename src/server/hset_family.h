@@ -6,7 +6,6 @@
 
 #include <optional>
 
-#include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/table.h"
@@ -37,7 +36,7 @@ class HSetFamily {
 
   static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
                                                ExpireFlags flags, std::string_view key,
-                                               facade::CmdArgParser::Range fields, PrimeValue* pv);
+                                               const facade::ParsedArgs& fields, PrimeValue* pv);
 };
 
 }  // namespace dfly

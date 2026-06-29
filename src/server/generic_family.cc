@@ -858,9 +858,8 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
     SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, *pv);
     return result;
   } else {
-    CmdArgParser fields_parser{values};
     auto result = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key,
-                                                  fields_parser.RemainingRange(), pv);
+                                                  values, pv);
     auto_updater.Run();
     HSetFamily::DeleteIfEmpty(db_slice, op_args.db_cntx, key, *pv);
     return result;

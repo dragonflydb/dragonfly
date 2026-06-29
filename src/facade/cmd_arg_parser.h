@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 
+#include <cassert>
 #include <concepts>
 #include <optional>
 #include <string_view>
@@ -29,8 +30,9 @@ namespace facade {
 //   auto f  = parser.Next<FInt<1, 99>>("bad f");                // FInt with a custom out-of-range
 //                                                               // / non-integer error message
 //   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
-//   for (auto fld : parser.NextRange())  ...                    // [N, e1..eN] counted list
-//   for (auto a : parser.RemainingRange())  ...                 // all remaining args, no count
+//   Range fields = parser.NextRange();                         // [N, e1..eN] counted list
+//   Range pairs  = parser.NextRange(2);                        // [N, f1,v1,..] N field/value pairs
+//   Range rest   = parser.RemainingRange();                    // all remaining args, no count
 //
 // Tag matching:
 //   parser.ExpectTag("LOAD");                                   // required literal keyword
@@ -114,10 +116,13 @@ struct CmdArgParser {
     ErrorReply MakeReply() const;
   };
 
-  // View over a counted arg list, from NextRange(). Yields string_view; size() for reserve().
+  // Bounded view over the first `count` args of a ParsedArgs, returned by NextRange()/
+  // RemainingRange(). A terminal Range (count covers the whole tail) converts to ParsedArgs.
   class Range {
    public:
     Range() = default;
+    explicit Range(ParsedArgs args) : args_{args}, count_{args.size()} {
+    }
 
     class iterator {
      public:
@@ -127,14 +132,19 @@ struct CmdArgParser {
       using pointer = const std::string_view*;
       using reference = std::string_view;
 
-      iterator(const CmdArgParser* parser, size_t index) : parser_{parser}, index_{index} {
+      iterator(const ParsedArgs* args, size_t index) : args_{args}, index_{index} {
       }
       std::string_view operator*() const {
-        return parser_->SafeSV(index_);
+        return (*args_)[index_];
       }
       iterator& operator++() {
         ++index_;
         return *this;
+      }
+      iterator operator++(int) {
+        iterator copy = *this;
+        ++index_;
+        return copy;
       }
       bool operator==(const iterator& o) const {
         return index_ == o.index_;
@@ -144,18 +154,18 @@ struct CmdArgParser {
       }
 
      private:
-      const CmdArgParser* parser_;
+      const ParsedArgs* args_;
       size_t index_;
     };
 
     iterator begin() const {
-      return {parser_, base_};
+      return {&args_, 0};
     }
     iterator end() const {
-      return {parser_, base_ + count_};
+      return {&args_, count_};
     }
     std::string_view operator[](size_t i) const {
-      return parser_->SafeSV(base_ + i);
+      return args_[i];
     }
     size_t size() const {
       return count_;
@@ -164,13 +174,17 @@ struct CmdArgParser {
       return count_ == 0;
     }
 
+    // Valid only for a terminal Range.
+    operator ParsedArgs() const {
+      assert(count_ == args_.size());
+      return args_;
+    }
+
    private:
     friend struct CmdArgParser;
-    Range(const CmdArgParser* parser, size_t base, size_t count)
-        : parser_{parser}, base_{base}, count_{count} {
+    Range(ParsedArgs args, size_t count) : args_{args}, count_{count} {
     }
-    const CmdArgParser* parser_ = nullptr;
-    size_t base_ = 0;
+    ParsedArgs args_;
     size_t count_ = 0;
   };
 
@@ -226,18 +240,17 @@ struct CmdArgParser {
     return val;
   }
 
-  // Reads [count, e1..e(count*group)]; group=2 reads count pairs. Errors if count is 0 or short.
+  // Reads a counted list [count, e1..e(count*group)] and returns its elements as a bounded Range;
+  // group=2 reads count field/value pairs. Errors if count is 0 or fewer than count*group remain.
   Range NextRange(size_t group = 1) {
     uint32_t count = Next<uint32_t>();
-    size_t base = cur_i_;
-    // count==0 or fewer than count*group trailing args is a count/args mismatch, not a truncated
-    // command: report INVALID_CASES (syntax) at the count arg.
-    if (!error_ && (count == 0 || !HasAtLeast(count * group)))
-      Report(INVALID_CASES, base > 0 ? base - 1 : 0);
+    ParsedArgs rest = args_.Tail(cur_i_);
+    if (!error_ && (count == 0 || rest.size() < size_t(count) * group))
+      Report(INVALID_CASES, cur_i_ - 1);
     if (error_)
       return {};
-    cur_i_ += count * group;
-    return Range{this, base, count * group};
+    cur_i_ += size_t(count) * group;
+    return Range{rest, size_t(count) * group};
   }
 
   // NextRange() with a custom error message on failure.
@@ -251,12 +264,11 @@ struct CmdArgParser {
     return r;
   }
 
-  // Consumes all remaining args as a Range (no leading count).
+  // Consumes and returns all remaining args as a terminal Range, no leading count.
   Range RemainingRange() {
-    size_t base = cur_i_;
-    size_t count = args_.size() - cur_i_;
+    Range r{args_.Tail(cur_i_)};
     cur_i_ = args_.size();
-    return Range{this, base, count};
+    return r;
   }
 
   template <class T = std::string_view> auto NextOrDefault(T default_value = {}) {
