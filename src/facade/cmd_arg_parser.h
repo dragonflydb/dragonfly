@@ -7,7 +7,6 @@
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 
-#include <cmath>
 #include <concepts>
 #include <optional>
 #include <string_view>
@@ -25,9 +24,9 @@ namespace facade {
 //   CmdArgParser parser(args);
 //   auto key = parser.Next<string_view>();                      // read one arg by type
 //   auto [src, dst] = parser.Next<string_view, string_view>();  // read several at once (tuple)
-//   auto db = parser.Next<FInt<0, 15>>();                       // range-restricted int
+//   auto db = parser.Next<VNum<0, 15>>();                       // range-restricted int
 //                                                               // (INVALID_INT if out of range)
-//   auto f  = parser.Next<FInt<1, 99>>("bad f");                // FInt with a custom out-of-range
+//   auto f  = parser.Next<VNum<1, 99>>("bad f");                // VNum with a custom out-of-range
 //                                                               // / non-integer error message
 //   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
 //
@@ -69,50 +68,31 @@ namespace facade {
 //     return cmd_cntx->SendError(parser.TakeError().MakeReply()); // trailing args
 //   // or: if (parser.HasError()) ...
 
-// Validated numeric type for Next<T>(): exposes an underlying_t, an implicit conversion to it, and
-// a static validate() predicate. FInt and the double validators below are instances. See
-// Convert<T>().
+// A validated number for Next<T>(): a NumHolder-derived type that adds a static validate()
+// predicate. Convert<T>() parses the underlying value, runs validate(), and reports
+// INVALID_INT/INVALID_FLOAT on failure. VNum (below) is the built-in range-restricted integer;
+// domain-specific double validators are defined next to their callers.
 template <class T>
-concept FNum = requires(T t, typename T::underlying_t v) {
+concept as_vnum = requires(T t, typename T::underlying_t v) {
   static_cast<typename T::underlying_t>(t);
   { T::validate(v) } -> std::same_as<bool>;
 };
 
-// Numerical range restriction used with Next<FInt<lo, hi>>().
-template <auto min, auto max> struct FInt {
+// Base for as_vnum types: stores the parsed value and converts back to it. Derive and add a static
+// validate() predicate to define a new validated number.
+template <class T> struct NumHolder {
+  using underlying_t = T;
+  underlying_t value = {};
+  operator underlying_t() const {
+    return value;
+  }
+};
+
+// Range-restricted integer used with Next<VNum<lo, hi>>() (INVALID_INT if out of range).
+template <auto min, auto max> struct VNum : NumHolder<decltype(min)> {
   static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
-  using underlying_t = decltype(min);
-
-  underlying_t value = {};
-  operator underlying_t() const {
-    return value;
-  }
-  static constexpr bool validate(underlying_t v) {
+  static constexpr bool validate(decltype(min) v) {
     return v >= min && v <= max;
-  }
-};
-
-// Rejects non-positive and non-finite doubles. Use with Next<PositiveDouble>().
-struct PositiveDouble {
-  using underlying_t = double;
-  underlying_t value = {};
-  operator underlying_t() const {
-    return value;
-  }
-  static constexpr bool validate(underlying_t v) {
-    return v > 0 && std::isfinite(v);
-  }
-};
-
-// Rejects negative and non-finite doubles. Use with Next<NonNegativeDouble>().
-struct NonNegativeDouble {
-  using underlying_t = double;
-  underlying_t value = {};
-  operator underlying_t() const {
-    return value;
-  }
-  static constexpr bool validate(underlying_t v) {
-    return v >= 0 && std::isfinite(v);
   }
 };
 
@@ -183,9 +163,9 @@ struct CmdArgParser {
     }
   }
 
-  // Like Next<T>(), but on a failed read (non-numeric, out-of-range FInt, or missing arg) replaces
-  // the generic error with a caller-supplied CUSTOM_ERROR message. Pair with FInt<lo,hi> to attach
-  // a custom out-of-range / non-integer message: parser.Next<FInt<1u, 99u>>("bad f").
+  // Like Next<T>(), but on a failed read (non-numeric, out-of-range VNum, or missing arg) replaces
+  // the generic error with a caller-supplied CUSTOM_ERROR message. Pair with VNum<lo,hi> to attach
+  // a custom out-of-range / non-integer message: parser.Next<VNum<1u, 99u>>("bad f").
   template <class T = std::string_view> T Next(std::string_view err_msg) {
     bool prior = bool(error_);
     T val = Next<T>();
@@ -374,7 +354,7 @@ struct CmdArgParser {
 
   template <class T> T Convert(size_t idx) {
     static_assert(std::is_arithmetic_v<T> || std::is_constructible_v<T, std::string_view> ||
-                      FNum<T> || is_optional<T>,
+                      as_vnum<T> || is_optional<T>,
                   "incorrect type");
     if constexpr (is_optional<T>) {
       return T{Convert<typename T::value_type>(idx)};
@@ -382,7 +362,7 @@ struct CmdArgParser {
       return Num<T>(idx);
     } else if constexpr (std::is_constructible_v<T, std::string_view>) {
       return static_cast<T>(SafeSV(idx));
-    } else if constexpr (FNum<T>) {
+    } else if constexpr (as_vnum<T>) {
       using U = typename T::underlying_t;
       U val = Num<U>(idx);
       if (!T::validate(val)) {

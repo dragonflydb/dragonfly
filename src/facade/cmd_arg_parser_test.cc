@@ -7,6 +7,8 @@
 #include <absl/base/casts.h>
 #include <gmock/gmock.h>
 
+#include <cmath>
+
 #include "facade/memcache_parser.h"
 
 using namespace testing;
@@ -499,9 +501,9 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
   {
     auto parser = Make({"10", "-10", "12"});
 
-    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 10);
-    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), -10);
-    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 0);
+    EXPECT_EQ((parser.Next<VNum<-11, 11>>().value), 10);
+    EXPECT_EQ((parser.Next<VNum<-11, 11>>().value), -10);
+    EXPECT_EQ((parser.Next<VNum<-11, 11>>().value), 0);
 
     auto err = parser.TakeError();
     EXPECT_TRUE(err);
@@ -511,7 +513,7 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
 
   {
     auto parser = Make({"-12"});
-    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 0);
+    EXPECT_EQ((parser.Next<VNum<-11, 11>>().value), 0);
 
     auto err = parser.TakeError();
     EXPECT_TRUE(err);
@@ -520,31 +522,31 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
   }
 }
 
+// A user-defined as_vnum: NumHolder<double> + a validate() predicate. Exercises the generic
+// validated-number path of Convert<T>() for a floating-point underlying type.
+struct PositiveFinite : NumHolder<double> {
+  static bool validate(double v) {
+    return v > 0 && std::isfinite(v);
+  }
+};
+
 TEST_F(CmdArgParserTest, ValidatedDouble) {
   {
-    auto parser = Make({"0.5", "0", "2.5"});
-    EXPECT_DOUBLE_EQ((parser.Next<PositiveDouble>().value), 0.5);
-    EXPECT_DOUBLE_EQ((parser.Next<NonNegativeDouble>().value), 0.0);
-    EXPECT_DOUBLE_EQ((parser.Next<NonNegativeDouble>().value), 2.5);
+    auto parser = Make({"0.5", "2.5"});
+    EXPECT_DOUBLE_EQ((parser.Next<PositiveFinite>().value), 0.5);
+    EXPECT_DOUBLE_EQ((parser.Next<PositiveFinite>().value), 2.5);
     EXPECT_FALSE(parser.HasError());
   }
   {
-    auto parser = Make({"0"});  // PositiveDouble rejects 0
-    parser.Next<PositiveDouble>();
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::INVALID_FLOAT);
-  }
-  {
-    auto parser = Make({"-1"});  // NonNegativeDouble rejects negative
-    parser.Next<NonNegativeDouble>();
+    auto parser = Make({"0"});  // validate() rejects 0
+    parser.Next<PositiveFinite>();
     auto err = parser.TakeError();
     EXPECT_TRUE(err);
     EXPECT_EQ(err.type, CmdArgParser::INVALID_FLOAT);
   }
   {
     auto parser = Make({"inf"});  // non-finite rejected
-    parser.Next<PositiveDouble>();
+    parser.Next<PositiveFinite>();
     auto err = parser.TakeError();
     EXPECT_TRUE(err);
     EXPECT_EQ(err.type, CmdArgParser::INVALID_FLOAT);

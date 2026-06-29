@@ -534,7 +534,7 @@ constexpr string_view kBM25StdTanhFactorErr = "BM25STD_TANH_FACTOR must be a pos
 // Parses a BM25STD_TANH_FACTOR value: an integer >= 1 (no upper bound). On a missing or invalid
 // value the parser reports kBM25StdTanhFactorErr, surfaced by the caller's error handling.
 uint64_t ParseBM25StdTanhFactor(CmdArgParser* parser) {
-  using TanhFactorInt = facade::FInt<uint64_t{1}, std::numeric_limits<uint64_t>::max()>;
+  using TanhFactorInt = facade::VNum<uint64_t{1}, std::numeric_limits<uint64_t>::max()>;
   return parser->Next<TanhFactorInt>(kBM25StdTanhFactorErr);
 }
 
@@ -1792,6 +1792,19 @@ struct HybridDocEntry {
 
 using HybridDocMap = absl::flat_hash_map<string, HybridDocEntry>;
 
+// Validated doubles for FT.HYBRID RANGE, used via CmdArgParser::Next<T>(). validate() runs inside
+// the parser so callers don't re-check the parsed value.
+struct NonNegativeDouble : facade::NumHolder<double> {
+  static bool validate(double v) {
+    return v >= 0 && std::isfinite(v);
+  }
+};
+struct HnswRangeEpsilon : facade::NumHolder<double> {
+  static bool validate(double v) {
+    return search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(v);
+  }
+};
+
 ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
   using facade::Map;
   using facade::Tag;
@@ -1812,12 +1825,8 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
   };
   auto parse_tanh_factor = [&](CmdArgParser* sub) { tanh_factor = ParseBM25StdTanhFactor(sub); };
   auto read_range_epsilon = [&](CmdArgParser* sub) {
-    double epsilon = sub->Next<facade::PositiveDouble>("Invalid EPSILON value");
-    if (sub->HasError())
-      return;
-    if (!search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(epsilon))
-      sub->ReportCustom("Invalid EPSILON value");
-    else
+    double epsilon = sub->Next<HnswRangeEpsilon>("Invalid EPSILON value");
+    if (!sub->HasError())
       p.range_epsilon = epsilon;
   };
   auto parse_hybrid_range = [&](CmdArgParser* sub) {
@@ -1841,7 +1850,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
             sub->ReportCustom("Duplicate RADIUS argument");
             return;
           }
-          p.range_radius = sub->Next<facade::NonNegativeDouble>("Invalid RADIUS value");
+          p.range_radius = sub->Next<NonNegativeDouble>("Invalid RADIUS value");
           has_radius = !sub->HasError();
         } else if (sub->Check("EPSILON")) {
           if (p.range_epsilon) {
@@ -1856,7 +1865,7 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       return;
     }
 
-    p.range_radius = sub->Next<facade::NonNegativeDouble>("Invalid RADIUS value");
+    p.range_radius = sub->Next<NonNegativeDouble>("Invalid RADIUS value");
     if (sub->Check("EPSILON"))
       read_range_epsilon(sub);
   };
