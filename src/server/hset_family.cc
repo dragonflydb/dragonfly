@@ -662,6 +662,9 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   RETURN_ON_BAD_STATUS(op_res);
 
   PrimeValue* pv = &((*op_res).it->second);
+  if (pv->IsExternal() && !pv->IsCool())
+    return OpStatus::CANCELLED;  // can't mutate offloaded hashes synchronously
+
   auto res = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
 
   // If it is a hash which became empty after expiring fields, we must delete the key safely.
@@ -900,6 +903,9 @@ OpResult<vector<int64_t>> OpHExpireTime(Transaction* t, EngineShard* shard, stri
   RETURN_ON_BAD_STATUS(it_res);
 
   const PrimeValue& pv = (*it_res)->second;
+  if (pv.IsExternal() && !pv.IsCool())
+    return OpStatus::CANCELLED;  // can't inspect offloaded hashes synchronously
+
   vector<int64_t> res;
   res.reserve(fields.size());
 
