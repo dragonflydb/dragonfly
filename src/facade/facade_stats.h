@@ -65,6 +65,13 @@ struct ConnectionStats {
   // number of times we flushed when dispatching the pipeline.
   uint64_t pipeline_dispatch_flush_count = 0;
 
+  // V2 Only: Number of times the proactor OnRecv callback actually drained bytes into io_buf_.
+  uint64_t proactor_reads = 0;
+
+  // V2 Only: Number of times parse-in-proactor enqueued at least one command from the OnRecv
+  // callback.
+  uint64_t proactor_parse = 0;
+
   ConnectionStats& operator+=(const ConnectionStats& o);
 };
 
