@@ -275,6 +275,14 @@ class QList {
     zstd_threshold_ = threshold;
   }
 
+  // Trains a thread-local ZSTD dictionary (if not yet trained) and bulk-compresses
+  // the list's interior nodes. Intended to be called once after a list has been
+  // bulk-populated via AppendListpack/AppendPlain (e.g. during RDB/replication load),
+  // where the per-push CoolOff() compression hook does not run. No-op unless
+  // set_compr_threshold() was given a non-zero value and LZF depth-compression is
+  // disabled.
+  void CompressAfterLoad();
+
   // Enable tiered storage.
   void EnableTiering(const TieringParams& params) {
     tiering_enabled_ = 1;

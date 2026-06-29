@@ -1150,7 +1150,121 @@ class QListZstdTest : public ::testing::Test {
       ql.Push(entry, QList::TAIL);
     }
   }
+
+  // Builds a single listpack node holding `count` Celery-like JSON entries,
+  // mimicking a quicklist node as it would arrive from an RDB stream.
+  uint8_t* BuildCeleryListpack(unsigned count, unsigned start_id) {
+    uint8_t* lp = lpNew(0);
+    for (unsigned i = 0; i < count; ++i) {
+      string id = to_string(start_id + i);
+      string entry =
+          "{\"body\": \"W10=\", \"content-encoding\": \"utf-8\", "
+          "\"content-type\": \"application/json\", "
+          "\"headers\": {\"lang\": \"py\", \"task\": \"process_job\", "
+          "\"id\": \"b3e4b923-8a77-4053-aff0-" +
+          id + "\", \"argsrepr\": \"('job" + id + "',)\"}}";
+      lp = lpAppend(lp, (uint8_t*)entry.data(), entry.size());
+    }
+    return lp;
+  }
 };
+
+TEST_F(QListZstdTest, CompressAfterLoad) {
+  // Simulate an RDB/replication load that finished before any dictionary was
+  // trained (e.g. the threshold was reached only on the final node). We model
+  // that by appending all nodes with the threshold disabled, so no compression
+  // happens incrementally, then enabling it and running the post-load pass.
+  QList ql(-1, 0);  // compress=0 so the ZSTD dict path is active (LZF disabled)
+
+  constexpr unsigned kNodes = 20;
+  constexpr unsigned kEntriesPerNode = 30;
+  for (unsigned n = 0; n < kNodes; ++n) {
+    ql.AppendListpack(BuildCeleryListpack(kEntriesPerNode, 100000 + n * kEntriesPerNode));
+  }
+  ASSERT_GE(ql.node_count(), 3u);
+
+  // Nothing is compressed yet - the threshold was not set during the load.
+  unsigned compressed_before = 0;
+  for (const QList::Node* node = ql.Head(); node; node = node->next) {
+    compressed_before += node->IsCompressed();
+  }
+  EXPECT_EQ(compressed_before, 0u);
+
+  ql.set_compr_threshold(1);
+  auto initial_compressions = QList::stats.zstd_dict_compressions;
+  ql.CompressAfterLoad();
+
+  // Interior nodes are now compressed; head and tail remain raw.
+  EXPECT_GT(QList::stats.zstd_dict_compressions, initial_compressions);
+  EXPECT_EQ(ql.Head()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+  EXPECT_EQ(ql.Tail()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+
+  unsigned compressed_after = 0;
+  for (const QList::Node* node = ql.Head(); node; node = node->next) {
+    compressed_after += node->IsCompressed();
+  }
+  EXPECT_GT(compressed_after, 0u);
+
+  // All entries remain readable after compression.
+  unsigned count = 0;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        EXPECT_GT(e.view().size(), 50u);
+        ++count;
+        return true;
+      },
+      0, -1);
+  EXPECT_EQ(count, kNodes * kEntriesPerNode);
+}
+
+TEST_F(QListZstdTest, CompressAfterLoadPlainNode) {
+  // Plain (single large element) interior nodes are also covered: they are
+  // included in dictionary training and compressed, and decompressed on read.
+  QList ql(-1, 0);
+
+  // Head and tail listpacks keep the plain node interior.
+  ql.AppendListpack(BuildCeleryListpack(30, 100000));
+
+  // A large, highly compressible plain element.
+  string plain(16384, 'a');
+  for (size_t i = 0; i < plain.size(); i += 7)
+    plain[i] = 'b';
+  uint8_t* data = (uint8_t*)zmalloc(plain.size());
+  ::memcpy(data, plain.data(), plain.size());
+  ql.AppendPlain(data, plain.size());
+
+  ql.AppendListpack(BuildCeleryListpack(30, 200000));
+  ASSERT_EQ(ql.node_count(), 3u);
+
+  const QList::Node* plain_node = ql.Head()->next;
+  ASSERT_EQ(plain_node->container, QUICKLIST_NODE_CONTAINER_PLAIN);
+
+  ql.set_compr_threshold(1);
+  ql.CompressAfterLoad();
+
+  // The interior plain node is now ZSTD-compressed.
+  EXPECT_EQ(plain_node->encoding, QLIST_NODE_ENCODING_ZSTD);
+
+  // It reads back intact (decompressed on access).
+  auto it = ql.GetIterator(30);  // index 30 == the plain element
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ(it.Get().view(), plain);
+}
+
+TEST_F(QListZstdTest, CompressAfterLoadDisabled) {
+  // Without a threshold, CompressAfterLoad must be a no-op.
+  QList ql(-1, 0);
+  for (unsigned n = 0; n < 10; ++n) {
+    ql.AppendListpack(BuildCeleryListpack(30, 100000 + n * 30));
+  }
+
+  auto initial_compressions = QList::stats.zstd_dict_compressions;
+  ql.CompressAfterLoad();
+  EXPECT_EQ(QList::stats.zstd_dict_compressions, initial_compressions);
+  for (const QList::Node* node = ql.Head(); node; node = node->next) {
+    EXPECT_EQ(node->encoding, QUICKLIST_NODE_ENCODING_RAW);
+  }
+}
 
 TEST_F(QListZstdTest, CompressAndReadAll) {
   QList ql(-1, 0);            // 4KB nodes, no depth-based compression (ZSTD dict replaces it)
