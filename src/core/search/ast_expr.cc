@@ -31,6 +31,10 @@ AstOptionalNode::AstOptionalNode(AstNode&& node) : node{make_unique<AstNode>(std
 AstNegateNode::AstNegateNode(AstNode&& node) : node{make_unique<AstNode>(std::move(node))} {
 }
 
+AstAttributeNode::AstAttributeNode(AstNode&& node, double weight)
+    : node{make_unique<AstNode>(std::move(node))}, weight{weight} {
+}
+
 AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, nodes{} {
   // If either node is already a logical node with the same op,
   // we can re-use it, as logical ops are associative.

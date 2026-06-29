@@ -424,6 +424,41 @@ TEST_F(SearchParserTest, VectorRange) {
   NEXT_TOK(TOK_VECTOR_RANGE);
 }
 
+TEST_F(SearchParserTest, WeightAttributes) {
+  QueryParams params;
+  params["w"] = "5.0";
+  params["radius"] = "1";
+  params["vec"] = std::string(4, '\0');
+  SetParams(&params);
+
+  SetInput("@name:(mal)=>{$weight:5.0}");
+  NEXT_EQ(TOK_FIELD, string, "@name");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LPAREN);
+  NEXT_EQ(TOK_TERM, string, "mal");
+  NEXT_TOK(TOK_RPAREN);
+  NEXT_TOK(TOK_ATTR_ARROW);
+  NEXT_TOK(TOK_WEIGHT);
+  NEXT_TOK(TOK_COLON);
+  NEXT_EQ(TOK_DOUBLE, string, "5.0");
+  NEXT_TOK(TOK_RCURLBR);
+
+  EXPECT_EQ(0, Parse("@name:(mal)=>{$weight:5.0}"));
+  auto ast = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstAttributeNode>(ast.Variant()));
+  const auto& attr = std::get<AstAttributeNode>(ast.Variant());
+  EXPECT_EQ(attr.weight, 5.0);
+  EXPECT_TRUE(std::holds_alternative<AstFieldNode>(attr.node->Variant()));
+
+  EXPECT_EQ(0, Parse("@name:(mal) => { $weight: 5.0 }"));
+  EXPECT_EQ(0, Parse("(@country:(mal)=>{$weight:20.0} | @city:(mal)=>{$weight:10.0})"));
+  EXPECT_EQ(0, Parse("@name:(mal)=>{$weight:$w}"));
+  EXPECT_EQ(0, Parse("@active:{true}=>{$weight:2}"));
+  EXPECT_EQ(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$weight:2}"));
+  EXPECT_EQ(0, Parse("(@f:[VECTOR_RANGE $radius $vec])=>{$weight:2}"));
+  EXPECT_NE(0, Parse("*=>{$weight:2}"));
+}
+
 TEST_F(SearchParserTest, VectorRangeParse) {
   QueryParams params;
   params["radius"] = "1";
