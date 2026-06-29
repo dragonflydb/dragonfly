@@ -295,11 +295,8 @@ void CmdGeoAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdGeoHash(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  vector<string_view> args;
-  while (parser.HasNext()) {
-    args.push_back(parser.Next());
-  }
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
+  OpResult<MScoreResponse> result =
+      ZSetFamily::ZGetMembers(parser.UnparsedArgs(), cmd_cntx->tx(), rb);
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(kWrongTypeErr);
@@ -319,11 +316,8 @@ void CmdGeoHash(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdGeoPos(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  vector<string_view> args;
-  while (parser.HasNext()) {
-    args.push_back(parser.Next());
-  }
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
+  OpResult<MScoreResponse> result =
+      ZSetFamily::ZGetMembers(parser.UnparsedArgs(), cmd_cntx->tx(), rb);
 
   if (result.status() != OpStatus::OK) {
     return rb->SendError(result.status());
@@ -346,22 +340,27 @@ void CmdGeoDist(CmdArgParser parser, CommandContext* cmd_cntx) {
   double distance_multiplier = 1;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  vector<string_view> args;
-  while (parser.HasNext()) {
-    args.push_back(parser.Next());
+  // GEODIST key member1 member2 [unit]. The unit is trailing/optional, so it can't be part of the
+  // [key, members...] view passed to ZGetMembers; read the fixed args explicitly.
+  std::array<std::string_view, 3> key_and_members;  // {key, member1, member2}
+  for (std::string_view& arg : key_and_members)
+    arg = parser.Next();
+
+  // Optional trailing unit; Finalize() rejects both a missing required arg and any trailing args.
+  std::string_view unit = parser.NextOrDefault();
+  if (!parser.Finalize()) {
+    return rb->SendError(parser.TakeError().MakeReply());
   }
 
-  if (args.size() == 4) {
-    distance_multiplier = ExtractUnit(args[3]);
-    args.pop_back();
+  if (!unit.empty()) {
+    distance_multiplier = ExtractUnit(unit);
     if (distance_multiplier < 0) {
       return rb->SendError(kInvalidUnit);
     }
-  } else if (args.size() != 3) {
-    return rb->SendError(kSyntaxErr);
   }
 
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
+  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(
+      facade::ParsedArgs{absl::MakeConstSpan(key_and_members)}, cmd_cntx->tx(), rb);
 
   if (result.status() != OpStatus::OK) {
     return rb->SendError(result.status());

@@ -1438,23 +1438,23 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ParsedA
 }
 
 OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
-                                  const facade::ArgRange& members) {
+                                  facade::ParsedArgs members) {
   auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
 
   if (res_it.status() == OpStatus::KEY_NOTFOUND) {
     // If the key doesn't exist return an array of NIL values
-    MScoreResponse result(members.Size(), std::nullopt);
+    MScoreResponse result(members.size(), std::nullopt);
     return result;
   }
 
   if (!res_it)
     return res_it.status();
 
-  MScoreResponse scores(members.Size());
+  MScoreResponse scores(members.size());
 
   auto& pv = res_it.value()->second;
   size_t i = 0;
-  for (string_view member : members.Range())
+  for (string_view member : members)
     scores[i++] = GetZsetScore(pv, member);
 
   return scores;
@@ -1992,10 +1992,10 @@ void ZSetFamily::ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemb
   }
 }
 
-OpResult<MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, Transaction* tx,
+OpResult<MScoreResponse> ZSetFamily::ZGetMembers(const facade::ParsedArgs& args, Transaction* tx,
                                                  SinkReplyBuilder* builder) {
-  string_view key = ArgS(args, 0);
-  auto members = args.subspan(1);
+  string_view key = args[0];
+  facade::ParsedArgs members = args.Tail();
   auto cb = [key, members](Transaction* t, EngineShard* shard) {
     return OpMScore(t->GetOpArgs(shard), key, members);
   };
@@ -2840,10 +2840,11 @@ void CmdZScore(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdZMScore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdZMScore(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
+  OpResult<MScoreResponse> result =
+      ZSetFamily::ZGetMembers(parser.UnparsedArgs(), cmd_cntx->tx(), rb);
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(kWrongTypeErr);
