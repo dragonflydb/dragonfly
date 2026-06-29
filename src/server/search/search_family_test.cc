@@ -152,6 +152,9 @@ auto HybridDocFieldNames = [](const RespExpr& resp, size_t doc_idx) -> set<strin
 
 namespace dfly {
 
+bool ParseFtSearchCSSResponse(const facade::RESPObj& resp_obj, const SearchParams& params,
+                              SearchResult* result);
+
 class SearchFamilyTest : public BaseFamilyTest {
  protected:
   void CreateFlatHashIdx() {
@@ -5158,57 +5161,72 @@ TEST_F(SearchFamilyTest, KnnHnswIPDistanceCalculation) {
 }
 
 TEST_F(SearchFamilyTest, ParseCSSResponse) {
-  using Fields = std::map<std::string, std::string>;
-  using Docs = std::map<std::string, Fields>;
-
-  std::string msg1 =
-      "*17\r\n:8\r\n$2\r\ns0\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-      "0\r\n$2\r\ns3\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-      "3\r\n$2\r\ns7\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-      "7\r\n$2\r\ns8\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-      "8\r\n$2\r\ns4\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-      "4\r\n$2\r\ns9\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest 9\r\n";
-
-  std::string msg2 =
-      "$2\r\ns1\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-      "1\r\n$2\r\ns5\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest 5\r\n";
+  std::string msg =
+      "*5\r\n:2\r\n$2\r\ns0\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
+      "0\r\n$2\r\ns1\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest 1\r\n";
 
   RESPParser reader;
-  auto reply = reader.Feed(msg1.c_str(), msg1.size());
-  ASSERT_TRUE(reply->Empty());
-
-  reply = reader.Feed(msg2.c_str(), msg2.size());
+  auto reply = reader.Feed(msg.c_str(), msg.size());
   ASSERT_FALSE(reply->Empty());
 
-  EXPECT_EQ(reply->GetType(), RESPObj::Type::ARRAY);
-  auto array = *reply->As<RESPArray>();
-  EXPECT_GE(array.Size(), 1);
-  EXPECT_EQ(array[0].GetType(), RESPObj::Type::INTEGER);
+  SearchParams params;
+  SearchResult result;
+  ASSERT_TRUE(ParseFtSearchCSSResponse(*reply, params, &result));
 
-  Docs search_results;
-  for (size_t i = 1; i < array.Size(); i += 2) {
-    auto& fields = search_results[*array[i].As<std::string>()];
+  ASSERT_EQ(result.total_hits, 2u);
+  ASSERT_EQ(result.docs.size(), 2u);
+  EXPECT_EQ(result.docs[0].key, "s0");
+  EXPECT_EQ(std::get<std::string>(result.docs[0].values["title"]), "test 0");
+  EXPECT_EQ(result.docs[1].key, "s1");
+  EXPECT_EQ(std::get<std::string>(result.docs[1].values["title"]), "test 1");
+}
 
-    auto field_array = *array[i + 1].As<RESPArray>();
+TEST_F(SearchFamilyTest, ParseCSSResponseWithScores) {
+  std::string msg =
+      "*9\r\n:2\r\n$3\r\nd:a\r\n$3\r\n1.5\r\n$3\r\n#10\r\n*2\r\n$5\r\ntitle\r\n$5\r\nalpha\r\n"
+      "$3\r\nd:b\r\n$3\r\n0.7\r\n$5\r\n$beta\r\n*2\r\n$5\r\ntitle\r\n$4\r\nbeta\r\n";
 
-    for (size_t j = 0; j < field_array.Size(); j += 2) {
-      std::string field_name = *field_array[j].As<std::string>();
-      std::string field_value = *field_array[j + 1].As<std::string>();
+  RESPParser reader;
+  auto reply = reader.Feed(msg.c_str(), msg.size());
+  ASSERT_FALSE(reply->Empty());
 
-      fields[field_name] = field_value;
-    }
-  }
+  SearchParams params;
+  params.with_scores = true;
+  params.sort_option = SearchParams::SortOption{FieldReference{"age"}, SortOrder::ASC};
+  SearchResult result;
+  ASSERT_TRUE(ParseFtSearchCSSResponse(*reply, params, &result));
 
-  EXPECT_EQ(search_results.size(), 8);
+  ASSERT_EQ(result.total_hits, 2u);
+  ASSERT_EQ(result.docs.size(), 2u);
 
-  EXPECT_EQ(search_results["s0"]["title"], "test 0");
-  EXPECT_EQ(search_results["s1"]["title"], "test 1");
-  EXPECT_EQ(search_results["s3"]["title"], "test 3");
-  EXPECT_EQ(search_results["s4"]["title"], "test 4");
-  EXPECT_EQ(search_results["s5"]["title"], "test 5");
-  EXPECT_EQ(search_results["s7"]["title"], "test 7");
-  EXPECT_EQ(search_results["s8"]["title"], "test 8");
-  EXPECT_EQ(search_results["s9"]["title"], "test 9");
+  EXPECT_EQ(result.docs[0].key, "d:a");
+  EXPECT_FLOAT_EQ(result.docs[0].text_score, 1.5f);
+  EXPECT_EQ(std::get<double>(result.docs[0].sort_score), 10);
+  EXPECT_EQ(std::get<std::string>(result.docs[0].values["title"]), "alpha");
+
+  EXPECT_EQ(result.docs[1].key, "d:b");
+  EXPECT_FLOAT_EQ(result.docs[1].text_score, 0.7f);
+  EXPECT_EQ(std::get<std::string>(result.docs[1].sort_score), "beta");
+  EXPECT_EQ(std::get<std::string>(result.docs[1].values["title"]), "beta");
+}
+
+TEST_F(SearchFamilyTest, ParseCSSResponseWithScorerOnly) {
+  std::string msg =
+      "*7\r\n:2\r\n$3\r\nd:a\r\n$3\r\n1.5\r\n*2\r\n$5\r\ntitle\r\n$5\r\nalpha\r\n"
+      "$3\r\nd:b\r\n$3\r\n0.7\r\n*2\r\n$5\r\ntitle\r\n$4\r\nbeta\r\n";
+
+  RESPParser reader;
+  auto reply = reader.Feed(msg.c_str(), msg.size());
+  ASSERT_FALSE(reply->Empty());
+
+  SearchParams params;
+  params.scorer = &search::BM25Std;
+  SearchResult result;
+  ASSERT_TRUE(ParseFtSearchCSSResponse(*reply, params, &result));
+
+  ASSERT_EQ(result.docs.size(), 2u);
+  EXPECT_FLOAT_EQ(result.docs[0].text_score, 1.5f);
+  EXPECT_FLOAT_EQ(result.docs[1].text_score, 0.7f);
 }
 
 TEST_F(SearchFamilyTest, WithSortKeysOption) {
