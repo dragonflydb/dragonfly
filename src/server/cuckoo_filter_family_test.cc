@@ -121,6 +121,27 @@ TEST_F(CuckooFilterFamilyTest, AddFilterFull) {
   EXPECT_THAT(Run({"cf.add", "cf", "overflow"}), ErrArg("Filter is full"));
 }
 
+TEST_F(CuckooFilterFamilyTest, InsertFilterFull) {
+  // Non-expanding filter with capacity 4; CF.INSERT returns -1 for items that cannot be inserted.
+  ASSERT_EQ(Run("cf.reserve cf 4 expansion 0"), "OK");
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_THAT(Run({"cf.insert", "cf", "items", absl::StrCat(i)}),
+                RespArray(ElementsAre(IntArg(1))));
+  }
+  auto resp = Run({"cf.insert", "cf", "items", "overflow1", "overflow2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(-1), IntArg(-1))));
+
+  // CF.INSERTNX: -1 for full, 0 for existing, 1 for inserted (but filter is full here).
+  ASSERT_EQ(Run("cf.reserve cfnx 4 expansion 0"), "OK");
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_THAT(Run({"cf.insertnx", "cfnx", "items", absl::StrCat(i)}),
+                RespArray(ElementsAre(IntArg(1))));
+  }
+  // Item 0 already exists → 0; overflow → -1.
+  resp = Run({"cf.insertnx", "cfnx", "items", "0", "overflow"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), IntArg(-1))));
+}
+
 TEST_F(CuckooFilterFamilyTest, Exists) {
   EXPECT_THAT(Run({"cf.add", "f1", "foo"}), IntArg(1));
   EXPECT_THAT(Run({"cf.exists", "f1", "foo"}), IntArg(1));

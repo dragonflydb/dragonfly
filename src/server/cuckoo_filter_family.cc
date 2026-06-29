@@ -132,7 +132,8 @@ struct InsertOptions {
 
 // Shared op for CF.INSERT and CF.INSERTNX. Returns one integer per item:
 //   1  — item inserted
-//   0  — item already exists (nx only) or filter is full
+//   0  — item already exists (nx only)
+//  -1  — filter is full, item could not be inserted
 // Returns KEY_NOTFOUND if nocreate is set and the key does not exist.
 OpResult<vector<int>> OpInsert(const OpArgs& op_args, string_view key, ParsedArgs items,
                                const InsertOptions& opts, bool nx) {
@@ -158,9 +159,13 @@ OpResult<vector<int>> OpInsert(const OpArgs& op_args, string_view key, ParsedArg
   for (size_t i = 0; i < items.size(); ++i) {
     const uint64_t hash = CuckooFilter::Hash(items[i]);
     if (nx) {
-      result[i] = (!cf->Exists(hash) && cf->Insert(hash)) ? 1 : 0;
+      if (cf->Exists(hash)) {
+        result[i] = 0;
+      } else {
+        result[i] = cf->Insert(hash) ? 1 : -1;
+      }
     } else {
-      result[i] = cf->Insert(hash) ? 1 : 0;
+      result[i] = cf->Insert(hash) ? 1 : -1;
     }
   }
   return result;
