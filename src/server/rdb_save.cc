@@ -792,7 +792,19 @@ std::error_code RdbSerializer::SaveCuckooFilterObject(const PrimeValue& pv) {
   size_t num_filters = cf->NumFilters();
   RETURN_ON_ERR(SaveLen(num_filters));
   for (size_t i = 0; i < num_filters; ++i) {
-    RETURN_ON_ERR(SaveString(cf->FilterBytes(i)));
+    string_view blob = cf->FilterBytes(i);
+    bool is_last_filter = (i + 1 == num_filters);
+    RETURN_ON_ERR(SaveLen(blob.size()));
+    for (size_t off = 0; off < blob.size(); off += kFilterChunkSize) {
+      size_t chunk_len = std::min(kFilterChunkSize, blob.size() - off);
+      bool is_last_chunk = (off + chunk_len >= blob.size());
+      RETURN_ON_ERR(SaveLen(chunk_len));
+      RETURN_ON_ERR(
+          WriteRaw(io::Bytes{reinterpret_cast<const uint8_t*>(blob.data() + off), chunk_len}));
+      RETURN_ON_ERR(PushToConsumerIfNeeded(is_last_filter && is_last_chunk
+                                               ? FlushState::kFlushEndEntry
+                                               : FlushState::kFlushMidEntry));
+    }
   }
 
   return {};

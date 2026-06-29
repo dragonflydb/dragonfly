@@ -116,6 +116,9 @@ class CuckooFilter {
   // Restores complete internal state from previously-serialized data (RDB load).
   void Deserialize(const SerializedDataView& data);
 
+  // Appends a single sub-filter from its raw bytes. For chunked RDB load (append mode).
+  void AppendFilter(std::string_view blob);
+
   // Reclaims space by moving items from newer sub-filters back into older ones, freeing the
   // newest sub-filter once it's been fully emptied. Only ever frees filters_.back(), one at
   // a time, working from the newest sub-filter down to (but not including) filters_[0].

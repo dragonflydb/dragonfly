@@ -1,8 +1,10 @@
 -- collect all keys into table specific type on specific prefix. Uses SCAN--
 local function LU_collect_keys(prefix, type)
-    -- SCAN wants this weird type name for json
+    -- SCAN wants internal type names for non-standard types
     if string.lower(type) == 'json' then
         type = 'ReJSON-RL'
+    elseif string.lower(type) == 'cf' then
+        type = 'MBbloomCF'
     end
 
     local pattern = prefix .. "*"

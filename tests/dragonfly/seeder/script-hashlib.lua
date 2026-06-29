@@ -33,3 +33,7 @@ end
 function LH_funcs.stream(key, hash)
     return dragonfly.ihash(hash, false, 'XRANGE', key, '-', '+')
 end
+
+function LH_funcs.cf(key, hash)
+    return dragonfly.ihash(hash, false, 'CF.INFO', key)
+end

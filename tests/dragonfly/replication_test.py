@@ -76,6 +76,14 @@ async def compare_datasets(c_master, c_replica):
             hash = dragonfly.ihash(0, false, 'JSON.GET', key)
         elseif type == 'STREAM' then
             hash = dragonfly.ihash(0, false, 'XRANGE', key, '-', '+')
+        elseif type == 'SBF' then
+            hash = dragonfly.ihash(0, false, 'BF.INFO', key)
+        elseif type == 'CMS' then
+            hash = dragonfly.ihash(0, false, 'CMS.INFO', key)
+        elseif type == 'TOPK' then
+            hash = dragonfly.ihash(0, true, 'TOPK.LIST', key)
+        elseif type == 'CF' then
+            hash = dragonfly.ihash(0, false, 'CF.INFO', key)
         end
         table.insert(res, hash)
     end
@@ -87,7 +95,14 @@ async def compare_datasets(c_master, c_replica):
     for t in SeederV2.DEFAULT_TYPES:
         m_keys, r_keys = set(), set()
 
-        scan_type = "ReJSON-RL" if t == "JSON" else t
+        _SCAN_TYPE = {
+            "JSON": "ReJSON-RL",
+            "SBF": "MBbloom--",
+            "CMS": "CMSk-TYPE",
+            "TOPK": "TopK-TYPE",
+            "CF": "MBbloomCF",
+        }
+        scan_type = _SCAN_TYPE.get(t, t)
         logging.info(f"Scanning keys for type {t}")
         cursor = "0"
         while True:
@@ -5061,3 +5076,52 @@ async def test_bgsave_during_stable_sync(df_factory: DflyInstanceFactory):
         "DbSlice change callback fired from shard_stable_sync_read during BGSAVE "
         "(SerializerBase::OnChangeBlocking invariant violated).\n" + "\n".join(bad_lines)
     )
+
+
+# Verify chunked CF replication stays within the max chunk size budget.
+@pytest.mark.large
+async def test_cf_chunked_replication_chunk_size(df_factory: DflyInstanceFactory):
+    master = df_factory.create(proactor_threads=1, maxmemory="512m")
+    replica = df_factory.create(proactor_threads=1, maxmemory="512m")
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("CF.RESERVE", "cf", "100000000")
+
+    cf_size = await c_master.execute_command("MEMORY USAGE", "cf")
+    assert cf_size > 2**26, f"Cuckoo filter should be >64MB, got {cf_size}"
+
+    random_seed = random.getrandbits(64)
+    logging.info(f"Using random seed {random_seed} for test reproducibility")
+    test_rng = random.Random(random_seed)
+
+    num_items = 200
+    random_items = [f"item:{i}" for i in test_rng.sample(range(1_000_000), num_items)]
+    async with c_master.pipeline(transaction=False) as pipe:
+        for item in random_items:
+            pipe.execute_command("CF.ADD", "cf", item)
+        await pipe.execute()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async with async_timeout.timeout(240):
+        await wait_for_replicas_state(c_replica)
+
+    replica_results = await asyncio.gather(
+        *(c_replica.execute_command("CF.EXISTS", "cf", item) for item in random_items)
+    )
+    missing = sum(1 for r in replica_results if not r)
+    assert missing == 0, f"{missing} of {num_items} items missing on replica"
+
+    master.stop()
+    replica.stop()
+
+    # kFilterChunkSize = 1 << 26 (64MB); peak should stay under 2x that.
+    MAX_CF_CHUNK_SIZE = 2**27
+    lines = master.find_in_logs("Serialization peak bytes: ")
+    assert len(lines) == 1
+    peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", lines[0])
+    assert peak_bytes < MAX_CF_CHUNK_SIZE
