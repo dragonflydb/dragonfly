@@ -3015,15 +3015,12 @@ void Connection::UpdateFromFlags() {
   always_flush_pipeline_cached = GetFlag(FLAGS_always_flush_pipeline);
   pipeline_squash_limit_cached = GetFlag(FLAGS_pipeline_squash_limit);
   pipeline_wait_batch_usec = GetFlag(FLAGS_pipeline_wait_batch_usec);
-  pipeline_prioritize_large_batches_cached = GetFlag(FLAGS_pipeline_prioritize_large_batches);
-  pipeline_parse_in_proactor_cached = GetFlag(FLAGS_pipeline_parse_in_proactor);
 }
 
 std::vector<std::string> Connection::GetMutableFlagNames() {
-  return base::GetFlagNames(
-      FLAGS_pipeline_queue_limit, FLAGS_pipeline_buffer_limit, FLAGS_max_busy_read_usec,
-      FLAGS_always_flush_pipeline, FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec,
-      FLAGS_pipeline_prioritize_large_batches, FLAGS_pipeline_parse_in_proactor);
+  return base::GetFlagNames(FLAGS_pipeline_queue_limit, FLAGS_pipeline_buffer_limit,
+                            FLAGS_max_busy_read_usec, FLAGS_always_flush_pipeline,
+                            FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec);
 }
 
 void Connection::GetRequestSizeHistogramThreadLocal(std::string* hist) {
