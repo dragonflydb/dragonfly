@@ -35,10 +35,9 @@ class HSetFamily {
   static bool DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
                             const PrimeValue& pv);
 
-  template <class FieldList>
   static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
                                                ExpireFlags flags, std::string_view key,
-                                               FieldList fields, PrimeValue* pv);
+                                               facade::CmdArgParser::Range fields, PrimeValue* pv);
 };
 
 }  // namespace dfly

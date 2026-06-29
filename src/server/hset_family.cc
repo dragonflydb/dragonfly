@@ -462,7 +462,7 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
   return res;
 }
 
-OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, const ParsedArgs& fields) {
+OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, CmdArgParser::Range fields) {
   DCHECK(!fields.empty());
 
   std::vector<OptStr> result(fields.size());
@@ -892,7 +892,7 @@ enum class FieldExpireOutput : uint8_t {
 
 template <FieldExpireOutput kOut>
 OpResult<vector<int64_t>> OpHExpireTime(Transaction* t, EngineShard* shard, string_view key,
-                                        const ParsedArgs& fields) {
+                                        CmdArgParser::Range fields) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   const DbContext& db_cntx = t->GetDbContext();
   auto it_res = db_slice.FindReadOnly(db_cntx, key, OBJ_HASH);
@@ -931,11 +931,11 @@ void HExpireTimeGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
   uint32_t numFields =
       parser.Next<FInt<1u, UINT32_MAX>>("Number of fields must be a positive integer");
-  ParsedArgs fields = parser.UnparsedArgs();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
+  CmdArgParser::Range fields = parser.RemainingRange();
   if (fields.size() != numFields) {
     return rb->SendError(kNumFieldsMismatch, kSyntaxErrType);
   }
@@ -965,7 +965,7 @@ void CmdHPExpireTime(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 // Removes the TTL from the listed existing fields by re-inserting them without an expiry.
 // No-op for listpack-encoded hashes (which never store per-field TTLs).
-void PersistFields(const OpArgs& op_args, string_view key, const ParsedArgs& fields,
+void PersistFields(const OpArgs& op_args, string_view key, CmdArgParser::Range fields,
                    PrimeValue* pv) {
   if (pv->Encoding() != kEncodingStrMap2)
     return;
@@ -983,7 +983,8 @@ void PersistFields(const OpArgs& op_args, string_view key, const ParsedArgs& fie
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 }
 
-OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const ParsedArgs& fields,
+OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key,
+                                  CmdArgParser::Range fields,
                                   const DbSlice::ExpireParams& exp_params) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
@@ -1053,11 +1054,11 @@ void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
   uint32_t numFields =
       parser.Next<FInt<1u, UINT32_MAX>>("Number of fields must be a positive integer");
-  ParsedArgs fields = parser.UnparsedArgs();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
+  CmdArgParser::Range fields = parser.RemainingRange();
   if (fields.size() != numFields)
     return rb->SendError("The `numfields` parameter must match the number of arguments",
                          kSyntaxErrType);
@@ -1105,7 +1106,7 @@ void CmdHGet(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdHMGet(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.Next();  // skip key
-  ParsedArgs fields = parser.UnparsedArgs();
+  CmdArgParser::Range fields = parser.RemainingRange();
   auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
   OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx->tx(), cb);
@@ -1594,8 +1595,7 @@ bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std:
 // 0 if the specified NX | XX | GT | LT condition has not been met.
 // 1 if the expiration time was set/updated.
 // 2 when HEXPIRE/HPEXPIRE is called with 0 seconds and the field is deleted.
-template <class FieldList>
-static std::vector<long> UpdateTTL(FieldList values, uint32_t ttl_sec, ExpireFlags flags,
+static std::vector<long> UpdateTTL(CmdArgParser::Range values, uint32_t ttl_sec, ExpireFlags flags,
                                    StringMap* owner) {
   std::vector<long> res;
   res.reserve(values.size());
@@ -1647,10 +1647,9 @@ static std::vector<long> UpdateTTL(FieldList values, uint32_t ttl_sec, ExpireFla
   return res;
 }
 
-template <class FieldList>
 vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                             ExpireFlags flags, string_view key, FieldList fields,
-                                             PrimeValue* pv) {
+                                             ExpireFlags flags, string_view key,
+                                             CmdArgParser::Range fields, PrimeValue* pv) {
   DCHECK_EQ(OBJ_HASH, pv->ObjType());
   // values contains field names — collect them for HNSW field data preservation.
   absl::InlinedVector<std::string_view, 4> field_names(fields.begin(), fields.end());
@@ -1669,11 +1668,5 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
   return res;
 }
-
-template vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs&, uint32_t, ExpireFlags,
-                                                      string_view, facade::ParsedArgs, PrimeValue*);
-template vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs&, uint32_t, ExpireFlags,
-                                                      string_view, facade::CmdArgParser::Range,
-                                                      PrimeValue*);
 
 }  // namespace dfly
