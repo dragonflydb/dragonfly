@@ -848,6 +848,9 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
   }
 
   PrimeValue* pv = &it->second;
+  if (pv->IsExternal() && !pv->IsCool())
+    return OpStatus::CANCELLED;  // can't mutate offloaded values synchronously
+
   if (pv->ObjType() == OBJ_SET) {
     auto result = SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
     // Finalize memory accounting before potential deletion.
@@ -874,6 +877,9 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
 
   if (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)
     return OpStatus::WRONG_TYPE;
+
+  if (it->second.IsExternal() && !it->second.IsCool())
+    return OpStatus::CANCELLED;  // can't inspect offloaded values synchronously
 
   int32_t res = -1;
   if (it->second.ObjType() == OBJ_SET) {
