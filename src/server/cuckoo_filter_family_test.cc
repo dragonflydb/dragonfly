@@ -47,12 +47,41 @@ TEST_F(CuckooFilterFamilyTest, WrongType) {
   EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
 }
 
-// RDB serialization isn't implemented yet for cuckoo filters (see rdb_save.cc). DUMP must fail
-// cleanly instead of crashing the server until that lands.
-TEST_F(CuckooFilterFamilyTest, DumpFailsCleanly) {
-  ASSERT_EQ(Run("cf.reserve cf1 1000"), "OK");
-  auto resp = Run({"dump", "cf1"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+TEST_F(CuckooFilterFamilyTest, DumpAndRestore) {
+  ASSERT_EQ(Run("cf.reserve cf1 1000 bucketsize 4 maxiterations 10 expansion 2"), "OK");
+  EXPECT_THAT(Run({"cf.add", "cf1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.add", "cf1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.add", "cf1", "bar"}), IntArg(1));
+
+  auto dump = Run({"dump", "cf1"}).GetBuf();
+  EXPECT_EQ(Run({"restore", "cf2", "0", ToSV(dump)}), "OK");
+
+  EXPECT_EQ(Run("type cf2"), "MBbloomCF");
+  EXPECT_THAT(Run({"cf.count", "cf2", "foo"}), IntArg(2));
+  EXPECT_THAT(Run({"cf.exists", "cf2", "bar"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.exists", "cf2", "nope"}), IntArg(0));
+
+  auto resp = Run({"cf.info", "cf2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(
+                        "Size", testing::_, "Number of buckets", testing::_, "Number of filters",
+                        IntArg(1), "Number of items inserted", IntArg(3), "Number of items deleted",
+                        IntArg(0), "Bucket size", IntArg(4), "Expansion rate", IntArg(2),
+                        "Max iterations", IntArg(10))));
+}
+
+TEST_F(CuckooFilterFamilyTest, DumpAndRestoreAfterExpansion) {
+  // Force growth past the first sub-filter so the dump covers num_filters > 1.
+  ASSERT_EQ(Run("cf.reserve cf1 4 expansion 2"), "OK");
+  for (int i = 0; i < 100; ++i) {
+    EXPECT_THAT(Run({"cf.add", "cf1", absl::StrCat(i)}), IntArg(1));
+  }
+
+  auto dump = Run({"dump", "cf1"}).GetBuf();
+  EXPECT_EQ(Run({"restore", "cf2", "0", ToSV(dump)}), "OK");
+
+  for (int i = 0; i < 100; ++i) {
+    EXPECT_THAT(Run({"cf.exists", "cf2", absl::StrCat(i)}), IntArg(1)) << i;
+  }
 }
 
 TEST_F(CuckooFilterFamilyTest, AddAutoCreatesAndAllowsDuplicates) {

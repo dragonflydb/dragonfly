@@ -348,6 +348,7 @@ class RdbSerializer {
   std::error_code SaveSBFObject(const PrimeValue& pv);
   std::error_code SaveTOPKObject(const PrimeValue& pv);
   std::error_code SaveCMSObject(const PrimeValue& pv);
+  std::error_code SaveCuckooFilterObject(const PrimeValue& pv);
 
   std::error_code SaveLongLongAsString(int64_t value);
   std::error_code SaveBinaryDouble(double val);

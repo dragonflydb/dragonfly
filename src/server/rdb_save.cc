@@ -27,6 +27,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/bloom.h"
 #include "core/cms.h"
+#include "core/cuckoo.h"
 #include "core/json/json_object.h"
 #include "core/oah_set.h"
 #include "core/qlist.h"
@@ -371,6 +372,10 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
   if (obj_type == OBJ_TOPK) {
     return SaveTOPKObject(pv);
+  }
+
+  if (obj_type == OBJ_CUCKOOFILTER) {
+    return SaveCuckooFilterObject(pv);
   }
 
   LOG(ERROR) << "Not implemented " << obj_type;
@@ -769,6 +774,25 @@ std::error_code RdbSerializer::SaveTOPKObject(const PrimeValue& pv) {
       absl::little_endian::Store32(chunk_buf.data() + (j * sizeof(uint32_t)), counters[i]);
     }
     RETURN_ON_ERR(WriteRaw(Bytes{chunk_buf.data(), chunk_count * sizeof(uint32_t)}));
+  }
+
+  return {};
+}
+
+std::error_code RdbSerializer::SaveCuckooFilterObject(const PrimeValue& pv) {
+  CuckooFilter* cf = pv.GetCuckooFilter();
+
+  RETURN_ON_ERR(SaveLen(cf->SlotsPerBucket()));
+  RETURN_ON_ERR(SaveLen(cf->MaxIterations()));
+  RETURN_ON_ERR(SaveLen(cf->Expansion()));
+  RETURN_ON_ERR(SaveLen(cf->NumBuckets()));
+  RETURN_ON_ERR(SaveLen(cf->NumItems()));
+  RETURN_ON_ERR(SaveLen(cf->NumDeletes()));
+
+  size_t num_filters = cf->NumFilters();
+  RETURN_ON_ERR(SaveLen(num_filters));
+  for (size_t i = 0; i < num_filters; ++i) {
+    RETURN_ON_ERR(SaveString(cf->FilterBytes(i)));
   }
 
   return {};

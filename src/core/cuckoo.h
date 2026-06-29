@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory_resource>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -95,6 +96,25 @@ class CuckooFilter {
   uint16_t Expansion() const {
     return expansion_;
   }
+
+  // Returns the raw bytes of the idx'th sub-filter. For RDB serialization.
+  std::string_view FilterBytes(size_t idx) const {
+    const SubFilter& sf = filters_[idx];
+    return {reinterpret_cast<const char*>(sf.data()), sf.size()};
+  }
+
+  struct SerializedDataView {
+    uint8_t slots_per_bucket;
+    uint16_t max_iterations;
+    uint16_t expansion;
+    uint64_t num_buckets;
+    uint64_t num_items;
+    uint64_t num_deletes;
+    const std::vector<std::string>& filters;
+  };
+
+  // Restores complete internal state from previously-serialized data (RDB load).
+  void Deserialize(const SerializedDataView& data);
 
  private:
   using SubFilter = std::pmr::vector<uint8_t>;
