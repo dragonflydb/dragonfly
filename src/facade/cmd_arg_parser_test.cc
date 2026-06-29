@@ -520,6 +520,37 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
   }
 }
 
+TEST_F(CmdArgParserTest, ValidatedDouble) {
+  {
+    auto parser = Make({"0.5", "0", "2.5"});
+    EXPECT_DOUBLE_EQ((parser.Next<PositiveDouble>().value), 0.5);
+    EXPECT_DOUBLE_EQ((parser.Next<NonNegativeDouble>().value), 0.0);
+    EXPECT_DOUBLE_EQ((parser.Next<NonNegativeDouble>().value), 2.5);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"0"});  // PositiveDouble rejects 0
+    parser.Next<PositiveDouble>();
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_FLOAT);
+  }
+  {
+    auto parser = Make({"-1"});  // NonNegativeDouble rejects negative
+    parser.Next<NonNegativeDouble>();
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_FLOAT);
+  }
+  {
+    auto parser = Make({"inf"});  // non-finite rejected
+    parser.Next<PositiveDouble>();
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_FLOAT);
+  }
+}
+
 TEST_F(CmdArgParserTest, BackedArguments) {
   cmn::BackedArguments bargs;
   string_view args[] = {"SET", "mykey", "42", "EX", "100"};

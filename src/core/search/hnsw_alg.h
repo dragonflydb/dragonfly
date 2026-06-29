@@ -1586,11 +1586,10 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     dist_t ep_dist = curdist;
     dist_t dynamic_range = std::max(ep_dist, radius);
     auto boundary = [](dist_t range, double eps) {
+      constexpr dist_t kMax = std::numeric_limits<dist_t>::max();
       double bound = static_cast<double>(range) * (1.0 + eps);
-      if (!std::isfinite(bound))
-        return std::numeric_limits<dist_t>::max();
-      return static_cast<dist_t>(
-          std::min(bound, static_cast<double>(std::numeric_limits<dist_t>::max())));
+      return std::isfinite(bound) ? static_cast<dist_t>(std::min(bound, static_cast<double>(kMax)))
+                                  : kMax;
     };
 
     dist_t dyn_boundary = boundary(dynamic_range, epsilon);

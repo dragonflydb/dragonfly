@@ -6,12 +6,9 @@
 
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
-#include <absl/strings/str_cat.h>
 
-#include <algorithm>
 #include <cmath>
 #include <concepts>
-#include <initializer_list>
 #include <optional>
 #include <string_view>
 #include <tuple>
@@ -72,21 +69,52 @@ namespace facade {
 //     return cmd_cntx->SendError(parser.TakeError().MakeReply()); // trailing args
 //   // or: if (parser.HasError()) ...
 
-// Numerical range restriction used with Next<FInt<lo, hi>>().
-template <auto min, auto max> struct FInt {
-  decltype(min) value = {};
-  operator decltype(min)() {
-    return value;
-  }
-
-  static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
-  static constexpr auto kMin = min;
-  static constexpr auto kMax = max;
+// Validated numeric type for Next<T>(): exposes an underlying_t, an implicit conversion to it, and
+// a static validate() predicate. FInt and the double validators below are instances. See
+// Convert<T>().
+template <class T>
+concept FNum = requires(T t, typename T::underlying_t v) {
+  static_cast<typename T::underlying_t>(t);
+  { T::validate(v) } -> std::same_as<bool>;
 };
 
-template <class T> constexpr bool is_fint = false;
+// Numerical range restriction used with Next<FInt<lo, hi>>().
+template <auto min, auto max> struct FInt {
+  static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
+  using underlying_t = decltype(min);
 
-template <auto min, auto max> constexpr bool is_fint<FInt<min, max>> = true;
+  underlying_t value = {};
+  operator underlying_t() const {
+    return value;
+  }
+  static constexpr bool validate(underlying_t v) {
+    return v >= min && v <= max;
+  }
+};
+
+// Rejects non-positive and non-finite doubles. Use with Next<PositiveDouble>().
+struct PositiveDouble {
+  using underlying_t = double;
+  underlying_t value = {};
+  operator underlying_t() const {
+    return value;
+  }
+  static constexpr bool validate(underlying_t v) {
+    return v > 0 && std::isfinite(v);
+  }
+};
+
+// Rejects negative and non-finite doubles. Use with Next<NonNegativeDouble>().
+struct NonNegativeDouble {
+  using underlying_t = double;
+  underlying_t value = {};
+  operator underlying_t() const {
+    return value;
+  }
+  static constexpr bool validate(underlying_t v) {
+    return v >= 0 && std::isfinite(v);
+  }
+};
 
 template <class T> constexpr bool is_optional = false;
 
@@ -133,8 +161,9 @@ struct CmdArgParser {
   // DCHECKs that any error was consumed.
   ~CmdArgParser();
 
-  std::string_view Peek() {
-    return SafeSV(cur_i_);
+  // Returns the arg `ahead` positions past the cursor without consuming it (empty if out of range).
+  std::string_view Peek(size_t ahead = 0) {
+    return SafeSV(cur_i_ + ahead);
   }
 
   template <class T = std::string_view, class... Ts> auto Next() {
@@ -164,20 +193,6 @@ struct CmdArgParser {
       error_.type = CUSTOM_ERROR;
       error_.custom_msg = std::string{err_msg};
     }
-    return val;
-  }
-
-  double NextPositiveDouble(std::string_view err_msg) {
-    double val = Next<double>(err_msg);
-    if (!HasError() && (!(val > 0) || !std::isfinite(val)))
-      ReportCustom(std::string{err_msg});
-    return val;
-  }
-
-  double NextNonNegativeDouble(std::string_view err_msg) {
-    double val = Next<double>(err_msg);
-    if (!HasError() && (!(val >= 0) || !std::isfinite(val)))
-      ReportCustom(std::string{err_msg});
     return val;
   }
 
@@ -245,59 +260,6 @@ struct CmdArgParser {
     auto res = MapImpl(SafeSV(cur_i_), std::forward<Cases>(cases)...);
     cur_i_ = res ? cur_i_ + 1 : cur_i_;
     return res;
-  }
-
-  template <class Func>
-  bool TryParseCountedKeyValueList(std::initializer_list<std::string_view> count_forcing_tags,
-                                   std::initializer_list<std::string_view> tags,
-                                   std::string_view context, Func func) {
-    if (cur_i_ + 1 >= args_.size() || error_)
-      return false;
-
-    auto matches_any = [](std::string_view arg, std::initializer_list<std::string_view> options) {
-      return std::any_of(options.begin(), options.end(),
-                         [arg](std::string_view opt) { return absl::EqualsIgnoreCase(arg, opt); });
-    };
-
-    std::string_view next = SafeSV(cur_i_ + 1);
-    bool force_count = matches_any(next, count_forcing_tags);
-    if (!force_count && !matches_any(next, tags))
-      return false;
-
-    size_t nargs = 0;
-    bool valid_count = absl::SimpleAtoi(SafeSV(cur_i_), &nargs) && nargs > 0 && (nargs % 2 == 0);
-    if (!valid_count) {
-      if (!force_count)
-        return false;
-      ReportCustom(absl::StrCat("Invalid argument count in ", context));
-      return true;
-    }
-
-    ++cur_i_;  // Consume nargs.
-    if (nargs > args_.size() - cur_i_) {
-      Report(OUT_OF_BOUNDS, cur_i_);
-      return true;
-    }
-    size_t end = cur_i_ + nargs;
-
-    while (cur_i_ < end && !error_) {
-      std::string_view tag = Next();
-      if (!matches_any(tag, tags)) {
-        ReportCustom(absl::StrCat("Unknown argument `", tag, "` in ", context));
-        return true;
-      }
-
-      size_t before_value = cur_i_;
-      func(this, tag);
-      if (!error_ && cur_i_ != before_value + 1) {
-        ReportCustom(absl::StrCat("Invalid argument count in ", context));
-        return true;
-      }
-    }
-
-    if (!error_ && cur_i_ < args_.size() && matches_any(SafeSV(cur_i_), tags))
-      ReportCustom(absl::StrCat("Unknown argument `", SafeSV(cur_i_), "` in ", context));
-    return true;
   }
 
   // If the next arg matches `tag`, consume it and the following args-into-pointers; else no-op.
@@ -412,7 +374,7 @@ struct CmdArgParser {
 
   template <class T> T Convert(size_t idx) {
     static_assert(std::is_arithmetic_v<T> || std::is_constructible_v<T, std::string_view> ||
-                      is_fint<T> || is_optional<T>,
+                      FNum<T> || is_optional<T>,
                   "incorrect type");
     if constexpr (is_optional<T>) {
       return T{Convert<typename T::value_type>(idx)};
@@ -420,18 +382,15 @@ struct CmdArgParser {
       return Num<T>(idx);
     } else if constexpr (std::is_constructible_v<T, std::string_view>) {
       return static_cast<T>(SafeSV(idx));
-    } else if constexpr (is_fint<T>) {
-      return {ConvertFInt<T::kMin, T::kMax>(idx)};
+    } else if constexpr (FNum<T>) {
+      using U = typename T::underlying_t;
+      U val = Num<U>(idx);
+      if (!T::validate(val)) {
+        Report(std::is_floating_point_v<U> ? INVALID_FLOAT : INVALID_INT, idx);
+        return {};
+      }
+      return T{val};
     }
-  }
-
-  template <auto min, auto max> FInt<min, max> ConvertFInt(size_t idx) {
-    auto res = Num<decltype(min)>(idx);
-    if (res < min || res > max) {
-      Report(INVALID_INT, idx);
-      return {};
-    }
-    return {res};
   }
 
   std::string_view SafeSV(size_t i) const {
