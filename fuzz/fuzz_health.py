@@ -95,6 +95,16 @@ def _delta(after, before, key):
     return _num(after, key) - _num(before, key)
 
 
+def _resolve_new_findings(directory_count, after_value, before_value):
+    # Per-run count: prefer the Analyze directory count (same source as the failure gate);
+    # fall back to the stats delta so the cumulative counter can't warn on resumed state.
+    if directory_count is not None:
+        parsed = _parse_number(str(directory_count))
+        if isinstance(parsed, (int, float)):
+            return max(0, int(parsed))
+    return max(0, int(after_value) - int(before_value))
+
+
 def _load_before_state(path):
     if not path:
         return {"stats": {}}, []
@@ -148,6 +158,15 @@ def build_report(args):
     unique_hangs = _first_num(after_stats, "unique_hangs", "saved_hangs")
     execs_per_sec = _num(after_stats, "execs_per_sec")
 
+    before_saved_crashes = _first_num(before_stats, "saved_crashes", "unique_crashes")
+    before_saved_hangs = _first_num(before_stats, "saved_hangs", "unique_hangs")
+    new_crashes = _resolve_new_findings(
+        getattr(args, "crash_count", None), saved_crashes, before_saved_crashes
+    )
+    new_hangs = _resolve_new_findings(
+        getattr(args, "hang_count", None), saved_hangs, before_saved_hangs
+    )
+
     metrics = {
         "target": args.target,
         "duration_minutes": args.duration_minutes,
@@ -168,6 +187,8 @@ def build_report(args):
         "saved_hangs": saved_hangs,
         "unique_crashes": unique_crashes,
         "unique_hangs": unique_hangs,
+        "new_crashes": new_crashes,
+        "new_hangs": new_hangs,
         "last_find": last_find,
         "last_find_age_seconds": last_find_age,
         "bitmap_cvg": after_stats.get("bitmap_cvg", ""),
@@ -196,10 +217,10 @@ def build_report(args):
     if isinstance(stability, (int, float)) and stability < 80:
         warnings.append(f"AFL stability is low: {metrics['stability']}")
 
-    if metrics["saved_crashes"] > 0:
-        warnings.append(f"AFL reported {metrics['saved_crashes']} saved crash(es)")
-    if metrics["saved_hangs"] > 0:
-        warnings.append(f"AFL reported {metrics['saved_hangs']} saved hang(s)")
+    if metrics["new_crashes"] > 0:
+        warnings.append(f"AFL found {metrics['new_crashes']} new crash(es) this run")
+    if metrics["new_hangs"] > 0:
+        warnings.append(f"AFL found {metrics['new_hangs']} new hang(s) this run")
 
     metrics["warnings"] = warnings
     return metrics
@@ -233,7 +254,9 @@ def write_markdown(path, data):
         ("bitmap_cvg", data["bitmap_cvg"]),
         ("stability", data["stability"]),
         ("saved_crashes", data["saved_crashes"]),
+        ("new_crashes", data["new_crashes"]),
         ("saved_hangs", data["saved_hangs"]),
+        ("new_hangs", data["new_hangs"]),
         ("unique_crashes", data["unique_crashes"]),
         ("unique_hangs", data["unique_hangs"]),
         ("queue_size_bytes", data["queue_size_bytes"]),
@@ -273,7 +296,9 @@ def print_report(data):
         "bitmap_cvg",
         "stability",
         "saved_crashes",
+        "new_crashes",
         "saved_hangs",
+        "new_hangs",
         "unique_crashes",
         "unique_hangs",
     ):
@@ -321,6 +346,8 @@ def main():
     report.add_argument("--cache-hit", required=True)
     report.add_argument("--commit", required=True)
     report.add_argument("--run-url", required=True)
+    report.add_argument("--crash-count", default=None)
+    report.add_argument("--hang-count", default=None)
     report.set_defaults(func=report_cmd)
 
     args = parser.parse_args()

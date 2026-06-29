@@ -20,6 +20,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 #include <absl/cleanup/cleanup.h>
+#include <absl/numeric/bits.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
@@ -33,6 +34,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/bloom.h"
 #include "core/cms.h"
+#include "core/cuckoo.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
 #include "core/oah_set.h"
@@ -177,7 +179,7 @@ bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
          type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
          type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2 || type == RDB_TYPE_CMS ||
-         type == RDB_TYPE_TOPK;
+         type == RDB_TYPE_TOPK || type == RDB_TYPE_CUCKOO;
 }
 
 DbSlice& GetCurrentDbSlice() {
@@ -202,6 +204,7 @@ class RdbLoaderBase::OpaqueObjLoader {
   void operator()(const RdbSBF& src);
   void operator()(const RdbCMS& src);
   void operator()(const RdbTOPK& src);
+  void operator()(const RdbCuckoo& src);
 
   std::error_code ec() const {
     return ec_;
@@ -343,6 +346,14 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCMS& src) {
   DCHECK_EQ(src.counters.size(), cms->NumCounters());
   cms->Load(src.total_incr_count, src.counters.data());
   pv_->SetCMS(cms);
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCuckoo& src) {
+  CuckooFilter* cf =
+      CompactObj::AllocateMR<CuckooFilter>(CuckooFilterOptions{}, CompactObj::memory_resource());
+  cf->Deserialize({src.slots_per_bucket, src.max_iterations, src.expansion, src.num_buckets,
+                   src.num_items, src.num_deletes, src.filters});
+  pv_->SetCuckooFilter(cf);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
@@ -1287,6 +1298,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_CMS:
       iores = ReadCMS();
       break;
+    case RDB_TYPE_CUCKOO:
+      iores = ReadCuckoo();
+      break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
 
@@ -2057,6 +2071,54 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
   }
 
   return OpaqueObj{std::move(res), RDB_TYPE_CMS};
+}
+
+io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCuckoo() {
+  RdbCuckoo res;
+
+  uint64_t slots_per_bucket, max_iterations, expansion;
+  SET_OR_UNEXPECT(LoadLen(nullptr), slots_per_bucket);
+  SET_OR_UNEXPECT(LoadLen(nullptr), max_iterations);
+  SET_OR_UNEXPECT(LoadLen(nullptr), expansion);
+
+  // expansion 0 means non-expanding; non-zero must be a power of two (AltIndex symmetry).
+  if (slots_per_bucket == 0 || slots_per_bucket > UINT8_MAX || max_iterations == 0 ||
+      max_iterations > UINT16_MAX || expansion > UINT16_MAX ||
+      (expansion != 0 && !absl::has_single_bit(expansion))) {
+    LOG(ERROR) << "Invalid Cuckoo filter parameters: slots_per_bucket=" << slots_per_bucket
+               << ", max_iterations=" << max_iterations << ", expansion=" << expansion;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+  res.slots_per_bucket = static_cast<uint8_t>(slots_per_bucket);
+  res.max_iterations = static_cast<uint16_t>(max_iterations);
+  res.expansion = static_cast<uint16_t>(expansion);
+
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.num_buckets);
+  // num_buckets must be a power of two — AltIndex requires it for correct KO-insert rollback.
+  if (!absl::has_single_bit(res.num_buckets))
+    return Unexpected(errc::rdb_file_corrupted);
+
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.num_items);
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.num_deletes);
+
+  uint64_t num_filters;
+  SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+
+  if (num_filters == 0)
+    return Unexpected(errc::rdb_file_corrupted);
+
+  res.filters.reserve(num_filters);
+  for (uint64_t i = 0; i < num_filters; ++i) {
+    std::string blob;
+    SET_OR_UNEXPECT(FetchGenericString(), blob);
+    // Empty blobs pass the modulo check (0 % n == 0) but would cause division-by-zero
+    // in BucketIndices (NumBuckets returns 0 → p.h1 % 0).
+    if (blob.empty() || blob.size() % res.slots_per_bucket != 0)
+      return Unexpected(errc::rdb_file_corrupted);
+    res.filters.push_back(std::move(blob));
+  }
+
+  return OpaqueObj{std::move(res), RDB_TYPE_CUCKOO};
 }
 
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {

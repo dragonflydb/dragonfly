@@ -349,7 +349,9 @@ jobs:
             --reset-state "${RESET_STATE}" \
             --cache-hit "${CACHE_RESTORED}" \
             --commit "${GITHUB_SHA}" \
-            --run-url "${RUN_URL}"
+            --run-url "${RUN_URL}" \
+            --crash-count "${{ steps.analyze.outputs.crash_count || '0' }}" \
+            --hang-count "${{ steps.analyze.outputs.hang_count || '0' }}"
 
           cat "${HEALTH_DIR}/health.md" >> "${GITHUB_STEP_SUMMARY}"
 

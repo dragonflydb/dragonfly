@@ -19,7 +19,6 @@ from redis.exceptions import MovedError
 
 from . import dfly_args
 from .instance import DflyInstanceFactory, DflyInstance
-from .proxy import Proxy
 from .replication_test import check_all_replicas_finished
 from .seeder import DebugPopulateSeeder
 from .utility import (
@@ -1544,7 +1543,7 @@ async def test_migration_with_key_ttl(df_factory):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_finalization_timeout_ms": 50})
-async def test_network_disconnect_during_migration(df_factory):
+async def test_network_disconnect_during_migration(df_factory, proxy_factory):
     instances, nodes = await create_cluster(
         df_factory,
         2,
@@ -1558,41 +1557,33 @@ async def test_network_disconnect_during_migration(df_factory):
     await DebugPopulateSeeder(key_target=100000).run(nodes[0].client)
     start_capture = await DebugPopulateSeeder.capture(nodes[0].client)
 
-    proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", nodes[1].instance.admin_port)
-    await proxy.start()
-    task = asyncio.create_task(proxy.serve())
-
+    proxy = await proxy_factory(nodes[1].instance.admin_port)
     nodes[0].migrations.append(MigrationInfo("127.0.0.1", proxy.port, [(0, 16383)], nodes[1].id))
-    try:
-        logging.debug("Start migration")
-        await apply_config(nodes)
+    logging.debug("Start migration")
+    await apply_config(nodes)
 
-        for _ in range(10):
-            await asyncio.sleep(random.randint(0, 50) / 100)
-            info = await nodes[0].admin_client.info("CLUSTER")
-            logging.debug("drop connection: %s", info)
-            proxy.drop_connection()
-            logging.debug(
-                await nodes[0].admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
-            )
+    for _ in range(10):
+        await asyncio.sleep(random.randint(0, 50) / 100)
+        info = await nodes[0].admin_client.info("CLUSTER")
+        logging.debug("drop connection: %s", info)
+        proxy.drop_connection()
+        logging.debug(
+            await nodes[0].admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
+        )
 
-        await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC", 20)
-    finally:
-        await proxy.close(task)
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC", 20)
 
-    await proxy.start()
-    task = asyncio.create_task(proxy.serve())
-    try:
-        await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
-        nodes[0].migrations = []
-        nodes[0].slots = []
-        nodes[1].slots = [(0, 16383)]
-        logging.debug("remove finished migrations")
-        await apply_config(nodes)
+    await proxy.close()
+    await proxy.start_serving()
 
-        assert (await DebugPopulateSeeder.capture(nodes[1].client)) == start_capture
-    finally:
-        await proxy.close(task)
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    logging.debug("remove finished migrations")
+    await apply_config(nodes)
+
+    assert (await DebugPopulateSeeder.capture(nodes[1].client)) == start_capture
 
 
 @pytest.mark.parametrize(
@@ -1919,10 +1910,11 @@ async def test_start_replication_during_migration(
         json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
     )
 
-    await check_all_replicas_finished([r1_node.client], m1_node.client)
-
     seeder.stop()
     await seed
+
+    await check_all_replicas_finished([r1_node.client], m1_node.client)
+
     fake_capture = await seeder.capture_fake_redis()
     assert await seeder.compare(fake_capture, r1_node.instance.port)
 
@@ -2397,7 +2389,9 @@ async def await_stable_sync(m_client: aioredis.Redis, replica_port, timeout=10):
 
 
 @dfly_args({"proactor_threads": 4})
-async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_seeder_factory):
+async def test_replicate_disconnect_cluster(
+    df_factory: DflyInstanceFactory, df_seeder_factory, proxy_factory
+):
     """
     Create dragonfly cluster of 2 nodes and additional dragonfly server in emulated mode.
     Populate the cluster with data
@@ -2446,9 +2440,7 @@ async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_
 
     fill_task = asyncio.create_task(seeder.run())
 
-    proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", cluster_nodes[0].port)
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+    proxy = await proxy_factory(cluster_nodes[0].port)
 
     # Start replication
     await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port) + " 0 5259")
@@ -2462,7 +2454,7 @@ async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_
     )
 
     # break connection between first node and replica
-    await proxy.close(proxy_task)
+    await proxy.close()
     await asyncio.sleep(3)
 
     async def is_first_master_conn_down(conn):
@@ -2476,8 +2468,7 @@ async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_
     await is_first_master_conn_down(c_replica)
 
     # start connection again
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+    await proxy.start_serving()
 
     seeder.stop()
     await fill_task
@@ -2493,8 +2484,6 @@ async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_
     assert await seeder.compare(capture, replica.port)
     fake_capture = await seeder.capture_fake_redis()
     assert await seeder.compare(fake_capture, replica.port)
-
-    await proxy.close(proxy_task)
 
 
 def is_offset_eq_master_repl_offset(replication_info: str):
@@ -2573,7 +2562,9 @@ async def test_replicate_redis_cluster(redis_cluster, df_factory, df_seeder_fact
 
 
 @dfly_args({"proactor_threads": 4, "pause_wait_timeout": 10})
-async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_seeder_factory):
+async def test_replicate_disconnect_redis_cluster(
+    redis_cluster, df_factory, df_seeder_factory, proxy_factory
+):
     """
     Create redis cluster of 3 nodes.
     Create dragonfly server in emulated mode.
@@ -2603,9 +2594,7 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
 
     fill_task = asyncio.create_task(seeder.run())
 
-    proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", redis_cluster_nodes[1].port)
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+    proxy = await proxy_factory(redis_cluster_nodes[1].port)
 
     # Start replication
     await c_replica.execute_command(
@@ -2620,7 +2609,7 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
     await asyncio.sleep(1)
 
     # break connection between second node and replica
-    await proxy.close(proxy_task)
+    await proxy.close()
     await asyncio.sleep(3)
 
     # check second node connection is down
@@ -2632,8 +2621,7 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
     assert statuses[2] == "up"
 
     # start connection again
-    await proxy.start()
-    proxy_task = asyncio.create_task(proxy.serve())
+    await proxy.start_serving()
 
     # give seeder more time to run
     await asyncio.sleep(1)
@@ -2659,7 +2647,6 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
     await c_replica.execute_command("REPLICAOF NO ONE")
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
-    await proxy.close(proxy_task)
 
 
 @pytest.mark.large

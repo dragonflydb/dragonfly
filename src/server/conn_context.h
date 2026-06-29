@@ -329,10 +329,10 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
-  void ChangeSubscription(bool to_add, bool to_reply, bool sharded, CmdArgList args,
+  void ChangeSubscription(bool to_add, bool to_reply, bool sharded, const facade::ParsedArgs& args,
                           facade::RedisReplyBuilder* rb);
 
-  void ChangePSubscription(bool to_add, bool to_reply, CmdArgList args,
+  void ChangePSubscription(bool to_add, bool to_reply, const facade::ParsedArgs& args,
                            facade::RedisReplyBuilder* rb);
   void UnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb);
   void PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb);
@@ -391,7 +391,7 @@ class ConnectionContext : public facade::ConnectionContext {
     monitor = enable;
   }
 
-  std::vector<unsigned> ChangeSubscriptions(CmdArgList channels, bool pattern, bool to_add,
+  std::vector<unsigned> ChangeSubscriptions(facade::ParsedArgs channels, bool pattern, bool to_add,
                                             bool to_reply);
 };
 

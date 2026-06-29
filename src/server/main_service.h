@@ -126,34 +126,34 @@ class Service : public facade::ServiceInterface {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Quit(CmdArgList args, CommandContext* cmd_cntx);
-  static void Multi(CmdArgList args, CommandContext* cmd_cntx);
+  static void Quit(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Multi(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
-  static void Watch(CmdArgList args, CommandContext* cmd_cntx);
-  static void Unwatch(CmdArgList args, CommandContext* cmd_cntx);
+  static void Watch(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Unwatch(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
-  void Discard(CmdArgList args, CommandContext* cmd_cntx);
+  void Discard(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only = false);
   void EvalRo(CmdArgList args, CommandContext* cmd_cntx);
   void EvalSha(CmdArgList args, CommandContext* cmd_cntx, bool read_only = false);
   void EvalShaRo(CmdArgList args, CommandContext* cmd_cntx);
-  void Exec(CmdArgList args, CommandContext* cmd_cntx);
-  void Publish(CmdArgList args, CommandContext* cmd_cntx);
-  void Subscribe(CmdArgList args, CommandContext* cmd_cntx);
-  void Unsubscribe(CmdArgList args, CommandContext* cmd_cntx);
-  void PSubscribe(CmdArgList args, CommandContext* cmd_cntx);
-  void PUnsubscribe(CmdArgList args, CommandContext* cmd_cntx);
-  void Function(CmdArgList args, CommandContext* cmd_cntx);
-  void Monitor(CmdArgList args, CommandContext* cmd_cntx);
-  void Pubsub(CmdArgList args, CommandContext* cmd_cntx);
-  void Command(CmdArgList args, CommandContext* cmd_cntx);
+  void Exec(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Publish(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Subscribe(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Unsubscribe(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void PSubscribe(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void PUnsubscribe(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Function(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Monitor(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Pubsub(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Command(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   void PubsubChannels(std::string_view pattern, SinkReplyBuilder* builder);
   void PubsubPatterns(SinkReplyBuilder* builder);
-  void PubsubNumSub(CmdArgList channels, SinkReplyBuilder* builder);
+  void PubsubNumSub(facade::ParsedArgs channels, SinkReplyBuilder* builder);
 
   struct EvalArgs {
-    std::string_view sha;  // only one of them is defined.
+    std::string_view sha;
     CmdArgList keys, args;
   };
 

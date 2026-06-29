@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import typing
+from contextlib import AsyncExitStack
 from copy import deepcopy
 from pathlib import Path
 from tempfile import gettempdir, mkdtemp
@@ -25,6 +26,7 @@ from redis import asyncio as aioredis
 
 from . import PortPicker
 from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
+from .proxy import Proxy
 from .utility import (
     DflySeederFactory,
     gen_ca_cert,
@@ -241,6 +243,20 @@ def df_seeder_factory(request) -> DflySeederFactory:
     logging.debug(f"Random seed: {seed}, check: {random.randrange(100)}")
 
     return DflySeederFactory(request.config.getoption("--log-seeder"))
+
+
+@pytest_asyncio.fixture
+async def proxy_factory():
+    async with AsyncExitStack() as stack:
+
+        async def create_proxy(
+            remote_port, remote_host="127.0.0.1", *, host="127.0.0.1", local_port=0
+        ):
+            return await stack.enter_async_context(
+                Proxy(host, local_port, remote_host, remote_port)
+            )
+
+        yield create_proxy
 
 
 def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
@@ -584,7 +600,7 @@ def redis_server(port_picker, df_log_dir) -> RedisServer:
     s = RedisServer(port_picker.get_available_port(), log_dir=df_log_dir)
     try:
         s.start()
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         skip_if_not_in_github()
         raise
     time.sleep(1)
