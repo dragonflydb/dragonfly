@@ -215,4 +215,23 @@ TEST_F(CuckooFilterFamilyTest, DelMissingKey) {
   EXPECT_THAT(Run({"cf.del", "nonexist-key", "foo"}), ErrArg("no such key"));
 }
 
+TEST_F(CuckooFilterFamilyTest, Compact) {
+  ASSERT_EQ(Run("cf.reserve cf1 4"), "OK");
+  for (int i = 0; i < 30; ++i) {
+    EXPECT_THAT(Run({"cf.add", "cf1", absl::StrCat(i)}), IntArg(1));
+  }
+  for (int i = 0; i < 29; ++i) {
+    EXPECT_THAT(Run({"cf.del", "cf1", absl::StrCat(i)}), IntArg(1));
+  }
+
+  // Explicit CF.COMPACT should succeed even though CF.DEL's automatic compaction has
+  // likely already run by this point — it's just a no-op/cheap pass in that case.
+  EXPECT_EQ(Run({"cf.compact", "cf1"}), "OK");
+  EXPECT_THAT(Run({"cf.exists", "cf1", "29"}), IntArg(1));
+}
+
+TEST_F(CuckooFilterFamilyTest, CompactMissingKey) {
+  EXPECT_THAT(Run({"cf.compact", "nonexist-key"}), ErrArg("no such key"));
+}
+
 }  // namespace dfly

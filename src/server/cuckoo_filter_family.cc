@@ -106,10 +106,23 @@ OpResult<bool> OpDel(const OpArgs& op_args, string_view key, string_view item) {
   auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
   RETURN_ON_BAD_STATUS(op_res);
 
-  // RedisBloom auto-compacts (merges sub-filters) once deletes exceed 10% of items, to
-  // reclaim space from sparse sub-filters. CuckooFilter has no compaction/merge support;
-  // this is an intentional, known parity gap that doesn't affect Delete's correctness.
-  return op_res->it->second.GetCuckooFilter()->Delete(CuckooFilter::Hash(item));
+  CuckooFilter* cf = op_res->it->second.GetCuckooFilter();
+  bool deleted = cf->Delete(CuckooFilter::Hash(item));
+  // auto-compact once deletes exceed 10% of items (mirrors RedisBloom's threshold)
+  if (deleted && cf->NumFilters() > 1 && cf->NumDeletes() > cf->NumItems() / 10)
+    cf->Compact(/*cont=*/false);
+  return deleted;
+}
+
+OpStatus OpCompact(const OpArgs& op_args, string_view key) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  RETURN_ON_BAD_STATUS(op_res);
+
+  // cont=true: unlike Delete()'s automatic compaction, CF.COMPACT keeps trying older
+  // sub-filters even if a newer one couldn't be fully emptied.
+  op_res->it->second.GetCuckooFilter()->Compact(/*cont=*/true);
+  return OpStatus::OK;
 }
 
 OpStatus OpReserve(const OpArgs& op_args, string_view key, const CuckooFilterOptions& options) {
@@ -294,6 +307,19 @@ void CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(*res);
 }
 
+void CmdCompact(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpCompact(t->GetOpArgs(shard), key);
+  };
+
+  OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  if (res == OpStatus::OK)
+    return cmd_cntx->SendOk();
+  return cmd_cntx->SendError(res);
+}
+
 }  // namespace
 
 using CI = CommandId;
@@ -310,7 +336,8 @@ void RegisterCuckooFilterFamily(CommandRegistry* registry) {
             << CI{"CF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(MExists)
             << CI{"CF.INFO", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Info)
             << CI{"CF.COUNT", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(Count)
-            << CI{"CF.DEL", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Del);
+            << CI{"CF.DEL", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Del)
+            << CI{"CF.COMPACT", CO::JOURNALED, 2, 1, 1}.HFUNC(Compact);
 }
 
 }  // namespace dfly

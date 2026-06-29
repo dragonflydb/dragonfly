@@ -116,6 +116,13 @@ class CuckooFilter {
   // Restores complete internal state from previously-serialized data (RDB load).
   void Deserialize(const SerializedDataView& data);
 
+  // Reclaims space by moving items from newer sub-filters back into older ones, freeing the
+  // newest sub-filter once it's been fully emptied. Only ever frees filters_.back(), one at
+  // a time, working from the newest sub-filter down to (but not including) filters_[0].
+  // If `cont` is false then the algorithm stops at the first sub-filter that can't be fully
+  // emptied; If `cont` is true (CF.COMPACT), keeps trying older sub-filters regardless.
+  void Compact(bool cont);
+
  private:
   using SubFilter = std::pmr::vector<uint8_t>;
 
@@ -141,6 +148,17 @@ class CuckooFilter {
   // there, then tries to reinsert the evicted fingerprint into its own alternate bucket.
   // Repeats up to max_iterations_ times. On failure, rolls back all swaps.
   bool KOInsert(const LookupParams& p, SubFilter& sf);
+
+  // Attempts to relocate every occupied slot in filters_[filter_idx] into some earlier
+  // sub-filter. Returns true if every slot was relocated or already empty (i.e. this
+  // sub-filter is now empty and safe to free if it's the last one).
+  bool CompactSingleFilter(size_t filter_idx);
+
+  // Tries to move the fingerprint located by the parameters into the
+  // first earlier sub-filter (lowest index first) with room for it.
+  // Returns true if the slot was already empty or the fingerprint was relocated
+  // Returns false if no earlier sub-filter had room
+  bool RelocateSlot(size_t filter_idx, uint64_t bucket_idx, uint8_t slot_idx);
 
   uint8_t slots_per_bucket_;
   uint16_t max_iterations_;
