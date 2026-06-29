@@ -257,6 +257,49 @@ function LG_funcs.mod_cf(key)
     end
 end
 
+-- sbf (scalable bloom filter)
+-- store random items in a bloom filter; append-only structure
+
+function LG_funcs.add_sbf(key)
+    redis.apcall('BF.RESERVE', key, '0.01', LG_funcs.csize * 10)
+    redis.apcall('BF.MADD', key, unpack(randstr_sequence()))
+end
+
+function LG_funcs.mod_sbf(key)
+    redis.apcall('BF.ADD', key, randstr())
+end
+
+-- cms (count-min sketch)
+-- store frequency estimates for random items
+
+function LG_funcs.add_cms(key)
+    redis.apcall('CMS.INITBYDIM', key, LG_funcs.csize * 4, 5)
+    local strs = randstr_sequence()
+    local args = {}
+    for i = 1, #strs do
+        table.insert(args, strs[i])
+        table.insert(args, math.random(1, 100))
+    end
+    redis.apcall('CMS.INCRBY', key, unpack(args))
+end
+
+function LG_funcs.mod_cms(key)
+    redis.apcall('CMS.INCRBY', key, randstr(), math.random(1, 10))
+end
+
+-- topk
+-- store top-k heavy hitters from a stream of items
+
+function LG_funcs.add_topk(key)
+    local k = math.max(1, LG_funcs.csize // 2)
+    redis.apcall('TOPK.RESERVE', key, k)
+    redis.apcall('TOPK.ADD', key, unpack(randstr_sequence()))
+end
+
+function LG_funcs.mod_topk(key)
+    redis.apcall('TOPK.ADD', key, randstr())
+end
+
 function LG_funcs.get_huge_entries()
   return huge_entries
 end

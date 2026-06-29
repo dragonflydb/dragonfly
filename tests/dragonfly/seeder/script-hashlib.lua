@@ -37,3 +37,15 @@ end
 function LH_funcs.cf(key, hash)
     return dragonfly.ihash(hash, false, 'CF.INFO', key)
 end
+
+function LH_funcs.sbf(key, hash)
+    return dragonfly.ihash(hash, false, 'BF.INFO', key)
+end
+
+function LH_funcs.cms(key, hash)
+    return dragonfly.ihash(hash, false, 'CMS.INFO', key)
+end
+
+function LH_funcs.topk(key, hash)
+    return dragonfly.ihash(hash, false, 'TOPK.LIST', key)
+end
