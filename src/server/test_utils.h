@@ -140,7 +140,8 @@ class BaseFamilyTest : public ::testing::Test {
   static std::vector<std::string> StrArray(const RespExpr& expr);
 
   Metrics GetMetrics() const {
-    return service_->server_family().GetMetrics(&namespaces->GetDefaultNamespace());
+    return service_->server_family().GetMetrics(&namespaces->GetDefaultNamespace(),
+                                                MetricsCollectOpts{});
   }
 
   void ClearMetrics();

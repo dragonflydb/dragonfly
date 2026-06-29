@@ -1611,8 +1611,9 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
     util::http::SetMime(util::http::kTextMime, &resp);
     uint64_t uptime = time(NULL) - start_time_;
-    auto metrics = GetMetrics(&namespaces->GetDefaultNamespace());
-    metrics.Print(uptime, dfly_cmd_.get(), &resp, legacy_format_metrics_);
+    auto metrics = GetMetrics(&namespaces->GetDefaultNamespace(), MetricsCollectOpts{});
+    metrics.Print(uptime, service_.mutable_registry(), dfly_cmd_.get(), &resp,
+                  legacy_format_metrics_);
     return send->Invoke(std::move(resp));
   };
 
@@ -1725,7 +1726,7 @@ void ServerFamily::StatsMC(std::string_view section, CommandContext* cmd_ctx) {
   auto kind = ProactorBase::me()->GetKind();
   const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
 
-  Metrics m = GetMetrics(&namespaces->GetDefaultNamespace());
+  Metrics m = GetMetrics(&namespaces->GetDefaultNamespace(), MetricsCollectOpts{});
   uint64_t uptime = time(NULL) - start_time_;
 
   const uint32_t total_conns =
@@ -2471,7 +2472,7 @@ void ServerFamily::ResetStat(Namespace* ns) {
       });
 }
 
-Metrics ServerFamily::GetMetrics(Namespace* ns, bool collect_replication_memory) const {
+Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) const {
   Metrics result;
 
   uint64_t start = absl::GetCurrentTimeNanos();
@@ -2481,9 +2482,9 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, bool collect_replication_memory)
   // per-thread partials are folded into `result` on this thread afterwards.
   std::vector<Metrics> partials(service_.proactor_pool().size());
 
-  auto cb = [&partials, ns, registry = service_.mutable_registry(), collect_replication_memory,
+  auto cb = [&partials, ns, registry = service_.mutable_registry(), &opts,
              dfly_cmd = dfly_cmd_.get()](unsigned index, ProactorBase* pb) {
-    partials[index].InitFromThread(ns, registry, index, collect_replication_memory, dfly_cmd);
+    partials[index].InitFromThread(ns, registry, index, opts, dfly_cmd);
   };
 
   // AwaitBrief (not AwaitFiberOnAll): the callback only reads thread-local/atomic state into
@@ -2539,7 +2540,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, bool collect_replication_memory)
   }
 
   result.peak_stats = peak_stats_;
-  result.cmd_latency_map = service_.mutable_registry()->LatencyMap();
+  if (opts.cmd_latency)
+    result.cmd_latency_map = service_.mutable_registry()->LatencyMap();
   result.used_mem_peak = glob_memory_peaks.used.load(memory_order_relaxed);
   result.used_mem_rss_peak = glob_memory_peaks.rss.load(memory_order_relaxed);
 
@@ -2560,8 +2562,12 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   for (const auto& db_stats : m.db_stats)
     total += db_stats;
 
+  auto section_enabled = [&](string_view name, bool hidden) {
+    return (!hidden && section.empty()) || section == "ALL" || section == name;
+  };
+
   auto should_enter = [&](string_view name, bool hidden = false) {
-    if ((!hidden && section.empty()) || section == "ALL" || section == name) {
+    if (section_enabled(name, hidden)) {
       auto normalized_name = string{name.substr(0, 1)} + absl::AsciiStrToLower(name.substr(1));
       absl::StrAppend(&info, info.empty() ? "" : "\r\n", "# ", normalized_name, "\r\n");
       return true;
@@ -2572,6 +2578,12 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   auto append = [&info](const absl::AlphaNum& a1, const absl::AlphaNum& a2) {
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
+
+  // Fetch the save controller (it takes save_mu_) only when a section that consults it will
+  // render: MEMORY (also default) or the hidden PERSISTENCE. Shared so INFO ALL locks once.
+  std::shared_ptr<detail::SaveStagesController> save_controller;
+  if (section_enabled("MEMORY", false) || section_enabled("PERSISTENCE", true))
+    save_controller = GetSaveController();
 
   bool show_managed_info = priveleged || !absl::GetFlag(FLAGS_managed_service_info);
 
@@ -2698,8 +2710,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       append("replication_full_sync_buffer_bytes", m.replication_stats.full_sync_buf_bytes);
     }
 
-    if (auto controller_copy = GetSaveController()) {
-      append("save_buffer_bytes", controller_copy->GetSaveBuffersSize());
+    if (save_controller) {
+      append("save_buffer_bytes", save_controller->GetSaveBuffersSize());
     }
   };
 
@@ -2809,10 +2821,10 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     double perc = 0;
     bool is_saving = false;
     uint32_t curent_durration_sec = 0;
-    if (auto controller_copy = GetSaveController()) {
+    if (save_controller) {
       is_saving = true;
-      curent_durration_sec = controller_copy->GetCurrentSaveDuration();
-      auto res = controller_copy->GetCurrentSnapshotProgress();
+      curent_durration_sec = save_controller->GetCurrentSaveDuration();
+      auto res = save_controller->GetCurrentSnapshotProgress();
       if (res.total_keys != 0) {
         current_snap_keys = res.current_keys;
         total_snap_keys = res.total_keys;
@@ -2925,7 +2937,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     };
 
     vector<pair<string_view, string>> commands;
-    for (const auto& [name, stats] : m.cmd_stats_map) {
+    auto named = service_.mutable_registry()->NamedCallStats(m.cmd_call_stats);
+    for (const auto& [name, stats] : named) {
       const auto calls = stats.first, sum = stats.second;
       commands.push_back(
           {name, absl::StrJoin({absl::StrCat("calls=", calls), absl::StrCat("usec=", sum),
@@ -3033,7 +3046,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
   if (should_enter("CLUSTER")) {
     append("cluster_enabled", IsClusterEnabledOrEmulated());
-    append("migration_errors_total", service_.cluster_family().MigrationsErrorsCount());
+    append("migration_errors_total", m.migration_errors_total);
     append("total_migrated_keys", m.shard_stats.total_migrated_keys);
   }
 
@@ -3081,25 +3094,32 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   std::vector<std::string> sections;
   bool need_metrics{false};  // Save time - do not fetch metrics if we don't need them.
-  bool need_repl_mem{false};
+  // Nothing collected unless a requested section needs it; the default (no-args) INFO is
+  // handled after the loop.
+  MetricsCollectOpts opts{.replication_memory = false, .cmd_stats = false, .cmd_latency = false};
   Metrics metrics;
 
   sections.reserve(cmd_cntx->tail_args().size());
   while (parser.HasNext()) {
     sections.emplace_back(absl::AsciiStrToUpper(parser.Next<string_view>()));
     const auto& section = sections.back();
-    if (!need_metrics && (section != "SERVER") && (section != "REPLICATION")) {
-      need_metrics = true;
-    }
-    // Mirror should_enter()'s MEMORY gate: the section is rendered for an exact
-    // match or for "ALL" (the empty/no-args case is handled below).
-    if (section == "MEMORY" || section == "ALL") {
-      need_repl_mem = true;
-    }
+    need_metrics |= (section != "SERVER") && (section != "REPLICATION");
+
+    // MEMORY needs replication memory; COMMANDSTATS (hidden) needs call stats; LATENCYSTATS needs
+    // latency histograms (also rendered by default INFO, handled below).
+    const bool is_all = section == "ALL";
+    opts.replication_memory |= (section == "MEMORY") || is_all;
+    opts.cmd_stats |= (section == "COMMANDSTATS") || is_all;
+    opts.cmd_latency |= (section == "LATENCYSTATS") || is_all;
   }
 
   if (need_metrics || sections.empty()) {
-    metrics = GetMetrics(cmd_cntx->server_conn_cntx()->ns, need_repl_mem || sections.empty());
+    if (sections.empty()) {
+      // Default INFO renders MEMORY and LATENCYSTATS (but not the hidden COMMANDSTATS).
+      opts.replication_memory = true;
+      opts.cmd_latency = true;
+    }
+    metrics = GetMetrics(cmd_cntx->server_conn_cntx()->ns, opts);
   } else if (!IsMaster()) {
     metrics.replica_side_info = GetReplicaSummary();
   }

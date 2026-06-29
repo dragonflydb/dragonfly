@@ -6,12 +6,16 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/ascii.h>
 #include <absl/types/span.h>
 
 #include <functional>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include "base/function2.hpp"
+#include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
@@ -91,8 +95,8 @@ class CommandId : public facade::CommandId {
  public:
   using CmdArgList = facade::CmdArgList;
 
-  // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stats_map in
-  // server_state.h)
+  // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_call_stats in
+  // metrics.h)
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             std::optional<uint32_t> acl_categories = std::nullopt);
 
@@ -333,14 +337,36 @@ class CommandRegistry {
     }
   }
 
-  void MergeCallStats(unsigned thread_index,
-                      std::function<void(std::string_view, const CmdCallStats&)> cb) const {
+  size_t size() const {
+    return cmd_map_.size();
+  }
+
+  // Copies proactor `thread_index`'s own per-command counters into `out` (>= size() entries);
+  // reads only this proactor's cells, so it is race-free inside the GetMetrics fan-out.
+  void CollectThreadCallStats(unsigned thread_index, CmdCallStats* out) const {
+    size_t i = 0;
+    for (const auto& k_v : cmd_map_)
+      out[i++] = k_v.second.GetStats(thread_index);
+  }
+
+  // Maps the merged per-command counters (indexed by registry order, see CollectThreadCallStats)
+  // to lowercase command names, skipping zero-call commands. `merged` is either empty (stats were
+  // not collected) or sized to the whole registry — cmd_map_ is fixed after startup, so index i
+  // maps to the same command it was collected for.
+  absl::flat_hash_map<std::string, CmdCallStats> NamedCallStats(
+      const std::vector<CmdCallStats>& merged) const {
+    absl::flat_hash_map<std::string, CmdCallStats> res;
+    if (merged.empty())
+      return res;
+    DCHECK_EQ(merged.size(), cmd_map_.size());
+    size_t i = 0;
     for (const auto& k_v : cmd_map_) {
-      auto src = k_v.second.GetStats(thread_index);
-      if (src.first == 0)
+      const CmdCallStats& s = merged[i++];
+      if (s.first == 0)
         continue;
-      cb(k_v.second.name(), src);
+      res[absl::AsciiStrToLower(k_v.second.name())] = s;
     }
+    return res;
   }
 
   void StartFamily(std::optional<uint32_t> acl_category = std::nullopt);

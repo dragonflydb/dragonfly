@@ -150,9 +150,8 @@ class ServerFamily {
 
   void ResetStat(Namespace* ns);
 
-  // Pass collect_replication_memory=false to skip the per-shard replication
-  // collection when no consumer (INFO MEMORY / metrics) needs it.
-  Metrics GetMetrics(Namespace* ns, bool collect_replication_memory = true) const;
+  // Collects server metrics. See MetricsCollectOpts; a default-constructed value collects all.
+  Metrics GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) const;
 
   std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section,
                                 bool priveleged) const;
