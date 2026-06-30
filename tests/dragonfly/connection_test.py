@@ -716,6 +716,12 @@ async def test_reply_count(df_server: DflyInstance):
     for _ in range(100):
         p.incr("num-1")
 
+    # A 100-command pipeline from localhost lands entirely in the TCP receive buffer
+    # before the server reads it.  Both V1 (SquashPipeline) and V2 (ParseLoop) drain
+    # the full batch and execute it before writing replies, so all 100 replies are
+    # coalesced into a single writev.  The limit is 2 rather than 1 to tolerate a
+    # rare OS-level TCP segment split that produces two read events.  Exceeding 2
+    # would indicate a regression in reply aggregation.
     pipe_limit = 2
     pipe_flushes = await measure(p.execute())
     assert pipe_flushes <= pipe_limit
