@@ -153,6 +153,8 @@ TEST_F(SetFamilyTest, SInterCard) {
   EXPECT_THAT(resp, ErrArg("limit can't be negative"));
   resp = Run({"sintercard", "2", "s1"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
+  resp = Run({"sintercard", "0", "LIMIT", "0"});
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
   resp = Run({"sintercard", "-1", "s1"});
   EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 }

@@ -713,7 +713,7 @@ OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key,
 
 struct HSetExParams {
   OpSetParams op_sp;
-  ParsedArgs fields;  // field/value pairs; valid only when the parser has no error.
+  CmdArgParser::Range fields;  // field/value pairs; valid only when the parser has no error.
 };
 
 // Parses HSETEX arguments after the key, reporting any error into `parser` (surfaced by the caller
@@ -765,12 +765,12 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
   // once errored, so the steps below need no per-step checks.
   if (parser->Check("FIELDS")) {
     op_sp.format = Format::kRedis;
-    uint32_t numfields = parser->Next<uint32_t>();
     if (op_sp.mode == Mode::kNX || (op_sp.keepttl && has_exp))
       parser->Report(CmdArgParser::CUSTOM_ERROR);  // NX is Dragonfly-only; one expiry option max
-
-    res.fields = parser->UnparsedArgs();
-    if (numfields == 0 || res.fields.size() != size_t(numfields) * 2)
+    // numfields field/value pairs; NextRange validates count > 0 and that count*2 args remain.
+    res.fields =
+        parser->NextRange(2, "The `numfields` parameter must match the number of arguments");
+    if (parser->HasNext())  // too many args
       parser->ReportCustom("The `numfields` parameter must match the number of arguments");
   } else if (has_exp) {
     // EX/PX/EXAT/PXAT belong to the Redis form; without FIELDS the command is malformed.
@@ -779,7 +779,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
     op_sp.format = Format::kDragonfly;
     op_sp.ttl = parser->Next<VNum<1, kMaxTtl>>();
 
-    res.fields = parser->UnparsedArgs();
+    res.fields = parser->RemainingRange();
     if (res.fields.empty() || res.fields.size() % 2 != 0)
       parser->ReportCustom(WrongNumArgsError(cmd_name));
   }
