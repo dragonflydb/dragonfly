@@ -313,60 +313,41 @@ struct CmsMergeArgs {
 };
 
 bool ParseMergeArgs(CmdArgParser parser, RedisReplyBuilder* rb, CmsMergeArgs* out) {
-  uint32_t num_keys;
-
   out->dest_key = parser.Next();
-  num_keys = parser.Next<uint32_t>();
+
+  // numkeys is non-terminal: an optional WEIGHTS clause may follow.
+  CmdArgParser::Range keys = parser.NextRange(1, kCmsWrongNumKeys);
   if (auto err = parser.TakeError(); err) {
     rb->SendError(err.MakeReply());
     return false;
   }
+  out->src_keys.assign(keys.begin(), keys.end());
+  uint32_t num_keys = keys.size();
 
-  if (num_keys == 0) {
-    rb->SendError(kCmsWrongNumKeys);
-    return false;
+  if (!parser.HasNext()) {
+    out->weights.resize(num_keys, 1);
+    return true;
   }
 
-  if (!parser.HasAtLeast(num_keys)) {
-    rb->SendError(kSyntaxErr);
-    return false;
-  }
-
-  out->src_keys.reserve(num_keys);
-  for (uint32_t i = 0; i < num_keys; ++i) {
-    out->src_keys.push_back(parser.Next());
-  }
-
-  if (parser.HasNext()) {
-    string_view weights_kw = parser.Next();
-    if (!absl::EqualsIgnoreCase(weights_kw, "WEIGHTS")) {
-      rb->SendError(kCmsWrongNumKeysWeights);
-      return false;
-    }
-
-    out->weights.reserve(num_keys);
-    for (uint32_t i = 0; i < num_keys; ++i) {
-      if (!parser.HasNext()) {
-        rb->SendError(kCmsWrongNumKeysWeights);
-        return false;
-      }
-
-      int64_t weight;
-      if (!absl::SimpleAtoi(parser.Next(), &weight)) {
-        rb->SendError(kCmsCannotParseNumber);
-        return false;
-      }
-      out->weights.push_back(weight);
-    }
-  }
-
-  if (parser.HasNext()) {
+  if (!parser.Check("WEIGHTS")) {
     rb->SendError(kCmsWrongNumKeysWeights);
     return false;
   }
 
-  if (out->weights.empty()) {
-    out->weights.resize(num_keys, 1);
+  CmdArgParser::Range weights = parser.RemainingRange();
+  if (weights.size() != num_keys) {
+    rb->SendError(kCmsWrongNumKeysWeights);
+    return false;
+  }
+
+  out->weights.reserve(num_keys);
+  for (string_view w : weights) {
+    int64_t weight;
+    if (!absl::SimpleAtoi(w, &weight)) {
+      rb->SendError(kCmsCannotParseNumber);
+      return false;
+    }
+    out->weights.push_back(weight);
   }
 
   return true;

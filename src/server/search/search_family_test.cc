@@ -5409,6 +5409,19 @@ TEST_F(SearchFamilyTest, HnswVectorRange) {
                    "PARAMS", "2", "vec", query_vec, "LIMIT", "0", "10"});
   EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
 
+  resp = Run({"FT.SEARCH", "idx",
+              "@pos:[VECTOR_RANGE 1.5 $vec]=>{$EPSILON: 0.5; $YIELD_DISTANCE_AS: dist}", "PARAMS",
+              "2", "vec", query_vec, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
+
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE inf $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec});
+  EXPECT_THAT(resp, ErrArg("radius"));
+
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$EPSILON: 2000000}", "PARAMS",
+              "2", "vec", query_vec});
+  EXPECT_THAT(resp, ErrArg("Query syntax error"));
+
   // Score alias is returned in each document by default
   resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
               "PARAMS", "2", "vec", query_vec, "RETURN", "1", "dist"});
@@ -5533,6 +5546,11 @@ TEST_F(SearchFamilyTest, FlatVectorRangeYieldDistanceAs) {
   resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist}",
               "PARAMS", "2", "v", vec, "SORTBY", "dist", "ASC", "RETURN", "1", "dist"});
   EXPECT_EQ(resp.GetVec()[1].GetString(), "k5");
+
+  resp = Run({"FT.SEARCH", "idx",
+              "@pos:[VECTOR_RANGE 1.5 $v]=>{$EPSILON: 0.5; $YIELD_DISTANCE_AS: dist}", "PARAMS",
+              "2", "v", vec});
+  EXPECT_THAT(resp, ErrArg("EPSILON"));
 }
 
 TEST_F(SearchFamilyTest, FlatVectorRangeWithFilter) {
@@ -5714,6 +5732,12 @@ TEST_F(SearchFamilyTest, VectorRangeAggregate) {
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "sum_dist", "2")));
 
+  resp = Run({"FT.AGGREGATE", "idx",
+              "@vec:[VECTOR_RANGE 2.5 $vec]=>{$EPSILON: 0.5; $YIELD_DISTANCE_AS: dist}", "PARAMS",
+              "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "SUM", "1", "@dist", "AS",
+              "sum_dist"});
+  EXPECT_THAT(resp, ErrArg("EPSILON"));
+
   // Large radius — both routes captured; each route has 3 docs
   resp = Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 10 $vec]=>{$YIELD_DISTANCE_AS: dist}",
               "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0",
@@ -5763,6 +5787,13 @@ TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
       Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 2.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
            "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "SUM", "1", "@dist",
            "AS", "sum_dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "sum_dist", "2")));
+
+  resp = Run({"FT.AGGREGATE", "idx",
+              "@pos:[VECTOR_RANGE 2.5 $vec]=>{$EPSILON: 0.5; $YIELD_DISTANCE_AS: dist}", "PARAMS",
+              "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "SUM", "1", "@dist", "AS",
+              "sum_dist"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "sum_dist", "2")));
 
@@ -6778,6 +6809,7 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
   vparams.hnsw_m = 32;
   vparams.hnsw_ef_construction = 400;
   vparams.hnsw_ef_runtime = 75;
+  vparams.hnsw_epsilon = 0.07;
   field.special_params = vparams;
 
   DocIndex base;
@@ -6791,9 +6823,9 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
 
   std::string cmd = info.BuildRestoreCommand();
 
-  // HNSW 14 = 7 key-value pairs:
-  // TYPE, DIM, DISTANCE_METRIC, INITIAL_CAP, M, EF_CONSTRUCTION, EF_RUNTIME.
-  EXPECT_THAT(cmd, HasSubstr("HNSW 14"));
+  // HNSW 16 = 8 key-value pairs:
+  // TYPE, DIM, DISTANCE_METRIC, INITIAL_CAP, M, EF_CONSTRUCTION, EF_RUNTIME, EPSILON.
+  EXPECT_THAT(cmd, HasSubstr("HNSW 16"));
   EXPECT_THAT(cmd, HasSubstr("TYPE FLOAT32"));
   EXPECT_THAT(cmd, HasSubstr("DIM 4"));
   EXPECT_THAT(cmd, HasSubstr("DISTANCE_METRIC COSINE"));
@@ -6801,6 +6833,7 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
   EXPECT_THAT(cmd, HasSubstr("M 32"));
   EXPECT_THAT(cmd, HasSubstr("EF_CONSTRUCTION 400"));
   EXPECT_THAT(cmd, HasSubstr("EF_RUNTIME 75"));
+  EXPECT_THAT(cmd, HasSubstr("EPSILON 0.07"));
 }
 
 // FT.CREATE with a VECTOR FLAT field whose DIM is enormous (e.g. 99999999999)
@@ -6937,7 +6970,7 @@ TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
                  "embedding",
                  "VECTOR",
                  "HNSW",
-                 "12",
+                 "16",
                  "TYPE",
                  "FLOAT32",
                  "DIM",
@@ -6949,18 +6982,43 @@ TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
                  "EF_CONSTRUCTION",
                  "200",
                  "EF_RUNTIME",
-                 "150"}),
+                 "150",
+                 "INITIAL_CAP",
+                 "500",
+                 "EPSILON",
+                 "0.07"}),
             "OK");
 
   auto info = Run({"ft.info", "idx"});
 
-  auto vector_field_matcher =
-      IsArray("identifier", "embedding", "attribute", "embedding", "type", "VECTOR", "algorithm",
-              "HNSW", "data_type", "FLOAT32", "dim", "4", "distance_metric", "COSINE", "M", "16",
-              "ef_construction", "200", "ef_runtime", "150");
+  auto vector_field_matcher = IsArray(
+      "identifier", "embedding", "attribute", "embedding", "type", "VECTOR", "algorithm", "HNSW",
+      "data_type", "FLOAT32", "dim", "4", "distance_metric", "COSINE", "initial_cap", "500", "M",
+      "16", "ef_construction", "200", "ef_runtime", "150", "epsilon", "0.070000");
 
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, "attributes", IsArray(vector_field_matcher), _, _, _,
                             _, _, _));
+}
+
+TEST_F(SearchFamilyTest, VectorEpsilonValidation) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx_hnsw_zero", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "8",
+                 "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2", "EPSILON", "0"}),
+            "OK");
+  EXPECT_THAT(Run({"FT.CREATE", "idx_hnsw_neg", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "8",
+                   "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2", "EPSILON", "-0.1"}),
+              ErrArg("Parse error"));
+  EXPECT_EQ(Run({"FT.CREATE", "idx_hnsw_5000", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "8",
+                 "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2", "EPSILON", "5000"}),
+            "OK");
+  EXPECT_THAT(Run({"FT.CREATE", "idx_hnsw_big", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "8",
+                   "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2", "EPSILON", "2000000"}),
+              ErrArg("Parse error"));
+  EXPECT_THAT(Run({"FT.CREATE", "idx_flat_eps", "ON", "HASH", "SCHEMA", "v", "VECTOR", "FLAT", "8",
+                   "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2", "EPSILON", "0.1"}),
+              ErrArg("Parse error"));
+  EXPECT_THAT(Run({"FT.CREATE", "idx_hnsw_inf", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "8",
+                   "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2", "EPSILON", "inf"}),
+              ErrArg("Parse error"));
 }
 
 // Verify that FT.INFO returns TAG field parameters: SEPARATOR and CASESENSITIVE.
@@ -8712,6 +8770,12 @@ TEST_F(SearchFamilyTest, FtHybridRangeFlat) {
   // d:1 (closest + text match) should rank first
   ASSERT_FALSE(rkeys.empty());
   EXPECT_EQ(rkeys[0], "d:1");
+
+  resp =
+      Run({"FT.HYBRID", "idx", "SEARCH",  "apple",  "VSIM", "@vec",  "$v",           "RANGE", "0.5",
+           "EPSILON",   "0.1", "COMBINE", "LINEAR", "4",    "ALPHA", "0.5",          "BETA",  "0.5",
+           "LIMIT",     "0",   "5",       "PARAMS", "2",    "v",     FloatVec1(1.0f)});
+  EXPECT_THAT(resp, ErrArg("EPSILON"));
 }
 
 TEST_F(SearchFamilyTest, FtHybridRangeHnsw) {
@@ -8733,6 +8797,44 @@ TEST_F(SearchFamilyTest, FtHybridRangeHnsw) {
   auto rkeys = HybridKeys(resp);
   ASSERT_FALSE(rkeys.empty());
   EXPECT_EQ(rkeys[0], "d:1");
+
+  resp = Run({"FT.HYBRID", "idx", "SEARCH", "apple", "VSIM",    "@vec",         "$v",
+              "RANGE",     "4",   "RADIUS", "0.5",   "EPSILON", "0.1",          "COMBINE",
+              "LINEAR",    "4",   "ALPHA",  "0.5",   "BETA",    "0.5",          "LIMIT",
+              "0",         "5",   "PARAMS", "2",     "v",       FloatVec1(1.0f)});
+  ASSERT_EQ(resp.type, RespExpr::ARRAY);
+  EXPECT_EQ(HybridKeys(resp)[0], "d:1");
+
+  resp = Run({"FT.HYBRID", "idx", "SEARCH",  "apple", "VSIM",   "@vec",         "$v",
+              "RANGE",     "4",   "EPSILON", "0.1",   "RADIUS", "0.5",          "COMBINE",
+              "LINEAR",    "4",   "ALPHA",   "0.5",   "BETA",   "0.5",          "LIMIT",
+              "0",         "5",   "PARAMS",  "2",     "v",      FloatVec1(1.0f)});
+  ASSERT_EQ(resp.type, RespExpr::ARRAY);
+  EXPECT_EQ(HybridKeys(resp)[0], "d:1");
+
+  resp =
+      Run({"FT.HYBRID", "idx", "SEARCH",  "apple",  "VSIM", "@vec",  "$v",           "RANGE", "2",
+           "EPSILON",   "0.1", "COMBINE", "LINEAR", "4",    "ALPHA", "0.5",          "BETA",  "0.5",
+           "LIMIT",     "0",   "5",       "PARAMS", "2",    "v",     FloatVec1(1.0f)});
+  EXPECT_THAT(resp, ErrArg("RADIUS"));
+
+  resp =
+      Run({"FT.HYBRID", "idx", "SEARCH",  "apple",  "VSIM", "@vec",  "$v",           "RANGE", "2",
+           "RADIUS",    "inf", "COMBINE", "LINEAR", "4",    "ALPHA", "0.5",          "BETA",  "0.5",
+           "LIMIT",     "0",   "5",       "PARAMS", "2",    "v",     FloatVec1(1.0f)});
+  EXPECT_THAT(resp, ErrArg("RADIUS"));
+
+  resp = Run({"FT.HYBRID", "idx", "SEARCH", "apple", "VSIM",    "@vec",         "$v",
+              "RANGE",     "4",   "RADIUS", "0.5",   "EPSILON", "inf",          "COMBINE",
+              "LINEAR",    "4",   "ALPHA",  "0.5",   "BETA",    "0.5",          "LIMIT",
+              "0",         "5",   "PARAMS", "2",     "v",       FloatVec1(1.0f)});
+  EXPECT_THAT(resp, ErrArg("EPSILON"));
+
+  resp = Run({"FT.HYBRID", "idx", "SEARCH", "apple", "VSIM",    "@vec",         "$v",
+              "RANGE",     "4",   "RADIUS", "0.5",   "EPSILON", "2000000",      "COMBINE",
+              "LINEAR",    "4",   "ALPHA",  "0.5",   "BETA",    "0.5",          "LIMIT",
+              "0",         "5",   "PARAMS", "2",     "v",       FloatVec1(1.0f)});
+  EXPECT_THAT(resp, ErrArg("EPSILON"));
   // d:2 within radius -> should be in results
   EXPECT_TRUE(std::find(rkeys.begin(), rkeys.end(), "d:2") != rkeys.end());
 }

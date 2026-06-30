@@ -176,7 +176,8 @@ struct AstKnnNode {
 // Applies vector range search: returns all docs with distance(vec, doc_vec) <= radius
 struct AstVectorRangeNode {
   AstVectorRangeNode() = default;
-  AstVectorRangeNode(std::string field, double radius, OwnedFtVector vec, std::string score_alias);
+  AstVectorRangeNode(std::string field, double radius, OwnedFtVector vec, std::string score_alias,
+                     std::optional<double> epsilon);
 
   AstVectorRangeNode(const AstVectorRangeNode&) = delete;
   AstVectorRangeNode& operator=(const AstVectorRangeNode&) = delete;
@@ -192,6 +193,7 @@ struct AstVectorRangeNode {
   double radius;
   OwnedFtVector vec;
   std::string score_alias;
+  std::optional<double> epsilon;
 };
 
 using NodeVariants =

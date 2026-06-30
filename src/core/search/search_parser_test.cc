@@ -433,6 +433,13 @@ TEST_F(SearchParserTest, VectorRangeParse) {
 
   // Basic syntax parses without error
   EXPECT_EQ(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist}"));
+  EXPECT_EQ(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$EPSILON: 0.1}"));
+  EXPECT_EQ(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$EPSILON: 0.1; $YIELD_DISTANCE_AS: dist}"));
+  EXPECT_EQ(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist; $EPSILON: 0.1}"));
+  EXPECT_NE(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$EPSILON: 0}"));
+  EXPECT_NE(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$EPSILON: 2000000}"));
+  EXPECT_NE(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$EPSILON: inf}"));
+  EXPECT_NE(0, Parse("*=>[KNN 1 @f $vec]=>{$EPSILON: 0.1}"));
 }
 
 TEST_F(SearchParserTest, VectorRangeCombinations) {

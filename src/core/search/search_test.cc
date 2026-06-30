@@ -833,6 +833,38 @@ TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
   EXPECT_EQ(result.knn_scores.size(), 3u);
 }
 
+TEST_F(VectorRangeTest, FlatRangeRejectsEpsilon) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({1.0f});
+
+  ASSERT_TRUE(algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$EPSILON: 0.1}", &params));
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.error, testing::HasSubstr("EPSILON"));
+}
+
+TEST_F(VectorRangeTest, FlatRangeRejectsInfiniteRadius) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({1.0f});
+
+  ASSERT_TRUE(algo.Init("@pos:[VECTOR_RANGE inf $vec]", &params));
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.error, testing::HasSubstr("radius"));
+}
+
 TEST_F(VectorRangeTest, RangeOrFilterScoresByDoc) {
   // OR-ing a range with a filter makes the result larger than the range-match set. knn_scores is
   // keyed by DocId: only in-range docs carry a distance, filter-only docs are simply absent.
@@ -1831,7 +1863,7 @@ TEST_P(HnswRangeQueryTest, BasicRange) {
   auto index = CreateSimple1DIndex(10);
 
   vector<float> query = {5.0f};
-  auto results = index->RangeQuery(query.data(), 1.5f);
+  auto results = index->RangeQuery(query.data(), 1.5f, std::nullopt);
 
   set<GlobalDocId> ids;
   for (const auto& [dist, id] : results)
@@ -1846,7 +1878,7 @@ TEST_P(HnswRangeQueryTest, ExactMatch) {
   auto index = CreateSimple1DIndex(10);
 
   vector<float> query = {3.0f};
-  auto results = index->RangeQuery(query.data(), 0.0f);
+  auto results = index->RangeQuery(query.data(), 0.0f, std::nullopt);
 
   ASSERT_EQ(results.size(), 1u);
   EXPECT_EQ(results[0].second, GlobalDocId{3});
@@ -1858,7 +1890,7 @@ TEST_P(HnswRangeQueryTest, LargeRadiusReturnsAll) {
   auto index = CreateSimple1DIndex(20);
 
   vector<float> query = {10.0f};
-  auto results = index->RangeQuery(query.data(), 1000.0f);
+  auto results = index->RangeQuery(query.data(), 1000.0f, std::nullopt);
 
   EXPECT_EQ(results.size(), 20u);
 }
@@ -1868,7 +1900,7 @@ TEST_P(HnswRangeQueryTest, EmptyResultOutsideRadius) {
   auto index = CreateSimple1DIndex(10);
 
   vector<float> query = {5.5f};
-  auto results = index->RangeQuery(query.data(), 0.1f);
+  auto results = index->RangeQuery(query.data(), 0.1f, std::nullopt);
 
   EXPECT_TRUE(results.empty());
 }
@@ -1878,7 +1910,7 @@ TEST_P(HnswRangeQueryTest, EmptyIndex) {
   auto index = CreateSimple1DIndex(0);
 
   vector<float> query = {0.0f};
-  auto results = index->RangeQuery(query.data(), 100.0f);
+  auto results = index->RangeQuery(query.data(), 100.0f, std::nullopt);
 
   EXPECT_TRUE(results.empty());
 }
@@ -1889,7 +1921,7 @@ TEST_P(HnswRangeQueryTest, DistancesCorrect) {
   auto index = CreateSimple1DIndex(10);
 
   vector<float> query = {5.0f};
-  auto results = index->RangeQuery(query.data(), 2.0f);  // docs 3,4,5,6,7
+  auto results = index->RangeQuery(query.data(), 2.0f, std::nullopt);  // docs 3,4,5,6,7
 
   EXPECT_EQ(results.size(), 5u);
   for (const auto& [dist, id] : results) {
@@ -1907,7 +1939,7 @@ TEST_P(HnswRangeQueryTest, DeletedDocNotReturned) {
   index->Remove(5);
 
   vector<float> query = {5.0f};
-  auto results = index->RangeQuery(query.data(), 1.5f);
+  auto results = index->RangeQuery(query.data(), 1.5f, std::nullopt);
 
   set<GlobalDocId> ids;
   for (const auto& [dist, id] : results)
@@ -1926,7 +1958,7 @@ TEST_P(HnswRangeQueryTest, ConsistentWithBruteForce) {
   vector<float> query = {25.0f};
   float radius = 5.0f;
 
-  auto results = index->RangeQuery(query.data(), radius);
+  auto results = index->RangeQuery(query.data(), radius, std::nullopt);
 
   // Brute force: collect all docs within radius.
   // L2Distance returns |a-b| for 1-D vectors (actual Euclidean, not squared).
@@ -1942,6 +1974,49 @@ TEST_P(HnswRangeQueryTest, ConsistentWithBruteForce) {
     got.insert(id);
 
   EXPECT_EQ(got, expected);
+}
+
+TEST_P(HnswRangeQueryTest, EpsilonDoesNotReturnOutOfRadiusDocs) {
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(20);
+
+  vector<float> query = {5.0f};
+  float radius = 1.5f;
+  auto results = index->RangeQuery(query.data(), radius, 1000.0);
+
+  for (const auto& [dist, id] : results) {
+    EXPECT_LE(dist, radius) << id;
+  }
+}
+
+TEST_P(HnswRangeQueryTest, RangeMatchesBruteForceAcrossQueries) {
+  // Sweep several queries/radii; range search must return EXACTLY the brute-force in-radius set
+  // (full recall + nothing out of radius). This guards the dynamic-range boundary update against a
+  // regression that drops in-radius docs. NOTE: on a 1-D L2 line the greedy descent always lands on
+  // the nearest doc, so the phase-2 entry point is within radius whenever any in-radius doc exists
+  // -- there the boundary clamp is provably equivalent. A truly clamp-sensitive case needs >=2-D;
+  // this test still guards completeness/soundness of the boundary logic on the available fixture.
+  (void)GetParam();
+  const size_t n = 100;
+  auto index = CreateSimple1DIndex(n);
+
+  for (float center : {12.0f, 50.0f, 87.0f}) {
+    for (float radius : {0.5f, 2.0f, 7.5f}) {
+      vector<float> query = {center};
+      auto results = index->RangeQuery(query.data(), radius, std::nullopt);
+
+      set<GlobalDocId> expected;
+      for (size_t i = 0; i < n; i++) {
+        if (std::abs(static_cast<float>(i) - center) <= radius)
+          expected.insert(i);
+      }
+      set<GlobalDocId> got;
+      for (const auto& [dist, id] : results)
+        got.insert(id);
+
+      EXPECT_EQ(got, expected) << "center=" << center << " radius=" << radius;
+    }
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(HnswRangeL2, HnswRangeQueryTest, testing::Values(VectorSimilarity::L2),

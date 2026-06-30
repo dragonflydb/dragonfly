@@ -922,6 +922,23 @@ void Interpreter::SetGlobalArray(const char* name, SliceSpan args) {
   SetGlobalArrayInternal(lua_, name, args);
 }
 
+Interpreter::GlobalArrayBuilder Interpreter::CreateGlobalStringArray(unsigned len,
+                                                                     const char* name) {
+  lua_createtable(lua_, len, 0);
+  return GlobalArrayBuilder{lua_, name};
+}
+
+void Interpreter::GlobalArrayBuilder::AddElem(unsigned index, std::string_view elem) {
+  lua_pushlstring(lua_, elem.data(), elem.size());
+  lua_rawseti(lua_, -2, index + 1);
+}
+
+Interpreter::GlobalArrayBuilder::~GlobalArrayBuilder() {
+  if (lua_) {
+    lua_setglobal(lua_, name_);
+  }
+}
+
 optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   // We want to detect `redis.call` expressions with unused return values, i.e. they are a
   // standalone statement, not part of a expression, condition, function call or assignment.

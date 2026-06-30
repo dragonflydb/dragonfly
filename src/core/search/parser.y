@@ -28,10 +28,17 @@
       std::string score_alias;
       std::optional<uint32_t> ef_runtime;
     };
+    struct VectorRangeAttributes {
+      std::string score_alias;
+      std::optional<double> epsilon;
+    };
     inline std::ostream& operator<<(std::ostream& os, const PhraseTok&) {
       return os;  // bison debug trace requires this; content not material to traces.
     }
     inline std::ostream& operator<<(std::ostream& os, const KnnAttributes&) {
+      return os;  // bison debug trace requires this; content not material to traces.
+    }
+    inline std::ostream& operator<<(std::ostream& os, const VectorRangeAttributes&) {
       return os;  // bison debug trace requires this; content not material to traces.
     }
   }
@@ -40,8 +47,11 @@
 
 // Added to cc file
 %code {
+#include <cmath>
+
 #include <absl/strings/ascii.h>
 #include "core/search/query_driver.h"
+#include "core/search/search.h"
 #include "core/search/vector_utils.h"
 
 #define yylex driver->scanner()->Lex
@@ -79,6 +89,7 @@ double toDouble(string_view src);
   KNN         "KNN"
   AS          "AS"
   EF_RUNTIME  "EF_RUNTIME"
+  EPSILON     "$EPSILON"
   VECTOR_RANGE      "VECTOR_RANGE"
   YIELD_DISTANCE_AS "$YIELD_DISTANCE_AS"
 ;
@@ -115,6 +126,7 @@ double toDouble(string_view src);
 %nterm <std::string> geounit
 %nterm <std::optional<uint32_t>> opt_ef_runtime
 %nterm <AstVectorRangeNode> vector_range_query
+%nterm <VectorRangeAttributes> vector_range_attrs vector_range_attr vector_range_attrs_clause
 %nterm <double> vec_range_radius
 
 %printer { yyo << $$; } <*>;
@@ -192,19 +204,20 @@ knn_attr:
     }
 
 vector_range_query:
-  FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET ARROW LCURLBR YIELD_DISTANCE_AS COLON TERM RCURLBR
+  FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET vector_range_attrs_clause
     {
       double radius = $5;
       auto field = std::move($1);
-      auto alias = std::move($12);
+      auto attrs = std::move($8);
       auto vec_result = BytesToFtVectorSafe($6);
       if (!vec_result) {
         auto empty_vec = std::make_unique<float[]>(0);
         $$ = AstVectorRangeNode(std::move(field), radius,
-                                {std::move(empty_vec), size_t{0}}, std::move(alias));
+                                {std::move(empty_vec), size_t{0}}, std::move(attrs.score_alias),
+                                attrs.epsilon);
       } else {
         $$ = AstVectorRangeNode(std::move(field), radius, std::move(*vec_result),
-                                std::move(alias));
+                                std::move(attrs.score_alias), attrs.epsilon);
       }
     }
   | FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET %prec NO_YIELD
@@ -215,11 +228,51 @@ vector_range_query:
       if (!vec_result) {
         auto empty_vec = std::make_unique<float[]>(0);
         $$ = AstVectorRangeNode(std::move(field), radius,
-                                {std::move(empty_vec), size_t{0}}, std::string{});
+                                {std::move(empty_vec), size_t{0}}, std::string{}, std::nullopt);
       } else {
         $$ = AstVectorRangeNode(std::move(field), radius, std::move(*vec_result),
-                                std::string{});
+                                std::string{}, std::nullopt);
       }
+    }
+
+vector_range_attrs_clause:
+  ARROW LCURLBR vector_range_attrs opt_vector_range_attr_trailer RCURLBR { $$ = std::move($3); }
+
+opt_vector_range_attr_trailer:
+  /* empty */
+  | SEMICOLON
+
+vector_range_attrs:
+  vector_range_attr { $$ = std::move($1); }
+  | vector_range_attrs SEMICOLON vector_range_attr
+    {
+      $$ = std::move($1);
+      auto attr = std::move($3);
+      if (attr.epsilon) {
+        if ($$.epsilon)
+          YYABORT;
+        $$.epsilon = attr.epsilon;
+      }
+      if (!attr.score_alias.empty()) {
+        if (!$$.score_alias.empty())
+          YYABORT;
+        $$.score_alias = std::move(attr.score_alias);
+      }
+    }
+
+vector_range_attr:
+  YIELD_DISTANCE_AS COLON TERM
+    {
+      $$ = VectorRangeAttributes{};
+      $$.score_alias = std::move($3);
+    }
+  | EPSILON COLON vec_range_radius
+    {
+      double epsilon = $3;
+      if (!SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(epsilon))
+        YYABORT;
+      $$ = VectorRangeAttributes{};
+      $$.epsilon = epsilon;
     }
 
 vec_range_radius:

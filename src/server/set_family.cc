@@ -1472,6 +1472,9 @@ void CmdSInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (parser.HasError())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
+  if (num_keys == 0)
+    return cmd_cntx->SendError(OpStatus::AT_LEAST_ONE_KEY);
+
   unsigned limit = 0;
   // num_keys has already been consumed, so args holds only the keys and an optional LIMIT clause.
   auto args = parser.UnparsedArgs();

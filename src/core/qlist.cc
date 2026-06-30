@@ -1633,6 +1633,27 @@ void QList::CompressWithZstdDict() {
   }
 }
 
+void QList::CompressAfterLoad() {
+  // Mirrors the ZSTD branch of CoolOff(), but runs in one shot after a bulk load
+  // instead of being driven incrementally by per-element pushes (which never
+  // happen during AppendListpack/AppendPlain).
+  if (zstd_threshold_ == 0 || AllowLZFCompression())
+    return;
+
+  if (!tl_zstd_dict) {
+    // No thread-local dictionary yet. Train one from this list's data, but only
+    // if the list is large enough to be worth it.
+    if (dict_learning_failed_ || malloc_size_ < zstd_threshold_ || len_ < 2)
+      return;
+    if (!TrainZstdDict())
+      return;
+  }
+
+  // A dictionary exists (trained here or by another list on this thread).
+  CompressWithZstdDict();
+  dict_bulk_finished_ = 1;
+}
+
 bool QList::CompressNodeWithDict(Node* node) {
   DCHECK(tl_zstd_dict);
 

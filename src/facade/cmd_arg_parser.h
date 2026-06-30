@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 
+#include <cassert>
 #include <concepts>
 #include <optional>
 #include <string_view>
@@ -29,6 +30,9 @@ namespace facade {
 //   auto f  = parser.Next<FInt<1, 99>>("bad f");                // FInt with a custom out-of-range
 //                                                               // / non-integer error message
 //   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
+//   Range fields = parser.NextRange();                         // [N, e1..eN] counted list
+//   Range pairs  = parser.NextRange(2);                        // [N, f1,v1,..] N field/value pairs
+//   Range rest   = parser.RemainingRange();                    // all remaining args, no count
 //
 // Tag matching:
 //   parser.ExpectTag("LOAD");                                   // required literal keyword
@@ -68,21 +72,33 @@ namespace facade {
 //     return cmd_cntx->SendError(parser.TakeError().MakeReply()); // trailing args
 //   // or: if (parser.HasError()) ...
 
-// Numerical range restriction used with Next<FInt<lo, hi>>().
-template <auto min, auto max> struct FInt {
-  decltype(min) value = {};
-  operator decltype(min)() {
-    return value;
-  }
-
-  static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
-  static constexpr auto kMin = min;
-  static constexpr auto kMax = max;
+// A validated number for Next<T>(): a VNum-derived type that adds a static validate()
+// predicate. Convert<T>() parses the underlying value, runs validate(), and reports
+// INVALID_INT/INVALID_FLOAT on failure. FInt (below) is the built-in range-restricted integer;
+// domain-specific double validators are defined next to their callers.
+template <class T>
+concept as_vnum = requires(T t, typename T::underlying_t v) {
+  static_cast<typename T::underlying_t>(t);
+  { T::validate(v) } -> std::same_as<bool>;
 };
 
-template <class T> constexpr bool is_fint = false;
+// Base for as_vnum types: stores the parsed value and converts back to it. Derive and add a static
+// validate() predicate to define a new validated number.
+template <class T> struct VNum {
+  using underlying_t = T;
+  underlying_t value = {};
+  operator underlying_t() const {
+    return value;
+  }
+};
 
-template <auto min, auto max> constexpr bool is_fint<FInt<min, max>> = true;
+// Range-restricted integer used with Next<FInt<lo, hi>>() (INVALID_INT if out of range).
+template <auto min, auto max> struct FInt : VNum<decltype(min)> {
+  static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
+  static constexpr bool validate(decltype(min) v) {
+    return v >= min && v <= max;
+  }
+};
 
 template <class T> constexpr bool is_optional = false;
 
@@ -112,6 +128,78 @@ struct CmdArgParser {
     ErrorReply MakeReply() const;
   };
 
+  // Bounded view over the first `count` args of a ParsedArgs, returned by NextRange()/
+  // RemainingRange(). A terminal Range (count covers the whole tail) converts to ParsedArgs.
+  class Range {
+   public:
+    Range() = default;
+    explicit Range(ParsedArgs args) : args_{args}, count_{args.size()} {
+    }
+
+    class iterator {
+     public:
+      using iterator_category = std::input_iterator_tag;
+      using value_type = std::string_view;
+      using difference_type = ptrdiff_t;
+      using pointer = const std::string_view*;
+      using reference = std::string_view;
+
+      iterator(const ParsedArgs* args, size_t index) : args_{args}, index_{index} {
+      }
+      std::string_view operator*() const {
+        return (*args_)[index_];
+      }
+      iterator& operator++() {
+        ++index_;
+        return *this;
+      }
+      iterator operator++(int) {
+        iterator copy = *this;
+        ++index_;
+        return copy;
+      }
+      bool operator==(const iterator& o) const {
+        return index_ == o.index_;
+      }
+      bool operator!=(const iterator& o) const {
+        return index_ != o.index_;
+      }
+
+     private:
+      const ParsedArgs* args_;
+      size_t index_;
+    };
+
+    iterator begin() const {
+      return {&args_, 0};
+    }
+    iterator end() const {
+      return {&args_, count_};
+    }
+    std::string_view operator[](size_t i) const {
+      return args_[i];
+    }
+    size_t size() const {
+      return count_;
+    }
+    bool empty() const {
+      return count_ == 0;
+    }
+
+    // Valid only for a terminal Range.
+    operator ParsedArgs() const {
+      assert(count_ == args_.size());
+      return args_;
+    }
+
+   private:
+    friend struct CmdArgParser;
+    Range(ParsedArgs args, size_t count) : args_{args}, count_{count} {
+    }
+    ParsedArgs args_;
+    size_t count_ = 0;
+  };
+
  public:
   explicit CmdArgParser(ArgSlice args) : args_{args} {
   }
@@ -129,14 +217,16 @@ struct CmdArgParser {
   // DCHECKs that any error was consumed.
   ~CmdArgParser();
 
-  std::string_view Peek() {
-    return SafeSV(cur_i_);
+  // Returns the arg `ahead` positions past the cursor without consuming it (empty if out of range).
+  std::string_view Peek(size_t ahead = 0) {
+    return SafeSV(cur_i_ + ahead);
   }
 
   template <class T = std::string_view, class... Ts> auto Next() {
     if (cur_i_ + sizeof...(Ts) >= args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);
-      return std::conditional_t<sizeof...(Ts) == 0, T, std::tuple<T, Ts...>>();
+      return std::conditional_t<sizeof...(Ts) == 0, decltype(Convert<T>(0)),
+                                std::tuple<T, Ts...>>();
     }
 
     if constexpr (sizeof...(Ts) == 0) {
@@ -153,14 +243,45 @@ struct CmdArgParser {
   // Like Next<T>(), but on a failed read (non-numeric, out-of-range FInt, or missing arg) replaces
   // the generic error with a caller-supplied CUSTOM_ERROR message. Pair with FInt<lo,hi> to attach
   // a custom out-of-range / non-integer message: parser.Next<FInt<1u, 99u>>("bad f").
-  template <class T = std::string_view> T Next(std::string_view err_msg) {
+  template <class T = std::string_view> auto Next(std::string_view err_msg) {
     bool prior = bool(error_);
-    T val = Next<T>();
+    auto val = Next<T>();
     if (!prior && error_ && !err_msg.empty()) {
       error_.type = CUSTOM_ERROR;
       error_.custom_msg = std::string{err_msg};
     }
     return val;
+  }
+
+  // Reads a counted list [count, e1..e(count*group)] and returns its elements as a bounded Range;
+  // group=2 reads count field/value pairs. Errors if count is 0 or fewer than count*group remain.
+  Range NextRange(size_t group = 1) {
+    uint32_t count = Next<uint32_t>();
+    ParsedArgs rest = args_.Tail(cur_i_);
+    if (!error_ && (count == 0 || rest.size() < size_t(count) * group))
+      Report(INVALID_CASES, cur_i_ - 1);
+    if (error_)
+      return {};
+    cur_i_ += size_t(count) * group;
+    return Range{rest, size_t(count) * group};
+  }
+
+  // NextRange() with a custom error message on failure.
+  Range NextRange(size_t group, std::string_view err_msg) {
+    bool prior = bool(error_);
+    Range r = NextRange(group);
+    if (!prior && error_ && !err_msg.empty()) {
+      error_.type = CUSTOM_ERROR;
+      error_.custom_msg = std::string{err_msg};
+    }
+    return r;
+  }
+
+  // Consumes and returns all remaining args as a terminal Range, no leading count.
+  Range RemainingRange() {
+    Range r{args_.Tail(cur_i_)};
+    cur_i_ = args_.size();
+    return r;
   }
 
   template <class T = std::string_view> auto NextOrDefault(T default_value = {}) {
@@ -341,7 +462,7 @@ struct CmdArgParser {
 
   template <class T> T Convert(size_t idx) {
     static_assert(std::is_arithmetic_v<T> || std::is_constructible_v<T, std::string_view> ||
-                      is_fint<T> || is_optional<T>,
+                      as_vnum<T> || is_optional<T>,
                   "incorrect type");
     if constexpr (is_optional<T>) {
       return T{Convert<typename T::value_type>(idx)};
@@ -349,18 +470,15 @@ struct CmdArgParser {
       return Num<T>(idx);
     } else if constexpr (std::is_constructible_v<T, std::string_view>) {
       return static_cast<T>(SafeSV(idx));
-    } else if constexpr (is_fint<T>) {
-      return {ConvertFInt<T::kMin, T::kMax>(idx)};
+    } else if constexpr (as_vnum<T>) {
+      using U = typename T::underlying_t;
+      U val = Num<U>(idx);
+      if (!T::validate(val)) {
+        Report(std::is_floating_point_v<U> ? INVALID_FLOAT : INVALID_INT, idx);
+        return {};
+      }
+      return T{val};
     }
-  }
-
-  template <auto min, auto max> FInt<min, max> ConvertFInt(size_t idx) {
-    auto res = Num<decltype(min)>(idx);
-    if (res < min || res > max) {
-      Report(INVALID_INT, idx);
-      return {};
-    }
-    return {res};
   }
 
   std::string_view SafeSV(size_t i) const {

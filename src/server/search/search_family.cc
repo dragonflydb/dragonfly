@@ -125,8 +125,15 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
     } else if (parser->Check("EF_RUNTIME")) {
       params.hnsw_ef_runtime = parser->Next<uint32_t>();
     } else if (parser->Check("EPSILON")) {
-      parser->Next<double>();
-      LOG(WARNING) << "EPSILON not supported";
+      double epsilon = parser->Next<double>("Invalid EPSILON value");
+      if (!params.use_hnsw) {
+        parser->ReportCustom("EPSILON is supported only for HNSW vector indexes");
+      } else if (!search::SchemaField::VectorParams::IsValidSchemaHnswEpsilon(epsilon)) {
+        parser->ReportCustom("Invalid EPSILON value");
+      } else {
+        params.hnsw_epsilon =
+            search::SchemaField::VectorParams::NormalizeSchemaHnswEpsilon(epsilon);
+      }
     } else {
       parser->Skip(2);
     }
@@ -1556,7 +1563,8 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
   std::vector<SearchResult> results(1);
   const ShardId shard_size = shard_set->size();
 
-  auto range_results = index->RangeQuery(range->vec.first.get(), static_cast<float>(range->radius));
+  auto range_results =
+      index->RangeQuery(range->vec.first.get(), static_cast<float>(range->radius), range->epsilon);
 
   std::vector<std::vector<SerializedSearchDoc>> shard_docs(shard_size);
   for (const auto& [score, global_doc_id] : range_results) {
@@ -1620,7 +1628,8 @@ vector<SearchResult> SearchGlobalHnswIndexRangePrefiltered(
         shard.docs.begin(), shard.docs.end(),
         [](const SerializedSearchDoc& a, const SerializedSearchDoc& b) { return a.id < b.id; });
 
-  auto range_results = index->RangeQuery(range->vec.first.get(), static_cast<float>(range->radius));
+  auto range_results =
+      index->RangeQuery(range->vec.first.get(), static_cast<float>(range->radius), range->epsilon);
 
   std::vector<SerializedSearchDoc> out;
   out.reserve(range_results.size());
@@ -1681,9 +1690,14 @@ std::shared_ptr<search::HnswVectorIndex> GetValidatedHnswRangeIndex(
     builder->SendError("Parse error of vector parameters");
     return nullptr;
   }
-  if (hnsw_range->radius < 0 || std::isnan(hnsw_range->radius)) {
+  if (!(hnsw_range->radius >= 0) || !std::isfinite(hnsw_range->radius)) {
     builder->SendError(
         absl::StrCat("VECTOR_RANGE radius must be non-negative, got: ", hnsw_range->radius));
+    return nullptr;
+  }
+  if (hnsw_range->epsilon &&
+      !search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(*hnsw_range->epsilon)) {
+    builder->SendError("VECTOR_RANGE EPSILON must be greater than zero");
     return nullptr;
   }
   if (hnsw_index->GetDim() != hnsw_range->vec.second) {
@@ -1744,6 +1758,7 @@ struct HybridSearchParams {
   string vsim_filter;
   bool use_range = false;
   float range_radius = 0;
+  std::optional<double> range_epsilon;
 
   CombineMethod combine_method = CombineMethod::RRF;
   float alpha = 0.5f;
@@ -1777,6 +1792,19 @@ struct HybridDocEntry {
 
 using HybridDocMap = absl::flat_hash_map<string, HybridDocEntry>;
 
+// Validated doubles for FT.HYBRID RANGE, used via CmdArgParser::Next<T>(). validate() runs inside
+// the parser so callers don't re-check the parsed value.
+struct NonNegativeDouble : facade::VNum<double> {
+  static bool validate(double v) {
+    return v >= 0 && std::isfinite(v);
+  }
+};
+struct HnswRangeEpsilon : facade::VNum<double> {
+  static bool validate(double v) {
+    return search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(v);
+  }
+};
+
 ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
   using facade::Map;
   using facade::Tag;
@@ -1796,6 +1824,51 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       p.scorer = *scorer_fn;
   };
   auto parse_tanh_factor = [&](CmdArgParser* sub) { tanh_factor = ParseBM25StdTanhFactor(sub); };
+  auto read_range_epsilon = [&](CmdArgParser* sub) {
+    double epsilon = sub->Next<HnswRangeEpsilon>("Invalid EPSILON value");
+    if (!sub->HasError())
+      p.range_epsilon = epsilon;
+  };
+  auto parse_hybrid_range = [&](CmdArgParser* sub) {
+    p.use_range = true;
+
+    // Two accepted forms after RANGE: the counted form "<nargs> RADIUS <r> [EPSILON <e>]" (keywords
+    // in any order) and the shorthand "<radius> [EPSILON <e>]". The counted form starts with an
+    // integer count immediately followed by a RADIUS/EPSILON keyword; the shorthand starts with the
+    // bare radius value.
+    size_t nargs = 0;
+    bool keyword_form =
+        absl::SimpleAtoi(sub->Peek(0), &nargs) && (absl::EqualsIgnoreCase(sub->Peek(1), "RADIUS") ||
+                                                   absl::EqualsIgnoreCase(sub->Peek(1), "EPSILON"));
+    if (keyword_form) {
+      sub->Skip(1);  // The counted-form argument count is not otherwise needed.
+      bool has_radius = false;
+      while (!sub->HasError() && (absl::EqualsIgnoreCase(sub->Peek(), "RADIUS") ||
+                                  absl::EqualsIgnoreCase(sub->Peek(), "EPSILON"))) {
+        if (sub->Check("RADIUS")) {
+          if (has_radius) {
+            sub->ReportCustom("Duplicate RADIUS argument");
+            return;
+          }
+          p.range_radius = sub->Next<NonNegativeDouble>("Invalid RADIUS value");
+          has_radius = !sub->HasError();
+        } else if (sub->Check("EPSILON")) {
+          if (p.range_epsilon) {
+            sub->ReportCustom("Duplicate EPSILON argument");
+            return;
+          }
+          read_range_epsilon(sub);
+        }
+      }
+      if (!sub->HasError() && !has_radius)
+        sub->ReportCustom("Missing required argument RADIUS");
+      return;
+    }
+
+    p.range_radius = sub->Next<NonNegativeDouble>("Invalid RADIUS value");
+    if (sub->Check("EPSILON"))
+      read_range_epsilon(sub);
+  };
 
   parser->ExpectTag("SEARCH", "expected SEARCH keyword");
   p.text_query = parser->Next<string>();
@@ -1814,10 +1887,8 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
                   Tag("SHARD_K_RATIO", &shard_k_ratio));
     p.num_candidates =
         static_cast<size_t>(std::ceil(static_cast<float>(p.num_candidates) * shard_k_ratio));
-  } else if (parser->Check("RANGE", &p.range_radius)) {
-    p.use_range = true;
-    float epsilon_ignored = 0.f;
-    parser->Apply(Tag("EPSILON", &epsilon_ignored));
+  } else if (parser->Check("RANGE")) {
+    parse_hybrid_range(parser);
   }
 
   if (parser->Check("FILTER", &p.vsim_filter) && p.use_range)
@@ -2059,7 +2130,7 @@ std::optional<string> RunHnswPreSearch(string_view index_name, const HybridSearc
   };
 
   if (params.use_range)
-    populate(hnsw_index->RangeQuery(vec.first.get(), params.range_radius));
+    populate(hnsw_index->RangeQuery(vec.first.get(), params.range_radius, params.range_epsilon));
   else
     populate(hnsw_index->Knn(vec.first.get(), params.num_candidates, params.ef_runtime));
   return std::nullopt;
@@ -2238,6 +2309,10 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   SearchParams knn_sp;
   vector<SearchResult> flat_knn_docs(shard_count);
   if (!use_hnsw) {
+    if (params->use_range && params->range_epsilon) {
+      rb->SendError("EPSILON is supported only for HNSW VECTOR_RANGE");
+      return false;
+    }
     if (params->query_params[params->vsim_param].empty()) {
       rb->SendError(absl::StrCat("Vector parameter not found: $", params->vsim_param));
       return false;
@@ -2804,6 +2879,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
       info.emplace_back(std::to_string(vparams.dim));
       info.emplace_back("distance_metric");
       info.emplace_back(search::VectorSimilarityToString(vparams.sim));
+      info.emplace_back("initial_cap");
+      info.emplace_back(std::to_string(vparams.capacity));
       if (vparams.use_hnsw) {
         info.emplace_back("M");
         info.emplace_back(std::to_string(vparams.hnsw_m));
@@ -2811,6 +2888,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
         info.emplace_back(std::to_string(vparams.hnsw_ef_construction));
         info.emplace_back("ef_runtime");
         info.emplace_back(std::to_string(vparams.hnsw_ef_runtime));
+        info.emplace_back("epsilon");
+        info.emplace_back(std::to_string(vparams.hnsw_epsilon));
       }
     } else if (field_info.type == search::SchemaField::TAG) {
       auto& tparams = std::get<search::SchemaField::TagParams>(field_info.special_params);
@@ -3705,8 +3784,8 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
 
   // Intersect the range hits with the filter matches: keep only range results whose global id is
   // in the sorted prefilter id set. Memory is O(filter matches) of ids plus O(range hits).
-  auto range_results =
-      hnsw_index->RangeQuery(hnsw_range->vec.first.get(), static_cast<float>(hnsw_range->radius));
+  auto range_results = hnsw_index->RangeQuery(
+      hnsw_range->vec.first.get(), static_cast<float>(hnsw_range->radius), hnsw_range->epsilon);
   if (prefilter_ids) {
     erase_if(range_results, [&](const auto& r) {
       return !std::binary_search(prefilter_ids->begin(), prefilter_ids->end(), r.second);
@@ -3799,10 +3878,15 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     if (knn) {
       if (!AggregateHnswKnn(cmd_cntx, params.value(), search_algo, knn, query_results))
         return;
-    } else if (auto* vr = search_algo.GetVectorRangeNode();
-               vr && GlobalHnswIndexRegistry::Instance().Exist(params->index, vr->field)) {
-      if (!AggregateHnswRange(cmd_cntx, params.value(), search_algo, vr, query_results))
-        return;
+    } else if (auto* vr = search_algo.GetVectorRangeNode(); vr) {
+      if (GlobalHnswIndexRegistry::Instance().Exist(params->index, vr->field)) {
+        if (!AggregateHnswRange(cmd_cntx, params.value(), search_algo, vr, query_results))
+          return;
+      } else {
+        if (vr->epsilon)
+          return builder->SendError("EPSILON is supported only for HNSW VECTOR_RANGE");
+        AggregateGeneric(cmd_cntx, params.value(), search_algo, query_results);
+      }
     } else {
       AggregateGeneric(cmd_cntx, params.value(), search_algo, query_results);
     }
