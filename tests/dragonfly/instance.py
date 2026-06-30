@@ -255,7 +255,7 @@ class DflyInstance:
             # are guranteed to run
             time.sleep(5)
             logging.debug(f"Unable to kill the process on port {self._port}")
-            logging.debug(f"INFO LOGS of DF are:")
+            logging.debug("INFO LOGS of DF are:")
             self.print_info_logs_to_debug_log()
             proc.kill()
             proc.communicate()
@@ -495,6 +495,17 @@ class DflyInstanceFactory:
         if version < 1.39:
             args.pop("enable_memcache_io_loop_v2", None)
             args.pop("enable_resp_io_loop_v2", None)
+            # DflyInstance merges params.args on top of args, so a globally-injected
+            # flag (e.g. --df enable_resp_io_loop_v2) would be re-added even after the
+            # pop above. Strip it from a params copy too so old binaries never see it.
+            if (
+                "enable_memcache_io_loop_v2" in params.args
+                or "enable_resp_io_loop_v2" in params.args
+            ):
+                pargs = dict(params.args)
+                pargs.pop("enable_memcache_io_loop_v2", None)
+                pargs.pop("enable_resp_io_loop_v2", None)
+                params = dataclasses.replace(params, args=pargs)
 
         instance = DflyInstance(params, args)
         self.instances.append(instance)
@@ -514,7 +525,7 @@ class DflyInstanceFactory:
         for instance in self.instances:
             try:  # ioloop might be no longer running
                 await instance.close_clients()
-            except Exception as e:
+            except Exception:
                 pass
 
             try:
