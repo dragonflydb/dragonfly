@@ -2813,7 +2813,7 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
-  Metrics m = server_family_.GetMetrics(&namespaces->GetDefaultNamespace());
+  Metrics m = server_family_.GetMetrics(&namespaces->GetDefaultNamespace(), MetricsCollectOpts{});
   DbStats db_stats;
   for (const auto& s : m.db_stats) {
     db_stats += s;

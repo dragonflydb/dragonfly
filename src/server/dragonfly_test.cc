@@ -1068,7 +1068,7 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   EXPECT_EQ(Run({"___ping"}), "PONG");
 
   Metrics metrics = GetMetrics();
-  const auto& stats = metrics.cmd_stats_map;
+  auto stats = service_->mutable_registry()->NamedCallStats(metrics.cmd_call_stats);
 
   EXPECT_THAT(stats, Contains(Pair("___set", Key(1))));
   EXPECT_THAT(stats, Contains(Pair("set", Key(1))));
@@ -1081,10 +1081,11 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   EXPECT_THAT(Run({"exec"}), RespElementsAre("OK"));
 
   metrics = GetMetrics();
-  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("___set", Key(2))));
-  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("set", Key(1))));
-  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("multi", Key(1))));
-  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("exec", Key(1))));
+  stats = service_->mutable_registry()->NamedCallStats(metrics.cmd_call_stats);
+  EXPECT_THAT(stats, Contains(Pair("___set", Key(2))));
+  EXPECT_THAT(stats, Contains(Pair("set", Key(1))));
+  EXPECT_THAT(stats, Contains(Pair("multi", Key(1))));
+  EXPECT_THAT(stats, Contains(Pair("exec", Key(1))));
 }
 
 TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {

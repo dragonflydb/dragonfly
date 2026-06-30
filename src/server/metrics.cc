@@ -110,8 +110,8 @@ void AppendPipelineLatencySummary(string_view name, string_view help, const base
 
 }  // namespace
 
-void Metrics::Print(uint64_t uptime, DflyCmd* dfly_cmd, util::http::StringResponse* resp,
-                    bool legacy) {
+void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* dfly_cmd,
+                    util::http::StringResponse* resp, bool legacy) {
   bool is_master = ServerState::tlocal()->is_master;
   const Metrics& m = *this;
 
@@ -445,19 +445,20 @@ void Metrics::Print(uint64_t uptime, DflyCmd* dfly_cmd, util::http::StringRespon
                             MetricType::GAUGE, &resp->body());
 
   // Command stats
-  if (!m.cmd_stats_map.empty()) {
+  auto cmd_stats = registry->NamedCallStats(m.cmd_call_stats);
+  if (!cmd_stats.empty()) {
     string command_metrics;
 
     AppendMetricHeader("commands_total", "Total number of commands executed", MetricType::COUNTER,
                        &command_metrics);
-    for (const auto& [name, stat] : m.cmd_stats_map) {
+    for (const auto& [name, stat] : cmd_stats) {
       const auto calls = stat.first;
       AppendMetricValue("commands_total", calls, {"cmd"}, {name}, &command_metrics);
     }
 
     AppendMetricHeader("commands_duration_seconds", "Duration of commands in seconds",
                        MetricType::COUNTER, &command_metrics);
-    for (const auto& [name, stat] : m.cmd_stats_map) {
+    for (const auto& [name, stat] : cmd_stats) {
       const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
                         &command_metrics);
@@ -711,7 +712,7 @@ void Metrics::Merge(const Metrics& src) {
                              sizeof(TieredStats) + sizeof(SearchStats) +
                              sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
                              sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
-                             sizeof(std::map<std::string, std::pair<uint64_t, uint64_t>>) +
+                             sizeof(std::vector<std::pair<uint64_t, uint64_t>>) +
                              sizeof(absl::flat_hash_map<std::string, uint64_t>) +
                              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
                              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
@@ -763,22 +764,25 @@ void Metrics::Merge(const Metrics& src) {
   // Map merges.
   for (const auto& [k, v] : src.connections_lib_name_ver_map)
     connections_lib_name_ver_map[k] += v;
-  for (const auto& [name, stat] : src.cmd_stats_map) {
-    auto& [calls, sum] = cmd_stats_map[name];
-    calls += stat.first;
-    sum += stat.second;
+
+  if (src.cmd_call_stats.size() > cmd_call_stats.size())
+    cmd_call_stats.resize(src.cmd_call_stats.size());
+  for (size_t i = 0; i < src.cmd_call_stats.size(); ++i) {
+    cmd_call_stats[i].first += src.cmd_call_stats[i].first;
+    cmd_call_stats[i].second += src.cmd_call_stats[i].second;
   }
 }
 
-void Metrics::InitFromThread(Namespace* ns, CommandRegistry* registry, unsigned proactor_index,
-                             bool collect_replication_memory, DflyCmd* dfly_cmd) {
+void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
+                             unsigned proactor_index, const MetricsCollectOpts& opts,
+                             DflyCmd* dfly_cmd) {
   static_assert(
       sizeof(Metrics) == sizeof(SliceEvents) + sizeof(std::vector<DbStats>) +
                              sizeof(EngineShard::Stats) + sizeof(facade::FacadeStats) +
                              sizeof(TieredStats) + sizeof(SearchStats) +
                              sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
                              sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
-                             sizeof(std::map<std::string, std::pair<uint64_t, uint64_t>>) +
+                             sizeof(std::vector<std::pair<uint64_t, uint64_t>>) +
                              sizeof(absl::flat_hash_map<std::string, uint64_t>) +
                              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
                              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
@@ -829,7 +833,7 @@ void Metrics::InitFromThread(Namespace* ns, CommandRegistry* registry, unsigned 
       lsn_buffer_bytes = journal::LsnBufferBytes();
     }
 
-    if (collect_replication_memory)
+    if (opts.replication_memory)
       replication_stats = dfly_cmd->GetReplicationMemoryStats(shard);
   }
 
@@ -849,12 +853,12 @@ void Metrics::InitFromThread(Namespace* ns, CommandRegistry* registry, unsigned 
     oldest_pending_send_ts = send_list.front().timestamp_cycles;
   }
 
-  auto cmd_stat_cb = [this](std::string_view name, const CmdCallStats& stat) {
-    auto& [calls, sum] = cmd_stats_map[absl::AsciiStrToLower(name)];
-    calls += stat.first;
-    sum += stat.second;
-  };
-  registry->MergeCallStats(proactor_index, cmd_stat_cb);
+  // Skip when no rendered section needs per-command stats — leaving the vector empty makes the
+  // later Merge and NamedCallStats no-ops.
+  if (opts.cmd_stats) {
+    cmd_call_stats.resize(registry->size());
+    registry->CollectThreadCallStats(proactor_index, cmd_call_stats.data());
+  }
 
   interned_string_stats = GetInternedStringStats();
 }

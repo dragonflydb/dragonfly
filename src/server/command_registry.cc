@@ -351,4 +351,22 @@ absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() c
   return cmd_latencies;
 }
 
+absl::flat_hash_map<std::string, CmdCallStats> CommandRegistry::NamedCallStats(
+    const std::vector<CmdCallStats>& merged) const {
+  absl::flat_hash_map<std::string, CmdCallStats> res;
+  if (merged.size() != cmd_map_.size()) {
+    LOG_IF(DFATAL, !merged.empty())
+        << "cmd_call_stats size " << merged.size() << " != registry size " << cmd_map_.size();
+    return res;
+  }
+  size_t i = 0;
+  for (const auto& k_v : cmd_map_) {
+    const CmdCallStats& s = merged[i++];
+    if (s.first == 0)
+      continue;
+    res[absl::AsciiStrToLower(k_v.second.name())] = s;
+  }
+  return res;
+}
+
 }  // namespace dfly

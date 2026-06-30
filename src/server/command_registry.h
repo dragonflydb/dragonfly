@@ -10,6 +10,8 @@
 
 #include <functional>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include "base/function2.hpp"
 #include "facade/cmd_arg_parser.h"
@@ -91,8 +93,8 @@ class CommandId : public facade::CommandId {
  public:
   using CmdArgList = facade::CmdArgList;
 
-  // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stats_map in
-  // server_state.h)
+  // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_call_stats in
+  // metrics.h)
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             std::optional<uint32_t> acl_categories = std::nullopt);
 
@@ -333,15 +335,22 @@ class CommandRegistry {
     }
   }
 
-  void MergeCallStats(unsigned thread_index,
-                      std::function<void(std::string_view, const CmdCallStats&)> cb) const {
-    for (const auto& k_v : cmd_map_) {
-      auto src = k_v.second.GetStats(thread_index);
-      if (src.first == 0)
-        continue;
-      cb(k_v.second.name(), src);
-    }
+  size_t size() const {
+    return cmd_map_.size();
   }
+
+  // `out` must hold >= size() entries. Reads only this proactor's own cells, so it is race-free
+  // when run concurrently inside the GetMetrics fan-out.
+  void CollectThreadCallStats(unsigned thread_index, CmdCallStats* out) const {
+    size_t i = 0;
+    for (const auto& k_v : cmd_map_)
+      out[i++] = k_v.second.GetStats(thread_index);
+  }
+
+  // Maps the merged per-command counters (registry order, see CollectThreadCallStats) to lowercase
+  // names, skipping zero-call commands. `merged` is empty (not collected) or whole-registry sized.
+  absl::flat_hash_map<std::string, CmdCallStats> NamedCallStats(
+      const std::vector<CmdCallStats>& merged) const;
 
   void StartFamily(std::optional<uint32_t> acl_category = std::nullopt);
 

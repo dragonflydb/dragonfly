@@ -8,7 +8,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -30,6 +29,14 @@ namespace dfly {
 
 class CommandRegistry;
 class DflyCmd;
+
+// Selects which expensive parts of GetMetrics to collect. All default true (collect everything);
+// INFO narrows them to the requested sections so common calls skip work they never render.
+struct MetricsCollectOpts {
+  bool replication_memory = true;
+  bool cmd_stats = true;
+  bool cmd_latency = true;
+};
 
 struct ReplicationMemoryStats {
   size_t streamer_buf_capacity_bytes = 0;  // total capacities of streamer buffers
@@ -108,8 +115,9 @@ struct Metrics {
 
   InterpreterManager::Stats lua_stats;
 
-  // command call frequencies (count, aggregated latency in usec).
-  std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
+  // Per-command counters indexed by registry order; summed across threads in Merge, mapped to
+  // names at print time via CommandRegistry::NamedCallStats.
+  std::vector<std::pair<uint64_t, uint64_t>> cmd_call_stats;
 
   absl::flat_hash_map<std::string, uint64_t> connections_lib_name_ver_map;
 
@@ -133,15 +141,15 @@ struct Metrics {
 
   acl::UserRegistry::AclStats acl_stats;
 
-  // Collects all thread-local / per-shard stats on the current proactor thread.
-  void InitFromThread(Namespace* ns, CommandRegistry* registry, unsigned proactor_index,
-                      bool collect_replication_memory, DflyCmd* dfly_cmd);
+  void InitFromThread(Namespace* ns, const CommandRegistry* registry, unsigned proactor_index,
+                      const MetricsCollectOpts& opts, DflyCmd* dfly_cmd);
 
   // Folds `src` into *this. Almost everything sums; tx_queue_len takes the max
   // and oldest_pending_send_ts the min.
   void Merge(const Metrics& src);
 
-  void Print(uint64_t uptime, DflyCmd* dfly_cmd, util::http::StringResponse* resp, bool legacy);
+  void Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* dfly_cmd,
+             util::http::StringResponse* resp, bool legacy);
 };
 
 }  // namespace dfly
