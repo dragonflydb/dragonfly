@@ -906,7 +906,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgParser par
         options.elements = parser.Next<uint32_t>();
         break;
       case FLAG_SLOT: {
-        auto [start, end] = parser.Next<VNum<0, 16383>, VNum<0, 16383>>();
+        auto [start, end] = parser.Next<FInt<0, 16383>, FInt<0, 16383>>();
         options.slot_range = cluster::SlotRange{SlotId(start), SlotId(end)};
         break;
       }

@@ -501,9 +501,9 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
   {
     auto parser = Make({"10", "-10", "12"});
 
-    EXPECT_EQ((parser.Next<VNum<-11, 11>>().value), 10);
-    EXPECT_EQ((parser.Next<VNum<-11, 11>>().value), -10);
-    EXPECT_EQ((parser.Next<VNum<-11, 11>>().value), 0);
+    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 10);
+    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), -10);
+    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 0);
 
     auto err = parser.TakeError();
     EXPECT_TRUE(err);
@@ -513,7 +513,7 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
 
   {
     auto parser = Make({"-12"});
-    EXPECT_EQ((parser.Next<VNum<-11, 11>>().value), 0);
+    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 0);
 
     auto err = parser.TakeError();
     EXPECT_TRUE(err);
@@ -522,9 +522,9 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
   }
 }
 
-// A user-defined as_vnum: NumHolder<double> + a validate() predicate. Exercises the generic
+// A user-defined as_vnum: VNum<double> + a validate() predicate. Exercises the generic
 // validated-number path of Convert<T>() for a floating-point underlying type.
-struct PositiveFinite : NumHolder<double> {
+struct PositiveFinite : VNum<double> {
   static bool validate(double v) {
     return v > 0 && std::isfinite(v);
   }

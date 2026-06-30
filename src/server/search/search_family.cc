@@ -534,7 +534,7 @@ constexpr string_view kBM25StdTanhFactorErr = "BM25STD_TANH_FACTOR must be a pos
 // Parses a BM25STD_TANH_FACTOR value: an integer >= 1 (no upper bound). On a missing or invalid
 // value the parser reports kBM25StdTanhFactorErr, surfaced by the caller's error handling.
 uint64_t ParseBM25StdTanhFactor(CmdArgParser* parser) {
-  using TanhFactorInt = facade::VNum<uint64_t{1}, std::numeric_limits<uint64_t>::max()>;
+  using TanhFactorInt = facade::FInt<uint64_t{1}, std::numeric_limits<uint64_t>::max()>;
   return parser->Next<TanhFactorInt>(kBM25StdTanhFactorErr);
 }
 
@@ -1794,12 +1794,12 @@ using HybridDocMap = absl::flat_hash_map<string, HybridDocEntry>;
 
 // Validated doubles for FT.HYBRID RANGE, used via CmdArgParser::Next<T>(). validate() runs inside
 // the parser so callers don't re-check the parsed value.
-struct NonNegativeDouble : facade::NumHolder<double> {
+struct NonNegativeDouble : facade::VNum<double> {
   static bool validate(double v) {
     return v >= 0 && std::isfinite(v);
   }
 };
-struct HnswRangeEpsilon : facade::NumHolder<double> {
+struct HnswRangeEpsilon : facade::VNum<double> {
   static bool validate(double v) {
     return search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(v);
   }

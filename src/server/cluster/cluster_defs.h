@@ -17,7 +17,7 @@
 namespace dfly::cluster {
 
 // A SlotId validated to be within [0, kMaxSlotNum], usable directly with CmdArgParser::Next().
-using ParsedSlotId = facade::VNum<SlotId{0}, SlotId{kMaxSlotNum}>;
+using ParsedSlotId = facade::FInt<SlotId{0}, SlotId{kMaxSlotNum}>;
 
 struct SlotRange {
   static constexpr SlotId kMaxSlotId = 0x3FFF;

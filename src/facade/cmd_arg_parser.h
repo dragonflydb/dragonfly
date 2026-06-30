@@ -25,9 +25,9 @@ namespace facade {
 //   CmdArgParser parser(args);
 //   auto key = parser.Next<string_view>();                      // read one arg by type
 //   auto [src, dst] = parser.Next<string_view, string_view>();  // read several at once (tuple)
-//   auto db = parser.Next<VNum<0, 15>>();                       // range-restricted int
+//   auto db = parser.Next<FInt<0, 15>>();                       // range-restricted int
 //                                                               // (INVALID_INT if out of range)
-//   auto f  = parser.Next<VNum<1, 99>>("bad f");                // VNum with a custom out-of-range
+//   auto f  = parser.Next<FInt<1, 99>>("bad f");                // FInt with a custom out-of-range
 //                                                               // / non-integer error message
 //   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
 //   Range fields = parser.NextRange();                         // [N, e1..eN] counted list
@@ -72,9 +72,9 @@ namespace facade {
 //     return cmd_cntx->SendError(parser.TakeError().MakeReply()); // trailing args
 //   // or: if (parser.HasError()) ...
 
-// A validated number for Next<T>(): a NumHolder-derived type that adds a static validate()
+// A validated number for Next<T>(): a VNum-derived type that adds a static validate()
 // predicate. Convert<T>() parses the underlying value, runs validate(), and reports
-// INVALID_INT/INVALID_FLOAT on failure. VNum (below) is the built-in range-restricted integer;
+// INVALID_INT/INVALID_FLOAT on failure. FInt (below) is the built-in range-restricted integer;
 // domain-specific double validators are defined next to their callers.
 template <class T>
 concept as_vnum = requires(T t, typename T::underlying_t v) {
@@ -84,7 +84,7 @@ concept as_vnum = requires(T t, typename T::underlying_t v) {
 
 // Base for as_vnum types: stores the parsed value and converts back to it. Derive and add a static
 // validate() predicate to define a new validated number.
-template <class T> struct NumHolder {
+template <class T> struct VNum {
   using underlying_t = T;
   underlying_t value = {};
   operator underlying_t() const {
@@ -92,8 +92,8 @@ template <class T> struct NumHolder {
   }
 };
 
-// Range-restricted integer used with Next<VNum<lo, hi>>() (INVALID_INT if out of range).
-template <auto min, auto max> struct VNum : NumHolder<decltype(min)> {
+// Range-restricted integer used with Next<FInt<lo, hi>>() (INVALID_INT if out of range).
+template <auto min, auto max> struct FInt : VNum<decltype(min)> {
   static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
   static constexpr bool validate(decltype(min) v) {
     return v >= min && v <= max;
@@ -240,9 +240,9 @@ struct CmdArgParser {
     }
   }
 
-  // Like Next<T>(), but on a failed read (non-numeric, out-of-range VNum, or missing arg) replaces
-  // the generic error with a caller-supplied CUSTOM_ERROR message. Pair with VNum<lo,hi> to attach
-  // a custom out-of-range / non-integer message: parser.Next<VNum<1u, 99u>>("bad f").
+  // Like Next<T>(), but on a failed read (non-numeric, out-of-range FInt, or missing arg) replaces
+  // the generic error with a caller-supplied CUSTOM_ERROR message. Pair with FInt<lo,hi> to attach
+  // a custom out-of-range / non-integer message: parser.Next<FInt<1u, 99u>>("bad f").
   template <class T = std::string_view> auto Next(std::string_view err_msg) {
     bool prior = bool(error_);
     auto val = Next<T>();

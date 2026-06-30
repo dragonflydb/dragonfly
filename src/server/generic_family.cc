@@ -283,9 +283,9 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(facade::ParsedArgs args) {
   parser.Skip(1);
 
   // IDLETIME and FREQ are parsed (for compat with Redis) but not used currently. Both are
-  // range-checked at parse time via VNum — out-of-range values surface as INVALID_INT.
-  VNum<int64_t{0}, std::numeric_limits<int64_t>::max()> idle_time{};
-  VNum<0, 255> freq{};
+  // range-checked at parse time via FInt — out-of-range values surface as INVALID_INT.
+  FInt<int64_t{0}, std::numeric_limits<int64_t>::max()> idle_time{};
+  FInt<0, 255> freq{};
   parser.Apply(Exist("REPLACE", &out_args.replace_), Exist("ABSTTL", &out_args.abs_time_),
                Exist("STICK", &out_args.sticky_), Tag("IDLETIME", &idle_time), Tag("FREQ", &freq));
 
@@ -2290,7 +2290,7 @@ void GenericFamily::Restore(facade::CmdArgParser parser, CommandContext* cmd_cnt
 
 void GenericFamily::FieldExpire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  uint32_t ttl_sec = parser.Next<VNum<1u, kMaxTtl>>();
+  uint32_t ttl_sec = parser.Next<FInt<1u, kMaxTtl>>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }

@@ -1281,7 +1281,7 @@ void SetBit(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Support for the command "SETBIT key offset new_value"
   // see https://redis.io/commands/setbit/
 
-  auto [key, offset, value] = parser.Next<string_view, uint32_t, VNum<0, 1>>();
+  auto [key, offset, value] = parser.Next<string_view, uint32_t, FInt<0, 1>>();
 
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());

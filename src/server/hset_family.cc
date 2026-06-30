@@ -777,7 +777,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
     parser->Report(CmdArgParser::CUSTOM_ERROR);
   } else {
     op_sp.format = Format::kDragonfly;
-    op_sp.ttl = parser->Next<VNum<1, kMaxTtl>>();
+    op_sp.ttl = parser->Next<FInt<1, kMaxTtl>>();
 
     res.fields = parser->RemainingRange();
     if (res.fields.empty() || res.fields.size() % 2 != 0)
@@ -847,7 +847,7 @@ void CmdHDel(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdHExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
-  using MinMaxTtl = VNum<0, (1 << 26)>;
+  using MinMaxTtl = FInt<0, (1 << 26)>;
   auto [key, ttl_sec] = parser.Next<string_view, MinMaxTtl>();
 
   ExpireFlags flags = parser
@@ -936,7 +936,7 @@ void HExpireTimeGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
   uint32_t numFields =
-      parser.Next<VNum<1u, UINT32_MAX>>("Number of fields must be a positive integer");
+      parser.Next<FInt<1u, UINT32_MAX>>("Number of fields must be a positive integer");
   ParsedArgs fields = parser.UnparsedArgs();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1059,7 +1059,7 @@ void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
                      Exist("PERSIST", &exp_params.persist)));
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
   uint32_t numFields =
-      parser.Next<VNum<1u, UINT32_MAX>>("Number of fields must be a positive integer");
+      parser.Next<FInt<1u, UINT32_MAX>>("Number of fields must be a positive integer");
   ParsedArgs fields = parser.UnparsedArgs();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
