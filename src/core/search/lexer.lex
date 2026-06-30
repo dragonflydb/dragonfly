@@ -77,6 +77,7 @@ astrsk_ch  \*
 "EF_RUNTIME"         return Parser::make_EF_RUNTIME (loc());
 "VECTOR_RANGE"       return Parser::make_VECTOR_RANGE (loc());
 "$EF_RUNTIME"        return Parser::make_EF_RUNTIME (loc());
+"$EPSILON"           return Parser::make_EPSILON (loc());
 "$YIELD_DISTANCE_AS" return Parser::make_YIELD_DISTANCE_AS (loc());
 
 [0-9]{1,9}                          return Parser::make_UINT32(str(), loc());

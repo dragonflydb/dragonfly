@@ -79,11 +79,12 @@ AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
 }
 
 AstVectorRangeNode::AstVectorRangeNode(std::string field, double radius, OwnedFtVector vec,
-                                       std::string score_alias)
+                                       std::string score_alias, std::optional<double> epsilon)
     : field{field.substr(1)},
       radius{radius},
       vec{std::move(vec)},
-      score_alias{std::move(score_alias)} {
+      score_alias{std::move(score_alias)},
+      epsilon{epsilon} {
 }
 
 bool AstKnnNode::HasPreFilter() const {

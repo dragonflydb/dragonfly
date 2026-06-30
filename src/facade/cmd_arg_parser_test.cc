@@ -7,6 +7,8 @@
 #include <absl/base/casts.h>
 #include <gmock/gmock.h>
 
+#include <cmath>
+
 #include "facade/memcache_parser.h"
 
 using namespace testing;
@@ -517,6 +519,37 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
     EXPECT_TRUE(err);
     EXPECT_EQ(err.type, CmdArgParser::INVALID_INT);
     EXPECT_EQ(err.index, 0);
+  }
+}
+
+// A user-defined as_vnum: VNum<double> + a validate() predicate. Exercises the generic
+// validated-number path of Convert<T>() for a floating-point underlying type.
+struct PositiveFinite : VNum<double> {
+  static bool validate(double v) {
+    return v > 0 && std::isfinite(v);
+  }
+};
+
+TEST_F(CmdArgParserTest, ValidatedDouble) {
+  {
+    auto parser = Make({"0.5", "2.5"});
+    EXPECT_DOUBLE_EQ((parser.Next<PositiveFinite>().value), 0.5);
+    EXPECT_DOUBLE_EQ((parser.Next<PositiveFinite>().value), 2.5);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"0"});  // validate() rejects 0
+    parser.Next<PositiveFinite>();
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_FLOAT);
+  }
+  {
+    auto parser = Make({"inf"});  // non-finite rejected
+    parser.Next<PositiveFinite>();
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_FLOAT);
   }
 }
 

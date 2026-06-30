@@ -4,6 +4,10 @@
 #include <hnswlib/visited_list_pool.h>
 #include <mimalloc.h>
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
 #pragma once
 
 namespace dfly::search {
@@ -1538,7 +1542,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   // closer out-of-radius candidates are found; `epsilon` controls the overscan factor
   // (default 0.01) to improve recall near the boundary.
   std::vector<std::pair<dist_t, labeltype>> searchRange(const void* query_data, dist_t radius,
-                                                        double epsilon = 0.01) const {
+                                                        double epsilon) const {
     std::vector<std::pair<dist_t, labeltype>> result;
     if (cur_element_count == 0)
       return result;
@@ -1581,7 +1585,14 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     // because the entry point is farther than radius.
     dist_t ep_dist = curdist;
     dist_t dynamic_range = std::max(ep_dist, radius);
-    dist_t dyn_boundary = static_cast<dist_t>(dynamic_range * (1.0 + epsilon));
+    auto boundary = [](dist_t range, double eps) {
+      constexpr dist_t kMax = std::numeric_limits<dist_t>::max();
+      double bound = static_cast<double>(range) * (1.0 + eps);
+      return std::isfinite(bound) ? static_cast<dist_t>(std::min(bound, static_cast<double>(kMax)))
+                                  : kMax;
+    };
+
+    dist_t dyn_boundary = boundary(dynamic_range, epsilon);
 
     if (!isMarkedDeleted(currObj) && ep_dist <= radius)
       result.emplace_back(ep_dist, getExternalLabel(currObj));
@@ -1599,16 +1610,10 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       candidate_set.pop();
       tableint curr_id = curr_pair.second;
 
-      // Shrink dynamic_range: if candidate is between radius and current range, pull the
-      // boundary down toward radius. If candidate is within radius and dynamic_range is
-      // still above radius (entry point was far), clamp to radius so we stop over-scanning.
-      if (curr_dist < dynamic_range) {
-        if (curr_dist >= radius) {
-          dynamic_range = curr_dist;
-        } else if (dynamic_range > radius) {
-          dynamic_range = radius;
-        }
-        dyn_boundary = static_cast<dist_t>(dynamic_range * (1.0 + epsilon));
+      // Shrink dynamic_range only with closer out-of-radius candidates, matching VecSim.
+      if (curr_dist < dynamic_range && curr_dist >= radius) {
+        dynamic_range = curr_dist;
+        dyn_boundary = boundary(dynamic_range, epsilon);
       }
 
       int* data = (int*)get_linklist0(curr_id);

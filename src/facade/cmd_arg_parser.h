@@ -72,21 +72,33 @@ namespace facade {
 //     return cmd_cntx->SendError(parser.TakeError().MakeReply()); // trailing args
 //   // or: if (parser.HasError()) ...
 
-// Numerical range restriction used with Next<FInt<lo, hi>>().
-template <auto min, auto max> struct FInt {
-  decltype(min) value = {};
-  operator decltype(min)() {
-    return value;
-  }
-
-  static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
-  static constexpr auto kMin = min;
-  static constexpr auto kMax = max;
+// A validated number for Next<T>(): a VNum-derived type that adds a static validate()
+// predicate. Convert<T>() parses the underlying value, runs validate(), and reports
+// INVALID_INT/INVALID_FLOAT on failure. FInt (below) is the built-in range-restricted integer;
+// domain-specific double validators are defined next to their callers.
+template <class T>
+concept as_vnum = requires(T t, typename T::underlying_t v) {
+  static_cast<typename T::underlying_t>(t);
+  { T::validate(v) } -> std::same_as<bool>;
 };
 
-template <class T> constexpr bool is_fint = false;
+// Base for as_vnum types: stores the parsed value and converts back to it. Derive and add a static
+// validate() predicate to define a new validated number.
+template <class T> struct VNum {
+  using underlying_t = T;
+  underlying_t value = {};
+  operator underlying_t() const {
+    return value;
+  }
+};
 
-template <auto min, auto max> constexpr bool is_fint<FInt<min, max>> = true;
+// Range-restricted integer used with Next<FInt<lo, hi>>() (INVALID_INT if out of range).
+template <auto min, auto max> struct FInt : VNum<decltype(min)> {
+  static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
+  static constexpr bool validate(decltype(min) v) {
+    return v >= min && v <= max;
+  }
+};
 
 template <class T> constexpr bool is_optional = false;
 
@@ -205,8 +217,9 @@ struct CmdArgParser {
   // DCHECKs that any error was consumed.
   ~CmdArgParser();
 
-  std::string_view Peek() {
-    return SafeSV(cur_i_);
+  // Returns the arg `ahead` positions past the cursor without consuming it (empty if out of range).
+  std::string_view Peek(size_t ahead = 0) {
+    return SafeSV(cur_i_ + ahead);
   }
 
   template <class T = std::string_view, class... Ts> auto Next() {
@@ -449,7 +462,7 @@ struct CmdArgParser {
 
   template <class T> T Convert(size_t idx) {
     static_assert(std::is_arithmetic_v<T> || std::is_constructible_v<T, std::string_view> ||
-                      is_fint<T> || is_optional<T>,
+                      as_vnum<T> || is_optional<T>,
                   "incorrect type");
     if constexpr (is_optional<T>) {
       return T{Convert<typename T::value_type>(idx)};
@@ -457,18 +470,15 @@ struct CmdArgParser {
       return Num<T>(idx);
     } else if constexpr (std::is_constructible_v<T, std::string_view>) {
       return static_cast<T>(SafeSV(idx));
-    } else if constexpr (is_fint<T>) {
-      return ConvertFInt<T::kMin, T::kMax>(idx);
+    } else if constexpr (as_vnum<T>) {
+      using U = typename T::underlying_t;
+      U val = Num<U>(idx);
+      if (!T::validate(val)) {
+        Report(std::is_floating_point_v<U> ? INVALID_FLOAT : INVALID_INT, idx);
+        return {};
+      }
+      return T{val};
     }
-  }
-
-  template <auto min, auto max> FInt<min, max> ConvertFInt(size_t idx) {
-    auto res = Num<decltype(min)>(idx);
-    if (res < min || res > max) {
-      Report(INVALID_INT, idx);
-      return {};
-    }
-    return {res};
   }
 
   std::string_view SafeSV(size_t i) const {
