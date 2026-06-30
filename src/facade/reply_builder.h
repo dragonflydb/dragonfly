@@ -218,7 +218,7 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
   void SendBulkStringBorrowed(const cmn::BorrowedString& bs);
 
   // The interface exposes only the rvalue function to allow squashing to "steal" the value,
-  // the real builder implmenetation forwards it to the constref version
+  // the real builder implementation forwards it to the constref version
   virtual void SendBulkStringBorrowed(cmn::BorrowedString&& bs);
 
   void SendLong(long val) override;
