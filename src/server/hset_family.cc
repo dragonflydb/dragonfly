@@ -786,8 +786,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
   return res;
 }
 
-void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{cmd_cntx->tail_args()};
+void HSetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   HSetExParams parsed = ParseHSetEx(&parser, cmd_cntx->cid()->name());
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);

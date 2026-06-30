@@ -2953,8 +2953,7 @@ Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) co
 
 #define HFUNC(x) SetHandler(&Service::x)
 #define MFUNC(x) \
-  SetHandler(    \
-      [this](CmdArgList, CommandContext* cntx) { this->x(MakeParserFromContext(cntx), cntx); })
+  SetHandler([this](CmdArgParser parser, CommandContext* cntx) { this->x(parser, cntx); })
 
 namespace acl {
 constexpr uint32_t kQuit = FAST | CONNECTION;
