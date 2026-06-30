@@ -4,7 +4,6 @@
 
 #include "server/transaction.h"
 
-#include <absl/flags/flag.h>
 #include <gmock/gmock.h>
 
 #include "base/logging.h"
@@ -18,8 +17,6 @@
 #include "server/server_state.h"
 #include "util/fibers/pool.h"
 #include "util/fibers/synchronization.h"
-
-ABSL_DECLARE_FLAG(int32_t, hz);
 
 namespace dfly {
 
@@ -36,10 +33,6 @@ class TransactionTest : public Test {
   void TearDown() override;
 
   static void SetUpTestSuite() {
-    // Disable periodic heartbeat / shard-handler fibers: this low-level harness
-    // passes a null shard handler, and the test intentionally runs long enough
-    // (deadlock detection) for the periodic fiber to fire otherwise.
-    absl::SetFlag(&FLAGS_hz, 0);
     ServerState::Init(kNumThreads, kNumThreads, nullptr, nullptr);
     facade::tl_facade_stats = new facade::FacadeStats;
   }
@@ -71,7 +64,9 @@ void TransactionTest::SetUp() {
   });
 
   shard_set = new EngineShardSet(pp_.get());
-  shard_set->Init(kNumThreads, nullptr);
+  // Pass a no-op shard handler (not nullptr): the periodic shard-handler fiber would
+  // otherwise invoke an empty std::function and crash if it fires during the test.
+  shard_set->Init(kNumThreads, [] {});
 }
 
 void TransactionTest::TearDown() {
