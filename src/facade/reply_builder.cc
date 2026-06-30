@@ -504,6 +504,7 @@ template <typename I> void RedisReplyBuilder::SendLongArr(absl::Span<const I> lo
 }
 
 template void RedisReplyBuilder::SendLongArr<long>(absl::Span<const long>);
+template void RedisReplyBuilder::SendLongArr<long long>(absl::Span<const long long>);
 template void RedisReplyBuilder::SendLongArr<int32_t>(absl::Span<const int32_t>);
 template void RedisReplyBuilder::SendLongArr<uint32_t>(absl::Span<const uint32_t>);
 template void RedisReplyBuilder::SendLongArr<uint64_t>(absl::Span<const uint64_t>);
