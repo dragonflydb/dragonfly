@@ -2205,12 +2205,39 @@ async def test_client_pause_with_replica(df_factory, df_seeder_factory):
     await asyncio.sleep(1)
     # block the seeder for 4 seconds
     await c_master.execute_command("client pause 4000 write")
+
+    # These counters are exempt from the "no writes during pause" check:
+    pause_exempt = ["cmdstat_info", "cmdstat_replconf", "cmdstat_multi"]
+
+    def writes(s):
+        return {k: v for k, v in s.items() if k not in pause_exempt}
+
+    # V2 supports truly overlapping in-flight commands: a write dispatched just before
+    # CLIENT PAUSE returns may still be completing on a shard thread. Wait until the write
+    # counters hold steady before using them as the baseline. A single "no change" interval
+    # is not enough - two reads can coincide before a slow in-flight write lands - so require
+    # the counters to stay put across two consecutive polls. In V1 (serial dispatch, no
+    # overlap) the counters are already steady, so this converges on the first two polls.
     stats = await c_master.info("CommandStats")
+    stable_polls = 0
+    for _ in range(10):  # up to ~1s, well within the 4s CLIENT PAUSE window
+        await asyncio.sleep(0.1)
+        cur = await c_master.info("CommandStats")
+        if writes(cur) == writes(stats):
+            stable_polls += 1
+            if stable_polls >= 2:
+                break
+        else:
+            stable_polls = 0
+        stats = cur
+    assert stable_polls >= 2, "master write counters never stabilized during CLIENT PAUSE"
+
     await asyncio.sleep(0.5)
     stats_after_sleep = await c_master.info("CommandStats")
-    # Check no commands are executed except info and replconf called from replica
+    # No writes may run while paused, only info/replconf (issued by the replica) and multi
+    # (the transaction wrapper itself is not a write) are allowed to advance - see pause_exempt.
     for cmd, cmd_stats in stats_after_sleep.items():
-        if cmd in ["cmdstat_info", "cmdstat_replconf", "cmdstat_multi"]:
+        if cmd in pause_exempt:
             continue
         assert stats[cmd] == cmd_stats, cmd
 
