@@ -109,6 +109,10 @@ COMMANDS = [
     # Bloom filter
     (b"BF.ADD", 2, 2), (b"BF.EXISTS", 2, 2), (b"BF.MADD", 2, 6), (b"BF.MEXISTS", 2, 6),
     (b"BF.RESERVE", 3, 5), (b"BF.SCANDUMP", 2, 2), (b"BF.LOADCHUNK", 3, 3),
+    # Cuckoo filter
+    (b"CF.RESERVE", 2, 8), (b"CF.ADD", 2, 2), (b"CF.ADDNX", 2, 2), (b"CF.EXISTS", 2, 2),
+    (b"CF.MEXISTS", 2, 6), (b"CF.INFO", 1, 1), (b"CF.COUNT", 2, 2), (b"CF.DEL", 2, 2),
+    (b"CF.INSERT", 3, 8), (b"CF.INSERTNX", 3, 8), (b"CF.COMPACT", 1, 1),
     # Count-Min Sketch
     (b"CMS.INITBYDIM", 3, 3), (b"CMS.INITBYPROB", 3, 3), (b"CMS.INCRBY", 3, 7), (b"CMS.QUERY", 2, 6),
     (b"CMS.INFO", 1, 1), (b"CMS.MERGE", 3, 7),
@@ -208,6 +212,15 @@ SPECIAL = [
     b"ABSTTL",
     b"u8",
     b"i64",
+    # cuckoo filter options
+    b"NOCREATE",
+    b"ITEMS",
+    b"BUCKETSIZE",
+    b"MAXITERATIONS",
+    b"EXPANSION",
+    b"CAPACITY",
+    # topk options
+    b"WITHCOUNT",
 ]
 JSON_VALUES = [b'{"a":1}', b"[1,2,3]", b'"str"', b"42", b"null", b"true"]
 JSON_PATHS = [b"$", b"$.a", b"$.*", b"$.arr[0]", b"."]
