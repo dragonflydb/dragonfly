@@ -2492,3 +2492,56 @@ async def test_client_list_filters(df_server: DflyInstance):
         await subscriber.connection.send_command("UNSUBSCRIBE")
         await subscriber.aclose()
         await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 2,
+        "write_connection_throttling": "true",
+        "write_connection_throttling_sleep_usec": 10000,  # 10ms per throttled batch
+    }
+)
+@pytest.mark.asyncio
+async def test_rw_throttle_stats(df_server: DflyInstance):
+    """Verify write connections are throttled and rw_throttle_* stats are reported"""
+
+    read_client = aioredis.Redis(port=df_server.port)
+    write_client = aioredis.Redis(port=df_server.port)
+
+    await write_client.mset({f"key{i}": f"val{i}" for i in range(10)})
+
+    before = await read_client.info("stats")
+    before_batches = int(before.get("rw_throttle_batches_total", 0))
+    before_write_cmds = int(before.get("rw_throttle_batch_write_commands", 0))
+
+    # Write connection: pipeline of SET commands — should be throttled
+    start = time.monotonic()
+    write_pipe = write_client.pipeline(transaction=False)
+    for i in range(10):
+        write_pipe.set(f"key{i}", f"new_val{i}")
+    await write_pipe.execute()
+    write_elapsed_ms = (time.monotonic() - start) * 1000
+
+    # Read connection: pipeline of GET commands — should not be throttled
+    start = time.monotonic()
+    read_pipe = read_client.pipeline(transaction=False)
+    for i in range(10):
+        read_pipe.get(f"key{i}")
+    await read_pipe.execute()
+    read_elapsed_ms = (time.monotonic() - start) * 1000
+
+    after = await read_client.info("stats")
+
+    # Write connection must have been delayed by the throttle sleep
+    assert write_elapsed_ms >= 10, f"Expected write throttle delay, got {write_elapsed_ms:.1f}ms"
+
+    # Read connection should be faster (no throttle)
+    assert read_elapsed_ms < write_elapsed_ms, "Read connection should not be throttled"
+
+    # Stats must reflect the throttled write batch
+    assert int(after.get("rw_throttle_batch_write_commands", 0)) > before_write_cmds
+    assert int(after.get("rw_throttle_batch_write_bytes", 0)) > 0
+    assert int(after.get("rw_throttle_batches_total", 0)) > before_batches
+
+    await read_client.aclose()
+    await write_client.aclose()
