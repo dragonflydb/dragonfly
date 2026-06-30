@@ -92,6 +92,12 @@ class EngineShard {
   // shard. Tries executing the passed transaction if possible (does not guarantee though).
   void PollExecution(const char* context, Transaction* trans);
 
+  // Call after running inlined to keep progress on the transaction queue if it was interrupted
+  void PollExecutionIfDeferred() {
+    if (needs_repoll_)
+      PollExecution("after_inline", nullptr);
+  }
+
   // Returns transaction queue.
   TxQueue* txq() {
     return &txq_;
@@ -264,6 +270,8 @@ class EngineShard {
 
   EngineShard(util::ProactorBase* pb, mi_heap_t* heap);
 
+  void PollExecutionInternal(const char* context, Transaction* trans);
+
   // blocks the calling fiber.
   void Shutdown();  // called before destructing EngineShard.
 
@@ -308,8 +316,11 @@ class EngineShard {
 
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;
+
   Transaction* continuation_trans_ = nullptr;
   Transaction* running_tx_ = nullptr;
+  bool needs_repoll_ = false;  // set when running_tx_ interrupted a PollExecution call
+
   std::string continuation_debug_id_;
   unsigned poll_concurrent_factor_ = 0;
 

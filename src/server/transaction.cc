@@ -732,8 +732,9 @@ void Transaction::ScheduleInternal() {
       CHECK(ScheduleInShard(EngineShard::tlocal(), optimistic_exec));
       run_barrier_.Dec();
 
-      // Drain any work that was deferred while this inlined tx held running_tx_.
-      EngineShard::tlocal()->PollExecution("after_inline", nullptr);
+      // If the optimistic run above held running_tx_ and deferred any poll on this shard,
+      // drain it now. Uses the same needs_repoll_ mechanism as PollExecution's re-drive loop.
+      EngineShard::tlocal()->PollExecutionIfDeferred();
       break;
     }
 
