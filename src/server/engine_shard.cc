@@ -610,6 +610,10 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   // Only one transaction can run at a time, so we have to abort the Poll while running_tx is
   // suspended. Running tx issues a follow up Poll is needs_repoll_ was set
   if (running_tx_) {
+    // Check that trans doesn't need processing or is guaranteed to be found via txq/continuation
+    DCHECK(trans == nullptr || !trans->DEBUG_IsArmedInShard(shard_id())  // tx was already disarmed
+           || trans->DEBUG_GetTxqPosInShard(shard_id()) != TxQueue::kEnd ||
+           continuation_trans_ == trans);
     needs_repoll_ = true;
     return;
   }
