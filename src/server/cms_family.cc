@@ -236,11 +236,8 @@ void CmdIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdQuery(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-
-  ParsedArgs items = parser.UnparsedArgs();
-  if (items.empty()) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpQuery(t->GetOpArgs(shard), key, items);

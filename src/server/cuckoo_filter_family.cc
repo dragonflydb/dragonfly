@@ -368,10 +368,8 @@ void CmdInsertImpl(CmdArgParser parser, CommandContext* cmd_cntx, bool nx) {
   if (!parser.Check("ITEMS")) {
     return rb->SendError("CF.INSERT requires ITEMS keyword");
   }
-  ParsedArgs items = parser.UnparsedArgs();
-  if (items.empty()) {
-    return rb->SendError("CF.INSERT requires at least one item");
-  }
+  ParsedArgs items = parser.RemainingRange("CF.INSERT requires at least one item");
+  RETURN_ON_PARSE_ERROR(parser, rb);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpInsert(t->GetOpArgs(shard), key, items, opts, nx);

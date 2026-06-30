@@ -1597,21 +1597,14 @@ void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 // Syntax: saddex key [KEEPTTL] ttl_sec member [member...]
 void CmdSAddEx(CmdArgParser parser, CommandContext* cmd_cntx) {
+  constexpr uint32_t kMaxTtl = (1UL << 26);
   const std::string_view key = parser.Next<std::string_view>();
   const bool keepttl = parser.Check("KEEPTTL");
-  const uint32_t ttl_sec = parser.Next<uint32_t>();
+  const uint32_t ttl_sec = parser.Next<FInt<1u, kMaxTtl>>();
+  ParsedArgs vals = parser.RemainingRange(WrongNumArgsError("SADDEX"));
 
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
-  }
-  constexpr uint32_t kMaxTtl = (1UL << 26);
-  if (ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return cmd_cntx->SendError(kInvalidIntErr);
-  }
-
-  ParsedArgs vals = parser.UnparsedArgs();
-  if (vals.empty()) {
-    return cmd_cntx->SendError(WrongNumArgsError("SADDEX"));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {

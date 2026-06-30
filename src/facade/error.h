@@ -22,6 +22,7 @@ inline constexpr char kKeyNotFoundErr[] = "no such key";
 inline constexpr char kInvalidIntErr[] = "value is not an integer or out of range";
 inline constexpr char kInvalidFloatErr[] = "value is not a valid float";
 inline constexpr char kUintErr[] = "value is out of range, must be positive";
+inline constexpr char kInvalidNumFields[] = "Number of fields must be a positive integer";
 inline constexpr char kIncrOverflow[] = "increment or decrement would overflow";
 inline constexpr char kDbIndOutOfRangeErr[] = "DB index is out of range";
 inline constexpr char kInvalidDbIndErr[] = "invalid DB index";

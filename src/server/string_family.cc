@@ -1415,23 +1415,18 @@ cmd::CmdR CmdIncr(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR CmdIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto [key, sval] = parser.Next<string_view, string_view>();
-  int64_t val;
-
-  if (!absl::SimpleAtoi(sval, &val)) {
-    cmd_cntx->SendError(kInvalidIntErr);
+  auto [key, val] = parser.Next<string_view, int64_t>();
+  if (auto err = parser.TakeError(); err) {
+    cmd_cntx->SendError(err.MakeReply());
     return cmd::kAborted;
   }
   return IncrByGeneric(cmd_cntx, key, val);
 }
 
 cmd::CmdR CmdIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto [key, sval] = parser.Next<string_view, string_view>();
-  double val;
-
-  if (!absl::SimpleAtod(sval, &val)) {
-    co_return facade::ErrorReply{kInvalidFloatErr};
-  }
+  auto [key, val] = parser.Next<string_view, double>();
+  if (auto err = parser.TakeError(); err)
+    co_return err.MakeReply();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrFloat(t->GetOpArgs(shard), key, val);
@@ -1461,11 +1456,9 @@ cmd::CmdR CmdDecr(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR CmdDecrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto [key, sval] = parser.Next<string_view, string_view>();
-  int64_t val;
-
-  if (!absl::SimpleAtoi(sval, &val)) {
-    cmd_cntx->SendError(kInvalidIntErr);
+  auto [key, val] = parser.Next<string_view, int64_t>();
+  if (auto err = parser.TakeError(); err) {
+    cmd_cntx->SendError(err.MakeReply());
     return cmd::kAborted;
   }
   if (val == INT64_MIN) {

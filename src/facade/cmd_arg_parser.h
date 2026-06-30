@@ -32,11 +32,14 @@ namespace facade {
 //   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
 //   Range fields = parser.NextRange();                         // [N, e1..eN] counted list
 //   Range pairs  = parser.NextRange(2);                        // [N, f1,v1,..] N field/value pairs
+//   Range fs     = parser.NextRange(1, mismatch, true);        // consume-all variant
 //   Range rest   = parser.RemainingRange();                    // all remaining args, no count
+//   Range items  = parser.RemainingRange("need >=1 item");     // ...erroring if none remain
 //
 // Tag matching:
 //   parser.ExpectTag("LOAD");                                   // required literal keyword
 //   if (parser.Check("NX")) { ... }                             // consume tag only if matched
+//   if (parser.Check("COUNT", &count)) { ... }                 // ...also read following args
 //   auto mode = parser.MapNext("EX", Mode::EX, "PX", Mode::PX); // tag -> enum mapping
 //   auto maybe_mode = parser.TryMapNext("ASC", Dir::ASC,        // like MapNext but returns
 //                                       "DESC", Dir::DESC);     // nullopt (no error) on miss
@@ -71,6 +74,8 @@ namespace facade {
 //   if (!parser.Finalize())                                     // also reports UNPROCESSED on
 //     return cmd_cntx->SendError(parser.TakeError().MakeReply()); // trailing args
 //   // or: if (parser.HasError()) ...
+//   parser.ReportCustom("bad option");                          // inject a custom error (no-op if
+//                                                               // one is already set)
 
 // A validated number for Next<T>(): a VNum-derived type that adds a static validate()
 // predicate. Convert<T>() parses the underlying value, runs validate(), and reports
@@ -253,34 +258,34 @@ struct CmdArgParser {
     return val;
   }
 
-  // Reads a counted list [count, e1..e(count*group)] and returns its elements as a bounded Range;
-  // group=2 reads count field/value pairs. Errors if count is 0 or fewer than count*group remain.
-  Range NextRange(size_t group = 1) {
-    uint32_t count = Next<uint32_t>();
+  // Reads a counted list [count, e1..e(count*group)] into a bounded Range (group=2 reads count
+  // field/value pairs). A wrong number of args reports `size_err`; an invalid/zero count reports
+  // `count_err`, or `size_err` when `count_err` is empty. With `consume_all` the Range must cover
+  // ALL remaining args. An empty message keeps the generic error (INVALID_INT / INVALID_CASES).
+  Range NextRange(size_t group = 1, std::string_view size_err = {}, bool consume_all = false,
+                  std::string_view count_err = {}) {
+    uint32_t count = Next<FInt<1u, UINT32_MAX>>(count_err.empty() ? size_err : count_err);
     ParsedArgs rest = args_.Tail(cur_i_);
-    if (!error_ && (count == 0 || rest.size() < size_t(count) * group))
-      Report(INVALID_CASES, cur_i_ - 1);
+    size_t need = size_t(count) * group;
+    if (!error_ && (consume_all ? rest.size() != need : rest.size() < need)) {
+      if (size_err.empty())
+        Report(INVALID_CASES, cur_i_ - 1);
+      else
+        ReportCustom(std::string{size_err});
+    }
     if (error_)
       return {};
-    cur_i_ += size_t(count) * group;
-    return Range{rest, size_t(count) * group};
+    cur_i_ += need;
+    return Range{rest, need};
   }
 
-  // NextRange() with a custom error message on failure.
-  Range NextRange(size_t group, std::string_view err_msg) {
-    bool prior = bool(error_);
-    Range r = NextRange(group);
-    if (!prior && error_ && !err_msg.empty()) {
-      error_.type = CUSTOM_ERROR;
-      error_.custom_msg = std::string{err_msg};
-    }
-    return r;
-  }
-
-  // Consumes and returns all remaining args as a terminal Range, no leading count.
-  Range RemainingRange() {
+  // Consumes and returns all remaining args as a terminal Range, no leading count. If `empty_err`
+  // is provided and no args remain, reports it as a custom error.
+  Range RemainingRange(std::string_view empty_err = {}) {
     Range r{args_.Tail(cur_i_)};
     cur_i_ = args_.size();
+    if (!empty_err.empty() && r.empty())
+      ReportCustom(std::string{empty_err});
     return r;
   }
 
