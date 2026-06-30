@@ -2209,9 +2209,17 @@ void Connection::ShutdownSelfBlocking() {
 }
 
 bool Connection::Migrate(util::fb2::ProactorBase* dest) {
-  // Migrate is used only by replication, so it doesn't have properties of full-fledged
-  // connections
-  CHECK(!cc_->async_dispatch);
+  // Migrate runs synchronously from within command dispatch and is used by replication (DFLY
+  // THREAD/FLOW), cluster slot migration, and connection auto-migration. None of these carry the
+  // full state (e.g. subscriptions) of a regular client connection, so the CHECKs below hold.
+
+  // Skip the !async_dispatch assertion for V2:
+  // - The flag is intentionally set/unset before/after the V2 DispatchCommandSimple call.
+  // - DFLY THREAD/FLOW call Migrate() synchronously from inside that dispatch, so it is expected
+  //   to be true here.
+  // - V2 is single-fiber, so the same fiber that set the flag is the one doing the migration.
+  // V1 keeps the assertion: there, a true async_dispatch means the AsyncFiber consumer is active.
+  CHECK(ioloop_v2_ || !cc_->async_dispatch);
   CHECK_EQ(cc_->subscriptions, 0);  // are bound to thread local caches
   CHECK_EQ(self_.use_count(), 1u);  // references cache our thread and backpressure
                                     //
@@ -2817,9 +2825,15 @@ bool Connection::ExecuteBatch() {
     // sendmsg syscalls to a minimum. IoLoopV2's idle-await block handles the final flush.
     reply_builder_->SetBatchMode(ioloop_v2_ && is_head && (cmd->next != nullptr));
 
+    // V2 only: raise async_dispatch so Service::DispatchCommand flushes buffered pipeline replies
+    // before a blocking head command (e.g. BLPOP) parks this single-fiber loop. In V1 the
+    // AsyncFiber owns this flag, so we must leave it untouched here.
+    if (ioloop_v2_)
+      cc_->async_dispatch = true;
     uint64_t dispatch_start = CycleClock::Now();
     auto dispatch_res = service_->DispatchCommandSimple(cmd, mode);
-
+    if (ioloop_v2_)
+      cc_->async_dispatch = false;
     // Enforce the pipeline reply-ordering invariant: replies must reach the socket in parse order.
     // V1 (ONLY_SYNC): all commands run serially, so parsed_to_execute_ always equals parsed_head_
     //    (is_head is always true). The invariant holds trivially.
