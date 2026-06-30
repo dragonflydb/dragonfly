@@ -27,10 +27,15 @@
     struct KnnAttributes {
       std::string score_alias;
       std::optional<uint32_t> ef_runtime;
+      std::optional<double> weight;
     };
     struct VectorRangeAttributes {
       std::string score_alias;
       std::optional<double> epsilon;
+      std::optional<double> weight;
+    };
+    struct TextAttributes {
+      std::optional<double> weight;
     };
     inline std::ostream& operator<<(std::ostream& os, const PhraseTok&) {
       return os;  // bison debug trace requires this; content not material to traces.
@@ -39,6 +44,9 @@
       return os;  // bison debug trace requires this; content not material to traces.
     }
     inline std::ostream& operator<<(std::ostream& os, const VectorRangeAttributes&) {
+      return os;  // bison debug trace requires this; content not material to traces.
+    }
+    inline std::ostream& operator<<(std::ostream& os, const TextAttributes&) {
       return os;  // bison debug trace requires this; content not material to traces.
     }
   }
@@ -77,6 +85,7 @@ double toDouble(string_view src);
   RPAREN      ")"
   STAR        "*"
   ARROW       "=>"
+  ATTR_ARROW  "=>{"
   COLON       ":"
   LBRACKET    "["
   RBRACKET    "]"
@@ -92,6 +101,7 @@ double toDouble(string_view src);
   EPSILON     "$EPSILON"
   VECTOR_RANGE      "VECTOR_RANGE"
   YIELD_DISTANCE_AS "$YIELD_DISTANCE_AS"
+  WEIGHT      "$WEIGHT"
 ;
 
 %token AND_OP
@@ -115,7 +125,8 @@ double toDouble(string_view src);
 
 %token <std::string> DOUBLE "double"
 %token <std::string> UINT32 "uint32"
-%nterm <AstExpr> final_query filter star_expr search_expr search_unary_expr search_or_expr search_and_expr bracket_filter_expr
+%nterm <AstExpr> final_query filter star_expr search_expr search_unary_expr search_primary
+%nterm <AstExpr> attributed_search_primary search_or_expr search_and_expr bracket_filter_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
 %nterm <AstExpr> term_atom
 %nterm <AstTagsNode::TagValueProxy> tag_list_element
@@ -127,6 +138,7 @@ double toDouble(string_view src);
 %nterm <std::optional<uint32_t>> opt_ef_runtime
 %nterm <AstVectorRangeNode> vector_range_query
 %nterm <VectorRangeAttributes> vector_range_attrs vector_range_attr vector_range_attrs_clause
+%nterm <TextAttributes> text_attrs text_attr text_attrs_clause
 %nterm <double> vec_range_radius
 
 %printer { yyo << $$; } <*>;
@@ -173,7 +185,7 @@ opt_ef_runtime:
 
 opt_knn_attrs:
   /* empty */ { $$ = KnnAttributes{}; }
-  | ARROW LCURLBR knn_attrs opt_knn_attr_trailer RCURLBR { $$ = std::move($3); }
+  | ATTR_ARROW knn_attrs opt_knn_attr_trailer RCURLBR { $$ = std::move($2); }
 
 opt_knn_attr_trailer:
   /* empty */
@@ -189,6 +201,11 @@ knn_attrs:
         $$.ef_runtime = attr.ef_runtime;
       if (!attr.score_alias.empty())
         $$.score_alias = std::move(attr.score_alias);
+      if (attr.weight) {
+        if ($$.weight)
+          YYABORT;
+        $$.weight = attr.weight;
+      }
     }
 
 knn_attr:
@@ -201,6 +218,14 @@ knn_attr:
     {
       $$ = KnnAttributes{};
       $$.score_alias = std::move($3);
+    }
+  | WEIGHT COLON vec_range_radius
+    {
+      double weight = $3;
+      if (!(weight >= 0) || !std::isfinite(weight))
+        YYABORT;
+      $$ = KnnAttributes{};
+      $$.weight = weight;
     }
 
 vector_range_query:
@@ -236,7 +261,7 @@ vector_range_query:
     }
 
 vector_range_attrs_clause:
-  ARROW LCURLBR vector_range_attrs opt_vector_range_attr_trailer RCURLBR { $$ = std::move($3); }
+  ATTR_ARROW vector_range_attrs opt_vector_range_attr_trailer RCURLBR { $$ = std::move($2); }
 
 opt_vector_range_attr_trailer:
   /* empty */
@@ -258,6 +283,11 @@ vector_range_attrs:
           YYABORT;
         $$.score_alias = std::move(attr.score_alias);
       }
+      if (attr.weight) {
+        if ($$.weight)
+          YYABORT;
+        $$.weight = attr.weight;
+      }
     }
 
 vector_range_attr:
@@ -274,11 +304,49 @@ vector_range_attr:
       $$ = VectorRangeAttributes{};
       $$.epsilon = epsilon;
     }
+  | WEIGHT COLON vec_range_radius
+    {
+      double weight = $3;
+      if (!(weight >= 0) || !std::isfinite(weight))
+        YYABORT;
+      $$ = VectorRangeAttributes{};
+      $$.weight = weight;
+    }
 
 vec_range_radius:
   DOUBLE  { $$ = toDouble($1); }
   | UINT32 { $$ = static_cast<double>(toUint32($1)); }
   | TERM   { double v = 0; if (!absl::SimpleAtod($1, &v)) YYABORT; $$ = v; }
+
+text_attrs_clause:
+  ATTR_ARROW text_attrs opt_text_attr_trailer RCURLBR { $$ = std::move($2); }
+
+opt_text_attr_trailer:
+  /* empty */
+  | SEMICOLON
+
+text_attrs:
+  text_attr { $$ = std::move($1); }
+  | text_attrs SEMICOLON text_attr
+    {
+      $$ = std::move($1);
+      auto attr = std::move($3);
+      if (attr.weight) {
+        if ($$.weight)
+          YYABORT;
+        $$.weight = attr.weight;
+      }
+    }
+
+text_attr:
+  WEIGHT COLON vec_range_radius
+    {
+      double weight = $3;
+      if (!(weight >= 0) || !std::isfinite(weight))
+        YYABORT;
+      $$ = TextAttributes{};
+      $$.weight = weight;
+    }
 
 filter:
   search_expr               { $$ = std::move($1); }
@@ -313,12 +381,20 @@ term_atom:
   | DOUBLE    { $$ = AstTermNode(std::move($1));   }
 
 search_unary_expr:
-  LPAREN search_expr RPAREN           { $$ = std::move($2);                  }
+  attributed_search_primary           { $$ = std::move($1);                  }
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2));   }
   | TILDE search_unary_expr           { $$ = AstOptionalNode(std::move($2)); }
+  | vector_range_query                { $$ = std::move($1);                  }
+
+attributed_search_primary:
+  search_primary                      { $$ = std::move($1);                  }
+  | search_primary text_attrs_clause
+    { $$ = AstAttributeNode(std::move($1), $2.weight.value_or(1.0)); }
+
+search_primary:
+  LPAREN search_expr RPAREN           { $$ = std::move($2);                  }
   | term_atom                         { $$ = std::move($1);                  }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
-  | vector_range_query                { $$ = std::move($1);                  }
 
 field_cond:
   term_atom                                             { $$ = std::move($1);                }

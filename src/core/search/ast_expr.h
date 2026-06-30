@@ -95,6 +95,20 @@ struct AstNegateNode {
   std::unique_ptr<AstNode> node;
 };
 
+// Applies query attributes to a subtree.
+struct AstAttributeNode {
+  AstAttributeNode(AstNode&& node, double weight);
+
+  AstAttributeNode(const AstAttributeNode&) = delete;
+  AstAttributeNode& operator=(const AstAttributeNode&) = delete;
+
+  AstAttributeNode(AstAttributeNode&&) noexcept = default;
+  AstAttributeNode& operator=(AstAttributeNode&&) noexcept = default;
+
+  std::unique_ptr<AstNode> node;
+  double weight = 1.0;
+};
+
 // Applies logical operation to results of all sub-nodes
 struct AstLogicalNode {
   enum LogicOp { AND, OR };
@@ -199,8 +213,8 @@ struct AstVectorRangeNode {
 using NodeVariants =
     std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode,
                  AstSuffixNode, AstInfixNode, AstWildcardNode, AstPhraseNode, AstRangeNode,
-                 AstNegateNode, AstOptionalNode, AstLogicalNode, AstFieldNode, AstTagsNode,
-                 AstKnnNode, AstGeoNode, AstVectorRangeNode>;
+                 AstNegateNode, AstOptionalNode, AstAttributeNode, AstLogicalNode, AstFieldNode,
+                 AstTagsNode, AstKnnNode, AstGeoNode, AstVectorRangeNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;

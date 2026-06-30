@@ -80,6 +80,7 @@ struct ProfileBuilder {
         [](const AstKnnNode& n) { return absl::StrCat("KNN{l=", n.limit, "}"); },
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
         [](const AstOptionalNode& n) { return absl::StrCat("Optional{}"); },
+        [](const AstAttributeNode& n) { return absl::StrCat("Attribute{w=", n.weight, "}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
         [](const AstStarFieldNode& n) { return absl::StrCat("StarField{}"); },
         [](const AstGeoNode& n) {
@@ -497,6 +498,10 @@ struct BasicSearch {
     return IndexResult{&indices_->GetAllDocs()};
   }
 
+  IndexResult Search(const AstAttributeNode& node, string_view active_field) {
+    return SearchGeneric(*node.node, active_field);
+  }
+
   // logical query: unify all sub results
   IndexResult Search(const AstLogicalNode& node, string_view active_field) {
     // Stopwords are never indexed, so a bare stopword operand matches nothing: as an AND term it
@@ -848,6 +853,9 @@ struct StatsCollector {
     Walk(*node.node, active_field);
   }
   void Visit(const AstOptionalNode& node, string_view active_field) {
+    Walk(*node.node, active_field);
+  }
+  void Visit(const AstAttributeNode& node, string_view active_field) {
     Walk(*node.node, active_field);
   }
   void Visit(const AstKnnNode& node, string_view active_field) {

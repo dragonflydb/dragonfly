@@ -64,6 +64,7 @@ astrsk_ch  \*
 "-"                  return Parser::make_NOT_OP (loc());
 "~"                  return Parser::make_TILDE (loc());
 ":"                  return Parser::make_COLON (loc());
+"=>"[[:space:]]*"{" return Parser::make_ATTR_ARROW (loc());
 "=>"                 return Parser::make_ARROW (loc());
 "["                  return Parser::make_LBRACKET (loc());
 "]"                  return Parser::make_RBRACKET (loc());
@@ -79,6 +80,7 @@ astrsk_ch  \*
 "$EF_RUNTIME"        return Parser::make_EF_RUNTIME (loc());
 "$EPSILON"           return Parser::make_EPSILON (loc());
 "$YIELD_DISTANCE_AS" return Parser::make_YIELD_DISTANCE_AS (loc());
+"$WEIGHT"            return Parser::make_WEIGHT (loc());
 
 [0-9]{1,9}                          return Parser::make_UINT32(str(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)       return Parser::make_DOUBLE(str(), loc());
