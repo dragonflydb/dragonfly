@@ -732,6 +732,37 @@ async def test_reply_count(df_server: DflyInstance):
     assert await measure(async_client.ft("i1").search("*")) <= 2
 
 
+@dfly_args({"proactor_threads": "1", "pipeline_squash": 1})
+async def test_squashed_reply_count(async_client: aioredis.Redis):
+    """Akin to test_reply_count but with pipelines"""
+
+    await async_client.ping()
+
+    # Create some keys to read
+    await async_client.set("long-str", "a" * 256)
+    await async_client.lpush("long-list", *(f"{i}" for i in range(100)))
+
+    pre = int((await async_client.info("stats"))["total_writes_processed"])
+    before = int((await async_client.info("stats"))["total_writes_processed"])
+    info_diff = before - pre
+
+    # Send a large pipeline of simple commands that will be squashed together.
+    p = async_client.pipeline(transaction=False)
+    for _ in range(10):
+        p.set("some-keys", "some-values")
+    for _ in range(50):
+        p.get("long-str")
+    for _ in range(50):
+        p.lrange("long-list", 0, -1)
+    await p.execute()
+
+    after = int((await async_client.info("stats"))["total_writes_processed"])
+    writes = after - before
+
+    # 90% of the commands don't cause writes. The replies should have been squashed
+    assert writes - info_diff < 11
+
+
 @dfly_args({"enable_resp_io_loop_v2": "true"})
 async def test_v2_conditional_flush_no_stall(df_server: DflyInstance):
     """Verify that V2 conditional flushing never stalls client replies.
