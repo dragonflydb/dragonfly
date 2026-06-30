@@ -2209,14 +2209,12 @@ void Connection::ShutdownSelfBlocking() {
 }
 
 bool Connection::Migrate(util::fb2::ProactorBase* dest) {
-  // Migrate runs synchronously from within command dispatch and is used by replication (DFLY
-  // THREAD/FLOW), cluster slot migration, and connection auto-migration. None of these carry the
-  // full state (e.g. subscriptions) of a regular client connection, so the CHECKs below hold.
+  // Migrate() runs synchronously and only supports connections without subscriptions and with no
+  // background command processing, as enforced by the CHECKs below.
 
   // Skip the !async_dispatch assertion for V2:
-  // - The flag is intentionally set/unset before/after the V2 DispatchCommandSimple call.
-  // - DFLY THREAD/FLOW call Migrate() synchronously from inside that dispatch, so it is expected
-  //   to be true here.
+  // - ExecuteBatch may set this flag around DispatchCommandSimple while flushing a pipeline, and
+  //   Migrate() can run synchronously from inside that dispatch, so the flag may be true here.
   // - V2 is single-fiber, so the same fiber that set the flag is the one doing the migration.
   // V1 keeps the assertion: there, a true async_dispatch means the AsyncFiber consumer is active.
   CHECK(ioloop_v2_ || !cc_->async_dispatch);
@@ -2227,9 +2225,8 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
     socket_->ResetOnRecvHook();
   }
 
-  // Migrate is only used by DFLY Thread and Flow command which both check against
-  // the result of Migration and handle it explicitly in their flows so this can act
-  // as a weak if condition instead of a crash prone CHECK.
+  // Callers check the result of Migrate() and handle failure explicitly in their flows, so this
+  // can act as a weak if condition instead of a crash prone CHECK.
   if (async_fb_.IsJoinable() || cc_->conn_closing) {
     return false;
   }
@@ -2825,15 +2822,19 @@ bool Connection::ExecuteBatch() {
     // sendmsg syscalls to a minimum. IoLoopV2's idle-await block handles the final flush.
     reply_builder_->SetBatchMode(ioloop_v2_ && is_head && (cmd->next != nullptr));
 
-    // V2 only: raise async_dispatch so Service::DispatchCommand flushes buffered pipeline replies
-    // before a blocking head command (e.g. BLPOP) parks this single-fiber loop. In V1 the
-    // AsyncFiber owns this flag, so we must leave it untouched here.
-    if (ioloop_v2_)
+    // V2 only: set async_dispatch so DispatchCommand flushes buffered replies before a blocking
+    // command (e.g. BLPOP) parks this fiber.
+    // - We use is_true_pipeline=true to skip the pointless flush, since there is nothing behind it.
+    // - Save and restore the old value instead of forcing it to false - it may have been true
+    // before we entered. In V1 the AsyncFiber owns this flag, so leave it alone here.
+    // - In V1 the AsyncFiber owns this flag, so leave it alone here.
+    const bool prev_async_dispatch = cc_->async_dispatch;
+    if (ioloop_v2_ && is_true_pipeline)
       cc_->async_dispatch = true;
     uint64_t dispatch_start = CycleClock::Now();
     auto dispatch_res = service_->DispatchCommandSimple(cmd, mode);
-    if (ioloop_v2_)
-      cc_->async_dispatch = false;
+    if (ioloop_v2_ && is_true_pipeline)
+      cc_->async_dispatch = prev_async_dispatch;
     // Enforce the pipeline reply-ordering invariant: replies must reach the socket in parse order.
     // V1 (ONLY_SYNC): all commands run serially, so parsed_to_execute_ always equals parsed_head_
     //    (is_head is always true). The invariant holds trivially.
