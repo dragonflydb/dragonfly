@@ -621,7 +621,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     // The transaction (if any) if armed, must be in the txq so a future PollExecution picks it up.
     DCHECK(trans == nullptr || !trans->DEBUG_IsArmedInShard(sid) ||
            trans->DEBUG_GetTxqPosInShard(sid) != TxQueue::kEnd)
-        << context << " " << trans->DebugId();
+        << context << " " << (trans ? trans->DebugId(sid) : "trans=nullptr");
     return;
   }
 
