@@ -2503,7 +2503,7 @@ void RenderShardProfileTree(RedisReplyBuilder* rb, const SearchResult& shard_res
 
 }  // namespace
 
-void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
   WarmupQueryParser();
 
   auto* builder = cmd_cntx->rb();
@@ -2511,8 +2511,10 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
     return builder->SendError("Cannot create index on db != 0"sv);
   }
 
-  CmdArgParser parser{args};
   string_view idx_name = parser.Next();
+
+  // Args after the index name, captured before further parsing for the CSS cluster dispatch below.
+  ParsedArgs create_args = parser.UnparsedArgs();
 
   // Parse optional NX (Only create if not exists) parameter for internal usage
   bool is_NX = parser.Check("NX");
@@ -2542,7 +2544,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
-    std::string args_str = absl::StrJoin(args.subspan(1), " ");
+    std::string args_str = absl::StrJoin(create_args, " ");
     std::string cmd = absl::StrCat("FT.CREATE ", idx_name, " CSS ", args_str);
 
     // TODO add processing of the reply to make sure index was created successfully on all shards,
@@ -2569,8 +2571,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   builder->SendOk();
 }
 
-void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view idx_name = parser.Next();
   parser.ExpectTag("SCHEMA");
   parser.ExpectTag("ADD");
@@ -2628,11 +2629,11 @@ void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
   builder->SendOk();
 }
 
-void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view idx_name = ArgS(args, 0);
+void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view idx_name = parser.Next();
 
   // Parse optional DD (Delete Documents) parameter
-  bool delete_docs = args.size() > 1 && absl::EqualsIgnoreCase(args[1], "DD");
+  bool delete_docs = parser.Check("DD");
 
   shared_ptr<DocIndex> index_info;
   atomic_uint num_deleted{0};
@@ -2702,8 +2703,8 @@ void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendOk();
 }
 
-void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view idx_name = ArgS(args, 0);
+void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view idx_name = parser.Next();
 
   vector<DocIndexInfo> infos(shard_set->size());
 
@@ -2855,7 +2856,7 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendDouble(percent_indexed);
 }
 
-void CmdFtList(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtList(CmdArgParser /*parser*/, CommandContext* cmd_cntx) {
   atomic_int first{0};
   vector<string> names;
 
@@ -2921,10 +2922,12 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
   return results;
 }
 
-void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view index_name = parser.Next();
   string_view query_str = parser.Next();
+
+  // Args after index name and query, captured before further parsing for the CSS dispatch below.
+  ParsedArgs search_args = parser.UnparsedArgs();
 
   bool is_cross_shard = parser.Check("CSS");
 
@@ -2945,7 +2948,7 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
     if (params->with_scores || params->scorer) {
       return builder->SendError("WITHSCORES/SCORER is not yet supported in cluster search mode");
     }
-    std::string args_str = absl::StrJoin(args.subspan(2), " ");
+    std::string args_str = absl::StrJoin(search_args, " ");
 
     css_docs = FtSearchCSS(index_name, query_str, args_str, *params);
   }
@@ -3250,9 +3253,7 @@ void SendFtProfileSearchResponse(const SearchParams& params,
   }
 }
 
-void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
-
+void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view index_name = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -3557,9 +3558,9 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
                               absl::MakeSpan(profile_results), took, rb, limited);
 }
 
-void CmdFtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view index_name = ArgS(args, 0);
-  string_view field_name = ArgS(args, 1);
+void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view index_name = parser.Next();
+  string_view field_name = parser.Next();
   VLOG(1) << "FtTagVals: " << index_name << " " << field_name;
 
   vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
@@ -3753,8 +3754,7 @@ static void AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
     cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
 }
 
-void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
 
   auto params = ParseAggregatorParams(&parser);
@@ -3955,8 +3955,8 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdFtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view index_name = ArgS(args, 0);
+void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view index_name = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   atomic_bool index_not_found{true};
@@ -4100,8 +4100,7 @@ void FtConfigSet(CmdArgParser* parser, CommandContext* cmd_cntx) {
   ABSL_UNREACHABLE();
 }
 
-void CmdFtConfig(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+void CmdFtConfig(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto func = parser.MapNext("GET", &FtConfigGet, "SET", &FtConfigSet, "HELP", &FtConfigHelp);
 
   if (auto err = parser.TakeError(); err) {
@@ -4111,8 +4110,7 @@ void CmdFtConfig(CmdArgList args, CommandContext* cmd_cntx) {
   func(&parser, cmd_cntx);
 }
 
-void CmdFtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [index_name, group_id] = parser.Next<string_view, string>();
 
   // Redis ignores this parameter. Checked on redis_version:6.2.13
@@ -4159,13 +4157,12 @@ void CmdFtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->rb()->SendOk();
 }
 
-void CmdFtDebug(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtDebug(CmdArgParser parser, CommandContext* cmd_cntx) {
   // FT._DEBUG command stub for test compatibility
   // This command is used by integration tests to control internal behavior
-  CmdArgParser parser{args};
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (args.empty() || parser.Check("HELP")) {
+  if (parser.Check("HELP")) {
     rb->SendSimpleString("FT._DEBUG - Debug command stub (not fully implemented)");
     return;
   }
@@ -4189,8 +4186,7 @@ void CmdFtDebug(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendOk();
 }
 
-void CmdFtHybrid(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+void CmdFtHybrid(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view index_name = parser.Next();
 
   auto params = ParseHybridParams(&parser);
