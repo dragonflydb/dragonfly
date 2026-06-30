@@ -920,7 +920,8 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
-  UnregisterOnChange(consumer);
+  if (!UnregisterOnChange(consumer))
+    LOG(DFATAL) << "UnregisterOnChange failed";
 
   if (absl::GetFlag(FLAGS_cluster_flush_decommit_memory)) {
     int64_t start = absl::GetCurrentTimeNanos();
@@ -1435,12 +1436,14 @@ void DbSlice::RegisterOnChange(ChangeConsumerInterface* consumer) {
   change_cb_.emplace_back(consumer);
 }
 
-void DbSlice::UnregisterOnChange(ChangeConsumerInterface* consumer) {
+bool DbSlice::UnregisterOnChange(ChangeConsumerInterface* consumer) {
   change_cb_latch_.Wait();
   auto it = std::find(change_cb_.begin(), change_cb_.end(), consumer);
-  CHECK(it != change_cb_.end());
+  if (it == change_cb_.end())
+    return false;  // not registered (or already unregistered by a racing fiber)
   change_cb_.erase(it);
   consumer->snapshot_version_ = 0;
+  return true;
 }
 
 bool DbSlice::WillBlockOnJournalWrite() const {

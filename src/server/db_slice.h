@@ -416,8 +416,10 @@ class DbSlice {
 
   void RegisterOnChange(ChangeConsumerInterface* consumer);
 
-  // Not allowed to be called from the consumer callback
-  void UnregisterOnChange(ChangeConsumerInterface* consumer);
+  // Not allowed to be called from the consumer callback. Idempotent: returns true only for the
+  // caller that actually removed the consumer, false if it was not registered. This makes it safe
+  // for racing fibers to unregister the same consumer without double-erasing.
+  bool UnregisterOnChange(ChangeConsumerInterface* consumer);
 
   bool HasRegisteredCallbacks() const {
     return !change_cb_.empty();

@@ -712,7 +712,7 @@ TEST_F(DflyEngineTest, Bug496) {
       EXPECT_EQ(cb_hits, 3);
     }
 
-    db.UnregisterOnChange(&consumer);
+    EXPECT_TRUE(db.UnregisterOnChange(&consumer));
   });
 }
 

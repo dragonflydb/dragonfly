@@ -440,6 +440,12 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest) {
 void RestoreStreamer::Run() {
   VLOG(1) << "RestoreStreamer run";
 
+  // If the context was cancelled before Start() ran, RegisterChangeListener was skipped and
+  // db_array_ is empty (see RestoreStreamer::Start). Guard the db_array_.front() access below;
+  // mid-traversal cancellation is handled by the cntx_->IsRunning() check inside the loop.
+  if (db_array_.empty())
+    return;
+
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;
 
@@ -534,10 +540,18 @@ RestoreStreamer::~RestoreStreamer() {
 }
 
 bool RestoreStreamer::Cancel() {
-  if (snapshot_version_ == 0)
+  // Cancel the execution context unconditionally, even if the streamer was not started yet. A
+  // concurrent Start() may run after Cancel() on the same shard (e.g. OutgoingMigration::Finish()
+  // cancels the flow while it is between ChangeState(C_SYNC) and PrepareSync()). Start() bails out
+  // early when the context is cancelled, which prevents the streamer from being registered (and
+  // leaked) after cancellation.
+  cntx_->Cancel();
+
+  // UnregisterOnChange is idempotent and returns true only for the caller that actually removed the
+  // listener, so racing Cancel() calls (e.g. Finish() vs ~SliceSlotMigration) can't double-erase.
+  if (!db_slice_->UnregisterOnChange(this))
     return false;
 
-  db_slice_->UnregisterOnChange(this);
   JournalStreamer::Cancel();
   return true;
 }
