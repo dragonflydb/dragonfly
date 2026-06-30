@@ -406,7 +406,14 @@ class Connection : public util::Connection {
   // If add is true, stats are incremented, otherwise decremented.
   void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
-  ParserStatus ParseRedis(base::IoBuf& buf, uint32_t max_busy_cycles, bool enqueue_only = false);
+  // Parse RESP commands from buf until the buffer is exhausted, a protocol error is hit, or
+  // max_busy_cycles CPU time elapses (triggering a yield to avoid starving other fibers).
+  //
+  // When max_busy_cycles==0: would not trigger a yield. This can be used if parsing is done in
+  // proactor context.
+  // When enqueue_only=true (V2): all parsed commands are enqueued without inline
+  // dispatch.
+  ParserStatus ParseRedis(base::IoBuf& buf, uint32_t max_busy_cycles, bool enqueue_only);
 
   void OnBreakCb(int32_t mask);
 
@@ -637,6 +644,12 @@ class Connection : public util::Connection {
   Protocol protocol_;
   Phase phase_ = SETUP;
 
+  // Where the V2 fiber is currently parked (suspended). Used as a safety gate, for example:
+  // - parse-in-proactor only fires when parked at kSquashHop (ensuring the parser is idle).
+  // - kNone = fiber is running or was just created.
+  enum class FiberParkSpot : uint8_t { kNone, kIdleAwait, kSquashHop, kParseYield };
+  FiberParkSpot fiber_park_spot_ = FiberParkSpot::kNone;
+
   // True after IncreaseConnStats registers this connection in the current thread's stats.
   // False before registration and after DecreaseConnStats unregisters it during close/migration.
   bool conn_stats_registered_ = false;
@@ -702,6 +715,11 @@ class Connection : public util::Connection {
       // If post migration is allowed to call RegisterRecv
       bool migration_allowed_to_register_ : 1;
       bool pending_input_ : 1;
+
+      // Set by parse-in-proactor (OnRecvNotification) when its ParseRedis hits a protocol error.
+      // The recv callback cannot return a status, so IoLoopV2 observes this flag and surfaces
+      // ParserStatus::ERROR to close the connection and send the protocol-error reply.
+      bool proactor_parse_error_ : 1;
     };
   };
 

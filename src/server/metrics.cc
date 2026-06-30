@@ -300,7 +300,11 @@ void Metrics::Print(uint64_t uptime, DflyCmd* dfly_cmd, util::http::StringRespon
                             &resp->body());
   AppendMetricWithoutLabels("net_read_yields_total", "", conn_stats.num_read_yields,
                             MetricType::COUNTER, &resp->body());
-
+  AppendMetricWithoutLabels("proactor_reads_total", "V2 OnRecv reads that actually drained bytes",
+                            conn_stats.proactor_reads, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("proactor_parse_total",
+                            "V2 OnRecv parses that enqueued at least one command",
+                            conn_stats.proactor_parse, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
 
