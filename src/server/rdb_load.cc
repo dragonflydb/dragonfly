@@ -66,6 +66,7 @@ extern "C" {
 
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
+ABSL_DECLARE_FLAG(uint32_t, list_experimental_zstd_dict_threshold);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_FLAG(bool, deserialize_hnsw_index, false, "Deserialize HNSW vector index graph structure");
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
@@ -602,6 +603,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   } else {
     qlv2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
                                          GetFlag(FLAGS_list_compress_depth));
+    if (uint32_t zstd_thresh = GetFlag(FLAGS_list_experimental_zstd_dict_threshold);
+        zstd_thresh > 0) {
+      qlv2->set_compr_threshold(zstd_thresh);
+    }
   }
 
   auto cleanup = absl::Cleanup([&] {
@@ -671,6 +676,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   }
 
   std::move(cleanup).Cancel();
+
+  // Learn a thread-local ZSTD dictionary from the loaded data and compress interior
+  // nodes if the list is large and compressible. Controlled by
+  // --list_experimental_zstd_dict_threshold; a no-op when the flag is 0. Runs per
+  // chunk for chunked lists, so newly appended interior nodes get compressed too.
+  qlv2->CompressAfterLoad();
 
   if (!config_.append) {
     // Try to convert to listpack if it's a single-node quicklist, but only if there is no more data
