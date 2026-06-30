@@ -118,6 +118,17 @@ def get_latency_operations(all_stats):
     return operations
 
 
+def get_global_time_range(ops_data):
+    """Return the global time range across all operation series."""
+    times = [time for op_data in ops_data.values() for time in op_data["times"]]
+    if not times:
+        return None
+
+    start = min(times)
+    end = max(times)
+    return [start, end] if start < end else None
+
+
 def plot_latency_chart_interactive(data, output_file="latency_chart.html", open_browser=True):
     """
     Generate interactive latency chart using Plotly.
@@ -299,9 +310,15 @@ def plot_latency_chart_interactive(data, output_file="latency_chart.html", open_
     fig.update_xaxes(title_text="Time (seconds)", row=tp_row, col=tp_col)
     fig.update_yaxes(title_text="Operations per Second", row=tp_row, col=tp_col)
 
+    time_range = get_global_time_range(ops_data)
+    fig.update_xaxes(matches="x", range=time_range)
+
     # Update layout
     fig.update_layout(
-        title_text="Memtier Benchmark - Latency Analysis (Interactive - Click legend to toggle)",
+        title_text=(
+            "Memtier Benchmark - Latency Analysis "
+            "(Interactive - Click legend to toggle, time axis linked)"
+        ),
         height=figure_height,
         hovermode="x unified",
         showlegend=True,
@@ -372,6 +389,8 @@ def plot_latency_chart(data, output_file="latency_chart.svg", open_browser=True)
     for op in operations:
         ops_data[op] = extract_latency_timeseries(data, op, ignore_last_seconds=3)
 
+    time_range = get_global_time_range(ops_data)
+
     # Determine number of subplots needed
     num_ops = len(operations)
     if num_ops == 1:
@@ -407,6 +426,8 @@ def plot_latency_chart(data, output_file="latency_chart.svg", open_browser=True)
         ax.set_title(f"{op} Operations - Latency Percentiles", fontsize=14, fontweight="bold")
         ax.legend(loc="best")
         ax.grid(True, alpha=0.3)
+        if time_range is not None:
+            ax.set_xlim(time_range)
 
     # Comparison plot (if multiple operations)
     if num_ops > 1:
@@ -430,6 +451,8 @@ def plot_latency_chart(data, output_file="latency_chart.svg", open_browser=True)
         ax_comp.set_title("Operations Comparison - Latency", fontsize=14, fontweight="bold")
         ax_comp.legend(loc="best")
         ax_comp.grid(True, alpha=0.3)
+        if time_range is not None:
+            ax_comp.set_xlim(time_range)
 
     # Throughput plot
     throughput_idx = min(num_ops + 1, len(axes) - 1) if num_ops > 1 else len(axes) - 1
@@ -446,6 +469,8 @@ def plot_latency_chart(data, output_file="latency_chart.svg", open_browser=True)
     ax_throughput.set_title("Throughput Over Time", fontsize=14, fontweight="bold")
     ax_throughput.legend(loc="best")
     ax_throughput.grid(True, alpha=0.3)
+    if time_range is not None:
+        ax_throughput.set_xlim(time_range)
 
     # Hide any unused subplots
     for idx in range(throughput_idx + 1, len(axes)):

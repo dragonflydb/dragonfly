@@ -300,10 +300,6 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(facade::ParsedArgs args) {
 OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArgs& op_args) {
   string str_res;
 
-  // TODO: cuckoo filter RDB serialization is not implemented yet.
-  if (pv.ObjType() == OBJ_CUCKOOFILTER)
-    return OpStatus::INVALID_VALUE;
-
   if (pv.IsExternal() && !pv.IsCool()) {
     // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
     auto res =
@@ -852,6 +848,9 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
   }
 
   PrimeValue* pv = &it->second;
+  if (pv->IsExternal() && !pv->IsCool())
+    return OpStatus::CANCELLED;  // can't mutate offloaded values synchronously
+
   if (pv->ObjType() == OBJ_SET) {
     auto result = SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
     // Finalize memory accounting before potential deletion.
@@ -878,6 +877,9 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
 
   if (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)
     return OpStatus::WRONG_TYPE;
+
+  if (it->second.IsExternal() && !it->second.IsCool())
+    return OpStatus::CANCELLED;  // can't inspect offloaded values synchronously
 
   int32_t res = -1;
   if (it->second.ObjType() == OBJ_SET) {

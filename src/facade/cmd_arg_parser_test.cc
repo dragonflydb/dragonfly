@@ -7,6 +7,8 @@
 #include <absl/base/casts.h>
 #include <gmock/gmock.h>
 
+#include <cmath>
+
 #include "facade/memcache_parser.h"
 
 using namespace testing;
@@ -517,6 +519,93 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
     EXPECT_TRUE(err);
     EXPECT_EQ(err.type, CmdArgParser::INVALID_INT);
     EXPECT_EQ(err.index, 0);
+  }
+}
+
+// A user-defined as_vnum: VNum<double> + a validate() predicate. Exercises the generic
+// validated-number path of Convert<T>() for a floating-point underlying type.
+struct PositiveFinite : VNum<double> {
+  static bool validate(double v) {
+    return v > 0 && std::isfinite(v);
+  }
+};
+
+TEST_F(CmdArgParserTest, ValidatedDouble) {
+  {
+    auto parser = Make({"0.5", "2.5"});
+    EXPECT_DOUBLE_EQ((parser.Next<PositiveFinite>().value), 0.5);
+    EXPECT_DOUBLE_EQ((parser.Next<PositiveFinite>().value), 2.5);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"0"});  // validate() rejects 0
+    parser.Next<PositiveFinite>();
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_FLOAT);
+  }
+  {
+    auto parser = Make({"inf"});  // non-finite rejected
+    parser.Next<PositiveFinite>();
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_FLOAT);
+  }
+}
+
+TEST_F(CmdArgParserTest, RangeList) {
+  using Range = CmdArgParser::Range;
+  // NextRange reads [count, e1..eN] and returns a bounded Range; a terminal Range converts to
+  // ParsedArgs.
+  {
+    auto parser = Make({"2", "a", "b"});
+    Range fields = parser.NextRange();
+    EXPECT_EQ(fields.size(), 2u);
+    EXPECT_THAT(std::vector<string_view>(fields.begin(), fields.end()), ElementsAre("a", "b"));
+    EXPECT_FALSE(parser.HasError());
+    EXPECT_FALSE(parser.HasNext());
+    ParsedArgs as_args = fields;  // terminal -> ParsedArgs
+    EXPECT_EQ(as_args.size(), 2u);
+  }
+  // group=2 reads count field/value pairs.
+  {
+    auto parser = Make({"2", "f1", "v1", "f2", "v2"});
+    Range kv = parser.NextRange(2);
+    EXPECT_EQ(kv.size(), 4u);
+    EXPECT_THAT(std::vector<string_view>(kv.begin(), kv.end()),
+                ElementsAre("f1", "v1", "f2", "v2"));
+    EXPECT_FALSE(parser.HasError());
+  }
+  // Bounded (non-terminal): only `count` elements are consumed; the rest stays for the caller.
+  {
+    auto parser = Make({"2", "k1", "k2", "WEIGHTS", "1", "2"});
+    Range keys = parser.NextRange();
+    EXPECT_EQ(keys.size(), 2u);
+    EXPECT_THAT(std::vector<string_view>(keys.begin(), keys.end()), ElementsAre("k1", "k2"));
+    EXPECT_FALSE(parser.HasError());
+    EXPECT_EQ(parser.Peek(), "WEIGHTS");  // trailing clause preserved
+  }
+  // count == 0 -> error.
+  {
+    auto parser = Make({"0"});
+    parser.NextRange();
+    EXPECT_TRUE(parser.TakeError());
+  }
+  // Fewer than count args remain -> INVALID_CASES.
+  {
+    auto parser = Make({"2", "a"});
+    parser.NextRange();
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
+  }
+  // RemainingRange: all remaining args, no leading count.
+  {
+    auto parser = Make({"a", "b", "c"});
+    Range rest = parser.RemainingRange();
+    EXPECT_EQ(rest.size(), 3u);
+    EXPECT_THAT(std::vector<string_view>(rest.begin(), rest.end()), ElementsAre("a", "b", "c"));
+    EXPECT_FALSE(parser.HasNext());
   }
 }
 

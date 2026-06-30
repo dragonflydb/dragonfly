@@ -107,6 +107,29 @@ class Interpreter {
 
   void SetGlobalArray(const char* name, SliceSpan args);
 
+  struct GlobalArrayBuilder {
+    GlobalArrayBuilder(const GlobalArrayBuilder&) = delete;
+    GlobalArrayBuilder& operator=(const GlobalArrayBuilder&) = delete;
+
+    GlobalArrayBuilder(GlobalArrayBuilder&& o) noexcept : lua_(o.lua_), name_(o.name_) {
+      o.lua_ = nullptr;
+    }
+
+    ~GlobalArrayBuilder();
+
+    void AddElem(unsigned index, std::string_view elem);
+
+   private:
+    friend class Interpreter;
+    GlobalArrayBuilder(lua_State* lua, const char* name) : lua_(lua), name_(name) {
+    }
+
+    lua_State* lua_;
+    const char* name_;
+  };
+
+  GlobalArrayBuilder CreateGlobalStringArray(unsigned len, const char* name);
+
   // Runs already added function sha returned by a successful call to AddFunction().
   // Returns: true if the call succeeded, otherwise fills error and returns false.
   // sha must be 40 char length.

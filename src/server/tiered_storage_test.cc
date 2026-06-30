@@ -694,6 +694,64 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
   }
 }
 
+// Regression: the hash field-TTL commands read/mutate the StringMap directly via pv.RObjPtr().
+// On an offloaded (external, non-cool) hash that pointer is invalid, so they used to SIGSEGV in
+// FieldExpireTime()/SetFieldsExpireTime(). They must now fail gracefully like HGETEX/HSETEX.
+TEST_F(TieredStorageTest, HashFieldExpiryOnOffloaded) {
+  absl::FlagSaver saver;
+  absl::SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  absl::SetFlag(&FLAGS_tiered_experimental_cooling, false);  // no in-memory copy -> truly external
+  absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);        // never upload back to memory
+  UpdateFromFlags();
+
+  static constexpr size_t kNUM = 100;
+  auto build = [](string_view key) {
+    vector<string> cmd = {"HSET", string{key}};
+    for (char c = 'a'; c <= 'z'; c++) {
+      cmd.push_back(string{1, c});
+      cmd.push_back(string{31, 'x'} + c);
+    }
+    return cmd;
+  };
+  for (size_t i = 0; i < kNUM; i++)
+    Run(build(absl::StrCat("k", i)));
+  ExpectConditionWithinTimeout([this] {
+    auto m = GetMetrics();
+    return m.tiered_stats.total_stashes + m.tiered_stats.small_bins_filling_entries_cnt == kNUM;
+  });
+
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0);  // force eviction from memory
+  UpdateFromFlags();
+  auto offloaded = [this] {
+    auto m = GetMetrics();
+    return m.db_stats[0].tiered_entries + m.tiered_stats.small_bins_filling_entries_cnt == kNUM;
+  };
+  ExpectConditionWithinTimeout(offloaded);
+
+  // Exercise every key: an offloaded (external) hash can't be inspected/mutated synchronously, so
+  // the command must fail gracefully; an in-memory one returns a normal reply. Neither may crash.
+  // FIELDTTL/FIELDEXPIRE go through the same FieldExpireTime()/SetFieldsExpireTime() path.
+  size_t external_errors = 0;
+  for (size_t i = 0; i < kNUM; i++) {
+    string key = absl::StrCat("k", i);
+    auto httl = Run({"HTTL", key, "FIELDS", "1", "a"});
+    Run({"HPEXPIRETIME", key, "FIELDS", "1", "a"});
+    Run({"HGETEX", key, "FIELDS", "1", "a"});
+    Run({"HEXPIRE", key, "100", "FIELDS", "1", "a"});
+    Run({"FIELDTTL", key, "a"});
+    Run({"FIELDEXPIRE", key, "100", "a"});
+    if (httl.type == RespExpr::ERROR)
+      ++external_errors;
+  }
+  // At least one hash was genuinely external, so the guard (not a crash) handled it.
+  EXPECT_GT(external_errors, 0u);
+
+  // The server is still alive and the data is intact (read back through the tiered path).
+  EXPECT_THAT(Run({"HLEN", "k0"}), IntArg(26));
+  string expected_a = string{31, 'x'} + 'a';
+  EXPECT_EQ(Run({"HGET", "k0", string{1, 'a'}}), expected_a);
+}
+
 class ListNodeTieringTest : public TieredStorageTest {
   void SetUp() override {
     fs.emplace();

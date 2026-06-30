@@ -14,6 +14,7 @@
 #include "server/error.h"
 #include "server/tiering/common.h"
 #include "server/tiering/external_alloc.h"
+#include "strings/human_readable.h"
 #include "util/fibers/uring_file.h"
 #include "util/fibers/uring_proactor.h"
 
@@ -23,6 +24,9 @@ ABSL_FLAG(bool, backing_file_direct, true, "If true uses O_DIRECT to open backin
 
 ABSL_FLAG(uint64_t, registered_buffer_size, 512_KB,
           "Size of registered buffer for IoUring fixed read/writes");
+
+ABSL_FLAG(strings::MemoryBytesFlag, tiering_disk_storage_initial_size, 256_MB,
+          "Initial disk storage size.");
 
 namespace dfly::tiering {
 
@@ -36,6 +40,10 @@ using namespace ::util::fb2;
 namespace {
 
 constexpr unsigned kHeapSliceId = UINT_MAX;
+
+size_t AlignUp(size_t value, size_t alignment) {
+  return (value + alignment - 1) & ~(alignment - 1);
+}
 
 RegisteredSlice AllocateTmpBuf(size_t size) {
   size = (size + kPageSize - 1) / kPageSize * kPageSize;
@@ -59,8 +67,6 @@ void ReturnBuf(RegisteredSlice buf) {
   else
     DestroyTmpBuf(buf);
 }
-
-constexpr off_t kInitialSize = 1UL << 28;  // 256MB
 
 template <typename... Ts> error_code DoFiberCall(void (SubmitEntry::*c)(Ts...), Ts... args) {
   auto* proactor = static_cast<UringProactor*>(ProactorBase::me());
@@ -94,12 +100,24 @@ error_code DiskStorage::Open(string_view path) {
 
   int fd = backing_file_->fd();
 
-  auto ec = DoFiberCall(&SubmitEntry::PrepFallocate, fd, 0, 0L, kInitialSize);
+  off_t disk_initial_size = absl::GetFlag(FLAGS_tiering_disk_storage_initial_size);
+
+  if (!disk_initial_size || (disk_initial_size % ExternalAllocator::kExtAlignment) != 0) {
+    disk_initial_size = !disk_initial_size
+                            ? ExternalAllocator::kExtAlignment
+                            : AlignUp(disk_initial_size, ExternalAllocator::kExtAlignment);
+    LOG(WARNING) << "Flag tiering_disk_storage_initial_size is not aligned to "
+                 << strings::HumanReadableNumBytes(ExternalAllocator::kExtAlignment)
+                 << " bytes; rounded up to " << strings::HumanReadableNumBytes(disk_initial_size);
+  }
+
+  auto ec =
+      DoFiberCall(&SubmitEntry::PrepFallocate, fd, 0, 0L, static_cast<off_t>(disk_initial_size));
   VLOG_IF(1, ec) << "Fallocate not supported";
 
   RETURN_ON_ERR(DoFiberCall(&SubmitEntry::PrepFadvise, fd, 0L, 0L, POSIX_FADV_RANDOM));
 
-  alloc_.AddStorage(0, kInitialSize);
+  alloc_.AddStorage(0, disk_initial_size);
 
   // TODO(vlad): Even though this is called only once for regular use,
   // the testing code runs this initializer every time, never unregistering previous buffers
@@ -204,8 +222,9 @@ void DiskStorage::Stash(DiskSegment segment, RegisteredSlice buf, StashCb cb) {
   // Grow in advance if needed and possible
   size_t capacity = alloc_.capacity();
   size_t available = capacity - alloc_.allocated_bytes();
-  if ((available < 256_MB) && (available < capacity * 0.15) && !grow_.pending) {
-    auto ec = RequestGrow(256_MB);
+  if ((available < ExternalAllocator::kExtAlignment) && (available < capacity * 0.15) &&
+      !grow_.pending) {
+    auto ec = RequestGrow(ExternalAllocator::kExtAlignment);
     LOG_IF(ERROR, ec && ec != errc::file_too_large) << "Could not call grow :" << ec.message();
   }
 }
@@ -216,7 +235,20 @@ DiskStorage::Stats DiskStorage::GetStats() const {
       static_cast<size_t>(max_size_), pending_ops_,      pending_stash_bytes_};
 }
 
-error_code DiskStorage::RequestGrow(off_t grow_size) {
+error_code DiskStorage::RequestGrow(off_t min_size) {
+  // Request the file to grow by (default ExternalAllocator::kExtAlignment = 256_MB):
+  // - take 5% of capacity
+  // - round up to 256 MB boundary
+  // - ensure result is at least min_size
+  auto ComputeGrowSize = [](size_t capacity, size_t min_size) -> size_t {
+    const size_t kGrowPercent = 5;
+    const size_t kAlign = ExternalAllocator::kExtAlignment;
+    size_t grow = AlignUp((capacity * kGrowPercent) / 100, kAlign);
+    return std::max(grow, min_size);
+  };
+
+  size_t grow_size = ComputeGrowSize(alloc_.capacity(), static_cast<size_t>(min_size));
+
   VLOG(1) << "Requesting grow by " << grow_size << " current capacity: " << alloc_.capacity();
 
   DCHECK_EQ(grow_size % ExternalAllocator::kExtAlignment, 0u);

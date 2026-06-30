@@ -34,7 +34,7 @@ class DebugCmd {
  public:
   DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx);
 
-  void Run(CmdArgList args, CommandContext* cmd_cntx);
+  void Run(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   static void Shutdown();
 

@@ -1792,6 +1792,19 @@ struct HybridDocEntry {
 
 using HybridDocMap = absl::flat_hash_map<string, HybridDocEntry>;
 
+// Validated doubles for FT.HYBRID RANGE, used via CmdArgParser::Next<T>(). validate() runs inside
+// the parser so callers don't re-check the parsed value.
+struct NonNegativeDouble : facade::VNum<double> {
+  static bool validate(double v) {
+    return v >= 0 && std::isfinite(v);
+  }
+};
+struct HnswRangeEpsilon : facade::VNum<double> {
+  static bool validate(double v) {
+    return search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(v);
+  }
+};
+
 ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
   using facade::Map;
   using facade::Tag;
@@ -1811,50 +1824,50 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       p.scorer = *scorer_fn;
   };
   auto parse_tanh_factor = [&](CmdArgParser* sub) { tanh_factor = ParseBM25StdTanhFactor(sub); };
+  auto read_range_epsilon = [&](CmdArgParser* sub) {
+    double epsilon = sub->Next<HnswRangeEpsilon>("Invalid EPSILON value");
+    if (!sub->HasError())
+      p.range_epsilon = epsilon;
+  };
   auto parse_hybrid_range = [&](CmdArgParser* sub) {
     p.use_range = true;
-    bool has_radius = false;
-    bool has_epsilon = false;
 
-    auto parse_range_opt = [&](CmdArgParser* opt_parser, string_view opt) {
-      if (absl::EqualsIgnoreCase(opt, "RADIUS")) {
-        if (has_radius) {
-          opt_parser->ReportCustom("Duplicate RADIUS argument");
-          return;
+    // Two accepted forms after RANGE: the counted form "<nargs> RADIUS <r> [EPSILON <e>]" (keywords
+    // in any order) and the shorthand "<radius> [EPSILON <e>]". The counted form starts with an
+    // integer count immediately followed by a RADIUS/EPSILON keyword; the shorthand starts with the
+    // bare radius value.
+    size_t nargs = 0;
+    bool keyword_form =
+        absl::SimpleAtoi(sub->Peek(0), &nargs) && (absl::EqualsIgnoreCase(sub->Peek(1), "RADIUS") ||
+                                                   absl::EqualsIgnoreCase(sub->Peek(1), "EPSILON"));
+    if (keyword_form) {
+      sub->Skip(1);  // The counted-form argument count is not otherwise needed.
+      bool has_radius = false;
+      while (!sub->HasError() && (absl::EqualsIgnoreCase(sub->Peek(), "RADIUS") ||
+                                  absl::EqualsIgnoreCase(sub->Peek(), "EPSILON"))) {
+        if (sub->Check("RADIUS")) {
+          if (has_radius) {
+            sub->ReportCustom("Duplicate RADIUS argument");
+            return;
+          }
+          p.range_radius = sub->Next<NonNegativeDouble>("Invalid RADIUS value");
+          has_radius = !sub->HasError();
+        } else if (sub->Check("EPSILON")) {
+          if (p.range_epsilon) {
+            sub->ReportCustom("Duplicate EPSILON argument");
+            return;
+          }
+          read_range_epsilon(sub);
         }
-        p.range_radius = opt_parser->NextNonNegativeDouble("Invalid RADIUS value");
-        has_radius = !opt_parser->HasError();
-      } else if (absl::EqualsIgnoreCase(opt, "EPSILON")) {
-        if (has_epsilon) {
-          opt_parser->ReportCustom("Duplicate EPSILON argument");
-          return;
-        }
-        double epsilon = opt_parser->NextPositiveDouble("Invalid EPSILON value");
-        if (!opt_parser->HasError() &&
-            !search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(epsilon)) {
-          opt_parser->ReportCustom("Invalid EPSILON value");
-          return;
-        }
-        p.range_epsilon = epsilon;
-        has_epsilon = !opt_parser->HasError();
       }
-    };
-
-    if (sub->TryParseCountedKeyValueList({"RADIUS"}, {"RADIUS", "EPSILON"}, "RANGE",
-                                         parse_range_opt)) {
       if (!sub->HasError() && !has_radius)
         sub->ReportCustom("Missing required argument RADIUS");
       return;
     }
 
-    p.range_radius = sub->NextNonNegativeDouble("Invalid RADIUS value");
+    p.range_radius = sub->Next<NonNegativeDouble>("Invalid RADIUS value");
     if (sub->Check("EPSILON"))
-      if (double epsilon = sub->NextPositiveDouble("Invalid EPSILON value"); !sub->HasError()) {
-        if (!search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(epsilon))
-          sub->ReportCustom("Invalid EPSILON value");
-        else
-          p.range_epsilon = epsilon;
-      }
+      read_range_epsilon(sub);
   };
 
   parser->ExpectTag("SEARCH", "expected SEARCH keyword");

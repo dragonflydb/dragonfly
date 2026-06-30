@@ -47,12 +47,41 @@ TEST_F(CuckooFilterFamilyTest, WrongType) {
   EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
 }
 
-// RDB serialization isn't implemented yet for cuckoo filters (see rdb_save.cc). DUMP must fail
-// cleanly instead of crashing the server until that lands.
-TEST_F(CuckooFilterFamilyTest, DumpFailsCleanly) {
-  ASSERT_EQ(Run("cf.reserve cf1 1000"), "OK");
-  auto resp = Run({"dump", "cf1"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+TEST_F(CuckooFilterFamilyTest, DumpAndRestore) {
+  ASSERT_EQ(Run("cf.reserve cf1 1000 bucketsize 4 maxiterations 10 expansion 2"), "OK");
+  EXPECT_THAT(Run({"cf.add", "cf1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.add", "cf1", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.add", "cf1", "bar"}), IntArg(1));
+
+  auto dump = Run({"dump", "cf1"}).GetBuf();
+  EXPECT_EQ(Run({"restore", "cf2", "0", ToSV(dump)}), "OK");
+
+  EXPECT_EQ(Run("type cf2"), "MBbloomCF");
+  EXPECT_THAT(Run({"cf.count", "cf2", "foo"}), IntArg(2));
+  EXPECT_THAT(Run({"cf.exists", "cf2", "bar"}), IntArg(1));
+  EXPECT_THAT(Run({"cf.exists", "cf2", "nope"}), IntArg(0));
+
+  auto resp = Run({"cf.info", "cf2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(
+                        "Size", testing::_, "Number of buckets", testing::_, "Number of filters",
+                        IntArg(1), "Number of items inserted", IntArg(3), "Number of items deleted",
+                        IntArg(0), "Bucket size", IntArg(4), "Expansion rate", IntArg(2),
+                        "Max iterations", IntArg(10))));
+}
+
+TEST_F(CuckooFilterFamilyTest, DumpAndRestoreAfterExpansion) {
+  // Force growth past the first sub-filter so the dump covers num_filters > 1.
+  ASSERT_EQ(Run("cf.reserve cf1 4 expansion 2"), "OK");
+  for (int i = 0; i < 100; ++i) {
+    EXPECT_THAT(Run({"cf.add", "cf1", absl::StrCat(i)}), IntArg(1));
+  }
+
+  auto dump = Run({"dump", "cf1"}).GetBuf();
+  EXPECT_EQ(Run({"restore", "cf2", "0", ToSV(dump)}), "OK");
+
+  for (int i = 0; i < 100; ++i) {
+    EXPECT_THAT(Run({"cf.exists", "cf2", absl::StrCat(i)}), IntArg(1)) << i;
+  }
 }
 
 TEST_F(CuckooFilterFamilyTest, AddAutoCreatesAndAllowsDuplicates) {
@@ -90,6 +119,27 @@ TEST_F(CuckooFilterFamilyTest, AddFilterFull) {
     EXPECT_THAT(Run({"cf.add", "cf", absl::StrCat(i)}), IntArg(1));
   }
   EXPECT_THAT(Run({"cf.add", "cf", "overflow"}), ErrArg("Filter is full"));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertFilterFull) {
+  // Non-expanding filter with capacity 4; CF.INSERT returns -1 for items that cannot be inserted.
+  ASSERT_EQ(Run("cf.reserve cf 4 expansion 0"), "OK");
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_THAT(Run({"cf.insert", "cf", "items", absl::StrCat(i)}),
+                RespArray(ElementsAre(IntArg(1))));
+  }
+  auto resp = Run({"cf.insert", "cf", "items", "overflow1", "overflow2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(-1), IntArg(-1))));
+
+  // CF.INSERTNX: -1 for full, 0 for existing, 1 for inserted (but filter is full here).
+  ASSERT_EQ(Run("cf.reserve cfnx 4 expansion 0"), "OK");
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_THAT(Run({"cf.insertnx", "cfnx", "items", absl::StrCat(i)}),
+                RespArray(ElementsAre(IntArg(1))));
+  }
+  // Item 0 already exists → 0; overflow → -1.
+  resp = Run({"cf.insertnx", "cfnx", "items", "0", "overflow"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), IntArg(-1))));
 }
 
 TEST_F(CuckooFilterFamilyTest, Exists) {
@@ -184,6 +234,81 @@ TEST_F(CuckooFilterFamilyTest, DelNonExistentItem) {
 
 TEST_F(CuckooFilterFamilyTest, DelMissingKey) {
   EXPECT_THAT(Run({"cf.del", "nonexist-key", "foo"}), ErrArg("no such key"));
+}
+
+TEST_F(CuckooFilterFamilyTest, Compact) {
+  ASSERT_EQ(Run("cf.reserve cf1 4"), "OK");
+  for (int i = 0; i < 30; ++i) {
+    EXPECT_THAT(Run({"cf.add", "cf1", absl::StrCat(i)}), IntArg(1));
+  }
+  for (int i = 0; i < 29; ++i) {
+    EXPECT_THAT(Run({"cf.del", "cf1", absl::StrCat(i)}), IntArg(1));
+  }
+
+  // Explicit CF.COMPACT should succeed even though CF.DEL's automatic compaction has
+  // likely already run by this point — it's just a no-op/cheap pass in that case.
+  EXPECT_EQ(Run({"cf.compact", "cf1"}), "OK");
+  EXPECT_THAT(Run({"cf.exists", "cf1", "29"}), IntArg(1));
+}
+
+TEST_F(CuckooFilterFamilyTest, CompactMissingKey) {
+  EXPECT_THAT(Run({"cf.compact", "nonexist-key"}), ErrArg("no such key"));
+}
+
+TEST_F(CuckooFilterFamilyTest, Insert) {
+  auto resp = Run({"cf.insert", "cf", "items", "a", "b", "c"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+  EXPECT_EQ(Run("type cf"), "MBbloomCF");
+
+  // Duplicates are allowed (like CF.ADD).
+  resp = Run({"cf.insert", "cf", "items", "a", "a"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(1))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertWithCapacity) {
+  auto resp = Run({"cf.insert", "cf", "capacity", "500", "items", "x"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertNocreate) {
+  // NOCREATE on missing key returns an error.
+  EXPECT_THAT(Run({"cf.insert", "cf", "nocreate", "items", "a"}), ErrArg("no such key"));
+
+  // NOCREATE on existing key works fine.
+  ASSERT_EQ(Run("cf.reserve cf 1000"), "OK");
+  auto resp = Run({"cf.insert", "cf", "nocreate", "items", "a"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertMissingItemsKeyword) {
+  EXPECT_THAT(Run({"cf.insert", "cf", "a", "b"}), ErrArg("ITEMS"));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertWrongType) {
+  Run("set str1 foo");
+  EXPECT_THAT(Run({"cf.insert", "str1", "items", "a"}), ErrArg("WRONGTYPE"));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertNx) {
+  auto resp = Run({"cf.insertnx", "cf", "items", "a", "b", "c"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+
+  // Existing items return 0 (like CF.ADDNX).
+  resp = Run({"cf.insertnx", "cf", "items", "a", "d"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), IntArg(1))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertNxNocreate) {
+  EXPECT_THAT(Run({"cf.insertnx", "cf", "nocreate", "items", "a"}), ErrArg("no such key"));
+
+  ASSERT_EQ(Run("cf.reserve cf 1000"), "OK");
+  auto resp = Run({"cf.insertnx", "cf", "nocreate", "items", "a"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1))));
+}
+
+TEST_F(CuckooFilterFamilyTest, InsertNxWrongType) {
+  Run("set str1 foo");
+  EXPECT_THAT(Run({"cf.insertnx", "str1", "items", "a"}), ErrArg("WRONGTYPE"));
 }
 
 }  // namespace dfly

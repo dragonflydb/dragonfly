@@ -299,6 +299,18 @@ TEST_F(StreamFamilyTest, XReadGroup) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
+TEST_F(StreamFamilyTest, XReadGroupConsumerNamedStreams) {
+  Run({"XADD", "COUNT", "1-0", "field", "value"});
+  Run({"XGROUP", "CREATE", "COUNT", "grp1", "0"});
+  Run({"XADD", "2", "1-0", "field", "value"});
+  Run({"XGROUP", "CREATE", "2", "grp1", "0"});
+  Run({"XADD", "xp1", "1-0", "field", "value"});
+  Run({"XGROUP", "CREATE", "xp1", "grp1", "0"});
+
+  auto resp = Run({"XREADGROUP", "GROUP", "grp1", "STREAMS", "COUNT", "2", "STREAMS", "xp1", ">"});
+  EXPECT_THAT(resp, RespElementsAre(RespArray(ElementsAre("xp1", ArrLen(1)))));
+}
+
 TEST_F(StreamFamilyTest, XReadBlock) {
   Run({"xadd", "foo", "1-*", "k1", "v1"});
   Run({"xadd", "foo", "1-*", "k2", "v2"});

@@ -32,7 +32,7 @@ struct CuckooInfo {
   uint16_t max_iterations = 0;
 };
 
-OpResult<CuckooFilter*> FindOrCreate(const OpArgs& op_args, string_view key) {
+OpResult<bool> OpAdd(const OpArgs& op_args, string_view key, string_view item) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
   RETURN_ON_BAD_STATUS(op_res);
@@ -41,27 +41,27 @@ OpResult<CuckooFilter*> FindOrCreate(const OpArgs& op_args, string_view key) {
   if (op_res->is_new) {
     pv.SetCuckooFilter(CuckooFilterOptions{.capacity = kDefaultCapacity});
   }
-  return pv.GetCuckooFilter();
-}
 
-OpResult<bool> OpAdd(const OpArgs& op_args, string_view key, string_view item) {
-  OpResult<CuckooFilter*> cf = FindOrCreate(op_args, key);
-  RETURN_ON_BAD_STATUS(cf);
-
-  if (!(*cf)->Insert(CuckooFilter::Hash(item)))
+  if (!pv.GetCuckooFilter()->Insert(CuckooFilter::Hash(item)))
     return OpStatus::CUCKOO_FILTER_FULL;
   return true;
 }
 
 OpResult<bool> OpAddNx(const OpArgs& op_args, string_view key, string_view item) {
-  OpResult<CuckooFilter*> cf = FindOrCreate(op_args, key);
-  RETURN_ON_BAD_STATUS(cf);
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  RETURN_ON_BAD_STATUS(op_res);
+
+  PrimeValue& pv = op_res->it->second;
+  if (op_res->is_new) {
+    pv.SetCuckooFilter(CuckooFilterOptions{.capacity = kDefaultCapacity});
+  }
 
   uint64_t hash = CuckooFilter::Hash(item);
-  if ((*cf)->Exists(hash))
+  if (pv.GetCuckooFilter()->Exists(hash))
     return false;
 
-  if (!(*cf)->Insert(hash))
+  if (!pv.GetCuckooFilter()->Insert(hash))
     return OpStatus::CUCKOO_FILTER_FULL;
   return true;
 }
@@ -106,10 +106,69 @@ OpResult<bool> OpDel(const OpArgs& op_args, string_view key, string_view item) {
   auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
   RETURN_ON_BAD_STATUS(op_res);
 
-  // RedisBloom auto-compacts (merges sub-filters) once deletes exceed 10% of items, to
-  // reclaim space from sparse sub-filters. CuckooFilter has no compaction/merge support;
-  // this is an intentional, known parity gap that doesn't affect Delete's correctness.
-  return op_res->it->second.GetCuckooFilter()->Delete(CuckooFilter::Hash(item));
+  CuckooFilter* cf = op_res->it->second.GetCuckooFilter();
+  bool deleted = cf->Delete(CuckooFilter::Hash(item));
+  // auto-compact once deletes exceed 10% of items (mirrors RedisBloom's threshold)
+  if (deleted && cf->NumFilters() > 1 && cf->NumDeletes() > cf->NumItems() / 10)
+    cf->Compact(/*cont=*/false);
+  return deleted;
+}
+
+OpStatus OpCompact(const OpArgs& op_args, string_view key) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  RETURN_ON_BAD_STATUS(op_res);
+
+  // cont=true: unlike Delete()'s automatic compaction, CF.COMPACT keeps trying older
+  // sub-filters even if a newer one couldn't be fully emptied.
+  op_res->it->second.GetCuckooFilter()->Compact(/*cont=*/true);
+  return OpStatus::OK;
+}
+
+struct InsertOptions {
+  uint64_t capacity = kDefaultCapacity;
+  bool nocreate = false;
+};
+
+// Shared op for CF.INSERT and CF.INSERTNX. Returns one integer per item:
+//   1  — item inserted
+//   0  — item already exists (nx only)
+//  -1  — filter is full, item could not be inserted
+// Returns KEY_NOTFOUND if nocreate is set and the key does not exist.
+OpResult<vector<int>> OpInsert(const OpArgs& op_args, string_view key, ParsedArgs items,
+                               const InsertOptions& opts, bool nx) {
+  auto& db_slice = op_args.GetDbSlice();
+
+  DbSlice::ItAndUpdater it_and_updater;
+  if (opts.nocreate) {
+    auto find_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+    if (!find_res)
+      return find_res.status();
+    it_and_updater = std::move(*find_res);
+  } else {
+    auto add_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+    RETURN_ON_BAD_STATUS(add_res);
+    if (add_res->is_new) {
+      add_res->it->second.SetCuckooFilter(CuckooFilterOptions{.capacity = opts.capacity});
+    }
+    it_and_updater = std::move(*add_res);
+  }
+
+  CuckooFilter* cf = it_and_updater.it->second.GetCuckooFilter();
+  vector<int> result(items.size());
+  for (size_t i = 0; i < items.size(); ++i) {
+    const uint64_t hash = CuckooFilter::Hash(items[i]);
+    if (nx) {
+      if (cf->Exists(hash)) {
+        result[i] = 0;
+      } else {
+        result[i] = cf->Insert(hash) ? 1 : -1;
+      }
+    } else {
+      result[i] = cf->Insert(hash) ? 1 : -1;
+    }
+  }
+  return result;
 }
 
 OpStatus OpReserve(const OpArgs& op_args, string_view key, const CuckooFilterOptions& options) {
@@ -294,6 +353,61 @@ void CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(*res);
 }
 
+void CmdInsertImpl(CmdArgParser parser, CommandContext* cmd_cntx, bool nx) {
+  string_view key = parser.Next();
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  RETURN_ON_PARSE_ERROR(parser, rb);
+
+  InsertOptions opts;
+  parser.Apply(Tag("CAPACITY", &opts.capacity), Exist("NOCREATE", &opts.nocreate));
+  RETURN_ON_PARSE_ERROR(parser, rb);
+
+  if (!opts.nocreate && opts.capacity == 0)
+    return rb->SendError("CF: capacity must be greater than 0");
+
+  if (!parser.Check("ITEMS")) {
+    return rb->SendError("CF.INSERT requires ITEMS keyword");
+  }
+  ParsedArgs items = parser.UnparsedArgs();
+  if (items.empty()) {
+    return rb->SendError("CF.INSERT requires at least one item");
+  }
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpInsert(t->GetOpArgs(shard), key, items, opts, nx);
+  };
+
+  OpResult<vector<int>> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res)
+    return rb->SendError(res.status());
+
+  RedisReplyBuilder::ArrayScope scope{rb, res->size()};
+  for (int v : *res) {
+    rb->SendLong(v);
+  }
+}
+
+void CmdInsert(CmdArgParser parser, CommandContext* cmd_cntx) {
+  CmdInsertImpl(std::move(parser), cmd_cntx, false);
+}
+
+void CmdInsertNx(CmdArgParser parser, CommandContext* cmd_cntx) {
+  CmdInsertImpl(std::move(parser), cmd_cntx, true);
+}
+
+void CmdCompact(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpCompact(t->GetOpArgs(shard), key);
+  };
+
+  OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  if (res == OpStatus::OK)
+    return cmd_cntx->SendOk();
+  return cmd_cntx->SendError(res);
+}
+
 }  // namespace
 
 using CI = CommandId;
@@ -310,7 +424,10 @@ void RegisterCuckooFilterFamily(CommandRegistry* registry) {
             << CI{"CF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(MExists)
             << CI{"CF.INFO", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Info)
             << CI{"CF.COUNT", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(Count)
-            << CI{"CF.DEL", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Del);
+            << CI{"CF.DEL", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Del)
+            << CI{"CF.INSERT", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(Insert)
+            << CI{"CF.INSERTNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(InsertNx)
+            << CI{"CF.COMPACT", CO::JOURNALED, 2, 1, 1}.HFUNC(Compact);
 }
 
 }  // namespace dfly

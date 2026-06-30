@@ -22,7 +22,6 @@ Usage:
 import json
 import os
 import random
-import struct
 
 # fmt: off
 # Every command registered in Dragonfly (via CI{...}), grouped by family: (name, min_args, max_args).
@@ -58,7 +57,8 @@ COMMANDS = [
     (b"HMSET", 3, 9), (b"HDEL", 2, 6), (b"HLEN", 1, 1), (b"HEXISTS", 2, 2),
     (b"HKEYS", 1, 1), (b"HVALS", 1, 1), (b"HGETALL", 1, 1), (b"HINCRBY", 3, 3),
     (b"HINCRBYFLOAT", 3, 3), (b"HSTRLEN", 2, 2), (b"HRANDFIELD", 1, 3), (b"HSCAN", 2, 7),
-    (b"HEXPIRE", 4, 9), (b"HTTL", 3, 8), (b"HSETEX", 4, 9),
+    (b"HEXPIRE", 4, 9), (b"HTTL", 3, 8), (b"HSETEX", 4, 9), (b"HPEXPIRETIME", 3, 8),
+    (b"HGETEX", 3, 9),
     # Set
     (b"SADD", 2, 6), (b"SREM", 2, 6), (b"SMEMBERS", 1, 1), (b"SISMEMBER", 2, 2),
     (b"SMISMEMBER", 2, 6), (b"SCARD", 1, 1), (b"SPOP", 1, 2), (b"SRANDMEMBER", 1, 2),

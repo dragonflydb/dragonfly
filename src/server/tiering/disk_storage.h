@@ -59,8 +59,8 @@ class DiskStorage {
   Stats GetStats() const;
 
  private:
-  // Try asynchronously growing backing file by requested size
-  std::error_code RequestGrow(off_t grow_size);
+  // Try asynchronously growing backing file by at least min requested size
+  std::error_code RequestGrow(off_t min_size);
 
   // Returns a buffer with size greater or equal to len.
   util::fb2::RegisteredSlice PrepareBuf(size_t len);
