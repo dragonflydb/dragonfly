@@ -354,9 +354,11 @@ absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() c
 absl::flat_hash_map<std::string, CmdCallStats> CommandRegistry::NamedCallStats(
     const std::vector<CmdCallStats>& merged) const {
   absl::flat_hash_map<std::string, CmdCallStats> res;
-  if (merged.empty())
+  if (merged.size() != cmd_map_.size()) {
+    LOG_IF(DFATAL, !merged.empty())
+        << "cmd_call_stats size " << merged.size() << " != registry size " << cmd_map_.size();
     return res;
-  DCHECK_EQ(merged.size(), cmd_map_.size());
+  }
   size_t i = 0;
   for (const auto& k_v : cmd_map_) {
     const CmdCallStats& s = merged[i++];

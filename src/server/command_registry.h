@@ -339,18 +339,16 @@ class CommandRegistry {
     return cmd_map_.size();
   }
 
-  // Copies proactor `thread_index`'s own per-command counters into `out` (>= size() entries);
-  // reads only this proactor's cells, so it is race-free inside the GetMetrics fan-out.
+  // `out` must hold >= size() entries. Reads only this proactor's own cells, so it is race-free
+  // when run concurrently inside the GetMetrics fan-out.
   void CollectThreadCallStats(unsigned thread_index, CmdCallStats* out) const {
     size_t i = 0;
     for (const auto& k_v : cmd_map_)
       out[i++] = k_v.second.GetStats(thread_index);
   }
 
-  // Maps the merged per-command counters (indexed by registry order, see CollectThreadCallStats)
-  // to lowercase command names, skipping zero-call commands. `merged` is either empty (stats were
-  // not collected) or sized to the whole registry — cmd_map_ is fixed after startup, so index i
-  // maps to the same command it was collected for.
+  // Maps the merged per-command counters (registry order, see CollectThreadCallStats) to lowercase
+  // names, skipping zero-call commands. `merged` is empty (not collected) or whole-registry sized.
   absl::flat_hash_map<std::string, CmdCallStats> NamedCallStats(
       const std::vector<CmdCallStats>& merged) const;
 

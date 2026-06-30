@@ -115,8 +115,8 @@ struct Metrics {
 
   InterpreterManager::Stats lua_stats;
 
-  // Per-command counters indexed by dense command id (registry order); summed across threads in
-  // Merge, mapped to names at print time. Use CommandRegistry to map indices to names.
+  // Per-command counters indexed by registry order; summed across threads in Merge, mapped to
+  // names at print time via CommandRegistry::NamedCallStats.
   std::vector<std::pair<uint64_t, uint64_t>> cmd_call_stats;
 
   absl::flat_hash_map<std::string, uint64_t> connections_lib_name_ver_map;
@@ -141,14 +141,14 @@ struct Metrics {
 
   acl::UserRegistry::AclStats acl_stats;
 
-  void InitFromThread(Namespace* ns, CommandRegistry* registry, unsigned proactor_index,
+  void InitFromThread(Namespace* ns, const CommandRegistry* registry, unsigned proactor_index,
                       const MetricsCollectOpts& opts, DflyCmd* dfly_cmd);
 
   // Folds `src` into *this. Almost everything sums; tx_queue_len takes the max
   // and oldest_pending_send_ts the min.
   void Merge(const Metrics& src);
 
-  void Print(uint64_t uptime, CommandRegistry* registry, DflyCmd* dfly_cmd,
+  void Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* dfly_cmd,
              util::http::StringResponse* resp, bool legacy);
 };
 

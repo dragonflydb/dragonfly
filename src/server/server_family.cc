@@ -3094,8 +3094,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   std::vector<std::string> sections;
   bool need_metrics{false};  // Save time - do not fetch metrics if we don't need them.
-  // Nothing collected unless a requested section needs it; the default (no-args) INFO is
-  // handled after the loop.
+  // Start with nothing; each requested section enables what it needs (default INFO below).
   MetricsCollectOpts opts{.replication_memory = false, .cmd_stats = false, .cmd_latency = false};
   Metrics metrics;
 
@@ -3105,12 +3104,10 @@ void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
     const auto& section = sections.back();
     need_metrics |= (section != "SERVER") && (section != "REPLICATION");
 
-    // MEMORY needs replication memory; COMMANDSTATS (hidden) needs call stats; LATENCYSTATS needs
-    // latency histograms (also rendered by default INFO, handled below).
     const bool is_all = section == "ALL";
-    opts.replication_memory |= (section == "MEMORY") || is_all;
-    opts.cmd_stats |= (section == "COMMANDSTATS") || is_all;
-    opts.cmd_latency |= (section == "LATENCYSTATS") || is_all;
+    opts.replication_memory |= is_all || (section == "MEMORY");
+    opts.cmd_stats |= is_all || (section == "COMMANDSTATS");
+    opts.cmd_latency |= is_all || (section == "LATENCYSTATS");
   }
 
   if (need_metrics || sections.empty()) {

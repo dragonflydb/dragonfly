@@ -110,7 +110,7 @@ void AppendPipelineLatencySummary(string_view name, string_view help, const base
 
 }  // namespace
 
-void Metrics::Print(uint64_t uptime, CommandRegistry* registry, DflyCmd* dfly_cmd,
+void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* dfly_cmd,
                     util::http::StringResponse* resp, bool legacy) {
   bool is_master = ServerState::tlocal()->is_master;
   const Metrics& m = *this;
@@ -761,7 +761,6 @@ void Metrics::Merge(const Metrics& src) {
   for (const auto& [k, v] : src.connections_lib_name_ver_map)
     connections_lib_name_ver_map[k] += v;
 
-  // Per-command counters: sum element-wise by command index.
   if (src.cmd_call_stats.size() > cmd_call_stats.size())
     cmd_call_stats.resize(src.cmd_call_stats.size());
   for (size_t i = 0; i < src.cmd_call_stats.size(); ++i) {
@@ -770,8 +769,9 @@ void Metrics::Merge(const Metrics& src) {
   }
 }
 
-void Metrics::InitFromThread(Namespace* ns, CommandRegistry* registry, unsigned proactor_index,
-                             const MetricsCollectOpts& opts, DflyCmd* dfly_cmd) {
+void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
+                             unsigned proactor_index, const MetricsCollectOpts& opts,
+                             DflyCmd* dfly_cmd) {
   static_assert(
       sizeof(Metrics) == sizeof(SliceEvents) + sizeof(std::vector<DbStats>) +
                              sizeof(EngineShard::Stats) + sizeof(facade::FacadeStats) +
