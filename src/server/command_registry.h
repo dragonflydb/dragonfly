@@ -6,7 +6,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
-#include <absl/strings/ascii.h>
 #include <absl/types/span.h>
 
 #include <functional>
@@ -15,7 +14,6 @@
 #include <vector>
 
 #include "base/function2.hpp"
-#include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
@@ -354,20 +352,7 @@ class CommandRegistry {
   // not collected) or sized to the whole registry — cmd_map_ is fixed after startup, so index i
   // maps to the same command it was collected for.
   absl::flat_hash_map<std::string, CmdCallStats> NamedCallStats(
-      const std::vector<CmdCallStats>& merged) const {
-    absl::flat_hash_map<std::string, CmdCallStats> res;
-    if (merged.empty())
-      return res;
-    DCHECK_EQ(merged.size(), cmd_map_.size());
-    size_t i = 0;
-    for (const auto& k_v : cmd_map_) {
-      const CmdCallStats& s = merged[i++];
-      if (s.first == 0)
-        continue;
-      res[absl::AsciiStrToLower(k_v.second.name())] = s;
-    }
-    return res;
-  }
+      const std::vector<CmdCallStats>& merged) const;
 
   void StartFamily(std::optional<uint32_t> acl_category = std::nullopt);
 
