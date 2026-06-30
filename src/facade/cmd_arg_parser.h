@@ -471,7 +471,7 @@ struct CmdArgParser {
     } else if constexpr (std::is_constructible_v<T, std::string_view>) {
       return static_cast<T>(SafeSV(idx));
     } else if constexpr (as_vnum<T>) {
-      return {ConvertFInt<T::kMin, T::kMax>(idx)};
+      using U = typename T::underlying_t;
       U val = Num<U>(idx);
       if (!T::validate(val)) {
         Report(std::is_floating_point_v<U> ? INVALID_FLOAT : INVALID_INT, idx);
