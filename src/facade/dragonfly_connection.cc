@@ -177,14 +177,14 @@ bool MatchHttp11Line(string_view line) {
 }
 
 struct ReadBufTracker {
-  explicit ReadBufTracker(const io::IoBuf& io_buf)
-      : io_buf_(io_buf), last_capacity_(io_buf.Capacity()) {
+  explicit ReadBufTracker(const io::IoBuf& io_buf, uint32_t conn_id)
+      : io_buf_(io_buf), last_capacity_(io_buf.Capacity()), id_(conn_id) {
   }
 
   ~ReadBufTracker() {
     size_t capacity = io_buf_.Capacity();
     if (last_capacity_ != capacity) {
-      VLOG(2) << "Grown io_buf to " << capacity;
+      VLOG(2) << CONN_ID << "Grown io_buf to " << capacity;
       tl_facade_stats->conn_stats.read_buf_capacity += capacity - last_capacity_;
     }
   }
@@ -192,6 +192,7 @@ struct ReadBufTracker {
  private:
   const io::IoBuf& io_buf_;
   size_t last_capacity_;
+  uint32_t id_;
 };
 
 struct ConnectionMemoryTracker {
@@ -670,7 +671,8 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
 }
 
 void Connection::AsyncOperations::operator()(ParsedCommand& cmd) {
-  DVLOG(2) << "Dispatching pipeline: " << cmd.Front();
+  DVLOG(2) << "[" << self->id_ << "] "
+           << "Dispatching pipeline: " << cmd.Front();
 
   ++self->local_stats_.cmds;
   self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd, facade::AsyncPreference::ONLY_SYNC);
@@ -684,7 +686,8 @@ void Connection::AsyncOperations::operator()(const MigrationRequestMessage& msg)
 }
 
 void Connection::AsyncOperations::operator()(CheckpointMessage msg) {
-  VLOG(2) << "Decremented checkpoint at " << self->DebugInfo();
+  VLOG(2) << "[" << self->id_ << "] "
+          << "Decremented checkpoint at " << self->DebugInfo();
 
   msg.bc->Dec();
 }
@@ -804,7 +807,7 @@ void Connection::MarkForClose() {
 
 // Called from Connection::Shutdown() right after socket_->Shutdown call.
 void Connection::OnShutdown() {
-  VLOG(1) << "Connection::OnShutdown";
+  VLOG(1) << CONN_ID << "Connection::OnShutdown";
 
   BreakOnce(POLLHUP);
   io_ec_ = make_error_code(errc::connection_aborted);
@@ -812,7 +815,7 @@ void Connection::OnShutdown() {
 }
 
 void Connection::OnPreMigrateThread() {
-  DVLOG(1) << "OnPreMigrateThread " << GetClientId();
+  DVLOG(1) << CONN_ID << "OnPreMigrateThread " << GetClientId();
 
   CHECK(!cc_->conn_closing);
 
@@ -919,7 +922,7 @@ void Connection::HandleRequests() {
     auto read_sz = socket_->Read(io::MutableBytes(buf));
     if (!read_sz || *read_sz < sizeof(buf)) {
       auto msg = read_sz ? absl::StrCat(*read_sz, " < ", sizeof(buf)) : read_sz.error().message();
-      LOG_EVERY_T(INFO, 1) << "Error reading from peer " << remote_ep << " " << msg
+      LOG_EVERY_T(INFO, 1) << CONN_ID << "Error reading from peer " << remote_ep << " " << msg
                            << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
       conn_stats.tls_accept_disconnects++;
       return;
@@ -930,7 +933,7 @@ void Connection::HandleRequests() {
     // Byte 2: minor ProtocolVersion — 0x01 (TLS 1.0), 0x02 (TLS 1.1), 0x03 (TLS 1.2/1.3).
     //         SSL 3.0 (0x00) is deprecated (RFC 7568) and rejected.
     if ((buf[0] != 0x16) || (buf[1] != 0x03) || (buf[2] < 0x01) || (buf[2] > 0x03)) {
-      VLOG(1) << "Bad TLS header "
+      VLOG(1) << CONN_ID << "Bad TLS header "
               << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
                               absl::Hex(buf[1], absl::kZeroPad2),
                               absl::Hex(buf[2], absl::kZeroPad2));
@@ -953,13 +956,13 @@ void Connection::HandleRequests() {
 
     if (!aresult) {
       // This can flood the logs -- don't change
-      LOG_EVERY_T(INFO, 1) << "Error handshaking " << aresult.error().message()
+      LOG_EVERY_T(INFO, 1) << CONN_ID << "Error handshaking " << aresult.error().message()
                            << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
       conn_stats.tls_accept_disconnects++;
       return;
     }
     is_tls_ = 1;
-    VLOG(1) << "TLS handshake succeeded";
+    VLOG(1) << CONN_ID << "TLS handshake succeeded";
   }
 #endif
 
@@ -980,7 +983,7 @@ void Connection::HandleRequests() {
     cc_.reset(service_->CreateContext(this));
 
     if (*http_res) {
-      VLOG(1) << "HTTP1.1 identified";
+      VLOG(1) << CONN_ID << "HTTP1.1 identified";
       is_http_ = true;
       HttpConnection http_conn{http_listener_};
       http_conn.SetSocket(socket_.get());
@@ -1020,7 +1023,7 @@ void Connection::HandleRequests() {
       ConnectionFlow();
 
       socket_->CancelOnErrorCb();  // noop if nothing is registered.
-      VLOG(1) << "Closed connection for peer "
+      VLOG(1) << CONN_ID << "Closed connection for peer "
               << GetClientInfo(fb2::ProactorBase::me()->GetPoolIndex());
       reply_builder_.reset();
       DestroyParsedQueue();
@@ -1078,7 +1081,7 @@ std::string FormatClientInfo(const ClientInfo& ci) {
 ClientInfo Connection::BuildClientInfo(unsigned thread_id) const {
   ClientInfo ci;
   if (!socket_) {
-    LOG(DFATAL) << "unexpected null socket_ "
+    LOG(DFATAL) << CONN_ID << "unexpected null socket_ "
                 << " phase " << unsigned(phase_) << ", is_http: " << unsigned(is_http_);
     return ci;
   }
@@ -1248,7 +1251,7 @@ io::Result<bool> Connection::CheckForHttpProto() {
     }
     last_len = io_buf_.InputLen();
     {
-      ReadBufTracker tracker(io_buf_);
+      ReadBufTracker tracker(io_buf_, id_);
       io_buf_.EnsureCapacity(128);
     }
   } while (last_len < 1024);
@@ -1287,7 +1290,7 @@ void Connection::ConnectionFlow() {
   // Main loop.
   if (parse_status != ERROR && !ec) {
     {
-      ReadBufTracker tracker(io_buf_);
+      ReadBufTracker tracker(io_buf_, id_);
       io_buf_.EnsureCapacity(64);
     }
     variant<error_code, Connection::ParserStatus> res;
@@ -1308,9 +1311,9 @@ void Connection::ConnectionFlow() {
   cc_->conn_closing = true;  // Signal dispatch to close.
   cnd_.notify_one();
   phase_ = SHUTTING_DOWN;
-  VLOG(2) << "Before dispatch_fb.join()";
+  VLOG(2) << CONN_ID << "Before dispatch_fb.join()";
   async_fb_.JoinIfNeeded();
-  VLOG(2) << "After dispatch_fb.join()";
+  VLOG(2) << CONN_ID << "After dispatch_fb.join()";
 
   phase_ = PRECLOSE;
 
@@ -1332,7 +1335,7 @@ void Connection::ConnectionFlow() {
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
   // offending request.
   if (parse_status == ERROR) {
-    VLOG(1) << "Error parser status " << parser_error_;
+    VLOG(1) << CONN_ID << "Error parser status " << parser_error_;
 
     if (redis_parser_) {
       SendProtocolError(RespSrvParser::Result(parser_error_), reply_builder_.get());
@@ -1351,7 +1354,7 @@ void Connection::ConnectionFlow() {
     // If the socket does not close the socket on the other side, the while loop will never finish.
     // to reproduce: nc localhost 6379  and then run invalid sequence: *1 <enter> *1 <enter>
     error_code ec2 = socket_->Shutdown(SHUT_WR);
-    LOG_IF(WARNING, ec2) << "Could not shutdown socket " << ec2;
+    LOG_IF(WARNING, ec2) << CONN_ID << "Could not shutdown socket " << ec2;
     while (!ec2) {
       // Discard any received data.
       io_buf_.Clear();
@@ -1364,9 +1367,9 @@ void Connection::ConnectionFlow() {
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
     string conn_info = service_->GetContextInfo(cc_.get()).Format();
-    LOG_EVERY_T(WARNING, 1) << "Socket error for connection " << conn_info << " " << GetName()
-                            << " during phase " << kPhaseName[phase_] << " : " << ec << " "
-                            << ec.message();
+    LOG_EVERY_T(WARNING, 1) << CONN_ID << "Socket error for connection " << conn_info << " "
+                            << GetName() << " during phase " << kPhaseName[phase_] << " : " << ec
+                            << " " << ec.message();
   }
 }
 
@@ -1387,7 +1390,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   if ((optimize_for_async || !can_dispatch_sync) &&
       qbp.IsPipelineBufferOverLimit(conn_stats->pipeline_queue_bytes, parsed_cmd_q_len_)) {
     conn_stats->pipeline_throttle_count++;
-    LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit (V1)."
+    LOG_EVERY_T(WARNING, 10) << CONN_ID << "Pipeline buffer over limit (V1)."
                              << ", Thread pipeline_queue_bytes: "
                              << conn_stats->pipeline_queue_bytes
                              << ", Thread pipeline_queue_entries: "
@@ -1468,7 +1471,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
     total_consumed += consumed;
     if (result == RespSrvParser::OK) {
       DCHECK(!parsed_cmd_->empty());
-      DVLOG(2) << "Got Args with first token " << parsed_cmd_->Front();
+      DVLOG(2) << CONN_ID << "Got Args with first token " << parsed_cmd_->Front();
 
       if (io_req_size_hist)
         io_req_size_hist->Add(request_consumed_bytes_);
@@ -1486,7 +1489,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
         // Unparsed bytes remain in io_buf_ for the next ParseLoop iteration.
         if (GetQueueBackpressure().IsPipelineBufferOverLimit(
                 GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_)) {
-          DVLOG(2) << "Pipeline buffer over limit, breaking from parsing loop.";
+          DVLOG(2) << CONN_ID << "Pipeline buffer over limit, breaking from parsing loop.";
           stop_parsing = true;
         }
       } else {
@@ -1496,7 +1499,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
     if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
       LOG_IF(WARNING, cntx()->replica_conn)
-          << "Redis parser error: " << static_cast<unsigned int>(result)
+          << CONN_ID << "Redis parser error: " << static_cast<unsigned int>(result)
           << " during parse: " << io::View(read_buffer);
     }
     RefreshConnectionMemoryUsage();
@@ -1538,7 +1541,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
     return NEED_MORE;
   }
 
-  VLOG(1) << "Parser error " << result;
+  VLOG(1) << CONN_ID << "Parser error " << result;
 
   return ERROR;
 }
@@ -1585,7 +1588,7 @@ void Connection::OnBreakCb(int32_t mask) {
     return;  // we cancelled the poller, which means we do not need to break from anything.
 
   if (!cc_) {
-    LOG(ERROR) << "Unexpected event " << mask;
+    LOG(ERROR) << CONN_ID << "Unexpected event " << mask;
     return;
   }
 
@@ -1692,7 +1695,7 @@ io::Result<size_t> Connection::HandleRecvSocket() {
   // In case the socket was closed orderly, we get 0 bytes read.
   if (recv_sz && *recv_sz) {
     size_t commit_sz = *recv_sz;
-    DVLOG(2) << "Received " << commit_sz << " bytes from socket";
+    DVLOG(2) << CONN_ID << "Received " << commit_sz << " bytes from socket";
 
     io_buf_.CommitWrite(commit_sz);
 
@@ -1717,7 +1720,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
     HandleMigrateRequest();
     auto recv_sz = HandleRecvSocket();
     if (!recv_sz) {
-      LOG_IF(WARNING, cntx()->replica_conn) << "HandleRecvSocket() error: " << recv_sz.error();
+      LOG_IF(WARNING, cntx()->replica_conn)
+          << CONN_ID << "HandleRecvSocket() error: " << recv_sz.error();
       return recv_sz.error();
     }
     if (*recv_sz == 0) {
@@ -1753,7 +1757,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
         // (Note: The buffer object is only working in power-of-2 sizes,
         // so there's no danger of accidental O(n^2) behavior.)
         if (parser_hint > capacity) {
-          ReadBufTracker tracker(io_buf_);
+          ReadBufTracker tracker(io_buf_, id_);
           io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint));
         }
 
@@ -1761,7 +1765,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
         // a reasonable limit to save on Recv() calls.
         if (reached_capacity && capacity < max_iobfuf_len / 2) {
           // Last io used most of the io_buf to the end.
-          ReadBufTracker tracker(io_buf_);
+          ReadBufTracker tracker(io_buf_, id_);
           io_buf_.Reserve(capacity * 2);  // Valid growth range.
         }
 
@@ -1769,6 +1773,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
           // it can happen with memcached but not for RedisParser, because RedisParser fully
           // consumes the passed buffer
           LOG_EVERY_T(WARNING, 10)
+              << CONN_ID
               << "Maximum io_buf length reached, consider to increase max_client_iobuf_len flag";
         }
       }
@@ -2062,7 +2067,7 @@ void Connection::AsyncFiber() {
       } else {
         ThisFiber::Yield();
       }
-      DVLOG(2) << "After yielding to producer, parsed_cmd_q_len_=" << parsed_cmd_q_len_
+      DVLOG(2) << CONN_ID << "After yielding to producer, parsed_cmd_q_len_=" << parsed_cmd_q_len_
                << " dispatch_q size=" << dispatch_q_.size();
       if (cc_->conn_closing)
         break;
@@ -2267,7 +2272,7 @@ void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, boo
   if (cc_->blocked && ignore_blocked)
     return;
 
-  VLOG(2) << "Sent checkpoint to " << DebugInfo();
+  VLOG(2) << CONN_ID << "Sent checkpoint to " << DebugInfo();
 
   bc->Add(1);
   SendAsync({CheckpointMessage{bc}});
@@ -2511,7 +2516,7 @@ void Connection::RefreshConnectionMemoryUsage() {
   } else {
     const size_t delta = accounted_connection_memory_bytes_ - current;
     if (ABSL_PREDICT_FALSE(delta > conn_stats.connection_memory_bytes)) {
-      LOG(DFATAL) << "Connection memory accounting underflow: total="
+      LOG(DFATAL) << CONN_ID << "Connection memory accounting underflow: total="
                   << conn_stats.connection_memory_bytes << " delta=" << delta;
       conn_stats.connection_memory_bytes = 0;
     } else {
@@ -2564,7 +2569,7 @@ void Connection::DecreaseConnStats() {
   auto& conn_stats = tl_facade_stats->conn_stats;
   RefreshConnectionMemoryUsage();
   if (ABSL_PREDICT_FALSE(accounted_connection_memory_bytes_ > conn_stats.connection_memory_bytes)) {
-    LOG(DFATAL) << "Connection memory accounting underflow on unregister: total="
+    LOG(DFATAL) << CONN_ID << "Connection memory accounting underflow on unregister: total="
                 << conn_stats.connection_memory_bytes
                 << " delta=" << accounted_connection_memory_bytes_;
     conn_stats.connection_memory_bytes = 0;
@@ -2612,11 +2617,12 @@ bool Connection::IsReplySizeOverLimit() const {
   size_t current = reply_sz.load(std::memory_order_acquire);
   const bool over_limit = reply_size_limit != 0 && current > 0 && current > reply_size_limit;
   if (over_limit) {
-    LOG_EVERY_T(INFO, 10) << "Commands squashing current reply size is overlimit: " << current
+    LOG_EVERY_T(INFO, 10) << CONN_ID
+                          << "Commands squashing current reply size is overlimit: " << current
                           << "/" << reply_size_limit
                           << ". Falling back to single command dispatch (instead of squashing)";
     // Used by testing. Should not be used in production, therefore debug log level 5.
-    DVLOG(5) << "Commands squashing current reply size is overlimit: " << current << "/"
+    DVLOG(5) << CONN_ID << "Commands squashing current reply size is overlimit: " << current << "/"
              << reply_size_limit
              << ". Falling back to single command dispatch (instead of squashing)";
   }
@@ -2626,7 +2632,7 @@ bool Connection::IsReplySizeOverLimit() const {
 Connection::ParserStatus Connection::ParseRedisBatch(base::IoBuf& buf) {
   if (IsOverPipelineLimit()) {
     // Signal ParseLoop to stop (NEED_MORE, not an error). IoLoopV2 will drain before resuming.
-    DVLOG(2) << "Pipeline buffer over limit. Avoid parsing Redis batch.";
+    DVLOG(2) << CONN_ID << "Pipeline buffer over limit. Avoid parsing Redis batch.";
     GetLocalConnStats().pipeline_throttle_count++;
     return NEED_MORE;
   }
@@ -2650,7 +2656,7 @@ Connection::ParserStatus Connection::ParseMCBatch(base::IoBuf& io_buf) {
                                                             &consumed, parsed_cmd_->mc_command());
     io_buf.ConsumeInput(consumed);
 
-    DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
+    DVLOG(2) << CONN_ID << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
              << unsigned(parsed_cmd_->mc_command()->type);
     if (result == MemcacheParser::INPUT_PENDING) {
       RefreshConnectionMemoryUsage();
@@ -2762,7 +2768,7 @@ bool Connection::ExecuteBatch() {
   // Execute sequentially all parsed commands. parsed_to_execute_ points to the next command to
   // dispatch; it advances as commands are dispatched, and parsed_head_ advances with it whenever a
   // command retires (executes synchronously or replies immediately).
-  DVLOG(2) << "ExecuteBatch: " << dispatch_waiting_count_ << " commands ";
+  DVLOG(2) << CONN_ID << "ExecuteBatch: " << dispatch_waiting_count_ << " commands ";
 
   while (parsed_to_execute_ != nullptr) {
     if (reply_builder_->GetError())
@@ -2771,8 +2777,8 @@ bool Connection::ExecuteBatch() {
     if (pipeline_squashing_v2_ && dispatch_waiting_count_ > 1) {
       // if we squashed any commands, continue the loop to check if there are
       // non-squashable commands to process.
-      DVLOG(2) << "Squashing pipeline " << dispatch_waiting_count_ << " commands " << pending_input_
-               << " " << io_buf_.InputLen();
+      DVLOG(2) << CONN_ID << "Squashing pipeline " << dispatch_waiting_count_ << " commands "
+               << pending_input_ << " " << io_buf_.InputLen();
 
       if (SquashPipelineV2()) {
         // - This helps with throughput. Explanation:
@@ -3123,7 +3129,7 @@ void Connection::ProcessRecvNotification(const util::FiberSocketBase::RecvNotifi
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
     {
-      ReadBufTracker tracker(io_buf_);
+      ReadBufTracker tracker(io_buf_, id_);
       io_buf_.WriteAndCommit(buf.data(), buf.size());
     }
     last_interaction_ = time(nullptr);
@@ -3136,7 +3142,7 @@ void Connection::ProcessRecvNotification(const util::FiberSocketBase::RecvNotifi
     ++local_stats_.read_cnt;
     ++conn_stats.num_recv_provided_calls;
   } else {
-    LOG(FATAL) << "Should not reach here";
+    LOG(FATAL) << CONN_ID << "Should not reach here";
   }
 }
 
@@ -3166,7 +3172,7 @@ void Connection::ReadPendingInput() {
       break;
     }
 
-    DVLOG(1) << "Read " << *res << " bytes from socket";
+    DVLOG(1) << CONN_ID << "Read " << *res << " bytes from socket";
 
     auto& conn_stats = tl_facade_stats->conn_stats;
     size_t commit_sz = *res;
@@ -3197,7 +3203,7 @@ void Connection::CheckIoBufCapacity(bool reached_capacity, base::IoBuf* io_buf) 
     // (Note: The buffer object is only working in power-of-2 sizes,
     // so there's no danger of accidental O(n^2) behavior.)
     if (parser_hint > capacity) {
-      ReadBufTracker tracker(*io_buf);
+      ReadBufTracker tracker(*io_buf, id_);
       io_buf->Reserve(std::min(max_io_buf_len, parser_hint));
     }
 
@@ -3205,14 +3211,14 @@ void Connection::CheckIoBufCapacity(bool reached_capacity, base::IoBuf* io_buf) 
     // a reasonable limit to save on Recv() calls.
     if (reached_capacity && capacity < max_io_buf_len / 2) {
       // Last io used most of the io_buf to the end.
-      ReadBufTracker tracker(*io_buf);
+      ReadBufTracker tracker(*io_buf, id_);
       io_buf->Reserve(capacity * 2);  // Valid growth range.
     }
 
     if (io_buf->AppendLen() == 0U) {
       // it can happen with memcached but not for RedisParser, because RedisParser fully
       // consumes the passed buffer
-      LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf->Capacity()
+      LOG_EVERY_T(WARNING, 10) << CONN_ID << "Maximum io_buf length reached " << io_buf->Capacity()
                                << ", consider to increase max_client_iobuf_len flag";
     }
   }
@@ -3316,7 +3322,7 @@ void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_wait
 
   auto& conn_stats = GetLocalConnStats();
   conn_stats.pipeline_throttle_count++;
-  LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit (V2)."
+  LOG_EVERY_T(WARNING, 10) << CONN_ID << "Pipeline buffer over limit (V2)."
                            << ", Thread pipeline_queue_bytes: " << conn_stats.pipeline_queue_bytes
                            << ", Thread pipeline_queue_entries: "
                            << conn_stats.pipeline_queue_entries
@@ -3452,7 +3458,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       if (auto ec = FlushReplies(); ec) {
         return ec;
       }
-      LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
+      LOG_IF(WARNING, cntx()->replica_conn) << CONN_ID << "async io error: " << io_ec_;
       return std::exchange(io_ec_, {});
     }
 
