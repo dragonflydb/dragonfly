@@ -27,6 +27,8 @@ struct ScoringTermInfo {
   size_t term_docs = 0;          // Number of documents containing this term
   uint32_t field_doc_len = 0;    // Document length in THIS field (sum of TF)
   double field_avg_doc_len = 0;  // Average document length for THIS field
+  double query_weight = 1.0;     // Query-time $weight: post-hoc scalar on the contribution
+  double field_weight = 1.0;     // Schema TEXT WEIGHT: folded into the effective term frequency
 };
 
 // Context passed to scorer for a single document
@@ -63,7 +65,9 @@ inline double BM25Std(const ScoringContext& ctx, const ScoringTermInfo& term) {
   constexpr double b = 0.75;
   constexpr double k1 = 1.2;
 
-  double f = term.term_freq;
+  // Schema field weight is folded into the effective frequency, so it passes through TF
+  // saturation (a high-weight field saturates instead of scaling the score linearly).
+  double f = term.field_weight * term.term_freq;
   if (f == 0)
     return 0.0;
 
@@ -76,7 +80,11 @@ inline double BM25Std(const ScoringContext& ctx, const ScoringTermInfo& term) {
 
   // TF saturation: f * (k1 + 1) / (f + k1 * (1 - b + b * fieldDocLen / fieldAvgDocLen))
   double avg = term.field_avg_doc_len > 0 ? term.field_avg_doc_len : 1.0;
-  double tf = f * (k1 + 1.0) / (f + k1 * (1.0 - b + b * term.field_doc_len / avg));
+  // Defense in depth: a non-finite effective frequency (pathological weight) would make the
+  // saturation inf/inf -> NaN; its limit as f -> inf is (k1 + 1).
+  double tf = std::isfinite(f)
+                  ? f * (k1 + 1.0) / (f + k1 * (1.0 - b + b * term.field_doc_len / avg))
+                  : (k1 + 1.0);
 
   return idf * tf;
 }
@@ -94,7 +102,7 @@ inline double TfIdf(const ScoringContext& ctx, const ScoringTermInfo& term) {
 
   // Clamp N >= n to avoid negative IDF during transient states
   double N = std::max(ctx.num_docs, term.term_docs);
-  return std::log(N / term.term_docs) * term.term_freq;
+  return std::log(N / term.term_docs) * (term.field_weight * term.term_freq);
 }
 
 // Compute TFIDF with document length normalization for a single term.

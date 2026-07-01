@@ -180,6 +180,15 @@ ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
   return lang;
 }
 
+void ParseTextWeight(CmdArgParser* parser, search::SchemaField::TextParams* params) {
+  double weight = parser->Next<double>("Invalid WEIGHT value");
+  if (!search::SchemaField::TextParams::IsValidWeight(weight)) {
+    parser->ReportCustom("Invalid WEIGHT value");
+    return;
+  }
+  params->weight = weight;
+}
+
 ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parser) {
   search::SchemaField::TextParams params{};
   while (parser->HasNext()) {
@@ -189,6 +198,10 @@ ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parse
     }
     if (parser->Check("NOSTEM")) {
       params.no_stem = true;
+      continue;
+    }
+    if (parser->Check("WEIGHT")) {
+      ParseTextWeight(parser, &params);
       continue;
     }
     break;
@@ -326,7 +339,7 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
 
 constexpr std::array<const std::string_view, 3> kIgnoredOptions = {"UNF"sv, "INDEXMISSING"sv,
                                                                    "INDEXEMPTY"sv};
-constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "PHONETIC"sv};
+constexpr std::array<const std::string_view, 1> kIgnoredOptionsWithArg = {"PHONETIC"sv};
 
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
@@ -393,6 +406,10 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
         if (field_type == search::SchemaField::TEXT && option == "NOSTEM"sv) {
           std::get<search::SchemaField::TextParams>(params).no_stem = true;
           parser->Skip(1);
+          continue;
+        }
+        if (field_type == search::SchemaField::TEXT && parser->Check("WEIGHT")) {
+          ParseTextWeight(parser, &std::get<search::SchemaField::TextParams>(params));
           continue;
         }
         if (rng::find(kIgnoredOptions, option) != kIgnoredOptions.end()) {
@@ -2902,6 +2919,8 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
         info.emplace_back("WITHSUFFIXTRIE");
     } else if (field_info.type == search::SchemaField::TEXT) {
       auto& tparams = std::get<search::SchemaField::TextParams>(field_info.special_params);
+      info.emplace_back("WEIGHT");
+      info.emplace_back(std::to_string(tparams.weight));
       if (tparams.with_suffixtrie)
         info.emplace_back("WITHSUFFIXTRIE");
       if (tparams.no_stem)

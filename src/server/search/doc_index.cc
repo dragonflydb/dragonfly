@@ -242,6 +242,7 @@ string DocIndexInfo::BuildRestoreCommand() const {
                         absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
                     },
                     [out = &out](const search::SchemaField::TextParams& params) {
+                      absl::StrAppend(out, " ", "WEIGHT", " ", std::to_string(params.weight));
                       if (params.with_suffixtrie)
                         absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
                       if (params.no_stem)

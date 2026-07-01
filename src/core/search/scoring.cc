@@ -10,7 +10,7 @@ double ScoreDocument(ScorerFn scorer, const ScoringContext& ctx,
                      const std::vector<ScoringTermInfo>& terms) {
   double score = 0.0;
   for (const auto& term : terms)
-    score += scorer(ctx, term);
+    score += term.query_weight * scorer(ctx, term);
   return score;
 }
 

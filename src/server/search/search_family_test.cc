@@ -457,7 +457,8 @@ TEST_F(SearchFamilyTest, InfoIndex) {
 
   auto descriptor_matcher = IsArray("key_type", "HASH", "prefixes", IsArray("doc-"),
                                     "default_language", "english", "default_score", 1);
-  auto schema_matcher = IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT"));
+  auto schema_matcher = IsArray(
+      IsArray("identifier", "name", "attribute", "name", "type", "TEXT", "WEIGHT", "1.000000"));
 
   EXPECT_THAT(info, IsArray(_, _, _, descriptor_matcher, "index_options", RespArray(IsEmpty()),
                             "attributes", schema_matcher, "num_docs", IntArg(15), "indexing",
@@ -3562,30 +3563,10 @@ TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
 }
 
 TEST_F(SearchFamilyTest, IgnoredOptionsInFtCreate) {
-  GTEST_SKIP() << "The usage of ignored options is now wrong - it skips supported ones!";
-
-  // Create an index with various options, some of which should be ignored
-  // INDEXMISSING and INDEXEMPTY are supported by default
-  auto resp = Run({"FT.CREATE",
-                   "idx",
-                   "ON",
-                   "HASH",
-                   "SCHEMA",
-                   "title",
-                   "TEXT",
-                   "UNF",
-                   "NOSTEM",
-                   "CASESENSITIVE",
-                   "WITHSUFFIXTRIE",
-                   "INDEXMISSING",
-                   "INDEXEMPTY",
-                   "WEIGHT",
-                   "1",
-                   "SEPARATOR",
-                   "|",
-                   "PHONETIC",
-                   "dm:en",
-                   "SORTABLE"});
+  // Supported text params (WITHSUFFIXTRIE/NOSTEM/WEIGHT) must precede flags and ignored options.
+  auto resp =
+      Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "WITHSUFFIXTRIE", "NOSTEM",
+           "WEIGHT", "2", "SORTABLE", "UNF", "INDEXMISSING", "INDEXEMPTY", "PHONETIC", "dm:en"});
 
   // Check that the response is OK, indicating the index was created successfully
   EXPECT_THAT(resp, "OK");
@@ -6901,6 +6882,27 @@ TEST(BuildRestoreCommandTest, TextNoStemPreserved) {
   EXPECT_THAT(info.BuildRestoreCommand(), HasSubstr("NOSTEM"));
 }
 
+TEST(BuildRestoreCommandTest, TextWeightPreserved) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::SchemaField;
+
+  SchemaField field;
+  field.type = SchemaField::TEXT;
+  field.flags = 0;
+  field.short_name = "title";
+  field.special_params = SchemaField::TextParams{.weight = 3.5};
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.schema.fields["title"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+
+  EXPECT_THAT(info.BuildRestoreCommand(), HasSubstr("WEIGHT 3.500000"));
+}
+
 // Verify that BuildRestoreCommand preserves WITHSUFFIXTRIE for TAG fields.
 TEST(BuildRestoreCommandTest, TagWithSuffixTriePreserved) {
   using dfly::DocIndex;
@@ -7044,8 +7046,8 @@ TEST_F(SearchFamilyTest, InfoIndexTextParams) {
 
   auto info = Run({"ft.info", "idx"});
 
-  auto text_field_matcher =
-      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WITHSUFFIXTRIE");
+  auto text_field_matcher = IsArray("identifier", "title", "attribute", "title", "type", "TEXT",
+                                    "WEIGHT", "1.000000", "WITHSUFFIXTRIE");
 
   EXPECT_THAT(
       info, IsArray(_, _, _, _, _, _, "attributes", IsArray(text_field_matcher), _, _, _, _, _, _));
@@ -7268,8 +7270,10 @@ TEST_F(SearchFamilyTest, StemmingInfoSurface) {
        "body", "TEXT", "NOSTEM"});
 
   auto info = Run({"FT.INFO", "info_idx"});
-  auto title_matcher = IsArray("identifier", "title", "attribute", "title", "type", "TEXT");
-  auto body_matcher = IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "NOSTEM");
+  auto title_matcher =
+      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "1.000000");
+  auto body_matcher = IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT",
+                              "1.000000", "NOSTEM");
   auto definition = IsArray("key_type", "HASH", "prefixes", IsArray("doc:"), "default_language",
                             "english", "default_score", 1);
   EXPECT_THAT(info, IsArray(_, _, _, definition, _, _, "attributes",
@@ -7837,6 +7841,167 @@ TEST_F(SearchFamilyTest, SearchWithScoresPerField) {
   // and same title field length (1), so scores should be equal regardless of body length.
   EXPECT_DOUBLE_EQ(scores["d:1"], scores["d:2"])
       << "Per-field scoring: body length should not affect title-only query score";
+}
+
+TEST_F(SearchFamilyTest, TextWeightsInfoAndScoring) {
+  EXPECT_THAT(Run({"FT.CREATE", "bad_weight", "SCHEMA", "title", "TEXT", "WEIGHT", "-1"}),
+              ErrArg("Invalid WEIGHT value"));
+  // Above the sanity cap (TextParams::kMaxWeight) so the folded weight cannot overflow BM25.
+  EXPECT_THAT(Run({"FT.CREATE", "huge_weight", "SCHEMA", "title", "TEXT", "WEIGHT", "1e7"}),
+              ErrArg("Invalid WEIGHT value"));
+
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "WEIGHT", "5", "body", "TEXT", "tag", "TAG"}),
+            "OK");
+
+  auto info = Run({"FT.INFO", "idx"});
+  auto title =
+      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "5.000000");
+  auto body =
+      IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "1.000000");
+  auto tag = IsArray("identifier", "tag", "attribute", "tag", "type", "TAG", "SEPARATOR", ",");
+  EXPECT_THAT(info, IsArray(_, _, _, _, _, _, "attributes", IsUnordArray(title, body, tag), _, _, _,
+                            _, _, _));
+
+  Run({"HSET", "d:1", "title", "hello", "body", "other", "tag", "yes"});
+  Run({"HSET", "d:2", "title", "other", "body", "hello", "tag", "yes"});
+
+  auto resp = Run({"FT.SEARCH", "idx", "hello", "NOCONTENT", "WITHSCORES", "LIMIT", "0", "10"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  const auto& vals = resp.GetVec();
+  ASSERT_EQ(vals.size(), 5u);
+  EXPECT_EQ(vals[1].GetString(), "d:1");
+  EXPECT_EQ(vals[3].GetString(), "d:2");
+  EXPECT_GT(std::stod(vals[2].GetString()), std::stod(vals[4].GetString()));
+}
+
+TEST_F(SearchFamilyTest, AlterTextWeight) {
+  Run({"HSET", "d:1", "title", "hello", "body", "weighted"});
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "body", "TEXT", "WEIGHT", "4"}), "OK");
+  WaitForIndexReady("idx");
+
+  auto info = Run({"FT.INFO", "idx"});
+  auto title =
+      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "1.000000");
+  auto body =
+      IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "4.000000");
+  EXPECT_THAT(info,
+              IsArray(_, _, _, _, _, _, "attributes", IsUnordArray(title, body), _, _, _, _, _, _));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@body:weighted"}), AreDocIds("d:1"));
+}
+
+TEST_F(SearchFamilyTest, QueryWeightsScaleScores) {
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "text", "TEXT",
+                 "tag", "TAG"}),
+            "OK");
+  Run({"HSET", "d:1", "text", "hello", "tag", "yes"});
+
+  auto score = [this](std::string_view query) {
+    auto resp = Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "SCORER", "BM25STD",
+                     "PARAMS", "2", "w", "4"});
+    const auto& vals = resp.GetVec();
+    EXPECT_EQ(vals.size(), 3u);
+    return std::stod(vals[2].GetString());
+  };
+
+  double raw = score("hello");
+  EXPECT_NEAR(score("hello=>{$weight:5}"), raw * 5, 1e-6);
+  EXPECT_NEAR(score("hello=>{$weight:5} hello=>{$weight:3}"), raw * 8, 1e-5);
+  EXPECT_NEAR(score("hello=>{$weight:$w}"), raw * 4, 1e-5);
+
+  auto tag_resp = Run({"FT.SEARCH", "idx", "@tag:{yes}=>{$weight:2}", "NOCONTENT", "WITHSCORES"});
+  EXPECT_THAT(tag_resp, RespElementsAre(IntArg(1), "d:1", "0"));
+
+  // Query-time weight above the sanity cap is rejected by the parser.
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello=>{$weight:1e7}"}), ErrArg("Query syntax error"));
+}
+
+TEST_F(SearchFamilyTest, AggregateAddScoresUsesQueryWeights) {
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "text", "TEXT"}),
+            "OK");
+  Run({"HSET", "d:1", "text", "hello"});
+
+  auto score = [this](std::string_view query) {
+    auto resp = Run({"FT.AGGREGATE", "idx", query, "ADDSCORES", "LOAD", "1", "@__score"});
+    const auto& vals = resp.GetVec();
+    EXPECT_EQ(vals.size(), 2u);
+    return map_score("__score", vals[1].GetVec());
+  };
+
+  double raw = score("hello");
+  EXPECT_NEAR(score("hello=>{$weight:3}"), raw * 3, 1e-6);
+}
+
+TEST_F(SearchFamilyTest, SynonymQueryWeightScaling) {
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "t", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "car", "automobile"}), "OK");
+  Run({"HSET", "d:1", "t", "car"});
+  Run({"HSET", "d:2", "t", "automobile"});
+
+  // id -> score from a WITHSCORES NOCONTENT reply.
+  auto scores = [this](std::string_view query) {
+    auto resp = Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "SCORER", "BM25STD",
+                     "LIMIT", "0", "10"});
+    std::map<std::string, double> out;
+    const auto& vals = resp.GetVec();
+    for (size_t i = 1; i + 1 < vals.size(); i += 2)
+      out[vals[i].GetString()] = std::stod(vals[i + 1].GetString());
+    return out;
+  };
+
+  auto raw = scores("car");
+  auto weighted = scores("car=>{$weight:2}");
+  ASSERT_EQ(raw.size(), 2u);
+  ASSERT_EQ(weighted.size(), 2u);
+  // Weight scales each score uniformly (incl. the synonym-matched d:2); the synonym group token
+  // is not double-counted, so every score is exactly 2x its unweighted value.
+  for (const auto& [id, raw_score] : raw) {
+    ASSERT_TRUE(weighted.count(id));
+    EXPECT_GT(raw_score, 0.0);
+    EXPECT_NEAR(weighted[id], raw_score * 2.0, 1e-4);
+  }
+}
+
+TEST_F(SearchFamilyTest, SchemaWeightFoldsIntoTermFrequency) {
+  // Schema TEXT WEIGHT is folded into the effective term frequency before BM25 saturation: a
+  // high-weight field saturates instead of scaling the score linearly. The weighted scores below
+  // are reference values captured from redis:8.6 (FT.SEARCH ... SCORER BM25STD) - both engines
+  // agree to 6 significant digits on this index.
+  EXPECT_EQ(Run({"FT.CREATE", "w", "ON", "HASH", "PREFIX", "1", "w:", "SCHEMA", "name", "TEXT",
+                 "WEIGHT", "5"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.CREATE", "nw", "ON", "HASH", "PREFIX", "1", "n:", "SCHEMA", "name", "TEXT"}),
+            "OK");
+  for (std::string_view p : {"w:", "n:"}) {
+    Run({"HSET", absl::StrCat(p, "1"), "name", "mal premium"});  // f=1
+    Run({"HSET", absl::StrCat(p, "2"), "name", "mal mal mal"});  // f=3
+    Run({"HSET", absl::StrCat(p, "3"), "name", "other thing"});  // no match
+  }
+
+  auto score = [this](std::string_view index, std::string_view id) {
+    auto resp = Run({"FT.SEARCH", index, "mal", "NOCONTENT", "WITHSCORES", "SCORER", "BM25STD",
+                     "LIMIT", "0", "10"});
+    const auto& vals = resp.GetVec();
+    for (size_t i = 1; i + 1 < vals.size(); i += 2)
+      if (vals[i].GetString() == id)
+        return std::stod(vals[i + 1].GetString());
+    return -1.0;
+  };
+
+  double nw1 = score("nw", "n:1"), nw2 = score("nw", "n:2");
+  double w1 = score("w", "w:1"), w2 = score("w", "w:2");
+
+  // Exact match to redis:8.6.
+  EXPECT_NEAR(w1, 0.851536, 1e-4);
+  EXPECT_NEAR(w2, 0.942455, 1e-4);
+
+  // Saturation signature: the boost is sub-linear (not a flat x5) and larger for the low-tf doc.
+  EXPECT_LT(w1, nw1 * 5.0);
+  EXPECT_GT(w1 / nw1, w2 / nw2);
 }
 
 // Verify ADDSCORES makes __score visible even without explicit LOAD or pipeline steps

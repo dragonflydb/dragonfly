@@ -3093,6 +3093,21 @@ TEST_F(ScoringTest, BM25StdMultiTerm) {
   EXPECT_DOUBLE_EQ(multi, sum);
 }
 
+TEST_F(ScoringTest, BM25StdNonFiniteWeightStaysFinite) {
+  // A pathological field weight can overflow the effective frequency to +inf; BM25 must not turn
+  // that into NaN (which would corrupt top-K sorting). The TF saturation limit is k1 + 1.
+  ScoringContext ctx{.num_docs = 100};
+  ScoringTermInfo term{.term_freq = 10,
+                       .term_docs = 5,
+                       .field_doc_len = 10,
+                       .field_avg_doc_len = 10.0,
+                       .field_weight = 1e308};  // f = field_weight * term_freq overflows to +inf
+
+  double score = BM25Std(ctx, term);
+  EXPECT_TRUE(std::isfinite(score));
+  EXPECT_GT(score, 0.0);
+}
+
 TEST_F(ScoringTest, TfIdfFormula) {
   // f=2, N=10, n=3
   // IDF = ln(10/3) ~ 1.2039
