@@ -43,6 +43,12 @@ import urllib.request
 # input budget (smaller than the Anthropic path), so very large diffs may be rejected.
 MAX_DIFF_LINES = 20000
 
+# GitHub Models caps the request body (gpt-4.1: ~8000 tokens). RESP/code is token-dense,
+# so we budget the assembled prompt conservatively in characters and never send the full
+# seed corpus (all seeds alone exceed the limit).
+MAX_PROMPT_CHARS = 14000
+SEED_SAMPLE_CHARS = 5000
+
 LLM_SYSTEM_PROMPT = """\
 You are a fuzzing expert for Dragonfly, a Redis-compatible in-memory database written in C++.
 
@@ -153,22 +159,47 @@ def encode_resp(commands):
 
 
 def build_prompt(diff_text, changed_files, example_seeds):
-    """Build the user prompt shared by all LLM providers."""
+    """Build the user prompt shared by all LLM providers.
+
+    The full seed corpus alone exceeds the input token limit, so instead of sending every
+    seed's contents we send all seed *names* (a cheap coverage signal) plus a few full
+    sample seeds for format, and truncate the diff so the whole prompt stays within budget.
+    """
     truncated, num_lines = truncate_diff(diff_text)
 
-    # Build examples section — show existing seeds so the LLM knows what's covered
-    examples_text = ""
-    for ex in example_seeds:
-        examples_text += "--- %s ---\n%s\n\n" % (ex["name"], ex["content"].rstrip())
+    names = ", ".join(ex["name"] for ex in example_seeds)
 
-    return (
-        "Here are ALL existing seed files (RESP wire format) so you know what's already covered:\n\n"
-        "%s\n"
+    # Full contents of a few seeds (up to a small budget) so the LLM sees the exact RESP
+    # wire format it must emit.
+    samples = ""
+    n_samples = 0
+    for ex in example_seeds:
+        block = "--- %s ---\n%s\n\n" % (ex["name"], ex["content"].rstrip())
+        if len(samples) + len(block) > SEED_SAMPLE_CHARS:
+            continue
+        samples += block
+        n_samples += 1
+
+    prefix = (
+        "Existing seed files (names) so you know what's already covered:\n%s\n\n"
+        "A few example seeds (RESP wire format) for reference:\n\n%s\n"
         "Now analyze this diff and generate targeted fuzzing seeds.\n\n"
         "Changed files: %s\n\n"
-        "Diff (%d lines):\n```\n%s\n```\n\n"
-        "Respond with valid JSON only."
-    ) % (examples_text, ", ".join(changed_files), num_lines, truncated)
+        "Diff (%d lines):\n```\n"
+    ) % (names, samples, ", ".join(changed_files), num_lines)
+    suffix = "\n```\n\nRespond with valid JSON only."
+
+    room = max(0, MAX_PROMPT_CHARS - len(prefix) - len(suffix))
+    if len(truncated) > room:
+        truncated = truncated[:room]
+        print("Truncated diff to %d chars to fit prompt budget" % room, file=sys.stderr)
+
+    print(
+        "Prompt: %d seed names, %d sample bodies, %d diff chars"
+        % (len(example_seeds), n_samples, len(truncated)),
+        file=sys.stderr,
+    )
+    return prefix + truncated + suffix
 
 
 def parse_llm_json(text):
@@ -358,12 +389,12 @@ def main():
     parser.add_argument(
         "--anthropic-api-key",
         default=None,
-        help="Anthropic API key for fallback (or set ANTHROPIC_API_KEY)",
+        help="Anthropic API key (or set ANTHROPIC_API_KEY)",
     )
     parser.add_argument(
         "--anthropic-model",
         default=os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
-        help="Anthropic fallback model to use",
+        help="Anthropic model to use",
     )
     args = parser.parse_args()
 

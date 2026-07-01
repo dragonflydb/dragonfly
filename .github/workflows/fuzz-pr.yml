@@ -49,6 +49,7 @@ concurrency:
 permissions:
   contents: read
   models: read
+  packages: read
 
 jobs:
   fuzz-pr:
