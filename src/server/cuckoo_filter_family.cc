@@ -418,15 +418,17 @@ void RegisterCuckooFilterFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::CUCKOO_FILTER);
 
   *registry << CI{"CF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1}.HFUNC(Reserve)
-            << CI{"CF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Add)
-            << CI{"CF.ADDNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(AddNx)
+            // It should really be fast but I am keeping compat.
+            << CI{"CF.ADD", CO::JOURNALED | CO::DENYOOM, 3, 1, 1}.HFUNC(Add)
+            << CI{"CF.ADDNX", CO::JOURNALED | CO::DENYOOM, 3, 1, 1}.HFUNC(AddNx)
             << CI{"CF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(Exists)
             << CI{"CF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(MExists)
             << CI{"CF.INFO", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Info)
             << CI{"CF.COUNT", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(Count)
-            << CI{"CF.DEL", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Del)
-            << CI{"CF.INSERT", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(Insert)
-            << CI{"CF.INSERTNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(InsertNx)
+            << CI{"CF.DEL", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(Del)
+            << CI{"CF.INSERT", CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(Insert)
+            << CI{"CF.INSERTNX", CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(InsertNx)
+            // They mark it fast and read only. It's neither.
             << CI{"CF.COMPACT", CO::JOURNALED, 2, 1, 1}.HFUNC(Compact);
 }
 

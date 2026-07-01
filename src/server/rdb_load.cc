@@ -350,6 +350,13 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCMS& src) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCuckoo& src) {
+  if (config_.append) {
+    CuckooFilter* cf = pv_->GetCuckooFilter();
+    DCHECK(cf);
+    for (const std::string& blob : src.filters)
+      cf->AppendFilter(blob);
+    return;
+  }
   CuckooFilter* cf =
       CompactObj::AllocateMR<CuckooFilter>(CuckooFilterOptions{}, CompactObj::memory_resource());
   cf->Deserialize({src.slots_per_bucket, src.max_iterations, src.expansion, src.num_buckets,
@@ -2086,49 +2093,94 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
 
 io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCuckoo() {
   RdbCuckoo res;
+  uint64_t num_filters = 0;
 
-  uint64_t slots_per_bucket, max_iterations, expansion;
-  SET_OR_UNEXPECT(LoadLen(nullptr), slots_per_bucket);
-  SET_OR_UNEXPECT(LoadLen(nullptr), max_iterations);
-  SET_OR_UNEXPECT(LoadLen(nullptr), expansion);
+  if (!pending_read_.cf_filter.has_value() && pending_read_.remaining == 0) {
+    uint64_t slots_per_bucket, max_iterations, expansion;
+    SET_OR_UNEXPECT(LoadLen(nullptr), slots_per_bucket);
+    SET_OR_UNEXPECT(LoadLen(nullptr), max_iterations);
+    SET_OR_UNEXPECT(LoadLen(nullptr), expansion);
 
-  // expansion 0 means non-expanding; non-zero must be a power of two (AltIndex symmetry).
-  if (slots_per_bucket == 0 || slots_per_bucket > UINT8_MAX || max_iterations == 0 ||
-      max_iterations > UINT16_MAX || expansion > UINT16_MAX ||
-      (expansion != 0 && !absl::has_single_bit(expansion))) {
-    LOG(ERROR) << "Invalid Cuckoo filter parameters: slots_per_bucket=" << slots_per_bucket
-               << ", max_iterations=" << max_iterations << ", expansion=" << expansion;
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-  res.slots_per_bucket = static_cast<uint8_t>(slots_per_bucket);
-  res.max_iterations = static_cast<uint16_t>(max_iterations);
-  res.expansion = static_cast<uint16_t>(expansion);
-
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.num_buckets);
-  // num_buckets must be a power of two — AltIndex requires it for correct KO-insert rollback.
-  if (!absl::has_single_bit(res.num_buckets))
-    return Unexpected(errc::rdb_file_corrupted);
-
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.num_items);
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.num_deletes);
-
-  uint64_t num_filters;
-  SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
-
-  if (num_filters == 0)
-    return Unexpected(errc::rdb_file_corrupted);
-
-  res.filters.reserve(num_filters);
-  for (uint64_t i = 0; i < num_filters; ++i) {
-    std::string blob;
-    SET_OR_UNEXPECT(FetchGenericString(), blob);
-    // Empty blobs pass the modulo check (0 % n == 0) but would cause division-by-zero
-    // in BucketIndices (NumBuckets returns 0 → p.h1 % 0).
-    if (blob.empty() || blob.size() % res.slots_per_bucket != 0)
+    if (slots_per_bucket == 0 || slots_per_bucket > UINT8_MAX || max_iterations == 0 ||
+        max_iterations > UINT16_MAX || expansion > UINT16_MAX ||
+        (expansion != 0 && !absl::has_single_bit(expansion))) {
+      LOG(ERROR) << "Invalid Cuckoo filter parameters: slots_per_bucket=" << slots_per_bucket
+                 << ", max_iterations=" << max_iterations << ", expansion=" << expansion;
       return Unexpected(errc::rdb_file_corrupted);
+    }
+    res.slots_per_bucket = static_cast<uint8_t>(slots_per_bucket);
+    res.max_iterations = static_cast<uint16_t>(max_iterations);
+    res.expansion = static_cast<uint16_t>(expansion);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.num_buckets);
+    if (!absl::has_single_bit(res.num_buckets))
+      return Unexpected(errc::rdb_file_corrupted);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.num_items);
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.num_deletes);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+    if (num_filters == 0)
+      return Unexpected(errc::rdb_file_corrupted);
+    pending_read_.cf_slots_per_bucket = res.slots_per_bucket;
+  } else {
+    num_filters = pending_read_.remaining;
+    pending_read_.remaining = 0;
+  }
+
+  auto read_cf_chunks = [&](std::string& data, size_t start_offset) -> io::Result<size_t> {
+    const size_t total = data.size();
+    size_t curr_offset = start_offset;
+    while (curr_offset < total && !ChunkBudgetExhausted()) {
+      uint64_t chunk_size;
+      SET_OR_UNEXPECT(LoadLen(nullptr), chunk_size);
+      if (chunk_size == 0 || chunk_size > total - curr_offset)
+        return Unexpected(errc::rdb_file_corrupted);
+      if (auto ec = FetchBuf(chunk_size, data.data() + curr_offset))
+        return make_unexpected(ec);
+      curr_offset += chunk_size;
+    }
+    return curr_offset;
+  };
+
+  if (pending_read_.cf_filter) {
+    auto& cf_st = *pending_read_.cf_filter;
+    SET_OR_UNEXPECT(read_cf_chunks(cf_st.filter_data, cf_st.offset), cf_st.offset);
+    if (cf_st.offset < cf_st.filter_data.size()) {
+      pending_read_.remaining = num_filters;
+      return OpaqueObj{std::move(res), RDB_TYPE_CUCKOO};
+    }
+    if (cf_st.filter_data.empty() || cf_st.filter_data.size() % cf_st.slots_per_bucket != 0)
+      return Unexpected(errc::rdb_file_corrupted);
+    res.filters.push_back(std::move(cf_st.filter_data));
+    pending_read_.cf_filter.reset();
+    --num_filters;
+  }
+
+  // If the previous filter is complete and there are more start the next one
+  const uint8_t spb = pending_read_.cf_slots_per_bucket;
+  if (spb == 0)
+    return Unexpected(errc::rdb_file_corrupted);
+  res.filters.reserve(num_filters);
+  for (; num_filters > 0 && !ChunkBudgetExhausted(); --num_filters) {
+    uint64_t total_size;
+    SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
+    if (total_size == 0 || total_size % spb != 0)
+      return Unexpected(errc::rdb_file_corrupted);
+
+    std::string blob(total_size, '\0');
+    size_t offset = 0;
+    SET_OR_UNEXPECT(read_cf_chunks(blob, 0), offset);
+
+    if (offset < total_size) {
+      pending_read_.cf_filter = {std::move(blob), offset, spb};
+      pending_read_.remaining = num_filters;
+      return OpaqueObj{std::move(res), RDB_TYPE_CUCKOO};
+    }
     res.filters.push_back(std::move(blob));
   }
 
+  pending_read_.remaining = num_filters;
   return OpaqueObj{std::move(res), RDB_TYPE_CUCKOO};
 }
 

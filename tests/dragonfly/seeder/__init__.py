@@ -28,7 +28,7 @@ class SeederBase:
     def __init__(self, types: typing.Optional[typing.List[str]] = None, seed=None):
         self.uid = SeederBase.UID_COUNTER
         SeederBase.UID_COUNTER += 1
-        self.types = types if types is not None else SeederBase.DEFAULT_TYPES
+        self.types = types if types is not None else type(self).DEFAULT_TYPES
 
         self.seed = random.randrange(sys.maxsize)
         if seed is not None:
@@ -138,6 +138,8 @@ class DebugPopulateSeeder(SeederBase):
 
 
 class Seeder(SeederBase):
+    DEFAULT_TYPES = SeederBase.DEFAULT_TYPES + ["CF"]
+
     @dataclass
     class Unit:
         prefix: str

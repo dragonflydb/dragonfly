@@ -16,6 +16,7 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/bloom.h"
+#include "core/cuckoo.h"
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
 #include "server/engine_shard_set.h"
@@ -1644,6 +1645,96 @@ TEST_F(RdbTest, SplitSBF) {
 
   for (size_t i = 0; i < 50; ++i) {
     EXPECT_THAT(Run({"BF.EXISTS", "bf_loaded", StrCat("item", i)}), IntArg(1));
+  }
+}
+
+TEST_F(RdbTest, SplitCuckoo) {
+  auto resp = Run("cf.reserve cf_src 4 expansion 2");
+  EXPECT_EQ(resp, "OK");
+  for (size_t i = 0; i < 100; ++i) {
+    resp = Run(StrCat("cf.add cf_src item", i));
+    EXPECT_THAT(resp, IntArg(1));
+  }
+
+  std::string first;
+  std::string last_blob;
+
+  // split the blob of the last filter into three chunks.
+  constexpr size_t kFirstSplit = 17;
+  constexpr size_t kSecondSplit = 13;
+
+  pp_->at(0)->Await([&] {
+    const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    const auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, "cf_src", OBJ_CUCKOOFILTER);
+    ASSERT_TRUE(it.ok());
+
+    const CuckooFilter* cf = it.value()->second.GetCuckooFilter();
+    ASSERT_GE(cf->NumFilters(), 2u);
+    const size_t num_filters = cf->NumFilters();
+
+    last_blob = std::string{cf->FilterBytes(num_filters - 1)};
+    ASSERT_GT(last_blob.size(), kFirstSplit + kSecondSplit);
+
+    first.push_back(RDB_TYPE_CUCKOO);
+    // brand new key whose shape is copied off cf_src
+    AppendString(&first, "cf_loaded");
+    AppendLen(&first, cf->SlotsPerBucket());
+    AppendLen(&first, cf->MaxIterations());
+    AppendLen(&first, cf->Expansion());
+    AppendLen(&first, cf->NumBuckets());
+    AppendLen(&first, cf->NumItems());
+    AppendLen(&first, cf->NumDeletes());
+    AppendLen(&first, num_filters);
+
+    // every filter but the last is written whole, in a single chunk
+    for (size_t i = 0; i + 1 < num_filters; ++i) {
+      const std::string blob{cf->FilterBytes(i)};
+      AppendLen(&first, blob.size());
+      AppendLen(&first, blob.size());
+      first.append(blob);
+    }
+
+    // total size of the last filter's blob
+    AppendLen(&first, last_blob.size());
+    // only kFirstSplit bytes of it in this chunk
+    AppendLen(&first, kFirstSplit);
+    first.append(last_blob.data(), kFirstSplit);
+  });
+
+  // add this plain string between chunks of the split filter
+  std::string plain;
+  plain.push_back(RDB_TYPE_STRING);
+  AppendString(&plain, "plain_key");
+  AppendString(&plain, "plain_val");
+
+  // p2 of last_blob
+  std::string second;
+  AppendLen(&second, kSecondSplit);
+  second.append(last_blob.data() + kFirstSplit, kSecondSplit);
+
+  // p3 of last_blob
+  std::string third;
+  constexpr auto kPrefixConsumed = kFirstSplit + kSecondSplit;
+  AppendLen(&third, last_blob.size() - kPrefixConsumed);
+  third.append(last_blob.data() + kPrefixConsumed, last_blob.size() - kPrefixConsumed);
+
+  std::string body;
+  body += MakeTaggedChunk(1, first);
+  body += plain;
+  body += MakeTaggedChunk(1, second);
+  body += MakeTaggedChunk(1, third);
+
+  EXPECT_EQ(Run("flushall"), "OK");
+
+  auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run("type cf_loaded"), "MBbloomCF");
+  EXPECT_EQ(Run("get plain_key"), "plain_val");
+
+  for (size_t i = 0; i < 100; ++i) {
+    EXPECT_THAT(Run(StrCat("cf.exists cf_loaded item", i)), IntArg(1));
   }
 }
 

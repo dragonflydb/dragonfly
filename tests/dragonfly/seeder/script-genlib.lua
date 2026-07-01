@@ -220,13 +220,50 @@ function LG_funcs.mod_stream(key)
     end
 end
 
+-- cuckoo filters
+-- reserve with enough capacity, then bulk-insert random items.
+-- cf_items tracks inserted items per key for the lifetime of this script
+-- execution so mod_cf can issue real deletes and trigger auto-compaction.
+
+local cf_items = {}
+
+function LG_funcs.add_cf(key)
+    local items = randstr_sequence()
+    redis.apcall('CF.RESERVE', key, math.max(LG_funcs.csize * 10, 64))
+    local args = {'CF.INSERT', key, 'NOCREATE', 'ITEMS'}
+    for _, item in ipairs(items) do
+        table.insert(args, item)
+    end
+    redis.apcall(unpack(args))
+    cf_items[key] = items
+end
+
+function LG_funcs.mod_cf(key)
+    local items = cf_items[key] or {}
+    local action = math.random(1, 3)
+    if action == 1 and #items > 0 then
+        -- delete a tracked item; may trigger auto-compaction via CF.DEL
+        local idx = math.random(#items)
+        redis.apcall('CF.DEL', key, items[idx])
+        items[idx] = items[#items]
+        items[#items] = nil
+    elseif action == 2 then
+        local item = randstr()
+        redis.apcall('CF.ADD', key, item)
+        table.insert(items, item)
+        cf_items[key] = items
+    else
+        redis.apcall('CF.ADD', key, randstr())
+    end
+end
+
 function LG_funcs.get_huge_entries()
   return huge_entries
 end
 
 -- Check if next entry generate huge value keys
 function LG_funcs.is_huge_entry(type)
-    -- These types doesn't generate huge value
+    -- These types don't generate huge values
     if type == "string" or type == "json" then
         return false
     else

@@ -78,12 +78,12 @@ class RdbLoaderBase {
   };
 
   struct RdbCuckoo {
-    uint8_t slots_per_bucket;
-    uint16_t max_iterations;
-    uint16_t expansion;
-    uint64_t num_buckets;
-    uint64_t num_items;
-    uint64_t num_deletes;
+    uint8_t slots_per_bucket = 0;
+    uint16_t max_iterations = 0;
+    uint16_t expansion = 0;
+    uint64_t num_buckets = 0;
+    uint64_t num_items = 0;
+    uint64_t num_deletes = 0;
     std::vector<std::string> filters;
   };
 
@@ -173,6 +173,14 @@ class RdbLoaderBase {
       unsigned hash_cnt = 0;
     };
     std::optional<SbfFilterState> sbf_filter;
+
+    struct CfFilterState {
+      std::string filter_data;
+      size_t offset = 0;
+      uint8_t slots_per_bucket = 0;
+    };
+    std::optional<CfFilterState> cf_filter;
+    uint8_t cf_slots_per_bucket = 0;  // saved on first chunk, reused on resume
   };
 
   struct LoadConfig {

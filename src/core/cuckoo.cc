@@ -173,6 +173,12 @@ void CuckooFilter::Deserialize(const SerializedDataView& data) {
   filters_.swap(new_filters);
 }
 
+void CuckooFilter::AppendFilter(std::string_view blob) {
+  SubFilter sf(reinterpret_cast<const uint8_t*>(blob.data()),
+               reinterpret_cast<const uint8_t*>(blob.data()) + blob.size(), mr_);
+  filters_.push_back(std::move(sf));
+}
+
 uint64_t CuckooFilter::Hash(std::string_view item) {
   return XXH3_64bits_withSeed(item.data(), item.size(), 0xc6a4a7935bd1e995ULL);
 }
