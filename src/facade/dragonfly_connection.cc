@@ -2218,12 +2218,12 @@ void Connection::ShutdownSelfBlocking() {
 bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   // Migrate() runs synchronously and only supports connections without subscriptions and with no
   // background command processing, as enforced by the CHECKs below.
-
-  // Skip the !async_dispatch assertion for V2:
-  // - ExecuteBatch may set this flag around DispatchCommandSimple while flushing a pipeline, and
-  //   Migrate() can run synchronously from inside that dispatch, so the flag may be true here.
-  // - V2 is single-fiber, so the same fiber that set the flag is the one doing the migration.
-  // V1 keeps the assertion: there, a true async_dispatch means the AsyncFiber consumer is active.
+  //
+  // V2: Skip the !async_dispatch assertion:
+  // - Uses a single-fiber, so the same fiber that set the flag is the one doing the migration.
+  // - ExecuteBatch may set this flag around DispatchCommandSimple while flushing a pipeline;
+  //   this guard is defensive in case future callers invoke Migrate() while a dispatch is active.
+  // V1: keeps the assertion: there, a true async_dispatch means the AsyncFiber consumer is active.
   CHECK(ioloop_v2_ || !cc_->async_dispatch);
   CHECK_EQ(cc_->subscriptions, 0);  // are bound to thread local caches
   CHECK_EQ(self_.use_count(), 1u);  // references cache our thread and backpressure
@@ -2232,8 +2232,9 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
     socket_->ResetOnRecvHook();
   }
 
-  // Callers check the result of Migrate() and handle failure explicitly in their flows, so this
-  // can act as a weak if condition instead of a crash prone CHECK.
+  // Migrate is only used by DFLY Thread and Flow command which both check against
+  // the result of Migration and handle it explicitly in their flows so this can act
+  // as a weak if condition instead of a crash prone CHECK.
   if (async_fb_.IsJoinable() || cc_->conn_closing) {
     return false;
   }
@@ -2724,8 +2725,14 @@ bool Connection::SquashPipelineV2() {
 
   uint64_t dispatch_start = CycleClock::Now();
   fiber_park_spot_ = FiberParkSpot::kSquashHop;
+  // DispatchSquashedBatch is synchronous - raise sync_dispatch so DispatchTracker sees this
+  // connection as dispatching and waits for these in-flight commands to finish.
+  // Invariant: clear on entry - only reached from the V2 loop between per-command dispatches.
+  DCHECK(!cc_->sync_dispatch);
+  cc_->sync_dispatch = true;
   unsigned squashed =
       service_->DispatchSquashedBatch(parsed_to_execute_, dispatch_waiting_count_, cc_.get());
+  cc_->sync_dispatch = false;
   fiber_park_spot_ = FiberParkSpot::kNone;
 
   if (squashed == 0)
@@ -2829,19 +2836,36 @@ bool Connection::ExecuteBatch() {
     // sendmsg syscalls to a minimum. IoLoopV2's idle-await block handles the final flush.
     reply_builder_->SetBatchMode(ioloop_v2_ && is_head && (cmd->next != nullptr));
 
-    // V2 only: set async_dispatch so DispatchCommand flushes buffered replies before a blocking
-    // command (e.g. BLPOP) parks this fiber.
-    // - We use is_true_pipeline=true to skip the pointless flush, since there is nothing behind it.
-    // - Save and restore the old value instead of forcing it to false - it may have been true
-    // before we entered. In V1 the AsyncFiber owns this flag, so leave it alone here.
-    // - In V1 the AsyncFiber owns this flag, so leave it alone here.
-    const bool prev_async_dispatch = cc_->async_dispatch;
-    if (ioloop_v2_ && is_true_pipeline)
-      cc_->async_dispatch = true;
+    // We set TWO flags because they feed two different, independent consumers (see conn_context.h);
+    // one flag cannot serve both:
+    // - sync_dispatch (every command): inflight-dispatch tracking (conn_context.h #1).
+    //   IsCurrentlyDispatching() must be true so a CLIENT PAUSE / REPLTAKEOVER / migration started
+    //   mid-flight waits for this command. A lone V2 command sets no other flag, so without it the
+    //   write can slip past CLIENT PAUSE.
+    // - async_dispatch (flush-before-block): makes MainService::DispatchCommand flush the buffered
+    //   pipeline replies before a blocking command (e.g. BLPOP) parks the fiber. Gating it avoids a
+    //   bogus flush / blocking-in-pipeline stat bump for a lone blocking command.
+    // V1 sets these flags elsewhere (DispatchSingle / the AsyncFiber paths), hence the ioloop_v2_
+    // guard.
+    //
+    // TODO(follow-up PR): an async command may still be in flight after this returns,
+    // yet sync_dispatch is cleared right below - so a CLIENT PAUSE / DispatchTracker started in
+    // that window can under-wait it. We need to defer the checkpoint until in-flight
+    // commands drain. The synchronous squash path (SquashPipelineV2) is already correct.
+    if (ioloop_v2_) {
+      // Invariant: both are clear on entry - the single V2 fiber never dispatches while already
+      // dispatching, and every path above resets them before the next command is reached.
+      DCHECK(!cc_->sync_dispatch);
+      DCHECK(!cc_->async_dispatch);
+      cc_->sync_dispatch = true;
+      cc_->async_dispatch = is_true_pipeline;
+    }
     uint64_t dispatch_start = CycleClock::Now();
     auto dispatch_res = service_->DispatchCommandSimple(cmd, mode);
-    if (ioloop_v2_ && is_true_pipeline)
-      cc_->async_dispatch = prev_async_dispatch;
+    if (ioloop_v2_) {
+      cc_->sync_dispatch = false;
+      cc_->async_dispatch = false;
+    }
     // Enforce the pipeline reply-ordering invariant: replies must reach the socket in parse order.
     // V1 (ONLY_SYNC): all commands run serially, so parsed_to_execute_ always equals parsed_head_
     //    (is_head is always true). The invariant holds trivially.
