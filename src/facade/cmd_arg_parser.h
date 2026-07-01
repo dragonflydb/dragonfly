@@ -206,9 +206,6 @@ struct CmdArgParser {
   };
 
  public:
-  explicit CmdArgParser(ArgSlice args) : args_{args} {
-  }
-
   explicit CmdArgParser(const cmn::BackedArguments& bargs, uint32_t offset = 0)
       : args_{bargs, offset} {
   }

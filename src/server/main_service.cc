@@ -578,9 +578,7 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
     for (const auto& scmd : exec_info.body) {
       // We can only tell if eval is transactional based on they keycount
       if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
-        CmdArgVec arg_vec{};
-        auto args = scmd.Slice(&arg_vec);
-        auto keys = DetermineKeys(scmd.Cid(), args);
+        auto keys = DetermineKeys(scmd.Cid(), scmd.Args());
         transactional |= (keys && keys.value().NumArgs() > 0);
       } else {
         transactional |= scmd.Cid()->IsTransactional();
@@ -1487,14 +1485,6 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
   cmd_cntx->SetTailArgs(args_no_cmd);
 
-  ArgSlice tail_args;
-  if (cmd_cntx->IsDeferredReply()) {
-    args_no_cmd.ToVec(&cmd_cntx->arg_slice_backing);  // Ensure lifetime
-    tail_args = cmd_cntx->arg_slice_backing;
-  } else {
-    tail_args = args_no_cmd.ToSlice(&cmd_cntx->arg_slice_backing);
-  }
-
   // Block on CLIENT PAUSE if needed
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
     if (VLOG_IS_ON(2)) {
@@ -1554,7 +1544,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     return DispatchResult::ERROR;
   }
 
-  DispatchResult res = InvokeCmd(tail_args, cmd_cntx);
+  DispatchResult res = InvokeCmd(cmd_cntx->tail_args(), cmd_cntx);
   if (dispatched_tx) {
     DCHECK(dfly_cntx->transaction == dispatched_tx.get());
     // A new top-level transaction is created here only for top-level commands. Nested commands
@@ -1627,7 +1617,7 @@ class ReplyGuard {
   std::string_view cid_name_;
 };
 
-DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx) {
+DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandContext* cmd_cntx) {
   auto* cid = cmd_cntx->cid();
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
@@ -1991,8 +1981,7 @@ void Service::TryEnqueueEvalAsyncCmd(const Interpreter::CallArgs& ca, CommandCon
     ParsedArgs parsed_args{*ca.args};
     if (auto [cid, tail] = registry_.FindExtended(parsed_args); cid != nullptr) {
       auto reply_mode = abort_on_error ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
-      CmdArgVec scratch;
-      info->async_cmds.emplace_back(cid, tail.ToSlice(&scratch), reply_mode);
+      info->async_cmds.emplace_back(cid, tail, reply_mode);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
     } else if (abort_on_error) {  // If we don't abort on errors, we can ignore it completely
       early_async_error = ReportUnknownCmd(ca.args->at(0));
@@ -2056,14 +2045,11 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     default: {
       // Save EVAL's state that DispatchCommand overwrites.
       auto saved_tail = cmd_cntx->tail_args();
-      CmdArgVec saved_backing;
-      saved_backing.swap(cmd_cntx->arg_slice_backing);
 
       auto* prev = cmd_cntx->SwapReplier(&replier);
       DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
       cmd_cntx->SwapReplier(prev);
 
-      saved_backing.swap(cmd_cntx->arg_slice_backing);
       cmd_cntx->SetTailArgs(saved_tail);
     }
   }
@@ -2419,19 +2405,16 @@ template <typename F> void IterateAllKeys(const ConnectionState::ExecInfo* exec_
   for (auto& [dbid, key] : exec_info->watched_keys)
     f(MutableSlice{key.data(), key.size()});
 
-  CmdArgVec arg_vec{};
-
   for (const auto& scmd : exec_info->body) {
     if (!scmd.Cid()->IsTransactional())
       continue;
 
-    auto args = scmd.Slice(&arg_vec);
-    auto key_res = DetermineKeys(scmd.Cid(), args);
+    auto key_res = DetermineKeys(scmd.Cid(), scmd.Args());
     if (!key_res.ok())
       continue;
 
     for (unsigned i : key_res->Range())
-      f(arg_vec[i]);
+      f(scmd.Args()[i]);
   }
 }
 
@@ -2525,15 +2508,13 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
       opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
       MultiCommandSquasher::Execute(std::move(cmd_gen), rb, cntx, this, opts);
     } else {
-      CmdArgVec arg_vec;
       DCHECK_EQ(cmd_cntx->cid(), exec_cid_);
 
       for (const auto& scmd : exec_info.body) {
-        CmdArgList args = scmd.Slice(&arg_vec);
-
         if (scmd.Cid()->IsTransactional()) {
           cmd_cntx->tx()->MultiSwitchCmd(scmd.Cid());
-          OpStatus st = cmd_cntx->tx()->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
+          OpStatus st =
+              cmd_cntx->tx()->InitByArgs(cntx->ns, cntx->conn_state.db_index, scmd.Args());
           if (st != OpStatus::OK) {
             cmd_cntx->SendError(st);
             break;
@@ -2544,7 +2525,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
         // execution inside exec.
         cmd_cntx->UpdateCid(scmd.Cid());
         cmd_cntx->SetTailArgs(scmd.Args());
-        auto invoke_res = InvokeCmd(args, cmd_cntx);
+        auto invoke_res = InvokeCmd(scmd.Args(), cmd_cntx);
         if ((invoke_res != DispatchResult::OK) ||
             rb->GetError())  // checks for i/o error, not logical error.
           break;

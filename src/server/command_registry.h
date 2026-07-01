@@ -115,7 +115,7 @@ class CommandId : public facade::CommandId {
                          std::optional<facade::ErrorReply>(const facade::ParsedArgs&) const>;
 
   // Returns the invoke time in usec.
-  void Invoke(CmdArgList args, CommandContext* cmd_cntx) const {
+  void Invoke(const facade::ParsedArgs& args, CommandContext* cmd_cntx) const {
     handler_(facade::CmdArgParser{args}, cmd_cntx);
   }
 
@@ -148,10 +148,10 @@ class CommandId : public facade::CommandId {
     return interleave_step_;
   }
 
+  // Adapts a free-function handler (including coroutine handlers returning cmd::CmdR) into the
+  // void Handler, discarding the unused return object.
   template <typename RT> CommandId&& SetHandler(RT f(facade::CmdArgParser, CommandContext*)) && {
-    handler_ = [f](facade::CmdArgParser parser, CommandContext* cntx) {
-      f(std::move(parser), cntx);
-    };
+    handler_ = [f](facade::CmdArgParser parser, CommandContext* cntx) { f(parser, cntx); };
     return std::move(*this);
   }
 
@@ -161,9 +161,7 @@ class CommandId : public facade::CommandId {
     return std::move(*this).SetHandler(f);
   }
 
-  CommandId&& SetHandler(Handler f, bool async_support = false) && {
-    if (async_support)
-      kind_mask_ |= SUPPORT_ASYNC;
+  CommandId&& SetHandler(Handler f) && {
     handler_ = std::move(f);
     return std::move(*this);
   }

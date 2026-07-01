@@ -13,8 +13,6 @@
 
 namespace dfly {
 
-using facade::CmdArgList;
-
 constexpr size_t kMaximumSlowlogArgCount = 31;  // 32 - 1 for the command name
 constexpr size_t kMaximumSlowlogArgLength = 128;
 
@@ -35,8 +33,9 @@ class SlowLogShard {
     return log_entries_;
   }
 
-  void Add(const std::string_view command_name, CmdArgList args, const std::string_view client_name,
-           const std::string_view client_ip, uint64_t exec_time_usec, uint64_t unix_ts_usec);
+  void Add(const std::string_view command_name, const facade::ParsedArgs& args,
+           const std::string_view client_name, const std::string_view client_ip,
+           uint64_t exec_time_usec, uint64_t unix_ts_usec);
   void Reset();
   void ChangeLength(size_t new_length);
 

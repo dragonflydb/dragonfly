@@ -127,14 +127,6 @@ class ParsedArgs {
     return const_iterator{this, size()};
   }
 
-  ArgSlice ToSlice(CmdArgVec* scratch) const {
-    return std::visit([scratch](const auto& args) { return args.ToSlice(scratch); }, args_);
-  }
-
-  void ToVec(CmdArgVec* vec) const {
-    std::visit([vec](const auto& args) { return args.ToVec(vec); }, args_);
-  }
-
  private:
   struct WrapperBacked {
     WrapperBacked(const cmn::BackedArguments* args, uint32_t index = 0)  // NOLINT
@@ -163,18 +155,6 @@ class ParsedArgs {
     std::string_view at(size_t i) const {
       return args_->at(index_ + i);
     }
-
-    ArgSlice ToSlice(CmdArgVec* scratch) const {
-      ToVec(scratch);
-      return *scratch;
-    }
-
-    void ToVec(CmdArgVec* vec) const {
-      vec->clear();
-      vec->reserve(args_->size() - index_);
-      for (auto arg : args_->view(index_))
-        vec->emplace_back(arg);
-    }
   };
 
   struct Slice : public ArgSlice {
@@ -188,14 +168,6 @@ class ParsedArgs {
 
     ParsedArgs Tail(unsigned offset = 1) const {
       return ParsedArgs{subspan(offset)};
-    }
-
-    ArgSlice ToSlice(void* /*scratch*/) const {
-      return *this;
-    }
-
-    void ToVec(CmdArgVec* vec) const {
-      vec->assign(begin(), end());
     }
   };
   std::variant<Slice, WrapperBacked> args_;

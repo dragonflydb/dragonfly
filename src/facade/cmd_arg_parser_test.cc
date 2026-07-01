@@ -20,16 +20,13 @@ namespace facade {
 class CmdArgParserTest : public testing::Test {
  public:
   CmdArgParser Make(absl::Span<const std::string_view> args) {
-    storage_.assign(args.begin(), args.end());
-    arg_vec_.clear();
-    for (auto& s : storage_)
-      arg_vec_.push_back(MutableSlice{s.data(), s.size()});
-    return CmdArgParser{absl::MakeSpan(arg_vec_)};
+    storage_.Assign(args.begin(), args.end(), args.size());
+    return CmdArgParser{storage_};
   }
 
  private:
   CmdArgVec arg_vec_;
-  std::vector<std::string> storage_;
+  cmn::BackedArguments storage_;
 };
 
 TEST_F(CmdArgParserTest, BasicTypes) {

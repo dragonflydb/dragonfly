@@ -2295,7 +2295,8 @@ void GenericFamily::FieldExpire(facade::CmdArgParser parser, CommandContext* cmd
     return cmd_cntx->SendError(err.MakeReply());
   }
   facade::CmdArgVec fields;
-  cmd_cntx->tail_args().Tail(parser.UnparsedStart()).ToVec(&fields);
+  auto field_args = cmd_cntx->tail_args().Tail(parser.UnparsedStart());
+  fields.assign(field_args.begin(), field_args.end());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpFieldExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
