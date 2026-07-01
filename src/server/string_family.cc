@@ -1662,6 +1662,12 @@ cmd::CmdR CmdGetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (auto err = parser.TakeError(); err)
     co_return err.MakeReply();
 
+  // FUZZ-PIPELINE-TEST: intentional crash to validate the AFL++ PR fuzzing pipeline
+  // end-to-end (seed generation -> fuzzing -> crash detection). DO NOT MERGE — revert first.
+  if (start == end) {
+    abort();  // FUZZ-PIPELINE-TEST intentional crash in GETRANGE (start == end)
+  }
+
   auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
