@@ -6,6 +6,7 @@
 
 #include <string>
 
+#include "facade/cmd_arg_parser.h"
 #include "facade/conn_context.h"
 #include "facade/facade_types.h"
 #include "server/cluster/cluster_config.h"
@@ -21,6 +22,7 @@ class ServerFamily;
 class CommandRegistry;
 class ConnectionContext;
 class CommandContext;
+using facade::CmdArgParser;
 }  // namespace dfly
 
 namespace dfly::cluster {
@@ -59,7 +61,7 @@ class ClusterFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
   // Cluster commands compatible with Redis
-  void Cluster(CmdArgList args, CommandContext* cmd_cntx);
+  void Cluster(CmdArgParser parser, CommandContext* cmd_cntx);
   void ClusterHelp(SinkReplyBuilder* builder);
   void ClusterShards(SinkReplyBuilder* builder, ConnectionContext* cntx);
   void ClusterSlots(SinkReplyBuilder* builder, ConnectionContext* cntx);
@@ -67,34 +69,35 @@ class ClusterFamily {
   void ClusterInfo(SinkReplyBuilder* builder, ConnectionContext* cntx);
   void ClusterMyId(SinkReplyBuilder* builder);
 
-  void KeySlot(CmdArgList args, SinkReplyBuilder* builder);
+  void KeySlot(facade::ParsedArgs args, SinkReplyBuilder* builder);
 
-  void ReadOnly(CmdArgList args, CommandContext* cmd_cntx);
-  void ReadWrite(CmdArgList args, CommandContext* cmd_cntx);
+  void ReadOnly(CmdArgParser parser, CommandContext* cmd_cntx);
+  void ReadWrite(CmdArgParser parser, CommandContext* cmd_cntx);
 
   // Custom Dragonfly commands for cluster management
-  void DflyCluster(CmdArgList args, CommandContext* cmd_cntx);
-  void DflyClusterConfig(CmdArgList args, CommandContext* cmd_cntx);
+  void DflyCluster(CmdArgParser parser, CommandContext* cmd_cntx);
+  void DflyClusterConfig(CmdArgParser parser, CommandContext* cmd_cntx);
 
-  void DflyClusterGetSlotInfo(CmdArgList args, CommandContext* cmd_cntx)
+  void DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* cmd_cntx)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
-  void DflyClusterFlushSlots(CmdArgList args, CommandContext* cmd_cntx);
-  void DflySlotMigrationStatus(CmdArgList args, CommandContext* cmd_cntx)
+  void DflyClusterFlushSlots(CmdArgParser parser, CommandContext* cmd_cntx);
+  void DflySlotMigrationStatus(CmdArgParser parser, CommandContext* cmd_cntx)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
-  void DflyMigrate(CmdArgList args, CommandContext* cmd_cntx);
+  void DflyMigrate(CmdArgParser parser, CommandContext* cmd_cntx);
 
   // DFLYMIGRATE INIT is internal command to create incoming migration object
-  void InitMigration(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(migration_mu_);
+  void InitMigration(CmdArgParser parser, CommandContext* cmd_cntx)
+      ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   // DFLYMIGRATE FLOW initiate second step in slots migration procedure
   // this request should be done for every shard on the target node
   // this method assocciate connection and shard that will be the data
   // source for migration
-  void DflyMigrateFlow(CmdArgList args, CommandContext* cmd_cntx);
+  void DflyMigrateFlow(CmdArgParser parser, CommandContext* cmd_cntx);
 
-  void DflyMigrateAck(CmdArgList args, CommandContext* cmd_cntx);
+  void DflyMigrateAck(CmdArgParser parser, CommandContext* cmd_cntx);
 
   std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id)
       ABSL_LOCKS_EXCLUDED(migration_mu_);

@@ -262,9 +262,7 @@ using strings::HumanReadableNumBytes;
 using EngineFuncParser = void (ServerFamily::*)(CmdArgParser, CommandContext*);
 
 inline CommandId::Handler HandlerFunc(ServerFamily* se, EngineFuncParser f) {
-  return [=](CmdArgList args, CommandContext* cntx) {
-    return (se->*f)(MakeParserFromContext(cntx), cntx);
-  };
+  return [=](CmdArgParser parser, CommandContext* cntx) { return (se->*f)(parser, cntx); };
 }
 
 namespace {
