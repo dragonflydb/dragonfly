@@ -661,8 +661,10 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
             await collect_expiring_events(pclient, keys)
 
 
-# TODO(#7505): add enable_resp_io_loop_v2=true once V2 flush density improves.
-@dfly_args({"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "false"})
+@dfly_multi_test_args(
+    {"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "false"},
+    {"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "true"},
+)
 async def test_reply_count(df_server: DflyInstance):
     """Make sure reply aggregations reduce reply counts for common cases"""
 
@@ -705,7 +707,6 @@ async def test_reply_count(df_server: DflyInstance):
     # MULTI-OK + the EXEC array.
     # V1 (dual-fiber) is aggressive (<=2).
     # V2 (single-fiber): MULTI/OK may flush separately before the EXEC batch (<=3).
-    # TODO(#7505): tighten multi_limit for V2 once flush density improves.
     is_v2 = is_resp_io_loop_v2(df_server)
     multi_limit = 3 if is_v2 else 2
     assert await measure(e.execute()) <= multi_limit
@@ -715,10 +716,13 @@ async def test_reply_count(df_server: DflyInstance):
     for _ in range(100):
         p.incr("num-1")
 
-    # V1: aggressive squashing across dual fibers (<=2).
-    # V2: flush density is poor and under active development; see #7505.
-    # TODO(#7505): tighten this limit once V2 flush aggregation improves.
-    pipe_limit = 20 if is_v2 else 2
+    # A 100-command pipeline from localhost lands entirely in the TCP receive buffer
+    # before the server reads it.  Both V1 (SquashPipeline) and V2 (ParseLoop) drain
+    # the full batch and execute it before writing replies, so all 100 replies are
+    # coalesced into a single writev.  The limit is 2 rather than 1 to tolerate a
+    # rare OS-level TCP segment split that produces two read events.  Exceeding 2
+    # would indicate a regression in reply aggregation.
+    pipe_limit = 2
     pipe_flushes = await measure(p.execute())
     assert pipe_flushes <= pipe_limit
 
