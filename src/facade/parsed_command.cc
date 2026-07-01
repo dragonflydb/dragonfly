@@ -115,8 +115,8 @@ bool ParsedCommand::CanReply() const {
 }
 
 void ParsedCommand::SendReply() {
-  auto payload_handler = [this](payload::Payload& pl) {
-    CapturingReplyBuilder::Apply(std::move(pl), rb_);
+  auto payload_handler = [this](const payload::Payload& pl) {
+    CapturingReplyBuilder::Apply(pl, rb_);
   };
   auto task_handler = [](SuspendedCommand& task) {
     DCHECK(task.coro);

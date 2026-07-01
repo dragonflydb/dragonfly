@@ -1837,17 +1837,24 @@ void Connection::SquashPipeline() {
     return;
   }
 
-  // Send the deferred replies in linked-list order, then release the commands. SendReply() may
-  // preempt, allowing the producer to append new commands, so re-read the next pointer after it
-  // and advance the list incrementally to keep it consistent at any preemption point.
+  // Send all replies under a ReplyScope before releasing the commands.
+  // This allows the reply builder to flush without copies
+  {
+    SinkReplyBuilder::ReplyScope scope(reply_builder_.get());
+    auto* cmd = parsed_head_;
+    for (unsigned i = 0; i < squashed && cmd; i++, cmd = cmd->next) {
+      DCHECK(cmd->CanReply());
+      // TODO: Coroutine replies don't preserve lifetimes after running, so pause the scope
+      std::optional<SinkReplyBuilder::ScopePause> pause;
+      if (cmd->IsSuspendedReply())
+        pause.emplace(reply_builder_.get());
+      cmd->SendReply();
+      conn_stats.pipelined_wait_latency += CycleClock::ToUsec(start - cmd->parsed_cycle);
+    }
+  }
+
   for (unsigned i = 0; i < squashed && parsed_head_; ++i) {
     auto* current = parsed_head_;
-
-    DCHECK(current->CanReply());
-    current->SendReply();
-
-    conn_stats.pipelined_wait_latency += CycleClock::ToUsec(start - current->parsed_cycle);
-
     auto* next = current->next;
     ReleasePipelinedCommand(current);
     AdvanceParsedHead(next);

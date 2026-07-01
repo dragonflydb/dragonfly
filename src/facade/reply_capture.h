@@ -31,7 +31,8 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void SendDouble(double val) override;
   void SendSimpleString(std::string_view str) override;
   void SendBulkString(std::string_view str) override;
-  void SendBulkStringBorrowed(cmn::BorrowedString bs) override;
+
+  void SendBulkStringBorrowed(cmn::BorrowedString&& bs) override;
 
   void StartCollection(unsigned len, CollectionType type) override;
   void SendNullArray() override;
@@ -55,6 +56,10 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
   // Send payload to builder.
   static void Apply(Payload&& pl, SinkReplyBuilder* builder);
+
+  // Send payload to builder without consuming it. String refs into the payload remain valid,
+  // making this safe to use under a ReplyScope when the payload outlives the scope.
+  static void Apply(const Payload& pl, SinkReplyBuilder* builder);
 
   // If an error is stored inside payload, get a reference to it.
   static std::optional<ErrorRef> TryExtractError(const Payload& pl);

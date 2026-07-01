@@ -14,12 +14,19 @@
 #include "facade/facade_types.h"
 #include "io/io.h"
 
+namespace cmn {
+class BorrowedString;
+}  // namespace cmn
+
 namespace facade {
 
 enum class RespVersion { kResp2, kResp3 };
 
 // Base class for all reply builders. Offer a simple high level interface for controlling output
 // modes and sending basic response types.
+// By default, pointer validity for reference types (string_view, const BorrowedString&) is only
+// assumed for the Send...() function call. Use ReplyScope if the lifetime is longer to avoid copies
+// and enable zero-copy vectorized IO.
 class SinkReplyBuilder {
   struct GuardBase {
     bool prev;
@@ -57,6 +64,17 @@ class SinkReplyBuilder {
     }
 
     ~ReplyScope();
+  };
+
+  // Temporarily pauses an active ReplyScope. While paused, Send calls copy data as usual
+  // (no zero-copy refs). Restores the previous scoped_ state on destruction.
+  struct ScopePause : GuardBase {
+    explicit ScopePause(SinkReplyBuilder* rb) : GuardBase{std::exchange(rb->scoped_, false), rb} {
+    }
+
+    ~ScopePause() {
+      rb->scoped_ = prev;
+    }
   };
 
   // Aggregator reduces the number of raw send calls by copying data in an intermediate buffer.
@@ -197,15 +215,11 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
   void SendSimpleString(std::string_view str) override;
   virtual void SendBulkString(std::string_view str);  // RESP: Blob String
 
-  // Like SendBulkString, but takes ownership of a move-only cmn::BorrowedString
-  // whose bytes are borrowed from a stable in-memory source (e.g. a CompactObj
-  // LargeString under the read-only invariant). The default impl handles both
-  // raw (iovec ref) and packed (chunked decode into scratch) encodings and
-  // Flushes before returning, so ~BorrowedString releases the pin only after
-  // the source bytes are in the kernel. CapturingReplyBuilder overrides this
-  // to move `bs` into the captured payload, extending the pin's lifetime
-  // through replay.
-  virtual void SendBulkStringBorrowed(cmn::BorrowedString bs);
+  void SendBulkStringBorrowed(const cmn::BorrowedString& bs);
+
+  // The interface exposes only the rvalue function to allow squashing to "steal" the value,
+  // the real builder implementation forwards it to the constref version
+  virtual void SendBulkStringBorrowed(cmn::BorrowedString&& bs);
 
   void SendLong(long val) override;
   virtual void SendDouble(double val);  // RESP: Number
