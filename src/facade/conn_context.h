@@ -53,8 +53,19 @@ class ConnectionContext {
   bool req_auth : 1;
   bool replica_conn : 1;  // whether it's a replica connection on the master side.
   bool authenticated : 1;
-  bool async_dispatch : 1;  // whether this connection is amid an async dispatch
-  bool sync_dispatch : 1;   // whether this connection is amid a sync dispatch
+
+  // Dispatch-state flags Clarification: their names come from the V1 producer/consumer model:
+  //   sync_dispatch  - the producer (I/O) fiber is running a command inline (in its context).
+  //   async_dispatch - the consumer (AsyncFiber) is running a command / admin message.
+  //
+  // For both V1+V2 loops - together, the two flags serve two purposes.:
+  //   1. Inflight-dispatch tracking: IsCurrentlyDispatching() == (sync_dispatch || async_dispatch).
+  //      DispatchTracker reads it so CLIENT PAUSE / REPLTAKEOVER / cluster migration / shutdown
+  //      wait for an in-flight command to finish.
+  //   2. Flush-Before-Block: async_dispatch=true (only) makes MainService::DispatchCommand flush
+  //      buffered pipeline replies before a blocking command (e.g. BLPOP) parks the fiber.
+  bool async_dispatch : 1;
+  bool sync_dispatch : 1;
 
   bool paused = false;  // whether this connection is paused due to CLIENT PAUSE
   // whether it's blocked on blocking commands like BLPOP, needs to be addressable
