@@ -889,7 +889,7 @@ void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid,
   exec_info.body.emplace_back(cid, parsed_cmd, tail_index);
   size_t after = parsed_cmd->UsedMemory();
   if (before != after) {
-    dfly_cntx->conn()->AdjustParsedCmdBytes(after - before);
+    dfly_cntx->conn()->AdjustParsedCmdBytes(ssize_t(after) - ssize_t(before));
   }
 
   exec_info.stored_cmd_bytes += exec_info.body.back().UsedMemory();
