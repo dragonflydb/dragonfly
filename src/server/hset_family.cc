@@ -49,6 +49,11 @@ using IncrByParam = std::variant<double, int64_t>;
 using OptStr = std::optional<std::string>;
 enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
 
+// FIELDS arg-count error for the hash field-TTL commands. HTTL/HPEXPIRETIME/HGETEX additionally
+// pass kInvalidNumFields for a non-positive numfields.
+constexpr char kNumFieldsMismatch[] =
+    "The `numfields` parameter must match the number of arguments";
+
 // TODO: replace all the listpack code with our detail::Listpack wrapper.
 bool IsGoodForListpack(const ParsedArgs& args, const uint8_t* lp) {
   DCHECK_GE(args.size(), 2u);
@@ -767,11 +772,7 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
     op_sp.format = Format::kRedis;
     if (op_sp.mode == Mode::kNX || (op_sp.keepttl && has_exp))
       parser->Report(CmdArgParser::CUSTOM_ERROR);  // NX is Dragonfly-only; one expiry option max
-    // numfields field/value pairs; NextRange validates count > 0 and that count*2 args remain.
-    res.fields =
-        parser->NextRange(2, "The `numfields` parameter must match the number of arguments");
-    if (parser->HasNext())  // too many args
-      parser->ReportCustom("The `numfields` parameter must match the number of arguments");
+    res.fields = parser->NextRange(2, kNumFieldsMismatch, /*consume_all=*/true);
   } else if (has_exp) {
     // EX/PX/EXAT/PXAT belong to the Redis form; without FIELDS the command is malformed.
     parser->Report(CmdArgParser::CUSTOM_ERROR);
@@ -864,13 +865,7 @@ void CmdHExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
                                kSyntaxErrType);
   }
 
-  uint32_t numFields = parser.Next<uint32_t>();
-
-  ParsedArgs fields = parser.UnparsedArgs();
-  if (fields.size() != numFields) {
-    return rb->SendError("The `numfields` parameter must match the number of arguments",
-                         kSyntaxErrType);
-  }
+  CmdArgParser::Range fields = parser.NextRange(1, kNumFieldsMismatch, /*consume_all=*/true);
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
@@ -883,7 +878,7 @@ void CmdHExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
     case OpStatus::OK:
       return rb->SendLongArr(absl::MakeConstSpan(result.value()));
     case OpStatus::KEY_NOTFOUND:
-      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(numFields, -2)));
+      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(fields.size(), -2)));
     default:
       return cmd_cntx->SendError(result.status());
   };
@@ -935,17 +930,11 @@ template <FieldExpireOutput kOut>
 void HExpireTimeGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
-  uint32_t numFields =
-      parser.Next<FInt<1u, UINT32_MAX>>("Number of fields must be a positive integer");
-  ParsedArgs fields = parser.UnparsedArgs();
+  CmdArgParser::Range fields =
+      parser.NextRange(1, kNumFieldsMismatch, /*consume_all=*/true, kInvalidNumFields);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
-
-  if (fields.size() != numFields) {
-    return rb->SendError("The `numfields` parameter must match the number of arguments",
-                         kSyntaxErrType);
-  }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHExpireTime<kOut>(t, shard, key, fields);
@@ -956,7 +945,7 @@ void HExpireTimeGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
     case OpStatus::OK:
       return rb->SendLongArr(absl::MakeConstSpan(result.value()));
     case OpStatus::KEY_NOTFOUND:
-      return rb->SendLongArr(absl::MakeConstSpan(vector<int64_t>(numFields, -2)));
+      return rb->SendLongArr(absl::MakeConstSpan(vector<int64_t>(fields.size(), -2)));
     default:
       return cmd_cntx->SendError(result.status());
   };
@@ -1058,16 +1047,11 @@ void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
                      Tag("EXAT", read_expiry(ExpT::EXAT)), Tag("PXAT", read_expiry(ExpT::PXAT)),
                      Exist("PERSIST", &exp_params.persist)));
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
-  uint32_t numFields =
-      parser.Next<FInt<1u, UINT32_MAX>>("Number of fields must be a positive integer");
-  ParsedArgs fields = parser.UnparsedArgs();
+  CmdArgParser::Range fields =
+      parser.NextRange(1, kNumFieldsMismatch, /*consume_all=*/true, kInvalidNumFields);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
-
-  if (fields.size() != numFields)
-    return rb->SendError("The `numfields` parameter must match the number of arguments",
-                         kSyntaxErrType);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHGetEx(t->GetOpArgs(shard), key, fields, exp_params);
@@ -1077,7 +1061,7 @@ void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   switch (result.status()) {
     case OpStatus::OK:
     case OpStatus::KEY_NOTFOUND: {
-      RedisReplyBuilder::ArrayScope scope{rb, numFields};
+      RedisReplyBuilder::ArrayScope scope{rb, fields.size()};
       for (size_t i = 0; i < fields.size(); i++) {
         if (result.ok() && (*result)[i].has_value())
           rb->SendBulkString(*(*result)[i]);
@@ -1159,12 +1143,8 @@ void CmdHExists(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdHIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view field = parser.Next();
-  string_view incrs = parser.Next();
-  int64_t ival = 0;
-
-  if (!absl::SimpleAtoi(incrs, &ival)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
-  }
+  int64_t ival = parser.Next<int64_t>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   IncrByParam param{ival};
 
@@ -1194,12 +1174,8 @@ void CmdHIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdHIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view field = parser.Next();
-  string_view incrs = parser.Next();
-  double dval = 0;
-
-  if (!absl::SimpleAtod(incrs, &dval)) {
-    return cmd_cntx->SendError(kInvalidFloatErr);
-  }
+  double dval = parser.Next<double>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   if (isnan(dval) || isinf(dval)) {
     return cmd_cntx->SendError(kNanOrInfDuringIncr);
@@ -1331,27 +1307,14 @@ void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
 
 void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  const size_t argc = cmd_cntx->tail_args().size();
-  if (argc > 3) {
-    DVLOG(1) << "Wrong number of command arguments: " << argc;
-    return rb->SendError(kSyntaxErr);
-  }
 
   string_view key = parser.Next();
-  int32_t count;
-  bool with_values = false;
+  bool has_count = parser.HasNext();
+  int32_t count = has_count ? parser.Next<int32_t>("count value is not an integer") : 0;
+  bool with_values = parser.Check("WITHVALUES");
 
-  if ((argc > 1) && (!SimpleAtoi(parser.Next(), &count))) {
-    return rb->SendError("count value is not an integer", kSyntaxErrType);
-  }
-
-  if (argc == 3) {
-    string arg = absl::AsciiStrToUpper(parser.Next());
-    if (arg != "WITHVALUES")
-      return rb->SendError(kSyntaxErr);
-    else
-      with_values = true;
-  }
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
@@ -1367,7 +1330,7 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (pv.Encoding() == kEncodingStrMap2) {
       StringMap* string_map = GetStringMap(pv, db_context);
 
-      if (argc == 1) {
+      if (!has_count) {
         auto opt_pair = string_map->RandomPair();
         if (opt_pair.has_value()) {
           auto [key, value] = *opt_pair;
@@ -1405,7 +1368,7 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
       size_t lplen = lpLength(lp);
       CHECK(lplen > 0 && lplen % 2 == 0);
       size_t hlen = lplen / 2;
-      if (argc == 1) {
+      if (!has_count) {
         listpackEntry key;
         lpRandomPair(lp, hlen, &key, NULL);
         StrVecEmplaceBack(str_vec, key);
@@ -1439,7 +1402,7 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    if (result->size() == 1 && argc == 1)
+    if (result->size() == 1 && !has_count)
       rb->SendBulkString(result->front());
     else if (with_values) {
       const auto result_size = result->size();
@@ -1457,7 +1420,7 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
     } else
       rb->SendBulkStrArr(*result, CollectionType::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    if (argc == 1)
+    if (!has_count)
       rb->SendNull();
     else
       rb->SendEmptyArray();

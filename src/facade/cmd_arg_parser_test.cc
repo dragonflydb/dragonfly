@@ -9,6 +9,7 @@
 
 #include <cmath>
 
+#include "facade/error.h"
 #include "facade/memcache_parser.h"
 
 using namespace testing;
@@ -599,6 +600,43 @@ TEST_F(CmdArgParserTest, RangeList) {
     EXPECT_TRUE(err);
     EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
   }
+  // A bad/zero count falls back to size_err unless count_err is passed.
+  {
+    auto parser = Make({"0", "a"});  // zero count -> size_err
+    parser.NextRange(1, "bad size", false);
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "bad size");
+  }
+  {
+    auto parser = Make({"0", "a"});  // zero count -> count_err when given
+    parser.NextRange(1, "bad size", false, "bad count");
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "bad count");
+  }
+  {
+    auto parser = Make({"3", "a"});  // valid count, too few args -> size_err
+    parser.NextRange(1, "bad size", false);
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "bad size");
+  }
+  // consume_all=true: the range must cover all remaining args, so trailing args are a mismatch.
+  {
+    auto parser = Make({"1", "a", "b"});  // count=1 but 2 args remain
+    parser.NextRange(1, "too many", true);
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "too many");
+  }
+  {
+    auto parser = Make({"2", "a", "b"});  // exact match -> ok, all consumed
+    Range r = parser.NextRange(1, "size", true);
+    EXPECT_FALSE(parser.HasError());
+    EXPECT_EQ(r.size(), 2u);
+    EXPECT_FALSE(parser.HasNext());
+  }
+  // consume_all=false: only `count` elements are consumed; the rest stays for the caller.
+  {
+    auto parser = Make({"1", "a", "b"});
+    Range r = parser.NextRange(1, "size", false);
+    EXPECT_FALSE(parser.HasError());
+    EXPECT_EQ(r.size(), 1u);
+    EXPECT_EQ(parser.Peek(), "b");
+  }
   // RemainingRange: all remaining args, no leading count.
   {
     auto parser = Make({"a", "b", "c"});
@@ -606,6 +644,25 @@ TEST_F(CmdArgParserTest, RangeList) {
     EXPECT_EQ(rest.size(), 3u);
     EXPECT_THAT(std::vector<string_view>(rest.begin(), rest.end()), ElementsAre("a", "b", "c"));
     EXPECT_FALSE(parser.HasNext());
+  }
+  // RemainingRange with empty_err: reports the message only when no args remain.
+  {
+    auto parser = Make({"a"});
+    Range rest = parser.RemainingRange("need args");
+    EXPECT_EQ(rest.size(), 1u);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"x"});
+    parser.Next();  // consume the only arg
+    parser.RemainingRange("need args");
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "need args");
+  }
+  {  // A prior error is preserved (empty_err does not overwrite it).
+    auto parser = Make({"x"});
+    parser.Next<int>();  // "x" is not an int -> INVALID_INT
+    parser.RemainingRange("need args");
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), kInvalidIntErr);
   }
 }
 

@@ -1015,14 +1015,10 @@ OpResult<ScoredMap> IntersectResults(vector<OpResult<ScoredMap>>& results, AggTy
 OpResult<SetOpArgs> ParseSetOpArgs(CmdArgParser parser, bool store) {
   SetOpArgs op_args;
 
-  // numkeys was already validated against the arg count during key resolution.
-  op_args.num_keys = parser.Next<unsigned>();
-  if (parser.TakeError() || op_args.num_keys == 0) {
+  op_args.num_keys = parser.NextRange(1).size();
+  if (parser.TakeError()) {
     return OpStatus::SYNTAX_ERR;
   }
-
-  // The source keys are resolved via the command's key spec; skip past them to the options.
-  parser.Skip(op_args.num_keys);
 
   parser.Apply(Tag("WEIGHTS",
                    [&op_args](CmdArgParser* p) {
@@ -2441,18 +2437,15 @@ void CmdZDiffStore(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdZIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
-  string_view key = parser.Next();
-  string_view score_arg = parser.Next();
-
-  ScoredMemberView scored_member;
-  scored_member.second = parser.Next();
-
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (!absl::SimpleAtod(score_arg, &scored_member.first)) {
-    VLOG(1) << "Bad score:" << score_arg << "|";
-    return rb->SendError(kInvalidFloatErr);
-  }
+  string_view key = parser.Next();
+  ScoredMemberView scored_member;
+  scored_member.first = parser.Next<double>();
+  scored_member.second = parser.Next();
+
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   if (isnan(scored_member.first)) {
     return rb->SendError(kScoreNaN);

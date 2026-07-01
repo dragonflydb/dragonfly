@@ -824,6 +824,19 @@ TEST_F(HSetFamilyTest, HExpire) {
   EXPECT_THAT(Run({"HGETALL", "key4"}), RespArray(ElementsAre()));
 }
 
+TEST_F(HSetFamilyTest, HExpireNumFieldsErrors) {
+  EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0", "k1", "v1"}), 2);
+
+  // Missing FIELDS keyword.
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "1", "k0"}), ErrArg("Mandatory argument FIELDS"));
+
+  // A wrong number of provided fields (too few, too many, or zero) reports the must-match message.
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "2", "k0"}), ErrArg("numfields"));
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "1", "k0", "k1"}), ErrArg("numfields"));
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "0", "k0"}), ErrArg("numfields"));
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "0"}), ErrArg("numfields"));
+}
+
 TEST_F(HSetFamilyTest, HExpireNoExpireEarly) {
   EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0", "k1", "v1"}), 2);
   EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "2", "k0", "k1"}),
