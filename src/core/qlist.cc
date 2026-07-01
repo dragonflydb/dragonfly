@@ -12,6 +12,7 @@ extern "C" {
 
 #include <absl/base/macros.h>
 #include <absl/base/optimization.h>
+#include <absl/flags/flag.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 #include <zstd.h>
@@ -21,6 +22,9 @@ extern "C" {
 #include "core/page_usage/page_usage_stats.h"
 
 using namespace std;
+
+ABSL_FLAG(int, list_compress_level, -1,
+          "Compression level for QList ZSTD dictionaries. -1 uses ZSTD's default tuning.");
 
 /* Maximum size in bytes of any multi-element listpack.
  * Larger values will live in their own isolated listpacks.
@@ -1590,7 +1594,8 @@ bool QList::TrainZstdDict() {
   }
 
   auto* state = new ZstdDictState();
-  state->cdict = ZSTD_createCDict(dict_raw.data(), dict_raw.size(), 1);
+  const int compression_level = absl::GetFlag(FLAGS_list_compress_level);
+  state->cdict = ZSTD_createCDict(dict_raw.data(), dict_raw.size(), compression_level);
   state->ddict = ZSTD_createDDict(dict_raw.data(), dict_raw.size());
   state->cctx = ZSTD_createCCtx();
   state->dctx = ZSTD_createDCtx();
