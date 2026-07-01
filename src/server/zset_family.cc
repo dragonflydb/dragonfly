@@ -47,7 +47,7 @@ using CI = CommandId;
 const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
 const char kLexRangeErr[] = "min or max not valid string range item";
 const char kFloatRangeErr[] = "min or max is not a float";
-const char kScoreNaN[] = "resulting score is not a number (NaN)";
+constexpr char kScoreNaN[] = "resulting score is not a number (NaN)";
 
 using MScoreResponse = std::vector<std::optional<double>>;
 using ScoredMember = ZSetFamily::ScoredMember;
@@ -2441,15 +2441,11 @@ void CmdZIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   string_view key = parser.Next();
   ScoredMemberView scored_member;
-  scored_member.first = parser.Next<double>();
+  scored_member.first = parser.Next<Validated<double, NotNan<kScoreNaN>>>();
   scored_member.second = parser.Next();
 
   if (auto err = parser.TakeError(); err)
     return rb->SendError(err.MakeReply());
-
-  if (isnan(scored_member.first)) {
-    return rb->SendError(kScoreNaN);
-  }
 
   ZSetFamily::ZParams zparams;
   zparams.flags = ZADD_IN_INCR;
@@ -2786,7 +2782,7 @@ void CmdZRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   bool is_count = parser.HasNext();
-  int count = is_count ? parser.Next<int>() : 1;
+  int count = parser.NextOrDefault<int>(1);
 
   ZSetFamily::RangeParams params;
   params.with_scores = static_cast<bool>(parser.Check("WITHSCORES"));

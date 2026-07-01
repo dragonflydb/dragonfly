@@ -33,6 +33,9 @@ struct TopkFamily {
 
 namespace {
 
+constexpr char kDecayRangeErr[] = "decay must be between 0 and 1";
+constexpr char kIncrRangeErr[] = "increment must be between 1 and 100000";
+
 OpStatus OpReserve(const OpArgs& op_args, string_view key, uint32_t k, uint32_t width,
                    uint32_t depth, double decay) {
   auto& db_slice = op_args.GetDbSlice();
@@ -193,7 +196,7 @@ void TopkFamily::Reserve(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   if (parser.HasNext()) {
     width = parser.Next<uint32_t>();
     depth = parser.Next<uint32_t>();
-    decay = parser.Next<double>();
+    decay = parser.Next<Validated<double, Bounded<0.0, 1.0, kDecayRangeErr>>>();
     RETURN_ON_PARSE_ERROR(parser, rb);
 
     if ((width == 0) || (depth == 0)) {
@@ -207,10 +210,6 @@ void TopkFamily::Reserve(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
     if ((width > kMaxWidth) || (depth > kMaxDepth)) {
       return rb->SendError(absl::StrCat("width must not exceed ", kMaxWidth,
                                         " and depth must not exceed ", kMaxDepth));
-    }
-
-    if (!std::isfinite(decay) || (decay < 0.0) || (decay > 1.0)) {
-      return rb->SendError("decay must be between 0 and 1");
     }
   }
 
@@ -271,11 +270,9 @@ void TopkFamily::IncrBy(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
     if (!parser.HasNext()) {
       return cmd_cntx->SendError(kSyntaxErr);
     }
-    uint32_t incr = parser.Next<uint32_t>();
+    uint32_t incr =
+        parser.Next<Validated<uint32_t, Bounded<uint32_t{1}, uint32_t{100000}, kIncrRangeErr>>>();
     RETURN_ON_PARSE_ERROR(parser, rb);
-    if (incr < 1 || incr > 100000) {  // Redis limits increment to [1, 100000]
-      return cmd_cntx->SendError("increment must be between 1 and 100000");
-    }
     items.emplace_back(item, incr);
   }
 

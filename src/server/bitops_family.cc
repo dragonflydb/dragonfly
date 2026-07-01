@@ -34,6 +34,7 @@ namespace {
 
 using ShardStringResults = vector<OpResult<string>>;
 const int32_t OFFSET_FACTOR = 8;  // number of bits in byte
+constexpr char kBitArgErr[] = "The bit argument must be 1 or 0";
 const char* OR_OP_NAME = "OR";
 const char* XOR_OP_NAME = "XOR";
 const char* AND_OP_NAME = "AND";
@@ -525,40 +526,11 @@ void BitPos(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
 
   auto key = parser.Next<string_view>();
-  auto value = parser.Next<int32_t>();
+  int32_t value = parser.Next<Validated<int32_t, Bounded<int32_t{0}, int32_t{1}, kBitArgErr>>>();
 
-  if (auto err = parser.TakeError(); err) {
-    return builder->SendError(err.MakeReply());
-  }
-
-  if (value != 0 && value != 1) {
-    return builder->SendError("The bit argument must be 1 or 0");
-  }
-
-  int64_t start = 0;
-  int64_t end = std::numeric_limits<int64_t>::max();
-  bool as_bit = false;
-
-  if (parser.HasNext()) {
-    start = parser.Next<int64_t>();
-    if (auto err = parser.TakeError(); err) {
-      return builder->SendError(err.MakeReply());
-    }
-
-    if (parser.HasNext()) {
-      end = parser.Next<int64_t>();
-      if (auto err = parser.TakeError(); err) {
-        return builder->SendError(err.MakeReply());
-      }
-
-      if (parser.HasNext()) {
-        as_bit = parser.MapNext("BIT", true, "BYTE", false);
-        if (auto err = parser.TakeError(); err) {
-          return builder->SendError(kSyntaxErr);
-        }
-      }
-    }
-  }
+  int64_t start = parser.NextOrDefault<int64_t>();
+  int64_t end = parser.NextOrDefault<int64_t>(std::numeric_limits<int64_t>::max());
+  bool as_bit = parser.HasNext() ? parser.MapNext("BIT", true, "BYTE", false) : false;
 
   if (!parser.Finalize()) {
     return builder->SendError(parser.TakeError().MakeReply());

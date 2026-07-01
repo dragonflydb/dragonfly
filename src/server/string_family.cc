@@ -1456,13 +1456,9 @@ cmd::CmdR CmdDecr(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR CmdDecrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto [key, val] = parser.Next<string_view, int64_t>();
+  auto [key, val] = parser.Next<string_view, Validated<int64_t, NotEq<INT64_MIN, kIncrOverflow>>>();
   if (auto err = parser.TakeError(); err) {
     cmd_cntx->SendError(err.MakeReply());
-    return cmd::kAborted;
-  }
-  if (val == INT64_MIN) {
-    cmd_cntx->SendError(kIncrOverflow);
     return cmd::kAborted;
   }
 

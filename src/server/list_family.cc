@@ -882,13 +882,10 @@ void RPopLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void BRPopLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
-  float timeout = parser.Next<float>();
+  float timeout = parser.Next<Validated<float, AtLeast<0.0f, kTimeoutNegativeErr>>>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
-
-  if (timeout < 0)
-    return cmd_cntx->SendError("timeout is negative");
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res =
@@ -914,13 +911,10 @@ void BLMove(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
-  float timeout = parser.Next<float>();
+  float timeout = parser.Next<Validated<float, AtLeast<0.0f, kTimeoutNegativeErr>>>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
-
-  if (timeout < 0)
-    return cmd_cntx->SendError("timeout is negative");
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res =
@@ -1042,12 +1036,8 @@ void PushGeneric(ListDir dir, bool skip_notexists, ParsedArgs args, CommandConte
 void PopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
-  uint32_t count = 1;
-  bool return_arr = false;
-  if (parser.HasNext()) {
-    count = parser.Next<uint32_t>();
-    return_arr = true;
-  }
+  bool return_arr = parser.HasNext();
+  uint32_t count = parser.NextOrDefault<uint32_t>(1);
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
@@ -1233,12 +1223,9 @@ void CmdLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  float timeout = parser.Next<float>();
+  float timeout = parser.Next<Validated<float, AtLeast<0.0f, kTimeoutNegativeErr>>>();
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
-
-  if (timeout < 0)
-    return cmd_cntx->SendError("timeout is negative");
 
   parser.Skip(parser.Next<size_t>());  // Skip numkeys and keys
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);

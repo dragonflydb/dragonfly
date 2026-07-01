@@ -495,6 +495,127 @@ TEST_F(CmdArgParserTest, ApplyOptional) {
   }
 }
 
+TEST_F(CmdArgParserTest, ValidatedRules) {
+  static constexpr char kOverflow[] = "overflow";
+  static constexpr char kNaN[] = "not a number";
+  static constexpr char kNonFinite[] = "not finite";
+
+  // NotEq: rejects only the sentinel value, with a custom message.
+  using NoMin = Validated<int64_t, NotEq<INT64_MIN, kOverflow>>;
+  {
+    auto parser = Make({"5"});
+    EXPECT_EQ(static_cast<int64_t>(parser.Next<NoMin>()), 5);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"-9223372036854775808"});  // INT64_MIN
+    parser.Next<NoMin>();
+    auto err = parser.TakeError();
+    EXPECT_EQ(err.type, CmdArgParser::CUSTOM_ERROR);
+    EXPECT_EQ(err.MakeReply().ToSv(), "overflow");
+  }
+  {  // A malformed number reports the generic INVALID_INT, not the rule message.
+    auto parser = Make({"abc"});
+    parser.Next<NoMin>();
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_INT);
+  }
+
+  // NotNan accepts +/-inf but rejects NaN; Finite rejects both.
+  {
+    auto parser = Make({"inf", "nan"});
+    EXPECT_TRUE(std::isinf(static_cast<double>(parser.Next<Validated<double, NotNan<kNaN>>>())));
+    EXPECT_FALSE(parser.HasError());
+    parser.Next<Validated<double, NotNan<kNaN>>>();
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "not a number");
+  }
+  {
+    auto parser = Make({"inf"});
+    parser.Next<Validated<double, Finite<kNonFinite>>>();
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "not finite");
+  }
+
+  // Composition: rules run in order, first non-empty message wins (NotNan rejects NaN first).
+  {
+    auto parser = Make({"nan"});
+    parser.Next<Validated<double, NotNan<kNaN>, Finite<kNonFinite>>>();
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "not a number");
+  }
+
+  // The rules are reusable to validate a value parsed by other means (e.g. NextWithPrefix).
+  {
+    auto parser = Make({"#-9223372036854775808"});
+    bool prefixed = false;
+    int64_t off = parser.NextWithPrefix<int64_t>("#", &prefixed);
+    EXPECT_TRUE(prefixed);
+    if (auto e = NotEq<INT64_MIN, kOverflow>(off); e.failed)
+      parser.ReportCustom(std::string{e.msg});
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "overflow");
+  }
+}
+
+TEST_F(CmdArgParserTest, BoundedRule) {
+  static constexpr char kMsg[] = "out of range";
+
+  // Integer range: in-range passes; below/above report the custom message; a non-integer stays
+  // generic INVALID_INT.
+  using Pct = Validated<int, Bounded<0, 100, kMsg>>;
+  {
+    auto parser = Make({"0", "100", "50"});
+    EXPECT_EQ(static_cast<int>(parser.Next<Pct>()), 0);
+    EXPECT_EQ(static_cast<int>(parser.Next<Pct>()), 100);
+    EXPECT_EQ(static_cast<int>(parser.Next<Pct>()), 50);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"101"});
+    parser.Next<Pct>();
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "out of range");
+  }
+  {
+    auto parser = Make({"abc"});
+    parser.Next<Pct>();
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_INT);
+  }
+
+  // Floating-point range rejects NaN and +/-inf via the custom message.
+  using UnitInterval = Validated<double, Bounded<0.0, 1.0, kMsg>>;
+  {
+    auto parser = Make({"0.5", "nan", "inf"});
+    EXPECT_DOUBLE_EQ(static_cast<double>(parser.Next<UnitInterval>()), 0.5);
+    EXPECT_FALSE(parser.HasError());
+    parser.Next<UnitInterval>();
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "out of range");
+    auto p2 = Make({"inf"});
+    p2.Next<UnitInterval>();
+    EXPECT_EQ(p2.TakeError().MakeReply().ToSv(), "out of range");
+  }
+}
+
+TEST_F(CmdArgParserTest, AtLeastRule) {
+  static constexpr char kNeg[] = "must not be negative";
+  using NonNeg = Validated<float, AtLeast<0.0f, kNeg>>;
+
+  {
+    auto parser = Make({"0", "3.5"});
+    EXPECT_FLOAT_EQ(static_cast<float>(parser.Next<NonNeg>()), 0.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(parser.Next<NonNeg>()), 3.5f);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"-0.1"});
+    parser.Next<NonNeg>();
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "must not be negative");
+  }
+  {  // NaN is accepted (matches a plain `v < 0` guard); a non-float stays generic INVALID_FLOAT.
+    auto parser = Make({"nan"});
+    parser.Next<NonNeg>();
+    EXPECT_FALSE(parser.HasError());
+    auto p2 = Make({"abc"});
+    p2.Next<NonNeg>();
+    EXPECT_EQ(p2.TakeError().type, CmdArgParser::INVALID_FLOAT);
+  }
+}
+
 TEST_F(CmdArgParserTest, FixedRangeInt) {
   {
     auto parser = Make({"10", "-10", "12"});
@@ -520,11 +641,10 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
   }
 }
 
-// A user-defined as_vnum: VNum<double> + a validate() predicate. Exercises the generic
-// validated-number path of Convert<T>() for a floating-point underlying type.
+// A user-defined validated number: VNum<double> + validate() reporting the generic INVALID_FLOAT.
 struct PositiveFinite : VNum<double> {
-  static bool validate(double v) {
-    return v > 0 && std::isfinite(v);
+  static RuleError validate(double v) {
+    return {!(v > 0 && std::isfinite(v)), {}};
   }
 };
 

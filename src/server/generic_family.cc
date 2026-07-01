@@ -277,8 +277,8 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(facade::ParsedArgs args) {
 
   // args[0] = key (skip); args[1] = ttl; args[2] = serialized value (skip).
   parser.Skip(1);
-  out_args.expiration_ = parser.Next<int64_t>();
-  if (parser.TakeError() || out_args.expiration_ < 0)
+  out_args.expiration_ = parser.Next<FInt<int64_t{0}, std::numeric_limits<int64_t>::max()>>();
+  if (parser.TakeError())
     return OpStatus::INVALID_INT;
   parser.Skip(1);
 
@@ -1343,11 +1343,8 @@ void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx)
 }
 
 void GenericFamily::Ping(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
-  string_view msg;
   const bool has_msg = parser.HasNext();
-  if (has_msg) {
-    msg = parser.Next();
-  }
+  string_view msg = parser.NextOrDefault();
   if (parser.HasNext()) {
     return cmd_cntx->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
   }

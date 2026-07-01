@@ -21,6 +21,11 @@ namespace {
 
 constexpr uint64_t kDefaultCapacity = 1024;
 
+constexpr char kCapacityErr[] = "CF: capacity must be greater than 0";
+constexpr char kBucketSizeErr[] = "CF: bucket size must be between 1 and 255";
+constexpr char kMaxIterationsErr[] = "CF: max iterations must be between 1 and 65535";
+constexpr char kExpansionErr[] = "CF: expansion must be between 0 and 32767";
+
 struct CuckooInfo {
   size_t size = 0;
   uint64_t num_buckets = 0;
@@ -185,36 +190,22 @@ OpStatus OpReserve(const OpArgs& op_args, string_view key, const CuckooFilterOpt
 
 void CmdReserve(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  uint64_t capacity = parser.Next<uint64_t>();
+  uint64_t capacity = parser.Next<Validated<uint64_t, NotEq<uint64_t{0}, kCapacityErr>>>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  RETURN_ON_PARSE_ERROR(parser, rb);
 
-  if (capacity == 0) {
-    return rb->SendError("CF: capacity must be greater than 0");
-  }
-
-  uint8_t bucket_size = CuckooFilterOptions::kDefaultSlotsPerBucket;
-  uint16_t max_iterations = CuckooFilterOptions::kDefaultMaxIterations;
-  uint16_t expansion = CuckooFilterOptions::kDefaultExpansion;
+  // The uint8_t/uint16_t widths reject over-max values already; the rules add CF's zero/cap bounds.
+  Validated<uint8_t, NotEq<uint8_t{0}, kBucketSizeErr>> bucket_size{
+      CuckooFilterOptions::kDefaultSlotsPerBucket};
+  Validated<uint16_t, NotEq<uint16_t{0}, kMaxIterationsErr>> max_iterations{
+      CuckooFilterOptions::kDefaultMaxIterations};
+  Validated<uint16_t, Bounded<uint16_t{0}, uint16_t{32767}, kExpansionErr>> expansion{
+      CuckooFilterOptions::kDefaultExpansion};
 
   parser.Apply(Tag("BUCKETSIZE", &bucket_size), Tag("MAXITERATIONS", &max_iterations),
                Tag("EXPANSION", &expansion));
 
   if (!parser.Finalize()) {
     return rb->SendError(parser.TakeError().MakeReply());
-  }
-
-  // The parser already rejects values that overflow the field width above (e.g. bucketsize
-  // 256) with the standard "value is not an integer or out of range" error. Only the
-  // business-rule bounds below (zero, and CF's tighter expansion cap) need manual checks.
-  if (bucket_size == 0) {
-    return rb->SendError("CF: bucket size must be between 1 and 255");
-  }
-  if (max_iterations == 0) {
-    return rb->SendError("CF: max iterations must be between 1 and 65535");
-  }
-  if (expansion > 32767) {
-    return rb->SendError("CF: expansion must be between 0 and 32767");
   }
 
   CuckooFilterOptions options{capacity, bucket_size, max_iterations, expansion};
