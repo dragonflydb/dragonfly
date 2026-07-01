@@ -1627,8 +1627,12 @@ bool Transaction::CanRunInlined() const {
   // We also refuse to inline when another transaction is already running on this shard:
   // journal/db-slice callbacks invoked from RunCallback can preempt, and a nested inlined
   // transaction would interleave its own callback loop with the outer one.
+  // Lastly: we refuse with blocking transactions. They run fully apart in PollExecution without
+  // being tracked in the tx queue, so a conflict with a suspended running tx can't be resolved.
+  auto* bc = es != nullptr ? namespace_->GetBlockingController(es->shard_id()) : nullptr;
   if (unique_shard_cnt_ == 1 && unique_shard_id_ == ss->thread_index() &&
-      ss->AllowInlineScheduling() && !IsGlobal() && es->running_tx() == nullptr) {
+      ss->AllowInlineScheduling() && !IsGlobal() && es->running_tx() == nullptr &&
+      (bc == nullptr || !bc->HasBlockedTransactions())) {
     ss->stats.tx_inline_runs++;
     return true;
   }
