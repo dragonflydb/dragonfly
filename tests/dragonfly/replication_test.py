@@ -5120,8 +5120,8 @@ async def test_cf_chunked_replication_chunk_size(df_factory: DflyInstanceFactory
     replica.stop()
 
     # kFilterChunkSize = 1 << 26 (64MB); peak should stay under 2x that.
-    MAX_CF_CHUNK_SIZE = 2**27
+    max_cf_chunk_size = 2**27
     lines = master.find_in_logs("Serialization peak bytes: ")
     assert len(lines) == 1
     peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", lines[0])
-    assert peak_bytes < MAX_CF_CHUNK_SIZE
+    assert peak_bytes < max_cf_chunk_size
