@@ -158,7 +158,7 @@ ABSL_FLAG(bool, managed_service_info, false,
 ABSL_FLAG(string, availability_zone, "",
           "server availability zone, used by clients to read from local-zone replicas");
 
-ABSL_FLAG(bool, keep_legacy_memory_metrics, true, "legacy metrics format");
+ABSL_FLAG(bool, keep_legacy_memory_metrics, false, "legacy metrics format");
 // TODO deprecate when flipped in production
 ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
           "when set, preserves journal offsets after REPLICAOF NO ONE");

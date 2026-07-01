@@ -308,7 +308,7 @@ struct CmsShardData {
 
 struct CmsMergeArgs {
   string_view dest_key;
-  vector<string_view> src_keys;
+  CmdArgParser::Range src_keys;
   vector<int64_t> weights;
 };
 
@@ -321,7 +321,7 @@ bool ParseMergeArgs(CmdArgParser parser, RedisReplyBuilder* rb, CmsMergeArgs* ou
     rb->SendError(err.MakeReply());
     return false;
   }
-  out->src_keys.assign(keys.begin(), keys.end());
+  out->src_keys = keys;
   uint32_t num_keys = keys.size();
 
   if (!parser.HasNext()) {
