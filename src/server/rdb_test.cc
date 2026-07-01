@@ -1251,12 +1251,12 @@ class MemBufControllerTest : public Test {
   }
 
   void Write(std::string_view s) {
-    controller_.CurrentBuffer()->WriteAndCommit(s.data(), s.size());
+    controller_.Buffer()->WriteAndCommit(s.data(), s.size());
   }
 
-  void AssertDefaultState() const {
+  void AssertDefaultState() {
     EXPECT_EQ(controller_.active_id_, 0u);
-    EXPECT_EQ(controller_.CurrentBuffer(), &controller_.default_buffer_);
+    EXPECT_EQ(controller_.Buffer(), &controller_.buffer_);
   }
 
   void MarkMidFlush() {
@@ -1281,30 +1281,35 @@ class MemBufControllerTest : public Test {
   void Restore(MemBufController::EntryId id) {
     controller_.RestoreStateAfterConsume(id);
     EXPECT_EQ(controller_.active_id_, id);
-    EXPECT_EQ(controller_.CurrentBuffer(), &controller_.entry_buffer_);
+  }
+
+  void WriteEntry(std::string_view data, bool save_successful = true) {
+    controller_.StartEntry();
+    Write(data);
+    controller_.FinishEntry(save_successful);
   }
 };
 
 TEST_F(MemBufControllerTest, TaggedData) {
   controller_.SetTagEntries(true);
 
-  const std::string_view data = "a_a_a_";
+  constexpr std::string_view data = "a_a_a_";
   const auto saved_id = SplitAndSuspend(data, 1);
   EXPECT_TRUE(HasSplitEntries());
 
   Write("a");
   Restore(saved_id);
-  EXPECT_EQ(controller_.FlushableSize(), 1);
+  ASSERT_EQ(controller_.FlushableSize(), 1);
 
   Write("b");
-  EXPECT_EQ(controller_.FlushableSize(), 2);
-  controller_.FinishEntry();
+  ASSERT_EQ(controller_.FlushableSize(), 2);
+  controller_.FinishEntry(true);
   EXPECT_FALSE(HasSplitEntries());
 
   const std::string blob = Flush();
 
-  EXPECT_EQ(blob.size(), MemBufController::kHeaderSize + 2);
-  EXPECT_EQ(blob[0], 'a');
+  ASSERT_EQ(blob.size(), MemBufController::kHeaderSize + 2);
+  ASSERT_EQ(blob[0], 'a');
   AssertTaggedData(blob.substr(1), "b");
 }
 
@@ -1316,7 +1321,7 @@ TEST_F(MemBufControllerTest, NestedInterleaving) {
 
   controller_.StartEntry();
   Write("ccc");
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
   AssertDefaultState();
 
   EXPECT_EQ(controller_.FlushableSize(), 3);
@@ -1325,13 +1330,13 @@ TEST_F(MemBufControllerTest, NestedInterleaving) {
 
   Restore(saved_id_b);
   Write("x");
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
 
   AssertTaggedData(Flush(), "x", 2);
 
   Restore(saved_id_a);
   Write("y");
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
   EXPECT_FALSE(HasSplitEntries());
 
   AssertTaggedData(Flush(), "y");
@@ -1350,7 +1355,7 @@ TEST_F(MemBufControllerTest, BuildBlobEdgeCases) {
   EXPECT_EQ(blob[0], 'p');
   AssertTaggedData(blob.substr(1), "x");
 
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
   AssertDefaultState();
 }
 
@@ -1359,7 +1364,7 @@ TEST_F(MemBufControllerTest, UnsplitEntry) {
 
   controller_.StartEntry();
   Write("hello");
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
   AssertDefaultState();
 
   EXPECT_EQ(controller_.FlushableSize(), 5);
@@ -1377,9 +1382,62 @@ TEST_F(MemBufControllerTest, TaggingDisabled) {
   Restore(saved_id);
 
   Write("def");
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
 
   EXPECT_EQ(Flush(), "def");
+}
+
+TEST_F(MemBufControllerTest, RollbackPartialEntry) {
+  for (const auto state : {true, false}) {
+    controller_.SetTagEntries(state);
+
+    WriteEntry("hello", true);
+    WriteEntry("world", false);
+
+    EXPECT_EQ(Flush(), "hello");
+
+    // empty buffer case
+    WriteEntry("a", false);
+
+    EXPECT_EQ(controller_.FlushableSize(), 0);
+    EXPECT_EQ(Flush(), "");
+
+    // next write works as expected ie no state corruption
+    WriteEntry("abc", true);
+    EXPECT_EQ(Flush(), "abc");
+  }
+}
+
+TEST_F(MemBufControllerTest, RollbackPartialEntrySplit) {
+  controller_.SetTagEntries(true);
+  auto entry = SplitAndSuspend("abc", 1);
+  EXPECT_TRUE(HasSplitEntries());
+  Restore(entry);
+  Write("bbb");
+
+  controller_.FinishEntry(false);
+  EXPECT_FALSE(HasSplitEntries());
+  EXPECT_EQ(controller_.FlushableSize(), 0);
+  EXPECT_EQ(Flush(), "");
+}
+
+TEST_F(MemBufControllerTest, RollbackOnSuspendedEntry) {
+  controller_.SetTagEntries(true);
+
+  const auto id_a = SplitAndSuspend("aaa", 1);
+
+  // a failed entry written
+  WriteEntry("bbb", false);
+
+  // controller still has aaa in map
+  EXPECT_TRUE(HasSplitEntries());
+
+  Restore(id_a);
+  Write("a_tail");
+  controller_.FinishEntry(true);
+
+  AssertTaggedData(Flush(), "a_tail", 1);
+  EXPECT_FALSE(HasSplitEntries());
 }
 
 namespace {

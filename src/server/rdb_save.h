@@ -79,10 +79,10 @@ CompressionMode GetDefaultCompressionMode();
 
 using StringVec = std::vector<std::string>;
 
-// Manages per-entry IO buffers for the RDB serializer, enabling tagged chunk framing for
-// interleaved serialization of multiple keys. When tagging is enabled, entries that were split
-// across multiple flushes are prefixed with a [opcode:1][stream_id:4][payload_length:4] header so
-// the loader can reassemble them.
+// Manages IO buffer for the RDB serializer, enabling tagged chunk framing for interleaved
+// serialization of multiple keys. When tagging is enabled, entries that were split across multiple
+// flushes are prefixed with a [opcode:1][stream_id:4][payload_length:4] header so the loader can
+// reassemble them.
 class MemBufController {
   friend class MemBufControllerTest;
 
@@ -91,20 +91,22 @@ class MemBufController {
   // Tagged chunk envelope: [RDB_OPCODE_TAGGED_CHUNK:1][stream_id:4][payload_length:4]
   static constexpr auto kHeaderSize = 9;
 
-  // Makes entry_buffer_ the current write target and assigns a new entry id.
+  // Marks the beginning of the current entry in prefix_len_ and assigns a new entry id.
   // Must be paired with FinishEntry().
   void StartEntry();
 
-  // Finalizes the active entry. Drains any remaining data from entry_buffer_ into the
-  // default buffer (tagging it if the entry was split), then resets to default state.
-  void FinishEntry();
+  // Finalizes the active entry. Replaces data with the tagged version if needed, then resets the
+  // state to default.
+  // save_entry_successful denotes whether the save (which started on StartEntry) was successful. If
+  // it failed, then the data which has been written since StartEntry (everything after prefix_len_)
+  // is removed from the buffer so as not to corrupt the rest of the data stream.
+  void FinishEntry(bool save_entry_successful);
 
-  // Moves data from entry_buffer_ into the default buffer. If the entry was
-  // split and tagging is enabled, a tag header is prepended.
-  void TagAndDrainToDefaultBuffer();
+  // Replaces the tail of an entry in the buffer with tagged data.
+  void MaybeTagEntryTail();
 
-  io::IoBuf* CurrentBuffer() const {
-    return current_buffer_;
+  io::IoBuf* Buffer() {
+    return &buffer_;
   }
 
   // Marks the active entry as having been split across multiple flushes. Once marked,
@@ -113,16 +115,16 @@ class MemBufController {
     split_entries_.insert(active_id_);
   }
 
-  // Total bytes available for flushing: current entry buffer + any previously drained
-  // data sitting in the default buffer.
-  size_t FlushableSize() const;
+  size_t FlushableSize() const {
+    return buffer_.InputLen();
+  }
 
-  // Captures the active entry id and points the current buffer to the default buffer. Called before
-  // the serializer's consume callback, which may preempt and allow other entries to interleave.
+  // Returns the active entry id. Called before the serializer's consume callback, which may preempt
+  // and allow other entries to interleave. The returned id must be saved by caller, and then later
+  // used for restoring the state.
   [[nodiscard]] EntryId SaveStateBeforeConsume();
 
-  // Restores a previously saved entry id after the consume callback returns. Points the current
-  // buffer to entry_buffer_.
+  // Restores a previously saved entry id after the consume callback returns.
   void RestoreStateAfterConsume(EntryId id);
 
   // Assembles a flush blob from the current buffer in the following steps:
@@ -140,11 +142,14 @@ class MemBufController {
     return send_tagged_entries_;
   }
 
-  size_t GetTotalBufferCapacity() const {
-    return default_buffer_.Capacity() + entry_buffer_.Capacity();
+  size_t BufferCapacity() const {
+    return buffer_.Capacity();
   }
 
  private:
+  // Consumes upto the prefix_len_ from the buffer, and appends into the string. Clears prefix_len_.
+  void ConsumePrefix(std::string* out);
+
   // Builds a 9-byte tagged chunk header for the active entry with the given payload size.
   std::array<uint8_t, 9> MakeTagHeader(size_t size) const;
 
@@ -154,13 +159,13 @@ class MemBufController {
   // id for current entry: non zero for data entries. 0 for non data entries, eg journal items
   EntryId active_id_ = 0;
 
-  io::IoBuf default_buffer_{4096};
-  io::IoBuf entry_buffer_{4096};
+  io::IoBuf buffer_{4096};
 
-  // intent lock to check that some entry id does not own the entry buffer before writing to it
-  EntryId entry_buffer_owner_ = 0;
-  io::IoBuf* current_buffer_ = &default_buffer_;
+  // intent lock to check that some other entry id does not own the buffer before writing to it
+  EntryId buffer_owner_ = 0;
   absl::flat_hash_set<EntryId> split_entries_;
+
+  size_t prefix_len_{0};
 };
 
 class RdbSaver {

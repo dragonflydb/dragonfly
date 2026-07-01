@@ -285,7 +285,8 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   }
 
   mem_buf_controller_.StartEntry();
-  absl::Cleanup cleanup = [&] { mem_buf_controller_.FinishEntry(); };
+  bool save_succeeded = false;
+  absl::Cleanup cleanup = [&] { mem_buf_controller_.FinishEntry(save_succeeded); };
 
   /* Save the expire time */
   if (expire_ms > 0) {
@@ -331,6 +332,7 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   // crossed the limit.
   if (auto ec = PushToConsumerIfNeeded(FlushState::kFlushEndEntry); ec)
     return make_unexpected(ec);
+  save_succeeded = true;
   return rdb_type;
 }
 
@@ -980,7 +982,7 @@ std::error_code RdbSerializer::WriteOpcode(uint8_t opcode) {
 }
 
 size_t RdbSerializer::GetBufferCapacity() const {
-  return mem_buf_controller_.GetTotalBufferCapacity();
+  return mem_buf_controller_.BufferCapacity();
 }
 
 size_t RdbSerializer::GetTempBufferSize() const {
@@ -988,7 +990,7 @@ size_t RdbSerializer::GetTempBufferSize() const {
 }
 
 error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
-  auto* mem_buf = mem_buf_controller_.CurrentBuffer();
+  auto* mem_buf = mem_buf_controller_.Buffer();
   mem_buf->Reserve(mem_buf->InputLen() + buf.size());
   IoBuf::Bytes dest = mem_buf->AppendBuffer();
   memcpy(dest.data(), buf.data(), buf.size());
@@ -998,7 +1000,7 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
 
 string RdbSerializer::Flush(FlushState flush_state) {
   using enum CompressionMode;
-  const IoBuf* mem_buf = mem_buf_controller_.CurrentBuffer();
+  const IoBuf* mem_buf = mem_buf_controller_.Buffer();
 
   if (!mem_buf_controller_.TagEntriesEnabled()) {
     const bool is_last_chunk = flush_state == FlushState::kFlushEndEntry;
@@ -1893,7 +1895,7 @@ std::optional<std::string> RdbSerializer::CompressBlob(std::string_view input) {
 }
 
 void RdbSerializer::CompressBlob() {
-  auto* mem_buf = mem_buf_controller_.CurrentBuffer();
+  auto* mem_buf = mem_buf_controller_.Buffer();
   Bytes blob = mem_buf->InputBuffer();
   std::string_view input{reinterpret_cast<const char*>(blob.data()), blob.size()};
   auto compressed = CompressBlob(input);
@@ -1925,42 +1927,71 @@ std::error_code RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
 }
 
 void MemBufController::StartEntry() {
-  DCHECK_EQ(entry_buffer_owner_, 0u);
-  DCHECK_EQ(entry_buffer_.InputLen(), 0u);
+  DCHECK_EQ(buffer_owner_, 0u);
 
   // Roll over to 1, id=0 is a special case
   if (next_id_ == std::numeric_limits<EntryId>::max())
     next_id_ = 1;
 
   active_id_ = next_id_++;
-  entry_buffer_owner_ = active_id_;
-  current_buffer_ = &entry_buffer_;
+  buffer_owner_ = active_id_;
+  // these bytes belong to another entry
+  prefix_len_ = buffer_.InputLen();
 }
 
-void MemBufController::FinishEntry() {
-  if (current_buffer_ == &entry_buffer_)
-    TagAndDrainToDefaultBuffer();
+namespace {
 
-  DCHECK_EQ(entry_buffer_.InputLen(), 0u);
-  split_entries_.erase(active_id_);
-  entry_buffer_owner_ = 0;
-  current_buffer_ = &default_buffer_;
-  active_id_ = 0;
+io::IoBuf RollbackBuffer(const io::IoBuf& buffer, const size_t cutoff) {
+  const auto bytes = io::View(buffer.InputBuffer());
+  DCHECK_LE(cutoff, bytes.size()) << "attempt to truncate more than buffer size";
+  IoBuf temp(cutoff);
+  temp.WriteAndCommit(bytes.data(), cutoff);
+  return temp;
 }
 
-void MemBufController::TagAndDrainToDefaultBuffer() {
-  DCHECK_EQ(current_buffer_, &entry_buffer_);
-  if (entry_buffer_.InputLen() == 0)
-    return;
+}  // namespace
 
-  const auto bytes = entry_buffer_.InputBuffer();
-  if (split_entries_.contains(active_id_) && send_tagged_entries_) {
-    const auto header = MakeTagHeader(entry_buffer_.InputLen());
-    default_buffer_.WriteAndCommit(header.data(), header.size());
+void MemBufController::FinishEntry(const bool save_entry_successful) {
+  // remove the data from buffer if we were not able to write cleanly
+  if (!save_entry_successful) {
+    if (prefix_len_ == 0)
+      buffer_.Clear();
+    else
+      buffer_ = RollbackBuffer(buffer_, prefix_len_);
+  } else if (split_entries_.contains(active_id_) && send_tagged_entries_) {
+    MaybeTagEntryTail();
   }
 
-  default_buffer_.WriteAndCommit(bytes.data(), bytes.size());
-  entry_buffer_.ConsumeInput(bytes.size());
+  split_entries_.erase(active_id_);
+  buffer_owner_ = 0;
+  active_id_ = 0;
+  prefix_len_ = 0;
+}
+
+void MemBufController::MaybeTagEntryTail() {
+  if (buffer_.InputLen() == prefix_len_)
+    return;
+
+  std::string dest;
+  dest.reserve(buffer_.InputLen() + kHeaderSize);
+  ConsumePrefix(&dest);
+
+  // TODO store in place, not append later, store directly in `dest`
+  const auto header = MakeTagHeader(buffer_.InputLen());
+  dest.append(reinterpret_cast<const char*>(header.data()), kHeaderSize);
+
+  const auto bytes = io::View(buffer_.InputBuffer());
+  dest.append(bytes.data(), bytes.size());
+
+  buffer_.Clear();
+  buffer_.WriteAndCommit(dest.data(), dest.size());
+}
+
+void MemBufController::ConsumePrefix(std::string* out) {
+  const auto bytes = io::View(buffer_.InputBuffer());
+  out->append(bytes.data(), prefix_len_);
+  buffer_.ConsumeInput(prefix_len_);
+  prefix_len_ = 0;
 }
 
 std::array<uint8_t, 9> MemBufController::MakeTagHeader(size_t size) const {
@@ -1974,62 +2005,52 @@ std::array<uint8_t, 9> MemBufController::MakeTagHeader(size_t size) const {
   return header;
 }
 
-size_t MemBufController::FlushableSize() const {
-  auto size = current_buffer_->InputLen();
-  if (current_buffer_ != &default_buffer_)
-    size += default_buffer_.InputLen();
-  return size;
-}
-
 MemBufController::EntryId MemBufController::SaveStateBeforeConsume() {
-  DCHECK_EQ(entry_buffer_owner_, active_id_);
-  DCHECK_EQ(entry_buffer_.InputLen(), 0u);
+  DCHECK_EQ(buffer_owner_, active_id_);
+  DCHECK_EQ(buffer_.InputLen(), 0u);
   const EntryId id = active_id_;
-  entry_buffer_owner_ = 0;
-  current_buffer_ = &default_buffer_;
+  buffer_owner_ = 0;
   active_id_ = 0;
   return id;
 }
 
 void MemBufController::RestoreStateAfterConsume(EntryId id) {
-  DCHECK_EQ(entry_buffer_owner_, 0u);
-  DCHECK_EQ(entry_buffer_.InputLen(), 0u);
-  entry_buffer_owner_ = id;
+  DCHECK_EQ(buffer_owner_, 0u);
+  buffer_owner_ = id;
   active_id_ = id;
-  current_buffer_ = &entry_buffer_;
+  // prepare to write a new chunk
+  prefix_len_ = buffer_.InputLen();
 }
 
 std::string MemBufController::BuildBlob() {
-  // default buffer always lies behind current bytes (entry buffer) in temporal sense, so it is
-  // built as prefix. We can never reach here where default buffer content was written _after_ entry
-  // buffer due to FinishEntry semantics.
-  const Bytes current_bytes = current_buffer_->InputBuffer();
-  const bool has_prefix = current_buffer_ != &default_buffer_ && default_buffer_.InputLen() > 0;
-  const Bytes prefix = has_prefix ? default_buffer_.InputBuffer() : Bytes{};
-
-  bool should_tag = send_tagged_entries_;
-
-  // tag only data entries (active id > 0) which were split at some point
-  should_tag &= active_id_ != 0 && split_entries_.contains(active_id_);
-
-  // do not tag empty bytes, it will send a useless header
-  should_tag &= !current_bytes.empty();
-
-  std::string out;
-  out.reserve(prefix.size() + (should_tag ? kHeaderSize : 0) + current_bytes.size());
-
-  if (has_prefix) {
-    out.append(io::View(prefix));
-    default_buffer_.ConsumeInput(prefix.size());
+  // In case of tagged chunks disabled, there is no prefix-suffix divide and no header to inject.
+  // The entire buffer should be returned as a whole, it may have been compressed already.
+  if (!send_tagged_entries_) {
+    std::string out{io::View(buffer_.InputBuffer())};
+    buffer_.Clear();
+    prefix_len_ = 0;
+    return out;
   }
 
+  // tag only data entries (active id > 0) which were split at some point
+  bool should_tag = active_id_ != 0 && split_entries_.contains(active_id_);
+
+  // do not tag empty bytes, it will send a useless header
+  const bool has_suffix = buffer_.InputLen() > prefix_len_;
+  should_tag &= has_suffix;
+
+  std::string out;
+  out.reserve(buffer_.InputLen() + (should_tag ? kHeaderSize : 0));
+
+  ConsumePrefix(&out);
+
   if (should_tag) {
-    const auto header = MakeTagHeader(current_bytes.size());
+    const auto header = MakeTagHeader(buffer_.InputLen());
     out.append(reinterpret_cast<const char*>(header.data()), header.size());
   }
 
-  out.append(io::View(current_bytes));
-  current_buffer_->ConsumeInput(current_bytes.size());
+  out.append(io::View(buffer_.InputBuffer()));
+  buffer_.ConsumeInput(buffer_.InputLen());
   return out;
 }
 
