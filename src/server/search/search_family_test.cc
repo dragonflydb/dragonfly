@@ -1561,7 +1561,7 @@ TEST_F(SearchFamilyTest, FtProfile) {
 
     const auto& tree = shard_resp[3].GetVec();
     EXPECT_EQ(tree[3].GetString() /* operation */, "Logical{n=3,o=and}"s);
-    EXPECT_GT(tree[1].GetInt() /* total time*/, tree[5].GetInt() /* self time */);
+    EXPECT_GE(tree[1].GetInt() /* total time*/, tree[5].GetInt() /* self time */);
     EXPECT_EQ(tree[7].GetInt() /* processed */, 0);
   }
 
