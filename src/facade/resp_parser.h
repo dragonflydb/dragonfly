@@ -94,6 +94,10 @@ class RESPParser {
     return reader_->pos;
   }
 
+  size_t PendingSize() const {
+    return reader_->len - reader_->pos;
+  }
+
  private:
   redisReader* reader_;
 };
