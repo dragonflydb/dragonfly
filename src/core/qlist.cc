@@ -1626,13 +1626,12 @@ void QList::BackfillCompressWithZstdDict() {
     }
   }
 
-  // Only mark failure if we actually tried to compress nodes and all failed.
-  if (any_attempted) {
-    if (any_compressed)
-      dict_bulk_finished_ = 1;
-    else
-      dict_bulk_failed_ = 1;
-  }
+  // Avoid full scan again by setting either of flags.
+  // In case none of the nodes succeeded to compress, we will not attempt to compress again.
+  if (any_attempted && !any_compressed)
+    dict_bulk_failed_ = 1;
+  else
+    dict_bulk_finished_ = 1;
 }
 
 void QList::CompressAfterLoad() {
