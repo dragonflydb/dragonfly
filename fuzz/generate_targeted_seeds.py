@@ -15,14 +15,16 @@ Fuzzing terminology used in this file:
 Flow:
   1. Read unified diff from stdin, extract changed C++ file paths.
   2. Load all existing seed files so the LLM knows what's already covered.
-  3. Call Claude API: send the diff + seeds, get back JSON with command arrays + focus commands.
+  3. Call an LLM API: send the diff + seeds, get back JSON with command arrays + focus commands.
   4. Encode commands as RESP wire format, write to output dir.
 
 The LLM returns commands as plain arrays (e.g. ["SET", "key", "value"]) and we handle
 RESP encoding ourselves — this avoids JSON escaping issues and byte-count mismatches.
 
-When ANTHROPIC_API_KEY is not available (e.g. fork PRs), exits with no output and
-the fuzzer runs with the existing seed corpus as-is.
+By default, GitHub Models is used with openai/gpt-4.1 via GITHUB_TOKEN. The Anthropic path
+still works when selected explicitly (--provider anthropic). There is no automatic fallback
+between providers, but if the selected provider has no credential or the call fails, we exit
+with no output and the fuzzer runs with the existing seed corpus as-is.
 
 Usage:
     git diff base..HEAD | python3 fuzz/generate_targeted_seeds.py --output-dir /tmp/seeds
@@ -34,8 +36,11 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 
-# Max diff lines to send to the LLM (Haiku handles ~200K tokens, so this is generous)
+# Max diff lines to send to the LLM. Note: GitHub Models enforces a bounded per-request
+# input budget (smaller than the Anthropic path), so very large diffs may be rejected.
 MAX_DIFF_LINES = 20000
 
 LLM_SYSTEM_PROMPT = """\
@@ -147,14 +152,8 @@ def encode_resp(commands):
     return bytes(result)
 
 
-def call_llm(diff_text, changed_files, example_seeds, api_key, model):
-    """Call Claude API to generate targeted seeds from the diff."""
-    try:
-        import anthropic
-    except ImportError:
-        print("anthropic package not available", file=sys.stderr)
-        return None
-
+def build_prompt(diff_text, changed_files, example_seeds):
+    """Build the user prompt shared by all LLM providers."""
     truncated, num_lines = truncate_diff(diff_text)
 
     # Build examples section — show existing seeds so the LLM knows what's covered
@@ -162,7 +161,7 @@ def call_llm(diff_text, changed_files, example_seeds, api_key, model):
     for ex in example_seeds:
         examples_text += "--- %s ---\n%s\n\n" % (ex["name"], ex["content"].rstrip())
 
-    prompt = (
+    return (
         "Here are ALL existing seed files (RESP wire format) so you know what's already covered:\n\n"
         "%s\n"
         "Now analyze this diff and generate targeted fuzzing seeds.\n\n"
@@ -171,17 +170,11 @@ def call_llm(diff_text, changed_files, example_seeds, api_key, model):
         "Respond with valid JSON only."
     ) % (examples_text, ", ".join(changed_files), num_lines, truncated)
 
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=model,
-        max_tokens=16384,
-        system=LLM_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
 
-    text = response.content[0].text.strip()
+def parse_llm_json(text):
+    """Parse JSON from an LLM response, tolerating occasional markdown wrapping."""
+    text = text.strip()
 
-    # Try to extract JSON from the response (LLMs sometimes wrap in markdown)
     json_match = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
     if json_match:
         text = json_match.group(1)
@@ -202,6 +195,102 @@ def call_llm(diff_text, changed_files, example_seeds, api_key, model):
     # Log raw response for debugging and raise
     print("Raw LLM response (first 2000 chars):\n%s" % text[:2000], file=sys.stderr)
     raise ValueError("Could not parse LLM response as JSON")
+
+
+def call_github_models(prompt, token, model, endpoint):
+    """Call GitHub Models API to generate targeted seeds from the diff."""
+    # GitHub Models' REST schema uses `max_tokens` (not `max_completion_tokens`), and gpt-4.1
+    # accepts it. We omit `temperature` and rely on the model default.
+    body = {
+        "model": model,
+        "max_tokens": 16384,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": LLM_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer %s" % token,
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2026-03-10",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            response_body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError("GitHub Models API returned HTTP %d: %s" % (e.code, error_body[:1000]))
+
+    data = json.loads(response_body)
+    try:
+        text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ValueError("Unexpected GitHub Models response shape") from e
+
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("GitHub Models returned an empty response")
+
+    return parse_llm_json(text)
+
+
+def call_anthropic(prompt, api_key, model):
+    """Call Anthropic API to generate targeted seeds from the diff."""
+    try:
+        import anthropic
+    except ImportError:
+        print("anthropic package not available", file=sys.stderr)
+        return None
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=16384,
+        system=LLM_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    text = response.content[0].text.strip()
+    return parse_llm_json(text)
+
+
+def call_llm(
+    diff_text,
+    changed_files,
+    example_seeds,
+    provider,
+    github_token,
+    github_model,
+    github_endpoint,
+    anthropic_api_key,
+    anthropic_model,
+):
+    """Call the selected LLM provider. No cross-provider fallback — errors propagate."""
+    prompt = build_prompt(diff_text, changed_files, example_seeds)
+
+    if provider == "github":
+        if not github_token:
+            print("No GITHUB_TOKEN set, skipping seed generation", file=sys.stderr)
+            return None
+        print("Using GitHub Models model: %s" % github_model, file=sys.stderr)
+        return call_github_models(prompt, github_token, github_model, github_endpoint)
+
+    if provider == "anthropic":
+        if not anthropic_api_key:
+            print("No ANTHROPIC_API_KEY set, skipping seed generation", file=sys.stderr)
+            return None
+        print("Using Anthropic model: %s" % anthropic_model, file=sys.stderr)
+        return call_anthropic(prompt, anthropic_api_key, anthropic_model)
+
+    raise ValueError("Unknown provider: %s" % provider)
 
 
 def write_output(output_dir, focus_commands, seeds):
@@ -239,15 +328,51 @@ def main():
         help="Directory with existing seed files (auto-detected if not set)",
     )
     parser.add_argument(
-        "--api-key", default=None, help="Anthropic API key (or set ANTHROPIC_API_KEY env var)"
+        "--provider",
+        choices=("github", "anthropic"),
+        default=os.environ.get("LLM_PROVIDER", "github"),
+        help="LLM provider to use. Defaults to github (openai/gpt-4.1); anthropic is opt-in.",
     )
-    parser.add_argument("--model", default="claude-haiku-4-5-20251001", help="Claude model to use")
+    parser.add_argument(
+        "--github-token",
+        default=None,
+        help="GitHub token for GitHub Models (or set GITHUB_MODELS_TOKEN/GITHUB_TOKEN)",
+    )
+    parser.add_argument(
+        "--github-endpoint",
+        default=os.environ.get(
+            "GITHUB_MODELS_ENDPOINT", "https://models.github.ai/inference/chat/completions"
+        ),
+        help="GitHub Models chat completions endpoint",
+    )
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("GITHUB_MODELS_MODEL", "openai/gpt-4.1"),
+        help="GitHub Models model ID to use",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="Deprecated alias for --anthropic-api-key",
+    )
+    parser.add_argument(
+        "--anthropic-api-key",
+        default=None,
+        help="Anthropic API key for fallback (or set ANTHROPIC_API_KEY)",
+    )
+    parser.add_argument(
+        "--anthropic-model",
+        default=os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
+        help="Anthropic fallback model to use",
+    )
     args = parser.parse_args()
 
-    api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("No ANTHROPIC_API_KEY set, skipping seed generation", file=sys.stderr)
-        return
+    github_token = (
+        args.github_token or os.environ.get("GITHUB_MODELS_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    )
+    anthropic_api_key = (
+        args.anthropic_api_key or args.api_key or os.environ.get("ANTHROPIC_API_KEY")
+    )
 
     diff_text = sys.stdin.read()
     if not diff_text.strip():
@@ -270,10 +395,23 @@ def main():
     example_seeds = load_example_seeds(seeds_dir)
     print("Loaded %d existing seeds" % len(example_seeds), file=sys.stderr)
 
+    # Fault tolerance: if the model call fails (rate limit, network, API error, bad
+    # response), log it and skip seed generation so the fuzzer still runs on the default
+    # seed corpus instead of failing the whole job.
     try:
-        result = call_llm(diff_text, changed_files, example_seeds, api_key, args.model)
+        result = call_llm(
+            diff_text,
+            changed_files,
+            example_seeds,
+            args.provider,
+            github_token,
+            args.model,
+            args.github_endpoint,
+            anthropic_api_key,
+            args.anthropic_model,
+        )
     except Exception as e:
-        print("LLM call failed: %s" % e, file=sys.stderr)
+        print("LLM call failed, using default seed corpus: %s" % e, file=sys.stderr)
         return
 
     if not result:
