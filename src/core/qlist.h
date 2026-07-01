@@ -362,7 +362,8 @@ class QList {
   bool TrainZstdDict();
 
   // Bulk-compresses all interior nodes using the thread-local ZSTD dictionary.
-  // Sets dict_bulk_failed_ if no nodes could be compressed.
+  // A completed walk always sets a terminal flag: dict_bulk_failed_ when real nodes were tried
+  // but none compressed (dict useless for this list), otherwise dict_bulk_finished_.
   void BackfillCompressWithZstdDict();
 
   // Compresses a single node using the thread-local ZSTD dictionary.

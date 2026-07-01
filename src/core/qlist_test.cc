@@ -1217,6 +1217,44 @@ TEST_F(QListZstdTest, CompressAfterLoad) {
   EXPECT_EQ(count, kNodes * kEntriesPerNode);
 }
 
+TEST_F(QListZstdTest, CompressAfterLoadChunkedAppend) {
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+
+  constexpr unsigned kEntriesPerNode = 30;
+  for (unsigned n = 0; n < 4; ++n) {
+    ql.AppendListpack(BuildCeleryListpack(kEntriesPerNode, 100000 + n * kEntriesPerNode));
+  }
+  ql.CompressAfterLoad();
+
+  const QList::Node* old_tail = ql.Tail();
+  ASSERT_EQ(old_tail->encoding, QUICKLIST_NODE_ENCODING_RAW);
+
+  QList moved(std::move(ql));
+  old_tail = moved.Tail();
+
+  for (unsigned n = 4; n < 7; ++n) {
+    moved.AppendListpack(BuildCeleryListpack(kEntriesPerNode, 100000 + n * kEntriesPerNode));
+  }
+  moved.CompressAfterLoad();
+
+  // The previous tail became interior after appending the next chunk, so it should be compressed
+  // without rescanning the already-finished prefix.
+  EXPECT_EQ(old_tail->encoding, QLIST_NODE_ENCODING_ZSTD);
+  EXPECT_EQ(moved.Head()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+  EXPECT_EQ(moved.Tail()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+
+  unsigned count = 0;
+  moved.Iterate(
+      [&](const QList::Entry& e) {
+        EXPECT_GT(e.view().size(), 50u);
+        ++count;
+        return true;
+      },
+      0, -1);
+  EXPECT_EQ(count, 7u * kEntriesPerNode);
+}
+
 TEST_F(QListZstdTest, CompressAfterLoadPlainNode) {
   // Plain (single large element) interior nodes are also covered: they are
   // included in dictionary training and compressed, and decompressed on read.
