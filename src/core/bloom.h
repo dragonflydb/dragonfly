@@ -150,6 +150,16 @@ class SBF {
     return max_capacity_;
   }
 
+  // Total design capacity across all filters (completed filters plus the current one).
+  size_t total_capacity() const {
+    return prev_size_ + max_capacity_;
+  }
+
+  // Total number of items inserted across all filters.
+  size_t total_items() const {
+    return prev_size_ + current_size_;
+  }
+
   size_t MallocUsed() const;
 
   uint8_t* filter_data(size_t idx) {
