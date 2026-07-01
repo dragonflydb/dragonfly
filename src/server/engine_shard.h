@@ -93,10 +93,7 @@ class EngineShard {
   void PollExecution(const char* context, Transaction* trans);
 
   // Call after running inlined to keep progress on the transaction queue if it was interrupted
-  void PollExecutionIfDeferred() {
-    if (needs_repoll_)
-      PollExecution("after_inline", nullptr);
-  }
+  void PollExecutionIfDeferred();
 
   // Returns transaction queue.
   TxQueue* txq() {

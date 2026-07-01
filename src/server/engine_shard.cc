@@ -618,13 +618,18 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     return;
   }
 
-  // Call PollExecutionInternal and repeat the call if we interrupted someone elses Poll
-  do {
-    needs_repoll_ = false;
-    PollExecutionInternal(context, trans);
-    trans = nullptr;  // we repeat with null transaction
-    context = "repoll";
-  } while (needs_repoll_);
+  needs_repoll_ = false;
+  PollExecutionInternal(context, trans);
+
+  // Executing `trans` out of order above would not follow up with queue processing, so
+  // we need to issue another poll if we interruped another poll request.
+  // Because it runs with trans=nullptr, it progresses only on the loop and does not need follow ups
+  PollExecutionIfDeferred();
+}
+
+void EngineShard::PollExecutionIfDeferred() {
+  if (std::exchange(needs_repoll_, false))
+    PollExecutionInternal("repoll", nullptr);
 }
 
 void EngineShard::PollExecutionInternal(const char* context, Transaction* trans) {
