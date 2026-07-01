@@ -145,6 +145,34 @@ TEST_F(BloomFamilyTest, LoadChunkErrors) {
   EXPECT_THAT(Run({"bf.loadchunk", "b1", "-1", "data"}), ErrArg("not an integer"));
 }
 
+TEST_F(BloomFamilyTest, Info) {
+  EXPECT_THAT(Run({"bf.info", "missing"}), ErrArg("no such key"));
+
+  Run({"bf.reserve", "b1", "0.01", "1000"});
+  auto resp = Run({"bf.info", "b1"});
+  auto vec = resp.GetVec();
+  ASSERT_EQ(vec.size(), 10u);
+  EXPECT_EQ(vec[0].GetString(), "Capacity");
+  EXPECT_THAT(vec[1], IntArg(1485));
+  EXPECT_EQ(vec[2].GetString(), "Size");
+  EXPECT_GT(*vec[3].GetInt(), 0);
+  EXPECT_EQ(vec[4].GetString(), "Number of filters");
+  EXPECT_THAT(vec[5], IntArg(1));
+  EXPECT_EQ(vec[6].GetString(), "Number of items inserted");
+  EXPECT_THAT(vec[7], IntArg(0));
+  EXPECT_EQ(vec[8].GetString(), "Expansion rate");
+  EXPECT_THAT(vec[9], IntArg(2));
+
+  for (int i = 0; i < 10; ++i)
+    Run({"bf.add", "b1", absl::StrCat("item", i)});
+  EXPECT_THAT(Run({"bf.info", "b1", "items"}), IntArg(10));
+  EXPECT_THAT(Run({"bf.info", "b1", "filters"}), IntArg(1));
+  EXPECT_THAT(Run({"bf.info", "b1", "bogus"}), ErrArg("Invalid info arguments"));
+
+  Run({"set", "str", "foo"});
+  EXPECT_THAT(Run({"bf.info", "str"}), ErrArg("WRONG"));
+}
+
 // COPY of an SBF must survive the chunked serialize/deserialize round-trip.
 TEST_F(BloomFamilyTest, CopyChunkedRoundTrip) {
   Run({"bf.reserve", "b1", "0.01", "1000"});
