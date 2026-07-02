@@ -1173,12 +1173,8 @@ void CmdHIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdHIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view field = parser.Next();
-  double dval = parser.Next<double>();
+  double dval = parser.Next<Validated<double, Finite<kNanOrInfDuringIncr>>>();
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
-
-  if (isnan(dval) || isinf(dval)) {
-    return cmd_cntx->SendError(kNanOrInfDuringIncr);
-  }
 
   IncrByParam param{dval};
 
