@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "server/detail/egress_throttle.h"
 #include "server/journal/types.h"
 #include "server/rdb_save.h"
 #include "server/serializer_base.h"
@@ -129,6 +130,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
+
+  // Limits this snapshot's socket egress to a configured bandwidth budget.
+  detail::EgressThrottler throttler_{0};
 
   struct Stats {
     size_t keys_total = 0;
