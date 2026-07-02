@@ -1010,6 +1010,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("pipeline_squash");
   config_registry.RegisterMutable("lua_mem_gc_threshold");
   config_registry.RegisterMutable("background_debug_jobs");
+  config_registry.RegisterMutable("snapshot_egress_limit_bytes");
 
   // Register ServerState flags
   RegisterMutableFlags(&config_registry, ServerState::GetMutableFlagNames(),
