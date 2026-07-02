@@ -606,24 +606,39 @@ void EngineShard::DestroyThreadLocal() {
   VLOG(1) << "Shard reset " << shard_id;
 }
 
-// Is called by Transaction::ExecuteAsync in order to run transaction tasks.
-// Only runs in its own thread.
 void EngineShard::PollExecution(const char* context, Transaction* trans) {
+  // Only one transaction can run at a time, so we have to abort the Poll while running_tx is
+  // suspended. Running tx issues a follow up Poll is needs_repoll_ was set
+  if (running_tx_) {
+    // Check that trans doesn't need processing or is guaranteed to be found via txq/continuation
+    DCHECK(trans == nullptr || !trans->DEBUG_IsArmedInShard(shard_id())  // tx was already disarmed
+           || trans->DEBUG_GetTxqPosInShard(shard_id()) != TxQueue::kEnd ||
+           continuation_trans_ == trans);
+    needs_repoll_ = true;
+    return;
+  }
+
+  needs_repoll_ = false;
+  PollExecutionInternal(context, trans);
+
+  // Executing `trans` out of order above would not follow up with queue processing, so
+  // we need to issue another poll if we interruped another poll request.
+  // Because it runs with trans=nullptr, it progresses only on the loop and does not need follow ups
+  PollExecutionIfDeferred();
+}
+
+void EngineShard::PollExecutionIfDeferred() {
+  if (std::exchange(needs_repoll_, false))
+    PollExecutionInternal("repoll", nullptr);
+}
+
+void EngineShard::PollExecutionInternal(const char* context, Transaction* trans) {
   DVLOG(2) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "") << " "
            << txq_.size() << " " << (continuation_trans_ ? continuation_trans_->DebugId() : "");
 
+  DCHECK(running_tx_ == nullptr) << running_tx_->DebugId();
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
-
-  // If another transaction is currently running on this shard (e.g. an inlined tx preempted
-  // on the connection fiber), we must not run any callbacks to avoid interleaving.
-  if (running_tx_) {
-    // The transaction (if any) if armed, must be in the txq so a future PollExecution picks it up.
-    DCHECK(trans == nullptr || !trans->DEBUG_IsArmedInShard(sid) ||
-           trans->DEBUG_GetTxqPosInShard(sid) != TxQueue::kEnd)
-        << context << " " << trans->DebugId();
-    return;
-  }
 
   // If any of the following flags are present, we are guaranteed to run in this function:
   // 1. AWAKED_Q -> Blocking transactions are executed immediately after waking up, they don't

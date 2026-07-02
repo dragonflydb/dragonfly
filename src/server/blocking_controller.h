@@ -27,6 +27,11 @@ class BlockingController {
     return !awakened_transactions_.empty();
   }
 
+  // Whether any transaction is currently suspended (blocked) on a watched key in this shard.
+  bool HasBlockedTransactions() const {
+    return !watched_dbs_.empty();
+  }
+
   const auto& awakened_transactions() const {
     return awakened_transactions_;
   }

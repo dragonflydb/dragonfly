@@ -153,6 +153,7 @@ helio_cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_sm
 helio_cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(transaction_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(json_family_memory_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)

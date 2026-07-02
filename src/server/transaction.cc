@@ -732,8 +732,9 @@ void Transaction::ScheduleInternal() {
       CHECK(ScheduleInShard(EngineShard::tlocal(), optimistic_exec));
       run_barrier_.Dec();
 
-      // Drain any work that was deferred while this inlined tx held running_tx_.
-      EngineShard::tlocal()->PollExecution("after_inline", nullptr);
+      // If the optimistic run above held running_tx_ and deferred any poll on this shard,
+      // drain it now. Uses the same needs_repoll_ mechanism as PollExecution's re-drive loop.
+      EngineShard::tlocal()->PollExecutionIfDeferred();
       break;
     }
 
@@ -1620,18 +1621,32 @@ bool Transaction::CanRunInlined() const {
   auto* ss = ServerState::tlocal();
   auto* es = EngineShard::tlocal();
 
+  // Transaction coordinator must be on the same thread at the target shard
+  if (unique_shard_cnt_ != 1 || unique_shard_id_ != ss->thread_index())
+    return false;
+
+  DCHECK(es);
+
   // Global transactions like SAVE can change the inlining rules, so run them non-inlined.
   // This guarantees that their PollExecution batch executes on the shard-queue fiber
   // when the conditions update.
+  if (!ss->AllowInlineScheduling() || IsGlobal())
+    return false;
+
   // We also refuse to inline when another transaction is already running on this shard:
   // journal/db-slice callbacks invoked from RunCallback can preempt, and a nested inlined
   // transaction would interleave its own callback loop with the outer one.
-  if (unique_shard_cnt_ == 1 && unique_shard_id_ == ss->thread_index() &&
-      ss->AllowInlineScheduling() && !IsGlobal() && es->running_tx() == nullptr) {
-    ss->stats.tx_inline_runs++;
-    return true;
-  }
-  return false;
+  if (es->running_tx() != nullptr)
+    return false;
+
+  // Lastly: we refuse with blocking transactions. They run fully apart in PollExecution without
+  // being tracked in the tx queue, so a conflict with a suspended running tx can't be resolved.
+  if (auto* bc = namespace_->GetBlockingController(es->shard_id());
+      bc != nullptr && bc->HasBlockedTransactions())
+    return false;
+
+  ss->stats.tx_inline_runs++;
+  return true;
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs& args) {
