@@ -120,6 +120,10 @@ struct CaptureVisitor {
     absl::StrAppend(&str, JsonEscape(bs));
   }
 
+  void operator()(const unique_ptr<payload::VerbatimString>& vs) {
+    absl::StrAppend(&str, JsonEscape(vs->str));
+  }
+
   void operator()(cmn::BorrowedString bs) {
     // HTTP visitor wants a single contiguous string to JSON-escape. For raw
     // encodings the bytes are already user-visible; for packed encodings we

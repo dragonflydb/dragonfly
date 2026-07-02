@@ -880,6 +880,8 @@ TEST_F(RedisReplyBuilderTest, BasicCapture) {
       [](RRB* r) { r->SendLong(1L); },
       [](RRB* r) { r->SendDouble(6.7); },
       [](RRB* r) { r->SendSimpleString("ok"); },
+      [](RRB* r) { r->SendVerbatimString("A simple string!", RRB::VerbatimFormat::TXT); },
+      [](RRB* r) { r->SendVerbatimString("# Title\nbody", RRB::VerbatimFormat::MARKDOWN); },
       [](RRB* r) { r->SendEmptyArray(); },
       [](RRB* r) { r->SendNullArray(); },
       [](RRB* r) { r->SendError("e1", "e2"); },

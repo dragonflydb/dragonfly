@@ -25,8 +25,14 @@ struct CollectionPayload;
 struct SimpleString : public std::string {};  // SendSimpleString
 struct BulkString : public std::string {};    // SendBulkString
 
+struct VerbatimString {
+  std::string str;
+  uint8_t format;  // RedisReplyBuilder::VerbatimFormat avoided include
+};
+
 using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
-                             cmn::BorrowedString, std::unique_ptr<CollectionPayload>>;
+                             std::unique_ptr<VerbatimString> /* big struct */, cmn::BorrowedString,
+                             std::unique_ptr<CollectionPayload>>;
 
 #if defined(__linux__) && !defined(_LIBCPP_VERSION)
 static_assert(sizeof(Payload) == 40);
