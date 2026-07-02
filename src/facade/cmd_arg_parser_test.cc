@@ -576,24 +576,11 @@ TEST_F(CmdArgParserTest, BoundedRule) {
     parser.Next<Pct>();
     EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_INT);
   }
-
-  // Floating-point range rejects NaN and +/-inf via the custom message.
-  using UnitInterval = Validated<double, Bounded<0.0, 1.0, kMsg>>;
-  {
-    auto parser = Make({"0.5", "nan", "inf"});
-    EXPECT_DOUBLE_EQ(static_cast<double>(parser.Next<UnitInterval>()), 0.5);
-    EXPECT_FALSE(parser.HasError());
-    parser.Next<UnitInterval>();
-    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "out of range");
-    auto p2 = Make({"inf"});
-    p2.Next<UnitInterval>();
-    EXPECT_EQ(p2.TakeError().MakeReply().ToSv(), "out of range");
-  }
 }
 
-TEST_F(CmdArgParserTest, AtLeastRule) {
+TEST_F(CmdArgParserTest, NonNegativeRule) {
   static constexpr char kNeg[] = "must not be negative";
-  using NonNeg = Validated<float, AtLeast<0.0f, kNeg>>;
+  using NonNeg = Validated<float, NonNegative<kNeg>>;
 
   {
     auto parser = Make({"0", "3.5"});
@@ -613,6 +600,33 @@ TEST_F(CmdArgParserTest, AtLeastRule) {
     auto p2 = Make({"abc"});
     p2.Next<NonNeg>();
     EXPECT_EQ(p2.TakeError().type, CmdArgParser::INVALID_FLOAT);
+  }
+}
+
+TEST_F(CmdArgParserTest, NextWithMessageOverride) {
+  static constexpr char kParseMsg[] = "custom parse error";
+  static constexpr char kRuleMsg[] = "must not be negative";
+  using NonNeg = Validated<float, NonNegative<kRuleMsg>>;
+
+  {  // A non-numeric value reports the caller message instead of the generic type error.
+    auto parser = Make({"abc"});
+    parser.Next<NonNeg>(kParseMsg);
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "custom parse error");
+  }
+  {  // A rule violation keeps its own message; the caller message does not override it.
+    auto parser = Make({"-1"});
+    parser.Next<NonNeg>(kParseMsg);
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "must not be negative");
+  }
+  {  // FInt out-of-range is a generic error, so the caller message applies to it too.
+    auto parser = Make({"5"});
+    parser.Next<FInt<0, 3>>(kParseMsg);
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "custom parse error");
+  }
+  {  // A valid value produces no error.
+    auto parser = Make({"2.5"});
+    EXPECT_FLOAT_EQ(static_cast<float>(parser.Next<NonNeg>(kParseMsg)), 2.5f);
+    EXPECT_FALSE(parser.HasError());
   }
 }
 

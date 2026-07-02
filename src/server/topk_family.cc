@@ -36,6 +36,10 @@ namespace {
 constexpr char kDecayRangeErr[] = "decay must be between 0 and 1";
 constexpr char kIncrRangeErr[] = "increment must be between 1 and 100000";
 
+RuleError DecayRange(double v) {
+  return {!(v >= 0 && v <= 1), kDecayRangeErr};
+}
+
 OpStatus OpReserve(const OpArgs& op_args, string_view key, uint32_t k, uint32_t width,
                    uint32_t depth, double decay) {
   auto& db_slice = op_args.GetDbSlice();
@@ -196,7 +200,7 @@ void TopkFamily::Reserve(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   if (parser.HasNext()) {
     width = parser.Next<uint32_t>();
     depth = parser.Next<uint32_t>();
-    decay = parser.Next<Validated<double, Bounded<0.0, 1.0, kDecayRangeErr>>>();
+    decay = parser.Next<Validated<double, DecayRange>>();
     RETURN_ON_PARSE_ERROR(parser, rb);
 
     if ((width == 0) || (depth == 0)) {

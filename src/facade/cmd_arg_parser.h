@@ -115,23 +115,24 @@ template <auto min, auto max> RuleError InRange(decltype(min) v) {
   return {v < min || v > max, {}};
 }
 
-// Out of [min, max] -> custom Msg; also rejects NaN (safe for floating-point ranges).
+// Out of [min, max] -> custom Msg. Integer bounds only (floating-point NTTPs need clang 18+; use a
+// dedicated rule for float ranges).
 template <auto min, auto max, const auto& Msg> RuleError Bounded(decltype(min) v) {
   static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
   return {!(v >= min && v <= max), Msg};
 }
 
-// v < min -> custom Msg; NaN is accepted (matches a plain `v < min` guard).
-template <auto min, const auto& Msg> RuleError AtLeast(decltype(min) v) {
-  return {v < min, Msg};
+// v < 0 -> custom Msg; NaN is accepted (matches a plain `v < 0` guard).
+template <const auto& Msg, class V> RuleError NonNegative(V v) {
+  return {v < 0, Msg};
 }
 
 // Rejects NaN but accepts +/-inf.
-template <const auto& Msg> RuleError NotNan(double v) {
+template <const auto& Msg, std::floating_point V> RuleError NotNan(V v) {
   return {std::isnan(v), Msg};
 }
 
-template <const auto& Msg> RuleError Finite(double v) {
+template <const auto& Msg, std::floating_point V> RuleError Finite(V v) {
   return {!std::isfinite(v), Msg};
 }
 
@@ -139,11 +140,9 @@ template <auto Bad, const auto& Msg> RuleError NotEq(decltype(Bad) v) {
   return {v == Bad, Msg};
 }
 
-// Accepts a value only if every rule accepts it; first rejection wins. Rules are function-pointer
-// NTTPs, e.g. Validated<int, Bounded<0, 9, kMsg>>.
-template <class T, auto... Rules> struct Validated : VNum<T> {
-  static_assert((std::same_as<decltype(Rules(std::declval<T>())), RuleError> && ...),
-                "a Validated rule must return RuleError");
+// Accepts a value only if every rule accepts it; first rejection wins. Each rule is a function
+// T -> RuleError, e.g. Validated<int, Bounded<0, 9, kMsg>>.
+template <class T, RuleError (*... Rules)(T)> struct Validated : VNum<T> {
   static RuleError validate(T v) {
     RuleError e;
     (void)((e = Rules(v)).failed || ...);
@@ -290,13 +289,14 @@ struct CmdArgParser {
     }
   }
 
-  // Like Next<T>(), but on a failed read (non-numeric, out-of-range FInt, or missing arg) replaces
-  // the generic error with a caller-supplied CUSTOM_ERROR message. Pair with FInt<lo,hi> to attach
-  // a custom out-of-range / non-integer message: parser.Next<FInt<1u, 99u>>("bad f").
+  // Like Next<T>(), but replaces any read failure (bad value, missing arg, ...) with a caller-
+  // supplied CUSTOM_ERROR message. A rule's own message from a Validated<T, Rules...> passes
+  // through unchanged, so parser.Next<Timeout>(kNotAFloat) reports kNotAFloat for a non-float but
+  // keeps each rule's out-of-range / negative message.
   template <class T = std::string_view> auto Next(std::string_view err_msg) {
     bool prior = bool(error_);
     auto val = Next<T>();
-    if (!prior && error_ && !err_msg.empty()) {
+    if (!prior && !err_msg.empty() && error_ && error_.type != CUSTOM_ERROR) {
       error_.type = CUSTOM_ERROR;
       error_.custom_msg = std::string{err_msg};
     }

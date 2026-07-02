@@ -9,6 +9,8 @@ extern "C" {
 #include <absl/functional/overload.h>
 #include <absl/strings/numbers.h>
 
+#include <limits>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/detail/listpack.h"
@@ -83,6 +85,17 @@ using absl::Overload;
 using time_point = Transaction::time_point;
 
 namespace {
+
+// unsigned(timeout * 1000) feeds the blocking layer's millisecond counter, so cap the seconds to
+// keep the float->unsigned conversion in range. Redis reports oversized timeouts as out of range.
+constexpr float kMaxBlockingTimeoutSec = std::numeric_limits<unsigned>::max() / 1000;
+
+RuleError WithinTimeoutLimit(float v) {
+  return {v > kMaxBlockingTimeoutSec, kTimeoutOutOfRangeErr};  // also rejects +inf
+}
+
+using Timeout = Validated<float, NotNan<kTimeoutNotFloatErr>, NonNegative<kTimeoutNegativeErr>,
+                          WithinTimeoutLimit>;
 
 void OffloadListNode(QList* ql, QList::Node* node) {
   TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
@@ -882,10 +895,10 @@ void RPopLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void BRPopLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
-  float timeout = parser.Next<Validated<float, AtLeast<0.0f, kTimeoutNegativeErr>>>();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  float timeout = parser.Next<Timeout>(kTimeoutNotFloatErr);
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res =
@@ -911,10 +924,10 @@ void BLMove(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
-  float timeout = parser.Next<Validated<float, AtLeast<0.0f, kTimeoutNegativeErr>>>();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  float timeout = parser.Next<Timeout>(kTimeoutNotFloatErr);
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res =
@@ -1063,17 +1076,11 @@ void PopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 }
 
-void BPopGeneric(ListDir dir, ParsedArgs args, CommandContext* cmd_cntx) {
-  DCHECK_GE(args.size(), 2u);
-
-  float timeout;
-  auto timeout_str = args[args.size() - 1];
-  if (!absl::SimpleAtof(timeout_str, &timeout)) {
-    return cmd_cntx->SendError("timeout is not a float or out of range");
-  }
-  if (timeout < 0) {
-    return cmd_cntx->SendError("timeout is negative");
-  }
+void BPopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Skip(parser.UnparsedArgs().size() - 1);  // keys are handled by the command key spec
+  float timeout = parser.Next<Timeout>(kTimeoutNotFloatErr);
+  if (auto err = parser.TakeError(); err)
+    return cmd_cntx->SendError(err.MakeReply());
   VLOG(1) << "BPop timeout(" << timeout << ")";
 
   std::string popped_value;
@@ -1143,7 +1150,7 @@ optional<pair<string_view, bool>> GetFirstNonEmptyKeyFound(EngineShard* shard, T
 void CmdLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  parser.Skip(parser.Next<size_t>());  // skip numkeys and keys
+  parser.NextRange();  // numkeys + keys, handled by the command key spec
 
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
   size_t pop_count = 1;
@@ -1223,11 +1230,11 @@ void CmdLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  float timeout = parser.Next<Validated<float, AtLeast<0.0f, kTimeoutNegativeErr>>>();
+  float timeout = parser.Next<Timeout>(kTimeoutNotFloatErr);
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
 
-  parser.Skip(parser.Next<size_t>());  // Skip numkeys and keys
+  parser.NextRange();  // numkeys + keys, handled by the command key spec
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 
   size_t pop_count = 1;
@@ -1469,11 +1476,11 @@ void CmdLSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdBLPop(CmdArgParser parser, CommandContext* cmd_cntx) {
-  BPopGeneric(ListDir::LEFT, parser.UnparsedArgs(), cmd_cntx);
+  BPopGeneric(ListDir::LEFT, std::move(parser), cmd_cntx);
 }
 
 void CmdBRPop(CmdArgParser parser, CommandContext* cmd_cntx) {
-  BPopGeneric(ListDir::RIGHT, parser.UnparsedArgs(), cmd_cntx);
+  BPopGeneric(ListDir::RIGHT, std::move(parser), cmd_cntx);
 }
 
 void CmdLMove(CmdArgParser parser, CommandContext* cmd_cntx) {
