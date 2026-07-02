@@ -1137,6 +1137,86 @@ TEST_F(ListNodeTieringTest, PushAfterOffloadedNodePromotedToTail) {
   EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kTrimmedItems));
 }
 
+// Test memory accounting for tiered lists. Reading and mutating tiered list nodes should keep
+// tracked list memory in sync with the actual in-memory list size.
+TEST_F(ListNodeTieringTest, ListTieringMemoryAccounting) {
+  const int kItems = 8;
+  const size_t kNodeSize = 4096;
+  const string kReadListKey = "read_cmd_on_list";
+  const string kWriteListKey = "mutable_command_on_list";
+  const string kReadWritListeKey = "read_then_write_command_on_list";
+
+  // Read the tracked object heap size for a single list key on its owning shard.
+  auto list_malloc_used = [](string_view key) {
+    size_t result = 0;
+    ShardId sid = Shard(key, shard_set->size());
+    shard_set->Await(sid, [key, &result] {
+      auto& db_slice =
+          namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+      auto* table = db_slice.GetDBTable(0);
+      auto it = table->prime.Find(key);
+      ASSERT_TRUE(IsValid(it));
+      result = it->second.MallocUsed();
+    });
+    return result;
+  };
+
+  // The test uses one list at a time, so OBJ_LIST type memory should match that list exactly.
+  auto expect_list_memory = [this, &list_malloc_used](string_view key) {
+    size_t list_memory = GetMetrics().db_stats[0].memory_usage_by_type[OBJ_LIST];
+    size_t malloc_used = list_malloc_used(key);
+    EXPECT_EQ(list_memory, malloc_used);
+  };
+
+  // Build a list with large one-item nodes and wait for at least one interior node to be offloaded.
+  auto push_list_and_wait = [this, kItems, kNodeSize, &expect_list_memory](string_view key) {
+    size_t stashes_before = GetMetrics().tiered_stats.total_stashes;
+    for (int i = 0; i < kItems; i++) {
+      Run({"RPUSH", string{key}, BuildString(kNodeSize, static_cast<char>('a' + i))});
+    }
+    ExpectConditionWithinTimeout([this, stashes_before] {
+      auto metrics = GetMetrics().tiered_stats;
+      return metrics.total_stashes > stashes_before && metrics.pending_stash_cnt == 0;
+    });
+    // Check that the list memory accounting matches the malloc used for the list key after tiering.
+    expect_list_memory(key);
+  };
+
+  // 1. Read-only materialization.
+  push_list_and_wait(kReadListKey);
+  size_t fetches_before = GetMetrics().tiered_stats.total_fetches;
+  EXPECT_EQ(Run({"LINDEX", kReadListKey, "2"}), BuildString(kNodeSize, 'c'));
+  EXPECT_GT(GetMetrics().tiered_stats.total_fetches, fetches_before);
+  expect_list_memory(kReadListKey);
+
+  // Expect list memory to be zero after deletion
+  EXPECT_THAT(Run({"DEL", kReadListKey}), IntArg(1));
+  EXPECT_EQ(GetMetrics().db_stats[0].memory_usage_by_type[OBJ_LIST], 0u);
+
+  // 2. Mutable materialization.
+  push_list_and_wait(kWriteListKey);
+  fetches_before = GetMetrics().tiered_stats.total_fetches;
+  EXPECT_EQ(Run({"LSET", kWriteListKey, "2", "z"}), "OK");
+  EXPECT_GT(GetMetrics().tiered_stats.total_fetches, fetches_before);
+  EXPECT_EQ(Run({"LINDEX", kWriteListKey, "2"}), "z");
+  expect_list_memory(kWriteListKey);
+
+  // Expect list memory to be zero after deletion
+  EXPECT_THAT(Run({"DEL", kWriteListKey}), IntArg(1));
+  EXPECT_EQ(GetMetrics().db_stats[0].memory_usage_by_type[OBJ_LIST], 0u);
+
+  // 3. Test read-only then mutable operations on same key.
+  push_list_and_wait(kReadWritListeKey);
+
+  fetches_before = GetMetrics().tiered_stats.total_fetches;
+  EXPECT_EQ(Run({"LINDEX", kReadWritListeKey, "3"}), BuildString(kNodeSize, 'd'));
+  EXPECT_GT(GetMetrics().tiered_stats.total_fetches, fetches_before);
+  expect_list_memory(kReadWritListeKey);
+
+  EXPECT_EQ(Run({"LPOP", kReadWritListeKey}), BuildString(kNodeSize, 'a'));
+  expect_list_memory(kReadWritListeKey);
+}
+
 // Test MEMORY DECOMMIT COOL command flushes the cool queue
 TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
   absl::FlagSaver saver;

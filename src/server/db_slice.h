@@ -182,6 +182,10 @@ class DbSlice {
     // Used when the existing object is overridden by a new one.
     void ReduceHeapUsage();
 
+    void AddManuallyReportedMemorySizeDelta(int32_t delta) {
+      fields_.manually_reported_memory_size_delta += delta;
+    }
+
     void Run();
     void Cancel();
 
@@ -198,6 +202,10 @@ class DbSlice {
       // The following fields are calculated at init time
       size_t orig_value_heap_size = 0;
       CompactObjType orig_obj_type = 0;
+
+      // Memory size delta already reported to stats outside of AutoUpdater.
+      // Subtracted from AutoUpdater's own heap diff to avoid double-counting.
+      int32_t manually_reported_memory_size_delta = 0;
     };
 
     AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
