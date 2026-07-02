@@ -166,6 +166,8 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     kind_mask_ |= REPLCONF;
   } else if (name_ == "QUIT") {
     kind_mask_ |= QUIT;
+  } else if (name_ == "RESET") {
+    kind_mask_ |= RESET;
   }
   if ((opt_mask_ & CO::ADMIN) == 0 && name_ != "EXEC")
     kind_mask_ |= CAN_MONITOR;

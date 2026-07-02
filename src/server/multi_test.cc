@@ -1682,4 +1682,53 @@ return redis.call('GET', KEYS[1])
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
+// Tests for the RESET command (connection-layer reset, mirrors Redis RESET).
+// RESET clears MULTI state, WATCH keys, DB index, and auth, keeping the connection alive.
+TEST_F(MultiTest, ResetReturnsResetString) {
+  EXPECT_THAT(Run({"reset"}), "RESET");
+}
+
+TEST_F(MultiTest, ResetClearsMULTIBlock) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"get", "x"}), "QUEUED");
+
+  // RESET should abort the MULTI block and leave us in normal state.
+  EXPECT_THAT(Run({"reset"}), "RESET");
+
+  // After RESET a plain GET works (not QUEUED, not an error).
+  EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
+  // EXEC without MULTI confirms the block was cleared.
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+}
+
+TEST_F(MultiTest, ResetClearsWatchState) {
+  Run({"set", "a", "1"});
+  EXPECT_THAT(Run({"watch", "a"}), "OK");
+
+  // Modify watched key from another connection so EXEC would normally fail.
+  Run("other", {"set", "a", "2"});
+
+  // RESET should clear WATCH; after RESET, a new MULTI/EXEC should succeed.
+  EXPECT_THAT(Run({"reset"}), "RESET");
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"get", "a"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("2"));
+}
+
+TEST_F(MultiTest, ResetSelectsDB0) {
+  // Move to DB 1, set a key there.
+  EXPECT_THAT(Run({"select", "1"}), "OK");
+  EXPECT_THAT(Run({"set", "resetkey", "val"}), "OK");
+
+  // RESET should switch back to DB 0.
+  EXPECT_THAT(Run({"reset"}), "RESET");
+
+  // The key in DB 1 should not be visible in DB 0.
+  EXPECT_THAT(Run({"get", "resetkey"}), ArgType(RespExpr::NIL));
+
+  // Select 1 to confirm the key is still there.
+  EXPECT_THAT(Run({"select", "1"}), "OK");
+  EXPECT_THAT(Run({"get", "resetkey"}), "val");
+}
+
 }  // namespace dfly

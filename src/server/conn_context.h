@@ -304,6 +304,11 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
 
+  // Applies the ACL identity carried by `cred` (command set, key/channel globs, db constraint)
+  // to this context. Used both when a connection is created and by RESET to restore the default
+  // user's identity. Does not touch `authed_username`, `ns`, or `authenticated`.
+  void SetAclCredentials(dfly::acl::UserCredentials cred);
+
   // Per-client introspection about the most recent command executed on this
   // connection (akin to the info Redis exposes via CLIENT INFO). Captured live
   // during command execution because the underlying Transaction is per-command
