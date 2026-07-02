@@ -1369,7 +1369,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
   string_view cmd_name{cid.name()};
 
   if (dfly_cntx.req_auth && !dfly_cntx.authenticated) {
-    if (cmd_name != "AUTH" && !cid.IsQuit() && cmd_name != "HELLO") {
+    if (cmd_name != "AUTH" && !cid.IsQuit() && !cid.IsReset() && cmd_name != "HELLO") {
       return ErrorReply{"-NOAUTH Authentication required.", facade::kNoAuthErrType};
     }
   }
@@ -1377,7 +1377,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
   // only reset and quit are allow if this connection is used for monitoring.
   // In Valkey monitor connections are marked as replica connections, so they get this unrelated
   // error message.
-  if (dfly_cntx.monitor && (cmd_name != "RESET" && !cid.IsQuit()))
+  if (dfly_cntx.monitor && !cid.IsReset() && !cid.IsQuit())
     return ErrorReply{"Replica can't interact with the keyspace"};
 
   bool is_write_cmd = cid.IsJournaled();
@@ -1529,7 +1529,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
       << ConnectionLogContext(dfly_cntx->conn());
 
   // If inside MULTI block, store command
-  bool is_trans_cmd = cid->IsExecGroup();
+  // RESET must execute immediately even inside MULTI (it aborts the transaction).
+  bool is_trans_cmd = cid->IsExecGroup() || cid->IsReset();
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     uint8_t tail_index = args.size() - args_no_cmd.size();
     StoreInMultiBlock(dfly_cntx, cid, parsed_cmd, tail_index);
@@ -1755,6 +1756,8 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     //  - EVAL: scripts may require a stricter multi mode than the non-atomic squashing tx;
     //  - blocking commands: prior replies must be flushed before the fiber blocks;
     //  - QUIT: closes the reply builder, dropping any deferred replies not yet sent;
+    //  - RESET: mutates auth/ACL/RESP state that later commands are validated against, so it must
+    //    run standalone before the rest of the pipeline is re-verified;
     //  - subscribe/unsubscribe: emit one reply per channel (multiple top-level replies), which the
     //    CapturingReplyBuilder backing deferred replies cannot represent;
     //  - admin commands (e.g. REPLCONF, DFLY): control commands that may produce no top-level
@@ -1765,7 +1768,7 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() || cid->IsExecGroup();
     const bool is_eval = cid->IsEvalGroup();
     if (is_multi || is_eval || cid->IsBlocking() || (cid->opt_mask() & CO::ADMIN) ||
-        cid->IsQuit() || cid->IsSubscribeFamily())
+        cid->IsQuit() || cid->IsReset() || cid->IsSubscribeFamily())
       break;
 
     if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
@@ -1871,6 +1874,45 @@ void Service::Quit(CmdArgParser, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   DeactivateMonitoring(cntx);
   cmd_cntx->conn()->MarkForClose();
+}
+
+void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  ConnectionState& conn_state = cntx->conn_state;
+
+  // Discard any pending MULTI block and unwatch all keys. MultiCleanup is safe to call even
+  // when no transaction is active (it no-ops on empty state).
+  MultiCleanup(cntx);
+
+  if (conn_state.subscribe_info) {
+    if (!conn_state.subscribe_info->channels.empty())
+      cntx->UnsubscribeAll(false, nullptr);
+    if (conn_state.subscribe_info)
+      cntx->PUnsubscribeAll(false, nullptr);
+  }
+
+  DeactivateMonitoring(cntx);
+
+  // CLIENT TRACKING ON bumps `subscriptions` to force async dispatch for invalidation pushes.
+  // Undo that here so RESET restores the fresh-connection baseline and the connection can go back
+  // to synchronous dispatch.
+  if (conn_state.tracking_info_.IsTrackingOn() && cntx->subscriptions > 0)
+    --cntx->subscriptions;
+  conn_state.tracking_info_.SetClientTracking(false);
+
+  conn_state.db_index = 0;
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  rb->SetRespVersion(RespVersion::kResp2);
+
+  // Restore the default-user ACL identity, matching a freshly created connection.
+  const auto* registry = ServerState::tlocal()->user_registry;
+  cntx->SetAclCredentials(registry->GetCredentials("default"));
+  cntx->authed_username = "default";
+  cntx->ns = &namespaces->GetOrInsert("");
+  cntx->authenticated = false;
+
+  rb->SendSimpleString("RESET");
 }
 
 void Service::Multi(CmdArgParser, CommandContext* cmd_cntx) {
@@ -2956,6 +2998,7 @@ constexpr uint32_t kFunction = SLOW;
 constexpr uint32_t kMonitor = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kPubSub = SLOW;
 constexpr uint32_t kCommand = SLOW | CONNECTION;
+constexpr uint32_t kReset = FAST | CONNECTION;
 }  // namespace acl
 
 void Service::Register(CommandRegistry* registry) {
@@ -2963,6 +3006,7 @@ void Service::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
       << CI{"QUIT", CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
+      << CI{"RESET", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kReset}.HFUNC(Reset)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kMulti}.HFUNC(Multi)
       << CI{"WATCH", CO::LOADING, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
       << CI{"UNWATCH", CO::LOADING, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)

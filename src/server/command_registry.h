@@ -247,6 +247,10 @@ class CommandId : public facade::CommandId {
     return kind_mask_ & QUIT;
   }
 
+  bool IsReset() const {
+    return kind_mask_ & RESET;
+  }
+
   void RecordLatency(unsigned tid, uint64_t latency_usec) const;
 
   bool SupportsAsync() const {
@@ -287,6 +291,8 @@ class CommandId : public facade::CommandId {
     IS_ALIAS = 1U << 13,
     // Command has an async handler (set via SetAsyncHandler / SetHandler with async_support).
     SUPPORT_ASYNC = 1U << 14,
+
+    RESET = 1U << 15,  // RESET only
   };
 
   // CmdKind bits. Trivially copied by the move ctor.
