@@ -64,6 +64,11 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   // If an error is stored inside payload, get a reference to it.
   static std::optional<ErrorRef> TryExtractError(const Payload& pl);
 
+  // Provide inline buffer to avoid allocations. Payload references it - track the lifetime!
+  void ProvideInlineBuffer(std::span<char> buf) {
+    inline_buffer_ = buf;
+  }
+
  private:
   // Send payload directly, bypassing external interface. For efficient passing between two
   // captures.
@@ -76,6 +81,9 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void CollapseFilledCollections();
 
   ReplyMode reply_mode_;
+
+  // A buffer that can be used to avoid allocations. The lifetime is guaranteed by the user
+  std::span<char> inline_buffer_;
 
   // List of nested active collections that are being built.
   std::stack<std::pair<std::unique_ptr<payload::CollectionPayload>, int>> stack_;

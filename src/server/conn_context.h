@@ -454,4 +454,8 @@ class CommandContext : public facade::ParsedCommand {
   const CommandId* cid_ = nullptr;
 };
 
+// 320 is a mi_good_size boundary.
+// The previous boundary of 256 would require making backed_args buffers much smaller
+static_assert(sizeof(CommandContext) == 320);
+
 }  // namespace dfly
