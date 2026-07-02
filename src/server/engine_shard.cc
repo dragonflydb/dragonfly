@@ -618,10 +618,16 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   // If another transaction is currently running on this shard (e.g. an inlined tx preempted
   // on the connection fiber), we must not run any callbacks to avoid interleaving.
   if (running_tx_) {
-    // The transaction (if any) if armed, must be in the txq so a future PollExecution picks it up.
+    auto print_tx = [&](const Transaction* t, string_view name) {
+      return absl::StrFormat("%s=%s", name, t ? t->DebugId(sid) : "null");
+    };
+    // The transaction, if non-null and armed, must either be the continuation tx or be in the txq
+    // or so a future PollExecution picks it up.
     DCHECK(trans == nullptr || !trans->DEBUG_IsArmedInShard(sid) ||
-           trans->DEBUG_GetTxqPosInShard(sid) != TxQueue::kEnd)
-        << context << " " << trans->DebugId();
+           trans->DEBUG_GetTxqPosInShard(sid) != TxQueue::kEnd || trans == continuation_trans_)
+        << context << " " << print_tx(trans, "trans") << " "
+        << print_tx(continuation_trans_, "continuation_trans") << " "
+        << print_tx(running_tx_, "running_tx");
     return;
   }
 

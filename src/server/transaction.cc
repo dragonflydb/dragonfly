@@ -529,7 +529,7 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
                     ",is_armed=", DEBUG_IsArmedInShard(*sid),
                     ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos);
   }
-  absl::StrAppend(&res, "}");
+  absl::StrAppend(&res, "}}");
   return res;
 }
 
