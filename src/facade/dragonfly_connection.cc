@@ -707,7 +707,13 @@ void Connection::AsyncOperations::operator()(CheckpointMessage msg) {
 
 void Connection::AsyncOperations::operator()(const InvalidationMessage& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
-  DCHECK(rbuilder->IsResp3());
+  // Invalidations are client-side-caching pushes that only exist under RESP3 with tracking on.
+  // A message can still be queued when the connection leaves that state - most notably RESET, which
+  // switches the connection back to RESP2 and disables tracking. Emitting a PUSH now would break
+  // the RESP2 protocol, so drop stale invalidations instead (mirrors the stale PubMessage
+  // handling).
+  if (!rbuilder->IsResp3())
+    return;
   rbuilder->StartCollection(2, facade::CollectionType::PUSH);
   rbuilder->SendBulkString("invalidate");
   if (msg.invalidate_due_to_flush) {
