@@ -54,6 +54,11 @@ void CapturingReplyBuilder::SendBulkString(std::string_view str) {
   Capture(BulkString{string{str}});
 }
 
+void CapturingReplyBuilder::SendVerbatimString(std::string_view str, VerbatimFormat format) {
+  SKIP_LESS(ReplyMode::FULL);
+  Capture(make_unique<VerbatimString>(string{str}, static_cast<uint8_t>(format)));
+}
+
 // Capture the borrow into the payload, extending the pin's lifetime until
 // replay moves it into the real sink where it is parked across the writev.
 void CapturingReplyBuilder::SendBulkStringBorrowed(cmn::BorrowedString&& bs) {
@@ -128,6 +133,11 @@ struct CaptureVisitor {
 
   void operator()(const payload::BulkString& bs) {
     static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs);
+  }
+
+  void operator()(const unique_ptr<payload::VerbatimString>& vs) {
+    using VF = RedisReplyBuilder::VerbatimFormat;
+    static_cast<RedisReplyBuilder*>(rb)->SendVerbatimString(vs->str, static_cast<VF>(vs->format));
   }
 
   void operator()(const cmn::BorrowedString& bs) {

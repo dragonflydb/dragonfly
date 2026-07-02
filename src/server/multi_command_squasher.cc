@@ -39,23 +39,25 @@ thread_local uint32_t log_squash_threshold_cached = 1ULL << 31;
 size_t Size(const CapturingReplyBuilder::Payload& payload) {
   size_t payload_size = sizeof(CapturingReplyBuilder::Payload);
   return payload_size +
-         visit(Overloaded{[](const payload::SimpleString& data) { return data.size(); },
-                          [](const payload::BulkString& data) { return data.size(); },
-                          [](const payload::Error& data) {
-                            return data->first.size() + data->second.size();
-                          },
-                          [](const unique_ptr<payload::CollectionPayload>& data) {
-                            if (!data || (data->len == 0 && data->type == CollectionType::ARRAY)) {
-                              return 0ul;
-                            }
-                            size_t res = 0;
-                            for (const auto& pl : data->arr) {
-                              res += Size(pl);
-                            }
-                            return res;
-                          },
-                          // Other payload types are small
-                          [](const auto&) { return 0ul; }},
+         visit(Overloaded{
+                   [](const payload::SimpleString& data) { return data.size(); },
+                   [](const payload::BulkString& data) { return data.size(); },
+                   [](const unique_ptr<payload::VerbatimString>& data) { return data->str.size(); },
+                   [](const payload::Error& data) {
+                     return data->first.size() + data->second.size();
+                   },
+                   [](const unique_ptr<payload::CollectionPayload>& data) {
+                     if (!data || (data->len == 0 && data->type == CollectionType::ARRAY)) {
+                       return 0ul;
+                     }
+                     size_t res = 0;
+                     for (const auto& pl : data->arr) {
+                       res += Size(pl);
+                     }
+                     return res;
+                   },
+                   // Other payload types are small
+                   [](const auto&) { return 0ul; }},
                payload);
 }
 
