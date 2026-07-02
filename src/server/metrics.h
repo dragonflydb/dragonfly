@@ -140,6 +140,7 @@ struct Metrics {
   InternedStringStats interned_string_stats;
 
   acl::UserRegistry::AclStats acl_stats;
+  util::fb2::ProactorBase::Stats proactor_stats;
 
   void InitFromThread(Namespace* ns, const CommandRegistry* registry, unsigned proactor_index,
                       const MetricsCollectOpts& opts, DflyCmd* dfly_cmd);
