@@ -55,6 +55,10 @@ inputs:
   epoll:
     required: false
     type: string
+  df-runtime-flags:
+    required: false
+    type: string
+    description: "Runtime flags to pass to the dragonfly process via --df, e.g. 'enable_resp_io_loop_v2=true'"
 
 runs:
   using: "composite"
@@ -134,6 +138,19 @@ runs:
         export FILTER="${{inputs.filter}}"
         JUNIT_DIR="${REGRESSION_JUNIT_DIR}"
 
+        # Runtime flags forwarded to the dragonfly process via --df.
+        # Globbing is disabled while splitting so values like vmodule=*=1 are preserved,
+        # and the flags are collected into an array to avoid re-splitting/globbing
+        # when expanded on the pytest command line.
+        DF_RUNTIME_ARGS=()
+        if [[ -n "${DF_RUNTIME_FLAGS_INPUT}" ]]; then
+          set -f # disables filename expansion (globbing)
+          for flag in ${DF_RUNTIME_FLAGS_INPUT}; do
+            DF_RUNTIME_ARGS+=(--df "$flag")
+          done
+          set +f
+        fi
+
         # Exclude large tests unless explicitly requested
         if [[ "$FILTER" == "large" ]]; then
           : # keep as-is, run only large tests
@@ -149,13 +166,13 @@ runs:
           timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes \
             --json-report --json-report-file=report.json \
             --junitxml="${JUNIT_DIR}/pytest-${REGRESSION_JUNIT_KIND}.xml" \
-            dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
+            dragonfly --df force_epoll=true "${DF_RUNTIME_ARGS[@]}" --log-cli-level=INFO || code=$?
         else
           # Run only replication tests with iouring
           timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes \
             --json-report --json-report-file=report.json \
             --junitxml="${JUNIT_DIR}/pytest-${REGRESSION_JUNIT_KIND}.xml" \
-            dragonfly --log-cli-level=INFO || code=$?
+            dragonfly "${DF_RUNTIME_ARGS[@]}" --log-cli-level=INFO || code=$?
         fi
 
         # timeout returns 124 if we exceeded the timeout duration
@@ -176,6 +193,9 @@ runs:
           exit 1
         fi
       env:
+        # Pass the raw runtime-flags input through the environment so the value is never
+        # embedded directly in the shell script (avoids shell injection).
+        DF_RUNTIME_FLAGS_INPUT: ${{ inputs.df-runtime-flags }}
         # Add environment variables to enable the S3 snapshot test.
         # AWS credentials: if inputs provided, use them; otherwise rely on workflow OIDC auth
         DRAGONFLY_S3_BUCKET: ${{ inputs.s3-bucket }}
