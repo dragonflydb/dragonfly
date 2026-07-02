@@ -2533,8 +2533,7 @@ async def test_client_list_filters(df_server: DflyInstance):
     {
         "proactor_threads": 2,
         "pipeline_squash": 1,
-        "write_connection_throttling": "true",
-        "write_connection_throttling_sleep_usec": 10000,  # 10ms per throttled batch
+        "write_connection_throttling_sleep_usec": 10000,  # 10ms per throttled batch; >0 enables throttling
     }
 )
 @pytest.mark.asyncio

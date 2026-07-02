@@ -136,9 +136,8 @@ ABSL_RETIRED_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
                   "Deprecated. Squash latency stats are now tracked unconditionally; "
                   "use the pipeline_latency_seconds histogram for percentiles instead.");
 
-ABSL_FLAG(bool, write_connection_throttling, false, "Throttle write connections.");
 ABSL_FLAG(uint32_t, write_connection_throttling_sleep_usec, 500,
-          "Sleep period for write connection in microseconds");
+          "Sleep period for write connection in microseconds. 0 disables yielding.");
 
 namespace {
 
@@ -177,6 +176,9 @@ void ShutdownWatchdog::Disarm() {
 }
 
 std::optional<ShutdownWatchdog> shutdown_watchdog = std::nullopt;
+
+thread_local uint32_t tl_write_connection_throttling_sleep_usec =
+    absl::GetFlag(FLAGS_write_connection_throttling_sleep_usec);
 
 }  // namespace
 
@@ -1020,9 +1022,14 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
   config_registry.RegisterMutable("pipeline_squash");
-  config_registry.RegisterMutable("write_connection_throttling");
   config_registry.RegisterMutable("lua_mem_gc_threshold");
   config_registry.RegisterMutable("background_debug_jobs");
+
+  RegisterMutableFlags(&config_registry,
+                       base::GetFlagNames(FLAGS_write_connection_throttling_sleep_usec), []() {
+                         tl_write_connection_throttling_sleep_usec =
+                             absl::GetFlag(FLAGS_write_connection_throttling_sleep_usec);
+                       });
 
   // Register ServerState flags
   RegisterMutableFlags(&config_registry, ServerState::GetMutableFlagNames(),
@@ -1753,6 +1760,16 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
   };
 
   bool batch_has_write_command = false;
+  auto update_rw_connection_throttling_metrics = [&](const CommandId* cid, size_t bytes) {
+    if (cid->IsReadOnly()) {
+      ss->stats.rw_throttle_batch_read_commands++;
+      ss->stats.rw_throttle_batch_read_bytes += bytes;
+    } else if (cid->IsJournaled()) {
+      batch_has_write_command = true;
+      ss->stats.rw_throttle_batch_write_commands++;
+      ss->stats.rw_throttle_batch_write_bytes += bytes;
+    }
+  };
 
   auto* cmd = first;
   for (unsigned i = 0; i < count && cmd; i++) {
@@ -1792,24 +1809,17 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
       continue;
     }
 
-    if (cid->IsReadOnly()) {
-      ss->stats.rw_throttle_batch_read_commands++;
-      ss->stats.rw_throttle_batch_read_bytes += cmd_cntx->EnqueuedBytes();
-    } else if (cid->IsJournaled()) {
-      batch_has_write_command = true;
-      ss->stats.rw_throttle_batch_write_commands++;
-      ss->stats.rw_throttle_batch_write_bytes += cmd_cntx->EnqueuedBytes();
-    }
+    if (tl_write_connection_throttling_sleep_usec > 0)
+      update_rw_connection_throttling_metrics(cid, cmd_cntx->EnqueuedBytes());
 
     cmd_refs.push_back(CmdRef{cid, tail_args, ReplyMode::FULL, cmd_cntx});
     cmd = cmd->next;
   }
 
   // Simple policy that throttles batches that contain write commands by sleeping before dispatch.
-  if (absl::GetFlag(FLAGS_write_connection_throttling) && batch_has_write_command) {
+  if (batch_has_write_command && tl_write_connection_throttling_sleep_usec > 0) {
     ss->stats.rw_throttle_batches_total++;
-    ThisFiber::SleepFor(
-        chrono::microseconds(absl::GetFlag(FLAGS_write_connection_throttling_sleep_usec)));
+    ThisFiber::SleepFor(chrono::microseconds(tl_write_connection_throttling_sleep_usec));
   }
 
   perform_squash();
