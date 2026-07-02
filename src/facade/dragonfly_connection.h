@@ -176,7 +176,8 @@ class Connection : public util::Connection {
   virtual void SendPubMessageAsync(PubMessage);
 
   // Add monitor message to dispatch queue.
-  void SendMonitorMessageAsync(std::string);
+  // Virtual because behavior is overridden in test_utils.
+  virtual void SendMonitorMessageAsync(std::string);
 
   // If any dispatch is currently in progress, increment counter and send checkpoint message to
   // decrement it once finished.

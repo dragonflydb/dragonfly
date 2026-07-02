@@ -654,6 +654,17 @@ TEST_F(DflyEngineTest, PUnsubscribe) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "b*", IntArg(0)));
 }
 
+TEST_F(DflyEngineTest, MonitorSubscriptionsAccounting) {
+  EXPECT_EQ(Run({"monitor"}), "OK");
+  EXPECT_EQ(1u, NumSubscriptions("IO0"));
+
+  // Deactivating the monitor (here via QUIT) must fully undo its contribution to `subscriptions`,
+  // so the connection is treated as non-subscribed again (eligible for thread migration and
+  // synchronous dispatch).
+  EXPECT_EQ(Run({"quit"}), "OK");
+  EXPECT_EQ(0u, NumSubscriptions("IO0"));
+}
+
 TEST_F(DflyEngineTest, Bug468) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");

@@ -382,9 +382,15 @@ class ConnectionContext : public facade::ConnectionContext {
   bool skip_acl_validation = false;
 
  private:
-  void EnableMonitoring(bool enable) {
+  void EnableMonitoring() {
     subscriptions++;  // required to support the monitoring
-    monitor = enable;
+    monitor = true;
+  }
+
+  void DisableMonitoring() {
+    DCHECK_GT(subscriptions, 0u);
+    subscriptions--;
+    monitor = false;
   }
 
   std::vector<unsigned> ChangeSubscriptions(facade::ParsedArgs channels, bool pattern, bool to_add,
