@@ -12,17 +12,24 @@
 #include <concepts>
 #include <vector>
 
+#include "common/rapidhash.h"
 #include "core/detail/stateless_allocator.h"
+#include "core/oah_ptr.h"
 #include "core/simd_op.h"
 #include "core/string_set.h"
-#include "oah_entry.h"
 
 namespace dfly {
 
+// oah_set.h - an open-addressing hash set of string members (the OAHSet container).
+//
+// OAHSet stores members in a flat array of TaggedPtr buckets. Each bucket is wrapped by a
+// non-owning OAHPtr holding either a single OAHEntry or a PtrVector collision chain. Lookups probe
+// a small SIMD window around the home bucket and spill overflow into an extension-point vector.
+// Buckets own their blobs/vectors and are freed explicitly (a TaggedPtr has no destructor).
+//
 // TODO add template parameter instead of OAHEntry
 class OAHSet {  // Open Addressing Hash Set
-  using OAHEntryAllocator = StatelessAllocator<OAHEntry>;
-  using Buckets = std::vector<OAHEntry, OAHEntryAllocator>;
+  using Buckets = std::vector<TaggedPtr, StatelessAllocator<TaggedPtr>>;
 
  public:
   static constexpr std::uint32_t kShiftLog = 5;                         // TODO make template
@@ -34,17 +41,17 @@ class OAHSet {  // Open Addressing Hash Set
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
     using value_type = OAHEntry;
-    using pointer = OAHEntry*;
-    using reference = OAHEntry&;
+    using pointer = OAHEntry;
+    using reference = OAHEntry;
 
     iterator(OAHSet* owner, uint32_t bucket_id, uint32_t pos_in_bucket)
         : owner_(owner), bucket_(bucket_id), pos_(pos_in_bucket) {
     }
 
     void SetExpiryTime(uint32_t ttl_sec) {
-      auto& entry = owner_->entries_[bucket_][pos_];
+      auto entry = owner_->At(bucket_)[pos_];
       owner_->obj_alloc_used_ -= entry.AllocSize();
-      owner_->entries_[bucket_][pos_].SetExpiry(owner_->EntryTTL(ttl_sec));
+      owner_->At(bucket_)[pos_].SetExpiry(owner_->EntryTTL(ttl_sec));
       owner_->obj_alloc_used_ += entry.AllocSize();
       owner_->expiration_used_ = true;
     }
@@ -68,19 +75,19 @@ class OAHSet {  // Open Addressing Hash Set
     }
 
     reference operator*() {
-      return owner_->entries_[bucket_][pos_];
+      return owner_->At(bucket_)[pos_];
     }
 
     reference operator->() {
-      return owner_->entries_[bucket_][pos_];
+      return owner_->At(bucket_)[pos_];
     }
 
     bool HasExpiry() {
-      return owner_->entries_[bucket_][pos_].HasExpiry();
+      return owner_->At(bucket_)[pos_].HasExpiry();
     }
 
     uint32_t ExpiryTime() {
-      return owner_->entries_[bucket_][pos_].GetExpiry();
+      return owner_->At(bucket_)[pos_].GetExpiry();
     }
 
     uint32_t bucket_id() const {
@@ -94,7 +101,7 @@ class OAHSet {  // Open Addressing Hash Set
     // Reallocates fragmented buffers in this bucket (inner entries + array buffer for
     // vectors). Returns true iff anything moved. Idempotent within a defrag pass.
     bool ReallocIfNeeded(PageUsage* page_usage) {
-      auto& bucket = owner_->entries_[bucket_];
+      auto bucket = owner_->At(bucket_);
       bool realloced = false;
       ssize_t delta = bucket.ReallocIfNeeded(page_usage, &realloced);
       // delta can be negative if a realloc lands in a smaller mimalloc usable-size
@@ -116,9 +123,9 @@ class OAHSet {  // Open Addressing Hash Set
       // time_now_ == 0 disables expiry (callers set it to 0 around serialization).
       const uint32_t now = owner_->time_now_;
       for (auto num_entries = owner_->entries_.size(); bucket_ < num_entries; ++bucket_) {
-        auto& bucket = owner_->entries_[bucket_];
+        auto bucket = owner_->At(bucket_);
         for (uint32_t bucket_size = bucket.ElementsNum(); pos_ < bucket_size; ++pos_) {
-          auto& entry = bucket[pos_];
+          auto entry = bucket[pos_];
           if (!entry)
             continue;
           if (now != 0 && entry.HasExpiry() && entry.GetExpiry() <= now) {
@@ -150,11 +157,12 @@ class OAHSet {  // Open Addressing Hash Set
 
   static constexpr uint32_t kMaxBatchLen = 32;
 
-  // OAHEntry is one uint64_t, so 4 entries fill a 32-byte AVX2 register. The window is
-  // probed in kEntryLaneStep-lane strides, so kDisplacementSize must be a multiple of
-  // the stride and <= 32 (masks fit a uint32_t).
-  static_assert(sizeof(OAHEntry) == sizeof(uint64_t));
-  static_assert(alignof(OAHEntry) == alignof(uint64_t));
+  // Buckets hold one TaggedPtr control word per lane, so 4 fill a 32-byte AVX2 register.
+  // The window is probed in kEntryLaneStep-lane strides, so kDisplacementSize must be a
+  // multiple of the stride and <= 32 (masks fit a uint32_t). OAHEntry stays a thin
+  // word-sized accessor over such a slot.
+  static_assert(sizeof(OAHEntry) == sizeof(TaggedPtr));
+  static_assert(alignof(OAHEntry) == alignof(TaggedPtr));
   static constexpr std::uint32_t kEntryLaneStep = 4;
   using EntryWide = SimdOp<uint64_t, kEntryLaneStep>;
   static_assert(kDisplacementSize % kEntryLaneStep == 0 && kDisplacementSize <= 32);
@@ -167,17 +175,25 @@ class OAHSet {  // Open Addressing Hash Set
 
   explicit OAHSet() = default;
 
+  // Buckets are TaggedPtr control words that own their blobs/vectors (freed by
+  // ~OAHSet), so a shallow copy would double-free. Non-copyable, matching DenseSet.
+  OAHSet(const OAHSet&) = delete;
+  OAHSet& operator=(const OAHSet&) = delete;
+
+  ~OAHSet() {
+    FreeAllSlots();
+  }
+
   // Inserts `str` (optional TTL); returns false if already present.
   bool Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX);
 
   void Reserve(size_t sz) {
     sz = absl::bit_ceil(sz);
     if (sz > entries_.size()) {
-      auto prev_capacity_log = capacity_log_;
       capacity_log_ = std::max(kMinCapacityLog, uint32_t(absl::bit_width(sz) - 1));
       size_t prev_size = entries_.size();
       entries_.resize(Capacity());
-      Rehash(prev_capacity_log, prev_size);
+      Rehash(prev_size);
     }
     assert(entries_.size() >= kDisplacementSize);
   }
@@ -188,6 +204,7 @@ class OAHSet {  // Open Addressing Hash Set
   void Shrink(size_t new_size);
 
   void Clear() {
+    FreeAllSlots();
     capacity_log_ = 0;
     entries_.resize(0);
     size_ = 0;
@@ -202,13 +219,14 @@ class OAHSet {  // Open Addressing Hash Set
     const uint32_t total = entries_.size();
     const uint32_t end = std::min(total, start + count);
     for (uint32_t i = start; i < end; ++i) {
-      auto& bucket = entries_[i];
+      auto bucket = At(i);
       if (bucket.Empty())
         continue;
 
       if (bucket.IsVector()) {
-        auto& vec = bucket.AsVector();
-        for (auto& entry : vec) {
+        auto vec = bucket.AsVector();
+        for (TaggedPtr& cell : vec) {
+          OAHEntry entry(cell);
           if (entry) {
             obj_alloc_used_ -= entry.AllocSize();
             --size_;
@@ -216,10 +234,10 @@ class OAHSet {  // Open Addressing Hash Set
         }
         ptr_vectors_alloc_used_ -= vec.AllocSize();
       } else {
-        obj_alloc_used_ -= bucket.AllocSize();
+        obj_alloc_used_ -= bucket[0].AllocSize();
         --size_;
       }
-      bucket = OAHEntry();
+      bucket.Clear();
     }
     // Match Clear() semantics: once incrementally cleared empty, the TTL flag is stale.
     if (size_ == 0)
@@ -270,7 +288,7 @@ class OAHSet {  // Open Addressing Hash Set
       bool res = false;
       for (uint32_t i = 0; i < kDisplacementSize; i++) {
         const uint32_t shifted_bid = bucket_id + i;
-        res |= ScanBucket(entries_[shifted_bid], cb, bucket_id);
+        res |= ScanBucket(At(shifted_bid), cb, bucket_id);
       }
       if (res)
         break;
@@ -326,7 +344,7 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   size_t SetMallocUsed() const {
-    return entries_.capacity() * sizeof(OAHEntry) + ptr_vectors_alloc_used_;
+    return entries_.capacity() * sizeof(TaggedPtr) + ptr_vectors_alloc_used_;
   }
 
   bool ExpirationUsed() const {
@@ -342,20 +360,41 @@ class OAHSet {  // Open Addressing Hash Set
 
  private:
   static uint64_t Hash(std::string_view str) {
-    constexpr XXH64_hash_t kHashSeed = 24061983;
-    return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
+    constexpr uint64_t kHashSeed = 24061983;
+    return rapidhashMicro_withSeed(str.data(), str.size(), kHashSeed);
   }
 
   static uint32_t BucketId(uint64_t hash, uint32_t capacity_log) {
     return hash >> (64 - capacity_log);
   }
+
+  // A non-owning OAHPtr over bucket slot `i`.
+  OAHPtr At(uint32_t i) {
+    return OAHPtr(entries_[i]);
+  }
+
+  // Frees the blob/vector of every non-empty bucket. Used by ~OAHSet and Clear().
+  void FreeAllSlots() {
+    for (size_t i = 0, n = entries_.size(); i < n; ++i) {
+      if (entries_[i])
+        At(i).Clear();
+    }
+  }
+
   // was Grow in StringSet
-  void Rehash(uint32_t prev_capacity_log, uint32_t prev_size);
+  void Rehash(uint32_t prev_size);
+
+  // Rehashes and re-inserts every entry of `slot`'s bucket into entries_, then frees it.
+  void RedistributeBucket(TaggedPtr& slot);
 
   // it is inefficient for now,
   // TODO predict new position by current position and extended hash
   void ShrinkBucket(uint32_t bucket_id) {
-    auto bucket = std::move(entries_[bucket_id]);
+    // Detach the slot bits into a local; `bucket` views the local and is freed
+    // explicitly below (At(new_bucket_id) writes into entries_, never this local).
+    TaggedPtr slot = entries_[bucket_id];
+    entries_[bucket_id] = 0;
+    OAHPtr bucket(slot);
     if (bucket.Empty())
       return;
 
@@ -368,17 +407,16 @@ class OAHSet {  // Open Addressing Hash Set
           continue;
         }
 
-        auto hash = Hash(bucket[pos].Key());
-        auto new_bucket_id = BucketId(hash, capacity_log_);
-        SetEntryHash(bucket[pos], hash);
-        new_bucket_id = FindEmptyAround(new_bucket_id);
-        ptr_vectors_alloc_used_ += entries_[new_bucket_id].Insert(std::move(bucket[pos]));
+        uint32_t new_bucket_id = FindEmptyAround(RehashEntry(bucket[pos]));
+        ptr_vectors_alloc_used_ += At(new_bucket_id).Insert(bucket.Remove(pos));
       }
     }
 
     if (bucket.IsVector()) {
       ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
     }
+    // Frees the (now drained) collision array and any expired entries left behind.
+    bucket.Clear();
   }
 
   static uint32_t GetExtensionPoint(uint32_t bid) {
@@ -387,17 +425,19 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   template <std::invocable<std::string_view> T>
-  bool ScanBucket(OAHEntry& entry, const T& cb, uint32_t bucket_id) {
+  bool ScanBucket(OAHPtr entry, const T& cb, uint32_t bucket_id) {
     if (!entry.IsVector()) {
-      entry.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
-      if (CheckBucketAffiliation(entry, bucket_id)) {
-        cb(entry.Key());
+      OAHEntry e = entry[0];
+      e.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+      if (CheckBucketAffiliation(e, bucket_id)) {
+        cb(e.Key());
         return true;
       }
     } else {
-      auto& arr = entry.AsVector();
+      auto arr = entry.AsVector();
       bool result = false;
-      for (auto& el : arr) {
+      for (TaggedPtr& cell : arr) {
+        OAHEntry el(cell);
         el.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
         if (CheckBucketAffiliation(el, bucket_id)) {
           cb(el.Key());
@@ -433,26 +473,26 @@ class OAHSet {  // Open Addressing Hash Set
 
   // Result of a SIMD probe over a run of OAHEntry lanes.
   struct LaneMasks {
-    uint32_t candidates;  // non-empty lanes whose ext-hash matches or is lazily zero
+    uint32_t candidates;  // non-empty lanes whose stored ext-hash equals the query ext-hash
     uint32_t empties;     // empty lanes (data_ == 0); Add picks a slot from these
   };
 
   // Vectorized hash probe over Wide::kLanes consecutive lanes from `base`. Backs
   // the window (EntryWide) and extension-vector (VectorWide) scans.
   template <typename Wide>
-  static LaneMasks ProbeLanes(const OAHEntry* base, uint64_t ext_hash) noexcept;
+  static LaneMasks ProbeLanes(const TaggedPtr* base, uint64_t ext_hash) noexcept;
 
   // Combined candidate/empty masks over the whole window (lane i -> bit i).
-  LaneMasks ProbeWindow(const OAHEntry* base, uint64_t ext_hash) noexcept;
+  LaneMasks ProbeWindow(const TaggedPtr* base, uint64_t ext_hash) noexcept;
 
   // Searches the extension-point vector for `str`. Returns the matched slot
   // (possibly now-empty after expiry, which the caller reuses) or nullptr.
-  OAHEntry* ProbeExtensionVector(uint32_t ext_bid, std::string_view str, uint64_t ext_hash);
+  TaggedPtr* ProbeExtensionVector(uint32_t ext_bid, std::string_view str, uint64_t ext_hash);
 
   // Outcome of a key probe. A raw slot (not an iterator) so the caller can reuse a
   // matched-but-just-expired entry, which is Empty() and would trip operator[]'s assert.
   struct MatchResult {
-    OAHEntry* matched;    // matched entry, or null if absent; may be Empty() (just expired)
+    TaggedPtr* matched;   // ptr to matched cell, or null if absent; may be 0 (just expired)
     uint32_t bucket_id;   // location of `matched`, for building an iterator
     uint32_t pos_in_vec;  // position within a vector bucket (0 for single entries)
   };
@@ -472,64 +512,21 @@ class OAHSet {  // Open Addressing Hash Set
     return (hash >> ext_hash_shift) & OAHEntry::kExtHashMask;
   }
 
-  uint64_t SetEntryHash(OAHEntry& entry, uint64_t hash) {
-    uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
-    entry.SetExtHash(ext_hash);
-    return ext_hash;
-  }
-
-  // Probe candidate whose key didn't match: refresh its stale/lazy-zero ext-hash
-  // cache so later probes skip it, then apply pending expiry.
-  void RefreshStaleCandidate(OAHEntry& e, uint64_t ext_hash);
-
-  bool CheckBucketAffiliation(OAHEntry& entry, uint32_t bucket_id) {
-    assert(!entry.IsVector());
+  bool CheckBucketAffiliation(OAHEntry entry, uint32_t bucket_id) {
     if (entry.Empty())
       return false;
     uint32_t bucket_id_hash_part = capacity_log_ > kShiftLog ? kShiftLog : capacity_log_;
     uint32_t bucket_mask = (1 << bucket_id_hash_part) - 1;
     bucket_id &= bucket_mask;
-    auto stored_hash = entry.GetHash();
-    if (!stored_hash) {
-      stored_hash = SetEntryHash(entry, Hash(entry.Key()));
-    }
-    uint32_t stored_bucket_id = stored_hash >> (OAHEntry::kExtHashSize - bucket_id_hash_part);
+    uint32_t stored_bucket_id = entry.GetHash() >> (OAHEntry::kExtHashSize - bucket_id_hash_part);
     return bucket_id == stored_bucket_id;
   }
 
-  // return new bucket_id
-  uint32_t RehashEntry(OAHEntry& entry, uint32_t current_bucket_id, uint32_t prev_capacity_log) {
-    assert(!entry.IsVector());
-    auto stored_hash = entry.GetHash();
-
-    const uint32_t logs_diff = capacity_log_ - prev_capacity_log;
-    const uint32_t prev_significant_bits =
-        prev_capacity_log > kShiftLog ? kShiftLog : prev_capacity_log;
-    const uint32_t needed_hash_bits = prev_significant_bits + logs_diff;
-
-    if (!stored_hash || needed_hash_bits > OAHEntry::kExtHashSize) {
-      auto hash = Hash(entry.Key());
-      SetEntryHash(entry, hash);
-      return BucketId(hash, capacity_log_);
-    }
-
-    const uint32_t real_bucket_end =
-        stored_hash >> (OAHEntry::kExtHashSize - prev_significant_bits);
-    const uint32_t prev_shift_mask = (1 << prev_significant_bits) - 1;
-    const uint32_t curr_shift = (current_bucket_id - real_bucket_end) & prev_shift_mask;
-    const uint32_t prev_bucket_mask = (1 << prev_capacity_log) - 1;
-    const uint32_t base_bucket_id = (current_bucket_id - curr_shift) & prev_bucket_mask;
-
-    const uint32_t last_bits_mask = (1 << logs_diff) - 1;
-    const uint32_t stored_hash_shift = OAHEntry::kExtHashSize - needed_hash_bits;
-    const uint32_t last_bits = (stored_hash >> stored_hash_shift) & last_bits_mask;
-    const uint32_t new_bucket_id = (base_bucket_id << logs_diff) | last_bits;
-
-    entry.ClearHash();  // the cache is invalid after rehash operation
-
-    assert(BucketId(Hash(entry.Key()), capacity_log_) == new_bucket_id);
-
-    return new_bucket_id;
+  // Recomputes the entry's hash, refreshes its stored ext-hash, and returns its new bucket.
+  uint32_t RehashEntry(OAHEntry entry) {
+    uint64_t hash = Hash(entry.Key());
+    entry.SetExtHash(CalcExtHash(hash, capacity_log_));
+    return BucketId(hash, capacity_log_);
   }
 
   mutable size_t obj_alloc_used_ = 0;
