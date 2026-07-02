@@ -224,6 +224,7 @@ bool SBF::Add(std::string_view str) {
   // Based on the paper, the optimal fill ratio for SBF is 50%.
   // Lets add a new slice if we reach it.
   if (current_size_ >= max_capacity_) {
+    prev_size_ += max_capacity_;
     fp_prob_ *= kSBFErrorFactor;
     filters_.emplace_back().Init(max_capacity_ * grow_factor_, fp_prob_,
                                  filters_.get_allocator().resource());
