@@ -53,7 +53,7 @@ jobs:
 
     steps:
       - name: Checkout mastodon
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: mastodon/mastodon
           ref: 8bbde181db0d6d79018fb1754a8296e753d47415
