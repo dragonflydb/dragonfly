@@ -15,13 +15,13 @@ Fuzzing terminology used in this file:
 Flow:
   1. Read unified diff from stdin, extract changed C++ file paths.
   2. Load all existing seed files so the LLM knows what's already covered.
-  3. Call Claude API: send the diff + seeds, get back JSON with command arrays + focus commands.
+  3. Call an LLM API (OpenAI gpt-4.1 by default): send diff + seeds, get JSON with command arrays + focus commands.
   4. Encode commands as RESP wire format, write to output dir.
 
 The LLM returns commands as plain arrays (e.g. ["SET", "key", "value"]) and we handle
 RESP encoding ourselves — this avoids JSON escaping issues and byte-count mismatches.
 
-When ANTHROPIC_API_KEY is not available (e.g. fork PRs), exits with no output and
+When no API key is available (e.g. fork PRs), exits with no output and
 the fuzzer runs with the existing seed corpus as-is.
 
 Usage:
@@ -34,8 +34,10 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 
-# Max diff lines to send to the LLM (Haiku handles ~200K tokens, so this is generous)
+# Max diff lines to send to the LLM (gpt-4.1 handles ~1M tokens, so this is generous)
 MAX_DIFF_LINES = 20000
 
 LLM_SYSTEM_PROMPT = """\
@@ -94,6 +96,32 @@ Rules for seeds:
 - Prefix all names with "pr_"
 """
 
+# JSON schema for OpenAI strict Structured Outputs — guarantees the response shape so the
+# parser never has to salvage malformed JSON.
+OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["focus_commands", "seeds"],
+    "properties": {
+        "focus_commands": {"type": "array", "items": {"type": "string"}},
+        "seeds": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "commands"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "commands": {
+                        "type": "array",
+                        "items": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+        },
+    },
+}
+
 
 def extract_changed_files(diff_text):
     """Extract C++/header file paths from a unified diff."""
@@ -147,22 +175,16 @@ def encode_resp(commands):
     return bytes(result)
 
 
-def call_llm(diff_text, changed_files, example_seeds, api_key, model):
-    """Call Claude API to generate targeted seeds from the diff."""
-    try:
-        import anthropic
-    except ImportError:
-        print("anthropic package not available", file=sys.stderr)
-        return None
-
+def build_prompt(diff_text, changed_files, example_seeds):
+    """Build the user prompt: full existing seed corpus + full (line-capped) diff."""
     truncated, num_lines = truncate_diff(diff_text)
 
-    # Build examples section — show existing seeds so the LLM knows what's covered
+    # Show existing seeds so the LLM knows what's already covered
     examples_text = ""
     for ex in example_seeds:
         examples_text += "--- %s ---\n%s\n\n" % (ex["name"], ex["content"].rstrip())
 
-    prompt = (
+    return (
         "Here are ALL existing seed files (RESP wire format) so you know what's already covered:\n\n"
         "%s\n"
         "Now analyze this diff and generate targeted fuzzing seeds.\n\n"
@@ -171,17 +193,12 @@ def call_llm(diff_text, changed_files, example_seeds, api_key, model):
         "Respond with valid JSON only."
     ) % (examples_text, ", ".join(changed_files), num_lines, truncated)
 
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=model,
-        max_tokens=16384,
-        system=LLM_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
 
-    text = response.content[0].text.strip()
+def parse_llm_json(text):
+    """Parse JSON from an LLM response, tolerating occasional markdown/prose wrapping."""
+    text = text.strip()
 
-    # Try to extract JSON from the response (LLMs sometimes wrap in markdown)
+    # LLMs sometimes wrap JSON in a markdown fence
     json_match = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
     if json_match:
         text = json_match.group(1)
@@ -191,7 +208,7 @@ def call_llm(diff_text, changed_files, example_seeds, api_key, model):
     except json.JSONDecodeError:
         pass
 
-    # Try to find the outermost { ... } and parse that
+    # Fall back to the outermost { ... }
     brace_match = re.search(r"\{.*\}", text, re.DOTALL)
     if brace_match:
         try:
@@ -199,9 +216,73 @@ def call_llm(diff_text, changed_files, example_seeds, api_key, model):
         except json.JSONDecodeError:
             pass
 
-    # Log raw response for debugging and raise
     print("Raw LLM response (first 2000 chars):\n%s" % text[:2000], file=sys.stderr)
     raise ValueError("Could not parse LLM response as JSON")
+
+
+def call_openai(prompt, api_key, model, endpoint):
+    """Call OpenAI (or any OpenAI-compatible endpoint) with strict JSON-schema output."""
+    body = {
+        "model": model,
+        "max_tokens": 16384,
+        "messages": [
+            {"role": "system", "content": LLM_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "fuzz_seeds", "strict": True, "schema": OUTPUT_SCHEMA},
+        },
+    }
+
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Authorization": "Bearer %s" % api_key, "Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError("OpenAI API returned HTTP %d: %s" % (e.code, error_body[:1000]))
+
+    message = data["choices"][0]["message"]
+    text = message.get("content")
+    if not text:
+        raise ValueError("OpenAI returned no content (refusal: %s)" % message.get("refusal"))
+    return parse_llm_json(text)
+
+
+def call_anthropic(prompt, api_key, model):
+    """Call the Anthropic API (opt-in via --provider anthropic)."""
+    try:
+        import anthropic
+    except ImportError:
+        print("anthropic package not available", file=sys.stderr)
+        return None
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=16384,
+        system=LLM_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return parse_llm_json(response.content[0].text)
+
+
+def call_llm(diff_text, changed_files, example_seeds, provider, api_key, model, openai_endpoint):
+    """Dispatch to the selected provider. No cross-provider fallback — errors propagate."""
+    prompt = build_prompt(diff_text, changed_files, example_seeds)
+
+    if provider == "openai":
+        return call_openai(prompt, api_key, model, openai_endpoint)
+    if provider == "anthropic":
+        return call_anthropic(prompt, api_key, model)
+    raise ValueError("Unknown provider: %s" % provider)
 
 
 def write_output(output_dir, focus_commands, seeds):
@@ -239,14 +320,34 @@ def main():
         help="Directory with existing seed files (auto-detected if not set)",
     )
     parser.add_argument(
-        "--api-key", default=None, help="Anthropic API key (or set ANTHROPIC_API_KEY env var)"
+        "--provider",
+        choices=("openai", "anthropic"),
+        default=os.environ.get("LLM_PROVIDER", "openai"),
+        help="LLM provider. Defaults to openai (gpt-4.1); anthropic is opt-in.",
     )
-    parser.add_argument("--model", default="claude-haiku-4-5-20251001", help="Claude model to use")
+    parser.add_argument("--model", default=None, help="Model to use (default: gpt-4.1 for openai)")
+    parser.add_argument(
+        "--api-key", default=None, help="API key (or set OPENAI_API_KEY / ANTHROPIC_API_KEY)"
+    )
+    parser.add_argument(
+        "--openai-endpoint",
+        default=os.environ.get("OPENAI_ENDPOINT", "https://api.openai.com/v1/chat/completions"),
+        help="OpenAI-compatible chat completions endpoint",
+    )
     args = parser.parse_args()
 
-    api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY")
+    default_models = {"openai": "gpt-4.1", "anthropic": "claude-haiku-4-5-20251001"}
+    model = args.model or default_models[args.provider]
+
+    if args.provider == "openai":
+        api_key = args.api_key or os.environ.get("OPENAI_API_KEY")
+        key_name = "OPENAI_API_KEY"
+    else:
+        api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY")
+        key_name = "ANTHROPIC_API_KEY"
+
     if not api_key:
-        print("No ANTHROPIC_API_KEY set, skipping seed generation", file=sys.stderr)
+        print("No %s set, skipping seed generation" % key_name, file=sys.stderr)
         return
 
     diff_text = sys.stdin.read()
@@ -270,10 +371,19 @@ def main():
     example_seeds = load_example_seeds(seeds_dir)
     print("Loaded %d existing seeds" % len(example_seeds), file=sys.stderr)
 
+    print("Using %s model: %s" % (args.provider, model), file=sys.stderr)
     try:
-        result = call_llm(diff_text, changed_files, example_seeds, api_key, args.model)
+        result = call_llm(
+            diff_text,
+            changed_files,
+            example_seeds,
+            args.provider,
+            api_key,
+            model,
+            args.openai_endpoint,
+        )
     except Exception as e:
-        print("LLM call failed: %s" % e, file=sys.stderr)
+        print("LLM call failed, using default seed corpus: %s" % e, file=sys.stderr)
         return
 
     if not result:
