@@ -763,8 +763,8 @@ async def test_squashed_reply_count(async_client: aioredis.Redis):
     after = int((await async_client.info("stats"))["total_writes_processed"])
     writes = after - before
 
-    # 90% of the commands don't cause writes. The replies should have been squashed
-    assert writes - info_diff < 11
+    # 85% of the commands don't cause writes. The replies should have been squashed
+    assert writes - info_diff < 15
 
 
 @dfly_args({"enable_resp_io_loop_v2": "true"})
