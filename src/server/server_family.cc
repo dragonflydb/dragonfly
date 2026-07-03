@@ -2315,7 +2315,7 @@ void ServerFamily::Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx)
       // OAHEntry-sized and the entries vector includes displacement slots.
       auto bucket_bytes = [](Set* s) -> size_t {
         if constexpr (std::is_same_v<Set, OAHSet>)
-          return size_t{s->Capacity()} * sizeof(OAHEntry);
+          return size_t{s->Capacity()} * sizeof(uint64_t);
         else
           return s->BucketCount() * sizeof(void*);
       };

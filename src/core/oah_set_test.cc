@@ -65,7 +65,8 @@ static string random_string(mt19937& rand, unsigned len) {
 }
 
 TEST_F(OAHSetTest, PtrVectorLinearThenDouble) {
-  auto vp = PtrVector<int>::FromSize(2);
+  uint64_t slot = PtrVector<int>::Create(2);
+  PtrVector<int> vp(slot);
   EXPECT_EQ(vp.Size(), 2u);
   vp[0] = 1;
   vp[1] = 2;
@@ -87,25 +88,88 @@ TEST_F(OAHSetTest, PtrVectorLinearThenDouble) {
   EXPECT_EQ(vp.Size(), 512u);
   EXPECT_EQ(vp[0], 1);
   EXPECT_EQ(vp[1], 2);
+
+  PtrVector<int>::Destroy(vp.Release());
+}
+
+// Counts live instances so a test can assert that every slot's destructor runs.
+struct LiveCounter {
+  static inline int live = 0;
+  uint64_t v = 0;
+
+  LiveCounter() {
+    ++live;
+  }
+  LiveCounter(LiveCounter&& o) noexcept : v(o.v) {
+    o.v = 0;
+    ++live;
+  }
+  LiveCounter& operator=(LiveCounter&& o) noexcept {
+    v = o.v;
+    o.v = 0;
+    return *this;
+  }
+  ~LiveCounter() {
+    --live;
+  }
+  explicit operator bool() const {
+    return v != 0;
+  }
+};
+
+TEST_F(OAHSetTest, PtrVectorDestroysAllElements) {
+  // Regression: Destroy() must run ~T() on every placement-new'd slot, not just the
+  // occupied (truthy) ones. Otherwise non-trivially-destructible elements -- including
+  // moved-from ones -- are leaked when the backing storage is freed.
+  LiveCounter::live = 0;
+  uint64_t slot = PtrVector<LiveCounter>::Create(4);
+  PtrVector<LiveCounter> vec(slot);
+  ASSERT_EQ(LiveCounter::live, 4);  // all four slots are default-constructed
+
+  vec[0].v = 7;                     // occupy one slot; the other three stay "empty"
+  vec.Grow();                       // reallocates: moves survivors, frees the old buffer
+  ASSERT_EQ(LiveCounter::live, 6);  // linear grow 4 -> 6, old buffer fully destroyed
+
+  PtrVector<LiveCounter>::Destroy(vec.Release());
+  EXPECT_EQ(LiveCounter::live, 0);  // every slot, empty or moved-from, was destroyed
 }
 
 TEST_F(OAHSetTest, OAHEntryTest) {
-  OAHEntry test("0123456789", 2);
+  uint64_t bits = OAHEntry::Create("0123456789", 2);
+  OAHEntry test(bits);
 
   EXPECT_EQ(test.Key(), "0123456789"sv);
   EXPECT_EQ(test.GetExpiry(), 2);
 
-  OAHEntry first("123456789");
+  OAHEntry::Destroy(test.Release());
+}
 
-  EXPECT_EQ(test.Insert(std::move(first)), 16);  // promote to a 2-element vector (2 * 8 bytes)
+TEST_F(OAHSetTest, OAHPtrInsertRemove) {
+  // OAHPtr is a non-owning view over a uint64_t slot; the test owns the slot and frees
+  // the leftover collision array explicitly at the end.
+  uint64_t slot = 0;
+  OAHPtr test{slot};
+  test.Assign(OAHEntry::Create("0123456789", 2));
 
-  EXPECT_EQ(test.Insert(OAHEntry("23456789")), 16);  // linear grow 2 -> 4 (two more 8-byte slots)
+  EXPECT_EQ(test[0].Key(), "0123456789"sv);
+  EXPECT_EQ(test[0].GetExpiry(), 2);
 
-  EXPECT_TRUE(test.Remove(0));
-  EXPECT_FALSE(test.Remove(0));
+  EXPECT_EQ(test.Insert(OAHEntry::Create("123456789")), 16);  // promote to a 2-element vector
+  EXPECT_EQ(test.Insert(OAHEntry::Create("23456789")), 16);   // linear grow 2 -> 4
 
-  EXPECT_EQ(test.Remove(2).Key(), "23456789");
-  EXPECT_EQ(test.Remove(1).Key(), "123456789");
+  uint64_t removed0 = test.Remove(0);
+  EXPECT_TRUE(removed0);
+  OAHEntry::Destroy(removed0);
+  EXPECT_FALSE(test.Remove(0));  // cell already empty -> 0 bits
+
+  uint64_t removed2 = test.Remove(2);
+  uint64_t removed1 = test.Remove(1);
+  EXPECT_EQ(OAHEntry(removed2).Key(), "23456789");
+  EXPECT_EQ(OAHEntry(removed1).Key(), "123456789");
+  OAHEntry::Destroy(removed2);
+  OAHEntry::Destroy(removed1);
+
+  test.Clear();  // free the now-empty collision array
 }
 
 TEST_F(OAHSetTest, OAHSetAddFindTest) {
@@ -142,10 +206,9 @@ TEST_F(OAHSetTest, Basic) {
 }
 
 // Regression: re-adding existing keys must never store a duplicate, even
-// across multiple rehashes (ClearHash → h_zero lazy path) and after entries
-// have overflowed into a vector at ext_bid. UpperBoundSize alone is
-// insufficient: a buggy AddUnique would still increment size_ exactly once. We
-// iterate and assert each key appears exactly once.
+// across multiple rehashes and after entries have overflowed into a vector at
+// ext_bid. UpperBoundSize alone is insufficient: a buggy AddUnique would still
+// increment size_ exactly once. We iterate and assert each key appears exactly once.
 TEST_F(OAHSetTest, NoDuplicateInsertion) {
   constexpr int kNumKeys = 2000;  // enough for several Reserve→Rehash cycles
   std::vector<std::string> keys;
@@ -731,17 +794,20 @@ TEST_F(OAHSetTest, ReallocIfNeededForceReallocates) {
 }
 
 TEST_F(OAHSetTest, ReallocIfNeededVectorEntry) {
-  // Construct a vector OAHEntry directly via Insert — same shape as a colliding bucket.
-  OAHEntry e("first_entry_payload");
-  (void)e.Insert(OAHEntry("second_entry_payload"));
-  (void)e.Insert(OAHEntry("third_entry_payload"));
+  // Construct a vector slot directly via Insert — same shape as a colliding bucket.
+  // OAHPtr is a non-owning view; the test owns `slot` and frees it at the end.
+  uint64_t slot = 0;
+  OAHPtr e{slot};
+  e.Assign(OAHEntry::Create("first_entry_payload"));
+  (void)e.Insert(OAHEntry::Create("second_entry_payload"));
+  (void)e.Insert(OAHEntry::Create("third_entry_payload"));
   ASSERT_TRUE(e.IsVector());
 
   // Snapshot inner-entry buffer pointers so we can assert each one moved.
   std::vector<char*> old_inner_ptrs;
   for (uint32_t i = 0; i < e.AsVector().Size(); ++i)
-    if (e.AsVector()[i])
-      old_inner_ptrs.push_back(e.AsVector()[i].Raw());
+    if (OAHEntry(e.AsVector()[i]))
+      old_inner_ptrs.push_back(OAHEntry(e.AsVector()[i]).Raw());
   char* old_vec_buf = e.Raw();
 
   PageUsage page_usage{CollectPageStats::NO, 0.9};
@@ -759,11 +825,12 @@ TEST_F(OAHSetTest, ReallocIfNeededVectorEntry) {
   // their content is intact.
   std::set<std::string> seen;
   std::vector<char*> new_inner_ptrs;
-  auto& vec = e.AsVector();
+  auto vec = e.AsVector();
   for (uint32_t i = 0; i < vec.Size(); ++i) {
-    if (vec[i]) {
-      seen.insert(std::string(vec[i].Key()));
-      new_inner_ptrs.push_back(vec[i].Raw());
+    OAHEntry cell(vec[i]);
+    if (cell) {
+      seen.insert(std::string(cell.Key()));
+      new_inner_ptrs.push_back(cell.Raw());
     }
   }
   EXPECT_EQ(seen.count("first_entry_payload"), 1u);
@@ -777,6 +844,8 @@ TEST_F(OAHSetTest, ReallocIfNeededVectorEntry) {
       EXPECT_NE(old_p, new_p) << "inner entry buffer not reallocated";
     }
   }
+
+  e.Clear();  // free the collision array + remaining entries
 }
 
 TEST_F(OAHSetTest, ReallocIfNeededVectorBucketViaIterator) {
@@ -956,7 +1025,7 @@ void BM_Clone(benchmark::State& state) {
   }
   ss2.Reserve(ss1.UpperBoundSize());
   while (state.KeepRunning()) {
-    for (auto& src : ss1) {
+    for (auto src : ss1) {
       ss2.Add(src.Key());
     }
     state.PauseTiming();
