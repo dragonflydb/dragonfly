@@ -8,6 +8,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/blocking_controller.h"
 #include "server/conn_context.h"
@@ -104,11 +105,11 @@ TEST_F(ListFamilyTest, BLMPopInvalidSyntax) {
 
   // Timeout is not a float
   resp = Run({"blmpop", "foo", "1", kKey1, "LEFT", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("value is not a valid float"));
+  EXPECT_THAT(resp, ErrArg(facade::kTimeoutNotFloatErr));
 
   // Negative timeout
   resp = Run({"blmpop", "-0.01", "1", kKey1, "LEFT", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("timeout is negative"));
+  EXPECT_THAT(resp, ErrArg(facade::kTimeoutNegativeErr));
 
   // Zero keys
   resp = Run({"blmpop", "0.01", "0", "LEFT", "COUNT", "1"});
@@ -917,6 +918,49 @@ TEST_F(ListFamilyTest, BLMove) {
   auto resp = Run({"lrange", "y", "0", "-1"});
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec(), ElementsAre("val1", "val2"));
+}
+
+// NaN / +-inf / negative timeouts are rejected (Redis-compatible) instead of being cast to unsigned
+// milliseconds, which is undefined behavior.
+TEST_F(ListFamilyTest, BlockingTimeoutValidation) {
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "abc"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "nan"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "inf"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "-inf"}), ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "-1"}), ErrArg(facade::kTimeoutNegativeErr));
+
+  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "abc"}),
+              ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "nan"}),
+              ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "inf"}),
+              ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "-inf"}),
+              ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "-1"}),
+              ErrArg(facade::kTimeoutNegativeErr));
+
+  EXPECT_THAT(Run({"blmpop", "abc", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blmpop", "nan", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blmpop", "inf", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"blmpop", "-inf", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"blmpop", "-1", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutNegativeErr));
+
+  EXPECT_THAT(Run({"blpop", "k", "abc"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blpop", "k", "nan"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blpop", "k", "inf"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"blpop", "k", "-inf"}), ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"blpop", "k", "-1"}), ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"brpop", "k", "abc"}), ErrArg(facade::kTimeoutNotFloatErr));
+
+  // A finite timeout so large that timeout * 1000 overflows the unsigned millisecond counter is
+  // rejected instead of triggering undefined float->unsigned conversion.
+  EXPECT_THAT(Run({"blpop", "k", "1e10"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"blmpop", "1e10", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+
+  // A large-but-representable timeout is accepted (returns immediately since the key exists).
+  Run({"rpush", "k", "v"});
+  EXPECT_THAT(Run({"blpop", "k", "4000000"}).GetVec(), ElementsAre("k", "v"));
 }
 
 // Wake two BLMOVEs on the same shard simultaneously

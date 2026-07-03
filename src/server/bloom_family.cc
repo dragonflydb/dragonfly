@@ -232,10 +232,7 @@ void CmdMAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdScanDump(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const string_view key = parser.Next();
-  const int64_t cursor = parser.Next<int64_t>();
-  if (cursor < 0)
-    return rb->SendError(kInvalidIntErr);
-
+  const int64_t cursor = parser.Next<FInt<int64_t{0}, std::numeric_limits<int64_t>::max()>>();
   if (const auto err = parser.TakeError(); err)
     return rb->SendError(err.MakeReply());
 
@@ -268,14 +265,10 @@ void CmdLoadChunk(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const std::string_view key = parser.Next();
 
-  const int64_t cursor = parser.Next<int64_t>();
+  const int64_t cursor = parser.Next<FInt<int64_t{1}, std::numeric_limits<int64_t>::max()>>();
+  const std::string_view blob = parser.Next();
   if (const auto err = parser.TakeError(); err)
     return rb->SendError(err.MakeReply());
-
-  if (cursor <= 0)
-    return rb->SendError(kInvalidIntErr);
-
-  const std::string_view blob = parser.Next();
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpLoadChunk(t->GetOpArgs(shard), blob, key, cursor);

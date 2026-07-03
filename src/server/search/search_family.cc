@@ -180,13 +180,14 @@ ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
   return lang;
 }
 
-void ParseTextWeight(CmdArgParser* parser, search::SchemaField::TextParams* params) {
-  double weight = parser->Next<double>("Invalid WEIGHT value");
-  if (!search::SchemaField::TextParams::IsValidWeight(weight)) {
-    parser->ReportCustom("Invalid WEIGHT value");
-    return;
+struct ValidTextWeight : facade::VNum<double> {
+  static facade::RuleError validate(double v) {
+    return {!search::SchemaField::TextParams::IsValidWeight(v), {}};
   }
-  params->weight = weight;
+};
+
+void ParseTextWeight(CmdArgParser* parser, search::SchemaField::TextParams* params) {
+  params->weight = parser->Next<ValidTextWeight>("Invalid WEIGHT value");
 }
 
 ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parser) {
@@ -1809,16 +1810,16 @@ struct HybridDocEntry {
 
 using HybridDocMap = absl::flat_hash_map<string, HybridDocEntry>;
 
-// Validated doubles for FT.HYBRID RANGE, used via CmdArgParser::Next<T>(). validate() runs inside
-// the parser so callers don't re-check the parsed value.
+// Validated doubles for FT.HYBRID RANGE; the empty message leaves INVALID_FLOAT for each call site
+// to replace via Next<T>("...").
 struct NonNegativeDouble : facade::VNum<double> {
-  static bool validate(double v) {
-    return v >= 0 && std::isfinite(v);
+  static facade::RuleError validate(double v) {
+    return {!(v >= 0 && std::isfinite(v)), {}};
   }
 };
 struct HnswRangeEpsilon : facade::VNum<double> {
-  static bool validate(double v) {
-    return search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(v);
+  static facade::RuleError validate(double v) {
+    return {!search::SchemaField::VectorParams::IsValidRuntimeHnswEpsilon(v), {}};
   }
 };
 

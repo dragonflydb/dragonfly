@@ -8,6 +8,7 @@
 #include <absl/strings/numbers.h>
 
 #include <cassert>
+#include <cmath>
 #include <concepts>
 #include <optional>
 #include <string_view>
@@ -21,6 +22,11 @@ namespace facade {
 
 // CmdArgParser — utility for parsing command option lists.
 //
+// Ideology: parse everything, then check the error ONCE at the end. The first error is latched and
+// every later read becomes a no-op, so intermediate `if (HasError())` guards are unnecessary. Fold
+// value checks into the read via Next<FInt<...>>() / Next<Validated<...>>() instead of post-parse
+// `if` blocks.
+//
 // Reading individual args:
 //   CmdArgParser parser(args);
 //   auto key = parser.Next<string_view>();                      // read one arg by type
@@ -29,6 +35,7 @@ namespace facade {
 //                                                               // (INVALID_INT if out of range)
 //   auto f  = parser.Next<FInt<1, 99>>("bad f");                // FInt with a custom out-of-range
 //                                                               // / non-integer error message
+//   auto s  = parser.Next<Validated<double, NotNan<kMsg>>>();   // parse + custom-error rule check
 //   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
 //   Range fields = parser.NextRange();                         // [N, e1..eN] counted list
 //   Range pairs  = parser.NextRange(2);                        // [N, f1,v1,..] N field/value pairs
@@ -77,33 +84,73 @@ namespace facade {
 //   parser.ReportCustom("bad option");                          // inject a custom error (no-op if
 //                                                               // one is already set)
 
-// A validated number for Next<T>(): a VNum-derived type that adds a static validate()
-// predicate. Convert<T>() parses the underlying value, runs validate(), and reports
-// INVALID_INT/INVALID_FLOAT on failure. FInt (below) is the built-in range-restricted integer;
-// domain-specific double validators are defined next to their callers.
-template <class T>
-concept as_vnum = requires(T t, typename T::underlying_t v) {
-  static_cast<typename T::underlying_t>(t);
-  { T::validate(v) } -> std::same_as<bool>;
+// Result of a validation rule: `failed` marks rejection. A non-empty `msg` is reported verbatim;
+// an empty one leaves the generic type error (INVALID_INT / INVALID_FLOAT), chosen by the caller.
+struct RuleError {
+  bool failed = false;
+  std::string_view msg = {};
 };
 
-// Base for as_vnum types: stores the parsed value and converts back to it. Derive and add a static
-// validate() predicate to define a new validated number.
+template <class T>
+concept as_vnum = requires(T t) {
+  static_cast<decltype(t.value)>(t);
+  { T::validate(t.value) } -> std::same_as<RuleError>;
+};
+
+// Base for validated numbers: holds the parsed value and converts back to it.
 template <class T> struct VNum {
-  using underlying_t = T;
-  underlying_t value = {};
-  operator underlying_t() const {
+  T value = {};
+  operator T() const {
     return value;
   }
 };
 
-// Range-restricted integer used with Next<FInt<lo, hi>>() (INVALID_INT if out of range).
-template <auto min, auto max> struct FInt : VNum<decltype(min)> {
+// Validation rules for Next<Validated<T, Rules...>>(): free functions `RuleError rule(T)`. Reusable
+// ones take the message as a reference-to-constexpr NTTP. They also validate values from elsewhere:
+//   if (auto e = SomeRule<...>(v); e.failed) parser.ReportCustom(std::string{e.msg});
+
+// Out of [min, max] -> generic type error (FInt is the idiomatic spelling).
+template <auto min, auto max> RuleError InRange(decltype(min) v) {
   static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
-  static constexpr bool validate(decltype(min) v) {
-    return v >= min && v <= max;
+  return {v < min || v > max, {}};
+}
+
+// Out of [min, max] -> custom Msg. Integer bounds only (floating-point NTTPs need clang 18+; use a
+// dedicated rule for float ranges).
+template <auto min, auto max, const auto& Msg> RuleError Bounded(decltype(min) v) {
+  static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
+  return {!(v >= min && v <= max), Msg};
+}
+
+// v < 0 -> custom Msg; NaN is accepted (matches a plain `v < 0` guard).
+template <const auto& Msg, class V> RuleError NonNegative(V v) {
+  return {v < 0, Msg};
+}
+
+// Rejects NaN but accepts +/-inf.
+template <const auto& Msg, std::floating_point V> RuleError NotNan(V v) {
+  return {std::isnan(v), Msg};
+}
+
+template <const auto& Msg, std::floating_point V> RuleError Finite(V v) {
+  return {!std::isfinite(v), Msg};
+}
+
+template <auto Bad, const auto& Msg> RuleError NotEq(decltype(Bad) v) {
+  return {v == Bad, Msg};
+}
+
+// Accepts a value only if every rule accepts it; first rejection wins. Each rule is a function
+// T -> RuleError, e.g. Validated<int, Bounded<0, 9, kMsg>>.
+template <class T, RuleError (*... Rules)(T)> struct Validated : VNum<T> {
+  static RuleError validate(T v) {
+    RuleError e;
+    (void)((e = Rules(v)).failed || ...);
+    return e;
   }
 };
+
+template <auto min, auto max> using FInt = Validated<decltype(min), InRange<min, max>>;
 
 template <class T> constexpr bool is_optional = false;
 
@@ -119,7 +166,7 @@ struct CmdArgParser {
     INVALID_CASES,
     INVALID_NEXT,
     UNPROCESSED,
-    CUSTOM_ERROR  // should be the last one
+    CUSTOM_ERROR  // keep last
   };
 
   struct ErrorInfo {
@@ -128,7 +175,7 @@ struct CmdArgParser {
     std::string custom_msg;
 
     operator bool() const {
-      return type != ErrorType::NO_ERROR;
+      return type != NO_ERROR;
     }
     ErrorReply MakeReply() const;
   };
@@ -242,13 +289,14 @@ struct CmdArgParser {
     }
   }
 
-  // Like Next<T>(), but on a failed read (non-numeric, out-of-range FInt, or missing arg) replaces
-  // the generic error with a caller-supplied CUSTOM_ERROR message. Pair with FInt<lo,hi> to attach
-  // a custom out-of-range / non-integer message: parser.Next<FInt<1u, 99u>>("bad f").
+  // Like Next<T>(), but replaces any read failure (bad value, missing arg, ...) with a caller-
+  // supplied CUSTOM_ERROR message. A rule's own message from a Validated<T, Rules...> passes
+  // through unchanged, so parser.Next<Timeout>(kNotAFloat) reports kNotAFloat for a non-float but
+  // keeps each rule's out-of-range / negative message.
   template <class T = std::string_view> auto Next(std::string_view err_msg) {
     bool prior = bool(error_);
     auto val = Next<T>();
-    if (!prior && error_ && !err_msg.empty()) {
+    if (!prior && !err_msg.empty() && error_ && error_.type != CUSTOM_ERROR) {
       error_.type = CUSTOM_ERROR;
       error_.custom_msg = std::string{err_msg};
     }
@@ -473,10 +521,15 @@ struct CmdArgParser {
     } else if constexpr (std::is_constructible_v<T, std::string_view>) {
       return static_cast<T>(SafeSV(idx));
     } else if constexpr (as_vnum<T>) {
-      using U = typename T::underlying_t;
+      using U = decltype(T::value);
       U val = Num<U>(idx);
-      if (!T::validate(val)) {
-        Report(std::is_floating_point_v<U> ? INVALID_FLOAT : INVALID_INT, idx);
+      if (error_)
+        return {};  // malformed number already reported
+      if (RuleError e = T::validate(val); e.failed) {
+        if (e.msg.empty())
+          Report(std::is_floating_point_v<U> ? INVALID_FLOAT : INVALID_INT, idx);
+        else
+          Report(CUSTOM_ERROR, idx, std::string{e.msg});
         return {};
       }
       return T{val};
