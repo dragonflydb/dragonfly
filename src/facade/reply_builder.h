@@ -87,7 +87,9 @@ class SinkReplyBuilder {
     ~ReplyAggregator();
   };
 
-  void Flush(size_t expected_buffer_cap = 0);  // Send all accumulated data and reset to clear state
+  // Send all accumulated data and reset to clear state
+  // `additional_bytes` hints how many bytes did not fit into the buffer to possibly grow it
+  void Flush(size_t additional_bytes = 0);
 
   std::error_code GetError() const {
     return ec_;
