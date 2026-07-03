@@ -746,6 +746,25 @@ TEST_F(RedisReplyBuilderTest, BatchMode) {
                           absl::StrCat(kBulkStringStart, "0"), std::string_view{}));
 }
 
+// Verify that in batch mode the buffer grows continuously to reduce flushes
+TEST_F(RedisReplyBuilderTest, BatchGrowsBuffer) {
+  builder_->SetBatchMode(true);
+
+  // large enough to cause buffer overflow
+  const std::string value(SinkReplyBuilder::kMaxInlineSize * 16, 'x');
+
+  constexpr int kReplies = 100;
+  for (int i = 0; i < kReplies; ++i)
+    builder_->SendBulkString(value);
+
+  EXPECT_EQ(builder_->UsedMemory(), SinkReplyBuilder::kMaxBufferSize);
+  EXPECT_LT(GetReplyStats().io_write_cnt, size_t(kReplies) / 2);
+
+  builder_->SetBatchMode(false);
+  builder_->Flush();
+  ASSERT_TRUE(NoErrors());
+}
+
 TEST_F(RedisReplyBuilderTest, Resp3Double) {
   builder_->SetRespVersion(RespVersion::kResp3);
   builder_->SendDouble(5.5);

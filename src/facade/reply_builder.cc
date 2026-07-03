@@ -168,27 +168,26 @@ void SinkReplyBuilder::WriteRef(std::string_view str) {
   total_size_ += str.size();
 }
 
-void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
+void SinkReplyBuilder::Flush(size_t additional_bytes) {
   // Fast path: nothing buffered and no buffer resize requested.
-  if (vecs_.empty() && (expected_buffer_cap == 0))
+  if (vecs_.empty() && (additional_bytes == 0))
     return;
 
   if (!vecs_.empty())
     Send();
 
-  // Grow backing buffer if was at least half full and still below it's max size
-  if (buffer_.InputLen() * 2 > buffer_.Capacity() && buffer_.Capacity() * 2 <= kMaxBufferSize)
-    expected_buffer_cap = max(expected_buffer_cap, buffer_.Capacity() * 2);
+  size_t target_capacity = buffer_.Capacity();
+  if (additional_bytes > 0)
+    target_capacity = std::max(buffer_.Capacity() + additional_bytes, buffer_.Capacity() * 2);
 
   total_size_ = 0;
   buffer_.Clear();
   vecs_.clear();
   guaranteed_pieces_ = 0;
 
-  DCHECK_LE(expected_buffer_cap, kMaxBufferSize);  // big strings should be enqueued as iovecs
-
-  if (expected_buffer_cap > buffer_.Capacity())
-    buffer_.Reserve(expected_buffer_cap);
+  target_capacity = std::min(target_capacity, kMaxBufferSize);
+  if (target_capacity != buffer_.Capacity())
+    buffer_.Reserve(target_capacity);
 }
 
 uint64_t SinkReplyBuilder::GetLastSendTimeCycles() const {
@@ -225,11 +224,11 @@ void SinkReplyBuilder::Send() {
 void SinkReplyBuilder::FinishScope() {
   replies_recorded_++;
 
-  if (!batched_ || total_size_ * 2 >= kMaxBufferSize /* copying isn't worth it */)
+  size_t ref_bytes = total_size_ - buffer_.InputLen();
+  if (!batched_ || ref_bytes * 2 >= kMaxBufferSize /* copying isn't worth it */)
     return Flush();
 
   // Check if we have enough space to copy all refs to buffer
-  size_t ref_bytes = total_size_ - buffer_.InputLen();
   if (ref_bytes > buffer_.AppendLen())
     return Flush(ref_bytes);
 
