@@ -247,8 +247,9 @@ class Transaction {
   void StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
                              bool skip_scheduling = false);
 
-  // Start multi in NON_ATOMIC mode.
-  void StartMultiNonAtomic();
+  // Start multi in NON_ATOMIC mode. Pass shard_local=true for squasher-local transactions that are
+  // pinned to a single shard for their whole lifetime (lets shard_data_ use a single cell).
+  void StartMultiNonAtomic(bool shard_local = false);
 
   // Unlock key locks of a multi transaction.
   // If block is set, wait for unlock to finish.
@@ -447,6 +448,10 @@ class Transaction {
     // Set if the multi command is concluding to avoid ambiguity with COORD_CONCLUDING
     bool concluding = false;
 
+    // Set for non-atomic squasher-local transactions that are pinned to a single shard for their
+    // whole lifetime, so shard_data_ needs only a single cell.
+    bool shard_local = false;
+
     unsigned cmd_seq_num = 0;  // used for debugging purposes.
   };
 
@@ -564,6 +569,12 @@ class Transaction {
 
   bool IsActiveMulti() const {
     return multi_ && multi_->role != SQUASHED_STUB;
+  }
+
+  // Full per-shard shard_data_ is needed only for multi transactions that may span/migrate
+  // across shards. Stubs (SQUASHED_STUB) and shard-local non-atomic squash txs use a single cell.
+  bool NeedsFullShardData() const {
+    return IsActiveMulti() && !(multi_ && multi_->shard_local);
   }
 
   unsigned SidToId(ShardId sid) const {

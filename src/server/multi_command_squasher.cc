@@ -101,7 +101,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
       // Non-atomic squashing does not use the transactional framework for fan out, so local
       // transactions have to be fully standalone, check locks and release them immediately.
       sinfo.local_tx = new Transaction{base_cid_};
-      sinfo.local_tx->StartMultiNonAtomic();
+      sinfo.local_tx->StartMultiNonAtomic(/*shard_local=*/true);
     }
     num_shards_++;
   }
