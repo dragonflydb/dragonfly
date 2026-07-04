@@ -96,6 +96,10 @@ void TestConnection::SendInvalidationMessageAsync(InvalidationMessage msg) {
   invalidate_messages.push_back(std::move(msg));
 }
 
+void TestConnection::SendMonitorMessageAsync(std::string msg) {
+  monitor_messages.push_back(std::move(msg));
+}
+
 std::string TestConnection::RemoteEndpointStr() const {
   return "";
 }
@@ -672,6 +676,13 @@ string BaseFamilyTest::GetId() const {
   int32 id = ProactorBase::me()->GetPoolIndex();
   CHECK_GE(id, 0);
   return absl::StrCat("IO", id);
+}
+
+size_t BaseFamilyTest::NumSubscriptions(string_view conn_id) const {
+  auto it = connections_.find(conn_id);
+  CHECK(it != connections_.end());
+
+  return it->second->conn()->cntx()->subscriptions;
 }
 
 size_t BaseFamilyTest::SubscriberMessagesLen(string_view conn_id) const {

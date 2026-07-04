@@ -6,6 +6,8 @@
 
 #include <absl/container/flat_hash_set.h>
 
+#include <cassert>
+
 #include "facade/conn_context.h"
 #include "facade/parsed_command.h"
 #include "facade/reply_mode.h"
@@ -382,9 +384,15 @@ class ConnectionContext : public facade::ConnectionContext {
   bool skip_acl_validation = false;
 
  private:
-  void EnableMonitoring(bool enable) {
+  void EnableMonitoring() {
     subscriptions++;  // required to support the monitoring
-    monitor = enable;
+    monitor = true;
+  }
+
+  void DisableMonitoring() {
+    assert(subscriptions > 0u);
+    subscriptions--;
+    monitor = false;
   }
 
   std::vector<unsigned> ChangeSubscriptions(facade::ParsedArgs channels, bool pattern, bool to_add,

@@ -36,6 +36,8 @@ class TestConnection : public facade::Connection {
 
   void SendInvalidationMessageAsync(InvalidationMessage msg) final;
 
+  void SendMonitorMessageAsync(std::string msg) final;
+
   bool IsPrivileged() const override {
     return is_privileged_;
   }
@@ -46,6 +48,8 @@ class TestConnection : public facade::Connection {
   std::vector<PubMessage> messages;
 
   std::vector<InvalidationMessage> invalidate_messages;
+
+  std::vector<std::string> monitor_messages;
 
  private:
   bool is_privileged_ = false;
@@ -160,6 +164,8 @@ class BaseFamilyTest : public ::testing::Test {
 
   std::string GetId() const;
   size_t SubscriberMessagesLen(std::string_view conn_id) const;
+
+  size_t NumSubscriptions(std::string_view conn_id) const;
 
   size_t InvalidationMessagesLen(std::string_view conn_id) const;
 

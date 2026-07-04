@@ -120,7 +120,11 @@ void ConnectionContext::ChangeMonitor(bool start) {
   // Tell other threads that about the change in the number of connection that we monitor
   shard_set->pool()->AwaitBrief(
       [start](unsigned, auto*) { ServerState::tlocal()->Monitors().NotifyChangeCount(start); });
-  EnableMonitoring(start);
+  if (start) {
+    EnableMonitoring();
+  } else {
+    DisableMonitoring();
+  }
 }
 
 void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, bool sharded,
