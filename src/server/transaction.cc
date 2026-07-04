@@ -280,6 +280,25 @@ void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
     kv_fp_.push_back(LockTag(key).Fingerprint());
 }
 
+void Transaction::StoreAnalyzedKeysInArgs(const KeyAnalysis& analysis) {
+  DCHECK(kv_fp_.empty());
+  DCHECK(args_slices_.empty());
+
+  const KeyIndex& key_index = analysis.index;
+
+  // even for a single key we may have multiple arguments per key (MSET).
+  if (key_index.bonus)
+    args_slices_.emplace_back(*key_index.bonus, *key_index.bonus + 1);
+  args_slices_.emplace_back(key_index.start, key_index.end);
+
+  DCHECK_EQ(key_index.NumArgs(), analysis.lock_fps.size());
+  if (analysis.lock_fps.size() == 1) {
+    kv_fp_.push_back(analysis.lock_fps.front());
+  } else {
+    kv_fp_.assign(analysis.lock_fps.begin(), analysis.lock_fps.end());
+  }
+}
+
 void Transaction::InitByKeys(const KeyIndex& key_index) {
   // Skip initialization for key-dependent transactions without keys
   if ((key_index.end - key_index.start) + int(bool(key_index.bonus)) == 0)
@@ -387,6 +406,39 @@ OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, const facade::Par
     return key_index.status();
 
   InitByKeys(*key_index);
+  return OpStatus::OK;
+}
+
+OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args,
+                                 const KeyAnalysis& analysis) {
+  InitBase(ns, index, args);
+
+  // Pre-analyzed keys are only passed by the squasher for regular key-based commands that are
+  // already proven to target a single shard.
+  DCHECK_EQ(cid_->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL), 0u);
+  DCHECK_NE(analysis.shard_id, kInvalidSid);
+  DCHECK_GT(analysis.index.NumArgs(), 0u);
+  DCHECK_EQ(analysis.index.NumArgs(), analysis.lock_fps.size());
+  DCHECK_EQ(unique_shard_cnt_, 0u);
+  DCHECK(args_slices_.empty());
+  DCHECK(kv_fp_.empty());
+
+  StoreAnalyzedKeysInArgs(analysis);
+
+  unique_slot_checker_.Reset();
+  if (analysis.slot_id) {
+    unique_slot_checker_.Add(*analysis.slot_id);
+  } else if (IsClusterEnabled()) {
+    // Preserve the old fallback behavior if a caller did not provide a slot.
+    unique_slot_checker_.Add(full_args_[*analysis.index]);
+  }
+
+  unique_shard_cnt_ = 1;
+  unique_shard_id_ = analysis.shard_id;
+
+  shard_data_.resize(NeedsFullShardData() ? shard_set->size() : 1);
+  shard_data_[SidToId(unique_shard_id_)].local_mask |= ACTIVE;
+
   return OpStatus::OK;
 }
 

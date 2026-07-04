@@ -4,9 +4,12 @@
 
 #pragma once
 
+#include <utility>
+
 #include "facade/reply_capture.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
+#include "server/tx_base.h"
 
 namespace dfly {
 
@@ -57,6 +60,10 @@ class MultiCommandSquasher {
     }
 
     struct Command : public CmdRef {
+      Command(CmdRef cmd, KeyAnalysis analysis) : CmdRef(cmd), key_analysis(std::move(analysis)) {
+      }
+
+      KeyAnalysis key_analysis;
       facade::CapturingReplyBuilder::Payload reply;
     };
     std::vector<Command> dispatched;  // Dispatched commands

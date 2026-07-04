@@ -136,14 +136,24 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
 
   // Check if all command keys belong to one shard
   ShardId last_sid = kInvalidSid;
+  KeyAnalysis analysis;
+  analysis.index = *keys;
+  analysis.lock_fps.reserve(keys->NumArgs());
+  UniqueSlotChecker slot_checker;
 
-  for (string_view key : keys->Range(cmd.args)) {
+  for (unsigned key_pos : keys->Range()) {
+    string_view key = cmd.args[key_pos];
     ShardId sid = Shard(key, shard_set->size());
     if (last_sid == kInvalidSid || last_sid == sid)
       last_sid = sid;
     else
       return SquashResult::NOT_SQUASHED;  // at least two shards
+
+    slot_checker.Add(key);
+    analysis.lock_fps.push_back(LockTag(key).Fingerprint());
   }
+  analysis.shard_id = last_sid;
+  analysis.slot_id = slot_checker.GetUniqueSlotId();
 
   // Transaction is not active on the requested shard.
   // Command should result in undeclared key error
@@ -152,7 +162,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
 
   auto& sinfo = PrepareShardInfo(last_sid);
 
-  sinfo.dispatched.push_back({cmd, {}});
+  sinfo.dispatched.emplace_back(cmd, std::move(analysis));
   order_.push_back(last_sid);
 
   bool need_flush = sinfo.dispatched.size() >= opts_.max_squash_size;
@@ -231,7 +241,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     ctx->SetupTx(dispatched.cid, local_cntx.tx());
     ctx->tx()->MultiSwitchCmd(dispatched.cid);
 
-    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args);
+    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args,
+                                        dispatched.key_analysis);
     if (status != OpStatus::OK) {
       ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
     } else {

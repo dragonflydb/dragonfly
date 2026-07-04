@@ -183,6 +183,8 @@ class Transaction {
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args);
+  OpStatus InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args,
+                      const KeyAnalysis& analysis);
 
   // Get command arguments for specific shard. Called from shard thread.
   ShardArgs GetShardArgs(ShardId sid) const;
@@ -510,6 +512,7 @@ class Transaction {
 
   // Store all key index keys in args_. Used only for single shard initialization.
   void StoreKeysInArgs(const KeyIndex& key_index);
+  void StoreAnalyzedKeysInArgs(const KeyAnalysis& analysis);
 
   // Multi transactions unlock asynchronously, so they need to keep fingerprints of keys.
   void PrepareMultiFps(CmdArgList keys);

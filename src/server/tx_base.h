@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/container/inlined_vector.h>
 #include <absl/types/span.h>
 
 #include <cstdint>
@@ -56,6 +57,16 @@ struct KeyIndex {
  public:
   unsigned start, end, step;      // [start, end) with step
   std::optional<unsigned> bonus;  // destination key, for example for commands that end with STORE
+};
+
+// Result of key analysis performed by a caller that already inspected all keys. Used to avoid
+// repeating key-index traversal, sharding, slot detection and lock fingerprinting during
+// transaction initialization.
+struct KeyAnalysis {
+  KeyIndex index;
+  ShardId shard_id = kInvalidSid;
+  std::optional<SlotId> slot_id;
+  absl::InlinedVector<LockFp, 4> lock_fps;
 };
 
 struct DbContext {
