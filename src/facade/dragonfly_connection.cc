@@ -2902,27 +2902,43 @@ bool Connection::ExecuteBatch() {
 }
 
 bool Connection::ReplyBatch() {
-  if (!HasInFlightCommands())
-    return true;
-
   ConnectionMemoryTracker memory_tracker(this);
   reply_builder_->SetBatchMode(true);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
-  while (parsed_head_->CanReply()) {
-    current_wait_.reset();  // Clear the subscription before moving to the next command
-    auto* cmd = parsed_head_;
-    AdvanceParsedHead(parsed_head_->next);
 
-    cmd->SendReply();
+  // Use single ReplyScope for all commands. We can release commands only after the scope finishes
+  // as references become invalidate otherwise
+  ParsedCommand* release_head = parsed_head_;
+  unsigned replied = 0;
+  {
+    SinkReplyBuilder::ReplyScope scope(reply_builder_.get());
+    while (HasInFlightCommands() && parsed_head_->CanReply()) {
+      current_wait_.reset();  // Clear the subscription before moving to the next command
+      auto* cmd = parsed_head_;
+      AdvanceParsedHead(parsed_head_->next);
 
-    // An in-flight command is considered to be a pipelined command.
-    ReleasePipelinedCommand(cmd);
-    if (reply_builder_->GetError())
-      return false;
+      // Pure coroutine replies don't preserve lifetimes
+      std::optional<SinkReplyBuilder::ScopePause> pause;
+      if (cmd->IsSuspendedReply())
+        pause.emplace(reply_builder_.get());
 
-    if (!HasInFlightCommands())
-      break;
+      cmd->SendReply();
+      replied++;
+
+      if (reply_builder_->GetError())
+        break;
+    }
   }
+
+  // Release all the commands that replied
+  for (unsigned i = 0; i < replied; ++i) {
+    auto* next = release_head->next;
+    ReleasePipelinedCommand(release_head);
+    release_head = next;
+  }
+
+  if (reply_builder_->GetError())
+    return false;
 
   // V1: handles its pipeline batching inside AsyncFiber, so it flushes unconditionally here.
   //
