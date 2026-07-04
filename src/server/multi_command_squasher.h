@@ -7,6 +7,7 @@
 #include "facade/reply_capture.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
+#include "server/tx_base.h"  // KeyIndex
 
 namespace dfly {
 
@@ -57,6 +58,7 @@ class MultiCommandSquasher {
     }
 
     struct Command : public CmdRef {
+      KeyIndex key_index;  // Precomputed by TrySquash, reused during the hop (skips DetermineKeys)
       facade::CapturingReplyBuilder::Payload reply;
     };
     std::vector<Command> dispatched;  // Dispatched commands

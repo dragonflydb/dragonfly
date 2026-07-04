@@ -152,7 +152,8 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
 
   auto& sinfo = PrepareShardInfo(last_sid);
 
-  sinfo.dispatched.push_back({cmd, {}});
+  // Carry the key analysis into the hop so InitByArgs does not recompute it (see DetermineKeys).
+  sinfo.dispatched.push_back({cmd, *keys, {}});
   order_.push_back(last_sid);
 
   bool need_flush = sinfo.dispatched.size() >= opts_.max_squash_size;
@@ -231,7 +232,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     ctx->SetupTx(dispatched.cid, local_cntx.tx());
     ctx->tx()->MultiSwitchCmd(dispatched.cid);
 
-    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args);
+    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args,
+                                        dispatched.key_index);
     if (status != OpStatus::OK) {
       ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
     } else {

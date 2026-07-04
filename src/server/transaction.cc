@@ -246,8 +246,8 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
 
     for (const auto& [start, end] : src.slices) {
       args_slices_.emplace_back(start, end);
-      for (string_view key : KeyIndex(start, end, src.key_step).Range(full_args_)) {
-        kv_fp_.push_back(LockTag(key).Fingerprint());
+      for (unsigned i = start; i < end; i += src.key_step) {
+        kv_fp_.push_back(LockTag(full_args_[i]).Fingerprint());
         sd.fp_count++;
       }
     }
@@ -271,13 +271,16 @@ void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
   DCHECK(kv_fp_.empty());
   DCHECK(args_slices_.empty());
 
-  // even for a single key we may have multiple arguments per key (MSET).
-  if (key_index.bonus)
-    args_slices_.emplace_back(*key_index.bonus, *key_index.bonus + 1);
-  args_slices_.emplace_back(key_index.start, key_index.end);
+  kv_fp_.reserve(key_index.NumArgs());
 
-  for (string_view key : key_index.Range(full_args_))
-    kv_fp_.push_back(LockTag(key).Fingerprint());
+  // even for a single key we may have multiple arguments per key (MSET).
+  if (key_index.bonus) {
+    args_slices_.emplace_back(*key_index.bonus, *key_index.bonus + 1);
+    kv_fp_.push_back(LockTag(full_args_[*key_index.bonus]).Fingerprint());
+  }
+  args_slices_.emplace_back(key_index.start, key_index.end);
+  for (unsigned i = key_index.start; i < key_index.end; i += key_index.step)
+    kv_fp_.push_back(LockTag(full_args_[i]).Fingerprint());
 }
 
 void Transaction::InitByKeys(const KeyIndex& key_index) {
@@ -384,6 +387,21 @@ OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, const facade::Par
     return key_index.status();
 
   InitByKeys(*key_index);
+  return OpStatus::OK;
+}
+
+OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args,
+                                 const KeyIndex& key_index) {
+  InitBase(ns, index, args);
+
+  // This fast overload is only used for regular key-based commands whose keys were already
+  // analyzed by the caller (the squasher). Global / no-key commands must use the generic path.
+  DCHECK_EQ(cid_->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL), 0u);
+  DCHECK_EQ(unique_shard_cnt_, 0u);
+  DCHECK(args_slices_.empty());
+  DCHECK(kv_fp_.empty());
+
+  InitByKeys(key_index);
   return OpStatus::OK;
 }
 
@@ -1652,6 +1670,13 @@ bool Transaction::CanRunInlined() const {
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs& args) {
   if (cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL))
     return KeyIndex{};
+
+  // Fast path for commands with a single key at a fixed position (e.g. GET/SET/...): skip the
+  // generic variadic/store-key branching below.
+  if (cid->IsFixedSingleKey()) {
+    unsigned start = cid->first_key_pos() - 1;
+    return KeyIndex{start, start + 1, 1};
+  }
 
   int num_custom_keys = -1;
 
