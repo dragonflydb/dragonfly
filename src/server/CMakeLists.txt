@@ -1,4 +1,4 @@
-option(DF_ENABLE_MEMORY_TRACKING "Adds memory tracking debugging via MEMORY TRACK command" ON)
+option(DF_ENABLE_MEMORY_TRACKING "Adds memory tracking debugging via MEMORY TRACK command" OFF)
 option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on SIGUSR1" OFF)
 
 option(WITH_COLLECTION_CMDS "Compile SET/HASH/ZSET/STREAM commands" ON)

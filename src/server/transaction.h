@@ -184,6 +184,12 @@ class Transaction {
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args);
 
+  // Same as above but reuses a key index already computed by the caller (e.g. the squasher),
+  // avoiding a redundant DetermineKeys pass. Only valid for regular key-based commands
+  // (not GLOBAL_TRANS / NO_KEY_TRANSACTIONAL).
+  OpStatus InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args,
+                      const KeyIndex& key_index);
+
   // Get command arguments for specific shard. Called from shard thread.
   ShardArgs GetShardArgs(ShardId sid) const;
 

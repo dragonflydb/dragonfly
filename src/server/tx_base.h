@@ -10,7 +10,6 @@
 #include <optional>
 
 #include "base/iterator.h"
-#include "common/arg_range.h"
 #include "facade/facade_types.h"
 #include "server/common_types.h"
 
@@ -25,8 +24,8 @@ struct KeyLockArgs {
 
 // Describes key indices.
 struct KeyIndex {
-  KeyIndex(unsigned start = 0, unsigned end = 0, unsigned step = 1,
-           std::optional<unsigned> bonus = std::nullopt)
+  explicit KeyIndex(unsigned start = 0, unsigned end = 0, unsigned step = 1,
+                    std::optional<unsigned> bonus = std::nullopt)
       : start(start), end(end), step(step), bonus(bonus) {
   }
 
@@ -50,7 +49,7 @@ struct KeyIndex {
 
   // Accepts any indexable argument container (cmn::ArgSlice, facade::ParsedArgs, ...).
   template <typename Args> auto Range(const Args& args) const {
-    return base::it::Transform([args](unsigned idx) { return args[idx]; }, Range());
+    return base::it::Transform([&args](unsigned idx) { return args[idx]; }, Range());
   }
 
  public:
