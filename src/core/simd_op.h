@@ -47,6 +47,10 @@ template <class T, std::size_t N> class SimdOp {
     return v;
   }
 
+  void Store(T* ptr) const noexcept {
+    std::memcpy(ptr, &v_, sizeof(Vec));
+  }
+
   constexpr SimdOp operator&(const SimdOp& o) const noexcept {
     return v_ & o.v_;
   }
@@ -99,13 +103,13 @@ template <class T, std::size_t N> class SimdOp {
       uint32x2_t narrow = vshrn_n_u64(halves[h], 32);
       std::uint64_t packed;
       std::memcpy(&packed, &narrow, sizeof(packed));
-      bits |= (static_cast<BitsType>((packed & 1u) | ((packed >> 31) & 2u))) << (2 * h);
+      bits |= (static_cast<BitsType>(((packed >> 31) & 1u) | ((packed >> 62) & 2u))) << (2 * h);
     }
     return bits;
 #else
     BitsType m = 0;
     for (std::size_t i = 0; i < N; ++i)
-      m |= static_cast<BitsType>(v_[i] != 0) << i;
+      m |= static_cast<BitsType>(static_cast<std::make_unsigned_t<T> >(v_[i]) >> 63) << i;
     return m;
 #endif
   }

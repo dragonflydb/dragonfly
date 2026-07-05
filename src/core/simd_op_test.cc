@@ -70,6 +70,28 @@ TEST(SimdOpTest, ToBitsLsbIsLaneZero) {
   EXPECT_EQ((v == uint64_t(42)).GetMSBs(), 0x1u);
 }
 
+TEST(SimdOpTest, GetMSBsReadsLaneSignBits) {
+  std::uint64_t arr[4] = {0x8000000000000000ULL, 0x7FFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0};
+  EXPECT_EQ(U64x4::Load(arr).GetMSBs(), 0b0101u);
+  EXPECT_EQ(U64x2::Load(arr).GetMSBs(), 0b0001u);
+}
+
+TEST(SimdOpTest, StoreRoundTripsLoad) {
+  // Store is used by OAHSet::PrefetchWindow to spill masked addresses before prefetch.
+  std::uint64_t src4[4] = {0x1111111111111111ULL, 0x2222222222222222ULL, 0x3333333333333333ULL,
+                           0x4444444444444444ULL};
+  std::uint64_t dst4[4] = {};
+  U64x4::Load(src4).Store(dst4);
+  for (int i = 0; i < 4; ++i)
+    EXPECT_EQ(dst4[i], src4[i]);
+
+  std::uint64_t src2[2] = {0xAAAAAAAAAAAAAAAAULL, 0xBBBBBBBBBBBBBBBBULL};
+  std::uint64_t dst2[2] = {};
+  (U64x2::Load(src2) & U64x2::Fill(0xFFFFFFFFULL)).Store(dst2);
+  EXPECT_EQ(dst2[0], 0xAAAAAAAAULL);
+  EXPECT_EQ(dst2[1], 0xBBBBBBBBULL);
+}
+
 TEST(SimdOpTest, U64x2WorksForVectorSearch) {
   // The 2-lane version is used by OAHSet::ProbeExtensionVector.
   std::uint64_t arr[2] = {0xDEAD, 0xBEEF};
