@@ -55,12 +55,7 @@ using ScoredArray = ZSetFamily::ScoredArray;
 using ScoredMemberView = ZSetFamily::ScoredMemberView;
 using ScoredMemberSpan = ZSetFamily::ScoredMemberSpan;
 
-struct ValidateZMPopResult {
-  uint32_t num_keys;
-  bool is_max;
-  int pop_count;
-  float timeout;
-};
+using ZPopTimeout = Validated<float, NonNegative<kTimeoutNegativeErr>>;
 
 inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
   auto interval = si;
@@ -1900,61 +1895,6 @@ std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, Tra
   return std::nullopt;
 }
 
-// Validates the ZMPop and BZMPop command arguments and extracts the values to the output params.
-// If the arguments are invalid sends the appropiate error to builder and returns false.
-bool ValidateZMPopCommand(CmdArgParser parser, bool is_blocking, CommandContext* cmd_cntx,
-                          ValidateZMPopResult* result) {
-  if (is_blocking) {
-    if (!absl::SimpleAtof(parser.Next(), &result->timeout)) {
-      cmd_cntx->SendError("timeout is not a float or out of range");
-      return false;
-    }
-    if (result->timeout < 0) {
-      cmd_cntx->SendError("timeout is negative");
-      return false;
-    }
-  }
-
-  if (!SimpleAtoi(parser.Next(), &(result->num_keys))) {
-    cmd_cntx->SendError(kUintErr);
-    return false;
-  }
-
-  if (result->num_keys <= 0 || !parser.HasAtLeast(result->num_keys + 1)) {
-    // We should have at least num_keys keys + a MIN/MAX arg.
-    cmd_cntx->SendError(kSyntaxErr);
-    return false;
-  }
-  // Skip over the keys themselves.
-  parser.Skip(result->num_keys);
-
-  // We know we have at least one more arg (we checked above).
-  if (parser.Check("MAX")) {
-    result->is_max = true;
-  } else if (parser.Check("MIN")) {
-    result->is_max = false;
-  } else {
-    cmd_cntx->SendError(kSyntaxErr);
-    return false;
-  }
-
-  result->pop_count = 1;
-  // Check if we have additional COUNT argument.
-  if (parser.HasNext()) {
-    if (!parser.Check("COUNT", &result->pop_count)) {
-      cmd_cntx->SendError(kSyntaxErr);
-      return false;
-    }
-  }
-
-  if (!parser.Finalize()) {
-    cmd_cntx->SendError(parser.TakeError().MakeReply());
-    return false;
-  }
-
-  return true;
-}
-
 }  // namespace
 
 void ZSetFamily::ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemberSpan memb_sp,
@@ -2482,22 +2422,16 @@ void CmdZInterStore(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdZInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
 
-  unsigned num_keys = parser.Next<unsigned>();
-  if (parser.TakeError()) {
-    return cmd_cntx->SendError(OpStatus::SYNTAX_ERR);
-  }
-
-  // After numkeys is consumed, the remaining args are the keys followed by an optional LIMIT
-  // clause.
-  facade::ParsedArgs args = parser.UnparsedArgs();
+  parser.NextRange(1, kSyntaxErr);  // numkeys + keys, handled by the command key spec.
 
   uint64_t limit = 0;
-  if (args.size() == (num_keys + 2) && args[num_keys] == "LIMIT") {
-    if (!absl::SimpleAtoi(args[num_keys + 1], &limit)) {
+  parser.Check("LIMIT", &limit);
+
+  if (!parser.Finalize()) {
+    auto err = parser.TakeError();
+    if (err.type == CmdArgParser::INVALID_INT)
       return builder->SendError("limit value is not a positive integer", kSyntaxErrType);
-    }
-  } else if (args.size() != num_keys) {
-    return builder->SendError(kSyntaxErr);
+    return builder->SendError(err.MakeReply());
   }
 
   vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
@@ -2521,12 +2455,22 @@ void CmdZInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 // Generic function for ZMPop and BZMPop commands
 void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blocking) {
-  ValidateZMPopResult zmpop_args;
-  // Validate on a copy so `parser` stays positioned at the start for reading the keys below.
-  if (!ValidateZMPopCommand(parser, is_blocking, cmd_cntx, &zmpop_args)) {
+  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  float timeout = 0;
+  if (is_blocking)
+    timeout = parser.Next<ZPopTimeout>(kTimeoutNotFloatErr);
+
+  CmdArgParser::Range keys = parser.NextRange();  // numkeys + keys, handled by the key spec.
+  bool is_max = parser.MapNext("MAX", true, "MIN", false);
+
+  int pop_count = 1;
+  parser.Check("COUNT", &pop_count);
+
+  if (!parser.Finalize()) {
+    cmd_cntx->SendError(parser.TakeError().MakeReply());
     return;
   }
-  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   // From the list of input keys, keep the first (in the order of keys in the command) key found
   // in the current shard.
@@ -2546,7 +2490,7 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
   // Keep all the keys found (first only for each shard) in a set for fast lookups.
   absl::flat_hash_set<std::string_view> first_found_keys_for_shard;
   // We can have at most one result from each shard.
-  first_found_keys_for_shard.reserve(std::min(shard_set->size(), zmpop_args.num_keys));
+  first_found_keys_for_shard.reserve(std::min<size_t>(shard_set->size(), keys.size()));
   for (const auto& key : first_found_key_per_shard_vec) {
     if (!key.has_value()) {
       continue;
@@ -2557,12 +2501,9 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
   // Now that we have the first non empty key from each shard, find the first overall first key
   // and pop elements from it.
   std::optional<std::string_view> key_to_pop = std::nullopt;
-  // Skip the leading [timeout] (BZMPOP only) and numkeys args to reach the key list, then find the
-  // first key (in command order) that exists and is non-empty on some shard. The string_views point
-  // into the command's backing args, which outlive this call.
-  parser.Skip(1 + is_blocking);
-  for (size_t i = 0; i < zmpop_args.num_keys; ++i) {
-    std::string_view key = parser.Next();
+  // Find the first key (in command order) that exists and is non-empty on some shard. The
+  // string_views point into the command's backing args, which outlive this call.
+  for (std::string_view key : keys) {
     if (first_found_keys_for_shard.contains(key)) {
       key_to_pop = key;
       break;
@@ -2581,7 +2522,7 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
     auto* ns = &trans->GetNamespace();
 
     auto limit_tp = Transaction::time_point::max();
-    auto limit_ms = (unsigned)(zmpop_args.timeout * 1000);
+    auto limit_ms = (unsigned)(timeout * 1000);
     if (limit_ms > 0) {
       using namespace std::chrono;
       limit_tp = steady_clock::now() + milliseconds(limit_ms);
@@ -2618,8 +2559,8 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
   DCHECK(key_to_pop.has_value());
 
   // Pop elements from relevant set.
-  OpResult<ScoredArray> pop_result = ZPopMinMaxInternal(
-      *key_to_pop, FilterShards::YES, zmpop_args.pop_count, zmpop_args.is_max, cmd_cntx->tx());
+  OpResult<ScoredArray> pop_result =
+      ZPopMinMaxInternal(*key_to_pop, FilterShards::YES, pop_count, is_max, cmd_cntx->tx());
 
   if (pop_result.status() == OpStatus::WRONG_TYPE) {
     return response_builder->SendError(kWrongTypeErr);

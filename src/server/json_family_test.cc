@@ -2240,6 +2240,10 @@ TEST_F(JsonFamilyTest, ArrInsert) {
 
   resp = Run({"JSON.ARRINSERT", "json", "$.a", "0", R"("c")"});
   EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
+
+  // Missing value -> wrong number of arguments (like Redis).
+  resp = Run({"JSON.ARRINSERT", "json", "$", "0"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 }
 
 TEST_F(JsonFamilyTest, ArrInsertLegacy) {

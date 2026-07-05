@@ -832,7 +832,9 @@ struct HSetReplies {
 void CmdHDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.Next();  // skip key
   // Collect field names for HNSW data preservation.
-  ParsedArgs fields_span = parser.UnparsedArgs();
+  ParsedArgs fields_span = parser.RemainingRange(WrongNumArgsError("HDEL"));
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
   absl::InlinedVector<std::string_view, 4> field_names;
   for (auto f : fields_span)
     field_names.push_back(f);
@@ -1285,7 +1287,9 @@ void CmdHSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdHSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
-  ParsedArgs values = parser.UnparsedArgs();
+  ParsedArgs values = parser.RemainingRange(WrongNumArgsError("HSETNX"));
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
   auto cb = [&, values](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, values, OpSetParams{.mode = OpSetParams::Mode::kNX});
   };

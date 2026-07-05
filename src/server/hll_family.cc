@@ -132,10 +132,10 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
 
 void PFAdd(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  facade::CmdArgVec values;
-  while (parser.HasNext()) {
-    values.push_back(parser.Next());
-  }
+  CmdArgParser::Range value_range = parser.RemainingRange();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  facade::CmdArgVec values{value_range.begin(), value_range.end()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return AddToHll(t->GetOpArgs(shard), key, values);

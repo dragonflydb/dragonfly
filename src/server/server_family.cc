@@ -458,20 +458,15 @@ optional<ClientListFilter> ParseClientListFilter(CmdArgParser parser, CommandCon
       return nullopt;
     }
     while (parser.HasNext()) {
-      uint32_t id;
-      if (!absl::SimpleAtoi(parser.Next<string_view>(), &id)) {
-        cmd_cntx->SendError("Invalid client ID");
-        return nullopt;
-      }
-      filter.ids.insert(id);
+      filter.ids.insert(parser.Next<uint32_t>("Invalid client ID"));
     }
   } else {
     cmd_cntx->SendError(facade::kSyntaxErr);
     return nullopt;
   }
 
-  if (parser.HasNext() || parser.HasError()) {
-    cmd_cntx->SendError(facade::kSyntaxErr);
+  if (!parser.Finalize()) {
+    cmd_cntx->SendError(parser.TakeError().MakeReply());
     return nullopt;
   }
   return filter;
@@ -3092,9 +3087,10 @@ void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   MetricsCollectOpts opts{.replication_memory = false, .cmd_stats = false, .cmd_latency = false};
   Metrics metrics;
 
-  sections.reserve(parser.UnparsedArgs().size());
-  while (parser.HasNext()) {
-    sections.emplace_back(absl::AsciiStrToUpper(parser.Next<string_view>()));
+  CmdArgParser::Range section_range = parser.RemainingRange();
+  sections.reserve(section_range.size());
+  for (string_view section_arg : section_range) {
+    sections.emplace_back(absl::AsciiStrToUpper(section_arg));
     const auto& section = sections.back();
     need_metrics |= (section != "SERVER") && (section != "REPLICATION");
 

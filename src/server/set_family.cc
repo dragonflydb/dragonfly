@@ -1130,7 +1130,8 @@ struct SetReplies {
 
 void CmdSAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  ParsedArgs values = parser.UnparsedArgs();
+  ParsedArgs values = parser.RemainingRange(WrongNumArgsError("SADD"));
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [key, values](Transaction* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, values, false, false);
@@ -1169,7 +1170,8 @@ void CmdSIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdSMIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  ParsedArgs members = parser.UnparsedArgs();
+  ParsedArgs members = parser.RemainingRange(WrongNumArgsError("SMISMEMBER"));
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   vector<int32_t> memberships(members.size());
 
@@ -1219,7 +1221,8 @@ void CmdSMove(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdSRem(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  ParsedArgs vals = parser.UnparsedArgs();
+  ParsedArgs vals = parser.RemainingRange(WrongNumArgsError("SREM"));
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [key, vals](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, vals, false);
@@ -1476,13 +1479,15 @@ void CmdSInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(OpStatus::AT_LEAST_ONE_KEY);
 
   unsigned limit = 0;
-  // num_keys has already been consumed, so args holds only the keys and an optional LIMIT clause.
-  auto args = parser.UnparsedArgs();
-  if (args.size() == (num_keys + 2) && args[num_keys] == "LIMIT") {
-    if (!absl::SimpleAtoi(args[num_keys + 1], &limit))
+  parser.Skip(num_keys);  // keys are handled by the command key spec.
+  parser.Check("LIMIT", &limit);
+
+  if (!parser.Finalize()) {
+    auto err = parser.TakeError();
+    if (err.type == CmdArgParser::INVALID_INT)
       return cmd_cntx->SendError("limit can't be negative");
-  } else if (args.size() > num_keys)
-    return cmd_cntx->SendError(kSyntaxErr);
+    return cmd_cntx->SendError(err.MakeReply());
+  }
 
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   auto cb = [&](Transaction* t, EngineShard* shard) {

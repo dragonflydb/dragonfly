@@ -727,6 +727,15 @@ TEST_F(GenericFamilyTest, Scan) {
   EXPECT_EQ(10, vec.size());
   EXPECT_THAT(vec, Each(StartsWith("zset")));
 
+  EXPECT_THAT(Run({"scan", "0", "count"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"scan", "0", "count", "not-a-number"}), ErrArg("value is not an integer"));
+  EXPECT_THAT(Run({"scan", "0", "type", "not-a-type"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"scan", "0", "NOVALUES"}), ErrArg("syntax error"));
+
+  // COUNT is a size_t hint: values above UINT32_MAX must still parse.
+  resp = Run({"scan", "0", "count", "5000000000"});
+  EXPECT_THAT(resp, ArrLen(2));
+
   Run({"flushdb"});
 
   Run({"set", "", "foo"});

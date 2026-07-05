@@ -1264,11 +1264,15 @@ void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, false, parser.UnparsedArgs(), cmd_cntx);
+  ParsedArgs args = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  return PushGeneric(ListDir::LEFT, false, args, cmd_cntx);
 }
 
 void CmdLPushX(CmdArgParser parser, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, true, parser.UnparsedArgs(), cmd_cntx);
+  ParsedArgs args = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  return PushGeneric(ListDir::LEFT, true, args, cmd_cntx);
 }
 
 void CmdLPop(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -1276,11 +1280,15 @@ void CmdLPop(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdRPush(CmdArgParser parser, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, false, parser.UnparsedArgs(), cmd_cntx);
+  ParsedArgs args = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx);
 }
 
 void CmdRPushX(CmdArgParser parser, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, true, parser.UnparsedArgs(), cmd_cntx);
+  ParsedArgs args = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx);
 }
 
 void CmdRPop(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -1340,15 +1348,10 @@ void CmdLPos(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdLIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
-  std::string_view key = parser.Next();
-  std::string_view index_str = parser.Next();
-  int32_t index;
+  auto [key, index] = parser.Next<string_view, int32_t>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (!absl::SimpleAtoi(index_str, &index)) {
-    rb->SendError(kInvalidIntErr);
-    return;
-  }
+  RETURN_ON_PARSE_ERROR(parser, rb);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIndex(t->GetOpArgs(shard), key, index);
@@ -1388,15 +1391,8 @@ void CmdLInsert(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdLTrim(CmdArgParser parser, CommandContext* cmd_cntx) {
-  string_view key = parser.Next();
-  string_view s_str = parser.Next();
-  string_view e_str = parser.Next();
-  int32_t start, end;
-
-  if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
-    cmd_cntx->SendError(kInvalidIntErr);
-    return;
-  }
+  auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
@@ -1408,16 +1404,9 @@ void CmdLTrim(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdLRange(CmdArgParser parser, CommandContext* cmd_cntx) {
-  std::string_view key = parser.Next();
-  std::string_view s_str = parser.Next();
-  std::string_view e_str = parser.Next();
-  int32_t start, end;
-
+  auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
-    rb->SendError(kInvalidIntErr);
-    return;
-  }
+  RETURN_ON_PARSE_ERROR(parser, rb);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRange(t->GetOpArgs(shard), key, start, end);
@@ -1433,15 +1422,8 @@ void CmdLRange(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
 void CmdLRem(CmdArgParser parser, CommandContext* cmd_cntx) {
-  std::string_view key = parser.Next();
-  std::string_view index_str = parser.Next();
-  std::string_view elem = parser.Next();
-  int32_t count;
-
-  if (!absl::SimpleAtoi(index_str, &count)) {
-    cmd_cntx->SendError(kInvalidIntErr);
-    return;
-  }
+  auto [key, count, elem] = parser.Next<string_view, int32_t, string_view>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
@@ -1454,15 +1436,8 @@ void CmdLRem(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdLSet(CmdArgParser parser, CommandContext* cmd_cntx) {
-  std::string_view key = parser.Next();
-  std::string_view index_str = parser.Next();
-  std::string_view elem = parser.Next();
-  int32_t count;
-
-  if (!absl::SimpleAtoi(index_str, &count)) {
-    cmd_cntx->SendError(kInvalidIntErr);
-    return;
-  }
+  auto [key, count, elem] = parser.Next<string_view, int32_t, string_view>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, elem, count);
