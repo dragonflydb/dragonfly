@@ -1220,39 +1220,78 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
   };
 
-  // Acquire intent locks. Intent locks are always acquired, even if already locked by others.
   if (!IsGlobal()) {
     lock_args = GetLockArgs(shard->shard_id());
     const bool shard_unlocked = shard->shard_lock()->Check(mode);
+    DbSlice& db_slice = GetDbSlice(shard->shard_id());
 
-    // We need to acquire the fp locks because the executing callback
-    // within RunCallback below might preempt.
-    const bool keys_unlocked = GetDbSlice(shard->shard_id()).Acquire(mode, lock_args);
-    lock_granted = shard_unlocked && keys_unlocked;
+    Transaction* running = shard->running_tx();
 
-    sd.local_mask |= KEYLOCK_ACQUIRED;
-    if (lock_granted) {
-      sd.local_mask |= OUT_OF_ORDER;
+    // Rare path: a callback is mid-execution on this shard (possibly suspended on another
+    // fiber after preempting). Its keys may not be reflected in the lock table yet - lazily
+    // register them on its behalf so our own conflict check below sees an accurate picture.
+    // `running` releases this lock itself once its callback concludes (see the guarded
+    // release_fp_locks() call below and RunInShard's concluding-lock-release code).
+    if (running != nullptr) {
+      DCHECK_NE(running, this);
+      auto& running_sd = running->shard_data_[running->SidToId(shard->shard_id())];
+      if (!(running_sd.local_mask & KEYLOCK_ACQUIRED)) {
+        db_slice.Acquire(running->LockMode(), running->GetLockArgs(shard->shard_id()));
+        running_sd.local_mask |= KEYLOCK_ACQUIRED;
+      }
     }
 
-    DVLOG(3) << "Lock granted " << lock_granted << " for trans " << DebugId();
+    auto acquire_fp_locks = [&]() {
+      const bool keys_unlocked = db_slice.Acquire(mode, lock_args);
+      lock_granted = shard_unlocked && keys_unlocked;
+      sd.local_mask |= KEYLOCK_ACQUIRED;
+      if (lock_granted) {
+        sd.local_mask |= OUT_OF_ORDER;
+      }
+      DVLOG(3) << "Lock granted " << lock_granted << " for trans " << DebugId();
+    };
 
-    // Check if we can run immediately. Skip if another transaction is already running on this shard
-    // (e.g., an inlined tx preempted). While lock_granted ensures no contention on keys, we must
-    // maintain the "running_tx == nullptr" invariant,
-    // since we only track one active transaction per shard.
-    bool immediate_run = execute_optimistic && lock_granted && shard->running_tx() == nullptr;
+    // Common path: nothing is mid-callback on this shard and we're about to run inline and
+    // conclude synchronously. Peek at the lock table without registering our own transient
+    // lock: if we finish without preempting (the common case), no one will ever observe it; if
+    // we do preempt, whoever schedules next on this shard will lazily register it for us (see
+    // above), so the lock table stays accurate throughout.
+    bool skip_acquire = execute_optimistic && running == nullptr && shard_unlocked &&
+                        db_slice.IsLockFree(mode, lock_args);
+    if (!skip_acquire) {
+      // Slow path: either contended, or a callback is mid-flight on this shard, or we're not
+      // eligible for immediate execution. Acquire intent locks as usual - they're always
+      // acquired here, even if already locked by others.
+      acquire_fp_locks();
+    }
+
+    // Check if we can run immediately. Skip if another transaction is already running on this
+    // shard (e.g., an inlined tx preempted). While lock_granted ensures no contention on keys,
+    // we must maintain the "running_tx == nullptr" invariant, since we only track one active
+    // transaction per shard.
+    bool immediate_run = skip_acquire || (execute_optimistic && lock_granted && running == nullptr);
     if (immediate_run) {
       sd.local_mask |= OPTIMISTIC_EXECUTION;
       shard->stats().tx_optimistic_total++;
 
       RunCallback(shard);
 
-      // Check state again, it could've been updated if the callback returned AVOID_CONCLUDING flag.
-      // Only possible for single shard.
+      // Check state again, it could've been updated if the callback returned AVOID_CONCLUDING
+      // flag. Only possible for single shard.
       if (coordinator_state_ & COORD_CONCLUDING) {
-        release_fp_locks();
+        // Release only if a lock is actually registered - either because we acquired it above,
+        // or because another transaction lazily registered it on our behalf while we preempted.
+        if (sd.local_mask & KEYLOCK_ACQUIRED) {
+          release_fp_locks();
+        }
         return true;
+      }
+
+      // AVOID_CONCLUDING flipped us back to non-concluding: we're going to sit in the tx-queue
+      // for a future hop, so make sure our lock is actually registered, unless someone already
+      // lazily registered it for us while we were preempted (or it was already acquired above).
+      if (!(sd.local_mask & KEYLOCK_ACQUIRED)) {
+        acquire_fp_locks();
       }
     }
   }
