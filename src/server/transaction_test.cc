@@ -12,6 +12,7 @@
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/common.h"
+#include "server/db_slice.h"
 #include "server/engine_shard.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
@@ -292,6 +293,134 @@ TEST_F(TransactionTest, AwakenedPollNotDroppedWhenBlockedTxPresent) {
       << "awakened BL was stranded: its PollExecution on shard 0 was never run";
 
   fb_bl.Join();
+}
+
+// Verifies Task 2.1 of issue #7458: an uncontended, concluding single-shard transaction with an
+// empty tx-queue and no in-flight callback on the shard runs inline without ever registering an
+// intent lock. If the old (always-Acquire) behavior were still in place, the key would appear
+// locked (CheckLock would return false) from inside the callback itself.
+TEST_F(TransactionTest, OptimisticFastPathSkipsLockTable) {
+  ASSERT_EQ(0u, Shard("a", shard_set->size()));
+
+  static CommandId cid{"tx_test_fastpath", 0, -1, 1, -1, acl::NONE};
+  auto tx = MakeTx(&cid, {"a"});
+
+  bool lock_free_during_cb = false;
+  OnShard(1, [&] {
+    tx->Execute(
+        [&](Transaction* t, EngineShard* shard) {
+          lock_free_during_cb =
+              t->GetDbSlice(shard->shard_id()).CheckLock(IntentLock::EXCLUSIVE, 0, "a");
+          return OpStatus::OK;
+        },
+        true);
+  });
+
+  EXPECT_TRUE(lock_free_during_cb)
+      << "fast path should run inline without ever registering an intent lock";
+}
+
+// Verifies Tasks 2.2/2.3/2.4 of issue #7458: while a transaction (Z) is mid-callback (running_tx_
+// set, simulating a preemption) and never registered a real lock for its own key (fast path), a
+// new *conflicting* transaction (W) scheduling on the same shard must lazily register Z's lock on
+// its behalf, see the conflict, and queue behind it (not run out of order). Once Z concludes, it
+// must release the lazily-registered lock (no leak), and W must then run.
+TEST_F(TransactionTest, LazyLockConflictingKey) {
+  ASSERT_EQ(0u, Shard("a", shard_set->size()));
+
+  static CommandId cid_z{"tx_test_lz_z", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_w{"tx_test_lz_w", 0, -1, 1, -1, acl::NONE};
+
+  auto tx_z = MakeTx(&cid_z, {"a"});
+  auto tx_w = MakeTx(&cid_w, {"a"});  // same key -> conflicts with Z
+
+  // Phase 1: park Z mid-callback on shard 0, holding running_tx_. Z is the very first scheduling
+  // attempt on an empty, uncontended shard, so it takes the fast path and never registers a lock.
+  auto z = ParkHoldingRunningTx(0, tx_z.get());
+  ASSERT_TRUE(z->WaitParked()) << "Z's concluding hop never parked";
+
+  ASSERT_TRUE(OnShard(0, [&] {
+    return tx_z->GetDbSlice(0).CheckLock(IntentLock::EXCLUSIVE, 0, "a");
+  })) << "Z should not have registered a lock while merely parked, absent a rival scheduler";
+
+  // Phase 2: schedule W on the same key from another thread. Because running_tx_ == Z on shard 0,
+  // W must lazily register Z's lock before checking its own -> sees a conflict -> queues instead
+  // of racing Z's still in-flight callback.
+  std::atomic_bool w_ran{false};
+  fb2::Done w_done;
+  auto fb_w = pp_->at(1)->LaunchFiber([&] {
+    tx_w->Execute(
+        [&](Transaction*, EngineShard*) {
+          w_ran.store(true, memory_order_relaxed);
+          return OpStatus::OK;
+        },
+        true);
+    w_done.Notify();
+  });
+
+  // Wait until W's scheduling attempt has landed on shard 0 and queued.
+  ASSERT_TRUE(AwaitOnShard(0, [&] { return tx_w->DEBUG_GetTxqPosInShard(0) != TxQueue::kEnd; }))
+      << "W was never scheduled (queued) on shard 0";
+
+  EXPECT_FALSE(w_ran.load(memory_order_relaxed))
+      << "W ran out of order while Z was still mid-callback";
+  EXPECT_FALSE(tx_w->DEBUG_GetLocalMask(0) & Transaction::OUT_OF_ORDER)
+      << "W should not be marked OUT_OF_ORDER: it conflicts with Z's (lazily locked) key";
+
+  // Z's lock must now be visible: W's scheduling lazily registered it on Z's behalf.
+  ASSERT_FALSE(OnShard(0, [&] {
+    return tx_z->GetDbSlice(0).CheckLock(IntentLock::EXCLUSIVE, 0, "a");
+  })) << "Z's key lock was not lazily registered while it was mid-callback";
+
+  // Phase 3: release Z. Its callback concludes, and because its lock was lazily registered by W,
+  // it must release it (Task 2.4) instead of leaking it. This also drains the deferred poll so W
+  // finally runs.
+  z->ReleaseAndJoin();
+
+  ASSERT_TRUE(w_done.WaitFor(5s)) << "W was never run after Z concluded";
+  EXPECT_TRUE(w_ran.load(memory_order_relaxed));
+
+  ASSERT_TRUE(OnShard(0, [&] {
+    return tx_z->GetDbSlice(0).CheckLock(IntentLock::EXCLUSIVE, 0, "a");
+  })) << "lock leaked: still registered after both Z and W concluded";
+
+  fb_w.Join();
+}
+
+// Companion to LazyLockConflictingKey: a transaction (V) scheduling on a *disjoint* key while Z is
+// mid-callback must still see Z's lazily-registered lock (so the table stays accurate), but since
+// its own key doesn't overlap, it must be marked OUT_OF_ORDER rather than forced into strict
+// queue order. It only actually executes once Z concludes and releases running_tx_, since at most
+// one callback may run per shard at a time.
+TEST_F(TransactionTest, LazyLockDisjointKeyMarkedOutOfOrder) {
+  ASSERT_EQ(0u, Shard("a", shard_set->size()));
+  ASSERT_EQ(0u, Shard("x", shard_set->size()));
+
+  static CommandId cid_z{"tx_test_lz2_z", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_v{"tx_test_lz2_v", 0, -1, 1, -1, acl::NONE};
+
+  auto tx_z = MakeTx(&cid_z, {"a"});
+  auto tx_v = MakeTx(&cid_v, {"x"});  // disjoint key, same shard
+
+  auto z = ParkHoldingRunningTx(0, tx_z.get());
+  ASSERT_TRUE(z->WaitParked()) << "Z's concluding hop never parked";
+
+  fb2::Done v_done;
+  auto fb_v = pp_->at(1)->LaunchFiber([&] {
+    tx_v->Execute(Noop, true);
+    v_done.Notify();
+  });
+
+  ASSERT_TRUE(AwaitOnShard(0, [&] { return tx_v->DEBUG_GetTxqPosInShard(0) != TxQueue::kEnd; }))
+      << "V was never scheduled (queued) on shard 0";
+
+  EXPECT_TRUE(tx_v->DEBUG_GetLocalMask(0) & Transaction::OUT_OF_ORDER)
+      << "V should be marked OUT_OF_ORDER: its key is disjoint from Z's";
+
+  z->ReleaseAndJoin();
+
+  ASSERT_TRUE(v_done.WaitFor(5s)) << "V was never run after Z concluded";
+  fb_v.Join();
 }
 
 }  // namespace dfly

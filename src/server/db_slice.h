@@ -362,6 +362,10 @@ class DbSlice {
     return CheckLock(mode, dbid, LockTag(key).Fingerprint());
   }
 
+  // Returns true if none of lock_args' keys are locked in a conflicting mode. Unlike Acquire(),
+  // this does not register anything in the lock table.
+  bool IsLockFree(IntentLock::Mode mode, const KeyLockArgs& lock_args) const;
+
   size_t db_array_size() const {
     return db_arr_.size();
   }
