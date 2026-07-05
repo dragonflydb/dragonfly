@@ -141,7 +141,7 @@ void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto reg = registry_->GetRegistryWithWriteLock();
   const bool exists = reg.registry.contains(username);
   const bool has_all_keys = exists ? reg.registry.find(username)->second.Keys().all_keys : false;
-  auto req = ParseAclSetUser(parser.UnparsedArgs(), false, has_all_keys);
+  auto req = ParseAclSetUser(parser.RemainingRange(), false, has_all_keys);
 
   auto error_case = [cmd_cntx](ErrorReply&& error) { cmd_cntx->SendError(error); };
 
@@ -198,7 +198,7 @@ void AclFamily::DelUser(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto& registry = *registry_;
   absl::flat_hash_set<string_view> users;
 
-  for (string_view username : parser.UnparsedArgs()) {
+  for (string_view username : parser.RemainingRange()) {
     if (username == "default") {
       continue;
     }
@@ -451,16 +451,12 @@ void AclFamily::Users(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::Cat(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto args = parser.UnparsedArgs();
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (args.size() > 1) {
-    rb->SendError(facade::OpStatus::SYNTAX_ERR);
-    return;
-  }
-
-  if (args.size() == 1) {
-    string category = absl::AsciiStrToUpper(args[0]);
+  if (parser.HasNext()) {
+    string category = absl::AsciiStrToUpper(parser.Next());
+    if (!parser.Finalize())
+      return rb->SendError(parser.TakeError().MakeReply());
 
     if (!cat_table_.contains(category)) {
       auto error = absl::StrCat("Unknown category: ", category);
@@ -555,22 +551,18 @@ void AclFamily::GetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::GenPass(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto args = parser.UnparsedArgs();
   auto* builder = cmd_cntx->rb();
-  if (args.size() > 1) {
-    builder->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
-    return;
-  }
-  uint32_t random_bits = 256;
-  if (args.size() == 1) {
-    auto requested_bits = args[0];
 
-    if (!absl::SimpleAtoi(requested_bits, &random_bits) || random_bits == 0 || random_bits > 4096) {
-      return builder->SendError(
-          "ACL GENPASS argument must be the number of bits for the output password, a positive "
-          "number up to 4096");
-    }
+  using GenPassBits = facade::FInt<uint32_t{1}, uint32_t{4096}>;
+  uint32_t random_bits = parser.NextOrDefault<GenPassBits>(GenPassBits{256});
+  if (!parser.Finalize()) {
+    if (parser.TakeError().type == facade::CmdArgParser::UNPROCESSED)
+      return builder->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
+    return builder->SendError(
+        "ACL GENPASS argument must be the number of bits for the output password, a positive "
+        "number up to 4096");
   }
+
   std::random_device urandom("/dev/urandom");
   const size_t result_length = (random_bits + 3) / 4;
   constexpr size_t step_size = sizeof(decltype(std::random_device::max()));

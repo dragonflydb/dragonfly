@@ -802,21 +802,16 @@ void DebugCmd::Shutdown() {
 }
 
 void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
-  bool save = true;
+  bool no_save = false;
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  while (parser.HasNext()) {
-    string opt = absl::AsciiStrToUpper(parser.Next());
-    VLOG(1) << "opt " << opt;
-
-    if (opt == "NOSAVE") {
-      save = false;
-    } else {
-      return cmd_cntx->SendError("DEBUG RELOAD only supports the NOSAVE options.");
-    }
+  parser.Apply(Exist("NOSAVE", &no_save));
+  if (!parser.Finalize()) {
+    (void)parser.TakeError();
+    return cmd_cntx->SendError("DEBUG RELOAD only supports the NOSAVE options.");
   }
 
-  if (save) {
+  if (!no_save) {
     string err_details;
     VLOG(1) << "Performing save";
 
@@ -1568,6 +1563,8 @@ void DebugCmd::Compression(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (parser.Check("SET", &bintable)) {
+    RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
     // SET <bintable> [type]
     string raw;
     atomic_bool succeed = absl::Base64Unescape(bintable, &raw);
@@ -1593,6 +1590,8 @@ void DebugCmd::Compression(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (parser.Check("EXPORT")) {
     print_bintable = true;
   } else if (parser.Check("IMPORT", &bintable)) {
+    RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
     string raw;
     bool succeed = absl::Base64Unescape(bintable, &raw);
     if (succeed) {

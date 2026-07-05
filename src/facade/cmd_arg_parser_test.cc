@@ -96,17 +96,44 @@ TEST_F(CmdArgParserTest, NextStatement) {
 }
 
 TEST_F(CmdArgParserTest, CheckTailFail) {
-  auto parser = Make({"TAG", "11", "22", "TAG", "text"});
+  {
+    auto parser = Make({"TAG", "11", "22", "TAG", "text"});
 
-  int first;
-  string_view second;
-  EXPECT_TRUE(parser.Check("TAG", &first, &second));
-  EXPECT_EQ(first, 11);
-  EXPECT_EQ(second, "22");
+    int first;
+    string_view second;
+    EXPECT_TRUE(parser.Check("TAG", &first, &second));
+    EXPECT_EQ(first, 11);
+    EXPECT_EQ(second, "22");
 
-  EXPECT_FALSE(parser.Check("TAG", &first, &second));
-  EXPECT_TRUE(parser.Check("TAG", &first));
-  EXPECT_TRUE(parser.TakeError());
+    EXPECT_TRUE(parser.Check("TAG", &first, &second));
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_INT);
+    EXPECT_EQ(err.index, 4);
+  }
+  {
+    auto parser = Make({"TAG", "11"});
+
+    int first;
+    string_view second;
+    EXPECT_TRUE(parser.Check("TAG", &first, &second));
+
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
+    EXPECT_EQ(err.index, 2);
+  }
+  {
+    auto parser = Make({"TAG"});
+
+    int first;
+    EXPECT_TRUE(parser.Check("TAG", &first));
+
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
+    EXPECT_EQ(err.index, 1);
+  }
 }
 
 TEST_F(CmdArgParserTest, Map) {

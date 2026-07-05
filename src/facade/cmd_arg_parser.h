@@ -46,7 +46,7 @@ namespace facade {
 // Tag matching:
 //   parser.ExpectTag("LOAD");                                   // required literal keyword
 //   if (parser.Check("NX")) { ... }                             // consume tag only if matched
-//   if (parser.Check("COUNT", &count)) { ... }                 // ...also read following args
+//   if (parser.Check("COUNT", &count)) { ... }                 // ...also read args (check errors)
 //   auto mode = parser.MapNext("EX", Mode::EX, "PX", Mode::PX); // tag -> enum mapping
 //   auto maybe_mode = parser.TryMapNext("ASC", Dir::ASC,        // like MapNext but returns
 //                                       "DESC", Dir::DESC);     // nullopt (no error) on miss
@@ -400,18 +400,18 @@ struct CmdArgParser {
     return res;
   }
 
-  // If the next arg matches `tag`, consume it and the following args-into-pointers; else no-op.
+  // Consumes `tag` if next and reads the following args-into-pointers; no-op otherwise. The result
+  // is the tag match only: a bad/missing value still returns true but latches an error (check it).
   template <class... Args> bool Check(std::string_view tag, Args*... args) {
-    if (cur_i_ + sizeof...(Args) >= args_.size())
+    if (cur_i_ >= args_.size())
       return false;
 
     std::string_view arg = SafeSV(cur_i_);
     if (!absl::EqualsIgnoreCase(arg, tag))
       return false;
 
-    ((*args = Convert<Args>(++cur_i_)), ...);
-
     ++cur_i_;
+    ((*args = Next<Args>()), ...);
 
     return true;
   }

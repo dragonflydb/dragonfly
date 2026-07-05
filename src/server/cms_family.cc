@@ -31,9 +31,14 @@ constexpr char kCmsNotFound[] = "CMS: key does not exist";
 constexpr char kCmsWrongNumKeys[] = "CMS: wrong number of keys";
 constexpr char kCmsWrongNumKeysWeights[] = "CMS: wrong number of keys/weights";
 constexpr char kCmsCannotParseNumber[] = "CMS: Cannot parse number";
+constexpr char kCmsPositiveIncrement[] = "CMS: increment must be a positive integer";
 
 constexpr uint32_t kMaxCmsWidth = 1'000'000;
 constexpr uint32_t kMaxCmsDepth = 100;
+
+RuleError PositiveCmsIncrement(int64_t v) {
+  return {v <= 0, kCmsPositiveIncrement};
+}
 
 bool ValidateCmsDimensions(uint32_t width, uint32_t depth, RedisReplyBuilder* rb) {
   if (width == 0 || depth == 0) {
@@ -192,33 +197,26 @@ void CmdInitByProb(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-
-  // Parse item/increment pairs. tail_args() includes the key, so subtract it.
-  size_t num_pair_args = cmd_cntx->tail_args().size() - 1;
-  if (num_pair_args < 2 || num_pair_args % 2 != 0) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   vector<pair<string_view, int64_t>> items;
-  items.reserve(num_pair_args / 2);
+  items.reserve(parser.UnparsedArgs().size() / 2);
 
+  using CmsIncrement = Validated<int64_t, PositiveCmsIncrement>;
   while (parser.HasNext()) {
-    string_view item = parser.Next();
-    int64_t incr;
-    if (!absl::SimpleAtoi(parser.Next(), &incr)) {
-      return cmd_cntx->SendError(kCmsCannotParseNumber);
-    }
-    if (incr <= 0) {
-      return cmd_cntx->SendError("CMS: increment must be a positive integer");
-    }
+    auto [item, incr] = parser.Next<string_view, CmsIncrement>();
     items.emplace_back(item, incr);
+  }
+  if (auto err = parser.TakeError()) {
+    if (err.type == CmdArgParser::INVALID_INT)
+      return rb->SendError(kCmsCannotParseNumber);
+    return rb->SendError(err.MakeReply());
   }
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrBy(t->GetOpArgs(shard), key, items);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   OpResult<vector<int64_t>> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res) {
     if (res.status() == OpStatus::KEY_NOTFOUND) {

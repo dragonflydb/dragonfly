@@ -129,9 +129,10 @@ void ScriptMgr::Run(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* buil
 }
 
 void ScriptMgr::ExistsCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder) const {
+  CmdArgParser::Range shas = parser.RemainingRange();
   vector<uint8_t> res;
-  while (parser.HasNext()) {
-    string_view sha = parser.Next<string_view>();
+  res.reserve(shas.size());
+  for (string_view sha : shas) {
     res.push_back(Find(sha) ? 1 : 0);
   }
 

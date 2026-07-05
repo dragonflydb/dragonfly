@@ -261,7 +261,8 @@ OpResult<vector<bool>> RunExists(CommandContext* cmd_cntx, string_view key, Pars
 
 void CmdExists(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  ParsedArgs items = parser.UnparsedArgs();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   OpResult<vector<bool>> res = RunExists(cmd_cntx, key, items);
   if (!res && res.status() != OpStatus::KEY_NOTFOUND && res.status() != OpStatus::WRONG_TYPE)
@@ -271,7 +272,8 @@ void CmdExists(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdMExists(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  ParsedArgs items = parser.UnparsedArgs();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   OpResult<vector<bool>> res = RunExists(cmd_cntx, key, items);
   if (!res && res.status() != OpStatus::KEY_NOTFOUND && res.status() != OpStatus::WRONG_TYPE)

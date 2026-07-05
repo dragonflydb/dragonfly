@@ -172,7 +172,8 @@ void CmdReserve(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  ParsedArgs items = parser.UnparsedArgs();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, items);
@@ -192,7 +193,9 @@ void CmdAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdExists(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  ParsedArgs items = parser.UnparsedArgs();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExists(t->GetOpArgs(shard), key, items);
   };
@@ -207,7 +210,8 @@ void CmdExists(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdMAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  ParsedArgs items = parser.UnparsedArgs();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, items);
@@ -284,7 +288,8 @@ void CmdLoadChunk(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdMExists(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  ParsedArgs items = parser.UnparsedArgs();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExists(t->GetOpArgs(shard), key, items);

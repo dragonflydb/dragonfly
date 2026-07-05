@@ -1913,23 +1913,11 @@ void CmdArrIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   string_view search_value = parser.Next();
 
-  int start_index = 0;
-  if (parser.HasNext()) {
-    if (!absl::SimpleAtoi(parser.Next(), &start_index)) {
-      VLOG(1) << "Failed to convert the start index to numeric";
-      builder->SendError(kInvalidIntErr);
-      return;
-    }
-  }
+  int start_index = parser.NextOrDefault<int>(0);
+  RETURN_ON_PARSE_ERROR(parser, builder);
 
-  int end_index = 0;
-  if (parser.HasNext()) {
-    if (!absl::SimpleAtoi(parser.Next(), &end_index)) {
-      VLOG(1) << "Failed to convert the stop index to numeric";
-      builder->SendError(kInvalidIntErr);
-      return;
-    }
-  }
+  int end_index = parser.NextOrDefault<int>(0);
+  RETURN_ON_PARSE_ERROR(parser, builder);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpArrIndex(t->GetOpArgs(shard), key, json_path, search_value, start_index, end_index);
@@ -1942,22 +1930,15 @@ void CmdArrIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdArrInsert(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.Next();
-  int index = -1;
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  string_view index_sv = parser.Next();
-  if (!absl::SimpleAtoi(index_sv, &index)) {
-    VLOG(1) << "Failed to convert the following value to numeric: " << index_sv;
-    builder->SendError(kInvalidIntErr);
-    return;
-  }
+  int index = parser.Next<int>();
+  RETURN_ON_PARSE_ERROR(parser, builder);
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  vector<string_view> new_values;
-  while (parser.HasNext()) {
-    new_values.emplace_back(parser.Next());
-  }
+  CmdArgParser::Range new_value_range = parser.RemainingRange();
+  vector<string_view> new_values{new_value_range.begin(), new_value_range.end()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpArrInsert(t->GetOpArgs(shard), key, json_path, index, new_values);
@@ -1974,10 +1955,8 @@ void CmdArrAppend(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  vector<string_view> append_values;
-  while (parser.HasNext()) {
-    append_values.emplace_back(parser.Next());
-  }
+  CmdArgParser::Range append_value_range = parser.RemainingRange();
+  vector<string_view> append_values{append_value_range.begin(), append_value_range.end()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpArrAppend(t->GetOpArgs(shard), key, json_path, append_values);
@@ -1990,21 +1969,10 @@ void CmdArrAppend(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdArrTrim(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.Next();
-  int start_index;
-  int stop_index;
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (!absl::SimpleAtoi(parser.Next(), &start_index)) {
-    VLOG(1) << "Failed to parse array start index";
-    builder->SendError(kInvalidIntErr);
-    return;
-  }
-
-  if (!absl::SimpleAtoi(parser.Next(), &stop_index)) {
-    VLOG(1) << "Failed to parse array stop index";
-    builder->SendError(kInvalidIntErr);
-    return;
-  }
+  auto [start_index, stop_index] = parser.Next<int, int>();
+  RETURN_ON_PARSE_ERROR(parser, builder);
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
@@ -2264,7 +2232,7 @@ void RegisterJsonFamily(CommandRegistry* registry) {
   *registry << CI{"JSON.CLEAR", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Clear);
   *registry << CI{"JSON.ARRPOP", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrPop);
   *registry << CI{"JSON.ARRTRIM", CO::JOURNALED | CO::FAST, 5, 1, 1, acl::JSON}.HFUNC(ArrTrim);
-  *registry << CI{"JSON.ARRINSERT", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}
+  *registry << CI{"JSON.ARRINSERT", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::JSON}
                    .HFUNC(ArrInsert);
   *registry << CI{"JSON.ARRAPPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}
                    .HFUNC(ArrAppend);

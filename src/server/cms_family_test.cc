@@ -77,6 +77,12 @@ TEST_F(CmsFamilyTest, IncrBy) {
   // Should fail with invalid number
   resp = Run("cms.incrby cms foo notanumber");
   EXPECT_THAT(resp, ErrArg("CMS: Cannot parse number"));
+
+  resp = Run({"cms.incrby", "cms", "foo", "0"});
+  EXPECT_THAT(resp, ErrArg("CMS: increment must be a positive integer"));
+
+  resp = Run({"cms.incrby", "cms", "foo", "1", "bar"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(CmsFamilyTest, Query) {
