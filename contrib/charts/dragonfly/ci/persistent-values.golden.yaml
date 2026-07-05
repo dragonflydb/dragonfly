@@ -45,7 +45,7 @@ metadata:
     app.kubernetes.io/version: "v1.39.0"
     app.kubernetes.io/managed-by: Helm
 spec:
-  serviceName: test
+  serviceName: test-dragonfly
   replicas: 1
   selector:
     matchLabels:
@@ -94,10 +94,10 @@ spec:
             requests: {}
           volumeMounts:
             - mountPath: /data
-              name: "test-data"
+              name: "test-dragonfly-data"
   volumeClaimTemplates:
     - metadata:
-        name: "test-data"
+        name: "test-dragonfly-data"
       spec:
         accessModes: [ "ReadWriteOnce" ]
         storageClassName: standard
