@@ -88,6 +88,7 @@ helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragon
 | storage.enabled | bool | `false` | If /data should persist. This will provision a StatefulSet instead. |
 | storage.requests | string | `"128Mi"` | Volume size to request for the PVC |
 | storage.storageClassName | string | `""` | Global StorageClass for Persistent Volume(s) |
+| storage.useFullnameForVolumes | bool | `false` | Use the chart's fullname (instead of the release name) for the StatefulSet's serviceName and the data volume/claim name. This avoids name collisions when the chart is installed as a subchart dependency. Do not enable this on an existing storage-enabled release: Kubernetes does not allow changing serviceName or renaming volumeClaimTemplates in place, so it only applies cleanly to new installs. |
 | tls.cert | string | `""` | TLS certificate |
 | tls.createCerts | bool | `false` | use cert-manager to automatically create the certificate |
 | tls.duration | string | `"87600h0m0s"` | duration or ttl of the validity of the created certificate |

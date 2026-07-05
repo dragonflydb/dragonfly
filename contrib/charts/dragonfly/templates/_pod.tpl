@@ -3,7 +3,7 @@
 volumeMounts:
   {{- if .Values.storage.enabled }}
   - mountPath: /data
-    name: "{{ .Release.Name }}-data"
+    name: "{{ include "dragonfly.dataVolumeName" . }}"
   {{- end }}
   {{- if and .Values.tls .Values.tls.enabled }}
   - mountPath: /etc/dragonfly/tls
