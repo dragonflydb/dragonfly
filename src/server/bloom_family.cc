@@ -1,6 +1,11 @@
 // Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <absl/strings/ascii.h>
+
+#include <array>
+#include <optional>
+
 #include "core/bloom.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
@@ -286,6 +291,56 @@ void CmdLoadChunk(CmdArgParser parser, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
+void CmdInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  const string_view key = parser.Next();
+
+  optional<string_view> field;
+  if (parser.HasNext())
+    field = parser.Next();
+
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
+    const auto& db_slice = t->GetDbSlice(shard->shard_id());
+    OpResult op_res = db_slice.FindReadOnly(t->GetOpArgs(shard).db_cntx, key, OBJ_SBF);
+    if (!op_res)
+      return op_res.status();
+
+    const SBF* sbf = op_res.value()->second.GetSBF();
+    if (IsBeingLoaded(sbf))
+      return OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS;
+
+    return array<int64_t, 5>{
+        static_cast<int64_t>(sbf->total_capacity()), static_cast<int64_t>(sbf->MallocUsed()),
+        static_cast<int64_t>(sbf->num_filters()), static_cast<int64_t>(sbf->total_items()),
+        static_cast<int64_t>(sbf->grow_factor())};
+  };
+
+  OpResult<array<int64_t, 5>> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res)
+    return rb->SendError(res.status());
+
+  constexpr string_view kNames[] = {"Capacity", "Size", "Number of filters",
+                                    "Number of items inserted", "Expansion rate"};
+  constexpr string_view kShortNames[] = {"CAPACITY", "SIZE", "FILTERS", "ITEMS", "EXPANSION"};
+
+  if (field) {
+    for (size_t i = 0; i < std::size(kShortNames); ++i) {
+      if (absl::EqualsIgnoreCase(*field, kShortNames[i]))
+        return rb->SendLong((*res)[i]);
+    }
+    return rb->SendError("Invalid info arguments");
+  }
+
+  RedisReplyBuilder::ArrayScope scope{rb, std::size(kNames) * 2};
+  for (size_t i = 0; i < std::size(kNames); ++i) {
+    rb->SendBulkString(kNames[i]);
+    rb->SendLong((*res)[i]);
+  }
+}
+
 void CmdMExists(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   ParsedArgs items = parser.RemainingRange(kSyntaxErr);
@@ -316,15 +371,16 @@ using CI = CommandId;
 void RegisterBloomFamily(CommandRegistry* registry) {
   registry->StartFamily();
 
-  *registry
-      << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
-             Reserve)
-      << CI{"BF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
-      << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MAdd)
-      << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
-      << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists)
-      << CI{"BF.SCANDUMP", CO::READONLY, 3, 1, 1, acl::BLOOM}.HFUNC(ScanDump)
-      << CI{"BF.LOADCHUNK", CO::JOURNALED | CO::DENYOOM, 4, 1, 1, acl::BLOOM}.HFUNC(LoadChunk);
+  *registry << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
+                   Reserve)
+            << CI{"BF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
+            << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(
+                   MAdd)
+            << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
+            << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists)
+            << CI{"BF.SCANDUMP", CO::READONLY, 3, 1, 1, acl::BLOOM}.HFUNC(ScanDump)
+            << CI{"BF.LOADCHUNK", CO::JOURNALED | CO::DENYOOM, 4, 1, 1, acl::BLOOM}.HFUNC(LoadChunk)
+            << CI{"BF.INFO", CO::READONLY, -2, 1, 1, acl::BLOOM}.HFUNC(Info);
 };
 
 }  // namespace dfly
