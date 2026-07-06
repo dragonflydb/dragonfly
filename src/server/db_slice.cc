@@ -1310,6 +1310,10 @@ bool DbSlice::IsLockFree(IntentLock::Mode mode, const KeyLockArgs& lock_args) co
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const {
   const auto& lt = db_arr_[dbid]->trans_locks;
+  if (lt.Size() == 0) {
+    return true;
+  }
+
   auto lock = lt.Find(fp);
   if (lock) {
     return lock->Check(mode);
