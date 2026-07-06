@@ -403,6 +403,55 @@ TEST_F(OAHSetTest, SimdFindEraseStress) {
     EXPECT_EQ(ss_->Find(s), ss_->end()) << s;
 }
 
+// Erasing an already-expired member WITHOUT a prior Find must return false (the member is
+// logically absent, matching the StringSet encoding + Redis SREM/HDEL) yet still reap it and
+// keep size accounting correct. This exercises Erase's own expiry resolution -- SimdFindEraseStress
+// always Finds first, so the target is reaped before Erase sees it.
+TEST_F(OAHSetTest, EraseExpiredDirect) {
+  ss_->set_time(10);
+  EXPECT_TRUE(ss_->Add("alive"sv, 100));  // expiry=110
+  EXPECT_TRUE(ss_->Add("dead"sv, 5));     // expiry=15
+  const uint32_t size_before = ss_->UpperBoundSize();
+
+  ss_->set_time(50);  // "dead" is now expired, "alive" survives
+
+  // Direct Erase (no preceding Find): expired member reports not-removed but is reaped.
+  EXPECT_FALSE(ss_->Erase("dead"sv)) << "expired erase must return false";
+  EXPECT_EQ(ss_->UpperBoundSize(), size_before - 1) << "expired member must be reaped from size";
+  EXPECT_EQ(ss_->Find("dead"sv), ss_->end());
+  EXPECT_FALSE(ss_->Erase("dead"sv)) << "second erase: already gone";
+
+  // A live member still erases normally.
+  EXPECT_TRUE(ss_->Erase("alive"sv));
+  EXPECT_EQ(ss_->UpperBoundSize(), size_before - 2);
+}
+
+// Same as above but forces the expired target into an extension vector (many collisions in a
+// tiny table), covering ProbeExtensionVector's Expire=false path and the vector cleanup.
+TEST_F(OAHSetTest, EraseExpiredDirectInVector) {
+  constexpr size_t kNum = 512;
+  ss_->Reserve(4);
+  ss_->set_time(10);
+  std::vector<std::string> members;
+  for (size_t i = 0; i < kNum; ++i) {
+    std::string s = absl::StrCat("evict_", i);
+    EXPECT_TRUE(ss_->Add(s, 5));  // all expire at 15
+    members.push_back(s);
+  }
+  const uint32_t size_before = ss_->UpperBoundSize();
+  EXPECT_EQ(size_before, kNum);
+
+  ss_->set_time(50);  // every member is now expired
+
+  uint32_t reaped = 0;
+  for (const auto& s : members) {
+    EXPECT_FALSE(ss_->Erase(s)) << "expired erase must return false: " << s;
+    EXPECT_EQ(ss_->UpperBoundSize(), size_before - ++reaped) << s;
+    EXPECT_EQ(ss_->Find(s), ss_->end()) << s;
+  }
+  EXPECT_EQ(ss_->UpperBoundSize(), 0u);
+}
+
 TEST_F(OAHSetTest, Resizing) {
   constexpr size_t num_strs = 4096;
   unordered_set<string> strs;

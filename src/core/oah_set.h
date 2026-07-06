@@ -10,10 +10,10 @@
 
 #include <array>
 #include <bit>
+#include <cassert>
 #include <concepts>
 #include <vector>
 
-#include "base/logging.h"
 #include "common/rapidhash.h"
 #include "core/detail/stateless_allocator.h"
 #include "core/oah_ptr.h"
@@ -378,8 +378,8 @@ class OAHSet {  // Open Addressing Hash Set
     return rapidhashMicro_withSeed(str.data(), str.size(), kHashSeed);
   }
 
-  static uint32_t BucketId(uint64_t hash, uint32_t capacity_log) {
-    return hash >> (64 - capacity_log);
+  uint32_t BucketId(uint64_t hash) const {
+    return hash >> (64 - capacity_log_);
   }
 
   // A non-owning OAHPtr over bucket slot `i`.
@@ -439,7 +439,7 @@ class OAHSet {  // Open Addressing Hash Set
       if (!entry)
         continue;
       // Drop entries whose TTL has passed instead of rehashing them.
-      if (expiration_used_ && entry.HasExpiry() && entry.GetExpiry() <= time_now_) {
+      if (IsExpired(entry)) {
         obj_alloc_used_ -= entry.AllocSize();
         --size_;
         continue;
@@ -467,7 +467,7 @@ class OAHSet {  // Open Addressing Hash Set
     if (e.Empty())
       return false;
     const std::string_view key = e.Key();
-    if (BucketId(Hash(key), capacity_log_) != bucket_id)
+    if (BucketId(Hash(key)) != bucket_id)
       return false;
     cb(key);
     return true;
@@ -532,6 +532,12 @@ class OAHSet {  // Open Addressing Hash Set
     expiration_used_ ? ExpireIfNeeded<true>(entry) : ExpireIfNeeded<false>(entry);
   }
 
+  // True when `entry`'s TTL has already elapsed. HasExpiry() is false for entries without a TTL,
+  // so it already covers the no-TTL case -- a separate expiration_used_ guard would be redundant.
+  FORCE_INLINE bool IsExpired(OAHEntry entry) const {
+    return entry.HasExpiry() && entry.GetExpiry() <= time_now_;
+  }
+
   // Vectorized hash probe over Wide::kLanes consecutive lanes from `base`, returning a
   // candidate bitmask (lane i -> bit i). Backs the window (EntryWide) and extension-vector
   // (VectorWide) scans. `shifted_ext_hash` is the query ext-hash pre-shifted to bits
@@ -544,7 +550,9 @@ class OAHSet {  // Open Addressing Hash Set
   uint32_t ProbeWindow(const TaggedPtr* base, uint64_t ext_hash) noexcept;
 
   // Searches the extension-point vector for `str`. Returns the matched slot
-  // (possibly now-empty after expiry, which the caller reuses) or nullptr.
+  // (possibly now-empty after expiry, which the caller reuses) or nullptr. Expire gates the
+  // per-candidate lazy expiration (see FindMatch).
+  template <bool Expire = true>
   TaggedPtr* ProbeExtensionVector(uint32_t ext_bid, std::string_view str, uint64_t ext_hash);
 
   // Outcome of a key probe. A raw slot (not an iterator) so the caller can reuse a
@@ -555,13 +563,16 @@ class OAHSet {  // Open Addressing Hash Set
     uint32_t pos_in_vec;  // position within a vector bucket (0 for single entries)
   };
 
-  // Shared core of AddImpl and FindInternal: scans the window (cand_bits from a
-  // prior ProbeLanes) then the extension vector for `str`.
+  // Shared core of AddImpl, FindInternal and Erase: scans the window (cand_bits from a prior
+  // ProbeLanes) then the extension vector for `str`. Expire (default true) gates the per-candidate
+  // lazy expiration: Find/Add reap expired entries they pass over, but Erase (Expire=false) skips
+  // that -- it won't revisit the set, so reaping bystanders is wasted work. With Expire=false a
+  // returned `matched` is always a live-looking cell (never a reaped 0).
+  template <bool Expire = true>
   MatchResult FindMatch(uint32_t bid, uint32_t ext_bid, uint32_t cand_bits, std::string_view str,
                         uint64_t ext_hash);
 
-  // Probes for `str`; returns an iterator to the live entry or end(). Shared by
-  // Find and Erase.
+  // Probes for `str`; returns an iterator to the live entry or end(). Used by Find.
   iterator FindInternal(uint32_t bid, std::string_view str, uint64_t hash);
 
   // The stored 12-bit fingerprint is a fixed low slice of the hash, independent of
@@ -578,7 +589,7 @@ class OAHSet {  // Open Addressing Hash Set
   // Recomputes the entry's hash and returns its new bucket. The stored fingerprint is
   // capacity-independent, so grow/shrink leave it valid -- no SetExtHash needed here.
   uint32_t RehashEntry(OAHEntry entry) {
-    return BucketId(Hash(entry.Key()), capacity_log_);
+    return BucketId(Hash(entry.Key()));
   }
 
   mutable size_t obj_alloc_used_ = 0;
@@ -600,10 +611,12 @@ inline FORCE_INLINE uint32_t OAHSet::ProbeLanes(const TaggedPtr* base,
                                                 uint64_t shifted_ext_hash) noexcept {
   auto data_v = Wide::Load(base);
   // Compare the stored ext-hash in place (bits [kExtHashShift, 64)) against the query, which
-  // the caller pre-shifted to the same position (no per-lane down-shift). Stored fingerprints
-  // are never 0 (CalcExtHash maps 0->1), so empty (all-zero) lanes can never match a nonzero
-  // query -- no empty-lane exclusion needed.
-  auto stored_hash = data_v & Wide::Fill(OAHEntry::kExtHashShiftedMask);
+  // the caller pre-shifted to the same position (no per-lane down-shift). The mask also covers
+  // the vector bit (bit 0): a vector slot sets it while an entry and the query never do, so a
+  // vector can never match a query here -- the window scan needs no per-candidate IsVector test.
+  // Stored fingerprints are never 0 (CalcExtHash maps 0->1), so empty (all-zero) lanes can never
+  // match a nonzero query either -- no empty-lane exclusion needed.
+  auto stored_hash = data_v & Wide::Fill(OAHEntry::kExtHashShiftedMask | OAHPtr::kVectorBit);
   auto candidate = (stored_hash == shifted_ext_hash);
   return candidate.GetMSBs();
 }
@@ -621,13 +634,14 @@ inline FORCE_INLINE uint32_t OAHSet::ProbeWindow(const TaggedPtr* base,
 
 // 2-lane SIMD strides. Vector sizes are always even (PtrVector grows by 2), so the
 // stride covers the array with no tail.
+template <bool Expire>
 inline FORCE_INLINE TaggedPtr* OAHSet::ProbeExtensionVector(uint32_t ext_bid, std::string_view str,
                                                             uint64_t ext_hash) {
   auto vec = At(ext_bid).AsVector();
   TaggedPtr* raw_arr = vec.Raw();
   const size_t size = vec.Size();
-  DCHECK_GE(size, size_t(kVectorLaneStep));
-  DCHECK_EQ(size % kVectorLaneStep, 0u);
+  assert(size >= size_t(kVectorLaneStep));
+  assert(size % kVectorLaneStep == 0u);
 
   const uint64_t shifted_ext_hash = ext_hash << OAHEntry::kExtHashShift;
   for (size_t base = 0; base < size; base += kVectorLaneStep) {
@@ -638,7 +652,8 @@ inline FORCE_INLINE TaggedPtr* OAHSet::ProbeExtensionVector(uint32_t ext_bid, st
       cand_bits &= cand_bits - 1;
       OAHEntry re(raw_arr[base + j]);
       const bool match = re.Key() == str;
-      ExpireIfNeeded(re);
+      if constexpr (Expire)
+        ExpireIfNeeded(re);
       if (match)
         return &raw_arr[base + j];
     }
@@ -647,6 +662,7 @@ inline FORCE_INLINE TaggedPtr* OAHSet::ProbeExtensionVector(uint32_t ext_bid, st
 }
 
 // Window read stays in bounds: entries_ has kDisplacementSize-1 slack past BucketCount.
+template <bool Expire>
 inline FORCE_INLINE OAHSet::MatchResult OAHSet::FindMatch(uint32_t bid, uint32_t ext_bid,
                                                           uint32_t cand_bits, std::string_view str,
                                                           uint64_t ext_hash) {
@@ -657,18 +673,18 @@ inline FORCE_INLINE OAHSet::MatchResult OAHSet::FindMatch(uint32_t bid, uint32_t
     const uint32_t i = std::countr_zero(cand_bits);
     cand_bits &= cand_bits - 1;
     const uint32_t bucket_id = bid + i;
-    OAHPtr p(base[bucket_id]);
-    if (p.IsVector())  // vectors live only at the extension point
-      continue;
-    OAHEntry e = p[0];
+    // Vector slots carry the vector bit and are masked out of the probe, so a candidate is
+    // always a single entry -- no IsVector check needed here.
+    OAHEntry e(base[bucket_id]);
     const bool match = e.Key() == str;
-    ExpireIfNeeded(e);
+    if constexpr (Expire)
+      ExpireIfNeeded(e);
     if (match)
       return {&base[bucket_id], bucket_id, 0};
   }
   OAHPtr ext(base[ext_bid]);
   if (ext.IsVector()) {
-    if (TaggedPtr* hit = ProbeExtensionVector(ext_bid, str, ext_hash))
+    if (TaggedPtr* hit = ProbeExtensionVector<Expire>(ext_bid, str, ext_hash))
       return {hit, ext_bid, static_cast<uint32_t>(hit - ext.AsVector().Raw())};
   }
   return {nullptr, 0, 0};
@@ -684,7 +700,7 @@ inline FORCE_INLINE uint32_t OAHSet::FindEmptyAround(uint32_t bid) {
   }
   // TODO add expiration logic
   const uint32_t ext = GetExtensionPoint(bid);
-  DCHECK_LT(ext, entries_.size());
+  assert(ext < entries_.size());
   return ext;
 }
 
@@ -693,10 +709,10 @@ inline FORCE_INLINE bool OAHSet::AddImpl(std::string_view str, uint32_t ttl_sec)
   if (size_ >= entries_.size()) [[unlikely]] {
     Reserve(BucketCount() * 2);
   }
-  DCHECK_GE(Capacity(), kDisplacementSize);
+  assert(Capacity() >= kDisplacementSize);
 
   uint64_t hash = Hash(str);
-  auto bucket_id = BucketId(hash, capacity_log_);
+  auto bucket_id = BucketId(hash);
   PREFETCH_READ(entries_.data() + bucket_id);
 
   const ssize_t mem_before = zmalloc_used_memory_tl;
@@ -783,28 +799,45 @@ inline unsigned OAHSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_
 inline OAHSet::iterator OAHSet::Find(std::string_view member) {
   if (entries_.empty())
     return end();
-  uint64_t hash = Hash(member);
-  return FindInternal(BucketId(hash, capacity_log_), member, hash);
+  const uint64_t hash = Hash(member);
+  return FindInternal(BucketId(hash), member, hash);
 }
 
 inline bool OAHSet::Erase(std::string_view str) {
   if (entries_.empty())
     return false;
-  uint64_t hash = Hash(str);
-  auto item = FindInternal(BucketId(hash, capacity_log_), str, hash);
-  if (item == end())
+  const uint64_t hash = Hash(str);
+  const uint32_t bid = BucketId(hash);
+  const uint64_t ext_hash = CalcExtHash(hash);
+  const uint32_t cand_bits = ProbeWindow(&entries_[bid], ext_hash);
+  // Expire=false: don't lazily reap bystander candidates -- Erase won't revisit the set. The
+  // matched target's own expiry is resolved below (so it's never returned as a reaped 0 here).
+  const MatchResult m = FindMatch<false>(bid, GetExtensionPoint(bid), cand_bits, str, ext_hash);
+  if (!m.matched)  // absent
     return false;
-  --size_;
-  OAHEntry victim = *item;
-  obj_alloc_used_ -= victim.AllocSize();
-  OAHEntry::Destroy(victim.Release());
 
-  OAHPtr bucket = At(item.bucket_id());
-  if (bucket.IsVector() && bucket.AsVector().Empty()) {
-    ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
-    bucket.Clear();
+  OAHEntry victim(*m.matched);
+  // An already-expired target is logically absent, so report not-removed (0) to match the
+  // StringSet encoding and Redis SREM/HDEL; the reaping below is identical either way.
+  const bool removed = !IsExpired(victim);
+
+  --size_;
+  obj_alloc_used_ -= victim.AllocSize();
+  OAHEntry::Destroy(victim.Release());  // zeroes the matched cell
+
+  // A window single entry sits directly in entries_[bucket_id], so erasing it needs no cleanup.
+  // Only a match whose cell lies inside an extension vector (matched != the bucket slot) can
+  // leave that vector empty; there the slot is necessarily a vector, so AsVector() needs no
+  // IsVector() re-check.
+  if (m.matched != &entries_[m.bucket_id]) {
+    OAHPtr bucket = At(m.bucket_id);
+    auto vec = bucket.AsVector();
+    if (vec.Empty()) {
+      ptr_vectors_alloc_used_ -= vec.AllocSize();
+      bucket.Clear();
+    }
   }
-  return true;
+  return removed;
 }
 
 inline OAHSet::iterator OAHSet::ScanRange(uint32_t lo, uint32_t hi) {
