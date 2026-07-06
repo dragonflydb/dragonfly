@@ -1,0 +1,275 @@
+name: ubsan
+
+# UndefinedBehaviorSanitizer run.
+#
+# Runs on x86_64 and aarch64: some findings differ by arch (char signedness, long
+# width), so both are checked.
+#
+# Two phases:
+#   1. Self-test (required): inject RunUbsanSelfTest() into dragonfly, build with
+#      UBSan, and check that every check fires - proof the flags are live.
+#   2. Run (informational): revert the patch, rebuild, and run the pytest suite
+#      under UBSan, saving findings as artifacts and a summary.
+#
+# Full details live in tools/sanitizers/ubsan/README.md.
+
+on:
+  schedule:
+    - cron: '0 4 * * 6' # Saturdays 04:00 UTC
+  workflow_dispatch: # manual run, any branch
+    inputs:
+      enable_helio:
+        description: "Enable Helio Instrumentation"
+        type: boolean
+        default: true
+      compare:
+        description: "Diff-run (Show newly-added issues vs a baseline run)"
+        type: boolean
+        default: true
+      compare_ref:
+        description: "Diff-run baseline: a git ref or a run number to compare to. Relevant only if Diff-run enabled. Empty = last successful scheduled run; else a git ref (sha/branch/tag) OR R<run-number> e.g. R3. Must be green + an ancestor of HEAD."
+        type: string
+        default: ""
+      fail_on_new:
+        description: "Fail the job on NEW real-UB + implicit-conversion findings vs baseline (default: informational)"
+        type: boolean
+        default: false
+      ubsan_runtime_options:
+        description: "Extra UBSAN_OPTIONS appended as colon-separated key=value pairs, e.g. 'silence_unsigned_overflow=1' (not a build option)."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  actions: read   # download-artifact fetches artifacts from other workflow runs
+
+jobs:
+  ubsan:
+    name: UBSan (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-24.04
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 120
+    env:
+      # Base UBSAN_OPTIONS shared by both runs; each step adds its own log_path.
+      # UBSAN_EXTRA_RUNTIME_OPTS (the manual input) is added only to phase 2.
+      UBSAN_COMMON_RUNTIME_OPTS: "print_stacktrace=1:report_error_type=1"
+      UBSAN_EXTRA_RUNTIME_OPTS: ${{ inputs.ubsan_runtime_options }}
+      # Sourced step library used by the run steps below (source "$CI_STEPS").
+      CI_STEPS: ${{ github.workspace }}/tools/sanitizers/ubsan/ci_steps.sh
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: ghcr.io/romange/ubuntu-dev:24
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /:/hostroot
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Show toolchain
+        run: |
+          echo "=== arch ==="; uname -m
+          echo "=== clang ==="; clang++ --version
+          echo "=== cmake ==="; cmake --version
+
+      # Defensive: the UBSan build is large; free host disk like the main CI does.
+      # The host root is mounted at /hostroot (see the job's volumes).
+      - name: Free disk space
+        run: |
+          source "$CI_STEPS"
+          step_free_disk_space
+
+      # Read + validate inputs (they default to their listed value on scheduled
+      # runs) and write the config banner for the summary. enable_helio toggles the
+      # ignore-list at build time, so it affects both builds.
+      - name: Resolve run configuration
+        id: runcfg
+        env:
+          ENABLE_HELIO: ${{ inputs.enable_helio }}
+          COMPARE: ${{ inputs.compare }}
+          COMPARE_REF: ${{ inputs.compare_ref }}
+          FAIL_ON_NEW: ${{ inputs.fail_on_new }}
+          UBSAN_RUNTIME_OPTIONS: ${{ inputs.ubsan_runtime_options }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          source "$CI_STEPS"
+          step_resolve_run_configuration
+
+      # Validate compare_ref before the build (the artifact is fetched later), so a
+      # bad value fails fast. Empty = last successful scheduled run; otherwise the
+      # ref/run must be green and an ancestor of HEAD.
+      - name: Resolve findings baseline
+        id: baseline
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.compare }}
+        env:
+          COMPARE_REF: ${{ inputs.compare_ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          source "$CI_STEPS"
+          step_resolve_findings_baseline
+
+      # ----------------------------------------------------------------------
+      # Phase 1: self-test -- prove every enabled UBSan check is actually live.
+      # ----------------------------------------------------------------------
+      - name: Inject UBSan self-test into dragonfly
+        run: |
+          git apply --whitespace=nowarn tools/sanitizers/ubsan/inject_ubsan_selftest.patch
+          echo "Applied inject_ubsan_selftest.patch"
+
+      - name: Build dragonfly (UBSan, strict, -O1)
+        uses: ./.github/actions/builder
+        with:
+          build-type: Debug
+          c-compiler: clang
+          cxx-compiler: clang++
+          sanitizers: Sanitizers
+          with-asan: 'OFF'   # UBSan-only run: ASan would abort on the self-test's memory cases.
+          ubsan-strict: 'ON'
+          with-aws: 'OFF'
+          targets: dragonfly
+
+      - name: Run self-test and assert every check fires
+        run: |
+          source "$CI_STEPS"
+          step_run_self_test
+
+      # Make sure that the runtime options actually change behavior (not separate
+      # code - same binary, different UBSAN_OPTIONS).
+      - name: Assert runtime options take effect
+        run: |
+          source "$CI_STEPS"
+          step_assert_runtime_options
+
+      - name: Revert self-test injection
+        run: |
+          git apply -R --whitespace=nowarn tools/sanitizers/ubsan/inject_ubsan_selftest.patch
+          echo "Reverted inject_ubsan_selftest.patch"
+
+      # ----------------------------------------------------------------------
+      # Phase 2: run the whole pytest suite (minus 'large') under UBSan. Findings
+      # and timings go to ubsan-logs and the summary; they don't fail the job.
+      # ----------------------------------------------------------------------
+      - name: Finalize sanitized dragonfly (incremental, patch reverted)
+        uses: ./.github/actions/builder
+        with:
+          build-type: Debug
+          c-compiler: clang
+          cxx-compiler: clang++
+          sanitizers: Sanitizers
+          with-asan: 'OFF'   # UBSan-only run.
+          ubsan-strict: 'ON'
+          with-aws: 'OFF'
+          # Same build dir as phase 1 -- ninja only recompiles dfly_main.cc and
+          # relinks dragonfly (the self-test source is gone). No clean rebuild.
+          targets: dragonfly
+
+      - name: Install Python test requirements
+        run: ${GITHUB_WORKSPACE}/.github/scripts/install-pytest-requirements.sh
+
+      # Test pass/fail is intentionally NOT a gate here (handled separately).
+      # continue-on-error lets the run proceed so we can evaluate UBSan findings.
+      - name: Run tests under UBSan
+        id: run_tests
+        continue-on-error: true
+        run: |
+          source "$CI_STEPS"
+          step_run_tests
+
+      # Download the baseline artifact for the run resolved above (empty run_id =
+      # no baseline, so the step is skipped). A miss only warns for the default
+      # baseline (continue-on-error); an explicit ref/run fails.
+      - name: Fetch findings baseline
+        if: ${{ steps.baseline.outputs.run_id != '' && steps.run_tests.outputs.ran == 'true' }}
+        continue-on-error: ${{ steps.baseline.outputs.lenient == 'true' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: ubsan-logs-${{ matrix.arch }}
+          path: ${{ github.workspace }}/build/ubsan-baseline
+          run-id: ${{ steps.baseline.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish UBSan findings to job summary
+        # Only when phase 2 actually ran; skip the empty "0 findings" report if the
+        # job bailed out earlier (bad input, or a build / self-test failure).
+        if: ${{ !cancelled() && steps.run_tests.outputs.ran == 'true' }}
+        env:
+          CFG_SUMMARY: ${{ steps.runcfg.outputs.cfg_summary }}
+          CFG_REPRO: ${{ steps.runcfg.outputs.cfg_repro }}
+        run: |
+          source "$CI_STEPS"
+          step_publish_findings "${{ matrix.arch }}" "${{ steps.baseline.outputs.desc }}"
+
+      # Opt-in gate: fail on NEW findings vs the baseline, limited to real UB +
+      # implicit-conversion (the #7562 class). Off by default until the diff is steady.
+      - name: Enforce fail_on_new
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.fail_on_new && steps.run_tests.outputs.ran == 'true' }}
+        run: |
+          source "$CI_STEPS"
+          step_enforce_fail_on_new
+
+      # Best-effort timing baseline: pull the latest regression-tests JUnit so the
+      # report can flag tests that ran suspiciously fast under UBSan (likely bailed
+      # early). Non-fatal: if it can't be fetched, the comparison is skipped.
+      - name: Resolve regression timing baseline
+        id: regbase
+        if: ${{ !cancelled() && steps.run_tests.outputs.ran == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          source "$CI_STEPS"
+          step_resolve_regression_baseline
+
+      - name: Fetch regression JUnit timing baseline
+        if: ${{ steps.regbase.outputs.run_id != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: junit-regression-*
+          merge-multiple: true
+          path: ${{ github.workspace }}/build/regression-baseline
+          run-id: ${{ steps.regbase.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish test timings & failures to job summary
+        if: ${{ !cancelled() && steps.run_tests.outputs.ran == 'true' }}
+        run: |
+          source "$CI_STEPS"
+          step_publish_timings "${{ matrix.arch }}"
+
+      - name: Upload UBSan logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ubsan-logs-${{ matrix.arch }}
+          path: ${{ github.workspace }}/build/ubsan-logs
+          if-no-files-found: ignore
+
+      # Leave the runner clean: kill any leftover dragonfly and drop the local logs
+      # (already uploaded). Mostly for self-hosted / local runners.
+      - name: Clean up
+        if: always()
+        run: |
+          pkill -9 -x dragonfly 2>/dev/null || true
+          rm -rf "${GITHUB_WORKSPACE}/build/ubsan-logs" || true
+
+      - name: Notify on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          echo "UBSan run (${{ matrix.arch }}) failed: ${job_link}"

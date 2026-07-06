@@ -17,6 +17,8 @@ from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
 from redis.asyncio import RedisCluster as RedisCluster
 
+from . import ubsan_helper
+
 START_DELAY = 0.8
 START_GDB_DELAY = 5.0
 
@@ -296,6 +298,9 @@ class DflyInstance:
             cwd=self.params.cwd,
             stdout=None if self.params.direct_output else subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            # Under UBSan, give the child its own per-test log_path so findings land
+            # in a per-test folder. Returns None otherwise -> inherit ubsan env.
+            env=ubsan_helper.child_env(),
         )
         logging.info(f"Starting {real_path} {' '.join(all_args)}, pid {self.proc.pid}")
 

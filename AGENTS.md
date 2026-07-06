@@ -356,7 +356,7 @@ Pass options to `helio/blaze.sh` with `-D` prefix:
 ```
 
 **Most useful options**:
-- `WITH_ASAN=ON` / `WITH_USAN=ON` - Enable sanitizers for debugging
+- `WITH_ASAN=ON` / `WITH_UBSAN=ON` - Enable sanitizers for debugging
 - `WITH_SEARCH=OFF` - Disable search module for faster builds
 - `WITH_AWS=OFF` / `WITH_GCP=OFF` - Disable cloud libraries
 - `WITH_TIERING=OFF` - Disable disk storage
