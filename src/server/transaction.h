@@ -510,7 +510,7 @@ class Transaction {
   void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args);
 
   // Store all key index keys in args_. Used only for single shard initialization.
-  void StoreKeysInArgs(const KeyIndex& key_index);
+  void InitSingleShardKeys(const KeyIndex& key_index);
 
   // Multi transactions unlock asynchronously, so they need to keep fingerprints of keys.
   void PrepareMultiFps(CmdArgList keys);
@@ -608,7 +608,7 @@ class Transaction {
   // Slices reference full_args_.
   // We need values as well since we reorder keys, and we need to know what value corresponds
   // to what key.
-  absl::InlinedVector<IndexSlice, 4> args_slices_;
+  mutable absl::InlinedVector<IndexSlice, 4> args_slices_;
 
   // Fingerprints of keys, precomputed once during the transaction initialization.
   absl::InlinedVector<LockFp, 4> kv_fp_;

@@ -267,18 +267,22 @@ void Transaction::PrepareMultiFps(CmdArgList keys) {
   }
 }
 
-void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
+void Transaction::InitSingleShardKeys(const KeyIndex& key_index) {
   DCHECK(kv_fp_.empty());
   DCHECK(args_slices_.empty());
 
-  kv_fp_.reserve(key_index.NumArgs());
+  if (!cid_->IsFixedSingleKey()) {
+    kv_fp_.reserve(key_index.NumArgs());
 
-  // even for a single key we may have multiple arguments per key (MSET).
-  if (key_index.bonus) {
-    args_slices_.emplace_back(*key_index.bonus, *key_index.bonus + 1);
-    kv_fp_.push_back(LockTag(full_args_[*key_index.bonus]).Fingerprint());
+    // For multi-key commands even with a single key,
+    // we may have multiple arguments per key (MSET).
+    if (key_index.bonus) {
+      args_slices_.emplace_back(*key_index.bonus, *key_index.bonus + 1);
+      kv_fp_.push_back(LockTag(full_args_[*key_index.bonus]).Fingerprint());
+    }
+    args_slices_.emplace_back(key_index.start, key_index.end);
   }
-  args_slices_.emplace_back(key_index.start, key_index.end);
+
   for (unsigned i = key_index.start; i < key_index.end; i += key_index.step)
     kv_fp_.push_back(LockTag(full_args_[i]).Fingerprint());
 }
@@ -298,7 +302,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     DCHECK(!IsActiveMulti() || multi_->mode == NON_ATOMIC);
 
     // We don't have to split the arguments by shards, so we can copy them directly.
-    StoreKeysInArgs(key_index);
+    InitSingleShardKeys(key_index);
 
     unique_shard_cnt_ = 1;
     string_view akey = full_args_[*key_index];
@@ -1345,6 +1349,12 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
 // runs in engine-shard thread.
 ShardArgs Transaction::GetShardArgs(ShardId sid) const {
   DCHECK(!multi_ || multi_->role != SQUASHER);
+
+  if (args_slices_.empty()) {
+    DCHECK(cid_->IsFixedSingleKey());
+    unsigned end = cid_->first_key_pos();
+    args_slices_.emplace_back(end - 1, end);
+  }
 
   // We can read unique_shard_cnt_  only because ShardArgsInShard is called after IsArmedInShard
   // barrier.

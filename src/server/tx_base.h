@@ -134,7 +134,7 @@ class ShardArgs {
 
  public:
   class Iterator {
-    facade::ParsedArgs arglist_;
+    const facade::ParsedArgs& arglist_;
     absl::Span<const IndexSlice>::const_iterator index_it_;
     uint32_t delta_ = 0;
 
@@ -146,7 +146,7 @@ class ShardArgs {
     using reference = value_type&;
 
     // First version, corresponds to spans over arguments.
-    Iterator(facade::ParsedArgs list, absl::Span<const IndexSlice>::const_iterator it)
+    Iterator(const facade::ParsedArgs& list, absl::Span<const IndexSlice>::const_iterator it)
         : arglist_(list), index_it_(it) {
     }
 
@@ -185,10 +185,11 @@ class ShardArgs {
 
   using const_iterator = Iterator;
 
-  ShardArgs(facade::ParsedArgs fa, absl::Span<const IndexSlice> s) : slice_(ArgsIndexPair(fa, s)) {
+  ShardArgs(const facade::ParsedArgs& fa, absl::Span<const IndexSlice> s)
+      : slice_(ArgsIndexPair(fa, s)) {
   }
 
-  ShardArgs() : slice_(ArgsIndexPair{}) {
+  ShardArgs() : slice_(ArgsIndexPair{}) {  // NOLINT
   }
 
   size_t Size() const;
