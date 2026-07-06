@@ -1762,12 +1762,12 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
   bool batch_has_write_command = false;
   auto update_rw_connection_throttling_metrics = [&](const CommandId* cid, size_t bytes) {
     if (cid->IsReadOnly()) {
-      ss->stats.rw_throttle_batch_read_commands++;
-      ss->stats.rw_throttle_batch_read_bytes += bytes;
+      ss->stats.batch_read_commands_total++;
+      ss->stats.batch_read_commands_bytes += bytes;
     } else if (cid->IsJournaled()) {
       batch_has_write_command = true;
-      ss->stats.rw_throttle_batch_write_commands++;
-      ss->stats.rw_throttle_batch_write_bytes += bytes;
+      ss->stats.batch_write_commands_total++;
+      ss->stats.batch_write_commands_bytes += bytes;
     }
   };
 

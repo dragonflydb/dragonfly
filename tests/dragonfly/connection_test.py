@@ -2547,8 +2547,8 @@ async def test_rw_throttle_stats(df_server: DflyInstance):
 
     before = await read_client.info("stats")
     before_batches = int(before.get("rw_throttle_batches_total", 0))
-    before_write_cmds = int(before.get("rw_throttle_batch_write_commands", 0))
-    before_read_cmds = int(before.get("rw_throttle_batch_read_commands", 0))
+    before_write_cmds = int(before.get("batch_write_commands_total", 0))
+    before_read_cmds = int(before.get("batch_read_commands_total", 0))
 
     # Write connection: pipeline of SET commands — should be throttled
     write_pipe = write_client.pipeline(transaction=False)
@@ -2565,13 +2565,13 @@ async def test_rw_throttle_stats(df_server: DflyInstance):
     after = await read_client.info("stats")
 
     # Write commands must be counted and their batches throttled
-    assert int(after.get("rw_throttle_batch_write_commands", 0)) > before_write_cmds
-    assert int(after.get("rw_throttle_batch_write_bytes", 0)) > 0
+    assert int(after.get("batch_write_commands_total", 0)) > before_write_cmds
+    assert int(after.get("batch_write_commands_bytes", 0)) > 0
     assert int(after.get("rw_throttle_batches_total", 0)) > before_batches
 
     # Read commands must be counted but must not produce throttled batches
-    assert int(after.get("rw_throttle_batch_read_commands", 0)) > before_read_cmds
-    assert int(after.get("rw_throttle_batch_read_bytes", 0)) > 0
+    assert int(after.get("batch_read_commands_total", 0)) > before_read_cmds
+    assert int(after.get("batch_read_commands_bytes", 0)) > 0
 
     await read_client.aclose()
     await write_client.aclose()

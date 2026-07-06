@@ -522,10 +522,10 @@ struct IOStat {
   uint64_t cmd_total = 0, pipelined_cmd_total = 0;
   size_t io_read_bytes = 0;
   uint64_t io_reads_total = 0;
-  uint64_t rw_throttle_batch_read_commands = 0;
-  uint64_t rw_throttle_batch_write_commands = 0;
-  uint64_t rw_throttle_batch_read_bytes = 0;
-  uint64_t rw_throttle_batch_write_bytes = 0;
+  uint64_t batch_read_commands_total = 0;
+  uint64_t batch_write_commands_total = 0;
+  uint64_t batch_read_commands_bytes = 0;
+  uint64_t batch_write_commands_bytes = 0;
   uint64_t rw_throttle_batches_total = 0;
 
   void From(const facade::FacadeStats& fs, const ServerState::Stats& ss);
@@ -541,10 +541,10 @@ void IOStat::From(const facade::FacadeStats& fs, const ServerState::Stats& ss) {
   pipelined_cmd_total = fs.conn_stats.pipelined_cmd_cnt;
   io_read_bytes = fs.conn_stats.io_read_bytes;
   io_reads_total = fs.conn_stats.io_read_cnt;
-  rw_throttle_batch_read_commands = ss.rw_throttle_batch_read_commands;
-  rw_throttle_batch_write_commands = ss.rw_throttle_batch_write_commands;
-  rw_throttle_batch_read_bytes = ss.rw_throttle_batch_read_bytes;
-  rw_throttle_batch_write_bytes = ss.rw_throttle_batch_write_bytes;
+  batch_read_commands_total = ss.batch_read_commands_total;
+  batch_write_commands_total = ss.batch_write_commands_total;
+  batch_read_commands_bytes = ss.batch_read_commands_bytes;
+  batch_write_commands_bytes = ss.batch_write_commands_bytes;
   rw_throttle_batches_total = ss.rw_throttle_batches_total;
 }
 
@@ -562,14 +562,14 @@ void IOStat::Print(RedisReplyBuilder* rb) const {
   rb->SendLong(io_read_bytes);
   rb->SendSimpleString("io_reads_total");
   rb->SendLong(io_reads_total);
-  rb->SendSimpleString("rw_throttle_batch_read_commands");
-  rb->SendLong(rw_throttle_batch_read_commands);
-  rb->SendSimpleString("rw_throttle_batch_write_commands");
-  rb->SendLong(rw_throttle_batch_write_commands);
-  rb->SendSimpleString("rw_throttle_batch_read_bytes");
-  rb->SendLong(rw_throttle_batch_read_bytes);
-  rb->SendSimpleString("rw_throttle_batch_write_bytes");
-  rb->SendLong(rw_throttle_batch_write_bytes);
+  rb->SendSimpleString("batch_read_commands_total");
+  rb->SendLong(batch_read_commands_total);
+  rb->SendSimpleString("batch_write_commands_total");
+  rb->SendLong(batch_write_commands_total);
+  rb->SendSimpleString("batch_read_commands_bytes");
+  rb->SendLong(batch_read_commands_bytes);
+  rb->SendSimpleString("batch_write_commands_bytes");
+  rb->SendLong(batch_write_commands_bytes);
   rb->SendSimpleString("rw_throttle_batches_total");
   rb->SendLong(rw_throttle_batches_total);
 }
@@ -581,10 +581,10 @@ IOStat& IOStat::operator-=(const IOStat& other) {
   pipelined_cmd_total -= other.pipelined_cmd_total;
   io_read_bytes -= other.io_read_bytes;
   io_reads_total -= other.io_reads_total;
-  rw_throttle_batch_read_commands -= other.rw_throttle_batch_read_commands;
-  rw_throttle_batch_write_commands -= other.rw_throttle_batch_write_commands;
-  rw_throttle_batch_read_bytes -= other.rw_throttle_batch_read_bytes;
-  rw_throttle_batch_write_bytes -= other.rw_throttle_batch_write_bytes;
+  batch_read_commands_total -= other.batch_read_commands_total;
+  batch_write_commands_total -= other.batch_write_commands_total;
+  batch_read_commands_bytes -= other.batch_read_commands_bytes;
+  batch_write_commands_bytes -= other.batch_write_commands_bytes;
   rw_throttle_batches_total -= other.rw_throttle_batches_total;
 
   return *this;

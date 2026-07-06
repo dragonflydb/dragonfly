@@ -138,10 +138,10 @@ class ServerState {  // public struct - to allow initialization.
     std::valarray<uint64_t> tx_width_freq_arr, squash_width_freq_arr;
 
     // Throttling metrics
-    uint64_t rw_throttle_batch_write_commands = 0;
-    uint64_t rw_throttle_batch_read_commands = 0;
-    uint64_t rw_throttle_batch_read_bytes = 0;
-    uint64_t rw_throttle_batch_write_bytes = 0;
+    uint64_t batch_write_commands_total = 0;
+    uint64_t batch_read_commands_total = 0;
+    uint64_t batch_read_commands_bytes = 0;
+    uint64_t batch_write_commands_bytes = 0;
     uint64_t rw_throttle_batches_total = 0;
 
     // Memory size of stored commands during multi-exec in connections

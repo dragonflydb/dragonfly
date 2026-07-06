@@ -88,10 +88,10 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   ADD(conn_timeout_events);
   ADD(psync_requests_total);
 
-  ADD(rw_throttle_batch_write_commands);
-  ADD(rw_throttle_batch_read_commands);
-  ADD(rw_throttle_batch_read_bytes);
-  ADD(rw_throttle_batch_write_bytes);
+  ADD(batch_write_commands_total);
+  ADD(batch_read_commands_total);
+  ADD(batch_read_commands_bytes);
+  ADD(batch_write_commands_bytes);
   ADD(rw_throttle_batches_total);
 
   if (this->tx_width_freq_arr.size() > 0) {
