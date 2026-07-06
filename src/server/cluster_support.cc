@@ -63,7 +63,10 @@ void InitializeCluster() {
     exit(1);
   }
 
-  if (cluster_mode != ClusterMode::kNoCluster) {
+  if (cluster_mode == ClusterMode::kNoCluster) {
+    // Reset the cached value so it doesn't leak in tests.
+    cluster_shard_by_slot = false;
+  } else {
     cluster_shard_by_slot = absl::GetFlag(FLAGS_experimental_cluster_shard_by_slot);
   }
 }

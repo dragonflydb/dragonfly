@@ -1320,6 +1320,36 @@ TEST_F(MultiTest, TestSquashing) {
   Run({"exec"});
 }
 
+// Non-atomic squashing (a disable-atomicity script) uses SQUASHED_LOCAL local transactions.
+// A multi-key command whose keys are colocated on one shard is squashed
+// into such a local_tx, exercising the shard-local multi-key path in Transaction::InitByKeys (and
+// its DCHECK that all keys map to the pinned shard). MULTI/EXEC would use *atomic* squashing and
+// would not reach this path.
+TEST_F(MultiTest, SquashShardLocalMultiKey) {
+  absl::FlagSaver fs;
+  SetTestFlag("cluster_mode", "emulated");
+  SetTestFlag("experimental_cluster_shard_by_slot", "true");
+  ResetService();
+
+  // disable-atomicity => NON_ATOMIC multi => squasher creates SQUASHED_LOCAL local txs.
+  // redis.acall queues the calls for non-atomic squashing. All keys share the {t} hashtag, so the
+  // multi-key MSET lands on a single shard and is squashable into one local_tx.
+  const char* kScript = R"(--!df flags=disable-atomicity,allow-undeclared-keys
+redis.acall('mset', '{t}a', '1', '{t}b', '2', '{t}c', '3')
+redis.acall('set', '{t}d', '4')
+)";
+  auto resp = Run({"eval", kScript, "0"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // Guard that the calls really went through non-atomic squashing. Without a flush the shard-local
+  // multi-key branch in Transaction::InitByKeys is never reached and the test would pass vacuously.
+  EXPECT_GT(GetMetrics().coordinator_stats.eval_squashed_flushes, 0u);
+
+  EXPECT_EQ(Run({"get", "{t}a"}), "1");
+  EXPECT_EQ(Run({"get", "{t}c"}), "3");
+  EXPECT_EQ(Run({"get", "{t}d"}), "4");
+}
+
 // Regression: squashing_current_reply_size must return to zero after a squash that spans
 // multiple flushes. A single MultiCommandSquasher instance flushes once per batch that
 // reaches max_squash_cmd_num; reply_size_delta was not reset between flushes, so

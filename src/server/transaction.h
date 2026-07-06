@@ -576,12 +576,17 @@ class Transaction {
   }
 
   // A non-atomic transaction pinned to a single shard for its whole lifetime (squasher-local).
+  // The pinning is enforced by MultiCommandSquasher, which only routes single-shard commands to
+  // such a tx and creates a separate one per shard, so it never fans out or migrates shards.
   bool IsShardLocalMulti() const {
     return multi_ && multi_->role == SQUASHED_LOCAL && multi_->mode == NON_ATOMIC;
   }
 
-  // Full per-shard shard_data_ is needed only for multi transactions that may span/migrate
-  // across shards. Stubs (SQUASHED_STUB) and shard-local non-atomic squash txs use a single cell.
+  // Full per-shard shard_data_ is needed only for multi transactions that may span/migrate across
+  // shards, whose leftover callbacks on other shards might still read shard_data_ after we moved on
+  // to the next command (shrinking it would be a cross-thread use-after-free). Stubs
+  // (SQUASHED_STUB) and shard-local non-atomic squash txs are single-shard for their whole
+  // lifetime, have no such leftover callbacks, and use a single cell.
   bool NeedsFullShardData() const {
     return IsActiveMulti() && !IsShardLocalMulti();
   }
