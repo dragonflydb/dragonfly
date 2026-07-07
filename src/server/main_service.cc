@@ -136,7 +136,7 @@ ABSL_RETIRED_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
                   "Deprecated. Squash latency stats are now tracked unconditionally; "
                   "use the pipeline_latency_seconds histogram for percentiles instead.");
 
-ABSL_FLAG(uint32_t, write_connection_throttling_sleep_usec, 500,
+ABSL_FLAG(uint32_t, write_connection_throttling_sleep_usec, 0,
           "Sleep period for write connection in microseconds. 0 disables yielding.");
 
 namespace {
