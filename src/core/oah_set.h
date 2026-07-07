@@ -32,7 +32,7 @@ class OAHSet {  // Open Addressing Hash Set
   using Buckets = std::vector<TaggedPtr, StatelessAllocator<TaggedPtr>>;
 
  public:
-  static constexpr std::uint32_t kShiftLog = 5;                         // TODO make template
+  static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
   static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
 
@@ -459,7 +459,6 @@ class OAHSet {  // Open Addressing Hash Set
 
   // Returns an iterator to a live entry in bucket `b` (skipping just-expired ones for
   // single entries and walking vector entries in order), or end() if none remain.
-  // FORCE_INLINE: it sits inside ScanRange's hot SIMD inner loop.
   iterator PickFromBucket(uint32_t b);
 
   // Linear [lo, hi) scan returning the first live entry or end(). SIMD strides over
@@ -468,7 +467,7 @@ class OAHSet {  // Open Addressing Hash Set
   // duplicating the body in the cold path.
   iterator ScanRange(uint32_t lo, uint32_t hi);
 
-  // The body of Add, FORCE_INLINE so it folds into Add and AddMany.
+  // The body of Add, shared by Add and AddMany.
   bool AddImpl(std::string_view str, uint32_t ttl_sec);
 
   // Result of a SIMD probe over a run of OAHEntry lanes.
