@@ -9,6 +9,7 @@
 #include "core/flatbuffers.h"
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
+#include "facade/reply_payload.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
 #include "util/http/http_common.h"
@@ -117,6 +118,10 @@ struct CaptureVisitor {
   }
 
   void operator()(const payload::BulkString& bs) {
+    absl::StrAppend(&str, JsonEscape(bs));
+  }
+
+  void operator()(const payload::BulkStringRef& bs) {
     absl::StrAppend(&str, JsonEscape(bs));
   }
 

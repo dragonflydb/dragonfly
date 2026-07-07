@@ -750,9 +750,6 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       ssl_ctx_(ctx),
       service_(service),
       flags_(0) {
-  constexpr size_t kReqSz = sizeof(ParsedCommand);
-  static_assert(kReqSz <= 256);
-
   // TODO: to move parser initialization to where we initialize the reply builder.
   switch (protocol) {
     case Protocol::REDIS:
@@ -2980,7 +2977,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   }
   parsed_tail_ = cmd;
 
-  size_t used_mem = cmd->EnqueuedBytes();
+  size_t used_mem = cmd->UsedMemory();
   parsed_cmd_q_len_++;
   dispatch_waiting_count_++;  // the newly appended tail command is not yet dispatched
   parsed_cmd_q_bytes_ += used_mem;
@@ -3013,7 +3010,7 @@ void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd) {
-  size_t used_mem = cmd->EnqueuedBytes();
+  size_t used_mem = cmd->UsedMemory();
   auto& conn_stats = tl_facade_stats->conn_stats;
 
   DCHECK_GT(parsed_cmd_q_len_, 0u);
@@ -3040,6 +3037,16 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd) {
       delete cmd;
     }
   }
+}
+
+void Connection::AdjustParsedCmdBytes(ssize_t delta) {
+  if (parsed_cmd_q_bytes_ == 0)
+    return;  // command dispatched synchronously, not in pipeline queue
+  auto& conn_stats = tl_facade_stats->conn_stats;
+  DCHECK_GE(static_cast<ssize_t>(parsed_cmd_q_bytes_) + delta, 0);
+  DCHECK_GE(static_cast<ssize_t>(conn_stats.pipeline_queue_bytes) + delta, 0);
+  parsed_cmd_q_bytes_ += delta;
+  conn_stats.pipeline_queue_bytes += delta;
 }
 
 void Connection::DestroyParsedQueue() {
