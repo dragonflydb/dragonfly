@@ -36,7 +36,10 @@ namespace facade {
 //   auto f  = parser.Next<FInt<1, 99>>("bad f");                // FInt with a custom out-of-range
 //                                                               // / non-integer error message
 //   auto s  = parser.Next<Validated<double, NotNan<kMsg>>>();   // parse + custom-error rule check
+//   auto u  = parser.Next(ParseUnit);                           // token parser fn: (sv, err) -> T
+//   auto n  = parser.Next(Number<int>);                         // full parser fn: (parser) -> T
 //   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
+//   auto conv  = parser.NextOrDefault(ParseUnit, 1.0);          // optional arg via a parser fn
 //   Range fields = parser.NextRange();                         // [N, e1..eN] counted list
 //   Range pairs  = parser.NextRange(2);                        // [N, f1,v1,..] N field/value pairs
 //   Range fs     = parser.NextRange(1, mismatch, true);        // consume-all variant
@@ -62,7 +65,8 @@ namespace facade {
 //       Map(&dir, "ASC", Dir::ASC, "DESC", Dir::DESC),   // tag -> fixed value mapping
 //       Tag("ATTR", Map(&mask, "v", Mask::Volatile,      // nested: outer tag + inner Map
 //                       "p", Mask::Permanent)),          //   (inner keyword required on match)
-//       OneOf(Exist("NX", &nx), Exist("XX", &xx)),       // mutex — at most one may match
+//       OneOf(Exist("NX", &nx), Exist("XX", &xx))       // mutex — at most one may match
+//           .Err("NX and XX are incompatible"),        //   custom conflict message (optional)
 //       If(!read_only, Tag("STORE", &store_key)));    // runtime-gated option
 //
 // Strict vs lenient dispatch:
@@ -80,6 +84,7 @@ namespace facade {
 // Error surfacing (at the end of parse):
 //   if (!parser.Finalize())                                     // also reports UNPROCESSED on
 //     return cmd_cntx->SendError(parser.TakeError().MakeReply()); // trailing args
+//   parser.Finalize("Unsupported option: ");                    // report "<prefix><leftover arg>"
 //   // or: if (parser.HasError()) ...
 //   parser.ReportCustom("bad option");                          // inject a custom error (no-op if
 //                                                               // one is already set)
@@ -97,6 +102,32 @@ concept as_vnum = requires(T t) {
   { T::validate(t.value) } -> std::same_as<RuleError>;
 };
 
+struct CmdArgParser;
+
+// A parser callable for Next(fn), taking either fn(CmdArgParser*) (drives the parser, may consume
+// several args) or fn(std::string_view, RuleError&) (converts the next arg, sets err on failure).
+template <class F>
+concept ParserFn =
+    std::is_invocable_v<F, CmdArgParser*> || std::is_invocable_v<F, std::string_view, RuleError&>;
+
+// Numeric conversion core shared by Num and Number; false if `arg` isn't a round-trippable T.
+template <class T> bool TryParseNum(std::string_view arg, T* out) {
+  if constexpr (std::is_same_v<T, float>) {
+    return absl::SimpleAtof(arg, out);
+  } else if constexpr (std::is_same_v<T, double>) {
+    return absl::SimpleAtod(arg, out);
+  } else if constexpr (std::is_integral_v<T> && sizeof(T) >= sizeof(int32_t)) {
+    return absl::SimpleAtoi(arg, out);
+  } else {
+    static_assert(std::is_integral_v<T> && sizeof(T) < sizeof(int32_t));
+    int32_t tmp;
+    if (!absl::SimpleAtoi(arg, &tmp))
+      return false;
+    *out = static_cast<T>(tmp);
+    return tmp == *out;  // reject values that don't fit T
+  }
+}
+
 // Base for validated numbers: holds the parsed value and converts back to it.
 template <class T> struct VNum {
   T value = {};
@@ -106,8 +137,7 @@ template <class T> struct VNum {
 };
 
 // Validation rules for Next<Validated<T, Rules...>>(): free functions `RuleError rule(T)`. Reusable
-// ones take the message as a reference-to-constexpr NTTP. They also validate values from elsewhere:
-//   if (auto e = SomeRule<...>(v); e.failed) parser.ReportCustom(std::string{e.msg});
+// ones take the message as a reference-to-constexpr NTTP.
 
 // Out of [min, max] -> generic type error (FInt is the idiomatic spelling).
 template <auto min, auto max> RuleError InRange(decltype(min) v) {
@@ -115,8 +145,7 @@ template <auto min, auto max> RuleError InRange(decltype(min) v) {
   return {v < min || v > max, {}};
 }
 
-// Out of [min, max] -> custom Msg. Integer bounds only (floating-point NTTPs need clang 18+; use a
-// dedicated rule for float ranges).
+// Out of [min, max] -> custom Msg. Integer bounds only (float NTTPs need clang 18+).
 template <auto min, auto max, const auto& Msg> RuleError Bounded(decltype(min) v) {
   static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
   return {!(v >= min && v <= max), Msg};
@@ -140,8 +169,7 @@ template <auto Bad, const auto& Msg> RuleError NotEq(decltype(Bad) v) {
   return {v == Bad, Msg};
 }
 
-// Accepts a value only if every rule accepts it; first rejection wins. Each rule is a function
-// T -> RuleError, e.g. Validated<int, Bounded<0, 9, kMsg>>.
+// Accepts a value only if every rule accepts it; first rejection wins.
 template <class T, RuleError (*... Rules)(T)> struct Validated : VNum<T> {
   static RuleError validate(T v) {
     RuleError e;
@@ -289,6 +317,30 @@ struct CmdArgParser {
     }
   }
 
+  // Runs a parser callable (see ParserFn): a fn(CmdArgParser*) drives the parser; a
+  // fn(std::string_view, RuleError&) converts the next arg, its RuleError becoming a report.
+  template <class F>
+  requires ParserFn<F>
+  auto Next(F&& fn) {
+    if constexpr (std::is_invocable_v<F, CmdArgParser*>) {
+      return std::forward<F>(fn)(this);
+    } else {
+      using R = std::invoke_result_t<F, std::string_view, RuleError&>;
+      static_assert(std::is_default_constructible_v<R> && !std::is_reference_v<R>,
+                    "token parser must return a default-constructible value type");
+      if (cur_i_ >= args_.size()) {
+        Report(OUT_OF_BOUNDS, cur_i_);
+        return R{};
+      }
+      size_t idx = cur_i_++;
+      RuleError e;
+      R val = std::forward<F>(fn)(SafeSV(idx), e);
+      if (e.failed)
+        Report(e.msg.empty() ? INVALID_CASES : CUSTOM_ERROR, idx, std::string{e.msg});
+      return e.failed ? R{} : val;
+    }
+  }
+
   // Like Next<T>(), but replaces any read failure (bad value, missing arg, ...) with a caller-
   // supplied CUSTOM_ERROR message. A rule's own message from a Validated<T, Rules...> passes
   // through unchanged, so parser.Next<Timeout>(kNotAFloat) reports kNotAFloat for a non-float but
@@ -336,6 +388,13 @@ struct CmdArgParser {
 
   template <class T = std::string_view> auto NextOrDefault(T default_value = {}) {
     return HasNext() ? Next<T>() : default_value;
+  }
+
+  // Runs a parser callable (see ParserFn) if an arg remains, else returns default_value.
+  template <class F, class D>
+  requires ParserFn<F>
+  auto NextOrDefault(F&& fn, D default_value) {
+    return HasNext() ? Next(std::forward<F>(fn)) : default_value;
   }
 
   // Consumes the next arg; reports INVALID_NEXT if it doesn't match (case-insensitive).
@@ -441,10 +500,18 @@ struct CmdArgParser {
     return *this;
   }
 
-  // Requires no leftover args and no prior errors. Reports UNPROCESSED if args remain.
-  bool Finalize() {
+  // Requires all args consumed and no prior error. If args remain, reports the generic UNPROCESSED
+  // (syntax) error, or "<unexpected_prefix><first leftover arg>" when a prefix is given (built only
+  // on failure). Returns true only if everything was consumed without error.
+  bool Finalize(std::string_view unexpected_prefix = {}) {
     if (HasNext()) {
-      Report(UNPROCESSED, cur_i_);
+      if (unexpected_prefix.empty()) {
+        Report(UNPROCESSED, cur_i_);
+      } else {
+        std::string msg{unexpected_prefix};
+        msg.append(Peek());
+        Report(CUSTOM_ERROR, cur_i_, std::move(msg));
+      }
       return false;
     }
     return !HasError();
@@ -544,31 +611,10 @@ struct CmdArgParser {
   }
 
   template <typename T> T Num(size_t idx) {
-    auto arg = SafeSV(idx);
-    T out;
-    if constexpr (std::is_same_v<T, float>) {
-      if (absl::SimpleAtof(arg, &out))
-        return out;
-    } else if constexpr (std::is_same_v<T, double>) {
-      if (absl::SimpleAtod(arg, &out))
-        return out;
-    } else if constexpr (std::is_integral_v<T> && sizeof(T) >= sizeof(int32_t)) {
-      if (absl::SimpleAtoi(arg, &out))
-        return out;
-    } else if constexpr (std::is_integral_v<T> && sizeof(T) < sizeof(int32_t)) {
-      int32_t tmp;
-      if (absl::SimpleAtoi(arg, &tmp)) {
-        out = tmp;  // out can not store the whole tmp
-        if (tmp == out)
-          return out;
-      }
-    }
-
-    if constexpr (std::is_floating_point_v<T>) {
-      Report(INVALID_FLOAT, idx);
-    } else {
-      Report(INVALID_INT, idx);
-    }
+    T out{};
+    if (TryParseNum(SafeSV(idx), &out))
+      return out;
+    Report(std::is_floating_point_v<T> ? INVALID_FLOAT : INVALID_INT, idx);
     return {};
   }
 
@@ -579,9 +625,34 @@ struct CmdArgParser {
   ErrorInfo error_;
 };
 
+// Default parser callable for arithmetic types: Next(Number<int>) behaves like Next<int>().
+template <class T> T Number(CmdArgParser* parser) {
+  return parser->Next<T>();
+}
+
 namespace detail {
 
-struct ExistOpt {
+// CRTP base for Apply() options: adds a fluent .Err(msg) whose message ReportErr() surfaces on
+// failure (OneOf conflict, nested Tag mismatch), else the generic INVALID_CASES syntax error. The
+// message is owned (copied) so temporaries like absl::StrCat(...) are safe.
+template <class Derived> struct OptBase {
+  std::string err = {};
+
+  Derived&& Err(std::string msg) && {
+    err = std::move(msg);
+    return std::move(static_cast<Derived&>(*this));
+  }
+
+ protected:
+  void ReportErr(CmdArgParser* parser) const {
+    if (err.empty())
+      parser->Report(CmdArgParser::INVALID_CASES);
+    else
+      parser->ReportCustom(err);
+  }
+};
+
+struct ExistOpt : OptBase<ExistOpt> {
   std::string_view tag;
   bool* field;
 
@@ -594,7 +665,7 @@ struct ExistOpt {
   }
 };
 
-template <class... Args> struct TagOpt {
+template <class... Args> struct TagOpt : OptBase<TagOpt<Args...>> {
   std::string_view tag;
   std::tuple<Args*...> args;
 
@@ -612,7 +683,7 @@ template <class... Args> struct TagOpt {
   }
 };
 
-template <class Func> struct LambdaOpt {
+template <class Func> struct LambdaOpt : OptBase<LambdaOpt<Func>> {
   std::string_view tag;
   Func func;
 
@@ -625,7 +696,7 @@ template <class Func> struct LambdaOpt {
   }
 };
 
-template <class T, class... Cases> struct MapOpt {
+template <class T, class... Cases> struct MapOpt : OptBase<MapOpt<T, Cases...>> {
   static_assert(sizeof...(Cases) % 2 == 0, "Map expects alternating tag/value pairs");
 
   T* field;
@@ -648,7 +719,7 @@ template <class T, class... Cases> struct MapOpt {
   }
 };
 
-template <class Inner> struct IfOpt {
+template <class Inner> struct IfOpt : OptBase<IfOpt<Inner>> {
   bool cond;
   Inner inner;
 
@@ -657,7 +728,7 @@ template <class Inner> struct IfOpt {
   }
 };
 
-template <class... Opts> struct OneOfOpt {
+template <class... Opts> struct OneOfOpt : OptBase<OneOfOpt<Opts...>> {
   std::tuple<Opts...> opts;
   mutable bool matched = false;
 
@@ -666,15 +737,15 @@ template <class... Opts> struct OneOfOpt {
     if (!any)
       return false;
     if (matched)
-      parser->Report(CmdArgParser::INVALID_CASES);
+      this->ReportErr(parser);
     matched = true;
     return true;
   }
 };
 
-// Nested: outer tag consumes one arg, then inner option runs against the next arg. If the inner
-// doesn't match, reports INVALID_CASES (the inner keyword is required once the outer matched).
-template <class Inner> struct TagNestedOpt {
+// Outer tag consumes one arg, then the inner option must match the next; otherwise reports
+// .Err(msg) or INVALID_CASES.
+template <class Inner> struct TagNestedOpt : OptBase<TagNestedOpt<Inner>> {
   std::string_view tag;
   Inner inner;
 
@@ -682,7 +753,7 @@ template <class Inner> struct TagNestedOpt {
     if (!parser->Check(tag))
       return false;
     if (!inner.TryApply(parser))
-      parser->Report(CmdArgParser::INVALID_CASES);
+      this->ReportErr(parser);
     return true;
   }
 };
@@ -696,36 +767,36 @@ concept ParseOption = requires(const T& t, CmdArgParser* p) {
 }  // namespace detail
 
 inline detail::ExistOpt Exist(std::string_view tag, bool* field) {
-  return {tag, field};
+  return {{}, tag, field};
 }
 
 template <class... Args> detail::TagOpt<Args...> Tag(std::string_view tag, Args*... args) {
-  return detail::TagOpt<Args...>{tag, std::make_tuple(args...)};
+  return {{}, tag, std::make_tuple(args...)};
 }
 
 template <class Func>
 requires std::is_invocable_v<Func, CmdArgParser*> detail::LambdaOpt<Func> Tag(std::string_view tag,
                                                                               Func func) {
-  return {tag, std::move(func)};
+  return {{}, tag, std::move(func)};
 }
 
 // Nested option: outer tag + inner sub-option (e.g. Map). After outer matches, inner must match
 // the following arg or INVALID_CASES is reported.
 template <detail::ParseOption Inner>
 detail::TagNestedOpt<Inner> Tag(std::string_view tag, Inner inner) {
-  return {tag, std::move(inner)};
+  return {{}, tag, std::move(inner)};
 }
 
 template <class T, class... Cases> detail::MapOpt<T, Cases...> Map(T* field, Cases... cases) {
-  return {field, std::make_tuple(std::move(cases)...)};
+  return {{}, field, std::make_tuple(std::move(cases)...)};
 }
 
 template <class Inner> detail::IfOpt<Inner> If(bool cond, Inner inner) {
-  return {cond, std::move(inner)};
+  return {{}, cond, std::move(inner)};
 }
 
 template <class... Opts> detail::OneOfOpt<Opts...> OneOf(Opts... opts) {
-  return {{std::move(opts)...}, false};
+  return {{}, {std::move(opts)...}};
 }
 
 }  // namespace facade

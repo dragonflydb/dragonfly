@@ -490,6 +490,29 @@ TEST_F(CmdArgParserTest, ApplyOneOf) {
     EXPECT_EQ(count, 5u);
     EXPECT_FALSE(parser.HasError());
   }
+
+  // .Err(msg) reports a custom conflict message instead of the generic syntax error.
+  {
+    auto parser = Make({"NX", "XX"});
+    bool nx = false, xx = false;
+    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)).Err("NX and XX are incompatible"));
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::CUSTOM_ERROR);
+    EXPECT_EQ(err.MakeReply().ToSv(), "NX and XX are incompatible");
+  }
+
+  // .Err() owns the message: a temporary/short-lived source may be destroyed before Apply runs.
+  {
+    bool nx = false, xx = false;
+    auto opt = [&] {
+      std::string tmp = "dynamic conflict";  // destroyed when this lambda returns
+      return OneOf(Exist("NX", &nx), Exist("XX", &xx)).Err(tmp);
+    }();
+    auto parser = Make({"NX", "XX"});
+    parser.Apply(opt);
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "dynamic conflict");
+  }
 }
 
 TEST_F(CmdArgParserTest, ApplyOptional) {
@@ -712,6 +735,71 @@ TEST_F(CmdArgParserTest, ValidatedDouble) {
   }
 }
 
+// A token parser callable (string_view, RuleError&): converts one arg, custom error on miss.
+constexpr char kBadUnit[] = "bad unit";
+double ParseUnit(std::string_view sv, RuleError& err) {
+  if (sv == "M")
+    return 1.0;
+  if (sv == "KM")
+    return 1000.0;
+  err = {true, kBadUnit};
+  return -1.0;
+}
+
+TEST_F(CmdArgParserTest, ParserFunction) {
+  {  // token form: fn(string_view, RuleError&) converts the next arg
+    auto parser = Make({"KM", "M"});
+    EXPECT_DOUBLE_EQ(parser.Next(ParseUnit), 1000.0);
+    EXPECT_DOUBLE_EQ(parser.Next(ParseUnit), 1.0);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"YARD"});
+    EXPECT_DOUBLE_EQ(parser.Next(ParseUnit), 0.0);  // value-initialized on failure
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::CUSTOM_ERROR);
+    EXPECT_EQ(err.MakeReply().ToSv(), kBadUnit);
+  }
+  {
+    auto parser = Make({});  // framework surfaces OUT_OF_BOUNDS before calling fn
+    EXPECT_DOUBLE_EQ(parser.Next(ParseUnit), 0.0);
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::OUT_OF_BOUNDS);
+  }
+  {  // full form: fn(CmdArgParser*) can consume several args and return a compound type
+    auto parser = Make({"3", "4"});
+    auto point = [](CmdArgParser* p) {
+      int x =
+          p->Next<int>();  // sequence reads explicitly; argument evaluation order is unspecified
+      return std::make_pair(x, p->Next<int>());
+    };
+    auto [x, y] = parser.Next(point);
+    EXPECT_EQ(x, 3);
+    EXPECT_EQ(y, 4);
+    EXPECT_FALSE(parser.HasError());
+  }
+}
+
+TEST_F(CmdArgParserTest, NumberParser) {
+  // The Number<> default parser callable matches the built-in Next<T>() behavior and error kinds.
+  {
+    auto parser = Make({"42", "3.5"});
+    EXPECT_EQ(parser.Next(Number<int>), 42);
+    EXPECT_DOUBLE_EQ(parser.Next(Number<double>), 3.5);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"notanint"});
+    EXPECT_EQ(parser.Next(Number<int>), 0);
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_INT);
+  }
+  {
+    auto parser = Make({"notafloat"});
+    EXPECT_DOUBLE_EQ(parser.Next(Number<double>), 0.0);
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_FLOAT);
+  }
+}
+
 TEST_F(CmdArgParserTest, RangeList) {
   using Range = CmdArgParser::Range;
   // NextRange reads [count, e1..eN] and returns a bounded Range; a terminal Range converts to
@@ -850,6 +938,29 @@ TEST_F(CmdArgParserTest, BackedArguments) {
     EXPECT_FALSE(parser.HasAtLeast(3));
     parser.Skip(2);
     EXPECT_TRUE(parser.Finalize());
+  }
+}
+
+TEST_F(CmdArgParserTest, FinalizeUnexpected) {
+  {  // all consumed -> success
+    auto parser = Make({"NX"});
+    EXPECT_TRUE(parser.Check("NX"));
+    EXPECT_TRUE(parser.Finalize("Unsupported option: "));
+    EXPECT_FALSE(parser.HasError());
+  }
+  {  // leftover + empty prefix -> generic UNPROCESSED
+    auto parser = Make({"FOO"});
+    EXPECT_FALSE(parser.Finalize());
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::UNPROCESSED);
+  }
+  {  // leftover + prefix -> custom "<prefix><arg>" (raw case, first leftover arg)
+    auto parser = Make({"a", "foo", "bar"});
+    EXPECT_EQ(parser.Next(), "a");
+    EXPECT_FALSE(parser.Finalize("Unsupported option: "));
+    auto err = parser.TakeError();
+    EXPECT_EQ(err.type, CmdArgParser::CUSTOM_ERROR);
+    EXPECT_EQ(err.MakeReply().ToSv(), "Unsupported option: foo");
+    EXPECT_EQ(err.index, 1u);  // points at the first leftover arg, not the consumed one
   }
 }
 

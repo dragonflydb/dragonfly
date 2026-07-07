@@ -1124,29 +1124,19 @@ void TtlGeneric(string_view key, TimeUnit unit, CommandContext* cmd_cntx) {
   }
 }
 
-io::Result<int32_t, string> ParseExpireOptionsOrReply(const facade::ParsedArgs& args) {
+int32_t ParseExpireOptions(CmdArgParser* parser) {
   int32_t flags = ExpireFlags::EXPIRE_ALWAYS;
-  for (auto arg : args) {
-    string arg_sv = absl::AsciiStrToUpper(ToSV(arg));
-    if (arg_sv == "NX") {
-      flags |= ExpireFlags::EXPIRE_NX;
-    } else if (arg_sv == "XX") {
-      flags |= ExpireFlags::EXPIRE_XX;
-    } else if (arg_sv == "GT") {
-      flags |= ExpireFlags::EXPIRE_GT;
-    } else if (arg_sv == "LT") {
-      flags |= ExpireFlags::EXPIRE_LT;
-    } else {
-      return nonstd::make_unexpected(absl::StrCat("Unsupported option: ", arg_sv));
-    }
-  }
+  parser->Apply(Tag("NX", [&](CmdArgParser*) { flags |= ExpireFlags::EXPIRE_NX; }),
+                Tag("XX", [&](CmdArgParser*) { flags |= ExpireFlags::EXPIRE_XX; }),
+                Tag("GT", [&](CmdArgParser*) { flags |= ExpireFlags::EXPIRE_GT; }),
+                Tag("LT", [&](CmdArgParser*) { flags |= ExpireFlags::EXPIRE_LT; }));
+  parser->Finalize("Unsupported option: ");
 
-  if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ExpireFlags::EXPIRE_XX)) {
-    return nonstd::make_unexpected("NX and XX options at the same time are not compatible");
-  }
-  if ((flags & ExpireFlags::EXPIRE_GT) && (flags & ExpireFlags::EXPIRE_LT)) {
-    return nonstd::make_unexpected("GT and LT options at the same time are not compatible");
-  }
+  // NX/XX and GT/LT are mutually exclusive; duplicate flags (e.g. NX NX) are tolerated like Redis.
+  if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ExpireFlags::EXPIRE_XX))
+    parser->ReportCustom("NX and XX options at the same time are not compatible");
+  if ((flags & ExpireFlags::EXPIRE_GT) && (flags & ExpireFlags::EXPIRE_LT))
+    parser->ReportCustom("GT and LT options at the same time are not compatible");
   return flags;
 }
 
@@ -1399,20 +1389,16 @@ void GenericFamily::Persist(facade::CmdArgParser parser, CommandContext* cmd_cnt
 
 void GenericFamily::Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
+  int32_t expire_options = parser.Next(ParseExpireOptions);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
-  }
-
-  auto expire_options = ParseExpireOptionsOrReply(cmd_cntx->tail_args().Tail(2));
-  if (!expire_options) {
-    return cmd_cntx->SendError(expire_options.error());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto op_args = t->GetOpArgs(shard);
     DbSlice::ExpireParams params{TimeUnit::SEC, int_arg, op_args.db_cntx.time_now_ms,
                                  /*cap=*/true};
-    params.expire_options = expire_options.value();
+    params.expire_options = expire_options;
     return OpExpire(op_args, key, params);
   };
 
@@ -1422,17 +1408,14 @@ void GenericFamily::Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx
 
 void GenericFamily::ExpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
+  int32_t expire_options = parser.Next(ParseExpireOptions);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
 
-  auto expire_options = ParseExpireOptionsOrReply(cmd_cntx->tail_args().Tail(2));
-  if (!expire_options) {
-    return cmd_cntx->SendError(expire_options.error());
-  }
   // ExpireParams normalizes 0/negative inputs internally.
   DbSlice::ExpireParams params{TimeUnit::SEC, int_arg};
-  params.expire_options = expire_options.value();
+  params.expire_options = expire_options;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -1470,17 +1453,14 @@ void GenericFamily::Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
 void GenericFamily::PexpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
+  int32_t expire_options = parser.Next(ParseExpireOptions);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
 
-  auto expire_options = ParseExpireOptionsOrReply(cmd_cntx->tail_args().Tail(2));
-  if (!expire_options) {
-    return cmd_cntx->SendError(expire_options.error());
-  }
   // ExpireParams normalizes 0/negative inputs internally.
   DbSlice::ExpireParams params{TimeUnit::MSEC, int_arg};
-  params.expire_options = expire_options.value();
+  params.expire_options = expire_options;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -1496,20 +1476,16 @@ void GenericFamily::PexpireAt(facade::CmdArgParser parser, CommandContext* cmd_c
 
 void GenericFamily::Pexpire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
+  int32_t expire_options = parser.Next(ParseExpireOptions);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
-  }
-
-  auto expire_options = ParseExpireOptionsOrReply(cmd_cntx->tail_args().Tail(2));
-  if (!expire_options) {
-    return cmd_cntx->SendError(expire_options.error());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto op_args = t->GetOpArgs(shard);
     DbSlice::ExpireParams params{TimeUnit::MSEC, int_arg, op_args.db_cntx.time_now_ms,
                                  /*cap=*/true};
-    params.expire_options = expire_options.value();
+    params.expire_options = expire_options;
     return OpExpire(op_args, key, params);
   };
   OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
@@ -2292,7 +2268,7 @@ void GenericFamily::FieldExpire(facade::CmdArgParser parser, CommandContext* cmd
     return cmd_cntx->SendError(err.MakeReply());
   }
   facade::CmdArgVec fields;
-  auto field_args = cmd_cntx->tail_args().Tail(parser.UnparsedStart());
+  auto field_args = parser.RemainingRange();
   fields.assign(field_args.begin(), field_args.end());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2315,8 +2291,8 @@ void GenericFamily::FieldExpire(facade::CmdArgParser parser, CommandContext* cmd
 // -1 if the field does not have associated TTL on it, and -3 if field is not found.
 void GenericFamily::FieldTtl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, field] = parser.Next<string_view, string_view>();
-  if (auto err = parser.TakeError(); err) {
-    return cmd_cntx->SendError(err.MakeReply());
+  if (!parser.Finalize()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpFieldTtl(t, shard, key, field); };
@@ -2333,8 +2309,8 @@ void GenericFamily::FieldTtl(facade::CmdArgParser parser, CommandContext* cmd_cn
 
 void GenericFamily::Move(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, target_db] = parser.Next<string_view, int32_t>();
-  if (auto err = parser.TakeError(); err) {
-    return cmd_cntx->SendError(err.MakeReply());
+  if (!parser.Finalize()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
   if (target_db < 0 || uint32_t(target_db) >= absl::GetFlag(FLAGS_dbnum)) {
@@ -2371,8 +2347,8 @@ void GenericFamily::Move(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
 void GenericFamily::Rename(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src_key, dest_key] = parser.Next<string_view, string_view>();
-  if (auto err = parser.TakeError(); err) {
-    return cmd_cntx->SendError(err.MakeReply());
+  if (!parser.Finalize()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
   auto reply = RenameGeneric(src_key, dest_key, false, cmd_cntx->tx());
   cmd_cntx->SendError(reply);
@@ -2380,8 +2356,8 @@ void GenericFamily::Rename(facade::CmdArgParser parser, CommandContext* cmd_cntx
 
 void GenericFamily::RenameNx(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src_key, dest_key] = parser.Next<string_view, string_view>();
-  if (auto err = parser.TakeError(); err) {
-    return cmd_cntx->SendError(err.MakeReply());
+  if (!parser.Finalize()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
   auto reply = RenameGeneric(src_key, dest_key, true, cmd_cntx->tx());
   if (!reply.status) {
@@ -2430,32 +2406,32 @@ void GenericFamily::Copy(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
 void GenericFamily::ExpireTime(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  if (auto err = parser.TakeError(); err) {
-    return cmd_cntx->SendError(err.MakeReply());
+  if (!parser.Finalize()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
   ExpireTimeGeneric(key, TimeUnit::SEC, cmd_cntx);
 }
 
 void GenericFamily::PExpireTime(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  if (auto err = parser.TakeError(); err) {
-    return cmd_cntx->SendError(err.MakeReply());
+  if (!parser.Finalize()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
   ExpireTimeGeneric(key, TimeUnit::MSEC, cmd_cntx);
 }
 
 void GenericFamily::Ttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  if (auto err = parser.TakeError(); err) {
-    return cmd_cntx->SendError(err.MakeReply());
+  if (!parser.Finalize()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
   TtlGeneric(key, TimeUnit::SEC, cmd_cntx);
 }
 
 void GenericFamily::Pttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  if (auto err = parser.TakeError(); err) {
-    return cmd_cntx->SendError(err.MakeReply());
+  if (!parser.Finalize()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
   TtlGeneric(key, TimeUnit::MSEC, cmd_cntx);
 }

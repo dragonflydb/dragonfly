@@ -152,6 +152,15 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   resp = Run({"expire", "key", "3600", "GT", "LT"});
   ASSERT_THAT(resp, ErrArg("GT and LT options at the same time are not compatible"));
 
+  // Duplicate flags are tolerated (idempotent), like Redis.
+  resp = Run({"expire", "key", "3600", "NX", "NX"});
+  ASSERT_THAT(resp, IntArg(1));
+  Run({"persist", "key"});
+
+  // Unknown option -> error naming the offending token.
+  resp = Run({"expire", "key", "3600", "FOO"});
+  ASSERT_THAT(resp, ErrArg("Unsupported option: FOO"));
+
   // NX option should be added since there is no expiry
   resp = Run({"expire", "key", "3600", "NX"});
   EXPECT_THAT(resp, IntArg(1));

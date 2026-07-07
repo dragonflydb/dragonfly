@@ -3613,46 +3613,42 @@ void ServerFamily::Latency(facade::CmdArgParser parser, CommandContext* cmd_cntx
 void ServerFamily::ShutdownCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Supported options (case-insensitive):
   // SAVE | NOSAVE, NOW, FORCE, ABORT, SAFE (Valkey-specific, the same as SAVE in Dragonfly)
-  enum ShutBits : uint32_t {
-    SB_SAVE = 1u << 0,
-    SB_NOSAVE = 1u << 1,
-    SB_NOW = 1u << 2,
-    SB_FORCE = 1u << 3,
-    SB_ABORT = 1u << 4,
-  };
+  struct ShutdownOpts {
+    bool save = false;
+    bool no_save = false;
+    bool now = false;
+    bool force = false;
+    bool abort = false;
+  } opts;
 
-  uint32_t sb = 0;
-  while (parser.HasNext()) {
-    // Map SAFE to SAVE directly (fallthrough behavior)
-    ShutBits opt = parser.MapNext("SAVE", SB_SAVE, "NOSAVE", SB_NOSAVE, "NOW", SB_NOW, "FORCE",
-                                  SB_FORCE, "ABORT", SB_ABORT, "SAFE", SB_SAVE);
-    sb |= static_cast<uint32_t>(opt);
-  }
+  parser.Apply(Exist("SAVE", &opts.save), Exist("SAFE", &opts.save), Exist("NOSAVE", &opts.no_save),
+               Exist("NOW", &opts.now), Exist("FORCE", &opts.force), Exist("ABORT", &opts.abort));
 
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  if (!parser.Finalize())
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
-  // Conflicting toggles
-  if ((sb & SB_SAVE) && (sb & SB_NOSAVE)) {
+  // SAVE/SAFE (synonyms) and NOSAVE are mutually exclusive.
+  if (opts.save && opts.no_save) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
-  if (sb & SB_ABORT) {
+  if (opts.abort) {
     // We currently do not support aborting an in-progress shutdown sequence.
     return cmd_cntx->SendError("SHUTDOWN ABORT is not supported");
   }
 
   // Configure save behavior on shutdown according to options.
-  if (sb & SB_FORCE) {
+  if (opts.force) {
     // FORCE implies no snapshot on shutdown regardless of SAVE/SAFE
     save_on_shutdown_ = false;
-  } else if (sb & SB_NOSAVE) {
+  } else if (opts.no_save) {
     save_on_shutdown_ = false;
-  } else if (sb & SB_SAVE) {
+  } else if (opts.save) {
     save_on_shutdown_ = true;
   }
 
   // Wire NOW/FORCE to a single fast-shutdown flag for listeners.
-  facade::g_shutdown_fast.store((sb & (SB_NOW | SB_FORCE)) != 0, std::memory_order_seq_cst);
+  facade::g_shutdown_fast.store(opts.now || opts.force, std::memory_order_seq_cst);
 
   CHECK_NOTNULL(acceptor_)->Stop();
   cmd_cntx->rb()->SendOk();
