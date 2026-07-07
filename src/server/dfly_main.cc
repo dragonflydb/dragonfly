@@ -532,7 +532,7 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
 
   iouring_res = -iouring_res;
 
-  if (iouring_res == ENOSYS) {
+  if (iouring_res == ENOSYS || iouring_res == EPERM) {
     LOG(WARNING) << "iouring API is not supported. switching to epoll.";
   } else if (iouring_res == ENOMEM) {
     LOG(WARNING) << "io_uring does not have enough memory. That can happen when your "
