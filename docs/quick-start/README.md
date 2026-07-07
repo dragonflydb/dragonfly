@@ -10,7 +10,7 @@
 
 Starting with `docker run` is the simplest way to get up and running with DragonflyDB.
 
-If you do not have docker on your machine, [Install Docker](https://docs.docker.com/get-docker/) before continuing.
+If you do not have docker on your machine, [Install Docker](https://docs.docker.com/get-docker/) before continuing. On Windows you can configure [WSL Containers](https://learn.microsoft.com/en-us/windows/wsl/tutorials/wsl-containers) for lower resource usage.
 
 ## Step 1
 
