@@ -1718,7 +1718,7 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
 
     if (!dist_trans) {
       dist_trans.reset(new Transaction{exec_cid_});
-      dist_trans->StartMultiNonAtomic();
+      dist_trans->StartMultiNonAtomic(Transaction::DEFAULT);
     } else {
       // Reset to original command id as it's changed during squashing
       dist_trans->MultiSwitchCmd(exec_cid_);
@@ -2019,7 +2019,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   switch (ca.call_type) {
     case CT::UNLOCK:
       tx->UnlockMulti(true);
-      tx->StartMultiNonAtomic();
+      tx->StartMultiNonAtomic(Transaction::DEFAULT);
       info->lock_tags.clear();
       info->key_backing.clear();
       return;
@@ -2152,7 +2152,7 @@ bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgL
       tx->StartMultiLockedAhead(ns, dbid, keys);
       return true;
     case Transaction::NON_ATOMIC:
-      tx->StartMultiNonAtomic();
+      tx->StartMultiNonAtomic(Transaction::DEFAULT);
       return true;
     default:
       LOG(FATAL) << "Invalid mode";

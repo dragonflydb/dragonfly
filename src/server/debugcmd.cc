@@ -1807,7 +1807,7 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
 void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch) {
   auto* exec_cid = sf_.service().mutable_registry()->Find("EXEC");
   boost::intrusive_ptr<Transaction> local_tx = new Transaction{exec_cid};
-  local_tx->StartMultiNonAtomic();
+  local_tx->StartMultiNonAtomic(Transaction::SHARD_LOCAL);
   boost::intrusive_ptr<Transaction> stub_tx =
       new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
 

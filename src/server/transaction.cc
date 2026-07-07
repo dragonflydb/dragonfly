@@ -292,9 +292,12 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
 
   // Stub transactions always operate only on single shard.
   bool is_stub = multi_ && multi_->role == SQUASHED_STUB;
+  // Squasher-local non-atomic transactions are pinned to a single shard for their whole lifetime
+  // (the squasher only batches single-shard commands), so they use a single shard_data_ cell too.
+  bool is_shard_local = IsShardLocalMulti();
 
   unique_slot_checker_.Reset();
-  if ((key_index.NumArgs() == 1 && !IsAtomicMulti()) || is_stub) {
+  if ((key_index.NumArgs() == 1 && !IsAtomicMulti()) || is_stub || is_shard_local) {
     DCHECK(!IsActiveMulti() || multi_->mode == NON_ATOMIC);
 
     // We don't have to split the arguments by shards, so we can copy them directly.
@@ -303,16 +306,25 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     unique_shard_cnt_ = 1;
     string_view akey = full_args_[*key_index];
 
-    if (is_stub)  // stub transactions don't migrate
+    if (is_stub) {  // stub transactions don't migrate
       DCHECK_EQ(unique_shard_id_, Shard(akey, shard_set->size()));
-    else {
+    } else {
       unique_slot_checker_.Add(akey);
       unique_shard_id_ = Shard(akey, shard_set->size());
     }
 
-    // Multi transactions that execute commands on their own (not stubs) can't shrink the backing
-    // array, as it still might be read by leftover callbacks.
-    shard_data_.resize(IsActiveMulti() ? shard_set->size() : 1);
+    // A shard-local tx takes this single-shard path even for multi-key commands, computing the
+    // shard from the first key only. Therefore all keys must map to unique_shard_id_.
+    if (is_shard_local) {
+      for (unsigned i = key_index.start; i < key_index.end; i += key_index.step)
+        DCHECK_EQ(Shard(full_args_[i], shard_set->size()), unique_shard_id_);
+    }
+
+    // Multi transactions that execute commands on their own (not stubs, not shard-local) can't
+    // shrink the backing array, as it still might be read by leftover callbacks on other shards.
+    // However, shard-local txs are pinned to a single shard for their whole lifetime,
+    // and never fan out, so they have no such leftover callbacks and a single cell is safe.
+    shard_data_.resize(NeedsFullShardData() ? shard_set->size() : 1);
     shard_data_[SidToId(unique_shard_id_)].local_mask |= ACTIVE;
 
     return;
@@ -462,9 +474,11 @@ void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList 
   full_args_ = {};  // InitBase set it to temporary keys, now we reset it.
 }
 
-void Transaction::StartMultiNonAtomic() {
+void Transaction::StartMultiNonAtomic(MultiRole role) {
   DCHECK(multi_);
+  DCHECK(role == DEFAULT || role == SHARD_LOCAL);
   multi_->mode = NON_ATOMIC;
+  multi_->role = role;
 }
 
 void Transaction::InitTxTime() {
@@ -1111,7 +1125,7 @@ string Transaction::DEBUG_PrintFailState(ShardId sid) const {
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
-  shard_data_.resize(IsActiveMulti() ? shard_set->size() : 1);
+  shard_data_.resize(NeedsFullShardData() ? shard_set->size() : 1);
   shard_data_.front().local_mask |= ACTIVE;
 }
 
