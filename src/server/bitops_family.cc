@@ -20,6 +20,7 @@
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/namespaces.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 #include "util/varz.h"
@@ -59,6 +60,11 @@ OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, string_view key, 
 OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, string_view key, bool value,
                                         int64_t start, int64_t end, bool as_bit);
 string GetString(const PrimeValue& pv);
+// Materializes the full string value, reading it back from tiered storage if it
+// was offloaded. bitops must never touch an external value directly - the
+// CompactObj accessors CHECK(!IsExternal()).
+OpResult<string> ReadStringValue(DbIndex dbid, string_view key, const PrimeValue& pv,
+                                 EngineShard* shard);
 bool SetBitValue(uint32_t offset, bool bit_value, string* entry);
 std::size_t CountBitSetByByteIndices(string_view at, std::size_t start, std::size_t end);
 std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits);
@@ -274,7 +280,13 @@ class ElementAccess {
     return updater_.is_new;
   }
 
-  string Value() const;
+  // True if the existing value was offloaded to tiered storage.
+  bool IsExternal() const {
+    return !IsNewEntry() && updater_.it->second.IsExternal();
+  }
+
+  // Materializes the value, reading it back from tiered storage if offloaded.
+  OpResult<string> Value() const;
 
   bool GetByteAtIndex(size_t idx, uint8_t* res) const;
   void SetByteAtIndex(size_t idx, uint8_t value) const;
@@ -308,8 +320,10 @@ OpStatus ElementAccess::Find(bool allow_wrong_type) {
   return OpStatus::OK;
 }
 
-string ElementAccess::Value() const {
-  return IsNewEntry() ? string{} : GetString(updater_.it->second);
+OpResult<string> ElementAccess::Value() const {
+  return IsNewEntry()
+             ? OpResult<string>{string{}}
+             : ReadStringValue(context_.db_index, key_, updater_.it->second, EngineShard::tlocal());
 }
 
 bool ElementAccess::GetByteAtIndex(size_t idx, uint8_t* res) const {
@@ -336,8 +350,14 @@ void ElementAccess::Commit(string_view new_value) const {
     }
     context_.ns->GetCurrentDbSlice().Del(context_, updater_.it);
   } else {
-    if (!IsNewEntry() && updater_.it->second.ObjType() != OBJ_STRING) {
+    const bool is_external = IsExternal();
+    // Overwriting a non-string type or an offloaded value: drop the old heap
+    // accounting once, and release the disk segment before storing in memory.
+    if (!IsNewEntry() && (updater_.it->second.ObjType() != OBJ_STRING || is_external)) {
       updater_.post_updater.ReduceHeapUsage();
+    }
+    if (is_external) {
+      EngineShard::tlocal()->tiered_storage()->Delete(context_.db_index, &updater_.it->second);
     }
     updater_.it->second.SetString(new_value);
     updater_.post_updater.Run();
@@ -371,10 +391,11 @@ OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset,
     return old_value;
   }
 
-  // Get byte where bit offset is located. If offset is out of bound it means
-  // that we need to extend the string otherwise we just update.
+  // In-memory value whose target byte already exists: flip the bit in place.
+  // An offloaded value can't be modified byte-in-place, so it falls through to
+  // the read-modify-write path below.
   uint8_t existing_byte;
-  if (element_access.GetByteAtIndex(byte_index, &existing_byte)) {
+  if (!element_access.IsExternal() && element_access.GetByteAtIndex(byte_index, &existing_byte)) {
     VLOG(2) << "Updating key: " << key << " at byte index: " << byte_index;
     uint32_t bit_index = GetNormalizedBitIndex(offset);
     old_value = CheckBitStatus(existing_byte, bit_index);
@@ -383,15 +404,19 @@ OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset,
           bit_value ? TurnBitOn(existing_byte, bit_index) : TurnBitOff(existing_byte, bit_index);
       element_access.SetByteAtIndex(byte_index, existing_byte);
     }
-  } else {
-    VLOG(2) << "Extending key: " << key << " to " << (byte_index + 1) << " bytes";
-    string existing_entry{element_access.Value()};
-    existing_entry.resize(byte_index + 1, 0);
-    SetBitValue(offset, bit_value, &existing_entry);
-    // We always need to commit the extended key
-    element_access.Commit(existing_entry);
+    return old_value;
   }
 
+  // Read the whole value (loading it back from tiered storage if offloaded), set
+  // the bit - extending the string if the offset is out of bounds - and commit.
+  auto value = element_access.Value();
+  if (!value)
+    return value.status();
+  string existing_entry = std::move(*value);
+  if (byte_index >= existing_entry.size())
+    existing_entry.resize(byte_index + 1, 0);
+  old_value = SetBitValue(offset, bit_value, &existing_entry);
+  element_access.Commit(existing_entry);
   return old_value;
 }
 
@@ -460,7 +485,7 @@ OpResult<string> RunBitOpNot(const OpArgs& op_args, string_view key) {
   DbSlice& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (find_res) {
-    return GetString(find_res.value()->second);
+    return ReadStringValue(op_args.db_cntx.db_index, key, find_res.value()->second, op_args.shard);
   } else {
     return find_res.status();
   }
@@ -482,7 +507,11 @@ OpResult<string> RunBitOpOnShard(string_view op, const OpArgs& op_args, ShardArg
   for (; start != end; ++start) {
     auto find_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_STRING);
     if (find_res) {
-      values.emplace_back(GetString(find_res.value()->second));
+      auto value = ReadStringValue(op_args.db_cntx.db_index, *start, find_res.value()->second,
+                                   op_args.shard);
+      if (!value)
+        return value.status();
+      values.emplace_back(std::move(*value));
     } else {
       if (find_res.status() == OpStatus::KEY_NOTFOUND) {
         continue;  // this is allowed, just return empty string per Redis
@@ -511,8 +540,13 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
       case OpStatus::OUT_OF_MEMORY:
         builder->SendError(kOutOfMemory);
         break;
+      case OpStatus::KEY_NOTFOUND:
+        builder->SendLong(0);  // a missing key behaves as an all-zero value
+        break;
       default:
-        builder->SendLong(0);  // in case we don't have the value we should just send 0
+        // Surface real errors (e.g. a failed tiered read) instead of masking
+        // them as a valid 0 reply.
+        builder->SendError(result.status());
         break;
     }
   }
@@ -924,8 +958,13 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
   }
   string value;
   if (*res) {
-    access_.Find(false);
-    value = access_.Value();
+    auto find_res = access_.Find(false);
+    if (find_res != OpStatus::OK)
+      return find_res;
+    auto materialized = access_.Value();
+    if (!materialized)
+      return materialized.status();
+    value = std::move(*materialized);
   }
 
   vector<ResultType> results;
@@ -938,7 +977,9 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
   }
 
   if (visitor.ShouldCommit()) {
-    access_.Find(false);
+    auto find_res = access_.Find(false);
+    if (find_res != OpStatus::OK)
+      return find_res;
     access_.Commit(visitor.Bitfield());
   }
 
@@ -1130,8 +1171,8 @@ void BitFieldGeneric(CmdArgParser parser, bool read_only, Transaction* tx,
 
   OpResult<vector<ResultType>> res = tx->ScheduleSingleHopT(std::move(cb));
 
-  if (res == OpStatus::WRONG_TYPE) {
-    builder->SendError(kWrongTypeErr);
+  if (!res) {
+    builder->SendError(res.status());
     return;
   }
 
@@ -1279,6 +1320,17 @@ string GetString(const PrimeValue& pv) {
   return res;
 }
 
+OpResult<string> ReadStringValue(DbIndex dbid, string_view key, const PrimeValue& pv,
+                                 EngineShard* shard) {
+  if (!pv.IsExternal())
+    return GetString(pv);
+
+  auto res = ReadTieredString(dbid, key, pv, shard->tiered_storage()).Get();
+  if (!res)
+    return OpStatus::IO_ERROR;
+  return std::move(res).value();
+}
+
 OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset) {
   DbSlice& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
@@ -1288,9 +1340,17 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_
   }
 
   const PrimeValue& pv = it_res.value()->second;
+  const size_t byte_index = GetByteIndex(offset);
 
   uint8_t byte_value = 0;
-  if (!pv.GetByteAtIndex(GetByteIndex(offset), &byte_value)) {
+  if (pv.IsExternal()) {
+    auto value = ReadStringValue(op_args.db_cntx.db_index, key, pv, op_args.shard);
+    if (!value)
+      return value.status();
+    if (byte_index >= value->size())
+      return false;
+    byte_value = static_cast<uint8_t>((*value)[byte_index]);
+  } else if (!pv.GetByteAtIndex(byte_index, &byte_value)) {
     return false;
   }
 
@@ -1305,9 +1365,7 @@ OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShar
     return it_res.status();
   }
 
-  const PrimeValue& pv = it_res.value()->second;
-
-  return GetString(pv);
+  return ReadStringValue(context.db_index, key, it_res.value()->second, shard);
 }
 
 OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, string_view key, int64_t start,
@@ -1375,8 +1433,12 @@ OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, string_view key, 
   // even though it contradicts its docs:
   //     If a clear bit isn't found in the specified range, the function returns -1
   //     as the user specified a clear range and there are no 0 bits in that range
+  // Only KEY_NOTFOUND maps to that; real errors (e.g. a failed tiered read) are
+  // propagated instead of being masked as a missing key.
   if (!value) {
-    return bit_value ? -1 : 0;
+    if (value.status() == OpStatus::KEY_NOTFOUND)
+      return bit_value ? -1 : 0;
+    return value.status();
   }
 
   string_view value_str = value.value();
