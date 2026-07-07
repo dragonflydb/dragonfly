@@ -138,7 +138,7 @@ class DebugPopulateSeeder(SeederBase):
 
 
 class Seeder(SeederBase):
-    DEFAULT_TYPES = SeederBase.DEFAULT_TYPES + ["CF"]
+    DEFAULT_TYPES = SeederBase.DEFAULT_TYPES + ["CF", "SBF", "CMS"]
 
     @dataclass
     class Unit:
