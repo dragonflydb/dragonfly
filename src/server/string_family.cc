@@ -56,6 +56,8 @@ using namespace util;
 
 using CI = CommandId;
 
+constexpr char kOffsetOutOfRange[] = "offset is out of range";
+
 // Either immediately available value or tiering future + result
 template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
 
@@ -1070,9 +1072,7 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
         return NegativeExpire{};
 
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
-    } else if (parser.Check("_MCFLAGS")) {
-      sparams.memcache_flags = parser.Next<uint32_t>();
-    } else {
+    } else if (!parser.Check("_MCFLAGS", &sparams.memcache_flags)) {
       uint16_t flag = parser.MapNext(  //
           "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
           "XX", SetCmd::SET_IF_EXISTS, "NX", SetCmd::SET_IF_NOTEXIST);
@@ -1189,12 +1189,11 @@ cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 cmd::CmdR CmdSetExGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view cmd_name = cmd_cntx->cid()->name();
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
+  if (exp_int < 1)
+    parser.ReportCustom(InvalidExpireTime(cmd_name));
 
   if (auto err = parser.TakeError(); err)
     co_return err.MakeReply();
-
-  if (exp_int < 1)
-    co_return facade::ErrorReply{InvalidExpireTime(cmd_name)};
 
   const ExpT type = cmd_name.front() == 'P' ? ExpT::PX : ExpT::EX;
   const uint64_t now_ms = GetCurrentTimeMs();
@@ -1660,15 +1659,13 @@ cmd::CmdR CmdGetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR CmdSetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
+  using SetRangeOffset = Validated<int32_t, NonNegative<kOffsetOutOfRange>>;
+  auto [key, offset, value] = parser.Next<string_view, SetRangeOffset, string_view>();
 
   if (auto err = parser.TakeError(); err)
     co_return err.MakeReply();
 
-  if (start < 0) {
-    co_return facade::ErrorReply{"offset is out of range"};
-  }
-
+  size_t start = offset;
   if (size_t min_size = start + value.size(); min_size > kMaxStrLen) {
     co_return facade::ErrorReply{"string exceeds maximum allowed size"};
   }

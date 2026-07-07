@@ -122,8 +122,7 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
     } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
     } else if (parser->Check("TYPE")) {
       params.data_type = absl::AsciiStrToUpper(parser->Next<string_view>());
-    } else if (parser->Check("EF_RUNTIME")) {
-      params.hnsw_ef_runtime = parser->Next<uint32_t>();
+    } else if (parser->Check("EF_RUNTIME", &params.hnsw_ef_runtime)) {
     } else if (parser->Check("EPSILON")) {
       double epsilon = parser->Next<double>("Invalid EPSILON value");
       if (!params.use_hnsw) {
@@ -192,29 +191,14 @@ void ParseTextWeight(CmdArgParser* parser, search::SchemaField::TextParams* para
 
 ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parser) {
   search::SchemaField::TextParams params{};
-  while (parser->HasNext()) {
-    if (parser->Check("WITHSUFFIXTRIE")) {
-      params.with_suffixtrie = true;
-      continue;
-    }
-    if (parser->Check("NOSTEM")) {
-      params.no_stem = true;
-      continue;
-    }
-    if (parser->Check("WEIGHT")) {
-      ParseTextWeight(parser, &params);
-      continue;
-    }
-    break;
-  }
+  parser->Apply(Exist("WITHSUFFIXTRIE", &params.with_suffixtrie), Exist("NOSTEM", &params.no_stem),
+                Tag("WEIGHT", [&](CmdArgParser* p) { ParseTextWeight(p, &params); }));
   return params;
 }
 
 search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
   search::SchemaField::NumericParams params{};
-  if (parser->Check("BLOCKSIZE")) {
-    params.block_size = parser->Next<size_t>();
-  }
+  parser->Check("BLOCKSIZE", &params.block_size);
   return params;
 }
 
@@ -390,7 +374,7 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
           absl::StrCat("Field type "sv, parser->Next(), " is not supported"sv));
     }
 
-    auto parsed_params = params_parser.value()(parser);
+    auto parsed_params = parser->Next(params_parser.value());
     if (!parsed_params) {
       return make_unexpected(parsed_params.error());
     }
@@ -564,9 +548,7 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
 
   while (parser->HasNext()) {
     // [LIMIT offset total]
-    if (parser->Check("LIMIT")) {
-      params.limit_offset = parser->Next<size_t>();
-      params.limit_total = parser->Next<size_t>();
+    if (parser->Check("LIMIT", &params.limit_offset, &params.limit_total)) {
       if (params.limit_total > max_results) {
         return CreateSyntaxError(absl::StrFormat("LIMIT exceeds maximum of %d", max_results));
       }
@@ -603,8 +585,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       params.scorer = *scorer;
     } else if (parser->Check("BM25STD_TANH_FACTOR")) {
       tanh_factor = ParseBM25StdTanhFactor(parser);
-    } else if (parser->Check("DIALECT")) {
-      parser->Skip(1);  // Accepted and ignored — DF always behaves as dialect 2
+    } else if (std::string_view ignored; parser->Check("DIALECT", &ignored)) {
+      // Accepted and ignored — DF always behaves as dialect 2.
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
@@ -826,9 +808,9 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
     }
 
     // LIMIT
-    if (parser->Check("LIMIT")) {
+    size_t offset = 0, num = 0;
+    if (parser->Check("LIMIT", &offset, &num)) {
       has_pipeline_step = true;
-      auto [offset, num] = parser->Next<size_t, size_t>();
       if (params.joins.empty() || params.join_agg_params.HasLimit()) {
         params.steps.push_back(aggregate::MakeLimitStep(offset, num));
       } else {
@@ -839,10 +821,10 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
     }
 
     // FILTER "expr"
-    if (parser->Check("FILTER")) {
+    std::string_view filter_expr;
+    if (parser->Check("FILTER", &filter_expr)) {
       has_pipeline_step = true;
-      std::string filter_expr{parser->Next<std::string_view>()};
-      auto step_or_err = aggregate::MakeFilterStep(filter_expr);
+      auto step_or_err = aggregate::MakeFilterStep(std::string{filter_expr});
       if (std::holds_alternative<std::string>(step_or_err)) {
         return CreateSyntaxError(
             absl::StrCat("FILTER expression error: ", std::get<std::string>(step_or_err)));
@@ -863,18 +845,18 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
     }
 
     // DIALECT (accepted and ignored — DF always behaves as dialect 2)
-    if (parser->Check("DIALECT")) {
-      parser->Skip(1);
+    std::string_view ignored_dialect;
+    if (parser->Check("DIALECT", &ignored_dialect)) {
       continue;
     }
 
     // APPLY "expr" AS alias
-    if (parser->Check("APPLY")) {
+    std::string_view expr;
+    if (parser->Check("APPLY", &expr)) {
       has_pipeline_step = true;
-      string expr{parser->Next<string_view>()};
       parser->ExpectTag("AS");
       string alias = parser->Next<string>();
-      auto step_or_err = aggregate::MakeApplyStep(expr, std::move(alias));
+      auto step_or_err = aggregate::MakeApplyStep(std::string{expr}, std::move(alias));
       if (std::holds_alternative<std::string>(step_or_err)) {
         return CreateSyntaxError(
             absl::StrCat("APPLY expression error: ", std::get<std::string>(step_or_err)));

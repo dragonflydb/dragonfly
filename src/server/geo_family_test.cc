@@ -255,6 +255,14 @@ TEST_F(GeoFamilyTest, GeoRadiusByMember) {
   resp = Run("GEOADD t 13.361389 38.115556 a 13.3619 38.1159 b 13.3608 38.1152 c");
   resp = Run("GEOSEARCH t FROMLONLAT 13.361389 38.115556 BYRADIUS 1 KM COUNT 0");
   EXPECT_THAT(resp, ErrArg("ERR COUNT must be > 0"));
+
+  // A non-numeric COUNT must report a syntax error, not be misrendered as an invalid lon/lat pair
+  // (the geo-specific error codes alias CmdArgParser::CUSTOM_ERROR).
+  resp = Run("GEORADIUSBYMEMBER Sicily Agrigento 100 km COUNT notanumber");
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run("GEORADIUSBYMEMBER Sicily Agrigento 100 badunit");
+  EXPECT_THAT(resp, ErrArg("unsupported unit provided. please use M, KM, FT, MI"));
 }
 
 TEST_F(GeoFamilyTest, GeoRadiusByMemberRO) {

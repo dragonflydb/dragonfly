@@ -396,12 +396,9 @@ std::optional<JsonGetParams> ParseJsonGetParams(CmdArgParser* parser, SinkReplyB
   while (parser->HasNext()) {
     if (parser->Check("NOESCAPE")) {
       parsed_args.no_escape = true;
-    } else if (parser->Check("SPACE")) {
-      parsed_args.space = parser->Next();
-    } else if (parser->Check("NEWLINE")) {
-      parsed_args.new_line = parser->Next();
-    } else if (parser->Check("INDENT")) {
-      parsed_args.indent = parser->Next();
+    } else if (parser->Check("SPACE", &parsed_args.space) ||
+               parser->Check("NEWLINE", &parsed_args.new_line) ||
+               parser->Check("INDENT", &parsed_args.indent)) {
     } else {
       std::string_view path_str = parser->Next();
 

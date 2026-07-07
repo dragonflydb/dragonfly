@@ -1777,42 +1777,26 @@ void ZRangeGeneric(facade::ParsedArgs args, ZSetFamily::RangeParams range_params
   facade::CmdArgParser parser{args.Tail().Tail().Tail()};
   using RP = ZSetFamily::RangeParams;
 
-  while (true) {
-    RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  auto set_interval = [&](RP::IntervalType interval) {
+    return [&, interval](CmdArgParser* p) {
+      if (exchange(range_params.interval_type, interval) ==
+          (interval == RP::SCORE ? RP::LEX : RP::SCORE)) {
+        p->ReportCustom("BYSCORE and BYLEX options are not compatible");
+      }
+    };
+  };
 
-    if (!parser.HasNext())
-      break;
+  parser.Apply(Tag("BYSCORE", set_interval(RP::SCORE)), Tag("BYLEX", set_interval(RP::LEX)),
+               Exist("REV", &range_params.reverse), Exist("WITHSCORES", &range_params.with_scores),
+               Tag("LIMIT", [&](CmdArgParser* p) {
+                 auto [offset, limit] = p->Next<int32_t, int32_t>();
+                 range_params.limit = limit < 0 ? UINT32_MAX : static_cast<uint32_t>(limit);
+                 range_params.offset = offset < 0 ? UINT32_MAX : static_cast<uint32_t>(offset);
+               }));
 
-    if (parser.Check("BYSCORE")) {
-      if (exchange(range_params.interval_type, RP::SCORE) == RP::LEX)
-        return cmd_cntx->SendError("BYSCORE and BYLEX options are not compatible");
-      continue;
-    }
+  parser.Finalize("unsupported option ");
 
-    if (parser.Check("BYLEX")) {
-      if (exchange(range_params.interval_type, RP::LEX) == RP::SCORE)
-        return cmd_cntx->SendError("BYSCORE and BYLEX options are not compatible");
-      continue;
-    }
-    if (parser.Check("REV")) {
-      range_params.reverse = true;
-      continue;
-    }
-    if (parser.Check("WITHSCORES")) {
-      range_params.with_scores = true;
-      continue;
-    }
-
-    if (parser.Check("LIMIT")) {
-      auto [offset, limit] = parser.Next<int32_t, int32_t>();
-
-      range_params.limit = limit < 0 ? UINT32_MAX : static_cast<uint32_t>(limit);
-      range_params.offset = offset < 0 ? UINT32_MAX : static_cast<uint32_t>(offset);
-      continue;
-    }
-
-    return cmd_cntx->SendError(absl::StrCat("unsupported option ", parser.Peek()));
-  }
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   if (range_params.offset == UINT32_MAX) {
     auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
