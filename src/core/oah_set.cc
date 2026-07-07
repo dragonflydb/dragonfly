@@ -91,7 +91,7 @@ inline FORCE_INLINE OAHSet::MatchResult OAHSet::FindMatch(uint32_t bid, uint32_t
 
 inline FORCE_INLINE bool OAHSet::AddImpl(std::string_view str, uint32_t ttl_sec) {
   // Grow at load factor 2; until then overflow lands in the window / extension vectors.
-  if (size_ >= entries_.size() * 2) [[unlikely]] {
+  if (size_ >= entries_.size()) [[unlikely]] {
     Reserve(BucketCount() * 2);
   }
   DCHECK_GE(Capacity(), kDisplacementSize);

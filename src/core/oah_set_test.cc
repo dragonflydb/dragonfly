@@ -190,7 +190,8 @@ TEST_F(OAHSetTest, OAHSetAddFindTest) {
   }
 
   // ~10000 elements at load factor 2 (grow only when size_ >= 2 * table size).
-  EXPECT_EQ(ss.BucketCount(), 8192);
+  // EXPECT_EQ(ss.BucketCount(), 8192);
+  EXPECT_EQ(ss.BucketCount(), 16384);
 }
 
 TEST_F(OAHSetTest, Basic) {
@@ -1400,5 +1401,28 @@ TEST_F(OAHSetTest, ScanWithShrinkBetweenCalls) {
   }
   EXPECT_EQ(seen.size(), must_see.size()) << "Should see exactly all original elements";
 }
+
+void BM_Add_LargerKey(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  OAHSet ss;
+  unsigned elems = state.range(0);
+  constexpr unsigned kKeySize = 64;
+  for (size_t i = 0; i < elems; ++i)
+    strs.push_back(random_string(generator, kKeySize));
+  ss.Reserve(elems);
+  size_t mem_used = 0;
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Add(str);
+    state.PauseTiming();
+    mem_used += MemUsed(ss);
+    ss.Clear();
+    ss.Reserve(elems);
+    state.ResumeTiming();
+  }
+  state.counters["Memory_Used"] = mem_used / state.iterations();
+}
+BENCHMARK(BM_Add_LargerKey)->ArgName("elements")->Arg(1000)->Arg(10000)->Arg(100000);
 
 }  // namespace dfly
