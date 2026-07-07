@@ -31,6 +31,7 @@ ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_list_support);
+ABSL_DECLARE_FLAG(bool, tiered_writes_cooling_bypass);
 ABSL_DECLARE_FLAG(unsigned, list_tiering_threshold);
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 
@@ -151,6 +152,41 @@ TEST_P(LatentCoolingTSTest, SimpleGetSet) {
   metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0);
   EXPECT_EQ(metrics.db_stats[0].tiered_used_bytes, 0);
+}
+
+// With cooling enabled, a written+stashed value normally lands in the in-RAM cooling pool. When
+// --tiered_writes_cooling_bypass is on, the write path requests a cooling-pool bypass so the stash
+// goes straight to disk, leaving the cool pool (and thus read-hot entries) untouched.
+TEST_F(TieredStorageTest, WritesCoolingBypass) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);     // force offloading
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);  // stashes land in the cooling pool
+  UpdateFromFlags();
+
+  const int kLen = 4000;
+
+  // Baseline: cold overwrites disabled -> the stashed value is retained in the cooling pool, so
+  // cold_storage_bytes grows.
+  SetFlag(&FLAGS_tiered_writes_cooling_bypass, false);
+  UpdateFromFlags();
+  Run({"SET", "hot", BuildString(kLen)});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  size_t cool_baseline = GetMetrics().tiered_stats.cold_storage_bytes;
+  EXPECT_GT(cool_baseline, 0u);
+
+  // Cold overwrites enabled -> the stashed value bypasses the cooling pool and goes disk-only, so
+  // cold_storage_bytes does not grow for it.
+  SetFlag(&FLAGS_tiered_writes_cooling_bypass, true);
+  UpdateFromFlags();
+  Run({"SET", "cold", BuildString(kLen)});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 2; });
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.cold_storage_bytes, cool_baseline);  // unchanged by the cold SET
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 2);
+
+  // The cold value is still readable (uploaded back from disk on access).
+  EXPECT_EQ(Run({"GET", "cold"}), BuildString(kLen));
 }
 
 TEST_P(LatentCoolingTSTest, StrLen) {

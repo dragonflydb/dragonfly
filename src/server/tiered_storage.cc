@@ -13,6 +13,7 @@
 #include <variant>
 
 #include "absl/cleanup/cleanup.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/flags/internal/flag.h"
 #include "absl/functional/bind_front.h"
 #include "absl/functional/overload.h"
@@ -63,6 +64,12 @@ ABSL_FLAG(float, tiered_upload_threshold, 0.1,
 ABSL_FLAG(bool, tiered_experimental_hash_support, false, "Experimental hash datatype offloading");
 
 ABSL_FLAG(bool, tiered_experimental_list_support, false, "Experimental list node offloading");
+
+ABSL_FLAG(bool, tiered_writes_cooling_bypass, false,
+          "If true, values offloaded as a result of a write/overwrite are externalized straight "
+          "to disk instead of being retained in the in-RAM cooling pool. Prevents write-heavy "
+          "bursts from evicting genuinely read-hot entries out of the cool pool; reads still "
+          "upload values back into RAM. Only takes effect when tiered_experimental_cooling is on");
 
 ABSL_FLAG(uint32, tiered_min_ttl_to_offload_ms, 5000,
           "Min remaining TTL in ms for a value to be eligible for offloading");
@@ -154,9 +161,18 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       : tiering::OpManager{max_size}, ts_{ts}, db_slice_{*db_slice} {
   }
 
+  // Records that the stash for (dbid, key) should bypass the cooling pool and go disk-only. The
+  // intent must survive the async stash gap (write path -> async stash -> SetExternal), so it is
+  // kept in a per-shard set instead of a PrimeValue state bit. Only populated when bypass is set,
+  // so it stays empty in the common case.
+  void MarkCoolingBypass(DbIndex dbid, std::string_view key) {
+    cooling_bypass_pending_.emplace(dbid, key);
+  }
+
   // Clear Stash pending flag for entry
   void ClearStashPending(OpManager::KeyRef key) {
     UnblockBackpressure(key, false);
+    cooling_bypass_pending_.erase(key);
     if (auto pv = Find(key.first, key.second); pv) {
       pv->SetStashPending(false);
       stats_.total_cancels++;
@@ -181,6 +197,10 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   void CancelStash(tiering::KeyRef id, size_t size) {
     UnblockBackpressure(id, false);
+    // A cancelled stash never reaches SetExternal/ClearStashPending, so drop any bypass marker
+    // here to avoid a stale entry (which could wrongly bypass cooling on a later stash of the
+    // same key, or leak). Covers both the own-page and small-bin sub-cases below.
+    cooling_bypass_pending_.erase(id);
     // TODO: Don't recompute size estimate, try-delete bin first
     if (OccupiesWholePages(size)) {
       CancelPending(id);
@@ -269,7 +289,13 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats_.total_stashes++;
 
       StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
-      if (ts_->config_.experimental_cooling) {
+
+      // A write/overwrite driven stash bypasses the cooling pool (see
+      // --tiered_writes_cooling_bypass) and goes disk-only, so write bursts don't evict read-hot
+      // entries. The intent is carried in cooling_bypass_pending_ across the async stash gap.
+      bool bypass = cooling_bypass_pending_.erase(key) > 0;
+
+      if (ts_->config_.experimental_cooling && !bypass) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
       } else {
@@ -322,6 +348,12 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   // When we don't have memory to upload a page for defragmentation, we save it here to do it later
   std::deque<uint32_t /* page index (kPageSize) */> delayed_defrag_queue_;
+
+  // Keys whose in-flight stash should bypass the cooling pool (see --tiered_writes_cooling_bypass).
+  // Stored as owning DbKeyId with heterogeneous lookup, so we can probe with an OpManager::KeyRef
+  // (which holds a string_view) without allocating. Populated only when bypass is requested.
+  absl::flat_hash_set<tiering::DbKeyId, tiering::detail::Hasher, tiering::detail::Eq>
+      cooling_bypass_pending_;
 
   TieredStorage* ts_;
   DbSlice& db_slice_;
@@ -523,6 +555,11 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
   tiering::OpManager::PendingId id;
   error_code ec;
 
+  // Carry the cooling-bypass intent per-key across the async stash gap. Done per-key (not per-bin)
+  // so small-bin batching keeps per-key granularity. Cleaned up in ClearStashPending on abort.
+  if (blobs.bypass_cooling)
+    op_manager_->MarkCoolingBypass(dbid, key);
+
   if (OccupiesWholePages(est_size)) {  // large enough for own page
     id = KeyRef(dbid, key);
     auto serialize = absl::bind_front(&StashDescriptor::Serialize, &blobs);
@@ -638,6 +675,7 @@ void TieredStorage::UpdateFromFlags() {
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
       .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_support),
       .experimental_list_offload = absl::GetFlag(FLAGS_tiered_experimental_list_support),
+      .writes_cooling_bypass = absl::GetFlag(FLAGS_tiered_writes_cooling_bypass),
       .min_ttl_to_offload_ms = absl::GetFlag(FLAGS_tiered_min_ttl_to_offload_ms),
   };
 
@@ -651,7 +689,7 @@ std::vector<std::string> TieredStorage::GetMutableFlagNames() {
                             FLAGS_tiered_max_pending_stash_bytes, FLAGS_tiered_offload_threshold,
                             FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
                             FLAGS_tiered_experimental_list_support,
-                            FLAGS_tiered_min_ttl_to_offload_ms);
+                            FLAGS_tiered_writes_cooling_bypass, FLAGS_tiered_min_ttl_to_offload_ms);
 }
 
 bool TieredStorage::ShouldOffload() const {
@@ -862,6 +900,11 @@ void StashPrimeValue(DbIndex dbid, std::string_view key, const PrimeKey& pk, Pri
           ts->ShouldStash(*pv, TieredStorage::StashContext{.key_expire_ms = pk.GetExpireTime()});
       blobs) {
     pv->SetStashPending(true);
+    // This is the write path (proactive offload driven by an edit). Request cooling-pool bypass so
+    // the value is externalized straight to disk. Background/scan-driven offload (RunOffloading)
+    // does not go through here and keeps the normal cooling behavior. The intent is carried on the
+    // StashDescriptor (not a PrimeValue bit) and recorded per-key inside StashPrimeValue.
+    blobs->bypass_cooling = ts->BypassCoolingForWrites();
     ts->StashPrimeValue(dbid, key, *blobs, backpressure);
   }
 }
