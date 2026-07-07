@@ -1300,8 +1300,20 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   uniq_fps_.clear();
 }
 
+bool DbSlice::IsLockFree(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
+  for (LockFp fp : lock_args.fps) {
+    if (!CheckLock(mode, lock_args.db_index, fp))
+      return false;
+  }
+  return true;
+}
+
 bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const {
   const auto& lt = db_arr_[dbid]->trans_locks;
+  if (lt.Size() == 0) {
+    return true;
+  }
+
   auto lock = lt.Find(fp);
   if (lock) {
     return lock->Check(mode);
