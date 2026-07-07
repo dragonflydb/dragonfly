@@ -476,7 +476,7 @@ void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList 
 
 void Transaction::StartMultiNonAtomic(MultiRole role) {
   DCHECK(multi_);
-  DCHECK(role == DEFAULT || role == SQUASHED_LOCAL);
+  DCHECK(role == DEFAULT || role == SHARD_LOCAL);
   multi_->mode = NON_ATOMIC;
   multi_->role = role;
 }

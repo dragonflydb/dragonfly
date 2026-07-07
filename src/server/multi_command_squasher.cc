@@ -100,10 +100,10 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
     } else {
       // Non-atomic squashing does not use the transactional framework for fan out, so local
       // transactions have to be fully standalone, check locks and release them immediately.
-      // SQUASHED_LOCAL pins the tx to this single shard for its whole lifetime, which lets it use a
+      // SHARD_LOCAL pins the tx to this single shard for its whole lifetime, which lets it use a
       // single-cell shard_data_.
       sinfo.local_tx = new Transaction{base_cid_};
-      sinfo.local_tx->StartMultiNonAtomic(Transaction::SQUASHED_LOCAL);
+      sinfo.local_tx->StartMultiNonAtomic(Transaction::SHARD_LOCAL);
     }
     num_shards_++;
   }
@@ -137,7 +137,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
     return SquashResult::NOT_SQUASHED;
 
   // Check if all command keys belong to one shard. This is what lets the non-atomic local_tx stay
-  // pinned to a single shard (SQUASHED_LOCAL) and use a single-cell shard_data_: multi-shard
+  // pinned to a single shard (SHARD_LOCAL) and use a single-cell shard_data_: multi-shard
   // commands bail out here and run standalone instead of being dispatched to a local_tx.
   ShardId last_sid = kInvalidSid;
 

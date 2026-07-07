@@ -1320,7 +1320,7 @@ TEST_F(MultiTest, TestSquashing) {
   Run({"exec"});
 }
 
-// Non-atomic squashing (a disable-atomicity script) uses SQUASHED_LOCAL local transactions.
+// Non-atomic squashing (a disable-atomicity script) uses SHARD_LOCAL local transactions.
 // A multi-key command whose keys are colocated on one shard is squashed
 // into such a local_tx, exercising the shard-local multi-key path in Transaction::InitByKeys (and
 // its DCHECK that all keys map to the pinned shard). MULTI/EXEC would use *atomic* squashing and
@@ -1331,7 +1331,7 @@ TEST_F(MultiTest, SquashShardLocalMultiKey) {
   SetTestFlag("experimental_cluster_shard_by_slot", "true");
   ResetService();
 
-  // disable-atomicity => NON_ATOMIC multi => squasher creates SQUASHED_LOCAL local txs.
+  // disable-atomicity => NON_ATOMIC multi => squasher creates SHARD_LOCAL local txs.
   // redis.acall queues the calls for non-atomic squashing. All keys share the {t} hashtag, so the
   // multi-key MSET lands on a single shard and is squashable into one local_tx.
   const char* kScript = R"(--!df flags=disable-atomicity,allow-undeclared-keys

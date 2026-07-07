@@ -145,15 +145,17 @@ class Transaction {
     NON_ATOMIC = 3,
   };
 
-  // Squashed parallel execution uses per-shard local transactions. Atomic squashing uses "stubs"
-  // that perform no scheduling or real hops and execute handlers directly inline. Non-atomic
-  // squashing uses local transactions that still schedule/acquire locks normally but are pinned to
-  // a single shard for their whole lifetime.
+  // Atomic squashing uses "stubs" that perform no scheduling or real hops and execute handlers
+  // directly inline, mocking the interface of a real transaction for a single shard. Non-atomic
+  // squashing does not squash on the transaction level at all: MultiCommandSquasher dispatches
+  // each command straight to its target shard's queue and relies on a real, ordinary transaction
+  // (SHARD_LOCAL) that schedules/acquires locks normally, just pinned to that one shard for its
+  // whole lifetime.
   enum MultiRole : uint8_t {
-    DEFAULT = 0,         // Regular multi transaction
-    SQUASHER = 1,        // Owner of stub transactions
-    SQUASHED_STUB = 2,   // Stub transaction
-    SQUASHED_LOCAL = 3,  // Non-atomic squasher-local transaction
+    DEFAULT = 0,        // Regular multi transaction
+    SQUASHER = 1,       // Owner of stub transactions
+    SQUASHED_STUB = 2,  // Stub transaction
+    SHARD_LOCAL = 3,    // Non-atomic transaction pinned to a single shard for its whole lifetime
   };
 
   // State on specific shard.
@@ -255,7 +257,7 @@ class Transaction {
   void StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
                              bool skip_scheduling = false);
 
-  // Start multi in NON_ATOMIC mode. Use SQUASHED_LOCAL for squasher-local transactions that are
+  // Start multi in NON_ATOMIC mode. Use SHARD_LOCAL for squasher-local transactions that are
   // pinned to a single shard for their whole lifetime (lets shard_data_ use a single cell).
   void StartMultiNonAtomic(MultiRole role);
 
@@ -579,7 +581,7 @@ class Transaction {
   // The pinning is enforced by MultiCommandSquasher, which only routes single-shard commands to
   // such a tx and creates a separate one per shard, so it never fans out or migrates shards.
   bool IsShardLocalMulti() const {
-    return multi_ && multi_->role == SQUASHED_LOCAL && multi_->mode == NON_ATOMIC;
+    return multi_ && multi_->role == SHARD_LOCAL && multi_->mode == NON_ATOMIC;
   }
 
   // Full per-shard shard_data_ is needed only for multi transactions that may span/migrate across
