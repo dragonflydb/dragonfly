@@ -220,43 +220,61 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     sinfo.reply_size_total_ptr->fetch_add(sz, std::memory_order_relaxed);
   };
 
-  for (auto& dispatched : sinfo.dispatched) {
-    auto* ctx = &local_cntx;
-    crb.SetReplyMode(dispatched.reply_mode);
+  const size_t dispatched_sz = sinfo.dispatched.size();
+  for (size_t batch_start = 0; batch_start < dispatched_sz; batch_start += 8) {
+    size_t batch_end = batch_start + 8;
+    if (batch_end > dispatched_sz)
+      batch_end = dispatched_sz;
 
-    // Allow captured replies to be stored in argument storage.
-    // Some commands might include arguments in replies, so we have a limited set
-    if (dispatched.cmd_cntx && dispatched.cid->SupportsAsync())
-      crb.ProvideInlineBuffer(dispatched.cmd_cntx->GetInlineBuffer());
-    else
-      crb.ProvideInlineBuffer({});  // reset buffer
-
-    // With tiered storage enabled, it makes sense to dispatch async commands concurrently
-    // to allow concurrent disk operations. Tiered futures are only blocked on during replies
-    bool do_async = es->tiered_storage() && !IsAtomic() && opts_.pipeline_mode &&
-                    dispatched.cid->SupportsAsync();
-    if (do_async) {
-      ctx = dispatched.cmd_cntx;
-      ctx->SetDeferredReply();
+    // We are in the context of a shard thread, so prefetching allows faster access
+    // to the command arguments.
+    for (size_t i = batch_start; i < batch_end; ++i) {
+      auto& dispatched = sinfo.dispatched[i];
+      if (dispatched.cmd_cntx) {
+        __builtin_prefetch(dispatched.cmd_cntx, 0, 3);
+      }
     }
 
-    ctx->SetupTx(dispatched.cid, local_cntx.tx());
-    ctx->tx()->MultiSwitchCmd(dispatched.cid);
+    for (size_t i = batch_start; i < batch_end; ++i) {
+      auto& dispatched = sinfo.dispatched[i];
+      auto* ctx = &local_cntx;
+      crb.SetReplyMode(dispatched.reply_mode);
 
-    auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args,
-                                        dispatched.key_index);
-    if (status != OpStatus::OK) {
-      ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
-    } else {
-      ctx->UpdateCid(dispatched.cid);
-      ctx->SetTailArgs(dispatched.args);
-      service_->InvokeCmd(dispatched.args, ctx);
-    }
+      // Allow captured replies to be stored in argument storage.
+      // Some commands might include arguments in replies, so we have a limited set
+      if (dispatched.cmd_cntx && dispatched.cid->SupportsAsync())
+        crb.ProvideInlineBuffer(dispatched.cmd_cntx->GetInlineBuffer());
+      else
+        crb.ProvideInlineBuffer({});  // reset buffer
 
-    if (!do_async) {
-      move_reply(&dispatched);  // Async commands resolve the context directly
-    } else if (!ctx->CanReply()) {
-      ctx->Blocker()->Wait();  // Transaction didn't finish inline (likely locked key), wait for it
+      // With tiered storage enabled, it makes sense to dispatch async commands concurrently
+      // to allow concurrent disk operations. Tiered futures are only blocked on during replies
+      bool do_async = es->tiered_storage() && !IsAtomic() && opts_.pipeline_mode &&
+                      dispatched.cid->SupportsAsync();
+      if (do_async) {
+        ctx = dispatched.cmd_cntx;
+        ctx->SetDeferredReply();
+      }
+
+      ctx->SetupTx(dispatched.cid, local_cntx.tx());
+      ctx->tx()->MultiSwitchCmd(dispatched.cid);
+
+      auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args,
+                                          dispatched.key_index);
+      if (status != OpStatus::OK) {
+        ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
+      } else {
+        ctx->UpdateCid(dispatched.cid);
+        ctx->SetTailArgs(dispatched.args);
+        service_->InvokeCmd(dispatched.args, ctx);
+      }
+
+      if (!do_async) {
+        move_reply(&dispatched);  // Async commands resolve the context directly
+      } else if (!ctx->CanReply()) {
+        ctx->Blocker()
+            ->Wait();  // Transaction didn't finish inline (likely locked key), wait for it
+      }
     }
   }
 
