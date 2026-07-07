@@ -13,6 +13,33 @@ namespace dfly {
 
 using U64x2 = SimdOp<std::uint64_t, 2>;
 using U64x4 = SimdOp<std::uint64_t, 4>;
+using U64x6 = SimdOp<std::uint64_t, 6>;
+using U64x8 = SimdOp<std::uint64_t, 8>;
+
+TEST(SimdOpTest, WideGetMSBsN8) {
+  // N=8 exercises the multi-group fold in GetMSBs.
+  std::uint64_t arr[8] = {1, 0, 3, 0, 5, 6, 0, 8};
+  EXPECT_EQ((U64x8::Load(arr) == uint64_t(0)).GetMSBs(), 0b01001010u);  // zero lanes: 1,3,6
+
+  std::uint64_t signs[8] = {~0ULL, 0, ~0ULL, ~0ULL, 0, ~0ULL, 0, ~0ULL};
+  EXPECT_EQ(U64x8::Load(signs).GetMSBs(), 0b10101101u);  // sign-bit set lanes
+
+  auto v = U64x8::Load(arr);
+  EXPECT_EQ((v == uint64_t(5)).GetMSBs(), 0b00010000u);  // only lane 4 == 5
+  EXPECT_EQ(((v & U64x8::Fill(0)) == uint64_t(0)).GetMSBs(), 0xFFu);
+}
+
+TEST(SimdOpTest, NonPowerOfTwoNMasksPadding) {
+  // N=6 widens storage to 8 lanes; the 2 padding lanes are zero-filled and must be masked out of
+  // GetMSBs -- notably they must NOT appear in a `== 0` probe.
+  std::uint64_t arr[6] = {0, 5, 0, 9, 5, 0};
+  auto v = U64x6::Load(arr);
+  EXPECT_EQ((v == uint64_t(0)).GetMSBs(), 0b100101u);  // zero lanes 0,2,5; padding masked off
+  EXPECT_EQ((v == uint64_t(5)).GetMSBs(), 0b010010u);  // lanes 1,4
+
+  std::uint64_t signs[6] = {~0ULL, 0, 0, 0, 0, ~0ULL};
+  EXPECT_EQ(U64x6::Load(signs).GetMSBs(), 0b100001u);  // sign lanes 0,5 only, no padding bits
+}
 
 TEST(SimdOpTest, FillAndLoadAreEquivalent) {
   std::uint64_t arr[4] = {7, 7, 7, 7};
@@ -68,6 +95,14 @@ TEST(SimdOpTest, ToBitsLsbIsLaneZero) {
   std::uint64_t arr[4] = {42, 0, 0, 0};
   auto v = U64x4::Load(arr);
   EXPECT_EQ((v == uint64_t(42)).GetMSBs(), 0x1u);
+}
+
+TEST(SimdOpTest, GetMSBsReadsLaneSignBits) {
+  // GetMSBs extracts each lane's sign bit (bit 63), not "is non-zero" -- lane 1 (0x7FFF..) has
+  // its low bits set but bit 63 clear, so it must not appear in the mask.
+  std::uint64_t arr[4] = {0x8000000000000000ULL, 0x7FFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0};
+  EXPECT_EQ(U64x4::Load(arr).GetMSBs(), 0b0101u);
+  EXPECT_EQ(U64x2::Load(arr).GetMSBs(), 0b0001u);
 }
 
 TEST(SimdOpTest, U64x2WorksForVectorSearch) {
