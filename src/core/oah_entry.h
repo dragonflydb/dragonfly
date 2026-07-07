@@ -21,7 +21,6 @@ namespace dfly {
 class PageUsage;
 
 #define PREFETCH_READ(x) __builtin_prefetch(x, 0, 1)
-#define FORCE_INLINE __attribute__((always_inline))
 
 // oah_entry.h - a single set member: a string key plus its expiry and cached hash.
 //

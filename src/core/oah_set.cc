@@ -10,13 +10,8 @@
 
 namespace dfly {
 
-// Definitions below are `inline FORCE_INLINE`: inline makes them COMDAT
-// (non-interposable), which lets always_inline apply to an out-of-line member so
-// they fold into their in-TU callers.
-
 template <typename Wide>
-inline FORCE_INLINE OAHSet::LaneMasks OAHSet::ProbeLanes(const TaggedPtr* base,
-                                                         uint64_t ext_hash) noexcept {
+OAHSet::LaneMasks OAHSet::ProbeLanes(const TaggedPtr* base, uint64_t ext_hash) noexcept {
   auto data_v = Wide::Load(base);
   auto hash_v = (data_v & Wide::Fill(OAHEntry::kExtHashShiftedMask)) >> OAHEntry::kExtHashShift;
   // ~is_empty excludes empty lanes, whose zero hash would otherwise match a zero query hash.
@@ -27,8 +22,7 @@ inline FORCE_INLINE OAHSet::LaneMasks OAHSet::ProbeLanes(const TaggedPtr* base,
 
 // Window may exceed one SIMD register: sweep in EntryWide strides, packing each
 // stride's masks (lane i of stride `off` -> bit off+i). uint32_t masks => <= 32 lanes.
-inline FORCE_INLINE OAHSet::LaneMasks OAHSet::ProbeWindow(const TaggedPtr* base,
-                                                          uint64_t ext_hash) noexcept {
+OAHSet::LaneMasks OAHSet::ProbeWindow(const TaggedPtr* base, uint64_t ext_hash) noexcept {
   LaneMasks w{0, 0};
   for (uint32_t off = 0; off < kDisplacementSize; off += EntryWide::kLanes) {
     const LaneMasks m = ProbeLanes<EntryWide>(base + off, ext_hash);
@@ -40,8 +34,7 @@ inline FORCE_INLINE OAHSet::LaneMasks OAHSet::ProbeWindow(const TaggedPtr* base,
 
 // 2-lane SIMD strides. Vector sizes are always even (PtrVector grows by 2), so the
 // stride covers the array with no tail.
-inline FORCE_INLINE TaggedPtr* OAHSet::ProbeExtensionVector(uint32_t ext_bid, std::string_view str,
-                                                            uint64_t ext_hash) {
+TaggedPtr* OAHSet::ProbeExtensionVector(uint32_t ext_bid, std::string_view str, uint64_t ext_hash) {
   auto vec = At(ext_bid).AsVector();
   TaggedPtr* raw_arr = vec.Raw();
   const size_t size = vec.Size();
@@ -66,9 +59,8 @@ inline FORCE_INLINE TaggedPtr* OAHSet::ProbeExtensionVector(uint32_t ext_bid, st
 }
 
 // Window read stays in bounds: entries_ has kDisplacementSize-1 slack past BucketCount.
-inline FORCE_INLINE OAHSet::MatchResult OAHSet::FindMatch(uint32_t bid, uint32_t ext_bid,
-                                                          uint32_t cand_bits, std::string_view str,
-                                                          uint64_t ext_hash) {
+OAHSet::MatchResult OAHSet::FindMatch(uint32_t bid, uint32_t ext_bid, uint32_t cand_bits,
+                                      std::string_view str, uint64_t ext_hash) {
   while (cand_bits) {
     const uint32_t i = std::countr_zero(cand_bits);
     cand_bits &= cand_bits - 1;
@@ -89,9 +81,8 @@ inline FORCE_INLINE OAHSet::MatchResult OAHSet::FindMatch(uint32_t bid, uint32_t
   return {nullptr, 0, 0};
 }
 
-inline FORCE_INLINE bool OAHSet::AddImpl(std::string_view str, uint32_t ttl_sec) {
-  // Grow at load factor 2; until then overflow lands in the window / extension vectors.
-  if (size_ >= entries_.size() * 2) [[unlikely]] {
+bool OAHSet::AddImpl(std::string_view str, uint32_t ttl_sec) {
+  if (size_ >= entries_.size()) [[unlikely]] {
     Reserve(BucketCount() * 2);
   }
   DCHECK_GE(Capacity(), kDisplacementSize);
@@ -153,8 +144,7 @@ unsigned OAHSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bo
   return res;
 }
 
-inline FORCE_INLINE OAHSet::iterator OAHSet::FindInternal(uint32_t bid, std::string_view str,
-                                                          uint64_t hash) {
+OAHSet::iterator OAHSet::FindInternal(uint32_t bid, std::string_view str, uint64_t hash) {
   const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
   const uint32_t cand_bits = ProbeWindow(&entries_[bid], ext_hash).candidates;
   const MatchResult m = FindMatch(bid, GetExtensionPoint(bid), cand_bits, str, ext_hash);
@@ -190,7 +180,7 @@ bool OAHSet::Erase(std::string_view str) {
   return true;
 }
 
-inline FORCE_INLINE OAHSet::iterator OAHSet::PickFromBucket(uint32_t b) {
+OAHSet::iterator OAHSet::PickFromBucket(uint32_t b) {
   OAHPtr bucket = At(b);
   if (!bucket.IsVector()) {
     OAHEntry e = bucket[0];
@@ -245,7 +235,7 @@ OAHSet::iterator OAHSet::GetRandomMember() {
   return ScanRange(0, start);
 }
 
-inline FORCE_INLINE uint32_t OAHSet::FindEmptyAround(uint32_t bid) {
+uint32_t OAHSet::FindEmptyAround(uint32_t bid) {
   // Strides scanned in order, so the first empty found is the lowest-index one. In
   // bounds thanks to entries_' kDisplacementSize-1 slack past BucketCount.
   for (uint32_t off = 0; off < kDisplacementSize; off += EntryWide::kLanes) {
