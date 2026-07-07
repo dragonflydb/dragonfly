@@ -30,7 +30,7 @@ docker run -p 6379:6379 --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dr
 
 ### On Windows
 
-_`network=host` doesn't work on Windows
+_`network=host` doesn't work on Windows_
 
 ```bash
 wslc run -p 6379:6379 --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dragonfly
