@@ -1810,7 +1810,7 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     }
 
     if (tl_write_connection_throttling_sleep_usec > 0)
-      update_rw_connection_throttling_metrics(cid, cmd_cntx->EnqueuedBytes());
+      update_rw_connection_throttling_metrics(cid, cmd_cntx->UsedMemory());
 
     cmd_refs.push_back(CmdRef{cid, tail_args, ReplyMode::FULL, cmd_cntx});
     cmd = cmd->next;
