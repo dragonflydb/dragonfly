@@ -47,9 +47,9 @@ namespace {
 // memory pages if using round sizes.
 #ifdef NDEBUG
 constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
-#elif defined SANITIZERS
-// Increase stack size for sanitizers builds.
-constexpr size_t kFiberDefaultStackSize = 64_KB - 16;
+#elif ABSL_HAVE_ADDRESS_SANITIZER
+// Increase stack size for ASAN builds to match production (kFiberStackBase * 2).
+constexpr size_t kFiberDefaultStackSize = 112_KB - 16;
 #else
 // Increase stack size for debug builds.
 constexpr size_t kFiberDefaultStackSize = 50_KB - 16;
