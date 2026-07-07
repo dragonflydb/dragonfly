@@ -1171,4 +1171,96 @@ TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
       << "Cool queue should be flushed after MEMORY DECOMMIT COOL";
 }
 
+// bitops commands must work on values that tiering has offloaded to disk.
+// PureDiskTSTest makes a stashed value fully external (no cool in-memory copy).
+
+namespace {
+// A `len`-byte string (large enough to offload) with the given bytes set.
+string MakeBitmap(std::initializer_list<std::pair<size_t, uint8_t>> set_bytes, size_t len = 4096) {
+  string s(len, '\0');
+  for (auto [idx, val] : set_bytes)
+    s[idx] = static_cast<char>(val);
+  return s;
+}
+}  // namespace
+
+TEST_F(PureDiskTSTest, BitopsGetBitOnExternal) {
+  Run({"SET", "bm", MakeBitmap({{0, 0x80}, {1, 0x01}})});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_EQ(1, CheckedInt({"GETBIT", "bm", "0"}));
+  EXPECT_EQ(0, CheckedInt({"GETBIT", "bm", "1"}));
+  EXPECT_EQ(1, CheckedInt({"GETBIT", "bm", "15"}));
+  EXPECT_EQ(0, CheckedInt({"GETBIT", "bm", "100"}));
+  EXPECT_EQ(0, CheckedInt({"GETBIT", "bm", "999999"}));
+}
+
+TEST_F(PureDiskTSTest, BitopsSetBitOnExternal) {
+  Run({"SET", "bm", MakeBitmap({{0, 0x80}})});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_EQ(0, CheckedInt({"SETBIT", "bm", "5", "1"}));
+  EXPECT_EQ(1, CheckedInt({"SETBIT", "bm", "0", "0"}));
+  EXPECT_EQ(0, CheckedInt({"GETBIT", "bm", "0"}));
+  EXPECT_EQ(1, CheckedInt({"GETBIT", "bm", "5"}));
+}
+
+TEST_F(PureDiskTSTest, BitopsBitCountOnExternal) {
+  Run({"SET", "bm", MakeBitmap({{0, 0xFF}, {1, 0x0F}})});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_EQ(12, CheckedInt({"BITCOUNT", "bm"}));
+  EXPECT_EQ(8, CheckedInt({"BITCOUNT", "bm", "0", "0"}));
+  EXPECT_EQ(4, CheckedInt({"BITCOUNT", "bm", "1", "1"}));
+}
+
+TEST_F(PureDiskTSTest, BitopsBitPosOnExternal) {
+  Run({"SET", "bm", MakeBitmap({{2, 0x40}})});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_EQ(17, CheckedInt({"BITPOS", "bm", "1"}));
+  EXPECT_EQ(0, CheckedInt({"BITPOS", "bm", "0"}));
+}
+
+TEST_F(PureDiskTSTest, BitopsBitOpAndOnExternal) {
+  Run({"SET", "k1", MakeBitmap({{0, 0xFF}})});
+  Run({"SET", "k2", MakeBitmap({{0, 0x0F}})});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 2; });
+
+  EXPECT_EQ(4096, CheckedInt({"BITOP", "AND", "dest", "k1", "k2"}));
+  EXPECT_EQ(4, CheckedInt({"BITCOUNT", "dest", "0", "0"}));
+}
+
+TEST_F(PureDiskTSTest, BitopsBitOpNotOnExternal) {
+  Run({"SET", "k1", MakeBitmap({{0, 0xFF}})});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_EQ(4096, CheckedInt({"BITOP", "NOT", "dest", "k1"}));
+  EXPECT_EQ(0, CheckedInt({"BITCOUNT", "dest", "0", "0"}));
+  EXPECT_EQ(8, CheckedInt({"BITCOUNT", "dest", "1", "1"}));
+}
+
+TEST_F(PureDiskTSTest, BitopsBitFieldGetOnExternal) {
+  Run({"SET", "bm", MakeBitmap({{0, 0xFF}})});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_THAT(Run({"BITFIELD", "bm", "GET", "u8", "0"}), RespArray(ElementsAre(IntArg(255))));
+}
+
+TEST_F(PureDiskTSTest, BitopsBitFieldModifyOnExternal) {
+  Run({"SET", "bm", MakeBitmap({{0, 0x00}})});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_THAT(Run({"BITFIELD", "bm", "SET", "u8", "0", "200"}), RespArray(ElementsAre(IntArg(0))));
+  EXPECT_THAT(Run({"BITFIELD", "bm", "INCRBY", "u8", "0", "5"}),
+              RespArray(ElementsAre(IntArg(205))));
+}
+
+TEST_F(PureDiskTSTest, BitopsBitFieldRoOnExternal) {
+  Run({"SET", "bm", MakeBitmap({{0, 0x2A}})});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_THAT(Run({"BITFIELD_RO", "bm", "GET", "u8", "0"}), RespArray(ElementsAre(IntArg(42))));
+}
+
 }  // namespace dfly
