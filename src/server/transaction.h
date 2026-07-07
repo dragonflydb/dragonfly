@@ -244,14 +244,15 @@ class Transaction {
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
 
   // Prepare transaction to do a single ScheduleSingleHop() for squashing
-  void PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList keys, MultiMode mode);
+  void PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, const facade::ParsedArgs& args,
+                           size_t num_keys, MultiMode mode);
 
   // Start multi in GLOBAL mode.
   void StartMultiGlobal(Namespace* ns, DbIndex dbid);
 
-  // Start multi in LOCK_AHEAD mode with given keys.
-  void StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
-                             bool skip_scheduling = false);
+  // Start multi in LOCK_AHEAD mode with the first num_keys elements of args as keys.
+  void StartMultiLockedAhead(Namespace* ns, DbIndex dbid, const facade::ParsedArgs& args,
+                             size_t num_keys, bool skip_scheduling = false);
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
@@ -513,7 +514,7 @@ class Transaction {
   void StoreKeysInArgs(const KeyIndex& key_index);
 
   // Multi transactions unlock asynchronously, so they need to keep fingerprints of keys.
-  void PrepareMultiFps(CmdArgList keys);
+  void PrepareMultiFps(const facade::ParsedArgs& args, size_t num_keys);
 
   void ScheduleInternal();
 

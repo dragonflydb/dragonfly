@@ -254,14 +254,15 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
   }
 }
 
-void Transaction::PrepareMultiFps(CmdArgList keys) {
+void Transaction::PrepareMultiFps(const facade::ParsedArgs& args, size_t num_keys) {
   DCHECK_EQ(multi_->mode, LOCK_AHEAD);
-  DCHECK_GT(keys.size(), 0u);
+  DCHECK_GT(num_keys, 0u);
 
   auto& tag_fps = multi_->tag_fps;
 
-  tag_fps.reserve(keys.size());
-  for (string_view str : keys) {
+  tag_fps.reserve(num_keys);
+  for (size_t i = 0; i < num_keys; ++i) {
+    string_view str = args[i];
     ShardId sid = Shard(str, shard_set->size());
     tag_fps.emplace(sid, LockTag(str).Fingerprint());
   }
@@ -443,18 +444,18 @@ void Transaction::StartMultiGlobal(Namespace* ns, DbIndex dbid) {
   ScheduleInternal();
 }
 
-void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
-                                        bool skip_scheduling) {
-  DVLOG(1) << "StartMultiLockedAhead on " << keys.size() << " keys";
+void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, const facade::ParsedArgs& args,
+                                        size_t num_keys, bool skip_scheduling) {
+  DVLOG(1) << "StartMultiLockedAhead on " << num_keys << " keys";
   DCHECK(multi_);
 
   multi_->mode = LOCK_AHEAD;
   multi_->lock_mode = LockMode();
 
-  PrepareMultiFps(keys);
+  PrepareMultiFps(args, num_keys);
 
-  InitBase(ns, dbid, keys);
-  InitByKeys(KeyIndex(0, keys.size()));
+  InitBase(ns, dbid, args);
+  InitByKeys(KeyIndex(0, num_keys));
 
   if (!skip_scheduling)
     ScheduleInternal();
@@ -551,10 +552,11 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
   return res;
 }
 
-void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList keys,
+void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db,
+                                      const facade::ParsedArgs& args, size_t num_keys,
                                       MultiMode mode) {
   if (mode == LOCK_AHEAD) {
-    StartMultiLockedAhead(ns, db, keys, true);  // delay locking until first hop
+    StartMultiLockedAhead(ns, db, args, num_keys, true);  // delay locking until first hop
   } else {
     DCHECK_EQ(mode, GLOBAL);
     StartMultiGlobal(ns, db);
