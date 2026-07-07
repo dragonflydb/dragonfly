@@ -673,10 +673,10 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "    calling VALUES OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
-        "TRAFFIC START <path>/<file_prefix> LISTENER <main|memcache|admin>",
+        "TRAFFIC START <path>/<file_prefix> [LISTENER <main|memcache|admin>]",
         "    Start traffic logging for a single listener type to files with the given",
-        "    path/prefix. LISTENER is required; mixing listeners in one recording is",
-        "    intentionally not supported - start separate recordings per listener.",
+        "    path/prefix. LISTENER defaults to main when omitted; mixing listeners in one",
+        "    recording is intentionally not supported - start separate recordings per listener.",
         "TRAFFIC START <path>/<file_prefix> REPLICA",
         "    On a replica, capture commands received from the master via the replication",
         "    stream. Fails with an error on a master/standalone server.",
@@ -1061,8 +1061,9 @@ void DebugCmd::LogTraffic(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Syntax:
   //   DEBUG TRAFFIC STOP
-  //   DEBUG TRAFFIC START <path> LISTENER <main|memcache|admin>
+  //   DEBUG TRAFFIC START <path> [LISTENER <main|memcache|admin>]
   //   DEBUG TRAFFIC START <path> REPLICA
+  // LISTENER defaults to main when omitted.
   // A recording captures exactly one source; LISTENER and REPLICA are mutually
   // exclusive. REPLICA captures commands received from a master via the
   // replication stream (only meaningful while this server is a replica).
@@ -1077,7 +1078,9 @@ void DebugCmd::LogTraffic(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.ExpectTag("START");
   auto path = parser.Next<string_view>();
 
-  Connection::ListenerType listener_type;
+  // The source defaults to the main listener when no LISTENER/REPLICA option is
+  // given, so `DEBUG TRAFFIC START <path>` records the main listener.
+  Connection::ListenerType listener_type = Connection::ListenerType::MAIN_RESP;
   if (parser.Check("REPLICA")) {
     // Replication stream is only incoming on a replica; there is no stream to
     // capture on a master/standalone server. Fail fast so the caller gets a
@@ -1090,7 +1093,7 @@ void DebugCmd::LogTraffic(CmdArgParser parser, CommandContext* cmd_cntx) {
           "REPLICA option requires this server to be a replica (current role is master)");
     }
     listener_type = Connection::ListenerType::REPLICA_RESP;
-  } else {
+  } else if (parser.HasNext()) {
     parser.ExpectTag("LISTENER");
     listener_type = parser.MapNext("main", Connection::ListenerType::MAIN_RESP, "memcache",
                                    Connection::ListenerType::MEMCACHE, "admin",
