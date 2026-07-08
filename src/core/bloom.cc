@@ -165,6 +165,9 @@ inline bool Bloom::Set(size_t bit_idx) {
 ///////////////////////////////////////////////////////////////////////////////
 void SBF::Init(uint64_t initial_capacity, double fp_prob, double grow_factor,
                PMR_NS::memory_resource* mr) {
+  // Called exactly once, right after construction: no previous filters to free.
+  DCHECK(filters_.empty());
+
   double new_fp_prob = fp_prob * kSBFErrorFactor;
 
   // Reserve storage for the new filter before initializing it. Bloom::~Bloom() CHECKs that
@@ -172,17 +175,13 @@ void SBF::Init(uint64_t initial_capacity, double fp_prob, double grow_factor,
   // filters_ — otherwise unwinding would destroy a Bloom that still owns its bit array and
   // abort instead of cleanly propagating bad_alloc. Reserving first guarantees the push_back
   // below cannot reallocate (and Bloom's move ctor is noexcept).
-  decltype(filters_) new_filters(filters_.get_allocator());
-  new_filters.reserve(1);
+  filters_.reserve(1);
 
   Bloom b;
   b.Init(initial_capacity, new_fp_prob, mr);
-  new_filters.push_back(std::move(b));
+  filters_.push_back(std::move(b));
 
   // Nothing below can throw.
-  for (auto& f : filters_)
-    f.Destroy(mr);
-  filters_.swap(new_filters);
   grow_factor_ = grow_factor;
   fp_prob_ = new_fp_prob;
   max_capacity_ = filters_.front().Capacity(fp_prob_);

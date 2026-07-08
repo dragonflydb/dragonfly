@@ -359,8 +359,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCuckoo& src) {
       cf->AppendFilter(blob);
     return;
   }
-  CuckooFilter* cf =
-      CompactObj::AllocateMR<CuckooFilter>(CuckooFilterOptions{}, CompactObj::memory_resource());
+  CuckooFilter* cf = CompactObj::AllocateMR<CuckooFilter>(CompactObj::memory_resource());
   cf->Deserialize({src.slots_per_bucket, src.max_iterations, src.expansion, src.num_buckets,
                    src.num_items, src.num_deletes, src.filters});
   pv_->SetCuckooFilter(cf);

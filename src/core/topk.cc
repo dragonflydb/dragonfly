@@ -41,6 +41,9 @@ TOPK::TOPK(PMR_NS::memory_resource* mr)
 }
 
 void TOPK::Init(uint32_t k, uint32_t width, uint32_t depth, double decay) {
+  // Called exactly once, right after construction: no previous state to preserve.
+  DCHECK(counters_.empty());
+  DCHECK(min_heap_.empty());
   DCHECK_GT(k, 0u);
   DCHECK_GT(width, 0u);
   DCHECK_GT(depth, 0u);

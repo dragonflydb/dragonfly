@@ -116,8 +116,8 @@ class SBF {
   SBF(SBF&& src) noexcept;
   SBF& operator=(SBF&& src) noexcept;
 
-  // (Re)initializes this SBF, discarding any previous filters. May throw std::bad_alloc; on
-  // failure this object is left unchanged.
+  // Initializes this SBF. Must be called exactly once, right after construction, on an
+  // otherwise-empty SBF. May throw std::bad_alloc; on failure this object is left unchanged.
   void Init(uint64_t initial_capacity, double fp_prob, double grow_factor,
             PMR_NS::memory_resource* mr);
 

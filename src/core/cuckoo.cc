@@ -49,7 +49,10 @@ CuckooFilter::CuckooFilter(std::pmr::memory_resource* mr) : mr_(mr), filters_(mr
 }
 
 void CuckooFilter::Init(const Options& options) {
+  // Called exactly once, right after construction: no previous sub-filters to free.
+  DCHECK(filters_.empty());
   DCHECK_GT(options.slots_per_bucket, 0);
+
   uint16_t new_expansion = options.expansion ? NextPowerOfTwo(options.expansion) : 0;
   uint64_t new_num_buckets =
       options.slots_per_bucket ? NextPowerOfTwo(options.capacity / options.slots_per_bucket) : 1;
@@ -57,12 +60,15 @@ void CuckooFilter::Init(const Options& options) {
     new_num_buckets = 1;
   DCHECK(IsPowerOfTwo(new_num_buckets));
 
-  // Build the first SubFilter before touching any existing state: if this throws,
+  // filters_ starts with 0 capacity, so push_back would otherwise be the operation that can
+  // throw. Reserve first so that risk happens while *this is still guaranteed unchanged.
+  filters_.reserve(1);
+
+  // Build the first SubFilter before committing any state: if this throws,
   // *this is left completely unchanged.
   SubFilter sf(new_num_buckets * options.slots_per_bucket, uint8_t{0}, mr_);
 
   // Nothing below can throw.
-  filters_.clear();
   filters_.push_back(std::move(sf));
   slots_per_bucket_ = options.slots_per_bucket;
   max_iterations_ = options.max_iterations;

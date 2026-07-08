@@ -28,6 +28,9 @@ uint32_t Offset(uint64_t h1, uint64_t h2, uint32_t row, uint32_t width) {
 }  // namespace
 
 void CMS::Init(uint32_t width, uint32_t depth) {
+  // Called exactly once, right after construction: no previous counters to free.
+  DCHECK(counters_ == nullptr);
+
   size_t len = static_cast<size_t>(width) * depth;
   // Allocate the new buffer before touching any existing state: if this throws,
   // *this is left completely unchanged.
@@ -35,9 +38,6 @@ void CMS::Init(uint32_t width, uint32_t depth) {
       static_cast<int64_t*>(mr_->allocate(AllocationSize(len), alignof(int64_t)));
   std::fill_n(new_counters, len, 0);
 
-  if (counters_) {
-    mr_->deallocate(counters_, AllocationSize(NumCounters()), alignof(int64_t));
-  }
   width_ = width;
   depth_ = depth;
   counters_ = new_counters;

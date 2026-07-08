@@ -27,8 +27,9 @@ class CMS {
 
   ~CMS();
 
-  // (Re)initializes this CMS with the given dimensions. May throw std::bad_alloc; on failure
-  // this object is left unchanged (the old counters, if any, are preserved).
+  // Initializes this CMS with the given dimensions. Must be called exactly once, right after
+  // construction, on an otherwise-empty CMS. May throw std::bad_alloc; on failure this object
+  // is left unchanged.
   void Init(uint32_t width, uint32_t depth);
 
   // Tag type to disambiguate CMS construction by error rate and probability.

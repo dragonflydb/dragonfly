@@ -69,8 +69,9 @@ class TOPK {
   TOPK& operator=(TOPK&& other) noexcept;
   ~TOPK() = default;
 
-  // (Re)initializes this sketch with the given dimensions. May throw std::bad_alloc; on
-  // failure this object is left unchanged.
+  // Initializes this sketch with the given dimensions. Must be called exactly once, right
+  // after construction, on an otherwise-empty TOPK. May throw std::bad_alloc; on failure this
+  // object is left unchanged.
   void Init(uint32_t k, uint32_t width = kDefaultWidth, uint32_t depth = kDefaultDepth,
             double decay = kDefaultDecay);
 

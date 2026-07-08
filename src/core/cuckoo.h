@@ -32,8 +32,9 @@ class CuckooFilter {
   // constructor; it never allocates and never throws. Call Init() before use.
   explicit CuckooFilter(std::pmr::memory_resource* mr);
 
-  // (Re)initializes this filter with the given options, discarding any previous content.
-  // May throw std::bad_alloc; on failure this object is left unchanged.
+  // Initializes this filter with the given options. Must be called exactly once, right after
+  // construction, on an otherwise-empty CuckooFilter. May throw std::bad_alloc; on failure
+  // this object is left unchanged.
   void Init(const Options& options);
 
   // Inserts a pre-computed hash. Returns false only if the filter is full
