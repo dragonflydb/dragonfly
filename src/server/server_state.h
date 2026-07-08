@@ -122,6 +122,11 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t multi_squash_exec_hop_usec = 0;
     uint64_t multi_squash_exec_reply_usec = 0;
     uint64_t squashed_commands = 0;
+    uint64_t multi_squash_fanout_total = 0;
+    uint64_t multi_squash_fanout_drainer_starts = 0;
+    uint64_t multi_squash_fanout_enqueue_saved = 0;
+    uint64_t multi_squash_fanout_src_dst_first = 0;
+    uint64_t multi_squash_fanout_src_dst_coalesced = 0;
     uint64_t blocking_commands_in_pipelines = 0;
     uint64_t blocked_on_interpreter = 0;
 

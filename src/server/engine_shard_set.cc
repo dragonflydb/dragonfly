@@ -114,6 +114,7 @@ void EngineShardSet::Init(uint32_t sz, std::function<void()> shard_handler) {
   pp_->AwaitFiberOnAll([this](uint32_t index, ProactorBase* pb) {
     if (index < size_) {
       InitThreadLocal(pb);
+      EngineShard::tlocal()->InitSquashedFanoutQueue(pp_->size());
     }
   });
 

@@ -321,51 +321,84 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 
     // Saves work in case logging is disable (i.e. log_squash_threshold_cached is high).
     cb_cntx.min_threshold_cycles = CycleClock::FromUsec(log_squash_threshold_cached / 5);
-    auto cb = [bc, &cb_cntx, this]() mutable {
-      uint64_t sched_time = CycleClock::Now() - cb_cntx.start;
+    uint32_t source_thread = ProactorBase::me()->GetPoolIndex();
 
-      // Update max_sched_cycles in lock-free fashion, to avoid contention
-      uint64_t current = cb_cntx.max_sched_cycles.load(memory_order_relaxed);
-      while (sched_time > cb_cntx.min_threshold_cycles && sched_time > current) {
-        if (cb_cntx.max_sched_cycles.compare_exchange_weak(
-                current, sched_time, memory_order_relaxed, memory_order_relaxed)) {
-          lock_guard<base::SpinLock> g(cb_cntx.lock);
+    struct FanoutTask : public EngineShard::SquashedFanoutTask {
+      FanoutTask(MultiCommandSquasher* squasher, CbCntx* cb_cntx, fb2::FiberBlockingCounter bc)
+          : squasher{squasher}, cb_cntx{cb_cntx}, bc{std::move(bc)} {
+        run = &FanoutTask::Run;
+      }
 
-          // If it is still the longest scheduling time
-          if (cb_cntx.max_sched_cycles.load(memory_order_relaxed) == sched_time) {
-            // Store the stats from the callback with longest scheduling time.
-            cb_cntx.fiber_running_cycles = ThisFiber::GetRunningTimeCycles();
-            cb_cntx.proactor_running_cycles = ProactorBase::me()->GetCurrentBusyCycles();
-            cb_cntx.max_sched_thread_id = ProactorBase::me()->GetPoolIndex();
-            cb_cntx.max_sched_seq_num = fb2::GetFiberRunSeq();
+      MultiCommandSquasher* squasher = nullptr;
+      CbCntx* cb_cntx = nullptr;
+      fb2::FiberBlockingCounter bc;
+
+      static void Run(EngineShard::SquashedFanoutTask* base, EngineShard* shard) {
+        auto* task = static_cast<FanoutTask*>(base);
+        MultiCommandSquasher* squasher = task->squasher;
+        CbCntx& cb_cntx = *task->cb_cntx;
+
+        uint64_t sched_time = CycleClock::Now() - cb_cntx.start;
+
+        // Update max_sched_cycles in lock-free fashion, to avoid contention
+        uint64_t current = cb_cntx.max_sched_cycles.load(memory_order_relaxed);
+        while (sched_time > cb_cntx.min_threshold_cycles && sched_time > current) {
+          if (cb_cntx.max_sched_cycles.compare_exchange_weak(
+                  current, sched_time, memory_order_relaxed, memory_order_relaxed)) {
+            lock_guard<base::SpinLock> g(cb_cntx.lock);
+
+            // If it is still the longest scheduling time
+            if (cb_cntx.max_sched_cycles.load(memory_order_relaxed) == sched_time) {
+              // Store the stats from the callback with longest scheduling time.
+              cb_cntx.fiber_running_cycles = ThisFiber::GetRunningTimeCycles();
+              cb_cntx.proactor_running_cycles = ProactorBase::me()->GetCurrentBusyCycles();
+              cb_cntx.max_sched_thread_id = ProactorBase::me()->GetPoolIndex();
+              cb_cntx.max_sched_seq_num = fb2::GetFiberRunSeq();
+            }
+            break;
           }
-          break;
+          // current is updated to the current value of max_sched_cycles, so the loop will retry
+          // with the new value if sched_time is still greater than it.
         }
-        // current is updated to the current value of max_sched_cycles, so the loop will retry
-        // with the new value if sched_time is still greater than it.
-      }
 
-      if (ThisFiber::GetRunningTimeCycles() > max_busy_squash_cycles_cached) {
-        ThisFiber::Yield();
-        stats_.yields++;
-      }
-      this->SquashedHopCb(EngineShard::tlocal(), cb_cntx.version);
-      uint64_t exec_time = CycleClock::Now() - cb_cntx.start;
-      current = cb_cntx.max_exec_cycles.load(memory_order_relaxed);
-      while (exec_time > current) {
-        if (cb_cntx.max_exec_cycles.compare_exchange_weak(current, exec_time, memory_order_relaxed,
-                                                          memory_order_relaxed))
-          break;
-      }
+        if (ThisFiber::GetRunningTimeCycles() > max_busy_squash_cycles_cached) {
+          ThisFiber::Yield();
+          squasher->stats_.yields++;
+        }
+        squasher->SquashedHopCb(shard, cb_cntx.version);
 
-      std::move(bc).Release();  // Release barrier: Must be the last one in the callback.
+        uint64_t exec_time = CycleClock::Now() - cb_cntx.start;
+        current = cb_cntx.max_exec_cycles.load(memory_order_relaxed);
+        while (exec_time > current) {
+          if (cb_cntx.max_exec_cycles.compare_exchange_weak(
+                  current, exec_time, memory_order_relaxed, memory_order_relaxed))
+            break;
+        }
+
+        std::move(task->bc).Release();  // Release barrier: Must be the last one in the callback.
+      }
     };
 
-    static_assert(sizeof(cb) <= 32);
+    vector<FanoutTask> fanout_tasks;
+    fanout_tasks.reserve(num_shards);
     for (unsigned i = 0; i < sharded_.size(); ++i) {
-      if (!sharded_[i].dispatched.empty())
-        shard_set->AddL2(i, cb);
+      if (!sharded_[i].dispatched.empty()) {
+        fanout_tasks.emplace_back(this, &cb_cntx, bc);
+        FanoutTask& task = fanout_tasks.back();
+        auto submit = shard_set->AddSquashedFanout(i, source_thread, &task);
+        auto& fanout_stats = ServerState::tlocal()->stats;
+        fanout_stats.multi_squash_fanout_total++;
+        if (submit.drainer_started)
+          fanout_stats.multi_squash_fanout_drainer_starts++;
+        else
+          fanout_stats.multi_squash_fanout_enqueue_saved++;
+        if (submit.mailbox_was_empty)
+          fanout_stats.multi_squash_fanout_src_dst_first++;
+        else
+          fanout_stats.multi_squash_fanout_src_dst_coalesced++;
+      }
     }
+    DCHECK_EQ(fanout_tasks.size(), num_shards);
     bc.Wait();
   }
 

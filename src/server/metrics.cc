@@ -192,6 +192,22 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             m.coordinator_stats.multi_squash_exec_reply_usec * 1e-6,
                             MetricType::COUNTER, &resp->body());
 
+  AppendMetricWithoutLabels("cmd_squash_fanout_submissions_total", "",
+                            m.coordinator_stats.multi_squash_fanout_total, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("cmd_squash_fanout_drainer_starts_total", "",
+                            m.coordinator_stats.multi_squash_fanout_drainer_starts,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("cmd_squash_fanout_enqueue_saved_total", "",
+                            m.coordinator_stats.multi_squash_fanout_enqueue_saved,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("cmd_squash_fanout_src_dst_first_total", "",
+                            m.coordinator_stats.multi_squash_fanout_src_dst_first,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("cmd_squash_fanout_src_dst_coalesced_total", "",
+                            m.coordinator_stats.multi_squash_fanout_src_dst_coalesced,
+                            MetricType::COUNTER, &resp->body());
+
   string connections_libs;
   AppendMetricHeader("connections_libs", "Total number of connections by libname:ver",
                      MetricType::GAUGE, &connections_libs);

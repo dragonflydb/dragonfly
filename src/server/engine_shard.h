@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
+
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
@@ -87,6 +90,19 @@ class EngineShard {
   TaskQueue* GetSecondaryQueue() {
     return &queue2_;
   }
+
+  struct SquashedFanoutTask {
+    SquashedFanoutTask* next = nullptr;
+    void (*run)(SquashedFanoutTask*, EngineShard*) = nullptr;
+  };
+
+  struct SquashedFanoutSubmitResult {
+    bool drainer_started = false;
+    bool mailbox_was_empty = false;
+  };
+
+  void InitSquashedFanoutQueue(uint32_t source_count);
+  SquashedFanoutSubmitResult AddSquashedFanoutTask(uint32_t source, SquashedFanoutTask* task);
 
   // Processes TxQueue, blocked transactions or any other execution state related to that
   // shard. Tries executing the passed transaction if possible (does not guarantee though).
@@ -283,6 +299,26 @@ class EngineShard {
 
   void CacheStats();
 
+  class SquashedFanoutQueue {
+   public:
+    void Init(uint32_t source_count);
+    SquashedFanoutSubmitResult Submit(EngineShard* shard, uint32_t source,
+                                      SquashedFanoutTask* task);
+
+   private:
+    struct Mailbox {
+      std::atomic<SquashedFanoutTask*> head{nullptr};
+    };
+
+    bool HasAnyTask() const;
+    void Drain(EngineShard* shard);
+    void DrainMailbox(EngineShard* shard, uint32_t source);
+
+    uint32_t source_count_ = 0;
+    std::unique_ptr<Mailbox[]> mailboxes_;
+    std::atomic_bool active_{false};
+  };
+
   // We are running a task that checks whether we need to
   // do memory de-fragmentation here, this task only run
   // when there are available CPU time.
@@ -296,6 +332,7 @@ class EngineShard {
 
   TxQueue txq_;
   TaskQueue queue_, queue2_;
+  SquashedFanoutQueue squashed_fanout_queue_;
 
   ShardId shard_id_;
   Stats stats_;

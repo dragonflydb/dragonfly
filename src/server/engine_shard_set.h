@@ -61,6 +61,12 @@ class EngineShardSet {
     return shards_[sid]->GetSecondaryQueue()->Add(std::forward<F>(f));
   }
 
+  EngineShard::SquashedFanoutSubmitResult AddSquashedFanout(ShardId sid, uint32_t source,
+                                                            EngineShard::SquashedFanoutTask* task) {
+    assert(sid < size_);
+    return shards_[sid]->AddSquashedFanoutTask(source, task);
+  }
+
   // Runs a brief function on all shards. Waits for it to complete.
   // `func` must not preempt.
   template <typename U> void RunBriefInParallel(U&& func) const {

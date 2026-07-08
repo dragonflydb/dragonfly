@@ -1350,6 +1350,33 @@ redis.acall('set', '{t}d', '4')
   EXPECT_EQ(Run({"get", "{t}d"}), "4");
 }
 
+TEST_F(MultiTest, SquashFanoutCounters) {
+  auto before = GetMetrics().coordinator_stats;
+
+  const char* kScript = R"(--!df flags=disable-atomicity,allow-undeclared-keys
+redis.acall('set', 'x', '1')
+redis.acall('set', 'c', '2')
+redis.acall('set', 'b', '3')
+)";
+  auto resp = Run({"eval", kScript, "0"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  auto after = GetMetrics().coordinator_stats;
+  uint64_t total = after.multi_squash_fanout_total - before.multi_squash_fanout_total;
+  uint64_t drainer_starts =
+      after.multi_squash_fanout_drainer_starts - before.multi_squash_fanout_drainer_starts;
+  uint64_t enqueue_saved =
+      after.multi_squash_fanout_enqueue_saved - before.multi_squash_fanout_enqueue_saved;
+  uint64_t src_dst_first =
+      after.multi_squash_fanout_src_dst_first - before.multi_squash_fanout_src_dst_first;
+  uint64_t src_dst_coalesced =
+      after.multi_squash_fanout_src_dst_coalesced - before.multi_squash_fanout_src_dst_coalesced;
+
+  EXPECT_GT(total, 0u);
+  EXPECT_EQ(total, drainer_starts + enqueue_saved);
+  EXPECT_EQ(total, src_dst_first + src_dst_coalesced);
+}
+
 // Regression: squashing_current_reply_size must return to zero after a squash that spans
 // multiple flushes. A single MultiCommandSquasher instance flushes once per batch that
 // reaches max_squash_cmd_num; reply_size_delta was not reset between flushes, so
