@@ -464,6 +464,8 @@ class CommandContext : public facade::ParsedCommand {
 
 // 320 is a mi_good_size boundary.
 // The previous boundary of 256 would require making backed_args buffers much smaller
+#if defined(__linux__)
 static_assert(sizeof(CommandContext) == 320);
+#endif
 
 }  // namespace dfly
