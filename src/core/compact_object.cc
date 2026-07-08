@@ -641,14 +641,20 @@ uint64_t LargeString::HashCode() const {
 void LargeString::SetString(string_view s, MemoryResource* mr) {
   DCHECK(!s.empty());
 
+  bool allocate = (ptr == nullptr);
+
   // Force a fresh buffer when either (a) the new value doesn't fit, or
   // (b) read_pending is set (in-place overwrite would corrupt pinned readers).
   // ReleasePtr either deallocates the old buffer or orphans it to its pending
   // PendingRead entry; either way `ptr` is reset before the new allocation.
-  if (s.size() > zmalloc_size(ptr) || read_pending) {
+  if (ptr && (s.size() > zmalloc_size(ptr) || read_pending)) {
     ReleasePtr(this, mr);
+    allocate = true;
+  }
+  if (allocate) {
     ptr = mr->allocate(s.size(), kAlignSize);
   }
+
   memcpy(ptr, s.data(), s.size());
   sz = s.size();
 }
