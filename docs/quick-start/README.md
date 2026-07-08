@@ -10,7 +10,7 @@
 
 Starting with `docker run` is the simplest way to get up and running with DragonflyDB.
 
-If you do not have docker on your machine, [Install Docker](https://docs.docker.com/get-docker/) before continuing.
+If you do not have docker on your machine, [Install Docker](https://docs.docker.com/get-docker/) before continuing. On Windows you can configure [WSL Containers](https://learn.microsoft.com/en-us/windows/wsl/tutorials/wsl-containers) for lower resource usage.
 
 ## Step 1
 
@@ -26,6 +26,14 @@ _`network=host` doesn't work well on macOS, see [this issue](https://github.com/
 
 ```bash
 docker run -p 6379:6379 --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dragonfly
+```
+
+### On Windows
+
+_`network=host` doesn't work on Windows_
+
+```bash
+wslc run -p 6379:6379 --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dragonfly
 ```
 
 Dragonfly DB will answer to both `http` and `redis` requests out of the box!
