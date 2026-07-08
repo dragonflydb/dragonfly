@@ -101,9 +101,6 @@ class EngineShard {
     bool mailbox_was_empty = false;
   };
 
-  void InitSquashedFanoutQueue(uint32_t source_count);
-  SquashedFanoutSubmitResult AddSquashedFanoutTask(uint32_t source, SquashedFanoutTask* task);
-
   // Processes TxQueue, blocked transactions or any other execution state related to that
   // shard. Tries executing the passed transaction if possible (does not guarantee though).
   void PollExecution(const char* context, Transaction* trans);
@@ -301,21 +298,11 @@ class EngineShard {
 
   class SquashedFanoutQueue {
    public:
-    void Init(uint32_t source_count);
-    SquashedFanoutSubmitResult Submit(EngineShard* shard, uint32_t source,
-                                      SquashedFanoutTask* task);
+    bool Start(EngineShard* shard);
 
    private:
-    struct Mailbox {
-      std::atomic<SquashedFanoutTask*> head{nullptr};
-    };
-
-    bool HasAnyTask() const;
     void Drain(EngineShard* shard);
-    void DrainMailbox(EngineShard* shard, uint32_t source);
 
-    uint32_t source_count_ = 0;
-    std::unique_ptr<Mailbox[]> mailboxes_;
     std::atomic_bool active_{false};
   };
 

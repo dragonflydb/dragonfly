@@ -79,17 +79,6 @@ namespace {
 
 constexpr uint64_t kCursorDoneState = 0u;
 
-EngineShard::SquashedFanoutTask* ReverseFanoutTasks(EngineShard::SquashedFanoutTask* list) {
-  EngineShard::SquashedFanoutTask* reversed = nullptr;
-  while (list) {
-    EngineShard::SquashedFanoutTask* next = list->next;
-    list->next = reversed;
-    reversed = list;
-    list = next;
-  }
-  return reversed;
-}
-
 bool HasContendedLocks(ShardId shard_id, Transaction* trx, const DbTable* table) {
   auto is_contended = [table](LockFp fp) { return table->trans_locks.Find(fp)->IsContended(); };
 
@@ -488,89 +477,26 @@ EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
   queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
 }
 
-void EngineShard::InitSquashedFanoutQueue(uint32_t source_count) {
-  squashed_fanout_queue_.Init(source_count);
-}
-
-EngineShard::SquashedFanoutSubmitResult EngineShard::AddSquashedFanoutTask(
-    uint32_t source, SquashedFanoutTask* task) {
-  DCHECK(task);
-  DCHECK(task->run);
-  DCHECK_EQ(task->next, nullptr);
-  return squashed_fanout_queue_.Submit(this, source, task);
-}
-
-void EngineShard::SquashedFanoutQueue::Init(uint32_t source_count) {
-  CHECK_EQ(source_count_, 0u);
-  CHECK_GT(source_count, 0u);
-
-  source_count_ = source_count;
-  mailboxes_.reset(new Mailbox[source_count]);
-}
-
-EngineShard::SquashedFanoutSubmitResult EngineShard::SquashedFanoutQueue::Submit(
-    EngineShard* shard, uint32_t source, SquashedFanoutTask* task) {
-  DCHECK_LT(source, source_count_);
-
-  Mailbox& mailbox = mailboxes_[source];
-  SquashedFanoutTask* head = mailbox.head.load(memory_order_relaxed);
-  while (true) {
-    task->next = head;
-    if (mailbox.head.compare_exchange_weak(head, task, memory_order_seq_cst,
-                                           memory_order_relaxed)) {
-      break;
-    }
-  }
-
-  SquashedFanoutSubmitResult result;
-  result.mailbox_was_empty = task->next == nullptr;
+bool EngineShard::SquashedFanoutQueue::Start(EngineShard* shard) {
   bool expected = false;
   if (active_.compare_exchange_strong(expected, true, memory_order_seq_cst, memory_order_relaxed)) {
-    result.drainer_started = true;
     shard->GetSecondaryQueue()->Add([this, shard] { Drain(shard); });
-  }
-  return result;
-}
-
-bool EngineShard::SquashedFanoutQueue::HasAnyTask() const {
-  for (uint32_t i = 0; i < source_count_; ++i) {
-    if (mailboxes_[i].head.load(memory_order_seq_cst) != nullptr)
-      return true;
+    return true;
   }
   return false;
-}
-
-void EngineShard::SquashedFanoutQueue::DrainMailbox(EngineShard* shard, uint32_t source) {
-  SquashedFanoutTask* list =
-      ReverseFanoutTasks(mailboxes_[source].head.exchange(nullptr, memory_order_acquire));
-
-  while (list) {
-    SquashedFanoutTask* task = list;
-    list = list->next;
-    task->next = nullptr;
-    task->run(task, shard);
-  }
 }
 
 void EngineShard::SquashedFanoutQueue::Drain(EngineShard* shard) {
   DCHECK(shard->IsMyThread());
 
   while (true) {
-    bool drained = false;
-    for (uint32_t source = 0; source < source_count_; ++source) {
-      if (mailboxes_[source].head.load(memory_order_relaxed) != nullptr) {
-        drained = true;
-        DrainMailbox(shard, source);
-      }
-    }
-
-    if (drained)
+    if (shard_set->DrainSquashedFanout(shard->shard_id(), shard))
       continue;
 
     // See Submit(): seq_cst closes the store-buffer race between publishing mailbox work and
     // publishing that no drainer is active.
     active_.store(false, memory_order_seq_cst);
-    if (!HasAnyTask())
+    if (!shard_set->HasSquashedFanout(shard->shard_id()))
       return;
 
     bool expected = false;

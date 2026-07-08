@@ -39,6 +39,17 @@ using strings::HumanReadableNumBytes;
 
 namespace {
 
+EngineShard::SquashedFanoutTask* ReverseFanoutTasks(EngineShard::SquashedFanoutTask* list) {
+  EngineShard::SquashedFanoutTask* reversed = nullptr;
+  while (list) {
+    EngineShard::SquashedFanoutTask* next = list->next;
+    list->next = reversed;
+    reversed = list;
+    list = next;
+  }
+  return reversed;
+}
+
 uint64_t GetFsLimit() {
   std::filesystem::path file_path(GetFlag(FLAGS_tiered_prefix));
   std::string dir_name_str = file_path.parent_path().string();
@@ -110,11 +121,11 @@ void EngineShardSet::Init(uint32_t sz, std::function<void()> shard_handler) {
   shards_.reset(new EngineShard*[sz]);
 
   size_ = sz;
+  InitSquashedFanoutQueues(pp_->size());
   size_t max_shard_file_size = GetTieredFileLimit(sz);
   pp_->AwaitFiberOnAll([this](uint32_t index, ProactorBase* pb) {
     if (index < size_) {
       InitThreadLocal(pb);
-      EngineShard::tlocal()->InitSquashedFanoutQueue(pp_->size());
     }
   });
 
@@ -153,6 +164,72 @@ void EngineShardSet::Shutdown() {
 
   delete namespaces;
   namespaces = nullptr;
+}
+
+void EngineShardSet::InitSquashedFanoutQueues(uint32_t source_count) {
+  CHECK_GT(source_count, 0u);
+  CHECK_GT(size_, 0u);
+
+  squashed_fanout_source_count_ = source_count;
+  squashed_fanout_mailboxes_.reset(new SquashedFanoutMailbox[size_t{source_count} * size_]);
+}
+
+EngineShardSet::SquashedFanoutMailbox& EngineShardSet::SquashedFanoutMailboxAt(uint32_t source,
+                                                                               ShardId sid) const {
+  DCHECK_LT(source, squashed_fanout_source_count_);
+  DCHECK_LT(sid, size_);
+  return squashed_fanout_mailboxes_[size_t{source} * size_ + sid];
+}
+
+EngineShard::SquashedFanoutSubmitResult EngineShardSet::AddSquashedFanout(
+    ShardId sid, uint32_t source, EngineShard::SquashedFanoutTask* task) {
+  assert(sid < size_);
+  DCHECK(task);
+  DCHECK(task->run);
+  DCHECK_EQ(task->next, nullptr);
+
+  auto& mailbox = SquashedFanoutMailboxAt(source, sid);
+  EngineShard::SquashedFanoutTask* head = mailbox.head.load(memory_order_relaxed);
+  while (true) {
+    task->next = head;
+    if (mailbox.head.compare_exchange_weak(head, task, memory_order_seq_cst,
+                                           memory_order_relaxed)) {
+      break;
+    }
+  }
+
+  EngineShard::SquashedFanoutSubmitResult result;
+  result.mailbox_was_empty = task->next == nullptr;
+  result.drainer_started = shards_[sid]->squashed_fanout_queue_.Start(shards_[sid]);
+  return result;
+}
+
+bool EngineShardSet::DrainSquashedFanout(ShardId sid, EngineShard* shard) {
+  bool drained = false;
+  for (uint32_t source = 0; source < squashed_fanout_source_count_; ++source) {
+    auto& mailbox = SquashedFanoutMailboxAt(source, sid);
+    if (mailbox.head.load(memory_order_relaxed) == nullptr)
+      continue;
+
+    EngineShard::SquashedFanoutTask* list =
+        ReverseFanoutTasks(mailbox.head.exchange(nullptr, memory_order_acquire));
+    while (list) {
+      drained = true;
+      EngineShard::SquashedFanoutTask* task = list;
+      list = list->next;
+      task->next = nullptr;
+      task->run(task, shard);
+    }
+  }
+  return drained;
+}
+
+bool EngineShardSet::HasSquashedFanout(ShardId sid) const {
+  for (uint32_t source = 0; source < squashed_fanout_source_count_; ++source) {
+    if (SquashedFanoutMailboxAt(source, sid).head.load(memory_order_seq_cst) != nullptr)
+      return true;
+  }
+  return false;
 }
 
 void EngineShardSet::InitThreadLocal(ProactorBase* pb) {
