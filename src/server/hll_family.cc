@@ -321,6 +321,10 @@ OpResult<int> PFMergeInternal(string_view key, Transaction* tx, SinkReplyBuilder
     auto op_res = db_slice.AddOrFind(t->GetDbContext(), key, OBJ_STRING);
     RETURN_ON_BAD_STATUS(op_res);
     auto& res = *op_res;
+    if (!res.is_new && res.it->second.IsExternal()) {
+      res.post_updater.ReduceHeapUsage();
+      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+    }
     res.it->second.SetString(hll);
 
     if (op_args.shard->journal()) {
