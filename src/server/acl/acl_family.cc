@@ -454,7 +454,7 @@ void AclFamily::Cat(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (parser.HasNext()) {
-    string category = absl::AsciiStrToUpper(parser.Next());
+    string category = parser.Next<facade::Upper>();
     if (!parser.Finalize())
       return rb->SendError(parser.TakeError().MakeReply());
 
@@ -587,7 +587,7 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  string command = absl::AsciiStrToUpper(parser.Next());
+  string command = parser.Next<facade::Upper>();
   auto* cid = cmd_registry_->Find(command);
   if (!cid || cid->IsAlias()) {
     auto error = absl::StrCat("Command '", command, "' not found");
