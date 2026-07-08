@@ -94,6 +94,11 @@ struct Metrics {
   uint64_t refused_conn_max_clients_reached_count = 0;
   uint64_t serialization_bytes = 0;
 
+  // Average fraction of time (0..1) IO-loop proactor threads spent idle (parked in
+  // wait_for_cqe with no ready fiber/task). Sampled per proactor via ProactorBase::IdleRatio()
+  // and averaged across threads in ServerFamily::GetMetrics.
+  double proactor_idle_ratio = 0;
+
   // Statistics about fibers running for a long time (more than 1ms).
   uint64_t fiber_longrun_cnt = 0;
   uint64_t fiber_longrun_usec = 0;

@@ -23,6 +23,7 @@
 #include "server/server_family.h"
 #include "server/snapshot.h"
 #include "util/fibers/fibers.h"
+#include "util/fibers/proactor_base.h"
 
 ABSL_DECLARE_FLAG(uint32_t, maxclients);
 
@@ -305,6 +306,13 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   AppendMetricWithoutLabels("proactor_parse_total",
                             "V2 OnRecv parses that enqueued at least one command",
                             conn_stats.proactor_parse, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_idle_parks_total",
+                            "V2 connection fiber idle-await parks (went to sleep)",
+                            conn_stats.pipeline_idle_parks, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels(
+      "pipeline_reply_wait_parks_total",
+      "V2 idle-await parks while a dispatched command reply was still pending (coroutine window)",
+      conn_stats.pipeline_reply_wait_parks, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
 
@@ -506,6 +514,11 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   double delay_seconds = m.fiber_switch_delay_usec * 1e-6;
   AppendMetricWithoutLabels("fiber_switch_delay_seconds_total", "", delay_seconds,
                             MetricType::COUNTER, &resp->body());
+
+  // Average fraction of time IO-loop proactor threads are idle (parked in wait_for_cqe with no
+  // ready fiber). Near 0 under saturation; higher when the server has spare capacity.
+  AppendMetricWithoutLabels("proactor_idle_ratio", "", m.proactor_idle_ratio, MetricType::GAUGE,
+                            &resp->body());
 
   AppendMetricWithoutLabels("fiber_longrun_total", "", m.fiber_longrun_cnt, MetricType::COUNTER,
                             &resp->body());
@@ -717,7 +730,7 @@ void Metrics::Merge(const Metrics& src) {
                              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
                              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
                              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-                             176,  // scalar fields (19 fields) + 4-byte alignment padding
+                             184,  // scalar fields + proactor_idle_ratio + 4-byte align padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
   // Per-db stats / events / small_string_bytes are merged element-wise.
@@ -743,6 +756,7 @@ void Metrics::Merge(const Metrics& src) {
   qps += src.qps;
   heap_used_bytes += src.heap_used_bytes;
   serialization_bytes += src.serialization_bytes;
+  proactor_idle_ratio += src.proactor_idle_ratio;  // summed here; averaged in GetMetrics
   traverse_ttl_per_sec += src.traverse_ttl_per_sec;
   delete_ttl_per_sec += src.delete_ttl_per_sec;
   fiber_switch_cnt += src.fiber_switch_cnt;
@@ -787,7 +801,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
                              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
                              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
                              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-                             176,  // scalar fields (19 fields) + 4-byte alignment padding
+                             184,  // scalar fields + proactor_idle_ratio + 4-byte align padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
   ServerState* ss = ServerState::tlocal();
@@ -805,6 +819,11 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
   qps = uint64_t(ss->MovingSum6());
   facade_stats = *tl_facade_stats;
   serialization_bytes = SliceSnapshot::GetThreadLocalMemoryUsage();
+
+  // Per-proactor idle ratio (0..1). ProactorBase::me() is valid inside the per-thread
+  // InitFromThread callback dispatched by ProactorPool::AwaitBrief.
+  if (fb2::ProactorBase* pb = fb2::ProactorBase::me())
+    proactor_idle_ratio = pb->IdleRatio();
 
   if (shard) {
     heap_used_bytes = shard->UsedMemory();

@@ -72,6 +72,15 @@ struct ConnectionStats {
   // callback.
   uint64_t proactor_parse = 0;
 
+  // V2 Only: Number of times the connection fiber parked at the idle-await (went to sleep).
+  uint64_t pipeline_idle_parks = 0;
+
+  // V2 Only: Subset of pipeline_idle_parks where the fiber slept while a dispatched command's
+  // reply was still pending - i.e. a coroutine reply-wait window (cross-shard/async completion)
+  // during which the proactor could do useful background work such as parse-in-proactor.
+  // Sequential async completions re-park once each, so this also reflects wake amplification.
+  uint64_t pipeline_reply_wait_parks = 0;
+
   ConnectionStats& operator+=(const ConnectionStats& o);
 };
 

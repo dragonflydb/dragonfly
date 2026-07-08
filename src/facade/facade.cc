@@ -23,7 +23,7 @@ using namespace std;
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
-  static_assert(kSizeConnStats == 296);
+  static_assert(kSizeConnStats == 312);
 
   ADD(read_buf_capacity);
   ADD(connection_memory_bytes);
@@ -58,6 +58,8 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(pipeline_dispatch_flush_count);
   ADD(proactor_reads);
   ADD(proactor_parse);
+  ADD(pipeline_idle_parks);
+  ADD(pipeline_reply_wait_parks);
 
   return *this;
 }

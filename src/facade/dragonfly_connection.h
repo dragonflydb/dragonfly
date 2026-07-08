@@ -646,9 +646,10 @@ class Connection : public util::Connection {
   Phase phase_ = SETUP;
 
   // Where the V2 fiber is currently parked (suspended). Used as a safety gate, for example:
-  // - parse-in-proactor only fires when parked at kSquashHop (ensuring the parser is idle).
+  // - parse-in-proactor fires when parked at kSquashHop or kSendReply (the parser is idle at
+  //   both, so the proactor can grow the next batch while the fiber blocks).
   // - kNone = fiber is running or was just created.
-  enum class FiberParkSpot : uint8_t { kNone, kIdleAwait, kSquashHop, kParseYield };
+  enum class FiberParkSpot : uint8_t { kNone, kIdleAwait, kSquashHop, kParseYield, kSendReply };
   FiberParkSpot fiber_park_spot_ = FiberParkSpot::kNone;
 
   // True after IncreaseConnStats registers this connection in the current thread's stats.
