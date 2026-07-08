@@ -1584,15 +1584,15 @@ static void BM_LpString2Int(benchmark::State& state) {
 }
 BENCHMARK(BM_LpString2Int)->Arg(1)->Arg(2);
 
-// CMS's constructor never allocates (CompactObj::SetCMS adopts a trivially-constructed CMS
-// before calling CMS::Init()), so a huge alloc failure is left as a valid, empty, correctly
-// tagged CMS object rather than an orphaned/corrupted union.
+// CompactObj::SetCMS only commits the CMS_TAG once CMS::Init() has succeeded (it builds and
+// initializes a trivially-constructed CMS first, cleaning it up on throw). So a huge alloc
+// failure must leave *this in its prior state instead of publishing a tagged-but-uninitialized
+// CMS that a later GetCMS()/IncrBy() call on the same key would find broken.
 TEST_F(CompactObjectTest, CMSHugeAllocLeavesValidEmptyObject) {
   constexpr uint32_t kHugeWidth = std::numeric_limits<uint32_t>::max();
   constexpr uint32_t kHugeDepth = 10000;
   EXPECT_THROW(cobj_.SetCMS(kHugeWidth, kHugeDepth), std::bad_alloc);
-  EXPECT_EQ(cobj_.ObjType(), OBJ_CMS);
-  EXPECT_EQ(cobj_.GetCMS()->NumCounters(), 0u);
+  EXPECT_NE(cobj_.ObjType(), OBJ_CMS);
   EXPECT_NO_THROW(cobj_.MallocUsed());
 }
 

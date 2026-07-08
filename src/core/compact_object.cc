@@ -20,6 +20,7 @@ extern "C" {
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
 }
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
@@ -1109,12 +1110,19 @@ void CompactObj::SetJson(const uint8_t* buf, size_t len) {
 }
 
 void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor) {
-  if (taglen_ != SBF_TAG) {
-    SetMeta(SBF_TAG);
-    u_.sbf = AllocateMR<SBF>(tl.local_mr);  // trivial ctor, never throws
-  }
-  // may throw; u_.sbf is already safely owned either way
-  u_.sbf->Init(initial_capacity, fp_prob, grow_factor, tl.local_mr);
+  // Build and initialize the SBF before committing the tag: if Init() throws, *this must
+  // stay untouched rather than publish a tagged-but-uninitialized SBF that later accesses
+  // (Insert/Exists on the same key) would find in a broken state and crash on (DCHECKs and
+  // raw-pointer derefs in Bloom/CMS/TOPK/CuckooFilter all assume Init() has already run).
+  // absl::Cleanup stores the callback inline (placement-new into its own char buffer), so
+  // this costs no heap allocation -- same as a hand-rolled try/catch, just RAII instead.
+  SBF* sbf = AllocateMR<SBF>(tl.local_mr);  // trivial ctor, never throws
+  absl::Cleanup cleanup = [sbf] { DeleteMR<SBF>(sbf); };
+  sbf->Init(initial_capacity, fp_prob, grow_factor, tl.local_mr);  // may throw
+  std::move(cleanup).Cancel();
+
+  SetMeta(SBF_TAG);
+  u_.sbf = sbf;
 }
 
 SBF* CompactObj::GetSBF() const {
@@ -1123,11 +1131,15 @@ SBF* CompactObj::GetSBF() const {
 }
 
 void CompactObj::SetCMS(uint32_t width, uint32_t depth) {
-  if (taglen_ != CMS_TAG) {
-    SetMeta(CMS_TAG);
-    u_.cms = AllocateMR<CMS>(tl.local_mr);  // trivial ctor, never throws
-  }
-  u_.cms->Init(width, depth);  // may throw; u_.cms is already safely owned either way
+  // Build and initialize the CMS before committing the tag: if Init() throws, *this must
+  // stay untouched rather than publish a tagged-but-uninitialized CMS.
+  CMS* cms = AllocateMR<CMS>(tl.local_mr);  // trivial ctor, never throws
+  absl::Cleanup cleanup = [cms] { DeleteMR<CMS>(cms); };
+  cms->Init(width, depth);  // may throw
+  std::move(cleanup).Cancel();
+
+  SetMeta(CMS_TAG);
+  u_.cms = cms;
 }
 
 CMS* CompactObj::GetCMS() const {
@@ -1136,11 +1148,15 @@ CMS* CompactObj::GetCMS() const {
 }
 
 void CompactObj::SetTOPK(uint32_t k, uint32_t width, uint32_t depth, double decay) {
-  if (taglen_ != TOPK_TAG) {
-    SetMeta(TOPK_TAG);
-    u_.topk = AllocateMR<TOPK>(memory_resource());  // trivial ctor, never throws
-  }
-  u_.topk->Init(k, width, depth, decay);  // may throw; u_.topk is already safely owned either way
+  // Build and initialize the TOPK before committing the tag: if Init() throws, *this must
+  // stay untouched rather than publish a tagged-but-uninitialized TOPK.
+  TOPK* topk = AllocateMR<TOPK>(memory_resource());  // trivial ctor, never throws
+  absl::Cleanup cleanup = [topk] { DeleteMR<TOPK>(topk); };
+  topk->Init(k, width, depth, decay);  // may throw
+  std::move(cleanup).Cancel();
+
+  SetMeta(TOPK_TAG);
+  u_.topk = topk;
 }
 
 TOPK* CompactObj::GetTOPK() const {
@@ -1149,12 +1165,16 @@ TOPK* CompactObj::GetTOPK() const {
 }
 
 void CompactObj::SetCuckooFilter(const CuckooFilterOptions& options) {
-  if (taglen_ != CUCKOO_FILTER_TAG) {
-    SetMeta(CUCKOO_FILTER_TAG);
-    u_.cuckoo_filter = AllocateMR<CuckooFilter>(tl.local_mr);  // trivial ctor, never throws
-  }
-  // may throw; u_.cuckoo_filter is already safely owned either way
-  u_.cuckoo_filter->Init(options);
+  // Build and initialize the CuckooFilter before committing the tag: if Init() throws,
+  // *this must stay untouched rather than publish a tagged-but-uninitialized filter that
+  // later Insert()/Exists() calls on the same key would find in a broken (empty) state.
+  CuckooFilter* cf = AllocateMR<CuckooFilter>(tl.local_mr);  // trivial ctor, never throws
+  absl::Cleanup cleanup = [cf] { DeleteMR<CuckooFilter>(cf); };
+  cf->Init(options);  // may throw
+  std::move(cleanup).Cancel();
+
+  SetMeta(CUCKOO_FILTER_TAG);
+  u_.cuckoo_filter = cf;
 }
 
 CuckooFilter* CompactObj::GetCuckooFilter() const {
