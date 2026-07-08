@@ -706,7 +706,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 }
 
 error_code Replica::ConsumeRedisStream() {
-  base::IoBuf io_buf(16_KB);
+  base::IoBuf io_buf(128_KB);
   ConnectionContext conn_context{nullptr, {}};
   conn_context.is_replicating = true;
   conn_context.journal_emulated = true;
@@ -726,7 +726,6 @@ error_code Replica::ConsumeRedisStream() {
   // or, alternatively, write commands stream coming from propagate() function.
   // Replica connection must send "REPLCONF ACK xxx" in order to make sure that master replication
   // buffer gets disposed of already processed commands, this is done in a separate fiber.
-  error_code ec;
   LOG(INFO) << "Transitioned into stable sync";
 
   // Set new error handler.
@@ -739,26 +738,33 @@ error_code Replica::ConsumeRedisStream() {
 
   acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
 
-  CommandContext cmnd_ctx;
-  cmnd_ctx.Init(&null_builder, &conn_context);
-  while (true) {
-    // Yield if the fiber has been running for long.
+  // Cap the batch at the squasher's own flush limit.
+  const size_t max_batch = std::max<size_t>(1, ServerState::tlocal()->max_squash_cmd_num);
+
+  struct BatchEntry {
+    CommandContext* cmd = nullptr;
+    size_t cmd_bytes = 0;
+    size_t deferred_ack_bytes = 0;
+    size_t AckBytes() const {
+      return cmd_bytes + deferred_ack_bytes;
+    }
+  };
+
+  std::vector<BatchEntry> batch;
+
+  batch.reserve(max_batch);
+
+  std::vector<CommandContext> ctx_pool(max_batch);
+
+  while (exec_st_.IsRunning()) {
+    // Skipped commands (MULTI/EXEC/PING) may drain buffered data without I/O or dispatch, so
+    // we should yield explicitly to avoid monopolizing thread.
     if (base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) > 1000) {  // 1ms
       ThisFiber::Yield();
     }
 
-    // If the acks-fb or something else triggered a shutdown, then do not attempt to read from the
-    // stream.
-    if (!exec_st_.IsRunning()) {
-      DCHECK(exec_st_.IsError());
-      LOG_REPL_ERROR("Stopping stream consumer in phase "
-                     << GetCurrentPhase()
-                     << " because of external error: " << exec_st_.GetError().Format());
-      acks_fb_.JoinIfNeeded();
-      return exec_st_.GetError();
-    }
-
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
+
     if (!response.has_value()) {
       LOG_REPL_ERROR("Error in Redis Stream at phase "
                      << GetCurrentPhase() << " with " << server().Description()
@@ -770,14 +776,17 @@ error_code Replica::ConsumeRedisStream() {
     }
 
     const auto& last_args = LastResponseArgs();
+    bool queued = false;
+
     if (!last_args.empty()) {
-      string cmd = absl::CHexEscape(last_args[0].GetView());
+      auto cmd = last_args[0].GetView();
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
-      // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we simply
-      // ignore MULTI/EXEC and execute their inner commands individually.
+      // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we
+      // simply ignore MULTI/EXEC and execute their inner commands individually.
       if (!absl::EqualsIgnoreCase(cmd, "MULTI") && !absl::EqualsIgnoreCase(cmd, "EXEC")) {
-        VLOG(2) << "Got command " << cmd << "\n consumed: " << response->total_read;
+        VLOG(2) << "Got command " << absl::CHexEscape(cmd)
+                << "\n consumed: " << response->total_read;
 
         if (LastResponseArgs()[0].GetBuf()[0] == '\r') {
           for (const auto& arg : LastResponseArgs()) {
@@ -785,16 +794,80 @@ error_code Replica::ConsumeRedisStream() {
           }
         }
 
-        FillBackedArgs(last_args, &cmnd_ctx);
-        service_.DispatchCommand(facade::ParsedArgs{cmnd_ctx}, &cmnd_ctx,
-                                 facade::AsyncPreference::ONLY_SYNC);
+        CommandContext* ctx = &ctx_pool[batch.size()];
+        ctx->ResetForReuse();
+        ctx->Init(&null_builder, &conn_context);
+        FillBackedArgs(last_args, ctx);
+        batch.push_back(BatchEntry{ctx, response->total_read});
+        queued = true;
       }
     }
 
     io_buf.ConsumeInput(response->left_in_buffer);
-    repl_offs_ += response->total_read;
-    replica_waker_.notify();  // Notify to trigger ACKs.
+
+    if (!queued) {
+      // Skipped commands can be ACKed immediately only if there are no earlier queued commands
+      // still waiting to be applied.
+      if (batch.empty()) {
+        repl_offs_ += response->total_read;
+        replica_waker_.notify();
+      } else {
+        // Defer ACK of skipped bytes until the last command is processed.
+        batch.back().deferred_ack_bytes += response->total_read;
+      }
+    }
+
+    // Dispatch when the read buffer is drained or the batch is full, and drain the whole
+    // batch before reading from the socket again.
+    if ((io_buf.InputLen() == 0 || batch.size() >= max_batch) && !batch.empty()) {
+      // Chain the commands together so that the squasher can process them in one go.
+      for (size_t i = 0; i + 1 < batch.size(); ++i) {
+        batch[i].cmd->next = batch[i + 1].cmd;
+      }
+      batch.back().cmd->next = nullptr;
+      size_t idx = 0;
+      while (idx < batch.size() && exec_st_.IsRunning()) {
+        // Try dispatching the batch of commands - if the batch didn't process any commands than
+        // fall back to dispatching the first command in the batch synchronously.
+        auto dispatch_batch = [&](size_t idx) {
+          size_t processed =
+              service_.DispatchSquashedBatch(batch[idx].cmd, batch.size() - idx, &conn_context);
+          if (processed > 0) {
+            return processed;
+          }
+          auto* cmd = batch[idx].cmd;
+          service_.DispatchCommand(facade::ParsedArgs{*cmd}, cmd,
+                                   facade::AsyncPreference::ONLY_SYNC);
+          return size_t{1};
+        };
+
+        size_t processed = dispatch_batch(idx);
+
+        for (size_t i = idx; i < idx + processed; ++i) {
+          // Squashing may run a command as a suspended coroutine instead of to completion;
+          // resuming it here is what lets it finish before its context is recycled.
+          auto* cmd = batch[i].cmd;
+          if (cmd->IsDeferredReply()) {
+            cmd->SendReply();
+          }
+          repl_offs_ += batch[i].AckBytes();
+        }
+
+        idx += processed;
+        replica_waker_.notify();
+      }
+
+      batch.clear();
+    }
   }
+
+  DCHECK(exec_st_.IsError());
+  LOG_REPL_ERROR("Stopping stream consumer in phase "
+                 << GetCurrentPhase()
+                 << " because of external error: " << exec_st_.GetError().Format());
+  acks_fb_.JoinIfNeeded();
+
+  return exec_st_.GetError();
 }
 
 error_code Replica::ConsumeDflyStream() {
