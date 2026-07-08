@@ -1318,4 +1318,29 @@ TEST_F(PureDiskTSTest, MGetSquashOnExternal) {
   EXPECT_EQ(CheckedInt({"STRLEN", "k0"}), 5000);
 }
 
+// PFMERGE overwrites its destination; an offloaded destination must not hit
+// CompactObj::SetString's CHECK(!IsExternal()).
+TEST_F(PureDiskTSTest, PFMergeIntoExternal) {
+  BuildDenseHll("dst");
+  BuildDenseHll("src");
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 2; });
+
+  EXPECT_EQ(Run({"PFMERGE", "dst", "src"}), "OK");
+}
+
+// A squashed async command reads its result after the shared transaction was
+// reused by a later command; SETNX must not observe that command's status.
+TEST_F(PureDiskTSTest, SetNxSquashResult) {
+  Run({"RPUSH", "mylist", "a"});  // wrong type for INCR
+  for (int rep = 0; rep < 300; ++rep) {
+    vector<vector<string>> batch;
+    for (int i = 0; i < 8; ++i) {
+      batch.push_back({"SETNX", absl::StrCat("k", i), "v"});
+      batch.push_back({"INCR", "mylist"});  // leaves WRONG_TYPE
+    }
+    RunMany(batch);
+  }
+  EXPECT_EQ(Run({"PING"}), "PONG");
+}
+
 }  // namespace dfly
