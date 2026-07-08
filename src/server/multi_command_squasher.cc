@@ -14,7 +14,9 @@
 #include "facade/dragonfly_connection.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
 
@@ -221,20 +223,30 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   };
 
   const size_t dispatched_sz = sinfo.dispatched.size();
+  PrimeTable* prime_table = cntx_->ns->GetDbSlice(es->shard_id()).GetTables(cntx_->db_index());
+  auto prefetch_cmd_cntx = [](const ShardExecInfo::Command& dispatched) {
+    if (dispatched.cmd_cntx) {
+      __builtin_prefetch(dispatched.cmd_cntx, 0, 3);
+    }
+  };
+  auto prefetch_dash_key = [prime_table](const ShardExecInfo::Command& dispatched) {
+    if (dispatched.cid->IsFixedSingleKey()) {
+      prime_table->Prefetch(dispatched.args[dispatched.key_index.start]);
+    }
+  };
+
   for (size_t batch_start = 0; batch_start < dispatched_sz; batch_start += 8) {
     size_t batch_end = batch_start + 8;
     if (batch_end > dispatched_sz)
       batch_end = dispatched_sz;
 
-    // We are in the context of a shard thread, so prefetching allows faster access
-    // to the command arguments.
+    // We are in the context of a shard thread, so prefetch command contexts before using
+    // ParsedArgs backed by them for the DashTable lookahead below.
     for (size_t i = batch_start; i < batch_end; ++i) {
-      auto& dispatched = sinfo.dispatched[i];
-      if (dispatched.cmd_cntx) {
-        __builtin_prefetch(dispatched.cmd_cntx, 0, 3);
-      }
+      prefetch_cmd_cntx(sinfo.dispatched[i]);
     }
 
+    prefetch_dash_key(sinfo.dispatched[batch_start]);
     for (size_t i = batch_start; i < batch_end; ++i) {
       auto& dispatched = sinfo.dispatched[i];
       auto* ctx = &local_cntx;
@@ -258,6 +270,9 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
       ctx->SetupTx(dispatched.cid, local_cntx.tx());
       ctx->tx()->MultiSwitchCmd(dispatched.cid);
+
+      if (i + 1 < batch_end)
+        prefetch_dash_key(sinfo.dispatched[i + 1]);
 
       auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args,
                                           dispatched.key_index);
