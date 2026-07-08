@@ -10,18 +10,17 @@ namespace dfly {
 using namespace std;
 
 namespace {
-CuckooFilter MakeCuckooFilter(const CuckooFilter::Options& options,
-                              std::pmr::memory_resource* mr) {
+CuckooFilter MakeCuckooFilter(const CuckooFilter::Options& options, std::pmr::memory_resource* mr) {
   CuckooFilter cf(mr);
   cf.Init(options);
+
   return cf;
 }
 }  // namespace
 
 class CuckooFilterTest : public ::testing::Test {
  protected:
-  CuckooFilterTest()
-      : cf_(MakeCuckooFilter({.capacity = 128}, std::pmr::get_default_resource())) {
+  CuckooFilterTest() : cf_(MakeCuckooFilter({.capacity = 128}, std::pmr::get_default_resource())) {
   }
 
   CuckooFilter cf_;
