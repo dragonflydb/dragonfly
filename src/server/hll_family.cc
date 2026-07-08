@@ -48,6 +48,9 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
       case OpStatus::CORRUPTED_HLL:
         builder->SendError(facade::StatusToMsg(OpStatus::CORRUPTED_HLL));
         break;
+      case OpStatus::IO_ERROR:
+        builder->SendError(facade::StatusToMsg(OpStatus::IO_ERROR));
+        break;
       default:
         builder->SendLong(0);  // in case we don't have the value we should just send 0
         break;

@@ -1276,19 +1276,21 @@ TEST_F(PureDiskTSTest, BitopsBitFieldRoOnExternal) {
 // HLL reads its value synchronously (GetSlice/GetString), which must handle
 // an offloaded value instead of tripping CHECK(!IsExternal()).
 TEST_F(PureDiskTSTest, PFCountOnExternal) {
-  BuildDenseHll("hll");
+  BuildDenseHll("hll");  // 6000 distinct elements
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
 
-  EXPECT_GT(CheckedInt({"PFCOUNT", "hll"}), 0);
+  // Estimate is within a few percent; a wrong error->0 mapping would fail here.
+  EXPECT_NEAR(CheckedInt({"PFCOUNT", "hll"}), 6000, 600);
 }
 
 TEST_F(PureDiskTSTest, PFMergeOnExternal) {
-  BuildDenseHll("src1");
-  BuildDenseHll("src2");
+  BuildDenseHll("src1");  // src1:* elements
+  BuildDenseHll("src2");  // disjoint src2:* elements
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 2; });
 
   EXPECT_EQ(Run({"PFMERGE", "dst", "src1", "src2"}), "OK");
-  EXPECT_GT(CheckedInt({"PFCOUNT", "dst"}), 0);
+  // Disjoint sources -> merged cardinality is the sum (~12000).
+  EXPECT_NEAR(CheckedInt({"PFCOUNT", "dst"}), 12000, 1200);
 }
 
 // RunMany squashes the batch (like Connection::SquashPipeline); a squashed read
@@ -1297,10 +1299,11 @@ TEST_F(PureDiskTSTest, PFMergeOnExternal) {
 TEST_F(PureDiskTSTest, MGetSquashOnExternal) {
   const int kNum = 12;
   const string big(5000, 'A');
+  auto val = [&](int i) { return absl::StrCat(big, "-", i); };  // distinct per key
   for (int rep = 0; rep < 200; ++rep) {
     vector<vector<string>> batch;
     for (int i = 0; i < kNum; ++i)
-      batch.push_back({"SET", absl::StrCat("k", i), big});
+      batch.push_back({"SET", absl::StrCat("k", i), val(i)});
     for (int i = 0; i < kNum; ++i)
       batch.push_back({"GET", absl::StrCat("k", i)});  // second access -> offload
     for (int j = 0; j < 8; ++j) {
@@ -1309,13 +1312,21 @@ TEST_F(PureDiskTSTest, MGetSquashOnExternal) {
         mget.push_back(absl::StrCat("k", i));
       batch.push_back(std::move(mget));
       for (int i = 0; i < kNum; ++i)
-        batch.push_back({"SETNX", absl::StrCat("k", i), "x"});
+        batch.push_back({"SETNX", absl::StrCat("k", i), "x"});  // skipped, keys exist
     }
     RunMany(batch);
   }
 
   EXPECT_EQ(Run({"PING"}), "PONG");
-  EXPECT_EQ(CheckedInt({"STRLEN", "k0"}), 5000);
+  // MGET must return each value in argument order (the reorder path corruption
+  // that #7816/#7817 hit would scramble or drop entries).
+  vector<string> mget = {"MGET"};
+  for (int i = 0; i < kNum; ++i)
+    mget.push_back(absl::StrCat("k", i));
+  auto vec = Run(absl::MakeSpan(mget)).GetVec();
+  ASSERT_EQ(vec.size(), size_t(kNum));
+  for (int i = 0; i < kNum; ++i)
+    EXPECT_EQ(vec[i], val(i));
 }
 
 // PFMERGE overwrites its destination; an offloaded destination must not hit
@@ -1341,6 +1352,9 @@ TEST_F(PureDiskTSTest, SetNxSquashResult) {
     RunMany(batch);
   }
   EXPECT_EQ(Run({"PING"}), "PONG");
+  // SETNX still reports its own outcome, not a neighbour's status.
+  EXPECT_EQ(CheckedInt({"SETNX", "fresh", "v"}), 1);
+  EXPECT_EQ(CheckedInt({"SETNX", "fresh", "w"}), 0);
 }
 
 }  // namespace dfly
