@@ -522,24 +522,34 @@ struct IOStat {
   uint64_t cmd_total = 0, pipelined_cmd_total = 0;
   size_t io_read_bytes = 0;
   uint64_t io_reads_total = 0;
+  uint64_t batch_read_commands_total = 0;
+  uint64_t batch_write_commands_total = 0;
+  uint64_t batch_read_commands_bytes = 0;
+  uint64_t batch_write_commands_bytes = 0;
+  uint64_t rw_throttle_batches_total = 0;
 
-  void From(const facade::FacadeStats& fs);
+  void From(const facade::FacadeStats& fs, const ServerState::Stats& ss);
   void Print(RedisReplyBuilder* rb) const;
 
   IOStat& operator-=(const IOStat& other);
 };
 
-void IOStat::From(const facade::FacadeStats& fs) {
+void IOStat::From(const facade::FacadeStats& fs, const ServerState::Stats& ss) {
   conn_received = fs.conn_stats.conn_received_cnt;
   curr_conn_count = fs.conn_stats.num_conns_main;
   cmd_total = fs.conn_stats.command_cnt_main;
   pipelined_cmd_total = fs.conn_stats.pipelined_cmd_cnt;
   io_read_bytes = fs.conn_stats.io_read_bytes;
   io_reads_total = fs.conn_stats.io_read_cnt;
+  batch_read_commands_total = ss.batch_read_commands_total;
+  batch_write_commands_total = ss.batch_write_commands_total;
+  batch_read_commands_bytes = ss.batch_read_commands_bytes;
+  batch_write_commands_bytes = ss.batch_write_commands_bytes;
+  rw_throttle_batches_total = ss.rw_throttle_batches_total;
 }
 
 void IOStat::Print(RedisReplyBuilder* rb) const {
-  rb->StartCollection(6, CollectionType::MAP);
+  rb->StartCollection(11, CollectionType::MAP);
   rb->SendSimpleString("connections_received");
   rb->SendLong(conn_received);
   rb->SendSimpleString("current_conn_count");
@@ -552,6 +562,16 @@ void IOStat::Print(RedisReplyBuilder* rb) const {
   rb->SendLong(io_read_bytes);
   rb->SendSimpleString("io_reads_total");
   rb->SendLong(io_reads_total);
+  rb->SendSimpleString("batch_read_commands_total");
+  rb->SendLong(batch_read_commands_total);
+  rb->SendSimpleString("batch_write_commands_total");
+  rb->SendLong(batch_write_commands_total);
+  rb->SendSimpleString("batch_read_commands_bytes");
+  rb->SendLong(batch_read_commands_bytes);
+  rb->SendSimpleString("batch_write_commands_bytes");
+  rb->SendLong(batch_write_commands_bytes);
+  rb->SendSimpleString("rw_throttle_batches_total");
+  rb->SendLong(rw_throttle_batches_total);
 }
 
 IOStat& IOStat::operator-=(const IOStat& other) {
@@ -561,6 +581,11 @@ IOStat& IOStat::operator-=(const IOStat& other) {
   pipelined_cmd_total -= other.pipelined_cmd_total;
   io_read_bytes -= other.io_read_bytes;
   io_reads_total -= other.io_reads_total;
+  batch_read_commands_total -= other.batch_read_commands_total;
+  batch_write_commands_total -= other.batch_write_commands_total;
+  batch_read_commands_bytes -= other.batch_read_commands_bytes;
+  batch_write_commands_bytes -= other.batch_write_commands_bytes;
+  rw_throttle_batches_total -= other.rw_throttle_batches_total;
 
   return *this;
 }
@@ -1676,14 +1701,16 @@ void DebugCmd::IOStats(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   bool per_second = parser.HasNext() && absl::EqualsIgnoreCase(parser.Peek(), "PS");
   vector<IOStat> stats(shard_set->pool()->size());
 
-  shard_set->pool()->AwaitBrief(
-      [&](unsigned index, ProactorBase*) { stats[index].From(*facade::tl_facade_stats); });
+  shard_set->pool()->AwaitBrief([&](unsigned index, ProactorBase*) {
+    stats[index].From(*facade::tl_facade_stats, ServerState::tlocal()->stats);
+  });
 
   if (per_second) {
     ThisFiber::SleepFor(1s);
     vector<IOStat> stats2(shard_set->pool()->size());
-    shard_set->pool()->AwaitBrief(
-        [&](unsigned index, ProactorBase*) { stats2[index].From(*facade::tl_facade_stats); });
+    shard_set->pool()->AwaitBrief([&](unsigned index, ProactorBase*) {
+      stats2[index].From(*facade::tl_facade_stats, ServerState::tlocal()->stats);
+    });
 
     for (size_t i = 0; i < stats.size(); ++i) {
       stats2[i] -= stats[i];

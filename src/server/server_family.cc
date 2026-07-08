@@ -2715,6 +2715,11 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
     append("pipeline_throttle_total", conn_stats.pipeline_throttle_count);
+    append("batch_read_commands_total", m.coordinator_stats.batch_read_commands_total);
+    append("batch_write_commands_total", m.coordinator_stats.batch_write_commands_total);
+    append("batch_read_commands_bytes", m.coordinator_stats.batch_read_commands_bytes);
+    append("batch_write_commands_bytes", m.coordinator_stats.batch_write_commands_bytes);
+    append("rw_throttle_batches_total", m.coordinator_stats.rw_throttle_batches_total);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);
