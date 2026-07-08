@@ -519,11 +519,14 @@ struct GetResp {
 };
 
 struct MGetResponse {
-  explicit MGetResponse(size_t size = 0) : resp_arr(size) {
+  explicit MGetResponse(size_t size = 0) : resp_arr(size), index_map(size) {
   }
 
   std::unique_ptr<char[]> storage;
   absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
+  // Global argument index of each resp_arr slot, captured during the hop so the
+  // reply can be reordered without touching the transaction afterwards.
+  absl::InlinedVector<uint32_t, 2> index_map;
 };
 
 template <typename Iter> using SearchKey = std::function<OpResult<Iter>(string_view)>;
@@ -565,7 +568,9 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
     key_index.reserve(keys.Size());
   }
 
-  for (string_view key : keys) {
+  for (auto arg_it = keys.begin(); arg_it != keys.end(); ++arg_it) {
+    string_view key = *arg_it;
+    response.index_map[index] = arg_it.index();
     if (mget_dedup_keys) {
       auto [it, inserted] = key_index.try_emplace(key, index);
       if (!inserted) {  // duplicate -> point to the first occurrence.
@@ -1464,23 +1469,17 @@ cmd::CmdR CmdDecrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
   return IncrByGeneric(cmd_cntx, key, -val);
 }
 
-// Reorder per-shard results according to argument order of primary command
-void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* t,
-                         absl::Span<optional<GetResp>> dest) {
-  for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
-    if (!t->IsActive(sid))
-      continue;
-
-    auto& src = mget_resp[sid];
-    ShardArgs shard_args = t->GetShardArgs(sid);
-    unsigned src_indx = 0;
-    for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
+// Reorder per-shard results into argument order using the indices captured
+// during the hop. Inactive shards leave an empty resp_arr, so no transaction
+// state is consulted here.
+void ReorderShardResults(absl::Span<MGetResponse> mget_resp, absl::Span<optional<GetResp>> dest) {
+  for (auto& src : mget_resp) {
+    for (size_t src_indx = 0; src_indx < src.resp_arr.size(); ++src_indx) {
       if (!src.resp_arr[src_indx])
         continue;
 
-      DCHECK_LT(it.index(), dest.size());
-      auto& item = dest[it.index()];
-      item = src.resp_arr[src_indx];
+      DCHECK_LT(src.index_map[src_indx], dest.size());
+      dest[src.index_map[src_indx]] = src.resp_arr[src_indx];
     }
   }
 }
@@ -1506,10 +1505,11 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
     return OpStatus::OK;
   };
 
-  // Waiter objects needs to be used to keep tx alive in its scope for ReorderShardResults
+  // The waiter keeps the transaction alive while the hop runs. Its result is not
+  // consulted: under pipeline squashing the transaction is reused for the next
+  // command once the hop completes, so all per-shard data is captured in the hop.
   cmd::SingleHopWaiter waiter{cmd_cntx, cb};
-  auto result = co_await waiter;
-  CHECK_EQ(OpStatus::OK, result);
+  co_await waiter;
 
   // wait for all tiered reads to finish and check for errors
   tiering_bc->Wait();
@@ -1521,7 +1521,7 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
   size_t arg_len = tail_args.size();
 
   unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
-  ReorderShardResults(absl::MakeSpan(mget_resp.get(), shard_set->size()), cmd_cntx->tx(),
+  ReorderShardResults(absl::MakeSpan(mget_resp.get(), shard_set->size()),
                       absl::MakeSpan(mget_results.get(), arg_len));
 
   SinkReplyBuilder::ReplyScope scope{cmd_cntx->rb()};

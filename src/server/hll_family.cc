@@ -17,6 +17,7 @@ extern "C" {
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -74,6 +75,20 @@ bool ConvertToDenseIfNeeded(string* hll) {
   return hll_validity == HLL_VALID_DENSE;
 }
 
+// Reads an HLL value, materializing it from tiered storage if offloaded.
+OpResult<string> ReadHll(const OpArgs& op_args, string_view key, const PrimeValue& pv) {
+  if (pv.IsExternal()) {
+    auto res =
+        ReadTieredString(op_args.db_cntx.db_index, key, pv, op_args.shard->tiered_storage()).Get();
+    if (!res)
+      return OpStatus::IO_ERROR;
+    return std::move(res).value();
+  }
+  string hll;
+  pv.GetString(&hll);
+  return hll;
+}
+
 OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values) {
   auto& db_slice = op_args.GetDbSlice();
 
@@ -82,11 +97,15 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_STRING);
   RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
+  bool was_external = false;
   if (res.is_new) {
     hll.resize(getSparseHllInitSize());
     initSparseHll(StringToHllPtr(hll));
   } else {
-    res.it->second.GetString(&hll);
+    was_external = res.it->second.IsExternal();
+    auto val = ReadHll(op_args, key, res.it->second);
+    RETURN_ON_BAD_STATUS(val);
+    hll = std::move(val).value();
   }
   if (isValidHLL(StringToHllPtr(hll)) == HLL_INVALID) {
     return OpStatus::INVALID_VALUE;
@@ -126,6 +145,10 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     hll = string{hll_sds, sdslen(hll_sds)};
     sdsfree(hll_sds);
   }
+  if (was_external) {
+    res.post_updater.ReduceHeapUsage();
+    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+  }
   res.it->second.SetString(hll);
   return std::min(updated, 1);
 }
@@ -150,27 +173,25 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
 
   auto it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (it.ok()) {
-    string hll;
-    string_view hll_view = it.value()->second.GetSlice(&hll);
+    auto hll_res = ReadHll(op_args, key, it.value()->second);
+    RETURN_ON_BAD_STATUS(hll_res);
+    string hll = std::move(hll_res).value();
 
-    switch (isValidHLL(StringToHllPtr(hll_view))) {
+    switch (isValidHLL(StringToHllPtr(hll))) {
       case HLL_VALID_DENSE:
         break;
       case HLL_VALID_SPARSE:
-        // Even in the case of a read - we still want to convert the hll to dense format, as it
-        // could originate in Redis (like in replication or rdb load).
-        hll = hll_view;
+        // Convert to dense on read too: a sparse value may originate from a foreign import.
         if (!ConvertToDenseIfNeeded(&hll)) {
           return OpStatus::CORRUPTED_HLL;
         }
-        hll_view = hll;
         break;
       case HLL_INVALID:
       default:
         return OpStatus::INVALID_VALUE;
     }
 
-    return pfcountSingle(StringToHllPtr(hll_view));
+    return pfcountSingle(StringToHllPtr(hll));
   } else if (it.status() == OpStatus::WRONG_TYPE) {
     return it.status();
   } else {
@@ -185,8 +206,9 @@ OpResult<vector<string>> ReadValues(const OpArgs& op_args, const ShardArgs& keys
     for (string_view key : keys) {
       auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
       if (it.ok()) {
-        string hll;
-        it.value()->second.GetString(&hll);
+        auto hll_res = ReadHll(op_args, key, it.value()->second);
+        RETURN_ON_BAD_STATUS(hll_res);
+        string hll = std::move(hll_res).value();
         if (!ConvertToDenseIfNeeded(&hll)) {
           return OpStatus::CORRUPTED_HLL;
         }
