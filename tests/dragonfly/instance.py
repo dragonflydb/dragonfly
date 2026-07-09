@@ -453,10 +453,6 @@ class DflyInstanceFactory:
         if version >= 1.21 and "serialization_max_chunk_size" not in args:
             args.setdefault("serialization_max_chunk_size", 300000)
 
-        # TODO (abhijat) fix version once feature released
-        if version == 100 and "serialization_tagged_chunks" not in args:
-            args.setdefault("serialization_tagged_chunks", True)
-
         if version > 1.36:
             args.setdefault("serialize_hnsw_index", "true")
             args.setdefault("deserialize_hnsw_index", "true")
