@@ -518,7 +518,7 @@ struct GetResp {
   uint32_t ttl_sec = 0;
 };
 
-struct MGetResponse {
+struct alignas(64) MGetResponse {
   explicit MGetResponse(size_t size = 0) : resp_arr(size) {
   }
 
@@ -1464,27 +1464,6 @@ cmd::CmdR CmdDecrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
   return IncrByGeneric(cmd_cntx, key, -val);
 }
 
-// Reorder per-shard results according to argument order of primary command
-void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* t,
-                         absl::Span<optional<GetResp>> dest) {
-  for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
-    if (!t->IsActive(sid))
-      continue;
-
-    auto& src = mget_resp[sid];
-    ShardArgs shard_args = t->GetShardArgs(sid);
-    unsigned src_indx = 0;
-    for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
-      if (!src.resp_arr[src_indx])
-        continue;
-
-      DCHECK_LT(it.index(), dest.size());
-      auto& item = dest[it.index()];
-      item = src.resp_arr[src_indx];
-    }
-  }
-}
-
 cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpireParams> gat_params) {
   const auto& tail_args = cmd_cntx->tail_args();
   DCHECK_GE(tail_args.size(), 1U);
@@ -1500,16 +1479,30 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
 
   unique_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
 
+  size_t arg_len = tail_args.size();
+  unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
+
   auto gat_ptr = gat_params ? &*gat_params : nullptr;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_ptr);
+    ShardId sid = shard->shard_id();
+    MGetResponse resp = OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_ptr);
+
+    // Reorder shard resuls based on key indices in commands
+    ShardArgs shard_args = t->GetShardArgs(sid);
+    unsigned src_indx = 0;
+    for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
+      if (!resp.resp_arr[src_indx])
+        continue;
+      DCHECK_LT(it.index(), arg_len);
+      mget_results[it.index()] = resp.resp_arr[src_indx];
+    }
+
+    // Keep the per-shard storage alive: GetResp::value string_views point into resp.storage.
+    mget_resp[sid] = std::move(resp);
     return OpStatus::OK;
   };
 
-  // Waiter objects needs to be used to keep tx alive in its scope for ReorderShardResults
-  cmd::SingleHopWaiter waiter{cmd_cntx, cb};
-  auto result = co_await waiter;
-  CHECK_EQ(OpStatus::OK, result);
+  co_await cmd::SingleHop(cb);
 
   // wait for all tiered reads to finish and check for errors
   tiering_bc->Wait();
@@ -1517,12 +1510,6 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
     cmd_cntx->rb()->SendError(err.message());
     co_return std::nullopt;
   }
-
-  size_t arg_len = tail_args.size();
-
-  unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
-  ReorderShardResults(absl::MakeSpan(mget_resp.get(), shard_set->size()), cmd_cntx->tx(),
-                      absl::MakeSpan(mget_results.get(), arg_len));
 
   SinkReplyBuilder::ReplyScope scope{cmd_cntx->rb()};
   if (cmd_cntx->mc_command()) {
