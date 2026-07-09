@@ -443,8 +443,16 @@ class Connection : public util::Connection {
   // Squashes pipelined commands from the dispatch queue to spread load over all threads
   void SquashPipeline();
 
-  // Clear pipelined messages, disaptching only intrusive ones.
+  // Clear pipelined messages, dispatching only intrusive ones.
   void ClearPipelinedMessages();
+
+  // Dec()s every BlockingCounter held in deferred_checkpoints_, then clear the vector.
+  // These belong to the checkpoint commands the V2 loop deferred in
+  // AsyncOperations(CheckpointMessage)while async commands were still in flight. Each counter
+  // belongs to a DispatchTracker (CLIENT PAUSE / REPLTAKEOVER / cluster migration / shutdown) that
+  // is blocked in Wait(). Decrementing it here signals that this connection's in-flight commands
+  // have landed.
+  void ReleaseDeferredCheckpoints();
 
   ClientInfo BuildClientInfo(unsigned thread_id) const;
 
@@ -582,6 +590,16 @@ class Connection : public util::Connection {
   std::error_code io_ec_;
   util::fb2::EventCount io_event_;
   std::optional<WaitEvent> current_wait_;
+
+  // - V2 only: used to store checkpoints (holding a BlockingCounter) whose bc->Dec() was deferred
+  // because async commands were still in-flight when the checkpoint was processed.
+  // - Pushing them in the back of the dispatch_q_ may create complexities, so holding them
+  // separately simplifies the solution.
+  // - They are released (bc->Dec()) once HasInFlightCommands() drops to false, or on connection
+  // close.
+  // - Assumption: usually this vectors holds 0-1 entries, and at any given (extreme) point of time,
+  // the number of deferred checkpoints is minimal (<10, no inlined vector required).
+  std::vector<util::fb2::BlockingCounter> deferred_checkpoints_;
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;

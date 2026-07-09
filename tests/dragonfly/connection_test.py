@@ -1337,6 +1337,175 @@ async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Re
     await all
 
 
+@pytest.mark.opt_only  # run against release/optimized build only
+@pytest.mark.exclude_epoll
+@dfly_args(
+    {
+        "proactor_threads": 4,
+        "enable_resp_io_loop_v2": "true",
+        # Tiered storage keeps a command in-flight on a thread-idle disk read, so CLIENT
+        # PAUSE's fiber rendezvous can't implicitly wait for it and mask the bug.
+        "tiered_prefix": "/tmp/tiered/pause_v2_backing",
+        "tiered_offload_threshold": "1.0",
+        "tiered_experimental_cooling": "false",
+        "maxmemory": "2G",
+    }
+)
+async def test_client_pause_v2_inflight_async_write_gap(df_server: DflyInstance):
+    """Regression: an in-flight async command on the V2 loop must keep CLIENT PAUSE waiting.
+
+    A tiered APPEND parks the shard fiber on a disk read, so the command stays in-flight
+    while returning a tiny reply. CLIENT PAUSE WRITE must not return until it completes.
+    Tuning parameters: VALUE_BYTES and SETTLE.
+    """
+    assert is_resp_io_loop_v2(df_server)
+
+    VALUE_BYTES = 256 * 1024 * 1024  # 256MB
+    SETTLE = 0.05
+
+    populator = df_server.client()
+    writer = df_server.client()
+    pauser = df_server.client()
+
+    await populator.execute_command("DEBUG", "POPULATE", 1, "huge", VALUE_BYTES, "RAND")
+    keys = await populator.keys("huge*")
+    assert len(keys) == 1
+    big_key = keys[0]
+
+    # Wait until the value is offloaded to disk (else APPEND reads from memory instantly).
+    async with async_timeout.timeout(60):
+        while int((await populator.info("TIERED")).get("tiered_entries", 0)) < 1:
+            await asyncio.sleep(0.2)
+
+    # Async write that must fetch the whole value from disk. Its fiber parks on the read.
+    inflight = asyncio.create_task(writer.execute_command("APPEND", big_key, "x"))
+
+    await asyncio.sleep(0.02)
+    assert not inflight.done(), "APPEND completed too fast to test; increase VALUE_BYTES"
+
+    # Issue a pause command on pauser connection while writer's append is still in-flight. It must not return until the append completes.
+    # It must not reply "OK" until every write command that was already in-flight at the moment it was issued has finished.
+    assert await pauser.execute_command("CLIENT", "PAUSE", "5000", "WRITE") == "OK"
+
+    await asyncio.sleep(SETTLE)  # give some time for asyncio to run the task completion callback.
+    inflight_done_after_pause = (
+        inflight.done()
+    )  # was the APPEND already complete when PAUSE returned?
+
+    # Teardown
+    try:
+        await pauser.execute_command("CLIENT", "UNPAUSE")
+    except Exception:
+        pass
+    if not inflight.done():
+        await asyncio.wait_for(inflight, timeout=60)
+
+    # Test outcome: CLIENT PAUSE must not return while the async command is still in-flight.
+    assert (
+        inflight_done_after_pause
+    ), "CLIENT PAUSE WRITE returned while an async command was still in flight"
+
+
+@pytest.mark.opt_only  # run against release/optimized build only
+@pytest.mark.exclude_epoll
+@dfly_args(
+    {
+        "proactor_threads": 4,
+        "enable_resp_io_loop_v2": "true",
+        # Tiered storage gives a long thread-idle in-flight window (see the test above).
+        "tiered_prefix": "/tmp/tiered/pause_v2_close_backing",
+        "tiered_offload_threshold": "1.0",
+        "tiered_experimental_cooling": "false",
+        "maxmemory": "2G",
+        # High timeout so a fast close-path release is distinguishable from a timeout release.
+        "pause_wait_timeout": 30,
+    }
+)
+async def test_client_pause_v2_close_releases_deferred_checkpoint(df_server: DflyInstance):
+    """Regression: closing a client mid-flight must release its deferred CLIENT PAUSE checkpoint.
+
+    A paused V2 connection with an in-flight async command defers its DispatchTracker
+    counter. If the client disconnects before the command lands, ClearPipelinedMessages
+    must release it so CLIENT PAUSE returns well before pause_wait_timeout.
+    """
+    assert is_resp_io_loop_v2(df_server)
+
+    VALUE_BYTES = 256 * 1024 * 1024  # 256MB
+    PAUSE_MS = 5000
+    PAUSE_WAIT_TIMEOUT = 30  # must match the dfly_args value above
+    RELEASE_BOUND = 10.0
+
+    populator = df_server.client()
+    pauser = df_server.client()
+
+    await populator.execute_command("DEBUG", "POPULATE", 1, "huge", VALUE_BYTES, "RAND")
+    keys = await populator.keys("huge*")
+    assert len(keys) == 1
+    big_key = keys[0]
+
+    async with async_timeout.timeout(60):
+        while int((await populator.info("TIERED")).get("tiered_entries", 0)) < 1:
+            await asyncio.sleep(0.2)
+
+    def enc(*args):
+        out = f"*{len(args)}\r\n".encode()
+        for a in args:
+            b = a if isinstance(a, bytes) else str(a).encode()
+            out += f"${len(b)}\r\n".encode() + b + b"\r\n"
+        return out
+
+    # Use raw socket so we can close it mid-flight (a df client would drain the reply first).
+    _, writer_sock = await asyncio.open_connection("127.0.0.1", df_server.port)
+
+    # Fire the async write (fetches the value from disk) and never read the reply.
+    writer_sock.write(enc("APPEND", big_key, "x"))
+    await writer_sock.drain()
+    await asyncio.sleep(0.03)
+
+    # Pause checkpoints the writer. Its in-flight command makes it defer the checkpoint.
+    pause_task = asyncio.create_task(
+        pauser.execute_command("CLIENT", "PAUSE", str(PAUSE_MS), "WRITE")
+    )
+    await asyncio.sleep(0.05)
+    assert not pause_task.done(), "CLIENT PAUSE returned before we could close the writer"
+
+    # Close the writer while its APPEND is still in flight and its checkpoint deferred.
+    t0 = time.monotonic()
+    writer_sock.close()
+    try:
+        await writer_sock.wait_closed()
+    except Exception:
+        pass
+
+    try:
+        # shield so the wait_for timeout does not cancel the pause task; we assert on it below.
+        # Catch only TimeoutError - any other exception means CLIENT PAUSE itself failed and must
+        # fail the test.
+        await asyncio.wait_for(asyncio.shield(pause_task), timeout=PAUSE_WAIT_TIMEOUT + 10)
+    except asyncio.TimeoutError:
+        pass
+    elapsed = time.monotonic() - t0
+
+    # Teardown - leave the server usable, regardless of the assertion outcome.
+    try:
+        await pauser.execute_command("CLIENT", "UNPAUSE")
+    except Exception:
+        pass
+
+    assert pause_task.done(), "CLIENT PAUSE never returned after the writer disconnected mid-flight"
+    # .result() re-raises if CLIENT PAUSE errored, so a failed pause fails the test here.
+    assert pause_task.result() == "OK", f"CLIENT PAUSE did not return OK: {pause_task.result()!r}"
+    assert elapsed < RELEASE_BOUND, (
+        f"CLIENT PAUSE took {elapsed:.2f}s after disconnect; expected the close-path release "
+        f"to unblock it well below pause_wait_timeout={PAUSE_WAIT_TIMEOUT}s"
+    )
+
+    # Make sure the server stays healthy and a subsequent pause with no in-flight work is not stuck.
+    assert await pauser.ping() is True
+    assert await pauser.execute_command("CLIENT", "PAUSE", "50", "WRITE") == "OK"
+    await pauser.execute_command("CLIENT", "UNPAUSE")
+
+
 async def test_lib_name_ver(async_client: aioredis.Redis):
     await async_client.execute_command("client setinfo lib-name dragonfly")
     await async_client.execute_command("client setinfo lib-ver 1.2.3.4")

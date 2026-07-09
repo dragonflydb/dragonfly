@@ -64,6 +64,19 @@ class ConnectionContext {
   //      wait for an in-flight command to finish.
   //   2. Flush-Before-Block: async_dispatch=true (only) makes MainService::DispatchCommand flush
   //      buffered pipeline replies before a blocking command (e.g. BLPOP) parks the fiber.
+  //
+  // V2 note:
+  // - These flags are on-spot markers raised around a single call, NOT a durable "this connection
+  //   is executing" state.
+  // - "Executing" is broader than running the command body: a V2 async command's reply is written
+  //   later, when its suspended reply coroutine is resumed. That reply-write is part of executing
+  //   the command, so the flag is raised around the resume too - not only the initial dispatch.
+  // - A V2 async command clears the flags as soon as the dispatch returns, while it may still be
+  //   in flight (its reply not yet written).
+  // - The only durable in-flight signal there is Connection::HasInFlightCommands().
+  // - Because the flags are read cross-fiber (DispatchTracker) but only at a fiber suspension
+  //   point, IsCurrentlyDispatching() may be transiently false mid-dispatch without any observer
+  //   seeing the gap.
   bool async_dispatch : 1;
   bool sync_dispatch : 1;
 
