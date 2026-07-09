@@ -1356,12 +1356,11 @@ async def test_client_pause_v2_inflight_async_write_gap(df_server: DflyInstance)
 
     A tiered APPEND parks the shard fiber on a disk read, so the command stays in-flight
     while returning a tiny reply. CLIENT PAUSE WRITE must not return until it completes.
-    Tuning parameters: VALUE_BYTES and SETTLE.
+    Tuning parameter: VALUE_BYTES (make the disk read long enough to stay in-flight).
     """
     assert is_resp_io_loop_v2(df_server)
 
     VALUE_BYTES = 256 * 1024 * 1024  # 256MB
-    SETTLE = 0.05
 
     populator = df_server.client()
     writer = df_server.client()
@@ -1383,26 +1382,27 @@ async def test_client_pause_v2_inflight_async_write_gap(df_server: DflyInstance)
     await asyncio.sleep(0.02)
     assert not inflight.done(), "APPEND completed too fast to test; increase VALUE_BYTES"
 
-    # Issue a pause command on pauser connection while writer's append is still in-flight. It must not return until the append completes.
-    # It must not reply "OK" until every write command that was already in-flight at the moment it was issued has finished.
-    assert await pauser.execute_command("CLIENT", "PAUSE", "5000", "WRITE") == "OK"
+    # PAUSE must not return before the in-flight APPEND finishes. Race them: a correct server writes
+    # the APPEND reply before releasing the pause checkpoint, so APPEND wins. If PAUSE wins, the
+    # write slipped past CLIENT PAUSE - the bug. (A sleep+snapshot check masks it or is racy.)
+    pause_task = asyncio.create_task(pauser.execute_command("CLIENT", "PAUSE", "5000", "WRITE"))
+    done, _ = await asyncio.wait({pause_task, inflight}, return_when=asyncio.FIRST_COMPLETED)
+    pause_beat_inflight = pause_task in done and inflight not in done
 
-    await asyncio.sleep(SETTLE)  # give some time for asyncio to run the task completion callback.
-    inflight_done_after_pause = (
-        inflight.done()
-    )  # was the APPEND already complete when PAUSE returned?
+    # Let both finish so the pauser/writer connections are idle before teardown.
+    assert await asyncio.wait_for(pause_task, timeout=60) == "OK"
+    if not inflight.done():
+        await asyncio.wait_for(inflight, timeout=60)
 
     # Teardown
     try:
         await pauser.execute_command("CLIENT", "UNPAUSE")
     except Exception:
         pass
-    if not inflight.done():
-        await asyncio.wait_for(inflight, timeout=60)
 
     # Test outcome: CLIENT PAUSE must not return while the async command is still in-flight.
     assert (
-        inflight_done_after_pause
+        not pause_beat_inflight
     ), "CLIENT PAUSE WRITE returned while an async command was still in flight"
 
 
