@@ -1142,6 +1142,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   shard_set->pool()->AwaitBrief([](unsigned, auto*) {
     facade::Connection::UpdateFromFlags();
+    MultiCommandSquasher::UpdateFromFlags();
     UpdateFromFlagsOnThread();
     UpdateSchedulerFlagsOnThread();
   });

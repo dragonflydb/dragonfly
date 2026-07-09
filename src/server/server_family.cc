@@ -2869,6 +2869,15 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
     append("tx_with_freq", absl::StrJoin(m.coordinator_stats.tx_width_freq_arr, ","));
     append("squash_with_freq", absl::StrJoin(m.coordinator_stats.squash_width_freq_arr, ","));
+    append("multi_squash_fanout_total", m.coordinator_stats.multi_squash_fanout_total);
+    append("multi_squash_fanout_drainer_starts",
+           m.coordinator_stats.multi_squash_fanout_drainer_starts);
+    append("multi_squash_fanout_enqueue_saved",
+           m.coordinator_stats.multi_squash_fanout_enqueue_saved);
+    append("multi_squash_fanout_src_dst_first",
+           m.coordinator_stats.multi_squash_fanout_src_dst_first);
+    append("multi_squash_fanout_src_dst_coalesced",
+           m.coordinator_stats.multi_squash_fanout_src_dst_coalesced);
     append("tx_queue_len", m.tx_queue_len);
 
     append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);

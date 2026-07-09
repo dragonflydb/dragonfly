@@ -76,6 +76,11 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   ADD(multi_squash_exec_hop_usec);
   ADD(multi_squash_exec_reply_usec);
   ADD(squashed_commands);
+  ADD(multi_squash_fanout_total);
+  ADD(multi_squash_fanout_drainer_starts);
+  ADD(multi_squash_fanout_enqueue_saved);
+  ADD(multi_squash_fanout_src_dst_first);
+  ADD(multi_squash_fanout_src_dst_coalesced);
   ADD(blocking_commands_in_pipelines);
   ADD(blocked_on_interpreter);
   ADD(rdb_save_usec);

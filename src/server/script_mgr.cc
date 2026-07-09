@@ -11,7 +11,6 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 
-#include <regex>
 #include <string>
 
 #include "base/flags.h"
@@ -239,14 +238,22 @@ void ScriptMgr::GCCmd(Transaction* tx, SinkReplyBuilder* builder) const {
 
 // Check if script starts with lua flags instructions (--df flags=...).
 io::Result<optional<ScriptMgr::ScriptParams>, GenericError> DeduceParams(string_view body) {
-  static const regex kRegex{R"(^\s*?--!df flags=([^\s\n\r]*)[\s\n\r])"};
-  cmatch matches;
+  while (!body.empty() && absl::ascii_isspace(body.front()))
+    body.remove_prefix(1);
 
-  if (!regex_search(body.data(), matches, kRegex))
+  constexpr string_view kPrefix = "--!df flags=";
+  if (!absl::ConsumePrefix(&body, kPrefix))
+    return nullopt;
+
+  size_t flags_len = 0;
+  while (flags_len < body.size() && !absl::ascii_isspace(body[flags_len]))
+    ++flags_len;
+
+  if (flags_len == body.size())
     return nullopt;
 
   ScriptMgr::ScriptParams params;
-  if (auto err = ScriptMgr::ScriptParams::ApplyFlags(matches.str(1), &params); err)
+  if (auto err = ScriptMgr::ScriptParams::ApplyFlags(body.substr(0, flags_len), &params); err)
     return nonstd::make_unexpected(err);
 
   return params;

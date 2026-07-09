@@ -477,6 +477,37 @@ EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
   queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
 }
 
+bool EngineShard::SquashedFanoutQueue::Start(EngineShard* shard) {
+  bool expected = false;
+  if (active_.compare_exchange_strong(expected, true, memory_order_seq_cst, memory_order_relaxed)) {
+    shard->GetSecondaryQueue()->Add([this, shard] { Drain(shard); });
+    return true;
+  }
+  return false;
+}
+
+void EngineShard::SquashedFanoutQueue::Drain(EngineShard* shard) {
+  DCHECK(shard->IsMyThread());
+
+  while (true) {
+    if (shard_set->DrainSquashedFanout(shard->shard_id(), shard))
+      continue;
+
+    // See Submit(): seq_cst closes the store-buffer race between publishing mailbox work and
+    // publishing that no drainer is active.
+    active_.store(false, memory_order_seq_cst);
+    if (!shard_set->HasSquashedFanout(shard->shard_id()))
+      return;
+
+    bool expected = false;
+    if (active_.compare_exchange_strong(expected, true, memory_order_seq_cst,
+                                        memory_order_relaxed)) {
+      continue;
+    }
+    return;
+  }
+}
+
 void EngineShard::Shutdown() {
   DVLOG(1) << "EngineShard::Shutdown";
 

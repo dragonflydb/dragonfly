@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
+
 #include "server/engine_shard.h"
 #include "util/proactor_pool.h"
 
@@ -61,6 +64,12 @@ class EngineShardSet {
     return shards_[sid]->GetSecondaryQueue()->Add(std::forward<F>(f));
   }
 
+  EngineShard::SquashedFanoutSubmitResult AddSquashedFanout(ShardId sid, uint32_t source,
+                                                            EngineShard::SquashedFanoutTask* task);
+
+  bool DrainSquashedFanout(ShardId sid, EngineShard* shard);
+  bool HasSquashedFanout(ShardId sid) const;
+
   // Runs a brief function on all shards. Waits for it to complete.
   // `func` must not preempt.
   template <typename U> void RunBriefInParallel(U&& func) const {
@@ -98,9 +107,18 @@ class EngineShardSet {
   void TEST_EnableCacheMode();
 
  private:
+  struct SquashedFanoutMailbox {
+    std::atomic<EngineShard::SquashedFanoutTask*> head{nullptr};
+  };
+
   void InitThreadLocal(util::ProactorBase* pb);
+  void InitSquashedFanoutQueues(uint32_t source_count);
+  SquashedFanoutMailbox& SquashedFanoutMailboxAt(uint32_t source, ShardId sid) const;
+
   util::ProactorPool* pp_;
   std::unique_ptr<EngineShard*[]> shards_;
+  std::unique_ptr<SquashedFanoutMailbox[]> squashed_fanout_mailboxes_;
+  uint32_t squashed_fanout_source_count_ = 0;
   uint32_t size_ = 0;
 };
 

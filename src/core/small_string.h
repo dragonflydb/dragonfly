@@ -15,7 +15,6 @@ class PageUsage;
 // Requires explicit memory management
 class SmallString {
   static constexpr unsigned kPrefLen = 10;
-  static constexpr unsigned kMaxSize = (1 << 8) - 1;
 
  public:
   static void InitThreadLocal(void* heap);
