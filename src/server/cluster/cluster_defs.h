@@ -8,7 +8,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <vector>
 
 #include "facade/cmd_arg_parser.h"
@@ -41,12 +40,6 @@ struct SlotRange {
 
   std::string ToString() const;
 };
-
-// Parses two slot ids [start, end] for parser.Next<SlotRange>() / Tag(tag, &optional<SlotRange>).
-inline SlotRange ParseArg(facade::CmdArgParser* p, std::type_identity<SlotRange>) {
-  auto [start, end] = p->Next<ParsedSlotId, ParsedSlotId>();
-  return {start, end};
-}
 
 class SlotRanges {
  public:

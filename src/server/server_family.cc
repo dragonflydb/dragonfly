@@ -2109,7 +2109,7 @@ void ClientHelp(SinkReplyBuilder* builder) {
 }
 
 void ServerFamily::Client(CmdArgParser parser, CommandContext* cmd_cntx) {
-  string sub_cmd = parser.Next<Upper>();
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next<string_view>());
   facade::ParsedArgs sub_args = parser.UnparsedArgs();
   auto* builder = cmd_cntx->rb();
 
@@ -2146,7 +2146,7 @@ void ServerFamily::Client(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void ServerFamily::Config(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   facade::ParsedArgs args = parser.UnparsedArgs();
-  string sub_cmd = parser.Next<Upper>();
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next<string_view>());
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (sub_cmd == "HELP") {
@@ -3143,7 +3143,7 @@ void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
-  facade::ParsedArgs args = parser.UnparsedArgs();  // kept for the UnknownCmd error message
+  facade::ParsedArgs args = parser.UnparsedArgs();
   // If no arguments are provided default to RESP2.
   bool is_resp3 = false;
   bool has_auth = false;
@@ -3153,28 +3153,31 @@ void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view clientname;
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (parser.HasNext()) {
-    string_view proto_version = parser.Next();
+  if (!args.empty()) {
+    string_view proto_version = args[0];
     is_resp3 = proto_version == "3";
-    if (proto_version != "2" && !is_resp3) {
+    bool valid_proto_version = proto_version == "2" || is_resp3;
+    if (!valid_proto_version) {
       cmd_cntx->SendError(UnknownCmd("HELLO", args));
       return;
     }
 
-    parser.Apply(Tag("AUTH",
-                     [&](CmdArgParser* p) {
-                       has_auth = true;
-                       username = p->Next();
-                       password = p->Next();
-                     }),
-                 Tag("SETNAME", [&](CmdArgParser* p) {
-                   has_setname = true;
-                   clientname = p->Next();
-                 }));
-
-    if (!parser.Finalize()) {
-      cmd_cntx->SendError(parser.TakeError().MakeReply());
-      return;
+    for (uint32_t i = 1; i < args.size(); i++) {
+      auto sub_cmd = args[i];
+      auto moreargs = args.size() - 1 - i;
+      if (absl::EqualsIgnoreCase(sub_cmd, "AUTH") && moreargs >= 2) {
+        has_auth = true;
+        username = args[i + 1];
+        password = args[i + 2];
+        i += 2;
+      } else if (absl::EqualsIgnoreCase(sub_cmd, "SETNAME") && moreargs > 0) {
+        has_setname = true;
+        clientname = args[i + 1];
+        i += 1;
+      } else {
+        cmd_cntx->SendError(kSyntaxErr);
+        return;
+      }
     }
   }
 
@@ -3408,7 +3411,8 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
   bool save_flag = static_cast<bool>(parser.Check("SAVE"));
 
   auto* builder = cmd_cntx->rb();
-  parser.Finalize("Unsupported option:");
+  if (parser.HasNext())
+    return cmd_cntx->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
@@ -3602,7 +3606,7 @@ void ServerFamily::LastSave(facade::CmdArgParser parser, CommandContext* cmd_cnt
 
 void ServerFamily::Latency(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  string sub_cmd = parser.Next<Upper>();
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next<string_view>());
 
   if (sub_cmd == "LATEST" || sub_cmd == "HISTOGRAM") {
     return rb->SendEmptyArray();
@@ -3708,7 +3712,7 @@ void ServerFamily::SlowLog(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void ServerFamily::Module(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
-  string sub_cmd = parser.Next<Upper>();
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next<string_view>());
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (sub_cmd != "LIST")

@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 
@@ -37,22 +36,15 @@ namespace facade {
 //   auto f  = parser.Next<FInt<1, 99>>("bad f");                // FInt with a custom out-of-range
 //                                                               // / non-integer error message
 //   auto s  = parser.Next<Validated<double, NotNan<kMsg>>>();   // parse + custom-error rule check
-//   auto sub = parser.Next<Upper>();                            // uppercased next arg (string)
-//   auto dur = parser.Next<Duration>();                         // custom type via ADL (see below)
-//   auto count = parser.NextOrDefault<size_t>(10);              // read optional arg, else default
-//   Range fields = parser.NextRange();                          // [N, e1..eN] counted list
-//   Range pairs  = parser.NextRange(2);                         // [N, f1,v1,..] field/value pairs
-//   Range fs     = parser.NextRange(1, mismatch, true);         // consume-all variant, exact fit
-//   Range rest   = parser.RemainingRange();                     // all remaining args, no count
-//   Range items  = parser.RemainingRange("need >=1 item");      // error if none remain
-//
-// Custom types: define a free `T ParseArg(CmdArgParser*, std::type_identity<T>)` in T's namespace
-// (found by ADL via the tag) so parser.Next<T>() and NextOrDefault<T>() parse T by driving the
-// parser. The tag only carries T for ADL; it holds no value, so nothing can be dereferenced.
-//     Duration ParseArg(CmdArgParser* p, std::type_identity<Duration>) {
-//       int64_t n = p->Next<int64_t>();
-//       return Duration{p->Check("MS") ? n : n * 1000};
-//     }
+//   auto u  = parser.Next(ParseUnit);                           // token parser fn: (sv, err) -> T
+//   auto n  = parser.Next(Number<int>);                         // full parser fn: (parser) -> T
+//   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
+//   auto conv  = parser.NextOrDefault(ParseUnit, 1.0);          // optional arg via a parser fn
+//   Range fields = parser.NextRange();                         // [N, e1..eN] counted list
+//   Range pairs  = parser.NextRange(2);                        // [N, f1,v1,..] N field/value pairs
+//   Range fs     = parser.NextRange(1, mismatch, true);        // consume-all variant
+//   Range rest   = parser.RemainingRange();                    // all remaining args, no count
+//   Range items  = parser.RemainingRange("need >=1 item");     // ...erroring if none remain
 //
 // Tag matching:
 //   parser.ExpectTag("LOAD");                                   // required literal keyword
@@ -65,7 +57,6 @@ namespace facade {
 // Bulk named options with Apply():
 //   parser.Apply(
 //       Exist("WITHSCORES", &with_scores),         // tag present -> sets bool true
-//       Flag("KEEPTTL", &flags, Opt::KEEPTTL),     // tag present -> OR bit into a flags field
 //       Tag("LIMIT", &offset, &limit),             // tag -> reads following args
 //       Tag("COUNT", &optional_count),             // std::optional<T>* supported directly
 //       Tag("GET", [&](CmdArgParser* p) {          // lambda: custom parsing on tag match
@@ -74,8 +65,8 @@ namespace facade {
 //       Map(&dir, "ASC", Dir::ASC, "DESC", Dir::DESC),   // tag -> fixed value mapping
 //       Tag("ATTR", Map(&mask, "v", Mask::Volatile,      // nested: outer tag + inner Map
 //                       "p", Mask::Permanent)),          //   (inner keyword required on match)
-//       OneOf(Exist("NX", &nx), Exist("XX", &xx))       // mutex — at most one (add .Repeat() to
-//           .Err("NX and XX are incompatible"),        //   allow the same one twice); custom msg
+//       OneOf(Exist("NX", &nx), Exist("XX", &xx))       // mutex — at most one may match
+//           .Err("NX and XX are incompatible"),        //   custom conflict message (optional)
 //       If(!read_only, Tag("STORE", &store_key)));    // runtime-gated option
 //
 // Strict vs lenient dispatch:
@@ -113,20 +104,11 @@ concept as_vnum = requires(T t) {
 
 struct CmdArgParser;
 
-// A compile-time parser callable for Next<Fn>(): either Fn(CmdArgParser*) (drives the parser, may
-// consume several args) or Fn(std::string_view, RuleError&) (converts the next arg, sets err).
+// A parser callable for Next(fn), taking either fn(CmdArgParser*) (drives the parser, may consume
+// several args) or fn(std::string_view, RuleError&) (converts the next arg, sets err on failure).
 template <class F>
 concept ParserFn =
     std::is_invocable_v<F, CmdArgParser*> || std::is_invocable_v<F, std::string_view, RuleError&>;
-
-// T is ArgParsable if a free `T ParseArg(CmdArgParser*, std::type_identity<T>)` is reachable by
-// ADL; such a T is read by parser.Next<T>(), with the free function driving the parser and
-// reporting its own errors. The type_identity tag carries T for ADL and holds no value to
-// dereference.
-template <class T>
-concept ArgParsable = requires(CmdArgParser* p) {
-  { ParseArg(p, std::type_identity<T>{}) } -> std::same_as<T>;
-};
 
 // Numeric conversion core shared by Num and Number; false if `arg` isn't a round-trippable T.
 template <class T> bool TryParseNum(std::string_view arg, T* out) {
@@ -201,11 +183,6 @@ template <auto min, auto max> using FInt = Validated<decltype(min), InRange<min,
 template <class T> constexpr bool is_optional = false;
 
 template <class U> constexpr bool is_optional<std::optional<U>> = true;
-
-// True for std::optional<U> whose U is ArgParsable; false (without touching value_type) otherwise.
-template <class T> constexpr bool optional_arg_parsable = false;
-
-template <class U> constexpr bool optional_arg_parsable<std::optional<U>> = ArgParsable<U>;
 
 struct CmdArgParser {
   enum ErrorType {
@@ -323,38 +300,30 @@ struct CmdArgParser {
   }
 
   template <class T = std::string_view, class... Ts> auto Next() {
-    if constexpr (sizeof...(Ts) == 0 && ArgParsable<T>) {
-      return ParseArg(this, std::type_identity<T>{});
-    } else if constexpr (sizeof...(Ts) == 0 && optional_arg_parsable<T>) {
-      return T{Next<typename T::value_type>()};
-    } else {
-      if (cur_i_ + sizeof...(Ts) >= args_.size()) {
-        Report(OUT_OF_BOUNDS, cur_i_);
-        return std::conditional_t<sizeof...(Ts) == 0, decltype(Convert<T>(0)),
-                                  std::tuple<T, Ts...>>();
-      }
+    if (cur_i_ + sizeof...(Ts) >= args_.size()) {
+      Report(OUT_OF_BOUNDS, cur_i_);
+      return std::conditional_t<sizeof...(Ts) == 0, decltype(Convert<T>(0)),
+                                std::tuple<T, Ts...>>();
+    }
 
-      if constexpr (sizeof...(Ts) == 0) {
-        auto idx = cur_i_++;
-        return Convert<T>(idx);
-      } else {
-        std::tuple<T, Ts...> res;
-        NextImpl<0>(&res);
-        cur_i_ += sizeof...(Ts) + 1;
-        return res;
-      }
+    if constexpr (sizeof...(Ts) == 0) {
+      auto idx = cur_i_++;
+      return Convert<T>(idx);
+    } else {
+      std::tuple<T, Ts...> res;
+      NextImpl<0>(&res);
+      cur_i_ += sizeof...(Ts) + 1;
+      return res;
     }
   }
 
-  // Runs a compile-time parser callable given as a template arg: parser.Next<Upper>(). Fn is either
-  // Fn(CmdArgParser*) (drives the parser) or Fn(std::string_view, RuleError&) (converts one arg,
-  // its RuleError becoming a report).
-  template <auto Fn>
-  requires ParserFn<decltype(Fn)>
-  auto Next() {
-    using F = decltype(Fn);
+  // Runs a parser callable (see ParserFn): a fn(CmdArgParser*) drives the parser; a
+  // fn(std::string_view, RuleError&) converts the next arg, its RuleError becoming a report.
+  template <class F>
+  requires ParserFn<F>
+  auto Next(F&& fn) {
     if constexpr (std::is_invocable_v<F, CmdArgParser*>) {
-      return Fn(this);
+      return std::forward<F>(fn)(this);
     } else {
       using R = std::invoke_result_t<F, std::string_view, RuleError&>;
       static_assert(std::is_default_constructible_v<R> && !std::is_reference_v<R>,
@@ -365,7 +334,7 @@ struct CmdArgParser {
       }
       size_t idx = cur_i_++;
       RuleError e;
-      R val = Fn(SafeSV(idx), e);
+      R val = std::forward<F>(fn)(SafeSV(idx), e);
       if (e.failed)
         Report(e.msg.empty() ? INVALID_CASES : CUSTOM_ERROR, idx, std::string{e.msg});
       return e.failed ? R{} : val;
@@ -421,12 +390,11 @@ struct CmdArgParser {
     return HasNext() ? Next<T>() : default_value;
   }
 
-  // Like NextOrDefault<T>(), but runs a compile-time parser callable:
-  // NextOrDefault<ParseGeoUnit>(1).
-  template <auto Fn>
-  requires ParserFn<decltype(Fn)>
-  auto NextOrDefault(auto default_value) {
-    return HasNext() ? Next<Fn>() : default_value;
+  // Runs a parser callable (see ParserFn) if an arg remains, else returns default_value.
+  template <class F, class D>
+  requires ParserFn<F>
+  auto NextOrDefault(F&& fn, D default_value) {
+    return HasNext() ? Next(std::forward<F>(fn)) : default_value;
   }
 
   // Consumes the next arg; reports INVALID_NEXT if it doesn't match (case-insensitive).
@@ -657,28 +625,9 @@ struct CmdArgParser {
   ErrorInfo error_;
 };
 
-// Default parser callable for arithmetic types: Next<Number<int>>() behaves like Next<int>().
+// Default parser callable for arithmetic types: Next(Number<int>) behaves like Next<int>().
 template <class T> T Number(CmdArgParser* parser) {
   return parser->Next<T>();
-}
-
-// Parser callable that ASCII-uppercases the next arg: parser.Next<Upper>().
-inline std::string Upper(std::string_view arg, RuleError&) {
-  return absl::AsciiStrToUpper(arg);
-}
-
-// A [min, max] pair read from two consecutive T args; reports Msg if min > max. Read with
-// parser.Next<MinMax<...>>() or Tag(tag, &field) for an optional<MinMax<...>> field. Msg is a
-// reference NTTP: give it external linkage (inline constexpr) so a MinMax type exposed across
-// translation units stays a single entity (a header-local `constexpr` message would break ODR).
-template <class T, const auto& Msg> struct MinMax { T min{}, max{}; };
-
-template <class T, const auto& Msg>
-MinMax<T, Msg> ParseArg(CmdArgParser* p, std::type_identity<MinMax<T, Msg>>) {
-  auto [lo, hi] = p->Next<T, T>();
-  if (lo > hi)
-    p->ReportCustom(std::string{Msg});
-  return {lo, hi};
 }
 
 namespace detail {
@@ -710,20 +659,6 @@ struct ExistOpt : OptBase<ExistOpt> {
   bool TryApply(CmdArgParser* parser) const {
     if (parser->Check(tag)) {
       *field = true;
-      return true;
-    }
-    return false;
-  }
-};
-
-template <class T> struct FlagOpt : OptBase<FlagOpt<T>> {
-  std::string_view tag;
-  T* field;
-  T value;
-
-  bool TryApply(CmdArgParser* parser) const {
-    if (parser->Check(tag)) {
-      *field |= value;
       return true;
     }
     return false;
@@ -793,35 +728,18 @@ template <class Inner> struct IfOpt : OptBase<IfOpt<Inner>> {
   }
 };
 
-// At most one option from the group may match; a second match reports .Err(msg)/INVALID_CASES.
-// .Repeat() tolerates the same option repeating (only a different one conflicts), e.g. EXPIRE NX
-// NX.
 template <class... Opts> struct OneOfOpt : OptBase<OneOfOpt<Opts...>> {
   std::tuple<Opts...> opts;
-  bool allow_repeat = false;
-  mutable int matched = -1;  // matched option index, -1 = none yet
-
-  OneOfOpt&& Repeat() && {
-    allow_repeat = true;
-    return std::move(*this);
-  }
+  mutable bool matched = false;
 
   bool TryApply(CmdArgParser* parser) const {
-    return TryAt<0>(parser);
-  }
-
- private:
-  template <size_t I> bool TryAt(CmdArgParser* parser) const {
-    if constexpr (I >= sizeof...(Opts)) {
+    bool any = std::apply([&](auto&... os) { return (os.TryApply(parser) || ...); }, opts);
+    if (!any)
       return false;
-    } else if (std::get<I>(opts).TryApply(parser)) {
-      if (matched != -1 && (!allow_repeat || matched != int(I)))
-        this->ReportErr(parser);
-      matched = I;
-      return true;
-    } else {
-      return TryAt<I + 1>(parser);
-    }
+    if (matched)
+      this->ReportErr(parser);
+    matched = true;
+    return true;
   }
 };
 
@@ -850,12 +768,6 @@ concept ParseOption = requires(const T& t, CmdArgParser* p) {
 
 inline detail::ExistOpt Exist(std::string_view tag, bool* field) {
   return {{}, tag, field};
-}
-
-// tag present -> ORs `value` into `*field` (e.g. a bitmask of flags).
-template <class T>
-detail::FlagOpt<T> Flag(std::string_view tag, T* field, std::type_identity_t<T> value) {
-  return {{}, tag, field, value};
 }
 
 template <class... Args> detail::TagOpt<Args...> Tag(std::string_view tag, Args*... args) {

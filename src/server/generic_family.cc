@@ -1126,14 +1126,17 @@ void TtlGeneric(string_view key, TimeUnit unit, CommandContext* cmd_cntx) {
 
 int32_t ParseExpireOptions(CmdArgParser* parser) {
   int32_t flags = ExpireFlags::EXPIRE_ALWAYS;
-  parser->Apply(
-      OneOf(Flag("NX", &flags, ExpireFlags::EXPIRE_NX), Flag("XX", &flags, ExpireFlags::EXPIRE_XX))
-          .Repeat()
-          .Err("NX and XX options at the same time are not compatible"),
-      OneOf(Flag("GT", &flags, ExpireFlags::EXPIRE_GT), Flag("LT", &flags, ExpireFlags::EXPIRE_LT))
-          .Repeat()
-          .Err("GT and LT options at the same time are not compatible"));
+  parser->Apply(Tag("NX", [&](CmdArgParser*) { flags |= ExpireFlags::EXPIRE_NX; }),
+                Tag("XX", [&](CmdArgParser*) { flags |= ExpireFlags::EXPIRE_XX; }),
+                Tag("GT", [&](CmdArgParser*) { flags |= ExpireFlags::EXPIRE_GT; }),
+                Tag("LT", [&](CmdArgParser*) { flags |= ExpireFlags::EXPIRE_LT; }));
   parser->Finalize("Unsupported option: ");
+
+  // NX/XX and GT/LT are mutually exclusive; duplicate flags (e.g. NX NX) are tolerated like Redis.
+  if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ExpireFlags::EXPIRE_XX))
+    parser->ReportCustom("NX and XX options at the same time are not compatible");
+  if ((flags & ExpireFlags::EXPIRE_GT) && (flags & ExpireFlags::EXPIRE_LT))
+    parser->ReportCustom("GT and LT options at the same time are not compatible");
   return flags;
 }
 
@@ -1386,7 +1389,7 @@ void GenericFamily::Persist(facade::CmdArgParser parser, CommandContext* cmd_cnt
 
 void GenericFamily::Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
-  int32_t expire_options = parser.Next<ParseExpireOptions>();
+  int32_t expire_options = parser.Next(ParseExpireOptions);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
@@ -1405,7 +1408,7 @@ void GenericFamily::Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx
 
 void GenericFamily::ExpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
-  int32_t expire_options = parser.Next<ParseExpireOptions>();
+  int32_t expire_options = parser.Next(ParseExpireOptions);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
@@ -1450,7 +1453,7 @@ void GenericFamily::Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
 void GenericFamily::PexpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
-  int32_t expire_options = parser.Next<ParseExpireOptions>();
+  int32_t expire_options = parser.Next(ParseExpireOptions);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
@@ -1473,7 +1476,7 @@ void GenericFamily::PexpireAt(facade::CmdArgParser parser, CommandContext* cmd_c
 
 void GenericFamily::Pexpire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, int_arg] = parser.Next<string_view, int64_t>();
-  int32_t expire_options = parser.Next<ParseExpireOptions>();
+  int32_t expire_options = parser.Next(ParseExpireOptions);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
