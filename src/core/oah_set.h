@@ -282,15 +282,14 @@ class OAHSet {  // Open Addressing Hash Set
       return 0;
 
     uint32_t bucket_id = cursor >> (32 - capacity_log_);
+    const bool expire = expiration_used_;
 
-    // First find the bucket to scan, skip empty buckets.
+    // First find the bucket to scan, skip empty buckets. Dispatch the per-entry expiry handling
+    // once via the compile-time-specialized ScanHomeBucket (no-TTL sets skip it entirely).
     for (; bucket_id < BucketCount(); ++bucket_id) {
-      bool res = false;
-      for (uint32_t i = 0; i < kDisplacementSize; i++) {
-        const uint32_t shifted_bid = bucket_id + i;
-        res |= ScanBucket(At(shifted_bid), cb, bucket_id);
-      }
-      if (res)
+      const bool reported =
+          expire ? ScanHomeBucket<true>(bucket_id, cb) : ScanHomeBucket<false>(bucket_id, cb);
+      if (reported)
         break;
     }
 
@@ -399,17 +398,17 @@ class OAHSet {  // Open Addressing Hash Set
       return;
 
     for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
-      if (bucket[pos]) {
-        // Check for TTL expiration during shrink - skip expired elements
-        if (bucket[pos].HasExpiry() && bucket[pos].GetExpiry() <= time_now_) {
-          obj_alloc_used_ -= bucket[pos].AllocSize();
-          --size_;
-          continue;
-        }
-
-        uint32_t new_bucket_id = FindEmptyAround(RehashEntry(bucket[pos]));
-        ptr_vectors_alloc_used_ += At(new_bucket_id).Insert(bucket.Remove(pos));
+      OAHEntry entry = bucket[pos];
+      if (!entry)
+        continue;
+      // Drop entries whose TTL has passed instead of rehashing them (no-TTL sets skip the check).
+      if (expiration_used_ && IsExpired(entry)) {
+        obj_alloc_used_ -= entry.AllocSize();
+        --size_;
+        continue;
       }
+      uint32_t new_bucket_id = FindEmptyAround(RehashEntry(entry));
+      ptr_vectors_alloc_used_ += At(new_bucket_id).Insert(bucket.Remove(pos));
     }
 
     if (bucket.IsVector()) {
@@ -422,31 +421,6 @@ class OAHSet {  // Open Addressing Hash Set
   static uint32_t GetExtensionPoint(uint32_t bid) {
     constexpr uint32_t extension_point_shift = kDisplacementSize - 1;
     return bid | extension_point_shift;
-  }
-
-  template <std::invocable<std::string_view> T>
-  bool ScanBucket(OAHPtr entry, const T& cb, uint32_t bucket_id) {
-    if (!entry.IsVector()) {
-      OAHEntry e = entry[0];
-      e.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
-      if (CheckBucketAffiliation(e, bucket_id)) {
-        cb(e.Key());
-        return true;
-      }
-    } else {
-      auto arr = entry.AsVector();
-      bool result = false;
-      for (TaggedPtr& cell : arr) {
-        OAHEntry el(cell);
-        el.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
-        if (CheckBucketAffiliation(el, bucket_id)) {
-          cb(el.Key());
-          result = true;
-        }
-      }
-      return result;
-    }
-    return false;
   }
 
   uint32_t EntryTTL(uint32_t ttl_sec) const {
@@ -476,49 +450,48 @@ class OAHSet {  // Open Addressing Hash Set
     uint32_t empties;     // empty lanes (data_ == 0); Add picks a slot from these
   };
 
-  // Vectorized hash probe over Wide::kLanes consecutive lanes from `base`. Backs
-  // the window (EntryWide) and extension-vector (VectorWide) scans.
+  // Vectorized hash probe over Wide::kLanes consecutive lanes from `base`. `shifted_ext_hash` is
+  // the query pre-shifted to bits [kExtHashShift, 64) so the stored hash is compared in place.
   template <typename Wide>
-  static LaneMasks ProbeLanes(const TaggedPtr* base, uint64_t ext_hash) noexcept;
+  static LaneMasks ProbeLanes(const TaggedPtr* base, uint64_t shifted_ext_hash) noexcept;
 
   // Combined candidate/empty masks over the whole window (lane i -> bit i).
   LaneMasks ProbeWindow(const TaggedPtr* base, uint64_t ext_hash) noexcept;
 
-  // Searches the extension-point vector for `str`. Returns the matched slot
-  // (possibly now-empty after expiry, which the caller reuses) or nullptr.
+  // ProbeWindow variant taking the already-shifted fingerprint (see the .cc for why they split).
+  LaneMasks ProbeWindowShifted(const TaggedPtr* base, uint64_t shifted_ext_hash) noexcept;
+
+  // Returns lanes in a scan window holding single entries affiliated with the
+  // home bucket, and separately reports vector lanes.
+  static uint32_t ScanWindowMask(const TaggedPtr* base, uint64_t target, uint32_t shift,
+                                 uint32_t* vector_mask_out) noexcept;
+
+  // Lanes affiliated with the home bucket (top `part` bits of ext-hash == target) and
+  // non-empty. Used for the extension-point vector (no vector-bit lanes to exclude).
+  template <typename Wide>
+  static uint32_t AffiliationMask(const TaggedPtr* base, uint64_t target, uint32_t shift) noexcept;
+
+  // Scans one stable-SCAN home bucket window and reports live affiliated entries. Templated on
+  // Expire: no-TTL sets skip the per-entry lazy expiration and the post-expiry empty re-check.
+  template <bool Expire> bool ScanHomeBucket(uint32_t bucket_id, const ItemCb& cb);
+
+  // Searches the extension-point vector for `str`. Returns the matched slot, or nullptr if absent.
+  // Callers derive the vector position (Find) or the in-vector flag (Erase) from the result; it
+  // does not expire, so the returned entry may be live or already-expired.
   TaggedPtr* ProbeExtensionVector(uint32_t ext_bid, std::string_view str, uint64_t ext_hash);
 
-  // Outcome of a key probe. A raw slot (not an iterator) so the caller can reuse a
-  // matched-but-just-expired entry, which is Empty() and would trip operator[]'s assert.
-  struct MatchResult {
-    TaggedPtr* matched;   // ptr to matched cell, or null if absent; may be 0 (just expired)
-    uint32_t bucket_id;   // location of `matched`, for building an iterator
-    uint32_t pos_in_vec;  // position within a vector bucket (0 for single entries)
-  };
-
-  // Shared core of AddImpl and FindInternal: scans the window (cand_bits from a
-  // prior ProbeLanes) then the extension vector for `str`.
-  MatchResult FindMatch(uint32_t bid, uint32_t ext_bid, uint32_t cand_bits, std::string_view str,
-                        uint64_t ext_hash);
-
-  // Probes for `str`; returns an iterator to the live entry or end(). Shared by
-  // Find and Erase.
-  iterator FindInternal(uint32_t bid, std::string_view str, uint64_t hash);
+  // Probes for `str`; returns an iterator to the live entry or end(). Used by Find. Templated on
+  // Expire: when no TTLs exist a key match is provably live, so the empty re-check is dropped.
+  template <bool Expire> iterator FindInternal(uint32_t bid, std::string_view str, uint64_t hash);
 
   static uint64_t CalcExtHash(uint64_t hash, uint32_t capacity_log) {
     const uint32_t start_hash_bit = capacity_log > kShiftLog ? capacity_log - kShiftLog : 0;
     const uint32_t ext_hash_shift = 64 - start_hash_bit - OAHEntry::kExtHashSize;
-    return (hash >> ext_hash_shift) & OAHEntry::kExtHashMask;
-  }
-
-  bool CheckBucketAffiliation(OAHEntry entry, uint32_t bucket_id) {
-    if (entry.Empty())
-      return false;
-    uint32_t bucket_id_hash_part = capacity_log_ > kShiftLog ? kShiftLog : capacity_log_;
-    uint32_t bucket_mask = (1 << bucket_id_hash_part) - 1;
-    bucket_id &= bucket_mask;
-    uint32_t stored_bucket_id = entry.GetHash() >> (OAHEntry::kExtHashSize - bucket_id_hash_part);
-    return bucket_id == stored_bucket_id;
+    const uint64_t h = (hash >> ext_hash_shift) & OAHEntry::kExtHashMask;
+    // Remap the rare all-zero fingerprint to 1 so empty (all-zero) slots never match a real
+    // entry, letting the SIMD probes drop the empty mask. Full entropy otherwise; home-prefix
+    // bits stay 0.
+    return h ? h : 1;
   }
 
   // Recomputes the entry's hash, refreshes its stored ext-hash, and returns its new bucket.
@@ -526,6 +499,23 @@ class OAHSet {  // Open Addressing Hash Set
     uint64_t hash = Hash(entry.Key());
     entry.SetExtHash(CalcExtHash(hash, capacity_log_));
     return BucketId(hash, capacity_log_);
+  }
+
+  // Lazily expires `entry` when it carries a live TTL. Templated on Expire so no-TTL callers
+  // select the <false> instantiation, whose body compiles to nothing.
+  template <bool Expire> void ExpireIfNeeded(OAHEntry entry) {
+    if constexpr (Expire)
+      entry.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+  }
+
+  // Runtime dispatch on expiration_used_: no-TTL sets run no expiry code at all.
+  void ExpireIfNeeded(OAHEntry entry) {
+    expiration_used_ ? ExpireIfNeeded<true>(entry) : ExpireIfNeeded<false>(entry);
+  }
+
+  // True when `entry`'s TTL has elapsed (HasExpiry() already covers the no-TTL case).
+  bool IsExpired(OAHEntry entry) const {
+    return entry.HasExpiry() && entry.GetExpiry() <= time_now_;
   }
 
   mutable size_t obj_alloc_used_ = 0;

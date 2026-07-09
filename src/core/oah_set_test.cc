@@ -1232,7 +1232,9 @@ void BM_Scan(benchmark::State& state) {
     size_t seen = 0;
     do {
       cursor = ss.Scan(cursor, [&](auto key) {
-        benchmark::DoNotOptimize(key);
+        // Reading the key size dereferences the key blob, simulating real usage where the
+        // scanned key is actually consumed (a bare no-op callback would hide that memory cost).
+        benchmark::DoNotOptimize(key.size());
         ++seen;
       });
     } while (cursor != 0);

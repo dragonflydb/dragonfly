@@ -4,6 +4,7 @@
 
 #include "core/oah_set.h"
 
+#include <algorithm>
 #include <bit>
 
 #include "base/logging.h"
@@ -11,26 +12,131 @@
 namespace dfly {
 
 template <typename Wide>
-OAHSet::LaneMasks OAHSet::ProbeLanes(const TaggedPtr* base, uint64_t ext_hash) noexcept {
+OAHSet::LaneMasks OAHSet::ProbeLanes(const TaggedPtr* base, uint64_t shifted_ext_hash) noexcept {
+  DCHECK_NE(shifted_ext_hash, 0u);  // never 0 (CalcExtHash remap), so empty lanes can't match
   auto data_v = Wide::Load(base);
-  auto hash_v = (data_v & Wide::Fill(OAHEntry::kExtHashShiftedMask)) >> OAHEntry::kExtHashShift;
-  // ~is_empty excludes empty lanes, whose zero hash would otherwise match a zero query hash.
+  // Mask covers the vector bit so vector slots never match a candidate (window probes then need
+  // no per-candidate IsVector test); ext-hash is never 0, so empty lanes can't match the query.
+  auto stored = data_v & Wide::Fill(OAHEntry::kExtHashShiftedMask | OAHPtr::kVectorBit);
   auto is_empty = data_v == uint64_t(0);
-  auto candidate = (hash_v == ext_hash) & ~is_empty;
+  auto candidate = stored == shifted_ext_hash;
   return {candidate.GetMSBs(), is_empty.GetMSBs()};
 }
 
 // Window may exceed one SIMD register: sweep in EntryWide strides, packing each
 // stride's masks (lane i of stride `off` -> bit off+i). uint32_t masks => <= 32 lanes.
+// Takes the unshifted fingerprint and shifts it in place. Erase/Find use this so the shift
+// stays out of their (larger) inlined bodies -- inlining it there measured a codegen regression.
 OAHSet::LaneMasks OAHSet::ProbeWindow(const TaggedPtr* base, uint64_t ext_hash) noexcept {
+  const uint64_t shifted_ext_hash = ext_hash << OAHEntry::kExtHashShift;
   LaneMasks w{0, 0};
   for (uint32_t off = 0; off < kDisplacementSize; off += EntryWide::kLanes) {
-    const LaneMasks m = ProbeLanes<EntryWide>(base + off, ext_hash);
+    const LaneMasks m = ProbeLanes<EntryWide>(base + off, shifted_ext_hash);
     w.candidates |= m.candidates << off;
     w.empties |= m.empties << off;
   }
   return w;
 }
+
+// Twin of ProbeWindow taking the already-shifted fingerprint (no internal shift). AddImpl uses it
+// because it also needs the shifted value for SetShiftedExtHash -- one shift instead of two.
+OAHSet::LaneMasks OAHSet::ProbeWindowShifted(const TaggedPtr* base,
+                                             uint64_t shifted_ext_hash) noexcept {
+  LaneMasks w{0, 0};
+  for (uint32_t off = 0; off < kDisplacementSize; off += EntryWide::kLanes) {
+    const LaneMasks m = ProbeLanes<EntryWide>(base + off, shifted_ext_hash);
+    w.candidates |= m.candidates << off;
+    w.empties |= m.empties << off;
+  }
+  return w;
+}
+
+uint32_t OAHSet::ScanWindowMask(const TaggedPtr* base, uint64_t target, uint32_t shift,
+                                uint32_t* vector_mask_out) noexcept {
+  uint32_t cand = 0;
+  uint32_t vec = 0;
+  for (uint32_t off = 0; off < kDisplacementSize; off += EntryWide::kLanes) {
+    const EntryWide data = EntryWide::Load(base + off);
+    const uint32_t isvec =
+        ((data & EntryWide::Fill(OAHPtr::kVectorBit)) == OAHPtr::kVectorBit).GetMSBs();
+    const uint32_t matched = ((data >> shift) == target).GetMSBs();
+    // target == 0 also matches all-zero empties; drop them here (cheaper than a scalar re-read).
+    const uint32_t is_empty = (data == uint64_t(0)).GetMSBs();
+    cand |= (matched & ~is_empty & ~isvec) << off;
+    vec |= isvec << off;
+  }
+  *vector_mask_out = vec;
+  return cand;
+}
+
+template <typename Wide>
+uint32_t OAHSet::AffiliationMask(const TaggedPtr* base, uint64_t target, uint32_t shift) noexcept {
+  const Wide data = Wide::Load(base);
+  // Vector arrays may hold empty slots; exclude them so target == 0 doesn't report holes.
+  const uint32_t matched = ((data >> shift) == target).GetMSBs();
+  const uint32_t is_empty = (data == uint64_t(0)).GetMSBs();
+  return matched & ~is_empty;
+}
+
+template <bool Expire> bool OAHSet::ScanHomeBucket(uint32_t bucket_id, const ItemCb& cb) {
+  const uint32_t part = std::min(capacity_log_, kShiftLog);
+  DCHECK_GT(part, 0u);
+  // ScanWindowMask drops empty lanes, so `cand` holds only affiliated non-empty single entries.
+  const uint32_t shift = 64 - part;
+  const uint64_t target = bucket_id & ((uint64_t{1} << part) - 1);
+
+  const TaggedPtr* base = &entries_[bucket_id];
+  // Prefetch every window slot's blob to overlap the loads with the SIMD mask below (an empty
+  // slot prefetches null, a no-op).
+  for (uint32_t i = 0; i < kDisplacementSize; ++i)
+    PREFETCH_READ(reinterpret_cast<const char*>(base[i] & ~OAHEntry::kTagMask));
+
+  uint32_t vec_mask = 0;
+  uint32_t cand = ScanWindowMask(base, target, shift, &vec_mask);
+  bool reported = false;
+
+  while (cand) {
+    const uint32_t i = std::countr_zero(cand);
+    cand &= cand - 1;
+    OAHEntry e = At(bucket_id + i)[0];
+    if constexpr (Expire) {
+      ExpireIfNeeded(e);
+      if (e.Empty())
+        continue;
+    }
+    cb(e.Key());
+    reported = true;
+  }
+
+  if (vec_mask) {
+    DCHECK_EQ(vec_mask & (vec_mask - 1), 0u);
+    const uint32_t vi = std::countr_zero(vec_mask);
+    auto vec = At(bucket_id + vi).AsVector();
+    TaggedPtr* raw = vec.Raw();
+    const size_t vsize = vec.Size();
+    for (size_t b = 0; b < vsize; b += VectorWide::kLanes) {
+      uint32_t m = AffiliationMask<VectorWide>(&raw[b], target, shift);
+      while (m) {
+        const uint32_t j = std::countr_zero(m);
+        m &= m - 1;
+        OAHEntry el(raw[b + j]);
+        if constexpr (Expire) {
+          ExpireIfNeeded(el);
+          if (el.Empty())
+            continue;
+        }
+        cb(el.Key());
+        reported = true;
+      }
+    }
+  }
+
+  return reported;
+}
+
+// Explicit instantiations so the inline Scan (in the header) can call both specializations.
+template bool OAHSet::ScanHomeBucket<true>(uint32_t, const ItemCb&);
+template bool OAHSet::ScanHomeBucket<false>(uint32_t, const ItemCb&);
 
 // 2-lane SIMD strides. Vector sizes are always even (PtrVector grows by 2), so the
 // stride covers the array with no tail.
@@ -41,44 +147,19 @@ TaggedPtr* OAHSet::ProbeExtensionVector(uint32_t ext_bid, std::string_view str, 
   DCHECK_GE(size, size_t(kVectorLaneStep));
   DCHECK_EQ(size % kVectorLaneStep, 0u);
 
+  const uint64_t shifted_ext_hash = ext_hash << OAHEntry::kExtHashShift;
   for (size_t base = 0; base < size; base += kVectorLaneStep) {
     auto cand_bits =
-        ProbeLanes<VectorWide>(reinterpret_cast<const uint64_t*>(&raw_arr[base]), ext_hash)
+        ProbeLanes<VectorWide>(reinterpret_cast<const uint64_t*>(&raw_arr[base]), shifted_ext_hash)
             .candidates;
     while (cand_bits) {
       const uint32_t j = std::countr_zero(cand_bits);
       cand_bits &= cand_bits - 1;
-      OAHEntry re(raw_arr[base + j]);
-      const bool match = re.Key() == str;
-      re.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
-      if (match)
+      if (OAHEntry(raw_arr[base + j]).Key() == str)
         return &raw_arr[base + j];
     }
   }
   return nullptr;
-}
-
-// Window read stays in bounds: entries_ has kDisplacementSize-1 slack past BucketCount.
-OAHSet::MatchResult OAHSet::FindMatch(uint32_t bid, uint32_t ext_bid, uint32_t cand_bits,
-                                      std::string_view str, uint64_t ext_hash) {
-  while (cand_bits) {
-    const uint32_t i = std::countr_zero(cand_bits);
-    cand_bits &= cand_bits - 1;
-    const uint32_t bucket_id = bid + i;
-    OAHPtr p = At(bucket_id);
-    if (p.IsVector())  // vectors live only at the extension point
-      continue;
-    OAHEntry e = p[0];
-    const bool match = e.Key() == str;
-    e.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
-    if (match)
-      return {&entries_[bucket_id], bucket_id, 0};
-  }
-  if (At(ext_bid).IsVector()) {
-    if (TaggedPtr* hit = ProbeExtensionVector(ext_bid, str, ext_hash))
-      return {hit, ext_bid, static_cast<uint32_t>(hit - At(ext_bid).AsVector().Raw())};
-  }
-  return {nullptr, 0, 0};
 }
 
 bool OAHSet::AddImpl(std::string_view str, uint32_t ttl_sec) {
@@ -91,8 +172,12 @@ bool OAHSet::AddImpl(std::string_view str, uint32_t ttl_sec) {
   auto bucket_id = BucketId(hash, capacity_log_);
   PREFETCH_READ(entries_.data() + bucket_id);
 
+  const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
+  const uint64_t shifted_ext_hash = ext_hash << OAHEntry::kExtHashShift;
+
   const ssize_t mem_before = zmalloc_used_memory_tl;
   TaggedPtr entry_tagged_ptr = OAHEntry::Create(str, EntryTTL(ttl_sec));
+  OAHEntry(entry_tagged_ptr).SetShiftedExtHash(shifted_ext_hash);  // reuse the shifted value
   if (ttl_sec != UINT32_MAX)
     expiration_used_ = true;
   const size_t entry_alloc_size = zmalloc_used_memory_tl - mem_before;
@@ -100,26 +185,42 @@ bool OAHSet::AddImpl(std::string_view str, uint32_t ttl_sec) {
   const uint32_t ext_bid = GetExtensionPoint(bucket_id);
   PREFETCH_READ(At(ext_bid).Raw());
 
-  const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
-  OAHEntry new_entry(entry_tagged_ptr);
-  new_entry.SetExtHash(ext_hash);
+  const LaneMasks masks = ProbeWindowShifted(&entries_[bucket_id], shifted_ext_hash);
 
-  const LaneMasks masks = ProbeWindow(&entries_[bucket_id], ext_hash);
-  const MatchResult m = FindMatch(bucket_id, ext_bid, masks.candidates, str, ext_hash);
-  if (m.matched && *m.matched != 0) {
-    OAHEntry::Destroy(entry_tagged_ptr);  // duplicate already present: discard the new blob
-    return false;
+  // Add/Find/Erase each inline their own probe (measured faster than a shared helper). Add needs
+  // only the matched cell, for the duplicate check and slot reuse.
+  TaggedPtr* matched = nullptr;
+  TaggedPtr* base = entries_.data();
+  for (uint32_t cand_bits = masks.candidates; cand_bits; cand_bits &= cand_bits - 1) {
+    TaggedPtr* cell = &base[bucket_id + std::countr_zero(cand_bits)];
+    if (OAHEntry(*cell).Key() == str) {
+      matched = cell;
+      break;
+    }
+  }
+  if (!matched && At(ext_bid).IsVector())
+    matched = ProbeExtensionVector(ext_bid, str, ext_hash);
+
+  if (matched) {
+    OAHEntry dup(*matched);
+    ExpireIfNeeded(dup);  // reap an already-expired duplicate so its cell can be reused
+    if (!dup.Empty()) {
+      OAHEntry::Destroy(entry_tagged_ptr);  // live duplicate
+      return false;
+    }
+    // Reaped an expired duplicate: its cell is empty, so reuse it in place.
+    obj_alloc_used_ += entry_alloc_size;
+    ++size_;
+    *matched = entry_tagged_ptr;
+    return true;
   }
 
   obj_alloc_used_ += entry_alloc_size;
   ++size_;
-  // Reuse an expired duplicate's slot, else a free window lane, else spill to the vector.
-  if (m.matched) {
-    *m.matched = entry_tagged_ptr;
-  } else if (masks.empties) {
+  if (masks.empties) {
     At(bucket_id + std::countr_zero(masks.empties)).Assign(entry_tagged_ptr);
   } else {
-    ptr_vectors_alloc_used_ += At(ext_bid).Insert(entry_tagged_ptr);
+    ptr_vectors_alloc_used_ += At(ext_bid).InsertNonEmpty(entry_tagged_ptr);  // window full
   }
   return true;
 }
@@ -144,47 +245,100 @@ unsigned OAHSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bo
   return res;
 }
 
+template <bool Expire>
 OAHSet::iterator OAHSet::FindInternal(uint32_t bid, std::string_view str, uint64_t hash) {
   const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
-  const uint32_t cand_bits = ProbeWindow(&entries_[bid], ext_hash).candidates;
-  const MatchResult m = FindMatch(bid, GetExtensionPoint(bid), cand_bits, str, ext_hash);
-  if (m.matched && *m.matched != 0)  // empty => matched but just expired, i.e. gone
-    return iterator{this, m.bucket_id, m.pos_in_vec};
+  const LaneMasks masks = ProbeWindow(&entries_[bid], ext_hash);
+
+  // Find returns an iterator built straight from the match. With no TTLs a key match is always
+  // live, so ExpireIfNeeded and the resulting empty re-check are compiled out.
+  TaggedPtr* base = entries_.data();
+  for (uint32_t cand_bits = masks.candidates; cand_bits; cand_bits &= cand_bits - 1) {
+    const uint32_t bucket_id = bid + std::countr_zero(cand_bits);
+    OAHEntry e(base[bucket_id]);
+    if (e.Key() == str) {
+      if constexpr (Expire) {
+        ExpireIfNeeded(e);
+        if (e.Empty())
+          return end();
+      }
+      return iterator{this, bucket_id, 0};
+    }
+  }
+  const uint32_t ext_bid = GetExtensionPoint(bid);
+  if (At(ext_bid).IsVector()) {
+    if (TaggedPtr* hit = ProbeExtensionVector(ext_bid, str, ext_hash)) {
+      if constexpr (Expire) {
+        OAHEntry e(*hit);
+        ExpireIfNeeded(e);
+        if (e.Empty())
+          return end();
+      }
+      return iterator{this, ext_bid, static_cast<uint32_t>(hit - At(ext_bid).AsVector().Raw())};
+    }
+  }
   return end();
 }
 
 OAHSet::iterator OAHSet::Find(std::string_view member) {
   if (entries_.empty())
     return end();
-  uint64_t hash = Hash(member);
-  return FindInternal(BucketId(hash, capacity_log_), member, hash);
+  const uint64_t hash = Hash(member);
+  const uint32_t bid = BucketId(hash, capacity_log_);
+  return expiration_used_ ? FindInternal<true>(bid, member, hash)
+                          : FindInternal<false>(bid, member, hash);
 }
 
 bool OAHSet::Erase(std::string_view str) {
   if (entries_.empty())
     return false;
-  uint64_t hash = Hash(str);
-  auto item = FindInternal(BucketId(hash, capacity_log_), str, hash);
-  if (item == end())
+  const uint64_t hash = Hash(str);
+  const uint32_t bid = BucketId(hash, capacity_log_);
+  const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
+  const LaneMasks masks = ProbeWindow(&entries_[bid], ext_hash);
+
+  // Erase keeps the matched cell (to free it) and whether the hit lives in an extension vector.
+  TaggedPtr* matched = nullptr;
+  TaggedPtr* base = entries_.data();
+  for (uint32_t cand_bits = masks.candidates; cand_bits; cand_bits &= cand_bits - 1) {
+    TaggedPtr* cell = &base[bid + std::countr_zero(cand_bits)];
+    if (OAHEntry(*cell).Key() == str) {
+      matched = cell;
+      break;
+    }
+  }
+  const uint32_t ext_bid = GetExtensionPoint(bid);
+  bool in_vector = false;
+  if (!matched && At(ext_bid).IsVector()) {
+    matched = ProbeExtensionVector(ext_bid, str, ext_hash);
+    in_vector = matched != nullptr;
+  }
+  if (!matched)
     return false;
+
+  OAHEntry victim(*matched);
+  const bool removed = !IsExpired(victim);  // already-expired target => not-removed (like Redis)
+
   --size_;
-  OAHEntry victim = *item;
   obj_alloc_used_ -= victim.AllocSize();
   OAHEntry::Destroy(victim.Release());
 
-  OAHPtr bucket = At(item.bucket_id());
-  if (bucket.IsVector() && bucket.AsVector().Empty()) {
-    ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
-    bucket.Clear();
+  if (in_vector) {  // reclaim the vector if the erase emptied it
+    OAHPtr bucket = At(ext_bid);
+    auto vec = bucket.AsVector();
+    if (vec.Empty()) {
+      ptr_vectors_alloc_used_ -= vec.AllocSize();
+      bucket.Clear();
+    }
   }
-  return true;
+  return removed;
 }
 
 OAHSet::iterator OAHSet::PickFromBucket(uint32_t b) {
   OAHPtr bucket = At(b);
   if (!bucket.IsVector()) {
     OAHEntry e = bucket[0];
-    e.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+    ExpireIfNeeded(e);
     return e.Empty() ? end() : iterator{this, b, 0};
   }
   auto vec = bucket.AsVector();
@@ -192,7 +346,7 @@ OAHSet::iterator OAHSet::PickFromBucket(uint32_t b) {
     OAHEntry entry(vec[pos]);
     if (!entry)
       continue;
-    entry.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+    ExpireIfNeeded(entry);
     if (entry)
       return iterator{this, b, pos};
   }
