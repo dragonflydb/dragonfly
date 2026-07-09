@@ -45,9 +45,19 @@ struct SingleHopWaiter {
   void await_suspend(std::coroutine_handle<> handle) const noexcept;
   facade::OpStatus await_resume() const noexcept;
 
+  // Runs the callback and snapshots its status. Scheduled in place of the raw
+  // callback for single-shard hops so await_resume() returns this snapshot
+  // instead of the transaction result, which under pipeline squashing may
+  // already be reused by the next command by the time the coroutine resumes.
+  Transaction::RunnableResult operator()(Transaction* tx, EngineShard* es) const;
+
   CommandContext* cmd_cntx;
   Transaction::RunnableType callback;
   boost::intrusive_ptr<Transaction> tx_keepalive_ = nullptr;
+  mutable facade::OpStatus status_ = facade::OpStatus::OK;
+  // Set when status_ holds the hop result (single-shard). Multi-shard hops
+  // aggregate into the transaction and are never squashed onto a reused tx.
+  bool use_snapshot_ = false;
 };
 
 // Extension of SingleHopWaiter capturing the return value of the callback
