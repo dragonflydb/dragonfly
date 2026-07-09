@@ -33,6 +33,8 @@ jobs:
             --show-diff-on-failure --color=always
             --from-ref ${{ github.event.pull_request.base.sha }}
             --to-ref ${{ github.event.pull_request.head.sha }}
+      - name: Check fuzz command coverage
+        run: python3 fuzz/check_fuzz_coverage.py
   build:
     permissions:
       contents: read
