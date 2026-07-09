@@ -75,6 +75,7 @@ type ClientWorker struct {
 	listenerType uint8
 
 	incoming  chan Record
+	stopCh    <-chan struct{}
 	processed uint
 }
 
@@ -105,7 +106,7 @@ type FileWorker struct {
 	clientGroup sync.WaitGroup
 	timeOffset  time.Duration
 	skipUntil   uint64
-	stopUntil   uint64 // timestamp when to stop processing traffic (0 = no limit)
+	stopCh      <-chan struct{}
 	// stats for output, updated by clients, read by rendering goroutine
 	processed uint64
 	delayed   uint64
@@ -217,8 +218,52 @@ func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 	worker.clientGroup.Done()
 }
 
+func (c *ClientWorker) nextRecord() (Record, bool) {
+	if c.stopCh == nil {
+		msg, ok := <-c.incoming
+		return msg, ok
+	}
+
+	select {
+	case <-c.stopCh:
+		return Record{}, false
+	default:
+	}
+
+	select {
+	case msg, ok := <-c.incoming:
+		return msg, ok
+	case <-c.stopCh:
+		return Record{}, false
+	}
+}
+
+func waitForPace(lag time.Duration, stopCh <-chan struct{}) bool {
+	if lag <= 0 {
+		return true
+	}
+	if stopCh == nil {
+		time.Sleep(lag)
+		return true
+	}
+
+	timer := time.NewTimer(lag)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-stopCh:
+		return false
+	}
+}
+
 func (c *ClientWorker) runRedis(pace bool, worker *FileWorker) {
-	for msg := range c.incoming {
+	for {
+		msg, ok := c.nextRecord()
+		if !ok {
+			break
+		}
+
 		if c.processed == 0 && msg.DbIndex != 0 {
 			// There is no easy way to switch, we rely on connection pool consisting only of one connection
 			c.redis.Do(context.Background(), []interface{}{"SELECT", fmt.Sprint(msg.DbIndex)})
@@ -232,8 +277,8 @@ func (c *ClientWorker) runRedis(pace bool, worker *FileWorker) {
 			atomic.AddUint64(&worker.delayed, 1)
 		}
 
-		if pace {
-			time.Sleep(lag)
+		if pace && !waitForPace(lag, c.stopCh) {
+			break
 		}
 
 		c.pipe.Do(context.Background(), msg.values...).Result()
@@ -284,13 +329,18 @@ func (c *ClientWorker) runRedis(pace bool, worker *FileWorker) {
 // on the per-client connection (see mcClient in memcache.go) and the
 // pipeline-range latency digest uses batch size = 1.
 func (c *ClientWorker) runMC(pace bool, worker *FileWorker) {
-	for msg := range c.incoming {
+	for {
+		msg, ok := c.nextRecord()
+		if !ok {
+			break
+		}
+
 		lag := time.Until(worker.HappensAt(time.Unix(0, int64(msg.Time))))
 		if lag < 0 {
 			atomic.AddUint64(&worker.delayed, 1)
 		}
-		if pace {
-			time.Sleep(lag)
+		if pace && !waitForPace(lag, c.stopCh) {
+			break
 		}
 
 		start := time.Now()
@@ -390,6 +440,7 @@ func NewClient(w *FileWorker, pace bool, listenerType uint8) *ClientWorker {
 	client := &ClientWorker{
 		listenerType: listenerType,
 		incoming:     make(chan Record, *fClientBuffer),
+		stopCh:       w.stopCh,
 	}
 
 	// Protocol is decided per file from its header (see FileWorker.Run), so the
@@ -430,6 +481,14 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 	err := parseRecords(file, func(lt uint8) {
 		listenerType = lt
 	}, func(r Record) bool {
+		if w.stopCh != nil {
+			select {
+			case <-w.stopCh:
+				return false
+			default:
+			}
+		}
+
 		client, ok := clients[r.Client]
 		if !ok {
 			// Listener type is uniform for the whole file (file-header), so every
@@ -449,11 +508,15 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 
 		atomic.AddUint64(&w.parsed, 1)
 
-		if w.stopUntil > 0 && r.Time > w.stopUntil {
-			return true
+		if w.stopCh == nil {
+			client.incoming <- r
+		} else {
+			select {
+			case client.incoming <- r:
+			case <-w.stopCh:
+				return false
+			}
 		}
-
-		client.incoming <- r
 		return true
 	}, *fIgnoreParseErrors)
 

@@ -501,6 +501,7 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     absl::StrAppend(&resp->body(), replication_lag_metrics);
   }
 
+  // Fiber and proactor metrics
   AppendMetricWithoutLabels("fiber_switch_total", "", m.fiber_switch_cnt, MetricType::COUNTER,
                             &resp->body());
   double delay_seconds = m.fiber_switch_delay_usec * 1e-6;
@@ -512,6 +513,22 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   double longrun_seconds = m.fiber_longrun_usec * 1e-6;
   AppendMetricWithoutLabels("fiber_longrun_seconds", "", longrun_seconds, MetricType::COUNTER,
                             &resp->body());
+
+  AppendMetricHeader("proactor_completions_total", "Proactor completions by type",
+                     MetricType::COUNTER, &resp->body());
+  AppendMetricValue("proactor_completions_total", m.proactor_stats.completions_fetches, {"type"},
+                    {"batch"}, &resp->body());
+  AppendMetricValue("proactor_completions_total", m.proactor_stats.num_completions, {"type"},
+                    {"count"}, &resp->body());
+
+  AppendMetricHeader("proactor_submits_total", "Proactor submits by type", MetricType::COUNTER,
+                     &resp->body());
+  AppendMetricValue("proactor_submits_total", m.proactor_stats.uring_submit_calls, {"type"},
+                    {"call"}, &resp->body());
+  AppendMetricValue("proactor_submits_total", m.proactor_stats.uring_submit_sqes, {"type"}, {"sqe"},
+                    &resp->body());
+
+  // TX metrics
   AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
 
   {
@@ -717,6 +734,7 @@ void Metrics::Merge(const Metrics& src) {
                              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
                              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
                              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
+                             sizeof(util::fb2::ProactorBase::Stats) +
                              176,  // scalar fields (19 fields) + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
@@ -727,6 +745,7 @@ void Metrics::Merge(const Metrics& src) {
     db_stats[i] += src.db_stats[i];
   events += src.events;
   small_string_bytes += src.small_string_bytes;
+  proactor_stats += src.proactor_stats;
 
   // Aggregate sub-structs.
   shard_stats += src.shard_stats;
@@ -787,6 +806,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
                              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
                              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
                              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
+                             sizeof(util::fb2::ProactorBase::Stats) +
                              176,  // scalar fields (19 fields) + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
@@ -805,6 +825,8 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
   qps = uint64_t(ss->MovingSum6());
   facade_stats = *tl_facade_stats;
   serialization_bytes = SliceSnapshot::GetThreadLocalMemoryUsage();
+
+  proactor_stats = util::fb2::ProactorBase::me()->stats();
 
   if (shard) {
     heap_used_bytes = shard->UsedMemory();

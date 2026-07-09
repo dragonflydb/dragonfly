@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -23,7 +24,7 @@ var fPace = flag.Bool("pace", true, "whether to pace the traffic according to th
 var fSkip = flag.Uint("skip", 0, "skip N records")
 var fSkipTimeSec = flag.Int("skip-time-sec", 0, "skip records in the first N seconds of the recording")
 var fIgnoreParseErrors = flag.Bool("ignore-parse-errors", false, "ignore parsing errors")
-var fTimeLimit = flag.Int("time-limit", 0, "time limit in seconds (0 = no limit)")
+var fTimeLimit = flag.Int("time-limit", 0, "wall-clock time limit in seconds (0 = no limit)")
 
 func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
 	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients", "avg(us)", "p75(us)", "p90(us)", "p99(us)", "p99.9(us)"}}
@@ -95,19 +96,20 @@ func Run(files []string) {
 	timeOffset := time.Now().Add(500 * time.Millisecond).Sub(effectiveBaseTime)
 	fmt.Println("Offset -> ", timeOffset)
 
-	// Calculate stop time based on recording timestamps if time limit is specified
-	var stopUntil uint64
+	var stopCh <-chan struct{}
 	if *fTimeLimit > 0 {
 		limitDuration := time.Duration(*fTimeLimit) * time.Second
-		stopUntil = uint64(effectiveBaseTime.Add(limitDuration).UnixNano())
-		fmt.Printf("Time limit set to %d seconds\n", *fTimeLimit)
+		ctx, cancel := context.WithTimeout(context.Background(), limitDuration)
+		defer cancel()
+		stopCh = ctx.Done()
+		fmt.Printf("Time limit set to %d seconds of wall time\n", *fTimeLimit)
 	}
 
 	// Start a worker for every file. They take care of spawning client workers.
 	var wg sync.WaitGroup
 	workers := make([]FileWorker, len(files))
 	for i := range workers {
-		workers[i] = FileWorker{timeOffset: timeOffset, skipUntil: skipUntil, stopUntil: stopUntil}
+		workers[i] = FileWorker{timeOffset: timeOffset, skipUntil: skipUntil, stopCh: stopCh}
 		wg.Add(1)
 		go workers[i].Run(files[i], &wg)
 	}
