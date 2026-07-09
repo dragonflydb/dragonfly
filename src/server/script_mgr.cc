@@ -72,7 +72,7 @@ ScriptMgr::ScriptKey::ScriptKey(string_view sha) : array{} {
 
 void ScriptMgr::Run(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder,
                     ConnectionContext* cntx) {
-  string subcmd = parser.Next<Upper>();
+  string subcmd = absl::AsciiStrToUpper(parser.Next<string_view>());
 
   if (subcmd == "HELP") {
     string_view kHelp[] = {

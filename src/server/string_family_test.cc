@@ -179,22 +179,6 @@ TEST_F(StringFamilyTest, SetOptionsSyntaxError) {
   EXPECT_THAT(Run({"SET", "foo", "bar", "EX", "18446744073709561"}), ErrArg("invalid expire time"));
 }
 
-// Repeating the same option is tolerated (last one wins), matching Redis; only conflicting options
-// error out (covered by SetOptionsSyntaxError above).
-TEST_F(StringFamilyTest, SetDuplicateOptions) {
-  EXPECT_EQ(Run({"set", "key", "val", "NX", "NX"}), "OK");
-  EXPECT_EQ(Run({"set", "key", "val", "XX", "XX"}), "OK");
-  EXPECT_EQ(Run({"set", "key", "val", "GET", "GET"}), "val");
-  EXPECT_EQ(Run({"set", "key", "val", "KEEPTTL", "KEEPTTL"}), "OK");
-
-  // Last expiry wins.
-  EXPECT_EQ(Run({"set", "key", "val", "EX", "100", "EX", "500"}), "OK");
-  EXPECT_THAT(Run({"ttl", "key"}), IntArg(500));
-
-  // A bad value in a later duplicate is still reported.
-  EXPECT_THAT(Run({"set", "key", "val", "EX", "100", "EX", "abc"}), ErrArg(kInvalidIntErr));
-}
-
 TEST_F(StringFamilyTest, Set) {
   auto resp = Run({"set", "foo", "bar", "XX"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));

@@ -2651,7 +2651,7 @@ void Service::PUnsubscribe(CmdArgParser parser, CommandContext* cmd_cntx) {
 // Not a real implementation. Serves as a decorator to accept some function commands
 // for testing.
 void Service::Function(CmdArgParser parser, CommandContext* cmd_cntx) {
-  string sub_cmd = parser.Next<Upper>();
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next());
 
   if (sub_cmd == "FLUSH") {
     return cmd_cntx->rb()->SendOk();
@@ -2697,7 +2697,7 @@ void Service::Pubsub(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  string subcmd = parser.Next<Upper>();
+  string subcmd = absl::AsciiStrToUpper(parser.Next());
 
   if (subcmd == "HELP") {
     string_view help_arr[] = {
@@ -2789,7 +2789,7 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  string subcmd = parser.Next<Upper>();
+  string subcmd = absl::AsciiStrToUpper(parser.Next());
 
   // COUNT
   if (subcmd == "COUNT") {
@@ -2798,7 +2798,7 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // INFO [cmd]
   if (subcmd == "INFO" && parser.HasNext()) {
-    string cmd = parser.Next<Upper>();
+    string cmd = absl::AsciiStrToUpper(parser.Next());
 
     if (const auto* cid = registry_.Find(cmd); cid) {
       rb->StartArray(1);

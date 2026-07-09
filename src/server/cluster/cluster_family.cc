@@ -420,7 +420,7 @@ void ClusterFamily::Cluster(CmdArgParser parser, CommandContext* cmd_cntx) {
   // In emulated cluster mode, all slots are mapped to the same host, and number of cluster
   // instances is thus 1.
   ParsedArgs full_args = parser.UnparsedArgs();
-  string sub_cmd = parser.Next<Upper>();
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next());
 
   auto* builder = cmd_cntx->rb();
   if (!IsClusterEnabledOrEmulated()) {
@@ -471,7 +471,7 @@ void ClusterFamily::DflyCluster(CmdArgParser parser, CommandContext* cmd_cntx) {
     return builder->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
   }
 
-  string sub_cmd = parser.Next<Upper>();  // remove subcommand name
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next());  // remove subcommand name
   if (sub_cmd == "GETSLOTINFO") {
     return DflyClusterGetSlotInfo(parser, cmd_cntx);
   } else if (sub_cmd == "CONFIG") {
@@ -835,7 +835,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgParser parser, CommandContext*
 }
 
 void ClusterFamily::DflyMigrate(CmdArgParser parser, CommandContext* cmd_cntx) {
-  string sub_cmd = parser.Next<Upper>();
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next());
 
   if (sub_cmd == "INIT") {
     InitMigration(parser, cmd_cntx);

@@ -1194,7 +1194,7 @@ void BitFieldRo(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 void BitOp(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   static const std::array<string_view, 4> BITOP_OP_NAMES{OR_OP_NAME, XOR_OP_NAME, AND_OP_NAME,
                                                          NOT_OP_NAME};
-  string op = parser.Next<Upper>();
+  string op = absl::AsciiStrToUpper(parser.Next<string_view>());
   string_view dest_key = parser.Next<string_view>();
 
   if (auto err = parser.TakeError(); err) {

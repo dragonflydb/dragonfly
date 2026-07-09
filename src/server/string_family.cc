@@ -1042,54 +1042,46 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
 
   sparams.memcache_flags = cmd_cntx->mc_command() ? cmd_cntx->mc_command()->flags : 0;
 
-  ExpT exp_type = ExpT::EX;
-  int64_t exp_arg = 0;
-  bool exp_defined = false;
+  while (parser.HasNext()) {
+    if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
+                                          "PXAT", ExpT::PXAT);
+        exp_type) {
+      auto int_arg = parser.Next<int64_t>();
+      if (parser.HasError())
+        break;
 
-  auto expiry = [&](ExpT type) {
-    return [&, type](CmdArgParser* p) {
-      exp_type = type;
-      exp_arg = p->Next<int64_t>();
-      exp_defined = true;
-    };
-  };
+      // We can set expiry only once.
+      if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)
+        return facade::ErrorReply{kSyntaxErr};
 
-  using SF = SetCmd::SetFlags;
-  // NX/XX and the expiry group each tolerate the same option repeating (last one wins) but reject a
-  // conflicting one, matching Redis. _MCFLAGS carries memcache flags on the replication path.
-  parser.Apply(OneOf(Flag("NX", &sparams.flags, SF::SET_IF_NOTEXIST),
-                     Flag("XX", &sparams.flags, SF::SET_IF_EXISTS))
-                   .Repeat(),
-               OneOf(Tag("EX", expiry(ExpT::EX)), Tag("PX", expiry(ExpT::PX)),
-                     Tag("EXAT", expiry(ExpT::EXAT)), Tag("PXAT", expiry(ExpT::PXAT)),
-                     Flag("KEEPTTL", &sparams.flags, SF::SET_KEEP_EXPIRE))
-                   .Repeat(),
-               Flag("GET", &sparams.flags, SF::SET_GET),
-               Flag("STICK", &sparams.flags, SF::SET_STICK),
-               Tag("_MCFLAGS", &sparams.memcache_flags));
+      sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
 
-  if (!parser.Finalize())
-    return parser.TakeError().MakeReply();
+      // Since PXAT/EXAT can change this, we need to check this ahead
+      if (int_arg <= 0)
+        return facade::ErrorReply{InvalidExpireTime("set")};
 
-  if (exp_defined) {
-    // Since PXAT/EXAT can change this, we need to check this ahead
-    if (exp_arg <= 0)
-      return facade::ErrorReply{InvalidExpireTime("set")};
+      const uint64_t now_ms = GetCurrentTimeMs();
+      DbSlice::ExpireParams expiry{*exp_type, int_arg, now_ms};
 
-    const uint64_t now_ms = GetCurrentTimeMs();
-    DbSlice::ExpireParams expiry_params{exp_type, exp_arg, now_ms};
+      auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
+      if (abs_ms < 0)
+        return facade::ErrorReply{InvalidExpireTime("set")};
 
-    auto [rel_ms, abs_ms] = expiry_params.Calculate(now_ms, false);
-    if (abs_ms < 0)
-      return facade::ErrorReply{InvalidExpireTime("set")};
+      // Remove existed key if the key is expired already
+      if (rel_ms < 0)
+        return NegativeExpire{};
 
-    // Remove existed key if the key is expired already
-    if (rel_ms < 0)
-      return NegativeExpire{};
-
-    sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-    tie(sparams.expire_after_ms, ignore) = expiry_params.Calculate(now_ms, true);
+      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
+    } else if (!parser.Check("_MCFLAGS", &sparams.memcache_flags)) {
+      uint16_t flag = parser.MapNext(  //
+          "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
+          "XX", SetCmd::SET_IF_EXISTS, "NX", SetCmd::SET_IF_NOTEXIST);
+      sparams.flags |= flag;
+    }
   }
+
+  if (auto err = parser.TakeError(); err)
+    return err.MakeReply();
 
   if (auto* mc = cmd_cntx->mc_command()) {
     using MP = facade::MemcacheParser;
@@ -1109,6 +1101,12 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
         return NegativeExpire{};
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
     }
+  }
+
+  auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
+  if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
+      has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
+    return facade::ErrorReply{kSyntaxErr};
   }
 
   return sparams;

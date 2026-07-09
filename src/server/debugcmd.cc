@@ -638,7 +638,7 @@ DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionCo
 }
 
 void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
-  string subcmd = parser.Next<Upper>();
+  string subcmd = absl::AsciiStrToUpper(parser.Next());
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
@@ -863,7 +863,7 @@ void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void DebugCmd::Replica(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
-  string opt = parser.Next<Upper>();
+  string opt = absl::AsciiStrToUpper(parser.Next());
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (opt == "PAUSE" || opt == "RESUME") {
@@ -887,7 +887,7 @@ void DebugCmd::Replica(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void DebugCmd::Migration(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
-  string opt = parser.Next<Upper>();
+  string opt = absl::AsciiStrToUpper(parser.Next());
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (opt == "PAUSE" || opt == "RESUME") {
     cf_.PauseAllIncomingMigrations(opt == "PAUSE");
@@ -895,6 +895,8 @@ void DebugCmd::Migration(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   }
   return cmd_cntx->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));
 }
+
+enum PopulateFlag { FLAG_RAND, FLAG_TYPE, FLAG_ELEMENTS, FLAG_SLOT, FLAG_EXPIRE, FLAG_UNKNOWN };
 
 // Populate arguments format:
 // required: (total count) (key prefix) (val size)
@@ -906,11 +908,40 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgParser par
   options.total_count = parser.Next<uint64_t>();
   options.prefix = parser.NextOrDefault<string_view>("key");
   options.val_size = parser.NextOrDefault<uint32_t>(16);
-  parser.Apply(Exist("RAND", &options.populate_random_values),
-               Tag("TYPE", [&](CmdArgParser* p) { options.type = p->Next<Upper>(); }),
-               Tag("ELEMENTS", &options.elements), Tag("SLOTS", &options.slot_range),
-               Tag("EXPIRE", &options.expire_ttl_range));
-  if (!parser.Finalize()) {
+  while (parser.HasNext()) {
+    PopulateFlag flag = parser.MapNext("RAND", FLAG_RAND, "TYPE", FLAG_TYPE, "ELEMENTS",
+                                       FLAG_ELEMENTS, "SLOTS", FLAG_SLOT, "EXPIRE", FLAG_EXPIRE);
+    switch (flag) {
+      case FLAG_RAND:
+        options.populate_random_values = true;
+        break;
+      case FLAG_TYPE:
+        options.type = absl::AsciiStrToUpper(parser.Next<string_view>());
+        break;
+      case FLAG_ELEMENTS:
+        options.elements = parser.Next<uint32_t>();
+        break;
+      case FLAG_SLOT: {
+        auto [start, end] = parser.Next<FInt<0, 16383>, FInt<0, 16383>>();
+        options.slot_range = cluster::SlotRange{SlotId(start), SlotId(end)};
+        break;
+      }
+      case FLAG_EXPIRE: {
+        auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
+        if (min_ttl >= max_ttl) {
+          cmd_cntx->SendError(kExpiryOutOfRange);
+          (void)parser.TakeError();
+          return nullopt;
+        }
+        options.expire_ttl_range = std::make_pair(min_ttl, max_ttl);
+        break;
+      }
+      default:
+        LOG(FATAL) << "Unexpected flag in PopulateArgs";
+        break;
+    }
+  }
+  if (parser.HasError()) {
     cmd_cntx->SendError(parser.TakeError().MakeReply());
     return nullopt;
   }
@@ -1852,9 +1883,9 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
     }
 
     if (options.expire_ttl_range.has_value()) {
-      uint32_t start = options.expire_ttl_range->min;
-      uint32_t end = options.expire_ttl_range->max;
-      uint32_t expire_ttl = start == end ? start : rand() % (end - start) + start;
+      uint32_t start = options.expire_ttl_range->first;
+      uint32_t end = options.expire_ttl_range->second;
+      uint32_t expire_ttl = rand() % (end - start) + start;
       VLOG(1) << "set key " << key << " expire ttl as " << expire_ttl;
       auto* cid = sf_.service().mutable_registry()->Find("EXPIRE");
       auto ttl_str = to_string(expire_ttl);
