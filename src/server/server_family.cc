@@ -3558,12 +3558,11 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
   }
 
-  auto [num_replicas_arg, timeout_ms] = parser.Next<int64_t, int64_t>();
+  using NonNegInt = facade::FInt<int64_t{0}, std::numeric_limits<int64_t>::max()>;
+  auto [num_replicas_arg, timeout_arg] = parser.Next<NonNegInt, NonNegInt>();
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
-  if (num_replicas_arg < 0 || timeout_ms < 0) {
-    return cmd_cntx->SendError(kInvalidIntErr);
-  }
-  int64_t num_replicas = num_replicas_arg;
+  const int64_t num_replicas = num_replicas_arg;
+  const int64_t timeout_ms = timeout_arg;
 
   // Collect currently tracked replicas.
   auto replicas = dfly_cmd_->GetReplicaInfoSnapshot();

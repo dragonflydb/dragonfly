@@ -129,7 +129,7 @@ COMMANDS = [
     (b"INFO", 0, 1), (b"CONFIG", 1, 3), (b"CLIENT", 1, 4), (b"COMMAND", 0, 3),
     (b"MEMORY", 1, 3), (b"ACL", 1, 5), (b"MONITOR", 0, 0), (b"HELLO", 0, 5),
     (b"BGSAVE", 0, 4), (b"SAVE", 0, 3), (b"LATENCY", 1, 2), (b"SLOWLOG", 1, 2),
-    (b"SHRINK", 1, 1), (b"QUIT", 0, 0), (b"TIME", 0, 0),
+    (b"SHRINK", 1, 1), (b"QUIT", 0, 0), (b"TIME", 0, 0), (b"WAIT", 2, 2),
     # Throttle
     (b"CL.THROTTLE", 4, 5),
 ]
