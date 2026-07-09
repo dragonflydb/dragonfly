@@ -118,6 +118,7 @@ git log --oneline -10
 - Global mutable state
 - Edit without reading
 - Skip tests
+- Use `std::regex` in fiber/server paths (recursive implementation can overflow small fiber stacks)
 - Use `./tools/docker/build.sh` for local development (use `ninja` instead)
 - Use `make` for incremental builds (use `ninja` instead)
 
