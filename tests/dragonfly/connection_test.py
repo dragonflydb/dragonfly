@@ -1358,7 +1358,10 @@ async def test_client_pause_v2_inflight_async_write_gap(df_server: DflyInstance)
     while returning a tiny reply. CLIENT PAUSE WRITE must not return until it completes.
     Tuning parameter: VALUE_BYTES (make the disk read long enough to stay in-flight).
     """
-    assert is_resp_io_loop_v2(df_server)
+
+    # Skip for V1 even if workflow injected --df enable_resp_io_loop_v2=false, which overrides the @dfly_args default above.
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets the V2 io loop deferred-checkpoint path")
 
     VALUE_BYTES = 256 * 1024 * 1024  # 256MB
 
@@ -1428,7 +1431,10 @@ async def test_client_pause_v2_close_releases_deferred_checkpoint(df_server: Dfl
     counter. If the client disconnects before the command lands, ClearPipelinedMessages
     must release it so CLIENT PAUSE returns well before pause_wait_timeout.
     """
-    assert is_resp_io_loop_v2(df_server)
+
+    # Skip for V1 even if workflow injected --df enable_resp_io_loop_v2=false, which overrides the @dfly_args default above.
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets the V2 io loop deferred-checkpoint path")
 
     VALUE_BYTES = 256 * 1024 * 1024  # 256MB
     PAUSE_MS = 5000
