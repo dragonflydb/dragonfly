@@ -185,7 +185,7 @@ double ParseGeoUnit(std::string_view arg, facade::RuleError& err) {
 
 void ParseCircularShape(CmdArgParser* parser, GeoShape* shape, GeoSearchOpts* geo_ops) {
   shape->t.radius = parser->Next<double>();
-  geo_ops->conversion = shape->conversion = parser->Next(ParseGeoUnit);
+  geo_ops->conversion = shape->conversion = parser->Next<ParseGeoUnit>();
   shape->type = CIRCULAR_TYPE;
 }
 
@@ -243,17 +243,8 @@ void CmdGeoAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   ZSetFamily::ZParams zparams;
-  for (;;) {
-    if (parser.Check("XX")) {
-      zparams.flags |= ZADD_IN_XX;  // update only
-    } else if (parser.Check("NX")) {
-      zparams.flags |= ZADD_IN_NX;  // add new only.
-    } else if (parser.Check("CH")) {
-      zparams.ch = true;
-    } else {
-      break;
-    }
-  }
+  parser.Apply(Flag("XX", &zparams.flags, ZADD_IN_XX), Flag("NX", &zparams.flags, ZADD_IN_NX),
+               Exist("CH", &zparams.ch));
 
   auto* builder = cmd_cntx->rb();
   auto args = parser.RemainingRange();
@@ -349,7 +340,7 @@ void CmdGeoDist(CmdArgParser parser, CommandContext* cmd_cntx) {
     arg = parser.Next();
 
   // Optional trailing unit; Finalize() rejects both a missing required arg and any trailing args.
-  double distance_multiplier = parser.NextOrDefault(ParseGeoUnit, 1.0);
+  double distance_multiplier = parser.NextOrDefault<ParseGeoUnit>(1.0);
   if (!parser.Finalize()) {
     return rb->SendError(parser.TakeError().MakeReply());
   }
@@ -645,7 +636,7 @@ void CmdGeoSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
                          [&](CmdArgParser* p) {
                            by_set = true;
                            std::tie(shape.t.r.width, shape.t.r.height) = p->Next<double, double>();
-                           geo_ops.conversion = shape.conversion = p->Next(ParseGeoUnit);
+                           geo_ops.conversion = shape.conversion = p->Next<ParseGeoUnit>();
                            shape.type = RECTANGLE_TYPE;
                          }))
                    .Err(kByRadiusBoxErr),

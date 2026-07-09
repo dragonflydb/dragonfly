@@ -5,6 +5,7 @@
 #pragma once
 
 #include "facade/cmd_arg_parser.h"
+#include "facade/error.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/conn_context.h"
 
@@ -28,7 +29,7 @@ class DebugCmd {
     uint32_t elements = 1;
 
     std::optional<cluster::SlotRange> slot_range;
-    std::optional<std::pair<uint32_t, uint32_t>> expire_ttl_range;
+    std::optional<facade::MinMax<uint32_t, facade::kExpiryOutOfRange>> expire_ttl_range;
   };
 
  public:

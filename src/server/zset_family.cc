@@ -2077,38 +2077,21 @@ void CmdBZPopMax(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdZAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
-  facade::ParsedArgs args = parser.UnparsedArgs();
-  string_view key = args[0];
+  string_view key = parser.Next();
 
   ZSetFamily::ZParams zparams;
-  size_t i = 1;
-  for (; i < args.size() - 1; ++i) {
-    string cur_arg = absl::AsciiStrToUpper(args[i]);
-
-    if (cur_arg == "XX") {
-      zparams.flags |= ZADD_IN_XX;  // update only
-    } else if (cur_arg == "NX") {
-      zparams.flags |= ZADD_IN_NX;  // add new only.
-    } else if (cur_arg == "GT") {
-      zparams.flags |= ZADD_IN_GT;
-    } else if (cur_arg == "LT") {
-      zparams.flags |= ZADD_IN_LT;
-    } else if (cur_arg == "CH") {
-      zparams.ch = true;
-    } else if (cur_arg == "INCR") {
-      zparams.flags |= ZADD_IN_INCR;
-    } else {
-      break;
-    }
-  }
+  parser.Apply(Flag("XX", &zparams.flags, ZADD_IN_XX), Flag("NX", &zparams.flags, ZADD_IN_NX),
+               Flag("GT", &zparams.flags, ZADD_IN_GT), Flag("LT", &zparams.flags, ZADD_IN_LT),
+               Exist("CH", &zparams.ch), Flag("INCR", &zparams.flags, ZADD_IN_INCR));
 
   auto* builder = cmd_cntx->rb();
-  if ((args.size() - i) % 2 != 0) {
+  auto args = parser.RemainingRange();
+  if (args.empty() || args.size() % 2 != 0) {
     builder->SendError(kSyntaxErr);
     return;
   }
 
-  if ((zparams.flags & ZADD_IN_INCR) && (i + 2 < args.size())) {
+  if ((zparams.flags & ZADD_IN_INCR) && args.size() > 2) {
     builder->SendError("INCR option supports a single increment-element pair");
     return;
   }
@@ -2129,7 +2112,7 @@ void CmdZAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   absl::flat_hash_set<string_view> members_set;
   absl::InlinedVector<ScoredMemberView, 4> members;
 
-  unsigned num_members = (args.size() - i) / 2;
+  unsigned num_members = args.size() / 2;
 
   // We sort the fields if the expected encoding could be listpack.
   bool to_sort_fields = false;
@@ -2141,7 +2124,7 @@ void CmdZAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
     to_sort_fields = true;
   }
 
-  for (; i < args.size(); i += 2) {
+  for (size_t i = 0; i < args.size(); i += 2) {
     string_view cur_arg = args[i];
     double val = 0;
 
@@ -2712,8 +2695,7 @@ void CmdZRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   ZSetFamily::RangeParams params;
   params.with_scores = static_cast<bool>(parser.Check("WITHSCORES"));
 
-  if (parser.HasNext())
-    return rb->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
+  parser.Finalize("Unsupported option:");
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
