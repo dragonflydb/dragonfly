@@ -2950,7 +2950,6 @@ bool Connection::ReplyBatch() {
     while (HasInFlightCommands() && parsed_head_->CanReply()) {
       current_wait_.reset();  // Clear the subscription before moving to the next command
       auto* cmd = parsed_head_;
-      AdvanceParsedHead(parsed_head_->next);
 
       // Pure coroutine replies don't preserve lifetimes
       const bool suspended = cmd->IsSuspendedReply();
@@ -2958,29 +2957,16 @@ bool Connection::ReplyBatch() {
       if (suspended)
         pause.emplace(reply_builder_.get());
 
-      // V2 only:
-      // - A command isn't "done" until its reply is written.
-      // - A suspended (coroutine) reply can do real work on resume (e.g. a tiered value's disk
-      //   read) and fiber-block inside SendReply().
-      // - We already advanced parsed_head_ past this command above (AdvanceParsedHead, before
-      // SendReply), so while
-      //   SendReply runs HasInFlightCommands() no longer counts it and reads false.
-      // - So we must mark the connection as dispatching across that SendReply: a CLIENT PAUSE /
-      //   DispatchTracker sampling mid-resume then still sees it busy and waits for the write.
-      // - A non-suspended reply just copies an already-built payload and can't preempt - no guard
-      // is needed.
-      // - We use sync_dispatch (not async_dispatch) because coro.resume() runs synchronously, and
-      //   async_dispatch would also force a flush-before-block; sync_dispatch is the right signal
-      //   for in-flight dispatch tracking.
-      auto set_sync_dispatch = [&](bool val) {
-        if (ioloop_v2_ && suspended) {
-          DCHECK(cc_->sync_dispatch != val);  // must strictly flip, never a redundant set
-          cc_->sync_dispatch = val;
-        }
-      };
-      set_sync_dispatch(true);
+      // V2 in-flight tracking:
+      // - A command isn't "done" until its reply is written. A suspended (coroutine) reply can do
+      //   real work on resume (e.g. a tiered value's disk read) and fiber-block inside SendReply().
+      // - We keep parsed_head_ pointing at this command across SendReply() and only advance it
+      //   AFTERWARDS. That way HasInFlightCommands() stays true for the whole reply-write, so a
+      //   CLIENT PAUSE / DispatchTracker sampling mid-resume still sees the connection busy (via
+      //   SendCheckpoint's HasInFlightCommands() check) and waits for the write to land.
+      // - A non-suspended reply just copies an already-built payload and can't preempt.
       cmd->SendReply();
-      set_sync_dispatch(false);
+      AdvanceParsedHead(cmd->next);
       replied++;
 
       if (reply_builder_->GetError())

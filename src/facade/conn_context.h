@@ -69,8 +69,9 @@ class ConnectionContext {
   // - These flags are on-spot markers raised around a single call, NOT a durable "this connection
   //   is executing" state.
   // - "Executing" is broader than running the command body: a V2 async command's reply is written
-  //   later, when its suspended reply coroutine is resumed. That reply-write is part of executing
-  //   the command, so the flag is raised around the resume too - not only the initial dispatch.
+  //   later, when its suspended reply coroutine is resumed. ReplyBatch keeps parsed_head_ on the
+  //   command until after SendReply() returns, so that reply-write window is covered by
+  //   HasInFlightCommands() rather than by these flags.
   // - A V2 async command clears the flags as soon as the dispatch returns, while it may still be
   //   in flight (its reply not yet written).
   // - The only durable in-flight signal there is Connection::HasInFlightCommands().
