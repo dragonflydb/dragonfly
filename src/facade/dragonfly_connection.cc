@@ -686,8 +686,21 @@ void Connection::AsyncOperations::operator()(const MigrationRequestMessage& msg)
 }
 
 void Connection::AsyncOperations::operator()(CheckpointMessage msg) {
-  VLOG(2) << "[" << self->id_ << "] "
-          << "Decremented checkpoint at " << self->DebugInfo();
+  // V2 only:
+  // - ExecuteBatch() -> DispatchCommandSimple() returns while the command may still be in flight.
+  // - A checkpoint that lands in that window must NOT Dec() yet - otherwise a CLIENT PAUSE /
+  // DispatchTracker would return before the in-flight write actually happens.
+  // - That's why here we defer the blocking counter by holding it. We will release it once
+  // HasInFlightCommands() is false, by calling ReleaseDeferredCheckpoints().
+  // - A blocked connection is excluded: a blocked command isn't an in-flight write and may never
+  // complete, so deferring its checkpoint could hold the DispatchTracker forever. Instead, we Dec()
+  // it immediately.
+  if (self->ioloop_v2_ && self->HasInFlightCommands() && !self->cc_->blocked) {
+    DVLOG(2) << "[" << self->id_ << "] "
+             << "Deferring checkpoint (in-flight commands) at " << self->DebugInfo();
+    self->deferred_checkpoints_.push_back(std::move(msg.bc));
+    return;
+  }
 
   msg.bc->Dec();
 }
@@ -1918,9 +1931,27 @@ void Connection::ClearPipelinedMessages() {
   parsed_to_execute_ = nullptr;
   dispatch_waiting_count_ = 0;
 
+  ReleaseDeferredCheckpoints();
+
   QueueBackpressure& qbp = GetQueueBackpressure();
   qbp.NotifyPipelineWaiters();
   qbp.pubsub_ec.notifyAll();
+}
+
+void Connection::ReleaseDeferredCheckpoints() {
+  // Invariant: only the V2 loop should defer a checkpoint, else vector must be empty.
+  DCHECK(ioloop_v2_ || deferred_checkpoints_.empty());
+  // Invariant: we never release while an async command is still in flight - doing so would let a
+  // CLIENT PAUSE / DispatchTracker return before the write lands. Callers must hold this rule.
+  DCHECK(!HasInFlightCommands());
+
+  if (deferred_checkpoints_.empty())
+    return;
+
+  for (auto& bc : deferred_checkpoints_) {
+    bc->Dec();
+  }
+  deferred_checkpoints_.clear();
 }
 
 string Connection::DebugInfo() const {
@@ -2273,7 +2304,14 @@ void Connection::SendMonitorMessageAsync(string msg) {
 }
 
 void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, bool ignore_blocked) {
-  if (!IsCurrentlyDispatching())
+  // Only send a checkpoint if the connection has an "active" command the tracker must wait for:
+  // 1) It is dispatching now, OR
+  // 2) V2 only - an async command is still in flight after DispatchCommandSimple already returned.
+  // In that V2 use case: IsCurrentlyDispatching() is already false, so without checking
+  // HasInFlightCommands() the checkpoint would be skipped and CLIENT PAUSE / DispatchTracker
+  // could return before the write is done.
+  bool has_active_command = IsCurrentlyDispatching() || (ioloop_v2_ && HasInFlightCommands());
+  if (!has_active_command)
     return;
 
   if (cc_->paused && ignore_paused)
@@ -2845,10 +2883,10 @@ bool Connection::ExecuteBatch() {
     // V1 sets these flags elsewhere (DispatchSingle / the AsyncFiber paths), hence the ioloop_v2_
     // guard.
     //
-    // TODO(follow-up PR): an async command may still be in flight after this returns,
-    // yet sync_dispatch is cleared right below - so a CLIENT PAUSE / DispatchTracker started in
-    // that window can under-wait it. We need to defer the checkpoint until in-flight
-    // commands drain. The synchronous squash path (SquashPipelineV2) is already correct.
+    // Note: an async command may still be in flight after this returns, yet sync_dispatch is
+    // cleared right below - so a CLIENT PAUSE / DispatchTracker sampling that window would see the
+    // connection idle. That gap is closed in AsyncOperations::operator()(CheckpointMessage) and
+    // SendCheckpoint() by deferring the checkpoint's bc->Dec().
     if (ioloop_v2_) {
       // Invariant: both are clear on entry - the single V2 fiber never dispatches while already
       // dispatching, and every path above resets them before the next command is reached.
@@ -2912,14 +2950,23 @@ bool Connection::ReplyBatch() {
     while (HasInFlightCommands() && parsed_head_->CanReply()) {
       current_wait_.reset();  // Clear the subscription before moving to the next command
       auto* cmd = parsed_head_;
-      AdvanceParsedHead(parsed_head_->next);
 
       // Pure coroutine replies don't preserve lifetimes
+      const bool suspended = cmd->IsSuspendedReply();
       std::optional<SinkReplyBuilder::ScopePause> pause;
-      if (cmd->IsSuspendedReply())
+      if (suspended)
         pause.emplace(reply_builder_.get());
 
+      // V2 in-flight tracking:
+      // - A command isn't "done" until its reply is written. A suspended (coroutine) reply can do
+      //   real work on resume (e.g. a tiered value's disk read) and fiber-block inside SendReply().
+      // - We keep parsed_head_ pointing at this command across SendReply() and only advance it
+      //   AFTERWARDS. That way HasInFlightCommands() stays true for the whole reply-write, so a
+      //   CLIENT PAUSE / DispatchTracker sampling mid-resume still sees the connection busy (via
+      //   SendCheckpoint's HasInFlightCommands() check) and waits for the write to land.
+      // - A non-suspended reply just copies an already-built payload and can't preempt.
       cmd->SendReply();
+      AdvanceParsedHead(cmd->next);
       replied++;
 
       if (reply_builder_->GetError())
@@ -3508,6 +3555,12 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     } else {
       // Input available and under budget: parse, execute, reply.
       parse_status = RunParsePath();
+    }
+
+    // Release any checkpoints deferred while async commands were in flight, now that the in-flight
+    // run has drained.
+    if (!HasInFlightCommands()) {
+      ReleaseDeferredCheckpoints();
     }
 
     // A protocol error detected by parse-in-proactor (which runs in the recv callback and cannot
