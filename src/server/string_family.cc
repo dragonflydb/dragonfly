@@ -518,15 +518,12 @@ struct GetResp {
   uint32_t ttl_sec = 0;
 };
 
-struct MGetResponse {
-  explicit MGetResponse(size_t size = 0) : resp_arr(size), index_map(size) {
+struct alignas(64) MGetResponse {
+  explicit MGetResponse(size_t size = 0) : resp_arr(size) {
   }
 
   std::unique_ptr<char[]> storage;
   absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
-  // Global argument index of each resp_arr slot, captured during the hop so the
-  // reply can be reordered without touching the transaction afterwards.
-  absl::InlinedVector<uint32_t, 2> index_map;
 };
 
 template <typename Iter> using SearchKey = std::function<OpResult<Iter>(string_view)>;
@@ -568,9 +565,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
     key_index.reserve(keys.Size());
   }
 
-  for (auto arg_it = keys.begin(); arg_it != keys.end(); ++arg_it) {
-    string_view key = *arg_it;
-    response.index_map[index] = arg_it.index();
+  for (string_view key : keys) {
     if (mget_dedup_keys) {
       auto [it, inserted] = key_index.try_emplace(key, index);
       if (!inserted) {  // duplicate -> point to the first occurrence.
@@ -1047,46 +1042,54 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
 
   sparams.memcache_flags = cmd_cntx->mc_command() ? cmd_cntx->mc_command()->flags : 0;
 
-  while (parser.HasNext()) {
-    if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
-                                          "PXAT", ExpT::PXAT);
-        exp_type) {
-      auto int_arg = parser.Next<int64_t>();
-      if (parser.HasError())
-        break;
+  ExpT exp_type = ExpT::EX;
+  int64_t exp_arg = 0;
+  bool exp_defined = false;
 
-      // We can set expiry only once.
-      if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)
-        return facade::ErrorReply{kSyntaxErr};
+  auto expiry = [&](ExpT type) {
+    return [&, type](CmdArgParser* p) {
+      exp_type = type;
+      exp_arg = p->Next<int64_t>();
+      exp_defined = true;
+    };
+  };
 
-      sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
+  using SF = SetCmd::SetFlags;
+  // NX/XX and the expiry group each tolerate the same option repeating (last one wins) but reject a
+  // conflicting one, matching Redis. _MCFLAGS carries memcache flags on the replication path.
+  parser.Apply(OneOf(Flag("NX", &sparams.flags, SF::SET_IF_NOTEXIST),
+                     Flag("XX", &sparams.flags, SF::SET_IF_EXISTS))
+                   .Repeat(),
+               OneOf(Tag("EX", expiry(ExpT::EX)), Tag("PX", expiry(ExpT::PX)),
+                     Tag("EXAT", expiry(ExpT::EXAT)), Tag("PXAT", expiry(ExpT::PXAT)),
+                     Flag("KEEPTTL", &sparams.flags, SF::SET_KEEP_EXPIRE))
+                   .Repeat(),
+               Flag("GET", &sparams.flags, SF::SET_GET),
+               Flag("STICK", &sparams.flags, SF::SET_STICK),
+               Tag("_MCFLAGS", &sparams.memcache_flags));
 
-      // Since PXAT/EXAT can change this, we need to check this ahead
-      if (int_arg <= 0)
-        return facade::ErrorReply{InvalidExpireTime("set")};
+  if (!parser.Finalize())
+    return parser.TakeError().MakeReply();
 
-      const uint64_t now_ms = GetCurrentTimeMs();
-      DbSlice::ExpireParams expiry{*exp_type, int_arg, now_ms};
+  if (exp_defined) {
+    // Since PXAT/EXAT can change this, we need to check this ahead
+    if (exp_arg <= 0)
+      return facade::ErrorReply{InvalidExpireTime("set")};
 
-      auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
-      if (abs_ms < 0)
-        return facade::ErrorReply{InvalidExpireTime("set")};
+    const uint64_t now_ms = GetCurrentTimeMs();
+    DbSlice::ExpireParams expiry_params{exp_type, exp_arg, now_ms};
 
-      // Remove existed key if the key is expired already
-      if (rel_ms < 0)
-        return NegativeExpire{};
+    auto [rel_ms, abs_ms] = expiry_params.Calculate(now_ms, false);
+    if (abs_ms < 0)
+      return facade::ErrorReply{InvalidExpireTime("set")};
 
-      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
-    } else if (!parser.Check("_MCFLAGS", &sparams.memcache_flags)) {
-      uint16_t flag = parser.MapNext(  //
-          "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
-          "XX", SetCmd::SET_IF_EXISTS, "NX", SetCmd::SET_IF_NOTEXIST);
-      sparams.flags |= flag;
-    }
+    // Remove existed key if the key is expired already
+    if (rel_ms < 0)
+      return NegativeExpire{};
+
+    sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
+    tie(sparams.expire_after_ms, ignore) = expiry_params.Calculate(now_ms, true);
   }
-
-  if (auto err = parser.TakeError(); err)
-    return err.MakeReply();
 
   if (auto* mc = cmd_cntx->mc_command()) {
     using MP = facade::MemcacheParser;
@@ -1106,12 +1109,6 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
         return NegativeExpire{};
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
     }
-  }
-
-  auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
-  if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
-      has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
-    return facade::ErrorReply{kSyntaxErr};
   }
 
   return sparams;
@@ -1469,21 +1466,6 @@ cmd::CmdR CmdDecrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
   return IncrByGeneric(cmd_cntx, key, -val);
 }
 
-// Reorder per-shard results into argument order using the indices captured
-// during the hop. Inactive shards leave an empty resp_arr, so no transaction
-// state is consulted here.
-void ReorderShardResults(absl::Span<MGetResponse> mget_resp, absl::Span<optional<GetResp>> dest) {
-  for (auto& src : mget_resp) {
-    for (size_t src_indx = 0; src_indx < src.resp_arr.size(); ++src_indx) {
-      if (!src.resp_arr[src_indx])
-        continue;
-
-      DCHECK_LT(src.index_map[src_indx], dest.size());
-      dest[src.index_map[src_indx]] = src.resp_arr[src_indx];
-    }
-  }
-}
-
 cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpireParams> gat_params) {
   const auto& tail_args = cmd_cntx->tail_args();
   DCHECK_GE(tail_args.size(), 1U);
@@ -1499,17 +1481,30 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
 
   unique_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
 
+  size_t arg_len = tail_args.size();
+  unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
+
   auto gat_ptr = gat_params ? &*gat_params : nullptr;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_ptr);
+    ShardId sid = shard->shard_id();
+    MGetResponse resp = OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_ptr);
+
+    // Reorder shard resuls based on key indices in commands
+    ShardArgs shard_args = t->GetShardArgs(sid);
+    unsigned src_indx = 0;
+    for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
+      if (!resp.resp_arr[src_indx])
+        continue;
+      DCHECK_LT(it.index(), arg_len);
+      mget_results[it.index()] = resp.resp_arr[src_indx];
+    }
+
+    // Keep the per-shard storage alive: GetResp::value string_views point into resp.storage.
+    mget_resp[sid] = std::move(resp);
     return OpStatus::OK;
   };
 
-  // The waiter keeps the transaction alive while the hop runs. Its result is not
-  // consulted: under pipeline squashing the transaction is reused for the next
-  // command once the hop completes, so all per-shard data is captured in the hop.
-  cmd::SingleHopWaiter waiter{cmd_cntx, cb};
-  co_await waiter;
+  co_await cmd::SingleHop(cb);
 
   // wait for all tiered reads to finish and check for errors
   tiering_bc->Wait();
@@ -1517,12 +1512,6 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
     cmd_cntx->rb()->SendError(err.message());
     co_return std::nullopt;
   }
-
-  size_t arg_len = tail_args.size();
-
-  unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
-  ReorderShardResults(absl::MakeSpan(mget_resp.get(), shard_set->size()),
-                      absl::MakeSpan(mget_results.get(), arg_len));
 
   SinkReplyBuilder::ReplyScope scope{cmd_cntx->rb()};
   if (cmd_cntx->mc_command()) {

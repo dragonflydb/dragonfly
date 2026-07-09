@@ -121,7 +121,7 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
     } else if (parser->Check("M", &params.hnsw_m)) {
     } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
     } else if (parser->Check("TYPE")) {
-      params.data_type = absl::AsciiStrToUpper(parser->Next<string_view>());
+      params.data_type = parser->Next<Upper>();
     } else if (parser->Check("EF_RUNTIME", &params.hnsw_ef_runtime)) {
     } else if (parser->Check("EPSILON")) {
       double epsilon = parser->Next<double>("Invalid EPSILON value");
@@ -374,7 +374,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
           absl::StrCat("Field type "sv, parser->Next(), " is not supported"sv));
     }
 
-    auto parsed_params = parser->Next(params_parser.value());
+    auto field_parser = params_parser.value();
+    auto parsed_params = field_parser(parser);
     if (!parsed_params) {
       return make_unexpected(parsed_params.error());
     }

@@ -15,6 +15,21 @@
 using namespace testing;
 using namespace std;
 
+namespace custom_arg {
+
+// Custom type whose ADL ParseArg lives here (not in facade), exercising Next<T>() via real ADL.
+struct Duration {
+  int64_t ms = 0;
+  bool operator==(const Duration&) const = default;
+};
+
+Duration ParseArg(facade::CmdArgParser* p, std::type_identity<Duration>) {
+  int64_t n = p->Next<int64_t>();
+  return Duration{p->Check("MS") ? n : n * 1000};
+}
+
+}  // namespace custom_arg
+
 namespace facade {
 
 class CmdArgParserTest : public testing::Test {
@@ -515,6 +530,64 @@ TEST_F(CmdArgParserTest, ApplyOneOf) {
   }
 }
 
+TEST_F(CmdArgParserTest, ApplyFlag) {
+  enum Bits : uint16_t { kNone = 0, kNx = 1 << 0, kXx = 1 << 1, kGet = 1 << 2 };
+
+  // Each present tag ORs its bit; absent tags leave it clear; duplicates are idempotent.
+  {
+    auto parser = Make({"GET", "NX", "GET"});
+    uint16_t flags = kNone;
+    parser.Apply(Flag("NX", &flags, uint16_t{kNx}), Flag("XX", &flags, uint16_t{kXx}),
+                 Flag("GET", &flags, uint16_t{kGet}));
+    EXPECT_EQ(flags, kNx | kGet);
+    EXPECT_FALSE(parser.HasError());
+  }
+
+  // Flag composes with OneOf: a conflicting pair still errors, but the same one repeats with
+  // Repeat.
+  {
+    auto parser = Make({"NX", "NX"});
+    uint16_t flags = kNone;
+    parser.Apply(
+        OneOf(Flag("NX", &flags, uint16_t{kNx}), Flag("XX", &flags, uint16_t{kXx})).Repeat());
+    EXPECT_EQ(flags, kNx);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"NX", "XX"});
+    uint16_t flags = kNone;
+    parser.Apply(
+        OneOf(Flag("NX", &flags, uint16_t{kNx}), Flag("XX", &flags, uint16_t{kXx})).Repeat());
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_CASES);
+  }
+}
+
+TEST_F(CmdArgParserTest, ApplyOneOfRepeat) {
+  auto set = [](int* dst, int v) { return [dst, v](CmdArgParser*) { *dst = v; }; };
+
+  {  // .Repeat() tolerates the SAME option repeating (idempotent), like Redis EXPIRE NX NX.
+    int nx = 0, xx = 0;
+    auto parser = Make({"NX", "NX"});
+    parser.Apply(OneOf(Tag("NX", set(&nx, 1)), Tag("XX", set(&xx, 1))).Repeat().Err("conflict"));
+    EXPECT_EQ(nx, 1);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {  // ...but a DIFFERENT option in the group still conflicts.
+    int nx = 0, xx = 0;
+    auto parser = Make({"NX", "XX"});
+    parser.Apply(OneOf(Tag("NX", set(&nx, 1)), Tag("XX", set(&xx, 1))).Repeat().Err("conflict"));
+    auto err = parser.TakeError();
+    EXPECT_EQ(err.type, CmdArgParser::CUSTOM_ERROR);
+    EXPECT_EQ(err.MakeReply().ToSv(), "conflict");
+  }
+  {  // Without .Repeat(), repeating the same option is still a conflict.
+    int nx = 0, xx = 0;
+    auto parser = Make({"NX", "NX"});
+    parser.Apply(OneOf(Tag("NX", set(&nx, 1)), Tag("XX", set(&xx, 1))).Err("conflict"));
+    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "conflict");
+  }
+}
+
 TEST_F(CmdArgParserTest, ApplyOptional) {
   // Tag present -> optional engaged.
   {
@@ -746,16 +819,22 @@ double ParseUnit(std::string_view sv, RuleError& err) {
   return -1.0;
 }
 
+// A full-form parser callable (CmdArgParser*): consumes several args, returns a compound type.
+std::pair<int, int> ParsePoint(CmdArgParser* p) {
+  int x = p->Next<int>();
+  return {x, p->Next<int>()};
+}
+
 TEST_F(CmdArgParserTest, ParserFunction) {
   {  // token form: fn(string_view, RuleError&) converts the next arg
     auto parser = Make({"KM", "M"});
-    EXPECT_DOUBLE_EQ(parser.Next(ParseUnit), 1000.0);
-    EXPECT_DOUBLE_EQ(parser.Next(ParseUnit), 1.0);
+    EXPECT_DOUBLE_EQ(parser.Next<ParseUnit>(), 1000.0);
+    EXPECT_DOUBLE_EQ(parser.Next<ParseUnit>(), 1.0);
     EXPECT_FALSE(parser.HasError());
   }
   {
     auto parser = Make({"YARD"});
-    EXPECT_DOUBLE_EQ(parser.Next(ParseUnit), 0.0);  // value-initialized on failure
+    EXPECT_DOUBLE_EQ(parser.Next<ParseUnit>(), 0.0);  // value-initialized on failure
     auto err = parser.TakeError();
     EXPECT_TRUE(err);
     EXPECT_EQ(err.type, CmdArgParser::CUSTOM_ERROR);
@@ -763,20 +842,22 @@ TEST_F(CmdArgParserTest, ParserFunction) {
   }
   {
     auto parser = Make({});  // framework surfaces OUT_OF_BOUNDS before calling fn
-    EXPECT_DOUBLE_EQ(parser.Next(ParseUnit), 0.0);
+    EXPECT_DOUBLE_EQ(parser.Next<ParseUnit>(), 0.0);
     EXPECT_EQ(parser.TakeError().type, CmdArgParser::OUT_OF_BOUNDS);
   }
-  {  // full form: fn(CmdArgParser*) can consume several args and return a compound type
+  {  // full form: Fn(CmdArgParser*) can consume several args and return a compound type
     auto parser = Make({"3", "4"});
-    auto point = [](CmdArgParser* p) {
-      int x =
-          p->Next<int>();  // sequence reads explicitly; argument evaluation order is unspecified
-      return std::make_pair(x, p->Next<int>());
-    };
-    auto [x, y] = parser.Next(point);
+    auto [x, y] = parser.Next<ParsePoint>();
     EXPECT_EQ(x, 3);
     EXPECT_EQ(y, 4);
     EXPECT_FALSE(parser.HasError());
+  }
+  {  // NextOrDefault<Fn>() runs the callable if an arg remains, else returns the default
+    auto with_arg = Make({"KM"});
+    EXPECT_DOUBLE_EQ(with_arg.NextOrDefault<ParseUnit>(7.0), 1000.0);
+    auto empty = Make({});
+    EXPECT_DOUBLE_EQ(empty.NextOrDefault<ParseUnit>(7.0), 7.0);
+    EXPECT_FALSE(empty.HasError());
   }
 }
 
@@ -784,19 +865,92 @@ TEST_F(CmdArgParserTest, NumberParser) {
   // The Number<> default parser callable matches the built-in Next<T>() behavior and error kinds.
   {
     auto parser = Make({"42", "3.5"});
-    EXPECT_EQ(parser.Next(Number<int>), 42);
-    EXPECT_DOUBLE_EQ(parser.Next(Number<double>), 3.5);
+    EXPECT_EQ(parser.Next<Number<int>>(), 42);
+    EXPECT_DOUBLE_EQ(parser.Next<Number<double>>(), 3.5);
     EXPECT_FALSE(parser.HasError());
   }
   {
     auto parser = Make({"notanint"});
-    EXPECT_EQ(parser.Next(Number<int>), 0);
+    EXPECT_EQ(parser.Next<Number<int>>(), 0);
     EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_INT);
   }
   {
     auto parser = Make({"notafloat"});
-    EXPECT_DOUBLE_EQ(parser.Next(Number<double>), 0.0);
+    EXPECT_DOUBLE_EQ(parser.Next<Number<double>>(), 0.0);
     EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_FLOAT);
+  }
+}
+
+TEST_F(CmdArgParserTest, UpperParser) {
+  auto parser = Make({"set", "MiXeD", ""});
+  EXPECT_EQ(parser.Next<Upper>(), "SET");
+  EXPECT_EQ(parser.Next<Upper>(), "MIXED");
+  EXPECT_EQ(parser.Next<Upper>(), "");
+  EXPECT_FALSE(parser.HasError());
+  EXPECT_EQ(parser.Next<Upper>(), "");  // out of bounds -> empty + error
+  EXPECT_EQ(parser.TakeError().type, CmdArgParser::OUT_OF_BOUNDS);
+}
+
+TEST_F(CmdArgParserTest, CustomTypeAdl) {
+  using custom_arg::Duration;
+
+  static_assert(ArgParsable<Duration>);
+  static_assert(!ArgParsable<int>);
+
+  {  // the custom parser drives multiple args; a second read resumes where the first stopped
+    auto parser = Make({"5", "MS", "2"});
+    EXPECT_EQ(parser.Next<Duration>(), Duration{5});     // "5 MS" -> 5ms
+    EXPECT_EQ(parser.Next<Duration>(), Duration{2000});  // "2" -> 2s
+    EXPECT_FALSE(parser.HasError());
+    EXPECT_FALSE(parser.HasNext());
+  }
+  {  // errors raised inside the custom parser propagate
+    auto parser = Make({"notanumber"});
+    (void)parser.Next<Duration>();
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_INT);
+  }
+  {  // NextOrDefault<T>() routes to it too, honoring the default when empty
+    auto parser = Make({});
+    EXPECT_EQ(parser.NextOrDefault<Duration>(Duration{99}), Duration{99});
+    EXPECT_FALSE(parser.HasError());
+  }
+  {  // optional<T> of an ArgParsable T routes through the same free function
+    auto parser = Make({"7", "MS"});
+    auto d = parser.Next<std::optional<Duration>>();
+    EXPECT_TRUE(d.has_value());
+    EXPECT_EQ(*d, Duration{7});
+    EXPECT_FALSE(parser.HasError());
+  }
+}
+
+constexpr char kNotOrdered[] = "min must be <= max";
+
+TEST_F(CmdArgParserTest, MinMaxParser) {
+  using Range = MinMax<uint32_t, kNotOrdered>;
+
+  {  // min <= max (equal allowed) parses into {min, max}
+    auto parser = Make({"3", "9", "5", "5"});
+    auto a = parser.Next<Range>();
+    EXPECT_EQ(a.min, 3u);
+    EXPECT_EQ(a.max, 9u);
+    auto b = parser.Next<Range>();  // equal endpoints are valid
+    EXPECT_EQ(b.min, 5u);
+    EXPECT_EQ(b.max, 5u);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {  // min > max reports the custom message
+    auto parser = Make({"9", "3"});
+    (void)parser.Next<Range>();
+    auto err = parser.TakeError();
+    EXPECT_EQ(err.type, CmdArgParser::CUSTOM_ERROR);
+    EXPECT_EQ(err.MakeReply().ToSv(), kNotOrdered);
+  }
+  {  // usable as an optional field via the optional<ArgParsable> path
+    auto parser = Make({"1", "4"});
+    auto r = parser.Next<std::optional<Range>>();
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->min, 1u);
+    EXPECT_EQ(r->max, 4u);
   }
 }
 

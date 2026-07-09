@@ -79,6 +79,14 @@ class OAHEntry {
   }
   void SetExtHash(uint64_t ext_hash);
 
+  // Sets the fingerprint on a FRESH entry (ext-hash bits still 0, heap ptr <= 52 bits): ORs
+  // directly, no read-mask. `shifted_ext_hash` must carry bits only in [kExtHashShift, 64); use
+  // SetExtHash if the entry may already hold a fingerprint.
+  void SetShiftedExtHash(uint64_t shifted_ext_hash) {
+    assert((shifted_ext_hash & ~kExtHashShiftedMask) == 0);
+    SetTaggedPtr(GetTaggedPtr() | shifted_ext_hash);
+  }
+
   // Reallocates the key blob if its page is underutilized; returns the usable-size delta and sets
   // *realloced when the buffer moved.
   ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced);

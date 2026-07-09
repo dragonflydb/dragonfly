@@ -152,7 +152,7 @@ DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
 
 void DflyCmd::Run(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Remaining-arg counts below are relative to the position after the subcommand token.
-  string sub_cmd = absl::AsciiStrToUpper(parser.Next<string_view>());
+  string sub_cmd = parser.Next<Upper>();
 
   if (sub_cmd == "THREAD") {
     return Thread(parser, cmd_cntx);

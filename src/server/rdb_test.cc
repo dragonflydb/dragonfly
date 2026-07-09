@@ -1609,6 +1609,31 @@ TEST_F(RdbTest, InterleavedLoad) {
   EXPECT_EQ(Run({"SELECT", "0"}), "OK");
 }
 
+TEST_F(RdbTest, EofWithPendingChunkState) {
+  // will be skipped
+  std::string a1;
+  a1.push_back(RDB_TYPE_HASH);
+  AppendString(&a1, "partial_hash");
+  AppendLen(&a1, 2);
+  AddKV(&a1, "f1", "v1");
+
+  // will survive
+  std::string b;
+  b.push_back(RDB_TYPE_STRING);
+  AppendString(&b, "complete_key");
+  AppendString(&b, "hello");
+
+  std::string body;
+  body += MakeTaggedChunk(1, a1);
+  body += b;
+
+  const auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_THAT(Run({"EXISTS", "partial_hash"}), IntArg(0));
+  EXPECT_EQ(Run({"GET", "complete_key"}), "hello");
+}
+
 TEST_F(RdbTest, SplitSBF) {
   // this test creates two filter SBF, then splits one of the filters. Since in sbf loading there
   // are two layers of possible splits, intra-filter and inter-filter, this test exercises both

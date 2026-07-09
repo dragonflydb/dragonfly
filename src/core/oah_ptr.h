@@ -67,6 +67,12 @@ class OAHPtr {
       *slot_ = tagged_ptr;
       return 0;
     }
+    return InsertNonEmpty(tagged_ptr);
+  }
+
+  // Insert into a slot the caller has already proven non-empty, skipping Insert's Empty() check.
+  [[nodiscard]] size_t InsertNonEmpty(TaggedPtr tagged_ptr) {
+    assert(!Empty());
     if (!IsVector()) {
       TaggedPtr arr_tagged_ptr = Vector::Create(2);
       Vector arr(arr_tagged_ptr);
