@@ -1644,10 +1644,10 @@ TEST_F(RdbTest, SplitSBF) {
   // splits. A plain string is also added between the split filter.
 
   // Creates filter in db to copy the fields from
-  auto resp = Run({"BF.RESERVE", "bf_src", "0.01", "10"});
+  auto resp = Run({"BF.RESERVE", "bf_src_1", "0.01", "10"});
   EXPECT_EQ(resp, "OK");
   for (size_t i = 0; i < 50; ++i) {
-    resp = Run({"BF.ADD", "bf_src", StrCat("item", i)});
+    resp = Run({"BF.ADD", "bf_src_1", StrCat("item", i)});
     EXPECT_THAT(resp, AnyOf(0, 1));
   }
 
@@ -1662,7 +1662,7 @@ TEST_F(RdbTest, SplitSBF) {
   pp_->at(0)->Await([&] {
     const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
     const auto& db = ctx.GetDbSlice(0);
-    auto it = db.FindReadOnly(ctx, "bf_src", OBJ_SBF);
+    auto it = db.FindReadOnly(ctx, "bf_src_1", OBJ_SBF);
     ASSERT_TRUE(it.ok());
 
     const SBF* sbf = it.value()->second.GetSBF();
@@ -1736,10 +1736,10 @@ TEST_F(RdbTest, SplitSBF) {
 }
 
 TEST_F(RdbTest, SplitCuckoo) {
-  auto resp = Run("cf.reserve cf_src 4 expansion 2");
+  auto resp = Run("cf.reserve cf_src_0 4 expansion 2");
   EXPECT_EQ(resp, "OK");
   for (size_t i = 0; i < 100; ++i) {
-    resp = Run(StrCat("cf.add cf_src item", i));
+    resp = Run(StrCat("cf.add cf_src_0 item", i));
     EXPECT_THAT(resp, IntArg(1));
   }
 
@@ -1753,7 +1753,7 @@ TEST_F(RdbTest, SplitCuckoo) {
   pp_->at(0)->Await([&] {
     const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
     const auto& db = ctx.GetDbSlice(0);
-    auto it = db.FindReadOnly(ctx, "cf_src", OBJ_CUCKOOFILTER);
+    auto it = db.FindReadOnly(ctx, "cf_src_0", OBJ_CUCKOOFILTER);
     ASSERT_TRUE(it.ok());
 
     const CuckooFilter* cf = it.value()->second.GetCuckooFilter();
@@ -1764,7 +1764,7 @@ TEST_F(RdbTest, SplitCuckoo) {
     ASSERT_GT(last_blob.size(), kFirstSplit + kSecondSplit);
 
     first.push_back(RDB_TYPE_CUCKOO);
-    // brand new key whose shape is copied off cf_src
+    // brand new key whose shape is copied off cf_src_0
     AppendString(&first, "cf_loaded");
     AppendLen(&first, cf->SlotsPerBucket());
     AppendLen(&first, cf->MaxIterations());

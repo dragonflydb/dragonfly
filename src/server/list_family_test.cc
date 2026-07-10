@@ -56,7 +56,7 @@ class ListFamilyTest : public BaseFamilyTest {
   }
 };
 
-const char kKey1[] = "x";
+const char kKey1[] = "d";
 const char kKey2[] = "b";
 const char kKey3[] = "c";
 
@@ -403,13 +403,13 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
 }
 
 TEST_F(ListFamilyTest, BPopTwoKeysSameShard) {
-  Run({"exists", "x", "y"});
+  Run({"exists", "x", "m"});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
   RespExpr blpop_resp;
 
   auto pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    blpop_resp = Run({"blpop", "x", "y", "0"});
-    EXPECT_FALSE(IsLocked(0, "y"));
+    blpop_resp = Run({"blpop", "x", "m", "0"});
+    EXPECT_FALSE(IsLocked(0, "m"));
     ASSERT_EQ(0, NumWatched());
   });
 
@@ -760,11 +760,11 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
 }
 
 TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
-  EXPECT_THAT(Run({"brpoplpush", "x", "y", "0.05"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"brpoplpush", "x", "m", "0.05"}), ArgType(RespExpr::NIL));
   ASSERT_EQ(0, NumWatched());
 
   EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
-  EXPECT_EQ(Run({"brpoplpush", "x", "y", "0.01"}), "val1");
+  EXPECT_EQ(Run({"brpoplpush", "x", "m", "0.01"}), "val1");
   ASSERT_EQ(1, GetDebugInfo().shards_count);
 
   EXPECT_THAT(Run({
@@ -773,15 +773,15 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
               }),
               IntArg(0));
   Run({"set", "x", "str"});
-  EXPECT_THAT(Run({"brpoplpush", "y", "x", "0.01"}), ErrArg("wrong kind of value"));
+  EXPECT_THAT(Run({"brpoplpush", "m", "x", "0.01"}), ErrArg("wrong kind of value"));
 
-  Run({"del", "x", "y"});
+  Run({"del", "x", "m"});
   Run({"multi"});
-  Run({"brpoplpush", "y", "x", "0"});
+  Run({"brpoplpush", "m", "x", "0"});
   RespExpr resp = Run({"exec"});
   EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
   ASSERT_FALSE(IsLocked(0, "x"));
-  ASSERT_FALSE(IsLocked(0, "y"));
+  ASSERT_FALSE(IsLocked(0, "m"));
   ASSERT_EQ(0, NumWatched());
 }
 
@@ -804,18 +804,19 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBug2857) {
 
 TEST_F(ListFamilyTest, BRPopLPushSingleShardBug4569) {
   RespExpr resp;
-  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { resp = Run({"brpop", "x", "0"}); });
-  WaitUntilLocked(0, "x");
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { resp = Run({"brpop", "h", "0"}); });
+  WaitUntilLocked(0, "h");
 
-  ASSERT_TRUE(IsLocked(0, "x"));
-  Run({"lpush", "y", "val"});
-  Run({"rpoplpush", "y", "x"});
+  ASSERT_TRUE(IsLocked(0, "h"));
+
+  Run({"lpush", "x", "val"});
+  Run({"rpoplpush", "x", "h"});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
   fb0.Join();
   EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("x", "val"));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("h", "val"));
   ASSERT_EQ(0, NumWatched());
-  ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_FALSE(IsLocked(0, "h"));
 }
 
 TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
@@ -1524,7 +1525,7 @@ TEST_F(ListFamilyTest, AwakeDb1) {
 
   auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
     Run("C", {"SELECT", kDbId});
-    Run("C", {"brpoplpush", "x", "y", "0"});
+    Run("C", {"brpoplpush", "x", "m", "0"});
     ASSERT_EQ(GetDebugInfo("C").shards_count, 1);
   });
   Run({"SELECT", kDbId});

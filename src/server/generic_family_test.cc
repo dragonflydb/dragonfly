@@ -528,8 +528,8 @@ TEST_F(GenericFamilyTest, Rename) {
 }
 
 TEST_F(GenericFamilyTest, RenameList) {
-  for (string_view dest : {"b", "y", "z"}) {
-    EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
+  for (string_view dest : {"a", "h", "s"}) {
+    EXPECT_EQ(1, CheckedInt({"lpush", "c", "elem"}));
     Metrics metrics = GetMetrics();
 
     size_t list_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
@@ -537,9 +537,9 @@ TEST_F(GenericFamilyTest, RenameList) {
     ASSERT_GT(list_usage, 0);
     ASSERT_EQ(string_usage, 0);
 
-    auto resp = Run({"rename", "x", dest});
+    auto resp = Run({"rename", "c", dest});
     ASSERT_EQ(resp, "OK");
-    if (dest == "b") {
+    if (dest == "a") {
       ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
     } else {
       ASSERT_EQ(1, last_cmd_dbg_info_.shards_count);
@@ -551,7 +551,7 @@ TEST_F(GenericFamilyTest, RenameList) {
     ASSERT_EQ(list_usage_after, list_usage);
     ASSERT_EQ(string_usage, 0);
 
-    EXPECT_EQ(0, CheckedInt({"del", "x"}));
+    EXPECT_EQ(0, CheckedInt({"del", "c"}));
     EXPECT_EQ(1, CheckedInt({"del", dest}));
   }
 }

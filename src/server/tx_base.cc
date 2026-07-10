@@ -7,6 +7,7 @@
 #include <xxhash.h>
 
 #include "base/logging.h"
+#include "common/rapidhash.h"
 #include "facade/facade_types.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
@@ -77,7 +78,7 @@ LockTag::LockTag(std::string_view key) {
 }
 
 LockFp LockTag::Fingerprint() const {
-  return XXH64(str_.data(), str_.size(), 0x1C69B3F74AC4AE35UL);
+  return rapidhashMicro_withSeed(str_.data(), str_.size(), 0x1C69B3F74AC4AE35UL);
 }
 
 }  // namespace dfly

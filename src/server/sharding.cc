@@ -9,6 +9,7 @@
 #include "absl/strings/match.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "common/rapidhash.h"
 #include "server/cluster_support.h"
 #include "server/common.h"
 #include "util/fibers/synchronization.h"
@@ -112,7 +113,7 @@ ShardId Shard(string_view v, ShardId shard_num) {
     v = LockTagOptions::instance().Tag(v);
   }
 
-  XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
+  uint64_t hash = rapidhashMicro_withSeed(v.data(), v.size(), 120577240643ULL);
 
   if (RoundRobinSharder::IsEnabled()) {
     auto round_robin = RoundRobinSharder::TryGetShardId(v, hash);
@@ -121,7 +122,12 @@ ShardId Shard(string_view v, ShardId shard_num) {
     }
   }
 
-  return hash % shard_num;
+  // Lemire's fast alternative to modulo reduction.
+  // Replaces slow division with multiply+shift, same distribution quality.
+  // See: https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
+  // Fold 64-bit hash to 32-bit first to use cheaper multiply instead of 128-bit.
+  uint32_t h32 = static_cast<uint32_t>(hash ^ (hash >> 32));
+  return static_cast<ShardId>((uint64_t{h32} * uint64_t{shard_num}) >> 32);
 }
 
 namespace sharding {

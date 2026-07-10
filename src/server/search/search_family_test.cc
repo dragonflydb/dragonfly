@@ -519,7 +519,7 @@ TEST_F(SearchFamilyTest, MemoryTrackingDocKeyIndex) {
   // Upper bound: generous per-doc estimate covering allocator rounding and index metadata.
   constexpr size_t kMinPerDoc = 2 * kKeyLen + sizeof(search::DocId);
   constexpr size_t kMaxPerDoc = 2 * (sizeof(std::string) + kKeyLen + 16 /*allocator rounding*/) +
-                                sizeof(search::DocId) + 64 /*tag index + map slot overhead*/;
+                                sizeof(search::DocId) + 80 /*tag index + map slot overhead*/;
   EXPECT_GE(mem_delta, kNumDocs * kMinPerDoc)
       << "Memory tracking should account for DocKeyIndex and FieldIndices storage";
   EXPECT_LE(mem_delta, kNumDocs * kMaxPerDoc)
@@ -5479,8 +5479,9 @@ TEST_F(SearchFamilyTest, WithSortKeysOption) {
       Run({"FT.SEARCH", "users", "jones", "SORTBY", "first_name", "WITHSORTKEYS", "NOCONTENT"}),
       IsArray(IntArg(2), "user1", "$alice", "user2", "$bob"));
 
-  EXPECT_THAT(Run({"FT.SEARCH", "users", "jones", "WITHSORTKEYS", "NOCONTENT"}),
-              IsArray(IntArg(2), "user1", ArgType(RespExpr::NIL), "user2", ArgType(RespExpr::NIL)));
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "users", "jones", "WITHSORTKEYS", "NOCONTENT"}),
+      IsUnordArray(IntArg(2), "user1", ArgType(RespExpr::NIL), "user2", ArgType(RespExpr::NIL)));
 
   EXPECT_THAT(
       Run({"FT.SEARCH", "users", "jones", "SORTBY", "last_name", "WITHSORTKEYS"}),

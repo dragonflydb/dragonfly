@@ -323,21 +323,27 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
   Run({"del", vec[1]});
   Run({"lpush", vec[1], "a"});
 
+  // Capture bumps after setup so any bump caused by del/lpush (which depends on
+  // vec[1]'s bucket position, not something this test cares about) doesn't
+  // pollute the count we're actually measuring below.
+  resp = Run({"info", "stats"});
+  size_t bumps_before = get_bump_ups(resp.GetString());
+
   resp = Run({"get", vec[2]});
   string val = resp.GetString();
   auto mget_resp = StrArray(Run({"mget", vec[2], vec[2], vec[2]}));
   EXPECT_THAT(mget_resp, ElementsAre(val, val, val));
 
   resp = Run({"info", "stats"});
-  size_t bumps = get_bump_ups(resp.GetString());
-  EXPECT_EQ(bumps, 2);  // one bump for get and one for mget
+  size_t bumps = get_bump_ups(resp.GetString()) - bumps_before;
+  EXPECT_EQ(bumps, 2);  // one bump for get and one for mget (deduped within mget)
 }
 
 TEST_F(StringFamilyTest, MSetGet) {
-  Run({"mset", "x", "0", "y", "0", "a", "0", "b", "0"});
+  Run({"mset", "x", "0", "m", "0", "a", "0", "b", "0"});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
 
-  Run({"mset", "x", "0", "y", "0"});
+  Run({"mset", "x", "0", "m", "0"});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
 
   Run({"mset", "x", "1", "b", "5", "x", "0"});
@@ -394,26 +400,26 @@ TEST_F(StringFamilyTest, IntKey) {
 }
 
 TEST_F(StringFamilyTest, SingleShard) {
-  Run({"mset", "x", "1", "y", "1"});
+  Run({"mset", "x", "1", "m", "1"});
   ASSERT_EQ(1, GetDebugInfo("IO0").shards_count);
 
-  Run({"mget", "x", "y", "b"});
+  Run({"mget", "x", "m", "b"});
   ASSERT_EQ(2, GetDebugInfo("IO0").shards_count);
 
-  auto resp = Run({"mget", "x", "y"});
+  auto resp = Run({"mget", "x", "m"});
   ASSERT_EQ(1, GetDebugInfo("IO0").shards_count);
   ASSERT_THAT(ToIntArr(resp), ElementsAre(1, 1));
 
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 100; ++i) {
-      Run({"mset", "x", "0", "y", "0"});
+      Run({"mset", "x", "0", "m", "0"});
     }
   });
 
   // Specially multiple shards to avoid fast-path.
   auto mget_fb = pp_->at(1)->LaunchFiber([&] {
     for (size_t i = 0; i < 100; ++i) {
-      Run({"mget", "x", "b", "y"});
+      Run({"mget", "x", "b", "m"});
     }
   });
   mset_fb.Join();
