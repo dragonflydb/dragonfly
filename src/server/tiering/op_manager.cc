@@ -81,16 +81,10 @@ void OpManager::CancelPending(PendingId id) {
 
 void OpManager::CancelPendingLoad(DiskSegment segment) {
   auto it = pending_reads_.find(segment.ContainingPages().offset);
-  if (it == pending_reads_.end())
-    return;
-
-  auto& entry_ops = it->second.entry_ops;
-  for (size_t i = 0; i < entry_ops.size(); i++) {
-    if (entry_ops[i].segment.offset == segment.offset) {
-      entry_ops.erase(entry_ops.begin() + i);
-      return;
-    }
-  }
+  DCHECK(it != pending_reads_.end());
+  auto* ops = it->second.Find(segment);
+  DCHECK(ops);
+  ops->read_cbs.clear();
 }
 
 void OpManager::DeleteOffloaded(DiskSegment segment) {
