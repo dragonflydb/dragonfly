@@ -1322,6 +1322,49 @@ TEST_F(PureDiskTSTest, BitopsBitFieldRoOnExternal) {
   EXPECT_THAT(Run({"BITFIELD_RO", "bm", "GET", "u8", "0"}), RespArray(ElementsAre(IntArg(42))));
 }
 
+// INCRBYFLOAT must not GetSlice() an offloaded value. The value is a valid float
+// padded to fill a page so it offloads.
+TEST_F(PureDiskTSTest, IncrByFloatOnExternal) {
+  const string val = "3.5" + string(4093, '0');
+  Run({"SET", "num", val});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+
+  EXPECT_EQ(Run({"INCRBYFLOAT", "num", "1.5"}), "5");
+  EXPECT_EQ(Run({"GET", "num"}), "5");
+}
+
+// Memcached APPEND goes through ExtendOrSkip -> ExtendExisting -> GetSlice()
+// (unlike RESP APPEND, which is tiered-aware via OpExtend).
+TEST_F(PureDiskTSTest, McAppendOnExternal) {
+  Run({"SET", "k", string(4096, 'x')});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+
+  RunMC(MemcacheParser::APPEND, "k", MCArgs{"suffix", 0});
+  EXPECT_EQ(Run({"STRLEN", "k"}), 4102);
+}
+
+// JSON.GET reads plain string keys with GetString() before parsing.
+TEST_F(PureDiskTSTest, JsonGetOnExternalString) {
+  const string doc = absl::StrCat("\"", string(4094, 'a'), "\"");
+  Run({"SET", "doc", doc});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+
+  EXPECT_EQ(Run({"JSON.GET", "doc"}), doc);
+}
+
+// DEBUG OBJECT COMPRESS reads via a raw prime-table lookup (no warmup) + GetSlice().
+TEST_F(PureDiskTSTest, DebugObjectCompressOnExternal) {
+  Run({"SET", "k", string(4096, 'x')});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+
+  auto resp = Run({"DEBUG", "OBJECT", "k", "COMPRESS"});
+  EXPECT_THAT(resp.GetString(), testing::HasSubstr("raw_size: 4096"));
+}
+
 // HLL reads its value synchronously (GetSlice/GetString), which must handle
 // an offloaded value instead of tripping CHECK(!IsExternal()).
 TEST_F(PureDiskTSTest, PFCountOnExternal) {
