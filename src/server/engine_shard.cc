@@ -787,7 +787,14 @@ void EngineShard::Heartbeat() {
   // This is determined by attempting to check if shard lock can be acquired.
   const bool can_acquire_global_lock = shard_lock()->Check(IntentLock::Mode::EXCLUSIVE);
 
-  if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock) {
+  // Also skip if a transaction callback is suspended mid-execution on this shard (e.g. an
+  // optimistic transaction that preempted on a journal write without registering its keys in
+  // the lock table, see ScheduleInShard's lazy lock registration).
+  // Note that this stalls the heartbeat for as long as callbacks keep getting suspended.
+  // If this starves expiry/eviction in practice, the design should consider changing direction:
+  // lazily register the suspended transaction's locks here (like ScheduleInShard does) and
+  // proceed instead of skipping.
+  if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock || running_tx_ != nullptr) {
     uint64_t now = absl::GetCurrentTimeNanos();
 
     uint64_t elapsed_ms = (now - stalled_start_ns_) / 1000000;

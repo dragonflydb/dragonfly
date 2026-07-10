@@ -208,6 +208,14 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
       if (bucket_it->first.HasExpire()) {
         string_view key = bucket_it->first.GetSlice(&scratch);
         ++checked_;
+        // Deleting expired keys here without checking the lock table is safe: transaction
+        // callbacks are serialized per shard (see EngineShard::running_tx_), so no suspended
+        // transaction can hold a reference to this entry while the insert that triggered this
+        // GC runs. The running transaction itself cannot reference it either: expiry is
+        // evaluated with the transaction's fixed clock (Transaction::time_now_ms_), so any key
+        // it already accessed is not expired from this GC's point of view. Locks held by
+        // queued (not yet running) transactions don't matter - they hold no references, and
+        // for them the key just expired a moment earlier.
         auto prime_it = db_slice_->ExpireIfNeeded(
             cntx_, DbSlice::Iterator(bucket_it, StringOrView::FromView(key)));
         if (prime_it.is_done())
