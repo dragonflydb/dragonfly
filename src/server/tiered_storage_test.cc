@@ -1345,6 +1345,17 @@ TEST_F(PureDiskTSTest, McAppendOnExternal) {
   EXPECT_EQ(Run({"STRLEN", "k"}), 4102);
 }
 
+// Memcached PREPEND shares the ExtendOrSkip path and prepends at the front.
+TEST_F(PureDiskTSTest, McPrependOnExternal) {
+  Run({"SET", "k", string(4096, 'x')});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+
+  RunMC(MemcacheParser::PREPEND, "k", MCArgs{"pre", 0});
+  EXPECT_EQ(Run({"GETRANGE", "k", "0", "2"}), "pre");
+  EXPECT_EQ(Run({"STRLEN", "k"}), 4099);
+}
+
 // JSON.GET reads plain string keys with GetString() before parsing.
 TEST_F(PureDiskTSTest, JsonGetOnExternalString) {
   const string doc = absl::StrCat("\"", string(4094, 'a'), "\"");
