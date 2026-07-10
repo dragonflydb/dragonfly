@@ -10,14 +10,14 @@
 
 namespace dfly {
 
-// oah_ptr.h - the bucket-slot manager that ties OAHEntry and PtrVector together.
+// oah_ptr.h - the bucket-slot manager that ties the entry accessor and PtrVector together.
 //
-// OAHPtr is a non-owning accessor over one bucket TaggedPtr that holds EITHER a single OAHEntry or
-// a PtrVector collision chain. Bit 0 (kVectorBit) discriminates them: a vector sets it, an entry
-// never does. OAHPtr is the only type aware of both representations and owns the lifetime logic
-// (promote-to-vector, grow, clear) via the OAHEntry and PtrVector Create()/Destroy() factories.
-class OAHPtr {
-  using Entry = OAHEntry;
+// OAHPtr is a non-owning accessor over one bucket TaggedPtr that holds EITHER a single Entry
+// (OAHEntry or OAHPair) or a PtrVector collision chain. Bit 0 (kVectorBit) discriminates them: a
+// vector sets it, an entry never does. OAHPtr is the only type aware of both representations and
+// owns the lifetime logic (promote-to-vector, grow, clear) via the Entry and PtrVector
+// Create()/Destroy() factories.
+template <typename Entry> class OAHPtr {
   using Vector = PtrVector<TaggedPtr>;
 
  public:
@@ -142,7 +142,7 @@ class OAHPtr {
   }
 
   char* Raw() const {
-    return reinterpret_cast<char*>(*slot_ & ~OAHEntry::kTagMask);
+    return reinterpret_cast<char*>(*slot_ & ~Entry::kTagMask);
   }
 
   // Replaces the slot's contents with the single entry `tagged_ptr`, freeing the old contents.
