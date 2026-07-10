@@ -255,6 +255,9 @@ class DflyCmd {
   // fan-out). Lock-free: reads thread-local replica infos.
   static ReplicationMemoryStats GetReplicationMemoryStats(EngineShard* shard);
 
+  // Returns a snapshot of currently tracked replicas (shared ownership).
+  std::vector<std::shared_ptr<ReplicaInfo>> GetReplicaInfoSnapshot() const ABSL_LOCKS_EXCLUDED(mu_);
+
   // Sets metadata.
   void SetDflyClientVersion(ConnectionState* state, DflyVersion version);
 
