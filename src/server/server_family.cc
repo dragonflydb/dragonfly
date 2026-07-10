@@ -1074,7 +1074,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
                                 facade::Connection* conn, ClientPause pause_state,
                                 std::function<bool()> is_pause_in_progress,
                                 std::function<void()> maybe_cleanup) {
-  // Track connections and set pause state to be able to wait untill all running transactions read
+  // Track connections and set pause state to be able to wait until all running transactions read
   // the new pause state. Exlude already paused commands from the busy count. Exlude tracking
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
   // state after waking from blocking so if the trasaction was waken by another running
@@ -1395,7 +1395,7 @@ void ServerFamily::FlushAll(Namespace* ns) {
 
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
-// error (if any occured) with a future.
+// error (if any occurred) with a future.
 std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& path,
                                                             LoadExistingKeys existing_keys) {
   DCHECK(!path.empty());
