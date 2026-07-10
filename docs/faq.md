@@ -46,6 +46,6 @@ Dragonfly optimizes the use of underlying hardware, allowing it to run efficient
 
 ## If only Dragonfly had this command I would use it for sure
 Dragonfly implements ~190 Redis commands which we think represent a good coverage of the market.
-However this is not based empirical data. Having said that, if you have commands that are not covered,
+However this is not based on empirical data. Having said that, if you have commands that are not covered,
 please feel free to open an issue for that or vote for an existing issue.
 We will do our best to prioritise those commands according to their popularity.
