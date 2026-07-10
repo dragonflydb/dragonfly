@@ -100,6 +100,9 @@ class TieredStorage : public TieredStorageBase {
   // Cancel pending stash for the value. Must have HasStashPending() true.
   void CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref);
 
+  // Cancel pending load for the value. Must have IsLoadPending() true.
+  void CancelLoad(tiering::DiskSegment segment);
+
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
 
@@ -203,6 +206,10 @@ TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::
                                                 const tiering::DiskSegment& segment,
                                                 TieredStorage* ts);
 
+// Prefetches offloaded list node. This is async and does not block the caller.
+// The node's io_pending is set to true until the read completes, and cleared on completion.
+void PrefetchTieredListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts);
+
 // Reads offloaded value, and applies modifications on it and return generic result from callback.
 // Unlike with immutable Reads - the modified value will be uploaded back to memory.
 // This is handled by OpManager when modf completes.
@@ -286,6 +293,9 @@ class TieredStorage : public TieredStorageBase {
   void CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref) {
   }
 
+  void CancelLoad(tiering::DiskSegment segment) {
+  }
+
   TieredStats GetStats() const {
     return {};
   }
@@ -337,6 +347,9 @@ inline TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, 
                                                        const tiering::DiskSegment& segment,
                                                        TieredStorage* ts) {
   return {};
+}
+
+inline void PrefetchTieredListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts) {
 }
 
 template <typename T>

@@ -29,7 +29,7 @@ void FragmentRef::ClearOffloaded() {
 
 bool FragmentRef::HasStashPending() const {
   return std::visit(Overloaded{[](CompactValue* pv) { return pv->HasStashPending(); },
-                               [](QList::Node* node) { return node->io_pending != 0; }},
+                               [](QList::Node* node) { return node->IsStashPending(); }},
                     val_);
 }
 

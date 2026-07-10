@@ -74,6 +74,10 @@ ABSL_FLAG(unsigned, list_tiering_threshold, 0,
 ABSL_FLAG(uint32_t, list_compress_dict_threshold, 0,
           "Minimum list malloc usage in bytes before attempting ZSTD dictionary compression. "
           "0 disables. Note: compression is synchronous and may block the thread.");
+ABSL_FLAG(uint32_t, list_tiering_prefetch_depth, 0,
+          "Before loading a tiered list node, scan up to this many neighboring nodes and "
+          "issue asynchronous load requests for any that are offloaded. A value of 0 disables "
+          "prefetching.");
 
 namespace dfly {
 
@@ -106,7 +110,26 @@ void OffloadListNode(QList* ql, QList::Node* node) {
 
 void LoadListNode(QList* ql, QList::Node* node) {
   TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+  const uint32_t tiering_prefetch_depth = absl::GetFlag(FLAGS_list_tiering_prefetch_depth);
   DCHECK(ts);
+
+  // If the list is large enough, scan up to `tiering_prefetch_depth` neighboring nodes in each
+  // direction and asynchronously load any offloaded nodes.
+  if (tiering_prefetch_depth > 0 && ql->node_count() >= 2 * tiering_prefetch_depth) {
+    auto prefetch = [&](QList::Node* n, bool forward) {
+      for (uint32_t i = 0; i < tiering_prefetch_depth && n != nullptr && n != node;
+           ++i, n = forward ? n->next : n->prev) {
+        if (!n->offloaded || n->io_pending) {
+          continue;
+        }
+        QList::stats.onload_requests++;
+        PrefetchTieredListNode(ql->GetDbIndex(), ql, n, ts);
+      }
+    };
+    prefetch(node->next, true);
+    prefetch(node->prev, false);
+  }
+
   QList::stats.onload_requests++;
   auto res = ReadTieredListNode(ql->GetDbIndex(), ql, node, node->GetExternalSlice(), ts).Get();
   if (!res) {
@@ -118,9 +141,14 @@ void CleanupListNode(QList* ql, QList::Node* node) {
   TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
   DCHECK(ts);
   if (!ts->IsClosed()) {
-    if (node->io_pending) {
+    if (node->IsStashPending()) {
       ts->CancelStash(tiering::ListNodeId{ql->GetDbIndex(), ql, node}, node);
     } else {
+      if (node->IsLoadPending()) {
+        // Background prefetch load still in flight: detach its callback so it doesn't touch this
+        // node once freed, then free the disk segment directly since it was never uploaded back.
+        ts->CancelLoad(node->GetExternalSlice());
+      }
       // We don't pass QList pointer so we need to decrease num_offloaded_nodes_ now.
       ql->AdjustOffloadNodeCount(-1);
       ts->Delete(ql->GetDbIndex(), node);

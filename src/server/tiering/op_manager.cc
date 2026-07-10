@@ -79,6 +79,20 @@ void OpManager::CancelPending(PendingId id) {
   pending_stash_ver_.erase(ToOwned(id));
 }
 
+void OpManager::CancelPendingLoad(DiskSegment segment) {
+  auto it = pending_reads_.find(segment.ContainingPages().offset);
+  if (it == pending_reads_.end())
+    return;
+
+  auto& entry_ops = it->second.entry_ops;
+  for (size_t i = 0; i < entry_ops.size(); i++) {
+    if (entry_ops[i].segment.offset == segment.offset) {
+      entry_ops.erase(entry_ops.begin() + i);
+      return;
+    }
+  }
+}
+
 void OpManager::DeleteOffloaded(DiskSegment segment) {
   EntryOps* pending_read = nullptr;
 
