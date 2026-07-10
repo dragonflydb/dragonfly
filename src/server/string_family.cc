@@ -282,13 +282,17 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
       return OpStatus::IO_ERROR;
     string slice = std::move(tier).value();
     string new_val = prepend ? absl::StrCat(val, slice) : absl::StrCat(slice, val);
-    res.post_updater.ReduceHeapUsage();
-    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+    // The read may have warmed the value back into memory; re-check before Delete.
+    if (res.it->second.IsExternal()) {
+      res.post_updater.ReduceHeapUsage();
+      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+    }
     res.it->second.SetString(new_val);
     return true;
   }
 
-  return ExtendExisting(res.it, key, val, prepend);
+  ExtendExisting(res.it, key, val, prepend);
+  return true;
 }
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
@@ -338,7 +342,9 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
 
-  if (was_external) {
+  // The tiered read may have warmed the value back into memory; re-check so Delete
+  // only runs while it is still external.
+  if (add_res.it->second.IsExternal()) {
     add_res.post_updater.ReduceHeapUsage();
     op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &add_res.it->second);
   }
