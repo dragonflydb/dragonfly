@@ -1238,7 +1238,7 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   VLOG(2) << "Execute txid: " << tx_data.txid << " waiting for data in all shards";
   // Wait until shards flows got transaction data and inserted to map.
   // This step enforces that replica will execute multi shard commands that finished on master
-  // and replica recieved all the commands from all shards.
+  // and replica received all the commands from all shards.
   multi_shard_data.block->Wait();
   // Check if we woke up due to cancellation.
   if (!cntx->IsRunning())
