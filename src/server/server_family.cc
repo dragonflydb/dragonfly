@@ -3551,6 +3551,148 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
   return builder->SendOk();
 }
 
+void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  if (!IsMaster()) {
+    return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
+  }
+
+  using NonNegInt = facade::FInt<int64_t{0}, std::numeric_limits<int64_t>::max()>;
+  auto [num_replicas_arg, timeout_arg] = parser.Next<NonNegInt, NonNegInt>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  const int64_t num_replicas = num_replicas_arg;
+  const int64_t timeout_ms = timeout_arg;
+
+  // Collect currently tracked replicas.
+  auto replicas = dfly_cmd_->GetReplicaInfoSnapshot();
+
+  if (replicas.empty()) {
+    return rb->SendLong(0);
+  }
+
+  uint32_t shard_count = shard_set->size();
+  std::vector<LSN> target_lsns(shard_count, 0);
+
+  // We snapshot the global per-shard LSN rather than the calling connection's own last-write
+  // LSN: journal writes happen post-commit on the shard's fiber, decoupled from the issuing
+  // connection, so tracking a per-connection LSN would add bookkeeping to every write's hot
+  // path. This waits for all writes up to now, which is strictly stronger than the Redis
+  // per-connection guarantee.
+  //
+  // Set from within a shard's own dispatched callback whenever that shard observes this node is
+  // no longer master. is_master is per-thread and SetMasterFlagOnAllThreads' fan-out gives no
+  // ordering guarantee across threads, so a check on the connection's own thread is not a
+  // reliable proxy for what a given shard's thread has seen; only checking at the exact site
+  // where we touch that shard's journal/LSN data is race-free.
+  std::atomic<bool> role_changed{false};
+
+  // Capture the current LSN on each shard and send PING to force replicas to ACK immediately.
+  // PING causes replicas to skip their normal ACK interval and send REPLCONF ACK right away.
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    if (!IsMaster()) {
+      role_changed.store(true, std::memory_order_relaxed);
+      return;
+    }
+    if (shard->journal()) {
+      uint32_t sid = shard->shard_id();
+      target_lsns[sid] = journal::GetLsn();
+      journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
+    }
+  });
+
+  // Count replicas that have acknowledged all shards up to their respective target LSN.
+  // Runs the check on each shard's proactor to safely read last_acked_lsn.
+  // Also returns the number of replicas still running (connected), so callers can detect
+  // that the required count can never be reached due to disconnections.
+  auto count_acked = [&]() ABSL_NO_THREAD_SAFETY_ANALYSIS -> std::pair<uint32_t, uint32_t> {
+    size_t n = replicas.size();
+    // Per-shard result: shard_acked[sid][i] == true means replica i caught up on shard sid.
+    std::vector<std::vector<bool>> shard_acked(shard_count, std::vector<bool>(n, true));
+
+    shard_set->RunBriefInParallel([&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+      if (!IsMaster()) {
+        role_changed.store(true, std::memory_order_relaxed);
+        return;
+      }
+      uint32_t sid = shard->shard_id();
+      if (!shard->journal() || target_lsns[sid] == 0)
+        return;
+      for (size_t i = 0; i < n; i++) {
+        shard_acked[sid][i] = replicas[i]->GetFlow(sid).last_acked_lsn >= target_lsns[sid];
+      }
+    });
+
+    uint32_t acked = 0, running = 0;
+    for (size_t i = 0; i < n; i++) {
+      if (!replicas[i]->GetExecState().IsRunning())
+        continue;
+      ++running;
+      bool all_acked = true;
+      for (uint32_t sid = 0; sid < shard_count; sid++) {
+        if (!shard_acked[sid][i]) {
+          all_acked = false;
+          break;
+        }
+      }
+      if (all_acked)
+        ++acked;
+    }
+    return {acked, running};
+  };
+
+  auto [count, running] = count_acked();
+
+  // A shard observed a role change while we were capturing/comparing LSNs: none of the above is
+  // trustworthy anymore (target_lsns may span a stale journal epoch from before the transition),
+  // so fail the same way the upfront check would have if the transition had landed a moment
+  // earlier.
+  if (role_changed.load(std::memory_order_relaxed)) {
+    return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
+  }
+
+  // Inside MULTI/EXEC we must not block: return the currently acked count immediately,
+  // matching Redis semantics for commands issued in a non-blocking context.
+  if (auto* tx = cmd_cntx->tx(); tx && tx->IsMulti()) {
+    return rb->SendLong(count);
+  }
+
+  // Unlike BLPOP et al., this loop isn't tied to Transaction's blocking machinery, so
+  // CancelBlockingOnThread (used by REPLTAKEOVER/shutdown) can't force it to return early -
+  // the connection just looks "busy dispatching" for as long as we keep polling. Cap timeout=0
+  // at a bounded duration instead of blocking forever, so a forgotten/disconnected WAIT client
+  // can't pin a fiber (and its per-tick shard fan-out) indefinitely.
+  constexpr auto kMaxWaitDuration = absl::Minutes(10);
+  absl::Time deadline = timeout_ms == 0 ? absl::Now() + kMaxWaitDuration
+                                        : absl::Now() + absl::Milliseconds(timeout_ms);
+  while (count < num_replicas && absl::Now() < deadline) {
+    // Exit early once every currently-tracked, still-running replica has already acked and
+    // that's still short of what was requested: our replica snapshot is fixed at call time, so
+    // no further polling can improve on this. Checking running < num_replicas alone would be
+    // wrong -- it's true from the very first iteration whenever more replicas were requested
+    // than are tracked, and would cut off replicas that just haven't caught up yet.
+    if (count == running && running < num_replicas)
+      break;
+    // Bail out promptly on takeover/shutdown: otherwise we'd keep this connection "busy" for
+    // the rest of the deadline, which can make REPLTAKEOVER's (much shorter) dispatch-drain
+    // timeout fail spuriously.
+    if (ServerState::tlocal()->gstate() != GlobalState::ACTIVE)
+      break;
+    // Bail out if this node became a replica mid-wait (e.g. a concurrent REPLICAOF): gstate()
+    // only transitions to LOADING for a full sync, not a partial one, so is_master is the only
+    // signal that catches both.
+    if (!IsMaster())
+      break;
+    ThisFiber::SleepFor(100ms);
+    std::tie(count, running) = count_acked();
+    if (role_changed.load(std::memory_order_relaxed)) {
+      return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
+    }
+  }
+
+  return rb->SendLong(count);
+}
+
 void ServerFamily::Role(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   util::fb2::LockGuard lk(replicaof_mu_);
@@ -3818,6 +3960,7 @@ constexpr uint32_t kReplicaOf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kReplTakeOver = DANGEROUS;
 constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
+constexpr uint32_t kWait = SLOW | CONNECTION;
 constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
 constexpr uint32_t kModule = ADMIN | SLOW | DANGEROUS;
@@ -3857,6 +4000,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, acl::kReplTakeOver}.HFUNC(
              ReplTakeOver)
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
+      << CI{"WAIT", CO::NOSCRIPT | CO::BLOCKING, 3, 0, 0, acl::kWait}.HFUNC(Wait)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)
       << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
