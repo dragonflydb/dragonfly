@@ -44,6 +44,7 @@
 #include "server/search/aggregator.h"
 #include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
+#include "server/server_state.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
@@ -121,7 +122,13 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
     } else if (parser->Check("M", &params.hnsw_m)) {
     } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
     } else if (parser->Check("TYPE")) {
-      params.data_type = absl::AsciiStrToUpper(parser->Next<string_view>());
+      std::string type_name = absl::AsciiStrToUpper(parser->Next<string_view>());
+      if (auto dt = search::ParseVectorDataType(type_name); dt)
+        params.data_type = *dt;
+      else if (auto* ss = ServerState::tlocal(); ss && ss->gstate() == GlobalState::LOADING)
+        params.data_type = search::VectorDataType::FLOAT32;  // legacy snapshot: coerce unknown TYPE
+      else
+        parser->ReportCustom("Not supported data type is given");
     } else if (parser->Check("EF_RUNTIME", &params.hnsw_ef_runtime)) {
     } else if (parser->Check("EPSILON")) {
       double epsilon = parser->Next<double>("Invalid EPSILON value");
@@ -2875,7 +2882,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       info.emplace_back("algorithm");
       info.emplace_back(vparams.use_hnsw ? "HNSW" : "FLAT");
       info.emplace_back("data_type");
-      info.emplace_back(vparams.data_type);
+      info.emplace_back(search::VectorDataTypeToString(vparams.data_type));
       info.emplace_back("dim");
       info.emplace_back(std::to_string(vparams.dim));
       info.emplace_back("distance_metric");

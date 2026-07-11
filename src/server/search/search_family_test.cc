@@ -1835,6 +1835,16 @@ TEST_F(SearchFamilyTest, AggregateLoad) {
   EXPECT_THAT(resp, ErrArg("LOAD cannot be applied after projectors or reducers"));
 }
 
+TEST_F(SearchFamilyTest, VectorUnknownTypeRejected) {
+  // A non-standard TYPE is rejected on a normal FT.CREATE (the replay-only coerce does not apply).
+  for (string_view bogus : {"BOGUS", "FP32", "FLOAT8", ""}) {
+    EXPECT_THAT(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "v", "VECTOR", "FLAT", "6", "TYPE",
+                     bogus, "DIM", "3", "DISTANCE_METRIC", "L2"}),
+                ErrArg("Parse error of vector parameters"))
+        << "TYPE=" << bogus;
+  }
+}
+
 TEST_F(SearchFamilyTest, Vector) {
   auto resp = Run({"ft.create", "ann", "ON", "HASH", "SCHEMA", "vector", "VECTOR", "HNSW", "8",
                    "TYPE", "FLOAT32", "DIM", "100", "distance_metric", "cosine", "M", "64"});

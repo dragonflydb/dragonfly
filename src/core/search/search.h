@@ -89,7 +89,7 @@ struct SchemaField {
     size_t capacity = 1000;                       // initial capacity
     size_t hnsw_ef_construction = 200;
     size_t hnsw_m = 16;
-    std::string data_type = "FLOAT32";
+    VectorDataType data_type = VectorDataType::FLOAT32;
     uint32_t hnsw_ef_runtime = 10;
     double hnsw_epsilon = kDefaultHnswEpsilon;
   };
