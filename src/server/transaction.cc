@@ -14,6 +14,7 @@
 #include "facade/op_status.h"
 #include "redis/redis_aux.h"
 #include "server/blocking_controller.h"
+#include "server/cmd_memory_scope.h"
 #include "server/command_registry.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -1862,6 +1863,36 @@ std::vector<Transaction::PerShardCache>& Transaction::TLTmpSpace::GetShardIndex(
   for (auto& v : shard_cache)
     v.Clear();
   return shard_cache;
+}
+
+namespace {
+thread_local CmdMemoryScope* tl_cmd_mem_scope = nullptr;
+}
+
+CmdMemoryScope::CmdMemoryScope(int obj_type)
+    : obj_type_(obj_type), mem_baseline_(EngineShard::tlocal()->UsedMemory()) {
+  if (tl_cmd_mem_scope)
+    parent_ = tl_cmd_mem_scope;
+
+  tl_cmd_mem_scope = this;
+}
+
+CmdMemoryScope::~CmdMemoryScope() {
+  DCHECK_EQ(tl_cmd_mem_scope, this);
+
+  const int64_t used_memory = static_cast<int64_t>(EngineShard::tlocal()->UsedMemory());
+  const int64_t total_delta = used_memory - mem_baseline_;
+  const int64_t my_delta = total_delta - child_delta_;
+
+  if (parent_)
+    parent_->child_delta_ += total_delta;
+
+  tl_cmd_mem_scope = parent_;
+
+  if (obj_type_ < 0)
+    return;
+
+  EngineShard::tlocal()->AddCmdTypeMemDelta(obj_type_, my_delta);
 }
 
 }  // namespace dfly
