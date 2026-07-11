@@ -6,8 +6,6 @@
 
 #include <absl/container/flat_hash_map.h>
 
-#include <cstddef>
-#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
@@ -140,6 +138,8 @@ struct Metrics {
   InternedStringStats interned_string_stats;
 
   acl::UserRegistry::AclStats acl_stats;
+
+  std::vector<int64_t> cmd_type_mem_delta;
 
   void InitFromThread(Namespace* ns, const CommandRegistry* registry, unsigned proactor_index,
                       const MetricsCollectOpts& opts, DflyCmd* dfly_cmd);

@@ -1,14 +1,18 @@
+import logging
 import platform
+import subprocess
 
 import aiohttp
+import pytest
+import redis
 from prometheus_client.samples import Sample
 from pymemcache import Client
-
+from redis import asyncio as aioredis
 from redis.exceptions import ResponseError
 
 from . import dfly_args
 from .instance import DflyInstance
-from .utility import *
+from .utility import assert_eventually
 
 
 @pytest.fixture(scope="class")
@@ -21,7 +25,7 @@ class TestServer:
         connection.send_command("QUIT")
         assert connection.read_response() == b"OK"
 
-        with pytest.raises(redis.exceptions.ConnectionError) as e:
+        with pytest.raises(redis.exceptions.ConnectionError):
             connection.read_response()
 
     def test_quit_after_sub(self, connection):
@@ -31,7 +35,7 @@ class TestServer:
         connection.send_command("QUIT")
         assert connection.read_response() == b"OK"
 
-        with pytest.raises(redis.exceptions.ConnectionError) as e:
+        with pytest.raises(redis.exceptions.ConnectionError):
             connection.read_response()
 
     async def test_multi_exec(self, async_client: aioredis.Redis):
@@ -95,13 +99,13 @@ async def test_client_kill(df_factory):
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
 
             # Can't kill admin from regular connection
-            with pytest.raises(ResponseError) as e_info:
+            with pytest.raises(ResponseError):
                 await client_conn.execute_command("CLIENT KILL LADDR 127.0.0.1:1112")
 
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
             await admin_client.execute_command("CLIENT KILL LADDR 127.0.0.1:1111")
             assert len(await admin_client.execute_command("CLIENT LIST")) == 1
-            with pytest.raises(redis.exceptions.ConnectionError) as e_info:
+            with pytest.raises(redis.exceptions.ConnectionError):
                 await client_conn.ping()
 
 
@@ -229,6 +233,29 @@ async def test_metric_labels(
         for sample in metrics["dragonfly_connected_clients"].samples:
             match_label_value(sample, "main", lambda v: v == 2)
             match_label_value(sample, "other", lambda v: v == 1)
+
+
+def metric_sample_value(metrics, name, labels):
+    if name not in metrics:
+        return 0
+
+    for sample in metrics[name].samples:
+        if all(sample.labels.get(k) == v for k, v in labels.items()):
+            return sample.value
+
+    return 0
+
+
+async def test_command_type_memory_metric(df_server: DflyInstance, async_client: aioredis.Redis):
+    metric_name = "dragonfly_command_type_memory_delta_bytes"
+    before = metric_sample_value(await df_server.metrics(), metric_name, {"type": "string"})
+
+    value = "x" * 65536
+    for i in range(32):
+        assert await async_client.set(f"cmd-type-mem-{i}", value)
+
+    after = metric_sample_value(await df_server.metrics(), metric_name, {"type": "string"})
+    assert after > before, "string type metric did not increase after traffic"
 
 
 async def test_latency_stats(async_client: aioredis.Redis):
