@@ -18,6 +18,7 @@
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/conn_context.h"
 
@@ -360,6 +361,40 @@ absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() c
     cmd_latencies.insert({absl::AsciiStrToLower(cmd_name), cmd.GetLatencyHist()});
   }
   return cmd_latencies;
+}
+
+int TypeForFamily(size_t family) {
+  static constexpr int kNoCommandMemoryType = -1;
+  static const std::vector<int> kFamilyToType = {
+      kNoCommandMemoryType,  // core
+      kNoCommandMemoryType,  // server
+      kNoCommandMemoryType,  // generic
+      OBJ_LIST,              // list
+      OBJ_STRING,            // string
+#ifdef WITH_COLLECTION_CMDS
+      OBJ_SET,     // set
+      OBJ_HASH,    // hash
+      OBJ_ZSET,    // sorted_set
+      OBJ_STREAM,  // stream
+#endif
+#ifdef WITH_EXTENSION_CMDS
+      OBJ_ZSET,          // geo
+      OBJ_STRING,        // bitmap
+      OBJ_STRING,        // hyperloglog
+      OBJ_SBF,           // bloom
+      OBJ_CMS,           // cms
+      OBJ_TOPK,          // topk
+      OBJ_CUCKOOFILTER,  // cuckoo_filter
+      OBJ_JSON,          // json
+#endif
+#ifdef WITH_SEARCH
+      kNoCommandMemoryType,  // search
+#endif
+      kNoCommandMemoryType,  // cluster
+      kNoCommandMemoryType,  // acl
+  };
+  DCHECK_LT(kFamilyToType.size(), acl::NumberOfFamilies());
+  return kFamilyToType[family];
 }
 
 absl::flat_hash_map<std::string, CmdCallStats> CommandRegistry::NamedCallStats(
