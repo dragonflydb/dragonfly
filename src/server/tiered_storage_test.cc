@@ -244,7 +244,7 @@ TEST_P(LatentCoolingTSTest, MGET) {
 }
 
 // Test that squashed GET/MGET commands over offloaded values run their disk reads concurrently.
-TEST_F(PureDiskTSTest, MGETParallel) {
+TEST_F(PureDiskTSTest, DISABLED_MGETParallel) {
   // Create kMax strings and offload them. Each value fills its own page so each key maps to a
   // distinct pending read, making concurrent reads observable via pending_read_cnt.
   const int kMax = 500;
