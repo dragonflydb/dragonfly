@@ -354,6 +354,7 @@ void TopkFamily::List(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   bool with_count = false;
 
+  // TODO: remove runtime parsing (single option -> Check).
   parser.Apply(OneOf(Exist("WITHCOUNT", &with_count)));
 
   if (!parser.Finalize())

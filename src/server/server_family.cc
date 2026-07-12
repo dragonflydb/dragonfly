@@ -256,6 +256,7 @@ using absl::StrCat;
 using namespace facade;
 using namespace util;
 using detail::SaveStagesController;
+
 using http::StringResponse;
 using strings::HumanReadableNumBytes;
 
@@ -3626,8 +3627,11 @@ void ServerFamily::ShutdownCmd(facade::CmdArgParser parser, CommandContext* cmd_
     bool abort = false;
   } opts;
 
-  parser.Apply(Exist("SAVE", &opts.save), Exist("SAFE", &opts.save), Exist("NOSAVE", &opts.no_save),
-               Exist("NOW", &opts.now), Exist("FORCE", &opts.force), Exist("ABORT", &opts.abort));
+  static constexpr auto kGrammar =
+      Compile(Options(Exist("SAVE", &ShutdownOpts::save), Exist("SAFE", &ShutdownOpts::save),
+                      Exist("NOSAVE", &ShutdownOpts::no_save), Exist("NOW", &ShutdownOpts::now),
+                      Exist("FORCE", &ShutdownOpts::force), Exist("ABORT", &ShutdownOpts::abort)));
+  kGrammar.Apply(&parser, &opts);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());

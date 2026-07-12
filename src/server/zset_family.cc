@@ -979,7 +979,20 @@ struct SetOpArgs {
   unsigned num_keys;
   vector<double> weights;
   bool with_scores = false;
+  bool store = false;
 };
+
+constexpr auto kSetOpGrammar =
+    Compile(Options(facade::Action(
+                        "WEIGHTS",
+                        +[](CmdArgParser* p, SetOpArgs* o) {
+                          o->weights.resize(o->num_keys, 1);
+                          for (unsigned i = 0; i < o->num_keys; ++i)
+                            o->weights[i] = p->Next<double>();
+                        }),
+                    Choice("AGGREGATE", &SetOpArgs::agg_type, "SUM", AggType::SUM, "MIN",
+                           AggType::MIN, "MAX", AggType::MAX),
+                    IfNot(&SetOpArgs::store, Exist("WITHSCORES", &SetOpArgs::with_scores))));
 
 OpResult<ScoredMap> IntersectResults(vector<OpResult<ScoredMap>>& results, AggType agg_type) {
   ScoredMap result;
@@ -1014,20 +1027,10 @@ OpResult<SetOpArgs> ParseSetOpArgs(CmdArgParser parser, bool store) {
   if (parser.TakeError()) {
     return OpStatus::SYNTAX_ERR;
   }
+  op_args.store = store;
 
-  parser.Apply(Tag("WEIGHTS",
-                   [&op_args](CmdArgParser* p) {
-                     op_args.weights.resize(op_args.num_keys, 1);
-                     for (unsigned i = 0; i < op_args.num_keys; ++i)
-                       op_args.weights[i] = p->Next<double>();
-                   }),
-               Tag("AGGREGATE", Map(&op_args.agg_type, "SUM", AggType::SUM, "MIN", AggType::MIN,
-                                    "MAX", AggType::MAX)),
-               // The *STORE variants do not offer the WITHSCORES option.
-               If(!store, Exist("WITHSCORES", &op_args.with_scores)));
+  kSetOpGrammar.Apply(&parser, &op_args);
 
-  // A non-float WEIGHTS value surfaces as INVALID_FLOAT; any other failure (unknown option, bad
-  // AGGREGATE type, or leftover args caught by Finalize) is a plain syntax error.
   if (auto err = parser.TakeError(); err) {
     return err.type == CmdArgParser::INVALID_FLOAT ? OpStatus::INVALID_FLOAT : OpStatus::SYNTAX_ERR;
   }
@@ -1786,6 +1789,7 @@ void ZRangeGeneric(facade::ParsedArgs args, ZSetFamily::RangeParams range_params
     };
   };
 
+  // TODO: remove runtime parsing (migrate to cap grammar).
   parser.Apply(Tag("BYSCORE", set_interval(RP::SCORE)), Tag("BYLEX", set_interval(RP::LEX)),
                Exist("REV", &range_params.reverse), Exist("WITHSCORES", &range_params.with_scores),
                Tag("LIMIT", [&](CmdArgParser* p) {

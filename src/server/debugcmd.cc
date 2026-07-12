@@ -830,6 +830,7 @@ void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   bool no_save = false;
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  // TODO: remove runtime parsing (single option -> Check).
   parser.Apply(Exist("NOSAVE", &no_save));
   if (!parser.Finalize()) {
     (void)parser.TakeError();
