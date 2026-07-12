@@ -1323,6 +1323,85 @@ TEST_F(PureDiskTSTest, BitopsBitFieldRoOnExternal) {
   EXPECT_THAT(Run({"BITFIELD_RO", "bm", "GET", "u8", "0"}), RespArray(ElementsAre(IntArg(42))));
 }
 
+// INCRBYFLOAT must not GetSlice() an offloaded value. The value is a valid float
+// padded to fill a page so it offloads.
+TEST_F(PureDiskTSTest, IncrByFloatOnExternal) {
+  const string val = "3.5" + string(4093, '0');
+  Run({"SET", "num", val});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+
+  EXPECT_EQ(Run({"INCRBYFLOAT", "num", "1.5"}), "5");
+  EXPECT_EQ(Run({"GET", "num"}), "5");
+}
+
+// A prior read marks the value touched, so the INCRBYFLOAT read warms it back into
+// memory (non-external); Delete must be gated on a fresh IsExternal() re-check.
+TEST_F(PureDiskTSTest, IncrByFloatOnExternalWarmedUp) {
+  const string val = "3.5" + string(4093, '0');
+  Run({"SET", "num", val});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+  Run({"GET", "num"});  // touch: the next read uploads the value
+
+  EXPECT_EQ(Run({"INCRBYFLOAT", "num", "1.5"}), "5");
+  EXPECT_EQ(Run({"GET", "num"}), "5");
+}
+
+// Memcached APPEND goes through ExtendOrSkip -> ExtendExisting -> GetSlice()
+// (unlike RESP APPEND, which is tiered-aware via OpExtend).
+TEST_F(PureDiskTSTest, McAppendOnExternal) {
+  Run({"SET", "k", string(4096, 'x')});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+
+  RunMC(MemcacheParser::APPEND, "k", MCArgs{"suffix", 0});
+  EXPECT_EQ(Run({"STRLEN", "k"}), 4102);
+}
+
+// Memcached PREPEND shares the ExtendOrSkip path and prepends at the front.
+TEST_F(PureDiskTSTest, McPrependOnExternal) {
+  Run({"SET", "k", string(4096, 'x')});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+
+  RunMC(MemcacheParser::PREPEND, "k", MCArgs{"pre", 0});
+  EXPECT_EQ(Run({"GETRANGE", "k", "0", "2"}), "pre");
+  EXPECT_EQ(Run({"STRLEN", "k"}), 4099);
+}
+
+// A prior read warms the value in on the APPEND read, so ExtendOrSkip must gate
+// Delete on a fresh IsExternal() re-check.
+TEST_F(PureDiskTSTest, McAppendOnExternalWarmedUp) {
+  Run({"SET", "k", string(4096, 'x')});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+  Run({"GET", "k"});  // touch: the next read uploads the value
+
+  RunMC(MemcacheParser::APPEND, "k", MCArgs{"suffix", 0});
+  EXPECT_EQ(Run({"STRLEN", "k"}), 4102);
+}
+
+// JSON.GET reads plain string keys with GetString() before parsing.
+TEST_F(PureDiskTSTest, JsonGetOnExternalString) {
+  const string doc = absl::StrCat("\"", string(4094, 'a'), "\"");
+  Run({"SET", "doc", doc});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+
+  EXPECT_EQ(Run({"JSON.GET", "doc"}), doc);
+}
+
+// DEBUG OBJECT COMPRESS reads via a raw prime-table lookup (no warmup) + GetSlice().
+TEST_F(PureDiskTSTest, DebugObjectCompressOnExternal) {
+  Run({"SET", "k", string(4096, 'x')});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+  ASSERT_GE(GetMetrics().db_stats[0].tiered_entries, 1u);
+
+  auto resp = Run({"DEBUG", "OBJECT", "k", "COMPRESS"});
+  EXPECT_THAT(resp.GetString(), testing::HasSubstr("raw_size: 4096"));
+}
+
 // HLL reads its value synchronously (GetSlice/GetString), which must handle
 // an offloaded value instead of tripping CHECK(!IsExternal()).
 TEST_F(PureDiskTSTest, PFCountOnExternal) {
@@ -1341,6 +1420,18 @@ TEST_F(PureDiskTSTest, PFMergeOnExternal) {
   EXPECT_EQ(Run({"PFMERGE", "dst", "src1", "src2"}), "OK");
   // Disjoint sources -> merged cardinality is the sum (~12000).
   EXPECT_NEAR(CheckedInt({"PFCOUNT", "dst"}), 12000, 1200);
+}
+
+// PFCOUNT touches the HLL, so the PFADD read warms it back into memory; AddToHll
+// must gate Delete on a fresh IsExternal() re-check.
+TEST_F(PureDiskTSTest, PFAddOnExternalWarmedUp) {
+  BuildDenseHll("hll");
+  // Wait for the final HLL (not just an intermediate build value) to be offloaded.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries >= 1; });
+  Run({"PFCOUNT", "hll"});  // touch: the next read uploads the value
+
+  Run({"PFADD", "hll", "extra-element"});
+  EXPECT_NEAR(CheckedInt({"PFCOUNT", "hll"}), 6000, 600);
 }
 
 // RunMany squashes the batch (like Connection::SquashPipeline); a squashed read

@@ -100,12 +100,10 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_STRING);
   RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
-  bool was_external = false;
   if (res.is_new) {
     hll.resize(getSparseHllInitSize());
     initSparseHll(StringToHllPtr(hll));
   } else {
-    was_external = res.it->second.IsExternal();
     auto val = ReadHll(op_args, key, res.it->second);
     RETURN_ON_BAD_STATUS(val);
     hll = std::move(val).value();
@@ -148,7 +146,8 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     hll = string{hll_sds, sdslen(hll_sds)};
     sdsfree(hll_sds);
   }
-  if (was_external) {
+  // ReadHll may have warmed the value back into memory; re-check before Delete.
+  if (res.it->second.IsExternal()) {
     res.post_updater.ReduceHeapUsage();
     op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
   }

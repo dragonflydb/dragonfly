@@ -47,6 +47,7 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "server/string_stats.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 
 using namespace std;
@@ -456,8 +457,19 @@ OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_
     return info;
   }
 
-  string scratch;
-  string_view value = it->second.GetSlice(&scratch);
+  string scratch, materialized;
+  string_view value;
+  if (it->second.IsExternal()) {
+    auto res =
+        ReadTieredString(db_index, key, it->second, EngineShard::tlocal()->tiered_storage()).Get();
+    if (!res) {
+      return OpStatus::IO_ERROR;
+    }
+    materialized = std::move(res).value();
+    value = materialized;
+  } else {
+    value = it->second.GetSlice(&scratch);
+  }
 
   info.raw_size = value.size();
   info.compressed_size = info.raw_size;

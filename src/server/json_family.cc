@@ -883,7 +883,16 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
     json_ptr = it->second.GetJson();
   } else if (it->second.ObjType() == OBJ_STRING) {
     string tmp;
-    it->second.GetString(&tmp);
+    if (it->second.IsExternal()) {
+      auto res = ReadTieredString(op_args.db_cntx.db_index, key, it->second,
+                                  op_args.shard->tiered_storage())
+                     .Get();
+      if (!res)
+        return OpStatus::IO_ERROR;
+      tmp = std::move(res).value();
+    } else {
+      it->second.GetString(&tmp);
+    }
     auto parsed_json = ShardJsonFromString(tmp);
     if (!parsed_json) {
       return OpStatus::WRONG_TYPE;
