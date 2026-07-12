@@ -148,7 +148,7 @@ TEST_F(OAHSetTest, OAHPtrInsertRemove) {
   // OAHPtr is a non-owning view over a uint64_t slot; the test owns the slot and frees
   // the leftover collision array explicitly at the end.
   uint64_t slot = 0;
-  OAHPtr test{slot};
+  OAHPtr<OAHEntry> test{slot};
   test.Assign(OAHEntry::Create("0123456789", 2));
 
   EXPECT_EQ(test[0].Key(), "0123456789"sv);
@@ -797,7 +797,7 @@ TEST_F(OAHSetTest, ReallocIfNeededVectorEntry) {
   // Construct a vector slot directly via Insert — same shape as a colliding bucket.
   // OAHPtr is a non-owning view; the test owns `slot` and frees it at the end.
   uint64_t slot = 0;
-  OAHPtr e{slot};
+  OAHPtr<OAHEntry> e{slot};
   e.Assign(OAHEntry::Create("first_entry_payload"));
   (void)e.Insert(OAHEntry::Create("second_entry_payload"));
   (void)e.Insert(OAHEntry::Create("third_entry_payload"));
