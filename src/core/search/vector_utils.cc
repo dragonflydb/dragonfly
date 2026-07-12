@@ -4,6 +4,7 @@
 
 #include "core/search/vector_utils.h"
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -123,12 +124,11 @@ float HalfToFloat(uint16_t h) {
     if (mant == 0) {
       bits = sign;  // +/- zero
     } else {
-      exp = 127 - 15 + 1;  // normalize the subnormal
-      while ((mant & 0x400) == 0) {
-        mant <<= 1;
-        exp--;
-      }
-      mant &= 0x3FF;
+      // Normalize the subnormal: shift the mantissa left until bit 10 is set. `mant` is in
+      // [1, 0x3FF], so countl_zero is in [22, 31] and the shift in [1, 10].
+      int shift = std::countl_zero(mant) - 21;
+      exp = (127 - 15 + 1) - shift;
+      mant = (mant << shift) & 0x3FF;
       bits = sign | (exp << 23) | (mant << 13);
     }
   } else if (exp == 0x1F) {
@@ -156,82 +156,55 @@ uint16_t LoadU16(const void* base, size_t i) {
   return v;
 }
 
-// Byte-safe reads: native-width blobs may be unaligned (borrowed keyspace storage), so a
-// typed deref would be UB. memcpy lowers to a single load on the target ISAs.
-float LoadF32(const void* base, size_t i) {
-  float v;
-  memcpy(&v, static_cast<const char*>(base) + i * sizeof(float), sizeof(v));
-  return v;
-}
-
-double LoadF64(const void* base, size_t i) {
-  double v;
-  memcpy(&v, static_cast<const char*>(base) + i * sizeof(double), sizeof(v));
-  return v;
-}
-
-// Reads element i of a native-width blob, widened to Acc (double for FLOAT64, else float).
-template <VectorDataType DT> struct Reader;
-template <> struct Reader<VectorDataType::FLOAT32> {
-  using Acc = float;
-  static float Get(const void* p, size_t i) {
-    return LoadF32(p, i);
-  }
-};
-template <> struct Reader<VectorDataType::FLOAT64> {
-  using Acc = double;
-  static double Get(const void* p, size_t i) {
-    return LoadF64(p, i);
-  }
-};
-template <> struct Reader<VectorDataType::FLOAT16> {
-  using Acc = float;
-  static float Get(const void* p, size_t i) {
-    return HalfToFloat(LoadU16(p, i));
-  }
-};
-template <> struct Reader<VectorDataType::BFLOAT16> {
-  using Acc = float;
-  static float Get(const void* p, size_t i) {
-    return Bf16ToFloat(LoadU16(p, i));
-  }
-};
-template <> struct Reader<VectorDataType::INT8> {
-  using Acc = float;
-  static float Get(const void* p, size_t i) {
-    return static_cast<const int8_t*>(p)[i];
-  }
-};
-template <> struct Reader<VectorDataType::UINT8> {
-  using Acc = float;
-  static float Get(const void* p, size_t i) {
-    return static_cast<const uint8_t*>(p)[i];
+// Reads element i of type Elem via memcpy — byte-safe for unaligned native-width blobs (e.g.
+// borrowed keyspace storage) — and widens it to Acc.
+template <class Elem, class AccT> struct PodReader {
+  using Acc = AccT;
+  static Acc Get(const void* p, size_t i) {
+    Elem v;
+    memcpy(&v, static_cast<const char*>(p) + i * sizeof(Elem), sizeof(v));
+    return static_cast<Acc>(v);
   }
 };
 
-template <VectorDataType DT> float L2Typed(const void* u, const void* v, size_t dims) {
-  using Acc = typename Reader<DT>::Acc;
+// Reads a 16-bit half/bfloat element and widens it to float via the given decoder.
+template <float (*Decode)(uint16_t)> struct HalfReader {
+  using Acc = float;
+  static float Get(const void* p, size_t i) {
+    return Decode(LoadU16(p, i));
+  }
+};
+
+using ReaderF32 = PodReader<float, float>;
+using ReaderF64 = PodReader<double, double>;
+using ReaderI8 = PodReader<int8_t, float>;
+using ReaderU8 = PodReader<uint8_t, float>;
+using ReaderF16 = HalfReader<HalfToFloat>;
+using ReaderBF16 = HalfReader<Bf16ToFloat>;
+
+template <class R> float L2Typed(const void* u, const void* v, size_t dims) {
+  using Acc = typename R::Acc;
   Acc sum = 0;
   for (size_t i = 0; i < dims; i++) {
-    Acc d = Reader<DT>::Get(u, i) - Reader<DT>::Get(v, i);
+    Acc d = R::Get(u, i) - R::Get(v, i);
     sum += d * d;
   }
   return static_cast<float>(std::sqrt(sum));
 }
 
-template <VectorDataType DT> float IPTyped(const void* u, const void* v, size_t dims) {
-  using Acc = typename Reader<DT>::Acc;
+template <class R> float IPTyped(const void* u, const void* v, size_t dims) {
+  using Acc = typename R::Acc;
   Acc sum = 0;
   for (size_t i = 0; i < dims; i++)
-    sum += Reader<DT>::Get(u, i) * Reader<DT>::Get(v, i);
+    sum += R::Get(u, i) * R::Get(v, i);
   return static_cast<float>(Acc(1) - sum);
 }
 
-template <VectorDataType DT> float CosineTyped(const void* u, const void* v, size_t dims) {
-  using Acc = typename Reader<DT>::Acc;
+template <class R> float CosineTyped(const void* u, const void* v, size_t dims) {
+  using Acc = typename R::Acc;
   Acc uv = 0, uu = 0, vv = 0;
   for (size_t i = 0; i < dims; i++) {
-    Acc a = Reader<DT>::Get(u, i), b = Reader<DT>::Get(v, i);
+    Acc a = R::Get(u, i), b = R::Get(v, i);
     uv += a * b;
     uu += a * a;
     vv += b * b;
@@ -241,15 +214,15 @@ template <VectorDataType DT> float CosineTyped(const void* u, const void* v, siz
   return 0.0f;
 }
 
-template <VectorDataType DT>
+template <class R>
 float DistByMetric(const void* u, const void* v, size_t dims, VectorSimilarity sim) {
   switch (sim) {
     case VectorSimilarity::L2:
-      return L2Typed<DT>(u, v, dims);
+      return L2Typed<R>(u, v, dims);
     case VectorSimilarity::IP:
-      return IPTyped<DT>(u, v, dims);
+      return IPTyped<R>(u, v, dims);
     case VectorSimilarity::COSINE:
-      return CosineTyped<DT>(u, v, dims);
+      return CosineTyped<R>(u, v, dims);
   }
   return 0.0f;
 }
@@ -260,17 +233,17 @@ float VectorDistance(const void* u, const void* v, size_t dims, VectorSimilarity
                      VectorDataType dt) {
   switch (dt) {
     case VectorDataType::FLOAT32:
-      return DistByMetric<VectorDataType::FLOAT32>(u, v, dims, sim);
+      return DistByMetric<ReaderF32>(u, v, dims, sim);
     case VectorDataType::FLOAT64:
-      return DistByMetric<VectorDataType::FLOAT64>(u, v, dims, sim);
+      return DistByMetric<ReaderF64>(u, v, dims, sim);
     case VectorDataType::FLOAT16:
-      return DistByMetric<VectorDataType::FLOAT16>(u, v, dims, sim);
+      return DistByMetric<ReaderF16>(u, v, dims, sim);
     case VectorDataType::BFLOAT16:
-      return DistByMetric<VectorDataType::BFLOAT16>(u, v, dims, sim);
+      return DistByMetric<ReaderBF16>(u, v, dims, sim);
     case VectorDataType::INT8:
-      return DistByMetric<VectorDataType::INT8>(u, v, dims, sim);
+      return DistByMetric<ReaderI8>(u, v, dims, sim);
     case VectorDataType::UINT8:
-      return DistByMetric<VectorDataType::UINT8>(u, v, dims, sim);
+      return DistByMetric<ReaderU8>(u, v, dims, sim);
   }
   return 0.0f;
 }

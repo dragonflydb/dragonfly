@@ -2114,6 +2114,8 @@ TEST_F(SearchTest, VectorDistanceTypedDtypes) {
   EXPECT_FLOAT_EQ(HalfToFloat(0xC000), -2.0f);
   EXPECT_FLOAT_EQ(HalfToFloat(0x0000), 0.0f);
   EXPECT_FLOAT_EQ(HalfToFloat(0x4200), 3.0f);
+  EXPECT_FLOAT_EQ(HalfToFloat(0x0001), std::ldexp(1.0f, -24));  // smallest subnormal half
+  EXPECT_FLOAT_EQ(HalfToFloat(0x0200), std::ldexp(1.0f, -15));  // subnormal half
   EXPECT_FLOAT_EQ(Bf16ToFloat(0x3F80), 1.0f);
   EXPECT_FLOAT_EQ(Bf16ToFloat(0x4000), 2.0f);
   EXPECT_FLOAT_EQ(Bf16ToFloat(0x40C0), 6.0f);
