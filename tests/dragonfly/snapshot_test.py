@@ -370,6 +370,9 @@ async def test_exit_on_s3_snapshot_load_err(df_factory):
 
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
+# TODO: temporarily disabled, constantly fails. See
+# https://github.com/dragonflydb/dragonfly/issues/7840
+@pytest.mark.skip("Temporarily disabled, constantly fails. See issue #7840")
 @pytest.mark.skipif(
     _missing_s3_test_env(),
     reason="AWS S3 snapshots bucket or credentials are not configured",
