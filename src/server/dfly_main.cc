@@ -144,6 +144,9 @@ using strings::HumanReadableNumBytes;
 
 namespace dfly {
 
+// Forward-declared here to avoid pulling the heavy protocol_client.h into this translation unit.
+bool ValidateClientTlsFlags();
+
 namespace {
 
 #if ABSL_HAVE_ADDRESS_SANITIZER
@@ -1117,6 +1120,15 @@ Usage: dragonfly [FLAGS]
 
   if (GetFlag(FLAGS_dbnum) > dfly::kMaxDbId) {
     LOG(ERROR) << "dbnum is too big. Exiting...";
+    return 1;
+  }
+
+  // Validate startup flags (TLS + snapshot filename) BEFORE creating the pidfile and before
+  // starting the proactor pool. They return false on a bad config; we exit cleanly (code 1)
+  // here, before the fiber runtime exists, which avoids a stale pidfile and aborting during
+  // fiber-runtime teardown.
+  if (!dfly::ValidateServerTlsFlags() || !dfly::ValidateClientTlsFlags() ||
+      !dfly::ValidateSnapshotFilenameFlags()) {
     return 1;
   }
 
