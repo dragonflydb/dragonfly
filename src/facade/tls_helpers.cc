@@ -6,11 +6,14 @@
 #include <openssl/err.h>
 
 #ifdef DFLY_USE_SSL
+#include <openssl/pem.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 #endif
 
 #include <absl/functional/bind_front.h>
 
+#include <optional>
 #include <string>
 
 #include "base/flags.h"
@@ -34,7 +37,43 @@ ABSL_FLAG(size_t, tls_session_cache_timeout, 300, "Timeout for each session/tick
 
 namespace facade {
 
+using absl::GetFlag;
+
 #ifdef DFLY_USE_SSL
+
+namespace {
+
+std::string Asn1TimeToString(const ASN1_TIME* asn1_time) {
+  if (!asn1_time)
+    return {};
+
+  BIO* bio = BIO_new(BIO_s_mem());
+  if (!bio)
+    return {};
+
+  ASN1_TIME_print(bio, asn1_time);
+
+  BUF_MEM* buf_mem = nullptr;
+  BIO_get_mem_ptr(bio, &buf_mem);
+  std::string result(buf_mem ? buf_mem->data : "", buf_mem ? buf_mem->length : 0);
+  BIO_free(bio);
+  return result;
+}
+
+std::string X509NameToString(X509_NAME* name) {
+  if (!name)
+    return {};
+
+  char* buf = X509_NAME_oneline(name, nullptr, 0);
+  if (!buf)
+    return {};
+
+  std::string result(buf);
+  OPENSSL_free(buf);
+  return result;
+}
+
+}  // namespace
 
 // Creates the TLS context. Returns nullptr if the TLS configuration is invalid.
 // To connect: openssl s_client -state -crlf -connect 127.0.0.1:6380
@@ -62,8 +101,8 @@ SSL_CTX* CreateSslCntx(TlsContextRole role) {
   const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
 
   if (!tls_cert_file.empty()) {
-    // TO connect with redis-cli you need both tls-key-file and tls-cert-file
-    // loaded. Use `redis-cli --tls -p 6380 --insecure  PING` to test
+    // To connect with redis-cli you need both tls-key-file and tls-cert-file
+    // loaded. Use `redis-cli --tls -p 6380 --insecure PING` to test
     if (SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()) != 1) {
       LOG(ERROR) << "Failed to load TLS certificate";
       return nullptr;
@@ -131,6 +170,19 @@ void PrintSSLError() {
         return 1;
       },
       nullptr);
+}
+
+std::optional<TlsCertInfo> ParseTlsCertInfo(const X509* cert) {
+  if (!cert)
+    return std::nullopt;
+
+  TlsCertInfo info;
+  info.subject = X509NameToString(X509_get_subject_name(cert));
+  info.issuer = X509NameToString(X509_get_issuer_name(cert));
+  info.not_before = Asn1TimeToString(X509_get_notBefore(cert));
+  info.not_after = Asn1TimeToString(X509_get_notAfter(cert));
+
+  return info;
 }
 
 #endif

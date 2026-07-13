@@ -47,6 +47,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
+#include "facade/tls_helpers.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "search/doc_index.h"
@@ -2539,8 +2540,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
   return result;
 }
 
-string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view section,
-                                       bool priveleged) const {
+string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view section, bool priveleged,
+                                       facade::Listener* listener) const {
   string info;
   DbStats total;
 
@@ -2595,6 +2596,18 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     }
     append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
+
+#ifdef DFLY_USE_SSL
+    if (listener) {
+      auto cert_info = listener->GetTlsCertInfo();
+      if (cert_info) {
+        append("tls_cert_subject", cert_info->subject);
+        append("tls_cert_issuer", cert_info->issuer);
+        append("tls_cert_not_before", cert_info->not_before);
+        append("tls_cert_not_after", cert_info->not_after);
+      }
+    }
+#endif
 
     // Add availability_zone if it's not empty
     const auto& az = GetFlag(FLAGS_availability_zone);
@@ -3118,12 +3131,16 @@ void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // output). The command does not abort or return an error if some sections are invalid. This
   // matches Valkey behavior.
   if (sections.empty()) {  // No sections: default to all sections.
-    info = FormatInfoMetrics(metrics, "", is_priveleged);
+    info = FormatInfoMetrics(metrics, "", is_priveleged,
+                             static_cast<facade::Listener*>(cmd_cntx->conn()->GetListener()));
   } else if (sections.size() == 1) {  // Single section
-    info = FormatInfoMetrics(metrics, sections[0], is_priveleged);
+    info = FormatInfoMetrics(metrics, sections[0], is_priveleged,
+                             static_cast<facade::Listener*>(cmd_cntx->conn()->GetListener()));
   } else {  // Multiple sections: concatenate results for each requested section.
     for (const auto& section : sections) {
-      const std::string section_str = FormatInfoMetrics(metrics, section, is_priveleged);
+      const std::string section_str =
+          FormatInfoMetrics(metrics, section, is_priveleged,
+                            static_cast<facade::Listener*>(cmd_cntx->conn()->GetListener()));
       if (!section_str.empty()) {
         if (!info.empty()) {
           absl::StrAppend(&info, "\r\n", section_str);

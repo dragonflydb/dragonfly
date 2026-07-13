@@ -161,8 +161,8 @@ class ServerFamily {
   // Collects server metrics. See MetricsCollectOpts; a default-constructed value collects all.
   Metrics GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) const;
 
-  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section,
-                                bool priveleged) const;
+  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section, bool priveleged,
+                                facade::Listener* listener) const;
 
   ScriptMgr* script_mgr() {
     return script_mgr_.get();
