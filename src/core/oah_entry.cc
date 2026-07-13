@@ -1,4 +1,4 @@
-// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -9,28 +9,35 @@
 namespace dfly {
 
 OAHEntry::TaggedPtr OAHEntry::Create(std::string_view key, uint32_t expiry) {
-  uint32_t key_size = key.size();
+  const uint32_t key_size = key.size();
+  assert(key_size <= kMaxKeySize);
   uint32_t expiry_size = (expiry != UINT32_MAX) * sizeof(expiry);
-  uint32_t key_len_field_size = key_size <= std::numeric_limits<uint8_t>::max() ? 1 : 4;
 
-  auto* blob = (char*)zmalloc(key_len_field_size + key_size + expiry_size);
+  uint8_t control;
+  uint32_t size_field_len;  // control byte + trailing extra size bytes
+  if (key_size <= kInlineSizeMax) {
+    control = static_cast<uint8_t>(key_size);
+    size_field_len = 1;
+  } else if (key_size <= kOneExtraByteMax) {
+    control = static_cast<uint8_t>(kBigSizeBit | (key_size & kLowSizeMask));
+    size_field_len = 2;
+  } else {
+    control = static_cast<uint8_t>(kBigSizeBit | kThreeBytesBit | (key_size & kLowSizeMask));
+    size_field_len = 4;
+  }
 
+  auto* blob = (char*)zmalloc(expiry_size + size_field_len + key_size);
   TaggedPtr tagged_ptr = reinterpret_cast<TaggedPtr>(blob);
-  OAHEntry entry(tagged_ptr);  // accessor over the local control word being built
   if (expiry_size) {
-    entry.SetExpiryBit(true);
+    tagged_ptr |= kExpiryBit;
     std::memcpy(blob, &expiry, sizeof(expiry));
   }
 
-  auto* key_size_pos = blob + expiry_size;
-  if (key_len_field_size == 1) {
-    entry.SetSsoBit();
-    uint8_t sso_key_size = key_size;
-    std::memcpy(key_size_pos, &sso_key_size, key_len_field_size);
-  } else {
-    std::memcpy(key_size_pos, &key_size, key_len_field_size);
-  }
-  std::memcpy(key_size_pos + key_len_field_size, key.data(), key_size);
+  char* p = blob + expiry_size;
+  *p++ = static_cast<char>(control);
+  for (uint32_t extra = key_size >> kLowSizeBits, i = 1; i < size_field_len; ++i, extra >>= 8)
+    *p++ = static_cast<char>(extra & 0xFF);
+  std::memcpy(p, key.data(), key_size);
   return tagged_ptr;
 }
 
@@ -89,22 +96,17 @@ ssize_t OAHEntry::ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
   return static_cast<ssize_t>(AllocSize()) - static_cast<ssize_t>(old_alloc);
 }
 
-uint32_t OAHEntry::GetKeySize() const {
-  if (HasSso()) {
-    uint8_t size = 0;
-    std::memcpy(&size, Raw() + GetExpirySize(), sizeof(size));
-    return size;
+std::string_view OAHEntry::KeyBig(const char* p, uint8_t control) const {
+  uint32_t size = control & kLowSizeMask;
+  uint32_t extra = static_cast<uint8_t>(p[1]);
+  const char* key = p + 2;  // control byte + 1 extra size byte
+  if (control & kThreeBytesBit) {
+    extra |= static_cast<uint32_t>(static_cast<uint8_t>(p[2])) << 8;
+    extra |= static_cast<uint32_t>(static_cast<uint8_t>(p[3])) << 16;
+    key = p + 4;  // control byte + 3 extra size bytes
   }
-  uint32_t size = 0;
-  std::memcpy(&size, Raw() + GetExpirySize(), sizeof(size));
-  return size;
-}
-
-void OAHEntry::SetExpiryBit(bool b) {
-  if (b)
-    SetTaggedPtr(GetTaggedPtr() | kExpiryBit);
-  else
-    SetTaggedPtr(GetTaggedPtr() & ~kExpiryBit);
+  size |= extra << kLowSizeBits;
+  return {key, size};
 }
 
 }  // namespace dfly
