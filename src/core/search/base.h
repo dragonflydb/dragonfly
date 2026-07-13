@@ -40,6 +40,24 @@ inline std::pair<ShardId, DocId> DecomposeGlobalDocId(GlobalDocId id) {
 
 enum class VectorSimilarity { L2, IP, COSINE };
 
+enum class VectorDataType { FLOAT32, FLOAT64, FLOAT16, BFLOAT16, INT8, UINT8 };
+
+constexpr size_t ElementSize(VectorDataType dt) {
+  switch (dt) {
+    case VectorDataType::FLOAT32:
+      return 4;
+    case VectorDataType::FLOAT64:
+      return 8;
+    case VectorDataType::FLOAT16:
+    case VectorDataType::BFLOAT16:
+      return 2;
+    case VectorDataType::INT8:
+    case VectorDataType::UINT8:
+      return 1;
+  }
+  return 4;
+}
+
 using OwnedFtVector = std::pair<std::unique_ptr<float[]>, size_t /* dimension (size) */>;
 using BorrowedFtVector = const char*;
 

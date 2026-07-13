@@ -4,8 +4,12 @@
 
 #include "core/search/vector_utils.h"
 
+#include <bit>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <memory>
+#include <optional>
 
 #include "base/logging.h"
 
@@ -111,6 +115,139 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
   return 0.0f;
 }
 
+float HalfToFloat(uint16_t h) {
+  uint32_t sign = static_cast<uint32_t>(h & 0x8000) << 16;
+  uint32_t exp = (h >> 10) & 0x1F;
+  uint32_t mant = h & 0x3FF;
+  uint32_t bits;
+  if (exp == 0) {
+    if (mant == 0) {
+      bits = sign;  // +/- zero
+    } else {
+      // Normalize the subnormal: shift the mantissa left until bit 10 is set. `mant` is in
+      // [1, 0x3FF], so countl_zero is in [22, 31] and the shift in [1, 10].
+      int shift = std::countl_zero(mant) - 21;
+      exp = (127 - 15 + 1) - shift;
+      mant = (mant << shift) & 0x3FF;
+      bits = sign | (exp << 23) | (mant << 13);
+    }
+  } else if (exp == 0x1F) {
+    bits = sign | 0x7F800000u | (mant << 13);  // inf / nan
+  } else {
+    bits = sign | ((exp + 112) << 23) | (mant << 13);  // rebias 127 - 15 = 112
+  }
+  float out;
+  memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
+float Bf16ToFloat(uint16_t b) {
+  uint32_t bits = static_cast<uint32_t>(b) << 16;
+  float out;
+  memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
+namespace {
+
+uint16_t LoadU16(const void* base, size_t i) {
+  uint16_t v;
+  memcpy(&v, static_cast<const char*>(base) + i * sizeof(uint16_t), sizeof(v));
+  return v;
+}
+
+// Reads element i of type Elem via memcpy — byte-safe for unaligned native-width blobs (e.g.
+// borrowed keyspace storage) — and widens it to Acc.
+template <class Elem, class AccT> struct PodReader {
+  using Acc = AccT;
+  static Acc Get(const void* p, size_t i) {
+    Elem v;
+    memcpy(&v, static_cast<const char*>(p) + i * sizeof(Elem), sizeof(v));
+    return static_cast<Acc>(v);
+  }
+};
+
+// Reads a 16-bit half/bfloat element and widens it to float via the given decoder.
+template <float (*Decode)(uint16_t)> struct HalfReader {
+  using Acc = float;
+  static float Get(const void* p, size_t i) {
+    return Decode(LoadU16(p, i));
+  }
+};
+
+using ReaderF32 = PodReader<float, float>;
+using ReaderF64 = PodReader<double, double>;
+using ReaderI8 = PodReader<int8_t, float>;
+using ReaderU8 = PodReader<uint8_t, float>;
+using ReaderF16 = HalfReader<HalfToFloat>;
+using ReaderBF16 = HalfReader<Bf16ToFloat>;
+
+template <class R> float L2Typed(const void* u, const void* v, size_t dims) {
+  using Acc = typename R::Acc;
+  Acc sum = 0;
+  for (size_t i = 0; i < dims; i++) {
+    Acc d = R::Get(u, i) - R::Get(v, i);
+    sum += d * d;
+  }
+  return static_cast<float>(std::sqrt(sum));
+}
+
+template <class R> float IPTyped(const void* u, const void* v, size_t dims) {
+  using Acc = typename R::Acc;
+  Acc sum = 0;
+  for (size_t i = 0; i < dims; i++)
+    sum += R::Get(u, i) * R::Get(v, i);
+  return static_cast<float>(Acc(1) - sum);
+}
+
+template <class R> float CosineTyped(const void* u, const void* v, size_t dims) {
+  using Acc = typename R::Acc;
+  Acc uv = 0, uu = 0, vv = 0;
+  for (size_t i = 0; i < dims; i++) {
+    Acc a = R::Get(u, i), b = R::Get(v, i);
+    uv += a * b;
+    uu += a * a;
+    vv += b * b;
+  }
+  if (Acc denom = uu * vv; denom != Acc(0))
+    return static_cast<float>(Acc(1) - uv / std::sqrt(denom));
+  return 0.0f;
+}
+
+template <class R>
+float DistByMetric(const void* u, const void* v, size_t dims, VectorSimilarity sim) {
+  switch (sim) {
+    case VectorSimilarity::L2:
+      return L2Typed<R>(u, v, dims);
+    case VectorSimilarity::IP:
+      return IPTyped<R>(u, v, dims);
+    case VectorSimilarity::COSINE:
+      return CosineTyped<R>(u, v, dims);
+  }
+  return 0.0f;
+}
+
+}  // namespace
+
+float VectorDistance(const void* u, const void* v, size_t dims, VectorSimilarity sim,
+                     VectorDataType dt) {
+  switch (dt) {
+    case VectorDataType::FLOAT32:
+      return DistByMetric<ReaderF32>(u, v, dims, sim);
+    case VectorDataType::FLOAT64:
+      return DistByMetric<ReaderF64>(u, v, dims, sim);
+    case VectorDataType::FLOAT16:
+      return DistByMetric<ReaderF16>(u, v, dims, sim);
+    case VectorDataType::BFLOAT16:
+      return DistByMetric<ReaderBF16>(u, v, dims, sim);
+    case VectorDataType::INT8:
+      return DistByMetric<ReaderI8>(u, v, dims, sim);
+    case VectorDataType::UINT8:
+      return DistByMetric<ReaderU8>(u, v, dims, sim);
+  }
+  return 0.0f;
+}
+
 std::string_view VectorSimilarityToString(VectorSimilarity sim) {
   switch (sim) {
     case VectorSimilarity::L2:
@@ -122,6 +259,41 @@ std::string_view VectorSimilarityToString(VectorSimilarity sim) {
   }
   DCHECK(false) << "Unhandled VectorSimilarity enum value: " << static_cast<int>(sim);
   return "L2";
+}
+
+std::string_view VectorDataTypeToString(VectorDataType dt) {
+  switch (dt) {
+    case VectorDataType::FLOAT32:
+      return "FLOAT32";
+    case VectorDataType::FLOAT64:
+      return "FLOAT64";
+    case VectorDataType::FLOAT16:
+      return "FLOAT16";
+    case VectorDataType::BFLOAT16:
+      return "BFLOAT16";
+    case VectorDataType::INT8:
+      return "INT8";
+    case VectorDataType::UINT8:
+      return "UINT8";
+  }
+  DCHECK(false) << "Unhandled VectorDataType enum value: " << static_cast<int>(dt);
+  return "FLOAT32";
+}
+
+std::optional<VectorDataType> ParseVectorDataType(std::string_view name) {
+  if (name == "FLOAT32")
+    return VectorDataType::FLOAT32;
+  if (name == "FLOAT64")
+    return VectorDataType::FLOAT64;
+  if (name == "FLOAT16")
+    return VectorDataType::FLOAT16;
+  if (name == "BFLOAT16")
+    return VectorDataType::BFLOAT16;
+  if (name == "INT8")
+    return VectorDataType::INT8;
+  if (name == "UINT8")
+    return VectorDataType::UINT8;
+  return std::nullopt;
 }
 
 float DistanceToSimilarity(float distance, VectorSimilarity sim) {

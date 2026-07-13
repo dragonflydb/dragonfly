@@ -2108,6 +2108,45 @@ TEST_F(SearchTest, VectorDistanceBasic) {
   EXPECT_LT(ip_same, 0.0f);  // Should be negative for non-normalized vectors
 }
 
+TEST_F(SearchTest, VectorDistanceTypedDtypes) {
+  EXPECT_FLOAT_EQ(HalfToFloat(0x3C00), 1.0f);
+  EXPECT_FLOAT_EQ(HalfToFloat(0x4000), 2.0f);
+  EXPECT_FLOAT_EQ(HalfToFloat(0xC000), -2.0f);
+  EXPECT_FLOAT_EQ(HalfToFloat(0x0000), 0.0f);
+  EXPECT_FLOAT_EQ(HalfToFloat(0x4200), 3.0f);
+  EXPECT_FLOAT_EQ(HalfToFloat(0x0001), std::ldexp(1.0f, -24));  // smallest subnormal half
+  EXPECT_FLOAT_EQ(HalfToFloat(0x0200), std::ldexp(1.0f, -15));  // subnormal half
+  EXPECT_FLOAT_EQ(Bf16ToFloat(0x3F80), 1.0f);
+  EXPECT_FLOAT_EQ(Bf16ToFloat(0x4000), 2.0f);
+  EXPECT_FLOAT_EQ(Bf16ToFloat(0x40C0), 6.0f);
+
+  // Every dtype holding {1,2,3} vs {4,5,6} must match the float32 reference under all metrics
+  // (integers 1..6 are exactly representable in all six dtypes).
+  const std::vector<float> f1 = {1.0f, 2.0f, 3.0f};
+  const std::vector<float> f2 = {4.0f, 5.0f, 6.0f};
+  auto check = [&](const void* a, const void* b, VectorDataType dt) {
+    for (auto sim : {VectorSimilarity::L2, VectorSimilarity::IP, VectorSimilarity::COSINE}) {
+      float ref = VectorDistance(f1.data(), f2.data(), 3, sim);
+      float got = VectorDistance(a, b, 3, sim, dt);
+      EXPECT_NEAR(got, ref, 1e-4) << "dtype=" << VectorDataTypeToString(dt);
+    }
+  };
+
+  const int8_t i8a[3] = {1, 2, 3}, i8b[3] = {4, 5, 6};
+  const uint8_t u8a[3] = {1, 2, 3}, u8b[3] = {4, 5, 6};
+  const float f32a[3] = {1, 2, 3}, f32b[3] = {4, 5, 6};
+  const double f64a[3] = {1, 2, 3}, f64b[3] = {4, 5, 6};
+  const uint16_t f16a[3] = {0x3C00, 0x4000, 0x4200}, f16b[3] = {0x4400, 0x4500, 0x4600};
+  const uint16_t bf16a[3] = {0x3F80, 0x4000, 0x4040}, bf16b[3] = {0x4080, 0x40A0, 0x40C0};
+
+  check(i8a, i8b, VectorDataType::INT8);
+  check(u8a, u8b, VectorDataType::UINT8);
+  check(f32a, f32b, VectorDataType::FLOAT32);
+  check(f64a, f64b, VectorDataType::FLOAT64);
+  check(f16a, f16b, VectorDataType::FLOAT16);
+  check(bf16a, bf16b, VectorDataType::BFLOAT16);
+}
+
 TEST_F(SearchTest, VectorDistanceConsistency) {
   // Test that results are consistent across multiple calls
   std::vector<float> vec1 = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f};
