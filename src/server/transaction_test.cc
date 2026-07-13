@@ -10,6 +10,7 @@
 #include "facade/facade_stats.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
+#include "server/cmd_memory_scope.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/db_slice.h"
@@ -421,6 +422,104 @@ TEST_F(TransactionTest, LazyLockDisjointKeyMarkedOutOfOrder) {
 
   ASSERT_TRUE(v_done.WaitFor(5s)) << "V was never run after Z concluded";
   fb_v.Join();
+}
+
+namespace {
+
+std::vector<int64_t> DeltaDiff(const std::vector<int64_t>& before,
+                               const std::vector<int64_t>& after) {
+  std::vector<int64_t> diffs = after;
+  for (size_t i = 0; i < before.size(); ++i)
+    diffs[i] -= before[i];
+  return diffs;
+}
+
+void AllButOneDeltaIs(const std::vector<int64_t>& deltas, size_t pos, int64_t expected) {
+  ASSERT_GT(deltas.size(), pos);
+  for (size_t i = 0; i < deltas.size(); ++i)
+    if (i == pos)
+      ASSERT_EQ(deltas[i], expected);
+    else
+      ASSERT_EQ(deltas[i], 0);
+}
+
+}  // namespace
+
+TEST_F(TransactionTest, DeltaChanges) {
+  OnShard(0, [] {
+    const auto shard = EngineShard::tlocal();
+    const auto mr = shard->memory_resource();
+    void* p = nullptr;
+    const auto before = shard->cmd_type_mem_delta();
+    WithMemTrack([&] { p = mr->allocate(1024); }, OBJ_STRING);
+    AllButOneDeltaIs(DeltaDiff(before, shard->cmd_type_mem_delta()), OBJ_STRING, 1024);
+    mr->deallocate(p, 1024);
+  });
+}
+
+TEST_F(TransactionTest, DeltaNoObjTypeDiscarded) {
+  OnShard(0, [] {
+    const auto shard = EngineShard::tlocal();
+    const auto mr = shard->memory_resource();
+    void* p = nullptr;
+    const auto before = shard->cmd_type_mem_delta();
+    WithMemTrack([&] { p = mr->allocate(1024); }, -1);
+    ASSERT_THAT(DeltaDiff(before, shard->cmd_type_mem_delta()), Each(0));
+    mr->deallocate(p, 1024);
+  });
+}
+
+TEST_F(TransactionTest, DeltaAllocAndFree) {
+  OnShard(0, [] {
+    const auto shard = EngineShard::tlocal();
+    const auto mr = shard->memory_resource();
+    void* p = mr->allocate(1024);
+    const auto before = shard->cmd_type_mem_delta();
+    WithMemTrack([&] { mr->deallocate(p, 1024); }, OBJ_LIST);
+    AllButOneDeltaIs(DeltaDiff(before, shard->cmd_type_mem_delta()), OBJ_LIST, -1024);
+  });
+}
+
+TEST_F(TransactionTest, DeltaNested) {
+  OnShard(0, [] {
+    const auto shard = EngineShard::tlocal();
+    const auto mr = shard->memory_resource();
+    std::vector<std::pair<void*, size_t>> tracked;
+    auto track = [&](size_t s) { tracked.emplace_back(mr->allocate(s), s); };
+
+    auto hash_cb = [&] {
+      void* p = mr->allocate(256);
+      track(128);
+      mr->deallocate(p, 256);
+    };
+
+    auto list_cb = [&] {
+      track(512);
+      WithMemTrack(hash_cb, OBJ_HASH);
+    };
+
+    auto str_cb = [&] {
+      track(1024);
+      WithMemTrack(list_cb, OBJ_LIST);
+    };
+
+    const auto before = shard->cmd_type_mem_delta();
+    WithMemTrack(str_cb, OBJ_STRING);
+    auto deltas = DeltaDiff(before, shard->cmd_type_mem_delta());
+
+    ASSERT_EQ(deltas[OBJ_STRING], 1024);
+    ASSERT_EQ(deltas[OBJ_LIST], 512);
+    ASSERT_EQ(deltas[OBJ_HASH], 128);
+
+    deltas[OBJ_HASH] = 0;
+    deltas[OBJ_LIST] = 0;
+    deltas[OBJ_STRING] = 0;
+
+    ASSERT_THAT(deltas, Each(0));
+
+    for (const auto& [ptr, size] : tracked)
+      mr->deallocate(ptr, size);
+  });
 }
 
 }  // namespace dfly
