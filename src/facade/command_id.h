@@ -100,8 +100,8 @@ class CommandId {
   // Acl categories
   uint32_t acl_categories_;
   // Acl commands indices
-  size_t family_;
-  uint64_t bit_index_;
+  size_t family_ = 0;
+  uint64_t bit_index_ = 0;
 };
 
 }  // namespace facade
