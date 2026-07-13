@@ -2,6 +2,7 @@ import asyncio
 import glob
 import logging
 import os
+import time
 from pathlib import Path
 
 from async_timeout import timeout
@@ -1106,3 +1107,116 @@ async def test_tagged_chunk_replication(df_factory, compression_mode: str):
     if hashes[0] != hashes[1]:
         await compare_datasets(cm, cr)
         assert False, "replica does not match master after full sync"
+
+
+SNAPSHOT_TIME_LIMIT_SEC = 1.0
+SNAPSHOT_LATENCY_P99_LIMIT_USEC = 10_000  # 10ms
+
+
+@pytest.mark.opt_only
+@dfly_args(
+    {
+        **BASIC_ARGS,
+        "proactor_threads": 2,  # matches the CI runner's core count
+        "dbfilename": "snap-time-parity",
+        # Pin the real production default (src/server/server_state.cc) - the test harness
+        # otherwise auto-injects 300000 (instance.py), which is 4.7x bigger and hides the
+        # per-chunk cost this test is meant to catch.
+        "serialization_max_chunk_size": 65536,
+        "latency_tracking": True,
+    }
+)
+async def test_snapshot_time_parity(async_client: aioredis.Redis):
+    """
+    Regression guard, two checks per save configuration (RDB/DF format x
+    background_snapshotting on/off):
+
+    1. Total SAVE duration must stay under SNAPSHOT_TIME_LIMIT_SEC. A save path that
+       blows past this is stalling disproportionately - e.g. a per-chunk backpressure
+       mechanism in the snapshot pipeline (SliceSnapshot::HandleFlushData) that is cheap
+       per call in theory but ends up dominating total save time in practice.
+
+    2. Command latency (ZADD p99, via INFO LATENCYSTATS) observed on a key still being
+       serialized must stay under SNAPSHOT_LATENCY_P99_LIMIT_USEC. This catches a save
+       that finishes quickly overall but still causes multi-ms stalls on individual
+       commands while it runs - the total-duration check alone can't see that.
+
+    Uses many large sorted sets (each split into hundreds of chunks at the
+    serialization_max_chunk_size boundary) plus a large number of small string keys
+    (mirrors a realistic keyspace shape), so the per-chunk flush path is exercised
+    thousands of times - enough for any per-call regression to show up clearly.
+    """
+    NUM_BIG_KEYS = 100
+    MEMBERS_PER_KEY = 20_000
+    NUM_SMALL_KEYS = 500_000
+    add_members = """
+    local n = tonumber(ARGV[1])
+    for j = 1, n do
+        redis.call('ZADD', KEYS[1], j, string.format('member-%040d', j))
+    end
+    """
+    for i in range(NUM_BIG_KEYS):
+        await async_client.eval(add_members, 1, f"big:{i}", MEMBERS_PER_KEY)
+    await async_client.execute_command("DEBUG", "POPULATE", str(NUM_SMALL_KEYS), "small:", "150")
+
+    async def write_load(stop_event: asyncio.Event):
+        # Writes directly to the big keys under serialization, so it reliably exercises
+        # the bucket-latch mechanism (BucketDependencies) held during their chunked
+        # serialization, rather than depending on an unrelated key happening to share a
+        # physical bucket with one of them.
+        i = 0
+        while not stop_event.is_set():
+            await async_client.zadd(f"big:{i % NUM_BIG_KEYS}", {f"probe-{i}": i})
+            i += 1
+
+    results = {}
+    latency_p99_usec = {}
+    for file_format in ["RDB", "DF"]:
+        for background in (False, True):
+            await async_client.config_set("background_snapshotting", "yes" if background else "no")
+            await async_client.execute_command("CONFIG", "RESETSTAT")
+
+            stop_event = asyncio.Event()
+            writer_task = asyncio.create_task(write_load(stop_event))
+
+            start = time.monotonic()
+            await async_client.execute_command("SAVE", file_format)
+            elapsed = time.monotonic() - start
+
+            stop_event.set()
+            await writer_task
+
+            info = await async_client.info("LATENCYSTATS")
+            stats = info.get("latency_percentiles_usec_zadd")
+            p99_usec = int(stats["p99"]) if stats else None
+
+            key = (file_format, background)
+            results[key] = elapsed
+            latency_p99_usec[key] = p99_usec
+
+    print("\n=== snapshot time & concurrent-write latency, per config ===")
+    for key in sorted(results, key=lambda k: results[k]):
+        fmt, bg = key
+        print(
+            f"  format={fmt:4s} background={str(bg):5s} "
+            f"total_time={results[key]:.3f}s  zadd_p99={latency_p99_usec[key]}us"
+        )
+
+    time_failures = {k: v for k, v in results.items() if v > SNAPSHOT_TIME_LIMIT_SEC}
+    latency_failures = {
+        k: v
+        for k, v in latency_p99_usec.items()
+        if v is not None and v > SNAPSHOT_LATENCY_P99_LIMIT_USEC
+    }
+
+    assert (
+        not time_failures
+    ), f"Snapshot total time exceeded {SNAPSHOT_TIME_LIMIT_SEC}s:\n" + "\n".join(
+        f"  format={k[0]} background={k[1]}: {v:.3f}s" for k, v in time_failures.items()
+    )
+    assert not latency_failures, (
+        f"Concurrent ZADD p99 latency exceeded {SNAPSHOT_LATENCY_P99_LIMIT_USEC}us during snapshot:\n"
+        + "\n".join(
+            f"  format={k[0]} background={k[1]}: {v}us" for k, v in latency_failures.items()
+        )
+    )
