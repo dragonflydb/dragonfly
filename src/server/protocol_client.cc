@@ -77,9 +77,9 @@ std::string ProtocolClient::ServerContext::Description() const {
   return absl::StrCat(host, ":", port);
 }
 
-void ValidateClientTlsFlags() {
+bool ValidateClientTlsFlags() {
   if (!GetFlag(FLAGS_tls_replication)) {
-    return;
+    return true;
   }
 
   bool has_auth = false;
@@ -87,7 +87,7 @@ void ValidateClientTlsFlags() {
   if (!GetFlag(FLAGS_tls_key_file).empty()) {
     if (GetFlag(FLAGS_tls_cert_file).empty()) {
       LOG(ERROR) << "tls_cert_file flag should be set";
-      exit(1);
+      return false;
     }
     has_auth = true;
   }
@@ -97,8 +97,10 @@ void ValidateClientTlsFlags() {
 
   if (!has_auth) {
     LOG(ERROR) << "No authentication method configured!";
-    exit(1);
+    return false;
   }
+
+  return true;
 }
 
 #ifdef DFLY_USE_SSL

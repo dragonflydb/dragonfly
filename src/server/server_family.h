@@ -46,6 +46,14 @@ class SnapshotStorage;
 
 std::string GetPassword();
 
+// Validates server-side TLS flags: when --tls is set, at least one auth method must be
+// configured (a password or a CA cert). Returns false on an invalid configuration.
+bool ValidateServerTlsFlags();
+
+// Validates the --dbfilename / --df_snapshot_format flags (filename format, no directory
+// separators, extension vs snapshot format). Returns false on an invalid configuration.
+bool ValidateSnapshotFilenameFlags();
+
 class CommandContext;
 class CommandRegistry;
 class DflyCmd;

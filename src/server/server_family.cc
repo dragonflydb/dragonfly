@@ -339,34 +339,6 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
   }
 }
 
-// Check that if TLS is used at least one form of client authentication is
-// enabled. That means either using a password or giving a root
-// certificate for authenticating client certificates which will
-// be required.
-bool ValidateServerTlsFlags() {
-  if (!absl::GetFlag(FLAGS_tls)) {
-    return true;
-  }
-
-  bool has_auth = false;
-
-  if (!dfly::GetPassword().empty()) {
-    has_auth = true;
-  }
-
-  if (!(absl::GetFlag(FLAGS_tls_ca_cert_file).empty() &&
-        absl::GetFlag(FLAGS_tls_ca_cert_dir).empty())) {
-    has_auth = true;
-  }
-
-  if (!has_auth) {
-    LOG(ERROR) << "TLS configured but no authentication method is used!";
-    return false;
-  }
-
-  return true;
-}
-
 template <typename T> void UpdateMax(T* maxv, T current) {
   *maxv = std::max(*maxv, current);
 }
@@ -994,6 +966,39 @@ bool IsMaster() {
 
 }  // namespace
 
+bool ValidateServerTlsFlags() {
+  if (!absl::GetFlag(FLAGS_tls)) {
+    return true;
+  }
+
+  bool has_auth = false;
+
+  if (!dfly::GetPassword().empty()) {
+    has_auth = true;
+  }
+
+  if (!(absl::GetFlag(FLAGS_tls_ca_cert_file).empty() &&
+        absl::GetFlag(FLAGS_tls_ca_cert_dir).empty())) {
+    has_auth = true;
+  }
+
+  if (!has_auth) {
+    LOG(ERROR) << "TLS configured but no authentication method is used!";
+    return false;
+  }
+
+  return true;
+}
+
+bool ValidateSnapshotFilenameFlags() {
+  auto ec = detail::ValidateFilename(GetFlag(FLAGS_dbfilename), GetFlag(FLAGS_df_snapshot_format));
+  if (ec) {
+    LOG(ERROR) << ec.Format();
+    return false;
+  }
+  return true;
+}
+
 void SlowLogGet(facade::ParsedArgs args, std::string_view sub_cmd, util::ProactorPool* pp,
                 CommandContext* cmd_cntx) {
   size_t requested_slow_log_length = UINT32_MAX;
@@ -1138,17 +1143,10 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_replid_.size());
   }
 
-  if (auto ec =
-          detail::ValidateFilename(GetFlag(FLAGS_dbfilename), GetFlag(FLAGS_df_snapshot_format));
-      ec) {
-    LOG(ERROR) << ec.Format();
-    exit(1);
-  }
+  // Note: startup flag validation (TLS + snapshot filename) runs in main() before the proactor
+  // pool starts. Calling exit() here - after pool->Run() - would tear down the live fiber
+  // runtime and can abort (SIGABRT). Keep these checks out of this ctor.
 
-  if (!ValidateServerTlsFlags()) {
-    exit(1);
-  }
-  ValidateClientTlsFlags();
   dfly_cmd_ = make_unique<DflyCmd>(this);
   legacy_format_metrics_ = GetFlag(FLAGS_keep_legacy_memory_metrics);
 }

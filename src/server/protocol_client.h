@@ -29,7 +29,7 @@ class ConnectionContext;
 class JournalExecutor;
 struct JournalReader;
 
-void ValidateClientTlsFlags();
+bool ValidateClientTlsFlags();
 
 // A helper class for implementing a Redis client that talks to a redis server.
 // This class should be inherited from.
