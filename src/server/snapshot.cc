@@ -193,9 +193,20 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
         PushSerialized(false);
       } else {
         if (!PushSerialized(false)) {
-          if (!use_background_mode_ && ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
+          if (ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
             ThisFiber::Yield();
           }
+        }
+
+        // Pay down CPU-time debt accrued by HandleFlushData() (including any big-value
+        // chunk flushes) since the last batch. This is the only place the snapshot fiber's
+        // backpressure sleep runs - always between TraverseBuckets() batches, so it never
+        // happens while a bucket's BucketDependencies latch is held.
+        if (accrued_run_cycles_ > 0) {
+          uint64_t sleep_usec =
+              (accrued_run_cycles_ * 1000'000 / base::CycleClock::Frequency()) / 2;
+          ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
+          accrued_run_cycles_ = 0;
         }
       }
     } while (snapshot_cursor_);
@@ -287,12 +298,12 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   last_pushed_id_ = id;
   seq_cond_.notify_all();
 
-  if (!use_background_mode_) {
-    // serializer_->Flush can be quite slow for large values or due to compression, therefore
-    // we counter-balance CPU over-usage by sleeping.
-    // We measure running_cycles before the preemption points, because they reset the counter.
-    uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
-    ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
+  // Accrue CPU-time debt instead of sleeping here - see accrued_run_cycles_ comment in the
+  // header. Only for the snapshot fiber's own traversal work: a write command reaching this
+  // via inline catch-up serialization (SerializeBucketLocked called from OnChange) must not be
+  // throttled - it needs to complete its own write, not pay for the snapshot's backpressure.
+  if (!use_background_mode_ && snapshot_fb_.IsActive()) {
+    accrued_run_cycles_ += running_cycles;
   }
 
   VLOG(2) << "Pushed with Serialize() " << serialized;

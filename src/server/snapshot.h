@@ -130,6 +130,17 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
+  // CPU-time debt (cycles) accrued by HandleFlushData() calls since the last time
+  // IterateBucketsFb() paid it down with a sleep. Deliberately NOT slept on inside
+  // HandleFlushData/ConsumeBigValueChunk: those can run while a bucket's
+  // BucketDependencies latch is held (mid big-value chunking), so sleeping there would
+  // extend that latch by the sleep duration for every chunk. Sleeping only from
+  // IterateBucketsFb, between TraverseBuckets() batches, keeps the same CPU backpressure
+  // without ever holding a bucket latch across a sleep. Only accrued when running on
+  // snapshot_fb_ itself (see HandleFlushData) - a write command's inline catch-up
+  // serialization of a stale bucket must not be throttled this way.
+  uint64_t accrued_run_cycles_ = 0;
+
   struct Stats {
     size_t keys_total = 0;
     size_t jounal_changes = 0;
