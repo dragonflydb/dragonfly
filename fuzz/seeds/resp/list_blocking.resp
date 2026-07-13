@@ -96,3 +96,12 @@ $3
 lb1
 $4
 LEFT
+*4
+$10
+BRPOPLPUSH
+$3
+lb1
+$3
+lb2
+$1
+1
