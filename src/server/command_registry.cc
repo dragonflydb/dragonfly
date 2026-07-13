@@ -214,6 +214,8 @@ CommandId CommandId::Clone(const std::string_view name) const {
     hdr_close(cloned.latency_histogram_);  // Free the histogram in the cloned object.
     cloned.latency_histogram_ = static_cast<hdr_histogram*>(latency_histogram_);
   }
+  cloned.SetFamily(GetFamily());
+  cloned.SetBitIndex(GetBitIndex());
   return cloned;
 }
 
