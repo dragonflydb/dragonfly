@@ -1,4 +1,4 @@
-// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -24,18 +24,22 @@ class PageUsage;
 
 // oah_entry.h - a single set member: a string key plus its expiry and cached hash.
 //
-// OAHEntry is a non-owning accessor over a TaggedPtr that points at a [expiry, key_size, key] heap
+// OAHEntry is a non-owning accessor over a TaggedPtr that points at a [expiry?, control, key] heap
 // blob. It manages that string: the static Create()/Destroy() allocate and free the blob, and
 // SetExpiry/SetExtHash/ReallocIfNeeded update it in place. The top 12 and bottom 3 bits of a heap
 // pointer are always free (user addresses are <= 52 bits), so flags live there: bit 0 stays clear
-// for OAHPtr's entry/vector tag, OAHEntry uses bits 1-2 (expiry/sso) and 52-63 (cached hash).
+// for OAHPtr's entry/vector tag, OAHEntry uses bit 1 (expiry) and 52-63 (cached hash).
+//
+// The blob begins with an optional 4-byte expiry, then a control byte encoding the key size (see
+// the kBigSizeBit/kThreeBytesBit block): keys < 64B store the size inline in the low 6 bits; larger
+// keys keep 5 low bits in the control byte plus 1 extra byte (< 8KB) or 3 extra bytes (< 0.5GB).
+// The control byte's top bit is a reserved ASCII/raw encoding flag, currently always 0.
 class OAHEntry {
  public:
   // A uint64_t packing the heap pointer together with tag/flag bits in its free low/high bits.
   using TaggedPtr = uint64_t;
 
   static constexpr size_t kExpiryBit = 1ULL << 1;
-  static constexpr size_t kSsoBit = 1ULL << 2;  // 1-byte (vs 4) key-length field
 
   static constexpr size_t kExtHashShift = 52;
   static constexpr uint32_t kExtHashSize = 12;
@@ -43,6 +47,21 @@ class OAHEntry {
   static constexpr size_t kExtHashShiftedMask = kExtHashMask << kExtHashShift;
 
   static constexpr size_t kTagMask = (4095ULL << 52) | 7;  // 12 high + 3 low tag bits
+
+  // Control-byte layout (the first blob byte after the optional expiry):
+  //   bit 7    : reserved ASCII/raw encoding flag (currently always 0)
+  //   bit 6    : kBigSizeBit    - size doesn't fit in 6 bits, extra bytes follow
+  //   bit 5    : kThreeBytesBit - when kBigSizeBit set: 3 extra size bytes (else 1)
+  //   bits 0-5 : inline size (< 64B); or bits 0-4 hold the low 5 bits of a larger size
+  static constexpr uint8_t kEncodingBit = 1u << 7;  // reserved, kept 0 for now
+  static constexpr uint8_t kBigSizeBit = 1u << 6;
+  static constexpr uint8_t kThreeBytesBit = 1u << 5;
+  static constexpr uint8_t kInlineSizeMask = 0x3F;              // 6-bit inline size
+  static constexpr uint8_t kLowSizeMask = 0x1F;                 // 5 low size bits for larger keys
+  static constexpr uint32_t kLowSizeBits = 5;                   // bits taken from the control byte
+  static constexpr uint32_t kInlineSizeMax = kInlineSizeMask;   // 63
+  static constexpr uint32_t kOneExtraByteMax = (1u << 13) - 1;  // 8191 (5 + 8 bits)
+  static constexpr uint32_t kMaxKeySize = (1u << 29) - 1;       // 5 + 24 bits (< 0.5GB)
 
   static TaggedPtr Create(std::string_view key, uint32_t expiry = UINT32_MAX);
   static void Destroy(TaggedPtr tagged_ptr);
@@ -64,7 +83,11 @@ class OAHEntry {
   }
 
   std::string_view Key() const {
-    return {GetKeyData(), GetKeySize()};
+    const char* p = Raw() + GetExpirySize();
+    uint8_t control = static_cast<uint8_t>(*p);
+    if ((control & kBigSizeBit) == 0)
+      return {p + 1, static_cast<size_t>(control & kInlineSizeMask)};
+    return KeyBig(p, control);
   }
 
   bool HasExpiry() const {
@@ -108,23 +131,13 @@ class OAHEntry {
   }
 
  protected:
-  const char* GetKeyData() const {
-    uint32_t key_field_size = HasSso() ? 1 : 4;
-    return Raw() + GetExpirySize() + key_field_size;
-  }
-  uint32_t GetKeySize() const;
-
-  void SetExpiryBit(bool b);
+  // Slow path of Key() for keys >= 64B: decodes the multibyte size field starting at control
+  // byte `p` (already read into `control`) and returns the key view.
+  std::string_view KeyBig(const char* p, uint8_t control) const;
 
   // Reallocates the key blob with `expiry`, preserving the key and stored ext-hash.
   void Rebuild(uint32_t expiry);
 
-  void SetSsoBit() {
-    SetTaggedPtr(GetTaggedPtr() | kSsoBit);
-  }
-  bool HasSso() const {
-    return (GetTaggedPtr() & kSsoBit) != 0;
-  }
   std::uint32_t GetExpirySize() const {
     return HasExpiry() ? sizeof(std::uint32_t) : 0;
   }
