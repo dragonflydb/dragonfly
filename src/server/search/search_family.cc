@@ -252,16 +252,18 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
     return CreateSyntaxError("Knn vector dimension cannot be zero"sv);
   }
 
-  // Validate that the initial allocation (capacity * (dim+1) floats) cannot
-  // overflow size_t or request an unreasonable amount of memory.  Without this
-  // check FlatVectorIndex::FlatVectorIndex() would throw std::bad_alloc,
-  // leaving a half-initialised index registered in ShardDocIndices.
-  static constexpr size_t kMaxFlatBufEntries = size_t{1} << 30;  // ~4 GiB of floats
-  if (vector_params.dim >= kMaxFlatBufEntries) {
+  // Cap the initial allocation (capacity * dim * element_width bytes, plus a small presence bitmap)
+  // so it cannot overflow size_t or request an unreasonable amount of memory. Without this check
+  // FlatVectorIndex::FlatVectorIndex() would throw std::bad_alloc, leaving a half-initialised index
+  // registered in ShardDocIndices.
+  static constexpr size_t kMaxFlatBufBytes = size_t{1} << 32;  // 4 GiB
+  const size_t width =
+      search::ElementSize(vector_params.data_type);  // dim already checked non-zero
+  if (vector_params.dim > kMaxFlatBufBytes / width) {
     return CreateSyntaxError("Vector index initial allocation is too large"sv);
   }
-  size_t dim_plus1 = vector_params.dim + 1;
-  if (vector_params.capacity > kMaxFlatBufEntries / dim_plus1) {
+  const size_t stride_bytes = vector_params.dim * width;
+  if (vector_params.capacity > kMaxFlatBufBytes / stride_bytes) {
     return CreateSyntaxError("Vector index initial allocation is too large"sv);
   }
 
@@ -1476,23 +1478,42 @@ vector<SearchResult> LoadHnswSearchDocs(
   return results;
 }
 
+// Validates that a KNN query blob matches the index's dim * element width. Returns an error
+// message on mismatch (mirrors the FLAT and FT.AGGREGATE paths), else nullopt.
+std::optional<std::string> ValidateHnswKnnBlob(const search::AstKnnNode* knn,
+                                               const search::HnswVectorIndex& index) {
+  size_t width = search::ElementSize(index.GetDataType());
+  if (knn->blob.empty() || knn->blob.size() % width != 0)
+    return "Parse error of vector parameters";
+  if (knn->blob.size() != index.GetDim() * width)
+    return absl::StrCat("Wrong vector index dimensions, got: ", knn->blob.size() / width,
+                        ", expected: ", index.GetDim());
+  return std::nullopt;
+}
+
 std::vector<std::pair<float, search::GlobalDocId>> SearchHnswWithPrefilter(
     const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
     std::optional<std::vector<search::GlobalDocId>> prefilter_global_docs_ids) {
+  // Callers validate the blob width and surface an error (ValidateHnswKnnBlob). This guard is a
+  // release-safety net against OOB reads if a future call site forgets; DCHECK flags that misuse.
+  DCHECK_EQ(knn->blob.size(), index->GetDim() * search::ElementSize(index->GetDataType()));
+  if (knn->blob.size() != index->GetDim() * search::ElementSize(index->GetDataType()))
+    return {};
+
   if (!prefilter_global_docs_ids)
-    return index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+    return index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime);
 
   auto& ids = *prefilter_global_docs_ids;
   VLOG(1) << "Searching HNSW index with prefilter size: " << ids.size();
 
   if (ids.size() < absl::GetFlag(FLAGS_subset_knn_search_threshold))
-    return index->SubsetKnn(knn->vec.first.get(), knn->limit, ids);
+    return index->SubsetKnn(knn->blob.data(), knn->limit, ids);
 
   // HnswVectorIndex::Knn(... allowed) uses binary_search for membership.
   if (!is_sorted(ids.begin(), ids.end()))
     sort(ids.begin(), ids.end());
 
-  return index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, ids);
+  return index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime, ids);
 }
 
 vector<SearchResult> SearchGlobalHnswIndex(
@@ -1571,7 +1592,7 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
   const ShardId shard_size = shard_set->size();
 
   auto range_results =
-      index->RangeQuery(range->vec.first.get(), static_cast<float>(range->radius), range->epsilon);
+      index->RangeQuery(range->blob.data(), static_cast<float>(range->radius), range->epsilon);
 
   std::vector<std::vector<SerializedSearchDoc>> shard_docs(shard_size);
   for (const auto& [score, global_doc_id] : range_results) {
@@ -1636,7 +1657,7 @@ vector<SearchResult> SearchGlobalHnswIndexRangePrefiltered(
         [](const SerializedSearchDoc& a, const SerializedSearchDoc& b) { return a.id < b.id; });
 
   auto range_results =
-      index->RangeQuery(range->vec.first.get(), static_cast<float>(range->radius), range->epsilon);
+      index->RangeQuery(range->blob.data(), static_cast<float>(range->radius), range->epsilon);
 
   std::vector<SerializedSearchDoc> out;
   out.reserve(range_results.size());
@@ -1693,7 +1714,8 @@ std::shared_ptr<search::HnswVectorIndex> GetValidatedHnswRangeIndex(
     builder->SendError(string{index_name} + ": no such global hnsw index");
     return nullptr;
   }
-  if (hnsw_range->vec.second == 0) {
+  const size_t width = search::ElementSize(hnsw_index->GetDataType());
+  if (hnsw_range->blob.empty() || hnsw_range->blob.size() % width != 0) {
     builder->SendError("Parse error of vector parameters");
     return nullptr;
   }
@@ -1707,9 +1729,10 @@ std::shared_ptr<search::HnswVectorIndex> GetValidatedHnswRangeIndex(
     builder->SendError("VECTOR_RANGE EPSILON must be greater than zero");
     return nullptr;
   }
-  if (hnsw_index->GetDim() != hnsw_range->vec.second) {
-    builder->SendError(absl::StrCat("Wrong vector index dimensions, got: ", hnsw_range->vec.second,
-                                    ", expected: ", hnsw_index->GetDim()));
+  if (hnsw_index->GetDim() * width != hnsw_range->blob.size()) {
+    builder->SendError(
+        absl::StrCat("Wrong vector index dimensions, got: ", hnsw_range->blob.size() / width,
+                     ", expected: ", hnsw_index->GetDim()));
     return nullptr;
   }
   return hnsw_index;
@@ -2097,21 +2120,18 @@ bool CollectGlobalScoringStats(string_view index_name, search::SearchAlgorithm& 
 
 std::optional<string> ValidateAndExtractHnswVector(const search::HnswVectorIndex& hnsw_index,
                                                    const HybridSearchParams& params,
-                                                   search::OwnedFtVector* out_vec) {
+                                                   std::string_view* out_blob) {
   auto vec_bytes = params.query_params[params.vsim_param];
   if (vec_bytes.empty())
     return absl::StrCat("Vector parameter not found: $", params.vsim_param);
 
-  auto vec = search::BytesToFtVectorSafe(vec_bytes);
-  if (!vec)
-    return absl::StrCat("Invalid vector bytes for parameter: $", params.vsim_param);
+  const size_t width = search::ElementSize(hnsw_index.GetDataType());
+  if (vec_bytes.size() != hnsw_index.GetDim() * width)
+    return absl::StrCat("Query vector blob size (", vec_bytes.size(),
+                        ") does not match index's expected size (", hnsw_index.GetDim() * width,
+                        ")");
 
-  if (vec->second != hnsw_index.GetDim())
-    return absl::StrCat("Query vector blob size (", vec->second * sizeof(float),
-                        ") does not match index's expected size (",
-                        hnsw_index.GetDim() * sizeof(float), ")");
-
-  *out_vec = std::move(*vec);
+  *out_blob = vec_bytes;
   return std::nullopt;
 }
 
@@ -2122,8 +2142,8 @@ std::optional<string> RunHnswPreSearch(string_view index_name, const HybridSearc
   if (!hnsw_index)
     return absl::StrCat("No HNSW index for field: ", params.vsim_field);
 
-  search::OwnedFtVector vec;
-  if (auto err = ValidateAndExtractHnswVector(*hnsw_index, params, &vec))
+  std::string_view blob;
+  if (auto err = ValidateAndExtractHnswVector(*hnsw_index, params, &blob))
     return err;
 
   auto populate = [&](const vector<pair<float, search::GlobalDocId>>& results) {
@@ -2137,9 +2157,9 @@ std::optional<string> RunHnswPreSearch(string_view index_name, const HybridSearc
   };
 
   if (params.use_range)
-    populate(hnsw_index->RangeQuery(vec.first.get(), params.range_radius, params.range_epsilon));
+    populate(hnsw_index->RangeQuery(blob.data(), params.range_radius, params.range_epsilon));
   else
-    populate(hnsw_index->Knn(vec.first.get(), params.num_candidates, params.ef_runtime));
+    populate(hnsw_index->Knn(blob.data(), params.num_candidates, params.ef_runtime));
   return std::nullopt;
 }
 
@@ -2152,8 +2172,8 @@ std::optional<string> RunHnswFilteredSearch(string_view index_name,
   if (!hnsw_index)
     return absl::StrCat("No HNSW index for field: ", params.vsim_field);
 
-  search::OwnedFtVector vec;
-  if (auto err = ValidateAndExtractHnswVector(*hnsw_index, params, &vec))
+  std::string_view blob;
+  if (auto err = ValidateAndExtractHnswVector(*hnsw_index, params, &blob))
     return err;
 
   vector<search::GlobalDocId> prefilter_ids;
@@ -2168,9 +2188,8 @@ std::optional<string> RunHnswFilteredSearch(string_view index_name,
 
   auto knn_results =
       prefilter_ids.size() < absl::GetFlag(FLAGS_subset_knn_search_threshold)
-          ? hnsw_index->SubsetKnn(vec.first.get(), params.num_candidates, prefilter_ids)
-          : hnsw_index->Knn(vec.first.get(), params.num_candidates, params.ef_runtime,
-                            prefilter_ids);
+          ? hnsw_index->SubsetKnn(blob.data(), params.num_candidates, prefilter_ids)
+          : hnsw_index->Knn(blob.data(), params.num_candidates, params.ef_runtime, prefilter_ids);
 
   for (const auto& [dist, global_id] : knn_results) {
     auto it = prefilter_map.find(global_id);
@@ -2363,8 +2382,8 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
       rb->SendError(absl::StrCat("No HNSW index for field: ", params->vsim_field));
       return false;
     }
-    search::OwnedFtVector vec_ignored;
-    if (auto err = ValidateAndExtractHnswVector(*hnsw_index, *params, &vec_ignored)) {
+    std::string_view blob_ignored;
+    if (auto err = ValidateAndExtractHnswVector(*hnsw_index, *params, &blob_ignored)) {
       rb->SendError(*err);
       return false;
     }
@@ -2397,7 +2416,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   std::once_flag schema_validated;
   bool vsim_not_vector = false;
   bool vsim_dim_mismatch = false;
-  size_t vsim_query_dim = 0, vsim_index_dim = 0;
+  size_t vsim_query_dim = 0, vsim_index_dim = 0, vsim_width = sizeof(float);
   search::VectorSimilarity captured_metric = search::VectorSimilarity::L2;
 
   vector<SearchResult> text_docs(shard_count);
@@ -2426,10 +2445,11 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
       captured_metric = vp.sim;
       if (!use_hnsw) {
         auto vec_bytes = params->query_params[params->vsim_param];
-        if (!vec_bytes.empty() && vec_bytes.size() != vp.dim * sizeof(float)) {
+        vsim_width = search::ElementSize(vp.data_type);
+        if (!vec_bytes.empty() && vec_bytes.size() != vp.dim * vsim_width) {
           vsim_dim_mismatch = true;
           vsim_index_dim = vp.dim;
-          vsim_query_dim = vec_bytes.size() / sizeof(float);
+          vsim_query_dim = vec_bytes.size() / vsim_width;
         }
       }
     });
@@ -2480,9 +2500,9 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     return false;
   }
   if (vsim_dim_mismatch) {
-    rb->SendError(absl::StrCat("Query vector blob size (", vsim_query_dim * sizeof(float),
+    rb->SendError(absl::StrCat("Query vector blob size (", vsim_query_dim * vsim_width,
                                ") does not match index's expected size (",
-                               vsim_index_dim * sizeof(float), ")"));
+                               vsim_index_dim * vsim_width, ")"));
     return false;
   }
 
@@ -3186,6 +3206,11 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
         cmd_cntx->tx()->Conclude();
       return builder->SendError(string{index_name} + ": no such global hnsw index");
     }
+    if (auto err = ValidateHnswKnnBlob(knn, *hnsw_index)) {
+      if (knn_has_prefilter)
+        cmd_cntx->tx()->Conclude();
+      return builder->SendError(*err);
+    }
     if (knn_has_prefilter) {
       docs = SearchGlobalHnswIndex(knn, hnsw_index, index_name, search_algo.GetKnnScoreSortOption(),
                                    knn_prefilter_docs, *params, *cmd_cntx);
@@ -3395,6 +3420,8 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, profile_knn->field);
     if (!hnsw_index)
       return rb->SendError(std::string{index_name} + ": no such global hnsw index");
+    if (auto err = ValidateHnswKnnBlob(profile_knn, *hnsw_index))
+      return rb->SendError(*err);
 
     std::vector<SearchResult> search_results(shards_count);
     std::vector<SearchResult> profile_search_results(shards_count);
@@ -3744,6 +3771,18 @@ static bool AggregateHnswKnn(CommandContext* cmd_cntx, AggregateParams& params,
     return false;
   }
 
+  const size_t hnsw_width = search::ElementSize(hnsw_index->GetDataType());
+  if (knn->blob.empty() || knn->blob.size() % hnsw_width != 0) {
+    cmd_cntx->rb()->SendError("Parse error of vector parameters");
+    return false;
+  }
+  if (knn->blob.size() != hnsw_index->GetDim() * hnsw_width) {
+    cmd_cntx->rb()->SendError(
+        absl::StrCat("Wrong vector index dimensions, got: ", knn->blob.size() / hnsw_width,
+                     ", expected: ", hnsw_index->GetDim()));
+    return false;
+  }
+
   const bool has_prefilter = knn->HasPreFilter();
   std::vector<absl::flat_hash_map<search::DocId, float>> text_scores(shard_set->size());
   std::optional<std::vector<search::GlobalDocId>> prefilter_ids;
@@ -3751,9 +3790,8 @@ static bool AggregateHnswKnn(CommandContext* cmd_cntx, AggregateParams& params,
     prefilter_ids = RunAggregatePrefilter(cmd_cntx, params, search_algo, text_scores);
 
   auto knn_results =
-      prefilter_ids
-          ? hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, *prefilter_ids)
-          : hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+      prefilter_ids ? hnsw_index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime, *prefilter_ids)
+                    : hnsw_index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime);
   auto shard_docs = GroupByShardId(knn_results, shard_set->size());
   RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, knn->score_alias, text_scores,
                        has_prefilter);
@@ -3795,7 +3833,7 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
   // Intersect the range hits with the filter matches: keep only range results whose global id is
   // in the sorted prefilter id set. Memory is O(filter matches) of ids plus O(range hits).
   auto range_results = hnsw_index->RangeQuery(
-      hnsw_range->vec.first.get(), static_cast<float>(hnsw_range->radius), hnsw_range->epsilon);
+      hnsw_range->blob.data(), static_cast<float>(hnsw_range->radius), hnsw_range->epsilon);
   if (prefilter_ids) {
     erase_if(range_results, [&](const auto& r) {
       return !std::binary_search(prefilter_ids->begin(), prefilter_ids->end(), r.second);

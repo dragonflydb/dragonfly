@@ -19,6 +19,8 @@
 
 #include <absl/functional/function_ref.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -268,18 +270,25 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
   std::string next_defrag_suffix_entry_;
 };
 
+struct VectorIndexInfo {
+  size_t dim = 0;
+  VectorSimilarity sim = VectorSimilarity::L2;
+  VectorDataType data_type = VectorDataType::FLOAT32;
+};
+
 struct BaseVectorIndex : public BaseIndex {
-  std::pair<size_t /*dim*/, VectorSimilarity> Info() const;
+  VectorIndexInfo Info() const;
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override final;
 
  protected:
-  BaseVectorIndex(size_t dim, VectorSimilarity sim);
+  BaseVectorIndex(size_t dim, VectorSimilarity sim, VectorDataType data_type);
 
   virtual void AddVector(DocId id, const void* vector) = 0;
 
   size_t dim_;
   VectorSimilarity sim_;
+  VectorDataType data_type_;
 };
 
 // Index for vector fields.
@@ -289,7 +298,8 @@ struct FlatVectorIndex : public BaseVectorIndex {
 
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
-  const float* Get(DocId doc) const;
+  // Pointer to the stored native-width vector bytes, or nullptr if the slot is empty.
+  const void* Get(DocId doc) const;
 
   // Return all documents that have vectors in this index
   std::vector<DocId> GetAllDocsWithNonNullValues() const override;
@@ -298,7 +308,9 @@ struct FlatVectorIndex : public BaseVectorIndex {
   void AddVector(DocId id, const void* vector) override;
 
  private:
-  PMR_NS::vector<float> entries_;
+  size_t stride_bytes_;                // dim_ * ElementSize(data_type_)
+  PMR_NS::vector<std::byte> entries_;  // contiguous native-width vectors
+  PMR_NS::vector<uint64_t> present_;   // presence bitmap, one bit per doc
 };
 
 struct GeoIndex : public BaseIndex {

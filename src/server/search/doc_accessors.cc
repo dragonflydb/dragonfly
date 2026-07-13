@@ -14,6 +14,8 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
+#include <cmath>
+
 #include "base/flags.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/json/path.h"
@@ -112,13 +114,14 @@ SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
   return out;
 }
 
-std::optional<BaseAccessor::VectorInfo> BaseAccessor::GetVector(std::string_view active_field,
-                                                                size_t dim) const {
+std::optional<BaseAccessor::VectorInfo> BaseAccessor::GetVector(
+    std::string_view active_field, size_t dim, search::VectorDataType dtype) const {
   auto strings_list = GetStrings(active_field);
   if (strings_list) {
     if (!strings_list->empty()) {
       auto value = strings_list->front();
-      if ((value.size() % sizeof(float)) || (value.size() / sizeof(float) != dim)) {
+      const size_t width = search::ElementSize(dtype);
+      if ((value.size() % width) || (value.size() / width != dim)) {
         return std::nullopt;
       }
       return value.data();
@@ -287,8 +290,8 @@ std::optional<BaseAccessor::StringList> JsonAccessor::GetStrings(std::string_vie
   return out;
 }
 
-std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(string_view active_field,
-                                                                size_t dim) const {
+std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(
+    string_view active_field, size_t dim, search::VectorDataType dtype) const {
   auto* path = GetPath(active_field);
   if (!path)
     return VectorInfo{};
@@ -305,17 +308,66 @@ std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(string_view acti
   if (size != dim)
     return std::nullopt;
 
-  auto ptr = make_unique<float[]>(size);
+  // JSON stores numbers, so quantize/encode each element to the field's declared native width.
+  const size_t width = search::ElementSize(dtype);
+  auto bytes = make_unique<std::byte[]>(size * width);
 
   size_t i = 0;
   for (const auto& v : res[0].array_range()) {
-    if (!v.is_number()) {
+    if (!v.is_number())
       return std::nullopt;
+    std::byte* dst = bytes.get() + i * width;
+    switch (dtype) {
+      case search::VectorDataType::FLOAT32: {
+        float x = v.as<float>();
+        memcpy(dst, &x, sizeof(x));
+        break;
+      }
+      case search::VectorDataType::FLOAT64: {
+        double x = v.as<double>();
+        memcpy(dst, &x, sizeof(x));
+        break;
+      }
+      case search::VectorDataType::FLOAT16: {
+        uint16_t x = search::FloatToHalf(v.as<float>());
+        memcpy(dst, &x, sizeof(x));
+        break;
+      }
+      case search::VectorDataType::BFLOAT16: {
+        uint16_t x = search::FloatToBf16(v.as<float>());
+        memcpy(dst, &x, sizeof(x));
+        break;
+      }
+      case search::VectorDataType::INT8: {
+        double d = v.as<double>();
+        // Bound the magnitude before lrint (keeps it in-range for long), then round to nearest
+        // (ties to even, matching the fp16/bf16 encoders) and reject anything that rounds outside
+        // int8 rather than wrapping.
+        if (!std::isfinite(d) || d < -129.0 || d > 128.0)
+          return std::nullopt;
+        long r = std::lrint(d);
+        if (r < -128 || r > 127)
+          return std::nullopt;
+        auto x = static_cast<int8_t>(r);
+        memcpy(dst, &x, sizeof(x));
+        break;
+      }
+      case search::VectorDataType::UINT8: {
+        double d = v.as<double>();
+        if (!std::isfinite(d) || d < -1.0 || d > 256.0)
+          return std::nullopt;
+        long r = std::lrint(d);
+        if (r < 0 || r > 255)
+          return std::nullopt;
+        auto x = static_cast<uint8_t>(r);
+        memcpy(dst, &x, sizeof(x));
+        break;
+      }
     }
-    ptr[i++] = v.as<float>();
+    i++;
   }
 
-  return search::OwnedFtVector{std::move(ptr), size};
+  return search::OwnedFtVector{std::move(bytes), size};
 }
 
 std::optional<BaseAccessor::NumsList> JsonAccessor::GetNumbers(string_view active_field) const {

@@ -867,76 +867,77 @@ void TagIndex::Tokenize(std::string_view value, uint32_t* /*pos_counter*/,
   NormalizeTags(value, case_sensitive_, separator_, out);
 }
 
-BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim) : dim_{dim}, sim_{sim} {
+BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim, VectorDataType data_type)
+    : dim_{dim}, sim_{sim}, data_type_{data_type} {
 }
 
-std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
-  return {dim_, sim_};
+VectorIndexInfo BaseVectorIndex::Info() const {
+  return {dim_, sim_, data_type_};
 }
 
 bool BaseVectorIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto vector = doc.GetVector(field, dim_);
+  auto vector = doc.GetVector(field, dim_, data_type_);
 
   if (!vector)
     return false;
 
-  if (std::holds_alternative<OwnedFtVector>(*vector)) {
-    const auto& owned_vector = std::get<OwnedFtVector>(*vector);
-    AddVector(id, owned_vector.first.get());
-  } else {
-    const auto& borrowed_vector = std::get<BorrowedFtVector>(*vector);
-    AddVector(id, borrowed_vector);
-  }
+  if (std::holds_alternative<OwnedFtVector>(*vector))
+    AddVector(id, std::get<OwnedFtVector>(*vector).first.get());
+  else
+    AddVector(id, std::get<BorrowedFtVector>(*vector));
 
   return true;
 }
 
-// Each document occupies (dim_ + 1) floats in entries_: dim_ floats for the vector data,
-// followed by one float as a presence marker (1.0 = present, 0.0 = absent/removed).
-// This avoids the previous heuristic of treating all-zero vectors as null.
-static constexpr float kPresent = 1.0f;
-static constexpr float kAbsent = 0.0f;
-
 FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
                                  PMR_NS::memory_resource* mr)
-    : BaseVectorIndex{params.dim, params.sim}, entries_{mr} {
+    : BaseVectorIndex{params.dim, params.sim, params.data_type},
+      stride_bytes_{params.dim * ElementSize(params.data_type)},
+      entries_{mr},
+      present_{mr} {
   DCHECK(!params.use_hnsw);
-  entries_.reserve(params.capacity * (params.dim + 1));
+  entries_.reserve(params.capacity * stride_bytes_);
+  present_.reserve((params.capacity + 63) / 64);
 }
 
 void FlatVectorIndex::AddVector(DocId id, const void* vector) {
-  const size_t stride = dim_ + 1;
-  DCHECK_LE(id * stride, entries_.size());
-  if (id * stride == entries_.size())
-    entries_.resize((id + 1) * stride, 0.0f);
+  const size_t need_bytes = (static_cast<size_t>(id) + 1) * stride_bytes_;
+  if (entries_.size() < need_bytes)
+    entries_.resize(need_bytes);
+
+  const size_t word = id / 64;
+  if (present_.size() <= word)
+    present_.resize(word + 1, 0);
 
   if (vector) {
-    memcpy(&entries_[id * stride], vector, dim_ * sizeof(float));
-    entries_[id * stride + dim_] = kPresent;
+    memcpy(entries_.data() + static_cast<size_t>(id) * stride_bytes_, vector, stride_bytes_);
+    present_[word] |= uint64_t{1} << (id % 64);
+  } else {
+    present_[word] &= ~(uint64_t{1} << (id % 64));
   }
 }
 
 void FlatVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
-  const size_t stride = dim_ + 1;
-  if (id * stride + dim_ < entries_.size())
-    entries_[id * stride + dim_] = kAbsent;
+  const size_t word = id / 64;
+  if (word < present_.size())
+    present_[word] &= ~(uint64_t{1} << (id % 64));
 }
 
-const float* FlatVectorIndex::Get(DocId doc) const {
-  const size_t stride = dim_ + 1;
-  if (doc * stride + dim_ >= entries_.size() || entries_[doc * stride + dim_] != kPresent)
+const void* FlatVectorIndex::Get(DocId doc) const {
+  const size_t word = doc / 64;
+  if (word >= present_.size() || !((present_[word] >> (doc % 64)) & 1))
     return nullptr;
-  return &entries_[doc * stride];
+  return entries_.data() + static_cast<size_t>(doc) * stride_bytes_;
 }
 
 std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
-  const size_t stride = dim_ + 1;
-  size_t num_slots = entries_.size() / stride;
   std::vector<DocId> result;
-  result.reserve(num_slots);
-  for (DocId id = 0; id < num_slots; ++id) {
-    if (entries_[id * stride + dim_] == kPresent)
-      result.push_back(id);
+  for (size_t word = 0; word < present_.size(); ++word) {
+    uint64_t bits = present_[word];
+    while (bits) {
+      result.push_back(static_cast<DocId>(word * 64 + __builtin_ctzll(bits)));
+      bits &= bits - 1;
+    }
   }
   return result;
 }

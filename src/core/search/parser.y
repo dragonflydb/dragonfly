@@ -165,14 +165,8 @@ knn_query:
       if (attrs.ef_runtime)
         ef = attrs.ef_runtime;
 
-      auto vec_result = BytesToFtVectorSafe($5);
-      if (!vec_result) {
-        // Create empty vector for invalid data - will return empty results during search
-        auto empty_vec = std::make_unique<float[]>(0);
-        $$ = AstKnnNode(knn_count, std::move(field), std::make_pair(std::move(empty_vec), size_t{0}), std::move(alias), ef);
-      } else {
-        $$ = AstKnnNode(knn_count, std::move(field), std::move(*vec_result), std::move(alias), ef);
-      }
+      // Raw query bytes are validated at search time against the field's declared dtype width.
+      $$ = AstKnnNode(knn_count, std::move(field), std::string{$5}, std::move(alias), ef);
     }
 
 opt_knn_alias:
@@ -234,30 +228,14 @@ vector_range_query:
       double radius = $5;
       auto field = std::move($1);
       auto attrs = std::move($8);
-      auto vec_result = BytesToFtVectorSafe($6);
-      if (!vec_result) {
-        auto empty_vec = std::make_unique<float[]>(0);
-        $$ = AstVectorRangeNode(std::move(field), radius,
-                                {std::move(empty_vec), size_t{0}}, std::move(attrs.score_alias),
-                                attrs.epsilon);
-      } else {
-        $$ = AstVectorRangeNode(std::move(field), radius, std::move(*vec_result),
-                                std::move(attrs.score_alias), attrs.epsilon);
-      }
+      $$ = AstVectorRangeNode(std::move(field), radius, std::string{$6},
+                              std::move(attrs.score_alias), attrs.epsilon);
     }
   | FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET %prec NO_YIELD
     {
       double radius = $5;
       auto field = std::move($1);
-      auto vec_result = BytesToFtVectorSafe($6);
-      if (!vec_result) {
-        auto empty_vec = std::make_unique<float[]>(0);
-        $$ = AstVectorRangeNode(std::move(field), radius,
-                                {std::move(empty_vec), size_t{0}}, std::string{}, std::nullopt);
-      } else {
-        $$ = AstVectorRangeNode(std::move(field), radius, std::move(*vec_result),
-                                std::string{}, std::nullopt);
-      }
+      $$ = AstVectorRangeNode(std::move(field), radius, std::string{$6}, std::string{}, std::nullopt);
     }
 
 vector_range_attrs_clause:

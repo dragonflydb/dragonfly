@@ -67,7 +67,8 @@ struct MockedDocument : public DocumentAccessor {
     return GetStrings(field);
   }
 
-  std::optional<VectorInfo> GetVector(string_view field, size_t dim) const override {
+  std::optional<VectorInfo> GetVector(string_view field, size_t dim,
+                                      VectorDataType dtype) const override {
     auto strings_list = GetStrings(field);
     if (!strings_list)
       return std::nullopt;
@@ -1440,7 +1441,7 @@ TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
     const char* data;
     explicit BorrowedDoc(const char* d) : data(d) {
     }
-    std::optional<VectorInfo> GetVector(string_view, size_t) const override {
+    std::optional<VectorInfo> GetVector(string_view, size_t, VectorDataType) const override {
       return BorrowedFtVector{data};
     }
     std::optional<StringList> GetStrings(string_view) const override {
@@ -2114,11 +2115,16 @@ TEST_F(SearchTest, VectorDistanceTypedDtypes) {
   EXPECT_FLOAT_EQ(HalfToFloat(0xC000), -2.0f);
   EXPECT_FLOAT_EQ(HalfToFloat(0x0000), 0.0f);
   EXPECT_FLOAT_EQ(HalfToFloat(0x4200), 3.0f);
-  EXPECT_FLOAT_EQ(HalfToFloat(0x0001), std::ldexp(1.0f, -24));  // smallest subnormal half
-  EXPECT_FLOAT_EQ(HalfToFloat(0x0200), std::ldexp(1.0f, -15));  // subnormal half
   EXPECT_FLOAT_EQ(Bf16ToFloat(0x3F80), 1.0f);
   EXPECT_FLOAT_EQ(Bf16ToFloat(0x4000), 2.0f);
   EXPECT_FLOAT_EQ(Bf16ToFloat(0x40C0), 6.0f);
+
+  // Encoders (float -> half), exact for representable values and round-trip.
+  EXPECT_EQ(FloatToHalf(1.0f), 0x3C00);
+  EXPECT_EQ(FloatToHalf(-2.0f), 0xC000);
+  EXPECT_EQ(FloatToBf16(1.0f), 0x3F80);
+  for (float x : {0.0f, 1.0f, -3.5f, 42.0f, 0.25f})
+    EXPECT_FLOAT_EQ(HalfToFloat(FloatToHalf(x)), x);
 
   // Every dtype holding {1,2,3} vs {4,5,6} must match the float32 reference under all metrics
   // (integers 1..6 are exactly representable in all six dtypes).
@@ -2145,6 +2151,57 @@ TEST_F(SearchTest, VectorDistanceTypedDtypes) {
   check(f64a, f64b, VectorDataType::FLOAT64);
   check(f16a, f16b, VectorDataType::FLOAT16);
   check(bf16a, bf16b, VectorDataType::BFLOAT16);
+}
+
+TEST_F(SearchTest, StubOnesVectorCosineWellDefined) {
+  // The HNSW deleted-node stub is EncodeOnesVector(...). Under COSINE it must have a nonzero norm,
+  // otherwise the distance degenerates to 0 (= maximally close) and biases traversal toward
+  // deleted nodes. Regresses for FLOAT32/BFLOAT16/FLOAT64 if the stub is a raw 0x01 byte fill,
+  // whose squared magnitude underflows the accumulator to zero.
+  const size_t dim = 3;
+  const float kExpected = 1.0f - 1.0f / std::sqrt(3.0f);  // cosine([1,0,0], [1,1,1])
+
+  auto check = [&](VectorDataType dt, const void* query) {
+    std::vector<std::byte> ones = EncodeOnesVector(dim, dt);
+    float d = VectorDistance(query, ones.data(), dim, VectorSimilarity::COSINE, dt);
+    EXPECT_NEAR(d, kExpected, 1e-3) << "dtype=" << VectorDataTypeToString(dt);
+    EXPECT_GT(d, 0.01f) << "degenerate zero-norm stub for dtype=" << VectorDataTypeToString(dt);
+  };
+
+  const float f32q[3] = {1, 0, 0};
+  const double f64q[3] = {1, 0, 0};
+  const uint16_t f16q[3] = {0x3C00, 0, 0};
+  const uint16_t bf16q[3] = {0x3F80, 0, 0};
+  const int8_t i8q[3] = {1, 0, 0};
+  const uint8_t u8q[3] = {1, 0, 0};
+
+  check(VectorDataType::FLOAT32, f32q);
+  check(VectorDataType::FLOAT64, f64q);
+  check(VectorDataType::FLOAT16, f16q);
+  check(VectorDataType::BFLOAT16, bf16q);
+  check(VectorDataType::INT8, i8q);
+  check(VectorDataType::UINT8, u8q);
+}
+
+TEST_F(SearchTest, HalfBf16SpecialValues) {
+  // Special-value branches of the half/bfloat converters (unexercised by the finite-normals test).
+  EXPECT_TRUE(std::isinf(HalfToFloat(0x7C00)));  // +inf
+  EXPECT_TRUE(std::isinf(HalfToFloat(0xFC00)) && HalfToFloat(0xFC00) < 0.0f);
+  EXPECT_TRUE(std::isnan(HalfToFloat(0x7E00)));
+  EXPECT_EQ(FloatToHalf(INFINITY), 0x7C00);
+  EXPECT_EQ(FloatToHalf(1e30f), 0x7C00);  // overflow -> inf
+  EXPECT_TRUE(std::isnan(HalfToFloat(FloatToHalf(std::nanf("")))));
+
+  EXPECT_TRUE(std::isinf(Bf16ToFloat(0x7F80)));
+  EXPECT_TRUE(std::isnan(Bf16ToFloat(0x7FC0)));
+  EXPECT_EQ(FloatToBf16(INFINITY), 0x7F80);
+  EXPECT_TRUE(std::isnan(Bf16ToFloat(FloatToBf16(std::nanf("")))));
+
+  // Smallest positive subnormal half round-trips and stays finite.
+  float sub = HalfToFloat(0x0001);
+  EXPECT_GT(sub, 0.0f);
+  EXPECT_LT(sub, 1e-6f);
+  EXPECT_EQ(FloatToHalf(sub), 0x0001);
 }
 
 TEST_F(SearchTest, VectorDistanceConsistency) {
