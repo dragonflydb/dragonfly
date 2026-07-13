@@ -235,27 +235,70 @@ async def test_metric_labels(
             match_label_value(sample, "other", lambda v: v == 1)
 
 
-def metric_sample_value(metrics, name, labels):
-    if name not in metrics:
+async def command_type_memory_delta(df_server: DflyInstance, type_name: str):
+    metric_name = "dragonfly_command_type_memory_delta_bytes"
+    metrics = await df_server.metrics()
+    if metric_name not in metrics:
         return 0
 
-    for sample in metrics[name].samples:
-        if all(sample.labels.get(k) == v for k, v in labels.items()):
+    for sample in metrics[metric_name].samples:
+        if sample.labels.get("type") == type_name:
             return sample.value
 
     return 0
 
 
-async def test_command_type_memory_metric(df_server: DflyInstance, async_client: aioredis.Redis):
-    metric_name = "dragonfly_command_type_memory_delta_bytes"
-    before = metric_sample_value(await df_server.metrics(), metric_name, {"type": "string"})
+async def _set_string_memory_delta(df_server: DflyInstance, async_client: aioredis.Redis):
+    before = await command_type_memory_delta(df_server, "string")
 
     value = "x" * 65536
     for i in range(32):
         assert await async_client.set(f"cmd-type-mem-{i}", value)
 
-    after = metric_sample_value(await df_server.metrics(), metric_name, {"type": "string"})
-    assert after > before, "string type metric did not increase after traffic"
+    after = await command_type_memory_delta(df_server, "string")
+    return after - before
+
+
+async def _hset_hash_memory_delta(df_server: DflyInstance, async_client: aioredis.Redis):
+    before = await command_type_memory_delta(df_server, "hash")
+
+    for i in range(32):
+        mapping = {f"field-{j}": "x" * 4096 for j in range(16)}
+        assert await async_client.hset(f"cmd-type-hash-{i}", mapping=mapping)
+
+    after = await command_type_memory_delta(df_server, "hash")
+    return after - before
+
+
+async def _del_string_memory_delta(df_server: DflyInstance, async_client: aioredis.Redis):
+    value = "x" * 65536
+    keys = [f"cmd-type-del-{i}" for i in range(32)]
+
+    for key in keys:
+        assert await async_client.set(key, value)
+
+    before = await command_type_memory_delta(df_server, "string")
+
+    assert await async_client.delete(*keys) == len(keys)
+
+    after = await command_type_memory_delta(df_server, "string")
+    return after - before
+
+
+@pytest.mark.parametrize(
+    "scenario, expected_sign",
+    [
+        (_set_string_memory_delta, 1),
+        (_hset_hash_memory_delta, 1),
+        (_del_string_memory_delta, -1),
+    ],
+    ids=["set-string", "hset-hash", "del-string"],
+)
+async def test_command_type_memory_metric(
+    df_server: DflyInstance, async_client: aioredis.Redis, scenario, expected_sign
+):
+    delta = await scenario(df_server, async_client)
+    assert delta * expected_sign > 0, f"{scenario.__name__} produced unexpected delta {delta}"
 
 
 async def test_latency_stats(async_client: aioredis.Redis):
