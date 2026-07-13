@@ -251,8 +251,18 @@ bool Listener::ReconfigureTLS() {
       return false;
     }
     ctx_ = ctx;
+    X509* cert = SSL_CTX_get0_certificate(ctx);
+    auto info = ParseTlsCertInfo(cert);
+    {
+      util::fb2::LockGuard lk(tls_cert_info_mu_);
+      tls_cert_info_ = info ? std::make_shared<const TlsCertInfo>(*info) : nullptr;
+    }
   } else {
     ctx_ = nullptr;
+    {
+      util::fb2::LockGuard lk(tls_cert_info_mu_);
+      tls_cert_info_.reset();
+    }
   }
 
   if (prev_ctx) {
@@ -263,6 +273,13 @@ bool Listener::ReconfigureTLS() {
 #endif
   return true;
 }
+
+#ifdef DFLY_USE_SSL
+std::shared_ptr<const TlsCertInfo> Listener::GetTlsCertInfo() const {
+  util::fb2::LockGuard lk(tls_cert_info_mu_);
+  return tls_cert_info_;
+}
+#endif
 
 size_t Listener::TLSUsedMemoryThreadLocal() {
   return listener_tl_stats.tls_allocated_bytes;

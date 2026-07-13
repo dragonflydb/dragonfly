@@ -26,6 +26,7 @@ struct hdr_histogram;
 
 namespace facade {
 class Listener;
+struct TlsCertInfo;
 }  // namespace facade
 
 namespace util {
@@ -161,8 +162,8 @@ class ServerFamily {
   // Collects server metrics. See MetricsCollectOpts; a default-constructed value collects all.
   Metrics GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) const;
 
-  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section,
-                                bool priveleged) const;
+  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section, bool priveleged,
+                                const std::shared_ptr<const facade::TlsCertInfo>& cert_info) const;
 
   ScriptMgr* script_mgr() {
     return script_mgr_.get();
