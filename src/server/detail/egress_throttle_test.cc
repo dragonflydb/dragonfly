@@ -7,101 +7,87 @@
 #include <gtest/gtest.h>
 
 #include "base/gtest.h"
-#include "util/sliding_counter.h"
 
 namespace dfly::detail {
 
 using namespace std;
 
-// A controllable clock policy so the ring-buffer behavior can be tested deterministically.
-// operator() returns the current slot index directly (a new slot begins when `slot` increments).
-struct ManualClock {
-  uint64_t* slot;
-  uint64_t operator()() const {
-    return *slot;
-  }
-};
-
-class SlidingCounterTest : public ::testing::Test {
- protected:
-  static constexpr unsigned kBuckets = 20;
-  using Counter = util::SlidingCounter<kBuckets, uint64_t, ManualClock>;
-
-  uint64_t slot_ = 0;
-  Counter counter_{ManualClock{&slot_}};
-};
-
-TEST_F(SlidingCounterTest, AccumulatesWithinWindow) {
-  counter_.IncBy(10);  // slot 0
-  counter_.IncBy(20);  // slot 0
-  slot_ = 1;
-  counter_.IncBy(30);  // slot 1
-  EXPECT_EQ(counter_.Sum(), 60u);
-}
-
-TEST_F(SlidingCounterTest, ClearsStaleBuckets) {
-  counter_.IncBy(100);  // slot 0
-  EXPECT_EQ(counter_.Sum(), 100u);
-
-  // Advance beyond one full window: the slot-0 bucket must roll off.
-  slot_ = kBuckets + 1;
-  EXPECT_EQ(counter_.Sum(), 0u);
-
-  counter_.IncBy(42);
-  EXPECT_EQ(counter_.Sum(), 42u);
-}
-
-TEST_F(SlidingCounterTest, PartialRollKeepsRecentBuckets) {
-  // Fill each of the buckets across one full window, 5 bytes each.
-  for (unsigned i = 0; i < kBuckets; ++i) {
-    slot_ = i;
-    counter_.IncBy(5);
-  }
-
-  slot_ = kBuckets - 1;
-  EXPECT_EQ(counter_.Sum(), 5u * kBuckets);
-
-  // Advance by 2 slots: exactly the 2 oldest buckets (slots 0 and 1) roll off.
-  slot_ = kBuckets - 1 + 2;
-  EXPECT_EQ(counter_.Sum(), 5u * (kBuckets - 2));
-}
-
-TEST_F(SlidingCounterTest, HugeJumpResetsEverything) {
-  for (unsigned i = 0; i < kBuckets; ++i) {
-    slot_ = i;
-    counter_.IncBy(7);
-  }
-
-  slot_ = 1'000 * kBuckets;  // far beyond the window
-  EXPECT_EQ(counter_.Sum(), 0u);
-}
-
-TEST_F(SlidingCounterTest, SumTailExcludesCurrentBucket) {
-  counter_.IncBy(10);  // slot 0
-  slot_ = 1;
-  counter_.IncBy(20);  // slot 1 (currently filling)
-  EXPECT_EQ(counter_.Sum(), 30u);
-  EXPECT_EQ(counter_.SumTail(), 10u);  // excludes the slot-1 bucket
-}
-
-TEST_F(SlidingCounterTest, BackwardClockKeepsWindow) {
-  slot_ = 5;
-  counter_.IncBy(50);
-  slot_ = 3;  // clock steps backward (e.g. NTP)
-  counter_.IncBy(10);
-  EXPECT_EQ(counter_.Sum(), 60u);  // no spurious clearing, attributed to current head
-}
+// Base timestamp (us) to mimic realistic absl::GetCurrentTimeNanos()/1000 magnitudes.
+constexpr uint64_t kT0 = 1'700'000'000'000'000ULL;
+constexpr uint64_t kTau = EgressThrottler::kBurstToleranceUs;  // 100ms
 
 TEST(EgressThrottlerTest, DisabledWhenNoLimit) {
   EgressThrottler t{0};
   EXPECT_FALSE(t.enabled());
-  // Recording on a disabled throttler is a no-op and must not crash.
-  t.Record(1'000'000, true);
+  // Recording/querying a disabled throttler is a no-op that never asks to sleep.
+  t.RecordAt(1'000'000, false, kT0);
+  EXPECT_EQ(t.WakeTime(kT0), 0u);
 }
 
 TEST(EgressThrottlerTest, EnabledWithLimit) {
   EgressThrottler t{1'000};
   EXPECT_TRUE(t.enabled());
+}
+
+// Under the limit the loop is never throttled.
+TEST(EgressThrottlerTest, ConformingProceeds) {
+  EgressThrottler t{1'000'000};  // 1 MB/s
+  t.RecordAt(100'000, false, kT0);
+  EXPECT_EQ(t.WakeTime(kT0), 0u);  // only 0.1s worth, within burst tolerance
+}
+
+// Sending a full second of budget at once forces a wait until the socket schedule catches up.
+TEST(EgressThrottlerTest, OverBudgetSleepsUntilSchedule) {
+  const uint64_t limit = 1'000'000;
+  EgressThrottler t{limit};
+
+  t.RecordAt(limit, false, kT0);  // 1 second worth of bytes at t0
+  // socket_tat_ = kT0 + 1s. It is conforming once now >= socket_tat_ - tau.
+  uint64_t wake = t.WakeTime(kT0);
+  EXPECT_EQ(wake, kT0 + EgressThrottler::kMicrosPerSec - kTau);
+
+  // At the wake time it may proceed.
+  EXPECT_EQ(t.WakeTime(wake), 0u);
+}
+
+// Out-of-order writes advance the socket schedule but must not throttle the loop while the loop
+// is still under its reserved share (progress guarantee).
+TEST(EgressThrottlerTest, OutOfOrderDoesNotStarveLoop) {
+  const uint64_t limit = 1'000'000;
+  EgressThrottler t{limit};
+
+  // A huge out-of-order burst saturates the socket for many seconds, yet the loop (which has sent
+  // nothing) is still allowed to proceed because its own reserved share is untouched.
+  t.RecordAt(10 * limit, true, kT0);
+  EXPECT_EQ(t.WakeTime(kT0), 0u);
+}
+
+// Once the loop itself has consumed its reserved share, it does get throttled under socket
+// saturation.
+TEST(EgressThrottlerTest, LoopThrottledAfterReservedShare) {
+  const uint64_t limit = 1'000'000;
+  EgressThrottler t{limit};
+
+  // Saturate the socket via out-of-order load.
+  t.RecordAt(10 * limit, true, kT0);
+  // Loop sends more than its reserved 0.1s worth (reserve rate = 0.1 * limit).
+  t.RecordAt(limit / 5, false, kT0);  // 0.2 * limit -> loop_tat_ ~ kT0 + 2s
+
+  EXPECT_GT(t.WakeTime(kT0), 0u);  // both socket and loop over budget -> throttle
+}
+
+// A backward clock step (e.g. NTP) must not corrupt the schedule: bytes attribute to the
+// current head, never rewinding the TAT.
+TEST(EgressThrottlerTest, BackwardClockDoesNotRewind) {
+  const uint64_t limit = 1'000'000;
+  EgressThrottler t{limit};
+
+  t.RecordAt(limit, false, kT0 + EgressThrottler::kMicrosPerSec);
+  uint64_t wake_before = t.WakeTime(kT0);
+
+  // Clock steps back; TAT should still reflect the earlier (larger) schedule.
+  t.RecordAt(1, false, kT0);
+  EXPECT_GE(t.WakeTime(kT0), wake_before);
 }
 
 }  // namespace dfly::detail
