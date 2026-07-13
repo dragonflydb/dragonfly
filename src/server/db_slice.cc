@@ -23,6 +23,7 @@ extern "C" {
 #include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/cluster/slot_set.h"
+#include "server/cmd_memory_scope.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -1912,6 +1913,9 @@ unique_ptr<base::Histogram> DbSlice::StopSampleValues(DbIndex db_ind) {
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async) {
   FiberAtomicGuard guard;
   size_t table_before = table->table_memory();
+
+  const int obj_type = del_it->second.ObjType();
+  CmdMemoryScope scope{obj_type};
 
   if (del_it->second.HasFlag()) {
     if (!SetMCFlag(table->index, del_it->first, 0)) {
