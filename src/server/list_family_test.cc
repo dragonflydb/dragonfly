@@ -60,6 +60,10 @@ const char kKey1[] = "d";
 const char kKey2[] = "b";
 const char kKey3[] = "c";
 
+const char kShard2Key1[] = "x";
+const char kShard2Key2[] = "m";
+const char kShard2Key3[] = "h";
+
 TEST_F(ListFamilyTest, Basic) {
   auto resp = Run({"lpush", kKey1, "1"});
   EXPECT_THAT(resp, IntArg(1));
@@ -208,7 +212,7 @@ TEST_F(ListFamilyTest, BLPopUnblocking) {
   resp = Run({"blpop", "z", "0"});
   ASSERT_THAT(resp, ErrArg("WRONGTYPE "));
 
-  ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_FALSE(IsLocked(0, kShard2Key1));
   ASSERT_FALSE(IsLocked(0, "y"));
   ASSERT_FALSE(IsLocked(0, "z"));
 }
@@ -218,18 +222,18 @@ TEST_F(ListFamilyTest, BLPopBlocking) {
 
   // Run the fiber at creation.
   auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    resp0 = Run({"blpop", "x", "0"});
+    resp0 = Run({"blpop", kShard2Key1, "0"});
     LOG(INFO) << "pop0";
   });
 
   ThisFiber::SleepFor(50us);
   auto fb1 = pp_->at(1)->LaunchFiber([&] {
-    resp1 = Run({"blpop", "x", "0"});
+    resp1 = Run({"blpop", kShard2Key1, "0"});
     LOG(INFO) << "pop1";
   });
   ThisFiber::SleepFor(30us);
 
-  RespExpr resp = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "x", "2", "1"}); });
+  RespExpr resp = pp_->at(1)->Await([&] { return Run("B1", {"lpush", kShard2Key1, "2", "1"}); });
   ASSERT_THAT(resp, IntArg(2));
 
   fb0.Join();
@@ -241,8 +245,8 @@ TEST_F(ListFamilyTest, BLPopBlocking) {
   int64_t epoch1 = GetDebugInfo("IO1").clock;
   ASSERT_LT(epoch0, epoch1);
   ASSERT_THAT(resp0, ArrLen(2));
-  EXPECT_THAT(resp0.GetVec(), ElementsAre("x", "1"));
-  ASSERT_FALSE(IsLocked(0, "x"));
+  EXPECT_THAT(resp0.GetVec(), ElementsAre(kShard2Key1, "1"));
+  ASSERT_FALSE(IsLocked(0, kShard2Key1));
   ASSERT_EQ(0, NumWatched());
 }
 
@@ -403,23 +407,23 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
 }
 
 TEST_F(ListFamilyTest, BPopTwoKeysSameShard) {
-  Run({"exists", "x", "m"});
+  Run({"exists", kShard2Key1, kShard2Key2});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
   RespExpr blpop_resp;
 
   auto pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    blpop_resp = Run({"blpop", "x", "m", "0"});
-    EXPECT_FALSE(IsLocked(0, "m"));
+    blpop_resp = Run({"blpop", kShard2Key1, kShard2Key2, "0"});
+    EXPECT_FALSE(IsLocked(0, kShard2Key2));
     ASSERT_EQ(0, NumWatched());
   });
 
-  WaitUntilLocked(0, "x");
+  WaitUntilLocked(0, kShard2Key1);
 
-  pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", "x", "bar"})); });
+  pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", kShard2Key1, "bar"})); });
   pop_fb.Join();
 
   ASSERT_THAT(blpop_resp, ArrLen(2));
-  EXPECT_THAT(blpop_resp.GetVec(), ElementsAre("x", "bar"));
+  EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kShard2Key1, "bar"));
 }
 
 TEST_F(ListFamilyTest, BPopRename) {
@@ -760,28 +764,28 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
 }
 
 TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
-  EXPECT_THAT(Run({"brpoplpush", "x", "m", "0.05"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"brpoplpush", kShard2Key1, kShard2Key2, "0.05"}), ArgType(RespExpr::NIL));
   ASSERT_EQ(0, NumWatched());
 
-  EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
-  EXPECT_EQ(Run({"brpoplpush", "x", "m", "0.01"}), "val1");
+  EXPECT_THAT(Run({"lpush", kShard2Key1, "val1"}), IntArg(1));
+  EXPECT_EQ(Run({"brpoplpush", kShard2Key1, kShard2Key2, "0.01"}), "val1");
   ASSERT_EQ(1, GetDebugInfo().shards_count);
 
   EXPECT_THAT(Run({
                   "exists",
-                  "x",
+                  kShard2Key1,
               }),
               IntArg(0));
-  Run({"set", "x", "str"});
-  EXPECT_THAT(Run({"brpoplpush", "m", "x", "0.01"}), ErrArg("wrong kind of value"));
+  Run({"set", kShard2Key1, "str"});
+  EXPECT_THAT(Run({"brpoplpush", kShard2Key2, kShard2Key1, "0.01"}), ErrArg("wrong kind of value"));
 
-  Run({"del", "x", "m"});
+  Run({"del", kShard2Key1, kShard2Key2});
   Run({"multi"});
-  Run({"brpoplpush", "m", "x", "0"});
+  Run({"brpoplpush", kShard2Key2, kShard2Key1, "0"});
   RespExpr resp = Run({"exec"});
   EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
-  ASSERT_FALSE(IsLocked(0, "x"));
-  ASSERT_FALSE(IsLocked(0, "m"));
+  ASSERT_FALSE(IsLocked(0, kShard2Key1));
+  ASSERT_FALSE(IsLocked(0, kShard2Key2));
   ASSERT_EQ(0, NumWatched());
 }
 
@@ -804,19 +808,21 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBug2857) {
 
 TEST_F(ListFamilyTest, BRPopLPushSingleShardBug4569) {
   RespExpr resp;
-  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { resp = Run({"brpop", "h", "0"}); });
-  WaitUntilLocked(0, "h");
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"brpop", kShard2Key3, "0"});
+  });
+  WaitUntilLocked(0, kShard2Key3);
 
-  ASSERT_TRUE(IsLocked(0, "h"));
+  ASSERT_TRUE(IsLocked(0, kShard2Key3));
 
-  Run({"lpush", "x", "val"});
-  Run({"rpoplpush", "x", "h"});
+  Run({"lpush", kShard2Key1, "val"});
+  Run({"rpoplpush", kShard2Key1, kShard2Key3});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
   fb0.Join();
   EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("h", "val"));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(kShard2Key3, "val"));
   ASSERT_EQ(0, NumWatched());
-  ASSERT_FALSE(IsLocked(0, "h"));
+  ASSERT_FALSE(IsLocked(0, kShard2Key3));
 }
 
 TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
@@ -824,15 +830,15 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
 
   // Run the fiber at creation.
   auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    resp = Run({"brpoplpush", "x", "y", "0"});
+    resp = Run({"brpoplpush", kShard2Key1, "y", "0"});
   });
   ThisFiber::SleepFor(30us);
   pp_->at(1)->Await([&] { Run("B1", {"lpush", "y", "2"}); });
 
-  pp_->at(1)->Await([&] { Run("B1", {"lpush", "x", "1"}); });
+  pp_->at(1)->Await([&] { Run("B1", {"lpush", kShard2Key1, "1"}); });
   fb0.Join();
   ASSERT_EQ(resp, "1");
-  ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_FALSE(IsLocked(0, kShard2Key1));
   ASSERT_FALSE(IsLocked(0, "y"));
   ASSERT_EQ(0, NumWatched());
 }
@@ -868,12 +874,12 @@ TEST_F(ListFamilyTest, BRPopContended) {
 
 TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   RespExpr resp;
-  EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.05"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"brpoplpush", kShard2Key1, "z", "0.05"}), ArgType(RespExpr::NIL));
 
   ASSERT_EQ(0, NumWatched());
 
-  Run({"lpush", "x", "val"});
-  EXPECT_EQ(Run({"brpoplpush", "x", "z", "0"}), "val");
+  Run({"lpush", kShard2Key1, "val"});
+  EXPECT_EQ(Run({"brpoplpush", kShard2Key1, "z", "0"}), "val");
   resp = Run({"lrange", "z", "0", "-1"});
   ASSERT_THAT(resp, RespElementsAre("val"));
   Run({"del", "z"});
@@ -881,14 +887,14 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
 
   // Run the fiber at creation.
   auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    resp = Run({"brpoplpush", "x", "z", "0"});
+    resp = Run({"brpoplpush", kShard2Key1, "z", "0"});
   });
 
   ThisFiber::SleepFor(30us);
   RespExpr resp_push = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "z", "val2"}); });
   ASSERT_THAT(resp_push, IntArg(1));
 
-  resp_push = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "x", "val1"}); });
+  resp_push = pp_->at(1)->Await([&] { return Run("B1", {"lpush", kShard2Key1, "val1"}); });
   ASSERT_THAT(resp_push, IntArg(1));
   fb0.Join();
 
@@ -898,7 +904,7 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   resp = Run({"lrange", "z", "0", "-1"});
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec(), ElementsAre("val1", "val2"));
-  ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_FALSE(IsLocked(0, kShard2Key1));
   ASSERT_FALSE(IsLocked(0, "z"));
   ASSERT_EQ(0, NumWatched());
   ASSERT_FALSE(HasAwakened());
@@ -909,13 +915,13 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
 }
 
 TEST_F(ListFamilyTest, BLMove) {
-  EXPECT_THAT(Run({"blmove", "x", "y", "right", "right", "0.05"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"blmove", kShard2Key1, "y", "right", "right", "0.05"}), ArgType(RespExpr::NIL));
   ASSERT_EQ(0, NumWatched());
 
-  EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
+  EXPECT_THAT(Run({"lpush", kShard2Key1, "val1"}), IntArg(1));
   EXPECT_THAT(Run({"lpush", "y", "val2"}), IntArg(1));
 
-  EXPECT_EQ(Run({"blmove", "x", "y", "right", "left", "0.01"}), "val1");
+  EXPECT_EQ(Run({"blmove", kShard2Key1, "y", "right", "left", "0.01"}), "val1");
   auto resp = Run({"lrange", "y", "0", "-1"});
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec(), ElementsAre("val1", "val2"));
@@ -924,21 +930,21 @@ TEST_F(ListFamilyTest, BLMove) {
 // NaN / +-inf / negative timeouts are rejected (Redis-compatible) instead of being cast to unsigned
 // milliseconds, which is undefined behavior.
 TEST_F(ListFamilyTest, BlockingTimeoutValidation) {
-  EXPECT_THAT(Run({"brpoplpush", "x", "y", "abc"}), ErrArg(facade::kTimeoutNotFloatErr));
-  EXPECT_THAT(Run({"brpoplpush", "x", "y", "nan"}), ErrArg(facade::kTimeoutNotFloatErr));
-  EXPECT_THAT(Run({"brpoplpush", "x", "y", "inf"}), ErrArg(facade::kTimeoutOutOfRangeErr));
-  EXPECT_THAT(Run({"brpoplpush", "x", "y", "-inf"}), ErrArg(facade::kTimeoutNegativeErr));
-  EXPECT_THAT(Run({"brpoplpush", "x", "y", "-1"}), ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"brpoplpush", kShard2Key1, "y", "abc"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"brpoplpush", kShard2Key1, "y", "nan"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"brpoplpush", kShard2Key1, "y", "inf"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"brpoplpush", kShard2Key1, "y", "-inf"}), ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"brpoplpush", kShard2Key1, "y", "-1"}), ErrArg(facade::kTimeoutNegativeErr));
 
-  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "abc"}),
+  EXPECT_THAT(Run({"blmove", kShard2Key1, "y", "LEFT", "RIGHT", "abc"}),
               ErrArg(facade::kTimeoutNotFloatErr));
-  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "nan"}),
+  EXPECT_THAT(Run({"blmove", kShard2Key1, "y", "LEFT", "RIGHT", "nan"}),
               ErrArg(facade::kTimeoutNotFloatErr));
-  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "inf"}),
+  EXPECT_THAT(Run({"blmove", kShard2Key1, "y", "LEFT", "RIGHT", "inf"}),
               ErrArg(facade::kTimeoutOutOfRangeErr));
-  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "-inf"}),
+  EXPECT_THAT(Run({"blmove", kShard2Key1, "y", "LEFT", "RIGHT", "-inf"}),
               ErrArg(facade::kTimeoutNegativeErr));
-  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "-1"}),
+  EXPECT_THAT(Run({"blmove", kShard2Key1, "y", "LEFT", "RIGHT", "-1"}),
               ErrArg(facade::kTimeoutNegativeErr));
 
   EXPECT_THAT(Run({"blmpop", "abc", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutNotFloatErr));
@@ -1124,7 +1130,7 @@ TEST_F(ListFamilyTest, LInsert) {
   EXPECT_THAT(Run({"linsert", "notfound", "before", "foo", "bar"}), IntArg(0));
 
   // Key is not a list.
-  Run({"set", "notalist", "x"});
+  Run({"set", "notalist", kShard2Key1});
   EXPECT_THAT(Run({"linsert", "notalist", "before", "foo", "bar"}),
               ErrArg("Operation against a key holding the wrong kind of value"));
 
@@ -1142,10 +1148,10 @@ TEST_F(ListFamilyTest, LInsert) {
   ASSERT_THAT(resp.GetVec(), ElementsAre("bar", "foo", "car"));
 
   // Insert before, pivot not found.
-  EXPECT_THAT(Run({"linsert", "mylist", "before", "notfound", "x"}), IntArg(-1));
+  EXPECT_THAT(Run({"linsert", "mylist", "before", "notfound", kShard2Key1}), IntArg(-1));
 
   // Insert after, pivot not found.
-  EXPECT_THAT(Run({"linsert", "mylist", "after", "notfound", "x"}), IntArg(-1));
+  EXPECT_THAT(Run({"linsert", "mylist", "after", "notfound", kShard2Key1}), IntArg(-1));
 
   // insert empty
   Run({"rpush", "k", "a"});
@@ -1317,16 +1323,16 @@ TEST_F(ListFamilyTest, LMPop) {
   EXPECT_THAT(resp, IntArg(0));
 
   // First non-empty list is not the first list
-  resp = Run({"lpush", "x", "x1"});
+  resp = Run({"lpush", kShard2Key1, "x1"});
   EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"lpush", "y", "y1"});
   EXPECT_THAT(resp, IntArg(1));
 
-  resp = Run({"lmpop", "3", "empty", "x", "y", "RIGHT"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("x", RespArray(ElementsAre("x1")))));
+  resp = Run({"lmpop", "3", "empty", kShard2Key1, "y", "RIGHT"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(kShard2Key1, RespArray(ElementsAre("x1")))));
 
-  resp = Run({"llen", "x"});
+  resp = Run({"llen", kShard2Key1});
   EXPECT_THAT(resp, IntArg(0));
 }
 
@@ -1340,12 +1346,12 @@ TEST_F(ListFamilyTest, LMPopMultipleElements) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("d", "e"));
 
   // Test removing multiple elements from right end
-  Run({"rpush", "list2", "v", "w", "x", "y", "z"});
+  Run({"rpush", "list2", "v", "w", kShard2Key1, "y", "z"});
   resp = Run({"lmpop", "1", "list2", "RIGHT", "COUNT", "2"});
   EXPECT_THAT(resp, RespArray(ElementsAre("list2", RespArray(ElementsAre("z", "y")))));
 
   resp = Run({"lrange", "list2", "0", "-1"});
-  EXPECT_THAT(resp.GetVec(), ElementsAre("v", "w", "x"));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("v", "w", kShard2Key1));
 }
 
 TEST_F(ListFamilyTest, LMPopMultipleLists) {
@@ -1525,11 +1531,11 @@ TEST_F(ListFamilyTest, AwakeDb1) {
 
   auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
     Run("C", {"SELECT", kDbId});
-    Run("C", {"brpoplpush", "x", "m", "0"});
+    Run("C", {"brpoplpush", kShard2Key1, kShard2Key2, "0"});
     ASSERT_EQ(GetDebugInfo("C").shards_count, 1);
   });
   Run({"SELECT", kDbId});
-  Run({"EVAL", "redis.call('LPUSH', KEYS[1], 'val'); return 1;", "1", "x"});
+  Run({"EVAL", "redis.call('LPUSH', KEYS[1], 'val'); return 1;", "1", kShard2Key1});
   f1.Join();
 }
 

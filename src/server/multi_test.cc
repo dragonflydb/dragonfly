@@ -536,7 +536,6 @@ TEST_F(MultiTest, MultiCommandsWithBonusKeys) {
   // Check squashing correctly pre-validates commands
   Run({"multi"});
   Run({"zinterstore", "e", "2", "a", "d", "z one extra"});
-  ;
   resp = Run({"exec"});
   EXPECT_THAT(resp, RespElementsAre(ErrArg("syntax error")));
 }

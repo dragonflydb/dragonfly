@@ -88,6 +88,16 @@ class RoundRobinSharder {
   static util::fb2::Mutex mutex_;
 };
 
+inline ShardId reduce(uint64_t hash, ShardId shard_num) {
+  // Lemire's fast alternative to modulo reduction.
+  // Replaces slow division with multiply+shift, same distribution quality.
+  // See: https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
+  // Fold 64-bit hash to 32-bit first to use cheaper multiply instead of 128-bit.
+
+  uint32_t h32 = static_cast<uint32_t>(hash ^ (hash >> 32));
+  return static_cast<ShardId>((uint64_t{h32} * uint64_t{shard_num}) >> 32);
+}
+
 }  // namespace
 
 thread_local string RoundRobinSharder::round_robin_prefix_;
@@ -121,13 +131,7 @@ ShardId Shard(string_view v, ShardId shard_num) {
       return *round_robin;
     }
   }
-
-  // Lemire's fast alternative to modulo reduction.
-  // Replaces slow division with multiply+shift, same distribution quality.
-  // See: https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
-  // Fold 64-bit hash to 32-bit first to use cheaper multiply instead of 128-bit.
-  uint32_t h32 = static_cast<uint32_t>(hash ^ (hash >> 32));
-  return static_cast<ShardId>((uint64_t{h32} * uint64_t{shard_num}) >> 32);
+  return reduce(hash, shard_num);
 }
 
 namespace sharding {

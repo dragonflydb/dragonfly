@@ -528,8 +528,13 @@ TEST_F(GenericFamilyTest, Rename) {
 }
 
 TEST_F(GenericFamilyTest, RenameList) {
-  for (string_view dest : {"a", "h", "s"}) {
-    EXPECT_EQ(1, CheckedInt({"lpush", "c", "elem"}));
+  const char kSourceKey[] = "c";
+  const char kDestKeySid0[] = "a";
+  const char kDestKeySid2[] = "h";
+  const char kDestKeySid2Alt[] = "s";
+
+  for (string_view dest : {kDestKeySid0, kDestKeySid2, kDestKeySid2Alt}) {
+    EXPECT_EQ(1, CheckedInt({"lpush", kSourceKey, "elem"}));
     Metrics metrics = GetMetrics();
 
     size_t list_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
@@ -537,9 +542,9 @@ TEST_F(GenericFamilyTest, RenameList) {
     ASSERT_GT(list_usage, 0);
     ASSERT_EQ(string_usage, 0);
 
-    auto resp = Run({"rename", "c", dest});
+    auto resp = Run({"rename", kSourceKey, dest});
     ASSERT_EQ(resp, "OK");
-    if (dest == "a") {
+    if (dest == kDestKeySid0) {
       ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
     } else {
       ASSERT_EQ(1, last_cmd_dbg_info_.shards_count);
@@ -551,7 +556,7 @@ TEST_F(GenericFamilyTest, RenameList) {
     ASSERT_EQ(list_usage_after, list_usage);
     ASSERT_EQ(string_usage, 0);
 
-    EXPECT_EQ(0, CheckedInt({"del", "c"}));
+    EXPECT_EQ(0, CheckedInt({"del", kSourceKey}));
     EXPECT_EQ(1, CheckedInt({"del", dest}));
   }
 }

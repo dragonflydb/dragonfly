@@ -1644,10 +1644,13 @@ TEST_F(RdbTest, SplitSBF) {
   // splits. A plain string is also added between the split filter.
 
   // Creates filter in db to copy the fields from
-  auto resp = Run({"BF.RESERVE", "bf_src_1", "0.01", "10"});
+
+  const char kBloomFilterSource[] = "bf_src_1";
+
+  auto resp = Run({"BF.RESERVE", kBloomFilterSource, "0.01", "10"});
   EXPECT_EQ(resp, "OK");
   for (size_t i = 0; i < 50; ++i) {
-    resp = Run({"BF.ADD", "bf_src_1", StrCat("item", i)});
+    resp = Run({"BF.ADD", kBloomFilterSource, StrCat("item", i)});
     EXPECT_THAT(resp, AnyOf(0, 1));
   }
 
@@ -1662,7 +1665,7 @@ TEST_F(RdbTest, SplitSBF) {
   pp_->at(0)->Await([&] {
     const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
     const auto& db = ctx.GetDbSlice(0);
-    auto it = db.FindReadOnly(ctx, "bf_src_1", OBJ_SBF);
+    auto it = db.FindReadOnly(ctx, kBloomFilterSource, OBJ_SBF);
     ASSERT_TRUE(it.ok());
 
     const SBF* sbf = it.value()->second.GetSBF();
