@@ -259,12 +259,39 @@ def classify_copy_replace(m: Metrics):
         print(">> WRONG")
 
 
+class RestoreScenario:
+    def __init__(self):
+        self.payload = None
+
+    async def setup(self, cl: aioredis.Redis):
+        src = "restore-src-" + ("a" * 1024)
+        assert await cl.hset(src, "f", "x" * 1024)
+        self.payload = await cl.dump(src)
+        assert self.payload is not None
+
+    async def action(self, cl: aioredis.Redis):
+        assert await cl.restore("d" * 1024, 0, self.payload)
+
+
+def classify_restore_hash(m: Metrics):
+    """
+    Currently misses the delta completely as restore is generic
+    """
+    if m.cmd("hash") == m.type("hash") + m.type("key") and m.cmd_total() == m.mem("object_used"):
+        print(">> OK")
+    else:
+        print(">> WRONG")
+
+
 async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
+    from functools import partial
+
     long_key = "a" * 1024
     long_key2 = "c" * 2048
     long_key3 = "d" * 1536
     long_val = "b" * 1024
 
+    restore_scenario = RestoreScenario()
     scenarios = [
         Scenario("set string simple", action=set_string_simple, classify=classify_simple_set),
         Scenario(
@@ -330,6 +357,12 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             setup=commands(("HSET", long_key, "f", long_val), ("SET", long_key2, long_val)),
             action=commands(("COPY", long_key, long_key2, "REPLACE")),
             classify=classify_copy_replace,
+        ),
+        Scenario(
+            "restore hash",
+            setup=partial(RestoreScenario.setup, restore_scenario),
+            action=partial(RestoreScenario.action, restore_scenario),
+            classify=classify_restore_hash,
         ),
     ]
 
