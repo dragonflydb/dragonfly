@@ -77,6 +77,9 @@ constexpr string_view kClusterDisabled =
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
 
+  config_registry.RegisterMutable("cluster_announce_ip");
+  config_registry.RegisterMutable("announce_port");
+
   InitializeCluster();
 
   id_ = absl::GetFlag(FLAGS_cluster_node_id);

@@ -966,6 +966,24 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterShardInfos) {
                                                     "role", "master",                          //
                                                     "replication-offset", IntArg(0),           //
                                                     "health", "online"))))))));
+
+  EXPECT_EQ(RunPrivileged({"config", "set", "cluster_announce_ip", "updated-host"}), "OK");
+  EXPECT_EQ(RunPrivileged({"config", "set", "announce_port", "6380"}), "OK");
+
+  EXPECT_THAT(
+      Run({"cluster", "shards"}),
+      RespElementsAre(RespArray(ElementsAre("slots",                                           //
+                                            RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //
+                                            "nodes",                                           //
+                                            RespArray(ElementsAre(                             //
+                                                RespArray(ElementsAre(                         //
+                                                    "id", GetMyId(),                           //
+                                                    "endpoint", "updated-host",                //
+                                                    "ip", "updated-host",                      //
+                                                    "port", IntArg(6380),                      //
+                                                    "role", "master",                          //
+                                                    "replication-offset", IntArg(0),           //
+                                                    "health", "online"))))))));
 }
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterSlots) {
