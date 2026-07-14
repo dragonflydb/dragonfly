@@ -331,6 +331,36 @@ def classify_hset_enc_change(m: Metrics):
         return "WRONG"
 
 
+async def action_trigger_table_growth(cl: aioredis.Redis):
+    pipe = cl.pipeline(transaction=False)
+    for i in range(50_000_0):
+        key = f"table-gr-{i}-" + ("k" * 64)
+        pipe.set(key, "v")
+    results = await pipe.execute()
+    assert all(results)
+
+
+def classify_table_growth(m: Metrics):
+    "Currently table growth is added to new metric!"
+    object_used = m.mem("object_used")
+    table = m.mem("table_used")
+    cmd = m.cmd("string")
+
+    if table <= 0:
+        return "WRONG table didnt grow"
+
+    if cmd == object_used:
+        return "OK table excluded"
+
+    if cmd >= object_used + table:
+        return "CHECK table included"
+
+    if cmd > object_used:
+        return "CHECK other bytes included?"
+
+    return "WRONG"
+
+
 async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
     from functools import partial
 
@@ -417,6 +447,12 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             setup=commands(("HSET", long_key, "f", "v")),
             action=commands(("HSET", long_key, "f1", long_val)),
             classify=classify_hset_enc_change,
+        ),
+        Scenario(
+            "table growth accounting",
+            setup=no_setup,
+            action=action_trigger_table_growth,
+            classify=classify_table_growth,
         ),
     ]
 
