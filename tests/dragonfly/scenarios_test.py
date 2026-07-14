@@ -283,6 +283,18 @@ def classify_restore_hash(m: Metrics):
         print(">> WRONG")
 
 
+def classify_hset_enc_change(m: Metrics):
+    if (
+        m.cmd("hash") == m.type("hash")
+        and m.cmd_total() == m.mem("object_used")
+        and m.cmd("hash") > 0
+        and clean_memory_classes(m)
+    ):
+        print(">> OK")
+    else:
+        print(">> WRONG")
+
+
 async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
     from functools import partial
 
@@ -363,6 +375,12 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             setup=partial(RestoreScenario.setup, restore_scenario),
             action=partial(RestoreScenario.action, restore_scenario),
             classify=classify_restore_hash,
+        ),
+        Scenario(
+            "hash encoding changes",
+            setup=commands(("HSET", long_key, "f", "v")),
+            action=commands(("HSET", long_key, "f1", long_val)),
+            classify=classify_hset_enc_change,
         ),
     ]
 
