@@ -128,6 +128,7 @@ async def set_string_simple(async_client: aioredis.Redis):
 
 
 def classify_simple_set(m: Metrics):
+    """New string: command delta should include value + key."""
     expected = m.type("string") + m.type("key")
 
     if m.cmd("string") == expected and m.mem("object_used") == expected and clean_memory_classes(m):
@@ -139,6 +140,7 @@ def classify_simple_set(m: Metrics):
 
 
 def classify_overwrite_hash(m: Metrics):
+    """SET over hash: old hash free and new string alloc should split by type."""
     if (
         m.cmd("hash") == m.type("hash")
         and m.cmd("string") == m.type("string") + m.type("key")
@@ -154,7 +156,13 @@ def classify_overwrite_hash(m: Metrics):
 
 
 def classify_del_string(m: Metrics):
-    if m.cmd("string") < 0 and clean_memory_classes(m):
+    """DEL string: command delta should match removed value + key."""
+    if (
+        m.cmd("string") == m.type("string") + m.type("key")
+        and m.cmd_total() == m.mem("object_used")
+        and m.cmd("string") < 0
+        and clean_memory_classes(m)
+    ):
         print(">> OK")
     else:
         print(">> WRONG")
@@ -169,30 +177,40 @@ def commands(*cmds):
 
 
 def classify_mixed_delete(m: Metrics):
-    if all(m.cmd(t) < 0 for t in ("hash", "list", "string")):
+    """DEL mixed keys: each removed type should get its own negative delta."""
+    if (
+        all(m.cmd(t) < 0 for t in ("hash", "list", "string"))
+        and m.cmd_total() == m.mem("object_used")
+        and m.type_total() == m.mem("object_used")
+        and clean_memory_classes(m)
+    ):
         print(">> OK")
     else:
         print(">> WRONG")
 
 
 def classify_rename_to_new(m: Metrics):
-    """
-    This needs work. Currently we wrap delete in scope, so the delete will make string -ve
-    But then the new string is added, which is under the RENAME cmd, which is generic. We
-    are currently skipping generic, so we only find the -ve delta
-    """
-    if m.cmd("string") > 0:
+    """RENAME new key: move should account net key delta to value type."""
+    if (
+        m.cmd("string") == m.type("string") + m.type("key")
+        and m.cmd_total() == m.mem("object_used")
+        and m.cmd("string") > 0
+        and clean_memory_classes(m)
+    ):
         print(">> OK")
     else:
         print(">> WRONG")
 
 
 def classify_rename_hash_over_string(m: Metrics):
-    """
-    Again, only observes delete operations, not the rename operation, so will only see
-    -ve effects. Needs work on generic cmds
-    """
-    if m.cmd("string") == m.type("string") and m.cmd("hash") == m.type("hash") + m.type("key"):
+    """RENAME over string: removed string and moved hash should split by type."""
+    if (
+        m.cmd("string") == m.type("string")
+        and m.cmd("hash") == m.type("hash") + m.type("key")
+        and m.cmd_total() == m.mem("object_used")
+        and m.type_total() == m.mem("object_used")
+        and clean_memory_classes(m)
+    ):
         print(">> OK")
     else:
         print(">> WRONG")
@@ -203,6 +221,7 @@ def classify_observe(_m: Metrics):
 
 
 def classify_json_interned(m: Metrics):
+    """JSON new docs: JSON+key accounted, interned pool stays separate."""
     expected = m.type("ReJSON-RL") + m.type("key")
     interned = m.mem("interned_string_pool") + m.mem("interned_string_table")
     if (
@@ -226,7 +245,12 @@ async def json_set_interned_strings(async_client: aioredis.Redis):
 
 
 def classify_ro(m: Metrics):
-    if all(v == 0 for v in m.cmd_type_delta.values()):
+    """Reads should not change command memory deltas."""
+    if (
+        all(v == 0 for v in m.cmd_type_delta.values())
+        and m.mem("object_used") == 0
+        and clean_memory_classes(m)
+    ):
         print(">> OK")
     else:
         print(">> WRONG")
@@ -238,21 +262,26 @@ async def expire_string(cl: aioredis.Redis):
 
 
 def classify_expiry(m: Metrics):
-    if m.cmd("string") < 0 and abs(m.cmd("string")) == abs(m.type("string")) + abs(m.type("key")):
+    """Expiry delete should look like DEL for the expired value type."""
+    if (
+        m.cmd("string") == m.type("string") + m.type("key")
+        and m.cmd_total() == m.mem("object_used")
+        and m.cmd("string") < 0
+        and clean_memory_classes(m)
+    ):
         print(">> OK")
     else:
         print(">> WRONG")
 
 
 def classify_copy_replace(m: Metrics):
-    """
-    replacement needs work to fix. We wrongly attribute everything to string right now from deleting the old value.
-    Nothing is attributed to hash probably
-    """
+    """COPY REPLACE: removed dest and copied source should split by type."""
     if (
         m.cmd("string") == m.type("string")
         and m.cmd("hash") == m.type("hash")
         and m.cmd_total() == m.mem("object_used")
+        and m.type_total() == m.mem("object_used")
+        and clean_memory_classes(m)
     ):
         print(">> OK")
     else:
@@ -274,16 +303,20 @@ class RestoreScenario:
 
 
 def classify_restore_hash(m: Metrics):
-    """
-    Currently misses the delta completely as restore is generic
-    """
-    if m.cmd("hash") == m.type("hash") + m.type("key") and m.cmd_total() == m.mem("object_used"):
+    """RESTORE hash: decoded runtime type should receive the delta."""
+    if (
+        m.cmd("hash") == m.type("hash") + m.type("key")
+        and m.cmd_total() == m.mem("object_used")
+        and m.type_total() == m.mem("object_used")
+        and clean_memory_classes(m)
+    ):
         print(">> OK")
     else:
         print(">> WRONG")
 
 
 def classify_hset_enc_change(m: Metrics):
+    """Hash encoding growth should stay attributed to hash."""
     if (
         m.cmd("hash") == m.type("hash")
         and m.cmd_total() == m.mem("object_used")
@@ -377,7 +410,7 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             classify=classify_restore_hash,
         ),
         Scenario(
-            "hash encoding changes",
+            "hash encoding changes lp->strmap",
             setup=commands(("HSET", long_key, "f", "v")),
             action=commands(("HSET", long_key, "f1", long_val)),
             classify=classify_hset_enc_change,
