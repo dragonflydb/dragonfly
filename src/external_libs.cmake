@@ -58,14 +58,27 @@ add_third_party(
   INSTALL_COMMAND ${DFLY_TOOLS_MAKE} install BUILD_SHARED=no PREFIX=${THIRD_PARTY_LIB_DIR}/lz4
 )
 
+# MiMalloc is built with a raw ExternalProject_Add rather than add_third_party:
+# its build needs custom patches, bespoke -DMI_* CMAKE_ARGS, non-standard output dirs, extra header copying, and a
+# hand-declared imported target - none of which fit add_third_party's conventional layout. It still downloads a URL
+# tarball, so it reuses the shared retry policy (see third_party.cmake) via DOWNLOAD_COMMAND (see below).
 set(MIMALLOC_ROOT_DIR ${THIRD_PARTY_LIB_DIR}/mimalloc2)
 set(MIMALLOC_INCLUDE_DIR ${MIMALLOC_ROOT_DIR}/include)
 set(MIMALLOC_PATCH_DIR ${CMAKE_CURRENT_LIST_DIR}/../patches/mimalloc-v2.2.4)
 set(MIMALLOC_C_FLAGS "-O3 -g -DMI_STAT=0 -DNDEBUG")
+set(MIMALLOC_URL https://github.com/microsoft/mimalloc/archive/refs/tags/v2.2.4.tar.gz)
+set(MIMALLOC_SHA256 754a98de5e2912fddbeaf24830f982b4540992f1bab4a0a8796ee118e0752bda)
 file(MAKE_DIRECTORY ${MIMALLOC_INCLUDE_DIR})
 
 ExternalProject_Add(mimalloc2_project
-  URL https://github.com/microsoft/mimalloc/archive/refs/tags/v2.2.4.tar.gz
+  # Download via the shared retry policy (see note above). HELIO_CMAKE_DIR is
+  # exported by helio/cmake/third_party.cmake.
+  DOWNLOAD_COMMAND ${CMAKE_COMMAND}
+      -DURL=${MIMALLOC_URL}
+      -DDEST=${THIRD_PARTY_DIR}/mimalloc2-src-archive
+      -DEXTRACT_DIR=${THIRD_PARTY_DIR}/mimalloc2
+      -DEXPECTED_HASH=${MIMALLOC_SHA256}
+      -P ${HELIO_CMAKE_DIR}/download_retry.cmake
   DOWNLOAD_DIR ${THIRD_PARTY_DIR}/mimalloc2
   SOURCE_DIR ${THIRD_PARTY_DIR}/mimalloc2
   # INSTALL_DIR ${MIMALLOC_ROOT_DIR}
@@ -89,7 +102,6 @@ ExternalProject_Add(mimalloc2_project
   LOG_BUILD ON
   LOG_PATCH ON
   LOG_UPDATE ON
-  DOWNLOAD_EXTRACT_TIMESTAMP YES
 
   CMAKE_GENERATOR "Unix Makefiles"
 
