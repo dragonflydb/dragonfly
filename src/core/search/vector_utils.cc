@@ -114,79 +114,19 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
 }
 
 float HalfToFloat(uint16_t h) {
-  uint32_t sign = static_cast<uint32_t>(h & 0x8000) << 16;
-  uint32_t exp = (h >> 10) & 0x1F;
-  uint32_t mant = h & 0x3FF;
-  uint32_t bits;
-  if (exp == 0) {
-    if (mant == 0) {
-      bits = sign;  // +/- zero
-    } else {
-      // Normalize the subnormal: shift the mantissa left until bit 10 is set. `mant` is in
-      // [1, 0x3FF], so countl_zero is in [22, 31] and the shift in [1, 10].
-      int shift = std::countl_zero(mant) - 21;
-      exp = (127 - 15 + 1) - shift;
-      mant = (mant << shift) & 0x3FF;
-      bits = sign | (exp << 23) | (mant << 13);
-    }
-  } else if (exp == 0x1F) {
-    bits = sign | 0x7F800000u | (mant << 13);  // inf / nan
-  } else {
-    bits = sign | ((exp + 112) << 23) | (mant << 13);  // rebias 127 - 15 = 112
-  }
-  float out;
-  memcpy(&out, &bits, sizeof(out));
-  return out;
+  return static_cast<float>(std::bit_cast<_Float16>(h));
 }
 
 float Bf16ToFloat(uint16_t b) {
-  uint32_t bits = static_cast<uint32_t>(b) << 16;
-  float out;
-  memcpy(&out, &bits, sizeof(out));
-  return out;
+  return static_cast<float>(std::bit_cast<__bf16>(b));
 }
 
 uint16_t FloatToHalf(float f) {
-  uint32_t x;
-  memcpy(&x, &f, sizeof(x));
-  const uint32_t sign = (x >> 16) & 0x8000;
-  const uint32_t exp_field = (x >> 23) & 0xFF;
-  uint32_t mant = x & 0x7FFFFF;
-
-  if (exp_field == 0xFF)  // inf / nan
-    return static_cast<uint16_t>(sign | 0x7C00 | (mant ? 0x200 : 0));
-
-  int32_t exp = static_cast<int32_t>(exp_field) - 127 + 15;
-  if (exp >= 0x1F)  // overflow -> inf
-    return static_cast<uint16_t>(sign | 0x7C00);
-
-  if (exp <= 0) {  // subnormal or zero
-    if (exp < -10)
-      return static_cast<uint16_t>(sign);
-    mant |= 0x800000;
-    const int shift = 14 - exp;
-    uint32_t half_mant = mant >> shift;
-    const uint32_t remainder = mant & ((1u << shift) - 1);
-    const uint32_t halfway = 1u << (shift - 1);
-    if (remainder > halfway || (remainder == halfway && (half_mant & 1)))
-      half_mant++;
-    return static_cast<uint16_t>(sign | half_mant);
-  }
-
-  uint16_t half = static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13));
-  const uint32_t remainder = mant & 0x1FFF;  // round to nearest even
-  if (remainder > 0x1000 || (remainder == 0x1000 && (half & 1)))
-    half++;
-  return half;
+  return std::bit_cast<uint16_t>(static_cast<_Float16>(f));
 }
 
 uint16_t FloatToBf16(float f) {
-  uint32_t bits;
-  memcpy(&bits, &f, sizeof(bits));
-  if ((bits & 0x7FFFFFFF) > 0x7F800000)  // nan -> quiet nan
-    return static_cast<uint16_t>((bits >> 16) | 0x0040);
-  bits += 0x7FFF + ((bits >> 16) & 1);  // round to nearest even
-  return static_cast<uint16_t>(bits >> 16);
+  return std::bit_cast<uint16_t>(static_cast<__bf16>(f));
 }
 
 std::vector<std::byte> EncodeOnesVector(size_t dim, VectorDataType dt) {

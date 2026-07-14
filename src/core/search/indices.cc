@@ -894,50 +894,42 @@ FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
     : BaseVectorIndex{params.dim, params.sim, params.data_type},
       stride_bytes_{params.dim * ElementSize(params.data_type)},
       entries_{mr},
-      present_{mr} {
+      present_(mr) {
   DCHECK(!params.use_hnsw);
   entries_.reserve(params.capacity * stride_bytes_);
-  present_.reserve((params.capacity + 63) / 64);
+  present_.reserve(params.capacity);
 }
 
 void FlatVectorIndex::AddVector(DocId id, const void* vector) {
+  // Grow, never shrink: DocIds are recycled (see ShardDocIndex free_ids_), so `id` can be smaller
+  // than the current max — an unconditional resize would truncate and drop other docs' vectors.
   const size_t need_bytes = (static_cast<size_t>(id) + 1) * stride_bytes_;
   if (entries_.size() < need_bytes)
     entries_.resize(need_bytes);
+  if (present_.size() <= id)
+    present_.resize(id + 1, false);
 
-  const size_t word = id / 64;
-  if (present_.size() <= word)
-    present_.resize(word + 1, 0);
-
-  if (vector) {
+  present_[id] = vector != nullptr;
+  if (vector)
     memcpy(entries_.data() + static_cast<size_t>(id) * stride_bytes_, vector, stride_bytes_);
-    present_[word] |= uint64_t{1} << (id % 64);
-  } else {
-    present_[word] &= ~(uint64_t{1} << (id % 64));
-  }
 }
 
 void FlatVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
-  const size_t word = id / 64;
-  if (word < present_.size())
-    present_[word] &= ~(uint64_t{1} << (id % 64));
+  if (id < present_.size())
+    present_[id] = false;
 }
 
 const void* FlatVectorIndex::Get(DocId doc) const {
-  const size_t word = doc / 64;
-  if (word >= present_.size() || !((present_[word] >> (doc % 64)) & 1))
+  if (doc >= present_.size() || !present_[doc])
     return nullptr;
   return entries_.data() + static_cast<size_t>(doc) * stride_bytes_;
 }
 
 std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
   std::vector<DocId> result;
-  for (size_t word = 0; word < present_.size(); ++word) {
-    uint64_t bits = present_[word];
-    while (bits) {
-      result.push_back(static_cast<DocId>(word * 64 + __builtin_ctzll(bits)));
-      bits &= bits - 1;
-    }
+  for (size_t id = 0; id < present_.size(); ++id) {
+    if (present_[id])
+      result.push_back(static_cast<DocId>(id));
   }
   return result;
 }

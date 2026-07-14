@@ -310,7 +310,7 @@ struct FlatVectorIndex : public BaseVectorIndex {
  private:
   size_t stride_bytes_;                // dim_ * ElementSize(data_type_)
   PMR_NS::vector<std::byte> entries_;  // contiguous native-width vectors
-  PMR_NS::vector<uint64_t> present_;   // presence bitmap, one bit per doc
+  PMR_NS::vector<bool> present_;       // presence flag per doc (bit-packed)
 };
 
 struct GeoIndex : public BaseIndex {
