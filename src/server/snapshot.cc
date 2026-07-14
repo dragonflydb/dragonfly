@@ -298,8 +298,10 @@ void SliceSnapshot::HandleFlushData(std::string data) {
 
   // Track egress just before the socket write. Attribute it to a high priority (out of order)
   // write when we don't run on the snapshot fiber.
-  if (CurrentEgressLimitBytes())
+  if (uint64_t limit = CurrentEgressLimitBytes(); limit > 0) {
+    throttler_.SetLimit(limit);
     throttler_.Record(serialized, !snapshot_fb_.IsActive());
+  }
 
   // Blocking point.
   consumer_->ConsumeData(std::move(data), base_cntx_);
