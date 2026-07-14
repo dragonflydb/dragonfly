@@ -7,6 +7,7 @@
 #include <absl/strings/str_cat.h>
 
 #include <mutex>
+#include <utility>
 
 #include "base/cycle_clock.h"
 #include "base/flags.h"
@@ -202,11 +203,16 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
         // chunk flushes) since the last batch. This is the only place the snapshot fiber's
         // backpressure sleep runs - always between TraverseBuckets() batches, so it never
         // happens while a bucket's BucketDependencies latch is held.
+        //
+        // Clear the counter *before* sleeping, not after: SleepFor() yields, so a write
+        // command's inline catch-up serialization (HandleFlushData on its own fiber) can
+        // run concurrently and add to accrued_run_cycles_ while we're asleep. Clearing
+        // after the sleep would silently drop that newly-accrued debt; clearing first means
+        // it accrues against an already-zeroed counter and is correctly picked up next batch.
         if (accrued_run_cycles_ > 0) {
-          uint64_t sleep_usec =
-              (accrued_run_cycles_ * 1000'000 / base::CycleClock::Frequency()) / 2;
+          uint64_t debt = std::exchange(accrued_run_cycles_, 0);
+          uint64_t sleep_usec = (debt * 1000'000 / base::CycleClock::Frequency()) / 2;
           ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
-          accrued_run_cycles_ = 0;
         }
       }
     } while (snapshot_cursor_);
