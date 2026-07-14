@@ -3585,7 +3585,6 @@ async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
     assert result["name"] == "1234"
 
 
-@pytest.mark.skip("Too noisy, see https://github.com/dragonflydb/dragonfly/issues/7801")
 async def test_bug_5221(df_factory):
     master = df_factory.create(
         proactor_threads=1,
