@@ -131,27 +131,32 @@ OpStatus OpCompact(const OpArgs& op_args, string_view key) {
 }
 
 struct InsertOptions {
+  string_view key;
   uint64_t capacity = kDefaultCapacity;
   bool nocreate = false;
 };
+
+constexpr auto kInsertGrammar =
+    Compile(Args(&InsertOptions::key), Options(Field("CAPACITY", &InsertOptions::capacity),
+                                               Exist("NOCREATE", &InsertOptions::nocreate)));
 
 // Shared op for CF.INSERT and CF.INSERTNX. Returns one integer per item:
 //   1  — item inserted
 //   0  — item already exists (nx only)
 //  -1  — filter is full, item could not be inserted
 // Returns KEY_NOTFOUND if nocreate is set and the key does not exist.
-OpResult<vector<int>> OpInsert(const OpArgs& op_args, string_view key, ParsedArgs items,
-                               const InsertOptions& opts, bool nx) {
+OpResult<vector<int>> OpInsert(const OpArgs& op_args, ParsedArgs items, const InsertOptions& opts,
+                               bool nx) {
   auto& db_slice = op_args.GetDbSlice();
 
   DbSlice::ItAndUpdater it_and_updater;
   if (opts.nocreate) {
-    auto find_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+    auto find_res = db_slice.FindMutable(op_args.db_cntx, opts.key, OBJ_CUCKOOFILTER);
     if (!find_res)
       return find_res.status();
     it_and_updater = std::move(*find_res);
   } else {
-    auto add_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+    auto add_res = db_slice.AddOrFind(op_args.db_cntx, opts.key, OBJ_CUCKOOFILTER);
     RETURN_ON_BAD_STATUS(add_res);
     if (add_res->is_new) {
       add_res->it->second.SetCuckooFilter(CuckooFilterOptions{.capacity = opts.capacity});
@@ -188,30 +193,36 @@ OpStatus OpReserve(const OpArgs& op_args, string_view key, const CuckooFilterOpt
   return OpStatus::OK;
 }
 
-void CmdReserve(CmdArgParser parser, CommandContext* cmd_cntx) {
-  string_view key = parser.Next();
-  uint64_t capacity = parser.Next<Validated<uint64_t, NotEq<uint64_t{0}, kCapacityErr>>>();
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-
-  // The uint8_t/uint16_t widths reject over-max values already; the rules add CF's zero/cap bounds.
+struct ReserveOpts {
+  string_view key;
+  Validated<uint64_t, NotEq<uint64_t{0}, kCapacityErr>> capacity;
   Validated<uint8_t, NotEq<uint8_t{0}, kBucketSizeErr>> bucket_size{
       CuckooFilterOptions::kDefaultSlotsPerBucket};
   Validated<uint16_t, NotEq<uint16_t{0}, kMaxIterationsErr>> max_iterations{
       CuckooFilterOptions::kDefaultMaxIterations};
   Validated<uint16_t, Bounded<uint16_t{0}, uint16_t{32767}, kExpansionErr>> expansion{
       CuckooFilterOptions::kDefaultExpansion};
+};
 
-  parser.Apply(Tag("BUCKETSIZE", &bucket_size), Tag("MAXITERATIONS", &max_iterations),
-               Tag("EXPANSION", &expansion));
+constexpr auto kReserveGrammar =
+    Compile(Args(&ReserveOpts::key, &ReserveOpts::capacity),
+            Options(Field("BUCKETSIZE", &ReserveOpts::bucket_size),
+                    Field("MAXITERATIONS", &ReserveOpts::max_iterations),
+                    Field("EXPANSION", &ReserveOpts::expansion)));
 
+void CmdReserve(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  ReserveOpts opts;
+  kReserveGrammar.Apply(&parser, &opts);
   if (!parser.Finalize()) {
     return rb->SendError(parser.TakeError().MakeReply());
   }
 
-  CuckooFilterOptions options{capacity, bucket_size, max_iterations, expansion};
+  CuckooFilterOptions options{opts.capacity, opts.bucket_size, opts.max_iterations, opts.expansion};
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpReserve(t->GetOpArgs(shard), key, options);
+    return OpReserve(t->GetOpArgs(shard), opts.key, options);
   };
 
   OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
@@ -347,16 +358,14 @@ void CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdInsertImpl(CmdArgParser parser, CommandContext* cmd_cntx, bool nx) {
-  string_view key = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  RETURN_ON_PARSE_ERROR(parser, rb);
 
   InsertOptions opts;
-  parser.Apply(Tag("CAPACITY", &opts.capacity), Exist("NOCREATE", &opts.nocreate));
+  kInsertGrammar.Apply(&parser, &opts);
   RETURN_ON_PARSE_ERROR(parser, rb);
 
   if (!opts.nocreate && opts.capacity == 0)
-    return rb->SendError("CF: capacity must be greater than 0");
+    return rb->SendError(kCapacityErr);
 
   if (!parser.Check("ITEMS")) {
     return rb->SendError("CF.INSERT requires ITEMS keyword");
@@ -365,7 +374,7 @@ void CmdInsertImpl(CmdArgParser parser, CommandContext* cmd_cntx, bool nx) {
   RETURN_ON_PARSE_ERROR(parser, rb);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpInsert(t->GetOpArgs(shard), key, items, opts, nx);
+    return OpInsert(t->GetOpArgs(shard), items, opts, nx);
   };
 
   OpResult<vector<int>> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));

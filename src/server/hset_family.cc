@@ -1044,6 +1044,7 @@ void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
         return p->ReportCustom(InvalidExpireTime(cmd_name));
     };
   };
+  // TODO: remove runtime parsing (migrate to cap grammar).
   parser.Apply(OneOf(Tag("EX", read_expiry(ExpT::EX)), Tag("PX", read_expiry(ExpT::PX)),
                      Tag("EXAT", read_expiry(ExpT::EXAT)), Tag("PXAT", read_expiry(ExpT::PXAT)),
                      Exist("PERSIST", &exp_params.persist)));

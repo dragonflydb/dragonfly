@@ -1315,6 +1315,7 @@ void CmdLPos(CmdArgParser parser, CommandContext* cmd_cntx) {
   std::optional<uint32_t> count;
   uint32_t max_len = 0;
 
+  // TODO: remove runtime parsing (migrate to cap grammar).
   parser.ApplyOrSkip(Tag("RANK", &rank), Tag("COUNT", &count), Tag("MAXLEN", &max_len));
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);

@@ -625,6 +625,7 @@ void CmdGeoSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   string_view key = parser.Next();
 
+  // TODO: remove runtime parsing (migrate to cap grammar).
   parser.Apply(OneOf(Tag("FROMMEMBER",
                          [&](CmdArgParser* p) {
                            from_set = true;

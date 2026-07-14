@@ -286,6 +286,7 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(facade::ParsedArgs args) {
   // range-checked at parse time via FInt — out-of-range values surface as INVALID_INT.
   FInt<int64_t{0}, std::numeric_limits<int64_t>::max()> idle_time{};
   FInt<0, 255> freq{};
+  // TODO: remove runtime parsing (migrate to cap grammar).
   parser.Apply(Exist("REPLACE", &out_args.replace_), Exist("ABSTTL", &out_args.abs_time_),
                Exist("STICK", &out_args.sticky_), Tag("IDLETIME", &idle_time), Tag("FREQ", &freq));
 
@@ -2001,15 +2002,21 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
   SortParams params;
   params.is_read_only = is_read_only;
 
-  parser.Apply(
-      Exist("ALPHA", &params.alpha), Map(&params.reversed, "DESC", true, "ASC", false),
-      Tag("LIMIT",
-          [&](CmdArgParser* p) {
+  static constexpr auto kGrammar = Compile(Options(
+      Exist("ALPHA", &SortParams::alpha), Map(&SortParams::reversed, "DESC", true, "ASC", false),
+      Action(
+          "LIMIT",
+          +[](CmdArgParser* p, SortParams* o) {
             auto [offset, limit] = p->Next<uint32_t, uint32_t>();
-            params.bounds = std::pair{offset, limit};
+            o->bounds = std::pair{offset, limit};
           }),
-      If(!is_read_only, Tag("STORE", &params.store_key)), Tag("BY", &params.by_pattern),
-      Tag("GET", [&](CmdArgParser* p) { params.get_patterns.push_back(p->Next<string_view>()); }));
+      IfNot(&SortParams::is_read_only, Field("STORE", &SortParams::store_key)),
+      Field("BY", &SortParams::by_pattern),
+      Action(
+          "GET", +[](CmdArgParser* p, SortParams* o) {
+            o->get_patterns.push_back(p->Next<string_view>());
+          })));
+  kGrammar.Apply(&parser, &params);
 
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());

@@ -1388,6 +1388,7 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
       defined = true;
     };
   };
+  // TODO: remove runtime parsing (migrate to cap grammar).
   parser.Apply(OneOf(Tag("EX", expiry(ExpT::EX)), Tag("PX", expiry(ExpT::PX)),
                      Tag("EXAT", expiry(ExpT::EXAT)), Tag("PXAT", expiry(ExpT::PXAT)),
                      Exist("PERSIST", &persist)));

@@ -5,6 +5,7 @@
 #include "facade/cmd_arg_parser.h"
 
 #include <absl/base/casts.h>
+#include <benchmark/benchmark.h>
 #include <gmock/gmock.h>
 
 #include <cmath>
@@ -45,6 +46,41 @@ TEST_F(CmdArgParserTest, BasicTypes) {
 
   EXPECT_FALSE(parser.HasNext());
   EXPECT_FALSE(parser.HasError());
+}
+
+TEST_F(CmdArgParserTest, EmptyArgumentNormalization) {
+  std::string_view args[] = {{}, {}, {}, {}, {}};
+  ASSERT_EQ(args[0].data(), nullptr);
+
+  ParsedArgs parsed{cmn::ArgSlice{args, std::size(args)}};
+  CmdArgParser parser{parsed};
+  EXPECT_NE(parser.CurrentUnchecked().data(), nullptr);
+
+  std::string_view value;
+  EXPECT_TRUE(parser.Check("", &value));
+  EXPECT_NE(value.data(), nullptr);
+
+  parser.ExpectTag("");
+  parser.ExpectTag("", "expected empty argument");
+  EXPECT_NE(parser.ExpectStartsWith("", "expected empty argument").data(), nullptr);
+  EXPECT_TRUE(parser.Finalize());
+
+  std::string_view arg;
+  CmdArgParser invalid_prefix{ParsedArgs{cmn::ArgSlice{&arg, 1}}};
+  EXPECT_NE(invalid_prefix.ExpectStartsWith("x", "missing prefix").data(), nullptr);
+  EXPECT_TRUE(invalid_prefix.TakeError());
+}
+
+TEST_F(CmdArgParserTest, MultiNextErrorPreservesCursor) {
+  auto parser = Make({"1", "bad", "also-bad"});
+
+  auto values = parser.Next<int, int, int>();
+  EXPECT_EQ(std::get<0>(values), 1);
+  EXPECT_EQ(std::get<1>(values), 0);
+  EXPECT_EQ(parser.UnparsedStart(), 3u);
+  auto err = parser.TakeError();
+  EXPECT_EQ(err.type, CmdArgParser::INVALID_INT);
+  EXPECT_EQ(err.index, 1u);
 }
 
 TEST_F(CmdArgParserTest, BoundError) {
@@ -963,5 +999,425 @@ TEST_F(CmdArgParserTest, FinalizeUnexpected) {
     EXPECT_EQ(err.index, 1u);  // points at the first leftover arg, not the consumed one
   }
 }
+
+namespace {
+struct SetLike {
+  std::string_view key;
+  std::string_view value;
+  uint16_t flags = 0;
+  uint32_t mc = 0;
+  uint32_t offset = 0;
+  uint32_t count = 0;
+  int64_t ttl = 0;
+  bool ttl_set = false;
+};
+enum SetLikeFlags : uint16_t { kNx = 1 << 0, kXx = 1 << 1, kGet = 1 << 2 };
+
+consteval auto MakeSetLikeGrammar() {
+  return Compile(Args(&SetLike::key, &SetLike::value),
+                 Options(OneOf("NX and XX are incompatible", Flag("NX", &SetLike::flags, kNx),
+                               Flag("XX", &SetLike::flags, kXx)),
+                         Action(
+                             "EX",
+                             +[](CmdArgParser* p, SetLike* o) {
+                               o->ttl = p->Next<int64_t>();
+                               o->ttl_set = true;
+                             }),
+                         Flag("GET", &SetLike::flags, kGet), Field("MCFLAGS", &SetLike::mc),
+                         Field("LIMIT", &SetLike::offset, &SetLike::count)));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammar) {
+  static constexpr auto kGrammar = MakeSetLikeGrammar();
+  auto apply = [&](std::initializer_list<std::string_view> args, SetLike* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {
+    SetLike o;
+    EXPECT_FALSE(apply({"mykey", "myval", "NX", "GET"}, &o));
+    EXPECT_EQ(o.key, "mykey");
+    EXPECT_EQ(o.value, "myval");
+    EXPECT_EQ(o.flags, kNx | kGet);
+  }
+  {
+    SetLike o;
+    EXPECT_FALSE(apply({"k", "v", "EX", "100"}, &o));
+    EXPECT_TRUE(o.ttl_set);
+    EXPECT_EQ(o.ttl, 100);
+  }
+  {
+    SetLike o;
+    EXPECT_FALSE(apply({"k", "v", "MCFLAGS", "42"}, &o));
+    EXPECT_EQ(o.mc, 42u);
+  }
+  {
+    SetLike o;
+    EXPECT_FALSE(apply({"k", "v", "LIMIT", "2", "10"}, &o));
+    EXPECT_EQ(o.offset, 2u);
+    EXPECT_EQ(o.count, 10u);
+  }
+  {
+    SetLike o;
+    auto err = apply({"k", "v", "NX", "XX"}, &o);
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.MakeReply().ToSv(), "NX and XX are incompatible");
+  }
+  {
+    SetLike o;
+    EXPECT_FALSE(apply({"k", "v", "NX", "NX"}, &o));
+    EXPECT_EQ(o.flags, kNx);
+  }
+  {
+    SetLike o;
+    EXPECT_FALSE(apply({"k", "v"}, &o));
+    EXPECT_EQ(o.key, "k");
+    EXPECT_EQ(o.value, "v");
+    EXPECT_EQ(o.flags, 0);
+  }
+  {
+    SetLike o;
+    EXPECT_TRUE(apply({"k"}, &o));
+  }
+  {
+    SetLike o;
+    auto err = apply({}, &o);
+    EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
+  }
+  {
+    SetLike o;
+    auto err = apply({"k", "v", "LIMIT", "2"}, &o);
+    EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
+  }
+  {
+    SetLike o;
+    EXPECT_TRUE(apply({"k", "v", "GET", "FOO"}, &o));
+    EXPECT_EQ(o.flags, kGet);
+  }
+  {
+    SetLike o;
+    EXPECT_TRUE(apply({"k", "v", "EX", "notanint"}, &o));
+  }
+}
+
+namespace {
+struct HeadTail {
+  std::string_view head;
+  bool flag = false;
+  std::string_view tail;
+};
+consteval auto MakeHeadTailGrammar() {
+  return Compile(Args(&HeadTail::head), Options(Exist("F", &HeadTail::flag)),
+                 Args(&HeadTail::tail));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarPositionalAfterOptions) {
+  static constexpr auto kGrammar = MakeHeadTailGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, HeadTail* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {
+    HeadTail o;
+    EXPECT_FALSE(run({"h", "F", "t"}, &o));
+    EXPECT_EQ(o.head, "h");
+    EXPECT_TRUE(o.flag);
+    EXPECT_EQ(o.tail, "t");
+  }
+  {
+    HeadTail o;
+    EXPECT_FALSE(run({"h", "t"}, &o));
+    EXPECT_EQ(o.head, "h");
+    EXPECT_FALSE(o.flag);
+    EXPECT_EQ(o.tail, "t");
+  }
+}
+
+namespace {
+enum class Dir { kAsc, kDesc };
+struct MapIf {
+  Dir dir = Dir::kAsc;
+  bool read_only = false;
+  std::string_view store;
+};
+consteval auto MakeMapIfGrammar() {
+  return Compile(Options(Map(&MapIf::dir, "ASC", Dir::kAsc, "DESC", Dir::kDesc),
+                         IfNot(&MapIf::read_only, Field("STORE", &MapIf::store))));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarMapIf) {
+  static constexpr auto kGrammar = MakeMapIfGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, MapIf* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {
+    MapIf o;
+    EXPECT_FALSE(run({"DESC"}, &o));
+    EXPECT_EQ(o.dir, Dir::kDesc);
+  }
+  {
+    MapIf o;
+    EXPECT_FALSE(run({"ASC", "STORE", "dst"}, &o));
+    EXPECT_EQ(o.dir, Dir::kAsc);
+    EXPECT_EQ(o.store, "dst");
+  }
+  {
+    MapIf o;
+    o.read_only = true;
+    EXPECT_TRUE(run({"STORE", "dst"}, &o));
+    EXPECT_EQ(o.store, "");
+  }
+}
+
+TEST_F(CmdArgParserTest, CapTagMatch) {
+  using cap_detail::TagMatch;
+  EXPECT_TRUE(TagMatch("EX", "EX"));
+  EXPECT_TRUE(TagMatch("ex", "EX"));
+  EXPECT_TRUE(TagMatch("Ex", "eX"));
+  EXPECT_FALSE(TagMatch("E", "EX"));
+  EXPECT_FALSE(TagMatch("EXX", "EX"));
+  EXPECT_FALSE(TagMatch("EY", "EX"));
+  EXPECT_FALSE(TagMatch("", "EX"));
+  EXPECT_TRUE(TagMatch("", ""));
+  EXPECT_FALSE(TagMatch(std::string_view{"E\0", 2}, "EX"));
+}
+
+namespace {
+enum class Agg { kSum, kMin, kMax };
+struct ChoiceTarget {
+  Agg agg = Agg::kSum;
+};
+consteval auto MakeChoiceGrammar() {
+  return Compile(Options(Choice("AGGREGATE", &ChoiceTarget::agg, "SUM", Agg::kSum, "MIN", Agg::kMin,
+                                "MAX", Agg::kMax)));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarChoice) {
+  static constexpr auto kGrammar = MakeChoiceGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, ChoiceTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {
+    ChoiceTarget o;
+    EXPECT_FALSE(run({"AGGREGATE", "MAX"}, &o));
+    EXPECT_EQ(o.agg, Agg::kMax);
+  }
+  {
+    ChoiceTarget o;
+    EXPECT_FALSE(run({"aggregate", "min"}, &o));
+    EXPECT_EQ(o.agg, Agg::kMin);
+  }
+  {
+    ChoiceTarget o;
+    EXPECT_TRUE(run({"AGGREGATE", "BOGUS"}, &o));
+  }
+  {
+    ChoiceTarget o;
+    EXPECT_TRUE(run({"AGGREGATE"}, &o));
+  }
+}
+
+namespace {
+
+enum BenchFlags : uint16_t { kBNx = 1 << 0, kBXx = 1 << 1, kBGet = 1 << 2 };
+enum class BenchDir : uint8_t { kAsc, kDesc };
+
+struct BenchTarget {
+  std::string_view key;
+  std::string_view value;
+  uint16_t flags = 0;
+  bool stick = false;
+  bool keepttl = false;
+  int64_t ttl = 0;
+  bool ttl_set = false;
+  uint32_t mc = 0;
+  BenchDir dir = BenchDir::kAsc;
+  bool read_only = false;
+  std::string_view store;
+};
+
+consteval auto MakeBenchGrammar() {
+  auto expiry = +[](CmdArgParser* p, BenchTarget* o) {
+    o->ttl = p->Next<int64_t>();
+    o->ttl_set = true;
+  };
+  return Compile(
+      Args(&BenchTarget::key, &BenchTarget::value),
+      Options(
+          OneOf("", Flag("NX", &BenchTarget::flags, kBNx), Flag("XX", &BenchTarget::flags, kBXx)),
+          Action("EX", expiry), Action("PX", expiry), Action("EXAT", expiry),
+          Action("PXAT", expiry), Flag("GET", &BenchTarget::flags, kBGet),
+          Map(&BenchTarget::dir, "ASC", BenchDir::kAsc, "DESC", BenchDir::kDesc),
+          IfNot(&BenchTarget::read_only, Field("STORE", &BenchTarget::store)),
+          Exist("STICK", &BenchTarget::stick), Exist("KEEPTTL", &BenchTarget::keepttl),
+          Field("MCFLAGS", &BenchTarget::mc)));
+}
+
+cmn::BackedArguments MakeStorage(std::initializer_list<std::string_view> args) {
+  std::vector<std::string_view> v(args);
+  cmn::BackedArguments s;
+  s.Assign(v.begin(), v.end(), v.size());
+  return s;
+}
+
+CmdArgParser BenchArgs(bool with_options) {
+  static const cmn::BackedArguments kNoOpts = MakeStorage({"mykey", "myval"});
+  static const cmn::BackedArguments kOpts = MakeStorage(
+      {"mykey", "myval", "NX", "EX", "100", "GET", "DESC", "STORE", "dst", "MCFLAGS", "7"});
+  return CmdArgParser{with_options ? kOpts : kNoOpts};
+}
+
+}  // namespace
+
+static void BM_RuntimeParse(benchmark::State& state) {
+  CmdArgParser proto = BenchArgs(state.range(0));
+  for (auto _ : state) {
+    CmdArgParser parser = proto;
+    BenchTarget o;
+    o.key = parser.Next();
+    o.value = parser.Next();
+    auto expiry = [&](CmdArgParser* p) {
+      o.ttl = p->Next<int64_t>();
+      o.ttl_set = true;
+    };
+    parser.Apply(OneOf(Tag("NX", [&](CmdArgParser*) { o.flags |= kBNx; }),
+                       Tag("XX", [&](CmdArgParser*) { o.flags |= kBXx; })),
+                 OneOf(Tag("EX", expiry), Tag("PX", expiry), Tag("EXAT", expiry),
+                       Tag("PXAT", expiry), Exist("KEEPTTL", &o.keepttl)),
+                 Tag("GET", [&](CmdArgParser*) { o.flags |= kBGet; }),
+                 Map(&o.dir, "ASC", BenchDir::kAsc, "DESC", BenchDir::kDesc),
+                 If(!o.read_only, Tag("STORE", &o.store)), Exist("STICK", &o.stick),
+                 Tag("MCFLAGS", &o.mc));
+    benchmark::DoNotOptimize(parser.Finalize());
+    benchmark::DoNotOptimize(o);
+  }
+}
+BENCHMARK(BM_RuntimeParse)->Arg(0)->Arg(1);
+
+static void BM_CapParse(benchmark::State& state) {
+  CmdArgParser proto = BenchArgs(state.range(0));
+  static constexpr auto kGrammar = MakeBenchGrammar();
+  for (auto _ : state) {
+    CmdArgParser parser = proto;
+    BenchTarget o;
+    kGrammar.Apply(&parser, &o);
+    benchmark::DoNotOptimize(parser.Finalize());
+    benchmark::DoNotOptimize(o);
+  }
+}
+BENCHMARK(BM_CapParse)->Arg(0)->Arg(1);
+
+static void BM_ManualParse(benchmark::State& state) {
+  CmdArgParser proto = BenchArgs(state.range(0));
+  for (auto _ : state) {
+    CmdArgParser parser = proto;
+    ParsedArgs args = parser.UnparsedArgs();
+    BenchTarget o;
+    bool ok = true;
+    size_t n = args.size();
+    o.key = args[0];
+    o.value = args[1];
+    for (size_t i = 2; i < n; ++i) {
+      std::string_view a = args[i];
+      if (absl::EqualsIgnoreCase(a, "NX")) {
+        o.flags |= kBNx;
+      } else if (absl::EqualsIgnoreCase(a, "XX")) {
+        o.flags |= kBXx;
+      } else if (absl::EqualsIgnoreCase(a, "GET")) {
+        o.flags |= kBGet;
+      } else if (absl::EqualsIgnoreCase(a, "ASC")) {
+        o.dir = BenchDir::kAsc;
+      } else if (absl::EqualsIgnoreCase(a, "DESC")) {
+        o.dir = BenchDir::kDesc;
+      } else if (!o.read_only && absl::EqualsIgnoreCase(a, "STORE")) {
+        if (++i >= n) {
+          ok = false;
+          break;
+        }
+        o.store = args[i];
+      } else if (absl::EqualsIgnoreCase(a, "STICK")) {
+        o.stick = true;
+      } else if (absl::EqualsIgnoreCase(a, "KEEPTTL")) {
+        o.keepttl = true;
+      } else if (absl::EqualsIgnoreCase(a, "EX") || absl::EqualsIgnoreCase(a, "PX") ||
+                 absl::EqualsIgnoreCase(a, "EXAT") || absl::EqualsIgnoreCase(a, "PXAT")) {
+        if (++i >= n || !absl::SimpleAtoi(args[i], &o.ttl)) {
+          ok = false;
+          break;
+        }
+        o.ttl_set = true;
+      } else if (absl::EqualsIgnoreCase(a, "MCFLAGS")) {
+        if (++i >= n || !absl::SimpleAtoi(args[i], &o.mc)) {
+          ok = false;
+          break;
+        }
+      } else {
+        ok = false;
+        break;
+      }
+    }
+    benchmark::DoNotOptimize(ok);
+    benchmark::DoNotOptimize(o);
+  }
+}
+BENCHMARK(BM_ManualParse)->Arg(0)->Arg(1);
+
+static void BM_ManualWithParser(benchmark::State& state) {
+  CmdArgParser proto = BenchArgs(state.range(0));
+  for (auto _ : state) {
+    CmdArgParser parser = proto;
+    BenchTarget o;
+    o.key = parser.Next();
+    o.value = parser.Next();
+    while (parser.HasNext()) {
+      if (parser.Check("NX"))
+        o.flags |= kBNx;
+      else if (parser.Check("XX"))
+        o.flags |= kBXx;
+      else if (parser.Check("GET"))
+        o.flags |= kBGet;
+      else if (parser.Check("ASC"))
+        o.dir = BenchDir::kAsc;
+      else if (parser.Check("DESC"))
+        o.dir = BenchDir::kDesc;
+      else if (!o.read_only && parser.Check("STORE"))
+        o.store = parser.Next();
+      else if (parser.Check("STICK"))
+        o.stick = true;
+      else if (parser.Check("KEEPTTL"))
+        o.keepttl = true;
+      else if (parser.Check("EX") || parser.Check("PX") || parser.Check("EXAT") ||
+               parser.Check("PXAT")) {
+        o.ttl = parser.Next<int64_t>();
+        o.ttl_set = true;
+      } else if (parser.Check("MCFLAGS")) {
+        o.mc = parser.Next<uint32_t>();
+      } else {
+        break;
+      }
+    }
+    benchmark::DoNotOptimize(parser.Finalize());
+    benchmark::DoNotOptimize(o);
+  }
+}
+BENCHMARK(BM_ManualWithParser)->Arg(0)->Arg(1);
 
 }  // namespace facade

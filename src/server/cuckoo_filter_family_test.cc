@@ -270,6 +270,13 @@ TEST_F(CuckooFilterFamilyTest, InsertWithCapacity) {
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1))));
 }
 
+TEST_F(CuckooFilterFamilyTest, InsertZeroCapacity) {
+  EXPECT_THAT(Run({"cf.insert", "cf", "capacity", "0", "items", "x"}),
+              ErrArg("capacity must be greater than 0"));
+  EXPECT_THAT(Run({"cf.insert", "cf", "capacity", "0", "nocreate", "items", "x"}),
+              ErrArg("no such key"));
+}
+
 TEST_F(CuckooFilterFamilyTest, InsertNocreate) {
   // NOCREATE on missing key returns an error.
   EXPECT_THAT(Run({"cf.insert", "cf", "nocreate", "items", "a"}), ErrArg("no such key"));
