@@ -1,3 +1,4 @@
+import asyncio
 from pprint import pprint
 from typing import Callable, Optional
 
@@ -231,6 +232,18 @@ def classify_ro(m: Metrics):
         print(">> WRONG")
 
 
+async def expire_string(cl: aioredis.Redis):
+    await asyncio.sleep(0.6)
+    assert await cl.get("a" * 1024) is None
+
+
+def classify_expiry(m: Metrics):
+    if m.cmd("string") < 0 and abs(m.cmd("string")) == abs(m.type("string")) + abs(m.type("key")):
+        print(">> OK")
+    else:
+        print(">> WRONG")
+
+
 async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
     long_key = "a" * 1024
     long_key2 = "c" * 2048
@@ -290,6 +303,12 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             ),
             action=commands(("GET", long_key), ("HGET", long_key2, "f"), ("LLEN", long_key3)),
             classify=classify_ro,
+        ),
+        Scenario(
+            "expire string",
+            setup=commands(("SET", long_key, long_val, "PX", "500")),
+            action=expire_string,
+            classify=classify_expiry,
         ),
     ]
 
