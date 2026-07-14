@@ -84,6 +84,9 @@ void OpManager::CancelPendingLoad(DiskSegment segment) {
   DCHECK(it != pending_reads_.end());
   auto* ops = it->second.Find(segment);
   DCHECK(ops);
+  for (auto& read_cb : ops->read_cbs) {
+    read_cb(nonstd::make_unexpected(make_error_code(errc::operation_canceled)));
+  }
   ops->read_cbs.clear();
 }
 
