@@ -67,13 +67,15 @@ class OpManager {
     return storage_.PrepareStash(length);
   }
 
-  // Stash value to be offloaded. It is opaque to OpManager.
-  void Stash(PendingId id, tiering::DiskSegment segment, util::fb2::RegisteredSlice buf);
+  // Stash value to be offloaded. It is opaque to OpManager. `flags` is an opaque byte passed
+  // back to NotifyStashed on completion (used by higher layers to carry stash metadata).
+  void Stash(PendingId id, tiering::DiskSegment segment, util::fb2::RegisteredSlice buf,
+             uint8_t flags = 0);
 
   // PrepareStash + Stash via function
   std::error_code PrepareAndStash(
       PendingId id, size_t length,
-      const std::function<size_t /*written*/ (io::MutableBytes)>& writer);
+      const std::function<size_t /*written*/ (io::MutableBytes)>& writer, uint8_t flags = 0);
 
   Stats GetStats() const;
 
@@ -81,8 +83,9 @@ class OpManager {
   using OwnedEntryId = std::variant<uintptr_t, DbKeyId, ListNodeId>;
 
   // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
-  // given error
-  virtual void NotifyStashed(const OwnedEntryId& id, const io::Result<DiskSegment>& segment) = 0;
+  // given error. `flags` is the opaque byte passed to Stash/PrepareAndStash.
+  virtual void NotifyStashed(const OwnedEntryId& id, const io::Result<DiskSegment>& segment,
+                             uint8_t flags) = 0;
 
   // Notify that an entry was successfully fetched. Includes whether entry was modified.
   // Returns true if value needs to be deleted from the storage.
@@ -136,7 +139,7 @@ class OpManager {
 
   // Called once Stash finished
   void ProcessStashed(const OwnedEntryId& id, unsigned version,
-                      const io::Result<DiskSegment>& segment);
+                      const io::Result<DiskSegment>& segment, uint8_t flags);
 
  private:
   static OwnedEntryId ToOwned(PendingId id);

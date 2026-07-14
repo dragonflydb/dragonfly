@@ -95,14 +95,14 @@ void OpManager::DeleteOffloaded(DiskSegment segment) {
 }
 
 void OpManager::Stash(PendingId id_ref, tiering::DiskSegment segment,
-                      util::fb2::RegisteredSlice buf) {
+                      util::fb2::RegisteredSlice buf, uint8_t flags) {
   auto id = ToOwned(id_ref);
   unsigned version = ++pending_stash_counter_;
   pending_stash_ver_[id] = version;
 
-  auto io_cb = [this, version, id = std::move(id), segment](std::error_code ec) {
-    ProcessStashed(id, version,
-                   ec ? nonstd::make_unexpected(ec) : io::Result<DiskSegment>(segment));
+  auto io_cb = [this, version, id = std::move(id), segment, flags](std::error_code ec) {
+    auto segment_res = ec ? nonstd::make_unexpected(ec) : io::Result<DiskSegment>(segment);
+    ProcessStashed(id, version, segment_res, flags);
   };
 
   // May block due to blocking call to Grow.
@@ -110,13 +110,14 @@ void OpManager::Stash(PendingId id_ref, tiering::DiskSegment segment,
 }
 
 std::error_code OpManager::PrepareAndStash(PendingId id, size_t length,
-                                           const std::function<size_t(io::MutableBytes)>& writer) {
+                                           const std::function<size_t(io::MutableBytes)>& writer,
+                                           uint8_t flags) {
   auto buf = PrepareStash(length);
   if (!buf.has_value())
     return buf.error();
 
   size_t written = writer(buf->second.bytes);
-  Stash(id, {buf->first, written}, buf->second);
+  Stash(id, {buf->first, written}, buf->second, flags);
   return {};
 }
 
@@ -135,11 +136,11 @@ OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
 }
 
 void OpManager::ProcessStashed(const OwnedEntryId& id, unsigned version,
-                               const io::Result<DiskSegment>& segment) {
+                               const io::Result<DiskSegment>& segment, uint8_t flags) {
   if (auto it = pending_stash_ver_.find(id);
       it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
-    NotifyStashed(id, segment);
+    NotifyStashed(id, segment, flags);
   } else if (segment) {
     // Throw away the value because it's no longer up-to-date even if no error occured
     VLOG(1) << "Releasing segment " << *segment << ", id: " << ToString(id);
