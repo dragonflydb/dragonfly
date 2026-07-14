@@ -224,6 +224,13 @@ async def json_set_interned_strings(async_client: aioredis.Redis):
         assert await async_client.execute_command("JSON.SET", key, "$", doc)
 
 
+def classify_ro(m: Metrics):
+    if all(v == 0 for v in m.cmd_type_delta.values()):
+        print(">> OK")
+    else:
+        print(">> WRONG")
+
+
 async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
     long_key = "a" * 1024
     long_key2 = "c" * 2048
@@ -273,6 +280,16 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             "json set interned strings",
             action=json_set_interned_strings,
             classify=classify_json_interned,
+        ),
+        Scenario(
+            "read only",
+            setup=commands(
+                ("SET", long_key, long_val),
+                ("HSET", long_key2, "f", long_val),
+                ("LPUSH", long_key3, long_val),
+            ),
+            action=commands(("GET", long_key), ("HGET", long_key2, "f"), ("LLEN", long_key3)),
+            classify=classify_ro,
         ),
     ]
 
