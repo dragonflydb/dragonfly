@@ -299,10 +299,11 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   seq_cond_.notify_all();
 
   // Accrue CPU-time debt instead of sleeping here - see accrued_run_cycles_ comment in the
-  // header. Only for the snapshot fiber's own traversal work: a write command reaching this
-  // via inline catch-up serialization (SerializeBucketLocked called from OnChange) must not be
-  // throttled - it needs to complete its own write, not pay for the snapshot's backpressure.
-  if (!use_background_mode_ && snapshot_fb_.IsActive()) {
+  // header. Accrued regardless of which fiber runs this call (snapshot_fb_'s own traversal,
+  // or a write command's inline catch-up serialization): it's a shared serialization budget,
+  // and only IterateBucketsFb ever pays it down, so a write's own execution is never delayed
+  // by it either way.
+  if (!use_background_mode_) {
     accrued_run_cycles_ += running_cycles;
   }
 
