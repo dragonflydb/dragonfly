@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 
 #include "base/logging.h"
 #include "util/fibers/fibers.h"
@@ -18,6 +19,15 @@ using namespace std;
 
 namespace {
 
+// The low priority stream is guaranteed at least limit/kLowPrioReserveDivisor of egress.
+constexpr uint64_t kLowPrioReserveDivisor = 10;  // 1/10 = 10%
+
+// Burst tolerance (GCRA tau): how far ahead of schedule a stream may run. Absorbs chunk
+// granularity and avoids tiny frequent sleeps without affecting the long-run average rate.
+constexpr uint64_t kBurstToleranceUs = 100'000;  // 100ms
+
+constexpr uint64_t kMicrosPerSec = 1'000'000;
+
 // CycleClock may drift in real time units, cached monotonic time is updated only once per scheduler
 // round, so use real time with higher query cost and possible backwards looping
 inline uint64_t NowUs() {
@@ -26,41 +36,33 @@ inline uint64_t NowUs() {
 
 }  // namespace
 
-void EgressThrottler::RecordAt(uint64_t bytes, bool out_of_order, uint64_t now_us) {
-  if (!enabled())
-    return;
-
+void EgressThrottler::RecordAt(uint64_t bytes, bool high_prio, uint64_t now_us) {
+  DCHECK_GT(limit_, 0u);
   // bytes * kMicrosPerSec would overflow only at ~18TB
   DCHECK_GT(std::numeric_limits<uint64_t>::max() / kMicrosPerSec, bytes);
 
-  socket_tat_ = std::max(now_us, socket_tat_) + bytes * kMicrosPerSec / limit_;
-  if (!out_of_order) {
-    uint64_t reserve = std::max<uint64_t>(1, limit_ / kLoopReserveDivisor);
-    loop_tat_ = std::max(now_us, loop_tat_) + bytes * kMicrosPerSec / reserve;
+  total_tat_ = std::max(now_us, total_tat_) + bytes * kMicrosPerSec / limit_;
+  if (!high_prio) {
+    uint64_t reserve = std::max<uint64_t>(1, limit_ / kLowPrioReserveDivisor);
+    low_prio_tat_ = std::max(now_us, low_prio_tat_) + bytes * kMicrosPerSec / reserve;
   }
 }
 
 uint64_t EgressThrottler::WakeTime(uint64_t now_us) const {
-  if (!enabled())
+  if (total_tat_ <= now_us + kBurstToleranceUs)  // total egress under budget
     return 0;
 
-  if (socket_tat_ <= now_us + kBurstToleranceUs)  // socket under budget
+  if (low_prio_tat_ <= now_us + kBurstToleranceUs)  // low priority reserved share
     return 0;
 
-  if (loop_tat_ <= now_us + kBurstToleranceUs)  // loops share
-    return 0;
-
-  return std::min(socket_tat_, loop_tat_) - kBurstToleranceUs;
+  return std::min(total_tat_, low_prio_tat_) - kBurstToleranceUs;
 }
 
-void EgressThrottler::Record(uint64_t bytes, bool out_of_order) {
-  RecordAt(bytes, out_of_order, NowUs());
+void EgressThrottler::Record(uint64_t bytes, bool high_prio) {
+  RecordAt(bytes, high_prio, NowUs());
 }
 
 void EgressThrottler::Throttle() const {
-  if (!enabled())
-    return;
-
   while (true) {
     uint64_t now = NowUs();
     uint64_t wake = WakeTime(now);

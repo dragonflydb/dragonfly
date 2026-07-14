@@ -90,8 +90,6 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   use_background_mode_ = absl::GetFlag(FLAGS_background_snapshotting);
   SerializerBase::RegisterChangeListener(stream_journal);
 
-  throttler_.SetLimit(CurrentEgressLimitBytes());
-
   if (stream_journal) {
     journal_cb_id_ = journal::RegisterConsumer(this);
   }
@@ -211,9 +209,11 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
       }
 
       // Suspend the traversal loop if we are exceeding the egress budget, letting
-      // out-of-order writes drain first. Guarantees the loop its reserved share
-      throttler_.SetLimit(CurrentEgressLimitBytes());  // Re-read to pick up CONFIG SET
-      throttler_.Throttle();
+      // high priority writes drain first. Guarantees the loop its reserved share.
+      if (uint64_t limit = CurrentEgressLimitBytes(); limit > 0) {
+        throttler_.SetLimit(limit);  // Re-read to pick up CONFIG SET
+        throttler_.Throttle();
+      }
     } while (snapshot_cursor_);
 
     // Wait for all the outstanding delayed entries and serialize them as well.
@@ -296,10 +296,12 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   // update last_pushed_id_ to 5.
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
 
+  // Track egress just before the socket write. Attribute it to a high priority (out of order)
+  // write when we don't run on the snapshot fiber.
+  if (CurrentEgressLimitBytes())
+    throttler_.Record(serialized, !snapshot_fb_.IsActive());
+
   // Blocking point.
-  // Track egress just before the socket write. Attribute it to the traversal loop only
-  // when we run on the snapshot fiber; out-of-order writes come from other fibers.
-  throttler_.Record(serialized, !snapshot_fb_.IsActive());
   consumer_->ConsumeData(std::move(data), base_cntx_);
 
   DCHECK_EQ(last_pushed_id_ + 1, id);
