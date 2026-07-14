@@ -459,6 +459,35 @@ TEST_F(SearchParserTest, WeightAttributes) {
   EXPECT_NE(0, Parse("*=>{$weight:2}"));
 }
 
+TEST_F(SearchParserTest, PerTermWeightInFieldGroup) {
+  QueryParams params;
+  params["w"] = "5.0";
+  SetParams(&params);
+
+  // Per-term weight inside a field group (as emitted by clients that weight individual words).
+  EXPECT_EQ(0, Parse("@description:(machine=>{$weight:2.0} | learning)"));
+  EXPECT_EQ(0, Parse("@description:(machine=>{$weight:2.0})"));
+  EXPECT_EQ(0, Parse("@description:(machine=>{$weight:2.0} networks)"));
+  EXPECT_EQ(0, Parse("@f:(a=>{$weight:2} | b=>{$weight:3} | c)"));
+  EXPECT_EQ(0, Parse("@f:(a=>{$weight:$w})"));
+  EXPECT_NE(0, Parse("@f:(*=>{$weight:2})"));
+
+  // The weighted term stays scoped to the field: Field{ Or[ Attribute{Term}, Term ] }.
+  EXPECT_EQ(0, Parse("@description:(machine=>{$weight:2.0} | learning)"));
+  auto ast = query_driver_.Take();
+  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(ast.Variant()));
+  const auto& field = std::get<AstFieldNode>(ast.Variant());
+  EXPECT_EQ(field.field, "description");
+  ASSERT_TRUE(std::holds_alternative<AstLogicalNode>(field.node->Variant()));
+  const auto& logical = std::get<AstLogicalNode>(field.node->Variant());
+  EXPECT_EQ(logical.op, AstLogicalNode::OR);
+  ASSERT_EQ(logical.nodes.size(), 2u);
+  ASSERT_TRUE(std::holds_alternative<AstAttributeNode>(logical.nodes[0].Variant()));
+  const auto& weighted = std::get<AstAttributeNode>(logical.nodes[0].Variant());
+  EXPECT_EQ(weighted.weight, 2.0);
+  EXPECT_TRUE(std::holds_alternative<AstTermNode>(weighted.node->Variant()));
+}
+
 TEST_F(SearchParserTest, VectorRangeParse) {
   QueryParams params;
   params["radius"] = "1";
