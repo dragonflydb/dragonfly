@@ -244,6 +244,21 @@ def classify_expiry(m: Metrics):
         print(">> WRONG")
 
 
+def classify_copy_replace(m: Metrics):
+    """
+    replacement needs work to fix. We wrongly attribute everything to string right now from deleting the old value.
+    Nothing is attributed to hash probably
+    """
+    if (
+        m.cmd("string") == m.type("string")
+        and m.cmd("hash") == m.type("hash")
+        and m.cmd_total() == m.mem("object_used")
+    ):
+        print(">> OK")
+    else:
+        print(">> WRONG")
+
+
 async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
     long_key = "a" * 1024
     long_key2 = "c" * 2048
@@ -309,6 +324,12 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             setup=commands(("SET", long_key, long_val, "PX", "500")),
             action=expire_string,
             classify=classify_expiry,
+        ),
+        Scenario(
+            "copy which replaces",
+            setup=commands(("HSET", long_key, "f", long_val), ("SET", long_key2, long_val)),
+            action=commands(("COPY", long_key, long_key2, "REPLACE")),
+            classify=classify_copy_replace,
         ),
     ]
 
