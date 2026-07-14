@@ -104,13 +104,16 @@ def classify_and_report(
         print(label)
         pprint(m.pr())
 
-    print(f"\t\tran scenario: {scenario.name}")
-    print_m("Before:", before)
-    print_m("After:", after)
     delta = after - before
-    print_m("Delta:", delta)
+    status = "ERROR" if error else scenario.classify(delta)
 
-    scenario.classify(delta)
+    print(f"\nScenario: {scenario.name}")
+    print(f">> {status}")
+
+    if status != "OK":
+        print_m("Before:", before)
+        print_m("After:", after)
+        print_m("Delta:", delta)
 
     if error:
         print(f"failed with {error=}")
@@ -132,11 +135,11 @@ def classify_simple_set(m: Metrics):
     expected = m.type("string") + m.type("key")
 
     if m.cmd("string") == expected and m.mem("object_used") == expected and clean_memory_classes(m):
-        print(">> OK")
+        return "OK"
     elif m.cmd("string") == m.mem("object_used"):
-        print(">> CHECK")
+        return "CHECK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 def classify_overwrite_hash(m: Metrics):
@@ -148,11 +151,11 @@ def classify_overwrite_hash(m: Metrics):
         and m.type_total() == m.mem("object_used")
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     elif m.cmd("hash") == 0 and m.cmd("string") == m.mem("object_used"):
-        print(">> CHECK hash accounted to string")
+        return "CHECK hash accounted to string"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 def classify_del_string(m: Metrics):
@@ -163,9 +166,9 @@ def classify_del_string(m: Metrics):
         and m.cmd("string") < 0
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 def commands(*cmds):
@@ -184,9 +187,9 @@ def classify_mixed_delete(m: Metrics):
         and m.type_total() == m.mem("object_used")
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 def classify_rename_to_new(m: Metrics):
@@ -197,9 +200,9 @@ def classify_rename_to_new(m: Metrics):
         and m.cmd("string") > 0
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 def classify_rename_hash_over_string(m: Metrics):
@@ -211,13 +214,13 @@ def classify_rename_hash_over_string(m: Metrics):
         and m.type_total() == m.mem("object_used")
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 def classify_observe(_m: Metrics):
-    print(">> OBSERVE")
+    return "OBSERVE"
 
 
 def classify_json_interned(m: Metrics):
@@ -230,9 +233,9 @@ def classify_json_interned(m: Metrics):
         and interned > 0
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 async def json_set_interned_strings(async_client: aioredis.Redis):
@@ -251,9 +254,9 @@ def classify_ro(m: Metrics):
         and m.mem("object_used") == 0
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 async def expire_string(cl: aioredis.Redis):
@@ -269,9 +272,9 @@ def classify_expiry(m: Metrics):
         and m.cmd("string") < 0
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 def classify_copy_replace(m: Metrics):
@@ -283,9 +286,9 @@ def classify_copy_replace(m: Metrics):
         and m.type_total() == m.mem("object_used")
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 class RestoreScenario:
@@ -310,9 +313,9 @@ def classify_restore_hash(m: Metrics):
         and m.type_total() == m.mem("object_used")
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 def classify_hset_enc_change(m: Metrics):
@@ -323,9 +326,9 @@ def classify_hset_enc_change(m: Metrics):
         and m.cmd("hash") > 0
         and clean_memory_classes(m)
     ):
-        print(">> OK")
+        return "OK"
     else:
-        print(">> WRONG")
+        return "WRONG"
 
 
 async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
