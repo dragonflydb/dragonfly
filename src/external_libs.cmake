@@ -79,7 +79,10 @@ ExternalProject_Add(mimalloc2_project
       -DEXTRACT_DIR=${THIRD_PARTY_DIR}/mimalloc2
       -DEXPECTED_HASH=${MIMALLOC_SHA256}
       -P ${HELIO_CMAKE_DIR}/download_retry.cmake
-  DOWNLOAD_DIR ${THIRD_PARTY_DIR}/mimalloc2
+  # DOWNLOAD_DIR (the download step's working dir) must differ from the source
+  # dir: download_retry.cmake removes EXTRACT_DIR (=the source dir) before
+  # moving the extracted tree into place, so it must not be the step's own CWD.
+  DOWNLOAD_DIR ${THIRD_PARTY_DIR}
   SOURCE_DIR ${THIRD_PARTY_DIR}/mimalloc2
   # INSTALL_DIR ${MIMALLOC_ROOT_DIR}
   UPDATE_COMMAND ""
