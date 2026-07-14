@@ -22,7 +22,7 @@ from redis.commands.search.query import Query
 
 from . import dfly_args
 from .instance import DflyInstanceFactory
-from .seeder import HnswSearchSeeder
+from .seeder import HnswSearchSeeder, np_dtype_for
 from .utility import (
     check_all_replicas_finished,
     skip_if_not_in_github,
@@ -433,8 +433,8 @@ async def test_big_json(async_client: aioredis.Redis):
     await i1.dropindex()
 
 
-async def knn_query(idx, query, vector):
-    params = {"vec": np.array(vector, dtype=np.float32).tobytes()}
+async def knn_query(idx, query, vector, np_dtype=np.float32):
+    params = {"vec": np.array(vector, dtype=np_dtype).tobytes()}
     result = await idx.search(query, params)
     return {doc["id"] for doc in result.docs}
 
@@ -490,6 +490,69 @@ async def test_knn(async_client: aioredis.Redis, index_type, algo_type):
 
     assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos $vec]", [10.0] == {"k8", "k10", "k12"})
     await i2.dropindex()
+
+
+@dfly_args({"proactor_threads": 4})
+@pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
+@pytest.mark.parametrize("algo_type", ["FLAT", "HNSW"])
+@pytest.mark.parametrize("data_type", ["INT8", "UINT8", "FLOAT16", "BFLOAT16", "FLOAT64"])
+async def test_knn_dtypes(async_client: aioredis.Redis, index_type, algo_type, data_type):
+    """End-to-end KNN via redis-py for every non-float32 dtype, over HASH+JSON and FLAT+HNSW.
+    Positions are small integers, exactly representable in all dtypes, so ordering is exact."""
+    np_dtype = np_dtype_for(data_type)
+    idx = async_client.ft(f"i-{index_type}-{algo_type}-{data_type}")
+
+    vector_field = VectorField(
+        "pos",
+        algorithm=algo_type,
+        attributes={"TYPE": data_type, "DIM": 1, "DISTANCE_METRIC": "L2"},
+    )
+    await idx.create_index(
+        fix_schema_naming(index_type, [TagField("even"), vector_field]),
+        definition=IndexDefinition(index_type=index_type),
+    )
+
+    n = 40  # keep within int8/uint8 range
+    pipe = async_client.pipeline()
+    for i in range(n):
+        even = "yes" if i % 2 == 0 else "no"
+        if index_type == IndexType.HASH:
+            pipe.hset(
+                f"k{i}",
+                mapping={"even": even, "pos": np.array([i], dtype=np_dtype).tobytes()},
+            )
+        else:
+            pipe.json().set(f"k{i}", "$", {"even": even, "pos": [i]})
+    await pipe.execute()
+
+    assert await knn_query(idx, "* => [KNN 3 @pos $vec]", [20], np_dtype) == {"k19", "k20", "k21"}
+    assert await knn_query(idx, "@even:{yes} => [KNN 3 @pos $vec]", [10], np_dtype) == {
+        "k8",
+        "k10",
+        "k12",
+    }
+    await idx.dropindex()
+
+
+@dfly_args({"proactor_threads": 4})
+@pytest.mark.parametrize("data_type", ["INT8", "UINT8", "FLOAT16", "BFLOAT16", "FLOAT64"])
+async def test_ftinfo_vector_data_type(async_client: aioredis.Redis, data_type):
+    """FT.INFO must round-trip the vector field's declared data_type (redisvl validates on it)."""
+    name = f"info-{data_type}"
+    idx = async_client.ft(name)
+    await idx.create_index(
+        [
+            VectorField(
+                "pos",
+                algorithm="HNSW",
+                attributes={"TYPE": data_type, "DIM": 4, "DISTANCE_METRIC": "L2"},
+            )
+        ],
+        definition=IndexDefinition(index_type=IndexType.HASH),
+    )
+    attr = _search_attribute(await async_client.execute_command("FT.INFO", name), "pos")
+    assert attr[attr.index("data_type") + 1] == data_type
+    await idx.dropindex()
 
 
 NUM_DIMS = 10
@@ -604,18 +667,15 @@ async def test_vector_empty_and_update(async_client: aioredis.Redis, index_type,
     await idx.dropindex()
 
 
-@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
-@pytest.mark.parametrize("start_threads, reload_threads", [(4, 4), (4, 2), (2, 4)])
-async def test_hnsw_reload_different_threads(
-    df_factory: DflyInstanceFactory, document_type, start_threads, reload_threads
+async def _hnsw_save_reload_check(
+    df_factory: DflyInstanceFactory, seeder: HnswSearchSeeder, start_threads=4, reload_threads=4
 ):
-    """HNSW KNN must still work after SAVE + restart with a different thread count."""
-    dbfilename = f"hnsw_threads_{tmp_file_name()}"
+    """Seed an HNSW index, SAVE, restart, and assert every doc stays indexed after reload."""
+    dbfilename = f"hnsw_reload_{tmp_file_name()}"
     inst = df_factory.create(proactor_threads=start_threads, dbfilename=dbfilename)
     inst.start()
     client = inst.client()
 
-    seeder = HnswSearchSeeder(num_initial_docs=50, num_dims=8, document_type=document_type)
     await seeder.create_index(client)
     await seeder.seed_initial_docs(client)
 
@@ -643,6 +703,26 @@ async def test_hnsw_reload_different_threads(
         assert await seeder._search_knn_filtered(
             client2, query_vec, key, k=1
         ), f"doc {key} lost from index after reload"
+
+
+@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
+@pytest.mark.parametrize("start_threads, reload_threads", [(4, 4), (4, 2), (2, 4)])
+async def test_hnsw_reload_different_threads(
+    df_factory: DflyInstanceFactory, document_type, start_threads, reload_threads
+):
+    """HNSW KNN must still work after SAVE + restart with a different thread count."""
+    seeder = HnswSearchSeeder(num_initial_docs=50, num_dims=8, document_type=document_type)
+    await _hnsw_save_reload_check(df_factory, seeder, start_threads, reload_threads)
+
+
+@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
+@pytest.mark.parametrize("data_type", ["INT8", "UINT8", "FLOAT16", "BFLOAT16", "FLOAT64"])
+async def test_hnsw_reload_dtypes(df_factory: DflyInstanceFactory, document_type, data_type):
+    """A non-float32 HNSW index survives SAVE + reload with its native width intact."""
+    seeder = HnswSearchSeeder(
+        num_initial_docs=50, num_dims=8, document_type=document_type, data_type=data_type
+    )
+    await _hnsw_save_reload_check(df_factory, seeder)
 
 
 async def test_search_options_reload(df_factory: DflyInstanceFactory):

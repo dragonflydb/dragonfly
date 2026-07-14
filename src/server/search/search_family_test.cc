@@ -7089,6 +7089,63 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
   EXPECT_THAT(cmd, HasSubstr("EPSILON 0.07"));
 }
 
+// Builds the FT.CREATE restore command for a single vector field of the given algorithm, dtype and
+// storage — the shared setup for the data_type round-trip tests below.
+static std::string BuildVectorRestoreCommand(bool use_hnsw, dfly::search::VectorDataType dt,
+                                             dfly::DocIndex::DataType storage) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+  using dfly::search::VectorSimilarity;
+
+  SchemaField field;
+  field.type = SchemaField::VECTOR;
+  field.flags = 0;
+  field.short_name = "embedding";
+
+  SchemaField::VectorParams vparams;
+  vparams.use_hnsw = use_hnsw;
+  vparams.dim = 4;
+  vparams.sim = VectorSimilarity::COSINE;
+  vparams.data_type = dt;
+  vparams.capacity = 500;
+  vparams.hnsw_m = 32;
+  vparams.hnsw_ef_construction = 400;
+  vparams.hnsw_ef_runtime = 75;
+  vparams.hnsw_epsilon = 0.07;
+  field.special_params = vparams;
+
+  DocIndex base;
+  base.type = storage;
+  base.prefixes = {"doc:"};
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["embedding"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+  return info.BuildRestoreCommand();
+}
+
+// A FLAT index restores its non-float32 TYPE (and stays FLAT).
+TEST(BuildRestoreCommandTest, FlatVectorPreservesDataType) {
+  std::string cmd =
+      BuildVectorRestoreCommand(false, dfly::search::VectorDataType::INT8, dfly::DocIndex::HASH);
+  EXPECT_THAT(cmd, HasSubstr("FLAT"));
+  EXPECT_THAT(cmd, HasSubstr("TYPE INT8"));
+  EXPECT_THAT(cmd, HasSubstr("DIM 4"));
+  EXPECT_THAT(cmd, HasSubstr("DISTANCE_METRIC COSINE"));
+}
+
+// An HNSW index restores a non-float32 TYPE.
+TEST(BuildRestoreCommandTest, HnswVectorPreservesNonFloat32DataType) {
+  std::string cmd =
+      BuildVectorRestoreCommand(true, dfly::search::VectorDataType::FLOAT16, dfly::DocIndex::HASH);
+  EXPECT_THAT(cmd, HasSubstr("HNSW"));
+  EXPECT_THAT(cmd, HasSubstr("TYPE FLOAT16"));
+  EXPECT_THAT(cmd, HasSubstr("DIM 4"));
+}
+
 // FT.CREATE with a VECTOR FLAT field whose DIM is enormous (e.g. 99999999999)
 // used to cause std::bad_alloc inside FlatVectorIndex, leaving a broken
 // ShardDocIndex registered.  A subsequent FT.SEARCH would dereference the empty

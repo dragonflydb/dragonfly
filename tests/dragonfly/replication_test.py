@@ -4506,6 +4506,31 @@ async def test_hnsw_failover_chain(
     await seeder.verify(c1, c2)
 
 
+@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
+@pytest.mark.parametrize("data_type", ["INT8", "FLOAT16"])
+async def test_hnsw_search_replication_dtypes(
+    df_factory: DflyInstanceFactory, document_type: str, data_type: str
+):
+    """A non-float32 HNSW index replicates: the replica rebuilds it at the field's native
+    width and serves KNN identical to the master."""
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    seeder = HnswSearchSeeder(
+        num_initial_docs=200, num_dims=8, document_type=document_type, data_type=data_type
+    )
+    await seeder.create_index(c_master)
+    await seeder.seed_initial_docs(c_master)
+
+    await start_replication(c_replica, master.port)
+    await check_all_replicas_finished([c_replica], c_master)
+    await seeder.verify(c_master, c_replica)
+
+
 async def test_rm_replication(df_factory: DflyInstanceFactory):
     """Test that RM command propagates deletions to replica and is rejected on replica."""
     master = df_factory.create(proactor_threads=2)

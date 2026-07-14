@@ -17,6 +17,7 @@ meta_memcache>=2.2.0
 prometheus_client>=0.17.0
 aiohttp>=3.10.2
 numpy
+ml_dtypes>=0.2.0
 pytest-json-report>=1.5.0
 psutil>=5.9.5
 boto3>=1.28.55
