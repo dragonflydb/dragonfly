@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <sys/types.h>
-
 #include <algorithm>
 #include <bit>
 #include <cassert>
@@ -13,14 +11,13 @@
 #include <new>
 #include <type_traits>
 
+#include "core/oah_base.h"
+
 extern "C" {
 #include "redis/zmalloc.h"
 }
 
 namespace dfly {
-
-// A uint64_t that packs a heap pointer together with tag/flag bits in its unused low/high bits.
-using TaggedPtr = uint64_t;
 
 // ptr_vector.h - a growable heap array of T addressed through a single TaggedPtr.
 //
@@ -30,8 +27,7 @@ using TaggedPtr = uint64_t;
 // stay even for the 2-lane SIMD probe; the 11-bit size field holds the count, or its base-2 log
 // when kLogModeBit is set (power-of-two sizes).
 template <class T> class PtrVector {
-  static constexpr size_t kVectorBit = 1ULL << 0;
-  static constexpr size_t kTagMask = (4095ULL << 52) | 7;
+  using TaggedPtr = oah::TaggedPtr;
   static constexpr size_t kSizeShift = 52;
   static constexpr size_t kSizeMask = 0x7FFULL;
   static constexpr size_t kLogModeBit = 1ULL << 63;
@@ -118,7 +114,7 @@ template <class T> class PtrVector {
 
  private:
   static T* RawOf(TaggedPtr tagged_ptr) {
-    return reinterpret_cast<T*>(tagged_ptr & ~kTagMask);
+    return reinterpret_cast<T*>(tagged_ptr & ~oah::kTagMask);
   }
 
   static size_t SizeOf(TaggedPtr tagged_ptr) {
@@ -133,7 +129,7 @@ template <class T> class PtrVector {
     assert(!log_mode || std::has_single_bit(count));
     const uint64_t field = log_mode ? std::countr_zero(count) : count;
     assert(field <= kSizeMask);
-    return (tagged_ptr & ~kSizeFieldMask) | kVectorBit | (field << kSizeShift) |
+    return (tagged_ptr & ~kSizeFieldMask) | oah::kVectorBit | (field << kSizeShift) |
            (log_mode ? kLogModeBit : 0);
   }
 

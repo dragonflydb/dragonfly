@@ -144,18 +144,20 @@ TEST_F(OAHSetTest, OAHEntryTest) {
   OAHEntry::Destroy(test.Release());
 }
 
-TEST_F(OAHSetTest, OAHEntryKeySizes) {
-  // Round-trips the control-byte size encoding across its boundaries: inline (< 64B),
-  // 1 extra byte (< 8KB) and 3 extra bytes (larger), with and without an expiry.
-  for (uint32_t sz : {0u, 1u, 63u, 64u, 255u, 8191u, 8192u, 100000u}) {
+TEST_F(OAHSetTest, KeySizeEncoding) {
+  // Round-trips the size encoding across its field-width boundaries -- inline (< 64B), 1 extra
+  // byte (< 8KB) and 3 extra bytes (larger) -- both at the OAHEntry level (with/without expiry)
+  // and through the full Add/Find/Erase path, whose duplicate detection relies on Key() decoding.
+  vector<string> keys;
+  for (uint32_t sz : {0u, 63u, 64u, 8191u, 8192u, 100000u}) {
     string key(sz, 'x');
     if (sz)
       key[sz - 1] = 'z';  // make the tail byte observable
+    keys.push_back(key);
 
     for (uint32_t expiry : {UINT32_MAX, 7u}) {
       uint64_t bits = OAHEntry::Create(key, expiry);
       OAHEntry e(bits);
-      EXPECT_EQ(e.Key().size(), sz);
       EXPECT_EQ(e.Key(), key);
       EXPECT_EQ(e.HasExpiry(), expiry != UINT32_MAX);
       if (expiry != UINT32_MAX) {
@@ -164,12 +166,7 @@ TEST_F(OAHSetTest, OAHEntryKeySizes) {
       OAHEntry::Destroy(e.Release());
     }
   }
-}
 
-TEST_F(OAHSetTest, LargeKeys) {
-  // The size encoding must round-trip through the full Add/Find/Erase path, not just OAHEntry.
-  vector<string> keys = {string(10, 'a'), string(63, 'b'), string(64, 'c'), string(8192, 'd'),
-                         string(70000, 'e')};
   for (const auto& k : keys)
     EXPECT_TRUE(ss_->Add(k));
   for (const auto& k : keys)

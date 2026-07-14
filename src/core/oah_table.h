@@ -17,6 +17,7 @@
 
 #include "common/rapidhash.h"
 #include "core/detail/stateless_allocator.h"
+#include "core/oah_base.h"
 #include "core/oah_ptr.h"
 #include "core/simd_op.h"
 
@@ -34,6 +35,10 @@ namespace dfly {
 // entry-specific (a set adds a key, a map a key+value with replace/exchange semantics), so it lives
 // in the derived OAHSet / OAHMap where each keeps its own tight, separately optimized code path.
 template <typename Entry> class OAHTable {  // Open Addressing Hash table
+ protected:
+  using TaggedPtr = oah::TaggedPtr;
+
+ private:
   using Buckets = std::vector<TaggedPtr, StatelessAllocator<TaggedPtr>>;
 
  public:
@@ -108,9 +113,9 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     bool ReallocIfNeeded(PageUsage* page_usage) {
       auto bucket = owner_->At(bucket_);
       bool realloced = false;
-      ssize_t delta = bucket.ReallocIfNeeded(page_usage, &realloced);
+      int64_t delta = bucket.ReallocIfNeeded(page_usage, &realloced);
       // delta can be negative if a realloc lands in a smaller mimalloc usable-size
-      // bucket; route the signed update through ssize_t to avoid size_t underflow.
+      // bucket; route the signed update through int64_t to avoid size_t underflow.
       if (delta >= 0) {
         owner_->obj_alloc_used_ += static_cast<size_t>(delta);
       } else {
@@ -304,7 +309,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     const uint64_t hash = Hash(str);
     const uint32_t bid = BucketId(hash, capacity_log_);
     const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
-    const LaneMasks masks = ProbeWindowShifted(&entries_[bid], ext_hash << Entry::kExtHashShift);
+    const LaneMasks masks = ProbeWindowShifted(&entries_[bid], ext_hash << oah::kExtHashShift);
 
     // Erase keeps the matched cell (to free it) and whether the hit lives in an extension vector.
     TaggedPtr* matched = nullptr;
@@ -614,7 +619,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     auto data_v = Wide::Load(base);
     // Mask covers the vector bit so vector slots never match a candidate (window probes then need
     // no per-candidate IsVector test); ext-hash is never 0, so empty lanes can't match the query.
-    auto stored = data_v & Wide::Fill(Entry::kExtHashShiftedMask | OAHPtr<Entry>::kVectorBit);
+    auto stored = data_v & Wide::Fill(oah::kExtHashShiftedMask | oah::kVectorBit);
     auto is_empty = data_v == uint64_t(0);
     auto candidate = stored == shifted_ext_hash;
     return {candidate.GetMSBs(), is_empty.GetMSBs()};
@@ -641,8 +646,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     for (uint32_t off = 0; off < kDisplacementSize; off += EntryWide::kLanes) {
       const EntryWide data = EntryWide::Load(base + off);
       const uint32_t isvec =
-          ((data & EntryWide::Fill(OAHPtr<Entry>::kVectorBit)) == OAHPtr<Entry>::kVectorBit)
-              .GetMSBs();
+          ((data & EntryWide::Fill(oah::kVectorBit)) == oah::kVectorBit).GetMSBs();
       const uint32_t matched = ((data >> shift) == target).GetMSBs();
       // target == 0 also matches all-zero empties; drop them here (cheaper than a scalar re-read).
       const uint32_t is_empty = (data == uint64_t(0)).GetMSBs();
@@ -677,7 +681,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     // Prefetch every window slot's blob to overlap the loads with the SIMD mask below (an empty
     // slot prefetches null, a no-op).
     for (uint32_t i = 0; i < kDisplacementSize; ++i)
-      PREFETCH_READ(reinterpret_cast<const char*>(base[i] & ~Entry::kTagMask));
+      oah::PrefetchRead(reinterpret_cast<const char*>(base[i] & ~oah::kTagMask));
 
     uint32_t vec_mask = 0;
     uint32_t cand = ScanWindowMask(base, target, shift, &vec_mask);
@@ -732,7 +736,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     assert(size >= size_t(kVectorLaneStep));
     assert(size % kVectorLaneStep == 0u);
 
-    const uint64_t shifted_ext_hash = ext_hash << Entry::kExtHashShift;
+    const uint64_t shifted_ext_hash = ext_hash << oah::kExtHashShift;
     for (size_t base = 0; base < size; base += kVectorLaneStep) {
       auto cand_bits = ProbeLanes<VectorWide>(reinterpret_cast<const uint64_t*>(&raw_arr[base]),
                                               shifted_ext_hash)
@@ -751,7 +755,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   // Expire: when no TTLs exist a key match is provably live, so the empty re-check is dropped.
   template <bool Expire> iterator FindInternal(uint32_t bid, std::string_view str, uint64_t hash) {
     const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
-    const LaneMasks masks = ProbeWindowShifted(&entries_[bid], ext_hash << Entry::kExtHashShift);
+    const LaneMasks masks = ProbeWindowShifted(&entries_[bid], ext_hash << oah::kExtHashShift);
 
     // Find returns an iterator built straight from the match. With no TTLs a key match is always
     // live, so ExpireIfNeeded and the resulting empty re-check are compiled out.
@@ -785,8 +789,8 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
 
   static uint64_t CalcExtHash(uint64_t hash, uint32_t capacity_log) {
     const uint32_t start_hash_bit = capacity_log > kShiftLog ? capacity_log - kShiftLog : 0;
-    const uint32_t ext_hash_shift = 64 - start_hash_bit - Entry::kExtHashSize;
-    const uint64_t h = (hash >> ext_hash_shift) & Entry::kExtHashMask;
+    const uint32_t ext_hash_shift = 64 - start_hash_bit - oah::kExtHashSize;
+    const uint64_t h = (hash >> ext_hash_shift) & oah::kExtHashMask;
     // Remap the rare all-zero fingerprint to 1 so empty (all-zero) slots never match a real
     // entry, letting the SIMD probes drop the empty mask. Full entropy otherwise; home-prefix
     // bits stay 0.
