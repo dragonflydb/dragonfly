@@ -17,7 +17,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/romange/ubuntu-dev:22
+      image: ghcr.io/romange/ubuntu-dev:24
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
     strategy:
       fail-fast: false
@@ -37,7 +37,7 @@ jobs:
         shell: bash
         working-directory: tests/fakeredis
         run: |
-          pip install poetry
+          pip install --break-system-packages poetry
           echo "$HOME/.poetry/bin" >> $GITHUB_PATH
           poetry install
       - name: Configure CMake
