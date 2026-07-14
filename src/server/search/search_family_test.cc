@@ -1317,6 +1317,278 @@ TEST_F(SearchFamilyTest, HashKnnReturnsImplicitVectorScore) {
   EXPECT_THAT(resp, MatchEntry("d:a", "__v_score", "0", "v", va));
 }
 
+TEST_F(SearchFamilyTest, HashKnnInt8) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "FLAT", "6",
+       "TYPE", "INT8", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto Int8Vec = [](std::initializer_list<int> vals) {
+    string s;
+    for (int v : vals)
+      s.push_back(static_cast<char>(static_cast<int8_t>(v)));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", Int8Vec({1, 2, 3})});
+  Run({"HSET", "d:b", "v", Int8Vec({40, 50, 60})});
+
+  const string q = Int8Vec({1, 2, 3});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HashKnnFloat64) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "FLAT", "6",
+       "TYPE", "FLOAT64", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto F64 = [](std::initializer_list<double> vals) {
+    string s;
+    for (double v : vals)
+      s.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", F64({1.5, 2.5, 3.5})});
+  Run({"HSET", "d:b", "v", F64({-1.0, -2.0, -3.0})});
+
+  const string q = F64({1.5, 2.5, 3.5});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HashKnnFloat16) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "FLAT", "6",
+       "TYPE", "FLOAT16", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto F16 = [](std::initializer_list<uint16_t> vals) {
+    string s;
+    for (uint16_t v : vals)
+      s.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", F16({0x3C00, 0x4000, 0x4200})});  // 1, 2, 3
+  Run({"HSET", "d:b", "v", F16({0x4400, 0x4500, 0x4600})});  // 4, 5, 6
+
+  const string q = F16({0x3C00, 0x4000, 0x4200});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HnswKnnInt8) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
+       "TYPE", "INT8", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto Int8Vec = [](std::initializer_list<int> vals) {
+    string s;
+    for (int v : vals)
+      s.push_back(static_cast<char>(static_cast<int8_t>(v)));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", Int8Vec({1, 2, 3})});
+  Run({"HSET", "d:b", "v", Int8Vec({40, 50, 60})});
+
+  const string q = Int8Vec({1, 2, 3});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HnswKnnFloat16) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT16", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto F16 = [](std::initializer_list<uint16_t> vals) {
+    string s;
+    for (uint16_t v : vals)
+      s.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", F16({0x3C00, 0x4000, 0x4200})});
+  Run({"HSET", "d:b", "v", F16({0x4400, 0x4500, 0x4600})});
+
+  const string q = F16({0x3C00, 0x4000, 0x4200});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnInt8) {
+  Run({"FT.CREATE", "idx",  "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",  "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "INT8", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"v":[1,2,3]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"v":[40,50,60]})"});
+
+  auto Int8Vec = [](std::initializer_list<int> vals) {
+    string s;
+    for (int v : vals)
+      s.push_back(static_cast<char>(static_cast<int8_t>(v)));
+    return s;
+  };
+  const string q = Int8Vec({1, 2, 3});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnFloat16) {
+  Run({"FT.CREATE", "idx",     "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",     "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT16", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"v":[1,2,3]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"v":[4,5,6]})"});
+
+  auto F16 = [](std::initializer_list<uint16_t> vals) {
+    string s;
+    for (uint16_t v : vals)
+      s.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    return s;
+  };
+  const string q = F16({0x3C00, 0x4000, 0x4200});  // 1, 2, 3
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HnswKnnWrongDimReturnsError) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto F32 = [](std::initializer_list<float> vals) {
+    string s;
+    for (float v : vals)
+      s.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", F32({1, 2, 3})});
+
+  // Query blob carries 2 elements, index expects 3 -> explicit error, not a silent empty result.
+  const string q = F32({1, 2});
+  auto resp =
+      Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, ErrArg("Wrong vector index dimensions"));
+}
+
+TEST_F(SearchFamilyTest, HnswKnnNonMultipleBlobReturnsError) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  // Blob size (5 bytes) is not a whole number of float32 elements -> parse error, and the reported
+  // dimension must not be a truncated size / width.
+  const string q = "abcde";
+  auto resp =
+      Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, ErrArg("Parse error of vector parameters"));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnInt8OutOfRange) {
+  Run({"FT.CREATE", "idx",  "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",  "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "INT8", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:ok", "$", R"({"v":[1,2,3]})"});
+  Run({"JSON.SET", "d:round", "$", R"({"v":[1,2,3.4]})"});  // 3.4 rounds to 3
+  Run({"JSON.SET", "d:hi", "$", R"({"v":[1,2,999]})"});     // out of int8 range -> doc skipped
+  Run({"JSON.SET", "d:lo", "$", R"({"v":[1,2,-200]})"});    // out of int8 range -> doc skipped
+
+  // Only the two in-range docs are indexed; the out-of-range ones are dropped (not wrapped).
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*"}), AreDocIds("d:ok", "d:round"));
+
+  // 3.4 rounded to 3, so d:round matches the [1,2,3] query exactly (distance 0).
+  Run({"JSON.DEL", "d:ok"});
+  auto Int8Vec = [](std::initializer_list<int> vals) {
+    string s;
+    for (int v : vals)
+      s.push_back(static_cast<char>(static_cast<int8_t>(v)));
+    return s;
+  };
+  const string q = Int8Vec({1, 2, 3});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:round", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HnswKnnFloat64LargeDim) {
+  // dim*8 = 2048 bytes exceeds the listpack threshold -> borrowed keyspace storage, whose sds
+  // data pointer is unaligned. Exercises the memcpy-based FLOAT64 reader (would trip
+  // -fsanitize=alignment before the byte-safe-load fix).
+  const int kDim = 256;
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT64", "DIM", absl::StrCat(kDim), "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto F64 = [](double fill, int dim) {
+    string s;
+    for (int i = 0; i < dim; i++)
+      s.append(reinterpret_cast<const char*>(&fill), sizeof(fill));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", F64(1.0, kDim)});
+  Run({"HSET", "d:b", "v", F64(5.0, kDim)});
+
+  const string q = F64(1.0, kDim);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, VectorUnknownTypeRejected) {
+  // A non-standard TYPE is rejected on a normal FT.CREATE (the replay-only coerce does not apply).
+  for (string_view bogus : {"BOGUS", "FP32", "FLOAT8", ""}) {
+    EXPECT_THAT(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "v", "VECTOR", "FLAT", "6", "TYPE",
+                     bogus, "DIM", "3", "DISTANCE_METRIC", "L2"}),
+                ErrArg("Parse error of vector parameters"))
+        << "TYPE=" << bogus;
+  }
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeInt8) {
+  // VECTOR_RANGE on a non-float dtype: exercises the width-aware range validation/decode seam.
+  auto Int8Bytes = [](int v) { return string(1, static_cast<char>(static_cast<int8_t>(v))); };
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "INT8",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+  for (int i = 0; i < 10; i++)
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", Int8Bytes(i)});
+
+  const string q = Int8Bytes(5);
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+                   "PARAMS", "2", "vec", q, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
+}
+
+TEST_F(SearchFamilyTest, FtHybridInt8) {
+  // FT.HYBRID has its own vector-width validation, separate from the plain KNN path.
+  auto Int8Vec = [](std::initializer_list<int> vals) {
+    string s;
+    for (int v : vals)
+      s.push_back(static_cast<char>(static_cast<int8_t>(v)));
+    return s;
+  };
+  EXPECT_EQ(Run({"FT.CREATE", "vidx", "ON", "HASH", "SCHEMA", "t", "TEXT", "v", "VECTOR", "FLAT",
+                 "6", "TYPE", "INT8", "DIM", "3", "DISTANCE_METRIC", "L2"}),
+            "OK");
+  Run({"HSET", "d:a", "t", "hello world", "v", Int8Vec({1, 2, 3})});
+  Run({"HSET", "d:b", "t", "hello there", "v", Int8Vec({40, 50, 60})});
+
+  auto resp = Run({"FT.HYBRID", "vidx", "SEARCH", "hello", "VSIM", "@v", "$b", "KNN", "5", "PARAMS",
+                   "2", "b", Int8Vec({1, 2, 3})});
+  ASSERT_HYBRID_RESP(resp);
+  EXPECT_EQ(HybridTotal(resp), 2);
+  EXPECT_THAT(HybridKeys(resp), UnorderedElementsAre("d:a", "d:b"));
+}
+
 TEST_F(SearchFamilyTest, HashHnswKnnReturnsImplicitVectorScore) {
   Run({"FT.CREATE", "idx",  "ON", "HASH", "PREFIX",  "1",   "d:", "SCHEMA",          "v",
        "VECTOR",    "HNSW", "8",  "TYPE", "FLOAT32", "DIM", "3",  "DISTANCE_METRIC", "L2",
@@ -1833,16 +2105,6 @@ TEST_F(SearchFamilyTest, AggregateLoad) {
   resp = Run({"ft.aggregate", "index", "*", "GROUPBY", "1", "@word", "REDUCE", "SUM", "1", "@foo",
               "AS", "foo_total", "LOAD", "1", "foo_total"});
   EXPECT_THAT(resp, ErrArg("LOAD cannot be applied after projectors or reducers"));
-}
-
-TEST_F(SearchFamilyTest, VectorUnknownTypeRejected) {
-  // A non-standard TYPE is rejected on a normal FT.CREATE (the replay-only coerce does not apply).
-  for (string_view bogus : {"BOGUS", "FP32", "FLOAT8", ""}) {
-    EXPECT_THAT(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "v", "VECTOR", "FLAT", "6", "TYPE",
-                     bogus, "DIM", "3", "DISTANCE_METRIC", "L2"}),
-                ErrArg("Parse error of vector parameters"))
-        << "TYPE=" << bogus;
-  }
 }
 
 TEST_F(SearchFamilyTest, Vector) {
@@ -6840,6 +7102,18 @@ TEST_F(SearchFamilyTest, SearchOnIndexWithHugeVectorDim) {
 
   // Index must not be registered — FT.SEARCH must report "no such index".
   resp = Run({"FT.SEARCH", "idx", "hello"});
+  EXPECT_THAT(resp, ErrArg("idx: no such index"));
+}
+
+// The allocation guard must account for the element width, not a fixed float32 layout.
+// dim=1000 / capacity=1e6 slips under the old "capacity * (dim+1) floats" bound, yet allocates
+// ~8 GiB as FLOAT64 — which used to throw std::bad_alloc and leave a broken ShardDocIndex.
+TEST_F(SearchFamilyTest, FlatWideDtypeAllocationGuard) {
+  auto resp = Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "v", "VECTOR", "FLAT", "8", "TYPE",
+                   "FLOAT64", "DIM", "1000", "INITIAL_CAP", "1000000", "DISTANCE_METRIC", "L2"});
+  EXPECT_THAT(resp, ErrArg("Vector index initial allocation is too large"));
+
+  resp = Run({"FT.SEARCH", "idx", "*"});
   EXPECT_THAT(resp, ErrArg("idx: no such index"));
 }
 

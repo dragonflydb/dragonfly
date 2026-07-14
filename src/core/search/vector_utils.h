@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <cstddef>
+#include <vector>
+
 #include "core/search/base.h"
 
 namespace dfly::search {
@@ -30,6 +33,13 @@ float VectorDistance(const void* u, const void* v, size_t dims, VectorSimilarity
 // Widen a half-precision (h) or bfloat16 (b) element, given as its raw 16-bit pattern, to float.
 float HalfToFloat(uint16_t h);
 float Bf16ToFloat(uint16_t b);
+
+// Narrow a float to half precision / bfloat16 (round to nearest even). Used to encode JSON numbers.
+uint16_t FloatToHalf(float f);
+uint16_t FloatToBf16(float f);
+
+// Builds a `dim`-element blob with every element set to 1.0 encoded in the given dtype.
+std::vector<std::byte> EncodeOnesVector(size_t dim, VectorDataType dt);
 
 std::string_view VectorSimilarityToString(VectorSimilarity sim);
 

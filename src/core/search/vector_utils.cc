@@ -30,11 +30,9 @@ namespace {
 #endif
 
 OwnedFtVector ConvertToFtVector(string_view value) {
-  // Value cannot be casted directly as it might be not aligned as a float (4 bytes).
-  // Misaligned memory access is UB.
   size_t size = value.size() / sizeof(float);
-  auto out = make_unique<float[]>(size);
-  memcpy(out.get(), value.data(), size * sizeof(float));
+  auto out = make_unique<std::byte[]>(value.size());
+  memcpy(out.get(), value.data(), value.size());
 
   return OwnedFtVector{std::move(out), size};
 }
@@ -116,39 +114,91 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
 }
 
 float HalfToFloat(uint16_t h) {
-  uint32_t sign = static_cast<uint32_t>(h & 0x8000) << 16;
-  uint32_t exp = (h >> 10) & 0x1F;
-  uint32_t mant = h & 0x3FF;
-  uint32_t bits;
-  if (exp == 0) {
-    if (mant == 0) {
-      bits = sign;  // +/- zero
-    } else {
-      // Normalize the subnormal: shift the mantissa left until bit 10 is set. `mant` is in
-      // [1, 0x3FF], so countl_zero is in [22, 31] and the shift in [1, 10].
-      int shift = std::countl_zero(mant) - 21;
-      exp = (127 - 15 + 1) - shift;
-      mant = (mant << shift) & 0x3FF;
-      bits = sign | (exp << 23) | (mant << 13);
-    }
-  } else if (exp == 0x1F) {
-    bits = sign | 0x7F800000u | (mant << 13);  // inf / nan
-  } else {
-    bits = sign | ((exp + 112) << 23) | (mant << 13);  // rebias 127 - 15 = 112
-  }
-  float out;
-  memcpy(&out, &bits, sizeof(out));
-  return out;
+  return static_cast<float>(std::bit_cast<_Float16>(h));
 }
 
 float Bf16ToFloat(uint16_t b) {
-  uint32_t bits = static_cast<uint32_t>(b) << 16;
-  float out;
-  memcpy(&out, &bits, sizeof(out));
+  return static_cast<float>(std::bit_cast<__bf16>(b));
+}
+
+uint16_t FloatToHalf(float f) {
+  return std::bit_cast<uint16_t>(static_cast<_Float16>(f));
+}
+
+uint16_t FloatToBf16(float f) {
+  return std::bit_cast<uint16_t>(static_cast<__bf16>(f));
+}
+
+std::vector<std::byte> EncodeOnesVector(size_t dim, VectorDataType dt) {
+  const size_t width = ElementSize(dt);
+  std::byte elem[sizeof(double)] = {};
+  switch (dt) {
+    case VectorDataType::FLOAT32: {
+      float v = 1.0f;
+      memcpy(elem, &v, sizeof(v));
+    } break;
+    case VectorDataType::FLOAT64: {
+      double v = 1.0;
+      memcpy(elem, &v, sizeof(v));
+    } break;
+    case VectorDataType::FLOAT16: {
+      uint16_t v = FloatToHalf(1.0f);
+      memcpy(elem, &v, sizeof(v));
+    } break;
+    case VectorDataType::BFLOAT16: {
+      uint16_t v = FloatToBf16(1.0f);
+      memcpy(elem, &v, sizeof(v));
+    } break;
+    case VectorDataType::INT8: {
+      int8_t v = 1;
+      memcpy(elem, &v, sizeof(v));
+    } break;
+    case VectorDataType::UINT8: {
+      uint8_t v = 1;
+      memcpy(elem, &v, sizeof(v));
+    } break;
+  }
+  std::vector<std::byte> out(dim * width);
+  for (size_t i = 0; i < dim; i++)
+    memcpy(out.data() + i * width, elem, width);
   return out;
 }
 
 namespace {
+
+#ifdef WITH_SIMSIMD
+
+// Distance between two native-width blobs of a given element type via simsimd, mapped to our
+// conventions: L2 = Euclidean distance, IP = 1 - dot product, COSINE = 1 - cosine similarity.
+// simsimd uses unaligned loads, so this is safe for unaligned query blobs and borrowed HNSW
+// storage; the raw bytes already match simsimd's element layout (fp16/bf16 as unsigned short).
+#define DFLY_DEFINE_SIMSIMD_DIST(suffix, elem_type)                                             \
+  float SimsimdDist_##suffix(const void* u, const void* v, size_t dims, VectorSimilarity sim) { \
+    const auto* a = reinterpret_cast<const elem_type*>(u);                                      \
+    const auto* b = reinterpret_cast<const elem_type*>(v);                                      \
+    simsimd_distance_t d = 0;                                                                   \
+    switch (sim) {                                                                              \
+      case VectorSimilarity::L2:                                                                \
+        simsimd_l2_##suffix(a, b, dims, &d);                                                    \
+        return static_cast<float>(d);                                                           \
+      case VectorSimilarity::IP:                                                                \
+        simsimd_dot_##suffix(a, b, dims, &d);                                                   \
+        return 1.0f - static_cast<float>(d);                                                    \
+      case VectorSimilarity::COSINE:                                                            \
+        simsimd_cos_##suffix(a, b, dims, &d);                                                   \
+        return static_cast<float>(d);                                                           \
+    }                                                                                           \
+    return 0.0f;                                                                                \
+  }
+DFLY_DEFINE_SIMSIMD_DIST(f32, simsimd_f32_t)
+DFLY_DEFINE_SIMSIMD_DIST(f64, simsimd_f64_t)
+DFLY_DEFINE_SIMSIMD_DIST(f16, simsimd_f16_t)
+DFLY_DEFINE_SIMSIMD_DIST(bf16, simsimd_bf16_t)
+DFLY_DEFINE_SIMSIMD_DIST(i8, simsimd_i8_t)
+DFLY_DEFINE_SIMSIMD_DIST(u8, simsimd_u8_t)
+#undef DFLY_DEFINE_SIMSIMD_DIST
+
+#else  // scalar fallback kernels, used when simsimd is not enabled
 
 uint16_t LoadU16(const void* base, size_t i) {
   uint16_t v;
@@ -227,11 +277,27 @@ float DistByMetric(const void* u, const void* v, size_t dims, VectorSimilarity s
   return 0.0f;
 }
 
+#endif  // WITH_SIMSIMD
+
 }  // namespace
 
 float VectorDistance(const void* u, const void* v, size_t dims, VectorSimilarity sim,
                      VectorDataType dt) {
   switch (dt) {
+#ifdef WITH_SIMSIMD
+    case VectorDataType::FLOAT32:
+      return SimsimdDist_f32(u, v, dims, sim);
+    case VectorDataType::FLOAT64:
+      return SimsimdDist_f64(u, v, dims, sim);
+    case VectorDataType::FLOAT16:
+      return SimsimdDist_f16(u, v, dims, sim);
+    case VectorDataType::BFLOAT16:
+      return SimsimdDist_bf16(u, v, dims, sim);
+    case VectorDataType::INT8:
+      return SimsimdDist_i8(u, v, dims, sim);
+    case VectorDataType::UINT8:
+      return SimsimdDist_u8(u, v, dims, sim);
+#else
     case VectorDataType::FLOAT32:
       return DistByMetric<ReaderF32>(u, v, dims, sim);
     case VectorDataType::FLOAT64:
@@ -244,6 +310,7 @@ float VectorDistance(const void* u, const void* v, size_t dims, VectorSimilarity
       return DistByMetric<ReaderI8>(u, v, dims, sim);
     case VectorDataType::UINT8:
       return DistByMetric<ReaderU8>(u, v, dims, sim);
+#endif
   }
   return 0.0f;
 }

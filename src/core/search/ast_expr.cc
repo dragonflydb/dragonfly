@@ -66,12 +66,12 @@ AstTagsNode::AstTagsNode(AstExpr&& l, TagValue tag) {
   tags.push_back(std::move(tag));
 }
 
-AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec,
+AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, std::string blob,
                        std::string_view score_alias, std::optional<uint32_t> ef_runtime)
     : filter{nullptr},
       limit{limit},
       field{field.substr(1)},
-      vec{std::move(vec)},
+      blob{std::move(blob)},
       score_alias{score_alias.empty() ? absl::StrCat("__", field.substr(1), "_score")
                                       : std::string{score_alias}},
       ef_runtime{ef_runtime} {
@@ -82,11 +82,11 @@ AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
   this->filter = make_unique<AstNode>(std::move(filter));
 }
 
-AstVectorRangeNode::AstVectorRangeNode(std::string field, double radius, OwnedFtVector vec,
+AstVectorRangeNode::AstVectorRangeNode(std::string field, double radius, std::string blob,
                                        std::string score_alias, std::optional<double> epsilon)
     : field{field.substr(1)},
       radius{radius},
-      vec{std::move(vec)},
+      blob{std::move(blob)},
       score_alias{std::move(score_alias)},
       epsilon{epsilon} {
 }

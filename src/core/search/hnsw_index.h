@@ -54,20 +54,24 @@ class HnswVectorIndex {
     return copy_vector_;
   }
 
-  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
+  std::vector<std::pair<float, GlobalDocId>> Knn(const void* target, size_t k,
                                                  std::optional<uint32_t> ef) const;
-  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
+  std::vector<std::pair<float, GlobalDocId>> Knn(const void* target, size_t k,
                                                  std::optional<uint32_t> ef,
                                                  const std::vector<GlobalDocId>& allowed) const;
-  std::vector<std::pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
+  std::vector<std::pair<float, GlobalDocId>> SubsetKnn(const void* target, size_t k,
                                                        const std::vector<GlobalDocId>& docs) const;
 
   // Returns all documents within radius, with their distances.
-  std::vector<std::pair<float, GlobalDocId>> RangeQuery(float* target, float radius,
+  std::vector<std::pair<float, GlobalDocId>> RangeQuery(const void* target, float radius,
                                                         std::optional<double> epsilon) const;
 
   size_t GetDim() const {
     return dim_;
+  }
+
+  VectorDataType GetDataType() const {
+    return data_type_;
   }
 
   // Get metadata for serialization
@@ -105,6 +109,7 @@ class HnswVectorIndex {
  private:
   bool copy_vector_;
   size_t dim_;
+  VectorDataType data_type_;
   std::unique_ptr<HnswlibAdapter> adapter_;
 };
 

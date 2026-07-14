@@ -14,6 +14,9 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
+#include <cmath>
+#include <type_traits>
+
 #include "base/flags.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/json/path.h"
@@ -40,6 +43,42 @@ namespace {
 
 string_view SdsToSafeSv(sds str) {
   return str != nullptr ? string_view{str, sdslen(str)} : ""sv;
+}
+
+// Encodes one JSON number `v` into `dst` at the native width of dtype DT. Returns false if the
+// value is out of range for an integer dtype. DT is a compile-time constant, so the per-dtype
+// branch is resolved at compile time and hoisted out of the caller's element loop.
+template <search::VectorDataType DT, typename JsonElem>
+bool EncodeJsonElement(const JsonElem& v, std::byte* dst) {
+  using VDT = search::VectorDataType;
+  if constexpr (DT == VDT::FLOAT32) {
+    float x = v.template as<float>();
+    memcpy(dst, &x, sizeof(x));
+  } else if constexpr (DT == VDT::FLOAT64) {
+    double x = v.template as<double>();
+    memcpy(dst, &x, sizeof(x));
+  } else if constexpr (DT == VDT::FLOAT16) {
+    uint16_t x = search::FloatToHalf(v.template as<float>());
+    memcpy(dst, &x, sizeof(x));
+  } else if constexpr (DT == VDT::BFLOAT16) {
+    uint16_t x = search::FloatToBf16(v.template as<float>());
+    memcpy(dst, &x, sizeof(x));
+  } else if constexpr (DT == VDT::INT8 || DT == VDT::UINT8) {
+    double d = v.template as<double>();
+    // Bound the magnitude before lrint (keeps it in-range for long), then round to nearest (ties
+    // to even, matching the fp16/bf16 encoders) and reject anything that rounds out of range.
+    constexpr double kLo = DT == VDT::INT8 ? -128.0 : 0.0;
+    constexpr double kHi = DT == VDT::INT8 ? 127.0 : 255.0;
+    if (!std::isfinite(d) || d < kLo - 1.0 || d > kHi + 1.0)
+      return false;
+    long r = std::lrint(d);
+    if (r < kLo || r > kHi)
+      return false;
+    using Int = std::conditional_t<DT == VDT::INT8, int8_t, uint8_t>;
+    auto x = static_cast<Int>(r);
+    memcpy(dst, &x, sizeof(x));
+  }
+  return true;
 }
 
 using FieldValue = std::optional<search::SortableValue>;
@@ -112,13 +151,14 @@ SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
   return out;
 }
 
-std::optional<BaseAccessor::VectorInfo> BaseAccessor::GetVector(std::string_view active_field,
-                                                                size_t dim) const {
+std::optional<BaseAccessor::VectorInfo> BaseAccessor::GetVector(
+    std::string_view active_field, size_t dim, search::VectorDataType dtype) const {
   auto strings_list = GetStrings(active_field);
   if (strings_list) {
     if (!strings_list->empty()) {
       auto value = strings_list->front();
-      if ((value.size() % sizeof(float)) || (value.size() / sizeof(float) != dim)) {
+      const size_t width = search::ElementSize(dtype);
+      if ((value.size() % width) || (value.size() / width != dim)) {
         return std::nullopt;
       }
       return value.data();
@@ -287,8 +327,8 @@ std::optional<BaseAccessor::StringList> JsonAccessor::GetStrings(std::string_vie
   return out;
 }
 
-std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(string_view active_field,
-                                                                size_t dim) const {
+std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(
+    string_view active_field, size_t dim, search::VectorDataType dtype) const {
   auto* path = GetPath(active_field);
   if (!path)
     return VectorInfo{};
@@ -305,17 +345,47 @@ std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(string_view acti
   if (size != dim)
     return std::nullopt;
 
-  auto ptr = make_unique<float[]>(size);
+  // JSON stores numbers, so quantize/encode each element to the field's declared native width.
+  const size_t width = search::ElementSize(dtype);
+  auto bytes = make_unique<std::byte[]>(size * width);
 
-  size_t i = 0;
-  for (const auto& v : res[0].array_range()) {
-    if (!v.is_number()) {
-      return std::nullopt;
+  // Resolve the dtype once, then run a monomorphic encode loop for it.
+  auto encode_all = [&]<search::VectorDataType DT>() {
+    size_t i = 0;
+    for (const auto& v : res[0].array_range()) {
+      if (!v.is_number() || !EncodeJsonElement<DT>(v, bytes.get() + i * width))
+        return false;
+      ++i;
     }
-    ptr[i++] = v.as<float>();
-  }
+    return true;
+  };
 
-  return search::OwnedFtVector{std::move(ptr), size};
+  using VDT = search::VectorDataType;
+  bool ok = false;
+  switch (dtype) {
+    case VDT::FLOAT32:
+      ok = encode_all.operator()<VDT::FLOAT32>();
+      break;
+    case VDT::FLOAT64:
+      ok = encode_all.operator()<VDT::FLOAT64>();
+      break;
+    case VDT::FLOAT16:
+      ok = encode_all.operator()<VDT::FLOAT16>();
+      break;
+    case VDT::BFLOAT16:
+      ok = encode_all.operator()<VDT::BFLOAT16>();
+      break;
+    case VDT::INT8:
+      ok = encode_all.operator()<VDT::INT8>();
+      break;
+    case VDT::UINT8:
+      ok = encode_all.operator()<VDT::UINT8>();
+      break;
+  }
+  if (!ok)
+    return std::nullopt;
+
+  return search::OwnedFtVector{std::move(bytes), size};
 }
 
 std::optional<BaseAccessor::NumsList> JsonAccessor::GetNumbers(string_view active_field) const {
