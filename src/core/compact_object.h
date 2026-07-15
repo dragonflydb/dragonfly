@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "absl/functional/function_ref.h"
 #include "base/pmr/memory_resource.h"
 #include "common/borrowed_string.h"
 #include "common/string_or_view.h"
@@ -163,6 +164,9 @@ class CompactObj {
  private:
   void operator=(const CompactObj&) = delete;
   CompactObj(const CompactObj&) = delete;
+
+  using FreeFn = absl::FunctionRef<void()>;
+  using FreeHook = absl::FunctionRef<void(FreeFn)>;
 
  protected:
   // 0-16 is reserved for inline lengths of string type.
@@ -360,6 +364,8 @@ class CompactObj {
   void GetString(std::string* res) const;
 
   void SetString(std::string_view str);
+  void SetString(std::string_view str, FreeHook fh);
+
   void ReserveString(size_t size);
   void AppendString(std::string_view str);
 
@@ -541,6 +547,7 @@ class CompactObj {
 
  protected:
   void EncodeString(std::string_view str);
+  void EncodeString(std::string_view str, FreeHook fh);
 
   // Requires: HasAllocated() - true.
   void Free();
@@ -557,6 +564,8 @@ class CompactObj {
     taglen_ = taglen;
     mask_ = mask;
   }
+
+  void SetMeta(uint8_t taglen, uint8_t mask, FreeHook fh);
 
   struct ExternalPtr {
     uint32_t serialized_size;
