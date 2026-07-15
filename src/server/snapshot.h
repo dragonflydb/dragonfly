@@ -130,6 +130,21 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
+  // Outstanding serialization CPU-time debt (cycles), accrued by every HandleFlushData()
+  // call regardless of which fiber runs it - snapshot_fb_'s own traversal, or a write
+  // command's inline catch-up serialization of a stale bucket (SerializeBucketLocked
+  // called from OnChange). It's a shared budget: serialization cost is serialization
+  // cost no matter who paid it, and a write doing that work means the traversal has less
+  // left to do, so it's correct for the traversal to back off proportionally more.
+  //
+  // Deliberately NOT slept on inside HandleFlushData/ConsumeBigValueChunk: those can run
+  // while a bucket's BucketDependencies latch is held (mid big-value chunking), so
+  // sleeping there would extend that latch by the sleep duration for every chunk, and -
+  // for the write-command case - would directly delay that command's own write. Only
+  // IterateBucketsFb ever pays this debt down (with a sleep, between TraverseBuckets()
+  // batches), which is never inside a held latch and never on a write command's fiber.
+  uint64_t accrued_run_cycles_ = 0;
+
   struct Stats {
     size_t keys_total = 0;
     size_t jounal_changes = 0;
