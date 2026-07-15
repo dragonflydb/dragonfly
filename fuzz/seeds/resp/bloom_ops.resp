@@ -43,3 +43,12 @@ $5
 item2
 $5
 itemX
+*4
+$12
+BF.LOADCHUNK
+$3
+bfd
+$1
+0
+$9
+chunkdata

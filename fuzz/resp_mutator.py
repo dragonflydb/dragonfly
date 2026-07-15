@@ -79,7 +79,7 @@ COMMANDS = [
     (b"XADD", 4, 10), (b"XLEN", 1, 1), (b"XRANGE", 3, 5), (b"XREVRANGE", 3, 5),
     (b"XREAD", 3, 9), (b"XREADGROUP", 5, 11), (b"XTRIM", 3, 6), (b"XDEL", 2, 6),
     (b"XINFO", 1, 3), (b"XACK", 3, 6), (b"XGROUP", 2, 6), (b"XAUTOCLAIM", 5, 7),
-    (b"XCLAIM", 5, 10), (b"XPENDING", 2, 6), (b"XSETID", 2, 4),
+    (b"XCLAIM", 5, 10), (b"XPENDING", 2, 6), (b"XSETID", 2, 2),
     # HyperLogLog
     (b"PFADD", 2, 6), (b"PFCOUNT", 1, 4), (b"PFMERGE", 2, 5),
     # Geo
