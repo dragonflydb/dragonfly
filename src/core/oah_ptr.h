@@ -4,7 +4,11 @@
 
 #pragma once
 
-#include "core/oah_entry.h"
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+
+#include "core/oah_base.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/ptr_vector.h"
 
@@ -18,11 +22,10 @@ namespace dfly {
 // owns the lifetime logic (promote-to-vector, grow, clear) via the Entry and PtrVector
 // Create()/Destroy() factories.
 template <typename Entry> class OAHPtr {
+  using TaggedPtr = oah::TaggedPtr;
   using Vector = PtrVector<TaggedPtr>;
 
  public:
-  static constexpr TaggedPtr kVectorBit = 1ULL << 0;
-
   explicit OAHPtr(TaggedPtr& slot) : slot_(&slot) {
   }
 
@@ -33,7 +36,7 @@ template <typename Entry> class OAHPtr {
     return !Empty();
   }
   bool IsVector() const {
-    return (*slot_ & kVectorBit) != 0;
+    return (*slot_ & oah::kVectorBit) != 0;
   }
 
   Vector AsVector() {
@@ -142,7 +145,7 @@ template <typename Entry> class OAHPtr {
   }
 
   char* Raw() const {
-    return reinterpret_cast<char*>(*slot_ & ~Entry::kTagMask);
+    return reinterpret_cast<char*>(*slot_ & ~oah::kTagMask);
   }
 
   // Replaces the slot's contents with the single entry `tagged_ptr`, freeing the old contents.

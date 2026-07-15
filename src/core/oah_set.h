@@ -10,6 +10,8 @@
 #include <cassert>
 #include <string_view>
 
+#include "core/oah_base.h"
+#include "core/oah_entry.h"
 #include "core/oah_table.h"
 #include "core/string_set.h"
 
@@ -62,10 +64,10 @@ class OAHSet : public OAHTable<OAHEntry> {
 
     uint64_t hash = Hash(str);
     auto bucket_id = BucketId(hash, capacity_log_);
-    PREFETCH_READ(entries_.data() + bucket_id);
+    oah::PrefetchRead(entries_.data() + bucket_id);
 
     const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
-    const uint64_t shifted_ext_hash = ext_hash << OAHEntry::kExtHashShift;
+    const uint64_t shifted_ext_hash = ext_hash << oah::kExtHashShift;
 
     const ssize_t mem_before = zmalloc_used_memory_tl;
     TaggedPtr entry_tagged_ptr = OAHEntry::Create(str, EntryTTL(ttl_sec));
@@ -75,7 +77,7 @@ class OAHSet : public OAHTable<OAHEntry> {
     const size_t entry_alloc_size = zmalloc_used_memory_tl - mem_before;
 
     const uint32_t ext_bid = GetExtensionPoint(bucket_id);
-    PREFETCH_READ(At(ext_bid).Raw());
+    oah::PrefetchRead(At(ext_bid).Raw());
 
     const LaneMasks masks = ProbeWindowShifted(&entries_[bucket_id], shifted_ext_hash);
 
