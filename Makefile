@@ -7,6 +7,7 @@ HELIO_ENABLE_GIT_VERSION = ON
 HELIO_WITH_UNWIND ?= OFF
 RELEASE_DIR=build-release
 WITH_SIMSIMD ?= ON
+TRACK_MEMORY_ALLOCS ?= OFF
 
 # Release build use glog. Everything else (local dev, CI tests) use absl logging through the root CMakeLists.txt cache
 # default.
@@ -41,7 +42,8 @@ HELIO_FLAGS = -DHELIO_RELEASE_FLAGS="-g" \
               -DWITH_SIMSIMD=$(WITH_SIMSIMD) \
               -DWITH_UNWIND=$(HELIO_WITH_UNWIND) \
               -DMARCH_OPT="$(HELIO_MARCH_OPT)" \
-              -DLEGACY_GLOG=$(LEGACY_GLOG)
+              -DLEGACY_GLOG=$(LEGACY_GLOG) \
+			  -DDF_ENABLE_MEMORY_TRACKING=$(TRACK_MEMORY_ALLOCS)
 
 .PHONY: default
 
