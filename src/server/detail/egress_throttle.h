@@ -21,9 +21,7 @@ class EgressThrottler {
   }
 
   // Updates the byte/second limit.
-  void SetLimit(uint64_t limit_bytes) {
-    limit_ = limit_bytes;
-  }
+  void SetLimit(uint64_t limit_bytes);
 
   // Record egress and whether it came from a high priority (out of order) write.
   void Record(uint64_t bytes, bool high_prio);

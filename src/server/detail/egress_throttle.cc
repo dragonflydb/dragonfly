@@ -24,7 +24,7 @@ constexpr uint64_t kLowPrioReserveDivisor = 10;  // 1/10 = 10%
 
 // Burst tolerance (GCRA tau): how far ahead of schedule a stream may run. Absorbs chunk
 // granularity and avoids tiny frequent sleeps without affecting the long-run average rate.
-constexpr uint64_t kBurstToleranceUs = 100'000;  // 100ms
+constexpr uint64_t kBurstToleranceUs = 50'000;  // 50ms
 
 constexpr uint64_t kMicrosPerSec = 1'000'000;
 
@@ -35,6 +35,11 @@ inline uint64_t NowUs() {
 }
 
 }  // namespace
+
+void EgressThrottler::SetLimit(uint64_t limit_bytes) {
+  // Scale limit back by tau (tolerance) so we never cross it
+  limit_ = limit_bytes * (1 - double(kBurstToleranceUs) / kMicrosPerSec);
+}
 
 void EgressThrottler::RecordAt(uint64_t bytes, bool high_prio, uint64_t now_us) {
   DCHECK_GT(limit_, 0u);

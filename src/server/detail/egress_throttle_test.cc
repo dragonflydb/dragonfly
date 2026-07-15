@@ -14,14 +14,14 @@ using namespace std;
 
 // Base timestamp (us) to mimic realistic absl::GetCurrentTimeNanos()/1000 magnitudes.
 constexpr uint64_t kT0 = 1'700'000'000'000'000ULL;
-constexpr uint64_t kTau = 100'000;             // matches kBurstToleranceUs (100ms) in the .cc
+constexpr uint64_t kTau = 50'000;              // matches kBurstToleranceUs (50ms) in the .cc
 constexpr uint64_t kMicrosPerSec = 1'000'000;  // matches the .cc
 
 // Under the limit the loop is never throttled.
 TEST(EgressThrottlerTest, ConformingProceeds) {
   EgressThrottler t{1'000'000};  // 1 MB/s
-  t.RecordAt(100'000, false, kT0);
-  EXPECT_EQ(t.WakeTime(kT0), 0u);  // only 0.1s worth, within burst tolerance
+  t.RecordAt(40'000, false, kT0);
+  EXPECT_EQ(t.WakeTime(kT0), 0u);  // only 0.04s worth, within burst tolerance
 }
 
 // Sending a full second of budget at once forces a wait until the schedule catches up.
