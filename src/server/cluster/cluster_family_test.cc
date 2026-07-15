@@ -27,11 +27,18 @@ using namespace testing;
 
 class ClusterFamilyTest : public BaseFamilyTest {
  public:
-  ClusterFamilyTest() {
-    SetTestFlag("cluster_mode", "yes");
-  }
+  ClusterFamilyTest() = default;
 
  protected:
+  void SetUp() override {
+    SetTestFlag("cluster_mode", "yes");
+    BaseFamilyTest::SetUp();
+  }
+
+  void TearDown() override {
+    BaseFamilyTest::TearDown();
+  }
+
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 
   string GetMyId() {
@@ -935,10 +942,18 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
 }
 
 class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
- public:
-  ClusterFamilyEmulatedTest() {
+ protected:
+  void SetUp() override {
     SetTestFlag("cluster_mode", "emulated");
     SetTestFlag("cluster_announce_ip", "fake-host");
+    SetTestFlag("announce_port", "6379");
+    BaseFamilyTest::SetUp();
+  }
+
+  void TearDown() override {
+    BaseFamilyTest::TearDown();
+    SetTestFlag("cluster_announce_ip", "");
+    SetTestFlag("announce_port", "0");
   }
 };
 
