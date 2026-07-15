@@ -72,13 +72,42 @@ constexpr char kIdNotFound[] = "syncid not found";
 constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
 
+ClusterNodeInfo GetLocalBindNodeInfo(const ServerFamily* server_family) {
+  for (auto* listener : server_family->GetListeners()) {
+    if (listener->IsMainInterface()) {
+      auto endpoint = listener->socket()->LocalEndpoint();
+      return {.id = {}, .ip = endpoint.address().to_string(), .port = endpoint.port()};
+    }
+  }
+
+  return {.id = {}, .ip = "127.0.0.1", .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))};
+}
+
+void ApplyAnnounceFlags(string_view my_id, const ClusterNodeInfo& local_node,
+                        ClusterShardInfos* shard_infos, bool use_local_bind_fallback) {
+  auto* node = shard_infos->Find(my_id);
+  if (node == nullptr) {
+    return;
+  }
+
+  std::string announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
+  uint16_t announce_port = absl::GetFlag(FLAGS_announce_port);
+
+  if (!use_local_bind_fallback && announce_ip.empty() && announce_port == 0) {
+    return;
+  }
+
+  if (announce_ip.empty()) {
+    announce_ip = local_node.ip;
+  }
+  node->ip = std::move(announce_ip);
+  node->port = announce_port == 0 ? local_node.port : announce_port;
+}
+
 }  // namespace
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
-
-  config_registry.RegisterMutable("cluster_announce_ip");
-  config_registry.RegisterMutable("announce_port");
 
   InitializeCluster();
 
@@ -89,6 +118,29 @@ ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(serve
     LOG(ERROR) << "Setting --cluster_node_id in emulated mode is unsupported";
     exit(1);
   }
+
+  auto announce_cb = [this](const absl::CommandLineFlag&) {
+    if (IsClusterEmulated()) {
+      return true;
+    }
+
+    util::fb2::LockGuard lk(set_config_mu);
+    auto current = ClusterConfig::Current();
+    if (!current) {
+      return true;
+    }
+
+    auto new_config = current->CloneWithChanges({}, {});
+    ApplyAnnounceFlags(id_, GetLocalBindNodeInfo(server_family_), &new_config->GetMutableConfig(),
+                       true);
+
+    server_family_->service().proactor_pool().AwaitFiberOnAll(
+        [&new_config](util::ProactorBase*) { ClusterConfig::SetCurrent(new_config); });
+    return true;
+  };
+
+  config_registry.RegisterMutable("cluster_announce_ip", announce_cb);
+  config_registry.RegisterMutable("announce_port", announce_cb);
 }
 
 void ClusterFamily::Shutdown() {
@@ -593,8 +645,9 @@ void ClusterFamily::DflyClusterConfig(CmdArgParser parser, CommandContext* cmd_c
         }
       }
     }
-
     new_config = new_config->CloneWithChanges(enable_slots, disable_slots);
+    ApplyAnnounceFlags(id_, GetLocalBindNodeInfo(server_family_), &new_config->GetMutableConfig(),
+                       false);
 
     // Capture prev config before SetCurrent so StartNewSlotMigrations can diff correctly.
     auto prev_config = ClusterConfig::Current();
