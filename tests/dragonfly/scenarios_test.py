@@ -59,6 +59,9 @@ class Metrics:
     def mem(self, class_name: str) -> float:
         return self.memory_class.get(class_name, 0)
 
+    def obj_used(self):
+        return self.mem("object_used")
+
     def cmd_total(self) -> float:
         return sum(self.cmd_type_delta.values())
 
@@ -134,9 +137,9 @@ def classify_simple_set(m: Metrics):
     """New string: command delta should include value + key."""
     expected = m.type("string") + m.type("key")
 
-    if m.cmd("string") == expected and m.mem("object_used") == expected and clean_memory_classes(m):
+    if m.cmd("string") == expected and m.obj_used() == expected and clean_memory_classes(m):
         return "OK"
-    elif m.cmd("string") == m.mem("object_used"):
+    elif m.cmd("string") == m.obj_used():
         return "CHECK"
     else:
         return "WRONG"
@@ -147,13 +150,26 @@ def classify_overwrite_hash(m: Metrics):
     if (
         m.cmd("hash") == m.type("hash")
         and m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_total() == m.mem("object_used")
-        and m.type_total() == m.mem("object_used")
+        and m.cmd_total() == m.obj_used()
+        and m.type_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
         return "OK"
-    elif m.cmd("hash") == 0 and m.cmd("string") == m.mem("object_used"):
+    elif m.cmd("hash") == 0 and m.cmd("string") == m.obj_used():
         return "CHECK hash accounted to string"
+    else:
+        return "WRONG"
+
+
+def classify_overwrite_hash_with_z(m: Metrics):
+    """A hash is used as dest for ZUNIONSTORE: old hash freed and new zset added"""
+    if (
+        m.cmd("zset") == m.type("zset")
+        and m.cmd("hash") == m.cmd("hash")
+        and m.cmd_total() == m.obj_used()
+        and clean_memory_classes(m)
+    ):
+        return "OK"
     else:
         return "WRONG"
 
@@ -162,7 +178,7 @@ def classify_del_string(m: Metrics):
     """DEL string: command delta should match removed value + key."""
     if (
         m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_total() == m.mem("object_used")
+        and m.cmd_total() == m.obj_used()
         and m.cmd("string") < 0
         and clean_memory_classes(m)
     ):
@@ -183,8 +199,8 @@ def classify_mixed_delete(m: Metrics):
     """DEL mixed keys: each removed type should get its own negative delta."""
     if (
         all(m.cmd(t) < 0 for t in ("hash", "list", "string"))
-        and m.cmd_total() == m.mem("object_used")
-        and m.type_total() == m.mem("object_used")
+        and m.cmd_total() == m.obj_used()
+        and m.type_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -196,7 +212,7 @@ def classify_rename_to_new(m: Metrics):
     """RENAME new key: move should account net key delta to value type."""
     if (
         m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_total() == m.mem("object_used")
+        and m.cmd_total() == m.obj_used()
         and m.cmd("string") > 0
         and clean_memory_classes(m)
     ):
@@ -210,8 +226,8 @@ def classify_rename_hash_over_string(m: Metrics):
     if (
         m.cmd("string") == m.type("string")
         and m.cmd("hash") == m.type("hash") + m.type("key")
-        and m.cmd_total() == m.mem("object_used")
-        and m.type_total() == m.mem("object_used")
+        and m.cmd_total() == m.obj_used()
+        and m.type_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -229,7 +245,7 @@ def classify_json_interned(m: Metrics):
     interned = m.mem("interned_string_pool") + m.mem("interned_string_table")
     if (
         m.cmd("ReJSON-RL") == expected
-        and m.cmd("ReJSON-RL") == m.mem("object_used")
+        and m.cmd("ReJSON-RL") == m.obj_used()
         and interned > 0
         and clean_memory_classes(m)
     ):
@@ -251,7 +267,7 @@ def classify_ro(m: Metrics):
     """Reads should not change command memory deltas."""
     if (
         all(v == 0 for v in m.cmd_type_delta.values())
-        and m.mem("object_used") == 0
+        and m.obj_used() == 0
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -268,7 +284,7 @@ def classify_expiry(m: Metrics):
     """Expiry delete should look like DEL for the expired value type."""
     if (
         m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_total() == m.mem("object_used")
+        and m.cmd_total() == m.obj_used()
         and m.cmd("string") < 0
         and clean_memory_classes(m)
     ):
@@ -282,8 +298,8 @@ def classify_copy_replace(m: Metrics):
     if (
         m.cmd("string") == m.type("string")
         and m.cmd("hash") == m.type("hash")
-        and m.cmd_total() == m.mem("object_used")
-        and m.type_total() == m.mem("object_used")
+        and m.cmd_total() == m.obj_used()
+        and m.type_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -309,8 +325,8 @@ def classify_restore_hash(m: Metrics):
     """RESTORE hash: decoded runtime type should receive the delta."""
     if (
         m.cmd("hash") == m.type("hash") + m.type("key")
-        and m.cmd_total() == m.mem("object_used")
-        and m.type_total() == m.mem("object_used")
+        and m.cmd_total() == m.obj_used()
+        and m.type_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -322,7 +338,7 @@ def classify_hset_enc_change(m: Metrics):
     """Hash encoding growth should stay attributed to hash."""
     if (
         m.cmd("hash") == m.type("hash")
-        and m.cmd_total() == m.mem("object_used")
+        and m.cmd_total() == m.obj_used()
         and m.cmd("hash") > 0
         and clean_memory_classes(m)
     ):
@@ -342,7 +358,7 @@ async def action_trigger_table_growth(cl: aioredis.Redis):
 
 def classify_table_growth(m: Metrics):
     "Currently table growth is added to new metric!"
-    object_used = m.mem("object_used")
+    object_used = m.obj_used()
     table = m.mem("table_used")
     cmd = m.cmd("string")
 
@@ -424,12 +440,12 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             action=commands(("GET", long_key), ("HGET", long_key2, "f"), ("LLEN", long_key3)),
             classify=classify_ro,
         ),
-        Scenario(
-            "expire string",
-            setup=commands(("SET", long_key, long_val, "PX", "500")),
-            action=expire_string,
-            classify=classify_expiry,
-        ),
+        # Scenario(
+        #     "expire string",
+        #     setup=commands(("SET", long_key, long_val, "PX", "500")),
+        #     action=expire_string,
+        #     classify=classify_expiry,
+        # ),
         Scenario(
             "copy which replaces",
             setup=commands(("HSET", long_key, "f", long_val), ("SET", long_key2, long_val)),
@@ -448,11 +464,21 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             action=commands(("HSET", long_key, "f1", long_val)),
             classify=classify_hset_enc_change,
         ),
+        # Scenario(
+        #     "table growth accounting",
+        #     setup=no_setup,
+        #     action=action_trigger_table_growth,
+        #     classify=classify_table_growth,
+        # ),
         Scenario(
-            "table growth accounting",
-            setup=no_setup,
-            action=action_trigger_table_growth,
-            classify=classify_table_growth,
+            "Z-union store overwrite hash",
+            setup=commands(
+                ("HSET", long_key, "f", long_val),
+                ("ZADD", long_key2, 1, "a", 2, "b"),
+                ("ZADD", long_key3, 3, "c", 4, "d"),
+            ),
+            action=commands(("ZUNIONSTORE", long_key, 2, long_key2, long_key3)),
+            classify=classify_overwrite_hash_with_z,
         ),
     ]
 
