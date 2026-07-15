@@ -239,7 +239,6 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
   EXPECT_EQ(Run({"cluster", "nodes"}),
             GetMyId() + " updated-host:6380@6380 myself,master - 0 0 0 connected 0-16383\n");
 
-  SetTestFlag("port", "6379");
   EXPECT_EQ(RunPrivileged({"config", "set", "cluster_announce_ip", ""}), "OK");
   EXPECT_EQ(RunPrivileged({"config", "set", "announce_port", "0"}), "OK");
 
@@ -251,9 +250,9 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
                                             RespArray(ElementsAre(                              //
                                                 RespArray(ElementsAre(                          //
                                                     "id", GetMyId(),                            //
-                                                    "endpoint", "127.0.0.1",                    //
-                                                    "ip", "127.0.0.1",                          //
-                                                    "port", IntArg(6379),                       //
+                                                    "endpoint", "updated-host",                 //
+                                                    "ip", "updated-host",                       //
+                                                    "port", IntArg(6380),                       //
                                                     "role", "master",                           //
                                                     "replication-offset", IntArg(0),            //
                                                     "health", "online"))))))));
@@ -262,12 +261,12 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
               RespElementsAre(RespArray(ElementsAre(IntArg(0),              //
                                                     IntArg(16'383),         //
                                                     RespArray(ElementsAre(  //
-                                                        "127.0.0.1",        //
-                                                        IntArg(6'379),      //
+                                                        "updated-host",     //
+                                                        IntArg(6'380),      //
                                                         GetMyId()))))));
 
   EXPECT_EQ(Run({"cluster", "nodes"}),
-            GetMyId() + " 127.0.0.1:6379@6379 myself,master - 0 0 0 connected 0-16383\n");
+            GetMyId() + " updated-host:6380@6380 myself,master - 0 0 0 connected 0-16383\n");
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFull) {
