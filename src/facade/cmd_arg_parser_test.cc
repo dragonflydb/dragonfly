@@ -206,125 +206,6 @@ TEST_F(CmdArgParserTest, IgnoreCase) {
   EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "world"sv);
 }
 
-TEST_F(CmdArgParserTest, Apply) {
-  // All option shapes: Exist sets a bool, Tag-with-one-field, Tag-with-two-fields.
-  {
-    auto parser = Make({"FLAG", "COUNT", "5", "LIMIT", "10", "20"});
-
-    bool flag = false;
-    uint32_t count = 0;
-    uint32_t offset = 0;
-    uint32_t limit = 0;
-
-    parser.Apply(Exist("FLAG", &flag), Tag("COUNT", &count), Tag("LIMIT", &offset, &limit));
-
-    EXPECT_TRUE(flag);
-    EXPECT_EQ(count, 5u);
-    EXPECT_EQ(offset, 10u);
-    EXPECT_EQ(limit, 20u);
-    EXPECT_FALSE(parser.HasError());
-  }
-
-  // Unknown option is left unconsumed (no error). The caller decides what to do next.
-  {
-    auto parser = Make({"COUNT", "5", "BOGUS"});
-
-    uint32_t count = 0;
-    parser.Apply(Tag("COUNT", &count));
-
-    EXPECT_EQ(count, 5u);
-    EXPECT_FALSE(parser.HasError());
-    EXPECT_TRUE(parser.HasNext());
-    EXPECT_EQ(parser.Peek(), "BOGUS");
-  }
-
-  // Case-insensitive matching (consistent with Check).
-  {
-    auto parser = Make({"count", "7"});
-
-    uint32_t count = 0;
-    parser.Apply(Tag("COUNT", &count));
-
-    EXPECT_EQ(count, 7u);
-    EXPECT_FALSE(parser.HasError());
-  }
-
-  // Invalid integer in a Tag arg propagates the error.
-  {
-    auto parser = Make({"COUNT", "NAN"});
-
-    uint32_t count = 0;
-    parser.Apply(Tag("COUNT", &count));
-
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::INVALID_INT);
-  }
-}
-
-TEST_F(CmdArgParserTest, ApplyOrSkip) {
-  // ApplyOrSkip silently skips any unknown arg (1 at a time) and keeps going.
-  {
-    auto parser = Make({"BOGUS", "COUNT", "5", "MORE_BOGUS", "STUFF"});
-
-    uint32_t count = 0;
-    parser.ApplyOrSkip(Tag("COUNT", &count));
-
-    EXPECT_EQ(count, 5u);
-    EXPECT_FALSE(parser.HasError());
-    EXPECT_FALSE(parser.HasNext());  // everything consumed
-  }
-  // Empty input — no error, no work.
-  {
-    auto parser = Make({});
-    uint32_t count = 0;
-    parser.ApplyOrSkip(Tag("COUNT", &count));
-    EXPECT_FALSE(parser.HasError());
-    EXPECT_FALSE(parser.HasNext());
-  }
-  // Trailing unknown at end-of-args: the skip must not trip OUT_OF_BOUNDS.
-  {
-    auto parser = Make({"BOGUS"});
-    uint32_t count = 0;
-    parser.ApplyOrSkip(Tag("COUNT", &count));
-    EXPECT_FALSE(parser.HasError());
-    EXPECT_FALSE(parser.HasNext());
-  }
-}
-
-TEST_F(CmdArgParserTest, ApplyTagMissingValue) {
-  // A matched tag with missing trailing value(s) must surface an error, not be silently skipped.
-  // This guards against a subtle interaction with ApplyOrSkip: if TagOpt treated "tag matches,
-  // values missing" as "no match", the skip path would swallow the malformed option.
-  {
-    auto parser = Make({"COUNT"});  // tag matches, value missing
-    uint32_t count = 0;
-    parser.Apply(Tag("COUNT", &count));
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
-  }
-  {
-    auto parser = Make({"COUNT"});
-    uint32_t count = 0;
-    parser.ApplyOrSkip(Tag("COUNT", &count));
-    // Tag must have been consumed (not left for Skip to swallow silently).
-    EXPECT_FALSE(parser.HasNext());
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
-  }
-  // Also guard the two-field case: LIMIT with only one trailing value.
-  {
-    auto parser = Make({"LIMIT", "10"});  // needs offset + limit
-    uint32_t offset = 0, limit = 0;
-    parser.Apply(Tag("LIMIT", &offset, &limit));
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
-  }
-}
-
 TEST_F(CmdArgParserTest, ReportBeforeAnyNext) {
   // Report(code) at cur_i_ == 0 must clamp the error index to 0 rather than underflow to SIZE_MAX.
   auto parser = Make({"x"});
@@ -332,253 +213,6 @@ TEST_F(CmdArgParserTest, ReportBeforeAnyNext) {
   auto err = parser.TakeError();
   EXPECT_TRUE(err);
   EXPECT_EQ(err.index, 0u);
-}
-
-TEST_F(CmdArgParserTest, ApplyLambda) {
-  // Tag() with a lambda lets callers run custom parsing on match. Useful for side-effectful cases
-  // like push_back or toggling a bool to false.
-  auto parser = Make({"GET", "p1", "ASC", "GET", "p2"});
-
-  std::vector<std::string_view> patterns;
-  bool reversed = true;
-
-  parser.Apply(
-      Tag("ASC", [&](CmdArgParser*) { reversed = false; }),
-      Tag("GET", [&](CmdArgParser* p) { patterns.push_back(p->Next<std::string_view>()); }));
-
-  EXPECT_FALSE(reversed);
-  ASSERT_EQ(patterns.size(), 2u);
-  EXPECT_EQ(patterns[0], "p1");
-  EXPECT_EQ(patterns[1], "p2");
-  EXPECT_FALSE(parser.HasError());
-}
-
-TEST_F(CmdArgParserTest, ApplyMap) {
-  // Map(&field, tag, value, ...) — matches any tag and writes the corresponding value.
-  // Standalone Map allows repeated matches (last wins); wrap in OneOf to require at most one.
-  {
-    auto parser = Make({"DESC"});
-    bool reversed = false;
-    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
-    EXPECT_TRUE(reversed);
-    EXPECT_FALSE(parser.HasError());
-  }
-  {
-    auto parser = Make({"ASC"});
-    bool reversed = true;
-    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
-    EXPECT_FALSE(reversed);
-    EXPECT_FALSE(parser.HasError());
-  }
-  // Unrelated tag leaves field untouched and stops Apply.
-  {
-    auto parser = Make({"OTHER"});
-    bool reversed = false;
-    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
-    EXPECT_FALSE(reversed);
-    EXPECT_TRUE(parser.HasNext());
-  }
-  // Standalone Map allows repeated matches — last wins, no error. This matches Redis SORT
-  // semantics where "ASC DESC" is equivalent to "DESC".
-  {
-    auto parser = Make({"DESC", "ASC"});
-    bool reversed = true;
-    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
-    EXPECT_FALSE(reversed);  // ASC came last
-    EXPECT_FALSE(parser.HasError());
-  }
-  {
-    auto parser = Make({"ASC", "DESC"});
-    bool reversed = false;
-    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
-    EXPECT_TRUE(reversed);  // DESC came last
-    EXPECT_FALSE(parser.HasError());
-  }
-  // OneOf + Map — DESC followed by ASC is a mutex violation.
-  {
-    auto parser = Make({"DESC", "ASC"});
-    bool reversed = false;
-    parser.Apply(OneOf(Map(&reversed, "DESC", true, "ASC", false)));
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
-  }
-}
-
-TEST_F(CmdArgParserTest, ApplyTagNested) {
-  // Tag(tag, inner_opt) — outer tag matches, then inner option runs against the next arg.
-  // If the inner doesn't match, INVALID_CASES is reported (the inner keyword is required).
-  enum class Mode { A, B, C };
-  {
-    auto parser = Make({"MODE", "B"});
-    Mode mode = Mode::A;
-    parser.Apply(Tag("MODE", Map(&mode, "A", Mode::A, "B", Mode::B, "C", Mode::C)));
-    EXPECT_EQ(mode, Mode::B);
-    EXPECT_FALSE(parser.HasError());
-  }
-  // Unknown inner tag -> INVALID_CASES.
-  {
-    auto parser = Make({"MODE", "BOGUS"});
-    Mode mode = Mode::A;
-    parser.Apply(Tag("MODE", Map(&mode, "A", Mode::A, "B", Mode::B)));
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
-  }
-  // Outer tag absent -> no effect, no error.
-  {
-    auto parser = Make({});
-    Mode mode = Mode::A;
-    parser.Apply(Tag("MODE", Map(&mode, "A", Mode::A, "B", Mode::B)));
-    EXPECT_EQ(mode, Mode::A);
-    EXPECT_FALSE(parser.HasError());
-  }
-}
-
-TEST_F(CmdArgParserTest, ApplyTagIf) {
-  // If(cond, opt) behaves like `opt` when cond is true, and never matches when false.
-  // Use to gate an option on a runtime flag (e.g. is_read_only).
-
-  // cond=true -> delegate to inner (matches and sets field).
-  {
-    auto parser = Make({"STORE", "dest"});
-    std::string_view store;
-    parser.Apply(If(true, Tag("STORE", &store)));
-    EXPECT_EQ(store, "dest");
-    EXPECT_FALSE(parser.HasError());
-  }
-
-  // cond=false -> inner is skipped. Apply stops at the (now unmatched) arg; Finalize reports
-  // UNPROCESSED so the caller can surface a syntax error.
-  {
-    auto parser = Make({"STORE", "dest"});
-    std::string_view store;
-    parser.Apply(If(false, Tag("STORE", &store)));
-    EXPECT_EQ(store, "");
-    EXPECT_FALSE(parser.HasError());
-    EXPECT_TRUE(parser.HasNext());
-    EXPECT_FALSE(parser.Finalize());
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::UNPROCESSED);
-  }
-
-  // Composes: cond=false + Exist - does not toggle the bool even when the tag is present.
-  {
-    auto parser = Make({"FLAG"});
-    bool flag = false;
-    parser.Apply(If(false, Exist("FLAG", &flag)));
-    EXPECT_FALSE(flag);
-  }
-}
-
-TEST_F(CmdArgParserTest, ApplyOneOf) {
-  // OneOf groups mutually-exclusive options. Zero or one may match across the Apply loop.
-  // A second match reports an error instead of being quietly accepted.
-
-  // Zero matches — fine.
-  {
-    auto parser = Make({});
-    bool nx = false, xx = false;
-    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)));
-    EXPECT_FALSE(nx);
-    EXPECT_FALSE(xx);
-    EXPECT_FALSE(parser.HasError());
-  }
-
-  // Single match — fine.
-  {
-    auto parser = Make({"NX"});
-    bool nx = false, xx = false;
-    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)));
-    EXPECT_TRUE(nx);
-    EXPECT_FALSE(xx);
-    EXPECT_FALSE(parser.HasError());
-  }
-
-  // Two different members of the group match -> error.
-  {
-    auto parser = Make({"NX", "XX"});
-    bool nx = false, xx = false;
-    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)));
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
-  }
-
-  // Same member twice also counts as a second match -> error.
-  {
-    auto parser = Make({"NX", "NX"});
-    bool nx = false, xx = false;
-    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)));
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
-  }
-
-  // OneOf composes with other Apply options. Unrelated tags are not affected.
-  {
-    auto parser = Make({"NX", "COUNT", "5"});
-    bool nx = false, xx = false;
-    uint32_t count = 0;
-    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)), Tag("COUNT", &count));
-    EXPECT_TRUE(nx);
-    EXPECT_EQ(count, 5u);
-    EXPECT_FALSE(parser.HasError());
-  }
-
-  // .Err(msg) reports a custom conflict message instead of the generic syntax error.
-  {
-    auto parser = Make({"NX", "XX"});
-    bool nx = false, xx = false;
-    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)).Err("NX and XX are incompatible"));
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::CUSTOM_ERROR);
-    EXPECT_EQ(err.MakeReply().ToSv(), "NX and XX are incompatible");
-  }
-
-  // .Err() owns the message: a temporary/short-lived source may be destroyed before Apply runs.
-  {
-    bool nx = false, xx = false;
-    auto opt = [&] {
-      std::string tmp = "dynamic conflict";  // destroyed when this lambda returns
-      return OneOf(Exist("NX", &nx), Exist("XX", &xx)).Err(tmp);
-    }();
-    auto parser = Make({"NX", "XX"});
-    parser.Apply(opt);
-    EXPECT_EQ(parser.TakeError().MakeReply().ToSv(), "dynamic conflict");
-  }
-}
-
-TEST_F(CmdArgParserTest, ApplyOptional) {
-  // Tag present -> optional engaged.
-  {
-    auto parser = Make({"COUNT", "5"});
-    std::optional<uint32_t> count;
-    parser.Apply(Tag("COUNT", &count));
-    ASSERT_TRUE(count.has_value());
-    EXPECT_EQ(*count, 5u);
-    EXPECT_FALSE(parser.HasError());
-  }
-  // Tag absent -> optional stays empty.
-  {
-    auto parser = Make({});
-    std::optional<uint32_t> count;
-    parser.Apply(Tag("COUNT", &count));
-    EXPECT_FALSE(count.has_value());
-    EXPECT_FALSE(parser.HasError());
-  }
-  // Invalid value -> INVALID_INT reported. The optional's state on error is undefined; callers
-  // must check for the parse error first.
-  {
-    auto parser = Make({"COUNT", "NAN"});
-    std::optional<uint32_t> count;
-    parser.Apply(Tag("COUNT", &count));
-    auto err = parser.TakeError();
-    EXPECT_TRUE(err);
-    EXPECT_EQ(err.type, CmdArgParser::INVALID_INT);
-  }
 }
 
 TEST_F(CmdArgParserTest, ValidatedRules) {
@@ -738,6 +372,42 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
     EXPECT_TRUE(err);
     EXPECT_EQ(err.type, CmdArgParser::INVALID_INT);
     EXPECT_EQ(err.index, 0);
+  }
+}
+
+TEST_F(CmdArgParserTest, PositiveInt) {
+  {
+    auto parser = Make({"1", "42"});
+    EXPECT_EQ(parser.Next<Positive<int64_t>>().value, 1);
+    EXPECT_EQ(parser.Next<Positive<int64_t>>().value, 42);
+    EXPECT_FALSE(parser.HasError());
+  }
+
+  {
+    auto parser = Make({"0"});
+    parser.Next<Positive<int64_t>>();
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_INT);
+  }
+
+  {
+    auto parser = Make({"256"});
+    parser.Next<Positive<uint8_t>>();
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_INT);
+  }
+}
+
+TEST_F(CmdArgParserTest, NonNegativeInt) {
+  {
+    auto parser = Make({"0", "42"});
+    EXPECT_EQ(parser.Next<NonNegativeInt<int64_t>>().value, 0);
+    EXPECT_EQ(parser.Next<NonNegativeInt<int64_t>>().value, 42);
+    EXPECT_FALSE(parser.HasError());
+  }
+
+  {
+    auto parser = Make({"-1"});
+    parser.Next<NonNegativeInt<int64_t>>();
+    EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_INT);
   }
 }
 
@@ -1014,17 +684,17 @@ struct SetLike {
 enum SetLikeFlags : uint16_t { kNx = 1 << 0, kXx = 1 << 1, kGet = 1 << 2 };
 
 consteval auto MakeSetLikeGrammar() {
-  return Compile(Args(&SetLike::key, &SetLike::value),
-                 Options(OneOf("NX and XX are incompatible", Flag("NX", &SetLike::flags, kNx),
-                               Flag("XX", &SetLike::flags, kXx)),
-                         Action(
-                             "EX",
-                             +[](CmdArgParser* p, SetLike* o) {
-                               o->ttl = p->Next<int64_t>();
-                               o->ttl_set = true;
-                             }),
-                         Flag("GET", &SetLike::flags, kGet), Field("MCFLAGS", &SetLike::mc),
-                         Field("LIMIT", &SetLike::offset, &SetLike::count)));
+  return Compile(
+      Args(&SetLike::key, &SetLike::value),
+      Options(OneOf("NX and XX are incompatible", Flags(&SetLike::flags, "NX", kNx, "XX", kXx)),
+              Action(
+                  "EX",
+                  +[](CmdArgParser* p, SetLike* o) {
+                    o->ttl = p->Next<int64_t>();
+                    o->ttl_set = true;
+                  }),
+              Flags(&SetLike::flags, "GET", kGet), Field("MCFLAGS", &SetLike::mc),
+              Field("LIMIT", &SetLike::offset, &SetLike::count)));
 }
 }  // namespace
 
@@ -1067,10 +737,11 @@ TEST_F(CmdArgParserTest, CapGrammar) {
     EXPECT_TRUE(err);
     EXPECT_EQ(err.MakeReply().ToSv(), "NX and XX are incompatible");
   }
-  {
+  {  // the same alternative twice is also a conflict (OneOf rejects any second match, like Redis)
     SetLike o;
-    EXPECT_FALSE(apply({"k", "v", "NX", "NX"}, &o));
-    EXPECT_EQ(o.flags, kNx);
+    auto err = apply({"k", "v", "NX", "NX"}, &o);
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.MakeReply().ToSv(), "NX and XX are incompatible");
   }
   {
     SetLike o;
@@ -1118,6 +789,9 @@ consteval auto MakeHeadTailGrammar() {
 
 TEST_F(CmdArgParserTest, CapGrammarPositionalAfterOptions) {
   static constexpr auto kGrammar = MakeHeadTailGrammar();
+  static constexpr auto kSkipGrammar = Compile(Skip(), Args(&HeadTail::tail));
+  static constexpr auto kFallbackSkipGrammar =
+      Compile(Options(Exist("F", &HeadTail::flag), Skip()));
   auto run = [&](std::initializer_list<std::string_view> args, HeadTail* o) {
     auto parser = Make(args);
     kGrammar.Apply(&parser, o);
@@ -1139,17 +813,32 @@ TEST_F(CmdArgParserTest, CapGrammarPositionalAfterOptions) {
     EXPECT_FALSE(o.flag);
     EXPECT_EQ(o.tail, "t");
   }
+  {
+    auto parser = Make({"ignored", "tail"});
+    auto target = kSkipGrammar.Apply(&parser);
+    EXPECT_TRUE(parser.Finalize());
+    EXPECT_EQ(target.tail, "tail");
+  }
+  {
+    auto parser = Make({"unknown", "F", "another"});
+    auto target = kFallbackSkipGrammar.Apply(&parser);
+    EXPECT_TRUE(parser.Finalize());
+    EXPECT_TRUE(target.flag);
+  }
 }
 
 namespace {
-enum class Dir { kAsc, kDesc };
+enum class Dir { kUnset, kAsc, kDesc };
 struct MapIf {
   Dir dir = Dir::kAsc;
+  Dir switched_dir = Dir::kUnset;
   bool read_only = false;
   std::string_view store;
 };
 consteval auto MakeMapIfGrammar() {
   return Compile(Options(Map(&MapIf::dir, "ASC", Dir::kAsc, "DESC", Dir::kDesc),
+                         OneOf("direction conflict", Map(&MapIf::switched_dir, "UP", Dir::kAsc),
+                               Map(&MapIf::switched_dir, "DOWN", Dir::kDesc)),
                          IfNot(&MapIf::read_only, Field("STORE", &MapIf::store))));
 }
 }  // namespace
@@ -1179,6 +868,68 @@ TEST_F(CmdArgParserTest, CapGrammarMapIf) {
     o.read_only = true;
     EXPECT_TRUE(run({"STORE", "dst"}, &o));
     EXPECT_EQ(o.store, "");
+  }
+  {  // OneOf(Map) selects once and writes the mapped value
+    MapIf o;
+    EXPECT_FALSE(run({"DOWN"}, &o));
+    EXPECT_EQ(o.switched_dir, Dir::kDesc);
+  }
+  {  // repeating the same option is now a conflict, matching Redis
+    MapIf o;
+    auto err = run({"DOWN", "DOWN"}, &o);
+    EXPECT_EQ(err.MakeReply().ToSv(), "direction conflict");
+  }
+  {
+    MapIf o;
+    auto err = run({"DOWN", "UP"}, &o);
+    EXPECT_EQ(err.MakeReply().ToSv(), "direction conflict");
+  }
+}
+
+namespace {
+struct IntoOptTarget {
+  struct Limit {
+    uint32_t offset = 0;
+    uint32_t count = 0;
+  };
+  std::optional<Limit> limit;
+  bool alpha = false;
+};
+consteval auto MakeIntoOptionalGrammar() {
+  return Compile(Options(Exist("ALPHA", &IntoOptTarget::alpha),
+                         Into(&IntoOptTarget::limit, Field("LIMIT", &IntoOptTarget::Limit::offset,
+                                                           &IntoOptTarget::Limit::count))));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarIntoOptional) {
+  static constexpr auto kGrammar = MakeIntoOptionalGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, IntoOptTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {  // keyword absent -> optional stays disengaged
+    IntoOptTarget o;
+    EXPECT_FALSE(run({"ALPHA"}, &o));
+    EXPECT_TRUE(o.alpha);
+    EXPECT_FALSE(o.limit.has_value());
+  }
+  {  // keyword present -> optional engaged and members read
+    IntoOptTarget o;
+    EXPECT_FALSE(run({"LIMIT", "2", "5"}, &o));
+    ASSERT_TRUE(o.limit.has_value());
+    EXPECT_EQ(o.limit->offset, 2u);
+    EXPECT_EQ(o.limit->count, 5u);
+  }
+  {  // repeated keyword -> last wins, still a single engaged value
+    IntoOptTarget o;
+    EXPECT_FALSE(run({"LIMIT", "1", "1", "LIMIT", "3", "4"}, &o));
+    ASSERT_TRUE(o.limit.has_value());
+    EXPECT_EQ(o.limit->offset, 3u);
+    EXPECT_EQ(o.limit->count, 4u);
   }
 }
 
@@ -1235,40 +986,113 @@ TEST_F(CmdArgParserTest, CapGrammarChoice) {
   }
 }
 
+// TagValue: a keyword sets a discriminant member to a compile-time value and reads the next arg
+// into another member (e.g. the EX/PX expiry keywords). Wrapped in OneOf for mutual exclusion.
+namespace {
+enum class Unit { kSec, kMs };
+struct TvTarget {
+  Unit unit = Unit::kSec;
+  std::optional<int64_t> amount;
+};
+consteval auto MakeTagValueGrammar() {
+  return Compile(Options(OneOf("", TagValue("EX", &TvTarget::unit, Unit::kSec, &TvTarget::amount),
+                               TagValue("PX", &TvTarget::unit, Unit::kMs, &TvTarget::amount))));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarTagValue) {
+  static constexpr auto kGrammar = MakeTagValueGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, TvTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {  // sets both the unit discriminant and the amount
+    TvTarget o;
+    EXPECT_FALSE(run({"PX", "1500"}, &o));
+    EXPECT_EQ(o.unit, Unit::kMs);
+    EXPECT_EQ(o.amount, 1500);
+  }
+  {  // a second (different) option conflicts
+    TvTarget o;
+    EXPECT_TRUE(run({"EX", "1", "PX", "2"}, &o));
+  }
+  {  // repeating the same option also conflicts
+    TvTarget o;
+    EXPECT_TRUE(run({"EX", "1", "EX", "2"}, &o));
+  }
+  {  // missing value -> error
+    TvTarget o;
+    EXPECT_TRUE(run({"EX"}, &o));
+  }
+}
+
 namespace {
 
 enum BenchFlags : uint16_t { kBNx = 1 << 0, kBXx = 1 << 1, kBGet = 1 << 2 };
-enum class BenchDir : uint8_t { kAsc, kDesc };
+enum class BenchUnit : uint8_t { kNone, kSec, kMs };
+enum class BenchSelection : uint8_t { kUnset, kFirst, kSecond };
 
-struct BenchTarget {
-  std::string_view key;
-  std::string_view value;
-  uint16_t flags = 0;
-  bool stick = false;
-  bool keepttl = false;
-  int64_t ttl = 0;
-  bool ttl_set = false;
-  uint32_t mc = 0;
-  BenchDir dir = BenchDir::kAsc;
-  bool read_only = false;
-  std::string_view store;
+struct BenchNested {
+  uint32_t value = 0;
 };
 
+// One member per cap rule so the benchmark grammar exercises every primitive exactly once.
+struct BenchTarget {
+  std::string_view head;
+  std::string_view tail;
+  bool one = false;
+  bool one_alt = false;
+  bool if_enabled = true;
+  bool if_disabled = false;
+  bool if_seen = false;
+  bool if_not_seen = false;
+  uint16_t flags = 0;
+  uint32_t field = 0;
+  uint32_t pair_first = 0;
+  uint32_t pair_second = 0;
+  uint32_t positive = 0;
+  uint32_t action = 0;
+  int64_t ttl = 0;
+  int64_t positive_ttl = 0;
+  BenchUnit unit = BenchUnit::kNone;
+  BenchUnit positive_unit = BenchUnit::kNone;
+  BenchSelection mapped = BenchSelection::kUnset;
+  BenchSelection choice = BenchSelection::kUnset;
+  BenchNested nested;
+  std::optional<BenchNested> opt_nested;
+};
+
+void ParseBenchAction(CmdArgParser* parser, BenchTarget* target) {
+  target->action += parser->Next<uint32_t>();
+}
+
+// Uses every cap rule once: Args, Options with a reserved tail, OneOf, Exist, Field, multi-member
+// Field, Field<Parsed>, Action, TagValue, TagValue<Parsed>, Map, Flags, Choice, If, IfNot, Into
+// into a plain and an optional member, and a Skip fallback.
 consteval auto MakeBenchGrammar() {
-  auto expiry = +[](CmdArgParser* p, BenchTarget* o) {
-    o->ttl = p->Next<int64_t>();
-    o->ttl_set = true;
-  };
   return Compile(
-      Args(&BenchTarget::key, &BenchTarget::value),
-      Options(
-          OneOf("", Flag("NX", &BenchTarget::flags, kBNx), Flag("XX", &BenchTarget::flags, kBXx)),
-          Action("EX", expiry), Action("PX", expiry), Action("EXAT", expiry),
-          Action("PXAT", expiry), Flag("GET", &BenchTarget::flags, kBGet),
-          Map(&BenchTarget::dir, "ASC", BenchDir::kAsc, "DESC", BenchDir::kDesc),
-          IfNot(&BenchTarget::read_only, Field("STORE", &BenchTarget::store)),
-          Exist("STICK", &BenchTarget::stick), Exist("KEEPTTL", &BenchTarget::keepttl),
-          Field("MCFLAGS", &BenchTarget::mc)));
+      Args(&BenchTarget::head),
+      Options(1,
+              OneOf("", Exist("ONE", &BenchTarget::one), Exist("ONE_ALT", &BenchTarget::one_alt)),
+              Field("FIELD", &BenchTarget::field),
+              Field("PAIR", &BenchTarget::pair_first, &BenchTarget::pair_second),
+              Field<Positive<uint32_t>>("POSITIVE", &BenchTarget::positive, "positive"),
+              Action("ACTION", ParseBenchAction),
+              TagValue("TV", &BenchTarget::unit, BenchUnit::kSec, &BenchTarget::ttl),
+              TagValue<Positive<int64_t>>("TVP", &BenchTarget::positive_unit, BenchUnit::kMs,
+                                          &BenchTarget::positive_ttl),
+              Map(&BenchTarget::mapped, "MAP", BenchSelection::kFirst),
+              Flags(&BenchTarget::flags, "FLAG", kBNx),
+              Choice("CHOICE", &BenchTarget::choice, "FIRST", BenchSelection::kFirst, "SECOND",
+                     BenchSelection::kSecond),
+              If(&BenchTarget::if_enabled, Exist("IF", &BenchTarget::if_seen)),
+              IfNot(&BenchTarget::if_disabled, Exist("IF_NOT", &BenchTarget::if_not_seen)),
+              Into(&BenchTarget::nested, Field("NESTED", &BenchNested::value)),
+              Into(&BenchTarget::opt_nested, Field("OPT_NESTED", &BenchNested::value)), Skip()),
+      Args(&BenchTarget::tail));
 }
 
 cmn::BackedArguments MakeStorage(std::initializer_list<std::string_view> args) {
@@ -1278,146 +1102,176 @@ cmn::BackedArguments MakeStorage(std::initializer_list<std::string_view> args) {
   return s;
 }
 
-CmdArgParser BenchArgs(bool with_options) {
-  static const cmn::BackedArguments kNoOpts = MakeStorage({"mykey", "myval"});
-  static const cmn::BackedArguments kOpts = MakeStorage(
-      {"mykey", "myval", "NX", "EX", "100", "GET", "DESC", "STORE", "dst", "MCFLAGS", "7"});
-  return CmdArgParser{with_options ? kOpts : kNoOpts};
+// The single input that exercises every rule of MakeBenchGrammar once (SKIP hits the Skip
+// fallback).
+CmdArgParser BenchArgs() {
+  static const cmn::BackedArguments kArgs = MakeStorage(
+      {"head",   "ONE", "FIELD",  "1",      "PAIR", "2",          "3",   "POSITIVE", "4",
+       "ACTION", "5",   "TV",     "6",      "TVP",  "7",          "MAP", "FLAG",     "CHOICE",
+       "FIRST",  "IF",  "IF_NOT", "NESTED", "8",    "OPT_NESTED", "9",   "SKIP",     "tail"});
+  return CmdArgParser{kArgs};
 }
 
 }  // namespace
 
-static void BM_RuntimeParse(benchmark::State& state) {
-  CmdArgParser proto = BenchArgs(state.range(0));
-  for (auto _ : state) {
-    CmdArgParser parser = proto;
-    BenchTarget o;
-    o.key = parser.Next();
-    o.value = parser.Next();
-    auto expiry = [&](CmdArgParser* p) {
-      o.ttl = p->Next<int64_t>();
-      o.ttl_set = true;
-    };
-    parser.Apply(OneOf(Tag("NX", [&](CmdArgParser*) { o.flags |= kBNx; }),
-                       Tag("XX", [&](CmdArgParser*) { o.flags |= kBXx; })),
-                 OneOf(Tag("EX", expiry), Tag("PX", expiry), Tag("EXAT", expiry),
-                       Tag("PXAT", expiry), Exist("KEEPTTL", &o.keepttl)),
-                 Tag("GET", [&](CmdArgParser*) { o.flags |= kBGet; }),
-                 Map(&o.dir, "ASC", BenchDir::kAsc, "DESC", BenchDir::kDesc),
-                 If(!o.read_only, Tag("STORE", &o.store)), Exist("STICK", &o.stick),
-                 Tag("MCFLAGS", &o.mc));
-    benchmark::DoNotOptimize(parser.Finalize());
-    benchmark::DoNotOptimize(o);
-  }
+TEST_F(CmdArgParserTest, BenchGrammar) {
+  static constexpr auto kGrammar = MakeBenchGrammar();
+  CmdArgParser parser = BenchArgs();
+  BenchTarget t = kGrammar.Apply(&parser);
+  EXPECT_TRUE(parser.Finalize());
+  EXPECT_EQ(t.head, "head");
+  EXPECT_EQ(t.tail, "tail");
+  EXPECT_TRUE(t.one);
+  EXPECT_EQ(t.field, 1u);
+  EXPECT_EQ(t.pair_first, 2u);
+  EXPECT_EQ(t.pair_second, 3u);
+  EXPECT_EQ(t.positive, 4u);
+  EXPECT_EQ(t.action, 5u);
+  EXPECT_EQ(t.ttl, 6);
+  EXPECT_EQ(t.positive_ttl, 7);
+  EXPECT_EQ(t.mapped, BenchSelection::kFirst);
+  EXPECT_EQ(t.flags, kBNx);
+  EXPECT_EQ(t.choice, BenchSelection::kFirst);
+  EXPECT_TRUE(t.if_seen);
+  EXPECT_TRUE(t.if_not_seen);
+  EXPECT_EQ(t.nested.value, 8u);
+  ASSERT_TRUE(t.opt_nested.has_value());
+  EXPECT_EQ(t.opt_nested->value, 9u);
 }
-BENCHMARK(BM_RuntimeParse)->Arg(0)->Arg(1);
 
+// The same grammar parsed three ways: the cap grammar, a raw index-based hand parser, and a hand
+// parser using the CmdArgParser navigation API. All three produce the same BenchTarget.
 static void BM_CapParse(benchmark::State& state) {
-  CmdArgParser proto = BenchArgs(state.range(0));
+  CmdArgParser proto = BenchArgs();
   static constexpr auto kGrammar = MakeBenchGrammar();
   for (auto _ : state) {
     CmdArgParser parser = proto;
-    BenchTarget o;
-    kGrammar.Apply(&parser, &o);
+    BenchTarget t = kGrammar.Apply(&parser);
     benchmark::DoNotOptimize(parser.Finalize());
-    benchmark::DoNotOptimize(o);
+    benchmark::DoNotOptimize(t);
   }
 }
-BENCHMARK(BM_CapParse)->Arg(0)->Arg(1);
+BENCHMARK(BM_CapParse);
 
 static void BM_ManualParse(benchmark::State& state) {
-  CmdArgParser proto = BenchArgs(state.range(0));
+  CmdArgParser proto = BenchArgs();
   for (auto _ : state) {
     CmdArgParser parser = proto;
     ParsedArgs args = parser.UnparsedArgs();
-    BenchTarget o;
+    BenchTarget t;
     bool ok = true;
     size_t n = args.size();
-    o.key = args[0];
-    o.value = args[1];
-    for (size_t i = 2; i < n; ++i) {
+    t.head = args[0];
+    t.tail = args[n - 1];
+    for (size_t i = 1; i + 1 < n; ++i) {  // leave the last arg for tail, like Options(1, ...)
       std::string_view a = args[i];
-      if (absl::EqualsIgnoreCase(a, "NX")) {
-        o.flags |= kBNx;
-      } else if (absl::EqualsIgnoreCase(a, "XX")) {
-        o.flags |= kBXx;
-      } else if (absl::EqualsIgnoreCase(a, "GET")) {
-        o.flags |= kBGet;
-      } else if (absl::EqualsIgnoreCase(a, "ASC")) {
-        o.dir = BenchDir::kAsc;
-      } else if (absl::EqualsIgnoreCase(a, "DESC")) {
-        o.dir = BenchDir::kDesc;
-      } else if (!o.read_only && absl::EqualsIgnoreCase(a, "STORE")) {
-        if (++i >= n) {
+      if (absl::EqualsIgnoreCase(a, "ONE"))
+        t.one = true;
+      else if (absl::EqualsIgnoreCase(a, "ONE_ALT"))
+        t.one_alt = true;
+      else if (absl::EqualsIgnoreCase(a, "FIELD"))
+        ok = ++i < n && absl::SimpleAtoi(args[i], &t.field);
+      else if (absl::EqualsIgnoreCase(a, "PAIR")) {
+        ok = i + 2 < n && absl::SimpleAtoi(args[i + 1], &t.pair_first) &&
+             absl::SimpleAtoi(args[i + 2], &t.pair_second);
+        i += 2;
+      } else if (absl::EqualsIgnoreCase(a, "POSITIVE"))
+        ok = ++i < n && absl::SimpleAtoi(args[i], &t.positive) && t.positive >= 1;
+      else if (absl::EqualsIgnoreCase(a, "ACTION")) {
+        uint32_t v = 0;
+        ok = ++i < n && absl::SimpleAtoi(args[i], &v);
+        t.action += v;
+      } else if (absl::EqualsIgnoreCase(a, "TV")) {
+        t.unit = BenchUnit::kSec;
+        ok = ++i < n && absl::SimpleAtoi(args[i], &t.ttl);
+      } else if (absl::EqualsIgnoreCase(a, "TVP")) {
+        t.positive_unit = BenchUnit::kMs;
+        ok = ++i < n && absl::SimpleAtoi(args[i], &t.positive_ttl) && t.positive_ttl >= 1;
+      } else if (absl::EqualsIgnoreCase(a, "MAP"))
+        t.mapped = BenchSelection::kFirst;
+      else if (absl::EqualsIgnoreCase(a, "FLAG"))
+        t.flags |= kBNx;
+      else if (absl::EqualsIgnoreCase(a, "CHOICE")) {
+        if (++i >= n)
           ok = false;
-          break;
-        }
-        o.store = args[i];
-      } else if (absl::EqualsIgnoreCase(a, "STICK")) {
-        o.stick = true;
-      } else if (absl::EqualsIgnoreCase(a, "KEEPTTL")) {
-        o.keepttl = true;
-      } else if (absl::EqualsIgnoreCase(a, "EX") || absl::EqualsIgnoreCase(a, "PX") ||
-                 absl::EqualsIgnoreCase(a, "EXAT") || absl::EqualsIgnoreCase(a, "PXAT")) {
-        if (++i >= n || !absl::SimpleAtoi(args[i], &o.ttl)) {
+        else if (absl::EqualsIgnoreCase(args[i], "FIRST"))
+          t.choice = BenchSelection::kFirst;
+        else if (absl::EqualsIgnoreCase(args[i], "SECOND"))
+          t.choice = BenchSelection::kSecond;
+        else
           ok = false;
-          break;
-        }
-        o.ttl_set = true;
-      } else if (absl::EqualsIgnoreCase(a, "MCFLAGS")) {
-        if (++i >= n || !absl::SimpleAtoi(args[i], &o.mc)) {
-          ok = false;
-          break;
-        }
-      } else {
-        ok = false;
-        break;
+      } else if (t.if_enabled && absl::EqualsIgnoreCase(a, "IF"))
+        t.if_seen = true;
+      else if (!t.if_disabled && absl::EqualsIgnoreCase(a, "IF_NOT"))
+        t.if_not_seen = true;
+      else if (absl::EqualsIgnoreCase(a, "NESTED"))
+        ok = ++i < n && absl::SimpleAtoi(args[i], &t.nested.value);
+      else if (absl::EqualsIgnoreCase(a, "OPT_NESTED")) {
+        uint32_t v = 0;
+        ok = ++i < n && absl::SimpleAtoi(args[i], &v);
+        t.opt_nested = BenchNested{v};
       }
+      // else: unknown token skipped, matching the Skip() fallback
     }
     benchmark::DoNotOptimize(ok);
-    benchmark::DoNotOptimize(o);
+    benchmark::DoNotOptimize(t);
   }
 }
-BENCHMARK(BM_ManualParse)->Arg(0)->Arg(1);
+BENCHMARK(BM_ManualParse);
 
 static void BM_ManualWithParser(benchmark::State& state) {
-  CmdArgParser proto = BenchArgs(state.range(0));
+  CmdArgParser proto = BenchArgs();
   for (auto _ : state) {
     CmdArgParser parser = proto;
-    BenchTarget o;
-    o.key = parser.Next();
-    o.value = parser.Next();
-    while (parser.HasNext()) {
-      if (parser.Check("NX"))
-        o.flags |= kBNx;
-      else if (parser.Check("XX"))
-        o.flags |= kBXx;
-      else if (parser.Check("GET"))
-        o.flags |= kBGet;
-      else if (parser.Check("ASC"))
-        o.dir = BenchDir::kAsc;
-      else if (parser.Check("DESC"))
-        o.dir = BenchDir::kDesc;
-      else if (!o.read_only && parser.Check("STORE"))
-        o.store = parser.Next();
-      else if (parser.Check("STICK"))
-        o.stick = true;
-      else if (parser.Check("KEEPTTL"))
-        o.keepttl = true;
-      else if (parser.Check("EX") || parser.Check("PX") || parser.Check("EXAT") ||
-               parser.Check("PXAT")) {
-        o.ttl = parser.Next<int64_t>();
-        o.ttl_set = true;
-      } else if (parser.Check("MCFLAGS")) {
-        o.mc = parser.Next<uint32_t>();
-      } else {
-        break;
-      }
+    BenchTarget t;
+    t.head = parser.Next();
+    while (parser.HasAtLeast(2)) {  // leave one trailing arg for tail, like Options(1, ...)
+      if (parser.Check("ONE"))
+        t.one = true;
+      else if (parser.Check("ONE_ALT"))
+        t.one_alt = true;
+      else if (parser.Check("FIELD"))
+        t.field = parser.Next<uint32_t>();
+      else if (parser.Check("PAIR"))
+        std::tie(t.pair_first, t.pair_second) = parser.Next<uint32_t, uint32_t>();
+      else if (parser.Check("POSITIVE"))
+        t.positive = parser.Next<Positive<uint32_t>>("positive");
+      else if (parser.Check("ACTION"))
+        t.action += parser.Next<uint32_t>();
+      else if (parser.Check("TV")) {
+        t.unit = BenchUnit::kSec;
+        t.ttl = parser.Next<int64_t>();
+      } else if (parser.Check("TVP")) {
+        t.positive_unit = BenchUnit::kMs;
+        t.positive_ttl = parser.Next<Positive<int64_t>>();
+      } else if (parser.Check("MAP"))
+        t.mapped = BenchSelection::kFirst;
+      else if (parser.Check("FLAG"))
+        t.flags |= kBNx;
+      else if (parser.Check("CHOICE")) {
+        std::string_view v = parser.Next();
+        if (absl::EqualsIgnoreCase(v, "FIRST"))
+          t.choice = BenchSelection::kFirst;
+        else if (absl::EqualsIgnoreCase(v, "SECOND"))
+          t.choice = BenchSelection::kSecond;
+        else
+          parser.Report(CmdArgParser::INVALID_CASES);
+      } else if (t.if_enabled && parser.Check("IF"))
+        t.if_seen = true;
+      else if (!t.if_disabled && parser.Check("IF_NOT"))
+        t.if_not_seen = true;
+      else if (parser.Check("NESTED"))
+        t.nested.value = parser.Next<uint32_t>();
+      else if (parser.Check("OPT_NESTED"))
+        t.opt_nested = BenchNested{parser.Next<uint32_t>()};
+      else
+        parser.Skip(1);  // Skip() fallback: consume an unknown token
     }
+    t.tail = parser.Next();
     benchmark::DoNotOptimize(parser.Finalize());
-    benchmark::DoNotOptimize(o);
+    benchmark::DoNotOptimize(t);
   }
 }
-BENCHMARK(BM_ManualWithParser)->Arg(0)->Arg(1);
+BENCHMARK(BM_ManualWithParser);
 
 }  // namespace facade

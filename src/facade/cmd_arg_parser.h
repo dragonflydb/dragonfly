@@ -11,6 +11,7 @@
 #include <cassert>
 #include <cmath>
 #include <concepts>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <tuple>
@@ -56,25 +57,50 @@ namespace facade {
 //                                       "DESC", Dir::DESC);     // nullopt (no error) on miss
 //
 // Compile-time grammar for CmdArgParser: a `static constexpr` grammar built from consteval
-// factories (Compile/Args/Options/OneOf/Flag/Exist/Field/Map/Choice/Action/If) bound to members of
-// a target struct T. Nothing is built per call; Apply keeps only a tiny stack state. The factories
-// live in `facade`; Exist/OneOf overload the runtime combinators.
+// factories (Compile/Args/Options/OneOf/Flags/Exist/Field/Map/Choice/TagValue/Action/If) bound to
+// members of a target struct T. Nothing is built per call; Apply keeps only a tiny stack state.
 //
 //   struct P { std::string_view key; uint16_t flags = 0; uint32_t mc = 0; int64_t ttl = 0; };
 //   enum : uint16_t { kNx = 1, kXx = 2 };
 //   static constexpr auto kGrammar = Compile(
 //       Args(&P::key),
 //       Options(OneOf("NX and XX are incompatible",
-//                     Flag("NX", &P::flags, kNx), Flag("XX", &P::flags, kXx)),
-//               Action("EX", +[](CmdArgParser* p, P* o) { o->ttl = p->Next<int64_t>(); }),
+//                     Flags(&P::flags, "NX", kNx, "XX", kXx)),
+//               Field<Positive<int64_t>>("EX", &P::ttl, "EX must be positive"),
 //               Field("MCFLAGS", &P::mc)));
-//   P o;
-//   kGrammar.Apply(&parser, &o);
+//   P o = kGrammar.Apply(&parser);
 //   if (!parser.Finalize()) ...
 //
+// Field reads the next argument as the member's exact type. Field<Parsed> reads it as Parsed and
+// then converts it into the member type. Use the explicit Parsed type when the result struct should
+// keep a plain storage type while parsing needs validation, a narrower range, or a custom error.
+//
+// Grammar factory reference:
+//   Compile(elements...)                  sequence elements into an Apply-able grammar
+//   Args(&T::a, &T::b, ...)               read positional arguments into members
+//   Options(rules...)                     repeatedly match rules until none accepts the next token
+//   Options(n, rules...)                  Options that leaves at least n trailing arguments
+//   OneOf(error, alternatives...)         allow one match; report error on a second match
+//
+// Tagged and token-mapping rules:
+//   Exist(tag, &T::flag)                  set a bool member when tag is present
+//   Field(tag, &T::a, ...)                read values after tag into the listed members
+//   Field<Parsed>(tag, &T::a, error)      parse as Parsed, then convert into the member type
+//   Action(tag, fn)                       call fn(CmdArgParser*, T*) after consuming tag
+//   TagValue(tag, &T::kind, k, &T::val)   set a discriminant and read the following value
+//   TagValue<Parsed>(...)                 TagValue with an explicit parsed value type
+//   Map(&T::value, tag, value, ...)       map any matching tag directly into a member
+//   Flags(&T::bits, tag, bit, ...)        OR the value for each matching tag into an integer
+//   Choice(tag, &T::value, key, value...) consume tag, then map the following token
+//
+// Composition and control rules:
+//   If(&T::condition, rule)               enable rule only when the bool member is true
+//   IfNot(&T::condition, rule)            enable rule only when the bool member is false
+//   Into(&T::nested, rule)                apply a rule to a nested member (engages an optional one)
+//   Skip(n)                               consume n positional args, or act as an option fallback
+//
 // Options stops at the first unmatched argument; pair the grammar with Finalize() to reject
-// leftovers. The legacy parser.Apply(Exist(...), Tag(...), Map(...), OneOf(...), If(...)) runtime
-// combinators remain until their callers migrate.
+// leftovers. For a handful of options, direct Check/TryMapNext calls in a loop may be simpler.
 //
 // Navigating manually:
 //   if (parser.HasNext()) { ... }                               // is there another arg?
@@ -110,11 +136,20 @@ struct CmdArgParser;
 // A parser callable for Next(fn), taking either fn(CmdArgParser*) (drives the parser, may consume
 // several args) or fn(std::string_view, RuleError&) (converts the next arg, sets err on failure).
 template <class F>
-concept ParserFn =
-    std::is_invocable_v<F, CmdArgParser*> || std::is_invocable_v<F, std::string_view, RuleError&>;
+concept ParserDriver = std::is_invocable_v<F, CmdArgParser*>;
+
+template <class F>
+concept TokenParser = std::is_invocable_v<F, std::string_view, RuleError&> &&
+    std::default_initializable<std::invoke_result_t<F, std::string_view, RuleError&>> &&
+    !std::is_reference_v<std::invoke_result_t<F, std::string_view, RuleError&>>;
+
+template <class F>
+concept ParserFn = ParserDriver<F> || TokenParser<F>;
 
 // Numeric conversion core shared by Num and Number; false if `arg` isn't a round-trippable T.
-template <class T> bool TryParseNum(std::string_view arg, T* out) {
+template <class T>
+requires std::integral<T> || std::same_as<T, float> || std::same_as<T, double>
+bool TryParseNum(std::string_view arg, T* out) {
   if constexpr (std::is_same_v<T, float>) {
     return absl::SimpleAtof(arg, out);
   } else if constexpr (std::is_same_v<T, double>) {
@@ -122,7 +157,6 @@ template <class T> bool TryParseNum(std::string_view arg, T* out) {
   } else if constexpr (std::is_integral_v<T> && sizeof(T) >= sizeof(int32_t)) {
     return absl::SimpleAtoi(arg, out);
   } else {
-    static_assert(std::is_integral_v<T> && sizeof(T) < sizeof(int32_t));
     int32_t tmp;
     if (!absl::SimpleAtoi(arg, &tmp))
       return false;
@@ -143,14 +177,14 @@ template <class T> struct VNum {
 // ones take the message as a reference-to-constexpr NTTP.
 
 // Out of [min, max] -> generic type error (FInt is the idiomatic spelling).
-template <auto min, auto max> RuleError InRange(decltype(min) v) {
-  static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
+template <auto min, auto max>
+requires std::same_as<decltype(min), decltype(max)> RuleError InRange(decltype(min) v) {
   return {v < min || v > max, {}};
 }
 
 // Out of [min, max] -> custom Msg. Integer bounds only (float NTTPs need clang 18+).
-template <auto min, auto max, const auto& Msg> RuleError Bounded(decltype(min) v) {
-  static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
+template <auto min, auto max, const auto& Msg>
+requires std::same_as<decltype(min), decltype(max)> RuleError Bounded(decltype(min) v) {
   return {!(v >= min && v <= max), Msg};
 }
 
@@ -183,9 +217,16 @@ template <class T, RuleError (*... Rules)(T)> struct Validated : VNum<T> {
 
 template <auto min, auto max> using FInt = Validated<decltype(min), InRange<min, max>>;
 
+template <std::integral T> using Positive = FInt<T{1}, std::numeric_limits<T>::max()>;
+template <std::integral T> using NonNegativeInt = FInt<T{0}, std::numeric_limits<T>::max()>;
+
 template <class T> constexpr bool is_optional = false;
 
 template <class U> constexpr bool is_optional<std::optional<U>> = true;
+
+template <class T>
+concept ParsedArg = std::is_arithmetic_v<T> || std::constructible_from<T, std::string_view> ||
+    as_vnum<T> || is_optional<T>;
 
 struct CmdArgParser {
   enum ErrorType {
@@ -309,7 +350,7 @@ struct CmdArgParser {
     return SVAt(cur_i_);
   }
 
-  template <class T = std::string_view, class... Ts> auto Next() {
+  template <ParsedArg T = std::string_view, ParsedArg... Ts> auto Next() {
     if (cur_i_ + sizeof...(Ts) >= size_) {
       ReportCode(OUT_OF_BOUNDS, cur_i_);
       return std::conditional_t<sizeof...(Ts) == 0, decltype(Convert<T>(0)),
@@ -338,8 +379,6 @@ struct CmdArgParser {
       return std::forward<F>(fn)(this);
     } else {
       using R = std::invoke_result_t<F, std::string_view, RuleError&>;
-      static_assert(std::is_default_constructible_v<R> && !std::is_reference_v<R>,
-                    "token parser must return a default-constructible value type");
       if (cur_i_ >= size_) {
         Report(OUT_OF_BOUNDS, cur_i_);
         return R{};
@@ -423,8 +462,7 @@ struct CmdArgParser {
   // Consumes the next arg as integer T, allowing an optional leading `prefix` (sets *prefixed when
   // present). Reports INVALID_INT if the remaining text isn't an integer. Use for offsets like
   // BITFIELD's "#index" form.
-  template <class T> T NextWithPrefix(std::string_view prefix, bool* prefixed) {
-    static_assert(std::is_integral_v<T>);
+  template <std::integral T> T NextWithPrefix(std::string_view prefix, bool* prefixed) {
     if (cur_i_ >= size_) {
       Report(OUT_OF_BOUNDS, cur_i_);
       return {};
@@ -484,21 +522,6 @@ struct CmdArgParser {
     ((*args = Next<Args>()), ...);
 
     return true;
-  }
-
-  // TODO: remove — superseded by the compile-time cap grammar (Compile/Options/...). Greedily
-  // matches remaining args against the options, stopping at the first unmatched arg.
-  template <class... Opts> void Apply(Opts... opts) {
-    while (HasNext() && (opts.TryApply(this) || ...)) {
-    }
-  }
-
-  // TODO: remove. Like Apply, but silently skips unmatched args one at a time instead of stopping.
-  template <class... Opts> void ApplyOrSkip(Opts... opts) {
-    while (HasNext()) {
-      if (!(opts.TryApply(this) || ...))
-        Skip(1);
-    }
   }
 
   CmdArgParser& Skip(size_t n) {
@@ -603,10 +626,7 @@ struct CmdArgParser {
       NextImpl<next>(t, base);
   }
 
-  template <class T> T Convert(size_t idx) {
-    static_assert(std::is_arithmetic_v<T> || std::is_constructible_v<T, std::string_view> ||
-                      as_vnum<T> || is_optional<T>,
-                  "incorrect type");
+  template <ParsedArg T> T Convert(size_t idx) {
     if constexpr (is_optional<T>) {
       return T{Convert<typename T::value_type>(idx)};
     } else if constexpr (std::is_arithmetic_v<T>) {
@@ -662,147 +682,85 @@ template <class T> T Number(CmdArgParser* parser) {
   return parser->Next<T>();
 }
 
-// TODO: remove — the runtime combinator family (the options below and their Exist/Tag/Map/If/OneOf
-// factories) is superseded by the compile-time cap grammar; kept until the last parser.Apply
-// callers migrate.
-namespace detail {
-
-// CRTP base for Apply() options: a fluent .Err(msg) surfaced by ReportErr() on failure, else the
-// generic INVALID_CASES error.
-template <class Derived> struct OptBase {
-  std::string err = {};
-
-  Derived&& Err(std::string msg) && {
-    err = std::move(msg);
-    return std::move(static_cast<Derived&>(*this));
-  }
-
- protected:
-  void ReportErr(CmdArgParser* parser) const {
-    if (err.empty())
-      parser->Report(CmdArgParser::INVALID_CASES);
-    else
-      parser->ReportCustom(err);
-  }
-};
-
-struct ExistOpt : OptBase<ExistOpt> {
-  std::string_view tag;
-  bool* field;
-
-  bool TryApply(CmdArgParser* parser) const {
-    if (parser->Check(tag)) {
-      *field = true;
-      return true;
-    }
-    return false;
-  }
-};
-
-template <class... Args> struct TagOpt : OptBase<TagOpt<Args...>> {
-  std::string_view tag;
-  std::tuple<Args*...> args;
-
-  bool TryApply(CmdArgParser* parser) const {
-    // Match the tag first, then read fields via Next<>() — so a missing value surfaces
-    // OUT_OF_BOUNDS instead of being swallowed by ApplyOrSkip as "no match".
-    if (!parser->Check(tag))
-      return false;
-    std::apply(
-        [&](auto*... ptrs) {
-          (((*ptrs) = parser->template Next<std::remove_pointer_t<decltype(ptrs)>>()), ...);
-        },
-        args);
-    return true;
-  }
-};
-
-template <class Func> struct LambdaOpt : OptBase<LambdaOpt<Func>> {
-  std::string_view tag;
-  Func func;
-
-  bool TryApply(CmdArgParser* parser) const {
-    if (parser->Check(tag)) {
-      func(parser);
-      return true;
-    }
-    return false;
-  }
-};
-
-template <class T, class... Cases> struct MapOpt : OptBase<MapOpt<T, Cases...>> {
-  static_assert(sizeof...(Cases) % 2 == 0, "Map expects alternating tag/value pairs");
-
-  T* field;
-  std::tuple<Cases...> cases;
-
-  bool TryApply(CmdArgParser* parser) const {
-    return TryMatch<0>(parser);
-  }
-
- private:
-  template <size_t I> bool TryMatch(CmdArgParser* parser) const {
-    if constexpr (I >= sizeof...(Cases)) {
-      return false;
-    } else if (parser->Check(std::get<I>(cases))) {
-      *field = std::get<I + 1>(cases);
-      return true;
-    } else {
-      return TryMatch<I + 2>(parser);
-    }
-  }
-};
-
-template <class Inner> struct IfOpt : OptBase<IfOpt<Inner>> {
-  bool cond;
-  Inner inner;
-
-  bool TryApply(CmdArgParser* parser) const {
-    return cond && inner.TryApply(parser);
-  }
-};
-
-template <class... Opts> struct OneOfOpt : OptBase<OneOfOpt<Opts...>> {
-  std::tuple<Opts...> opts;
-  mutable bool matched = false;
-
-  bool TryApply(CmdArgParser* parser) const {
-    bool any = std::apply([&](auto&... os) { return (os.TryApply(parser) || ...); }, opts);
-    if (!any)
-      return false;
-    if (matched)
-      this->ReportErr(parser);
-    matched = true;
-    return true;
-  }
-};
-
-// Outer tag consumes one arg, then the inner option must match the next; otherwise reports
-// .Err(msg) or INVALID_CASES.
-template <class Inner> struct TagNestedOpt : OptBase<TagNestedOpt<Inner>> {
-  std::string_view tag;
-  Inner inner;
-
-  bool TryApply(CmdArgParser* parser) const {
-    if (!parser->Check(tag))
-      return false;
-    if (!inner.TryApply(parser))
-      this->ReportErr(parser);
-    return true;
-  }
-};
-
-// Concept matching any of the Apply options (has a TryApply(CmdArgParser*) method).
-template <class T>
-concept ParseOption = requires(const T& t, CmdArgParser* p) {
-  { t.TryApply(p) } -> std::same_as<bool>;
-};
-
-}  // namespace detail
-
 namespace cap_detail {
 
 struct NoState {};
+
+template <class... Rules> struct FirstTarget;
+
+template <> struct FirstTarget<> { using type = void; };
+
+template <class Rule, class... Rules> struct FirstTarget<Rule, Rules...> {
+  using type = std::conditional_t<std::is_void_v<typename Rule::Target>,
+                                  typename FirstTarget<Rules...>::type, typename Rule::Target>;
+};
+
+template <class... Rules> using FirstTargetT = typename FirstTarget<Rules...>::type;
+
+template <class Rule>
+concept GrammarRule = requires {
+  typename Rule::Target;
+  typename Rule::State;
+};
+
+template <class Rule, class Target>
+concept RuleFor =
+    std::same_as<typename Rule::Target, void> || std::same_as<typename Rule::Target, Target>;
+
+template <class... Rules>
+concept CompatibleRules = sizeof...(Rules) > 0 && (GrammarRule<Rules> && ...) &&
+                          !std::same_as<FirstTargetT<Rules...>, void> &&
+                          (RuleFor<Rules, FirstTargetT<Rules...>> && ...);
+
+template <class M, class... Cases> consteval bool IsTagValuePack() {
+  if constexpr (sizeof...(Cases) == 0 || sizeof...(Cases) % 2 != 0) {
+    return false;
+  } else {
+    using Tuple = std::tuple<Cases...>;
+    return []<size_t... I>(std::index_sequence<I...>) {
+      return ((std::convertible_to<std::tuple_element_t<2 * I, Tuple>, std::string_view> &&
+               std::convertible_to<std::tuple_element_t<2 * I + 1, Tuple>, M>)&&...);
+    }
+    (std::make_index_sequence<sizeof...(Cases) / 2>{});
+  }
+}
+
+template <class M, class... Cases>
+concept TagValuePack = IsTagValuePack<M, Cases...>();
+
+// Splits alternating tag/value arguments (t0, v0, t1, v1, ...) into parallel arrays.
+template <class M, class... Cs> consteval auto SplitTagValues(Cs... cs) {
+  constexpr size_t N = sizeof...(Cs) / 2;
+  std::array<std::string_view, N> tags{};
+  std::array<M, N> values{};
+  auto cases = std::tuple{cs...};
+  [&]<size_t... I>(std::index_sequence<I...>) {
+    ((tags[I] = std::get<2 * I>(cases), values[I] = std::get<2 * I + 1>(cases)), ...);
+  }
+  (std::make_index_sequence<N>{});
+  return std::pair{tags, values};
+}
+
+struct Skip {
+  using Target = void;
+  using State = NoState;
+  consteval explicit Skip(size_t count) : count_(count) {
+    if (count == 0)
+      throw "Skip count must be positive";
+  }
+
+  template <class T> void Consume(CmdArgParser* p, T*, State&) const {
+    p->Skip(count_);
+  }
+
+  template <class T> bool Consume(CmdArgParser* p, std::string_view, T*, State&) const {
+    p->Skip(count_);
+    return true;
+  }
+
+ private:
+  size_t count_;
+};
 
 template <class T, class... M>
 void ReadMembers(CmdArgParser* p, T* o, const std::tuple<M T::*...>& fields) {
@@ -842,20 +800,6 @@ template <class Derived, class T> struct TaggedRule {
   std::string_view tag_;
 };
 
-template <class T, class M> struct Flag : TaggedRule<Flag<T, M>, T> {
-  consteval Flag(const char* tag, M T::*field, M value)
-      : TaggedRule<Flag<T, M>, T>(tag), field_(field), value_(value) {
-  }
-
-  void OnMatch(CmdArgParser*, T* o) const {
-    o->*field_ |= value_;
-  }
-
- private:
-  M T::*field_;
-  M value_;
-};
-
 template <class T> struct Exist : TaggedRule<Exist<T>, T> {
   consteval Exist(const char* tag, bool T::*field) : TaggedRule<Exist<T>, T>(tag), field_(field) {
   }
@@ -881,6 +825,20 @@ template <class T, class... M> struct Field : TaggedRule<Field<T, M...>, T> {
   std::tuple<M T::*...> fields_;
 };
 
+template <class P, class T, class M> struct ParsedField : TaggedRule<ParsedField<P, T, M>, T> {
+  consteval ParsedField(const char* tag, std::string_view err, M T::*field)
+      : TaggedRule<ParsedField<P, T, M>, T>(tag), err_(err), field_(field) {
+  }
+
+  void OnMatch(CmdArgParser* p, T* o) const {
+    o->*field_ = err_.empty() ? p->Next<P>() : p->Next<P>(err_);
+  }
+
+ private:
+  std::string_view err_;
+  M T::*field_;
+};
+
 template <class T> struct Action : TaggedRule<Action<T>, T> {
   consteval Action(const char* tag, void (*fn)(CmdArgParser*, T*))
       : TaggedRule<Action<T>, T>(tag), fn_(fn) {
@@ -894,17 +852,41 @@ template <class T> struct Action : TaggedRule<Action<T>, T> {
   void (*fn_)(CmdArgParser*, T*);
 };
 
-template <class T, class M, size_t N> struct Map {
+// tag -> set a discriminant member to a compile-time value, then read the following arg into
+// another member (e.g. the EX/PX/EXAT/PXAT expiry keywords: pick a unit enum + read the amount).
+template <class P, class T, class D, class M>
+struct TagValue : TaggedRule<TagValue<P, T, D, M>, T> {
+  consteval TagValue(const char* tag, D T::*disc, D disc_val, M T::*value)
+      : TaggedRule<TagValue<P, T, D, M>, T>(tag), disc_(disc), disc_val_(disc_val), value_(value) {
+  }
+
+  void OnMatch(CmdArgParser* p, T* o) const {
+    o->*disc_ = disc_val_;
+    o->*value_ = p->Next<P>();
+  }
+
+ private:
+  D T::*disc_;
+  D disc_val_;
+  M T::*value_;
+};
+
+// Matches any of its tags and writes the paired value into a member. Map assigns the value; Flags
+// OR-accumulates it (kAccumulate, integral members only).
+template <class T, class M, size_t N, bool kAccumulate> struct TagMap {
   using Target = T;
   using State = NoState;
-  consteval Map(M T::*field, std::array<std::string_view, N> tags, std::array<M, N> values)
+  consteval TagMap(M T::*field, std::array<std::string_view, N> tags, std::array<M, N> values)
       : field_(field), tags_(tags), values_(values) {
   }
   bool Consume(CmdArgParser* p, std::string_view cur, T* o, State&) const {
     for (size_t i = 0; i < N; ++i) {
       if (TagMatch(cur, tags_[i])) {
         p->AdvanceUnchecked();
-        o->*field_ = values_[i];
+        if constexpr (kAccumulate)
+          o->*field_ |= values_[i];
+        else
+          o->*field_ = values_[i];
         return true;
       }
     }
@@ -924,7 +906,7 @@ template <class T, class M, size_t N> struct Choice : TaggedRule<Choice<T, M, N>
   }
 
   void OnMatch(CmdArgParser* p, T* o) const {
-    std::string_view val = p->template Next<std::string_view>();
+    std::string_view val = p->Next<std::string_view>();
     for (size_t i = 0; i < N; ++i) {
       if (TagMatch(val, keys_[i])) {
         o->*field_ = values_[i];
@@ -955,6 +937,33 @@ template <class T, class Inner> struct If {
   Inner inner_;
 };
 
+// Applies the inner rule to a nested member. A plain member is targeted directly; an optional
+// member has the rule target its contained value, and the optional is engaged only when the rule
+// matches (an existing value is preserved), so its engaged state signals that the keyword was seen.
+template <class T, class Member, class Inner> struct Into {
+  using Target = T;
+  using State = typename Inner::State;
+  consteval Into(Member T::*field, Inner inner) : field_(field), inner_(inner) {
+  }
+  bool Consume(CmdArgParser* p, std::string_view cur, T* o, State& st) const {
+    if constexpr (is_optional<Member>) {
+      using Value = typename Member::value_type;
+      Member& opt = o->*field_;
+      Value scratch = opt.value_or(Value{});
+      if (!inner_.Consume(p, cur, &scratch, st))
+        return false;
+      opt = std::move(scratch);
+      return true;
+    } else {
+      return inner_.Consume(p, cur, &(o->*field_), st);
+    }
+  }
+
+ private:
+  Member T::*field_;
+  Inner inner_;
+};
+
 template <class T, class... M> struct Args {
   using Target = T;
   using State = NoState;
@@ -971,7 +980,7 @@ template <class T, class... M> struct Args {
 template <class T, class... Alts> struct OneOf {
   using Target = T;
   struct State {
-    signed char matched = -1;
+    bool matched = false;
   };
   consteval OneOf(std::string_view err, Alts... alts) : err_(err), alts_(alts...) {
   }
@@ -986,9 +995,9 @@ template <class T, class... Alts> struct OneOf {
     } else {
       typename std::tuple_element_t<I, std::tuple<Alts...>>::State alt_st{};
       if (std::get<I>(alts_).Consume(p, cur, o, alt_st)) {
-        if (st.matched >= 0 && st.matched != static_cast<signed char>(I))
+        if (st.matched)  // a second match (same or different alt) is a conflict, like Redis
           ReportConflict(p);
-        st.matched = static_cast<signed char>(I);
+        st.matched = true;
         return true;
       }
       return TryAt<I + 1>(p, cur, o, st);
@@ -1007,10 +1016,12 @@ template <class T, class... Alts> struct OneOf {
 template <class T, class... Rules> struct Options {
   using Target = T;
   using State = std::tuple<typename Rules::State...>;
-  consteval explicit Options(Rules... rules) : rules_(rules...) {
+  consteval explicit Options(Rules... rules) : Options(0, rules...) {
+  }
+  consteval Options(size_t tail, Rules... rules) : tail_(tail), rules_(rules...) {
   }
   void Consume(CmdArgParser* p, T* o, State& st) const {
-    while (p->InBounds()) {
+    while (p->HasAtLeast(tail_ + 1)) {
       std::string_view cur = p->CurrentUnchecked();
       if (!Match(p, cur, o, st, std::index_sequence_for<Rules...>{}))
         break;
@@ -1023,6 +1034,7 @@ template <class T, class... Rules> struct Options {
              std::index_sequence<I...>) const {
     return (std::get<I>(rules_).Consume(p, cur, o, std::get<I>(st)) || ...);
   }
+  size_t tail_;
   std::tuple<Rules...> rules_;
 };
 
@@ -1033,6 +1045,11 @@ template <class T, class... Elems> struct Grammar {
   void Apply(CmdArgParser* p, T* o) const {
     std::tuple<typename Elems::State...> st{};
     Run(p, o, st, std::index_sequence_for<Elems...>{});
+  }
+  T Apply(CmdArgParser* p) const {
+    T out{};
+    Apply(p, &out);
+    return out;
   }
 
  private:
@@ -1046,44 +1063,50 @@ template <class T, class... Elems> struct Grammar {
 
 }  // namespace cap_detail
 
-template <class T, class M>
-consteval auto Flag(const char* tag, M T::*field, std::type_identity_t<M> value) {
-  return cap_detail::Flag<T, M>{tag, field, value};
-}
 template <class T> consteval auto Exist(const char* tag, bool T::*field) {
   return cap_detail::Exist<T>{tag, field};
 }
-template <class T, class... M> consteval auto Field(const char* tag, M T::*... fields) {
-  static_assert(sizeof...(M) > 0, "Field expects at least one member");
+template <class T, class... M>
+requires(sizeof...(M) > 0 && (ParsedArg<M> && ...)) consteval auto Field(const char* tag,
+                                                                         M T::*... fields) {
   return cap_detail::Field<T, M...>{tag, fields...};
+}
+template <class P, class T, class M>
+requires std::convertible_to<P, M>
+consteval auto Field(const char* tag, M T::*field, std::string_view err = {}) {
+  return cap_detail::ParsedField<P, T, M>{tag, err, field};
 }
 template <class T> consteval auto Action(const char* tag, void (*fn)(CmdArgParser*, T*)) {
   return cap_detail::Action<T>{tag, fn};
 }
-template <class T, class M, class... Cs> consteval auto Map(M T::*field, Cs... cs) {
-  static_assert(sizeof...(Cs) % 2 == 0, "Map expects alternating tag/value pairs");
-  constexpr size_t N = sizeof...(Cs) / 2;
-  std::array<std::string_view, N> tags{};
-  std::array<M, N> values{};
-  auto cases = std::tuple{cs...};
-  [&]<size_t... I>(std::index_sequence<I...>) {
-    ((tags[I] = std::get<2 * I>(cases), values[I] = std::get<2 * I + 1>(cases)), ...);
-  }
-  (std::make_index_sequence<N>{});
-  return cap_detail::Map<T, M, N>{field, tags, values};
+template <class P, class T, class D, class M>
+requires std::convertible_to<P, M>
+consteval auto TagValue(const char* tag, D T::*disc, std::type_identity_t<D> disc_val,
+                        M T::*value) {
+  return cap_detail::TagValue<P, T, D, M>{tag, disc, disc_val, value};
+}
+template <class T, class D, class M>
+consteval auto TagValue(const char* tag, D T::*disc, std::type_identity_t<D> disc_val,
+                        M T::*value) {
+  return TagValue<M>(tag, disc, disc_val, value);
 }
 template <class T, class M, class... Cs>
+requires cap_detail::TagValuePack<M, Cs...>
+consteval auto Map(M T::*field, Cs... cs) {
+  auto [tags, values] = cap_detail::SplitTagValues<M>(cs...);
+  return cap_detail::TagMap<T, M, sizeof...(Cs) / 2, false>{field, tags, values};
+}
+template <class T, std::integral M, class... Cs>
+requires cap_detail::TagValuePack<M, Cs...>
+consteval auto Flags(M T::*field, Cs... cs) {
+  auto [tags, values] = cap_detail::SplitTagValues<M>(cs...);
+  return cap_detail::TagMap<T, M, sizeof...(Cs) / 2, true>{field, tags, values};
+}
+template <class T, class M, class... Cs>
+requires cap_detail::TagValuePack<M, Cs...>
 consteval auto Choice(const char* tag, M T::*field, Cs... cs) {
-  static_assert(sizeof...(Cs) % 2 == 0, "Choice expects alternating key/value pairs");
-  constexpr size_t N = sizeof...(Cs) / 2;
-  std::array<std::string_view, N> keys{};
-  std::array<M, N> values{};
-  auto cases = std::tuple{cs...};
-  [&]<size_t... I>(std::index_sequence<I...>) {
-    ((keys[I] = std::get<2 * I>(cases), values[I] = std::get<2 * I + 1>(cases)), ...);
-  }
-  (std::make_index_sequence<N>{});
-  return cap_detail::Choice<T, M, N>{tag, field, keys, values};
+  auto [keys, values] = cap_detail::SplitTagValues<M>(cs...);
+  return cap_detail::Choice<T, M, sizeof...(Cs) / 2>{tag, field, keys, values};
 }
 template <class T, class Inner> consteval auto If(bool T::*cond, Inner inner) {
   return cap_detail::If<T, Inner>{cond, true, inner};
@@ -1091,53 +1114,41 @@ template <class T, class Inner> consteval auto If(bool T::*cond, Inner inner) {
 template <class T, class Inner> consteval auto IfNot(bool T::*cond, Inner inner) {
   return cap_detail::If<T, Inner>{cond, false, inner};
 }
-template <class T, class... M> consteval auto Args(M T::*... fields) {
-  static_assert(sizeof...(M) > 0, "Args expects at least one member");
+template <class T, class Member, class Inner>
+requires std::same_as<Member, typename Inner::Target> ||
+    std::same_as<Member, std::optional<typename Inner::Target>>
+consteval auto Into(Member T::*field, Inner inner) {
+  return cap_detail::Into<T, Member, Inner>{field, inner};
+}
+template <class T, class... M>
+requires(sizeof...(M) > 0) consteval auto Args(M T::*... fields) {
   return cap_detail::Args<T, M...>{fields...};
 }
-template <class... Alts> consteval auto OneOf(std::string_view err, Alts... alts) {
-  using T = typename std::tuple_element_t<0, std::tuple<Alts...>>::Target;
+template <class... Alts>
+requires cap_detail::CompatibleRules<Alts...>
+consteval auto OneOf(std::string_view err, Alts... alts) {
+  using T = cap_detail::FirstTargetT<Alts...>;
   return cap_detail::OneOf<T, Alts...>{err, alts...};
 }
-template <class... Rules> consteval auto Options(Rules... rules) {
-  using T = typename std::tuple_element_t<0, std::tuple<Rules...>>::Target;
-  return cap_detail::Options<T, Rules...>{rules...};
+template <class... Rules>
+requires cap_detail::CompatibleRules<Rules...>
+consteval auto Options(size_t tail, Rules... rules) {
+  using T = cap_detail::FirstTargetT<Rules...>;
+  return cap_detail::Options<T, Rules...>{tail, rules...};
 }
-template <class... Elems> consteval auto Compile(Elems... elems) {
-  using T = typename std::tuple_element_t<0, std::tuple<Elems...>>::Target;
+template <class... Rules>
+requires cap_detail::CompatibleRules<Rules...>
+consteval auto Options(Rules... rules) {
+  return Options(0, rules...);
+}
+template <class... Elems>
+requires cap_detail::CompatibleRules<Elems...>
+consteval auto Compile(Elems... elems) {
+  using T = cap_detail::FirstTargetT<Elems...>;
   return cap_detail::Grammar<T, Elems...>{elems...};
 }
-
-// TODO: remove — runtime combinator factories, superseded by the consteval cap factories above.
-inline detail::ExistOpt Exist(std::string_view tag, bool* field) {
-  return {{}, tag, field};
-}
-
-template <class... Args> detail::TagOpt<Args...> Tag(std::string_view tag, Args*... args) {
-  return {{}, tag, std::make_tuple(args...)};
-}
-
-template <class Func>
-requires std::is_invocable_v<Func, CmdArgParser*> detail::LambdaOpt<Func> Tag(std::string_view tag,
-                                                                              Func func) {
-  return {{}, tag, std::move(func)};
-}
-
-template <detail::ParseOption Inner>
-detail::TagNestedOpt<Inner> Tag(std::string_view tag, Inner inner) {
-  return {{}, tag, std::move(inner)};
-}
-
-template <class T, class... Cases> detail::MapOpt<T, Cases...> Map(T* field, Cases... cases) {
-  return {{}, field, std::make_tuple(std::move(cases)...)};
-}
-
-template <class Inner> detail::IfOpt<Inner> If(bool cond, Inner inner) {
-  return {{}, cond, std::move(inner)};
-}
-
-template <detail::ParseOption... Opts> detail::OneOfOpt<Opts...> OneOf(Opts... opts) {
-  return {{}, {std::move(opts)...}};
+consteval auto Skip(size_t count = 1) {
+  return cap_detail::Skip{count};
 }
 
 }  // namespace facade
