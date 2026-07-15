@@ -408,6 +408,20 @@ TEST_F(SearchTest, MatchField) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
+TEST_F(SearchTest, MatchFieldPerTermWeight) {
+  PrepareSchema({{"f1", SchemaField::TEXT}, {"f2", SchemaField::TEXT}});
+
+  // A per-term weight inside a field group keeps the term scoped to that field.
+  PrepareQuery("@f1:(machine=>{$weight:2.0} | learning)");
+
+  ExpectAll(Map{{"f1", "machine models"}, {"f2", "x"}}, Map{{"f1", "deep learning"}, {"f2", "x"}},
+            Map{{"f1", "machine learning"}, {"f2", "x"}});
+  ExpectNone(Map{{"f1", "unrelated"}, {"f2", "machine learning"}},  // only in f2
+             Map{{"f1", "nothing here"}, {"f2", "x"}});
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
 TEST_F(SearchTest, MatchRange) {
   PrepareSchema({{"f1", SchemaField::NUMERIC}, {"f2", SchemaField::NUMERIC}});
   PrepareQuery("@f1:[1 10] @f2:[50 100]");

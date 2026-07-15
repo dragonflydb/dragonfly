@@ -7777,6 +7777,35 @@ TEST_F(SearchFamilyTest, SearchWithScoresBasic) {
   EXPECT_GT(scores["d:1"], scores["d:2"]) << "Doc with higher TF should score higher";
 }
 
+// A per-term weight inside a field group must parse, stay scoped to the field, and boost the
+// score of docs matching the weighted term (the shape emitted when weighting individual words).
+TEST_F(SearchFamilyTest, SearchPerTermWeightInFieldGroup) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "body", "TEXT"}),
+            "OK");
+  Run({"hset", "d:1", "title", "machine", "body", "z"});
+  Run({"hset", "d:2", "title", "learning", "body", "z"});
+  Run({"hset", "d:3", "title", "unrelated", "body", "machine learning"});
+
+  auto collect = [&](std::string_view query) {
+    auto resp = Run({"ft.search", "i1", query, "NOCONTENT", "WITHSCORES", "DIALECT", "2"});
+    std::map<std::string, double> scores;
+    const auto& vals = resp.GetVec();
+    for (size_t i = 1; i + 1 < vals.size(); i += 2)
+      scores[vals[i].GetString()] = std::stod(vals[i + 1].GetString());
+    return scores;
+  };
+
+  auto scores = collect("@title:(machine=>{$weight:3.0} | learning)");
+  // d:1 and d:2 match via title; d:3 has the words only in body -> field scoping excludes it.
+  ASSERT_EQ(scores.size(), 2u);
+  EXPECT_FALSE(scores.contains("d:3"));
+  ASSERT_TRUE(scores.contains("d:1") && scores.contains("d:2"));
+  // Weighting "machine" 3x boosts the otherwise-symmetric d:1 above d:2. Use at() so a missing
+  // key fails loudly instead of operator[] inserting a default score.
+  EXPECT_GT(scores.at("d:1"), scores.at("d:2"));
+}
+
 // Verify ADDSCORES injects __score for simple (non-KNN) FT.AGGREGATE
 TEST_F(SearchFamilyTest, AggregateAddScoresSimple) {
   EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),

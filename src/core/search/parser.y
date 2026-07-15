@@ -451,6 +451,7 @@ field_unary_expr:
   | NOT_OP field_unary_expr     { $$ = AstNegateNode(std::move($2));   }
   | TILDE field_unary_expr      { $$ = AstOptionalNode(std::move($2)); }
   | term_atom                   { $$ = std::move($1);                  }
+  | term_atom text_attrs_clause { $$ = AstAttributeNode(std::move($1), $2.weight.value_or(1.0)); }
 
 tag_list:
   tag_list_element                       { $$ = AstTagsNode(std::move($1));                }
