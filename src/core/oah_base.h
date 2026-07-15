@@ -67,12 +67,6 @@ inline uint32_t FieldSize(size_t size) {
                                     : kLargeFieldSize;
 }
 
-inline uint32_t FieldSizeFromControl(uint8_t control) {
-  return (control & kBigSizeBit) == 0 ? kInlineFieldSize
-         : control & kThreeBytesBit   ? kLargeFieldSize
-                                      : kMediumFieldSize;
-}
-
 inline void Write(size_t size, uint32_t field_size, char* dest) {
   assert(field_size == FieldSize(size));
   uint8_t control;
@@ -104,15 +98,6 @@ inline Decoded Read(const char* src) {
   }
   const uint32_t size = (control & kLowSizeMask) | (extra << kLowSizeBits);
   return {size, three_bytes ? kLargeFieldSize : kMediumFieldSize};
-}
-
-inline uint32_t ReadLarge(const char* src) {
-  const uint8_t control = static_cast<uint8_t>(src[0]);
-  assert(FieldSizeFromControl(control) == kLargeFieldSize);
-  uint32_t extra = static_cast<uint8_t>(src[1]);
-  extra |= static_cast<uint32_t>(static_cast<uint8_t>(src[2])) << 8;
-  extra |= static_cast<uint32_t>(static_cast<uint8_t>(src[3])) << 16;
-  return (control & kLowSizeMask) | (extra << kLowSizeBits);
 }
 
 }  // namespace size

@@ -69,7 +69,7 @@ class OAHSet : public OAHTable<OAHEntry> {
     const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
     const uint64_t shifted_ext_hash = ext_hash << oah::kExtHashShift;
 
-    const int64_t mem_before = zmalloc_used_memory_tl;
+    const ssize_t mem_before = zmalloc_used_memory_tl;
     TaggedPtr entry_tagged_ptr = OAHEntry::Create(str, EntryTTL(ttl_sec));
     OAHEntry(entry_tagged_ptr).SetShiftedExtHash(shifted_ext_hash);  // reuse the shifted value
     if (ttl_sec != UINT32_MAX)

@@ -120,14 +120,14 @@ template <typename Entry> class OAHPtr {
   // Defragments fragmented buffers under this slot: the entry's string, or for a vector every inner
   // entry plus the array. Returns the cumulative usable-size delta; *realloced is set if anything
   // moved.
-  int64_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
+  ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
     *realloced = false;
     if (Empty())
       return 0;
     if (!IsVector())
       return Entry(*slot_).ReallocIfNeeded(page_usage, realloced);
 
-    int64_t obj_alloc_delta = 0;
+    ssize_t obj_alloc_delta = 0;
     Vector vec = AsVector();
     for (TaggedPtr& cell : vec) {
       Entry entry(cell);

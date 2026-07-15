@@ -113,9 +113,9 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     bool ReallocIfNeeded(PageUsage* page_usage) {
       auto bucket = owner_->At(bucket_);
       bool realloced = false;
-      int64_t delta = bucket.ReallocIfNeeded(page_usage, &realloced);
+      ssize_t delta = bucket.ReallocIfNeeded(page_usage, &realloced);
       // delta can be negative if a realloc lands in a smaller mimalloc usable-size
-      // bucket; route the signed update through int64_t to avoid size_t underflow.
+      // bucket; route the signed update through ssize_t to avoid size_t underflow.
       if (delta >= 0) {
         owner_->obj_alloc_used_ += static_cast<size_t>(delta);
       } else {

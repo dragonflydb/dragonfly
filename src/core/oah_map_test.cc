@@ -326,11 +326,11 @@ TEST_F(OAHMapTest, ExternalValueSelectiveRealloc) {
   size_t old_alloc = pair.AllocSize();
   SelectivePageUsage value_only(const_cast<char*>(old_value));
   bool realloced = false;
-  int64_t delta = pair.ReallocIfNeeded(&value_only, &realloced);
+  ssize_t delta = pair.ReallocIfNeeded(&value_only, &realloced);
   EXPECT_TRUE(realloced);
   EXPECT_EQ(pair.Raw(), old_raw);
   EXPECT_NE(pair.Value().data(), old_value);
-  EXPECT_EQ(delta, static_cast<int64_t>(pair.AllocSize()) - static_cast<int64_t>(old_alloc));
+  EXPECT_EQ(delta, static_cast<ssize_t>(pair.AllocSize()) - static_cast<ssize_t>(old_alloc));
   EXPECT_EQ(pair.Key(), key);
   EXPECT_EQ(pair.Value(), value);
   EXPECT_EQ(pair.GetExpiry(), 11u);
@@ -346,7 +346,7 @@ TEST_F(OAHMapTest, ExternalValueSelectiveRealloc) {
   EXPECT_TRUE(realloced);
   EXPECT_NE(pair.Raw(), old_raw);
   EXPECT_EQ(pair.Value().data(), old_value);
-  EXPECT_EQ(delta, static_cast<int64_t>(pair.AllocSize()) - static_cast<int64_t>(old_alloc));
+  EXPECT_EQ(delta, static_cast<ssize_t>(pair.AllocSize()) - static_cast<ssize_t>(old_alloc));
   EXPECT_EQ(pair.Key(), key);
   EXPECT_EQ(pair.Value(), value);
   EXPECT_EQ(pair.GetExpiry(), 11u);
@@ -361,7 +361,7 @@ TEST_F(OAHMapTest, ExternalValueSelectiveRealloc) {
   EXPECT_TRUE(realloced);
   EXPECT_NE(pair.Raw(), old_raw);
   EXPECT_NE(pair.Value().data(), old_value);
-  EXPECT_EQ(delta, static_cast<int64_t>(pair.AllocSize()) - static_cast<int64_t>(old_alloc));
+  EXPECT_EQ(delta, static_cast<ssize_t>(pair.AllocSize()) - static_cast<ssize_t>(old_alloc));
   EXPECT_EQ(pair.Key(), key);
   EXPECT_EQ(pair.Value(), value);
   EXPECT_EQ(pair.GetExpiry(), 11u);

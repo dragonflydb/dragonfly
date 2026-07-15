@@ -74,7 +74,7 @@ void OAHEntry::ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* all
   }
 }
 
-int64_t OAHEntry::ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
+ssize_t OAHEntry::ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
   *realloced = false;
   if (Empty())
     return 0;
@@ -84,7 +84,7 @@ int64_t OAHEntry::ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
   const size_t old_alloc = AllocSize();
   Rebuild(HasExpiry() ? GetExpiry() : UINT32_MAX);
   *realloced = true;
-  return static_cast<int64_t>(AllocSize()) - static_cast<int64_t>(old_alloc);
+  return static_cast<ssize_t>(AllocSize()) - static_cast<ssize_t>(old_alloc);
 }
 
 }  // namespace dfly

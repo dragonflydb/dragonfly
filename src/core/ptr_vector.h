@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <sys/types.h>
+
 #include <algorithm>
 #include <bit>
 #include <cassert>

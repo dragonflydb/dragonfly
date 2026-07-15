@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <sys/types.h>
+
 #include <cassert>
 #include <cstdint>
 #include <string_view>
@@ -79,7 +81,7 @@ class OAHEntry {
 
   // Reallocates the key blob if its page is underutilized; returns the usable-size delta and sets
   // *realloced when the buffer moved.
-  int64_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced);
+  ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced);
 
   char* Raw() const {
     return (char*)(GetTaggedPtr() & ~oah::kTagMask);
