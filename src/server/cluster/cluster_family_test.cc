@@ -30,13 +30,13 @@ class ClusterFamilyTest : public BaseFamilyTest {
   ClusterFamilyTest() = default;
 
  protected:
-  void SetUp() override {
+  virtual void ConfigureClusterFlags() {
     SetTestFlag("cluster_mode", "yes");
-    BaseFamilyTest::SetUp();
   }
 
-  void TearDown() override {
-    BaseFamilyTest::TearDown();
+  void SetUp() override {
+    ConfigureClusterFlags();
+    BaseFamilyTest::SetUp();
   }
 
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
@@ -943,17 +943,10 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
 
 class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
  protected:
-  void SetUp() override {
+  void ConfigureClusterFlags() override {
     SetTestFlag("cluster_mode", "emulated");
     SetTestFlag("cluster_announce_ip", "fake-host");
     SetTestFlag("announce_port", "6379");
-    BaseFamilyTest::SetUp();
-  }
-
-  void TearDown() override {
-    BaseFamilyTest::TearDown();
-    SetTestFlag("cluster_announce_ip", "");
-    SetTestFlag("announce_port", "0");
   }
 };
 
