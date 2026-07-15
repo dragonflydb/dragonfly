@@ -272,7 +272,7 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
       if (ec) {
         LOG(WARNING) << "Error greeting " << server().Description()
                      << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
-                     << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                     << ", socket state: " + SockInfo();
         state_mask_ &= R_ENABLED;
         continue;
       }
@@ -290,7 +290,7 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
       if (ec) {
         LOG(WARNING) << "Error syncing with " << server().Description()
                      << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
-                     << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                     << ", socket state: " + SockInfo();
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
         continue;
       }
@@ -310,7 +310,7 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
     if (state_mask_ & R_ENABLED) {  // replication was not stopped.
       LOG(WARNING) << "Error stable sync with " << server().Description()
                    << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
-                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                   << ", socket state: " + SockInfo();
     }
   }
 
@@ -768,8 +768,7 @@ error_code Replica::ConsumeRedisStream() {
     if (!response.has_value()) {
       LOG_REPL_ERROR("Error in Redis Stream at phase "
                      << GetCurrentPhase() << " with " << server().Description()
-                     << ", error: " << response.error()
-                     << ", socket state: " + GetSocketInfo(Sock()->native_handle()));
+                     << ", error: " << response.error() << ", socket state: " + SockInfo());
       exec_st_.ReportError(response.error());
       acks_fb_.JoinIfNeeded();
       return response.error();
@@ -877,8 +876,8 @@ error_code Replica::ConsumeDflyStream() {
     lock_guard lk{flows_op_mu_};
 
     LOG_REPL_ERROR("Replication error in phase "
-                   << GetCurrentPhase() << " with " << server().Description() << ", error: "
-                   << ge.Format() << ", socket state: " + GetSocketInfo(Sock()->native_handle()));
+                   << GetCurrentPhase() << " with " << server().Description()
+                   << ", error: " << ge.Format() << ", socket state: " + SockInfo());
 
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_) {

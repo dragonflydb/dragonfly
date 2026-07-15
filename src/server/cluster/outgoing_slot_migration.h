@@ -3,6 +3,9 @@
 //
 #pragma once
 
+#include <atomic>
+#include <optional>
+
 #include "server/cluster/cluster_defs.h"
 #include "server/execution_state.h"
 #include "server/protocol_client.h"
@@ -28,7 +31,11 @@ class OutgoingMigration : private ProtocolClient {
   // if is_error = false mark migration as FINISHED and cancel migration if it's not finished yet
   // can be called from any thread, but only after Start()
   // if is_error = true and migration is in progress it will be restarted otherwise nothing happens
-  void Finish(const GenericError& error = {}) ABSL_LOCKS_EXCLUDED(state_mu_);
+  // attempt_gen ties an error-handler Finish() to the sync attempt whose flow spawned it; a call
+  // with a stale generation (a newer attempt already exists) is a no-op. Callers acting on the
+  // current attempt (success path, OOM, external cancel) pass std::nullopt.
+  void Finish(const GenericError& error = {}, std::optional<uint64_t> attempt_gen = std::nullopt)
+      ABSL_LOCKS_EXCLUDED(state_mu_);
 
   MigrationState GetState() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
@@ -104,6 +111,16 @@ class OutgoingMigration : private ProtocolClient {
 
   mutable util::fb2::Mutex state_mu_;
   MigrationState state_ ABSL_GUARDED_BY(state_mu_) = MigrationState::C_CONNECTING;
+
+  // Incremented by SyncFb before creating each attempt's flows. Written only by SyncFb; read by
+  // Finish() to drop stale error-handler calls that belong to a previous attempt's flows.
+  //
+  // Uses both an atomic and state_mu_, each for a different job: the increment and Finish()'s
+  // authoritative re-check run under state_mu_ because the invariant spans two variables (a
+  // Finish() that passes the check must write state_ before the next bump), which no memory
+  // order on a single atomic can express. The type stays atomic only for Finish()'s advisory
+  // pre-lock check - a plain read there would be a data race.
+  std::atomic<uint64_t> attempt_gen_{0};
 
   boost::intrusive_ptr<Transaction> tx_;
 
