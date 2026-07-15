@@ -64,6 +64,20 @@ ClusterShardInfos::ClusterShardInfos(std::vector<ClusterShardInfo> infos)
   rng::sort(infos_, std::less<>{});
 }
 
+ClusterExtendedNodeInfo* ClusterShardInfos::Find(std::string_view id) noexcept {
+  for (auto& shard : infos_) {
+    if (shard.master.id == id) {
+      return &shard.master;
+    }
+    for (auto& replica : shard.replicas) {
+      if (replica.id == id) {
+        return &replica;
+      }
+    }
+  }
+  return nullptr;
+}
+
 facade::ErrorReply SlotOwnershipError(SlotId slot_id) {
   const auto cluster_config = ClusterConfig::Current();
   if (!cluster_config)

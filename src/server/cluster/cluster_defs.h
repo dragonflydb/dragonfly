@@ -174,19 +174,7 @@ class ClusterShardInfos {
     return infos_.empty();
   }
 
-  ClusterExtendedNodeInfo* Find(std::string_view id) noexcept {
-    for (auto& shard : infos_) {
-      if (shard.master.id == id) {
-        return &shard.master;
-      }
-      for (auto& replica : shard.replicas) {
-        if (replica.id == id) {
-          return &replica;
-        }
-      }
-    }
-    return nullptr;
-  }
+  ClusterExtendedNodeInfo* Find(std::string_view id) noexcept;
 
   bool operator==(const ClusterShardInfos& r) const noexcept {
     return infos_ == r.infos_;
