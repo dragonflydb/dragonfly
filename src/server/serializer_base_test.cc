@@ -142,7 +142,7 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
 
   void RecordSerialized(std::string key) {
     // Simulate occasional yields due to big value flushes
-    while (absl::Bernoulli(bg_, 0.3)) {
+    while (absl::Bernoulli(bg_, 0.4)) {
       for (unsigned it = absl::Uniform(bg_, 1, 10); it > 0; it--)
         util::ThisFiber::Yield();
     }
@@ -348,7 +348,7 @@ TEST_F(SerializerBaseTest, IncreasingLists) {
   // Select keys in range [0, 2 * kKeys] to have a balance of new and existing keys
   std::atomic_bool running = true;
   std::vector<util::fb2::Fiber> workers;
-  for (size_t w = 0; w < 3; w++) {
+  for (size_t w = 0; w < 5; w++) {
     auto worker = pp_->at(w % pp_->size())->LaunchFiber([&, w] {
       std::string id = absl::StrCat("w", w);
       absl::InsecureBitGen bg;

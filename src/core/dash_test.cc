@@ -1445,12 +1445,15 @@ TEST_F(DashTest, Version) {
   }
 
   unsigned items = 0;
-  for (auto it = dt.begin(); it != dt.end(); ++it) {
-    ASSERT_FALSE(it.is_done());
-    ASSERT_GE(it.GetVersion(), it->first + 65000)
-        << it.segment_id() << " " << it.bucket_id() << " " << it.slot_id();
-    ++items;
-  }
+  VersionDT::Cursor cursor;
+  do {
+    cursor = dt.Traverse(cursor, [&](VersionDT::iterator it) {
+      ASSERT_FALSE(it.is_done());
+      ASSERT_GE(it.GetVersion(), it->first + 65000)
+          << it.segment_id() << " " << it.bucket_id() << " " << it.slot_id();
+      ++items;
+    });
+  } while (cursor);
   ASSERT_EQ(kNum, items);
 }
 
