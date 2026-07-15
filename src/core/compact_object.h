@@ -343,6 +343,7 @@ class CompactObj {
   // takes ownership over obj_inner.
   // type should not be OBJ_STRING.
   void InitRobj(CompactObjType type, unsigned encoding, void* obj_inner);
+  void InitRobj(CompactObjType type, unsigned encoding, void* obj_inner, FreeHook fh);
 
   // Sets the abstract time used by per-member lazy expiry on StringSet/StringMap.
   // The value should typically be obtained via MemberTimeSeconds(now_ms).

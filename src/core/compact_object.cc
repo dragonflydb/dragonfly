@@ -1000,6 +1000,32 @@ void CompactObj::InitRobj(CompactObjType type, unsigned encoding, void* obj) {
   u_.r_obj.Init(encoding, obj);
 }
 
+void CompactObj::InitRobj(CompactObjType type, unsigned encoding, void* obj, FreeHook fh) {
+  DCHECK_NE(type, OBJ_STRING);
+  uint8_t tag;
+  switch (type) {
+    case OBJ_LIST:
+      tag = LIST_TAG;
+      break;
+    case OBJ_SET:
+      tag = SET_TAG;
+      break;
+    case OBJ_HASH:
+      tag = HASH_TAG;
+      break;
+    case OBJ_ZSET:
+      tag = ZSET_TAG;
+      break;
+    case OBJ_STREAM:
+      tag = STREAM_TAG;
+      break;
+    default:
+      LOG(FATAL) << "Unsupported type for InitRobj: " << type;
+  }
+  SetMeta(tag, mask_, fh);
+  u_.r_obj.Init(encoding, obj);
+}
+
 namespace {
 // Dispatches `fn` over the dense set/map backing this CompactObj for
 // kEncodingStrMap2. OBJ_HASH always uses StringMap (a DenseSet subclass);
