@@ -27,7 +27,7 @@ size_t StashedValueSize(string_view value) {
 }  // namespace
 
 std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_view key,
-                                                     std::string_view value, uint8_t flags) {
+                                                     std::string_view value, StashSource source) {
   DCHECK_LT(value.size(), 2_KB);
 
   size_t value_bytes = StashedValueSize(value);
@@ -38,7 +38,10 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_v
   }
 
   current_bin_.bytes_ += value_bytes;
-  current_bin_.flags |= flags;
+
+  if (source == StashSource::kClient)  // A client write flips the whole bin
+    current_bin_.source = StashSource::kClient;
+
   auto [it, inserted] = current_bin_.entries_.emplace(std::make_pair(dbid, key), string(value));
   CHECK(inserted);
 

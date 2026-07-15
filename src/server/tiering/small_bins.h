@@ -41,14 +41,13 @@ class SmallBins {
   struct FilledBin {
     friend class SmallBins;
     BinId id;
-    uint8_t flags = 0;
+    StashSource source = StashSource::kOffloading;
 
    private:
     explicit FilledBin(BinId id) : id{id} {
     }
 
     unsigned bytes_ = 0;
-    uint8_t flags_ = 0;
     tiering::EntryMap<std::string> entries_;
   };
 
@@ -63,10 +62,10 @@ class SmallBins {
     return current_bin_.entries_.count(std::make_pair(dbid, key)) > 0;
   }
 
-  // Enqueue key/value pair for stash. Returns page to be stashed if it filled up. Per-value flags
-  // are collapsed with bitwise or into a per-bin flag
+  // Enqueue key/value pair for stash. Returns page to be stashed if it filled up. A bin is
+  // marked as a client stash if any of its entries came from a client (see FilledBin::source).
   std::optional<FilledBin> Stash(DbIndex dbid, std::string_view key, std::string_view value,
-                                 uint8_t flags = 0);
+                                 StashSource source = StashSource::kClient);
 
   // Report that a stash succeeeded. Returns list of stored keys with calculated value locations.
   KeySegmentList ReportStashed(BinId id, DiskSegment segment);

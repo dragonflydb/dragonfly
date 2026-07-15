@@ -66,7 +66,7 @@ struct OpManagerTest : PoolTestBase, OpManager {
   }
 
   void NotifyStashed(const OwnedEntryId& id, const io::Result<DiskSegment>& segment,
-                     uint8_t flags) override {
+                     StashSource source) override {
     VLOG(1) << std::get<0>(id) << " stashed";
     ASSERT_TRUE(segment);
     auto [it, inserted] = stashed_.emplace(id, *segment);

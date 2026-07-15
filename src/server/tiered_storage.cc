@@ -45,6 +45,12 @@ ABSL_FLAG(bool, tiered_experimental_cooling, true,
           "If true, uses intermediate cooling layer "
           "when offloading values to storage");
 
+ABSL_FLAG(bool, tiered_offload_cooling, true,
+          "If true, values offloaded by background offloading are cooled like client writes. If "
+          "false, such values (already proven cold) are only kept in the cooling layer when there "
+          "is spare memory (no eviction needed) and are then inserted at the reclaim end of the "
+          "cool queue so they are evicted first; otherwise they go straight to disk");
+
 ABSL_RETIRED_FLAG(unsigned, tiered_storage_write_depth, 200,
                   "Maximum number of concurrent stash requests issued by background offload. "
                   "Deprecated: prefer tiered_max_pending_stash_bytes.");
@@ -213,12 +219,12 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void Defragment(tiering::DiskSegment segment, string_view value);
 
   void NotifyStashed(const OwnedEntryId& id, const io::Result<tiering::DiskSegment>& segment,
-                     uint8_t flags) override {
+                     tiering::StashSource source) override {
     if (!segment) {
       VLOG(1) << "Stash failed " << segment.error().message();
       visit([this](auto id) { ClearStashPending(id); }, id);
     } else {
-      visit([this, segment, flags](auto id) { SetExternal(id, *segment, flags); }, id);
+      visit([this, segment, source](auto id) { SetExternal(id, *segment, source); }, id);
     }
   }
 
@@ -258,37 +264,58 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   // Find entry by key in db_slice and store external segment in place of original value.
   // Update memory stats
-  void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment, uint8_t flags) {
+  void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment,
+                   tiering::StashSource source) {
     UnblockBackpressure(key, true);
-    if (auto* pv = Find(key.first, key.second); pv) {
-      auto* stats = GetDbTableStats(key.first);
 
-      pv->SetStashPending(false);
-      stats->tiered_entries++;
-      stats->tiered_used_bytes += segment.length;
-      stats_.total_stashes++;
+    auto* pv = Find(key.first, key.second);
+    if (!pv) {
+      LOG(DFATAL) << "Value not found";
+      return;
+    }
 
-      StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
-      if (ts_->config_.experimental_cooling && (flags & TieredStorage::kWasClientWrite)) {
-        RetireColdEntries(pv->MallocUsed());
-        ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
-      } else {
-        stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
-        pv->SetExternal(segment.offset, segment.length, blobs.rep);
+    auto* stats = GetDbTableStats(key.first);
+
+    pv->SetStashPending(false);
+    stats->tiered_entries++;
+    stats->tiered_used_bytes += segment.length;
+    stats_.total_stashes++;
+
+    StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
+
+    // Client writes are always cooled down.
+    // Offloaded are cooled down if enabled or otherwise placed at the head of the cool qeueue
+    // (lowest prio) and only if memory is available - so not to disrupt client writes at all
+    bool should_cool = false, low_prio = false;
+    if (ts_->config_.experimental_cooling) {
+      if (source == tiering::StashSource::kClient || ts_->config_.offload_cooling) {
+        should_cool = true;
+      } else if (ts_->UploadBudget() > int64_t(pv->MallocUsed())) {
+        should_cool = true;
+        low_prio = true;
       }
+    }
+
+    if (should_cool) {
+      if (!low_prio)
+        RetireColdEntries(pv->MallocUsed());
+      ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv, low_prio);
     } else {
-      LOG(DFATAL) << "Should not reach here";
+      stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
+      pv->SetExternal(segment.offset, segment.length, blobs.rep);
     }
   }
 
   // Find bin by id and call SetExternal for all contained entries
-  void SetExternal(tiering::SmallBins::BinId id, tiering::DiskSegment segment, uint8_t flags) {
+  void SetExternal(tiering::SmallBins::BinId id, tiering::DiskSegment segment,
+                   tiering::StashSource source) {
     for (const auto& [sub_dbid, sub_key, sub_segment] : ts_->bins_->ReportStashed(id, segment))
-      SetExternal({sub_dbid, sub_key}, sub_segment, flags);
+      SetExternal({sub_dbid, sub_key}, sub_segment, source);
   }
 
   // Finalize stash for a fragments identified by pointer
-  void SetExternal(tiering::ListNodeId id, tiering::DiskSegment segment, uint8_t /*flags*/) {
+  void SetExternal(tiering::ListNodeId id, tiering::DiskSegment segment,
+                   tiering::StashSource /*source*/) {
     auto* stats = GetDbTableStats(std::get<0>(id));
 
     stats->tiered_entries++;
@@ -510,7 +537,7 @@ void TieredStorage::ReadInternal(tiering::ReadId id, const tiering::DiskSegment&
 }
 
 void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDescriptor& blobs,
-                                    BackPressureFuture* backpressure, uint8_t flags) {
+                                    BackPressureFuture* backpressure, tiering::StashSource source) {
   CHECK(!bins_->IsPending(dbid, key));  // Because has stash pending is false (ShouldStash checks)
 
   size_t est_size = blobs.EstimatedSerializedSize();
@@ -522,13 +549,13 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
   if (OccupiesWholePages(est_size)) {  // large enough for own page
     id = KeyRef(dbid, key);
     auto serialize = absl::bind_front(&StashDescriptor::Serialize, &blobs);
-    ec = op_manager_->PrepareAndStash(id, est_size, serialize, flags);
-  } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(blobs), flags); bin) {
+    ec = op_manager_->PrepareAndStash(id, est_size, serialize, source);
+  } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(blobs), source); bin) {
     id = bin->id;
     auto serialize = absl::bind_front(&tiering::SmallBins::SerializeBin, bins_.get(), &*bin);
-    // The flushed bin may aggregate entries from several stashes; keep it cool if any of them
-    // requested it (see SmallBins::FilledBin::Flags).
-    ec = op_manager_->PrepareAndStash(id, 4_KB, serialize, bin->flags);
+    // The flushed bin may aggregate entries from several stashes; it counts as a client stash if
+    // any of them was one (see SmallBins::FilledBin::source).
+    ec = op_manager_->PrepareAndStash(id, 4_KB, serialize, bin->source);
   } else {
     return;  // added to bin, no operations pending
   }
@@ -631,6 +658,7 @@ void TieredStorage::UpdateFromFlags() {
   config_ = {
       .min_value_size = absl::GetFlag(FLAGS_tiered_min_value_size),
       .experimental_cooling = absl::GetFlag(FLAGS_tiered_experimental_cooling),
+      .offload_cooling = absl::GetFlag(FLAGS_tiered_offload_cooling),
       .max_pending_stash_bytes = absl::GetFlag(FLAGS_tiered_max_pending_stash_bytes),
       .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
@@ -645,11 +673,11 @@ void TieredStorage::UpdateFromFlags() {
 }
 
 std::vector<std::string> TieredStorage::GetMutableFlagNames() {
-  return base::GetFlagNames(FLAGS_tiered_min_value_size, FLAGS_tiered_experimental_cooling,
-                            FLAGS_tiered_max_pending_stash_bytes, FLAGS_tiered_offload_threshold,
-                            FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
-                            FLAGS_tiered_experimental_list_support,
-                            FLAGS_tiered_min_ttl_to_offload_ms);
+  return base::GetFlagNames(
+      FLAGS_tiered_min_value_size, FLAGS_tiered_experimental_cooling, FLAGS_tiered_offload_cooling,
+      FLAGS_tiered_max_pending_stash_bytes, FLAGS_tiered_offload_threshold,
+      FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
+      FLAGS_tiered_experimental_list_support, FLAGS_tiered_min_ttl_to_offload_ms);
 }
 
 bool TieredStorage::ShouldOffload() const {
@@ -691,9 +719,8 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
       } else {
         stats_.offloading_stashes++;
         it->second.SetStashPending(true);
-        // Background cold-scan offload: this value already lost a second chance, so do not keep
-        // it in the cooling layer.
-        StashPrimeValue(dbid, it->first.GetSlice(&tmp), *blobs, nullptr, /*flags=*/0);
+        StashPrimeValue(dbid, it->first.GetSlice(&tmp), *blobs, nullptr,
+                        tiering::StashSource::kOffloading);
       }
     }
   };
@@ -814,9 +841,13 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
                              const tiering::DiskSegment& segment, CompactObj::ExternalRep rep,
-                             PrimeValue* pv) {
+                             PrimeValue* pv, bool insert_at_end) {
   TieredCoolRecord* record = CompactObj::AllocateMR<TieredCoolRecord>();
-  cool_queue_.push_front(*record);
+
+  if (insert_at_end)
+    cool_queue_.push_back(*record);
+  else
+    cool_queue_.push_front(*record);
   stats_.cool_memory_used += (sizeof(TieredCoolRecord) + pv->MallocUsed());
 
   record->key_hash = CompactObj::HashCode(str);
@@ -862,8 +893,7 @@ void StashPrimeValue(DbIndex dbid, std::string_view key, const PrimeKey& pk, Pri
           ts->ShouldStash(*pv, TieredStorage::StashContext{.key_expire_ms = pk.GetExpireTime()});
       blobs) {
     pv->SetStashPending(true);
-    // Write/load-driven offload: keep the value in the cooling layer to serve read-after-write.
-    ts->StashPrimeValue(dbid, key, *blobs, backpressure, TieredStorage::kWasClientWrite);
+    ts->StashPrimeValue(dbid, key, *blobs, backpressure, tiering::StashSource::kClient);
   }
 }
 

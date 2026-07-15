@@ -67,15 +67,16 @@ class OpManager {
     return storage_.PrepareStash(length);
   }
 
-  // Stash value to be offloaded. It is opaque to OpManager. `flags` is an opaque byte passed
-  // back to NotifyStashed on completion (used by higher layers to carry stash metadata).
+  // Stash value to be offloaded. It is opaque to OpManager. `source` records who requested the
+  // stash and is passed back to NotifyStashed on completion (used by higher layers for policy).
   void Stash(PendingId id, tiering::DiskSegment segment, util::fb2::RegisteredSlice buf,
-             uint8_t flags = 0);
+             StashSource source = StashSource::kClient);
 
   // PrepareStash + Stash via function
   std::error_code PrepareAndStash(
       PendingId id, size_t length,
-      const std::function<size_t /*written*/ (io::MutableBytes)>& writer, uint8_t flags = 0);
+      const std::function<size_t /*written*/ (io::MutableBytes)>& writer,
+      StashSource source = StashSource::kClient);
 
   Stats GetStats() const;
 
@@ -83,9 +84,9 @@ class OpManager {
   using OwnedEntryId = std::variant<uintptr_t, DbKeyId, ListNodeId>;
 
   // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
-  // given error. `flags` is the opaque byte passed to Stash/PrepareAndStash.
+  // given error. `source` is the value passed to Stash/PrepareAndStash.
   virtual void NotifyStashed(const OwnedEntryId& id, const io::Result<DiskSegment>& segment,
-                             uint8_t flags) = 0;
+                             StashSource source) = 0;
 
   // Notify that an entry was successfully fetched. Includes whether entry was modified.
   // Returns true if value needs to be deleted from the storage.
@@ -139,7 +140,7 @@ class OpManager {
 
   // Called once Stash finished
   void ProcessStashed(const OwnedEntryId& id, unsigned version,
-                      const io::Result<DiskSegment>& segment, uint8_t flags);
+                      const io::Result<DiskSegment>& segment, StashSource source);
 
  private:
   static OwnedEntryId ToOwned(PendingId id);

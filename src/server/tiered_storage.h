@@ -66,12 +66,6 @@ class TieredStorage : public TieredStorageBase {
   std::error_code Open(std::string_view path);
   void Close();
 
-  // Stash flags below:
-  //
-  // Set if the stash was issued by a client write (and not background offloading).
-  // Such writes can be "cooled down" as we don't yet know the access frequency of the value
-  static constexpr uint8_t kWasClientWrite = 1;
-
   // Enqueue read external value with generic decoder.
   template <typename D, typename F>
   void Read(tiering::ReadId id, const tiering::DiskSegment& segment, const D& decoder, F&& f,
@@ -89,10 +83,10 @@ class TieredStorage : public TieredStorageBase {
                                              const StashContext& stash_ctx) const;
 
   // Stash value identified by (dbid, key), returns optional future for backpressure is not null.
-  // if `provide_bp` is set and conditions are met. `flags` (see kKeepCool) are carried through
-  // to stash completion.
+  // if `provide_bp` is set and conditions are met. `source` records who issued the stash and is
+  // carried through to stash completion to decide whether the value is cooled.
   void StashPrimeValue(DbIndex dbid, std::string_view key, const StashDescriptor& blobs,
-                       BackPressureFuture* backpressure, uint8_t flags);
+                       BackPressureFuture* backpressure, tiering::StashSource source);
 
   // Stash partial value identified by pointer.
   void StashPartialValue(tiering::PendingId id, const StashDescriptor& blobs,
@@ -139,9 +133,10 @@ class TieredStorage : public TieredStorageBase {
                     const tiering::Decoder& decoder,
                     std::function<void(io::Result<tiering::Decoder*>)> cb, bool read_only);
 
-  // Moves pv contents to the cool storage and updates pv to point to it.
+  // Moves pv contents to the cool storage and updates pv to point to it. Inserts at front by
+  // default or at back if `insert_at_end` is set (first to be evicted, lowest priority)
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
-                CompactObj::ExternalRep rep, PrimeValue* pv);
+                CompactObj::ExternalRep rep, PrimeValue* pv, bool insert_at_end = false);
 
   void ProcessDelayedDeframents();
 
@@ -164,6 +159,7 @@ class TieredStorage : public TieredStorageBase {
   struct {
     size_t min_value_size;
     bool experimental_cooling;
+    bool offload_cooling;
     size_t max_pending_stash_bytes;
     float offload_threshold;
     float upload_threshold;

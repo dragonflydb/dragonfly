@@ -28,6 +28,8 @@ ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
+ABSL_DECLARE_FLAG(bool, tiered_offload_cooling);
+ABSL_DECLARE_FLAG(uint32_t, tiered_min_ttl_to_offload_ms);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_list_support);
@@ -71,6 +73,26 @@ class TieredStorageTest : public BaseFamilyTest {
 
   void UpdateFromFlags() {
     pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+  }
+
+  // Writes `num` large values that stay hot (nothing is stashed on the write path), then enables
+  // background offloading. Callers wait for and assert the outcome they expect.
+  void PrimeHotValuesAndEnableOffloading(size_t num) {
+    string value = BuildString(3000);
+    max_memory_limit = num * 8192;  // headroom so writes stay hot (no eager stash)
+
+    // Write everything with offloading off. Give keys a TTL below min_ttl_to_offload_ms so the
+    // write path does not eagerly stash (and cool) them; they stay hot in memory.
+    SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);
+    SetFlag(&FLAGS_tiered_min_ttl_to_offload_ms, 3600'000);  // 1h: covers our 100s key TTL
+    UpdateFromFlags();
+    for (size_t i = 0; i < num; i++)
+      Run({"SET", absl::StrCat("k", i), value, "EX", "100"});
+    EXPECT_EQ(GetMetrics().tiered_stats.total_stashes, 0u);
+
+    // Enable offloading so the background cold-scan drains the (now cold) values.
+    SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+    UpdateFromFlags();
   }
 
   // A single huge PFADD stays sparse and too small to offload; batch to force dense.
@@ -498,6 +520,66 @@ TEST_F(PureDiskTSTest, OffloadingStrategy) {
     EXPECT_EQ(metrics.tiered_stats.total_offloading_stashes, i);
     EXPECT_EQ(metrics.tiered_stats.total_stashes, i + 1);
   }
+}
+
+// With tiered_offload_cooling=false and spare memory, a background-offloaded value (proven cold)
+// is kept in the cooling layer as an opportunistic cache instead of going straight to disk.
+TEST_F(TieredStorageTest, BackgroundOffloadingCoolsWhenRoom) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  SetFlag(&FLAGS_tiered_offload_cooling, false);
+  // Default upload_threshold (0.1) leaves headroom, so cooling won't evict anything.
+
+  PrimeHotValuesAndEnableOffloading(200);
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.cold_storage_bytes > 0; });
+  EXPECT_GT(GetMetrics().tiered_stats.total_offloading_stashes, 0u);
+}
+
+// With tiered_offload_cooling=false and no free memory, cooling a proven-cold value would force an
+// eviction, so it goes straight to disk and the cooling layer stays empty.
+TEST_F(TieredStorageTest, BackgroundOffloadingSkipsCoolingUnderPressure) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  SetFlag(&FLAGS_tiered_offload_cooling, false);
+  SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);  // no headroom -> cooling always evicts
+
+  PrimeHotValuesAndEnableOffloading(200);
+  // Nothing is cooled, so offloading drains every value straight to disk.
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 200; });
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.total_offloading_stashes, 200u);
+  EXPECT_EQ(metrics.tiered_stats.cold_storage_bytes, 0u);
+}
+
+// Contrast with the above under identical memory pressure: with tiered_offload_cooling=true
+// (default), background-offloaded values are still cooled like client writes.
+TEST_F(TieredStorageTest, BackgroundOffloadingKeepsCoolingUnderPressure) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  SetFlag(&FLAGS_tiered_offload_cooling, true);
+  SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);  // same pressure as the test above
+
+  PrimeHotValuesAndEnableOffloading(200);
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.cold_storage_bytes > 0; });
+}
+
+// Regardless of tiered_offload_cooling, a client write under memory pressure is cooled (kept in
+// memory) so it can serve read-after-write, growing the cooling layer.
+TEST_F(TieredStorageTest, ClientWriteIsCooled) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  SetFlag(&FLAGS_tiered_offload_cooling, false);
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // force eager stash on write
+  UpdateFromFlags();
+
+  max_memory_limit = 1;  // any write is "over budget" -> eager stash
+  Run({"SET", "key", BuildString(3000)});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.total_offloading_stashes, 0u);  // not via background scan
+  EXPECT_GT(metrics.tiered_stats.cold_storage_bytes, 0u);        // kept in cooling layer
 }
 
 // Test FLUSHALL while reading entries
