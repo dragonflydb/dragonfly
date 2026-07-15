@@ -60,6 +60,9 @@ class OpManager {
   // Cancel entry with pending io
   void CancelPending(PendingId id);
 
+  // Cancel pending read for offloaded entry.
+  void CancelPendingLoad(DiskSegment segment);
+
   // Delete offloaded entry located at the segment.
   void DeleteOffloaded(DiskSegment segment);
 

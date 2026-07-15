@@ -423,7 +423,7 @@ size_t QList::Node::GetLZF(void** data) const {
 }
 
 void QList::Node::SetExternal(size_t offset, uint32_t size) {
-  DCHECK(entry && !io_pending);
+  DCHECK(entry && !IsStashPending());
   zfree(entry);
   offloaded = 1;
   ext_offset = offset;
@@ -447,7 +447,7 @@ size_t QList::DefragIfNeeded(PageUsage* page_usage) {
 
   for (Node* curr = head_; curr; curr = curr->next) {
     // Skip offloaded or pending nodes
-    if (curr->offloaded || curr->io_pending) {
+    if (curr->offloaded || curr->IsStashPending()) {
       continue;
     }
 
@@ -936,7 +936,7 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
     //    get accessed again. Another reason for missing offloaded nodes is that node_id can be
     //    off due to merges (can be improved in future).
     if (node_id >= threshold && node_id + threshold < len_) {
-      if (!node->offloaded && !node->io_pending) {
+      if (!node->offloaded && !node->IsStashPending()) {
         tiering_params_->offload(this, node);
       }
     } else if (num_offloaded_nodes * 2 + threshold * 2 < len_) {
@@ -951,12 +951,12 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
       // due to usual access patterns of adding items via lpush/rpush.
       while (traverse_node_id <= len_ / 2 && (num_offloaded_nodes + 2 * threshold) < len_) {
         if (traverse_node_id >= threshold) {
-          if (fw->offloaded == 0 && fw->io_pending == 0) {
+          if (fw->offloaded == 0 && !fw->IsStashPending()) {
             tiering_params_->offload(this, fw);
           }
 
           // Avoid offloading the same node twice when fw and rev meet in the middle.
-          if (rev != fw && rev->offloaded == 0 && rev->io_pending == 0) {
+          if (rev != fw && rev->offloaded == 0 && !rev->IsStashPending()) {
             tiering_params_->offload(this, rev);
           }
         }
@@ -1052,7 +1052,7 @@ void QList::Materialize(Node* node) {
     return;
 
   // Cancel stash in progress before loading.
-  if (node->io_pending) {
+  if (node->IsStashPending()) {
     tiering_params_->cleanup(this, node);
   }
 

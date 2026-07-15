@@ -862,7 +862,7 @@ TEST_F(ListNodeTieringTest, DeleteAfterStash) {
   }
 
   // Wait until stash is complete (io_pending cleared, offloaded=1) before DEL
-  // to avoid the io_pending use-after-free path.
+  // to avoid the use-after-free path for a pending stash.
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
 
   EXPECT_THAT(Run({"DEL", "mylist"}), IntArg(1));
@@ -936,7 +936,7 @@ TEST_F(ListNodeTieringTest, StashedDataMatchesOnLoad) {
   EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kItems));
 }
 
-// DEL a list whose interior nodes have io_pending=1.
+// DEL a list whose interior nodes have io_pending=1 (stash in flight).
 TEST_F(ListNodeTieringTest, DeleteWhileNodePending) {
   const int kItems = 6;
   for (int i = 0; i < kItems; i++) {
@@ -983,7 +983,7 @@ TEST_F(ListNodeTieringTest, RenameWithStashedNodes) {
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);  // after reads nodes come back to memory
 }
 
-// RENAME a list while its nodes are still io_pending.
+// RENAME a list while its nodes are still io_pending (stash in flight).
 TEST_F(ListNodeTieringTest, RenameWhileNodesPending) {
   const int kItems = 6;
   vector<string> expected;
@@ -1031,7 +1031,7 @@ TEST_F(ListNodeTieringTest, ExpireListWithStashedNodes) {
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
 }
 
-// PEXPIRE a list while its nodes are still io_pending
+// PEXPIRE a list while its nodes are still io_pending (stash in flight)
 TEST_F(ListNodeTieringTest, ExpireListWhileNodesPending) {
   const int kItems = 6;
   for (int i = 0; i < kItems; i++) {
@@ -1054,7 +1054,7 @@ TEST_F(ListNodeTieringTest, ExpireListWhileNodesPending) {
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
 }
 
-// FLUSHALL while list nodes are io_pending or fully offloaded.
+// FLUSHALL while list nodes are io_pending (stash in flight) or fully offloaded.
 TEST_F(ListNodeTieringTest, FlushAllWithTieredListNodes) {
   const int kLists = 4;
   const int kItems = 6;

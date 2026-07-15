@@ -83,6 +83,14 @@ class QList {
       return encoding != QUICKLIST_NODE_ENCODING_RAW;
     }
 
+    bool IsStashPending() const {
+      return io_pending && !offloaded;
+    }
+
+    bool IsLoadPending() const {
+      return io_pending && offloaded;
+    }
+
     size_t GetLZF(void** data) const;
 
     void SetExternal(size_t offset, uint32_t sz);

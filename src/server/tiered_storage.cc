@@ -500,6 +500,10 @@ bool TieredStorage::HasModificationPending(tiering::DiskSegment segment) const {
   return op_manager_->HasModificationPending(segment);
 }
 
+void TieredStorage::CancelLoad(tiering::DiskSegment segment) {
+  op_manager_->CancelPendingLoad(segment);
+}
+
 void TieredStorage::ReadInternal(tiering::ReadId id, const tiering::DiskSegment& segment,
                                  const tiering::Decoder& decoder,
                                  std::function<void(io::Result<tiering::Decoder*>)> cb,
@@ -909,6 +913,20 @@ TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::
   ts->Read(tiering::ListNodeId{dbid, ql, node}, segment, tiering::ListNodeDecoder{ql},
            std::move(read_cb));
   return fut;
+}
+
+void PrefetchTieredListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts) {
+  DCHECK(node->offloaded);
+  DCHECK(!node->io_pending);
+  node->io_pending = 1;
+  auto read_cb = [node](const io::Result<tiering::ListNodeDecoder*>& res) {
+    node->io_pending = 0;
+    if (!res) {
+      LOG(WARNING) << "Failed to prefetch list node from tiered storage: " << res.error().message();
+    }
+  };
+  ts->Read(tiering::ListNodeId{dbid, ql, node}, node->GetExternalSlice(),
+           tiering::ListNodeDecoder{ql}, std::move(read_cb));
 }
 
 template <typename T>
