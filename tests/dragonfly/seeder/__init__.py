@@ -241,6 +241,24 @@ class Seeder(SeederBase):
         logging.debug(msg)
 
 
+def np_dtype_for(data_type: str):
+    """Maps a vector field TYPE token to the numpy dtype clients encode with."""
+    simple = {
+        "FLOAT32": np.float32,
+        "FLOAT64": np.float64,
+        "FLOAT16": np.float16,
+        "INT8": np.int8,
+        "UINT8": np.uint8,
+    }
+    if data_type in simple:
+        return simple[data_type]
+    if data_type == "BFLOAT16":
+        import ml_dtypes  # optional dependency, only needed for bfloat16
+
+        return ml_dtypes.bfloat16
+    raise ValueError(f"unsupported vector data_type: {data_type}")
+
+
 class HnswSearchSeeder:
 
     def __init__(
@@ -251,6 +269,7 @@ class HnswSearchSeeder:
         num_initial_docs=200,
         seed=42,
         document_type="HASH",
+        data_type="FLOAT32",
     ):
         if document_type not in ("HASH", "JSON"):
             raise ValueError(f"document_type must be HASH or JSON, got {document_type}")
@@ -260,12 +279,20 @@ class HnswSearchSeeder:
         self.num_initial_docs = num_initial_docs
         self.seed = seed
         self.document_type = document_type
+        self.data_type = data_type
+        self.np_dtype = np_dtype_for(data_type)
 
         self._doc_counter = 0
         self._stop_event = asyncio.Event()
 
     def _make_embedding(self):
-        return np.random.uniform(-10, 10, self.num_dims).astype(np.float32)
+        # Integer dtypes must carry whole numbers (JSON stores them as JSON numbers); keep the
+        # range well inside the type so quantization is lossless and KNN ordering is stable.
+        if np.issubdtype(self.np_dtype, np.integer):
+            info = np.iinfo(self.np_dtype)
+            lo, hi = max(info.min, -100), min(info.max, 100)
+            return np.random.randint(lo, hi + 1, self.num_dims).astype(self.np_dtype)
+        return np.random.uniform(-10, 10, self.num_dims).astype(self.np_dtype)
 
     def _field(self, name: str, *spec: str) -> list:
         # FT.CREATE field syntax: HASH uses the field name directly; JSON
@@ -285,7 +312,7 @@ class HnswSearchSeeder:
                 "HNSW",
                 "6",
                 "TYPE",
-                "FLOAT32",
+                self.data_type,
                 "DIM",
                 str(self.num_dims),
                 "DISTANCE_METRIC",
