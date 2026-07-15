@@ -27,11 +27,18 @@ using namespace testing;
 
 class ClusterFamilyTest : public BaseFamilyTest {
  public:
-  ClusterFamilyTest() {
+  ClusterFamilyTest() = default;
+
+ protected:
+  virtual void ConfigureClusterFlags() {
     SetTestFlag("cluster_mode", "yes");
   }
 
- protected:
+  void SetUp() override {
+    ConfigureClusterFlags();
+    BaseFamilyTest::SetUp();
+  }
+
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 
   string GetMyId() {
@@ -935,10 +942,11 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
 }
 
 class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
- public:
-  ClusterFamilyEmulatedTest() {
+ protected:
+  void ConfigureClusterFlags() override {
     SetTestFlag("cluster_mode", "emulated");
     SetTestFlag("cluster_announce_ip", "fake-host");
+    SetTestFlag("announce_port", "6379");
   }
 };
 
@@ -963,6 +971,24 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterShardInfos) {
                                                     "endpoint", "fake-host",                   //
                                                     "ip", "fake-host",                         //
                                                     "port", IntArg(6379),                      //
+                                                    "role", "master",                          //
+                                                    "replication-offset", IntArg(0),           //
+                                                    "health", "online"))))))));
+
+  EXPECT_EQ(RunPrivileged({"config", "set", "cluster_announce_ip", "updated-host"}), "OK");
+  EXPECT_EQ(RunPrivileged({"config", "set", "announce_port", "6380"}), "OK");
+
+  EXPECT_THAT(
+      Run({"cluster", "shards"}),
+      RespElementsAre(RespArray(ElementsAre("slots",                                           //
+                                            RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //
+                                            "nodes",                                           //
+                                            RespArray(ElementsAre(                             //
+                                                RespArray(ElementsAre(                         //
+                                                    "id", GetMyId(),                           //
+                                                    "endpoint", "updated-host",                //
+                                                    "ip", "updated-host",                      //
+                                                    "port", IntArg(6380),                      //
                                                     "role", "master",                          //
                                                     "replication-offset", IntArg(0),           //
                                                     "health", "online"))))))));
