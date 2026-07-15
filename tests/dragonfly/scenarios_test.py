@@ -161,17 +161,26 @@ def classify_overwrite_hash(m: Metrics):
         return "WRONG"
 
 
-def classify_overwrite_hash_with_z(m: Metrics):
-    """A hash is used as dest for ZUNIONSTORE: old hash freed and new zset added"""
+def classify_overwrite(m: Metrics, t: str):
     if (
-        m.cmd("zset") == m.type("zset")
-        and m.cmd("hash") == m.cmd("hash")
+        m.cmd(t) == m.type(t)
+        and m.cmd("hash") == m.type("hash")
         and m.cmd_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
         return "OK"
     else:
         return "WRONG"
+
+
+def classify_overwrite_hash_with_z(m: Metrics):
+    """A hash is used as dest for ZUNIONSTORE: old hash freed and new zset added"""
+    return classify_overwrite(m, "zset")
+
+
+def classify_overwrite_hash_with_set(m: Metrics):
+    """A hash is used as dest for SUNIONSTORE: old hash freed and new set added"""
+    return classify_overwrite(m, "set")
 
 
 def classify_del_string(m: Metrics):
@@ -471,7 +480,7 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
         #     classify=classify_table_growth,
         # ),
         Scenario(
-            "Z-union store overwrite hash",
+            "zset union store overwrite hash",
             setup=commands(
                 ("HSET", long_key, "f", long_val),
                 ("ZADD", long_key2, 1, "a", 2, "b"),
@@ -479,6 +488,16 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             ),
             action=commands(("ZUNIONSTORE", long_key, 2, long_key2, long_key3)),
             classify=classify_overwrite_hash_with_z,
+        ),
+        Scenario(
+            "set union store overwrite hash",
+            setup=commands(
+                ("HSET", long_key, "f", long_val),
+                ("SADD", long_key2, 1, "a", 2, "b"),
+                ("SADD", long_key3, 3, "c", 4, "d"),
+            ),
+            action=commands(("SUNIONSTORE", long_key, long_key2, long_key3)),
+            classify=classify_overwrite_hash_with_set,
         ),
     ]
 
