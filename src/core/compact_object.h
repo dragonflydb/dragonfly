@@ -153,6 +153,7 @@ uint32_t JsonEnconding();
 
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
+  using FreeFn = absl::FunctionRef<void()>;
 
  public:
   // Maximum input length, in bytes, that we attempt to compress with Huffman encoding.
@@ -160,13 +161,11 @@ class CompactObj {
   // inside the 15-bit delta budget. Also used by debug tooling that builds a representative
   // symbol histogram from existing data to train the Huffman table.
   static constexpr unsigned kMaxHuffLen = 16 * 1024;
+  using FreeHook = absl::FunctionRef<void(FreeFn)>;
 
  private:
   void operator=(const CompactObj&) = delete;
   CompactObj(const CompactObj&) = delete;
-
-  using FreeFn = absl::FunctionRef<void()>;
-  using FreeHook = absl::FunctionRef<void(FreeFn)>;
 
  protected:
   // 0-16 is reserved for inline lengths of string type.
