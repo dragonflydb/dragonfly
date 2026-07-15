@@ -1428,7 +1428,7 @@ async def test_client_pause_v2_close_releases_deferred_checkpoint(df_server: Dfl
     """Regression: closing a client mid-flight must release its deferred CLIENT PAUSE checkpoint.
 
     A paused V2 connection with an in-flight async command defers its DispatchTracker
-    counter. If the client disconnects before the command lands, ClearPipelinedMessages
+    counter. If the client disconnects before the command lands, DrainConnectionQueues
     must release it so CLIENT PAUSE returns well before pause_wait_timeout.
     """
 

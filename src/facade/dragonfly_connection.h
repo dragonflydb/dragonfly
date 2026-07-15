@@ -443,8 +443,10 @@ class Connection : public util::Connection {
   // Squashes pipelined commands from the dispatch queue to spread load over all threads
   void SquashPipeline();
 
-  // Clear pipelined messages, dispatching only intrusive ones.
-  void ClearPipelinedMessages();
+  // Drain the control message queue (dispatch_q_) and the parsed command queue (parsed_head_) at
+  // close time, processing checkpoints and waiting on in-flight commands, then release deferred
+  // checkpoints.
+  void DrainConnectionQueues();
 
   // Dec()s every BlockingCounter held in deferred_checkpoints_, then clear the vector.
   // These belong to the checkpoint commands the V2 loop deferred in

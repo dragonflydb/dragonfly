@@ -1327,12 +1327,12 @@ void Connection::ConnectionFlow() {
 
   phase_ = PRECLOSE;
 
-  ClearPipelinedMessages();
+  DrainConnectionQueues();
   DCHECK(!HasPendingMessages());
 
   service_->OnConnectionClose(cc_.get());
 
-  // We have already cleared the queues above (ClearPipelinedMessages), so local queue stats
+  // We have already cleared the queues above (DrainConnectionQueues), so local queue stats
   // (dispatch_q_bytes_, etc.) represent 0 usage. DecreaseConnStats will safely subtract 0 for those
   // stats, while correctly removing this connection from the global connection counts and buffer
   // capacity tracking.
@@ -1896,7 +1896,7 @@ void Connection::SquashPipeline() {
   skip_next_squashing_ = (squashed != pipeline_count);
 }
 
-void Connection::ClearPipelinedMessages() {
+void Connection::DrainConnectionQueues() {
   AsyncOperations async_op{reply_builder_.get(), this};
 
   // First, clear dispatch queue
