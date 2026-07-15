@@ -63,6 +63,7 @@ ABSL_FLAG(bool, break_replication_on_master_restart, false,
           "flushing the replica's data.");
 ABSL_FLAG(std::string, replica_announce_ip, "",
           "IP address that Dragonfly announces to replication master");
+ABSL_FLAG(bool, experimental_cascaded_partial_sync, false, "Experimental cascaded psync");
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint16_t, announce_port);
 ABSL_FLAG(
@@ -187,7 +188,10 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   }
 
   if (last_journal_LSNs_.has_value()) {
-    return LastMasterSyncData{master_context_.master_repl_id, last_journal_LSNs_.value()};
+    std::string lineage_id = absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)
+                                 ? GetLineageId()
+                                 : master_context_.master_repl_id;
+    return LastMasterSyncData{lineage_id, last_journal_LSNs_.value()};
   }
   return nullopt;
 }
@@ -412,10 +416,20 @@ std::error_code Replica::HandleCapaDflyResp() {
     PC_RETURN_ON_BAD_RESPONSE(LastResponseArgs()[3].type == RespExpr::INT64);
     master_context_.version = DflyVersion(get<int64_t>(LastResponseArgs()[3].u));
   }
+
+  // If our master is itself a replica (cascaded), parse lineage id (grandparent id)
+  if (LastResponseArgs().size() >= 5) {
+    PC_RETURN_ON_BAD_RESPONSE(LastResponseArgs()[4].type == RespExpr::STRING);
+    master_context_.lineage_id = ToSV(LastResponseArgs()[4].GetBuf());
+  } else {
+    master_context_.lineage_id = master_context_.master_repl_id;
+  }
+
   VLOG(1) << "Master id: " << master_context_.master_repl_id
           << ", sync id: " << master_context_.dfly_session_id
           << ", num journals: " << param_num_flows
-          << ", version: " << unsigned(master_context_.version);
+          << ", version: " << unsigned(master_context_.version)
+          << ", lineage: " << master_context_.lineage_id;
 
   return error_code{};
 }
@@ -888,6 +902,13 @@ error_code Replica::ConsumeDflyStream() {
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
   LOG(INFO) << "Transitioned into stable sync";
+
+  // Continue the master's LSN numbering so cascaded sub-replicas share the lineage root's LSN
+  // space and can negotiate partial sync when reconnecting up the chain.
+  if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
+    StartJournalAtOwnLSN();
+  }
+
   // Transition flows into stable sync.
   {
     auto shard_cb = [&](unsigned index, auto*) {
@@ -1492,6 +1513,16 @@ size_t Replica::GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes
   }
   // Journal always starts at pos 1
   return std::max<size_t>(1UL, total_shard_lsn);
+}
+
+void Replica::StartJournalAtOwnLSN() {
+  shard_set->RunBriefInParallel([this](EngineShard* shard) {
+    size_t index = shard->shard_id();
+    auto flow_map = GetFlowMapAtIndex(index);
+    size_t rec_executed = GetRecCountExecutedPerShard(flow_map);
+    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
+    journal::StartInThreadAtLsn(rec_executed);
+  });
 }
 
 uint32_t DflyShardReplica::FlowId() const {

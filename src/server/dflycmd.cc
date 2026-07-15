@@ -40,6 +40,7 @@ using namespace std;
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
+ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
 
 namespace dfly {
 
@@ -348,6 +349,27 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
 
       // The LSN vector of the same master must be the same size on all replicas.
       if (lsns.size() != my_last_master->last_journal_LSNs.size()) {
+        return cmd_cntx->SendError(facade::kSyntaxErr);
+      }
+
+      DCHECK_LT(flow_id, lsns.size());
+      if (flow_id >= lsns.size()) {
+        LOG(ERROR) << "Invalid flow_id: " << flow_id << " exceeds LSN vector size: " << lsns.size()
+                   << ". Disabling partial sync.";
+        return;  // Fall back to full sync without an error reply.
+      }
+      flow_lsn = lsns[flow_id];
+    } else if (replica_last_master && replica_last_master->id == sf_->GetLineageId() &&
+               absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
+      // Cascaded replication: the connecting replica shares our lineage root, and every node in
+      // the chain keeps its journal in that root's LSN space. So its LSN vector is expressed in
+      // our own LSN space and we can partial-sync it straight from our replication buffer -
+      // whether we are the lineage root itself or an intermediate replica in the chain.
+      ++ServerState::tlocal()->stats.psync_requests_total;
+      const std::vector<LSN>& lsns = replica_last_master->last_journal_LSNs;
+
+      // The LSN vector must carry one entry per shard.
+      if (lsns.size() != shard_set->size()) {
         return cmd_cntx->SendError(facade::kSyntaxErr);
       }
 

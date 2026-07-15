@@ -966,7 +966,8 @@ async def test_double_take_over(df_factory, df_seeder_factory):
 
 
 async def test_replica_of_replica(df_factory):
-    # Can't connect a replica to a replica, but OK to connect 2 replicas to the same master
+    # Can't connect a replica to a replica, but OK to connect 2 replicas to the same master.
+    # Cascaded replication is only allowed behind --experimental_cascaded_partial_sync (off here).
     master = df_factory.create(proactor_threads=2)
     replica = df_factory.create(proactor_threads=2)
     replica2 = df_factory.create(proactor_threads=2)
@@ -1106,6 +1107,115 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     # Check logs for partial replication
     lines = server3.find_in_logs(f"Started partial sync with localhost:{server2.port}")
     assert len(lines) == 1
+
+
+@pytest.mark.parametrize("reconnect_to", [0, 1])
+async def test_cascaded_partial_sync(df_factory, reconnect_to):
+    """
+    Cascaded replication (master -> r1 -> ... -> rn): the last replica reconnects to node
+    `reconnect_to` in the chain and should partial sync instead of full sync. reconnect_to=0 is
+    the lineage root master; any other index is an intermediate node, which works too because
+    every node in the chain shares the lineage root's LSN space.
+    """
+    flag = {"proactor_threads": 4, "experimental_cascaded_partial_sync": None}
+    instances = [df_factory.create(**flag) for i in range(4)]
+    df_factory.start_all(instances)
+
+    clients = [i.client() for i in instances]
+
+    # Fill master with test data
+    seeder = DebugPopulateSeeder(key_target=50)
+    c_master = clients[0]
+    await seeder.run(c_master)
+
+    # Chain replication
+    for i in range(1, len(instances)):
+        await clients[i].execute_command(f"REPLICAOF localhost {instances[i-1].port}")
+        # Wait for this link to reach stable sync before chaining the next replica, otherwise the
+        # next replica may connect while this one is still LOADING and abort its handshake.
+        await wait_for_replicas_state(clients[i])
+
+    # Generate journal traffic that lands in the partial-sync buffer.
+    # NOTE: append (not set) because SET is omit-optimized which disables partial sync.
+    for i in range(100):
+        await c_master.append(f"k{i}", "val")
+
+    for i in range(1, len(instances)):
+        await check_all_replicas_finished([clients[i]], clients[i - 1])
+
+    # The last instance reconnects to the target node
+    target = instances[reconnect_to]
+    await clients[-1].execute_command(f"REPLICAOF localhost {target.port}")
+    await check_all_replicas_finished([clients[-1]], clients[reconnect_to])
+
+    # Further writes originating at the master should keep flowing down to the last replica.
+    for i in range(100, 150):
+        await c_master.append(f"k{i}", "val")
+    if reconnect_to != 0:
+        await check_all_replicas_finished([clients[reconnect_to]], c_master)
+    await check_all_replicas_finished([clients[-1]], clients[reconnect_to])
+
+    # Validate data consistency.
+    master_hash, last_hash = await asyncio.gather(
+        *(SeederV2.capture(c) for c in (c_master, clients[-1]))
+    )
+    assert master_hash == last_hash
+
+    info = await clients[-1].info("replication")
+    assert info["psync_successes"] == 1
+
+    instances[-1].stop()
+    lines = instances[-1].find_in_logs(f"Started partial sync with localhost:{target.port}")
+    assert len(lines) == 1
+    lines = instances[-1].find_in_logs(f"Started full sync with localhost:{target.port}")
+    assert len(lines) == 0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Master rotation not implemented yet",
+)
+async def test_cascaded_partial_sync_split_brain(df_factory):
+    """Split-brain safety: master -> r1 -> r2, then r1 is promoted to standalone and
+    BOTH master and r1 take independent writes to the same key. r2 (following r1) then reconnects
+    directly to master.
+    """
+    flag = {"proactor_threads": 4, "experimental_cascaded_partial_sync": None}
+    master, r1, r2 = (df_factory.create(**flag) for _ in range(3))
+    df_factory.start_all([master, r1, r2])
+
+    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
+
+    # Base data + a shared key that both branches will later diverge on.
+    # NOTE: append (not set) because SET is omit-optimized which disables partial sync.
+    for i in range(50):
+        await c_master.append(f"k{i}", "val")
+    await c_master.append("diverge", "base")
+
+    # Build chain master -> r1 -> r2.
+    await c_r1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_r1)
+    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
+    await wait_for_replicas_state(c_r2)
+    await check_all_replicas_finished([c_r1], c_master)
+    await check_all_replicas_finished([c_r2], c_r1)
+
+    # r1 splits from master and both sides write divergent values to the same key in the shared
+    # LSN space.
+    await c_r1.execute_command("REPLICAOF NO ONE")
+    await c_master.append("diverge", "_MASTER")
+    await c_r1.append("diverge", "_R1")
+    await check_all_replicas_finished([c_r2], c_r1)
+
+    assert (await c_master.get("diverge")) == "base_MASTER"
+    assert (await c_r2.get("diverge")) == "base_R1"
+
+    # r2 reconnects directly to master. It must converge to master's authoritative value.
+    await c_r2.execute_command(f"REPLICAOF localhost {master.port}")
+    await check_all_replicas_finished([c_r2], c_master)
+
+    master_val, r2_val = await asyncio.gather(c_master.get("diverge"), c_r2.get("diverge"))
+    assert r2_val == master_val, f"split-brain divergence: master={master_val!r} r2={r2_val!r}"
 
 
 @pytest.mark.parametrize("proactors", [1, 4, 6])
