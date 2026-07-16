@@ -68,6 +68,9 @@ class Metrics:
     def type_total(self) -> float:
         return sum(self.type_used.values())
 
+    def cmd_match_obj(self):
+        return self.cmd_total() == self.obj_used()
+
 
 WANT_MEMORY_CLASSES = frozenset(
     {
@@ -150,7 +153,7 @@ def classify_overwrite_hash(m: Metrics):
     if (
         m.cmd("hash") == m.type("hash")
         and m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_total() == m.obj_used()
+        and m.cmd_match_obj()
         and m.type_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
@@ -165,7 +168,7 @@ def classify_overwrite(m: Metrics, t: str):
     if (
         m.cmd(t) == m.type(t)
         and m.cmd("hash") == m.type("hash")
-        and m.cmd_total() == m.obj_used()
+        and m.cmd_match_obj()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -187,7 +190,7 @@ def classify_del_string(m: Metrics):
     """DEL string: command delta should match removed value + key."""
     if (
         m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_total() == m.obj_used()
+        and m.cmd_match_obj()
         and m.cmd("string") < 0
         and clean_memory_classes(m)
     ):
@@ -208,7 +211,7 @@ def classify_mixed_delete(m: Metrics):
     """DEL mixed keys: each removed type should get its own negative delta."""
     if (
         all(m.cmd(t) < 0 for t in ("hash", "list", "string"))
-        and m.cmd_total() == m.obj_used()
+        and m.cmd_match_obj()
         and m.type_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
@@ -221,7 +224,7 @@ def classify_rename_to_new(m: Metrics):
     """RENAME new key: move should account net key delta to value type."""
     if (
         m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_total() == m.obj_used()
+        and m.cmd_match_obj()
         and m.cmd("string") > 0
         and clean_memory_classes(m)
     ):
@@ -235,7 +238,7 @@ def classify_rename_hash_over_string(m: Metrics):
     if (
         m.cmd("string") == m.type("string")
         and m.cmd("hash") == m.type("hash") + m.type("key")
-        and m.cmd_total() == m.obj_used()
+        and m.cmd_match_obj()
         and m.type_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
@@ -293,7 +296,7 @@ def classify_expiry(m: Metrics):
     """Expiry delete should look like DEL for the expired value type."""
     if (
         m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_total() == m.obj_used()
+        and m.cmd_match_obj()
         and m.cmd("string") < 0
         and clean_memory_classes(m)
     ):
@@ -307,7 +310,7 @@ def classify_copy_replace(m: Metrics):
     if (
         m.cmd("string") == m.type("string")
         and m.cmd("hash") == m.type("hash")
-        and m.cmd_total() == m.obj_used()
+        and m.cmd_match_obj()
         and m.type_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
@@ -334,7 +337,7 @@ def classify_restore_hash(m: Metrics):
     """RESTORE hash: decoded runtime type should receive the delta."""
     if (
         m.cmd("hash") == m.type("hash") + m.type("key")
-        and m.cmd_total() == m.obj_used()
+        and m.cmd_match_obj()
         and m.type_total() == m.obj_used()
         and clean_memory_classes(m)
     ):
@@ -347,7 +350,7 @@ def classify_hset_enc_change(m: Metrics):
     """Hash encoding growth should stay attributed to hash."""
     if (
         m.cmd("hash") == m.type("hash")
-        and m.cmd_total() == m.obj_used()
+        and m.cmd_match_obj()
         and m.cmd("hash") > 0
         and clean_memory_classes(m)
     ):
@@ -498,6 +501,16 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             ),
             action=commands(("SUNIONSTORE", long_key, long_key2, long_key3)),
             classify=classify_overwrite_hash_with_set,
+        ),
+        Scenario(
+            "unlink mixed types",
+            setup=commands(
+                ("SET", long_key, long_val),
+                ("HSET", long_key + "h", "f", long_val),
+                ("LPUSH", long_key + "l", long_val),
+            ),
+            action=commands(("UNLINK", long_key, long_key + "h", long_key + "l")),
+            classify=classify_mixed_delete,
         ),
     ]
 
