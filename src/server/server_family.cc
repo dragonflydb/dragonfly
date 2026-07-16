@@ -391,9 +391,6 @@ void ClientInfo(facade::ParsedArgs args, CommandContext* cmd_cntx) {
   }
   auto* conn = cmd_cntx->conn();
   string info = conn->GetClientInfo();
-
-  // redis-py (5expects these fields. We append dummy values to keep the output parsable.
-  absl::StrAppend(&info, " db=", cmd_cntx->server_conn_cntx()->db_index(), "\r\n");
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   return rb->SendBulkString(info);
 }
