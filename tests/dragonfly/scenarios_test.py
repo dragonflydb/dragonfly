@@ -123,6 +123,7 @@ def classify_and_report(
 
     if error:
         print(f"failed with {error=}")
+    return status
 
 
 def clean_memory_classes(m: Metrics) -> bool:
@@ -482,7 +483,7 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             classify=classify_copy_replace,
         ),
         Scenario(
-            "restore hash",
+            "restore hash [EASY FIX]",
             setup=partial(RestoreScenario.setup, restore_scenario),
             action=partial(RestoreScenario.action, restore_scenario),
             classify=classify_restore_hash,
@@ -530,7 +531,7 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             classify=classify_mixed_delete,
         ),
         Scenario(
-            "flushdb mixed types",
+            "flushdb mixed types [EASY FIX]",
             setup=commands(
                 ("SET", long_key, long_val),
                 ("HSET", long_key + "h", "f", long_val),
@@ -540,7 +541,7 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             classify=classify_flushdb_mixed,
         ),
         Scenario(
-            "async unlinking",
+            "async unlinking [EASY FIX]",
             setup=setup_unlink_large_hash,
             action=commands(("UNLINK", "unlink-hash-" + ("h" * 256))),
             classify=classify_observe,
@@ -554,6 +555,8 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
     5. ...
     """
 
+    passed = []
+    not_passed = []
     for scenario in scenarios:
         await async_client.flushdb()
 
@@ -566,4 +569,14 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             error = e
 
         after = await snapshot_metrics(df_server)
-        classify_and_report(scenario, before, after, error)
+        if classify_and_report(scenario, before, after, error) != "OK":
+            not_passed.append(scenario)
+        else:
+            passed.append(scenario)
+
+    print("\n\n", "====" * 32, "\n\n")
+    passed = "\n ".join(s.name for s in passed)
+    not_passed = "\n ".join(s.name for s in not_passed)
+    print(f"passed:\n {passed}")
+    # those marked easy fix have known fix
+    print(f"not passed:\n {not_passed}")
