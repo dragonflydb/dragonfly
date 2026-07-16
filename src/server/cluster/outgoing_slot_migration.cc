@@ -166,10 +166,10 @@ void OutgoingMigration::Finish(const GenericError& error, std::optional<uint64_t
   // current attempt must not be touched. This early check is advisory (it keeps a stale handler
   // from reporting an outdated error and shutting down the control socket); the authoritative
   // checks are the locked generation re-check below (protects state_) and the per-shard
-  // generation check in the cancel lambda (protects the flows).
-  const uint64_t current_gen = attempt_gen_.load(std::memory_order_relaxed);
-  const uint64_t target_gen = attempt_gen.value_or(current_gen);
-  if (target_gen != current_gen) {
+  // generation check in the cancel lambda (protects the flows). Staleness only exists for calls
+  // carrying an explicit generation: nullopt means "the current attempt, whatever it is now" and
+  // is never stale.
+  if (attempt_gen && *attempt_gen != attempt_gen_.load(std::memory_order_relaxed)) {
     return;
   }
 
@@ -191,18 +191,24 @@ void OutgoingMigration::Finish(const GenericError& error, std::optional<uint64_t
   }
 
   bool should_cancel_flows = false;
+  uint64_t effective_gen = 0;
   absl::Cleanup on_exit([this]() { ShutdownSocket(); });
 
   {
     util::fb2::LockGuard lk(state_mu_);
+    const uint64_t locked_gen = attempt_gen_.load(std::memory_order_relaxed);
     // Authoritative staleness check: SyncFb bumps attempt_gen_ under state_mu_, so passing this
-    // check guarantees target_gen is still the current attempt for as long as we hold the lock -
-    // a stale Finish() can never overwrite state_ of a newer attempt.
-    if (target_gen != attempt_gen_.load(std::memory_order_relaxed)) {
+    // check guarantees the explicit generation is still the current attempt for as long as we
+    // hold the lock - a stale Finish() can never overwrite state_ of a newer attempt. A nullopt
+    // caller resolves its target here, under the lock, and is never dropped: treating it as
+    // stale would turn an external cancel racing a retry bump into a no-op, leaving SyncFb
+    // looping forever and hanging teardown in ~OutgoingMigration.
+    if (attempt_gen && *attempt_gen != locked_gen) {
       // Leave the newer attempt's control socket alone.
       std::move(on_exit).Cancel();
       return;
     }
+    effective_gen = attempt_gen.value_or(locked_gen);
     switch (state_) {
       case MigrationState::C_FATAL:
       case MigrationState::C_FINISHED:
@@ -210,7 +216,7 @@ void OutgoingMigration::Finish(const GenericError& error, std::optional<uint64_t
 
       // C_CONNECTING no longer implies "no flows exist": a retry may be connecting while the
       // previous attempt's flows are still registered. Cancelling is always safe because the
-      // lambda below only touches flows of target_gen.
+      // lambda below only touches flows of effective_gen.
       case MigrationState::C_CONNECTING:
       case MigrationState::C_SYNC:
       case MigrationState::C_ERROR:
@@ -226,10 +232,10 @@ void OutgoingMigration::Finish(const GenericError& error, std::optional<uint64_t
   }
 
   if (should_cancel_flows) {
-    OnAllShards([target_gen](auto& migration) {
+    OnAllShards([effective_gen](auto& migration) {
       // Check-and-cancel runs inside the shard task, atomically with respect to the retry loop's
       // replace task on the same shard, so Finish() can never cancel another attempt's flow.
-      if (migration && migration->AttemptGen() == target_gen) {
+      if (migration && migration->AttemptGen() == effective_gen) {
         migration->Cancel();
       }
     });

@@ -33,7 +33,10 @@ class OutgoingMigration : private ProtocolClient {
   // if is_error = true and migration is in progress it will be restarted otherwise nothing happens
   // attempt_gen ties an error-handler Finish() to the sync attempt whose flow spawned it; a call
   // with a stale generation (a newer attempt already exists) is a no-op. Callers acting on the
-  // current attempt (success path, OOM, external cancel) pass std::nullopt.
+  // current attempt (success path, OOM, external cancel) pass std::nullopt, which resolves to
+  // the current generation under state_mu_ and is never treated as stale - a nullopt call must
+  // always mean "the current attempt, whatever it is now", or it reintroduces cross-attempt
+  // cancellation.
   void Finish(const GenericError& error = {}, std::optional<uint64_t> attempt_gen = std::nullopt)
       ABSL_LOCKS_EXCLUDED(state_mu_);
 
