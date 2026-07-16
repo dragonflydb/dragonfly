@@ -19,6 +19,7 @@ extern "C" {
 #include "core/cuckoo.h"
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
+#include "io/file_util.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
@@ -27,6 +28,7 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/serializer_commons.h"
 #include "server/test_utils.h"
+#include "strings/human_readable.h"
 
 namespace rng = std::ranges;
 
@@ -45,6 +47,8 @@ ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 ABSL_DECLARE_FLAG(bool, serialize_hnsw_index);
 ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, snapshot_egress_limit_bytes);
+ABSL_DECLARE_FLAG(std::string, dbfilename);
 
 namespace dfly {
 
@@ -1997,6 +2001,63 @@ TEST_F(RdbTest, JournalDelWaitsForShardLoads) {
   ASSERT_FALSE(ec) << ec.message();
 
   EXPECT_THAT(Run({"GET", key}), ArgType(RespExpr::NIL));
+}
+
+// Integration test for snapshot egress throttling (--snapshot_egress_limit_bytes).
+// Bandwidth limiting is inherently time-based, so this test runs a snapshot large enough
+// that the throttled run takes a few seconds. It asserts two robust properties:
+//   1. The effective egress rate does not exceed the configured limit (the core guarantee).
+//   2. The limit - not inherent serialization cost - is what slows the save down.
+TEST_F(RdbTest, SnapshotEgressThrottle) {
+  absl::FlagSaver fs;
+  // Disable compression so the on-disk size equals the tracked egress and serialization
+  // stays cheap, ensuring the throttle (not CPU) dominates the timing.
+  SetFlag(&FLAGS_compression_mode, CompressionMode::NONE);
+
+  // ~20MB spread across shards.
+  Run({"debug", "populate", "20000", "key", "1000"});
+
+  auto save_and_measure = [&]() -> std::pair<double, size_t> {
+    int64_t start = absl::GetCurrentTimeNanos();
+    RespExpr resp = Run({"save", "rdb"});
+    CHECK_EQ(resp, "OK");
+    double secs = double(absl::GetCurrentTimeNanos() - start) / 1e9;
+    auto files = io::StatFiles(absl::StrCat(absl::GetFlag(FLAGS_dbfilename), "*"));
+    CHECK(files) << files.error().message();
+    size_t total = 0;
+    for (const auto& f : *files)
+      total += f.size;
+    return {secs, total};
+  };
+
+  // Baseline save with no limit to measure the machine's serialization capacity.
+  SetFlag(&FLAGS_snapshot_egress_limit_bytes, strings::MemoryBytesFlag{0});
+  auto [t_base, bytes] = save_and_measure();
+  ASSERT_GT(bytes, 1u << 20) << "populated dataset too small to test throttling";
+
+  // The limit is per-shard-thread, so throttle each shard to a small fraction of the machine's
+  // measured per-shard capacity. That way the limit - not CPU - is the bottleneck on any machine
+  // (including slow ASAN/CI). Aim for a run of at least a couple of seconds so several sliding
+  // windows elapse. Pacing makes each shard's average rate converge to the limit, so the
+  // aggregate rate converges to limit * num_shards and the expected duration is ~target_sec.
+  uint64_t shards = shard_set->size();
+  double target_sec = std::max(2.0, t_base * 8);
+  uint64_t limit = uint64_t(bytes / shards / target_sec);
+  SetFlag(&FLAGS_snapshot_egress_limit_bytes, strings::MemoryBytesFlag{limit});
+  auto [t_lim, bytes2] = save_and_measure();
+
+  double rate = double(bytes2) / t_lim;
+  double per_shard_rate = rate / shards;
+  LOG(INFO) << "egress throttle: bytes=" << bytes2 << " shards=" << shards << " limit=" << limit
+            << "B/s t_base=" << t_base << "s t_lim=" << t_lim << "s rate=" << uint64_t(rate)
+            << "B/s per_shard_rate=" << uint64_t(per_shard_rate) << "B/s";
+
+  // Core guarantee: each shard's achieved egress rate stays at/below the limit. The only slack is
+  // the one-window initial burst plus per-bucket overshoot, comfortably within 1.6x.
+  EXPECT_LE(per_shard_rate, limit * 1.6) << "egress exceeded the configured per-shard limit";
+
+  // Sanity: the slowdown is caused by the limit, not by inherent save cost.
+  EXPECT_GT(t_lim, t_base * 3);
 }
 
 }  // namespace dfly
