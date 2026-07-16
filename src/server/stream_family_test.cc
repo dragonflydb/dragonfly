@@ -1289,6 +1289,19 @@ TEST_F(StreamFamilyTest, XAddMaxSeq) {
   EXPECT_THAT(resp, ErrArg("The ID specified in XADD is equal or smaller"));
 }
 
+TEST_F(StreamFamilyTest, XRangeIdRoundTrip) {
+  // Regression: a stream id whose text form exceeds 32 bytes (kMaxInlineSize) was garbled when
+  // read back — it was enqueued into the reply by reference past a temporary's lifetime (UAF).
+  // Covers both id-reply paths: <= 32 bytes (inlined) and > 32 bytes (copied under ScopePause).
+  const char kShortId[] = "5-5";                                // <= 32: inlined
+  const char kLongId[] = "2577343934890-18446744073709551615";  // 34 bytes > 32: copied
+  Run({"XADD", "x", kShortId, "f", "v"});
+  Run({"XADD", "x", kLongId, "f", "v"});
+  auto resp = Run({"XRANGE", "x", "-", "+"});
+  EXPECT_THAT(resp, RespElementsAre(RespElementsAre(kShortId, RespElementsAre("f", "v")),
+                                    RespElementsAre(kLongId, RespElementsAre("f", "v"))));
+}
+
 TEST_F(StreamFamilyTest, XsetIdSmallerMaxDeleted) {
   Run({"XADD", "x", "1-1", "a", "1"});
   Run({"XADD", "x", "1-2", "b", "2"});

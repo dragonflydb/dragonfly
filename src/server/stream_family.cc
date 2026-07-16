@@ -709,6 +709,20 @@ string StreamIdRepr(const streamID& id) {
   return absl::StrCat(id.ms, "-", id.seq);
 };
 
+// Sends a stream id as a bulk string. A bulk string longer than kMaxInlineSize is enqueued by
+// reference and copied only when the enclosing ReplyScope ends — after this temporary is gone
+// (use-after-free that garbles long ids). Pause the scope for long ids so they are materialized
+// while still alive; short ids are inlined immediately and need no pause.
+void SendStreamId(RedisReplyBuilder* rb, const streamID& id) {
+  string s = StreamIdRepr(id);
+  if (s.size() > SinkReplyBuilder::kMaxInlineSize) {
+    SinkReplyBuilder::ScopePause pause{rb};
+    rb->SendBulkString(s);
+  } else {
+    rb->SendBulkString(s);
+  }
+}
+
 facade::ErrorReply NoGroupError(string_view key, string_view cgroup) {
   return facade::ErrorReply(
       absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'"),
@@ -2716,7 +2730,7 @@ struct StreamReplies {
 
   void SendRecord(const Record& record) const {
     RedisReplyBuilder::ArrayScope scope{rb, 2};
-    rb->SendBulkString(StreamIdRepr(record.id));
+    SendStreamId(rb, record.id);
     rb->StartArray(record.kv_arr.size() * 2);
     for (const auto& k_v : record.kv_arr) {
       rb->SendBulkString(k_v.first);
@@ -2727,7 +2741,7 @@ struct StreamReplies {
   void SendIDs(absl::Span<const streamID> ids) const {
     RedisReplyBuilder::ArrayScope scope{rb, ids.size()};
     for (auto id : ids)
-      rb->SendBulkString(StreamIdRepr(id));
+      SendStreamId(rb, id);
   }
 
   void SendRecords(absl::Span<const Record> records) const {
@@ -3390,7 +3404,7 @@ void CmdXAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   OpResult<streamID> add_result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
 
   if (add_result) {
-    rb->SendBulkString(StreamIdRepr(*add_result));
+    SendStreamId(rb, *add_result);
   } else {
     if (add_result == OpStatus::KEY_NOTFOUND) {
       rb->SendNull();
@@ -3596,8 +3610,6 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       if (result) {
         rb->StartArray(result->size());
         for (const auto& ginfo : *result) {
-          string last_id = StreamIdRepr(ginfo.last_id);
-
           rb->StartCollection(6, CollectionType::MAP);
           rb->SendBulkString("name");
           rb->SendBulkString(ginfo.name);
@@ -3606,7 +3618,7 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
           rb->SendBulkString("pending");
           rb->SendLong(ginfo.pending_size);
           rb->SendBulkString("last-delivered-id");
-          rb->SendBulkString(last_id);
+          SendStreamId(rb, ginfo.last_id);
           rb->SendBulkString("entries-read");
           if (ginfo.entries_read != SCG_INVALID_ENTRIES_READ) {
             rb->SendLong(ginfo.entries_read);
@@ -3677,16 +3689,16 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
         rb->SendLong(sinfo->radix_tree_nodes);
 
         rb->SendBulkString("last-generated-id");
-        rb->SendBulkString(StreamIdRepr(sinfo->last_generated_id));
+        SendStreamId(rb, sinfo->last_generated_id);
 
         rb->SendBulkString("max-deleted-entry-id");
-        rb->SendBulkString(StreamIdRepr(sinfo->max_deleted_entry_id));
+        SendStreamId(rb, sinfo->max_deleted_entry_id);
 
         rb->SendBulkString("entries-added");
         rb->SendLong(sinfo->entries_added);
 
         rb->SendBulkString("recorded-first-entry-id");
-        rb->SendBulkString(StreamIdRepr(sinfo->recorded_first_entry_id));
+        SendStreamId(rb, sinfo->recorded_first_entry_id);
 
         if (full) {
           rb->SendBulkString("entries");
@@ -3701,7 +3713,7 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
             rb->SendBulkString(ginfo.name);
 
             rb->SendBulkString("last-delivered-id");
-            rb->SendBulkString(StreamIdRepr(ginfo.last_id));
+            SendStreamId(rb, ginfo.last_id);
 
             rb->SendBulkString("entries-read");
             if (ginfo.entries_read != SCG_INVALID_ENTRIES_READ) {
@@ -3723,7 +3735,7 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
             rb->StartArray(ginfo.stream_nack_vec.size());
             for (const auto& pending_info : ginfo.stream_nack_vec) {
               rb->StartArray(4);
-              rb->SendBulkString(StreamIdRepr(pending_info.pel_id));
+              SendStreamId(rb, pending_info.pel_id);
               rb->SendBulkString(pending_info.consumer_name);
               rb->SendLong(pending_info.delivery_time);
               rb->SendLong(pending_info.delivery_count);
@@ -3755,7 +3767,7 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
               for (const auto& pending : consumer_info.pending) {
                 rb->StartArray(3);
 
-                rb->SendBulkString(StreamIdRepr(pending.pel_id));
+                SendStreamId(rb, pending.pel_id);
                 rb->SendLong(pending.delivery_time);
                 rb->SendLong(pending.delivery_count);
               }
@@ -3857,14 +3869,16 @@ void CmdXPending(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
   const PendingResult& result = op_result.value();
 
+  // Batch the reply so SendStreamId's per-id ScopePause copies refs instead of flushing per id.
+  SinkReplyBuilder::ReplyAggregator agg{rb};
   SinkReplyBuilder::ReplyScope scope{rb};
   if (std::holds_alternative<PendingReducedResult>(result)) {
     const auto& res = std::get<PendingReducedResult>(result);
     rb->StartArray(4);
     rb->SendLong(res.count);
     if (res.count) {
-      rb->SendBulkString(StreamIdRepr(res.start));
-      rb->SendBulkString(StreamIdRepr(res.end));
+      SendStreamId(rb, res.start);
+      SendStreamId(rb, res.end);
       rb->StartArray(res.consumer_list.size());
 
       for (auto& [consumer_name, count] : res.consumer_list) {
@@ -3885,7 +3899,7 @@ void CmdXPending(CmdArgParser parser, CommandContext* cmd_cntx) {
     rb->StartArray(res.size());
     for (auto& item : res) {
       rb->StartArray(4);
-      rb->SendBulkString(StreamIdRepr(item.start));
+      SendStreamId(rb, item.start);
       rb->SendBulkString(item.consumer_name);
       rb->SendLong(item.elapsed);
       rb->SendLong(item.delivery_count);
@@ -4153,8 +4167,10 @@ void CmdXAutoClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   const ClaimInfo& cresult = result.value();
 
+  // Batch the reply so SendStreamId's per-id ScopePause copies refs instead of flushing per id.
+  SinkReplyBuilder::ReplyAggregator agg{rb};
   rb->StartArray(3);
-  rb->SendBulkString(StreamIdRepr(cresult.end_id));
+  SendStreamId(rb, cresult.end_id);
   StreamReplies{rb}.SendClaimInfo(cresult);
   StreamReplies{rb}.SendIDs(cresult.deleted_ids);
 }
