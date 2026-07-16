@@ -420,74 +420,97 @@ TEST_F(TieredStorageTest, Defrag) {
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
 }
 
-// Verify that RunDefragScan discovers and defragments bins that became fragmented while there was
-// no upload budget (so the immediate defrag path in NotifyDelete was skipped), and that it does no
-// work when nothing is fragmented (dynamic / low-cpu behaviour).
+// Verify that the background defrag scan (RunDefragScan, driven by the periodic heartbeat)
+// discovers and defragments a large number of bins that became fragmented while there was no upload
+// budget (so the immediate defrag path in NotifyDelete was skipped). Also checks that once
+// everything is compacted the scan does no further work (dynamic / low-cpu behaviour).
 TEST_F(TieredStorageTest, RunDefragScan) {
   absl::FlagSaver saver;
 
-  auto set_budget = [this](int64_t budget) {
-    pp_->at(0)->AwaitBrief([budget] {
-      auto& db_slice =
-          namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
-      db_slice.UpdateMemoryParams(budget, 0);
-    });
-  };
-  auto run_offloading = [this] {
-    pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->RunOffloading(0); });
-  };
-
-  // Stash a full bin: 7 of 8 small values end up together, the last one keeps filling.
-  for (char k = 'a'; k < 'a' + 8; k++) {
-    Run({"SET", string(1, k), string(600, k)});
-  }
-  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
-
-  {
-    auto metrics = GetMetrics();
-    ASSERT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
-    ASSERT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 7u);
-  }
-
-  // Fragment the bin while there is no upload budget, so the immediate defrag path is skipped.
-  // With upload_threshold == 1.0, UploadBudget() == memory_budget - max_memory_limit, and the
-  // heartbeat keeps memory_budget <= max_memory_limit, so the budget stays non-positive.
+  // offload_threshold == 1.0 keeps ShouldOffload() true so the heartbeat always runs offloading
+  // (and therefore the defrag scan). The upload_threshold toggles the sign of UploadBudget():
+  //   UploadBudget() == memory_budget - upload_threshold * (max_memory_limit / shards)
+  // With a single shard and memory_budget == max_memory_limit - used_memory, upload_threshold
+  // == 1.0 gives a negative budget (immediate defrag + scan suppressed), and 0.0 gives a positive
+  // budget.
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
   SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
   UpdateFromFlags();
-  set_budget(0);
+  max_memory_limit = 1024_MB;  // well above used memory, so no eviction interferes
 
-  for (char k = 'a'; k < 'a' + 4; k++) {
-    Run({"DEL", string(1, k)});
+  // Read the current upload budget on the shard (recomputed by the heartbeat's CacheStats()).
+  auto upload_budget = [this] {
+    return pp_->at(0)->AwaitBrief(
+        [] { return EngineShard::tlocal()->tiered_storage()->UploadBudget(); });
+  };
+
+  // Integer values, fixed 600-byte width so exactly 7 pack into one 4KB bin (as in the Defrag
+  // test). 600 digits overflows int64, so each value is stored as a raw string and is eligible for
+  // stashing.
+  const int kNum = 700;
+  auto value_for = [](int i) {
+    string v(600, '0');
+    string digits = absl::StrCat(i);
+    v.replace(v.size() - digits.size(), digits.size(), digits);
+    return v;
+  };
+
+  for (int i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), value_for(i)});
   }
 
-  // Only 3 of 7 remain (< 7/2), so the bin is fragmented. It must linger: no defrag happened yet.
-  {
-    auto metrics = GetMetrics();
-    EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
-    EXPECT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 3u);
-    EXPECT_EQ(metrics.tiered_stats.total_defrags, 0u);
+  // Wait until all full bins are stashed. kNum/7 bins hold 7 entries each; the trailing few keep
+  // the current bin filling.
+  const unsigned kBins = kNum / 7;
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.small_bins_cnt >= kBins - 1; });
+
+  // Wait until the heartbeat has recomputed a negative budget, so fragmentation below won't trigger
+  // the immediate defrag path.
+  ExpectConditionWithinTimeout([&] { return upload_budget() < 0; });
+
+  // Fragment every full bin: delete 4 of each consecutive group of 7 keys, leaving 3 (< 7/2).
+  for (int i = 0; i < kNum; i++) {
+    if (i % 7 < 4)
+      Run({"DEL", absl::StrCat("k", i)});
   }
 
-  // Give back upload budget and let the offloading loop's defrag scan pick up the lingering bin.
+  // No defrag may have happened yet: the immediate path is suppressed and the scan bails on a
+  // negative budget. Capture the number of survivors still living in fragmented stashed bins.
+  auto frag_metrics = GetMetrics();
+  ASSERT_EQ(frag_metrics.tiered_stats.total_defrags, 0u);
+  const size_t survivors = frag_metrics.tiered_stats.small_bins_entries_cnt;
+  ASSERT_GT(survivors, 0u);
+
+  // Give back upload budget. The next heartbeats run RunDefragScan, which repacks the survivors.
   SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);
   UpdateFromFlags();
-  set_budget(1_MB);
-  run_offloading();
+  ExpectConditionWithinTimeout([&] { return upload_budget() > 0; });
 
-  // Wait until the defrag read completes and the 3 survivors are repacked.
-  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
-  {
-    auto metrics = GetMetrics();
-    EXPECT_EQ(metrics.tiered_stats.total_defrags, 3u);
-    EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 0u);
-    EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+  // Every survivor in a fragmented bin is recovered exactly once, so total_defrags settles at
+  // `survivors`. The repacked survivors form new, full (non-fragmented) bins that are not scanned
+  // again.
+  ExpectConditionWithinTimeout([&] {
+    auto m = GetMetrics();
+    return m.tiered_stats.total_defrags >= survivors && m.tiered_stats.pending_read_cnt == 0;
+  });
+
+  auto after = GetMetrics();
+  EXPECT_EQ(after.tiered_stats.total_defrags, survivors);
+  // Compaction: the survivors now occupy strictly fewer bins than before defragmentation.
+  EXPECT_LT(after.tiered_stats.small_bins_cnt, frag_metrics.tiered_stats.small_bins_cnt);
+
+  // Data integrity: every surviving key still returns its original value.
+  for (int i = 0; i < kNum; i++) {
+    if (i % 7 >= 4) {
+      EXPECT_EQ(Run({"GET", absl::StrCat("k", i)}), value_for(i));
+    }
   }
 
-  // Dynamic behaviour: with nothing fragmented, another scan is a cheap no-op (no extra defrags).
-  set_budget(1_MB);
-  run_offloading();
-  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
-  EXPECT_EQ(GetMetrics().tiered_stats.total_defrags, 3u);
+  // Dynamic behaviour: nothing is fragmented anymore, so further heartbeat scans are cheap no-ops.
+  size_t defrags_now = GetMetrics().tiered_stats.total_defrags;
+  util::ThisFiber::SleepFor(100ms);  // ~10 heartbeats at hz=100
+  EXPECT_EQ(GetMetrics().tiered_stats.total_defrags, defrags_now);
 }
 
 TEST_F(PureDiskTSTest, BackgroundOffloading) {
