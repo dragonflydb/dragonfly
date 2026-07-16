@@ -1645,12 +1645,14 @@ TEST_F(RdbTest, SplitSBF) {
 
   // Creates filter in db to copy the fields from
 
-  const char kBloomFilterSource[] = "bf_src_1";
+  const char kKeySbfSrc[] = "bf_src_1";
 
-  auto resp = Run({"BF.RESERVE", kBloomFilterSource, "0.01", "10"});
+  CHECK_EQ(0u, Shard(kKeySbfSrc, shard_set->size()));
+
+  auto resp = Run({"BF.RESERVE", kKeySbfSrc, "0.01", "10"});
   EXPECT_EQ(resp, "OK");
   for (size_t i = 0; i < 50; ++i) {
-    resp = Run({"BF.ADD", kBloomFilterSource, StrCat("item", i)});
+    resp = Run({"BF.ADD", kKeySbfSrc, StrCat("item", i)});
     EXPECT_THAT(resp, AnyOf(0, 1));
   }
 
@@ -1665,7 +1667,7 @@ TEST_F(RdbTest, SplitSBF) {
   pp_->at(0)->Await([&] {
     const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
     const auto& db = ctx.GetDbSlice(0);
-    auto it = db.FindReadOnly(ctx, kBloomFilterSource, OBJ_SBF);
+    auto it = db.FindReadOnly(ctx, kKeySbfSrc, OBJ_SBF);
     ASSERT_TRUE(it.ok());
 
     const SBF* sbf = it.value()->second.GetSBF();
@@ -1739,24 +1741,26 @@ TEST_F(RdbTest, SplitSBF) {
 }
 
 TEST_F(RdbTest, SplitCuckoo) {
-  auto resp = Run("cf.reserve cf_src_0 4 expansion 2");
+  const char kKeyCfSrc[] = "cf_src_0";
+  CHECK_EQ(0u, Shard(kKeyCfSrc, shard_set->size()));
+
+  auto resp = Run(StrCat("cf.reserve ", kKeyCfSrc, " 4 expansion 2"));
   EXPECT_EQ(resp, "OK");
   for (size_t i = 0; i < 100; ++i) {
-    resp = Run(StrCat("cf.add cf_src_0 item", i));
+    resp = Run(StrCat("cf.add ", kKeyCfSrc, " item", i));
     EXPECT_THAT(resp, IntArg(1));
   }
 
   std::string first;
   std::string last_blob;
 
-  // split the blob of the last filter into three chunks.
   constexpr size_t kFirstSplit = 17;
   constexpr size_t kSecondSplit = 13;
 
   pp_->at(0)->Await([&] {
     const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
     const auto& db = ctx.GetDbSlice(0);
-    auto it = db.FindReadOnly(ctx, "cf_src_0", OBJ_CUCKOOFILTER);
+    auto it = db.FindReadOnly(ctx, kKeyCfSrc, OBJ_CUCKOOFILTER);
     ASSERT_TRUE(it.ok());
 
     const CuckooFilter* cf = it.value()->second.GetCuckooFilter();
@@ -1767,7 +1771,7 @@ TEST_F(RdbTest, SplitCuckoo) {
     ASSERT_GT(last_blob.size(), kFirstSplit + kSecondSplit);
 
     first.push_back(RDB_TYPE_CUCKOO);
-    // brand new key whose shape is copied off cf_src_0
+    // brand new key whose shape is copied off kKeyCfSrc
     AppendString(&first, "cf_loaded");
     AppendLen(&first, cf->SlotsPerBucket());
     AppendLen(&first, cf->MaxIterations());
@@ -1777,7 +1781,6 @@ TEST_F(RdbTest, SplitCuckoo) {
     AppendLen(&first, cf->NumDeletes());
     AppendLen(&first, num_filters);
 
-    // every filter but the last is written whole, in a single chunk
     for (size_t i = 0; i + 1 < num_filters; ++i) {
       const std::string blob{cf->FilterBytes(i)};
       AppendLen(&first, blob.size());
@@ -1785,25 +1788,20 @@ TEST_F(RdbTest, SplitCuckoo) {
       first.append(blob);
     }
 
-    // total size of the last filter's blob
     AppendLen(&first, last_blob.size());
-    // only kFirstSplit bytes of it in this chunk
     AppendLen(&first, kFirstSplit);
     first.append(last_blob.data(), kFirstSplit);
   });
 
-  // add this plain string between chunks of the split filter
   std::string plain;
   plain.push_back(RDB_TYPE_STRING);
   AppendString(&plain, "plain_key");
   AppendString(&plain, "plain_val");
 
-  // p2 of last_blob
   std::string second;
   AppendLen(&second, kSecondSplit);
   second.append(last_blob.data() + kFirstSplit, kSecondSplit);
 
-  // p3 of last_blob
   std::string third;
   constexpr auto kPrefixConsumed = kFirstSplit + kSecondSplit;
   AppendLen(&third, last_blob.size() - kPrefixConsumed);
