@@ -514,6 +514,15 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
         ),
     ]
 
+    """
+    todo scenarios:
+    1. flush with mix types
+    2. async unlink
+    3. bitop
+    4. sort .. store
+    5. ...
+    """
+
     for scenario in scenarios:
         await async_client.flushdb()
 
