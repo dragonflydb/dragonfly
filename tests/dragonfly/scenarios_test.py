@@ -245,6 +245,36 @@ def classify_rename_hash_over_string(m: Metrics):
         return "WRONG"
 
 
+async def setup_move_hash_between_dbs(cl: aioredis.Redis):
+    key = "move-key-" + ("m" * 1024)
+    await cl.execute_command("SELECT", 1)
+    await cl.flushdb()
+    assert await cl.hset(key, "field", "x" * 1024)
+
+
+async def move_hash_between_dbs(cl: aioredis.Redis):
+    key = "move-key-" + ("m" * 1024)
+    try:
+        assert await cl.execute_command("MOVE", key, 0) == 1
+    finally:
+        await cl.execute_command("SELECT", 0)
+
+
+def classify_move_between_dbs(m: Metrics):
+    """MOVE across DBs: same key/value should have no net object delta."""
+    if (
+        all(v == 0 for v in m.cmd_type_delta.values())
+        and m.type_total() == 0
+        and m.obj_used() == 0
+        and clean_memory_classes(m)
+    ):
+        return "OK"
+    elif m.obj_used() == 0 and any(v != 0 for v in m.cmd_type_delta.values()):
+        return "CHECK move shell accounted despite zero net memory"
+    else:
+        return "WRONG"
+
+
 def classify_observe(_m: Metrics):
     return "OBSERVE"
 
@@ -546,13 +576,18 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             action=commands(("UNLINK", "unlink-hash-" + ("h" * 256))),
             classify=classify_observe,
         ),
+        Scenario(
+            "move hash between dbs [EASY FIX]",
+            setup=setup_move_hash_between_dbs,
+            action=move_hash_between_dbs,
+            classify=classify_move_between_dbs,
+        ),
     ]
 
     """
     todo scenarios:
     3. bitop
     4. sort .. store
-    5. ...
     """
 
     passed = []
