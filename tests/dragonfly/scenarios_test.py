@@ -398,6 +398,14 @@ def classify_flushdb_mixed(m: Metrics):
         return "WRONG"
 
 
+async def setup_unlink_large_hash(cl: aioredis.Redis):
+    key = "unlink-hash-" + ("h" * 256)
+    pipe = cl.pipeline(transaction=False)
+    for i in range(1024):
+        pipe.hset(key, f"f{i}", "x" * 128)
+    await pipe.execute()
+
+
 async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
     from functools import partial
 
@@ -531,12 +539,16 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             action=commands(("FLUSHDB", "SYNC")),
             classify=classify_flushdb_mixed,
         ),
+        Scenario(
+            "async unlinking",
+            setup=setup_unlink_large_hash,
+            action=commands(("UNLINK", "unlink-hash-" + ("h" * 256))),
+            classify=classify_observe,
+        ),
     ]
 
     """
     todo scenarios:
-    1. flush with mix types
-    2. async unlink
     3. bitop
     4. sort .. store
     5. ...
