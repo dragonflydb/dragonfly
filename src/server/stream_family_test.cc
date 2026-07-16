@@ -439,6 +439,42 @@ TEST_F(StreamFamilyTest, XReadGroupBlockDelconsumer) {
   EXPECT_THAT(resp_del_consumer, IntArg(0));
 }
 
+TEST_F(StreamFamilyTest, XReadGroupBlockHonorsCount) {
+  Run({"xgroup", "create", "foo", "group", "0", "MKSTREAM"});
+
+  // Block a consumer with COUNT 1.
+  RespExpr resp0;
+  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run({"xreadgroup", "group", "group", "alice", "count", "1", "block", "0", "streams",
+                 "foo", ">"});
+  });
+  // Wait until the reader is parked in the blocking path (WaitOnWatch flips
+  // the connection's `blocked` flag) so the transaction below exercises the
+  // wake-up read, not the immediate one. fb0 runs on proactor 0 -> "IO0".
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  // Wake it with a transaction adding multiple entries at once. The woken
+  // read must honor COUNT like the non-blocking path does, instead of
+  // delivering the transaction's whole burst to one consumer.
+  auto fb1 = pp_->at(1)->LaunchFiber([&] {
+    Run({"multi"});
+    Run({"xadd", "foo", "1-1", "k1", "v1"});
+    Run({"xadd", "foo", "1-2", "k2", "v2"});
+    Run({"xadd", "foo", "1-3", "k3", "v3"});
+    auto resp = Run({"exec"});
+    ASSERT_THAT(resp, ArrLen(3));
+  });
+
+  fb0.Join();
+  fb1.Join();
+
+  EXPECT_THAT(resp0.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(1)));
+
+  // The entries beyond COUNT stay undelivered, available to other consumers.
+  auto resp = Run({"xreadgroup", "group", "group", "bob", "count", "10", "streams", "foo", ">"});
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(2)));
+}
+
 TEST_F(StreamFamilyTest, XReadInvalidArgs) {
   // Invalid COUNT value.
   auto resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});

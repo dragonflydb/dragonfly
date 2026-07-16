@@ -678,6 +678,14 @@ string BaseFamilyTest::GetId() const {
   return absl::StrCat("IO", id);
 }
 
+bool BaseFamilyTest::IsConnBlocked(string_view conn_id) {
+  unique_lock lk(mu_);
+  auto it = connections_.find(conn_id);
+  // The connection may not exist yet: it is created lazily by the first Run
+  // on its thread, which is exactly the window callers are waiting out.
+  return it != connections_.end() && it->second->cmd_cntx()->blocked;
+}
+
 size_t BaseFamilyTest::NumSubscriptions(string_view conn_id) const {
   auto it = connections_.find(conn_id);
   CHECK(it != connections_.end());

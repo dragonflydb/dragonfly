@@ -3068,6 +3068,10 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   auto range_cb = [&](Transaction* t, EngineShard* shard) {
     if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
       RangeOpts range_opts;
+      // Ensure the woken read honors COUNT like the non-blocking path
+      // (OpRead) does: without it, a consumer woken by a transaction that
+      // added multiple entries receives all of them in one reply.
+      range_opts.count = opts->count;
       range_opts.end = ParsedStreamId{.val = streamID{
                                           .ms = UINT64_MAX,
                                           .seq = UINT64_MAX,
