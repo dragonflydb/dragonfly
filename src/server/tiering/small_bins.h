@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "core/dash.h"
 #include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
 #include "server/tiering/entry_map.h"
@@ -102,8 +103,28 @@ class SmallBins {
   // Pending stashes, their keys and value sizes
   absl::flat_hash_map<unsigned /* id */, tiering::EntryMap<DiskSegment>> pending_bins_;
 
+  struct BasicDashPolicy {
+    enum { kSlotNum = 12, kBucketNum = 64 };
+    static constexpr bool kUseVersion = false;
+
+    template <typename U> static void DestroyValue(const U&) {
+    }
+    template <typename U> static void DestroyKey(const U&) {
+    }
+
+    template <typename U, typename V> static bool Equal(U&& u, V&& v) {
+      return u == v;
+    }
+
+    static uint64_t HashFn(uint64_t v) {
+      return std::hash<uint64_t>()(v);
+    }
+  };
+
+  using Dash = dfly::DashTable<size_t /* offset */, StashInfo, BasicDashPolicy>;
+
   // Map of bins that were stashed and should be deleted when number of entries reaches 0
-  absl::flat_hash_map<size_t /*offset*/, StashInfo> stashed_bins_;
+  Dash stashed_bins_;
 
   struct {
     size_t stashed_entries_cnt = 0;

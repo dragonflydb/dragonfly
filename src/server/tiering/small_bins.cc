@@ -102,7 +102,8 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   }
 
   stats_.stashed_entries_cnt += list.size();
-  stashed_bins_[segment.offset] = {uint8_t(list.size()), bytes};
+
+  stashed_bins_.Insert(segment.offset, StashInfo{uint8_t(list.size()), bytes});
   return list;
 }
 
@@ -137,7 +138,7 @@ std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view
 
 SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
   auto full_segment = segment.ContainingPages();
-  if (auto it = stashed_bins_.find(full_segment.offset); it != stashed_bins_.end()) {
+  if (auto it = stashed_bins_.Find(full_segment.offset); it != stashed_bins_.end()) {
     stats_.stashed_entries_cnt--;
     auto& bin = it->second;
 
@@ -146,7 +147,7 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 
     if (--bin.entries == 0) {
       DCHECK_EQ(bin.bytes, 0u);
-      stashed_bins_.erase(it);
+      stashed_bins_.Erase(it);
       return {full_segment, false /* fragmented */, true /* empty */};
     }
 
@@ -159,7 +160,7 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 }
 
 bool SmallBins::IsFragmented(size_t offset) {
-  if (auto it = stashed_bins_.find(offset); it != stashed_bins_.end())
+  if (auto it = stashed_bins_.Find(offset); it != stashed_bins_.end())
     return it->second.bytes < kPageSize / 2;
   return false;
 }
@@ -173,12 +174,13 @@ SmallBins::Stats SmallBins::GetStats() const {
 
 SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {
   DCHECK_EQ(value.size(), kPageSize);
+  auto it = stashed_bins_.Find(segment.offset);
 
-  auto bin = stashed_bins_.extract(segment.offset);
-  if (bin.empty())
+  if (it == stashed_bins_.end())
     return {};
 
-  stats_.stashed_entries_cnt -= bin.mapped().entries;
+  auto bin = it->second;
+  stats_.stashed_entries_cnt -= bin.entries;
 
   const char* data = value.data();
 
