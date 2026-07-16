@@ -1312,7 +1312,19 @@ void SearchReply(const SearchParams& params,
   Overloaded sortable_value_sender{
       [rb](monostate) { rb->SendNull(); },
       [rb](double d) { rb->SendBulkString(absl::StrCat("#", d)); },
-      [rb](const string& s) { rb->SendBulkString("$" + s); },
+      [rb](const string& s) {
+        // absl::StrCat("$", s) is a temporary: a bulk string longer than kMaxInlineSize is
+        // enqueued by reference and copied only when the enclosing ArrayScope ends — after the
+        // temporary is gone (use-after-free). Pause the scope for long values so the string is
+        // materialized while still alive; short ones are inlined immediately and need no pause.
+        string v = absl::StrCat("$", s);
+        if (v.size() > RedisReplyBuilder::kMaxInlineSize) {
+          RedisReplyBuilder::ScopePause pause{rb};
+          rb->SendBulkString(v);
+        } else {
+          rb->SendBulkString(v);
+        }
+      },
   };
 
   rb->SendLong(total_hits);
