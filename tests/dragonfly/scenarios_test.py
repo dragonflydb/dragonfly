@@ -68,8 +68,8 @@ class Metrics:
     def type_total(self) -> float:
         return sum(self.type_used.values())
 
-    def cmd_match_obj(self):
-        return self.cmd_total() == self.obj_used()
+    def cmd_and_type_match_obj(self):
+        return self.cmd_total() == self.obj_used() == self.type_total()
 
 
 WANT_MEMORY_CLASSES = frozenset(
@@ -153,8 +153,7 @@ def classify_overwrite_hash(m: Metrics):
     if (
         m.cmd("hash") == m.type("hash")
         and m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_match_obj()
-        and m.type_total() == m.obj_used()
+        and m.cmd_and_type_match_obj()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -168,7 +167,7 @@ def classify_overwrite(m: Metrics, t: str):
     if (
         m.cmd(t) == m.type(t)
         and m.cmd("hash") == m.type("hash")
-        and m.cmd_match_obj()
+        and m.cmd_and_type_match_obj()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -190,7 +189,7 @@ def classify_del_string(m: Metrics):
     """DEL string: command delta should match removed value + key."""
     if (
         m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_match_obj()
+        and m.cmd_and_type_match_obj()
         and m.cmd("string") < 0
         and clean_memory_classes(m)
     ):
@@ -211,8 +210,7 @@ def classify_mixed_delete(m: Metrics):
     """DEL mixed keys: each removed type should get its own negative delta."""
     if (
         all(m.cmd(t) < 0 for t in ("hash", "list", "string"))
-        and m.cmd_match_obj()
-        and m.type_total() == m.obj_used()
+        and m.cmd_and_type_match_obj()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -224,7 +222,7 @@ def classify_rename_to_new(m: Metrics):
     """RENAME new key: move should account net key delta to value type."""
     if (
         m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_match_obj()
+        and m.cmd_and_type_match_obj()
         and m.cmd("string") > 0
         and clean_memory_classes(m)
     ):
@@ -238,8 +236,7 @@ def classify_rename_hash_over_string(m: Metrics):
     if (
         m.cmd("string") == m.type("string")
         and m.cmd("hash") == m.type("hash") + m.type("key")
-        and m.cmd_match_obj()
-        and m.type_total() == m.obj_used()
+        and m.cmd_and_type_match_obj()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -296,7 +293,7 @@ def classify_expiry(m: Metrics):
     """Expiry delete should look like DEL for the expired value type."""
     if (
         m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_match_obj()
+        and m.cmd_and_type_match_obj()
         and m.cmd("string") < 0
         and clean_memory_classes(m)
     ):
@@ -310,8 +307,7 @@ def classify_copy_replace(m: Metrics):
     if (
         m.cmd("string") == m.type("string")
         and m.cmd("hash") == m.type("hash")
-        and m.cmd_match_obj()
-        and m.type_total() == m.obj_used()
+        and m.cmd_and_type_match_obj()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -337,8 +333,7 @@ def classify_restore_hash(m: Metrics):
     """RESTORE hash: decoded runtime type should receive the delta."""
     if (
         m.cmd("hash") == m.type("hash") + m.type("key")
-        and m.cmd_match_obj()
-        and m.type_total() == m.obj_used()
+        and m.cmd_and_type_match_obj()
         and clean_memory_classes(m)
     ):
         return "OK"
@@ -350,7 +345,7 @@ def classify_hset_enc_change(m: Metrics):
     """Hash encoding growth should stay attributed to hash."""
     if (
         m.cmd("hash") == m.type("hash")
-        and m.cmd_match_obj()
+        and m.cmd_and_type_match_obj()
         and m.cmd("hash") > 0
         and clean_memory_classes(m)
     ):
@@ -387,6 +382,20 @@ def classify_table_growth(m: Metrics):
         return "CHECK other bytes included?"
 
     return "WRONG"
+
+
+def classify_flushdb_mixed(m: Metrics):
+    """FLUSHDB mixed keys: whole table reset currently bypasses per-key delete scopes."""
+    if (
+        all(m.cmd(t) < 0 for t in ("hash", "list", "string"))
+        and m.cmd_and_type_match_obj()
+        and clean_memory_classes(m)
+    ):
+        return "OK"
+    elif m.type_total() == m.mem("object_used") and m.cmd_total() != m.mem("object_used"):
+        return "CHECK flush bypasses per-key scopes"
+    else:
+        return "WRONG"
 
 
 async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
@@ -511,6 +520,16 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             ),
             action=commands(("UNLINK", long_key, long_key + "h", long_key + "l")),
             classify=classify_mixed_delete,
+        ),
+        Scenario(
+            "flushdb mixed types",
+            setup=commands(
+                ("SET", long_key, long_val),
+                ("HSET", long_key + "h", "f", long_val),
+                ("LPUSH", long_key + "l", long_val),
+            ),
+            action=commands(("FLUSHDB", "SYNC")),
+            classify=classify_flushdb_mixed,
         ),
     ]
 
