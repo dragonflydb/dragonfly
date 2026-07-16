@@ -18,7 +18,6 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
   ADD(total_cancels);
   ADD(total_deletes);
   ADD(total_defrags);
-  ADD(delayed_defrag_queue_size);
   ADD(total_uploads);
   ADD(total_heap_buf_allocs);
   ADD(total_registered_buf_allocs);

@@ -165,6 +165,14 @@ bool SmallBins::IsFragmented(size_t offset) {
   return false;
 }
 
+::dfly::detail::DashCursor SmallBins::TraverseFragmented(::dfly::detail::DashCursor cursor,
+                                                         std::function<void(size_t)> f) {
+  return stashed_bins_.Traverse(cursor, [f](Dash::iterator it) {
+    if (it->second.bytes < kPageSize / 2)
+      f(it->first);
+  });
+}
+
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
                .stashed_entries_cnt = stats_.stashed_entries_cnt,

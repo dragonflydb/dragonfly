@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/dash_internal.h"
 #include "core/tiering_types.h"
 #include "io/io.h"  // for io::Result (TODO: replace with nonstd/expected)
 #include "server/stats.h"
@@ -139,12 +140,14 @@ class TieredStorage : public TieredStorageBase {
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
 
-  void ProcessDelayedDeframents();
+  // Scan small bins for fragmented ones and enqueue for defrag
+  void RunDefragScan();
 
   PrimeValue DeleteCool(tiering::TieredCoolRecord* record);
   tiering::TieredCoolRecord* PopCool();
 
-  PrimeTable::Cursor offloading_cursor_;  // where RunOffloading left off
+  detail::DashCursor offloading_cursor_;  // where RunOffloading left off
+  detail::DashCursor defrag_cursor_;      // where defrag left off
 
   // Stash operations waiting for completion to throttle
   tiering::EntryMap<::util::fb2::Future<bool>> stash_backpressure_;

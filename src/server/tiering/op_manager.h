@@ -57,6 +57,8 @@ class OpManager {
   // Returns true if there is a pending modification for the given segment.
   bool HasModificationPending(DiskSegment segment) const;
 
+  bool HasReadPending(PendingId id, DiskSegment segment) const;
+
   // Cancel entry with pending io
   void CancelPending(PendingId id);
 
@@ -92,7 +94,8 @@ class OpManager {
   virtual bool NotifyFetched(const OwnedEntryId& id, DiskSegment segment, Decoder*) = 0;
 
   // Notify delete. Return true if the filled segment needs to be marked as free.
-  virtual bool NotifyDelete(DiskSegment segment) = 0;
+  // If was_read is set, the item was just read and can still be reached with a read
+  virtual bool NotifyDelete(DiskSegment segment, bool was_read) = 0;
 
   // Describes pending read futures for a single entry
   struct EntryOps {

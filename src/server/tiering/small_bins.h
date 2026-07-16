@@ -88,6 +88,10 @@ class SmallBins {
   // Serialize filled bin to destination buffer (4kb)
   size_t SerializeBin(FilledBin* bin, io::MutableBytes dest);
 
+  // Traverse stashed bins and run callback on those that are fragmented
+  ::dfly::detail::DashCursor TraverseFragmented(::dfly::detail::DashCursor,
+                                                std::function<void(size_t /* offset */)>);
+
   Stats GetStats() const;
 
  private:
