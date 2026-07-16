@@ -27,7 +27,7 @@ class CmdMemoryScope {
   CmdMemoryScope* parent_ = nullptr;
 };
 
-template <typename F> auto WithMemTrack(F f, int obj_type) {
+template <typename F> auto WithMemTrack(int obj_type, F f) {
   CmdMemoryScope scope(obj_type);
   return f();
 }

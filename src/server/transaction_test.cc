@@ -451,7 +451,7 @@ TEST_F(TransactionTest, DeltaChanges) {
     const auto mr = shard->memory_resource();
     void* p = nullptr;
     const auto before = shard->cmd_type_mem_delta();
-    WithMemTrack([&] { p = mr->allocate(1024); }, OBJ_STRING);
+    WithMemTrack(OBJ_STRING, [&] { p = mr->allocate(1024); });
     AllButOneDeltaIs(DeltaDiff(before, shard->cmd_type_mem_delta()), OBJ_STRING, 1024);
     mr->deallocate(p, 1024);
   });
@@ -463,7 +463,7 @@ TEST_F(TransactionTest, DeltaNoObjTypeDiscarded) {
     const auto mr = shard->memory_resource();
     void* p = nullptr;
     const auto before = shard->cmd_type_mem_delta();
-    WithMemTrack([&] { p = mr->allocate(1024); }, -1);
+    WithMemTrack(-1, [&] { p = mr->allocate(1024); });
     ASSERT_THAT(DeltaDiff(before, shard->cmd_type_mem_delta()), Each(0));
     mr->deallocate(p, 1024);
   });
@@ -475,7 +475,7 @@ TEST_F(TransactionTest, DeltaAllocAndFree) {
     const auto mr = shard->memory_resource();
     void* p = mr->allocate(1024);
     const auto before = shard->cmd_type_mem_delta();
-    WithMemTrack([&] { mr->deallocate(p, 1024); }, OBJ_LIST);
+    WithMemTrack(OBJ_LIST, [&] { mr->deallocate(p, 1024); });
     AllButOneDeltaIs(DeltaDiff(before, shard->cmd_type_mem_delta()), OBJ_LIST, -1024);
   });
 }
@@ -495,16 +495,16 @@ TEST_F(TransactionTest, DeltaNested) {
 
     auto list_cb = [&] {
       track(512);
-      WithMemTrack(hash_cb, OBJ_HASH);
+      WithMemTrack(OBJ_HASH, hash_cb);
     };
 
     auto str_cb = [&] {
       track(1024);
-      WithMemTrack(list_cb, OBJ_LIST);
+      WithMemTrack(OBJ_LIST, list_cb);
     };
 
     const auto before = shard->cmd_type_mem_delta();
-    WithMemTrack(str_cb, OBJ_STRING);
+    WithMemTrack(OBJ_STRING, str_cb);
     auto deltas = DeltaDiff(before, shard->cmd_type_mem_delta());
 
     ASSERT_EQ(deltas[OBJ_STRING], 1024);
