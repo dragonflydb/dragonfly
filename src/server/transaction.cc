@@ -683,7 +683,10 @@ void Transaction::RunCallback(EngineShard* shard) {
   RunnableResult result;
   try {
     const int obj_type = cid_ ? TypeForFamily(cid_->GetFamily()) : -1;
-    result = WithMemTrack(obj_type, [&] { return (*cb_ptr_)(this, shard); });
+    if (obj_type >= 0)
+      result = WithMemTrack(obj_type, [&] { return (*cb_ptr_)(this, shard); });
+    else
+      result = (*cb_ptr_)(this, shard);
     if (unique_shard_cnt_ == 1) {
       cb_ptr_.reset();  // We can do it because only a single thread runs the callback.
       local_result_ = result;
@@ -1522,7 +1525,11 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   }
 
   const int obj_type = cid_ ? TypeForFamily(cid_->GetFamily()) : -1;
-  const auto result = WithMemTrack(obj_type, [&] { return cb(this, shard); });
+  RunnableResult result;
+  if (obj_type >= 0)
+    result = WithMemTrack(obj_type, [&] { return cb(this, shard); });
+  else
+    result = cb(this, shard);
 
   db_slice.OnCbFinishBlocking();
 
