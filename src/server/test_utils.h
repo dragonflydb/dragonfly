@@ -163,6 +163,12 @@ class BaseFamilyTest : public ::testing::Test {
                           std::chrono::milliseconds timeout_ms = std::chrono::milliseconds(100));
 
   std::string GetId() const;
+
+  // Whether connection `conn_id` is currently parked in a blocking command
+  // (e.g. BLPOP / XREAD ... BLOCK). Combine with WaitUntilCondition to
+  // deterministically order a wake-up write after the block is entered.
+  bool IsConnBlocked(std::string_view conn_id);
+
   size_t SubscriberMessagesLen(std::string_view conn_id) const;
 
   size_t NumSubscriptions(std::string_view conn_id) const;

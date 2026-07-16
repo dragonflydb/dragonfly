@@ -448,7 +448,10 @@ TEST_F(StreamFamilyTest, XReadGroupBlockHonorsCount) {
     resp0 = Run({"xreadgroup", "group", "group", "alice", "count", "1", "block", "0", "streams",
                  "foo", ">"});
   });
-  ThisFiber::SleepFor(50us);
+  // Wait until the reader is parked in the blocking path (WaitOnWatch flips
+  // the connection's `blocked` flag) so the transaction below exercises the
+  // wake-up read, not the immediate one. fb0 runs on proactor 0 -> "IO0".
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
 
   // Wake it with a transaction adding multiple entries at once. The woken
   // read must honor COUNT like the non-blocking path does, instead of
