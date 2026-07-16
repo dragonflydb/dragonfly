@@ -420,6 +420,76 @@ TEST_F(TieredStorageTest, Defrag) {
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
 }
 
+// Verify that RunDefragScan discovers and defragments bins that became fragmented while there was
+// no upload budget (so the immediate defrag path in NotifyDelete was skipped), and that it does no
+// work when nothing is fragmented (dynamic / low-cpu behaviour).
+TEST_F(TieredStorageTest, RunDefragScan) {
+  absl::FlagSaver saver;
+
+  auto set_budget = [this](int64_t budget) {
+    pp_->at(0)->AwaitBrief([budget] {
+      auto& db_slice =
+          namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+      db_slice.UpdateMemoryParams(budget, 0);
+    });
+  };
+  auto run_offloading = [this] {
+    pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->RunOffloading(0); });
+  };
+
+  // Stash a full bin: 7 of 8 small values end up together, the last one keeps filling.
+  for (char k = 'a'; k < 'a' + 8; k++) {
+    Run({"SET", string(1, k), string(600, k)});
+  }
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  {
+    auto metrics = GetMetrics();
+    ASSERT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
+    ASSERT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 7u);
+  }
+
+  // Fragment the bin while there is no upload budget, so the immediate defrag path is skipped.
+  // With upload_threshold == 1.0, UploadBudget() == memory_budget - max_memory_limit, and the
+  // heartbeat keeps memory_budget <= max_memory_limit, so the budget stays non-positive.
+  SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
+  UpdateFromFlags();
+  set_budget(0);
+
+  for (char k = 'a'; k < 'a' + 4; k++) {
+    Run({"DEL", string(1, k)});
+  }
+
+  // Only 3 of 7 remain (< 7/2), so the bin is fragmented. It must linger: no defrag happened yet.
+  {
+    auto metrics = GetMetrics();
+    EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
+    EXPECT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 3u);
+    EXPECT_EQ(metrics.tiered_stats.total_defrags, 0u);
+  }
+
+  // Give back upload budget and let the offloading loop's defrag scan pick up the lingering bin.
+  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);
+  UpdateFromFlags();
+  set_budget(1_MB);
+  run_offloading();
+
+  // Wait until the defrag read completes and the 3 survivors are repacked.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
+  {
+    auto metrics = GetMetrics();
+    EXPECT_EQ(metrics.tiered_stats.total_defrags, 3u);
+    EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 0u);
+    EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+  }
+
+  // Dynamic behaviour: with nothing fragmented, another scan is a cheap no-op (no extra defrags).
+  set_budget(1_MB);
+  run_offloading();
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
+  EXPECT_EQ(GetMetrics().tiered_stats.total_defrags, 3u);
+}
+
 TEST_F(PureDiskTSTest, BackgroundOffloading) {
   absl::FlagSaver saver;
   SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);  // upload all values

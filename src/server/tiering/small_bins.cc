@@ -189,6 +189,7 @@ SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_v
 
   auto bin = it->second;
   stats_.stashed_entries_cnt -= bin.entries;
+  stashed_bins_.Erase(it);
 
   const char* data = value.data();
 

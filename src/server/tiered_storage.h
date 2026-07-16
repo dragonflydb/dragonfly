@@ -149,6 +149,9 @@ class TieredStorage : public TieredStorageBase {
   detail::DashCursor offloading_cursor_;  // where RunOffloading left off
   detail::DashCursor defrag_cursor_;      // where defrag left off
 
+  // Number of bins the previous defrag scan enqueued. Used to scale the next scan's cpu time-slice.
+  unsigned last_defrag_scan_hits_ = 0;
+
   // Stash operations waiting for completion to throttle
   tiering::EntryMap<::util::fb2::Future<bool>> stash_backpressure_;
 

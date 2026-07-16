@@ -78,7 +78,8 @@ bool OpManager::HasReadPending(PendingId id, DiskSegment segment) const {
   if (it == pending_reads_.end())
     return false;
 
-  return it->second.Find(segment)->id == ToOwned(id);
+  auto* ops = it->second.Find(segment);
+  return ops && ops->id == ToOwned(id);
 }
 
 void OpManager::CancelPending(PendingId id) {
