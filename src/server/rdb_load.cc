@@ -2582,6 +2582,7 @@ void RdbLoader::DiscardChunkedValuesOnFinish() {
     if (values.empty())
       continue;
 
+    LOG(ERROR) << "unexpected " << values.size() << " values found in chunk map on RDB load finish";
     bc->Add(1);
     shard_set->Add(sid, [values = std::move(values), bc]() mutable {
       values.clear();
@@ -3013,6 +3014,15 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   PrimeValue* pv_ptr = &pv;
   DbIndex db_ind = db_cntx.db_index;
 
+  bool failed_should_cleanup = false;
+  ChunkedKey key{db_ind, item->key};
+  absl::Cleanup maybe_remove_chunk_entry = [&] {
+    if (!failed_should_cleanup)
+      return;
+    std::unique_lock l{now_chunked_mu_};
+    now_chunked_.erase(key);
+  };
+
   auto error_msg = [](const auto* item, auto db_ind) {
     return absl::StrCat("Found empty key: ", item->key, " in DB ", db_ind, " rdb_type ",
                         item->val.rdb_type);
@@ -3039,6 +3049,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 
   if (auto ec = FromOpaque(item->val, config_copy, pv_ptr); ec) {
+    failed_should_cleanup = item->load_config.chunked;
     if (ec.value() == errc::value_expired) {
       // hmap and sset values can expire and we ok with it,
       // so we don't set ec_ in this case
