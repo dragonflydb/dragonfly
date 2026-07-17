@@ -2581,7 +2581,26 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     GetCurrentDbSlice().DecrLoadInProgress();
   }
 
-  now_chunked_.clear();
+  if (!now_chunked_.empty()) {
+    // Leftover chunked entries (e.g. from an EOF mid-chunk) were allocated on their
+    // owning shard's heap. Destroy each one on that shard's thread instead of the
+    // FinishLoad() caller's thread, to avoid freeing across mimalloc heaps.
+    std::vector<std::vector<std::unique_ptr<PrimeValue>>> pending_by_shard(shard_set->size());
+    for (auto& [key, val] : now_chunked_) {
+      ShardId sid = Shard(key.second, shard_set->size());
+      pending_by_shard[sid].push_back(std::move(val));
+    }
+    now_chunked_.clear();
+
+    BlockingCounter bc2(shard_set->size());
+    for (unsigned i = 0; i < shard_set->size(); ++i) {
+      shard_set->Add(i, [vec = std::move(pending_by_shard[i]), bc2]() mutable {
+        vec.clear();  // actual destructors run here, on the owning shard thread
+        bc2->Dec();
+      });
+    }
+    bc2->Wait();
+  }
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
