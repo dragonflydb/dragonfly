@@ -2060,4 +2060,30 @@ TEST_F(RdbTest, SnapshotEgressThrottle) {
   EXPECT_GT(t_lim, t_base * 3);
 }
 
+TEST_F(RdbTest, EofWithRemoteShardChunksPending) {
+  ASSERT_GT(shard_set->size(), 1);
+  std::string key;
+  ShardId sid = 0;
+  for (auto i = 0; i < 1000; ++i) {
+    key = absl::StrCat("uc-", i);
+    sid = Shard(key, shard_set->size());
+    if (sid > 0)
+      break;
+  }
+  ASSERT_GT(sid, 0);
+
+  std::string chunk;
+  chunk.push_back(RDB_TYPE_HASH);
+  AppendString(&chunk, key);
+
+  AppendLen(&chunk, 2);  // promise 2 and create 1 field
+  AddKV(&chunk, "field", "v1");
+
+  const std::string body = MakeTaggedChunk(1, chunk);
+  const auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+
+  ASSERT_FALSE(ec) << ec.message();
+  EXPECT_EQ(Run({"EXISTS", key}), 0);
+}
+
 }  // namespace dfly

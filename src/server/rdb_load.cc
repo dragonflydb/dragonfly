@@ -2566,6 +2566,32 @@ error_code RdbLoader::Load(io::Source* src) {
   return kOk;
 }
 
+void RdbLoader::DiscardChunkedValuesOnFinish() {
+  using Values = std::vector<std::unique_ptr<PrimeValue>>;
+  std::vector<Values> by_shard(shard_set->size());
+  {
+    std::unique_lock l{now_chunked_mu_};
+    for (auto& [key, pv] : now_chunked_)
+      by_shard[Shard(key.second, shard_set->size())].push_back(std::move(pv));
+    now_chunked_.clear();
+  }
+
+  BlockingCounter bc{0};
+  for (ShardId sid = 0; sid < by_shard.size(); ++sid) {
+    auto& values = by_shard[sid];
+    if (values.empty())
+      continue;
+
+    bc->Add(1);
+    shard_set->Add(sid, [values = std::move(values), bc]() mutable {
+      values.clear();
+      bc->Dec();
+    });
+  }
+
+  bc->Wait();
+}
+
 void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   BlockingCounter bc(shard_set->size());
   for (unsigned i = 0; i < shard_set->size(); ++i) {
@@ -2581,7 +2607,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     GetCurrentDbSlice().DecrLoadInProgress();
   }
 
-  now_chunked_.clear();
+  DiscardChunkedValuesOnFinish();
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
