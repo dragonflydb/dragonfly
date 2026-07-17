@@ -23,7 +23,8 @@ class OAHSet : public OAHTable<OAHEntry> {
  public:
   // Inserts `str` (optional TTL); returns false if already present.
   bool Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
-    return AddImpl(str, ttl_sec);
+    const ASCIIStr key(str);
+    return AddImpl(key.content(), key.len(), ttl_sec);
   }
 
   // keepttl=true: existing entries are left alone (current/legacy behavior).
@@ -34,10 +35,11 @@ class OAHSet : public OAHTable<OAHEntry> {
     unsigned res = 0;
     const bool has_ttl = ttl_sec != UINT32_MAX;
     for (auto& s : span) {
-      if (AddImpl(s, ttl_sec)) {
+      const ASCIIStr key(s);
+      if (AddImpl(key.content(), key.len(), ttl_sec)) {
         ++res;
       } else if (has_ttl && !keepttl) {
-        auto it = Find(s);
+        auto it = Find(key.content(), key.len());
         if (it != end())
           it.SetExpiryTime(ttl_sec);
       }
@@ -51,18 +53,21 @@ class OAHSet : public OAHTable<OAHEntry> {
     other->Reserve(UpperBoundSize());
     other->set_time(time_now());
     for (auto it = begin(), it_end = end(); it != it_end; ++it) {
-      other->Add(it->Key(), it.HasExpiry() ? it.ExpiryTime() - time_now() : UINT32_MAX);
+      // Copy the stored (already-encoded) content verbatim -- no decode/re-encode round-trip.
+      const oah::key::Stored s = (*it).StoredKey();
+      const uint32_t ttl = it.HasExpiry() ? it.ExpiryTime() - time_now() : UINT32_MAX;
+      other->AddImpl({s.content, s.header.content_size}, s.header.len, ttl);
     }
   }
 
  private:
-  bool AddImpl(std::string_view str, uint32_t ttl_sec) {
+  bool AddImpl(std::string_view content, uint32_t len, uint32_t ttl_sec) {
     if (size_ >= entries_.size()) [[unlikely]] {
       Reserve(BucketCount() * 2);
     }
     assert(Capacity() >= kDisplacementSize);
 
-    uint64_t hash = Hash(str);
+    uint64_t hash = Hash(content);
     auto bucket_id = BucketId(hash, capacity_log_);
     oah::PrefetchRead(entries_.data() + bucket_id);
 
@@ -70,7 +75,7 @@ class OAHSet : public OAHTable<OAHEntry> {
     const uint64_t shifted_ext_hash = ext_hash << oah::kExtHashShift;
 
     const ssize_t mem_before = zmalloc_used_memory_tl;
-    TaggedPtr entry_tagged_ptr = OAHEntry::Create(str, EntryTTL(ttl_sec));
+    TaggedPtr entry_tagged_ptr = OAHEntry::Create(content, len, EntryTTL(ttl_sec));
     OAHEntry(entry_tagged_ptr).SetShiftedExtHash(shifted_ext_hash);  // reuse the shifted value
     if (ttl_sec != UINT32_MAX)
       expiration_used_ = true;
@@ -87,13 +92,13 @@ class OAHSet : public OAHTable<OAHEntry> {
     TaggedPtr* base = entries_.data();
     for (uint32_t cand_bits = masks.candidates; cand_bits; cand_bits &= cand_bits - 1) {
       TaggedPtr* cell = &base[bucket_id + std::countr_zero(cand_bits)];
-      if (OAHEntry(*cell).Key() == str) {
+      if (OAHEntry(*cell).KeyMatches(content, len)) {
         matched = cell;
         break;
       }
     }
     if (!matched && At(ext_bid).IsVector())
-      matched = ProbeExtensionVector(ext_bid, str, ext_hash);
+      matched = ProbeExtensionVector(ext_bid, content, len, ext_hash);
 
     if (matched) {
       OAHEntry dup(*matched);
@@ -129,15 +134,32 @@ template <typename Fn> auto VisitSet(void* ptr, Fn&& fn) {
   return g_use_oah_set ? fn(static_cast<OAHSet*>(ptr)) : fn(static_cast<StringSet*>(ptr));
 }
 
-// Current member as a string_view from either iterator type. Free functions so
-// generic code (e.g. VisitSet lambdas) can write `Key(it)` uniformly.
+// Current member from either iterator type. OAHSet returns a small owning/view object: it
+// references raw entry bytes directly and owns decoded ASCII bytes inline. Callers keep that object
+// alive while using GetKeyView(), so decoded views remain valid across nested calls and fiber
+// yields.
 inline std::string_view Key(StringSet::iterator it) {
   sds s = *it;
   return {s, sdslen(s)};
 }
 
-inline std::string_view Key(OAHSet::iterator it) {
-  return it->Key();
+inline oah::key::Decoded Key(OAHSet::iterator it) {
+  return OAHSet::DecodeKey(*it);
 }
+
+inline std::string_view GetKeyView(std::string_view key) {
+  return key;
+}
+
+inline std::string_view GetKeyView(sds key) {
+  return {key, sdslen(key)};
+}
+
+inline std::string_view GetKeyView(const oah::key::Decoded& key) {
+  return key.view();
+}
+
+inline std::string_view GetKeyView(oah::key::Decoded&&) = delete;
+inline std::string_view GetKeyView(const oah::key::Decoded&&) = delete;
 
 }  // namespace dfly

@@ -34,7 +34,10 @@ class OAHEntry {
  public:
   using TaggedPtr = oah::TaggedPtr;
 
-  static TaggedPtr Create(std::string_view key, uint32_t expiry = UINT32_MAX);
+  // Builds an entry blob [expiry?, key_header, key] storing `key` (already-encoded content)
+  // verbatim. The header records `real_size`; whether the key is encoded is derived from
+  // key.size() != real_size.
+  static TaggedPtr Create(std::string_view key, uint32_t real_size, uint32_t expiry = UINT32_MAX);
   static void Destroy(TaggedPtr tagged_ptr);
 
   explicit OAHEntry(TaggedPtr& slot) : slot_(&slot) {
@@ -53,10 +56,26 @@ class OAHEntry {
     return zmalloc_usable_size(Raw());
   }
 
-  std::string_view Key() const {
-    const char* p = Raw() + GetExpirySize();
-    const oah::size::Decoded key = oah::size::Read(p);
-    return {p + key.field_size, key.size};
+  // Deserializes the stored key: its codec header plus a pointer to the stored content bytes. The
+  // table decodes/compares this (OAHEntry itself never ascii-encodes or decodes).
+  oah::key::Stored StoredKey() const {
+    const char* hdr = Raw() + GetExpirySize();
+    const oah::key::Header h = oah::key::ReadHeader(hdr);
+    return {h, hdr + h.field_size};
+  }
+
+  // Stored key content (ascii-packed or raw) used for hashing. Not the logical key.
+  std::string_view KeyContent() const {
+    const oah::key::Stored s = StoredKey();
+    return {s.content, s.header.content_size};
+  }
+
+  // Compares this entry's key against a query key (content bytes + logical length). Reads the
+  // header inline (not via StoredKey) to stay register-friendly on the hot path.
+  bool KeyMatches(std::string_view content, uint32_t len) const {
+    const char* hdr = Raw() + GetExpirySize();
+    const oah::key::Header h = oah::key::ReadHeader(hdr);
+    return oah::key::Matches(h, hdr + h.field_size, content, len);
   }
 
   bool HasExpiry() const {
@@ -94,7 +113,7 @@ class OAHEntry {
     return res;
   }
 
-  // Lets the iterator drill down (it->Key()).
+  // Lets the iterator drill down (it->KeyContent()).
   OAHEntry* operator->() {
     return this;
   }

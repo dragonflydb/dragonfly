@@ -225,8 +225,9 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func, bool allow_yield)
     VisitSet(pv.RObjPtr(), [&](auto* set) {
       for (auto it = set->begin(); it != set->end(); ++it) {
         YieldLongIteration(allow_yield);
-        std::string_view key = Key(it);
-        if (!func(ContainerEntry{key.data(), key.size()})) {
+        auto key = Key(it);
+        const std::string_view key_view = GetKeyView(key);
+        if (!func(ContainerEntry{key_view.data(), key_view.size()})) {
           success = false;
           break;
         }
