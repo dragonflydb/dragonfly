@@ -2700,20 +2700,25 @@ void RdbLoader::DiscardChunkedValuesOnFinish() {
     now_chunked_.clear();
   }
 
+  size_t total = 0;
+  for (auto& values : by_shard)
+    total += values.size();
+  if (total > 0)
+    LOG(ERROR) << "unexpected " << total << " values found in chunk map on RDB load finish";
+
   BlockingCounter bc{0};
   for (ShardId sid = 0; sid < by_shard.size(); ++sid) {
     auto& values = by_shard[sid];
     if (values.empty())
       continue;
 
-    LOG(ERROR) << "unexpected " << values.size() << " values found in chunk map on RDB load finish";
     bc->Add(1);
     shard_set->Add(sid, [values = std::move(values), bc]() mutable {
       values.clear();
       bc->Dec();
     });
   }
-  bc->Wait();
+  bc->Wait();  // block until every shard has finished freeing its leftover values
 }
 
 void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {

@@ -2294,4 +2294,38 @@ TEST_F(RdbTest, SnapshotEgressThrottle) {
   EXPECT_GT(t_lim, t_base * 3);
 }
 
+TEST_F(RdbTest, EofWithRemoteShardChunksPending) {
+  // This test creates a key whose RDB chunk is dispatched to a remote shard (not the shard
+  // driving the load), and simulates the source stream ending (EOF) before all of that chunk's
+  // promised elements arrive. This exercises the case where a remote-shard chunk is left
+  // incomplete/pending when EOF is hit, verifying the loader neither errors out nor leaves a
+  // partially-built key behind.
+  ASSERT_GT(shard_set->size(), 1);  // need >1 shard so we can pick a key on a non-zero shard
+
+  std::string key;
+  ShardId sid = 0;
+
+  for (auto i = 0; i < 1000; ++i) {
+    key = absl::StrCat("uc-", i);
+    sid = Shard(key, shard_set->size());
+    if (sid > 0)
+      break;
+  }
+  ASSERT_GT(sid, 0);
+
+  std::string chunk;
+  chunk.push_back(RDB_TYPE_HASH);
+  AppendString(&chunk, key);
+  AppendLen(&chunk, 2);  // promise 2 fields, only 1 will follow
+  AddKV(&chunk, "field", "v1");
+
+  const std::string body = MakeTaggedChunk(1, chunk);
+
+  const auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();  // EOF with pending remote chunk must not surface as an error
+
+  // Key was never fully loaded before EOF, so it must not exist.
+  EXPECT_EQ(Run({"EXISTS", key}), 0);
+}
+
 }  // namespace dfly
