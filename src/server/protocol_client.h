@@ -138,6 +138,10 @@ class ProtocolClient {
     return sock_.get();
   }
 
+  // Socket diagnostics string for error logs. Evaluates the socket exactly once and tolerates a
+  // socket that was never created (e.g. ConnectAndAuth() refusing on a dead context).
+  std::string SockInfo() const;
+
  private:
   std::error_code Recv(util::FiberSocketBase* input, base::IoBuf* dest);
 
