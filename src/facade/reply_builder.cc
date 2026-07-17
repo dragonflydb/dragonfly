@@ -344,6 +344,14 @@ void RedisReplyBuilderBase::SendBulkString(std::string_view str) {
   WritePieces(kCRLF);
 }
 
+template <typename T>
+requires std::is_same_v<T, std::string>
+void RedisReplyBuilderBase::SendBulkString(T&& str) {
+  DCHECK(!IsScoped());
+  SendBulkString(std::string_view{str});
+}
+template void RedisReplyBuilderBase::SendBulkString(std::string&&);
+
 void RedisReplyBuilderBase::SendBulkStringBorrowed(const cmn::BorrowedString& bs) {
   ReplyScope scope(this);
   tl_facade_stats->reply_stats.borrowed_string_sent_cnt++;
