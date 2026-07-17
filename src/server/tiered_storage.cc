@@ -88,13 +88,6 @@ constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
 // so we cap the number of concurrent defragmentation operations to avoid unbounded memory growth.
 constexpr uint32_t kMaxPendingDefrags = 50;
 
-// The defrag scan cpu time-slice adapts to recent activity: it stays close to kDefragScanBaseUs
-// when the previous scan found nothing (sleepy, so we don't burn cpu scanning a stale table) and
-// grows by kDefragScanUsPerHit for every bin the previous scan enqueued, up to kDefragScanMaxUs.
-constexpr uint64_t kDefragScanBaseUs = 5;
-constexpr uint64_t kDefragScanUsPerHit = 5;
-constexpr uint64_t kDefragScanMaxUs = 50;
-
 // Called after setting new value in place of previous segment
 void RecordDeleted(const FragmentRef& fragment_ref, size_t tiered_len, DbTableStats* stats) {
   stats->AddTypeMemoryUsage(fragment_ref.ObjType(), fragment_ref.MallocUsed());
@@ -718,6 +711,10 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 }
 
 void TieredStorage::RunDefragScan() {
+  constexpr uint64_t kBaseUs = 2;
+  constexpr uint64_t kUsPerHit = 5;
+  constexpr uint64_t kMaxUs = 25;
+
   const auto start_cycles = base::CycleClock::Now();
 
   unsigned hits = 0;
@@ -731,8 +728,7 @@ void TieredStorage::RunDefragScan() {
 
   // Scale the cpu time-slice by how much work the previous scan found: sleepy on a stale table,
   // more aggressive while there's a backlog to clear.
-  const uint64_t time_budget_us =
-      std::min(kDefragScanBaseUs + last_defrag_scan_hits_ * kDefragScanUsPerHit, kDefragScanMaxUs);
+  const uint64_t time_budget_us = std::min(kBaseUs + last_defrag_scan_hits_ * kUsPerHit, kMaxUs);
 
   uint64_t cycles = 0;
   do {
