@@ -2716,7 +2716,10 @@ struct StreamReplies {
 
   void SendRecord(const Record& record) const {
     rb->StartArray(2);
-    rb->SendBulkString(StreamIdRepr(record.id));
+    {
+      std::string sbs_reply = StreamIdRepr(record.id);
+      rb->SendBulkString(sbs_reply);
+    }
     rb->StartArray(record.kv_arr.size() * 2);
     for (const auto& k_v : record.kv_arr) {
       rb->SendBulkString(k_v.first);
@@ -2726,8 +2729,10 @@ struct StreamReplies {
 
   void SendIDs(absl::Span<const streamID> ids) const {
     rb->StartArray(ids.size());
-    for (auto id : ids)
-      rb->SendBulkString(StreamIdRepr(id));
+    for (auto id : ids) {
+      std::string sbs_reply = StreamIdRepr(id);
+      rb->SendBulkString(sbs_reply);
+    }
   }
 
   void SendRecords(absl::Span<const Record> records) const {
@@ -3390,7 +3395,10 @@ void CmdXAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   OpResult<streamID> add_result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
 
   if (add_result) {
-    rb->SendBulkString(StreamIdRepr(*add_result));
+    {
+      std::string sbs_reply = StreamIdRepr(*add_result);
+      rb->SendBulkString(sbs_reply);
+    }
   } else {
     if (add_result == OpStatus::KEY_NOTFOUND) {
       rb->SendNull();
@@ -3604,7 +3612,10 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
           rb->SendBulkString("pending");
           rb->SendLong(ginfo.pending_size);
           rb->SendBulkString("last-delivered-id");
-          rb->SendBulkString(StreamIdRepr(ginfo.last_id));
+          {
+            std::string sbs_reply = StreamIdRepr(ginfo.last_id);
+            rb->SendBulkString(sbs_reply);
+          }
           rb->SendBulkString("entries-read");
           if (ginfo.entries_read != SCG_INVALID_ENTRIES_READ) {
             rb->SendLong(ginfo.entries_read);
@@ -3675,16 +3686,25 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
         rb->SendLong(sinfo->radix_tree_nodes);
 
         rb->SendBulkString("last-generated-id");
-        rb->SendBulkString(StreamIdRepr(sinfo->last_generated_id));
+        {
+          std::string sbs_reply = StreamIdRepr(sinfo->last_generated_id);
+          rb->SendBulkString(sbs_reply);
+        }
 
         rb->SendBulkString("max-deleted-entry-id");
-        rb->SendBulkString(StreamIdRepr(sinfo->max_deleted_entry_id));
+        {
+          std::string sbs_reply = StreamIdRepr(sinfo->max_deleted_entry_id);
+          rb->SendBulkString(sbs_reply);
+        }
 
         rb->SendBulkString("entries-added");
         rb->SendLong(sinfo->entries_added);
 
         rb->SendBulkString("recorded-first-entry-id");
-        rb->SendBulkString(StreamIdRepr(sinfo->recorded_first_entry_id));
+        {
+          std::string sbs_reply = StreamIdRepr(sinfo->recorded_first_entry_id);
+          rb->SendBulkString(sbs_reply);
+        }
 
         if (full) {
           rb->SendBulkString("entries");
@@ -3699,7 +3719,10 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
             rb->SendBulkString(ginfo.name);
 
             rb->SendBulkString("last-delivered-id");
-            rb->SendBulkString(StreamIdRepr(ginfo.last_id));
+            {
+              std::string sbs_reply = StreamIdRepr(ginfo.last_id);
+              rb->SendBulkString(sbs_reply);
+            }
 
             rb->SendBulkString("entries-read");
             if (ginfo.entries_read != SCG_INVALID_ENTRIES_READ) {
@@ -3721,7 +3744,10 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
             rb->StartArray(ginfo.stream_nack_vec.size());
             for (const auto& pending_info : ginfo.stream_nack_vec) {
               rb->StartArray(4);
-              rb->SendBulkString(StreamIdRepr(pending_info.pel_id));
+              {
+                std::string sbs_reply = StreamIdRepr(pending_info.pel_id);
+                rb->SendBulkString(sbs_reply);
+              }
               rb->SendBulkString(pending_info.consumer_name);
               rb->SendLong(pending_info.delivery_time);
               rb->SendLong(pending_info.delivery_count);
@@ -3753,7 +3779,10 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
               for (const auto& pending : consumer_info.pending) {
                 rb->StartArray(3);
 
-                rb->SendBulkString(StreamIdRepr(pending.pel_id));
+                {
+                  std::string sbs_reply = StreamIdRepr(pending.pel_id);
+                  rb->SendBulkString(sbs_reply);
+                }
                 rb->SendLong(pending.delivery_time);
                 rb->SendLong(pending.delivery_count);
               }
@@ -3862,8 +3891,14 @@ void CmdXPending(CmdArgParser parser, CommandContext* cmd_cntx) {
     rb->StartArray(4);
     rb->SendLong(res.count);
     if (res.count) {
-      rb->SendBulkString(StreamIdRepr(res.start));
-      rb->SendBulkString(StreamIdRepr(res.end));
+      {
+        std::string sbs_reply = StreamIdRepr(res.start);
+        rb->SendBulkString(sbs_reply);
+      }
+      {
+        std::string sbs_reply = StreamIdRepr(res.end);
+        rb->SendBulkString(sbs_reply);
+      }
       rb->StartArray(res.consumer_list.size());
 
       for (auto& [consumer_name, count] : res.consumer_list) {
@@ -3884,7 +3919,10 @@ void CmdXPending(CmdArgParser parser, CommandContext* cmd_cntx) {
     rb->StartArray(res.size());
     for (auto& item : res) {
       rb->StartArray(4);
-      rb->SendBulkString(StreamIdRepr(item.start));
+      {
+        std::string sbs_reply = StreamIdRepr(item.start);
+        rb->SendBulkString(sbs_reply);
+      }
       rb->SendBulkString(item.consumer_name);
       rb->SendLong(item.elapsed);
       rb->SendLong(item.delivery_count);
@@ -4155,7 +4193,10 @@ void CmdXAutoClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Batch the reply: temporary ids are copied into the batching buffer instead of referenced.
   SinkReplyBuilder::ReplyAggregator agg{rb};
   rb->StartArray(3);
-  rb->SendBulkString(StreamIdRepr(cresult.end_id));
+  {
+    std::string sbs_reply = StreamIdRepr(cresult.end_id);
+    rb->SendBulkString(sbs_reply);
+  }
   StreamReplies{rb}.SendClaimInfo(cresult);
   StreamReplies{rb}.SendIDs(cresult.deleted_ids);
 }

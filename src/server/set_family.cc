@@ -1591,7 +1591,10 @@ void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
     auto replier = [cursor, result = std::move(result)](facade::SinkReplyBuilder* builder) {
       auto* rb = static_cast<RedisReplyBuilder*>(builder);
       RedisReplyBuilder::ArrayScope scope{rb, 2};
-      rb->SendBulkString(absl::StrCat(cursor));
+      {
+        std::string sbs_reply = absl::StrCat(cursor);
+        rb->SendBulkString(sbs_reply);
+      }
       rb->SendBulkStrArr(*result);
     };
     cmd_cntx->ReplyWith(std::move(replier));

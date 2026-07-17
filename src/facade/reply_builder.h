@@ -217,6 +217,14 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
   void SendSimpleString(std::string_view str) override;
   virtual void SendBulkString(std::string_view str);  // RESP: Blob String
 
+  // Reject a temporary std::string: under a ReplyScope it would be enqueued by reference and read
+  // after destruction (use-after-free). Materialize into a named std::string first. Constrained to
+  // std::string rvalues, so string literals / string_view / lvalue strings are unaffected (a plain
+  // `std::string&&` overload would make `SendBulkString("literal")` ambiguous).
+  template <typename T>
+  requires std::is_same_v<T, std::string>
+  void SendBulkString(T&&) = delete;
+
   void SendBulkStringBorrowed(const cmn::BorrowedString& bs);
 
   // The interface exposes only the rvalue function to allow squashing to "steal" the value,

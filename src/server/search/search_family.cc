@@ -1315,15 +1315,28 @@ void SearchReply(const SearchParams& params,
 
   Overloaded sortable_value_sender{
       [rb](monostate) { rb->SendNull(); },
-      [rb](double d) { rb->SendBulkString(absl::StrCat("#", d)); },
-      [rb](const string& s) { rb->SendBulkString(absl::StrCat("$", s)); },
+      [rb](double d) {
+        {
+          std::string sbs_reply = absl::StrCat("#", d);
+          rb->SendBulkString(sbs_reply);
+        }
+      },
+      [rb](const string& s) {
+        {
+          std::string sbs_reply = absl::StrCat("$", s);
+          rb->SendBulkString(sbs_reply);
+        }
+      },
   };
 
   rb->SendLong(total_hits);
   for (size_t i = offset; i < end; i++) {
     rb->SendBulkString(docs[i]->key);
     if (params.with_scores) {
-      rb->SendBulkString(absl::StrCat(docs[i]->text_score));
+      {
+        std::string sbs_reply = absl::StrCat(docs[i]->text_score);
+        rb->SendBulkString(sbs_reply);
+      }
     }
     if (params.with_sortkeys) {
       visit(sortable_value_sender, docs[i]->sort_score);
@@ -2069,7 +2082,10 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
 
     if (emit_text) {
       rb->SendBulkString(params.yield_text_score_as);
-      rb->SendBulkString(absl::StrCat(doc.text_score));
+      {
+        std::string sbs_reply = absl::StrCat(doc.text_score);
+        rb->SendBulkString(sbs_reply);
+      }
     }
     if (emit_fields) {
       for (const auto& [k, v] : doc.values) {
@@ -2078,18 +2094,28 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
       }
       if (yield_combined_score) {
         rb->SendBulkString(params.yield_combined_score_as);
-        rb->SendBulkString(absl::StrCat(doc.combined));
+        {
+          std::string sbs_reply = absl::StrCat(doc.combined);
+          rb->SendBulkString(sbs_reply);
+        }
       }
     } else {
       rb->SendBulkString("__key");
       rb->SendBulkString(doc.key);
       rb->SendBulkString(yield_combined_score ? string_view{params.yield_combined_score_as}
                                               : "__score"sv);
-      rb->SendBulkString(absl::StrCat(doc.combined));
+      {
+        std::string sbs_reply = absl::StrCat(doc.combined);
+        rb->SendBulkString(sbs_reply);
+      }
     }
     if (emit_vsim) {
       rb->SendBulkString(params.yield_vsim_score_as);
-      rb->SendBulkString(absl::StrCat(search::DistanceToSimilarity(doc.knn_dist, vsim_metric)));
+      {
+        std::string sbs_reply =
+            absl::StrCat(search::DistanceToSimilarity(doc.knn_dist, vsim_metric));
+        rb->SendBulkString(sbs_reply);
+      }
     }
   }
 
@@ -2097,7 +2123,10 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
   rb->StartArray(0);
 
   rb->SendBulkString("execution_time");
-  rb->SendBulkString(absl::StrFormat("%.6f", absl::ToDoubleMilliseconds(total_took)));
+  {
+    std::string sbs_reply = absl::StrFormat("%.6f", absl::ToDoubleMilliseconds(total_took));
+    rb->SendBulkString(sbs_reply);
+  }
 }
 
 // Returns false if the index is not found on any shard; caller must Conclude() the tx.
@@ -4172,9 +4201,15 @@ void FtConfigHelp(CmdArgParser* parser, CommandContext* cmd_cntx) {
     rb->StartArray(5);
     rb->SendBulkString(flag->Name());
     rb->SendBulkString("Description"sv);
-    rb->SendBulkString(flag->Help());
+    {
+      std::string sbs_reply = flag->Help();
+      rb->SendBulkString(sbs_reply);
+    }
     rb->SendBulkString("Value"sv);
-    rb->SendBulkString(flag->CurrentValue());
+    {
+      std::string sbs_reply = flag->CurrentValue();
+      rb->SendBulkString(sbs_reply);
+    }
   }
 }
 

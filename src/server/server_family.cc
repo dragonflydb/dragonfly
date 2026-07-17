@@ -1060,15 +1060,19 @@ void SlowLogGet(facade::ParsedArgs args, std::string_view sub_cmd, util::Proacto
       if (arg.second > 0) {
         auto suffix = absl::StrCat("... (", arg.second, " more bytes)");
         auto cmd_arg = arg.first.substr(0, kMaximumSlowlogArgLength - suffix.length());
-        rb->SendBulkString(absl::StrCat(cmd_arg, suffix));
+        {
+          std::string sbs_reply = absl::StrCat(cmd_arg, suffix);
+          rb->SendBulkString(sbs_reply);
+        }
       } else {
         rb->SendBulkString(arg.first);
       }
     }
     // if we truncated arguments - add a special string to indicate that.
     if (args.size() < entry.original_length) {
-      rb->SendBulkString(
-          absl::StrCat("... (", entry.original_length - args.size(), " more arguments)"));
+      std::string sbs_reply =
+          absl::StrCat("... (", entry.original_length - args.size(), " more arguments)");
+      rb->SendBulkString(sbs_reply);
     }
 
     rb->SendBulkString(entry.client_ip);
@@ -3707,7 +3711,10 @@ void ServerFamily::Role(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
     for (auto& data : vec) {
       rb->StartArray(3);
       rb->SendBulkString(data.address);
-      rb->SendBulkString(absl::StrCat(data.listening_port));
+      {
+        std::string sbs_reply = absl::StrCat(data.listening_port);
+        rb->SendBulkString(sbs_reply);
+      }
       rb->SendBulkString(data.state);
     }
 
@@ -3717,7 +3724,10 @@ void ServerFamily::Role(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
     auto send_replica_info = [rb](const Replica::Summary& rinfo) {
       rb->SendBulkString(rinfo.host);
-      rb->SendBulkString(absl::StrCat(rinfo.port));
+      {
+        std::string sbs_reply = absl::StrCat(rinfo.port);
+        rb->SendBulkString(sbs_reply);
+      }
       if (rinfo.full_sync_done) {
         rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "online"
                                                                              : "stable_sync");

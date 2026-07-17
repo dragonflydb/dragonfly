@@ -1245,7 +1245,10 @@ void CmdHScan(CmdArgParser parser, CommandContext* cmd_cntx) {
       [[fallthrough]];
     case OpStatus::OK: {
       RedisReplyBuilder::ArrayScope scope{rb, 2};
-      rb->SendBulkString(absl::StrCat(cursor));
+      {
+        std::string sbs_reply = absl::StrCat(cursor);
+        rb->SendBulkString(sbs_reply);
+      }
       rb->SendBulkStrArr(*result);
       break;
     }

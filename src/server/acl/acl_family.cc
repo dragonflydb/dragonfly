@@ -219,7 +219,10 @@ void AclFamily::DelUser(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void AclFamily::WhoAmI(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->SendBulkString(absl::StrCat("User is ", cmd_cntx->server_conn_cntx()->authed_username));
+  {
+    std::string sbs_reply = absl::StrCat("User is ", cmd_cntx->server_conn_cntx()->authed_username);
+    rb->SendBulkString(sbs_reply);
+  }
 }
 
 string AclFamily::RegistryToString() const {
