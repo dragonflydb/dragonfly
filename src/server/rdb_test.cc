@@ -1754,6 +1754,7 @@ TEST_F(RdbTest, SplitCuckoo) {
   std::string first;
   std::string last_blob;
 
+  // split the blob of the last filter into three chunks.
   constexpr size_t kFirstSplit = 17;
   constexpr size_t kSecondSplit = 13;
 
@@ -1771,7 +1772,6 @@ TEST_F(RdbTest, SplitCuckoo) {
     ASSERT_GT(last_blob.size(), kFirstSplit + kSecondSplit);
 
     first.push_back(RDB_TYPE_CUCKOO);
-
     // brand new key whose shape is copied off kKeyCfSrc
     AppendString(&first, "cf_loaded");
     AppendLen(&first, cf->SlotsPerBucket());

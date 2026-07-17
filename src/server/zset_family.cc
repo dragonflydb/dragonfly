@@ -839,15 +839,6 @@ ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, A
       SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, (*res)->second);
     }
   }
-  // Clamp NaN scores (from inf + -inf cancellation across sources) to 0,
-  // matching Redis semantics. Must happen once, after all sources for each
-  // member have been fully aggregated — not per pairwise merge — otherwise
-  // an intermediate 0 can mask a later inf contribution.
-  for (auto& [member, score] : result) {
-    if (std::isnan(score)) {
-      score = 0;
-    }
-  }
 
   return result;
 }
@@ -1608,18 +1599,6 @@ void ZBooleanOperation(CmdArgParser parser, string_view cmd, bool is_union, bool
 
     if (result.empty() && !is_union)  // intersection only shrinks
       break;
-  }
-  // Clamp any NaN scores (e.g. from inf + -inf cancelling across shards or
-  // within a shard) to 0, matching Redis SUM aggregate semantics. Must happen
-  // once here, after all shard-local and cross-shard merges are complete —
-  // clamping earlier can mask a later inf contribution and produce a wrong
-  // non-NaN result instead of the correct 0.
-  if (op_args->agg_type == AggType::SUM) {
-    for (auto& [member, score] : result) {
-      if (std::isnan(score)) {
-        score = 0;
-      }
-    }
   }
 
   // Copy to vector for sorting

@@ -647,6 +647,7 @@ TEST_F(GenericFamilyTest, Stick) {
   Run({"append", "a", "-value"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
 
+  // check rename persists stickyness
   Run({"rename", "a", "k"});
   ASSERT_THAT(Run({"stick", "k"}), IntArg(0));
 
