@@ -102,8 +102,8 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   }
 
   stats_.stashed_entries_cnt += list.size();
+  stashed_bins_.InsertNew(segment.offset, StashInfo{uint8_t(list.size()), bytes});
 
-  stashed_bins_.Insert(segment.offset, StashInfo{uint8_t(list.size()), bytes});
   return list;
 }
 
@@ -166,7 +166,7 @@ bool SmallBins::IsFragmented(size_t offset) {
 }
 
 ::dfly::detail::DashCursor SmallBins::TraverseFragmented(::dfly::detail::DashCursor cursor,
-                                                         std::function<void(size_t)> f) {
+                                                         absl::FunctionRef<void(size_t)> f) {
   return stashed_bins_.Traverse(cursor, [f](Dash::iterator it) {
     if (it->second.bytes < kPageSize / 2)
       f(it->first);

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/functional/function_ref.h>
 
 #include <optional>
 #include <string>
@@ -90,7 +91,7 @@ class SmallBins {
 
   // Traverse stashed bins and run callback on those that are fragmented
   ::dfly::detail::DashCursor TraverseFragmented(::dfly::detail::DashCursor,
-                                                std::function<void(size_t /* offset */)>);
+                                                absl::FunctionRef<void(size_t /* offset */)>);
 
   Stats GetStats() const;
 

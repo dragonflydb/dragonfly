@@ -732,10 +732,10 @@ void TieredStorage::RunDefragScan() {
 
   uint64_t cycles = 0;
   do {
-    if (UploadBudget() < 0)
+    if (UploadBudget() <= 0)
       break;
 
-    if (op_manager_->stats_.pending_defrags > kMaxPendingDefrags)
+    if (op_manager_->stats_.pending_defrags >= kMaxPendingDefrags)
       break;
 
     defrag_cursor_ = bins_->TraverseFragmented(defrag_cursor_, cb);
