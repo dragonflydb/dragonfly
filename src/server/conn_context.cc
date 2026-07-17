@@ -91,6 +91,10 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
     has_main_or_memcache_listener = owner->IsMainOrMemcache();
   }
 
+  SetAclCredentials(std::move(cred));
+}
+
+void ConnectionContext::SetAclCredentials(acl::UserCredentials cred) {
   keys = std::move(cred.keys);
   pub_sub = std::move(cred.pub_sub);
   if (cred.acl_commands.empty()) {

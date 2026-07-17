@@ -183,7 +183,12 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
         sock_.reset(mythread->CreateSocket());
       }
     } else {
-      return cntx->GetError();
+      // The stored error may convert to a zero error_code: Cancel() records no error at all, and
+      // an error reported as a plain string has no code either. This branch is a failure (no
+      // socket was created), so it must never return a zero code - callers interpret that as
+      // "socket connected" and would proceed to use a null or stale sock_.
+      std::error_code ec = cntx->GetError();
+      return ec ? ec : make_error_code(errc::operation_canceled);
     }
   }
 
@@ -252,9 +257,14 @@ void ProtocolClient::ShutdownSocket() {
   return ShutdownSocketImpl(false);
 }
 
+std::string ProtocolClient::SockInfo() const {
+  auto* sock = Sock();
+  return GetSocketInfo(sock ? sock->native_handle() : -1);
+}
+
 void ProtocolClient::DefaultErrorHandler(const GenericError& err) {
   LOG(WARNING) << "Socket error: " << err.Format() << " in " << server_context_.Description()
-               << ", socket info: " << GetSocketInfo(sock_ ? sock_->native_handle() : -1);
+               << ", socket info: " << SockInfo();
   ShutdownSocket();
 }
 

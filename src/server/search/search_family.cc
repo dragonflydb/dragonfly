@@ -1307,12 +1307,16 @@ void SearchReply(const SearchParams& params,
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   const size_t items_per_field =
       (reply_with_ids_only ? 1 : 2) + params.with_sortkeys + params.with_scores;
-  RedisReplyBuilder::ArrayScope scope{rb, limit * items_per_field + 1};
+  // Batch the reply so temporary sortkeys are copied into the batching buffer instead of referenced
+  // past their lifetime — a >kMaxInlineSize bulk string enqueued by reference under a reply scope
+  // is copied only when the scope ends, after the "$" + s temporary is gone (use-after-free).
+  SinkReplyBuilder::ReplyAggregator agg{rb};
+  rb->StartArray(limit * items_per_field + 1);
 
   Overloaded sortable_value_sender{
       [rb](monostate) { rb->SendNull(); },
       [rb](double d) { rb->SendBulkString(absl::StrCat("#", d)); },
-      [rb](const string& s) { rb->SendBulkString("$" + s); },
+      [rb](const string& s) { rb->SendBulkString(absl::StrCat("$", s)); },
   };
 
   rb->SendLong(total_hits);

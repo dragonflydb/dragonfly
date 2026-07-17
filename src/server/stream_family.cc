@@ -2715,7 +2715,7 @@ struct StreamReplies {
   }
 
   void SendRecord(const Record& record) const {
-    RedisReplyBuilder::ArrayScope scope{rb, 2};
+    rb->StartArray(2);
     rb->SendBulkString(StreamIdRepr(record.id));
     rb->StartArray(record.kv_arr.size() * 2);
     for (const auto& k_v : record.kv_arr) {
@@ -2725,13 +2725,13 @@ struct StreamReplies {
   }
 
   void SendIDs(absl::Span<const streamID> ids) const {
-    RedisReplyBuilder::ArrayScope scope{rb, ids.size()};
+    rb->StartArray(ids.size());
     for (auto id : ids)
       rb->SendBulkString(StreamIdRepr(id));
   }
 
   void SendRecords(absl::Span<const Record> records) const {
-    RedisReplyBuilder::ArrayScope scope{rb, records.size()};
+    rb->StartArray(records.size());
     for (const auto& record : records)
       SendRecord(record);
   }
@@ -3253,7 +3253,7 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
 
   // Send all results back
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  SinkReplyBuilder::ReplyScope scope(rb);
+  SinkReplyBuilder::ReplyAggregator agg(rb);
   if (opts->read_group) {
     if (rb->IsResp3()) {
       rb->StartCollection(opts->stream_ids.size(), CollectionType::MAP);
@@ -3596,8 +3596,6 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       if (result) {
         rb->StartArray(result->size());
         for (const auto& ginfo : *result) {
-          string last_id = StreamIdRepr(ginfo.last_id);
-
           rb->StartCollection(6, CollectionType::MAP);
           rb->SendBulkString("name");
           rb->SendBulkString(ginfo.name);
@@ -3606,7 +3604,7 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
           rb->SendBulkString("pending");
           rb->SendLong(ginfo.pending_size);
           rb->SendBulkString("last-delivered-id");
-          rb->SendBulkString(last_id);
+          rb->SendBulkString(StreamIdRepr(ginfo.last_id));
           rb->SendBulkString("entries-read");
           if (ginfo.entries_read != SCG_INVALID_ENTRIES_READ) {
             rb->SendLong(ginfo.entries_read);
@@ -3857,7 +3855,8 @@ void CmdXPending(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
   const PendingResult& result = op_result.value();
 
-  SinkReplyBuilder::ReplyScope scope{rb};
+  // Batch the reply: temporary ids are copied into the batching buffer instead of referenced.
+  SinkReplyBuilder::ReplyAggregator agg{rb};
   if (std::holds_alternative<PendingReducedResult>(result)) {
     const auto& res = std::get<PendingReducedResult>(result);
     rb->StartArray(4);
@@ -4153,6 +4152,8 @@ void CmdXAutoClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   const ClaimInfo& cresult = result.value();
 
+  // Batch the reply: temporary ids are copied into the batching buffer instead of referenced.
+  SinkReplyBuilder::ReplyAggregator agg{rb};
   rb->StartArray(3);
   rb->SendBulkString(StreamIdRepr(cresult.end_id));
   StreamReplies{rb}.SendClaimInfo(cresult);

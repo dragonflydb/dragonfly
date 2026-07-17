@@ -317,6 +317,17 @@ TEST_F(ServerFamilyTest, ClientListRejected) {
   }
 }
 
+TEST_F(ServerFamilyTest, ClientInfoSingleDbField) {
+  const string info = Run({"CLIENT", "INFO"}).GetString();
+  // Regression: "db=" used to be emitted twice (FormatClientInfo + a redundant append).
+  size_t count = 0;
+  for (size_t pos = info.find(" db="); pos != string::npos; pos = info.find(" db=", pos + 1))
+    ++count;
+  EXPECT_EQ(count, 1u) << info;
+  // CLIENT INFO returns a single line with no trailing newline (unlike CLIENT LIST).
+  EXPECT_FALSE(absl::EndsWith(info, "\r\n")) << info;
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
   // case 1. can't use the feature for resp2
   auto resp = Run({"CLIENT", "TRACKING", "ON"});

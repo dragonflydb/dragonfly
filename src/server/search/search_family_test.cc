@@ -5492,6 +5492,18 @@ TEST_F(SearchFamilyTest, WithSortKeysOption) {
                    IsMap("last_name", "jones", "first_name", "alice", "age", "35")));
 }
 
+TEST_F(SearchFamilyTest, WithSortKeysLongValue) {
+  // Regression: a WITHSORTKEYS string sortkey whose "$"-prefixed form exceeds kMaxInlineSize was
+  // garbled when read back — the "$" + s temporary was enqueued into the reply by reference past
+  // its lifetime (use-after-free). Derive the length from the constant so the test keeps exercising
+  // the non-inlined (WriteRef) path even if kMaxInlineSize changes.
+  EXPECT_EQ(Run({"ft.create", "idx", "SCHEMA", "txt", "TEXT", "SORTABLE"}), "OK");
+  const string long_val(RedisReplyBuilder::kMaxInlineSize + 8, 'a');
+  Run({"HSET", "doc1", "txt", long_val});
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "txt", "WITHSORTKEYS", "NOCONTENT"}),
+              IsArray(IntArg(1), "doc1", "$" + long_val));
+}
+
 // GEO index tests for FT.SEARCH with HASH and JSON documents
 
 TEST_F(SearchFamilyTest, GeoSearchHash) {

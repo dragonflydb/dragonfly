@@ -6,8 +6,6 @@
 
 #include <absl/flags/flag.h>
 
-#include <atomic>
-
 #include "absl/cleanup/cleanup.h"
 #include "base/logging.h"
 #include "cluster_family.h"
@@ -38,7 +36,11 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
                      OutgoingMigration* om)
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), &exec_st_) {
-    exec_st_.SwitchErrorHandler([om](auto ge) { om->Finish(std::move(ge)); });
+    // Flows only report errors; teardown is owned by the migration-level handler
+    // (OutgoingMigration::OnAttemptError), which ResetError() joins at every attempt boundary.
+    // A forwarder that fires late (after the boundary) injects an error into the new attempt
+    // and costs one spurious retry - it cannot touch flows or migration state.
+    exec_st_.SwitchErrorHandler([om](auto ge) { om->exec_st_.ReportError(std::move(ge)); });
   }
 
   ~SliceSlotMigration() {
@@ -59,8 +61,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
       LOG(WARNING) << "Couldn't connect to source node_id " << node_id << " shard_id " << shard_id
-                   << ": " << ec.message()
-                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                   << ": " << ec.message() << ", socket state: " + SockInfo();
       exec_st_.ReportError(GenericError(ec, "Couldn't connect to source."));
       return;
     }
@@ -154,57 +155,74 @@ void OutgoingMigration::OnAllShards(std::function<void(UniqueSliceSlotMigration&
 }
 
 void OutgoingMigration::Finish(const GenericError& error) {
-  auto next_state = MigrationState::C_FINISHED;
+  // Only terminal transitions happen here: C_FINISHED, or C_FATAL for an OOM reported by the
+  // incoming node. Retryable errors never reach Finish() - they are reported on exec_st_ and
+  // handled by OnAttemptError().
+  const auto next_state =
+      error == errc::not_enough_memory ? MigrationState::C_FATAL : MigrationState::C_FINISHED;
+
   if (error) {
-    // If OOM error move to FATAL, non-recoverable  state
-    if (error == errc::not_enough_memory) {
-      next_state = MigrationState::C_FATAL;
-    } else {
-      next_state = MigrationState::C_ERROR;
-      exec_st_.ReportError(error);
-    }
     LOG(WARNING) << "Finish outgoing migration for " << cf_->MyID() << ": "
                  << migration_info_.node_info.id << " with error: " << error.Format();
-
   } else {
     LOG(INFO) << "Finish outgoing migration for " << cf_->MyID() << ": "
               << migration_info_.node_info.id;
   }
 
-  bool should_cancel_flows = false;
-  absl::Cleanup on_exit([this]() { ShutdownSocket(); });
-
   {
     util::fb2::LockGuard lk(state_mu_);
-    switch (state_) {
-      case MigrationState::C_FATAL:
-      case MigrationState::C_FINISHED:
-        return;  // Already finished, nothing else to do
-
-      case MigrationState::C_CONNECTING:
-        should_cancel_flows = false;
-        break;
-
-      case MigrationState::C_SYNC:
-      case MigrationState::C_ERROR:
-        should_cancel_flows = true;
-        break;
+    if (state_ == MigrationState::C_FINISHED || state_ == MigrationState::C_FATAL) {
+      return;  // Already finished, nothing else to do
     }
     state_ = next_state;
   }
 
   if (next_state == MigrationState::C_FATAL) {
-    // Fatal state stop any further processing of migration so we need to update error here
+    // Fatal state stops any further processing of migration so we need to update error here
     SetLastError(error);
   }
 
-  if (should_cancel_flows) {
-    OnAllShards([](auto& migration) {
-      CHECK(migration != nullptr);
+  // Tear down whatever flows exist. This may run concurrently with SyncFb building an attempt
+  // and brush flows that are still setting up - that is intended: the whole migration is
+  // terminating, the state write above latches ChangeState() so SyncFb cannot start another
+  // attempt, and a flow cancelled during setup fails cleanly (ConnectAndAuth() reports a real
+  // error on a cancelled context). Flows created after this cancel die unstarted: SyncFb's next
+  // ChangeState() fails before PrepareFlow()/PrepareSync(), so nothing connects or registers,
+  // and ~OutgoingMigration reaps the objects.
+  OnAllShards([](auto& migration) {
+    if (migration) {
       migration->Cancel();
-    });
-    exec_st_.JoinErrorHandler();
+    }
+  });
+
+  ShutdownSocket();
+}
+
+void OutgoingMigration::OnAttemptError(const GenericError& error) {
+  LOG(WARNING) << "Outgoing migration attempt error for " << cf_->MyID() << ": "
+               << migration_info_.node_info.id << ": " << error.Format();
+
+  {
+    // Check-and-write in one critical section: never downgrade a terminal state. If Finish()
+    // won the race, the migration is over and there is nothing to tear down that Finish()'s own
+    // cancel does not already cover.
+    util::fb2::LockGuard lk(state_mu_);
+    if (state_ == MigrationState::C_FINISHED || state_ == MigrationState::C_FATAL) {
+      return;
+    }
+    state_ = MigrationState::C_ERROR;
   }
+
+  // Cancel this attempt's flows and shut down the control socket so SyncFb's blocking IO
+  // returns and the retry loop can run. The slots are guaranteed to hold this attempt's flows:
+  // ResetError() joins this handler before the next attempt replaces them.
+  OnAllShards([](auto& migration) {
+    if (migration) {
+      migration->Cancel();
+    }
+  });
+
+  ShutdownSocket();
 }
 
 MigrationState OutgoingMigration::GetState() const {
@@ -216,6 +234,11 @@ void OutgoingMigration::SyncFb() {
   VLOG(1) << "Starting outgoing migration fiber for migration " << migration_info_.ToString();
 
   const absl::Time start_time = absl::Now();
+
+  // Arm the attempt teardown handler. From here on, any error reported on exec_st_ - whether
+  // forwarded by a flow or reported by this fiber's own IO failures - runs OnAttemptError()
+  // exactly once per attempt; ResetError() joins it and re-arms at every attempt boundary.
+  exec_st_.Reset([this](const GenericError& ge) { OnAttemptError(ge); });
 
   // we retry starting migration until "cancel" is happened
   while (GetState() != MigrationState::C_FINISHED) {
@@ -232,8 +255,7 @@ void OutgoingMigration::SyncFb() {
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
       LOG(WARNING) << "Can't connect to target node " << server().Description()
-                   << " for migration: " << ec.message()
-                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                   << " for migration: " << ec.message() << ", socket state: " + SockInfo();
       exec_st_.ReportError(GenericError(ec, "Couldn't connect to source."));
       continue;
     }
@@ -247,8 +269,7 @@ void OutgoingMigration::SyncFb() {
 
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
       LOG(WARNING) << "Could not send INIT command to " << server().Description()
-                   << " for migration: " << ec.message()
-                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                   << " for migration: " << ec.message() << ", socket state: " + SockInfo();
       exec_st_.ReportError(GenericError(ec, "Could not send INIT command."));
       continue;
     }
@@ -278,6 +299,13 @@ void OutgoingMigration::SyncFb() {
     }
 
     OnAllShards([this](auto& migration) {
+      // A flow may still be registered if its teardown raced this retry loop (e.g. Finish()
+      // terminating the migration concurrently). Cancel it here, sequenced before its
+      // destruction on the same shard task, so we never destroy a streamer that is still
+      // registered.
+      if (migration) {
+        migration->Cancel();
+      }
       DbSlice& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
       journal::StartInThread();
       migration = std::make_unique<SliceSlotMigration>(&db_slice, server(),
@@ -342,7 +370,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
       LOG(WARNING) << "Couldn't connect to " << cf_->MyID() << " : " << migration_info_.node_info.id
                    << " attempt " << attempt << ": " << ec.message()
-                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                   << ", socket state: " + SockInfo();
       return false;
     }
   }
@@ -380,7 +408,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
 
   if (auto err = SendCommand(cmd); err) {
     LOG(WARNING) << "Error during sending DFLYMIGRATE ACK to " << server().Description() << ": "
-                 << err.message() << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                 << err.message() << ", socket state: " + SockInfo();
     return false;
   }
 
@@ -397,8 +425,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
 
     if (auto resp = ReadRespReply(ack_timeout_ms - passed_ms); !resp) {
       LOG(WARNING) << "Error reading response to ACK command from " << server().Description()
-                   << ": " << resp.error()
-                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                   << ": " << resp.error() << ", socket state: " + SockInfo();
       return false;
     }
 
