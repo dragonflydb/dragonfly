@@ -3421,11 +3421,13 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
     return cmd_cntx->SendError("timeout is negative");
   }
 
+  // The LockGuard must precede the master check to ensure atomicity for the subsequent repl_ptr
+  // check
+  util::fb2::LockGuard lk(replicaof_mu_);
+
   // We return OK, to support idempotency semantics.
   if (IsMaster())
     return builder->SendOk();
-
-  util::fb2::LockGuard lk(replicaof_mu_);
 
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
