@@ -45,8 +45,8 @@ class BlockingControllerTest : public Test {
 };
 
 void BlockingControllerTest::SetUp() {
-  const char kKeySid0[] = "d";
-  const char kKeySid2[] = "m";
+  const char kKeySid0[] = "m";
+  const char kKeySid2[] = "d";
   pp_.reset(fb2::Pool::Epoll(kNumThreads));
   pp_->Run();
   pp_->AwaitBrief([](unsigned index, ProactorBase* p) {

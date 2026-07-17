@@ -40,12 +40,12 @@ namespace {
 constexpr unsigned kPoolThreadCount = 4;
 
 const char kKey1[] = "x";
-const char kKey2[] = "b";
+const char kKey2[] = "u";
 const char kKey3[] = "c";
-const char kKey4[] = "m";
+const char kKey4[] = "j";
 
 const char kKeySid0[] = "a";
-const char kKeySid1[] = "b";
+const char kKeySid1[] = "i";
 const char kKeySid2[] = "c";
 
 }  // namespace
@@ -521,21 +521,21 @@ TEST_F(MultiTest, MultiCommandsWithBonusKeys) {
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_multi_exec_squash, true);
 
-  EXPECT_EQ(Shard("a", shard_set->size()), Shard("d", shard_set->size()));
-  EXPECT_EQ(Shard("d", shard_set->size()), Shard("e", shard_set->size()));
+  EXPECT_EQ(Shard("a", shard_set->size()), Shard("f", shard_set->size()));
+  EXPECT_EQ(Shard("f", shard_set->size()), Shard("h", shard_set->size()));
 
   // Check bonus keys are correctly processed with squashing
   Run({"multi"});
   Run({"zadd", "a", "1", "a", "2", "b"});
-  Run({"zadd", "d", "2", "b", "3", "c"});
-  Run({"zinterstore", "e", "2", "a", "d"});
+  Run({"zadd", "f", "2", "b", "3", "c"});
+  Run({"zinterstore", "h", "2", "a", "f"});
   auto resp = Run({"exec"});
   EXPECT_THAT(resp.GetVec()[2], IntArg(1));
-  EXPECT_THAT(Run({"zcard", "e"}), IntArg(1));
+  EXPECT_THAT(Run({"zcard", "h"}), IntArg(1));
 
   // Check squashing correctly pre-validates commands
   Run({"multi"});
-  Run({"zinterstore", "e", "2", "a", "d", "z one extra"});
+  Run({"zinterstore", "h", "2", "a", "f", "z one extra"});
   resp = Run({"exec"});
   EXPECT_THAT(resp, RespElementsAre(ErrArg("syntax error")));
 }
@@ -1379,16 +1379,16 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
     LOG(INFO) << key << ": shard " << Shard(key, shard_set->size());
   }
 
-  Run({"mget", "a", "d", "e", "l", "n", "p"});
+  Run({"mget", "a", "f", "g", "h", "l", "m"});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
 
   auto fb1 = pp_->at(1)->LaunchFiber(Launch::post, [&] {
     // Runs multi on shard0 1000 times.
     for (unsigned j = 0; j < 1000; ++j) {
       Run({"multi"});
+      Run({"incrby", "h", "1"});
       Run({"incrby", "l", "1"});
-      Run({"incrby", "n", "1"});
-      Run({"incrby", "p", "1"});
+      Run({"incrby", "m", "1"});
       Run({"exec"});
     }
   });
@@ -1398,8 +1398,8 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
     for (unsigned j = 0; j < 1000; ++j) {
       Run({"multi"});
       Run({"incrby", "a", "1"});
-      Run({"incrby", "d", "1"});
-      Run({"incrby", "e", "1"});
+      Run({"incrby", "f", "1"});
+      Run({"incrby", "g", "1"});
       Run({"exec"});
     }
   });
@@ -1422,7 +1422,7 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
 
   bool success = pp_->at(0)->Await([&]() -> bool {
     for (unsigned j = 0; j < 1000; ++j) {
-      auto resp = Run({"mget", "a", "d", "e", "l", "n", "p"});
+      auto resp = Run({"mget", "a", "f", "g", "h", "l", "m"});
       const RespExpr::Vec& arr = resp.GetVec();
       CHECK_EQ(6u, arr.size());
 

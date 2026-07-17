@@ -28,6 +28,14 @@ using namespace std;
 using namespace util;
 using absl::StrCat;
 
+constexpr char kShard0Key[] = "z";  // shard 0
+constexpr char kShard1Key[] = "x";  // shard 1
+
+// Optional alternate keys if a test needs additional keys.
+constexpr char kShard0AltKey[] = "a";   // shard 0
+constexpr char kShard1AltKey[] = "b";   // shard 1
+constexpr char kShard1AltKey2[] = "d";  // shard 1
+
 namespace dfly {
 
 class GenericFamilyTest : public BaseFamilyTest {};
@@ -487,27 +495,28 @@ TEST_F(GenericFamilyTest, Touch) {
 
 TEST_F(GenericFamilyTest, Rename) {
   RespExpr resp;
-  string b_val(32, 'b');
-  string x_val(32, 'x');
+  string dest_val(32, 'z');
+  string src_val(32, 'x');
 
-  resp = Run({"mset", "x", x_val, "b", b_val});
+  resp = Run({"mset", kShard1Key, src_val, kShard0Key, dest_val});
   ASSERT_EQ(resp, "OK");
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
-  resp = Run({"rename", "z", "b"});
+  resp = Run({"rename", kShard0AltKey, kShard0Key});
   ASSERT_THAT(resp, ErrArg("no such key"));
 
-  resp = Run({"rename", "x", "b"});
+  resp = Run({"rename", kShard1Key, kShard0Key});
   ASSERT_EQ(resp, "OK");
 
-  int64_t val = CheckedInt({"get", "x"});
-  ASSERT_EQ(kint64min, val);  // does not exist
+  int64_t val = CheckedInt({"get", kShard1Key});
+  ASSERT_EQ(kint64min, val);
 
-  ASSERT_EQ(x_val, Run({"get", "b"}));  // swapped.
+  ASSERT_EQ(src_val, Run({"get", kShard0Key}));
 
-  EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 1);
+  EXPECT_EQ(CheckedInt({"exists", kShard1Key, kShard0Key}), 1);
 
-  const char* keys[2] = {"b", "x"};
+  const char* keys[2] = {kShard0Key, kShard1Key};
+
   auto ren_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 200; ++i) {
       int j = i % 2;
@@ -518,8 +527,7 @@ TEST_F(GenericFamilyTest, Rename) {
 
   auto exist_fb = pp_->at(2)->LaunchFiber([&] {
     for (size_t i = 0; i < 300; ++i) {
-      int64_t resp = CheckedInt({"exists", "x", "b"});
-      ASSERT_EQ(1, resp);
+      ASSERT_EQ(1, CheckedInt({"exists", kShard1Key, kShard0Key}));
     }
   });
 
@@ -528,13 +536,12 @@ TEST_F(GenericFamilyTest, Rename) {
 }
 
 TEST_F(GenericFamilyTest, RenameList) {
-  const char kSourceKey[] = "c";
-  const char kDestKeySid0[] = "a";
-  const char kDestKeySid2[] = "h";
-  const char kDestKeySid2Alt[] = "s";
+  const char* kSourceKey = kShard1AltKey;  // b (shard 1)
 
-  for (string_view dest : {kDestKeySid0, kDestKeySid2, kDestKeySid2Alt}) {
+  for (string_view dest :
+       {string_view{kShard0AltKey}, string_view{kShard1Key}, string_view{kShard1AltKey2}}) {
     EXPECT_EQ(1, CheckedInt({"lpush", kSourceKey, "elem"}));
+
     Metrics metrics = GetMetrics();
 
     size_t list_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
@@ -544,7 +551,8 @@ TEST_F(GenericFamilyTest, RenameList) {
 
     auto resp = Run({"rename", kSourceKey, dest});
     ASSERT_EQ(resp, "OK");
-    if (dest == kDestKeySid0) {
+
+    if (dest == string_view{kShard0AltKey}) {
       ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
     } else {
       ASSERT_EQ(1, last_cmd_dbg_info_.shards_count);
@@ -560,7 +568,6 @@ TEST_F(GenericFamilyTest, RenameList) {
     EXPECT_EQ(1, CheckedInt({"del", dest}));
   }
 }
-
 TEST_F(GenericFamilyTest, RenameBinary) {
   const char kKey1[] = "\x01\x02\x03\x04";
   const char kKey2[] = "\x05\x06\x07\x08";
@@ -618,39 +625,38 @@ TEST_F(GenericFamilyTest, RenameCmsNanCrash) {
 }
 
 TEST_F(GenericFamilyTest, Stick) {
-  // check stick returns zero on non-existent keys
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
 
   for (auto key : {"a", "b", "c", "d"}) {
     Run({"set", key, "."});
   }
 
-  // check stick is applied only once
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(2));
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
   ASSERT_THAT(Run({"stick", "a", "c"}), IntArg(1));
   ASSERT_THAT(Run({"stick", "b", "d"}), IntArg(1));
   ASSERT_THAT(Run({"stick", "c", "d"}), IntArg(0));
 
-  // check stickyness persists during writes
   Run({"set", "a", "new"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
+
   Run({"append", "a", "-value"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
 
-  // check rename persists stickyness
   Run({"rename", "a", "k"});
   ASSERT_THAT(Run({"stick", "k"}), IntArg(0));
 
-  // check rename persists stickyness on multiple shards
-  Run({"del", "b"});
-  string b_val(32, 'b');
-  string x_val(32, 'x');
-  Run({"mset", "b", b_val, "x", x_val});
+  Run({"del", kShard0Key});
+
+  string dest_val(32, 'z');
+  string src_val(32, 'x');
+
+  Run({"mset", kShard0Key, dest_val, kShard1Key, src_val});
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
-  Run({"stick", "x"});
-  Run({"rename", "x", "b"});
-  ASSERT_THAT(Run({"stick", "b"}), IntArg(0));
+
+  Run({"stick", kShard1Key});
+  Run({"rename", kShard1Key, kShard0Key});
+  ASSERT_THAT(Run({"stick", kShard0Key}), IntArg(0));
 }
 
 TEST_F(GenericFamilyTest, Move) {
@@ -1789,28 +1795,29 @@ TEST_F(GenericFamilyTest, Unlink) {
 
 TEST_F(GenericFamilyTest, Copy) {
   RespExpr resp;
-  string b_val(32, 'b');
-  string x_val(32, 'x');
+  string dest_val(32, 'z');
+  string src_val(32, 'x');
 
-  resp = Run({"mset", "x", x_val, "b", b_val});
+  resp = Run({"mset", kShard1Key, src_val, kShard0Key, dest_val});
   ASSERT_EQ(resp, "OK");
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
-  resp = Run({"COPY", "z", "b"});
+  resp = Run({"COPY", kShard0AltKey, kShard0Key});
   ASSERT_THAT(resp, IntArg(0));
 
-  resp = Run({"COPY", "b", "c"});
+  resp = Run({"COPY", kShard0Key, "c"});
   ASSERT_THAT(resp, IntArg(1));
-  ASSERT_EQ(b_val, Run({"get", "c"}));
+  ASSERT_EQ(dest_val, Run({"get", "c"}));
 
-  resp = Run({"COPY", "x", "b", "REPLACE"});
+  resp = Run({"COPY", kShard1Key, kShard0Key, "REPLACE"});
   ASSERT_THAT(resp, IntArg(1));
 
-  ASSERT_EQ(x_val, Run({"get", "x"}));
-  ASSERT_EQ(x_val, Run({"get", "b"}));
-  EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 2);
+  ASSERT_EQ(src_val, Run({"get", kShard1Key}));
+  ASSERT_EQ(src_val, Run({"get", kShard0Key}));
+  EXPECT_EQ(CheckedInt({"exists", kShard1Key, kShard0Key}), 2);
 
-  const char* keys[2] = {"b", "x"};
+  const char* keys[2] = {kShard0Key, kShard1Key};
+
   auto ren_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 200; ++i) {
       int j = i % 2;
@@ -1821,8 +1828,7 @@ TEST_F(GenericFamilyTest, Copy) {
 
   auto exist_fb = pp_->at(2)->LaunchFiber([&] {
     for (size_t i = 0; i < 300; ++i) {
-      int64_t resp = CheckedInt({"exists", "x", "b"});
-      ASSERT_EQ(2, resp);
+      ASSERT_EQ(2, CheckedInt({"exists", kShard1Key, kShard0Key}));
     }
   });
 
@@ -1831,13 +1837,14 @@ TEST_F(GenericFamilyTest, Copy) {
 }
 
 TEST_F(GenericFamilyTest, CopyNonString) {
-  EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
-  auto resp = Run({"COPY", "x", "b"});
+  EXPECT_EQ(1, CheckedInt({"lpush", kShard1Key, "elem"}));
+
+  auto resp = Run({"COPY", kShard1Key, kShard0Key});
   ASSERT_THAT(resp, IntArg(1));
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
-  EXPECT_EQ(1, CheckedInt({"del", "x"}));
-  EXPECT_EQ(1, CheckedInt({"del", "b"}));
+  EXPECT_EQ(1, CheckedInt({"del", kShard1Key}));
+  EXPECT_EQ(1, CheckedInt({"del", kShard0Key}));
 }
 
 TEST_F(GenericFamilyTest, CopyBinary) {

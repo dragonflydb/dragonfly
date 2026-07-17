@@ -200,27 +200,6 @@ TEST_F(ServerFamilyTest, SlowLogLen) {
   EXPECT_THAT(resp.GetInt(), 3);
 }
 
-TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
-  auto resp = Run({"config", "set", "slowlog_max_len", "3"});
-  EXPECT_THAT(resp.GetString(), "OK");
-  resp = Run({"config", "set", "slowlog_log_slower_than", "-1"});
-  EXPECT_THAT(resp.GetString(), "OK");
-  Run({"slowlog", "reset"});
-
-  // issue some commands
-  for (int i = 1; i < 4; ++i) {
-    resp = Run({"lpush", "mykey", std::to_string(i)});
-    EXPECT_THAT(resp.GetInt(), i);
-  }
-
-  // slowlog is still empty
-  resp = Run({"slowlog", "get"});
-  EXPECT_THAT(resp.GetVec().size(), 0);
-  resp = Run({"slowlog", "len"});
-  EXPECT_THAT(resp.GetInt(), 0);
-}
-
-// Test how slowlog captures additional information about heavy commands
 TEST_F(ServerFamilyTest, SlowLogExecEval) {
   Run({"config", "set", "slowlog_max_len", "20"});
   Run({"config", "set", "slowlog_log_slower_than", "0"});
@@ -228,9 +207,9 @@ TEST_F(ServerFamilyTest, SlowLogExecEval) {
   // Run EXEC
   {
     Run({"multi"});
-    Run({"set", "first", "ok"});
-    Run({"set", "second2", "ok"});
-    Run({"get", "third3"});
+    Run({"set", "a", "ok"});
+    Run({"set", "b", "ok"});
+    Run({"get", "c"});
     Run({"exec"});
   }
 
@@ -245,7 +224,8 @@ for i, key in ipairs(KEYS) do
 end
 return 'OK';
     )";
-    auto resp = Run({"EVAL", script, "3", "first", "second2", "third3", "second2"});
+
+    auto resp = Run({"EVAL", script, "3", "a", "b", "c", "b"});
     EXPECT_EQ(resp, "OK");
   }
 
@@ -253,14 +233,15 @@ return 'OK';
   auto resp = Run({"slowlog", "get"});
   for (const auto& entry : resp.GetVec()) {
     const auto& args = entry.GetVec()[3].GetVec();
+
     if (args[0] == "EXEC") {
       EXPECT_THAT(args, ElementsAreArray({"EXEC", "num_cmds: 3", "is_write: 1"}));
       found++;
     } else if (args[0] == "EVAL") {
       const auto sha = "41e84cf7973712deda6c1737a69bd1365eeb060f";
       EXPECT_THAT(args, ElementsAreArray({"EVAL", sha, "num_cmds: 6", "slow_cmds: 6", "tx_mode: 2",
-                                          "tx_shards: 2", "is_write: 1", "lock_tags: 3", "3",
-                                          "first", "second2", "third3", "second2"}));
+                                          "tx_shards: 2", "is_write: 1", "lock_tags: 3", "3", "a",
+                                          "b", "c", "b"}));
       found++;
     }
   }

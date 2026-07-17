@@ -90,11 +90,9 @@ class RoundRobinSharder {
 
 inline ShardId reduce(uint64_t hash, ShardId shard_num) {
   // Lemire's fast alternative to modulo reduction.
-  // Replaces slow division with multiply+shift, same distribution quality.
-  // See: https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
-  // Fold 64-bit hash to 32-bit first to use cheaper multiply instead of 128-bit.
+  // Use the lower 32 bits of the hash directly.
 
-  uint32_t h32 = static_cast<uint32_t>(hash ^ (hash >> 32));
+  uint32_t h32 = static_cast<uint32_t>(hash);
   return static_cast<ShardId>((uint64_t{h32} * uint64_t{shard_num}) >> 32);
 }
 

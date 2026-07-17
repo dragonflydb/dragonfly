@@ -56,13 +56,13 @@ class ListFamilyTest : public BaseFamilyTest {
   }
 };
 
-const char kKey1[] = "d";
-const char kKey2[] = "b";
-const char kKey3[] = "c";
+const char kKey1[] = "a";  // shard 0
+const char kKey2[] = "i";  // shard 1
+const char kKey3[] = "c";  // shard 2
 
-const char kShard2Key1[] = "x";
-const char kShard2Key2[] = "m";
-const char kShard2Key3[] = "h";
+const char kShard2Key1[] = "x";  // shard 2
+const char kShard2Key2[] = "j";  // shard 2
+const char kShard2Key3[] = "k";  // shard 2
 
 TEST_F(ListFamilyTest, Basic) {
   auto resp = Run({"lpush", kKey1, "1"});
@@ -973,27 +973,30 @@ TEST_F(ListFamilyTest, BlockingTimeoutValidation) {
 // Wake two BLMOVEs on the same shard simultaneously
 TEST_F(ListFamilyTest, BLMoveSimultaneously) {
   EXPECT_EQ(Shard("src1", shard_set->size()),
-            Shard("src10", shard_set->size()));  // wake on same shard
-  EXPECT_NE(Shard("dest110", shard_set->size()),
+            Shard("src100", shard_set->size()));  // wake on same shard
+
+  EXPECT_NE(Shard("dest1", shard_set->size()),
             Shard("src1", shard_set->size()));  // Trigger MoveTwoShards
 
   auto f1 = pp_->at(1)->LaunchFiber([this]() {
-    Run("c1", {"blmove", "src1", "dest110", "LEFT", "RIGHT", "0"});
+    Run("c1", {"blmove", "src1", "dest1", "LEFT", "RIGHT", "0"});
   });
+
   auto f2 = pp_->at(1)->LaunchFiber([this]() {
-    Run("c2", {"blmove", "src10", "dest110", "LEFT", "RIGHT", "0"});
+    Run("c2", {"blmove", "src100", "dest1", "LEFT", "RIGHT", "0"});
   });
 
   ThisFiber::SleepFor(5ms);
+
   Run({"multi"});
   Run({"rpush", "src1", "v1"});
-  Run({"rpush", "src10", "v2"});
+  Run({"rpush", "src100", "v2"});
   Run({"exec"});
 
   f1.Join();
   f2.Join();
 
-  auto res = Run({"lrange", "dest110", "0", "-1"});
+  auto res = Run({"lrange", "dest1", "0", "-1"});
   EXPECT_THAT(res.GetVec(), UnorderedElementsAre("v1", "v2"));
 }
 
