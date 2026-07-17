@@ -1292,7 +1292,7 @@ TEST_F(StreamFamilyTest, XAddMaxSeq) {
 TEST_F(StreamFamilyTest, XRangeIdRoundTrip) {
   // Regression: a stream id whose text form exceeds 32 bytes (kMaxInlineSize) was garbled when
   // read back — it was enqueued into the reply by reference past a temporary's lifetime (UAF).
-  // Covers both id-reply paths: <= 32 bytes (inlined) and > 32 bytes (copied under ScopePause).
+  // Covers both id-reply paths: <= 32 bytes (inlined) and > 32 bytes (copied into the batch).
   const char kShortId[] = "5-5";                                // <= 32: inlined
   const char kLongId[] = "2577343934890-18446744073709551615";  // 34 bytes > 32: copied
   Run({"XADD", "x", kShortId, "f", "v"});

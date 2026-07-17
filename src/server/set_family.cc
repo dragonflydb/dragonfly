@@ -1590,11 +1590,9 @@ void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (result.status() != OpStatus::WRONG_TYPE) {
     auto replier = [cursor, result = std::move(result)](facade::SinkReplyBuilder* builder) {
       auto* rb = static_cast<RedisReplyBuilder*>(builder);
+      std::string cursor_str = absl::StrCat(cursor);
       RedisReplyBuilder::ArrayScope scope{rb, 2};
-      {
-        std::string sbs_reply = absl::StrCat(cursor);
-        rb->SendBulkString(sbs_reply);
-      }
+      rb->SendBulkString(cursor_str);
       rb->SendBulkStrArr(*result);
     };
     cmd_cntx->ReplyWith(std::move(replier));

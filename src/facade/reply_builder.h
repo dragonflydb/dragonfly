@@ -9,6 +9,7 @@
 #include <optional>
 #include <string_view>
 
+#include "base/logging.h"
 #include "common/borrowed_string.h"
 #include "facade/facade_stats.h"
 #include "facade/facade_types.h"
@@ -115,6 +116,10 @@ class SinkReplyBuilder {
     return batched_;
   }
 
+  bool IsScoped() const {
+    return scoped_;
+  }
+
   void CloseConnection();
 
   static const ReplyStats& GetThreadLocalStats() {
@@ -217,13 +222,17 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
   void SendSimpleString(std::string_view str) override;
   virtual void SendBulkString(std::string_view str);  // RESP: Blob String
 
-  // Reject a temporary std::string: under a ReplyScope it would be enqueued by reference and read
-  // after destruction (use-after-free). Materialize into a named std::string first. Constrained to
-  // std::string rvalues, so string literals / string_view / lvalue strings are unaffected (a plain
-  // `std::string&&` overload would make `SendBulkString("literal")` ambiguous).
+  // Forward a temporary std::string to the string_view overload. Sending a temporary under a
+  // ReplyScope would enqueue it by reference and read it after destruction (use-after-free), so the
+  // DCHECK guards that the builder is not scoped (when unscoped the value is copied immediately).
+  // Constrained to std::string rvalues, so string literals / string_view / lvalue strings are
+  // unaffected (a plain `std::string&&` overload would make `SendBulkString("literal")` ambiguous).
   template <typename T>
   requires std::is_same_v<T, std::string>
-  void SendBulkString(T&&) = delete;
+  void SendBulkString(T&& str) {
+    DCHECK(!IsScoped());
+    SendBulkString(std::string_view{str});
+  }
 
   void SendBulkStringBorrowed(const cmn::BorrowedString& bs);
 

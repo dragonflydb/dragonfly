@@ -2583,11 +2583,9 @@ void GenericFamily::Scan(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx->server_conn_cntx());
 
   auto replier = [cursor, keys = std::move(keys)](RedisReplyBuilder* builder) {
+    std::string cursor_str = absl::StrCat(cursor);
     RedisReplyBuilder::ArrayScope scope{builder, 2};
-    {
-      std::string sbs_reply = absl::StrCat(cursor);
-      builder->SendBulkString(sbs_reply);
-    }
+    builder->SendBulkString(cursor_str);
     builder->SendBulkStrArr(keys);
   };
 
@@ -2622,11 +2620,9 @@ void GenericFamily::Rm(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->server_conn_cntx());
 
   auto replier = [cursor, deleted](RedisReplyBuilder* rb) {
+    std::string cursor_str = absl::StrCat(cursor);
     RedisReplyBuilder::ArrayScope scope{rb, 2};
-    {
-      std::string sbs_reply = absl::StrCat(cursor);
-      rb->SendBulkString(sbs_reply);
-    }
+    rb->SendBulkString(cursor_str);
     rb->SendLong(deleted);
   };
   cmd_cntx->ReplyWith(std::move(replier));

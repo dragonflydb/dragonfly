@@ -2804,10 +2804,7 @@ void CmdZScan(CmdArgParser parser, CommandContext* cmd_cntx) {
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     rb->StartArray(2);
-    {
-      std::string sbs_reply = absl::StrCat(cursor);
-      rb->SendBulkString(sbs_reply);
-    }
+    rb->SendBulkString(absl::StrCat(cursor));
     rb->StartArray(result->size());  // Within scan the returned page is of type array.
     for (const auto& k : *result) {
       rb->SendBulkString(k);

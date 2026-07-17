@@ -1506,10 +1506,7 @@ void DebugCmd::Topk(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
     rb->SendLong(total_keys);
     rb->StartArray(items.size());
     for (const auto& k_v : items) {
-      {
-        std::string sbs_reply = StrCat(k_v.second, ":", k_v.first);
-        rb->SendBulkString(sbs_reply);
-      }
+      rb->SendBulkString(StrCat(k_v.second, ":", k_v.first));
     }
     return;
   }
@@ -1707,10 +1704,7 @@ void DebugCmd::Compression(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->SendDouble(ratio);
   if (print_bintable) {
     rb->SendSimpleString("bintable");
-    {
-      std::string sbs_reply = absl::Base64Escape(bintable);
-      rb->SendBulkString(sbs_reply);
-    }
+    rb->SendBulkString(absl::Base64Escape(bintable));
   }
 }
 
