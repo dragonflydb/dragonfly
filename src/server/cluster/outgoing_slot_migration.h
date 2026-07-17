@@ -4,7 +4,6 @@
 #pragma once
 
 #include <atomic>
-#include <optional>
 
 #include "server/cluster/cluster_defs.h"
 #include "server/execution_state.h"
@@ -28,17 +27,11 @@ class OutgoingMigration : private ProtocolClient {
   // start migration process, sends INIT command to the target node
   void Start();
 
-  // if is_error = false mark migration as FINISHED and cancel migration if it's not finished yet
-  // can be called from any thread, but only after Start()
-  // if is_error = true and migration is in progress it will be restarted otherwise nothing happens
-  // attempt_gen ties an error-handler Finish() to the sync attempt whose flow spawned it; a call
-  // with a stale generation (a newer attempt already exists) is a no-op. Callers acting on the
-  // current attempt (success path, OOM, external cancel) pass std::nullopt, which resolves to
-  // the current generation under state_mu_ and is never treated as stale - a nullopt call must
-  // always mean "the current attempt, whatever it is now", or it reintroduces cross-attempt
-  // cancellation.
-  void Finish(const GenericError& error = {}, std::optional<uint64_t> attempt_gen = std::nullopt)
-      ABSL_LOCKS_EXCLUDED(state_mu_);
+  // Terminal transition: marks the migration FINISHED (or FATAL for an OOM error) and tears down
+  // the current flows. Used by the success path, incoming-OOM handling and external cancellation
+  // (config update). Can be called from any thread, but only after Start(). Error-driven teardown
+  // with retry is not done here - it is owned by OnAttemptError(), the exec_st_ error handler.
+  void Finish(const GenericError& error = {}) ABSL_LOCKS_EXCLUDED(state_mu_);
 
   MigrationState GetState() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
@@ -61,7 +54,10 @@ class OutgoingMigration : private ProtocolClient {
   void ResetError() {
     if (exec_st_.IsError()) {
       SetLastError(exec_st_.GetError());
-      exec_st_.Reset(nullptr);
+      // Attempt boundary barrier: Reset() joins the in-flight OnAttemptError() handler before
+      // returning, so no teardown from the previous attempt is still running when SyncFb builds
+      // the next one, and re-arms the handler for the new attempt.
+      exec_st_.Reset([this](const GenericError& ge) { OnAttemptError(ge); });
     }
   }
 
@@ -96,6 +92,12 @@ class OutgoingMigration : private ProtocolClient {
   // return true if migration is finalized even with C_ERROR state
   bool FinalizeMigration(long attempt);
 
+  // Error handler of exec_st_: tears down the failed attempt's flows and moves the state to
+  // C_ERROR so SyncFb retries. Runs as the handler fiber - at most one is in flight, and
+  // ResetError() joins it at the attempt boundary, so it can never overlap the construction of
+  // the next attempt.
+  void OnAttemptError(const GenericError& error) ABSL_LOCKS_EXCLUDED(state_mu_);
+
   bool ChangeState(MigrationState new_state) ABSL_LOCKS_EXCLUDED(state_mu_);
 
   void OnAllShards(std::function<void(UniqueSliceSlotMigration&)>);
@@ -114,16 +116,6 @@ class OutgoingMigration : private ProtocolClient {
 
   mutable util::fb2::Mutex state_mu_;
   MigrationState state_ ABSL_GUARDED_BY(state_mu_) = MigrationState::C_CONNECTING;
-
-  // Incremented by SyncFb before creating each attempt's flows. Written only by SyncFb; read by
-  // Finish() to drop stale error-handler calls that belong to a previous attempt's flows.
-  //
-  // Uses both an atomic and state_mu_, each for a different job: the increment and Finish()'s
-  // authoritative re-check run under state_mu_ because the invariant spans two variables (a
-  // Finish() that passes the check must write state_ before the next bump), which no memory
-  // order on a single atomic can express. The type stays atomic only for Finish()'s advisory
-  // pre-lock check - a plain read there would be a data race.
-  std::atomic<uint64_t> attempt_gen_{0};
 
   boost::intrusive_ptr<Transaction> tx_;
 
