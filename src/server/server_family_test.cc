@@ -200,6 +200,26 @@ TEST_F(ServerFamilyTest, SlowLogLen) {
   EXPECT_THAT(resp.GetInt(), 3);
 }
 
+TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
+  auto resp = Run({"config", "set", "slowlog_max_len", "3"});
+  EXPECT_THAT(resp.GetString(), "OK");
+  resp = Run({"config", "set", "slowlog_log_slower_than", "-1"});
+  EXPECT_THAT(resp.GetString(), "OK");
+  Run({"slowlog", "reset"});
+
+  // issue some commands
+  for (int i = 1; i < 4; ++i) {
+    resp = Run({"lpush", "mykey", std::to_string(i)});
+    EXPECT_THAT(resp.GetInt(), i);
+  }
+
+  // slowlog is still empty
+  resp = Run({"slowlog", "get"});
+  EXPECT_THAT(resp.GetVec().size(), 0);
+  resp = Run({"slowlog", "len"});
+  EXPECT_THAT(resp.GetInt(), 0);
+}
+
 TEST_F(ServerFamilyTest, SlowLogExecEval) {
   Run({"config", "set", "slowlog_max_len", "20"});
   Run({"config", "set", "slowlog_log_slower_than", "0"});

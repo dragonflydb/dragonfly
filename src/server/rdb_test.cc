@@ -1771,6 +1771,7 @@ TEST_F(RdbTest, SplitCuckoo) {
     ASSERT_GT(last_blob.size(), kFirstSplit + kSecondSplit);
 
     first.push_back(RDB_TYPE_CUCKOO);
+
     // brand new key whose shape is copied off kKeyCfSrc
     AppendString(&first, "cf_loaded");
     AppendLen(&first, cf->SlotsPerBucket());
@@ -1780,6 +1781,7 @@ TEST_F(RdbTest, SplitCuckoo) {
     AppendLen(&first, cf->NumItems());
     AppendLen(&first, cf->NumDeletes());
     AppendLen(&first, num_filters);
+
     // every filter but the last is written whole, in a single chunk
     for (size_t i = 0; i + 1 < num_filters; ++i) {
       const std::string blob{cf->FilterBytes(i)};
@@ -1787,21 +1789,26 @@ TEST_F(RdbTest, SplitCuckoo) {
       AppendLen(&first, blob.size());
       first.append(blob);
     }
+
     // total size of the last filter's blob
     AppendLen(&first, last_blob.size());
+
     // only kFirstSplit bytes of it in this chunk
     AppendLen(&first, kFirstSplit);
     first.append(last_blob.data(), kFirstSplit);
   });
+
   // add this plain string between chunks of the split filter
   std::string plain;
   plain.push_back(RDB_TYPE_STRING);
   AppendString(&plain, "plain_key");
   AppendString(&plain, "plain_val");
+
   // p2 of last_blob
   std::string second;
   AppendLen(&second, kSecondSplit);
   second.append(last_blob.data() + kFirstSplit, kSecondSplit);
+
   // p3 of last_blob
   std::string third;
   constexpr auto kPrefixConsumed = kFirstSplit + kSecondSplit;

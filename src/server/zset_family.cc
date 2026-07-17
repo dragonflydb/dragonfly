@@ -748,7 +748,8 @@ ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight, const DbContext& 
 double Aggregate(double v1, double v2, AggType atype) {
   switch (atype) {
     case AggType::SUM:
-      return v1 + v2;
+      v1 += v2;
+      return isnan(v1) ? 0 : v1;
     case AggType::MAX:
       return max(v1, v2);
     case AggType::MIN:

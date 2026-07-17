@@ -568,6 +568,7 @@ TEST_F(GenericFamilyTest, RenameList) {
     EXPECT_EQ(1, CheckedInt({"del", dest}));
   }
 }
+
 TEST_F(GenericFamilyTest, RenameBinary) {
   const char kKey1[] = "\x01\x02\x03\x04";
   const char kKey2[] = "\x05\x06\x07\x08";
@@ -625,18 +626,21 @@ TEST_F(GenericFamilyTest, RenameCmsNanCrash) {
 }
 
 TEST_F(GenericFamilyTest, Stick) {
+  // check stick returns zero on non-existent keys
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
 
   for (auto key : {"a", "b", "c", "d"}) {
     Run({"set", key, "."});
   }
 
+  // check stick is applied only once
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(2));
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
   ASSERT_THAT(Run({"stick", "a", "c"}), IntArg(1));
   ASSERT_THAT(Run({"stick", "b", "d"}), IntArg(1));
   ASSERT_THAT(Run({"stick", "c", "d"}), IntArg(0));
 
+  // check stickyness persists during writes
   Run({"set", "a", "new"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
 
@@ -646,6 +650,7 @@ TEST_F(GenericFamilyTest, Stick) {
   Run({"rename", "a", "k"});
   ASSERT_THAT(Run({"stick", "k"}), IntArg(0));
 
+  // check rename persists stickyness on multiple shards
   Run({"del", kShard0Key});
 
   string dest_val(32, 'z');
