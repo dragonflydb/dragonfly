@@ -401,6 +401,7 @@
 "BGSAVE"
 "LASTSAVE"
 "ROLE"
+"RESET"
 
 # Subcommands
 "OBJECT ENCODING"

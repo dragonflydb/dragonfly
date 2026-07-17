@@ -127,6 +127,7 @@ class Service : public facade::ServiceInterface {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
   static void Quit(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Reset(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   static void Multi(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   static void Watch(facade::CmdArgParser parser, CommandContext* cmd_cntx);
