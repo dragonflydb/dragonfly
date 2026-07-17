@@ -3,6 +3,8 @@
 //
 #include "server/replica.h"
 
+#include <sys/ioctl.h>
+
 #include <chrono>
 
 #include "absl/strings/match.h"
@@ -1416,6 +1418,16 @@ std::vector<uint64_t> Replica::GetReplicaOffset() const {
 
 std::string Replica::GetSyncId() const {
   return master_context_.dfly_session_id;
+}
+
+int Replica::GetMasterSocketUnreadBytes() const {
+  auto* s = Sock();
+  if (s == nullptr)
+    return -1;
+  int unread = 0;
+  if (ioctl(s->native_handle(), FIONREAD, &unread) != 0)
+    return -1;
+  return unread;
 }
 
 string Replica::GetClientInfo() const {

@@ -15,6 +15,17 @@ async def _bounded(awaitable, timeout=5):
     return await asyncio.wait_for(awaitable, timeout=timeout)
 
 
+# Investigation-only for #6940. Remove once closed.
+async def _dump_repl_diag(diag_clients, note):
+    if not diag_clients:
+        return
+    logging.warning(f"DEBUG REPLDIAG: {note}")
+    await asyncio.gather(
+        *(_bounded(c.execute_command("DEBUG", "REPLDIAG")) for c in diag_clients),
+        return_exceptions=True,
+    )
+
+
 async def _log_progress(c_master, c_replicas, interval=10):
     # Periodic progress so a long-running test phase (seeder.run, REPLICAOF, check_data)
     # is not silent. Caller cancels the task at teardown.
@@ -32,13 +43,21 @@ async def _log_progress(c_master, c_replicas, interval=10):
 
 # Checks that master redis and dragonfly replica are synced by writing a random key to master
 # and waiting for it to exist in replica. Foreach db in 0..dbcount-1.
-async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbcount=1, timeout=30):
+async def await_synced(
+    c_master: aioredis.Redis, c_replica: aioredis.Redis, dbcount=1, timeout=30, diag_clients=None
+):
     rnd_str = "".join(random.choices(string.ascii_letters, k=10))
     key = "sync_key/" + rnd_str
     for db in range(dbcount):
         await c_master.set(key, "dummy")
         logging.info(f"await_synced: set {key} on MASTER db={db}, polling REPLICA up to {timeout}s")
         remaining = timeout
+        # Investigation-only for #6940: track the replica's own progress rate so we can tell a
+        # genuinely stalled/slow replica apart from one that's simply still early in a normal
+        # sync. Only fire the (expensive, verbose) diag dump once we see it isn't catching up.
+        prev_replica_dbsize = None
+        stall_ticks = 0
+        diag_fired = False
         while remaining > 0:
             # Run concurrently so a tick is bounded by the slowest single call (5s), not their sum.
             # return_exceptions=True so a stalled call surfaces in its slot without aborting the rest.
@@ -58,9 +77,29 @@ async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbco
                 f"dbsize master={master_dbsize} replica={replica_dbsize} "
                 f"master_info={master_info} replica_info={replica_info}"
             )
+            # "Slow" = replica made little or no progress this tick (not behind by definition:
+            # it could legitimately still be receiving its first batch). Combined with "running
+            # out of budget" below, this distinguishes a real stall from an early/normal sync.
+            made_progress = (
+                isinstance(replica_dbsize, int)
+                and isinstance(prev_replica_dbsize, int)
+                and replica_dbsize > prev_replica_dbsize
+            )
+            stall_ticks = 0 if made_progress else stall_ticks + 1
+            if isinstance(replica_dbsize, int):
+                prev_replica_dbsize = replica_dbsize
+            # About to fail: little/no progress recently, and little time left to recover.
+            if not diag_fired and stall_ticks >= 3 and remaining <= 10:
+                diag_fired = True
+                await _dump_repl_diag(
+                    diag_clients,
+                    f"db={db} rate looks stalled ({stall_ticks} flat ticks), "
+                    f"{remaining}s left before timeout",
+                )
             await asyncio.sleep(1)
             remaining -= 1
         else:
+            await _dump_repl_diag(diag_clients, f"db={db} TIMEOUT after {timeout}s")
             logging.error(
                 f"await_synced TIMEOUT db={db} key={key} after {timeout}s "
                 f"dbsize master={master_dbsize} replica={replica_dbsize} "
@@ -72,7 +111,11 @@ async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbco
 async def await_synced_all(c_master, c_replicas, timeout=30, dbcount=1):
     for i, c_replica in enumerate(c_replicas):
         logging.info(f"await_synced_all: checking replica {i + 1}/{len(c_replicas)}")
-        await await_synced(c_master, c_replica, dbcount=dbcount, timeout=timeout)
+        # diag_clients=c_replicas (not just c_replica): a stall dump is only useful compared
+        # against its siblings at the same instant, see #6940 investigation notes.
+        await await_synced(
+            c_master, c_replica, dbcount=dbcount, timeout=timeout, diag_clients=c_replicas
+        )
 
 
 async def check_data(seeder, replicas, c_replicas):

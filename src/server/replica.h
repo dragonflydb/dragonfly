@@ -143,6 +143,10 @@ class Replica : ProtocolClient {
 
   size_t GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const;
 
+  // Investigation-only for #6940 (DEBUG REPLDIAG): bytes currently sitting unread in the
+  // master socket's kernel receive buffer, or -1 if unavailable. Remove once closed.
+  int GetMasterSocketUnreadBytes() const;
+
  private:
   ExecutionState exec_st_;
 
