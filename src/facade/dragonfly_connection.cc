@@ -1954,6 +1954,8 @@ void Connection::ReleaseDeferredCheckpoints() {
   if (deferred_checkpoints_.empty())
     return;
 
+  DVLOG(1) << CONN_ID << " Releasing " << deferred_checkpoints_.size() << " deferred checkpoint(s) "
+           << DebugInfo();
   for (auto& bc : deferred_checkpoints_) {
     bc->Dec();
   }
@@ -2269,7 +2271,7 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   // Migrate is only used by DFLY Thread and Flow command which both check against
   // the result of Migration and handle it explicitly in their flows so this can act
   // as a weak if condition instead of a crash prone CHECK.
-  if (async_fb_.IsJoinable() || cc_->conn_closing) {
+  if ((!ioloop_v2_ && async_fb_.IsJoinable()) || cc_->conn_closing) {
     return false;
   }
 
@@ -2354,11 +2356,25 @@ void Connection::SendAsync(MessageHandle msg) {
   DCHECK_EQ(ProactorBase::me(), socket_->proactor());
   auto& conn_stats = tl_facade_stats->conn_stats;
 
-  // "Closing" connections might be still processing commands, as we don't interrupt them.
-  // So we still want to deliver control messages to them (like checkpoints) if
-  // async_fb_ is running (joinable).
-  if (cc_->conn_closing && (!msg.IsCheckPoint() || !async_fb_.IsJoinable()))
-    return;
+  // A closing connection drops control messages - nothing consumes them. The one exception is a
+  // checkpoint with a live V1 async fiber (V2 never qualifies, so we don't read async_fb_ there).
+  auto* checkpoint = std::get_if<CheckpointMessage>(&msg.handle);
+  if (cc_->conn_closing) {
+    const bool checkpoint_on_live_async_fiber = checkpoint && !ioloop_v2_ && async_fb_.IsJoinable();
+    if (!checkpoint_on_live_async_fiber) {
+      // Dec() the dropped checkpoint's blocking counter (SendCheckpoint already Add()-edit) or the
+      // DispatchTracker leaks and the takeover / pause / migration / shutdown waiting on it hangs.
+      if (checkpoint) {
+        DVLOG(1) << CONN_ID << "Dropping checkpoint on closing conn " << DebugInfo();
+        checkpoint->bc->Dec();
+      }
+      return;
+    }
+  }
+
+  // A checkpoint on a closing V2 connection is always dropped-and-healed above, never enqueued
+  // here.
+  DCHECK(!(checkpoint && cc_->conn_closing && ioloop_v2_));
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
   if (!cc_->conn_closing && !ioloop_v2_) {
