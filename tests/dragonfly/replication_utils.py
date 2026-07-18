@@ -24,7 +24,10 @@ The main entry points are:
 import asyncio
 import dataclasses
 import logging
+import time
 from typing import List, Optional, Union
+
+from redis import asyncio as aioredis
 
 from .instance import DflyInstance, DflyInstanceFactory
 from .seeder import Seeder as SeederV2
@@ -278,3 +281,25 @@ def master_role_reply(replicas, state: str = "online", ip: str = "127.0.0.1"):
 def replica_role_reply(master, state: str = "online", host: str = "localhost"):
     """Expected reply of ``ROLE`` on a replica of the given master instance."""
     return ["slave", host, str(master.port), state]
+
+
+# ---------------------------------------------------------------------------
+# Metrics / status helpers
+# ---------------------------------------------------------------------------
+
+
+async def get_metric_value(inst, metric_name, sample_index=0):
+    return (await inst.metrics())[metric_name].samples[sample_index].value
+
+
+async def wait_for_replica_status(
+    replica: aioredis.Redis, status: str, wait_for_seconds=0.01, timeout=20
+):
+    start = time.time()
+    while (time.time() - start) < timeout:
+        await asyncio.sleep(wait_for_seconds)
+
+        info = await replica.info("replication")
+        if info["master_link_status"] == status:
+            return
+    raise RuntimeError("Client did not become available in time!")

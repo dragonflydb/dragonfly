@@ -14,7 +14,7 @@ from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory, RedisServer
-from .replication_test import compare_datasets
+from .replication_utils import compare_datasets
 from .seeder import DebugPopulateSeeder, Seeder
 from .utility import (
     assert_eventually,
