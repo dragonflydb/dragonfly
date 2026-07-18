@@ -1515,6 +1515,20 @@ TEST_F(JsonFamilyTest, ObjKeysLegacy) {
   EXPECT_THAT(resp.GetVec(), IsEmpty());
 }
 
+TEST_F(JsonFamilyTest, StrAppendDefaultPath) {
+  auto resp = Run({"JSON.SET", "json", ".", R"("foo")"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "json", R"("bar")"});
+  EXPECT_THAT(resp, IntArg(6));
+
+  resp = Run({"JSON.STRAPPEND", "json", ".", R"("baz")", "extra"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_THAT(resp, R"("foobar")");
+}
+
 TEST_F(JsonFamilyTest, StrAppend) {
   string json = R"(
     {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":3}}
