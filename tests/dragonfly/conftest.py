@@ -395,6 +395,20 @@ async def async_client(async_pool):
     yield client
 
 
+@pytest_asyncio.fixture
+async def replication(df_factory, request):
+    """Decomposable, marker-annotated replication fixture.
+
+    Configure the topology with ``@pytest.mark.replication(...)`` whose keyword
+    arguments are forwarded to :func:`replication_utils.setup_replication`.
+    """
+    from .replication_utils import setup_replication
+
+    marker = request.node.get_closest_marker("replication")
+    kwargs = dict(marker.kwargs) if marker else {}
+    return await setup_replication(df_factory, **kwargs)
+
+
 def pytest_addoption(parser):
     parser.addoption("--gdb", action="store_true", default=False, help="Run instances in gdb")
     parser.addoption("--df", action="append", default=[], help="Add arguments to dragonfly")
