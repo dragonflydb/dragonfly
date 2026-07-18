@@ -3488,6 +3488,21 @@ void ServerFamily::ForceReplicasToFullSync() {
   });
 }
 
+void ServerFamily::ForkLineage() {
+  if (!absl::GetFlag(FLAGS_experimental_cascaded_partial_sync))
+    return;
+
+  // We are being promoted while possibly serving sub-replicas that share our master's lineage.
+  // Emit a LINEAGE marker carrying our own replication id (the new lineage root) so downstream
+  // replicas adopt it: they can still partial-sync within our new lineage, but will full-sync if
+  // they reconnect to the old ancestor (split-brain safety).
+  std::string_view new_lineage_id = master_replid_;
+  shard_set->RunBriefInParallel([new_lineage_id](EngineShard* shard) {
+    if (shard->journal())
+      journal::RecordEntry(0, journal::Op::LINEAGE, 0, nullopt, {new_lineage_id, ArgSlice{}});
+  });
+}
+
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   util::fb2::LockGuard lk(replicaof_mu_);
 
@@ -3498,6 +3513,7 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
     if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
       // Start journal and keep offsets.
       repl_ptr->StartJournalAtOwnLSN();
+      ForkLineage();
     }
     // flip flag before clearing replica_
     SetMasterFlagOnAllThreads(true);
@@ -3644,6 +3660,7 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
     service().cluster_family().ReconcileReplicaSlots();
   }
 
+  ForkLineage();
   last_master_data_ = replica_->Stop();
   replica_.reset();
 
