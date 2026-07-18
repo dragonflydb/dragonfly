@@ -564,7 +564,8 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
       partial_sync_lsn = shard_flows_[i]->JournalExecutedCount();
     }
     shard_flows_[i].reset(new DflyShardReplica(server(), master_context_, i, &service_,
-                                               multi_shard_exe_, load_context.get()));
+                                               multi_shard_exe_, load_context.get(),
+                                               &forked_lineage_));
     if (partial_sync_lsn > 0) {
       shard_flows_[i]->SetRecordsExecuted(partial_sync_lsn);
     }
@@ -1131,6 +1132,15 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         // if journal is active.
         journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
       }
+    } else if (tx_data.opcode == journal::Op::LINEAGE) {
+      // One of our ancestors forked the lineage and updated us with the new roots master id
+      string_view new_lineage_id = tx_data.command.Front();
+      *forked_lineage_ = string(new_lineage_id);
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+
+      if (EngineShard::tlocal() && EngineShard::tlocal()->journal()) {  // pass further
+        journal::RecordEntry(0, journal::Op::LINEAGE, 0, nullopt, {new_lineage_id, ArgSlice{}});
+      }
     } else {
       const bool is_successful = ExecuteTx(std::move(tx_data), cntx);
       if (is_successful) {
@@ -1219,10 +1229,12 @@ void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
 DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext master_context,
                                    uint32_t flow_id, Service* service,
                                    std::shared_ptr<MultiShardExecution> multi_shard_exe,
-                                   RdbLoadContext* load_context)
+                                   RdbLoadContext* load_context,
+                                   cmn::ThreadSafeValue<std::string>* forked_lineage)
     : ProtocolClient(server_context),
       service_(*service),
       master_context_(master_context),
+      forked_lineage_(forked_lineage),
       multi_shard_exe_(multi_shard_exe),
       flow_id_(flow_id) {
   executor_ = std::make_unique<JournalExecutor>(service);

@@ -10,6 +10,7 @@
 #include <queue>
 #include <variant>
 
+#include "common/thread_safe_value.h"
 #include "facade/facade_types.h"
 #include "facade/redis_parser.h"
 #include "io/io_buf.h"
@@ -128,7 +129,11 @@ class Replica : ProtocolClient {
   // The replication id of the lineage root master. Equals the direct master's id, unless the
   // direct master advertised an ancestor id (cascaded replication), in which case it is the
   // ancestor's id. Used to negotiate partial sync when reconnecting up the chain.
+  // After a lineage fork (a promoted ancestor sent a LINEAGE marker), we adopt the new lineage
+  // root's id carried by the marker instead of the old ancestor's id.
   std::string GetLineageId() const {
+    if (std::string forked = *forked_lineage_; !forked.empty())
+      return forked;
     return master_context_.lineage_id;
   }
 
@@ -171,6 +176,9 @@ class Replica : ProtocolClient {
   util::fb2::Fiber sync_fb_;
   util::fb2::Fiber acks_fb_;
   util::fb2::EventCount replica_waker_;
+
+  // Lineage id adopted from a LINEAGE marker after a promoted ancestor forked; last-wins.
+  cmn::ThreadSafeValue<std::string> forked_lineage_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
   std::vector<std::vector<unsigned>> thread_flow_map_;  // a map from proactor id to flow list.
@@ -221,7 +229,8 @@ class DflyShardReplica : public ProtocolClient {
  public:
   DflyShardReplica(ServerContext server_context, MasterContext master_context, uint32_t flow_id,
                    Service* service, std::shared_ptr<MultiShardExecution> multi_shard_exe,
-                   class RdbLoadContext* load_context);
+                   class RdbLoadContext* load_context,
+                   cmn::ThreadSafeValue<std::string>* forked_lineage);
   ~DflyShardReplica();
 
   void Cancel();
@@ -265,6 +274,9 @@ class DflyShardReplica : public ProtocolClient {
  private:
   Service& service_;
   MasterContext master_context_;
+
+  // Points at the owning Replica's forked lineage holder; assigned when a LINEAGE marker arrives.
+  cmn::ThreadSafeValue<std::string>* forked_lineage_;
 
   std::optional<base::IoBuf> leftover_buf_;
 

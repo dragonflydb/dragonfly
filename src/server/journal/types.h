@@ -14,7 +14,16 @@
 namespace dfly {
 namespace journal {
 
-enum class Op : uint8_t { SELECT = 6, EXPIRED = 9 /* sunset*/, COMMAND = 10, PING = 13, LSN = 15 };
+enum class Op : uint8_t {
+  SELECT = 6,
+  EXPIRED = 9 /* sunset*/,
+  COMMAND = 10,
+  PING = 13,
+  LSN = 15,
+
+  // Signals change of lineage id. Must be passed further to reach whole replica subtree
+  LINEAGE = 16,
+};
 
 struct EntryBase {
   TxId txid;

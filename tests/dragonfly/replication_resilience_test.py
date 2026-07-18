@@ -1171,20 +1171,21 @@ async def test_cascaded_partial_sync(df_factory, reconnect_to):
     assert len(lines) == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Master rotation not implemented yet",
-)
 async def test_cascaded_partial_sync_split_brain(df_factory):
-    """Split-brain safety: master -> r1 -> r2, then r1 is promoted to standalone and
-    BOTH master and r1 take independent writes to the same key. r2 (following r1) then reconnects
-    directly to master.
+    """Split-brain safety + deep-chain lineage propagation. Chain master -> r1 -> r2 -> r3. r1 is
+    promoted, forming a new lineage r1 -> r2 -> r3, and both master and r1 take divergent writes to
+    the same key in the shared LSN space.
+      * r3 (a grandchild of r1) reconnects to the new root r1 and PARTIAL syncs: the LINEAGE marker
+        carries r1's id all the way down, so r3 - not just r1's direct child - adopts it. Without
+        propagating the id, r3 would present r2's id and be forced into a full sync.
+      * r3 then reconnects up to the old master and must FULL sync, converging to master's
+        authoritative value instead of silently keeping r1's divergent data (split-brain safety).
     """
     flag = {"proactor_threads": 4, "experimental_cascaded_partial_sync": None}
-    master, r1, r2 = (df_factory.create(**flag) for _ in range(3))
-    df_factory.start_all([master, r1, r2])
+    master, r1, r2, r3 = (df_factory.create(**flag) for _ in range(4))
+    df_factory.start_all([master, r1, r2, r3])
 
-    c_master, c_r1, c_r2 = master.client(), r1.client(), r2.client()
+    c_master, c_r1, c_r2, c_r3 = master.client(), r1.client(), r2.client(), r3.client()
 
     # Base data + a shared key that both branches will later diverge on.
     # NOTE: append (not set) because SET is omit-optimized which disables partial sync.
@@ -1192,13 +1193,13 @@ async def test_cascaded_partial_sync_split_brain(df_factory):
         await c_master.append(f"k{i}", "val")
     await c_master.append("diverge", "base")
 
-    # Build chain master -> r1 -> r2.
-    await c_r1.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_for_replicas_state(c_r1)
-    await c_r2.execute_command(f"REPLICAOF localhost {r1.port}")
-    await wait_for_replicas_state(c_r2)
+    # Build chain master -> r1 -> r2 -> r3.
+    for c, upstream in [(c_r1, master), (c_r2, r1), (c_r3, r2)]:
+        await c.execute_command(f"REPLICAOF localhost {upstream.port}")
+        await wait_for_replicas_state(c)
     await check_all_replicas_finished([c_r1], c_master)
     await check_all_replicas_finished([c_r2], c_r1)
+    await check_all_replicas_finished([c_r3], c_r2)
 
     # r1 splits from master and both sides write divergent values to the same key in the shared
     # LSN space.
@@ -1206,16 +1207,28 @@ async def test_cascaded_partial_sync_split_brain(df_factory):
     await c_master.append("diverge", "_MASTER")
     await c_r1.append("diverge", "_R1")
     await check_all_replicas_finished([c_r2], c_r1)
+    await check_all_replicas_finished([c_r3], c_r2)
 
     assert (await c_master.get("diverge")) == "base_MASTER"
-    assert (await c_r2.get("diverge")) == "base_R1"
+    assert (await c_r3.get("diverge")) == "base_R1"
 
-    # r2 reconnects directly to master. It must converge to master's authoritative value.
-    await c_r2.execute_command(f"REPLICAOF localhost {master.port}")
-    await check_all_replicas_finished([c_r2], c_master)
+    # The grandchild reconnects directly to the new root r1, skipping r2: partial sync within the
+    # new lineage.
+    await c_r3.execute_command(f"REPLICAOF localhost {r1.port}")
+    await check_all_replicas_finished([c_r3], c_r1)
+    assert (await c_r3.get("diverge")) == "base_R1"
+    assert (await c_r3.info("replication"))["psync_successes"] == 1
 
-    master_val, r2_val = await asyncio.gather(c_master.get("diverge"), c_r2.get("diverge"))
-    assert r2_val == master_val, f"split-brain divergence: master={master_val!r} r2={r2_val!r}"
+    # r3 reconnects up to the old master: it must full sync and converge to master's value.
+    await c_r3.execute_command(f"REPLICAOF localhost {master.port}")
+    await check_all_replicas_finished([c_r3], c_master)
+    master_val, r3_val = await asyncio.gather(c_master.get("diverge"), c_r3.get("diverge"))
+    assert r3_val == master_val, f"split-brain divergence: master={master_val!r} r3={r3_val!r}"
+
+    r3.stop()
+    assert len(r3.find_in_logs(f"Started partial sync with localhost:{r1.port}")) == 1
+    assert len(r3.find_in_logs(f"Started full sync with localhost:{r1.port}")) == 0
+    assert len(r3.find_in_logs(f"Started full sync with localhost:{master.port}")) == 1
 
 
 @pytest.mark.parametrize("proactors", [1, 4, 6])
