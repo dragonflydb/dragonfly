@@ -220,6 +220,7 @@ TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
   EXPECT_THAT(resp.GetInt(), 0);
 }
 
+// Test how slowlog captures additional information about heavy commands
 TEST_F(ServerFamilyTest, SlowLogExecEval) {
   Run({"config", "set", "slowlog_max_len", "20"});
   Run({"config", "set", "slowlog_log_slower_than", "0"});
