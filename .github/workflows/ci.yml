@@ -43,6 +43,7 @@ jobs:
 
     env:
       CPP_JUNIT_DIR: ${{ github.workspace }}/test-results/junit/cpp
+      CPP_DASHBOARD_DIR: ${{ github.workspace }}/test-results/dashboard/cpp
 
     strategy:
       matrix:
@@ -238,16 +239,34 @@ jobs:
         if: always()
         run: |
           NAME="junit-ci-${{ matrix.container }}-${{ matrix.build-type }}-${{ matrix.compiler.cxx }}-${{ matrix.sanitizers }}"
+          MATRIX_NAME="container-${{ matrix.container }}-build-${{ matrix.build-type }}-compiler-${{ matrix.compiler.cxx }}-sanitizers-${{ matrix.sanitizers }}"
           SAFE_NAME=$("${GITHUB_WORKSPACE}/.github/scripts/sanitize-token.sh" "${NAME}")
-          echo "CI_JUNIT_ARTIFACT=${SAFE_NAME}" >> "${GITHUB_ENV}"
+          {
+            echo "CI_JUNIT_ARTIFACT=${SAFE_NAME}"
+            echo "CI_JUNIT_UPLOAD_SUFFIX=${MATRIX_NAME}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Generate C++ GTest dashboard summary
+        if: always()
+        run: |
+          mkdir -p "${CPP_DASHBOARD_DIR}"
+
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/gtest-junit-to-dashboard-json.py" \
+            "${CPP_JUNIT_DIR}/gtest" "${CPP_DASHBOARD_DIR}/gtest-summary.json" \
+            --workflow "${GITHUB_WORKFLOW}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --job "${GITHUB_JOB}" \
+            --variant "${CI_JUNIT_UPLOAD_SUFFIX}"
 
       - name: Upload C++ JUnit test results
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.CI_JUNIT_ARTIFACT }}
-          # Scope to cpp/ only: regression XMLs are uploaded by the regression action itself.
-          path: ${{ github.workspace }}/test-results/junit/cpp/**/*.xml
+          path: |
+            ${{ github.workspace }}/test-results/junit/cpp/ctest/**/*.xml
+            ${{ github.workspace }}/test-results/dashboard/cpp/**/*.json
           if-no-files-found: ignore
 
       - name: Refresh AWS credentials for C++ JUnit upload
@@ -264,10 +283,15 @@ jobs:
           S3_REGTEST_BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
         run: |
           JUNIT_DIR="${CPP_JUNIT_DIR}"
-          MATRIX_NAME="container-${{ matrix.container }}-build-${{ matrix.build-type }}-compiler-${{ matrix.compiler.cxx }}-sanitizers-${{ matrix.sanitizers }}"
+          MATRIX_NAME="${CI_JUNIT_UPLOAD_SUFFIX}"
 
-          "${GITHUB_WORKSPACE}/.github/scripts/upload-junit-to-s3.sh" \
-            "${JUNIT_DIR}" "${S3_REGTEST_BUCKET}" "cpp" "${MATRIX_NAME}" "C++ JUnit"
+          "${GITHUB_WORKSPACE}/.github/scripts/upload-test-results-to-s3.sh" \
+            dir junit "${JUNIT_DIR}" "${S3_REGTEST_BUCKET}" "cpp" "${MATRIX_NAME}" \
+            "C++ JUnit" "*.xml" "gtest/*/*.xml"
+
+          "${GITHUB_WORKSPACE}/.github/scripts/upload-test-results-to-s3.sh" \
+            file dashboard "${CPP_DASHBOARD_DIR}/gtest-summary.json" "${S3_REGTEST_BUCKET}" "cpp" \
+            "${MATRIX_NAME}" "C++ GTest dashboard JSON"
 
       - name: Upload dragonfly binary for cgroup test
         if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Release' && matrix.sanitizers == 'NoSanitizers' && matrix.compiler.cxx == 'g++'

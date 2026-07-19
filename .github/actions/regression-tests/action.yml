@@ -227,9 +227,9 @@ runs:
       if: always() && inputs.junit-s3-bucket != '' && inputs.aws-role-to-assume != ''
       shell: bash
       run: |
-        "${GITHUB_WORKSPACE}/.github/scripts/upload-junit-to-s3.sh" \
-          "${REGRESSION_JUNIT_DIR}" "${{ inputs.junit-s3-bucket }}" "regression" \
-          "${REGRESSION_JUNIT_S3_SUFFIX}" "regression JUnit"
+        "${GITHUB_WORKSPACE}/.github/scripts/upload-test-results-to-s3.sh" \
+          dir junit "${REGRESSION_JUNIT_DIR}" "${{ inputs.junit-s3-bucket }}" "regression" \
+          "${REGRESSION_JUNIT_S3_SUFFIX}" "regression JUnit" "*.xml"
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'
