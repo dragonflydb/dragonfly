@@ -328,7 +328,7 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
   } else if (detail::IsAzurePath(uri)) {
     auto azure = std::make_shared<detail::AzureSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await(
-        [&] { return azure->Init(detail::kBucketConnectMs); });
+        [&] { return azure->Init(uri, detail::kBucketConnectMs); });
     if (ec) {
       LOG(ERROR) << "Failed to initialize Azure snapshot storage: " << ec.message();
       exit(1);

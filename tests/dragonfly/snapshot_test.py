@@ -3,6 +3,12 @@ import glob
 import logging
 import os
 from pathlib import Path
+import shutil
+import signal
+import socket
+import subprocess
+import time
+import uuid
 
 from async_timeout import timeout
 import boto3
@@ -30,6 +36,18 @@ FILE_FORMATS = ["RDB", "DF"]
 
 # Should be used where text auxiliary mechanisms like filenames
 LIGHTWEIGHT_SEEDER_ARGS = dict(key_target=100, data_size=100, variance=1, samples=1)
+
+AZURITE_ACCOUNT = "devstoreaccount1"
+AZURITE_KEY = (
+    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/" "K1SZFPTOtr/KBHBeksoGMGw=="
+)
+AZURITE_PORT = 10000
+AZURITE_CONN_STR = (
+    f"DefaultEndpointsProtocol=http;"
+    f"AccountName={AZURITE_ACCOUNT};"
+    f"AccountKey={AZURITE_KEY};"
+    f"BlobEndpoint=http://127.0.0.1:{AZURITE_PORT}/{AZURITE_ACCOUNT};"
+)
 
 
 def find_main_file(path: Path, pattern):
@@ -483,6 +501,84 @@ def delete_azure_objects(container, prefix):
         container_client.delete_blob(blob.name)
 
 
+def get_azure_account_name():
+    from azure.storage.blob import BlobServiceClient
+
+    blob_service = BlobServiceClient.from_connection_string(
+        os.environ["AZURE_STORAGE_CONNECTION_STRING"]
+    )
+    return blob_service.account_name
+
+
+def _azurite_running():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1)
+        return sock.connect_ex(("127.0.0.1", AZURITE_PORT)) == 0
+
+
+@pytest.fixture
+def azurite():
+    if _azurite_running():
+        yield
+        return
+
+    azurite_bin = shutil.which("azurite-blob")
+    if not azurite_bin:
+        pytest.skip("azurite-blob is not installed")
+
+    proc = subprocess.Popen(
+        [azurite_bin, "--blobHost", "127.0.0.1", "--skipApiVersionCheck"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for _ in range(30):
+        if _azurite_running():
+            break
+        time.sleep(0.5)
+    else:
+        proc.kill()
+        pytest.skip("Azurite did not become ready in time")
+
+    yield
+
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=5)
+
+
+@dfly_args({**BASIC_ARGS})
+async def test_azure_snapshot_azurite(df_factory, monkeypatch, azurite):
+    from azure.storage.blob import BlobServiceClient
+
+    monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING", raising=False)
+    monkeypatch.setenv("AZURE_STORAGE_ACCOUNT", "otheraccount")
+    monkeypatch.setenv("AZURE_STORAGE_KEY", AZURITE_KEY)
+    monkeypatch.setenv(
+        "AZURE_STORAGE_BLOB_ENDPOINT",
+        f"http://127.0.0.1:{AZURITE_PORT}/{AZURITE_ACCOUNT}",
+    )
+    container = f"dfly{uuid.uuid4().hex[:20]}"
+    blob_service = BlobServiceClient.from_connection_string(AZURITE_CONN_STR)
+    blob_service.create_container(container)
+
+    instance = df_factory.create()
+    instance.start()
+    async_client = instance.client()
+    seeder = DebugPopulateSeeder(key_target=10_000)
+    await seeder.run(async_client)
+    start_capture = await DebugPopulateSeeder.capture(async_client)
+    prefix = f"snapshot-{uuid.uuid4().hex}"
+    az_path = f"https://{AZURITE_ACCOUNT}.blob.core.windows.net/{container}/{prefix}"
+
+    try:
+        await async_client.execute_command("SAVE", "DF", az_path, "snapshot")
+        assert await async_client.flushall()
+        await async_client.execute_command("DFLY", "LOAD", az_path + "/snapshot-summary.dfs")
+
+        assert await DebugPopulateSeeder.capture(async_client) == start_capture
+    finally:
+        blob_service.delete_container(container)
+
+
 @pytest.mark.skipif(
     _missing_azure_test_env(),
     reason="Azure storage container or credentials are not configured",
@@ -493,7 +589,13 @@ async def test_azure_snapshot(async_client, tmp_dir):
     await seeder.run(async_client)
 
     start_capture = await DebugPopulateSeeder.capture(async_client)
-    az_path = "az://" + os.environ["DRAGONFLY_AZURE_CONTAINER"] + str(tmp_dir)
+    az_path = (
+        "https://"
+        + get_azure_account_name()
+        + ".blob.core.windows.net/"
+        + os.environ["DRAGONFLY_AZURE_CONTAINER"]
+        + str(tmp_dir)
+    )
 
     try:
         # save to Azure + flush + load from Azure
