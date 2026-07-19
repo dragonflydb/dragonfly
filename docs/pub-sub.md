@@ -353,61 +353,83 @@ operator()(const PubMessage& pub_msg)
 Messages are sent as RESP3 Push types (`CollectionType::PUSH`) via
 `RedisReplyBuilder::SendBulkStrArr`.
 
-## Backpressure
+## Backpressure (RESP V1)
 
-Fast publishers sending to slow subscribers can cause unbounded memory growth in the
-dispatch queues. Dragonfly prevents this with a **per-thread memory budget** for subscriber
-messages.
+This section describes the current publisher back-pressure behavior for
+Redis/RESP connections using Dragonfly's V1 connection loop (`IoLoop` plus
+`AsyncFiber`). It focuses on a fast `PUBLISH`/`SPUBLISH` producer and a
+subscriber that does not read from its socket. The V2 connection loop is
+intentionally out of scope.
 
-### Memory Accounting
+Dragonfly does not block a publisher on an individual subscriber socket.
+Instead, published messages are placed on each subscriber connection's
+control-path dispatch queue. The server accounts the queued Pub/Sub message
+memory per I/O thread. Once that thread exceeds `publish_buffer_limit`,
+publishers targeting the thread park their fibers until queued subscriber
+messages are processed or the connections are closed.
 
-Memory is tracked at two levels:
+The limit is a throttling point, not a strict allocation cap. A publish checks
+the budget before dispatching and does not reserve space, so concurrent
+publishers can add messages after the check and temporarily push the total
+above the configured value.
 
-| Scope | Variable | Location |
-|-------|----------|----------|
-| **Per-thread** (all connections) | `QueueBackpressure::subscriber_bytes` | `atomic_size_t`, thread-local struct |
-| **Per-connection** | `dispatch_q_subscriber_bytes_` | Connection member |
-| **Per-thread stats** | `conn_stats.dispatch_queue_subscriber_bytes` | `ConnectionStats` |
+### V1 delivery path
 
-`UpdateDispatchStats(msg, add)` is called:
-- **On enqueue** (`add=true`): in `SendAsync()`, before pushing to `dispatch_q_`.
-  Atomically increments `subscriber_bytes`.
-- **On dequeue** (`add=false`): via `absl::Cleanup` in `ProcessAdminMessage()`, after the
-  message handler returns. Atomically decrements `subscriber_bytes`.
+For `PUBLISH` and the non-cluster `SPUBLISH` path, the delivery sequence is:
 
-### Throttling Publishers
+1. `ChannelStore::SendMessages` finds exact and pattern subscribers and sorts
+   them by their owning I/O thread.
+2. Before dispatching, it calls
+   `Connection::EnsureMemoryBudget(thread_id)` once per destination thread.
+   `QueueBackpressure::EnsureBelowLimit` parks the publishing fiber while
+   `subscriber_bytes > publish_buffer_limit` (the equality case is allowed).
+3. `BuildSender` creates one shared payload containing the channel and message
+   arguments. `DispatchBrief` runs on each I/O thread and calls
+   `Connection::SendPubMessageAsync` for local subscribers.
+4. `SendPubMessageAsync` wraps the `PubMessage` in a `MessageHandle` and calls
+   `SendAsync`. The message is appended to the connection's `dispatch_q_`,
+   the V1 `AsyncFiber` is started if necessary, and the fiber is notified.
+5. `AsyncFiber` consumes the control path. `ProcessAdminMessage` invokes the
+   Pub/Sub handler, which formats a RESP push (`message`, `smessage`, or
+   `pmessage`) into the subscriber's reply builder.
+6. After the handler returns, the message's queue accounting is removed. The
+   reply builder flushes according to the normal V1 connection-loop rules. A
+   slow or non-reading socket therefore leaves messages in `dispatch_q_`,
+   keeping the subscriber memory accounted and eventually throttling
+   publishers for that I/O thread.
 
-Before dispatching messages, `ChannelStore::SendMessages` calls
-`Connection::EnsureMemoryBudget(sub_thread)` for each unique destination thread:
+The budget is shared by all subscriber connections on one I/O thread. A
+single stuck subscriber can therefore throttle publishers sending to other
+subscribers assigned to the same thread, but it does not directly consume the
+budget of other I/O threads.
 
-```cpp
-void Connection::EnsureMemoryBudget(unsigned tid) {
-  thread_queue_backpressure[tid].EnsureBelowLimit();
-}
+### Limits, cleanup, and observability
 
-void QueueBackpressure::EnsureBelowLimit() {
-  pubsub_ec.await([this] {
-    return subscriber_bytes.load(memory_order_relaxed) <= publish_buffer_limit;
-  });
-}
-```
+Queued Pub/Sub messages are accounted both per connection and in the owning
+I/O thread's `QueueBackpressure::subscriber_bytes`. When a message is
+processed, or when a connection closes and its queue is drained, the bytes are
+released. Once the thread falls back to or below `publish_buffer_limit`, V1
+wakes waiting publishers. Messages are normally retained until they are
+processed or the subscriber disconnects; stale messages are dropped after the
+client leaves Pub/Sub mode.
 
-This blocks the publishing fiber (not the thread) until the destination thread's subscriber
-memory drops below the `publish_buffer_limit` (default: 128MB, configurable via
-`--publish_buffer_limit`).
+The main configuration knob is `publish_buffer_limit` (128 MB per I/O thread,
+startup-only). `proactor_threads` changes how subscribers and independent
+budgets are distributed. Other V1 pipeline and socket settings can affect
+processing or output latency, but do not change Pub/Sub admission directly.
 
-### Wake-up Path
+For diagnosis, use:
 
-In the `AsyncFiber` loop, after processing a dispatch queue message:
+- `dispatch_queue_subscriber_bytes`: queued Pub/Sub bytes;
+- `send_delay_ms` / `send_delay_seconds`: age of the oldest pending send;
+- `total_net_output_bytes` and `total_writes_processed`: output progress; and
+- `cmdstat_publish`: indirect evidence of publisher waiting.
 
-```cpp
-if (subscriber_over_limit &&
-    conn_stats.dispatch_queue_subscriber_bytes < qbp.publish_buffer_limit)
-  qbp.pubsub_ec.notify();  // wake ONE blocked publisher
-```
-
-The check snapshots the "over limit" state before processing and only notifies if the state
-transitioned from over-limit to under-limit. This avoids spurious wake-ups.
+These signals are aggregated and do not identify the specific subscriber
+holding the budget. `pipeline_queue_bytes` and `pipeline_throttle_total` can
+indicate competing data-path pressure. Existing coverage is
+`tests/dragonfly/connection_test.py::test_publish_stuck`, which verifies that
+publishers resume after the stuck subscriber disconnects.
 
 ## Cluster Mode Integration
 
