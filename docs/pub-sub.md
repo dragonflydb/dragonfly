@@ -403,116 +403,33 @@ single stuck subscriber can therefore throttle publishers sending to other
 subscribers assigned to the same thread, but it does not directly consume the
 budget of other I/O threads.
 
-### Memory accounting and wake-up
+### Limits, cleanup, and observability
 
-Each queued `PubMessage` contributes its `MessageHandle` and message payload
-size to the following counters:
+Queued Pub/Sub messages are accounted both per connection and in the owning
+I/O thread's `QueueBackpressure::subscriber_bytes`. When a message is
+processed, or when a connection closes and its queue is drained, the bytes are
+released. Once the thread falls back to or below `publish_buffer_limit`, V1
+wakes waiting publishers. Messages are normally retained until they are
+processed or the subscriber disconnects; stale messages are dropped after the
+client leaves Pub/Sub mode.
 
-| Scope | Counter | Meaning |
-| --- | --- | --- |
-| I/O thread | `QueueBackpressure::subscriber_bytes` | Atomic total of queued Pub/Sub message bytes for all connections on the thread. This is the value used by the publisher wait predicate. |
-| Connection | `dispatch_q_subscriber_bytes_` | Pub/Sub bytes currently in that connection's `dispatch_q_`. |
-| Thread-local stats | `conn_stats.dispatch_queue_subscriber_bytes` | Non-atomic stats value used while processing that I/O thread. |
-| Connection/thread stats | `dispatch_queue_bytes` and `dispatch_queue_entries` | All control-path messages, including Pub/Sub, monitor, checkpoints, and migration messages. |
+The main configuration knob is `publish_buffer_limit` (128 MB per I/O thread,
+startup-only). `proactor_threads` changes how subscribers and independent
+budgets are distributed. Other V1 pipeline and socket settings can affect
+processing or output latency, but do not change Pub/Sub admission directly.
 
-Accounting is incremented before the message is queued. It is decremented
-after `ProcessAdminMessage` returns, using a cleanup guard. If a connection
-closes first, `DrainConnectionQueues` subtracts every queued message so that a
-dead subscriber cannot leave the thread permanently over budget.
+For diagnosis, use:
 
-After processing a dispatch message, V1 checks whether the connection's
-subscriber queue was previously at or above the limit and is now below it. On
-that transition it notifies one publisher waiting on the thread's
-`pubsub_ec`. Connection cleanup notifies all waiters. A publisher may still
-remain parked until a subsequent wake-up observes the predicate as true; the
-predicate itself is always `subscriber_bytes <= publish_buffer_limit`.
+- `dispatch_queue_subscriber_bytes`: queued Pub/Sub bytes;
+- `send_delay_ms` / `send_delay_seconds`: age of the oldest pending send;
+- `total_net_output_bytes` and `total_writes_processed`: output progress; and
+- `cmdstat_publish`: indirect evidence of publisher waiting.
 
-### Subscriber state and disconnects
-
-Messages can be delayed by inter-thread dispatch or by publisher
-back-pressure. The V1 handler drops a stale message when the connection has no
-subscriptions left (except unsubscribe and punsubscribe acknowledgements),
-preventing delayed messages from corrupting the post-Pub/Sub protocol state.
-This is not a queue overflow policy: messages are normally retained until
-processed, and a slow subscriber is eventually unblocked by reading,
-unsubscribing/closing, or connection cleanup.
-
-### Configuration knobs
-
-#### Direct subscriber back-pressure
-
-| Flag | Default and scope | Runtime mutable? | Effect |
-| --- | --- | --- | --- |
-| `publish_buffer_limit` | `128MB`, per I/O thread | No | Maximum queued Pub/Sub message memory tolerated before publishers targeting that thread park. It is copied into `QueueBackpressure` during `Connection::Init`. It is not listed by `Connection::GetMutableFlagNames`, so it is not currently changed by `CONFIG SET`. A value of zero is rejected during initialization. |
-| `proactor_threads` | Build/runtime deployment setting | No | Changes the number of independent per-thread budgets and the distribution of subscribers. It does not create one server-wide `publish_buffer_limit`; a busy thread can throttle while other threads still have capacity. |
-
-#### V1 queue-draining and competing-work controls
-
-These flags do not change the subscriber budget, but can change how quickly a
-subscriber connection reaches and drains its dispatch queue when it also has
-pipeline work:
-
-| Flag | Default | Runtime mutable? | Relevance |
-| --- | ---: | --- | --- |
-| `async_dispatch_quota` | `100` | No | Maximum consecutive dispatch-queue messages before V1 gives queued pipeline work a chance. `0` disables the quota. A larger value favors draining Pub/Sub/control messages; a smaller value gives the data path more opportunities. |
-| `pipeline_buffer_limit` | `128MB` per I/O thread | Yes | Limits memory occupied by parsed pipeline requests. Pipeline pressure can make the same I/O thread busy or parked, competing with dispatch processing. |
-| `pipeline_queue_limit` | `10000` per connection | Yes | Limits the number of parsed pipeline commands and can stop socket reading for that connection. |
-| `pipeline_squash` | `1` | No | Enables V1 pipeline squashing once the configured threshold is reached. Squashing is considered only when the dispatch queue is empty, so it does not drain a continuously non-empty Pub/Sub queue. |
-| `pipeline_squash_limit` | `1<<30` | No | Caps the number of commands included in a squashed V1 pipeline batch. |
-| `squashed_reply_size_limit` | `0` (unlimited) | No | Disables squashing for a connection when the current squashed reply exceeds this limit. |
-| `always_flush_pipeline` | `false` | Yes | Changes when V1 pipeline replies are flushed; it can affect how quickly buffered output is written. |
-| `pipeline_wait_batch_usec` | `0` | Yes | Optional V1 wait before processing a single pending command, which can add scheduling delay when the connection is not otherwise busy. |
-| `max_busy_read_usec` | `200` microseconds | Yes | Bounds uninterrupted socket read/parse work. It affects how often the connection yields to other work, but is not a Pub/Sub memory limit. |
-| `tcp_nodelay` | `true` | No | Controls TCP_NODELAY. It can affect output latency after a Pub/Sub reply is ready, but does not affect queue admission. |
-
-The most important distinction is that `pipeline_buffer_limit` and
-`pipeline_queue_limit` protect the data path, while only
-`publish_buffer_limit` controls publisher admission based on queued subscriber
-messages.
-
-### Observability
-
-The following signals are useful when diagnosing a stuck subscriber. Values
-are aggregated across I/O threads unless noted otherwise.
-
-| Signal | Surface | Interpretation |
-| --- | --- | --- |
-| `dispatch_queue_subscriber_bytes` | `INFO memory` | Current queued Pub/Sub message bytes across all subscriber dispatch queues. A value near or above `publish_buffer_limit` indicates publisher back-pressure may be active on one or more threads. |
-| `dispatch_queue_bytes` | `INFO memory`; Prometheus gauge and `memory_by_class_bytes{class="dispatch_queue"}` | Current bytes for all control-path messages, not just Pub/Sub. |
-| `dispatch_queue_peak_bytes` | `INFO memory` | Legacy peak value of combined dispatch and pipeline queue bytes; it is not a Pub/Sub-only peak. |
-| `pipeline_queue_bytes` | `INFO memory`; Prometheus memory gauge | Parsed data-path memory that may compete with dispatch processing. |
-| `pipeline_queue_length` | `INFO clients`; Prometheus gauge | Number of pending parsed commands. |
-| `pipeline_throttle_total` | `INFO stats`; Prometheus counter | Number of data-path pipeline throttling events. It is evidence of competing pipeline pressure, not evidence that Pub/Sub back-pressure itself fired. |
-| `send_delay_ms` / `send_delay_seconds` | `INFO clients` / Prometheus gauge | Age of the oldest pending socket send on any connection. It is not Pub/Sub-specific, but a sustained non-zero value corroborates a slow output path. |
-| `total_net_output_bytes` / `net_output_bytes_total` | `INFO stats` / Prometheus counter | Output progress. Compare its rate with queue growth to distinguish a stalled socket from a publisher-side workload change. |
-| `total_writes_processed` / `net_output_send_total` | `INFO stats` / Prometheus counter | Number of completed output writes. |
-| `reply_duration_seconds` | Prometheus counter | Time spent in reply send operations. It is process-wide and not Pub/Sub-specific. |
-| `cmdstat_publish` and command latency data | `INFO commandstats` and command-latency facilities | Publisher command latency includes time spent parked in `EnsureMemoryBudget`, but there is no dedicated publisher-wait duration or wait-count metric. |
-
-`dispatch_queue_entries` and the per-connection
-`dispatch_q_subscriber_bytes_` value are maintained internally but are not
-currently rendered as public `INFO` or Prometheus metrics. There is also no
-metric that identifies which I/O thread or subscriber is holding the
-`publish_buffer_limit`; correlate queue bytes, send delay, output progress,
-and the subscriber connection's behavior.
-
-### Practical diagnosis
-
-1. Confirm that `dispatch_queue_subscriber_bytes` is growing or remains near
-   the configured `publish_buffer_limit`.
-2. Check `send_delay_ms` and output counters to determine whether socket writes
-   are progressing.
-3. Check `pipeline_queue_length`, `pipeline_queue_bytes`, and
-   `pipeline_throttle_total` for competing data-path pressure.
-4. Identify the slow subscriber and make it read or disconnect. Once its
-   queued messages are processed or discarded during cleanup, the per-thread
-   byte total falls and blocked publishers resume.
-
-The existing regression coverage for this behavior is
+These signals are aggregated and do not identify the specific subscriber
+holding the budget. `pipeline_queue_bytes` and `pipeline_throttle_total` can
+indicate competing data-path pressure. Existing coverage is
 `tests/dragonfly/connection_test.py::test_publish_stuck`, which verifies that
-publishers park at a small buffer limit and resume after the stuck subscriber
-disconnects, and `test_pubsub_unsubscribe`, which exercises delayed messages
-while a subscriber leaves Pub/Sub mode.
+publishers resume after the stuck subscriber disconnects.
 
 ## Cluster Mode Integration
 
