@@ -19,12 +19,12 @@ from redis.exceptions import MovedError
 
 from . import dfly_args
 from .instance import DflyInstanceFactory, DflyInstance
-from .replication_test import check_all_replicas_finished
 from .seeder import DebugPopulateSeeder
 from .utility import (
     DflySeederFactory,
     ExpirySeeder,
     assert_eventually,
+    check_all_replicas_finished,
     extract_int_after_prefix,
     info_tick_timer,
     is_saving,
