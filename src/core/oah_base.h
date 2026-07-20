@@ -15,20 +15,19 @@
 namespace dfly {
 
 // A key reduced once to the bytes used for hashing and comparison: 7-bit ASCII-packed into buf_
-// when worth it (ascii, length 8..128), else a view of the original bytes. Uses the shared
-// detail::bitpacking codec. Non-copyable: content() may alias buf_.
+// when worth it (ascii, length 8..128) via the shared detail::ascii_try_pack codec, else a view
+// of the original bytes. Non-copyable: content() may alias buf_.
 class ASCIIStr {
  public:
   static constexpr uint32_t kMinLen = 8;    // shorter strings pack to the same size, so stay raw
   static constexpr uint32_t kMaxLen = 128;  // largest length we ascii-encode
 
-  explicit ASCIIStr(std::string_view s) : len_(static_cast<uint32_t>(s.size())) {
-    if (s.size() >= kMinLen && s.size() <= kMaxLen &&
-        detail::validate_ascii_fast(s.data(), s.size())) {
-      detail::ascii_pack_simd2(s.data(), s.size(), reinterpret_cast<uint8_t*>(buf_));
-      content_ = {buf_, detail::binpacked_len(s.size())};
-    } else {
-      content_ = s;
+  explicit ASCIIStr(std::string_view s) : content_(s), len_(static_cast<uint32_t>(s.size())) {
+    if (s.size() >= kMinLen && s.size() <= kMaxLen) {
+      const size_t packed =
+          detail::ascii_try_pack(s.data(), s.size(), reinterpret_cast<uint8_t*>(buf_));
+      if (packed)
+        content_ = std::string_view{buf_, packed};
     }
   }
 

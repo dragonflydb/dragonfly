@@ -225,6 +225,8 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func, bool allow_yield)
     VisitSet(pv.RObjPtr(), [&](auto* set) {
       for (auto it = set->begin(); it != set->end(); ++it) {
         YieldLongIteration(allow_yield);
+        // `key` owns the decoded bytes for OAH-encoded members; the ContainerEntry only views them,
+        // so it is valid for the duration of the `func` call. `func` must copy to retain it.
         auto key = Key(it);
         const std::string_view key_view = GetKeyView(key);
         if (!func(ContainerEntry{key_view.data(), key_view.size()})) {

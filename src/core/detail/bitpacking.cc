@@ -202,6 +202,31 @@ void ascii_pack2(const char* ascii, size_t len, uint8_t* bin) {
   }
 }
 
+size_t ascii_try_pack(const char* ascii, size_t len, uint8_t* bin) {
+  const uint8_t* src = reinterpret_cast<const uint8_t*>(ascii);
+  uint8_t* out = bin;
+  uint8_t hi = 0;  // OR of every byte; bit 7 set means some byte was >= 128 (not ascii)
+  size_t i = 0;
+
+  for (; i + 8 <= len; i += 8) {  // 8 bytes -> 7: byte j supplies bits [7*j, 7*j+6] of val
+    uint64_t val = 0;
+    for (unsigned j = 0; j < 8; ++j) {
+      hi |= src[i + j];
+      val |= static_cast<uint64_t>(src[i + j] & 0x7F) << (7 * j);
+    }
+    for (unsigned j = 0; j < 7; ++j)  // low 7 bytes, least-significant first (endian-neutral)
+      out[j] = static_cast<uint8_t>(val >> (8 * j));
+    out += 7;
+  }
+
+  for (; i < len; ++i) {  // tail (< 8 bytes) stays verbatim
+    hi |= src[i];
+    *out++ = src[i];
+  }
+
+  return (hi & 0x80) ? 0 : static_cast<size_t>(out - bin);
+}
+
 // The algo - do in parallel what ascii_pack does on two uint64_t integers
 void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin) {
 #if defined(__SSE3__) || defined(__aarch64__)
