@@ -203,6 +203,9 @@ class ServerFamily {
   void PauseReplication(bool pause) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
+  // Investigation-only (DEBUG REPLDIAG). Remove once closed.
+  std::optional<int> GetReplicaMasterSocketUnreadBytes() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
   const std::string& master_replid() const {
     return master_replid_;
   }

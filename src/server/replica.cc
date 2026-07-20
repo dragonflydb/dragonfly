@@ -1418,6 +1418,10 @@ std::string Replica::GetSyncId() const {
   return master_context_.dfly_session_id;
 }
 
+int Replica::GetMasterSocketUnreadBytes() {
+  return GetSocketUnreadBytes();
+}
+
 string Replica::GetClientInfo() const {
   auto f = [this]() {
     facade::ClientInfo ci;

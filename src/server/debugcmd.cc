@@ -695,6 +695,9 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "    Prints histogram of object sizes.",
         "STACKTRACE",
         "    Prints the stacktraces of all current fibers to the logs.",
+        "REPLDIAG",
+        "    Investigation-only: like STACKTRACE, plus (if this instance is a redis-"
+        "    stream replica) the unread byte count in the master socket's kernel recv buffer.",
         "SHARDS",
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
         "TOPK ON [min_freq] | OFF [max_keys]",
@@ -781,6 +784,10 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (subcmd == "STACKTRACE") {
     return Stacktrace(cmd_cntx);
+  }
+
+  if (subcmd == "REPLDIAG") {
+    return ReplDiag(cmd_cntx);
   }
 
   if (subcmd == "SHARDS") {
@@ -1354,6 +1361,35 @@ void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
 
 void DebugCmd::Stacktrace(CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  fb2::Mutex m;
+  shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+    EngineShard* es = EngineShard::tlocal();
+    string txq;
+    if (es) {
+      EngineShard::TxQueueInfo txq_info = es->AnalyzeTxQueue();
+      txq = txq_info.Format();
+    }
+    std::unique_lock lk(m);
+    LOG_IF(INFO, !txq.empty()) << "Shard" << index << ": " << txq;
+    fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+  });
+  base::FlushLogs();
+  rb->SendOk();
+}
+
+// Investigation-only: dumps everything Stacktrace() does, plus (on a redis-stream
+// replica) the current unread byte count on the master socket, to tell apart "data is sitting
+// unread" (missed wakeup) from "genuinely nothing to read yet" at the moment of a stall. Remove
+// once the stalled-replica bug is closed.
+void DebugCmd::ReplDiag(CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  if (auto unread = sf_.GetReplicaMasterSocketUnreadBytes(); unread) {
+    LOG(WARNING) << "DEBUG REPLDIAG: master_socket_unread_bytes=" << *unread;
+  } else {
+    LOG(WARNING) << "DEBUG REPLDIAG: not a redis-stream replica (no master socket)";
+  }
+
   fb2::Mutex m;
   shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
     EngineShard* es = EngineShard::tlocal();

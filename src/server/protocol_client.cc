@@ -14,6 +14,7 @@ extern "C" {
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
+#include <sys/ioctl.h>
 
 #include <boost/asio/ip/tcp.hpp>
 #include <string>
@@ -260,6 +261,16 @@ void ProtocolClient::ShutdownSocket() {
 std::string ProtocolClient::SockInfo() const {
   auto* sock = Sock();
   return GetSocketInfo(sock ? sock->native_handle() : -1);
+}
+
+int ProtocolClient::GetSocketUnreadBytes() {
+  unique_lock lk(sock_mu_);
+  if (!sock_)
+    return -1;
+  int unread = 0;
+  if (ioctl(sock_->native_handle(), FIONREAD, &unread) != 0)
+    return -1;
+  return unread;
 }
 
 void ProtocolClient::DefaultErrorHandler(const GenericError& err) {

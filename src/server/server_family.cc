@@ -1651,6 +1651,17 @@ std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
   return nullopt;
 }
 
+std::optional<int> ServerFamily::GetReplicaMasterSocketUnreadBytes() {
+  util::fb2::LockGuard lk(replicaof_mu_);
+
+  if (!IsMaster()) {
+    auto repl_ptr = replica_;
+    CHECK(repl_ptr);
+    return repl_ptr->GetMasterSocketUnreadBytes();
+  }
+  return nullopt;
+}
+
 vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
   std::vector<facade::Listener*> listeners;
   listeners.reserve(listeners.size());
