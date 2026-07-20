@@ -12,6 +12,31 @@
 #include "base/histogram.h"
 namespace facade {
 
+// Counters for the Pub/Sub back-pressure / slow-subscriber protection policy. Exported as the
+// prometheus counter `pubsub_backpressure_events_total` with a bounded `event` label.
+struct PubsubBackpressureStats {
+  // Transitions where a thread's queued Pub/Sub bytes crossed from at/below the soft limit to
+  // above.
+  uint64_t soft_limit_crossing = 0;
+  // Publisher wait episodes caused by reaching the hard limit.
+  uint64_t hard_limit_throttled = 0;
+
+  // Subscriber connections closed by the policy after the soft-limit and stuck-send conditions
+  // were met.
+  uint64_t forced_disconnect = 0;
+
+  // Queued Pub/Sub messages discarded during policy-driven disconnects.
+  uint64_t messages_discarded = 0;
+
+  PubsubBackpressureStats& operator+=(const PubsubBackpressureStats& o) {
+    soft_limit_crossing += o.soft_limit_crossing;
+    hard_limit_throttled += o.hard_limit_throttled;
+    forced_disconnect += o.forced_disconnect;
+    messages_discarded += o.messages_discarded;
+    return *this;
+  }
+};
+
 struct ConnectionStats {
   size_t read_buf_capacity = 0;  // total capacity of input buffers
   size_t connection_memory_bytes = 0;
@@ -71,6 +96,9 @@ struct ConnectionStats {
   // V2 Only: Number of times parse-in-proactor enqueued at least one command from the OnRecv
   // callback.
   uint64_t proactor_parse = 0;
+
+  // Pub/Sub back-pressure / slow-subscriber protection counters.
+  PubsubBackpressureStats pubsub_backpressure;
 
   ConnectionStats& operator+=(const ConnectionStats& o);
 };

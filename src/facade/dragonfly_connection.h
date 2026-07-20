@@ -402,6 +402,17 @@ class Connection : public util::Connection {
   // Returns true if the fiber should terminate (e.g. Migration).
   bool ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op);
 
+  // Returns true if a control-path async operation is currently running inside ProcessAdminMessage
+  // and has been in progress for at least `timeout_cycles` (base::CycleClock cycles).
+  bool IsAsyncOpOverdue(uint64_t timeout_cycles) const;
+
+  // Slow-subscriber protection (RESP V1): evict queued PubMessage items from dispatch_q_ (releasing
+  // their per-thread subscriber accounting immediately), account the discard metrics, log a
+  // rate-limited diagnostic, and MarkForClose() this connection. Non-blocking: it never waits,
+  // joins, or interrupts the in-flight send. The connection closes via the normal shutdown path
+  // once the pending send returns.
+  void RequestPubsubClose();
+
   // Processes the next Pipeline command from parsed_head_.
   void ProcessPipelineCommandV1();
 
@@ -746,12 +757,17 @@ class Connection : public util::Connection {
       // The recv callback cannot return a status, so IoLoopV2 observes this flag and surfaces
       // ParserStatus::ERROR to close the connection and send the protocol-error reply.
       bool proactor_parse_error_ : 1;
+
+      bool request_shutdown_ : 1;  // set when the connection is requested to shutdown
     };
   };
 
   ListenerType listener_type_ = ListenerType::MAIN_RESP;
 
-  bool request_shutdown_ = false;
+  // Monotonic start time (base::CycleClock::Now()) of the control-path async operation currently
+  // executing inside ProcessAdminMessage's std::visit, or 0 when none is in progress. Used by the
+  // slow-subscriber protection policy to detect a Pub/Sub send that has been blocked too long.
+  uint64_t async_op_start_cycle_ = 0;
 };
 
 }  // namespace facade

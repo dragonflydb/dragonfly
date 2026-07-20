@@ -149,6 +149,21 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 
   AppendMetricWithoutLabels("pipeline_throttle_total", "", conn_stats.pipeline_throttle_count,
                             MetricType::COUNTER, &resp->body());
+
+  {
+    const auto& pbp = conn_stats.pubsub_backpressure;
+    AppendMetricHeader("pubsub_backpressure_events_total",
+                       "Pub/Sub back-pressure and slow-subscriber protection events by type",
+                       MetricType::COUNTER, &resp->body());
+    AppendMetricValue("pubsub_backpressure_events_total", pbp.soft_limit_crossing, {"event"},
+                      {"soft_limit"}, &resp->body());
+    AppendMetricValue("pubsub_backpressure_events_total", pbp.hard_limit_throttled, {"event"},
+                      {"hard_limit"}, &resp->body());
+    AppendMetricValue("pubsub_backpressure_events_total", pbp.forced_disconnect, {"event"},
+                      {"forced_disconnect"}, &resp->body());
+    AppendMetricValue("pubsub_backpressure_events_total", pbp.messages_discarded, {"event"},
+                      {"messages_discarded"}, &resp->body());
+  }
   AppendMetricWithoutLabels("pipeline_commands_total", "", conn_stats.pipelined_cmd_cnt,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_calls_total", "", conn_stats.pipeline_dispatch_calls,

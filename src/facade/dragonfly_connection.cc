@@ -82,8 +82,16 @@ ABSL_FLAG(uint32_t, pipeline_queue_limit, 10000,
           "may require increasing this limit to prevent the risk of deadlocking."
           "See https://github.com/dragonflydb/dragonfly/discussions/3997 for details");
 
-ABSL_FLAG(strings::MemoryBytesFlag, publish_buffer_limit, 128_MB,
-          "Amount of memory to use for storing pub commands in bytes - per IO thread");
+ABSL_FLAG(strings::MemoryBytesFlag, publish_buffer_limit, 196_MB,
+          "Amount of memory to use for storing pub commands in bytes - per IO thread. This is the "
+          "soft Pub/Sub back-pressure limit; publishers are only parked once the per-thread "
+          "subscriber memory reaches this value times the internal hard-limit multiplier.");
+
+ABSL_FLAG(uint32_t, pubsub_slow_subscriber_timeout_ms, 0,
+          "If a subscriber connection keeps a Pub/Sub socket write blocked for at least this many "
+          "milliseconds while the per-IO-thread subscriber memory is above the soft "
+          "publish_buffer_limit, Dragonfly closes that subscriber to release the back-pressure. "
+          "0 disables this slow-subscriber protection. Startup-only, like publish_buffer_limit.");
 
 ABSL_FLAG(uint32_t, pipeline_squash, 1,
           "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
@@ -156,6 +164,11 @@ using nonstd::make_unexpected;
 namespace facade {
 
 namespace {
+
+// Multiplier applied to the soft publish_buffer_limit to derive the hard Pub/Sub back-pressure
+// limit. Publishers are only parked in EnsureMemoryBudget once the per-thread subscriber memory
+// reaches soft_limit * kPubSubHardMultiplier.
+constexpr uint32_t kPubSubHardMultiplier = 4;
 
 void SendProtocolError(RespSrvParser::Result pres, SinkReplyBuilder* builder) {
   constexpr string_view res = "-ERR Protocol error: "sv;
@@ -468,8 +481,27 @@ struct QueueBackpressure {
   QueueBackpressure() {
   }
 
-  // Block until subscriber memory usage is below limit, can be called from any thread.
+  // Block until subscriber memory usage is below the hard limit, can be called from any thread.
   void EnsureBelowLimit();
+
+  // Hard Pub/Sub back-pressure limit (soft publish_buffer_limit times kPubSubHardMultiplier).
+  // EnsureBelowLimit only parks publishers once subscriber memory reaches this value.
+  size_t PubSubHardLimit() const {
+    return publish_buffer_limit * kPubSubHardMultiplier;
+  }
+
+  // True while the per-thread subscriber memory is above the soft publish_buffer_limit, i.e. a
+  // Pub/Sub back-pressure episode is in progress. Read on the owning I/O thread.
+  bool IsSubscriberSoftLimited() const {
+    return subscriber_bytes.load(memory_order_relaxed) > publish_buffer_limit;
+  }
+
+  // Accounts `mem` subscriber bytes on this thread and, on an at/below-soft -> above-soft
+  // transition, counts one soft_limit_crossing event. Called only on the owning I/O thread.
+  void AddSubscriberBytes(size_t mem);
+
+  // Releases `mem` subscriber bytes on this thread. Called only on the owning I/O thread.
+  void SubSubscriberBytes(size_t mem);
 
   // Checks if backpressure should be applied.
   // 'size' should be the total bytes currently consumed by all connections on this thread.
@@ -523,8 +555,30 @@ struct QueueBackpressure {
 };
 
 void QueueBackpressure::EnsureBelowLimit() {
-  pubsub_ec.await(
-      [this] { return subscriber_bytes.load(memory_order_relaxed) <= publish_buffer_limit; });
+  const size_t hard_limit = PubSubHardLimit();
+  // Fast path: below the hard red line, publishers proceed without parking (they only get
+  // throttled by the soft limit via the slow-subscriber protection policy, not here).
+  if (subscriber_bytes.load(memory_order_relaxed) <= hard_limit)
+    return;
+
+  // We are about to park a publisher - count one hard-limit throttle episode. Incremented on the
+  // publisher's own thread-local stats, so it is safe even though this qbp belongs to another
+  // thread.
+  ++tl_facade_stats->conn_stats.pubsub_backpressure.hard_limit_throttled;
+  pubsub_ec.await([&] { return subscriber_bytes.load(memory_order_relaxed) <= hard_limit; });
+}
+
+void QueueBackpressure::AddSubscriberBytes(size_t mem) {
+  // subscriber_bytes is only written by the owning I/O thread, so the fetch_add result is the true
+  // previous value. Count one soft_limit_crossing on the at/below-soft -> above-soft transition.
+  size_t before = subscriber_bytes.fetch_add(mem, memory_order_relaxed);
+  if (before <= publish_buffer_limit && before + mem > publish_buffer_limit)
+    ++tl_facade_stats->conn_stats.pubsub_backpressure.soft_limit_crossing;
+}
+
+void QueueBackpressure::SubSubscriberBytes(size_t mem) {
+  DCHECK_GE(subscriber_bytes.load(memory_order_relaxed), mem);
+  subscriber_bytes.fetch_sub(mem, memory_order_relaxed);
 }
 
 // Global array for each io thread to keep track of the total memory usage of the dispatch queues.
@@ -554,6 +608,12 @@ thread_local bool pipeline_prioritize_large_batches_cached =
     absl::GetFlag(FLAGS_pipeline_prioritize_large_batches);
 thread_local bool pipeline_parse_in_proactor_cached =
     absl::GetFlag(FLAGS_pipeline_parse_in_proactor);
+
+// Cached deadline (in CycleClock cycles) after which a continuously blocked Pub/Sub send makes a
+// subscriber eligible for the slow-subscriber protection close. 0 means the protection is disabled.
+// Derived from the startup-only --pubsub_slow_subscriber_timeout_ms flag.
+thread_local uint64_t pubsub_slow_subscriber_timeout_cycles_cached = base::CycleClock::FromUsec(
+    uint64_t(absl::GetFlag(FLAGS_pubsub_slow_subscriber_timeout_ms)) * 1000);
 
 }  // namespace
 
@@ -2014,8 +2074,18 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
   // Execution
   auto replies_recorded_before = reply_builder_->RepliesRecorded();
   cc_->async_dispatch = true;
+  // Track the control-path async operation so the slow-subscriber protection policy can observe how
+  // long the current Pub/Sub send has been blocked (see SendPubMessageAsync).
+  async_op_start_cycle_ = base::CycleClock::Now();
   std::visit(*async_op, msg->handle);
+  async_op_start_cycle_ = 0;
   cc_->async_dispatch = false;
+
+  // A slow-subscriber close may have been requested from SendPubMessageAsync while we were parked
+  // in the send above. Stop normal processing; MarkForClose() already set the reply-builder error,
+  // so the AsyncFiber loop will observe it and run the connection's shutdown path.
+  if (request_shutdown_)
+    return false;
 
   // Post-execution Flush
   // We force a flush If the message is supposed to reply (e.g. PubSub) but didn't write to the
@@ -2119,8 +2189,10 @@ void Connection::AsyncFiber() {
 
     reply_builder_->SetBatchMode(GetPendingMessageCount() > 1);
 
+    // Publishers park at the hard limit, so we only need to wake them when the subscriber memory
+    // transitions back below it.
     bool subscriber_over_limit =
-        conn_stats.dispatch_queue_subscriber_bytes >= qbp.publish_buffer_limit;
+        conn_stats.dispatch_queue_subscriber_bytes >= qbp.PubSubHardLimit();
 
     // The below if/else conditionally choose between 3 message processing policies:
     // 1. Pipeline squashing
@@ -2203,7 +2275,7 @@ void Connection::AsyncFiber() {
     }
 
     if (subscriber_over_limit &&
-        conn_stats.dispatch_queue_subscriber_bytes < qbp.publish_buffer_limit)
+        conn_stats.dispatch_queue_subscriber_bytes <= qbp.PubSubHardLimit())
       qbp.pubsub_ec.notify();
   }
 
@@ -2303,7 +2375,74 @@ bool Connection::IsCurrentlyDispatching() const {
   return cc_->async_dispatch || cc_->sync_dispatch;
 }
 
+bool Connection::IsAsyncOpOverdue(uint64_t timeout_cycles) const {
+  if (async_op_start_cycle_ == 0)
+    return false;
+  return base::CycleClock::Now() - async_op_start_cycle_ >= timeout_cycles;
+}
+
+void Connection::RequestPubsubClose() {
+  QueueBackpressure& qbp = GetQueueBackpressure();
+
+  // Evict already-queued PubMessage items, releasing their per-thread subscriber accounting
+  // immediately. Other control messages (checkpoints, migration, ...) are left for the normal
+  // connection cleanup so their waiters/statistics stay consistent.
+  size_t discarded_msgs = 0, discarded_bytes = 0;
+  for (auto it = dispatch_q_.begin(); it != dispatch_q_.end();) {
+    if (it->IsPubMsg()) {
+      ++discarded_msgs;
+      discarded_bytes += it->UsedMemory();
+      UpdateDispatchStats(*it, false /* subtract */);
+      it = dispatch_q_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  // The close is non-blocking but guaranteed: MarkForClose() sets the reply-builder error, so the
+  // AsyncFiber loop tears the connection down once the parked send returns. RequestPubsubClose runs
+  // at most once per connection (further pub messages are dropped via request_shutdown_), so the
+  // disconnect is counted exactly once here.
+  auto& bp = tl_facade_stats->conn_stats.pubsub_backpressure;
+  ++bp.forced_disconnect;
+  bp.messages_discarded += discarded_msgs;
+
+  // Rate-limited structured diagnostic. Bounded fields only - the connection id goes to the log,
+  // not to a metric label.
+  LOG_EVERY_T(WARNING, 1) << "Closing slow Pub/Sub subscriber " << DebugInfo()
+                          << " tid=" << ProactorBase::me()->GetPoolIndex()
+                          << " publish_buffer_limit=" << qbp.publish_buffer_limit
+                          << " thread_subscriber_bytes="
+                          << qbp.subscriber_bytes.load(memory_order_relaxed)
+                          << " blocked_send_usec="
+                          << base::CycleClock::ToUsec(base::CycleClock::Now() -
+                                                      async_op_start_cycle_)
+                          << " discarded_entries=" << discarded_msgs
+                          << " discarded_bytes=" << discarded_bytes;
+
+  // Non-blocking: only mark the reply builder error and request_shutdown_.
+  MarkForClose();
+
+  // The subscriber budget just dropped - wake every parked publisher so they can re-check.
+  qbp.pubsub_ec.notifyAll();
+}
+
 void Connection::SendPubMessageAsync(PubMessage msg) {
+  // Slow-subscriber protection (RESP V1): once a close was requested, drop further pub messages
+  // instead of repopulating the queue. Cleanup releases accounting and wakes publishers.
+  if (request_shutdown_)
+    return;
+
+  // Two conjunctive conditions: the thread is in a soft-limit back-pressure episode AND this
+  // connection's active Pub/Sub send has been blocked continuously past the configured deadline.
+  // A slow send below the budget, or a full budget with a still-progressing send, is left alone.
+  uint64_t timeout_cycles = pubsub_slow_subscriber_timeout_cycles_cached;
+  if (timeout_cycles > 0 && GetQueueBackpressure().IsSubscriberSoftLimited() &&
+      IsAsyncOpOverdue(timeout_cycles)) {
+    RequestPubsubClose();
+    return;  // discard the message that triggered the close
+  }
+
   SendAsync({make_unique<PubMessage>(std::move(msg))});
 }
 
@@ -2449,7 +2588,7 @@ void Connection::UpdateDispatchStats(const MessageHandle& msg, bool add) {
     conn_stats.dispatch_queue_bytes += mem;
     dispatch_q_bytes_ += mem;
     if (msg.IsPubMsg()) {
-      qbp.subscriber_bytes.fetch_add(mem, std::memory_order_relaxed);
+      qbp.AddSubscriberBytes(mem);
       conn_stats.dispatch_queue_subscriber_bytes += mem;
       dispatch_q_subscriber_bytes_ += mem;
     }
@@ -2462,7 +2601,7 @@ void Connection::UpdateDispatchStats(const MessageHandle& msg, bool add) {
     if (msg.IsPubMsg()) {
       DCHECK_GE(conn_stats.dispatch_queue_subscriber_bytes, mem);
       DCHECK_GE(qbp.subscriber_bytes.load(std::memory_order_relaxed), mem);
-      qbp.subscriber_bytes.fetch_sub(mem, std::memory_order_relaxed);
+      qbp.SubSubscriberBytes(mem);
       conn_stats.dispatch_queue_subscriber_bytes -= mem;
       dispatch_q_subscriber_bytes_ -= mem;
     }
@@ -2625,7 +2764,7 @@ void Connection::IncreaseConnStats() {
   if (dispatch_q_subscriber_bytes_ > 0) {
     auto& qbp = GetQueueBackpressure();
     conn_stats.dispatch_queue_subscriber_bytes += dispatch_q_subscriber_bytes_;
-    qbp.subscriber_bytes.fetch_add(dispatch_q_subscriber_bytes_, std::memory_order_relaxed);
+    qbp.AddSubscriberBytes(dispatch_q_subscriber_bytes_);
   }
 
   conn_stats_registered_ = true;
@@ -2668,7 +2807,7 @@ void Connection::DecreaseConnStats() {
     DCHECK_GE(conn_stats.dispatch_queue_subscriber_bytes, dispatch_q_subscriber_bytes_);
     conn_stats.dispatch_queue_subscriber_bytes -= dispatch_q_subscriber_bytes_;
     DCHECK_GE(qbp.subscriber_bytes.load(std::memory_order_relaxed), dispatch_q_subscriber_bytes_);
-    qbp.subscriber_bytes.fetch_sub(dispatch_q_subscriber_bytes_, std::memory_order_relaxed);
+    qbp.SubSubscriberBytes(dispatch_q_subscriber_bytes_);
   }
   DCHECK_GE(conn_stats.pipeline_queue_entries, parsed_cmd_q_len_);
   conn_stats.pipeline_queue_entries -= parsed_cmd_q_len_;
