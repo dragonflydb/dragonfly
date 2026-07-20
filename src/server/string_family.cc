@@ -1376,37 +1376,24 @@ cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
-  ExpT exp_type_value = ExpT::EX;
-  int64_t int_arg = 0;
-  bool persist = false;
-  bool defined = false;
+  static constexpr char kGetExExpiryErr[] = "invalid expire time in 'getex' command";
+  using ExpiryValue = Validated<int64_t, Bounded<int64_t{1}, INT64_MAX, kGetExExpiryErr>>;
+  static constexpr auto kGrammar = Compile(Options(ExpiryOrPersist<ExpiryValue>()));
+  auto opts = kGrammar.Apply(&parser);
 
-  auto expiry = [&](ExpT type) {
-    return [&, type](CmdArgParser* p) {
-      exp_type_value = type;
-      int_arg = p->Next<int64_t>();
-      defined = true;
-    };
-  };
-  // TODO: remove runtime parsing (migrate to cap grammar).
-  parser.Apply(OneOf(Tag("EX", expiry(ExpT::EX)), Tag("PX", expiry(ExpT::PX)),
-                     Tag("EXAT", expiry(ExpT::EXAT)), Tag("PXAT", expiry(ExpT::PXAT)),
-                     Exist("PERSIST", &persist)));
   if (!parser.Finalize()) {
     co_return parser.TakeError().MakeReply();
-  }
-  if (defined && int_arg <= 0) {
-    co_return facade::ErrorReply{InvalidExpireTime("getex")};
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringResult> {
     auto op_args = t->GetOpArgs(shard);
 
     DbSlice::ExpireParams exp_params;
-    if (defined) {
-      exp_params = DbSlice::ExpireParams{exp_type_value, int_arg, op_args.db_cntx.time_now_ms};
+    if (opts.expiry.value) {
+      exp_params =
+          DbSlice::ExpireParams{opts.expiry.type, *opts.expiry.value, op_args.db_cntx.time_now_ms};
     }
-    exp_params.persist = persist;
+    exp_params.persist = opts.persist;
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
     if (!it_res)

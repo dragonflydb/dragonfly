@@ -846,11 +846,8 @@ void DebugCmd::Shutdown() {
 }
 
 void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
-  bool no_save = false;
-
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  // TODO: remove runtime parsing (single option -> Check).
-  parser.Apply(Exist("NOSAVE", &no_save));
+  bool no_save = parser.Check("NOSAVE");
   if (!parser.Finalize()) {
     (void)parser.TakeError();
     return cmd_cntx->SendError("DEBUG RELOAD only supports the NOSAVE options.");

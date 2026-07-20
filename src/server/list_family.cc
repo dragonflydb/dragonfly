@@ -1339,21 +1339,23 @@ void CmdLLen(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdLPos(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, elem] = parser.Next<string_view, string_view>();
 
-  int rank = 1;
-  std::optional<uint32_t> count;
-  uint32_t max_len = 0;
+  struct LposOpts {
+    int rank = 1;
+    std::optional<uint32_t> count;
+    uint32_t max_len = 0;
+  };
 
-  // TODO: remove runtime parsing (migrate to cap grammar).
-  parser.ApplyOrSkip(Tag("RANK", &rank), Tag("COUNT", &count), Tag("MAXLEN", &max_len));
-
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  static constexpr auto kGrammar = Compile(
+      Options(Field<Validated<int, NotEq<0, facade::kInvalidIntErr>>>("RANK", &LposOpts::rank),
+              Field("COUNT", &LposOpts::count), Field("MAXLEN", &LposOpts::max_len)));
+  auto opts = kGrammar.Apply(&parser);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (rank == 0)
-    return rb->SendError(kInvalidIntErr);
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
 
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
-    return OpPos(t->GetOpArgs(shard), key, elem, rank, count.value_or(1), max_len);
+    return OpPos(t->GetOpArgs(shard), key, elem, opts.rank, opts.count.value_or(1), opts.max_len);
   };
 
   Transaction* trans = cmd_cntx->tx();
@@ -1365,7 +1367,7 @@ void CmdLPos(CmdArgParser parser, CommandContext* cmd_cntx) {
     return rb->SendError(result.status());
   }
 
-  if (!count.has_value()) {
+  if (!opts.count.has_value()) {
     if (result->empty()) {
       rb->SendNull();
     } else {

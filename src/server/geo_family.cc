@@ -42,11 +42,11 @@ enum Errors {
 };
 
 const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
-const char kFromMemberLonglatErr[] =
+constexpr char kFromMemberLonglatErr[] =
     "FROMMEMBER and FROMLONLAT options at the same time are not compatible";
-const char kByRadiusBoxErr[] = "BYRADIUS and BYBOX options at the same time are not compatible";
-const char kAscDescErr[] = "ASC and DESC options at the same time are not compatible";
-const char kStoreTypeErr[] = "STORE and STOREDIST options at the same time are not compatible";
+constexpr char kByRadiusBoxErr[] = "BYRADIUS and BYBOX options at the same time are not compatible";
+constexpr char kAscDescErr[] = "ASC and DESC options at the same time are not compatible";
+constexpr char kStoreTypeErr[] = "STORE and STOREDIST options at the same time are not compatible";
 const char kStoreCompatRadErr[] =
     "STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORDS options";
 const char kStoreCompatByMemberErr[] =
@@ -77,9 +77,16 @@ struct GeoPoint {
 };
 using GeoArray = std::vector<GeoPoint>;
 
-enum class Sorting { kUnsorted, kAsc, kDesc, kError };
-enum class GeoStoreType { kNoStore, kStoreHash, kStoreDist, kError };
+enum class Sorting { kUnsorted, kAsc, kDesc };
+enum class GeoStoreType { kNoStore, kStoreHash, kStoreDist };
+enum class GeoSearchSource { kMember, kLonLat };
 struct GeoSearchOpts {
+  GeoSearchOpts() = default;
+
+  explicit GeoSearchOpts(bool allow_store, string_view count_err = {})
+      : allow_store(allow_store), count_err(count_err) {
+  }
+
   double conversion = 0;
   uint64_t count = std::numeric_limits<uint64_t>::max();
   Sorting sorting = Sorting::kUnsorted;
@@ -89,10 +96,19 @@ struct GeoSearchOpts {
   bool withhash = 0;
   GeoStoreType store = GeoStoreType::kNoStore;
   string_view store_key;
+  bool allow_store = false;
+  string_view count_err;
 
   bool HasWithStatement() const {
     return withdist || withcoord || withhash;
   }
+};
+
+struct GeoSearchParse {
+  GeoSearchOpts geo_ops;
+  optional<GeoSearchSource> source;
+  string_view member;
+  GeoShape shape{};
 };
 
 bool ValidateLongLat(double longitude, double latitude) {
@@ -209,35 +225,69 @@ bool HandleGeoParserFinalize(const GeoShape& shape, CmdArgParser* parser,
   return true;
 }
 
-void SetSorting(GeoSearchOpts* geo_ops, Sorting sorting) {
-  geo_ops->sorting = geo_ops->sorting == Sorting::kUnsorted ? sorting : Sorting::kError;
-}
-
 void ParseCount(CmdArgParser* parser, GeoSearchOpts* geo_ops, string_view err_msg = {}) {
   geo_ops->count = parser->Next<uint64_t>(err_msg);
   geo_ops->any = parser->Check("ANY");
 }
 
-void SetStore(GeoSearchOpts* geo_ops, GeoStoreType store, string_view key) {
-  geo_ops->store_key = key;
-  geo_ops->store = geo_ops->store == GeoStoreType::kNoStore ? store : GeoStoreType::kError;
+void ParseGeoResultCount(CmdArgParser* parser, GeoSearchOpts* geo_ops) {
+  ParseCount(parser, geo_ops, geo_ops->count_err);
 }
 
-void ParseGeoResultOptions(CmdArgParser* parser, GeoSearchOpts* geo_ops, bool allow_store,
-                           string_view count_err = {}) {
-  parser->Apply(Tag("ASC", [&](CmdArgParser*) { SetSorting(geo_ops, Sorting::kAsc); }),
-                Tag("DESC", [&](CmdArgParser*) { SetSorting(geo_ops, Sorting::kDesc); }),
-                Tag("COUNT", [&](CmdArgParser* p) { ParseCount(p, geo_ops, count_err); }),
-                Exist("WITHCOORD", &geo_ops->withcoord), Exist("WITHDIST", &geo_ops->withdist),
-                Exist("WITHHASH", &geo_ops->withhash),
-                If(allow_store, Tag("STORE",
-                                    [&](CmdArgParser* p) {
-                                      SetStore(geo_ops, GeoStoreType::kStoreHash, p->Next());
-                                    })),
-                If(allow_store, Tag("STOREDIST", [&](CmdArgParser* p) {
-                     SetStore(geo_ops, GeoStoreType::kStoreDist, p->Next());
-                   })));
+void ParseGeoResultOptions(CmdArgParser* parser, GeoSearchOpts* geo_ops) {
+  static constexpr auto kGrammar = Compile(Options(
+      OneOf(kAscDescErr,
+            Map(&GeoSearchOpts::sorting, "ASC", Sorting::kAsc, "DESC", Sorting::kDesc)),
+      Action("COUNT", ParseGeoResultCount), Exist("WITHCOORD", &GeoSearchOpts::withcoord),
+      Exist("WITHDIST", &GeoSearchOpts::withdist), Exist("WITHHASH", &GeoSearchOpts::withhash),
+      If(&GeoSearchOpts::allow_store,
+         OneOf(kStoreTypeErr,
+               TagValue("STORE", &GeoSearchOpts::store, GeoStoreType::kStoreHash,
+                        &GeoSearchOpts::store_key),
+               TagValue("STOREDIST", &GeoSearchOpts::store, GeoStoreType::kStoreDist,
+                        &GeoSearchOpts::store_key)))));
+  kGrammar.Apply(parser, geo_ops);
 }
+
+void ParseGeoSearchFromMember(CmdArgParser* parser, GeoSearchParse* opts) {
+  opts->source = GeoSearchSource::kMember;
+  opts->member = parser->Next<string_view>();
+}
+
+void ParseLongLat(CmdArgParser* parser, GeoSearchParse* opts) {
+  opts->source = GeoSearchSource::kLonLat;
+  ParseLongLat(parser, opts->shape.xy);
+}
+
+void ParseGeoSearchByRadius(CmdArgParser* parser, GeoSearchParse* opts) {
+  GeoShape& shape = opts->shape;
+  shape.t.radius = parser->Next<double>();
+  opts->geo_ops.conversion = shape.conversion = parser->Next(ParseGeoUnit);
+  shape.type = CIRCULAR_TYPE;
+}
+
+void ParseGeoSearchByBox(CmdArgParser* parser, GeoSearchParse* opts) {
+  GeoShape& shape = opts->shape;
+  std::tie(shape.t.r.width, shape.t.r.height) = parser->Next<double, double>();
+  opts->geo_ops.conversion = shape.conversion = parser->Next(ParseGeoUnit);
+  shape.type = RECTANGLE_TYPE;
+}
+
+void ParseGeoSearchCount(CmdArgParser* parser, GeoSearchParse* opts) {
+  ParseCount(parser, &opts->geo_ops);
+}
+
+constexpr auto kGeoSearchGrammar = Compile(Options(
+    OneOf(kFromMemberLonglatErr, Action("FROMMEMBER", ParseGeoSearchFromMember),
+          Action<GeoSearchParse>("FROMLONLAT", ParseLongLat)),
+    OneOf(kByRadiusBoxErr, Action("BYRADIUS", ParseGeoSearchByRadius),
+          Action("BYBOX", ParseGeoSearchByBox)),
+    Into(&GeoSearchParse::geo_ops, OneOf(kAscDescErr, Map(&GeoSearchOpts::sorting, "ASC",
+                                                          Sorting::kAsc, "DESC", Sorting::kDesc))),
+    Action("COUNT", ParseGeoSearchCount),
+    Into(&GeoSearchParse::geo_ops, Exist("WITHCOORD", &GeoSearchOpts::withcoord)),
+    Into(&GeoSearchParse::geo_ops, Exist("WITHDIST", &GeoSearchOpts::withdist)),
+    Into(&GeoSearchParse::geo_ops, Exist("WITHHASH", &GeoSearchOpts::withhash))));
 
 void CmdGeoAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
@@ -453,19 +503,19 @@ void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
 }
 
 void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
-                           const GeoShape& shape_ref, string_view key, string_view member,
+                           const GeoShape& shape_ref, string_view key, optional<string_view> member,
                            const GeoSearchOpts& geo_ops) {
   GeoShape* shape = &(const_cast<GeoShape&>(shape_ref));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
   ShardId from_shard = Shard(key, shard_set->size());
 
-  if (!member.empty()) {
+  if (member) {
     // get shape.xy from member
     OpResult<double> member_score;
     auto cb = [&](Transaction* t, EngineShard* shard) {
       if (shard->shard_id() == from_shard) {
-        member_score = ZSetFamily::OpScore(t->GetOpArgs(shard), key, member);
+        member_score = ZSetFamily::OpScore(t->GetOpArgs(shard), key, *member);
       }
       return OpStatus::OK;
     };
@@ -617,65 +667,33 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
 }  // namespace
 
 void CmdGeoSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
-  GeoShape shape = {};
-  GeoSearchOpts geo_ops;
-  string_view member;
-  bool from_set = false, by_set = false;
   auto* builder = cmd_cntx->rb();
 
   string_view key = parser.Next();
+  auto st = kGeoSearchGrammar.Apply(&parser);
 
-  // TODO: remove runtime parsing (migrate to cap grammar).
-  parser.Apply(OneOf(Tag("FROMMEMBER",
-                         [&](CmdArgParser* p) {
-                           from_set = true;
-                           member = p->Next();
-                         }),
-                     Tag("FROMLONLAT",
-                         [&](CmdArgParser* p) {
-                           from_set = true;
-                           ParseLongLat(p, shape.xy);
-                         }))
-                   .Err(kFromMemberLonglatErr),
-               OneOf(Tag("BYRADIUS",
-                         [&](CmdArgParser* p) {
-                           by_set = true;
-                           ParseCircularShape(p, &shape, &geo_ops);
-                         }),
-                     Tag("BYBOX",
-                         [&](CmdArgParser* p) {
-                           by_set = true;
-                           std::tie(shape.t.r.width, shape.t.r.height) = p->Next<double, double>();
-                           geo_ops.conversion = shape.conversion = p->Next(ParseGeoUnit);
-                           shape.type = RECTANGLE_TYPE;
-                         }))
-                   .Err(kByRadiusBoxErr),
-               Tag("ASC", [&](CmdArgParser*) { SetSorting(&geo_ops, Sorting::kAsc); }),
-               Tag("DESC", [&](CmdArgParser*) { SetSorting(&geo_ops, Sorting::kDesc); }),
-               Tag("COUNT", [&](CmdArgParser* p) { ParseCount(p, &geo_ops); }),
-               Exist("WITHCOORD", &geo_ops.withcoord), Exist("WITHDIST", &geo_ops.withdist),
-               Exist("WITHHASH", &geo_ops.withhash));
-
-  if (HandleGeoParserFinalize(shape, &parser, cmd_cntx)) {
+  if (HandleGeoParserFinalize(st.shape, &parser, cmd_cntx)) {
     return;
   }
 
   // check mandatory options
-  if (!from_set || !by_set) {
+  if (!st.source || st.shape.type == 0) {
     return builder->SendError(kSyntaxErr);
-  } else if (geo_ops.sorting == Sorting::kError) {
-    return builder->SendError(kAscDescErr);
-  } else if (geo_ops.count == 0) {
+  } else if (st.geo_ops.count == 0) {
     return builder->SendError(kCountError);
   }
 
-  geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
-  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, member, geo_ops);
+  st.geo_ops.count = (st.geo_ops.count == UINT64_MAX) ? 0 : st.geo_ops.count;
+  optional<string_view> member;
+  if (*st.source == GeoSearchSource::kMember) {
+    member = st.member;
+  }
+  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, st.shape, key, member, st.geo_ops);
 }
 
 void GeoRadiusByMemberGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool read_only) {
   GeoShape shape = {};
-  GeoSearchOpts geo_ops;
+  GeoSearchOpts geo_ops{!read_only, kSyntaxErr};
   // parse arguments
   string_view key = parser.Next();
   // member to latlong, set shape.xy
@@ -684,29 +702,26 @@ void GeoRadiusByMemberGeneric(CmdArgParser parser, CommandContext* cmd_cntx, boo
   auto* builder = cmd_cntx->rb();
   ParseCircularShape(&parser, &shape, &geo_ops);
 
-  ParseGeoResultOptions(&parser, &geo_ops, !read_only, kSyntaxErr);
+  ParseGeoResultOptions(&parser, &geo_ops);
 
   if (HandleGeoParserFinalize(shape, &parser, cmd_cntx)) {
     return;
   }
 
-  if (geo_ops.sorting == Sorting::kError) {
-    return builder->SendError(kAscDescErr);
-  } else if (geo_ops.store == GeoStoreType::kError) {
-    return builder->SendError(kStoreTypeErr);
-  } else if (geo_ops.count == 0) {
+  if (geo_ops.count == 0) {
     return builder->SendError(kCountError);
   } else if (geo_ops.HasWithStatement() && geo_ops.store != GeoStoreType::kNoStore) {
     return builder->SendError(kStoreCompatByMemberErr);
   }
 
   geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
-  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, member, geo_ops);
+  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, optional<string_view>{member},
+                        geo_ops);
 }
 
 void GeoRadiusGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool read_only) {
   GeoShape shape = {};
-  GeoSearchOpts geo_ops;
+  GeoSearchOpts geo_ops{!read_only};
 
   auto* builder = cmd_cntx->rb();
 
@@ -714,17 +729,13 @@ void GeoRadiusGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool read_o
   ParseLongLat(&parser, shape.xy);
   ParseCircularShape(&parser, &shape, &geo_ops);
 
-  ParseGeoResultOptions(&parser, &geo_ops, !read_only);
+  ParseGeoResultOptions(&parser, &geo_ops);
 
   if (HandleGeoParserFinalize(shape, &parser, cmd_cntx)) {
     return;
   }
 
-  if (geo_ops.sorting == Sorting::kError) {
-    return builder->SendError(kAscDescErr);
-  } else if (geo_ops.store == GeoStoreType::kError) {
-    return builder->SendError(kStoreTypeErr);
-  } else if (geo_ops.count == 0) {
+  if (geo_ops.count == 0) {
     return builder->SendError(kCountError);
   }
 
@@ -733,7 +744,7 @@ void GeoRadiusGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool read_o
   }
 
   geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
-  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, "", geo_ops);
+  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, nullopt, geo_ops);
 }
 
 void CmdGeoRadiusByMember(CmdArgParser parser, CommandContext* cmd_cntx) {

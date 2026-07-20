@@ -718,8 +718,21 @@ OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key,
 
 struct HSetExParams {
   OpSetParams op_sp;
+  ExpiryOption expiry;
   CmdArgParser::Range fields;  // field/value pairs; valid only when the parser has no error.
 };
+
+optional<DbSlice::ExpireParams> MakeFieldExpireParams(ExpT type, int64_t value, uint64_t now_ms,
+                                                      bool allow_expired) {
+  if (value < 0)
+    return nullopt;
+
+  DbSlice::ExpireParams params{type, value, now_ms};
+  auto [ttl_ms, expire_at_ms] = params.Calculate(now_ms, false);
+  if (expire_at_ms < 0 || ttl_ms > kMaxExpireDeadlineMs || (!allow_expired && ttl_ms <= 0))
+    return nullopt;
+  return params;
+}
 
 // Parses HSETEX arguments after the key, reporting any error into `parser` (surfaced by the caller
 // via RETURN_ON_PARSE_ERROR). `cmd_name` is only used to format error messages.
@@ -732,53 +745,42 @@ struct HSetExParams {
 // mandatory FIELDS keyword, the Dragonfly format a bare numeric ttl_sec. NX (per-field skip) and
 // the collective FNX/FXX condition are mutually exclusive; FNX/FXX behave identically in both
 // syntaxes (set all-or-nothing). Only the reported value differs (see OpSetParams::Format).
-HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
+HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name, uint64_t now_ms) {
   using Mode = OpSetParams::Mode;
   using Format = OpSetParams::Format;
-  constexpr int kMaxTtl = 1 << 26;
 
-  HSetExParams res;
+  static constexpr auto kGrammar = Compile(
+      Options(Into(&HSetExParams::op_sp, OneOf("", Map(&OpSetParams::mode, "NX", Mode::kNX, "FNX",
+                                                       Mode::kFNX, "FXX", Mode::kFXX))),
+              Into(&HSetExParams::op_sp, OneOf("", Exist("KEEPTTL", &OpSetParams::keepttl))),
+              Into(&HSetExParams::expiry, ExpiryOneOf())));
+  HSetExParams res = kGrammar.Apply(parser);
   OpSetParams& op_sp = res.op_sp;
+  ExpiryOption& expiry = res.expiry;
 
-  bool has_exp = false;
-
-  // EX/PX are relative (now = 0), EXAT/PXAT absolute (now = current time); ms = true for PX/PXAT.
-  // The value must land in (now, now + kMaxTtl] so the resulting ttl_sec stays in [1, kMaxTtl].
-  const int64_t now_ms = GetCurrentTimeMs();
-  const auto expiry = [&](int64_t now, bool ms) {
-    return [&, now, ms](CmdArgParser* p) {
-      has_exp = true;
-      int64_t span = ms ? int64_t(kMaxTtl) * 1000 : kMaxTtl;
-      int64_t v = p->Next<int64_t>();
-      if (v <= now || v > now + span)
-        p->ReportCustom(
-            InvalidExpireTime(cmd_name));  // no-op if Next already reported a non-integer
-      else
-        op_sp.ttl = ms ? (v - now + 999) / 1000 : v - now;
-    };
-  };
-
-  // A single Map makes the set modes (NX/FNX/FXX) mutually exclusive; OneOf also rejects a repeated
-  // flag. Parsing stops at the first non-flag token (ttl_sec or FIELDS).
-  parser->Apply(
-      OneOf(Map(&op_sp.mode, "NX", Mode::kNX, "FNX", Mode::kFNX, "FXX", Mode::kFXX)),
-      OneOf(Exist("KEEPTTL", &op_sp.keepttl)),
-      OneOf(Tag("EX", expiry(0, false)), Tag("PX", expiry(0, true)),
-            Tag("EXAT", expiry(now_ms / 1000, false)), Tag("PXAT", expiry(now_ms, true))));
+  if (expiry.value) {
+    auto expire_params = MakeFieldExpireParams(expiry.type, *expiry.value, now_ms, false);
+    if (!expire_params) {
+      parser->ReportCustom(InvalidExpireTime(cmd_name));
+    } else {
+      int64_t ttl_ms = expire_params->Calculate(now_ms, false).first;
+      op_sp.ttl = (ttl_ms + 999) / 1000;
+    }
+  }
 
   // FIELDS marks the Redis format, a bare ttl_sec the Dragonfly format. The parser short-circuits
   // once errored, so the steps below need no per-step checks.
   if (parser->Check("FIELDS")) {
     op_sp.format = Format::kRedis;
-    if (op_sp.mode == Mode::kNX || (op_sp.keepttl && has_exp))
+    if (op_sp.mode == Mode::kNX || (op_sp.keepttl && expiry.value))
       parser->Report(CmdArgParser::CUSTOM_ERROR);  // NX is Dragonfly-only; one expiry option max
     res.fields = parser->NextRange(2, kNumFieldsMismatch, /*consume_all=*/true);
-  } else if (has_exp) {
+  } else if (expiry.value) {
     // EX/PX/EXAT/PXAT belong to the Redis form; without FIELDS the command is malformed.
     parser->Report(CmdArgParser::CUSTOM_ERROR);
   } else {
     op_sp.format = Format::kDragonfly;
-    op_sp.ttl = parser->Next<FInt<1, kMaxTtl>>();
+    op_sp.ttl = parser->Next<FInt<int64_t{1}, kMaxExpireDeadlineSec>>();
 
     res.fields = parser->RemainingRange();
     if (res.fields.empty() || res.fields.size() % 2 != 0)
@@ -789,7 +791,8 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
 
 void HSetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  HSetExParams parsed = ParseHSetEx(&parser, cmd_cntx->cid()->name());
+  uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
+  HSetExParams parsed = ParseHSetEx(&parser, cmd_cntx->cid()->name(), now_ms);
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   // Evaluate the FNX/FXX condition (if any), then let OpSet set the fields and report the
@@ -849,7 +852,7 @@ void CmdHDel(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdHExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
-  using MinMaxTtl = FInt<0, (1 << 26)>;
+  using MinMaxTtl = FInt<int64_t{0}, kMaxExpireDeadlineSec>;
   auto [key, ttl_sec] = parser.Next<string_view, MinMaxTtl>();
 
   ExpireFlags flags = parser
@@ -1018,36 +1021,29 @@ OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const 
   return values;
 }
 
+DbSlice::ExpireParams BuildHGetExpiry(CmdArgParser* p, const ExpiryOrPersistOptions& o,
+                                      uint64_t now_ms, string_view cmd_name) {
+  DbSlice::ExpireParams out;
+  out.persist = o.persist;  // PERSIST and an expiry are mutually exclusive (OneOf)
+  if (!o.expiry.value)
+    return out;
+
+  auto params = MakeFieldExpireParams(o.expiry.type, *o.expiry.value, now_ms, true);
+  if (!params)
+    p->ReportCustom(InvalidExpireTime(cmd_name));
+  return params.value_or(out);
+}
+
 void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  string_view cmd_name = cmd_cntx->cid()->name();
-  // The transaction clock the op applies the TTL against, so a relative EX/PX resolves against the
-  // same time the op uses rather than a separate wall-clock read.
-  const uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
 
-  // At most one of EX/PX/EXAT/PXAT/PERSIST is accepted before FIELDS; OneOf rejects a second option
-  // as a syntax error (Redis instead reports a misplaced-FIELDS error here).
-  DbSlice::ExpireParams exp_params;
-  auto read_expiry = [&](ExpT type) {
-    return [&, type](CmdArgParser* p) {
-      // HGETEX accepts 0 (expire now -> delete the field) but rejects negatives, unlike SET/GETEX.
-      // A non-integer leaves the parser's own error in place (ReportCustom won't overwrite it).
-      int64_t value = p->Next<int64_t>();
-      if (value < 0)
-        return p->ReportCustom("invalid expire time, must be >= 0");
+  uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
+  static constexpr auto kGrammar = Compile(Options(ExpiryOrPersist()));
+  auto opts = kGrammar.Apply(&parser);
 
-      // Reject overflow and values past the hash-field TTL cap (1<<26 s, as for HEXPIRE/HSETEX).
-      exp_params = DbSlice::ExpireParams{type, value, now_ms};
-      constexpr int64_t kMaxTtlMs = (int64_t{1} << 26) * 1000;
-      auto [rel_msec, abs_msec] = exp_params.Calculate(now_ms, false);
-      if (abs_msec < 0 || rel_msec > kMaxTtlMs)
-        return p->ReportCustom(InvalidExpireTime(cmd_name));
-    };
-  };
-  // TODO: remove runtime parsing (migrate to cap grammar).
-  parser.Apply(OneOf(Tag("EX", read_expiry(ExpT::EX)), Tag("PX", read_expiry(ExpT::PX)),
-                     Tag("EXAT", read_expiry(ExpT::EXAT)), Tag("PXAT", read_expiry(ExpT::PXAT)),
-                     Exist("PERSIST", &exp_params.persist)));
+  DbSlice::ExpireParams exp_params =
+      BuildHGetExpiry(&parser, opts, now_ms, cmd_cntx->cid()->name());
+
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
   CmdArgParser::Range fields =
       parser.NextRange(1, kNumFieldsMismatch, /*consume_all=*/true, kInvalidNumFields);

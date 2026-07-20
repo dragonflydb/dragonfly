@@ -8,10 +8,13 @@
 #include <absl/random/random.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
+#include "facade/cmd_arg_parser.h"
 #include "facade/facade_types.h"
+#include "server/common_types.h"
 #include "server/engine_shard.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
@@ -24,6 +27,31 @@ typedef struct streamConsumer streamConsumer;
 typedef struct streamCG streamCG;
 
 namespace dfly {
+
+struct ExpiryOption {
+  ExpT type = ExpT::EX;
+  std::optional<int64_t> value;
+};
+
+struct ExpiryOrPersistOptions {
+  ExpiryOption expiry;
+  bool persist = false;
+};
+
+template <class P = int64_t> consteval auto ExpiryOneOf() {
+  using namespace facade;
+  using T = ExpiryOption;
+  return OneOf("", TagValue<P>("EX", &T::type, ExpT::EX, &T::value),
+               TagValue<P>("PX", &T::type, ExpT::PX, &T::value),
+               TagValue<P>("EXAT", &T::type, ExpT::EXAT, &T::value),
+               TagValue<P>("PXAT", &T::type, ExpT::PXAT, &T::value));
+}
+
+template <class P = int64_t> consteval auto ExpiryOrPersist() {
+  using namespace facade;
+  using T = ExpiryOrPersistOptions;
+  return OneOf("", Into(&T::expiry, ExpiryOneOf<P>()), Exist("PERSIST", &T::persist));
+}
 
 // Compute XXH3 hash and return as 16-character hex string
 std::string XXH3_Digest(std::string_view s);

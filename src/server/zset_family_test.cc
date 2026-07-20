@@ -510,6 +510,27 @@ TEST_F(ZSetFamilyTest, ZRange) {
   ASSERT_THAT(resp, RespElementsAre("foo", "great", "hill", "omega"));
 }
 
+TEST_F(ZSetFamilyTest, RangeFixedTypeByOptionConflict) {
+  Run({"zadd", "z", "1", "a", "2", "b", "3", "c"});
+
+  // Legacy fixed-type handlers must reject a BY* option that flips their preset interval type.
+  EXPECT_THAT(Run({"zrangebylex", "z", "0", "10", "BYSCORE"}),
+              ErrArg("BYSCORE and BYLEX options are not compatible"));
+  EXPECT_THAT(Run({"zrangebyscore", "z", "0", "10", "BYLEX"}),
+              ErrArg("BYSCORE and BYLEX options are not compatible"));
+  EXPECT_THAT(Run({"zrevrangebylex", "z", "10", "0", "BYSCORE"}),
+              ErrArg("BYSCORE and BYLEX options are not compatible"));
+  EXPECT_THAT(Run({"zrevrangebyscore", "z", "10", "0", "BYLEX"}),
+              ErrArg("BYSCORE and BYLEX options are not compatible"));
+
+  // A redundant same-type option is tolerated (does not change the preset type).
+  EXPECT_THAT(Run({"zrangebyscore", "z", "1", "3", "BYSCORE"}), RespElementsAre("a", "b", "c"));
+
+  // The unified ZRANGE still enforces mutual exclusion of the two options.
+  EXPECT_THAT(Run({"zrange", "z", "-", "+", "BYLEX", "BYSCORE"}),
+              ErrArg("BYSCORE and BYLEX options are not compatible"));
+}
+
 TEST_F(ZSetFamilyTest, ZRevRange) {
   Run({"zadd", "key", "-inf", "a", "1", "b", "2", "c"});
   auto resp = Run({"zrevrangebyscore", "key", "2", "-inf"});

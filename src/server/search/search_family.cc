@@ -186,22 +186,21 @@ ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
   return lang;
 }
 
+using TP = search::SchemaField::TextParams;
+
 struct ValidTextWeight : facade::VNum<double> {
   static facade::RuleError validate(double v) {
-    return {!search::SchemaField::TextParams::IsValidWeight(v), {}};
+    return {!TP::IsValidWeight(v), {}};
   }
 };
 
-void ParseTextWeight(CmdArgParser* parser, search::SchemaField::TextParams* params) {
+void ParseTextWeight(CmdArgParser* parser, TP* params) {
   params->weight = parser->Next<ValidTextWeight>("Invalid WEIGHT value");
 }
 
-ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parser) {
-  search::SchemaField::TextParams params{};
-  parser->Apply(Exist("WITHSUFFIXTRIE", &params.with_suffixtrie), Exist("NOSTEM", &params.no_stem),
-                Tag("WEIGHT", [&](CmdArgParser* p) { ParseTextWeight(p, &params); }));
-  return params;
-}
+constexpr auto kTextParamsGrammar =
+    Compile(Options(Exist("WITHSUFFIXTRIE", &TP::with_suffixtrie), Exist("NOSTEM", &TP::no_stem),
+                    Field<ValidTextWeight>("WEIGHT", &TP::weight, "Invalid WEIGHT value")));
 
 search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
   search::SchemaField::NumericParams params{};
@@ -228,10 +227,7 @@ ParsedSchemaField ParseTag(CmdArgParser* parser) {
 }
 
 ParsedSchemaField ParseText(CmdArgParser* parser) {
-  auto text_params = ParseTextParams(parser);
-  if (!text_params)
-    return make_unexpected(text_params.error());
-  return std::make_pair(search::SchemaField::TEXT, std::move(text_params).value());
+  return std::make_pair(search::SchemaField::TEXT, kTextParamsGrammar.Apply(parser));
 }
 
 ParsedSchemaField ParseNumeric(CmdArgParser* parser) {
@@ -541,12 +537,12 @@ std::optional<search::ScorerSpec> ParseScorer(CmdArgParser* parser) {
 }
 
 constexpr string_view kBM25StdTanhFactorErr = "BM25STD_TANH_FACTOR must be a positive integer";
+using BM25StdTanhFactor = facade::Positive<uint64_t>;
 
 // Parses a BM25STD_TANH_FACTOR value: an integer >= 1 (no upper bound). On a missing or invalid
 // value the parser reports kBM25StdTanhFactorErr, surfaced by the caller's error handling.
 uint64_t ParseBM25StdTanhFactor(CmdArgParser* parser) {
-  using TanhFactorInt = facade::FInt<uint64_t{1}, std::numeric_limits<uint64_t>::max()>;
-  return parser->Next<TanhFactorInt>(kBM25StdTanhFactorErr);
+  return parser->Next<BM25StdTanhFactor>(kBM25StdTanhFactorErr);
 }
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
@@ -1785,6 +1781,7 @@ struct HybridSearchParams {
   string text_query;
   string yield_text_score_as;
   std::optional<search::ScorerSpec> scorer;  // carries the BM25STD.TANH factor when applicable
+  uint64_t bm25std_tanh_factor = search::kDefaultBM25StdTanhFactor;
 
   string vsim_field;
   string vsim_param;
@@ -1803,6 +1800,7 @@ struct HybridSearchParams {
 
   size_t num_candidates = 0;
   std::optional<uint32_t> ef_runtime;
+  float shard_k_ratio = 1.0f;
 
   size_t limit_offset = 0;
   size_t limit_total = 10;
@@ -1839,25 +1837,45 @@ struct HnswRangeEpsilon : facade::VNum<double> {
   }
 };
 
+void ParseScorerInto(CmdArgParser* sub, HybridSearchParams* p) {
+  if (p->scorer) {
+    sub->Next();
+    return;
+  }
+  auto scorer_fn = ParseScorer(sub);
+  if (!scorer_fn)
+    sub->ReportCustom(absl::StrCat("No such scorer: ", sub->Peek()));
+  else
+    p->scorer = *scorer_fn;
+}
+
+void ParseHybridLoad(CmdArgParser* parser, HybridSearchParams* params) {
+  if (parser->Check("*")) {
+    params->load_all_fields = true;
+    return;
+  }
+
+  const size_t count = parser->Next<size_t>();
+  std::vector<FieldReference> fields;
+  fields.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    string_view field = parser->Next();
+    if (absl::StartsWith(field, "@"))
+      field.remove_prefix(1);
+    string_view alias;
+    parser->Check("AS", &alias);
+    fields.emplace_back(field, alias);
+  }
+  params->return_fields = std::move(fields);
+}
+
+void ParseHybridQueryParams(CmdArgParser* parser, HybridSearchParams* params) {
+  params->query_params = ParseQueryParams(parser);
+}
+
 ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
-  using facade::Map;
-  using facade::Tag;
-
   HybridSearchParams p;
-  uint64_t tanh_factor = search::kDefaultBM25StdTanhFactor;
 
-  auto parse_scorer = [&](CmdArgParser* sub) {
-    if (p.scorer) {
-      sub->Next();
-      return;
-    }
-    auto scorer_fn = ParseScorer(sub);
-    if (!scorer_fn)
-      sub->ReportCustom(absl::StrCat("No such scorer: ", sub->Peek()));
-    else
-      p.scorer = *scorer_fn;
-  };
-  auto parse_tanh_factor = [&](CmdArgParser* sub) { tanh_factor = ParseBM25StdTanhFactor(sub); };
   auto read_range_epsilon = [&](CmdArgParser* sub) {
     double epsilon = sub->Next<HnswRangeEpsilon>("Invalid EPSILON value");
     if (!sub->HasError())
@@ -1906,28 +1924,36 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
 
   parser->ExpectTag("SEARCH", "expected SEARCH keyword");
   p.text_query = parser->Next<string>();
-  parser->Apply(Tag("SCORER", parse_scorer), Tag("BM25STD_TANH_FACTOR", parse_tanh_factor),
-                Tag("YIELD_SCORE_AS", &p.yield_text_score_as));
+  static constexpr auto kScorerGrammar = Compile(Options(
+      Action("SCORER", &ParseScorerInto),
+      Field<BM25StdTanhFactor>("BM25STD_TANH_FACTOR", &HybridSearchParams::bm25std_tanh_factor,
+                               kBM25StdTanhFactorErr),
+      Field("YIELD_SCORE_AS", &HybridSearchParams::yield_text_score_as)));
+  kScorerGrammar.Apply(parser, &p);
   if (p.scorer)
-    p.scorer->bm25std_tanh_factor = tanh_factor;
+    p.scorer->bm25std_tanh_factor = p.bm25std_tanh_factor;
 
   parser->ExpectTag("VSIM", "expected VSIM keyword");
   p.vsim_field = string{parser->ExpectStartsWith("@", "VSIM field must start with @")};
   p.vsim_param = string{parser->ExpectStartsWith("$", "VSIM parameter must start with $")};
 
-  float shard_k_ratio = 1.0f;
   if (parser->Check("KNN", &p.num_candidates)) {
-    parser->Apply(Tag("K", &p.num_candidates), Tag("EF_RUNTIME", &p.ef_runtime),
-                  Tag("SHARD_K_RATIO", &shard_k_ratio));
+    static constexpr auto kGrammar =
+        Compile(Options(Field("K", &HybridSearchParams::num_candidates),
+                        Field("EF_RUNTIME", &HybridSearchParams::ef_runtime),
+                        Field("SHARD_K_RATIO", &HybridSearchParams::shard_k_ratio)));
+    kGrammar.Apply(parser, &p);
     p.num_candidates =
-        static_cast<size_t>(std::ceil(static_cast<float>(p.num_candidates) * shard_k_ratio));
+        static_cast<size_t>(std::ceil(static_cast<float>(p.num_candidates) * p.shard_k_ratio));
   } else if (parser->Check("RANGE")) {
     parse_hybrid_range(parser);
   }
 
   if (parser->Check("FILTER", &p.vsim_filter) && p.use_range)
     parser->ReportCustom("VSIM RANGE cannot be combined with FILTER");
-  parser->Apply(Tag("YIELD_SCORE_AS", &p.yield_vsim_score_as));
+  static constexpr auto kYieldGrammar =
+      Compile(Options(Field("YIELD_SCORE_AS", &HybridSearchParams::yield_vsim_score_as)));
+  kYieldGrammar.Apply(parser, &p);
 
   if (parser->Check("COMBINE")) {
     using CM = HybridSearchParams::CombineMethod;
@@ -1935,40 +1961,27 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       p.combine_method = *method;
       parser->Next<size_t>();  // nargs hint, not validated -- key/value pairs drive parsing.
       if (p.combine_method == CM::LINEAR) {
-        parser->Apply(Tag("ALPHA", &p.alpha), Tag("BETA", &p.beta),
-                      Tag("YIELD_SCORE_AS", &p.yield_combined_score_as));
+        static constexpr auto kGrammar = Compile(Options(
+            Field("ALPHA", &HybridSearchParams::alpha), Field("BETA", &HybridSearchParams::beta),
+            Field("YIELD_SCORE_AS", &HybridSearchParams::yield_combined_score_as)));
+        kGrammar.Apply(parser, &p);
       } else {
-        parser->Apply(Tag("CONSTANT", &p.rrf_constant), Tag("WINDOW", &p.rrf_window),
-                      Tag("YIELD_SCORE_AS", &p.yield_combined_score_as));
+        static constexpr auto kGrammar =
+            Compile(Options(Field("CONSTANT", &HybridSearchParams::rrf_constant),
+                            Field("WINDOW", &HybridSearchParams::rrf_window),
+                            Field("YIELD_SCORE_AS", &HybridSearchParams::yield_combined_score_as)));
+        kGrammar.Apply(parser, &p);
       }
     } else {
       parser->ReportCustom(absl::StrCat("unsupported COMBINE method: ", parser->Peek()));
     }
   }
 
-  auto parse_load = [&](CmdArgParser* sub) {
-    if (sub->Check("*")) {
-      p.load_all_fields = true;
-      return;
-    }
-    const size_t n = sub->Next<size_t>();
-    std::vector<FieldReference> fields;
-    fields.reserve(n);
-    for (size_t i = 0; i < n; i++) {
-      string_view f = sub->Next();
-      if (absl::StartsWith(f, "@"))
-        f.remove_prefix(1);
-      string_view alias;
-      sub->Check("AS", &alias);
-      fields.emplace_back(f, alias);
-    }
-    p.return_fields = std::move(fields);
-  };
-
-  auto parse_params = [&](CmdArgParser* sub) { p.query_params = ParseQueryParams(sub); };
-
-  parser->ApplyOrSkip(Tag("SCORER", parse_scorer), Tag("LOAD", parse_load),
-                      Tag("LIMIT", &p.limit_offset, &p.limit_total), Tag("PARAMS", parse_params));
+  static constexpr auto kTailGrammar = Compile(
+      Options(Action("SCORER", &ParseScorerInto), Action("LOAD", &ParseHybridLoad),
+              Field("LIMIT", &HybridSearchParams::limit_offset, &HybridSearchParams::limit_total),
+              Action("PARAMS", &ParseHybridQueryParams), Skip()));
+  kTailGrammar.Apply(parser, &p);
 
   if (parser->HasError())
     return make_unexpected(parser->TakeError().MakeReply());
