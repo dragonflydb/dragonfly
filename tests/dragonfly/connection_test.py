@@ -467,53 +467,122 @@ async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Red
         await pub
 
 
-@pytest.mark.large
-@dfly_args({"proactor_threads": "4"})
-async def test_pubsub_busy_connections(df_server: DflyInstance):
-    sleep = 60
+async def _pubsub_backpressure_stats(df_server: DflyInstance) -> dict[str, int]:
+    # Read the pubsub_backpressure_events_total counter by its `event` label from the
+    # Prometheus /metrics endpoint. prometheus_client strips the `_total` suffix from the family.
+    metrics = await df_server.metrics()
+    family = metrics.get("dragonfly_pubsub_backpressure_events")
+    if family is None:
+        return {}
+    return {sample.labels["event"]: int(sample.value) for sample in family.samples}
 
-    async def sub_thread():
-        i = 0
 
-        async def sub_task():
-            nonlocal i
-            sleep_task = asyncio.create_task(asyncio.sleep(sleep))
-            while not sleep_task.done():
-                client = df_server.client()
-                pubsub = client.pubsub()
-                await pubsub.subscribe("channel")
-                # await pubsub.unsubscribe("channel")
-                i = i + 1
-                await client.close()
+async def _open_stuck_subscriber(port: int):
+    """Open a raw subscriber connection with a tiny receive buffer that stops reading, so the
+    server's Pub/Sub socket write blocks quickly once the subscriber falls behind."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    sock = writer.get_extra_info("socket")
+    # Cap the receive window so the server-side write blocks after only a few KB.
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
 
-        subs = [asyncio.create_task(sub_task()) for _ in range(10)]
-        for s in subs:
-            await s
-        logging.debug(f"Exiting thread after {i} subscriptions")
+    writer.write(b"SUBSCRIBE channel\r\n")
+    await writer.drain()
+    # Read only the subscribe confirmation, then never read again -> stuck subscriber.
+    await reader.readexactly(1)
+    writer.transport.pause_reading()
+
+    return reader, writer
+
+
+# publish_buffer_limit is the soft limit; the hard limit is 4x that. It is large relative to the
+# subscriber's socket buffer, so the server write blocks (and the stall timer starts) well before
+# the soft limit is crossed.
+@dfly_args(
+    {
+        "proactor_threads": "1",
+        "publish_buffer_limit": "32mb",
+        "pubsub_slow_subscriber_timeout_ms": "100",
+    }
+)
+async def test_pubsub_slow_subscriber_closed(df_server: DflyInstance, async_client: aioredis.Redis):
+    reader, writer = await _open_stuck_subscriber(df_server.port)
+
+    stop = False
 
     async def pub_task():
-        pub = df_server.client()
-        i = 0
-        sleep_task = asyncio.create_task(asyncio.sleep(sleep))
-        while not sleep_task.done():
-            await pub.publish("channel", f"message-{i}")
-            i = i + 1
+        payload = "msg" * 1000
+        while not stop:
+            p = async_client.pipeline(transaction=False)
+            for _ in range(200):
+                p.publish("channel", payload)
+            await p.execute()
 
-    def run_in_thread():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(sub_thread())
+    publishers = [asyncio.create_task(pub_task()) for _ in range(20)]
 
-    threads = []
-    for _ in range(10):
-        thread = Thread(target=run_in_thread)
-        thread.start()
-        threads.append(thread)
+    # Wait until the policy force-closes the stuck subscriber.
+    stats = {}
+    for _ in range(150):
+        stats = await _pubsub_backpressure_stats(df_server)
+        if stats["forced_disconnect"] >= 1:
+            break
+        await asyncio.sleep(0.1)
 
-    await pub_task()
+    assert stats["soft_limit"] >= 1
+    assert stats["forced_disconnect"] >= 1
+    assert stats["messages_discarded"] >= 1
 
-    for thread in threads:
-        thread.join()
+    # Let the publishers finish - they must not stay parked once the budget was released.
+    stop = True
+    await asyncio.wait_for(asyncio.gather(*publishers), timeout=20)
+
+    # Drain the subscriber socket so the parked write completes and the connection closes through
+    # the normal shutdown path.
+    try:
+        while True:
+            data = await asyncio.wait_for(reader.read(65536), timeout=2)
+            if not data:
+                break
+    except asyncio.TimeoutError:
+        pass
+    writer.close()
+
+
+# With the timeout disabled (0), a stuck subscriber is never force-closed even under back-pressure.
+@dfly_args(
+    {
+        "proactor_threads": "1",
+        "publish_buffer_limit": "4mb",
+        "pubsub_slow_subscriber_timeout_ms": "0",
+    }
+)
+async def test_pubsub_slow_subscriber_disabled(
+    df_server: DflyInstance, async_client: aioredis.Redis
+):
+    reader, writer = await _open_stuck_subscriber(df_server.port)
+
+    async def pub_task():
+        payload = "msg" * 1000
+        p = async_client.pipeline(transaction=False)
+        for _ in range(2000):
+            p.publish("channel", payload)
+        await p.execute()
+
+    publishers = [asyncio.create_task(pub_task()) for _ in range(20)]
+
+    await asyncio.sleep(3)
+
+    stats = await _pubsub_backpressure_stats(df_server)
+    # The subscriber stays stuck: it is never force-closed and nothing is discarded.
+    assert stats["forced_disconnect"] == 0
+    assert stats["messages_discarded"] == 0
+
+    # Publishers are parked on the hard limit; closing the subscriber unblocks them.
+    writer.write(b"QUIT\r\n")
+    await writer.drain()
+    writer.close()
+
+    for pub in asyncio.as_completed(publishers):
+        await pub
 
 
 async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_connections=100):
