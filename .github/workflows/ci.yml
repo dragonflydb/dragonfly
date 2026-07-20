@@ -66,6 +66,8 @@ jobs:
             # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
             cxx_flags: "-Wno-error=unused-command-line-argument"
             sanitizers: "Sanitizers"
+            # Sanitizer builds produce larger objects, so give this job a bigger ccache.
+            ccache-max-size: "2G"
 
     runs-on: ubuntu-latest
     container:
@@ -114,7 +116,11 @@ jobs:
       - name: Build Dragonfly
         uses: ./.github/actions/builder
         with:
+          enable-ccache: 'true'
+          ccache-save: 'true'
           build-type: ${{matrix.build-type}}
+          cache-key-suffix: ${{ matrix.container }}
+          ccache-max-size: ${{ matrix.ccache-max-size || '1G' }}
           c-compiler: ${{matrix.compiler.c}}
           cxx-compiler: ${{matrix.compiler.cxx}}
           cxx-flags: ${{matrix.cxx_flags}}
@@ -411,7 +417,10 @@ jobs:
       - name: Build Dragonfly
         uses: ./.github/actions/builder
         with:
+          enable-ccache: 'true'
+          ccache-save: 'true'
           build-type: Release
+          cache-key-suffix: 'ubuntu-dev:24'
           targets: 'dragonfly'
 
       - name: Authenticate to AWS

@@ -43,7 +43,10 @@ jobs:
       - name: Build Dragonfly
         uses: ./.github/actions/builder
         with:
+          enable-ccache: 'true'
+          ccache-save: 'true'
           build-type: ${{matrix.build-type}}
+          cache-key-suffix: ${{ matrix.container }}
           targets: 'dragonfly'
 
       - name: Authenticate to AWS

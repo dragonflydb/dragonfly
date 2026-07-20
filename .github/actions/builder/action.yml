@@ -42,10 +42,51 @@ inputs:
     required: false
     default: 'src/all'
     type: string
+  enable-ccache:
+    description: "Use ccache. 'true' restores/saves the cache; 'false' (default) skips it and builds with -DENABLE_CCACHE=OFF"
+    required: false
+    default: 'false'
+    type: string
+  ccache-save:
+    description: "When ccache is on, set to 'true' to save the updated cache back; 'false' (default) restores read-only"
+    required: false
+    default: 'false'
+    type: string
+  ccache-max-size:
+    description: "Max ccache size per config (e.g. 1G, 2G, 500M)"
+    required: false
+    default: '1G'
+    type: string
+  cache-key-suffix:
+    description: "Extra token mixed into the cache key; callers pass the container so glibc/musl caches don't collide"
+    required: false
+    default: 'default'
+    type: string
 
 runs:
   using: "composite"
   steps:
+    - name: Check ccache cache-key-suffix
+      if: ${{ inputs.enable-ccache == 'true' && inputs.ccache-save == 'true' }}
+      shell: bash
+      run: |
+        # Refuse to write to a shared cache scope: reject an empty/whitespace suffix or the literal "default".
+        suffix="${{ inputs.cache-key-suffix }}"
+        if [[ -z "${suffix//[[:space:]]/}" || "$suffix" == "default" ]]; then
+          echo "::error title=ccache::ccache-save is 'true' but cache-key-suffix is empty or 'default'. Pass a specific cache-key-suffix (e.g. the container image) so writes don't collide across configs."
+          exit 1
+        fi
+
+    - name: Setup ccache
+      if: ${{ inputs.enable-ccache == 'true' }}
+      # Persist compiled objects across ephemeral runners so unchanged files aren't recompiled.
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: dfly-ccache-${{ inputs.cache-key-suffix }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-${{ inputs.c-compiler }}-${{ inputs.cxx-compiler }}-${{ inputs.sanitizers }}
+        max-size: ${{ inputs.ccache-max-size }}
+        save: ${{ inputs.ccache-save }}
+        verbose: 1
+
     - name: Configure CMake
       shell: bash
       run: |
@@ -64,6 +105,13 @@ runs:
           -DCMAKE_BUILD_TYPE="${{ inputs.build-type }}"
           -GNinja
         )
+
+        # Pass ccache on/off explicitly so the build never depends on the CMake default.
+        if [ "${{ inputs.enable-ccache }}" = "true" ]; then
+          CMAKE_CMD+=(-DENABLE_CCACHE=ON)
+        else
+          CMAKE_CMD+=(-DENABLE_CCACHE=OFF)
+        fi
 
         # Add optional compiler flags
         if [ -n "${{ inputs.c-compiler }}" ]; then
@@ -97,4 +145,11 @@ runs:
       run: |
         cd ${GITHUB_WORKSPACE}/${{ inputs.build-dir }}
         echo "Building target: ${{ inputs.targets }}"
+        if [ "${{ inputs.enable-ccache }}" = "true" ]; then
+          ccache -z || true   # zero stats so the summary below reflects only this build
+        fi
         ninja ${{ inputs.targets }}
+        if [ "${{ inputs.enable-ccache }}" = "true" ]; then
+          echo "===== ccache stats (this build) ====="
+          ccache -s || true
+        fi
