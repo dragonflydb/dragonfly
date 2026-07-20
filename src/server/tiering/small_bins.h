@@ -122,16 +122,8 @@ class SmallBins {
     }
 
     static uint64_t HashFn(uint64_t v) {
-      // Keys are page-aligned disk offsets (multiples of kPageSize), so their low bits are always
-      // zero and their high bits are zero for small files. std::hash<uint64_t> is the identity on
-      // libstdc++, which would funnel every bin into a single segment and make DashTable split
-      // forever. Mix the bits (murmur3 fmix64) so offsets distribute evenly.
-      v ^= v >> 33;
-      v *= 0xff51afd7ed558ccdULL;
-      v ^= v >> 33;
-      v *= 0xc4ceb9fe1a85ec53ULL;
-      v ^= v >> 33;
-      return v;
+      // Keys are page alined (% 4096 = 0) which breaks hashing, so scale down to page index
+      return v / kPageSize;
     }
   };
 

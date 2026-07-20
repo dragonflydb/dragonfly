@@ -85,9 +85,9 @@ size_t SmallBins::SerializeBin(FilledBin* bin, io::MutableBytes dest) {
 }
 
 SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment) {
-  DVLOG(1) << "ReportStashed " << id;
+  DCHECK(pending_bins_.contains(id));                    // valid pending operation id
+  DCHECK(stashed_bins_.Find(segment.offset).is_done());  // new unoccupied destination
 
-  DCHECK(pending_bins_.contains(id));
   auto seg_map_node = pending_bins_.extract(id);
   const auto& seg_map = seg_map_node.mapped();
   DCHECK_GT(seg_map.size(), 0u) << id;

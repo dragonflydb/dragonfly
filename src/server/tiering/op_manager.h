@@ -94,9 +94,9 @@ class OpManager {
   virtual bool NotifyFetched(const OwnedEntryId& id, DiskSegment segment, Decoder*) = 0;
 
   // Notify delete. Return true if the filled segment needs to be marked as free.
-  // Under was_read this function was called after a read completion as the follow-up delete
+  // Under in_memory this function was called after a read completion as the follow-up delete
   // operation - the full page is still in the op_managers pending operations cache
-  virtual bool NotifyDelete(DiskSegment segment, bool was_read) = 0;
+  virtual bool NotifyDelete(DiskSegment segment, bool in_memory) = 0;
 
   // Describes pending read futures for a single entry
   struct EntryOps {

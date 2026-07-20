@@ -225,7 +225,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   bool NotifyFetched(const OwnedEntryId& id, tiering::DiskSegment segment,
                      tiering::Decoder* decoder) override;
 
-  bool NotifyDelete(tiering::DiskSegment segment, bool was_read) override;
+  bool NotifyDelete(tiering::DiskSegment segment, bool in_memory) override;
 
   void EnqueueForDefrag(tiering::DiskSegment segment);
 
@@ -414,7 +414,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
   return false;
 }
 
-bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment, bool was_read) {
+bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment, bool in_memory) {
   DVLOG(2) << "NotifyDelete [" << segment.offset << "," << segment.length << "]";
 
   if (OccupiesWholePages(segment.length))
@@ -428,8 +428,8 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment, b
   // If we have memory, upload the page for defrag. It will be reshuffled and offloaded more packed.
   // Otherwise background scans of fragmented bins will discover them
   if (bin.fragmented && ts_->UploadBudget() > 0) {
-    // Limit number of IO operations if we need to read from disk (was_read is false)
-    if (was_read || stats_.pending_defrags < kMaxPendingDefrags) {
+    // Limit number of IO operations if we need to read from disk (in_memory is false)
+    if (in_memory || stats_.pending_defrags < kMaxPendingDefrags) {
       EnqueueForDefrag(bin.segment);
     }
   }
@@ -668,7 +668,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   const auto start_cycles = base::CycleClock::Now();
 
-  // Takes up a small fixed amount of time and is best done before offloading (to be picked up)
+  // Takes up a small bounded amount of time and is best done before offloading (to be picked up)
   RunDefragScan();
 
   // Don't run offloading if there's only very little space left
