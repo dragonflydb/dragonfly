@@ -457,7 +457,8 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
       const bool has_expiry = set->ExpirationUsed();
       RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
       for (auto it = set->begin(); it != set->end();) {
-        RETURN_ON_ERR(SaveString(Key(it)));
+        auto key = Key(it);
+        RETURN_ON_ERR(SaveString(GetKeyView(key)));
         if (has_expiry) {
           int64_t expiry = it.HasExpiry() ? int64_t{it.ExpiryTime()} : -1;
           RETURN_ON_ERR(SaveLongLongAsString(expiry));

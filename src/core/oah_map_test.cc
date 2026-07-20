@@ -14,6 +14,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/detail/bitpacking.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
 
@@ -25,8 +26,20 @@ namespace dfly {
 
 using namespace std;
 
+// Encodes a logical key the way OAHMap does, then serializes it into a pair blob.
+static uint64_t CreatePair(string_view key, string_view value, uint32_t expiry = UINT32_MAX) {
+  const ASCIIStr ek(key);
+  return OAHPair::Create(ek.content(), ek.len(), value, expiry);
+}
+
+// Decodes a pair's logical key (production does this at the table level, via OAHMap::DecodeKey).
+static string KeyOf(OAHPair p) {
+  const oah::key::Decoded key = OAHMap::DecodeKey(p);
+  return string{key.view()};
+}
+
 // Mirrors string_map_test.cc for the OAHMap (OAHTable<OAHPair>) container. The StringMap SdsPair
-// iterator (it->first/it->second) maps to the OAHPair accessor (it->Key()/it->Value()), and
+// iterator (it->first/it->second) maps to the OAHPair accessor (KeyOf(*it)/it->Value()), and
 // AddOrExchange/Extract return an OwnedOAHPair (RAII, frees on destruction) instead of an SdsEntry.
 class OAHMapTest : public ::testing::Test {
  protected:
@@ -100,13 +113,13 @@ TEST_F(OAHMapTest, Basic) {
   EXPECT_EQ(it->Value(), "bar"sv);
 
   it = m_->begin();
-  EXPECT_EQ(it->Key(), "foo"sv);
+  EXPECT_EQ(KeyOf(*it), "foo"sv);
   EXPECT_EQ(it->Value(), "bar"sv);
   ++it;
   EXPECT_TRUE(it == m_->end());
 
   for (auto e : *m_) {
-    EXPECT_EQ(e.Key(), "foo"sv);
+    EXPECT_EQ(KeyOf(e), "foo"sv);
     EXPECT_EQ(e.Value(), "bar"sv);
   }
 
@@ -127,9 +140,9 @@ TEST_F(OAHMapTest, Basic) {
 TEST_F(OAHMapTest, EmptyKeyAndValue) {
   // Empty members arrive as non-null empty views (""sv), never a null std::string_view{} -- see
   // CmdArgParser::SafeSV. OAHPair::Create relies on that invariant (DCHECK on the data pointers).
-  uint64_t bits = OAHPair::Create(""sv, ""sv);
+  uint64_t bits = CreatePair(""sv, ""sv);
   OAHPair pair(bits);
-  EXPECT_TRUE(pair.Key().empty());
+  EXPECT_TRUE(KeyOf(pair).empty());
   EXPECT_TRUE(pair.Value().empty());
   OAHPair::Destroy(pair.Release());
 
@@ -139,7 +152,7 @@ TEST_F(OAHMapTest, EmptyKeyAndValue) {
   EXPECT_TRUE(value->empty());
   auto it = m_->Find("");
   ASSERT_NE(it, m_->end());
-  EXPECT_TRUE(it->Key().empty());
+  EXPECT_TRUE(KeyOf(*it).empty());
   EXPECT_TRUE(it->Value().empty());
   EXPECT_TRUE(m_->Erase(""));
   EXPECT_FALSE(m_->GetValue("").has_value());
@@ -152,29 +165,34 @@ TEST_F(OAHMapTest, OAHPairSizeEncoding) {
       const string value = sized_string(value_size, 'v');
       for (uint32_t expiry : {UINT32_MAX, 7u}) {
         const size_t used_before = zmalloc_used_memory_tl;
-        uint64_t bits = OAHPair::Create(key, value, expiry);
+        uint64_t bits = CreatePair(key, value, expiry);
         OAHPair pair(bits);
 
-        EXPECT_EQ(pair.Key(), key);
+        EXPECT_EQ(KeyOf(pair), key);
         EXPECT_EQ(pair.Value(), value);
-        EXPECT_EQ(pair.KeyValue(), make_pair(string_view(key), string_view(value)));
         EXPECT_EQ(pair.HasExpiry(), expiry != UINT32_MAX);
         EXPECT_EQ(pair.GetExpiry(), expiry);
         EXPECT_EQ(pair.AllocSize(), zmalloc_used_memory_tl - used_before);
 
-        // Decode the fields directly from the blob: [expiry?, key_size, value_size, value_ptr:8B].
-        const char* key_size_field = pair.Raw() + (expiry != UINT32_MAX) * sizeof(expiry);
-        const oah::size::Decoded decoded_key_size = oah::size::Read(key_size_field);
-        const char* value_size_field = key_size_field + decoded_key_size.field_size;
+        // Decode the fields directly from the blob:
+        //   [expiry?, key_header, value_size, value_ptr:8B, key_content]
+        const char* key_header = pair.Raw() + (expiry != UINT32_MAX) * sizeof(expiry);
+        const oah::key::Header kh = oah::key::ReadHeader(key_header);
+        EXPECT_EQ(kh.len, key_size);
+        EXPECT_EQ(kh.encoded, ASCIIStr(key).encoded());
+        const char* value_size_field = key_header + kh.field_size;
         const oah::size::Decoded decoded_value_size = oah::size::Read(value_size_field);
         const char* value_ptr_field = value_size_field + decoded_value_size.field_size;
-        EXPECT_EQ(decoded_key_size.size, key_size);
         EXPECT_EQ(decoded_value_size.size, value_size);
 
         char* stored_value = nullptr;
         std::memcpy(&stored_value, value_ptr_field, sizeof(stored_value));
         EXPECT_EQ(stored_value, pair.Value().data());
-        EXPECT_EQ(pair.Key().data(), value_ptr_field + sizeof(stored_value));
+
+        // Key content (ascii-packed or raw) is stored right after the value pointer.
+        const char* key_content = value_ptr_field + sizeof(stored_value);
+        EXPECT_EQ(pair.KeyContent().data(), key_content);
+        EXPECT_EQ(pair.KeyContent().size(), ASCIIStr(key).content().size());
 
         const uintptr_t raw = reinterpret_cast<uintptr_t>(pair.Raw());
         const uintptr_t raw_end = raw + zmalloc_usable_size(pair.Raw());
@@ -191,6 +209,50 @@ TEST_F(OAHMapTest, OAHPairSizeEncoding) {
       }
     }
   }
+}
+
+TEST_F(OAHMapTest, AsciiEncoding) {
+  string ascii_key(80, 'a');                // 80 ascii chars -> 70 packed bytes
+  string boundary(128, 'b');                // largest ascii-encodable field
+  string too_long(129, 'c');                // one over -> raw
+  string non_ascii(80, 'd');                //
+  non_ascii[40] = static_cast<char>(0xC3);  // a non-ascii byte -> raw
+  const string value = "some-value";
+
+  for (string* k : {&ascii_key, &boundary, &too_long, &non_ascii})
+    EXPECT_TRUE(m_->AddOrUpdate(*k, value)) << k->size();
+
+  // Encodable fields are packed; the others stay raw. The value is never encoded.
+  auto it = m_->Find(ascii_key);
+  ASSERT_NE(it, m_->end());
+  EXPECT_EQ(it->KeyContent().size(), detail::binpacked_len(80));
+  EXPECT_EQ(it->Value(), value);
+  EXPECT_EQ(m_->Find(boundary)->KeyContent().size(), detail::binpacked_len(128));
+  EXPECT_EQ(m_->Find(too_long)->KeyContent().size(), too_long.size());
+  EXPECT_EQ(m_->Find(non_ascii)->KeyContent().size(), non_ascii.size());
+
+  // Updating an existing encoded field works, and lookups respect the logical length.
+  EXPECT_FALSE(m_->AddOrUpdate(ascii_key, "v2"));
+  EXPECT_EQ(m_->Find(ascii_key)->Value(), "v2"sv);
+  EXPECT_FALSE(m_->Contains(string(79, 'a')));
+  EXPECT_FALSE(m_->Contains(string(81, 'a')));
+
+  // Iteration reconstructs the logical fields.
+  vector<string> keys;
+  for (auto e = m_->begin(); e != m_->end(); ++e)
+    keys.push_back(string{KeyOf(*e)});
+  EXPECT_EQ(keys.size(), 4u);
+  auto has = [&](const string& k) {
+    for (const string& x : keys)
+      if (x == k)
+        return true;
+    return false;
+  };
+  for (string* k : {&ascii_key, &boundary, &too_long, &non_ascii})
+    EXPECT_TRUE(has(*k)) << k->size();
+
+  for (string* k : {&ascii_key, &boundary, &too_long, &non_ascii})
+    EXPECT_TRUE(m_->Extract(*k)) << k->size();
 }
 
 TEST_F(OAHMapTest, OAHSizeFieldEncoding) {
@@ -255,7 +317,7 @@ TEST_F(OAHMapTest, ExternalValueOwnership) {
   {
     auto extracted = m_->Extract(key);
     ASSERT_TRUE(extracted);
-    EXPECT_EQ(extracted.pair().Key(), key);
+    EXPECT_EQ(KeyOf(extracted.pair()), key);
     EXPECT_EQ(extracted.pair().Value(), replacement);
     EXPECT_EQ(m_->ObjMallocUsed(), 0u);
     EXPECT_EQ(zmalloc_used_memory_tl, used_before_extract);
@@ -294,7 +356,7 @@ TEST_F(OAHMapTest, ExternalValueExpiryRebuild) {
   ASSERT_NE(it, m_->end());
   EXPECT_NE(it->Raw(), old_raw);
   EXPECT_EQ(it->Value().data(), old_value);
-  EXPECT_EQ(it->Key(), key);
+  EXPECT_EQ(KeyOf(*it), key);
   EXPECT_EQ(it->Value(), value);
   EXPECT_EQ(it->GetHash(), old_hash);
   EXPECT_EQ(it.ExpiryTime(), 7u);
@@ -316,7 +378,7 @@ TEST_F(OAHMapTest, ExternalValueExpiryRebuild) {
 TEST_F(OAHMapTest, ExternalValueSelectiveRealloc) {
   const string key = sized_string(8192, 'k');
   const string value = sized_string(8192, 'v');
-  uint64_t bits = OAHPair::Create(key, value, 11);
+  uint64_t bits = CreatePair(key, value, 11);
   OAHPair pair(bits);
   pair.SetExtHash(123);
 
@@ -331,7 +393,7 @@ TEST_F(OAHMapTest, ExternalValueSelectiveRealloc) {
   EXPECT_EQ(pair.Raw(), old_raw);
   EXPECT_NE(pair.Value().data(), old_value);
   EXPECT_EQ(delta, static_cast<ssize_t>(pair.AllocSize()) - static_cast<ssize_t>(old_alloc));
-  EXPECT_EQ(pair.Key(), key);
+  EXPECT_EQ(KeyOf(pair), key);
   EXPECT_EQ(pair.Value(), value);
   EXPECT_EQ(pair.GetExpiry(), 11u);
   EXPECT_EQ(pair.GetHash(), 123u);
@@ -347,7 +409,7 @@ TEST_F(OAHMapTest, ExternalValueSelectiveRealloc) {
   EXPECT_NE(pair.Raw(), old_raw);
   EXPECT_EQ(pair.Value().data(), old_value);
   EXPECT_EQ(delta, static_cast<ssize_t>(pair.AllocSize()) - static_cast<ssize_t>(old_alloc));
-  EXPECT_EQ(pair.Key(), key);
+  EXPECT_EQ(KeyOf(pair), key);
   EXPECT_EQ(pair.Value(), value);
   EXPECT_EQ(pair.GetExpiry(), 11u);
   EXPECT_EQ(pair.GetHash(), 123u);
@@ -362,7 +424,7 @@ TEST_F(OAHMapTest, ExternalValueSelectiveRealloc) {
   EXPECT_NE(pair.Raw(), old_raw);
   EXPECT_NE(pair.Value().data(), old_value);
   EXPECT_EQ(delta, static_cast<ssize_t>(pair.AllocSize()) - static_cast<ssize_t>(old_alloc));
-  EXPECT_EQ(pair.Key(), key);
+  EXPECT_EQ(KeyOf(pair), key);
   EXPECT_EQ(pair.Value(), value);
   EXPECT_EQ(pair.GetExpiry(), 11u);
   EXPECT_EQ(pair.GetHash(), 123u);
@@ -571,7 +633,7 @@ TEST_F(OAHMapTest, Extract) {
   {
     auto entry = m_->Extract("f1");
     ASSERT_TRUE(entry);
-    EXPECT_EQ(entry.pair().Key(), "f1"sv);
+    EXPECT_EQ(KeyOf(entry.pair()), "f1"sv);
     EXPECT_EQ(entry.pair().Value(), "v1"sv);
   }
   EXPECT_EQ(m_->UpperBoundSize(), 1u);
@@ -679,7 +741,7 @@ void BM_Clone(benchmark::State& state) {
   dst.Reserve(src.UpperBoundSize());
   while (state.KeepRunning()) {
     for (auto e : src)
-      dst.AddOrUpdate(e.Key(), e.Value());
+      dst.AddOrUpdate(KeyOf(e), e.Value());
     state.PauseTiming();
     dst.Clear();
     dst.Reserve(src.UpperBoundSize());
@@ -798,7 +860,7 @@ void BM_Scan(benchmark::State& state) {
     uint32_t cursor = 0;
     size_t seen = 0;
     do {
-      cursor = m.Scan(cursor, [&](auto key) {
+      cursor = m.Scan(cursor, [&](const auto& key) {
         benchmark::DoNotOptimize(key.size());
         ++seen;
       });

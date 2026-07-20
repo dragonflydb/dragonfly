@@ -148,12 +148,8 @@ struct StringSetWrapper {
     };
     do {
       curs = VisitSet(obj_, [&](auto* s) {
-        return s->Scan(static_cast<uint32_t>(curs), [&](auto key) {
-          if constexpr (std::is_same_v<decltype(key), sds>)
-            record(string_view{key, sdslen(key)});
-          else
-            record(key);
-        });
+        return s->Scan(static_cast<uint32_t>(curs),
+                       [&](const auto& key) { record(GetKeyView(key)); });
       });
     } while (curs && maxiterations-- && res->size() < count &&
              (base::CycleClock::Now() - start_cycles) < timeout_cycles);
@@ -162,8 +158,10 @@ struct StringSetWrapper {
 
   template <typename Cb> void ForEach(Cb&& cb) const {
     VisitSet(obj_, [&](auto* s) {
-      for (auto it = s->begin(); it != s->end(); ++it)
-        cb(Key(it));
+      for (auto it = s->begin(); it != s->end(); ++it) {
+        auto key = Key(it);
+        cb(GetKeyView(key));
+      }
     });
   }
 
@@ -314,9 +312,11 @@ void RandMemberUnique(const StringSetWrapper& strset, size_t count, cmn::BackedA
       auto it = s->GetRandomMember();
       if (it == s->end())
         break;
-      auto [_, inserted] = picks.insert(string{Key(it)});
+      auto key = Key(it);
+      const string_view key_view = GetKeyView(key);
+      auto [_, inserted] = picks.insert(string{key_view});
       if (inserted)
-        dest->PushArg(Key(it));
+        dest->PushArg(key_view);
     }
   });
 }
@@ -327,7 +327,8 @@ void RandMemberRepeat(const StringSetWrapper& strset, size_t count, cmn::BackedA
       auto it = s->GetRandomMember();
       if (it == s->end())
         break;
-      dest->PushArg(Key(it));
+      auto key = Key(it);
+      dest->PushArg(GetKeyView(key));
     }
   });
 }
