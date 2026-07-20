@@ -1042,7 +1042,6 @@ struct BenchNested {
 // One member per cap rule so the benchmark grammar exercises every primitive exactly once.
 struct BenchTarget {
   std::string_view head;
-  std::string_view tail;
   bool one = false;
   bool one_alt = false;
   bool if_enabled = true;
@@ -1069,14 +1068,13 @@ void ParseBenchAction(CmdArgParser* parser, BenchTarget* target) {
   target->action += parser->Next<uint32_t>();
 }
 
-// Uses every cap rule once: Args, Options with a reserved tail, OneOf, Exist, Field, multi-member
-// Field, Field<Parsed>, Action, TagValue, TagValue<Parsed>, Map, Flags, Choice, If, IfNot, Into
-// into a plain and an optional member, and a Skip fallback.
+// Uses every cap rule once: Args, Options, OneOf, Exist, Field, multi-member Field, Field<Parsed>,
+// Action, TagValue, TagValue<Parsed>, Map, Flags, Choice, If, IfNot, Into into a plain and an
+// optional member, and a Skip fallback.
 consteval auto MakeBenchGrammar() {
   return Compile(
       Args(&BenchTarget::head),
-      Options(1,
-              OneOf("", Exist("ONE", &BenchTarget::one), Exist("ONE_ALT", &BenchTarget::one_alt)),
+      Options(OneOf("", Exist("ONE", &BenchTarget::one), Exist("ONE_ALT", &BenchTarget::one_alt)),
               Field("FIELD", &BenchTarget::field),
               Field("PAIR", &BenchTarget::pair_first, &BenchTarget::pair_second),
               Field<Positive<uint32_t>>("POSITIVE", &BenchTarget::positive, "positive"),
@@ -1091,8 +1089,7 @@ consteval auto MakeBenchGrammar() {
               If(&BenchTarget::if_enabled, Exist("IF", &BenchTarget::if_seen)),
               IfNot(&BenchTarget::if_disabled, Exist("IF_NOT", &BenchTarget::if_not_seen)),
               Into(&BenchTarget::nested, Field("NESTED", &BenchNested::value)),
-              Into(&BenchTarget::opt_nested, Field("OPT_NESTED", &BenchNested::value)), Skip()),
-      Args(&BenchTarget::tail));
+              Into(&BenchTarget::opt_nested, Field("OPT_NESTED", &BenchNested::value)), Skip()));
 }
 
 cmn::BackedArguments MakeStorage(std::initializer_list<std::string_view> args) {
@@ -1108,7 +1105,7 @@ CmdArgParser BenchArgs() {
   static const cmn::BackedArguments kArgs = MakeStorage(
       {"head",   "ONE", "FIELD",  "1",      "PAIR", "2",          "3",   "POSITIVE", "4",
        "ACTION", "5",   "TV",     "6",      "TVP",  "7",          "MAP", "FLAG",     "CHOICE",
-       "FIRST",  "IF",  "IF_NOT", "NESTED", "8",    "OPT_NESTED", "9",   "SKIP",     "tail"});
+       "FIRST",  "IF",  "IF_NOT", "NESTED", "8",    "OPT_NESTED", "9",   "SKIP"});
   return CmdArgParser{kArgs};
 }
 
@@ -1120,7 +1117,6 @@ TEST_F(CmdArgParserTest, BenchGrammar) {
   BenchTarget t = kGrammar.Apply(&parser);
   EXPECT_TRUE(parser.Finalize());
   EXPECT_EQ(t.head, "head");
-  EXPECT_EQ(t.tail, "tail");
   EXPECT_TRUE(t.one);
   EXPECT_EQ(t.field, 1u);
   EXPECT_EQ(t.pair_first, 2u);
@@ -1162,8 +1158,7 @@ static void BM_ManualParse(benchmark::State& state) {
     bool ok = true;
     size_t n = args.size();
     t.head = args[0];
-    t.tail = args[n - 1];
-    for (size_t i = 1; i + 1 < n; ++i) {  // leave the last arg for tail, like Options(1, ...)
+    for (size_t i = 1; i < n; ++i) {
       std::string_view a = args[i];
       if (absl::EqualsIgnoreCase(a, "ONE"))
         t.one = true;
@@ -1225,7 +1220,7 @@ static void BM_ManualWithParser(benchmark::State& state) {
     CmdArgParser parser = proto;
     BenchTarget t;
     t.head = parser.Next();
-    while (parser.HasAtLeast(2)) {  // leave one trailing arg for tail, like Options(1, ...)
+    while (parser.HasNext()) {
       if (parser.Check("ONE"))
         t.one = true;
       else if (parser.Check("ONE_ALT"))
@@ -1267,7 +1262,6 @@ static void BM_ManualWithParser(benchmark::State& state) {
       else
         parser.Skip(1);  // Skip() fallback: consume an unknown token
     }
-    t.tail = parser.Next();
     benchmark::DoNotOptimize(parser.Finalize());
     benchmark::DoNotOptimize(t);
   }

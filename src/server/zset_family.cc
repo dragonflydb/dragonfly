@@ -1780,6 +1780,10 @@ void ZRangeGeneric(facade::ParsedArgs args, ZSetFamily::RangeParams range_params
   facade::CmdArgParser parser{args.Tail().Tail().Tail()};
   using RP = ZSetFamily::RangeParams;
 
+  // Legacy handlers (ZRANGEBYSCORE/ZRANGEBYLEX and their REV variants) preset a fixed interval
+  // type; a BYSCORE/BYLEX option that flips it to the opposite type must be rejected.
+  const RP::IntervalType fixed_type = range_params.interval_type;
+
   static constexpr auto kGrammar =
       Compile(Options(OneOf("BYSCORE and BYLEX options are not compatible",
                             Map(&RP::interval_type, "BYSCORE", RP::SCORE),
@@ -1792,6 +1796,9 @@ void ZRangeGeneric(facade::ParsedArgs args, ZSetFamily::RangeParams range_params
                             rp->offset = offset < 0 ? UINT32_MAX : static_cast<uint32_t>(offset);
                           })));
   kGrammar.Apply(&parser, &range_params);
+
+  if (fixed_type != RP::RANK && range_params.interval_type != fixed_type)
+    parser.ReportCustom("BYSCORE and BYLEX options are not compatible");
 
   parser.Finalize("unsupported option ");
 
@@ -2079,8 +2086,7 @@ void CmdZAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   static constexpr auto kGrammar = Compile(
-      Options(1,
-              Flags(&ZSetFamily::ZParams::flags, "NX", unsigned{ZADD_IN_NX}, "XX",
+      Options(Flags(&ZSetFamily::ZParams::flags, "NX", unsigned{ZADD_IN_NX}, "XX",
                     unsigned{ZADD_IN_XX}, "GT", unsigned{ZADD_IN_GT}, "LT", unsigned{ZADD_IN_LT}),
               Exist("CH", &ZSetFamily::ZParams::ch),
               Flags(&ZSetFamily::ZParams::flags, "INCR", unsigned{ZADD_IN_INCR})));
@@ -2088,7 +2094,7 @@ void CmdZAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto args = parser.RemainingRange();
 
   auto* builder = cmd_cntx->rb();
-  if (args.size() % 2 != 0) {
+  if (args.empty() || args.size() % 2 != 0) {
     builder->SendError(kSyntaxErr);
     return;
   }

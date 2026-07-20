@@ -79,7 +79,6 @@ namespace facade {
 //   Compile(elements...)                  sequence elements into an Apply-able grammar
 //   Args(&T::a, &T::b, ...)               read positional arguments into members
 //   Options(rules...)                     repeatedly match rules until none accepts the next token
-//   Options(n, rules...)                  Options that leaves at least n trailing arguments
 //   OneOf(error, alternatives...)         allow one match; report error on a second match
 //
 // Tagged and token-mapping rules:
@@ -1016,12 +1015,10 @@ template <class T, class... Alts> struct OneOf {
 template <class T, class... Rules> struct Options {
   using Target = T;
   using State = std::tuple<typename Rules::State...>;
-  consteval explicit Options(Rules... rules) : Options(0, rules...) {
-  }
-  consteval Options(size_t tail, Rules... rules) : tail_(tail), rules_(rules...) {
+  consteval explicit Options(Rules... rules) : rules_(rules...) {
   }
   void Consume(CmdArgParser* p, T* o, State& st) const {
-    while (p->HasAtLeast(tail_ + 1)) {
+    while (p->HasAtLeast(1)) {
       std::string_view cur = p->CurrentUnchecked();
       if (!Match(p, cur, o, st, std::index_sequence_for<Rules...>{}))
         break;
@@ -1034,7 +1031,6 @@ template <class T, class... Rules> struct Options {
              std::index_sequence<I...>) const {
     return (std::get<I>(rules_).Consume(p, cur, o, std::get<I>(st)) || ...);
   }
-  size_t tail_;
   std::tuple<Rules...> rules_;
 };
 
@@ -1132,14 +1128,9 @@ consteval auto OneOf(std::string_view err, Alts... alts) {
 }
 template <class... Rules>
 requires cap_detail::CompatibleRules<Rules...>
-consteval auto Options(size_t tail, Rules... rules) {
-  using T = cap_detail::FirstTargetT<Rules...>;
-  return cap_detail::Options<T, Rules...>{tail, rules...};
-}
-template <class... Rules>
-requires cap_detail::CompatibleRules<Rules...>
 consteval auto Options(Rules... rules) {
-  return Options(0, rules...);
+  using T = cap_detail::FirstTargetT<Rules...>;
+  return cap_detail::Options<T, Rules...>{rules...};
 }
 template <class... Elems>
 requires cap_detail::CompatibleRules<Elems...>
