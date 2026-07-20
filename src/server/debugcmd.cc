@@ -696,7 +696,7 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "STACKTRACE",
         "    Prints the stacktraces of all current fibers to the logs.",
         "REPLDIAG",
-        "    Investigation-only for #6940: like STACKTRACE, plus (if this instance is a redis-"
+        "    Investigation-only: like STACKTRACE, plus (if this instance is a redis-"
         "    stream replica) the unread byte count in the master socket's kernel recv buffer.",
         "SHARDS",
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
@@ -1377,7 +1377,7 @@ void DebugCmd::Stacktrace(CommandContext* cmd_cntx) {
   rb->SendOk();
 }
 
-// Investigation-only for #6940: dumps everything Stacktrace() does, plus (on a redis-stream
+// Investigation-only: dumps everything Stacktrace() does, plus (on a redis-stream
 // replica) the current unread byte count on the master socket, to tell apart "data is sitting
 // unread" (missed wakeup) from "genuinely nothing to read yet" at the moment of a stall. Remove
 // once the stalled-replica bug is closed.

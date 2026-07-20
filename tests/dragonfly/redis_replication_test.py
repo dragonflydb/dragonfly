@@ -15,15 +15,18 @@ async def _bounded(awaitable, timeout=5):
     return await asyncio.wait_for(awaitable, timeout=timeout)
 
 
-# Investigation-only for #6940. Remove once closed.
+# Investigation-only. Remove once closed.
 async def _dump_repl_diag(diag_clients, note):
     if not diag_clients:
         return
     logging.warning(f"DEBUG REPLDIAG: {note}")
-    await asyncio.gather(
+    results = await asyncio.gather(
         *(_bounded(c.execute_command("DEBUG", "REPLDIAG")) for c in diag_clients),
         return_exceptions=True,
     )
+    for i, result in enumerate(results):
+        if isinstance(result, BaseException):
+            logging.warning(f"DEBUG REPLDIAG: client[{i}] failed: {result!r}")
 
 
 async def _log_progress(c_master, c_replicas, interval=10):
@@ -52,7 +55,7 @@ async def await_synced(
         await c_master.set(key, "dummy")
         logging.info(f"await_synced: set {key} on MASTER db={db}, polling REPLICA up to {timeout}s")
         remaining = timeout
-        # Investigation-only for #6940: track the replica's own progress rate so we can tell a
+        # Investigation-only: track the replica's own progress rate so we can tell a
         # genuinely stalled/slow replica apart from one that's simply still early in a normal
         # sync. Only fire the (expensive, verbose) diag dump once we see it isn't catching up.
         prev_replica_dbsize = None
@@ -112,7 +115,7 @@ async def await_synced_all(c_master, c_replicas, timeout=30, dbcount=1):
     for i, c_replica in enumerate(c_replicas):
         logging.info(f"await_synced_all: checking replica {i + 1}/{len(c_replicas)}")
         # diag_clients=c_replicas (not just c_replica): a stall dump is only useful compared
-        # against its siblings at the same instant, see #6940 investigation notes.
+        # against its siblings at the same instant.
         await await_synced(
             c_master, c_replica, dbcount=dbcount, timeout=timeout, diag_clients=c_replicas
         )
