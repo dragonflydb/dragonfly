@@ -64,12 +64,22 @@ cd build-opt && ninja dragonfly
 | WITH_COLLECTION_CMDS | Include commands for collections (SET, HSET, ZSET)                                                                                                                                                                                       |
 | WITH_EXTENSION_CMDS  | Include extension commands (Bloom, HLL, JSON, ...)                                                                                                                                                                                       |
 | USE_MOLD             | Uses the mold linker to reduce link time overhead while enabling Link Time Optimization (LTO) for improved runtime performance. Recommended for benchmarking and production. |
+| WITH_ASAN            | Enable AddressSanitizer (`-fsanitize=address`). Debug builds only. Clang and GCC. |
+| WITH_UBSAN            | Enable UndefinedBehaviorSanitizer. Adds the stock `-fsanitize=undefined` check group (alignment, array-bounds, null, shift, signed-integer-overflow, ...). Debug builds only. Clang and GCC. |
+| WITH_UBSAN_STRICT    | Extends `WITH_UBSAN` with Clang-only checks: `implicit-conversion` (silent integer truncation / sign-change, e.g. the bug class from PR #7562), `nullability`, `float-divide-by-zero`, `integer` (unsigned overflow + shift), `function`, `vptr`, and `object-size` (effective only at `-O1+`). Default `ON`, but only relevant with `WITH_UBSAN` is also `ON`. Excludes third-party / vendored code via `tools/sanitizers/ubsan/ubsan-ignorelist.txt`. Noisy on code that intentionally uses unsigned wrap-around (hashing, length math). |
 
 Minimal debug build:
 
 ```bash
 ./helio/blaze.sh -DWITH_GPERF=OFF -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_TIERING=OFF -DWITH_SEARCH=OFF -DWITH_COLLECTION_CMDS=OFF -DWITH_EXTENSION_CMDS=OFF
 ```
+
+### Running UBSan locally
+
+Dragonfly has a full UBSan setup - a self-test that proves the checks are live, a
+whole-suite CI run, and triage tooling. For how to configure and build a UBSan
+binary, the full `UBSAN_OPTIONS` reference, and how to read the findings, see
+[tools/sanitizers/ubsan/README.md](../tools/sanitizers/ubsan/README.md).
 
 ## Step 4 - voilà
 

@@ -1,0 +1,24 @@
+# Clang SanitizerSpecialCaseList -- passed to the compiler via
+# -fsanitize-ignorelist (wired in the WITH_UBSAN_STRICT block of CMakeLists.txt).
+#
+# Files matched here are NOT instrumented by UBSan, so findings always point at
+# first-party Dragonfly code instead of vendored dependencies.
+#
+# Format reference: https://clang.llvm.org/docs/SanitizerSpecialCaseList.html
+#   src:<glob>       match by source file path
+#   fun:<glob>       match by (mangled) function name
+#   mainfile:<glob>  match by main translation unit
+# A leading '!' re-includes a previously excluded entry.
+
+# --- Vendored / third-party sources built in-tree ---------------------------
+src:*/third_party/*
+src:*/_deps/*
+
+# --- The helio framework (git submodule).
+# Uncomments the rule below (via sed) so helio is excluded from instrumentation.
+# src:*/helio/*
+
+# --- System toolchain headers (libstdc++ / gcc) and Boost -------------------
+src:*/usr/lib/gcc/*
+src:*/include/c++/*
+src:*/usr/include/*

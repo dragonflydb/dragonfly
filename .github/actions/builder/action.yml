@@ -28,9 +28,24 @@ inputs:
     default: '-no-pie'
     type: string
   sanitizers:
-    description: "Enable sanitizers (NoSanitizers or Sanitizers)"
+    description: "Enable sanitizers (NoSanitizers or Sanitizers). Master toggle for all sanitizers."
     required: false
     default: 'NoSanitizers'
+    type: string
+  with-asan:
+    description: "Override ASan independently: 'ON'/'OFF'. Empty inherits from `sanitizers`."
+    required: false
+    default: ''
+    type: string
+  with-ubsan:
+    description: "Override UBSan independently: 'ON'/'OFF'. Empty inherits from `sanitizers`."
+    required: false
+    default: ''
+    type: string
+  ubsan-strict:
+    description: "Enable extended UBSan checks (WITH_UBSAN_STRICT). Off by default."
+    required: false
+    default: 'OFF'
     type: string
   with-aws:
     description: "Build with AWS support"
@@ -49,14 +64,23 @@ runs:
     - name: Configure CMake
       shell: bash
       run: |
-        # Set sanitizer flags
+        # Set sanitizer flags. `sanitizers` is the master toggle (both on/off);
+        # with-asan / with-ubsan optionally override each independently.
         ASAN="OFF"
-        USAN="OFF"
+        UBSAN="OFF"
         if [ '${{ inputs.sanitizers }}' = 'Sanitizers' ]; then
-          echo "Enabling ASAN/USAN"
+          echo "Enabling ASAN/UBSAN"
           ASAN="ON"
-          USAN="ON"
+          UBSAN="ON"
         fi
+        # Per-sanitizer overrides (empty = inherit from `sanitizers`).
+        if [ -n '${{ inputs.with-asan }}' ]; then
+          ASAN='${{ inputs.with-asan }}'
+        fi
+        if [ -n '${{ inputs.with-ubsan }}' ]; then
+          UBSAN='${{ inputs.with-ubsan }}'
+        fi
+        echo "Sanitizers resolved: ASAN=${ASAN} UBSAN=${UBSAN}"
 
         # Build cmake command array
         CMAKE_CMD=(cmake
@@ -84,7 +108,8 @@ runs:
           -DWITH_UNWIND=OFF
           -DWITH_GPERF=OFF
           -DWITH_ASAN="${ASAN}"
-          -DWITH_USAN="${USAN}"
+          -DWITH_UBSAN="${UBSAN}"
+          -DWITH_UBSAN_STRICT="${{ inputs.ubsan-strict }}"
           -DLEGACY_GLOG=OFF
         )
 
