@@ -962,6 +962,30 @@ bool IsMaster() {
   return ServerState::tlocal()->is_master;
 }
 
+void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
+  static constexpr string_view kSaveHelp[] = {
+      "DF",
+      "    Save in dragonfly-specific snapshotting format (default).",
+      "RDB",
+      "    Save in standard redis rdb format.",
+      "CLOUD_URI",
+      "    Specifies a cloud storage URI (s3://, gs://, azure://) to save the snapshot.",
+      "BASENAME",
+      "    The base filename for the snapshot files. <dbfilename> if omitted",
+  };
+
+  string format_line = is_bgsave ? "BGSAVE [SCHEDULE]" : "SAVE";
+  format_line.append(" [DF|RDB [CLOUD_URI [BASENAME]]]. Sub-options are:");
+  vector<string_view> help_arr{format_line};
+
+  if (is_bgsave) {
+    help_arr.emplace_back("SCHEDULE");
+    help_arr.emplace_back("    Optional. Parsed for client compatibility (no-op).");
+  }
+  help_arr.insert(help_arr.end(), begin(kSaveHelp), end(kSaveHelp));
+  rb->SendSimpleStrArr(help_arr);
+}
+
 }  // namespace
 
 bool ValidateServerTlsFlags() {
@@ -2397,13 +2421,18 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(facade::ParsedArgs ar
   return save_cmd_opts;
 }
 
-// BGSAVE [SCHEDULE] [DF|RDB] [CLOUD_URI] [BASENAME]
+// BGSAVE [SCHEDULE] [DF|RDB] [CLOUD_URI [BASENAME] | BASENAME]
 void ServerFamily::BgSave(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   facade::ParsedArgs args = parser.UnparsedArgs();
   // SCHEDULE is parsed for client compatibility but is a no-op: concurrent
   // saves are still rejected by DoSaveCheckAndStart; we do not queue.
   if (!args.empty() && absl::EqualsIgnoreCase(args[0], "SCHEDULE")) {
     args = args.Tail();
+  }
+
+  if (!args.empty() && absl::EqualsIgnoreCase(args[0], "HELP")) {
+    return SendSaveHelp(rb, true);
   }
 
   auto maybe_res = GetSaveCmdOpts(args, cmd_cntx);
@@ -2421,12 +2450,17 @@ void ServerFamily::BgSave(CmdArgParser parser, CommandContext* cmd_cntx) {
   cmd_cntx->rb()->SendOk();
 }
 
-// SAVE [DF|RDB] [CLOUD_URI] [BASENAME]
+// SAVE [DF|RDB] [CLOUD_URI [BASENAME] | BASENAME]
 // Allows saving the snapshot of the dataset on disk, potentially overriding the format
 // and the snapshot name.
 void ServerFamily::Save(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  auto maybe_res = GetSaveCmdOpts(parser.UnparsedArgs(), cmd_cntx);
+  facade::ParsedArgs args = parser.UnparsedArgs();
+  if (!args.empty() && absl::EqualsIgnoreCase(args[0], "HELP")) {
+    return SendSaveHelp(rb, false);
+  }
+
+  auto maybe_res = GetSaveCmdOpts(args, cmd_cntx);
   if (!maybe_res) {
     return;
   }
