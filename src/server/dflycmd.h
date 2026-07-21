@@ -328,9 +328,6 @@ class DflyCmd {
   // Main entrypoint for stopping replication.
   void StopReplication(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
-  std::optional<LSN> ParseLsnVec(std::string_view lsn_vec, size_t last_journal_lsn_size,
-                                 size_t flow_id, CommandContext* cmd_cntx);
-
   // Checks if LSN exists in the partial sync buffer. If not, also LOG that we can't
   // partial sync.
   bool IsLSNInPartialSyncBuffer(LSN lsn) const;
