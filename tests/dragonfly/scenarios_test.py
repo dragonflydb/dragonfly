@@ -69,7 +69,12 @@ class Metrics:
         return sum(self.type_used.values())
 
     def cmd_and_type_match_obj(self):
-        return self.cmd_total() == self.obj_used() == self.type_total()
+        cmd_metric_total = self.cmd_total()
+        cmd_metric_total += self.type("key")
+        return cmd_metric_total == self.obj_used() == self.type_total()
+
+    def type_match(self, t: str):
+        return self.cmd(t) == self.type(t)
 
 
 WANT_MEMORY_CLASSES = frozenset(
@@ -138,10 +143,12 @@ async def set_string_simple(async_client: aioredis.Redis):
 
 
 def classify_simple_set(m: Metrics):
-    """New string: command delta should include value + key."""
-    expected = m.type("string") + m.type("key")
-
-    if m.cmd("string") == expected and m.obj_used() == expected and clean_memory_classes(m):
+    """New string: command delta should include value."""
+    if (
+        m.type_match("string")
+        and m.obj_used() == m.type("string") + m.type("key")
+        and clean_memory_classes(m)
+    ):
         return "OK"
     elif m.cmd("string") == m.obj_used():
         return "CHECK"
@@ -152,8 +159,8 @@ def classify_simple_set(m: Metrics):
 def classify_overwrite_hash(m: Metrics):
     """SET over hash: old hash free and new string alloc should split by type."""
     if (
-        m.cmd("hash") == m.type("hash")
-        and m.cmd("string") == m.type("string") + m.type("key")
+        m.type_match("hash")
+        and m.cmd("string") == m.type("string")
         and m.cmd_and_type_match_obj()
         and clean_memory_classes(m)
     ):
@@ -166,8 +173,8 @@ def classify_overwrite_hash(m: Metrics):
 
 def classify_overwrite(m: Metrics, t: str):
     if (
-        m.cmd(t) == m.type(t)
-        and m.cmd("hash") == m.type("hash")
+        m.type_match(t)
+        and m.type_match("hash")
         and m.cmd_and_type_match_obj()
         and clean_memory_classes(m)
     ):
@@ -187,9 +194,9 @@ def classify_overwrite_hash_with_set(m: Metrics):
 
 
 def classify_del_string(m: Metrics):
-    """DEL string: command delta should match removed value + key."""
+    """DEL string: command delta should match removed value."""
     if (
-        m.cmd("string") == m.type("string") + m.type("key")
+        m.type_match("string")
         and m.cmd_and_type_match_obj()
         and m.cmd("string") < 0
         and clean_memory_classes(m)
@@ -221,12 +228,7 @@ def classify_mixed_delete(m: Metrics):
 
 def classify_rename_to_new(m: Metrics):
     """RENAME new key: move should account net key delta to value type."""
-    if (
-        m.cmd("string") == m.type("string") + m.type("key")
-        and m.cmd_and_type_match_obj()
-        and m.cmd("string") > 0
-        and clean_memory_classes(m)
-    ):
+    if m.type_match("string") and m.cmd_and_type_match_obj() and clean_memory_classes(m):
         return "OK"
     else:
         return "WRONG"
@@ -235,8 +237,8 @@ def classify_rename_to_new(m: Metrics):
 def classify_rename_hash_over_string(m: Metrics):
     """RENAME over string: removed string and moved hash should split by type."""
     if (
-        m.cmd("string") == m.type("string")
-        and m.cmd("hash") == m.type("hash") + m.type("key")
+        m.type_match("string")
+        and m.type_match("hash")
         and m.cmd_and_type_match_obj()
         and clean_memory_classes(m)
     ):
@@ -281,10 +283,9 @@ def classify_observe(_m: Metrics):
 
 def classify_json_interned(m: Metrics):
     """JSON new docs: JSON+key accounted, interned pool stays separate."""
-    expected = m.type("ReJSON-RL") + m.type("key")
     interned = m.mem("interned_string_pool") + m.mem("interned_string_table")
     if (
-        m.cmd("ReJSON-RL") == expected
+        m.type_match("ReJSON-RL")
         and m.cmd("ReJSON-RL") == m.obj_used()
         and interned > 0
         and clean_memory_classes(m)
@@ -323,7 +324,7 @@ async def expire_string(cl: aioredis.Redis):
 def classify_expiry(m: Metrics):
     """Expiry delete should look like DEL for the expired value type."""
     if (
-        m.cmd("string") == m.type("string") + m.type("key")
+        m.type_match("string")
         and m.cmd_and_type_match_obj()
         and m.cmd("string") < 0
         and clean_memory_classes(m)
@@ -336,8 +337,8 @@ def classify_expiry(m: Metrics):
 def classify_copy_replace(m: Metrics):
     """COPY REPLACE: removed dest and copied source should split by type."""
     if (
-        m.cmd("string") == m.type("string")
-        and m.cmd("hash") == m.type("hash")
+        m.type_match("string")
+        and m.type_match("hash")
         and m.cmd_and_type_match_obj()
         and clean_memory_classes(m)
     ):
@@ -362,11 +363,7 @@ class RestoreScenario:
 
 def classify_restore_hash(m: Metrics):
     """RESTORE hash: decoded runtime type should receive the delta."""
-    if (
-        m.cmd("hash") == m.type("hash") + m.type("key")
-        and m.cmd_and_type_match_obj()
-        and clean_memory_classes(m)
-    ):
+    if m.type_match("hash") and m.cmd_and_type_match_obj() and clean_memory_classes(m):
         return "OK"
     else:
         return "WRONG"
@@ -375,7 +372,7 @@ def classify_restore_hash(m: Metrics):
 def classify_hset_enc_change(m: Metrics):
     """Hash encoding growth should stay attributed to hash."""
     if (
-        m.cmd("hash") == m.type("hash")
+        m.type_match("hash")
         and m.cmd_and_type_match_obj()
         and m.cmd("hash") > 0
         and clean_memory_classes(m)

@@ -1886,12 +1886,16 @@ CmdMemoryScope::CmdMemoryScope(int obj_type)
   tl_cmd_mem_scope = this;
 }
 
+void CmdMemoryScope::MarkDeducted(int64_t bytes) {
+  deductions_ += bytes;
+}
+
 CmdMemoryScope::~CmdMemoryScope() {
   DCHECK_EQ(tl_cmd_mem_scope, this);
 
   const int64_t used_memory = static_cast<int64_t>(EngineShard::tlocal()->UsedMemory());
   const int64_t total_delta = used_memory - mem_baseline_;
-  const int64_t my_delta = total_delta - child_delta_;
+  const int64_t my_delta = total_delta - child_delta_ - deductions_;
 
   if (parent_)
     parent_->child_delta_ += total_delta;
@@ -1902,6 +1906,12 @@ CmdMemoryScope::~CmdMemoryScope() {
     return;
 
   EngineShard::tlocal()->AddCmdTypeMemDelta(obj_type_, my_delta);
+}
+
+void MarkDeductedFromCurrentScope(int64_t bytes) {
+  if (tl_cmd_mem_scope != nullptr) {
+    tl_cmd_mem_scope->MarkDeducted(bytes);
+  }
 }
 
 }  // namespace dfly

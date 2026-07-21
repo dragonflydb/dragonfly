@@ -81,6 +81,8 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* 
   DbTableStats& stats = db->stats;
 
   stats.AddTypeMemoryUsage(type, size);
+  if (type == OBJ_KEY)
+    MarkDeductedFromCurrentScope(size);
 
   if (db->slots_stats) {
     db->slots_stats[KeySlot(key)].memory_bytes += size;
