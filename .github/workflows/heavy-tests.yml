@@ -44,6 +44,9 @@ jobs:
       - name: Build Dragonfly
         uses: ./.github/actions/builder
         with:
+          # CCache read-only (save defaults off): reuse the base cache kept warm by regression-tests.
+          enable-ccache: 'true'
+          cache-key-suffix: ${{ matrix.container }}
           build-type: ${{matrix.build-type}}
           targets: 'dragonfly'
 

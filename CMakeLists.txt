@@ -33,6 +33,40 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 project(DRAGONFLY C CXX)
 set(CMAKE_CXX_STANDARD 20)
 
+# Use ccache as the compiler launcher when available (local and CI).
+# Opt out with -DENABLE_CCACHE=OFF (or CCACHE_DISABLE=1 / ccache config).
+option(ENABLE_CCACHE "Use ccache as the compiler launcher when available" ON)
+set(_clear_launchers TRUE)
+if(ENABLE_CCACHE)
+  find_program(CCACHE_PROGRAM ccache)
+  if(CCACHE_PROGRAM)
+    message(STATUS "ccache is enabled: ${CCACHE_PROGRAM}")
+    # Wrap ccache in `env` to configure it without a config file; compress to save space.
+    set(_ccache_launcher env CCACHE_COMPRESS=true CCACHE_COMPRESSLEVEL=5)
+    # Local only: share one cache across worktrees. Skipped in CI, where paths are
+    # stable and CCACHE_BASEDIR can mangle dependency files.
+    if(NOT DEFINED ENV{CI})
+      list(APPEND _ccache_launcher CCACHE_BASEDIR=$ENV{HOME} CCACHE_NOHASHDIR=true)
+    endif()
+    set(CMAKE_C_COMPILER_LAUNCHER   ${_ccache_launcher} "${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${_ccache_launcher} "${CCACHE_PROGRAM}")
+    set(_clear_launchers FALSE)
+  else()
+    message(STATUS "ccache is enabled but not found, disabling compiler launcher")
+  endif()
+else()
+  message(STATUS "ccache is disabled")
+endif()
+
+# When ccache isn't used (disabled or missing), clear any launcher a wrapper such as
+# blaze.sh injected via -D, so the build reliably falls back to native compilation.
+if(_clear_launchers)
+  unset(CMAKE_C_COMPILER_LAUNCHER CACHE)
+  unset(CMAKE_CXX_COMPILER_LAUNCHER CACHE)
+  set(CMAKE_C_COMPILER_LAUNCHER "")
+  set(CMAKE_CXX_COMPILER_LAUNCHER "")
+endif()
+
 # Disabled because it has false positives with ref-counted intrusive pointers.
 CHECK_CXX_COMPILER_FLAG("-Wuse-after-free" HAS_USE_AFTER_FREE_WARN)
 if (HAS_USE_AFTER_FREE_WARN)
