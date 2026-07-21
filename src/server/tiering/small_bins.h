@@ -121,10 +121,9 @@ class SmallBins {
       return u == v;
     }
 
-    static uint64_t HashFn(uint64_t v) {
-      // Keys are page alined (% 4096 = 0) which breaks hashing, so scale down to page index
-      return v / kPageSize;
-    }
+    // Keys are page-aligned (% kPageSize == 0), dividing by kPageSize does not fix the problem as
+    // dashtable expects are more or less random distribution of all bits (including higher)
+    static uint64_t HashFn(uint64_t v);
   };
 
   using Dash = dfly::DashTable<size_t /* offset */, StashInfo, BasicDashPolicy>;

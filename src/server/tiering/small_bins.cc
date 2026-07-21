@@ -4,6 +4,8 @@
 
 #include "server/tiering/small_bins.h"
 
+#include <xxhash.h>
+
 #include <algorithm>
 #include <optional>
 #include <utility>
@@ -25,6 +27,10 @@ size_t StashedValueSize(string_view value) {
 }
 
 }  // namespace
+
+uint64_t SmallBins::BasicDashPolicy::HashFn(uint64_t v) {
+  return XXH3_64bits(&v, sizeof(v));
+}
 
 std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_view key,
                                                      std::string_view value) {
