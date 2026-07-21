@@ -5,8 +5,12 @@
 
 #include <absl/base/optimization.h>
 #include <absl/flags/flag.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_replace.h>
+#include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
+
+#include <algorithm>
 
 #ifdef WITH_AWS
 #include <aws/core/auth/AWSCredentialsProvider.h>
@@ -32,6 +36,7 @@
 #include "base/logging.h"
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
+#include "strings/escaping.h"
 #include "util/cloud/azure/creds_provider.h"
 #include "util/cloud/azure/storage.h"
 #include "util/fibers/fiber_file.h"
@@ -51,14 +56,13 @@ using namespace std;
 namespace {
 
 constexpr string_view kSummarySuffix = "summary.dfs"sv;
+constexpr std::string_view kHttpsPrefix = "https://";
 
 pair<string, string> GetBucketPath(string_view path) {
   string_view clean = path;
   string_view prefix = kGCSPrefix;
   if (absl::StartsWith(clean, kS3Prefix)) {
     prefix = kS3Prefix;
-  } else if (absl::StartsWith(clean, kAzurePrefix)) {
-    prefix = kAzurePrefix;
   }
   clean = absl::StripPrefix(clean, prefix);
 
@@ -97,7 +101,105 @@ std::string EscapeRegex(string_view input) {
   return escaped;
 }
 
+bool IsValidAzureAccount(string_view account) {
+  return account.size() >= 3 && account.size() <= 24 &&
+         std::all_of(account.begin(), account.end(),
+                     [](char c) { return absl::ascii_islower(c) || absl::ascii_isdigit(c); });
+}
+
+bool IsValidAzureContainer(string_view container) {
+  if (container.size() < 3 || container.size() > 63 || container.front() == '-' ||
+      container.back() == '-') {
+    return false;
+  }
+
+  bool previous_hyphen = false;
+  for (char c : container) {
+    if (absl::ascii_islower(c) || absl::ascii_isdigit(c)) {
+      previous_hyphen = false;
+    } else if (c == '-' && !previous_hyphen) {
+      previous_hyphen = true;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+struct AzurePath {
+  string account;
+  string container;
+  string key;
+};
+
+io::Result<AzurePath, GenericError> ParseAzurePath(string_view path) {
+  if (!absl::ConsumePrefix(&path, kHttpsPrefix)) {
+    return nonstd::make_unexpected(
+        GenericError(make_error_code(errc::invalid_argument), "Invalid Azure path"));
+  }
+
+  const size_t first_slash = path.find('/');
+  string_view host = first_slash == string_view::npos ? path : path.substr(0, first_slash);
+  if (!absl::EndsWith(host, kAzureBlobEndpointSuffix)) {
+    return nonstd::make_unexpected(GenericError(make_error_code(errc::invalid_argument),
+                                                "Azure path must include an account hostname"));
+  }
+  string_view account = absl::StripSuffix(host, kAzureBlobEndpointSuffix);
+  if (!IsValidAzureAccount(account)) {
+    return nonstd::make_unexpected(GenericError(make_error_code(errc::invalid_argument),
+                                                "Azure path must include an account hostname"));
+  }
+
+  string_view raw_container_and_key =
+      first_slash == string_view::npos ? string_view{} : path.substr(first_slash + 1);
+  if (raw_container_and_key.find_first_of("?#") != string_view::npos) {
+    return nonstd::make_unexpected(GenericError(make_error_code(errc::invalid_argument),
+                                                "Azure path must not contain a query"));
+  }
+
+  const size_t second_slash = raw_container_and_key.find('/');
+  string_view raw_container = second_slash == string_view::npos
+                                  ? raw_container_and_key
+                                  : raw_container_and_key.substr(0, second_slash);
+  string container;
+  if (!strings::AppendUrlDecoded(raw_container, &container)) {
+    return nonstd::make_unexpected(GenericError(make_error_code(errc::invalid_argument),
+                                                "Azure path contains invalid percent encoding"));
+  }
+  if (!IsValidAzureContainer(container)) {
+    return nonstd::make_unexpected(GenericError(make_error_code(errc::invalid_argument),
+                                                "Azure path must include a container"));
+  }
+
+  string key;
+  string_view raw_key = second_slash == string_view::npos
+                            ? string_view{}
+                            : raw_container_and_key.substr(second_slash + 1);
+  if (!strings::AppendUrlDecoded(raw_key, &key)) {
+    return nonstd::make_unexpected(GenericError(make_error_code(errc::invalid_argument),
+                                                "Azure path contains invalid percent encoding"));
+  }
+  return AzurePath{string(account), std::move(container), std::move(key)};
+}
+
+string BuildAzurePath(const AzurePath& path) {
+  string result = absl::StrCat(kHttpsPrefix, path.account, kAzureBlobEndpointSuffix, "/");
+  strings::AppendUrlEncoded(path.container, &result);
+  if (!path.key.empty()) {
+    for (string_view component : absl::StrSplit(path.key, '/')) {
+      result += '/';
+      strings::AppendUrlEncoded(component, &result);
+    }
+  }
+  return result;
+}
+
 }  // namespace
+
+// Helps to recognize Azure path - used in server_family.cc to initialize AzureSnapshotStorage.
+bool IsAzurePath(string_view path) {
+  return bool(ParseAzurePath(path));
+}
 
 string SnapshotStorage::FindMatchingFile(string_view prefix, string_view dbfilename,
                                          vector<SnapStat> keys) {
@@ -426,16 +528,20 @@ error_code GcsSnapshotStorage::CheckPath(const std::string& path) {
 
 // AZURE
 
-AzureSnapshotStorage::AzureSnapshotStorage() {
-  creds_provider_ = make_unique<util::cloud::azure::Credentials>();
-}
+AzureSnapshotStorage::AzureSnapshotStorage() = default;
 
 AzureSnapshotStorage::~AzureSnapshotStorage() {
   if (ctx_)
     util::http::TlsClient::FreeContext(ctx_);
 }
 
-error_code AzureSnapshotStorage::Init(unsigned connect_ms) {
+error_code AzureSnapshotStorage::Init(string_view uri, unsigned connect_ms) {
+  auto azure_path = ParseAzurePath(uri);
+  if (!azure_path) {
+    return static_cast<error_code>(azure_path.error());
+  }
+
+  creds_provider_ = make_unique<util::cloud::azure::Credentials>(std::move(azure_path->account));
   RETURN_ERROR(creds_provider_->Init(connect_ms));
   if (creds_provider_->IsHttps()) {
     ctx_ = util::http::TlsClient::CreateSslContext();
@@ -446,12 +552,17 @@ error_code AzureSnapshotStorage::Init(unsigned connect_ms) {
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AzureSnapshotStorage::OpenWriteFile(
     const std::string& path) {
-  auto [container, key] = GetBucketPath(path);
+  auto azure_path = ParseAzurePath(path);
+  if (!azure_path) {
+    return nonstd::make_unexpected(azure_path.error());
+  }
+
   cloud::azure::WriteFileOptions opts;
   opts.creds_provider = creds_provider_.get();
   opts.ssl_cntx = ctx_;
 
-  io::Result<io::WriteFile*> dest_res = cloud::azure::OpenWriteFile(container, key, opts);
+  io::Result<io::WriteFile*> dest_res =
+      cloud::azure::OpenWriteFile(azure_path->container, azure_path->key, opts);
   if (!dest_res) {
     return nonstd::make_unexpected(GenericError(dest_res.error(), "Could not open file"));
   }
@@ -460,15 +571,16 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AzureSnapshotStorage::Op
 }
 
 io::ReadonlyFileOrError AzureSnapshotStorage::OpenReadFile(const std::string& path) {
-  if (!IsAzurePath(path))
-    return nonstd::make_unexpected(GenericError("Invalid azure path"));
+  auto azure_path = ParseAzurePath(path);
+  if (!azure_path) {
+    return nonstd::make_unexpected(azure_path.error());
+  }
 
-  auto [container, key] = GetBucketPath(path);
   cloud::azure::ReadFileOptions opts;
   opts.creds_provider = creds_provider_.get();
   opts.ssl_cntx = ctx_;
 
-  return cloud::azure::OpenReadFile(container, key, opts);
+  return cloud::azure::OpenReadFile(azure_path->container, azure_path->key, opts);
 }
 
 io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view dir,
@@ -476,7 +588,12 @@ io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view
   if (dbfilename.empty())
     return "";
 
-  auto [bucket_name, prefix] = GetBucketPath(dir);
+  auto azure_path = ParseAzurePath(dir);
+  if (!azure_path) {
+    return nonstd::make_unexpected(azure_path.error());
+  }
+  string bucket_name = std::move(azure_path->container);
+  string prefix = std::move(azure_path->key);
 
   // TODO: check if needed
   if (!prefix.empty() && prefix.back() != '/') {
@@ -511,7 +628,8 @@ io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view
 
   auto match_key = FindMatchingFile(prefix, dbfilename, *keys);
   if (!match_key.empty()) {
-    return absl::StrCat(kAzurePrefix, bucket_name, "/", match_key);
+    return BuildAzurePath(
+        {.account = creds_provider_->account_name(), .container = bucket_name, .key = match_key});
   }
   return nonstd::make_unexpected(GenericError(
       std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
@@ -519,14 +637,16 @@ io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view
 
 io::Result<vector<string>, GenericError> AzureSnapshotStorage::ExpandFromPath(
     const string& load_path) {
-  if (!IsAzurePath(load_path))
-    return nonstd::make_unexpected(
-        GenericError(make_error_code(errc::invalid_argument), "Invalid Azure path"));
+  auto azure_path = ParseAzurePath(load_path);
+  if (!azure_path) {
+    return nonstd::make_unexpected(azure_path.error());
+  }
 
   if (!absl::EndsWith(load_path, kSummarySuffix))
     return vector<string>{};
 
-  const auto [bucket_name, obj_path] = GetBucketPath(load_path);
+  const string& bucket_name = azure_path->container;
+  const string& obj_path = azure_path->key;
   regex re(absl::StrReplaceAll(obj_path, {{"summary", "[0-9]{4}"}}));
   string_view prefix = absl::StripSuffix(obj_path, kSummarySuffix);
 
@@ -544,7 +664,9 @@ io::Result<vector<string>, GenericError> AzureSnapshotStorage::ExpandFromPath(
                 std::smatch m;
                 string key{item.key};
                 if (std::regex_match(key, m, re)) {
-                  res.push_back(absl::StrCat(kAzurePrefix, bucket_name, "/", item.key));
+                  res.push_back(BuildAzurePath({.account = creds_provider_->account_name(),
+                                                .container = bucket_name,
+                                                .key = string(item.key)}));
                 }
               },
               &cursor);
@@ -567,7 +689,8 @@ io::Result<vector<string>, GenericError> AzureSnapshotStorage::ExpandFromPath(
 }
 
 error_code AzureSnapshotStorage::CheckPath(const std::string& path) {
-  return {};
+  auto azure_path = ParseAzurePath(path);
+  return azure_path ? error_code{} : static_cast<error_code>(azure_path.error());
 }
 
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool https,
