@@ -2246,7 +2246,7 @@ void Connection::AsyncFiber() {
             quota_reached || (is_migration_req && (protocol_ == Protocol::REDIS));
       }
       if (dispatch_q_.empty() || prefer_pipeline_execution) {  // 2. Process pipeline Queue
-        VLOG_IF(1, prefer_pipeline_execution)
+        VLOG_IF(2, prefer_pipeline_execution)
             << CONN_ID << "Preferring pipeline execution over admin queue. "
             << "Migration requested: " << is_migration_req
             << ", dispatch quota reached: " << quota_reached
