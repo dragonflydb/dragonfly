@@ -469,6 +469,15 @@ TEST_F(SetFamilyTest, SAddEx) {
   EXPECT_THAT(Run({"saddex", "key", "KEEPTTL", "2"}), ErrArg("wrong number of arguments"));
 }
 
+TEST_F(SetFamilyTest, SAddExTtlBoundary) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // The member-TTL ceiling is the shared kMaxExpireDeadlineSec (same as HEXPIRE/HSETEX/HGETEX).
+  EXPECT_THAT(Run({"saddex", "key", absl::StrCat(kMaxExpireDeadlineSec), "at_cap"}), IntArg(1));
+  EXPECT_THAT(Run({"saddex", "key", absl::StrCat(kMaxExpireDeadlineSec + 1), "above_cap"}),
+              ErrArg("value is not an integer or out of range"));
+}
+
 TEST_F(SetFamilyTest, CheckSetLinkExpiryTransfer) {
   for (int i = 0; i < 10; i++) {
     EXPECT_THAT(Run(absl::StrCat("SADDEX key 5 ", i)), IntArg(1));
