@@ -15,6 +15,8 @@ TARGET="${1:-resp}"
 BUILD_DIR="${BUILD_DIR:-$PROJECT_ROOT/build-dbg}"
 FUZZ_DIR="$SCRIPT_DIR"
 OUTPUT_DIR="${OUTPUT_DIR:-$FUZZ_DIR/artifacts/$TARGET}"
+# The composite action reads this marker after afl-fuzz exits and removes the recorded directories.
+TEMP_DIRS_FILE="${OUTPUT_DIR}/temp_dirs.txt"
 CORPUS_DIR="${CORPUS_DIR:-$FUZZ_DIR/corpus/$TARGET}"
 SEEDS_DIR="${SEEDS_DIR:-$FUZZ_DIR/seeds/$TARGET}"
 DICT_FILE="${DICT_FILE:-$FUZZ_DIR/dict/$TARGET.dict}"
@@ -22,6 +24,20 @@ TIMEOUT="5000"
 FUZZ_TARGET="$BUILD_DIR/dragonfly"
 AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-1}"
 AFL_MEM_MB="${AFL_MEM_MB:-4096}"  # Memory limit (MB) passed to afl-fuzz -m; also written to repro.env
+
+# Tiering (disk-backed storage) fuzzing. When AFL_ENABLE_TIERING=1, Dragonfly is launched with
+# tiered storage enabled so the fuzzer exercises the offload/fetch code paths. Used in the nightly
+# (long) tiering leg. offload_threshold=1.0 offloads eligible values eagerly regardless of memory
+# pressure, so tiering is stressed even with the small values the mutator produces.
+AFL_TIER_MAXMEMORY="${AFL_TIER_MAXMEMORY:-1G}"
+AFL_TIER_OFFLOAD_THRESHOLD="${AFL_TIER_OFFLOAD_THRESHOLD:-1.0}"
+# Where tiering backing files live. CI points this at the runner temp dir (a real disk mounted
+# from the host); the /tmp default may be tmpfs/overlayfs with unrealistic IO timing.
+AFL_TIER_DIR="${AFL_TIER_DIR:-/tmp}"
+# tiered_experimental_cooling ("experimental" is a legacy name, the feature is stable): pin with
+# AFL_TIER_COOLING=true|false; otherwise alternate by AFL_RUN_NUMBER parity so nightly campaigns
+# cover both code paths, falling back to the server default (true) when neither is set.
+AFL_TIER_COOLING="${AFL_TIER_COOLING:-}"
 
 # Persistent record: restart server every N iterations and record the last N inputs.
 # This ensures that on crash, ALL inputs that built the current server state are available
@@ -58,16 +74,50 @@ setup_directories() {
     print_info "Setting up directories..."
     mkdir -p "${OUTPUT_DIR}"
     mkdir -p "${CORPUS_DIR}"
+    touch "${TEMP_DIRS_FILE}"
 
     # When AFL_ENABLE_SAVE=1, enable SAVE/BGSAVE by pointing --dbfilename and --dir
     # to a temp directory. Used in nightly (long) fuzzing to test snapshot serialization.
     if [[ "${AFL_ENABLE_SAVE:-}" == "1" ]]; then
         DB_DIR=$(mktemp -d /tmp/dragonfly-fuzz-db.XXXXXX)
+        printf '%s\n' "${DB_DIR}" >> "${TEMP_DIRS_FILE}"
         DB_FILENAME="dump"
         print_info "Save mode enabled — database directory: ${DB_DIR}"
     else
         DB_DIR=""
         DB_FILENAME=""
+    fi
+
+    # When AFL_ENABLE_TIERING=1, enable tiered storage by pointing --tiered_prefix at a temp
+    # backing directory. Dragonfly opens "<prefix>-NNNN.dts" per shard with O_TRUNC, so each
+    # server (re)start gets a fresh backing file. O_DIRECT (the production default) is kept when
+    # the backing filesystem supports it; tmpfs/overlayfs reject it, which would abort the server
+    # on startup, so fall back to buffered IO there.
+    if [[ "${AFL_ENABLE_TIERING:-}" == "1" ]]; then
+        TIER_DIR=$(mktemp -d "${AFL_TIER_DIR}/dragonfly-fuzz-tier.XXXXXX")
+        printf '%s\n' "${TIER_DIR}" >> "${TEMP_DIRS_FILE}"
+        TIER_PREFIX="${TIER_DIR}/backing"
+        if dd if=/dev/zero of="${TIER_DIR}/odirect_probe" bs=4096 count=1 oflag=direct \
+            status=none 2>/dev/null; then
+            TIER_DIRECT=true
+        else
+            TIER_DIRECT=false
+        fi
+        rm -f "${TIER_DIR}/odirect_probe"
+        if [[ -n "${AFL_TIER_COOLING}" ]]; then
+            TIER_COOLING="${AFL_TIER_COOLING}"
+        elif [[ "${AFL_RUN_NUMBER:-}" =~ ^[0-9]+$ ]]; then
+            # 10# forces decimal: leading-zero values like 08 would otherwise be parsed as octal
+            TIER_COOLING=$([[ $((10#$AFL_RUN_NUMBER % 2)) -eq 0 ]] && echo true || echo false)
+        else
+            TIER_COOLING=true
+        fi
+        print_info "Tiering enabled — backing prefix: ${TIER_PREFIX} (direct=${TIER_DIRECT}, cooling=${TIER_COOLING})"
+    else
+        TIER_DIR=""
+        TIER_PREFIX=""
+        TIER_DIRECT=""
+        TIER_COOLING=""
     fi
 
     if [[ -z "$(ls -A "$CORPUS_DIR" 2>/dev/null)" ]]; then
@@ -98,6 +148,7 @@ show_config() {
     echo "  Memory limit:     ${AFL_MEM_MB}MB"
     echo "  Loop limit:      ${AFL_LOOP_LIMIT} (= AFL_PERSISTENT_RECORD)"
     echo "  Save mode:       ${AFL_ENABLE_SAVE:-off}"
+    echo "  Tiering:         ${TIER_PREFIX:-off}${TIER_PREFIX:+ (direct=${TIER_DIRECT}, cooling=${TIER_COOLING})}"
     echo ""
     print_note "Fuzzing integrated in dragonfly (USE_AFL + persistent mode)"
     print_note "Usage: ./run_fuzzer.sh [resp|memcache]"
@@ -122,6 +173,15 @@ write_repro_env() {
         echo "--omit_basic_usage"
         echo "--restricted_commands=SHUTDOWN,DEBUG,FLUSHALL,FLUSHDB"
         echo "--max_bulk_len=1048576"
+        if [[ -n "$TIER_PREFIX" ]]; then
+            # cwd-relative prefix so repro works from any directory (parent dir = cwd, which always
+            # exists). triage_crashes.sh rewrites this to its per-crash temp dir.
+            echo "--tiered_prefix=tiered_backing"
+            echo "--maxmemory=${AFL_TIER_MAXMEMORY}"
+            echo "--tiered_offload_threshold=${AFL_TIER_OFFLOAD_THRESHOLD}"
+            echo "--backing_file_direct=${TIER_DIRECT}"
+            echo "--tiered_experimental_cooling=${TIER_COOLING}"
+        fi
         [[ "$TARGET" == "memcache" ]] && echo "--memcached_port=11211"
     } > "$out"
     print_info "Reproduction environment: ${out}"
@@ -160,6 +220,16 @@ run_fuzzer() {
     )
 
     [[ -n "$DB_DIR" ]] && AFL_CMD+=(--dir="${DB_DIR}")
+
+    if [[ -n "$TIER_PREFIX" ]]; then
+        AFL_CMD+=(
+            --tiered_prefix="${TIER_PREFIX}"
+            --maxmemory="${AFL_TIER_MAXMEMORY}"
+            --tiered_offload_threshold="${AFL_TIER_OFFLOAD_THRESHOLD}"
+            --backing_file_direct="${TIER_DIRECT}"
+            --tiered_experimental_cooling="${TIER_COOLING}"
+        )
+    fi
 
     if [[ "$TARGET" == "memcache" ]]; then
         AFL_CMD+=(--memcached_port=11211 --afl_target_port=11211)

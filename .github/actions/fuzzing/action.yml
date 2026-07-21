@@ -5,20 +5,16 @@ inputs:
   mode:
     description: "Fuzzing mode: 'smoke' (stop on first crash) or 'long' (collect all crashes)"
     required: true
-    type: string
   target:
     description: "Fuzz target: 'resp' or 'memcache'"
     required: false
     default: 'resp'
-    type: string
   duration-minutes:
     description: "Fuzzing duration in minutes"
     required: true
-    type: string
   run-number:
     description: "GitHub run number for artifact naming"
     required: true
-    type: string
   extra-seeds-dir:
     description: "Directory with additional seed files (initial fuzzer inputs) to merge into the corpus"
     required: false
@@ -31,6 +27,14 @@ inputs:
     description: "Build the binary before fuzzing. Set to 'false' when reusing a binary built by a previous action call in the same job — fails if the binary is missing."
     required: false
     default: 'true'
+  tiering:
+    description: "Enable tiered (disk-backed) storage while fuzzing to exercise the offload/fetch code paths."
+    required: false
+    default: 'false'
+  artifact-suffix:
+    description: "Suffix appended to uploaded artifact names to disambiguate matrix legs sharing a target (e.g. '-tiering')."
+    required: false
+    default: ''
 
 outputs:
   hang_count:
@@ -43,6 +47,16 @@ outputs:
 runs:
   using: "composite"
   steps:
+    - name: Validate fuzzing inputs
+      shell: bash
+      env:
+        DURATION_MINUTES: ${{ inputs.duration-minutes }}
+      run: |
+        if [[ ! "$DURATION_MINUTES" =~ ^[1-9][0-9]*$ ]]; then
+          echo "::error::Fuzzing duration must be a positive integer"
+          exit 1
+        fi
+
     - name: Verify AFL++ installation
       shell: bash
       run: |
@@ -99,9 +113,6 @@ runs:
     - name: Run AFL++ fuzzing
       shell: bash
       run: |
-        MODE="${{ inputs.mode }}"
-        DURATION_MINUTES="${{ inputs.duration-minutes }}"
-
         echo "Starting AFL++ fuzzing..."
         echo "Configuration:"
         echo "  Target: ${{ inputs.target }}"
@@ -111,8 +122,15 @@ runs:
         cd fuzz
         export BUILD_DIR="${GITHUB_WORKSPACE}/build-dbg"
 
+        # Tiering backing files go under the runner temp dir: inside a container job the
+        # RUNNER_TEMP env var is the in-container path (/__w/_temp), bind-mounted from the
+        # host (real disk) — unlike the container's overlayfs /tmp, so the O_DIRECT probe in
+        # run_fuzzer.sh can keep production-like direct IO. Do NOT use ${{ runner.temp }}
+        # here: the expression expands to the host path, which does not exist in the container.
+        export AFL_TIER_DIR="${RUNNER_TEMP}"
+
         # Run fuzzer with timeout
-        timeout ${DURATION_MINUTES}m ./run_fuzzer.sh "${{ inputs.target }}" || EXIT_CODE=$?
+        timeout "${DURATION_MINUTES}m" ./run_fuzzer.sh "${{ inputs.target }}" || EXIT_CODE=$?
 
         # timeout returns 124 if it timed out (expected), 0 if finished naturally
         if [ "${EXIT_CODE:-0}" -eq 124 ]; then
@@ -124,6 +142,8 @@ runs:
           exit 1
         fi
       env:
+        MODE: ${{ inputs.mode }}
+        DURATION_MINUTES: ${{ inputs.duration-minutes }}
         # Mode-specific environment variables
         AFL_BENCH_UNTIL_CRASH: ${{ inputs.mode == 'smoke' && '1' || '' }}
         AFL_NO_UI: 1
@@ -139,7 +159,47 @@ runs:
         # vocabulary, keeping the queue and memory bounded.
         AFL_CUSTOM_MUTATOR_ONLY: 1
         AFL_ENABLE_SAVE: ${{ inputs.mode == 'long' && '1' || '' }}
+        AFL_ENABLE_TIERING: ${{ inputs.tiering == 'true' && '1' || '' }}
+        # Used to alternate tiered_experimental_cooling between nightly campaigns.
+        AFL_RUN_NUMBER: ${{ inputs.run-number }}
         FUZZ_FOCUS_COMMANDS: ${{ inputs.focus-commands }}
+
+    - name: Clean up fuzzing temporary directories
+      if: always()
+      shell: bash
+      env:
+        TEMP_DIRS_FILE: fuzz/artifacts/${{ inputs.target }}/temp_dirs.txt
+      run: |
+        if [[ ! -f "$TEMP_DIRS_FILE" ]]; then
+          exit 0
+        fi
+
+        while IFS= read -r temp_dir || [[ -n "$temp_dir" ]]; do
+          if [[ -z "$temp_dir" ]]; then
+            continue
+          fi
+
+          # Only delete paths produced by the mktemp templates in run_fuzzer.sh
+          # (under /tmp or under the runner temp dir used for tiering backing files).
+          # The base dir is compared literally — interpolating it into the regex would
+          # break on paths with regex metacharacters.
+          base_dir="${temp_dir%/*}"
+          dir_name="${temp_dir##*/}"
+          if [[ "$base_dir" != "/tmp" && "$base_dir" != "${RUNNER_TEMP}" ]] || \
+             [[ ! "$dir_name" =~ ^dragonfly-fuzz-(db|tier)\.[[:alnum:]]{6}$ ]]; then
+            echo "::warning::Refusing to remove unexpected temporary directory: $temp_dir"
+            continue
+          fi
+
+          if [[ -d "$temp_dir" ]]; then
+            echo "Removing fuzzing temporary directory: $temp_dir"
+            rm -rf -- "$temp_dir" || \
+              echo "::warning::Failed to remove fuzzing temporary directory: $temp_dir"
+          fi
+        done < "$TEMP_DIRS_FILE"
+
+        rm -f -- "$TEMP_DIRS_FILE" || \
+          echo "::warning::Failed to remove temporary directory marker: $TEMP_DIRS_FILE"
 
     - name: Analyze fuzzing results
       shell: bash
@@ -167,7 +227,7 @@ runs:
         fi
 
         if [ -d "$QUEUE_DIR" ]; then
-          CORPUS_SIZE=$(find "$QUEUE_DIR" -type f ! -name ".state" 2>/dev/null | wc -l)
+          CORPUS_SIZE=$(find "$QUEUE_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l)
         fi
 
         echo "Fuzzing Results:"
@@ -181,7 +241,7 @@ runs:
           if [ -f "$STATS_FILE" ]; then
             echo ""
             echo "Key Statistics:"
-            grep -E "execs_done|execs_per_sec|paths_total|corpus_count|saved_crashes|saved_hangs|unique_crashes|unique_hangs|last_crash|last_hang" "$STATS_FILE" || true
+            grep -E "execs_done|execs_per_sec|paths_total|corpus_count|saved_crashes|saved_hangs|unique_crashes|unique_hangs|last_crash|last_hang|stability|variable_paths|bitmap_cvg" "$STATS_FILE" || true
           fi
         fi
 
@@ -208,7 +268,8 @@ runs:
         if [ "$CORPUS_SIZE" -gt 0 ]; then
           echo "No crashes found - fuzzing test passed!"
         else
-          echo "No fuzzing artifacts found (fuzzer may not have started)"
+          echo "::error::No fuzzing corpus found (fuzzer may not have started)"
+          exit 1
         fi
 
     - name: Package crash artifacts
@@ -246,9 +307,9 @@ runs:
 
     - name: Upload crash artifacts
       if: failure() && steps.analyze.outputs.crash_count > 0
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
-        name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-crashes-${{ inputs.run-number }}
+        name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-crashes-${{ inputs.run-number }}${{ inputs.artifact-suffix }}
         path: |
           fuzz/packaged/*.tar.gz
           fuzz/artifacts/${{ inputs.target }}/default/fuzzer_stats
@@ -275,9 +336,9 @@ runs:
 
     - name: Upload hang artifacts
       if: failure() && steps.analyze.outputs.hang_count > 0
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
-        name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-hangs-${{ inputs.run-number }}
+        name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-hangs-${{ inputs.run-number }}${{ inputs.artifact-suffix }}
         path: |
           fuzz/packaged_hangs/*.tar.gz
           fuzz/artifacts/${{ inputs.target }}/default/fuzzer_stats
