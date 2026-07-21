@@ -1604,10 +1604,9 @@ void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 // Syntax: saddex key [KEEPTTL] ttl_sec member [member...]
 void CmdSAddEx(CmdArgParser parser, CommandContext* cmd_cntx) {
-  constexpr uint32_t kMaxTtl = (1UL << 26);
   const std::string_view key = parser.Next<std::string_view>();
   const bool keepttl = parser.Check("KEEPTTL");
-  const uint32_t ttl_sec = parser.Next<FInt<1u, kMaxTtl>>();
+  const uint32_t ttl_sec = parser.Next<FInt<uint32_t{1}, uint32_t{kMaxExpireDeadlineSec}>>();
   ParsedArgs vals = parser.RemainingRange(WrongNumArgsError("SADDEX"));
 
   if (auto err = parser.TakeError(); err) {
