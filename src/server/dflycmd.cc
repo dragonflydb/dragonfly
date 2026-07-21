@@ -83,9 +83,7 @@ bool ToSyncId(string_view str, uint32_t* num) {
   return absl::SimpleAtoi(str, num);
 }
 
-// CmdArgParser token parser for a dash-joined per-shard LSN vector such as "5-3-8". Reports an
-// error through the parser (surfaced as kInvalidIntErr by the caller) if any token isn't an
-// integer, matching the original per-token validation.
+// Parse LSN vector such as "5-3-8"
 std::vector<LSN> ParseLsnVec(std::string_view arg, RuleError& err) {
   std::vector<LSN> lsns;
   for (std::string_view token : absl::StrSplit(arg, '-')) {
@@ -292,10 +290,7 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
   std::optional<LSN> seqid;
   std::optional<Replica::LastMasterSyncData> replica_last_master;
   if (parser.HasAtLeast(2)) {
-    // <last_master_id> <lsn-vec>: the replica's previous master and its dash-joined per-shard LSNs.
-    replica_last_master.emplace();
-    replica_last_master->id = parser.Next<string>();
-    replica_last_master->last_journal_LSNs = parser.Next(ParseLsnVec);
+    replica_last_master = {parser.Next<string>(), parser.Next(ParseLsnVec)};
   } else if (parser.HasNext()) {
     seqid = parser.Next<LSN>();
   }
