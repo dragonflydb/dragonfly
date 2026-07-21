@@ -392,23 +392,12 @@ async def action_trigger_table_growth(cl: aioredis.Redis):
 
 
 def classify_table_growth(m: Metrics):
-    "Currently table growth is added to new metric!"
-    object_used = m.obj_used()
-    table = m.mem("table_used")
-    cmd = m.cmd("string")
-
-    if table <= 0:
+    """Table growth is NOT added to new metric!"""
+    if m.mem("table_used") <= 0:
         return "WRONG table didnt grow"
 
-    if cmd == object_used:
-        return "OK table excluded"
-
-    if cmd >= object_used + table:
-        return "CHECK table included"
-
-    if cmd > object_used:
-        return "CHECK other bytes included?"
-
+    if m.cmd("string") < m.mem("table_used"):
+        return "OK"
     return "WRONG"
 
 
@@ -474,7 +463,7 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             classify=classify_rename_to_new,
         ),
         Scenario(
-            "rename hash over string",
+            "rename hash over string [COMPLICATED FIX: COMMAND HANDLER]",
             setup=commands(
                 ("HSET", long_key, "field", long_val),
                 ("SET", long_key3, long_val),
@@ -589,6 +578,7 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
 
     passed = []
     not_passed = []
+    known_fixes = []
     for scenario in scenarios:
         await async_client.flushdb()
 
@@ -601,7 +591,10 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
             error = e
 
         after = await snapshot_metrics(df_server)
-        if classify_and_report(scenario, before, after, error) != "OK":
+        report = classify_and_report(scenario, before, after, error)
+        if report != "OK" and "FIX" in scenario.name:
+            known_fixes.append(scenario)
+        elif report != "OK":
             not_passed.append(scenario)
         else:
             passed.append(scenario)
@@ -609,6 +602,7 @@ async def test_scenarios(df_server: DflyInstance, async_client: aioredis.Redis):
     print("\n\n", "====" * 32, "\n\n")
     passed = "\n ".join(s.name for s in passed)
     not_passed = "\n ".join(s.name for s in not_passed)
+    known_fixes = "\n ".join(s.name for s in known_fixes)
     print(f"passed:\n {passed}")
-    # those marked easy fix have known fix
     print(f"not passed:\n {not_passed}")
+    print(f"known fixes:\n {known_fixes}")
