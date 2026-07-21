@@ -926,6 +926,57 @@ TEST_F(SearchFamilyTest, SymbolsInTag) {
   EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{\"fourth})"}), AreDocIds("doc:4"));
 }
 
+TEST_F(SearchFamilyTest, QuotedTagEscapes) {
+  Run({"FT.CREATE", "demo_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "tags", "TAG"});
+  Run({"HSET", "doc:1", "tags", R"(tnt\backslash)"});
+  Run({"HSET", "doc:2", "tags", "tnt\"quote"});
+  Run({"HSET", "doc:3", "tags", "plain-value"});
+  Run({"HSET", "doc:4", "tags", "foo bar"});
+  Run({"HSET", "doc:5", "tags", R"(a\b)"});
+  Run({"HSET", "doc:6", "tags", "c"});
+  Run({"HSET", "doc:7", "tags", R"(C:\)"});
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"tnt\\backslash"})", "DIALECT", "2"}),
+              AreDocIds("doc:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"tnt\"quote"})", "DIALECT", "2"}),
+              AreDocIds("doc:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"plain-value"})", "DIALECT", "2"}),
+              AreDocIds("doc:3"));
+
+  // A quoted value may contain spaces, which the bare {foo bar} form cannot express.
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"foo bar"})", "DIALECT", "2"}),
+              AreDocIds("doc:4"));
+
+  // OR-list of quoted members, each unescaped independently.
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"a\\b"|"c"})", "DIALECT", "2"}),
+              AreDocIds("doc:5", "doc:6"));
+
+  // Value ending in a backslash: the doubled query matches the stored `C:\`, and the lone-backslash
+  // query must not abort the server (it unescapes to `C:`, which matches nothing here).
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"C:\\"})", "DIALECT", "2"}),
+              AreDocIds("doc:7"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"C:\"})", "DIALECT", "2"}), kNoResults);
+  EXPECT_EQ(Run({"PING"}), "PONG");
+}
+
+TEST_F(SearchFamilyTest, QuotedTagEscapesJson) {
+  Run({"FT.CREATE", "json_idx", "ON", "JSON", "PREFIX", "1", "jdoc:", "SCHEMA", "$.tag", "AS",
+       "tag", "TAG"});
+  // JSON unescapes "a\\b" to the stored tag value a\b.
+  Run({"JSON.SET", "jdoc:1", "$", R"({"tag":"a\\b"})"});
+  EXPECT_THAT(Run({"FT.SEARCH", "json_idx", R"(@tag:{"a\\b"})", "DIALECT", "2"}),
+              AreDocIds("jdoc:1"));
+}
+
+TEST_F(SearchFamilyTest, QuotedTagEscapesCaseSensitive) {
+  Run({"FT.CREATE", "cs_idx", "ON", "HASH", "PREFIX", "1", "cs:", "SCHEMA", "tags", "TAG",
+       "CASESENSITIVE"});
+  Run({"HSET", "cs:1", "tags", R"(ACME\Admin)"});
+  // Exact case matches; wrong case does not.
+  EXPECT_THAT(Run({"FT.SEARCH", "cs_idx", R"(@tags:{"ACME\\Admin"})", "DIALECT", "2"}),
+              AreDocIds("cs:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "cs_idx", R"(@tags:{"acme\\admin"})", "DIALECT", "2"}), kNoResults);
+}
+
 TEST_F(SearchFamilyTest, TagNumbers) {
   Run({"hset", "d:1", "number", "1"});
   Run({"hset", "d:2", "number", "2"});

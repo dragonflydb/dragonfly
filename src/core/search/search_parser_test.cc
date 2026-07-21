@@ -622,6 +622,37 @@ TEST_F(SearchParserTest, PhraseSlopRejectedInTagContext) {
   EXPECT_NE(0, Parse("@t:{\"foo\"~2}"));
 }
 
+// Quoted tag values must process one layer of \X escapes, mirroring the unquoted tag path,
+// so values containing backslashes or quotes round-trip between HSET and FT.SEARCH.
+TEST_F(SearchParserTest, QuotedTagEscapes) {
+  auto tag_affix = [this](const string& query) -> string {
+    EXPECT_EQ(0, Parse(query));
+    AstExpr e = query_driver_.Take();
+    EXPECT_TRUE(std::holds_alternative<AstFieldNode>(e));
+    const AstNode& tags = *std::get<AstFieldNode>(e).node;
+    EXPECT_TRUE(std::holds_alternative<AstTagsNode>(tags));
+    const auto& tn = std::get<AstTagsNode>(tags);
+    EXPECT_EQ(tn.tags.size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<AstTermNode>(tn.tags[0]));
+    return std::get<AstTermNode>(tn.tags[0]).affix;
+  };
+
+  // Recognized escapes \\ and \" resolve to their single-character values.
+  EXPECT_EQ(tag_affix(R"(@t:{"tnt\\backslash"})"), R"(tnt\backslash)");
+  EXPECT_EQ(tag_affix(R"(@t:{"tnt\"quote"})"), "tnt\"quote");
+
+  // Characterization: one layer of \X is stripped for any X, mirroring the unquoted make_Tag
+  // path, so an unrecognized escape drops its backslash rather than passing through verbatim.
+  // This is an intentional policy change from v1.39's verbatim behavior; pinning it keeps a
+  // future reader from "restoring" the old semantics.
+  EXPECT_EQ(tag_affix(R"(@t:{"ACME\jdoe"})"), "ACMEjdoe");
+
+  // A trailing lone backslash (e.g. a Windows path) must not abort — it previously tripped the
+  // DCHECK in UnescapeTerm — and drops the dangling backslash; the doubled form is a literal `\`.
+  EXPECT_EQ(tag_affix(R"(@t:{"C:\"})"), "C:");
+  EXPECT_EQ(tag_affix(R"(@t:{"C:\\"})"), R"(C:\)");
+}
+
 TEST_F(SearchParserTest, PhraseParse) {
   // Top-level phrase.
   ASSERT_EQ(0, Parse("\"machine learning\""));
@@ -675,6 +706,16 @@ TEST_F(SearchParserTest, WildcardLex) {
 
   SetInput("w\"h?o\"");
   NEXT_EQ(TOK_WILDCARD, string, "h?o");
+  NEXT_TOK(TOK_YYEOF);
+
+  // A trailing lone backslash must not abort (previously tripped a DCHECK in UnescapeTerm); the
+  // dangling backslash is dropped, so `w"a\"` and `w'a\'` both yield `a`.
+  SetInput(R"(w"a\")");
+  NEXT_EQ(TOK_WILDCARD, string, "a");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput(R"(w'a\')");
+  NEXT_EQ(TOK_WILDCARD, string, "a");
   NEXT_TOK(TOK_YYEOF);
 
   // Uppercase `W` is not a wildcard: it rewinds to a term followed by a phrase.
