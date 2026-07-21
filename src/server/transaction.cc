@@ -1876,10 +1876,27 @@ std::vector<Transaction::PerShardCache>& Transaction::TLTmpSpace::GetShardIndex(
 
 namespace {
 thread_local CmdMemoryScope* tl_cmd_mem_scope = nullptr;
+
+int64_t CmdTrackedMemory() {
+  const EngineShard* shard = EngineShard::tlocal();
+  const int64_t used_memory = shard->UsedMemory();
+
+  const DbSlice* db_slice = nullptr;
+  if (const Transaction* tx = shard->running_tx(); tx != nullptr)
+    db_slice = &tx->GetDbSlice(shard->shard_id());
+  else if (namespaces != nullptr)
+    db_slice = &namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+
+  if (db_slice == nullptr)
+    return used_memory;
+
+  return used_memory - db_slice->table_memory();
 }
 
+}  // namespace
+
 CmdMemoryScope::CmdMemoryScope(int obj_type)
-    : obj_type_(obj_type), mem_baseline_(EngineShard::tlocal()->UsedMemory()) {
+    : obj_type_(obj_type), mem_baseline_(CmdTrackedMemory()) {
   if (tl_cmd_mem_scope)
     parent_ = tl_cmd_mem_scope;
 
@@ -1893,7 +1910,7 @@ void CmdMemoryScope::MarkDeducted(int64_t bytes) {
 CmdMemoryScope::~CmdMemoryScope() {
   DCHECK_EQ(tl_cmd_mem_scope, this);
 
-  const int64_t used_memory = static_cast<int64_t>(EngineShard::tlocal()->UsedMemory());
+  const int64_t used_memory = CmdTrackedMemory();
   const int64_t total_delta = used_memory - mem_baseline_;
   const int64_t my_delta = total_delta - child_delta_ - deductions_;
 
