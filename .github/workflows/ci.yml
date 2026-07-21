@@ -234,6 +234,21 @@ jobs:
           name: regression_logs
           path: /tmp/failed/*
 
+      - name: Run Valkey TCL stream tests
+        # Same gating as the regression tests above: runs the upstream Valkey stream TCL suites
+        # (unit/type/stream[-cgroups]) in external-server mode against the just-built binary,
+        # on both Debug and Release. continue-on-error keeps it a canary for now — flip to a
+        # blocking step once proven stable in CI. See tests/dragonfly/valkey_tcl/README.md.
+        if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          # tcl runs the harness; redis-tools + iproute2 (ss) for the fail-closed readiness probe.
+          apt-get update && apt-get install -y --no-install-recommends tcl redis-tools iproute2
+          cd ${GITHUB_WORKSPACE}/tests/dragonfly/valkey_tcl
+          ./sync-valkey-tcl-tests.sh
+          ./run-stream-tests.sh ${GITHUB_WORKSPACE}/build/dragonfly 6399
+
       - name: Prepare JUnit artifact name
         if: always()
         run: |
