@@ -748,8 +748,7 @@ ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight, const DbContext& 
 double Aggregate(double v1, double v2, AggType atype) {
   switch (atype) {
     case AggType::SUM:
-      v1 += v2;
-      return isnan(v1) ? 0 : v1;
+      return v1 + v2;
     case AggType::MAX:
       return max(v1, v2);
     case AggType::MIN:
@@ -1599,6 +1598,16 @@ void ZBooleanOperation(CmdArgParser parser, string_view cmd, bool is_union, bool
 
     if (result.empty() && !is_union)  // intersection only shrinks
       break;
+  }
+
+  // NaN can appear here from inf + -inf cancelling out during SUM aggregation.
+  // Clamp it to 0 (matches Redis) only once, after all merges are done.
+  if (op_args->agg_type == AggType::SUM) {
+    for (auto& [member, score] : result) {
+      if (std::isnan(score)) {
+        score = 0;
+      }
+    }
   }
 
   // Copy to vector for sorting

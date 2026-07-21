@@ -774,6 +774,42 @@ TEST_F(ZSetFamilyTest, ZUnionStoreOpts) {
   EXPECT_THAT(resp, DoubleArg(0));
 }
 
+// Regression test: inf + -inf during SUM aggregation must clamp to 0, even when
+// an early clamp inside a single shard's merge would otherwise get overwritten
+// by a later merge and produce inf instead. See Aggregate()/ZBooleanOperation()..
+TEST_F(ZSetFamilyTest, ZUnionStoreSumNanCancelsToZero) {
+  // Case 1: all sources on the SAME shard — the corrupting merge sequence happens
+  // entirely inside UnionShardKeysWithScore's local merge loop.
+  const char kKeySameShardA[] = "x";
+  const char kKeySameShardB[] = "m";
+  ASSERT_EQ(Shard(kKeySameShardA, shard_set->size()), Shard(kKeySameShardB, shard_set->size()))
+      << "test requires these two keys on the same shard";
+
+  Run({"ZADD", kKeySameShardA, "inf", "e1"});
+  Run({"ZADD", kKeySameShardB, "-inf", "e1"});
+  Run({"ZUNIONSTORE", "dest_same_shard", "3", kKeySameShardA, kKeySameShardB, kKeySameShardA});
+  auto resp = Run({"ZSCORE", "dest_same_shard", "e1"});
+  EXPECT_THAT(resp, DoubleArg(0)) << "same-shard union: inf + -inf + inf must clamp to 0";
+
+  // Case 2: two sources on one shard (producing a premature within-shard clamp),
+  // a third source on a different shard.
+  const char kKeyPairShardA[] = "b";
+  const char kKeyPairShardB[] = "d";
+  const char kKeyOtherShard[] = "a";
+  ASSERT_EQ(Shard(kKeyPairShardA, shard_set->size()), Shard(kKeyPairShardB, shard_set->size()))
+      << "kKeyPairShardA/B must be on the same shard";
+  ASSERT_NE(Shard(kKeyPairShardA, shard_set->size()), Shard(kKeyOtherShard, shard_set->size()))
+      << "kKeyOtherShard must be on a different shard";
+
+  Run({"ZADD", kKeyPairShardA, "inf", "e1"});
+  Run({"ZADD", kKeyPairShardB, "-inf", "e1"});
+  Run({"ZADD", kKeyOtherShard, "inf", "e1"});
+  Run({"ZUNIONSTORE", "dest_diff_shard", "3", kKeyPairShardA, kKeyPairShardB, kKeyOtherShard});
+  resp = Run({"ZSCORE", "dest_diff_shard", "e1"});
+  EXPECT_THAT(resp, DoubleArg(0))
+      << "cross-shard union: within-shard clamp must not corrupt cross-shard merge";
+}
+
 TEST_F(ZSetFamilyTest, ZInterStore) {
   EXPECT_EQ(2, CheckedInt({"zadd", "z1", "1", "a", "2", "b"}));
   EXPECT_EQ(2, CheckedInt({"zadd", "z2", "3", "c", "2", "b"}));
