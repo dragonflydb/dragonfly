@@ -387,6 +387,18 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/lint-test-chart
 
+  list-caches:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: List all Actions caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh cache list -R ${{ github.repository }} --limit 100 --sort size_in_bytes --order desc || true
+
   large-tests-arm:
     runs-on: CI-LARGE-ARM
 
