@@ -1911,10 +1911,18 @@ CmdMemoryScope::~CmdMemoryScope() {
   DCHECK_EQ(tl_cmd_mem_scope, this);
 
   const int64_t used_memory = CmdTrackedMemory();
+  // The memory moved this much during current scope possibly including all movements due to child
+  // scopes.
   const int64_t total_delta = used_memory - mem_baseline_;
+  // Remove the movements due to child scopes, and whatever we do not want to count.
   const int64_t my_delta = total_delta - child_delta_ - deductions_;
 
   if (parent_)
+    // Let parent know about movements due to this scope. This calculation travels up to the root.
+    // So when the parent calculates delta, it can remove the movements due to children. It is added
+    // because a parent can have multiple child scopes in sequence. Note that deductions will only
+    // matter at the current scope. The parent need not know about them, the parent only needs to
+    // know about our total movement.
     parent_->child_delta_ += total_delta;
 
   tl_cmd_mem_scope = parent_;

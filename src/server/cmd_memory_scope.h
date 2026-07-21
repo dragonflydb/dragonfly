@@ -14,6 +14,10 @@ class CmdMemoryScope {
 
   CmdMemoryScope(const CmdMemoryScope&) = delete;
   CmdMemoryScope& operator=(const CmdMemoryScope&) = delete;
+
+  // An escape hatch. It tells the scope not to count this many bytes when it computes delta. For
+  // example when we want to exclude key size from calculation, or more generally some object was
+  // allocated using the same memory resource we are tracking, but we do not want to count it.
   void MarkDeducted(int64_t bytes);
 
   ~CmdMemoryScope();
