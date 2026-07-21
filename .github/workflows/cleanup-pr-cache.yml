@@ -1,0 +1,66 @@
+# Deletes the GitHub Actions caches scoped to a pull request the moment it is closed or merged. PR caches live under
+# refs/pull/<N>/merge and are otherwise only reclaimed by the 7-day-unused / 10 GB LRU eviction policy. With a high PR
+# volume that can pin the repo near the 10 GB ceiling and cause cache thrashing. This event-driven cleanup keeps the
+# budget free for the caches that matter.
+# Scope: PR caches only. Caches from regression/heavy/etc. runs live on refs/heads/main (no "close" event) and are not
+# touched here; prune those via the manual ref-aware dedup command or a separate scheduled workflow.
+name: Cleanup PR caches
+
+on:
+  pull_request:
+    types: [closed]
+
+# One cleanup per PR, a later close/merge event supersedes an in-flight run.
+concurrency:
+  group: cleanup-pr-cache-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cleanup:
+    # Fork PRs run with a read-only GITHUB_TOKEN and cannot delete caches (and
+    # generally cannot create them either), so restrict to same-repo PRs.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Host runner (no container:) so the preinstalled gh CLI is available.
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write   # required to delete caches
+    steps:
+      - name: Delete caches for the closed PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+
+          # Repo-wide cache usage (10 GB limit). Printed before and after the
+          # deletion so the log shows exactly how much this cleanup reclaimed.
+          print_repo_cache_usage() {
+            gh api "repos/$GH_REPO/actions/cache/usage" --jq \
+              '"Repo cache: \(.active_caches_size_in_bytes/1048576|floor) MB used, "
+               + "\(.active_caches_count) caches "
+               + "(limit 10240 MB, \((10737418240 - .active_caches_size_in_bytes)/1048576|floor) MB free)"'
+          }
+
+          echo "== Before cleanup =="
+          print_repo_cache_usage
+          echo "Caches scoped to $PR_REF:"
+          gh cache list --ref "$PR_REF" --limit 100 --json id,key,sizeInBytes \
+            --jq '.[] | "  \(.sizeInBytes/1048576|floor)MB  \(.key)"' || true
+
+          ids=$(gh cache list --ref "$PR_REF" --limit 100 --json id --jq '.[].id')
+          count=$(printf '%s' "$ids" | grep -c . || true)
+          echo "Found $count cache(s) to delete"
+
+          if [ -z "$ids" ]; then
+            echo "No caches found for $PR_REF; nothing to delete"
+          else
+            for id in $ids; do
+              echo "Deleting cache id=$id"
+              gh cache delete "$id"
+            done
+          fi
+
+          echo "== After cleanup =="
+          print_repo_cache_usage
