@@ -1123,12 +1123,12 @@ Usage: dragonfly [FLAGS]
     return 1;
   }
 
-  // Validate startup flags (TLS + snapshot filename) BEFORE creating the pidfile and before
-  // starting the proactor pool. They return false on a bad config; we exit cleanly (code 1)
-  // here, before the fiber runtime exists, which avoids a stale pidfile and aborting during
-  // fiber-runtime teardown.
+  // Validate startup flags (TLS, snapshot filename, keyspace events) BEFORE creating the
+  // pidfile and before starting the proactor pool. They return false on a bad config; we exit
+  // cleanly (code 1) here, before the fiber runtime exists, which avoids a stale pidfile and
+  // aborting during fiber-runtime teardown.
   if (!dfly::ValidateServerTlsFlags() || !dfly::ValidateClientTlsFlags() ||
-      !dfly::ValidateSnapshotFilenameFlags()) {
+      !dfly::ValidateSnapshotFilenameFlags() || !dfly::ValidateNotifyKeyspaceEventsFlag()) {
     return 1;
   }
 

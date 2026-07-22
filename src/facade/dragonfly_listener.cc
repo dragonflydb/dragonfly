@@ -109,29 +109,37 @@ bool ConfigureKeepAlive(int fd) {
 }
 
 struct ListenerStats {
-  size_t tls_allocated_bytes = 0;
   uint64_t refused_conn_maxclients_reached_cnt = 0;
 };
 
 thread_local ListenerStats listener_tl_stats;
 atomic_int ssl_init_refcount = 0;
 
+// Global: TLS contexts are built once and shared across listeners, so OpenSSL objects are
+// routinely allocated on one thread and freed on another. Per-thread counters would go
+// negative on the freeing threads and wrap the summed metric.
+atomic_size_t tls_allocated_bytes{0};
+
 void* OverriddenSSLMalloc(size_t size, const char* file, int line) {
   void* res = mi_malloc(size);
-  listener_tl_stats.tls_allocated_bytes += mi_malloc_usable_size(res);
+  tls_allocated_bytes.fetch_add(mi_malloc_usable_size(res), memory_order_relaxed);
   return res;
 }
 
 void* OverriddenSSLRealloc(void* addr, size_t size, const char* file, int line) {
   size_t prev_size = mi_malloc_usable_size(addr);
   void* res = mi_realloc(addr, size);
-  listener_tl_stats.tls_allocated_bytes += mi_malloc_usable_size(res);
-  listener_tl_stats.tls_allocated_bytes -= prev_size;
+  // On failure the original block stays allocated and will be freed (and subtracted) later,
+  // so adjusting the counter here would subtract it twice.
+  if (res) {
+    tls_allocated_bytes.fetch_add(mi_malloc_usable_size(res), memory_order_relaxed);
+    tls_allocated_bytes.fetch_sub(prev_size, memory_order_relaxed);
+  }
   return res;
 }
 
 void OverriddenSSLFree(void* addr, const char* file, int line) {
-  listener_tl_stats.tls_allocated_bytes -= mi_malloc_usable_size(addr);
+  tls_allocated_bytes.fetch_sub(mi_malloc_usable_size(addr), memory_order_relaxed);
   mi_free(addr);
 }
 
@@ -264,8 +272,24 @@ bool Listener::ReconfigureTLS() {
   return true;
 }
 
-size_t Listener::TLSUsedMemoryThreadLocal() {
-  return listener_tl_stats.tls_allocated_bytes;
+void Listener::ApplyTlsCtx(SSL_CTX* ctx) {
+#ifdef DFLY_USE_SSL
+  const bool tls_on_privileged_port = !GetFlag(FLAGS_no_tls_on_admin_port);
+  SSL_CTX* prev_ctx = ctx_;
+  if (ctx && (!IsPrivilegedInterface() || tls_on_privileged_port)) {
+    SSL_CTX_up_ref(ctx);
+    ctx_ = ctx;
+  } else {
+    ctx_ = nullptr;
+  }
+  if (prev_ctx) {
+    SSL_CTX_free(prev_ctx);
+  }
+#endif
+}
+
+size_t Listener::TLSUsedMemory() {
+  return tls_allocated_bytes.load(memory_order_relaxed);
 }
 
 uint64_t Listener::RefusedConnectionMaxClientsCount() {

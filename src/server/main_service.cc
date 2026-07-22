@@ -92,6 +92,7 @@ ABSL_FLAG(bool, lua_resp2_legacy_float, false,
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 8096, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
+ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 ABSL_FLAG(size_t, listpack_max_field_len, 64,
           "Maximum length of a hash field or value to be stored in listpack encoding");
 ABSL_FLAG(size_t, listpack_max_bytes, 1024,
@@ -1079,19 +1080,36 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("search_query_string_bytes");
 #endif
 
+  // The default inherited by DbSlices is set here, before any of them exists: slices use the
+  // validated state instead of re-reading the raw flag, which transiently holds unvalidated
+  // input while CONFIG SET runs (a racing namespace creation must never observe a rejected
+  // value). dfly_main validates the flag before the pidfile/listeners exist; this exit is a
+  // backstop for other embeddings.
+  {
+    if (!ValidateNotifyKeyspaceEventsFlag()) {
+      exit(1);
+    }
+    DbSlice::SetExpiredEventsRecordingDefault(!absl::GetFlag(FLAGS_notify_keyspace_events).empty());
+  }
+
   config_registry.RegisterMutable(
       "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
+        // The candidate value is already parsed into the flag at this point.
         auto res = flag.TryGet<std::string>();
-        if (!res.has_value() || (!res->empty() && !absl::EqualsIgnoreCase(*res, "EX"))) {
+        if (!res.has_value() || !ValidateNotifyKeyspaceEventsFlag()) {
           return false;
         }
 
-        pool->AwaitBrief([&res](unsigned, auto*) {
+        const bool enable = !res->empty();
+        // Update the default before the loop below so a concurrently created namespace either
+        // inherits the new value or is already visible to the iteration.
+        DbSlice::SetExpiredEventsRecordingDefault(enable);
+        pool->AwaitFiberOnAll([enable](unsigned, auto*) {
           auto* shard = EngineShard::tlocal();
           if (shard) {
-            auto shard_id = shard->shard_id();
-            auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id);
-            db_slice.SetNotifyKeyspaceEvents(*res);
+            namespaces->ForEachDbSliceOnShard(shard->shard_id(), [enable](DbSlice& db_slice) {
+              db_slice.SetExpiredEventsRecording(enable);
+            });
           }
         });
 

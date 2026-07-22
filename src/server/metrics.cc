@@ -852,7 +852,11 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
       replication_stats = dfly_cmd->GetReplicationMemoryStats(shard);
   }
 
-  tls_bytes = Listener::TLSUsedMemoryThreadLocal();
+  // The TLS counter is process-wide (contexts are allocated and freed on different threads),
+  // so read it once instead of summing it per thread.
+  if (proactor_index == 0) {
+    tls_bytes = Listener::TLSUsedMemory();
+  }
   refused_conn_max_clients_reached_count = Listener::RefusedConnectionMaxClientsCount();
 
   lua_stats = InterpreterManager::tl_stats();

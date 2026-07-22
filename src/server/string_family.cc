@@ -112,6 +112,9 @@ class SetCmd {
     uint16_t flags = SET_ALWAYS;
     uint32_t memcache_flags = 0;
     uint64_t expire_after_ms = 0;  // Relative value based on now. 0 means no expiration.
+    // EXAT/PXAT resolved to a time that already elapsed: delete instead of store (after the
+    // NX/XX/GET conditions are honored).
+    bool expire_in_past = false;
     optional<StringResult>* prev_val = nullptr;  // if set, previous value will be stored if found
     BackPressureFuture* backpressure = nullptr;
 
@@ -125,6 +128,10 @@ class SetCmd {
  private:
   OpStatus SetExisting(const SetParams& params, std::string_view value,
                        DbSlice::ItAndUpdater* it_upd);
+
+  // Deletes the key whose freshly applied expiration is already in the past; journals the
+  // deletion and then emits the expired keyspace event.
+  OpStatus DeleteExpiredKey(std::string_view key, DbSlice::ItAndUpdater* it_upd);
 
   void AddNew(const SetParams& params, const DbSlice::Iterator& it, std::string_view key,
               std::string_view value);
@@ -865,12 +872,16 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
     const OpArgs& op_args = params.t->GetOpArgs(params.shard);
     if (expired) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{(params.key)});
+    } else if (params.expire_params.persist) {
+      // GAT 0 removes the expiry; PEXPIREAT with the returned 0 would delete the replica's key.
+      RecordJournal(op_args, "PERSIST"sv, ArgSlice{(params.key)});
     } else {
       RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{(params.key), (absl::StrCat(value))});
     }
   }
 
   if (expired) {
+    db_slice.SendExpiredKeyEvent(ctx, params.key);
     return OpStatus::KEY_NOTFOUND;
   }
   return find_res->it;
@@ -911,6 +922,8 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
     if (params.flags & SET_IF_EXISTS) {
       if (IsValid(find_res.it)) {
+        if (params.expire_in_past)
+          return DeleteExpiredKey(key, &find_res);
         return SetExisting(params, value, &find_res);
       } else {
         return OpStatus::SKIPPED;
@@ -919,8 +932,21 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
       DCHECK(params.flags & SET_IF_NOTEXIST) << params.flags;
       if (IsValid(find_res.it)) {
         return OpStatus::SKIPPED;
-      }  // else AddNew() is called below
+      }
+      // The new value would already be expired: nothing to create.
+      if (params.expire_in_past)
+        return OpStatus::OK;
+      // else AddNew() is called below
     }
+  } else if (params.expire_in_past) {
+    // Unconditional set whose expiration already elapsed: delete the existing key (if any)
+    // instead of storing the value.
+    auto find_res = db_slice.FindMutable(op_args_.db_cntx, key);
+    if (auto status = CachePrevIfNeeded(params, find_res.it); status != OpStatus::OK)
+      return status;
+    if (!IsValid(find_res.it))
+      return OpStatus::OK;
+    return DeleteExpiredKey(key, &find_res);
   }
 
   // Enable journal omits for this operation
@@ -1061,6 +1087,24 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
   dfly::RecordJournal(op_args_, "SET", ArgSlice{cmds});
 }
 
+OpStatus SetCmd::DeleteExpiredKey(string_view key, DbSlice::ItAndUpdater* it_upd) {
+  auto& db_slice = op_args_.GetDbSlice();
+  it_upd->post_updater.Run();  // finalize memory accounting before the delete
+
+  DbSlice::ExpireParams past{TimeUnit::MSEC, -1, op_args_.db_cntx.time_now_ms, /*cap=*/true};
+  auto res = db_slice.UpdateExpire(op_args_.db_cntx, it_upd->it, past);
+  RETURN_ON_BAD_STATUS(res);
+  DCHECK_EQ(*res, -1);
+
+  // SET is NO_AUTOJOURNAL: without an explicit record the replica never learns about this
+  // deletion and keeps the old value forever.
+  if (op_args_.shard->journal()) {
+    dfly::RecordJournal(op_args_, "DEL"sv, ArgSlice{key});
+  }
+  db_slice.SendExpiredKeyEvent(op_args_.db_cntx, key);
+  return OpStatus::OK;
+}
+
 OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Iterator it) {
   if (!params.prev_val || !IsValid(it))
     return OpStatus::OK;
@@ -1072,9 +1116,8 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   return OpStatus::OK;
 }
 
-struct NegativeExpire {};  // Returned if relative expiry was in the past
-std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetParams(
-    CmdArgParser parser, const CommandContext* cmd_cntx) {
+std::variant<SetCmd::SetParams, facade::ErrorReply> ParseSetParams(CmdArgParser parser,
+                                                                   const CommandContext* cmd_cntx) {
   SetCmd::SetParams sparams;
 
   sparams.memcache_flags = cmd_cntx->mc_command() ? cmd_cntx->mc_command()->flags : 0;
@@ -1104,11 +1147,13 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
       if (abs_ms < 0)
         return facade::ErrorReply{InvalidExpireTime("set")};
 
-      // Remove existed key if the key is expired already
-      if (rel_ms < 0)
-        return NegativeExpire{};
-
-      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
+      // An expiration that already elapsed deletes instead of storing. Keep parsing so the
+      // remaining options (NX/XX/GET, syntax validation) are honored.
+      if (rel_ms <= 0) {
+        sparams.expire_in_past = true;
+      } else {
+        tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
+      }
     } else if (!parser.Check("_MCFLAGS", &sparams.memcache_flags)) {
       uint16_t flag = parser.MapNext(  //
           "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
@@ -1134,9 +1179,11 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
       auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
       if (abs_ms < 0)
         return facade::ErrorReply{InvalidExpireTime("set")};
-      if (rel_ms < 0)
-        return NegativeExpire{};
-      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
+      if (rel_ms <= 0) {
+        sparams.expire_in_past = true;
+      } else {
+        tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
+      }
     }
   }
 
@@ -1155,23 +1202,6 @@ cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (holds_alternative<facade::ErrorReply>(params_result))
     co_return get<facade::ErrorReply>(params_result);
-
-  if (holds_alternative<NegativeExpire>(params_result)) {
-    auto del_cb = [](const Transaction* tx, EngineShard* es) {
-      ShardArgs args = tx->GetShardArgs(es->shard_id());
-      GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
-      return OpStatus::OK;
-    };
-    co_await cmd::SingleHop(del_cb);
-
-    if (cmd_cntx->mc_command() != nullptr) {
-      cmd_cntx->rb()->SendSimpleString(
-          MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderStored(true));
-    } else {
-      cmd_cntx->rb()->SendOk();
-    }
-    co_return std::nullopt;
-  }
 
   auto& sparams = get<SetCmd::SetParams>(params_result);
 
@@ -1401,21 +1431,29 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     StringResult value = ReadString(t->GetDbIndex(), key, it_res->it->second, shard);
 
+    bool key_expired = false;
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
-      RETURN_ON_BAD_STATUS(
-          op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it, exp_params));
+      auto expire_res = op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it, exp_params);
+      RETURN_ON_BAD_STATUS(expire_res);
+      key_expired = *expire_res == -1;
     }
 
-    // Replicate GETEX as PEXPIREAT or PERSIST
+    // Replicate GETEX as DEL (already-past expiration), PEXPIREAT or PERSIST.
     if (shard->journal() && exp_params.IsDefined()) {
       if (exp_params.persist) {
         RecordJournal(op_args, "PERSIST", {key});
+      } else if (key_expired) {
+        RecordJournal(op_args, "DEL", {key});
       } else {
         auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms, false);
         auto abs_time_str = absl::StrCat(abs_time);
         RecordJournal(op_args, "PEXPIREAT", {key, abs_time_str});
       }
+    }
+
+    if (key_expired) {
+      op_args.GetDbSlice().SendExpiredKeyEvent(op_args.db_cntx, key);
     }
 
     return value;

@@ -1,6 +1,8 @@
 import pytest
 import redis
-from .utility import *
+import os
+
+from .utility import gen_ca_cert, gen_certificate
 from .instance import DflyStartException
 
 
@@ -164,3 +166,22 @@ async def test_config_disable_tls(
         # Connecting without TLS should succeed.
         async with server.client() as client_unauth:
             await client_unauth.ping()
+
+
+async def test_tls_reload_memory_metric(df_factory, with_tls_server_args):
+    # The TLS context is built on the main thread at startup but freed on a listener thread on
+    # reload, which used to wrap the summed per-thread tls_bytes accounting to a huge value.
+    with df_factory.create(
+        admin_port=1114, no_tls_on_admin_port="true", requirepass="XXX", **with_tls_server_args
+    ) as server:
+        async with server.admin_client(password="XXX") as client:
+            # Drop the TLS contexts without any TLS connection alive.
+            await client.config_set("tls", "false")
+            info = await client.info("memory")
+            # An underflowed counter shows up as an astronomically large value.
+            assert info["tls_bytes"] < 100 * 1024 * 1024
+
+            # Re-enabling rebuilds the contexts; the metric must stay sane after churn.
+            await client.config_set("tls", "true")
+            info = await client.info("memory")
+            assert 0 < info["tls_bytes"] < 100 * 1024 * 1024

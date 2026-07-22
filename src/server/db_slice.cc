@@ -67,6 +67,10 @@ using Payload = journal::Entry::Payload;
 
 namespace {
 
+// Validated notify_keyspace_events state inherited by new slices; see
+// DbSlice::SetExpiredEventsRecordingDefault.
+std::atomic_bool expired_events_recording_default{false};
+
 constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
@@ -442,12 +446,7 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
       client_tracking_map_(owner->memory_resource()) {
   db_arr_.emplace_back();
   CreateDb(0);
-  std::string keyspace_events = GetFlag(FLAGS_notify_keyspace_events);
-  if (!keyspace_events.empty() && keyspace_events != "Ex") {
-    LOG(ERROR) << "Only Ex is currently supported";
-    exit(0);
-  }
-  expired_keys_events_recording_ = !keyspace_events.empty();
+  expired_keys_events_recording_ = expired_events_recording_default.load(std::memory_order_relaxed);
   journal_omit_redundant_writes_ = absl::GetFlag(FLAGS_journal_omit_redundant_writes);
 }
 
@@ -1211,14 +1210,26 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   if (!satisfied)
     return OpStatus::SKIPPED;
 
-  // If we update and the new value is already expired, delete the key
+  // If we update and the new value is already expired, delete the key. The caller is responsible
+  // for emitting the expired keyspace event (via SendExpiredKeyEvent) AFTER journaling the
+  // deletion, so a publish that suspends or fails cannot separate the mutation from its journal
+  // record.
   if (rel_msec <= 0) {
     Del(cntx, prime_it);
+    ++events_.expired_keys;
+    db_arr_[cntx.db_index]->stats.events.expired_keys++;
     return -1;
   }
 
   AddExpire(cntx.db_index, prime_it, abs_msec);
   return abs_msec;
+}
+
+void DbSlice::SendExpiredKeyEvent(const Context& cntx, std::string_view key) const {
+  if (!expired_keys_events_recording_)
+    return;
+  channel_store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"),
+                              absl::Span<const std::string_view>{&key, 1}, false);
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx,
@@ -1750,8 +1761,8 @@ void DbSlice::ResetEvents() {
   }
 }
 
-void DbSlice::SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events) {
-  expired_keys_events_recording_ = !notify_keyspace_events.empty();
+void DbSlice::SetExpiredEventsRecordingDefault(bool enable) {
+  expired_events_recording_default.store(enable, std::memory_order_relaxed);
 }
 
 void DbSlice::QueueInvalidationTrackingMessageAtomic(std::string_view key) {
