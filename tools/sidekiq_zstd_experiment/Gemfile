@@ -1,0 +1,5 @@
+source "https://rubygems.org"
+
+# Sidekiq 7 talks to Dragonfly over the Redis protocol via redis-client (pulled
+# in transitively); no separate `redis` gem needed for the worker or producer.
+gem "sidekiq", "~> 7.3"
