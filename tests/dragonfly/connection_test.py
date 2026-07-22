@@ -701,6 +701,8 @@ async def test_pubsub_unsubscribe_message_loss(
     message_token = b"$7\r\nmessage\r\n"
     unsubscribe_token = b"$11\r\nunsubscribe\r\n"
 
+    # Raw socket with a tiny recv buffer that stops reading, so the server's Pub/Sub writes block
+    # and messages pile up server-side. (_open_stuck_subscriber can't be actively drained here.)
     loop = asyncio.get_running_loop()
     subscriber = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     subscriber.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
@@ -709,8 +711,8 @@ async def test_pubsub_unsubscribe_message_loss(
         await loop.sock_connect(subscriber, ("127.0.0.1", df_server.port))
         await loop.sock_sendall(subscriber, f"SUBSCRIBE {channel}\r\n".encode())
 
-        # Read only the subscribe confirmation, then stop reading so the server's
-        # Pub/Sub writes block and messages queue up on the server side.
+        # Read only the subscribe confirmation, then stop reading so the server's Pub/Sub writes
+        # block and messages queue up on the server side.
         subscribe_reply = b""
         while b":1\r\n" not in subscribe_reply:
             subscribe_reply += await loop.sock_recv(subscriber, 1024)
@@ -719,7 +721,6 @@ async def test_pubsub_unsubscribe_message_loss(
         for _ in range(message_count):
             assert await publisher.publish(channel, payload) == 1
 
-        # Unsubscribe
         await loop.sock_sendall(subscriber, f"UNSUBSCRIBE {channel}\r\n".encode())
 
         # Drain replies until the unsubscribe confirmation, then keep reading through a
@@ -742,12 +743,10 @@ async def test_pubsub_unsubscribe_message_loss(
         assert saw_unsubscribe, "never received the unsubscribe confirmation"
 
         unsub_at = stream.index(unsubscribe_token)
-        messages_before = stream[:unsub_at].count(
-            message_token
-        )  # must be message_count, if not -> messages were dropped
-        messages_after = stream[unsub_at:].count(
-            message_token
-        )  # must be 0, if messages_after > 0 -> replied were reordered
+        # must be message_count, if not -> messages were dropped
+        messages_before = stream[:unsub_at].count(message_token)
+        # must be 0, if > 0 -> replies were reordered
+        messages_after = stream[unsub_at:].count(message_token)
 
         assert (
             messages_after == 0

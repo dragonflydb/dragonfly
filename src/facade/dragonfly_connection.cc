@@ -2236,12 +2236,12 @@ void Connection::AsyncFiber() {
 
       // Prefer the pipeline over the admin queue when case 1 OR case 2 holds (pipeline non-empty):
       // 1. Migration requested (Redis only): drain the pipeline first.
-      // 2. Anti-starvation, requires 2a AND 2b AND 2c to be all true:
+      // 2. Anti-starvation, requires all conditions below to be true:
       //    2a. the dispatch quota was reached, and
       //    2b. the pipeline head is STRICTLY older than the dispatch queue head (so UNSUBSCRIBE
       //        never jumps ahead of pub/sub messages queued before it), and
-      //    2c. the head is not a checkpoint. Checkpoints are front-inserted so they can hide older
-      //        PubMessages; process the (cheap) checkpoint first and re-evaluate next round.
+      //    2c. the head is not a checkpoint. Checkpoints are front-inserted, taking precedence over
+      //    older PubMessages.
       bool prefer_pipeline_execution = false;
       if (parsed_head_ != nullptr) {
         const bool drain_for_migration = is_migration_req && (protocol_ == Protocol::REDIS);
