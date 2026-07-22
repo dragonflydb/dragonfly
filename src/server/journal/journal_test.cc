@@ -1,6 +1,8 @@
 #include <absl/strings/str_join.h>
+#include <gmock/gmock.h>
 
 #include <boost/circular_buffer.hpp>
+#include <optional>
 #include <random>
 #include <string>
 
@@ -10,6 +12,7 @@
 #include "server/common.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
+#include "server/journal/streamer.h"
 #include "server/journal/types.h"
 #include "server/serializer_commons.h"
 #include "util/fibers/fibers.h"
@@ -62,6 +65,47 @@ template <typename... Ss> CmdArgList StoreList(StoredLists* vec, Ss... strings) 
   auto& arg_vec = vec->back().second;
   return CmdArgList{arg_vec.data(), arg_vec.size()};
 }
+
+class StalledWriteSocket : public FiberSocketBase {
+ public:
+  StalledWriteSocket() : FiberSocketBase(nullptr) {
+  }
+
+  MOCK_METHOD(io::Result<size_t>, TryRecv, (io::MutableBytes), (override));
+  MOCK_METHOD(io::Result<size_t>, TrySend, (io::Bytes), (override));
+  MOCK_METHOD(AcceptResult, Accept, (), (override));
+  MOCK_METHOD(error_code, Connect, (const endpoint_type&, std::function<void(int)>), (override));
+  MOCK_METHOD(bool, IsOpen, (), (const, override));
+  MOCK_METHOD(void, set_timeout, (uint32_t), (override));
+  MOCK_METHOD(uint32_t, timeout, (), (const, override));
+  MOCK_METHOD(void, ResetOnRecvHook, (), (override));
+  MOCK_METHOD(io::Result<size_t>, TrySend, (const iovec*, uint32_t), (override));
+  MOCK_METHOD(io::Result<size_t>, WriteSome, (const iovec*, uint32_t), (override));
+  MOCK_METHOD(void, AsyncReadSome, (const iovec*, uint32_t, io::AsyncProgressCb), (override));
+  MOCK_METHOD(void, AsyncWriteSome, (const iovec*, uint32_t, io::AsyncProgressCb), (override));
+  MOCK_METHOD(io::Result<size_t>, RecvMsg, (const msghdr&, int), (override));
+  MOCK_METHOD(io::Result<size_t>, Recv, (const io::MutableBytes&, int), (override));
+  MOCK_METHOD(native_handle_type, native_handle, (), (const, override));
+  MOCK_METHOD(void, RegisterOnErrorCb, (std::function<void(uint32_t)>), (override));
+  MOCK_METHOD(void, CancelOnErrorCb, (), (override));
+  MOCK_METHOD(error_code, Close, (), (override));
+  MOCK_METHOD(error_code, Shutdown, (int), (override));
+  MOCK_METHOD(endpoint_type, LocalEndpoint, (), (const, override));
+  MOCK_METHOD(endpoint_type, RemoteEndpoint, (), (const, override));
+  MOCK_METHOD(bool, IsUDS, (), (const, override));
+  MOCK_METHOD(error_code, Create, (unsigned short), (override));
+  MOCK_METHOD(error_code, Bind, (const sockaddr*, unsigned), (override));
+  MOCK_METHOD(error_code, Listen, (unsigned), (override));
+  MOCK_METHOD(error_code, Listen, (uint16_t, unsigned), (override));
+  MOCK_METHOD(error_code, ListenUDS, (const char*, mode_t, unsigned), (override));
+  MOCK_METHOD(void, RegisterOnRecv, (OnRecvCb), (override));
+};
+
+class TestJournalStreamer : public JournalStreamer {
+ public:
+  using JournalStreamer::JournalStreamer;
+  using JournalStreamer::Write;
+};
 
 // Test serializing and de-serializing entries.
 TEST(Journal, WriteRead) {
@@ -196,6 +240,55 @@ TEST(Journal, PendingBuf) {
 
   ASSERT_TRUE(pbuf.Empty());
   ASSERT_EQ(pbuf.Size(), 0);
+}
+
+TEST(JournalStreamerRepro, DestroyingWithInflightWriteUsesFreedPayload) {
+  ExecutionState cntx;
+  StalledWriteSocket socket;
+  iovec stalled_iovec{};
+  std::optional<io::AsyncProgressCb> stalled_completion;
+
+  EXPECT_CALL(socket, AsyncWriteSome(testing::_, 1, testing::_))
+      .WillOnce([&](const iovec* v, uint32_t len, io::AsyncProgressCb cb) {
+        ASSERT_EQ(len, 1u);
+        stalled_iovec = v[0];
+        stalled_completion.emplace(std::move(cb));
+      });
+
+  const std::string payload(79, 'P');
+  {
+    JournalStreamer::Config config;
+    config.start_partial_sync_at = 1;  // Avoid registering a global journal consumer.
+
+    TestJournalStreamer streamer{&cntx, config};
+    streamer.Start(&socket);
+    streamer.Write(payload);
+    ASSERT_NE(stalled_iovec.iov_base, nullptr);
+
+    // The error path skips the destructor DCHECK that normally catches the in-flight write.
+    ASSERT_TRUE(cntx.ReportError("intentional teardown during stalled write"));
+  }
+
+  ASSERT_TRUE(stalled_completion);
+
+  // This test deliberately reads an iovec retained by a stalled async operation. ASAN reports
+  // the use-after-free here; without ASAN, allocation reuse makes the stale send observable.
+  const volatile char first_byte = *static_cast<const volatile char*>(stalled_iovec.iov_base);
+  EXPECT_EQ(first_byte, payload.front());
+
+  std::vector<std::string> replacements;
+  std::string* reused = nullptr;
+  for (unsigned i = 0; i < 1024 && reused == nullptr; ++i) {
+    replacements.emplace_back(payload.size(), 'R');
+    if (replacements.back().data() == stalled_iovec.iov_base) {
+      reused = &replacements.back();
+    }
+  }
+
+  ASSERT_NE(reused, nullptr);
+  EXPECT_EQ(
+      (std::string_view{static_cast<const char*>(stalled_iovec.iov_base), stalled_iovec.iov_len}),
+      payload);
 }
 
 TEST(Journal, CircularMemory) {
