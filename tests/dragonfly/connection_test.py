@@ -495,9 +495,7 @@ async def _open_stuck_subscriber(port: int):
     return reader, writer
 
 
-# publish_buffer_limit is the soft limit; the hard limit is 4x that. It is large relative to the
-# subscriber's socket buffer, so the server write blocks (and the stall timer starts) well before
-# the soft limit is crossed.
+# A single slow subscriber is evicted after its blocked send exceeds the per-connection limit.
 @dfly_args(
     {
         "proactor_threads": "1",
@@ -511,7 +509,7 @@ async def test_pubsub_slow_subscriber_closed(df_server: DflyInstance, async_clie
     stop = False
 
     async def pub_task():
-        payload = "msg" * 1000
+        payload = "msg" * 100
         while not stop:
             p = async_client.pipeline(transaction=False)
             for _ in range(200):
@@ -520,32 +518,42 @@ async def test_pubsub_slow_subscriber_closed(df_server: DflyInstance, async_clie
 
     publishers = [asyncio.create_task(pub_task()) for _ in range(20)]
 
-    # Wait until the policy force-closes the stuck subscriber.
-    stats = {}
-    for _ in range(150):
-        stats = await _pubsub_backpressure_stats(df_server)
-        if stats["forced_disconnect"] >= 1:
-            break
-        await asyncio.sleep(0.1)
-
-    assert stats["soft_limit"] >= 1
-    assert stats["forced_disconnect"] >= 1
-    assert stats["messages_discarded"] >= 1
-
-    # Let the publishers finish - they must not stay parked once the budget was released.
-    stop = True
-    await asyncio.wait_for(asyncio.gather(*publishers), timeout=20)
-
-    # Drain the subscriber socket so the parked write completes and the connection closes through
-    # the normal shutdown path.
     try:
-        while True:
-            data = await asyncio.wait_for(reader.read(65536), timeout=2)
-            if not data:
+        # Wait until the policy force-closes the stuck subscriber.
+        stats = {}
+        for _ in range(150):
+            stats = await _pubsub_backpressure_stats(df_server)
+            if stats["forced_disconnect"] >= 1:
                 break
-    except asyncio.TimeoutError:
-        pass
-    writer.close()
+            await asyncio.sleep(0.1)
+
+        assert stats["forced_disconnect"] >= 1
+        assert stats["messages_discarded"] >= 1
+
+        # We force disconnect the subscriber before we reach the per-thread soft limit
+        # (i.e. based on connection memory threshold).
+        assert stats["soft_limit"] == 0
+
+        # Let the publishers finish - they must not stay parked once the budget was released.
+        stop = True
+        await asyncio.wait_for(asyncio.gather(*publishers), timeout=20)
+
+        # Drain the subscriber socket so the parked write completes and the connection closes through
+        # the normal shutdown path.
+        try:
+            while True:
+                data = await asyncio.wait_for(reader.read(65536), timeout=2)
+                if not data:
+                    break
+        except asyncio.TimeoutError:
+            pass
+    finally:
+        stop = True
+        for publisher in publishers:
+            publisher.cancel()
+        await asyncio.gather(*publishers, return_exceptions=True)
+        writer.close()
+        await writer.wait_closed()
 
 
 # With the timeout disabled (0), a stuck subscriber is never force-closed even under back-pressure.

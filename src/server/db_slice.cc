@@ -315,7 +315,7 @@ template <typename Set> void AsyncDeleter::EnqueDeletion(uint32_t next, Set* ds)
   DCHECK(pb);
   DVLOG(2) << "Adding async deletion task, thread " << pb->GetPoolIndex() << " " << launch_task;
   if (launch_task) {
-    pb->AddOnIdleTask(&IdleCb);
+    pb->AddOnIdleTask(&IdleCb, "async_deleter");
   }
 }
 

@@ -402,9 +402,9 @@ class Connection : public util::Connection {
   // Returns true if the fiber should terminate (e.g. Migration).
   bool ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op);
 
-  // Returns true if a control-path async operation is currently running inside ProcessAdminMessage
-  // and has been in progress for at least `timeout_cycles` (base::CycleClock cycles).
-  bool IsAsyncOpOverdue(uint64_t timeout_cycles) const;
+  // Returns true if a control-path async operation is currently
+  // running inside ProcessAdminMessage and been stalled for longer than the configured threshold.
+  bool IsAsyncOpOverdue() const;
 
   // Slow-subscriber protection (RESP V1): evict queued PubMessage items from dispatch_q_ (releasing
   // their per-thread subscriber accounting immediately), account the discard metrics, log a

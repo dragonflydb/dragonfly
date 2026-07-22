@@ -89,8 +89,9 @@ ABSL_FLAG(strings::MemoryBytesFlag, publish_buffer_limit, 196_MB,
 
 ABSL_FLAG(uint32_t, pubsub_slow_subscriber_timeout_ms, 0,
           "If a subscriber connection keeps a Pub/Sub socket write blocked for at least this many "
-          "milliseconds while the per-IO-thread subscriber memory is above the soft "
-          "publish_buffer_limit, Dragonfly closes that subscriber to release the back-pressure. "
+          "milliseconds, Dragonfly closes it when either its queued Pub/Sub memory reaches "
+          "one-sixteenth of publish_buffer_limit or the per-IO-thread subscriber memory is "
+          "above publish_buffer_limit. "
           "0 disables this slow-subscriber protection. Startup-only, like publish_buffer_limit.");
 
 ABSL_FLAG(uint32_t, pipeline_squash, 1,
@@ -2390,14 +2391,18 @@ bool Connection::IsCurrentlyDispatching() const {
   return cc_->async_dispatch || cc_->sync_dispatch;
 }
 
-bool Connection::IsAsyncOpOverdue(uint64_t timeout_cycles) const {
-  if (async_op_start_cycle_ == 0)
+bool Connection::IsAsyncOpOverdue() const {
+  if (pubsub_slow_subscriber_timeout_cycles_cached == 0 || async_op_start_cycle_ == 0)
     return false;
-  return base::CycleClock::Now() - async_op_start_cycle_ >= timeout_cycles;
+  return base::CycleClock::Now() >=
+         async_op_start_cycle_ + pubsub_slow_subscriber_timeout_cycles_cached;
 }
 
 void Connection::RequestPubsubClose() {
   QueueBackpressure& qbp = GetQueueBackpressure();
+  const size_t connection_subscriber_bytes = dispatch_q_subscriber_bytes_;
+
+  unsigned blocked_usec = base::CycleClock::ToUsec(base::CycleClock::Now() - async_op_start_cycle_);
 
   // Evict already-queued PubMessage items, releasing their per-thread subscriber accounting
   // immediately. Other control messages (checkpoints, migration, ...) are left for the normal
@@ -2426,12 +2431,10 @@ void Connection::RequestPubsubClose() {
   // not to a metric label.
   LOG_EVERY_T(WARNING, 1) << "Closing slow Pub/Sub subscriber " << DebugInfo()
                           << " tid=" << ProactorBase::me()->GetPoolIndex()
-                          << " publish_buffer_limit=" << qbp.publish_buffer_limit
                           << " thread_subscriber_bytes="
                           << qbp.subscriber_bytes.load(memory_order_relaxed)
-                          << " blocked_send_usec="
-                          << base::CycleClock::ToUsec(base::CycleClock::Now() -
-                                                      async_op_start_cycle_)
+                          << " connection_subscriber_bytes=" << connection_subscriber_bytes
+                          << " blocked_send_usec=" << blocked_usec
                           << " discarded_entries=" << discarded_msgs
                           << " discarded_bytes=" << discarded_bytes;
 
@@ -2448,14 +2451,23 @@ void Connection::SendPubMessageAsync(PubMessage msg) {
   if (request_shutdown_)
     return;
 
-  // Two conjunctive conditions: the thread is in a soft-limit back-pressure episode AND this
-  // connection's active Pub/Sub send has been blocked continuously past the configured deadline.
-  // A slow send below the budget, or a full budget with a still-progressing send, is left alone.
-  uint64_t timeout_cycles = pubsub_slow_subscriber_timeout_cycles_cached;
-  if (timeout_cycles > 0 && GetQueueBackpressure().IsSubscriberSoftLimited() &&
-      IsAsyncOpOverdue(timeout_cycles)) {
-    RequestPubsubClose();
-    return;  // discard the message that triggered the close
+  if (IsAsyncOpOverdue()) {
+    // A single blocked subscriber must not consume the whole per-thread Pub/Sub budget before the
+    // slow-subscriber policy can evict it.
+    constexpr uint32_t kPubSubConnectionLimitDivisor = 16;
+
+    // Close a subscriber only after its active Pub/Sub send has been blocked continuously past the
+    // configured deadline. Either its own queued Pub/Sub data has reached the per-connection limit,
+    // or the thread is in a soft-limit back-pressure episode. The local limit prevents one blocked
+    // connection from consuming the whole thread-wide budget before it becomes eligible for
+    // eviction.
+    QueueBackpressure& qbp = GetQueueBackpressure();
+
+    size_t conn_soft_limit = qbp.publish_buffer_limit / kPubSubConnectionLimitDivisor;
+    if (dispatch_q_subscriber_bytes_ >= conn_soft_limit || qbp.IsSubscriberSoftLimited()) {
+      RequestPubsubClose();
+      return;  // discard the message that triggered the close
+    }
   }
 
   SendAsync({make_unique<PubMessage>(std::move(msg))});
