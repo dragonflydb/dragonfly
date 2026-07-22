@@ -138,7 +138,7 @@ TEST_F(MultiTxTest, MultiUnlock) {
   auto* ns = &namespaces->GetDefaultNamespace();
   string_view keys[4] = {kKey1, kKey2, kKey3, kKey4};
 
-  pp_->at(0)->Await([&] { tx->StartMultiLockedAhead(ns, 0, keys); });
+  pp_->at(0)->Await([&] { tx->StartMultiLockedAhead(ns, 0, CmdArgList{keys}, std::size(keys)); });
 
   for (auto key : keys)
     EXPECT_TRUE(IsLocked(0, key));

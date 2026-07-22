@@ -2120,7 +2120,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
       {
         CmdArgVec keys(info->key_backing.begin(), info->key_backing.end());
         tx->MultiSwitchCmd(registry_.Find("EVAL"));
-        tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), keys, false);
+        tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), CmdArgList{keys}, keys.size(), false);
       }
       return;
     case CT::ACALL:
@@ -2220,7 +2220,8 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
 
 // Starts multi transaction. Returns true if transaction was scheduled.
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
-bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgList keys) {
+bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode,
+                const facade::ParsedArgs& args, size_t num_keys) {
   Transaction* tx = cntx->transaction;
   DCHECK(tx);
   Namespace* ns = cntx->ns;
@@ -2231,9 +2232,9 @@ bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgL
       tx->StartMultiGlobal(ns, dbid);
       return true;
     case Transaction::LOCK_AHEAD:
-      if (keys.empty())
+      if (num_keys == 0)
         return false;
-      tx->StartMultiLockedAhead(ns, dbid, keys);
+      tx->StartMultiLockedAhead(ns, dbid, args, num_keys);
       return true;
     case Transaction::NON_ATOMIC:
       tx->StartMultiNonAtomic(Transaction::DEFAULT);
@@ -2336,11 +2337,6 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };
 
-  CmdArgVec tx_keys;  // TODO: remove this once we get rid of CmdArgList in transaction
-  tx_keys.reserve(eval_args.num_keys);
-  for (unsigned i = 0; i < eval_args.num_keys; ++i)
-    tx_keys.push_back(eval_args.keys_args[i]);
-
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
     sinfo->stats.tx_shards = 1;
     // It might be that there are no declared keys, but there is only a single shard
@@ -2359,7 +2355,8 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     });
 
     ++ss->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareSingleSquash(conn_cntx->ns, real_sid, conn_cntx->db_index(), tx_keys, script_mode);
+    tx->PrepareSingleSquash(conn_cntx->ns, real_sid, conn_cntx->db_index(), eval_args.keys_args,
+                            eval_args.num_keys, script_mode);
 
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
@@ -2391,7 +2388,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
         return cmd_cntx->SendError(err);
       }
     } else {
-      scheduled = StartMulti(conn_cntx, script_mode, tx_keys);
+      scheduled = StartMulti(conn_cntx, script_mode, eval_args.keys_args, eval_args.num_keys);
       sinfo->stats.tx_shards = tx->GetUniqueShardCnt();
     }
 
@@ -2561,7 +2558,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
 
   bool scheduled = false;
   if (multi_mode != Transaction::NOT_DETERMINED) {
-    scheduled = StartMulti(cntx, multi_mode, keys);
+    scheduled = StartMulti(cntx, multi_mode, CmdArgList{keys}, keys.size());
   }
 
   // EXEC should not run if any of the watched keys expired.
