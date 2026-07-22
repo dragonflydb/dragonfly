@@ -1692,7 +1692,7 @@ async def test_cluster_fuzzymigration(
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             logging.debug(states)
             for state in states:
-                direction, node_id, st, _, _ = state
+                direction, node_id, st, _, _, _ = state
                 if direction == "out":
                     if st == "FINISHED":
                         m_id = [id for id, x in enumerate(node.migrations) if x.node_id == node_id][
