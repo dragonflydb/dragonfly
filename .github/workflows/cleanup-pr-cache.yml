@@ -34,8 +34,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Repo-wide cache usage (10 GB limit). Printed before and after the
-          # deletion so the log shows exactly how much this cleanup reclaimed.
+          # Repo-wide cache usage (10 GB limit). Printed before and after the deletion so the log shows how much was reclaimed.
           print_repo_cache_usage() {
             gh api "repos/$GH_REPO/actions/cache/usage" --jq \
               '"Repo cache: \(.active_caches_size_in_bytes/1048576|floor) MB used, "
@@ -44,23 +43,16 @@ jobs:
           }
 
           echo "== Before cleanup =="
-          print_repo_cache_usage
+          print_repo_cache_usage || true
           echo "Caches scoped to $PR_REF:"
-          gh cache list --ref "$PR_REF" --limit 100 --json id,key,sizeInBytes \
+          gh cache list --ref "$PR_REF" --limit 1000 --json id,key,sizeInBytes \
             --jq '.[] | "  \(.sizeInBytes/1048576|floor)MB  \(.key)"' || true
 
-          ids=$(gh cache list --ref "$PR_REF" --limit 100 --json id --jq '.[].id')
-          count=$(printf '%s' "$ids" | grep -c . || true)
-          echo "Found $count cache(s) to delete"
-
-          if [ -z "$ids" ]; then
-            echo "No caches found for $PR_REF; nothing to delete"
-          else
-            for id in $ids; do
-              echo "Deleting cache id=$id"
-              gh cache delete "$id"
-            done
+          # Delete all caches for this PR ref in one non-interactive call. --succeed-on-no-caches treats an empty result
+          # as success under `set -e`; the `||` guard keeps cleanup best-effort so a transient failure still reports below.
+          if ! gh cache delete --all --ref "$PR_REF" --succeed-on-no-caches; then
+            echo "::warning::Some caches for $PR_REF may not have been deleted; the 7-day-unused / LRU policy will reclaim any leftovers."
           fi
 
           echo "== After cleanup =="
-          print_repo_cache_usage
+          print_repo_cache_usage || true
