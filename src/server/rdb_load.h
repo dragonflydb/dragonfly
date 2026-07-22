@@ -224,7 +224,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams(int rdbtype);
-  ::io::Result<OpaqueObj> ReadRedisJson();
+  ::io::Result<OpaqueObj> ReadRedisModule2();
   ::io::Result<OpaqueObj> ReadSBFImpl(bool filter_is_chunked);
   ::io::Result<OpaqueObj> ReadSBF();
   ::io::Result<OpaqueObj> ReadSBF2();
@@ -232,7 +232,8 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadTOPK();
   ::io::Result<OpaqueObj> ReadCuckoo();
 
-  std::error_code SkipModuleData();
+  std::error_code SkipModuleAuxData();
+  std::error_code SkipModuleKeyData();
   std::error_code HandleCompressedBlob(int op_type);
   std::error_code HandleCompressedBlobFinish();
   std::error_code AllocateDecompressOnce(int op_type);

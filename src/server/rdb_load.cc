@@ -1301,7 +1301,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       }
       break;
     case RDB_TYPE_MODULE_2:
-      iores = ReadRedisJson();
+      iores = ReadRedisModule2();
       break;
     case RDB_TYPE_SBF:
       iores = ReadSBF();
@@ -1828,20 +1828,25 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
 }
 
-auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
-  auto json_magic_number = LoadLen(nullptr);
-  if (!json_magic_number) {
+auto RdbLoaderBase::ReadRedisModule2() -> io::Result<OpaqueObj> {
+  auto module_id = LoadLen(nullptr);
+  if (!module_id) {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
   constexpr string_view kJsonModule = "ReJSON-RL"sv;
-  string module_name = ModuleTypeName(*json_magic_number);
+  string module_name = ModuleTypeName(*module_id);
   if (module_name != kJsonModule) {
-    LOG(ERROR) << "Unsupported module: " << module_name;
-    return Unexpected(errc::unsupported_operation);
+    // We don't support any other module type except ReJSON, so we skip the key instead of
+    // failing the load.
+    LOG(WARNING) << "Skipping key with unsupported module type: " << module_name;
+    if (error_code ec = SkipModuleKeyData(); ec) {
+      return make_unexpected(ec);
+    }
+    return Unexpected(errc::feature_not_supported);
   }
 
-  int encver = *json_magic_number & 1023;
+  int encver = *module_id & 1023;
   if (encver != 3) {
     LOG(ERROR) << "Unsupported ReJSON version: " << encver;
     return Unexpected(errc::unsupported_operation);
@@ -2468,7 +2473,7 @@ error_code RdbLoader::Load(io::Source* src) {
       string module_name = ModuleTypeName(module_id);
 
       LOG(WARNING) << "WARNING: Skipping data for module " << module_name;
-      RETURN_ON_ERR(SkipModuleData());
+      RETURN_ON_ERR(SkipModuleAuxData());
       continue;
     }
 
@@ -2695,12 +2700,20 @@ error_code RdbLoaderBase::AllocateDecompressOnce(int op_type) {
   return {};
 }
 
-error_code RdbLoaderBase::SkipModuleData() {
+error_code RdbLoaderBase::SkipModuleAuxData() {
   uint64_t opcode;
   SET_OR_RETURN(LoadLen(nullptr), opcode);  // ignore field 'when_opcode'
+
   if (opcode != RDB_MODULE_OPCODE_UINT)
     return RdbError(errc::rdb_file_corrupted);
+
   SET_OR_RETURN(LoadLen(nullptr), opcode);  // ignore field 'when'
+
+  return SkipModuleKeyData();
+}
+
+error_code RdbLoaderBase::SkipModuleKeyData() {
+  uint64_t opcode;
 
   while (true) {
     SET_OR_RETURN(LoadLen(nullptr), opcode);
@@ -3219,8 +3232,14 @@ io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& 
   const bool was_appending = pending_read_.remaining != 0;
 
   // Read a part of the object. Updates remaining items
-  if (auto ec = ReadObj(object_type, &item->val); ec)
+  if (auto ec = ReadObj(object_type, &item->val); ec) {
+    if (ec == RdbError(errc::feature_not_supported)) {
+      LOG(WARNING) << "Skipping unsupported key '" << key;
+      pending_read_ = {};
+      return true;
+    }
     return make_unexpected(ec);
+  }
 
   const bool finalized = pending_read_.remaining == 0;
 
