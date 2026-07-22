@@ -3698,14 +3698,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         return ec;
       }
 
-      // FlushReplies (above) suspends the fiber. While the fiber is suspended, pending_input may
-      // change and/or new bytes might arrive in io_buf_, so re-check ShouldWakeIdle() before
-      // parking. This re-check is an optimization, and not a must for correctness.
-      if (!ShouldWakeIdle()) {
-        fiber_park_spot_ = FiberParkSpot::kIdleAwait;
-        io_event_.await([this] { return ShouldWakeIdle(); });
-        fiber_park_spot_ = FiberParkSpot::kNone;
-      }
+      fiber_park_spot_ = FiberParkSpot::kIdleAwait;
+      io_event_.await([this] { return ShouldWakeIdle(); });
+      fiber_park_spot_ = FiberParkSpot::kNone;
     }
 
     phase_ = PROCESS;
