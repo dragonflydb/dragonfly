@@ -3234,7 +3234,7 @@ io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& 
   // Read a part of the object. Updates remaining items
   if (auto ec = ReadObj(object_type, &item->val); ec) {
     if (ec == RdbError(errc::feature_not_supported)) {
-      LOG(WARNING) << "Skipping unsupported key '" << key;
+      LOG(WARNING) << "Skipping unsupported key: " << key;
       pending_read_ = {};
       return true;
     }
