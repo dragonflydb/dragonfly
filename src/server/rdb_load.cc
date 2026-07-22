@@ -295,24 +295,26 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
-  SBF* sbf = config_.append ? pv_->GetSBF()
-                            : CompactObj::AllocateMR<SBF>(
-                                  src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
-                                  src.current_size, CompactObj::memory_resource());
+  SBF* sbf;
+  if (config_.append) {
+    sbf = pv_->GetSBF();
+  } else {
+    sbf = CompactObj::AllocateMR<SBF>(src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
+                                      src.current_size, CompactObj::memory_resource());
+    // Adopt immediately so sbf is safely owned even if AllocateFilter throws below.
+    pv_->SetSBF(sbf);
+  }
   for (unsigned i = 0; i < src.filters.size(); ++i) {
     const auto& blob = src.filters[i].blob;
     auto* ptr = sbf->AllocateFilter(blob.size(), src.filters[i].hash_cnt);
     memcpy(ptr, blob.data(), blob.size());
   }
-
-  // new obj
-  if (!config_.append)
-    pv_->SetSBF(sbf);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTOPK& src) {
-  TOPK* topk = CompactObj::AllocateMR<TOPK>(CompactObj::memory_resource(), src.k, src.width,
-                                            src.depth, src.decay);
+  TOPK* topk = CompactObj::AllocateMR<TOPK>(CompactObj::memory_resource());  // trivial ctor
+  pv_->SetTOPK(topk);  // adopt immediately so topk is safely owned even if Init() throws below
+  topk->Init(src.k, src.width, src.depth, src.decay);
 
   TOPK::SerializedData data;
   data.k = src.k;
@@ -339,14 +341,14 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTOPK& src) {
   }
 
   topk->Deserialize(data);
-  pv_->SetTOPK(topk);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCMS& src) {
-  CMS* cms = CompactObj::AllocateMR<CMS>(src.width, src.depth, CompactObj::memory_resource());
+  CMS* cms = CompactObj::AllocateMR<CMS>(CompactObj::memory_resource());  // trivial ctor
+  pv_->SetCMS(cms);  // adopt immediately so cms is safely owned even if Init() throws below
+  cms->Init(src.width, src.depth);
   DCHECK_EQ(src.counters.size(), cms->NumCounters());
   cms->Load(src.total_incr_count, src.counters.data());
-  pv_->SetCMS(cms);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCuckoo& src) {
@@ -357,8 +359,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCuckoo& src) {
       cf->AppendFilter(blob);
     return;
   }
-  CuckooFilter* cf =
-      CompactObj::AllocateMR<CuckooFilter>(CuckooFilterOptions{}, CompactObj::memory_resource());
+  CuckooFilter* cf = CompactObj::AllocateMR<CuckooFilter>(CompactObj::memory_resource());
   cf->Deserialize({src.slots_per_bucket, src.max_iterations, src.expansion, src.num_buckets,
                    src.num_items, src.num_deletes, src.filters});
   pv_->SetCuckooFilter(cf);
