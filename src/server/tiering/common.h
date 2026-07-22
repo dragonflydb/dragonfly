@@ -4,12 +4,19 @@
 
 #pragma once
 
+#include <cstdint>
 #include <iosfwd>
 #include <memory>
 #include <optional>
 #include <variant>
 
 namespace dfly::tiering {
+
+// Who issued the stash
+enum class StashSource : uint8_t {
+  kClient,      // Client write
+  kOffloading,  // Background offloading loop
+};
 
 inline namespace literals {
 

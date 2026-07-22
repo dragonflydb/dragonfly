@@ -125,4 +125,20 @@ TEST_F(SmallBinsTest, UpdateStatsAfterDelete) {
   EXPECT_EQ(0u, bins_.GetStats().current_bin_bytes);
 }
 
+TEST_F(SmallBinsTest, StashSourceClientDominates) {
+  // A bin is marked as a client stash if any of its entries came from a client; a bin made up
+  // purely of background-offloaded entries stays kOffloading.
+  std::optional<SmallBins::FilledBin> offloading_bin, mixed_bin;
+  for (unsigned i = 0; !offloading_bin; i++)
+    offloading_bin = bins_.Stash(0, absl::StrCat("o", i), "v", StashSource::kOffloading);
+  EXPECT_EQ(offloading_bin->source, StashSource::kOffloading);
+
+  // Feed mostly offloading entries but a single client one: the whole bin becomes a client stash.
+  for (unsigned i = 0; !mixed_bin; i++) {
+    auto source = (i == 1) ? StashSource::kClient : StashSource::kOffloading;
+    mixed_bin = bins_.Stash(0, absl::StrCat("m", i), "v", source);
+  }
+  EXPECT_EQ(mixed_bin->source, StashSource::kClient);
+}
+
 }  // namespace dfly::tiering
