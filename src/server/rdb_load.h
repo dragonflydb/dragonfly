@@ -412,6 +412,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   std::error_code VerifyChecksum();
 
+  void DiscardChunkedValuesOnFinish();
   void FinishLoad(absl::Time start_time, size_t* keys_loaded);
 
   void FlushShardAsync(ShardId sid);
