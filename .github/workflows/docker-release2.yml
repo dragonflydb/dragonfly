@@ -48,7 +48,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: true
@@ -135,7 +135,7 @@ jobs:
         flavor: [ubuntu]
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Login to Registries
         uses: ./.github/actions/multi-registry-docker-login
@@ -282,7 +282,7 @@ jobs:
       run: env
 
     - name: checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         token: ${{ secrets.DRAGONFLY_TOKEN }}  # PAT to push to main
         fetch-depth: 0
@@ -293,7 +293,7 @@ jobs:
         version: "v3.21.0"
 
     - name: Setup Go
-      uses: actions/setup-go@v6
+      uses: actions/setup-go@v7
       with:
         go-version-file: go.work
 

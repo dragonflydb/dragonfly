@@ -37,7 +37,7 @@ jobs:
       id-token: write
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
           submodules: true
@@ -172,7 +172,7 @@ jobs:
         flavor: [alpine,ubuntu,distroless]
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Login to Registries
         uses: ./.github/actions/multi-registry-docker-login
