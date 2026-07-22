@@ -65,7 +65,8 @@ struct OpManagerTest : PoolTestBase, OpManager {
     return future;
   }
 
-  void NotifyStashed(const OwnedEntryId& id, const io::Result<DiskSegment>& segment) override {
+  void NotifyStashed(const OwnedEntryId& id, bool bypass_cooling,
+                     const io::Result<DiskSegment>& segment) override {
     VLOG(1) << std::get<0>(id) << " stashed";
     ASSERT_TRUE(segment);
     auto [it, inserted] = stashed_.emplace(id, *segment);
@@ -83,10 +84,13 @@ struct OpManagerTest : PoolTestBase, OpManager {
   }
 
   std::error_code Stash(PendingId id, std::string_view value) {
-    return PrepareAndStash(id, value.size(), [=](io::MutableBytes bytes) {
-      memcpy(bytes.data(), value.data(), value.size());
-      return value.size();
-    });
+    return PrepareAndStash(
+        id, value.size(),
+        [=](io::MutableBytes bytes) {
+          memcpy(bytes.data(), value.data(), value.size());
+          return value.size();
+        },
+        /*bypass_cooling=*/false);
   }
 
   void WaitForPendingStashes() {
