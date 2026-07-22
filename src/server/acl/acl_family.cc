@@ -587,19 +587,24 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  string command = absl::AsciiStrToUpper(parser.Next());
-  auto* cid = cmd_registry_->Find(command);
+  const facade::ParsedArgs simulated_cmd = parser.UnparsedArgs();
+  // Use the same lookup as real dispatch (FindExtended), not a plain single-token Find: multi-word
+  // commands like "ACL SETUSER" otherwise resolve to the bare family command ("ACL") and get
+  // checked against the wrong, less restrictive ACL category.
+  auto [cid, simulated_args] = cmd_registry_->FindExtended(simulated_cmd);
   if (!cid || cid->IsAlias()) {
-    auto error = absl::StrCat("Command '", command, "' not found");
+    auto error =
+        absl::StrCat("Command '", absl::AsciiStrToUpper(simulated_cmd.Front()), "' not found");
     rb->SendError(error);
     return;
   }
-  const facade::ParsedArgs simulated_args = parser.UnparsedArgs();
 
   const auto& user = registry.find(username)->second;
   // Stub, used to mimic connection context for a user.
   ConnectionContext stub(nullptr, acl::UserCredentials{});
+  stub.authed_username = username;
   stub.acl_commands = user.AclCommandsRef();
+  stub.pub_sub = user.PubSub();
   // "mock" without an actual connection we can't know which db is active so we skip this check
   // for DryRun.
   stub.acl_db_idx = {};
@@ -608,13 +613,20 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
   // command without its arguments, so skip key-pattern validation for an incomplete simulation.
   if (cid->Validate(simulated_args))
     stub.keys = {{}, true};
-  const auto [is_allowed, reason] = IsUserAllowedToInvokeCommandGeneric(stub, *cid, simulated_args);
+  // Check pub/sub channel ACLs too, the same way a real PUBLISH/SUBSCRIBE/PSUBSCRIBE dispatch
+  // would. We can't use the IsUserAllowedToInvokeCommand wrapper here: on denial it logs to
+  // AclLog, which reads the real Connection* for client info - the stub above has none.
+  const bool is_allowed =
+      cid->IsPubSub() ? IsPubSubCommandAuthorized(cid->IsPatternPubSub(), stub.acl_commands,
+                                                  stub.pub_sub, simulated_args, *cid)
+                            .first
+                      : IsUserAllowedToInvokeCommandGeneric(stub, *cid, simulated_args).first;
   if (is_allowed) {
     rb->SendOk();
     return;
   }
 
-  auto msg = absl::StrCat("This user has no permissions to run the '", command, "' command");
+  auto msg = absl::StrCat("This user has no permissions to run the '", cid->name(), "' command");
 
   rb->SendBulkString(msg);
 }

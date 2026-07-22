@@ -32,9 +32,17 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
   return (acl_commands[index] & command_mask) != 0;
 }
 
-[[nodiscard]] std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(
-    bool literal_match, const std::vector<uint64_t>& acl_commands, const AclPubSub& pub_sub,
-    const facade::ParsedArgs& tail_args, const CommandId& id) {
+}  // namespace
+
+// Exported (not anonymous-namespace-local) so callers without a live connection, like ACL DRYRUN's
+// stub context, can run the pub/sub check directly without going through
+// IsUserAllowedToInvokeCommand and its AclLog::Add side effect, which dereferences a real
+// Connection*.
+std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
+                                                          const std::vector<uint64_t>& acl_commands,
+                                                          const AclPubSub& pub_sub,
+                                                          const facade::ParsedArgs& tail_args,
+                                                          const CommandId& id) {
   if (!ValidateCommand(acl_commands, id)) {
     return {false, AclLog::Reason::COMMAND};
   }
@@ -65,8 +73,6 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
 
   return {allowed, AclLog::Reason::PUB_SUB};
 }
-
-}  // namespace
 
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
                                                 const facade::ParsedArgs& tail_args) {
@@ -140,7 +146,11 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
   bool keys_allowed = true;
   if (!keys.all_keys && id.first_key_pos() != 0 && (is_read_command || is_write_command)) {
     auto keys_index = DetermineKeys(&id, tail_args);
-    DCHECK(keys_index);
+    // Commands with content-dependent key positions (e.g. ZUNION's numkeys) can fail to parse
+    // arbitrary/malformed tail_args; that's a normal rejection, not a broken invariant, so fail
+    // closed instead of asserting.
+    if (!keys_index)
+      return {false, AclLog::Reason::KEY};
 
     for (std::string_view key : keys_index->Range(tail_args))
       keys_allowed &= iterate_globs(key);
