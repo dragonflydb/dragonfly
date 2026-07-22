@@ -49,7 +49,7 @@ jobs:
             --jq '.[] | "  \(.sizeInBytes/1048576|floor)MB  \(.key)"' || true
 
           # Delete all caches for this PR ref in one non-interactive call. --succeed-on-no-caches treats an empty result
-          # as success under `set -e`; the `||` guard keeps cleanup best-effort so a transient failure still reports below.
+          # as success under `set -e`; the `if !` wrapper keeps cleanup best-effort so a transient failure still reports below.
           if ! gh cache delete --all --ref "$PR_REF" --succeed-on-no-caches; then
             echo "::warning::Some caches for $PR_REF may not have been deleted; the 7-day-unused / LRU policy will reclaim any leftovers."
           fi
