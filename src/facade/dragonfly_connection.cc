@@ -1753,7 +1753,9 @@ bool Connection::ProcessControlMessages(uint32_t quota) {
       break;
     }
 
+    async_op_start_cycle_ = base::CycleClock::Now();
     std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
+    async_op_start_cycle_ = 0;
   }
 
   return false;
