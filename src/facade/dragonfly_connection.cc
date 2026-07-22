@@ -2234,16 +2234,23 @@ void Connection::AsyncFiber() {
         }
       }
 
-      // We prioritize pipeline execution over the admin queue in two distinct cases (Pipeline queue
-      // must be non-empty for both cases):
-      // 1. A migration is requested (Redis only), but we must drain the existing
-      // pipeline first.
-      // 2.  The dispatch quota was reached, forcing a pipeline execution to prevent
-      // starvation.
+      // Prefer the pipeline over the admin queue when case 1 OR case 2 holds (pipeline non-empty):
+      // 1. Migration requested (Redis only): drain the pipeline first.
+      // 2. Anti-starvation, requires 2a AND 2b AND 2c to be all true:
+      //    2a. the dispatch quota was reached, and
+      //    2b. the pipeline head is STRICTLY older than the dispatch queue head (so UNSUBSCRIBE
+      //        never jumps ahead of pub/sub messages queued before it), and
+      //    2c. the head is not a checkpoint. Checkpoints are front-inserted so they can hide older
+      //        PubMessages; process the (cheap) checkpoint first and re-evaluate next round.
       bool prefer_pipeline_execution = false;
       if (parsed_head_ != nullptr) {
-        prefer_pipeline_execution =
-            quota_reached || (is_migration_req && (protocol_ == Protocol::REDIS));
+        const bool drain_for_migration = is_migration_req && (protocol_ == Protocol::REDIS);
+        const bool head_preserves_order =
+            dispatch_q_.empty() ||
+            (!dispatch_q_.front().IsCheckPoint() &&
+             parsed_head_->parsed_cycle < dispatch_q_.front().dispatch_cycle);
+        const bool quota_reached_while_preserves_order = quota_reached && head_preserves_order;
+        prefer_pipeline_execution = drain_for_migration || quota_reached_while_preserves_order;
       }
       if (dispatch_q_.empty() || prefer_pipeline_execution) {  // 2. Process pipeline Queue
         VLOG_IF(2, prefer_pipeline_execution)

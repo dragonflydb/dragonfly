@@ -677,6 +677,89 @@ async def test_pubsub_unsubscribe(df_server: DflyInstance):
     await cl.aclose()
 
 
+# This test is written as as part of a bug fix (regression, v1.38): the async_dispatch_quota anti-starvation logic ran UNSUBSCRIBE
+# while earlier Pub/Sub messages were still queued, so the client saw messages after the unsubscribe confirmation (or lost them).
+# All messages must precede the confirmation.
+#
+# dfly_args: single proactor thread for deterministic reordering, and tiny quota to trigger anti starvation quickly
+@dfly_args({"proactor_threads": 1, "async_dispatch_quota": 4})
+async def test_pubsub_unsubscribe_message_loss(
+    df_server: DflyInstance, async_client: aioredis.Redis
+):
+    # The fix currently only covers the V1 io loop. The V2 loop (IoLoopV2) still reorders
+    # UNSUBSCRIBE ahead of queued Pub/Sub messages, so skip until V2 is fixed.
+    # TODO: re-enable for V2 once the IoLoopV2 fix lands (see linked GitHub issue).
+    if is_resp_io_loop_v2(df_server):
+        pytest.skip("V2 io loop still reorders UNSUBSCRIBE ahead of queued messages; fix pending")
+
+    publisher = async_client
+    channel = "ordering-channel"
+    # Well above async_dispatch_quota (and the socket buffer) so the surplus piles up
+    # in the server-side dispatch queue and the anti-starvation path triggers.
+    message_count = 60
+    payload = b"x" * 100_000  # large enough to fill the tiny receive window quickly
+    message_token = b"$7\r\nmessage\r\n"
+    unsubscribe_token = b"$11\r\nunsubscribe\r\n"
+
+    loop = asyncio.get_running_loop()
+    subscriber = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    subscriber.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+    subscriber.setblocking(False)
+    try:
+        await loop.sock_connect(subscriber, ("127.0.0.1", df_server.port))
+        await loop.sock_sendall(subscriber, f"SUBSCRIBE {channel}\r\n".encode())
+
+        # Read only the subscribe confirmation, then stop reading so the server's
+        # Pub/Sub writes block and messages queue up on the server side.
+        subscribe_reply = b""
+        while b":1\r\n" not in subscribe_reply:
+            subscribe_reply += await loop.sock_recv(subscriber, 1024)
+
+        # Publish all message_count messages before UNSUBSCRIBE so each is queued ahead of it.
+        for _ in range(message_count):
+            assert await publisher.publish(channel, payload) == 1
+
+        # Unsubscribe
+        await loop.sock_sendall(subscriber, f"UNSUBSCRIBE {channel}\r\n".encode())
+
+        # Drain replies until the unsubscribe confirmation, then keep reading through a
+        # short idle grace period to catch any message wrongly emitted after it.
+        stream = b""
+        saw_unsubscribe = False
+        async with async_timeout.timeout(60):
+            while True:
+                try:
+                    data = await asyncio.wait_for(loop.sock_recv(subscriber, 256 * 1024), 2.0)
+                except asyncio.TimeoutError:
+                    if saw_unsubscribe:
+                        break  # idle after the confirmation -> stream is complete
+                    continue
+                if not data:
+                    break
+                stream += data
+                saw_unsubscribe = saw_unsubscribe or unsubscribe_token in stream
+
+        assert saw_unsubscribe, "never received the unsubscribe confirmation"
+
+        unsub_at = stream.index(unsubscribe_token)
+        messages_before = stream[:unsub_at].count(
+            message_token
+        )  # must be message_count, if not -> messages were dropped
+        messages_after = stream[unsub_at:].count(
+            message_token
+        )  # must be 0, if messages_after > 0 -> replied were reordered
+
+        assert (
+            messages_after == 0
+        ), f"{messages_after} Pub/Sub messages were delivered AFTER the unsubscribe confirmation - replies were reordered"
+        assert messages_before == message_count, (
+            f"only {messages_before}/{message_count} Pub/Sub messages were delivered before "
+            "the unsubscribe confirmation - messages published before UNSUBSCRIBE were lost"
+        )
+    finally:
+        subscriber.close()
+
+
 async def produce_expiring_keys(async_client: aioredis.Redis):
     keys = []
     for i in range(10, 50):
