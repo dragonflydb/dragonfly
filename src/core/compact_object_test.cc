@@ -1065,6 +1065,85 @@ TEST_F(CompactObjectTest, HuffmanVarintHeader) {
   EXPECT_TRUE(seen_2byte) << "Expected at least one 2-byte header (delta >= 128)";
 }
 
+// Tests that Huffman-encoded CompactKey correctly survives round-trips through
+// SDS_TTL_TAG — covering inline, SMALL_TAG, and LARGE_STR_TAG storage tiers.
+TEST_F(CompactObjectTest, HuffmanWithSdsTtlTag) {
+  HuffmanEncoder encoder;
+  BuildEncoderAB(&encoder);
+  auto bindata = encoder.Export();
+  ASSERT_TRUE(bindata.has_value());
+  // re-init is a no-op if already installed; either way the encoder is valid.
+  CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, *bindata);
+
+  // The three sizes exercise the three storage tiers for Huffman-encoded 'a'-strings:
+  //   30   chars -> blob fits inline (<= kInlineLen=16)
+  //   100  chars -> blob -> SMALL_TAG (17..255 bytes)
+  //   4000 chars -> blob -> LARGE_STR_TAG (> 255 bytes)
+  for (size_t n : {30u, 100u, 4000u}) {
+    SCOPED_TRACE("n=" + to_string(n));
+    const string s(n, 'a');
+
+    unsigned encode_attempt = CompactObj::GetStatsThreadLocal().huff_encode_total;
+    unsigned encode_success = CompactObj::GetStatsThreadLocal().huff_encode_success;
+
+    // Baseline: verify the key is Huffman-encoded and correct before TTL.
+    CompactKey key(s);
+    ASSERT_EQ(n, key.Size());
+    const uint64_t hash_before = key.HashCode();
+    ASSERT_EQ(CompactObj::HashCode(s), hash_before);
+    size_t malloc_before = key.MallocUsed();
+    ASSERT_LT(malloc_before, n);
+
+    ASSERT_TRUE(key == s);
+    {
+      string slice;
+      ASSERT_EQ(s, key.GetSlice(&slice));
+    }
+    ASSERT_EQ(encode_attempt + 1, CompactObj::GetStatsThreadLocal().huff_encode_total);
+    ASSERT_EQ(encode_success + 1, CompactObj::GetStatsThreadLocal().huff_encode_success);
+
+    // After SetExpireTime: key moves to SDS_TTL_TAG while preserving Huffman encoding.
+    key.SetExpireTime(1000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(1000u, key.GetExpireTime());
+    EXPECT_EQ(n, key.Size()) << "Size must be preserved after SetExpireTime";
+    EXPECT_EQ(hash_before, key.HashCode()) << "HashCode must be preserved after SetExpireTime";
+    EXPECT_TRUE(key == s) << "operator== must work after SetExpireTime";
+    {
+      string slice;
+      EXPECT_EQ(s, key.GetSlice(&slice)) << "GetSlice must decode correctly after SetExpireTime";
+    }
+
+    // Encoding is preserved.
+    ASSERT_EQ(encode_attempt + 1, CompactObj::GetStatsThreadLocal().huff_encode_total);
+
+    // In-place TTL update: only exp_ms changes, encoded blob is untouched.
+    key.SetExpireTime(2000);
+    EXPECT_EQ(2000u, key.GetExpireTime());
+    EXPECT_EQ(n, key.Size());
+    EXPECT_EQ(hash_before, key.HashCode());
+    EXPECT_TRUE(key == s);
+    ASSERT_EQ(encode_attempt + 1, CompactObj::GetStatsThreadLocal().huff_encode_total);
+
+    // After ClearExpireTime: decoded string is extracted, key is re-encoded.
+    EXPECT_TRUE(key.ClearExpireTime());
+    EXPECT_FALSE(key.HasExpire());
+    EXPECT_EQ(n, key.Size()) << "Size must be restored after ClearExpireTime";
+    EXPECT_EQ(hash_before, key.HashCode()) << "HashCode must be restored after ClearExpireTime";
+    EXPECT_TRUE(key == s) << "operator== must work after ClearExpireTime";
+
+    // Implementation detail: ClearExpireTime causes a re-encode,
+    // so we should see one more encode attempt and success.
+    ASSERT_EQ(encode_attempt + 2, CompactObj::GetStatsThreadLocal().huff_encode_total);
+    ASSERT_EQ(encode_success + 2, CompactObj::GetStatsThreadLocal().huff_encode_success);
+    {
+      string decoded;
+      key.GetString(&decoded);
+      EXPECT_EQ(s, decoded) << "GetString must return original string after ClearExpireTime";
+    }
+  }
+}
+
 TEST_F(CompactObjectTest, GetByteAtOffset) {
   // Inline string (INLINE_TAG)
   {
