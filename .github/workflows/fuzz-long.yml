@@ -16,6 +16,11 @@ on:
         required: false
         default: '30'
         type: string
+      tiering_duration:
+        description: 'Tiering RESP fuzzing duration in minutes'
+        required: false
+        default: '60'
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}
@@ -23,6 +28,7 @@ concurrency:
 
 jobs:
   fuzz-long:
+    name: fuzz-long (${{ matrix.target }}${{ matrix.suffix }})
     if: github.repository == 'dragonflydb/dragonfly'
     runs-on: CI-LARGE-86
     timeout-minutes: 120
@@ -33,8 +39,15 @@ jobs:
         include:
           - target: resp
             duration: '60'
+            duration_input: resp_duration
           - target: memcache
             duration: '30'
+            duration_input: memcache_duration
+          - target: resp
+            duration: '60'
+            duration_input: tiering_duration
+            tiering: 'true'
+            suffix: '-tiering'
 
     container:
       image: ghcr.io/romange/ubuntu-dev:24-afl
@@ -49,19 +62,21 @@ jobs:
         with:
           submodules: true
 
-      - name: Run AFL++ long fuzzing campaign (${{ matrix.target }})
+      - name: Run AFL++ long fuzzing campaign (${{ matrix.target }}${{ matrix.suffix }})
         uses: ./.github/actions/fuzzing
         with:
           mode: long
           target: ${{ matrix.target }}
-          duration-minutes: ${{ matrix.target == 'resp' && (github.event.inputs.resp_duration || matrix.duration) || (github.event.inputs.memcache_duration || matrix.duration) }}
+          duration-minutes: ${{ github.event.inputs[matrix.duration_input] || matrix.duration }}
           run-number: ${{ github.run_number }}
+          tiering: ${{ matrix.tiering || 'false' }}
+          artifact-suffix: ${{ matrix.suffix || '' }}
 
       - name: Send notification on failure
         if: failure() && github.ref == 'refs/heads/main'
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          message="AFL++ ${{ matrix.target }} fuzzing found crashes.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+          message="AFL++ ${{ matrix.target }}${{ matrix.suffix }} fuzzing found crashes.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
 
           curl -s \
             -X POST \
