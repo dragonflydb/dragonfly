@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import socket
+import ssl
 import string
 import time
 from dataclasses import dataclass
@@ -2377,6 +2378,53 @@ async def test_client_migrate(df_server: DflyInstance):
     {"proactor_threads": 4, "enable_resp_io_loop_v2": "false"},
     {"proactor_threads": 4, "enable_resp_io_loop_v2": "true"},
 )
+async def test_tls_client_migrate(df_factory, with_ca_tls_server_args, with_ca_tls_client_args):
+    """A TLS connection must survive a cross-thread migration under both IO loops.
+
+    V2 support for TLS is new, so exercise the migration path end-to-end for a TLS connection:
+    after CLIENT MIGRATE hops the connection to another proactor thread, the connection must keep
+    serving commands. This covers OnPostMigrateThread re-registering the event-driven recv hook and
+    the TLS "pull" re-read that drains bytes already buffered in the TLS engine at hop time. A
+    post-migration pipeline bounded by a timeout turns any stall into a failure instead of a hang.
+    """
+    server = df_factory.create(**with_ca_tls_server_args)
+    server.start()
+
+    client1 = server.client(**with_ca_tls_client_args)
+    await client1.client_setname("tls_migrate")
+    thread_info = await client1.execute_command("DFLY THREAD")
+    current_tid, num_threads = thread_info[0], thread_info[1]
+    client_id = await client1.client_id()
+
+    admin = server.client(**with_ca_tls_client_args)
+    dest_tid = (current_tid + 1) % num_threads
+    resp = await admin.execute_command("CLIENT", "MIGRATE", client_id, dest_tid)
+    assert resp == 1  # migrated successfully
+
+    # The connection must land on the destination thread and keep serving commands.
+    async for r, breaker in tick_timer(lambda: client1.execute_command("DFLY THREAD")):
+        with breaker:
+            assert r[0] == dest_tid
+
+    # Post-migration: a pipeline must complete (no stall) and return correct replies. This
+    # exercises the re-registered recv hook and the TLS re-read on the new thread.
+    async with async_timeout.timeout(10):
+        pipe = client1.pipeline(transaction=False)
+        for i in range(200):
+            pipe.set(f"k{i}", "v" * 1024)
+            pipe.get(f"k{i}")
+        results = await pipe.execute()
+    for i in range(200):
+        assert results[2 * i + 1] == "v" * 1024, f"GET k{i} returned {results[2 * i + 1]!r}"
+
+    await client1.aclose()
+    await admin.aclose()
+
+
+@dfly_multi_test_args(
+    {"proactor_threads": 4, "enable_resp_io_loop_v2": "false"},
+    {"proactor_threads": 4, "enable_resp_io_loop_v2": "true"},
+)
 async def test_client_migrate_no_conn_leak(df_server: DflyInstance):
     admin = df_server.client()
 
@@ -2742,6 +2790,79 @@ async def test_tls_partial_header_read(
     # Verify server is still alive by making a valid connection
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     assert await client.ping()
+
+
+@dfly_multi_test_args(
+    {"enable_resp_io_loop_v2": "false", "proactor_threads": 1},
+    {"enable_resp_io_loop_v2": "true", "proactor_threads": 1},
+)
+async def test_tls_full_duplex_large_pipeline(
+    df_factory, with_ca_tls_server_args, with_tls_client_args
+):
+    """Regression test for TLS support in the V2 (single-fiber) IoLoop.
+
+    Streams a large pipeline of ECHO commands (large request AND large reply payloads) over a
+    single TLS connection using true full-duplex I/O: a writer task keeps sending while a reader
+    task concurrently consumes replies. This forces the server to perform a blocking TLS write
+    (flushing buffered replies) while new request bytes arrive on the socket (POLLIN). That is the
+    exact scenario that can deadlock the V2 loop if a TryRecv deferred during WRITE_IN_PROGRESS
+    leaves buffered data unseen and the fiber parks idle. The exchange is bounded by a timeout, so
+    a hang fails the test instead of blocking forever. Runs under both V1 and V2 loops.
+    """
+    server = df_factory.create(**with_ca_tls_server_args)
+    server.start()
+
+    # The server verifies client certs (tls_ca_cert_file is set), so present the client cert chain.
+    # We deliberately do NOT verify the server cert here (its CN won't match 127.0.0.1), so no CA
+    # bundle is configured - verification is turned off explicitly below.
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.load_cert_chain(
+        certfile=with_tls_client_args["ssl_certfile"],
+        keyfile=with_tls_client_args["ssl_keyfile"],
+    )
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    # The blocking-write repro is driven by the per-command payload size (a single 128 KiB TLS
+    # record can't flush in one non-blocking write), not by the command count - so we keep the
+    # payload large but the count modest to stay CI-friendly.
+    payload_size = 128 * 1024  # 128 KiB per command: large enough to force blocking TLS writes.
+    num_cmds = 100  # ~12.5 MiB streamed in each direction.
+
+    def make_payload(i: int) -> bytes:
+        # 16-byte zero-padded index prefix lets the reader detect reordering/corruption cheaply.
+        prefix = f"{i:016d}".encode()
+        return prefix + b"x" * (payload_size - len(prefix))
+
+    def encode_echo(payload: bytes) -> bytes:
+        return b"*2\r\n$4\r\nECHO\r\n$" + str(len(payload)).encode() + b"\r\n" + payload + b"\r\n"
+
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.port, ssl=ssl_ctx)
+
+    async def read_bulk() -> bytes:
+        header = await reader.readuntil(b"\r\n")  # b"$<len>\r\n"
+        assert header[:1] == b"$", f"unexpected reply header: {header!r}"
+        n = int(header[1:-2])
+        body = await reader.readexactly(n + 2)  # payload + trailing CRLF
+        return body[:-2]
+
+    async def write_all():
+        for i in range(num_cmds):
+            writer.write(encode_echo(make_payload(i)))
+            await writer.drain()
+
+    async def read_all():
+        for i in range(num_cmds):
+            got = await read_bulk()
+            assert len(got) == payload_size, f"reply {i} wrong size: {len(got)}"
+            assert got[:16] == f"{i:016d}".encode(), f"reply {i} out of order/corrupt"
+
+    # A hang would exceed this bound and fail the test rather than blocking forever.
+    async with async_timeout.timeout(60):
+        await asyncio.gather(write_all(), read_all())
+
+    writer.close()
+    await writer.wait_closed()
 
 
 async def test_blocking_command_pipeline_flush(df_server: DflyInstance):
