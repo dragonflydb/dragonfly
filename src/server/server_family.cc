@@ -166,6 +166,7 @@ ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
+ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
@@ -3335,16 +3336,6 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
 }
 
-void ServerFamily::StartJournalInShardThreads(Replica* repl_ptr) {
-  shard_set->RunBriefInParallel([this, repl_ptr](auto* shard) {
-    size_t index = shard->shard_id();
-    auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
-    size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
-    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
-    journal::StartInThreadAtLsn(rec_executed);
-  });
-}
-
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   util::fb2::LockGuard lk(replicaof_mu_);
 
@@ -3354,7 +3345,7 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
     auto repl_ptr = replica_;
     if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
       // Start journal and keep offsets.
-      StartJournalInShardThreads(repl_ptr.get());
+      repl_ptr->StartJournalAtOwnLSN();
     }
     // flip flag before clearing replica_
     SetMasterFlagOnAllThreads(true);
@@ -3474,7 +3465,7 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
   CHECK(repl_ptr);
 
   // Start journal to allow partial sync from same source master
-  StartJournalInShardThreads(repl_ptr.get());
+  repl_ptr->StartJournalAtOwnLSN();
 
   auto info = replica_->GetSummary();
   if (!info.full_sync_done) {
@@ -3500,10 +3491,17 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
   return builder->SendOk();
 }
 
+std::string ServerFamily::GetLineageId() const {
+  util::fb2::LockGuard lk(replicaof_mu_);
+  return replica_ ? replica_->GetLineageId() : master_replid_;
+}
+
 void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
   facade::ParsedArgs args = parser.UnparsedArgs();
   auto* builder = cmd_cntx->rb();
-  {
+
+  // Replicating a replica (cascaded replication) is only supported behind the experimental flag.
+  if (!absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
     util::fb2::LockGuard lk(replicaof_mu_);
     if (!IsMaster()) {
       return cmd_cntx->SendError("Replicating a replica is unsupported");
@@ -3534,13 +3532,17 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
 
         cntx->replica_conn = true;
 
-        // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads> <version>
+        // The response for 'capa dragonfly' is:
+        //   <masterid> <syncid> <numthreads> <version> <lineage_id>
+        std::string lineage_id = GetLineageId();
+
         auto* rb = static_cast<RedisReplyBuilder*>(builder);
-        rb->StartArray(4);
+        rb->StartArray(5);
         rb->SendSimpleString(master_replid_);
         rb->SendSimpleString(sync_id);
         rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
+        rb->SendSimpleString(lineage_id);
         return;
       }
     } else if (cmd == "LISTENING-PORT") {

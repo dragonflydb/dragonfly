@@ -210,6 +210,10 @@ class ServerFamily {
     return master_replid_;
   }
 
+  // The lineage root replication id of this node: its own replid if it is a true master, or the
+  // ancestor id advertised by its master when it is itself a replica (cascaded replication).
+  std::string GetLineageId() const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
   DflyCmd* GetDflyCmd() const {
     return dfly_cmd_.get();
   }
@@ -305,8 +309,6 @@ class ServerFamily {
 
   void ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmnd_cntx,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  void StartJournalInShardThreads(Replica* repl_ptr);
 
   void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 

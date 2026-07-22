@@ -40,6 +40,7 @@ using namespace std;
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
+ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
 
 namespace dfly {
 
@@ -287,19 +288,21 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view sync_id_str = parser.Next<string_view>();
   string_view flow_id_str = parser.Next<string_view>();
 
-  std::optional<LSN> seqid;
+  std::optional<LSN> flow_lsn;
   std::optional<Replica::LastMasterSyncData> replica_last_master;
+
   if (parser.HasAtLeast(2)) {
     replica_last_master = {parser.Next<string>(), parser.Next(ParseLsnVec)};
   } else if (parser.HasNext()) {
-    seqid = parser.Next<LSN>();
+    flow_lsn = parser.Next<LSN>();
   }
+
   if (parser.TakeError()) {
     return cmd_cntx->SendError(facade::kInvalidIntErr);
   }
 
   VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
-          << " flow: " << flow_id_str << " seq: " << seqid.value_or(-1);
+          << " flow: " << flow_id_str << " seq: " << flow_lsn.value_or(-1);
 
   if (master_id != sf_->master_replid()) {
     return cmd_cntx->SendError(kBadMasterId);
@@ -338,18 +341,22 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     std::optional<Replica::LastMasterSyncData> my_last_master = sf_->GetLastMasterData();
 
-    // The LSN this flow could resume from: either the per-flow seqid sent on a same-master
-    // reconnect, or this flow's entry in the LSN vector the replica saved from the master both
-    // nodes shared before a failover. Both feed the same partial-sync check below.
-    std::optional<LSN> flow_lsn = seqid;
-    if (replica_last_master && my_last_master && my_last_master->id == replica_last_master->id) {
+    // Skip full sync if we stem from the same master and this node was promoted (my_last_master)
+    const bool failover_match =
+        my_last_master && replica_last_master && replica_last_master->id == my_last_master->id;
+
+    // Skip full sync if we have the same parent in a cascaded setup
+    const bool cascaded_match = replica_last_master &&
+                                replica_last_master->id == sf_->GetLineageId() &&
+                                absl::GetFlag(FLAGS_experimental_cascaded_partial_sync);
+
+    // Case for partial sync
+    if (failover_match || cascaded_match) {
       ++ServerState::tlocal()->stats.psync_requests_total;
       const std::vector<LSN>& lsns = replica_last_master->last_journal_LSNs;
 
-      // The LSN vector of the same master must be the same size on all replicas.
-      if (lsns.size() != my_last_master->last_journal_LSNs.size()) {
+      if (lsns.size() != shard_set->size())  // Replica sends LSNs only on equal shard size
         return cmd_cntx->SendError(facade::kSyntaxErr);
-      }
 
       DCHECK_LT(flow_id, lsns.size());
       if (flow_id >= lsns.size()) {
@@ -357,16 +364,12 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
                    << ". Disabling partial sync.";
         return;  // Fall back to full sync without an error reply.
       }
-      flow_lsn = lsns[flow_id];
+      flow_lsn = lsns[flow_id];  // this is a valid lsn - we can follow up with the buffer check
     }
 
-    std::optional<LSN> lsn_to_start_partial;
+    // Switch sync type to partial
     if (flow_lsn && IsLSNInPartialSyncBuffer(*flow_lsn)) {
-      lsn_to_start_partial = *flow_lsn;
-    }
-
-    if (lsn_to_start_partial) {
-      flow.start_partial_sync_at = *lsn_to_start_partial;
+      flow.start_partial_sync_at = *flow_lsn;
       sync_type = "PARTIAL";
       VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
               << " and is available. (current_lsn=" << journal::GetLsn() << ")";

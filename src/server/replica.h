@@ -36,6 +36,7 @@ struct MasterContext {
   std::string dfly_session_id;  // Sync session id for dfly sync.
   unsigned num_flows = 0;
   DflyVersion version = DflyVersion::VER1;
+  std::string lineage_id;  // lineage id of master
 };
 
 // This class manages replication from both Dragonfly and Redis masters.
@@ -124,6 +125,13 @@ class Replica : ProtocolClient {
     return !master_context_.dfly_session_id.empty();
   }
 
+  // The replication id of the lineage root master. Equals the direct master's id, unless the
+  // direct master advertised an ancestor id (cascaded replication), in which case it is the
+  // ancestor's id. Used to negotiate partial sync when reconnecting up the chain.
+  std::string GetLineageId() const {
+    return master_context_.lineage_id;
+  }
+
   std::vector<uint64_t> GetReplicaOffset() const;
   std::string GetSyncId() const;
 
@@ -146,6 +154,11 @@ class Replica : ProtocolClient {
   // Investigation-only (DEBUG REPLDIAG): bytes currently sitting unread in the
   // master socket's kernel receive buffer, or -1 if unavailable. Remove once closed.
   int GetMasterSocketUnreadBytes();
+
+  // Start the journal in every shard thread at this replica's per-shard executed LSN, so the
+  // journal continues the master's LSN numbering. Enables partial sync from the same source master
+  // (failover) and cascaded partial sync (sub-replicas share the lineage root's LSN space).
+  void StartJournalAtOwnLSN();
 
  private:
   ExecutionState exec_st_;

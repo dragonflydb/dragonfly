@@ -275,11 +275,12 @@ class DflyCmd {
   // Return connection thread index or migrate to another thread.
   void Thread(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
-  // FLOW <masterid> <syncid> <flowid> [<seqid>]
-  // Register connection as flow for sync session.
-  // If seqid is given, it means the client wants to try partial sync.
-  // If it is possible, return Ok and prepare for a partial sync, else
-  // return error and ask the replica to execute FLOW again.
+  // FLOW <masterid> <syncid> <flowid> [<seqid> OR <last_master_id> <lsn-vec>]
+  // Register connection as flow for sync session and determine sync type (possibly partial).
+  // For <seqid> - this is the last LSN processed when replication broke with the same node
+  // For <last_master_id> <lsn-vec> - replicas last replication info, determine if partial sync
+  // is possible (node promotion (master-replica swap), cascaded replication omitting a node).
+  // Replies with sync type (partial/full) and eof token
   void Flow(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   // SYNC <syncid>
