@@ -1,0 +1,90 @@
+# Known-failing Valkey stream tests on Dragonfly, skipped so the suite is a green
+# regression gate over the passing subset. One test name per line (a line starting
+# with '/' is treated as a regexp by the harness). Comments (#) and blank lines are
+# stripped before the list is passed to --skipfile.
+#
+# Each entry is a tracked gap, NOT a permanent exclusion — remove it once fixed.
+# Validated against Valkey unstable @ 79fc841577be18d5e789f741ca92a4157e8315fa.
+# Baseline PoC (truncated partial run before the wake fixes): 65 pass / 27 fail.
+
+# --- Missing runtime CONFIG `stream-node-max-entries` (test setup fails) ---
+XADD with MAXLEN option and the '~' argument
+XADD with LIMIT consecutive calls
+XTRIM with ~ is limited
+XTRIM without ~ is not limited
+XTRIM without ~ and with LIMIT
+XTRIM with LIMIT delete entries no more than limit
+XTRIM MINID marking last entry in listpack as deleted
+
+# --- `XREAD ... STREAMS key +` (read last element, Valkey 7.4+) unsupported ---
+XREAD last element from non-empty stream
+XREAD last element from empty stream
+XREAD last element blocking from empty stream
+XREAD last element blocking from non-empty stream
+XREAD last element from multiple streams
+XREAD last element with count > 1
+
+# --- `XSETID ... ENTRIESADDED/MAXDELETEDID/offset` extended syntax unsupported ---
+XSETID cannot run with an offset but without a maximal tombstone
+XSETID cannot run with a maximal tombstone but without an offset
+XSETID errors on negative offset
+XSETID cannot set the maximal tombstone with larger ID
+XSETID cannot set the offset to less than the length
+
+# --- Blocking XREAD not registered as a blocked client (wait_for_blocked_clients timeout) ---
+XREAD with same stream name multiple times should work
+XREAD + multiple XADD inside transaction
+Blocking XREAD for stream that ran dry (issue #5299)
+# Woken blocking XREAD replies an empty set ({x {}}) instead of the newly added entry.
+XREAD streamID edge (blocking)
+
+# --- Ran-dry XREADGROUP replies {stream {}} instead of nil (issue #5299 shape) ---
+Blocking XREADGROUP for stream that ran dry (issue #5299)
+
+# --- Blocked-client accounting: INFO lacks `total_blocking_keys`(+`_on_nokey`); multi-client ---
+# blocked-count scenarios don't converge. NOTE: these tests abort mid-way and LEAK blocked
+# clients, which then poison the following RENAME/XCLAIM tests (cascade failures) — so they
+# must stay skipped together.
+Blocking XREADGROUP for stream key that has clients blocked on list
+Blocking XREADGROUP for stream key that has clients blocked on stream - avoid endless loop
+Blocking XREADGROUP for stream key that has clients blocked on stream - reprocessing command
+
+# --- XGROUP/XINFO HELP extra-arg handling differs (cosmetic) ---
+XGROUP HELP should not have unexpected options
+XINFO HELP should not have unexpected options
+
+# --- XGROUP CREATE does not validate a negative ENTRIESREAD ---
+XGROUP CREATE: with ENTRIESREAD parameter
+
+# --- XGROUP SETID rejects the `-` special id ---
+PEL NACK reassignment after XGROUP SETID event
+
+# --- HANGS: blocked XREADGROUP is not woken when the key is mutated (BLOCK 0). ---
+# A group-blocked client is not woken by DEL/SET(retype)/FLUSHALL/SWAPDB, so `$rd read`
+# blocks forever. These MUST stay skipped or the whole run wedges. Remove once
+# wake-on-key-invalidation for blocked XREADGROUP lands.
+# (XGROUP DESTROY and RENAME *do* wake correctly.)
+Blocking XREADGROUP: key deleted
+Blocking XREADGROUP: key type changed with SET
+Blocking XREADGROUP: key type changed with transaction
+Blocking XREADGROUP: flushed DB
+Blocking XREADGROUP: swapped DB, key doesn't exist
+Blocking XREADGROUP: swapped DB, key is not a stream
+
+# --- Errorstats naming/format differs from Valkey (pre-existing, unrelated to wake) ---
+# The XREADGROUP wake to -NOGROUP works; this test also asserts `errorstat_NOGROUP:count=1`,
+# but Dragonfly emits its internal type tag (`no_group_error:N`) with a different format.
+XGROUP DESTROY should unblock XREADGROUP with -NOGROUP
+
+# --- XCLAIM with trimming: needs `config set stream-node-max-entries` (two tests share this name) ---
+XCLAIM with trimming
+
+# --- XPENDING ignores the <consumer> filter argument ---
+# `XPENDING key group - + 10 consumer2` returns other consumers' entries instead of an
+# empty array (live-verified), so the pre-claim asserts fail.
+XCLAIM can claim PEL items from another consumer
+
+# --- Error-message text differs from Valkey (assert_error exact-match) ---
+XREAD and XREADGROUP against wrong parameter
+XAUTOCLAIM COUNT must be > 0
+XAUTOCLAIM with out of range count
