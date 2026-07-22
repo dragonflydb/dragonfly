@@ -9,6 +9,7 @@
 #include "absl/strings/match.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "common/rapidhash.h"
 #include "server/cluster_support.h"
 #include "server/common.h"
 #include "util/fibers/synchronization.h"
@@ -87,6 +88,14 @@ class RoundRobinSharder {
   static util::fb2::Mutex mutex_;
 };
 
+inline ShardId reduce(uint64_t hash, ShardId shard_num) {
+  // Lemire's fast alternative to modulo reduction.
+  // Use the lower 32 bits of the hash directly.
+
+  uint32_t h32 = static_cast<uint32_t>(hash);
+  return static_cast<ShardId>((uint64_t{h32} * uint64_t{shard_num}) >> 32);
+}
+
 }  // namespace
 
 thread_local string RoundRobinSharder::round_robin_prefix_;
@@ -112,7 +121,7 @@ ShardId Shard(string_view v, ShardId shard_num) {
     v = LockTagOptions::instance().Tag(v);
   }
 
-  XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
+  uint64_t hash = rapidhashMicro_withSeed(v.data(), v.size(), 120577240643ULL);
 
   if (RoundRobinSharder::IsEnabled()) {
     auto round_robin = RoundRobinSharder::TryGetShardId(v, hash);
@@ -120,8 +129,7 @@ ShardId Shard(string_view v, ShardId shard_num) {
       return *round_robin;
     }
   }
-
-  return hash % shard_num;
+  return reduce(hash, shard_num);
 }
 
 namespace sharding {
