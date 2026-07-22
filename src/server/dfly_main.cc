@@ -536,14 +536,16 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   iouring_res = -iouring_res;
 
   if (iouring_res == ENOSYS) {
-    LOG(WARNING) << "iouring API is not supported. switching to epoll.";
+    LOG(WARNING) << "iouring API is not supported. Switching to epoll.";
   } else if (iouring_res == ENOMEM) {
     LOG(WARNING) << "io_uring does not have enough memory. That can happen when your "
                     "max locked memory is too limited. If you run via docker, "
                     "try adding '--ulimit memlock=-1' to \"docker run\" command."
                     "Meanwhile, switching to epoll";
+  } else if (iouring_res == EPERM) {
+    LOG(WARNING) << "Check if io_uring is disabled via /proc/sys/kernel/io_uring_disabled. Switching to epoll.";
   } else {
-    LOG(WARNING) << "Weird error " << iouring_res << " switching to epoll";
+    LOG(WARNING) << "Weird error " << strerror(iouring_res) << " switching to epoll";
   }
 
   return true;
