@@ -922,6 +922,14 @@ void Connection::OnPostMigrateThread() {
     MaybeEnableRecvMultishot();
     socket_->RegisterOnRecv(
         [this](const FiberSocketBase::RecvNotification& n) { OnRecvNotification(n); });
+
+    // TLS and multishot are mutually exclusive: MaybeEnableRecvMultishot() only enables multishot
+    // when !is_tls_, so for a TLS connection it is a no-op above. We might still have bytes in the
+    // TLS engine, and a fresh RegisterOnRecv only fires on new socket activity, so force a read to
+    // drain those already-buffered bytes at hop time.
+    if (is_tls_) {
+      pending_input_ = true;
+    }
   }
 
   migration_in_process_ = false;
@@ -1077,10 +1085,8 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {  // non-http
-      ioloop_v2_ =
-          !is_tls_ &&
-          ((protocol_ == Protocol::MEMCACHE && GetFlag(FLAGS_enable_memcache_io_loop_v2)) ||
-           (protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_resp_io_loop_v2)));
+      ioloop_v2_ = (protocol_ == Protocol::MEMCACHE && GetFlag(FLAGS_enable_memcache_io_loop_v2)) ||
+                   (protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_resp_io_loop_v2));
       pipeline_squashing_v2_ =
           ioloop_v2_ && GetFlag(FLAGS_enable_pipeline_squashing_v2) && protocol_ == Protocol::REDIS;
 
@@ -3429,17 +3435,23 @@ void Connection::ReadPendingInput() {
 
   // Drain available socket data into io_buf_.
   io::MutableBytes buf = io_buf_.AppendBuffer();
-  // A recv call can return fewer bytes than requested even if the
-  // socket buffer actually contains enough data to satisfy the full request.
+  // pending_input_ lifecycle in this drain loop (see TlsSocket::TryRecv contract in tls_socket.h):
+  // - Positive read: possibly short, not a "drained" signal - keep looping without clearing it. If
+  //   the loop exits because io_buf_ is full, it stays set for the next pass.
+  // - EAGAIN/EWOULDBLOCK: a wake is coming (drained kernel, or a TLS read deferred behind a
+  //   background write) - clear pending_input_ and park.
+  // - EBUSY (device_or_resource_busy, TLS only): another fiber holds the socket, no wake - keep it
+  //   latched and retry on a later pass (neither clear it nor set io_ec_).
+  // - Any other error: a real I/O failure - surface via io_ec_.
   while (!buf.empty()) {
     io::Result<size_t> res = socket_->TryRecv(buf);
     if (!res) {
       auto ec = res.error();
-      // TryRecv is non-blocking: it returns EAGAIN/EWOULDBLOCK when nothing is ready.
-      if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block)
+      if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
         pending_input_ = false;
-      else
+      } else if (ec != errc::device_or_resource_busy) {
         io_ec_ = ec;
+      }
       break;
     }
 
@@ -3682,15 +3694,18 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     if (!ShouldWakeIdle()) {
       phase_ = READ_SOCKET;
 
-      // Flush replies deferred by ReplyBatch before sleeping - ensures the client gets its response
-      // even when no more data arrives (single commands, end of pipeline).
       if (auto ec = FlushReplies(); ec) {
         return ec;
       }
 
-      fiber_park_spot_ = FiberParkSpot::kIdleAwait;
-      io_event_.await([this] { return ShouldWakeIdle(); });
-      fiber_park_spot_ = FiberParkSpot::kNone;
+      // FlushReplies (above) suspends the fiber. While the fiber is suspended, pending_input may
+      // change and/or new bytes might arrive in io_buf_, so re-check ShouldWakeIdle() before
+      // parking. This re-check is an optimization, and not a must for correctness.
+      if (!ShouldWakeIdle()) {
+        fiber_park_spot_ = FiberParkSpot::kIdleAwait;
+        io_event_.await([this] { return ShouldWakeIdle(); });
+        fiber_park_spot_ = FiberParkSpot::kNone;
+      }
     }
 
     phase_ = PROCESS;
