@@ -375,6 +375,7 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
                  << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
+    LogTcpSocketDiagnostics(dest_);
     cntx_->ReportError("JournalStreamer write operation timeout");
   }
 }
@@ -390,6 +391,7 @@ void JournalStreamer::WaitForInflightToComplete(bool with_timeout) {
         << "Waiting for inflight bytes " << in_flight_bytes_;
 
     if (next >= max_timeout) {
+      LogTcpSocketDiagnostics(dest_);
       if (with_timeout) {
         cntx_->ReportError("JournalStreamer write operation timeout");
         break;
