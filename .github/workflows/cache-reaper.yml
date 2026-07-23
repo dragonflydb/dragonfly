@@ -53,7 +53,9 @@ jobs:
 
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             # PR closed/merged: delete every cache scoped to this PR ref in one non-interactive call.
-            before_count=$(gh cache list --ref "$PR_REF" --json id --jq 'length')
+            # Best-effort count for the log only; unlike `gh cache delete --all` below, it doesn't
+            # need to be exact, so a transient failure here must not abort the actual cleanup.
+            before_count=$(gh cache list --ref "$PR_REF" --limit 1000 --json id --jq 'length' || echo '?')
             echo "PR closed - deleting all caches for $PR_REF ($before_count found)"
             if ! gh cache delete --all --ref "$PR_REF" --succeed-on-no-caches; then
               echo "::warning::Some caches for $PR_REF may not have been deleted; 7-day/LRU will reclaim leftovers."
@@ -74,8 +76,11 @@ jobs:
               while IFS=$'\t' read -r id ref key; do
                 [ -n "$id" ] || continue
                 echo "Deleting stale cache: $key (ref=$ref, id=$id)"
-                gh cache delete "$id" || echo "::warning::failed to delete id=$id"
-                deleted=$((deleted + 1))
+                if gh cache delete "$id"; then
+                  deleted=$((deleted + 1))
+                else
+                  echo "::warning::failed to delete id=$id"
+                fi
               done <<< "$stale"
               echo "Deleted $deleted stale duplicate cache(s)"
             fi
