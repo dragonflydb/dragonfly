@@ -1,0 +1,85 @@
+# Cache reaper - keeps the repo's 10 GB Actions cache budget tight. Two triggers:
+#   - closed pull_request:   delete ALL ccache entries for that PR (refs/pull/<N>/merge).
+#   - schedule / manual:     remove duplications (dedup) - keep the newest cache per (ref, config), delete older copies.
+#                            This trims refs/heads/main duplicates left by the 3-hourly regression/
+#                            epoll runs, whose append-timestamp saves a new entry every run.
+name: Cache reaper
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
+
+# One reap per PR; scheduled/manual reaps share a single group. A newer run supersedes an in-flight one.
+concurrency:
+  group: cache-reaper-${{ github.event.pull_request.number || 'scheduled' }}
+  cancel-in-progress: true
+
+jobs:
+  reap:
+    # Make sure that: 1) per-PR cleanups are parallel and isolated 2) scheduled dedups are serialized to one at a time.
+    if: github.repository == 'dragonflydb/dragonfly' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write   # required to delete caches
+    steps:
+      - name: Reap caches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+
+          # Repo-wide cache usage (10 GB limit), printed before/after so the log shows what was reclaimed.
+          # NOTE: deliberately NOT using `gh api .../actions/cache/usage` here - that aggregate
+          # endpoint is an async, separately-refreshed rollup and can still report pre-deletion
+          # totals for a while after a delete. `gh cache list` hits the live cache-metadata store
+          # directly (confirmed consistent immediately after deletes), so we sum sizeInBytes
+          # ourselves instead of trusting the lagging aggregate.
+          print_repo_cache_usage() {
+            gh cache list --limit 1000 --json sizeInBytes --jq \
+              '(map(.sizeInBytes) | add // 0) as $bytes
+               | "Repo cache: \($bytes/1048576|floor) MB used, "
+                 + "\(length) caches "
+                 + "(limit 10240 MB, \((10737418240 - $bytes)/1048576|floor) MB free)"'
+          }
+
+          echo "== Before cleanup =="
+          print_repo_cache_usage || true
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # PR closed/merged: delete every cache scoped to this PR ref in one non-interactive call.
+            before_count=$(gh cache list --ref "$PR_REF" --json id --jq 'length')
+            echo "PR closed - deleting all caches for $PR_REF ($before_count found)"
+            if ! gh cache delete --all --ref "$PR_REF" --succeed-on-no-caches; then
+              echo "::warning::Some caches for $PR_REF may not have been deleted; 7-day/LRU will reclaim leftovers."
+            fi
+            echo "Deleted $before_count cache(s) for $PR_REF"
+          else
+            # Scheduled/manual: keep the newest cache per (ref, config), delete the older duplicate copies.
+            echo "Scheduled dedup - keeping newest per (ref, config), deleting older copies"
+            stale=$(gh cache list --limit 1000 --json id,key,ref,createdAt \
+              --jq '[ .[] | select(.key|test("dfly-ccache")) ]
+                    | group_by(.ref + "|" + (.key | sub("-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$";"")))
+                    | map(sort_by(.createdAt) | .[:-1]) | flatten
+                    | .[] | "\(.id)\t\(.ref)\t\(.key)"')
+            if [ -z "$stale" ]; then
+              echo "No stale duplicate caches."
+            else
+              deleted=0
+              while IFS=$'\t' read -r id ref key; do
+                [ -n "$id" ] || continue
+                echo "Deleting stale cache: $key (ref=$ref, id=$id)"
+                gh cache delete "$id" || echo "::warning::failed to delete id=$id"
+                deleted=$((deleted + 1))
+              done <<< "$stale"
+              echo "Deleted $deleted stale duplicate cache(s)"
+            fi
+          fi
+
+          echo "== After cleanup =="
+          print_repo_cache_usage || true
