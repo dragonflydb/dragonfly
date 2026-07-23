@@ -154,9 +154,8 @@ string UnescapeTerm(string_view src) {
       res.push_back(c);
     }
   }
-  // The {term_part}+ pattern always pairs `\\` with a following char, so a
-  // trailing lone backslash is unreachable.
-  DCHECK(!escaped);
+  // A trailing lone backslash (reachable from quoted tag/wildcard values, e.g. a
+  // Windows path `C:\`) is dropped, matching make_Tag and SplitWithEscapes.
   return res;
 }
 
