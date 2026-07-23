@@ -19,8 +19,9 @@ concurrency:
 
 jobs:
   reap:
+    # TEMPORARY: allow fork validation; remove glevkovich/dragonfly before the real PR.
     # Make sure that: 1) per-PR cleanups are parallel and isolated 2) scheduled dedups are serialized to one at a time.
-    if: github.repository == 'dragonflydb/dragonfly' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.repository == 'dragonflydb/dragonfly' || github.repository == 'glevkovich/dragonfly') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       actions: write   # required to delete caches
