@@ -140,9 +140,10 @@ ABSL_FLAG(
     "to accumulate more already-available input, so the squasher sees one large batch instead of "
     "many small ones.");
 
-ABSL_FLAG(bool, pipeline_parse_in_proactor, true,
-          "V2 only: parse newly-arrived bytes from the proactor OnRecv callback while the fiber "
-          "is blocked in a squash hop, so the next batch is already grown when execution resumes.");
+ABSL_FLAG(
+    bool, pipeline_parse_in_proactor, true,
+    "V2 only: parse newly-arrived bytes from the proactor OnRecv callback while the fiber is "
+    "parked waiting on parallel work, so the next batch is already grown when execution resumes.");
 
 ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
           "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
@@ -3070,12 +3071,19 @@ bool Connection::ExecuteBatch() {
       DCHECK(!cc_->async_dispatch);
       cc_->sync_dispatch = true;
       cc_->async_dispatch = is_true_pipeline;
+      fiber_park_spot_ = FiberParkSpot::kSimpleHop;
     }
+    // parse-in-proactor can append commands while we are parked in DispatchCommandSimple. We might
+    // need to update is_true_pipeline.
+    size_t q_len_before_dispatch = parsed_cmd_q_len_;
     uint64_t dispatch_start = CycleClock::Now();
     auto dispatch_res = service_->DispatchCommandSimple(cmd, mode);
     if (ioloop_v2_) {
+      fiber_park_spot_ = FiberParkSpot::kNone;
       cc_->sync_dispatch = false;
       cc_->async_dispatch = false;
+      if (parsed_cmd_q_len_ > q_len_before_dispatch)
+        is_true_pipeline = true;
     }
     // Enforce the pipeline reply-ordering invariant: replies must reach the socket in parse order.
     // V1 (ONLY_SYNC): all commands run serially, so parsed_to_execute_ always equals parsed_head_
@@ -3130,8 +3138,10 @@ bool Connection::ReplyBatch() {
       // Pure coroutine replies don't preserve lifetimes
       const bool suspended = cmd->IsSuspendedReply();
       std::optional<SinkReplyBuilder::ScopePause> pause;
-      if (suspended)
+      if (suspended) {
         pause.emplace(reply_builder_.get());
+        fiber_park_spot_ = FiberParkSpot::kSendReply;
+      }
 
       // V2 in-flight tracking:
       // - A command isn't "done" until its reply is written. A suspended (coroutine) reply can do
@@ -3142,6 +3152,7 @@ bool Connection::ReplyBatch() {
       //   SendCheckpoint's HasInFlightCommands() check) and waits for the write to land.
       // - A non-suspended reply just copies an already-built payload and can't preempt.
       cmd->SendReply();
+      fiber_park_spot_ = FiberParkSpot::kNone;
       AdvanceParsedHead(cmd->next);
       replied++;
 
@@ -3382,11 +3393,16 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
     if (io_buf_.InputLen() > before)
       ++GetLocalConnStats().proactor_reads;
 
-    // Parse In Proactor: parse newly-read bytes while the fiber is parked in a squash hop, so the
-    // next batch is already larger on resume.
-    // - This is safe because the parser is idle at kSquashHop.
+    // Parse In Proactor: parse newly-read bytes while the fiber is parked, so the next batch is
+    // already larger on resume. Enabled only at parks where the parser is idle AND the fiber waits
+    // on parallel progress (a remote shard or the kernel, possibly on another CPU), so the parse
+    // overlaps real work. Parks that run nothing in parallel (e.g. a self-preemption yield) are
+    // excluded - offloading them buys nothing.
     // - Calling ParseRedis() with max_busy_cycles==0: proactor's callbacks must not suspend.
-    if (pipeline_parse_in_proactor_cached && (fiber_park_spot_ == FiberParkSpot::kSquashHop) &&
+    if (pipeline_parse_in_proactor_cached &&
+        (fiber_park_spot_ == FiberParkSpot::kSquashHop ||
+         fiber_park_spot_ == FiberParkSpot::kSendReply ||
+         fiber_park_spot_ == FiberParkSpot::kSimpleHop) &&
         redis_parser_ && (io_buf_.InputLen() > 0)) {
       size_t cmds_before = parsed_cmd_q_len_;
       ParserStatus st = ParseRedis(io_buf_, 0, /*enqueue_only=*/true);
