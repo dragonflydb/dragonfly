@@ -63,7 +63,10 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
   if (!pub_sub.all_channels) {
     std::string_view name = id.name();
     if (name == "PUBLISH" || name == "SPUBLISH") {
-      allowed &= iterate_globs(tail_args[0]);
+      // tail_args can be empty for ACL DRYRUN's simulated commands, which skip arity
+      // validation. Treat a missing channel argument as unknown/permissive, matching how
+      // DryRun skips the key-pattern check for the same incomplete-args case.
+      allowed &= tail_args.empty() || iterate_globs(tail_args[0]);
     } else {
       for (auto channel : tail_args) {
         allowed &= iterate_globs(channel);

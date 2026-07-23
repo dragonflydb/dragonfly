@@ -416,6 +416,16 @@ TEST_F(AclFamilyTest, TestDryRun) {
 
   resp = Run("ACL DRYRUN conn-only ACL SETUSER victim on nopass");
   EXPECT_THAT(resp, "This user has no permissions to run the 'ACL SETUSER' command");
+
+  // DRYRUN simulates commands without validating arity, so PUBLISH with no channel/message
+  // must not crash (it used to index the missing first argument) when the user's pub/sub
+  // access is restricted to specific channels.
+  resp = Run("ACL DRYRUN chan-user PUBLISH");
+  EXPECT_THAT(resp, "OK");
+
+  // Unknown ACL sub-commands must be reported by their full simulated name, not just "ACL".
+  resp = Run("ACL DRYRUN default ACL BOGUSSUBCMD");
+  EXPECT_THAT(resp, ErrArg("ERR Command 'ACL BOGUSSUBCMD' not found"));
 }
 
 TEST_F(AclFamilyTest, AclGenPassTooManyArguments) {

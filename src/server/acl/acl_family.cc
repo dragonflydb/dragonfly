@@ -593,8 +593,14 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
   // checked against the wrong, less restrictive ACL category.
   auto [cid, simulated_args] = cmd_registry_->FindExtended(simulated_cmd);
   if (!cid || cid->IsAlias()) {
-    auto error =
-        absl::StrCat("Command '", absl::AsciiStrToUpper(simulated_cmd.Front()), "' not found");
+    // Mirror the lookup key FindExtended actually used: for ACL sub-commands that's "ACL
+    // SUBCMD", not just "ACL", otherwise a bad sub-command misleadingly reports "ACL" itself
+    // as not found.
+    std::string looked_up = absl::AsciiStrToUpper(simulated_cmd.Front());
+    if (looked_up == "ACL" && simulated_cmd.size() > 1) {
+      absl::StrAppend(&looked_up, " ", absl::AsciiStrToUpper(simulated_cmd[1]));
+    }
+    auto error = absl::StrCat("Command '", looked_up, "' not found");
     rb->SendError(error);
     return;
   }
