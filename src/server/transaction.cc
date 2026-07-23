@@ -1903,26 +1903,56 @@ CmdMemoryScope::CmdMemoryScope(int obj_type)
   tl_cmd_mem_scope = this;
 }
 
+void CmdMemoryScope::Checkpoint(int64_t used_memory) {
+  DCHECK(!suspended_);
+  delta_ += used_memory - mem_baseline_;
+  mem_baseline_ = used_memory;
+}
+
 void CmdMemoryScope::MarkDeducted(int64_t bytes) {
   deductions_ += bytes;
 }
 
+void CmdMemoryScope::Suspend() {
+  DCHECK_EQ(tl_cmd_mem_scope, this);
+  // we assert that the suspended scope is not part of a chain as a child. currently this is true.
+  DCHECK_EQ(parent_, nullptr);
+  DCHECK(!suspended_);
+
+  Checkpoint(CmdTrackedMemory());
+  suspended_ = true;
+}
+
+void CmdMemoryScope::Resume() {
+  DCHECK_EQ(tl_cmd_mem_scope, this);
+  DCHECK(suspended_);
+
+  mem_baseline_ = CmdTrackedMemory();
+  suspended_ = false;
+}
+
 CmdMemoryScope::~CmdMemoryScope() {
   DCHECK_EQ(tl_cmd_mem_scope, this);
+  // Since the suspend/resume system is to cooperate with helio, this check verifies that if hooks
+  // were set in helio, both hooks were set and correctly. that we did not resume without setting
+  // the resume hook appropriately.
+  DCHECK(!suspended_);
 
-  const int64_t used_memory = CmdTrackedMemory();
+  Checkpoint(CmdTrackedMemory());
+
   // The memory moved this much during current scope possibly including all movements due to child
   // scopes.
-  const int64_t total_delta = used_memory - mem_baseline_;
+  const int64_t total_delta = delta_;
   // Remove the movements due to child scopes, and whatever we do not want to count.
   const int64_t my_delta = total_delta - child_delta_ - deductions_;
 
-  if (parent_)
+  if (parent_ && !parent_->suspended_)
     // Let parent know about movements due to this scope. This calculation travels up to the root.
     // So when the parent calculates delta, it can remove the movements due to children. It is added
     // because a parent can have multiple child scopes in sequence. Note that deductions will only
     // matter at the current scope. The parent need not know about them, the parent only needs to
-    // know about our total movement.
+    // know about our total movement. Also do not notify the parent if it is suspended, it will
+    // completely ignore all child movements, because it relies on the helio hooks to resume itself.
     parent_->child_delta_ += total_delta;
 
   tl_cmd_mem_scope = parent_;
@@ -1934,9 +1964,18 @@ CmdMemoryScope::~CmdMemoryScope() {
 }
 
 void MarkDeductedFromCurrentScope(int64_t bytes) {
-  if (tl_cmd_mem_scope != nullptr) {
+  if (tl_cmd_mem_scope)
     tl_cmd_mem_scope->MarkDeducted(bytes);
-  }
+}
+
+void SuspendCurrentCmdMemoryScope() {
+  DCHECK(tl_cmd_mem_scope != nullptr);
+  tl_cmd_mem_scope->Suspend();
+}
+
+void ResumeCurrentCmdMemoryScope() {
+  DCHECK(tl_cmd_mem_scope != nullptr);
+  tl_cmd_mem_scope->Resume();
 }
 
 }  // namespace dfly

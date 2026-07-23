@@ -522,4 +522,36 @@ TEST_F(TransactionTest, DeltaNested) {
   });
 }
 
+TEST_F(TransactionTest, DeltaSuspendResume) {
+  OnShard(0, [] {
+    const auto shard = EngineShard::tlocal();
+    const auto mr = shard->memory_resource();
+
+    const auto before = shard->cmd_type_mem_delta();
+    void* p = nullptr;
+    void* q = nullptr;
+
+    {
+      CmdMemoryScope scope_for_string{OBJ_STRING};
+      p = mr->allocate(1024);
+
+      scope_for_string.Suspend();
+
+      {
+        CmdMemoryScope scope_for_list{OBJ_LIST};
+        q = mr->allocate(128);
+      }
+
+      scope_for_string.Resume();
+    }
+
+    const auto diff = DeltaDiff(before, shard->cmd_type_mem_delta());
+    ASSERT_EQ(diff[OBJ_LIST], 128);
+    ASSERT_EQ(diff[OBJ_STRING], 1024);
+
+    mr->deallocate(p, 1024);
+    mr->deallocate(q, 128);
+  });
+}
+
 }  // namespace dfly
