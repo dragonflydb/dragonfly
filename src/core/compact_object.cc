@@ -1000,6 +1000,32 @@ void CompactObj::InitRobj(CompactObjType type, unsigned encoding, void* obj) {
   u_.r_obj.Init(encoding, obj);
 }
 
+void CompactObj::InitRobj(CompactObjType type, unsigned encoding, void* obj, FreeHook fh) {
+  DCHECK_NE(type, OBJ_STRING);
+  uint8_t tag;
+  switch (type) {
+    case OBJ_LIST:
+      tag = LIST_TAG;
+      break;
+    case OBJ_SET:
+      tag = SET_TAG;
+      break;
+    case OBJ_HASH:
+      tag = HASH_TAG;
+      break;
+    case OBJ_ZSET:
+      tag = ZSET_TAG;
+      break;
+    case OBJ_STREAM:
+      tag = STREAM_TAG;
+      break;
+    default:
+      LOG(FATAL) << "Unsupported type for InitRobj: " << type;
+  }
+  SetMeta(tag, mask_, fh);
+  u_.r_obj.Init(encoding, obj);
+}
+
 namespace {
 // Dispatches `fn` over the dense set/map backing this CompactObj for
 // kEncodingStrMap2. OBJ_HASH always uses StringMap (a DenseSet subclass);
@@ -1170,6 +1196,10 @@ CuckooFilter* CompactObj::GetCuckooFilter() const {
 }
 
 void CompactObj::SetString(std::string_view str) {
+  SetString(str, [](auto free_old) { free_old(); });
+}
+
+void CompactObj::SetString(std::string_view str, FreeHook fh) {
   CHECK(!IsExternal());
   encoding_ = NONE_ENC;
 
@@ -1180,21 +1210,21 @@ void CompactObj::SetString(std::string_view str) {
 
     // We use redis string2ll to be compatible with Redis.
     if (string2ll(str.data(), str.size(), &ival)) {
-      SetMeta(INT_TAG, mask_);
+      SetMeta(INT_TAG, mask_, fh);
       u_.ival = ival;
 
       return;
     }
 
     if (str.size() <= kInlineLen) {
-      SetMeta(str.size(), mask_);
+      SetMeta(str.size(), mask_, fh);
       if (!str.empty())
         memcpy(u_.inline_str, str.data(), str.size());
       return;
     }
   }
 
-  EncodeString(str);
+  EncodeString(str, fh);
 }
 
 void CompactObj::ReserveString(size_t size) {
@@ -1800,6 +1830,16 @@ bool CompactObj::CmpNonInline(std::string_view sv) const {
   return false;
 }
 
+void CompactObj::SetMeta(uint8_t taglen, uint8_t mask, FreeHook fh) {
+  if (HasAllocated()) {
+    fh([&] { Free(); });
+  } else {
+    memset(u_.inline_str, 0, kInlineLen);
+  }
+  taglen_ = taglen;
+  mask_ = mask;
+}
+
 bool CompactObj::CmpEncoded(string_view sv) const {
   DCHECK(encoding_);
 
@@ -1893,6 +1933,10 @@ bool CompactObj::CmpEncoded(string_view sv) const {
 }
 
 void CompactObj::EncodeString(string_view str) {
+  EncodeString(str, [](FreeFn free_old) { free_old(); });
+}
+
+void CompactObj::EncodeString(string_view str, FreeHook fh) {
   DCHECK_GT(str.size(), kInlineLen);
   DCHECK_EQ(NONE_ENC, encoding_);
 
@@ -1923,7 +1967,7 @@ void CompactObj::EncodeString(string_view str) {
         encoded = huff.blob;
         encoding_ = HUFFMAN_ENC;
         if (encoded.size() <= kInlineLen) {
-          SetMeta(encoded.size(), mask_);
+          SetMeta(encoded.size(), mask_, fh);
           memcpy(u_.inline_str, encoded.data(), encoded.size());
           return;
         }
@@ -1952,7 +1996,7 @@ void CompactObj::EncodeString(string_view str) {
     encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), encode_len};
 
     if (encoded.size() <= kInlineLen) {
-      SetMeta(encoded.size(), mask_);
+      SetMeta(encoded.size(), mask_, fh);
       detail::ascii_pack(str.data(), str.size(), reinterpret_cast<uint8_t*>(u_.inline_str));
 
       return;
@@ -1965,13 +2009,13 @@ void CompactObj::EncodeString(string_view str) {
     if (taglen_ == SMALL_TAG)
       tl.small_str_bytes -= u_.small_str.MallocUsed();
     else
-      SetMeta(SMALL_TAG, mask_);
+      SetMeta(SMALL_TAG, mask_, fh);
 
     tl.small_str_bytes += u_.small_str.Assign(encoded);
     return;
   }
 
-  SetMeta(LARGE_STR_TAG, mask_);
+  SetMeta(LARGE_STR_TAG, mask_, fh);
   u_.large_str.SetString(encoded, tl.local_mr);
 }
 

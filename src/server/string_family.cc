@@ -15,13 +15,13 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
-#include "core/overloaded.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/cmd_memory_scope.h"
 #include "server/cmd_support.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
@@ -968,6 +968,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 
   bool has_expire = key.HasExpire();
 
+  const auto existing_type = it_upd->it->second.ObjType();
   it_upd->post_updater.ReduceHeapUsage();
 
   // Update flags
@@ -984,7 +985,14 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   }
 
   // overwrite existing entry.
-  prime_value.SetString(value);
+  if (existing_type == OBJ_STRING) {
+    prime_value.SetString(value);
+  } else {
+    prime_value.SetString(value, [existing_type](auto free_old) {
+      CmdMemoryScope scope{static_cast<int>(existing_type)};
+      free_old();
+    });
+  }
 
   DCHECK_EQ(has_expire, key.HasExpire());
 

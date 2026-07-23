@@ -224,6 +224,12 @@ class EngineShard {
   // Return total segments merged.
   size_t CompactTable(double threshold, DbIndex db_idx);
 
+  void AddCmdTypeMemDelta(size_t type, int64_t delta);
+
+  const std::vector<int64_t>& cmd_type_mem_delta() const {
+    return cmd_type_mem_delta_;
+  }
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
@@ -339,6 +345,8 @@ class EngineShard {
   using Counter = util::SlidingCounter<7>;
 
   Counter counter_[COUNTER_TOTAL];
+
+  std::vector<int64_t> cmd_type_mem_delta_;
 
   static __thread EngineShard* shard_;
 };

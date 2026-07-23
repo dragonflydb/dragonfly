@@ -1,14 +1,18 @@
+import logging
 import platform
+import subprocess
 
 import aiohttp
+import pytest
+import redis
 from prometheus_client.samples import Sample
 from pymemcache import Client
-
+from redis import asyncio as aioredis
 from redis.exceptions import ResponseError
 
 from . import dfly_args
 from .instance import DflyInstance
-from .utility import *
+from .utility import assert_eventually
 
 
 @pytest.fixture(scope="class")
@@ -21,7 +25,7 @@ class TestServer:
         connection.send_command("QUIT")
         assert connection.read_response() == b"OK"
 
-        with pytest.raises(redis.exceptions.ConnectionError) as e:
+        with pytest.raises(redis.exceptions.ConnectionError):
             connection.read_response()
 
     def test_quit_after_sub(self, connection):
@@ -31,7 +35,7 @@ class TestServer:
         connection.send_command("QUIT")
         assert connection.read_response() == b"OK"
 
-        with pytest.raises(redis.exceptions.ConnectionError) as e:
+        with pytest.raises(redis.exceptions.ConnectionError):
             connection.read_response()
 
     async def test_multi_exec(self, async_client: aioredis.Redis):
@@ -95,13 +99,13 @@ async def test_client_kill(df_factory):
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
 
             # Can't kill admin from regular connection
-            with pytest.raises(ResponseError) as e_info:
+            with pytest.raises(ResponseError):
                 await client_conn.execute_command("CLIENT KILL LADDR 127.0.0.1:1112")
 
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
             await admin_client.execute_command("CLIENT KILL LADDR 127.0.0.1:1111")
             assert len(await admin_client.execute_command("CLIENT LIST")) == 1
-            with pytest.raises(redis.exceptions.ConnectionError) as e_info:
+            with pytest.raises(redis.exceptions.ConnectionError):
                 await client_conn.ping()
 
 
@@ -229,6 +233,72 @@ async def test_metric_labels(
         for sample in metrics["dragonfly_connected_clients"].samples:
             match_label_value(sample, "main", lambda v: v == 2)
             match_label_value(sample, "other", lambda v: v == 1)
+
+
+async def command_type_memory_delta(df_server: DflyInstance, type_name: str):
+    metric_name = "dragonfly_command_type_memory_delta_bytes"
+    metrics = await df_server.metrics()
+    if metric_name not in metrics:
+        return 0
+
+    for sample in metrics[metric_name].samples:
+        if sample.labels.get("type") == type_name:
+            return sample.value
+
+    return 0
+
+
+async def _set_string_memory_delta(df_server: DflyInstance, async_client: aioredis.Redis):
+    before = await command_type_memory_delta(df_server, "string")
+
+    value = "x" * 65536
+    for i in range(32):
+        assert await async_client.set(f"cmd-type-mem-{i}", value)
+
+    after = await command_type_memory_delta(df_server, "string")
+    return after - before
+
+
+async def _hset_hash_memory_delta(df_server: DflyInstance, async_client: aioredis.Redis):
+    before = await command_type_memory_delta(df_server, "hash")
+
+    for i in range(32):
+        mapping = {f"field-{j}": "x" * 4096 for j in range(16)}
+        assert await async_client.hset(f"cmd-type-hash-{i}", mapping=mapping)
+
+    after = await command_type_memory_delta(df_server, "hash")
+    return after - before
+
+
+async def _del_string_memory_delta(df_server: DflyInstance, async_client: aioredis.Redis):
+    value = "x" * 65536
+    keys = [f"cmd-type-del-{i}" for i in range(32)]
+
+    for key in keys:
+        assert await async_client.set(key, value)
+
+    before = await command_type_memory_delta(df_server, "string")
+
+    assert await async_client.delete(*keys) == len(keys)
+
+    after = await command_type_memory_delta(df_server, "string")
+    return after - before
+
+
+@pytest.mark.parametrize(
+    "scenario, expected_sign",
+    [
+        (_set_string_memory_delta, 1),
+        (_hset_hash_memory_delta, 1),
+        (_del_string_memory_delta, -1),
+    ],
+    ids=["set-string", "hset-hash", "del-string"],
+)
+async def test_command_type_memory_metric(
+    df_server: DflyInstance, async_client: aioredis.Redis, scenario, expected_sign
+):
+    delta = await scenario(df_server, async_client)
+    assert delta * expected_sign > 0, f"{scenario.__name__} produced unexpected delta {delta}"
 
 
 async def test_latency_stats(async_client: aioredis.Redis):
