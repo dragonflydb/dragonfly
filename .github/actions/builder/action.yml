@@ -13,14 +13,14 @@ inputs:
     default: 'build'
     type: string
   c-compiler:
-    description: "C compiler to use"
+    description: "C compiler to use. Leave unset only if the container default is intended"
     required: false
-    default: ''
+    default: 'unknwn_c_cmpl'
     type: string
   cxx-compiler:
-    description: "C++ compiler to use"
+    description: "C++ compiler to use. Leave unset only if the container default is intended"
     required: false
-    default: ''
+    default: 'unkn_cpp_cmpl'
     type: string
   cxx-flags:
     description: "C++ compiler flags"
@@ -82,6 +82,10 @@ runs:
       # Persist compiled objects across ephemeral runners so unchanged files aren't recompiled.
       uses: hendrikmuhs/ccache-action@v1.2
       with:
+        # ATTENTION: this is the ccache key template. Changing it (or any input that feeds it:
+        # cache-key-suffix / build-type / c-compiler / cxx-compiler / sanitizers etc) changes the key
+        # for EVERY caller. Keep whatever warms refs/heads/main in sync with this key, or PR
+        # builds stop matching the warm cache and go cold.
         key: dfly-ccache-${{ inputs.cache-key-suffix }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-${{ inputs.c-compiler }}-${{ inputs.cxx-compiler }}-${{ inputs.sanitizers }}
         max-size: ${{ inputs.ccache-max-size }}
         save: ${{ inputs.ccache-save }}
@@ -113,11 +117,12 @@ runs:
           CMAKE_CMD+=(-DENABLE_CCACHE=OFF)
         fi
 
-        # Add optional compiler flags
-        if [ -n "${{ inputs.c-compiler }}" ]; then
+        # Add optional compiler flags. 'unknwn_c_cmpl' / 'unkn_cpp_cmpl' are the key-only sentinel
+        # defaults (see the inputs above): treat them like "unset".
+        if [ -n "${{ inputs.c-compiler }}" ] && [ "${{ inputs.c-compiler }}" != "unknwn_c_cmpl" ]; then
           CMAKE_CMD+=(-DCMAKE_C_COMPILER="${{ inputs.c-compiler }}")
         fi
-        if [ -n "${{ inputs.cxx-compiler }}" ]; then
+        if [ -n "${{ inputs.cxx-compiler }}" ] && [ "${{ inputs.cxx-compiler }}" != "unkn_cpp_cmpl" ]; then
           CMAKE_CMD+=(-DCMAKE_CXX_COMPILER="${{ inputs.cxx-compiler }}")
         fi
         if [ -n "${{ inputs.cxx-flags }}" ]; then
