@@ -594,6 +594,7 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
     rb->SendError(error);
     return;
   }
+  const facade::ParsedArgs simulated_args = parser.UnparsedArgs();
 
   const auto& user = registry.find(username)->second;
   // Stub, used to mimic connection context for a user.
@@ -602,8 +603,12 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
   // "mock" without an actual connection we can't know which db is active so we skip this check
   // for DryRun.
   stub.acl_db_idx = {};
-  stub.keys = {{}, true};
-  const auto [is_allowed, reason] = IsUserAllowedToInvokeCommandGeneric(stub, *cid, {});
+  stub.keys = user.Keys();
+  // The regular command path validates arity before checking ACLs. DRYRUN historically accepts a
+  // command without its arguments, so skip key-pattern validation for an incomplete simulation.
+  if (cid->Validate(simulated_args))
+    stub.keys = {{}, true};
+  const auto [is_allowed, reason] = IsUserAllowedToInvokeCommandGeneric(stub, *cid, simulated_args);
   if (is_allowed) {
     rb->SendOk();
     return;
@@ -1266,7 +1271,7 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
   *registry << CI{"ACL USERS", kAclMask, 1, 0, 0, acl::kUsers}.HFUNC(Users);
   *registry << CI{"ACL CAT", kAclMask, -1, 0, 0, acl::kCat}.HFUNC(Cat);
   *registry << CI{"ACL GETUSER", kAclMask, 2, 0, 0, acl::kGetUser}.HFUNC(GetUser);
-  *registry << CI{"ACL DRYRUN", kAclMask, 3, 0, 0, acl::kDryRun}.HFUNC(DryRun);
+  *registry << CI{"ACL DRYRUN", kAclMask, -3, 0, 0, acl::kDryRun}.HFUNC(DryRun);
   *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kGenPass}.HFUNC(
       GenPass);
   *registry << CI{"ACL HELP", kAclMask, 0, 0, 0, acl::kHelp}.HFUNC(Help);

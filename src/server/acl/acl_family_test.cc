@@ -364,8 +364,8 @@ TEST_F(AclFamilyTest, TestDryRun) {
   resp = Run({"ACL", "DRYRUN", "default"});
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl dryrun' command"));
 
-  resp = Run({"ACL", "DRYRUN", "default", "get", "more"});
-  EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl dryrun' command"));
+  resp = Run({"ACL", "DRYRUN", "default", "SET", "key", "value"});
+  EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "DRYRUN", "kostas", "more"});
   EXPECT_THAT(resp, ErrArg("ERR User 'kostas' not found"));
@@ -384,6 +384,15 @@ TEST_F(AclFamilyTest, TestDryRun) {
 
   resp = Run({"ACL", "DRYRUN", "kostas", "SET"});
   EXPECT_THAT(resp, "This user has no permissions to run the 'SET' command");
+
+  resp = Run({"ACL", "SETUSER", "key-reader", "+GET", "~allowed:*"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "DRYRUN", "key-reader", "GET", "allowed:key"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "DRYRUN", "key-reader", "GET", "blocked:key"});
+  EXPECT_THAT(resp, "This user has no permissions to run the 'GET' command");
 }
 
 TEST_F(AclFamilyTest, AclGenPassTooManyArguments) {
