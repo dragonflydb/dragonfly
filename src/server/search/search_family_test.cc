@@ -977,6 +977,22 @@ TEST_F(SearchFamilyTest, QuotedTagEscapesCaseSensitive) {
   EXPECT_THAT(Run({"FT.SEARCH", "cs_idx", R"(@tags:{"acme\\admin"})", "DIALECT", "2"}), kNoResults);
 }
 
+// The quoted (UnescapeTerm) and unquoted (make_Tag) tag paths share one unescape helper, so an
+// escaped value must be found identically by both query forms. Guards the make_Tag/UnescapeTerm
+// dedup: any divergence between the two paths would surface here. The colon steers the unquoted
+// form through make_Tag (TAG_VAL) rather than the TERM rule.
+TEST_F(SearchFamilyTest, QuotedUnquotedTagEscapeEquivalence) {
+  Run({"FT.CREATE", "eqv_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "tags", "TAG"});
+  Run({"HSET", "doc:1", "tags", R"(a:b\c)"});  // stored value: a:b\c
+
+  EXPECT_THAT(Run({"FT.SEARCH", "eqv_idx", R"(@tags:{a:b\\c})", "DIALECT", "2"}),
+              AreDocIds("doc:1"));  // unquoted -> make_Tag
+  EXPECT_THAT(Run({"FT.SEARCH", "eqv_idx", R"(@tags:{"a:b\\c"})", "DIALECT", "2"}),
+              AreDocIds("doc:1"));  // quoted -> UnescapeTerm
+  EXPECT_THAT(Run({"FT.SEARCH", "eqv_idx", R"(@tags:{a:b\\c*})", "DIALECT", "2"}),
+              AreDocIds("doc:1"));  // prefix glob -> make_Tag marker-trim branch
+}
+
 TEST_F(SearchFamilyTest, TagNumbers) {
   Run({"hset", "d:1", "number", "1"});
   Run({"hset", "d:2", "number", "2"});

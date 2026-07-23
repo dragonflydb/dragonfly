@@ -155,32 +155,19 @@ string UnescapeTerm(string_view src) {
     }
   }
   // A trailing lone backslash (reachable from quoted tag/wildcard values, e.g. a
-  // Windows path `C:\`) is dropped, matching make_Tag and SplitWithEscapes.
+  // Windows path `C:\`) is dropped, matching the text path (SplitWithEscapes).
   return res;
 }
 
 Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc) {
-  string res;
-  res.reserve(src.size());
-
-  // Determine processing boundaries
+  // Trim the glob markers, then share the single-layer `\X` unescape with terms via UnescapeTerm,
+  // so quoted and unquoted tag values can never diverge.
   size_t start = (type == TagType::SUFFIX || type == TagType::INFIX) ? 1 : 0;
   size_t end = src.size();
   if (type == TagType::PREFIX || type == TagType::INFIX) {
-    end--; // Skip the last '*' character
+    end--;  // Skip the last '*' character
   }
-
-    // Handle escaping
-  bool escaped = false;
-  for (size_t i = start; i < end; ++i) {
-    if (escaped) {
-      escaped = false;
-    } else if (src[i] == '\\') {
-      escaped = true;
-      continue;
-    }
-    res.push_back(src[i]);
-  }
+  string res = UnescapeTerm(src.substr(start, end - start));
 
   // Return the appropriate token type
   switch (type) {
