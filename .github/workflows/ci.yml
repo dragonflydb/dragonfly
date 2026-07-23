@@ -1,8 +1,10 @@
 name: ci-tests
 
 on:
-  # push:
-  # branches: [ main ]
+  # On push to main: build only (all test steps + heavy jobs below are gated to pull_request)
+  # to warm the shared ccache on refs/heads/main, so a new PR's first build starts warm.
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -47,6 +49,12 @@ jobs:
 
     strategy:
       matrix:
+        # PoC: run-step fans each of today's 6 build combos across N independent jobs. Every job
+        # builds identically (ccache-warmed, so the extra builds are cheap) and then, via the
+        # `matrix.run-step == '...'` guards below, executes only the single test assigned to its
+        # own run-step and skips every other test step. 6 combos x 6 run-steps = 36 jobs.
+        run-step: [iouring, epoll, cluster, cluster-hashtags, regression, valkey-tcl]
+        # This matrix also runs on push to main (build-only) to warm the ccache that PR builds restore.
         # Test of these containers
         container: ["ubuntu-dev:24", "alpine-dev:latest"]
         build-type: [Debug, Release]
@@ -60,6 +68,37 @@ jobs:
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
             sanitizers: "NoSanitizers"
+            run-step: iouring
+          - container: "alpine-dev:latest"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: ""
+            sanitizers: "NoSanitizers"
+            run-step: epoll
+          - container: "alpine-dev:latest"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: ""
+            sanitizers: "NoSanitizers"
+            run-step: cluster
+          - container: "alpine-dev:latest"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: ""
+            sanitizers: "NoSanitizers"
+            run-step: cluster-hashtags
+          - container: "alpine-dev:latest"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: ""
+            sanitizers: "NoSanitizers"
+            run-step: regression
+          - container: "alpine-dev:latest"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: ""
+            sanitizers: "NoSanitizers"
+            run-step: valkey-tcl
           - container: "ubuntu-dev:24"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
@@ -68,6 +107,42 @@ jobs:
             sanitizers: "Sanitizers"
             # Sanitizer builds produce larger objects, so give this job a bigger ccache.
             ccache-max-size: "2G"
+            run-step: iouring
+          - container: "ubuntu-dev:24"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: "-Wno-error=unused-command-line-argument"
+            sanitizers: "Sanitizers"
+            ccache-max-size: "2G"
+            run-step: epoll
+          - container: "ubuntu-dev:24"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: "-Wno-error=unused-command-line-argument"
+            sanitizers: "Sanitizers"
+            ccache-max-size: "2G"
+            run-step: cluster
+          - container: "ubuntu-dev:24"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: "-Wno-error=unused-command-line-argument"
+            sanitizers: "Sanitizers"
+            ccache-max-size: "2G"
+            run-step: cluster-hashtags
+          - container: "ubuntu-dev:24"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: "-Wno-error=unused-command-line-argument"
+            sanitizers: "Sanitizers"
+            ccache-max-size: "2G"
+            run-step: regression
+          - container: "ubuntu-dev:24"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: "-Wno-error=unused-command-line-argument"
+            sanitizers: "Sanitizers"
+            ccache-max-size: "2G"
+            run-step: valkey-tcl
 
     runs-on: ubuntu-latest
     container:
@@ -134,108 +209,64 @@ jobs:
           df -h
 
       - name: C++ Unit Tests - IoUring
+        if: github.event_name != 'push' && matrix.run-step == 'iouring'
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          echo Run ctest -V -L DFLY
-          JUNIT_DIR="${CPP_JUNIT_DIR}"
-          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
-          GTEST_IOURING_DIR="${JUNIT_DIR}/gtest/iouring"
-          GTEST_MANUAL_DIR="${JUNIT_DIR}/gtest/iouring-manual"
-          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_IOURING_DIR}" "${GTEST_MANUAL_DIR}"
-
-          run_manual_gtest() {
-            GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" timeout 5m "$@"
-          }
-
-          GTEST_OUTPUT="xml:${GTEST_IOURING_DIR}/" \
-          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
-          FLAGS_fiber_safety_margin=4096 timeout 20m ctest -V -L DFLY -E allocation_tracker_test \
-            --output-junit "${CTEST_JUNIT_DIR}/iouring.xml"
-
-          # Run allocation tracker test separately without alsologtostderr because it generates a TON of logs.
-          GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" FLAGS_fiber_safety_margin=4096 \
-            timeout 5m ./allocation_tracker_test
-
-          run_manual_gtest ./dragonfly_test
-          run_manual_gtest ./json_family_test --jsonpathv2=false
-          run_manual_gtest ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
-          run_manual_gtest ./search_test --use_numeric_range_tree=false
-          run_manual_gtest ./search_family_test --use_numeric_range_tree=false
-
+          # PoC: run only the first test reported by the binary itself, via --gtest_filter,
+          # instead of the full suite - proves the run-step split without a real test-picking algorithm.
+          FILTER=$(./dragonfly_test --gtest_list_tests | awk '/^[^ ]/{suite=$1} /^  /{print suite $1; exit}')
+          echo "Running single test (iouring): ${FILTER}"
+          ./dragonfly_test --gtest_filter="${FILTER}"
 
       - name: C++ Unit Tests - Epoll
+        if: github.event_name != 'push' && matrix.run-step == 'epoll'
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          JUNIT_DIR="${CPP_JUNIT_DIR}"
-          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
-          GTEST_EPOLL_DIR="${JUNIT_DIR}/gtest/epoll"
-          GTEST_MANUAL_DIR="${JUNIT_DIR}/gtest/epoll-manual"
-          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_EPOLL_DIR}" "${GTEST_MANUAL_DIR}"
-
-          # Create a rule that automatically prints stacktrace upon segfault
-          cat > ./init.gdb <<EOF
-          catch signal SIGSEGV
-          command
-          bt
-          end
-          EOF
-
-          GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" \
-            gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          GTEST_OUTPUT="xml:${GTEST_EPOLL_DIR}/" \
-          GLOG_alsologtostderr=1 FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
-          timeout 20m ctest -V -L DFLY -E allocation_tracker_test \
-            --output-junit "${CTEST_JUNIT_DIR}/epoll.xml"
-
-          GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" FLAGS_fiber_safety_margin=4096 \
-            FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
+          FILTER=$(./dragonfly_test --gtest_list_tests | awk '/^[^ ]/{suite=$1} /^  /{print suite $1; exit}')
+          echo "Running single test (epoll): ${FILTER}"
+          ./dragonfly_test --force_epoll --gtest_filter="${FILTER}"
 
       - name: C++ Unit Tests - IoUring with cluster mode
+        if: github.event_name != 'push' && matrix.run-step == 'cluster'
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          JUNIT_DIR="${CPP_JUNIT_DIR}"
-          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
-          GTEST_CLUSTER_DIR="${JUNIT_DIR}/gtest/cluster"
-          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_CLUSTER_DIR}"
-          GTEST_OUTPUT="xml:${GTEST_CLUSTER_DIR}/" FLAGS_fiber_safety_margin=4096 \
-            FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY \
-            --output-junit "${CTEST_JUNIT_DIR}/cluster.xml"
+          TEST_NAME=$(ctest -N -L DFLY | awk '/Test #/{print $3; exit}')
+          echo "Running single test (cluster): ${TEST_NAME}"
+          FLAGS_cluster_mode=emulated ctest -V -R "^${TEST_NAME}$"
 
       - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
+        if: github.event_name != 'push' && matrix.run-step == 'cluster-hashtags'
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          JUNIT_DIR="${CPP_JUNIT_DIR}"
-          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
-          GTEST_CLUSTER_DIR="${JUNIT_DIR}/gtest/cluster-hashtags"
-          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_CLUSTER_DIR}"
-          GTEST_OUTPUT="xml:${GTEST_CLUSTER_DIR}/" FLAGS_fiber_safety_margin=4096 \
-            FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY \
-            --output-junit "${CTEST_JUNIT_DIR}/cluster-hashtags.xml"
+          TEST_NAME=$(ctest -N -L DFLY | awk '/Test #/{print $3; exit}')
+          echo "Running single test (cluster-hashtags): ${TEST_NAME}"
+          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true ctest -V -R "^${TEST_NAME}$"
 
       - name: Upload unit logs on failure
-        if: failure()
+        if: failure() && github.event_name != 'push'
         uses: actions/upload-artifact@v7
         with:
           name: unit_logs
           path: /tmp/*INFO*
 
       - name: Run regression tests
-        if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers'
+        if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers' && github.event_name != 'push' && matrix.run-step == 'regression'
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
           run-only-on-ubuntu-latest: true
           build-folder-name: build
-          # Non-release build will not run tests marked as opt_only
-          # "not empty" string is needed for release build because pytest command can not get empty string for filter
-          filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
+          # PoC: narrowed to a single test via -k instead of the full suite (was:
+          # matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only').
+          # TODO: replace REPLACE_WITH_SINGLE_TEST_NAME with a real test name/keyword.
+          filter: "REPLACE_WITH_SINGLE_TEST_NAME"
           junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           azure-container: ${{ secrets.AZURE_REGTEST_CONTAINER }}
           azure-storage-connection-string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
 
       - name: Upload regression logs on failure
-        if: failure()
+        if: failure() && github.event_name != 'push'
         uses: actions/upload-artifact@v7
         with:
           name: regression_logs
@@ -246,7 +277,7 @@ jobs:
         # (unit/type/stream[-cgroups]) in external-server mode against the just-built binary,
         # on both Debug and Release. continue-on-error keeps it a canary for now — flip to a
         # blocking step once proven stable in CI. See tests/dragonfly/valkey_tcl/README.md.
-        if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers'
+        if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers' && github.event_name != 'push' && matrix.run-step == 'valkey-tcl'
         continue-on-error: true
         timeout-minutes: 20
         run: |
@@ -257,7 +288,7 @@ jobs:
           ./run-stream-tests.sh ${GITHUB_WORKSPACE}/build/dragonfly 6399
 
       - name: Prepare JUnit artifact name
-        if: always()
+        if: always() && github.event_name != 'push'
         run: |
           NAME="junit-ci-${{ matrix.container }}-${{ matrix.build-type }}-${{ matrix.compiler.cxx }}-${{ matrix.sanitizers }}"
           MATRIX_NAME="container-${{ matrix.container }}-build-${{ matrix.build-type }}-compiler-${{ matrix.compiler.cxx }}-sanitizers-${{ matrix.sanitizers }}"
@@ -268,7 +299,7 @@ jobs:
           } >> "${GITHUB_ENV}"
 
       - name: Generate C++ GTest dashboard summary
-        if: always()
+        if: always() && github.event_name != 'push'
         run: |
           mkdir -p "${CPP_DASHBOARD_DIR}"
 
@@ -281,7 +312,7 @@ jobs:
             --variant "${CI_JUNIT_UPLOAD_SUFFIX}"
 
       - name: Upload C++ JUnit test results
-        if: always()
+        if: always() && github.event_name != 'push'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.CI_JUNIT_ARTIFACT }}
@@ -291,7 +322,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Refresh AWS credentials for C++ JUnit upload
-        if: always() && github.repository_owner == 'dragonflydb' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        if: always() && github.repository_owner == 'dragonflydb' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.event_name != 'push'
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
@@ -299,7 +330,7 @@ jobs:
           unset-current-credentials: true
 
       - name: Upload C++ JUnit results to S3
-        if: always() && github.repository_owner == 'dragonflydb' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        if: always() && github.repository_owner == 'dragonflydb' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.event_name != 'push'
         env:
           S3_REGTEST_BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
         run: |
@@ -315,7 +346,7 @@ jobs:
             "${MATRIX_NAME}" "C++ GTest dashboard JSON"
 
       - name: Upload dragonfly binary for cgroup test
-        if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Release' && matrix.sanitizers == 'NoSanitizers' && matrix.compiler.cxx == 'g++'
+        if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Release' && matrix.sanitizers == 'NoSanitizers' && matrix.compiler.cxx == 'g++' && github.event_name != 'push'
         uses: actions/upload-artifact@v7
         with:
           name: dragonfly-binary
@@ -325,6 +356,7 @@ jobs:
   cgroup-thread-detection:
     runs-on: ubuntu-latest
     needs: [build]
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@v6
 
@@ -398,12 +430,13 @@ jobs:
   lint-test-chart:
     runs-on: ubuntu-latest
     needs: [build]
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/lint-test-chart
 
   list-caches:
-    if: always()
+    if: always() && github.event_name != 'push'
     needs: [build]
     runs-on: ubuntu-latest
     permissions:
@@ -416,6 +449,9 @@ jobs:
 
   large-tests-arm:
     runs-on: CI-LARGE-ARM
+    # Skipped on push-to-main (warm) because its build cache (df_common_bin / Linux-ARM64-Release-
+    # gcc-g++) is already warmed on main by the scheduled regression-tests job.
+    if: github.event_name != 'push'
 
     permissions:
       id-token: write
@@ -447,7 +483,9 @@ jobs:
           enable-ccache: 'true'
           ccache-save: 'true'
           build-type: Release
-          cache-key-suffix: 'ubuntu-dev:24'
+          cache-key-suffix: 'df_common_bin'
+          c-compiler: gcc
+          cxx-compiler: g++
           targets: 'dragonfly'
 
       - name: Authenticate to AWS
