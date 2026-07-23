@@ -117,7 +117,7 @@ runs:
           CMAKE_CMD+=(-DENABLE_CCACHE=OFF)
         fi
 
-        # Add optional compiler flags. 'unknwn_c_cmpl' / 'unkn_cpp_cmpl' are the key-only sentinel
+        # Add optional compiler overrides. 'unknwn_c_cmpl' / 'unkn_cpp_cmpl' are the key-only sentinel
         # defaults (see the inputs above): treat them like "unset".
         if [ -n "${{ inputs.c-compiler }}" ] && [ "${{ inputs.c-compiler }}" != "unknwn_c_cmpl" ]; then
           CMAKE_CMD+=(-DCMAKE_C_COMPILER="${{ inputs.c-compiler }}")
