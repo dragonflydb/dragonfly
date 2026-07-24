@@ -136,8 +136,22 @@ ABSL_RETIRED_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
                   "Deprecated. Squash latency stats are now tracked unconditionally; "
                   "use the pipeline_latency_seconds histogram for percentiles instead.");
 
-ABSL_FLAG(uint32_t, write_connection_throttling_sleep_usec, 0,
-          "Sleep period for write connection in microseconds. 0 disables yielding.");
+ABSL_FLAG(string, rw_throttle_policy, "none",
+          "Active write connection throttling policy: none | fixed | ratio. none disables "
+          "throttling; fixed sleeps rw_throttle_sleep_usec whenever a batch contains a write "
+          "command; ratio dynamically delays a write batch based on the observed write command "
+          "ratio. Mutable via CONFIG SET; switching policies discards any accumulated history.");
+ABSL_FLAG(uint32_t, rw_throttle_sleep_usec, 100,
+          "Fixed policy: sleep duration for a batch containing a write command. Ratio policy: "
+          "upper bound on the total time a batch will wait for the write ratio to drop back "
+          "under rw_throttle_threshold. Microseconds.");
+ABSL_FLAG(uint32_t, rw_throttle_window_size, 128,
+          "Number of recent squashed batches tracked per IO thread to compute the write command "
+          "ratio used by the ratio policy.");
+ABSL_FLAG(uint32_t, rw_throttle_min_commands, 8192,
+          "Minimum total commands observed in the window before the ratio policy activates.");
+ABSL_FLAG(double, rw_throttle_threshold, 0.25,
+          "Write command ratio above which the ratio policy delays a write batch.");
 
 namespace {
 
@@ -177,8 +191,148 @@ void ShutdownWatchdog::Disarm() {
 
 std::optional<ShutdownWatchdog> shutdown_watchdog = std::nullopt;
 
-thread_local uint32_t tl_write_connection_throttling_sleep_usec =
-    absl::GetFlag(FLAGS_write_connection_throttling_sleep_usec);
+// Policy interface for write throttling.
+//
+// Each IO thread owns one policy instance. The instance is accessed only by
+// fibers running on that thread, so implementations do not need synchronization.
+//
+// ThrottleIfNeeded() is called before executing a write batch. Record() is called
+// after executing a batch, so policies base throttle decisions on completed work.
+//
+// The default implementation applies no throttling and adds virtually no runtime overhead.
+class RWConnectionThrottlePolicy {
+ public:
+  struct BatchMetric {
+    uint32_t read_cmds = 0;
+    uint32_t write_cmds = 0;
+    uint32_t read_bytes = 0;
+    uint32_t write_bytes = 0;
+  };
+
+  virtual ~RWConnectionThrottlePolicy() = default;
+
+  virtual void Record(BatchMetric batch_cmds) {
+  }
+
+  virtual bool ThrottleIfNeeded() {
+    return false;
+  }
+};
+
+// Fixed throttling policy that sleeps for a fixed, configurable duration before each write batch.
+class FixedThrottlePolicy : public RWConnectionThrottlePolicy {
+ public:
+  explicit FixedThrottlePolicy(uint32_t sleep_usec) : sleep_usec_(sleep_usec) {
+  }
+
+  bool ThrottleIfNeeded() override {
+    util::ThisFiber::SleepFor(chrono::microseconds(sleep_usec_));
+    return true;
+  }
+
+  void SetSleepUsec(uint32_t sleep_usec) {
+    sleep_usec_ = sleep_usec;
+  }
+
+ private:
+  uint32_t sleep_usec_;
+};
+
+// Sliding-window throttling policy.
+//
+// Maintains a moving window of completed batches and delays write batches while the recorded write
+// fraction exceeds `threshold`. The policy remains inactive until the window is full or at least
+// `min_commands` commands have been recorded.
+//
+// Waiting fibers wake when Record() updates the window. `max_sleep_usec` bounds the wait so a
+// write-only drain cannot stall indefinitely when no future read batch arrives.
+class RatioWindowThrottlePolicy : public RWConnectionThrottlePolicy {
+ public:
+  RatioWindowThrottlePolicy(uint32_t window_size, uint32_t min_commands, double threshold,
+                            uint32_t max_sleep_usec)
+      : slots_(window_size) {
+    SetLimits(min_commands, threshold, max_sleep_usec);
+  }
+
+  void Record(BatchMetric batch_cmds) override {
+    if (!slots_.empty()) {
+      BatchMetric& slot = slots_[pos_];
+      if (filled_ == slots_.size()) {
+        sum_read_ -= slot.read_cmds;
+        sum_write_ -= slot.write_cmds;
+      } else {
+        ++filled_;
+      }
+      slot = batch_cmds;
+      sum_read_ += batch_cmds.read_cmds;
+      sum_write_ += batch_cmds.write_cmds;
+      pos_ = (pos_ + 1) % slots_.size();
+    }
+    ec_.notifyAll();
+  }
+
+  bool ThrottleIfNeeded() override {
+    if (!ShouldThrottle())
+      return false;
+
+    auto deadline = chrono::steady_clock::now() + chrono::microseconds(max_sleep_usec_);
+    ec_.await_until([this] { return !ShouldThrottle(); }, deadline);
+    return true;
+  }
+
+  void SetLimits(uint32_t min_commands, double threshold, uint32_t max_sleep_usec) {
+    min_commands_ = min_commands;
+    threshold_ = threshold;
+    max_sleep_usec_ = max_sleep_usec;
+  }
+
+ private:
+  bool ShouldThrottle() const {
+    uint64_t total = sum_read_ + sum_write_;
+    if (filled_ < slots_.size() && total < min_commands_) {
+      return false;
+    }
+    double write_fraction = total == 0 ? 0.0 : double(sum_write_) / double(total);
+    return write_fraction > threshold_;
+  }
+
+  std::vector<BatchMetric> slots_;
+  uint32_t min_commands_ = 0;
+  double threshold_ = 1.0;
+  uint32_t max_sleep_usec_ = 0;
+  size_t pos_ = 0;
+  size_t filled_ = 0;
+  uint64_t sum_read_ = 0;
+  uint64_t sum_write_ = 0;
+  util::fb2::EventCount ec_;
+};
+
+// Creates the throttling policy selected by FLAGS_rw_throttle_policy,
+// initializing it from the current flag values. Returns the default
+// no-op policy if throttling is disabled or the policy name is unrecognized.
+std::unique_ptr<RWConnectionThrottlePolicy> CreateRWConnectionThrottlePolicy() {
+  string kind = absl::AsciiStrToLower(absl::GetFlag(FLAGS_rw_throttle_policy));
+  if (kind == "fixed") {
+    return std::make_unique<FixedThrottlePolicy>(absl::GetFlag(FLAGS_rw_throttle_sleep_usec));
+  }
+  if (kind == "ratio") {
+    return std::make_unique<RatioWindowThrottlePolicy>(
+        absl::GetFlag(FLAGS_rw_throttle_window_size), absl::GetFlag(FLAGS_rw_throttle_min_commands),
+        absl::GetFlag(FLAGS_rw_throttle_threshold), absl::GetFlag(FLAGS_rw_throttle_sleep_usec));
+  }
+  LOG_IF(WARNING, kind != "none") << "Unknown rw_throttle_policy: " << kind
+                                  << ", disabling throttling";
+  return std::make_unique<RWConnectionThrottlePolicy>();
+}
+
+thread_local std::unique_ptr<RWConnectionThrottlePolicy> tl_rw_throttle_policy;
+
+RWConnectionThrottlePolicy& GetRWConnectionThrottlePolicy() {
+  if (!tl_rw_throttle_policy) {
+    tl_rw_throttle_policy = CreateRWConnectionThrottlePolicy();
+  }
+  return *tl_rw_throttle_policy;
+}
 
 }  // namespace
 
@@ -1026,11 +1180,27 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("background_debug_jobs");
   config_registry.RegisterMutable("snapshot_egress_limit_bytes");
 
-  RegisterMutableFlags(&config_registry,
-                       base::GetFlagNames(FLAGS_write_connection_throttling_sleep_usec), []() {
-                         tl_write_connection_throttling_sleep_usec =
-                             absl::GetFlag(FLAGS_write_connection_throttling_sleep_usec);
-                       });
+  // Switching throttling policy.
+  RegisterMutableFlags(&config_registry, base::GetFlagNames(FLAGS_rw_throttle_policy),
+                       []() { tl_rw_throttle_policy = CreateRWConnectionThrottlePolicy(); });
+
+  // Parameter changes; update the existing policy instance in place.
+  RegisterMutableFlags(
+      &config_registry,
+      base::GetFlagNames(FLAGS_rw_throttle_sleep_usec, FLAGS_rw_throttle_threshold), []() {
+        if (absl::GetFlag(FLAGS_rw_throttle_sleep_usec) == 0) {
+          LOG(WARNING) << "rw_throttle_sleep_usec must be greater than 0, resetting to default";
+          absl::SetFlag(&FLAGS_rw_throttle_sleep_usec, 100);
+        }
+        RWConnectionThrottlePolicy& policy = GetRWConnectionThrottlePolicy();
+        if (auto* fixed = dynamic_cast<FixedThrottlePolicy*>(&policy)) {
+          fixed->SetSleepUsec(absl::GetFlag(FLAGS_rw_throttle_sleep_usec));
+        } else if (auto* ratio = dynamic_cast<RatioWindowThrottlePolicy*>(&policy)) {
+          ratio->SetLimits(absl::GetFlag(FLAGS_rw_throttle_min_commands),
+                           absl::GetFlag(FLAGS_rw_throttle_threshold),
+                           absl::GetFlag(FLAGS_rw_throttle_sleep_usec));
+        }
+      });
 
   // Register ServerState flags
   RegisterMutableFlags(&config_registry, ServerState::GetMutableFlagNames(),
@@ -1761,15 +1931,18 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     cmd_refs.clear();
   };
 
+  RWConnectionThrottlePolicy& rw_throttle_policy = GetRWConnectionThrottlePolicy();
+
   bool batch_has_write_command = false;
+  RWConnectionThrottlePolicy::BatchMetric batch_metric{};
   auto update_rw_connection_throttling_metrics = [&](const CommandId* cid, size_t bytes) {
     if (cid->IsReadOnly()) {
-      ss->stats.batch_read_commands_total++;
-      ss->stats.batch_read_commands_bytes += bytes;
+      ++batch_metric.read_cmds;
+      batch_metric.read_bytes += bytes;
     } else if (cid->IsJournaled()) {
       batch_has_write_command = true;
-      ss->stats.batch_write_commands_total++;
-      ss->stats.batch_write_commands_bytes += bytes;
+      ++batch_metric.write_cmds;
+      batch_metric.write_bytes += bytes;
     }
   };
 
@@ -1813,20 +1986,26 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
       continue;
     }
 
-    if (tl_write_connection_throttling_sleep_usec > 0)
-      update_rw_connection_throttling_metrics(cid, cmd_cntx->UsedMemory());
+    update_rw_connection_throttling_metrics(cid, cmd_cntx->UsedMemory());
 
     cmd_refs.push_back(CmdRef{cid, tail_args, ReplyMode::FULL, cmd_cntx});
     cmd = cmd->next;
   }
 
-  // Simple policy that throttles batches that contain write commands by sleeping before dispatch.
-  if (batch_has_write_command && tl_write_connection_throttling_sleep_usec > 0) {
+  ss->stats.batch_read_commands_total += batch_metric.read_cmds;
+  ss->stats.batch_write_commands_total += batch_metric.write_cmds;
+  ss->stats.batch_read_commands_bytes += batch_metric.read_bytes;
+  ss->stats.batch_write_commands_bytes += batch_metric.write_bytes;
+
+  // Throttle batches with a write command.
+  if (batch_has_write_command && rw_throttle_policy.ThrottleIfNeeded()) {
     ss->stats.rw_throttle_batches_total++;
-    ThisFiber::SleepFor(chrono::microseconds(tl_write_connection_throttling_sleep_usec));
   }
 
   perform_squash();
+
+  if (batch_metric.read_cmds + batch_metric.write_cmds > 0)
+    rw_throttle_policy.Record(batch_metric);
 
   if (dist_trans)
     dist_trans->UnlockMulti();

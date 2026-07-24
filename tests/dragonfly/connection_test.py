@@ -3212,16 +3212,25 @@ async def test_client_list_filters(df_server: DflyInstance):
         await observer.aclose()
 
 
-@dfly_args(
+@dfly_multi_test_args(
     {
         "proactor_threads": 2,
         "pipeline_squash": 1,
-        "write_connection_throttling_sleep_usec": 10000,  # 10ms per throttled batch; >0 enables throttling
-    }
+        "rw_throttle_policy": "fixed",
+        "rw_throttle_sleep_usec": 10000,  # 10ms per write batch
+    },
+    {
+        "proactor_threads": 2,
+        "pipeline_squash": 1,
+        "rw_throttle_policy": "ratio",
+        "rw_throttle_sleep_usec": 10000,  # 10ms per throttled batch
+        "rw_throttle_window_size": 1,  # activate the dynamic ratio window on the very first batch
+    },
 )
 @pytest.mark.asyncio
 async def test_rw_throttle_stats(df_server: DflyInstance):
-    """Verify write connections are throttled and rw_throttle_* stats are reported"""
+    """Verify write connections are throttled and rw_throttle_* stats are reported,
+    for both the fixed and ratio throttling policies"""
 
     read_client = aioredis.Redis(port=df_server.port)
     write_client = aioredis.Redis(port=df_server.port)
