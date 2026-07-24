@@ -265,6 +265,11 @@ class Connection : public util::Connection {
 
   ConnectionContext* cntx();
 
+  // Returns the listener that accepted this connection, or nullptr if unknown.
+  util::ListenerInterface* GetListener() const {
+    return listener();
+  }
+
   // For non replication connections refresh memory usage field as well as update tl stats if conn.
   // is still live.
   void RefreshConnectionMemoryUsage();

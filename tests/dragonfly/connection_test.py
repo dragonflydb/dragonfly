@@ -4,6 +4,7 @@ import random
 import socket
 import ssl
 import string
+import subprocess
 import time
 from dataclasses import dataclass
 from threading import Thread
@@ -1477,6 +1478,64 @@ async def test_tls_reject(
     client = server.client(**with_tls_client_args)
     with pytest.raises(ConnectionError):
         await client.ping()
+
+
+def _parse_dn(dn: str) -> dict:
+    """Parse an OpenSSL oneline/RFC2253 DN into a dict of attributes.
+
+    Handles both the slash-separated format from X509_NAME_oneline()
+    (e.g. /C=GR/ST=SKG/...) and the comma-separated formats from the
+    openssl CLI (e.g. C = GR, ST = SKG, ... or C=GR,ST=...).
+    """
+    dn = dn.strip()
+    if dn.startswith("/"):
+        parts = dn.split("/")[1:]
+    else:
+        parts = [p.strip() for p in dn.split(",")]
+    result = {}
+    for part in parts:
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        result[key.strip()] = value.strip()
+    return result
+
+
+async def test_tls_info(with_ca_tls_server_args, with_ca_tls_client_args, df_factory):
+    server: DflyInstance = df_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    server.start()
+
+    cert_file = with_ca_tls_server_args["tls_cert_file"]
+
+    # Extract expected values from the test certificate. DNs are compared as
+    # attribute dicts because OpenSSL versions format the oneline DN differently.
+    def cert_field(flag):
+        out = subprocess.check_output(["openssl", "x509", "-in", cert_file, "-noout", flag])
+        return out.decode().strip().split("=", 1)[1]
+
+    expected_subject = _parse_dn(cert_field("-subject"))
+    expected_issuer = _parse_dn(cert_field("-issuer"))
+    expected_not_before = cert_field("-startdate")
+    expected_not_after = cert_field("-enddate")
+
+    client = server.client(**with_ca_tls_client_args)
+
+    # redis-py's INFO parser turns "key=value" strings into nested dicts, which
+    # mangles the oneline DN values. Bypass the callback to inspect the raw INFO
+    # string for the TLS certificate fields.
+    info_callback = client.response_callbacks["INFO"]
+    client.response_callbacks["INFO"] = lambda response: response
+    try:
+        raw_info = await client.execute_command("INFO", "SERVER")
+    finally:
+        client.response_callbacks["INFO"] = info_callback
+
+    info_lines = dict(line.split(":", 1) for line in raw_info.splitlines() if ":" in line)
+    assert _parse_dn(info_lines["tls_cert_subject"]) == expected_subject
+    assert _parse_dn(info_lines["tls_cert_issuer"]) == expected_issuer
+    assert info_lines["tls_cert_not_before"] == expected_not_before
+    assert info_lines["tls_cert_not_after"] == expected_not_after
+    await client.aclose()
 
 
 @dfly_args({"proactor_threads": "4", "pipeline_squash": 1})

@@ -8,10 +8,24 @@
 #include <openssl/ssl.h>
 #endif
 
+#include <optional>
+#include <string>
+
 namespace facade {
 
-#ifdef DFLY_USE_SSL
 enum class TlsContextRole { SERVER, CLIENT };
+
+struct TlsCertInfo {
+  std::string subject;     // Common name / subject DN.
+  std::string issuer;      // Issuer DN.
+  std::string not_before;  // Start of validity period (ASN1_TIME formatted).
+  std::string not_after;   // End of validity period (ASN1_TIME formatted).
+};
+
+#ifdef DFLY_USE_SSL
+// Extracts TLS certificate metadata from an already-loaded X509 certificate.
+// Returns std::nullopt if the certificate is null or cannot be parsed.
+std::optional<TlsCertInfo> ParseTlsCertInfo(const X509* cert);
 
 SSL_CTX* CreateSslCntx(TlsContextRole role);
 
