@@ -91,6 +91,10 @@ class ParsedCommand : public cmn::BackedArguments {
     return rb_;
   }
 
+  SinkReplyBuilder* SwapReplyBuilder(SinkReplyBuilder* rb) {
+    return std::exchange(rb_, rb);
+  }
+
   ConnectionContext* conn_cntx() const {
     return conn_cntx_;
   }
