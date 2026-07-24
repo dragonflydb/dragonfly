@@ -247,6 +247,11 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       else
         crb.ProvideInlineBuffer({});  // reset buffer
 
+      // For async commands we need to exchange the reply builder as they still can access it
+      // mutably (for example for last_error_ updates). Sync commands use the local context with the
+      // local one
+      SinkReplyBuilder* saved_rb = nullptr;
+
       // With tiered storage enabled, it makes sense to dispatch async commands concurrently
       // to allow concurrent disk operations. Tiered futures are only blocked on during replies
       bool do_async = es->tiered_storage() && !IsAtomic() && opts_.pipeline_mode &&
@@ -254,6 +259,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       if (do_async) {
         ctx = dispatched.cmd_cntx;
         ctx->SetDeferredReply();
+        saved_rb = ctx->SwapReplyBuilder(&crb);
       }
 
       ctx->SetupTx(dispatched.cid, local_cntx.tx());
@@ -266,8 +272,12 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       } else {
         ctx->UpdateCid(dispatched.cid);
         ctx->SetTailArgs(dispatched.args);
+
         service_->InvokeCmd(dispatched.args, ctx);
       }
+
+      if (saved_rb)
+        ctx->SwapReplyBuilder(saved_rb);
 
       if (!do_async) {
         move_reply(&dispatched);  // Async commands resolve the context directly

@@ -708,8 +708,12 @@ OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view ke
 
 // Helper for building replies for strings
 struct GetReplies {
-  GetReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
-    DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
+  GetReplies(CommandContext* cmd_cntx) : cmd_cntx{cmd_cntx} {
+  }
+
+  // Fetch the reply builder lazily only after were allowed to reply (after await)
+  RedisReplyBuilder* rb() const {
+    return static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   }
 
   template <typename T> void Send(OpResult<T>&& res) const {
@@ -717,18 +721,18 @@ struct GetReplies {
       case OpStatus::OK:
         return Send(std::move(res.value()));
       case OpStatus::WRONG_TYPE:
-        return rb->SendError(kWrongTypeErr);
+        return rb()->SendError(kWrongTypeErr);
       case OpStatus::IO_ERROR:
-        return rb->SendError(kTieredIoError);
+        return rb()->SendError(kTieredIoError);
       default:
-        rb->SendNull();
+        rb()->SendNull();
     }
   }
 
   template <typename T> void Send(optional<T>&& res) const {
     if (res.has_value())
       return Send(std::move(*res));
-    return rb->SendNull();
+    return rb()->SendNull();
   }
 
   template <typename T> void Send(TResultOrT<T>&& res) const {
@@ -748,7 +752,7 @@ struct GetReplies {
     if (holds_alternative<cmn::BorrowedString>(res)) {
       // Move the BorrowedString into SendBulkStringBorrowed; the reply builder takes ownership
       // of the borrow (and associated pin) and parks the pin until all the writes complete.
-      rb->SendBulkStringBorrowed(std::move(get<cmn::BorrowedString>(res)));
+      rb()->SendBulkStringBorrowed(std::move(get<cmn::BorrowedString>(res)));
       return;
     }
     auto fut = get<TieredStorage::TResult<std::string>>(std::move(res));
@@ -760,20 +764,20 @@ struct GetReplies {
   }
 
   void Send(size_t val) const {
-    rb->SendLong(val);
+    rb()->SendLong(val);
   }
 
   // TODO: to remove.
   void Send(string_view str) const {
     LOG(FATAL) << "SHOULD NOT SEND STRINGVIEW DIRECTLY";
-    rb->SendBulkString(str);
+    rb()->SendBulkString(str);
   }
 
   void Send(const std::string& str) const {
-    rb->SendBulkString(str);
+    rb()->SendBulkString(str);
   }
 
-  RedisReplyBuilder* rb;
+  CommandContext* cmd_cntx;
 };
 
 cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -787,8 +791,7 @@ cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
       return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
 
-    RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-    GetReplies{rb}.Send(co_await cmd::SingleHopT(cb));
+    GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   } else {
     // Memcached skips if key is missing
     auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1206,7 +1209,7 @@ cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    GetReplies{rb}.Send(std::move(prev));
+    GetReplies{cmd_cntx}.Send(std::move(prev));
     co_return std::nullopt;
   }
 
@@ -1293,7 +1296,7 @@ cmd::CmdR CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
     return BorrowStringOrRead(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1309,7 +1312,7 @@ cmd::CmdR CmdGetDel(CmdArgParser parser, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1368,7 +1371,7 @@ cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (status != OpStatus::OK) {
     cmd_cntx->rb()->SendError(status);
   } else {
-    GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
+    GetReplies{cmd_cntx}.Send(std::move(prev));
   }
   co_return std::nullopt;
 }
@@ -1421,7 +1424,7 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1652,7 +1655,7 @@ cmd::CmdR CmdStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [key = parser.Next()](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1666,7 +1669,7 @@ cmd::CmdR CmdGetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1685,7 +1688,7 @@ cmd::CmdR CmdSetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
