@@ -9,7 +9,7 @@ import math
 import sys
 import xml.etree.ElementTree as ET
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -250,7 +250,9 @@ def started_failing_in_sample(recent: list[dict[str, str]]) -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input_dir", type=Path, help="Root containing downloaded JUnit XML")
+    parser.add_argument(
+        "input_dir", type=Path, help="Root containing downloaded JUnit XML and dashboard JSON"
+    )
     parser.add_argument("output_json", type=Path, help="Where to write summary JSON")
     parser.add_argument(
         "--limit",
@@ -270,7 +272,13 @@ def main() -> int:
         print(f"Input directory does not exist: {input_dir}", file=sys.stderr)
         return 2
 
-    xml_files = sorted(input_dir.rglob("*.xml"))
+    xml_root = input_dir / "junit" if (input_dir / "junit").is_dir() else input_dir
+    dashboard_root = input_dir / "dashboard"
+
+    xml_files = sorted(xml_root.rglob("*.xml"))
+    dashboard_json_files = (
+        sorted(dashboard_root.rglob("gtest-summary.json")) if dashboard_root.is_dir() else []
+    )
     if args.limit:
         xml_files = xml_files[: args.limit]
 
@@ -285,17 +293,14 @@ def main() -> int:
     run_keys: set[str] = set()
     dates: set[str] = set()
 
+    total_input_files = len(xml_files) + len(dashboard_json_files)
+
     for index, xml_file in enumerate(xml_files, 1):
         if index == 1 or index % 500 == 0:
-            print(f"Parsing {index}/{len(xml_files)}: {xml_file.relative_to(input_dir)}")
+            print(f"Parsing {index}/{total_input_files}: {xml_file.relative_to(xml_root)}")
 
-        meta = metadata_for(input_dir, xml_file)
-        run_keys.add("/".join([meta.workflow, meta.run_id, meta.attempt, meta.job, meta.variant]))
-        dates.add(meta.date)
-        by_suite[meta.suite] += 1
-        by_level[meta.level] += 1
-        by_workflow[meta.workflow] += 1
-        by_variant[meta.variant] += 1
+        meta = metadata_for(xml_root, xml_file)
+        add_report_metadata(meta, run_keys, dates, by_suite, by_level, by_workflow, by_variant)
 
         try:
             records = list(read_testcases(xml_file, meta))
@@ -306,30 +311,38 @@ def main() -> int:
 
         report_has_failure = False
         for record in records:
-            status = record["status"]
-            if status in FAIL_STATUSES:
+            if add_test_record(tests, tests_by_status, meta, record):
                 report_has_failure = True
-            tests_by_status[status] += 1
 
-            aggregate = tests.get(record["test_id"])
-            if aggregate is None:
-                aggregate = TestAggregate(
-                    test_id=record["test_id"],
-                    suite=meta.suite,
-                    level=meta.level,
-                    classname=record["classname"],
-                    name=record["name"],
-                    display_name=record["display_name"],
-                )
-                tests[record["test_id"]] = aggregate
+        reports_by_status["failed" if report_has_failure else "passed"] += 1
 
-            aggregate.add(
-                meta=meta,
-                status=status,
-                timestamp=record["timestamp"],
-                duration=record["duration"],
-                message=record["message"],
+    for index, json_file in enumerate(dashboard_json_files, len(xml_files) + 1):
+        if index == len(xml_files) + 1 or index % 500 == 0:
+            print(f"Parsing {index}/{total_input_files}: {json_file.relative_to(dashboard_root)}")
+
+        meta = metadata_for_dashboard_json(dashboard_root, json_file)
+        add_report_metadata(meta, run_keys, dates, by_suite, by_level, by_workflow, by_variant)
+
+        try:
+            records, embedded_parse_errors = read_dashboard_testcases(json_file, meta)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            parse_errors.append({"file": meta.relative_path, "error": str(exc)})
+            reports_by_status["parse_error"] += 1
+            continue
+
+        for error in embedded_parse_errors:
+            parse_errors.append(
+                {
+                    "file": f"{meta.relative_path}:{error.get('file', 'unknown')}",
+                    "error": str(error.get("error", "unknown error")),
+                }
             )
+        reports_by_status["parse_error"] += len(embedded_parse_errors)
+
+        report_has_failure = False
+        for record_meta, record in records:
+            if add_test_record(tests, tests_by_status, record_meta, record):
+                report_has_failure = True
 
         reports_by_status["failed" if report_has_failure else "passed"] += 1
 
@@ -355,6 +368,7 @@ def main() -> int:
         },
         "totals": {
             "xml_files": len(xml_files),
+            "dashboard_json_files": len(dashboard_json_files),
             "runs": len(run_keys),
             "unique_tests": len(test_rows),
             "test_occurrences": sum(tests_by_status.values()),
@@ -392,10 +406,59 @@ def main() -> int:
     print(f"Wrote {output_json}")
     print(
         "Parsed "
-        f"{len(xml_files)} XML files, {summary['totals']['test_occurrences']} occurrences, "
+        f"{len(xml_files)} XML files and {len(dashboard_json_files)} dashboard JSON files, "
+        f"{summary['totals']['test_occurrences']} occurrences, "
         f"{summary['totals']['unique_tests']} unique tests."
     )
     return 0
+
+
+def add_report_metadata(
+    meta: Metadata,
+    run_keys: set[str],
+    dates: set[str],
+    by_suite: Counter[str],
+    by_level: Counter[str],
+    by_workflow: Counter[str],
+    by_variant: Counter[str],
+) -> None:
+    run_keys.add("/".join([meta.workflow, meta.run_id, meta.attempt, meta.job, meta.variant]))
+    dates.add(meta.date)
+    by_suite[meta.suite] += 1
+    by_level[meta.level] += 1
+    by_workflow[meta.workflow] += 1
+    by_variant[meta.variant] += 1
+
+
+def add_test_record(
+    tests: dict[str, TestAggregate],
+    tests_by_status: Counter[str],
+    meta: Metadata,
+    record: dict[str, Any],
+) -> bool:
+    status = record["status"]
+    tests_by_status[status] += 1
+
+    aggregate = tests.get(record["test_id"])
+    if aggregate is None:
+        aggregate = TestAggregate(
+            test_id=record["test_id"],
+            suite=meta.suite,
+            level=meta.level,
+            classname=record["classname"],
+            name=record["name"],
+            display_name=record["display_name"],
+        )
+        tests[record["test_id"]] = aggregate
+
+    aggregate.add(
+        meta=meta,
+        status=status,
+        timestamp=record["timestamp"],
+        duration=record["duration"],
+        message=record["message"],
+    )
+    return status in FAIL_STATUSES
 
 
 def metadata_for(root: Path, xml_file: Path) -> Metadata:
@@ -451,6 +514,36 @@ def metadata_for(root: Path, xml_file: Path) -> Metadata:
     )
 
 
+def metadata_for_dashboard_json(root: Path, json_file: Path) -> Metadata:
+    relative = json_file.relative_to(root)
+    parts = relative.parts
+
+    suite = parts[0] if len(parts) > 0 else "unknown"
+    year = value_part(parts, "year", "0000")
+    month = value_part(parts, "month", "00")
+    day = value_part(parts, "day", "00")
+    date = f"{year}-{month}-{day}"
+
+    try:
+        day_index = next(i for i, part in enumerate(parts) if part.startswith("day="))
+    except StopIteration:
+        day_index = 3
+
+    return Metadata(
+        suite=suite,
+        date=date,
+        workflow=get_part(parts, day_index + 1, "unknown-workflow"),
+        run_id=get_part(parts, day_index + 2, "unknown-run"),
+        attempt=get_part(parts, day_index + 3, "1"),
+        job=get_part(parts, day_index + 4, "unknown-job"),
+        variant=get_part(parts, day_index + 5, "unknown-variant"),
+        level="gtest",
+        group="gtest",
+        report_name=json_file.stem,
+        relative_path=relative.as_posix(),
+    )
+
+
 def value_part(parts: tuple[str, ...], key: str, default: str) -> str:
     prefix = f"{key}="
     for part in parts:
@@ -463,6 +556,83 @@ def get_part(parts: tuple[str, ...], index: int, default: str) -> str:
     if 0 <= index < len(parts):
         return parts[index]
     return default
+
+
+def read_dashboard_testcases(
+    json_file: Path, meta: Metadata
+) -> tuple[list[tuple[Metadata, dict[str, Any]]], list[dict[str, Any]]]:
+    payload = json.loads(json_file.read_text(encoding="utf-8"))
+    tests_payload = payload.get("tests", [])
+    if not isinstance(tests_payload, list):
+        raise ValueError("dashboard JSON 'tests' must be a list")
+
+    parse_errors = payload.get("parse_errors", [])
+    if not isinstance(parse_errors, list):
+        parse_errors = []
+
+    records = []
+    for item in tests_payload:
+        if not isinstance(item, dict):
+            continue
+
+        record_meta = metadata_for_dashboard_record(meta, item)
+        classname = str(
+            item.get("classname") or item.get("binary") or record_meta.group or "unknown"
+        )
+        name = str(item.get("name") or "unknown")
+        status = normalize_status(item.get("status"))
+        timestamp = normalize_timestamp(str(item.get("timestamp") or ""), record_meta.date)
+        duration = float_or_zero(item.get("time", item.get("duration", 0)))
+        message = normalize_message(item.get("message", ""))
+
+        records.append(
+            (
+                record_meta,
+                {
+                    "test_id": make_test_id(record_meta, classname, name),
+                    "classname": classname,
+                    "name": name,
+                    "display_name": display_name(record_meta, classname, name),
+                    "status": status,
+                    "timestamp": timestamp,
+                    "duration": duration,
+                    "message": message,
+                },
+            )
+        )
+
+    return records, parse_errors
+
+
+def metadata_for_dashboard_record(meta: Metadata, item: dict[str, Any]) -> Metadata:
+    source = str(item.get("source") or "")
+    relative_path = meta.relative_path if not source else f"{meta.relative_path}#{source}"
+    return replace(
+        meta,
+        suite=str(item.get("suite") or meta.suite),
+        level=str(item.get("level") or meta.level),
+        workflow=str(item.get("workflow") or meta.workflow),
+        run_id=str(item.get("run_id") or meta.run_id),
+        attempt=str(item.get("run_attempt") or meta.attempt),
+        job=str(item.get("job") or meta.job),
+        variant=str(item.get("variant") or meta.variant),
+        group=str(item.get("group") or item.get("binary") or meta.group),
+        report_name=source or meta.report_name,
+        relative_path=relative_path,
+    )
+
+
+def normalize_status(value: Any) -> str:
+    status = str(value or "unknown").lower()
+    if status == "errored":
+        return "error"
+    if status in {"passed", "failed", "error", "skipped"}:
+        return status
+    return "unknown"
+
+
+def normalize_message(value: Any) -> str:
+    return " ".join(str(value or "").split())[:500]
 
 
 def read_testcases(xml_file: Path, meta: Metadata) -> list[dict[str, Any]]:

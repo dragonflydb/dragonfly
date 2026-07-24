@@ -45,7 +45,7 @@ const recentFailureDays = 7;
 
 async function boot() {
   try {
-    const response = await fetch('data/summary.json', {cache: 'no-store'});
+    const response = await fetch('data/summary.json');
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
