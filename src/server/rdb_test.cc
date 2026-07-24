@@ -50,6 +50,22 @@ ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, snapshot_egress_limit_bytes);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
 
+namespace {
+
+uint64_t EncodeModuleId(std::string_view name, int ver) {
+  CHECK_LE(name.size(), 9u) << "Module names are encoded in at most 9 chars";
+  constexpr std::string_view kCharset =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  uint64_t bits = 0;
+  for (char c : name) {
+    size_t idx = kCharset.find(c);
+    bits = (bits << 6) | idx;
+  }
+  return (bits << 10) | static_cast<uint64_t>(ver);
+}
+
+}  // namespace
+
 namespace dfly {
 
 static const auto kMatchNil = ArgType(RespExpr::NIL);
@@ -2001,6 +2017,32 @@ TEST_F(RdbTest, JournalDelWaitsForShardLoads) {
   ASSERT_FALSE(ec) << ec.message();
 
   EXPECT_THAT(Run({"GET", key}), ArgType(RespExpr::NIL));
+}
+
+// Test that an unsupported module type is skipped, and that the keys before and after it are
+// loaded correctly.
+TEST_F(RdbTest, ModuleUnsupportedTypeSkipped) {
+  std::string body;
+
+  body.push_back(RDB_TYPE_STRING);
+  AddKV(&body, "key_before", "val_before");
+
+  body.push_back(RDB_TYPE_MODULE_2);
+  AppendString(&body, "key_with_unsupported_module");
+  AppendLen(&body, EncodeModuleId("invalid", 1));
+  AppendLen(&body, RDB_MODULE_OPCODE_STRING);
+  AppendString(&body, "value");
+  AppendLen(&body, RDB_MODULE_OPCODE_EOF);
+
+  body.push_back(RDB_TYPE_STRING);
+  AddKV(&body, "key_after", "val_after");
+
+  auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run({"GET", "key_before"}), "val_before");
+  EXPECT_THAT(Run({"EXISTS", "key_with_unsupported_module"}), IntArg(0));
+  EXPECT_EQ(Run({"GET", "key_after"}), "val_after");
 }
 
 // Integration test for snapshot egress throttling (--snapshot_egress_limit_bytes).
