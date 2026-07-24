@@ -1519,11 +1519,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
 
       // Loaded data bypasses the journal, so force replicas into full sync.
-      dfly_cmd_->CancelReplicas();
-      shard_set->RunBriefInParallel([](EngineShard* shard) {
-        if (shard->journal())
-          journal::ClearBuffer();
-      });
+      ForceReplicasToFullSync();
     }
 
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
@@ -3334,6 +3330,14 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   facade::RedisReplyBuilder rb(&sink);
   CommandContext cmd_cntx{&rb, nullptr};
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
+}
+
+void ServerFamily::ForceReplicasToFullSync() {
+  dfly_cmd_->CancelReplicas();
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    if (shard->journal())
+      journal::ClearBuffer();
+  });
 }
 
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {

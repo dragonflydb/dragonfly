@@ -218,6 +218,10 @@ class ServerFamily {
     return dfly_cmd_.get();
   }
 
+  // Forces all replicas of this node to perform a full sync by breaking the replication connection
+  // with a cancellation error (DfylCmd::CancelReplicas) and resetting the journal
+  void ForceReplicasToFullSync();
+
   std::optional<LastMasterSyncData> GetLastMasterData() const {
     return last_master_data_;
   }
