@@ -260,6 +260,9 @@ class ListWrapper {
   // another db so this dbid will be incorrect. Refactor to support moving objects between dbs.
   template <typename T>
   explicit ListWrapper(DbIndex dbid, T t) : db_id_(dbid), impl_(std::forward<T>(t)) {
+    if (auto* ql = std::get_if<QList*>(&impl_)) {
+      (*ql)->ClearReportedMemorySizeDelta();
+    }
   }
 
   size_t Size() const {
@@ -306,6 +309,12 @@ class ListWrapper {
 
   bool Replace(long index, string_view elem) {
     return VisitMut([&](auto& list) { return ReplaceInternal(index, elem, list); });
+  }
+
+  int32_t ReportedMemorySizeDelta() {
+    return visit(Overload{[](QList* ql) -> int32_t { return ql->TakeReportedMemorySizeDelta(); },
+                          [](const LP&) -> int32_t { return 0; }},
+                 impl_);
   }
 
   void Erase(long start, long count) {
@@ -444,6 +453,8 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   lw.Launder(&it->second);
   len = lw.Size();
 
+  it_res->post_updater.AddManuallyReportedMemorySizeDelta(lw.ReportedMemorySizeDelta());
+
   it_res->post_updater.Run();
 
   OpArgs op_args = t->GetOpArgs(shard);
@@ -491,6 +502,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     val = srcql_v2.Pop(ToWhere(src_dir));
     srcql_v2.Push(val, ToWhere(dest_dir));
     srcql_v2.Launder(&src_it->second);
+    src_res->post_updater.AddManuallyReportedMemorySizeDelta(srcql_v2.ReportedMemorySizeDelta());
     return val;
   }
 
@@ -511,6 +523,9 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 
   dest_lw.Push(val, ToWhere(dest_dir));
   dest_lw.Launder(&dest_res.it->second);
+
+  src_res->post_updater.AddManuallyReportedMemorySizeDelta(srcql_v2.ReportedMemorySizeDelta());
+  dest_res.post_updater.AddManuallyReportedMemorySizeDelta(dest_lw.ReportedMemorySizeDelta());
 
   src_res->post_updater.Run();
   dest_res.post_updater.Run();
@@ -567,6 +582,8 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   lw.Launder(&res.it->second);
   len = lw.Size();
 
+  res.post_updater.AddManuallyReportedMemorySizeDelta(lw.ReportedMemorySizeDelta());
+
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
     vector<string_view> mapped(vals.size() + 1);
@@ -611,6 +628,8 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
     }
   }
   lw.Launder(&it->second);
+
+  it_res->post_updater.AddManuallyReportedMemorySizeDelta(lw.ReportedMemorySizeDelta());
 
   it_res->post_updater.Run();
 
@@ -751,6 +770,8 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
     res = int(lw.Size());
   }
 
+  it_res->post_updater.AddManuallyReportedMemorySizeDelta(lw.ReportedMemorySizeDelta());
+
   return res;
 }
 
@@ -771,6 +792,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   unsigned removed = lw.Remove(elem, count, where);
   size_t len = lw.Size();
   lw.Launder(&it_res->it->second);
+  it_res->post_updater.AddManuallyReportedMemorySizeDelta(lw.ReportedMemorySizeDelta());
   it_res->post_updater.Run();
 
   if (len == 0) {
@@ -792,6 +814,8 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
     lw.Launder(&it_res->it->second);
     status = OpStatus::OK;
   }
+  it_res->post_updater.AddManuallyReportedMemorySizeDelta(lw.ReportedMemorySizeDelta());
+
   return status;
 }
 
@@ -832,6 +856,8 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   lw.Erase(0, ltrim);
   lw.Erase(-rtrim, rtrim);
   lw.Launder(&it->second);
+
+  it_res->post_updater.AddManuallyReportedMemorySizeDelta(lw.ReportedMemorySizeDelta());
 
   it_res->post_updater.Run();
 
