@@ -722,6 +722,35 @@ async def test_mc_gat_replication(df_factory):
     expected_cas_ver = b"0"
     assert result[key] == (value, expected_cas_ver), f"unexpected result for key: {result=}"
 
+    # GAT 0 removes the expiry; the replica must keep the key as persistent, not delete it
+    assert cm.set(key, value, expire=1000, noreply=True)
+    assert cm._fetch_cmd(b"gat", [str(0), key], expect_cas=False) == {key: value}
+
+    async with master.client() as c_master, replica.client() as c_replica:
+        assert await c_master.pttl(key) == -1
+        await check_all_replicas_finished([c_replica], c_master)
+        # -2 would mean the replica dropped the key instead of persisting it
+        assert await c_replica.pttl(key) == -1
+
+
+async def test_set_past_expiry_replication(df_factory):
+    master = df_factory.create(proactor_threads=1)
+    replica = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    async with master.client() as c_master, replica.client() as c_replica:
+        await c_master.set("k", "v")
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_available_async(c_replica)
+        assert await c_replica.get("k") == "v"
+
+        # SET with an absolute expiry in the past deletes the key; the DEL must replicate
+        # (SET is not auto-journaled, so the delete needs an explicit journal record)
+        assert await c_master.execute_command("SET", "k", "v2", "PXAT", "1")
+        assert await c_master.exists("k") == 0
+        await check_all_replicas_finished([c_replica], c_master)
+        assert await c_replica.exists("k") == 0
+
 
 @pytest.mark.skip("Fails constantly on CI")
 @pytest.mark.large

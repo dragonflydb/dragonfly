@@ -47,6 +47,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
+#include "facade/tls_helpers.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "search/doc_index.h"
@@ -164,6 +165,7 @@ ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
           "when set, preserves journal offsets after REPLICAOF NO ONE");
 
 ABSL_DECLARE_FLAG(int32_t, port);
+ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
 ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
@@ -989,6 +991,15 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
 
 }  // namespace
 
+bool ValidateNotifyKeyspaceEventsFlag() {
+  const string value = absl::GetFlag(FLAGS_notify_keyspace_events);
+  if (!value.empty() && !absl::EqualsIgnoreCase(value, "EX")) {
+    LOG(ERROR) << "Invalid notify_keyspace_events value, only Ex is currently supported";
+    return false;
+  }
+  return true;
+}
+
 bool ValidateServerTlsFlags() {
   if (!absl::GetFlag(FLAGS_tls)) {
     return true;
@@ -1227,12 +1238,25 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     if (!ValidateServerTlsFlags()) {
       return false;
     }
-    for (facade::Listener* l : listeners_) {
-      // Must reconfigure in the listener proactor to avoid a race.
-      if (!l->socket()->proactor()->Await([l] { return l->ReconfigureTLS(); })) {
+#ifdef DFLY_USE_SSL
+    // Build the new context before touching any listener: a bad cert/key must fail here, not
+    // midway through the listeners (a failed callback only rolls back the flag value, so a
+    // partial switch would leave listeners split between old and new TLS state).
+    SSL_CTX* ctx = nullptr;
+    if (absl::GetFlag(FLAGS_tls)) {
+      ctx = facade::CreateSslCntx(facade::TlsContextRole::SERVER);
+      if (!ctx) {
         return false;
       }
     }
+    for (facade::Listener* l : listeners_) {
+      // Must reconfigure in the listener proactor to avoid a race.
+      l->socket()->proactor()->Await([l, ctx] { l->ApplyTlsCtx(ctx); });
+    }
+    if (ctx) {
+      SSL_CTX_free(ctx);
+    }
+#endif
     return true;
   });
   config_registry.RegisterMutable("tls_cert_file");

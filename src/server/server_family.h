@@ -54,6 +54,10 @@ bool ValidateServerTlsFlags();
 // separators, extension vs snapshot format). Returns false on an invalid configuration.
 bool ValidateSnapshotFilenameFlags();
 
+// Validates --notify_keyspace_events (only the Ex class is supported). Returns false and logs
+// on an invalid value.
+bool ValidateNotifyKeyspaceEventsFlag();
+
 class CommandContext;
 class CommandRegistry;
 class DflyCmd;

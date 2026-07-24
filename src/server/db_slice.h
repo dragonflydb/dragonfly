@@ -310,6 +310,15 @@ class DbSlice {
   facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it,
                                          const ExpireParams& params);
 
+  // Whether expired-key keyspace notifications are enabled (validated config state).
+  bool IsExpiredEventsRecording() const {
+    return expired_keys_events_recording_;
+  }
+
+  // Publish the expired keyspace event for a key removed due to an elapsed expiration. No-op when
+  // notifications are disabled. Call AFTER the deletion has been journaled.
+  void SendExpiredKeyEvent(const Context& cntx, std::string_view key) const;
+
   // Adds expiry on a key. If the key already has expiry, updates it.
   void AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at);
 
@@ -509,9 +518,14 @@ class DbSlice {
     client_tracking_map_[key].insert(conn_ref);
   }
 
-  // Does not check for non supported events. Callers must parse the string and reject it
-  // if it's not empty and not EX.
-  void SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events);
+  // Only the validated notify_keyspace_events paths (startup, CONFIG SET) may drive this.
+  void SetExpiredEventsRecording(bool enable) {
+    expired_keys_events_recording_ = enable;
+  }
+
+  // Default inherited by newly created slices (new namespaces). Kept separately from the raw
+  // flag, which transiently holds unvalidated input while CONFIG SET runs its validation.
+  static void SetExpiredEventsRecordingDefault(bool enable);
 
   // Returns true if any registered snapshot is blocked on bucket serialiazion (big value, delayed)
   // and thus might reject the journal change
