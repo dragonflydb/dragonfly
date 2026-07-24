@@ -5,6 +5,7 @@
 
 extern "C" {
 #include "redis/crc64.h"
+#include "redis/listpack.h"
 #include "redis/redis_aux.h"
 #include "redis/zmalloc.h"
 }
@@ -2127,6 +2128,99 @@ TEST_F(RdbTest, RestoreStreamConsumerGroupCorruption) {
   EXPECT_THAT(Run({"EXISTS", "ok1"}), IntArg(1));
   EXPECT_EQ(Run({"RESTORE", "ok2", "0", build({x, y}, {{"c1", {x}}, {"c2", {y}}})}), "OK");
   EXPECT_THAT(Run({"EXISTS", "ok2"}), IntArg(1));
+}
+
+// A master entry declaring more fields than the listpack holds makes stream iteration walk
+// lpNext past the end and crash; RESTORE must reject the inconsistent stream.
+TEST_F(RdbTest, RestoreStreamListpackMasterFieldsOverflow) {
+  auto u64le = [](std::string* out, uint64_t v) {
+    uint8_t b[8];
+    absl::little_endian::Store64(b, v);
+    out->append(reinterpret_cast<const char*>(b), sizeof(b));
+  };
+
+  // A one-node stream DUMP whose master entry declares the given counts. The listpack is
+  // structurally valid (four integers), so only the declared counts are lies.
+  auto build = [&](int64_t count, int64_t deleted, int64_t num_master_fields) {
+    uint8_t* lp = lpNew(0);
+    lp = lpAppendInteger(lp, count);              // valid entry count
+    lp = lpAppendInteger(lp, deleted);            // deleted count
+    lp = lpAppendInteger(lp, num_master_fields);  // master fields (untrusted)
+    lp = lpAppendInteger(lp, 0);                  // terminator
+    std::string lp_blob(reinterpret_cast<const char*>(lp), lpBytes(lp));
+    lpFree(lp);
+
+    std::string p;
+    p.push_back(RDB_TYPE_STREAM_LISTPACKS);
+    AppendLen(&p, 1);                           // one listpack node
+    AppendString(&p, std::string(16, '\x01'));  // 16-byte master ID (sizeof(streamID))
+    AppendString(&p, lp_blob);                  // the crafted master-entry listpack
+    AppendLen(&p, 0);                           // stream_len
+    AppendLen(&p, 0);                           // last_id.ms
+    AppendLen(&p, 0);                           // last_id.seq
+    AppendLen(&p, 0);                           // consumer-group count
+
+    uint8_t ver[2];
+    absl::little_endian::Store16(ver, RDB_SER_VERSION);
+    p.append(reinterpret_cast<const char*>(ver), sizeof(ver));
+    u64le(&p, crc64(0, reinterpret_cast<const uint8_t*>(p.data()), p.size()));
+    return p;
+  };
+
+  // Control: truthful counts must still load.
+  EXPECT_EQ(Run({"RESTORE", "safe", "0", build(0, 0, 0)}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "safe"}), IntArg(1));
+
+  // Inflated master-fields count: crashes a vulnerable loader in streamGetEdgeID, rejected here.
+  EXPECT_THAT(Run({"RESTORE", "overflow", "0", build(0, 0, 1000)}), ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "overflow"}), IntArg(0));
+
+  // valid + deleted counts whose signed sum overflows; must not wrap negative and skip the walk.
+  EXPECT_THAT(Run({"RESTORE", "sumovf", "0", build(INT64_MAX, 1, 0)}), ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "sumovf"}), IntArg(0));
+
+  // Real streams must still round-trip, exercising both SAMEFIELDS and full records.
+  Run({"XADD", "s", "1-1", "a", "1", "b", "2"});  // master fields {a, b}
+  Run({"XADD", "s", "2-1", "a", "3", "b", "4"});  // same fields -> SAMEFIELDS
+  Run({"XADD", "s", "3-1", "c", "5"});            // different fields -> full record
+  auto dump = Run({"DUMP", "s"});
+  Run({"DEL", "s"});
+  EXPECT_EQ(Run({"RESTORE", "s", "0", dump.GetString()}), "OK");
+  EXPECT_THAT(Run({"XLEN", "s"}), IntArg(3));
+}
+
+// An early EOF with trailing bytes passes the non-deep lpValidateIntegrity but must be
+// rejected by the walk; otherwise reverse iteration (lpLast/lpPrev) reads the trailing bytes
+// out of bounds. Exercised via the non-deep full-RDB load path.
+TEST_F(RdbTest, LoadStreamListpackEarlyEof) {
+  uint8_t* lp = lpNew(0);
+  lp = lpAppendInteger(lp, 0);  // count
+  lp = lpAppendInteger(lp, 0);  // deleted
+  lp = lpAppendInteger(lp, 0);  // num master fields
+  lp = lpAppendInteger(lp, 0);  // terminator
+  std::string blob(reinterpret_cast<const char*>(lp), lpBytes(lp));
+  lpFree(lp);
+
+  // The trailing LP_EOF becomes an early EOF once junk and a new final EOF follow it; patch
+  // the header total-bytes to the enlarged size so lpValidateIntegrity still accepts it.
+  blob.append(4, '\x7f');
+  blob.push_back('\xff');
+  absl::little_endian::Store32(reinterpret_cast<uint8_t*>(blob.data()), blob.size());
+
+  std::string body;
+  body.push_back(RDB_TYPE_STREAM_LISTPACKS);
+  AppendString(&body, "earlyeof");               // key
+  AppendLen(&body, 1);                           // one listpack node
+  AppendString(&body, std::string(16, '\x01'));  // 16-byte master ID
+  AppendString(&body, blob);                     // the early-EOF listpack
+  AppendLen(&body, 0);                           // stream_len
+  AppendLen(&body, 0);                           // last_id.ms
+  AppendLen(&body, 0);                           // last_id.seq
+  AppendLen(&body, 0);                           // consumer-group count
+
+  // Skipping the corrupt key is non-fatal; the point is that it is never stored.
+  std::ignore = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  EXPECT_THAT(Run({"EXISTS", "earlyeof"}), IntArg(0));
 }
 
 // Integration test for snapshot egress throttling (--snapshot_egress_limit_bytes).

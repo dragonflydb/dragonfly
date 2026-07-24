@@ -91,6 +91,12 @@ int64_t LpGetIntegerIfValid(unsigned char* ele, int* valid) {
 }
 
 // Returns 1 if the stream listpack entries structure is valid, 0 otherwise.
+// Beyond the structural listpack check, it verifies the stream master entry and every
+// record are internally consistent - in particular that the declared field and record
+// counts match the entries actually present - so that later stream iteration cannot walk
+// past the listpack end. Mirrors upstream streamValidateListpackIntegrity. The semantic
+// walk runs regardless of `deep`: on a no-auth deployment an attacker can point the server
+// at a hostile master via REPLICAOF, so the replication load path is not trusted either.
 int StreamValidateListpackIntegrity(unsigned char* lp, size_t size, int deep) {
   int valid_record;
   unsigned char *p, *next;
@@ -104,26 +110,115 @@ int StreamValidateListpackIntegrity(unsigned char* lp, size_t size, int deep) {
   if (!p)
     return 0;
 
-  LpGetIntegerIfValid(p, &valid_record);
+  // Master entry header: valid-count, deleted-count, num-master-fields.
+  int64_t entry_count = LpGetIntegerIfValid(p, &valid_record);
   if (!valid_record)
     return 0;
   p = next;
   if (!lpValidateNext(lp, &next, size))
     return 0;
 
-  LpGetIntegerIfValid(p, &valid_record);
+  int64_t deleted_count = LpGetIntegerIfValid(p, &valid_record);
   if (!valid_record)
     return 0;
   p = next;
   if (!lpValidateNext(lp, &next, size))
     return 0;
 
-  LpGetIntegerIfValid(p, &valid_record);
+  int64_t master_fields = LpGetIntegerIfValid(p, &valid_record);
   if (!valid_record)
     return 0;
   p = next;
   if (!lpValidateNext(lp, &next, size))
     return 0;
+
+  if (entry_count < 0 || deleted_count < 0 || master_fields < 0)
+    return 0;
+
+  // The master field names.
+  for (int64_t i = 0; i < master_fields; i++) {
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+  }
+
+  // The zero terminator that closes the master entry.
+  int64_t zero = LpGetIntegerIfValid(p, &valid_record);
+  if (!valid_record || zero != 0)
+    return 0;
+  p = next;
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+
+  // Records. Their number is bounded by the declared valid + deleted counts, and each
+  // record's trailing lp-count must match the entries it spans. Both counts are already
+  // non-negative, so the total is summed in uint64_t: a signed sum could overflow to a
+  // negative value (undefined behavior) and skip the loop, bypassing validation.
+  uint64_t records = static_cast<uint64_t>(entry_count) + static_cast<uint64_t>(deleted_count);
+  while (records-- > 0) {
+    if (!p)
+      return 0;
+
+    int64_t fields = master_fields, extra_fields = 3;
+    int64_t flags = LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record)
+      return 0;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+
+    // The two entry-id deltas (ms, seq) relative to the master id.
+    LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record)
+      return 0;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+    LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record)
+      return 0;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+
+    if (!(flags & STREAM_ITEM_FLAG_SAMEFIELDS)) {
+      fields = LpGetIntegerIfValid(p, &valid_record);
+      if (!valid_record || fields < 0)
+        return 0;
+      p = next;
+      if (!lpValidateNext(lp, &next, size))
+        return 0;
+
+      // Per-record field names.
+      for (int64_t i = 0; i < fields; i++) {
+        p = next;
+        if (!lpValidateNext(lp, &next, size))
+          return 0;
+      }
+      extra_fields += fields + 1;
+    }
+
+    // The field values.
+    for (int64_t i = 0; i < fields; i++) {
+      p = next;
+      if (!lpValidateNext(lp, &next, size))
+        return 0;
+    }
+
+    int64_t lp_count = LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record || lp_count != fields + extra_fields)
+      return 0;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+  }
+
+  // The walk must consume the whole listpack: p must be the final (EOF) byte. Rejects an
+  // early EOF with trailing bytes, which a non-deep load accepts and later reverse iteration
+  // (lpLast/lpPrev) would then read out of bounds.
+  if (next || p != lp + size - 1)
+    return 0;
+
   return 1;
 }
 
