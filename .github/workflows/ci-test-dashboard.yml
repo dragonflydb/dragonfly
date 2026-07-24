@@ -1,0 +1,155 @@
+name: CI Test Dashboard
+
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Number of recent UTC days to include"
+        required: false
+        type: number
+        default: 30
+      publish_bucket:
+        description: "Optional S3 bucket to publish the static dashboard to"
+        required: false
+        type: string
+      publish_prefix:
+        description: "Optional prefix within the publish bucket"
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.repository == 'dragonflydb/dragonfly'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      DASHBOARD_ROOT: tools/ci_test_dashboard
+      LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '30' }}
+      SOURCE_BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
+      PUBLISH_BUCKET: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_bucket || secrets.S3_CI_TEST_DASHBOARD_BUCKET }}
+      PUBLISH_PREFIX: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_prefix || vars.CI_TEST_DASHBOARD_PREFIX }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Authenticate to AWS
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Ensure AWS CLI is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v aws >/dev/null 2>&1; then
+            python3 -m pip install --user awscli
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          aws --version
+
+      - name: Download recent test results
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SOURCE_BUCKET}" ]]; then
+            echo "S3_REGTEST_BUCKET is empty"
+            exit 1
+          fi
+
+          if [[ ! "${LOOKBACK_DAYS}" =~ ^[0-9]+$ ]] || [[ "${LOOKBACK_DAYS}" -lt 1 ]]; then
+            echo "lookback_days must be a positive integer; got '${LOOKBACK_DAYS}'"
+            exit 2
+          fi
+
+          INPUT_DIR="${RUNNER_TEMP}/ci-test-dashboard/input"
+          JUNIT_DIR="${INPUT_DIR}/junit"
+          DASHBOARD_JSON_DIR="${INPUT_DIR}/dashboard"
+          mkdir -p "${JUNIT_DIR}" "${DASHBOARD_JSON_DIR}"
+          echo "INPUT_DIR=${INPUT_DIR}" >> "${GITHUB_ENV}"
+
+          for offset in $(seq 0 "$((LOOKBACK_DAYS - 1))"); do
+            year=$(date -u -d "${offset} days ago" +%Y)
+            month=$(date -u -d "${offset} days ago" +%m)
+            day=$(date -u -d "${offset} days ago" +%d)
+
+            cpp_junit_source="s3://${SOURCE_BUCKET}/test-results/junit/cpp/year=${year}/month=${month}/day=${day}/"
+            cpp_junit_target="${JUNIT_DIR}/cpp/year=${year}/month=${month}/day=${day}/"
+            echo "Downloading C++ CTest XML from ${cpp_junit_source}"
+            aws s3 sync "${cpp_junit_source}" "${cpp_junit_target}" \
+              --exclude "*" \
+              --include "*/ctest/*.xml"
+
+            regression_source="s3://${SOURCE_BUCKET}/test-results/junit/regression/year=${year}/month=${month}/day=${day}/"
+            regression_target="${JUNIT_DIR}/regression/year=${year}/month=${month}/day=${day}/"
+            echo "Downloading regression JUnit XML from ${regression_source}"
+            aws s3 sync "${regression_source}" "${regression_target}" \
+              --exclude "*" \
+              --include "*.xml"
+
+            dashboard_source="s3://${SOURCE_BUCKET}/test-results/dashboard/cpp/year=${year}/month=${month}/day=${day}/"
+            dashboard_target="${DASHBOARD_JSON_DIR}/cpp/year=${year}/month=${month}/day=${day}/"
+            echo "Downloading C++ GTest dashboard JSON from ${dashboard_source}"
+            aws s3 sync "${dashboard_source}" "${dashboard_target}" \
+              --exclude "*" \
+              --include "*/gtest-summary.json"
+          done
+
+          echo "Downloaded XML files: $(find "${JUNIT_DIR}" -type f -name "*.xml" | wc -l)"
+          echo "Downloaded dashboard JSON files: $(find "${DASHBOARD_JSON_DIR}" -type f -name "gtest-summary.json" | wc -l)"
+
+      - name: Build dashboard data
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${DASHBOARD_ROOT}/build_dashboard.py" \
+            "${INPUT_DIR}" \
+            "${DASHBOARD_ROOT}/site/data/summary.json"
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-test-dashboard
+          path: ${{ env.DASHBOARD_ROOT }}/site
+          if-no-files-found: error
+
+      - name: Publish dashboard site to S3
+        if: env.PUBLISH_BUCKET != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          destination="s3://${PUBLISH_BUCKET}"
+          if [[ -n "${PUBLISH_PREFIX}" ]]; then
+            destination="${destination}/${PUBLISH_PREFIX%/}"
+          fi
+
+          summary_file="${DASHBOARD_ROOT}/site/data/summary.json"
+          summary_gzip="${RUNNER_TEMP}/summary.json.gz"
+          gzip -9 -c "${summary_file}" > "${summary_gzip}"
+
+          echo "Publishing ${DASHBOARD_ROOT}/site to ${destination}/"
+          aws s3 sync "${DASHBOARD_ROOT}/site/" "${destination}/" \
+            --delete \
+            --exclude "data/summary.json" \
+            --cache-control "public,max-age=300"
+          aws s3 cp "${summary_gzip}" "${destination}/data/summary.json" \
+            --content-type "application/json" \
+            --content-encoding "gzip" \
+            --cache-control "public,max-age=3600"
+
+      - name: Skip S3 publish
+        if: env.PUBLISH_BUCKET == ''
+        run: echo "No publish bucket configured; dashboard is available as a workflow artifact."

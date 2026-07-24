@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dragonfly CI Test Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Dragonfly CI Test Dashboard</h1>
+        <p id="subtitle">Loading test results...</p>
+      </div>
+      <div class="status-pill" id="dataStatus">Loading</div>
+    </header>
+
+    <main>
+      <section class="metrics" id="metrics"></section>
+
+      <section class="toolbar" aria-label="Filters">
+        <div class="search-box">
+          <label for="searchInput">Search</label>
+          <input id="searchInput" type="search" placeholder="test name, class, workflow" />
+        </div>
+
+        <div class="control-group">
+          <span>Suite</span>
+          <div class="segmented" id="suiteFilter"></div>
+        </div>
+
+        <div class="control-group">
+          <span>View</span>
+          <div class="segmented" id="viewFilter"></div>
+        </div>
+      </section>
+
+      <section class="toolbar filter-toolbar" aria-label="Run filters">
+        <div class="control-group">
+          <label for="rangeFilter">Range</label>
+          <select id="rangeFilter"></select>
+        </div>
+
+        <div class="control-group">
+          <label for="dateFilter">Date</label>
+          <select id="dateFilter"></select>
+        </div>
+
+        <div class="control-group">
+          <label for="workflowFilter">Workflow</label>
+          <select id="workflowFilter"></select>
+        </div>
+
+        <div class="control-group">
+          <label for="variantFilter">Variant</label>
+          <select id="variantFilter"></select>
+        </div>
+
+        <button class="secondary-button" id="resetFilters" type="button">Reset</button>
+      </section>
+
+      <section class="content-grid">
+        <section class="panel">
+          <div class="panel-header">
+            <h2 id="tableTitle">Tests</h2>
+            <span id="tableCount"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Test</th>
+                  <th>Status</th>
+                  <th>Failures</th>
+                  <th>Last Failed</th>
+                  <th>Last Seen</th>
+                  <th>Suite</th>
+                  <th>Rate</th>
+                  <th>Runs</th>
+                  <th>Avg Time</th>
+                </tr>
+              </thead>
+              <tbody id="testRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside class="panel details">
+          <div class="panel-header">
+            <h2>Selected</h2>
+          </div>
+          <div id="detailsPane" class="empty-state">Select a test row.</div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

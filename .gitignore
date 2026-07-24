@@ -35,3 +35,5 @@ tests/dragonfly/valkey_tcl/upstream/
 _codeql_build_dir/
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+tools/ci_test_dashboard/site/data/*.json
+tools/ci_test_dashboard/tmp
