@@ -420,6 +420,92 @@ TEST_F(TieredStorageTest, Defrag) {
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
 }
 
+// Verify that the background defrag scan (RunDefragScan, driven by the periodic heartbeat)
+// discovers and defragments a large number of bins that became fragmented while there was no upload
+// budget (so the immediate defrag path in NotifyDelete was skipped). Also checks that once
+// everything is compacted the scan does no further work (dynamic / low-cpu behaviour).
+TEST_F(TieredStorageTest, RunDefragScan) {
+  absl::FlagSaver saver;
+
+  // offload_threshold == 1.0 keeps ShouldOffload() true so the heartbeat always runs offloading
+  // (and therefore the defrag scan). The upload_threshold toggles the sign of UploadBudget():
+  //   UploadBudget() == memory_budget - upload_threshold * (max_memory_limit / shards)
+  // With a single shard and memory_budget == max_memory_limit - used_memory, upload_threshold
+  // == 1.0 gives a negative budget (immediate defrag + scan suppressed), and 0.0 gives a positive
+  // budget.
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+  SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
+  UpdateFromFlags();
+  max_memory_limit = 1024_MB;  // well above used memory, so no eviction interferes
+
+  // Read the current upload budget on the shard (recomputed by the heartbeat's CacheStats()).
+  auto upload_budget = [this] {
+    return pp_->at(0)->AwaitBrief(
+        [] { return EngineShard::tlocal()->tiered_storage()->UploadBudget(); });
+  };
+
+  // Integer values, fixed 600-byte width so exactly 7 pack into one 4KB bin (as in the Defrag
+  // test). 600 digits overflows int64, so each value is stored as a raw string and is eligible for
+  // stashing.
+  const int kNum = 700;
+  auto value_for = [](int i) {
+    string v(600, '0');
+    string digits = absl::StrCat(i);
+    v.replace(v.size() - digits.size(), digits.size(), digits);
+    return v;
+  };
+
+  for (int i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), value_for(i)});
+  }
+
+  // Wait until all full bins are stashed. kNum/7 bins hold 7 entries each; the trailing few keep
+  // the current bin filling.
+  const unsigned kBins = kNum / 7;
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.small_bins_cnt >= kBins - 1; });
+
+  // Wait until the heartbeat has recomputed a negative budget, so fragmentation below won't trigger
+  // the immediate defrag path.
+  ExpectConditionWithinTimeout([&] { return upload_budget() < 0; });
+
+  // Fragment every full bin: delete 4 of each consecutive group of 7 keys, leaving 3 (< 7/2).
+  for (int i = 0; i < kNum; i++) {
+    if (i % 7 < 4)
+      Run({"DEL", absl::StrCat("k", i)});
+  }
+
+  // No defrag may have happened yet: the immediate path is suppressed and the scan bails on a
+  // negative budget. Capture the number of survivors still living in fragmented stashed bins.
+  auto frag_metrics = GetMetrics();
+  ASSERT_EQ(frag_metrics.tiered_stats.total_defrags, 0u);
+  const size_t survivors = frag_metrics.tiered_stats.small_bins_entries_cnt;
+  ASSERT_GT(survivors, 0u);
+
+  // Give back upload budget. The next heartbeats run RunDefragScan, which repacks the survivors.
+  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);
+  UpdateFromFlags();
+  ExpectConditionWithinTimeout([&] { return upload_budget() > 0; });
+
+  // The scan recovers every survivor that lived in a fragmented bin (each is defragged at least
+  // once). Wait until all survivors have been recovered and pending reads have drained.
+  ExpectConditionWithinTimeout([&] {
+    auto m = GetMetrics();
+    return m.tiered_stats.total_defrags >= survivors && m.tiered_stats.pending_read_cnt == 0;
+  });
+
+  auto after = GetMetrics();
+  // Compaction: the survivors now occupy strictly fewer bins than before defragmentation.
+  EXPECT_LT(after.tiered_stats.small_bins_cnt, frag_metrics.tiered_stats.small_bins_cnt);
+
+  // Data integrity: every surviving key still returns its original value.
+  for (int i = 0; i < kNum; i++) {
+    if (i % 7 >= 4) {
+      EXPECT_EQ(Run({"GET", absl::StrCat("k", i)}), value_for(i));
+    }
+  }
+}
+
 TEST_F(PureDiskTSTest, BackgroundOffloading) {
   absl::FlagSaver saver;
   SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);  // upload all values
