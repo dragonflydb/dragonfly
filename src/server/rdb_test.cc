@@ -2045,6 +2045,90 @@ TEST_F(RdbTest, ModuleUnsupportedTypeSkipped) {
   EXPECT_EQ(Run({"GET", "key_after"}), "val_after");
 }
 
+// Every global-PEL entry of a loaded consumer group must be owned by exactly one
+// consumer. A crafted stream that violates this must be rejected: two consumers
+// sharing one entry leave a NACK double-freed on consumer deletion, and an
+// unclaimed entry leaves nack->consumer == nullptr for XACK/XCLAIM to dereference.
+TEST_F(RdbTest, RestoreStreamConsumerGroupCorruption) {
+  auto u64le = [](std::string* out, uint64_t v) {
+    uint8_t b[8];
+    absl::little_endian::Store64(b, v);
+    out->append(reinterpret_cast<const char*>(b), sizeof(b));
+  };
+
+  struct Consumer {
+    std::string name;
+    std::vector<std::string> pel;
+  };
+
+  // Builds a DUMP payload for a stream with an empty body and a single consumer
+  // group whose global PEL and consumers are as specified.
+  auto build = [&](const std::vector<std::string>& global_pel,
+                   const std::vector<Consumer>& consumers) {
+    std::string p;
+    p.push_back(RDB_TYPE_STREAM_LISTPACKS);
+    AppendLen(&p, 0);  // listpack node count: empty stream body
+    AppendLen(&p, 0);  // stream_len
+    AppendLen(&p, 0);  // last_id.ms
+    AppendLen(&p, 0);  // last_id.seq
+
+    AppendLen(&p, 1);       // one consumer group
+    AppendString(&p, "g");  // group name
+    AppendLen(&p, 0);       // group last_id.ms
+    AppendLen(&p, 0);       // group last_id.seq
+
+    AppendLen(&p, global_pel.size());
+    for (const auto& id : global_pel) {
+      p.append(id);
+      u64le(&p, 0);      // delivery_time
+      AppendLen(&p, 0);  // delivery_count
+    }
+
+    AppendLen(&p, consumers.size());
+    for (const auto& c : consumers) {
+      AppendString(&p, c.name);
+      u64le(&p, 0);  // seen_time
+      AppendLen(&p, c.pel.size());
+      for (const auto& id : c.pel)
+        p.append(id);
+    }
+
+    // DUMP footer: 2-byte version, then CRC64 over everything preceding it.
+    uint8_t ver[2];
+    absl::little_endian::Store16(ver, RDB_SER_VERSION);
+    p.append(reinterpret_cast<const char*>(ver), sizeof(ver));
+    uint64_t cs = crc64(0, reinterpret_cast<const uint8_t*>(p.data()), p.size());
+    u64le(&p, cs);
+    return p;
+  };
+
+  const std::string x(16, 'A');
+  const std::string y(16, 'B');
+
+  // Two consumers claim the same global-PEL entry: accepted by a vulnerable
+  // loader, then a double-free when both consumers are deleted.
+  EXPECT_THAT(Run({"RESTORE", "shared", "0", build({x}, {{"c1", {x}}, {"c2", {x}}})}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "shared"}), IntArg(0));
+
+  // A global-PEL entry that no consumer claims: accepted by a vulnerable loader,
+  // leaving nack->consumer == nullptr.
+  EXPECT_THAT(Run({"RESTORE", "unclaimed", "0", build({x}, {{"c1", {}}})}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "unclaimed"}), IntArg(0));
+
+  // One consumer lists the same id twice (duplicate consumer-PEL insert).
+  EXPECT_THAT(Run({"RESTORE", "dup", "0", build({x}, {{"c1", {x, x}}})}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "dup"}), IntArg(0));
+
+  // Positive controls: well-formed groups must still load.
+  EXPECT_EQ(Run({"RESTORE", "ok1", "0", build({x}, {{"c1", {x}}})}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "ok1"}), IntArg(1));
+  EXPECT_EQ(Run({"RESTORE", "ok2", "0", build({x, y}, {{"c1", {x}}, {"c2", {y}}})}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "ok2"}), IntArg(1));
+}
+
 // Integration test for snapshot egress throttling (--snapshot_egress_limit_bytes).
 // Bandwidth limiting is inherently time-based, so this test runs a snapshot large enough
 // that the throttled run takes a few seconds. It asserts two robust properties:

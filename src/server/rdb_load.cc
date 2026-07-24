@@ -874,6 +874,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
       }
     }
 
+    uint64_t assigned = 0;
     for (const auto& cons : cg.cons_arr) {
       streamConsumer* consumer = StreamCreateConsumer(
           cgroup, ToSV(cons.name, &buf1_), cons.seen_time, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
@@ -896,17 +897,34 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
           return;
         }
 
+        // Each global PEL entry belongs to exactly one consumer; a second claim
+        // would share the NACK across consumer PELs and double-free it on delete.
+        if (nack->consumer != nullptr) {
+          LOG(ERROR) << "Global PEL entry already assigned to a consumer";
+          ec_ = RdbError(errc::rdb_file_corrupted);
+          return;
+        }
+
         /* Set the NACK consumer, that was left to NULL when
          * loading the global PEL. Then set the same shared
          * NACK structure also in the consumer-specific PEL. */
         nack->consumer = consumer;
+        ++assigned;
         if (!raxTryInsert(consumer->pel, ptr, rawid.size(), nack, NULL)) {
           LOG(ERROR) << "Duplicated consumer PEL entry loading a stream consumer group";
-          streamFreeNACK(nack);
+          // nack is owned by cgroup->pel and freed once during stream teardown.
           ec_ = RdbError(errc::duplicate_key);
           return;
         }
       }
+    }
+
+    // Every global PEL entry must be claimed by exactly one consumer; an
+    // unclaimed one leaves nack->consumer == nullptr for later dereference.
+    if (assigned != raxSize(cgroup->pel)) {
+      LOG(ERROR) << "Unclaimed global PEL entry loading a stream consumer group";
+      ec_ = RdbError(errc::rdb_file_corrupted);
+      return;
     }
   }
 
