@@ -1433,13 +1433,15 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
     status = await nodes[0].admin_client.execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
     )
-    status[0].pop()
+    assert status[0].pop() == "[3000, 9000]"  # slot_ranges
+    status[0].pop()  # error
     assert status[0] == ["out", nodes[1].id, "FINISHED", 7]
 
     status = await nodes[1].admin_client.execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
     )
-    status[0].pop()
+    assert status[0].pop() == "[3000, 9000]"  # slot_ranges
+    status[0].pop()  # error
     assert status[0] == ["in", nodes[0].id, "FINISHED", 7]
 
     nodes[0].migrations = []
@@ -1690,7 +1692,7 @@ async def test_cluster_fuzzymigration(
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             logging.debug(states)
             for state in states:
-                direction, node_id, st, _, _ = state
+                direction, node_id, st, _, _, _ = state
                 if direction == "out":
                     if st == "FINISHED":
                         m_id = [id for id, x in enumerate(node.migrations) if x.node_id == node_id][
