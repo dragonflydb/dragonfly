@@ -540,7 +540,8 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
                     "try adding '--ulimit memlock=-1' to \"docker run\" command."
                     "Meanwhile, switching to epoll";
   } else if (iouring_res == EPERM) {
-    LOG(WARNING) << "Check if io_uring is disabled via /proc/sys/kernel/io_uring_disabled. Switching to epoll.";
+    LOG(WARNING) << "Check if io_uring is disabled via /proc/sys/kernel/io_uring_disabled. "
+                    "Switching to epoll.";
   } else {
     LOG(WARNING) << "Weird error " << strerror(iouring_res) << " switching to epoll";
   }
