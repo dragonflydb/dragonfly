@@ -1354,10 +1354,7 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
 
       if (string_map->Empty()) {  // Can happen if we use a TTL on hash members.
-        auto res_it = db_slice.FindMutable(db_context, key, OBJ_HASH);
-        if (res_it) {
-          db_slice.DelMutable(db_context, std::move(*res_it));
-        }
+        HSetFamily::DeleteIfEmpty(db_slice, db_context, key, pv);
         return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {
