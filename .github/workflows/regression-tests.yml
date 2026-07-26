@@ -48,7 +48,9 @@ jobs:
           enable-ccache: 'true'
           ccache-save: 'true'
           build-type: ${{matrix.build-type}}
-          cache-key-suffix: ${{ matrix.container }}
+          cache-key-suffix: 'df_common_bin'
+          c-compiler: gcc
+          cxx-compiler: g++
           targets: 'dragonfly'
 
       - name: Authenticate to AWS
