@@ -1762,3 +1762,91 @@ async def test_hash_field_expiry_replication_lag(df_factory: DflyInstanceFactory
         "The emptied-key deletion must be journaled explicitly: the replayed command "
         "cannot reproduce it because the replayed field TTL has not elapsed yet."
     )
+
+
+@pytest.mark.parametrize("container", ["hash", "set"])
+async def test_shrink_emptied_key_replication_lag(df_factory: DflyInstanceFactory, container):
+    """
+    Verify that SHRINK journals an explicit DEL when expiring entries during bucket
+    compaction empties the key.
+
+    Member TTLs replicate as relative values re-applied against the replica clock, so
+    under lag the replayed SHRINK finds the entries still alive, compacts without
+    expiring anything and keeps the key. The replica is SIGSTOPped so the TTL-arming
+    command and the SHRINK replay land back-to-back on resume, before the replayed
+    TTLs elapse — only an explicit DEL record can keep the replica in sync.
+    """
+    if df_factory.params.gdb:
+        # Signals to a ptrace-traced server are intercepted by gdb: SIGSTOP on the
+        # wrapper pauses nothing, SIGSTOP on the child cannot be resumed with SIGCONT.
+        pytest.skip("SIGSTOP-based lag simulation cannot pause a gdb-traced server")
+
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Set up replication before writing data so any later mismatch is real divergence
+    await start_replication(c_replica, master.port)
+
+    # Seed one entry at a time: a single bulk insert presizes the bucket array
+    # compactly and SHRINK early-returns 0 without expiring anything.
+    pipe = c_master.pipeline(transaction=False)
+    for i in range(200):
+        if container == "hash":
+            pipe.hset("mykey", f"f{i}", f"v{i}")
+        else:
+            pipe.sadd("mykey", f"m{i}")
+    await pipe.execute()
+
+    # Thin it out so bit_ceil(UpperBoundSize) < BucketCount and compaction runs.
+    pipe = c_master.pipeline(transaction=False)
+    for i in range(30, 200):
+        if container == "hash":
+            pipe.hdel("mykey", f"f{i}")
+        else:
+            pipe.srem("mykey", f"m{i}")
+    await pipe.execute()
+
+    await check_all_replicas_finished([c_replica], c_master)
+    count_cmd = "HLEN" if container == "hash" else "SCARD"
+    assert await c_replica.execute_command(count_cmd, "mykey") == 30
+
+    survivors = [(f"f{i}" if container == "hash" else f"m{i}") for i in range(30)]
+    try:
+        # SIGSTOP is sent inside pause_process, so it must already be covered by finally.
+        await pause_process(replica.proc.pid)
+
+        # TTL 3 pairs with the elapsed guard below: a false pass (the replica lazily
+        # expiring the entries itself during replay) needs a >2s stall between the two
+        # replayed records, which the guard rules out.
+        if container == "hash":
+            await c_master.execute_command("HEXPIRE", "mykey", "3", "FIELDS", "30", *survivors)
+        else:
+            await c_master.execute_command("FIELDEXPIRE", "mykey", "3", *survivors)
+        await asyncio.sleep(3.2)
+
+        # Compaction lazily expires every remaining entry and deletes the emptied key.
+        freed = await c_master.execute_command("SHRINK", "mykey")
+        assert freed > 0, "bucket array was already compact - SHRINK did not compact"
+        assert await c_master.exists("mykey") == 0
+    finally:
+        resume_time = time.monotonic()
+        resume_process(replica.proc.pid)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # A stall > 2s between the two replayed records lets the replica lazily expire the
+    # entries itself, so neither verdict would be trustworthy — skip instead of failing.
+    elapsed = time.monotonic() - resume_time
+    if elapsed > 2:
+        pytest.skip(f"environment too slow to distinguish a missing DEL ({elapsed:.1f}s)")
+
+    assert await c_replica.exists("mykey") == 0, (
+        "Replica still has 'mykey' after SHRINK emptied it on master. The emptied-key "
+        "deletion must be journaled explicitly: the replayed SHRINK finds the replayed "
+        "member TTLs still alive and cannot reproduce it."
+    )
