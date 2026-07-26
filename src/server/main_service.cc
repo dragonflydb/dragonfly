@@ -347,6 +347,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendError(std::string_view str, std::string_view type) final;
 
   void SendBulkString(std::string_view str) final;
+  void SendBulkStringBorrowed(cmn::BorrowedString&& bs) final;
   void SendSimpleString(std::string_view str) final;
 
   void SendNullArray() final;
@@ -508,6 +509,18 @@ void InterpreterReplier::SendDouble(double val) {
 void InterpreterReplier::SendBulkString(string_view str) {
   explr_->OnString(str);
   PostItem();
+}
+
+void InterpreterReplier::SendBulkStringBorrowed(cmn::BorrowedString&& bs) {
+  if (!bs.IsEncoded())
+    return SendBulkString(bs.view());
+
+  auto* ops = cmn::BorrowedStringOps::Get();
+  string decoded(ops->DecodedSize(bs), '\0');
+  auto result = ops->DecodeChunk(bs, bs.view().size(), 0, std::span<char>{decoded});
+  DCHECK_EQ(result.src_consumed, bs.view().size());
+  DCHECK_EQ(result.dec_written, decoded.size());
+  SendBulkString(decoded);
 }
 
 void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
