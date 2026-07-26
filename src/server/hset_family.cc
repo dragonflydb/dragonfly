@@ -678,6 +678,11 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
     auto* sm = static_cast<StringMap*>(pv->RObjPtr());
     if (sm->UpperBoundSize() == 0) {
       db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+      // The replayed command re-applies a relative TTL against the replica clock and
+      // cannot reproduce this deletion; journal it explicitly.
+      if (op_args.shard->journal()) {
+        RecordJournal(op_args, "DEL"sv, {key});
+      }
     }
   }
 
@@ -1014,8 +1019,14 @@ OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const 
   // Lazy field expiry during the read, or a 0-ttl deletion above, may have emptied the hash.
   if (pv->Encoding() == kEncodingStrMap2) {
     auto* sm = static_cast<StringMap*>(pv->RObjPtr());
-    if (sm->UpperBoundSize() == 0)
+    if (sm->UpperBoundSize() == 0) {
       db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+      // The replayed command re-applies a relative TTL against the replica clock and
+      // cannot reproduce this deletion; journal it explicitly.
+      if (op_args.shard->journal()) {
+        RecordJournal(op_args, "DEL"sv, {key});
+      }
+    }
   }
 
   return values;

@@ -1,9 +1,12 @@
 import asyncio
 import logging
+import os
 import random
+import signal
 import time
 
 import async_timeout
+import psutil
 import pymemcache
 import pytest
 from redis import asyncio as aioredis
@@ -1670,3 +1673,92 @@ async def test_cf_chunked_replication_chunk_size(df_factory: DflyInstanceFactory
     assert len(lines) == 1
     peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", lines[0])
     assert peak_bytes < max_cf_chunk_size
+
+
+async def pause_process(pid):
+    """SIGSTOP a process and wait until it is actually stopped.
+
+    Without the wait a not-yet-stopped replica can still apply journal records sent
+    before the stop takes effect, which defeats tests that rely on replication lag.
+    """
+    os.kill(pid, signal.SIGSTOP)
+    proc = psutil.Process(pid)
+    async with async_timeout.timeout(5):
+        while proc.status() != psutil.STATUS_STOPPED:
+            await asyncio.sleep(0.01)
+
+
+def resume_process(pid):
+    try:
+        os.kill(pid, signal.SIGCONT)
+    except ProcessLookupError:
+        pass  # already gone; don't mask the test failure that got us here
+
+
+@pytest.mark.parametrize(
+    "trigger_cmd",
+    [
+        ["HEXPIRE", "myhash", "100", "FIELDS", "1", "f1"],
+        ["HGETEX", "myhash", "FIELDS", "1", "f1"],
+        ["HGETEX", "myhash", "EX", "100", "FIELDS", "1", "f1"],
+    ],
+    ids=["hexpire-extend", "hgetex", "hgetex-ex"],
+)
+async def test_hash_field_expiry_replication_lag(df_factory: DflyInstanceFactory, trigger_cmd):
+    """
+    Verify that OpHExpire/OpHGetEx journal an explicit DEL when lazy field expiry
+    empties the hash.
+
+    Field TTLs replicate as relative values re-applied against the replica clock, so
+    under lag the replayed trigger finds the field still alive and does not re-run the
+    lazy expiry that deleted the key on master. The replica is SIGSTOPped so the
+    TTL-arming command and the trigger replay land back-to-back on resume, before the
+    replayed TTL elapses — only an explicit DEL record can keep the replica in sync.
+    """
+    if df_factory.params.gdb:
+        # Signals to a ptrace-traced server are intercepted by gdb: SIGSTOP on the
+        # wrapper pauses nothing, SIGSTOP on the child cannot be resumed with SIGCONT.
+        pytest.skip("SIGSTOP-based lag simulation cannot pause a gdb-traced server")
+
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Set up replication before writing data so any later mismatch is real divergence
+    await start_replication(c_replica, master.port)
+
+    await c_master.execute_command("HSET", "myhash", "f1", "v1")
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.hlen("myhash") == 1
+
+    try:
+        # SIGSTOP is sent inside pause_process, so it must already be covered by finally.
+        await pause_process(replica.proc.pid)
+
+        # TTL 3 pairs with the elapsed guard below: a false pass (the replica lazily
+        # expiring the field itself during replay) needs a >2s stall between the two
+        # replayed records, which the guard rules out.
+        await c_master.execute_command("HEXPIRE", "myhash", "3", "FIELDS", "1", "f1")
+        await asyncio.sleep(3.2)
+
+        # Lazily expires f1 and deletes the emptied hash on master.
+        await c_master.execute_command(*trigger_cmd)
+        assert await c_master.exists("myhash") == 0
+    finally:
+        resume_time = time.monotonic()
+        resume_process(replica.proc.pid)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    elapsed = time.monotonic() - resume_time
+    assert elapsed <= 2, f"environment too slow to distinguish a missing DEL ({elapsed:.1f}s)"
+
+    assert await c_replica.exists("myhash") == 0, (
+        f"Replica still has 'myhash' after {trigger_cmd[0]} emptied it on master. "
+        "The emptied-key deletion must be journaled explicitly: the replayed command "
+        "cannot reproduce it because the replayed field TTL has not elapsed yet."
+    )
