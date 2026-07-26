@@ -506,36 +506,36 @@ async def _open_stuck_subscriber(port: int):
 async def test_pubsub_slow_subscriber_closed(df_server: DflyInstance, async_client: aioredis.Redis):
     reader, writer = await _open_stuck_subscriber(df_server.port)
 
-    stop = False
-
     async def pub_task():
-        payload = "msg" * 100
-        while not stop:
+        # The connection threshold is 1/16 of the 32 MiB publish buffer (2 MiB). Send a
+        # bounded 6 MiB workload over ~240 ms. This both exceeds the threshold and leaves
+        # enough time for the 100 ms slow-subscriber timeout to be observed by a later publish.
+        payload = "msg" * (16 * 1024 // 3)
+        for _ in range(24):
             p = async_client.pipeline(transaction=False)
-            for _ in range(200):
+            for _ in range(16):
                 p.publish("channel", payload)
             await p.execute()
+            await asyncio.sleep(0.01)
 
-    publishers = [asyncio.create_task(pub_task()) for _ in range(20)]
+    publishers = [asyncio.create_task(pub_task())]
 
     try:
         # Wait until the policy force-closes the stuck subscriber.
-        stats = {}
-        for _ in range(150):
+        @assert_eventually(timeout=15)
+        async def wait_for_forced_disconnect():
             stats = await _pubsub_backpressure_stats(df_server)
-            if stats["forced_disconnect"] >= 1:
-                break
-            await asyncio.sleep(0.1)
+            assert stats["forced_disconnect"] >= 1
+            return stats
 
-        assert stats["forced_disconnect"] >= 1
+        stats = await wait_for_forced_disconnect()
         assert stats["messages_discarded"] >= 1
 
         # We force disconnect the subscriber before we reach the per-thread soft limit
         # (i.e. based on connection memory threshold).
         assert stats["soft_limit"] == 0
 
-        # Let the publishers finish - they must not stay parked once the budget was released.
-        stop = True
+        # The bounded publishers must complete after the slow subscriber is disconnected.
         await asyncio.wait_for(asyncio.gather(*publishers), timeout=20)
 
         # Drain the subscriber socket so the parked write completes and the connection closes through
@@ -548,7 +548,6 @@ async def test_pubsub_slow_subscriber_closed(df_server: DflyInstance, async_clie
         except asyncio.TimeoutError:
             pass
     finally:
-        stop = True
         for publisher in publishers:
             publisher.cancel()
         await asyncio.gather(*publishers, return_exceptions=True)
