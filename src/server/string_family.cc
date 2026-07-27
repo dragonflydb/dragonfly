@@ -1380,7 +1380,7 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   static constexpr char kGetExExpiryErr[] = "invalid expire time in 'getex' command";
-  using ExpiryValue = Validated<int64_t, Bounded<int64_t{1}, INT64_MAX, kGetExExpiryErr>>;
+  using ExpiryValue = Validated<int64_t, ClosedRange<int64_t{1}, INT64_MAX, kGetExExpiryErr>>;
   static constexpr auto kGrammar = Compile(Options(ExpiryOrPersist<ExpiryValue>()));
   auto opts = kGrammar.Apply(&parser);
 
