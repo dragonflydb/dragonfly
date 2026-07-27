@@ -2351,6 +2351,11 @@ void ServerFamily::Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx)
       // delete the now-empty key to prevent zombie keys that crash SAVE.
       if (ds->Empty()) {
         db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
+        // The replayed SHRINK re-applies relative member TTLs against the replica clock
+        // and cannot reproduce this deletion; journal it explicitly.
+        if (shard->journal()) {
+          RecordJournal(t->GetOpArgs(shard), "DEL"sv, {key});
+        }
       }
 
       return bytes_before - bytes_after;
