@@ -142,6 +142,23 @@ TEST_F(DflyEngineTest, EvalResp) {
                                    ElementsAre("b", IntArg(2), "a", IntArg(1))));
 }
 
+TEST_F(DflyEngineTest, EvalGetLargeBorrowedStrings) {
+  std::string raw(32 * 1024, '\x81');
+  std::string ascii(32 * 1024, 'a');
+
+  EXPECT_THAT(Run({"set", "ascii", ascii}), "OK");
+  EXPECT_THAT(Run({"set", "raw", raw}), "OK");
+  optional<int64_t> ascii_usage = Run({"memory", "usage", "ascii"}).GetInt();
+  optional<int64_t> raw_usage = Run({"memory", "usage", "raw"}).GetInt();
+  ASSERT_TRUE(ascii_usage);
+  ASSERT_TRUE(raw_usage);
+  EXPECT_GT(*raw_usage, *ascii_usage);
+
+  EXPECT_THAT(Run({"eval", "return {redis.call('get', KEYS[1]), redis.call('get', KEYS[2])}", "2",
+                   "ascii", "raw"}),
+              RespElementsAre(ascii, raw));
+}
+
 TEST_F(DflyEngineTest, EvalPublish) {
   auto resp = pp_->at(1)->Await([&] { return Run({"subscribe", "foo"}); });
   EXPECT_THAT(resp, ArrLen(3));
