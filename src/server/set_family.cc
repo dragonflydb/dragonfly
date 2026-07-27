@@ -1382,11 +1382,8 @@ void CmdSRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool is_count = parser.HasNext();
   int count = parser.NextOrDefault<int>(1);
 
-  if (parser.HasNext())
-    return cmd_cntx->SendError(WrongNumArgsError("SRANDMEMBER"));
-
-  if (auto err = parser.TakeError(); err)
-    return cmd_cntx->SendError(err.MakeReply());
+  if (!parser.Finalize())
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
   cmn::BackedArguments vals;
   auto cb = [&](Transaction* t, EngineShard* shard) {

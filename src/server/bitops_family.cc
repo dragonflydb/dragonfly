@@ -560,7 +560,7 @@ void BitPos(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
 
   auto key = parser.Next<string_view>();
-  int32_t value = parser.Next<Validated<int32_t, Bounded<int32_t{0}, int32_t{1}, kBitArgErr>>>();
+  int32_t value = parser.Next<Validated<int32_t, ClosedRange<0, 1, kBitArgErr>>>();
 
   int64_t start = parser.NextOrDefault<int64_t>();
   int64_t end = parser.NextOrDefault<int64_t>(std::numeric_limits<int64_t>::max());
@@ -584,20 +584,16 @@ void BitCount(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto key = parser.Next<string_view>();
 
-  std::pair<int64_t, int64_t> start_end;
-  if (parser.HasNext()) {
-    auto tuple_result = parser.Next<int64_t, int64_t>();
-    start_end = std::make_pair(std::get<0>(tuple_result), std::get<1>(tuple_result));
-  } else {
-    start_end = std::make_pair(0, std::numeric_limits<int64_t>::max());
-  }
+  int64_t start = 0, end = std::numeric_limits<int64_t>::max();
+  if (parser.HasNext())
+    std::tie(start, end) = parser.Next<int64_t, int64_t>();
 
   bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
-  auto cb = [&, start_end](Transaction* t, EngineShard* shard) {
-    return CountBitsForValue(t->GetOpArgs(shard), key, start_end.first, start_end.second, as_bit);
+  auto cb = [&, start, end](Transaction* t, EngineShard* shard) {
+    return CountBitsForValue(t->GetOpArgs(shard), key, start, end, as_bit);
   };
   OpResult<std::size_t> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   HandleOpValueResult(res, cmd_cntx->rb());

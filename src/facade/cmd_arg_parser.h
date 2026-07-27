@@ -175,16 +175,20 @@ template <class T> struct VNum {
 // Validation rules for Next<Validated<T, Rules...>>(): free functions `RuleError rule(T)`. Reusable
 // ones take the message as a reference-to-constexpr NTTP.
 
-// Out of [min, max] -> generic type error (FInt is the idiomatic spelling).
-template <auto min, auto max>
-requires std::same_as<decltype(min), decltype(max)> RuleError InRange(decltype(min) v) {
-  return {v < min || v > max, {}};
+// Empty rule message: leaves the generic type error (INVALID_INT / INVALID_FLOAT) in place.
+inline constexpr char kNoRuleMsg[] = "";
+
+// v outside the closed [min, max] (ClosedRange) or open (min, max) (OpenRange) -> Msg; an empty Msg
+// keeps the generic type error. Integer endpoints are compared in v's type, so OpenRange<0, 1, ...>
+// also validates a floating-point probability (avoids float NTTPs, which need clang 18+).
+template <auto min, auto max, const auto& Msg = kNoRuleMsg, class V>
+requires std::same_as<decltype(min), decltype(max)> RuleError ClosedRange(V v) {
+  return {!(v >= min && v <= max), Msg};
 }
 
-// Out of [min, max] -> custom Msg. Integer bounds only (float NTTPs need clang 18+).
-template <auto min, auto max, const auto& Msg>
-requires std::same_as<decltype(min), decltype(max)> RuleError Bounded(decltype(min) v) {
-  return {!(v >= min && v <= max), Msg};
+template <auto min, auto max, const auto& Msg = kNoRuleMsg, class V>
+requires std::same_as<decltype(min), decltype(max)> RuleError OpenRange(V v) {
+  return {!(v > min && v < max), Msg};
 }
 
 // v < 0 -> custom Msg; NaN is accepted (matches a plain `v < 0` guard).
@@ -214,7 +218,7 @@ template <class T, RuleError (*... Rules)(T)> struct Validated : VNum<T> {
   }
 };
 
-template <auto min, auto max> using FInt = Validated<decltype(min), InRange<min, max>>;
+template <auto min, auto max> using FInt = Validated<decltype(min), ClosedRange<min, max>>;
 
 template <std::integral T> using Positive = FInt<T{1}, std::numeric_limits<T>::max()>;
 template <std::integral T> using NonNegativeInt = FInt<T{0}, std::numeric_limits<T>::max()>;
