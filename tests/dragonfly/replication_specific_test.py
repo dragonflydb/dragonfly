@@ -1345,6 +1345,77 @@ async def test_set_member_expiry_replication(
     )
 
 
+@pytest.mark.parametrize(
+    "trigger_cmd, fields",
+    [
+        (["HRANDFIELD", "myhash"], ["f1"]),
+        (["HRANDFIELD", "myhash", "2"], ["f1", "f2"]),
+        (["HRANDFIELD", "myhash", "-2", "WITHVALUES"], ["f1", "f2"]),
+        (["HGETALL", "myhash"], ["f1", "f2", "f3"]),
+        (["HGET", "myhash", "f1"], ["f1"]),
+        (["HTTL", "myhash", "FIELDS", "1", "f1"], ["f1"]),
+    ],
+    ids=[
+        "hrandfield",
+        "hrandfield-count",
+        "hrandfield-negcount-withvalues",
+        "hgetall",
+        "hget",
+        "httl",
+    ],
+)
+async def test_hash_field_expiry_replication(df_factory: DflyInstanceFactory, trigger_cmd, fields):
+    """
+    Verify that lazy hash-field expiry on master is replicated to the replica.
+
+    When all fields of a StringMap-encoded hash expire via lazy expiry (triggered by
+    a read), the emptied key is deleted on master and the deletion must be journaled,
+    otherwise the replica retains a stale key that no longer exists on master.
+
+    HGET is a point lookup that only expires entries in the accessed bucket, so a
+    single field is used to guarantee the hash becomes empty. HGETALL iterates the
+    whole map, so it gets a multi-field seed.
+    """
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Set up replication before writing data to avoid race with TTL
+    await start_replication(c_replica, master.port)
+
+    hset_args = [x for f in fields for x in (f, "v")]
+    await c_master.execute_command("HSET", "myhash", *hset_args)
+    await c_master.execute_command("HEXPIRE", "myhash", "1", "FIELDS", str(len(fields)), *fields)
+
+    num_fields = len(fields)
+    assert await c_master.hlen("myhash") == num_fields
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    assert await c_replica.hlen("myhash") == num_fields
+
+    # Wait for fields to expire
+    await asyncio.sleep(1.2)
+
+    # Trigger lazy expiry on master via a read command. HRANDFIELD forms hit the
+    # CmdHRandField deletion; HGET/HGETALL/HTTL guard the sibling already-journaled paths.
+    await c_master.execute_command(*trigger_cmd)
+
+    # The key should be gone on master
+    assert await c_master.exists("myhash") == 0
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    assert await c_replica.exists("myhash") == 0, (
+        f"Replica still has 'myhash' after lazy expiry triggered by {trigger_cmd[0]}. "
+        "The emptied-key deletion must be journaled so the replica stays in sync."
+    )
+
+
 @dfly_args({"proactor_threads": 4})
 async def test_hnsw_external_vector_replication_crash(df_factory: DflyInstanceFactory):
     """
