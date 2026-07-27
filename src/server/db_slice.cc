@@ -31,6 +31,7 @@ extern "C" {
 #include "server/namespaces.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "server/transaction.h"
 #include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
@@ -896,6 +897,25 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
       .omitted_journal = omit_journal};
 }
 
+void DbSlice::NotifyOrDeferBlockingWake(BlockingController* bc) {
+  // A concluding transaction dispatches the awakened keys itself, but only for the controller of
+  // its own namespace (see Transaction::RunInShard). A transaction of another namespace would
+  // leave this controller's events pending indefinitely, so only skip the deferral when the
+  // running transaction actually drains us.
+  auto drains_us = [this](const Transaction* tx) {
+    return tx != nullptr && &tx->GetNamespace() == ns_;
+  };
+
+  if (drains_us(owner_->running_tx()) || drains_us(owner_->GetContTx()))
+    return;
+
+  // Otherwise we are on a background path (heartbeat expiry/eviction, slot flush, replica load)
+  // that may be in the middle of a prime table traversal or inside a FiberAtomicGuard. Readiness
+  // checkers read the db slice and can lazily expire other keys and preempt on a journal write,
+  // so they must not run in place - defer them to a safe point.
+  owner_->DeferBlockingWake(bc);
+}
+
 void DbSlice::ActivateDb(DbIndex db_ind) {
   if (db_arr_.size() <= db_ind)
     db_arr_.resize(db_ind + 1);
@@ -911,11 +931,13 @@ void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table, bool async) {
   if (obj_type == OBJ_STREAM) {
     // A blocked XREADGROUP watches a key that can never become ready again once the stream is
     // gone. Mark it awakened so that the readiness check re-evaluates it and the reader learns
-    // that its consumer group disappeared. The awakened keys are dispatched by the transaction
-    // that performs this deletion when it concludes.
+    // that its consumer group disappeared. On background deletion paths, defer dispatch until a
+    // safe point outside the table traversal.
     if (auto* bc = ns_->GetBlockingController(owner_->shard_id()); bc) {
       string tmp;
-      bc->Awaken(table->index, it->first.GetSlice(&tmp));
+      string_view key = it->first.GetSlice(&tmp);
+      bc->Awaken(table->index, key);
+      NotifyOrDeferBlockingWake(bc);
     }
   } else if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
     string tmp;
@@ -973,6 +995,9 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
     cursor = next;
     ThisFiber::Yield();
+    // Safe point: no bucket iteration is in progress, so blocked readers whose stream was just
+    // deleted can be woken now.
+    owner_->RunDeferredBlockingWakes();
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
@@ -1405,6 +1430,14 @@ void DbSlice::PreUpdateBlocking(DbIndex db_ind, const Iterator& it) {
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
+  // A blocked reader may be watching this key expecting a different type (for example
+  // XREADGROUP when the stream gets overwritten by SET/RENAME/BITOP). Let the readiness
+  // checker re-evaluate it.
+  if (auto* bc = ns_->GetBlockingController(owner_->shard_id()); bc) {
+    bc->Awaken(db_ind, key);
+    NotifyOrDeferBlockingWake(bc);
+  }
+
   auto& db = *db_arr_[db_ind];
   auto& watched_keys = db.watched_keys;
   if (!watched_keys.empty()) {
@@ -1467,13 +1500,7 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
     }
   }
 
-  auto obj_type = it->second.ObjType();
-  if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
-    doc_del_cb_(key, cntx, it->second);
-  }
-
-  const_cast<DbSlice*>(this)->PerformDeletionAtomic(Iterator(it, StringOrView::FromView(key)),
-                                                    db.get());
+  const_cast<DbSlice*>(this)->Del(cntx, Iterator(it, StringOrView::FromView(key)), db.get());
 
   ++events_.expired_keys;
   db->stats.events.expired_keys++;

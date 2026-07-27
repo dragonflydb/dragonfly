@@ -71,5 +71,7 @@ class BlockingController {
   // Transactions that got awakened with NotifySuspended
   // TODO: Used only for one DCHECK
   absl::flat_hash_set<Transaction*> awakened_transactions_;
+
+  bool notify_pending_reentrancy_guard_ = false;
 };
 }  // namespace dfly

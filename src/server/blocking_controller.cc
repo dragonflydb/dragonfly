@@ -4,6 +4,7 @@
 
 #include "server/blocking_controller.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/inlined_vector.h>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -11,6 +12,7 @@
 #include "base/logging.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
 
@@ -148,6 +150,11 @@ void BlockingController::RemovedWatched(Keys keys, Transaction* tx) {
 
 // Runs on the shard thread.
 void BlockingController::NotifyPending() {
+  if (std::exchange(notify_pending_reentrancy_guard_, true))  // already running
+    return;
+
+  absl::Cleanup cleanup([this] { notify_pending_reentrancy_guard_ = false; });
+
   const Transaction* tx = owner_->GetContTx();
   CHECK(tx == nullptr) << tx->DebugId();
 
@@ -155,30 +162,52 @@ void BlockingController::NotifyPending() {
   context.ns = ns_;
   context.time_now_ms = GetCurrentTimeMs();
 
-  for (DbIndex index : awakened_indices_) {
-    auto dbit = watched_dbs_.find(index);
-    if (dbit == watched_dbs_.end())
-      continue;
+  // Readiness checkers read the db slice, which lazily expires keys and journals the deletion.
+  // A blocking journal write would preempt here, and while we are suspended a timing out
+  // transaction can erase the very DbWatchTable / WatchQueue entries this loop holds (see
+  // Transaction::ExpireShardCb -> RemovedWatched). Buffer the journal instead so that the scan
+  // below runs to completion without yielding.
+  journal::DisableFlushGuard journal_flush_guard(owner_->journal());
 
-    context.db_index = index;
-    DbWatchTable& wt = *dbit->second;  // pointer stability due to node_hash_map
-    for (string_view key : wt.awakened_keys) {
-      DVLOG(1) << "Processing awakened key " << key;
-      auto w_it = wt.queue_map.find(key);
-      CHECK(w_it != wt.queue_map.end());
+  // during execution we can get new awakened keys, so we need to loop until all are processed.
+  while (!awakened_indices_.empty()) {
+    decltype(awakened_indices_) awakened_indices;
+    std::swap(awakened_indices, awakened_indices_);
 
-      WatchQueue* wq = w_it->second.get();
-      NotifyWatchQueue(key, wq, context);
-      if (wq->items.empty())
-        wt.queue_map.erase(w_it);
-    }
-    wt.awakened_keys.clear();
+    for (const DbIndex index : awakened_indices) {
+      auto dbit = watched_dbs_.find(index);
+      if (dbit == watched_dbs_.end())
+        continue;
 
-    if (wt.queue_map.empty()) {
-      watched_dbs_.erase(dbit);
+      DbWatchTable& wt = *dbit->second;  // pointer stability due to node_hash_map
+      decltype(wt.awakened_keys) awakened_keys;
+      std::swap(awakened_keys, wt.awakened_keys);
+
+      for (const std::string& key : awakened_keys) {
+        DVLOG(1) << "Processing awakened key " << key;
+        auto w_it = wt.queue_map.find(key);
+        if (w_it == wt.queue_map.end())
+          continue;
+
+        WatchQueue* wq = w_it->second.get();
+        // A readiness check can lazily expire the key and enqueue another wake event before
+        // NotifyWatchQueue marks the current queue as active. The duplicate event is stale once
+        // the head transaction has been notified; RemovedWatched will enqueue the key again when
+        // the active transaction finishes if more waiters remain.
+        if (wq->state != WatchQueue::SUSPENDED)
+          continue;
+
+        context.db_index = index;
+        NotifyWatchQueue(key, wq, context);
+        if (wq->items.empty())
+          wt.queue_map.erase(w_it);
+      }
+
+      if (wt.queue_map.empty()) {
+        watched_dbs_.erase(dbit);
+      }
     }
   }
-  awakened_indices_.clear();
 }
 
 void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* trans) {

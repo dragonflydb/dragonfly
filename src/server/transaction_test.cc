@@ -6,8 +6,13 @@
 
 #include <gmock/gmock.h>
 
+#include <atomic>
+
 #include "base/logging.h"
 #include "facade/facade_stats.h"
+extern "C" {
+#include "redis/stream.h"
+}
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -43,14 +48,17 @@ class TransactionTest : public Test {
     return OpStatus::OK;
   }
 
-  boost::intrusive_ptr<Transaction> MakeTx(const CommandId* cid, StringVec keys) {
+  boost::intrusive_ptr<Transaction> MakeTx(const CommandId* cid, StringVec keys,
+                                           Namespace* ns = nullptr) {
     boost::intrusive_ptr<Transaction> tx(new Transaction{cid});
     auto argv = std::make_shared<CmdArgVec>();
     for (auto& k : keys)
       argv->emplace_back(k);
     arg_holders_.push_back({std::move(keys), argv});
     CmdArgList args{argv->data(), argv->size()};
-    CHECK_EQ(OpStatus::OK, tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, args));
+    if (ns == nullptr)
+      ns = &namespaces->GetDefaultNamespace();
+    CHECK_EQ(OpStatus::OK, tx->InitByArgs(ns, 0, args));
     return tx;
   }
 
@@ -145,6 +153,74 @@ void TransactionTest::TearDown() {
 
   pp_->Stop();
   pp_.reset();
+}
+
+// A background deletion on namespace B must defer B's wake even when a callback from namespace A
+// is running on the same shard. The callback from A never drains B's BlockingController, so
+// treating any running transaction as sufficient would leave B's blocked reader asleep.
+TEST_F(TransactionTest, ForeignNamespaceStreamWakeIsDeferred) {
+  constexpr ShardId kShard = 0;
+  constexpr string_view kWatchedKey = "x";
+  constexpr string_view kForeignKey = "a";
+  ASSERT_EQ(kShard, Shard(kWatchedKey, shard_set->size()));
+  ASSERT_EQ(kShard, Shard(kForeignKey, shard_set->size()));
+
+  Namespace* foreign_ns =
+      OnShard(kShard, [] { return &namespaces->GetOrInsert("foreign-wake-namespace"); });
+
+  static CommandId foreign_cid{"foreign_wake_tx", 0, -1, 1, -1, acl::NONE};
+  static CommandId watched_cid{"watched_wake_tx", 0, -1, 1, -1, acl::NONE};
+  auto foreign_tx = MakeTx(&foreign_cid, {string{kForeignKey}}, foreign_ns);
+  auto watched_tx = MakeTx(&watched_cid, {string{kWatchedKey}});
+
+  std::atomic_uint checker_calls{0};
+  fb2::Done checker_called;
+  unsigned checker_calls_before_deferred_drain = 0;
+  BlockingController* watched_bc = nullptr;
+
+  OnShard(kShard, [&] {
+    auto* shard = EngineShard::tlocal();
+    auto& watched_ns = namespaces->GetDefaultNamespace();
+    auto& db = watched_ns.GetDbSlice(kShard);
+    DbContext cntx{&watched_ns, 0, GetCurrentTimeMs()};
+
+    auto added = db.AddOrFind(cntx, kWatchedKey, OBJ_STREAM);
+    ASSERT_TRUE(added);
+    ASSERT_TRUE(added->is_new);
+    added->it->second.InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, streamNew());
+    added->post_updater.Run();
+
+    watched_bc = watched_ns.GetOrAddBlockingController(shard);
+    watched_bc->AddWatched(
+        watched_tx->GetShardArgs(kShard),
+        [&](EngineShard*, const DbContext&, string_view) {
+          checker_calls.fetch_add(1, memory_order_relaxed);
+          checker_called.Notify();
+          return KeyReadyResult::kNotReady;
+        },
+        watched_tx.get());
+
+    // DbSlice::Del awakens the watched stream and invokes NotifyOrDeferBlockingWake.
+    // Keep an unrelated namespace's transaction visible to model a background deletion which
+    // lands while another namespace is mid-callback.
+    shard->set_running_tx(foreign_tx.get());
+    auto stream_it = db.FindMutable(cntx, kWatchedKey, OBJ_STREAM);
+    ASSERT_TRUE(stream_it);
+    db.DelMutable(cntx, std::move(*stream_it));
+    checker_calls_before_deferred_drain = checker_calls.load(memory_order_relaxed);
+    shard->set_running_tx(nullptr);
+  });
+
+  // The existing periodic heartbeat is the production safe point for deferred wakes.
+  const bool wake_drained = checker_called.WaitFor(2s);
+  OnShard(kShard,
+          [&] { watched_bc->RemovedWatched(watched_tx->GetShardArgs(kShard), watched_tx.get()); });
+
+  EXPECT_EQ(checker_calls_before_deferred_drain, 0u);
+  EXPECT_TRUE(wake_drained)
+      << "periodic heartbeat did not drain the foreign namespace's deferred wake";
+  EXPECT_EQ(checker_calls.load(memory_order_relaxed), 1u)
+      << "the wake was not deferred because the running transaction belonged to another namespace";
 }
 
 // Reproduces a deadlock where the next hop of a continuation transaction (A) is
