@@ -254,8 +254,8 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
             await client.execute_command(f"LPUSH {name} {rand_str}")
 
     # Make them STICK so we don't evict them
-    await client.execute_command(f"STICK list_1")
-    await client.execute_command(f"STICK list_2")
+    await client.execute_command("STICK list_1")
+    await client.execute_command("STICK list_2")
 
     await client.execute_command("CONFIG SET enable_heartbeat_eviction true")
 
@@ -390,7 +390,7 @@ async def test_remove_docs_on_eviction(df_factory):
     await asyncio.sleep(1)
 
     # Get number of docs in index
-    index_info = await client.execute_command(f"FT.INFO idx")
+    index_info = await client.execute_command("FT.INFO idx")
     index_info_num_docs = index_info[9]
 
     # Get number of keys in database
@@ -502,3 +502,32 @@ async def test_bitops_denyoom(df_factory: DflyInstanceFactory):
         with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
             await client.execute_command(*cmd)
     assert await client.ping()
+
+
+@pytest.mark.asyncio
+async def test_short_key_allocation_gap(df_factory: DflyInstanceFactory):
+    """
+    Creates many small sized keys with ttl. Then checks that the object used memory is close to used memory.
+    The test accompanies a change where such keys now report the total block size instead of string length.
+    The older case resulted in a gap between the used memory vs reported memory by object size.
+    """
+    from celery.utils.debug import humanbytes as h
+
+    df_server = df_factory.create(proactor_threads=1)
+    df_server.start()
+
+    client = df_server.client()
+    await client.execute_command(
+        "DEBUG", "POPULATE", 500000, "abcdefgh", 10, "EXPIRE", 1000, 100000
+    )
+    await asyncio.sleep(1)
+    memory = await client.info("memory")
+    used_memory = memory["used_memory"]
+    object_used = memory["object_used_memory"]
+    table_used = memory["table_used_memory"]
+    threshold = used_memory * 0.1
+    total_used = object_used + table_used
+    logging.info(
+        f"used={h(used_memory)} object_used={h(object_used)} table_used={h(table_used)} total_used={h(total_used)} threshold={h(threshold)}"
+    )
+    assert abs(used_memory - total_used) <= used_memory * 0.1
