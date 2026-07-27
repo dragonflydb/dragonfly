@@ -42,6 +42,7 @@ jobs:
       contents: read
       id-token: write
       packages: read
+      actions: write # To allow deleting cache
 
     env:
       CPP_JUNIT_DIR: ${{ github.workspace }}/test-results/junit/cpp
@@ -121,6 +122,7 @@ jobs:
         with:
           enable-ccache: 'true'
           ccache-save: 'true'
+          enable-deps-cache: 'true'
           build-type: ${{matrix.build-type}}
           cache-key-suffix: ${{ matrix.container }}
           ccache-max-size: ${{ matrix.ccache-max-size || '1G' }}
@@ -432,6 +434,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      actions: write # To allow deleting cache
 
     container:
       image: ghcr.io/romange/ubuntu-dev:24
@@ -458,6 +461,7 @@ jobs:
         with:
           enable-ccache: 'true'
           ccache-save: 'true'
+          enable-deps-cache: 'true'
           build-type: Release
           cache-key-suffix: 'df_common_bin'
           c-compiler: gcc

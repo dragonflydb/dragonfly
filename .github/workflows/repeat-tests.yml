@@ -73,6 +73,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      actions: write # To allow deleting cache
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}

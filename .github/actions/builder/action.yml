@@ -62,6 +62,11 @@ inputs:
     required: false
     default: 'default'
     type: string
+  enable-deps-cache:
+    description: "Cache the built third-party deps (third_party/_deps) and their build artifacts, skipping both download and compilation on a hit. 'false' (default) skips it."
+    required: false
+    default: 'false'
+    type: string
 
 runs:
   using: "composite"
@@ -77,19 +82,79 @@ runs:
           exit 1
         fi
 
-    - name: Setup ccache
+    - name: Restore/save cache (ccache)
       if: ${{ inputs.enable-ccache == 'true' }}
-      # Persist compiled objects across ephemeral runners so unchanged files aren't recompiled.
+      # - Reuse compiled objects across runners so unchanged files are not recompiled.
+      # - The action restores here and saves in its GitHub Actions post-step (auto-generated): "Post Restore/save cache (ccache)".
       uses: hendrikmuhs/ccache-action@v1.2
       with:
-        # ATTENTION: this is the ccache key template. Changing it (or any input that feeds it:
-        # cache-key-suffix / build-type / c-compiler / cxx-compiler / sanitizers etc) changes the key
-        # for EVERY caller. Keep whatever warms refs/heads/main in sync with this key, or PR
-        # builds stop matching the warm cache and go cold.
+        # - This is the ccache key template used by every caller.
+        # - Changing it or one of its inputs creates a new cache. Keep main's cache producer aligned with this key so
+        #   pull requests can restore the cache warmed on main.
         key: dfly-ccache-${{ inputs.cache-key-suffix }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-${{ inputs.c-compiler }}-${{ inputs.cxx-compiler }}-${{ inputs.sanitizers }}
         max-size: ${{ inputs.ccache-max-size }}
         save: ${{ inputs.ccache-save }}
         verbose: 1
+
+    - name: Compute third-party deps cache key
+      # - Generate one key for restore, save, and failure cleanup so those steps always use the same cache entry.
+      # - hashFiles() includes dependency definitions, dependency build settings, and patches. Add any new file that
+      #   changes a dependency's fetched source or build output, or an old cache could be restored incorrectly.
+      # - internal.cmake, sanitizers, and cxx-flags affect the compiler settings inherited by dependencies, so each
+      #   setting combination needs its own cache entry.
+      # - This cache restores complete third_party and _deps directories before the build. An exact hit skips fetching
+      #   and building dependencies. ccache is separate: it caches individual object files and also covers src/.
+      if: inputs.enable-deps-cache == 'true'
+      id: deps-cache-key
+      shell: bash
+      run: |
+        HASH="${{ hashFiles('src/external_libs.cmake', 'CMakeLists.txt', 'src/CMakeLists.txt', 'helio/cmake/third_party.cmake', 'helio/cmake/internal.cmake', 'patches/**', 'helio/patches/**') }}"
+        PREFIX="dfly-deps-${{ inputs.cache-key-suffix }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-${{ inputs.cxx-compiler }}-${{ inputs.sanitizers }}-${{ inputs.cxx-flags }}-"
+        if [ -z "${HASH}" ]; then
+          echo "::error title=deps-cache::hashFiles() matched no files - refusing to cache under a degenerate key. Check the file list in this step."
+          exit 1
+        fi
+        {
+          echo "key=${PREFIX}${HASH}"
+          echo "prefix=${PREFIX}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Restore cache (deps)
+      # - actions/cache/restore only downloads a cache; unlike the combined cache action, it never saves automatically.
+      # - The separate Save step can therefore require a successful build, while the failure step can delete this key.
+      # - Cache both directories: third_party contains ExternalProject builds; _deps contains FetchContent builds.
+      # - Paths are workspace-relative because actions/cache runs inside the job's container, where host paths do not
+      #   exist.
+      if: inputs.enable-deps-cache == 'true'
+      id: deps-cache-restore
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          ${{ inputs.build-dir }}/third_party
+          ${{ inputs.build-dir }}/_deps
+        key: ${{ steps.deps-cache-key.outputs.key }}
+        restore-keys: |
+          ${{ steps.deps-cache-key.outputs.prefix }}
+
+    - name: Report cache status (deps)
+      # - Print the exact, fallback, or miss result in the log and Job Summary.
+      if: always() && inputs.enable-deps-cache == 'true'
+      shell: bash
+      run: |
+        if [ "${{ steps.deps-cache-restore.outputs.cache-hit }}" = "true" ]; then
+          STATUS="FULL HIT (exact key match) - third_party/_deps fully restored, no rebuild expected"
+        elif [ -n "${{ steps.deps-cache-restore.outputs.cache-matched-key }}" ]; then
+          STATUS="PARTIAL HIT (restore-keys fallback: '${{ steps.deps-cache-restore.outputs.cache-matched-key }}') - the build will rebuild whatever changed since that key"
+        else
+          STATUS="MISS - no matching cache found, full cold third-party build expected (~140s)"
+        fi
+        echo "Third-party deps cache: ${STATUS}"
+        echo "  primary key: ${{ steps.deps-cache-key.outputs.key }}"
+        {
+          echo "### Third-party deps cache"
+          echo "- **${STATUS}**"
+          echo "- primary key: \`${{ steps.deps-cache-key.outputs.key }}\`"
+        } >> "${GITHUB_STEP_SUMMARY}"
 
     - name: Configure CMake
       shell: bash
@@ -148,7 +213,8 @@ runs:
     - name: Build
       shell: bash
       run: |
-        cd ${GITHUB_WORKSPACE}/${{ inputs.build-dir }}
+        # - Use $GITHUB_WORKSPACE: it is the workspace path inside the container. github.workspace is the host path.
+        cd "${GITHUB_WORKSPACE}/${{ inputs.build-dir }}"
         echo "Building target: ${{ inputs.targets }}"
         if [ "${{ inputs.enable-ccache }}" = "true" ]; then
           ccache -z || true   # zero stats so the summary below reflects only this build
@@ -157,4 +223,34 @@ runs:
         if [ "${{ inputs.enable-ccache }}" = "true" ]; then
           echo "===== ccache stats (this build) ====="
           ccache -s || true
+        fi
+
+    - name: Save cache (deps)
+      # - Save only after configuration and build succeed. Later test failures must not discard a valid deps cache.
+      # - Never save a failed or cancelled build: it may contain incomplete artifacts.
+      # - Do not save when this step already restored the requested cache. There is nothing new to upload, and saving
+      #   it again would create an unnecessary copy for this run's branch or pull request.
+      if: success() && inputs.enable-deps-cache == 'true' && steps.deps-cache-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          ${{ inputs.build-dir }}/third_party
+          ${{ inputs.build-dir }}/_deps
+        key: ${{ steps.deps-cache-key.outputs.key }}
+
+    - name: Clear cache on build failure (deps)
+      # - On failure, remove this run's cache key so a partial dependency build is never reused.
+      # - Do not delete an exact restore hit: this run cannot overwrite it because Save skips exact hits.
+      # - --ref limits deletion to this run's ref. Without it, a matching pull-request key could delete main's cache.
+      if: failure() && inputs.enable-deps-cache == 'true' && steps.deps-cache-restore.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        echo "Build failed - clearing third-party deps cache key so the next run doesn't reuse it:"
+        echo "  ${{ steps.deps-cache-key.outputs.key }} (ref: ${{ github.ref }})"
+        if ! command -v gh >/dev/null 2>&1; then
+          echo "::warning::'gh' CLI not found - skipping cache cleanup. Clear manually: gh cache delete '${{ steps.deps-cache-key.outputs.key }}' --ref '${{ github.ref }}'"
+        elif ! gh cache delete "${{ steps.deps-cache-key.outputs.key }}" --repo "${{ github.repository }}" --ref "${{ github.ref }}"; then
+          echo "::warning::Could not delete deps cache (missing 'actions: write' permission on forked PRs, or nothing saved under this key yet). Clear manually: gh cache delete '${{ steps.deps-cache-key.outputs.key }}' --ref '${{ github.ref }}'"
         fi
