@@ -318,4 +318,152 @@ TEST_F(CuckooFilterFamilyTest, InsertNxWrongType) {
   EXPECT_THAT(Run({"cf.insertnx", "str1", "items", "a"}), ErrArg("WRONGTYPE"));
 }
 
+TEST_F(CuckooFilterFamilyTest, ScanDumpOfEmptyFilterReturnsImmediately) {
+  // Matches upstream: CF.SCANDUMP on a filter with no items reports done right away,
+  // regardless of the cursor passed in -- no header chunk is ever sent for it.
+  ASSERT_EQ(Run("cf.reserve cf1 1000"), "OK");
+
+  for (const char* cursor : {"0", "1", "999999"}) {
+    auto resp = Run({"cf.scandump", "cf1", cursor});
+    auto vec = resp.GetVec();
+    ASSERT_EQ(vec.size(), 2u);
+    EXPECT_EQ(*vec[0].GetInt(), 0) << "cursor=" << cursor;
+    EXPECT_TRUE(vec[1].GetBuf().empty()) << "cursor=" << cursor;
+  }
+}
+
+TEST_F(CuckooFilterFamilyTest, ScanDump) {
+  ASSERT_EQ(Run("cf.reserve cf1 1000"), "OK");
+  for (int i = 0; i < 100; ++i) {
+    Run({"cf.add", "cf1", absl::StrCat("item", i)});
+  }
+
+  auto resp = Run({"cf.scandump", "cf1", "0"});
+  auto vec = resp.GetVec();
+
+  ASSERT_EQ(vec.size(), 2u);
+  int64_t cursor = *vec[0].GetInt();
+
+  EXPECT_EQ(cursor, 1);
+  EXPECT_EQ(vec[1].type, RespExpr::STRING);
+
+  int chunk_count = 1;
+  while (cursor != 0) {
+    resp = Run({"cf.scandump", "cf1", std::to_string(cursor)});
+    vec = resp.GetVec();
+    ASSERT_EQ(vec.size(), 2u);
+
+    const auto next_cursor = *vec[0].GetInt();
+    ASSERT_TRUE(next_cursor > cursor || next_cursor == 0);
+    cursor = next_cursor;
+
+    EXPECT_EQ(vec[1].type, RespExpr::STRING);
+    if (cursor != 0) {
+      ++chunk_count;
+      EXPECT_FALSE(vec[1].GetBuf().empty());
+    } else {
+      EXPECT_TRUE(vec[1].GetBuf().empty());
+    }
+  }
+
+  EXPECT_GE(chunk_count, 1);
+}
+
+TEST_F(CuckooFilterFamilyTest, ScanDumpMissingKey) {
+  EXPECT_THAT(Run({"cf.scandump", "nonexist-key", "0"}), ErrArg("no such key"));
+}
+
+TEST_F(CuckooFilterFamilyTest, ScanDumpPastEnd) {
+  ASSERT_EQ(Run("cf.reserve cf1 100"), "OK");
+  Run({"cf.add", "cf1", "x"});
+
+  const auto resp = Run({"cf.scandump", "cf1", "999999"});
+  const auto& vec = resp.GetVec();
+
+  ASSERT_EQ(vec.size(), 2u);
+  EXPECT_EQ(*vec[0].GetInt(), 0);
+  EXPECT_EQ(vec[1].type, RespExpr::STRING);
+  EXPECT_TRUE(vec[1].GetBuf().empty());
+}
+
+TEST_F(CuckooFilterFamilyTest, ChunkRoundTrip) {
+  constexpr int total_items = 200;
+
+  ASSERT_EQ(Run("cf.reserve cf1 4 expansion 2"), "OK");
+  for (int i = 0; i < total_items; ++i)
+    EXPECT_THAT(Run({"cf.add", "cf1", absl::StrCat("item", i)}), IntArg(1));
+
+  struct Chunk {
+    int64_t cursor;
+    std::string data;
+  };
+  std::vector<Chunk> chunks;
+
+  int64_t cursor = 0;
+  do {
+    auto resp = Run({"cf.scandump", "cf1", std::to_string(cursor)});
+    const auto& vec = resp.GetVec();
+    ASSERT_EQ(vec.size(), 2u);
+
+    const int64_t next_cursor = *vec[0].GetInt();
+    ASSERT_TRUE(next_cursor > cursor || next_cursor == 0);
+
+    if (next_cursor != 0) {
+      EXPECT_EQ(vec[1].type, RespExpr::STRING);
+      EXPECT_FALSE(vec[1].GetBuf().empty());
+      chunks.push_back({next_cursor, vec[1].GetString()});
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+
+  ASSERT_GE(chunks.size(), 2u);
+
+  for (const auto& [crs, data] : chunks)
+    EXPECT_EQ(Run({"cf.loadchunk", "cf2", std::to_string(crs), data}), "OK");
+
+  EXPECT_THAT(
+      Run({"cf.info", "cf2"}),
+      RespArray(ElementsAre(
+          "Size", testing::_, "Number of buckets", testing::_, "Number of filters", testing::_,
+          "Number of items inserted", IntArg(total_items), "Number of items deleted", IntArg(0),
+          "Bucket size", testing::_, "Expansion rate", IntArg(2), "Max iterations", testing::_)));
+
+  for (int i = 0; i < total_items; ++i)
+    EXPECT_THAT(Run({"cf.exists", "cf2", absl::StrCat("item", i)}), IntArg(1)) << i;
+}
+
+TEST_F(CuckooFilterFamilyTest, LoadChunkOverwritesExistingKey) {
+  Run("set cf2 preexisting");
+  ASSERT_EQ(Run("cf.reserve cf1 1000"), "OK");
+  EXPECT_THAT(Run({"cf.add", "cf1", "foo"}), IntArg(1));
+
+  std::vector<std::pair<int64_t, std::string>> chunks;
+  int64_t cursor = 0;
+  do {
+    auto resp = Run({"cf.scandump", "cf1", std::to_string(cursor)});
+    const auto& vec = resp.GetVec();
+    const int64_t next_cursor = *vec[0].GetInt();
+    if (next_cursor != 0)
+      chunks.emplace_back(next_cursor, vec[1].GetString());
+    cursor = next_cursor;
+  } while (cursor != 0);
+
+  for (const auto& [crs, data] : chunks)
+    EXPECT_EQ(Run({"cf.loadchunk", "cf2", std::to_string(crs), data}), "OK");
+
+  EXPECT_EQ(Run("type cf2"), "MBbloomCF");
+  EXPECT_THAT(Run({"cf.exists", "cf2", "foo"}), IntArg(1));
+}
+
+TEST_F(CuckooFilterFamilyTest, LoadChunkErrors) {
+  EXPECT_THAT(Run({"cf.loadchunk", "cf1", "0", "data"}), ErrArg("not an integer"));
+  EXPECT_THAT(Run({"cf.loadchunk", "cf1", "-1", "data"}), ErrArg("not an integer"));
+  EXPECT_THAT(Run({"cf.loadchunk", "cf1", "1", "bad-header"}), ErrArg("INVALIDOBJ"));
+}
+
+TEST_F(CuckooFilterFamilyTest, LoadChunkMissingFilterForContinuation) {
+  // cursor > 1 with no prior header load (cursor==1) means the key was never created.
+  EXPECT_THAT(Run({"cf.loadchunk", "nonexist-key", "2", "data"}), ErrArg("no such key"));
+}
+
 }  // namespace dfly

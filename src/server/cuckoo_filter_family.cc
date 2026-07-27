@@ -10,6 +10,7 @@
 #include "server/conn_context.h"
 #include "server/db_slice.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -47,7 +48,11 @@ OpResult<bool> OpAdd(const OpArgs& op_args, string_view key, string_view item) {
     pv.SetCuckooFilter(CuckooFilterOptions{.capacity = kDefaultCapacity});
   }
 
-  if (!pv.GetCuckooFilter()->Insert(CuckooFilter::Hash(item)))
+  CuckooFilter* cf = pv.GetCuckooFilter();
+  if (cf->IsLoading())
+    return OpStatus::CUCKOO_FILTER_LOAD_IN_PROGRESS;
+
+  if (!cf->Insert(CuckooFilter::Hash(item)))
     return OpStatus::CUCKOO_FILTER_FULL;
   return true;
 }
@@ -62,11 +67,15 @@ OpResult<bool> OpAddNx(const OpArgs& op_args, string_view key, string_view item)
     pv.SetCuckooFilter(CuckooFilterOptions{.capacity = kDefaultCapacity});
   }
 
+  CuckooFilter* cf = pv.GetCuckooFilter();
+  if (cf->IsLoading())
+    return OpStatus::CUCKOO_FILTER_LOAD_IN_PROGRESS;
+
   uint64_t hash = CuckooFilter::Hash(item);
-  if (pv.GetCuckooFilter()->Exists(hash))
+  if (cf->Exists(hash))
     return false;
 
-  if (!pv.GetCuckooFilter()->Insert(hash))
+  if (!cf->Insert(hash))
     return OpStatus::CUCKOO_FILTER_FULL;
   return true;
 }
@@ -78,6 +87,9 @@ OpResult<vector<bool>> OpExists(const OpArgs& op_args, string_view key, ParsedAr
     return op_res.status();
 
   const CuckooFilter* cf = op_res.value()->second.GetCuckooFilter();
+  if (cf->IsLoading())
+    return OpStatus::CUCKOO_FILTER_LOAD_IN_PROGRESS;
+
   vector<bool> result(items.size());
   for (size_t i = 0; i < items.size(); ++i) {
     result[i] = cf->Exists(CuckooFilter::Hash(items[i]));
@@ -92,6 +104,9 @@ OpResult<CuckooInfo> OpInfo(const OpArgs& op_args, string_view key) {
     return op_res.status();
 
   const CuckooFilter* cf = op_res.value()->second.GetCuckooFilter();
+  if (cf->IsLoading())
+    return OpStatus::CUCKOO_FILTER_LOAD_IN_PROGRESS;
+
   return CuckooInfo{cf->MallocUsed(), cf->NumBuckets(),     cf->NumFilters(), cf->NumItems(),
                     cf->NumDeletes(), cf->SlotsPerBucket(), cf->Expansion(),  cf->MaxIterations()};
 }
@@ -103,6 +118,9 @@ OpResult<size_t> OpCount(const OpArgs& op_args, string_view key, string_view ite
     return op_res.status();
 
   const CuckooFilter* cf = op_res.value()->second.GetCuckooFilter();
+  if (cf->IsLoading())
+    return OpStatus::CUCKOO_FILTER_LOAD_IN_PROGRESS;
+
   return cf->Count(CuckooFilter::Hash(item));
 }
 
@@ -112,6 +130,9 @@ OpResult<bool> OpDel(const OpArgs& op_args, string_view key, string_view item) {
   RETURN_ON_BAD_STATUS(op_res);
 
   CuckooFilter* cf = op_res->it->second.GetCuckooFilter();
+  if (cf->IsLoading())
+    return OpStatus::CUCKOO_FILTER_LOAD_IN_PROGRESS;
+
   bool deleted = cf->Delete(CuckooFilter::Hash(item));
   // auto-compact once deletes exceed 10% of items (mirrors RedisBloom's threshold)
   if (deleted && cf->NumFilters() > 1 && cf->NumDeletes() > cf->NumItems() / 10)
@@ -124,9 +145,74 @@ OpStatus OpCompact(const OpArgs& op_args, string_view key) {
   auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
   RETURN_ON_BAD_STATUS(op_res);
 
+  CuckooFilter* cf = op_res->it->second.GetCuckooFilter();
+  if (cf->IsLoading())
+    return OpStatus::CUCKOO_FILTER_LOAD_IN_PROGRESS;
+
   // cont=true: unlike Delete()'s automatic compaction, CF.COMPACT keeps trying older
   // sub-filters even if a newer one couldn't be fully emptied.
-  op_res->it->second.GetCuckooFilter()->Compact(/*cont=*/true);
+  cf->Compact(/*cont=*/true);
+  return OpStatus::OK;
+}
+
+OpResult<CFChunk> OpScanDump(const OpArgs& op_args, string_view key, int64_t cursor) {
+  auto& db_slice = op_args.GetDbSlice();
+  OpResult op_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  if (!op_res)
+    return op_res.status();
+
+  const CuckooFilter* cf = op_res.value()->second.GetCuckooFilter();
+  if (cf->IsLoading())
+    return OpStatus::CUCKOO_FILTER_LOAD_IN_PROGRESS;
+
+  CFDumpIterator it(*cf, cursor);
+  return it.Next();
+}
+
+OpStatus OpLoadChunk(const OpArgs& op_args, string_view blob, string_view key, int64_t cursor) {
+  auto& db_slice = op_args.GetDbSlice();
+
+  if (cursor == 1) {  // Init phase: blob is the header chunk.
+    auto load_result = LoadCFHeader(blob, CompactObj::memory_resource());
+    if (!load_result.has_value()) {
+      LOG_EVERY_T(WARNING, 10) << "CF.LOADCHUNK invalid header"
+                               << " key=" << key << " cursor=" << cursor
+                               << " blob_size=" << blob.size()
+                               << " load_res=" << ToString(load_result.error());
+      return OpStatus::INVALID_VALUE;
+    }
+
+    // type set to nullopt to find any type key and overwrite it, not just CUCKOOFILTER
+    auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, std::nullopt);
+    if (!op_res) {
+      CompactObj::DeleteMR<CuckooFilter>(load_result.value());
+      return op_res.status();
+    }
+
+    // LOADCHUNK overwrites existing key
+    if (!op_res->is_new) {
+      // existing key might not necessarily be a cuckoo filter; it could be HASH/JSON, and indexed
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, op_res->it->second, op_args.shard);
+      db_slice.RemoveExpire(op_args.db_cntx.db_index, op_res->it);
+    }
+
+    op_res->it->second.SetCuckooFilter(load_result.value());
+    return OpStatus::OK;
+  }  // cursor == 1 (Init phase)
+
+  // Continue loading chunks into a not-yet-fully-loaded filter.
+  auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  if (!op_res)
+    return op_res.status();
+
+  CuckooFilter* cf = op_res->it->second.GetCuckooFilter();
+  if (auto load_res = LoadCFChunk(cursor, blob, cf); load_res != CFLoadResult::kOk) {
+    LOG_EVERY_T(WARNING, 10) << "CF.LOADCHUNK invalid chunk"
+                             << " key=" << key << " cursor=" << cursor
+                             << " blob_size=" << blob.size() << " load_res=" << ToString(load_res);
+    return OpStatus::OUT_OF_RANGE;
+  }
+
   return OpStatus::OK;
 }
 
@@ -165,6 +251,9 @@ OpResult<vector<int>> OpInsert(const OpArgs& op_args, ParsedArgs items, const In
   }
 
   CuckooFilter* cf = it_and_updater.it->second.GetCuckooFilter();
+  if (cf->IsLoading())
+    return OpStatus::CUCKOO_FILTER_LOAD_IN_PROGRESS;
+
   vector<int> result(items.size());
   for (size_t i = 0; i < items.size(); ++i) {
     const uint64_t hash = CuckooFilter::Hash(items[i]);
@@ -408,6 +497,49 @@ void CmdCompact(CmdArgParser parser, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(res);
 }
 
+void CmdScanDump(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  const string_view key = parser.Next();
+  const int64_t cursor = parser.Next<FInt<int64_t{0}, std::numeric_limits<int64_t>::max()>>();
+  if (const auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpScanDump(t->GetOpArgs(shard), key, cursor);
+  };
+
+  OpResult<CFChunk> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res)
+    return rb->SendError(res.status());
+
+  RedisReplyBuilder::ArrayScope scope{rb, 2};
+  rb->SendLong(res->cursor);
+  if (res->cursor == 0)
+    DCHECK(res->data.empty()) << " scan ended with inconsistent state";
+  rb->SendBulkString(res->data);
+}
+
+void CmdLoadChunk(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  const string_view key = parser.Next();
+
+  const int64_t cursor = parser.Next<FInt<int64_t{1}, std::numeric_limits<int64_t>::max()>>();
+  const string_view blob = parser.Next();
+  if (const auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpLoadChunk(t->GetOpArgs(shard), blob, key, cursor);
+  };
+
+  const OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  if (res == OpStatus::OK)
+    return rb->SendOk();
+  if (res == OpStatus::INVALID_VALUE)
+    return rb->SendError("INVALIDOBJ invalid cuckoo filter dump payload");
+  return rb->SendError(res);
+}
+
 }  // namespace
 
 using CI = CommandId;
@@ -429,7 +561,9 @@ void RegisterCuckooFilterFamily(CommandRegistry* registry) {
             << CI{"CF.INSERT", CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(Insert)
             << CI{"CF.INSERTNX", CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(InsertNx)
             // They mark it fast and read only. It's neither.
-            << CI{"CF.COMPACT", CO::JOURNALED, 2, 1, 1}.HFUNC(Compact);
+            << CI{"CF.COMPACT", CO::JOURNALED, 2, 1, 1}.HFUNC(Compact)
+            << CI{"CF.SCANDUMP", CO::READONLY, 3, 1, 1}.HFUNC(ScanDump)
+            << CI{"CF.LOADCHUNK", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.HFUNC(LoadChunk);
 }
 
 }  // namespace dfly
