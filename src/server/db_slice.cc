@@ -23,6 +23,7 @@ extern "C" {
 #include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/cluster/slot_set.h"
+#include "server/cmd_memory_scope.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -57,6 +58,9 @@ ABSL_FLAG(bool, journal_omit_redundant_writes, true,
           "If true, omit journal writes for keys during full sync that are yet to be reached by "
           "the serialization loop. Reduces full sync overhead");
 
+ABSL_FLAG(bool, disable_auto_updater_value_accounting, false,
+          "Temporary benchmarking flag: disable AutoUpdater value memory accounting.");
+
 namespace dfly {
 
 using namespace std;
@@ -72,6 +76,8 @@ constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
 static_assert(kPrimeSegmentSize <= 32304);
 
+bool auto_updater_value_accounting_enabled = true;
+
 void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* db) {
   DCHECK_NE(db, nullptr);
   if (size == 0)
@@ -80,6 +86,8 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* 
   DbTableStats& stats = db->stats;
 
   stats.AddTypeMemoryUsage(type, size);
+  if (type == OBJ_KEY)
+    MarkDeductedFromCurrentScope(size);
 
   if (db->slots_stats) {
     db->slots_stats[KeySlot(key)].memory_bytes += size;
@@ -440,6 +448,12 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
       cache_mode_(cache_mode),
       owner_(owner),
       client_tracking_map_(owner->memory_resource()) {
+  static bool init_auto_updater_value_accounting = [] {
+    auto_updater_value_accounting_enabled = !GetFlag(FLAGS_disable_auto_updater_value_accounting);
+    return true;
+  }();
+  (void)init_auto_updater_value_accounting;
+
   db_arr_.emplace_back();
   CreateDb(0);
   std::string keyspace_events = GetFlag(FLAGS_notify_keyspace_events);
@@ -511,6 +525,9 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 }
 
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
+  if (!auto_updater_value_accounting_enabled)
+    return;
+
   AccountObjectMemory(fields_.key, fields_.orig_obj_type, -fields_.orig_value_heap_size,
                       fields_.db_slice->GetDBTable(fields_.db_ind));
   fields_.orig_value_heap_size = 0;                      // Reset to avoid double accounting.
@@ -529,20 +546,22 @@ void DbSlice::AutoUpdater::Run() {
 
   CHECK_NE(fields_.db_slice, nullptr);
 
-  CompactObjType current_type = fields_.it->second.ObjType();
-  int64_t current_size = static_cast<int64_t>(fields_.it->second.MallocUsed());
-  DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
+  if (auto_updater_value_accounting_enabled) {
+    CompactObjType current_type = fields_.it->second.ObjType();
+    int64_t current_size = static_cast<int64_t>(fields_.it->second.MallocUsed());
+    DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
 
-  if (current_type != fields_.orig_obj_type) {
-    // Type changed: remove old size from old type, add new size to new type separately.
-    // Applying (current_size - orig_size) to the new type would incorrectly subtract
-    // from a counter that never had the original bytes added to it.
-    AccountObjectMemory(fields_.key, fields_.orig_obj_type,
-                        -static_cast<int64_t>(fields_.orig_value_heap_size), table);
-    AccountObjectMemory(fields_.key, current_type, current_size, table);
-  } else {
-    ssize_t delta = current_size - static_cast<int64_t>(fields_.orig_value_heap_size);
-    AccountObjectMemory(fields_.key, current_type, delta, table);
+    if (current_type != fields_.orig_obj_type) {
+      // Type changed: remove old size from old type, add new size to new type separately.
+      // Applying (current_size - orig_size) to the new type would incorrectly subtract
+      // from a counter that never had the original bytes added to it.
+      AccountObjectMemory(fields_.key, fields_.orig_obj_type,
+                          -static_cast<int64_t>(fields_.orig_value_heap_size), table);
+      AccountObjectMemory(fields_.key, current_type, current_size, table);
+    } else {
+      ssize_t delta = current_size - static_cast<int64_t>(fields_.orig_value_heap_size);
+      AccountObjectMemory(fields_.key, current_type, delta, table);
+    }
   }
 
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
@@ -555,13 +574,13 @@ void DbSlice::AutoUpdater::Cancel() {
 
 DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it,
                                   DbSlice* db_slice)
-    : fields_{.db_slice = db_slice,
-              .db_ind = db_ind,
-              .it = it,
-              .key = key,
-              .orig_value_heap_size = it->second.MallocUsed(),
-              .orig_obj_type = it->second.ObjType()} {
+    : fields_{.db_slice = db_slice, .db_ind = db_ind, .it = it, .key = key} {
   DCHECK(IsValid(it));
+
+  if (auto_updater_value_accounting_enabled) {
+    fields_.orig_value_heap_size = it->second.MallocUsed();
+    fields_.orig_obj_type = it->second.ObjType();
+  }
 }
 
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
@@ -1912,6 +1931,9 @@ unique_ptr<base::Histogram> DbSlice::StopSampleValues(DbIndex db_ind) {
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async) {
   FiberAtomicGuard guard;
   size_t table_before = table->table_memory();
+
+  const int obj_type = del_it->second.ObjType();
+  CmdMemoryScope scope{obj_type};
 
   if (del_it->second.HasFlag()) {
     if (!SetMCFlag(table->index, del_it->first, 0)) {

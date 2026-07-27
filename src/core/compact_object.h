@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "absl/functional/function_ref.h"
 #include "base/pmr/memory_resource.h"
 #include "common/borrowed_string.h"
 #include "common/string_or_view.h"
@@ -152,6 +153,7 @@ uint32_t JsonEnconding();
 
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
+  using FreeFn = absl::FunctionRef<void()>;
 
  public:
   // Maximum input length, in bytes, that we attempt to compress with Huffman encoding.
@@ -159,6 +161,7 @@ class CompactObj {
   // inside the 15-bit delta budget. Also used by debug tooling that builds a representative
   // symbol histogram from existing data to train the Huffman table.
   static constexpr unsigned kMaxHuffLen = 16 * 1024;
+  using FreeHook = absl::FunctionRef<void(FreeFn)>;
 
  private:
   void operator=(const CompactObj&) = delete;
@@ -339,6 +342,7 @@ class CompactObj {
   // takes ownership over obj_inner.
   // type should not be OBJ_STRING.
   void InitRobj(CompactObjType type, unsigned encoding, void* obj_inner);
+  void InitRobj(CompactObjType type, unsigned encoding, void* obj_inner, FreeHook fh);
 
   // Sets the abstract time used by per-member lazy expiry on StringSet/StringMap.
   // The value should typically be obtained via MemberTimeSeconds(now_ms).
@@ -360,6 +364,8 @@ class CompactObj {
   void GetString(std::string* res) const;
 
   void SetString(std::string_view str);
+  void SetString(std::string_view str, FreeHook fh);
+
   void ReserveString(size_t size);
   void AppendString(std::string_view str);
 
@@ -541,6 +547,7 @@ class CompactObj {
 
  protected:
   void EncodeString(std::string_view str);
+  void EncodeString(std::string_view str, FreeHook fh);
 
   // Requires: HasAllocated() - true.
   void Free();
@@ -557,6 +564,8 @@ class CompactObj {
     taglen_ = taglen;
     mask_ = mask;
   }
+
+  void SetMeta(uint8_t taglen, uint8_t mask, FreeHook fh);
 
   struct ExternalPtr {
     uint32_t serialized_size;

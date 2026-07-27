@@ -386,4 +386,6 @@ class CommandRegistry {
   std::optional<uint32_t> acl_category_;  // category of family currently being built
 };
 
+int TypeForFamily(size_t family);
+
 }  // namespace dfly

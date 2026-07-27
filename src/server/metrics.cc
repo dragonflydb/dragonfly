@@ -272,6 +272,24 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
       absl::StrAppend(&resp->body(), type_used_memory_metric);
   }
 
+  {
+    string cmd_type_memory_metric;
+    bool added = false;
+    AppendMetricHeader("command_type_memory_delta_bytes",
+                       "Signed cumulative command memory delta per object type", MetricType::GAUGE,
+                       &cmd_type_memory_metric);
+    for (size_t type = 0; type < m.cmd_type_mem_delta.size(); ++type) {
+      int64_t delta = m.cmd_type_mem_delta[type];
+      if (delta == 0)
+        continue;
+      AppendMetricValue("command_type_memory_delta_bytes", delta, {"type"}, {ObjTypeToString(type)},
+                        &cmd_type_memory_metric);
+      added = true;
+    }
+    if (added)
+      absl::StrAppend(&resp->body(), cmd_type_memory_metric);
+  }
+
   // Stats metrics
   AppendMetricWithoutLabels("connections_received_total", "", conn_stats.conn_received_cnt,
                             MetricType::COUNTER, &resp->body());
@@ -732,6 +750,7 @@ void Metrics::Merge(const Metrics& src) {
                              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
                              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
                              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
+                             sizeof(std::vector<int64_t>) +
                              176,  // scalar fields (19 fields) + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
@@ -786,6 +805,12 @@ void Metrics::Merge(const Metrics& src) {
     cmd_call_stats[i].first += src.cmd_call_stats[i].first;
     cmd_call_stats[i].second += src.cmd_call_stats[i].second;
   }
+
+  if (cmd_type_mem_delta.size() < src.cmd_type_mem_delta.size())
+    cmd_type_mem_delta.resize(src.cmd_type_mem_delta.size());
+
+  for (size_t i = 0; i < src.cmd_type_mem_delta.size(); ++i)
+    cmd_type_mem_delta[i] += src.cmd_type_mem_delta[i];
 }
 
 void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
@@ -802,6 +827,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
                              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
                              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
                              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
+                             sizeof(std::vector<int64_t>) +
                              176,  // scalar fields (19 fields) + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
@@ -850,6 +876,8 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
 
     if (opts.replication_memory)
       replication_stats = dfly_cmd->GetReplicationMemoryStats(shard);
+
+    cmd_type_mem_delta = shard->cmd_type_mem_delta();
   }
 
   tls_bytes = Listener::TLSUsedMemoryThreadLocal();

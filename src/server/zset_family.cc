@@ -22,6 +22,7 @@ extern "C" {
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/cluster/cluster_defs.h"
+#include "server/cmd_memory_scope.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -252,25 +253,38 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
 
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
+  const bool is_replacing = !add_res.is_new && zparams.override;
   if (add_res.is_new || zparams.override) {
     // If we're overwriting an existing key (not a new one), we need to remove it from
     // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
-    if (!add_res.is_new && zparams.override) {
+    int existing_type = OBJ_ZSET;
+    if (is_replacing) {
+      existing_type = it->second.ObjType();
       RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, pv, op_args.shard);
     }
 
+    auto init_zset = [&](const unsigned encoding, void* inner) {
+      if (is_replacing && existing_type != OBJ_ZSET)
+        pv.InitRobj(OBJ_ZSET, encoding, inner, [existing_type](auto free_old) {
+          CmdMemoryScope scope{existing_type};
+          free_old();
+        });
+      else
+        pv.InitRobj(OBJ_ZSET, encoding, inner);
+    };
+
     if (member_len > server.max_map_field_len) {
-      pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, CompactObj::AllocateMR<detail::SortedMap>());
+      init_zset(OBJ_ENCODING_SKIPLIST, CompactObj::AllocateMR<detail::SortedMap>());
     } else {
       unsigned char* lp = lpNew(0);
-      pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
+      init_zset(OBJ_ENCODING_LISTPACK, lp);
     }
   } else {
     if (it->second.ObjType() != OBJ_ZSET)
       return OpStatus::WRONG_TYPE;
   }
 
-  if (!add_res.is_new && zparams.override)
+  if (is_replacing)
     db_slice.RemoveExpire(op_args.db_cntx.db_index, it);
 
   auto* blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());

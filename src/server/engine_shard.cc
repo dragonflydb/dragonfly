@@ -1238,4 +1238,14 @@ size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
   return total_seg_merged;
 }
 
+void EngineShard::AddCmdTypeMemDelta(size_t type, int64_t delta) {
+  if (ABSL_PREDICT_FALSE(delta == 0))
+    return;
+
+  if (ABSL_PREDICT_FALSE(type >= cmd_type_mem_delta_.size()))
+    cmd_type_mem_delta_.resize(type + 1);
+
+  cmd_type_mem_delta_[type] += delta;
+}
+
 }  // namespace dfly

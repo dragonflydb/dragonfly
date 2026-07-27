@@ -20,6 +20,7 @@ extern "C" {
 #include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/cmd_memory_scope.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -98,6 +99,12 @@ struct StringSetWrapper {
     void* set = g_use_oah_set ? static_cast<void*>(CompactObj::AllocateMR<OAHSet>())
                               : static_cast<void*>(CompactObj::AllocateMR<StringSet>());
     obj->InitRobj(OBJ_SET, kEncodingStrMap2, set);
+  }
+
+  static void Init(CompactObj* obj, CompactObj::FreeHook fh) {
+    void* set = g_use_oah_set ? static_cast<void*>(CompactObj::AllocateMR<OAHSet>())
+                              : static_cast<void*>(CompactObj::AllocateMR<StringSet>());
+    obj->InitRobj(OBJ_SET, kEncodingStrMap2, set, fh);
   }
 
   unsigned Add(const NewEntries& entries, uint32_t ttl_sec, bool keepttl) const {
@@ -212,7 +219,7 @@ pair<unsigned, bool> RemoveSet(const DbContext& db_context, const ParsedArgs& va
   }
 }
 
-void InitSet(const NewEntries& vals, CompactObj* set) {
+void InitSet(const NewEntries& vals, CompactObj* set, int orig_type = OBJ_SET) {
   bool int_set = true;
   long long intv;
 
@@ -223,11 +230,23 @@ void InitSet(const NewEntries& vals, CompactObj* set) {
     }
   }
 
+  auto hook = [&](auto old_free) {
+    CmdMemoryScope scope{orig_type};
+    old_free();
+  };
+
   if (int_set) {
     intset* is = intsetNew();
-    set->InitRobj(OBJ_SET, kEncodingIntSet, is);
+
+    if (orig_type != OBJ_SET)
+      set->InitRobj(OBJ_SET, kEncodingIntSet, is, hook);
+    else
+      set->InitRobj(OBJ_SET, kEncodingIntSet, is);
   } else {
-    StringSetWrapper::Init(set);
+    if (orig_type != OBJ_SET)
+      StringSetWrapper::Init(set, hook);
+    else
+      StringSetWrapper::Init(set);
   }
 }
 
@@ -551,7 +570,9 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   if (add_res.is_new || overwrite) {
     // If we're overwriting an existing key (not a new one), we need to remove it from
     // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
+    int orig_type = OBJ_SET;
     if (!add_res.is_new && overwrite) {
+      orig_type = add_res.it->second.ObjType();
       RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, co, op_args.shard);
       // Account for the old value's memory under its original type before destroying it,
       // since InitSet will free the old value and change the type.
@@ -560,7 +581,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
 
     // does not store the values, merely sets the encoding.
     // TODO: why not store the values as well?
-    InitSet(vals, &co);
+    InitSet(vals, &co, orig_type);
   }
 
   uint32_t res = 0;
