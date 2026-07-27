@@ -1921,3 +1921,148 @@ async def test_shrink_emptied_key_replication_lag(df_factory: DflyInstanceFactor
         "deletion must be journaled explicitly: the replayed SHRINK finds the replayed "
         "member TTLs still alive and cannot reproduce it."
     )
+
+
+@pytest.mark.parametrize(
+    "trigger_cmd, expected_f1",
+    [
+        (["HEXPIRE", "myhash", "100", "FIELDS", "1", "f1"], None),
+        (["HGETEX", "myhash", "PERSIST", "FIELDS", "1", "f1"], None),
+        (["HGETEX", "myhash", "EX", "100", "FIELDS", "1", "f1"], None),
+        (["HSETEX", "myhash", "FXX", "FIELDS", "1", "f1", "vnew"], None),
+        (["HSETEX", "myhash", "FNX", "FIELDS", "1", "f1", "vnew"], "vnew"),
+        (["FIELDEXPIRE", "myhash", "100", "f1"], None),
+    ],
+    ids=["hexpire", "hgetex-persist", "hgetex-ex", "hsetex-fxx", "hsetex-fnx", "fieldexpire"],
+)
+async def test_hash_partial_field_expiry_replication_lag(
+    df_factory: DflyInstanceFactory, trigger_cmd, expected_f1
+):
+    """
+    Verify that hash commands probing a lazily expired field journal an explicit HDEL
+    when the hash does not become empty (a sibling field keeps the key alive).
+
+    Field TTLs replicate as relative values re-applied against the replica clock, so
+    under lag the replayed trigger finds the field still alive and takes a different
+    decision: HEXPIRE/FIELDEXPIRE re-arm it, HGETEX PERSIST makes it immortal, HSETEX
+    FXX overwrites it, HSETEX FNX refuses the write the master performed. The replica
+    is SIGSTOPped so the TTL-arming command and the trigger replay land back-to-back
+    on resume, before the replayed TTL elapses — only an explicit HDEL record can keep
+    the replica in sync.
+    """
+    if df_factory.params.gdb:
+        # Signals to a ptrace-traced server are intercepted by gdb: SIGSTOP on the
+        # wrapper pauses nothing, SIGSTOP on the child cannot be resumed with SIGCONT.
+        pytest.skip("SIGSTOP-based lag simulation cannot pause a gdb-traced server")
+
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Set up replication before writing data so any later mismatch is real divergence
+    await start_replication(c_replica, master.port)
+
+    await c_master.execute_command("HSET", "myhash", "f1", "10", "keep", "x")
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.hlen("myhash") == 2
+
+    try:
+        # SIGSTOP is sent inside pause_process, so it must already be covered by finally.
+        await pause_process(replica.proc.pid)
+
+        # TTL 3 pairs with the elapsed guard below: a false pass (the replica lazily
+        # expiring the field itself during replay) needs a >2s stall between the two
+        # replayed records, which the guard rules out.
+        await c_master.execute_command("HEXPIRE", "myhash", "3", "FIELDS", "1", "f1")
+        await asyncio.sleep(3.2)
+
+        # Probes the lazily expired f1; the hash stays alive through 'keep'.
+        await c_master.execute_command(*trigger_cmd)
+        assert await c_master.hget("myhash", "f1") == expected_f1
+        assert await c_master.hget("myhash", "keep") == "x"
+    finally:
+        resume_time = time.monotonic()
+        resume_process(replica.proc.pid)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # A stall > 2s between the two replayed records lets the replica lazily expire the
+    # field itself, so neither verdict would be trustworthy — skip instead of failing.
+    elapsed = time.monotonic() - resume_time
+    if elapsed > 2:
+        pytest.skip(f"environment too slow to distinguish a missing HDEL ({elapsed:.1f}s)")
+
+    assert await c_replica.hget("myhash", "f1") == expected_f1, (
+        f"Replica diverged on 'f1' after {trigger_cmd[0]} probed it while lazily "
+        "expired on master. The probed-missing field must be journaled as an explicit "
+        "HDEL: the replayed command finds the replayed field TTL still alive and takes "
+        "a different decision."
+    )
+    assert await c_replica.hget("myhash", "keep") == "x"
+
+
+async def test_set_member_partial_expiry_replication_lag(df_factory: DflyInstanceFactory):
+    """
+    Verify that FIELDEXPIRE on a set journals an explicit SREM for a probed member
+    that was lazily expired, when the set does not become empty.
+
+    Same shape as the hash flavor: the replayed FIELDEXPIRE finds the replayed member
+    TTL still alive and re-arms the stale copy instead of reporting it missing.
+    """
+    if df_factory.params.gdb:
+        # Signals to a ptrace-traced server are intercepted by gdb: SIGSTOP on the
+        # wrapper pauses nothing, SIGSTOP on the child cannot be resumed with SIGCONT.
+        pytest.skip("SIGSTOP-based lag simulation cannot pause a gdb-traced server")
+
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Set up replication before writing data so any later mismatch is real divergence
+    await start_replication(c_replica, master.port)
+
+    await c_master.sadd("myset", "m1", "keep")
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.scard("myset") == 2
+
+    try:
+        # SIGSTOP is sent inside pause_process, so it must already be covered by finally.
+        await pause_process(replica.proc.pid)
+
+        # TTL 3 pairs with the elapsed guard below: a false pass (the replica lazily
+        # expiring the member itself during replay) needs a >2s stall between the two
+        # replayed records, which the guard rules out.
+        await c_master.execute_command("FIELDEXPIRE", "myset", "3", "m1")
+        await asyncio.sleep(3.2)
+
+        # Probes the lazily expired m1; the set stays alive through 'keep'.
+        await c_master.execute_command("FIELDEXPIRE", "myset", "100", "m1")
+        assert await c_master.sismember("myset", "m1") == 0
+        assert await c_master.sismember("myset", "keep") == 1
+    finally:
+        resume_time = time.monotonic()
+        resume_process(replica.proc.pid)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # A stall > 2s between the two replayed records lets the replica lazily expire the
+    # member itself, so neither verdict would be trustworthy — skip instead of failing.
+    elapsed = time.monotonic() - resume_time
+    if elapsed > 2:
+        pytest.skip(f"environment too slow to distinguish a missing SREM ({elapsed:.1f}s)")
+
+    assert await c_replica.sismember("myset", "m1") == 0, (
+        "Replica still has member 'm1' after FIELDEXPIRE probed it while lazily "
+        "expired on master. The probed-missing member must be journaled as an explicit "
+        "SREM: the replayed command finds the replayed member TTL still alive and "
+        "re-arms the stale copy."
+    )
+    assert await c_replica.sismember("myset", "keep") == 1
