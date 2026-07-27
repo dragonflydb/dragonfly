@@ -512,15 +512,14 @@ void InterpreterReplier::SendBulkString(string_view str) {
 }
 
 void InterpreterReplier::SendBulkStringBorrowed(cmn::BorrowedString&& bs) {
+  // No streaming sink here: decode into a contiguous string and route through
+  // SendBulkString (-> explr_->OnString), rather than RedisReplyBuilder's
+  // iovec-based chunked path.
   if (!bs.IsEncoded())
     return SendBulkString(bs.view());
 
-  auto* ops = cmn::BorrowedStringOps::Get();
-  string decoded(ops->DecodedSize(bs), '\0');
-  auto result = ops->DecodeChunk(bs, bs.view().size(), 0, std::span<char>{decoded});
-  DCHECK_EQ(result.src_consumed, bs.view().size());
-  DCHECK_EQ(result.dec_written, decoded.size());
-  SendBulkString(decoded);
+  string decoded = cmn::DecodeToString(bs);
+  SendBulkString(string_view{decoded});
 }
 
 void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {

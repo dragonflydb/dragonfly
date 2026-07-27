@@ -352,27 +352,6 @@ void RedisReplyBuilderBase::SendBulkString(T&& str) {
 }
 template void RedisReplyBuilderBase::SendBulkString(std::string&&);
 
-void RedisReplyBuilderBase::SendBulkStringBorrowed(const cmn::BorrowedString& bs) {
-  ReplyScope scope(this);
-  tl_facade_stats->reply_stats.borrowed_string_sent_cnt++;
-
-  auto* ops = cmn::BorrowedStringOps::Get();
-  size_t total = ops->DecodedSize(bs);
-
-  DVLOG(1) << "SendBulkBorrowed " << total << " enc=" << unsigned(bs.encoding());
-  WritePieces(kLengthPrefix, total, kCRLF);
-  if (bs.IsEncoded()) {
-    WriteDecodedAscii(bs);
-  } else {
-    WriteRef(bs.view());
-  }
-  WritePieces(kCRLF);
-}
-
-void RedisReplyBuilderBase::SendBulkStringBorrowed(cmn::BorrowedString&& bs) {
-  SendBulkStringBorrowed(static_cast<const cmn::BorrowedString&>(bs));
-}
-
 void RedisReplyBuilderBase::SendLong(long val) {
   ReplyScope scope(this);
   WritePieces(kLongPref, val, kCRLF);
@@ -457,6 +436,27 @@ void RedisReplyBuilderBase::SendVerbatimString(std::string_view str, VerbatimFor
 
 std::string RedisReplyBuilderBase::SerializeCommand(std::string_view command) {
   return string{command} + kCRLF;
+}
+
+void RedisReplyBuilder::SendBulkStringBorrowed(const cmn::BorrowedString& bs) {
+  ReplyScope scope(this);
+  tl_facade_stats->reply_stats.borrowed_string_sent_cnt++;
+
+  auto* ops = cmn::BorrowedStringOps::Get();
+  size_t total = ops->DecodedSize(bs);
+
+  DVLOG(1) << "SendBulkBorrowed " << total << " enc=" << unsigned(bs.encoding());
+  WritePieces(kLengthPrefix, total, kCRLF);
+  if (bs.IsEncoded()) {
+    WriteDecodedAscii(bs);
+  } else {
+    WriteRef(bs.view());
+  }
+  WritePieces(kCRLF);
+}
+
+void RedisReplyBuilder::SendBulkStringBorrowed(cmn::BorrowedString&& bs) {
+  SendBulkStringBorrowed(static_cast<const cmn::BorrowedString&>(bs));
 }
 
 void RedisReplyBuilder::SendSimpleStrArr(const facade::ArgRange& strs) {
