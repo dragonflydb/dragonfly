@@ -35,7 +35,7 @@ inputs:
   with-aws:
     description: "Build with AWS support"
     required: false
-    default: 'ON'
+    default: 'OFF'
     type: string
   targets:
     description: "Build targets to compile"

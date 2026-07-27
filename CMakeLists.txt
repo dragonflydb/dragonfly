@@ -142,6 +142,7 @@ if (HAS_SPLIT_DWARF_C)
 endif()
 
 set(LEGACY_GLOG OFF CACHE BOOL "Use legacy glog instead of absl")
+set(WITH_AWS OFF CACHE BOOL "Build with helio native AWS support")
 
 include(third_party)
 include(internal)
