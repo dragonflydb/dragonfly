@@ -1,17 +1,18 @@
 import logging
 import time
+
 import pytest
 
 from . import dfly_args
 from .instance import DflyInstance
 from .search_benchmark_utils import (
-    generate_document_columns,
+    DOCUMENT_KEY,
+    INDEX_KEY,
     create_search_index,
+    generate_document_columns,
     generate_document_data,
     run_query_load_test,
     set_random_seed,
-    INDEX_KEY,
-    DOCUMENT_KEY,
 )
 
 

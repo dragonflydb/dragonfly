@@ -7,6 +7,7 @@ import time
 
 import async_timeout
 import pytest
+
 from redis import asyncio as aioredis
 
 from . import dfly_args, dfly_multi_test_args
@@ -122,9 +123,7 @@ async def test_django_cacheops_script(async_client, num_keys=500):
         assert await async_client.exists(k)
         for table, fields in DJANGO_CACHEOPS_SCHEMA(vs).items():
             for sub_schema in fields:
-                conj_key = f"conj:{table}:" + "&".join(
-                    "{}={}".format(f, v) for f, v in sub_schema.items()
-                )
+                conj_key = f"conj:{table}:" + "&".join(f"{f}={v}" for f, v in sub_schema.items())
                 assert await async_client.sismember(conj_key, k)
 
 
@@ -236,7 +235,7 @@ async def test_eval_error_propagation(async_client):
             await async_client.eval(template.format(cmd), 1, "l")
             if does_abort:
                 assert False, "Eval must have thrown an error: " + cmd
-        except aioredis.RedisError as e:
+        except aioredis.RedisError:
             if not does_abort:
                 assert False, "Error should have been ignored: " + cmd
 
@@ -373,7 +372,7 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
           end
         end
     """
-    for i in range(0, 1000):
+    for i in range(1000):
         await asyncio.gather(*(async_client.eval(SCRIPT, 0) for _ in range(5)))
 
     info = await async_client.info("memory")
@@ -392,7 +391,7 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
 
     await async_client.execute_command("CONFIG", "SET", "lua_mem_gc_threshold", "1000")
 
-    for i in range(0, 1000):
+    for i in range(1000):
         await asyncio.gather(*(async_client.eval(SCRIPT, 0) for _ in range(5)))
 
     info = await async_client.info("memory")

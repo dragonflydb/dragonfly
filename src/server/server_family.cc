@@ -799,8 +799,8 @@ nonstd::expected<ReplicaOfArgs, ErrorReply> ReplicaOfArgs::FromCmdArgs(facade::P
     replicaof_args.port = 0;
   } else {
     replicaof_args.host = parser.Next<string>();
-    replicaof_args.port = parser.Next<uint16_t>();
-    if (auto err = parser.TakeError(); err || replicaof_args.port < 1) {
+    replicaof_args.port = parser.Next<Positive<uint16_t>>("port is out of range");
+    if (auto err = parser.TakeError(); err) {
       return nonstd::make_unexpected(ErrorReply("port is out of range"));
     }
     if (parser.HasNext()) {

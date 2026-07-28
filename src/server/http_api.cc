@@ -129,22 +129,16 @@ struct CaptureVisitor {
     absl::StrAppend(&str, JsonEscape(vs->str));
   }
 
-  void operator()(cmn::BorrowedString bs) {
-    // HTTP visitor wants a single contiguous string to JSON-escape. For raw
-    // encodings the bytes are already user-visible; for packed encodings we
-    // materialize once via the registered decode op (chunked decoding only
-    // matters for iovec sinks).
+  void operator()(const cmn::BorrowedString& bs) {
+    // HTTP visitor wants a single contiguous string to JSON-escape. Raw bytes
+    // are already user-visible (avoid a copy); packed encodings are decoded
+    // once via the shared helper (chunked decoding only matters for iovec
+    // sinks).
     if (!bs.IsEncoded()) {
       absl::StrAppend(&str, JsonEscape(bs.view()));
       return;
     }
-    auto* ops = cmn::BorrowedStringOps::Get();
-    const size_t dec_size = ops->DecodedSize(bs);
-    // Default-initialized buffer — skips the value-init zero-fill that
-    // std::string(n, '\0') would do, since DecodeChunk overwrites every byte.
-    auto buf = std::make_unique_for_overwrite<char[]>(dec_size);
-    ops->DecodeChunk(bs, bs.view().size(), 0, std::span<char>(buf.get(), dec_size));
-    absl::StrAppend(&str, JsonEscape(std::string_view(buf.get(), dec_size)));
+    absl::StrAppend(&str, JsonEscape(cmn::DecodeToString(bs)));
   }
 
   void operator()(payload::Null) {

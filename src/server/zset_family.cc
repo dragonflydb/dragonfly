@@ -673,39 +673,34 @@ void IntervalVisitor::AddResult(const uint8_t* vstr, unsigned vlen, long long vl
   }
 }
 
-bool ParseBound(string_view src, ZSetFamily::Bound* bound) {
-  if (src.empty())
-    return false;
-
-  if (src[0] == '(') {
-    bound->is_open = true;
+// Token parsers for parser.Next(fn); also used directly by ZRangeInternal.
+ZSetFamily::Bound ParseScoreBound(string_view src, facade::RuleError& err) {
+  ZSetFamily::Bound bound;
+  if (!src.empty() && src[0] == '(') {
+    bound.is_open = true;
     src.remove_prefix(1);
   }
-
-  return ParseDouble(src, &bound->val);
+  if (src.empty() || !ParseDouble(src, &bound.val))
+    err = {true, kFloatRangeErr};
+  return bound;
 }
 
-bool ParseLexBound(string_view src, ZSetFamily::LexBound* bound) {
-  if (src.empty())
-    return false;
-
+ZSetFamily::LexBound ParseLexBound(string_view src, facade::RuleError& err) {
+  ZSetFamily::LexBound bound;
   if (src == "+") {
-    bound->type = ZSetFamily::LexBound::PLUS_INF;
+    bound.type = ZSetFamily::LexBound::PLUS_INF;
   } else if (src == "-") {
-    bound->type = ZSetFamily::LexBound::MINUS_INF;
-  } else if (src[0] == '(') {
-    bound->type = ZSetFamily::LexBound::OPEN;
-    src.remove_prefix(1);
-    bound->val = src;
-  } else if (src[0] == '[') {
-    bound->type = ZSetFamily::LexBound::CLOSED;
-    src.remove_prefix(1);
-    bound->val = src;
+    bound.type = ZSetFamily::LexBound::MINUS_INF;
+  } else if (!src.empty() && src[0] == '(') {
+    bound.type = ZSetFamily::LexBound::OPEN;
+    bound.val = src.substr(1);
+  } else if (!src.empty() && src[0] == '[') {
+    bound.type = ZSetFamily::LexBound::CLOSED;
+    bound.val = src.substr(1);
   } else {
-    return false;
+    err = {true, kLexRangeErr};
   }
-
-  return true;
+  return bound;
 }
 
 enum class AggType : uint8_t { SUM, MIN, MAX, NOOP };
@@ -1690,17 +1685,21 @@ void ZRangeInternal(const facade::ParsedArgs& args, ZSetFamily::RangeParams rang
   switch (range_params.interval_type) {
     case RP::IntervalType::SCORE: {
       ZSetFamily::ScoreInterval si;
-      if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
+      RuleError err;
+      si.first = ParseScoreBound(min_s, err);
+      si.second = ParseScoreBound(max_s, err);
+      if (err.failed)
         return cmd_cntx->SendError(kFloatRangeErr);
-      }
       range_spec.interval = si;
       break;
     }
     case RP::IntervalType::LEX: {
       ZSetFamily::LexInterval li;
-      if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
+      RuleError err;
+      li.first = ParseLexBound(min_s, err);
+      li.second = ParseLexBound(max_s, err);
+      if (err.failed)
         return cmd_cntx->SendError(kLexRangeErr);
-      }
       range_spec.interval = li;
       break;
     }
@@ -1820,12 +1819,7 @@ void ZRankGeneric(CmdArgParser parser, bool reverse, CommandContext* cmd_cntx) {
 
   string_view key = parser.Next();
   string_view member = parser.Next();
-  bool with_score = false;
-
-  if (parser.HasNext()) {
-    parser.ExpectTag("WITHSCORE");
-    with_score = true;
-  }
+  bool with_score = parser.Check("WITHSCORE");
 
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2189,14 +2183,10 @@ void CmdZCard(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdZCount(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-
-  string_view min_s = parser.Next();
-  string_view max_s = parser.Next();
-
   ZSetFamily::ScoreInterval si;
-  if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return cmd_cntx->SendError(kFloatRangeErr);
-  }
+  si.first = parser.Next(ParseScoreBound);
+  si.second = parser.Next(ParseScoreBound);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCount(t->GetOpArgs(shard), key, si);
@@ -2563,14 +2553,10 @@ void CmdZPopMin(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdZLexCount(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-
-  string_view min_s = parser.Next();
-  string_view max_s = parser.Next();
-
   ZSetFamily::LexInterval li;
-  if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
-    return cmd_cntx->SendError(kLexRangeErr);
-  }
+  li.first = parser.Next(ParseLexBound);
+  li.second = parser.Next(ParseLexBound);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpLexCount(t->GetOpArgs(shard), key, li);
@@ -2627,13 +2613,9 @@ void CmdZRevRangeByLex(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdZRemRangeByRank(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  string_view min_s = parser.Next();
-  string_view max_s = parser.Next();
-
   ZSetFamily::IndexInterval ii;
-  if (!SimpleAtoi(min_s, &ii.first) || !SimpleAtoi(max_s, &ii.second)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
-  }
+  std::tie(ii.first, ii.second) = parser.Next<int64_t, int64_t>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   ZSetFamily::ZRangeSpec range_spec;
   range_spec.interval = ii;
@@ -2642,35 +2624,25 @@ void CmdZRemRangeByRank(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdZRemRangeByScore(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  string_view min_s = parser.Next();
-  string_view max_s = parser.Next();
-
   ZSetFamily::ScoreInterval si;
-  if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return cmd_cntx->SendError(kFloatRangeErr);
-  }
+  si.first = parser.Next(ParseScoreBound);
+  si.second = parser.Next(ParseScoreBound);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   ZSetFamily::ZRangeSpec range_spec;
-
   range_spec.interval = si;
-
   ZRemRangeGeneric(key, range_spec, cmd_cntx);
 }
 
 void CmdZRemRangeByLex(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  string_view min_s = parser.Next();
-  string_view max_s = parser.Next();
-
   ZSetFamily::LexInterval li;
-  if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
-    return cmd_cntx->SendError(kLexRangeErr);
-  }
+  li.first = parser.Next(ParseLexBound);
+  li.second = parser.Next(ParseLexBound);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   ZSetFamily::ZRangeSpec range_spec;
-
   range_spec.interval = li;
-
   ZRemRangeGeneric(key, range_spec, cmd_cntx);
 }
 
@@ -2767,15 +2739,11 @@ void CmdZMScore(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdZScan(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  string_view token = parser.Next();
-
-  uint64_t cursor = 0;
+  uint64_t cursor = parser.Next<uint64_t>("invalid cursor");
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (!absl::SimpleAtoi(token, &cursor)) {
-    return cmd_cntx->SendError("invalid cursor");
-  }
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(parser.UnparsedArgs());
   if (!ops) {

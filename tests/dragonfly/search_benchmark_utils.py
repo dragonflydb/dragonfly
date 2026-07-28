@@ -1,12 +1,13 @@
 import asyncio
 import logging
+import math
 import random
 import string
 import uuid
-import math
-from typing import List, Tuple
-from redis import asyncio as aioredis
+
 from redis.commands.search.query import Query
+
+from redis import asyncio as aioredis
 
 
 def set_random_seed(seed: int):
@@ -43,8 +44,6 @@ PRE_GENERATED_UIDS = []
 
 
 def _initialize_pre_generated_data(size: int):
-    global PRE_GENERATED_STRINGS, PRE_GENERATED_UIDS
-
     # Clear previous data and generate new
     PRE_GENERATED_STRINGS.clear()
     PRE_GENERATED_UIDS.clear()
@@ -62,10 +61,10 @@ def _initialize_pre_generated_data(size: int):
 
 async def generate_document_data(
     client: aioredis.Redis,
-    columns: List[Tuple[str, str]],
+    columns: list[tuple[str, str]],
     num_documents: int,
     chunk_size: int = 1000,
-) -> List[str]:
+) -> list[str]:
     # Initialize pre-generated data
     _initialize_pre_generated_data(num_documents)
 
@@ -89,7 +88,7 @@ async def generate_document_data(
 
 
 async def _generate_documents_chunk(
-    client: aioredis.Redis, document_ids: List[str], columns: List[Tuple[str, str]]
+    client: aioredis.Redis, document_ids: list[str], columns: list[tuple[str, str]]
 ):
     pipeline = client.pipeline()
 
@@ -111,7 +110,7 @@ async def _generate_documents_chunk(
     await pipeline.execute()
 
 
-def generate_search_query(columns: List[Tuple[str, str]], document_ids: List[str]) -> Query:
+def generate_search_query(columns: list[tuple[str, str]], document_ids: list[str]) -> Query:
     column_names = [name for name, _ in columns]
     num_columns = random.randint(int(len(column_names) / 3.5), int(len(column_names) / 2))
     selected_columns = random.sample(column_names, num_columns)
@@ -149,8 +148,8 @@ def create_simple_numeric_filter(property_name: str, property_type: str) -> str:
 async def run_query_client(
     client_id: int,
     df_server,
-    columns: List[Tuple[str, str]],
-    document_ids: List[str],
+    columns: list[tuple[str, str]],
+    document_ids: list[str],
     num_queries: int,
 ) -> int:
     client = df_server.client()
@@ -162,7 +161,7 @@ async def run_query_client(
         for i in range(num_queries):
             try:
                 query = generate_search_query(columns, document_ids)
-                results = await client.ft(INDEX_KEY).search(query)
+                await client.ft(INDEX_KEY).search(query)
                 success_count += 1
 
             except Exception as e:
@@ -183,8 +182,8 @@ async def run_query_client(
 
 async def run_query_load_test(
     df_server,
-    columns: List[Tuple[str, str]],
-    document_ids: List[str],
+    columns: list[tuple[str, str]],
+    document_ids: list[str],
     total_queries: int,
     num_concurrent_clients: int,
 ) -> int:
@@ -202,7 +201,7 @@ async def run_query_load_test(
     return total_completed
 
 
-def generate_document_columns(num_columns: int = 700) -> List[Tuple[str, str]]:
+def generate_document_columns(num_columns: int = 700) -> list[tuple[str, str]]:
     max_text_fields = 128
 
     # Available types for generation
@@ -254,7 +253,7 @@ def generate_document_columns(num_columns: int = 700) -> List[Tuple[str, str]]:
     return columns
 
 
-async def create_search_index(client: aioredis.Redis, columns: List[Tuple[str, str]]) -> None:
+async def create_search_index(client: aioredis.Redis, columns: list[tuple[str, str]]) -> None:
     text_field_count = sum(1 for _, col_type in columns if col_type == "TEXT")
 
     if text_field_count > 128:

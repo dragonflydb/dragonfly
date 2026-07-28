@@ -1,21 +1,23 @@
-import async_timeout
 import asyncio
 import itertools
 import logging
-import pytest
 import random
+
+import async_timeout
+import pytest
 import redis.asyncio as aioredis
 
 from . import dfly_args
-from .seeder import DebugPopulateSeeder, Seeder as SeederV2
+from .instance import DflyInstance, DflyInstanceFactory
+from .seeder import DebugPopulateSeeder
+from .seeder import Seeder as SeederV2
 from .utility import (
+    LogMonitor,
+    check_all_replicas_finished,
+    compare_master_replica_keys,
     info_tick_timer,
     wait_for_replicas_state,
-    check_all_replicas_finished,
-    LogMonitor,
-    compare_master_replica_keys,
 )
-from .instance import DflyInstance, DflyInstanceFactory
 
 BASIC_ARGS = {
     "proactor_threads": 4,
