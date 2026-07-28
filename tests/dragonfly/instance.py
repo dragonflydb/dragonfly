@@ -9,7 +9,6 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Union
 
 import aiohttp
 import psutil
@@ -28,7 +27,7 @@ class DflyParams:
     gdb: bool
     direct_output: bool
     buffered_out: bool
-    args: Dict[str, Union[str, None]]
+    args: dict[str, str | None]
     existing_port: int
     existing_admin_port: int
     existing_mc_port: int
@@ -95,7 +94,7 @@ class DflyInstance:
         self.params = params
         self.proc: subprocess.Popen | None = None
         self._client: RedisClient | None = None
-        self.log_files: List[str] = []
+        self.log_files: list[str] = []
         self.dynamic_port = False
         self.sed_proc = None
         self.clients = []
@@ -357,7 +356,7 @@ class DflyInstance:
             return ports.pop()
         raise RuntimeError("Couldn't parse port")
 
-    def get_logs_from_psutil(self) -> List[str]:
+    def get_logs_from_psutil(self) -> list[str]:
         p = psutil.Process(self.proc.pid)
         rv = []
         for file in p.open_files():
@@ -507,7 +506,7 @@ class DflyInstanceFactory:
         self.instances.append(instance)
         return instance
 
-    def start_all(self, instances: List[DflyInstance]):
+    def start_all(self, instances: list[DflyInstance]):
         """Start multiple instances in parallel"""
         for instance in instances:
             instance._start()

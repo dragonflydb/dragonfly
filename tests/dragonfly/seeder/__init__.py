@@ -1,17 +1,16 @@
 import asyncio
 import json as json_mod
-import random
 import logging
-import re
-import typing
 import math
-import redis
-import redis.asyncio as aioredis
-from dataclasses import dataclass
-import time
+import random
+import re
 import sys
+import time
+from dataclasses import dataclass
 
 import numpy as np
+import redis
+import redis.asyncio as aioredis
 
 try:
     from importlib import resources as impresources
@@ -25,7 +24,7 @@ class SeederBase:
     CACHED_SCRIPTS = {}
     DEFAULT_TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON", "STREAM"]
 
-    def __init__(self, types: typing.List[str] | None = None, seed=None):
+    def __init__(self, types: list[str] | None = None, seed=None):
         self.uid = SeederBase.UID_COUNTER
         SeederBase.UID_COUNTER += 1
         self.types = types if types is not None else type(self).DEFAULT_TYPES
@@ -38,9 +37,7 @@ class SeederBase:
         logging.debug(f"Random seed: {self.seed}, check: {random.randrange(100)}")
 
     @classmethod
-    async def capture(
-        clz, client: aioredis.Redis, types: typing.List[str] | None = None
-    ) -> typing.Tuple[int]:
+    async def capture(clz, client: aioredis.Redis, types: list[str] | None = None) -> tuple[int]:
         """Generate hash capture for all data stored in instance pointed by client"""
 
         sha = await client.script_load(clz._load_script("hash"))
@@ -92,7 +89,7 @@ class DebugPopulateSeeder(SeederBase):
         variance=5,
         samples=10,
         collection_size=None,
-        types: typing.List[str] | None = None,
+        types: list[str] | None = None,
         seed=None,
     ):
         SeederBase.__init__(self, types, seed)
@@ -147,7 +144,7 @@ class Seeder(SeederBase):
         counter: int
         stop_key: str
 
-    units: typing.List[Unit]
+    units: list[Unit]
 
     def __init__(
         self,
@@ -155,7 +152,7 @@ class Seeder(SeederBase):
         key_target=10_000,
         data_size=100,
         collection_size=None,
-        types: typing.List[str] | None = None,
+        types: list[str] | None = None,
         huge_value_target=5,
         huge_value_size=100000,
         seed=None,
@@ -234,7 +231,7 @@ class Seeder(SeederBase):
         unit.counter = int(result[0])
         huge_entries = int(result[1])
 
-        msg = f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}"
+        msg = f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4 + 0]}"
         if huge_entries > 0:
             msg = f"{msg}. Total huge entries {huge_entries} added."
 

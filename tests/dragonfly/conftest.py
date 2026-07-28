@@ -16,7 +16,6 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import gettempdir, mkdtemp
 from time import sleep
-from typing import Dict, List, Union
 
 import pymemcache
 import pytest
@@ -259,7 +258,7 @@ async def proxy_factory():
         yield create_proxy
 
 
-def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
+def parse_args(args: list[str]) -> dict[str, str | None]:
     args_dict = {}
     for arg in args:
         if "=" in arg:
