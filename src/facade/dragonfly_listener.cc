@@ -280,6 +280,7 @@ std::shared_ptr<const TlsCertInfo> Listener::GetTlsCertInfo() const {
   return tls_cert_info_;
 #else
   return nullptr;
+#endif
 }
 
 size_t Listener::TLSUsedMemoryThreadLocal() {
