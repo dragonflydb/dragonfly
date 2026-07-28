@@ -1063,7 +1063,7 @@ async def test_send_delay_metric(df_server: DflyInstance):
 async def test_match_http(df_server: DflyInstance):
     reader, writer = await asyncio.open_connection("localhost", df_server.port)
     for i in range(2000):
-        writer.write("foo bar ".encode())
+        writer.write(b"foo bar ")
         await writer.drain()
 
 
@@ -1148,7 +1148,7 @@ async def test_pipeline_batching_while_migrating(
     writer.write((f"EVALSHA {sha} 1 a\r\n" + incrs).encode())
     await writer.drain()
     # We migrate only when the socket wakes up, so send another batch to trigger migration
-    writer.write("INCR a\r\n".encode())
+    writer.write(b"INCR a\r\n")
     await writer.drain()
 
     # The data doesn't necessarily arrive in a single batch
@@ -1956,7 +1956,7 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
 @dfly_args({"send_timeout": 3})
 async def test_send_timeout(df_server, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
-    writer.write("client setname writer_test\n".encode())
+    writer.write(b"client setname writer_test\n")
     await writer.drain()
     assert "OK" in (await reader.readline()).decode()
     clients = await async_client.client_list()
@@ -1967,7 +1967,7 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
 
     async def get_task():
         while True:
-            writer.write("GET a\n".encode())
+            writer.write(b"GET a\n")
             await writer.drain()
             await asyncio.sleep(0.1)
 
