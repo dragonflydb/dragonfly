@@ -801,8 +801,8 @@ nonstd::expected<ReplicaOfArgs, ErrorReply> ReplicaOfArgs::FromCmdArgs(facade::P
     replicaof_args.port = 0;
   } else {
     replicaof_args.host = parser.Next<string>();
-    replicaof_args.port = parser.Next<uint16_t>();
-    if (auto err = parser.TakeError(); err || replicaof_args.port < 1) {
+    replicaof_args.port = parser.Next<Positive<uint16_t>>("port is out of range");
+    if (auto err = parser.TakeError(); err) {
       return nonstd::make_unexpected(ErrorReply("port is out of range"));
     }
     if (parser.HasNext()) {
@@ -1543,11 +1543,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
 
       // Loaded data bypasses the journal, so force replicas into full sync.
-      dfly_cmd_->CancelReplicas();
-      shard_set->RunBriefInParallel([](EngineShard* shard) {
-        if (shard->journal())
-          journal::ClearBuffer();
-      });
+      ForceReplicasToFullSync();
     }
 
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
@@ -2379,6 +2375,11 @@ void ServerFamily::Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx)
       // delete the now-empty key to prevent zombie keys that crash SAVE.
       if (ds->Empty()) {
         db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
+        // The replayed SHRINK re-applies relative member TTLs against the replica clock
+        // and cannot reproduce this deletion; journal it explicitly.
+        if (shard->journal()) {
+          RecordJournal(t->GetOpArgs(shard), "DEL"sv, {key});
+        }
       }
 
       return bytes_before - bytes_after;
@@ -3358,6 +3359,14 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   facade::RedisReplyBuilder rb(&sink);
   CommandContext cmd_cntx{&rb, nullptr};
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
+}
+
+void ServerFamily::ForceReplicasToFullSync() {
+  dfly_cmd_->CancelReplicas();
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    if (shard->journal())
+      journal::ClearBuffer();
+  });
 }
 
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {

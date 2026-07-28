@@ -420,15 +420,20 @@ records `async_op_start_cycle_` around the `std::visit` that runs the Pub/Sub
 send, so the connection knows how long its current send has been blocked.
 
 `SendPubMessageAsync` (which runs on the subscriber's thread while that send is
-parked) closes the subscriber only when **both** conditions hold:
+parked) closes the subscriber when its active send has been blocked continuously
+for at least `--pubsub_slow_subscriber_timeout_ms` and **either** of these
+conditions holds:
 
-1. the thread is in a soft-limit episode (`subscriber_bytes` above the soft
-   limit), and
-2. this connection's active send has been blocked continuously for at least
-   `--pubsub_slow_subscriber_timeout_ms`.
+1. this connection's queued Pub/Sub data has reached one-sixteenth of
+   `publish_buffer_limit`, or
+2. the thread is in a soft-limit episode (`subscriber_bytes` above the soft
+   limit).
 
-The conditions are conjunctive: a slow send below the budget, or a full budget
-with a still-progressing send, is left alone. When both hold,
+Thus, a slow connection cannot consume the entire per-thread budget before the
+policy can evict it, while a full thread can evict any subscriber with a
+timed-out send. A slow send below the per-connection threshold is left alone
+until the thread reaches its soft limit, and a full budget with a
+still-progressing send is also left alone. When the policy triggers,
 `RequestPubsubClose` discards the new message, evicts the connection's queued
 `PubMessage` items (immediately releasing their subscriber accounting and waking
 parked publishers), and calls the non-blocking `MarkForClose` — it never waits,

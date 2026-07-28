@@ -1,14 +1,19 @@
+import logging
 import platform
+import subprocess
 
 import aiohttp
+import pytest
 from prometheus_client.samples import Sample
 from pymemcache import Client
-
 from redis.exceptions import ResponseError
+
+import redis
+from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstance
-from .utility import *
+from .utility import assert_eventually
 
 
 @pytest.fixture(scope="class")
@@ -21,7 +26,7 @@ class TestServer:
         connection.send_command("QUIT")
         assert connection.read_response() == b"OK"
 
-        with pytest.raises(redis.exceptions.ConnectionError) as e:
+        with pytest.raises(redis.exceptions.ConnectionError):
             connection.read_response()
 
     def test_quit_after_sub(self, connection):
@@ -31,7 +36,7 @@ class TestServer:
         connection.send_command("QUIT")
         assert connection.read_response() == b"OK"
 
-        with pytest.raises(redis.exceptions.ConnectionError) as e:
+        with pytest.raises(redis.exceptions.ConnectionError):
             connection.read_response()
 
     async def test_multi_exec(self, async_client: aioredis.Redis):
@@ -82,8 +87,8 @@ async def test_get_databases(async_client: aioredis.Redis):
 async def test_client_kill(df_factory):
     with df_factory.create(port=1111, admin_port=1112) as instance:
         instance: DflyInstance
-        from redis.backoff import NoBackoff
         from redis.asyncio.retry import Retry
+        from redis.backoff import NoBackoff
 
         client = instance.client(retry=Retry(NoBackoff(), 0))
         admin_client = instance.admin_client()
@@ -95,13 +100,13 @@ async def test_client_kill(df_factory):
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
 
             # Can't kill admin from regular connection
-            with pytest.raises(ResponseError) as e_info:
+            with pytest.raises(ResponseError):
                 await client_conn.execute_command("CLIENT KILL LADDR 127.0.0.1:1112")
 
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
             await admin_client.execute_command("CLIENT KILL LADDR 127.0.0.1:1111")
             assert len(await admin_client.execute_command("CLIENT LIST")) == 1
-            with pytest.raises(redis.exceptions.ConnectionError) as e_info:
+            with pytest.raises(redis.exceptions.ConnectionError):
                 await client_conn.ping()
 
 
@@ -239,7 +244,7 @@ async def test_latency_stats(async_client: aioredis.Redis):
         await async_client.hgetall("missing")
 
     latency_stats = await async_client.info("LATENCYSTATS")
-    for expected in {"hgetall", "set", "get"}:
+    for expected in ("hgetall", "set", "get"):
         key = f"latency_percentiles_usec_{expected}"
         assert key in latency_stats
         assert latency_stats[key].keys() == {"p50", "p99", "p99.9"}

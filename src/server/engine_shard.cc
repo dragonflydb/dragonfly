@@ -536,7 +536,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
     RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
   });
-  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); }, "defrag");
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
@@ -828,15 +828,16 @@ void EngineShard::Heartbeat() {
         check_huffman = false;  // trigger only once.
 
         // launch the task
-        huffman_check_task_id_ =
-            ProactorBase::me()->AddOnIdleTask([task = HuffmanCheckTask{}]() mutable {
+        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask(
+            [task = HuffmanCheckTask{}]() mutable {
               if (!shard_ || !namespaces) {
                 return -1;
               }
 
               DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
               return task.Run(&db_slice);
-            });
+            },
+            "huffman_check");
       }
     }
   }

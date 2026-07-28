@@ -59,7 +59,7 @@ provided for client-library compatibility.
 | `DFLYCLUSTER` | `CONFIG <json>` | `ADMIN \| GLOBAL_TRANS \| HIDDEN`, ACL `ADMIN \| SLOW` | Installs new cluster state. Runs as a global transaction. |
 | `DFLYCLUSTER` | `GETSLOTINFO SLOTS <id\|a-b>...` | as above | Per-slot stats: `key_count`, `total_reads`, `total_writes`, `memory_bytes`. |
 | `DFLYCLUSTER` | `FLUSHSLOTS <start> <end> [...]` | as above | Deletes data in slot ranges. Journaled to replicas. |
-| `DFLYCLUSTER` | `SLOT-MIGRATION-STATUS [<peer_id>]` | as above | Per-migration status: `[direction, peer_id, state, keys_migrated, error]`. |
+| `DFLYCLUSTER` | `SLOT-MIGRATION-STATUS [<peer_id>]` | as above | Per-migration status: `[direction, peer_id, state, keys_migrated, error, slot_ranges]`. |
 | `DFLYMIGRATE` | `INIT <source_id> <num_flows> [start end]...` | `ADMIN \| HIDDEN`, ACL `ADMIN \| SLOW \| DANGEROUS` | Source → target: announce migration. |
 | `DFLYMIGRATE` | `FLOW <source_id> <shard_id>` | as above | Source → target: open one per-shard data stream. |
 | `DFLYMIGRATE` | `ACK <source_id> <attempt>` | as above | Source → target: finalize attempt. |
@@ -407,7 +407,17 @@ add a fresh migration entry in a later config.
 
 `DFLYCLUSTER SLOT-MIGRATION-STATUS` exposes these states as the strings
 `CONNECTING | SYNC | ERROR | FINISHED | FATAL`, alongside the direction (`in` /
-`out`), the peer id, the count of migrated keys so far, and the last error message.
+`out`), the peer id, the count of migrated keys so far, the last error message, and
+the slot ranges the migration covers (e.g. `[4096, 8191]`). The key count is a live,
+recomputed-on-every-call count of the local shard's keys for those slots while the
+migration is in `SYNC` - it is **not** a "keys sent" or "keys received" counter, and
+it moves with concurrent traffic: for an `out` entry it reflects whatever is
+currently in the source for those slots (keys aren't removed from the source until
+the cluster manager pushes a successor config, so inserts/deletes/expirations on the
+source during migration change it too); for an `in` entry it reflects whatever has
+landed in the target so far (it grows as data streams in, but is likewise not
+insulated from concurrent writes). Only once a migration reaches `FINISHED` is the
+count frozen and stable.
 
 ### 6.2 Source flow
 

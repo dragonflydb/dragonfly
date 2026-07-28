@@ -109,6 +109,24 @@ class PureDiskTSTest : public TieredStorageTest {
   optional<absl::FlagSaver> fs;
 };
 
+// Like PureDiskTSTest but multi-threaded, so squashed async commands are
+// dispatched concurrently across several shard threads.
+class PureDiskTSMTTest : public TieredStorageTest {
+ protected:
+  PureDiskTSMTTest() {
+    num_threads_ = 8;
+  }
+
+  void SetUp() override {
+    fs.emplace();
+    SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
+    SetFlag(&FLAGS_tiered_experimental_cooling, false);
+    TieredStorageTest::SetUp();
+  }
+
+  optional<absl::FlagSaver> fs;
+};
+
 // Perform simple series of SET, GETSET and GET
 TEST_P(LatentCoolingTSTest, SimpleGetSet) {
   absl::FlagSaver saver;
@@ -1496,6 +1514,26 @@ TEST_F(PureDiskTSTest, SetNxSquashResult) {
   // SETNX still reports its own outcome, not a neighbour's status.
   EXPECT_EQ(CheckedInt({"SETNX", "fresh", "v"}), 1);
   EXPECT_EQ(CheckedInt({"SETNX", "fresh", "w"}), 0);
+}
+
+// Concurrent asynchronous tiered execution puts pressure on error handling
+// that often utilizes global mutable state. Verify no crashes occur
+TEST_F(PureDiskTSMTTest, SquashedVerifyFailConcurrent) {
+  const int kNum = 32;  // keys span all shards so every shard runs InvokeCmd
+  const string big(4000, 'A');
+  for (int rep = 0; rep < 400; ++rep) {
+    vector<vector<string>> batch;
+    // A malformed command (wrong arity) fails VerifyCommandState and yields a
+    // long, heap-allocated error string that poisons the shared last_error_.
+    batch.push_back({"SET", "k0"});
+    for (int i = 0; i < kNum; ++i)
+      batch.push_back({"SET", absl::StrCat("k", i), big});
+    for (int i = 0; i < kNum; ++i)
+      batch.push_back({"GET", absl::StrCat("k", i)});
+    RunMany(batch);
+  }
+
+  EXPECT_EQ(Run({"PING"}), "PONG");
 }
 
 }  // namespace dfly

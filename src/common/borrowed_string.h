@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -139,6 +140,21 @@ class BorrowedStringOps {
 inline void BorrowedString::Unpin() noexcept {
   if (pin_)
     BorrowedStringOps::Get()->Release(std::move(*this));
+}
+
+// Materialize a borrowed string into a single contiguous std::string. Raw
+// (unencoded) borrows copy their user-visible bytes; packed encodings are
+// decoded once via the registered ops. Consumers that need a contiguous buffer
+// (script interpreter, HTTP/JSON) use this. iovec sinks should prefer chunked
+// decoding (RedisReplyBuilder::SendBulkStringBorrowed) to avoid the extra copy.
+inline std::string DecodeToString(const BorrowedString& bs) {
+  if (!bs.IsEncoded())
+    return std::string{bs.view()};
+
+  auto* ops = BorrowedStringOps::Get();
+  std::string out(ops->DecodedSize(bs), '\0');
+  ops->DecodeChunk(bs, bs.view().size(), 0, std::span<char>{out.data(), out.size()});
+  return out;
 }
 
 }  // namespace cmn

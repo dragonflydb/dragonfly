@@ -44,9 +44,10 @@ jobs:
       - name: Build Dragonfly
         uses: ./.github/actions/builder
         with:
-          # CCache read-only (save defaults off): reuse the base cache kept warm by regression-tests.
           enable-ccache: 'true'
-          cache-key-suffix: ${{ matrix.container }}
+          cache-key-suffix: 'df_common_bin'
+          c-compiler: gcc
+          cxx-compiler: g++
           build-type: ${{matrix.build-type}}
           targets: 'dragonfly'
 

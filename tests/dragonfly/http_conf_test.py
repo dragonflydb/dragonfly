@@ -1,5 +1,7 @@
-import aiohttp
 import json
+
+import aiohttp
+
 from . import dfly_args
 from .instance import DflyInstance
 
@@ -140,7 +142,6 @@ def get_json_object(json_str):
 
 @dfly_args({"proactor_threads": "1", "expose_http_api": "true", "slowlog_log_slower_than": 0})
 async def test_http_api_json_response(df_server: DflyInstance):
-    client = df_server.client()
     async with get_http_session() as session:
         body = '["set", "foo","bar"]'
         async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:

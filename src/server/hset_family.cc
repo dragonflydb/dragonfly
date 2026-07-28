@@ -670,14 +670,42 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   if (pv->IsExternal() && !pv->IsCool())
     return OpStatus::CANCELLED;  // can't mutate offloaded hashes synchronously
 
+  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
+  const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
+
   auto res = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
 
   // If it is a hash which became empty after expiring fields, we must delete the key safely.
   // We use DelMutable which consumes the iterator/updater to prevent the crash.
+  bool key_deleted = false;
   if (pv->Encoding() == kEncodingStrMap2) {
     auto* sm = static_cast<StringMap*>(pv->RObjPtr());
     if (sm->UpperBoundSize() == 0) {
       db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+      key_deleted = true;
+    }
+  }
+
+  // Journaling below may yield; disarm the updater so no dash iterator survives the yield
+  // (DelMutable already consumed it in the deleted case).
+  if (!key_deleted)
+    op_res->post_updater.Run();
+
+  if (op_args.shard->journal()) {
+    if (key_deleted) {
+      // The replayed command re-applies a relative TTL against the replica clock and
+      // cannot reproduce this deletion; journal it explicitly.
+      RecordJournal(op_args, "DEL"sv, {key});
+    } else if (had_member_expiry) {
+      // A field probed while lazily expired is still alive on a lagging replica and the
+      // replayed command would re-arm it there; delete it explicitly.
+      absl::InlinedVector<string_view, 4> missing{key};
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (res[i] == -2)
+          missing.push_back(values[i]);
+      }
+      if (missing.size() > 1)
+        RecordJournal(op_args, "HDEL"sv, missing);
     }
   }
 
@@ -702,17 +730,29 @@ OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key,
   if (pv.IsExternal() && !pv.IsCool())
     return OpStatus::CANCELLED;  // can't inspect offloaded hashes synchronously
 
+  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
+  const bool had_member_expiry = pv.Encoding() == kEncodingStrMap2 && pv.HasMemberExpiration();
+
   HMapWrap hw{pv, op_args.db_cntx};
   bool holds = true;
+  absl::InlinedVector<string_view, 4> missing{key};
   for (size_t i = 0; i < fields.size(); i += 2) {
+    const bool found = bool(hw.Find(fields[i]));
+    if (had_member_expiry && !found)
+      missing.push_back(fields[i]);
     // FNX requires every field to be absent; FXX requires every field to be present.
-    if (fnx == bool(hw.Find(fields[i]))) {
+    if (fnx == found) {
       holds = false;
       break;
     }
   }
-  if (hw.Length() == 0)  // Find() may have lazily expired fields and emptied the hash.
+  if (hw.Length() == 0) {  // Find() may have lazily expired fields and emptied the hash.
     DeleteHw(hw, op_args, key);
+  } else if (missing.size() > 1 && op_args.shard->journal()) {
+    // A field probed while lazily expired is still alive on a lagging replica and the
+    // replayed condition would decide differently there; delete it explicitly first.
+    RecordJournal(op_args, "HDEL"sv, missing);
+  }
   return holds;
 }
 
@@ -993,6 +1033,9 @@ OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const 
   if (pv->IsExternal() && !pv->IsCool())
     return OpStatus::CANCELLED;  // offloaded hashes can't be read/mutated synchronously
 
+  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
+  const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
+
   // Capture the current field values before mutating TTLs: a past/zero expiry deletes the field,
   // but its value must still be returned (Redis semantics).
   vector<OptStr> values;
@@ -1012,10 +1055,36 @@ OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const 
   }
 
   // Lazy field expiry during the read, or a 0-ttl deletion above, may have emptied the hash.
+  bool key_deleted = false;
   if (pv->Encoding() == kEncodingStrMap2) {
     auto* sm = static_cast<StringMap*>(pv->RObjPtr());
-    if (sm->UpperBoundSize() == 0)
+    if (sm->UpperBoundSize() == 0) {
       db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+      key_deleted = true;
+    }
+  }
+
+  // Journaling below may yield; disarm the updater so no dash iterator survives the yield
+  // (DelMutable already consumed it in the deleted case).
+  if (!key_deleted)
+    op_res->post_updater.Run();
+
+  if (op_args.shard->journal()) {
+    if (key_deleted) {
+      // The replayed command re-applies a relative TTL against the replica clock and
+      // cannot reproduce this deletion; journal it explicitly.
+      RecordJournal(op_args, "DEL"sv, {key});
+    } else if (had_member_expiry) {
+      // A field probed while lazily expired is still alive on a lagging replica and the
+      // replayed command would re-arm or persist it there; delete it explicitly.
+      absl::InlinedVector<string_view, 4> missing{key};
+      for (size_t i = 0; i < fields.size(); ++i) {
+        if (!values[i].has_value())
+          missing.push_back(fields[i]);
+      }
+      if (missing.size() > 1)
+        RecordJournal(op_args, "HDEL"sv, missing);
+    }
   }
 
   return values;
@@ -1354,10 +1423,7 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
 
       if (string_map->Empty()) {  // Can happen if we use a TTL on hash members.
-        auto res_it = db_slice.FindMutable(db_context, key, OBJ_HASH);
-        if (res_it) {
-          db_slice.DelMutable(db_context, std::move(*res_it));
-        }
+        HSetFamily::DeleteIfEmpty(db_slice, db_context, key, pv);
         return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {

@@ -89,8 +89,9 @@ ABSL_FLAG(strings::MemoryBytesFlag, publish_buffer_limit, 196_MB,
 
 ABSL_FLAG(uint32_t, pubsub_slow_subscriber_timeout_ms, 0,
           "If a subscriber connection keeps a Pub/Sub socket write blocked for at least this many "
-          "milliseconds while the per-IO-thread subscriber memory is above the soft "
-          "publish_buffer_limit, Dragonfly closes that subscriber to release the back-pressure. "
+          "milliseconds, Dragonfly closes it when either its queued Pub/Sub memory reaches "
+          "one-sixteenth of publish_buffer_limit or the per-IO-thread subscriber memory is "
+          "above publish_buffer_limit. "
           "0 disables this slow-subscriber protection. Startup-only, like publish_buffer_limit.");
 
 ABSL_FLAG(uint32_t, pipeline_squash, 1,
@@ -140,9 +141,10 @@ ABSL_FLAG(
     "to accumulate more already-available input, so the squasher sees one large batch instead of "
     "many small ones.");
 
-ABSL_FLAG(bool, pipeline_parse_in_proactor, true,
-          "V2 only: parse newly-arrived bytes from the proactor OnRecv callback while the fiber "
-          "is blocked in a squash hop, so the next batch is already grown when execution resumes.");
+ABSL_FLAG(
+    bool, pipeline_parse_in_proactor, true,
+    "V2 only: parse newly-arrived bytes from the proactor OnRecv callback while the fiber is "
+    "parked waiting on parallel work, so the next batch is already grown when execution resumes.");
 
 ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
           "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
@@ -2390,14 +2392,18 @@ bool Connection::IsCurrentlyDispatching() const {
   return cc_->async_dispatch || cc_->sync_dispatch;
 }
 
-bool Connection::IsAsyncOpOverdue(uint64_t timeout_cycles) const {
-  if (async_op_start_cycle_ == 0)
+bool Connection::IsAsyncOpOverdue() const {
+  if (pubsub_slow_subscriber_timeout_cycles_cached == 0 || async_op_start_cycle_ == 0)
     return false;
-  return base::CycleClock::Now() - async_op_start_cycle_ >= timeout_cycles;
+  return base::CycleClock::Now() >=
+         async_op_start_cycle_ + pubsub_slow_subscriber_timeout_cycles_cached;
 }
 
 void Connection::RequestPubsubClose() {
   QueueBackpressure& qbp = GetQueueBackpressure();
+  const size_t connection_subscriber_bytes = dispatch_q_subscriber_bytes_;
+
+  unsigned blocked_usec = base::CycleClock::ToUsec(base::CycleClock::Now() - async_op_start_cycle_);
 
   // Evict already-queued PubMessage items, releasing their per-thread subscriber accounting
   // immediately. Other control messages (checkpoints, migration, ...) are left for the normal
@@ -2426,12 +2432,10 @@ void Connection::RequestPubsubClose() {
   // not to a metric label.
   LOG_EVERY_T(WARNING, 1) << "Closing slow Pub/Sub subscriber " << DebugInfo()
                           << " tid=" << ProactorBase::me()->GetPoolIndex()
-                          << " publish_buffer_limit=" << qbp.publish_buffer_limit
                           << " thread_subscriber_bytes="
                           << qbp.subscriber_bytes.load(memory_order_relaxed)
-                          << " blocked_send_usec="
-                          << base::CycleClock::ToUsec(base::CycleClock::Now() -
-                                                      async_op_start_cycle_)
+                          << " connection_subscriber_bytes=" << connection_subscriber_bytes
+                          << " blocked_send_usec=" << blocked_usec
                           << " discarded_entries=" << discarded_msgs
                           << " discarded_bytes=" << discarded_bytes;
 
@@ -2448,14 +2452,23 @@ void Connection::SendPubMessageAsync(PubMessage msg) {
   if (request_shutdown_)
     return;
 
-  // Two conjunctive conditions: the thread is in a soft-limit back-pressure episode AND this
-  // connection's active Pub/Sub send has been blocked continuously past the configured deadline.
-  // A slow send below the budget, or a full budget with a still-progressing send, is left alone.
-  uint64_t timeout_cycles = pubsub_slow_subscriber_timeout_cycles_cached;
-  if (timeout_cycles > 0 && GetQueueBackpressure().IsSubscriberSoftLimited() &&
-      IsAsyncOpOverdue(timeout_cycles)) {
-    RequestPubsubClose();
-    return;  // discard the message that triggered the close
+  if (IsAsyncOpOverdue()) {
+    // A single blocked subscriber must not consume the whole per-thread Pub/Sub budget before the
+    // slow-subscriber policy can evict it.
+    constexpr uint32_t kPubSubConnectionLimitDivisor = 16;
+
+    // Close a subscriber only after its active Pub/Sub send has been blocked continuously past the
+    // configured deadline. Either its own queued Pub/Sub data has reached the per-connection limit,
+    // or the thread is in a soft-limit back-pressure episode. The local limit prevents one blocked
+    // connection from consuming the whole thread-wide budget before it becomes eligible for
+    // eviction.
+    QueueBackpressure& qbp = GetQueueBackpressure();
+
+    size_t conn_soft_limit = qbp.publish_buffer_limit / kPubSubConnectionLimitDivisor;
+    if (dispatch_q_subscriber_bytes_ >= conn_soft_limit || qbp.IsSubscriberSoftLimited()) {
+      RequestPubsubClose();
+      return;  // discard the message that triggered the close
+    }
   }
 
   SendAsync({make_unique<PubMessage>(std::move(msg))});
@@ -3070,12 +3083,19 @@ bool Connection::ExecuteBatch() {
       DCHECK(!cc_->async_dispatch);
       cc_->sync_dispatch = true;
       cc_->async_dispatch = is_true_pipeline;
+      fiber_park_spot_ = FiberParkSpot::kSimpleHop;
     }
+    // parse-in-proactor can append commands while we are parked in DispatchCommandSimple. We might
+    // need to update is_true_pipeline.
+    size_t q_len_before_dispatch = parsed_cmd_q_len_;
     uint64_t dispatch_start = CycleClock::Now();
     auto dispatch_res = service_->DispatchCommandSimple(cmd, mode);
     if (ioloop_v2_) {
+      fiber_park_spot_ = FiberParkSpot::kNone;
       cc_->sync_dispatch = false;
       cc_->async_dispatch = false;
+      if (parsed_cmd_q_len_ > q_len_before_dispatch)
+        is_true_pipeline = true;
     }
     // Enforce the pipeline reply-ordering invariant: replies must reach the socket in parse order.
     // V1 (ONLY_SYNC): all commands run serially, so parsed_to_execute_ always equals parsed_head_
@@ -3130,8 +3150,10 @@ bool Connection::ReplyBatch() {
       // Pure coroutine replies don't preserve lifetimes
       const bool suspended = cmd->IsSuspendedReply();
       std::optional<SinkReplyBuilder::ScopePause> pause;
-      if (suspended)
+      if (suspended) {
         pause.emplace(reply_builder_.get());
+        fiber_park_spot_ = FiberParkSpot::kSendReply;
+      }
 
       // V2 in-flight tracking:
       // - A command isn't "done" until its reply is written. A suspended (coroutine) reply can do
@@ -3142,6 +3164,7 @@ bool Connection::ReplyBatch() {
       //   SendCheckpoint's HasInFlightCommands() check) and waits for the write to land.
       // - A non-suspended reply just copies an already-built payload and can't preempt.
       cmd->SendReply();
+      fiber_park_spot_ = FiberParkSpot::kNone;
       AdvanceParsedHead(cmd->next);
       replied++;
 
@@ -3382,11 +3405,16 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
     if (io_buf_.InputLen() > before)
       ++GetLocalConnStats().proactor_reads;
 
-    // Parse In Proactor: parse newly-read bytes while the fiber is parked in a squash hop, so the
-    // next batch is already larger on resume.
-    // - This is safe because the parser is idle at kSquashHop.
+    // Parse In Proactor: parse newly-read bytes while the fiber is parked, so the next batch is
+    // already larger on resume. Enabled only at parks where the parser is idle AND the fiber waits
+    // on parallel progress (a remote shard or the kernel, possibly on another CPU), so the parse
+    // overlaps real work. Parks that run nothing in parallel (e.g. a self-preemption yield) are
+    // excluded - offloading them buys nothing.
     // - Calling ParseRedis() with max_busy_cycles==0: proactor's callbacks must not suspend.
-    if (pipeline_parse_in_proactor_cached && (fiber_park_spot_ == FiberParkSpot::kSquashHop) &&
+    if (pipeline_parse_in_proactor_cached &&
+        (fiber_park_spot_ == FiberParkSpot::kSquashHop ||
+         fiber_park_spot_ == FiberParkSpot::kSendReply ||
+         fiber_park_spot_ == FiberParkSpot::kSimpleHop) &&
         redis_parser_ && (io_buf_.InputLen() > 0)) {
       size_t cmds_before = parsed_cmd_q_len_;
       ParserStatus st = ParseRedis(io_buf_, 0, /*enqueue_only=*/true);

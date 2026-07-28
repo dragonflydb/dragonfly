@@ -273,12 +273,12 @@ TEST_F(CmdArgParserTest, ValidatedRules) {
   }
 }
 
-TEST_F(CmdArgParserTest, BoundedRule) {
+TEST_F(CmdArgParserTest, RangeRules) {
   static constexpr char kMsg[] = "out of range";
 
-  // Integer range: in-range passes; below/above report the custom message; a non-integer stays
-  // generic INVALID_INT.
-  using Pct = Validated<int, Bounded<0, 100, kMsg>>;
+  // ClosedRange integer: in-range passes; below/above report the custom message; a non-integer
+  // stays generic INVALID_INT.
+  using Pct = Validated<int, ClosedRange<0, 100, kMsg>>;
   {
     auto parser = Make({"0", "100", "50"});
     EXPECT_EQ(static_cast<int>(parser.Next<Pct>()), 0);
@@ -295,6 +295,25 @@ TEST_F(CmdArgParserTest, BoundedRule) {
     auto parser = Make({"abc"});
     parser.Next<Pct>();
     EXPECT_EQ(parser.TakeError().type, CmdArgParser::INVALID_INT);
+  }
+
+  // Integer endpoints validate floating-point v: OpenRange<0, 1> excludes the endpoints, while
+  // ClosedRange<0, 1> includes them.
+  using OpenProb = Validated<double, OpenRange<0, 1, kMsg>>;
+  using ClosedProb = Validated<double, ClosedRange<0, 1, kMsg>>;
+  {
+    auto parser = Make({"0.5"});
+    EXPECT_DOUBLE_EQ(static_cast<double>(parser.Next<OpenProb>()), 0.5);
+    EXPECT_FALSE(parser.HasError());
+  }
+  for (std::string_view edge : {"0", "1"}) {
+    auto open = Make({edge});
+    open.Next<OpenProb>();
+    EXPECT_EQ(open.TakeError().MakeReply().ToSv(), "out of range");  // open excludes endpoints
+
+    auto closed = Make({edge});
+    closed.Next<ClosedProb>();
+    EXPECT_FALSE(closed.HasError());  // closed includes endpoints
   }
 }
 

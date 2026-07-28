@@ -803,37 +803,40 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgParser parser, CommandContext*
     string_view state;
     size_t keys_number;
     string error;
+    string slot_ranges;
   };
   vector<Reply> reply;
   reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
 
   auto append_answer = [&reply](string_view direction, string node_id, string_view filter,
-                                MigrationState state, size_t keys_number, string error) {
+                                MigrationState state, size_t keys_number, string error,
+                                string slot_ranges) {
     if (filter.empty() || filter == node_id) {
       error = error.empty() ? "0" : error;
-      reply.emplace_back(
-          Reply{direction, std::move(node_id), StateToStr(state), keys_number, std::move(error)});
+      reply.emplace_back(Reply{direction, std::move(node_id), StateToStr(state), keys_number,
+                               std::move(error), std::move(slot_ranges)});
     }
   };
 
   for (const auto& m : incoming_migrations_jobs_) {
     append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(),
-                  m->GetErrorStr());
+                  m->GetErrorStr(), m->GetSlots().ToString());
   }
   for (const auto& m : outgoing_migration_jobs_) {
     append_answer("out", m->GetMigrationInfo().node_info.id, node_id, m->GetState(),
-                  m->GetKeyCount(), m->GetErrorStr());
+                  m->GetKeyCount(), m->GetErrorStr(), m->GetSlots().ToString());
   }
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->StartArray(reply.size());
   for (const auto& r : reply) {
-    rb->StartArray(5);
+    rb->StartArray(6);
     rb->SendBulkString(r.direction);
     rb->SendBulkString(r.node_id);
     rb->SendBulkString(r.state);
     rb->SendLong(r.keys_number);
     rb->SendBulkString(r.error);
+    rb->SendBulkString(r.slot_ranges);
   }
 }
 

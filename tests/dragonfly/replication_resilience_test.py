@@ -8,13 +8,12 @@ from itertools import chain, repeat
 
 import async_timeout
 import pytest
+
 import redis
 from redis import asyncio as aioredis
 
 from . import dfly_args
-from .instance import DflyInstanceFactory, DflyInstance
-from .seeder import DebugPopulateSeeder
-from .seeder import Seeder as SeederV2
+from .instance import DflyInstance, DflyInstanceFactory
 from .replication_utils import (
     ADMIN_PORT,
     get_metric_value,
@@ -23,11 +22,13 @@ from .replication_utils import (
     start_replication,
     wait_for_replica_status,
 )
+from .seeder import DebugPopulateSeeder
+from .seeder import Seeder as SeederV2
 from .utility import (
-    assert_eventually,
-    check_all_replicas_finished,
     DflySeederFactory,
     ExpirySeeder,
+    assert_eventually,
+    check_all_replicas_finished,
     info_tick_timer,
     tmp_file_name,
     wait_available_async,
@@ -688,8 +689,8 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     # redis-py >= 7 retries on ConnectionError by default, and BusyLoadingError
     # inherits from ConnectionError, causing the REPLICAOF to be silently
     # retried until loading finishes.
-    from redis.retry import Retry
     from redis.backoff import NoBackoff
+    from redis.retry import Retry
 
     c_replica = replica.client(retry=Retry(NoBackoff(), 0))
 
@@ -1171,6 +1172,63 @@ async def test_cascaded_partial_sync(df_factory, reconnect_to):
     assert len(lines) == 0
 
 
+async def test_cascaded_full_sync_on_master_switch(df_factory):
+    """Transitive re-sync when an intermediate node switches to a new, independent master.
+
+    Chain master -> r1 -> r2 -> r3. r1 then does REPLICAOF m2 where m2 is an independent master
+    holding a different dataset. r1 full syncs m2 (replacing its data outside its journal), which
+    must force r2 to full sync r1, which in turn forces r3 to full sync r2. All downstream replicas
+    must converge to m2's dataset.
+    """
+    flag = {"proactor_threads": 4, "experimental_cascaded_partial_sync": None}
+    master, r1, r2, r3, m2 = (df_factory.create(**flag) for _ in range(5))
+    df_factory.start_all([master, r1, r2, r3, m2])
+
+    c_master, c_r1, c_r2, c_r3, c_m2 = (
+        master.client(),
+        r1.client(),
+        r2.client(),
+        r3.client(),
+        m2.client(),
+    )
+
+    # master and m2 hold clearly different datasets.
+    for i in range(100):
+        await c_master.append(f"k{i}", "master")
+    for i in range(100):
+        await c_m2.append(f"k{i}", "M2_DIFFERENT")
+
+    # Build chain master -> r1 -> r2 -> r3.
+    for c, upstream in ((c_r1, master), (c_r2, r1), (c_r3, r2)):
+        await c.execute_command(f"REPLICAOF localhost {upstream.port}")
+        await wait_for_replicas_state(c)
+    await check_all_replicas_finished([c_r1], c_master)
+    await check_all_replicas_finished([c_r2], c_r1)
+    await check_all_replicas_finished([c_r3], c_r2)
+
+    master_hash, r3_hash = await asyncio.gather(SeederV2.capture(c_master), SeederV2.capture(c_r3))
+    assert master_hash == r3_hash
+
+    # r1 switches to the independent master m2.
+    await c_r1.execute_command(f"REPLICAOF localhost {m2.port}")
+    await wait_for_replicas_state(c_r1)
+    await check_all_replicas_finished([c_r1], c_m2)
+
+    # Downstream replicas must transitively full sync and converge to m2's dataset.
+    await check_all_replicas_finished([c_r2], c_r1)
+    await check_all_replicas_finished([c_r3], c_r2)
+
+    m2_hash, r1_hash, r2_hash, r3_hash = await asyncio.gather(
+        SeederV2.capture(c_m2),
+        SeederV2.capture(c_r1),
+        SeederV2.capture(c_r2),
+        SeederV2.capture(c_r3),
+    )
+    assert r1_hash == m2_hash, "r1 did not converge to m2"
+    assert r2_hash == m2_hash, "r2 did not transitively converge to m2"
+    assert r3_hash == m2_hash, "r3 did not transitively converge to m2"
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="Master rotation not implemented yet",
@@ -1235,7 +1293,7 @@ async def test_partial_sync(df_factory, proactors, backlog_len, proxy_factory):
     df_factory.start_all([replica, master])
 
     async def stream(client, total):
-        for i in range(0, total):
+        for i in range(total):
             prefix = "{prefix}"
             # Seed to one shard only. This will eventually cause one of the flows to become stale.
             await client.execute_command(f"SET {prefix}foo{i} bar{i}")

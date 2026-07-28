@@ -1,17 +1,17 @@
 import asyncio
 import json as json_mod
-import random
 import logging
-import re
-import typing
 import math
-import redis
-import redis.asyncio as aioredis
-from dataclasses import dataclass
-import time
+import random
+import re
 import sys
+import time
+from dataclasses import dataclass
 
 import numpy as np
+import redis.asyncio as aioredis
+
+import redis
 
 try:
     from importlib import resources as impresources
@@ -25,7 +25,7 @@ class SeederBase:
     CACHED_SCRIPTS = {}
     DEFAULT_TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON", "STREAM"]
 
-    def __init__(self, types: typing.Optional[typing.List[str]] = None, seed=None):
+    def __init__(self, types: list[str] | None = None, seed=None):
         self.uid = SeederBase.UID_COUNTER
         SeederBase.UID_COUNTER += 1
         self.types = types if types is not None else type(self).DEFAULT_TYPES
@@ -38,9 +38,7 @@ class SeederBase:
         logging.debug(f"Random seed: {self.seed}, check: {random.randrange(100)}")
 
     @classmethod
-    async def capture(
-        clz, client: aioredis.Redis, types: typing.Optional[typing.List[str]] = None
-    ) -> typing.Tuple[int]:
+    async def capture(clz, client: aioredis.Redis, types: list[str] | None = None) -> tuple[int]:
         """Generate hash capture for all data stored in instance pointed by client"""
 
         sha = await client.script_load(clz._load_script("hash"))
@@ -92,7 +90,7 @@ class DebugPopulateSeeder(SeederBase):
         variance=5,
         samples=10,
         collection_size=None,
-        types: typing.Optional[typing.List[str]] = None,
+        types: list[str] | None = None,
         seed=None,
     ):
         SeederBase.__init__(self, types, seed)
@@ -147,7 +145,7 @@ class Seeder(SeederBase):
         counter: int
         stop_key: str
 
-    units: typing.List[Unit]
+    units: list[Unit]
 
     def __init__(
         self,
@@ -155,7 +153,7 @@ class Seeder(SeederBase):
         key_target=10_000,
         data_size=100,
         collection_size=None,
-        types: typing.Optional[typing.List[str]] = None,
+        types: list[str] | None = None,
         huge_value_target=5,
         huge_value_size=100000,
         seed=None,
@@ -234,7 +232,7 @@ class Seeder(SeederBase):
         unit.counter = int(result[0])
         huge_entries = int(result[1])
 
-        msg = f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}"
+        msg = f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4 + 0]}"
         if huge_entries > 0:
             msg = f"{msg}. Total huge entries {huge_entries} added."
 
@@ -401,7 +399,7 @@ class HnswSearchSeeder:
         r = await client.execute_command(
             "FT.SEARCH",
             self.index_name,
-            "*=>[KNN {k} @embedding $vec]".format(k=k),
+            f"*=>[KNN {k} @embedding $vec]",
             "NOCONTENT",
             "PARAMS",
             "2",
@@ -421,11 +419,11 @@ class HnswSearchSeeder:
         checks presence in the index, making this a reliable existence check.
         """
         doc_key = doc_id if isinstance(doc_id, str) else doc_id.decode()
-        doc_num = doc_key[len(self.prefix) :] if doc_key.startswith(self.prefix) else doc_key
+        doc_num = doc_key.removeprefix(self.prefix)
         r = await client.execute_command(
             "FT.SEARCH",
             self.index_name,
-            "@doc_id:{{{id}}}=>[KNN {k} @embedding $vec]".format(id=doc_num, k=k),
+            f"@doc_id:{{{doc_num}}}=>[KNN {k} @embedding $vec]",
             "NOCONTENT",
             "PARAMS",
             "2",

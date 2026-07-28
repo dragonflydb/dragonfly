@@ -710,6 +710,9 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
   if (sync_type == "partial") {
     ++psync_successes_;
+  } else if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
+    // We replace our dataset with full sync invisibly for other replicas, so force them to re-sync
+    service_.server_family().ForceReplicasToFullSync();
   }
 
   // Joining flows and resetting state is done by cleanup.

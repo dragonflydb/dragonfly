@@ -1,14 +1,15 @@
 import logging
 import threading
-from redis import asyncio as aioredis
 
 import pytest
 from celery import Celery
 from celery.contrib.testing.worker import (
-    setup_app_for_worker,
     TestWorkController,
     _set_task_join_will_block,
+    setup_app_for_worker,
 )
+
+from redis import asyncio as aioredis
 
 
 def _process_job(job_id):
@@ -68,7 +69,7 @@ async def test_celery_push_jobs(async_client: aioredis.Redis, celery_app):
     process_job = celery_app.tasks["process_job"]
 
     results = []
-    for i in range(0, 200):
+    for i in range(200):
         results.append(process_job.delay(f"job{i}"))
 
     queue_len = await async_client.llen("my_queue")
@@ -78,7 +79,6 @@ async def test_celery_push_jobs(async_client: aioredis.Redis, celery_app):
 
 
 def test_celery_inspect(celery_app, celery_worker):
-    process_job = celery_app.tasks["process_job"]
     inspector = celery_app.control.inspect()
 
     # Worker should be alive

@@ -1,7 +1,7 @@
 import pytest
-import asyncio
-from redis import asyncio as aioredis
 from redis.exceptions import ResponseError
+
+from redis import asyncio as aioredis
 
 
 @pytest.mark.asyncio

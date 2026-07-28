@@ -24,6 +24,39 @@ If release name contains chart name it will be used as a full name.
 {{- end }}
 
 {{/*
+StatefulSet serviceName. Defaults to the release name, matching this chart's
+historical behavior so existing storage-enabled releases are unaffected on
+upgrade (Kubernetes does not allow changing serviceName in place). Set
+storage.useFullnameForVolumes to base it on the fullname instead, which
+avoids name collisions when this chart is installed as a subchart dependency.
+*/}}
+{{- define "dragonfly.serviceName" -}}
+{{- if .Values.storage.useFullnameForVolumes }}
+{{- include "dragonfly.fullname" . }}
+{{- else }}
+{{- .Release.Name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Data volume / PVC name. Defaults to "<release-name>-data", matching this
+chart's historical behavior so existing storage-enabled releases are
+unaffected on upgrade (Kubernetes does not allow renaming
+volumeClaimTemplates in place). Set storage.useFullnameForVolumes to base it
+on the fullname instead, which avoids name collisions when this chart is
+installed as a subchart dependency. Truncates the combined string (rather
+than truncating fullname alone and appending "-data") to respect the 63 char
+Kubernetes name limit.
+*/}}
+{{- define "dragonfly.dataVolumeName" -}}
+{{- if .Values.storage.useFullnameForVolumes }}
+{{- printf "%s-data" (include "dragonfly.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-data" .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "dragonfly.chart" -}}

@@ -9,6 +9,7 @@ import tarfile
 import async_timeout
 import pymemcache
 import pytest
+
 import redis
 
 from . import dfly_args
