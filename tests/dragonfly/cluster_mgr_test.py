@@ -1,8 +1,11 @@
+import logging
 import subprocess
+
 import pytest
+
 import redis
 from redis import asyncio as aioredis
-from .utility import *
+
 from . import dfly_args
 
 BASE_PORT = 30001
@@ -37,7 +40,7 @@ async def test_cluster_mgr(df_factory):
     assert run_cluster_mgr(["--action=config_single_remote", f"--target_port={BASE_PORT}"])
     for i in range(1, NODES):
         assert run_cluster_mgr(
-            ["--action=attach", f"--target_port={BASE_PORT}", f"--attach_port={BASE_PORT+i}"]
+            ["--action=attach", f"--target_port={BASE_PORT}", f"--attach_port={BASE_PORT + i}"]
         )
 
     # Feed the cluster with data and test that it works correctly
@@ -48,10 +51,10 @@ async def test_cluster_mgr(df_factory):
     # Migrate ~half of the slots to node 1
     assert run_cluster_mgr(
         [
-            f"--action=migrate",
+            "--action=migrate",
             f"--target_port={BASE_PORT + 1}",
-            f"--slot_start=8000",
-            f"--slot_end=16383",
+            "--slot_start=8000",
+            "--slot_end=16383",
         ]
     )
     await check_cluster_data(client)
@@ -65,26 +68,26 @@ async def test_cluster_mgr(df_factory):
     # Can't attach non-replica as replica
     assert not run_cluster_mgr(
         [
-            f"--action=attach",
+            "--action=attach",
             f"--target_port={BASE_PORT}",
-            f"--attach_port={BASE_PORT+2}",
-            f"--attach_as_replica=True",
+            f"--attach_port={BASE_PORT + 2}",
+            "--attach_as_replica=True",
         ]
     )
 
     # Reattach node 2 and migrate some slots to it
     assert run_cluster_mgr(
-        ["--action=attach", f"--target_port={BASE_PORT}", f"--attach_port={BASE_PORT+2}"]
+        ["--action=attach", f"--target_port={BASE_PORT}", f"--attach_port={BASE_PORT + 2}"]
     )
     await check_cluster_data(client)
     # Slots 7000-8000 belong to node0, while 8001-9000 belong to node1. cluster_mgr doesn't support
     # such a migration in a single command.
     assert not run_cluster_mgr(
         [
-            f"--action=migrate",
+            "--action=migrate",
             f"--target_port={BASE_PORT + 1}",
-            f"--slot_start=7000",
-            f"--slot_end=9000",
+            "--slot_start=7000",
+            "--slot_end=9000",
         ]
     )
     assert run_cluster_mgr(
@@ -93,10 +96,10 @@ async def test_cluster_mgr(df_factory):
     await check_cluster_data(client)
     assert run_cluster_mgr(
         [
-            f"--action=migrate",
+            "--action=migrate",
             f"--target_port={BASE_PORT + 2}",
-            f"--slot_start=8000",
-            f"--slot_end=10000",
+            "--slot_start=8000",
+            "--slot_end=10000",
         ]
     )
     await check_cluster_data(client)
@@ -104,8 +107,8 @@ async def test_cluster_mgr(df_factory):
     # Can't attach replica before running REPLICAOF
     assert not run_cluster_mgr(
         [
-            f"--action=attach",
-            f"--attach_as_replica=True",
+            "--action=attach",
+            "--attach_as_replica=True",
             f"--target_port={BASE_PORT}",
             f"--attach_port={replicas[0].port}",
         ]
@@ -117,8 +120,8 @@ async def test_cluster_mgr(df_factory):
         await replica_clients[i].execute_command(f"replicaof 127.0.0.1 {masters[i].port}")
         assert run_cluster_mgr(
             [
-                f"--action=attach",
-                f"--attach_as_replica=True",
+                "--action=attach",
+                "--attach_as_replica=True",
                 f"--target_port={masters[i].port}",
                 f"--attach_port={replicas[i].port}",
             ]
@@ -137,19 +140,19 @@ async def test_cluster_mgr(df_factory):
     await c_master0.execute_command(f"replicaof 127.0.0.1 {replicas[0].port}")
     assert run_cluster_mgr(
         [
-            f"--action=attach",
-            f"--attach_as_replica=True",
+            "--action=attach",
+            "--attach_as_replica=True",
             f"--target_port={replicas[0].port}",
             f"--attach_port={masters[0].port}",
         ]
     )
     assert run_cluster_mgr(["--action=takeover", f"--target_port={masters[0].port}"])
-    await c_master0.execute_command(f"replicaof no one")
+    await c_master0.execute_command("replicaof no one")
     await replica_clients[0].execute_command(f"replicaof 127.0.0.1 {masters[0].port}")
     assert run_cluster_mgr(
         [
-            f"--action=attach",
-            f"--attach_as_replica=True",
+            "--action=attach",
+            "--attach_as_replica=True",
             f"--target_port={masters[0].port}",
             f"--attach_port={replicas[0].port}",
         ]

@@ -132,25 +132,18 @@ class ReplicationGroup:
     def cleanup(rg):
         """Cleanup Dragonfly instances"""
         # Cleanup is handled by Dragonfly fixtures
-        pass
 
 
 class ValkeySearchTestCaseCommon:
     """Common base class for tests"""
 
-    pass
-
 
 class ValkeyTestCase(ValkeySearchTestCaseCommon):
     """Base test case class"""
 
-    pass
-
 
 class ReplicationTestCase(ValkeyTestCase):
     """Replication test case"""
-
-    pass
 
 
 class ValkeySearchTestCaseBase(ValkeySearchTestCaseCommon):
@@ -267,8 +260,6 @@ class ValkeySearchTestCaseBase(ValkeySearchTestCaseCommon):
 class ValkeySearchTestCaseDebugMode(ValkeySearchTestCaseBase):
     """Debug mode variant"""
 
-    pass
-
 
 class ValkeySearchClusterTestCase(ValkeySearchTestCaseCommon):
     """Cluster test case - simplified for single Dragonfly instance"""
@@ -352,5 +343,3 @@ class ValkeySearchClusterTestCase(ValkeySearchTestCaseCommon):
 
 class ValkeySearchClusterTestCaseDebugMode(ValkeySearchClusterTestCase):
     """Debug mode cluster variant"""
-
-    pass

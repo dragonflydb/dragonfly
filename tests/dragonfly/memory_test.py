@@ -5,6 +5,7 @@ import string
 import time
 
 import pytest
+
 import redis
 
 from . import dfly_args
@@ -254,8 +255,8 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
             await client.execute_command(f"LPUSH {name} {rand_str}")
 
     # Make them STICK so we don't evict them
-    await client.execute_command(f"STICK list_1")
-    await client.execute_command(f"STICK list_2")
+    await client.execute_command("STICK list_1")
+    await client.execute_command("STICK list_2")
 
     await client.execute_command("CONFIG SET enable_heartbeat_eviction true")
 
@@ -297,7 +298,7 @@ async def test_no_rss_eviction_overflow_on_expired_keys(df_factory: DflyInstance
     val_size = 1024 * 50  # 50 kb for key
     num_keys = data_fill_size // val_size
 
-    for i in range(0, 5):
+    for i in range(5):
         pipe = client.pipeline(transaction=False)
         step_keys = num_keys + i * 10
         await pipe.execute_command("DEBUG", "POPULATE", step_keys, "key_1", val_size)
@@ -390,7 +391,7 @@ async def test_remove_docs_on_eviction(df_factory):
     await asyncio.sleep(1)
 
     # Get number of docs in index
-    index_info = await client.execute_command(f"FT.INFO idx")
+    index_info = await client.execute_command("FT.INFO idx")
     index_info_num_docs = index_info[9]
 
     # Get number of keys in database

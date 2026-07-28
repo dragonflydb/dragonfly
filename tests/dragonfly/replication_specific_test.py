@@ -9,16 +9,17 @@ import async_timeout
 import psutil
 import pymemcache
 import pytest
+
 from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory
-from .seeder import DebugPopulateSeeder, HnswSearchSeeder
-from .seeder import Seeder as SeederV2
 from .replication_utils import (
     setup_replication,
     start_replication,
 )
+from .seeder import DebugPopulateSeeder, HnswSearchSeeder
+from .seeder import Seeder as SeederV2
 from .utility import (
     assert_eventually,
     check_all_replicas_finished,
@@ -47,13 +48,13 @@ async def test_search(df_factory):
 
     # First, create an index on replica
     await c_replica.execute_command("FT.CREATE", "idx-r", "SCHEMA", "f1", "numeric")
-    for i in range(0, 10):
+    for i in range(10):
         await c_replica.hset(f"k{i}", mapping={"f1": i})
     assert (await c_replica.ft("idx-r").search("@f1:[5 9]")).total == 5
 
     # Second, create an index on master
     await c_master.execute_command("FT.CREATE", "idx-m", "SCHEMA", "f2", "numeric")
-    for i in range(0, 10):
+    for i in range(10):
         await c_master.hset(f"k{i}", mapping={"f2": i * 2})
     assert (await c_master.ft("idx-m").search("@f2:[6 10]")).total == 3
 

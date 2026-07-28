@@ -1,9 +1,16 @@
+import asyncio
+import logging
+import os
 import tempfile
+import time
 
 import async_timeout
+import pytest
+
+import redis
+from redis import asyncio as aioredis
 
 from . import dfly_args
-from .utility import *
 
 
 @pytest.mark.asyncio
@@ -169,7 +176,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     assert res == "OK"
 
     with pytest.raises(redis.exceptions.NoPermissionError):
-        await client.execute_command(f"SET x bar")
+        await client.execute_command("SET x bar")
     await client.aclose()
 
     # NOPERM between multi and exec
@@ -205,7 +212,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
 
     await client.execute_command("AUTH myuser kk")
     assert "OK" == await client.execute_command("MULTI")
-    await client.execute_command(f"SET x bar")
+    await client.execute_command("SET x bar")
     await client.execute_command("EXEC")
 
     # NOPERM between multi and exec
@@ -221,7 +228,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     denied = False
     while not denied and time.time() - start < 10:
         try:
-            await client.execute_command(f"SET x bar")
+            await client.execute_command("SET x bar")
             await asyncio.sleep(0.1)
         except redis.exceptions.NoPermissionError:
             denied = True
@@ -523,12 +530,12 @@ async def test_set_len_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert 7 == len(res)
 
-    await async_client.execute_command(f"CONFIG SET acllog_max_len 3")
+    await async_client.execute_command("CONFIG SET acllog_max_len 3")
 
     res = await async_client.execute_command("ACL LOG")
     assert 3 == len(res)
 
-    await async_client.execute_command(f"CONFIG SET acllog_max_len 10")
+    await async_client.execute_command("CONFIG SET acllog_max_len 10")
 
     for x in range(7):
         with pytest.raises(redis.exceptions.AuthenticationError):
@@ -680,7 +687,7 @@ async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
 
     async def publish_worker(client):
         logging.debug("Starting publish_worker")
-        for i in range(0, 10):
+        for i in range(10):
             logging.debug(f"publisher iteration: {i}")
             await client.publish("channel", f"message{i}")
 

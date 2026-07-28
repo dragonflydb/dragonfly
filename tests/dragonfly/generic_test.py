@@ -1,13 +1,15 @@
-import logging
-import pytest
-import redis
 import asyncio
+import logging
+
+import pytest
+
+import redis
 from redis import asyncio as aioredis
 
-from . import dfly_multi_test_args, dfly_args
+from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyStartException
-from .utility import batch_fill_data, gen_test_data, EnvironCntx
 from .seeder import DebugPopulateSeeder
+from .utility import EnvironCntx, batch_fill_data, gen_test_data
 
 
 @dfly_multi_test_args({"keys_output_limit": 512}, {"keys_output_limit": 1024})
@@ -166,22 +168,20 @@ async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: Df
 
 
 async def test_arg_from_environ_overwritten_by_cli(df_factory):
-    with EnvironCntx(DFLY_port="6378"):
-        with df_factory.create(port=6377):
-            client = aioredis.Redis(port=6377)
-            await client.ping()
+    with EnvironCntx(DFLY_port="6378"), df_factory.create(port=6377):
+        client = aioredis.Redis(port=6377)
+        await client.ping()
 
 
 async def test_arg_from_environ(df_factory):
-    with EnvironCntx(DFLY_requirepass="pass"):
-        with df_factory.create() as dfly:
-            # Expect password from environment variable
-            with pytest.raises(redis.exceptions.AuthenticationError):
-                client = aioredis.Redis(port=dfly.port)
-                await client.ping()
-
-            client = aioredis.Redis(password="pass", port=dfly.port)
+    with EnvironCntx(DFLY_requirepass="pass"), df_factory.create() as dfly:
+        # Expect password from environment variable
+        with pytest.raises(redis.exceptions.AuthenticationError):
+            client = aioredis.Redis(port=dfly.port)
             await client.ping()
+
+        client = aioredis.Redis(password="pass", port=dfly.port)
+        await client.ping()
 
 
 async def test_unknown_dfly_env(df_factory, export_dfly_password):

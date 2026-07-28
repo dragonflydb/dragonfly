@@ -2,20 +2,21 @@ import asyncio
 import glob
 import logging
 import os
-from pathlib import Path
+import random
 import shutil
 import signal
 import socket
 import subprocess
 import time
 import uuid
+from pathlib import Path
 
-from async_timeout import timeout
 import boto3
 import pytest
-import redis
-import random
+from async_timeout import timeout
 from pymemcache.client.base import Client as MCClient
+
+import redis
 from redis import asyncio as aioredis
 
 from . import dfly_args
@@ -24,11 +25,11 @@ from .replication_utils import compare_datasets
 from .seeder import DebugPopulateSeeder, Seeder
 from .utility import (
     assert_eventually,
-    wait_available_async,
+    check_all_replicas_finished,
     is_saving,
     tmp_file_name,
+    wait_available_async,
     wait_for_replicas_state,
-    check_all_replicas_finished,
 )
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/", "proactor_threads": 4}
