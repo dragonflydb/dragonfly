@@ -1078,6 +1078,25 @@ TEST_F(DflyEngineTest, ExpireInlineKeyAccounting) {
   EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
 }
 
+TEST_F(DflyEngineTest, ShortKeyAllocationGap) {
+  // Populates a large number of small keys with TTL. Then check that gap between used memory and
+  // per object reported sum should not be too large. The test fails if the keys report actual
+  // string length, and passes if they report block size.
+  EXPECT_EQ(Run({"DEBUG", "POPULATE", "250000", "abcdefgh", "10", "EXPIRE", "1000", "100000"}),
+            "OK");
+  const auto metrics = GetMetrics();
+
+  const ssize_t total_usage =
+      metrics.db_stats[0].obj_memory_usage + metrics.db_stats[0].table_mem_usage;
+  const ssize_t used_mem = metrics.heap_used_bytes;
+
+  const ssize_t delta = used_mem - total_usage;
+  const double threshold = used_mem * 0.1;
+
+  EXPECT_LE(std::abs(delta), threshold)
+      << " gap: " << std::abs(delta) / 1024 << " threshold: " << threshold / 1024;
+}
+
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
