@@ -259,8 +259,18 @@ bool Listener::ReconfigureTLS() {
       return false;
     }
     ctx_ = ctx;
+    X509* cert = SSL_CTX_get0_certificate(ctx);
+    auto info = ParseTlsCertInfo(cert);
+    {
+      util::fb2::LockGuard lk(tls_cert_info_mu_);
+      tls_cert_info_ = info ? std::make_shared<const TlsCertInfo>(*info) : nullptr;
+    }
   } else {
     ctx_ = nullptr;
+    {
+      util::fb2::LockGuard lk(tls_cert_info_mu_);
+      tls_cert_info_.reset();
+    }
   }
 
   if (prev_ctx) {
@@ -272,15 +282,33 @@ bool Listener::ReconfigureTLS() {
   return true;
 }
 
+std::shared_ptr<const TlsCertInfo> Listener::GetTlsCertInfo() const {
+#ifdef DFLY_USE_SSL
+  util::fb2::LockGuard lk(tls_cert_info_mu_);
+  return tls_cert_info_;
+#else
+  return nullptr;
+#endif
+}
+
 void Listener::ApplyTlsCtx(SSL_CTX* ctx) {
 #ifdef DFLY_USE_SSL
   const bool tls_on_privileged_port = !GetFlag(FLAGS_no_tls_on_admin_port);
   SSL_CTX* prev_ctx = ctx_;
+  std::shared_ptr<const TlsCertInfo> info;
   if (ctx && (!IsPrivilegedInterface() || tls_on_privileged_port)) {
     SSL_CTX_up_ref(ctx);
     ctx_ = ctx;
+    auto parsed = ParseTlsCertInfo(SSL_CTX_get0_certificate(ctx));
+    if (parsed) {
+      info = std::make_shared<const TlsCertInfo>(*parsed);
+    }
   } else {
     ctx_ = nullptr;
+  }
+  {
+    util::fb2::LockGuard lk(tls_cert_info_mu_);
+    tls_cert_info_ = std::move(info);
   }
   if (prev_ctx) {
     SSL_CTX_free(prev_ctx);

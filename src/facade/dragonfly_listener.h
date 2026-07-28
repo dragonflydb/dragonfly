@@ -13,8 +13,10 @@
 #include <vector>
 
 #include "facade/facade_types.h"
+#include "facade/tls_helpers.h"
 #include "util/fiber_socket_base.h"
 #include "util/fibers/proactor_base.h"
+#include "util/fibers/synchronization.h"
 #include "util/http/http_handler.h"
 #include "util/listener_interface.h"
 
@@ -47,6 +49,10 @@ class Listener : public util::ListenerInterface {
   // no_tls_on_admin_port is set). Takes its own reference on ctx and never fails, so a set of
   // listeners can be switched without partial state. MUST be called from the listener proactor.
   void ApplyTlsCtx(SSL_CTX* ctx);
+
+  // Returns the TLS certificate metadata currently used by this listener.
+  // nullptr if TLS is not configured or the certificate could not be parsed.
+  std::shared_ptr<const TlsCertInfo> GetTlsCertInfo() const;
 
   // Returns process-wide dynamic memory usage by TLS.
   static size_t TLSUsedMemory();
@@ -83,6 +89,10 @@ class Listener : public util::ListenerInterface {
 
   Protocol protocol_;
   SSL_CTX* ctx_ = nullptr;
+  // Updated in ReconfigureTLS (listener proactor) and read from any proactor
+  // via INFO, so all accesses are guarded by tls_cert_info_mu_.
+  mutable util::fb2::Mutex tls_cert_info_mu_;
+  std::shared_ptr<const TlsCertInfo> tls_cert_info_ ABSL_GUARDED_BY(tls_cert_info_mu_);
 };
 
 // Dispatch tracker allows tracking the dispatch state of connections and blocking until all

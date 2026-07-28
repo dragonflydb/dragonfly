@@ -2738,6 +2738,15 @@ size_t Connection::GetMemoryUsage() const {
   return mem;
 }
 
+std::shared_ptr<const TlsCertInfo> Connection::GetTlsCertInfo() const {
+#ifdef DFLY_USE_SSL
+  auto* facade_listener = static_cast<facade::Listener*>(listener());
+  return facade_listener ? facade_listener->GetTlsCertInfo() : nullptr;
+#else
+  return nullptr;
+#endif
+}
+
 void Connection::RefreshConnectionMemoryUsage() {
   if (!conn_stats_registered_)
     return;
