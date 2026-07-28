@@ -43,8 +43,6 @@ PRE_GENERATED_UIDS = []
 
 
 def _initialize_pre_generated_data(size: int):
-    global PRE_GENERATED_STRINGS, PRE_GENERATED_UIDS
-
     # Clear previous data and generate new
     PRE_GENERATED_STRINGS.clear()
     PRE_GENERATED_UIDS.clear()
@@ -162,7 +160,7 @@ async def run_query_client(
         for i in range(num_queries):
             try:
                 query = generate_search_query(columns, document_ids)
-                results = await client.ft(INDEX_KEY).search(query)
+                await client.ft(INDEX_KEY).search(query)
                 success_count += 1
 
             except Exception as e:
