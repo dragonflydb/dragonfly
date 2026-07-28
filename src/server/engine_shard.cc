@@ -1226,9 +1226,12 @@ EngineShard::CompactTableStats EngineShard::CompactTable(double threshold, DbInd
         continue;
 
       ++stats.attempted;
-      if (prime.Merge(seg_id, buddy_id)) {
+      auto [seg_merged, declined_depth_guard] = prime.Merge(seg_id, buddy_id);
+      if (seg_merged) {
         ++stats.merged;
         merged_any = true;
+      } else if (declined_depth_guard) {
+        ++stats.skipped_min_depth;
       } else {
         ++stats.rolled_back;
       }

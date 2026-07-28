@@ -211,15 +211,24 @@ class DashTable : public detail::DashTableBase {
     return buddy_idx;
   }
 
+  // Result of Merge(): `merged` is true iff the two segments were merged. When `merged` is
+  // false, `declined_depth_guard` tells apart the two ways it can fail: true means Merge
+  // refused to run because it would violate the initial_depth invariant (no items were
+  // touched); false means a real rollback happened (items were moved into `keep` then moved
+  // back after a failed insertion).
+  struct MergeResult {
+    bool merged = false;
+    bool declined_depth_guard = false;
+  };
+
   // - Moves all items from `buddy_id` to `keep_id` (merges the two segments).
   //   After merge completes, `buddy_id` segment is deleted.
-  // - Return true if the two segments merged successfully.
-  // - If an insertion fails we rollback and abort the merge (return false).
+  // - If an insertion fails we rollback and abort the merge.
   // - Merge can run only if there are no active snapshots.
   // - Prefer calling this function only when the combined size of both segments
   //   than x * segment_capacity. With x: 0 < x < 0.25 as statistically this won't
   //   trigger rollbacks.
-  bool Merge(unsigned keep_id, unsigned buddy_id) {
+  MergeResult Merge(unsigned keep_id, unsigned buddy_id) {
     auto* keep = GetSegment(keep_id);
     auto* buddy = GetSegment(buddy_id);
 
@@ -233,7 +242,7 @@ class DashTable : public detail::DashTableBase {
     // After merge, keep will have depth-1, which determines unique_segments
     uint8_t depth_after_merge = keep->local_depth() - 1;
     if (depth_after_merge < initial_depth_) {
-      return false;
+      return {.merged = false, .declined_depth_guard = true};
     }
 
     bool should_rollback = false;
@@ -267,7 +276,7 @@ class DashTable : public detail::DashTableBase {
       auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
       keep->Split(hash_fn, buddy, [](auto&&...) {});
 
-      return false;
+      return {.merged = false, .declined_depth_guard = false};
     }
 
     // Same as Split()
@@ -287,7 +296,7 @@ class DashTable : public detail::DashTableBase {
     --unique_segments_;
     bucket_count_ -= keep->num_buckets();
 
-    return true;
+    return {.merged = true, .declined_depth_guard = false};
   }
 
   size_t GetSegmentCount() const {

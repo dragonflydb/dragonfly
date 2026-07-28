@@ -222,15 +222,25 @@ class EngineShard {
   }
 
   struct CompactTableStats {
-    size_t merged = 0;                // segments successfully merged
-    size_t attempted = 0;             // buddy pairs that passed the size gate and were tried
-    size_t rolled_back = 0;           // attempted merges that failed and were rolled back
-    bool exited_on_snapshot = false;  // true if we bailed out early due to a snapshot in progress
+    // Segments successfully merged.
+    size_t merged = 0;
+    // Buddy pairs that passed the size gate and were handed to Merge (includes pairs
+    // that Merge then declined via the depth guard, see skipped_min_depth below).
+    size_t attempted = 0;
+    // Attempted merges that moved items into the buddy and then had to roll back
+    // after a failed insertion.
+    size_t rolled_back = 0;
+    // Buddy pairs declined before any items were touched, because merging would
+    // violate the initial_depth invariant.
+    size_t skipped_min_depth = 0;
+    // True if we bailed out early due to a snapshot in progress.
+    bool exited_on_snapshot = false;
 
     CompactTableStats& operator+=(const CompactTableStats& o) {
       merged += o.merged;
       attempted += o.attempted;
       rolled_back += o.rolled_back;
+      skipped_min_depth += o.skipped_min_depth;
       exited_on_snapshot = exited_on_snapshot || o.exited_on_snapshot;
       return *this;
     }
