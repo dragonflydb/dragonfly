@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/flags/declare.h>
+#include <absl/flags/flag.h>
 #include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest-matchers.h>
@@ -18,6 +20,10 @@
 #include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
+
+ABSL_DECLARE_FLAG(std::string, tiered_prefix);
+ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
+ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 
 namespace dfly::cluster {
 namespace {
@@ -67,6 +73,19 @@ class ClusterFamilyTest : public BaseFamilyTest {
     string config = absl::Substitute(config_template, id);
     EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
   }
+};
+
+class TieredClusterFamilyTest : public ClusterFamilyTest {
+ protected:
+  void ConfigureClusterFlags() override {
+    ClusterFamilyTest::ConfigureClusterFlags();
+    absl::SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_cluster_family_test");
+    absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+    absl::SetFlag(&FLAGS_tiered_experimental_cooling, false);
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
 };
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
@@ -633,6 +652,30 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
                                 "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))),
           RespArray(ElementsAre(IntArg(2), "key_count", IntArg(0), "total_reads", IntArg(0),
                                 "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
+}
+
+TEST_F(TieredClusterFamilyTest, ClusterConfigDeleteFullyExternalSlot) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  constexpr string_view kKey = "bigkey";
+  const SlotId slot = KeySlot(kKey);
+  const string value(64 * 1024, '#');
+  EXPECT_EQ(Run({"SET", kKey, value}), "OK");
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes == 1; });
+
+  EXPECT_THAT(
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)}),
+      RespElementsAre(RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads", _,
+                                            "total_writes", IntArg(1), "memory_bytes", Not(IntArg(0))))));
+
+  ConfigSingleNodeCluster("other");
+
+  ExpectConditionWithinTimeout([&] { return CheckedInt({"dbsize"}) == 0; });
+  EXPECT_THAT(
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)}),
+      RespElementsAre(RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(0), "total_reads", _,
+                                            "total_writes", IntArg(1), "memory_bytes", IntArg(0)))));
 }
 
 // Test issue #1302
