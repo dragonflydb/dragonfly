@@ -5,6 +5,12 @@ from .seeder import Seeder
 import logging
 
 
+def _compact_table_stats(flat_reply):
+    """DEBUG COMPACT-TABLE replies with a RESP map, which arrives as a flat
+    [k1, v1, k2, v2, ...] list over RESP2."""
+    return dict(zip(flat_reply[::2], flat_reply[1::2]))
+
+
 @dfly_args({"proactor_threads": 2, "maxmemory": "1G"})
 async def test_gc_merges_segments_and_shrinks_capacity(async_client: aioredis.Redis):
     value_size = 50
@@ -31,10 +37,12 @@ async def test_gc_merges_segments_and_shrinks_capacity(async_client: aioredis.Re
         await async_client.delete(*keys_to_delete[batch_start : batch_start + 1000])
 
     # Run GC with aggressive threshold to trigger merges
-    segments_merged = await async_client.execute_command("DEBUG", "COMPACT-TABLE", "0.5")
+    compact_stats = _compact_table_stats(
+        await async_client.execute_command("DEBUG", "COMPACT-TABLE", "0.5")
+    )
 
     stats_after = await async_client.info("MEMORY")
-    assert segments_merged > 0
+    assert compact_stats["merged"] > 0
     # Fewer segments means fewer buckets, so the table's total capacity must shrink
     assert stats_after["prime_capacity"] < stats_before["prime_capacity"], (
         f"Table capacity should shrink after GC: before={stats_before['prime_capacity']}, "
@@ -42,7 +50,7 @@ async def test_gc_merges_segments_and_shrinks_capacity(async_client: aioredis.Re
     )
 
     logging.info(
-        f"COMPACT-TABLE merged {segments_merged} segments, "
+        f"COMPACT-TABLE stats: {compact_stats}, "
         f"capacity {stats_before['prime_capacity']} -> {stats_after['prime_capacity']}"
     )
 
