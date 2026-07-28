@@ -321,7 +321,15 @@ TEST_F(CompactObjectTest, SdsTtlTag) {
 
     string slice;
     EXPECT_EQ("hello", key.GetSlice(&slice));
-    EXPECT_GT(key.MallocUsed(), 0u);
+
+    // cannot access the sds directly so create copy with same string
+    sds s = sdsnewlen("hello", 5);
+    // block size, should be 8 which is next block size
+    EXPECT_EQ(key.MallocUsed(), zmalloc_usable_size(sdsAllocPtr(s)));
+    EXPECT_EQ(key.MallocUsed(), 8);
+    // the string length + sds header + nul byte = 7
+    EXPECT_GT(key.MallocUsed(), sdsAllocSize(s));
+    sdsfree(s);
   }
 
   // 2. INT_TAG key + SetTtl
