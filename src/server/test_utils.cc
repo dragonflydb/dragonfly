@@ -394,7 +394,7 @@ void BaseFamilyTest::ClearMetrics() {
 }
 
 string BaseFamilyTest::FormatMetrics(const Metrics& metrics) const {
-  return service_->server_family().FormatInfoMetrics(metrics, "ALL", true);
+  return service_->server_family().FormatInfoMetrics(metrics, "ALL", true, nullptr);
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
