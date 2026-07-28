@@ -45,11 +45,9 @@ class Listener : public util::ListenerInterface {
   // ReconfigureTLS MUST be called from the same proactor as the listener.
   bool ReconfigureTLS();
 
-#ifdef DFLY_USE_SSL
   // Returns the TLS certificate metadata currently used by this listener.
   // nullptr if TLS is not configured or the certificate could not be parsed.
   std::shared_ptr<const TlsCertInfo> GetTlsCertInfo() const;
-#endif
 
   // Returns thread-local dynamic memory usage by TLS.
   static size_t TLSUsedMemoryThreadLocal();
