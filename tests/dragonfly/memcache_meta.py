@@ -1,13 +1,14 @@
 import pytest
-from .instance import DflyInstance
-from . import dfly_args
 from meta_memcache import (
+    CacheClient,
     Key,
     ServerAddress,
-    CacheClient,
     connection_pool_factory_builder,
 )
 from meta_memcache.protocol import RequestFlags, Success
+
+from . import dfly_args
+from .instance import DflyInstance
 
 DEFAULT_ARGS = {"memcached_port": 11211, "proactor_threads": 4}
 

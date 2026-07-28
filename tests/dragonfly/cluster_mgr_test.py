@@ -2,6 +2,7 @@ import logging
 import subprocess
 
 import pytest
+
 import redis
 from redis import asyncio as aioredis
 

@@ -9,8 +9,9 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-import redis
 import redis.asyncio as aioredis
+
+import redis
 
 try:
     from importlib import resources as impresources

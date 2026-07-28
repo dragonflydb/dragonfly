@@ -1,27 +1,29 @@
 import asyncio
+import difflib
 import functools
 import itertools
-import logging
-import sys
-import wrapt
-from redis import asyncio as aioredis
-import redis
-import random
-import string
-import time
-import difflib
 import json
-import subprocess
-import pytest
+import logging
 import os
-import fakeredis
-from typing import Iterable
-from enum import Enum
+import random
 import re
+import string
+import subprocess
+import sys
+import time
+from enum import Enum
 from shutil import copyfileobj
+from typing import Iterable
+
+import fakeredis
+import pytest
+import wrapt
 from requests import Session
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+import redis
+from redis import asyncio as aioredis
 
 
 def tmp_file_name():

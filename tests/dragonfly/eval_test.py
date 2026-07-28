@@ -7,6 +7,7 @@ import time
 
 import async_timeout
 import pytest
+
 from redis import asyncio as aioredis
 
 from . import dfly_args, dfly_multi_test_args

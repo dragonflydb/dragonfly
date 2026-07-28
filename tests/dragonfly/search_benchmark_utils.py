@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import math
 import random
 import string
 import uuid
-import math
-from redis import asyncio as aioredis
+
 from redis.commands.search.query import Query
+
+from redis import asyncio as aioredis
 
 
 def set_random_seed(seed: int):

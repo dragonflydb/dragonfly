@@ -6,6 +6,7 @@ import time
 
 import async_timeout
 import pytest
+
 import redis
 from redis import asyncio as aioredis
 

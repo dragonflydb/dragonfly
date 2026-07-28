@@ -3,11 +3,12 @@ import string
 
 import async_timeout
 import pytest
+
 from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory
-from .seeder import Seeder, DebugPopulateSeeder
+from .seeder import DebugPopulateSeeder, Seeder
 from .utility import DflySeederFactory, ValueType
 
 

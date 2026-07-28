@@ -1,14 +1,15 @@
 import logging
 import threading
-from redis import asyncio as aioredis
 
 import pytest
 from celery import Celery
 from celery.contrib.testing.worker import (
-    setup_app_for_worker,
     TestWorkController,
     _set_task_join_will_block,
+    setup_app_for_worker,
 )
+
+from redis import asyncio as aioredis
 
 
 def _process_job(job_id):

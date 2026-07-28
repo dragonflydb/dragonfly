@@ -1,6 +1,7 @@
 import pytest
-import redis
 from redis.asyncio import Redis as RedisClient
+
+import redis
 
 
 async def test_maxclients(df_factory):

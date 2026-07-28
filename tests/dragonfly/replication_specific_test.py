@@ -9,16 +9,17 @@ import async_timeout
 import psutil
 import pymemcache
 import pytest
+
 from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory
-from .seeder import DebugPopulateSeeder, HnswSearchSeeder
-from .seeder import Seeder as SeederV2
 from .replication_utils import (
     setup_replication,
     start_replication,
 )
+from .seeder import DebugPopulateSeeder, HnswSearchSeeder
+from .seeder import Seeder as SeederV2
 from .utility import (
     assert_eventually,
     check_all_replicas_finished,

@@ -12,13 +12,13 @@ from binascii import crc_hqx
 from dataclasses import dataclass
 
 import pytest
-from redis import asyncio as aioredis
-from redis.cluster import ClusterNode
-from redis.cluster import RedisCluster
+from redis.cluster import ClusterNode, RedisCluster
 from redis.exceptions import MovedError
 
+from redis import asyncio as aioredis
+
 from . import dfly_args
-from .instance import DflyInstanceFactory, DflyInstance
+from .instance import DflyInstance, DflyInstanceFactory
 from .seeder import DebugPopulateSeeder
 from .utility import (
     DflySeederFactory,

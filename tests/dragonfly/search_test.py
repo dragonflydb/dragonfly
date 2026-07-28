@@ -10,9 +10,16 @@ import time
 
 import numpy as np
 import pytest
+from redis.commands.search.field import (
+    GeoField,
+    NumericField,
+    TagField,
+    TextField,
+    VectorField,
+)
+
 import redis
 from redis import asyncio as aioredis
-from redis.commands.search.field import TextField, NumericField, TagField, VectorField, GeoField
 
 try:
     from redis.commands.search.indexDefinition import IndexDefinition, IndexType

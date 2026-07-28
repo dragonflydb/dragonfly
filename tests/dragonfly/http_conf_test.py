@@ -1,5 +1,7 @@
-import aiohttp
 import json
+
+import aiohttp
+
 from . import dfly_args
 from .instance import DflyInstance
 

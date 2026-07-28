@@ -1,5 +1,7 @@
-import pytest
 import asyncio
+
+import pytest
+
 import redis
 from redis import asyncio as aioredis
 

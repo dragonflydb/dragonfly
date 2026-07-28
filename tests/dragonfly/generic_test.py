@@ -1,13 +1,15 @@
-import logging
-import pytest
-import redis
 import asyncio
+import logging
+
+import pytest
+
+import redis
 from redis import asyncio as aioredis
 
-from . import dfly_multi_test_args, dfly_args
+from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyStartException
-from .utility import batch_fill_data, gen_test_data, EnvironCntx
 from .seeder import DebugPopulateSeeder
+from .utility import EnvironCntx, batch_fill_data, gen_test_data
 
 
 @dfly_multi_test_args({"keys_output_limit": 512}, {"keys_output_limit": 1024})

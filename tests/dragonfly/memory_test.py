@@ -5,6 +5,7 @@ import string
 import time
 
 import pytest
+
 import redis
 
 from . import dfly_args

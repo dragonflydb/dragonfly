@@ -6,13 +6,12 @@ import time
 
 import async_timeout
 import pytest
+
 import redis
 from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory
-from .seeder import DebugPopulateSeeder
-from .seeder import Seeder as SeederV2
 from .replication_utils import (
     ADMIN_PORT,
     assert_replica_data_matches,
@@ -22,6 +21,8 @@ from .replication_utils import (
     setup_replication,
     start_replication,
 )
+from .seeder import DebugPopulateSeeder
+from .seeder import Seeder as SeederV2
 from .utility import (
     assert_eventually,
     batch_fill_data,

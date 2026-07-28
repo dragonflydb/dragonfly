@@ -4,11 +4,12 @@ import subprocess
 
 import aiohttp
 import pytest
-import redis
 from prometheus_client.samples import Sample
 from pymemcache import Client
-from redis import asyncio as aioredis
 from redis.exceptions import ResponseError
+
+import redis
+from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstance
@@ -86,8 +87,8 @@ async def test_get_databases(async_client: aioredis.Redis):
 async def test_client_kill(df_factory):
     with df_factory.create(port=1111, admin_port=1112) as instance:
         instance: DflyInstance
-        from redis.backoff import NoBackoff
         from redis.asyncio.retry import Retry
+        from redis.backoff import NoBackoff
 
         client = instance.client(retry=Retry(NoBackoff(), 0))
         admin_client = instance.admin_client()

@@ -10,8 +10,6 @@ from threading import Thread
 
 import async_timeout
 import pytest
-import redis as base_redis
-from redis import asyncio as aioredis
 from redis.backoff import NoBackoff
 from redis.cache import CacheConfig
 from redis.exceptions import (
@@ -22,9 +20,12 @@ from redis.exceptions import (
 )
 from redis.retry import Retry
 
+import redis as base_redis
+from redis import asyncio as aioredis
+
 from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyInstanceFactory
-from .utility import tick_timer, assert_eventually, parse_client_list
+from .utility import assert_eventually, parse_client_list, tick_timer
 
 BASE_PORT = 1111
 

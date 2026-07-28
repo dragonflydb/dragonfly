@@ -7,7 +7,7 @@ import pytest
 import redis.asyncio as aioredis
 
 from .instance import DflyInstanceFactory
-from .utility import ValueType, wait_available_async, assert_eventually
+from .utility import ValueType, assert_eventually, wait_available_async
 
 
 async def _bounded(awaitable, timeout=5):

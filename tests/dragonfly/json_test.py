@@ -1,6 +1,7 @@
 from json import JSONDecoder, JSONEncoder, dumps
 
 import pytest
+
 import redis
 from redis import asyncio as aioredis
 
