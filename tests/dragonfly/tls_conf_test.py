@@ -3,7 +3,6 @@ import os
 import pytest
 
 import redis
-import os
 
 from .instance import DflyStartException
 from .utility import gen_ca_cert, gen_certificate
