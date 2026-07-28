@@ -2,7 +2,6 @@ import pytest
 import asyncio
 import redis
 from redis import asyncio as aioredis
-from pathlib import Path
 
 from . import dfly_args
 from .instance import DflyInstanceFactory
@@ -35,7 +34,7 @@ class TestDflyAutoLoadSnapshot:
             while True:
                 try:
                     value = await client.execute_command(f"INCR {key}")
-                except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
+                except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError):
                     break
             return key, value
 
@@ -103,7 +102,6 @@ class TestShutdownOptions:
         except Exception as e:
             print(e)
             # Connection may be dropped as part of shutdown; this is acceptable
-            pass
 
         await client.connection_pool.disconnect()
 
