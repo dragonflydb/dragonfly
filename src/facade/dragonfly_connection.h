@@ -15,6 +15,7 @@
 #include <variant>
 
 #include "facade/connection_ref.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "io/io_buf.h"
@@ -264,6 +265,10 @@ class Connection : public util::Connection {
   size_t GetMemoryUsage() const;
 
   ConnectionContext* cntx();
+
+  // Returns the TLS certificate metadata for this connection's listener, or nullptr if the listener
+  // has no TLS configured or the certificate could not be parsed.
+  std::shared_ptr<const TlsCertInfo> GetTlsCertInfo() const;
 
   // For non replication connections refresh memory usage field as well as update tl stats if conn.
   // is still live.
