@@ -13,7 +13,7 @@ import sys
 import time
 from enum import Enum
 from shutil import copyfileobj
-from typing import Iterable
+from collections.abc import Iterable
 
 import fakeredis
 import pytest

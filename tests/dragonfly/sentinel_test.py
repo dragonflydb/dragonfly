@@ -3,7 +3,7 @@ import logging
 import pathlib
 import subprocess
 import time
-from typing import Awaitable
+from collections.abc import Awaitable
 
 import pytest
 
