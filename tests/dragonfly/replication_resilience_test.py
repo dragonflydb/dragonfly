@@ -1292,7 +1292,7 @@ async def test_partial_sync(df_factory, proactors, backlog_len, proxy_factory):
     df_factory.start_all([replica, master])
 
     async def stream(client, total):
-        for i in range(0, total):
+        for i in range(total):
             prefix = "{prefix}"
             # Seed to one shard only. This will eventually cause one of the flows to become stale.
             await client.execute_command(f"SET {prefix}foo{i} bar{i}")

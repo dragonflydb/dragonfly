@@ -686,7 +686,7 @@ async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
 
     async def publish_worker(client):
         logging.debug("Starting publish_worker")
-        for i in range(0, 10):
+        for i in range(10):
             logging.debug(f"publisher iteration: {i}")
             await client.publish("channel", f"message{i}")
 

@@ -297,7 +297,7 @@ async def test_no_rss_eviction_overflow_on_expired_keys(df_factory: DflyInstance
     val_size = 1024 * 50  # 50 kb for key
     num_keys = data_fill_size // val_size
 
-    for i in range(0, 5):
+    for i in range(5):
         pipe = client.pipeline(transaction=False)
         step_keys = num_keys + i * 10
         await pipe.execute_command("DEBUG", "POPULATE", step_keys, "key_1", val_size)

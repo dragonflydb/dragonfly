@@ -236,7 +236,7 @@ async def test_eval_error_propagation(async_client):
             await async_client.eval(template.format(cmd), 1, "l")
             if does_abort:
                 assert False, "Eval must have thrown an error: " + cmd
-        except aioredis.RedisError as e:
+        except aioredis.RedisError:
             if not does_abort:
                 assert False, "Error should have been ignored: " + cmd
 
@@ -373,7 +373,7 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
           end
         end
     """
-    for i in range(0, 1000):
+    for i in range(1000):
         await asyncio.gather(*(async_client.eval(SCRIPT, 0) for _ in range(5)))
 
     info = await async_client.info("memory")
@@ -392,7 +392,7 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
 
     await async_client.execute_command("CONFIG", "SET", "lua_mem_gc_threshold", "1000")
 
-    for i in range(0, 1000):
+    for i in range(1000):
         await asyncio.gather(*(async_client.eval(SCRIPT, 0) for _ in range(5)))
 
     info = await async_client.info("memory")

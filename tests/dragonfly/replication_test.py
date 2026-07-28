@@ -765,7 +765,7 @@ async def test_script_transfer(df_factory):
 
     # Load some scripts into master ahead
     scripts = []
-    for i in range(0, 10):
+    for i in range(10):
         sha = await c_master.script_load(SCRIPT_TEMPLATE.format(i))
         scripts.append(sha)
 

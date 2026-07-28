@@ -605,12 +605,12 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
 
     async def publish_worker():
         client = aioredis.Redis(connection_pool=async_pool)
-        for i in range(0, 2000):
+        for i in range(2000):
             await client.publish("channel", f"message-{i}")
         await client.aclose()
 
     async def channel_reader(channel: aioredis.client.PubSub):
-        for i in range(0, 150):
+        for i in range(150):
             try:
                 async with async_timeout.timeout(1):
                     await channel.get_message(ignore_subscribe_messages=True)
@@ -1185,7 +1185,7 @@ async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
     writer.write(b"*1000\r\n")
     writer.write(b"$4\r\nmget\r\n")
     val = (b"a" * 100) + b"\r\n"
-    for i in range(0, 900):
+    for i in range(900):
         writer.write(b"$100\r\n" + val)
     await writer.drain()  # writer is pending because the request is not finished.
 
@@ -2027,7 +2027,7 @@ async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     # them only after execution, so while `INFO` runs the cache is empty.
     # high max_busy_read_usec ensures that the connection fiber has enough time to push
     # all the commands to reach the squashing limit.
-    for i in range(0, 10):
+    for i in range(10):
         # 10 INFO commands exceed pipeline_squash=9, so the whole pipeline is squashed and
         # INFO should report pipeline_cache_bytes == 0 for every command in it.
         res = await push_pipeline(10)

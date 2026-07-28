@@ -68,7 +68,7 @@ async def test_celery_push_jobs(async_client: aioredis.Redis, celery_app):
     process_job = celery_app.tasks["process_job"]
 
     results = []
-    for i in range(0, 200):
+    for i in range(200):
         results.append(process_job.delay(f"job{i}"))
 
     queue_len = await async_client.llen("my_queue")
@@ -78,7 +78,6 @@ async def test_celery_push_jobs(async_client: aioredis.Redis, celery_app):
 
 
 def test_celery_inspect(celery_app, celery_worker):
-    process_job = celery_app.tasks["process_job"]
     inspector = celery_app.control.inspect()
 
     # Worker should be alive
