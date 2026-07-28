@@ -1,8 +1,10 @@
 import asyncio
+import logging
+
 from redis import asyncio as aioredis
+
 from . import dfly_args
 from .seeder import Seeder
-import logging
 
 
 @dfly_args({"proactor_threads": 2, "maxmemory": "1G"})

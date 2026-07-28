@@ -11,8 +11,6 @@ from threading import Thread
 
 import async_timeout
 import pytest
-import redis as base_redis
-from redis import asyncio as aioredis
 from redis.backoff import NoBackoff
 from redis.cache import CacheConfig
 from redis.exceptions import (
@@ -23,9 +21,12 @@ from redis.exceptions import (
 )
 from redis.retry import Retry
 
+import redis as base_redis
+from redis import asyncio as aioredis
+
 from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyInstanceFactory
-from .utility import tick_timer, assert_eventually, parse_client_list
+from .utility import assert_eventually, parse_client_list, tick_timer
 
 BASE_PORT = 1111
 
@@ -507,36 +508,36 @@ async def _open_stuck_subscriber(port: int):
 async def test_pubsub_slow_subscriber_closed(df_server: DflyInstance, async_client: aioredis.Redis):
     reader, writer = await _open_stuck_subscriber(df_server.port)
 
-    stop = False
-
     async def pub_task():
-        payload = "msg" * 100
-        while not stop:
+        # The connection threshold is 1/16 of the 32 MiB publish buffer (2 MiB). Send a
+        # bounded 6 MiB workload over ~240 ms. This both exceeds the threshold and leaves
+        # enough time for the 100 ms slow-subscriber timeout to be observed by a later publish.
+        payload = "msg" * (16 * 1024 // 3)
+        for _ in range(24):
             p = async_client.pipeline(transaction=False)
-            for _ in range(200):
+            for _ in range(16):
                 p.publish("channel", payload)
             await p.execute()
+            await asyncio.sleep(0.01)
 
-    publishers = [asyncio.create_task(pub_task()) for _ in range(20)]
+    publishers = [asyncio.create_task(pub_task())]
 
     try:
         # Wait until the policy force-closes the stuck subscriber.
-        stats = {}
-        for _ in range(150):
+        @assert_eventually(timeout=15)
+        async def wait_for_forced_disconnect():
             stats = await _pubsub_backpressure_stats(df_server)
-            if stats["forced_disconnect"] >= 1:
-                break
-            await asyncio.sleep(0.1)
+            assert stats["forced_disconnect"] >= 1
+            return stats
 
-        assert stats["forced_disconnect"] >= 1
+        stats = await wait_for_forced_disconnect()
         assert stats["messages_discarded"] >= 1
 
         # We force disconnect the subscriber before we reach the per-thread soft limit
         # (i.e. based on connection memory threshold).
         assert stats["soft_limit"] == 0
 
-        # Let the publishers finish - they must not stay parked once the budget was released.
-        stop = True
+        # The bounded publishers must complete after the slow subscriber is disconnected.
         await asyncio.wait_for(asyncio.gather(*publishers), timeout=20)
 
         # Drain the subscriber socket so the parked write completes and the connection closes through
@@ -549,7 +550,6 @@ async def test_pubsub_slow_subscriber_closed(df_server: DflyInstance, async_clie
         except asyncio.TimeoutError:
             pass
     finally:
-        stop = True
         for publisher in publishers:
             publisher.cancel()
         await asyncio.gather(*publishers, return_exceptions=True)
@@ -607,12 +607,12 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
 
     async def publish_worker():
         client = aioredis.Redis(connection_pool=async_pool)
-        for i in range(0, 2000):
+        for i in range(2000):
             await client.publish("channel", f"message-{i}")
         await client.aclose()
 
     async def channel_reader(channel: aioredis.client.PubSub):
-        for i in range(0, 150):
+        for i in range(150):
             try:
                 async with async_timeout.timeout(1):
                     await channel.get_message(ignore_subscribe_messages=True)
@@ -1065,7 +1065,7 @@ async def test_send_delay_metric(df_server: DflyInstance):
 async def test_match_http(df_server: DflyInstance):
     reader, writer = await asyncio.open_connection("localhost", df_server.port)
     for i in range(2000):
-        writer.write("foo bar ".encode())
+        writer.write(b"foo bar ")
         await writer.drain()
 
 
@@ -1150,7 +1150,7 @@ async def test_pipeline_batching_while_migrating(
     writer.write((f"EVALSHA {sha} 1 a\r\n" + incrs).encode())
     await writer.drain()
     # We migrate only when the socket wakes up, so send another batch to trigger migration
-    writer.write("INCR a\r\n".encode())
+    writer.write(b"INCR a\r\n")
     await writer.drain()
 
     # The data doesn't necessarily arrive in a single batch
@@ -1187,7 +1187,7 @@ async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
     writer.write(b"*1000\r\n")
     writer.write(b"$4\r\nmget\r\n")
     val = (b"a" * 100) + b"\r\n"
-    for i in range(0, 900):
+    for i in range(900):
         writer.write(b"$100\r\n" + val)
     await writer.drain()  # writer is pending because the request is not finished.
 
@@ -2016,7 +2016,7 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
 @dfly_args({"send_timeout": 3})
 async def test_send_timeout(df_server, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
-    writer.write("client setname writer_test\n".encode())
+    writer.write(b"client setname writer_test\n")
     await writer.drain()
     assert "OK" in (await reader.readline()).decode()
     clients = await async_client.client_list()
@@ -2027,7 +2027,7 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
 
     async def get_task():
         while True:
-            writer.write("GET a\n".encode())
+            writer.write(b"GET a\n")
             await writer.drain()
             await asyncio.sleep(0.1)
 
@@ -2087,7 +2087,7 @@ async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     # them only after execution, so while `INFO` runs the cache is empty.
     # high max_busy_read_usec ensures that the connection fiber has enough time to push
     # all the commands to reach the squashing limit.
-    for i in range(0, 10):
+    for i in range(10):
         # 10 INFO commands exceed pipeline_squash=9, so the whole pipeline is squashed and
         # INFO should report pipeline_cache_bytes == 0 for every command in it.
         res = await push_pipeline(10)

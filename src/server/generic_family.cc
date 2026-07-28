@@ -817,19 +817,37 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
   if (pv->IsExternal() && !pv->IsCool())
     return OpStatus::CANCELLED;  // can't mutate offloaded values synchronously
 
-  if (pv->ObjType() == OBJ_SET) {
-    auto result = SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
+  const bool is_set = pv->ObjType() == OBJ_SET;
+  // Only a TTL-carrying StringMap/StringSet can hold lazily expired members needing compensation.
+  const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
+
+  vector<long> result;
+  bool key_deleted;
+  if (is_set) {
+    result = SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
     // Finalize memory accounting before potential deletion.
     auto_updater.Run();
-    SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, *pv);
-    return result;
+    key_deleted = SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, *pv);
   } else {
-    auto result = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key,
-                                                  values, pv);
+    result = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key,
+                                             values, pv);
     auto_updater.Run();
-    HSetFamily::DeleteIfEmpty(db_slice, op_args.db_cntx, key, *pv);
-    return result;
+    key_deleted = HSetFamily::DeleteIfEmpty(db_slice, op_args.db_cntx, key, *pv);
   }
+
+  // A member probed while lazily expired is still alive on a lagging replica and the replayed
+  // command would re-arm it there; delete it explicitly. Delete*IfEmpty journaled a DEL itself
+  // and may have yielded, so only locals are touched from here on.
+  if (!key_deleted && had_member_expiry && op_args.shard->journal()) {
+    absl::InlinedVector<std::string_view, 4> missing{key};
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (result[i] == -2)
+        missing.push_back(values[i]);
+    }
+    if (missing.size() > 1)
+      RecordJournal(op_args, is_set ? "SREM"sv : "HDEL"sv, missing);
+  }
+  return result;
 }
 
 // returns -2 if the key was not found, -3 if the field was not found,

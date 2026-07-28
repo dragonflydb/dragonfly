@@ -658,11 +658,8 @@ ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
     CmdArgParser* parser, absl::flat_hash_set<std::string>* known_indexes) {
   AggregateParams::JoinParams join_params;
   join_params.index = parser->Next<std::string>();
-  if (parser->Check("AS")) {
-    join_params.index_alias = parser->Next<std::string>();
-  } else {
+  if (!parser->Check("AS", &join_params.index_alias))
     join_params.index_alias = join_params.index;
-  }
 
   if (known_indexes->contains(join_params.index_alias)) {
     return CreateSyntaxError(

@@ -311,9 +311,9 @@ TEST_F(SetFamilyTest, SRandMember) {
   ASSERT_THAT(Run({"SRandMember", "unknown::set"}), ArgType(RespExpr::NIL));
   ASSERT_THAT(Run({"SRandMember", "unknown::set", "0"}), ArrLen(0));
 
-  // Test wrong arguments
+  // Test wrong arguments: Redis returns a syntax error for extra args (t_set.c srandmemberCommand).
   resp = Run({"SRandMember", "x", "5", "3"});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(SetFamilyTest, SMIsMember) {

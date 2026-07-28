@@ -1,27 +1,29 @@
 import asyncio
+import difflib
 import functools
 import itertools
-import logging
-import sys
-import wrapt
-from redis import asyncio as aioredis
-import redis
-import random
-import string
-import time
-import difflib
 import json
-import subprocess
-import pytest
+import logging
 import os
-import fakeredis
-from typing import Iterable, Union
-from enum import Enum
+import random
 import re
+import string
+import subprocess
+import sys
+import time
+from collections.abc import Iterable
+from enum import Enum
 from shutil import copyfileobj
+
+import fakeredis
+import pytest
+import wrapt
 from requests import Session
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+import redis
+from redis import asyncio as aioredis
 
 
 def tmp_file_name():
@@ -146,9 +148,7 @@ async def info_tick_timer(client: aioredis.Redis, section=None, **kwargs):
 # wait for a process becomes "responsive":
 # for a master - waits that it finishes loading a snapshot if it's budy doing so,
 # and for replica it waits until it finishes its full sync stage and reaches the stable sync state.
-async def wait_available_async(
-    clients: Union[aioredis.Redis, Iterable[aioredis.Redis]], timeout=120
-):
+async def wait_available_async(clients: aioredis.Redis | Iterable[aioredis.Redis], timeout=120):
     if not isinstance(clients, aioredis.Redis):
         # Syntactic sugar to seamlessly handle an array of clients.
         return await asyncio.gather(*(wait_available_async(c, timeout=timeout) for c in clients))
@@ -884,7 +884,7 @@ class ExpirySeeder:
         while not self.stop_flag:
             try:
                 pipeline = client.pipeline(transaction=False)
-                for i in range(0, self.batch_size):
+                for i in range(self.batch_size):
                     pipeline.execute_command(f"SET tmp{self.i} bar{self.i} EX {self.timeout}")
                     self.i = self.i + 1
                 await pipeline.execute()

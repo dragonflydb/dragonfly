@@ -1,0 +1,5 @@
+storage:
+  enabled: true
+  storageClassName: "standard"
+  requests: 128Mi
+  useFullnameForVolumes: true

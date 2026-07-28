@@ -200,7 +200,7 @@ struct ReserveOpts {
       CuckooFilterOptions::kDefaultSlotsPerBucket};
   Validated<uint16_t, NotEq<uint16_t{0}, kMaxIterationsErr>> max_iterations{
       CuckooFilterOptions::kDefaultMaxIterations};
-  Validated<uint16_t, Bounded<uint16_t{0}, uint16_t{32767}, kExpansionErr>> expansion{
+  Validated<uint16_t, ClosedRange<0, 32767, kExpansionErr>> expansion{
       CuckooFilterOptions::kDefaultExpansion};
 };
 
