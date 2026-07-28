@@ -244,7 +244,7 @@ async def test_latency_stats(async_client: aioredis.Redis):
         await async_client.hgetall("missing")
 
     latency_stats = await async_client.info("LATENCYSTATS")
-    for expected in {"hgetall", "set", "get"}:
+    for expected in ("hgetall", "set", "get"):
         key = f"latency_percentiles_usec_{expected}"
         assert key in latency_stats
         assert latency_stats[key].keys() == {"p50", "p99", "p99.9"}

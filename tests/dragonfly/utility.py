@@ -11,9 +11,9 @@ import string
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from enum import Enum
 from shutil import copyfileobj
-from collections.abc import Iterable
 
 import fakeredis
 import pytest
