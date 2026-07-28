@@ -274,12 +274,13 @@ bool Listener::ReconfigureTLS() {
   return true;
 }
 
-#ifdef DFLY_USE_SSL
 std::shared_ptr<const TlsCertInfo> Listener::GetTlsCertInfo() const {
+#ifdef DFLY_USE_SSL
   util::fb2::LockGuard lk(tls_cert_info_mu_);
   return tls_cert_info_;
+#else
+  return nullptr;
 }
-#endif
 
 size_t Listener::TLSUsedMemoryThreadLocal() {
   return listener_tl_stats.tls_allocated_bytes;
