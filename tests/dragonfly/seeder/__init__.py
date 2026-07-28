@@ -25,7 +25,7 @@ class SeederBase:
     CACHED_SCRIPTS = {}
     DEFAULT_TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON", "STREAM"]
 
-    def __init__(self, types: typing.Optional[typing.List[str]] = None, seed=None):
+    def __init__(self, types: typing.List[str] | None = None, seed=None):
         self.uid = SeederBase.UID_COUNTER
         SeederBase.UID_COUNTER += 1
         self.types = types if types is not None else type(self).DEFAULT_TYPES
@@ -39,7 +39,7 @@ class SeederBase:
 
     @classmethod
     async def capture(
-        clz, client: aioredis.Redis, types: typing.Optional[typing.List[str]] = None
+        clz, client: aioredis.Redis, types: typing.List[str] | None = None
     ) -> typing.Tuple[int]:
         """Generate hash capture for all data stored in instance pointed by client"""
 
@@ -92,7 +92,7 @@ class DebugPopulateSeeder(SeederBase):
         variance=5,
         samples=10,
         collection_size=None,
-        types: typing.Optional[typing.List[str]] = None,
+        types: typing.List[str] | None = None,
         seed=None,
     ):
         SeederBase.__init__(self, types, seed)
@@ -155,7 +155,7 @@ class Seeder(SeederBase):
         key_target=10_000,
         data_size=100,
         collection_size=None,
-        types: typing.Optional[typing.List[str]] = None,
+        types: typing.List[str] | None = None,
         huge_value_target=5,
         huge_value_size=100000,
         seed=None,

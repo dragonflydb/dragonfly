@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, List, Union
+from typing import Dict, List, Union
 
 import aiohttp
 import psutil
@@ -93,14 +93,14 @@ class DflyInstance:
         self.args = args
         self.args.update(params.args)
         self.params = params
-        self.proc: Optional[subprocess.Popen] = None
-        self._client: Optional[RedisClient] = None
+        self.proc: subprocess.Popen | None = None
+        self._client: RedisClient | None = None
         self.log_files: List[str] = []
         self.dynamic_port = False
         self.sed_proc = None
         self.clients = []
         # Optional hard RLIMIT_AS cap (mirrors `ulimit -v`) for OOM tests.
-        self.vmem_limit_bytes: Optional[int] = None
+        self.vmem_limit_bytes: int | None = None
 
         if self.params.existing_port:
             self._port = self.params.existing_port
@@ -318,7 +318,7 @@ class DflyInstance:
         return self._port
 
     @property
-    def admin_port(self) -> Optional[int]:
+    def admin_port(self) -> int | None:
         if self.params.existing_admin_port:
             return self.params.existing_admin_port
         if "admin_port" in self.args:
@@ -326,7 +326,7 @@ class DflyInstance:
         return None
 
     @property
-    def mc_port(self) -> Optional[int]:
+    def mc_port(self) -> int | None:
         if self.params.existing_mc_port:
             return self.params.existing_mc_port
         if "memcached_port" in self.args:

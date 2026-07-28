@@ -25,7 +25,7 @@ import asyncio
 import dataclasses
 import logging
 import time
-from typing import List, Optional, Union
+from typing import List, Union
 
 from redis import asyncio as aioredis
 
@@ -209,8 +209,8 @@ class ReplicationSetup:
 async def setup_replication(
     df_factory: DflyInstanceFactory,
     *,
-    master_args: Optional[dict] = None,
-    replica_args: Optional[dict] = None,
+    master_args: dict | None = None,
+    replica_args: dict | None = None,
     replicas: Union[int, List[dict]] = 1,
     connect: bool = True,
     wait: bool = True,
