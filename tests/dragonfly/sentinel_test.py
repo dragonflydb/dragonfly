@@ -5,8 +5,6 @@ from redis import asyncio as aioredis
 import pytest
 import time
 import asyncio
-from datetime import datetime
-from sys import stderr
 import logging
 
 from .utility import assert_eventually, wait_available_async
@@ -74,7 +72,7 @@ class Sentinel:
             f"port {self.port}",
             f"sentinel monitor {self.default_deployment} 127.0.0.1 {self.initial_master_port} 1",
             f"sentinel down-after-milliseconds {self.default_deployment} 3000",
-            f"slave-priority 100",
+            "slave-priority 100",
         ]
         self.config_file.write_text("\n".join(config))
 
