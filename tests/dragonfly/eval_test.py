@@ -122,9 +122,7 @@ async def test_django_cacheops_script(async_client, num_keys=500):
         assert await async_client.exists(k)
         for table, fields in DJANGO_CACHEOPS_SCHEMA(vs).items():
             for sub_schema in fields:
-                conj_key = f"conj:{table}:" + "&".join(
-                    "{}={}".format(f, v) for f, v in sub_schema.items()
-                )
+                conj_key = f"conj:{table}:" + "&".join(f"{f}={v}" for f, v in sub_schema.items())
                 assert await async_client.sismember(conj_key, k)
 
 

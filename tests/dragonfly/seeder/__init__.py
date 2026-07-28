@@ -401,7 +401,7 @@ class HnswSearchSeeder:
         r = await client.execute_command(
             "FT.SEARCH",
             self.index_name,
-            "*=>[KNN {k} @embedding $vec]".format(k=k),
+            f"*=>[KNN {k} @embedding $vec]",
             "NOCONTENT",
             "PARAMS",
             "2",
@@ -425,7 +425,7 @@ class HnswSearchSeeder:
         r = await client.execute_command(
             "FT.SEARCH",
             self.index_name,
-            "@doc_id:{{{id}}}=>[KNN {k} @embedding $vec]".format(id=doc_num, k=k),
+            f"@doc_id:{{{doc_num}}}=>[KNN {k} @embedding $vec]",
             "NOCONTENT",
             "PARAMS",
             "2",

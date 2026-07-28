@@ -1,8 +1,8 @@
+from json import JSONDecoder, JSONEncoder, dumps
+
 import pytest
 import redis
 from redis import asyncio as aioredis
-from .utility import *
-from json import JSONDecoder, JSONEncoder, dumps
 
 jane = {"name": "Jane", "Age": 33, "Location": "Chawton"}
 
@@ -37,7 +37,7 @@ async def test_access_json_value_as_string(async_client: aioredis.Redis):
     assert the_type == "ReJSON-RL"
     # you cannot access this key as string
     with pytest.raises(redis.exceptions.ResponseError) as e:
-        result = await async_client.get(key_name)
+        await async_client.get(key_name)
 
     assert e.value.args[0] == "WRONGTYPE Operation against a key holding the wrong kind of value"
 
@@ -104,7 +104,7 @@ async def test_arrappend(async_client: aioredis.Redis, description, expected_val
 
     # make sure the value is as expected
     first_element = await async_client.execute_command("json.get", key_name, "$[0]")
-    assert first_element == "[{}]".format(expected_value)
+    assert first_element == f"[{expected_value}]"
 
     # make sure the type is as expected
     actual_type = await async_client.execute_command("json.type", key_name, "$[0]")

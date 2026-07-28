@@ -33,7 +33,7 @@ async def test_spop_with_null_byte_members(df_factory: DflyInstanceFactory):
     num_members = 10
 
     for i in range(num_members):
-        await client.sadd("set", "b'MEMBER\x01\x02\x00_KEY{i}'".format(i=i))
+        await client.sadd("set", f"b'MEMBER\x01\x02\x00_KEY{i}'")
 
     assert await client.scard("set") == num_members
 
