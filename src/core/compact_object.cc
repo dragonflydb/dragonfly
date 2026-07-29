@@ -1394,7 +1394,8 @@ void CompactObj::GetString(char* dest) const {
   LOG(FATAL) << "Bad tag " << int(taglen_);
 }
 
-void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep, uint32_t mem_size) {
+void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep, size_t mem_size) {
+  DCHECK_LE(mem_size, std::numeric_limits<uint32_t>::max());
   uint16_t huff_header = 0;
   if (encoding_ == HUFFMAN_ENC) {
     CHECK(rep == ExternalRep::STRING);
@@ -1409,7 +1410,7 @@ void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep, uint32
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.offload.page_index = offset / 4096;
-  u_.ext_ptr.offload.mem_size = mem_size;
+  u_.ext_ptr.offload.mem_size = uint32_t(mem_size);
 }
 
 CompactObj::ExternalRep CompactObj::GetExternalRep() const {
@@ -1439,7 +1440,7 @@ auto CompactObj::GetCool() const -> CoolItem {
   return res;
 }
 
-void CompactObj::Freeze(size_t offset, size_t sz, uint32_t mem_size) {
+void CompactObj::Freeze(size_t offset, size_t sz, size_t mem_size) {
   SetExternal(offset, sz, GetExternalRep(), mem_size);
 }
 

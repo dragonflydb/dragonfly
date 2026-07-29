@@ -423,7 +423,7 @@ class CompactObj {
     return u_.ext_ptr.is_cool;
   }
 
-  void SetExternal(size_t offset, uint32_t sz, ExternalRep rep, uint32_t mem_size);
+  void SetExternal(size_t offset, uint32_t sz, ExternalRep rep, size_t mem_size);
   ExternalRep GetExternalRep() const;
 
   // Switches to empty, non-external string.
@@ -449,7 +449,7 @@ class CompactObj {
 
   // Prequisite: IsCool() is true.
   // Keeps cool record only as external value and discard in-memory part.
-  void Freeze(size_t offset, size_t sz, uint32_t mem_size);
+  void Freeze(size_t offset, size_t sz, size_t mem_size);
 
   std::pair<size_t, size_t> GetExternalSlice() const;
 

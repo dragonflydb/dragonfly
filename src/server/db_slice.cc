@@ -525,17 +525,16 @@ void DbSlice::AutoUpdater::ReduceHeapUsage() {
     return;
   }
 
-  // Use the current sizes, not the ones captured at construction: a tiered read may have
-  // uploaded the value back to memory in the meantime.
-  const PrimeValue& pv = fields_.it->second;
-  AccountObjectMemory(fields_.key, fields_.orig_obj_type, -int64_t(pv.ResidentMallocUsed()),
-                      -int64_t(pv.LogicalMallocUsed()),
+  // The baselines are up to date even if a blocking tiered read uploaded the value mid-scope:
+  // such reads are followed by ResyncBaseline(). Subtracting them keeps this call idempotent.
+  AccountObjectMemory(fields_.key, fields_.orig_obj_type, -int64_t(fields_.orig_value_heap_size),
+                      -int64_t(fields_.orig_logical_size),
                       fields_.db_slice->GetDBTable(fields_.db_ind));
 
   // Reset to avoid double accounting, and sync the type after accounting.
   fields_.orig_value_heap_size = 0;
   fields_.orig_logical_size = 0;
-  fields_.orig_obj_type = pv.ObjType();
+  fields_.orig_obj_type = fields_.it->second.ObjType();
 }
 
 void DbSlice::AutoUpdater::ResyncBaseline() {
