@@ -67,6 +67,11 @@ inputs:
     required: false
     default: 'false'
     type: string
+  inspect-deps-cache:
+    description: "Temporarily report restored dependency-cache sizes and stop before building"
+    required: false
+    default: 'false'
+    type: string
 
 runs:
   using: "composite"
@@ -142,6 +147,29 @@ runs:
           ${{ inputs.build-dir }}/.ninja_log
           ${{ inputs.build-dir }}/CMakeFiles/*_project-complete
         key: ${{ steps.deps-cache-key.outputs.key }}
+
+    - name: Inspect restored deps cache (temporary)
+      if: inputs.inspect-deps-cache == 'true'
+      shell: bash
+      run: |
+        build_dir="${GITHUB_WORKSPACE}/${{ inputs.build-dir }}"
+        if [ "${{ steps.deps-cache-restore.outputs.cache-hit }}" = "true" ]; then
+          for directory in third_party _deps; do
+            path="${build_dir}/${directory}"
+            echo "=== ${directory} cache contents ==="
+            du -sh "${path}"
+            du -x -h --max-depth=2 "${path}" | sort -h
+            echo "=== 30 largest files in ${directory} ==="
+            find "${path}" -xdev -type f -printf '%s\t%p\n' | sort -nr | head -30 | numfmt --field=1 --to=iec
+          done
+          echo "=== cache metadata ==="
+          du -h "${build_dir}/.ninja_log"
+          du -sh "${build_dir}"/CMakeFiles/*_project-complete
+        else
+          echo "Dependency cache miss; no restored cache contents to inspect."
+        fi
+        echo "Temporary dependency-cache inspection complete; stopping before CMake and Ninja."
+        exit 1
 
     - name: Report cache status (deps)
       # - Only exact cache keys are used (no restore-keys), so a hit means the config matches the saved artifacts.
