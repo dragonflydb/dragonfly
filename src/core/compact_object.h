@@ -423,7 +423,7 @@ class CompactObj {
     return u_.ext_ptr.is_cool;
   }
 
-  void SetExternal(size_t offset, uint32_t sz, ExternalRep rep);
+  void SetExternal(size_t offset, uint32_t sz, ExternalRep rep, uint32_t mem_size);
   ExternalRep GetExternalRep() const;
 
   // Switches to empty, non-external string.
@@ -449,7 +449,7 @@ class CompactObj {
 
   // Prequisite: IsCool() is true.
   // Keeps cool record only as external value and discard in-memory part.
-  void Freeze(size_t offset, size_t sz);
+  void Freeze(size_t offset, size_t sz, uint32_t mem_size);
 
   std::pair<size_t, size_t> GetExternalSlice() const;
 
@@ -462,6 +462,12 @@ class CompactObj {
   // Returns the approximation of memory used by the object.
   // If slow is true, may use more expensive methods to calculate the precise size.
   size_t MallocUsed(bool slow = false) const;
+
+  // Bytes held in RAM: for a cool value that is the copy kept in its cool record.
+  size_t ResidentMallocUsed() const;
+
+  // Bytes the object would occupy in RAM if it were not offloaded.
+  size_t LogicalMallocUsed() const;
 
   // Resets the object to empty state (string).
   void Reset();
@@ -575,7 +581,8 @@ class CompactObj {
     // cool_record pointer. Therefore, we moved this field into TieredCoolRecord itself.
     struct Offload {
       uint32_t page_index;
-      uint32_t reserved;
+      // Heap bytes the value had while resident. The serialized size differs in both directions.
+      uint32_t mem_size;
     };
 
     union {

@@ -31,6 +31,13 @@ class SlotSet;
 
 using facade::OpResult;
 
+// `resident_delta` goes to the per-db/per-type counters (bytes held in RAM), `logical_delta` to
+// the per-slot counter (size as if resident, so offloading must not move it).
+void AccountObjectMemory(std::string_view key, unsigned type, int64_t resident_delta,
+                         int64_t logical_delta, DbTable* db);
+
+void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db);
+
 struct DbStats : public DbTableStats {
   // number of active keys.
   size_t key_count = 0;
@@ -182,6 +189,10 @@ class DbSlice {
     // Used when the existing object is overridden by a new one.
     void ReduceHeapUsage();
 
+    // Re-reads the entry's current sizes into the baseline. Call it after a blocking tiered
+    // read, which may upload the value back into memory and account for it behind our back.
+    void ResyncBaseline();
+
     void Run();
     void Cancel();
 
@@ -197,6 +208,7 @@ class DbSlice {
 
       // The following fields are calculated at init time
       size_t orig_value_heap_size = 0;
+      size_t orig_logical_size = 0;
       CompactObjType orig_obj_type = 0;
     };
 

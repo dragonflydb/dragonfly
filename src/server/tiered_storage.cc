@@ -88,11 +88,14 @@ constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
 // so we cap the number of concurrent defragmentation operations to avoid unbounded memory growth.
 constexpr uint32_t kMaxPendingDefrags = 100;
 
-// Called after setting new value in place of previous segment
-void RecordDeleted(const FragmentRef& fragment_ref, size_t tiered_len, DbTableStats* stats) {
-  stats->AddTypeMemoryUsage(fragment_ref.ObjType(), fragment_ref.MallocUsed());
-  stats->tiered_entries--;
-  stats->tiered_used_bytes -= tiered_len;
+// Called after setting new value in place of previous segment.
+// The per-slot ledger already carried the pre-offload size, so it only takes the difference.
+void RecordDeleted(const FragmentRef& fragment_ref, size_t tiered_len, int64_t logical_delta,
+                   string_view key, DbTable* db) {
+  AccountObjectMemory(key, fragment_ref.ObjType(), int64_t(fragment_ref.MallocUsed()),
+                      logical_delta, db);
+  db->stats.tiered_entries--;
+  db->stats.tiered_used_bytes -= tiered_len;
 }
 
 tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
@@ -234,8 +237,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void RetireColdEntries(size_t additional_memory);
 
   // Set value to be an in-memory type again. Update memory stats.
-  void Upload(DbIndex dbid, string_view value, PrimeValue* pv) {
+  void Upload(DbIndex dbid, string_view key, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
+    const size_t logical_before = pv->LogicalMallocUsed();
     switch (pv->GetExternalRep()) {
       case CompactObj::ExternalRep::STRING: {
         pv->Materialize(value, true);
@@ -253,7 +257,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       }
     };
 
-    RecordDeleted(*pv, value.size(), GetDbTableStats(dbid));
+    RecordDeleted(*pv, value.size(), int64_t(pv->MallocUsed()) - int64_t(logical_before), key,
+                  db_slice_.GetDBTable(dbid));
   }
 
   // Find entry by key in db_slice and store external segment in place of original value.
@@ -273,8 +278,10 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
       } else {
-        stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
-        pv->SetExternal(segment.offset, segment.length, blobs.rep);
+        // Only the RAM ledger changes: SetExternal preserves the logical size in the value.
+        const size_t mem_size = pv->MallocUsed();
+        stats->AddTypeMemoryUsage(pv->ObjType(), -int64_t(mem_size));
+        pv->SetExternal(segment.offset, segment.length, blobs.rep, mem_size);
       }
     } else {
       LOG(DFATAL) << "Should not reach here";
@@ -355,7 +362,8 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
     } else {
       // Cut out relevant part of value and restore it to memory
       string_view value = page.substr(item_segment.offset - segment.offset, item_segment.length);
-      Upload(dbid, value, &pv);
+      string scratch;
+      Upload(dbid, it->first.GetSlice(&scratch), value, &pv);
     }
   }
 }
@@ -391,11 +399,14 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     return false;
 
   if (const auto* key = std::get_if<tiering::ListNodeId>(&id); key) {
-    DbIndex db_id = std::get<0>(*key);
+    QList* ql = reinterpret_cast<QList*>(std::get<1>(*key));
+    // The list may have been moved to another db since the node was stashed.
+    DbIndex db_id = ql->GetDbIndex();
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
     ++stats_.total_uploads;
     decoder->Upload(node);
-    RecordDeleted(node, segment.length, GetDbTableStats(db_id));
+    // A node upload does not change the list's logical size.
+    RecordDeleted(node, segment.length, 0, {}, db_slice_.GetDBTable(db_id));
     return true;
   }
 
@@ -404,8 +415,10 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
       if (metrics.modified || pv->WasTouched()) {
         ++stats_.total_uploads;
+        const size_t logical_before = pv->LogicalMallocUsed();
         decoder->Upload(pv);
-        RecordDeleted(*pv, segment.length, GetDbTableStats(key->first));
+        RecordDeleted(*pv, segment.length, int64_t(pv->MallocUsed()) - int64_t(logical_before),
+                      key->second, db_slice_.GetDBTable(key->first));
         return true;
       }
       pv->SetTouched(true);
@@ -560,8 +573,8 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
 
   tiering::DiskSegment segment = fragment_ref.GetExternalSlice();
   if (auto* cool = fragment_ref.GetCoolRecord(); cool) {
-    auto hot = DeleteCool(cool);
-    DCHECK_EQ(hot.ObjType(), OBJ_STRING);
+    // Cooling is type agnostic, so the recovered value may be of any offloadable type.
+    DeleteCool(cool);
   }
   fragment_ref.ClearOffloaded();
   op_manager_->DeleteOffloaded(dbid, segment);
@@ -614,6 +627,7 @@ TieredStats TieredStorage::GetStats() const {
   }
 
   {  // Own stats
+    stats.total_deletes = stats_.total_deletes;
     stats.total_stash_overflows = stats_.stash_overflow_cnt;
     stats.cold_storage_bytes = stats_.cool_memory_used;
     stats.total_offloading_steps = stats_.offloading_steps;
@@ -754,10 +768,11 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 
     // Now the item is only in storage.
     tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
-    pv.Freeze(segment.offset, segment.length);
+    const size_t mem_size = record->value.MallocUsed();
+    pv.Freeze(segment.offset, segment.length, mem_size);
 
     auto* stats = op_manager_->GetDbTableStats(record->db_index);
-    stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
+    stats->AddTypeMemoryUsage(record->value.ObjType(), -int64_t(mem_size));
     CompactObj::DeleteMR<TieredCoolRecord>(record);
   } while (gained < goal);
 

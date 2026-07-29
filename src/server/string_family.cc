@@ -278,13 +278,13 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
     auto tier = ReadTieredString(op_args.db_cntx.db_index, key, res.it->second,
                                  op_args.shard->tiered_storage())
                     .Get();
+    res.post_updater.ResyncBaseline();  // the read may have uploaded the value
     if (!tier)
       return OpStatus::IO_ERROR;
     string slice = std::move(tier).value();
     string new_val = prepend ? absl::StrCat(val, slice) : absl::StrCat(slice, val);
-    // The read may have warmed the value back into memory; re-check before Delete.
+    res.post_updater.ReduceHeapUsage();
     if (res.it->second.IsExternal()) {
-      res.post_updater.ReduceHeapUsage();
       op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
     }
     res.it->second.SetString(new_val);
@@ -321,6 +321,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
     auto res = ReadTieredString(op_args.db_cntx.db_index, key, add_res.it->second,
                                 op_args.shard->tiered_storage())
                    .Get();
+    add_res.post_updater.ResyncBaseline();  // the read may have uploaded the value
     if (!res)
       return OpStatus::IO_ERROR;
     tmp = std::move(res).value();
@@ -342,10 +343,8 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
 
-  // The tiered read may have warmed the value back into memory; re-check so Delete
-  // only runs while it is still external.
+  add_res.post_updater.ReduceHeapUsage();
   if (add_res.it->second.IsExternal()) {
-    add_res.post_updater.ReduceHeapUsage();
     op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &add_res.it->second);
   }
   add_res.it->second.SetString(str);

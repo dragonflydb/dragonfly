@@ -878,12 +878,12 @@ TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
       EXPECT_EQ(test_str, enc.Decode(raw_str).Take());
 
       // Test Materialize
-      obj.SetExternal(0, 0, CompactObj::ExternalRep::STRING);  // dummy values
+      obj.SetExternal(0, 0, CompactObj::ExternalRep::STRING, 0);  // dummy values
       obj.Materialize(raw_str, true);
       EXPECT_EQ(test_str, obj.ToString());
 
       // Restore from external again, but not as a raw value
-      obj.SetExternal(0, 0, CompactObj::ExternalRep::STRING);
+      obj.SetExternal(0, 0, CompactObj::ExternalRep::STRING, 0);
       auto test_str2 = test_str + "updated";
       obj.Materialize(test_str2, false);
       EXPECT_EQ(obj.ToString(), test_str2);
@@ -930,14 +930,14 @@ TEST_F(CompactObjectTest, ExternalRepresentation) {
   {
     CompactValue obj;
     obj.SetString("test");
-    obj.SetExternal(0, 4, CompactObj::ExternalRep::STRING);
+    obj.SetExternal(0, 4, CompactObj::ExternalRep::STRING, 4);
     EXPECT_EQ(obj.ObjType(), OBJ_STRING);
   }
   {
     StringMap sm{};
     CompactValue obj;
     obj.SetRObjPtr(&sm);
-    obj.SetExternal(0, 4, CompactObj::ExternalRep::SERIALIZED_MAP);
+    obj.SetExternal(0, 4, CompactObj::ExternalRep::SERIALIZED_MAP, 4);
     EXPECT_EQ(obj.ObjType(), OBJ_HASH);
   }
 }

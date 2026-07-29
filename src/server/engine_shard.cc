@@ -366,6 +366,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
   uint64_t attempts = 0;
 
   DbTable* db_table = slice.GetDBTable(defrag_state_.dbid);
+  std::string scratch;
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
@@ -376,7 +377,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
       if (did) {
         reallocations++;
         if (const ssize_t delta = it->second.MallocUsed() - original_size; delta != 0) {
-          db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+          AccountObjectMemory(it->first.GetSlice(&scratch), it->second.ObjType(), delta, db_table);
         }
       }
     });
