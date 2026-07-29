@@ -59,9 +59,6 @@ class Namespaces {
   Namespace& GetDefaultNamespace() const;  // No locks
   Namespace& GetOrInsert(std::string_view ns) ABSL_LOCKS_EXCLUDED(mu_);
 
-  // Namespaces are never removed while serving, so the snapshot stays valid.
-  std::vector<Namespace*> GetAllNamespaces() ABSL_LOCKS_EXCLUDED(mu_);
-
  private:
   util::fb2::SharedMutex mu_{};
   absl::node_hash_map<std::string, Namespace> namespaces_ ABSL_GUARDED_BY(mu_);

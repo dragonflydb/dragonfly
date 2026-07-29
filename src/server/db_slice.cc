@@ -488,13 +488,11 @@ auto DbSlice::GetStats() const -> Stats {
 }
 
 SlotStats DbSlice::GetSlotStats(SlotId sid) const {
-  SlotStats stats;
+  CHECK(db_arr_[0]);
   // slots_stats is null outside real cluster mode.
-  for (const auto& db : db_arr_) {
-    if (db && db->slots_stats)
-      stats += db->slots_stats[sid];
-  }
-  return stats;
+  if (!db_arr_[0]->slots_stats)
+    return {};
+  return db_arr_[0]->slots_stats[sid];
 }
 
 DbSlice::AutoUpdater::AutoUpdater() {
@@ -899,51 +897,38 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
   // get version >= next_version and survive.
   uint64_t del_count = 0;
 
-  // Copies keep the tables alive (FLUSHALL drops them); db > 0 is reachable via db-pinned
-  // ACL users and replicated streams, so every db index is traversed.
-  DbTableArray local_arr = db_arr_;
+  // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
+  boost::intrusive_ptr<DbTable> table = db_arr_.front();
+  size_t memory_before = table->table_memory() + table->stats.obj_memory_usage;
 
-  size_t memory_before = 0;
-  for (const auto& table : local_arr) {
-    if (table)
-      memory_before += table->table_memory() + table->stats.obj_memory_usage;
-  }
+  DbContext db_cntx;
+  db_cntx.time_now_ms = GetCurrentTimeMs();
+  db_cntx.db_index = table->index;
+
+  std::string tmp;
+  auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
+    it.AdvanceIfNotOccupied();
+    while (!it.is_done()) {
+      std::string_view key = it->first.GetSlice(&tmp);
+      SlotId sid = KeySlot(key);
+      if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
+        // We use copy of table smart pointer and pass it as table because FLUSHALL can drop table.
+        Del(db_cntx, Iterator::FromPrime(it), table.get());
+        ++del_count;
+      }
+      ++it;
+    }
+  };
 
   ServerState& etl = *ServerState::tlocal();
-  std::string tmp;
+  PrimeTable* pt = &table->prime;
+  PrimeTable::Cursor cursor;
 
-  for (const auto& table : local_arr) {
-    if (!table)
-      continue;
-
-    DbContext db_cntx;
-    db_cntx.time_now_ms = GetCurrentTimeMs();
-    db_cntx.db_index = table->index;
-
-    auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
-      it.AdvanceIfNotOccupied();
-      while (!it.is_done()) {
-        std::string_view key = it->first.GetSlice(&tmp);
-        SlotId sid = KeySlot(key);
-        if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
-          Del(db_cntx, Iterator::FromPrime(it), table.get());
-          ++del_count;
-        }
-        ++it;
-      }
-    };
-
-    PrimeTable* pt = &table->prime;
-    PrimeTable::Cursor cursor;
-
-    do {
-      cursor = pt->TraverseBuckets(cursor, iterate_bucket);
-      ThisFiber::Yield();
-    } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
-
-    if (etl.gstate() == GlobalState::SHUTTING_DOWN)
-      break;
-  }
+  do {
+    PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
+    cursor = next;
+    ThisFiber::Yield();
+  } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
   if (!UnregisterOnChange(consumer))
@@ -953,11 +938,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     int64_t start = absl::GetCurrentTimeNanos();
     etl.DecommitMemory(ServerState::kDataHeap);
     int64_t took = absl::GetCurrentTimeNanos() - start;
-    size_t memory_after = 0;
-    for (const auto& table : local_arr) {
-      if (table)
-        memory_after += table->table_memory() + table->stats.obj_memory_usage;
-    }
+    size_t memory_after = table->table_memory() + table->stats.obj_memory_usage;
 
     LOG(INFO) << "Memory decommit took " << took << "ns, deleted " << del_count << ", memory delta "
               << (static_cast<int64_t>(memory_before) - static_cast<int64_t>(memory_after));
@@ -973,20 +954,19 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   uint64_t next_version = NextVersion();
 
   auto shared_slots = std::make_shared<cluster::SlotSet>(std::move(slot_set));
+  boost::intrusive_ptr<DbTable> table = db_arr_.front();
 
   // Register the on_change callback synchronously so that bucket modifications between
   // FlushSlots returning and the fiber starting are caught (the callback deletes old entries
   // before the bucket version is bumped, preventing the traversal from skipping them).
-  // Tables are captured: serializers may deliver buckets of tables FLUSHALL has since swapped
-  // out, and only registration-time tables can hold entries older than next_version.
-  auto on_change = [this, shared_slots, next_version, tables = db_arr_](DbIndex db_index,
-                                                                        const ChangeReq& req) {
-    FiberAtomicGuard fg;
-
-    // Dbs activated later hold only entries newer than next_version.
-    DbTable* table = db_index < tables.size() ? tables[db_index].get() : nullptr;
-    if (table == nullptr)
+  auto on_change = [this, shared_slots, next_version, table](DbIndex db_index,
+                                                             const ChangeReq& req) {
+    // The callback fires for every db index, but only db 0 is flushed; deleting a db > 0
+    // entry through db 0's table would corrupt its accounting and prime table.
+    if (db_index != 0)
       return;
+
+    FiberAtomicGuard fg;
 
     auto process_bucket = [&](PrimeTable::bucket_iterator it) {
       std::string tmp;
@@ -998,7 +978,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
           DbContext cntx;
           cntx.time_now_ms = GetCurrentTimeMs();
           cntx.db_index = db_index;
-          Del(cntx, Iterator::FromPrime(it), table);
+          Del(cntx, Iterator::FromPrime(it), table.get());
         }
         ++it;
       }
@@ -1715,18 +1695,13 @@ void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
 }
 
 void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
-  // Matches the flush scope (every db index).
-  for (const auto& db : db_arr_) {
-    if (!db)
+  for (const auto& [key, conn_list] : db_arr_[0]->watched_keys) {
+    SlotId sid = KeySlot(key);
+    if (!slot_ids.Contains(sid)) {
       continue;
-    for (const auto& [key, conn_list] : db->watched_keys) {
-      SlotId sid = KeySlot(key);
-      if (!slot_ids.Contains(sid)) {
-        continue;
-      }
-      for (auto* dirty_ptr : conn_list)
-        dirty_ptr->store(true, memory_order_relaxed);
     }
+    for (auto* dirty_ptr : conn_list)
+      dirty_ptr->store(true, memory_order_relaxed);
   }
 }
 

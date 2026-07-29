@@ -16,7 +16,6 @@ namespace dfly::cluster {
 
 uint64_t GetKeyCount(const SlotRanges& slots) {
   std::atomic_uint64_t keys = 0;
-  auto all_namespaces = namespaces->GetAllNamespaces();
 
   shard_set->pool()->AwaitFiberOnAll([&](auto*) {
     EngineShard* shard = EngineShard::tlocal();
@@ -24,13 +23,12 @@ uint64_t GetKeyCount(const SlotRanges& slots) {
       return;
 
     uint64_t shard_keys = 0;
-    // Consistent with GETSLOTINFO aggregation.
-    for (Namespace* ns : all_namespaces) {
-      auto& db_slice = ns->GetDbSlice(shard->shard_id());
-      for (const SlotRange& range : slots) {
-        for (SlotId slot = range.start; slot <= range.end; slot++) {
-          shard_keys += db_slice.GetSlotStats(slot).key_count;
-        }
+    for (const SlotRange& range : slots) {
+      for (SlotId slot = range.start; slot <= range.end; slot++) {
+        shard_keys += namespaces->GetDefaultNamespace()
+                          .GetDbSlice(shard->shard_id())
+                          .GetSlotStats(slot)
+                          .key_count;
       }
     }
     keys.fetch_add(shard_keys);

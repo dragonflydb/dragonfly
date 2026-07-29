@@ -35,6 +35,7 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_log.h"
 #include "server/acl/validator.h"
+#include "server/cluster_support.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/config_registry.h"
@@ -1116,6 +1117,10 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
     if (auto res = MaybeParseAclDflySelect(facade::ToSV(arg), dbnum_); res) {
       if (req.select_db) {
         return ErrorReply("ERR Error, select db $ was used twice");
+      }
+      // AUTH switches the connection to this db, bypassing the SELECT restriction.
+      if (IsClusterEnabled() && *res != 0 && *res != std::numeric_limits<size_t>::max()) {
+        return ErrorReply("ERR Error, select db $ is not allowed in cluster mode");
       }
       req.select_db = res;
       continue;

@@ -501,13 +501,9 @@ void DeleteSlots(Transaction* trans, const SlotRanges& slots_ranges) {
     return;
   }
 
-  // Namespaced keys must not survive the slot hand-off.
-  auto all_namespaces = namespaces->GetAllNamespaces();
   trans->Execute(
-      [&](Transaction* t, EngineShard* shard) {
-        for (Namespace* ns : all_namespaces) {
-          ns->GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
-        }
+      [&slots_ranges](Transaction* t, EngineShard* shard) {
+        namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
         return OpStatus::OK;
       },
       true);
@@ -700,7 +696,6 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
   }
 
   fb2::Mutex mu;
-  auto all_namespaces = namespaces->GetAllNamespaces();
 
   auto cb = [&](auto*) ABSL_LOCKS_EXCLUDED(mu) {
     EngineShard* shard = EngineShard::tlocal();
@@ -708,11 +703,8 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
       return;
 
     util::fb2::LockGuard lk(mu);
-    for (Namespace* ns : all_namespaces) {
-      auto& db_slice = ns->GetDbSlice(shard->shard_id());
-      for (auto& [slot, data] : slots_stats) {
-        data += db_slice.GetSlotStats(slot);
-      }
+    for (auto& [slot, data] : slots_stats) {
+      data += namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).GetSlotStats(slot);
     }
   };
 
