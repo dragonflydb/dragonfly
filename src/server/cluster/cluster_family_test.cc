@@ -646,7 +646,7 @@ TEST_F(CoolingTieredClusterFamilyTest, ClusterGetSlotInfoRemovesTieredBytesOnWar
 
   const size_t tiered_bytes = GetMetrics().db_stats[0].tiered_used_bytes;
   EXPECT_EQ(Run({"GET", kKey}), value);
-  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u);
+  ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries == 0; });
 
   EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)}),
               RespElementsAre(RespArray(ElementsAre(
