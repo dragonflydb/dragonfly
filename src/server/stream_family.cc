@@ -3034,15 +3034,8 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
                                                      : KeyReadyResult::kKeyNotFound;
 
     StreamIDsItem& sitem = opts->stream_ids.at(key);
-    if (sitem.id.val.ms != UINT64_MAX && sitem.id.val.seq != UINT64_MAX)
-      return KeyReadyResult::kReady;
-
     const CompactObj& cobj = (*res_it)->second;
     stream* s = GetReadOnlyStream(cobj);
-    streamID last_id = s->last_id;
-    if (s->length) {
-      StreamLastValidID(s, &last_id);
-    }
 
     // Update group pointer and check it's validity
     if (opts->read_group) {
@@ -3051,8 +3044,22 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
         return KeyReadyResult::kReady;  // abort
     }
 
-    return streamCompareID(&last_id, &sitem.group->last_id) > 0 ? KeyReadyResult::kReady
-                                                                : KeyReadyResult::kNotReady;
+    // An empty stream has nothing to serve: s->last_id only records the last generated id and
+    // survives XDEL and XTRIM.
+    if (!s->length)
+      return KeyReadyResult::kNotReady;
+
+    streamID last_id;
+    StreamLastValidID(s, &last_id);
+
+    // XREADGROUP only blocks on '>', which asks for entries the group has not delivered yet.
+    // XREAD blocks on a concrete id and must stay blocked until an entry reaches it.
+    if (opts->read_group) {
+      return streamCompareID(&last_id, &sitem.group->last_id) > 0 ? KeyReadyResult::kReady
+                                                                  : KeyReadyResult::kNotReady;
+    }
+    return streamCompareID(&last_id, &sitem.id.val) >= 0 ? KeyReadyResult::kReady
+                                                         : KeyReadyResult::kNotReady;
   };
 
   if (auto status =
@@ -3085,8 +3092,11 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
         return OpStatus::OK;
       }
 
-      if (sitem.id.val.ms == UINT64_MAX || sitem.id.val.seq == UINT64_MAX) {
-        range_opts.start.val = sitem.group->last_id;  // only for '>'
+      // '>' is encoded as UINT64_MAX-UINT64_MAX and is only accepted for XREADGROUP, so the start
+      // comes from the group. A plain XREAD has no group and reads from the id it asked for, even
+      // when that id happens to carry a UINT64_MAX component.
+      if (opts->read_group && sitem.id.val.ms == UINT64_MAX && sitem.id.val.seq == UINT64_MAX) {
+        range_opts.start.val = sitem.group->last_id;
         StreamIncrID(&range_opts.start.val);
       }
 
