@@ -7,6 +7,7 @@
 #include <cctype>
 #include <chrono>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -611,9 +612,9 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
   stub.authed_username = username;
   stub.acl_commands = user.AclCommandsRef();
   stub.pub_sub = user.PubSub();
-  // "mock" without an actual connection we can't know which db is active so we skip this check
-  // for DryRun.
-  stub.acl_db_idx = {};
+  stub.acl_db_idx = user.Db();
+  stub.conn_state.db_index =
+      stub.acl_db_idx == std::numeric_limits<size_t>::max() ? 0 : stub.acl_db_idx;
   stub.keys = user.Keys();
   // The regular command path validates arity before checking ACLs. DRYRUN historically accepts a
   // command without its arguments, so skip key-pattern validation for an incomplete simulation.

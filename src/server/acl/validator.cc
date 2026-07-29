@@ -59,9 +59,14 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
     return false;
   };
 
+  std::string_view name = id.name();
+  // Valkey never gates unsubscribe on channel ACLs (only PUBLISH/SUBSCRIBE flags are checked).
+  if (name == "UNSUBSCRIBE" || name == "PUNSUBSCRIBE" || name == "SUNSUBSCRIBE") {
+    return {true, AclLog::Reason::PUB_SUB};
+  }
+
   bool allowed = true;
   if (!pub_sub.all_channels) {
-    std::string_view name = id.name();
     if (name == "PUBLISH" || name == "SPUBLISH") {
       // tail_args can be empty for ACL DRYRUN's simulated commands, which skip arity
       // validation. Treat a missing channel argument as unknown/permissive, matching how

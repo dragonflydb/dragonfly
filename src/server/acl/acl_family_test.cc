@@ -399,6 +399,12 @@ TEST_F(AclFamilyTest, TestDryRun) {
   resp = Run("ACL DRYRUN key-reader ZUNION notanumber allowed:key");
   EXPECT_THAT(resp, "This user has no permissions to run the 'ZUNION' command");
 
+  resp = Run("ACL SETUSER zunion-user +ZUNION ~allowed:*");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL DRYRUN zunion-user ZUNION notanumber allowed:key");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'ZUNION' command");
+
   // Pub/sub channel ACLs must be honored too, not just command categories and key patterns.
   resp = Run("ACL SETUSER chan-user +@pubsub resetchannels &allowed-channel");
   EXPECT_THAT(resp, "OK");
@@ -408,6 +414,39 @@ TEST_F(AclFamilyTest, TestDryRun) {
 
   resp = Run("ACL DRYRUN chan-user PUBLISH blocked-channel hello");
   EXPECT_THAT(resp, "This user has no permissions to run the 'PUBLISH' command");
+
+  // Unsubscribing never needs channel permission, only the command bit (matches Valkey).
+  resp = Run("ACL DRYRUN chan-user UNSUBSCRIBE blocked-channel");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL DRYRUN chan-user PUNSUBSCRIBE blocked-*");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL DRYRUN chan-user SUNSUBSCRIBE blocked-channel");
+  EXPECT_THAT(resp, "OK");
+
+  // The unrestricted default user must be able to cross databases.
+  resp = Run("ACL DRYRUN default MOVE key 1");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL DRYRUN default SELECT 5");
+  EXPECT_THAT(resp, "OK");
+
+  // A user pinned to a single db can SELECT into it, but never leave it via MOVE/SELECT.
+  resp = Run("ACL SETUSER db-user +@all $2");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL DRYRUN db-user SELECT 2");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL DRYRUN db-user SELECT 3");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'SELECT' command");
+
+  resp = Run("ACL DRYRUN db-user MOVE key 3");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'MOVE' command");
+
+  resp = Run("ACL DRYRUN db-user MULTI");
+  EXPECT_THAT(resp, "OK");
 
   // Multi-word commands like "ACL SETUSER" must resolve to their own (more restrictive) ACL
   // category, not fall back to the bare "ACL" family command.
