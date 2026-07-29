@@ -924,6 +924,125 @@ TEST_F(ClusterFamilyTest, FlushSlotsDoesNotDeleteEntriesInsertedAfterFlush) {
   });
 }
 
+TEST_F(ClusterFamilyTest, MoveNotAllowedInClusterMode) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  EXPECT_EQ(Run({"set", "key", "val"}), "OK");
+  EXPECT_THAT(Run({"move", "key", "1"}), ErrArg("MOVE is not allowed in cluster mode"));
+  EXPECT_EQ(Run({"get", "key"}), "val");
+}
+
+// Keys in db > 0 must be counted by GETSLOTINFO and deleted by FLUSHSLOTS.
+TEST_F(ClusterFamilyTest, SlotOpsCoverAllDbIndexes) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  const string key = "db1key";
+  const string db0_key = "{db1key}other";  // same slot as key
+  const string slot = absl::StrCat(CheckedInt({"cluster", "keyslot", key}));
+
+  // Same shard, so key_count == 2 proves summing over db indexes.
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+    db_slice.ActivateDb(1);
+    PrimeValue val0;
+    val0.SetString(string(128, 'x'));
+    DbContext cntx0{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    CHECK(db_slice.AddOrUpdate(cntx0, db0_key, std::move(val0), 0).ok());
+    PrimeValue val1;
+    val1.SetString(string(128, 'x'));
+    DbContext cntx1{&namespaces->GetDefaultNamespace(), 1, GetCurrentTimeMs()};
+    CHECK(db_slice.AddOrUpdate(cntx1, key, std::move(val1), 0).ok());
+  });
+
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", slot}),
+              RespElementsAre(RespArray(ElementsAre(IntArg(CheckedInt({"cluster", "keyslot", key})),
+                                                    "key_count", IntArg(2), "total_reads", _,
+                                                    "total_writes", _, "memory_bytes", _))));
+
+  EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", slot, slot}), "OK");
+  ExpectConditionWithinTimeout([&] {
+    return pp_->at(0)->Await([&] {
+      auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(0);
+      return db_slice.DbSize(0) == 0u && db_slice.DbSize(1) == 0u;
+    });
+  });
+}
+
+// The flush's on_change must delete through the table of the change's db index; the bug
+// charged db 0's table for a db 1 deletion (FATAL underflow in debug).
+TEST_F(ClusterFamilyTest, FlushSlotsOnChangeCoversNonDefaultDb) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+    db_slice.ActivateDb(1);
+    DbContext cntx{&namespaces->GetDefaultNamespace(), 1, GetCurrentTimeMs()};
+
+    PrimeValue val;
+    val.SetString(string(128, 'x'));
+    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val), 0).ok());
+
+    cluster::SlotRanges ranges({{0, 16383}});
+    es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    db_slice.FlushSlots(ranges);
+    es->shard_lock()->Release(IntentLock::EXCLUSIVE);
+
+    // Overwrite without yielding: PreUpdateBlocking fires on_change with db_index=1.
+    PrimeValue val2;
+    val2.SetString(string(128, 'y'));
+    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val2), 0).ok());
+
+    util::ThisFiber::SleepFor(50ms);  // let the flush fiber finish
+
+    // The new entry postdates the flush, so it survives.
+    EXPECT_EQ(db_slice.DbSize(1), 1u);
+    EXPECT_EQ(db_slice.DbSize(0), 0u);
+    EXPECT_EQ(db_slice.GetSlotStats(KeySlot("key")).key_count, 1u);
+  });
+}
+
+// Namespaced keys must be counted by GETSLOTINFO and deleted by FLUSHSLOTS.
+TEST_F(ClusterFamilyTest, SlotOpsCoverAllNamespaces) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  const string key = "nskey";
+  const string default_ns_key = "{nskey}dflt";  // same slot as key
+  const string slot = absl::StrCat(CheckedInt({"cluster", "keyslot", key}));
+
+  // Same shard, so key_count == 2 proves summing over namespaces.
+  auto& tenant = namespaces->GetOrInsert("tenant1");
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    PrimeValue val0;
+    val0.SetString(string(128, 'x'));
+    DbContext cntx0{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    auto& default_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+    CHECK(default_slice.AddOrUpdate(cntx0, default_ns_key, std::move(val0), 0).ok());
+    PrimeValue val1;
+    val1.SetString(string(128, 'x'));
+    DbContext cntx1{&tenant, 0, GetCurrentTimeMs()};
+    CHECK(tenant.GetDbSlice(es->shard_id()).AddOrUpdate(cntx1, key, std::move(val1), 0).ok());
+  });
+
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", slot}),
+              RespElementsAre(RespArray(ElementsAre(IntArg(CheckedInt({"cluster", "keyslot", key})),
+                                                    "key_count", IntArg(2), "total_reads", _,
+                                                    "total_writes", _, "memory_bytes", _))));
+
+  EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", slot, slot}), "OK");
+  ExpectConditionWithinTimeout([&] {
+    return pp_->at(0)->Await([&] {
+      return tenant.GetDbSlice(0).DbSize(0) == 0u &&
+             namespaces->GetDefaultNamespace().GetDbSlice(0).DbSize(0) == 0u;
+    });
+  });
+}
+
 TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
   ConfigSingleNodeCluster(GetMyId());
 
@@ -949,6 +1068,19 @@ class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
     SetTestFlag("announce_port", "6379");
   }
 };
+
+// slots_stats is null outside real cluster mode; GetSlotStats must not crash.
+TEST_F(ClusterFamilyEmulatedTest, GetSlotStatsWithoutClusterMode) {
+  EXPECT_EQ(Run({"set", "key", "value"}), "OK");
+
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+    SlotStats stats = db_slice.GetSlotStats(0);
+    EXPECT_EQ(stats.key_count, 0u);
+  });
+}
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
   string cluster_info = Run({"cluster", "info"}).GetString();

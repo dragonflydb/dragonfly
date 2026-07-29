@@ -81,6 +81,16 @@ Namespace& Namespaces::GetDefaultNamespace() const {
   return *default_namespace_;
 }
 
+std::vector<Namespace*> Namespaces::GetAllNamespaces() {
+  dfly::SharedLock guard(mu_);
+  std::vector<Namespace*> res;
+  res.reserve(namespaces_.size());
+  for (auto& [name, ns] : namespaces_) {
+    res.push_back(&ns);
+  }
+  return res;
+}
+
 Namespace& Namespaces::GetOrInsert(std::string_view ns) {
   {
     // Try to look up under a shared lock
