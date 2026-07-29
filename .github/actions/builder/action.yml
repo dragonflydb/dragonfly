@@ -143,6 +143,21 @@ runs:
           ${{ inputs.build-dir }}/CMakeFiles/*_project-complete
         key: ${{ steps.deps-cache-key.outputs.key }}
 
+    - name: Inspect restored deps cache (temporary)
+      if: inputs.enable-deps-cache == 'true' && steps.deps-cache-restore.outputs.cache-hit == 'true'
+      shell: bash
+      run: |
+        build_dir="${GITHUB_WORKSPACE}/${{ inputs.build-dir }}"
+        for directory in third_party _deps; do
+          path="${build_dir}/${directory}"
+          echo "=== ${directory} cache contents ==="
+          du -sh "${path}"
+          find "${path}" -mindepth 1 -maxdepth 1 -type d -print0 | xargs -r -0 du -sh | sort -h
+        done
+        echo "=== cache metadata ==="
+        du -h "${build_dir}/.ninja_log"
+        du -sh "${build_dir}"/CMakeFiles/*_project-complete
+
     - name: Report cache status (deps)
       # - Only exact cache keys are used (no restore-keys), so a hit means the config matches the saved artifacts.
       if: always() && inputs.enable-deps-cache == 'true'
