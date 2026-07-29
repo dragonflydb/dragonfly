@@ -25,6 +25,7 @@
 ABSL_DECLARE_FLAG(std::string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
+ABSL_DECLARE_FLAG(bool, force_epoll);
 #endif
 
 namespace dfly::cluster {
@@ -80,8 +81,18 @@ class ClusterFamilyTest : public BaseFamilyTest {
 #ifdef WITH_TIERING
 class TieredClusterFamilyTest : public ClusterFamilyTest {
  protected:
+  void SetUp() override {
+    ClusterFamilyTest::SetUp();
+    if (absl::GetFlag(FLAGS_force_epoll)) {
+      GTEST_SKIP() << "Tiered storage requires io_uring";
+    }
+  }
+
   void ConfigureClusterFlags() override {
     ClusterFamilyTest::ConfigureClusterFlags();
+    if (absl::GetFlag(FLAGS_force_epoll)) {
+      return;
+    }
     absl::SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_cluster_family_test");
     absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
     absl::SetFlag(&FLAGS_tiered_experimental_cooling, false);
@@ -93,8 +104,18 @@ class TieredClusterFamilyTest : public ClusterFamilyTest {
 
 class CoolingTieredClusterFamilyTest : public ClusterFamilyTest {
  protected:
+  void SetUp() override {
+    ClusterFamilyTest::SetUp();
+    if (absl::GetFlag(FLAGS_force_epoll)) {
+      GTEST_SKIP() << "Tiered storage requires io_uring";
+    }
+  }
+
   void ConfigureClusterFlags() override {
     ClusterFamilyTest::ConfigureClusterFlags();
+    if (absl::GetFlag(FLAGS_force_epoll)) {
+      return;
+    }
     absl::SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_cluster_family_test");
     absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
     absl::SetFlag(&FLAGS_tiered_experimental_cooling, true);
