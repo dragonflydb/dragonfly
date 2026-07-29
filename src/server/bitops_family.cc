@@ -357,7 +357,8 @@ void ElementAccess::Commit(string_view new_value) const {
       updater_.post_updater.ReduceHeapUsage();
     }
     if (is_external) {
-      EngineShard::tlocal()->tiered_storage()->Delete(context_.db_index, &updater_.it->second);
+      EngineShard::tlocal()->tiered_storage()->Delete(context_.db_index, key_,
+                                                      &updater_.it->second);
     }
     updater_.it->second.SetString(new_value);
     updater_.post_updater.Run();

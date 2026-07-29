@@ -492,6 +492,17 @@ SlotStats DbSlice::GetSlotStats(SlotId sid) const {
   return db_arr_[0]->slots_stats[sid];
 }
 
+void DbSlice::AdjustSlotStats(DbIndex dbid, std::string_view key, int64_t resident_delta,
+                              int64_t tiered_delta) {
+  auto* slots_stats = GetDBTable(dbid)->slots_stats.get();
+  if (slots_stats == nullptr)
+    return;
+
+  SlotStats& stats = slots_stats[KeySlot(key)];
+  stats.memory_bytes += resident_delta;
+  stats.tiered_bytes += tiered_delta;
+}
+
 DbSlice::AutoUpdater::AutoUpdater() {
 }
 
@@ -682,7 +693,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   // Fetch back cool items
   if (pv.IsExternal() && pv.IsCool()) {
-    pv = owner_->tiered_storage()->Warmup(cntx.db_index, pv.GetCool());
+    pv = owner_->tiered_storage()->Warmup(cntx.db_index, key, pv.GetCool());
   }
 
   // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
@@ -1712,7 +1723,7 @@ void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> 
     do {
       cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
         if (it->second.IsExternal()) {
-          tiered_storage->Delete(index, &it->second);
+          tiered_storage->Delete(index, it->first.GetSlice(&scratch), &it->second);
         } else if (it->second.HasStashPending()) {
           tiered_storage->CancelStash(std::make_pair(index, it->first.GetSlice(&scratch)),
                                       &it->second);
@@ -1932,7 +1943,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
     string_view key = del_it->first.GetSlice(&scratch);
     shard_owner()->tiered_storage()->CancelStash(std::make_pair(table->index, key), &pv);
   } else if (pv.IsExternal()) {
-    shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
+    shard_owner()->tiered_storage()->Delete(table->index, del_it.key(), &del_it->second);
   }
 
   ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();

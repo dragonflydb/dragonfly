@@ -234,7 +234,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void RetireColdEntries(size_t additional_memory);
 
   // Set value to be an in-memory type again. Update memory stats.
-  void Upload(DbIndex dbid, string_view value, PrimeValue* pv) {
+  void Upload(DbIndex dbid, string_view key, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
     switch (pv->GetExternalRep()) {
       case CompactObj::ExternalRep::STRING: {
@@ -253,6 +253,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       }
     };
 
+    db_slice_.AdjustSlotStats(dbid, key, pv->MallocUsed(), -static_cast<int64_t>(value.size()));
     RecordDeleted(*pv, value.size(), GetDbTableStats(dbid));
   }
 
@@ -269,6 +270,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats_.total_stashes++;
 
       StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
+      const int64_t resident_delta =
+          ts_->config_.experimental_cooling ? 0 : -static_cast<int64_t>(pv->MallocUsed());
+      db_slice_.AdjustSlotStats(key.first, key.second, resident_delta, segment.length);
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
@@ -349,13 +353,17 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
 
       // We remove it from both cool storage and the offline storage.
       pv = ts_->DeleteCool(item.record);
+      string key;
+      db_slice_.AdjustSlotStats(dbid, it->first.GetSlice(&key), 0,
+                                -static_cast<int64_t>(segment.length));
       auto* stats = GetDbTableStats(dbid);
       stats->tiered_entries--;
       stats->tiered_used_bytes -= segment.length;
     } else {
       // Cut out relevant part of value and restore it to memory
       string_view value = page.substr(item_segment.offset - segment.offset, item_segment.length);
-      Upload(dbid, value, &pv);
+      string key;
+      Upload(dbid, it->first.GetSlice(&key), value, &pv);
     }
   }
 }
@@ -405,6 +413,8 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
       if (metrics.modified || pv->WasTouched()) {
         ++stats_.total_uploads;
         decoder->Upload(pv);
+        db_slice_.AdjustSlotStats(key->first, key->second, pv->MallocUsed(),
+                                  -static_cast<int64_t>(segment.length));
         RecordDeleted(*pv, segment.length, GetDbTableStats(key->first));
         return true;
       }
@@ -565,6 +575,12 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
   }
   fragment_ref.ClearOffloaded();
   op_manager_->DeleteOffloaded(dbid, segment);
+}
+
+void TieredStorage::Delete(DbIndex dbid, std::string_view key, FragmentRef fragment_ref) {
+  tiering::DiskSegment segment = fragment_ref.GetExternalSlice();
+  op_manager_->db_slice_.AdjustSlotStats(dbid, key, 0, -static_cast<int64_t>(segment.length));
+  Delete(dbid, fragment_ref);
 }
 
 void TieredStorage::CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref) {
@@ -754,6 +770,9 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 
     // Now the item is only in storage.
     tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
+    string key;
+    op_manager_->db_slice_.AdjustSlotStats(record->db_index, it->first.GetSlice(&key),
+                                           -static_cast<int64_t>(record->value.MallocUsed()), 0);
     pv.Freeze(segment.offset, segment.length);
 
     auto* stats = op_manager_->GetDbTableStats(record->db_index);
@@ -827,11 +846,12 @@ void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
   pv->SetCool(segment.offset, segment.length, rep, record);
 }
 
-PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
+PrimeValue TieredStorage::Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item) {
   tiering::DiskSegment segment = FromCoolItem(item);
 
   // We remove it from both cool storage and the offline storage.
   PrimeValue hot = DeleteCool(item.record);
+  op_manager_->db_slice_.AdjustSlotStats(dbid, key, 0, -static_cast<int64_t>(segment.length));
   op_manager_->DeleteOffloaded(dbid, segment);
   return hot;
 }

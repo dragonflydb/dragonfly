@@ -285,7 +285,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
     // The read may have warmed the value back into memory; re-check before Delete.
     if (res.it->second.IsExternal()) {
       res.post_updater.ReduceHeapUsage();
-      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
     }
     res.it->second.SetString(new_val);
     return true;
@@ -346,7 +346,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   // only runs while it is still external.
   if (add_res.it->second.IsExternal()) {
     add_res.post_updater.ReduceHeapUsage();
-    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &add_res.it->second);
+    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &add_res.it->second);
   }
   add_res.it->second.SetString(str);
 
@@ -983,7 +983,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
-    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, &prime_value);
+    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, it_upd->it.key(), &prime_value);
   }
 
   // overwrite existing entry.

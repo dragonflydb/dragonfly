@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/flags/declare.h>
+#include <absl/flags/flag.h>
 #include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest-matchers.h>
@@ -18,6 +20,12 @@
 #include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
+
+#ifdef WITH_TIERING
+ABSL_DECLARE_FLAG(std::string, tiered_prefix);
+ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
+ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
+#endif
 
 namespace dfly::cluster {
 namespace {
@@ -68,6 +76,34 @@ class ClusterFamilyTest : public BaseFamilyTest {
     EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
   }
 };
+
+#ifdef WITH_TIERING
+class TieredClusterFamilyTest : public ClusterFamilyTest {
+ protected:
+  void ConfigureClusterFlags() override {
+    ClusterFamilyTest::ConfigureClusterFlags();
+    absl::SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_cluster_family_test");
+    absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+    absl::SetFlag(&FLAGS_tiered_experimental_cooling, false);
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
+};
+
+class CoolingTieredClusterFamilyTest : public ClusterFamilyTest {
+ protected:
+  void ConfigureClusterFlags() override {
+    ClusterFamilyTest::ConfigureClusterFlags();
+    absl::SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_cluster_family_test");
+    absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+    absl::SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
+};
+#endif  // WITH_TIERING
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
   EXPECT_THAT(RunPrivileged({"dflycluster", "config", "invalid JSON"}),
@@ -516,6 +552,95 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
           RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads", IntArg(1),
                                 "total_writes", IntArg(2), "memory_bytes", IntArg(36))))));
 }
+
+#ifdef WITH_TIERING
+TEST_F(TieredClusterFamilyTest, ClusterGetSlotInfoReportsResidentAndTieredBytes) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  constexpr string_view kKey = "tiered-key";
+  const SlotId slot = KeySlot(kKey);
+  const string value(64 * 1024, '#');
+  ASSERT_EQ(Run({"SET", kKey, value}), "OK");
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes == 1; });
+
+  const size_t tiered_bytes = GetMetrics().db_stats[0].tiered_used_bytes;
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)}),
+              RespElementsAre(RespArray(ElementsAre(
+                  IntArg(slot), "key_count", IntArg(1), "total_reads", IntArg(0), "total_writes",
+                  IntArg(1), "memory_bytes", IntArg(36), "tiered_bytes", IntArg(tiered_bytes)))));
+}
+
+TEST_F(TieredClusterFamilyTest, ClusterGetSlotInfoRemovesTieredBytesOnDelete) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  constexpr string_view kKey = "tiered-key";
+  const SlotId slot = KeySlot(kKey);
+  ASSERT_EQ(Run({"SET", kKey, string(64 * 1024, '#')}), "OK");
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes == 1; });
+
+  EXPECT_THAT(Run({"DEL", kKey}), IntArg(1));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)}),
+              RespElementsAre(RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(0),
+                                                    "total_reads", IntArg(0), "total_writes",
+                                                    IntArg(2), "memory_bytes", IntArg(0)))));
+}
+
+TEST_F(TieredClusterFamilyTest, ClusterGetSlotInfoRestoresResidentBytesOnUpload) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  constexpr string_view kKey = "tiered-key";
+  const SlotId slot = KeySlot(kKey);
+  const string value(64 * 1024, '#');
+  ASSERT_EQ(Run({"SET", kKey, value}), "OK");
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes == 1; });
+
+  const size_t tiered_bytes = GetMetrics().db_stats[0].tiered_used_bytes;
+  EXPECT_EQ(Run({"GET", kKey}), value);
+  EXPECT_EQ(Run({"GET", kKey}), value);
+  ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries == 0; });
+
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)}),
+              RespElementsAre(RespArray(ElementsAre(
+                  IntArg(slot), "key_count", IntArg(1), "total_reads", IntArg(2), "total_writes",
+                  IntArg(1), "memory_bytes", IntArg(tiered_bytes + 36)))));
+}
+
+TEST_F(CoolingTieredClusterFamilyTest, ClusterGetSlotInfoRemovesTieredBytesOnWarmup) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  constexpr string_view kKey = "tiered-key";
+  const SlotId slot = KeySlot(kKey);
+  const string value(64 * 1024, '#');
+  ASSERT_EQ(Run({"SET", kKey, value}), "OK");
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes == 1; });
+
+  const size_t tiered_bytes = GetMetrics().db_stats[0].tiered_used_bytes;
+  EXPECT_EQ(Run({"GET", kKey}), value);
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u);
+
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)}),
+              RespElementsAre(RespArray(ElementsAre(
+                  IntArg(slot), "key_count", IntArg(1), "total_reads", IntArg(1), "total_writes",
+                  IntArg(1), "memory_bytes", IntArg(tiered_bytes + 36)))));
+}
+
+TEST_F(CoolingTieredClusterFamilyTest, ClusterGetSlotInfoRemovesResidentBytesOnDelete) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  constexpr string_view kKey = "tiered-key";
+  const SlotId slot = KeySlot(kKey);
+  ASSERT_EQ(Run({"SET", kKey, string(64 * 1024, '#')}), "OK");
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes == 1; });
+
+  EXPECT_THAT(Run({"DEL", kKey}), IntArg(1));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)}),
+              RespElementsAre(RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(0),
+                                                    "total_reads", IntArg(0), "total_writes",
+                                                    IntArg(2), "memory_bytes", IntArg(0)))));
+}
+
+#endif  // WITH_TIERING
 
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfoRanges) {
   ConfigSingleNodeCluster(GetMyId());

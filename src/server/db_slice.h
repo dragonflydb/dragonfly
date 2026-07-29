@@ -253,6 +253,10 @@ class DbSlice {
   // Returns slot statistics for db 0.
   SlotStats GetSlotStats(SlotId sid) const;
 
+  // Updates resident and tiered value bytes for a slot.
+  void AdjustSlotStats(DbIndex dbid, std::string_view key, int64_t resident_delta,
+                       int64_t tiered_delta);
+
   void UpdateMemoryParams(int64_t budget, size_t bytes_per_object) {
     memory_budget_ = budget;
     bytes_per_object_ = bytes_per_object;
