@@ -31,12 +31,12 @@ class SlotSet;
 
 using facade::OpResult;
 
-// `resident_delta` goes to the per-db/per-type counters (bytes held in RAM), `logical_delta` to
-// the per-slot counter (size as if resident, so offloading must not move it).
-void AccountObjectMemory(std::string_view key, unsigned type, int64_t resident_delta,
-                         int64_t logical_delta, DbTable* db);
-
+// Applies a delta to the per-db/per-type counters and to the owning slot's memory_bytes.
+// All of them track resident RAM.
 void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db);
+
+// Applies a delta to the owning slot's tiered_bytes - disk bytes held by the slot's entries.
+void AccountSlotTieredBytes(std::string_view key, int64_t delta, DbTable* db);
 
 struct DbStats : public DbTableStats {
   // number of active keys.
@@ -208,7 +208,6 @@ class DbSlice {
 
       // The following fields are calculated at init time
       size_t orig_value_heap_size = 0;
-      size_t orig_logical_size = 0;
       CompactObjType orig_obj_type = 0;
     };
 

@@ -1642,6 +1642,20 @@ TEST_F(PureDiskTSTest, IncrByFloatParseErrorAfterUploadReleasesObjectMemory) {
   EXPECT_EQ(metrics.db_stats[0].obj_memory_usage, 0u);
 }
 
+// The no-delete outcome returns with the value still in place after the conditional read.
+TEST_F(PureDiskTSTest, DelExNoMatchAfterUploadReleasesObjectMemory) {
+  Run({"SET", "k", BuildString(4000)});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries == 1u; });
+
+  Run({"GET", "k"});
+  EXPECT_EQ(CheckedInt({"DELEX", "k", "IFEQ", "nomatch"}), 0);
+
+  Run({"DEL", "k"});
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
+  EXPECT_EQ(metrics.db_stats[0].obj_memory_usage, 0u);
+}
+
 TEST_F(PureDiskTSTest, PfAddInvalidHllAfterUploadReleasesObjectMemory) {
   Run({"SET", "k", BuildString(4000, 'z')});  // not a valid HLL
   ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries == 1u; });

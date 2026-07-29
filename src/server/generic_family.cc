@@ -943,6 +943,20 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   uint64_t exp_ts = from_res.it->first.GetExpireTime();
   RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, from_res.it->second, op_args.shard);
   from_res.post_updater.ReduceHeapUsage();
+
+  // FindMutable warms cool values up, so only a fully-external value still holds disk bytes;
+  // move its tiered accounting to the target db together with the value.
+  if (from_res.it->second.IsExternal()) {
+    const int64_t tiered_len = from_res.it->second.GetExternalSlice().second;
+    DbTable* src_table = db_slice.GetDBTable(op_args.db_cntx.db_index);
+    DbTable* dst_table = db_slice.GetDBTable(target_db);
+    AccountSlotTieredBytes(key, -tiered_len, src_table);
+    AccountSlotTieredBytes(key, tiered_len, dst_table);
+    src_table->stats.tiered_entries--;
+    src_table->stats.tiered_used_bytes -= tiered_len;
+    dst_table->stats.tiered_entries++;
+    dst_table->stats.tiered_used_bytes += tiered_len;
+  }
   PrimeValue from_obj = std::move(from_res.it->second);
 
   db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
@@ -1296,6 +1310,9 @@ void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx)
           es->tiered_storage());
 
       auto result = fut.Get();
+      // The read may have uploaded the value back into memory and accounted for it right away,
+      // which leaves the updater's baseline behind. Resync before any return.
+      it_res->post_updater.ResyncBaseline();
       if (!result)
         // Tiered storage read failed - return generic I/O error
         return OpStatus::IO_ERROR;

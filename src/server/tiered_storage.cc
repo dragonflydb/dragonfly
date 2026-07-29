@@ -88,12 +88,11 @@ constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
 // so we cap the number of concurrent defragmentation operations to avoid unbounded memory growth.
 constexpr uint32_t kMaxPendingDefrags = 100;
 
-// Called after setting new value in place of previous segment.
-// The per-slot ledger already carried the pre-offload size, so it only takes the difference.
-void RecordDeleted(const FragmentRef& fragment_ref, size_t tiered_len, int64_t logical_delta,
-                   string_view key, DbTable* db) {
-  AccountObjectMemory(key, fragment_ref.ObjType(), int64_t(fragment_ref.MallocUsed()),
-                      logical_delta, db);
+// Called after setting new value in place of previous segment
+void RecordDeleted(const FragmentRef& fragment_ref, size_t tiered_len, string_view key,
+                   DbTable* db) {
+  AccountObjectMemory(key, fragment_ref.ObjType(), fragment_ref.MallocUsed(), db);
+  AccountSlotTieredBytes(key, -int64_t(tiered_len), db);
   db->stats.tiered_entries--;
   db->stats.tiered_used_bytes -= tiered_len;
 }
@@ -239,7 +238,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Set value to be an in-memory type again. Update memory stats.
   void Upload(DbIndex dbid, string_view key, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
-    const size_t logical_before = pv->LogicalMallocUsed();
     switch (pv->GetExternalRep()) {
       case CompactObj::ExternalRep::STRING: {
         pv->Materialize(value, true);
@@ -257,8 +255,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       }
     };
 
-    RecordDeleted(*pv, value.size(), int64_t(pv->MallocUsed()) - int64_t(logical_before), key,
-                  db_slice_.GetDBTable(dbid));
+    RecordDeleted(*pv, value.size(), key, db_slice_.GetDBTable(dbid));
   }
 
   // Find entry by key in db_slice and store external segment in place of original value.
@@ -266,11 +263,12 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
     UnblockBackpressure(key, true);
     if (auto* pv = Find(key.first, key.second); pv) {
-      auto* stats = GetDbTableStats(key.first);
+      DbTable* table = db_slice_.GetDBTable(key.first);
 
       pv->SetStashPending(false);
-      stats->tiered_entries++;
-      stats->tiered_used_bytes += segment.length;
+      table->stats.tiered_entries++;
+      table->stats.tiered_used_bytes += segment.length;
+      AccountSlotTieredBytes(key.second, segment.length, table);
       stats_.total_stashes++;
 
       StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
@@ -278,10 +276,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
       } else {
-        // Only the RAM ledger changes: SetExternal preserves the logical size in the value.
-        const size_t mem_size = pv->MallocUsed();
-        stats->AddTypeMemoryUsage(pv->ObjType(), -int64_t(mem_size));
-        pv->SetExternal(segment.offset, segment.length, blobs.rep, mem_size);
+        AccountObjectMemory(key.second, pv->ObjType(), -int64_t(pv->MallocUsed()), table);
+        pv->SetExternal(segment.offset, segment.length, blobs.rep);
       }
     } else {
       LOG(DFATAL) << "Should not reach here";
@@ -349,6 +345,8 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
     // TODO: Handle upload and cooling via type dependent decoders
 
     stats_.total_defrags++;
+    string scratch;
+    string_view item_key = it->first.GetSlice(&scratch);
     PrimeValue& pv = it->second;
     if (pv.IsCool()) {
       PrimeValue::CoolItem item = pv.GetCool();
@@ -356,14 +354,14 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
 
       // We remove it from both cool storage and the offline storage.
       pv = ts_->DeleteCool(item.record);
-      auto* stats = GetDbTableStats(dbid);
-      stats->tiered_entries--;
-      stats->tiered_used_bytes -= segment.length;
+      DbTable* table = db_slice_.GetDBTable(dbid);
+      table->stats.tiered_entries--;
+      table->stats.tiered_used_bytes -= segment.length;
+      AccountSlotTieredBytes(item_key, -int64_t(segment.length), table);
     } else {
       // Cut out relevant part of value and restore it to memory
       string_view value = page.substr(item_segment.offset - segment.offset, item_segment.length);
-      string scratch;
-      Upload(dbid, it->first.GetSlice(&scratch), value, &pv);
+      Upload(dbid, item_key, value, &pv);
     }
   }
 }
@@ -405,8 +403,11 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
     ++stats_.total_uploads;
     decoder->Upload(node);
-    // A node upload does not change the list's logical size.
-    RecordDeleted(node, segment.length, 0, {}, db_slice_.GetDBTable(db_id));
+    // Node ids carry no key, so per-slot counters cannot follow them.
+    auto* stats = GetDbTableStats(db_id);
+    stats->AddTypeMemoryUsage(OBJ_LIST, node->sz);
+    stats->tiered_entries--;
+    stats->tiered_used_bytes -= segment.length;
     return true;
   }
 
@@ -415,10 +416,8 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
       if (metrics.modified || pv->WasTouched()) {
         ++stats_.total_uploads;
-        const size_t logical_before = pv->LogicalMallocUsed();
         decoder->Upload(pv);
-        RecordDeleted(*pv, segment.length, int64_t(pv->MallocUsed()) - int64_t(logical_before),
-                      key->second, db_slice_.GetDBTable(key->first));
+        RecordDeleted(*pv, segment.length, key->second, db_slice_.GetDBTable(key->first));
         return true;
       }
       pv->SetTouched(true);
@@ -564,6 +563,12 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
     stats_.total_clients_throttled++;
     *backpressure = stash_backpressure_[{dbid, string{key}}];
   }
+}
+
+void TieredStorage::Delete(DbIndex dbid, std::string_view key, FragmentRef fragment_ref) {
+  AccountSlotTieredBytes(key, -int64_t(fragment_ref.GetExternalSlice().second),
+                         op_manager_->db_slice_.GetDBTable(dbid));
+  Delete(dbid, fragment_ref);
 }
 
 void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
@@ -768,11 +773,12 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 
     // Now the item is only in storage.
     tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
-    const size_t mem_size = record->value.MallocUsed();
-    pv.Freeze(segment.offset, segment.length, mem_size);
+    pv.Freeze(segment.offset, segment.length);
 
-    auto* stats = op_manager_->GetDbTableStats(record->db_index);
-    stats->AddTypeMemoryUsage(record->value.ObjType(), -int64_t(mem_size));
+    string scratch;
+    AccountObjectMemory(it->first.GetSlice(&scratch), record->value.ObjType(),
+                        -int64_t(record->value.MallocUsed()),
+                        op_manager_->db_slice_.GetDBTable(record->db_index));
     CompactObj::DeleteMR<TieredCoolRecord>(record);
   } while (gained < goal);
 
@@ -842,8 +848,9 @@ void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
   pv->SetCool(segment.offset, segment.length, rep, record);
 }
 
-PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
+PrimeValue TieredStorage::Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item) {
   tiering::DiskSegment segment = FromCoolItem(item);
+  AccountSlotTieredBytes(key, -int64_t(segment.length), op_manager_->db_slice_.GetDBTable(dbid));
 
   // We remove it from both cool storage and the offline storage.
   PrimeValue hot = DeleteCool(item.record);

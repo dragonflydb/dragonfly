@@ -713,7 +713,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
   rb->StartArray(slots_stats.size());
 
   for (const auto& slot_data : slots_stats) {
-    rb->StartArray(9);
+    rb->StartArray(slot_data.second.tiered_bytes > 0 ? 11 : 9);
     rb->SendLong(slot_data.first);
     rb->SendBulkString("key_count");
     rb->SendLong(slot_data.second.key_count);
@@ -728,6 +728,11 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
     rb->SendBulkString("memory_bytes");
     rb->SendLong(slot_data.second.memory_bytes +
                  slot_data.second.key_count * sizeof(CompactObj) * 2);
+
+    if (slot_data.second.tiered_bytes > 0) {
+      rb->SendBulkString("tiered_bytes");
+      rb->SendLong(slot_data.second.tiered_bytes);
+    }
   }
 }
 

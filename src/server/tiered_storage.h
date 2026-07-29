@@ -92,6 +92,8 @@ class TieredStorage : public TieredStorageBase {
                          BackPressureFuture* backpressure);
 
   // Delete value, must be offloaded (external type)
+  void Delete(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref);
+  // List node fragments carry no key, so per-slot counters cannot follow them.
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
 
   // Returns true if there is a pending modification for the given segment.
@@ -110,7 +112,7 @@ class TieredStorage : public TieredStorageBase {
   size_t ReclaimMemory(size_t goal);
 
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
-  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
+  PrimeValue Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item);
 
   TieredStats GetStats() const;
 
@@ -271,6 +273,9 @@ class TieredStorage : public TieredStorageBase {
              BackPressureFuture* backpressure) {
   }
 
+  void Delete(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref) {
+  }
+
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref) {
   }
 
@@ -318,7 +323,7 @@ class TieredStorage : public TieredStorageBase {
     return 0;
   }
 
-  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
+  PrimeValue Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item) {
     return PrimeValue{};
   }
 

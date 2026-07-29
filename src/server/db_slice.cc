@@ -370,28 +370,39 @@ template <typename F> struct CallbackConsumer : public DbSlice::ChangeConsumerIn
 
 }  // namespace
 
-void AccountObjectMemory(string_view key, unsigned type, int64_t resident_delta,
-                         int64_t logical_delta, DbTable* db) {
+void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable* db) {
   DCHECK_NE(db, nullptr);
+  if (delta == 0)
+    return;
 
-  if (resident_delta != 0)
-    db->stats.AddTypeMemoryUsage(type, resident_delta);
+  db->stats.AddTypeMemoryUsage(type, delta);
 
-  if (logical_delta == 0 || !db->slots_stats)
+  if (!db->slots_stats)
     return;
 
   const SlotId sid = KeySlot(key);
   uint64_t& slot_memory = db->slots_stats[sid].memory_bytes;
-  if (logical_delta < 0 && slot_memory < uint64_t(-logical_delta)) {
+  if (delta < 0 && slot_memory < uint64_t(-delta)) {
     LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot memory usage: " << slot_memory
-                           << " + " << logical_delta << ", slot: " << sid;
-    logical_delta = -int64_t(slot_memory);
+                           << " + " << delta << ", slot: " << sid;
+    delta = -int64_t(slot_memory);
   }
-  slot_memory += logical_delta;
+  slot_memory += delta;
 }
 
-void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable* db) {
-  AccountObjectMemory(key, type, delta, delta, db);
+void AccountSlotTieredBytes(string_view key, int64_t delta, DbTable* db) {
+  DCHECK_NE(db, nullptr);
+  if (delta == 0 || !db->slots_stats)
+    return;
+
+  const SlotId sid = KeySlot(key);
+  uint64_t& tiered_bytes = db->slots_stats[sid].tiered_bytes;
+  if (delta < 0 && tiered_bytes < uint64_t(-delta)) {
+    LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot tiered usage: " << tiered_bytes
+                           << " + " << delta << ", slot: " << sid;
+    delta = -int64_t(tiered_bytes);
+  }
+  tiered_bytes += delta;
 }
 
 #define ADD(x) (x) += o.x
@@ -525,15 +536,13 @@ void DbSlice::AutoUpdater::ReduceHeapUsage() {
     return;
   }
 
-  // The baselines are up to date even if a blocking tiered read uploaded the value mid-scope:
-  // such reads are followed by ResyncBaseline(). Subtracting them keeps this call idempotent.
+  // The baseline is up to date even if a blocking tiered read uploaded the value mid-scope:
+  // such reads are followed by ResyncBaseline(). Subtracting it keeps this call idempotent.
   AccountObjectMemory(fields_.key, fields_.orig_obj_type, -int64_t(fields_.orig_value_heap_size),
-                      -int64_t(fields_.orig_logical_size),
                       fields_.db_slice->GetDBTable(fields_.db_ind));
 
   // Reset to avoid double accounting, and sync the type after accounting.
   fields_.orig_value_heap_size = 0;
-  fields_.orig_logical_size = 0;
   fields_.orig_obj_type = fields_.it->second.ObjType();
 }
 
@@ -544,7 +553,6 @@ void DbSlice::AutoUpdater::ResyncBaseline() {
 
   const PrimeValue& pv = fields_.it->second;
   fields_.orig_value_heap_size = pv.ResidentMallocUsed();
-  fields_.orig_logical_size = pv.LogicalMallocUsed();
   fields_.orig_obj_type = pv.ObjType();
 }
 
@@ -562,8 +570,7 @@ void DbSlice::AutoUpdater::Run() {
 
   const PrimeValue& pv = fields_.it->second;
   CompactObjType current_type = pv.ObjType();
-  int64_t current_resident = static_cast<int64_t>(pv.ResidentMallocUsed());
-  int64_t current_logical = static_cast<int64_t>(pv.LogicalMallocUsed());
+  int64_t current_size = static_cast<int64_t>(pv.ResidentMallocUsed());
   DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
 
   if (current_type != fields_.orig_obj_type) {
@@ -571,13 +578,11 @@ void DbSlice::AutoUpdater::Run() {
     // Applying (current_size - orig_size) to the new type would incorrectly subtract
     // from a counter that never had the original bytes added to it.
     AccountObjectMemory(fields_.key, fields_.orig_obj_type,
-                        -static_cast<int64_t>(fields_.orig_value_heap_size),
-                        -static_cast<int64_t>(fields_.orig_logical_size), table);
-    AccountObjectMemory(fields_.key, current_type, current_resident, current_logical, table);
+                        -static_cast<int64_t>(fields_.orig_value_heap_size), table);
+    AccountObjectMemory(fields_.key, current_type, current_size, table);
   } else {
     AccountObjectMemory(fields_.key, current_type,
-                        current_resident - static_cast<int64_t>(fields_.orig_value_heap_size),
-                        current_logical - static_cast<int64_t>(fields_.orig_logical_size), table);
+                        current_size - static_cast<int64_t>(fields_.orig_value_heap_size), table);
   }
 
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
@@ -595,7 +600,6 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .it = it,
               .key = key,
               .orig_value_heap_size = it->second.ResidentMallocUsed(),
-              .orig_logical_size = it->second.LogicalMallocUsed(),
               .orig_obj_type = it->second.ObjType()} {
   DCHECK(IsValid(it));
 }
@@ -718,7 +722,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   // Fetch back cool items
   if (pv.IsExternal() && pv.IsCool()) {
-    pv = owner_->tiered_storage()->Warmup(cntx.db_index, pv.GetCool());
+    pv = owner_->tiered_storage()->Warmup(cntx.db_index, key, pv.GetCool());
   }
 
   // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
@@ -1758,7 +1762,7 @@ void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> 
     do {
       cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
         if (it->second.IsExternal()) {
-          tiered_storage->Delete(index, &it->second);
+          tiered_storage->Delete(index, it->first.GetSlice(&scratch), &it->second);
         } else if (it->second.HasStashPending()) {
           tiered_storage->CancelStash(std::make_pair(index, it->first.GetSlice(&scratch)),
                                       &it->second);
@@ -1976,14 +1980,13 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
   // The tiered delete blanks the external metadata, zeroing the reported size and type.
   const CompactObjType val_type = pv.ObjType();
   const ssize_t value_heap_size = pv.ResidentMallocUsed();
-  const ssize_t value_logical_size = pv.LogicalMallocUsed();
 
   if (pv.HasStashPending()) {
     string scratch;
     string_view key = del_it->first.GetSlice(&scratch);
     shard_owner()->tiered_storage()->CancelStash(std::make_pair(table->index, key), &pv);
   } else if (pv.IsExternal()) {
-    shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
+    shard_owner()->tiered_storage()->Delete(table->index, del_it.key(), &del_it->second);
   }
 
   ssize_t key_size_used = del_it->first.MallocUsed();
@@ -1992,8 +1995,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
   } else {
     AccountObjectMemory(del_it.key(), OBJ_KEY, -key_size_used, table);  // Key
   }
-  AccountObjectMemory(del_it.key(), val_type, -value_heap_size, -value_logical_size,
-                      table);  // Value
+  AccountObjectMemory(del_it.key(), val_type, -value_heap_size, table);  // Value
 
   if (async && MayDeleteAsynchronously(pv)) {
     auto schedule = [](auto* ds) {
