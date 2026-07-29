@@ -527,6 +527,58 @@ TEST_F(StreamFamilyTest, XReadBlockOnMaxMsId) {
               ElementsAre("18446744073709551615-2", ArrLen(2)));
 }
 
+// A blocked XREADGROUP watches a key that can never become ready once the stream is deleted, so
+// it must be told that its consumer group is gone instead of sleeping forever.
+TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnDeletedStream) {
+  Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
+
+  RespExpr resp;
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"xreadgroup", "group", "group", "alice", "block", "0", "streams", "foo", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  pp_->at(1)->Await([&] { return Run({"del", "foo"}); });
+  reader.Join();
+  EXPECT_THAT(resp, ErrArg("consumer group this client was blocked on no longer exists"));
+}
+
+// Deleting the stream must not wake a plain XREAD: it is waiting for entries that a recreated
+// stream can still deliver.
+TEST_F(StreamFamilyTest, XReadBlockStaysBlockedOnDeletedStream) {
+  Run({"xadd", "foo", "1-0", "k", "v"});
+
+  RespExpr resp;
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"xread", "block", "0", "streams", "foo", "1-1"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  pp_->at(1)->Await([&] { return Run({"del", "foo"}); });
+  EXPECT_FALSE(WaitUntilCondition([&] { return !IsConnBlocked("IO0"); }, 100ms))
+      << "XREAD woke up although the stream can still be recreated";
+
+  pp_->at(1)->Await([&] { return Run({"xadd", "foo", "2-0", "k", "v"}); });
+  reader.Join();
+  const auto& stream_resp = resp.GetVec()[0].GetVec();
+  EXPECT_THAT(stream_resp, ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(stream_resp[1].GetVec()[0].GetVec(), ElementsAre("2-0", ArrLen(2)));
+}
+
+TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnRetypedStream) {
+  Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
+
+  RespExpr resp;
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"xreadgroup", "group", "group", "alice", "block", "0", "streams", "foo", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  pp_->at(1)->Await([&] { return Run({"set", "foo", "value"}); });
+  reader.Join();
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+}
+
 TEST_F(StreamFamilyTest, XReadGroupBlockHonorsCount) {
   Run({"xgroup", "create", "foo", "group", "0", "MKSTREAM"});
 

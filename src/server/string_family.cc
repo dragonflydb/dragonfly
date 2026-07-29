@@ -22,6 +22,7 @@
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/blocking_controller.h"
 #include "server/cmd_support.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
@@ -33,6 +34,7 @@
 #include "server/family_utils.h"
 #include "server/generic_family.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
@@ -969,6 +971,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   }
 
   bool has_expire = key.HasExpire();
+  const bool was_stream = prime_value.ObjType() == OBJ_STREAM;
 
   it_upd->post_updater.ReduceHeapUsage();
 
@@ -987,6 +990,12 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 
   // overwrite existing entry.
   prime_value.SetString(value);
+
+  if (was_stream) {
+    if (auto* bc = op_args_.db_cntx.ns->GetBlockingController(shard->shard_id()); bc) {
+      bc->Awaken(op_args_.db_cntx.db_index, it_upd->it.key());
+    }
+  }
 
   DCHECK_EQ(has_expire, key.HasExpire());
 

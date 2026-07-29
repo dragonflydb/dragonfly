@@ -29,6 +29,8 @@ class SlotRanges;
 class SlotSet;
 }  // namespace cluster
 
+class BlockingController;
+
 using facade::OpResult;
 
 // Applies a delta to the per-db/per-type counters and to the owning slot's memory_bytes.
@@ -255,7 +257,7 @@ class DbSlice {
     int32_t expire_options = 0;  // ExpireFlags
   };
 
-  DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
+  DbSlice(uint32_t index, bool cache_mode, EngineShard* owner, Namespace* ns);
   ~DbSlice();
 
   // Returns statistics for the whole db slice. A bit heavy operation.
@@ -620,6 +622,9 @@ class DbSlice {
   uint8_t cache_mode_ : 1;
 
   EngineShard* owner_;
+
+  // The namespace owning this slice. Never null and never changes.
+  Namespace* ns_;
 
   bool expire_allowed_ = true;
 
