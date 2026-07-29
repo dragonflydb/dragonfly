@@ -3942,9 +3942,11 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
 
   stream* s = GetReadOnlyStream(*cobj);
 
-  // Fetch last id
+  // Fetch last id. s->last_id is only the last *generated* id: XDEL, XTRIM and XSETID leave it
+  // behind on an empty stream, so it must not be treated as a readable entry.
+  const bool stream_has_entries = s->length > 0;
   streamID last_id = s->last_id;
-  if (s->length)
+  if (stream_has_entries)
     StreamLastValidID(s, &last_id);
 
   // Check requested
@@ -3975,7 +3977,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     }
 
     // we know the requested last_id only when we already have it
-    if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
+    if (stream_has_entries && streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
       requested_sitem.id.val = requested_sitem.group->last_id;
       StreamIncrID(&requested_sitem.id.val);
     }
@@ -3989,7 +3991,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     }
   }
 
-  return streamCompareID(&last_id, &requested_sitem.id.val) >= 0;
+  return stream_has_entries && streamCompareID(&last_id, &requested_sitem.id.val) >= 0;
 }
 
 void CmdXRead(CmdArgParser parser, CommandContext* cmd_cntx) {

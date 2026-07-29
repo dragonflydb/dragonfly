@@ -439,6 +439,24 @@ TEST_F(StreamFamilyTest, XReadGroupBlockDelconsumer) {
   EXPECT_THAT(resp_del_consumer, IntArg(0));
 }
 
+TEST_F(StreamFamilyTest, XReadBlockOnEmptiedStream) {
+  // XDEL leaves the last generated id behind, but the stream has nothing left to serve, so both
+  // reads must block instead of returning an empty reply.
+  Run({"xadd", "foo", "1-0", "k", "v"});
+  Run({"xdel", "foo", "1-0"});
+
+  EXPECT_THAT(Run({"xread", "block", "1", "streams", "foo", "0"}), ArgType(RespExpr::NIL_ARRAY));
+
+  Run({"xgroup", "create", "foo", "group", "0"});
+  EXPECT_THAT(Run({"xreadgroup", "group", "group", "alice", "block", "1", "streams", "foo", ">"}),
+              ArgType(RespExpr::NIL_ARRAY));
+
+  // A new entry is still served once it arrives.
+  Run({"xadd", "foo", "2-0", "k", "v"});
+  auto resp = Run({"xreadgroup", "group", "group", "alice", "block", "1", "streams", "foo", ">"});
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(1)));
+}
+
 TEST_F(StreamFamilyTest, XReadGroupBlockHonorsCount) {
   Run({"xgroup", "create", "foo", "group", "0", "MKSTREAM"});
 
