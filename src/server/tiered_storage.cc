@@ -579,7 +579,13 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
 
 void TieredStorage::Delete(DbIndex dbid, std::string_view key, FragmentRef fragment_ref) {
   tiering::DiskSegment segment = fragment_ref.GetExternalSlice();
-  op_manager_->db_slice_.AdjustSlotStats(dbid, key, 0, -static_cast<int64_t>(segment.length));
+  int64_t resident_delta = 0;
+  if (auto* cool = fragment_ref.GetCoolRecord(); cool) {
+    resident_delta = -static_cast<int64_t>(cool->value.MallocUsed());
+    op_manager_->GetDbTableStats(dbid)->AddTypeMemoryUsage(cool->value.ObjType(), resident_delta);
+  }
+  op_manager_->db_slice_.AdjustSlotStats(dbid, key, resident_delta,
+                                         -static_cast<int64_t>(segment.length));
   Delete(dbid, fragment_ref);
 }
 

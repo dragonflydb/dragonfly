@@ -7,10 +7,12 @@
 #include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest-matchers.h>
+#include <unistd.h>
 
 #include <string>
 #include <string_view>
 
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_replace.h"
 #include "absl/strings/substitute.h"
 #include "absl/time/clock.h"
@@ -33,6 +35,12 @@ namespace {
 
 using namespace std;
 using namespace testing;
+
+#ifdef WITH_TIERING
+string TieredTestPrefix() {
+  return absl::StrCat("/tmp/tiered_cluster_family_test_", getpid());
+}
+#endif
 
 class ClusterFamilyTest : public BaseFamilyTest {
  public:
@@ -93,7 +101,7 @@ class TieredClusterFamilyTest : public ClusterFamilyTest {
     if (absl::GetFlag(FLAGS_force_epoll)) {
       return;
     }
-    absl::SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_cluster_family_test");
+    absl::SetFlag(&FLAGS_tiered_prefix, TieredTestPrefix());
     absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
     absl::SetFlag(&FLAGS_tiered_experimental_cooling, false);
   }
@@ -116,7 +124,7 @@ class CoolingTieredClusterFamilyTest : public ClusterFamilyTest {
     if (absl::GetFlag(FLAGS_force_epoll)) {
       return;
     }
-    absl::SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_cluster_family_test");
+    absl::SetFlag(&FLAGS_tiered_prefix, TieredTestPrefix());
     absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
     absl::SetFlag(&FLAGS_tiered_experimental_cooling, true);
   }

@@ -499,8 +499,24 @@ void DbSlice::AdjustSlotStats(DbIndex dbid, std::string_view key, int64_t reside
     return;
 
   SlotStats& stats = slots_stats[KeySlot(key)];
-  stats.memory_bytes += resident_delta;
-  stats.tiered_bytes += tiered_delta;
+  auto adjust_bytes = [](uint64_t* bytes, int64_t delta) {
+    if (delta >= 0) {
+      *bytes += static_cast<uint64_t>(delta);
+      return;
+    }
+
+    // Avoid negating INT64_MIN while converting the negative delta to its magnitude.
+    uint64_t decrement = static_cast<uint64_t>(-(delta + 1)) + 1;
+    if (*bytes < decrement) {
+      LOG(DFATAL) << "Slot memory accounting underflow: " << *bytes << " - " << decrement;
+      *bytes = 0;
+      return;
+    }
+    *bytes -= decrement;
+  };
+
+  adjust_bytes(&stats.memory_bytes, resident_delta);
+  adjust_bytes(&stats.tiered_bytes, tiered_delta);
 }
 
 DbSlice::AutoUpdater::AutoUpdater() {
