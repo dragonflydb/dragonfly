@@ -737,10 +737,9 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "COMPACT-TABLE [threshold]",
         "    Merge underutilized buddy-segment pairs in the dash table to reclaim memory.",
         "    Two buddy segments are merged when their combined size is <= threshold *",
-        "    segment_capacity (i.e. against ONE segment's capacity, not the sum of both),",
-        "    so on average each buddy must be under roughly threshold/2 full. <threshold>",
-        "    is in (0, 1] and defaults to 0.25. Returns a map with 'merged', 'attempted',",
-        "    'rolled_back', 'skipped_min_depth' counts and 'exited_on_snapshot' (1 if the",
+        "    segment_capacity, so on average each buddy must be under roughly threshold/2",
+        "    full. <threshold> is in (0, 1] and defaults to 0.25. Returns a stats map with",
+        "    'merged', 'attempted', 'rolled_back' counts and 'exited_on_snapshot' (1 if the",
         "    scan exited early due to an in-progress snapshot).",
         "UNIQ-STRS",
         "    Prints per-object unique string stats and estimated dedup savings across shards.",
@@ -1817,15 +1816,13 @@ void DebugCmd::CompactTable(facade::CmdArgParser parser, CommandContext* cmd_cnt
     total += r;
   }
 
-  rb->StartCollection(5, CollectionType::MAP);
+  rb->StartCollection(4, CollectionType::MAP);
   rb->SendSimpleString("merged");
   rb->SendLong(total.merged);
   rb->SendSimpleString("attempted");
   rb->SendLong(total.attempted);
   rb->SendSimpleString("rolled_back");
   rb->SendLong(total.rolled_back);
-  rb->SendSimpleString("skipped_min_depth");
-  rb->SendLong(total.skipped_min_depth);
   rb->SendSimpleString("exited_on_snapshot");
   rb->SendLong(total.exited_on_snapshot ? 1 : 0);
 }

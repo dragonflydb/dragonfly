@@ -1230,9 +1230,7 @@ EngineShard::CompactTableStats EngineShard::CompactTable(double threshold, DbInd
       if (seg_merged) {
         ++stats.merged;
         merged_any = true;
-      } else if (declined_depth_guard) {
-        ++stats.skipped_min_depth;
-      } else {
+      } else if (!declined_depth_guard) {
         ++stats.rolled_back;
       }
 
