@@ -457,6 +457,76 @@ TEST_F(StreamFamilyTest, XReadBlockOnEmptiedStream) {
   EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(1)));
 }
 
+// A blocked XREAD asks for entries starting at a concrete id. An XADD below that id awakens the
+// watch queue, but the reader must stay blocked instead of being served an empty record list.
+TEST_F(StreamFamilyTest, XReadBlockIgnoresEntriesBelowRequestedId) {
+  Run({"xadd", "foo", "1-0", "k", "v"});
+
+  RespExpr resp;
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"xread", "block", "0", "streams", "foo", "5-0"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  // The wake is processed on the shard thread, so give it a window to land before concluding
+  // that the reader stayed blocked.
+  pp_->at(1)->Await([&] { return Run({"xadd", "foo", "2-0", "k", "v"}); });
+  EXPECT_FALSE(WaitUntilCondition([&] { return !IsConnBlocked("IO0"); }, 100ms))
+      << "the reader woke on an entry below the requested id";
+
+  pp_->at(1)->Await([&] { return Run({"xadd", "foo", "6-0", "k", "v"}); });
+  reader.Join();
+  const auto& stream_resp = resp.GetVec()[0].GetVec();
+  EXPECT_THAT(stream_resp, ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(stream_resp[1].GetVec()[0].GetVec(), ElementsAre("6-0", ArrLen(2)));
+}
+
+// The entry that awakens a blocked XREADGROUP can be gone by the time the readiness check runs.
+// s->last_id survives it, so the check must not report the emptied stream as ready.
+TEST_F(StreamFamilyTest, XReadGroupBlockIgnoresWakeFromRemovedEntry) {
+  Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
+
+  RespExpr resp;
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"xreadgroup", "group", "group", "alice", "block", "0", "streams", "foo", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  pp_->at(1)->Await([&] {
+    Run({"multi"});
+    Run({"xadd", "foo", "1-0", "k", "v"});
+    Run({"xdel", "foo", "1-0"});
+    return Run({"exec"});
+  });
+  EXPECT_FALSE(WaitUntilCondition([&] { return !IsConnBlocked("IO0"); }, 100ms))
+      << "the reader woke on an entry that the same transaction removed";
+
+  pp_->at(1)->Await([&] { return Run({"xadd", "foo", "2-0", "k", "v"}); });
+  reader.Join();
+  const auto& stream_resp = resp.GetVec()[0].GetVec();
+  EXPECT_THAT(stream_resp, ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(stream_resp[1].GetVec()[0].GetVec(), ElementsAre("2-0", ArrLen(2)));
+}
+
+// The '>' sentinel is UINT64_MAX-UINT64_MAX, but a plain XREAD may legitimately request an id
+// with a UINT64_MAX component. Such a read has no consumer group to resolve the start from.
+TEST_F(StreamFamilyTest, XReadBlockOnMaxMsId) {
+  Run({"xadd", "foo", "1-0", "k", "v"});
+
+  RespExpr resp;
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"xread", "block", "0", "streams", "foo", "18446744073709551615-0"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  pp_->at(1)->Await([&] { return Run({"xadd", "foo", "18446744073709551615-2", "k", "v"}); });
+  reader.Join();
+  const auto& stream_resp = resp.GetVec()[0].GetVec();
+  EXPECT_THAT(stream_resp, ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(stream_resp[1].GetVec()[0].GetVec(),
+              ElementsAre("18446744073709551615-2", ArrLen(2)));
+}
+
 TEST_F(StreamFamilyTest, XReadGroupBlockHonorsCount) {
   Run({"xgroup", "create", "foo", "group", "0", "MKSTREAM"});
 
