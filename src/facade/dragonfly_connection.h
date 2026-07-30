@@ -476,6 +476,8 @@ class Connection : public util::Connection {
 
   void IncreaseConnStats();
   void DecreaseConnStats();
+  void RegisterReadBufCapacity();
+  void UnregisterReadBufCapacity();
   void BreakOnce(uint32_t ev_mask);
 
   // The read buffer with read data that needs to be parsed and processed.
@@ -701,6 +703,10 @@ class Connection : public util::Connection {
   // True after IncreaseConnStats registers this connection in the current thread's stats.
   // False before registration and after DecreaseConnStats unregisters it during close/migration.
   bool conn_stats_registered_ = false;
+
+  // Used for DEBUG assertions. true when this connection's io_buf_ capacity contributes to the
+  // current thread's total.
+  bool read_buf_capacity_registered_ = false;
 
   // True while this connection contributes to connection_memory_bytes. Set false for
   // replication-flow connections, whose direct memory is excluded from the client connection

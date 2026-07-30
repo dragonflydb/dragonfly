@@ -191,17 +191,39 @@ bool MatchHttp11Line(string_view line) {
          absl::EndsWith(line, "HTTP/1.1");
 }
 
+// ReadBufTracker should be the only one to update ConnectionStats::read_buf_capacity
+// To use it as RAII object, call the ctor, or if the update should be immediate, call
+// ReadBufTracker::Update() directly.
 struct ReadBufTracker {
   explicit ReadBufTracker(const io::IoBuf& io_buf, uint32_t conn_id)
       : io_buf_(io_buf), last_capacity_(io_buf.Capacity()), id_(conn_id) {
   }
 
   ~ReadBufTracker() {
-    size_t capacity = io_buf_.Capacity();
-    if (last_capacity_ != capacity) {
-      VLOG(2) << CONN_ID << "Grown io_buf to " << capacity;
-      tl_facade_stats->conn_stats.read_buf_capacity += capacity - last_capacity_;
+    Update(last_capacity_, io_buf_.Capacity(), id_);
+  }
+
+  // Make it static so we may also call it directly without constructing a ReadBufTracker object.
+  static void Update(size_t previous_capacity, size_t new_capacity, uint32_t conn_id) {
+    if (previous_capacity == new_capacity)
+      return;
+    DCHECK(tl_facade_stats);
+
+    size_t& read_buf_capacity = tl_facade_stats->conn_stats.read_buf_capacity;
+    if (new_capacity > previous_capacity) {
+      read_buf_capacity += new_capacity - previous_capacity;
+    } else {
+      const size_t delta = previous_capacity - new_capacity;
+      DCHECK_GE(read_buf_capacity, delta);
+      if (ABSL_PREDICT_FALSE(read_buf_capacity < delta)) {
+        LOG(DFATAL) << "Read-buffer capacity accounting underflow: total=" << read_buf_capacity
+                    << " delta=" << delta;
+        read_buf_capacity = 0;
+      } else
+        read_buf_capacity -= delta;
     }
+    VLOG(2) << "[" << conn_id << "] io_buf capacity changed from " << previous_capacity << " to "
+            << new_capacity << " (read_buf_capacity = " << read_buf_capacity << ")";
   }
 
  private:
@@ -909,6 +931,7 @@ void Connection::OnPreMigrateThread() {
   socket_->CancelOnErrorCb();
   DCHECK(!async_fb_.IsJoinable()) << GetClientId();
 
+  UnregisterReadBufCapacity();
   DecreaseConnStats();
 }
 
@@ -943,6 +966,7 @@ void Connection::OnPostMigrateThread() {
     LaunchAsyncFiberIfNeeded();
   }
 
+  RegisterReadBufCapacity();
   IncreaseConnStats();
 }
 
@@ -973,6 +997,12 @@ void Connection::HandleRequests() {
   VLOG(1) << CONN_ID << "HandleRequests";
   DCHECK(tl_facade_stats);
   auto& conn_stats = tl_facade_stats->conn_stats;
+
+  // Read-buffer capacity is registered before TLS and protocol detection, so it must be removed on
+  // every exit, including HTTP and early-failure paths. Normal connection stats are owned by
+  // ConnectionFlow and transferred separately during migration.
+  RegisterReadBufCapacity();
+  absl::Cleanup read_buf_guard = [this] { UnregisterReadBufCapacity(); };
 
   auto remote_ep = RemoteEndpointStr();
 
@@ -1347,10 +1377,11 @@ void Connection::ConnectionFlow() {
   DCHECK(reply_builder_);
   auto& conn_stats = tl_facade_stats->conn_stats;
 
-  // Register the new connection with the thread-local statistics.
-  // At this point (connection birth), local queue stats/luggage are 0,
-  // so only connection counts and buffer capacities are incremented.
+  // Register client statistics for this protocol flow. Read-buffer capacity was registered before
+  // protocol detection. Migration transfers these normal statistics between proactors.
   IncreaseConnStats();
+  absl::Cleanup conn_stats_guard = [this] { DecreaseConnStats(); };
+
   ++conn_stats.conn_received_cnt;
 
   ++local_stats_.read_cnt;
@@ -1405,12 +1436,6 @@ void Connection::ConnectionFlow() {
   DCHECK(!HasPendingMessages());
 
   service_->OnConnectionClose(cc_.get());
-
-  // We have already cleared the queues above (DrainConnectionQueues), so local queue stats
-  // (dispatch_q_bytes_, etc.) represent 0 usage. DecreaseConnStats will safely subtract 0 for those
-  // stats, while correctly removing this connection from the global connection counts and buffer
-  // capacity tracking.
-  DecreaseConnStats();
 
   if (ioloop_v2_) {
     socket_->ResetOnRecvHook();
@@ -2792,8 +2817,6 @@ void Connection::IncreaseConnStats() {
     ++conn_stats.num_conns_main;
   else
     ++conn_stats.num_conns_other;
-  conn_stats.read_buf_capacity += io_buf_.Capacity();
-
   conn_stats.dispatch_queue_entries += dispatch_q_.size();
   conn_stats.dispatch_queue_bytes += dispatch_q_bytes_;
   conn_stats.pipeline_queue_entries += parsed_cmd_q_len_;
@@ -2832,9 +2855,6 @@ void Connection::DecreaseConnStats() {
     DCHECK_GT(conn_stats.num_conns_other, 0u);
     --conn_stats.num_conns_other;
   }
-  DCHECK_GE(conn_stats.read_buf_capacity, io_buf_.Capacity());
-  conn_stats.read_buf_capacity -= io_buf_.Capacity();
-
   DCHECK_GE(conn_stats.dispatch_queue_entries, dispatch_q_.size());
   conn_stats.dispatch_queue_entries -= dispatch_q_.size();
   DCHECK_GE(conn_stats.dispatch_queue_bytes, dispatch_q_bytes_);
@@ -2850,6 +2870,22 @@ void Connection::DecreaseConnStats() {
   conn_stats.pipeline_queue_entries -= parsed_cmd_q_len_;
   DCHECK_GE(conn_stats.pipeline_queue_bytes, parsed_cmd_q_bytes_);
   conn_stats.pipeline_queue_bytes -= parsed_cmd_q_bytes_;
+}
+
+void Connection::RegisterReadBufCapacity() {
+  DCHECK(tl_facade_stats);
+  DCHECK(!read_buf_capacity_registered_);
+  // Registration includes setting the flag and adding the current buffer capacity.
+  ReadBufTracker::Update(0, io_buf_.Capacity(), id_);
+  read_buf_capacity_registered_ = true;
+}
+
+void Connection::UnregisterReadBufCapacity() {
+  DCHECK(tl_facade_stats);
+  DCHECK(read_buf_capacity_registered_);
+  // Unregistration includes clearing the flag and subtracting the current buffer capacity.
+  ReadBufTracker::Update(io_buf_.Capacity(), 0, id_);
+  read_buf_capacity_registered_ = false;
 }
 
 void Connection::BreakOnce(uint32_t ev_mask) {
