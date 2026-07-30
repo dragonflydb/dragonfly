@@ -305,6 +305,10 @@ class DbSlice {
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                                 uint64_t expire_at_ms);
 
+  // Must be called before overwriting a value in place. An offloaded value keeps its data on disk
+  // and reports no heap allocation, so overwriting it drops the only reference to its disk extent.
+  void ReleaseOffloadedValue(DbIndex db_ind, PrimeValue* pv);
+
   // Update entry expiration. Return expiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
   facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it,

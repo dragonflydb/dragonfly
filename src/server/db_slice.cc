@@ -1187,6 +1187,11 @@ pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool ca
   return {rel_ms, ms_timestamp};
 }
 
+void DbSlice::ReleaseOffloadedValue(DbIndex db_ind, PrimeValue* pv) {
+  if (pv->IsExternal())
+    shard_owner()->tiered_storage()->Delete(db_ind, pv);
+}
+
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
                                         const ExpireParams& params) {
   constexpr uint64_t kPersistValue = 0;
@@ -1242,6 +1247,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
 
   auto& it = res.it;
 
+  ReleaseOffloadedValue(cntx.db_index, &it->second);
   it->second = std::move(obj);
 
   if (expire_at_ms) {
