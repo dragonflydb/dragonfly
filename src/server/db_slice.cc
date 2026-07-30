@@ -1863,7 +1863,7 @@ void DbSlice::StartSampleKeys(DbIndex db_ind) {
 
   HllBufferPtr hll_buf;
   hll_buf.size = getDenseHllSize();
-  hll_buf.hll = new uint8_t[hll_buf.size];
+  hll_buf.hll = new uint8_t[hll_buf.size + 1];
   CHECK_EQ(0, createDenseHll(hll_buf));
   db.sample_unique_keys = new DbTable::SampleUniqueKeys;
   db.sample_unique_keys->dense_hll = hll_buf.hll;

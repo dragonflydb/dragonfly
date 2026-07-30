@@ -27,7 +27,18 @@ enum HllValidness {
   HLL_VALID_DENSE,
 };
 
-/* Convenience struct for pointing to an Hll buffer along with its size */
+/* Convenience struct for pointing to an Hll buffer along with its size.
+ *
+ * A dense buffer must have one readable and writable byte past `size`, i.e. the
+ * allocation has to be getDenseHllSize() + 1 bytes even though `size` stays
+ * getDenseHllSize(). HLL_DENSE_GET_REGISTER/HLL_DENSE_SET_REGISTER address the
+ * two bytes a register may straddle unconditionally, so register 16383 - which
+ * ends on a byte boundary and needs only the first - still touches the one after
+ * it. The extra byte never affects the result (the read is masked off and the
+ * write is a no-op), but the access is real: without it, every pfmerge(),
+ * pfcountMulti() and unlucky pfadd_dense() reads and rewrites one byte past the
+ * end. std::string and sds buffers satisfy this through their terminator; a raw
+ * `new uint8_t[getDenseHllSize()]` does not. */
 struct HllBufferPtr {
   unsigned char* hll;
   size_t size;
