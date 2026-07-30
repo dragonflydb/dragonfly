@@ -476,6 +476,7 @@ class CompactObj {
   // little-endian uint16_t. Those 2 bytes carry the delta header that maps compressed length
   // to decoded length. Only meaningful when encoding_ == HUFFMAN_ENC.
   uint16_t GetHuffHeader() const;
+
   // Returns true if the byte was decoded successfully, false if idx is out of bounds.
   bool GetByteAtIndex(size_t idx, uint8_t* res) const;
   // Returns a pair of booleans: {success, in_place}. success is false if offset is out of bounds
