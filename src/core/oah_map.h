@@ -151,8 +151,8 @@ class OAHMap : public OAHTable<OAHPair> {
   // a fresh insert.
   bool AddPairImpl(std::string_view content, uint32_t len, TaggedPtr new_tp, bool replace,
                    TaggedPtr* old_out) {
-    if (size_ >= entries_.size()) [[unlikely]] {
-      Reserve(BucketCount() * 2);
+    if (size_ >= entries_.size() * kOverloadFactor) [[unlikely]] {
+      GrowCapacity(BucketCount() * 2);
     }
     assert(Capacity() >= kDisplacementSize);
 

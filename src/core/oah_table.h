@@ -42,9 +42,13 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   using Buckets = std::vector<TaggedPtr, StatelessAllocator<TaggedPtr>>;
 
  public:
-  static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
+  static constexpr std::uint32_t kShiftLog = 4;                         // TODO make template
   static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
+
+  // Table grows once live entries reach capacity * kOverloadFactor (200% load, by default).
+  static constexpr std::uint32_t kOverloadFactor = 2;
+  static constexpr size_t kMinBucketCount = 1u << kMinCapacityLog;
 
   class iterator {
    public:
@@ -194,27 +198,21 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     FreeAllSlots();
   }
 
+  // Reserves enough capacity to hold `sz` live entries without triggering a resize.
   void Reserve(size_t sz) {
-    sz = absl::bit_ceil(sz);
-    if (sz > entries_.size()) {
-      capacity_log_ = std::max(kMinCapacityLog, uint32_t(absl::bit_width(sz) - 1));
-      size_t prev_size = entries_.size();
-      entries_.resize(Capacity());
-      Rehash(prev_size);
-    }
-    assert(entries_.size() >= kDisplacementSize);
+    GrowCapacity((sz + kOverloadFactor - 1) / kOverloadFactor);
   }
 
-  // TODO rewrite using extended hash approach
-  //
-  // Shrinks the table to new_size (power of 2, >= 1 << kMinCapacityLog and >= element count).
+  // Shrinks toward `new_size` buckets, never below what's needed for live entries at
+  // kOverloadFactor. No-op if not smaller than the current bucket count.
   void Shrink(size_t new_size) {
-    assert(absl::has_single_bit(new_size));
-    assert(new_size >= (1u << kMinCapacityLog));
-    assert(new_size < entries_.size());
+    size_t required = size_ / kOverloadFactor + (size_ % kOverloadFactor != 0);
+    size_t target = absl::bit_ceil(std::max({new_size, kMinBucketCount, required}));
+    if (target >= BucketCount())
+      return;
 
     size_t prev_size = entries_.size();
-    capacity_log_ = absl::bit_width(new_size) - 1;
+    capacity_log_ = absl::bit_width(target) - 1;
 
     // Process from low to high (opposite of Grow/Rehash).
     for (size_t i = 0; i < prev_size; ++i) {
@@ -430,6 +428,18 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   }
 
  protected:
+  // Grows the table so entries_.size() >= bucket_capacity (power of 2), rehashing in place.
+  void GrowCapacity(size_t bucket_capacity) {
+    bucket_capacity = absl::bit_ceil(bucket_capacity);
+    if (bucket_capacity > entries_.size()) {
+      capacity_log_ = std::max(kMinCapacityLog, uint32_t(absl::bit_width(bucket_capacity) - 1));
+      size_t prev_size = entries_.size();
+      entries_.resize(Capacity());
+      Rehash(prev_size);
+    }
+    assert(entries_.size() >= kDisplacementSize);
+  }
+
   static uint64_t Hash(std::string_view str) {
     constexpr uint64_t kHashSeed = 24061983;
     return rapidhashMicro_withSeed(str.data(), str.size(), kHashSeed);

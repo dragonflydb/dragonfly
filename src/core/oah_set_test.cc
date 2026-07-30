@@ -114,6 +114,19 @@ TEST(OAHKeyCodec, HeaderContentMatchesDecode) {
   check(non_ascii);
 }
 
+TEST_F(OAHSetTest, ShrinkUsesOverloadAwareTarget) {
+  for (unsigned i = 0; i < 4; ++i) {
+    EXPECT_TRUE(ss_->Add(absl::StrCat("member", i)));
+  }
+  ss_->Reserve(128 * OAHSet::kOverloadFactor);
+  EXPECT_EQ(ss_->BucketCount(), 128);
+
+  // The legacy caller asks for eight buckets. OAH ignores that DenseSet-oriented
+  // target and retains its legal 16-bucket minimum.
+  ss_->Shrink(8);
+  EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
+}
+
 TEST_F(OAHSetTest, AsciiEncoding) {
   string ascii_key(80, 'a');                // 80 ascii chars -> 70 packed bytes
   string boundary(128, 'b');                // largest ascii-encodable key
@@ -371,8 +384,8 @@ TEST_F(OAHSetTest, OAHSetAddFindTest) {
     EXPECT_EQ(KeyOf(*e), s);
   }
 
-  // ~10000 elements at load factor 1 (grow when size_ >= table size).
-  EXPECT_EQ(ss.BucketCount(), 16384);
+  // ~10000 elements at kOverloadFactor=2 (grow when size_ >= table size * 2).
+  EXPECT_EQ(ss.BucketCount(), 8192);
 }
 
 TEST_F(OAHSetTest, Basic) {
@@ -1372,7 +1385,8 @@ void BM_Grow(benchmark::State& state) {
     state.PauseTiming();
     OAHSet tmp;
     src.Fill(&tmp);
-    CHECK_EQ(tmp.BucketCount(), elems);
+    // Fill reserves via UpperBoundSize().
+    CHECK_EQ(tmp.BucketCount(), elems / OAHSet::kOverloadFactor);
     state.ResumeTiming();
     for (const auto& str : strs) {
       tmp.Add(str);
@@ -1444,7 +1458,7 @@ void BM_Shrink(benchmark::State& state) {
     ss.Clear();
     src.Fill(&ss);
     ss.Reserve(kGrowTo);
-    CHECK_EQ(ss.BucketCount(), kGrowTo);
+    CHECK_EQ(ss.BucketCount(), kGrowTo / OAHSet::kOverloadFactor);
     state.ResumeTiming();
     ss.Shrink(kShrinkTo);
   }
@@ -1511,10 +1525,11 @@ TEST_P(ShrinkTest, BasicShrink) {
     EXPECT_TRUE(ss_->Add(strs.back()));
   }
 
-  // Grow to a larger size
-  ss_->Reserve(1 << 22);
+  // Grow to a larger size.
+  constexpr size_t kGrownBuckets = 1u << 22;
+  ss_->Reserve(kGrownBuckets * OAHSet::kOverloadFactor);
   size_t original_bucket_count = ss_->BucketCount();
-  EXPECT_EQ(original_bucket_count, 1u << 22);
+  EXPECT_EQ(original_bucket_count, kGrownBuckets);
 
   // Shrink to the parameterized size
   ss_->Shrink(shrink_to);
@@ -1562,7 +1577,7 @@ TEST_F(OAHSetTest, ShrinkWithTTL) {
   }
 
   // Grow to larger size
-  ss_->Reserve(1 << 22);
+  ss_->Reserve((1u << 22) * OAHSet::kOverloadFactor);
 
   // Set time to 50 - this will expire elements with TTL <= 50
   ss_->set_time(50);
@@ -1617,8 +1632,9 @@ TEST_F(OAHSetTest, ScanWithShrinkBetweenCalls) {
   EXPECT_NE(cursor, 0u) << "Should not finish in one iteration";
 
   // Grow to large size in the middle of scanning
-  ss_->Reserve(1 << 22);
-  EXPECT_EQ(ss_->BucketCount(), 1u << 22);
+  constexpr size_t kGrownBuckets = 1u << 22;
+  ss_->Reserve(kGrownBuckets * OAHSet::kOverloadFactor);
+  EXPECT_EQ(ss_->BucketCount(), kGrownBuckets);
   EXPECT_GT(ss_->BucketCount(), initial_bucket_count);
 
   // Continue scanning a bit after Grow
