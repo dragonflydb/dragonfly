@@ -368,6 +368,21 @@ template <typename F> struct CallbackConsumer : public DbSlice::ChangeConsumerIn
   F f_;
 };
 
+void UpdateSlotStat(string_view key, int64_t delta, DbTable* db, uint64_t SlotStats::*stat,
+                    string_view name) {
+  if (delta == 0 || !db->slots_stats)
+    return;
+
+  const SlotId sid = KeySlot(key);
+  uint64_t& value = db->slots_stats[sid].*stat;
+  if (delta < 0 && value < uint64_t(-delta)) {
+    LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot " << name << ": " << value << " + "
+                           << delta << ", slot: " << sid;
+    delta = -int64_t(value);
+  }
+  value += delta;
+}
+
 }  // namespace
 
 void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable* db) {
@@ -376,33 +391,12 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable*
     return;
 
   db->stats.AddTypeMemoryUsage(type, delta);
-
-  if (!db->slots_stats)
-    return;
-
-  const SlotId sid = KeySlot(key);
-  uint64_t& slot_memory = db->slots_stats[sid].memory_bytes;
-  if (delta < 0 && slot_memory < uint64_t(-delta)) {
-    LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot memory usage: " << slot_memory
-                           << " + " << delta << ", slot: " << sid;
-    delta = -int64_t(slot_memory);
-  }
-  slot_memory += delta;
+  UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage");
 }
 
 void AccountSlotTieredBytes(string_view key, int64_t delta, DbTable* db) {
   DCHECK_NE(db, nullptr);
-  if (delta == 0 || !db->slots_stats)
-    return;
-
-  const SlotId sid = KeySlot(key);
-  uint64_t& tiered_bytes = db->slots_stats[sid].tiered_bytes;
-  if (delta < 0 && tiered_bytes < uint64_t(-delta)) {
-    LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot tiered usage: " << tiered_bytes
-                           << " + " << delta << ", slot: " << sid;
-    delta = -int64_t(tiered_bytes);
-  }
-  tiered_bytes += delta;
+  UpdateSlotStat(key, delta, db, &SlotStats::tiered_bytes, "tiered usage");
 }
 
 #define ADD(x) (x) += o.x
