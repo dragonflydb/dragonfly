@@ -2304,6 +2304,11 @@ void GenericFamily::Move(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
+  // A key moved to db > 0 would escape slot-scoped operations.
+  if (IsClusterEnabled()) {
+    return cmd_cntx->SendError("MOVE is not allowed in cluster mode");
+  }
+
   if (target_db < 0 || uint32_t(target_db) >= absl::GetFlag(FLAGS_dbnum)) {
     return cmd_cntx->SendError(kDbIndOutOfRangeErr);
   }

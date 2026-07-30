@@ -489,6 +489,9 @@ auto DbSlice::GetStats() const -> Stats {
 
 SlotStats DbSlice::GetSlotStats(SlotId sid) const {
   CHECK(db_arr_[0]);
+  // slots_stats is null outside real cluster mode.
+  if (!db_arr_[0]->slots_stats)
+    return {};
   return db_arr_[0]->slots_stats[sid];
 }
 
@@ -909,7 +912,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
       std::string_view key = it->first.GetSlice(&tmp);
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
-        // We use copy of table smart pointer and pass it as table because FLLUSHALL can drop table.
+        // We use copy of table smart pointer and pass it as table because FLUSHALL can drop table.
         Del(db_cntx, Iterator::FromPrime(it), table.get());
         ++del_count;
       }
@@ -938,7 +941,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     size_t memory_after = table->table_memory() + table->stats.obj_memory_usage;
 
     LOG(INFO) << "Memory decommit took " << took << "ns, deleted " << del_count << ", memory delta "
-              << (memory_before - memory_after);
+              << (static_cast<int64_t>(memory_before) - static_cast<int64_t>(memory_after));
   }
 }
 
@@ -958,6 +961,11 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   // before the bucket version is bumped, preventing the traversal from skipping them).
   auto on_change = [this, shared_slots, next_version, table](DbIndex db_index,
                                                              const ChangeReq& req) {
+    // The callback fires for every db index, but only db 0 is flushed; deleting a db > 0
+    // entry through db 0's table would corrupt its accounting and prime table.
+    if (db_index != 0)
+      return;
+
     FiberAtomicGuard fg;
 
     auto process_bucket = [&](PrimeTable::bucket_iterator it) {

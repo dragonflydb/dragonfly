@@ -924,6 +924,55 @@ TEST_F(ClusterFamilyTest, FlushSlotsDoesNotDeleteEntriesInsertedAfterFlush) {
   });
 }
 
+TEST_F(ClusterFamilyTest, MoveNotAllowedInClusterMode) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  EXPECT_EQ(Run({"set", "key", "val"}), "OK");
+  EXPECT_THAT(Run({"move", "key", "1"}), ErrArg("MOVE is not allowed in cluster mode"));
+  EXPECT_EQ(Run({"get", "key"}), "val");
+}
+
+TEST_F(ClusterFamilyTest, AclSelectDbNotAllowedInClusterMode) {
+  EXPECT_THAT(Run({"acl", "setuser", "u1", "on", ">pw", "~*", "+@all", "$1"}),
+              ErrArg("not allowed in cluster mode"));
+  EXPECT_EQ(Run({"acl", "setuser", "u2", "on", ">pw", "~*", "+@all", "$0"}), "OK");
+  EXPECT_EQ(Run({"acl", "setuser", "u3", "on", ">pw", "~*", "+@all", "$ALL"}), "OK");
+}
+
+// The flush's on_change fires for every db index but must only touch db 0; the bug charged
+// db 0's table for a db 1 deletion (FATAL underflow in debug).
+TEST_F(ClusterFamilyTest, FlushSlotsOnChangeIgnoresNonDefaultDb) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+    db_slice.ActivateDb(1);
+    DbContext cntx{&namespaces->GetDefaultNamespace(), 1, GetCurrentTimeMs()};
+
+    PrimeValue val;
+    val.SetString(string(128, 'x'));
+    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val), 0).ok());
+
+    cluster::SlotRanges ranges({{0, 16383}});
+    es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    db_slice.FlushSlots(ranges);
+    es->shard_lock()->Release(IntentLock::EXCLUSIVE);
+
+    // Overwrite without yielding: PreUpdateBlocking fires on_change with db_index=1.
+    PrimeValue val2;
+    val2.SetString(string(128, 'y'));
+    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val2), 0).ok());
+
+    util::ThisFiber::SleepFor(50ms);  // let the flush fiber finish
+
+    // db 1 is not covered by slot operations; the entry stays.
+    EXPECT_EQ(db_slice.DbSize(1), 1u);
+    EXPECT_EQ(db_slice.DbSize(0), 0u);
+  });
+}
+
 TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
   ConfigSingleNodeCluster(GetMyId());
 
@@ -949,6 +998,19 @@ class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
     SetTestFlag("announce_port", "6379");
   }
 };
+
+// slots_stats is null outside real cluster mode; GetSlotStats must not crash.
+TEST_F(ClusterFamilyEmulatedTest, GetSlotStatsWithoutClusterMode) {
+  EXPECT_EQ(Run({"set", "key", "value"}), "OK");
+
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+    SlotStats stats = db_slice.GetSlotStats(0);
+    EXPECT_EQ(stats.key_count, 0u);
+  });
+}
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
   string cluster_info = Run({"cluster", "info"}).GetString();
