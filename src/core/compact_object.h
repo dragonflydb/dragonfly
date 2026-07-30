@@ -463,6 +463,9 @@ class CompactObj {
   // If slow is true, may use more expensive methods to calculate the precise size.
   size_t MallocUsed(bool slow = false) const;
 
+  // Bytes held in RAM: for a cool value that is the copy kept in its cool record.
+  size_t ResidentMallocUsed() const;
+
   // Resets the object to empty state (string).
   void Reset();
 

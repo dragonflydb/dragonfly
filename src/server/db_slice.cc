@@ -72,20 +72,6 @@ constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
 static_assert(kPrimeSegmentSize <= 32304);
 
-void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* db) {
-  DCHECK_NE(db, nullptr);
-  if (size == 0)
-    return;
-
-  DbTableStats& stats = db->stats;
-
-  stats.AddTypeMemoryUsage(type, size);
-
-  if (db->slots_stats) {
-    db->slots_stats[KeySlot(key)].memory_bytes += size;
-  }
-}
-
 class PrimeEvictionPolicy {
  public:
   static constexpr bool can_evict = true;  // we implement eviction functionality.
@@ -384,6 +370,26 @@ template <typename F> struct CallbackConsumer : public DbSlice::ChangeConsumerIn
 
 }  // namespace
 
+void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable* db) {
+  DCHECK_NE(db, nullptr);
+  if (delta == 0)
+    return;
+
+  db->stats.AddTypeMemoryUsage(type, delta);
+
+  if (!db->slots_stats)
+    return;
+
+  const SlotId sid = KeySlot(key);
+  uint64_t& slot_memory = db->slots_stats[sid].memory_bytes;
+  if (delta < 0 && slot_memory < uint64_t(-delta)) {
+    LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot memory usage: " << slot_memory
+                           << " + " << delta << ", slot: " << sid;
+    delta = -int64_t(slot_memory);
+  }
+  slot_memory += delta;
+}
+
 #define ADD(x) (x) += o.x
 
 DbStats& DbStats::operator+=(const DbStats& o) {
@@ -514,10 +520,28 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 }
 
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
-  AccountObjectMemory(fields_.key, fields_.orig_obj_type, -fields_.orig_value_heap_size,
+  if (fields_.db_slice == nullptr) {
+    return;
+  }
+
+  // The baseline is up to date even if a blocking tiered read uploaded the value mid-scope:
+  // such reads are followed by ResyncBaseline(). Subtracting it keeps this call idempotent.
+  AccountObjectMemory(fields_.key, fields_.orig_obj_type, -int64_t(fields_.orig_value_heap_size),
                       fields_.db_slice->GetDBTable(fields_.db_ind));
-  fields_.orig_value_heap_size = 0;                      // Reset to avoid double accounting.
-  fields_.orig_obj_type = fields_.it->second.ObjType();  // Sync type after accounting.
+
+  // Reset to avoid double accounting, and sync the type after accounting.
+  fields_.orig_value_heap_size = 0;
+  fields_.orig_obj_type = fields_.it->second.ObjType();
+}
+
+void DbSlice::AutoUpdater::ResyncBaseline() {
+  if (fields_.db_slice == nullptr) {
+    return;
+  }
+
+  const PrimeValue& pv = fields_.it->second;
+  fields_.orig_value_heap_size = pv.ResidentMallocUsed();
+  fields_.orig_obj_type = pv.ObjType();
 }
 
 void DbSlice::AutoUpdater::Run() {
@@ -532,8 +556,9 @@ void DbSlice::AutoUpdater::Run() {
 
   CHECK_NE(fields_.db_slice, nullptr);
 
-  CompactObjType current_type = fields_.it->second.ObjType();
-  int64_t current_size = static_cast<int64_t>(fields_.it->second.MallocUsed());
+  const PrimeValue& pv = fields_.it->second;
+  CompactObjType current_type = pv.ObjType();
+  int64_t current_size = static_cast<int64_t>(pv.ResidentMallocUsed());
   DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
 
   if (current_type != fields_.orig_obj_type) {
@@ -544,8 +569,8 @@ void DbSlice::AutoUpdater::Run() {
                         -static_cast<int64_t>(fields_.orig_value_heap_size), table);
     AccountObjectMemory(fields_.key, current_type, current_size, table);
   } else {
-    ssize_t delta = current_size - static_cast<int64_t>(fields_.orig_value_heap_size);
-    AccountObjectMemory(fields_.key, current_type, delta, table);
+    AccountObjectMemory(fields_.key, current_type,
+                        current_size - static_cast<int64_t>(fields_.orig_value_heap_size), table);
   }
 
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
@@ -562,7 +587,7 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .db_ind = db_ind,
               .it = it,
               .key = key,
-              .orig_value_heap_size = it->second.MallocUsed(),
+              .orig_value_heap_size = it->second.ResidentMallocUsed(),
               .orig_obj_type = it->second.ObjType()} {
   DCHECK(IsValid(it));
 }
@@ -1021,6 +1046,16 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 
     CreateDb(index);
     std::swap(db_arr_[index]->trans_locks, flush_db_arr[index]->trans_locks);
+
+    // Unlike the key_count/memory_bytes gauges, traffic counters are cumulative history.
+    const auto& old_slots = flush_db_arr[index]->slots_stats;
+    auto& new_slots = db_arr_[index]->slots_stats;
+    if (old_slots && new_slots) {
+      for (SlotId sid = 0; sid <= kMaxSlotNum; ++sid) {
+        new_slots[sid].total_reads = old_slots[sid].total_reads;
+        new_slots[sid].total_writes = old_slots[sid].total_writes;
+      }
+    }
   }
 
   LOG_IF(DFATAL, !fetched_items_.empty())
@@ -1935,6 +1970,10 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
 
   PrimeValue& pv = del_it->second;
 
+  // The tiered delete blanks the external metadata, zeroing the reported size and type.
+  const CompactObjType val_type = pv.ObjType();
+  const ssize_t value_heap_size = pv.ResidentMallocUsed();
+
   if (pv.HasStashPending()) {
     string scratch;
     string_view key = del_it->first.GetSlice(&scratch);
@@ -1943,13 +1982,13 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
     shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
   }
 
-  ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();
+  ssize_t key_size_used = del_it->first.MallocUsed();
   if (del_it->first.IsInline()) {
     --stats.inline_keys;
   } else {
     AccountObjectMemory(del_it.key(), OBJ_KEY, -key_size_used, table);  // Key
   }
-  AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
+  AccountObjectMemory(del_it.key(), val_type, -value_heap_size, table);  // Value
 
   if (async && MayDeleteAsynchronously(pv)) {
     auto schedule = [](auto* ds) {

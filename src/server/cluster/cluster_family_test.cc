@@ -13,11 +13,18 @@
 #include "absl/strings/substitute.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/compact_object.h"
 #include "core/detail/gen_utils.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "facade/facade_test.h"
+#include "server/engine_shard_set.h"
 #include "server/test_utils.h"
+#include "server/tiered_storage.h"
+
+ABSL_DECLARE_FLAG(bool, force_epoll);
 
 namespace dfly::cluster {
 namespace {
@@ -633,6 +640,280 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
                                 "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))),
           RespArray(ElementsAre(IntArg(2), "key_count", IntArg(0), "total_reads", IntArg(0),
                                 "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
+}
+
+// SlotStats::memory_bytes tracks resident RAM.
+class ClusterMemoryTest : public ClusterFamilyTest {
+ protected:
+  ClusterMemoryTest() {
+    num_threads_ = 1;
+  }
+
+  struct SlotInfo {
+    int64_t key_count = 0;
+    int64_t total_reads = 0;
+    int64_t total_writes = 0;
+    int64_t memory_bytes = 0;
+  };
+
+  SlotInfo GetSlotInfo(SlotId slot) {
+    auto resp = RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)});
+    const auto& row = resp.GetVec()[0].GetVec();
+    return SlotInfo{*row[2].GetInt(), *row[4].GetInt(), *row[6].GetInt(), *row[8].GetInt()};
+  }
+
+  // GETSLOTINFO adds a fixed per-key table-space term.
+  int64_t RawSlotMemory(SlotId slot) {
+    SlotInfo info = GetSlotInfo(slot);
+    return info.memory_bytes - info.key_count * int64_t(sizeof(CompactObj)) * 2;
+  }
+
+  void ExpectSlotEmpty(SlotId slot) {
+    SlotInfo info = GetSlotInfo(slot);
+    EXPECT_EQ(info.key_count, 0);
+    EXPECT_EQ(info.memory_bytes, 0);
+  }
+
+  void ExpectSlotMirrorsDb(SlotId slot) {
+    EXPECT_EQ(RawSlotMemory(slot), int64_t(GetMetrics().db_stats[0].obj_memory_usage));
+  }
+};
+
+#ifdef WITH_TIERING
+
+class ClusterTieredTest : public ClusterMemoryTest {
+ protected:
+  void SetUp() override {
+    if (absl::GetFlag(FLAGS_force_epoll)) {
+      GTEST_SKIP() << "Tiered storage requires io_uring";
+    }
+    flag_saver_.emplace();
+    SetTestFlag("tiered_prefix", "/tmp/cluster_tiered_test");
+    SetTestFlag("tiered_offload_threshold", "1.0");
+    SetTestFlag("tiered_min_value_size", "64");
+    SetTestFlag("tiered_experimental_cooling", "false");
+    ClusterMemoryTest::SetUp();
+    ConfigSingleNodeCluster(GetMyId());
+  }
+
+  void TearDown() override {
+    if (service_)
+      ClusterMemoryTest::TearDown();
+    flag_saver_.reset();
+  }
+
+  void WaitForOffload(size_t entries) {
+    ExpectConditionWithinTimeout(
+        [this, entries] { return GetMetrics().db_stats[0].tiered_entries == entries; });
+  }
+
+  // The background offloader keeps moving bytes between the counters; park it and drain
+  // in-flight stashes so that multi-command assertions see a stable state.
+  void StopOffloading() {
+    SetTestFlag("tiered_offload_threshold", "0.0");
+    pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+    ExpectConditionWithinTimeout(
+        [this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0u; });
+  }
+
+  std::optional<absl::FlagSaver> flag_saver_;
+};
+
+// memory_bytes tracks resident RAM only: offloading removes the value's bytes from it, and it
+// must return to zero once the slot is empty.
+TEST_F(ClusterTieredTest, SlotCountersFollowOffloadAndDelete) {
+  const string kKey = "tiered-del";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  EXPECT_EQ(RawSlotMemory(slot), 0);
+
+  EXPECT_EQ(CheckedInt({"DEL", kKey}), 1);
+  ExpectSlotEmpty(slot);
+}
+
+// The single key lives in one slot, so the slot counters must mirror the db-wide ones exactly.
+TEST_F(ClusterTieredTest, SlotCountersFollowExternalOverwrite) {
+  const string kKey = "tiered-set";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  // Overwriting an offloaded value releases its disk extent; the new value may get offloaded
+  // again right away, so compare against the db-wide counters instead of fixed values.
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'y')}), "OK");
+  StopOffloading();
+
+  ExpectSlotMirrorsDb(slot);
+  // The old extent was released: at most one value's worth of disk is held.
+  EXPECT_LE(GetMetrics().db_stats[0].tiered_used_bytes, 3584u);
+}
+
+TEST_F(ClusterTieredTest, SlotCountersReleasedOnFlushSlots) {
+  const string kKey = "tiered-flush";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", absl::StrCat(slot), absl::StrCat(slot)}),
+            "OK");
+  ExpectConditionWithinTimeout([&]() { return GetSlotInfo(slot).key_count == 0; });
+
+  ExpectSlotEmpty(slot);
+}
+
+TEST_F(ClusterTieredTest, SlotCountersReleasedOnExpiry) {
+  const string kKey = "tiered-ttl";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  EXPECT_EQ(CheckedInt({"PEXPIRE", kKey, "10"}), 1);
+  AdvanceTime(100);
+  EXPECT_THAT(Run({"GET", kKey}), ArgType(RespExpr::NIL));
+  ExpectSlotEmpty(slot);
+}
+
+// Uploads and re-offloads move bytes in and out of memory_bytes; it must mirror the db-wide
+// counter at every step and never wrap around zero.
+TEST_F(ClusterTieredTest, SlotCountersFollowUploadAndAppend) {
+  const string kKey = "tiered-append";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4000, 'x')}), "OK");
+  WaitForOffload(1);
+
+  for (int i = 0; i < 6; ++i)
+    Run({"APPEND", kKey, string(512, 'y')});
+  StopOffloading();
+
+  ExpectSlotMirrorsDb(slot);
+
+  EXPECT_EQ(CheckedInt({"DEL", kKey}), 1);
+  ExpectSlotEmpty(slot);
+}
+
+TEST_F(ClusterTieredTest, SlotCountersReleasedOnConfigSlotRemoval) {
+  Run({"debug", "populate", "20", "key", "3000", "SLOTS", "1", "1"});
+  WaitForOffload(20);
+
+  ConfigSingleNodeCluster("abc");
+  ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
+
+  ExpectSlotEmpty(1);
+}
+
+class ClusterTieredCoolingTest : public ClusterTieredTest {
+ protected:
+  void SetUp() override {
+    ClusterTieredTest::SetUp();
+    if (!service_)  // skipped
+      return;
+    SetTestFlag("tiered_experimental_cooling", "true");
+    pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+  }
+};
+
+// A cool value keeps its RAM copy, so it still counts in memory_bytes until it is deleted.
+TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnFlushSlots) {
+  const string kKey = "cool-flush";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  // The cool value's RAM copy stays in the slot's memory_bytes.
+  ExpectSlotMirrorsDb(slot);
+  EXPECT_GT(RawSlotMemory(slot), 0);
+
+  EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", absl::StrCat(slot), absl::StrCat(slot)}),
+            "OK");
+  ExpectConditionWithinTimeout([&]() { return GetSlotInfo(slot).key_count == 0; });
+
+  ExpectSlotEmpty(slot);
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+// Warming a cool value up on read keeps its RAM bytes accounted exactly once.
+TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnWarmup) {
+  const string kKey = "cool-warm";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+  StopOffloading();
+
+  EXPECT_EQ(Run({"GET", kKey}), string(4096, 'x'));
+
+  ExpectSlotMirrorsDb(slot);
+  EXPECT_GT(RawSlotMemory(slot), 0);
+}
+
+#endif  // WITH_TIERING
+
+TEST_F(ClusterMemoryTest, SlotMemoryFollowsDefrag) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  const SlotId slot = KeySlot("{tag}0");
+  const int kKeys = 120;
+
+  // Arrays grown element by element keep spare capacity that defrag drops, so the post-defrag
+  // delta is non-zero only for a non-power-of-two element count.
+  for (int i = 0; i < kKeys; ++i) {
+    Run({"JSON.SET", absl::StrCat("{tag}", i), "$", "[]"});
+    for (int j = 0; j < 40; ++j)
+      Run({"JSON.ARRAPPEND", absl::StrCat("{tag}", i), "$", absl::StrCat(j)});
+  }
+
+  shard_set->pool()->AwaitFiberOnAll([](unsigned, util::ProactorBase*) {
+    auto* shard = EngineShard::tlocal();
+    if (!shard)
+      return;
+    for (int i = 0; i < 100; ++i) {
+      PageUsage page_usage{CollectPageStats::NO, 0, CycleQuota::Unlimited()};
+      page_usage.SetForceReallocate(true);
+      shard->DoDefrag(&page_usage);
+      if (shard->GetDefragCursor() == 0)
+        break;
+    }
+  });
+
+  ASSERT_GT(GetMetrics().shard_stats.defrag_realloc_total, 0u);
+
+  // Every key shares one hashtag.
+  ExpectSlotMirrorsDb(slot);
+
+  for (int i = 0; i < kKeys; ++i)
+    Run({"DEL", absl::StrCat("{tag}", i)});
+
+  ExpectSlotEmpty(slot);
+}
+
+TEST_F(ClusterMemoryTest, SlotTrafficCountersSurviveFlush) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  const string kKey = "traffic-key";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(1000, '#')}), "OK");
+  Run({"GET", kKey});
+
+  SlotInfo before = GetSlotInfo(slot);
+  ASSERT_GT(before.total_reads, 0);
+  ASSERT_GT(before.total_writes, 0);
+
+  Run({"FLUSHALL"});
+
+  SlotInfo after = GetSlotInfo(slot);
+  EXPECT_EQ(after.key_count, 0);
+  EXPECT_EQ(after.memory_bytes, 0);
+  EXPECT_EQ(after.total_reads, before.total_reads);
+  EXPECT_EQ(after.total_writes, before.total_writes);
 }
 
 // Test issue #1302

@@ -1783,6 +1783,12 @@ size_t CompactObj::MallocUsed(bool slow) const {
   return 0;
 }
 
+size_t CompactObj::ResidentMallocUsed() const {
+  if (taglen_ == EXTERNAL_TAG && u_.ext_ptr.is_cool)
+    return u_.ext_ptr.cool_record->value.MallocUsed();
+  return MallocUsed();
+}
+
 bool CompactObj::CmpNonInline(std::string_view sv) const {
   DCHECK_GT(taglen_, kInlineLen);
   switch (taglen_) {

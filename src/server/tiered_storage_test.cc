@@ -99,6 +99,23 @@ INSTANTIATE_TEST_SUITE_P(TS, LatentCoolingTSTest, testing::Values(true, false));
 
 // Disabled cooling and all values are offloaded
 class PureDiskTSTest : public TieredStorageTest {
+ protected:
+  // Offload "k" holding value, upload it back via mutate and expect no RAM ledger leak.
+  template <typename F> void ExpectNoUploadLeak(std::string_view value, F mutate) {
+    Run({"SET", "k", value});
+    ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries == 1u; });
+
+    // The first read only marks the entry as touched; the next one uploads it.
+    Run({"GET", "k"});
+    mutate();
+
+    Run({"DEL", "k"});
+    auto metrics = GetMetrics();
+    EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
+    EXPECT_EQ(metrics.db_stats[0].obj_memory_usage, 0u);
+  }
+
+ private:
   void SetUp() override {
     fs.emplace();
     SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
@@ -1536,6 +1553,110 @@ TEST_F(PureDiskTSMTTest, SquashedVerifyFailConcurrent) {
   }
 
   EXPECT_EQ(Run({"PING"}), "PONG");
+}
+
+// Expiry removes the entry without the lookup that would have warmed a cool value up.
+TEST_F(TieredStorageTest, CoolExpiryReleasesObjectMemory) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  UpdateFromFlags();
+
+  const int kNum = 20;
+  for (int i = 0; i < kNum; ++i)
+    Run({"SET", absl::StrCat("k", i), BuildString(4000), "PX", "20000"});
+
+  ExpectConditionWithinTimeout(
+      [this] { return GetMetrics().db_stats[0].tiered_entries == unsigned(kNum); });
+
+  EXPECT_GT(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+
+  AdvanceTime(30000);
+  for (int i = 0; i < kNum; ++i)
+    EXPECT_THAT(Run({"GET", absl::StrCat("k", i)}), ArgType(RespExpr::NIL));
+
+  EXPECT_EQ(CheckedInt({"DBSIZE"}), 0);
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
+  EXPECT_EQ(metrics.db_stats[0].obj_memory_usage, 0u);
+}
+
+TEST_F(PureDiskTSTest, McAppendAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000), [&] {
+    RunMC(MemcacheParser::APPEND, "k", MCArgs{"suffix", 0});
+  });
+}
+
+TEST_F(PureDiskTSTest, IncrByFloatAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(absl::StrCat("1.", string(4000, '0'), "5"), [&] {
+    Run({"INCRBYFLOAT", "k", "1.5"});
+  });
+}
+
+TEST_F(PureDiskTSTest, BitfieldAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000), [&] { Run({"BITFIELD", "k", "SET", "u8", "0", "255"}); });
+}
+
+TEST_F(PureDiskTSTest, SetBitAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000), [&] { Run({"SETBIT", "k", "40000", "1"}); });
+}
+
+TEST_F(PureDiskTSTest, ReadOnlyBitfieldAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000), [&] { Run({"BITFIELD", "k", "GET", "u8", "0"}); });
+}
+
+// The error path returns before the value is replaced.
+TEST_F(PureDiskTSTest, IncrByFloatParseErrorAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000, 'z'), [&] {
+    EXPECT_THAT(Run({"INCRBYFLOAT", "k", "1.5"}), ErrArg("not a valid float"));
+  });
+}
+
+// The no-delete outcome returns with the value still in place after the conditional read.
+TEST_F(PureDiskTSTest, DelExNoMatchAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000), [&] {
+    EXPECT_EQ(CheckedInt({"DELEX", "k", "IFEQ", "nomatch"}), 0);
+  });
+}
+
+TEST_F(PureDiskTSTest, PfAddInvalidHllAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000, 'z'), [&] { Run({"PFADD", "k", "elem"}); });
+}
+
+TEST_F(PureDiskTSTest, TotalDeletesReported) {
+  const int kNum = 5;
+  for (int i = 0; i < kNum; ++i)
+    Run({"SET", absl::StrCat("k", i), BuildString(4000)});
+
+  ExpectConditionWithinTimeout(
+      [this] { return GetMetrics().db_stats[0].tiered_entries == unsigned(kNum); });
+
+  EXPECT_EQ(GetMetrics().tiered_stats.total_deletes, 0u);
+
+  for (int i = 0; i < kNum; ++i)
+    Run({"DEL", absl::StrCat("k", i)});
+
+  EXPECT_EQ(GetMetrics().tiered_stats.total_deletes, unsigned(kNum));
+}
+
+// Cooling is type agnostic, so a hash can reach the tiered delete path holding a cool record.
+TEST_F(TieredStorageTest, CoolHashDeleteDoesNotAbort) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+
+  // Listpack hashes go through small bins, which only flush at 4KB - one hash never stashes.
+  const int kNum = 60;
+  for (int i = 0; i < kNum; ++i)
+    Run({"HSET", absl::StrCat("h", i), "f", BuildString(200)});
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries > 0u; });
+
+  Run({"FLUSHALL"});
+  EXPECT_EQ(Run({"PING"}), "PONG");
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
 }
 
 }  // namespace dfly
