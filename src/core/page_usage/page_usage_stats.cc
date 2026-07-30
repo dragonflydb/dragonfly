@@ -35,7 +35,7 @@ constexpr auto kHistSignificantFigures = 3;
 HllBufferPtr InitHllPtr() {
   HllBufferPtr p;
   p.size = getDenseHllSize();
-  p.hll = new uint8_t[p.size];
+  p.hll = new uint8_t[p.size + 1];
   CHECK_EQ(0, createDenseHll(p));
   return p;
 }

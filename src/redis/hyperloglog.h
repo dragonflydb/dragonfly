@@ -11,13 +11,34 @@
  * We do support converting of existing sprase-encoded HLL into dense-encoded, which can be useful
  * for replication, serialization, etc. */
 
+/* hyperloglog.c is kept textually as close to valkey's src/hyperloglog.c as possible so that
+ * re-syncing stays cheap: `git log <sync-point>..origin/unstable -- src/hyperloglog.c` in a valkey
+ * clone lists exactly what is outstanding. Last synced with valkey 06d30f293 ("Fix PFADD corrupted
+ * sparse HLL handling by restoring hllSparseSet return type", 2026-02-10).
+ *
+ * The deliberate differences are: no robj/server.h (the sparse helpers take an sds*, and the
+ * command implementations are replaced by the HllBufferPtr API below); server.hll_sparse_max_bytes
+ * is the compile-time HLL_SPARSE_MAX_BYTES; and the upstream functions that have a Dragonfly
+ * counterpart (hllAdd, hllMerge, createHLLObject) are kept under `#if 0` as its reference. */
+
 enum HllValidness {
   HLL_INVALID,
   HLL_VALID_SPARSE,
   HLL_VALID_DENSE,
 };
 
-/* Convenience struct for pointing to an Hll buffer along with its size */
+/* Convenience struct for pointing to an Hll buffer along with its size.
+ *
+ * A dense buffer must have one readable and writable byte past `size`, i.e. the
+ * allocation has to be getDenseHllSize() + 1 bytes even though `size` stays
+ * getDenseHllSize(). HLL_DENSE_GET_REGISTER/HLL_DENSE_SET_REGISTER address the
+ * two bytes a register may straddle unconditionally, so register 16383 - which
+ * ends on a byte boundary and needs only the first - still touches the one after
+ * it. The extra byte never affects the result (the read is masked off and the
+ * write is a no-op), but the access is real: without it, every pfmerge(),
+ * pfcountMulti() and unlucky pfadd_dense() reads and rewrites one byte past the
+ * end. std::string and sds buffers satisfy this through their terminator; a raw
+ * `new uint8_t[getDenseHllSize()]` does not. */
 struct HllBufferPtr {
   unsigned char* hll;
   size_t size;
@@ -43,7 +64,10 @@ int createDenseHll(struct HllBufferPtr hll_ptr);
 int convertSparseToDenseHll(struct HllBufferPtr in_hll, struct HllBufferPtr out_hll);
 
 /* Adds `value` of size `size`, to `hll_ptr`.
- * If `obj` does not have an underlying type of HLL a negative number is returned. */
+ * If `obj` does not have an underlying type of HLL a negative number is returned.
+ * pfadd_sparse() may reallocate `*hll_ptr`, or replace it with a dense-encoded
+ * HLL when the sparse encoding can no longer represent the value; in the latter
+ * case `*promoted` is set to 1. */
 int pfadd_sparse(sds* hll_ptr, const unsigned char* value, size_t size, int* promoted);
 int pfadd_dense(struct HllBufferPtr hll_ptr, const unsigned char* value, size_t size);
 
@@ -58,7 +82,15 @@ int64_t pfcountMulti(struct HllBufferPtr* hlls, size_t hlls_count);
 /* Merges array of HLLs pointed to be `in_hlls` of size `in_hlls_count` into `out_hll`.
  * Returns 0 upon success, otherwise a negative number.
  * Failure can occur when any of `in_hlls` or `out_hll` is not a dense-encoded HLL.
- * `out_hll` *can* be one of the elements in `in_hlls`. */
+ * `out_hll` *can* be one of the elements in `in_hlls`. Note that the registers of
+ * `out_hll` are overwritten with the merge result rather than raised to it, so any
+ * cardinality it held that is not also in `in_hlls` is lost. */
 int pfmerge(struct HllBufferPtr* in_hlls, size_t in_hlls_count, struct HllBufferPtr out_hll);
+
+/* Test-only knob mirroring valkey's `PFDEBUG SIMD (ON|OFF)`: enables or disables the
+ * AVX2/NEON fast paths used by pfmerge() and pfcountMulti(), so that tests can check
+ * that they agree with the scalar implementation.
+ * Returns 1 if a SIMD fast path is in effect after the call, 0 otherwise. */
+int hllEnableSimd(int enable);
 
 #endif
