@@ -736,8 +736,11 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "    Prints segment info for the current database.",
         "COMPACT-TABLE [threshold]",
         "    Merge underutilized buddy-segment pairs in the dash table to reclaim memory.",
-        "    <threshold> is the maximum combined fill ratio (0, 1] below which two buddy",
-        "    segments are merged; defaults to 0.25. Returns the number of segments merged.",
+        "    Two buddy segments are merged when their combined size is <= threshold *",
+        "    segment_capacity, so on average each buddy must be under roughly threshold/2",
+        "    full. <threshold> is in (0, 1] and defaults to 0.25. Returns a stats map with",
+        "    'merged', 'attempted', 'rolled_back' counts and 'exited_on_snapshot' (1 if the",
+        "    scan exited early due to an in-progress snapshot).",
         "UNIQ-STRS",
         "    Prints per-object unique string stats and estimated dedup savings across shards.",
         "HELP",
@@ -1803,12 +1806,25 @@ void DebugCmd::CompactTable(facade::CmdArgParser parser, CommandContext* cmd_cnt
   }
 
   const DbIndex db_idx = cmd_cntx->server_conn_cntx()->db_index();
-  std::vector<size_t> results(shard_set->size());
+  std::vector<EngineShard::CompactTableStats> results(shard_set->size());
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     results[shard->shard_id()] = shard->CompactTable(threshold, db_idx);
   });
 
-  rb->SendLong(std::accumulate(results.begin(), results.end(), 0ul));
+  EngineShard::CompactTableStats total;
+  for (const auto& r : results) {
+    total += r;
+  }
+
+  rb->StartCollection(4, CollectionType::MAP);
+  rb->SendSimpleString("merged");
+  rb->SendLong(total.merged);
+  rb->SendSimpleString("attempted");
+  rb->SendLong(total.attempted);
+  rb->SendSimpleString("rolled_back");
+  rb->SendLong(total.rolled_back);
+  rb->SendSimpleString("exited_on_snapshot");
+  rb->SendLong(total.exited_on_snapshot ? 1 : 0);
 }
 
 void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {

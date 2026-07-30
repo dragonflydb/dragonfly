@@ -221,8 +221,28 @@ class EngineShard {
     return defrag_state_.cursor;
   }
 
-  // Return total segments merged.
-  size_t CompactTable(double threshold, DbIndex db_idx);
+  struct CompactTableStats {
+    // Segments successfully merged.
+    size_t merged = 0;
+    // Buddy pairs that passed the size gate and were handed to Merge.
+    size_t attempted = 0;
+    // Attempted merges that moved items into the buddy and then had to roll back
+    // after a failed insertion.
+    size_t rolled_back = 0;
+    // True if we bailed out early due to a snapshot in progress.
+    bool exited_on_snapshot = false;
+
+    CompactTableStats& operator+=(const CompactTableStats& o) {
+      merged += o.merged;
+      attempted += o.attempted;
+      rolled_back += o.rolled_back;
+      exited_on_snapshot = exited_on_snapshot || o.exited_on_snapshot;
+      return *this;
+    }
+  };
+
+  // Merge underutilized buddy-segment pairs in the dash table.
+  CompactTableStats CompactTable(double threshold, DbIndex db_idx);
 
  private:
   struct DefragTaskState {

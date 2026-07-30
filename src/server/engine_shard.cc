@@ -1192,17 +1192,18 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   return info;
 }
 
-size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
+EngineShard::CompactTableStats EngineShard::CompactTable(double threshold, DbIndex db_idx) {
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   auto& prime = db_slice.GetDBTable(db_idx)->prime;
-  size_t total_seg_merged = 0;
+  CompactTableStats stats;
 
   while (true) {
     bool merged_any = false;
     // Prompt GetSegmentCount() each iteration to handle directory resizes across preemptions
     for (size_t seg_id = 0; seg_id < prime.GetSegmentCount(); seg_id = prime.NextSeg(seg_id)) {
       if (SliceSnapshot::IsSnaphotInProgress()) {
-        return total_seg_merged;
+        stats.exited_on_snapshot = true;
+        return stats;
       }
       // Fetch segment pointer fresh each iteration
       auto* seg = prime.GetSegment(seg_id);
@@ -1216,15 +1217,21 @@ size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
 
       auto* buddy = prime.GetSegment(buddy_id);
 
+      // max_size is threshold * ONE segment's capacity, but combined is the SUM of both
+      // buddies, so each buddy must average under roughly threshold/2 full to qualify.
       const size_t combined = seg->SlowSize() + buddy->SlowSize();
       const size_t max_size = threshold * seg->capacity();
 
       if (combined > max_size)
         continue;
 
-      if (prime.Merge(seg_id, buddy_id)) {
-        ++total_seg_merged;
+      ++stats.attempted;
+      auto [seg_merged, declined_depth_guard] = prime.Merge(seg_id, buddy_id);
+      if (seg_merged) {
+        ++stats.merged;
         merged_any = true;
+      } else if (!declined_depth_guard) {
+        ++stats.rolled_back;
       }
 
       // Yield after merge (don't hold pointers across yield)
@@ -1235,7 +1242,7 @@ size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
       break;
   }
 
-  return total_seg_merged;
+  return stats;
 }
 
 }  // namespace dfly

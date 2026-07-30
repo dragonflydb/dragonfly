@@ -484,7 +484,7 @@ TEST_F(DashTest, MergeFailureRollback) {
 
   size_t total_size_before = dt_.size();
 
-  bool merge_succeeded = dt_.Merge(sid, buddy_id);
+  bool merge_succeeded = dt_.Merge(sid, buddy_id).merged;
 
   EXPECT_EQ(dt_.size(), total_size_before);
 
@@ -561,7 +561,7 @@ TEST_F(DashTest, MergePreservesSize) {
     auto* buddy = dt_.GetSegment(buddy_id);
     size_t combined_size = seg->SlowSize() + buddy->SlowSize();
     if (combined_size <= static_cast<size_t>(0.25 * seg->capacity())) {
-      bool merged = dt_.Merge(seg_id, buddy_id);
+      bool merged = dt_.Merge(seg_id, buddy_id).merged;
       if (merged) {
         // Size must be unchanged after each merge
         EXPECT_EQ(dt_.size(), size_before)
@@ -608,7 +608,7 @@ TEST_F(DashTest, MergeKeyLookupConsistency) {
       auto* buddy = dt_.GetSegment(buddy_id);
       size_t combined_size = seg->SlowSize() + buddy->SlowSize();
       if (combined_size <= static_cast<size_t>(0.25 * seg->capacity())) {
-        if (dt_.Merge(seg_id, buddy_id)) {
+        if (dt_.Merge(seg_id, buddy_id).merged) {
           merged_any = true;
         }
       }
@@ -717,7 +717,7 @@ TEST_F(DashTest, MergeDirectoryConsistency) {
       size_t combined = keep->SlowSize() + buddy->SlowSize();
 
       if (combined <= static_cast<size_t>(0.25 * keep->capacity())) {
-        bool merged = dt_.Merge(keep_id, buddy_id);
+        bool merged = dt_.Merge(keep_id, buddy_id).merged;
         ASSERT_TRUE(merged);
 
         // After merge, all dir entries that covered buddy must now point to keep
@@ -760,7 +760,7 @@ TEST_F(DashTest, MergeWithAliasedEntries) {
     size_t threshold = static_cast<size_t>(0.25 * seg0->capacity());
 
     if (combined <= threshold) {
-      bool ok = dt_.Merge(0, 1);
+      bool ok = dt_.Merge(0, 1).merged;
       ASSERT_TRUE(ok);
 
       // Now segment at entries 0 and 1 is the same depth-2 object
@@ -790,7 +790,7 @@ TEST_F(DashTest, MergeWithAliasedEntries) {
       if (seg2 != seg3) {
         size_t combined23 = seg2->SlowSize() + seg3->SlowSize();
         if (combined23 <= static_cast<size_t>(0.25 * seg2->capacity())) {
-          bool ok23 = dt_.Merge(2, 3);
+          bool ok23 = dt_.Merge(2, 3).merged;
           if (ok23) {
             // Now both {0,1} and {2,3} are depth-2 segments — they ARE buddies
             // FindBuddyId(0): bit_pos=1, buddy_idx=0^2=2, GetSegment(2)->local_depth()=2 == 2 -> 2
@@ -886,8 +886,8 @@ TEST_F(DashTest, FindBuddyIdCanonicalForStripe) {
   }
 
   ASSERT_NE(keep_a, UINT_MAX);
-  ASSERT_TRUE(dt_.Merge(keep_a, bud_a));
-  ASSERT_TRUE(dt_.Merge(keep_b, bud_b));
+  ASSERT_TRUE(dt_.Merge(keep_a, bud_a).merged);
+  ASSERT_TRUE(dt_.Merge(keep_b, bud_b).merged);
 
   // After both merges:
   //   - segment at keep_a has local_depth = d-1, aliased by stripe {keep_a, keep_a+1}
@@ -968,7 +968,7 @@ TEST_F(DashTest, NextSegCanonicalBehavior) {
     auto* buddy = dt_.GetSegment(next);
     if (buddy->local_depth() == seg->local_depth() &&
         seg->SlowSize() + buddy->SlowSize() <= static_cast<size_t>(0.25 * seg->capacity())) {
-      bool ok = dt_.Merge(static_cast<unsigned>(i), static_cast<unsigned>(next));
+      bool ok = dt_.Merge(static_cast<unsigned>(i), static_cast<unsigned>(next)).merged;
       if (ok)
         break;
     }
