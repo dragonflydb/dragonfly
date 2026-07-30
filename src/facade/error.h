@@ -58,5 +58,6 @@ inline constexpr char kNoAuthErrType[] = "no_auth";
 
 inline constexpr char kBloomFilterLoadInProgress[] = "bloom filter load in progress";
 inline constexpr char kCuckooFilterFull[] = "Filter is full";
+inline constexpr char kCuckooFilterMaxExpansions[] = "Maximum expansions reached";
 
 }  // namespace facade

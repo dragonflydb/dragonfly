@@ -53,12 +53,20 @@ auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResul
 
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag) << config_name;
+  string old_value = flag->CurrentValue();
   if (string error; !flag->ParseFrom(value, &error)) {
     LOG(WARNING) << error;
     return SetResult::INVALID;
   }
 
   bool success = !cb || cb(*flag);
+  if (!success) {
+    // rollback to the old value in case cb validation did not work. Otherwise, we end up with
+    // a value that should not be supported by the flag.
+    string error;
+    if (!flag->ParseFrom(old_value, &error))
+      LOG(ERROR) << "Failed to restore " << config_name << " to its previous value: " << error;
+  }
   return success ? SetResult::OK : SetResult::INVALID;
 }
 

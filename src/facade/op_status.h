@@ -39,6 +39,7 @@ enum class OpStatus : uint16_t {
   NAN_OR_INF_DURING_INCR,
   BLOOM_FILTER_LOAD_IN_PROGRESS,
   CUCKOO_FILTER_FULL,
+  CUCKOO_FILTER_MAX_EXPANSIONS,
 };
 
 class OpResultBase {
