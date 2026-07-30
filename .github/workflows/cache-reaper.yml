@@ -38,7 +38,7 @@ jobs:
           # - Group usage into ccache, third-party dependencies cache, and other caches.
           # - ccache-action automatically prefixes each persisted ccache key with "ccache-".
           print_repo_cache_usage() {
-            gh cache list --limit 1000 --json sizeInBytes,key --jq '
+            gh cache list --limit 10000 --json sizeInBytes,key --jq '
               def cat:
                 if (.key | test("^ccache-dfly-ccache-")) then "ccache"
                 elif (.key | test("^dfly-deps-")) then "3rd-party deps"
@@ -54,28 +54,43 @@ jobs:
           echo "== Before cleanup =="
           print_repo_cache_usage || true
 
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then # pr closed - > delete only caches for this PR
             # - Delete every cache scoped to the closed pull request's ref.
             # - The count is informational - failure to read it must not prevent cleanup.
-            before_count=$(gh cache list --ref "$PR_REF" --limit 1000 --json id --jq 'length' || echo '?')
+            before_count=$(gh cache list --ref "$PR_REF" --limit 10000 --json id --jq 'length' || echo '?')
             echo "PR closed - deleting all caches for $PR_REF ($before_count found)"
             if ! gh cache delete --all --ref "$PR_REF" --succeed-on-no-caches; then
               echo "::warning::Some caches for $PR_REF may not have been deleted; 7-day/LRU will reclaim leftovers."
             fi
             echo "Deleted $before_count cache(s) for $PR_REF"
-          else
-            # - Keep the newest cache for each ref and configuration; delete older duplicates.
+          else # scheduled cleanup
+            # - Keep the newest cache for each ref and supported dependency-cache configuration, delete older duplicates.
             # - ccache keys add a timestamp on every save, so remove that timestamp before grouping.
             # - Dependency keys end in a content hash; remove it to group obsolete definitions by configuration.
-            echo "Scheduled dedup - keeping newest per (ref, config), deleting older copies"
-            stale=$(gh cache list --limit 1000 --json id,key,ref,createdAt \
-              --jq '[ .[] | select(.key|test("^ccache-dfly-ccache-|^dfly-deps-")) ]
-                    | group_by(.ref + "|" + (.key | sub("-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$|-[0-9a-f]{64}$";"")))
-                    | map(sort_by(.createdAt) | .[:-1]) | flatten
-                    | .[] | "\(.id)\t\(.ref)\t\(.key)"')
+            # - This relies on ccache keys ending in timestamps and deps keys ending in a 64-hex content hash. Update
+            #   the grouping expression if either key shape changes, so their configurations cannot collide.
+            # - Key shapes: ccache-dfly-ccache-<config>-<timestamp> and dfly-deps-<config>-<dependency-files-sha256>.
+            # - Inspect live keys with: `gh cache list -R dragonflydb/dragonfly --limit 100`
+            stale=$(gh cache list --limit 10000 --json id,key,ref,createdAt --jq '
+                # Keep only ccache and dependency-cache entries created by this workflow.
+                [ .[] | select(
+                    .key | test("^ccache-dfly-ccache-|^dfly-deps-")
+                  ) ]
+                # Group entries that share a ref and configuration, ignoring each key's changing suffix.
+                | group_by(
+                    .ref + "|"
+                    + (.key | sub("-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$|-[0-9a-f]{64}$"; ""))
+                  )
+                # Sort each group from oldest to newest and remove the newest entry.
+                | map(sort_by(.createdAt) | .[:-1])
+                # Turn the remaining duplicate groups into individual cache entries.
+                | flatten[]
+                # Print fields for the shell deletion loop.
+                | "\(.id)\t\(.ref)\t\(.key)"')
             if [ -z "$stale" ]; then
               echo "No stale duplicate caches."
             else
+              echo "Scheduled cleanup - keeping newest cache per (ref, config)"
               deleted=0
               while IFS=$'\t' read -r id ref key; do
                 [ -n "$id" ] || continue
