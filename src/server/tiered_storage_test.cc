@@ -649,6 +649,116 @@ TEST_F(OffloadedOverwriteTest, BloomLoadChunk) {
   ExpectExtentReleased();
 }
 
+// Values below kMinOccupancySize share a 4KB page through SmallBins. The page records the hash of
+// the key each value was stashed under, and defragmentation locates the owner by that hash, so a
+// value must not change keys while it sits in a bin.
+class SmallBinKeyMoveTest : public PureDiskTSTest {
+ protected:
+  static constexpr int kNum = 40;
+
+  static string Value(int i) {
+    return absl::StrCat(absl::StrFormat("%03d", i), BuildString(197, 'a' + i % 26));
+  }
+
+  // Fills a whole bin page and returns once it has been stashed.
+  void FillBin() {
+    for (int i = 0; i < kNum; i++)
+      Run({"SET", absl::StrCat("k", i), Value(i)});
+    ExpectConditionWithinTimeout(
+        [&] { return GetMetrics().tiered_stats.small_bins_entries_cnt >= 20; });
+  }
+
+  // Drops everything but `keep`, which forces the bin below half a page and triggers defrag.
+  void DropAllBut(string_view keep) {
+    for (int i = 0; i < kNum; i++) {
+      string key = absl::StrCat("k", i);
+      if (key != keep)
+        Run({"DEL", key});
+    }
+    ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
+  }
+
+  // Nothing may still claim to be external once the last disk extent is gone.
+  void ExpectNoDanglingExternal() {
+    auto metrics = GetMetrics();
+    if (metrics.tiered_stats.allocated_bytes == 0) {
+      EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u)
+          << "entry still external while no disk space is allocated";
+    }
+  }
+
+  // Refills the bins so the freed page gets handed out again and overwritten.
+  void ReusePage() {
+    for (int i = kNum; i < 3 * kNum; i++)
+      Run({"SET", absl::StrCat("n", i), Value(i)});
+    ExpectConditionWithinTimeout(
+        [&] { return GetMetrics().tiered_stats.small_bins_entries_cnt >= 20; });
+  }
+};
+
+TEST_F(SmallBinKeyMoveTest, RenameKeepsValueReadable) {
+  FillBin();
+
+  EXPECT_EQ(Run({"RENAME", "k5", "moved"}), "OK");
+
+  DropAllBut("k5");  // k5 no longer exists; drops every other key in the page
+  ExpectNoDanglingExternal();
+
+  ReusePage();
+  EXPECT_EQ(Run({"GET", "moved"}), Value(5));
+}
+
+// The destination shares the page with the source, so releasing its extent (which RENAME does)
+// makes the page fragmented and would otherwise queue it for defragmentation right away.
+TEST_F(SmallBinKeyMoveTest, RenameOverNeighbourInSamePage) {
+  FillBin();
+
+  EXPECT_EQ(Run({"RENAME", "k5", "k6"}), "OK");
+
+  for (int i = 10; i < 24; i++)  // fragment the page without emptying it
+    Run({"DEL", absl::StrCat("k", i)});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
+  ExpectNoDanglingExternal();
+
+  ReusePage();
+  EXPECT_EQ(Run({"GET", "k6"}), Value(5));
+}
+
+// Hashes are stashed as listpacks, so they take the other decoding path out of a bin.
+TEST_F(SmallBinKeyMoveTest, RenameOffloadedHashKeepsFields) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+
+  // Fields must stay below the listpack limit: a StringMap hash is never stashed.
+  auto field = [](int i) { return absl::StrCat("v", i, BuildString(40, 'a' + i % 26)); };
+
+  for (int i = 0; i < 60; i++)
+    Run({"HSET", absl::StrCat("h", i), "f1", field(i), "f2", absl::StrCat("second-", i)});
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.small_bins_entries_cnt >= 20; });
+
+  EXPECT_EQ(Run({"RENAME", "h5", "moved"}), "OK");
+
+  EXPECT_EQ(Run({"HGET", "moved", "f1"}), field(5));
+  EXPECT_EQ(Run({"HGET", "moved", "f2"}), "second-5");
+  EXPECT_EQ(Run({"TYPE", "moved"}), "hash");
+}
+
+TEST_F(SmallBinKeyMoveTest, MoveToAnotherDbKeepsValueReadable) {
+  FillBin();
+
+  EXPECT_THAT(Run({"MOVE", "k5", "1"}), IntArg(1));
+
+  DropAllBut("k5");
+  ExpectNoDanglingExternal();
+
+  ReusePage();
+  Run({"SELECT", "1"});
+  EXPECT_EQ(Run({"GET", "k5"}), Value(5));
+  Run({"SELECT", "0"});
+}
+
 // Test FLUSHALL while reading entries
 TEST_F(PureDiskTSTest, FlushAll) {
   const int kNum = 500;

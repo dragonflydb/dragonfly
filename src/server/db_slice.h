@@ -309,6 +309,11 @@ class DbSlice {
   // and reports no heap allocation, so overwriting it drops the only reference to its disk extent.
   void ReleaseOffloadedValue(DbIndex db_ind, PrimeValue* pv);
 
+  // Must be called before moving a value to another key or db, as RENAME and MOVE do. An offloaded
+  // value that shares a disk page is recovered by the key hash stored in that page, so it is read
+  // back into memory. Returns false if reading it failed.
+  [[nodiscard]] bool UnstashValueForKeyChange(DbIndex db_ind, std::string_view key, PrimeValue* pv);
+
   // Update entry expiration. Return expiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
   facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it,

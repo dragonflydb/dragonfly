@@ -929,6 +929,11 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   if (!IsValid(from_res.it))
     return OpStatus::KEY_NOTFOUND;
 
+  // A value sharing a disk page is recovered during defragmentation by the key hash serialized
+  // into that page, so it must come back to memory before it is stored under another db.
+  if (!db_slice.UnstashValueForKeyChange(op_args.db_cntx.db_index, key, &from_res.it->second))
+    return OpStatus::IO_ERROR;
+
   // Ensure target database exists.
   db_slice.ActivateDb(target_db);
 
@@ -978,6 +983,12 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
 
   if (from_key == to_key)
     return destination_should_not_exist ? OpStatus::KEY_EXISTS : OpStatus::OK;
+
+  // A value sharing a disk page is recovered during defragmentation by the key hash serialized
+  // into that page, so it must come back to memory before it is stored under another key. Done
+  // before the destination is looked up, so only one updater is alive across the blocking read.
+  if (!db_slice.UnstashValueForKeyChange(op_args.db_cntx.db_index, from_key, &from_res.it->second))
+    return OpStatus::IO_ERROR;
 
   bool is_prior_list = false;
   auto to_res = db_slice.FindMutable(op_args.db_cntx, to_key);

@@ -1192,6 +1192,12 @@ void DbSlice::ReleaseOffloadedValue(DbIndex db_ind, PrimeValue* pv) {
     shard_owner()->tiered_storage()->Delete(db_ind, pv);
 }
 
+bool DbSlice::UnstashValueForKeyChange(DbIndex db_ind, string_view key, PrimeValue* pv) {
+  if (!pv->IsExternal())
+    return true;
+  return shard_owner()->tiered_storage()->UnstashForKeyChange(db_ind, key, pv);
+}
+
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
                                         const ExpireParams& params) {
   constexpr uint64_t kPersistValue = 0;

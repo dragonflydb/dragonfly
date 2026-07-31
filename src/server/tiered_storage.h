@@ -94,6 +94,12 @@ class TieredStorage : public TieredStorageBase {
   // Delete value, must be offloaded (external type)
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
 
+  // Call before an offloaded value is stored under a different key or db. A value sharing a disk
+  // page is recovered during defragmentation by the key hash serialized into that page, which the
+  // move invalidates, so it is read back into memory. Blocking. No-op for anything else.
+  // Returns false if the value could not be read.
+  bool UnstashForKeyChange(DbIndex dbid, std::string_view key, PrimeValue* pv);
+
   // Returns true if there is a pending modification for the given segment.
   bool HasModificationPending(tiering::DiskSegment segment) const;
 
@@ -272,6 +278,10 @@ class TieredStorage : public TieredStorageBase {
   }
 
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref) {
+  }
+
+  bool UnstashForKeyChange(DbIndex dbid, std::string_view key, PrimeValue* pv) {
+    return true;
   }
 
   bool HasModificationPending(tiering::DiskSegment segment) const {

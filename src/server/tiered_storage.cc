@@ -567,6 +567,66 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
   op_manager_->DeleteOffloaded(dbid, segment);
 }
 
+bool TieredStorage::UnstashForKeyChange(DbIndex dbid, string_view key, PrimeValue* pv) {
+  // A cool value keeps its copy in memory, and a value owning whole pages is recovered by its
+  // segment alone. Only bin entries are looked up by the key hash serialized into the page.
+  if (!pv->IsExternal() || pv->IsCool())
+    return true;
+
+  tiering::DiskSegment segment = pv->GetExternalSlice();
+  if (OccupiesWholePages(segment.length))
+    return true;
+
+  const CompactObj::ExternalRep rep = pv->GetExternalRep();
+  TResult<string> fut;
+  auto resolve = [fut](io::Result<string_view> res) mutable {
+    fut.Resolve(res.transform([](string_view sv) { return string{sv}; }));
+  };
+
+  // Decode with the representation the value was stashed as: the read may also trigger an upload,
+  // and a mismatched decoder would restore the value as the wrong type.
+  switch (rep) {
+    case CompactObj::ExternalRep::STRING:
+      // GetView() returns the decoded value, so it is materialized below as non-raw.
+      Read(KeyRef{dbid, key}, segment, tiering::StringDecoder{*pv},
+           [resolve](io::Result<tiering::StringDecoder*> res) mutable {
+             resolve(res.transform([](tiering::StringDecoder* d) { return d->GetView(); }));
+           });
+      break;
+    case CompactObj::ExternalRep::SERIALIZED_MAP:
+      Read(KeyRef{dbid, key}, segment, tiering::ListpackMapDecoder{},
+           [resolve](io::Result<tiering::ListpackMapDecoder*> res) mutable {
+             resolve(res.transform([](tiering::ListpackMapDecoder* d) {
+               detail::ListpackWrap lw = d->Get();
+               return string_view{reinterpret_cast<const char*>(lw.GetPointer()), lw.UsedBytes()};
+             }));
+           });
+      break;
+    case CompactObj::ExternalRep::LIST_NODE:
+      LOG(DFATAL) << "List nodes are not addressed by a key";
+      return true;
+  }
+
+  io::Result<string> res = fut.Get();
+  if (!res)
+    return false;
+
+  // The read itself uploads the value on a second touch, in which case nothing is left on disk.
+  // Otherwise restore it here and free the page entry; the heap delta is picked up by the
+  // caller's AutoUpdater, so no memory statistics are touched.
+  if (pv->IsExternal()) {
+    if (rep == CompactObj::ExternalRep::STRING) {
+      pv->Materialize(*res, false);
+    } else {
+      tiering::ListpackMapDecoder decoder{};
+      decoder.Initialize(*res);
+      decoder.Upload(pv);
+    }
+    op_manager_->DeleteOffloaded(dbid, segment);
+  }
+  return true;
+}
+
 void TieredStorage::CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref) {
   DCHECK(fragment_ref.HasStashPending());
   DCHECK(std::holds_alternative<KeyRef>(id) || std::holds_alternative<tiering::ListNodeId>(id));
