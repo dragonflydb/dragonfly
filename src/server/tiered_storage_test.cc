@@ -1669,4 +1669,84 @@ TEST_F(PureDiskTSMTTest, SquashedVerifyFailConcurrent) {
   EXPECT_EQ(Run({"PING"}), "PONG");
 }
 
+#ifdef WITH_SEARCH
+
+// A search index reads fields straight out of the value, so a hash it covers must stay resident.
+class IndexedHashTieringTest : public PureDiskTSTest {
+ protected:
+  // A hash serializes to about 64 bytes, and a bin is only stashed once it fills a 4KB page.
+  static constexpr int kNum = 150;
+
+  // Fields must stay below the listpack limit, otherwise the hash is never stashed at all.
+  static string Field(int i) {
+    return absl::StrCat("v", i, BuildString(40, 'a' + i % 26));
+  }
+
+  void EnableHashOffload() {
+    SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+    UpdateFromFlags();
+  }
+
+  void FillHashes(string_view prefix) {
+    for (int i = 0; i < kNum; i++)
+      Run({"HSET", absl::StrCat(prefix, i), "f1", Field(i), "f2", absl::StrCat("s", i)});
+  }
+
+  void CreateIndex() {
+    EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "h", "SCHEMA", "f1", "TEXT"}),
+              "OK");
+  }
+
+  // FT.SEARCH replies with an array whose first element is the total match count.
+  int64_t Indexed() {
+    auto resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "0", "0"});
+    if (resp.type != RespExpr::ARRAY)
+      return -1;
+    auto vec = resp.GetVec();
+    if (vec.empty())
+      return -1;
+    return vec[0].GetInt().value_or(-1);
+  }
+};
+
+TEST_F(IndexedHashTieringTest, IndexedHashIsNotOffloaded) {
+  absl::FlagSaver saver;
+  EnableHashOffload();
+  CreateIndex();
+
+  FillHashes("h");
+  FillHashes("plain");  // no index covers this prefix, so these must still reach the disk
+
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries > 0; });
+
+  for (int i = 0; i < kNum; i++)
+    Run({"DEL", absl::StrCat("plain", i)});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u) << "an indexed hash was offloaded";
+  EXPECT_EQ(Indexed(), kNum);
+
+  // Both used to abort the server on an offloaded indexed hash.
+  EXPECT_THAT(Run({"DEL", "h5"}), IntArg(1));
+  EXPECT_EQ(Indexed(), kNum - 1);
+}
+
+TEST_F(IndexedHashTieringTest, IndexBuildPicksUpOffloadedHashes) {
+  absl::FlagSaver saver;
+  EnableHashOffload();
+
+  FillHashes("h");
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.small_bins_entries_cnt >= 20; });
+  ASSERT_GT(GetMetrics().db_stats[0].tiered_entries, 0u);
+
+  CreateIndex();  // used to abort while walking the offloaded hashes
+
+  ExpectConditionWithinTimeout([&] { return Indexed() == kNum; });
+  EXPECT_EQ(Indexed(), kNum);
+  EXPECT_EQ(Run({"HGET", "h5", "f1"}), Field(5));
+}
+
+#endif  // WITH_SEARCH
+
 }  // namespace dfly

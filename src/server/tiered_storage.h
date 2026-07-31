@@ -42,6 +42,7 @@ struct TieredStorageBase {
   };
 
   struct StashContext {
+    std::string_view key;
     uint64_t key_expire_ms = 0;  // 0 means no expiry
   };
 
@@ -93,6 +94,10 @@ class TieredStorage : public TieredStorageBase {
 
   // Delete value, must be offloaded (external type)
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
+
+  // Brings an offloaded value back into memory so that a search index can read its fields.
+  // Blocking. Returns false if the value could not be read.
+  bool MaterializeForIndexing(DbIndex dbid, std::string_view key, PrimeValue* pv);
 
   // Returns true if there is a pending modification for the given segment.
   bool HasModificationPending(tiering::DiskSegment segment) const;
@@ -272,6 +277,10 @@ class TieredStorage : public TieredStorageBase {
   }
 
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref) {
+  }
+
+  bool MaterializeForIndexing(DbIndex dbid, std::string_view key, PrimeValue* pv) {
+    return true;
   }
 
   bool HasModificationPending(tiering::DiskSegment segment) const {

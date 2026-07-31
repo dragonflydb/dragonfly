@@ -15,6 +15,10 @@ using namespace std;
 ShardDocIndices::ShardDocIndices() : local_mr_(nullptr) {
 }
 
+bool ShardDocIndices::IsIndexed(std::string_view key, unsigned obj_code) const {
+  return false;
+}
+
 void ShardDocIndices::AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv) {
 }
 void ShardDocIndices::RemoveDoc(std::string_view key, const DbContext& db_cnt, PrimeValue& pv,

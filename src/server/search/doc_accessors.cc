@@ -488,6 +488,14 @@ unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue&
     return make_unique<JsonAccessor>(pv.GetJson());
   }
 
+  // An offloaded value holds a disk reference where the object pointer would be, so reading it
+  // as a container would follow a bogus pointer. Values reachable here are kept in memory (see
+  // ShardDocIndices::IsIndexed), so this only guards against a path that missed that rule.
+  if (pv.IsExternal()) {
+    LOG(DFATAL) << "Cannot index an offloaded value";
+    return make_unique<ListPackAccessor>(nullptr);
+  }
+
   if (pv.Encoding() == kEncodingListPack) {
     auto ptr = reinterpret_cast<uint8_t*>(pv.RObjPtr());
     return make_unique<ListPackAccessor>(ptr);

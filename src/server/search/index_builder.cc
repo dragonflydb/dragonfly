@@ -10,6 +10,7 @@
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
 #include "server/search/global_hnsw_index.h"
+#include "server/tiered_storage.h"
 
 namespace dfly::search {
 
@@ -58,6 +59,13 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
     if (!index_->Matches(key, pv.ObjType()))
       return;
 
+    // Its fields live on disk, and reading them would suspend this fiber in the middle of a
+    // table traversal. Collect it and deal with it once the traversal is over.
+    if (pv.IsExternal()) {
+      offloaded_keys_.emplace_back(key);
+      return;
+    }
+
     // TODO: make it a parameter of SharDocIndex::AddDoc()
     if (is_restored_) {
       // Use existing DocIds from the restored key_index_ to keep them aligned with
@@ -91,6 +99,31 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
     if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
       util::ThisFiber::Yield();
   } while (cursor && state_.IsRunning());
+
+  IndexOffloaded(table, db_cntx);
+}
+
+void IndexBuilder::IndexOffloaded(dfly::DbTable* table, DbContext db_cntx) {
+  TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+
+  for (const std::string& key : offloaded_keys_) {
+    if (!state_.IsRunning())
+      break;
+
+    auto it = table->prime.Find(key);
+    if (!IsValid(it))  // deleted while we were traversing
+      continue;
+
+    // Reading suspends this fiber, so the entry has to be looked up again afterwards.
+    if (it->second.IsExternal() && !ts->MaterializeForIndexing(db_cntx.db_index, key, &it->second))
+      continue;
+
+    it = table->prime.Find(key);
+    if (IsValid(it) && !it->second.IsExternal())
+      index_->AddDoc(key, db_cntx, it->second);
+  }
+
+  offloaded_keys_.clear();
 }
 
 void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {

@@ -23,6 +23,7 @@
 #include "core/qlist.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/search/doc_index.h"
 #include "server/snapshot.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
@@ -567,6 +568,32 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
   op_manager_->DeleteOffloaded(dbid, segment);
 }
 
+bool TieredStorage::MaterializeForIndexing(DbIndex dbid, string_view key, PrimeValue* pv) {
+  // A cool value already has its copy in memory.
+  if (!pv->IsExternal() || pv->IsCool())
+    return true;
+
+  // Only hashes are both indexable and offloadable: JSON never reaches the disk.
+  if (pv->GetExternalRep() != CompactObj::ExternalRep::SERIALIZED_MAP) {
+    LOG(DFATAL) << "Unexpected representation for an indexed value";
+    return false;
+  }
+
+  // Taking a mutable copy marks the decoder as modified, which makes the read upload the value
+  // back into memory and release its disk space, with the memory statistics kept in sync.
+  TResult<bool> fut;
+  Read(
+      KeyRef{dbid, key}, pv->GetExternalSlice(), tiering::ListpackMapDecoder{},
+      [fut](io::Result<tiering::ListpackMapDecoder*> res) mutable {
+        if (res)
+          (*res)->GetMutable();
+        fut.Resolve(res.transform([](tiering::ListpackMapDecoder*) { return true; }));
+      },
+      false /* not read only */);
+
+  return fut.Get().has_value();
+}
+
 void TieredStorage::CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref) {
   DCHECK(fragment_ref.HasStashPending());
   DCHECK(std::holds_alternative<KeyRef>(id) || std::holds_alternative<tiering::ListNodeId>(id));
@@ -686,14 +713,16 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   string tmp;
   auto cb = [this, dbid, &tmp](PrimeIterator it) mutable {
     stats_.offloading_steps++;
-    auto blobs = ShouldStash(it->second, StashContext{.key_expire_ms = it->first.GetExpireTime()});
+    string_view key = it->first.GetSlice(&tmp);
+    auto blobs = ShouldStash(it->second,
+                             StashContext{.key = key, .key_expire_ms = it->first.GetExpireTime()});
     if (blobs) {
       if (it->second.WasTouched()) {
         it->second.SetTouched(false);
       } else {
         stats_.offloading_stashes++;
         it->second.SetStashPending(true);
-        StashPrimeValue(dbid, it->first.GetSlice(&tmp), *blobs, nullptr);
+        StashPrimeValue(dbid, key, *blobs, nullptr);
       }
     }
   };
@@ -787,6 +816,14 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
   if (fragment_ref.ObjType() == OBJ_LIST && !config_.experimental_list_offload)
     return nullopt;
 
+  // A value covered by a search index has to stay in memory: indexing reads its fields straight
+  // out of the value, and an offloaded one has none to give.
+  const CompactObjType obj_type = fragment_ref.ObjType();
+  if ((obj_type == OBJ_HASH || obj_type == OBJ_JSON) &&
+      op_manager_->db_slice_.shard_owner()->search_indices()->IsIndexed(stash_ctx.key, obj_type)) {
+    return nullopt;
+  }
+
   // Estimate value size
   StashDescriptor blobs{fragment_ref.GetSerializationDescr()};
   size_t estimated_size = blobs.EstimatedSerializedSize();
@@ -858,8 +895,8 @@ TieredCoolRecord* TieredStorage::PopCool() {
 
 void StashPrimeValue(DbIndex dbid, std::string_view key, const PrimeKey& pk, PrimeValue* pv,
                      TieredStorage* ts, BackPressureFuture* backpressure) {
-  if (auto blobs =
-          ts->ShouldStash(*pv, TieredStorage::StashContext{.key_expire_ms = pk.GetExpireTime()});
+  if (auto blobs = ts->ShouldStash(
+          *pv, TieredStorage::StashContext{.key = key, .key_expire_ms = pk.GetExpireTime()});
       blobs) {
     pv->SetStashPending(true);
     ts->StashPrimeValue(dbid, key, *blobs, backpressure);
