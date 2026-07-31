@@ -62,8 +62,8 @@ class OAHSet : public OAHTable<OAHEntry> {
 
  private:
   bool AddImpl(std::string_view content, uint32_t len, uint32_t ttl_sec) {
-    if (size_ >= entries_.size()) [[unlikely]] {
-      Reserve(BucketCount() * 2);
+    if (size_ >= entries_.size() * kOverloadFactor) [[unlikely]] {
+      GrowCapacity(BucketCount() * 2);
     }
     assert(Capacity() >= kDisplacementSize);
 
