@@ -253,18 +253,25 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
   if (add_res.is_new || zparams.override) {
+    // Allocated before the value is released below: freeing the disk extent is irreversible,
+    // while a bad_alloc here is reported to the client as OOM and must leave the value readable.
+    unsigned encoding = OBJ_ENCODING_LISTPACK;
+    void* robj_ptr = nullptr;
+    if (member_len > server.max_map_field_len) {
+      encoding = OBJ_ENCODING_SKIPLIST;
+      robj_ptr = CompactObj::AllocateMR<detail::SortedMap>();
+    } else {
+      robj_ptr = lpNew(0);
+    }
+
     // If we're overwriting an existing key (not a new one), we need to remove it from
     // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
     if (!add_res.is_new && zparams.override) {
       RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, pv, op_args.shard);
+      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, &pv);
     }
 
-    if (member_len > server.max_map_field_len) {
-      pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, CompactObj::AllocateMR<detail::SortedMap>());
-    } else {
-      unsigned char* lp = lpNew(0);
-      pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
-    }
+    pv.InitRobj(OBJ_ZSET, encoding, robj_ptr);
   } else {
     if (it->second.ObjType() != OBJ_ZSET)
       return OpStatus::WRONG_TYPE;

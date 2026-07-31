@@ -518,6 +518,137 @@ TEST_F(PureDiskTSTest, OffloadingStrategy) {
   }
 }
 
+// Overwriting an offloaded value in place must release its disk extent, otherwise it is
+// orphaned forever and the FLUSHALL invariant CHECK_EQ(tiered_entries, 0) aborts the process.
+TEST_F(PureDiskTSTest, RenameOverOffloadedDestination) {
+  const string src_value = BuildString(3000, 'a');
+  Run({"SET", "src", src_value});
+  Run({"SET", "dst", BuildString(3000, 'b')});
+
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 2; });
+  ASSERT_EQ(GetMetrics().tiered_stats.allocated_bytes, 2 * 4096u);
+
+  EXPECT_EQ(Run({"RENAME", "src", "dst"}), "OK");
+
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 1u);
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.allocated_bytes == 4096u; });
+  EXPECT_EQ(GetMetrics().tiered_stats.allocated_bytes, 4096u);
+
+  EXPECT_EQ(Run({"GET", "dst"}), src_value);
+
+  Run({"FLUSHALL"});
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u);
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.allocated_bytes == 0u; });
+}
+
+// Same defect reached through DbSlice::AddOrUpdate instead of RENAME.
+TEST_F(PureDiskTSTest, SortStoreOverOffloadedDestination) {
+  Run({"RPUSH", "src", "3", "1", "2"});  // small list, stays in memory
+  Run({"SET", "dst", BuildString(3000, 'b')});
+
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
+  ASSERT_EQ(GetMetrics().tiered_stats.allocated_bytes, 4096u);
+
+  EXPECT_THAT(Run({"SORT", "src", "STORE", "dst"}), IntArg(3));
+
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u);
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.allocated_bytes == 0u; });
+  EXPECT_THAT(Run({"LRANGE", "dst", "0", "-1"}), RespArray(ElementsAre("1", "2", "3")));
+
+  Run({"FLUSHALL"});
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u);
+}
+
+// The remaining in-place overwrite paths reach the value through DbSlice::AddOrFind and retype it,
+// which drops the external reference silently: CompactObj::HasAllocated() is false for an external
+// value, so Init*()/Reset() free nothing.
+class OffloadedOverwriteTest : public PureDiskTSTest {
+ protected:
+  // Offloads a 3000 byte string under `key` and returns once it occupies exactly one disk page.
+  void OffloadString(string_view key) {
+    Run({"SET", key, BuildString(3000, 'b')});
+    ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
+    ASSERT_EQ(GetMetrics().tiered_stats.allocated_bytes, 4096u);
+  }
+
+  // The extent must be gone, and FLUSHALL must not trip CHECK_EQ(tiered_entries, 0).
+  void ExpectExtentReleased() {
+    EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u);
+    ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.allocated_bytes == 0u; });
+    Run({"FLUSHALL"});
+  }
+};
+
+TEST_F(OffloadedOverwriteTest, SetInterStore) {
+  Run({"SADD", "s1", "a", "b", "c"});
+  OffloadString("dst");
+
+  EXPECT_THAT(Run({"SINTERSTORE", "dst", "s1"}), IntArg(3));
+
+  EXPECT_EQ(Run({"TYPE", "dst"}), "set");
+  EXPECT_THAT(Run({"SCARD", "dst"}), IntArg(3));
+  ExpectExtentReleased();
+}
+
+TEST_F(OffloadedOverwriteTest, ZUnionStore) {
+  Run({"ZADD", "z1", "1", "a", "2", "b"});
+  OffloadString("dst");
+
+  EXPECT_THAT(Run({"ZUNIONSTORE", "dst", "1", "z1"}), IntArg(2));
+
+  EXPECT_EQ(Run({"TYPE", "dst"}), "zset");
+  EXPECT_EQ(Run({"ZSCORE", "dst", "b"}), "2");
+  ExpectExtentReleased();
+}
+
+TEST_F(OffloadedOverwriteTest, ZRangeStore) {
+  Run({"ZADD", "z1", "1", "a", "2", "b"});
+  OffloadString("dst");
+
+  EXPECT_THAT(Run({"ZRANGESTORE", "dst", "z1", "0", "-1"}), IntArg(2));
+
+  EXPECT_EQ(Run({"TYPE", "dst"}), "zset");
+  ExpectExtentReleased();
+}
+
+TEST_F(OffloadedOverwriteTest, JsonSet) {
+  OffloadString("dst");
+
+  EXPECT_EQ(Run({"JSON.SET", "dst", "$", R"({"a":1})"}), "OK");
+
+  EXPECT_EQ(Run({"JSON.GET", "dst"}), R"({"a":1})");
+  ExpectExtentReleased();
+}
+
+TEST_F(OffloadedOverwriteTest, BloomLoadChunk) {
+  Run({"BF.RESERVE", "src", "0.01", "100"});
+  Run({"BF.ADD", "src", "hello"});
+
+  struct Chunk {
+    int64_t cursor;
+    string data;
+  };
+  vector<Chunk> chunks;
+  for (int64_t cursor = 0;;) {
+    auto resp = Run({"BF.SCANDUMP", "src", absl::StrCat(cursor)});
+    const auto& vec = resp.GetVec();
+    ASSERT_EQ(vec.size(), 2u);
+    cursor = *vec[0].GetInt();
+    if (cursor == 0)
+      break;
+    chunks.push_back({cursor, vec[1].GetString()});
+  }
+  ASSERT_FALSE(chunks.empty());
+
+  OffloadString("dst");
+
+  for (const auto& [cursor, data] : chunks)
+    EXPECT_EQ(Run({"BF.LOADCHUNK", "dst", absl::StrCat(cursor), data}), "OK");
+
+  EXPECT_THAT(Run({"BF.EXISTS", "dst", "hello"}), IntArg(1));
+  ExpectExtentReleased();
+}
+
 // Test FLUSHALL while reading entries
 TEST_F(PureDiskTSTest, FlushAll) {
   const int kNum = 500;

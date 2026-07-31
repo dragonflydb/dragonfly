@@ -560,7 +560,16 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
 
     // does not store the values, merely sets the encoding.
     // TODO: why not store the values as well?
-    InitSet(vals, &co);
+    if (co.IsExternal()) {
+      // Build the replacement first: freeing the disk extent is irreversible, while a bad_alloc
+      // inside InitSet is reported to the client as OOM and must leave the value readable.
+      PrimeValue replacement;
+      InitSet(vals, &replacement);
+      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, &co);
+      co = std::move(replacement);
+    } else {
+      InitSet(vals, &co);
+    }
   }
 
   uint32_t res = 0;
