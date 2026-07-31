@@ -520,10 +520,6 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 }
 
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
-  if (fields_.db_slice == nullptr) {
-    return;
-  }
-
   // The baseline is up to date even if a blocking tiered read uploaded the value mid-scope:
   // such reads are followed by ResyncBaseline(). Subtracting it keeps this call idempotent.
   AccountObjectMemory(fields_.key, fields_.orig_obj_type, -int64_t(fields_.orig_value_heap_size),
@@ -535,12 +531,8 @@ void DbSlice::AutoUpdater::ReduceHeapUsage() {
 }
 
 void DbSlice::AutoUpdater::ResyncBaseline() {
-  if (fields_.db_slice == nullptr) {
-    return;
-  }
-
   const PrimeValue& pv = fields_.it->second;
-  fields_.orig_value_heap_size = pv.ResidentMallocUsed();
+  fields_.orig_value_heap_size = pv.MallocUsed();
   fields_.orig_obj_type = pv.ObjType();
 }
 
@@ -558,7 +550,7 @@ void DbSlice::AutoUpdater::Run() {
 
   const PrimeValue& pv = fields_.it->second;
   CompactObjType current_type = pv.ObjType();
-  int64_t current_size = static_cast<int64_t>(pv.ResidentMallocUsed());
+  int64_t current_size = static_cast<int64_t>(pv.MallocUsed());
   DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
 
   if (current_type != fields_.orig_obj_type) {
@@ -587,7 +579,7 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .db_ind = db_ind,
               .it = it,
               .key = key,
-              .orig_value_heap_size = it->second.ResidentMallocUsed(),
+              .orig_value_heap_size = it->second.MallocUsed(),
               .orig_obj_type = it->second.ObjType()} {
   DCHECK(IsValid(it));
 }
@@ -710,7 +702,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   // Fetch back cool items
   if (pv.IsExternal() && pv.IsCool()) {
-    pv = owner_->tiered_storage()->Warmup(cntx.db_index, pv.GetCool());
+    pv = owner_->tiered_storage()->Warmup(cntx.db_index, key, pv.GetCool());
   }
 
   // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
@@ -1970,10 +1962,6 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
 
   PrimeValue& pv = del_it->second;
 
-  // The tiered delete blanks the external metadata, zeroing the reported size and type.
-  const CompactObjType val_type = pv.ObjType();
-  const ssize_t value_heap_size = pv.ResidentMallocUsed();
-
   if (pv.HasStashPending()) {
     string scratch;
     string_view key = del_it->first.GetSlice(&scratch);
@@ -1982,13 +1970,13 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
     shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
   }
 
-  ssize_t key_size_used = del_it->first.MallocUsed();
+  ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();
   if (del_it->first.IsInline()) {
     --stats.inline_keys;
   } else {
     AccountObjectMemory(del_it.key(), OBJ_KEY, -key_size_used, table);  // Key
   }
-  AccountObjectMemory(del_it.key(), val_type, -value_heap_size, table);  // Value
+  AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 
   if (async && MayDeleteAsynchronously(pv)) {
     auto schedule = [](auto* ds) {

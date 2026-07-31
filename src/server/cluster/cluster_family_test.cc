@@ -819,7 +819,7 @@ class ClusterTieredCoolingTest : public ClusterTieredTest {
   }
 };
 
-// A cool value keeps its RAM copy, so it still counts in memory_bytes until it is deleted.
+// Cool values are tracked by the cool cache only, so the slot ledger does not include them.
 TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnFlushSlots) {
   const string kKey = "cool-flush";
   const SlotId slot = KeySlot(kKey);
@@ -827,9 +827,8 @@ TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnFlushSlots) {
   EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
   WaitForOffload(1);
 
-  // The cool value's RAM copy stays in the slot's memory_bytes.
   ExpectSlotMirrorsDb(slot);
-  EXPECT_GT(RawSlotMemory(slot), 0);
+  EXPECT_EQ(RawSlotMemory(slot), 0);
 
   EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", absl::StrCat(slot), absl::StrCat(slot)}),
             "OK");
@@ -839,7 +838,7 @@ TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnFlushSlots) {
   EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
 }
 
-// Warming a cool value up on read keeps its RAM bytes accounted exactly once.
+// Warming a cool value up returns its bytes to the ledger, accounted exactly once.
 TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnWarmup) {
   const string kKey = "cool-warm";
   const SlotId slot = KeySlot(kKey);

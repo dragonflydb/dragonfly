@@ -1569,7 +1569,9 @@ TEST_F(TieredStorageTest, CoolExpiryReleasesObjectMemory) {
   ExpectConditionWithinTimeout(
       [this] { return GetMetrics().db_stats[0].tiered_entries == unsigned(kNum); });
 
-  EXPECT_GT(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+  // Cool values are tracked by the cool cache only; their bytes left the RAM ledger.
+  EXPECT_LT(GetMetrics().db_stats[0].obj_memory_usage, 1000u);
+  EXPECT_GT(GetMetrics().tiered_stats.cold_storage_bytes, 0u);
 
   AdvanceTime(30000);
   for (int i = 0; i < kNum; ++i)
