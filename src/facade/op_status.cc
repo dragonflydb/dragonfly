@@ -58,6 +58,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return kBloomFilterLoadInProgress;
     case OpStatus::CUCKOO_FILTER_FULL:
       return kCuckooFilterFull;
+    case OpStatus::CUCKOO_FILTER_LOAD_IN_PROGRESS:
+      return kCuckooFilterLoadInProgress;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       return "Internal error";
