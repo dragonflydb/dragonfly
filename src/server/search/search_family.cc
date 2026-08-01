@@ -45,6 +45,7 @@
 #include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
 #include "server/server_state.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
@@ -2642,11 +2643,17 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  // An index reads document fields straight out of the value, but tiering may offload hashes
-  // to disk, so the two cannot be combined. JSON values never reach the disk.
-  if (parsed_index->type == DocIndex::HASH &&
-      shard_set->Await(0, [] { return EngineShard::tlocal()->tiered_storage() != nullptr; })) {
-    return builder->SendError("Cannot create a HASH index when tiered storage is enabled"sv);
+  // An index reads document fields straight out of the value, but hash offloading moves them
+  // to disk, so the two cannot be combined. The condition is sticky because offloaded hashes
+  // may still exist after the offloading is turned off. JSON values never reach the disk.
+  if (parsed_index->type == DocIndex::HASH && shard_set->Await(0, [] {
+        auto* ts = EngineShard::tlocal()->tiered_storage();
+        return ts && ts->HashOffloadEverEnabled();
+      })) {
+    // Replicated commands get no reply, so make the divergence visible in the log.
+    LOG_IF(ERROR, cmd_cntx->server_conn_cntx()->is_replicating)
+        << "Rejected a replicated hash index " << idx_name << ": " << kHashIndexVsHashOffloadError;
+    return builder->SendError(std::string{kHashIndexVsHashOffloadError});
   }
 
   // Check if index already exists

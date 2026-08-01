@@ -1375,6 +1375,14 @@ vector<string> ShardDocIndices::GetIndexNames() const {
   return names;
 }
 
+bool ShardDocIndices::HasHashIndexes() const {
+  for (const auto& [name, index] : indices_) {
+    if (index->base_->type == DocIndex::HASH)
+      return true;
+  }
+  return false;
+}
+
 void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, PrimeValue* pv) {
   DCHECK(IsIndexedKeyType(*pv));
   for (auto& [index_name, index] : indices_) {

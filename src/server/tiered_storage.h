@@ -117,6 +117,12 @@ class TieredStorage : public TieredStorageBase {
   void UpdateFromFlags();  // Update internal values based on current flag values
   static std::vector<std::string> GetMutableFlagNames();  // Triggers UpdateFromFlags
 
+  // Whether hash offloading was ever enabled during this process lifetime. Offloaded hashes
+  // may still exist after the flag is turned off, so the answer never goes back to false.
+  bool HashOffloadEverEnabled() const {
+    return hash_offload_ever_;
+  }
+
   bool ShouldOffload() const;     // True if below tiered_offload_threshold
   float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashes
 
@@ -156,6 +162,7 @@ class TieredStorage : public TieredStorageBase {
   CoolQueue cool_queue_;
 
   bool is_closed_ = false;
+  bool hash_offload_ever_ = false;
 
   struct {
     size_t min_value_size;
@@ -304,6 +311,10 @@ class TieredStorage : public TieredStorageBase {
   }
 
   void UpdateFromFlags() {
+  }
+
+  bool HashOffloadEverEnabled() const {
+    return false;
   }
 
   static std::vector<std::string> GetMutableFlagNames() {

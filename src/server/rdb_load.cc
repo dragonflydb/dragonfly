@@ -3022,7 +3022,7 @@ error_code RdbLoader::HandleAux() {
   } else if (auxkey == "redis-bits") {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
-    LoadSearchIndexDefFromAux(std::move(auxval));
+    RETURN_ON_ERR(LoadSearchIndexDefFromAux(std::move(auxval)));
   } else if (auxkey == "search-synonyms") {
     LoadSearchSynonymsFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
@@ -3448,8 +3448,13 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
   }
 }
 
-void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
-  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition", true);
+error_code RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
+  if (!LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition", true)) {
+    LOG(ERROR) << "Cannot load the snapshot: it contains a hash index, "
+                  "but hash offloading is enabled on this instance";
+    return RdbError(errc::feature_not_supported);
+  }
+  return {};
 }
 
 error_code RdbLoader::HandleVectorIndex() {

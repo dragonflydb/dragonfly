@@ -259,6 +259,11 @@ struct DocIndex {
   DataType type{HASH};
 };
 
+// FT.CREATE refuses hash indexes when hash offloading is or was enabled; loading paths match
+// this exact error to fail fast instead of silently dropping the index.
+inline constexpr std::string_view kHashIndexVsHashOffloadError =
+    "Cannot create a HASH index: hash offloading is or was enabled";
+
 struct DocIndexInfo {
   DocIndex base_index;
   size_t num_docs = 0;
@@ -613,6 +618,9 @@ class ShardDocIndices {
   void BlockUntilConstructionEnd();
 
   std::vector<std::string> GetIndexNames() const;
+
+  // Returns true if any index over hash documents exists.
+  bool HasHashIndexes() const;
 
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
   void AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv);

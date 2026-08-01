@@ -426,7 +426,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   // Load index definition from RESP string describing it in FT.CREATE format,
   // issues an FT.CREATE call, but does not start indexing
-  void LoadSearchIndexDefFromAux(std::string&& value);
+  std::error_code LoadSearchIndexDefFromAux(std::string&& value);
 
   // Load synonyms from RESP string and issue FT.SYNUPDATE call
   void LoadSearchSynonymsFromAux(std::string&& value);

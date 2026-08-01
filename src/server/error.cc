@@ -34,6 +34,8 @@ string error_category::message(int ev) const {
   switch (ev) {
     case wrong_signature:
       return "Wrong signature while trying to load from rdb file";
+    case feature_not_supported:
+      return "The rdb file relies on a feature that is not supported by this server configuration";
     case out_of_memory:
       return "Out of memory, or used memory is too high";
     case incorrect_snapshot_id:

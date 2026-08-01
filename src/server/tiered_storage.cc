@@ -23,6 +23,7 @@
 #include "core/qlist.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/search/doc_index.h"
 #include "server/snapshot.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
@@ -641,6 +642,8 @@ void TieredStorage::UpdateFromFlags() {
       .min_ttl_to_offload_ms = absl::GetFlag(FLAGS_tiered_min_ttl_to_offload_ms),
   };
 
+  hash_offload_ever_ |= config_.experimental_hash_offload;
+
   LOG_IF(WARNING, config_.upload_threshold > config_.offload_threshold)
       << "tiered_upload_threshold should be less than tiered_offload_threshold to maximize cache "
          "and defragmentation effectiveness";
@@ -781,6 +784,12 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
 
   // For now, hash offloading is conditional
   if (fragment_ref.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
+    return nullopt;
+
+  // Indexing reads fields straight out of the value, so hashes stay resident while any hash
+  // index exists (it could only be created before hash offloading was enabled).
+  if (fragment_ref.ObjType() == OBJ_HASH &&
+      op_manager_->db_slice_.shard_owner()->search_indices()->HasHashIndexes())
     return nullopt;
 
   // For now, list node offloading is conditional

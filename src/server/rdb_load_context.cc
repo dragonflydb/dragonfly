@@ -173,7 +173,7 @@ PerShardMappings PreDistributeKeyMappings(
 
 }  // namespace
 
-void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_view command_name,
+bool LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_view command_name,
                               std::string_view error_context, bool add_NX) {
   facade::CapturingReplyBuilder crb;
 
@@ -200,7 +200,7 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
 
   if (res != facade::RedisParser::Result::OK) {
     LOG(ERROR) << "Bad " << error_context << ": " << printable_def;
-    return;
+    return true;
   }
 
   // Temporary migration fix for backwards compatibility with old snapshots where TAG fields were
@@ -235,7 +235,9 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
     LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
+    return err->first != kHashIndexVsHashOffloadError;
   }
+  return true;
 }
 
 void RdbLoadContext::AddPendingSynonymCommand(std::string cmd) {

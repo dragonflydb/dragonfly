@@ -28,6 +28,10 @@ void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
 void ShardDocIndices::BlockUntilConstructionEnd() {
 }
 
+bool ShardDocIndices::HasHashIndexes() const {
+  return false;
+}
+
 size_t ShardDocIndices::GetUsedMemory() const {
   return 0;
 }

@@ -18,7 +18,9 @@ namespace dfly {
 class Service;
 
 // Dispatches a search command (FT.CREATE / FT.SYNUPDATE) from a serialized AUX string.
-void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_view command_name,
+// Returns false only for errors the loading must not survive; ordinary bad definitions are
+// logged and skipped for backward compatibility.
+bool LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_view command_name,
                               std::string_view error_context, bool add_NX = false);
 
 // Pending index key-to-DocId mappings to apply after indices are created.

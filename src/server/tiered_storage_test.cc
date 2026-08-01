@@ -33,6 +33,7 @@ ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_list_support);
 ABSL_DECLARE_FLAG(unsigned, list_tiering_threshold);
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
+ABSL_DECLARE_FLAG(std::string, dbfilename);
 
 namespace dfly {
 
@@ -1671,18 +1672,78 @@ TEST_F(PureDiskTSMTTest, SquashedVerifyFailConcurrent) {
 
 #ifdef WITH_SEARCH
 
-// An index reads document fields straight out of the value, which tiering may offload to
-// disk, so hash indexes are not allowed on a server with tiered storage.
-TEST_F(TieredStorageTest, HashSearchIndexForbidden) {
+// An index reads document fields straight out of the value, which hash offloading moves to
+// disk, so hash indexes and hash offloading cannot be combined. Tiering alone does not
+// forbid hash indexes: with hash offloading disabled the values stay resident.
+TEST_F(TieredStorageTest, HashSearchIndexVsHashOffload) {
+  absl::FlagSaver saver;
+
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "h", "SCHEMA", "f1", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.DROPINDEX", "idx"}), "OK");
+
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+
   EXPECT_THAT(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "h", "SCHEMA", "f1", "TEXT"}),
-              ErrArg("tiered storage"));
-
+              ErrArg("hash offloading"));
   // HASH is also the default key type.
-  EXPECT_THAT(Run({"FT.CREATE", "idx2", "SCHEMA", "f1", "TEXT"}), ErrArg("tiered storage"));
-
+  EXPECT_THAT(Run({"FT.CREATE", "idx2", "SCHEMA", "f1", "TEXT"}), ErrArg("hash offloading"));
   // JSON values never reach the disk, so JSON indexes stay allowed.
   EXPECT_EQ(Run({"FT.CREATE", "jidx", "ON", "JSON", "PREFIX", "1", "j", "SCHEMA", "$.f1", "TEXT"}),
             "OK");
+
+  // Turning the offloading off does not lift the ban: offloaded hashes may still exist.
+  SetFlag(&FLAGS_tiered_experimental_hash_support, false);
+  UpdateFromFlags();
+  EXPECT_THAT(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "h", "SCHEMA", "f1", "TEXT"}),
+              ErrArg("hash offloading"));
+}
+
+// A hash index created before hash offloading was enabled keeps all hashes resident.
+TEST_F(TieredStorageTest, HashIndexBlocksHashOffload) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
+  UpdateFromFlags();
+
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "h", "SCHEMA", "f1", "TEXT"}),
+            "OK");
+
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+
+  // Fields must stay below the listpack limit so the hashes remain offload-eligible.
+  for (int i = 0; i < 150; i++)
+    Run({"HSET", absl::StrCat("h", i), "f1", absl::StrCat("v", i, BuildString(40, 'a'))});
+
+  // Strings do offload; waiting for them proves the offloader has cycled past the hashes.
+  for (int i = 0; i < 3; i++)
+    Run({"SET", absl::StrCat("s", i), BuildString(3000)});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_stashes >= 3; });
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 3u) << "an indexed hash was offloaded";
+
+  // Both used to abort the server on an offloaded indexed hash.
+  EXPECT_THAT(Run({"DEL", "h5"}), IntArg(1));
+  auto resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "0", "0"});
+  ASSERT_EQ(resp.type, RespExpr::ARRAY);
+  EXPECT_THAT(resp.GetVec()[0], IntArg(149));
+}
+
+// Loading a snapshot with a hash index must fail explicitly when hash offloading was
+// enabled, instead of silently dropping the index.
+TEST_F(TieredStorageTest, HashSearchIndexLoadFails) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_dbfilename, "tiered_hash_index_test");
+
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "h", "SCHEMA", "f1", "TEXT"}),
+            "OK");
+  Run({"HSET", "h1", "f1", "hello"});
+
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+
+  EXPECT_THAT(Run({"DEBUG", "RELOAD"}), ErrArg("not supported"));
 }
 
 #endif  // WITH_SEARCH
