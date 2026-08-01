@@ -291,6 +291,9 @@ void JournalStreamer::AsyncWrite(bool force_send) {
   total_sent_ += in_flight_bytes_;
   last_async_write_time_ = base::CycleClock::Now();
 
+  if (auto throttler = ServerState::tlocal()->GetEgressThrottler(); throttler)
+    throttler->get().Record(in_flight_bytes_, false);
+
   const auto v_size = cur_buf.buf.size();
   absl::InlinedVector<iovec, 8> v(v_size);
 
@@ -480,6 +483,9 @@ void RestoreStreamer::Run() {
       stats_.iter_skips++;
       continue;
     }
+
+    if (auto throttler = ServerState::tlocal()->GetEgressThrottler(); throttler)
+      throttler->get().Throttle();
 
     cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
       if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt

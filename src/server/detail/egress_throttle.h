@@ -35,6 +35,10 @@ class EgressThrottler {
   // Returns 0 if the loop may proceed at `now_us`, otherwise the us timestamp to sleep until.
   uint64_t WakeTime(uint64_t now_us) const;
 
+  bool IsEnabled() const {
+    return limit_ > 0;
+  }
+
  private:
   uint64_t limit_;             // bytes/second
   uint64_t total_tat_ = 0;     // theoretical arrival time (us) for all egress

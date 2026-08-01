@@ -68,6 +68,8 @@ void EgressThrottler::Record(uint64_t bytes, bool high_prio) {
 }
 
 void EgressThrottler::Throttle() const {
+  DCHECK_GT(limit_, 0u);
+
   while (true) {
     uint64_t now = NowUs();
     uint64_t wake = WakeTime(now);
