@@ -4,6 +4,8 @@
 
 #include "server/search/index_builder.h"
 
+#include <absl/container/flat_hash_set.h>
+
 #include <ranges>
 
 #include "server/db_slice.h"
@@ -13,6 +15,13 @@
 #include "server/tiered_storage.h"
 
 namespace dfly::search {
+
+namespace {
+
+// How many deferred offloaded keys are collected before the traversal pauses to index them.
+constexpr size_t kOffloadedBatchSize = 64;
+
+}  // namespace
 
 void IndexBuilder::Start(const OpArgs& op_args, bool is_restored,
                          std::function<void()> on_complete) {
@@ -59,6 +68,13 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
     if (!index_->Matches(key, pv.ObjType()))
       return;
 
+    // An indexed value has to stay resident, so cancel its pending stash: otherwise the
+    // small-bins flush would externalize this doc after it was indexed below.
+    if (pv.HasStashPending()) {
+      EngineShard::tlocal()->tiered_storage()->CancelStash(std::make_pair(db_cntx.db_index, key),
+                                                           &pv);
+    }
+
     // Its fields live on disk, and reading them would suspend this fiber in the middle of a
     // table traversal. Collect it and deal with it once the traversal is over.
     if (pv.IsExternal()) {
@@ -66,64 +82,98 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
       return;
     }
 
-    // TODO: make it a parameter of SharDocIndex::AddDoc()
-    if (is_restored_) {
-      // Use existing DocIds from the restored key_index_ to keep them aligned with
-      // GlobalDocIds stored in the serialized HNSW graph. Only add to regular indices
-      // (text/tag/numeric); vector indices are handled separately by VectorLoop.
-      if (auto doc_id = index_->key_index().Find(key); doc_id) {
-        auto accessor = GetAccessor(db_cntx, pv);
-        if (!index_->indices_->Add(*doc_id, *accessor)) {
-          LOG(WARNING) << "Failed to restore index entry for key: " << key
-                       << ", removing from key index";
-          index_->key_index_.Remove(*doc_id);
-        }
-      } else {
-        // New document not in the restored key_index_ (added by journal events during
-        // full sync before the index was created). Use AddNew to allocate a fresh DocId
-        // that won't collide with serialized HNSW node ids from freed slots.
-        auto accessor = GetAccessor(db_cntx, pv);
-        DocId id = index_->key_index_.AddNew(key);
-        if (!index_->indices_->Add(id, *accessor)) {
-          index_->key_index_.Remove(id);
-        }
-      }
-    } else {
-      index_->AddDoc(key, db_cntx, pv);
-    }
+    IndexEntry(key, db_cntx, pv);
   };
 
   PrimeTable::Cursor cursor;
   do {
     cursor = table->prime.Traverse(cursor, cb);
+    // Between traversal steps the cursor tolerates concurrent table modifications, so it is
+    // safe to suspend here: draining in batches bounds the memory held by deferred keys.
+    if (offloaded_keys_.size() >= kOffloadedBatchSize)
+      IndexOffloaded(table, db_cntx);
     if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
       util::ThisFiber::Yield();
   } while (cursor && state_.IsRunning());
 
   IndexOffloaded(table, db_cntx);
+  offloaded_keys_ = {};
 }
 
 void IndexBuilder::IndexOffloaded(dfly::DbTable* table, DbContext db_cntx) {
   TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
 
+  // Issue all reads before waiting on any: concurrent reads of one small-bins page share a
+  // single disk fetch, and reads of independent pages overlap in the IO queue.
+  std::vector<std::pair<std::string_view, util::fb2::Future<bool>>> pending;
+  pending.reserve(offloaded_keys_.size());
+  absl::flat_hash_set<std::string_view> seen;  // a cursor revisit may defer a key twice
   for (const std::string& key : offloaded_keys_) {
     if (!state_.IsRunning())
       break;
-
+    if (!seen.insert(key).second)
+      continue;
     auto it = table->prime.Find(key);
-    if (!IsValid(it))  // deleted while we were traversing
-      continue;
-
-    // Reading suspends this fiber, so the entry has to be looked up again afterwards.
-    if (it->second.IsExternal() && !ts->MaterializeForIndexing(db_cntx.db_index, key, &it->second))
-      continue;
-
-    it = table->prime.Find(key);
-    if (IsValid(it) && !it->second.IsExternal())
-      index_->AddDoc(key, db_cntx, it->second);
+    if (!IsValid(it) || !index_->Matches(key, it->second.ObjType()))
+      continue;  // deleted or recreated with another type while we were traversing
+    pending.emplace_back(key, ts->MaterializeForIndexing(db_cntx.db_index, key, &it->second));
   }
 
-  offloaded_keys_.clear();
+  for (auto& [key, fut] : pending) {
+    if (!state_.IsRunning())
+      break;
+
+    // Waiting suspends this fiber, so the entry has to be looked up again afterwards.
+    if (!fut.Get()) {
+      LOG(ERROR) << "Failed to read an offloaded value, not indexing key: " << key;
+      // A restored build already has this key mapped; drop the mapping so no DocId points
+      // at a document that is absent from the field indices.
+      if (is_restored_) {
+        if (auto doc_id = index_->key_index().Find(key); doc_id)
+          index_->key_index_.Remove(*doc_id);
+      }
+      continue;
+    }
+
+    auto it = table->prime.Find(key);
+    if (IsValid(it) && !it->second.IsExternal() && index_->Matches(key, it->second.ObjType()))
+      IndexEntry(key, db_cntx, it->second);
+
+    // Warming up cool values never suspends, so yield explicitly like the cursor loop does.
+    if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
+      util::ThisFiber::Yield();
+  }
+
+  offloaded_keys_.clear();  // keep the bounded capacity for the next batch
+}
+
+// TODO: make it a parameter of ShardDocIndex::AddDoc()
+void IndexBuilder::IndexEntry(std::string_view key, const DbContext& db_cntx,
+                              const PrimeValue& pv) {
+  if (!is_restored_) {
+    index_->AddDoc(key, db_cntx, pv);
+    return;
+  }
+
+  // Use existing DocIds from the restored key_index_ to keep them aligned with
+  // GlobalDocIds stored in the serialized HNSW graph. Only add to regular indices
+  // (text/tag/numeric); vector indices are handled separately by VectorLoop.
+  auto accessor = GetAccessor(db_cntx, pv);
+  if (auto doc_id = index_->key_index().Find(key); doc_id) {
+    if (!index_->indices_->Add(*doc_id, *accessor)) {
+      LOG(WARNING) << "Failed to restore index entry for key: " << key
+                   << ", removing from key index";
+      index_->key_index_.Remove(*doc_id);
+    }
+  } else {
+    // New document not in the restored key_index_ (added by journal events during
+    // full sync before the index was created). Use AddNew to allocate a fresh DocId
+    // that won't collide with serialized HNSW node ids from freed slots.
+    DocId id = index_->key_index_.AddNew(key);
+    if (!index_->indices_->Add(id, *accessor)) {
+      index_->key_index_.Remove(id);
+    }
+  }
 }
 
 void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {

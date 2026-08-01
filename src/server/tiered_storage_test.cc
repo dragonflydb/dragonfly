@@ -12,9 +12,15 @@
 #include "absl/flags/reflection.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "base/pmr/memory_resource.h"
 #include "facade/facade_test.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/namespaces.h"
 #include "server/test_utils.h"
+#ifdef WITH_SEARCH
+#include "server/search/doc_index.h"
+#endif
 #include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 
@@ -1672,8 +1678,15 @@ TEST_F(PureDiskTSMTTest, SquashedVerifyFailConcurrent) {
 #ifdef WITH_SEARCH
 
 // A search index reads fields straight out of the value, so a hash it covers must stay resident.
-class IndexedHashTieringTest : public PureDiskTSTest {
+class IndexedHashTieringTest : public TieredStorageTest {
  protected:
+  void SetUp() override {
+    fs.emplace();
+    SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
+    SetFlag(&FLAGS_tiered_experimental_cooling, cooling_);
+    TieredStorageTest::SetUp();
+  }
+
   // A hash serializes to about 64 bytes, and a bin is only stashed once it fills a 4KB page.
   static constexpr int kNum = 150;
 
@@ -1706,6 +1719,33 @@ class IndexedHashTieringTest : public PureDiskTSTest {
     if (vec.empty())
       return -1;
     return vec[0].GetInt().value_or(-1);
+  }
+
+  void WaitIndexBuilt() {
+    pp_->at(0)->Await([] { EngineShard::tlocal()->search_indices()->BlockUntilConstructionEnd(); });
+  }
+
+  // Rebuild as on snapshot load: the key mapping survives, the field indices start empty.
+  void RebuildAsRestored() {
+    pp_->at(0)->Await([] {
+      EngineShard* es = EngineShard::tlocal();
+      OpArgs op_args{es, nullptr,
+                     DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+      es->search_indices()->GetIndex("idx")->Rebuild(op_args, PMR_NS::get_default_resource(), true);
+    });
+  }
+
+  bool cooling_ = false;
+
+ private:
+  optional<absl::FlagSaver> fs;
+};
+
+// Same scenario, but stashed values stay cool: offloaded with a copy kept in memory.
+class CoolIndexedHashTieringTest : public IndexedHashTieringTest {
+ protected:
+  CoolIndexedHashTieringTest() {
+    cooling_ = true;
   }
 };
 
@@ -1745,6 +1785,94 @@ TEST_F(IndexedHashTieringTest, IndexBuildPicksUpOffloadedHashes) {
   ExpectConditionWithinTimeout([&] { return Indexed() == kNum; });
   EXPECT_EQ(Indexed(), kNum);
   EXPECT_EQ(Run({"HGET", "h5", "f1"}), Field(5));
+}
+
+// A hash parked in a filling small-bins page carries a pending stash. The index build must
+// cancel it, otherwise the later bin flush externalizes an already-indexed doc.
+TEST_F(IndexedHashTieringTest, IndexBuildCancelsPendingStash) {
+  absl::FlagSaver saver;
+  EnableHashOffload();
+
+  FillHashes("h");  // most flush to disk, the tail parks in a filling bin with a pending stash
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.small_bins_entries_cnt >= 20; });
+
+  CreateIndex();
+  WaitIndexBuilt();
+  ASSERT_EQ(Indexed(), kNum);
+
+  FillHashes("plain");  // uncovered hashes fill the shared bin and force it to flush
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+
+  // Used to abort: the flushed bin externalized indexed docs, and DEL read their fields.
+  for (int i = 0; i < kNum; i++)
+    Run({"DEL", absl::StrCat("h", i)});
+  EXPECT_EQ(Indexed(), 0);
+}
+
+// Search only indexes database 0, so an index must not block offloading in other databases.
+TEST_F(IndexedHashTieringTest, IndexDoesNotBlockOffloadInOtherDbs) {
+  absl::FlagSaver saver;
+  EnableHashOffload();
+  CreateIndex();
+
+  Run({"SELECT", "1"});
+  FillHashes("h");  // covered names, but in database 1
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[1].tiered_entries > 0; });
+
+  Run({"SELECT", "0"});
+  EXPECT_EQ(Indexed(), 0);
+}
+
+// Cooling is the default mode, and a cool value is still external: the index build
+// used to skip such values silently instead of warming them up.
+TEST_F(CoolIndexedHashTieringTest, IndexBuildPicksUpCoolHashes) {
+  absl::FlagSaver saver;
+  EnableHashOffload();
+
+  FillHashes("h");
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.small_bins_entries_cnt >= 20; });
+  ASSERT_GT(GetMetrics().tiered_stats.cold_storage_bytes, 0u);
+
+  CreateIndex();
+  WaitIndexBuilt();
+
+  EXPECT_EQ(Indexed(), kNum);
+  EXPECT_EQ(Run({"HGET", "h5", "f1"}), Field(5));
+}
+
+// When an index is restored from a snapshot, deferred offloaded docs must reuse the restored
+// key mapping: AddDoc refuses keys that are already mapped. Offloaded covered hashes are
+// possible on load because multi-file snapshots may register the index only after the data
+// was stashed, so simulate that by stashing past the ShouldStash gate.
+TEST_F(IndexedHashTieringTest, RestoredIndexBuildPicksUpOffloadedHashes) {
+  absl::FlagSaver saver;
+  EnableHashOffload();
+  CreateIndex();
+  FillHashes("h");
+  ASSERT_EQ(Indexed(), kNum);
+
+  pp_->at(0)->Await([&] {
+    EngineShard* es = EngineShard::tlocal();
+    DbTable* table = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id()).GetDBTable(0);
+    for (int i = 0; i < kNum; i++) {
+      string key = absl::StrCat("h", i);
+      auto it = table->prime.Find(key);
+      CHECK(IsValid(it));
+      TieredStorage::StashDescriptor blobs{
+          tiering::FragmentRef{it->second}.GetSerializationDescr()};
+      it->second.SetStashPending(true);
+      es->tiered_storage()->StashPrimeValue(0, key, blobs, nullptr);
+    }
+  });
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+  ASSERT_GT(GetMetrics().db_stats[0].tiered_entries, 0u);
+
+  RebuildAsRestored();
+  WaitIndexBuilt();
+
+  EXPECT_EQ(Indexed(), kNum);
 }
 
 #endif  // WITH_SEARCH

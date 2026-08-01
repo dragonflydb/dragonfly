@@ -479,6 +479,20 @@ void JsonAccessor::RemoveFieldFromCache(string_view field) {
 thread_local absl::flat_hash_map<std::string, std::unique_ptr<JsonAccessor::JsonPathContainer>>
     JsonAccessor::path_cache_;
 
+namespace {
+
+// Fallback for a value whose fields cannot be read: reports no fields at all.
+struct EmptyAccessor : public BaseAccessor {
+  std::optional<StringList> GetStrings(std::string_view /*active_field*/) const override {
+    return search::EmptyAccessResult<StringList>();
+  }
+  SearchDocData Serialize(const search::Schema& /*schema*/) const override {
+    return {};
+  }
+};
+
+}  // namespace
+
 unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv,
                                      std::string_view cleanup_key) {
   DCHECK(pv.ObjType() == OBJ_HASH || pv.ObjType() == OBJ_JSON);
@@ -493,7 +507,7 @@ unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue&
   // ShardDocIndices::IsIndexed), so this only guards against a path that missed that rule.
   if (pv.IsExternal()) {
     LOG(DFATAL) << "Cannot index an offloaded value";
-    return make_unique<ListPackAccessor>(nullptr);
+    return make_unique<EmptyAccessor>();
   }
 
   if (pv.Encoding() == kEncodingListPack) {

@@ -327,6 +327,7 @@ class HnswShardIndex {
 class ShardDocIndex {
   friend class ShardDocIndices;
   friend struct search::IndexBuilder;
+  friend class IndexedHashTieringTest;
 
   using DocId = search::DocId;
   using GlobalDocId = search::GlobalDocId;
