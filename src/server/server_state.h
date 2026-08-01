@@ -254,7 +254,9 @@ class ServerState {  // public struct - to allow initialization.
   }
 
   // If egress throttling is enabled, returns the per-thread throttler with updated limits
-  std::optional<std::reference_wrapper<detail::EgressThrottler>> GetEgressThrottler();
+  detail::EgressThrottler& GetEgressThrottler() {
+    return egress_throttler_;
+  }
 
   bool ShouldLogSlowCmd(unsigned latency_usec) const;
 

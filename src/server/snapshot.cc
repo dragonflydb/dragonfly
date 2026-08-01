@@ -203,8 +203,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
       // Suspend the traversal loop if we are exceeding the egress budget, letting
       // high priority writes drain first. Guarantees the loop its reserved share.
-      if (auto throttler = ServerState::tlocal()->GetEgressThrottler(); throttler)
-        throttler->get().Throttle();
+      ServerState::tlocal()->GetEgressThrottler().Throttle();
     } while (snapshot_cursor_);
 
     // Wait for all the outstanding delayed entries and serialize them as well.
@@ -289,8 +288,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
 
   // Track egress just before the socket write. Attribute it to a high priority (out of order)
   // write when we don't run on the snapshot fiber.
-  if (auto throttler = ServerState::tlocal()->GetEgressThrottler(); throttler)
-    throttler->get().Record(serialized, !snapshot_fb_.IsActive());
+  ServerState::tlocal()->GetEgressThrottler().Record(serialized, !snapshot_fb_.IsActive());
 
   // Blocking point.
   consumer_->ConsumeData(std::move(data), base_cntx_);

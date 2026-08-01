@@ -64,11 +64,15 @@ uint64_t EgressThrottler::WakeTime(uint64_t now_us) const {
 }
 
 void EgressThrottler::Record(uint64_t bytes, bool high_prio) {
+  if (!limit_)
+    return;
+
   RecordAt(bytes, high_prio, NowUs());
 }
 
 void EgressThrottler::Throttle() const {
-  DCHECK_GT(limit_, 0u);
+  if (!limit_)
+    return;
 
   while (true) {
     uint64_t now = NowUs();

@@ -17,9 +17,17 @@ constexpr uint64_t kT0 = 1'700'000'000'000'000ULL;
 constexpr uint64_t kTau = 50'000;              // matches kBurstToleranceUs (50ms) in the .cc
 constexpr uint64_t kMicrosPerSec = 1'000'000;  // matches the .cc
 
+struct OpenEgressThrottler : EgressThrottler {
+  explicit OpenEgressThrottler(size_t limit) : EgressThrottler(limit) {
+  }
+
+  using EgressThrottler::RecordAt;
+  using EgressThrottler::WakeTime;
+};
+
 // Under the limit the loop is never throttled.
 TEST(EgressThrottlerTest, ConformingProceeds) {
-  EgressThrottler t{1'000'000};  // 1 MB/s
+  OpenEgressThrottler t{1'000'000};  // 1 MB/s
   t.RecordAt(40'000, false, kT0);
   EXPECT_EQ(t.WakeTime(kT0), 0u);  // only 0.04s worth, within burst tolerance
 }
@@ -27,7 +35,7 @@ TEST(EgressThrottlerTest, ConformingProceeds) {
 // Sending a full second of budget at once forces a wait until the schedule catches up.
 TEST(EgressThrottlerTest, OverBudgetSleepsUntilSchedule) {
   const uint64_t limit = 1'000'000;
-  EgressThrottler t{limit};
+  OpenEgressThrottler t{limit};
 
   t.RecordAt(limit, false, kT0);  // 1 second worth of bytes at t0
   // total_tat_ = kT0 + 1s. It is conforming once now >= total_tat_ - tau.
@@ -42,7 +50,7 @@ TEST(EgressThrottlerTest, OverBudgetSleepsUntilSchedule) {
 // is still under its reserved (low priority) share (progress guarantee).
 TEST(EgressThrottlerTest, HighPrioDoesNotStarveLowPrio) {
   const uint64_t limit = 1'000'000;
-  EgressThrottler t{limit};
+  OpenEgressThrottler t{limit};
 
   // A huge high priority burst saturates the total budget for many seconds, yet the loop (which has
   // sent nothing) is still allowed to proceed because its own reserved share is untouched.
@@ -54,7 +62,7 @@ TEST(EgressThrottlerTest, HighPrioDoesNotStarveLowPrio) {
 // total saturation.
 TEST(EgressThrottlerTest, LowPrioThrottledAfterReservedShare) {
   const uint64_t limit = 1'000'000;
-  EgressThrottler t{limit};
+  OpenEgressThrottler t{limit};
 
   // Saturate the total budget via high priority load.
   t.RecordAt(10 * limit, true, kT0);
@@ -68,7 +76,7 @@ TEST(EgressThrottlerTest, LowPrioThrottledAfterReservedShare) {
 // current head, never rewinding the TAT.
 TEST(EgressThrottlerTest, BackwardClockDoesNotRewind) {
   const uint64_t limit = 1'000'000;
-  EgressThrottler t{limit};
+  OpenEgressThrottler t{limit};
 
   t.RecordAt(limit, false, kT0 + kMicrosPerSec);
   uint64_t wake_before = t.WakeTime(kT0);

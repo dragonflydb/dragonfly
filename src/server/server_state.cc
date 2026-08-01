@@ -294,13 +294,6 @@ ServerState* ServerState::SafeTLocal() {
   return state_;
 }
 
-std::optional<std::reference_wrapper<detail::EgressThrottler>> ServerState::GetEgressThrottler() {
-  if (egress_throttler_.IsEnabled())
-    return std::ref(egress_throttler_);
-  else
-    return std::nullopt;
-}
-
 bool ServerState::ShouldLogSlowCmd(unsigned latency_usec) const {
   return slow_log_shard_.IsEnabled() && latency_usec >= log_slower_than_usec;
 }
