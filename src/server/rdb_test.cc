@@ -47,7 +47,6 @@ ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 ABSL_DECLARE_FLAG(bool, serialize_hnsw_index);
 ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
-ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, snapshot_egress_limit_bytes);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
 
 namespace dfly {
@@ -2031,7 +2030,7 @@ TEST_F(RdbTest, SnapshotEgressThrottle) {
   };
 
   // Baseline save with no limit to measure the machine's serialization capacity.
-  SetFlag(&FLAGS_snapshot_egress_limit_bytes, strings::MemoryBytesFlag{0});
+  Run({"config", "set", "snapshot_egress_limit_bytes", "0"});
   auto [t_base, bytes] = save_and_measure();
   ASSERT_GT(bytes, 1u << 20) << "populated dataset too small to test throttling";
 
@@ -2043,7 +2042,7 @@ TEST_F(RdbTest, SnapshotEgressThrottle) {
   uint64_t shards = shard_set->size();
   double target_sec = std::max(2.0, t_base * 8);
   uint64_t limit = uint64_t(bytes / shards / target_sec);
-  SetFlag(&FLAGS_snapshot_egress_limit_bytes, strings::MemoryBytesFlag{limit});
+  Run({"config", "set", "snapshot_egress_limit_bytes", absl::StrCat(limit)});
   auto [t_lim, bytes2] = save_and_measure();
 
   double rate = double(bytes2) / t_lim;

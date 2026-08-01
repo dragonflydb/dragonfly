@@ -253,7 +253,6 @@ class ServerState {  // public struct - to allow initialization.
     return thread_index_;
   }
 
-  // If egress throttling is enabled, returns the per-thread throttler with updated limits
   detail::EgressThrottler& GetEgressThrottler() {
     return egress_throttler_;
   }
