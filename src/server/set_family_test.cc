@@ -844,4 +844,13 @@ TEST_F(SetFamilyTest, ShrinkMemoryAccountingSet) {
   EXPECT_THAT(Run({"SCARD", "s1"}), IntArg(9));
 }
 
+// An empty result deletes the destination regardless of its previous type.
+TEST_F(SetFamilyTest, EmptyStoreDeletesForeignTypeDest) {
+  for (std::string_view cmd : {"SINTERSTORE"sv, "SUNIONSTORE"sv, "SDIFFSTORE"sv}) {
+    Run({"SET", "dest", "hello"});
+    EXPECT_THAT(Run({cmd, "dest", "nx1", "nx2"}), IntArg(0)) << cmd;
+    EXPECT_THAT(Run({"EXISTS", "dest"}), IntArg(0)) << cmd;
+  }
+}
+
 }  // namespace dfly

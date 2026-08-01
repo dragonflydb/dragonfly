@@ -1424,4 +1424,18 @@ TEST_F(ZSetFamilyTest, ZCountMinGreaterThanMaxCrash) {
   EXPECT_THAT(resp, IntArg(0));
 }
 
+// An empty result deletes the destination regardless of its previous type.
+TEST_F(ZSetFamilyTest, EmptyStoreDeletesForeignTypeDest) {
+  for (std::string_view cmd : {"ZUNIONSTORE"sv, "ZINTERSTORE"sv, "ZDIFFSTORE"sv}) {
+    Run({"SET", "dest", "hello"});
+    EXPECT_THAT(Run({cmd, "dest", "2", "nx1", "nx2"}), IntArg(0)) << cmd;
+    EXPECT_THAT(Run({"EXISTS", "dest"}), IntArg(0)) << cmd;
+  }
+
+  Run({"SET", "dest", "hello"});
+  Run({"ZADD", "src", "1", "a"});
+  EXPECT_THAT(Run({"ZRANGESTORE", "dest", "src", "5", "9"}), IntArg(0));
+  EXPECT_THAT(Run({"EXISTS", "dest"}), IntArg(0));
+}
+
 }  // namespace dfly
