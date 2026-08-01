@@ -327,7 +327,6 @@ class HnswShardIndex {
 class ShardDocIndex {
   friend class ShardDocIndices;
   friend struct search::IndexBuilder;
-  friend class IndexedHashTieringTest;
 
   using DocId = search::DocId;
   using GlobalDocId = search::GlobalDocId;
@@ -614,10 +613,6 @@ class ShardDocIndices {
   void BlockUntilConstructionEnd();
 
   std::vector<std::string> GetIndexNames() const;
-
-  // True if any index covers this key. Such a value must stay in memory: indexing reads its
-  // fields straight out of it, and an offloaded value has none.
-  bool IsIndexed(std::string_view key, unsigned obj_code) const;
 
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
   void AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv);

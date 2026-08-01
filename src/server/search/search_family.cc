@@ -2642,6 +2642,13 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
+  // An index reads document fields straight out of the value, but tiering may offload hashes
+  // to disk, so the two cannot be combined. JSON values never reach the disk.
+  if (parsed_index->type == DocIndex::HASH &&
+      shard_set->Await(0, [] { return EngineShard::tlocal()->tiered_storage() != nullptr; })) {
+    return builder->SendError("Cannot create a HASH index when tiered storage is enabled"sv);
+  }
+
   // Check if index already exists
   atomic_uint exists_cnt = 0;
   cmd_cntx->tx()->Execute(

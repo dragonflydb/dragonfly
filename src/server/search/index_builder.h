@@ -7,10 +7,10 @@
 #include <functional>
 
 #include "server/execution_state.h"
-#include "server/table.h"
 #include "server/tx_base.h"
 
 namespace dfly {
+struct DbTable;
 class ShardDocIndex;
 }  // namespace dfly
 
@@ -38,20 +38,12 @@ struct IndexBuilder {
   // Loop with cursor over table and add entries to regular index
   void CursorLoop(DbTable* table, DbContext db_cntx);
 
-  // Add a single entry to the regular indices, reusing the restored DocIds on restored builds.
-  void IndexEntry(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
-
-  // Bring the offloaded values collected by CursorLoop back to memory and index them. Reading
-  // from disk blocks, which is only safe outside of a table traversal.
-  void IndexOffloaded(DbTable* table, DbContext db_cntx);
-
   // Loop with cursor over table and add entries to global HNSW vector indices
   void VectorLoop(DbTable* table, DbContext db_cntx);
 
   dfly::ExecutionState state_;
   ShardDocIndex* index_;
   bool is_restored_ = false;
-  std::vector<std::string> offloaded_keys_;  // deferred by CursorLoop, handled by IndexOffloaded
   util::fb2::Fiber fiber_;
 };
 

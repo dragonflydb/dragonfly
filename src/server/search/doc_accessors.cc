@@ -503,8 +503,8 @@ unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue&
   }
 
   // An offloaded value holds a disk reference where the object pointer would be, so reading it
-  // as a container would follow a bogus pointer. Values reachable here are kept in memory (see
-  // ShardDocIndices::IsIndexed), so this only guards against a path that missed that rule.
+  // as a container would follow a bogus pointer. Hash indexes cannot be created on a server
+  // with tiered storage, so this only guards against a regression of that rule.
   if (pv.IsExternal()) {
     LOG(DFATAL) << "Cannot index an offloaded value";
     return make_unique<EmptyAccessor>();
