@@ -5,6 +5,7 @@
 #include "server/search/search_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/container/fixed_array.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/strings/match.h>
@@ -2643,34 +2644,60 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  // An index reads document fields straight out of the value, but hash offloading moves them
-  // to disk, so the two cannot be combined. The condition is sticky because offloaded hashes
-  // may still exist after the offloading is turned off. JSON values never reach the disk.
-  if (parsed_index->type == DocIndex::HASH && shard_set->Await(0, [] {
-        auto* ts = EngineShard::tlocal()->tiered_storage();
-        return ts && ts->HashOffloadEverEnabled();
-      })) {
-    // Replicated commands get no reply, so make the divergence visible in the log.
-    LOG_IF(ERROR, cmd_cntx->server_conn_cntx()->is_replicating)
-        << "Rejected a replicated hash index " << idx_name << ": " << kHashIndexVsHashOffloadError;
-    return builder->SendError(std::string{kHashIndexVsHashOffloadError});
-  }
-
-  // Check if index already exists
+  // Check if the index already exists. An index reads document fields straight out of the
+  // value, but hash offloading moves them to disk, so the two cannot be combined: a HASH
+  // index is refused if hash offloading is or was enabled (sticky — offloaded hashes may
+  // still exist after it is turned off), and otherwise reserved right here, within the same
+  // shard callback, so that enabling hash offloading concurrently cannot slip a stash in
+  // before InitIndex installs the index.
+  const bool is_hash_index = parsed_index->type == DocIndex::HASH;
   atomic_uint exists_cnt = 0;
+  atomic_uint banned_cnt = 0;
+  absl::FixedArray<bool> reserved(shard_set->size(), false);
   cmd_cntx->tx()->Execute(
-      [idx_name, &exists_cnt](auto* tx, auto* es) {
-        if (es->search_indices()->GetIndex(idx_name) != nullptr)
+      [&](auto* tx, auto* es) {
+        if (es->search_indices()->GetIndex(idx_name) != nullptr) {
           exists_cnt.fetch_add(1, std::memory_order_relaxed);
+        } else if (is_hash_index) {
+          auto* ts = es->tiered_storage();
+          if (ts && ts->HashOffloadEverEnabled()) {
+            banned_cnt.fetch_add(1, std::memory_order_relaxed);
+          } else {
+            es->search_indices()->ReserveHashIndex();
+            reserved[es->shard_id()] = true;
+          }
+        }
         return OpStatus::OK;
       },
       false);
 
+  auto release_reservations = [&] {
+    if (!is_hash_index)
+      return;
+    cmd_cntx->tx()->Execute(
+        [&](auto* tx, auto* es) {
+          if (reserved[es->shard_id()])
+            es->search_indices()->ReleaseHashIndexReservation();
+          return OpStatus::OK;
+        },
+        false);
+  };
+
   DCHECK(exists_cnt == 0u || exists_cnt == shard_set->size());
 
   if (exists_cnt.load(memory_order_relaxed) > 0) {
+    release_reservations();
     cmd_cntx->tx()->Conclude();
     return is_NX ? builder->SendOk() : builder->SendError("Index already exists");
+  }
+
+  if (banned_cnt.load(memory_order_relaxed) > 0) {
+    release_reservations();
+    cmd_cntx->tx()->Conclude();
+    // Replicated commands get no reply, so make the divergence visible in the log.
+    LOG_IF(ERROR, cmd_cntx->server_conn_cntx()->is_replicating)
+        << "Rejected a replicated hash index " << idx_name << ": " << kHashIndexVsHashOffloadError;
+    return builder->SendError(std::string{kHashIndexVsHashOffloadError});
   }
 
   if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
@@ -2685,6 +2712,7 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   if (!CreateHnswIndices(idx_name, *parsed_index)) {
+    release_reservations();
     cmd_cntx->tx()->Conclude();
     return builder->SendError("Index already exists");
   }
@@ -2692,8 +2720,11 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
   cmd_cntx->tx()->Execute(
-      [idx_name, idx_ptr, is_journal](auto* tx, auto* es) {
+      [&, idx_ptr, is_journal](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr, is_journal);
+        // The installed index takes over blocking hash offloading from the reservation.
+        if (reserved[es->shard_id()])
+          es->search_indices()->ReleaseHashIndexReservation();
         return OpStatus::OK;
       },
       true);

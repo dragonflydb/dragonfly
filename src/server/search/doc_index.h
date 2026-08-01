@@ -619,8 +619,20 @@ class ShardDocIndices {
 
   std::vector<std::string> GetIndexNames() const;
 
-  // Returns true if any index over hash documents exists.
+  // Returns true if any index over hash documents exists or is being created.
   bool HasHashIndexes() const;
+
+  // FT.CREATE reserves a hash index on the shard before its first suspension point, so hash
+  // offloading cannot slip in between the offload-state check and InitIndex. Released when
+  // the index is installed or when the command fails.
+  void ReserveHashIndex() {
+    pending_hash_indexes_++;
+  }
+
+  void ReleaseHashIndexReservation() {
+    DCHECK_GT(pending_hash_indexes_, 0u);
+    pending_hash_indexes_--;
+  }
 
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
   void AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv);
@@ -644,6 +656,7 @@ class ShardDocIndices {
  private:
   MiMemoryResource local_mr_;
   absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
+  uint32_t pending_hash_indexes_ = 0;  // reserved by in-flight FT.CREATE commands
 
   std::string next_defrag_index_;
 };

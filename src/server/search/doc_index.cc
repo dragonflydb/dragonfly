@@ -1376,6 +1376,8 @@ vector<string> ShardDocIndices::GetIndexNames() const {
 }
 
 bool ShardDocIndices::HasHashIndexes() const {
+  if (pending_hash_indexes_ > 0)
+    return true;
   for (const auto& [name, index] : indices_) {
     if (index->base_->type == DocIndex::HASH)
       return true;

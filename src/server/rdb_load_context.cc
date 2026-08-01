@@ -310,8 +310,14 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
 
   uint32_t master_shards = master_shard_count_;
 
-  if (is_error)
+  if (is_error) {
+    // Definitions applied during this load never went through RebuildAllIndices, so their
+    // field indices were never initialized; drop them instead of leaving them searchable.
+    // Any pre-existing indices were dropped when the keyspace was flushed before the load.
+    shard_set->AwaitRunningOnShardQueue(
+        [](EngineShard* es) { es->search_indices()->DropAllIndices(); });
     return;
+  }
 
   // When shard counts differ, remap HNSW global_ids and redistribute key mappings on-the-fly.
   bool shard_count_differs = master_shards != 0 && master_shards != shard_set->size();

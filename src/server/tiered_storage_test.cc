@@ -1712,9 +1712,10 @@ TEST_F(TieredStorageTest, HashIndexBlocksHashOffload) {
   SetFlag(&FLAGS_tiered_experimental_hash_support, true);
   UpdateFromFlags();
 
-  // Fields must stay below the listpack limit so the hashes remain offload-eligible.
+  // The serialized hash must exceed tiered_min_value_size (64), while the field value must
+  // stay below the listpack limit (64) for the hash to remain offload-eligible at all.
   for (int i = 0; i < 150; i++)
-    Run({"HSET", absl::StrCat("h", i), "f1", absl::StrCat("v", i, BuildString(40, 'a'))});
+    Run({"HSET", absl::StrCat("h", i), "f1", absl::StrCat("v", i, BuildString(58, 'a'))});
 
   // Strings do offload; waiting for them proves the offloader has cycled past the hashes.
   for (int i = 0; i < 3; i++)
@@ -1730,12 +1731,23 @@ TEST_F(TieredStorageTest, HashIndexBlocksHashOffload) {
   EXPECT_THAT(resp.GetVec()[0], IntArg(149));
 }
 
+// Snapshot tests use their own PID-scoped filename, restored only after TearDown's
+// CleanupSnapshots has removed the produced files.
+class TieredSnapshotTest : public TieredStorageTest {
+ protected:
+  void SetUp() override {
+    fs.emplace();
+    SetFlag(&FLAGS_dbfilename, absl::StrCat("tiered_snapshot_test_", getpid()));
+    TieredStorageTest::SetUp();
+  }
+
+  optional<absl::FlagSaver> fs;
+};
+
 // Loading a snapshot with a hash index must fail explicitly when hash offloading was
 // enabled, instead of silently dropping the index.
-TEST_F(TieredStorageTest, HashSearchIndexLoadFails) {
+TEST_F(TieredSnapshotTest, HashSearchIndexLoadFails) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_dbfilename, "tiered_hash_index_test");
-
   EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "h", "SCHEMA", "f1", "TEXT"}),
             "OK");
   Run({"HSET", "h1", "f1", "hello"});
@@ -1744,6 +1756,27 @@ TEST_F(TieredStorageTest, HashSearchIndexLoadFails) {
   UpdateFromFlags();
 
   EXPECT_THAT(Run({"DEBUG", "RELOAD"}), ErrArg("not supported"));
+}
+
+// A failed load must not leave half-created indices behind: they never went through
+// RebuildAllIndices, and searching them would touch uninitialized state.
+TEST_F(TieredSnapshotTest, PartialIndexLoadRollsBack) {
+  absl::FlagSaver saver;
+  EXPECT_EQ(Run({"FT.CREATE", "jidx", "ON", "JSON", "PREFIX", "1", "j", "SCHEMA", "$.f1", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "h", "SCHEMA", "f1", "TEXT"}),
+            "OK");
+  Run({"HSET", "h1", "f1", "hello"});
+
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+
+  EXPECT_THAT(Run({"DEBUG", "RELOAD"}), ErrArg("not supported"));
+
+  // Both definitions are rolled back, whichever of them the loader processed first.
+  EXPECT_THAT(Run({"FT._LIST"}), RespArray(IsEmpty()));
+  EXPECT_THAT(Run({"FT.SEARCH", "jidx", "*"}), ErrArg("no such index"));
+  EXPECT_EQ(Run({"PING"}), "PONG");
 }
 
 #endif  // WITH_SEARCH
