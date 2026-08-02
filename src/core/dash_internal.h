@@ -583,6 +583,19 @@ class Segment {
     segment_id_ = new_id;
   }
 
+  void IteratorBorrowed() {
+    ++live_iterators_;
+  }
+
+  void IteratorReturned() {
+    assert(live_iterators_ > 0);
+    --live_iterators_;
+  }
+
+  bool IsSafeToDefragment() const {
+    return live_iterators_ == 0;
+  }
+
  private:
   static_assert(sizeof(Iterator) == 2);
 
@@ -618,6 +631,10 @@ class Segment {
   uint8_t local_depth_;
   uint32_t segment_id_;  // segment id in the table.
   PMR_NS::memory_resource* mr_ = nullptr;
+
+  // Number of iterators active with this segment's pointer. Determines whether it is safe to
+  // reallocate for defragmentation.
+  uint32_t live_iterators_{0};
 
  public:
   static constexpr size_t kBucketSz = sizeof(Bucket);
