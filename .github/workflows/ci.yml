@@ -121,7 +121,7 @@ jobs:
       - name: Test dependency-cache manifest
         if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Debug' && matrix.compiler.cxx == 'g++' && matrix.sanitizers == 'NoSanitizers'
         # run only once for both pull requests and pushes.
-        run: bash tools/test_deps_cache_manifest.sh
+        run: bash .github/actions/builder/scripts/test_deps_cache_manifest.sh
 
       - name: Build Dragonfly
         uses: ./.github/actions/builder

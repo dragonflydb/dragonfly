@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 
-# Tests for tools/deps_cache_manifest.py.
-# - Run with: bash tools/test_deps_cache_manifest.sh
+# Tests for the builder action's dependency-cache manifest validator.
+# - Run with: bash .github/actions/builder/scripts/test_deps_cache_manifest.sh
 # - Set RUN_MANIFEST_BENCHMARK=1 to time manifest generation and validation for a 1,000-file fixture.
 # - Default tests:
 #   1) Confirm a tar archive can be extracted and still pass manifest validation, with file mtimes unchanged.
 #   2) Confirm validation rejects changed, added, deleted, unreadable, or unsupported cache entries and malformed
 #      manifests.
-# - No build directory is needed. Keep this script and deps_cache_manifest.py in tools/ , the test creates its own
-#   temporary workspace.
+# - No build directory is needed; the test creates its own temporary workspace.
 
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-manifest_tool="$repo_root/tools/deps_cache_manifest.py"
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+manifest_tool="$script_dir/deps_cache_manifest.py"
 workspace=$(mktemp -d)
 template="$workspace/template"
 
