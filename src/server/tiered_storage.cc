@@ -88,11 +88,13 @@ constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
 // so we cap the number of concurrent defragmentation operations to avoid unbounded memory growth.
 constexpr uint32_t kMaxPendingDefrags = 100;
 
-// Called after setting new value in place of previous segment
-void RecordDeleted(const FragmentRef& fragment_ref, size_t tiered_len, DbTableStats* stats) {
-  stats->AddTypeMemoryUsage(fragment_ref.ObjType(), fragment_ref.MallocUsed());
-  stats->tiered_entries--;
-  stats->tiered_used_bytes -= tiered_len;
+// Called when a value returns to RAM and its disk segment is dropped: the bytes go back to the
+// RAM ledger and leave the tiered counters.
+void AccountTieredUpload(const FragmentRef& fragment_ref, size_t tiered_len, string_view key,
+                         DbTable* db) {
+  AccountObjectMemory(key, fragment_ref.ObjType(), fragment_ref.MallocUsed(), db);
+  db->stats.tiered_entries--;
+  db->stats.tiered_used_bytes -= tiered_len;
 }
 
 tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
@@ -234,7 +236,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void RetireColdEntries(size_t additional_memory);
 
   // Set value to be an in-memory type again. Update memory stats.
-  void Upload(DbIndex dbid, string_view value, PrimeValue* pv) {
+  void Upload(DbIndex dbid, string_view key, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
     switch (pv->GetExternalRep()) {
       case CompactObj::ExternalRep::STRING: {
@@ -253,7 +255,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       }
     };
 
-    RecordDeleted(*pv, value.size(), GetDbTableStats(dbid));
+    AccountTieredUpload(*pv, value.size(), key, db_slice_.GetDBTable(dbid));
   }
 
   // Find entry by key in db_slice and store external segment in place of original value.
@@ -261,19 +263,20 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
     UnblockBackpressure(key, true);
     if (auto* pv = Find(key.first, key.second); pv) {
-      auto* stats = GetDbTableStats(key.first);
+      DbTable* table = db_slice_.GetDBTable(key.first);
 
       pv->SetStashPending(false);
-      stats->tiered_entries++;
-      stats->tiered_used_bytes += segment.length;
+      table->stats.tiered_entries++;
+      table->stats.tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
       StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
+      // The value's bytes leave the RAM ledger; a cool copy is tracked by the cool cache only.
+      AccountObjectMemory(key.second, pv->ObjType(), -int64_t(pv->MallocUsed()), table);
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
       } else {
-        stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
         pv->SetExternal(segment.offset, segment.length, blobs.rep);
       }
     } else {
@@ -342,20 +345,24 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
     // TODO: Handle upload and cooling via type dependent decoders
 
     stats_.total_defrags++;
+    string scratch;
+    string_view item_key = it->first.GetSlice(&scratch);
     PrimeValue& pv = it->second;
     if (pv.IsCool()) {
       PrimeValue::CoolItem item = pv.GetCool();
       tiering::DiskSegment segment = FromCoolItem(item);
 
-      // We remove it from both cool storage and the offline storage.
+      // We remove it from both cool storage and the offline storage; the value becomes a
+      // regular in-memory one, so it returns to the RAM ledger.
       pv = ts_->DeleteCool(item.record);
+      AccountObjectMemory(item_key, pv.ObjType(), pv.MallocUsed(), db_slice_.GetDBTable(dbid));
       auto* stats = GetDbTableStats(dbid);
       stats->tiered_entries--;
       stats->tiered_used_bytes -= segment.length;
     } else {
       // Cut out relevant part of value and restore it to memory
       string_view value = page.substr(item_segment.offset - segment.offset, item_segment.length);
-      Upload(dbid, value, &pv);
+      Upload(dbid, item_key, value, &pv);
     }
   }
 }
@@ -395,7 +402,11 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
     ++stats_.total_uploads;
     decoder->Upload(node);
-    RecordDeleted(node, segment.length, GetDbTableStats(db_id));
+    // TODO: per-slot accounting is skipped because node ids carry no slot/key information.
+    auto* stats = GetDbTableStats(db_id);
+    stats->AddTypeMemoryUsage(OBJ_LIST, node->sz);
+    stats->tiered_entries--;
+    stats->tiered_used_bytes -= segment.length;
     return true;
   }
 
@@ -405,7 +416,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
       if (metrics.modified || pv->WasTouched()) {
         ++stats_.total_uploads;
         decoder->Upload(pv);
-        RecordDeleted(*pv, segment.length, GetDbTableStats(key->first));
+        AccountTieredUpload(*pv, segment.length, key->second, db_slice_.GetDBTable(key->first));
         return true;
       }
       pv->SetTouched(true);
@@ -560,8 +571,8 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
 
   tiering::DiskSegment segment = fragment_ref.GetExternalSlice();
   if (auto* cool = fragment_ref.GetCoolRecord(); cool) {
-    auto hot = DeleteCool(cool);
-    DCHECK_EQ(hot.ObjType(), OBJ_STRING);
+    // With experimental hash support a cool record may hold a hash, not only a string.
+    DeleteCool(cool);
   }
   fragment_ref.ClearOffloaded();
   op_manager_->DeleteOffloaded(dbid, segment);
@@ -614,6 +625,7 @@ TieredStats TieredStorage::GetStats() const {
   }
 
   {  // Own stats
+    stats.total_deletes = stats_.total_deletes;
     stats.total_stash_overflows = stats_.stash_overflow_cnt;
     stats.cold_storage_bytes = stats_.cool_memory_used;
     stats.total_offloading_steps = stats_.offloading_steps;
@@ -752,12 +764,10 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
     CHECK(IsValid(it));
     PrimeValue& pv = it->second;
 
-    // Now the item is only in storage.
+    // Now the item is only in storage. Its bytes already left the RAM ledger at cool-down.
     tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
     pv.Freeze(segment.offset, segment.length);
 
-    auto* stats = op_manager_->GetDbTableStats(record->db_index);
-    stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
     CompactObj::DeleteMR<TieredCoolRecord>(record);
   } while (gained < goal);
 
@@ -827,11 +837,14 @@ void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
   pv->SetCool(segment.offset, segment.length, rep, record);
 }
 
-PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
+PrimeValue TieredStorage::Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item) {
   tiering::DiskSegment segment = FromCoolItem(item);
 
-  // We remove it from both cool storage and the offline storage.
+  // We remove it from both cool storage and the offline storage. The value returns to RAM,
+  // so it returns to the RAM ledger as well.
   PrimeValue hot = DeleteCool(item.record);
+  AccountObjectMemory(key, hot.ObjType(), hot.MallocUsed(),
+                      op_manager_->db_slice_.GetDBTable(dbid));
   op_manager_->DeleteOffloaded(dbid, segment);
   return hot;
 }

@@ -31,6 +31,10 @@ class SlotSet;
 
 using facade::OpResult;
 
+// Applies a delta to the per-db/per-type counters and to the owning slot's memory_bytes.
+// All of them track resident RAM.
+void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db);
+
 struct DbStats : public DbTableStats {
   // number of active keys.
   size_t key_count = 0;
@@ -181,6 +185,10 @@ class DbSlice {
     // Removes the memory usage attributed to the iterator and resets orig_heap_size.
     // Used when the existing object is overridden by a new one.
     void ReduceHeapUsage();
+
+    // Re-reads the entry's current sizes into the baseline. Call it after a blocking tiered
+    // read, which may upload the value back into memory and account for it behind our back.
+    void ResyncBaseline();
 
     void Run();
     void Cancel();

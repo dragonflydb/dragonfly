@@ -1297,6 +1297,9 @@ void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx)
           es->tiered_storage());
 
       auto result = fut.Get();
+      // The read may have uploaded the value back into memory and accounted for it right away,
+      // which leaves the updater's baseline behind. Resync before any return.
+      it_res->post_updater.ResyncBaseline();
       if (!result)
         // Tiered storage read failed - return generic I/O error
         return OpStatus::IO_ERROR;

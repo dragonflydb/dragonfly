@@ -72,20 +72,6 @@ constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
 static_assert(kPrimeSegmentSize <= 32304);
 
-void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* db) {
-  DCHECK_NE(db, nullptr);
-  if (size == 0)
-    return;
-
-  DbTableStats& stats = db->stats;
-
-  stats.AddTypeMemoryUsage(type, size);
-
-  if (db->slots_stats) {
-    db->slots_stats[KeySlot(key)].memory_bytes += size;
-  }
-}
-
 class PrimeEvictionPolicy {
  public:
   static constexpr bool can_evict = true;  // we implement eviction functionality.
@@ -384,6 +370,26 @@ template <typename F> struct CallbackConsumer : public DbSlice::ChangeConsumerIn
 
 }  // namespace
 
+void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable* db) {
+  DCHECK_NE(db, nullptr);
+  if (delta == 0)
+    return;
+
+  db->stats.AddTypeMemoryUsage(type, delta);
+
+  if (!db->slots_stats)
+    return;
+
+  const SlotId sid = KeySlot(key);
+  uint64_t& slot_memory = db->slots_stats[sid].memory_bytes;
+  if (delta < 0 && slot_memory < uint64_t(-delta)) {
+    LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot memory usage: " << slot_memory
+                           << " + " << delta << ", slot: " << sid;
+    delta = -int64_t(slot_memory);
+  }
+  slot_memory += delta;
+}
+
 #define ADD(x) (x) += o.x
 
 DbStats& DbStats::operator+=(const DbStats& o) {
@@ -514,10 +520,20 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 }
 
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
-  AccountObjectMemory(fields_.key, fields_.orig_obj_type, -fields_.orig_value_heap_size,
+  // The baseline is up to date even if a blocking tiered read uploaded the value mid-scope:
+  // such reads are followed by ResyncBaseline(). Subtracting it keeps this call idempotent.
+  AccountObjectMemory(fields_.key, fields_.orig_obj_type, -int64_t(fields_.orig_value_heap_size),
                       fields_.db_slice->GetDBTable(fields_.db_ind));
-  fields_.orig_value_heap_size = 0;                      // Reset to avoid double accounting.
-  fields_.orig_obj_type = fields_.it->second.ObjType();  // Sync type after accounting.
+
+  // Reset to avoid double accounting, and sync the type after accounting.
+  fields_.orig_value_heap_size = 0;
+  fields_.orig_obj_type = fields_.it->second.ObjType();
+}
+
+void DbSlice::AutoUpdater::ResyncBaseline() {
+  const PrimeValue& pv = fields_.it->second;
+  fields_.orig_value_heap_size = pv.MallocUsed();
+  fields_.orig_obj_type = pv.ObjType();
 }
 
 void DbSlice::AutoUpdater::Run() {
@@ -532,8 +548,9 @@ void DbSlice::AutoUpdater::Run() {
 
   CHECK_NE(fields_.db_slice, nullptr);
 
-  CompactObjType current_type = fields_.it->second.ObjType();
-  int64_t current_size = static_cast<int64_t>(fields_.it->second.MallocUsed());
+  const PrimeValue& pv = fields_.it->second;
+  CompactObjType current_type = pv.ObjType();
+  int64_t current_size = static_cast<int64_t>(pv.MallocUsed());
   DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
 
   if (current_type != fields_.orig_obj_type) {
@@ -544,8 +561,8 @@ void DbSlice::AutoUpdater::Run() {
                         -static_cast<int64_t>(fields_.orig_value_heap_size), table);
     AccountObjectMemory(fields_.key, current_type, current_size, table);
   } else {
-    ssize_t delta = current_size - static_cast<int64_t>(fields_.orig_value_heap_size);
-    AccountObjectMemory(fields_.key, current_type, delta, table);
+    AccountObjectMemory(fields_.key, current_type,
+                        current_size - static_cast<int64_t>(fields_.orig_value_heap_size), table);
   }
 
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
@@ -685,7 +702,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   // Fetch back cool items
   if (pv.IsExternal() && pv.IsCool()) {
-    pv = owner_->tiered_storage()->Warmup(cntx.db_index, pv.GetCool());
+    pv = owner_->tiered_storage()->Warmup(cntx.db_index, key, pv.GetCool());
   }
 
   // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
@@ -1021,6 +1038,16 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 
     CreateDb(index);
     std::swap(db_arr_[index]->trans_locks, flush_db_arr[index]->trans_locks);
+
+    // Unlike the key_count/memory_bytes gauges, traffic counters are cumulative history.
+    const auto& old_slots = flush_db_arr[index]->slots_stats;
+    auto& new_slots = db_arr_[index]->slots_stats;
+    if (old_slots && new_slots) {
+      for (SlotId sid = 0; sid <= kMaxSlotNum; ++sid) {
+        new_slots[sid].total_reads = old_slots[sid].total_reads;
+        new_slots[sid].total_writes = old_slots[sid].total_writes;
+      }
+    }
   }
 
   LOG_IF(DFATAL, !fetched_items_.empty())

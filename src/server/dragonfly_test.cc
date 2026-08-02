@@ -744,6 +744,28 @@ TEST_F(DflyEngineTest, Bug496) {
   });
 }
 
+TEST_F(DflyEngineTest, ReduceHeapUsageIdempotent) {
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+
+    {
+      auto res = *db.AddOrFind({}, "key", std::nullopt);
+      res.it->second.SetString(string(1000, 'x'));
+    }
+
+    size_t before = db.GetStats().db_stats[0].obj_memory_usage;
+    EXPECT_GT(before, 0u);
+
+    auto res = db.FindMutable({}, "key");
+    res.post_updater.ReduceHeapUsage();
+    // A second call before the value is replaced must not subtract the same bytes again.
+    res.post_updater.ReduceHeapUsage();
+    res.post_updater.Run();
+
+    EXPECT_EQ(db.GetStats().db_stats[0].obj_memory_usage, before);
+  });
+}
+
 TEST_F(DflyEngineTest, Issue607) {
   // https://github.com/dragonflydb/dragonfly/issues/607
 
