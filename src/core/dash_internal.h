@@ -411,6 +411,8 @@ class Segment {
   Segment(const Segment&) = delete;
   Segment& operator=(const Segment&) = delete;
 
+  Segment(Segment&&) = default;
+
   // Returns (iterator, true) if insert succeeds,
   // (iterator, false) for duplicate and (invalid-iterator, false) if it's full
   template <typename K, typename V, typename Pred, typename OnMoveCb>

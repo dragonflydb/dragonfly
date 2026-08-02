@@ -16,6 +16,7 @@
 #include "base/hash.h"
 #include "base/logging.h"
 #include "base/zipf_gen.h"
+#include "core/compact_object.h"
 #include "core/dash.h"
 #include "io/file.h"
 #include "io/line_reader.h"
@@ -320,6 +321,108 @@ TEST_F(DashTest, SegmentFull) {
   unsigned keys[12] = {8045, 8085, 8217, 8330, 8337, 8381, 8432, 8506, 8587, 8605, 8612, 8725};
   for (unsigned i = 0; i < 12; ++i) {
     ASSERT_EQ(keys[i], segment_.Key(0, i));
+  }
+}
+
+class CompactSegmentTest : public testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    auto* heap = mi_heap_get_backing();
+
+    init_zmalloc_threadlocal(heap);
+    SmallString::InitThreadLocal(heap);
+
+    thread_local MiMemoryResource memory_resource(heap);
+    CompactObj::InitThreadLocal(&memory_resource);
+    InitTLStatelessAllocMR(&memory_resource);
+  }
+
+  static void TearDownTestSuite() {
+    CleanupStatelessAllocMR();
+  }
+};
+
+struct CompactTestPolicy {
+  enum : uint8_t { kSlotNum = 14, kBucketNum = 56 };
+  static constexpr bool kUseVersion = true;
+};
+
+// Tests the segment move constructor copies internals correctly
+TEST_F(CompactSegmentTest, SegmentMove) {
+  using CompactSegment = detail::Segment<CompactKey, CompactValue, CompactTestPolicy>;
+  static_assert(std::is_nothrow_move_constructible_v<CompactSegment>);
+
+  auto get_stash_size = [](const CompactSegment& segment) {
+    size_t size = 0;
+    for (size_t i = 0; i < CompactSegment::kStashBucketNum; ++i)
+      size += segment.GetBucket(CompactSegment::kBucketNum + i).Size();
+    return size;
+  };
+
+  struct ExpectedEntry {
+    string key;
+    string value;
+    uint64_t hash;
+  };
+
+  constexpr uint8_t kLocalDepth = 3;
+  constexpr uint32_t kSegmentId = 17;
+  constexpr uint64_t kBucketVersion = 12345;
+
+  auto source =
+      make_unique<CompactSegment>(kLocalDepth, kSegmentId, PMR_NS::get_default_resource());
+  vector<ExpectedEntry> expected;
+
+  struct Pred {
+    string_view key_view;
+    bool operator()(const CompactKey& key) const {
+      return key == key_view;
+    }
+  };
+  auto no_op = [](auto&&...) {};
+
+  for (unsigned i = 0; i < 10000; ++i) {
+    string key = absl::StrCat(i, "-", string(128, 'k'));
+    string value = absl::StrCat(i, "-", string(256, 'v'));
+    const uint64_t hash = CompactObj::HashCode(key);
+    auto [it, inserted] =
+        source->Insert(CompactKey{key}, CompactValue{value}, hash, Pred{key}, no_op);
+    if (!inserted)
+      break;
+
+    ASSERT_TRUE(it.found());
+    expected.push_back({std::move(key), std::move(value), hash});
+    // something went to stash, so we have some data in regular buckets and some in stash
+    if (get_stash_size(*source))
+      break;
+  }
+
+  const size_t original_size = source->SlowSize();
+  const size_t original_stash_size = get_stash_size(*source);
+  ASSERT_EQ(original_size, expected.size());
+  ASSERT_GT(original_stash_size, 0);
+  ASSERT_TRUE(source->IsSafeToDefragment());
+
+  source->SetVersion(0, kBucketVersion);
+
+  CompactSegment destination = std::move(*source);
+  source.reset();
+
+  EXPECT_EQ(destination.SlowSize(), original_size);
+  EXPECT_EQ(get_stash_size(destination), original_stash_size);
+  EXPECT_EQ(destination.local_depth(), kLocalDepth);
+  EXPECT_EQ(destination.segment_id(), kSegmentId);
+  EXPECT_EQ(destination.GetVersion(0), kBucketVersion);
+  EXPECT_TRUE(destination.IsSafeToDefragment());
+
+  for (const auto& [key, value, hash] : expected) {
+    auto it = destination.FindIt(hash, Pred{key});
+    ASSERT_TRUE(it.found());
+
+    string k;
+    string v;
+    EXPECT_EQ(destination.Key(it.index, it.slot).GetSlice(&k), string_view{key});
+    EXPECT_EQ(destination.Value(it.index, it.slot).GetSlice(&v), string_view{value});
   }
 }
 
