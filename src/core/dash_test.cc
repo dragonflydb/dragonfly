@@ -426,6 +426,66 @@ TEST_F(CompactSegmentTest, SegmentMove) {
   }
 }
 
+TEST_F(DashTest, RelocateSegment) {
+  for (uint64_t i = 0; i < 100; ++i)
+    ASSERT_TRUE(dt_.Insert(i, i * 2).second);
+
+  auto* old_segment = dt_.GetSegment(0);
+  const uintptr_t old_address = reinterpret_cast<uintptr_t>(old_segment);
+
+  const size_t old_size = dt_.size();
+  const size_t old_segment_count = dt_.unique_segments();
+  const size_t old_bucket_count = dt_.bucket_count();
+
+  ASSERT_TRUE(dt_.TryRelocateSegment(0));
+
+  auto* new_segment = dt_.GetSegment(0);
+  EXPECT_NE(reinterpret_cast<uintptr_t>(new_segment), old_address);
+
+  EXPECT_EQ(dt_.size(), old_size);
+  EXPECT_EQ(dt_.unique_segments(), old_segment_count);
+  EXPECT_EQ(dt_.bucket_count(), old_bucket_count);
+
+  for (uint64_t i = 0; i < 100; ++i) {
+    auto it = dt_.Find(i);
+    ASSERT_FALSE(it.is_done());
+    EXPECT_EQ(it->second, i * 2);
+  }
+}
+
+TEST_F(DashTest, SegmentRelocateUpdateAliases) {
+  for (size_t i = 0; i < 4000; ++i)
+    dt_.Insert(i, i);
+  ASSERT_EQ(dt_.depth(), 3);
+
+  for (size_t i = 0; i < 4000; ++i)
+    dt_.Erase(i);
+
+  ASSERT_TRUE(dt_.Merge(0, 1).merged);
+  ASSERT_EQ(dt_.GetSegment(0), dt_.GetSegment(1));
+
+  auto* old_segment = dt_.GetSegment(0);
+  const uintptr_t old_address = reinterpret_cast<uintptr_t>(old_segment);
+  ASSERT_TRUE(dt_.TryRelocateSegment(1));
+
+  auto* new_segment = dt_.GetSegment(0);
+  EXPECT_NE(reinterpret_cast<uintptr_t>(new_segment), old_address);
+  EXPECT_EQ(dt_.GetSegment(0), new_segment);
+  EXPECT_EQ(dt_.GetSegment(1), new_segment);
+}
+
+TEST_F(DashTest, SegmentSafeToMove) {
+  const auto* original = dt_.GetSegment(0);
+  // relocate not accepted as long as an iterator is live
+  {
+    auto bucket_it = dt_.BucketIt(0, 0);
+    EXPECT_FALSE(dt_.TryRelocateSegment(0));
+  }
+  EXPECT_EQ(dt_.GetSegment(0), original);
+
+  EXPECT_TRUE(dt_.TryRelocateSegment(0));
+}
+
 TEST_F(DashTest, FirstStash) {
   constexpr unsigned kRegularCapacity = Segment::kBucketNum * Segment::kSlotNum;
   unsigned less_seventy = 0;

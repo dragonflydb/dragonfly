@@ -417,6 +417,10 @@ class DashTable : public detail::DashTableBase {
     return stash_unloaded_;
   }
 
+  // Attempts to reallocate segment for defragmentation. Will not continue if segment has outgoing
+  // iterators holding pointers to it as these will become invalid on relocation.
+  bool TryRelocateSegment(size_t segment_id);
+
  private:
   enum class InsertMode {
     kInsertIfNotFound,
@@ -1244,6 +1248,33 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
   } while (!fetched);
 
   return Cursor{global_depth_, sid, bid};
+}
+
+template <typename _Key, typename _Value, typename Policy>
+bool DashTable<_Key, _Value, Policy>::TryRelocateSegment(size_t segment_id) {
+  static_assert(std::is_nothrow_move_constructible_v<SegmentType>);
+
+  SegmentType* segment = segment_[segment_id];
+  if (!segment->IsSafeToDefragment())
+    return false;
+
+  const size_t chunk = size_t{1} << (global_depth_ - segment->local_depth());
+  const size_t start = segment->segment_id();
+
+  PMR_NS::polymorphic_allocator<SegmentType> allocator(segment_.get_allocator());
+  using A = std::allocator_traits<decltype(allocator)>;
+
+  SegmentType* new_segment = allocator.allocate(1);
+  // invokes move ctor. will move: segment -> bucket[] -> key[],value[] etc.
+  // if key,values data is heap allocated, moving the handle moves ownership
+  A::construct(allocator, new_segment, std::move(*segment));
+
+  std::fill_n(segment_.begin() + start, chunk, new_segment);
+
+  A::destroy(allocator, segment);
+  A::deallocate(allocator, segment, 1);
+
+  return true;
 }
 
 template <typename _Key, typename _Value, typename Policy>
