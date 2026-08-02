@@ -13,6 +13,7 @@
 #include "server/acl/acl_log.h"
 #include "server/channel_store.h"
 #include "server/common_types.h"
+#include "server/detail/egress_throttle.h"
 #include "server/script_mgr.h"
 #include "server/slowlog.h"
 #include "util/sliding_counter.h"
@@ -252,6 +253,10 @@ class ServerState {  // public struct - to allow initialization.
     return thread_index_;
   }
 
+  detail::EgressThrottler& GetEgressThrottler() {
+    return egress_throttler_;
+  }
+
   bool ShouldLogSlowCmd(unsigned latency_usec) const;
 
   Stats stats;
@@ -332,6 +337,8 @@ class ServerState {  // public struct - to allow initialization.
 
   absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
   uint32_t thread_index_ = 0;
+
+  detail::EgressThrottler egress_throttler_{0};
 
   mutable uint64_t used_mem_last_read_usec_ = 0;
   mutable MemoryUsageStats

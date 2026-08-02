@@ -6,6 +6,8 @@
 
 #include <mimalloc.h>
 
+#include "server/detail/egress_throttle.h"
+
 extern "C" {
 #include "redis/zmalloc.h"
 }
@@ -18,6 +20,7 @@ extern "C" {
 #include "facade/facade_stats.h"
 #include "server/common.h"
 #include "server/journal/journal.h"
+#include "strings/human_readable.h"
 #include "util/listener_interface.h"
 
 namespace rng = std::ranges;
@@ -41,6 +44,11 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
           "serialization. 0 - to disable streaming mode");
 ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
           "Max number of commands squashed in a single shard during squash optimizaiton");
+
+ABSL_FLAG(strings::MemoryBytesFlag, snapshot_egress_limit_bytes, 0,
+          "Per-shard-thread socket egress bandwidth budget in bytes/second. Each shard throttles "
+          "its snapshot traversal loop to stay under this rate. Accepts human-readable sizes "
+          "(e.g. 100mb, 1gb). 0 disables throttling.");
 
 namespace dfly {
 
@@ -252,11 +260,12 @@ void ServerState::UpdateFromFlags() {
   rss_oom_deny_ratio = absl::GetFlag(FLAGS_rss_oom_deny_ratio);
   serialization_max_chunk_size = absl::GetFlag(FLAGS_serialization_max_chunk_size);
   max_squash_cmd_num = absl::GetFlag(FLAGS_max_squashed_cmd_num);
+  egress_throttler_.SetLimit(absl::GetFlag(FLAGS_snapshot_egress_limit_bytes));
 }
 
 vector<string> ServerState::GetMutableFlagNames() {
   return base::GetFlagNames(FLAGS_rss_oom_deny_ratio, FLAGS_serialization_max_chunk_size,
-                            FLAGS_max_squashed_cmd_num);
+                            FLAGS_max_squashed_cmd_num, FLAGS_snapshot_egress_limit_bytes);
 }
 
 Interpreter* ServerState::BorrowInterpreter() {
