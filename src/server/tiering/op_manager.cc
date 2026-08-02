@@ -106,13 +106,13 @@ void OpManager::DeleteOffloaded(DiskSegment segment) {
 }
 
 void OpManager::Stash(PendingId id_ref, tiering::DiskSegment segment,
-                      util::fb2::RegisteredSlice buf) {
+                      util::fb2::RegisteredSlice buf, bool bypass_cooling) {
   auto id = ToOwned(id_ref);
   unsigned version = ++pending_stash_counter_;
   pending_stash_ver_[id] = version;
 
-  auto io_cb = [this, version, id = std::move(id), segment](std::error_code ec) {
-    ProcessStashed(id, version,
+  auto io_cb = [this, version, id = std::move(id), segment, bypass_cooling](std::error_code ec) {
+    ProcessStashed(id, version, bypass_cooling,
                    ec ? nonstd::make_unexpected(ec) : io::Result<DiskSegment>(segment));
   };
 
@@ -121,13 +121,14 @@ void OpManager::Stash(PendingId id_ref, tiering::DiskSegment segment,
 }
 
 std::error_code OpManager::PrepareAndStash(PendingId id, size_t length,
-                                           const std::function<size_t(io::MutableBytes)>& writer) {
+                                           const std::function<size_t(io::MutableBytes)>& writer,
+                                           bool bypass_cooling) {
   auto buf = PrepareStash(length);
   if (!buf.has_value())
     return buf.error();
 
   size_t written = writer(buf->second.bytes);
-  Stash(id, {buf->first, written}, buf->second);
+  Stash(id, {buf->first, written}, buf->second, bypass_cooling);
   return {};
 }
 
@@ -145,12 +146,12 @@ OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
   return it->second;
 }
 
-void OpManager::ProcessStashed(const OwnedEntryId& id, unsigned version,
+void OpManager::ProcessStashed(const OwnedEntryId& id, unsigned version, bool bypass_cooling,
                                const io::Result<DiskSegment>& segment) {
   if (auto it = pending_stash_ver_.find(id);
       it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
-    NotifyStashed(id, segment);
+    NotifyStashed(id, bypass_cooling, segment);
   } else if (segment) {
     // Throw away the value because it's no longer up-to-date even if no error occured
     VLOG(1) << "Releasing segment " << *segment << ", id: " << ToString(id);

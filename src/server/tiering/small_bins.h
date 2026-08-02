@@ -37,6 +37,13 @@ class SmallBins {
     bool fragmented = false, empty = false;
   };
 
+  // A pending value together with its per-key cooling-pool bypass flag. Kept per-key so a bin that
+  // mixes write-path and background entries preserves each entry's disposition.
+  struct BinValue {
+    std::string value;
+    bool bypass_cooling = false;
+  };
+
   // Packaged bin ready to be serialized with SerializeBin()
   struct FilledBin {
     friend class SmallBins;
@@ -47,11 +54,13 @@ class SmallBins {
     }
 
     unsigned bytes_ = 0;
-    tiering::EntryMap<std::string> entries_;
+    tiering::EntryMap<BinValue> entries_;
   };
 
-  // List of locations of values for corresponding keys of previously filled bin
-  using KeySegmentList = std::vector<std::tuple<DbIndex, std::string /* key*/, DiskSegment>>;
+  // List of locations of values for corresponding keys of previously filled bin, each with the
+  // per-key cooling-pool bypass flag recorded at Stash() time.
+  using KeySegmentList = std::vector<
+      std::tuple<DbIndex, std::string /* key*/, bool /* bypass_cooling */, DiskSegment>>;
 
   // List of item key db indices and hashes
   using KeyHashDbList = std::vector<std::tuple<DbIndex, uint64_t /* hash */, DiskSegment>>;
@@ -61,8 +70,10 @@ class SmallBins {
     return current_bin_.entries_.count(std::make_pair(dbid, key)) > 0;
   }
 
-  // Enqueue key/value pair for stash. Returns page to be stashed if it filled up.
-  std::optional<FilledBin> Stash(DbIndex dbid, std::string_view key, std::string_view value);
+  // Enqueue key/value pair for stash. Returns page to be stashed if it filled up. bypass_cooling is
+  // recorded per-key alongside the value and echoed back through ReportStashed().
+  std::optional<FilledBin> Stash(DbIndex dbid, std::string_view key, std::string_view value,
+                                 bool bypass_cooling);
 
   // Report that a stash succeeeded. Returns list of stored keys with calculated value locations.
   KeySegmentList ReportStashed(BinId id, DiskSegment segment);
@@ -99,8 +110,14 @@ class SmallBins {
   BinId last_bin_id_ = 0;
   FilledBin current_bin_{last_bin_id_};
 
-  // Pending stashes, their keys and value sizes
-  absl::flat_hash_map<unsigned /* id */, tiering::EntryMap<DiskSegment>> pending_bins_;
+  // In-page location of a pending value plus its per-key cooling-pool bypass flag.
+  struct PendingLocation {
+    DiskSegment segment;
+    bool bypass_cooling = false;
+  };
+
+  // Pending stashes, their keys and in-page locations
+  absl::flat_hash_map<unsigned /* id */, tiering::EntryMap<PendingLocation>> pending_bins_;
 
   // Map of bins that were stashed and should be deleted when number of entries reaches 0
   absl::flat_hash_map<size_t /*offset*/, StashInfo> stashed_bins_;

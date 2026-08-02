@@ -37,6 +37,10 @@ struct TieredStorageBase {
         : tiering::FragmentRef::SerializationDescr(params) {
     }
 
+    // When true, this stash bypasses the in-RAM cooling pool and is externalized straight to disk
+    // (see --tiered_writes_cooling_bypass).
+    bool bypass_cooling = false;
+
     size_t EstimatedSerializedSize() const;
     size_t Serialize(io::MutableBytes buffer) const;
   };
@@ -130,6 +134,12 @@ class TieredStorage : public TieredStorageBase {
     return is_closed_;
   }
 
+  // True if write/overwrite driven stashes should bypass the cooling pool and be externalized
+  // straight to disk. Only meaningful when the cooling pool is enabled.
+  bool BypassCoolingForWrites() const {
+    return config_.writes_cooling_bypass && config_.experimental_cooling;
+  }
+
  private:
   void ReadInternal(tiering::ReadId, const tiering::DiskSegment& segment,
                     const tiering::Decoder& decoder,
@@ -165,6 +175,7 @@ class TieredStorage : public TieredStorageBase {
     float upload_threshold;
     bool experimental_hash_offload;
     bool experimental_list_offload;
+    bool writes_cooling_bypass;
     uint32_t min_ttl_to_offload_ms;
   } config_;
 

@@ -27,7 +27,7 @@ size_t StashedValueSize(string_view value) {
 }  // namespace
 
 std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_view key,
-                                                     std::string_view value) {
+                                                     std::string_view value, bool bypass_cooling) {
   DCHECK_LT(value.size(), 2_KB);
 
   size_t value_bytes = StashedValueSize(value);
@@ -38,7 +38,8 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_v
   }
 
   current_bin_.bytes_ += value_bytes;
-  auto [it, inserted] = current_bin_.entries_.emplace(std::make_pair(dbid, key), string(value));
+  auto [it, inserted] = current_bin_.entries_.emplace(std::make_pair(dbid, key),
+                                                      BinValue{string(value), bypass_cooling});
   CHECK(inserted);
 
   return filled_bin;
@@ -65,11 +66,13 @@ size_t SmallBins::SerializeBin(FilledBin* bin, io::MutableBytes dest) {
   }
 
   // Store all values with sizes, n * (2 + x) bytes
-  for (const auto& [key, value] : bin->entries_) {
+  for (const auto& [key, bin_value] : bin->entries_) {
+    const std::string& value = bin_value.value;
     absl::little_endian::Store16(data, value.size());
     data += sizeof(uint16_t);
 
-    pending_set[key] = {size_t(data - dest.data()), value.size()};
+    pending_set[key] = {DiskSegment{size_t(data - dest.data()), value.size()},
+                        bin_value.bypass_cooling};
     memcpy(data, value.data(), value.size());
     data += value.size();
   }
@@ -94,11 +97,12 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
 
   uint16_t bytes = 0;
   SmallBins::KeySegmentList list;
-  for (auto& [key, sub_segment] : seg_map) {
+  for (auto& [key, location] : seg_map) {
+    const DiskSegment& sub_segment = location.segment;
     bytes += sub_segment.length;
 
     DiskSegment real_segment{segment.offset + sub_segment.offset, sub_segment.length};
-    list.emplace_back(key.first, key.second, real_segment);
+    list.emplace_back(key.first, key.second, location.bypass_cooling, real_segment);
   }
 
   stats_.stashed_entries_cnt += list.size();
@@ -120,7 +124,7 @@ std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashAborted(BinId
 std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view key) {
   auto& entries = current_bin_.entries_;
   if (auto it = entries.find(make_pair(dbid, key)); it != entries.end()) {
-    size_t stashed_size = StashedValueSize(it->second);
+    size_t stashed_size = StashedValueSize(it->second.value);
     DCHECK_GE(current_bin_.bytes_, stashed_size);
 
     current_bin_.bytes_ -= stashed_size;

@@ -64,6 +64,12 @@ ABSL_FLAG(bool, tiered_experimental_hash_support, false, "Experimental hash data
 
 ABSL_FLAG(bool, tiered_experimental_list_support, false, "Experimental list node offloading");
 
+ABSL_FLAG(bool, tiered_writes_cooling_bypass, false,
+          "If true, values offloaded as a result of a write/overwrite are externalized straight "
+          "to disk instead of being retained in the in-RAM cooling pool. Prevents write-heavy "
+          "bursts from evicting genuinely read-hot entries out of the cool pool; reads still "
+          "upload values back into RAM. Only takes effect when tiered_experimental_cooling is on");
+
 ABSL_FLAG(uint32, tiered_min_ttl_to_offload_ms, 5000,
           "Min remaining TTL in ms for a value to be eligible for offloading");
 
@@ -212,14 +218,21 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Load all values from bin by their hashes
   void Defragment(tiering::DiskSegment segment, string_view value);
 
-  void NotifyStashed(const OwnedEntryId& id,
+  void NotifyStashed(const OwnedEntryId& id, bool bypass_cooling,
                      const io::Result<tiering::DiskSegment>& segment) override {
     if (!segment) {
       VLOG(1) << "Stash failed " << segment.error().message();
       visit([this](auto id) { ClearStashPending(id); }, id);
-    } else {
-      visit([this, segment](auto id) { SetExternal(id, *segment); }, id);
+      return;
     }
+    // Only the own-page (single PrimeValue) stash can carry a cooling-bypass decision. Small bins
+    // record it per-key and consume it via ReportStashed; list nodes never enter the cooling pool.
+    visit(absl::Overload{
+              [&](const tiering::DbKeyId& key) { SetExternal(key, bypass_cooling, *segment); },
+              [&](uintptr_t bin_id) { SetExternal(tiering::SmallBins::BinId(bin_id), *segment); },
+              [&](const tiering::ListNodeId& node) { SetExternal(node, *segment); },
+          },
+          id);
   }
 
   bool NotifyFetched(const OwnedEntryId& id, tiering::DiskSegment segment,
@@ -257,8 +270,11 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   // Find entry by key in db_slice and store external segment in place of original value.
-  // Update memory stats
-  void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
+  // Update memory stats. When bypass_cooling is set (a write/overwrite driven stash, see
+  // --tiered_writes_cooling_bypass), the value goes disk-only instead of into the cooling pool, so
+  // write bursts don't evict read-hot entries. The intent is carried on the stash across the async
+  // gap (own-page: OpManager stash flag; small-bin: per-key in SmallBins), not a PrimeValue bit.
+  void SetExternal(OpManager::KeyRef key, bool bypass_cooling, tiering::DiskSegment segment) {
     UnblockBackpressure(key, true);
     if (auto* pv = Find(key.first, key.second); pv) {
       auto* stats = GetDbTableStats(key.first);
@@ -269,7 +285,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats_.total_stashes++;
 
       StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
-      if (ts_->config_.experimental_cooling) {
+
+      if (ts_->config_.experimental_cooling && !bypass_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
       } else {
@@ -281,13 +298,15 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  // Find bin by id and call SetExternal for all contained entries
+  // Find bin by id and call SetExternal for all contained entries, each with its own per-key
+  // cooling-bypass flag recorded in SmallBins (a bin may mix write-path and background entries).
   void SetExternal(tiering::SmallBins::BinId id, tiering::DiskSegment segment) {
-    for (const auto& [sub_dbid, sub_key, sub_segment] : ts_->bins_->ReportStashed(id, segment))
-      SetExternal({sub_dbid, sub_key}, sub_segment);
+    for (const auto& [sub_dbid, sub_key, sub_bypass, sub_segment] :
+         ts_->bins_->ReportStashed(id, segment))
+      SetExternal({sub_dbid, sub_key}, sub_bypass, sub_segment);
   }
 
-  // Finalize stash for a fragments identified by pointer
+  // Finalize stash for a fragments identified by pointer. List nodes never enter the cooling pool.
   void SetExternal(tiering::ListNodeId id, tiering::DiskSegment segment) {
     auto* stats = GetDbTableStats(std::get<0>(id));
 
@@ -523,14 +542,20 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
   tiering::OpManager::PendingId id;
   error_code ec;
 
+  // Carry the cooling-bypass intent across the async stash gap without a side table. For an
+  // own-page stash it rides the OpManager stash flag; for a small-bin stash it is recorded per-key
+  // inside SmallBins (a bin may mix write-path and background entries) and echoed via
+  // ReportStashed.
   if (OccupiesWholePages(est_size)) {  // large enough for own page
     id = KeyRef(dbid, key);
     auto serialize = absl::bind_front(&StashDescriptor::Serialize, &blobs);
-    ec = op_manager_->PrepareAndStash(id, est_size, serialize);
-  } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(blobs)); bin) {
+    ec = op_manager_->PrepareAndStash(id, est_size, serialize, blobs.bypass_cooling);
+  } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(blobs), blobs.bypass_cooling);
+             bin) {
     id = bin->id;
     auto serialize = absl::bind_front(&tiering::SmallBins::SerializeBin, bins_.get(), &*bin);
-    ec = op_manager_->PrepareAndStash(id, 4_KB, serialize);
+    // Bin-level flag is unused: the per-key bypass is recorded inside SmallBins (above).
+    ec = op_manager_->PrepareAndStash(id, 4_KB, serialize, /*bypass_cooling=*/false);
   } else {
     return;  // added to bin, no operations pending
   }
@@ -638,6 +663,7 @@ void TieredStorage::UpdateFromFlags() {
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
       .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_support),
       .experimental_list_offload = absl::GetFlag(FLAGS_tiered_experimental_list_support),
+      .writes_cooling_bypass = absl::GetFlag(FLAGS_tiered_writes_cooling_bypass),
       .min_ttl_to_offload_ms = absl::GetFlag(FLAGS_tiered_min_ttl_to_offload_ms),
   };
 
@@ -651,7 +677,7 @@ std::vector<std::string> TieredStorage::GetMutableFlagNames() {
                             FLAGS_tiered_max_pending_stash_bytes, FLAGS_tiered_offload_threshold,
                             FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
                             FLAGS_tiered_experimental_list_support,
-                            FLAGS_tiered_min_ttl_to_offload_ms);
+                            FLAGS_tiered_writes_cooling_bypass, FLAGS_tiered_min_ttl_to_offload_ms);
 }
 
 bool TieredStorage::ShouldOffload() const {
@@ -862,6 +888,11 @@ void StashPrimeValue(DbIndex dbid, std::string_view key, const PrimeKey& pk, Pri
           ts->ShouldStash(*pv, TieredStorage::StashContext{.key_expire_ms = pk.GetExpireTime()});
       blobs) {
     pv->SetStashPending(true);
+    // This is the write path (proactive offload driven by an edit). Request cooling-pool bypass so
+    // the value is externalized straight to disk. Background/scan-driven offload (RunOffloading)
+    // does not go through here and keeps the normal cooling behavior. The intent is carried on the
+    // StashDescriptor (not a PrimeValue bit) and recorded per-key inside StashPrimeValue.
+    blobs->bypass_cooling = ts->BypassCoolingForWrites();
     ts->StashPrimeValue(dbid, key, *blobs, backpressure);
   }
 }
@@ -885,7 +916,8 @@ void TieredStorage::StashPartialValue(tiering::PendingId id, const StashDescript
 
   auto serialize = absl::bind_front(&StashDescriptor::Serialize, &blobs);
 
-  error_code ec = op_manager_->PrepareAndStash(id, est_size, serialize);
+  // List nodes never enter the cooling pool, so cooling bypass does not apply.
+  error_code ec = op_manager_->PrepareAndStash(id, est_size, serialize, /*bypass_cooling=*/false);
   if (ec) {
     bool to_log = ec != errc::file_too_large && ec != errc::operation_would_block &&
                   ec != errc::operation_in_progress;

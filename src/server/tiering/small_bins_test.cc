@@ -4,6 +4,7 @@
 
 #include "server/tiering/small_bins.h"
 
+#include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
 
 #include <algorithm>
@@ -37,15 +38,38 @@ TEST_F(SmallBinsTest, SimpleStashRead) {
   // Fill single bin
   std::optional<SmallBins::FilledBin> bin;
   for (unsigned i = 0; !bin; i++)
-    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i), /*bypass_cooling=*/false);
   auto [id, data] = Serialize(*bin);
 
   // Verify cut locations point to correct values
   auto segments = bins_.ReportStashed(id, DiskSegment{0, 4_KB});
-  for (auto [dbid, key, location] : segments) {
+  for (auto [dbid, key, bypass_cooling, location] : segments) {
     auto value = "v"s + key.substr(1);
     EXPECT_EQ(value, data.substr(location.offset, location.length));
   }
+}
+
+// The per-key cooling-pool bypass flag must round-trip through Stash -> SerializeBin ->
+// ReportStashed, preserved per entry even when a single bin mixes bypassed and non-bypassed keys.
+TEST_F(SmallBinsTest, BypassCoolingRoundTrip) {
+  // Fill a single bin, alternating the bypass flag per key (bypass == key index is even).
+  std::optional<SmallBins::FilledBin> bin;
+  for (unsigned i = 0; !bin; i++)
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i), /*bypass_cooling=*/i % 2 == 0);
+  auto [id, data] = Serialize(*bin);
+
+  auto segments = bins_.ReportStashed(id, DiskSegment{0, 4_KB});
+  unsigned flagged = 0, unflagged = 0;
+  for (auto& [dbid, key, bypass_cooling, location] : segments) {
+    unsigned idx = 0;
+    CHECK(absl::SimpleAtoi(key.substr(1), &idx));
+    EXPECT_EQ(bypass_cooling, idx % 2 == 0) << key;
+    (bypass_cooling ? flagged : unflagged)++;
+  }
+
+  // The bin must actually mix both flag values, otherwise the per-key check is vacuous.
+  EXPECT_GT(flagged, 0u);
+  EXPECT_GT(unflagged, 0u);
 }
 
 TEST_F(SmallBinsTest, SimpleDeleteAbort) {
@@ -55,7 +79,7 @@ TEST_F(SmallBinsTest, SimpleDeleteAbort) {
   std::optional<SmallBins::FilledBin> bin;
   unsigned i = 0;
   for (; !bin; i++)
-    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i), /*bypass_cooling=*/false);
   auto [id, data] = Serialize(*bin);
 
   // Delete all even values
@@ -78,7 +102,7 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
   std::optional<SmallBins::FilledBin> bin;
   unsigned i = 0;
   for (; !bin; i++)
-    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i), /*bypass_cooling=*/false);
   auto [id, data] = Serialize(*bin);
 
   // Delete all even values
@@ -89,13 +113,13 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
 
   // Expect all odd keys still to exist
   EXPECT_EQ(segments.size(), i / 2);
-  for (auto& [dbid, key, segment] : segments) {
+  for (auto& [dbid, key, bypass_cooling, segment] : segments) {
     EXPECT_EQ(key, "k"s + data.substr(segment.offset, segment.length).substr(1));
   }
 
   // Delete all stashed values
   while (!segments.empty()) {
-    auto segment = std::get<2>(segments.back());
+    auto segment = std::get<DiskSegment>(segments.back());
     segments.pop_back();
     auto bin = bins_.Delete(segment);
 
@@ -113,7 +137,8 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
 TEST_F(SmallBinsTest, UpdateStatsAfterDelete) {
   // caused https://github.com/dragonflydb/dragonfly/issues/3240
   for (unsigned i = 0; i < 10; i++) {
-    auto spilled_bin = bins_.Stash(0, absl::StrCat("k", i), SmallString(128));
+    auto spilled_bin =
+        bins_.Stash(0, absl::StrCat("k", i), SmallString(128), /*bypass_cooling=*/false);
     ASSERT_FALSE(spilled_bin);
   }
 
