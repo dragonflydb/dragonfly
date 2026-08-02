@@ -1327,7 +1327,7 @@ struct TestEvictionPolicy {
     if (!evict_enabled)
       return 0;
 
-    auto it = hotb.probes.by_type.regular_buckets[0];
+    auto it = hotb.probes.regular_buckets[0];
     unsigned res = 0;
     for (; !it.is_done(); ++it) {
       LOG(INFO) << "Deleting " << it->first;
@@ -1703,10 +1703,10 @@ struct ShiftRightPolicy {
   }
 
   unsigned Evict(const U64Dash::HotBuckets& hotb, U64Dash* me) {
-    constexpr unsigned kNumStashBuckets = ABSL_ARRAYSIZE(hotb.probes.by_type.stash_buckets);
+    constexpr unsigned kNumStashBuckets = ABSL_ARRAYSIZE(hotb.probes.stash_buckets);
 
     unsigned stash_pos = hotb.key_hash % kNumStashBuckets;
-    auto stash_it = hotb.probes.by_type.stash_buckets[stash_pos];
+    auto stash_it = hotb.probes.stash_buckets[stash_pos];
     stash_it += (U64Dash::kSlotNum - 1);  // go to the last slot.
 
     uint64_t k = stash_it->first;

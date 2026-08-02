@@ -5,6 +5,7 @@
 
 #include <array>
 #include <ranges>
+#include <utility>
 #include <vector>
 
 #include "absl/random/random.h"
@@ -59,19 +60,14 @@ class DashTable : public detail::DashTableBase {
     struct ByType {
       bucket_iterator regular_buckets[kRegularBuckets];
       bucket_iterator stash_buckets[SegmentType::kStashBucketNum];
-    };
-
-    union Probes {
-      ByType by_type;
-      bucket_iterator arr[kNumBuckets];
-
-      Probes() : arr() {
-      }
     } probes;
 
     // id must be in the range [0, kNumBuckets).
     bucket_iterator at(unsigned id) const {
-      return probes.arr[id];
+      if (id < kRegularBuckets) {
+        return probes.regular_buckets[id];
+      }
+      return probes.stash_buckets[id - kRegularBuckets];
     }
 
     unsigned num_buckets;
@@ -1065,11 +1061,11 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       hotspot.key_hash = key_hash;
 
       for (unsigned j = 0; j < HotBuckets::kRegularBuckets; ++j) {
-        hotspot.probes.by_type.regular_buckets[j] = bucket_iterator{this, target_seg_id, bid[j]};
+        hotspot.probes.regular_buckets[j] = bucket_iterator{this, target_seg_id, bid[j]};
       }
 
       for (unsigned i = 0; i < SegmentType::kStashBucketNum; ++i) {
-        hotspot.probes.by_type.stash_buckets[i] =
+        hotspot.probes.stash_buckets[i] =
             bucket_iterator{this, target_seg_id, uint8_t(Policy::kBucketNum + i), 0};
       }
       hotspot.num_buckets = HotBuckets::kNumBuckets;
