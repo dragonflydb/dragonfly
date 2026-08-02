@@ -744,7 +744,6 @@ TEST_F(DflyEngineTest, Bug496) {
   });
 }
 
-// A second call before the value is replaced must not subtract the same bytes again.
 TEST_F(DflyEngineTest, ReduceHeapUsageIdempotent) {
   shard_set->RunBlockingInParallel([](EngineShard* shard) {
     auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
@@ -759,6 +758,7 @@ TEST_F(DflyEngineTest, ReduceHeapUsageIdempotent) {
 
     auto res = db.FindMutable({}, "key");
     res.post_updater.ReduceHeapUsage();
+    // A second call before the value is replaced must not subtract the same bytes again.
     res.post_updater.ReduceHeapUsage();
     res.post_updater.Run();
 

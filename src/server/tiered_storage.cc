@@ -88,9 +88,10 @@ constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
 // so we cap the number of concurrent defragmentation operations to avoid unbounded memory growth.
 constexpr uint32_t kMaxPendingDefrags = 100;
 
-// Called after setting new value in place of previous segment
-void RecordDeleted(const FragmentRef& fragment_ref, size_t tiered_len, string_view key,
-                   DbTable* db) {
+// Called when a value returns to RAM and its disk segment is dropped: the bytes go back to the
+// RAM ledger and leave the tiered counters.
+void AccountTieredUpload(const FragmentRef& fragment_ref, size_t tiered_len, string_view key,
+                         DbTable* db) {
   AccountObjectMemory(key, fragment_ref.ObjType(), fragment_ref.MallocUsed(), db);
   db->stats.tiered_entries--;
   db->stats.tiered_used_bytes -= tiered_len;
@@ -254,7 +255,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       }
     };
 
-    RecordDeleted(*pv, value.size(), key, db_slice_.GetDBTable(dbid));
+    AccountTieredUpload(*pv, value.size(), key, db_slice_.GetDBTable(dbid));
   }
 
   // Find entry by key in db_slice and store external segment in place of original value.
@@ -401,7 +402,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
     ++stats_.total_uploads;
     decoder->Upload(node);
-    // Node ids carry no key, so per-slot counters cannot follow them.
+    // TODO: per-slot accounting is skipped because node ids carry no slot/key information.
     auto* stats = GetDbTableStats(db_id);
     stats->AddTypeMemoryUsage(OBJ_LIST, node->sz);
     stats->tiered_entries--;
@@ -415,7 +416,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
       if (metrics.modified || pv->WasTouched()) {
         ++stats_.total_uploads;
         decoder->Upload(pv);
-        RecordDeleted(*pv, segment.length, key->second, db_slice_.GetDBTable(key->first));
+        AccountTieredUpload(*pv, segment.length, key->second, db_slice_.GetDBTable(key->first));
         return true;
       }
       pv->SetTouched(true);
@@ -570,7 +571,7 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
 
   tiering::DiskSegment segment = fragment_ref.GetExternalSlice();
   if (auto* cool = fragment_ref.GetCoolRecord(); cool) {
-    // Cooling is type agnostic, so the recovered value may be of any offloadable type.
+    // With experimental hash support a cool record may hold a hash, not only a string.
     DeleteCool(cool);
   }
   fragment_ref.ClearOffloaded();
