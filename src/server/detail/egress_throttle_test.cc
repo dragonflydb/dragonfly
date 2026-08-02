@@ -17,6 +17,7 @@ constexpr uint64_t kT0 = 1'700'000'000'000'000ULL;
 constexpr uint64_t kTau = 50'000;              // matches kBurstToleranceUs (50ms) in the .cc
 constexpr uint64_t kMicrosPerSec = 1'000'000;  // matches the .cc
 
+// Open protected functions to public for testing
 struct OpenEgressThrottler : EgressThrottler {
   explicit OpenEgressThrottler(size_t limit) : EgressThrottler(limit) {
   }
