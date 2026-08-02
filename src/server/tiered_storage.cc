@@ -375,17 +375,21 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
 
   tiering::Decoder::UploadMetrics metrics = decoder->GetMetrics();
 
-  // 1. When modified is true we MUST upload the value back to memory.
-  // 2. On the other hand, if read is caused by snapshotting we:
-  //    a. Don't fetch it if it is PrimeValue
-  //    b. We allow fetching for ListNodes because they need to be materialized.
-  //    Currently, our heuristic is not very smart, because we stop uploading any reads during
-  //    the snapshotting.
-  // TODO: to revisit this when we rewrite it with more efficient snapshotting algorithm.
+  // We must upload the value if it was modified
   bool should_upload = metrics.modified;
-  should_upload |=
-      (ts_->UploadBudget() > int64_t(metrics.estimated_mem_usage)) &&
-      (!SliceSnapshot::IsSnaphotInProgress() || std::holds_alternative<tiering::ListNodeId>(id));
+
+  // Snapshotting casuses reads that are not from clients, so ignore request to upload
+  // List tiering uploads on it own rules from the ends
+  const bool upload_disabled =
+      SliceSnapshot::IsSnaphotInProgress() && !std::holds_alternative<tiering::ListNodeId>(id);
+
+  // Give way for upload by reducing cooled queue if needed
+  constexpr size_t kUploadReclaimMargin = 1_MB;
+  int64_t needed = int64_t(metrics.estimated_mem_usage);
+  if (ts_->UploadBudget() <= needed)
+    RetireColdEntries(needed + kUploadReclaimMargin);
+
+  should_upload |= !upload_disabled && ts_->UploadBudget() > needed;
 
   if (!should_upload)
     return false;

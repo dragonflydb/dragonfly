@@ -1231,6 +1231,89 @@ TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
       << "Cool queue should be flushed after MEMORY DECOMMIT COOL";
 }
 
+// Ensure that uploading still happens even if the memory if occupied by cool entries.
+// Uploading should start evicting those to make room for itself, otherwise the cache flow
+// might be blocked unless the cold entries are read or evicted due to real memory pressure
+TEST_F(TieredStorageTest, CoolQueueDoesNotBlockUpload) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // always offload
+  SetFlag(&FLAGS_tiered_upload_threshold, 0.5f);   // upload only when >50% of maxmemory is free
+  UpdateFromFlags();
+
+  const string value = BuildString(tiering::kPageSize);  // occupies a whole page
+
+  struct ShardView {
+    int64_t upload_budget = 0;
+    size_t cool_bytes = 0;
+    ssize_t memory_budget = 0;
+  };
+  auto view = [&] {
+    ShardView v;
+    pp_->at(0)->AwaitBrief([&] {
+      EngineShard* shard = EngineShard::tlocal();
+      auto* ts = shard->tiered_storage();
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+      v.upload_budget = ts->UploadBudget();
+      v.cool_bytes = ts->CoolMemoryUsage();
+      v.memory_budget = db.memory_budget();
+    });
+    return v;
+  };
+
+  // Phase A: create a few values and push them fully to disk (out of the cool queue), so that
+  // reading them later must go through the disk-fetch/upload path in NotifyFetched.
+  const int kExt = 10;
+  for (int i = 0; i < kExt; i++)
+    Run({"SET", absl::StrCat("ext:", i), value});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kExt; });
+
+  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->ReclaimMemory(SIZE_MAX); });
+  ASSERT_EQ(view().cool_bytes, 0u) << "cool queue should be flushed";
+
+  // Phase B: build a large cool pile from other keys. These stay resident in the cool queue.
+  const int kCool = 300;
+  for (int i = 0; i < kCool; i++)
+    Run({"SET", absl::StrCat("cool:", i), value});
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().db_stats[0].tiered_entries >= kExt + kCool; });
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.cold_storage_bytes > 0; });
+
+  // Shrink maxmemory so that free memory hovers just above the upload threshold, i.e.
+  // UploadBudget() is slightly negative while the cool pile is large and fully reclaimable.
+  const int64_t kMargin = 128 * 1024;
+  pp_->at(0)->AwaitBrief([&] {
+    EngineShard* shard = EngineShard::tlocal();
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    int64_t used = max_memory_limit.load() - db.memory_budget();  // single shard
+    // UploadBudget = (max - used) - 0.5 * max = 0.5 * max - used; solve for == -kMargin.
+    max_memory_limit = 2 * (used - kMargin);
+  });
+
+  // Let the heartbeat recompute the budget and confirm the problematic state.
+  ExpectConditionWithinTimeout([&] { return view().upload_budget < 0; });
+  auto before = view();
+  ASSERT_LT(before.upload_budget, 0);
+  ASSERT_GT(before.cool_bytes, size_t(kMargin))
+      << "cool pile should dwarf the deficit and be reclaimable";
+  const size_t uploads_before = GetMetrics().tiered_stats.total_uploads;
+
+  // Access the fully-external values twice each (two touches trigger an upload).
+  for (int rep = 0; rep < 2; rep++) {
+    for (int i = 0; i < kExt; i++)
+      EXPECT_EQ(Run({"GET", absl::StrCat("ext:", i)}), value);
+  }
+
+  // With the fix, reads reclaim the stale cool pile and bring accessed values back to RAM.
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.total_uploads > uploads_before; });
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.tiered_stats.total_uploads, uploads_before)
+      << "negative UploadBudget with a large cool queue blocked uploads";
+  EXPECT_LT(metrics.tiered_stats.cold_storage_bytes, before.cool_bytes)
+      << "cool pile was never reclaimed to make room for uploads";
+}
+
 // bitops commands must work on values that tiering has offloaded to disk.
 // PureDiskTSTest makes a stashed value fully external (no cool in-memory copy).
 
