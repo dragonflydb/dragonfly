@@ -26,6 +26,9 @@ jobs:
       contents: read   # required to check out the cache helper script
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Ensures the sourced script is from the trusted target branch revision
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
       - name: Reap caches
         shell: bash
         env:

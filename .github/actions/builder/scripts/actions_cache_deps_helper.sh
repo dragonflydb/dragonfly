@@ -50,7 +50,6 @@ actions_cache_deps_expand_paths() {
   local -a cache_paths
   local -a matched_paths
 
-  shopt -s nullglob
   mapfile -t cache_paths <<< "$paths"
   output_paths=()
   for cache_path in "${cache_paths[@]}"; do
@@ -71,6 +70,13 @@ actions_cache_deps_validate_restore() {
   manifest_tool="$(dirname "${BASH_SOURCE[0]}")/deps_cache_manifest.py"
   cd "$workspace" || return
   actions_cache_deps_expand_paths "$paths" expanded_cache_paths
+  #  Handle a broken cache restore restore where none of the expected paths exist after extraction.
+  if ((${#expanded_cache_paths[@]} == 0)); then
+    echo "::warning title=deps-cache::Restored dependency cache contains none of the expected paths; rebuilding dependencies locally"
+    rm -f "$manifest_path"
+    echo "deps_cache_is_valid=false" >> "$GITHUB_OUTPUT"
+    return
+  fi
   python3 "$manifest_tool" validate \
     --root "$workspace" --manifest "$manifest_path" \
     "${expanded_cache_paths[@]}" || validation_status=$?
