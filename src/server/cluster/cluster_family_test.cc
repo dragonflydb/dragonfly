@@ -654,12 +654,18 @@ class ClusterMemoryTest : public ClusterFamilyTest {
     int64_t total_reads = 0;
     int64_t total_writes = 0;
     int64_t memory_bytes = 0;
+    int64_t tiered_bytes = 0;  // reported only when non-zero
   };
 
   SlotInfo GetSlotInfo(SlotId slot) {
     auto resp = RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)});
     const auto& row = resp.GetVec()[0].GetVec();
-    return SlotInfo{*row[2].GetInt(), *row[4].GetInt(), *row[6].GetInt(), *row[8].GetInt()};
+    SlotInfo info{*row[2].GetInt(), *row[4].GetInt(), *row[6].GetInt(), *row[8].GetInt()};
+    if (row.size() >= 11) {
+      EXPECT_EQ(row[9], "tiered_bytes");
+      info.tiered_bytes = *row[10].GetInt();
+    }
+    return info;
   }
 
   // GETSLOTINFO adds a fixed per-key table-space term.
@@ -672,10 +678,14 @@ class ClusterMemoryTest : public ClusterFamilyTest {
     SlotInfo info = GetSlotInfo(slot);
     EXPECT_EQ(info.key_count, 0);
     EXPECT_EQ(info.memory_bytes, 0);
+    EXPECT_EQ(info.tiered_bytes, 0);
   }
 
+  // The slot ledgers must mirror the db-wide ones.
   void ExpectSlotMirrorsDb(SlotId slot) {
-    EXPECT_EQ(RawSlotMemory(slot), int64_t(GetMetrics().db_stats[0].obj_memory_usage));
+    auto db_stats = GetMetrics().db_stats[0];
+    EXPECT_EQ(RawSlotMemory(slot), int64_t(db_stats.obj_memory_usage));
+    EXPECT_EQ(GetSlotInfo(slot).tiered_bytes, int64_t(db_stats.tiered_used_bytes));
   }
 };
 
@@ -729,6 +739,7 @@ TEST_F(ClusterTieredTest, SlotCountersFollowOffloadAndDelete) {
   WaitForOffload(1);
 
   EXPECT_EQ(RawSlotMemory(slot), 0);
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
 
   EXPECT_EQ(CheckedInt({"DEL", kKey}), 1);
   ExpectSlotEmpty(slot);
@@ -758,6 +769,7 @@ TEST_F(ClusterTieredTest, SlotCountersReleasedOnFlushSlots) {
 
   EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
   WaitForOffload(1);
+  ASSERT_GT(GetSlotInfo(slot).tiered_bytes, 0);
 
   EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", absl::StrCat(slot), absl::StrCat(slot)}),
             "OK");
@@ -772,6 +784,7 @@ TEST_F(ClusterTieredTest, SlotCountersReleasedOnExpiry) {
 
   EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
   WaitForOffload(1);
+  ASSERT_GT(GetSlotInfo(slot).tiered_bytes, 0);
 
   EXPECT_EQ(CheckedInt({"PEXPIRE", kKey, "10"}), 1);
   AdvanceTime(100);
@@ -801,6 +814,7 @@ TEST_F(ClusterTieredTest, SlotCountersFollowUploadAndAppend) {
 TEST_F(ClusterTieredTest, SlotCountersReleasedOnConfigSlotRemoval) {
   Run({"debug", "populate", "20", "key", "3000", "SLOTS", "1", "1"});
   WaitForOffload(20);
+  ASSERT_GT(GetSlotInfo(1).tiered_bytes, 0);
 
   ConfigSingleNodeCluster("abc");
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
@@ -819,7 +833,8 @@ class ClusterTieredCoolingTest : public ClusterTieredTest {
   }
 };
 
-// Cool values are tracked by the cool cache only, so the slot ledger does not include them.
+// A cool value is invisible to the RAM ledger but still holds its disk extent, so it counts
+// in tiered_bytes only.
 TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnFlushSlots) {
   const string kKey = "cool-flush";
   const SlotId slot = KeySlot(kKey);
@@ -829,6 +844,7 @@ TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnFlushSlots) {
 
   ExpectSlotMirrorsDb(slot);
   EXPECT_EQ(RawSlotMemory(slot), 0);
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
 
   EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", absl::StrCat(slot), absl::StrCat(slot)}),
             "OK");
@@ -838,19 +854,21 @@ TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnFlushSlots) {
   EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
 }
 
-// Warming a cool value up returns its bytes to the ledger, accounted exactly once.
+// Warming a cool value up returns its bytes to the RAM ledger and releases the disk extent.
 TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnWarmup) {
   const string kKey = "cool-warm";
   const SlotId slot = KeySlot(kKey);
 
   EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
   WaitForOffload(1);
+  ASSERT_GT(GetSlotInfo(slot).tiered_bytes, 0);
   StopOffloading();
 
   EXPECT_EQ(Run({"GET", kKey}), string(4096, 'x'));
 
   ExpectSlotMirrorsDb(slot);
   EXPECT_GT(RawSlotMemory(slot), 0);
+  EXPECT_EQ(GetSlotInfo(slot).tiered_bytes, 0);
 }
 
 #endif  // WITH_TIERING

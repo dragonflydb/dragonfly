@@ -566,7 +566,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
       // inside InitSet is reported to the client as OOM and must leave the value readable.
       PrimeValue replacement;
       InitSet(vals, &replacement);
-      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, &co);
+      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &co);
       co = std::move(replacement);
     } else {
       InitSet(vals, &co);

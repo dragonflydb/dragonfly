@@ -47,6 +47,7 @@ struct SlotStats {
   uint64_t total_reads = 0;
   uint64_t total_writes = 0;
   uint64_t memory_bytes = 0;
+  uint64_t tiered_bytes = 0;
   SlotStats& operator+=(const SlotStats& o);
 };
 

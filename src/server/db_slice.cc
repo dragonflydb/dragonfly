@@ -370,24 +370,37 @@ template <typename F> struct CallbackConsumer : public DbSlice::ChangeConsumerIn
 
 }  // namespace
 
+namespace {
+
+void UpdateSlotStat(string_view key, int64_t delta, DbTable* db, uint64_t SlotStats::*stat,
+                    string_view name) {
+  if (delta == 0 || !db->slots_stats)
+    return;
+
+  const SlotId sid = KeySlot(key);
+  uint64_t& value = db->slots_stats[sid].*stat;
+  if (delta < 0 && value < uint64_t(-delta)) {
+    LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot " << name << ": " << value << " + "
+                           << delta << ", slot: " << sid;
+    delta = -int64_t(value);
+  }
+  value += delta;
+}
+
+}  // namespace
+
 void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable* db) {
   DCHECK_NE(db, nullptr);
   if (delta == 0)
     return;
 
   db->stats.AddTypeMemoryUsage(type, delta);
+  UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage");
+}
 
-  if (!db->slots_stats)
-    return;
-
-  const SlotId sid = KeySlot(key);
-  uint64_t& slot_memory = db->slots_stats[sid].memory_bytes;
-  if (delta < 0 && slot_memory < uint64_t(-delta)) {
-    LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot memory usage: " << slot_memory
-                           << " + " << delta << ", slot: " << sid;
-    delta = -int64_t(slot_memory);
-  }
-  slot_memory += delta;
+void AccountSlotTieredBytes(string_view key, int64_t delta, DbTable* db) {
+  DCHECK_NE(db, nullptr);
+  UpdateSlotStat(key, delta, db, &SlotStats::tiered_bytes, "tiered usage");
 }
 
 #define ADD(x) (x) += o.x
@@ -1214,9 +1227,9 @@ pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool ca
   return {rel_ms, ms_timestamp};
 }
 
-void DbSlice::ReleaseOffloadedValue(DbIndex db_ind, PrimeValue* pv) {
+void DbSlice::ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv) {
   if (pv->IsExternal())
-    shard_owner()->tiered_storage()->Delete(db_ind, pv);
+    shard_owner()->tiered_storage()->Delete(db_ind, key, pv);
 }
 
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
@@ -1274,7 +1287,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
 
   auto& it = res.it;
 
-  ReleaseOffloadedValue(cntx.db_index, &it->second);
+  ReleaseOffloadedValue(cntx.db_index, key, &it->second);
   it->second = std::move(obj);
 
   if (expire_at_ms) {
@@ -1753,7 +1766,7 @@ void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> 
     do {
       cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
         if (it->second.IsExternal()) {
-          tiered_storage->Delete(index, &it->second);
+          tiered_storage->Delete(index, it->first.GetSlice(&scratch), &it->second);
         } else if (it->second.HasStashPending()) {
           tiered_storage->CancelStash(std::make_pair(index, it->first.GetSlice(&scratch)),
                                       &it->second);
@@ -1973,7 +1986,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
     string_view key = del_it->first.GetSlice(&scratch);
     shard_owner()->tiered_storage()->CancelStash(std::make_pair(table->index, key), &pv);
   } else if (pv.IsExternal()) {
-    shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
+    shard_owner()->tiered_storage()->Delete(table->index, del_it.key(), &del_it->second);
   }
 
   ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();
