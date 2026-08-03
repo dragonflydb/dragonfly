@@ -383,8 +383,10 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable*
   const SlotId sid = KeySlot(key);
   uint64_t& slot_memory = db->slots_stats[sid].memory_bytes;
   if (delta < 0 && slot_memory < uint64_t(-delta)) {
-    LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot memory usage: " << slot_memory
-                           << " + " << delta << ", slot: " << sid;
+    // Legacy glog used in release builds does not support LOG_EVERY_T(DFATAL, ...).
+    LOG_EVERY_T(ERROR, 1) << "Encountered underflow of per-slot memory usage: " << slot_memory
+                          << " + " << delta << ", slot: " << sid;
+    DCHECK(false);
     delta = -int64_t(slot_memory);
   }
   slot_memory += delta;
