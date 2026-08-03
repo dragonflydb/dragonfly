@@ -317,15 +317,21 @@ void CommandContext::ReuseInternal() {
   cid_ = nullptr;
   tx_ = nullptr;
   tail_args_ = {};
-  start_time_usec = 0;
+  start_cycle = 0;
 }
 
 void CommandContext::RecordLatency(const facade::ParsedArgs& tail_args) const {
-  DCHECK_GT(start_time_usec, 0u);
-  int64_t after = base::CycleClock::ToUsec(base::CycleClock::Now());
+  DCHECK_GT(start_cycle, 0u);
+  const uint64_t end_cycle = base::CycleClock::Now();
+  if (end_cycle < start_cycle) {
+    LOG(ERROR) << "Cycle clock moved backwards while recording " << cid_->name()
+               << " latency: start=" << start_cycle << ", end=" << end_cycle
+               << ", frequency=" << base::CycleClock::Frequency();
+    return;
+  }
 
   ServerState* ss = ServerState::SafeTLocal();  // Might have migrated thread, read after invocation
-  int64_t execution_time_usec = after - start_time_usec;
+  uint64_t execution_time_usec = base::CycleClock::ToUsec(end_cycle - start_cycle);
 
   cid_->RecordLatency(ss->thread_index(), execution_time_usec);
   DCHECK(conn_cntx_ != nullptr);
