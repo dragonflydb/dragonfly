@@ -1,6 +1,8 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <absl/cleanup/cleanup.h>
+
 #include <random>
 
 #include "base/gtest.h"
@@ -1215,6 +1217,168 @@ TEST_F(StringFamilyTest, PendingReadDrainNonOrphaned) {
     CompactObj::DrainPendingReads();
     cobj.Reset();
   });
+}
+
+// Overwriting an existing key with an already-past expiration deletes it and must emit the
+// expired keyspace event, like a regular expiry does. Regression: the delete was silent, so a
+// subscriber waiting for the event blocked forever.
+TEST_F(StringFamilyTest, SetPastExpiryEmitsExpiredEvent) {
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  // Scoped so a fatal assertion below cannot leak the setting into other tests.
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  Run({"SET", "foo", "bar"});
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  EXPECT_EQ(Run({"SET", "foo", "bar2", "PXAT", "1"}), "OK");
+  EXPECT_THAT(Run({"GET", "foo"}), ArgType(RespExpr::NIL));
+
+  // Flush all async dispatch callbacks so the subscriber's thread receives the message.
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_EQ("__keyevent@0__:expired", msg.channel);
+  EXPECT_EQ("foo", msg.message);
+}
+
+// A past expiration must not bypass the NX/XX/GET conditions or the parsing of trailing options.
+TEST_F(StringFamilyTest, SetPastExpiryHonorsConditions) {
+  // NX on an existing key: the condition fails first - key kept, nil reply.
+  Run({"SET", "foo", "bar"});
+  EXPECT_THAT(Run({"SET", "foo", "x", "NX", "PXAT", "1"}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"GET", "foo"}), "bar");
+
+  // NX on a missing key: nothing to store (the value would already be expired), OK reply.
+  EXPECT_EQ(Run({"SET", "nokey", "x", "NX", "PXAT", "1"}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "nokey"}), IntArg(0));
+
+  // XX on a missing key: nil, nothing created.
+  EXPECT_THAT(Run({"SET", "nokey2", "x", "XX", "PXAT", "1"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"EXISTS", "nokey2"}), IntArg(0));
+
+  // GET returns the old value while the key is deleted.
+  EXPECT_EQ(Run({"SET", "foo", "x", "GET", "PXAT", "1"}), "bar");
+  EXPECT_THAT(Run({"EXISTS", "foo"}), IntArg(0));
+
+  // Options after the past expiry are still parsed: trailing garbage is a syntax error.
+  Run({"SET", "foo2", "bar"});
+  EXPECT_THAT(Run({"SET", "foo2", "x", "PXAT", "1", "BOGUS"}), ErrArg("syntax error"));
+  EXPECT_EQ(Run({"GET", "foo2"}), "bar");
+
+  // Unconditional set on a missing key: OK, nothing stored.
+  EXPECT_EQ(Run({"SET", "nokey3", "x", "PXAT", "1"}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "nokey3"}), IntArg(0));
+}
+
+// An expiration equal to the current time is already elapsed: the key is deleted, not persisted.
+TEST_F(StringFamilyTest, SetExpiryAtNowDeletes) {
+  Run({"SET", "foo", "bar"});
+  EXPECT_EQ(Run({"SET", "foo", "x", "PXAT", absl::StrCat(TEST_current_time_ms)}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "foo"}), IntArg(0));
+}
+
+// GETEX with an already-past expiration deletes the key and must emit the expired event.
+TEST_F(StringFamilyTest, GetExPastExpiryEmitsExpiredEvent) {
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  // Scoped so a fatal assertion below cannot leak the setting into other tests.
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  Run({"SET", "foo", "bar"});
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  EXPECT_EQ(Run({"GETEX", "foo", "PXAT", "1"}), "bar");
+  EXPECT_THAT(Run({"EXISTS", "foo"}), IntArg(0));
+
+  // Flush all async dispatch callbacks so the subscriber's thread receives the message.
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_EQ("__keyevent@0__:expired", msg.channel);
+  EXPECT_EQ("foo", msg.message);
+}
+
+// Memcached paths that delete a key due to an already-past expiration must emit the expired
+// event: SET/REPLACE with a past absolute exptime and GAT with a past timestamp.
+TEST_F(StringFamilyTest, McPastExpiryEmitsExpiredEvent) {
+  using MP = facade::MemcacheParser;
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  // Scoped so a fatal assertion below cannot leak the setting into other tests.
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  MCArgs past_args{"new"};
+  past_args.ttl = std::chrono::seconds{TEST_current_time_ms / 1000 - 100};
+  const string past_ts = absl::StrCat(TEST_current_time_ms / 1000 - 100);
+  auto flush = [&] { pp_->AwaitFiberOnAll([](util::ProactorBase*) {}); };
+
+  // In subscriber mode (single_response_ = false) replies keep their raw RESP form.
+  EXPECT_THAT(RunMC(MP::SET, "k1", MCArgs{"val"}), ElementsAre("+STORED"));
+  EXPECT_THAT(RunMC(MP::SET, "k1", past_args), ElementsAre("+STORED"));
+  flush();
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  EXPECT_EQ("k1", GetPublishedMessage("IO1", 0).message);
+
+  EXPECT_THAT(RunMC(MP::SET, "k2", MCArgs{"val"}), ElementsAre("+STORED"));
+  EXPECT_THAT(RunMC(MP::REPLACE, "k2", past_args), ElementsAre("+STORED"));
+  flush();
+  ASSERT_EQ(2u, SubscriberMessagesLen("IO1"));
+  EXPECT_EQ("k2", GetPublishedMessage("IO1", 1).message);
+
+  EXPECT_THAT(RunMC(MP::SET, "k3", MCArgs{"val"}), ElementsAre("+STORED"));
+  EXPECT_THAT(GetMC(MP::GAT, {past_ts, "k3"}), ElementsAre("END"));
+  flush();
+  ASSERT_EQ(3u, SubscriberMessagesLen("IO1"));
+  EXPECT_EQ("k3", GetPublishedMessage("IO1", 2).message);
+}
+
+// Memcached SET/ADD/REPLACE with an already-past absolute exptime: the store conditions are
+// honored first, then the delete-instead-of-store semantics apply.
+TEST_F(StringFamilyTest, McSetPastExpiry) {
+  using MP = facade::MemcacheParser;
+  // RunMC bypasses the text parser, so ttl is passed through as absolute unix seconds.
+  MCArgs past_args{"new"};
+  past_args.ttl = std::chrono::seconds{TEST_current_time_ms / 1000 - 100};
+
+  // SET deletes the existing key and reports STORED.
+  EXPECT_THAT(RunMC(MP::SET, "key", MCArgs{"val"}), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::SET, "key", past_args), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::GET, "key"), ElementsAre("END"));
+
+  // ADD on an existing key fails the NX condition and keeps the key.
+  EXPECT_THAT(RunMC(MP::SET, "key", MCArgs{"val"}), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::ADD, "key", past_args), ElementsAre("NOT_STORED"));
+  EXPECT_THAT(RunMC(MP::GET, "key"), ElementsAre("VALUE key 0 3", "val", "END"));
+
+  // ADD on a missing key: nothing to create, reported as stored.
+  EXPECT_THAT(RunMC(MP::ADD, "miss", past_args), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::GET, "miss"), ElementsAre("END"));
+
+  // REPLACE deletes the existing key; on a missing key the XX condition fails.
+  EXPECT_THAT(RunMC(MP::REPLACE, "key", past_args), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::GET, "key"), ElementsAre("END"));
+  EXPECT_THAT(RunMC(MP::REPLACE, "miss2", past_args), ElementsAre("NOT_STORED"));
 }
 
 }  // namespace dfly

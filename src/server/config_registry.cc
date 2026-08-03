@@ -53,13 +53,22 @@ auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResul
 
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag) << config_name;
+  const string prev_value = flag->CurrentValue();
   if (string error; !flag->ParseFrom(value, &error)) {
     LOG(WARNING) << error;
     return SetResult::INVALID;
   }
 
   bool success = !cb || cb(*flag);
-  return success ? SetResult::OK : SetResult::INVALID;
+  if (!success) {
+    // Roll back, otherwise the rejected value would stay observable via CONFIG GET and raw flag
+    // reads. Only the flag value is restored: a callback must validate before applying any side
+    // effects, since those are not rolled back here.
+    string error;
+    CHECK(flag->ParseFrom(prev_value, &error)) << error;
+    return SetResult::INVALID;
+  }
+  return SetResult::OK;
 }
 
 absl::CommandLineFlag* ConfigRegistry::GetFlag(std::string_view config_name) {

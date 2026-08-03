@@ -4,6 +4,8 @@
 
 #include "server/generic_family.h"
 
+#include <absl/cleanup/cleanup.h>
+
 extern "C" {
 #include "redis/rdb.h"
 }
@@ -2303,7 +2305,13 @@ TEST_F(GenericFamilyTest, SortByNosortStoreInMulti) {
 // Heartbeat-driven key expiry must not call SendMessages inside a fiber-atomic section.
 TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
   // Enable expired-key keyspace notifications.
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
   Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  // Scoped so a fatal assertion below cannot leak the setting into other tests.
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
 
   single_response_ = false;
   auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
@@ -2332,9 +2340,81 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
   const auto& msg = GetPublishedMessage("IO1", 0);
   EXPECT_EQ("__keyevent@0__:expired", msg.channel);
   EXPECT_EQ("mykey", msg.message);
+}
 
-  // Restore the flag so it doesn't bleed into other tests.
+// EXPIRE with an already-past time deletes the key and must emit the expired keyspace event,
+// like a regular expiry does. Regression: the delete was silent, so a subscriber waiting for
+// the event blocked forever.
+TEST_F(GenericFamilyTest, ExpirePastEmitsExpiredEvent) {
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  // Scoped so a fatal assertion below cannot leak the setting into other tests.
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  Run({"SET", "foo", "1"});
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  EXPECT_THAT(Run({"EXPIRE", "foo", "-1"}), IntArg(1));
+  EXPECT_THAT(Run({"GET", "foo"}), ArgType(RespExpr::NIL));
+
+  // Flush all async dispatch callbacks so the subscriber's thread receives the message.
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_EQ("__keyevent@0__:expired", msg.channel);
+  EXPECT_EQ("foo", msg.message);
+
+  // The immediate delete counts as an expiration in the stats, like a regular expiry.
+  EXPECT_GE(GetMetrics().events.expired_keys, 1u);
+}
+
+// A rejected CONFIG SET must not leave the invalid value observable: CONFIG GET has to keep
+// returning the previous value (a poisoned raw flag would also crash later flag consumers).
+TEST_F(GenericFamilyTest, ConfigSetRejectedValueRollsBack) {
+  auto initial = Run({"CONFIG", "GET", "notify_keyspace_events"});
+  ASSERT_THAT(initial, ArrLen(2));
+  const string prev = initial.GetVec()[1].GetString();
+
+  EXPECT_THAT(Run({"CONFIG", "SET", "notify_keyspace_events", "nonsense"}),
+              ErrArg("CONFIG SET failed"));
+  auto resp = Run({"CONFIG", "GET", "notify_keyspace_events"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("notify_keyspace_events", prev));
+}
+
+// CONFIG SET notify_keyspace_events must apply to every namespace, not only the default one,
+// and namespaces created afterwards must inherit the current setting.
+TEST_F(GenericFamilyTest, ConfigNotifyAppliesToAllNamespaces) {
+  Namespace* ns = pp_->at(0)->Await([] { return &namespaces->GetOrInsert("ns1"); });
+
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  // Scoped so a fatal assertion below cannot leak the setting into other tests.
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    EXPECT_TRUE(ns->GetDbSlice(i).IsExpiredEventsRecording()) << i;
+  }
+
+  Namespace* late_ns = pp_->at(0)->Await([] { return &namespaces->GetOrInsert("ns2"); });
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    EXPECT_TRUE(late_ns->GetDbSlice(i).IsExpiredEventsRecording()) << i;
+  }
+
   Run({"CONFIG", "SET", "notify_keyspace_events", ""});
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    EXPECT_FALSE(ns->GetDbSlice(i).IsExpiredEventsRecording()) << i;
+    EXPECT_FALSE(late_ns->GetDbSlice(i).IsExpiredEventsRecording()) << i;
+  }
 }
 
 }  // namespace dfly

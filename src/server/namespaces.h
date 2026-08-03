@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/node_hash_map.h>
+#include <absl/functional/function_ref.h>
 
 #include <memory>
 #include <string>
@@ -58,6 +59,11 @@ class Namespaces {
 
   Namespace& GetDefaultNamespace() const;  // No locks
   Namespace& GetOrInsert(std::string_view ns) ABSL_LOCKS_EXCLUDED(mu_);
+
+  // Applies f to the given shard's DbSlice of every namespace. f runs under the namespaces
+  // lock: it must not yield and must not call back into Namespaces.
+  void ForEachDbSliceOnShard(ShardId sid, absl::FunctionRef<void(DbSlice&)> f)
+      ABSL_LOCKS_EXCLUDED(mu_);
 
  private:
   util::fb2::SharedMutex mu_{};

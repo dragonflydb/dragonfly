@@ -45,12 +45,17 @@ class Listener : public util::ListenerInterface {
   // ReconfigureTLS MUST be called from the same proactor as the listener.
   bool ReconfigureTLS();
 
+  // Replaces the TLS context with ctx (or drops it for a privileged interface when
+  // no_tls_on_admin_port is set). Takes its own reference on ctx and never fails, so a set of
+  // listeners can be switched without partial state. MUST be called from the listener proactor.
+  void ApplyTlsCtx(SSL_CTX* ctx);
+
   // Returns the TLS certificate metadata currently used by this listener.
   // nullptr if TLS is not configured or the certificate could not be parsed.
   std::shared_ptr<const TlsCertInfo> GetTlsCertInfo() const;
 
-  // Returns thread-local dynamic memory usage by TLS.
-  static size_t TLSUsedMemoryThreadLocal();
+  // Returns process-wide dynamic memory usage by TLS.
+  static size_t TLSUsedMemory();
   static uint64_t RefusedConnectionMaxClientsCount();
 
   bool IsPrivilegedInterface() const;

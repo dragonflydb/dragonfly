@@ -799,6 +799,12 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
     }
   }
 
+  // An already-past expiration deleted the key: emit the expired keyspace event (after the
+  // journal record above, so a suspending publish cannot separate the mutation from it).
+  if (res.ok() && res.value() == -1) {
+    db_slice.SendExpiredKeyEvent(op_args.db_cntx, key);
+  }
+
   return res.status();
 }
 

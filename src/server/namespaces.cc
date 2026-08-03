@@ -81,6 +81,13 @@ Namespace& Namespaces::GetDefaultNamespace() const {
   return *default_namespace_;
 }
 
+void Namespaces::ForEachDbSliceOnShard(ShardId sid, absl::FunctionRef<void(DbSlice&)> f) {
+  dfly::SharedLock guard(mu_);
+  for (auto& entry : ABSL_TS_UNCHECKED_READ(namespaces_)) {
+    f(entry.second.GetDbSlice(sid));
+  }
+}
+
 Namespace& Namespaces::GetOrInsert(std::string_view ns) {
   {
     // Try to look up under a shared lock
