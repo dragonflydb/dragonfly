@@ -380,8 +380,10 @@ void UpdateSlotStat(string_view key, int64_t delta, DbTable* db, uint64_t SlotSt
   const SlotId sid = KeySlot(key);
   uint64_t& value = db->slots_stats[sid].*stat;
   if (delta < 0 && value < uint64_t(-delta)) {
-    LOG_EVERY_T(DFATAL, 1) << "Encountered underflow of per-slot " << name << ": " << value << " + "
-                           << delta << ", slot: " << sid;
+    // Legacy glog used in release builds does not support LOG_EVERY_T(DFATAL, ...).
+    LOG_EVERY_T(ERROR, 1) << "Encountered underflow of per-slot " << name << ": " << value << " + "
+                          << delta << ", slot: " << sid;
+    DCHECK(false);
     delta = -int64_t(value);
   }
   value += delta;
