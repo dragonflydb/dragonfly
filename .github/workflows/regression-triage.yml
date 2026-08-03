@@ -1,0 +1,111 @@
+name: Regression Failure Triage
+
+# Fires after "Regression Tests" or "Epoll Regression Tests" finishes on main.
+# Sends a trigger to openclaw's /hooks/agent endpoint; the openclaw agent does
+# the actual log fetching, issue search, and issue create/comment (see
+# .github/openclaw/regression-triage/).
+on:
+  workflow_run:
+    workflows:
+      - Regression Tests
+      - Epoll Regression Tests
+    types:
+      - completed
+
+jobs:
+  triage:
+    if: >
+      github.repository == 'dragonflydb/dragonfly' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_branch == 'main'
+    # Runs on our own runner (not ubuntu-latest): openclaw's gateway has no public
+    # URL, it's bound to loopback on the dragonclaw box. Reachability is via a
+    # dedicated, tunnel-only SSH key (see .github/openclaw/regression-triage/) that
+    # can ONLY forward to 127.0.0.1:18789 on that box - see authorized_keys there
+    # for the exact restriction (command=, permitopen=).
+    runs-on: [self-hosted, linux, ARM64]
+    steps:
+      - name: Trigger openclaw triage
+        env:
+          OPENCLAW_SSH_KEY: ${{ secrets.OPENCLAW_SSH_KEY }}
+          OPENCLAW_SSH_HOST: ${{ secrets.OPENCLAW_SSH_HOST }} # user@host, set as a repo secret
+          OPENCLAW_HOOK_TOKEN: ${{ secrets.OPENCLAW_HOOK_TOKEN }}
+          # Same Google Chat webhook regression-tests already posts failure
+          # notifications to; the target space id is embedded in its URL
+          # (https://chat.googleapis.com/v1/spaces/<id>/messages?...), so we
+          # reuse it instead of tracking the space id as a second secret.
+          GSPACES_BOT_DF_BUILD: ${{ secrets.GSPACES_BOT_DF_BUILD }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          if [[ -z "${OPENCLAW_SSH_KEY}" || -z "${OPENCLAW_SSH_HOST}" ]]; then
+            echo "OPENCLAW_SSH_KEY/OPENCLAW_SSH_HOST not set, skipping triage trigger."
+            exit 0
+          fi
+
+          key_file="$(mktemp)"
+          trap 'kill "${tunnel_pid:-0}" 2>/dev/null; rm -f "$key_file"' EXIT
+          printf '%s\n' "$OPENCLAW_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+
+          ssh -i "$key_file" -N -o StrictHostKeyChecking=accept-new \
+              -o ExitOnForwardFailure=yes \
+              -L 18789:127.0.0.1:18789 "$OPENCLAW_SSH_HOST" &
+          tunnel_pid=$!
+
+          # Wait for the forwarded port to actually accept connections instead of
+          # a fixed sleep, so a slow SSH handshake doesn't race the curl below.
+          for _ in $(seq 1 15); do
+            kill -0 "$tunnel_pid" 2>/dev/null || { echo "tunnel died"; exit 1; }
+            (exec 3<>/dev/tcp/127.0.0.1/18789) 2>/dev/null && { exec 3<&-; exec 3>&-; break; }
+            sleep 1
+          done
+
+          space_id="$(echo "$GSPACES_BOT_DF_BUILD" | grep -oE 'spaces/[^/]+' | head -1)"
+          if [[ -z "$space_id" ]]; then
+            echo "Could not extract a space id from GSPACES_BOT_DF_BUILD, aborting."
+            exit 1
+          fi
+
+          payload="$(
+            jq -n \
+              --arg agentId "regression-triage" \
+              --arg sessionKey "hook:regression:${RUN_ID}:${RUN_ATTEMPT}" \
+              --arg repo "$REPOSITORY" \
+              --arg runId "$RUN_ID" \
+              --arg runAttempt "$RUN_ATTEMPT" \
+              --arg runUrl "$RUN_URL" \
+              --arg sha "$HEAD_SHA" \
+              --arg workflow "$WORKFLOW_NAME" \
+              --arg to "$space_id" \
+              '{
+                agentId: $agentId,
+                sessionKey: $sessionKey,
+                sessionMode: "persistent",
+                deliver: true,
+                channel: "googlechat",
+                to: $to,
+                message: (
+                  "Triage this failed regression run using the regression-triage skill.\n" +
+                  "Repository: " + $repo + "\n" +
+                  "Workflow: " + $workflow + "\n" +
+                  "Run ID: " + $runId + "\n" +
+                  "Attempt: " + $runAttempt + "\n" +
+                  "Commit: " + $sha + "\n" +
+                  "Run URL: " + $runUrl
+                )
+              }'
+          )"
+
+          # Connecting through the tunnel is occasionally flaky right after it comes
+          # up, so retry the whole request a few times before giving up.
+          curl --fail-with-body --max-time 20 \
+            --retry 5 --retry-delay 3 --retry-all-errors \
+            --header "Authorization: Bearer ${OPENCLAW_HOOK_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "$payload" \
+            "http://127.0.0.1:18789/hooks/agent"
