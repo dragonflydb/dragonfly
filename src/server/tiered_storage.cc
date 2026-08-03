@@ -86,7 +86,7 @@ constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
 
 // Memory budget (UploadBudget) does not account for buffers allocated for in-flight defrag reads,
 // so we cap the number of concurrent defragmentation operations to avoid unbounded memory growth.
-constexpr uint32_t kMaxPendingDefrags = 100;
+constexpr uint32_t kMaxPendingDefrags = 50;
 
 // Called when a value returns to RAM and its disk segment is dropped: the bytes go back to the
 // RAM ledger and leave the tiered counters.
@@ -228,7 +228,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   bool NotifyFetched(const OwnedEntryId& id, tiering::DiskSegment segment,
                      tiering::Decoder* decoder) override;
 
-  bool NotifyDelete(tiering::DiskSegment segment) override;
+  bool NotifyDelete(tiering::DiskSegment segment, bool in_memory) override;
 
   void EnqueueForDefrag(tiering::DiskSegment segment);
 
@@ -325,9 +325,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     uint32_t pending_defrags = 0;
   } stats_;
 
-  // When we don't have memory to upload a page for defragmentation, we save it here to do it later
-  std::deque<uint32_t /* page index (kPageSize) */> delayed_defrag_queue_;
-
   TieredStorage* ts_;
   DbSlice& db_slice_;
 };
@@ -385,17 +382,21 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
 
   tiering::Decoder::UploadMetrics metrics = decoder->GetMetrics();
 
-  // 1. When modified is true we MUST upload the value back to memory.
-  // 2. On the other hand, if read is caused by snapshotting we:
-  //    a. Don't fetch it if it is PrimeValue
-  //    b. We allow fetching for ListNodes because they need to be materialized.
-  //    Currently, our heuristic is not very smart, because we stop uploading any reads during
-  //    the snapshotting.
-  // TODO: to revisit this when we rewrite it with more efficient snapshotting algorithm.
+  // We must upload the value if it was modified
   bool should_upload = metrics.modified;
-  should_upload |=
-      (ts_->UploadBudget() > int64_t(metrics.estimated_mem_usage)) &&
-      (!SliceSnapshot::IsSnaphotInProgress() || std::holds_alternative<tiering::ListNodeId>(id));
+
+  // Snapshotting casuses reads that are not from clients, so ignore request to upload
+  // List tiering uploads on it own rules from the ends
+  const bool upload_disabled =
+      SliceSnapshot::IsSnaphotInProgress() && !std::holds_alternative<tiering::ListNodeId>(id);
+
+  // Give way for upload by reducing cooled queue if needed
+  constexpr size_t kUploadReclaimMargin = 1_MB;
+  int64_t needed = int64_t(metrics.estimated_mem_usage);
+  if (ts_->UploadBudget() <= needed)
+    RetireColdEntries(needed + kUploadReclaimMargin);
+
+  should_upload |= !upload_disabled && ts_->UploadBudget() > needed;
 
   if (!should_upload)
     return false;
@@ -431,7 +432,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
   return false;
 }
 
-bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
+bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment, bool in_memory) {
   DVLOG(2) << "NotifyDelete [" << segment.offset << "," << segment.length << "]";
 
   if (OccupiesWholePages(segment.length))
@@ -443,14 +444,11 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
   }
 
   // If we have memory, upload the page for defrag. It will be reshuffled and offloaded more packed.
-  // Otherwise, enqueue the bin to be defragmented later when memory is available
-  if (bin.fragmented) {
-    constexpr size_t kMaxDelayedMem = 1_MB;
-    if (stats_.pending_defrags < kMaxPendingDefrags && ts_->UploadBudget() > 0) {
+  // Otherwise background scans of fragmented bins will discover them
+  if (bin.fragmented && ts_->UploadBudget() > 0) {
+    // Limit number of IO operations if we need to read from disk (in_memory is false)
+    if (in_memory || stats_.pending_defrags < kMaxPendingDefrags) {
       EnqueueForDefrag(bin.segment);
-    } else if (delayed_defrag_queue_.size() * sizeof(uint32_t) < kMaxDelayedMem) {
-      uint32_t page_index = bin.segment.offset / tiering::kPageSize;
-      delayed_defrag_queue_.push_back(page_index);
     }
   }
 
@@ -611,7 +609,6 @@ TieredStats TieredStorage::GetStats() const {
     stats.total_cancels = shard_stats.total_cancels;
     stats.total_defrags = shard_stats.total_defrags;
     stats.total_uploads = shard_stats.total_uploads;
-    stats.delayed_defrag_queue_size = op_manager_->delayed_defrag_queue_.size();
   }
 
   {  // OpManager stats
@@ -696,8 +693,8 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   const auto start_cycles = base::CycleClock::Now();
 
-  // Takes up a small fixed amount of time and is best done before offloading (to be picked up)
-  ProcessDelayedDeframents();
+  // Takes up a small bounded amount of time and is best done before offloading (to be picked up)
+  RunDefragScan();
 
   // Don't run offloading if there's only very little space left
   auto disk_stats = op_manager_->GetStats().disk_stats;
@@ -738,19 +735,44 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   } while (offloading_cursor_);
 }
 
-void TieredStorage::ProcessDelayedDeframents() {
-  auto& dd_queue = op_manager_->delayed_defrag_queue_;
-  if (dd_queue.empty() || UploadBudget() <= 0)
-    return;
+void TieredStorage::RunDefragScan() {
+  constexpr uint64_t kBaseUs = 2;
+  constexpr uint64_t kUsPerHit = 5;
+  constexpr uint64_t kMaxUs = 25;
 
-  while (op_manager_->stats_.pending_defrags < kMaxPendingDefrags && !dd_queue.empty()) {
-    size_t offset = dd_queue.front() * tiering::kPageSize;
-    dd_queue.pop_front();
+  const auto start_cycles = base::CycleClock::Now();
 
-    if (!bins_->IsFragmented(offset))
-      continue;
-    op_manager_->EnqueueForDefrag({offset, tiering::kPageSize});
-  }
+  unsigned hits = 0;
+  auto cb = [this, &hits](size_t offset) {
+    tiering::DiskSegment segment{offset, tiering::kPageSize};
+    if (!op_manager_->HasReadPending(kFragmentedBin, segment)) {
+      op_manager_->EnqueueForDefrag({offset, tiering::kPageSize});
+      ++hits;
+    }
+  };
+
+  // Scale the cpu time-slice by how much work the previous scan found: sleepy on a stale table,
+  // more aggressive while there's a backlog to clear.
+  const uint64_t time_budget_us = std::min(kBaseUs + last_defrag_scan_hits_ * kUsPerHit, kMaxUs);
+
+  uint64_t cycles = 0;
+  do {
+    if (UploadBudget() <= 0)
+      break;
+
+    if (op_manager_->stats_.pending_defrags >= kMaxPendingDefrags)
+      break;
+
+    defrag_cursor_ = bins_->TraverseFragmented(defrag_cursor_, cb);
+
+    // TODO: yield as background fiber to perform more work on idle
+    // Limit allowed cpu-timeslice
+    cycles = base::CycleClock::Now() - start_cycles;
+    if (base::CycleClock::ToUsec(cycles) >= time_budget_us)
+      break;
+  } while (defrag_cursor_);
+
+  last_defrag_scan_hits_ = hits;
 }
 
 size_t TieredStorage::ReclaimMemory(size_t goal) {

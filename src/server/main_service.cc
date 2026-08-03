@@ -1655,7 +1655,7 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  cmd_cntx->start_time_usec = base::CycleClock::ToUsec(base::CycleClock::Now());
+  cmd_cntx->start_cycle = base::CycleClock::Now();
 
   ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   auto* builder = cmd_cntx->rb();
@@ -1664,7 +1664,8 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
 
   ServerState& ss = *ServerState::tlocal();
 
-  if ((cid->opt_mask() & CO::DENYOOM) && ss.ShouldDenyOnOOM(cmd_cntx->start_time_usec)) {
+  if ((cid->opt_mask() & CO::DENYOOM) &&
+      ss.ShouldDenyOnOOM(base::CycleClock::ToUsec(cmd_cntx->start_cycle))) {
     cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
     return DispatchResult::OOM;
   }

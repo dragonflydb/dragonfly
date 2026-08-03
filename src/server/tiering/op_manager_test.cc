@@ -78,7 +78,7 @@ struct OpManagerTest : PoolTestBase, OpManager {
     return false;
   }
 
-  bool NotifyDelete(DiskSegment segment) override {
+  bool NotifyDelete(DiskSegment segment, bool in_memory) override {
     return true;
   }
 
