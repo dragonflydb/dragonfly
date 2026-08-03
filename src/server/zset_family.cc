@@ -268,7 +268,7 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
     // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
     if (!add_res.is_new && zparams.override) {
       RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, pv, op_args.shard);
-      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, &pv);
+      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &pv);
     }
 
     pv.InitRobj(OBJ_ZSET, encoding, robj_ptr);

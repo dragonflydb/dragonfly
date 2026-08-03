@@ -530,7 +530,7 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
       VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
       return OpStatus::INVALID_JSON;
     }
-    op_args.GetDbSlice().ReleaseOffloadedValue(op_args.db_cntx.db_index, &it_res->it->second);
+    op_args.GetDbSlice().ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &it_res->it->second);
     it_res->it->second.Reset();
   }
 

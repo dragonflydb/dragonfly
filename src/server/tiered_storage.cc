@@ -93,6 +93,7 @@ constexpr uint32_t kMaxPendingDefrags = 50;
 void AccountTieredUpload(const FragmentRef& fragment_ref, size_t tiered_len, string_view key,
                          DbTable* db) {
   AccountObjectMemory(key, fragment_ref.ObjType(), fragment_ref.MallocUsed(), db);
+  AccountSlotTieredBytes(key, -int64_t(tiered_len), db);
   db->stats.tiered_entries--;
   db->stats.tiered_used_bytes -= tiered_len;
 }
@@ -268,6 +269,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       pv->SetStashPending(false);
       table->stats.tiered_entries++;
       table->stats.tiered_used_bytes += segment.length;
+      AccountSlotTieredBytes(key.second, segment.length, table);
       stats_.total_stashes++;
 
       StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
@@ -352,10 +354,11 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
       // We remove it from both cool storage and the offline storage; the value becomes a
       // regular in-memory one, so it returns to the RAM ledger.
       pv = ts_->DeleteCool(item.record);
-      AccountObjectMemory(item_key, pv.ObjType(), pv.MallocUsed(), db_slice_.GetDBTable(dbid));
-      auto* stats = GetDbTableStats(dbid);
-      stats->tiered_entries--;
-      stats->tiered_used_bytes -= segment.length;
+      DbTable* table = db_slice_.GetDBTable(dbid);
+      AccountObjectMemory(item_key, pv.ObjType(), pv.MallocUsed(), table);
+      AccountSlotTieredBytes(item_key, -int64_t(segment.length), table);
+      table->stats.tiered_entries--;
+      table->stats.tiered_used_bytes -= segment.length;
     } else {
       // Cut out relevant part of value and restore it to memory
       string_view value = page.substr(item_segment.offset - segment.offset, item_segment.length);
@@ -560,6 +563,12 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
     stats_.total_clients_throttled++;
     *backpressure = stash_backpressure_[{dbid, string{key}}];
   }
+}
+
+void TieredStorage::Delete(DbIndex dbid, std::string_view key, FragmentRef fragment_ref) {
+  AccountSlotTieredBytes(key, -int64_t(fragment_ref.GetExternalSlice().second),
+                         op_manager_->db_slice_.GetDBTable(dbid));
+  Delete(dbid, fragment_ref);
 }
 
 void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
@@ -865,8 +874,9 @@ PrimeValue TieredStorage::Warmup(DbIndex dbid, std::string_view key, PrimeValue:
   // We remove it from both cool storage and the offline storage. The value returns to RAM,
   // so it returns to the RAM ledger as well.
   PrimeValue hot = DeleteCool(item.record);
-  AccountObjectMemory(key, hot.ObjType(), hot.MallocUsed(),
-                      op_manager_->db_slice_.GetDBTable(dbid));
+  DbTable* table = op_manager_->db_slice_.GetDBTable(dbid);
+  AccountObjectMemory(key, hot.ObjType(), hot.MallocUsed(), table);
+  AccountSlotTieredBytes(key, -int64_t(segment.length), table);
   op_manager_->DeleteOffloaded(dbid, segment);
   return hot;
 }

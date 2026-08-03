@@ -35,6 +35,9 @@ using facade::OpResult;
 // All of them track resident RAM.
 void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db);
 
+// Applies a delta to the owning slot's tiered_bytes - disk bytes held by the slot's entries.
+void AccountSlotTieredBytes(std::string_view key, int64_t delta, DbTable* db);
+
 struct DbStats : public DbTableStats {
   // number of active keys.
   size_t key_count = 0;
@@ -315,7 +318,7 @@ class DbSlice {
 
   // Must be called before overwriting a value in place. An offloaded value keeps its data on disk
   // and reports no heap allocation, so overwriting it drops the only reference to its disk extent.
-  void ReleaseOffloadedValue(DbIndex db_ind, PrimeValue* pv);
+  void ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv);
 
   // Update entry expiration. Return expiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;

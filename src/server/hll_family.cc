@@ -149,7 +149,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   }
   res.post_updater.ReduceHeapUsage();
   if (res.it->second.IsExternal()) {
-    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
   }
   res.it->second.SetString(hll);
   return std::min(updated, 1);
@@ -325,7 +325,7 @@ OpResult<int> PFMergeInternal(string_view key, Transaction* tx, SinkReplyBuilder
     auto& res = *op_res;
     if (!res.is_new && res.it->second.IsExternal()) {
       res.post_updater.ReduceHeapUsage();
-      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
     }
     res.it->second.SetString(hll);
 
