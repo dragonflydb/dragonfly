@@ -490,8 +490,8 @@ bool IsGeoStoreMode(const GeoSearchOpts& geo_ops) {
   return geo_ops.store == GeoStoreType::kStoreHash || geo_ops.store == GeoStoreType::kStoreDist;
 }
 
-void GeoStoreToDest(Transaction* tx, string_view dest_key, const vector<ScoredMemberView>& smvec,
-                    RedisReplyBuilder* rb) {
+OpStatus GeoStoreToDest(Transaction* tx, string_view dest_key,
+                        const vector<ScoredMemberView>& smvec, RedisReplyBuilder* rb) {
   OpResult<ZSetFamily::AddResult> add_result;
   ShardId dest_shard = Shard(dest_key, shard_set->size());
   auto store_cb = [&](Transaction* t, EngineShard* shard) {
@@ -499,22 +499,25 @@ void GeoStoreToDest(Transaction* tx, string_view dest_key, const vector<ScoredMe
       add_result = ZSetFamily::OpAdd(t->GetOpArgs(shard),
                                      ZSetFamily::ZParams{.override = true, .journal_update = true},
                                      dest_key, ScoredMemberSpan{smvec});
+      if (add_result.status() == OpStatus::OUT_OF_MEMORY) {
+        return OpStatus::OUT_OF_MEMORY;
+      }
     }
     return OpStatus::OK;
   };
   tx->Execute(std::move(store_cb), true);
 
-  if (add_result.status() == OpStatus::OUT_OF_MEMORY) {
+  if (!add_result) {
     rb->SendError(add_result.status());
-    return;
+    return add_result.status();
   }
-  LOG_IF(WARNING, !add_result) << "Unexpected status " << add_result.status();
 
   rb->SendLong(smvec.size());
+  return OpStatus::OK;
 }
 
-void GeoStoreEmptyDest(Transaction* tx, string_view dest_key, RedisReplyBuilder* rb) {
-  GeoStoreToDest(tx, dest_key, {}, rb);
+OpStatus GeoStoreEmptyDest(Transaction* tx, string_view dest_key, RedisReplyBuilder* rb) {
+  return GeoStoreToDest(tx, dest_key, {}, rb);
 }
 
 void FinalizeGeoSearchCount(GeoSearchOpts* geo_ops) {
@@ -571,7 +574,8 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
     auto member_sts = member_score.status();
     if (member_sts != OpStatus::OK) {
       if (member_sts == OpStatus::KEY_NOTFOUND && IsGeoStoreMode(geo_ops)) {
-        return GeoStoreEmptyDest(tx, geo_ops.store_key, rb);
+        GeoStoreEmptyDest(tx, geo_ops.store_key, rb);
+        return;
       }
       tx->Conclude();
       switch (member_sts) {
@@ -599,7 +603,8 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
     auto result_sts = result.status();
     if (result_sts != OpStatus::OK) {
       if (result_sts == OpStatus::KEY_NOTFOUND && IsGeoStoreMode(geo_ops)) {
-        return GeoStoreEmptyDest(tx, geo_ops.store_key, rb);
+        GeoStoreEmptyDest(tx, geo_ops.store_key, rb);
+        return;
       }
       tx->Conclude();
       switch (result_sts) {
@@ -700,7 +705,9 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
         smvec.emplace_back(p.score, p.member);
       }
     }
-    GeoStoreToDest(tx, geo_ops.store_key, smvec, rb);
+    if (GeoStoreToDest(tx, geo_ops.store_key, smvec, rb) != OpStatus::OK) {
+      return;
+    }
   }
 }
 
@@ -731,6 +738,7 @@ void CmdGeoSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   GeoSearchStoreGeneric(cmd_cntx->tx(), builder, st.shape, key, member, st.geo_ops);
 }
 
+// GEOSEARCHSTORE dest src <search-options> — search src and store matches in dest (Redis 6.2+).
 void CmdGeoSearchStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
 
