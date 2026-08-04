@@ -49,9 +49,6 @@ class OAHMapTest : public ::testing::Test {
     InitTLStatelessAllocMR(PMR_NS::get_default_resource());
   }
 
-  static void TearDownTestSuite() {
-  }
-
   void SetUp() override {
     m_ = new OAHMap;
     generator_.seed(0);
@@ -135,6 +132,26 @@ TEST_F(OAHMapTest, Basic) {
   ASSERT_TRUE(value.has_value());
   EXPECT_EQ(*value, "baraaaaaaaaaaaa2"sv);
   EXPECT_FALSE(m_->GetValue("missing").has_value());
+}
+
+TEST_F(OAHMapTest, ShrinkToMinimumBuckets) {
+  m_->Reserve(1);
+  EXPECT_EQ(m_->BucketCount(), OAHMap::kMinBucketCount);
+
+  EXPECT_TRUE(m_->AddOrUpdate("first", "one"));
+  EXPECT_TRUE(m_->AddOrUpdate("second", "two"));
+  m_->Reserve(128 * OAHMap::kOverloadFactor);
+  m_->Shrink(1);
+  EXPECT_EQ(m_->BucketCount(), OAHMap::kMinBucketCount);
+
+  EXPECT_EQ(m_->GetValue("first"), std::optional{"one"sv});
+  EXPECT_EQ(m_->GetValue("second"), std::optional{"two"sv});
+
+  for (unsigned i = 2; i < 34; ++i)
+    EXPECT_TRUE(m_->AddOrUpdate(absl::StrCat("member", i), "value"));
+  EXPECT_TRUE(m_->AddOrUpdate("member34", "value"));
+  EXPECT_EQ(m_->BucketCount(), 32u);
+  EXPECT_EQ(m_->GetValue("first"), std::optional{"one"sv});
 }
 
 TEST_F(OAHMapTest, EmptyKeyAndValue) {

@@ -52,9 +52,7 @@ class OAHSet : public OAHTable<OAHEntry> {
 
  private:
   bool AddImpl(std::string_view content, uint32_t len, uint32_t ttl_sec) {
-    if (size_ >= entries_.size() * kOverloadFactor) [[unlikely]] {
-      GrowCapacity(BucketCount() * 2);
-    }
+    TryGrow();
     assert(Capacity() >= kDisplacementSize);
 
     uint64_t hash = Hash(content);

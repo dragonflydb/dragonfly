@@ -46,9 +46,6 @@ class OAHSetTest : public ::testing::Test {
     InitTLStatelessAllocMR(PMR_NS::get_default_resource());
   }
 
-  static void TearDownTestSuite() {
-  }
-
   void SetUp() override {
     ss_ = new OAHSet;
     generator_.seed(0);
@@ -121,10 +118,50 @@ TEST_F(OAHSetTest, ShrinkUsesOverloadAwareTarget) {
   ss_->Reserve(128 * OAHSet::kOverloadFactor);
   EXPECT_EQ(ss_->BucketCount(), 128);
 
-  // The legacy caller asks for eight buckets. OAH ignores that DenseSet-oriented
-  // target and retains its legal 16-bucket minimum.
+  // The requested target is above OAH's minimum.
   ss_->Shrink(8);
+  EXPECT_EQ(ss_->BucketCount(), 8u);
+}
+
+TEST_F(OAHSetTest, ShrinkToMinimumBuckets) {
+  ss_->Reserve(1);
   EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
+
+  vector<string> keys = {"first", "second"};
+  for (const string& key : keys)
+    EXPECT_TRUE(ss_->Add(key));
+
+  ss_->Reserve(128 * OAHSet::kOverloadFactor);
+  ss_->Shrink(1);
+  EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
+  ss_->Reserve(16);  // The physical probe slots already satisfy this reservation.
+  EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
+
+  const auto scan_all = [this] {
+    unordered_set<string> result;
+    uint32_t cursor = 0;
+    do {
+      cursor = ss_->Scan(cursor, [&](string_view key) { result.emplace(key); });
+    } while (cursor != 0);
+    return result;
+  };
+
+  EXPECT_TRUE(ss_->Add("expired", 1));
+  ss_->set_time(1);
+  EXPECT_EQ(scan_all(), unordered_set<string>(keys.begin(), keys.end()));
+
+  for (size_t i = keys.size(); i < 34; ++i) {
+    keys.push_back(absl::StrCat("member", i));
+    EXPECT_TRUE(ss_->Add(keys.back()));
+  }
+
+  EXPECT_EQ(scan_all(), unordered_set<string>(keys.begin(), keys.end()));
+
+  keys.push_back("member34");
+  EXPECT_TRUE(ss_->Add(keys.back()));  // Grows from the compact minimum representation.
+  EXPECT_EQ(ss_->BucketCount(), 32u);
+  for (const string& key : keys)
+    EXPECT_TRUE(ss_->Contains(key));
 }
 
 TEST_F(OAHSetTest, AsciiEncoding) {
