@@ -460,7 +460,50 @@ TEST_F(TieredStorageTest, Defrag) {
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
 }
 
-// Verify that the background defrag scan (RunDefragScan, driven by the periodic heartbeat)
+// Offloaded small bin values reference their key back by (dbid, key) pair, so moving/renaming the
+// key has to invalidate (delete) the offloaded value
+TEST_F(PureDiskTSTest, RenameOffloadedSmallBin) {
+  auto is_offloaded = [&](string_view key) {
+    return pp_->at(0)->AwaitBrief([&] {
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+      auto it = db.GetDBTable(0)->prime.Find(key);
+      return IsValid(it) && it->second.IsExternal();
+    });
+  };
+  auto val = [](int i) { return string(600, char('a' + i)); };
+
+  const int kNum = 16;
+  for (int i = 0; i < kNum; i++)
+    Run({"SET", absl::StrCat("k", i), val(i)});
+  ExpectConditionWithinTimeout(
+      [this] { return GetMetrics().tiered_stats.small_bins_entries_cnt >= 7u; });
+
+  int victim = -1;
+  for (int i = 0; i < kNum && victim < 0; i++)
+    if (is_offloaded(absl::StrCat("k", i)))
+      victim = i;
+  ASSERT_GE(victim, 0);
+  const string vkey = absl::StrCat("k", victim);
+
+  ASSERT_EQ(Run({"RENAME", vkey, "moved"}), "OK");
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
+  EXPECT_FALSE(is_offloaded("moved"));
+  EXPECT_THAT(Run({"EXISTS", vkey}), IntArg(0));
+
+  // Free the victim's shared page via defrag, then reuse it and check the renamed value survived.
+  for (int i = 0; i < kNum; i++)
+    if (i != victim)
+      Run({"DEL", absl::StrCat("k", i)});
+  for (int i = 0; i < kNum; i++)
+    Run({"SET", absl::StrCat("r", i), string(600, char('0' + i % 10))});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
+  EXPECT_EQ(Run({"GET", "moved"}), val(victim));
+
+  Run({"FLUSHALL"});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
+  EXPECT_EQ(GetMetrics().tiered_stats.allocated_bytes, 0u);
+}
+
 // discovers and defragments a large number of bins that became fragmented while there was no upload
 // budget (so the immediate defrag path in NotifyDelete was skipped). Also checks that once
 // everything is compacted the scan does no further work (dynamic / low-cpu behaviour).

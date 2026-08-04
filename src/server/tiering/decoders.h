@@ -43,7 +43,7 @@ struct Decoder {
   virtual void Upload(void* obj) = 0;
 };
 
-// Basic "bare" decoder that just stores the provided slice
+// Basic "generic" decoder that just stores the raw disk slice and can upload any prime value
 struct BareDecoder : public Decoder {
   std::unique_ptr<Decoder> Clone() const override;
   void Initialize(std::string_view slice) override;
@@ -54,7 +54,7 @@ struct BareDecoder : public Decoder {
 };
 
 // Decodes string value with objects StrEncoding
-struct StringDecoder : public Decoder {
+struct StringDecoder : public BareDecoder {
   explicit StringDecoder(const CompactObj& obj);
 
   std::unique_ptr<Decoder> Clone() const override;
@@ -72,17 +72,15 @@ struct StringDecoder : public Decoder {
   explicit StringDecoder(CompactObj::StrEncoding encoding);
 
   bool modified_ = false;
-  std::string_view slice_;
   CompactObj::StrEncoding encoding_;
   dfly::StringOrView value_;
 };
 
 // Decodes listpack maps stored directly as raw listpack bytes on disk.
-struct ListpackMapDecoder : public Decoder {
+struct ListpackMapDecoder : public BareDecoder {
   ~ListpackMapDecoder();
 
   std::unique_ptr<Decoder> Clone() const override;
-  void Initialize(std::string_view slice) override;
   UploadMetrics GetMetrics() const override;
   void Upload(void* obj) override;
 
@@ -93,21 +91,18 @@ struct ListpackMapDecoder : public Decoder {
   dfly::detail::ListpackWrap* GetMutable();
 
  private:
-  std::string_view slice_;
   std::unique_ptr<dfly::detail::ListpackWrap> owned_lw_;
 };
 
 // Decodes QList::Node
-struct ListNodeDecoder : public Decoder {
+struct ListNodeDecoder : public BareDecoder {
   explicit ListNodeDecoder(QList* ql);
   std::unique_ptr<Decoder> Clone() const override;
-  void Initialize(std::string_view slice) override;
-  UploadMetrics GetMetrics() const override;
+  // Initialize and GetMetrics are inherited from BareDecoder (raw slice, unmodified).
   void Upload(void* obj) override;
 
  private:
   QList* ql_;
-  std::string_view slice_;
 };
 
 }  // namespace dfly::tiering
