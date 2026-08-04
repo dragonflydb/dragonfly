@@ -289,8 +289,10 @@ void MemoryCmd::Run(CmdArgParser parser) {
     static const float default_threshold =
         absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     const float threshold = parser.NextOrDefault(default_threshold);
-    if (const auto err = parser.TakeError(); err)
-      return cmd_cntx_->SendError(err.MakeReply());
+    if (!parser.Finalize())
+      return cmd_cntx_->SendError(parser.TakeError().MakeReply());
+    if (!(threshold > 0.0 && threshold <= 1.0))
+      return cmd_cntx_->SendError("Threshold must be between 0 and 1");
 
     std::vector<CollectedPageStats> results(shard_set->size());
     shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
@@ -315,8 +317,10 @@ void MemoryCmd::Run(CmdArgParser parser) {
 void MemoryCmd::DefragmentSegments(CmdArgParser parser) {
   static const float default_threshold = absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
   const float threshold = parser.NextOrDefault(default_threshold);
-  if (const auto err = parser.TakeError(); err)
-    return cmd_cntx_->SendError(err.MakeReply());
+  if (!parser.Finalize())
+    return cmd_cntx_->SendError(parser.TakeError().MakeReply());
+  if (!(threshold > 0.0 && threshold <= 1.0))
+    return cmd_cntx_->SendError("Threshold must be between 0 and 1");
 
   const auto* conn_cntx = cmd_cntx_->server_conn_cntx();
   // Only defragment currently selected db
@@ -324,18 +328,25 @@ void MemoryCmd::DefragmentSegments(CmdArgParser parser) {
   const DbIndex db_ind = conn_cntx->db_index();
 
   std::vector<CollectedPageStats> results(shard_set->size());
-  shard_set->pool()->AwaitFiberOnAll([threshold, ns, db_ind, &results](util::ProactorBase*) {
-    if (auto* shard = EngineShard::tlocal(); shard) {
-      PageUsage page_usage{CollectPageStats::YES, threshold,
-                           CycleQuota{CycleQuota::kDefaultDefragQuota}};
-      ns->GetDbSlice(shard->shard_id()).DefragTableSegments(db_ind, &page_usage);
-      results[shard->shard_id()] = page_usage.CollectedStats();
-    }
-  });
+  std::atomic_bool completed{true};
+  shard_set->pool()->AwaitFiberOnAll(
+      [threshold, ns, db_ind, &results, &completed](util::ProactorBase*) {
+        if (auto* shard = EngineShard::tlocal(); shard) {
+          PageUsage page_usage{CollectPageStats::YES, threshold,
+                               CycleQuota{CycleQuota::kDefaultDefragQuota}};
+          const ShardId sid = shard->shard_id();
+          if (!ns->GetDbSlice(sid).DefragTableSegments(db_ind, &page_usage))
+            completed.store(false, memory_order_relaxed);
+          results[sid] = page_usage.CollectedStats();
+        }
+      });
 
   const CollectedPageStats merged = CollectedPageStats::Merge(std::move(results), threshold);
+  std::string response = merged.ToString();
+  const auto done = completed.load(memory_order_relaxed) ? "true" : "false";
+  absl::StrAppend(&response, "\nTraversal complete: ", done);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
-  return rb->SendVerbatimString(merged.ToString());
+  return rb->SendVerbatimString(response);
 }
 
 namespace {

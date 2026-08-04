@@ -1978,9 +1978,9 @@ unique_ptr<base::Histogram> DbSlice::StopSampleValues(DbIndex db_ind) {
   return unique_ptr<base::Histogram>{exchange(db.sample_values_hist, nullptr)};
 }
 
-void DbSlice::DefragTableSegments(DbIndex db_ind, PageUsage* page_usage) {
+bool DbSlice::DefragTableSegments(DbIndex db_ind, PageUsage* page_usage) {
   if (!IsDbValid(db_ind))
-    return;
+    return true;
 
   DbTable* db_table = GetDBTable(db_ind);
   PrimeTable& pt = db_table->prime;
@@ -1997,6 +1997,7 @@ void DbSlice::DefragTableSegments(DbIndex db_ind, PageUsage* page_usage) {
     });
   } while (cursor && !page_usage->QuotaDepleted());
   db_table->segment_defrag_cursor = cursor;
+  return !cursor;
 }
 
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async) {

@@ -559,7 +559,8 @@ class DbSlice {
   // Returns a histogram of sampled values.
   std::unique_ptr<base::Histogram> StopSampleValues(DbIndex db_ind);
 
-  void DefragTableSegments(DbIndex db_ind, PageUsage* page_usage);
+  // Returns true if the traversal reached the end of the selected database table.
+  bool DefragTableSegments(DbIndex db_ind, PageUsage* page_usage);
 
  private:
   void PreUpdateBlocking(DbIndex db_ind, const Iterator& it);
