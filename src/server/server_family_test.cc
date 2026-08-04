@@ -786,7 +786,21 @@ TEST_F(ServerFamilyTest, MemoryArenaSummary) {
 }
 
 TEST_F(ServerFamilyTest, MemoryParserErrorHandling) {
-  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT", "not-a-float"}), ErrArg("not a valid float"));
+  constexpr auto no_float = "not a valid float";
+  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT", "not-a-float"}), ErrArg(no_float));
+  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT-SEGMENTS", "nofloat"}), ErrArg(no_float));
+
+  constexpr auto threshold_err = "Threshold must be between 0 and 1";
+  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT", "2"}), ErrArg(threshold_err));
+  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT-SEGMENTS", "2"}), ErrArg(threshold_err));
+}
+
+TEST_F(ServerFamilyTest, MemoryDefragSegments) {
+  auto resp = Run({"MEMORY", "DEFRAGMENT-SEGMENTS", "0.9"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("Traversal complete:"));
+
+  resp = Run({"MEMORY", "DEFRAGMENT-SEGMENTS", "0.9", "xyz"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(ServerFamilyTest, InfoReplicationMemoryNoReplicas) {

@@ -1758,6 +1758,74 @@ TEST_F(DashTest, SplitBug) {
   EXPECT_EQ(746, table.size());
 }
 
+namespace {
+
+void GrowSegments(Dash64& dt) {
+  for (uint64_t i = 0; i < 4000; ++i)
+    dt.Insert(i, i);
+
+  ASSERT_EQ(dt.depth(), 3);
+  ASSERT_EQ(dt.unique_segments(), 8);
+}
+
+void FreeItemsForMerge(Dash64& dt) {
+  for (uint64_t i = 200; i < 4000; ++i)
+    dt.Erase(i);
+}
+
+}  // namespace
+
+TEST_F(DashTest, VisitSegmentOnce) {
+  GrowSegments(dt_);
+  FreeItemsForMerge(dt_);
+
+  // create aliases so that visiting over them is exercised
+  ASSERT_TRUE(dt_.Merge(0, 1).merged);
+  ASSERT_EQ(dt_.GetSegment(0), dt_.GetSegment(1));
+
+  std::unordered_set<Dash64::Segment_t*> visited;
+  Dash64::Cursor cursor;
+  do {
+    cursor = dt_.VisitSegment(cursor, [&](size_t sid, auto* segment) {
+      EXPECT_EQ(sid, segment->segment_id());
+      EXPECT_EQ(segment, dt_.GetSegment(sid));
+      EXPECT_TRUE(visited.insert(segment).second);
+    });
+  } while (cursor);
+
+  // each segment visited exactly once
+  EXPECT_EQ(visited.size(), dt_.unique_segments());
+}
+
+TEST_F(DashTest, VisitSegmentCursorSurvivesGrowth) {
+  auto cursor = dt_.VisitSegment(Dash64::Cursor{}, [](size_t sid, auto*) { EXPECT_EQ(sid, 0); });
+
+  GrowSegments(dt_);
+
+  vector<size_t> visited;
+  do {
+    cursor = dt_.VisitSegment(cursor, [&](size_t sid, auto*) { visited.push_back(sid); });
+  } while (cursor);
+
+  // global depth grows from 1->3, so bits in next segment id of cursor go from 1->100 i.e. 4
+  EXPECT_EQ(visited, (vector<size_t>{4, 5, 6, 7}));
+}
+
+TEST_F(DashTest, VisitSegmentCursorAfterMerge) {
+  GrowSegments(dt_);
+  FreeItemsForMerge(dt_);
+
+  auto cursor = dt_.VisitSegment(Dash64::Cursor{}, [](size_t sid, auto*) { EXPECT_EQ(sid, 0); });
+  ASSERT_EQ(cursor.segment_id(dt_.depth()), 1);
+  ASSERT_TRUE(dt_.Merge(0, 1).merged);
+
+  cursor = dt_.VisitSegment(cursor, [&](size_t sid, auto* segment) {
+    EXPECT_EQ(sid, 0);
+    EXPECT_EQ(segment, dt_.GetSegment(0));
+  });
+  EXPECT_EQ(cursor.segment_id(dt_.depth()), 2);
+}
+
 /**
  ______     _      _   _               _______        _
 |  ____|   (_)    | | (_)             |__   __|      | |
