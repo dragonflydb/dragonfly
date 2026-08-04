@@ -492,16 +492,24 @@ bool IsGeoStoreMode(const GeoSearchOpts& geo_ops) {
 
 void GeoStoreToDest(Transaction* tx, string_view dest_key, const vector<ScoredMemberView>& smvec,
                     RedisReplyBuilder* rb) {
+  OpResult<ZSetFamily::AddResult> add_result;
   ShardId dest_shard = Shard(dest_key, shard_set->size());
   auto store_cb = [&](Transaction* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard) {
-      ZSetFamily::ZParams zparams;
-      zparams.override = true;
-      ZSetFamily::OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec});
+      add_result = ZSetFamily::OpAdd(t->GetOpArgs(shard),
+                                     ZSetFamily::ZParams{.override = true, .journal_update = true},
+                                     dest_key, ScoredMemberSpan{smvec});
     }
     return OpStatus::OK;
   };
   tx->Execute(std::move(store_cb), true);
+
+  if (add_result.status() == OpStatus::OUT_OF_MEMORY) {
+    rb->SendError(add_result.status());
+    return;
+  }
+  LOG_IF(WARNING, !add_result) << "Unexpected status " << add_result.status();
+
   rb->SendLong(smvec.size());
 }
 
@@ -835,7 +843,8 @@ void RegisterGeoFamily(CommandRegistry* registry) {
       << CI{"GEOPOS", CO::READONLY, -2, 1, 1}.HFUNC(GeoPos)
       << CI{"GEODIST", CO::READONLY, -4, 1, 1}.HFUNC(GeoDist)
       << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1}.HFUNC(GeoSearch)
-      << CI{"GEOSEARCHSTORE", CO::JOURNALED | CO::DENYOOM, -8, 1, 2}.HFUNC(GeoSearchStore)
+      << CI{"GEOSEARCHSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -8, 1, 2}
+             .HFUNC(GeoSearchStore)
       << CI{"GEORADIUSBYMEMBER", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -5, 1, 1}
              .HFUNC(GeoRadiusByMember)
       << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1}.HFUNC(GeoRadiusByMemberRO)
