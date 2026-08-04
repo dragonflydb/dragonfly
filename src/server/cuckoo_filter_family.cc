@@ -35,8 +35,6 @@ using namespace std;
 
 namespace {
 
-constexpr uint64_t kMaxCapacity = 1ULL << 30;
-
 constexpr char kBucketSizeErr[] = "CF: bucket size must be between 1 and 255";
 constexpr char kMaxIterationsErr[] = "CF: max iterations must be between 1 and 65535";
 constexpr char kExpansionErr[] = "CF: expansion must be between 0 and 32768";
@@ -54,9 +52,9 @@ thread_local uint16_t tl_cf_expansion_factor =
     static_cast<uint16_t>(absl::GetFlag(FLAGS_cf_expansion_factor));
 thread_local uint32_t tl_cf_max_expansions = absl::GetFlag(FLAGS_cf_max_expansions);
 
-// capacity must be at least 2*bucket_size (two buckets worth of room) and at most kMaxCapacity.
+// capacity must be at least 2*bucket_size (two buckets worth of room) and at most the max.
 bool CapacityInRange(uint64_t capacity, uint8_t bucket_size) {
-  return capacity >= 2ULL * bucket_size && capacity <= kMaxCapacity;
+  return capacity >= 2ULL * bucket_size && capacity <= kCuckooFilterMaxCapacity;
 }
 
 CuckooFilterOptions NewFilterOptions(uint64_t capacity) {
@@ -494,7 +492,7 @@ void RegisterCuckooFilterConfig() {
 
   config_registry.RegisterMutable("cf_initial_size", [pool](const absl::CommandLineFlag& flag) {
     auto val = flag.TryGet<uint64_t>();
-    if (!val || *val < 4 || *val > kMaxCapacity)
+    if (!val || *val < 4 || *val > kCuckooFilterMaxCapacity)
       return false;
     pool->AwaitBrief([v = *val](unsigned, auto*) { tl_cf_initial_size = v; });
     return true;

@@ -243,9 +243,9 @@ TEST_F(CuckooFilterFamilyTest, ConfigSetChangesAutoCreateDefaults) {
   EXPECT_THAT(field("Number of buckets"), IntArg(16));
 
   // Rejected: out of range.
-  EXPECT_THAT(Run("config set cf_bucket_size 0"), ErrArg(""));
-  EXPECT_THAT(Run("config set cf_bucket_size 256"), ErrArg(""));
-  EXPECT_THAT(Run("config set cf_max_expansions 0"), ErrArg(""));
+  EXPECT_THAT(Run("config set cf_bucket_size 0"), ErrArg("argument can not be set"));
+  EXPECT_THAT(Run("config set cf_bucket_size 256"), ErrArg("argument can not be set"));
+  EXPECT_THAT(Run("config set cf_max_expansions 0"), ErrArg("argument can not be set"));
 }
 
 TEST_F(CuckooFilterFamilyTest, InsertFilterFull) {

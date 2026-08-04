@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -59,7 +60,11 @@ inline constexpr char kNoAuthErrType[] = "no_auth";
 inline constexpr char kBloomFilterLoadInProgress[] = "bloom filter load in progress";
 inline constexpr char kCuckooFilterFull[] = "Filter is full";
 inline constexpr char kCuckooFilterMaxExpansions[] = "Maximum expansions reached";
+
+inline constexpr uint64_t kCuckooFilterMaxCapacity = 1ULL << 30;
 inline constexpr char kCuckooFilterInvalidCapacity[] =
     "CF: capacity must be in the range [2 * bucket size, 1073741824]";
+static_assert(kCuckooFilterMaxCapacity == 1073741824,
+              "update the literal in kCuckooFilterInvalidCapacity above too");
 
 }  // namespace facade
