@@ -76,11 +76,33 @@ jobs:
       - name: GCloud setup
         uses: 'google-github-actions/setup-gcloud@v3'
 
+      - name: Log locally built metadata
+        working-directory: tools/packaging/osrepos
+        run: |
+          echo "=== APT Packages (local) ==="
+          cat $SiteRoot/deb/dists/noble/main/binary-amd64/Packages
+          echo ""
+          echo "=== RPM repomd.xml (local) ==="
+          cat $SiteRoot/rpm/repodata/repomd.xml
+
       - name: Deploy site
         working-directory: tools/packaging/osrepos
         run: |
           gcloud storage rm ${{ secrets.GCP_PACKAGES_BUCKET }}/**
           gcloud storage rsync $SiteRoot ${{ secrets.GCP_PACKAGES_BUCKET }} --recursive --delete-unmatched-destination-objects
+
+      - name: Verify deployed site
+        run: |
+          echo "=== APT Packages (public) ==="
+          curl -s https://packages.dragonflydb.io/deb/dists/noble/main/binary-amd64/Packages
+          echo ""
+          echo "=== RPM repomd.xml (public) ==="
+          curl -s https://packages.dragonflydb.io/rpm/repodata/repomd.xml
+          echo ""
+          echo "=== Response headers (APT) ==="
+          curl -sI https://packages.dragonflydb.io/deb/dists/noble/main/binary-amd64/Packages
+          echo "=== Response headers (RPM) ==="
+          curl -sI https://packages.dragonflydb.io/rpm/repodata/repomd.xml
 
       - name: Notify on failure
         if: failure()
