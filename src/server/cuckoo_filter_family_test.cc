@@ -150,6 +150,24 @@ TEST_F(CuckooFilterFamilyTest, AddFilterFull) {
   EXPECT_THAT(Run("cf.add cf overflow"), ErrArg("Filter is full"));
 }
 
+TEST_F(CuckooFilterFamilyTest, AddRejectsInvalidConfiguredCapacity) {
+  // cf_bucket_size and cf_initial_size are independently CONFIG-settable, so it's possible to end
+  // up with a combination that violates capacity >= 2*bucketsize. CF.ADD/CF.ADDNX must reject
+  // auto-create in that case instead of silently constructing an undersized filter.
+  ASSERT_EQ(Run("config set cf_bucket_size 200"), "OK");
+  ASSERT_EQ(Run("config set cf_initial_size 100"), "OK");
+  absl::Cleanup restore = [this] {
+    Run("config set cf_bucket_size 2");
+    Run("config set cf_initial_size 1024");
+  };
+
+  // cf_initial_size(100) < 2*cf_bucket_size(200), so auto-create must fail.
+  constexpr char kErr[] = "capacity must be in the range [2 * bucket size, 1073741824]";
+  EXPECT_THAT(Run("cf.add cf x"), ErrArg(kErr));
+  EXPECT_THAT(Run("cf.addnx cf x"), ErrArg(kErr));
+  EXPECT_THAT(Run("exists cf"), IntArg(0));
+}
+
 TEST_F(CuckooFilterFamilyTest, AddMaxExpansions) {
   // Lower the cap via CONFIG SET so the test doesn't need to insert thousands of items to hit it.
   // This also exercises that CONFIG SET actually refreshes the cached value used by CF.ADD et al.
@@ -179,11 +197,14 @@ TEST_F(CuckooFilterFamilyTest, AddMaxExpansions) {
   auto info = Run("cf.info cf");
   ASSERT_THAT(info, ArrLen(16));
   const auto& arr = info.GetVec();
+  bool found_num_filters = false;
   for (size_t i = 0; i < arr.size(); ++i) {
     if (arr[i].type == RespExpr::STRING && arr[i].GetString() == "Number of filters") {
       EXPECT_THAT(arr[i + 1], IntArg(2));
+      found_num_filters = true;
     }
   }
+  ASSERT_TRUE(found_num_filters) << "\"Number of filters\" field missing from CF.INFO output";
 }
 
 TEST_F(CuckooFilterFamilyTest, ConfigSetChangesAutoCreateDefaults) {
@@ -191,8 +212,9 @@ TEST_F(CuckooFilterFamilyTest, ConfigSetChangesAutoCreateDefaults) {
   ASSERT_EQ(Run("config set cf_initial_size 64"), "OK");
   ASSERT_EQ(Run("config set cf_max_iterations 7"), "OK");
   ASSERT_EQ(Run("config set cf_expansion_factor 3"), "OK");
-  // Runs after the rejected-value assertions below too, which still mutate the underlying absl
-  // flags (ConfigRegistry parses the new value before running validation) despite being rejected.
+  // Restores the changes made above. ConfigRegistry::Set rolls back to the previous value itself
+  // when a validation callback rejects a CONFIG SET, so the rejected-value assertions below don't
+  // need cleanup of their own — the cf_max_expansions restore here is just defensive.
   absl::Cleanup restore = [this] {
     Run("config set cf_bucket_size 2");
     Run("config set cf_initial_size 1024");

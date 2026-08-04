@@ -59,5 +59,7 @@ inline constexpr char kNoAuthErrType[] = "no_auth";
 inline constexpr char kBloomFilterLoadInProgress[] = "bloom filter load in progress";
 inline constexpr char kCuckooFilterFull[] = "Filter is full";
 inline constexpr char kCuckooFilterMaxExpansions[] = "Maximum expansions reached";
+inline constexpr char kCuckooFilterInvalidCapacity[] =
+    "CF: capacity must be in the range [2 * bucket size, 1073741824]";
 
 }  // namespace facade

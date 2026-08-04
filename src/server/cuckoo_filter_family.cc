@@ -37,7 +37,6 @@ namespace {
 
 constexpr uint64_t kMaxCapacity = 1ULL << 30;
 
-constexpr char kCapacityErr[] = "CF: capacity must be in the range [2 * bucket size, 1073741824]";
 constexpr char kBucketSizeErr[] = "CF: bucket size must be between 1 and 255";
 constexpr char kMaxIterationsErr[] = "CF: max iterations must be between 1 and 65535";
 constexpr char kExpansionErr[] = "CF: expansion must be between 0 and 32768";
@@ -80,7 +79,21 @@ struct CuckooInfo {
   uint16_t max_iterations = 0;
 };
 
+// Checked before AddOrFind (which would otherwise insert a dangling entry): cf-initial-size and
+// cf-bucket-size are independently CONFIG-settable and may currently violate CapacityInRange.
+OpStatus CheckCapacityBeforeAutoCreate(const OpArgs& op_args, string_view key) {
+  if (CapacityInRange(tl_cf_initial_size, tl_cf_bucket_size))
+    return OpStatus::OK;
+  auto peek = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  if (peek.status() == OpStatus::KEY_NOTFOUND)
+    return OpStatus::CUCKOO_FILTER_INVALID_CAPACITY;
+  return OpStatus::OK;
+}
+
 OpResult<bool> OpAdd(const OpArgs& op_args, string_view key, string_view item) {
+  if (OpStatus st = CheckCapacityBeforeAutoCreate(op_args, key); st != OpStatus::OK)
+    return st;
+
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
   RETURN_ON_BAD_STATUS(op_res);
@@ -100,6 +113,9 @@ OpResult<bool> OpAdd(const OpArgs& op_args, string_view key, string_view item) {
 }
 
 OpResult<bool> OpAddNx(const OpArgs& op_args, string_view key, string_view item) {
+  if (OpStatus st = CheckCapacityBeforeAutoCreate(op_args, key); st != OpStatus::OK)
+    return st;
+
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
   RETURN_ON_BAD_STATUS(op_res);
@@ -271,7 +287,7 @@ void CmdReserve(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   if (!CapacityInRange(opts.capacity, opts.bucket_size))
-    return rb->SendError(kCapacityErr);
+    return rb->SendError(kCuckooFilterInvalidCapacity);
 
   CuckooFilterOptions options{opts.capacity, opts.bucket_size, opts.max_iterations, opts.expansion};
 
@@ -422,7 +438,7 @@ void CmdInsertImpl(CmdArgParser parser, CommandContext* cmd_cntx, bool nx) {
   // CF.INSERT accepts CAPACITY only to describe how an about-to-be-created filter should look,
   // but a bogus value is rejected up front either way.
   if (!CapacityInRange(opts.capacity, tl_cf_bucket_size))
-    return rb->SendError(kCapacityErr);
+    return rb->SendError(kCuckooFilterInvalidCapacity);
 
   if (!parser.Check("ITEMS")) {
     return rb->SendError("CF.INSERT requires ITEMS keyword");
