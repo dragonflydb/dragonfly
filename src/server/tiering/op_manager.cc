@@ -57,10 +57,10 @@ void OpManager::Close() {
 }
 
 void OpManager::Enqueue(PendingId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb,
-                        bool read_only) {
+                        ReadOptions options) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
   PrepareRead(segment.ContainingPages())
-      .ForSegment(segment, id, decoder, read_only)
+      .ForSegment(segment, id, decoder, options)
       .read_cbs.emplace_back(std::move(cb));
 }
 
@@ -70,7 +70,7 @@ bool OpManager::HasModificationPending(DiskSegment segment) const {
     return false;
 
   auto* ops_ptr = it->second.Find(segment);
-  return ops_ptr && !ops_ptr->read_only;
+  return ops_ptr && !ops_ptr->options.read_only;
 }
 
 bool OpManager::HasReadPending(PendingId id, DiskSegment segment) const {
@@ -204,7 +204,7 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
     // If the item is not being deleted, report is as fetched to be cached potentially.
     // In case it's cached, we might need to delete it.
     if (page.has_value() && !delete_from_storage)
-      delete_from_storage |= NotifyFetched(ko.id, ko.segment, &*ko.decoder);
+      delete_from_storage |= NotifyFetched(ko.id, ko.segment, &*ko.decoder, ko.options);
 
     // If the item is being deleted, check if the full page needs to be deleted.
     if (delete_from_storage)
@@ -219,25 +219,32 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
 }
 
 OpManager::EntryOps::EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder,
-                              bool read_only)
-    : id{std::move(id)}, segment{segment}, decoder{decoder.Clone()}, read_only{read_only} {
+                              ReadOptions options)
+    : id{std::move(id)}, segment{segment}, decoder{decoder.Clone()}, options{options} {
 }
 
 OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, PendingId id,
-                                                   const Decoder& decoder, bool read_only) {
+                                                   const Decoder& decoder, ReadOptions options) {
   DCHECK_GE(key_segment.offset, segment.offset);
   DCHECK_LE(key_segment.length, segment.length);
 
   for (auto& ops : entry_ops) {
     if (ops.segment.offset == key_segment.offset) {
-      auto ops_decoder = ops.decoder.get();
-      DCHECK(typeid(*ops_decoder) == typeid(decoder))
-          << typeid(*ops_decoder).name() << " " << typeid(decoder).name();
-      ops.read_only &= read_only;
+      auto* stored = ops.decoder.get();
+      // We can promote a BareDecoder, but we can't cope with conflicting decoders
+      if (typeid(*stored) != typeid(decoder)) {
+        if (typeid(*stored) == typeid(BareDecoder)) {
+          ops.decoder = decoder.Clone();  // promote generic -> specific
+        } else if (typeid(decoder) != typeid(BareDecoder)) {
+          LOG(DFATAL) << "conflicting decoders on one segment: " << typeid(*stored).name() << " vs "
+                      << typeid(decoder).name();
+        }
+      }
+      ops.options.Merge(options);
       return ops;
     }
   }
-  return entry_ops.emplace_back(ToOwned(id), key_segment, decoder, read_only);
+  return entry_ops.emplace_back(ToOwned(id), key_segment, decoder, options);
 }
 
 OpManager::EntryOps* OpManager::ReadOp::Find(DiskSegment key_segment) {
