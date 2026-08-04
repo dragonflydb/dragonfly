@@ -60,6 +60,10 @@ ABSL_FLAG(float, tiered_offload_threshold, 0.5,
 ABSL_FLAG(float, tiered_upload_threshold, 0.1,
           "Ratio of free memory (free/max memory) below which uploading stops");
 
+ABSL_FLAG(uint32_t, tiered_experimental_repack_limit, 0,
+          "Experimental bin-bucket deframentation. Limit for number of concurrent page reads "
+          "issued, 0 means disabled");
+
 ABSL_FLAG(bool, tiered_experimental_hash_support, false, "Experimental hash datatype offloading");
 
 ABSL_FLAG(bool, tiered_experimental_list_support, false, "Experimental list node offloading");
@@ -636,6 +640,8 @@ TieredStats TieredStorage::GetStats() const {
     stats.cold_storage_bytes = stats_.cool_memory_used;
     stats.total_offloading_steps = stats_.offloading_steps;
     stats.total_offloading_stashes = stats_.offloading_stashes;
+    stats.total_buckets_repacked = stats_.total_buckets_repacked;
+    stats.estimated_bin_bucket_fragmentation = stats_.estimated_bin_bucket_fragmentation;
     stats.clients_throttled = stash_backpressure_.size();
     stats.total_clients_throttled = stats_.total_clients_throttled;
   }
@@ -656,6 +662,7 @@ void TieredStorage::UpdateFromFlags() {
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
       .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_support),
       .experimental_list_offload = absl::GetFlag(FLAGS_tiered_experimental_list_support),
+      .experimental_repack_limit = absl::GetFlag(FLAGS_tiered_experimental_repack_limit),
       .min_ttl_to_offload_ms = absl::GetFlag(FLAGS_tiered_min_ttl_to_offload_ms),
   };
 
@@ -669,6 +676,7 @@ std::vector<std::string> TieredStorage::GetMutableFlagNames() {
                             FLAGS_tiered_max_pending_stash_bytes, FLAGS_tiered_offload_threshold,
                             FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
                             FLAGS_tiered_experimental_list_support,
+                            FLAGS_tiered_experimental_repack_limit,
                             FLAGS_tiered_min_ttl_to_offload_ms);
 }
 
@@ -684,6 +692,28 @@ int64_t TieredStorage::UploadBudget() const {
   int64_t free_memory = op_manager_->db_slice_.memory_budget();
   int64_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
   return free_memory - double(config_.upload_threshold) * per_shard;
+}
+
+void TieredStorage::Heartbeat() {
+  DbSlice& db_slice = op_manager_->db_slice_;
+
+  if (config_.experimental_repack_limit) {
+    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+      if (db_slice.IsDbValid(i))
+        RunRepackScan(i);
+    }
+  }
+
+  if (!ShouldOffload())
+    return;
+
+  VLOG(1) << "Running offloading, memory=" << db_slice.memory_budget()
+          << ", cool memory: " << CoolMemoryUsage();
+
+  for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+    if (db_slice.IsDbValid(i))
+      RunOffloading(i);
+  }
 }
 
 void TieredStorage::RunOffloading(DbIndex dbid) {
@@ -773,6 +803,94 @@ void TieredStorage::RunDefragScan() {
   } while (defrag_cursor_);
 
   last_defrag_scan_hits_ = hits;
+}
+
+void TieredStorage::RunRepackScan(DbIndex dbid) {
+  constexpr uint64_t kMaxScanUs = 100;
+
+  // How many more pages we can have than the theoretical minimal amount
+  const size_t kAcceptableWaste = 2;
+
+  PrimeTable& table = op_manager_->db_slice_.GetDBTable(dbid)->prime;
+  const auto start_cycles = base::CycleClock::Now();
+
+  size_t issued_reads = 0;
+
+  // With negative budget we just recalculate the stats
+  if (UploadBudget() < 0)
+    issued_reads = config_.experimental_repack_limit + 1;
+
+  auto cb = [&](PrimeTable::bucket_iterator it) {
+    size_t total_size = 0;
+    std::vector<size_t> pages;
+
+    auto it2 = it;
+    for (it2.AdvanceIfNotOccupied(); !it2.is_done(); ++it2) {
+      PrimeValue& pv = it2->second;
+      if (!pv.IsExternal() || pv.IsCool())
+        continue;
+
+      tiering::DiskSegment segment{pv.GetExternalSlice()};
+      if (OccupiesWholePages(segment.length))
+        continue;
+
+      total_size += segment.length;
+      size_t page = segment.ContainingPages().offset;
+      if (std::find(pages.begin(), pages.end(), page) == pages.end())
+        pages.push_back(page);
+    }
+
+    if (pages.empty())
+      return;
+
+    repack_state_.cycle_buckets++;
+    repack_state_.cycle_pages += pages.size();
+
+    // Check if we are in optimality bounds
+    size_t min_required = total_size / tiering::kPageSize + 1;
+    if (pages.size() + kAcceptableWaste <= min_required)
+      return;
+
+    if (issued_reads > config_.experimental_repack_limit)
+      return;
+
+    stats_.total_buckets_repacked++;
+
+    std::string scratch;
+    for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+      PrimeValue& pv = it->second;
+      if (!pv.IsExternal() || pv.IsCool())
+        continue;
+      tiering::DiskSegment segment{pv.GetExternalSlice()};
+      if (OccupiesWholePages(segment.length))
+        continue;
+
+      if (op_manager_->HasModificationPending(segment))
+        continue;
+
+      pv.SetTouched(true);
+      string_view key = it->first.GetSlice(&scratch);
+      Read(
+          tiering::KeyRef{dbid, key}, segment, tiering::StringDecoder{pv},
+          [](io::Result<tiering::StringDecoder*>) {}, /*read_only=*/true);
+    }
+    issued_reads += pages.size();
+  };
+
+  do {
+    if (base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles) >= kMaxScanUs)
+      break;
+    repack_state_.cursor = table.TraverseBuckets(repack_state_.cursor, cb);
+  } while (repack_state_.cursor);
+
+  if (!repack_state_.cursor /* we made a loop */) {
+    if (repack_state_.cycle_buckets > 0) {
+      stats_.estimated_bin_bucket_fragmentation =
+          float(repack_state_.cycle_pages) / float(repack_state_.cycle_buckets);
+    }
+    repack_state_.cycle_buckets = 0;
+    repack_state_.cycle_pages = 0;
+  }
 }
 
 size_t TieredStorage::ReclaimMemory(size_t goal) {

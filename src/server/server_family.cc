@@ -2837,6 +2837,8 @@ string ServerFamily::FormatInfoMetrics(
     append("tiered_total_deletes", m.tiered_stats.total_deletes);
     append("tiered_total_uploads", m.tiered_stats.total_uploads);
     append("tiered_total_defrags", m.tiered_stats.total_defrags);
+    append("tiered_total_repacks", m.tiered_stats.total_buckets_repacked);
+
     append("tiered_total_stash_overflows", m.tiered_stats.total_stash_overflows);
     append("tiered_heap_buf_allocations", m.tiered_stats.total_heap_buf_allocs);
     append("tiered_registered_buf_allocations", m.tiered_stats.total_registered_buf_allocs);
@@ -2851,9 +2853,13 @@ string ServerFamily::FormatInfoMetrics(
     append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
     append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
+    append("tiered_small_bins_estimated_bucket_fragmentation",
+           m.tiered_stats.estimated_bin_bucket_fragmentation);
+
     append("tiered_cold_storage_bytes", m.tiered_stats.cold_storage_bytes);
     append("tiered_offloading_steps", m.tiered_stats.total_offloading_steps);
     append("tiered_offloading_stashes", m.tiered_stats.total_offloading_stashes);
+    append("tiered_repack_values", m.tiered_stats.total_buckets_repacked);
     append("tiered_ram_hits", m.events.ram_hits);
     append("tiered_ram_cool_hits", m.events.ram_cool_hits);
     append("tiered_ram_misses", m.events.ram_misses);
