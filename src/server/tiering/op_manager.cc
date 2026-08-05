@@ -235,9 +235,10 @@ OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, Pend
       if (typeid(*stored) != typeid(decoder)) {
         if (typeid(*stored) == typeid(BareDecoder)) {
           ops.decoder = decoder.Clone();  // promote generic -> specific
-        } else if (typeid(decoder) != typeid(BareDecoder)) {
-          LOG(DFATAL) << "conflicting decoders on one segment: " << typeid(*stored).name() << " vs "
-                      << typeid(decoder).name();
+        } else {
+          CHECK(typeid(decoder) == typeid(BareDecoder))
+              << "conflicting decoders on one segment: " << typeid(*stored).name() << " vs "
+              << typeid(decoder).name();
         }
       }
       ops.options.Merge(options);
