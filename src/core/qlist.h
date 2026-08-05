@@ -357,8 +357,8 @@ class QList {
   void CoolOff(Node* node, uint32_t node_id);
 
   // Like the RecompressOnly free function, but also handles ZSTD dict mode.
-  // Returns the size delta (negative means compression reduced memory usage).
-  ssize_t RecompressNode(Node* node);
+  // Updates malloc_size_ with the resulting size delta.
+  void RecompressNode(Node* node);
 
   void Replace(Iterator it, std::string_view elem);
   void CompressByDepth(Node* node);
@@ -375,6 +375,7 @@ class QList {
   void BackfillCompressWithZstdDict();
 
   // Compresses a single node using the thread-local ZSTD dictionary.
+  // On success updates malloc_size_ with the size delta, so callers must not account for it.
   bool CompressNodeWithDict(Node* node);
 
   // Prepares the node for read access.

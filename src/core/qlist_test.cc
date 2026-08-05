@@ -1498,6 +1498,65 @@ TEST_F(QListZstdTest, IncrementalCompression) {
   EXPECT_EQ(count, ql.Size());
 }
 
+TEST_F(QListZstdTest, MallocUsedTracksSteadyStateCompression) {
+  // Most of the nodes below are compressed by the steady-state branch of CoolOff(), which used
+  // to skip the malloc_size_ update and left the tracked size at the uncompressed value.
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  size_t compressed_nodes = 0;
+  for (const QList::Node* node = ql.Head(); node; node = node->next) {
+    compressed_nodes += node->IsCompressed();
+  }
+  ASSERT_GT(compressed_nodes, 10u);
+
+  const size_t tracked = ql.MallocUsed(false);
+  const size_t actual = ql.MallocUsed(true);
+  LOG(INFO) << "tracked: " << tracked << ", actual: " << actual;
+
+  // The two never match exactly: MallocUsed(true) sums zmalloc_usable_size() while the tracked
+  // deltas use the compressed payload length, ignoring the quicklistLZF header. So the tracked
+  // size must stay slightly below the real one, not an order of magnitude above it.
+  EXPECT_LE(tracked, actual);
+  EXPECT_GT(tracked, actual * 0.8);
+}
+
+// Erase() drops whole interior nodes without decompressing them first, so DelNode() used to
+// subtract the uncompressed node->sz for a node that had only contributed its compressed length
+// to malloc_size_. The counter is unsigned, so the over-subtraction wrapped it around.
+TEST_F(QListZstdTest, EraseWholeCompressedNodesKeepsMallocSize) {
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+  ASSERT_GT(ql.node_count(), 10u);
+
+  ql.Erase(100, 200);
+  ASSERT_EQ(ql.Size(), 300u);
+
+  const size_t tracked = ql.MallocUsed(false);
+  const size_t actual = ql.MallocUsed(true);
+  LOG(INFO) << "tracked: " << ssize_t(tracked) << ", actual: " << actual;
+  EXPECT_LE(tracked, actual);
+  EXPECT_GT(tracked, actual * 0.8);
+}
+
+// Same accounting bug on the LZF depth-compression path, which is independent of the ZSTD dict.
+TEST_F(QListZstdTest, EraseWholeLzfNodesKeepsMallocSize) {
+  QList ql(-1, 1);  // compress=1 enables LZF depth compression and disables the ZSTD dict path
+  PopulateWithCeleryData(ql, 500);
+  ASSERT_GT(ql.node_count(), 10u);
+
+  ql.Erase(100, 200);
+  ASSERT_EQ(ql.Size(), 300u);
+
+  const size_t tracked = ql.MallocUsed(false);
+  const size_t actual = ql.MallocUsed(true);
+  LOG(INFO) << "tracked: " << ssize_t(tracked) << ", actual: " << actual;
+  EXPECT_LE(tracked, actual);
+  EXPECT_GT(tracked, actual * 0.8);
+}
+
 TEST_F(QListZstdTest, IncompressibleDataNotCompressed) {
   // Train a dictionary with compressible Celery data.
   QList ql_train(-1, 0);
