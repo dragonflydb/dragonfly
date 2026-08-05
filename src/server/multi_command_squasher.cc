@@ -169,6 +169,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
 
   // In pipeline mode the reply is captured and deferred into the parsed command, preserving
   // the reply order with squashed commands whose replies are sent later by the connection.
+  [[maybe_unused]] const RespVersion original_resp = rb->GetRespVersion();
   optional<CapturingReplyBuilder> crb;
   if (opts_.pipeline_mode) {
     DCHECK(cmd.cmd_cntx);
@@ -197,6 +198,10 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
   cmd_cntx.SetupTx(cmd.cid, tx);
   cmd_cntx.SetTailArgs(cmd.args);
   service_->InvokeCmd(cmd.args, &cmd_cntx);
+
+  DCHECK(!crb || crb->GetRespVersion() == original_resp)
+      << cmd.cid->name() << " changed its RESP version while captured";
+
   resolve();
 
   return true;
