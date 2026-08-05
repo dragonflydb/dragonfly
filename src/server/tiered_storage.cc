@@ -23,6 +23,7 @@
 #include "core/qlist.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/search/doc_index.h"
 #include "server/snapshot.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
@@ -704,7 +705,8 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   string tmp;
   auto cb = [this, dbid, &tmp](PrimeIterator it) mutable {
     stats_.offloading_steps++;
-    auto blobs = ShouldStash(it->second, StashContext{.key_expire_ms = it->first.GetExpireTime()});
+    auto blobs = ShouldStash(
+        it->second, StashContext{.dbid = dbid, .key_expire_ms = it->first.GetExpireTime()});
     if (blobs) {
       if (it->second.WasTouched()) {
         it->second.SetTouched(false);
@@ -824,6 +826,14 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
   if (fragment_ref.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
     return nullopt;
 
+  // Prevent new database 0 HASH stashes while an index exists. The index builder materializes
+  // matching values that were already external when the index was created.
+  auto* search_indices = op_manager_->db_slice_.shard_owner()->search_indices();
+  if (stash_ctx.dbid == 0 && fragment_ref.ObjType() == OBJ_HASH && search_indices &&
+      search_indices->HasHashIndexes()) {
+    return nullopt;
+  }
+
   // For now, list node offloading is conditional
   if (fragment_ref.ObjType() == OBJ_LIST && !config_.experimental_list_offload)
     return nullopt;
@@ -881,6 +891,41 @@ PrimeValue TieredStorage::Warmup(DbIndex dbid, std::string_view key, PrimeValue:
   return hot;
 }
 
+util::fb2::Future<bool> TieredStorage::MaterializeForIndexing(DbIndex dbid, string_view key,
+                                                              PrimeValue* pv) {
+  util::fb2::Future<bool> fut;
+  if (!pv->IsExternal()) {
+    fut.Resolve(true);
+    return fut;
+  }
+
+  // A cool value still has its in-memory copy, so bringing it back does not suspend.
+  if (pv->IsCool()) {
+    *pv = Warmup(dbid, key, pv->GetCool());
+    fut.Resolve(true);
+    return fut;
+  }
+
+  // HASH is the only indexable type that can be offloaded.
+  if (pv->GetExternalRep() != CompactObj::ExternalRep::SERIALIZED_MAP) {
+    LOG(DFATAL) << "Unexpected representation for an indexed value";
+    fut.Resolve(false);
+    return fut;
+  }
+
+  // Taking a mutable copy marks the decoder as modified. The normal modified-read path then
+  // uploads the value and releases its disk segment regardless of the current upload budget.
+  Read(
+      KeyRef{dbid, key}, pv->GetExternalSlice(), tiering::ListpackMapDecoder{},
+      [fut](io::Result<tiering::ListpackMapDecoder*> res) mutable {
+        if (res)
+          (*res)->GetMutable();
+        fut.Resolve(res.has_value());
+      },
+      false /* read_only */);
+  return fut;
+}
+
 PrimeValue TieredStorage::DeleteCool(TieredCoolRecord* record) {
   auto it = CoolQueue::s_iterator_to(*record);
   cool_queue_.erase(it);
@@ -903,8 +948,8 @@ TieredCoolRecord* TieredStorage::PopCool() {
 
 void StashPrimeValue(DbIndex dbid, std::string_view key, const PrimeKey& pk, PrimeValue* pv,
                      TieredStorage* ts, BackPressureFuture* backpressure) {
-  if (auto blobs =
-          ts->ShouldStash(*pv, TieredStorage::StashContext{.key_expire_ms = pk.GetExpireTime()});
+  if (auto blobs = ts->ShouldStash(
+          *pv, TieredStorage::StashContext{.dbid = dbid, .key_expire_ms = pk.GetExpireTime()});
       blobs) {
     pv->SetStashPending(true);
     ts->StashPrimeValue(dbid, key, *blobs, backpressure);
@@ -913,7 +958,7 @@ void StashPrimeValue(DbIndex dbid, std::string_view key, const PrimeKey& pk, Pri
 
 bool StashListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts,
                    BackPressureFuture* backpressure) {
-  if (auto blobs = ts->ShouldStash(*node, {}); blobs) {
+  if (auto blobs = ts->ShouldStash(*node, {.dbid = dbid}); blobs) {
     // Increment before stashing; decremented on failure in `ClearStashPending`
     ql->AdjustOffloadNodeCount(1);
     node->io_pending = 1;

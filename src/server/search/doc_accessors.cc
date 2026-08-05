@@ -479,6 +479,20 @@ void JsonAccessor::RemoveFieldFromCache(string_view field) {
 thread_local absl::flat_hash_map<std::string, std::unique_ptr<JsonAccessor::JsonPathContainer>>
     JsonAccessor::path_cache_;
 
+namespace {
+
+struct EmptyAccessor : public BaseAccessor {
+  std::optional<StringList> GetStrings(std::string_view /*active_field*/) const override {
+    return std::optional<StringList>{std::in_place};
+  }
+
+  SearchDocData Serialize(const search::Schema& /*schema*/) const override {
+    return {};
+  }
+};
+
+}  // namespace
+
 unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv,
                                      std::string_view cleanup_key) {
   DCHECK(pv.ObjType() == OBJ_HASH || pv.ObjType() == OBJ_JSON);
@@ -486,6 +500,13 @@ unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue&
   if (pv.ObjType() == OBJ_JSON) {
     DCHECK(pv.GetJson());
     return make_unique<JsonAccessor>(pv.GetJson());
+  }
+
+  // An external value stores a disk reference where its container pointer would normally be.
+  // The resident gate and index builder should make this unreachable.
+  if (pv.IsExternal()) {
+    LOG(DFATAL) << "Cannot access an offloaded HASH from a search index";
+    return make_unique<EmptyAccessor>();
   }
 
   if (pv.Encoding() == kEncodingListPack) {

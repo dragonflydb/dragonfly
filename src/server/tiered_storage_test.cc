@@ -13,7 +13,12 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/namespaces.h"
+#ifdef WITH_SEARCH
+#include "server/search/doc_index.h"
+#endif
 #include "server/test_utils.h"
 #include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
@@ -1960,5 +1965,238 @@ TEST_F(TieredStorageTest, CoolHashDeleteDoesNotAbort) {
   EXPECT_EQ(Run({"PING"}), "PONG");
   EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
 }
+
+#ifdef WITH_SEARCH
+
+class IndexedHashTieringTest : public TieredStorageTest, public testing::WithParamInterface<bool> {
+ protected:
+  void SetUp() override {
+    SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+    SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);
+    SetFlag(&FLAGS_tiered_experimental_cooling, GetParam());
+    SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+    TieredStorageTest::SetUp();
+  }
+
+  static constexpr int kNumHashes = 150;
+
+  struct HashState {
+    size_t external = 0;
+    size_t pending = 0;
+  };
+
+  void FillHashes(string_view prefix, DbIndex dbid = 0) {
+    Run({"SELECT", absl::StrCat(dbid)});
+    for (int i = 0; i < kNumHashes; ++i) {
+      Run({"HSET", absl::StrCat(prefix, i), "f1", BuildString(48, 'v'), "f2",
+           absl::StrCat("s", i)});
+    }
+    Run({"SELECT", "0"});
+  }
+
+  void FillLargeHash(string_view key, char fill, DbIndex dbid = 0) {
+    Run({"SELECT", absl::StrCat(dbid)});
+    Run({"HSET", key, "f1", BuildString(3000, fill)});
+    Run({"SELECT", "0"});
+  }
+
+  void CreateIndex(string_view name = "idx", string_view prefix = "h") {
+    EXPECT_EQ(Run({"FT.CREATE", name, "ON", "HASH", "PREFIX", "1", prefix, "SCHEMA", "f1", "TEXT"}),
+              "OK");
+    WaitIndexBuilt();
+  }
+
+  void ExpectIndexed(int64_t count, string_view name = "idx") {
+    EXPECT_THAT(Run({"FT.SEARCH", name, "*", "LIMIT", "0", "0"}),
+                RespArray(ElementsAre(IntArg(count))));
+  }
+
+  void WaitIndexBuilt() {
+    pp_->at(0)->Await([] { EngineShard::tlocal()->search_indices()->BlockUntilConstructionEnd(); });
+  }
+
+  HashState GetHashState(string_view prefix, DbIndex dbid = 0) {
+    HashState state;
+    pp_->at(0)->AwaitBrief([&] {
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+      DbTable* table = db.GetDBTable(dbid);
+      for (int i = 0; i < kNumHashes; ++i) {
+        auto it = table->prime.Find(absl::StrCat(prefix, i));
+        if (!IsValid(it))
+          continue;
+        state.external += it->second.IsExternal();
+        state.pending += it->second.HasStashPending();
+      }
+    });
+    return state;
+  }
+
+  bool IsHashExternal(string_view key, DbIndex dbid = 0) {
+    bool external = false;
+    pp_->at(0)->AwaitBrief([&] {
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+      auto it = db.GetDBTable(dbid)->prime.Find(key);
+      external = IsValid(it) && it->second.ObjType() == OBJ_HASH && it->second.IsExternal();
+    });
+    return external;
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
+};
+
+INSTANTIATE_TEST_SUITE_P(Cooling, IndexedHashTieringTest, testing::Values(false, true));
+
+TEST_P(IndexedHashTieringTest, HashIndexKeepsDbZeroHashesResident) {
+  CreateIndex();
+  CreateIndex("other_idx", "z");
+  FillHashes("h");
+  FillLargeHash("plain", 'p');
+  FillLargeHash("h_db1_move", 'm', 1);
+
+  ExpectConditionWithinTimeout([&] { return IsHashExternal("h_db1_move", 1); });
+  ASSERT_TRUE(IsHashExternal("h_db1_move", 1));
+
+  HashState db0_h = GetHashState("h");
+  EXPECT_EQ(db0_h.external, 0u);
+  EXPECT_EQ(db0_h.pending, 0u);
+  EXPECT_FALSE(IsHashExternal("plain"));
+  ExpectIndexed(kNumHashes);
+
+  Run({"SELECT", "1"});
+  EXPECT_THAT(Run({"MOVE", "h_db1_move", "0"}), IntArg(1));
+  Run({"SELECT", "0"});
+  EXPECT_FALSE(IsHashExternal("h_db1_move"));
+  EXPECT_EQ(Run({"HGET", "h_db1_move", "f1"}), BuildString(3000, 'm'));
+  ExpectIndexed(kNumHashes + 1);
+
+  EXPECT_EQ(Run({"FT.DROPINDEX", "idx"}), "OK");
+  FillLargeHash("still_pinned", 's');
+  FillLargeHash("drop_probe", 'd', 1);
+  ExpectConditionWithinTimeout([&] { return IsHashExternal("drop_probe", 1); });
+  EXPECT_FALSE(IsHashExternal("still_pinned"));
+  EXPECT_EQ(Run({"FT.DROPINDEX", "other_idx"}), "OK");
+  FillLargeHash("post", 'x');
+  ExpectConditionWithinTimeout([&] { return IsHashExternal("post"); });
+}
+
+TEST_P(IndexedHashTieringTest, BuildMaterializesMatchingHashes) {
+  FillHashes("h");
+  FillLargeHash("plain_source", 's');
+  FillLargeHash("plain_destination", 'd');
+  ExpectConditionWithinTimeout([&] {
+    return GetHashState("h").external > 0 && IsHashExternal("plain_source") &&
+           IsHashExternal("plain_destination");
+  });
+
+  CreateIndex();
+
+  HashState state = GetHashState("h");
+  EXPECT_EQ(state.external, 0u);
+  EXPECT_EQ(state.pending, 0u);
+  EXPECT_TRUE(IsHashExternal("plain_source"));
+  EXPECT_TRUE(IsHashExternal("plain_destination"));
+  ExpectIndexed(kNumHashes);
+  EXPECT_EQ(Run({"HGET", "h5", "f1"}), BuildString(48, 'v'));
+
+  EXPECT_EQ(Run({"RENAME", "plain_source", "h_renamed"}), "OK");
+  EXPECT_FALSE(IsHashExternal("h_renamed"));
+  ExpectIndexed(kNumHashes + 1);
+
+  EXPECT_EQ(Run({"RENAME", "h0", "plain_destination"}), "OK");
+  EXPECT_FALSE(IsHashExternal("plain_destination"));
+  ExpectIndexed(kNumHashes);
+}
+
+TEST_P(IndexedHashTieringTest, CopyMaterializesExternalSourceAndDestination) {
+  const string source0 = "copy_src:0";
+  const string source1 = "copy_src:1";
+  const string destination = "copy_old:0";
+  FillLargeHash(source0, 'a');
+  FillLargeHash(source1, 'b');
+  FillLargeHash(destination, 'c');
+  ExpectConditionWithinTimeout([&] {
+    return IsHashExternal(source0) && IsHashExternal(source1) && IsHashExternal(destination);
+  });
+
+  CreateIndex("copy_idx", "copy_indexed:");
+  ASSERT_TRUE(IsHashExternal(source0));
+  ASSERT_TRUE(IsHashExternal(source1));
+  ASSERT_TRUE(IsHashExternal(destination));
+
+  EXPECT_THAT(Run({"COPY", source0, destination, "REPLACE"}), IntArg(1));
+  EXPECT_FALSE(IsHashExternal(source0));
+  EXPECT_FALSE(IsHashExternal(destination));
+  EXPECT_EQ(Run({"HGET", destination, "f1"}), BuildString(3000, 'a'));
+
+  EXPECT_THAT(Run({"COPY", source1, "copy_indexed:0"}), IntArg(1));
+  EXPECT_FALSE(IsHashExternal(source1));
+  EXPECT_FALSE(IsHashExternal("copy_indexed:0"));
+  ExpectIndexed(1, "copy_idx");
+}
+
+TEST_P(IndexedHashTieringTest, CancelledMaterializationLeavesHashExternal) {
+  if (GetParam())
+    GTEST_SKIP() << "cool values warm synchronously without a cancellable disk read";
+
+  SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
+  UpdateFromFlags();
+  const string key = "cancelled";
+  FillLargeHash(key, 'c');
+  ExpectConditionWithinTimeout([&] { return IsHashExternal(key); });
+
+  pp_->at(0)->Await([&] {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+    auto it = db.GetDBTable(0)->prime.Find(key);
+    ASSERT_TRUE(IsValid(it));
+    ASSERT_TRUE(it->second.IsExternal());
+
+    auto* ts = EngineShard::tlocal()->tiered_storage();
+    tiering::DiskSegment segment = it->second.GetExternalSlice();
+    auto future = ts->MaterializeForIndexing(0, key, &it->second);
+    ASSERT_TRUE(ts->HasModificationPending(segment));
+    ts->CancelLoad(segment);
+    EXPECT_FALSE(future.Get());
+  });
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
+  EXPECT_TRUE(IsHashExternal(key));
+}
+
+TEST_P(IndexedHashTieringTest, BorrowedHnswVectorsStayResident) {
+  constexpr int kDim = 512;  // 2 KiB: HNSW borrows the keyspace bytes instead of copying them.
+  auto vector_blob = [=](float value) {
+    vector<float> values(kDim, value);
+    return string(reinterpret_cast<const char*>(values.data()), values.size() * sizeof(float));
+  };
+
+  for (int i = 0; i < 3; ++i)
+    Run({"HSET", absl::StrCat("vec:", i), "v", vector_blob(i + 1)});
+  ExpectConditionWithinTimeout([&] { return GetHashState("vec:").external == 3; });
+
+  EXPECT_EQ(
+      Run({"FT.CREATE", "vec_idx", "ON", "HASH", "PREFIX", "1", "vec:", "SCHEMA", "v", "VECTOR",
+           "HNSW", "6", "TYPE", "FLOAT32", "DIM", absl::StrCat(kDim), "DISTANCE_METRIC", "L2"}),
+      "OK");
+  WaitIndexBuilt();
+
+  HashState state = GetHashState("vec:");
+  EXPECT_EQ(state.external, 0u);
+  EXPECT_EQ(state.pending, 0u);
+  ExpectIndexed(3, "vec_idx");
+
+  string query = vector_blob(1.0f);
+  auto response =
+      Run({"FT.SEARCH", "vec_idx", "*=>[KNN 1 @v $q]", "PARAMS", "2", "q", query, "DIALECT", "2"});
+  ASSERT_EQ(response.type, RespExpr::ARRAY);
+  ASSERT_GE(response.GetVec().size(), 2u);
+  EXPECT_THAT(response.GetVec()[0], IntArg(1));
+  EXPECT_EQ(response.GetVec()[1], "vec:0");
+
+  FillLargeHash("pressure", 'p', 1);
+  ExpectConditionWithinTimeout([&] { return IsHashExternal("pressure", 1); });
+  EXPECT_EQ(GetHashState("vec:").external, 0u);
+}
+
+#endif  // WITH_SEARCH
 
 }  // namespace dfly
