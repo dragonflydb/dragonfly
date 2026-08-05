@@ -17,9 +17,9 @@ namespace facade {
 
 struct CaptureVisitor;
 
-// CapturingReplyBuilder allows capturing replies and retrieveing them with Take().
-// Those replies can be stored standalone and sent with
-// CapturingReplyBuilder::Apply() to another reply builder.
+// CapturingReplyBuilder allows capturing replies and retrieving them with Take().
+// Those replies can be stored standalone and sent with CapturingReplyBuilder::Apply() to another
+// reply builder.
 class CapturingReplyBuilder : public RedisReplyBuilder {
   friend struct CaptureVisitor;
 
