@@ -4,6 +4,7 @@
 
 #include "server/transaction.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/match.h>
 
 #include <memory>
@@ -21,6 +22,7 @@
 #include "server/journal/journal.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
+#include "util/fibers/fibers.h"
 
 ABSL_FLAG(uint32_t, tx_queue_warning_len, 96,
           "Length threshold for warning about long transaction queue");
@@ -81,6 +83,25 @@ std::string FormatTp(Transaction::time_point tp) {
 
 uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
+}
+
+void CmdMemoryFiberSwitchHook(fb2::FiberSwitchHookEvent event) noexcept {
+  using enum fb2::FiberSwitchHookEvent;
+  switch (event) {
+    case SUSPEND:
+      SuspendCurrentCmdMemoryScope();
+      break;
+    case RESUME:
+      ResumeCurrentCmdMemoryScope();
+      break;
+  }
+}
+
+template <typename F> auto WithMemTrackAndFiberHook(int obj_type, F f) {
+  CmdMemoryScope scope(obj_type);
+  const auto prev_hook = ThisFiber::SetSwitchHook({CmdMemoryFiberSwitchHook});
+  absl::Cleanup cleanup = [prev_hook] { ThisFiber::SetSwitchHook(prev_hook); };
+  return f();
 }
 
 }  // namespace
@@ -684,7 +705,7 @@ void Transaction::RunCallback(EngineShard* shard) {
   try {
     const int obj_type = cid_ ? TypeForFamily(cid_->GetFamily()) : -1;
     if (obj_type >= 0)
-      result = WithMemTrack(obj_type, [&] { return (*cb_ptr_)(this, shard); });
+      result = WithMemTrackAndFiberHook(obj_type, [&] { return (*cb_ptr_)(this, shard); });
     else
       result = (*cb_ptr_)(this, shard);
     if (unique_shard_cnt_ == 1) {
@@ -1527,7 +1548,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   const int obj_type = cid_ ? TypeForFamily(cid_->GetFamily()) : -1;
   RunnableResult result;
   if (obj_type >= 0)
-    result = WithMemTrack(obj_type, [&] { return cb(this, shard); });
+    result = WithMemTrackAndFiberHook(obj_type, [&] { return cb(this, shard); });
   else
     result = cb(this, shard);
 
