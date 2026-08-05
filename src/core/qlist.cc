@@ -695,13 +695,13 @@ void QList::Iterate(IterateFunc cb, long start, long end) const {
 
   if (end < 0 || end >= long(Size()))
     end = Size() - 1;
-  Iterator it = GetIterator(start);
-  if (it.Valid()) {
+  ReadCursor cur = GetReadCursor(start);
+  if (cur.Valid()) {
     do {
-      if (start > end || !cb(it.Get()))
+      if (start > end || !cb(cur.Get()))
         break;
       start++;
-    } while (it.Next());
+    } while (cur.Next());
   }
 }
 
@@ -1364,6 +1364,14 @@ auto QList::GetIterator(long idx) const -> Iterator {
   InitIteratorEntry(&iter);
 
   return iter;
+}
+
+void QList::EndRead(const Iterator& it) const {
+  if (it.current_ == nullptr)
+    return;
+
+  QList* self = const_cast<QList*>(this);
+  self->RecompressNode(it.current_);
 }
 
 auto QList::Erase(Iterator it) -> Iterator {

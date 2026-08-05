@@ -124,6 +124,38 @@ class QList {
     friend class QList;
   };
 
+  // A read-only cursor that recompresses its final node on destruction.
+  class ReadCursor {
+   public:
+    ~ReadCursor() {
+      owner_->EndRead(it_);
+    }
+
+    ReadCursor(const ReadCursor&) = delete;
+    ReadCursor& operator=(const ReadCursor&) = delete;
+
+    bool Valid() const {
+      return it_.Valid();
+    }
+
+    Entry Get() const {
+      return it_.Get();
+    }
+
+    bool Next() {
+      return it_.Next();
+    }
+
+   private:
+    ReadCursor(const QList* owner, Iterator it) : owner_(owner), it_(it) {
+    }
+
+    const QList* owner_;
+    Iterator it_;
+
+    friend class QList;
+  };
+
   using IterateFunc = absl::FunctionRef<bool(Entry)>;
   enum InsertOpt : uint8_t { BEFORE, AFTER };
 
@@ -225,6 +257,15 @@ class QList {
   // negative index - means counting from the tail.
   // result.Valid() is true if the index is within range.
   Iterator GetIterator(long idx) const;
+
+  // Returns a read-only cursor that restores the list's footprint on destruction.
+  ReadCursor GetReadCursor(Where where) const {
+    return ReadCursor{this, GetIterator(where)};
+  }
+
+  ReadCursor GetReadCursor(long idx) const {
+    return ReadCursor{this, GetIterator(idx)};
+  }
 
   uint32_t node_count() const {
     return len_;
@@ -380,6 +421,8 @@ class QList {
 
   // Prepares the node for read access.
   void AccessForReads(bool recompress, Node* node);
+
+  void EndRead(const Iterator& it) const;
 
   Node* MergeNodes(Node* node);
 
