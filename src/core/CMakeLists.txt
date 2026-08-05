@@ -1,11 +1,3 @@
-find_library(LIB_PCRE2 NAMES pcre2-8)
-if(LIB_PCRE2)
-  set(PCRE2_LIB ${LIB_PCRE2})
-else()
-  message(STATUS "pcre2-8 not found. Building without PCRE2 support.")
-  set(PCRE2_LIB "")
-endif()
-
 find_library(LIB_RE2 NAMES re2)
 if(LIB_RE2)
   set(RE2_LIB ${LIB_RE2})
@@ -34,12 +26,12 @@ add_library(dfly_core allocation_tracker.cc bloom.cc topk.cc compact_object.cc c
 cxx_link(dfly_core base dfly_search_core dfly_page_usage fibers2 jsonpath
     absl::flat_hash_map absl::str_format absl::random_random redis_lib
     TRDP::lua lua_modules
-    OpenSSL::Crypto TRDP::dconv TRDP::zstd TRDP::hdr_histogram)
+    OpenSSL::Crypto TRDP::dconv TRDP::zstd TRDP::hdr_histogram TRDP::pcre2)
 
 add_executable(dash_bench dash_bench.cc)
 cxx_link(dash_bench dfly_core redis_test_lib)
 
-helio_cxx_test(dfly_core_test dfly_core TRDP::fast_float ${PCRE2_LIB} ${RE2_LIB} LABELS DFLY)
+helio_cxx_test(dfly_core_test dfly_core TRDP::fast_float TRDP::pcre2 ${RE2_LIB} LABELS DFLY)
 helio_cxx_test(compact_object_test dfly_core LABELS DFLY)
 helio_cxx_test(extent_tree_test dfly_core LABELS DFLY)
 helio_cxx_test(dash_test dfly_core file redis_test_lib DATA testdata/ids.txt.zst LABELS DFLY)
