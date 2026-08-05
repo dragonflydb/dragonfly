@@ -425,6 +425,50 @@ TEST_F(QListTest, DefragmentListpackCompressed) {
   ASSERT_EQ(i, total_items);
 }
 
+// Defragmenting a compressed node must copy only sizeof(quicklistLZF) + lzf->sz bytes,
+// not node->sz (which holds the *uncompressed* size). Copying node->sz over-reads the
+// source allocation (ASAN) and over-allocates the destination, inflating the real
+// footprint above the tracked malloc_size_.
+TEST_F(QListTest, DefragCompressedEntrySize) {
+  PageUsage page_usage{CollectPageStats::YES, 100.0};
+  page_usage.SetForceReallocate(true);
+
+  ql_ = QList{-1, 1};  // 4kb nodes, head/tail uncompressed, interior nodes LZF-compressed.
+
+  // Highly compressible payloads so that lzf->sz is much smaller than node->sz.
+  constexpr int kItems = 100;
+  const string payload(300, 'a');
+  for (int i = 0; i < kItems; ++i) {
+    ql_.Push(StrCat(payload, i), QList::TAIL);
+  }
+
+  ASSERT_GT(ql_.node_count(), 2u);
+  unsigned compressed = 0;
+  for (const auto* node = ql_.Head(); node; node = node->next) {
+    compressed += node->IsCompressed();
+  }
+  ASSERT_GT(compressed, 0u) << "test requires compressed interior nodes";
+
+  const size_t before_fast = ql_.MallocUsed(false);
+  const size_t before_slow = ql_.MallocUsed(true);
+
+  ASSERT_EQ(ql_.node_count(), ql_.DefragIfNeeded(&page_usage));
+
+  // Reallocating with the same sizes must not change either the tracked or the real footprint.
+  EXPECT_EQ(before_fast, ql_.MallocUsed(false));
+  EXPECT_EQ(before_slow, ql_.MallocUsed(true));
+
+  // Entries are still readable (decompression of the moved nodes succeeds).
+  int i = 0;
+  auto it = ql_.GetIterator(QList::HEAD);
+  ASSERT_TRUE(it.Valid());
+  do {
+    ASSERT_EQ(StrCat(payload, i), it.Get().to_string());
+    ++i;
+  } while (it.Next());
+  ASSERT_EQ(kItems, i);
+}
+
 // MergeNodes must not follow the head_->prev circular link when looking for
 // adjacent nodes to merge.  Splitting a full head node and calling MergeNodes
 // on the right half used to traverse new_head->prev (= tail), merging two
