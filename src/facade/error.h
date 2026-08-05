@@ -22,6 +22,10 @@ inline constexpr char kKeyNotFoundErr[] = "no such key";
 inline constexpr char kInvalidIntErr[] = "value is not an integer or out of range";
 inline constexpr char kInvalidFloatErr[] = "value is not a valid float";
 inline constexpr char kUintErr[] = "value is out of range, must be positive";
+inline constexpr char kTimeoutNegativeErr[] = "timeout is negative";
+inline constexpr char kTimeoutNotFloatErr[] = "timeout is not a float or out of range";
+inline constexpr char kTimeoutOutOfRangeErr[] = "timeout is out of range";
+inline constexpr char kInvalidNumFields[] = "Number of fields must be a positive integer";
 inline constexpr char kIncrOverflow[] = "increment or decrement would overflow";
 inline constexpr char kDbIndOutOfRangeErr[] = "DB index is out of range";
 inline constexpr char kInvalidDbIndErr[] = "invalid DB index";
@@ -53,5 +57,6 @@ inline constexpr char kNoGroupErrType[] = "no_group_error";
 inline constexpr char kNoAuthErrType[] = "no_auth";
 
 inline constexpr char kBloomFilterLoadInProgress[] = "bloom filter load in progress";
+inline constexpr char kCuckooFilterFull[] = "Filter is full";
 
 }  // namespace facade

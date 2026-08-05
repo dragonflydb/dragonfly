@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -53,19 +54,55 @@ struct SearchResult {
   SearchResult() = default;
 
   SearchResult(size_t total_hits, std::vector<SerializedSearchDoc> docs,
-               std::optional<search::AlgorithmProfile> profile)
-      : total_hits{total_hits}, docs{std::move(docs)}, profile{std::move(profile)} {
+               std::optional<search::AlgorithmProfile> profile, float max_text_score = 0)
+      : total_hits{total_hits},
+        docs{std::move(docs)},
+        max_text_score{max_text_score},
+        profile{std::move(profile)} {
   }
 
   SearchResult(facade::ErrorReply error) : error{std::move(error)} {
   }
 
-  size_t total_hits;
+  size_t total_hits = 0;
   std::vector<SerializedSearchDoc> docs;
+  float max_text_score = 0;
   std::optional<search::AlgorithmProfile> profile;
 
   std::optional<facade::ErrorReply> error;
 };
+
+struct SearchIdResult {
+  SearchIdResult() = default;
+
+  SearchIdResult(size_t total_hits, std::vector<search::DocId> ids,
+                 absl::flat_hash_map<search::DocId, float> text_scores,
+                 std::optional<search::AlgorithmProfile> profile, float max_text_score = 0);
+
+  SearchIdResult(facade::ErrorReply error);
+
+  size_t total_hits = 0;
+  std::vector<search::DocId> ids;
+  absl::flat_hash_map<search::DocId, float> text_scores;
+  float max_text_score = 0;
+  std::optional<search::AlgorithmProfile> profile;
+
+  std::optional<facade::ErrorReply> error;
+};
+
+inline SearchIdResult::SearchIdResult(size_t total_hits, std::vector<search::DocId> ids,
+                                      absl::flat_hash_map<search::DocId, float> text_scores,
+                                      std::optional<search::AlgorithmProfile> profile,
+                                      float max_text_score)
+    : total_hits{total_hits},
+      ids{std::move(ids)},
+      text_scores{std::move(text_scores)},
+      max_text_score{max_text_score},
+      profile{std::move(profile)} {
+}
+
+inline SearchIdResult::SearchIdResult(facade::ErrorReply error) : error{std::move(error)} {
+}
 
 // Field reference with optional alias as parsed from RETURN [field AS alias], LOAD, etc...
 struct FieldReference {
@@ -130,8 +167,9 @@ struct SearchParams {
 
   search::QueryParams query_params;
 
-  bool with_scores = false;           // WITHSCORES flag
-  search::ScorerFn scorer = nullptr;  // SCORER parameter (null = not set)
+  bool with_scores = false;                  // WITHSCORES flag
+  std::optional<search::ScorerSpec> scorer;  // SCORER parameter (null = not set); carries the
+                                             // BM25STD.TANH factor when applicable
 
   bool ShouldReturnAllFields() const {
     return !return_fields.has_value();
@@ -196,8 +234,12 @@ struct AggregateParams {
   std::optional<std::vector<FieldReference>> load_fields;
   std::vector<aggregate::AggregationStep> steps;
 
-  bool add_scores = false;            // ADDSCORES flag
-  search::ScorerFn scorer = nullptr;  // SCORER parameter (null = not set)
+  bool add_scores = false;                   // ADDSCORES flag
+  std::optional<search::ScorerSpec> scorer;  // SCORER parameter (null = not set); carries the
+                                             // BM25STD.TANH factor when applicable
+
+  // Set only for multi-shard scoring queries; not owned.
+  const search::GlobalScoringStats* global_scoring_stats = nullptr;
 };
 
 // Stores basic info about a document index.
@@ -352,8 +394,20 @@ class ShardDocIndex {
   ~ShardDocIndex();
 
   // Perform search on all indexed documents and return results.
+  // When global_stats is non-null, scorers see cluster-wide counts.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
-                      search::SearchAlgorithm* search_algo, bool is_knn_prefilter) const;
+                      search::SearchAlgorithm* search_algo, bool is_knn_prefilter,
+                      const search::GlobalScoringStats* global_stats) const;
+
+  // Perform search and return only matched document ids. Used by HNSW prefilters where
+  // serializing every filtered key before KNN would dominate wide-filter queries.
+  SearchIdResult SearchIds(const OpArgs& op_args, const SearchParams& params,
+                           search::SearchAlgorithm* search_algo,
+                           const search::GlobalScoringStats* global_stats) const;
+
+  // This shard's contribution to a GlobalScoringStats. search_algo must be
+  // Init()-ed.
+  search::ShardScoringStats CollectScoringStats(search::SearchAlgorithm* search_algo) const;
 
   // Perform search and load requested values - note params might be interpreted differently.
   std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,
@@ -389,6 +443,13 @@ class ShardDocIndex {
   void RemoveDoc(DocId id, const DbContext& db_cntx, const PrimeValue& pv);
 
   DocIndexInfo GetInfo() const;
+
+  // Direct access to the underlying DocIndex (schema, prefixes, type). Prefer this over
+  // GetInfo().base_index for hot paths -- GetInfo() returns a freshly-copied DocIndexInfo
+  // (which contains the entire schema by value).
+  const DocIndex& base() const {
+    return *base_;
+  }
 
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
@@ -534,9 +595,8 @@ class ShardDocIndices {
   ShardDocIndex* GetIndex(std::string_view name);
 
   // Init index: create shard local state for given index with given name.
-  // Build if instance is in active state.
   void InitIndex(const OpArgs& op_args, std::string_view name,
-                 std::shared_ptr<const DocIndex> index);
+                 std::shared_ptr<const DocIndex> index, bool is_journal = false);
 
   // Drop index, return the dropped index if it existed or nullptr otherwise
   std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);
@@ -544,8 +604,10 @@ class ShardDocIndices {
   // Drop all indices
   void DropAllIndices();
 
-  // Rebuild all indices
-  void RebuildAllIndices(const OpArgs& op_args, bool is_restored);
+  // Rebuild all indices. Each index decides on its own whether to use the restore
+  // path (graph already populated from RDB → only vectors need to be filled in)
+  // or a full rebuild from the keyspace, based on its own state at call time.
+  void RebuildAllIndices(const OpArgs& op_args);
 
   // Block until construction of all indices finishes
   void BlockUntilConstructionEnd();

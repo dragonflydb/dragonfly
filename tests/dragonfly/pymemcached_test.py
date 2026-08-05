@@ -4,7 +4,9 @@ import socket
 import ssl
 import time
 
+import pytest
 from pymemcache.client.base import Client as MCClient
+from pymemcache.exceptions import MemcacheServerError
 
 from . import dfly_args
 from .instance import DflyInstance
@@ -56,6 +58,22 @@ class TestMemcached:
         assert memcached_client.decr("key5", 1) == 1
 
         assert memcached_client.gets("key5") == (b"1", b"0")
+
+    def test_incr_decr_large_delta(self, memcached_client: MCClient):
+        """
+        Verify that incr/decr with delta > INT64_MAX returns an error
+        instead of silently wrapping to a negative value.
+        """
+        memcached_client.set("counter", 100)
+        large_delta = 2**63 + 1  # INT64_MAX + 2
+
+        with pytest.raises(MemcacheServerError):
+            memcached_client.incr("counter", large_delta)
+        assert memcached_client.get("counter") == b"100"
+
+        with pytest.raises(MemcacheServerError):
+            memcached_client.decr("counter", large_delta)
+        assert memcached_client.get("counter") == b"100"
 
     # Noreply (and pipeline) tests
     async def test_noreply_pipeline(self, df_server: DflyInstance, memcached_client: MCClient):

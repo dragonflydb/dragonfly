@@ -83,6 +83,14 @@ class QList {
       return encoding != QUICKLIST_NODE_ENCODING_RAW;
     }
 
+    bool IsStashPending() const {
+      return io_pending && !offloaded;
+    }
+
+    bool IsLoadPending() const {
+      return io_pending && offloaded;
+    }
+
     size_t GetLZF(void** data) const;
 
     void SetExternal(size_t offset, uint32_t sz);
@@ -275,6 +283,14 @@ class QList {
     zstd_threshold_ = threshold;
   }
 
+  // Trains a thread-local ZSTD dictionary (if not yet trained) and bulk-compresses
+  // the list's interior nodes. Intended to be called once after a list has been
+  // bulk-populated via AppendListpack/AppendPlain (e.g. during RDB/replication load),
+  // where the per-push CoolOff() compression hook does not run. No-op unless
+  // set_compr_threshold() was given a non-zero value and LZF depth-compression is
+  // disabled.
+  void CompressAfterLoad();
+
   // Enable tiered storage.
   void EnableTiering(const TieringParams& params) {
     tiering_enabled_ = 1;
@@ -315,6 +331,18 @@ class QList {
     return compress_ != 0;
   }
 
+  bool IsZstdDictMode() const {
+    return zstd_threshold_ > 0 && !AllowLZFCompression();
+  }
+
+  bool IsInterior(const Node* node) const {
+    return node && node != head_ && node->next != nullptr;
+  }
+
+  bool CanCompressWithZstdDict(const Node* node) const {
+    return !dict_bulk_failed_ && IsInterior(node);
+  }
+
   Node* _Tail() const {
     return head_ ? head_->prev : nullptr;
   }
@@ -334,6 +362,7 @@ class QList {
 
   void Replace(Iterator it, std::string_view elem);
   void CompressByDepth(Node* node);
+  void MoveFrom(QList&& other);
 
   // Trains a ZSTD dictionary from all node data and stores it in thread-local state.
   // Returns true if a dictionary was successfully trained (or already exists).
@@ -341,8 +370,9 @@ class QList {
   bool TrainZstdDict();
 
   // Bulk-compresses all interior nodes using the thread-local ZSTD dictionary.
-  // Sets dict_compress_failed_ if no nodes could be compressed.
-  void CompressWithZstdDict();
+  // A completed walk always sets a terminal flag: dict_bulk_failed_ when real nodes were tried
+  // but none compressed (dict useless for this list), otherwise dict_bulk_finished_.
+  void BackfillCompressWithZstdDict();
 
   // Compresses a single node using the thread-local ZSTD dictionary.
   bool CompressNodeWithDict(Node* node);
@@ -368,7 +398,7 @@ class QList {
   uint32_t len_ = 0;                  /* number of quicklistNodes */
   int16_t fill_;                      /* fill factor for individual nodes */
   uint16_t dict_learning_failed_ : 1; /* thread-local dict training failed for this list's data */
-  uint16_t dict_compress_failed_ : 1; /* compression with thread-local dict failed for this list */
+  uint16_t dict_bulk_failed_ : 1;     /* compression with thread-local dict failed for this list */
   uint16_t dict_bulk_finished_ : 1;   /* bulk compression done, per-node compression active */
   uint16_t tiering_enabled_ : 1;      /* tiering storage enabled */
   uint16_t reserved1_ : 12;

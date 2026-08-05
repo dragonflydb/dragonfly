@@ -221,7 +221,7 @@ Por padrão, o Dragonfly permite acesso HTTP via porta TCP principal (6379). Ou 
 
 Acesse `:6379/metrics` para ver métricas Prometheus-compatíveis.
 
-As métricas são compatíveis com o dashboard do Grafana, [veja aqui](tools/local/monitoring/grafana/provisioning/dashboards/dashboard.json).
+As métricas são compatíveis com o dashboard do Grafana, [veja aqui](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json).
 
 Importante: o console HTTP deve ser acessado em rede segura. Se expor a porta TCP do Dragonfly externamente, desabilite o console com `--http_admin_console=false` ou `--nohttp_admin_console`.
 

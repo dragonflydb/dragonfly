@@ -17,6 +17,7 @@ extern "C" {
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -47,6 +48,9 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
       case OpStatus::CORRUPTED_HLL:
         builder->SendError(facade::StatusToMsg(OpStatus::CORRUPTED_HLL));
         break;
+      case OpStatus::IO_ERROR:
+        builder->SendError(facade::StatusToMsg(OpStatus::IO_ERROR));
+        break;
       default:
         builder->SendLong(0);  // in case we don't have the value we should just send 0
         break;
@@ -74,6 +78,20 @@ bool ConvertToDenseIfNeeded(string* hll) {
   return hll_validity == HLL_VALID_DENSE;
 }
 
+// Reads an HLL value, materializing it from tiered storage if offloaded.
+OpResult<string> ReadHll(const OpArgs& op_args, string_view key, const PrimeValue& pv) {
+  if (pv.IsExternal()) {
+    auto res =
+        ReadTieredString(op_args.db_cntx.db_index, key, pv, op_args.shard->tiered_storage()).Get();
+    if (!res)
+      return OpStatus::IO_ERROR;
+    return std::move(res).value();
+  }
+  string hll;
+  pv.GetString(&hll);
+  return hll;
+}
+
 OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values) {
   auto& db_slice = op_args.GetDbSlice();
 
@@ -86,7 +104,10 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     hll.resize(getSparseHllInitSize());
     initSparseHll(StringToHllPtr(hll));
   } else {
-    res.it->second.GetString(&hll);
+    auto val = ReadHll(op_args, key, res.it->second);
+    res.post_updater.ResyncBaseline();  // the read may have uploaded the value
+    RETURN_ON_BAD_STATUS(val);
+    hll = std::move(val).value();
   }
   if (isValidHLL(StringToHllPtr(hll)) == HLL_INVALID) {
     return OpStatus::INVALID_VALUE;
@@ -126,16 +147,23 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     hll = string{hll_sds, sdslen(hll_sds)};
     sdsfree(hll_sds);
   }
+  res.post_updater.ReduceHeapUsage();
+  if (res.it->second.IsExternal()) {
+    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
+  }
   res.it->second.SetString(hll);
   return std::min(updated, 1);
 }
 
-void PFAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void PFAdd(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  CmdArgParser::Range value_range = parser.RemainingRange();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  facade::CmdArgVec values{value_range.begin(), value_range.end()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return AddToHll(t->GetOpArgs(shard), key, args);
+    return AddToHll(t->GetOpArgs(shard), key, values);
   };
 
   OpResult<int> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -147,27 +175,25 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
 
   auto it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (it.ok()) {
-    string hll;
-    string_view hll_view = it.value()->second.GetSlice(&hll);
+    auto hll_res = ReadHll(op_args, key, it.value()->second);
+    RETURN_ON_BAD_STATUS(hll_res);
+    string hll = std::move(hll_res).value();
 
-    switch (isValidHLL(StringToHllPtr(hll_view))) {
+    switch (isValidHLL(StringToHllPtr(hll))) {
       case HLL_VALID_DENSE:
         break;
       case HLL_VALID_SPARSE:
-        // Even in the case of a read - we still want to convert the hll to dense format, as it
-        // could originate in Redis (like in replication or rdb load).
-        hll = hll_view;
+        // Convert to dense on read too: a sparse value may originate from a foreign import.
         if (!ConvertToDenseIfNeeded(&hll)) {
           return OpStatus::CORRUPTED_HLL;
         }
-        hll_view = hll;
         break;
       case HLL_INVALID:
       default:
         return OpStatus::INVALID_VALUE;
     }
 
-    return pfcountSingle(StringToHllPtr(hll_view));
+    return pfcountSingle(StringToHllPtr(hll));
   } else if (it.status() == OpStatus::WRONG_TYPE) {
     return it.status();
   } else {
@@ -182,8 +208,9 @@ OpResult<vector<string>> ReadValues(const OpArgs& op_args, const ShardArgs& keys
     for (string_view key : keys) {
       auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
       if (it.ok()) {
-        string hll;
-        it.value()->second.GetString(&hll);
+        auto hll_res = ReadHll(op_args, key, it.value()->second);
+        RETURN_ON_BAD_STATUS(hll_res);
+        string hll = std::move(hll_res).value();
         if (!ConvertToDenseIfNeeded(&hll)) {
           return OpStatus::CORRUPTED_HLL;
         }
@@ -209,7 +236,7 @@ vector<HllBufferPtr> ConvertShardVector(const vector<vector<string>>& hlls) {
   return ptrs;
 }
 
-OpResult<int64_t> PFCountMulti(CmdArgList args, CommandContext* cmd_cntx) {
+OpResult<int64_t> PFCountMulti(CommandContext* cmd_cntx) {
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
@@ -245,9 +272,9 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void PFCount(CmdArgList args, CommandContext* cmd_cntx) {
-  if (args.size() == 1) {
-    string_view key = ArgS(args, 0);
+void PFCount(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  if (!parser.HasNext()) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return CountHllsSingle(t->GetOpArgs(shard), key);
     };
@@ -255,11 +282,11 @@ void PFCount(CmdArgList args, CommandContext* cmd_cntx) {
     OpResult<int64_t> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
     HandleOpValueResult(res, cmd_cntx->rb());
   } else {
-    HandleOpValueResult(PFCountMulti(args, cmd_cntx), cmd_cntx->rb());
+    HandleOpValueResult(PFCountMulti(cmd_cntx), cmd_cntx->rb());
   }
 }
 
-OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+OpResult<int> PFMergeInternal(string_view key, Transaction* tx, SinkReplyBuilder* builder) {
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
@@ -290,14 +317,16 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
   hll.resize(getDenseHllSize());
   createDenseHll(StringToHllPtr(hll));
   int result = pfmerge(ptrs.data(), ptrs.size(), StringToHllPtr(hll));
-
   auto set_cb = [&](Transaction* t, EngineShard* shard) {
-    string_view key = ArgS(args, 0);
     const OpArgs& op_args = t->GetOpArgs(shard);
     auto& db_slice = op_args.GetDbSlice();
     auto op_res = db_slice.AddOrFind(t->GetDbContext(), key, OBJ_STRING);
     RETURN_ON_BAD_STATUS(op_res);
     auto& res = *op_res;
+    if (!res.is_new && res.it->second.IsExternal()) {
+      res.post_updater.ReduceHeapUsage();
+      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
+    }
     res.it->second.SetString(hll);
 
     if (op_args.shard->journal()) {
@@ -311,9 +340,10 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
   return result;
 }
 
-void PFMerge(CmdArgList args, CommandContext* cmd_cntx) {
+void PFMerge(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  OpResult<int> result = PFMergeInternal(args, cmd_cntx->tx(), rb);
+  OpResult<int> result = PFMergeInternal(key, cmd_cntx->tx(), rb);
   if (result.ok()) {
     if (result.value() == 0) {
       rb->SendOk();

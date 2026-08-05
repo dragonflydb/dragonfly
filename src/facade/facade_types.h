@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <optional>
 #include <ranges>
 #include <string>
@@ -46,8 +47,8 @@ class ParsedArgs {
   ParsedArgs() = default;
 
   // References backed arguments. The object must outlive this ParsedArgs.
-  ParsedArgs(const cmn::BackedArguments& bargs)  // NOLINT google-explicit-constructor
-      : args_(&bargs) {
+  ParsedArgs(const cmn::BackedArguments& bargs, uint32_t offset = 0)  // NOLINT
+      : args_(WrapperBacked{&bargs, offset}) {
   }
 
   ParsedArgs(ArgSlice slice)  // NOLINT google-explicit-constructor
@@ -65,34 +66,81 @@ class ParsedArgs {
     return size() == 0;
   }
 
-  ParsedArgs Tail() const {
-    return std::visit([](const auto& args) { return args.Tail(); }, args_);
+  ParsedArgs Tail(unsigned offset = 1) const {
+    return std::visit([offset](const auto& args) { return args.Tail(offset); }, args_);
   }
 
   std::string_view Front() const {
     return std::visit([](const auto& args) { return args.front(); }, args_);
   }
 
-  ArgSlice ToSlice(CmdArgVec* scratch) const {
-    return std::visit([scratch](const auto& args) { return args.ToSlice(scratch); }, args_);
+  std::string_view operator[](size_t i) const {
+    return std::visit([i](const auto& args) { return args.at(i); }, args_);
   }
 
-  void ToVec(CmdArgVec* vec) const {
-    std::visit([vec](const auto& args) { return args.ToVec(vec); }, args_);
+  // Index-based const iterator, so ParsedArgs can be iterated (e.g. as a journal
+  // Payload alternative) without exposing its underlying span/BackedArguments.
+  class const_iterator {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = std::string_view;
+    using difference_type = ptrdiff_t;
+    using pointer = const std::string_view*;
+    using reference = std::string_view;
+
+    const_iterator(const ParsedArgs* args, size_t index) : args_(args), index_(index) {
+    }
+
+    std::string_view operator*() const {
+      return (*args_)[index_];
+    }
+
+    const_iterator& operator++() {
+      ++index_;
+      return *this;
+    }
+
+    const_iterator operator++(int) {
+      const_iterator copy = *this;
+      ++index_;
+      return copy;
+    }
+
+    bool operator==(const const_iterator& o) const {
+      return index_ == o.index_;
+    }
+
+    bool operator!=(const const_iterator& o) const {
+      return index_ != o.index_;
+    }
+
+   private:
+    const ParsedArgs* args_;
+    size_t index_;
+  };
+
+  const_iterator begin() const {
+    return const_iterator{this, 0};
+  }
+
+  const_iterator end() const {
+    return const_iterator{this, size()};
   }
 
  private:
   struct WrapperBacked {
-    WrapperBacked(const cmn::BackedArguments* args) : args_(args) {  // NOLINT
+    WrapperBacked(const cmn::BackedArguments* args, uint32_t index = 0)  // NOLINT
+        : args_(args), index_(index) {
+      assert(index <= args->size());
     }
 
     const cmn::BackedArguments* args_;
     uint32_t index_ = 0;
 
-    ParsedArgs Tail() const {
+    ParsedArgs Tail(unsigned offset = 1) const {
       ParsedArgs res(*args_);
       WrapperBacked* wb = std::get_if<WrapperBacked>(&res.args_);
-      wb->index_ = index_ + 1;
+      wb->index_ = index_ + offset;
       return res;
     };
 
@@ -104,16 +152,8 @@ class ParsedArgs {
       return args_->at(index_);
     }
 
-    ArgSlice ToSlice(CmdArgVec* scratch) const {
-      ToVec(scratch);
-      return *scratch;
-    }
-
-    void ToVec(CmdArgVec* vec) const {
-      vec->clear();
-      vec->reserve(args_->size() - index_);
-      for (auto arg : args_->view(index_))
-        vec->emplace_back(arg);
+    std::string_view at(size_t i) const {
+      return args_->at(index_ + i);
     }
   };
 
@@ -122,16 +162,12 @@ class ParsedArgs {
     Slice(ArgSlice other) : ArgSlice(other) {  // NOLINT
     }
 
-    ParsedArgs Tail() const {
-      return ParsedArgs{subspan(1)};
+    std::string_view at(size_t i) const {
+      return ArgSlice::operator[](i);
     }
 
-    ArgSlice ToSlice(void* /*scratch*/) const {
-      return *this;
-    }
-
-    void ToVec(CmdArgVec* vec) const {
-      vec->assign(begin(), end());
+    ParsedArgs Tail(unsigned offset = 1) const {
+      return ParsedArgs{subspan(offset)};
     }
   };
   std::variant<Slice, WrapperBacked> args_;
@@ -219,6 +255,7 @@ constexpr size_t kRecvBufSize = 1500;
 
 namespace std {
 ostream& operator<<(ostream& os, cmn::ArgSlice args);
+ostream& operator<<(ostream& os, const facade::ParsedArgs& args);
 ostream& operator<<(ostream& os, facade::Protocol protocol);
 
 }  // namespace std

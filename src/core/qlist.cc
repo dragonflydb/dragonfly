@@ -12,6 +12,7 @@ extern "C" {
 
 #include <absl/base/macros.h>
 #include <absl/base/optimization.h>
+#include <absl/flags/flag.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 #include <zstd.h>
@@ -21,6 +22,9 @@ extern "C" {
 #include "core/page_usage/page_usage_stats.h"
 
 using namespace std;
+
+ABSL_FLAG(int, list_compress_level, -1,
+          "Compression level for QList ZSTD dictionaries. -1 uses ZSTD's default tuning.");
 
 /* Maximum size in bytes of any multi-element listpack.
  * Larger values will live in their own isolated listpacks.
@@ -419,7 +423,7 @@ size_t QList::Node::GetLZF(void** data) const {
 }
 
 void QList::Node::SetExternal(size_t offset, uint32_t size) {
-  DCHECK(entry && !io_pending);
+  DCHECK(entry && !IsStashPending());
   zfree(entry);
   offloaded = 1;
   ext_offset = offset;
@@ -443,7 +447,7 @@ size_t QList::DefragIfNeeded(PageUsage* page_usage) {
 
   for (Node* curr = head_; curr; curr = curr->next) {
     // Skip offloaded or pending nodes
-    if (curr->offloaded || curr->io_pending) {
+    if (curr->offloaded || curr->IsStashPending()) {
       continue;
     }
 
@@ -470,27 +474,15 @@ size_t QList::DefragIfNeeded(PageUsage* page_usage) {
 QList::QList(int fill, int compress)
     : fill_(fill),
       dict_learning_failed_(0),
-      dict_compress_failed_(0),
+      dict_bulk_failed_(0),
       dict_bulk_finished_(0),
       tiering_enabled_(0),
       compress_(compress),
       bookmark_count_(0) {
 }
 
-QList::QList(QList&& other) noexcept
-    : head_(other.head_),
-      count_(other.count_),
-      len_(other.len_),
-      fill_(other.fill_),
-      dict_learning_failed_(other.dict_learning_failed_),
-      dict_compress_failed_(other.dict_compress_failed_),
-      dict_bulk_finished_(other.dict_bulk_finished_),
-      tiering_enabled_(other.tiering_enabled_),
-      compress_(other.compress_),
-      bookmark_count_(other.bookmark_count_),
-      tiering_params_(std::move(other.tiering_params_)) {
-  other.head_ = nullptr;
-  other.len_ = other.count_ = 0;
+QList::QList(QList&& other) noexcept {
+  MoveFrom(std::move(other));
 }
 
 QList::~QList() {
@@ -500,21 +492,30 @@ QList::~QList() {
 QList& QList::operator=(QList&& other) noexcept {
   if (this != &other) {
     Clear();
-    head_ = other.head_;
-    len_ = other.len_;
-    count_ = other.count_;
-    fill_ = other.fill_;
-    dict_learning_failed_ = other.dict_learning_failed_;
-    dict_compress_failed_ = other.dict_compress_failed_;
-    dict_bulk_finished_ = other.dict_bulk_finished_;
-    tiering_enabled_ = other.tiering_enabled_;
-    compress_ = other.compress_;
-    bookmark_count_ = other.bookmark_count_;
-    other.head_ = nullptr;
-    other.len_ = other.count_ = 0;
-    tiering_params_ = std::move(other.tiering_params_);
+    MoveFrom(std::move(other));
   }
   return *this;
+}
+
+void QList::MoveFrom(QList&& other) {
+  head_ = other.head_;
+  len_ = other.len_;
+  malloc_size_ = other.malloc_size_;
+  count_ = other.count_;
+  fill_ = other.fill_;
+  dict_learning_failed_ = other.dict_learning_failed_;
+  dict_bulk_failed_ = other.dict_bulk_failed_;
+  dict_bulk_finished_ = other.dict_bulk_finished_;
+  tiering_enabled_ = other.tiering_enabled_;
+  compress_ = other.compress_;
+  bookmark_count_ = other.bookmark_count_;
+  db_id_ = other.db_id_;
+  zstd_threshold_ = other.zstd_threshold_;
+  tiering_params_ = std::move(other.tiering_params_);
+
+  other.head_ = nullptr;
+  other.malloc_size_ = 0;
+  other.len_ = other.count_ = 0;
 }
 
 void QList::Clear() noexcept {
@@ -779,7 +780,7 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
 
   if (!after && (it.offset_ == 0 || it.offset_ == -(node->count))) {
     at_head = 1;
-    if (NodeAllowInsert(node->prev, fill_, sz)) {
+    if (node != head_ && NodeAllowInsert(node->prev, fill_, sz)) {
       avail_prev = 1;
     }
   }
@@ -935,7 +936,7 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
     //    get accessed again. Another reason for missing offloaded nodes is that node_id can be
     //    off due to merges (can be improved in future).
     if (node_id >= threshold && node_id + threshold < len_) {
-      if (!node->offloaded && !node->io_pending) {
+      if (!node->offloaded && !node->IsStashPending()) {
         tiering_params_->offload(this, node);
       }
     } else if (num_offloaded_nodes * 2 + threshold * 2 < len_) {
@@ -950,12 +951,12 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
       // due to usual access patterns of adding items via lpush/rpush.
       while (traverse_node_id <= len_ / 2 && (num_offloaded_nodes + 2 * threshold) < len_) {
         if (traverse_node_id >= threshold) {
-          if (fw->offloaded == 0 && fw->io_pending == 0) {
+          if (fw->offloaded == 0 && !fw->IsStashPending()) {
             tiering_params_->offload(this, fw);
           }
 
           // Avoid offloading the same node twice when fw and rev meet in the middle.
-          if (rev != fw && rev->offloaded == 0 && rev->io_pending == 0) {
+          if (rev != fw && rev->offloaded == 0 && !rev->IsStashPending()) {
             tiering_params_->offload(this, rev);
           }
         }
@@ -964,17 +965,16 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
         traverse_node_id++;
       }
     }
-  } else if (zstd_threshold_ > 0 && !AllowLZFCompression()) {
+  } else if (IsZstdDictMode()) {
     // ZSTD dictionary compression (mutually exclusive with LZF depth-compression).
     if (dict_bulk_finished_) {
       // Steady state: compress individual nodes as they appear.
-      if (!dict_compress_failed_ && tl_zstd_dict && node != head_ && node->next != nullptr) {
+      if (tl_zstd_dict && CanCompressWithZstdDict(node)) {
         CompressNodeWithDict(node);
       }
     } else if (tl_zstd_dict) {
       // Dict exists (trained by this or another instance), bulk-compress all interior nodes.
-      CompressWithZstdDict();
-      dict_bulk_finished_ = 1;
+      BackfillCompressWithZstdDict();
     } else if (!dict_learning_failed_ && malloc_size_ >= zstd_threshold_ && len_ >= 2) {
       // No dict yet, try to train one.
       TrainZstdDict();
@@ -997,9 +997,8 @@ void QList::CompressByDepth(Node* node) {
 
   // In ZSTD dict mode (LZF disabled), depth-based LZF compression doesn't apply.
   // Handle the recompress flag via dict and return.
-  if (zstd_threshold_ > 0 && !AllowLZFCompression()) {
-    if (node && node->recompress && tl_zstd_dict && !dict_compress_failed_ && node != head_ &&
-        node->next != nullptr) {
+  if (IsZstdDictMode()) {
+    if (node && node->recompress && tl_zstd_dict && CanCompressWithZstdDict(node)) {
       size_t sz = node->sz;
       if (CompressNodeWithDict(node)) {
         node->recompress = 0;
@@ -1053,7 +1052,7 @@ void QList::Materialize(Node* node) {
     return;
 
   // Cancel stash in progress before loading.
-  if (node->io_pending) {
+  if (node->IsStashPending()) {
     tiering_params_->cleanup(this, node);
   }
 
@@ -1209,9 +1208,11 @@ void QList::DelNode(Node* node) {
    * now have compressed nodes needing to be decompressed. */
   CompressByDepth(NULL);
 
-  // Head and tail must always be uncompressed. A deletion may promote a
-  // ZSTD-compressed interior node to head or tail.
+  // Head and tail must always be materialized and uncompressed. A deletion may promote an
+  // offloaded, pending, or ZSTD-compressed interior node to head or tail.
   if (head_) {
+    Materialize(head_);
+    Materialize(head_->prev);
     if (head_->IsCompressed()) {
       malloc_size_ += TryDecompressInternal(false, head_);
     }
@@ -1220,7 +1221,8 @@ void QList::DelNode(Node* node) {
     }
   }
 
-  if (!node->offloaded) {
+  if (!node->offloaded && node->entry) {
+    DCHECK(node->entry != nullptr);
     zfree(node->entry);
   }
 
@@ -1592,7 +1594,8 @@ bool QList::TrainZstdDict() {
   }
 
   auto* state = new ZstdDictState();
-  state->cdict = ZSTD_createCDict(dict_raw.data(), dict_raw.size(), 1);
+  const int compression_level = absl::GetFlag(FLAGS_list_compress_level);
+  state->cdict = ZSTD_createCDict(dict_raw.data(), dict_raw.size(), compression_level);
   state->ddict = ZSTD_createDDict(dict_raw.data(), dict_raw.size());
   state->cctx = ZSTD_createCCtx();
   state->dctx = ZSTD_createDCtx();
@@ -1606,16 +1609,20 @@ bool QList::TrainZstdDict() {
   return true;
 }
 
-void QList::CompressWithZstdDict() {
+void QList::BackfillCompressWithZstdDict() {
   DCHECK(tl_zstd_dict);
 
-  // Bulk-compress all interior nodes, tracking memory delta.
+  if (len_ < 3)
+    return;
+
   bool any_compressed = false;
   bool any_attempted = false;
-  for (Node* node = head_; node; node = node->next) {
-    if (node == head_ || node->next == nullptr)
-      continue;
-    if (node->encoding == QUICKLIST_NODE_ENCODING_RAW && node->sz >= MIN_COMPRESS_BYTES)
+  // Scan from tail backwards. On chunked loads, the first compressed node marks the already
+  // processed prefix.
+  for (Node* node = head_->prev->prev; node && node != head_; node = node->prev) {
+    if (node->encoding != QUICKLIST_NODE_ENCODING_RAW)
+      break;
+    if (node->sz >= MIN_COMPRESS_BYTES)
       any_attempted = true;
     size_t prev_size = zmalloc_usable_size(node->entry);
     if (CompressNodeWithDict(node)) {
@@ -1624,10 +1631,32 @@ void QList::CompressWithZstdDict() {
     }
   }
 
-  // Only mark failure if we actually tried to compress nodes and all failed.
-  if (any_attempted && !any_compressed) {
-    dict_compress_failed_ = 1;
+  // Avoid full scan again by setting either of flags.
+  // In case none of the nodes succeeded to compress, we will not attempt to compress again.
+  if (any_attempted && !any_compressed)
+    dict_bulk_failed_ = 1;
+  else
+    dict_bulk_finished_ = 1;
+}
+
+void QList::CompressAfterLoad() {
+  // Mirrors the ZSTD branch of CoolOff(), but runs in one shot after a bulk load
+  // instead of being driven incrementally by per-element pushes (which never
+  // happen during AppendListpack/AppendPlain).
+  if (!IsZstdDictMode() || dict_bulk_failed_)
+    return;
+
+  if (!tl_zstd_dict) {
+    // No thread-local dictionary yet. Train one from this list's data, but only
+    // if the list is large enough to be worth it.
+    if (dict_learning_failed_ || malloc_size_ < zstd_threshold_ || len_ < 2)
+      return;
+    if (!TrainZstdDict())
+      return;
   }
+
+  // A dictionary exists (trained here or by another list on this thread).
+  BackfillCompressWithZstdDict();
 }
 
 bool QList::CompressNodeWithDict(Node* node) {
@@ -1670,8 +1699,7 @@ bool QList::CompressNodeWithDict(Node* node) {
 ssize_t QList::RecompressNode(Node* node) {
   if (!node->recompress || node->dont_compress)
     return 0;
-  if (zstd_threshold_ > 0 && !AllowLZFCompression() && tl_zstd_dict && !dict_compress_failed_ &&
-      node != head_ && node->next != nullptr) {
+  if (IsZstdDictMode() && tl_zstd_dict && CanCompressWithZstdDict(node)) {
     size_t sz = node->sz;
     if (CompressNodeWithDict(node)) {
       node->recompress = 0;

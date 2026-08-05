@@ -116,6 +116,10 @@ void Aggregator::DoSort(const SortParams& sort_params) {
         continue;
       return order == SortOrder::ASC ? *lv < *rv : *lv > *rv;
     }
+    // All explicit fields tied: break by hidden __key for cross-shard determinism.
+    auto lk = l.find("__key"), rk = r.find("__key");
+    if (lk != l.end() && rk != r.end())
+      return lk->second < rk->second;
     return false;
   };
 

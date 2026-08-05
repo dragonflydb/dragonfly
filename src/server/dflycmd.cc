@@ -40,6 +40,7 @@ using namespace std;
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
+ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
 
 namespace dfly {
 
@@ -70,12 +71,52 @@ const char kIdNotFound[] = "syncid not found";
 const char kInvalidSyncId[] = "bad sync id";
 const char kInvalidState[] = "invalid state";
 
+// Per-proactor cached view of replica_infos_.
+// Every mutation of centralized `replica_infos_` warrants subsequent call to
+// UpdateReplicaInfoCacheLocked.
+thread_local std::shared_ptr<const DflyCmd::ReplicaInfoMap> tl_replica_infos;
+
 bool ToSyncId(string_view str, uint32_t* num) {
   if (!absl::StartsWith(str, "SYNC"))
     return false;
   str.remove_prefix(4);
 
   return absl::SimpleAtoi(str, num);
+}
+
+// Parse LSN vector such as "5-3-8"
+std::vector<LSN> ParseLsnVec(std::string_view arg, RuleError& err) {
+  std::vector<LSN> lsns;
+  for (std::string_view token : absl::StrSplit(arg, '-')) {
+    LSN value;
+    if (!absl::SimpleAtoi(token, &value)) {
+      err = {true, {}};
+      return {};
+    }
+    lsns.push_back(value);
+  }
+  return lsns;
+}
+
+// Wires replication metadata onto the flow's connection and returns its FlowInfo, writing the
+// freshly generated EOF token into *eof_token. Must be called under the replica's lock.
+FlowInfo& SetupFlowConnection(CommandContext* cmd_cntx, DflyCmd::ReplicaInfo* replica_ptr,
+                              uint32_t sync_id, unsigned flow_id, string* eof_token) {
+  auto* conn_cntx = cmd_cntx->server_conn_cntx();
+  cmd_cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
+  conn_cntx->conn_state.replication_info.repl_session_id = sync_id;
+  conn_cntx->conn_state.replication_info.repl_flow_id = flow_id;
+  conn_cntx->replica_conn = true;
+
+  absl::InsecureBitGen gen;
+  *eof_token = GetRandomHex(gen, 40);
+
+  auto& flow = replica_ptr->GetFlow(flow_id);
+  conn_cntx->master_repl_flow = &flow;
+  conn_cntx->conn()->SetConnectionMemoryAccounting(false);
+  flow.conn = cmd_cntx->conn();
+  flow.eof_token = *eof_token;
+  return flow;
 }
 
 bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* replica,
@@ -91,16 +132,17 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
     journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
   }
 
-  const FlowInfo* flow = &replica->flows[shard->shard_id()];
+  const FlowInfo* flow = &replica->GetFlow(shard->shard_id());
 
   while (flow->last_acked_lsn < journal::GetLsn()) {
     if (absl::Now() > end_time) {
-      LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: " << replica->address
-                   << ":" << replica->listening_port << ", last acked: " << flow->last_acked_lsn
-                   << ", expecting " << journal::GetLsn();
+      LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: "
+                   << replica->GetAddress() << ":" << replica->GetListeningPort()
+                   << ", last acked: " << flow->last_acked_lsn << ", expecting "
+                   << journal::GetLsn();
       return false;
     }
-    if (!replica->exec_st.IsRunning()) {
+    if (!replica->GetExecState().IsRunning()) {
       return false;
     }
     LOG_EVERY_T(INFO, 1) << "Replica lsn:" << flow->last_acked_lsn
@@ -115,21 +157,21 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
 }  // namespace
 
 void DflyCmd::ReplicaInfo::Cancel() {
-  util::fb2::LockGuard lk{shared_mu};
-  if (replica_state == SyncState::CANCELLED) {
+  util::fb2::LockGuard lk{shared_mu_};
+  if (replica_state_.load(std::memory_order_relaxed) == SyncState::CANCELLED) {
     return;
   }
 
-  LOG(INFO) << "Disconnecting from replica " << address << ":" << listening_port;
+  LOG(INFO) << "Disconnecting from replica " << address_ << ":" << listening_port_;
 
   // Update state and cancel context.
-  replica_state = SyncState::CANCELLED;
-  exec_st.ReportCancelError();
+  replica_state_.store(SyncState::CANCELLED, std::memory_order_relaxed);
+  exec_st_.ReportCancelError();
   // Wait for tasks to finish.
   shard_set->RunBlockingInParallel([this](EngineShard* shard) {
     VLOG(2) << "Disconnecting flow " << shard->shard_id();
 
-    FlowInfo* flow = &flows[shard->shard_id()];
+    FlowInfo* flow = &flows_[shard->shard_id()];
     if (flow->cleanup) {
       flow->cleanup();
     }
@@ -137,47 +179,47 @@ void DflyCmd::ReplicaInfo::Cancel() {
     flow->conn = nullptr;
   });
   // Wait for error handler to quit.
-  exec_st.JoinErrorHandler();
-  VLOG(1) << "Disconnecting replica " << address << ":" << listening_port;
+  exec_st_.JoinErrorHandler();
+  VLOG(1) << "Disconnecting replica " << address_ << ":" << listening_port_;
 }
 
 DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
 }
 
-void DflyCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
-  DCHECK_GE(args.size(), 1u);
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+void DflyCmd::Run(CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Remaining-arg counts below are relative to the position after the subcommand token.
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next<string_view>());
 
   if (sub_cmd == "THREAD") {
-    return Thread(args, cmd_cntx);
+    return Thread(parser, cmd_cntx);
   }
 
-  if (sub_cmd == "FLOW" && (args.size() >= 4 && args.size() <= 6)) {
-    return Flow(args, cmd_cntx);
+  if (sub_cmd == "FLOW" && parser.HasAtLeast(3) && !parser.HasAtLeast(6)) {
+    return Flow(parser, cmd_cntx);
   }
 
-  if (sub_cmd == "SYNC" && args.size() == 2) {
-    return Sync(args, cmd_cntx);
+  if (sub_cmd == "SYNC" && parser.HasAtLeast(1) && !parser.HasAtLeast(2)) {
+    return Sync(parser, cmd_cntx);
   }
 
-  if (sub_cmd == "STARTSTABLE" && args.size() == 2) {
-    return StartStable(args, cmd_cntx);
+  if (sub_cmd == "STARTSTABLE" && parser.HasAtLeast(1) && !parser.HasAtLeast(2)) {
+    return StartStable(parser, cmd_cntx);
   }
 
-  if (sub_cmd == "TAKEOVER" && (args.size() == 3 || args.size() == 4)) {
-    return TakeOver(args, cmd_cntx);
+  if (sub_cmd == "TAKEOVER" && parser.HasAtLeast(2) && !parser.HasAtLeast(4)) {
+    return TakeOver(parser, cmd_cntx);
   }
 
   if (sub_cmd == "EXPIRE") {
-    return Expire(args, cmd_cntx);
+    return Expire(parser, cmd_cntx);
   }
 
-  if (sub_cmd == "REPLICAOFFSET" && args.size() == 1) {
-    return ReplicaOffset(args, cmd_cntx);
+  if (sub_cmd == "REPLICAOFFSET" && !parser.HasNext()) {
+    return ReplicaOffset(parser, cmd_cntx);
   }
 
   if (sub_cmd == "LOAD") {
-    return Load(args, cmd_cntx);
+    return Load(parser, cmd_cntx);
   }
 
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
@@ -206,11 +248,11 @@ void DflyCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(kSyntaxErr);
 }
 
-void DflyCmd::Thread(CmdArgList args, CommandContext* cmd_cntx) {
+void DflyCmd::Thread(CmdArgParser parser, CommandContext* cmd_cntx) {
   util::ProactorPool* pool = shard_set->pool();
 
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
-  if (args.size() == 1) {  // DFLY THREAD : returns connection thread index and number of threads.
+  if (!parser.HasNext()) {  // DFLY THREAD : returns connection thread index and number of threads.
     rb->StartArray(2);
     rb->SendLong(ProactorBase::me()->GetPoolIndex());
     rb->SendLong(long(pool->size()));
@@ -218,9 +260,8 @@ void DflyCmd::Thread(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   // DFLY THREAD to_thread : migrates current connection to a different thread.
-  string_view arg = ArgS(args, 1);
-  unsigned num_thread;
-  if (!absl::SimpleAtoi(arg, &num_thread)) {
+  unsigned num_thread = parser.Next<unsigned>();
+  if (parser.TakeError()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
@@ -242,26 +283,26 @@ void DflyCmd::Thread(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(kInvalidIntErr);
 }
 
-void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view master_id = ArgS(args, 1);
-  string_view sync_id_str = ArgS(args, 2);
-  string_view flow_id_str = ArgS(args, 3);
+void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view master_id = parser.Next<string_view>();
+  string_view sync_id_str = parser.Next<string_view>();
+  string_view flow_id_str = parser.Next<string_view>();
 
-  std::optional<LSN> seqid;
-  std::optional<string> last_master_id;
-  std::optional<string> last_master_lsn;
-  if (args.size() == 5) {
-    seqid.emplace();
-    if (!absl::SimpleAtoi(ArgS(args, 4), &seqid.value())) {
-      return cmd_cntx->SendError(facade::kInvalidIntErr);
-    }
-  } else if (args.size() == 6) {
-    last_master_id = ArgS(args, 4);
-    last_master_lsn = ArgS(args, 5);
+  std::optional<LSN> flow_lsn;
+  std::optional<Replica::LastMasterSyncData> replica_last_master;
+
+  if (parser.HasAtLeast(2)) {
+    replica_last_master = {parser.Next<string>(), parser.Next(ParseLsnVec)};
+  } else if (parser.HasNext()) {
+    flow_lsn = parser.Next<LSN>();
+  }
+
+  if (parser.TakeError()) {
+    return cmd_cntx->SendError(facade::kInvalidIntErr);
   }
 
   VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
-          << " flow: " << flow_id_str << " seq: " << seqid.value_or(-1);
+          << " flow: " << flow_id_str << " seq: " << flow_lsn.value_or(-1);
 
   if (master_id != sf_->master_replid()) {
     return cmd_cntx->SendError(kBadMasterId);
@@ -279,31 +320,18 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
   string eof_token;
   std::string sync_type{"FULL"};
   {
-    util::fb2::LockGuard lk{replica_ptr->shared_mu};
+    util::fb2::LockGuard lk{replica_ptr->GetMutex()};
 
-    if (replica_ptr->replica_state != SyncState::PREPARATION) {
+    if (replica_ptr->GetReplicaState() != SyncState::PREPARATION) {
       return cmd_cntx->SendError(kInvalidState);
     }
 
-    // Set meta info on connection.
-    auto* conn_cntx = cmd_cntx->server_conn_cntx();
-    cmd_cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
-    conn_cntx->conn_state.replication_info.repl_session_id = sync_id;
-    conn_cntx->conn_state.replication_info.repl_flow_id = flow_id;
-    conn_cntx->replica_conn = true;
+    // Set meta info on the connection and prepare the flow.
+    auto& flow = SetupFlowConnection(cmd_cntx, replica_ptr.get(), sync_id, flow_id, &eof_token);
 
-    absl::InsecureBitGen gen;
-    eof_token = GetRandomHex(gen, 40);
-
-    auto& flow = replica_ptr->flows[flow_id];
-    conn_cntx->master_repl_flow = &flow;
-    flow.conn = cmd_cntx->conn();
-    flow.eof_token = eof_token;
-    flow.version = replica_ptr->version;
-
-    if (!conn_cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
+    if (!cmd_cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
       // Listener::PreShutdown() triggered
-      if (conn_cntx->conn()->socket()->IsOpen()) {
+      if (cmd_cntx->conn()->socket()->IsOpen()) {
         return cmd_cntx->SendError(kInvalidState);
       }
       return;
@@ -311,27 +339,37 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
 
     journal::StartInThread();
 
-    std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
-    std::optional<LSN> lsn_to_start_partial;
-    // In this flow the master and the registered replica where synced from the same master.
-    if (last_master_id && data && data->id == *last_master_id) {
+    std::optional<Replica::LastMasterSyncData> my_last_master = sf_->GetLastMasterData();
+
+    // Skip full sync if we stem from the same master and this node was promoted (my_last_master)
+    const bool failover_match =
+        my_last_master && replica_last_master && replica_last_master->id == my_last_master->id;
+
+    // Skip full sync if we have the same parent in a cascaded setup
+    const bool cascaded_match = replica_last_master &&
+                                replica_last_master->id == sf_->GetLineageId() &&
+                                absl::GetFlag(FLAGS_experimental_cascaded_partial_sync);
+
+    // Case for partial sync
+    if (failover_match || cascaded_match) {
       ++ServerState::tlocal()->stats.psync_requests_total;
-      auto flow_lsn =
-          ParseLsnVec(*last_master_lsn, data->last_journal_LSNs.size(), flow_id, cmd_cntx);
-      if (!flow_lsn) {
-        return;  // ParseLsnVec replies in case of error
-      }
+      const std::vector<LSN>& lsns = replica_last_master->last_journal_LSNs;
 
-      if (IsLSNInPartialSyncBuffer(*flow_lsn)) {
-        lsn_to_start_partial.emplace(*flow_lsn);
-      }
+      if (lsns.size() != shard_set->size())  // Replica sends LSNs only on equal shard size
+        return cmd_cntx->SendError(facade::kSyntaxErr);
 
-    } else if (seqid.has_value() && IsLSNInPartialSyncBuffer(*seqid)) {
-      lsn_to_start_partial.emplace(*seqid);
+      DCHECK_LT(flow_id, lsns.size());
+      if (flow_id >= lsns.size()) {
+        LOG(ERROR) << "Invalid flow_id: " << flow_id << " exceeds LSN vector size: " << lsns.size()
+                   << ". Disabling partial sync.";
+        return;  // Fall back to full sync without an error reply.
+      }
+      flow_lsn = lsns[flow_id];  // this is a valid lsn - we can follow up with the buffer check
     }
 
-    if (lsn_to_start_partial) {
-      flow.start_partial_sync_at = *lsn_to_start_partial;
+    // Switch sync type to partial
+    if (flow_lsn && IsLSNInPartialSyncBuffer(*flow_lsn)) {
+      flow.start_partial_sync_at = *flow_lsn;
       sync_type = "PARTIAL";
       VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
               << " and is available. (current_lsn=" << journal::GetLsn() << ")";
@@ -344,8 +382,8 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendSimpleString(eof_token);
 }
 
-void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view sync_id_str = ArgS(args, 1);
+void DflyCmd::Sync(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view sync_id_str = parser.Next<string_view>();
 
   VLOG(1) << "Got DFLY SYNC " << sync_id_str;
 
@@ -353,7 +391,7 @@ void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
   if (!sync_id)
     return;
 
-  util::fb2::LockGuard lk{replica_ptr->shared_mu};
+  util::fb2::LockGuard lk{replica_ptr->GetMutex()};
   if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::PREPARATION, cmd_cntx))
     return;
 
@@ -364,7 +402,17 @@ void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Use explicit assignment for replica_ptr, because capturing structured bindings is C++20.
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
-      status = StartFullSyncInThread(&replica_ptr->flows[shard->shard_id()], &replica_ptr->exec_st,
+      FlowInfo* flow = &replica_ptr->GetFlow(shard->shard_id());
+      // By the time DFLY SYNC arrives, all DFLY FLOW responses have already been sent (the replica
+      // sends SYNC only after receiving all FLOW replies), so start_partial_sync_at is settled.
+      // If partial sync was arranged, reject DFLY SYNC: the replica sent SYNC after receiving
+      // PARTIAL, which means it does not properly implement the partial sync protocol and would
+      // deadlock or corrupt state if we proceeded.
+      if (flow->start_partial_sync_at.has_value()) {
+        status = OpStatus::INVALID_VALUE;
+        return;
+      }
+      status = StartFullSyncInThread(replica_ptr->GetVersion(), flow, &replica_ptr->GetExecState(),
                                      shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
@@ -374,17 +422,17 @@ void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(kInvalidState);
   }
 
-  LOG(INFO) << "Started sync with replica " << replica_ptr->address << ":"
-            << replica_ptr->listening_port;
+  LOG(INFO) << "Started sync with replica " << replica_ptr->GetAddress() << ":"
+            << replica_ptr->GetListeningPort();
 
   // protected by lk above.
-  replica_ptr->replica_state = SyncState::FULL_SYNC;
+  replica_ptr->SetReplicaState(SyncState::FULL_SYNC);
 
   return cmd_cntx->SendOk();
 }
 
-void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view sync_id_str = ArgS(args, 1);
+void DflyCmd::StartStable(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view sync_id_str = parser.Next<string_view>();
 
   VLOG(1) << "Got DFLY STARTSTABLE " << sync_id_str;
 
@@ -392,20 +440,17 @@ void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
   if (!sync_id)
     return;
 
-  util::fb2::LockGuard lk{replica_ptr->shared_mu};
-  auto repl_state = replica_ptr->replica_state;
+  util::fb2::LockGuard lk{replica_ptr->GetMutex()};
+  auto repl_state = replica_ptr->GetReplicaState();
   if (repl_state != SyncState::FULL_SYNC && repl_state != SyncState::PREPARATION) {
     cmd_cntx->SendError(kInvalidState);
     return;
   }
 
-  // Check all flows are connected.
   // This might happen if a flow abruptly disconnected before sending the SYNC request.
-  for (const FlowInfo& flow : replica_ptr->flows) {
-    if (!flow.conn) {
-      cmd_cntx->SendError(kInvalidState);
-      return;
-    }
+  if (!replica_ptr->AllFlowsConnected()) {
+    cmd_cntx->SendError(kInvalidState);
+    return;
   }
 
   {
@@ -413,18 +458,18 @@ void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
     AggregateStatus status;
 
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
-      FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
+      FlowInfo* flow = &replica_ptr->GetFlow(shard->shard_id());
 
       // We are doing partial sync. We never started FullSync so we don't need to stop it.
       bool is_partial = flow->start_partial_sync_at.has_value();
       if (!is_partial) {
-        status = StopFullSyncInThread(flow, &replica_ptr->exec_st, shard);
+        status = StopFullSyncInThread(flow, &replica_ptr->GetExecState(), shard);
         if (*status != OpStatus::OK) {
           return;
         }
       }
 
-      StartStableSyncInThread(flow, &replica_ptr->exec_st, shard);
+      StartStableSyncInThread(flow, &replica_ptr->GetExecState(), shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
 
@@ -432,10 +477,10 @@ void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(kInvalidState);
   }
 
-  LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->address << ":"
-            << replica_ptr->listening_port;
+  LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->GetAddress() << ":"
+            << replica_ptr->GetListeningPort();
 
-  replica_ptr->replica_state = SyncState::STABLE_SYNC;
+  replica_ptr->SetReplicaState(SyncState::STABLE_SYNC);
   return cmd_cntx->SendOk();
 }
 
@@ -451,44 +496,10 @@ bool DflyCmd::IsLSNInPartialSyncBuffer(LSN lsn) const {
   return exists;
 }
 
-std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
-                                        size_t last_journal_lsn_size, size_t flow_id,
-                                        CommandContext* cmd_cntx) {
-  std::vector<std::string_view> lsn_str_vec = absl::StrSplit(last_master_lsn, '-');
-  if (lsn_str_vec.size() != last_journal_lsn_size) {
-    cmd_cntx->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
-                                              // should be the same size on all replicas.
-    return std::nullopt;
-  }
-
-  std::vector<LSN> lsn_vec;
-  lsn_vec.reserve(lsn_str_vec.size());
-
-  for (string_view lsn_str : lsn_str_vec) {
-    int64_t value;
-    if (!absl::SimpleAtoi(lsn_str, &value)) {
-      cmd_cntx->SendError(facade::kInvalidIntErr);
-      return std::nullopt;
-    }
-    lsn_vec.push_back(value);
-  }
-
-  DCHECK(flow_id < lsn_vec.size());
-  if (flow_id >= lsn_vec.size()) {
-    LOG(ERROR) << "Invalid flow_id: " << flow_id << " exceeds LSN vector size: " << lsn_vec.size()
-               << ". Disabling partial sync.";
-    return std::nullopt;
-  }
-
-  return {lsn_vec[flow_id]};
-}
-
 // DFLY TAKEOVER <timeout_sec> [SAVE] <sync_id>
 // timeout_sec - number of seconds to wait for TAKEOVER to converge.
 // SAVE option is used only by tests.
-void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
-  parser.Next();
+void DflyCmd::TakeOver(CmdArgParser parser, CommandContext* cmd_cntx) {
   float timeout = std::ceil(parser.Next<float>());
   if (timeout < 0) {
     // allow 0s timeout for tests.
@@ -508,7 +519,7 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
     return;
 
   {
-    dfly::SharedLock lk{replica_ptr->shared_mu};
+    dfly::SharedLock lk{replica_ptr->GetMutex()};
     if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::STABLE_SYNC, cmd_cntx))
       return;
 
@@ -559,7 +570,7 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
 
   atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
-    dfly::SharedLock lk{replica_ptr->shared_mu};
+    dfly::SharedLock lk{replica_ptr->GetMutex()};
     auto cb = [replica_ptr = replica_ptr, end_time, &catchup_success](EngineShard* shard) {
       // PING to force the replica to send the last acked lsn.
       if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard, true)) {
@@ -612,10 +623,9 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   // For non-cluster mode we shutdown
   if (detail::cluster_mode != detail::ClusterMode::kRealCluster) {
     VLOG(1) << "Takeover accepted, shutting down.";
-    std::string save_arg = "NOSAVE";
-    MutableSlice sargs(save_arg);
     CommandContext child_cmd_cntx{cmd_cntx->rb(), nullptr};
-    sf_->ShutdownCmd(CmdArgList(&sargs, 1), &child_cmd_cntx);
+    child_cmd_cntx.PushArg("NOSAVE");
+    sf_->ShutdownCmd(facade::CmdArgParser{child_cmd_cntx, 0}, &child_cmd_cntx);
     return;
   }
 
@@ -624,10 +634,10 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
     LOG(INFO) << "ReconcileMasterSlots() early exit. Config already updated";
     return;
   }
-  sf_->service().cluster_family().ReconcileMasterSlots(replica_ptr->id);
+  sf_->service().cluster_family().ReconcileMasterSlots(replica_ptr->GetId());
 }
 
-void DflyCmd::Expire(CmdArgList args, CommandContext* cmd_cntx) {
+void DflyCmd::Expire(CmdArgParser parser, CommandContext* cmd_cntx) {
   cmd_cntx->tx()->ScheduleSingleHop([](Transaction* t, EngineShard* shard) {
     t->GetDbSlice(shard->shard_id()).ExpireAllIfNeeded();
     return OpStatus::OK;
@@ -636,7 +646,7 @@ void DflyCmd::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendOk();
 }
 
-void DflyCmd::ReplicaOffset(CmdArgList args, CommandContext* cmd_cntx) {
+void DflyCmd::ReplicaOffset(CmdArgParser parser, CommandContext* cmd_cntx) {
   std::vector<LSN> lsns(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     lsns[shard->shard_id()] = shard->journal() ? journal::GetLsn() : 0;
@@ -646,9 +656,7 @@ void DflyCmd::ReplicaOffset(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendLongArr(absl::MakeConstSpan(lsns));
 }
 
-void DflyCmd::Load(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
-  parser.ExpectTag("LOAD");
+void DflyCmd::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
   string filename = parser.Next<string>();
   ServerFamily::LoadExistingKeys existing_keys = ServerFamily::LoadExistingKeys::kFail;
 
@@ -677,8 +685,8 @@ void DflyCmd::Load(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendOk();
 }
 
-OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
-                                        EngineShard* shard) {
+OpStatus DflyCmd::StartFullSyncInThread(DflyVersion version, FlowInfo* flow,
+                                        ExecutionState* exec_st, EngineShard* shard) {
   DCHECK(shard);
   DCHECK(flow->conn);
 
@@ -686,8 +694,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
   // of the flows also contain them.
   SaveMode save_mode =
       shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
-  flow->saver =
-      std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false, "", flow->version);
+  flow->saver = std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false, "", version);
 
   flow->cleanup = [flow, shard]() {
     // socket shutdown is needed before calling saver->Cancel(). Because
@@ -784,6 +791,7 @@ auto DflyCmd::CreateSyncSession(ConnectionState* state) -> std::pair<uint32_t, u
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
 
+  UpdateReplicaInfoCacheLocked();
   return {it->first, flow_count};
 }
 
@@ -816,6 +824,7 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
 
   util::fb2::LockGuard lk(mu_);
   replica_infos_.erase(sync_id);
+  UpdateReplicaInfoCacheLocked();
 }
 
 // Because we need to annotate unique_lock
@@ -832,13 +841,13 @@ void DflyCmd::BreakStalledFlowsInShard() {
   vector<uint32_t> deleted;
 
   for (auto [sync_id, replica_ptr] : replica_infos_) {
-    dfly::SharedLock replica_lock{replica_ptr->shared_mu};
+    dfly::SharedLock replica_lock{replica_ptr->GetMutex()};
 
-    if (!replica_ptr->flows[sid].saver)
+    if (!replica_ptr->GetFlow(sid).saver)
       continue;
 
     // If saver is present - we are currently using it for full sync.
-    int64_t last_write_ns = replica_ptr->flows[sid].saver->GetLastWriteTime();
+    int64_t last_write_ns = replica_ptr->GetFlow(sid).saver->GetLastWriteTime();
     int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_replication_timeout)) * 1'000'000LL;
     int64_t now = absl::GetCurrentTimeNanos();
     if (last_write_ns > 0 && last_write_ns + timeout_ns < now) {
@@ -854,6 +863,9 @@ void DflyCmd::BreakStalledFlowsInShard() {
 
   for (auto sync_id : deleted)
     replica_infos_.erase(sync_id);
+
+  if (!deleted.empty())
+    UpdateReplicaInfoCacheLocked();
 }
 
 shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
@@ -865,60 +877,64 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   return {};
 }
 
+std::vector<std::shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoSnapshot() const {
+  util::fb2::LockGuard lk(mu_);
+  std::vector<std::shared_ptr<ReplicaInfo>> result;
+  result.reserve(replica_infos_.size());
+  for (const auto& [id, ptr] : replica_infos_) {
+    result.push_back(ptr);
+  }
+  return result;
+}
+
 std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
   std::vector<ReplicaRoleInfo> vec;
-  util::fb2::LockGuard lk(mu_);
+  auto replica_infos = tl_replica_infos;
+  if (!replica_infos)
+    return vec;
 
-  vec.reserve(replica_infos_.size());
-  map replication_lags = ReplicationLagsLocked();
+  vec.reserve(replica_infos->size());
+  std::map<uint32_t, LSN> replication_lags = ReplicationLags(*replica_infos);
 
-  for (const auto& [id, info] : replica_infos_) {
+  for (const auto& [id, info] : *replica_infos) {
+    SyncState state = info->GetReplicaState();
+    // ReplicationLags only populates entries for STABLE_SYNC replicas, so a missing
+    // entry defaults to lag=0 — exactly what we want for any other state.
     LSN lag = replication_lags[id];
-    SyncState state = SyncState::PREPARATION;
-
-    // If the replica state being updated, its lag is undefined,
-    // the same applies of course if its state is not STABLE_SYNC.
-    shared_lock lk(info->shared_mu, try_to_lock);
-    if (lk.owns_lock()) {
-      state = info->replica_state;
-      // If the replica is not in stable sync, its lag is undefined, so we set it to 0.
-      if (state != SyncState::STABLE_SYNC) {
-        lag = 0;
-      }
-    } else {
-      lag = 0;
-    }
-    vec.push_back(
-        ReplicaRoleInfo{info->id, info->address, info->listening_port, SyncStateName(state), lag});
+    vec.push_back(ReplicaRoleInfo{std::string{info->GetId()}, info->GetAddress(),
+                                  info->GetListeningPort(), SyncStateName(state), lag});
   }
   return vec;
 }
 
-void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
-  atomic<size_t> streamer_bytes{0}, full_sync_bytes{0};
+ReplicationMemoryStats DflyCmd::GetReplicationMemoryStats(EngineShard* shard) {
+  // Must run on the shard's own proactor: it reads thread-local tl_replica_infos
+  // and the shard's flow saver/streamer, which only this thread mutates — so the
+  // read is lock-free and a wrong-thread call would report 0/stale stats.
+  DCHECK(shard && shard->IsMyThread());
 
-  {
-    util::fb2::LockGuard lk{mu_};  // prevent state changes
-    auto cb = [&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
-      for (const auto& [_, info] : replica_infos_) {
-        dfly::SharedLock repl_lk{info->shared_mu};
+  ReplicationMemoryStats stats;
+  auto replica_infos = tl_replica_infos;
+  if (!replica_infos)
+    return stats;
 
-        // flows should not be empty.
-        DCHECK(!info->flows.empty());
-        if (info->flows.empty())
-          continue;
+  for (const auto& [_, info] : *replica_infos) {
+    DCHECK_GT(info->GetFlowCount(), 0u);
+    if (info->GetFlowCount() == 0)
+      continue;
 
-        const auto& flow = info->flows[shard->shard_id()];
-        if (flow.streamer)
-          streamer_bytes.fetch_add(flow.streamer->UsedBytes(), memory_order_relaxed);
-        if (flow.saver)
-          full_sync_bytes.fetch_add(flow.saver->GetTotalBuffersSize(), memory_order_relaxed);
-      }
-    };
-    shard_set->RunBlockingInParallel(cb);
+    const auto& flow = info->GetFlow(shard->shard_id());
+    if (flow.streamer)
+      stats.streamer_buf_capacity_bytes += flow.streamer->UsedBytes();
+    if (flow.saver) {
+      // Replication-flow savers must be single-shard, otherwise the saver's
+      // GetTotalBuffersSize would internally call RunBriefInParallel and nest.
+      DCHECK(flow.saver->Mode() == SaveMode::SINGLE_SHARD ||
+             flow.saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY);
+      stats.full_sync_buf_bytes += flow.saver->GetTotalBuffersSize();
+    }
   }
-  stats->streamer_buf_capacity_bytes += streamer_bytes.load(memory_order_relaxed);
-  stats->full_sync_buf_bytes += full_sync_bytes.load(memory_order_relaxed);
+  return stats;
 }
 
 pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
@@ -939,21 +955,29 @@ pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
   return {sync_id, sync_it->second};
 }
 
-std::map<uint32_t, LSN> DflyCmd::ReplicationLagsLocked() const {
-  DCHECK(!mu_.try_lock());  // expects to be under global lock
-  if (replica_infos_.empty())
+std::map<uint32_t, LSN> DflyCmd::ReplicationLags(const ReplicaInfoMap& replicas_local_cache) const {
+  if (replicas_local_cache.empty())
     return {};
 
   // In each shard we calculate a map of replica id to replication lag in the shard.
+  // Only compute lag for replicas currently in STABLE_SYNC — for any other state the
+  // lag is undefined (e.g. last_acked_lsn is still 0 mid-full-sync). Replicas that
+  // transition out of (or into) STABLE_SYNC between this scan and the outer reader
+  // are naturally handled: missing entries default to lag=0, and the outer reader
+  // re-checks state before emitting the lag.
+  // We fan out via RunBriefInParallel only because journal::GetLsn() is per-shard
+  // thread-local state that must be read on each shard's own proactor.
   std::vector<std::map<uint32_t, LSN>> shard_lags(shard_set->size());
-  shard_set->RunBriefInParallel([&shard_lags, this](EngineShard* shard) {
+  shard_set->RunBriefInParallel([&shard_lags, &replicas_local_cache](EngineShard* shard) {
+    if (!shard->journal())
+      return;
     auto& lags = shard_lags[shard->shard_id()];
-    for (const auto& info : ABSL_TS_UNCHECKED_READ(replica_infos_)) {
+    const LSN cur_lsn = journal::GetLsn();
+    for (const auto& info : replicas_local_cache) {
       const ReplicaInfo* replica = info.second.get();
-      if (shard->journal()) {
-        int64_t lag = journal::GetLsn() - replica->flows[shard->shard_id()].last_acked_lsn;
-        lags[info.first] = lag;
-      }
+      if (replica->GetReplicaState() != SyncState::STABLE_SYNC)
+        continue;
+      lags[info.first] = cur_lsn - replica->GetFlow(shard->shard_id()).last_acked_lsn;
     }
   });
 
@@ -967,12 +991,22 @@ std::map<uint32_t, LSN> DflyCmd::ReplicationLagsLocked() const {
   return rv;
 }
 
+void DflyCmd::UpdateReplicaInfoCacheLocked() {
+  auto replica_infos = std::make_shared<const ReplicaInfoMap>(replica_infos_);
+  // Dispatching under mu_ keeps
+  // the per-proactor caches consistent — concurrent callers enqueue their updates in a
+  // serialized order, so all proactors observe the same final snapshot. The shared_ptr is
+  // captured by value because the local goes out of scope before the lambda runs.
+  shard_set->pool()->DispatchBrief(
+      [replica_infos](unsigned, ProactorBase*) { tl_replica_infos = replica_infos; });
+}
+
 void DflyCmd::SetDflyClientVersion(ConnectionState* state, DflyVersion version) {
   auto replica_ptr = GetReplicaInfo(state->replication_info.repl_session_id);
   VLOG(1) << "Client version for session_id=" << state->replication_info.repl_session_id << " is "
           << int(version);
 
-  replica_ptr->version = version;
+  replica_ptr->SetVersion(version);
 }
 
 // Must run under locked replica_info.mu.
@@ -980,18 +1014,15 @@ void DflyCmd::SetDflyClientVersion(ConnectionState* state, DflyVersion version) 
 // block, leading to high contention in some case. Split it and avoid replying under a lock.
 bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& repl_info, SyncState expected,
                                        CommandContext* cmd_cntx) {
-  if (repl_info.replica_state != expected) {
+  if (repl_info.GetReplicaState() != expected) {
     cmd_cntx->SendError(kInvalidState);
     return false;
   }
 
-  // Check all flows are connected.
   // This might happen if a flow abruptly disconnected before sending the SYNC request.
-  for (const FlowInfo& flow : repl_info.flows) {
-    if (!flow.conn) {
-      cmd_cntx->SendError(kInvalidState);
-      return false;
-    }
+  if (!repl_info.AllFlowsConnected()) {
+    cmd_cntx->SendError(kInvalidState);
+    return false;
   }
 
   return true;
@@ -1002,6 +1033,7 @@ void DflyCmd::CancelReplicas() {
   {
     util::fb2::LockGuard lk(mu_);
     pending = std::move(replica_infos_);
+    UpdateReplicaInfoCacheLocked();
   }
 
   for (auto& [_, replica_ptr] : pending) {

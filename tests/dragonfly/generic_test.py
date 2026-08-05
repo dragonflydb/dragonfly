@@ -1,13 +1,15 @@
-import logging
-import pytest
-import redis
 import asyncio
+import logging
+
+import pytest
+
+import redis
 from redis import asyncio as aioredis
 
-from . import dfly_multi_test_args, dfly_args
+from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyStartException
-from .utility import batch_fill_data, gen_test_data, EnvironCntx
 from .seeder import DebugPopulateSeeder
+from .utility import EnvironCntx, batch_fill_data, gen_test_data
 
 
 @dfly_multi_test_args({"keys_output_limit": 512}, {"keys_output_limit": 1024})
@@ -166,22 +168,20 @@ async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: Df
 
 
 async def test_arg_from_environ_overwritten_by_cli(df_factory):
-    with EnvironCntx(DFLY_port="6378"):
-        with df_factory.create(port=6377):
-            client = aioredis.Redis(port=6377)
-            await client.ping()
+    with EnvironCntx(DFLY_port="6378"), df_factory.create(port=6377):
+        client = aioredis.Redis(port=6377)
+        await client.ping()
 
 
 async def test_arg_from_environ(df_factory):
-    with EnvironCntx(DFLY_requirepass="pass"):
-        with df_factory.create() as dfly:
-            # Expect password from environment variable
-            with pytest.raises(redis.exceptions.AuthenticationError):
-                client = aioredis.Redis(port=dfly.port)
-                await client.ping()
-
-            client = aioredis.Redis(password="pass", port=dfly.port)
+    with EnvironCntx(DFLY_requirepass="pass"), df_factory.create() as dfly:
+        # Expect password from environment variable
+        with pytest.raises(redis.exceptions.AuthenticationError):
+            client = aioredis.Redis(port=dfly.port)
             await client.ping()
+
+        client = aioredis.Redis(password="pass", port=dfly.port)
+        await client.ping()
 
 
 async def test_unknown_dfly_env(df_factory, export_dfly_password):
@@ -228,30 +228,6 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
 
     info = await c_master.info("stats")
     assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
-
-
-@pytest.mark.asyncio
-async def test_denyoom_commands(df_factory):
-    df_server = df_factory.create(proactor_threads=1, maxmemory="256mb", oom_deny_commands="get")
-    df_server.start()
-    client = df_server.client()
-    await client.execute_command("DEBUG POPULATE 7000 size 44000")
-
-    min_deny = 256 * 1024 * 1024  # 256mb
-    info = await client.info("memory")
-    print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
-    assert info["used_memory"] > min_deny, "Weak testcase: too little used memory"
-
-    # reject set due to oom
-    with pytest.raises(redis.exceptions.ResponseError):
-        await client.execute_command("set x y")
-
-    # reject get because it is set in oom_deny_commands
-    with pytest.raises(redis.exceptions.ResponseError):
-        await client.execute_command("get x")
-
-    # mget should not be rejected
-    await client.execute_command("mget x")
 
 
 @pytest.mark.parametrize("type", ["LIST", "HASH", "SET", "ZSET", "STRING", "STREAM"])

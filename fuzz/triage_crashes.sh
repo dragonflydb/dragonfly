@@ -206,10 +206,7 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
             --proactor_threads=1
             --dbfilename=
             --omit_basic_usage
-            --rename_command=SHUTDOWN=
-            --rename_command=DEBUG=
-            --rename_command=FLUSHALL=
-            --rename_command=FLUSHDB=
+            --restricted_commands=SHUTDOWN,DEBUG,FLUSHALL,FLUSHDB
             --max_bulk_len=1048576
         )
         [[ "$MODE" == "memcache" ]] && DF_ARGS+=(--memcached_port="$MC_PORT")
@@ -232,6 +229,29 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     DB_DIR="$WORK_DIR/db_${CRASH_ID}"
     rm -rf "$DB_DIR"
     mkdir -p "$LOG_DIR" "$DB_DIR"
+
+    # If the fuzz run used tiered storage, repro.env carries a cwd-relative --tiered_prefix.
+    # Rewrite it into this crash's temp dir so the backing files are isolated and cleaned with it.
+    HAS_TIERING=0
+    for i in "${!DF_ARGS[@]}"; do
+        if [[ "${DF_ARGS[$i]}" == --tiered_prefix=* ]]; then
+            DF_ARGS[$i]="--tiered_prefix=$DB_DIR/backing"
+            HAS_TIERING=1
+        fi
+    done
+
+    # repro.env may carry --backing_file_direct=true from the fuzz machine; force buffered IO
+    # when this machine's filesystem rejects O_DIRECT (tmpfs/overlayfs) so the server can start.
+    if [[ "$HAS_TIERING" == "1" ]] && \
+        ! dd if=/dev/zero of="$DB_DIR/odirect_probe" bs=4096 count=1 oflag=direct \
+            status=none 2>/dev/null; then
+        for i in "${!DF_ARGS[@]}"; do
+            if [[ "${DF_ARGS[$i]}" == --backing_file_direct=* ]]; then
+                DF_ARGS[$i]="--backing_file_direct=false"
+            fi
+        done
+    fi
+    rm -f "$DB_DIR/odirect_probe"
 
     # Triage-specific flags (not part of the fuzz run):
     # --log_dir captures crash logs; --dir provides a clean writable directory

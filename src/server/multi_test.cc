@@ -96,7 +96,7 @@ TEST_F(MultiTest, MultiWithError) {
 
   EXPECT_THAT(Run({"multi"}), "OK");
   EXPECT_THAT(Run({"set", "z", "y"}), "QUEUED");
-  EXPECT_THAT(Run({"exec"}), "OK");
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("OK"));
 
   EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
   EXPECT_THAT(Run({"get", "z"}), "y");
@@ -147,6 +147,63 @@ TEST_F(MultiTxTest, MultiUnlock) {
 
   for (auto key : keys)
     EXPECT_FALSE(IsLocked(0, key));
+}
+
+// Test that CancelScheduledTx successfully cancels a multi-shard transaction
+// that has been scheduled and armed but not yet executed on any shard.
+TEST_F(MultiTxTest, CancelScheduledTx) {
+  // Set initial values on keys spanning multiple shards.
+  Run({"mset", kKeySid0, "v0", kKeySid1, "v1", kKeySid2, "v2"});
+
+  // Suspend all shards with a global transaction. This prevents any other transaction
+  // from executing, ensuring the MSET stays armed but unexecuted.
+  TransactionSuspension suspension;
+  pp_->at(0)->Await([&] { suspension.Start(); });
+
+  // Launch MSET on a fiber. It will schedule and arm but block in run_barrier_.Wait()
+  // because the global suspension transaction holds all shards.
+  auto mset_fb = pp_->at(0)->LaunchFiber([&] {
+    Run("mset_client", {"MSET", kKeySid0, "new0", kKeySid1, "new1", kKeySid2, "new2"});
+  });
+
+  // Wait for the MSET transaction to be scheduled.
+  Transaction* mset_tx = nullptr;
+  ExpectConditionWithinTimeout([&] {
+    bool ready = false;
+    pp_->at(0)->Await([&] {
+      mset_tx = GetTransaction("mset_client");
+      ready = mset_tx != nullptr && mset_tx->IsScheduled();
+    });
+    return ready;
+  });
+
+  // Cancel the MSET transaction from proactor 0.
+  bool cancelled = false;
+  pp_->at(0)->Await([&] { cancelled = mset_tx->CancelScheduledTx(); });
+  EXPECT_TRUE(cancelled);
+
+  // Release the suspension so everything can proceed.
+  pp_->at(0)->Await([&] { suspension.Terminate(); });
+
+  mset_fb.Join();
+
+  // Verify the MSET's values did NOT take effect.
+  EXPECT_EQ(Run({"get", kKeySid0}), "v0");
+  EXPECT_EQ(Run({"get", kKeySid1}), "v1");
+  EXPECT_EQ(Run({"get", kKeySid2}), "v2");
+
+  // Verify no locks are held.
+  EXPECT_FALSE(IsLocked(0, kKeySid0));
+  EXPECT_FALSE(IsLocked(0, kKeySid1));
+  EXPECT_FALSE(IsLocked(0, kKeySid2));
+
+  // Verify tx queues are empty.
+  atomic_bool tx_empty{true};
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    if (!shard->txq()->Empty())
+      tx_empty.store(false);
+  });
+  EXPECT_TRUE(tx_empty);
 }
 
 TEST_F(MultiTest, MultiGlobalCommands) {
@@ -247,12 +304,12 @@ TEST_F(MultiTest, MultiEmpty) {
   Run({"multi"});
   ASSERT_EQ(Run({"ping", "foo"}), "QUEUED");
   resp = Run({"exec"});
-  EXPECT_EQ(resp, "foo");
+  EXPECT_THAT(resp, RespElementsAre("foo"));
 
   Run({"multi"});
   Run({"set", "a", ""});
   resp = Run({"exec"});
-  EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(resp, RespElementsAre("OK"));
 
   resp = Run({"get", "a"});
   EXPECT_EQ(resp, "");
@@ -432,7 +489,7 @@ TEST_F(MultiTest, MultiRename) {
   resp = Run({"rename", kKey4, kKey2});
   ASSERT_EQ(resp, "QUEUED");
   resp = Run({"exec"});
-  EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(resp, RespElementsAre("OK"));
 
   EXPECT_FALSE(IsLocked(0, kKey1));
   EXPECT_FALSE(IsLocked(0, kKey2));
@@ -445,7 +502,7 @@ TEST_F(MultiTest, MultiWithoutTx) {
   Run({"multi"});
   Run({"ping"});
   auto resp = Run({"exec"});
-  EXPECT_EQ(resp, "PONG");
+  EXPECT_THAT(resp, RespElementsAre("PONG"));
 
   // EVAL without keys and default script flags should be non-transactional
   Run({"multi"});
@@ -480,7 +537,7 @@ TEST_F(MultiTest, MultiCommandsWithBonusKeys) {
   Run({"multi"});
   Run({"zinterstore", "ze", "2", "za", "zb", "z one extra"});
   resp = Run({"exec"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, RespElementsAre(ErrArg("syntax error")));
 }
 
 TEST_F(MultiTest, MultiHop) {
@@ -590,7 +647,7 @@ TEST_F(MultiTest, Eval) {
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"hvals", "hmap"});
-  EXPECT_EQ(resp, "2222");
+  EXPECT_THAT(resp, RespElementsAre("2222"));
 
   Run({"sadd", "s1", "a", "b"});
   Run({"sadd", "s2", "a", "c"});
@@ -998,7 +1055,7 @@ TEST_F(MultiTest, UndeclaredKeyFlag) {
 
   // Clear all Lua scripts so we can configure the cache
   EXPECT_THAT(Run({"script", "flush"}), "OK");
-  EXPECT_THAT(Run({"script", "exists", sha}), IntArg(0));
+  EXPECT_THAT(Run({"script", "exists", sha}), RespElementsAre(IntArg(0)));
 
   EXPECT_THAT(
       Run({"config", "set", "lua_undeclared_keys_shas", absl::StrCat(sha, ",NON-EXISTING-HASH")}),
@@ -1263,6 +1320,54 @@ TEST_F(MultiTest, TestSquashing) {
   Run({"exec"});
 }
 
+// Non-atomic squashing (a disable-atomicity script) uses SHARD_LOCAL local transactions.
+// A multi-key command whose keys are colocated on one shard is squashed
+// into such a local_tx, exercising the shard-local multi-key path in Transaction::InitByKeys (and
+// its DCHECK that all keys map to the pinned shard). MULTI/EXEC would use *atomic* squashing and
+// would not reach this path.
+TEST_F(MultiTest, SquashShardLocalMultiKey) {
+  absl::FlagSaver fs;
+  SetTestFlag("cluster_mode", "emulated");
+  SetTestFlag("experimental_cluster_shard_by_slot", "true");
+  ResetService();
+
+  // disable-atomicity => NON_ATOMIC multi => squasher creates SHARD_LOCAL local txs.
+  // redis.acall queues the calls for non-atomic squashing. All keys share the {t} hashtag, so the
+  // multi-key MSET lands on a single shard and is squashable into one local_tx.
+  const char* kScript = R"(--!df flags=disable-atomicity,allow-undeclared-keys
+redis.acall('mset', '{t}a', '1', '{t}b', '2', '{t}c', '3')
+redis.acall('set', '{t}d', '4')
+)";
+  auto resp = Run({"eval", kScript, "0"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // Guard that the calls really went through non-atomic squashing. Without a flush the shard-local
+  // multi-key branch in Transaction::InitByKeys is never reached and the test would pass vacuously.
+  EXPECT_GT(GetMetrics().coordinator_stats.eval_squashed_flushes, 0u);
+
+  EXPECT_EQ(Run({"get", "{t}a"}), "1");
+  EXPECT_EQ(Run({"get", "{t}c"}), "3");
+  EXPECT_EQ(Run({"get", "{t}d"}), "4");
+}
+
+// Regression: squashing_current_reply_size must return to zero after a squash that spans
+// multiple flushes. A single MultiCommandSquasher instance flushes once per batch that
+// reaches max_squash_cmd_num; reply_size_delta was not reset between flushes, so
+// total_reply_size double-counted earlier batches and the counter underflowed.
+TEST_F(MultiTest, SquashReplySizeAccounting) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_squash, true);
+
+  // Must exceed max_squashed_cmd_num (default 100) so the squash spans multiple flushes.
+  const int kNumCmds = 300;
+  Run({"multi"});
+  for (int i = 0; i < kNumCmds; ++i)
+    Run({"set", kKey1, "v"});
+  Run({"exec"});
+
+  EXPECT_EQ(GetMetrics().facade_stats.reply_stats.squashing_current_reply_size, 0u);
+}
+
 TEST_F(MultiTest, MultiLeavesTxQueue) {
   // Tests the scenario, where the OOO multi-tx is scheduled into tx queue and there is another
   // tx (mget) after it that runs and tests for atomicity.
@@ -1459,7 +1564,7 @@ TEST_F(MultiEvalTest, MultiAndEval) {
   Run({"multi"});
   Run({"eval", "return 'OK';", "0"});
   auto resp = Run({"exec"});
-  EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(resp, RespElementsAre("OK"));
 
   // We had a bug running script load inside multi
   Run({"multi"});
@@ -1605,6 +1710,55 @@ return redis.call('GET', KEYS[1])
 
   auto resp = Run({"eval", kScript, "1", "key"});
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
+// Tests for the RESET command (connection-layer reset, mirrors Redis RESET).
+// RESET clears MULTI state, WATCH keys, DB index, and auth, keeping the connection alive.
+TEST_F(MultiTest, ResetReturnsResetString) {
+  EXPECT_THAT(Run({"reset"}), "RESET");
+}
+
+TEST_F(MultiTest, ResetClearsMULTIBlock) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"get", "x"}), "QUEUED");
+
+  // RESET should abort the MULTI block and leave us in normal state.
+  EXPECT_THAT(Run({"reset"}), "RESET");
+
+  // After RESET a plain GET works (not QUEUED, not an error).
+  EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
+  // EXEC without MULTI confirms the block was cleared.
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+}
+
+TEST_F(MultiTest, ResetClearsWatchState) {
+  Run({"set", "a", "1"});
+  EXPECT_THAT(Run({"watch", "a"}), "OK");
+
+  // Modify watched key from another connection so EXEC would normally fail.
+  Run("other", {"set", "a", "2"});
+
+  // RESET should clear WATCH; after RESET, a new MULTI/EXEC should succeed.
+  EXPECT_THAT(Run({"reset"}), "RESET");
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"get", "a"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("2"));
+}
+
+TEST_F(MultiTest, ResetSelectsDB0) {
+  // Move to DB 1, set a key there.
+  EXPECT_THAT(Run({"select", "1"}), "OK");
+  EXPECT_THAT(Run({"set", "resetkey", "val"}), "OK");
+
+  // RESET should switch back to DB 0.
+  EXPECT_THAT(Run({"reset"}), "RESET");
+
+  // The key in DB 1 should not be visible in DB 0.
+  EXPECT_THAT(Run({"get", "resetkey"}), ArgType(RespExpr::NIL));
+
+  // Select 1 to confirm the key is still there.
+  EXPECT_THAT(Run({"select", "1"}), "OK");
+  EXPECT_THAT(Run({"get", "resetkey"}), "val");
 }
 
 }  // namespace dfly

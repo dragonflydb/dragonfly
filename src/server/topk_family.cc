@@ -22,16 +22,19 @@ using namespace std;
 using namespace facade;
 
 struct TopkFamily {
-  static void Reserve(CmdArgList args, CommandContext* cmd_cntx);
-  static void Add(CmdArgList args, CommandContext* cmd_cntx);
-  static void IncrBy(CmdArgList args, CommandContext* cmd_cntx);
-  static void Query(CmdArgList args, CommandContext* cmd_cntx);
-  static void Count(CmdArgList args, CommandContext* cmd_cntx);
-  static void List(CmdArgList args, CommandContext* cmd_cntx);
-  static void Info(CmdArgList args, CommandContext* cmd_cntx);
+  static void Reserve(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Add(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void IncrBy(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Query(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Count(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void List(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Info(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 };
 
 namespace {
+
+constexpr char kDecayRangeErr[] = "decay must be between 0 and 1";
+constexpr char kIncrRangeErr[] = "increment must be between 1 and 100000";
 
 OpStatus OpReserve(const OpArgs& op_args, string_view key, uint32_t k, uint32_t width,
                    uint32_t depth, double decay) {
@@ -170,8 +173,7 @@ bool HandleOpError(OpStatus status, CommandContext* cmd_cntx) {
 
 }  // namespace
 
-void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::Reserve(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   uint32_t k = parser.Next<uint32_t>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -194,7 +196,7 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
   if (parser.HasNext()) {
     width = parser.Next<uint32_t>();
     depth = parser.Next<uint32_t>();
-    decay = parser.Next<double>();
+    decay = parser.Next<Validated<double, ClosedRange<0, 1, kDecayRangeErr>>>();
     RETURN_ON_PARSE_ERROR(parser, rb);
 
     if ((width == 0) || (depth == 0)) {
@@ -209,20 +211,10 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
       return rb->SendError(absl::StrCat("width must not exceed ", kMaxWidth,
                                         " and depth must not exceed ", kMaxDepth));
     }
-
-    if (!std::isfinite(decay) || (decay < 0.0) || (decay > 1.0)) {
-      return rb->SendError("decay must be between 0 and 1");
-    }
   }
 
-  if (parser.HasNext()) {
-    return rb->SendError(kSyntaxErr);
-  }
-
-  // Guard against overflow: width * depth * sizeof(uint32_t) must fit in size_t.
-  if (width > SIZE_MAX / sizeof(uint32_t) / depth) {
-    return rb->SendError("width * depth is too large");
-  }
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpReserve(t->GetOpArgs(shard), key, k, width, depth, decay);
@@ -234,17 +226,14 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendOk();
 }
 
-void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::Add(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  vector<string_view> items;
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  while (parser.HasNext()) {
-    items.push_back(parser.Next());
-  }
-  if (items.empty()) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
+  CmdArgParser::Range item_range = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, rb);
+
+  vector<string_view> items{item_range.begin(), item_range.end()};
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, items);
   };
@@ -254,7 +243,6 @@ void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
     return;
 
   // Build array response
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   {
     SinkReplyBuilder::ReplyScope scope(rb);
     rb->StartArray(result->size());
@@ -268,28 +256,23 @@ void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::IncrBy(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   vector<pair<string_view, uint32_t>> items;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
+  items.reserve(parser.UnparsedArgs().size() / 2);
   while (parser.HasNext()) {
-    string_view item = parser.Next();
-    if (!parser.HasNext()) {
-      return cmd_cntx->SendError(kSyntaxErr);
-    }
-    uint32_t incr = parser.Next<uint32_t>();
-    RETURN_ON_PARSE_ERROR(parser, rb);
-    if (incr < 1 || incr > 100000) {  // Redis limits increment to [1, 100000]
-      return cmd_cntx->SendError("increment must be between 1 and 100000");
-    }
+    auto [item, incr] =
+        parser.Next<string_view, Validated<uint32_t, ClosedRange<1, 100000, kIncrRangeErr>>>();
     items.emplace_back(item, incr);
   }
+  RETURN_ON_PARSE_ERROR(parser, rb);
 
   if (items.empty()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrBy(t->GetOpArgs(shard), key, items);
   };
@@ -311,17 +294,14 @@ void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void TopkFamily::Query(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::Query(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  vector<string_view> items;
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  while (parser.HasNext()) {
-    items.push_back(parser.Next());
-  }
-  if (items.empty()) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
+  CmdArgParser::Range item_range = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, rb);
+
+  vector<string_view> items{item_range.begin(), item_range.end()};
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpQuery(t->GetOpArgs(shard), key, items);
   };
@@ -330,7 +310,6 @@ void TopkFamily::Query(CmdArgList args, CommandContext* cmd_cntx) {
     return;
 
   // Build array response
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   {
     SinkReplyBuilder::ReplyScope scope(rb);
     rb->StartArray(result->size());
@@ -340,17 +319,14 @@ void TopkFamily::Query(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void TopkFamily::Count(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::Count(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  vector<string_view> items;
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  while (parser.HasNext()) {
-    items.push_back(parser.Next());
-  }
-  if (items.empty()) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
+  CmdArgParser::Range item_range = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, rb);
+
+  vector<string_view> items{item_range.begin(), item_range.end()};
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCount(t->GetOpArgs(shard), key, items);
   };
@@ -359,7 +335,6 @@ void TopkFamily::Count(CmdArgList args, CommandContext* cmd_cntx) {
     return;
 
   // Build array response
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   {
     SinkReplyBuilder::ReplyScope scope(rb);
     rb->StartArray(result->size());
@@ -369,24 +344,13 @@ void TopkFamily::Count(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::List(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  bool with_count = false;
-
-  if (parser.HasNext()) {
-    string_view flag = parser.Next();
-    if (absl::EqualsIgnoreCase(flag, "WITHCOUNT")) {
-      with_count = true;
-    } else {
-      return cmd_cntx->SendError(kSyntaxErr);
-    }
-  }
-
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (parser.HasNext()) {
-    return rb->SendError(kSyntaxErr);
-  }
+  bool with_count = parser.Check("WITHCOUNT");
+
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpList(t->GetOpArgs(shard), key); };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -407,14 +371,12 @@ void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void TopkFamily::Info(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void TopkFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (parser.HasNext()) {
-    return rb->SendError(kSyntaxErr);
-  }
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpInfo(t->GetOpArgs(shard), key); };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));

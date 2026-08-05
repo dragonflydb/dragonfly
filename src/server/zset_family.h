@@ -24,13 +24,13 @@ class ZSetFamily {
   static void Register(CommandRegistry* registry);
 
   static LoadBlobResult LoadZiplistBlob(std::string_view blob, PrimeValue* pv);
-  static LoadBlobResult LoadListpackBlob(std::string_view blob, PrimeValue* pv);
+  static LoadBlobResult LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* pv);
 
   using IndexInterval = std::pair<int64_t, int64_t>;
   using MScoreResponse = std::vector<std::optional<double>>;
 
   struct Bound {
-    double val;
+    double val = 0;
     bool is_open = false;
     Bound() = default;
     Bound(double v, bool open) : val(v), is_open(open) {
@@ -86,7 +86,7 @@ class ZSetFamily {
   static void ZAddGeneric(std::string_view key, const ZParams& zparams, ScoredMemberSpan memb_sp,
                           CommandContext* cmd_cntx);
 
-  static OpResult<MScoreResponse> ZGetMembers(CmdArgList args, Transaction* tx,
+  static OpResult<MScoreResponse> ZGetMembers(const facade::ParsedArgs& args, Transaction* tx,
                                               SinkReplyBuilder* builder);
 
   static OpResult<std::vector<ScoredArray>> OpRanges(const std::vector<ZRangeSpec>& range_specs,

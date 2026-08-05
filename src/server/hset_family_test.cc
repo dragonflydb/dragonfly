@@ -548,10 +548,9 @@ TEST_F(HSetFamilyTest, HSetEx) {
   EXPECT_EQ(Run({"HSETEX", "k", "KEEPTTL", long_time, "nottl", "newval"}), 0);
   EXPECT_EQ(Run({"FIELDTTL", "k", "nottl"}).GetInt(), 100);
 
-  EXPECT_THAT(Run({"HSETEX", "k", "NX", "KEEPTTL", "NX", "1", "v", "v2"}),
-              ErrArg("ERR wrong number of arguments for 'hsetex' command"));
-  EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "KEEPTTL", "1", "v", "v2"}),
-              ErrArg("ERR wrong number of arguments for 'hsetex' command"));
+  // A repeated flag is rejected as a syntax error.
+  EXPECT_THAT(Run({"HSETEX", "k", "NX", "KEEPTTL", "NX", "1", "v", "v2"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "KEEPTTL", "1", "v", "v2"}), ErrArg("syntax error"));
 
   // No field-value pairs — should return error, not SIGABRT
   EXPECT_THAT(Run({"HSETEX", "k", "100"}),
@@ -562,6 +561,159 @@ TEST_F(HSetFamilyTest, HSetEx) {
               ErrArg("ERR wrong number of arguments for 'hsetex' command"));
 }
 
+// FNX/FXX are also accepted by the Dragonfly syntax. They apply the same collective set-all-or-
+// nothing condition as the Redis format, but keep the Dragonfly reply (number of created fields).
+TEST_F(HSetFamilyTest, HSetExDragonflyCondition) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // FNX on a fresh key: none of the fields exist -> all are set, created count returned.
+  EXPECT_THAT(Run({"HSETEX", "dk", "FNX", "100", "a", "1", "b", "2"}), IntArg(2));
+  EXPECT_EQ(Run({"HGET", "dk", "a"}), "1");
+  EXPECT_EQ(Run({"FIELDTTL", "dk", "a"}).GetInt(), 100);
+
+  // FNX fails because a/b already exist -> nothing set, value and TTL unchanged.
+  EXPECT_THAT(Run({"HSETEX", "dk", "FNX", "50", "a", "x"}), IntArg(0));
+  EXPECT_EQ(Run({"HGET", "dk", "a"}), "1");
+  EXPECT_EQ(Run({"FIELDTTL", "dk", "a"}).GetInt(), 100);
+  // Mixed existing/new with FNX: one field already exists -> nothing set at all.
+  EXPECT_THAT(Run({"HSETEX", "dk", "FNX", "50", "a", "x", "newf", "y"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXISTS", "dk", "newf"}), IntArg(0));
+
+  // FXX applies because all fields exist; it overwrites value and TTL but creates nothing -> 0.
+  EXPECT_THAT(Run({"HSETEX", "dk", "FXX", "50", "a", "x"}), IntArg(0));
+  EXPECT_EQ(Run({"HGET", "dk", "a"}), "x");
+  EXPECT_EQ(Run({"FIELDTTL", "dk", "a"}).GetInt(), 50);
+  // FXX fails because a field is missing -> nothing set.
+  EXPECT_THAT(Run({"HSETEX", "dk", "FXX", "50", "missing", "y"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXISTS", "dk", "missing"}), IntArg(0));
+  // FXX on a non-existing key fails and leaves no key behind.
+  EXPECT_THAT(Run({"HSETEX", "dk2", "FXX", "50", "a", "1"}), IntArg(0));
+  EXPECT_THAT(Run({"EXISTS", "dk2"}), IntArg(0));
+
+  // KEEPTTL composes with the condition.
+  EXPECT_THAT(Run({"HSETEX", "dk", "FXX", "KEEPTTL", "10", "a", "z"}), IntArg(0));
+  EXPECT_EQ(Run({"HGET", "dk", "a"}), "z");
+  EXPECT_EQ(Run({"FIELDTTL", "dk", "a"}).GetInt(), 50);  // TTL retained
+
+  // NX (per-field skip) and the collective FNX/FXX condition are mutually exclusive.
+  EXPECT_THAT(Run({"HSETEX", "dk", "NX", "FNX", "100", "a", "1"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"HSETEX", "dk", "FNX", "FXX", "100", "a", "1"}), ErrArg("syntax error"));
+  // A repeated condition flag is rejected.
+  EXPECT_THAT(Run({"HSETEX", "dk", "FNX", "FNX", "100", "a", "1"}), ErrArg("syntax error"));
+}
+
+TEST_F(HSetFamilyTest, HSetExRedisFormat) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;  // reset to a known test time
+
+  // Basic Redis format without expiry: fields are set without TTL, returns 1.
+  EXPECT_THAT(Run({"HSETEX", "k", "FIELDS", "2", "f1", "v1", "f2", "v2"}), IntArg(1));
+  EXPECT_EQ(Run({"HGET", "k", "f1"}), "v1");
+  EXPECT_EQ(Run({"HGET", "k", "f2"}), "v2");
+  EXPECT_EQ(Run({"FIELDTTL", "k", "f1"}).GetInt(), -1);  // no TTL
+
+  // EX seconds.
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "100", "FIELDS", "1", "exf", "v"}), IntArg(1));
+  EXPECT_EQ(Run({"FIELDTTL", "k", "exf"}).GetInt(), 100);
+
+  // PX milliseconds.
+  EXPECT_THAT(Run({"HSETEX", "k", "PX", "100000", "FIELDS", "1", "pxf", "v"}), IntArg(1));
+  EXPECT_EQ(Run({"FIELDTTL", "k", "pxf"}).GetInt(), 100);
+
+  // EXAT unix-time-seconds.
+  const uint64_t now_sec = kMemberExpiryBase;
+  EXPECT_THAT(
+      Run({"HSETEX", "k", "EXAT", absl::StrCat(now_sec + 100), "FIELDS", "1", "exatf", "v"}),
+      IntArg(1));
+  EXPECT_EQ(Run({"FIELDTTL", "k", "exatf"}).GetInt(), 100);
+
+  // PXAT unix-time-milliseconds.
+  EXPECT_THAT(Run({"HSETEX", "k", "PXAT", absl::StrCat((now_sec + 100) * 1000), "FIELDS", "1",
+                   "pxatf", "v"}),
+              IntArg(1));
+  EXPECT_EQ(Run({"FIELDTTL", "k", "pxatf"}).GetInt(), 100);
+
+  // Setting a field again without an expiry option removes its existing TTL.
+  EXPECT_THAT(Run({"HSETEX", "k", "FIELDS", "1", "exf", "v2"}), IntArg(1));
+  EXPECT_EQ(Run({"FIELDTTL", "k", "exf"}).GetInt(), -1);
+
+  // KEEPTTL retains the existing TTL while updating the value.
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "50", "FIELDS", "1", "kf", "v1"}), IntArg(1));
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kf"}).GetInt(), 50);
+  EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "FIELDS", "1", "kf", "v2"}), IntArg(1));
+  EXPECT_EQ(Run({"HGET", "k", "kf"}), "v2");
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kf"}).GetInt(), 50);
+
+  // FNX: only set when none of the fields exist.
+  EXPECT_THAT(Run({"HSETEX", "k", "FNX", "FIELDS", "1", "fnxf", "v1"}), IntArg(1));
+  EXPECT_THAT(Run({"HSETEX", "k", "FNX", "FIELDS", "1", "fnxf", "v2"}), IntArg(0));
+  EXPECT_EQ(Run({"HGET", "k", "fnxf"}), "v1");  // unchanged
+  // Mixed existing/new field with FNX: nothing is set because one already exists.
+  EXPECT_THAT(Run({"HSETEX", "k", "FNX", "FIELDS", "2", "fnxf", "x", "newf", "y"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXISTS", "k", "newf"}), IntArg(0));
+
+  // FXX: only set when all the fields exist.
+  EXPECT_THAT(Run({"HSETEX", "k", "FXX", "FIELDS", "1", "fnxf", "v3"}), IntArg(1));
+  EXPECT_EQ(Run({"HGET", "k", "fnxf"}), "v3");  // updated
+  EXPECT_THAT(Run({"HSETEX", "k", "FXX", "FIELDS", "1", "missing", "v"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXISTS", "k", "missing"}), IntArg(0));
+  // Mixed with FXX: nothing set because one field is missing.
+  EXPECT_THAT(Run({"HSETEX", "k", "FXX", "FIELDS", "2", "fnxf", "a", "missing2", "b"}), IntArg(0));
+  EXPECT_EQ(Run({"HGET", "k", "fnxf"}), "v3");  // unchanged
+
+  // FNX on a non-existing key succeeds; FXX on a non-existing key fails.
+  EXPECT_THAT(Run({"HSETEX", "nk", "FNX", "FIELDS", "1", "a", "b"}), IntArg(1));
+  EXPECT_THAT(Run({"HSETEX", "nk2", "FXX", "FIELDS", "1", "a", "b"}), IntArg(0));
+  EXPECT_THAT(Run({"EXISTS", "nk2"}), IntArg(0));  // no empty key left behind
+
+  // Error: FNX and FXX are mutually exclusive.
+  EXPECT_THAT(Run({"HSETEX", "k", "FNX", "FXX", "FIELDS", "1", "f", "v"}), ErrArg("syntax error"));
+
+  // Error: a condition flag may not be repeated.
+  EXPECT_THAT(Run({"HSETEX", "k", "FNX", "FNX", "FIELDS", "1", "f", "v"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"HSETEX", "k", "FXX", "FXX", "FIELDS", "1", "f", "v"}), ErrArg("syntax error"));
+
+  // Error: only one expiry option allowed.
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "10", "KEEPTTL", "FIELDS", "1", "f", "v"}),
+              ErrArg("syntax error"));
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "10", "PX", "10", "FIELDS", "1", "f", "v"}),
+              ErrArg("syntax error"));
+
+  // Error: out-of-range / overflow-inducing expiries are rejected (not UB) for every unit.
+  EXPECT_THAT(Run({"HSETEX", "k", "PX", "9223372036854775807", "FIELDS", "1", "f", "v"}),
+              ErrArg("invalid expire time"));
+  EXPECT_THAT(Run({"HSETEX", "k", "EXAT", "9223372036854775", "FIELDS", "1", "f", "v"}),
+              ErrArg("invalid expire time"));
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "0", "FIELDS", "1", "f", "v"}),
+              ErrArg("invalid expire time"));
+  // A non-integer expiry value still reports the integer error (matching Redis).
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "abc", "FIELDS", "1", "f", "v"}),
+              ErrArg("value is not an integer or out of range"));
+  // A past EXAT is in the past -> rejected.
+  EXPECT_THAT(Run({"HSETEX", "k", "EXAT", "1", "FIELDS", "1", "f", "v"}),
+              ErrArg("invalid expire time"));
+
+  // Error: numfields must match the number of field/value pairs.
+  EXPECT_THAT(Run({"HSETEX", "k", "FIELDS", "2", "f", "v"}), ErrArg("must match"));
+  EXPECT_THAT(Run({"HSETEX", "k", "FIELDS", "0", "f", "v"}), ErrArg("must match"));
+
+  // Format is detected by the FIELDS keyword: a Redis-only flag without FIELDS falls through to
+  // the Dragonfly path, where the non-numeric ttl_sec ("f") is rejected.
+  EXPECT_THAT(Run({"HSETEX", "k", "FNX", "f", "v"}),
+              ErrArg("value is not an integer or out of range"));
+
+  // EX/PX/EXAT/PXAT are Redis-form only: without FIELDS they are a syntax error rather than being
+  // silently ignored in favor of a positional ttl_sec.
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "10", "100", "f", "v"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"HSETEX", "k", "PX", "10", "100", "f", "v"}), ErrArg("syntax error"));
+
+  // A field expiring during the FNX/FXX check must not leave an empty hash behind.
+  EXPECT_THAT(Run({"HSETEX", "exp", "1", "only", "v"}), IntArg(1));  // dfly: field with 1s TTL
+  AdvanceTime(2000);                                                 // the field expires
+  // FXX needs `only` to exist; it's expired, so the condition fails and the now-empty hash is gone.
+  EXPECT_THAT(Run({"HSETEX", "exp", "FXX", "FIELDS", "1", "only", "v2"}), IntArg(0));
+  EXPECT_THAT(Run({"EXISTS", "exp"}), IntArg(0));
+}
+
 TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {
   const int kElements = 200;
   // Enough for IsGoodForListpack to become false
@@ -570,6 +722,28 @@ TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {
     Run({"HSET", "hk", k, "100500700"});
   }
   EXPECT_THAT(Run({"HLEN", "hk"}), IntArg(kElements));
+}
+
+// A single-field hash must remain listpack even when the value exceeds max_map_field_len
+// (default 64 bytes). With multiple fields the large value still triggers dense_set. (#7249)
+TEST_F(HSetFamilyTest, SingleFieldLargeValueRemainsListpack) {
+  const string large_value(2000, 'x');
+
+  EXPECT_EQ(1, CheckedInt({"HSET", "hmap", "field", large_value}));
+  auto resp = Run({"DEBUG", "OBJECT", "hmap"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:listpack"));
+  EXPECT_EQ(Run({"HGET", "hmap", "field"}), large_value);
+
+  EXPECT_EQ(0, CheckedInt({"HSET", "hmap", "field", string(2000, 'y')}));
+  resp = Run({"DEBUG", "OBJECT", "hmap"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:listpack"));
+
+  // Two fields: falls through to the regular size check, which rejects the large value.
+  EXPECT_EQ(2, CheckedInt({"HSET", "hmap", "field1", large_value, "field2", "val"}));
+  resp = Run({"DEBUG", "OBJECT", "hmap"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:dense_set"));
+  EXPECT_EQ(Run({"HGET", "hmap", "field1"}), large_value);
+  EXPECT_EQ(Run({"HGET", "hmap", "field2"}), "val");
 }
 
 TEST_F(HSetFamilyTest, Issue1140) {
@@ -601,18 +775,26 @@ TEST_F(HSetFamilyTest, HExpire) {
   EXPECT_EQ(CheckedInt({"HSET", "key3", "k0", "v0", "k1", "v1", "k2", "v2", "k3", "v3", "k4", "v4",
                         "k5", "v5"}),
             6);
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "XX", "FIELDS", "1", "k0"}), IntArg(0));
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "NX", "FIELDS", "1", "k0"}), IntArg(1));
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "NX", "FIELDS", "1", "k0"}), IntArg(0));
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "XX", "FIELDS", "1", "k0"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "XX", "FIELDS", "1", "k0"}),
+              RespElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "NX", "FIELDS", "1", "k0"}),
+              RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "NX", "FIELDS", "1", "k0"}),
+              RespElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "XX", "FIELDS", "1", "k0"}),
+              RespElementsAre(IntArg(1)));
   EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "NX", "FIELDS", "3", "k1", "k2", "k3"}),
               RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "8", "GT", "FIELDS", "1", "k2"}), IntArg(0));
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "12", "GT", "FIELDS", "1", "k2"}), IntArg(1));
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "8", "LT", "FIELDS", "1", "k3"}), IntArg(1));
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "12", "LT", "FIELDS", "1", "k3"}), IntArg(0));
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "GT", "FIELDS", "1", "k4"}), IntArg(0));
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "LT", "FIELDS", "1", "k5"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "8", "GT", "FIELDS", "1", "k2"}), RespElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "12", "GT", "FIELDS", "1", "k2"}),
+              RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "8", "LT", "FIELDS", "1", "k3"}), RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "12", "LT", "FIELDS", "1", "k3"}),
+              RespElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "GT", "FIELDS", "1", "k4"}),
+              RespElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "LT", "FIELDS", "1", "k5"}),
+              RespElementsAre(IntArg(1)));
   AdvanceTime(8'000);
   EXPECT_THAT(
       Run({"HGETALL", "key3"}),
@@ -622,8 +804,8 @@ TEST_F(HSetFamilyTest, HExpire) {
   AdvanceTime(2'000);
   EXPECT_THAT(Run({"HGETALL", "key3"}), RespArray(ElementsAre("k4", "v4")));
 
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "FIELDS", "1", "k4"}), IntArg(1));
-  EXPECT_THAT(Run({"HEXPIRE", "key3", "0", "XX", "FIELDS", "1", "k4"}), IntArg(2));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "FIELDS", "1", "k4"}), RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "0", "XX", "FIELDS", "1", "k4"}), RespElementsAre(IntArg(2)));
   EXPECT_THAT(Run({"HGETALL", "key3"}), RespArray(ElementsAre()));
 
   EXPECT_EQ(
@@ -633,12 +815,26 @@ TEST_F(HSetFamilyTest, HExpire) {
   EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "LT", "FIELDS", "2", "k2", "k3"}),
               RespElementsAre(IntArg(2), IntArg(2)));
 
-  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "XX", "FIELDS", "1", "k4"}), IntArg(0));
-  EXPECT_THAT(Run({"HEXPIRE", "key4", "10", "NX", "FIELDS", "1", "k4"}), IntArg(1));
-  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "NX", "FIELDS", "1", "k4"}), IntArg(0));
-  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "GT", "FIELDS", "1", "k4"}), IntArg(0));
-  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "FIELDS", "1", "k4"}), IntArg(2));
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "XX", "FIELDS", "1", "k4"}), RespElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "10", "NX", "FIELDS", "1", "k4"}),
+              RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "NX", "FIELDS", "1", "k4"}), RespElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "GT", "FIELDS", "1", "k4"}), RespElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "FIELDS", "1", "k4"}), RespElementsAre(IntArg(2)));
   EXPECT_THAT(Run({"HGETALL", "key4"}), RespArray(ElementsAre()));
+}
+
+TEST_F(HSetFamilyTest, HExpireNumFieldsErrors) {
+  EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0", "k1", "v1"}), 2);
+
+  // Missing FIELDS keyword.
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "1", "k0"}), ErrArg("Mandatory argument FIELDS"));
+
+  // A wrong number of provided fields (too few, too many, or zero) reports the must-match message.
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "2", "k0"}), ErrArg("numfields"));
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "1", "k0", "k1"}), ErrArg("numfields"));
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "0", "k0"}), ErrArg("numfields"));
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "0"}), ErrArg("numfields"));
 }
 
 TEST_F(HSetFamilyTest, HExpireNoExpireEarly) {
@@ -685,13 +881,13 @@ TEST_F(HSetFamilyTest, HTtl) {
               RespArray(ElementsAre(IntArg(-1), IntArg(-1), IntArg(-2))));
 
   // Set expiry and verify TTL
-  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "1", "k0"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "1", "k0"}), RespElementsAre(IntArg(1)));
   EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "2", "k0", "k1"}),
               RespArray(ElementsAre(IntArg(10), IntArg(-1))));
 
   // Advance time and verify TTL decreases
   AdvanceTime(3000);
-  EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "1", "k0"}), IntArg(7));
+  EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "1", "k0"}), RespElementsAre(IntArg(7)));
 
   // Wrong type
   Run({"SET", "strkey", "val"});
@@ -700,6 +896,160 @@ TEST_F(HSetFamilyTest, HTtl) {
   // Syntax errors
   EXPECT_THAT(Run({"HTTL", "key", "1", "k0"}), ErrArg("Mandatory argument FIELDS"));
   EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "2", "k0"}), ErrArg("numfields"));
+}
+
+TEST_F(HSetFamilyTest, HPExpireTime) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;  // member time_now == 0
+
+  // Non-existent key returns -2 for all fields.
+  EXPECT_THAT(Run({"HPEXPIRETIME", "nokey", "FIELDS", "2", "f1", "f2"}),
+              RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
+
+  // Fields without TTL return -1, non-existent fields return -2.
+  EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0", "k1", "v1"}), 2);
+  EXPECT_THAT(Run({"HPEXPIRETIME", "key", "FIELDS", "3", "k0", "k1", "nosuch"}),
+              RespArray(ElementsAre(IntArg(-1), IntArg(-1), IntArg(-2))));
+
+  // Set an expiry and verify the absolute Unix-ms timestamp.
+  EXPECT_THAT(Run({"HEXPIRE", "key", "100", "FIELDS", "1", "k0"}), RespElementsAre(IntArg(1)));
+  const int64_t expected_ms = (static_cast<int64_t>(kMemberExpiryBase) + 100) * 1000;
+  EXPECT_THAT(Run({"HPEXPIRETIME", "key", "FIELDS", "2", "k0", "k1"}),
+              RespArray(ElementsAre(IntArg(expected_ms), IntArg(-1))));
+
+  // The absolute timestamp does not change as time passes.
+  AdvanceTime(3000);
+  EXPECT_THAT(Run({"HPEXPIRETIME", "key", "FIELDS", "1", "k0"}),
+              RespElementsAre(IntArg(expected_ms)));
+
+  // Wrong type.
+  Run({"SET", "strkey", "val"});
+  EXPECT_THAT(Run({"HPEXPIRETIME", "strkey", "FIELDS", "1", "f"}), ErrArg("WRONGTYPE"));
+
+  // Syntax errors.
+  EXPECT_THAT(Run({"HPEXPIRETIME", "key", "notfields", "1", "k0"}),
+              ErrArg("Mandatory argument FIELDS"));
+  EXPECT_THAT(Run({"HPEXPIRETIME", "key", "FIELDS", "2", "k0"}), ErrArg("numfields"));
+  // A non-positive or non-integer numfields all report the same Redis message.
+  EXPECT_THAT(Run({"HPEXPIRETIME", "key", "FIELDS", "0", "k0"}),
+              ErrArg("Number of fields must be a positive integer"));
+  EXPECT_THAT(Run({"HPEXPIRETIME", "key", "FIELDS", "-1", "k0"}),
+              ErrArg("Number of fields must be a positive integer"));
+  EXPECT_THAT(Run({"HPEXPIRETIME", "key", "FIELDS", "abc", "k0"}),
+              ErrArg("Number of fields must be a positive integer"));
+
+  EXPECT_THAT(Run({"HPEXPIRETIME", "key", "FIELDS", "1"}),
+              ErrArg("The `numfields` parameter must match the number of arguments"));
+}
+
+TEST_F(HSetFamilyTest, HGetEx) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;  // member time_now == 0
+
+  // Missing key -> array of nils.
+  EXPECT_THAT(Run({"HGETEX", "nokey", "FIELDS", "2", "f1", "f2"}),
+              RespArray(ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL))));
+
+  EXPECT_EQ(CheckedInt({"HSET", "key", "f1", "v1", "f2", "v2", "f3", "v3"}), 3);
+
+  // No option: returns values and leaves the TTLs untouched.
+  EXPECT_THAT(Run({"HGETEX", "key", "FIELDS", "3", "f1", "f2", "nosuch"}),
+              RespArray(ElementsAre("v1", "v2", ArgType(RespExpr::NIL))));
+  EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "2", "f1", "f2"}),
+              RespArray(ElementsAre(IntArg(-1), IntArg(-1))));
+
+  // EX sets a relative TTL and still returns the value.
+  EXPECT_THAT(Run({"HGETEX", "key", "EX", "100", "FIELDS", "1", "f1"}), RespElementsAre("v1"));
+  EXPECT_EQ(Run({"FIELDTTL", "key", "f1"}).GetInt(), 100);
+
+  // PX (milliseconds) rounds up to whole seconds.
+  EXPECT_THAT(Run({"HGETEX", "key", "PX", "100000", "FIELDS", "1", "f2"}), RespElementsAre("v2"));
+  EXPECT_EQ(Run({"FIELDTTL", "key", "f2"}).GetInt(), 100);
+
+  // EXAT / PXAT (absolute) set a TTL relative to now.
+  EXPECT_THAT(
+      Run({"HGETEX", "key", "EXAT", absl::StrCat(kMemberExpiryBase + 200), "FIELDS", "1", "f1"}),
+      RespElementsAre("v1"));
+  EXPECT_EQ(Run({"FIELDTTL", "key", "f1"}).GetInt(), 200);
+  EXPECT_THAT(Run({"HGETEX", "key", "PXAT", absl::StrCat((kMemberExpiryBase + 300) * 1000),
+                   "FIELDS", "1", "f2"}),
+              RespElementsAre("v2"));
+  EXPECT_EQ(Run({"FIELDTTL", "key", "f2"}).GetInt(), 300);
+
+  // PERSIST removes the TTL and returns the value.
+  EXPECT_THAT(Run({"HGETEX", "key", "PERSIST", "FIELDS", "1", "f1"}), RespElementsAre("v1"));
+  EXPECT_EQ(Run({"FIELDTTL", "key", "f1"}).GetInt(), -1);
+  // PERSIST on a field without a TTL is a no-op.
+  EXPECT_THAT(Run({"HGETEX", "key", "PERSIST", "FIELDS", "1", "f3"}), RespElementsAre("v3"));
+  EXPECT_EQ(Run({"FIELDTTL", "key", "f3"}).GetInt(), -1);
+
+  // A past PXAT (or EX/PX 0) returns the current value, then deletes the field.
+  EXPECT_THAT(Run({"HGETEX", "key", "PXAT", "1", "FIELDS", "1", "f2"}), RespElementsAre("v2"));
+  EXPECT_THAT(Run({"HEXISTS", "key", "f2"}), IntArg(0));
+  EXPECT_THAT(Run({"HGETEX", "key", "EX", "0", "FIELDS", "1", "f3"}), RespElementsAre("v3"));
+  EXPECT_THAT(Run({"HEXISTS", "key", "f3"}), IntArg(0));
+
+  // Deleting the last field removes the key entirely.
+  EXPECT_THAT(Run({"HGETEX", "key", "EX", "0", "FIELDS", "1", "f1"}), RespElementsAre("v1"));
+  EXPECT_THAT(Run({"EXISTS", "key"}), IntArg(0));
+
+  // PERSIST on a listpack-encoded hash (no TTLs) just returns values.
+  EXPECT_EQ(CheckedInt({"HSET", "lp", "a", "1", "b", "2"}), 2);
+  EXPECT_THAT(Run({"HGETEX", "lp", "PERSIST", "FIELDS", "2", "a", "missing"}),
+              RespArray(ElementsAre("1", ArgType(RespExpr::NIL))));
+}
+
+TEST_F(HSetFamilyTest, HGetExErrors) {
+  EXPECT_EQ(CheckedInt({"HSET", "key", "f1", "v1"}), 1);
+
+  // At most one expiry option is allowed. A second option is rejected by the OneOf parser as a
+  // syntax error (Redis instead reports a misplaced-FIELDS error here — an accepted divergence).
+  EXPECT_THAT(Run({"HGETEX", "key", "EX", "10", "PX", "10000", "FIELDS", "1", "f1"}),
+              ErrArg("syntax error"));
+  EXPECT_THAT(Run({"HGETEX", "key", "PERSIST", "EX", "10", "FIELDS", "1", "f1"}),
+              ErrArg("syntax error"));
+  EXPECT_THAT(Run({"HGETEX", "key", "EX", "10", "EX", "20", "FIELDS", "1", "f1"}),
+              ErrArg("syntax error"));
+  // An unknown token where an option/FIELDS is expected still yields the FIELDS error (like Redis).
+  EXPECT_THAT(Run({"HGETEX", "key", "KEEPTTL", "FIELDS", "1", "f1"}),
+              ErrArg("Mandatory argument FIELDS"));
+
+  // Negative relative expiry and non-integer values are rejected.
+  EXPECT_THAT(Run({"HGETEX", "key", "EX", "-1", "FIELDS", "1", "f1"}),
+              ErrArg("invalid expire time"));
+  EXPECT_THAT(Run({"HGETEX", "key", "EX", "abc", "FIELDS", "1", "f1"}), ErrArg("not an integer"));
+
+  // Out-of-range / overflow-inducing expiries are rejected (not UB) for every unit.
+  EXPECT_THAT(Run({"HGETEX", "key", "PX", "9223372036854775807", "FIELDS", "1", "f1"}),
+              ErrArg("invalid expire time"));
+  EXPECT_THAT(Run({"HGETEX", "key", "PXAT", "9223372036854775807", "FIELDS", "1", "f1"}),
+              ErrArg("invalid expire time"));
+  EXPECT_THAT(Run({"HGETEX", "key", "EX", "9223372036854775807", "FIELDS", "1", "f1"}),
+              ErrArg("invalid expire time"));
+  EXPECT_THAT(Run({"HGETEX", "key", "EXAT", "9223372036854775807", "FIELDS", "1", "f1"}),
+              ErrArg("invalid expire time"));
+  // A far-future absolute timestamp beyond the hash-field TTL cap (kMaxExpireDeadlineSec, shared by
+  // HEXPIRE/HSETEX) is rejected even though it does not overflow.
+  EXPECT_THAT(Run({"HGETEX", "key", "EXAT", "9999999999", "FIELDS", "1", "f1"}),
+              ErrArg("invalid expire time"));
+
+  // Missing FIELDS keyword / numfields mismatch / numfields must be positive.
+  EXPECT_THAT(Run({"HGETEX", "key", "notfields", "1", "f1"}), ErrArg("Mandatory argument FIELDS"));
+  EXPECT_THAT(Run({"HGETEX", "key", "FIELDS", "2", "f1"}), ErrArg("numfields"));
+  // A non-positive or non-integer numfields all report the same Redis message.
+  EXPECT_THAT(Run({"HGETEX", "key", "FIELDS", "0", "f1"}),
+              ErrArg("Number of fields must be a positive integer"));
+  EXPECT_THAT(Run({"HGETEX", "key", "FIELDS", "-1", "f1"}),
+              ErrArg("Number of fields must be a positive integer"));
+  EXPECT_THAT(Run({"HGETEX", "key", "FIELDS", "abc", "f1"}),
+              ErrArg("Number of fields must be a positive integer"));
+  // An option placed after FIELDS is treated as a field name -> numfields mismatch.
+  EXPECT_THAT(Run({"HGETEX", "key", "FIELDS", "1", "f1", "EX", "10"}), ErrArg("numfields"));
+
+  EXPECT_THAT(Run({"HGETEX", "key", "FIELDS", "1"}),
+              ErrArg("The `numfields` parameter must match the number of arguments"));
+
+  // Wrong type.
+  Run({"SET", "strkey", "val"});
+  EXPECT_THAT(Run({"HGETEX", "strkey", "FIELDS", "1", "f"}), ErrArg("WRONGTYPE"));
 }
 
 TEST_F(HSetFamilyTest, RandomFieldAllExpired) {
@@ -755,7 +1105,7 @@ TEST_F(HSetFamilyTest, EmptyHashBug) {
 
 TEST_F(HSetFamilyTest, ScanAfterExpireSet) {
   EXPECT_THAT(Run({"HSET", "aset", "afield", "avalue"}), IntArg(1));
-  EXPECT_THAT(Run({"HEXPIRE", "aset", "1", "FIELDS", "1", "afield"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "aset", "1", "FIELDS", "1", "afield"}), RespElementsAre(IntArg(1)));
 
   const auto resp = Run({"HSCAN", "aset", "0", "count", "100"});
   EXPECT_THAT(resp, ArrLen(2));
@@ -770,7 +1120,7 @@ TEST_F(HSetFamilyTest, ScanAfterExpireSet) {
 TEST_F(HSetFamilyTest, KeyRemovedWhenEmpty) {
   auto test_cmd = [&](const std::function<void()>& f, const std::string_view tag) {
     EXPECT_THAT(Run({"HSET", "a", "afield", "avalue"}), IntArg(1));
-    EXPECT_THAT(Run({"HEXPIRE", "a", "1", "FIELDS", "1", "afield"}), IntArg(1));
+    EXPECT_THAT(Run({"HEXPIRE", "a", "1", "FIELDS", "1", "afield"}), RespElementsAre(IntArg(1)));
     AdvanceTime(1000);
 
     EXPECT_THAT(Run({"EXISTS", "a"}), IntArg(1));
@@ -782,7 +1132,11 @@ TEST_F(HSetFamilyTest, KeyRemovedWhenEmpty) {
   test_cmd([&] { EXPECT_THAT(Run({"HGETALL", "a"}), RespArray(ElementsAre())); }, "HGETALL");
   test_cmd([&] { EXPECT_THAT(Run({"HDEL", "a", "afield"}), IntArg(0)); }, "HDEL");
   test_cmd([&] { EXPECT_THAT(Run({"HSCAN", "a", "0"}).GetVec()[0], "0"); }, "HSCAN");
-  test_cmd([&] { EXPECT_THAT(Run({"HMGET", "a", "afield"}), ArgType(RespExpr::NIL)); }, "HMGET");
+  test_cmd(
+      [&] {
+        EXPECT_THAT(Run({"HMGET", "a", "afield"}), RespElementsAre(ArgType(RespExpr::NIL)));
+      },
+      "HMGET");
   test_cmd([&] { EXPECT_THAT(Run({"HEXISTS", "a", "afield"}), IntArg(0)); }, "HEXISTS");
   test_cmd([&] { EXPECT_THAT(Run({"HSTRLEN", "a", "afield"}), IntArg(0)); }, "HSTRLEN");
 }
@@ -838,7 +1192,7 @@ TEST_F(HSetFamilyTest, HExpireZeroTTL_DeletesKey) {
   auto cleanup = absl::MakeCleanup([kRdbFile] { std::ignore = remove(kRdbFile); });
   Run({"HSET", "zombie", "f", "v"});
   auto resp = Run({"HEXPIRE", "zombie", "0", "FIELDS", "1", "f"});
-  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(2)));
   EXPECT_EQ(0, CheckedInt({"EXISTS", "zombie"}));
   EXPECT_EQ(Run({"SAVE", "RDB", kRdbFile}), "OK");
 }

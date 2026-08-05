@@ -7,6 +7,8 @@
 
 namespace dfly {
 
+using facade::RespArray;
+using facade::RespElementsAre;
 using testing::ElementsAre;
 using testing::HasSubstr;
 
@@ -235,7 +237,7 @@ TEST_F(TopkFamilyTest, ReserveDimensionsExceedCaps) {
 TEST_F(TopkFamilyTest, AddSingleItem) {
   ReserveDefault("tk", 5);
   auto resp = AddItem("tk", "foo");
-  EXPECT_EQ(resp.type, RespExpr::NIL);
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
 }
 
 // Tests adding multiple items in a single TOPK.ADD call.
@@ -256,10 +258,10 @@ TEST_F(TopkFamilyTest, AddDuplicateItem) {
   AddItem("tk", "foo");
 
   auto resp = Run({"topk.count", "tk", "foo"});
-  EXPECT_GE(resp.GetInt(), 1);
+  EXPECT_GE(resp.GetVec()[0].GetInt().value_or(0), 1);
 
   resp = Run({"topk.query", "tk", "foo"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 // Tests that TOPK.ADD fails when called with no items (only key).
@@ -280,19 +282,19 @@ TEST_F(TopkFamilyTest, AddEviction) {
 
   // Adding a weak item should return NIL (no eviction, because it can't beat the min)
   auto resp = AddItem("tk", "weak");
-  EXPECT_EQ(resp.type, RespExpr::NIL);
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
 
   auto list = Run({"topk.list", "tk"});
   EXPECT_EQ(list.GetVec().size(), 2u);
 
   // The two heavy items should still be in the top-k
-  EXPECT_THAT(Run({"topk.query", "tk", "heavy1"}), IntArg(1));
-  EXPECT_THAT(Run({"topk.query", "tk", "heavy2"}), IntArg(1));
+  EXPECT_THAT(Run({"topk.query", "tk", "heavy1"}), RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"topk.query", "tk", "heavy2"}), RespElementsAre(IntArg(1)));
 
   // Now add a very strong item that should evict the weakest (heavy2)
   resp = IncrByItem("tk", "newcomer", 100000);
   // The return value should be a string (the evicted item), not NIL
-  EXPECT_EQ(resp.type, RespExpr::STRING);
+  EXPECT_EQ(resp.GetVec()[0].type, RespExpr::STRING);
 }
 
 // Tests adding items with special characters (spaces, emoji-like, binary-safe).
@@ -303,7 +305,7 @@ TEST_F(TopkFamilyTest, AddSpecialCharacters) {
   AddItem("tk", "");  // Empty string
 
   auto resp = Run({"topk.query", "tk", "hello world"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 // Tests adding a large number of items exceeding k to verify batch behavior.
@@ -327,10 +329,10 @@ TEST_F(TopkFamilyTest, AddLargeBatch) {
 TEST_F(TopkFamilyTest, IncrBySingleItem) {
   ReserveDefault("tk", 5);
   auto resp = IncrByItem("tk", "foo", 10);
-  EXPECT_EQ(resp.type, RespExpr::NIL);
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
 
   resp = Run({"topk.count", "tk", "foo"});
-  EXPECT_GE(resp.GetInt(), 1);
+  EXPECT_GE(resp.GetVec()[0].GetInt().value_or(0), 1);
 }
 
 // Tests incrementing multiple items in a single TOPK.INCRBY call.
@@ -349,21 +351,21 @@ TEST_F(TopkFamilyTest, IncrByAccumulates) {
 
   auto resp = Run({"topk.count", "tk", "foo"});
   // Probabilistic, but should be at least 1
-  EXPECT_GE(resp.GetInt(), 1);
+  EXPECT_GE(resp.GetVec()[0].GetInt().value_or(0), 1);
 }
 
 // Tests TOPK.INCRBY with increment=1 (minimum valid increment).
 TEST_F(TopkFamilyTest, IncrByMinIncrement) {
   ReserveDefault("tk", 5);
   auto resp = IncrByItem("tk", "foo", 1);
-  EXPECT_EQ(resp.type, RespExpr::NIL);
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
 }
 
 // Tests TOPK.INCRBY with increment=100000 (maximum valid increment per Redis docs).
 TEST_F(TopkFamilyTest, IncrByMaxIncrement) {
   ReserveDefault("tk", 5);
   auto resp = IncrByItem("tk", "foo", 100000);
-  EXPECT_EQ(resp.type, RespExpr::NIL);
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
 }
 
 // Tests that TOPK.INCRBY with increment=0 returns an error.
@@ -411,13 +413,13 @@ TEST_F(TopkFamilyTest, IncrByNoItems) {
 TEST_F(TopkFamilyTest, QueryPresentItem) {
   ReserveDefault("tk", 5);
   AddItem("tk", "foo");
-  EXPECT_THAT(Run({"topk.query", "tk", "foo"}), IntArg(1));
+  EXPECT_THAT(Run({"topk.query", "tk", "foo"}), RespElementsAre(IntArg(1)));
 }
 
 // Tests TOPK.QUERY for an item that has never been added.
 TEST_F(TopkFamilyTest, QueryAbsentItem) {
   ReserveDefault("tk", 5);
-  EXPECT_THAT(Run({"topk.query", "tk", "neveradded"}), IntArg(0));
+  EXPECT_THAT(Run({"topk.query", "tk", "neveradded"}), RespElementsAre(IntArg(0)));
 }
 
 // Tests TOPK.QUERY with multiple items, mixing present and absent.
@@ -432,7 +434,7 @@ TEST_F(TopkFamilyTest, QueryMultipleMixed) {
 // Tests TOPK.QUERY on a just-reserved (empty) top-k.
 TEST_F(TopkFamilyTest, QueryEmptyTopk) {
   ReserveDefault("tk", 5);
-  EXPECT_THAT(Run({"topk.query", "tk", "anything"}), IntArg(0));
+  EXPECT_THAT(Run({"topk.query", "tk", "anything"}), RespElementsAre(IntArg(0)));
 }
 
 // Tests that TOPK.QUERY with no items returns an error.
@@ -451,13 +453,13 @@ TEST_F(TopkFamilyTest, CountSingleItem) {
   ReserveDefault("tk", 5);
   IncrByItem("tk", "foo", 10);
   auto resp = Run({"topk.count", "tk", "foo"});
-  EXPECT_GE(resp.GetInt(), 1);
+  EXPECT_GE(resp.GetVec()[0].GetInt().value_or(0), 1);
 }
 
 // Tests that TOPK.COUNT for a never-added item returns 0.
 TEST_F(TopkFamilyTest, CountAbsentItem) {
   ReserveDefault("tk", 5);
-  EXPECT_THAT(Run({"topk.count", "tk", "neveradded"}), IntArg(0));
+  EXPECT_THAT(Run({"topk.count", "tk", "neveradded"}), RespElementsAre(IntArg(0)));
 }
 
 // Tests TOPK.COUNT with multiple items and verifies relative ordering.
@@ -475,7 +477,7 @@ TEST_F(TopkFamilyTest, CountMultipleRelativeOrder) {
 // Tests TOPK.COUNT on an empty top-k for any item.
 TEST_F(TopkFamilyTest, CountEmptyTopk) {
   ReserveDefault("tk", 5);
-  EXPECT_THAT(Run({"topk.count", "tk", "anything"}), IntArg(0));
+  EXPECT_THAT(Run({"topk.count", "tk", "anything"}), RespElementsAre(IntArg(0)));
 }
 
 // Tests that TOPK.COUNT returns the estimated frequency from the sketch
@@ -488,14 +490,14 @@ TEST_F(TopkFamilyTest, CountItemOutsideOfHeap) {
   IncrByItem("tk", "heavy", 1000);
   IncrByItem("tk", "victim", 5);
 
-  EXPECT_THAT(Run({"topk.query", "tk", "victim"}), IntArg(0));
+  EXPECT_THAT(Run({"topk.query", "tk", "victim"}), RespElementsAre(IntArg(0)));
 
   // Use EXPECT_GE because Count-Min Sketch guarantees count >= actual,
   // but hash collisions can technically cause overestimation.
   auto count_victim = Run({"topk.count", "tk", "victim"});
-  EXPECT_GE(count_victim.GetInt().value_or(0), 5);
+  EXPECT_GE(count_victim.GetVec()[0].GetInt().value_or(0), 5);
   auto count_heavy = Run({"topk.count", "tk", "heavy"});
-  EXPECT_GE(count_heavy.GetInt().value_or(0), 1000);
+  EXPECT_GE(count_heavy.GetVec()[0].GetInt().value_or(0), 1000);
 }
 
 // Tests that TOPK.COUNT with no items returns an error.
@@ -658,11 +660,11 @@ TEST_F(TopkFamilyTest, FrequencyAccuracy) {
 
   // The top-3 should still contain our heavy items
   auto resp = Run({"topk.query", "tk", "alpha"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
   resp = Run({"topk.query", "tk", "beta"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
   resp = Run({"topk.query", "tk", "gamma"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 // Tests that multiple independent TOPK keys do not interfere with each other.
@@ -673,11 +675,11 @@ TEST_F(TopkFamilyTest, MultipleKeysIsolation) {
   AddItem("tk1", "onlyin1");
   AddItem("tk2", "onlyin2");
 
-  EXPECT_THAT(Run({"topk.query", "tk1", "onlyin1"}), IntArg(1));
-  EXPECT_THAT(Run({"topk.query", "tk1", "onlyin2"}), IntArg(0));
+  EXPECT_THAT(Run({"topk.query", "tk1", "onlyin1"}), RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"topk.query", "tk1", "onlyin2"}), RespElementsAre(IntArg(0)));
 
-  EXPECT_THAT(Run({"topk.query", "tk2", "onlyin2"}), IntArg(1));
-  EXPECT_THAT(Run({"topk.query", "tk2", "onlyin1"}), IntArg(0));
+  EXPECT_THAT(Run({"topk.query", "tk2", "onlyin2"}), RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"topk.query", "tk2", "onlyin1"}), RespElementsAre(IntArg(0)));
 
   // Verify INFO returns correct per-key parameters
   auto info1 = Run({"topk.info", "tk1"});
@@ -697,18 +699,18 @@ TEST_F(TopkFamilyTest, AddAndIncrByInteraction) {
   // Add item via ADD (count +1)
   AddItem("tk", "foo");
   auto resp = Run({"topk.query", "tk", "foo"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   // Increment same item via INCRBY — item should still be in top-k
   IncrByItem("tk", "foo", 100);
   resp = Run({"topk.query", "tk", "foo"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   // Add a different item via ADD, then boost via INCRBY
   AddItem("tk", "bar");
   IncrByItem("tk", "bar", 50);
   resp = Run({"topk.query", "tk", "bar"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 // Tests behavior under high contention: many distinct items with the same count

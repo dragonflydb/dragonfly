@@ -38,3 +38,8 @@ should repeat 7:th day every month at 9:25
 # Worker pause/resume race: worker.resume() is not awaited, rapid 10ms pause/resume
 # cycles can exhaust the 8000ms timeout under CI load.
 should pause and resume worker without error
+
+# QueueEvents.run() race: close() sets this.closing and calls disconnect(), but the
+# XREAD BLOCK error sometimes arrives before checkConnectionError sees this.closing,
+# causing run() to reject instead of resolve.
+when run method is called when queueEvent is running

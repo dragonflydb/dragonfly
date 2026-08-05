@@ -94,14 +94,14 @@ class CommandId {
   int8_t first_key_;
   int8_t last_key_;
 
+  // Whether the command can only be used by admin connections.
+  bool restricted_ = false;
+
   // Acl categories
   uint32_t acl_categories_;
   // Acl commands indices
   size_t family_;
   uint64_t bit_index_;
-
-  // Whether the command can only be used by admin connections.
-  bool restricted_ = false;
 };
 
 }  // namespace facade

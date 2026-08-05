@@ -7,11 +7,11 @@ set_source_files_properties(${gen_dir}/parser.cc PROPERTIES
                             COMPILE_FLAGS "-Wno-maybe-uninitialized")
 add_library(dfly_search_core ast_expr.cc base.cc hnsw_index.cc query_driver.cc search.cc
             indices.cc sort_indices.cc vector_utils.cc compressed_sorted_set.cc block_list.cc
-            renewable_quota.cc range_tree.cc synonyms.cc scoring.cc
+            renewable_quota.cc range_tree.cc synonyms.cc scoring.cc stemmer.cc
             ${gen_dir}/parser.cc ${gen_dir}/lexer.cc)
 
 target_link_libraries(dfly_search_core dfly_page_usage base fibers2 redis_lib absl::strings
-  TRDP::reflex TRDP::uni-algo TRDP::hnswlib Boost::headers)
+  TRDP::reflex TRDP::uni-algo TRDP::hnswlib TRDP::stemmer Boost::headers)
 
 if(WITH_SIMSIMD)
   target_link_libraries(dfly_search_core TRDP::simsimd)
@@ -23,6 +23,7 @@ if(WITH_SIMSIMD)
 endif()
 
 helio_cxx_test(compressed_sorted_set_test dfly_search_core LABELS DFLY)
+helio_cxx_test(stemmer_test dfly_search_core LABELS DFLY)
 helio_cxx_test(block_list_test dfly_search_core LABELS DFLY)
 helio_cxx_test(range_tree_test dfly_search_core absl::random_random LABELS DFLY)
 helio_cxx_test(rax_tree_test redis_test_lib LABELS DFLY)

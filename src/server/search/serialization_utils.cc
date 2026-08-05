@@ -89,8 +89,18 @@ void SearchSerializer::SerializeGlobalHnswIndices() const {
       // Acquire a read lock to ensure a consistent snapshot of the graph.
       auto read_lock = index->GetReadLock();
 
-      // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, elements_number,
+      // Skip empty indices entirely — world_.enterpoint_node_ is -1 for an empty graph
+      // (wraps to UINT32_MAX as tableint); emitting that as the inline entry-point would
+      // ship a garbage sentinel. The replica's RebuildAllIndices will see no graph nodes
+      // and rebuild from the (also empty) keyspace, which is the right outcome.
+      size_t node_count = index->GetNodeCount();
+      if (node_count == 0) {
+        continue;
+      }
+
+      // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, enterpoint_node, elements_number,
       //          then for each node: binary encoded entry via SaveHNSWEntry]
+      // The entry-point ships with the node data so loaders need no separate AUX field.
       if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_VECTOR_INDEX); ec) {
         continue;
       }
@@ -98,7 +108,11 @@ void SearchSerializer::SerializeGlobalHnswIndices() const {
         continue;
       }
 
-      size_t node_count = index->GetNodeCount();
+      auto metadata = index->GetMetadata();
+      if (auto ec = serializer_->SaveLen(metadata.enterpoint_node); ec) {
+        continue;
+      }
+
       if (auto ec = serializer_->SaveLen(node_count); ec) {
         continue;
       }

@@ -16,6 +16,9 @@ QueryDriver::~QueryDriver() {
 void QueryDriver::ResetScanner() {
   scanner_ = std::make_unique<Scanner>();
   scanner_->SetParams(params_);
+  // Clear any AST left over from a previous parse: on a reused driver a failed parse never calls
+  // Set(), so Take() would otherwise return the stale result of the prior query.
+  expr_ = AstExpr{};
 }
 
 void QueryDriver::Error(const Parser::location_type& loc, std::string_view msg) {

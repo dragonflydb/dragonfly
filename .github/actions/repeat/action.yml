@@ -52,15 +52,14 @@ runs:
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
-        if [[ "${{ inputs.epoll }}" == "epoll" ]]; then
+        FORCE_EPOLL=""
+        if ${{ contains(fromJSON('["epoll","yes","true"]'), inputs.epoll) }}; then
           FORCE_EPOLL="--df force_epoll=true"
-        else
-          FORCE_EPOLL=""
         fi
-        if [[ $"{{ inputs.vmodule_expression }}" != "" ]]; then
+
+        VMOD=""
+        if [[ -n "${{ inputs.vmodule_expression }}" ]]; then
           VMOD="--df vmodule=${{ inputs.vmodule_expression }}"
-        else
-          VMOD=""
         fi
         echo Running command: timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --drop-data-after-each-test ${FORCE_EPOLL} ${VMOD} --color=yes --json-report --json-report-file=report.json --log-cli-level=DEBUG --count=${{ inputs.count }}
         timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --drop-data-after-each-test ${FORCE_EPOLL} ${VMOD} --color=yes --json-report --json-report-file=report.json --log-cli-level=DEBUG --count=${{ inputs.count }} || code=$?

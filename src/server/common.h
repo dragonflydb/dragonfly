@@ -21,6 +21,10 @@ class GlobMatcher;
 constexpr int64_t kMaxExpireDeadlineSec = (1u << 28) - 1;  // 8.5 years
 constexpr int64_t kMaxExpireDeadlineMs = kMaxExpireDeadlineSec * 1000;
 
+// Largest size a single string value may occupy. Enforced by SETRANGE and the
+// bit commands that grow a string (SETBIT, BITFIELD SET/INCRBY).
+constexpr uint32_t kMaxStrLen = 1 << 28;
+
 using facade::ArgS;
 using facade::CmdArgList;
 using facade::CmdArgVec;
@@ -73,7 +77,7 @@ struct ScanOpts {
   ScanOpts(ScanOpts&& other) = default;
 
   bool Matches(std::string_view val_name) const;
-  static OpResult<ScanOpts> TryFrom(CmdArgList args, bool allow_novalues = false);
+  static OpResult<ScanOpts> TryFrom(const facade::ParsedArgs& args, bool allow_novalues = false);
 
   std::unique_ptr<GlobMatcher> matcher;
   size_t limit = 10;
@@ -89,6 +93,7 @@ struct ScanOpts {
   std::optional<Mask> mask;
   size_t min_malloc_size = 0;
   bool novalues = false;
+  bool allow_novalues = false;
 };
 
 // I use relative time from Feb 1, 2023 in seconds.

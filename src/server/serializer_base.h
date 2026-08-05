@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "io/io.h"
+#include "server/db_slice.h"
 #include "server/synchronization.h"
 #include "server/table.h"
 #include "util/fibers/future.h"
@@ -19,6 +20,40 @@ namespace dfly {
 
 class ExecutionState;
 struct TestDriver;
+
+namespace detail {
+
+#ifdef __clang__
+#define NO_THREAD_SAFETY_ANALYSIS __attribute__((no_thread_safety_analysis))
+#else
+#define NO_THREAD_SAFETY_ANALYSIS
+#endif
+
+template <typename T> struct OptionalMutex {
+  explicit OptionalMutex(bool active) : active_{active} {
+  }
+
+  void lock() NO_THREAD_SAFETY_ANALYSIS {
+    if (active_)
+      mutex_.lock();
+  }
+
+  void unlock() NO_THREAD_SAFETY_ANALYSIS {
+    if (active_)
+      mutex_.unlock();
+  }
+
+  bool is_locked() const {
+    return active_ && mutex_.is_locked();
+  }
+
+  T mutex_;
+  const bool active_;
+};
+
+#undef NO_THREAD_SAFETY_ANALYSIS
+
+}  // namespace detail
 
 // Opaque identity for a physical DashTable bucket — its memory address.
 // Unique across all databases/segments for the lifetime of a serialization.
@@ -34,11 +69,18 @@ struct BucketDependencies {
 
   // Wait for all bucket dependencies to resolve
   void Wait(BucketIdentity bucket) const;
-  bool DEBUG_IsBusy(BucketIdentity) const;
+  // Wait for no dependencies to exist
+  void WaitEmpty() const;
+  bool HasAny() const {
+    return !deps_.empty();
+  }
 
  private:
   using SharedLatch = std::shared_ptr<LocalLatch>;
   absl::flat_hash_map<BucketIdentity, SharedLatch> deps_;
+
+  // Triggered when all dependencies are resolved
+  mutable util::fb2::CondVarAny empty_q_;
 };
 
 struct TieredDelayedEntry {
@@ -75,11 +117,47 @@ struct DelayedEntryHandler {
   std::multimap<BucketIdentity, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 };
 
+// Serialization pipeline overview:
+//
+// ┌────────────────────┐     ┌───────────────────┐
+// │  Traversal fiber   │     │ OnChange          │
+// │ (IterateBucketsFb) │     │ (db_slice change) │
+// └────────┬───────────┘     └────────┬──────────┘
+//          │                          │
+//          ▼                          ▼
+// ┌───────────────────────────────────────────────┐
+// │           SerializerBase::ProcessBucket       │  (serializer_base.cc)
+// │  Stamps bucket version, manages dependencies  │
+// └────────────────────┬──────────────────────────┘
+//                      │
+//                      ▼
+// ┌───────────────────────────────────────────────┐
+// │        SerializeBucketLocked (virtual)        │  (snapshot.cc / streamer.cc)
+// │  Iterates bucket entries, serializes each one │
+// └────────────────────┬──────────────────────────┘
+//                      │
+//          ┌───────────┴───────────┐
+//          ▼                       ▼
+// ┌─────────────────┐   ┌──────────────────────┐
+// │  Inline entry   │   │  Tiered (offloaded)  │
+// │  (SaveEntry /   │   │  EnqueueOffloaded →  │
+// │   CmdSerializer)│   │  ProcessDelayedEntry │
+// └────────┬────────┘   └──────────┬───────────┘
+//          │                       │
+//          ▼                       ▼
+// ┌───────────────────────────────────────────────┐
+// │     Output sink (consumer / socket write)     │
+// └───────────────────────────────────────────────┘
+//
+// See also: docs/shard-serialization.md for locking & ordering details.
+
 // Base class for operations relying on snapshotting and implementing SerializeBucket.
 // Progress should be driven externally by calling ProcessBucket().
 // Additionally, db_slice change listeners can be registered that invoke SerializeBucket
 // before any modification are performed to ensure point-in-time isolation.
-class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
+class SerializerBase : public BucketDependencies,
+                       public DelayedEntryHandler,
+                       public DbSlice::ChangeConsumerInterface {
  public:
   struct Stats {
     uint64_t keys_serialized = 0;              // total number of keys serialized
@@ -93,7 +171,8 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   virtual ~SerializerBase();
 
   // Register db_slice change listener and save snapshot version.
-  void RegisterChangeListener();
+  // Pass whether this is replication (true) or snapshotting (false)
+  void RegisterChangeListener(bool replication);
 
   // Unregisters the callback.  Safe to call if already unregistered.
   void UnregisterChangeListener();
@@ -110,32 +189,41 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.
-  // Currently runs with big_value_mu_ held.
   virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) = 0;
 
-  // Called when an existing bucket is about to be mutated. Calls ProcessBucket.
-  void OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it);
+  // Serialize single entry with expire/flags
+  virtual void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                                    time_t expire, uint32_t mc_flags) = 0;
 
-  // Called when a new key is about to be inserted. Calls ProcessBucket for the buckets.
-  void OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& set);
+  // Serialize entry while automatically handling delayed/cooled values, calls SerializeEntryLocked
+  void SerializeEntry(BucketIdentity bucket, DbIndex db_index, const PrimeKey& pk,
+                      const PrimeValue& pv);
 
-  // --- Shared members (to be moved from subclasses in later PRs) ---
+  // Calls SerializeEntry internally under stream_mu_
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
+
+  // Called before a set of buckets is mutated.
+  void OnChange(DbIndex db_index, const ChangeReq& req) override;
+
+  bool IsAnyBucketBlocked() const override {
+    return BucketDependencies::HasAny();
+  }
+
+  void WaitForNoBucketBlocked() const override;
+
+  // --- Shared members ---
 
   DbSlice* const db_slice_;
   ExecutionState* const base_cntx_;
 
   DbTableArray db_array_;
 
-  uint64_t snapshot_version_ = 0;
   Stats stats_;
 
   // Guards output stream (serializer) to not be used from multiple fibers
   // as buffered changes can be flushed amid writing a value (logical stream)
-  ThreadLocalMutex stream_mu_;
-
- private:
-  uint64_t change_cb_id_ = 0;
+  detail::OptionalMutex<ThreadLocalMutex> stream_mu_;
 };
 
 }  // namespace dfly

@@ -4,14 +4,16 @@
 
 #include "server/tiering/decoders.h"
 
+#include <cstring>
+
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/qlist.h"
-#include "server/tiering/serialized_map.h"
 
 extern "C" {
 #include "redis/redis_aux.h"  // for OBJ_HASH
+#include "redis/zmalloc.h"
 }
 
 namespace dfly::tiering {
@@ -68,29 +70,52 @@ std::string* StringDecoder::Write() {
   return value_.GetMutable();
 }
 
-std::unique_ptr<Decoder> SerializedMapDecoder::Clone() const {
-  return std::make_unique<SerializedMapDecoder>();
+ListpackMapDecoder::~ListpackMapDecoder() {
+  if (owned_lw_) {
+    zfree(owned_lw_->GetPointer());
+  }
 }
 
-void SerializedMapDecoder::Initialize(std::string_view slice) {
-  map_ = std::make_unique<SerializedMap>(slice);
+std::unique_ptr<Decoder> ListpackMapDecoder::Clone() const {
+  return std::make_unique<ListpackMapDecoder>();
 }
 
-Decoder::UploadMetrics SerializedMapDecoder::GetMetrics() const {
-  return UploadMetrics{.modified = false,
-                       .estimated_mem_usage = map_->DataBytes() + map_->size() * 2 * 8};
+void ListpackMapDecoder::Initialize(std::string_view slice) {
+  slice_ = slice;
 }
 
-void SerializedMapDecoder::Upload(void* obj) {
-  CompactObj* compact_obj = reinterpret_cast<CompactObj*>(obj);
-  auto lw = detail::ListpackWrap::WithCapacity(GetMetrics().estimated_mem_usage);
-  for (const auto& [key, value] : *map_)
-    lw.Insert(key, value, true);
-  compact_obj->InitRobj(OBJ_HASH, kEncodingListPack, lw.GetPointer());
+Decoder::UploadMetrics ListpackMapDecoder::GetMetrics() const {
+  size_t bytes = owned_lw_ ? owned_lw_->UsedBytes() : slice_.size();
+  return UploadMetrics{
+      .modified = owned_lw_ != nullptr,
+      .estimated_mem_usage = bytes,
+  };
 }
 
-SerializedMap* SerializedMapDecoder::Get() const {
-  return map_.get();
+void ListpackMapDecoder::Upload(void* robj) {
+  auto* obj = static_cast<CompactObj*>(robj);
+
+  if (!owned_lw_)
+    GetMutable();  // Need an owned copy to hand off
+
+  obj->InitRobj(OBJ_HASH, kEncodingListPack, owned_lw_->GetPointer());
+  owned_lw_.reset();
+}
+
+detail::ListpackWrap ListpackMapDecoder::Get() const {
+  if (owned_lw_)
+    return *owned_lw_;
+  return detail::ListpackWrap::Readonly(
+      const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(slice_.data())));
+}
+
+detail::ListpackWrap* ListpackMapDecoder::GetMutable() {
+  if (!owned_lw_) {
+    uint8_t* lp = (uint8_t*)zmalloc(slice_.size());
+    memcpy(lp, slice_.data(), slice_.size());
+    owned_lw_ = std::make_unique<detail::ListpackWrap>(lp);
+  }
+  return owned_lw_.get();
 }
 
 ListNodeDecoder::ListNodeDecoder(QList* ql) : ql_(ql) {

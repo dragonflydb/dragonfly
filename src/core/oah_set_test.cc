@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -13,9 +13,10 @@
 #include <unordered_set>
 
 #include "base/gtest.h"
+#include "base/logging.h"
+#include "core/detail/bitpacking.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
-#include "glog/logging.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -25,15 +26,24 @@ namespace dfly {
 
 using namespace std;
 
+// Encodes a logical key the way OAHSet does, then serializes it into an entry blob.
+static uint64_t CreateEntry(string_view key, uint32_t expiry = UINT32_MAX) {
+  const ASCIIStr ek(key);
+  return OAHEntry::Create(ek.content(), ek.len(), expiry);
+}
+
+// Decodes an entry's logical key (production does this at the table level, via OAHSet::DecodeKey).
+static string KeyOf(OAHEntry e) {
+  const oah::key::Decoded key = OAHSet::DecodeKey(e);
+  return string{key.view()};
+}
+
 class OAHSetTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
     auto* tlh = mi_heap_get_backing();
     init_zmalloc_threadlocal(tlh);
     InitTLStatelessAllocMR(PMR_NS::get_default_resource());
-  }
-
-  static void TearDownTestSuite() {
   }
 
   void SetUp() override {
@@ -64,45 +74,334 @@ static string random_string(mt19937& rand, unsigned len) {
   return ret;
 }
 
-TEST_F(OAHSetTest, PtrVectorTest) {
-  PtrVector<int> vp(PtrVector<int>::FromLogSize(3));
-  EXPECT_EQ(vp.Size(), 8);
-  EXPECT_EQ(vp.LogSize(), 3);
-  size_t i = 0;
-  for (; i < vp.Size(); ++i) {
-    EXPECT_EQ(vp[i], 0);
-    vp[i] = i + 1;
-  }
-  vp.ResizeLog(4);
+TEST(OAHKeyCodec, HeaderContentMatchesDecode) {
+  auto check = [](const string& key) {
+    const ASCIIStr ek(key);
+    const uint32_t hdr = oah::size::FieldSize(ek.len());
+    vector<char> blob(hdr + ek.content().size() + 1, 0);
+    const uint8_t encoded_bit = ek.encoded() * oah::key::kEncodedBit;
+    const uint32_t fs = oah::key::WriteHeader(encoded_bit, ek.len(), blob.data());
+    EXPECT_EQ(fs, hdr) << key.size();
+    memcpy(blob.data() + fs, ek.content().data(), ek.content().size());
 
-  for (; i < vp.Size(); ++i) {
-    EXPECT_EQ(vp[i], 0);
-    vp[i] = i + 1;
+    const oah::key::Header h = oah::key::ReadHeader(blob.data());
+    EXPECT_EQ(h.field_size, fs) << key.size();
+    EXPECT_EQ(h.len, key.size()) << key.size();
+    EXPECT_EQ(h.encoded, ASCIIStr(key).encoded()) << key.size();
+    EXPECT_EQ(h.content_size, ek.content().size()) << key.size();
+
+    const char* content = blob.data() + h.field_size;
+    const oah::key::Stored stored{h, content};
+    const oah::key::Decoded decoded = oah::key::Decode(stored);
+    EXPECT_EQ(decoded.view(), key) << key.size();
+    if (!h.encoded) {
+      EXPECT_EQ(decoded.data(), content) << key.size();
+    }
+
+    EXPECT_TRUE(oah::key::Matches(h, content, ek.content(), ek.len())) << key.size();
+
+    const ASCIIStr other(key + "Z");
+    EXPECT_FALSE(oah::key::Matches(h, content, other.content(), other.len())) << key.size();
+  };
+  for (uint32_t len : {0u, 1u, 7u, 8u, 63u, 64u, 127u, 128u, 500u})
+    check(string(len, 'a'));
+
+  string non_ascii = "abc";
+  non_ascii.push_back(static_cast<char>(0x80));
+  check(non_ascii);
+}
+
+TEST_F(OAHSetTest, ShrinkUsesOverloadAwareTarget) {
+  for (unsigned i = 0; i < 4; ++i) {
+    EXPECT_TRUE(ss_->Add(absl::StrCat("member", i)));
   }
-  EXPECT_EQ(vp.Size(), 16);
-  EXPECT_EQ(vp.LogSize(), 4);
-  for (size_t i = 0; i < vp.Size(); ++i) {
-    EXPECT_EQ(vp[i], i + 1);
+  ss_->Reserve(128 * OAHSet::kOverloadFactor);
+  EXPECT_EQ(ss_->BucketCount(), 128);
+
+  // The requested target is above OAH's minimum.
+  ss_->Shrink(8);
+  EXPECT_EQ(ss_->BucketCount(), 8u);
+}
+
+TEST_F(OAHSetTest, ShrinkToMinimumBuckets) {
+  ss_->Reserve(1);
+  EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
+
+  vector<string> keys = {"first", "second"};
+  for (const string& key : keys)
+    EXPECT_TRUE(ss_->Add(key));
+
+  ss_->Reserve(128 * OAHSet::kOverloadFactor);
+  ss_->Shrink(1);
+  EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
+  ss_->Reserve(16);  // The physical probe slots already satisfy this reservation.
+  EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
+
+  const auto scan_all = [this] {
+    unordered_set<string> result;
+    uint32_t cursor = 0;
+    do {
+      cursor = ss_->Scan(cursor, [&](string_view key) { result.emplace(key); });
+    } while (cursor != 0);
+    return result;
+  };
+
+  EXPECT_TRUE(ss_->Add("expired", 1));
+  ss_->set_time(1);
+  EXPECT_EQ(scan_all(), unordered_set<string>(keys.begin(), keys.end()));
+
+  for (size_t i = keys.size(); i < 34; ++i) {
+    keys.push_back(absl::StrCat("member", i));
+    EXPECT_TRUE(ss_->Add(keys.back()));
+  }
+
+  EXPECT_EQ(scan_all(), unordered_set<string>(keys.begin(), keys.end()));
+
+  keys.push_back("member34");
+  EXPECT_TRUE(ss_->Add(keys.back()));  // Grows from the compact minimum representation.
+  EXPECT_EQ(ss_->BucketCount(), 32u);
+  for (const string& key : keys)
+    EXPECT_TRUE(ss_->Contains(key));
+}
+
+TEST_F(OAHSetTest, AsciiEncoding) {
+  string ascii_key(80, 'a');                // 80 ascii chars -> 70 packed bytes
+  string boundary(128, 'b');                // largest ascii-encodable key
+  string too_long(129, 'c');                // one over -> raw
+  string non_ascii(80, 'd');                //
+  non_ascii[40] = static_cast<char>(0xC3);  // a non-ascii byte -> raw
+
+  for (string* k : {&ascii_key, &boundary, &too_long, &non_ascii})
+    EXPECT_TRUE(ss_->Add(*k)) << k->size();
+
+  // Duplicate detection runs in the encoded state.
+  EXPECT_FALSE(ss_->Add(ascii_key));
+  EXPECT_FALSE(ss_->Add(boundary));
+
+  // Encodable keys are packed; the others stay raw.
+  auto it = ss_->Find(ascii_key);
+  ASSERT_NE(it, ss_->end());
+  EXPECT_EQ(it->KeyContent().size(), detail::binpacked_len(80));
+  EXPECT_LT(it->KeyContent().size(), ascii_key.size());
+  EXPECT_EQ(ss_->Find(boundary)->KeyContent().size(), detail::binpacked_len(128));
+  EXPECT_EQ(ss_->Find(too_long)->KeyContent().size(), too_long.size());
+  EXPECT_EQ(ss_->Find(non_ascii)->KeyContent().size(), non_ascii.size());
+
+  // Lookups distinguish keys that would pack to the same byte count but differ in length.
+  EXPECT_FALSE(ss_->Contains(string(79, 'a')));
+  EXPECT_FALSE(ss_->Contains(string(81, 'a')));
+
+  // Iteration reconstructs the logical keys.
+  unordered_set<string> seen;
+  for (auto e = ss_->begin(); e != ss_->end(); ++e)
+    seen.insert(string{KeyOf(*e)});
+  for (string* k : {&ascii_key, &boundary, &too_long, &non_ascii})
+    EXPECT_TRUE(seen.count(*k)) << k->size();
+
+  for (string* k : {&ascii_key, &boundary, &too_long, &non_ascii}) {
+    EXPECT_TRUE(ss_->Erase(*k)) << k->size();
+    EXPECT_FALSE(ss_->Contains(*k)) << k->size();
   }
 }
 
-TEST_F(OAHSetTest, OAHEntryTest) {
-  OAHEntry test("0123456789", 2);
+TEST_F(OAHSetTest, DecodedKeyLifetimeAndRawZeroCopy) {
+  const string first(80, 'a');
+  const string second(80, 'b');
+  const string raw(129, 'c');  // exceeds the ASCII codec limit, so it stays raw
+  ASSERT_TRUE(ss_->Add(first));
+  ASSERT_TRUE(ss_->Add(second));
+  ASSERT_TRUE(ss_->Add(raw));
 
-  EXPECT_EQ(test.Key(), "0123456789"sv);
+  auto first_it = ss_->Find(first);
+  auto second_it = ss_->Find(second);
+  auto raw_it = ss_->Find(raw);
+  ASSERT_NE(first_it, ss_->end());
+  ASSERT_NE(second_it, ss_->end());
+  ASSERT_NE(raw_it, ss_->end());
+
+  // Each encoded handle owns its decoded bytes, so decoding another key cannot overwrite it.
+  auto first_key = Key(first_it);
+  const string_view first_view = first_key.view();
+  auto second_key = Key(second_it);
+  EXPECT_EQ(first_view, first);
+  EXPECT_EQ(second_key.view(), second);
+  const uintptr_t first_addr = reinterpret_cast<uintptr_t>(&first_key);
+  const uintptr_t first_data = reinterpret_cast<uintptr_t>(first_key.data());
+  EXPECT_GE(first_data, first_addr);
+  EXPECT_LT(first_data, first_addr + sizeof(first_key));
+
+  // Raw keys remain a direct view into the entry instead of being copied into scratch storage.
+  auto raw_key = Key(raw_it);
+  EXPECT_EQ(raw_key.view(), raw);
+  EXPECT_EQ(raw_key.data(), raw_it->KeyContent().data());
+
+  // Scan views are valid in the callback; callers copy them when retaining results. Raw keys stay
+  // entry-backed during the callback.
+  unordered_set<string> scanned;
+  uint32_t cursor = 0;
+  do {
+    cursor = ss_->Scan(cursor, [&](string_view key) {
+      scanned.emplace(key);
+      if (key == raw) {
+        EXPECT_EQ(key.data(), raw_it->KeyContent().data());
+      }
+    });
+  } while (cursor != 0);
+  EXPECT_EQ(scanned, (unordered_set<string>{first, second, raw}));
+
+  // Encoded handles remain self-contained when copied and outlive the entry storage.
+  vector<oah::key::Decoded> retained_encoded{first_key, second_key};
+  ss_->Clear();
+  EXPECT_EQ(first_key.view(), first);
+  EXPECT_EQ(second_key.view(), second);
+  unordered_set<string> retained_views;
+  for (const auto& key : retained_encoded)
+    retained_views.emplace(key.view());
+  EXPECT_EQ(retained_views, (unordered_set<string>{first, second}));
+}
+
+TEST_F(OAHSetTest, PtrVectorLinearThenDouble) {
+  uint64_t slot = PtrVector<int>::Create(2);
+  PtrVector<int> vp(slot);
+  EXPECT_EQ(vp.Size(), 2u);
+  vp[0] = 1;
+  vp[1] = 2;
+
+  // Linear growth (+2 elements) up to and including kLinearMax (128); sizes stay even.
+  for (size_t expected = 4; expected <= 128; expected += 2) {
+    const size_t prev = vp.Size();
+    vp.Grow();
+    EXPECT_EQ(vp.Size(), expected);
+    EXPECT_EQ(vp[0], 1);     // existing elements preserved across reallocation
+    EXPECT_EQ(vp[prev], 0);  // newly added slots are default-constructed
+  }
+  EXPECT_EQ(vp.Size(), 128u);
+
+  // At/above kLinearMax the vector switches to doubling (log-mode encoding).
+  vp.Grow();
+  EXPECT_EQ(vp.Size(), 256u);
+  vp.Grow();
+  EXPECT_EQ(vp.Size(), 512u);
+  EXPECT_EQ(vp[0], 1);
+  EXPECT_EQ(vp[1], 2);
+
+  PtrVector<int>::Destroy(vp.Release());
+}
+
+// Counts live instances so a test can assert that every slot's destructor runs.
+struct LiveCounter {
+  static inline int live = 0;
+  uint64_t v = 0;
+
+  LiveCounter() {
+    ++live;
+  }
+  LiveCounter(LiveCounter&& o) noexcept : v(o.v) {
+    o.v = 0;
+    ++live;
+  }
+  LiveCounter& operator=(LiveCounter&& o) noexcept {
+    v = o.v;
+    o.v = 0;
+    return *this;
+  }
+  ~LiveCounter() {
+    --live;
+  }
+  explicit operator bool() const {
+    return v != 0;
+  }
+};
+
+TEST_F(OAHSetTest, PtrVectorDestroysAllElements) {
+  // Regression: Destroy() must run ~T() on every placement-new'd slot, not just the
+  // occupied (truthy) ones. Otherwise non-trivially-destructible elements -- including
+  // moved-from ones -- are leaked when the backing storage is freed.
+  LiveCounter::live = 0;
+  uint64_t slot = PtrVector<LiveCounter>::Create(4);
+  PtrVector<LiveCounter> vec(slot);
+  ASSERT_EQ(LiveCounter::live, 4);  // all four slots are default-constructed
+
+  vec[0].v = 7;                     // occupy one slot; the other three stay "empty"
+  vec.Grow();                       // reallocates: moves survivors, frees the old buffer
+  ASSERT_EQ(LiveCounter::live, 6);  // linear grow 4 -> 6, old buffer fully destroyed
+
+  PtrVector<LiveCounter>::Destroy(vec.Release());
+  EXPECT_EQ(LiveCounter::live, 0);  // every slot, empty or moved-from, was destroyed
+}
+
+TEST_F(OAHSetTest, OAHEntryTest) {
+  uint64_t bits = CreateEntry("0123456789", 2);
+  OAHEntry test(bits);
+
+  EXPECT_EQ(KeyOf(test), "0123456789"sv);
   EXPECT_EQ(test.GetExpiry(), 2);
 
-  OAHEntry first("123456789");
+  OAHEntry::Destroy(test.Release());
+}
 
-  EXPECT_EQ(test.Insert(std::move(first)), 16);
+TEST_F(OAHSetTest, KeySizeEncoding) {
+  // Round-trips the size encoding across its field-width boundaries -- inline (< 64B), 1 extra
+  // byte (< 8KB) and 3 extra bytes (larger) -- both at the OAHEntry level (with/without expiry)
+  // and through the full Add/Find/Erase path, whose duplicate detection relies on Key() decoding.
+  vector<string> keys;
+  for (uint32_t sz : {0u, 63u, 64u, 8191u, 8192u, 100000u}) {
+    string key(sz, 'x');
+    if (sz)
+      key[sz - 1] = 'z';  // make the tail byte observable
+    keys.push_back(key);
 
-  EXPECT_EQ(test.Insert(OAHEntry("23456789")), 16);
+    for (uint32_t expiry : {UINT32_MAX, 7u}) {
+      uint64_t bits = CreateEntry(key, expiry);
+      OAHEntry e(bits);
+      EXPECT_EQ(KeyOf(e), key);
+      EXPECT_EQ(e.HasExpiry(), expiry != UINT32_MAX);
+      if (expiry != UINT32_MAX) {
+        EXPECT_EQ(e.GetExpiry(), expiry);
+      }
+      OAHEntry::Destroy(e.Release());
+    }
+  }
 
-  EXPECT_TRUE(test.Remove(0));
-  EXPECT_FALSE(test.Remove(0));
+  for (const auto& k : keys)
+    EXPECT_TRUE(ss_->Add(k));
+  for (const auto& k : keys)
+    EXPECT_FALSE(ss_->Add(k));  // duplicate detection relies on Key() decoding the size
+  for (const auto& k : keys)
+    EXPECT_TRUE(ss_->Contains(k));
+  EXPECT_EQ(ss_->UpperBoundSize(), keys.size());
+  for (const auto& k : keys)
+    EXPECT_TRUE(ss_->Erase(k));
+  EXPECT_EQ(ss_->UpperBoundSize(), 0u);
+}
 
-  EXPECT_EQ(test.Remove(2).Key(), "23456789");
-  EXPECT_EQ(test.Pop().Key(), "123456789");
+TEST_F(OAHSetTest, OAHPtrInsertRemove) {
+  // OAHPtr is a non-owning view over a uint64_t slot; the test owns the slot and frees
+  // the leftover collision array explicitly at the end.
+  uint64_t slot = 0;
+  OAHPtr<OAHEntry> test{slot};
+  test.Assign(CreateEntry("0123456789", 2));
+
+  EXPECT_EQ(KeyOf(test[0]), "0123456789"sv);
+  EXPECT_EQ(test[0].GetExpiry(), 2);
+
+  EXPECT_EQ(test.Insert(CreateEntry("123456789")),
+            16);                                        // promote to a 2-element vector
+  EXPECT_EQ(test.Insert(CreateEntry("23456789")), 16);  // linear grow 2 -> 4
+
+  uint64_t removed0 = test.Remove(0);
+  EXPECT_TRUE(removed0);
+  OAHEntry::Destroy(removed0);
+  EXPECT_FALSE(test.Remove(0));  // cell already empty -> 0 bits
+
+  uint64_t removed2 = test.Remove(2);
+  uint64_t removed1 = test.Remove(1);
+  EXPECT_EQ(KeyOf(OAHEntry(removed2)), "23456789");
+  EXPECT_EQ(KeyOf(OAHEntry(removed1)), "123456789");
+  OAHEntry::Destroy(removed2);
+  OAHEntry::Destroy(removed1);
+
+  test.Clear();  // free the now-empty collision array
 }
 
 TEST_F(OAHSetTest, OAHSetAddFindTest) {
@@ -119,10 +418,11 @@ TEST_F(OAHSetTest, OAHSetAddFindTest) {
 
   for (const auto& s : test_set) {
     auto e = ss.Find(s);
-    EXPECT_EQ(e->Key(), s);
+    EXPECT_EQ(KeyOf(*e), s);
   }
 
-  EXPECT_EQ(ss.BucketCount(), 16384);
+  // ~10000 elements at kOverloadFactor=2 (grow when size_ >= table size * 2).
+  EXPECT_EQ(ss.BucketCount(), 8192);
 }
 
 TEST_F(OAHSetTest, Basic) {
@@ -135,6 +435,51 @@ TEST_F(OAHSetTest, Basic) {
   EXPECT_TRUE(ss_->Contains("foo"sv));
   EXPECT_TRUE(ss_->Contains("bar"sv));
   EXPECT_EQ(2, ss_->UpperBoundSize());
+}
+
+// Regression: re-adding existing keys must never store a duplicate, even
+// across multiple rehashes and after entries have overflowed into a vector at
+// ext_bid. UpperBoundSize alone is insufficient: a buggy AddUnique would still
+// increment size_ exactly once. We iterate and assert each key appears exactly once.
+TEST_F(OAHSetTest, NoDuplicateInsertion) {
+  constexpr int kNumKeys = 2000;  // enough for several Reserve→Rehash cycles
+  std::vector<std::string> keys;
+  keys.reserve(kNumKeys);
+  for (int i = 0; i < kNumKeys; ++i) {
+    keys.push_back(absl::StrCat("dup_key_", i));
+    EXPECT_TRUE(ss_->Add(keys.back())) << "first add of " << keys.back();
+  }
+  const uint32_t size_before = ss_->UpperBoundSize();
+
+  // Re-add every key.
+  for (const auto& k : keys) {
+    EXPECT_FALSE(ss_->Add(k)) << "re-add of " << k;
+  }
+  EXPECT_EQ(ss_->UpperBoundSize(), size_before);
+
+  // Erase half, then re-add them — exercises both the empty-slot reuse and
+  // the "key was here, now gone, must re-insert" paths in AddUnique.
+  for (size_t i = 0; i < keys.size(); i += 2) {
+    EXPECT_TRUE(ss_->Erase(keys[i]));
+  }
+  for (size_t i = 0; i < keys.size(); i += 2) {
+    EXPECT_TRUE(ss_->Add(keys[i])) << "re-add after erase of " << keys[i];
+  }
+  EXPECT_EQ(ss_->UpperBoundSize(), size_before);
+
+  // Final pass: re-add every key, none should be inserted.
+  for (const auto& k : keys) {
+    EXPECT_FALSE(ss_->Add(k)) << "final re-add of " << k;
+  }
+
+  std::unordered_set<std::string> seen;
+  size_t total = 0;
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    EXPECT_TRUE(seen.insert(std::string(KeyOf(*it))).second) << "duplicate: " << KeyOf(*it);
+    ++total;
+  }
+  EXPECT_EQ(seen.size(), keys.size());
+  EXPECT_EQ(total, keys.size());
 }
 
 TEST_F(OAHSetTest, StandardAddErase) {
@@ -216,6 +561,77 @@ TEST_F(OAHSetTest, DisplacedBug) {
   ss_->Add("HPq");
 }
 
+// Stresses the SIMD Find/Erase probe across every code path: the displacement
+// window, the extension vector (forced by many collisions into a tiny table),
+// the lazy-zero hash cache left behind by repeated rehashes, and TTL expiry
+// observed during a Find/Erase probe. Mixed live/erased/expired members must
+// be resolved correctly.
+TEST_F(OAHSetTest, SimdFindEraseStress) {
+  constexpr size_t kNum = 20000;
+  ss_->Reserve(4);  // start tiny so growth + vector overflow both happen
+  ss_->set_time(10);
+
+  std::vector<std::string> live;       // present, no TTL
+  std::vector<std::string> ttl_alive;  // present, TTL in the future
+  std::vector<std::string> ttl_dead;   // inserted with TTL that expires at time=50
+  std::vector<std::string> erased;     // inserted then erased
+
+  for (size_t i = 0; i < kNum; ++i) {
+    std::string s = absl::StrCat("simd_member_", i);
+    switch (i % 4) {
+      case 0:
+        EXPECT_TRUE(ss_->Add(s));
+        live.push_back(s);
+        break;
+      case 1:
+        EXPECT_TRUE(ss_->Add(s, 100));  // expires at 110, survives time=50
+        ttl_alive.push_back(s);
+        break;
+      case 2:
+        EXPECT_TRUE(ss_->Add(s, 5));  // expires at 15, dead by time=50
+        ttl_dead.push_back(s);
+        break;
+      default:
+        EXPECT_TRUE(ss_->Add(s));
+        EXPECT_TRUE(ss_->Erase(s));
+        erased.push_back(s);
+        break;
+    }
+  }
+
+  ss_->set_time(50);  // ttl_dead entries are now expired
+
+  for (const auto& s : live) {
+    auto it = ss_->Find(s);
+    ASSERT_NE(it, ss_->end()) << s;
+    EXPECT_EQ(KeyOf(*it), s);
+    EXPECT_FALSE(it.HasExpiry());
+  }
+  for (const auto& s : ttl_alive) {
+    auto it = ss_->Find(s);
+    ASSERT_NE(it, ss_->end()) << s;
+    EXPECT_EQ(it.ExpiryTime(), 110u);
+  }
+  for (const auto& s : ttl_dead) {
+    EXPECT_EQ(ss_->Find(s), ss_->end()) << "should be expired: " << s;
+    EXPECT_FALSE(ss_->Erase(s)) << "expired erase: " << s;
+  }
+  for (const auto& s : erased) {
+    EXPECT_EQ(ss_->Find(s), ss_->end()) << "should be erased: " << s;
+    EXPECT_FALSE(ss_->Erase(s)) << "double erase: " << s;
+  }
+
+  // Erase every live + ttl_alive member via the SIMD probe; each must hit once.
+  for (const auto& s : live)
+    EXPECT_TRUE(ss_->Erase(s)) << s;
+  for (const auto& s : ttl_alive)
+    EXPECT_TRUE(ss_->Erase(s)) << s;
+  for (const auto& s : live)
+    EXPECT_EQ(ss_->Find(s), ss_->end()) << s;
+  for (const auto& s : ttl_alive)
+    EXPECT_EQ(ss_->Find(s), ss_->end()) << s;
+}
+
 TEST_F(OAHSetTest, Resizing) {
   constexpr size_t num_strs = 4096;
   unordered_set<string> strs;
@@ -247,7 +663,7 @@ TEST_F(OAHSetTest, Resizing) {
 
 TEST_F(OAHSetTest, SimpleScan) {
   unordered_set<string_view> info = {"foo", "bar"};
-  unordered_set<string_view> seen;
+  unordered_set<string> seen;
 
   for (auto str : info) {
     EXPECT_TRUE(ss_->Add(str));
@@ -257,12 +673,13 @@ TEST_F(OAHSetTest, SimpleScan) {
   do {
     cursor = ss_->Scan(cursor, [&](std::string_view str) {
       EXPECT_TRUE(info.count(str));
-      seen.insert(str);
+      seen.insert(string{str});
     });
   } while (cursor != 0);
 
   EXPECT_EQ(seen.size(), info.size());
-  EXPECT_TRUE(equal(seen.begin(), seen.end(), info.begin()));
+  for (string_view s : info)
+    EXPECT_TRUE(seen.count(string{s})) << s;
 }
 
 // // Ensure REDIS scan guarantees are met
@@ -271,13 +688,13 @@ TEST_F(OAHSetTest, ScanGuarantees) {
   unordered_set<string_view> not_be_seen = {"AAA", "BBB"};
   unordered_set<string_view> maybe_seen = {"AA@@@@@@@@@@@@@@", "AAA@@@@@@@@@@@@@",
                                            "AAAAAAAAA@@@@@@@", "AAAAAAAAAA@@@@@@"};
-  unordered_set<string_view> seen;
+  unordered_set<string> seen;
 
   auto scan_callback = [&](std::string_view str) {
     EXPECT_TRUE(to_be_seen.count(str) || maybe_seen.count(str));
     EXPECT_FALSE(not_be_seen.count(str));
     if (to_be_seen.count(str)) {
-      seen.insert(str);
+      seen.insert(string{str});
     }
   };
 
@@ -404,34 +821,6 @@ TEST_F(OAHSetTest, XtremeScanGrow) {
   EXPECT_EQ(seen.size(), to_see.size());
 }
 
-TEST_F(OAHSetTest, Pop) {
-  constexpr size_t num_items = 8;
-  unordered_set<string> to_insert;
-
-  while (to_insert.size() != num_items) {
-    auto str = random_string(generator_, 10);
-    if (to_insert.count(str)) {
-      continue;
-    }
-
-    to_insert.insert(str);
-    EXPECT_TRUE(ss_->Add(str));
-  }
-
-  while (!ss_->Empty()) {
-    size_t size = ss_->UpperBoundSize();
-    auto str = ss_->Pop();
-    DCHECK(ss_->UpperBoundSize() == to_insert.size() - 1);
-    DCHECK(str);
-    DCHECK(to_insert.count(std::string(str.Key())));
-    DCHECK_EQ(ss_->UpperBoundSize(), size - 1);
-    to_insert.erase(std::string(str.Key()));
-  }
-
-  DCHECK(ss_->Empty());
-  DCHECK(to_insert.empty());
-}
-
 TEST_F(OAHSetTest, Iteration) {
   ss_->Add("foo");
   for (const auto& ptr : *ss_) {
@@ -452,7 +841,7 @@ TEST_F(OAHSetTest, Iteration) {
   }
 
   for (const auto& ptr : *ss_) {
-    std::string str(ptr.Key());
+    std::string str(KeyOf(ptr));
     EXPECT_TRUE(to_insert.count(str));
     to_insert.erase(str);
   }
@@ -494,7 +883,7 @@ TEST_F(OAHSetTest, Ttl) {
   }
   EXPECT_EQ(101u, ss_->UpperBoundSize());
   it = ss_->Find("foo50");
-  EXPECT_EQ("foo50"sv, it->Key());
+  EXPECT_EQ("foo50"sv, KeyOf(*it));
   EXPECT_EQ(2u, it.ExpiryTime());
 
   ss_->set_time(2);
@@ -512,8 +901,8 @@ TEST_F(OAHSetTest, Ttl) {
   EXPECT_FALSE(it.HasExpiry());
 
   for (auto it = ss_->begin(); it != ss_->end(); ++it) {
-    ASSERT_TRUE(absl::StartsWith(it->Key(), "bar")) << it->Key();
-    string str(it->Key());
+    ASSERT_TRUE(absl::StartsWith(KeyOf(*it), "bar")) << KeyOf(*it);
+    string str(KeyOf(*it));
     VLOG(1) << *it;
   }
 }
@@ -553,7 +942,7 @@ TEST_F(OAHSetTest, Fill) {
   ss_->Fill(&s2);
   EXPECT_EQ(s2.UpperBoundSize(), ss_->UpperBoundSize());
   for (const auto& s : *ss_) {
-    EXPECT_TRUE(s2.Contains(s.Key()));
+    EXPECT_TRUE(s2.Contains(KeyOf(s)));
   }
 }
 
@@ -614,7 +1003,7 @@ TEST_F(OAHSetTest, ReallocIfNeededForceReallocates) {
   for (size_t i = 0; i < 50; ++i) {
     EXPECT_TRUE(ss_->Add(absl::StrCat("key_", i, "_xxxxxxxx"), 100 + i));
   }
-  size_t alloc_before = ss_->ObjAllocUsed();
+  size_t alloc_before = ss_->ObjMallocUsed();
   EXPECT_GT(alloc_before, 0u);
 
   PageUsage page_usage{CollectPageStats::NO, 0.9};
@@ -633,22 +1022,25 @@ TEST_F(OAHSetTest, ReallocIfNeededForceReallocates) {
     ASSERT_NE(it, ss_->end());
     EXPECT_EQ(it.ExpiryTime(), 100u + i);
   }
-  // ObjAllocUsed remains roughly consistent (mimalloc usable size for same logical size).
-  EXPECT_GT(ss_->ObjAllocUsed(), 0u);
+  // ObjMallocUsed remains roughly consistent (mimalloc usable size for same logical size).
+  EXPECT_GT(ss_->ObjMallocUsed(), 0u);
 }
 
 TEST_F(OAHSetTest, ReallocIfNeededVectorEntry) {
-  // Construct a vector OAHEntry directly via Insert — same shape as a colliding bucket.
-  OAHEntry e("first_entry_payload");
-  (void)e.Insert(OAHEntry("second_entry_payload"));
-  (void)e.Insert(OAHEntry("third_entry_payload"));
+  // Construct a vector slot directly via Insert — same shape as a colliding bucket.
+  // OAHPtr is a non-owning view; the test owns `slot` and frees it at the end.
+  uint64_t slot = 0;
+  OAHPtr<OAHEntry> e{slot};
+  e.Assign(CreateEntry("first_entry_payload"));
+  (void)e.Insert(CreateEntry("second_entry_payload"));
+  (void)e.Insert(CreateEntry("third_entry_payload"));
   ASSERT_TRUE(e.IsVector());
 
   // Snapshot inner-entry buffer pointers so we can assert each one moved.
   std::vector<char*> old_inner_ptrs;
   for (uint32_t i = 0; i < e.AsVector().Size(); ++i)
-    if (e.AsVector()[i])
-      old_inner_ptrs.push_back(e.AsVector()[i].Raw());
+    if (OAHEntry(e.AsVector()[i]))
+      old_inner_ptrs.push_back(OAHEntry(e.AsVector()[i]).Raw());
   char* old_vec_buf = e.Raw();
 
   PageUsage page_usage{CollectPageStats::NO, 0.9};
@@ -666,11 +1058,12 @@ TEST_F(OAHSetTest, ReallocIfNeededVectorEntry) {
   // their content is intact.
   std::set<std::string> seen;
   std::vector<char*> new_inner_ptrs;
-  auto& vec = e.AsVector();
+  auto vec = e.AsVector();
   for (uint32_t i = 0; i < vec.Size(); ++i) {
-    if (vec[i]) {
-      seen.insert(std::string(vec[i].Key()));
-      new_inner_ptrs.push_back(vec[i].Raw());
+    OAHEntry cell(vec[i]);
+    if (cell) {
+      seen.insert(std::string(KeyOf(cell)));
+      new_inner_ptrs.push_back(cell.Raw());
     }
   }
   EXPECT_EQ(seen.count("first_entry_payload"), 1u);
@@ -684,6 +1077,8 @@ TEST_F(OAHSetTest, ReallocIfNeededVectorEntry) {
       EXPECT_NE(old_p, new_p) << "inner entry buffer not reallocated";
     }
   }
+
+  e.Clear();  // free the collision array + remaining entries
 }
 
 TEST_F(OAHSetTest, ReallocIfNeededVectorBucketViaIterator) {
@@ -743,7 +1138,7 @@ TEST_F(OAHSetTest, ClearStepIncremental) {
   }
   EXPECT_EQ(cursor, total);
   EXPECT_EQ(ss_->UpperBoundSize(), 0u);
-  EXPECT_EQ(ss_->ObjAllocUsed(), 0u);
+  EXPECT_EQ(ss_->ObjMallocUsed(), 0u);
 }
 
 TEST_F(OAHSetTest, ClearStepFullBucketCount) {
@@ -753,7 +1148,7 @@ TEST_F(OAHSetTest, ClearStepFullBucketCount) {
   uint32_t end = ss_->ClearStep(0, ss_->Capacity());
   EXPECT_EQ(end, ss_->Capacity());
   EXPECT_EQ(ss_->UpperBoundSize(), 0u);
-  EXPECT_EQ(ss_->ObjAllocUsed(), 0u);
+  EXPECT_EQ(ss_->ObjMallocUsed(), 0u);
 }
 
 TEST_F(OAHSetTest, GetRandomMemberEmpty) {
@@ -764,7 +1159,7 @@ TEST_F(OAHSetTest, GetRandomMemberSingle) {
   EXPECT_TRUE(ss_->Add("only"sv));
   auto it = ss_->GetRandomMember();
   ASSERT_NE(it, ss_->end());
-  EXPECT_EQ(it->Key(), "only"sv);
+  EXPECT_EQ(KeyOf(*it), "only"sv);
 }
 
 TEST_F(OAHSetTest, GetRandomMemberSkipsExpired) {
@@ -777,7 +1172,7 @@ TEST_F(OAHSetTest, GetRandomMemberSkipsExpired) {
     auto it = ss_->GetRandomMember();
     if (it == ss_->end())
       continue;
-    EXPECT_EQ(it->Key(), "alive"sv);
+    EXPECT_EQ(KeyOf(*it), "alive"sv);
   }
 }
 
@@ -810,7 +1205,7 @@ TEST_F(OAHSetTest, ClearStepResetsExpirationUsed) {
       << "ExpirationUsed must be false after ClearStep fully empties the set";
 }
 
-TEST_F(OAHSetTest, ReallocIfNeededObjAllocUsedConsistent) {
+TEST_F(OAHSetTest, ReallocIfNeededObjMallocUsedConsistent) {
   // Sanity: after force-realloc, obj_alloc_used_ remains the sum of all entries'
   // current AllocSize. Guards against signed-delta arithmetic going wrong on the counter.
   for (size_t i = 0; i < 100; ++i)
@@ -824,20 +1219,20 @@ TEST_F(OAHSetTest, ReallocIfNeededObjAllocUsedConsistent) {
   size_t expected = 0;
   for (auto it = ss_->begin(); it != ss_->end(); ++it)
     expected += (*it).AllocSize();
-  EXPECT_EQ(ss_->ObjAllocUsed(), expected);
+  EXPECT_EQ(ss_->ObjMallocUsed(), expected);
 }
 
-TEST_F(OAHSetTest, ClearResetsObjAllocUsed) {
+TEST_F(OAHSetTest, ClearResetsObjMallocUsed) {
   for (size_t i = 0; i < 100; ++i) {
     ss_->Add(random_string(generator_, 10));
   }
 
-  EXPECT_GT(ss_->ObjAllocUsed(), 0u);
+  EXPECT_GT(ss_->ObjMallocUsed(), 0u);
   EXPECT_GT(ss_->UpperBoundSize(), 0u);
 
   ss_->Clear();
 
-  EXPECT_EQ(ss_->ObjAllocUsed(), 0u);
+  EXPECT_EQ(ss_->ObjMallocUsed(), 0u);
   EXPECT_EQ(ss_->UpperBoundSize(), 0u);
 }
 
@@ -849,22 +1244,20 @@ TEST_F(OAHSetTest, IterateEmpty) {
 }
 
 static size_t MemUsed(OAHSet& obj) {
-  return obj.ObjAllocUsed() + obj.SetAllocUsed();
+  return obj.ObjMallocUsed() + obj.SetMallocUsed();
 }
 
 void BM_Clone(benchmark::State& state) {
-  vector<string> strs;
   mt19937 generator(0);
   OAHSet ss1, ss2;
   unsigned elems = state.range(0);
-  for (size_t i = 0; i < elems; ++i) {
-    string str = random_string(generator, 10);
-    ss1.Add(str);
-  }
+  unsigned keySize = state.range(1);
+  for (size_t i = 0; i < elems; ++i)
+    ss1.Add(random_string(generator, keySize));
   ss2.Reserve(ss1.UpperBoundSize());
   while (state.KeepRunning()) {
-    for (auto& src : ss1) {
-      ss2.Add(src.Key());
+    for (auto src : ss1) {
+      ss2.Add(KeyOf(src));
     }
     state.PauseTiming();
     ss2.Clear();
@@ -872,17 +1265,15 @@ void BM_Clone(benchmark::State& state) {
     state.ResumeTiming();
   }
 }
-BENCHMARK(BM_Clone)->ArgName("elements")->Arg(32000);
+BENCHMARK(BM_Clone)->ArgNames({"elements", "KeySize"})->ArgsProduct({{32000}, {10, 100, 1000}});
 
 void BM_Fill(benchmark::State& state) {
   unsigned elems = state.range(0);
-  vector<string> strs;
+  unsigned keySize = state.range(1);
   mt19937 generator(0);
   OAHSet ss1, ss2;
-  for (size_t i = 0; i < elems; ++i) {
-    string str = random_string(generator, 10);
-    ss1.Add(str);
-  }
+  for (size_t i = 0; i < elems; ++i)
+    ss1.Add(random_string(generator, keySize));
 
   while (state.KeepRunning()) {
     ss1.Fill(&ss2);
@@ -891,23 +1282,22 @@ void BM_Fill(benchmark::State& state) {
     state.ResumeTiming();
   }
 }
-BENCHMARK(BM_Fill)->ArgName("elements")->Arg(32000);
+BENCHMARK(BM_Fill)->ArgNames({"elements", "KeySize"})->ArgsProduct({{32000}, {10, 100, 1000}});
 
 void BM_Clear(benchmark::State& state) {
   unsigned elems = state.range(0);
+  unsigned key_size = state.range(1);
   mt19937 generator(0);
   OAHSet ss;
   while (state.KeepRunning()) {
     state.PauseTiming();
-    for (size_t i = 0; i < elems; ++i) {
-      string str = random_string(generator, 16);
-      ss.Add(str);
-    }
+    for (size_t i = 0; i < elems; ++i)
+      ss.Add(random_string(generator, key_size));
     state.ResumeTiming();
     ss.Clear();
   }
 }
-BENCHMARK(BM_Clear)->ArgName("elements")->Arg(32000);
+BENCHMARK(BM_Clear)->ArgNames({"elements", "KeySize"})->ArgsProduct({{32000}, {10, 100, 1000}});
 
 void BM_Add(benchmark::State& state) {
   vector<string> strs;
@@ -948,12 +1338,12 @@ void BM_AddMany(benchmark::State& state) {
   }
   ss.Reserve(elems);
   vector<string_view> svs;
-  size_t mem_used = 0;
   for (const auto& str : strs) {
     svs.push_back(str);
   }
+  size_t mem_used = 0;
   while (state.KeepRunning()) {
-    ss.AddMany(absl::MakeSpan(svs));
+    ss.AddMany(absl::MakeSpan(svs), UINT32_MAX, false);
     state.PauseTiming();
     CHECK_EQ(ss.UpperBoundSize(), elems);
     mem_used += MemUsed(ss);
@@ -1032,7 +1422,8 @@ void BM_Grow(benchmark::State& state) {
     state.PauseTiming();
     OAHSet tmp;
     src.Fill(&tmp);
-    CHECK_EQ(tmp.BucketCount(), elems);
+    // Fill reserves via UpperBoundSize().
+    CHECK_EQ(tmp.BucketCount(), elems / OAHSet::kOverloadFactor);
     state.ResumeTiming();
     for (const auto& str : strs) {
       tmp.Add(str);
@@ -1045,6 +1436,73 @@ void BM_Grow(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_Grow);
+
+void BM_GetRandomMember(benchmark::State& state) {
+  mt19937 generator(0);
+  OAHSet ss;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
+  for (size_t i = 0; i < elems; ++i)
+    ss.Add(random_string(generator, keySize));
+
+  while (state.KeepRunning()) {
+    benchmark::DoNotOptimize(ss.GetRandomMember());
+  }
+}
+BENCHMARK(BM_GetRandomMember)
+    ->ArgNames({"elements", "KeySize"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Scan(benchmark::State& state) {
+  mt19937 generator(0);
+  OAHSet ss;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
+  for (size_t i = 0; i < elems; ++i)
+    ss.Add(random_string(generator, keySize));
+
+  while (state.KeepRunning()) {
+    uint32_t cursor = 0;
+    size_t seen = 0;
+    do {
+      cursor = ss.Scan(cursor, [&](const auto& key) {
+        // Reading the key size dereferences the key blob, simulating real usage where the
+        // scanned key is actually consumed (a bare no-op callback would hide that memory cost).
+        benchmark::DoNotOptimize(key.size());
+        ++seen;
+      });
+    } while (cursor != 0);
+    benchmark::DoNotOptimize(seen);
+  }
+}
+BENCHMARK(BM_Scan)
+    ->ArgNames({"elements", "KeySize"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Shrink(benchmark::State& state) {
+  mt19937 generator(0);
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
+  OAHSet src;
+  for (size_t i = 0; i < elems; ++i)
+    src.Add(random_string(generator, keySize));
+
+  size_t kShrinkTo = absl::bit_ceil(size_t(elems));
+  size_t kGrowTo = kShrinkTo * 4;
+  OAHSet ss;
+  while (state.KeepRunning()) {
+    state.PauseTiming();
+    ss.Clear();
+    src.Fill(&ss);
+    ss.Reserve(kGrowTo);
+    CHECK_EQ(ss.BucketCount(), kGrowTo / OAHSet::kOverloadFactor);
+    state.ResumeTiming();
+    ss.Shrink(kShrinkTo);
+  }
+}
+BENCHMARK(BM_Shrink)
+    ->ArgNames({"elements", "KeySize"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
 // unsigned total_wasted_memory = 0;
 
@@ -1104,10 +1562,11 @@ TEST_P(ShrinkTest, BasicShrink) {
     EXPECT_TRUE(ss_->Add(strs.back()));
   }
 
-  // Grow to a larger size
-  ss_->Reserve(1 << 22);
+  // Grow to a larger size.
+  constexpr size_t kGrownBuckets = 1u << 22;
+  ss_->Reserve(kGrownBuckets * OAHSet::kOverloadFactor);
   size_t original_bucket_count = ss_->BucketCount();
-  EXPECT_EQ(original_bucket_count, 1u << 22);
+  EXPECT_EQ(original_bucket_count, kGrownBuckets);
 
   // Shrink to the parameterized size
   ss_->Shrink(shrink_to);
@@ -1155,7 +1614,7 @@ TEST_F(OAHSetTest, ShrinkWithTTL) {
   }
 
   // Grow to larger size
-  ss_->Reserve(1 << 22);
+  ss_->Reserve((1u << 22) * OAHSet::kOverloadFactor);
 
   // Set time to 50 - this will expire elements with TTL <= 50
   ss_->set_time(50);
@@ -1210,8 +1669,9 @@ TEST_F(OAHSetTest, ScanWithShrinkBetweenCalls) {
   EXPECT_NE(cursor, 0u) << "Should not finish in one iteration";
 
   // Grow to large size in the middle of scanning
-  ss_->Reserve(1 << 22);
-  EXPECT_EQ(ss_->BucketCount(), 1u << 22);
+  constexpr size_t kGrownBuckets = 1u << 22;
+  ss_->Reserve(kGrownBuckets * OAHSet::kOverloadFactor);
+  EXPECT_EQ(ss_->BucketCount(), kGrownBuckets);
   EXPECT_GT(ss_->BucketCount(), initial_bucket_count);
 
   // Continue scanning a bit after Grow

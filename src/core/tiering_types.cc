@@ -20,13 +20,16 @@ bool FragmentRef::IsOffloaded() const {
 
 void FragmentRef::ClearOffloaded() {
   std::visit(Overloaded{[](CompactValue* pv) { pv->RemoveExternal(); },
-                        [](QList::Node* node) { node->offloaded = 0; }},
+                        [](QList::Node* node) {
+                          node->offloaded = 0;
+                          node->entry = nullptr;
+                        }},
              val_);
 }
 
 bool FragmentRef::HasStashPending() const {
   return std::visit(Overloaded{[](CompactValue* pv) { return pv->HasStashPending(); },
-                               [](QList::Node* node) { return node->io_pending != 0; }},
+                               [](QList::Node* node) { return node->IsStashPending(); }},
                     val_);
 }
 

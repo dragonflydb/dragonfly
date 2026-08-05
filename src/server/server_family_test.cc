@@ -279,10 +279,52 @@ TEST_F(ServerFamilyTest, ClientPause) {
 
   Run({"CLIENT", "PAUSE", "50", "WRITE"});
 
+  auto get_start = absl::Now();
   Run({"get", "key"});
-  EXPECT_LT((absl::Now() - start), absl::Milliseconds(10));
+  EXPECT_LT((absl::Now() - get_start), absl::Milliseconds(50));
   Run({"set", "key", "value2"});
   EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
+}
+
+TEST_F(ServerFamilyTest, ClientListAccepted) {
+  const std::vector<std::vector<std::string>> ok = {
+      {"CLIENT", "LIST"},
+      {"CLIENT", "LIST", "TYPE", "normal"},
+      {"CLIENT", "LIST", "TYPE", "master"},
+      {"CLIENT", "LIST", "TYPE", "replica"},
+      {"CLIENT", "LIST", "TYPE", "slave"},
+      {"CLIENT", "LIST", "TYPE", "pubsub"},
+      {"CLIENT", "LIST", "ID", "1"},
+      {"CLIENT", "LIST", "ID", "1", "2", "3"},
+  };
+  for (const auto& args : ok) {
+    EXPECT_THAT(Run(args).GetString(), "") << absl::StrJoin(args, " ");
+  }
+}
+
+TEST_F(ServerFamilyTest, ClientListRejected) {
+  const std::vector<std::pair<std::vector<std::string>, std::string>> bad = {
+      {{"CLIENT", "LIST", "TYPE", "bogus"}, "Unknown client type 'bogus'"},
+      {{"CLIENT", "LIST", "TYPE"}, "syntax error"},
+      {{"CLIENT", "LIST", "ID"}, "syntax error"},
+      {{"CLIENT", "LIST", "ID", "abc"}, "Invalid client ID"},
+      {{"CLIENT", "LIST", "TYPE", "normal", "ID", "1"}, "syntax error"},
+      {{"CLIENT", "LIST", "FOO"}, "syntax error"},
+  };
+  for (const auto& [args, msg] : bad) {
+    EXPECT_THAT(Run(args), ErrArg(msg)) << absl::StrJoin(args, " ");
+  }
+}
+
+TEST_F(ServerFamilyTest, ClientInfoSingleDbField) {
+  const string info = Run({"CLIENT", "INFO"}).GetString();
+  // Regression: "db=" used to be emitted twice (FormatClientInfo + a redundant append).
+  size_t count = 0;
+  for (size_t pos = info.find(" db="); pos != string::npos; pos = info.find(" db=", pos + 1))
+    ++count;
+  EXPECT_EQ(count, 1u) << info;
+  // CLIENT INFO returns a single line with no trailing newline (unlike CLIENT LIST).
+  EXPECT_FALSE(absl::EndsWith(info, "\r\n")) << info;
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
@@ -741,6 +783,103 @@ TEST_F(ServerFamilyTest, MemoryArenaSummary) {
 
   resp = Run({"MEMORY", "ARENA"});
   EXPECT_THAT(resp.GetString(), HasSubstr("Count"));
+}
+
+TEST_F(ServerFamilyTest, MemoryParserErrorHandling) {
+  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT", "not-a-float"}), ErrArg("not a valid float"));
+}
+
+TEST_F(ServerFamilyTest, InfoReplicationMemoryNoReplicas) {
+  auto resp = Run({"INFO", "MEMORY"});
+  auto info = resp.GetString();
+  EXPECT_THAT(info, HasSubstr("replication_streaming_buffer_bytes:0"));
+  EXPECT_THAT(info, HasSubstr("replication_full_sync_buffer_bytes:0"));
+}
+
+TEST_F(ServerFamilyTest, InfoReplicationMemoryOnlyInMemorySection) {
+  EXPECT_THAT(Run({"INFO", "REPLICATION"}).GetString(),
+              Not(HasSubstr("replication_streaming_buffer_bytes")));
+  EXPECT_THAT(Run({"INFO", "MEMORY"}).GetString(), HasSubstr("replication_streaming_buffer_bytes"));
+  EXPECT_THAT(Run({"INFO"}).GetString(), HasSubstr("replication_streaming_buffer_bytes"));
+  EXPECT_THAT(Run({"INFO", "ALL"}).GetString(), HasSubstr("replication_streaming_buffer_bytes"));
+}
+
+// COMMANDSTATS is a hidden section (rendered only for an explicit name or ALL), while
+// LATENCYSTATS is rendered for the default no-arg INFO as well. This pins the gating
+// behavior that lets GetMetrics skip command-stat aggregation for common INFO calls while
+// still collecting latency data whenever the LATENCYSTATS section is emitted.
+TEST_F(ServerFamilyTest, InfoCommandAndLatencyStatsGating) {
+  // Generate command activity across the connections / proactors.
+  for (int i = 0; i < 5; ++i) {
+    Run({"set", absl::StrCat("k", i), "v"});
+    Run({"get", absl::StrCat("k", i)});
+  }
+  Run({"ping"});
+
+  // Default INFO: COMMANDSTATS is hidden, but LATENCYSTATS is emitted.
+  const string def = Run({"INFO"}).GetString();
+  EXPECT_THAT(def, Not(HasSubstr("# Commandstats")));
+  EXPECT_THAT(def, Not(HasSubstr("cmdstat_")));
+  EXPECT_THAT(def, HasSubstr("# Latencystats"));
+
+  // INFO STATS renders neither hidden COMMANDSTATS nor LATENCYSTATS.
+  const string stats = Run({"INFO", "STATS"}).GetString();
+  EXPECT_THAT(stats, Not(HasSubstr("cmdstat_")));
+  EXPECT_THAT(stats, Not(HasSubstr("# Latencystats")));
+  EXPECT_THAT(stats, Not(HasSubstr("latency_percentiles_usec_")));
+
+  // Explicit sections and ALL render them.
+  EXPECT_THAT(Run({"INFO", "COMMANDSTATS"}).GetString(), HasSubstr("# Commandstats"));
+  EXPECT_THAT(Run({"INFO", "LATENCYSTATS"}).GetString(), HasSubstr("# Latencystats"));
+  const string all = Run({"INFO", "ALL"}).GetString();
+  EXPECT_THAT(all, HasSubstr("# Commandstats"));
+  EXPECT_THAT(all, HasSubstr("# Latencystats"));
+}
+
+// Command stats are aggregated across all proactor threads. Exercising commands on the IO
+// threads and then summing per-thread counters on the caller must yield the correct totals
+// (regression guard for moving aggregation out of the fan-out callback).
+TEST_F(ServerFamilyTest, InfoCommandStatsAggregation) {
+  Run({"config", "resetstat"});
+
+  const int kGets = 17;
+  for (int i = 0; i < kGets; ++i) {
+    Run({"get", "nonexistent"});
+  }
+
+  auto extract_calls = [](std::string_view info, std::string_view stat) -> int {
+    // looks for "<stat>:calls=<n>,..."
+    size_t pos = info.find(stat);
+    if (pos == std::string_view::npos)
+      return -1;
+    std::string_view rest = info.substr(pos);
+    const string needle = "calls=";
+    size_t cpos = rest.find(needle);
+    if (cpos == std::string_view::npos)
+      return -1;
+    rest = rest.substr(cpos + needle.size());
+    int value = 0;
+    for (char c : rest) {
+      if (c < '0' || c > '9')
+        break;
+      value = value * 10 + (c - '0');
+    }
+    return value;
+  };
+
+  const string cmdstats = Run({"INFO", "COMMANDSTATS"}).GetString();
+  EXPECT_EQ(extract_calls(cmdstats, "cmdstat_get:"), kGets);
+
+  // A command never invoked must not appear at all (zero-call commands are skipped).
+  EXPECT_THAT(cmdstats, Not(HasSubstr("cmdstat_getex:")));
+
+  // The aggregated value is also visible in INFO ALL.
+  const string all = Run({"INFO", "ALL"}).GetString();
+  EXPECT_GE(extract_calls(all, "cmdstat_get:"), kGets);
+}
+
+TEST_F(ServerFamilyTest, InfoClusterMigrationErrors) {
+  EXPECT_THAT(Run({"INFO", "CLUSTER"}).GetString(), HasSubstr("migration_errors_total:0"));
 }
 
 }  // namespace dfly

@@ -8,6 +8,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/blocking_controller.h"
 #include "server/conn_context.h"
@@ -104,11 +105,11 @@ TEST_F(ListFamilyTest, BLMPopInvalidSyntax) {
 
   // Timeout is not a float
   resp = Run({"blmpop", "foo", "1", kKey1, "LEFT", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("value is not a valid float"));
+  EXPECT_THAT(resp, ErrArg(facade::kTimeoutNotFloatErr));
 
   // Negative timeout
   resp = Run({"blmpop", "-0.01", "1", kKey1, "LEFT", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("timeout is negative"));
+  EXPECT_THAT(resp, ErrArg(facade::kTimeoutNegativeErr));
 
   // Zero keys
   resp = Run({"blmpop", "0.01", "0", "LEFT", "COUNT", "1"});
@@ -282,7 +283,7 @@ TEST_F(ListFamilyTest, BLPopTimeout) {
   Run({"blpop", kKey1, "0"});
   resp = Run({"exec"});
 
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL_ARRAY)));
   ASSERT_FALSE(IsLocked(0, kKey1));
   ASSERT_EQ(0, NumWatched());
 }
@@ -482,7 +483,7 @@ TEST_F(ListFamilyTest, LRem) {
   ASSERT_THAT(Run({"lpush", kKey3, "bar", "bar", "foo"}), IntArg(3));
   ASSERT_THAT(Run({"lrem", kKey3, "-2", "bar"}), IntArg(2));
   resp = Run({"lrange", kKey3, "0", "-1"});
-  ASSERT_EQ(resp, "foo");
+  ASSERT_THAT(resp, RespElementsAre("foo"));
 }
 
 TEST_F(ListFamilyTest, DumpRestorePlain) {
@@ -491,7 +492,7 @@ TEST_F(ListFamilyTest, DumpRestorePlain) {
   auto buffer = Run({"DUMP", kKey1}).GetBuf();
   EXPECT_EQ(Run({"RESTORE", kKey2, "0", ToSV(buffer)}), "OK");
   EXPECT_EQ(CheckedInt({"LLEN", kKey2}), 1);
-  EXPECT_EQ(Run({"LRANGE", kKey2, "0", "1"}), kValue);
+  EXPECT_THAT(Run({"LRANGE", kKey2, "0", "1"}), RespElementsAre(kValue));
 }
 
 TEST_F(ListFamilyTest, LTrim) {
@@ -501,7 +502,7 @@ TEST_F(ListFamilyTest, LTrim) {
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec(), ElementsAre("c", "d"));
   ASSERT_EQ(Run({"ltrim", kKey1, "0", "0"}), "OK");
-  ASSERT_EQ(Run({"lrange", kKey1, "0", "1"}), "c");
+  ASSERT_THAT(Run({"lrange", kKey1, "0", "1"}), RespElementsAre("c"));
   Run({"set", "foo", "bar"});
   ASSERT_THAT(Run({"ltrim", "foo", "0", "1"}), ErrArg("WRONGTYPE"));
   ASSERT_EQ(Run({"ltrim", "nexists", "0", "1"}), "OK");
@@ -659,7 +660,7 @@ TEST_F(ListFamilyTest, LMove) {
   ASSERT_THAT(resp, "4");
 
   resp = Run({"lrange", kKey1, "0", "-1"});
-  ASSERT_EQ(resp, "3");
+  ASSERT_THAT(resp, RespElementsAre("3"));
 
   resp = Run({"lrange", kKey2, "0", "-1"});
   ASSERT_THAT(resp, ArrLen(4));
@@ -778,7 +779,7 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
   Run({"multi"});
   Run({"brpoplpush", "y", "x", "0"});
   RespExpr resp = Run({"exec"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
   ASSERT_FALSE(IsLocked(0, "x"));
   ASSERT_FALSE(IsLocked(0, "y"));
   ASSERT_EQ(0, NumWatched());
@@ -873,7 +874,7 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   Run({"lpush", "x", "val"});
   EXPECT_EQ(Run({"brpoplpush", "x", "z", "0"}), "val");
   resp = Run({"lrange", "z", "0", "-1"});
-  ASSERT_EQ(resp, "val");
+  ASSERT_THAT(resp, RespElementsAre("val"));
   Run({"del", "z"});
   ASSERT_EQ(0, NumWatched());
 
@@ -917,6 +918,49 @@ TEST_F(ListFamilyTest, BLMove) {
   auto resp = Run({"lrange", "y", "0", "-1"});
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec(), ElementsAre("val1", "val2"));
+}
+
+// NaN / +-inf / negative timeouts are rejected (Redis-compatible) instead of being cast to unsigned
+// milliseconds, which is undefined behavior.
+TEST_F(ListFamilyTest, BlockingTimeoutValidation) {
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "abc"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "nan"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "inf"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "-inf"}), ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "-1"}), ErrArg(facade::kTimeoutNegativeErr));
+
+  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "abc"}),
+              ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "nan"}),
+              ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "inf"}),
+              ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "-inf"}),
+              ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"blmove", "x", "y", "LEFT", "RIGHT", "-1"}),
+              ErrArg(facade::kTimeoutNegativeErr));
+
+  EXPECT_THAT(Run({"blmpop", "abc", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blmpop", "nan", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blmpop", "inf", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"blmpop", "-inf", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"blmpop", "-1", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutNegativeErr));
+
+  EXPECT_THAT(Run({"blpop", "k", "abc"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blpop", "k", "nan"}), ErrArg(facade::kTimeoutNotFloatErr));
+  EXPECT_THAT(Run({"blpop", "k", "inf"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"blpop", "k", "-inf"}), ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"blpop", "k", "-1"}), ErrArg(facade::kTimeoutNegativeErr));
+  EXPECT_THAT(Run({"brpop", "k", "abc"}), ErrArg(facade::kTimeoutNotFloatErr));
+
+  // A finite timeout so large that timeout * 1000 overflows the unsigned millisecond counter is
+  // rejected instead of triggering undefined float->unsigned conversion.
+  EXPECT_THAT(Run({"blpop", "k", "1e10"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+  EXPECT_THAT(Run({"blmpop", "1e10", "1", "k", "LEFT"}), ErrArg(facade::kTimeoutOutOfRangeErr));
+
+  // A large-but-representable timeout is accepted (returns immediately since the key exists).
+  Run({"rpush", "k", "v"});
+  EXPECT_THAT(Run({"blpop", "k", "4000000"}).GetVec(), ElementsAre("k", "v"));
 }
 
 // Wake two BLMOVEs on the same shard simultaneously
@@ -967,7 +1011,7 @@ TEST_F(ListFamilyTest, BLMoveRings) {
 
   for (int i = 1; i < 10; i++)
     EXPECT_THAT(Run({"llen", to_string(i)}), IntArg(0));
-  EXPECT_EQ(Run({"lrange", "0", "0", "-1"}), "v1");
+  EXPECT_THAT(Run({"lrange", "0", "0", "-1"}), RespElementsAre("v1"));
 }
 
 // Move in waves where each wave layer has a fixed set of "vertices" through which all values travel
@@ -1056,7 +1100,7 @@ TEST_F(ListFamilyTest, LPushX) {
   EXPECT_THAT(Run({"llen", kKey1}), IntArg(0));
 
   EXPECT_THAT(Run({"lpush", kKey1, "val1"}), IntArg(1));
-  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}), "val1");
+  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}), RespElementsAre("val1"));
 
   EXPECT_THAT(Run({"lpushx", kKey1, "val2"}), IntArg(2));
   EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}).GetVec(), ElementsAre("val2", "val1"));
@@ -1068,7 +1112,7 @@ TEST_F(ListFamilyTest, RPushX) {
   EXPECT_THAT(Run({"llen", kKey1}), IntArg(0));
 
   EXPECT_THAT(Run({"rpush", kKey1, "val1"}), IntArg(1));
-  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}), "val1");
+  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}), RespElementsAre("val1"));
 
   EXPECT_THAT(Run({"rpushx", kKey1, "val2"}), IntArg(2));
   EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}).GetVec(), ElementsAre("val1", "val2"));

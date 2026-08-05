@@ -36,6 +36,8 @@ class TestConnection : public facade::Connection {
 
   void SendInvalidationMessageAsync(InvalidationMessage msg) final;
 
+  void SendMonitorMessageAsync(std::string msg) final;
+
   bool IsPrivileged() const override {
     return is_privileged_;
   }
@@ -46,6 +48,8 @@ class TestConnection : public facade::Connection {
   std::vector<PubMessage> messages;
 
   std::vector<InvalidationMessage> invalidate_messages;
+
+  std::vector<std::string> monitor_messages;
 
  private:
   bool is_privileged_ = false;
@@ -129,17 +133,19 @@ class BaseFamilyTest : public ::testing::Test {
   void CleanupSnapshots();
 
   bool IsLocked(DbIndex db_index, std::string_view key) const;
-  ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
+  ConnectionContext::LastCommandStats GetDebugInfo(const std::string& id) const;
 
-  ConnectionContext::DebugInfo GetDebugInfo() const {
+  ConnectionContext::LastCommandStats GetDebugInfo() const {
     return GetDebugInfo("IO0");
   }
 
   TestConnWrapper* AddFindConn(Protocol proto, std::string_view id);
+  Transaction* GetTransaction(std::string_view conn_id);
   static std::vector<std::string> StrArray(const RespExpr& expr);
 
   Metrics GetMetrics() const {
-    return service_->server_family().GetMetrics(&namespaces->GetDefaultNamespace());
+    return service_->server_family().GetMetrics(&namespaces->GetDefaultNamespace(),
+                                                MetricsCollectOpts{});
   }
 
   void ClearMetrics();
@@ -157,7 +163,15 @@ class BaseFamilyTest : public ::testing::Test {
                           std::chrono::milliseconds timeout_ms = std::chrono::milliseconds(100));
 
   std::string GetId() const;
+
+  // Whether connection `conn_id` is currently parked in a blocking command
+  // (e.g. BLPOP / XREAD ... BLOCK). Combine with WaitUntilCondition to
+  // deterministically order a wake-up write after the block is entered.
+  bool IsConnBlocked(std::string_view conn_id);
+
   size_t SubscriberMessagesLen(std::string_view conn_id) const;
+
+  size_t NumSubscriptions(std::string_view conn_id) const;
 
   size_t InvalidationMessagesLen(std::string_view conn_id) const;
 
@@ -187,9 +201,8 @@ class BaseFamilyTest : public ::testing::Test {
 
   absl::flat_hash_map<std::string, std::unique_ptr<TestConnWrapper>> connections_;
   util::fb2::Mutex mu_;
-  ConnectionContext::DebugInfo last_cmd_dbg_info_;
+  ConnectionContext::LastCommandStats last_cmd_dbg_info_;
 
-  std::vector<RespVec*> resp_vec_;
   bool single_response_ = true;
   util::fb2::Fiber watchdog_fiber_;
   util::fb2::Done watchdog_done_;

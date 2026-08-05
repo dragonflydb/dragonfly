@@ -71,11 +71,8 @@ class CommandAggregator {
 
 }  // namespace
 
-CmdSerializer::CmdSerializer(DbSlice* db_slice, FlushSerialized cb,
-                             size_t max_serialization_buffer_size)
-    : db_slice_(db_slice),
-      cb_(std::move(cb)),
-      max_serialization_buffer_size_(max_serialization_buffer_size) {
+CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size)
+    : cb_(std::move(cb)), max_serialization_buffer_size_(max_serialization_buffer_size) {
   serializer_ = std::make_unique<RdbSerializer>(GetDefaultCompressionMode());
 }
 
@@ -162,27 +159,24 @@ void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms)
 size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
   // Disable lazy expiry during serialization (same as rdb_save.cc).
   // We are called under bucket lock so DeleteIfEmpty is not possible.
-  StringSet* ss = nullptr;
-  uint32_t prev_time = 0;
-  if (pv.Encoding() == kEncodingStrMap2) {
-    ss = static_cast<StringSet*>(pv.RObjPtr());
-    prev_time = ss->time_now();
-    ss->set_time(0);
-  }
+  const uint32_t prev_time = pv.MemberTime();
+  pv.SetMemberTime(0);
 
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("SADD", args); },
       max_serialization_buffer_size_);
 
   size_t commands = 0;
-  container_utils::IterateSet(pv, [&](container_utils::ContainerEntry ce) {
-    commands += aggregator.AddArg(ce.ToString());
-    return true;
-  });
+  container_utils::IterateSet(
+      pv,
+      [&](container_utils::ContainerEntry ce) {
+        commands += aggregator.AddArg(ce.ToString());
+        return true;
+      },
+      /*allow_yield=*/false);
 
   // Restore previous time so subsequent operations can trigger lazy expiry.
-  if (ss)
-    ss->set_time(prev_time);
+  pv.SetMemberTime(prev_time);
 
   return commands;
 }
@@ -200,19 +194,14 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
         commands += aggregator.AddArg(ce.ToString());
         return true;
       },
-      /*start=*/0, /*end=*/SIZE_MAX, /*reverse=*/false, /*use_score=*/true);
+      /*start=*/0, /*end=*/SIZE_MAX, /*reverse=*/false, /*use_score=*/true, /*allow_yield=*/false);
   return commands;
 }
 
 size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
   // Disable lazy expiry during serialization (same as rdb_save.cc).
-  StringMap* sm = nullptr;
-  uint32_t prev_time = 0;
-  if (pv.Encoding() == kEncodingStrMap2) {
-    sm = static_cast<StringMap*>(pv.RObjPtr());
-    prev_time = sm->time_now();
-    sm->set_time(0);
-  }
+  const uint32_t prev_time = pv.MemberTime();
+  pv.SetMemberTime(0);
 
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("HSET", args); },
@@ -220,15 +209,16 @@ size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
 
   size_t commands = 0;
   container_utils::IterateMap(
-      pv, [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
+      pv,
+      [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
         aggregator.AddArg(k.ToString(), CommandAggregator::CommitMode::kNoCommit);
         commands += aggregator.AddArg(v.ToString());
         return true;
-      });
+      },
+      /*allow_yield=*/false);
 
   // Restore previous time so subsequent operations can trigger lazy expiry.
-  if (sm)
-    sm->set_time(prev_time);
+  pv.SetMemberTime(prev_time);
 
   return commands;
 }
@@ -239,10 +229,13 @@ size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
       max_serialization_buffer_size_);
 
   size_t commands = 0;
-  container_utils::IterateList(pv, [&](container_utils::ContainerEntry ce) {
-    commands += aggregator.AddArg(ce.ToString());
-    return true;
-  });
+  container_utils::IterateList(
+      pv,
+      [&](container_utils::ContainerEntry ce) {
+        commands += aggregator.AddArg(ce.ToString());
+        return true;
+      },
+      /*start=*/0, /*end=*/SIZE_MAX, /*allow_yield=*/false);
   return commands;
 }
 

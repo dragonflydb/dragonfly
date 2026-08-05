@@ -20,6 +20,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 #include <absl/cleanup/cleanup.h>
+#include <absl/numeric/bits.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
@@ -33,8 +34,10 @@ extern "C" {
 #include "base/logging.h"
 #include "core/bloom.h"
 #include "core/cms.h"
+#include "core/cuckoo.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
+#include "core/oah_set.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -63,6 +66,7 @@ extern "C" {
 
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
+ABSL_DECLARE_FLAG(uint32_t, list_compress_dict_threshold);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_FLAG(bool, deserialize_hnsw_index, false, "Deserialize HNSW vector index graph structure");
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
@@ -87,11 +91,17 @@ int64_t LpGetIntegerIfValid(unsigned char* ele, int* valid) {
 }
 
 // Returns 1 if the stream listpack entries structure is valid, 0 otherwise.
-int StreamValidateListpackIntegrity(unsigned char* lp, size_t size) {
+// Beyond the structural listpack check, it verifies the stream master entry and every
+// record are internally consistent - in particular that the declared field and record
+// counts match the entries actually present - so that later stream iteration cannot walk
+// past the listpack end. Mirrors upstream streamValidateListpackIntegrity. The semantic
+// walk runs regardless of `deep`: on a no-auth deployment an attacker can point the server
+// at a hostile master via REPLICAOF, so the replication load path is not trusted either.
+int StreamValidateListpackIntegrity(unsigned char* lp, size_t size, int deep) {
   int valid_record;
   unsigned char *p, *next;
 
-  if (!lpValidateIntegrity(lp, size, 0, NULL, NULL))
+  if (!lpValidateIntegrity(lp, size, deep, NULL, NULL))
     return 0;
 
   next = p = lpValidateFirst(lp);
@@ -100,26 +110,121 @@ int StreamValidateListpackIntegrity(unsigned char* lp, size_t size) {
   if (!p)
     return 0;
 
-  LpGetIntegerIfValid(p, &valid_record);
+  // Master entry header: valid-count, deleted-count, num-master-fields.
+  int64_t entry_count = LpGetIntegerIfValid(p, &valid_record);
   if (!valid_record)
     return 0;
   p = next;
   if (!lpValidateNext(lp, &next, size))
     return 0;
 
-  LpGetIntegerIfValid(p, &valid_record);
+  int64_t deleted_count = LpGetIntegerIfValid(p, &valid_record);
   if (!valid_record)
     return 0;
   p = next;
   if (!lpValidateNext(lp, &next, size))
     return 0;
 
-  LpGetIntegerIfValid(p, &valid_record);
+  int64_t master_fields = LpGetIntegerIfValid(p, &valid_record);
   if (!valid_record)
     return 0;
   p = next;
   if (!lpValidateNext(lp, &next, size))
     return 0;
+
+  if (entry_count < 0 || deleted_count < 0 || master_fields < 0)
+    return 0;
+
+  // The master field names.
+  for (int64_t i = 0; i < master_fields; i++) {
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+  }
+
+  // The zero terminator that closes the master entry.
+  int64_t zero = LpGetIntegerIfValid(p, &valid_record);
+  if (!valid_record || zero != 0)
+    return 0;
+  p = next;
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+
+  // Records. Their number is bounded by the declared valid + deleted counts, and each
+  // record's trailing lp-count must match the entries it spans. Both counts are already
+  // non-negative, so the total is summed in uint64_t: a signed sum could overflow to a
+  // negative value (undefined behavior) and skip the loop, bypassing validation.
+  uint64_t actual_deleted = 0;
+  uint64_t records = static_cast<uint64_t>(entry_count) + static_cast<uint64_t>(deleted_count);
+  while (records-- > 0) {
+    if (!p)
+      return 0;
+
+    int64_t fields = master_fields, extra_fields = 3;
+    int64_t flags = LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record)
+      return 0;
+    if (flags & STREAM_ITEM_FLAG_DELETED)
+      ++actual_deleted;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+
+    // The two entry-id deltas (ms, seq) relative to the master id.
+    LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record)
+      return 0;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+    LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record)
+      return 0;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+
+    if (!(flags & STREAM_ITEM_FLAG_SAMEFIELDS)) {
+      fields = LpGetIntegerIfValid(p, &valid_record);
+      if (!valid_record || fields < 0)
+        return 0;
+      p = next;
+      if (!lpValidateNext(lp, &next, size))
+        return 0;
+
+      // Per-record field names.
+      for (int64_t i = 0; i < fields; i++) {
+        p = next;
+        if (!lpValidateNext(lp, &next, size))
+          return 0;
+      }
+      extra_fields += fields + 1;
+    }
+
+    // The field values.
+    for (int64_t i = 0; i < fields; i++) {
+      p = next;
+      if (!lpValidateNext(lp, &next, size))
+        return 0;
+    }
+
+    int64_t lp_count = LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record || lp_count != fields + extra_fields)
+      return 0;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+  }
+
+  if (actual_deleted != static_cast<uint64_t>(deleted_count))
+    return 0;
+
+  // The walk must consume the whole listpack: p must be the final (EOF) byte. Rejects an
+  // early EOF with trailing bytes, which a non-deep load accepts and later reverse iteration
+  // (lpLast/lpPrev) would then read out of bounds.
+  if (next || p != lp + size - 1)
+    return 0;
+
   return 1;
 }
 
@@ -176,7 +281,7 @@ bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
          type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
          type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2 || type == RDB_TYPE_CMS ||
-         type == RDB_TYPE_TOPK;
+         type == RDB_TYPE_TOPK || type == RDB_TYPE_CUCKOO;
 }
 
 DbSlice& GetCurrentDbSlice() {
@@ -201,6 +306,7 @@ class RdbLoaderBase::OpaqueObjLoader {
   void operator()(const RdbSBF& src);
   void operator()(const RdbCMS& src);
   void operator()(const RdbTOPK& src);
+  void operator()(const RdbCuckoo& src);
 
   std::error_code ec() const {
     return ec_;
@@ -344,6 +450,21 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCMS& src) {
   pv_->SetCMS(cms);
 }
 
+void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCuckoo& src) {
+  if (config_.append) {
+    CuckooFilter* cf = pv_->GetCuckooFilter();
+    DCHECK(cf);
+    for (const std::string& blob : src.filters)
+      cf->AppendFilter(blob);
+    return;
+  }
+  CuckooFilter* cf =
+      CompactObj::AllocateMR<CuckooFilter>(CuckooFilterOptions{}, CompactObj::memory_resource());
+  cf->Deserialize({src.slots_per_bucket, src.max_iterations, src.expansion, src.num_buckets,
+                   src.num_items, src.num_deletes, src.filters});
+  pv_->SetCuckooFilter(cf);
+}
+
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   size_t len = ltrace->arr.size();
 
@@ -372,6 +493,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     if (inner_obj) {
       if (is_intset) {
         zfree(inner_obj);
+      } else if (g_use_oah_set) {
+        CompactObj::DeleteMR<OAHSet>(inner_obj);
       } else {
         CompactObj::DeleteMR<StringSet>(inner_obj);
       }
@@ -394,62 +517,67 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       return true;
     });
   } else {
-    StringSet* set;
-    if (config_.append) {
-      // Note we always use StringSet when the object is being chunked.
-      if (!EnsureObjEncoding(OBJ_SET, kEncodingStrMap2)) {
-        return;
-      }
-      set = static_cast<StringSet*>(pv_->RObjPtr());
-    } else {
-      set = CompactObj::AllocateMR<StringSet>();
-      set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
-      inner_obj = set;
-
-      // Expand the set up front to avoid rehashing.
-      set->Reserve((config_.reserve > len) ? config_.reserve : len);
-    }
-
-    size_t increment = 1;
-    if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
-      increment = 2;
-    }
-
-    bool values_expired = false;
-
-    for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
-      string_view element = ToSV(ltrace->arr[i].rdb_var, &buf1_);
-
-      uint32_t ttl_sec = UINT32_MAX;
-      if (increment == 2) {
-        int64_t ttl_time = -1;
-        string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
-        if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
-          LOG(ERROR) << "Can't parse set TTL " << ttl_str;
-          ec_ = RdbError(errc::rdb_file_corrupted);
+    auto load = [&]<typename Set>() {
+      Set* set;
+      if (config_.append) {
+        if (!EnsureObjEncoding(OBJ_SET, kEncodingStrMap2)) {
           return;
         }
+        set = static_cast<Set*>(pv_->RObjPtr());
+      } else {
+        set = CompactObj::AllocateMR<Set>();
+        set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+        inner_obj = set;
 
-        if (ttl_time != -1) {
-          if (ttl_time <= set->time_now()) {
-            values_expired = true;
-            continue;
+        // Expand the set up front to avoid rehashing.
+        set->Reserve((config_.reserve > len) ? config_.reserve : len);
+      }
+
+      size_t increment = 1;
+      if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
+        increment = 2;
+      }
+
+      bool values_expired = false;
+
+      for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
+        string_view element = ToSV(ltrace->arr[i].rdb_var, &buf1_);
+
+        uint32_t ttl_sec = UINT32_MAX;
+        if (increment == 2) {
+          int64_t ttl_time = -1;
+          string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
+          if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
+            LOG(ERROR) << "Can't parse set TTL " << ttl_str;
+            ec_ = RdbError(errc::rdb_file_corrupted);
+            return;
           }
 
-          ttl_sec = ttl_time - set->time_now();
+          if (ttl_time != -1) {
+            if (ttl_time <= set->time_now()) {
+              values_expired = true;
+              continue;
+            }
+
+            ttl_sec = ttl_time - set->time_now();
+          }
+        }
+        if (!set->Add(element, ttl_sec)) {
+          LOG(ERROR) << "Duplicate set members detected " << absl::CHexEscape(element)
+                     << " with TTL " << ttl_sec << " " << rdb_type_ << " " << set->ExpirationUsed()
+                     << " " << config_.append;
+          ec_ = RdbError(errc::duplicate_key);
+          return;
         }
       }
-      if (!set->Add(element, ttl_sec)) {
-        LOG(ERROR) << "Duplicate set members detected " << absl::CHexEscape(element) << " with TTL "
-                   << ttl_sec << " " << rdb_type_ << " " << set->ExpirationUsed() << " "
-                   << config_.append;
-        ec_ = RdbError(errc::duplicate_key);
-        return;
+      if (set->Empty() && values_expired) {
+        ec_ = RdbError(errc::value_expired);
       }
-    }
-    if (set->Empty() && values_expired) {
-      ec_ = RdbError(errc::value_expired);
-    }
+    };
+    if (g_use_oah_set)
+      load.template operator()<OAHSet>();
+    else
+      load.template operator()<StringSet>();
   }
 
   if (ec_)
@@ -576,15 +704,16 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
 void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   QList* qlv2 = nullptr;
   if (config_.append) {
-    if (pv_->ObjType() != OBJ_LIST) {
-      ec_ = RdbError(errc::invalid_rdb_type);
+    if (!EnsureObjEncoding(OBJ_LIST, kEncodingQL2))
       return;
-    }
-    DCHECK_EQ(pv_->Encoding(), kEncodingQL2);
+
     qlv2 = static_cast<QList*>(pv_->RObjPtr());
   } else {
     qlv2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
                                          GetFlag(FLAGS_list_compress_depth));
+    if (uint32_t zstd_thresh = GetFlag(FLAGS_list_compress_dict_threshold); zstd_thresh > 0) {
+      qlv2->set_compr_threshold(zstd_thresh);
+    }
   }
 
   auto cleanup = absl::Cleanup([&] {
@@ -611,7 +740,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
     if (rdb_type_ == RDB_TYPE_LIST_QUICKLIST_2) {
       uint8_t* src = (uint8_t*)sv.data();
-      if (!lpValidateIntegrity(src, sv.size(), 0, nullptr, nullptr)) {
+      if (!lpValidateIntegrity(src, sv.size(), config_.deep_integrity ? 1 : 0, nullptr, nullptr)) {
         LOG(ERROR) << "Listpack integrity check failed.";
         ec_ = RdbError(errc::rdb_file_corrupted);
         return false;
@@ -655,11 +784,20 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
   std::move(cleanup).Cancel();
 
+  // Learn a thread-local ZSTD dictionary from the loaded data and compress interior
+  // nodes if the list is large and compressible. Controlled by
+  // --list_compress_dict_threshold; a no-op when the flag is 0. Runs per
+  // chunk for chunked lists, so newly appended interior nodes get compressed too.
+  qlv2->CompressAfterLoad();
+
   if (!config_.append) {
-    // Try to convert to listpack if it's a single-node quicklist
-    if (uint8_t* lp = qlv2->TryExtractListpack()) {
+    // Try to convert to listpack if it's a single-node quicklist, but only if there is no more data
+    // to come. In case of a chunked list, there can be a single node with more to come in future
+    // chunks.
+    // chunked=true and append=false is the first chunk (append is updated after reading object)
+    if (const auto list_ptr = config_.chunked ? nullptr : qlv2->TryExtractListpack()) {
       CompactObj::DeleteMR<QList>(qlv2);
-      pv_->InitRobj(OBJ_LIST, kEncodingListPack, lp);
+      pv_->InitRobj(OBJ_LIST, kEncodingListPack, list_ptr);
     } else {
       pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
     }
@@ -759,7 +897,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
 
     uint8_t* lp = (uint8_t*)data.data();
 
-    if (!StreamValidateListpackIntegrity(lp, data.size())) {
+    if (!StreamValidateListpackIntegrity(lp, data.size(), config_.deep_integrity ? 1 : 0)) {
       LOG(ERROR) << "Stream listpack integrity check failed.";
       ec_ = RdbError(errc::rdb_file_corrupted);
       return;
@@ -837,6 +975,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
       }
     }
 
+    uint64_t assigned = 0;
     for (const auto& cons : cg.cons_arr) {
       streamConsumer* consumer = StreamCreateConsumer(
           cgroup, ToSV(cons.name, &buf1_), cons.seen_time, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
@@ -859,17 +998,34 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
           return;
         }
 
+        // Each global PEL entry belongs to exactly one consumer; a second claim
+        // would share the NACK across consumer PELs and double-free it on delete.
+        if (nack->consumer != nullptr) {
+          LOG(ERROR) << "Global PEL entry already assigned to a consumer";
+          ec_ = RdbError(errc::rdb_file_corrupted);
+          return;
+        }
+
         /* Set the NACK consumer, that was left to NULL when
          * loading the global PEL. Then set the same shared
          * NACK structure also in the consumer-specific PEL. */
         nack->consumer = consumer;
+        ++assigned;
         if (!raxTryInsert(consumer->pel, ptr, rawid.size(), nack, NULL)) {
           LOG(ERROR) << "Duplicated consumer PEL entry loading a stream consumer group";
-          streamFreeNACK(nack);
+          // nack is owned by cgroup->pel and freed once during stream teardown.
           ec_ = RdbError(errc::duplicate_key);
           return;
         }
       }
+    }
+
+    // Every global PEL entry must be claimed by exactly one consumer; an
+    // unclaimed one leaves nack->consumer == nullptr for later dereference.
+    if (assigned != raxSize(cgroup->pel)) {
+      LOG(ERROR) << "Unclaimed global PEL entry loading a stream consumer group";
+      ec_ = RdbError(errc::rdb_file_corrupted);
+      return;
     }
   }
 
@@ -914,24 +1070,26 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
 
   if (rdb_type_ == RDB_TYPE_SET_INTSET || rdb_type_ == RDB_TYPE_SET_LISTPACK) {
     LoadBlobResult load_result = rdb_type_ == RDB_TYPE_SET_INTSET
-                                     ? SetFamily::LoadIntSetBlob(blob, pv_)
-                                     : SetFamily::LoadLPSetBlob(blob, pv_);
+                                     ? SetFamily::LoadIntSetBlob(blob, config_.deep_integrity, pv_)
+                                     : SetFamily::LoadLPSetBlob(blob, config_.deep_integrity, pv_);
     handle_load_result(load_result);
     return;
   }
 
   if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
-    LoadBlobResult load_result = rdb_type_ == RDB_TYPE_HASH_ZIPLIST
-                                     ? HSetFamily::LoadZiplistBlob(blob, pv_)
-                                     : HSetFamily::LoadListpackBlob(blob, pv_);
+    LoadBlobResult load_result =
+        rdb_type_ == RDB_TYPE_HASH_ZIPLIST
+            ? HSetFamily::LoadZiplistBlob(blob, pv_)
+            : HSetFamily::LoadListpackBlob(blob, config_.deep_integrity, pv_);
     handle_load_result(load_result);
     return;
   }
 
   if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST || rdb_type_ == RDB_TYPE_ZSET_LISTPACK) {
-    LoadBlobResult load_result = rdb_type_ == RDB_TYPE_ZSET_ZIPLIST
-                                     ? ZSetFamily::LoadZiplistBlob(blob, pv_)
-                                     : ZSetFamily::LoadListpackBlob(blob, pv_);
+    LoadBlobResult load_result =
+        rdb_type_ == RDB_TYPE_ZSET_ZIPLIST
+            ? ZSetFamily::LoadZiplistBlob(blob, pv_)
+            : ZSetFamily::LoadListpackBlob(blob, config_.deep_integrity, pv_);
     handle_load_result(load_result);
     return;
   } else if (rdb_type_ == RDB_TYPE_JSON) {
@@ -1262,7 +1420,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       }
       break;
     case RDB_TYPE_MODULE_2:
-      iores = ReadRedisJson();
+      iores = ReadRedisModule2();
       break;
     case RDB_TYPE_SBF:
       iores = ReadSBF();
@@ -1275,6 +1433,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       break;
     case RDB_TYPE_CMS:
       iores = ReadCMS();
+      break;
+    case RDB_TYPE_CUCKOO:
+      iores = ReadCuckoo();
       break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
@@ -1786,20 +1947,25 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
 }
 
-auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
-  auto json_magic_number = LoadLen(nullptr);
-  if (!json_magic_number) {
+auto RdbLoaderBase::ReadRedisModule2() -> io::Result<OpaqueObj> {
+  auto module_id = LoadLen(nullptr);
+  if (!module_id) {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
   constexpr string_view kJsonModule = "ReJSON-RL"sv;
-  string module_name = ModuleTypeName(*json_magic_number);
+  string module_name = ModuleTypeName(*module_id);
   if (module_name != kJsonModule) {
-    LOG(ERROR) << "Unsupported module: " << module_name;
-    return Unexpected(errc::unsupported_operation);
+    // We don't support any other module type except ReJSON, so we skip the key instead of
+    // failing the load.
+    LOG(WARNING) << "Skipping key with unsupported module type: " << module_name;
+    if (error_code ec = SkipModuleKeyData(); ec) {
+      return make_unexpected(ec);
+    }
+    return Unexpected(errc::feature_not_supported);
   }
 
-  int encver = *json_magic_number & 1023;
+  int encver = *module_id & 1023;
   if (encver != 3) {
     LOG(ERROR) << "Unsupported ReJSON version: " << encver;
     return Unexpected(errc::unsupported_operation);
@@ -2029,8 +2195,8 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
 
   SET_OR_UNEXPECT(LoadLen(nullptr), res.total_incr_count);
 
-  // Safely check for multiplication overflow BEFORE multiplying
-  if (depth > 0 && width > (SIZE_MAX / depth))
+  // Reject dimensions whose counter buffer (num_counters * sizeof(int64_t)) would overflow size_t.
+  if (width > (SIZE_MAX / sizeof(int64_t)) / depth)
     return Unexpected(errc::rdb_file_corrupted);
 
   res.width = static_cast<uint32_t>(width);
@@ -2046,6 +2212,99 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
   }
 
   return OpaqueObj{std::move(res), RDB_TYPE_CMS};
+}
+
+io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCuckoo() {
+  RdbCuckoo res;
+  uint64_t num_filters = 0;
+
+  if (!pending_read_.cf_filter.has_value() && pending_read_.remaining == 0) {
+    uint64_t slots_per_bucket, max_iterations, expansion;
+    SET_OR_UNEXPECT(LoadLen(nullptr), slots_per_bucket);
+    SET_OR_UNEXPECT(LoadLen(nullptr), max_iterations);
+    SET_OR_UNEXPECT(LoadLen(nullptr), expansion);
+
+    if (slots_per_bucket == 0 || slots_per_bucket > UINT8_MAX || max_iterations == 0 ||
+        max_iterations > UINT16_MAX || expansion > UINT16_MAX ||
+        (expansion != 0 && !absl::has_single_bit(expansion))) {
+      LOG(ERROR) << "Invalid Cuckoo filter parameters: slots_per_bucket=" << slots_per_bucket
+                 << ", max_iterations=" << max_iterations << ", expansion=" << expansion;
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    res.slots_per_bucket = static_cast<uint8_t>(slots_per_bucket);
+    res.max_iterations = static_cast<uint16_t>(max_iterations);
+    res.expansion = static_cast<uint16_t>(expansion);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.num_buckets);
+    if (!absl::has_single_bit(res.num_buckets))
+      return Unexpected(errc::rdb_file_corrupted);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.num_items);
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.num_deletes);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+    if (num_filters == 0)
+      return Unexpected(errc::rdb_file_corrupted);
+    pending_read_.cf_slots_per_bucket = res.slots_per_bucket;
+  } else {
+    num_filters = pending_read_.remaining;
+    pending_read_.remaining = 0;
+  }
+
+  auto read_cf_chunks = [&](std::string& data, size_t start_offset) -> io::Result<size_t> {
+    const size_t total = data.size();
+    size_t curr_offset = start_offset;
+    while (curr_offset < total && !ChunkBudgetExhausted()) {
+      uint64_t chunk_size;
+      SET_OR_UNEXPECT(LoadLen(nullptr), chunk_size);
+      if (chunk_size == 0 || chunk_size > total - curr_offset)
+        return Unexpected(errc::rdb_file_corrupted);
+      if (auto ec = FetchBuf(chunk_size, data.data() + curr_offset))
+        return make_unexpected(ec);
+      curr_offset += chunk_size;
+    }
+    return curr_offset;
+  };
+
+  if (pending_read_.cf_filter) {
+    auto& cf_st = *pending_read_.cf_filter;
+    SET_OR_UNEXPECT(read_cf_chunks(cf_st.filter_data, cf_st.offset), cf_st.offset);
+    if (cf_st.offset < cf_st.filter_data.size()) {
+      pending_read_.remaining = num_filters;
+      return OpaqueObj{std::move(res), RDB_TYPE_CUCKOO};
+    }
+    if (cf_st.filter_data.empty() || cf_st.filter_data.size() % cf_st.slots_per_bucket != 0)
+      return Unexpected(errc::rdb_file_corrupted);
+    res.filters.push_back(std::move(cf_st.filter_data));
+    pending_read_.cf_filter.reset();
+    --num_filters;
+  }
+
+  // If the previous filter is complete and there are more start the next one
+  const uint8_t spb = pending_read_.cf_slots_per_bucket;
+  if (spb == 0)
+    return Unexpected(errc::rdb_file_corrupted);
+  res.filters.reserve(num_filters);
+  for (; num_filters > 0 && !ChunkBudgetExhausted(); --num_filters) {
+    uint64_t total_size;
+    SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
+    if (total_size == 0 || total_size % spb != 0)
+      return Unexpected(errc::rdb_file_corrupted);
+
+    std::string blob(total_size, '\0');
+    size_t offset = 0;
+    SET_OR_UNEXPECT(read_cf_chunks(blob, 0), offset);
+
+    if (offset < total_size) {
+      pending_read_.cf_filter = {std::move(blob), offset, spb};
+      pending_read_.remaining = num_filters;
+      return OpaqueObj{std::move(res), RDB_TYPE_CUCKOO};
+    }
+    res.filters.push_back(std::move(blob));
+  }
+
+  pending_read_.remaining = num_filters;
+  return OpaqueObj{std::move(res), RDB_TYPE_CUCKOO};
 }
 
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
@@ -2242,25 +2501,24 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_EOF) {
-      if (current_chunk_state_) {
-        LOG(ERROR) << "eof seen while a previous chunk is not yet finished, stream id "
-                   << current_chunk_state_->stream_id << ", remaining bytes "
-                   << current_chunk_state_->remaining_payload_bytes
-                   << ", pending stream states: " << stream_states_.size();
-        return RdbError(errc::rdb_chunk_payload_remaining);
-      }
+      if (current_chunk_state_)
+        LOG(WARNING) << "eof seen while a previous chunk is not yet finished, stream id "
+                     << current_chunk_state_->stream_id << ", remaining bytes "
+                     << current_chunk_state_->remaining_payload_bytes
+                     << ", pending stream states: " << stream_states_.size();
 
       if (!stream_states_.empty()) {
-        LOG(ERROR) << "eof seen while pending stream states: " << stream_states_.size();
-        return RdbError(errc::rdb_chunk_payload_remaining);
+        LOG(WARNING) << "eof seen while pending stream states: " << stream_states_.size();
       }
+      current_chunk_state_.reset();
+      stream_states_.clear();
       /* EOF: End of file, exit the main loop. */
       break;
     }
 
     if (type == RDB_OPCODE_FULLSYNC_END) {
-      LOG(INFO) << "Read RDB_OPCODE_FULLSYNC_END rss="
-                << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
+      VLOG(2) << "Read RDB_OPCODE_FULLSYNC_END rss="
+              << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
       RETURN_ON_ERR(EnsureRead(8));
       RETURN_ON_ERR(ConsumeInput(8));  // ignore 8 bytes
 
@@ -2334,7 +2592,7 @@ error_code RdbLoader::Load(io::Source* src) {
       string module_name = ModuleTypeName(module_id);
 
       LOG(WARNING) << "WARNING: Skipping data for module " << module_name;
-      RETURN_ON_ERR(SkipModuleData());
+      RETURN_ON_ERR(SkipModuleAuxData());
       continue;
     }
 
@@ -2561,12 +2819,20 @@ error_code RdbLoaderBase::AllocateDecompressOnce(int op_type) {
   return {};
 }
 
-error_code RdbLoaderBase::SkipModuleData() {
+error_code RdbLoaderBase::SkipModuleAuxData() {
   uint64_t opcode;
   SET_OR_RETURN(LoadLen(nullptr), opcode);  // ignore field 'when_opcode'
+
   if (opcode != RDB_MODULE_OPCODE_UINT)
     return RdbError(errc::rdb_file_corrupted);
+
   SET_OR_RETURN(LoadLen(nullptr), opcode);  // ignore field 'when'
+
+  return SkipModuleKeyData();
+}
+
+error_code RdbLoaderBase::SkipModuleKeyData() {
+  uint64_t opcode;
 
   while (true) {
     SET_OR_RETURN(LoadLen(nullptr), opcode);
@@ -2757,8 +3023,6 @@ error_code RdbLoader::HandleAux() {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
-  } else if (auxkey == "hnsw-index-metadata") {
-    LoadHnswIndexMetadataFromAux(std::move(auxval));
   } else if (auxkey == "search-synonyms") {
     LoadSearchSynonymsFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
@@ -2952,7 +3216,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     // bogus negative memory delta and crash in AccountObjectMemory.
     auto it = updater.it;
     updater.post_updater.Run();
-    StashPrimeValue(db_cntx.db_index, item->key, &it->second, ts, nullptr);
+    StashPrimeValue(db_cntx.db_index, item->key, it->first, &it->second, ts, nullptr);
 
     // Block, if tiered storage is active, but can't keep up
     while (db_slice->shard_owner()->ShouldThrottleForTiering())
@@ -3087,8 +3351,14 @@ io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& 
   const bool was_appending = pending_read_.remaining != 0;
 
   // Read a part of the object. Updates remaining items
-  if (auto ec = ReadObj(object_type, &item->val); ec)
+  if (auto ec = ReadObj(object_type, &item->val); ec) {
+    if (ec == RdbError(errc::feature_not_supported)) {
+      LOG(WARNING) << "Skipping unsupported key: " << key;
+      pending_read_ = {};
+      return true;
+    }
     return make_unexpected(ec);
+  }
 
   const bool finalized = pending_read_.remaining == 0;
 
@@ -3182,37 +3452,17 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition", true);
 }
 
-void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
-  try {
-    auto json_opt = JsonFromString(def);
-    if (!json_opt) {
-      LOG(ERROR) << "Invalid HNSW index metadata JSON: " << def;
-      return;
-    }
-    const auto& json = *json_opt;
-
-    PendingHnswMetadata phm;
-    phm.index_name = json["index_name"].as<string>();
-    phm.field_name = json["field_name"].as<string>();
-    phm.metadata.enterpoint_node = json["enterpoint_node"].as<size_t>();
-
-    LOG(INFO) << "Loaded HNSW metadata for index=" << phm.index_name << " field=" << phm.field_name
-              << " enterpoint=" << phm.metadata.enterpoint_node;
-
-    load_context_->AddPendingHnswMetadata(std::move(phm));
-  } catch (const std::exception& e) {
-    LOG(ERROR) << "Failed to parse HNSW index metadata JSON: " << e.what() << " def: " << def;
-  }
-}
-
 error_code RdbLoader::HandleVectorIndex() {
   // HNSW vector index graph data.
-  // Binary format: [index_key, elements_number,
-  //   then for each node (little-endian):
+  // Binary format: [index_key, enterpoint_node, elements_number,
+  //   then for each node (little-endian, ascending internal_id 0..count-1):
   //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
   //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
   string index_key;
   SET_OR_RETURN(FetchGenericString(), index_key);
+
+  search::HnswIndexMetadata metadata;
+  SET_OR_RETURN(LoadLen(nullptr), metadata.enterpoint_node);
 
   uint64_t elements_number;
   SET_OR_RETURN(LoadLen(nullptr), elements_number);
@@ -3231,12 +3481,12 @@ error_code RdbLoader::HandleVectorIndex() {
 
   if (shard_count_ == shard_set->size()) {
     // Same shard count: restore directly.
-    return RestoreVectorIndex(index_key, index_name, field_name, elements_number);
+    return RestoreVectorIndex(index_key, index_name, field_name, elements_number, metadata);
   }
 
   // Different shard count: load nodes and defer restoration.
   // Global_ids will be remapped in PerformPostLoad after all key mappings are collected.
-  PendingHnswNodes pending{std::string(index_name), std::string(field_name), {}};
+  PendingHnswNodes pending{std::string(index_name), std::string(field_name), metadata, {}};
   RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &pending.nodes));
   LOG(INFO) << "Deferred HNSW index restore for " << index_key << " with " << pending.nodes.size()
             << " nodes (shard count mismatch: " << shard_count_ << " vs " << shard_set->size()
@@ -3312,7 +3562,8 @@ error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
 }
 
 error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
-                                         string_view field_name, uint64_t elements_number) {
+                                         string_view field_name, uint64_t elements_number,
+                                         const search::HnswIndexMetadata& metadata) {
 #ifdef WITH_SEARCH
   // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
   auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
@@ -3327,13 +3578,7 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
   if (nodes.empty())
     return {};
 
-  auto metadata = load_context_->FindHnswMetadata(index_name, field_name);
-  if (!metadata) {
-    LOG(ERROR) << "HNSW metadata missing for " << index_key
-               << "; skipping graph restore — index will be rebuilt from keyspace";
-    return {};
-  }
-  if (!hnsw_index->RestoreFromNodes(nodes, *metadata)) {
+  if (!hnsw_index->RestoreFromNodes(nodes, metadata)) {
     LOG(WARNING) << "HNSW graph restore rejected for " << index_key
                  << "; index will be rebuilt from keyspace";
     return {};

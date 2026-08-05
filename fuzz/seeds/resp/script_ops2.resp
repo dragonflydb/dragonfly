@@ -1,7 +1,7 @@
-*4
+*5
 $4
 EVAL
-$44
+$42
 return redis.call('SET', KEYS[1], ARGV[1])
 $1
 1
@@ -12,7 +12,7 @@ esval
 *4
 $7
 EVAL_RO
-$37
+$33
 return redis.call('GET', KEYS[1])
 $1
 1
@@ -32,15 +32,15 @@ $6
 EXISTS
 $40
 e0e1f9fabfc9d4800c877a703b823ac0578ff831
-*4
-$8
+*3
+$7
 EVALSHA
 $40
 e0e1f9fabfc9d4800c877a703b823ac0578ff831
 $1
 0
-*4
-$11
+*3
+$10
 EVALSHA_RO
 $40
 e0e1f9fabfc9d4800c877a703b823ac0578ff831

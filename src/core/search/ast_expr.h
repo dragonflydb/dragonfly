@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <iosfwd>
 #include <memory>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -36,6 +37,23 @@ using AstTermNode = AstAffixNode<TagType::REGULAR>;
 using AstPrefixNode = AstAffixNode<TagType::PREFIX>;
 using AstSuffixNode = AstAffixNode<TagType::SUFFIX>;
 using AstInfixNode = AstAffixNode<TagType::INFIX>;
+
+// Glob pattern from `w'...'` syntax. `affix` holds the verbatim pattern: `*` matches any run of
+// characters, `?` matches exactly one, `\` escapes the next character to a literal.
+using AstWildcardNode = AstAffixNode<TagType::WILDCARD>;
+
+// Quoted multi-word phrase. `raw` is the verbatim content between quotes; the
+// executor runs the shared text tokenizer over it and matches the resulting
+// tokens against posting-list positions.
+// `slop` = max intervening tokens allowed between consecutive phrase terms
+// (in order). slop=0 = exact adjacency; slop>0 comes from `"..."~N` syntax.
+struct AstPhraseNode {
+  explicit AstPhraseNode(std::string raw, uint32_t slop = 0) : raw{std::move(raw)}, slop{slop} {
+  }
+
+  std::string raw;
+  uint32_t slop = 0;
+};
 
 // Matches numeric range
 struct AstRangeNode {
@@ -77,6 +95,20 @@ struct AstNegateNode {
   std::unique_ptr<AstNode> node;
 };
 
+// Applies query attributes to a subtree.
+struct AstAttributeNode {
+  AstAttributeNode(AstNode&& node, double weight);
+
+  AstAttributeNode(const AstAttributeNode&) = delete;
+  AstAttributeNode& operator=(const AstAttributeNode&) = delete;
+
+  AstAttributeNode(AstAttributeNode&&) noexcept = default;
+  AstAttributeNode& operator=(AstAttributeNode&&) noexcept = default;
+
+  std::unique_ptr<AstNode> node;
+  double weight = 1.0;
+};
+
 // Applies logical operation to results of all sub-nodes
 struct AstLogicalNode {
   enum LogicOp { AND, OR };
@@ -110,7 +142,8 @@ struct AstFieldNode {
 
 // Stores a list of tags for a tag query
 struct AstTagsNode {
-  using TagValue = std::variant<AstTermNode, AstPrefixNode, AstSuffixNode, AstInfixNode>;
+  using TagValue =
+      std::variant<AstTermNode, AstPrefixNode, AstSuffixNode, AstInfixNode, AstWildcardNode>;
 
   struct TagValueProxy
       : public AstTagsNode::TagValue {  // bison needs it to be default constructible
@@ -129,8 +162,8 @@ struct AstTagsNode {
 // Applies nearest neighbor search to the final result set
 struct AstKnnNode {
   AstKnnNode() = default;
-  AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec,
-             std::string_view score_alias, std::optional<size_t> ef_runtime);
+  AstKnnNode(uint32_t limit, std::string_view field, std::string blob, std::string_view score_alias,
+             std::optional<uint32_t> ef_runtime);
 
   AstKnnNode(AstNode&& sub, AstKnnNode&& self);
 
@@ -147,9 +180,9 @@ struct AstKnnNode {
   std::unique_ptr<AstNode> filter;
   size_t limit;
   std::string field;
-  OwnedFtVector vec;
+  std::string blob;  // raw query-vector bytes, decoded at search time using the field dtype
   std::string score_alias;
-  std::optional<float> ef_runtime;
+  std::optional<uint32_t> ef_runtime;
 
   bool HasPreFilter() const;
 };
@@ -157,7 +190,8 @@ struct AstKnnNode {
 // Applies vector range search: returns all docs with distance(vec, doc_vec) <= radius
 struct AstVectorRangeNode {
   AstVectorRangeNode() = default;
-  AstVectorRangeNode(std::string field, double radius, OwnedFtVector vec, std::string score_alias);
+  AstVectorRangeNode(std::string field, double radius, std::string blob, std::string score_alias,
+                     std::optional<double> epsilon);
 
   AstVectorRangeNode(const AstVectorRangeNode&) = delete;
   AstVectorRangeNode& operator=(const AstVectorRangeNode&) = delete;
@@ -171,14 +205,16 @@ struct AstVectorRangeNode {
 
   std::string field;
   double radius;
-  OwnedFtVector vec;
+  std::string blob;  // raw query-vector bytes, decoded at search time using the field dtype
   std::string score_alias;
+  std::optional<double> epsilon;
 };
 
-using NodeVariants = std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode,
-                                  AstPrefixNode, AstSuffixNode, AstInfixNode, AstRangeNode,
-                                  AstNegateNode, AstOptionalNode, AstLogicalNode, AstFieldNode,
-                                  AstTagsNode, AstKnnNode, AstGeoNode, AstVectorRangeNode>;
+using NodeVariants =
+    std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode,
+                 AstSuffixNode, AstInfixNode, AstWildcardNode, AstPhraseNode, AstRangeNode,
+                 AstNegateNode, AstOptionalNode, AstAttributeNode, AstLogicalNode, AstFieldNode,
+                 AstTagsNode, AstKnnNode, AstGeoNode, AstVectorRangeNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;
@@ -204,6 +240,6 @@ using AstExpr = AstNode;
 }  // namespace dfly
 
 namespace std {
-ostream& operator<<(ostream& os, optional<size_t> o);
+ostream& operator<<(ostream& os, optional<uint32_t> o);
 ostream& operator<<(ostream& os, dfly::search::AstTagsNode::TagValueProxy o);
 }  // namespace std

@@ -1,17 +1,17 @@
 import asyncio
 import json as json_mod
-import random
 import logging
-import re
-import typing
 import math
-import redis
-import redis.asyncio as aioredis
-from dataclasses import dataclass
-import time
+import random
+import re
 import sys
+import time
+from dataclasses import dataclass
 
 import numpy as np
+import redis.asyncio as aioredis
+
+import redis
 
 try:
     from importlib import resources as impresources
@@ -25,10 +25,10 @@ class SeederBase:
     CACHED_SCRIPTS = {}
     DEFAULT_TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON", "STREAM"]
 
-    def __init__(self, types: typing.Optional[typing.List[str]] = None, seed=None):
+    def __init__(self, types: list[str] | None = None, seed=None):
         self.uid = SeederBase.UID_COUNTER
         SeederBase.UID_COUNTER += 1
-        self.types = types if types is not None else SeederBase.DEFAULT_TYPES
+        self.types = types if types is not None else type(self).DEFAULT_TYPES
 
         self.seed = random.randrange(sys.maxsize)
         if seed is not None:
@@ -38,9 +38,7 @@ class SeederBase:
         logging.debug(f"Random seed: {self.seed}, check: {random.randrange(100)}")
 
     @classmethod
-    async def capture(
-        clz, client: aioredis.Redis, types: typing.Optional[typing.List[str]] = None
-    ) -> typing.Tuple[int]:
+    async def capture(clz, client: aioredis.Redis, types: list[str] | None = None) -> tuple[int]:
         """Generate hash capture for all data stored in instance pointed by client"""
 
         sha = await client.script_load(clz._load_script("hash"))
@@ -92,7 +90,7 @@ class DebugPopulateSeeder(SeederBase):
         variance=5,
         samples=10,
         collection_size=None,
-        types: typing.Optional[typing.List[str]] = None,
+        types: list[str] | None = None,
         seed=None,
     ):
         SeederBase.__init__(self, types, seed)
@@ -138,6 +136,8 @@ class DebugPopulateSeeder(SeederBase):
 
 
 class Seeder(SeederBase):
+    DEFAULT_TYPES = SeederBase.DEFAULT_TYPES + ["CF", "SBF", "CMS"]
+
     @dataclass
     class Unit:
         prefix: str
@@ -145,7 +145,7 @@ class Seeder(SeederBase):
         counter: int
         stop_key: str
 
-    units: typing.List[Unit]
+    units: list[Unit]
 
     def __init__(
         self,
@@ -153,7 +153,7 @@ class Seeder(SeederBase):
         key_target=10_000,
         data_size=100,
         collection_size=None,
-        types: typing.Optional[typing.List[str]] = None,
+        types: list[str] | None = None,
         huge_value_target=5,
         huge_value_size=100000,
         seed=None,
@@ -232,11 +232,29 @@ class Seeder(SeederBase):
         unit.counter = int(result[0])
         huge_entries = int(result[1])
 
-        msg = f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}"
+        msg = f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4 + 0]}"
         if huge_entries > 0:
             msg = f"{msg}. Total huge entries {huge_entries} added."
 
         logging.debug(msg)
+
+
+def np_dtype_for(data_type: str):
+    """Maps a vector field TYPE token to the numpy dtype clients encode with."""
+    simple = {
+        "FLOAT32": np.float32,
+        "FLOAT64": np.float64,
+        "FLOAT16": np.float16,
+        "INT8": np.int8,
+        "UINT8": np.uint8,
+    }
+    if data_type in simple:
+        return simple[data_type]
+    if data_type == "BFLOAT16":
+        import ml_dtypes  # optional dependency, only needed for bfloat16
+
+        return ml_dtypes.bfloat16
+    raise ValueError(f"unsupported vector data_type: {data_type}")
 
 
 class HnswSearchSeeder:
@@ -249,6 +267,7 @@ class HnswSearchSeeder:
         num_initial_docs=200,
         seed=42,
         document_type="HASH",
+        data_type="FLOAT32",
     ):
         if document_type not in ("HASH", "JSON"):
             raise ValueError(f"document_type must be HASH or JSON, got {document_type}")
@@ -258,12 +277,20 @@ class HnswSearchSeeder:
         self.num_initial_docs = num_initial_docs
         self.seed = seed
         self.document_type = document_type
+        self.data_type = data_type
+        self.np_dtype = np_dtype_for(data_type)
 
         self._doc_counter = 0
         self._stop_event = asyncio.Event()
 
     def _make_embedding(self):
-        return np.random.uniform(-10, 10, self.num_dims).astype(np.float32)
+        # Integer dtypes must carry whole numbers (JSON stores them as JSON numbers); keep the
+        # range well inside the type so quantization is lossless and KNN ordering is stable.
+        if np.issubdtype(self.np_dtype, np.integer):
+            info = np.iinfo(self.np_dtype)
+            lo, hi = max(info.min, -100), min(info.max, 100)
+            return np.random.randint(lo, hi + 1, self.num_dims).astype(self.np_dtype)
+        return np.random.uniform(-10, 10, self.num_dims).astype(self.np_dtype)
 
     def _field(self, name: str, *spec: str) -> list:
         # FT.CREATE field syntax: HASH uses the field name directly; JSON
@@ -283,7 +310,7 @@ class HnswSearchSeeder:
                 "HNSW",
                 "6",
                 "TYPE",
-                "FLOAT32",
+                self.data_type,
                 "DIM",
                 str(self.num_dims),
                 "DISTANCE_METRIC",
@@ -339,7 +366,8 @@ class HnswSearchSeeder:
                 "JSON.SET", key, "$.embedding", json_mod.dumps(emb.tolist())
             )
 
-    async def seed_initial_docs(self, client: aioredis.Redis):
+    async def seed_initial_docs(self, client: aioredis.Redis, batch_size: int = 2000):
+        # Flush periodically to avoid unbounded pipeline buffering at high N.
         if self.document_type == "HASH":
             pipe = client.pipeline(transaction=False)
             for i in range(self.num_initial_docs):
@@ -352,6 +380,9 @@ class HnswSearchSeeder:
                         "embedding": emb.tobytes(),
                     },
                 )
+                if (i + 1) % batch_size == 0:
+                    await pipe.execute()
+                    pipe = client.pipeline(transaction=False)
             await pipe.execute()
         else:
             for i in range(self.num_initial_docs):
@@ -363,10 +394,13 @@ class HnswSearchSeeder:
 
     async def _search_knn(self, client, query_vec, k=5):
         """Run a KNN search and return (total_count, set_of_doc_ids)."""
+        # NOCONTENT: only keys are needed, and it avoids returning the raw binary
+        # embedding field that a decode_responses client cannot decode.
         r = await client.execute_command(
             "FT.SEARCH",
             self.index_name,
-            "*=>[KNN {k} @embedding $vec]".format(k=k),
+            f"*=>[KNN {k} @embedding $vec]",
+            "NOCONTENT",
             "PARAMS",
             "2",
             "vec",
@@ -375,7 +409,7 @@ class HnswSearchSeeder:
             "0",
             str(k),
         )
-        doc_ids = set(r[i] for i in range(1, len(r), 2))
+        doc_ids = set(r[1:])
         return r[0], doc_ids
 
     async def _search_knn_filtered(self, client, query_vec, doc_id, k=5):
@@ -385,11 +419,12 @@ class HnswSearchSeeder:
         checks presence in the index, making this a reliable existence check.
         """
         doc_key = doc_id if isinstance(doc_id, str) else doc_id.decode()
-        doc_num = doc_key[len(self.prefix) :] if doc_key.startswith(self.prefix) else doc_key
+        doc_num = doc_key.removeprefix(self.prefix)
         r = await client.execute_command(
             "FT.SEARCH",
             self.index_name,
-            "@doc_id:{{{id}}}=>[KNN {k} @embedding $vec]".format(id=doc_num, k=k),
+            f"@doc_id:{{{doc_num}}}=>[KNN {k} @embedding $vec]",
+            "NOCONTENT",
             "PARAMS",
             "2",
             "vec",
@@ -486,6 +521,7 @@ class HnswSearchSeeder:
                     "FT.SEARCH",
                     self.index_name,
                     "*=>[KNN 5 @embedding $vec]",
+                    "NOCONTENT",
                     "PARAMS",
                     "2",
                     "vec",

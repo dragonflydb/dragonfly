@@ -59,14 +59,18 @@ vector<string> FormatEvalSlowlog(const ConnectionState& state) {
 
 }  // namespace
 
-StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyMode mode)
-    : cid_{cid}, args_{args}, reply_mode_{mode} {
+StoredCmd::StoredCmd(const CommandId* cid, const facade::ParsedArgs& args, facade::ReplyMode mode)
+    : cid_{cid}, reply_mode_{mode} {
   backed_ = std::make_unique<cmn::BackedArguments>(args.begin(), args.end(), args.size());
   args_ = facade::ParsedArgs{*backed_};
 }
 
-CmdArgList StoredCmd::Slice(CmdArgVec* scratch) const {
-  return args_.ToSlice(scratch);
+StoredCmd::StoredCmd(const CommandId* cid, cmn::BackedArguments* src, uint8_t tail_index,
+                     facade::ReplyMode mode)
+    : cid_{cid}, reply_mode_{mode} {
+  backed_ = std::make_unique<cmn::BackedArguments>();
+  backed_->SwapArgs(*src);
+  args_ = facade::ParsedArgs{*backed_, tail_index};
 }
 
 std::string StoredCmd::FirstArg() const {
@@ -76,6 +80,10 @@ std::string StoredCmd::FirstArg() const {
   return string{args_.Front()};
 }
 
+CmdRef StoredCmd::Ref() const {
+  return CmdRef{cid_, args_, reply_mode_};
+}
+
 ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredentials cred)
     : facade::ConnectionContext(owner) {
   if (owner) {
@@ -83,6 +91,10 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
     has_main_or_memcache_listener = owner->IsMainOrMemcache();
   }
 
+  SetAclCredentials(std::move(cred));
+}
+
+void ConnectionContext::SetAclCredentials(acl::UserCredentials cred) {
   keys = std::move(cred.keys);
   pub_sub = std::move(cred.pub_sub);
   if (cred.acl_commands.empty()) {
@@ -112,11 +124,16 @@ void ConnectionContext::ChangeMonitor(bool start) {
   // Tell other threads that about the change in the number of connection that we monitor
   shard_set->pool()->AwaitBrief(
       [start](unsigned, auto*) { ServerState::tlocal()->Monitors().NotifyChangeCount(start); });
-  EnableMonitoring(start);
+  if (start) {
+    EnableMonitoring();
+  } else {
+    DisableMonitoring();
+  }
 }
 
 void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, bool sharded,
-                                           CmdArgList args, facade::RedisReplyBuilder* rb) {
+                                           const facade::ParsedArgs& args,
+                                           facade::RedisReplyBuilder* rb) {
   vector<unsigned> result = ChangeSubscriptions(args, false, to_add, to_reply);
 
   if (to_reply) {
@@ -125,12 +142,13 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, bool shar
     const absl::Span<const string_view> action = sharded ? actionSharded : actionRegular;
     SinkReplyBuilder::ReplyScope scope{rb};
     for (size_t i = 0; i < result.size(); ++i) {
-      SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i], rb);
+      SendSubscriptionChangedResponse(action[to_add], args[i], result[i], rb);
     }
   }
 }
 
-void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply, CmdArgList args,
+void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply,
+                                            const facade::ParsedArgs& args,
                                             facade::RedisReplyBuilder* rb) {
   vector<unsigned> result = ChangeSubscriptions(args, true, to_add, to_reply);
 
@@ -142,7 +160,7 @@ void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply, CmdArgLi
 
     SinkReplyBuilder::ReplyScope scope{rb};
     for (size_t i = 0; i < result.size(); ++i) {
-      SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i], rb);
+      SendSubscriptionChangedResponse(action[to_add], args[i], result[i], rb);
     }
   }
 }
@@ -172,12 +190,6 @@ size_t ConnectionState::ExecInfo::UsedMemory() const {
   return HeapSize(body) + HeapSize(watched_keys);
 }
 
-void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, ArgSlice args) {
-  body.emplace_back(cid, args);
-  stored_cmd_bytes += body.back().UsedMemory();
-  is_write |= cid->IsJournaled();
-}
-
 size_t ConnectionState::ExecInfo::ClearStoredCmds() {
   const size_t used = GetStoredCmdBytes();
   vector<StoredCmd>{}.swap(body);
@@ -203,6 +215,11 @@ size_t ConnectionContext::UsedMemory() const {
          HeapSize(pub_sub.globs);
 }
 
+void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
+  if (transaction)
+    transaction->CancelBlocking(nullptr);
+}
+
 void ConnectionContext::Unsubscribe(std::string_view channel) {
   auto* sinfo = conn_state.subscribe_info.get();
   DCHECK(sinfo);
@@ -215,7 +232,7 @@ void ConnectionContext::Unsubscribe(std::string_view channel) {
   }
 }
 
-vector<unsigned> ConnectionContext::ChangeSubscriptions(CmdArgList channels, bool pattern,
+vector<unsigned> ConnectionContext::ChangeSubscriptions(facade::ParsedArgs channels, bool pattern,
                                                         bool to_add, bool to_reply) {
   vector<unsigned> result(to_reply ? channels.size() : 0, 0);
 
@@ -299,16 +316,22 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
 void CommandContext::ReuseInternal() {
   cid_ = nullptr;
   tx_ = nullptr;
-  arg_slice_backing.clear();
-  start_time_ns = 0;
+  tail_args_ = {};
+  start_cycle = 0;
 }
 
-void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
-  DCHECK_GT(start_time_ns, 0u);
-  int64_t after = absl::GetCurrentTimeNanos();
+void CommandContext::RecordLatency(const facade::ParsedArgs& tail_args) const {
+  DCHECK_GT(start_cycle, 0u);
+  const uint64_t end_cycle = base::CycleClock::Now();
+  if (end_cycle < start_cycle) {
+    LOG(ERROR) << "Cycle clock moved backwards while recording " << cid_->name()
+               << " latency: start=" << start_cycle << ", end=" << end_cycle
+               << ", frequency=" << base::CycleClock::Frequency();
+    return;
+  }
 
   ServerState* ss = ServerState::SafeTLocal();  // Might have migrated thread, read after invocation
-  int64_t execution_time_usec = (after - start_time_ns) / 1000;
+  uint64_t execution_time_usec = base::CycleClock::ToUsec(end_cycle - start_cycle);
 
   cid_->RecordLatency(ss->thread_index(), execution_time_usec);
   DCHECK(conn_cntx_ != nullptr);
@@ -319,38 +342,37 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
     return;
 
   if (!ss->ShouldLogSlowCmd(execution_time_usec))  // It was not a slow command
-    return;
+    return;                                        // fast path - no logging is required
 
+  // Slow path - logging is required.
   auto* cntx = static_cast<dfly::ConnectionContext*>(conn_cntx());
 
   // Log nested commands of scripts that made it into slowlog
-  if (auto sinfo = cntx->conn_state.script_info.get(); !cid_->MultiControlKind() && sinfo)
+  if (auto sinfo = cntx->conn_state.script_info.get(); !cid_->IsMultiTransactional() && sinfo)
     sinfo->stats.slow_commands.fetch_add(1, memory_order_relaxed);
 
   vector<string> aux_params;
   CmdArgVec aux_slice;
+  facade::ParsedArgs slowlog_args = tail_args;
 
   // Rewrite arguments for exec/eval with stats
-  if (auto mck = cid_->MultiControlKind(); mck) {
-    switch (*mck) {
-      case CO::MultiControlKind::EXEC:
-        if (cid_->name() == "EXEC")
-          aux_params = FormatExecSlowlog(cntx->conn_state);
-        break;
-      case CO::MultiControlKind::EVAL:
-        aux_params = FormatEvalSlowlog(cntx->conn_state);
-        break;
-    };
+  if (cid_->IsMultiTransactional()) {
+    if (cid_->IsExec())
+      aux_params = FormatExecSlowlog(cntx->conn_state);
+    else if (cid_->IsEvalGroup())
+      aux_params = FormatEvalSlowlog(cntx->conn_state);
+
     aux_slice = {aux_params.begin(), aux_params.end()};
     if (tail_args.size() > 0) {
+      facade::ParsedArgs args_suffix = tail_args;
       if (!aux_params.empty())
-        tail_args.remove_prefix(1);  // remove script/sha from eval/evalsha
-      aux_slice.insert(aux_slice.end(), tail_args.begin(), tail_args.end());
+        args_suffix = args_suffix.Tail(1);  // remove script/sha from eval/evalsha
+      aux_slice.insert(aux_slice.end(), args_suffix.begin(), args_suffix.end());
     }
-    tail_args = aux_slice;
+    slowlog_args = facade::ArgSlice{aux_slice};
   }
 
-  ServerState::SafeTLocal()->GetSlowLog().Add(cid_->name(), tail_args, conn->GetName(),
+  ServerState::SafeTLocal()->GetSlowLog().Add(cid_->name(), slowlog_args, conn->GetName(),
                                               conn->RemoteEndpointStr(), execution_time_usec,
                                               absl::GetCurrentTimeNanos() / 1000);
 }

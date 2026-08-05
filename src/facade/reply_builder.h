@@ -7,11 +7,18 @@
 
 #include <boost/intrusive/list.hpp>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <type_traits>
 
+#include "common/borrowed_string.h"
 #include "facade/facade_stats.h"
 #include "facade/facade_types.h"
 #include "io/io.h"
+
+namespace cmn {
+class BorrowedString;
+}  // namespace cmn
 
 namespace facade {
 
@@ -19,6 +26,9 @@ enum class RespVersion { kResp2, kResp3 };
 
 // Base class for all reply builders. Offer a simple high level interface for controlling output
 // modes and sending basic response types.
+// By default, pointer validity for reference types (string_view, const BorrowedString&) is only
+// assumed for the Send...() function call. Use ReplyScope if the lifetime is longer to avoid copies
+// and enable zero-copy vectorized IO.
 class SinkReplyBuilder {
   struct GuardBase {
     bool prev;
@@ -31,9 +41,9 @@ class SinkReplyBuilder {
 
   struct PendingPin : public boost::intrusive::list_base_hook<
                           ::boost::intrusive::link_mode<::boost::intrusive::normal_link>> {
-    uint64_t timestamp_ns;
+    uint64_t timestamp_cycles;  // base::CycleClock::Now() value
 
-    PendingPin(uint64_t v = 0) : timestamp_ns(v) {
+    PendingPin(uint64_t v = 0) : timestamp_cycles(v) {
     }
   };
 
@@ -58,6 +68,17 @@ class SinkReplyBuilder {
     ~ReplyScope();
   };
 
+  // Temporarily pauses an active ReplyScope. While paused, Send calls copy data as usual
+  // (no zero-copy refs). Restores the previous scoped_ state on destruction.
+  struct ScopePause : GuardBase {
+    explicit ScopePause(SinkReplyBuilder* rb) : GuardBase{std::exchange(rb->scoped_, false), rb} {
+    }
+
+    ~ScopePause() {
+      rb->scoped_ = prev;
+    }
+  };
+
   // Aggregator reduces the number of raw send calls by copying data in an intermediate buffer.
   // Prefer ReplyScope if possible to additionally reduce the number of copies.
   struct ReplyAggregator : GuardBase {
@@ -68,7 +89,9 @@ class SinkReplyBuilder {
     ~ReplyAggregator();
   };
 
-  void Flush(size_t expected_buffer_cap = 0);  // Send all accumulated data and reset to clear state
+  // Send all accumulated data and reset to clear state
+  // `additional_bytes` hints how many bytes did not fit into the buffer to possibly grow it
+  void Flush(size_t additional_bytes = 0);
 
   std::error_code GetError() const {
     return ec_;
@@ -83,11 +106,19 @@ class SinkReplyBuilder {
   }
 
   bool IsSendActive() const {
-    return send_time_ns_ > 0;
+    return send_time_cycles_ > 0;
   }
 
   void SetBatchMode(bool b) {
     batched_ = b;
+  }
+
+  bool IsBatchMode() const {
+    return batched_;
+  }
+
+  bool IsScoped() const {
+    return scoped_;
   }
 
   void CloseConnection();
@@ -115,12 +146,16 @@ class SinkReplyBuilder {
     return std::exchange(last_error_, {});
   }
 
-  uint64_t GetLastSendTimeNs() const;
+  uint64_t GetLastSendTimeCycles() const;
 
  protected:
   template <typename... Ts>
   void WritePieces(Ts&&... pieces);     // Copy pieces into buffer and reference buffer
   void WriteRef(std::string_view str);  // Add iovec bypassing buffer
+
+  // Chunk-decode `bs` (a packed source) directly into scratch. Used by
+  // SendBulkStringBorrowed for encoded variants.
+  void WriteDecodedAscii(const cmn::BorrowedString& bs);
 
   void FinishScope();  // Called when scope ends to flush buffer if needed
   void Send();
@@ -142,8 +177,8 @@ class SinkReplyBuilder {
   // external data (WriteRef). Validity is ensured by FinishScope that either flushes before ref
   // lifetime ends or copies refs to the buffer.
   absl::InlinedVector<iovec, 16> vecs_;
-  size_t guaranteed_pieces_ = 0;  // length of prefix of vecs_ that are guaranteed to be pieces
-  uint64_t send_time_ns_ = 0;
+  size_t guaranteed_pieces_ = 0;   // length of prefix of vecs_ that are guaranteed to be pieces
+  uint64_t send_time_cycles_ = 0;  // base::CycleClock::Now() at Send() entry, 0 when idle
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
@@ -187,6 +222,22 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
 
   void SendSimpleString(std::string_view str) override;
   virtual void SendBulkString(std::string_view str);  // RESP: Blob String
+
+  // Forward a temporary std::string to the string_view overload. Sending a temporary under a
+  // ReplyScope would enqueue it by reference and read it after destruction (use-after-free), so the
+  // implementation DCHECKs that the builder is not scoped (when unscoped the value is copied
+  // immediately). Constrained to std::string rvalues, so string literals / string_view / lvalue
+  // strings are unaffected (a plain `std::string&&` overload would make `SendBulkString("literal")`
+  // ambiguous). Defined in the .cc and explicitly instantiated to keep base/logging.h out of here.
+  template <typename T>
+  requires std::is_same_v<T, std::string>
+  void SendBulkString(T&& str);
+
+  // Send a borrowed bulk string. Abstract: every concrete builder decides how
+  // (RedisReplyBuilder streams via iovec, the interpreter decodes to a string,
+  // squashing steals the value). The rvalue-only interface lets squashing
+  // "steal" the borrow.
+  virtual void SendBulkStringBorrowed(cmn::BorrowedString&& bs) = 0;
 
   void SendLong(long val) override;
   virtual void SendDouble(double val);  // RESP: Number
@@ -235,6 +286,14 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
       rb->StartArray(len);
     }
   };
+
+  // Optimized borrowed-string send: chunk-decode directly into the sink scratch
+  // (encoded) or reference the raw bytes (unencoded), avoiding a materialized
+  // copy. The const-ref overload is non-consuming, so capture replay can call
+  // it while the borrow stays owned by the payload; the rvalue override just
+  // forwards to it.
+  void SendBulkStringBorrowed(const cmn::BorrowedString& bs);
+  void SendBulkStringBorrowed(cmn::BorrowedString&& bs) override;
 
   void SendSimpleStrArr(const facade::ArgRange& strs);
   void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = CollectionType::ARRAY);

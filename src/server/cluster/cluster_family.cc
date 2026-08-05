@@ -77,6 +77,9 @@ constexpr string_view kClusterDisabled =
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
 
+  config_registry.RegisterMutable("cluster_announce_ip");
+  config_registry.RegisterMutable("announce_port");
+
   InitializeCluster();
 
   id_ = absl::GetFlag(FLAGS_cluster_node_id);
@@ -407,19 +410,20 @@ void ClusterFamily::ClusterInfo(SinkReplyBuilder* builder, ConnectionContext* cn
   return ClusterInfoImpl(shard_infos.value_or(ClusterShardInfos{}), builder);
 }
 
-void ClusterFamily::KeySlot(CmdArgList args, SinkReplyBuilder* builder) {
+void ClusterFamily::KeySlot(facade::ParsedArgs args, SinkReplyBuilder* builder) {
   if (args.size() != 2) {
     return builder->SendError(WrongNumArgsError("CLUSTER KEYSLOT"));
   }
 
-  SlotId id = dfly::KeySlot(ArgS(args, 1));
+  SlotId id = dfly::KeySlot(args[1]);
   return builder->SendLong(id);
 }
 
-void ClusterFamily::Cluster(CmdArgList args, CommandContext* cmd_cntx) {
+void ClusterFamily::Cluster(CmdArgParser parser, CommandContext* cmd_cntx) {
   // In emulated cluster mode, all slots are mapped to the same host, and number of cluster
   // instances is thus 1.
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  ParsedArgs full_args = parser.UnparsedArgs();
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next());
 
   auto* builder = cmd_cntx->rb();
   if (!IsClusterEnabledOrEmulated()) {
@@ -427,10 +431,10 @@ void ClusterFamily::Cluster(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (sub_cmd == "KEYSLOT") {
-    return KeySlot(args, builder);
+    return KeySlot(full_args, builder);
   }
 
-  if (args.size() > 1) {
+  if (parser.HasNext()) {
     return builder->SendError(WrongNumArgsError(absl::StrCat("CLUSTER ", sub_cmd)));
   }
 
@@ -452,34 +456,33 @@ void ClusterFamily::Cluster(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void ClusterFamily::ReadOnly(CmdArgList args, CommandContext* cmd_cntx) {
+void ClusterFamily::ReadOnly(CmdArgParser parser, CommandContext* cmd_cntx) {
   cmd_cntx->rb()->SendOk();
 }
 
-void ClusterFamily::ReadWrite(CmdArgList args, CommandContext* cmd_cntx) {
+void ClusterFamily::ReadWrite(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!IsClusterEmulated()) {
     return cmd_cntx->SendError(kClusterDisabled);
   }
   cmd_cntx->rb()->SendOk();
 }
 
-void ClusterFamily::DflyCluster(CmdArgList args, CommandContext* cmd_cntx) {
+void ClusterFamily::DflyCluster(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
   auto* cntx = cmd_cntx->server_conn_cntx();
   if (!(IsClusterEnabled() || (IsClusterEmulated() && cntx->journal_emulated))) {
     return builder->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
   }
 
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
-  args.remove_prefix(1);  // remove subcommand name
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next());  // remove subcommand name
   if (sub_cmd == "GETSLOTINFO") {
-    return DflyClusterGetSlotInfo(args, cmd_cntx);
+    return DflyClusterGetSlotInfo(parser, cmd_cntx);
   } else if (sub_cmd == "CONFIG") {
-    return DflyClusterConfig(args, cmd_cntx);
+    return DflyClusterConfig(parser, cmd_cntx);
   } else if (sub_cmd == "FLUSHSLOTS") {
-    return DflyClusterFlushSlots(args, cmd_cntx);
+    return DflyClusterFlushSlots(parser, cmd_cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
-    return DflySlotMigrationStatus(args, cmd_cntx);
+    return DflySlotMigrationStatus(parser, cmd_cntx);
   }
 
   return builder->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
@@ -548,12 +551,12 @@ void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
 }
 }  // namespace
 
-void ClusterFamily::DflyClusterConfig(CmdArgList args, CommandContext* cmd_cntx) {
-  if (args.size() != 1) {
+void ClusterFamily::DflyClusterConfig(CmdArgParser parser, CommandContext* cmd_cntx) {
+  if (parser.UnparsedArgs().size() != 1) {
     return cmd_cntx->SendError(WrongNumArgsError("DFLYCLUSTER CONFIG"));
   }
 
-  string_view json_str = ArgS(args, 0);
+  string_view json_str = parser.Next();
   shared_ptr<ClusterConfig> new_config = ClusterConfig::CreateFromConfig(id_, json_str);
   if (new_config == nullptr) {
     LOG(WARNING) << "Can't set cluster config";
@@ -593,7 +596,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, CommandContext* cmd_cntx)
 
     new_config = new_config->CloneWithChanges(enable_slots, disable_slots);
 
-    StartNewSlotMigrations(*new_config);
+    // Capture prev config before SetCurrent so StartNewSlotMigrations can diff correctly.
+    auto prev_config = ClusterConfig::Current();
 
     SlotSet before =
         ClusterConfig::Current() ? ClusterConfig::Current()->GetOwnedSlots() : SlotSet(true);
@@ -632,13 +636,16 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, CommandContext* cmd_cntx)
           << "Flushing newly unowned slots: " << deleted_slots.ToString();
       WriteFlushSlotsToJournal(deleted_slots);
     }
+
+    // Start new migrations only after stale data is flushed. This ensures DFLYMIGRATE FLOW
+    // cannot write data that is immediately wiped by DeleteSlots above.
+    StartNewSlotMigrations(*new_config, prev_config);
   }
 
   return cmd_cntx->SendOk();
 }
 
-void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.ExpectTag("SLOTS");
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -706,7 +713,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, CommandContext* cmd_
   rb->StartArray(slots_stats.size());
 
   for (const auto& slot_data : slots_stats) {
-    rb->StartArray(9);
+    rb->StartArray(slot_data.second.tiered_bytes > 0 ? 11 : 9);
     rb->SendLong(slot_data.first);
     rb->SendBulkString("key_count");
     rb->SendLong(slot_data.second.key_count);
@@ -721,15 +728,20 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, CommandContext* cmd_
     rb->SendBulkString("memory_bytes");
     rb->SendLong(slot_data.second.memory_bytes +
                  slot_data.second.key_count * sizeof(CompactObj) * 2);
+
+    // Disk bytes held by the slot's offloaded entries; reported only when non-zero.
+    if (slot_data.second.tiered_bytes > 0) {
+      rb->SendBulkString("tiered_bytes");
+      rb->SendLong(slot_data.second.tiered_bytes);
+    }
   }
 }
 
-void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, CommandContext* cmd_cntx) {
-  LOG(INFO) << "Got DFLYCLUSTER FLUSHSLOTS " << args;
+void ClusterFamily::DflyClusterFlushSlots(CmdArgParser parser, CommandContext* cmd_cntx) {
+  LOG(INFO) << "Got DFLYCLUSTER FLUSHSLOTS " << parser.UnparsedArgs();
 
   std::vector<SlotRange> slot_ranges;
 
-  CmdArgParser parser(args);
   do {
     auto [slot_start, slot_end] = parser.Next<ParsedSlotId, ParsedSlotId>();
     RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
@@ -744,10 +756,11 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, CommandContext* cmd_c
   return cmd_cntx->SendOk();
 }
 
-void ClusterFamily::StartNewSlotMigrations(const ClusterConfig& new_config) {
+void ClusterFamily::StartNewSlotMigrations(const ClusterConfig& new_config,
+                                           const std::shared_ptr<ClusterConfig>& prev_config) {
   // TODO Add validating and error processing
-  auto out_migrations = new_config.GetNewOutgoingMigrations(ClusterConfig::Current());
-  auto in_migrations = new_config.GetNewIncomingMigrations(ClusterConfig::Current());
+  auto out_migrations = new_config.GetNewOutgoingMigrations(prev_config);
+  auto in_migrations = new_config.GetNewIncomingMigrations(prev_config);
 
   util::fb2::LockGuard lk(migration_mu_);
 
@@ -781,9 +794,7 @@ static string_view StateToStr(MigrationState state) {
   return "UNDEFINED_STATE"sv;
 }
 
-void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
-
+void ClusterFamily::DflySlotMigrationStatus(CmdArgParser parser, CommandContext* cmd_cntx) {
   util::fb2::LockGuard lk(migration_mu_);
 
   string_view node_id;
@@ -798,51 +809,52 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, CommandContext* cmd
     string_view state;
     size_t keys_number;
     string error;
+    string slot_ranges;
   };
   vector<Reply> reply;
   reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
 
   auto append_answer = [&reply](string_view direction, string node_id, string_view filter,
-                                MigrationState state, size_t keys_number, string error) {
+                                MigrationState state, size_t keys_number, string error,
+                                string slot_ranges) {
     if (filter.empty() || filter == node_id) {
       error = error.empty() ? "0" : error;
-      reply.emplace_back(
-          Reply{direction, std::move(node_id), StateToStr(state), keys_number, std::move(error)});
+      reply.emplace_back(Reply{direction, std::move(node_id), StateToStr(state), keys_number,
+                               std::move(error), std::move(slot_ranges)});
     }
   };
 
   for (const auto& m : incoming_migrations_jobs_) {
     append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(),
-                  m->GetErrorStr());
+                  m->GetErrorStr(), m->GetSlots().ToString());
   }
   for (const auto& m : outgoing_migration_jobs_) {
     append_answer("out", m->GetMigrationInfo().node_info.id, node_id, m->GetState(),
-                  m->GetKeyCount(), m->GetErrorStr());
+                  m->GetKeyCount(), m->GetErrorStr(), m->GetSlots().ToString());
   }
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->StartArray(reply.size());
   for (const auto& r : reply) {
-    rb->StartArray(5);
+    rb->StartArray(6);
     rb->SendBulkString(r.direction);
     rb->SendBulkString(r.node_id);
     rb->SendBulkString(r.state);
     rb->SendLong(r.keys_number);
     rb->SendBulkString(r.error);
+    rb->SendBulkString(r.slot_ranges);
   }
 }
 
-void ClusterFamily::DflyMigrate(CmdArgList args, CommandContext* cmd_cntx) {
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
-
-  args.remove_prefix(1);
+void ClusterFamily::DflyMigrate(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string sub_cmd = absl::AsciiStrToUpper(parser.Next());
 
   if (sub_cmd == "INIT") {
-    InitMigration(args, cmd_cntx);
+    InitMigration(parser, cmd_cntx);
   } else if (sub_cmd == "FLOW") {
-    DflyMigrateFlow(args, cmd_cntx);
+    DflyMigrateFlow(parser, cmd_cntx);
   } else if (sub_cmd == "ACK") {
-    DflyMigrateAck(args, cmd_cntx);
+    DflyMigrateAck(parser, cmd_cntx);
   } else {
     cmd_cntx->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
   }
@@ -940,9 +952,8 @@ SlotRanges ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationIn
   return removed_slots;
 }
 
-void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
-  VLOG(1) << "Create incoming migration, args: " << args;
-  CmdArgParser parser{args};
+void ClusterFamily::InitMigration(CmdArgParser parser, CommandContext* cmd_cntx) {
+  VLOG(1) << "Create incoming migration, args: " << parser.UnparsedArgs();
 
   auto [source_id, flows_num] = parser.Next<string_view, uint32_t>();
 
@@ -987,6 +998,7 @@ void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
         new Transaction{server_family_->service().FindCmd("DFLYCLUSTER")});
     flush_tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
     DeleteSlots(flush_tx.get(), slots);
+    WriteFlushSlotsToJournal(slots);
   }
 
   if (migration->GetState() == MigrationState::C_FATAL) {
@@ -998,8 +1010,7 @@ void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendOk();
 }
 
-void ClusterFamily::DflyMigrateFlow(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+void ClusterFamily::DflyMigrateFlow(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [source_id, shard_id] = parser.Next<std::string_view, uint32_t>();
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
@@ -1084,13 +1095,13 @@ void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
           << " : " << node_id;
 }
 
-void ClusterFamily::DflyMigrateAck(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+void ClusterFamily::DflyMigrateAck(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ParsedArgs ack_args = parser.UnparsedArgs();
   auto [source_id, attempt] = parser.Next<std::string_view, long>();
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  VLOG(1) << "DFLYMIGRATE ACK" << args;
+  VLOG(1) << "DFLYMIGRATE ACK" << ack_args;
   auto in_migrations = ClusterConfig::Current()->GetIncomingMigrations();
   auto m_it = rng::find_if(in_migrations, [source_id = source_id](const auto& m) {
     return m.node_info.id == source_id;
@@ -1216,10 +1227,12 @@ void ClusterFamily::ReconcileReplicaSlots() {
       [&new_config](util::ProactorBase*) { ClusterConfig::SetCurrent(new_config); });
 }
 
-using EngineFunc = void (ClusterFamily::*)(CmdArgList args, CommandContext* cmd_cntx);
+using EngineFunc = void (ClusterFamily::*)(CmdArgParser args, CommandContext* cmd_cntx);
 
 inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
-  return [=](CmdArgList args, CommandContext* cmd_cntx) { return (se->*f)(args, cmd_cntx); };
+  return [=](CmdArgParser parser, CommandContext* cmd_cntx) {
+    return (se->*f)(std::move(parser), cmd_cntx);
+  };
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ClusterFamily::x))

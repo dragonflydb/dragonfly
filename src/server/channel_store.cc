@@ -13,6 +13,7 @@
 #include "server/cluster_support.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
+#include "util/fibers/detail/fiber_interface.h"
 
 namespace dfly {
 using namespace std;
@@ -93,6 +94,8 @@ ChannelStore::~ChannelStore() {
 
 unsigned ChannelStore::SendMessages(string_view channel, facade::ArgRange messages,
                                     bool sharded) const {
+  // SendMessages may suspend via EnsureMemoryBudget; must never be called in an atomic section.
+  DCHECK(!util::fb2::detail::IsFiberAtomicSection());
   vector<Subscriber> subscribers = FetchSubscribers(channel);
   if (subscribers.empty())
     return 0;

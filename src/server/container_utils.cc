@@ -6,6 +6,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/oah_set.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -22,6 +23,10 @@ extern "C" {
 #include "redis/redis_aux.h"
 #include "redis/util.h"
 }
+
+ABSL_FLAG(uint32_t, container_iteration_yield_interval_usec, 500,
+          "Yield the fiber every N microseconds during container iteration. "
+          "0 disables yielding.");
 
 namespace rng = std::ranges;
 
@@ -140,11 +145,21 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
   return ShardFFResult{std::get<0>(res), std::get<2>(res)};
 }
 
+void YieldLongIteration(bool allow_yield) {
+  static const uint32_t interval_usec =
+      absl::GetFlag(FLAGS_container_iteration_yield_interval_usec);
+  if (allow_yield && interval_usec > 0 &&
+      base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > interval_usec) {
+    util::ThisFiber::Yield();
+  }
+}
+
 }  // namespace
 
 using namespace std;
 
-bool IterateList(const PrimeValue& pv, const IterateFunc& func, size_t start, size_t end) {
+bool IterateList(const PrimeValue& pv, const IterateFunc& func, size_t start, size_t end,
+                 bool allow_yield) {
   DCHECK_LE(start, end);
   bool success = true;
   size_t len = pv.Size();
@@ -187,6 +202,7 @@ bool IterateList(const PrimeValue& pv, const IterateFunc& func, size_t start, si
 
   ql->Iterate(
       [&](const CollectionEntry& entry) {
+        YieldLongIteration(allow_yield);
         success = func(entry);
         return success;
       },
@@ -194,7 +210,7 @@ bool IterateList(const PrimeValue& pv, const IterateFunc& func, size_t start, si
   return success;
 }
 
-bool IterateSet(const PrimeValue& pv, const IterateFunc& func) {
+bool IterateSet(const PrimeValue& pv, const IterateFunc& func, bool allow_yield) {
   bool success = true;
   if (pv.Encoding() == kEncodingIntSet) {
     intset* is = static_cast<intset*>(pv.RObjPtr());
@@ -202,22 +218,30 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func) {
     int ii = 0;
 
     while (success && intsetGet(is, ii++, &ival)) {
+      YieldLongIteration(allow_yield);
       success = func(ContainerEntry{ival});
     }
   } else {
-    for (sds ptr : *static_cast<StringSet*>(pv.RObjPtr())) {
-      if (!func(ContainerEntry{ptr, sdslen(ptr)})) {
-        success = false;
-        break;
+    VisitSet(pv.RObjPtr(), [&](auto* set) {
+      for (auto it = set->begin(); it != set->end(); ++it) {
+        YieldLongIteration(allow_yield);
+        // `key` owns the decoded bytes for OAH-encoded members; the ContainerEntry only views them,
+        // so it is valid for the duration of the `func` call. `func` must copy to retain it.
+        auto key = Key(it);
+        const std::string_view key_view = GetKeyView(key);
+        if (!func(ContainerEntry{key_view.data(), key_view.size()})) {
+          success = false;
+          break;
+        }
       }
-    }
+    });
   }
 
   return success;
 }
 
 bool IterateSortedSet(const PrimeValue& pv, const IterateSortedFunc& func, size_t start, size_t end,
-                      bool reverse, bool use_score) {
+                      bool reverse, bool use_score, bool allow_yield) {
   size_t llen = pv.Size();
   if (llen == 0)
     return true;
@@ -273,13 +297,14 @@ bool IterateSortedSet(const PrimeValue& pv, const IterateSortedFunc& func, size_
     CHECK_EQ(pv.Encoding(), OBJ_ENCODING_SKIPLIST);
     auto* smap = static_cast<detail::SortedMap*>(pv.RObjPtr());
     return smap->Iterate(start, rangelen, reverse, [&](sds ele, double score) {
+      YieldLongIteration(allow_yield);
       return func(ContainerEntry{ele, sdslen(ele)}, score);
     });
   }
   return false;
 }
 
-bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func) {
+bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func, bool allow_yield) {
   bool finished = true;
 
   if (pv.Encoding() == kEncodingListPack) {
@@ -293,6 +318,7 @@ bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func) {
   } else {
     StringMap* sm = static_cast<StringMap*>(pv.RObjPtr());
     for (const auto& k_v : *sm) {
+      YieldLongIteration(allow_yield);
       if (!func(ContainerEntry{k_v.first, sdslen(k_v.first)},
                 ContainerEntry{k_v.second, sdslen(k_v.second)})) {
         finished = false;
@@ -305,10 +331,8 @@ bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func) {
 
 StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context) {
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-  StringMap* res = static_cast<StringMap*>(pv.RObjPtr());
-  uint32_t map_time = MemberTimeSeconds(db_context.time_now_ms);
-  res->set_time(map_time);
-  return res;
+  pv.SetMemberTime(MemberTimeSeconds(db_context.time_now_ms));
+  return static_cast<StringMap*>(pv.RObjPtr());
 }
 
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,

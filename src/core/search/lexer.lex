@@ -28,7 +28,8 @@
   using namespace std;
   using dfly::search::TagType;
 
-  Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc);
+  Parser::symbol_type make_PhraseTok(string_view src, const Parser::location_type& loc);
+  Parser::symbol_type make_Wildcard(string_view src, const Parser::location_type& loc);
   Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc);
   // Strip backslashes from \X sequences in a term.
   string UnescapeTerm(string_view src);
@@ -38,13 +39,8 @@ dq         \"
 sq         \'
 esc_chars  ['"\?\\abfnrtv]
 esc_seq    \\{esc_chars}
-term_ch    \w
-/* term_part: word char OR any backslash-escaped char.
- * This deliberately overlaps with tag_val_ch — both can match the same input
- * inside `{...}`. The grammar treats TERM and TAG_VAL interchangeably as
- * `tag_list_element`, so identical-length matches resolve to TERM (rule order)
- * and the unescaped text is the same. UnescapeTerm produces the literal text. */
-term_part  (\w|\\.)
+term_ch    (\w|[^\x00-\x7f])
+term_part  (\w|[^\x00-\x7f]|\\.)
 tag_val_base_ch [^,.<>{}\[\]\\\"\?':;!@#$%^&*()\-+=~\/| ]|\\.
 tag_val_ch {tag_val_base_ch}+(:+{tag_val_base_ch}*)*
 astrsk_ch  \*
@@ -68,6 +64,7 @@ astrsk_ch  \*
 "-"                  return Parser::make_NOT_OP (loc());
 "~"                  return Parser::make_TILDE (loc());
 ":"                  return Parser::make_COLON (loc());
+"=>"[[:space:]]*"{" return Parser::make_ATTR_ARROW (loc());
 "=>"                 return Parser::make_ARROW (loc());
 "["                  return Parser::make_LBRACKET (loc());
 "]"                  return Parser::make_RBRACKET (loc());
@@ -75,17 +72,32 @@ astrsk_ch  \*
 "}"                  return Parser::make_RCURLBR (loc());
 "|"                  return Parser::make_OR_OP (loc());
 ","                  return Parser::make_COMMA (loc());
+";"                  return Parser::make_SEMICOLON (loc());
 "KNN"                return Parser::make_KNN (loc());
 "AS"                 return Parser::make_AS (loc());
 "EF_RUNTIME"         return Parser::make_EF_RUNTIME (loc());
 "VECTOR_RANGE"       return Parser::make_VECTOR_RANGE (loc());
+"$EF_RUNTIME"        return Parser::make_EF_RUNTIME (loc());
+"$EPSILON"           return Parser::make_EPSILON (loc());
 "$YIELD_DISTANCE_AS" return Parser::make_YIELD_DISTANCE_AS (loc());
+"$WEIGHT"            return Parser::make_WEIGHT (loc());
 
 [0-9]{1,9}                          return Parser::make_UINT32(str(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)       return Parser::make_DOUBLE(str(), loc());
 
-{dq}([^"]|{esc_seq})*{dq}           return make_StringLit(matched_view(1, 1), loc());
-{sq}([^']|{esc_seq})*{sq}           return make_StringLit(matched_view(1, 1), loc());
+  /* w'...' / w"..." glob wildcard, where `*`/`?` inside are glob metacharacters interpreted at
+     query time. Only a lowercase `w` marks a wildcard; the lexer is case-insensitive, so an
+     uppercase `W` is rewound to a plain term and the quoted part re-scans as a phrase. Longest
+     match wins over the bare `w` term plus a following phrase. */
+w{sq}([^']|{esc_seq})*{sq}            { if (str()[0] != 'w') { matcher().less(1); return Parser::make_TERM(UnescapeTerm(str()), loc()); }
+                                        return make_Wildcard(str(), loc()); }
+w{dq}([^"]|{esc_seq})*{dq}            { if (str()[0] != 'w') { matcher().less(1); return Parser::make_TERM(UnescapeTerm(str()), loc()); }
+                                        return make_Wildcard(str(), loc()); }
+
+  /* Quoted phrase, optionally followed by `~N` slop (no whitespace before `~`). With whitespace
+     before `~`, the tilde tokenizes separately as the optional-term operator. */
+{dq}([^"]|{esc_seq})*{dq}(~[0-9]+)?   return make_PhraseTok(str(), loc());
+{sq}([^']|{esc_seq})*{sq}(~[0-9]+)?   return make_PhraseTok(str(), loc());
 
 "$"{term_ch}+                       return ParseParam(str(), loc());
 "@"{term_ch}+                       return Parser::make_FIELD(str(), loc());
@@ -102,12 +114,30 @@ astrsk_ch  \*
 <<EOF>> return Parser::make_YYEOF(loc());
 %%
 
-Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc) {
-  string res;
-  if (!absl::CUnescape(src, &res))
-    throw Parser::syntax_error (loc, "bad escaped string: " + string(src));
+Parser::symbol_type make_PhraseTok(string_view src, const Parser::location_type& loc) {
+  // Phrase content is passed verbatim; the phrase tokenizer is the single source of
+  // truth for `\X` semantics.
+  uint32_t slop = 0;
+  char quote = src.front();
+  size_t close_idx = src.size() - 1;
+  while (close_idx > 0 && src[close_idx] != quote)
+    --close_idx;
+  string_view inner = src.substr(1, close_idx - 1);
+  string_view after = src.substr(close_idx + 1);
+  if (!after.empty() && after.front() == '~') {
+    if (!absl::SimpleAtoi(after.substr(1), &slop))
+      throw Parser::syntax_error(loc, "bad phrase slop: " + string(after));
+  }
 
-  return Parser::make_TERM(res, loc);
+  return Parser::make_PHRASE(dfly::search::PhraseTok{string{inner}, slop}, loc);
+}
+
+Parser::symbol_type make_Wildcard(string_view src, const Parser::location_type& loc) {
+  // src is `w'...'` or `w"..."`. Drop the marker and the surrounding quotes, then strip one layer
+  // of `\` escapes (as terms do). The glob matcher interprets any remaining `\`, so `w'a\*'` keeps
+  // `*` a metacharacter while `w'a\\*'` matches a literal `*`.
+  string_view inner = src.substr(2, src.size() - 3);
+  return Parser::make_WILDCARD(UnescapeTerm(inner), loc);
 }
 
 string UnescapeTerm(string_view src) {
@@ -124,34 +154,20 @@ string UnescapeTerm(string_view src) {
       res.push_back(c);
     }
   }
-  // The {term_part}+ pattern always pairs `\\` with a following char, so a
-  // trailing lone backslash is unreachable.
-  DCHECK(!escaped);
+  // A trailing lone backslash (reachable from quoted tag/wildcard values, e.g. a
+  // Windows path `C:\`) is dropped, matching the text path (SplitWithEscapes).
   return res;
 }
 
 Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc) {
-  string res;
-  res.reserve(src.size());
-
-  // Determine processing boundaries
+  // Trim the glob markers, then share the single-layer `\X` unescape with terms via UnescapeTerm,
+  // so quoted and unquoted tag values can never diverge.
   size_t start = (type == TagType::SUFFIX || type == TagType::INFIX) ? 1 : 0;
   size_t end = src.size();
   if (type == TagType::PREFIX || type == TagType::INFIX) {
-    end--; // Skip the last '*' character
+    end--;  // Skip the last '*' character
   }
-
-    // Handle escaping
-  bool escaped = false;
-  for (size_t i = start; i < end; ++i) {
-    if (escaped) {
-      escaped = false;
-    } else if (src[i] == '\\') {
-      escaped = true;
-      continue;
-    }
-    res.push_back(src[i]);
-  }
+  string res = UnescapeTerm(src.substr(start, end - start));
 
   // Return the appropriate token type
   switch (type) {

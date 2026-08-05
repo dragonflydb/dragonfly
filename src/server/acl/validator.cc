@@ -32,9 +32,17 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
   return (acl_commands[index] & command_mask) != 0;
 }
 
-[[nodiscard]] std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(
-    bool literal_match, const std::vector<uint64_t>& acl_commands, const AclPubSub& pub_sub,
-    CmdArgList tail_args, const CommandId& id) {
+}  // namespace
+
+// Exported (not anonymous-namespace-local) so callers without a live connection, like ACL DRYRUN's
+// stub context, can run the pub/sub check directly without going through
+// IsUserAllowedToInvokeCommand and its AclLog::Add side effect, which dereferences a real
+// Connection*.
+std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
+                                                          const std::vector<uint64_t>& acl_commands,
+                                                          const AclPubSub& pub_sub,
+                                                          const facade::ParsedArgs& tail_args,
+                                                          const CommandId& id) {
   if (!ValidateCommand(acl_commands, id)) {
     return {false, AclLog::Reason::COMMAND};
   }
@@ -51,15 +59,22 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
     return false;
   };
 
+  std::string_view name = id.name();
+  // Valkey never gates unsubscribe on channel ACLs (only PUBLISH/SUBSCRIBE flags are checked).
+  if (name == "UNSUBSCRIBE" || name == "PUNSUBSCRIBE" || name == "SUNSUBSCRIBE") {
+    return {true, AclLog::Reason::PUB_SUB};
+  }
+
   bool allowed = true;
   if (!pub_sub.all_channels) {
-    std::string_view name = id.name();
     if (name == "PUBLISH" || name == "SPUBLISH") {
-      auto channel = tail_args[0];
-      allowed &= iterate_globs(facade::ToSV(channel));
+      // tail_args can be empty for ACL DRYRUN's simulated commands, which skip arity
+      // validation. Treat a missing channel argument as unknown/permissive, matching how
+      // DryRun skips the key-pattern check for the same incomplete-args case.
+      allowed &= tail_args.empty() || iterate_globs(tail_args[0]);
     } else {
       for (auto channel : tail_args) {
-        allowed &= iterate_globs(facade::ToSV(channel));
+        allowed &= iterate_globs(channel);
       }
     }
   }
@@ -67,10 +82,8 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
   return {allowed, AclLog::Reason::PUB_SUB};
 }
 
-}  // namespace
-
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
-                                                ArgSlice tail_args) {
+                                                const facade::ParsedArgs& tail_args) {
   if (cntx.skip_acl_validation) {
     return true;
   }
@@ -81,8 +94,8 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
 
   std::pair<bool, AclLog::Reason> auth_res;
 
-  if (auto pkind = id.PubSubKind(); pkind) {
-    bool is_pattern = *pkind == CO::PubSubKind::PATTERN;
+  if (id.IsPubSub()) {
+    bool is_pattern = id.IsPatternPubSub();
     auth_res =
         IsPubSubCommandAuthorized(is_pattern, cntx.acl_commands, cntx.pub_sub, tail_args, id);
   } else {
@@ -100,7 +113,7 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
 }
 
 [[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
-    const ConnectionContext& cntx, const CommandId& id, CmdArgList tail_args) {
+    const ConnectionContext& cntx, const CommandId& id, const facade::ParsedArgs& tail_args) {
   const size_t max = std::numeric_limits<size_t>::max();
   // Once we support ranges this must change
   const bool reject_move_command = cntx.acl_db_idx != max && id.name() == "MOVE";
@@ -141,7 +154,11 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
   bool keys_allowed = true;
   if (!keys.all_keys && id.first_key_pos() != 0 && (is_read_command || is_write_command)) {
     auto keys_index = DetermineKeys(&id, tail_args);
-    DCHECK(keys_index);
+    // Commands with content-dependent key positions (e.g. ZUNION's numkeys) can fail to parse
+    // arbitrary/malformed tail_args; that's a normal rejection, not a broken invariant, so fail
+    // closed instead of asserting.
+    if (!keys_index)
+      return {false, AclLog::Reason::KEY};
 
     for (std::string_view key : keys_index->Range(tail_args))
       keys_allowed &= iterate_globs(key);

@@ -5,11 +5,14 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/functional/function_ref.h>
 
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "core/dash.h"
+#include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
 #include "server/tiering/entry_map.h"
 
@@ -76,12 +79,19 @@ class SmallBins {
   // the need for external actions like deleting empty segments or triggering defragmentation
   BinInfo Delete(DiskSegment segment);
 
+  // Returns true if the page exists and is fragmented
+  bool IsFragmented(size_t offset);
+
   // Delete stashed bin. Returns list of recovered item key hashes and db indices.
   // Mainly used for defragmentation
   KeyHashDbList DeleteBin(DiskSegment segment, std::string_view value);
 
   // Serialize filled bin to destination buffer (4kb)
   size_t SerializeBin(FilledBin* bin, io::MutableBytes dest);
+
+  // Traverse stashed bins and run callback on those that are fragmented
+  ::dfly::detail::DashCursor TraverseFragmented(::dfly::detail::DashCursor,
+                                                absl::FunctionRef<void(size_t /* offset */)>);
 
   Stats GetStats() const;
 
@@ -98,8 +108,28 @@ class SmallBins {
   // Pending stashes, their keys and value sizes
   absl::flat_hash_map<unsigned /* id */, tiering::EntryMap<DiskSegment>> pending_bins_;
 
+  struct BasicDashPolicy {
+    enum { kSlotNum = 12, kBucketNum = 64 };
+    static constexpr bool kUseVersion = false;
+
+    template <typename U> static void DestroyValue(const U&) {
+    }
+    template <typename U> static void DestroyKey(const U&) {
+    }
+
+    template <typename U, typename V> static bool Equal(U&& u, V&& v) {
+      return u == v;
+    }
+
+    // Keys are page-aligned (% kPageSize == 0), dividing by kPageSize does not fix the problem as
+    // dashtable expects are more or less random distribution of all bits (including higher)
+    static uint64_t HashFn(uint64_t v);
+  };
+
+  using Dash = dfly::DashTable<size_t /* offset */, StashInfo, BasicDashPolicy>;
+
   // Map of bins that were stashed and should be deleted when number of entries reaches 0
-  absl::flat_hash_map<size_t /*offset*/, StashInfo> stashed_bins_;
+  Dash stashed_bins_;
 
   struct {
     size_t stashed_entries_cnt = 0;

@@ -7,7 +7,7 @@
 namespace dfly {
 namespace search {
 
-enum class TagType { PREFIX, SUFFIX, INFIX, REGULAR };
+enum class TagType { PREFIX, SUFFIX, INFIX, REGULAR, WILDCARD };
 
 }  // namespace search
 }  // namespace dfly

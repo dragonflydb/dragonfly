@@ -4,7 +4,9 @@
 #pragma once
 
 #include <absl/strings/escaping.h>
+#include <time.h>
 
+#include <cstdint>
 #include <queue>
 #include <variant>
 
@@ -27,7 +29,7 @@ class ConnectionContext;
 class JournalExecutor;
 struct JournalReader;
 
-void ValidateClientTlsFlags();
+bool ValidateClientTlsFlags();
 
 // A helper class for implementing a Redis client that talks to a redis server.
 // This class should be inherited from.
@@ -136,6 +138,15 @@ class ProtocolClient {
     return sock_.get();
   }
 
+  // Socket diagnostics string for error logs. Evaluates the socket exactly once and tolerates a
+  // socket that was never created (e.g. ConnectAndAuth() refusing on a dead context).
+  std::string SockInfo() const;
+
+  // Bytes currently sitting unread in the socket's kernel receive buffer, or -1 if unavailable
+  // (no socket yet, or the ioctl failed). Locks sock_mu_ so it can't race with ConnectAndAuth()/
+  // ShutdownSocketImpl() replacing or destroying sock_ concurrently.
+  int GetSocketUnreadBytes();
+
  private:
   std::error_code Recv(util::FiberSocketBase* input, base::IoBuf* dest);
 
@@ -153,10 +164,15 @@ class ProtocolClient {
   util::fb2::Mutex sock_mu_;
 
  protected:
+  static uint64_t TimeSec() {
+    return time(nullptr);
+  }
+
   std::string last_cmd_;
   std::string last_resp_;
 
-  std::atomic<uint64_t> last_io_time_ = 0;  // in ns, monotonic clock.
+  // Seconds (CLOCK_MONOTONIC_COARSE) — consumed only by master_last_io_sec.
+  std::atomic<uint64_t> last_io_time_ = 0;
 
 #ifdef DFLY_USE_SSL
 

@@ -8,13 +8,18 @@ extern "C" {
 
 #include <absl/container/flat_hash_set.h>
 #include <absl/random/random.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_split.h>
 
+#include <array>
 #include <boost/icl/interval_set.hpp>
 #include <csignal>
+#include <fstream>
+#include <map>
+#include <optional>
 #include <queue>
 #include <shared_mutex>
 #include <tuple>
@@ -86,6 +91,7 @@ ABSL_FLAG(bool, connect_only, false,
           "If true, will only connect to the server, without sending "
           "loadtest commands");
 ABSL_FLAG(string, password, "", "password to authenticate the client");
+ABSL_FLAG(string, json_out_file, "", "Write a memtier-compatible latency JSON report to this file");
 
 using namespace std;
 using namespace util;
@@ -106,9 +112,29 @@ atomic_bool terminate_requested = false;
 #pragma diag_suppress 144
 #endif
 
-enum Protocol { RESP, MC_TEXT } protocol;
-enum DistType { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
+enum Protocol : uint8_t { RESP, MC_TEXT } protocol;
+enum DistType : uint8_t { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
+
 constexpr uint16_t kNumSlots = 16384;
+constexpr uint32_t kDnsResolveTimeoutMs = 2000;
+constexpr string_view kMovedErrorKey = "MOVED"sv;
+enum class BenchOp : uint8_t { kSet, kGet, kCustom, kUnknown };
+constexpr size_t kTrackedOpCount = 2;
+constexpr std::array<string_view, kTrackedOpCount> kBuiltInOpNames = {"Sets", "Gets"};
+
+optional<size_t> TrackedOpIndex(BenchOp op) {
+  switch (op) {
+    case BenchOp::kSet:
+    case BenchOp::kCustom:
+      return 0;
+    case BenchOp::kGet:
+      return 1;
+    case BenchOp::kUnknown:
+      return nullopt;
+  }
+
+  return nullopt;
+}
 
 static string GetRandomBlob(size_t len, bool ascii) {
   static bool is_random = GetFlag(FLAGS_random_data);
@@ -148,6 +174,95 @@ uint16_t SlotId(string_view str) {
 }
 
 using SlotRange = pair<uint16_t, uint16_t>;
+
+namespace {
+
+optional<tcp::endpoint> ResolveMovedEndpoint(string_view endpoint, ProactorBase* proactor) {
+  string_view host;
+  string_view port_str;
+
+  if (!endpoint.empty() && endpoint.front() == '[') {
+    const size_t end = endpoint.find(']');
+    if (end == string_view::npos || end + 1 >= endpoint.size() || endpoint[end + 1] != ':') {
+      LOG(ERROR) << "Invalid MOVED endpoint: " << endpoint;
+      return nullopt;
+    }
+    host = endpoint.substr(1, end - 1);
+    port_str = endpoint.substr(end + 2);
+  } else {
+    const size_t separator = endpoint.rfind(':');
+    if (separator == string_view::npos) {
+      LOG(ERROR) << "Invalid MOVED endpoint: " << endpoint;
+      return nullopt;
+    }
+    host = endpoint.substr(0, separator);
+    port_str = endpoint.substr(separator + 1);
+  }
+
+  uint32_t port;
+  if (host.empty() || !absl::SimpleAtoi(port_str, &port) || port >= 65536) {
+    LOG(ERROR) << "Invalid MOVED endpoint: " << endpoint;
+    return nullopt;
+  }
+
+  boost::system::error_code ec;
+  auto address = boost::asio::ip::make_address(host, ec);
+  if (ec) {
+    char ip_addr[INET6_ADDRSTRLEN];
+    if (const std::error_code dns_ec =
+            fb2::DnsResolve(string(host), kDnsResolveTimeoutMs, ip_addr, proactor)) {
+      LOG(ERROR) << "Could not resolve MOVED endpoint " << endpoint << ": " << dns_ec;
+      return nullopt;
+    }
+
+    address = boost::asio::ip::make_address(ip_addr, ec);
+    if (ec) {
+      LOG(ERROR) << "Resolved MOVED endpoint " << endpoint << " to invalid address " << ip_addr
+                 << ": " << ec.message();
+      return nullopt;
+    }
+  }
+
+  return tcp::endpoint(address, port);
+}
+
+optional<pair<uint16_t, tcp::endpoint>> ParseMovedError(string_view error, ProactorBase* proactor) {
+  error = error.substr(kMovedErrorKey.length());
+  vector<string_view> parts =
+      absl::StrSplit(absl::StripTrailingAsciiWhitespace(error), ' ', absl::SkipEmpty());
+
+  if (parts.size() != 2) {
+    LOG(ERROR) << "Invalid MOVED error: " << error;
+    return nullopt;
+  }
+
+  uint32_t slot_id;
+  if (!absl::SimpleAtoi(parts[0], &slot_id) || slot_id >= kNumSlots) {
+    LOG(ERROR) << "Invalid MOVED slot: " << parts[0];
+    return nullopt;
+  }
+
+  auto endpoint = ResolveMovedEndpoint(parts[1], proactor);
+  if (!endpoint)
+    return nullopt;
+
+  return pair<uint16_t, tcp::endpoint>{uint16_t(slot_id), *endpoint};
+}
+
+}  // namespace
+
+vector<string> GetTrackedOpNames() {
+  const string command = GetFlag(FLAGS_command);
+
+  if (command.empty()) {
+    return {string(kBuiltInOpNames[0]), string(kBuiltInOpNames[1])};
+  }
+
+  vector<string_view> parts = absl::StrSplit(command, ' ', absl::SkipEmpty());
+  CHECK(!parts.empty()) << "--command must not be whitespace only";
+
+  return {absl::AsciiStrToUpper(parts.front())};
+}
 
 struct ShardInfo {
   vector<SlotRange> slots;  // list of [start, end] pairs. inclusive.
@@ -258,6 +373,10 @@ class CommandGenerator {
 
   string Next(SlotRange range);
 
+  BenchOp op() const {
+    return op_;
+  }
+
   bool might_hit() const {
     return might_hit_;
   }
@@ -288,6 +407,7 @@ class CommandGenerator {
   bool might_hit_ = false;
   bool noreply_ = false;
   bool is_ascii_ = true;
+  BenchOp op_ = BenchOp::kUnknown;
 };
 
 CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
@@ -321,6 +441,7 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
   }
 
   vector<string_view> parts = absl::StrSplit(command_, ' ', absl::SkipEmpty());
+  CHECK(!parts.empty()) << "--command must not be whitespace only";
   for (string_view p : parts) {
     if (p == "__key__"sv) {
       cmd_parts_.emplace_back(KEY);
@@ -343,19 +464,23 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
 
 string CommandGenerator::Next(SlotRange range) {
   noreply_ = false;
+  op_ = BenchOp::kUnknown;
 
   if (command_.empty()) {
     string key = (*keygen_)(range.first, range.second);
 
     if (absl::Uniform(bit_gen, 0U, ratio_get_ + ratio_set_) < ratio_set_) {
       might_hit_ = false;
+      op_ = BenchOp::kSet;
       return FillSet(key);
     }
     might_hit_ = true;
+    op_ = BenchOp::kGet;
     return FillGet(key);
   }
 
   // For custom commands, we select a random slot and then use it for key generation.
+  op_ = BenchOp::kCustom;
   uint16_t slot_id = 0;
 
   if (keygen_->IsClusterEnabled()) {
@@ -423,6 +548,8 @@ string CommandGenerator::FillGet(string_view key) {
 
 struct ClientStats {
   base::Histogram total_hist, online_hist;
+  std::array<base::Histogram, kTrackedOpCount> op_stats;
+  std::map<uint32_t, std::array<base::Histogram, kTrackedOpCount>> time_series;
 
   uint64_t num_responses = 0;
   uint64_t qps = 0;
@@ -431,9 +558,28 @@ struct ClientStats {
   uint64_t num_errors = 0;
   unsigned num_clients = 0;
 
+  void AddLatencySample(BenchOp op, uint64_t usec, uint64_t elapsed_ns) {
+    optional<size_t> index = TrackedOpIndex(op);
+    if (!index || *index >= kTrackedOpCount)
+      return;
+
+    op_stats[*index].Add(usec);
+    time_series[elapsed_ns / 1'000'000'000ULL][*index].Add(usec);
+  }
+
   ClientStats& operator+=(const ClientStats& o) {
     total_hist.Merge(o.total_hist);
     online_hist.Merge(o.online_hist);
+
+    for (size_t i = 0; i < kTrackedOpCount; ++i) {
+      op_stats[i].Merge(o.op_stats[i]);
+    }
+    for (const auto& [sec, samples] : o.time_series) {
+      auto& dst = time_series[sec];
+      for (size_t i = 0; i < kTrackedOpCount; ++i) {
+        dst[i].Merge(samples[i]);
+      }
+    }
 
     num_responses += o.num_responses;
     qps += o.qps;
@@ -451,8 +597,12 @@ class Driver {
  public:
   explicit Driver(uint32_t num_reqs, uint32_t time_limit, ClientStats* stats, ProactorBase* p,
                   ShardSlots* ss)
-      : num_reqs_(num_reqs), time_limit_(time_limit), shard_slots_(*ss), stats_(*stats) {
-    socket_.reset(p->CreateSocket());
+      : num_reqs_(num_reqs),
+        time_limit_(time_limit),
+        shard_slots_(*ss),
+        stats_(*stats),
+        proactor_(p) {
+    socket_.reset(proactor_->CreateSocket());
     if (time_limit_ > 0)
       num_reqs_ = UINT32_MAX;
   }
@@ -485,6 +635,7 @@ class Driver {
   struct Req {
     uint64_t start;
     bool might_hit;
+    BenchOp op = BenchOp::kUnknown;
   };
 
   uint32_t num_reqs_, time_limit_, received_ = 0;
@@ -493,6 +644,7 @@ class Driver {
   tcp::endpoint ep_;
   ShardSlots& shard_slots_;
   ClientStats& stats_;
+  ProactorBase* proactor_;
   unique_ptr<FiberSocketBase> socket_;
   fb2::Fiber receive_fb_;
   queue<Req> reqs_;
@@ -720,6 +872,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       Req req;
       req.start = absl::GetCurrentTimeNanos();
       req.might_hit = cmd_gen->might_hit();
+      req.op = cmd_gen->op();
 
       reqs_.push(req);
 
@@ -801,10 +954,12 @@ static string_view FindLine(io::Bytes buf) {
 
 void Driver::PopRequest() {
   uint64_t now = absl::GetCurrentTimeNanos();
-  uint64_t usec = (now - reqs_.front().start) / 1000;
+  const Req& req = reqs_.front();
+  uint64_t usec = (now - req.start) / 1000;
   stats_.online_hist.Add(usec);
   stats_.total_hist.Add(usec);
-  stats_.hit_opportunities += reqs_.front().might_hit;
+  stats_.hit_opportunities += req.might_hit;
+  stats_.AddLatencySample(req.op, usec, now - start_ns_);
   ++received_;
   reqs_.pop();
   if (reqs_.empty()) {
@@ -850,8 +1005,6 @@ void Driver::ParseRESP() {
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
   RespVec parse_args;
-  constexpr string_view kMovedErrorKey = "MOVED"sv;
-  boost::system::error_code ec;
 
   do {
     result = parser_.Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
@@ -860,26 +1013,9 @@ void Driver::ParseRESP() {
         string_view error = parse_args[0].GetView();
         VLOG(2) << "Error " << error;
         if (absl::StartsWith(error, kMovedErrorKey)) {
-          error = error.substr(kMovedErrorKey.length());
-          vector<string_view> parts =
-              absl::StrSplit(absl::StripTrailingAsciiWhitespace(error), ' ', absl::SkipEmpty());
-
-          CHECK_EQ(parts.size(), 2u);
-          uint32_t slot_id;
-          CHECK(absl::SimpleAtoi(parts[0], &slot_id));
-
-          vector<string_view> addr_parts = absl::StrSplit(parts[1], ':');
-          CHECK_EQ(2u, addr_parts.size());
-
-          auto host = boost::asio::ip::make_address(addr_parts[0], ec);
-          CHECK(!ec) << "make_address failed with error: " << ec.message()
-                     << " while parsing address " << addr_parts[0];
-
-          uint32_t port;
-          CHECK(absl::SimpleAtoi(addr_parts[1], &port));
-          CHECK_LT(port, 65536u);
-
-          shard_slots_.MoveSlot(ep_, tcp::endpoint(host, port), slot_id);
+          if (const auto moved = ParseMovedError(error, proactor_); moved) {
+            shard_slots_.MoveSlot(ep_, moved->second, moved->first);
+          }
         }
         ++stats_.num_errors;
       } else if (reqs_.front().might_hit && parse_args[0].type != RespExpr::NIL) {
@@ -1011,6 +1147,270 @@ void TLocalClient::AdjustCycle() {
 
 thread_local unique_ptr<TLocalClient> client;
 
+double ToMillis(double usec) {
+  return usec / 1000.0;
+}
+
+double HistogramAverageMs(const base::Histogram& hist) {
+  return hist.count() ? ToMillis(hist.Average()) : 0.0;
+}
+
+double HistogramMinMs(const base::Histogram& hist) {
+  return hist.count() ? ToMillis(hist.min()) : 0.0;
+}
+
+double HistogramMaxMs(const base::Histogram& hist) {
+  return hist.count() ? ToMillis(hist.max()) : 0.0;
+}
+
+double HistogramPercentileMs(const base::Histogram& hist, double percentile) {
+  return hist.count() ? ToMillis(hist.Percentile(percentile)) : 0.0;
+}
+
+double OpsPerSec(uint64_t count, uint64_t total_ms) {
+  return total_ms ? (double(count) * 1000.0 / double(total_ms)) : 0.0;
+}
+
+string JsonEscape(string_view input) {
+  string out;
+  out.reserve(input.size() + 8);
+
+  for (unsigned char c : input) {
+    switch (c) {
+      case '\\':
+        out += "\\\\";
+        break;
+      case '"':
+        out += "\\\"";
+        break;
+      case '\b':
+        out += "\\b";
+        break;
+      case '\f':
+        out += "\\f";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        if (c < 0x20) {
+          absl::StrAppendFormat(&out, "\\u%04x", c);
+        } else {
+          out.push_back(char(c));
+        }
+    }
+  }
+
+  return out;
+}
+
+string FormatJsonDouble(double value) {
+  return StrFormat("%.6f", value);
+}
+
+void WriteIndent(std::ostream& os, unsigned indent) {
+  for (unsigned i = 0; i < indent; ++i) {
+    os.put(' ');
+  }
+}
+
+void WritePercentilesJson(std::ostream& os, const base::Histogram& hist, unsigned indent) {
+  WriteIndent(os, indent);
+  os << "\"Percentile Latencies\": {\n";
+  WriteIndent(os, indent + 2);
+  os << "\"p50.00\": " << FormatJsonDouble(HistogramPercentileMs(hist, 50.0)) << ",\n";
+  WriteIndent(os, indent + 2);
+  os << "\"p99.00\": " << FormatJsonDouble(HistogramPercentileMs(hist, 99.0)) << ",\n";
+  WriteIndent(os, indent + 2);
+  os << "\"p99.90\": " << FormatJsonDouble(HistogramPercentileMs(hist, 99.9)) << "\n";
+  WriteIndent(os, indent);
+  os << '}';
+}
+
+void WriteSampleStatsJson(std::ostream& os, const base::Histogram& hist, uint64_t total_ms,
+                          unsigned indent, bool nested_percentiles) {
+  WriteIndent(os, indent);
+  os << "\"Count\": " << hist.count() << ",\n";
+  WriteIndent(os, indent);
+  os << "\"Ops/sec\": " << FormatJsonDouble(OpsPerSec(hist.count(), total_ms)) << ",\n";
+  WriteIndent(os, indent);
+  os << "\"Average Latency\": " << FormatJsonDouble(HistogramAverageMs(hist)) << ",\n";
+  WriteIndent(os, indent);
+  os << "\"Min Latency\": " << FormatJsonDouble(HistogramMinMs(hist)) << ",\n";
+  WriteIndent(os, indent);
+  os << "\"Max Latency\": " << FormatJsonDouble(HistogramMaxMs(hist));
+
+  if (nested_percentiles) {
+    os << ",\n";
+    WritePercentilesJson(os, hist, indent);
+  } else {
+    os << ",\n";
+    WriteIndent(os, indent);
+    os << "\"p50.00\": " << FormatJsonDouble(HistogramPercentileMs(hist, 50.0)) << ",\n";
+    WriteIndent(os, indent);
+    os << "\"p99.00\": " << FormatJsonDouble(HistogramPercentileMs(hist, 99.0)) << ",\n";
+    WriteIndent(os, indent);
+    os << "\"p99.90\": " << FormatJsonDouble(HistogramPercentileMs(hist, 99.9));
+  }
+}
+
+base::Histogram AggregateTimeSeriesSample(const ClientStats& summary, uint64_t sec) {
+  base::Histogram sample;
+
+  auto it = summary.time_series.find(sec);
+  if (it == summary.time_series.end())
+    return sample;
+
+  for (const base::Histogram& hist : it->second) {
+    sample.Merge(hist);
+  }
+
+  return sample;
+}
+
+void WriteTimeSeriesJson(std::ostream& os, const ClientStats& summary, size_t op_index,
+                         uint64_t bucket_count, unsigned indent) {
+  WriteIndent(os, indent);
+  os << "\"Time-Serie\": {\n";
+
+  for (uint64_t sec = 0; sec < bucket_count; ++sec) {
+    base::Histogram sample;
+    if (auto it = summary.time_series.find(sec); it != summary.time_series.end()) {
+      sample = it->second[op_index];
+    }
+
+    WriteIndent(os, indent + 2);
+    os << '"' << sec << "\": {\n";
+    WriteSampleStatsJson(os, sample, 1000, indent + 4, false);
+    os << "\n";
+    WriteIndent(os, indent + 2);
+    os << '}';
+    if (sec + 1 != bucket_count) {
+      os << ',';
+    }
+    os << "\n";
+  }
+
+  WriteIndent(os, indent);
+  os << '}';
+}
+
+void WriteTotalsTimeSeriesJson(std::ostream& os, const ClientStats& summary, uint64_t bucket_count,
+                               unsigned indent) {
+  WriteIndent(os, indent);
+  os << "\"Time-Serie\": {\n";
+
+  for (uint64_t sec = 0; sec < bucket_count; ++sec) {
+    base::Histogram sample = AggregateTimeSeriesSample(summary, sec);
+
+    WriteIndent(os, indent + 2);
+    os << '"' << sec << "\": {\n";
+    WriteSampleStatsJson(os, sample, 1000, indent + 4, false);
+    os << "\n";
+    WriteIndent(os, indent + 2);
+    os << '}';
+    if (sec + 1 != bucket_count) {
+      os << ',';
+    }
+    os << "\n";
+  }
+
+  WriteIndent(os, indent);
+  os << '}';
+}
+
+void WriteOperationJson(std::ostream& os, string_view op_name, const ClientStats& summary,
+                        size_t op_index, uint64_t total_ms, uint64_t bucket_count, unsigned indent,
+                        bool trailing_comma) {
+  WriteIndent(os, indent);
+  os << '"' << op_name << "\": {\n";
+  WriteSampleStatsJson(os, summary.op_stats[op_index], total_ms, indent + 2, true);
+  os << ",\n";
+  WriteTimeSeriesJson(os, summary, op_index, bucket_count, indent + 2);
+  os << "\n";
+  WriteIndent(os, indent);
+  os << '}';
+  if (trailing_comma) {
+    os << ',';
+  }
+  os << "\n";
+}
+
+void WriteTotalsJson(std::ostream& os, const ClientStats& summary, uint64_t total_ms,
+                     uint64_t bucket_count, unsigned indent, bool trailing_comma) {
+  WriteIndent(os, indent);
+  os << "\"Totals\": {\n";
+  WriteSampleStatsJson(os, summary.total_hist, total_ms, indent + 2, true);
+  os << ",\n";
+  WriteTotalsTimeSeriesJson(os, summary, bucket_count, indent + 2);
+  os << "\n";
+  WriteIndent(os, indent);
+  os << '}';
+  if (trailing_comma) {
+    os << ',';
+  }
+  os << "\n";
+}
+
+void WriteLatencyJsonReport(const ClientStats& summary, absl::Duration duration,
+                            size_t thread_count) {
+  const string output_path = GetFlag(FLAGS_json_out_file);
+  if (output_path.empty())
+    return;
+  const vector<string> op_names = GetTrackedOpNames();
+
+  const uint64_t total_ms = std::max<uint64_t>(1, absl::ToInt64Milliseconds(duration));
+  uint64_t bucket_count = std::max<uint64_t>(1, (total_ms + 999) / 1000);
+  if (!summary.time_series.empty()) {
+    bucket_count = std::max<uint64_t>(bucket_count, summary.time_series.rbegin()->first + 1);
+  }
+
+  std::ofstream os(output_path, std::ios::out | std::ios::trunc);
+  CHECK(os) << "Could not open latency report file " << output_path;
+
+  os << "{\n";
+  WriteIndent(os, 2);
+  os << "\"configuration\": {\n";
+  WriteIndent(os, 4);
+  os << "\"server\": \"" << JsonEscape(GetFlag(FLAGS_h)) << "\",\n";
+  WriteIndent(os, 4);
+  os << "\"port\": " << GetFlag(FLAGS_p) << ",\n";
+  WriteIndent(os, 4);
+  os << "\"clients\": " << GetFlag(FLAGS_c) << ",\n";
+  WriteIndent(os, 4);
+  os << "\"threads\": " << thread_count << ",\n";
+  WriteIndent(os, 4);
+  os << "\"pipeline\": " << GetFlag(FLAGS_pipeline) << ",\n";
+  WriteIndent(os, 4);
+  os << "\"ratio\": \"" << JsonEscape(GetFlag(FLAGS_ratio)) << "\"\n";
+  WriteIndent(os, 2);
+  os << "},\n";
+  WriteIndent(os, 2);
+  os << "\"ALL STATS\": {\n";
+  WriteIndent(os, 4);
+  os << "\"Runtime\": {\n";
+  WriteIndent(os, 6);
+  os << "\"Total duration\": " << total_ms << "\n";
+  WriteIndent(os, 4);
+  os << "},\n";
+  WriteTotalsJson(os, summary, total_ms, bucket_count, 4, !op_names.empty());
+  for (size_t i = 0; i < op_names.size(); ++i) {
+    WriteOperationJson(os, op_names[i], summary, i, total_ms, bucket_count, 4,
+                       i + 1 != op_names.size());
+  }
+  WriteIndent(os, 2);
+  os << "}\n";
+  os << "}\n";
+
+  CHECK(os.good()) << "Failed writing latency report to " << output_path;
+}
+
 void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp) {
   fb2::Mutex mutex;
 
@@ -1125,7 +1525,7 @@ ClusterShards FetchClusterInfo(const tcp::endpoint& ep, ProactorBase* proactor) 
     CHECK_EQ(2u, addr_parts.size());
     string host(addr_parts[0]);
     char ip_addr[INET6_ADDRSTRLEN];
-    std::error_code ec = fb2::DnsResolve(host, ip_addr);
+    std::error_code ec = fb2::DnsResolve(host, kDnsResolveTimeoutMs, ip_addr, proactor);
     CHECK(!ec) << "Could not resolve " << host << " " << ec;
     auto address = ::boost::asio::ip::make_address(ip_addr);
 
@@ -1173,7 +1573,6 @@ int main(int argc, char* argv[]) {
   pp.reset(fb2::Pool::Epoll());
 #endif
   pp->Run();
-  fb2::InitDnsResolver(2000);
 
   ProactorBase::RegisterSignal({SIGTERM}, pp->GetNextProactor(), [](int) {
     CONSOLE_INFO << "terminate requested";
@@ -1189,6 +1588,12 @@ int main(int argc, char* argv[]) {
   }
 
   string dist = GetFlag(FLAGS_key_dist);
+  string json_out_file = GetFlag(FLAGS_json_out_file);
+
+  if (!json_out_file.empty()) {
+    CHECK(!GetFlag(FLAGS_noreply)) << "--json_out_file is not supported together with --noreply";
+    CHECK(!GetFlag(FLAGS_connect_only)) << "--json_out_file requires sending benchmark commands";
+  }
 
   if (dist == "U") {
     dist_type = UNIFORM;
@@ -1205,8 +1610,8 @@ int main(int argc, char* argv[]) {
   auto* proactor = pp->GetNextProactor();
   char ip_addr[128];
 
-  error_code ec =
-      proactor->Await([&] { return fb2::DnsResolve(GetFlag(FLAGS_h), 2000, ip_addr, proactor); });
+  error_code ec = proactor->Await(
+      [&] { return fb2::DnsResolve(GetFlag(FLAGS_h), kDnsResolveTimeoutMs, ip_addr, proactor); });
   CHECK(!ec) << "Could not resolve " << GetFlag(FLAGS_h) << " " << ec;
 
   auto address = ::boost::asio::ip::make_address(ip_addr);
@@ -1327,6 +1732,8 @@ int main(int argc, char* argv[]) {
     CONSOLE_INFO << "----------------------------------\nHit rate: "
                  << 100 * double(summary.hit_count) / double(summary.hit_opportunities) << "%\n";
   }
+
+  WriteLatencyJsonReport(summary, duration, pp->size());
   pp->Stop();
 
   return 0;

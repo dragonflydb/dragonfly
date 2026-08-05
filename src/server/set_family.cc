@@ -16,6 +16,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/oah_set.h"
 #include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
@@ -44,7 +45,7 @@ using SetType = pair<void*, unsigned>;
 namespace {
 
 // Possible sources of new set entries
-using NewEntries = std::variant<ArgSlice, absl::flat_hash_set<std::string_view>>;
+using NewEntries = std::variant<ArgSlice, ParsedArgs, absl::flat_hash_set<std::string_view>>;
 
 auto EntriesRange(const NewEntries& entries) {
   return base::it::Wrap(cmn::kToSV, entries);
@@ -54,6 +55,11 @@ constexpr uint32_t kMaxIntSetEntries = 256;
 
 bool IsDenseEncoding(const CompactObj& co) {
   return co.Encoding() == kEncodingStrMap2;
+}
+
+inline void UpdateSetTime(void* robj_ptr, uint64_t now_ms) {
+  uint32_t t = MemberTimeSeconds(now_ms);
+  VisitSet(robj_ptr, [t](auto* s) { s->set_time(t); });
 }
 
 intset* IntsetAddSafe(string_view val, intset* is, bool* success, bool* added) {
@@ -89,7 +95,9 @@ struct StringSetWrapper {
   }
 
   static void Init(CompactObj* obj) {
-    obj->InitRobj(OBJ_SET, kEncodingStrMap2, CompactObj::AllocateMR<StringSet>());
+    void* set = g_use_oah_set ? static_cast<void*>(CompactObj::AllocateMR<OAHSet>())
+                              : static_cast<void*>(CompactObj::AllocateMR<StringSet>());
+    obj->InitRobj(OBJ_SET, kEncodingStrMap2, set);
   }
 
   unsigned Add(const NewEntries& entries, uint32_t ttl_sec, bool keepttl) const {
@@ -97,29 +105,33 @@ struct StringSetWrapper {
     string_view members[StringSet::kMaxBatchLen];
     size_t entries_len = std::visit([](const auto& e) { return e.size(); }, entries);
     unsigned len = 0;
-    if (ss->BucketCount() < entries_len) {
-      ss->Reserve(entries_len);
-    }
+    VisitSet(obj_, [entries_len](auto* s) {
+      if (s->BucketCount() < entries_len)
+        s->Reserve(entries_len);
+    });
+    auto add_many = [&](unsigned n) {
+      return VisitSet(
+          obj_, [&](auto* s) { return s->AddMany(absl::MakeSpan(members, n), ttl_sec, keepttl); });
+    };
     for (string_view member : EntriesRange(entries)) {
       members[len++] = member;
       if (len == StringSet::kMaxBatchLen) {
-        res += ss->AddMany(absl::MakeSpan(members, StringSet::kMaxBatchLen), ttl_sec, keepttl);
+        res += add_many(len);
         len = 0;
       }
     }
-
-    if (len) {
-      res += ss->AddMany(absl::MakeSpan(members, len), ttl_sec, keepttl);
-    }
-
+    if (len)
+      res += add_many(len);
     return res;
   }
 
-  pair<unsigned, bool> Remove(const facade::ArgRange& entries) const {
-    unsigned removed = 0;
-    for (string_view member : entries)
-      removed += ss->Erase(member);
-    return {removed, ss->Empty()};
+  pair<unsigned, bool> Remove(const ParsedArgs& entries) const {
+    return VisitSet(obj_, [&](auto* s) {
+      unsigned removed = 0;
+      for (string_view member : entries)
+        removed += s->Erase(member);
+      return std::pair<unsigned, bool>{removed, s->Empty()};
+    });
   }
 
   uint64_t Scan(uint64_t curs, const ScanOpts& scan_op, StringVec* res) const {
@@ -130,40 +142,53 @@ struct StringSetWrapper {
     // Approximately 100usec
     const uint64_t timeout_cycles = base::CycleClock::Now() + base::CycleClock::Frequency() / 10000;
 
+    auto record = [&](string_view str) {
+      if (scan_op.Matches(str))
+        res->emplace_back(str);
+    };
     do {
-      auto scan_callback = [&](sds ptr) {
-        if (string_view str{ptr, sdslen(ptr)}; scan_op.Matches(str))
-          res->emplace_back(str);
-      };
-      curs = ss->Scan(curs, scan_callback);
+      curs = VisitSet(obj_, [&](auto* s) {
+        return s->Scan(static_cast<uint32_t>(curs),
+                       [&](const auto& key) { record(GetKeyView(key)); });
+      });
     } while (curs && maxiterations-- && res->size() < count &&
              (base::CycleClock::Now() - start_cycles) < timeout_cycles);
     return curs;
   }
 
-  explicit operator StringSet*() const {
-    return ss;
+  template <typename Cb> void ForEach(Cb&& cb) const {
+    VisitSet(obj_, [&](auto* s) {
+      for (auto it = s->begin(); it != s->end(); ++it) {
+        auto key = Key(it);
+        cb(GetKeyView(key));
+      }
+    });
   }
 
-  StringSet* operator->() const {
-    return ss;
+  size_t UpperBoundSize() const {
+    return VisitSet(obj_, [](auto* s) { return s->UpperBoundSize(); });
+  }
+  bool Empty() const {
+    return VisitSet(obj_, [](auto* s) { return s->Empty(); });
+  }
+  bool Contains(string_view member) const {
+    return VisitSet(obj_, [member](auto* s) { return s->Contains(member); });
   }
 
-  auto Range() const {
-    auto transform = [](sds ptr) { return string_view{ptr, sdslen(ptr)}; };
-    return base::it::Transform(transform, base::it::Range(ss->begin(), ss->end()));
+  void* obj() const {
+    return obj_;
   }
 
  private:
-  StringSetWrapper(void* robj_ptr, uint64_t now_ms) : ss(static_cast<StringSet*>(robj_ptr)) {
-    ss->set_time(MemberTimeSeconds(now_ms));
+  StringSetWrapper(void* robj_ptr, uint64_t now_ms) : obj_(robj_ptr) {
+    UpdateSetTime(obj_, now_ms);
   }
 
-  StringSet* const ss;
+  void* const obj_;
 };
 
 // returns (removed, isempty)
-pair<unsigned, bool> RemoveSet(const DbContext& db_context, const facade::ArgRange& vals,
+pair<unsigned, bool> RemoveSet(const DbContext& db_context, const ParsedArgs& vals,
                                CompactObj* set) {
   if (set->Encoding() == kEncodingIntSet) {
     intset* is = (intset*)set->RObjPtr();
@@ -210,7 +235,7 @@ uint32_t SetTypeLen(const DbContext& db_context, const SetType& set) {
   if (set.second == kEncodingIntSet) {
     return intsetLen((const intset*)set.first);
   } else {
-    return StringSetWrapper(set, db_context)->UpperBoundSize();
+    return StringSetWrapper(set, db_context).UpperBoundSize();
   }
 }
 
@@ -222,7 +247,7 @@ bool IsInSet(const DbContext& db_context, const SetType& st, int64_t val) {
   char* next = absl::numbers_internal::FastIntToBuffer(val, buf);
   string_view str{buf, size_t(next - buf)};
 
-  return StringSetWrapper(st, db_context)->Contains(str);
+  return StringSetWrapper(st, db_context).Contains(str);
 }
 
 bool IsInSet(const DbContext& db_context, const SetType& st, string_view member) {
@@ -233,7 +258,7 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
 
     return intsetFind((intset*)st.first, llval);
   } else {
-    return StringSetWrapper(st, db_context)->Contains(member);
+    return StringSetWrapper(st, db_context).Contains(member);
   }
 }
 
@@ -247,23 +272,23 @@ int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view me
     return -1;
   } else {
     StringSetWrapper ss{st, db_context};
-    auto it = ss->Find(member);
-    if (it == ss->end())
-      return -3;
-
-    return it.HasExpiry() ? it.ExpiryTime() : -1;
+    return VisitSet(ss.obj(), [member](auto* s) -> int32_t {
+      auto it = s->Find(member);
+      if (it == s->end())
+        return -3;
+      return it.HasExpiry() ? it.ExpiryTime() : -1;
+    });
   }
 }
 
 // Removes arg from result.
 void DiffStrSet(const DbContext& db_context, const SetType& st,
                 absl::flat_hash_set<string>* result) {
-  for (string_view entry : StringSetWrapper{st, db_context}.Range())
-    result->erase(entry);
+  StringSetWrapper{st, db_context}.ForEach([&](string_view entry) { result->erase(entry); });
 }
 
 void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, StringVec* result) {
-  for (string_view str : StringSetWrapper{vec.front(), db_context}.Range()) {
+  StringSetWrapper{vec.front(), db_context}.ForEach([&](string_view str) {
     size_t j = 1;
     for (j = 1; j < vec.size(); ++j) {
       if (vec[j].first != vec.front().first && !IsInSet(db_context, vec[j], str)) {
@@ -274,40 +299,51 @@ void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, String
     if (j == vec.size()) {
       result->emplace_back(str);
     }
-  }
+  });
 }
 
-template <typename C = absl::flat_hash_set<string>>
-StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
-  C picks;
+void RandMemberUnique(const StringSetWrapper& strset, size_t count, cmn::BackedArguments* dest) {
+  absl::flat_hash_set<string> picks;
   picks.reserve(count);
 
-  size_t tries = 0;
-  while (picks.size() < count && tries++ < count * 2) {
-    auto it = strset->GetRandomMember();
-    if (it == strset->end())
-      break;
-    sds member = *it;
-    picks.insert(picks.end(), {member, sdslen(member)});
-  }
-
-  if constexpr (is_same_v<StringVec, C>)
-    return picks;
-  return StringVec{make_move_iterator(picks.begin()), make_move_iterator(picks.end())};
+  VisitSet(strset.obj(), [&](auto* s) {
+    size_t tries = 0;
+    while (picks.size() < count && tries++ < count * 2) {
+      auto it = s->GetRandomMember();
+      if (it == s->end())
+        break;
+      auto key = Key(it);
+      const string_view key_view = GetKeyView(key);
+      auto [_, inserted] = picks.insert(string{key_view});
+      if (inserted)
+        dest->PushArg(key_view);
+    }
+  });
 }
 
-StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
-                           PicksGenerator& generator, size_t picks_count) {
+void RandMemberRepeat(const StringSetWrapper& strset, size_t count, cmn::BackedArguments* dest) {
+  VisitSet(strset.obj(), [&](auto* s) {
+    while (dest->size() < count) {
+      auto it = s->GetRandomMember();
+      if (it == s->end())
+        break;
+      auto key = Key(it);
+      dest->PushArg(GetKeyView(key));
+    }
+  });
+}
+
+void RandMemberStrSet(const DbContext& db_context, const CompactObj& co, PicksGenerator& generator,
+                      size_t picks_count, cmn::BackedArguments* dest) {
   CHECK(IsDenseEncoding(co));
   StringSetWrapper strset{co, db_context};
 
-  // If the set is small, extract entries with StringSet::GetRandomMember
-  if (picks_count * 5 < strset->UpperBoundSize()) {
-    StringSet* ss(strset);
+  // If the set is small, extract entries with random sampling.
+  if (picks_count * 5 < strset.UpperBoundSize()) {
     if (bool unique = (dynamic_cast<UniquePicksGenerator*>(&generator) != nullptr); unique)
-      return RandMemberStrSetPicky(ss, picks_count);
+      return RandMemberUnique(strset, picks_count, dest);
     else
-      return RandMemberStrSetPicky<StringVec>(ss, picks_count);
+      return RandMemberRepeat(strset, picks_count, dest);
   }
 
   std::unordered_map<RandomPick, std::uint32_t> times_index_is_picked;
@@ -319,27 +355,24 @@ StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
   result.reserve(picks_count);
 
   std::uint32_t ss_entry_index = 0;
-  for (string_view str : strset.Range()) {
+  strset.ForEach([&](string_view str) {
     auto it = times_index_is_picked.find(ss_entry_index++);
     if (it != times_index_is_picked.end()) {
       while (it->second--)
         result.emplace_back(str);
     }
-  }
+  });
   /* Equal elements in the result are always successive. So, it is necessary to shuffle them */
   absl::BitGen gen;
   std::shuffle(result.begin(), result.end(), gen);
 
-  return result;
+  dest->Assign(result.begin(), result.end(), result.size());
 }
 
-StringVec RandMemberSet(const DbContext& db_context, const CompactObj& co,
-                        PicksGenerator& generator, std::size_t picks_count) {
+void RandMemberSet(const DbContext& db_context, const CompactObj& co, PicksGenerator& generator,
+                   std::size_t picks_count, cmn::BackedArguments* dest) {
   if (co.Encoding() == kEncodingIntSet) {
     intset* is = static_cast<intset*>(co.RObjPtr());
-
-    StringVec result;
-    result.reserve(picks_count);
 
     for (std::size_t i = 0; i < picks_count; i++) {
       const std::size_t picked_index = generator.Generate();
@@ -347,11 +380,11 @@ StringVec RandMemberSet(const DbContext& db_context, const CompactObj& co,
       int64_t value = 0;
       CHECK_GT(intsetGet(is, picked_index, &value), std::uint8_t(0));
 
-      result.push_back(absl::StrCat(value));
+      dest->PushArg(absl::StrCat(value));
     }
-    return result;
+    return;
   }
-  return RandMemberStrSet(db_context, co, generator, picks_count);
+  RandMemberStrSet(db_context, co, generator, picks_count, dest);
 }
 
 vector<string> ToVec(absl::flat_hash_set<string>&& set) {
@@ -488,9 +521,10 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   // to overwrite the key. However, if the set is empty it means we should delete the
   // key if it exists.
   if (overwrite && (vals_it.begin() == vals_it.end())) {
-    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
-    if (res_it) {
-      db_slice.DelMutable(op_args.db_cntx, std::move(*res_it));
+    // Lookup is untyped: an empty result deletes the destination regardless of its type.
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key);
+    if (IsValid(res_it.it)) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(res_it));
       if (journal_update && op_args.shard->journal()) {
         RecordJournal(op_args, "DEL"sv, ArgSlice{key});
       }
@@ -527,7 +561,16 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
 
     // does not store the values, merely sets the encoding.
     // TODO: why not store the values as well?
-    InitSet(vals, &co);
+    if (co.IsExternal()) {
+      // Build the replacement first: freeing the disk extent is irreversible, while a bad_alloc
+      // inside InitSet is reported to the client as OOM and must leave the value readable.
+      PrimeValue replacement;
+      InitSet(vals, &replacement);
+      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &co);
+      co = std::move(replacement);
+    } else {
+      InitSet(vals, &co);
+    }
   }
 
   uint32_t res = 0;
@@ -544,7 +587,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
       if (!success) {
         co.SetRObjPtr(is);
 
-        StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+        void* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
         if (!ss) {
           return OpStatus::OUT_OF_MEMORY;
         }
@@ -594,7 +637,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
     // Update stats and trigger any handle the old value if needed.
     if (co.Encoding() == kEncodingIntSet) {
       intset* is = (intset*)co.RObjPtr();
-      StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+      void* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
       if (!ss) {
         return OpStatus::OUT_OF_MEMORY;
       }
@@ -607,7 +650,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   return StringSetWrapper{co, op_args.db_cntx}.Add(vals, ttl_sec, keepttl);
 }
 
-OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const facade::ArgRange& vals,
+OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const ParsedArgs& vals,
                          bool journal_rewrite) {
   auto& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
@@ -624,7 +667,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const facade::A
     db_slice.Del(op_args.db_cntx, find_res->it);
   }
   if (removed && journal_rewrite && op_args.shard->journal()) {
-    vector<string_view> mapped(vals.Size() + 1);
+    vector<string_view> mapped(vals.size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
     RecordJournal(op_args, "SREM"sv, mapped);
@@ -736,10 +779,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
     auto find_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
     if (find_res) {
       const PrimeValue& pv = find_res.value()->second;
-      if (IsDenseEncoding(pv)) {
-        StringSet* ss = (StringSet*)pv.RObjPtr();
-        ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-      }
+      pv.SetMemberTime(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
       container_utils::IterateSet(pv, [&uniques](container_utils::ContainerEntry ce) {
         uniques.emplace(ce.ToString());
         return true;
@@ -770,10 +810,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
 
   absl::flat_hash_set<string> uniques;
   const PrimeValue& pv = find_res.value()->second;
-  if (IsDenseEncoding(pv)) {
-    StringSet* ss = (StringSet*)pv.RObjPtr();
-    ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-  }
+  pv.SetMemberTime(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
 
   container_utils::IterateSet(pv, [&uniques](container_utils::ContainerEntry ce) {
     uniques.emplace(ce.ToString());
@@ -833,10 +870,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
       return find_res.status();
 
     const PrimeValue& pv = find_res.value()->second;
-    if (IsDenseEncoding(pv)) {
-      StringSet* ss = (StringSet*)pv.RObjPtr();
-      ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
-    }
+    pv.SetMemberTime(MemberTimeSeconds(t->GetDbContext().time_now_ms));
 
     result.reserve(pv.Size());
     container_utils::IterateSet(find_res.value()->second,
@@ -913,7 +947,8 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
   return result;
 }
 
-OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, int count) {
+OpStatus OpRandMember(const OpArgs& op_args, std::string_view key, int count,
+                      cmn::BackedArguments* dest) {
   auto& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_SET);
   if (!find_res)
@@ -923,8 +958,11 @@ OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, in
 
   const std::uint32_t size = pv.Size();
   const bool picks_are_unique = count >= 0;
+  // Widen to int64_t before std::abs: for count == INT_MIN, std::abs(count) on an int is UB
+  // (the magnitude isn't representable in int). The magnitude fits in int64_t and uint32_t.
   const std::uint32_t picks_count =
-      picks_are_unique ? std::min(static_cast<std::uint32_t>(count), size) : std::abs(count);
+      picks_are_unique ? std::min(static_cast<std::uint32_t>(count), size)
+                       : static_cast<std::uint32_t>(std::abs(static_cast<std::int64_t>(count)));
 
   auto generator = [picks_are_unique, picks_count, size]() -> std::unique_ptr<PicksGenerator> {
     if (picks_are_unique) {
@@ -934,17 +972,16 @@ OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, in
     }
   }();
 
-  auto result = RandMemberSet(op_args.db_cntx, pv, *generator, picks_count);
+  RandMemberSet(op_args.db_cntx, pv, *generator, picks_count, dest);
 
   // pv may be invalidated by DeleteSetIfEmpty (FindMutable + DelMutable), so
   // we must not reference it afterwards.
   SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, pv);
-
-  return result;
+  return OpStatus::OK;
 }
 
 // count - how many elements to pop.
-OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count) {
+OpStatus OpPop(const OpArgs& op_args, string_view key, unsigned count, cmn::BackedArguments* dest) {
   auto& db_cntx = op_args.db_cntx;
   auto& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindMutable(db_cntx, key, OBJ_SET);
@@ -961,16 +998,10 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
    * The number of requested elements is greater than or equal to
    * the number of elements inside the set: simply return the whole set. */
   if (count >= size) {
-    if (IsDenseEncoding(co)) {
-      StringSet* ss = (StringSet*)co.RObjPtr();
-      ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-    }
+    co.SetMemberTime(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
 
-    StringVec result;
-    result.reserve(picks_count);
-
-    container_utils::IterateSet(co, [&result](container_utils::ContainerEntry ce) {
-      result.push_back(ce.ToString());
+    container_utils::IterateSet(co, [dest](container_utils::ContainerEntry ce) {
+      dest->PushArg(ce.ToString());
       return true;
     });
 
@@ -978,7 +1009,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     db_slice.DelMutable(op_args.db_cntx, std::move(*find_res));
 
     // All members may have expired during iteration (lazy expiry), leaving the result empty.
-    if (result.empty()) {
+    if (dest->empty()) {
       return OpStatus::KEY_NOTFOUND;
     }
 
@@ -986,7 +1017,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     if (op_args.shard->journal()) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     }
-    return result;
+    return OpStatus::OK;
   }
 
   /* CASE 2:
@@ -995,10 +1026,10 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   UniquePicksGenerator generator{picks_count, size};
 
   // Select random members
-  StringVec result = RandMemberSet(db_cntx, co, generator, picks_count);
+  RandMemberSet(db_cntx, co, generator, picks_count, dest);
 
   // Remove selected members
-  auto [removed, is_empty] = RemoveSet(db_cntx, result, &co);
+  auto [removed, is_empty] = RemoveSet(db_cntx, *dest, &co);
   find_res->post_updater.Run();
 
   // Lazy per-member TTL expiry during RandMemberSet iteration may have emptied
@@ -1011,28 +1042,30 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     // Return KEY_NOTFOUND when nothing was actually popped so that CmdSPop
     // replies with NULL for the single-arg form instead of dereferencing an
     // empty vector.
-    if (result.empty()) {
+    if (dest->empty()) {
       return OpStatus::KEY_NOTFOUND;
     }
-    return result;
+
+    return OpStatus::OK;
   }
 
   // Lazy expiry may have removed all picked members even though the set is
   // not fully empty yet (Size() counts stale entries). Return KEY_NOTFOUND so
   // CmdSPop replies with NULL instead of dereferencing an empty vector.
-  if (result.empty()) {
+  if (dest->empty()) {
     return OpStatus::KEY_NOTFOUND;
   }
 
   // Replicate as SREM with removed keys, because SPOP is not deterministic.
   if (removed && op_args.shard->journal()) {
-    vector<string_view> mapped(result.size() + 1);
+    vector<string_view> mapped(dest->size() + 1);
     mapped[0] = key;
-    copy(result.begin(), result.end(), mapped.begin() + 1);
+    ParsedArgs vals(*dest);
+    std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
     RecordJournal(op_args, "SREM"sv, mapped);
   }
 
-  return result;
+  return OpStatus::OK;
 }
 
 OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor,
@@ -1106,9 +1139,10 @@ struct SetReplies {
   bool script;
 };
 
-void CmdSAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  auto values = args.subspan(1);
+void CmdSAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs values = parser.RemainingRange(WrongNumArgsError("SADD"));
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [key, values](Transaction* t, EngineShard* shard) {
     return OpAdd(t->GetOpArgs(shard), key, values, false, false);
@@ -1122,9 +1156,9 @@ void CmdSAdd(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view val = ArgS(args, 1);
+void CmdSIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view val = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
@@ -1145,9 +1179,10 @@ void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   SendNumeric(result ? OpResult<uint32_t>(1) : result.status(), cmd_cntx);
 }
 
-void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  auto members = args.subspan(1);
+void CmdSMIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs members = parser.RemainingRange(WrongNumArgsError("SMISMEMBER"));
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   vector<int32_t> memberships(members.size());
 
@@ -1159,7 +1194,7 @@ void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
       const PrimeValue& pv = (*find_res)->second;
       SetType st{pv.RObjPtr(), pv.Encoding()};
       for (size_t i = 0; i < members.size(); ++i)
-        memberships[i] = IsInSet(db_cntx, st, ToSV(members[i]));
+        memberships[i] = IsInSet(db_cntx, st, members[i]);
       SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, pv);
       return OpStatus::OK;
     }
@@ -1179,10 +1214,10 @@ void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void CmdSMove(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view src = ArgS(args, 0);
-  string_view dest = ArgS(args, 1);
-  string_view member = ArgS(args, 2);
+void CmdSMove(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view src = parser.Next();
+  string_view dest = parser.Next();
+  string_view member = parser.Next();
 
   Mover mover{src, dest, member, true};
   mover.Find(cmd_cntx->tx());
@@ -1195,9 +1230,10 @@ void CmdSMove(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result.value());
 }
 
-void CmdSRem(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  auto vals = args.subspan(1);
+void CmdSRem(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs vals = parser.RemainingRange(WrongNumArgsError("SREM"));
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [key, vals](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, vals, false);
@@ -1207,8 +1243,8 @@ void CmdSRem(CmdArgList args, CommandContext* cmd_cntx) {
   SendNumeric(result, cmd_cntx);
 }
 
-void CmdSCard(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdSCard(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
     auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_SET);
@@ -1223,47 +1259,48 @@ void CmdSCard(CmdArgList args, CommandContext* cmd_cntx) {
   SendNumeric(result, cmd_cntx);
 }
 
-void CmdSPop(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  unsigned count = 1;
-  if (args.size() > 1) {
-    string_view arg = ArgS(args, 1);
-    if (!absl::SimpleAtoi(arg, &count)) {
-      cmd_cntx->SendError(kInvalidIntErr);
-      return;
-    }
+void CmdSPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  const size_t args_size = parser.UnparsedArgs().size();
+
+  string_view key = parser.Next();
+  unsigned count = parser.NextOrDefault<unsigned>(1);
+
+  // SPOP only accepts `key` or `key count`; reject a bad count or any trailing args.
+  if (!parser.Finalize()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
+  cmn::BackedArguments vals;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPop(t->GetOpArgs(shard), key, count);
+    return OpPop(t->GetOpArgs(shard), key, count, &vals);
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  auto replier = [result = std::move(result),
-                  pop_single = (args.size() == 1)](facade::SinkReplyBuilder* builder) {
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-      if (pop_single) {  // SPOP key
-        if (result.status() == OpStatus::KEY_NOTFOUND) {
-          rb->SendNull();
-        } else {
-          DCHECK_EQ(1u, result.value().size());
-          rb->SendBulkString(result.value().front());
-        }
-      } else {  // SPOP key cnt
-        rb->SendBulkStrArr(*result, CollectionType::SET);
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND) {
+    if (args_size == 1) {  // SPOP key
+      if (status == OpStatus::KEY_NOTFOUND) {
+        rb->SendNull();
+      } else {
+        DCHECK_EQ(1u, vals.size());
+        rb->SendBulkString(vals.Front());
       }
-      return;
+    } else {  // SPOP key cnt
+      RedisReplyBuilder::ReplyScope scope(rb);
+      rb->StartCollection(vals.size(), CollectionType::SET);
+      for (size_t i = 0; i < vals.size(); ++i) {
+        rb->SendBulkString(vals[i]);
+      }
     }
+    return;
+  }
 
-    rb->SendError(result.status());
-  };
-  cmd_cntx->ReplyWith(std::move(replier));
+  rb->SendError(status);
 }
 
-void CmdSDiff(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSDiff(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view src_key = ArgS(args, 0);
+  string_view src_key = parser.Next();
   ShardId src_shard = Shard(src_key, result_set.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1283,11 +1320,11 @@ void CmdSDiff(CmdArgList args, CommandContext* cmd_cntx) {
   SetReplies{cmd_cntx}.Send(rsv);
 }
 
-void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSDiffStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 0);
+  string_view dest_key = parser.Next();
   ShardId dest_shard = Shard(dest_key, result_set.size());
-  string_view src_key = ArgS(args, 1);
+  string_view src_key = parser.Next();
   ShardId src_shard = Shard(src_key, result_set.size());
 
   VLOG(1) << "SDiffStore " << src_key << " " << src_shard;
@@ -1337,7 +1374,7 @@ void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result_size);
 }
 
-void CmdSMembers(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSMembers(CmdArgParser, CommandContext* cmd_cntx) {
   auto cb = [](Transaction* t, EngineShard* shard) { return OpInter(t, shard, false); };
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1349,43 +1386,41 @@ void CmdSMembers(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdSRandMember(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+void CmdSRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   bool is_count = parser.HasNext();
-  int count = is_count ? parser.Next<int>() : 1;
+  int count = parser.NextOrDefault<int>(1);
 
-  if (parser.HasNext())
-    return cmd_cntx->SendError(WrongNumArgsError("SRANDMEMBER"));
+  if (!parser.Finalize())
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
-  if (auto err = parser.TakeError(); err)
-    return cmd_cntx->SendError(err.MakeReply());
-
-  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
-    return OpRandMember(t->GetOpArgs(shard), key, count);
+  cmn::BackedArguments vals;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpRandMember(t->GetOpArgs(shard), key, count, &vals);
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(cb);
 
-  auto replier = [is_count, result = std::move(result)](facade::SinkReplyBuilder* builder) {
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    if (result || result == OpStatus::KEY_NOTFOUND) {
-      if (is_count) {
-        rb->SendBulkStrArr(*result, CollectionType::SET);
-      } else if (result->size()) {
-        rb->SendBulkString(result->front());
-      } else {
-        rb->SendNull();
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND) {
+    if (is_count) {
+      RedisReplyBuilder::ReplyScope scope(rb);
+      rb->StartCollection(vals.size(), CollectionType::SET);
+      for (size_t i = 0; i < vals.size(); ++i) {
+        rb->SendBulkString(vals[i]);
       }
-      return;
+    } else if (!vals.empty()) {
+      rb->SendBulkString(vals.Front());
+    } else {
+      rb->SendNull();
     }
-    rb->SendError(result.status());
-  };
-  cmd_cntx->ReplyWith(std::move(replier));
+    return;
+  }
+  cmd_cntx->SendError(status);
 }
 
-void CmdSInter(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSInter(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1403,9 +1438,9 @@ void CmdSInter(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSInterStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 0);
+  string_view dest_key = parser.Next();
   ShardId dest_shard = Shard(dest_key, result_set.size());
   atomic_uint32_t inter_shard_cnt{0};
 
@@ -1442,17 +1477,25 @@ void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result->size());
 }
 
-void CmdSInterCard(CmdArgList args, CommandContext* cmd_cntx) {
-  unsigned num_keys;
-  if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys))
-    return cmd_cntx->SendError(kSyntaxErr);
+void CmdSInterCard(CmdArgParser parser, CommandContext* cmd_cntx) {
+  unsigned num_keys = parser.Next<unsigned>();
+
+  if (parser.HasError())
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
+
+  if (num_keys == 0)
+    return cmd_cntx->SendError(OpStatus::AT_LEAST_ONE_KEY);
 
   unsigned limit = 0;
-  if (args.size() == (num_keys + 3) && ArgS(args, 1 + num_keys) == "LIMIT") {
-    if (!absl::SimpleAtoi(ArgS(args, num_keys + 2), &limit))
+  parser.Skip(num_keys);  // keys are handled by the command key spec.
+  parser.Check("LIMIT", &limit);
+
+  if (!parser.Finalize()) {
+    auto err = parser.TakeError();
+    if (err.type == CmdArgParser::INVALID_INT)
       return cmd_cntx->SendError("limit can't be negative");
-  } else if (args.size() > (num_keys + 1))
-    return cmd_cntx->SendError(kSyntaxErr);
+    return cmd_cntx->SendError(err.MakeReply());
+  }
 
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1469,7 +1512,7 @@ void CmdSInterCard(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdSUnion(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSUnion(CmdArgParser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1484,9 +1527,9 @@ void CmdSUnion(CmdArgList args, CommandContext* cmd_cntx) {
   SetReplies{cmd_cntx}.Send(unionset);
 }
 
-void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSUnionStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 0);
+  string_view dest_key = parser.Next();
   ShardId dest_shard = Shard(dest_key, result_set.size());
 
   auto union_cb = [&](Transaction* t, EngineShard* shard) {
@@ -1524,23 +1567,22 @@ void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(result_size);
 }
 
-void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view token = ArgS(args, 1);
+void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
+  const size_t args_size = cmd_cntx->tail_args().size();
+  string_view key = parser.Next();
+  uint64_t cursor = parser.Next<uint64_t>();
 
-  uint64_t cursor = 0;
-
-  if (!absl::SimpleAtoi(token, &cursor)) {
+  if (parser.TakeError()) {
     return cmd_cntx->SendError("invalid cursor");
   }
 
   // SSCAN key cursor [MATCH pattern] [COUNT count]
-  if (args.size() > 6) {
-    DVLOG(1) << "got " << args.size() << " this is more than it should be";
+  if (args_size > 6) {
+    DVLOG(1) << "got " << args_size << " this is more than it should be";
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(cmd_cntx->tail_args().Tail(2));
   if (!ops) {
     DVLOG(1) << "SScan invalid args - return " << ops << " to the user";
     return cmd_cntx->SendError(ops.status());
@@ -1556,8 +1598,9 @@ void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
   if (result.status() != OpStatus::WRONG_TYPE) {
     auto replier = [cursor, result = std::move(result)](facade::SinkReplyBuilder* builder) {
       auto* rb = static_cast<RedisReplyBuilder*>(builder);
+      std::string cursor_str = absl::StrCat(cursor);
       RedisReplyBuilder::ArrayScope scope{rb, 2};
-      rb->SendBulkString(absl::StrCat(cursor));
+      rb->SendBulkString(cursor_str);
       rb->SendBulkStrArr(*result);
     };
     cmd_cntx->ReplyWith(std::move(replier));
@@ -1567,24 +1610,14 @@ void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 // Syntax: saddex key [KEEPTTL] ttl_sec member [member...]
-void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
-
+void CmdSAddEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   const std::string_view key = parser.Next<std::string_view>();
   const bool keepttl = parser.Check("KEEPTTL");
-  const uint32_t ttl_sec = parser.Next<uint32_t>();
+  const uint32_t ttl_sec = parser.Next<FInt<uint32_t{1}, uint32_t{kMaxExpireDeadlineSec}>>();
+  ParsedArgs vals = parser.RemainingRange(WrongNumArgsError("SADDEX"));
 
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
-  }
-  constexpr uint32_t kMaxTtl = (1UL << 26);
-  if (ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return cmd_cntx->SendError(kInvalidIntErr);
-  }
-
-  CmdArgList vals = parser.Tail();
-  if (vals.empty()) {
-    return cmd_cntx->SendError(WrongNumArgsError("SADDEX"));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1606,7 +1639,7 @@ bool SetFamily::DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, st
   if (!IsDenseEncoding(pv))
     return false;
 
-  if (StringSet* ss = (StringSet*)pv.RObjPtr(); !ss->Empty())
+  if (!VisitSet(pv.RObjPtr(), [](auto* s) { return s->Empty(); }))
     return false;
 
   if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_SET); res) {
@@ -1619,8 +1652,8 @@ bool SetFamily::DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, st
   return false;
 }
 
-auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
-  if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), 0)) {
+auto SetFamily::LoadIntSetBlob(std::string_view blob, bool deep, PrimeValue* pv) -> LoadBlobResult {
+  if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), deep ? 1 : 0)) {
     LOG(ERROR) << "Intset integrity check failed.";
     return LoadBlobResult::kCorrupted;
   }
@@ -1630,7 +1663,7 @@ auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlo
   unsigned len = intsetLen(is);
 
   if (len > SetFamily::MaxIntsetEntries()) {
-    StringSet* set = SetFamily::ConvertToStrSet(is, len);
+    void* set = SetFamily::ConvertToStrSet(is, len);
 
     if (!set) {
       LOG(ERROR) << "OOM in ConvertToStrSet " << len;
@@ -1646,44 +1679,58 @@ auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlo
   return LoadBlobResult::kSuccess;
 }
 
-auto SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
-  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
-    LOG(ERROR) << "ListPack integrity check failed.";
-    return LoadBlobResult::kCorrupted;
-  }
-
-  unsigned char* lp = (unsigned char*)blob.data();
-  StringSet* set = CompactObj::AllocateMR<StringSet>();
+// Allocate a fresh dense set and populate it from the listpack. Returns nullptr
+// (and deletes the partial set) if a duplicate member is detected.
+template <typename Set> static Set* BuildSetFromLP(unsigned char* lp) {
+  Set* set = CompactObj::AllocateMR<Set>();
   for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
     unsigned char field_buf[LP_INTBUF_SIZE];
     string_view elem = detail::ListpackWrap::GetView(cur, field_buf);
     if (!set->Add(elem)) {
       LOG(ERROR) << "Duplicate member " << elem;
-      CompactObj::DeleteMR<StringSet>(set);
-      return LoadBlobResult::kCorrupted;
+      CompactObj::DeleteMR<Set>(set);
+      return nullptr;
     }
   }
-  pv->InitRobj(OBJ_SET, kEncodingStrMap2, set);
+  return set;
+}
+
+auto SetFamily::LoadLPSetBlob(std::string_view blob, bool deep, PrimeValue* pv) -> LoadBlobResult {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), deep ? 1 : 0, nullptr, nullptr)) {
+    LOG(ERROR) << "ListPack integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  unsigned char* lp = (unsigned char*)blob.data();
+  void* set_ptr = g_use_oah_set ? static_cast<void*>(BuildSetFromLP<OAHSet>(lp))
+                                : static_cast<void*>(BuildSetFromLP<StringSet>(lp));
+  if (!set_ptr)
+    return LoadBlobResult::kCorrupted;
+
+  pv->InitRobj(OBJ_SET, kEncodingStrMap2, set_ptr);
   return LoadBlobResult::kSuccess;
 }
 
-StringSet* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
-  int64_t intele;
-  char buf[32];
-  int ii = 0;
-
-  StringSet* ss = CompactObj::AllocateMR<StringSet>();
+// Allocate a fresh dense set, reserve capacity, and copy each intset member as
+// the decimal string form.
+template <typename Set> static Set* BuildSetFromIntSet(const intset* is, size_t expected_len) {
+  Set* ss = CompactObj::AllocateMR<Set>();
   if (expected_len) {
     ss->Reserve(expected_len);
   }
-
+  int64_t intele;
+  char buf[32];
+  int ii = 0;
   while (intsetGet(const_cast<intset*>(is), ii++, &intele)) {
     char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
-    string_view str{buf, size_t(next - buf)};
-    CHECK(ss->Add(str));
+    CHECK(ss->Add(string_view{buf, size_t(next - buf)}));
   }
-
   return ss;
+}
+
+void* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
+  return g_use_oah_set ? static_cast<void*>(BuildSetFromIntSet<OAHSet>(is, expected_len))
+                       : static_cast<void*>(BuildSetFromIntSet<StringSet>(is, expected_len));
 }
 
 using CI = CommandId;
@@ -1734,7 +1781,7 @@ vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_
   if (pv->Encoding() == kEncodingIntSet) {
     // a valid result can never be a intset, since it doesnt keep ttl
     intset* is = (intset*)pv->RObjPtr();
-    StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+    void* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
     if (!ss) {
       std::vector<long> out(values.size(), -2);
       return out;
@@ -1742,9 +1789,8 @@ vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_
     pv->InitRobj(OBJ_SET, kEncodingStrMap2, ss);
   }
 
-  auto ss = static_cast<StringSet*>(pv->RObjPtr());
-  ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-  return ExpireElements(ss, values, ttl_sec);
+  pv->SetMemberTime(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+  return VisitSet(pv->RObjPtr(), [&](auto* ss) { return ExpireElements(ss, values, ttl_sec); });
 }
 
 }  // namespace dfly

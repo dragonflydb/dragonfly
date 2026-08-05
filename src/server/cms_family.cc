@@ -2,6 +2,11 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/strings/str_cat.h>
+
+#include <cmath>
+#include <limits>
+
 #include "core/cms.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
@@ -26,6 +31,48 @@ constexpr char kCmsNotFound[] = "CMS: key does not exist";
 constexpr char kCmsWrongNumKeys[] = "CMS: wrong number of keys";
 constexpr char kCmsWrongNumKeysWeights[] = "CMS: wrong number of keys/weights";
 constexpr char kCmsCannotParseNumber[] = "CMS: Cannot parse number";
+constexpr char kCmsPositiveIncrement[] = "CMS: increment must be a positive integer";
+constexpr char kCmsErrRange[] = "CMS: error must be between 0 and 1 exclusive";
+constexpr char kCmsProbRange[] = "CMS: probability must be between 0 and 1 exclusive";
+
+constexpr uint32_t kMaxCmsWidth = 1'000'000;
+constexpr uint32_t kMaxCmsDepth = 100;
+
+RuleError PositiveCmsIncrement(int64_t v) {
+  return {v <= 0, kCmsPositiveIncrement};
+}
+
+bool ValidateCmsDimensions(uint32_t width, uint32_t depth, RedisReplyBuilder* rb) {
+  if (width == 0 || depth == 0) {
+    rb->SendError("CMS: width and depth must be greater than 0");
+    return false;
+  }
+
+  if ((width > kMaxCmsWidth) || (depth > kMaxCmsDepth)) {
+    rb->SendError(absl::StrCat("CMS: width must not exceed ", kMaxCmsWidth,
+                               " and depth must not exceed ", kMaxCmsDepth));
+    return false;
+  }
+
+  return true;
+}
+
+bool ComputeCmsDimensions(double error, double probability, RedisReplyBuilder* rb, uint32_t* width,
+                          uint32_t* depth) {
+  double computed_width = std::ceil(M_E / error);
+  double computed_depth = std::ceil(std::log(1.0 / probability));
+
+  if (!std::isfinite(computed_width) || !std::isfinite(computed_depth) || computed_width <= 0 ||
+      computed_depth <= 0 || computed_width > std::numeric_limits<uint32_t>::max() ||
+      computed_depth > std::numeric_limits<uint32_t>::max()) {
+    rb->SendError("CMS: invalid error/probability");
+    return false;
+  }
+
+  *width = static_cast<uint32_t>(computed_width);
+  *depth = static_cast<uint32_t>(computed_depth);
+  return ValidateCmsDimensions(*width, *depth, rb);
+}
 
 OpStatus OpInitByDim(const OpArgs& op_args, string_view key, uint32_t width, uint32_t depth) {
   auto& db_slice = op_args.GetDbSlice();
@@ -37,22 +84,6 @@ OpStatus OpInitByDim(const OpArgs& op_args, string_view key, uint32_t width, uin
 
   PrimeValue& pv = op_res->it->second;
   pv.SetCMS(width, depth);
-
-  return OpStatus::OK;
-}
-
-OpStatus OpInitByProb(const OpArgs& op_args, string_view key, double error, double probability) {
-  auto& db_slice = op_args.GetDbSlice();
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CMS);
-  RETURN_ON_BAD_STATUS(op_res);
-
-  if (!op_res->is_new)
-    return OpStatus::KEY_EXISTS;
-
-  PrimeValue& pv = op_res->it->second;
-  CMS* cms = CompactObj::AllocateMR<CMS>(CMS::ErrorRateTag{}, error, probability,
-                                         CompactObj::memory_resource());
-  pv.SetCMS(cms);
 
   return OpStatus::OK;
 }
@@ -75,7 +106,7 @@ OpResult<vector<int64_t>> OpIncrBy(const OpArgs& op_args, string_view key,
   return result;
 }
 
-OpResult<vector<int64_t>> OpQuery(const OpArgs& op_args, string_view key, CmdArgList items) {
+OpResult<vector<int64_t>> OpQuery(const OpArgs& op_args, string_view key, ParsedArgs items) {
   auto& db_slice = op_args.GetDbSlice();
   OpResult op_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_CMS);
   if (!op_res)
@@ -108,8 +139,7 @@ OpResult<CmsInfo> OpInfo(const OpArgs& op_args, string_view key) {
   return CmsInfo{cms->width(), cms->depth(), cms->total_count()};
 }
 
-void CmdInitByDim(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void CmdInitByDim(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   uint32_t width, depth;
 
@@ -117,9 +147,8 @@ void CmdInitByDim(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RETURN_ON_PARSE_ERROR(parser, rb);
 
-  if (width == 0 || depth == 0) {
-    return rb->SendError("CMS: width and depth must be greater than 0");
-  }
+  if (!ValidateCmsDimensions(width, depth, rb))
+    return;
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpInitByDim(t->GetOpArgs(shard), key, width, depth);
@@ -135,24 +164,21 @@ void CmdInitByDim(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
-void CmdInitByProb(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void CmdInitByProb(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   double error, probability;
 
-  tie(error, probability) = parser.Next<double, double>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  tie(error, probability) = parser.Next<Validated<double, OpenRange<0, 1, kCmsErrRange>>,
+                                        Validated<double, OpenRange<0, 1, kCmsProbRange>>>();
   RETURN_ON_PARSE_ERROR(parser, rb);
 
-  if (!(error > 0 && error < 1)) {
-    return rb->SendError("CMS: error must be between 0 and 1 exclusive");
-  }
-  if (!(probability > 0 && probability < 1)) {
-    return rb->SendError("CMS: probability must be between 0 and 1 exclusive");
-  }
+  uint32_t width = 0, depth = 0;
+  if (!ComputeCmsDimensions(error, probability, rb, &width, &depth))
+    return;
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpInitByProb(t->GetOpArgs(shard), key, error, probability);
+    return OpInitByDim(t->GetOpArgs(shard), key, width, depth);
   };
 
   OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
@@ -165,35 +191,28 @@ void CmdInitByProb(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
-void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
-
-  // Parse item/increment pairs
-  if (args.size() < 2 || args.size() % 2 != 0) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
+void CmdIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   vector<pair<string_view, int64_t>> items;
-  items.reserve(args.size() / 2);
+  items.reserve(parser.UnparsedArgs().size() / 2);
 
-  for (size_t i = 0; i < args.size(); i += 2) {
-    string_view item = ToSV(args[i]);
-    int64_t incr;
-    if (!absl::SimpleAtoi(ToSV(args[i + 1]), &incr)) {
-      return cmd_cntx->SendError(kCmsCannotParseNumber);
-    }
-    if (incr <= 0) {
-      return cmd_cntx->SendError("CMS: increment must be a positive integer");
-    }
+  using CmsIncrement = Validated<int64_t, PositiveCmsIncrement>;
+  while (parser.HasNext()) {
+    auto [item, incr] = parser.Next<string_view, CmsIncrement>();
     items.emplace_back(item, incr);
+  }
+  if (auto err = parser.TakeError()) {
+    if (err.type == CmdArgParser::INVALID_INT)
+      return rb->SendError(kCmsCannotParseNumber);
+    return rb->SendError(err.MakeReply());
   }
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrBy(t->GetOpArgs(shard), key, items);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   OpResult<vector<int64_t>> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res) {
     if (res.status() == OpStatus::KEY_NOTFOUND) {
@@ -209,16 +228,13 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdQuery(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
-
-  if (args.empty()) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
+void CmdQuery(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpQuery(t->GetOpArgs(shard), key, args);
+    return OpQuery(t->GetOpArgs(shard), key, items);
   };
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -237,8 +253,8 @@ void CmdQuery(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdInfo(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -283,76 +299,56 @@ struct CmsShardData {
 
 struct CmsMergeArgs {
   string_view dest_key;
-  vector<string_view> src_keys;
+  CmdArgParser::Range src_keys;
   vector<int64_t> weights;
 };
 
-bool ParseMergeArgs(CmdArgList args, RedisReplyBuilder* rb, CmsMergeArgs* out) {
-  CmdArgParser parser(args);
-  uint32_t num_keys;
-
+bool ParseMergeArgs(CmdArgParser parser, RedisReplyBuilder* rb, CmsMergeArgs* out) {
   out->dest_key = parser.Next();
-  num_keys = parser.Next<uint32_t>();
+
+  // numkeys is non-terminal: an optional WEIGHTS clause may follow.
+  CmdArgParser::Range keys = parser.NextRange(1, kCmsWrongNumKeys);
   if (auto err = parser.TakeError(); err) {
     rb->SendError(err.MakeReply());
     return false;
   }
+  out->src_keys = keys;
+  uint32_t num_keys = keys.size();
 
-  if (num_keys == 0) {
-    rb->SendError(kCmsWrongNumKeys);
-    return false;
+  if (!parser.HasNext()) {
+    out->weights.resize(num_keys, 1);
+    return true;
   }
 
-  if (parser.Tail().size() < num_keys) {
-    rb->SendError(kSyntaxErr);
-    return false;
-  }
-
-  out->src_keys.reserve(num_keys);
-  for (uint32_t i = 0; i < num_keys; ++i) {
-    out->src_keys.push_back(parser.Next());
-  }
-
-  if (parser.HasNext()) {
-    string_view weights_kw = parser.Next();
-    if (!absl::EqualsIgnoreCase(weights_kw, "WEIGHTS")) {
-      rb->SendError(kCmsWrongNumKeysWeights);
-      return false;
-    }
-
-    out->weights.reserve(num_keys);
-    for (uint32_t i = 0; i < num_keys; ++i) {
-      if (!parser.HasNext()) {
-        rb->SendError(kCmsWrongNumKeysWeights);
-        return false;
-      }
-
-      int64_t weight;
-      if (!absl::SimpleAtoi(parser.Next(), &weight)) {
-        rb->SendError(kCmsCannotParseNumber);
-        return false;
-      }
-      out->weights.push_back(weight);
-    }
-  }
-
-  if (parser.HasNext()) {
+  if (!parser.Check("WEIGHTS")) {
     rb->SendError(kCmsWrongNumKeysWeights);
     return false;
   }
 
-  if (out->weights.empty()) {
-    out->weights.resize(num_keys, 1);
+  CmdArgParser::Range weights = parser.RemainingRange();
+  if (weights.size() != num_keys) {
+    rb->SendError(kCmsWrongNumKeysWeights);
+    return false;
+  }
+
+  out->weights.reserve(num_keys);
+  for (string_view w : weights) {
+    int64_t weight;
+    if (!absl::SimpleAtoi(w, &weight)) {
+      rb->SendError(kCmsCannotParseNumber);
+      return false;
+    }
+    out->weights.push_back(weight);
   }
 
   return true;
 }
 
 // Merge multiple CMS structures into a destination key.
-void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdMerge(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   CmsMergeArgs merge_args;
-  if (!ParseMergeArgs(args, rb, &merge_args)) {
+  if (!ParseMergeArgs(parser, rb, &merge_args)) {
     return;
   }
 
@@ -495,12 +491,13 @@ using CI = CommandId;
 void RegisterCmsFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::CMS);
 
-  *registry << CI{"CMS.INITBYDIM", CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(InitByDim)
-            << CI{"CMS.INITBYPROB", CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(InitByProb)
-            << CI{"CMS.INCRBY", CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(IncrBy)
-            << CI{"CMS.QUERY", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(Query)
-            << CI{"CMS.INFO", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Info)
-            << CI{"CMS.MERGE", CO::DENYOOM | CO::VARIADIC_KEYS, -4, 3, 3}.HFUNC(Merge);
+  *registry
+      << CI{"CMS.INITBYDIM", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(InitByDim)
+      << CI{"CMS.INITBYPROB", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(InitByProb)
+      << CI{"CMS.INCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(IncrBy)
+      << CI{"CMS.QUERY", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(Query)
+      << CI{"CMS.INFO", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Info)
+      << CI{"CMS.MERGE", CO::JOURNALED | CO::DENYOOM | CO::VARIADIC_KEYS, -4, 3, 3}.HFUNC(Merge);
 }
 
 }  // namespace dfly

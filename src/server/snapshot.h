@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "server/detail/egress_throttle.h"
 #include "server/journal/types.h"
 #include "server/rdb_save.h"
 #include "server/serializer_base.h"
@@ -23,33 +24,12 @@ namespace search {
 using DocId = uint32_t;
 }  // namespace search
 
-// ┌────────────────┐   ┌─────────────┐
-// │IterateBucketsFb│   │  OnChange   │
-// └──────┬─────────┘   └─┬───────────┘
-//        │               │            OnChange forces whole bucket to be
-//        ▼               ▼            serialized if iterate didn't reach it yet
-// ┌──────────────────────────┐
-// │     DoSerializeBucket    │        Both might fall back to a temporary serializer
-// └────────────┬─────────────┘        if default is used on another db index
-//              │
-//              |                      Socket is left open in journal streaming mode
-//              ▼
-// ┌──────────────────────────┐          ┌─────────────────────────┐
-// │     SerializeEntry       │          │  ConsumeJournalChange   │
-// └─────────────┬────────────┘          └────────────┬────────────┘
-//               │                                    │
-//         PushBytes                                  │   into serializer buffer)
-//               │                                    ▼
-//               ▼                        ┌──────────────────────────┐
-//               ▼                        │     WriteJournalEntry    │
-// ┌──────────────────────────────┐       │  (appends journal entry  │
-// │     push_cb(buffer)          │       │   into serializer buffer)│
-// └──────────────────────────────┘       └──────────────────────────┘
-
 // SliceSnapshot is used for iterating over a shard at a specified point-in-time
-// and submitting all values to an output sink.
+// and submitting all values to an output sink via RdbSerializer.
 // In journal streaming mode, the snapshot continues submitting changes
 // over the sink until explicitly stopped.
+//
+// See serializer_base.h for the overall serialization pipeline diagram.
 class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInterface {
  public:
   // Represents a target sink for receiving snapshot data. Specifically designed
@@ -111,11 +91,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
                                  bool on_update) override;
 
-  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
-
-  // Serialize entry into passed serializer.
-  void SerializeEntry(BucketIdentity bucket, DbIndex db_index, const PrimeKey& pk,
-                      const PrimeValue& pv);
+  // Called under stream_mu_ to perform RDB serialization of a single entry.
+  void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                            time_t expire, uint32_t mc_flags) override;
 
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.
@@ -127,6 +105,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // The data has already been extracted from the serializer and is owned here, ensuring correct
   // plumbing and making it safe to move.
   void HandleFlushData(std::string data);
+
+  // Callback of RdbSerializer to push big value chunks
+  std::error_code ConsumeBigValueChunk(std::string data);
 
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized();
@@ -150,15 +131,16 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
+  // Limits this snapshot's socket egress to a configured bandwidth budget.
+  detail::EgressThrottler throttler_{0};
+
   struct Stats {
-    size_t skipped = 0;
     size_t keys_total = 0;
     size_t jounal_changes = 0;
     size_t flushed_under_lock = 0;
   } stats_;
 
   SnapshotDataConsumerInterface* consumer_;
-  ExecutionState* cntx_;
 };
 
 }  // namespace dfly

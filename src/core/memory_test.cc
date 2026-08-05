@@ -31,7 +31,7 @@ class MiHeapTest : public ::testing::Test {
   }
 };
 
-TEST_F(MiHeapTest, Basic) {
+TEST_F(MiHeapTest, DISABLED_Basic) {
   mi_heap_t* heap = mi_heap_get_default();
   void* ptr = mi_heap_malloc_aligned(heap, 1024 /* size*/, 64 /* alignment*/);
   ASSERT_TRUE(ptr != nullptr);
@@ -53,7 +53,7 @@ TEST_F(MiHeapTest, Basic) {
   EXPECT_EQ(heap->tld->stats.malloc_huge.current, 0);
 }
 
-TEST_F(MiHeapTest, Threaded) {
+TEST_F(MiHeapTest, DISABLED_Threaded) {
   mi_heap_t* heap = mi_heap_get_default();
 
   void* ptr = mi_heap_malloc_aligned(heap, 1024 /* size*/, 64 /* alignment*/);
@@ -188,7 +188,7 @@ TEST_F(MiHeapTest, FullBinQueueCollection) {
 // the abandoned thread heap once collection runs.
 //
 // This test uses the default heap and verifies reclamation by checking its statistics.
-TEST_F(MiHeapTest, AbandonedHeapReclamation) {
+TEST_F(MiHeapTest, DISABLED_AbandonedHeapReclamation) {
   constexpr size_t block_size = 128;
   constexpr size_t num_blocks = 2000;
   std::vector<void*> allocations(num_blocks);

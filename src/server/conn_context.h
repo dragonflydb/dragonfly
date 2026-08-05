@@ -6,6 +6,8 @@
 
 #include <absl/container/flat_hash_set.h>
 
+#include <cassert>
+
 #include "facade/conn_context.h"
 #include "facade/parsed_command.h"
 #include "facade/reply_mode.h"
@@ -21,17 +23,31 @@ class ChannelStore;
 class Interpreter;
 struct FlowInfo;
 
+// Non-owning view of a command for the squasher. Can be constructed from StoredCmd or
+// CommandContext.
+struct CmdRef {
+  const CommandId* cid = nullptr;
+  facade::ParsedArgs args;
+  facade::ReplyMode reply_mode = facade::ReplyMode::FULL;
+  CommandContext* cmd_cntx = nullptr;
+
+  bool IsValid() const {
+    return cid != nullptr;
+  }
+};
+
 // Stores command id and arguments for delayed invocation.
 // Used for storing MULTI/EXEC commands.
 class StoredCmd {
  public:
   // Deep copy of args, creates backing storage internally.
-  StoredCmd(const CommandId* cid, ArgSlice args, facade::ReplyMode mode = facade::ReplyMode::FULL);
+  StoredCmd(const CommandId* cid, const facade::ParsedArgs& args,
+            facade::ReplyMode mode = facade::ReplyMode::FULL);
 
-  // Shallow copy of args.
-  StoredCmd(const CommandId* cid, facade::ParsedArgs args)
-      : cid_{cid}, args_{args}, reply_mode_(facade::ReplyMode::FULL) {
-  }
+  // Moves args from src via swap. src's BackedArguments will be empty after this.
+  // tail_index specifies how many leading args to skip (e.g., 1 to skip the command name).
+  StoredCmd(const CommandId* cid, cmn::BackedArguments* src, uint8_t tail_index,
+            facade::ReplyMode mode = facade::ReplyMode::FULL);
 
   size_t NumArgs() const {
     return args_.size();
@@ -41,7 +57,9 @@ class StoredCmd {
     return backed_ ? backed_->HeapMemory() + sizeof(*backed_) : 0;
   }
 
-  facade::ArgSlice Slice(CmdArgVec* scratch) const;
+  const facade::ParsedArgs& Args() const {
+    return args_;
+  }
   std::string FirstArg() const;
 
   const CommandId* Cid() const {
@@ -51,6 +69,8 @@ class StoredCmd {
   facade::ReplyMode ReplyMode() const {
     return reply_mode_;
   }
+
+  CmdRef Ref() const;
 
  private:
   const CommandId* cid_;     // underlying command
@@ -86,9 +106,6 @@ struct ConnectionState {
     void ClearWatched();
 
     size_t UsedMemory() const;
-
-    // Deep copies arguments and updates the stored_cmd_bytes.
-    void AddStoredCmd(const CommandId* cid, ArgSlice args);
 
     // Empties the body vector and resets stored_cmd_bytes to 0. Returns the size before data was
     // cleared.
@@ -164,7 +181,6 @@ struct ConnectionState {
     uint32_t repl_flow_id = UINT32_MAX;
     std::string repl_ip_address;
     uint32_t repl_listening_port = 0;
-    DflyVersion repl_version = DflyVersion::VER1;
   };
 
   struct SquashingInfo {
@@ -290,12 +306,21 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
 
-  struct DebugInfo {
-    uint32_t shards_count = 0;
-    TxClock clock = 0;
+  // Applies the ACL identity carried by `cred` (command set, key/channel globs, db constraint)
+  // to this context. Used both when a connection is created and by RESET to restore the default
+  // user's identity. Does not touch `authed_username`, `ns`, or `authenticated`.
+  void SetAclCredentials(dfly::acl::UserCredentials cred);
+
+  // Per-client introspection about the most recent command executed on this
+  // connection (akin to the info Redis exposes via CLIENT INFO). Captured live
+  // during command execution because the underlying Transaction is per-command
+  // and freed once dispatch returns.
+  struct LastCommandStats {
+    uint32_t shards_count = 0;  // unique shards touched by the command's transaction
+    TxClock clock = 0;          // transaction id (txid) of the command
   };
 
-  DebugInfo last_command_debug;
+  LastCommandStats last_cmd_stats;
 
   // TODO: to introduce proper accessors.
   Namespace* ns = nullptr;
@@ -307,10 +332,10 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
-  void ChangeSubscription(bool to_add, bool to_reply, bool sharded, CmdArgList args,
+  void ChangeSubscription(bool to_add, bool to_reply, bool sharded, const facade::ParsedArgs& args,
                           facade::RedisReplyBuilder* rb);
 
-  void ChangePSubscription(bool to_add, bool to_reply, CmdArgList args,
+  void ChangePSubscription(bool to_add, bool to_reply, const facade::ParsedArgs& args,
                            facade::RedisReplyBuilder* rb);
   void UnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb);
   void PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb);
@@ -318,7 +343,8 @@ class ConnectionContext : public facade::ConnectionContext {
 
   size_t UsedMemory() const override;
 
-  virtual void Unsubscribe(std::string_view channel) override;
+  void Unsubscribe(std::string_view channel) override;
+  void OnSocketError(uint32_t epoll_mask) override;
 
   // Whether this connection is a connection from a replica to its master.
   // This flag is true only on replica side, where we need to setup a special ConnectionContext
@@ -363,12 +389,18 @@ class ConnectionContext : public facade::ConnectionContext {
   bool skip_acl_validation = false;
 
  private:
-  void EnableMonitoring(bool enable) {
+  void EnableMonitoring() {
     subscriptions++;  // required to support the monitoring
-    monitor = enable;
+    monitor = true;
   }
 
-  std::vector<unsigned> ChangeSubscriptions(CmdArgList channels, bool pattern, bool to_add,
+  void DisableMonitoring() {
+    assert(subscriptions > 0u);
+    subscriptions--;
+    monitor = false;
+  }
+
+  std::vector<unsigned> ChangeSubscriptions(facade::ParsedArgs channels, bool pattern, bool to_add,
                                             bool to_reply);
 };
 
@@ -396,7 +428,7 @@ class CommandContext : public facade::ParsedCommand {
     return static_cast<ConnectionContext*>(conn_cntx_);
   }
 
-  void RecordLatency(facade::ArgSlice tail_args) const;
+  void RecordLatency(const facade::ParsedArgs& tail_args) const;
 
   facade::Connection* conn() const {
     return conn_cntx_->conn();
@@ -414,16 +446,31 @@ class CommandContext : public facade::ParsedCommand {
     return cid_;
   }
 
-  uint64_t start_time_ns = 0;
+  void SetTailArgs(facade::ParsedArgs args) {
+    tail_args_ = args;
+  }
 
-  // Stores backing array for tail args slice
-  CmdArgVec arg_slice_backing;
+  const facade::ParsedArgs& tail_args() const {
+    return tail_args_;
+  }
+
+  uint64_t start_cycle = 0;
 
  protected:
   void ReuseInternal() final;
 
+  // Command arguments without the command name. Points into BackedArguments owned by this
+  // CommandContext (or StoredCmd for EXEC), so it survives async execution.
+  facade::ParsedArgs tail_args_;
+
   Transaction* tx_ = nullptr;
   const CommandId* cid_ = nullptr;
 };
+
+// 320 is a mi_good_size boundary.
+// The previous boundary of 256 would require making backed_args buffers much smaller
+#if defined(__linux__)
+static_assert(sizeof(CommandContext) == 320);
+#endif
 
 }  // namespace dfly

@@ -1,14 +1,16 @@
-// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #pragma once
 
+#include <sys/types.h>
+
 #include <cassert>
-#include <cstring>
+#include <cstdint>
 #include <string_view>
 
-#include "base/hash.h"
+#include "core/oah_base.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -18,289 +20,120 @@ namespace dfly {
 
 class PageUsage;
 
-#define PREFETCH_READ(x) __builtin_prefetch(x, 0, 1)
-#define FORCE_INLINE __attribute__((always_inline))
-
-// TODO add allocator support
-template <class T> class PtrVector {
-  static constexpr size_t kVectorBit = 1ULL << 0;          // first 3 bits aren't used by pointer
-  static constexpr size_t kTagMask = (4095ULL << 52) | 7;  // we reserve 12 high bits and 3 low bits
-
-  static constexpr size_t kLogSizeShift = 56;
-  static constexpr size_t kLogSizeMask = 0xFFULL;
-  static constexpr size_t kLogSizeShiftedMask = kLogSizeMask << kLogSizeShift;
-
- public:
-  static PtrVector FromLogSize(uint64_t log_size) {
-    return PtrVector(log_size);
-  }
-
-  T* begin() const {
-    return &Raw()[0];
-  }
-
-  T* end() const {
-    return &Raw()[Size()];
-  }
-
-  PtrVector(PtrVector&& other) {
-    uptr_ = other.uptr_;
-    other.uptr_ = 0;
-  }
-
-  ~PtrVector() {
-    Clear();
-  }
-
-  size_t LogSize() const {
-    return (uptr_ >> kLogSizeShift) & kLogSizeMask;
-  }
-
-  size_t Size() const {
-    return 1 << LogSize();
-  }
-
-  uint64_t Release() {
-    uint64_t res = uptr_;
-    uptr_ = 0;
-    return res;
-  }
-
-  bool Empty() const {
-    if (uptr_ == 0)
-      return true;
-
-    for (auto& el : *this) {
-      if (el)
-        return false;
-    }
-    return true;
-  }
-
-  void ResizeLog(uint64_t new_log_size) {
-    auto new_ptr = reinterpret_cast<T*>(zmalloc(sizeof(T) << new_log_size));
-    size_t new_size = 1 << new_log_size;
-    const size_t size = std::min(Size(), new_size);
-    for (size_t i = 0; i < size; ++i) {
-      new (new_ptr + i) T(std::move(Raw()[i]));
-    }
-    for (size_t i = size; i < new_size; ++i) {
-      new (new_ptr + i) T();
-    }
-    Clear();
-    uptr_ = reinterpret_cast<uint64_t>(new_ptr);
-    SetLogSize(new_log_size);
-  }
-
-  T& operator[](size_t idx) {
-    return Raw()[idx];
-  }
-
-  const T& operator[](size_t idx) const {
-    return Raw()[idx];
-  }
-
-  T* Raw() const {
-    return (T*)(uptr_ & ~kTagMask);
-  }
-
-  size_t AllocSize() const {
-    return Size() * sizeof(T);
-  }
-
- private:
-  void Clear() {
-    const size_t size = Size();
-    T* raw = Raw();
-    if (!raw)
-      return;
-    for (size_t i = 0; i < size; ++i) {
-      if (raw[i])
-        raw[i].~T();
-    }
-
-    zfree(Raw());
-    uptr_ = 0;
-  }
-  // because of log_size I prefer to hide it
-  PtrVector(uint64_t log_size) {
-    assert(log_size <= 32);
-    uptr_ = reinterpret_cast<uint64_t>(zmalloc(sizeof(T) << log_size));
-    const uint64_t size = 1 << log_size;
-    for (uint64_t i = 0; i < size; ++i) {
-      new (reinterpret_cast<T*>(uptr_) + i) T();
-    }
-    SetLogSize(log_size);
-  }
-
-  void SetLogSize(uint64_t log_size) {
-    uptr_ = (uptr_ & ~kLogSizeShiftedMask) | kVectorBit | (uint64_t(log_size) << kLogSizeShift);
-  }
-
-  uint64_t uptr_ = 0;
-};
-
-// doesn't possess memory, it should be created and release manually
+// oah_entry.h - a single set member: a string key plus its expiry and cached hash.
+//
+// OAHEntry is a non-owning accessor over a TaggedPtr that points at a [expiry?, control, key] heap
+// blob. It manages that string: the static Create()/Destroy() allocate and free the blob, and
+// SetExpiry/SetExtHash/ReallocIfNeeded update it in place. The top 12 and bottom 3 bits of a heap
+// pointer are always free (user addresses are <= 52 bits), so flags live there: bit 0 stays clear
+// for OAHPtr's entry/vector tag, OAHEntry uses bit 1 (expiry) and 52-63 (cached hash).
+//
+// The blob begins with an optional 4-byte expiry, then an oah::size-encoded key size followed by
+// the key bytes. See oah::size (core/oah_base.h) for the size encoding.
 class OAHEntry {
  public:
-  // we can assume that high 12 bits of user address space
-  // can be used for tagging. At most 52 bits of address are reserved for
-  // some configurations, and usually it's 48 bits.
-  // https://docs.kernel.org/arch/arm64/memory.html
-  // first 3 bits aren't used by pointer
-  static constexpr size_t kVectorBit = 1ULL << 0;
-  static constexpr size_t kExpiryBit = 1ULL << 1;
-  // if bit is set the string length field is 1 byte instead of 4
-  static constexpr size_t kSsoBit = 1ULL << 2;
+  using TaggedPtr = oah::TaggedPtr;
 
-  // extended hash allows us to reduce keys comparisons
-  static constexpr size_t kExtHashShift = 52;
-  static constexpr uint32_t kExtHashSize = 12;
-  static constexpr size_t kExtHashMask = 0xFFFULL;
-  static constexpr size_t kExtHashShiftedMask = kExtHashMask << kExtHashShift;
+  // Builds an entry blob [expiry?, key_header, key] storing `key` (already-encoded content)
+  // verbatim. The header records `real_size`; whether the key is encoded is derived from
+  // key.size() != real_size.
+  static TaggedPtr Create(std::string_view key, uint32_t real_size, uint32_t expiry = UINT32_MAX);
+  static void Destroy(TaggedPtr tagged_ptr);
 
-  static constexpr size_t kTagMask = (4095ULL << 52) | 7;  // we reserve 12 high bits and 3 low.
-
-  OAHEntry() = default;
-
-  OAHEntry(std::string_view key, uint32_t expiry = UINT32_MAX);
-
-  // TODO add initializer list constructor
-  OAHEntry(PtrVector<OAHEntry>&& vec) {
-    data_ = vec.Release() | kVectorBit;
+  explicit OAHEntry(TaggedPtr& slot) : slot_(&slot) {
   }
-
-  OAHEntry(const OAHEntry& e) = delete;
-  OAHEntry(OAHEntry&& e) {
-    data_ = e.data_;
-    e.data_ = 0;
-  }
-
-  // consider manual removing, we waste a lot of time to check nullptr
-  ~OAHEntry() {
-    Clear();
-  }
-
-  OAHEntry& operator=(const OAHEntry& e) = delete;
-  OAHEntry& operator=(OAHEntry&& e) {
-    std::swap(data_, e.data_);
-    return *this;
-  }
+  OAHEntry(const OAHEntry&) = default;
+  OAHEntry& operator=(const OAHEntry&) = default;
 
   bool Empty() const {
-    return data_ == 0;
+    return GetTaggedPtr() == 0;
   }
-
   operator bool() const {
     return !Empty();
-  }
-
-  bool IsVector() const {
-    return (data_ & kVectorBit) != 0;
-  }
-
-  bool IsEntry() const {
-    return (data_ != 0) & !(data_ & kVectorBit);
   }
 
   size_t AllocSize() const {
     return zmalloc_usable_size(Raw());
   }
 
-  PtrVector<OAHEntry>& AsVector() {
-    static_assert(sizeof(PtrVector<OAHEntry>) == sizeof(uint64_t));
-    return *reinterpret_cast<PtrVector<OAHEntry>*>(&data_);
+  // Deserializes the stored key: its codec header plus a pointer to the stored content bytes. The
+  // table decodes/compares this (OAHEntry itself never ascii-encodes or decodes).
+  oah::key::Stored StoredKey() const {
+    const char* hdr = Raw() + GetExpirySize();
+    const oah::key::Header h = oah::key::ReadHeader(hdr);
+    return {h, hdr + h.field_size};
   }
 
-  std::string_view Key() const {
-    assert(!IsVector());
-    return {GetKeyData(), GetKeySize()};
+  // Stored key content (ascii-packed or raw) used for hashing. Not the logical key.
+  std::string_view KeyContent() const {
+    const oah::key::Stored s = StoredKey();
+    return {s.content, s.header.content_size};
+  }
+
+  // Compares this entry's key against a query key (content bytes + logical length). Reads the
+  // header inline (not via StoredKey) to stay register-friendly on the hot path.
+  bool KeyMatches(std::string_view content, uint32_t len) const {
+    const char* hdr = Raw() + GetExpirySize();
+    const oah::key::Header h = oah::key::ReadHeader(hdr);
+    return oah::key::Matches(h, hdr + h.field_size, content, len);
   }
 
   bool HasExpiry() const {
-    return (data_ & kExpiryBit) != 0;
+    return (GetTaggedPtr() & oah::kExpiryBit) != 0;
+  }
+  uint32_t GetExpiry() const;
+  void SetExpiry(uint32_t at_sec);
+  void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* alloc_used);
+
+  uint64_t GetHash() const {
+    return (GetTaggedPtr() & oah::kExtHashShiftedMask) >> oah::kExtHashShift;
+  }
+  void SetExtHash(uint64_t ext_hash);
+
+  // Sets the fingerprint on a FRESH entry (ext-hash bits still 0, heap ptr <= 52 bits): ORs
+  // directly, no read-mask. `shifted_ext_hash` must carry bits only in [kExtHashShift, 64); use
+  // SetExtHash if the entry may already hold a fingerprint.
+  void SetShiftedExtHash(uint64_t shifted_ext_hash) {
+    assert((shifted_ext_hash & ~oah::kExtHashShiftedMask) == 0);
+    SetTaggedPtr(GetTaggedPtr() | shifted_ext_hash);
   }
 
-  // returns the expiry time of the current entry or UINT32_MAX if no expiry is set.
-  uint32_t GetExpiry() const;
+  // Reallocates the key blob if its page is underutilized; returns the usable-size delta and sets
+  // *realloced when the buffer moved.
+  ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced);
 
-  // TODO consider another option to implement iterator
+  char* Raw() const {
+    return (char*)(GetTaggedPtr() & ~oah::kTagMask);
+  }
+
+  // Returns the control word and zeroes the slot, transferring ownership to the caller.
+  TaggedPtr Release() {
+    TaggedPtr res = GetTaggedPtr();
+    SetTaggedPtr(0);
+    return res;
+  }
+
+  // Lets the iterator drill down (it->KeyContent()).
   OAHEntry* operator->() {
     return this;
   }
 
-  uint64_t GetHash() const {
-    return (data_ & kExtHashShiftedMask) >> kExtHashShift;
-  }
-
-  bool CheckNoCollisions(const uint64_t ext_hash);
-
-  void SetExtHash(uint64_t ext_hash);
-
-  void ClearHash() {
-    data_ &= ~kExtHashShiftedMask;
-  }
-
-  void SetExpiry(uint32_t at_sec);
-
-  void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* alloc_used);
-
-  // Reallocates fragmented buffers under this entry. For a single entry, that's its own
-  // string buffer. For a vector entry, recurses into every inner entry AND the vector's
-  // own array buffer. Returns the cumulative change in zmalloc_usable_size across inner
-  // entry buffers (the vector array buffer is realloc'd to the same logical size so its
-  // AllocSize is unchanged). *realloced is set to true iff any buffer was moved.
-  ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced);
-
-  // TODO refactor, because it's inefficient
-  // Returns additional allocation size of ptrVector
-  [[nodiscard]] size_t Insert(OAHEntry&& e);
-
-  uint32_t ElementsNum();
-
-  // TODO remove, it is inefficient
-  OAHEntry& operator[](uint32_t pos);
-
-  OAHEntry Remove(uint32_t pos);
-
-  OAHEntry Pop();
-
-  char* Raw() const {
-    return (char*)(data_ & ~kTagMask);
-  }
-
  protected:
-  void Clear();
-
-  const char* GetKeyData() const {
-    uint32_t key_field_size = HasSso() ? 1 : 4;
-    return Raw() + GetExpirySize() + key_field_size;
-  }
-
-  uint32_t GetKeySize() const;
-
-  void SetExpiryBit(bool b);
-
-  void SetVectorBit() {
-    data_ |= kVectorBit;
-  }
-
-  void SetSsoBit() {
-    data_ |= kSsoBit;
-  }
-
-  bool HasSso() const {
-    return (data_ & kSsoBit) != 0;
-  }
-
-  size_t Size();
+  // Reallocates the key blob with `expiry`, preserving the key and stored ext-hash.
+  void Rebuild(uint32_t expiry);
 
   std::uint32_t GetExpirySize() const {
     return HasExpiry() ? sizeof(std::uint32_t) : 0;
   }
 
-  // memory daya layout [Expiry, key_size, key]
-  uint64_t data_ = 0;
+  TaggedPtr GetTaggedPtr() const {
+    return *slot_;
+  }
+  void SetTaggedPtr(TaggedPtr tagged_ptr) {
+    *slot_ = tagged_ptr;
+  }
+
+  TaggedPtr* slot_;
 };
 
 }  // namespace dfly

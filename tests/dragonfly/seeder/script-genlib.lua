@@ -53,11 +53,15 @@ end
 function LG_funcs.mod_string(key)
     -- APPEND and SETRANGE are the only modifying operations for strings,
     -- issue APPEND rarely to not grow data too much
-    if math.random() < 0.05 then
-        redis.apcall('APPEND', key, '+')
-    else
+    -- replace the whole string fully sometimes
+    local p = math.random()
+    if p < 0.2 then
+        redis.apcall('APPEND', key, dragonfly.randstr(2))
+    elseif p < 0.9 then
         local replacement = dragonfly.randstr(LG_funcs.dsize // 2)
         redis.apcall('SETRANGE', key, math.random(0, LG_funcs.dsize // 2), replacement)
+    else
+        redis.apcall('SET', key, dragonfly.randstr(LG_funcs.dsize))
     end
 end
 
@@ -216,13 +220,93 @@ function LG_funcs.mod_stream(key)
     end
 end
 
+-- cuckoo filters
+-- reserve with enough capacity, then bulk-insert random items.
+-- cf_items tracks inserted items per key for the lifetime of this script
+-- execution so mod_cf can issue real deletes and trigger auto-compaction.
+
+local cf_items = {}
+
+function LG_funcs.add_cf(key)
+    local items = randstr_sequence()
+    redis.apcall('CF.RESERVE', key, math.max(LG_funcs.csize * 10, 64))
+    local args = {'CF.INSERT', key, 'NOCREATE', 'ITEMS'}
+    for _, item in ipairs(items) do
+        table.insert(args, item)
+    end
+    redis.apcall(unpack(args))
+    cf_items[key] = items
+end
+
+function LG_funcs.mod_cf(key)
+    local items = cf_items[key] or {}
+    local action = math.random(1, 3)
+    if action == 1 and #items > 0 then
+        -- delete a tracked item; may trigger auto-compaction via CF.DEL
+        local idx = math.random(#items)
+        redis.apcall('CF.DEL', key, items[idx])
+        items[idx] = items[#items]
+        items[#items] = nil
+    elseif action == 2 then
+        local item = randstr()
+        redis.apcall('CF.ADD', key, item)
+        table.insert(items, item)
+        cf_items[key] = items
+    else
+        redis.apcall('CF.ADD', key, randstr())
+    end
+end
+
+-- sbf (scalable bloom filter)
+-- store random items in a bloom filter; append-only structure
+
+function LG_funcs.add_sbf(key)
+    redis.apcall('BF.RESERVE', key, '0.01', LG_funcs.csize * 10)
+    redis.apcall('BF.MADD', key, unpack(randstr_sequence()))
+end
+
+function LG_funcs.mod_sbf(key)
+    redis.apcall('BF.ADD', key, randstr())
+end
+
+-- cms (count-min sketch)
+-- store frequency estimates for random items
+
+function LG_funcs.add_cms(key)
+    redis.apcall('CMS.INITBYDIM', key, LG_funcs.csize * 4, 5)
+    local strs = randstr_sequence()
+    local args = {}
+    for i = 1, #strs do
+        table.insert(args, strs[i])
+        table.insert(args, math.random(1, 100))
+    end
+    redis.apcall('CMS.INCRBY', key, unpack(args))
+end
+
+function LG_funcs.mod_cms(key)
+    redis.apcall('CMS.INCRBY', key, randstr(), math.random(1, 10))
+end
+
+-- topk
+-- store top-k heavy hitters from a stream of items
+
+function LG_funcs.add_topk(key)
+    local k = math.max(1, LG_funcs.csize // 2)
+    redis.apcall('TOPK.RESERVE', key, k)
+    redis.apcall('TOPK.ADD', key, unpack(randstr_sequence()))
+end
+
+function LG_funcs.mod_topk(key)
+    redis.apcall('TOPK.ADD', key, randstr())
+end
+
 function LG_funcs.get_huge_entries()
   return huge_entries
 end
 
 -- Check if next entry generate huge value keys
 function LG_funcs.is_huge_entry(type)
-    -- These types doesn't generate huge value
+    -- These types don't generate huge values
     if type == "string" or type == "json" then
         return false
     else

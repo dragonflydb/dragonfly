@@ -5,6 +5,7 @@
 #include "core/search/compressed_sorted_set.h"
 
 #include <absl/container/btree_set.h>
+#include <gmock/gmock.h>
 
 #include <algorithm>
 
@@ -390,6 +391,188 @@ TEST_F(CompressedSortedSetTest, FreqZeroHandling) {
   ++it;
   EXPECT_EQ(*it, 30u);
   EXPECT_EQ(it.Freq(), 0u);
+}
+
+TEST_F(CompressedSortedSetTest, PositionsBasic) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), /*store_freq=*/true,
+                           /*store_positions=*/true};
+  EXPECT_TRUE(list.StoresFreq());
+  EXPECT_TRUE(list.StoresPositions());
+
+  std::vector<uint32_t> p1{0, 3, 17};
+  std::vector<uint32_t> p2{5};
+  std::vector<uint32_t> p3{2, 4, 6, 8};
+  list.Insert(10, p1.size(), p1);
+  list.Insert(20, p2.size(), p2);
+  list.Insert(30, p3.size(), p3);
+
+  auto it = list.begin();
+  EXPECT_EQ(*it, 10u);
+  EXPECT_EQ(it.Freq(), 3u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p1));
+  ++it;
+  EXPECT_EQ(*it, 20u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p2));
+  ++it;
+  EXPECT_EQ(*it, 30u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p3));
+}
+
+TEST_F(CompressedSortedSetTest, PositionsInsertMiddle) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), true, true};
+
+  std::vector<uint32_t> p10{1, 5};
+  std::vector<uint32_t> p30{2, 4, 7};
+  std::vector<uint32_t> p20{0, 10};
+  list.Insert(10, p10.size(), p10);
+  list.Insert(30, p30.size(), p30);
+  // Triggers the middle-insert path: bound is 30, prev is 10.
+  list.Insert(20, p20.size(), p20);
+
+  auto it = list.begin();
+  EXPECT_EQ(*it, 10u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p10));
+  ++it;
+  EXPECT_EQ(*it, 20u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p20));
+  ++it;
+  EXPECT_EQ(*it, 30u);
+  // Crucial: 30's positions must survive the middle-insert.
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p30));
+}
+
+TEST_F(CompressedSortedSetTest, PositionsRemove) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), true, true};
+
+  std::vector<uint32_t> p10{0, 4};
+  std::vector<uint32_t> p20{3};
+  std::vector<uint32_t> p30{1, 9, 15};
+  list.Insert(10, p10.size(), p10);
+  list.Insert(20, p20.size(), p20);
+  list.Insert(30, p30.size(), p30);
+
+  EXPECT_TRUE(list.Remove(20));
+  EXPECT_EQ(list.Size(), 2u);
+
+  auto it = list.begin();
+  EXPECT_EQ(*it, 10u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p10));
+  ++it;
+  EXPECT_EQ(*it, 30u);
+  // Crucial: removing middle entry must preserve 30's positions verbatim.
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p30));
+}
+
+TEST_F(CompressedSortedSetTest, PositionsRemoveTail) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), true, true};
+  std::vector<uint32_t> p10{0, 5};
+  std::vector<uint32_t> p20{2, 8};
+  list.Insert(10, p10.size(), p10);
+  list.Insert(20, p20.size(), p20);
+
+  EXPECT_TRUE(list.Remove(20));
+  auto it = list.begin();
+  EXPECT_EQ(*it, 10u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p10));
+  ++it;
+  EXPECT_EQ(it, list.end());
+}
+
+TEST_F(CompressedSortedSetTest, PositionsMerge) {
+  CompressedSortedSet a{PMR_NS::get_default_resource(), true, true};
+  CompressedSortedSet b{PMR_NS::get_default_resource(), true, true};
+
+  std::vector<uint32_t> p10{1, 3};
+  std::vector<uint32_t> p30{0};
+  std::vector<uint32_t> p20{5, 7};
+  std::vector<uint32_t> p40{2};
+  a.Insert(10, p10.size(), p10);
+  a.Insert(30, p30.size(), p30);
+  b.Insert(20, p20.size(), p20);
+  b.Insert(40, p40.size(), p40);
+
+  a.Merge(std::move(b));
+
+  auto it = a.begin();
+  EXPECT_EQ(*it, 10u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p10));
+  ++it;
+  EXPECT_EQ(*it, 20u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p20));
+  ++it;
+  EXPECT_EQ(*it, 30u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p30));
+  ++it;
+  EXPECT_EQ(*it, 40u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p40));
+}
+
+TEST_F(CompressedSortedSetTest, PositionsSplit) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), true, true};
+  std::vector<std::vector<uint32_t>> all_pos;
+  for (uint32_t i = 0; i < 10; ++i) {
+    std::vector<uint32_t> p{i, i + 100, i + 200};
+    all_pos.push_back(p);
+    list.Insert(i * 10, p.size(), p);
+  }
+
+  auto [first, second] = std::move(list).Split();
+  EXPECT_GT(first.Size(), 0u);
+  EXPECT_GT(second.Size(), 0u);
+  EXPECT_EQ(first.Size() + second.Size(), 10u);
+  EXPECT_TRUE(first.StoresPositions());
+  EXPECT_TRUE(second.StoresPositions());
+
+  // Confirm each docid still has its original positions in whichever half it landed.
+  for (const auto& set : {&first, &second}) {
+    for (auto it = set->begin(); it != set->end(); ++it) {
+      uint32_t docid = *it;
+      ASSERT_EQ(docid % 10u, 0u);
+      const auto& expected = all_pos[docid / 10];
+      EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+                  ::testing::ElementsAreArray(expected))
+          << "docid=" << docid;
+    }
+  }
+}
+
+TEST_F(CompressedSortedSetTest, PositionsLargeValues) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), true, true};
+
+  std::vector<uint32_t> p1{0, 127, 128, 16383, 16384, 1u << 28};
+  std::vector<uint32_t> p2{500};
+  list.Insert(1000, p1.size(), p1);
+  list.Insert(2000, p2.size(), p2);
+
+  auto it = list.begin();
+  EXPECT_EQ(*it, 1000u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p1));
+  ++it;
+  EXPECT_EQ(*it, 2000u);
+  EXPECT_THAT(std::vector<uint32_t>(it.Positions().begin(), it.Positions().end()),
+              ::testing::ElementsAreArray(p2));
+}
+
+TEST_F(CompressedSortedSetTest, PositionsImpliesFreq) {
+  // store_positions=true must imply store_freq=true regardless of the freq flag passed.
+  CompressedSortedSet list{PMR_NS::get_default_resource(), /*store_freq=*/false,
+                           /*store_positions=*/true};
+  EXPECT_TRUE(list.StoresFreq());
+  EXPECT_TRUE(list.StoresPositions());
 }
 
 }  // namespace dfly::search

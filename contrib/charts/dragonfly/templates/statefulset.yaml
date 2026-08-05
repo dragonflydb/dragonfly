@@ -7,7 +7,7 @@ metadata:
   labels:
     {{- include "dragonfly.labels" . | nindent 4 }}
 spec:
-  serviceName: {{ .Release.Name }}
+  serviceName: {{ include "dragonfly.serviceName" . }}
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
@@ -30,7 +30,7 @@ spec:
       {{- include "dragonfly.pod" . | trim | nindent 6 }}
   volumeClaimTemplates:
     - metadata:
-        name: "{{ .Release.Name }}-data"
+        name: "{{ include "dragonfly.dataVolumeName" . }}"
       spec:
         accessModes: [ "ReadWriteOnce" ]
         storageClassName: {{ .Values.storage.storageClassName }}

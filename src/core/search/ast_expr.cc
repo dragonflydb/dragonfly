@@ -5,6 +5,7 @@
 #include "core/search/ast_expr.h"
 
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
 
 #include <algorithm>
 #include <cmath>
@@ -28,6 +29,10 @@ AstOptionalNode::AstOptionalNode(AstNode&& node) : node{make_unique<AstNode>(std
 }
 
 AstNegateNode::AstNegateNode(AstNode&& node) : node{make_unique<AstNode>(std::move(node))} {
+}
+
+AstAttributeNode::AstAttributeNode(AstNode&& node, double weight)
+    : node{make_unique<AstNode>(std::move(node))}, weight{weight} {
 }
 
 AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, nodes{} {
@@ -61,13 +66,14 @@ AstTagsNode::AstTagsNode(AstExpr&& l, TagValue tag) {
   tags.push_back(std::move(tag));
 }
 
-AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec,
-                       std::string_view score_alias, std::optional<size_t> ef_runtime)
+AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, std::string blob,
+                       std::string_view score_alias, std::optional<uint32_t> ef_runtime)
     : filter{nullptr},
       limit{limit},
       field{field.substr(1)},
-      vec{std::move(vec)},
-      score_alias{score_alias},
+      blob{std::move(blob)},
+      score_alias{score_alias.empty() ? absl::StrCat("__", field.substr(1), "_score")
+                                      : std::string{score_alias}},
       ef_runtime{ef_runtime} {
 }
 
@@ -76,12 +82,13 @@ AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
   this->filter = make_unique<AstNode>(std::move(filter));
 }
 
-AstVectorRangeNode::AstVectorRangeNode(std::string field, double radius, OwnedFtVector vec,
-                                       std::string score_alias)
+AstVectorRangeNode::AstVectorRangeNode(std::string field, double radius, std::string blob,
+                                       std::string score_alias, std::optional<double> epsilon)
     : field{field.substr(1)},
       radius{radius},
-      vec{std::move(vec)},
-      score_alias{std::move(score_alias)} {
+      blob{std::move(blob)},
+      score_alias{std::move(score_alias)},
+      epsilon{epsilon} {
 }
 
 bool AstKnnNode::HasPreFilter() const {
@@ -93,7 +100,7 @@ bool AstKnnNode::HasPreFilter() const {
 }  // namespace dfly::search
 
 namespace std {
-ostream& operator<<(ostream& os, optional<size_t> o) {
+ostream& operator<<(ostream& os, optional<uint32_t> o) {
   return os;
 }
 

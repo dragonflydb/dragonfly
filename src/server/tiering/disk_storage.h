@@ -29,6 +29,7 @@ class DiskStorage {
     uint64_t registered_buf_alloc_count = 0;
     size_t max_file_size = 0;
     size_t pending_ops = 0;
+    size_t pending_stash_bytes = 0;
   };
 
   using ReadCb = std::function<void(io::Result<std::string_view>)>;
@@ -58,14 +59,15 @@ class DiskStorage {
   Stats GetStats() const;
 
  private:
-  // Try asynchronously growing backing file by requested size
-  std::error_code RequestGrow(off_t grow_size);
+  // Try asynchronously growing backing file by at least min requested size
+  std::error_code RequestGrow(off_t min_size);
 
   // Returns a buffer with size greater or equal to len.
   util::fb2::RegisteredSlice PrepareBuf(size_t len);
 
   off_t max_size_;
-  size_t pending_ops_ = 0;  // number of ongoing ops for safe shutdown
+  size_t pending_ops_ = 0;          // number of ongoing ops for safe shutdown
+  size_t pending_stash_bytes_ = 0;  // bytes currently in-flight to disk
 
   // how many times we allocate registered/heap buffers.
   uint64_t heap_buf_alloc_cnt_ = 0, reg_buf_alloc_cnt_ = 0;
@@ -73,8 +75,8 @@ class DiskStorage {
   struct {
     bool pending = false;  // currently in progress
     std::error_code last_err;
-    uint64_t timestamp_ns;  // last grow finished
-  } grow_;                  // status of last RequestGrow() operation
+    uint64_t timestamp_cycles;  // last grow finished, base::CycleClock::Now() cycles
+  } grow_;                      // status of last RequestGrow() operation
 
   std::string backing_file_path_;
   std::unique_ptr<util::fb2::LinuxFile> backing_file_;

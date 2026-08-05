@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <string>
@@ -60,6 +61,27 @@ struct SchemaField {
   enum FieldFlags : uint8_t { NOINDEX = 1 << 0, SORTABLE = 1 << 1 };
 
   struct VectorParams {
+    static constexpr double kDefaultHnswEpsilon = 0.01;
+    // Deliberate sanity cap: rejects non-finite and absurd values. Set far above any practical
+    // overscan factor (epsilon of a few already explores almost the whole graph), so it never
+    // rejects a realistic value.
+    static constexpr double kMaxHnswEpsilon = 1e6;
+
+    // Schema epsilon (FT.CREATE) allows 0, which maps to the default via
+    // NormalizeSchemaHnswEpsilon.
+    static bool IsValidSchemaHnswEpsilon(double epsilon) {
+      return epsilon >= 0 && epsilon <= kMaxHnswEpsilon && std::isfinite(epsilon);
+    }
+
+    // Runtime override ($EPSILON / RANGE EPSILON) must be strictly positive.
+    static bool IsValidRuntimeHnswEpsilon(double epsilon) {
+      return epsilon > 0 && epsilon <= kMaxHnswEpsilon && std::isfinite(epsilon);
+    }
+
+    static double NormalizeSchemaHnswEpsilon(double epsilon) {
+      return epsilon == 0 ? kDefaultHnswEpsilon : epsilon;
+    }
+
     bool use_hnsw = false;
 
     size_t dim = 0u;                              // dimension of knn vectors
@@ -67,7 +89,9 @@ struct SchemaField {
     size_t capacity = 1000;                       // initial capacity
     size_t hnsw_ef_construction = 200;
     size_t hnsw_m = 16;
-    std::string data_type = "FLOAT32";
+    VectorDataType data_type = VectorDataType::FLOAT32;
+    uint32_t hnsw_ef_runtime = 10;
+    double hnsw_epsilon = kDefaultHnswEpsilon;
   };
 
   struct TagParams {
@@ -77,8 +101,18 @@ struct SchemaField {
   };
 
   struct TextParams {
+    // Sanity cap mirroring VectorParams::kMaxHnswEpsilon: rejects absurd weights so the schema
+    // weight folded into the effective term frequency cannot overflow BM25 to inf/NaN.
+    static constexpr double kMaxWeight = 1e6;
+
+    static bool IsValidWeight(double weight) {
+      return weight >= 0 && weight <= kMaxWeight && std::isfinite(weight);
+    }
+
     // if enabled, suffix trie is build for efficient suffix and infix queries
     bool with_suffixtrie = false;
+    bool no_stem = false;
+    double weight = 1.0;
   };
 
   struct NumericParams {
@@ -108,6 +142,9 @@ struct Schema {
   // Mapping for short field names (aliases).
   absl::flat_hash_map<std::string /* short name*/, std::string /*identifier*/> field_names;
 
+  std::string default_language = "english";
+  std::string language_field;  // doc field providing per-doc language; empty = none
+
   // Return identifier for alias if found, otherwise return passed value
   std::string_view LookupAlias(std::string_view alias) const;
 
@@ -123,6 +160,9 @@ struct IndicesOptions {
 
   absl::flat_hash_set<std::string> stopwords;
   bool custom_stopwords = false;  // true when STOPWORDS was explicitly set in FT.CREATE
+  // When true, TEXT posting lists do not store token positions. Saves memory but
+  // disables phrase queries. Set via NOOFFSETS in FT.CREATE.
+  bool no_offsets = false;
 };
 
 // BM25 scoring statistics are now tracked per-field inside each TextIndex.
@@ -147,6 +187,10 @@ class FieldIndices {
   const Schema& GetSchema() const;
 
   const Synonyms* GetSynonyms() const;
+
+  // True if `term` (case-folded) is a stopword for this index. Mirrors the index-time stopword
+  // check so query terms that are stopwords can be dropped instead of matching nothing.
+  bool IsStopWord(std::string_view term) const;
 
   SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
 
@@ -189,14 +233,15 @@ struct AlgorithmProfile {
 struct SearchResult {
   size_t total;  // how many documents were matched in total
 
-  // The ids of the matched documents
+  // The ids of the matched documents, in result order
   std::vector<DocId> ids;
 
-  // Contains final scores if an aggregation was present
-  std::vector<std::pair<DocId, float>> knn_scores;
+  // Vector distances keyed by DocId (order is carried by `ids`). Populated for KNN/VECTOR_RANGE.
+  absl::flat_hash_map<DocId, float> knn_scores;
 
-  // Text relevance scores (DocId -> score). Populated when a scorer is active.
-  std::vector<std::pair<DocId, float>> text_scores;
+  // Text relevance scores keyed by DocId. Populated when a scorer is active.
+  absl::flat_hash_map<DocId, float> text_scores;
+  float max_text_score = 0;
 
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;
@@ -220,9 +265,15 @@ class SearchAlgorithm {
   bool Init(std::string_view query, const QueryParams* params,
             const OptionalFilters* filters = nullptr);
 
-  // Search on given index with predefined limit for cutting off result ids
+  // Search on given index with predefined limit for cutting off result ids.
+  // When global_stats is non-null, scorers see cluster-wide counts instead of
+  // values local to `index`.
   SearchResult Search(const FieldIndices* index,
-                      size_t cuttoff_limit = std::numeric_limits<size_t>::max()) const;
+                      size_t cuttoff_limit = std::numeric_limits<size_t>::max(),
+                      const GlobalScoringStats* global_stats = nullptr) const;
+
+  // This shard's contribution to GlobalScoringStats. Requires Init().
+  ShardScoringStats CollectScoringStats(const FieldIndices* index) const;
 
   std::optional<KnnScoreSortOption> GetKnnScoreSortOption() const;
 
@@ -234,13 +285,25 @@ class SearchAlgorithm {
 
   const AstVectorRangeNode* GetVectorRangeNode() const;
 
+  // All VECTOR_RANGE leaves in the query tree, in DFS order.
+  std::vector<const AstVectorRangeNode*> CollectVectorRangeNodes() const;
+
+  bool IsBareVectorRange() const;
+
+  // True when the query is `AND[VECTOR_RANGE, filters...]`.
+  bool IsAndedVectorRange() const;
+
+  // Detaches the range from the top-level AND (replacing it with match-all) and returns it,
+  // leaving query_ as the runnable pre-filter. Requires IsAndedVectorRange().
+  std::unique_ptr<AstNode> ExtractVectorRangeAsPrefilter();
+
   void EnableProfiling();
 
-  void SetScorer(ScorerFn scorer);
+  void SetScorer(ScorerSpec scorer);
 
  private:
   bool profiling_enabled_ = false;
-  ScorerFn scorer_ = nullptr;
+  std::optional<ScorerSpec> scorer_;
   std::unique_ptr<AstNode> query_;
   std::optional<KnnScoreSortOption> knn_hnsw_score_sort_option_;
 };

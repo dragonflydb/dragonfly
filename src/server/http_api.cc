@@ -5,9 +5,11 @@
 #include "server/http_api.h"
 
 #include "base/logging.h"
+#include "common/borrowed_string.h"
 #include "core/flatbuffers.h"
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
+#include "facade/reply_payload.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
 #include "util/http/http_common.h"
@@ -117,6 +119,26 @@ struct CaptureVisitor {
 
   void operator()(const payload::BulkString& bs) {
     absl::StrAppend(&str, JsonEscape(bs));
+  }
+
+  void operator()(const payload::BulkStringRef& bs) {
+    absl::StrAppend(&str, JsonEscape(bs));
+  }
+
+  void operator()(const unique_ptr<payload::VerbatimString>& vs) {
+    absl::StrAppend(&str, JsonEscape(vs->str));
+  }
+
+  void operator()(const cmn::BorrowedString& bs) {
+    // HTTP visitor wants a single contiguous string to JSON-escape. Raw bytes
+    // are already user-visible (avoid a copy); packed encodings are decoded
+    // once via the shared helper (chunked decoding only matters for iovec
+    // sinks).
+    if (!bs.IsEncoded()) {
+      absl::StrAppend(&str, JsonEscape(bs.view()));
+      return;
+    }
+    absl::StrAppend(&str, JsonEscape(cmn::DecodeToString(bs)));
   }
 
   void operator()(payload::Null) {

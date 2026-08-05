@@ -10,6 +10,7 @@
 #include <nonstd/expected.hpp>
 #include <optional>
 
+#include "facade/cmd_arg_parser.h"
 #include "server/common_types.h"
 #include "server/execution_state.h"
 
@@ -19,7 +20,7 @@ class SinkReplyBuilder;
 
 namespace dfly {
 
-using facade::CmdArgList;
+using facade::CmdArgParser;
 
 class EngineShardSet;
 class Interpreter;
@@ -54,7 +55,8 @@ class ScriptMgr {
 
   ScriptMgr();
 
-  void Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Run(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder,
+           ConnectionContext* cntx);
 
   // Insert script and return sha. Get possible error from compilation or parsing script flags.
   nonstd::expected<std::string, GenericError> Insert(std::string_view body,
@@ -74,11 +76,11 @@ class ScriptMgr {
   void OnScriptError(std::string_view sha, std::string_view error);
 
  private:
-  void ExistsCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) const;
-  void FlushCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+  void ExistsCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder) const;
+  void FlushCmd(Transaction* tx, SinkReplyBuilder* builder);
+  void LoadCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder,
                ConnectionContext* cntx);
-  void ConfigCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void ConfigCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder);
   void ListCmd(Transaction* tx, SinkReplyBuilder* builder) const;
   void LatencyCmd(Transaction* tx, SinkReplyBuilder* builder) const;
   void GCCmd(Transaction* tx, SinkReplyBuilder* builder) const;

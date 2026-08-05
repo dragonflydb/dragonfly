@@ -7,6 +7,7 @@
 #include <coroutine>
 #include <variant>
 
+#include "base/cycle_clock.h"
 #include "base/function2.hpp"
 #include "common/backed_args.h"
 #include "facade/memcache_parser.h"
@@ -90,6 +91,10 @@ class ParsedCommand : public cmn::BackedArguments {
     return rb_;
   }
 
+  SinkReplyBuilder* SwapReplyBuilder(SinkReplyBuilder* rb) {
+    return std::exchange(rb_, rb);
+  }
+
   ConnectionContext* conn_cntx() const {
     return conn_cntx_;
   }
@@ -103,6 +108,10 @@ class ParsedCommand : public cmn::BackedArguments {
       sz += sizeof(*mc_cmd_);
     }
     return sz;
+  }
+
+  void FinalizeParsing() {
+    parsed_cycle = base::CycleClock::Now();
   }
 
   // Marks this command as having reply stored in its payload instead of being sent directly.
@@ -126,31 +135,41 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
   void SendLong(long val);
+
+  // Deprecated: use Resolve instead for deferred replies.
   template <typename F> void ReplyWith(F&& func) {
     assert(!is_deferred_reply_);
     using RbType = decltype(OnlyArgType(&std::decay_t<F>::operator()));
     func(static_cast<RbType>(rb_));
   }
 
-  // Below are main commands for the async api and all assume that the command defers replies
-
-  // Whether SendReply() can be called. If not, it must be waited via Blocker()
+  // Whether SendReply() can be called. Only valid in deferred mode.
+  // If the reply is not ready yet, it is guaranteed to be tracked by non-null Blocker()
   bool CanReply() const;
 
-  // Reaching zero on blocker means CanReply() turns true
+  // Reaching zero on blocker means CanReply() will turn true.
+  // Waits for underlying awaitable (usually transaction)
   util::fb2::EmbeddedBlockingCounter* Blocker() const {
     return std::get<SuspendedCommand>(reply_).blocker;
   }
 
-  // Assumes CanReply() is true. Sends reply
+  // Whether this command will resume a coroutine on SendReply().
+  bool IsSuspendedReply() const {
+    return std::holds_alternative<SuspendedCommand>(reply_);
+  }
+
+  // Requires CanReply(). Either sends stored reply or wakes up coroutine to send reply
   void SendReply();
 
-  // Resolve deferred command with reply
+  // Resolve deferred command immediately with an error reply.
   void Resolve(const facade::ErrorReply& error) {
     SendError(error);
   }
 
-  // Resolve deferred command with async task
+  // Resolve deferred command with a captured payload.
+  void Resolve(payload::Payload&& pl);
+
+  // Resolve deferred command with coroutine + blocker. See CanReply(), Blocker() and SendReply()
   void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, std::coroutine_handle<> coro) {
     reply_ = SuspendedCommand{blocker, coro};
   }
@@ -189,9 +208,5 @@ class ParsedCommand : public cmn::BackedArguments {
 
   std::variant<payload::Payload, SuspendedCommand> reply_;
 };
-
-#ifdef __linux__
-static_assert(sizeof(ParsedCommand) == 232);
-#endif
 
 }  // namespace facade

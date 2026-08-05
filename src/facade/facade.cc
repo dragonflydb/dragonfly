@@ -23,9 +23,10 @@ using namespace std;
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
-  static_assert(kSizeConnStats == 272);
+  static_assert(kSizeConnStats == 328);
 
   ADD(read_buf_capacity);
+  ADD(connection_memory_bytes);
   ADD(dispatch_queue_entries);
   ADD(dispatch_queue_bytes);
   ADD(pipeline_queue_entries);
@@ -54,7 +55,10 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(pipeline_dispatch_calls);
   ADD(pipeline_dispatch_commands);
   ADD(pipeline_dispatch_flush_usec);
-  ADD(skip_pipeline_flushing);
+  ADD(pipeline_dispatch_flush_count);
+  ADD(proactor_reads);
+  ADD(proactor_parse);
+  ADD(pubsub_backpressure);
 
   return *this;
 }
@@ -64,7 +68,7 @@ ReplyStats::ReplyStats(ReplyStats&& other) noexcept {
 }
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 80u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 88u + kSanitizerOverhead);
   ADD(io_write_cnt);
   ADD(io_write_bytes);
 
@@ -73,6 +77,7 @@ ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
   }
 
   ADD(script_error_count);
+  ADD(borrowed_string_sent_cnt);
 
   send_stats += o.send_stats;
   squashing_current_reply_size.fetch_add(o.squashing_current_reply_size.load(memory_order_relaxed),
@@ -83,7 +88,7 @@ ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
 #undef ADD
 
 ReplyStats& ReplyStats::operator=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 80u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 88u + kSanitizerOverhead);
 
   if (this == &o) {
     return *this;
@@ -94,6 +99,7 @@ ReplyStats& ReplyStats::operator=(const ReplyStats& o) {
   io_write_bytes = o.io_write_bytes;
   err_count = o.err_count;
   script_error_count = o.script_error_count;
+  borrowed_string_sent_cnt = o.borrowed_string_sent_cnt;
   squashing_current_reply_size.store(o.squashing_current_reply_size.load(memory_order_relaxed),
                                      memory_order_relaxed);
   return *this;
@@ -159,6 +165,18 @@ ostream& operator<<(ostream& os, facade::CmdArgList ras) {
       os << absl::CHexEscape(ArgS(ras, i)) << ",";
     }
     os << absl::CHexEscape(ArgS(ras, ras.size() - 1));
+  }
+  os << "]";
+
+  return os;
+}
+
+ostream& operator<<(ostream& os, const facade::ParsedArgs& args) {
+  os << "[";
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (i)
+      os << ",";
+    os << absl::CHexEscape(args[i]);
   }
   os << "]";
 

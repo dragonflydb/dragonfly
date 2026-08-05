@@ -16,12 +16,13 @@ constexpr uint8_t RDB_TYPE_SBF = 33;
 constexpr uint8_t RDB_TYPE_SBF2 = 34;
 constexpr uint8_t RDB_TYPE_CMS = 35;
 constexpr uint8_t RDB_TYPE_TOPK = 36;
+constexpr uint8_t RDB_TYPE_CUCKOO = 37;
 
 constexpr bool rdbIsObjectTypeDF(uint8_t type) {
   return __rdbIsObjectType(type) || (type == RDB_TYPE_JSON) ||
          (type == RDB_TYPE_HASH_WITH_EXPIRY) || (type == RDB_TYPE_SET_WITH_EXPIRY) ||
          (type == RDB_TYPE_SBF) || (type == RDB_TYPE_SBF2) || (type == RDB_TYPE_CMS) ||
-         (type == RDB_TYPE_TOPK);
+         (type == RDB_TYPE_TOPK) || (type == RDB_TYPE_CUCKOO);
 }
 
 //  Opcodes: Range 200-240 is used by DF extensions.
@@ -49,10 +50,11 @@ constexpr uint8_t RDB_OPCODE_DF_MASK = 220; /* Mask for key properties */
 constexpr uint32_t DF_MASK_FLAG_STICKY = (1 << 0);
 constexpr uint32_t DF_MASK_FLAG_MC_FLAGS = (1 << 1);
 
-// Opcode to store HNSW vector index node data for global indices
-// Format: [index_name, elements_number, internal_id, global_id, level, zero_level_links_num,
-// zero_level_links,
-//          higher_level_links_num (only if level > 0), higher_level_links (only if level > 0)]
+// Opcode to store HNSW vector index node data for global indices.
+// Format: [index_name, enterpoint_node, elements_number,
+//          then for each node in ascending internal_id 0..elements_number-1:
+//            internal_id, global_id, level, zero_level_links_num, zero_level_links,
+//            higher_level_links_num (only if level > 0), higher_level_links (only if level > 0)]
 constexpr uint8_t RDB_OPCODE_VECTOR_INDEX = 222;
 
 // Opcode to store ShardDocIndex key-to-DocId mapping for search indices

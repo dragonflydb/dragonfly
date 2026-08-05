@@ -10,11 +10,12 @@
 #include <string>
 
 #include "core/qlist.h"
-#include "facade/facade_stats.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/facade_types.h"
-#include "server/acl/user_registry.h"
+#include "io/proc_reader.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/metrics.h"
 #include "server/replica_types.h"
 #include "server/server_state.h"
 #include "server/stats.h"
@@ -25,6 +26,7 @@ struct hdr_histogram;
 
 namespace facade {
 class Listener;
+struct TlsCertInfo;
 }  // namespace facade
 
 namespace util {
@@ -45,6 +47,14 @@ class SnapshotStorage;
 
 std::string GetPassword();
 
+// Validates server-side TLS flags: when --tls is set, at least one auth method must be
+// configured (a password or a CA cert). Returns false on an invalid configuration.
+bool ValidateServerTlsFlags();
+
+// Validates the --dbfilename / --df_snapshot_format flags (filename format, no directory
+// separators, extension vs snapshot format). Returns false on an invalid configuration.
+bool ValidateSnapshotFilenameFlags();
+
 class CommandContext;
 class CommandRegistry;
 class DflyCmd;
@@ -59,101 +69,6 @@ struct ReplicaRoleInfo {
   uint32_t listening_port;
   std::string_view state;
   uint64_t lsn_lag;
-};
-
-struct ReplicationMemoryStats {
-  size_t streamer_buf_capacity_bytes = 0;  // total capacities of streamer buffers
-  size_t full_sync_buf_bytes = 0;          // total bytes used for full sync buffers
-};
-
-struct LoadingStats {
-  size_t restore_count = 0;
-  size_t failed_restore_count = 0;
-
-  size_t backup_count = 0;
-  size_t failed_backup_count = 0;
-};
-
-// Global peak stats recorded after aggregating metrics over all shards.
-// Note that those values are only updated during GetMetrics calls.
-struct PeakStats {
-  size_t conn_dispatch_queue_bytes = 0;  // peak value of conn_stats.dispatch_queue_bytes
-  size_t conn_read_buf_capacity = 0;     // peak of total read buf capcacities
-};
-
-// Aggregated metrics over multiple sources on all shards
-struct Metrics {
-  SliceEvents events;              // general keyspace stats
-  std::vector<DbStats> db_stats;   // dbsize stats
-  EngineShard::Stats shard_stats;  // per-shard stats
-
-  facade::FacadeStats facade_stats;  // client stats and buffer sizes
-  TieredStats tiered_stats;
-
-  SearchStats search_stats;
-  ServerState::Stats coordinator_stats;  // stats on transaction running
-  PeakStats peak_stats;
-  QList::Stats qlist_stats;
-
-  size_t qps = 0;
-
-  size_t used_mem_peak = 0;
-  size_t used_mem_rss_peak = 0;
-
-  size_t heap_used_bytes = 0;
-  size_t small_string_bytes = 0;
-  uint32_t traverse_ttl_per_sec = 0;
-  uint32_t delete_ttl_per_sec = 0;
-  uint64_t hoffman_encode_total = 0, hoffman_encode_success = 0;
-  uint64_t fiber_switch_cnt = 0;
-  uint64_t fiber_switch_delay_usec = 0;
-  uint64_t tls_bytes = 0;
-  uint64_t refused_conn_max_clients_reached_count = 0;
-  uint64_t serialization_bytes = 0;
-
-  // Statistics about fibers running for a long time (more than 1ms).
-  uint64_t fiber_longrun_cnt = 0;
-  uint64_t fiber_longrun_usec = 0;
-
-  // Max length of the all the tx shard-queues.
-  uint32_t tx_queue_len = 0;
-  uint32_t worker_fiber_count = 0;
-  uint32_t blocked_tasks = 0;
-  size_t worker_fiber_stack_size = 0;
-
-  size_t lsn_buffer_size = 0;
-  size_t lsn_buffer_bytes = 0;
-
-  // monotonic timestamp (ProactorBase::GetMonotonicTimeNs) of the connection stuck on send
-  // for longest time.
-  uint64_t oldest_pending_send_ts = uint64_t(-1);
-
-  InterpreterManager::Stats lua_stats;
-
-  // command call frequencies (count, aggregated latency in usec).
-  std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
-
-  absl::flat_hash_map<std::string, uint64_t> connections_lib_name_ver_map;
-
-  struct ReplicaInfo {
-    ReplicaSummary summary;
-
-    // cluster
-    std::vector<ReplicaSummary> cl_repl_summary;
-  };
-
-  // Replica reconnect stats on the replica side. Undefined for master
-  std::optional<ReplicaInfo> replica_side_info;
-
-  size_t migration_errors_total;
-
-  LoadingStats loading_stats;
-
-  absl::flat_hash_map<std::string, hdr_histogram*> cmd_latency_map;
-
-  InternedStringStats interned_string_stats;
-
-  acl::UserRegistry::AclStats acl_stats;
 };
 
 // Contains the state of the last save operation.
@@ -221,6 +136,9 @@ struct SaveCmdOptions {
   std::string_view basename;
 };
 
+bool ReadProcStats(io::StatusData* sdata);
+uint64_t GetDelayMs(uint64_t cycles_ts);
+
 class ServerFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
@@ -233,7 +151,7 @@ class ServerFamily {
   void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Public because is used by DflyCmd.
-  void ShutdownCmd(CmdArgList args, CommandContext* cmd_cntx);
+  void ShutdownCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   Service& service() {
     return service_;
@@ -241,10 +159,11 @@ class ServerFamily {
 
   void ResetStat(Namespace* ns);
 
-  Metrics GetMetrics(Namespace* ns) const;
+  // Collects server metrics. See MetricsCollectOpts; a default-constructed value collects all.
+  Metrics GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) const;
 
-  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section,
-                                bool priveleged) const;
+  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section, bool priveleged,
+                                const std::shared_ptr<const facade::TlsCertInfo>& cert_info) const;
 
   ScriptMgr* script_mgr() {
     return script_mgr_.get();
@@ -285,13 +204,24 @@ class ServerFamily {
   void PauseReplication(bool pause) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
+  // Investigation-only (DEBUG REPLDIAG). Remove once closed.
+  std::optional<int> GetReplicaMasterSocketUnreadBytes() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
   const std::string& master_replid() const {
     return master_replid_;
   }
 
+  // The lineage root replication id of this node: its own replid if it is a true master, or the
+  // ancestor id advertised by its master when it is itself a replica (cascaded replication).
+  std::string GetLineageId() const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
   DflyCmd* GetDflyCmd() const {
     return dfly_cmd_.get();
   }
+
+  // Forces all replicas of this node to perform a full sync by breaking the replication connection
+  // with a cancellation error (DfylCmd::CancelReplicas) and resetting the journal
+  void ForceReplicasToFullSync();
 
   std::optional<LastMasterSyncData> GetLastMasterData() const {
     return last_master_data_;
@@ -306,6 +236,17 @@ class ServerFamily {
   // Replica-side method. Returns replication summary if this server is a replica,
   // nullopt otherwise.
   std::optional<Metrics::ReplicaInfo> GetReplicaSummary() const;
+
+  struct MasterLinkClientInfo {
+    uint32_t client_id;
+    std::string info;
+  };
+
+  // One entry per attached outbound master link; empty if not replicating.
+  std::vector<MasterLinkClientInfo> GetMasterLinkClientInfo() const
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
+  bool IsMasterLinkClientId(uint32_t id) const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void OnClose(ConnectionContext* cntx);
 
@@ -335,29 +276,33 @@ class ServerFamily {
     return shard_set->size();
   }
 
-  void Auth(CmdArgList args, CommandContext* cmd_cntx);
-  void Client(CmdArgList args, CommandContext* cmd_cntx);
-  void Config(CmdArgList args, CommandContext* cmd_cntx);
-  void DbSize(CmdArgList args, CommandContext* cmd_cntx);
-  void Debug(CmdArgList args, CommandContext* cmd_cntx);
-  void Dfly(CmdArgList args, CommandContext* cmd_cntx);
-  void Memory(CmdArgList args, CommandContext* cmd_cntx);
-  void Shrink(CmdArgList args, CommandContext* cmd_cntx);
-  void FlushDb(CmdArgList args, CommandContext* cmd_cntx);
-  void Info(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void Hello(CmdArgList args, CommandContext* cmd_cntx);
-  void LastSave(CmdArgList args, CommandContext* cmd_cntx);
-  void Latency(CmdArgList args, CommandContext* cmd_cntx);
-  void ReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
-  void AddReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
-  void ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void ReplConf(CmdArgList args, CommandContext* cmd_cntx);
-  void Role(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void Save(CmdArgList args, CommandContext* cmd_cntx);
-  void BgSave(CmdArgList args, CommandContext* cmd_cntx);
-  void Script(CmdArgList args, CommandContext* cmd_cntx);
-  void SlowLog(CmdArgList args, CommandContext* cmd_cntx);
-  void Module(CmdArgList args, CommandContext* cmd_cntx);
+  void Auth(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Client(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Config(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void DbSize(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Debug(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Dfly(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Memory(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void FlushDb(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Info(facade::CmdArgParser parser, CommandContext* cmd_cntx)
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Hello(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void LastSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Latency(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void ReplicaOf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void AddReplicaOf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx)
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void ReplConf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Role(facade::CmdArgParser parser, CommandContext* cmd_cntx)
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Save(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void BgSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Script(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void SlowLog(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Module(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
@@ -367,17 +312,10 @@ class ServerFamily {
                            // failure
   };
 
-  // REPLICAOF implementation. See arguments above
-  void ReplicaOfInternal(CmdArgList args, CommandContext* cmnd_cntx,
+  void ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmnd_cntx,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
-  void StartJournalInShardThreads(Replica* repl_ptr);
-
   void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  // REPLICAOF implementation without two phase locking.
-  void ReplicaOfInternalV2(CmdArgList args, CommandContext* cmnd_cntx,
-                           ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   struct LoadOptions {
     std::string snapshot_id;
@@ -395,7 +333,7 @@ class ServerFamily {
 
   void SendInvalidationMessages() const;
 
-  std::optional<SaveCmdOptions> GetSaveCmdOpts(CmdArgList args, CommandContext* cmd_cntx);
+  std::optional<SaveCmdOptions> GetSaveCmdOpts(facade::ParsedArgs args, CommandContext* cmd_cntx);
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
@@ -413,8 +351,8 @@ class ServerFamily {
 
   static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
 
-  void ClientPauseCmd(CmdArgList args, CommandContext* cmd_cntx);
-  void ClientUnPauseCmd(CmdArgList args, CommandContext* cmd_cntx);
+  void ClientPauseCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void ClientUnPauseCmd(facade::ParsedArgs args, CommandContext* cmd_cntx);
 
   // Set accepting_connections_ and update listners according to it
   void ChangeConnectionAccept(bool accept);

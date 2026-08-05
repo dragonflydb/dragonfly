@@ -10,6 +10,7 @@
 #include <coroutine>
 #include <variant>
 
+#include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "facade/op_status.h"
 #include "server/conn_context.h"
@@ -44,9 +45,19 @@ struct SingleHopWaiter {
   void await_suspend(std::coroutine_handle<> handle) const noexcept;
   facade::OpStatus await_resume() const noexcept;
 
+  // Runs the callback and snapshots its status. Scheduled in place of the raw
+  // callback for single-shard hops so await_resume() returns this snapshot
+  // instead of the transaction result, which under pipeline squashing may
+  // already be reused by the next command by the time the coroutine resumes.
+  Transaction::RunnableResult operator()(Transaction* tx, EngineShard* es) const;
+
   CommandContext* cmd_cntx;
   Transaction::RunnableType callback;
   boost::intrusive_ptr<Transaction> tx_keepalive_ = nullptr;
+  mutable facade::OpStatus status_ = facade::OpStatus::OK;
+  // Set when status_ holds the hop result (single-shard). Multi-shard hops
+  // aggregate into the transaction and are never squashed onto a reused tx.
+  bool use_snapshot_ = false;
 };
 
 // Extension of SingleHopWaiter capturing the return value of the callback
@@ -82,11 +93,11 @@ constexpr CmdR kAborted = {};
 // Underlying driver (promise) of coroutine that defines its context
 struct CmdR::Coro {
   // Coroutine created of a top level command
-  Coro(facade::CmdArgList arg, CommandContext* cmd_cntx) : cmd_cntx{cmd_cntx} {
+  Coro(facade::CmdArgParser, CommandContext* cmd) : cmd_cntx{cmd} {
   }
 
   // Coroutine created of a internal function with arguments
-  template <typename... Ts> Coro(CommandContext* cmd_cntx, const Ts&... ts) : cmd_cntx{cmd_cntx} {
+  template <typename... Ts> explicit Coro(CommandContext* cmd, const Ts&... ts) : cmd_cntx{cmd} {
   }
 
   // Use it waiter directly cases when it needs to stay in scope to keep the transaction alive

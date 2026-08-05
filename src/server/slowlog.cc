@@ -19,7 +19,7 @@ void SlowLogShard::Reset() {
   log_entries_.clear();
 }
 
-void SlowLogShard::Add(const string_view command_name, CmdArgList args,
+void SlowLogShard::Add(const string_view command_name, const facade::ParsedArgs& args,
                        const string_view client_name, const string_view client_ip,
                        uint64_t exec_time_usec, uint64_t unix_ts_usec) {
   DCHECK_GT(log_entries_.capacity(), 0u);
@@ -35,7 +35,7 @@ void SlowLogShard::Add(const string_view command_name, CmdArgList args,
   slowlog_args.emplace_back(command_name, 0);
 
   for (size_t i = 0; i < slowlog_effective_length; ++i) {
-    string_view arg = facade::ArgS(args, i);
+    string_view arg = args[i];
     size_t extra_bytes = 0;
     // If any of the arguments is deemed too long, it will be truncated
     // and the truncated string will be suffixed by the number of truncated bytes in

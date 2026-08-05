@@ -52,10 +52,11 @@ void ParsedCommand::ResetForReuse() {
   is_deferred_reply_ = false;
   reply_ = std::monostate{};
 
-  offsets_.clear();
+  offsets_.resize(0);
+  offsets_.shrink_to_fit();
   if (HeapMemory() > 1024) {
-    storage_.clear();  // also deallocates the heap.
-    offsets_.shrink_to_fit();
+    storage_.resize(0);
+    storage_.shrink_to_fit();
   }
   ReuseInternal();
 }
@@ -98,6 +99,14 @@ void ParsedCommand::SendLong(long val) {
   rb_->SendLong(val);
 }
 
+void ParsedCommand::Resolve(payload::Payload&& pl) {
+  DCHECK(!is_deferred_reply_);
+  DCHECK_GT(pl.index(), 0u);  // not monostate
+
+  is_deferred_reply_ = true;
+  reply_ = std::move(pl);
+}
+
 bool ParsedCommand::CanReply() const {
   DCHECK(is_deferred_reply_);
   dfly::Overloaded ov{[](const payload::Payload& pl) { return pl.index() > 0 /* not monostate */; },
@@ -106,8 +115,8 @@ bool ParsedCommand::CanReply() const {
 }
 
 void ParsedCommand::SendReply() {
-  auto payload_handler = [this](payload::Payload& pl) {
-    CapturingReplyBuilder::Apply(std::move(pl), rb_);
+  auto payload_handler = [this](const payload::Payload& pl) {
+    CapturingReplyBuilder::Apply(pl, rb_);
   };
   auto task_handler = [](SuspendedCommand& task) {
     DCHECK(task.coro);

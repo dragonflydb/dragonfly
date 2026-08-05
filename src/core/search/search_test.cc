@@ -67,7 +67,8 @@ struct MockedDocument : public DocumentAccessor {
     return GetStrings(field);
   }
 
-  std::optional<VectorInfo> GetVector(string_view field, size_t dim) const override {
+  std::optional<VectorInfo> GetVector(string_view field, size_t dim,
+                                      VectorDataType dtype) const override {
     auto strings_list = GetStrings(field);
     if (!strings_list)
       return std::nullopt;
@@ -343,6 +344,37 @@ TEST_F(SearchTest, CheckParenthesisPriority) {
   }
 }
 
+TEST_F(SearchTest, EnglishStemming) {
+  for (auto query : {"learn", "learning", "learns", "learned"}) {
+    PrepareQuery(query);
+    ExpectAll("machine learning fundamentals", "I will learn tomorrow", "she learned yesterday",
+              "the model learns fast");
+    ExpectNone("unrelated text", "completely different");
+    EXPECT_TRUE(Check()) << "query=" << query << " err=" << GetError();
+  }
+}
+
+TEST_F(SearchTest, NoStemAttribute) {
+  PrepareSchema({{"field", SchemaField::TEXT, SchemaField::TextParams{.no_stem = true}}});
+
+  PrepareQuery("learn");
+  ExpectAll("I will learn tomorrow");
+  ExpectNone("machine learning fundamentals", "she learned yesterday", "the model learns fast");
+  EXPECT_TRUE(Check()) << GetError();
+
+  PrepareQuery("learning");
+  ExpectAll("machine learning fundamentals");
+  ExpectNone("I will learn tomorrow", "she learned yesterday", "the model learns fast");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, StemmingNormalizesCase) {
+  PrepareQuery("Running");
+  ExpectAll("He was RUNNING fast", "the runs were good");
+  ExpectNone("she sat still", "runner ahead");  // Porter does not unify -er nouns with -ing verbs
+  EXPECT_TRUE(Check()) << GetError();
+}
+
 TEST_F(SearchTest, CheckPrefix) {
   {
     PrepareQuery("pre*");
@@ -372,6 +404,20 @@ TEST_F(SearchTest, MatchField) {
   ExpectNone(Map{{"f1", "foo"}, {"f2", "bar"}, {"f3", "last is wrong"}},
              Map{{"f1", "its"}, {"f2", "totally"}, {"f3", "wrong"}},
              Map{{"f1", "im foo but its only me and"}, {"f2", "bar"}});
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchFieldPerTermWeight) {
+  PrepareSchema({{"f1", SchemaField::TEXT}, {"f2", SchemaField::TEXT}});
+
+  // A per-term weight inside a field group keeps the term scoped to that field.
+  PrepareQuery("@f1:(machine=>{$weight:2.0} | learning)");
+
+  ExpectAll(Map{{"f1", "machine models"}, {"f2", "x"}}, Map{{"f1", "deep learning"}, {"f2", "x"}},
+            Map{{"f1", "machine learning"}, {"f2", "x"}});
+  ExpectNone(Map{{"f1", "unrelated"}, {"f2", "machine learning"}},  // only in f2
+             Map{{"f1", "nothing here"}, {"f2", "x"}});
 
   EXPECT_TRUE(Check()) << GetError();
 }
@@ -517,6 +563,46 @@ TEST_F(SearchTest, StopWords) {
   // found is not a stopword
   algo.Init("found", &params);
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+}
+
+// A stopword among query terms must be dropped, not kept as a required term. Otherwise the
+// implicit-AND query reduces to an empty result because stopwords are never indexed.
+TEST_F(SearchTest, StopWordsDroppedFromQuery) {
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
+  IndicesOptions options{{"some", "words", "are", "left", "out"}};
+
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  vector<string> documents = {"some words left out",      //
+                              "some can be found",        //
+                              "words are never matched",  //
+                              "explicitly found!"};
+  for (size_t i = 0; i < documents.size(); i++) {
+    MockedDocument doc{{{"title", documents[i]}}};
+    indices.Add(i, doc);
+  }
+
+  // Trailing stopword is dropped -> query behaves like "found".
+  algo.Init("found some", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+
+  // Stopword between two real terms is dropped -> "explicitly found".
+  algo.Init("explicitly are found", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(3));
+
+  // Stopword as an OR operand contributes nothing; the real operand still matches.
+  algo.Init("found | some", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+
+  // Field-scoped group with a trailing stopword still matches.
+  algo.Init("@title:(found are)", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+
+  // A non-stopword term still constrains the result as usual.
+  algo.Init("found matched", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre());
 }
 
 class SearchRaxTest
@@ -760,6 +846,64 @@ TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
   EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 1, 2));
   // knn_scores should contain distances for all matched docs
   EXPECT_EQ(result.knn_scores.size(), 3u);
+}
+
+TEST_F(VectorRangeTest, FlatRangeRejectsEpsilon) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({1.0f});
+
+  ASSERT_TRUE(algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$EPSILON: 0.1}", &params));
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.error, testing::HasSubstr("EPSILON"));
+}
+
+TEST_F(VectorRangeTest, FlatRangeRejectsInfiniteRadius) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({1.0f});
+
+  ASSERT_TRUE(algo.Init("@pos:[VECTOR_RANGE inf $vec]", &params));
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.error, testing::HasSubstr("radius"));
+}
+
+TEST_F(VectorRangeTest, RangeOrFilterScoresByDoc) {
+  // OR-ing a range with a filter makes the result larger than the range-match set. knn_scores is
+  // keyed by DocId: only in-range docs carry a distance, filter-only docs are simply absent.
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}, {"route", SchemaField::TAG}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  for (size_t i = 0; i < 10; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i)})}, {"route", (i % 2 == 0) ? "a" : "b"}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({5.0f});
+
+  // range (pos 4,5,6 -> docs 4,5,6) OR route "a" (docs 0,2,4,6,8) = union {0,2,4,5,6,8}.
+  ASSERT_TRUE(
+      algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist} | @route:{a}", &params));
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 2, 4, 5, 6, 8));
+  // Distances exist only for the in-range docs; filter-only docs (0, 2, 8) are absent.
+  EXPECT_THAT(result.knn_scores,
+              testing::UnorderedElementsAre(testing::Key(4u), testing::Key(5u), testing::Key(6u)));
+  EXPECT_FLOAT_EQ(result.knn_scores.at(5), 0.0f);
 }
 
 TEST_F(VectorRangeTest, FlatStarQueryZeroVectorIsValid) {
@@ -1311,7 +1455,7 @@ TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
     const char* data;
     explicit BorrowedDoc(const char* d) : data(d) {
     }
-    std::optional<VectorInfo> GetVector(string_view, size_t) const override {
+    std::optional<VectorInfo> GetVector(string_view, size_t, VectorDataType) const override {
       return BorrowedFtVector{data};
     }
     std::optional<StringList> GetStrings(string_view) const override {
@@ -1734,7 +1878,7 @@ TEST_P(HnswRangeQueryTest, BasicRange) {
   auto index = CreateSimple1DIndex(10);
 
   vector<float> query = {5.0f};
-  auto results = index->RangeQuery(query.data(), 1.5f);
+  auto results = index->RangeQuery(query.data(), 1.5f, std::nullopt);
 
   set<GlobalDocId> ids;
   for (const auto& [dist, id] : results)
@@ -1749,7 +1893,7 @@ TEST_P(HnswRangeQueryTest, ExactMatch) {
   auto index = CreateSimple1DIndex(10);
 
   vector<float> query = {3.0f};
-  auto results = index->RangeQuery(query.data(), 0.0f);
+  auto results = index->RangeQuery(query.data(), 0.0f, std::nullopt);
 
   ASSERT_EQ(results.size(), 1u);
   EXPECT_EQ(results[0].second, GlobalDocId{3});
@@ -1761,7 +1905,7 @@ TEST_P(HnswRangeQueryTest, LargeRadiusReturnsAll) {
   auto index = CreateSimple1DIndex(20);
 
   vector<float> query = {10.0f};
-  auto results = index->RangeQuery(query.data(), 1000.0f);
+  auto results = index->RangeQuery(query.data(), 1000.0f, std::nullopt);
 
   EXPECT_EQ(results.size(), 20u);
 }
@@ -1771,7 +1915,7 @@ TEST_P(HnswRangeQueryTest, EmptyResultOutsideRadius) {
   auto index = CreateSimple1DIndex(10);
 
   vector<float> query = {5.5f};
-  auto results = index->RangeQuery(query.data(), 0.1f);
+  auto results = index->RangeQuery(query.data(), 0.1f, std::nullopt);
 
   EXPECT_TRUE(results.empty());
 }
@@ -1781,7 +1925,7 @@ TEST_P(HnswRangeQueryTest, EmptyIndex) {
   auto index = CreateSimple1DIndex(0);
 
   vector<float> query = {0.0f};
-  auto results = index->RangeQuery(query.data(), 100.0f);
+  auto results = index->RangeQuery(query.data(), 100.0f, std::nullopt);
 
   EXPECT_TRUE(results.empty());
 }
@@ -1792,7 +1936,7 @@ TEST_P(HnswRangeQueryTest, DistancesCorrect) {
   auto index = CreateSimple1DIndex(10);
 
   vector<float> query = {5.0f};
-  auto results = index->RangeQuery(query.data(), 2.0f);  // docs 3,4,5,6,7
+  auto results = index->RangeQuery(query.data(), 2.0f, std::nullopt);  // docs 3,4,5,6,7
 
   EXPECT_EQ(results.size(), 5u);
   for (const auto& [dist, id] : results) {
@@ -1810,7 +1954,7 @@ TEST_P(HnswRangeQueryTest, DeletedDocNotReturned) {
   index->Remove(5);
 
   vector<float> query = {5.0f};
-  auto results = index->RangeQuery(query.data(), 1.5f);
+  auto results = index->RangeQuery(query.data(), 1.5f, std::nullopt);
 
   set<GlobalDocId> ids;
   for (const auto& [dist, id] : results)
@@ -1829,7 +1973,7 @@ TEST_P(HnswRangeQueryTest, ConsistentWithBruteForce) {
   vector<float> query = {25.0f};
   float radius = 5.0f;
 
-  auto results = index->RangeQuery(query.data(), radius);
+  auto results = index->RangeQuery(query.data(), radius, std::nullopt);
 
   // Brute force: collect all docs within radius.
   // L2Distance returns |a-b| for 1-D vectors (actual Euclidean, not squared).
@@ -1845,6 +1989,49 @@ TEST_P(HnswRangeQueryTest, ConsistentWithBruteForce) {
     got.insert(id);
 
   EXPECT_EQ(got, expected);
+}
+
+TEST_P(HnswRangeQueryTest, EpsilonDoesNotReturnOutOfRadiusDocs) {
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(20);
+
+  vector<float> query = {5.0f};
+  float radius = 1.5f;
+  auto results = index->RangeQuery(query.data(), radius, 1000.0);
+
+  for (const auto& [dist, id] : results) {
+    EXPECT_LE(dist, radius) << id;
+  }
+}
+
+TEST_P(HnswRangeQueryTest, RangeMatchesBruteForceAcrossQueries) {
+  // Sweep several queries/radii; range search must return EXACTLY the brute-force in-radius set
+  // (full recall + nothing out of radius). This guards the dynamic-range boundary update against a
+  // regression that drops in-radius docs. NOTE: on a 1-D L2 line the greedy descent always lands on
+  // the nearest doc, so the phase-2 entry point is within radius whenever any in-radius doc exists
+  // -- there the boundary clamp is provably equivalent. A truly clamp-sensitive case needs >=2-D;
+  // this test still guards completeness/soundness of the boundary logic on the available fixture.
+  (void)GetParam();
+  const size_t n = 100;
+  auto index = CreateSimple1DIndex(n);
+
+  for (float center : {12.0f, 50.0f, 87.0f}) {
+    for (float radius : {0.5f, 2.0f, 7.5f}) {
+      vector<float> query = {center};
+      auto results = index->RangeQuery(query.data(), radius, std::nullopt);
+
+      set<GlobalDocId> expected;
+      for (size_t i = 0; i < n; i++) {
+        if (std::abs(static_cast<float>(i) - center) <= radius)
+          expected.insert(i);
+      }
+      set<GlobalDocId> got;
+      for (const auto& [dist, id] : results)
+        got.insert(id);
+
+      EXPECT_EQ(got, expected) << "center=" << center << " radius=" << radius;
+    }
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(HnswRangeL2, HnswRangeQueryTest, testing::Values(VectorSimilarity::L2),
@@ -1934,6 +2121,101 @@ TEST_F(SearchTest, VectorDistanceBasic) {
   // For identical vectors: IP = 1 - dot_product(v, v) = 1 - ||v||^2
   // For vec1 = {1, 2, 3}: ||v||^2 = 1 + 4 + 9 = 14, so IP = 1 - 14 = -13
   EXPECT_LT(ip_same, 0.0f);  // Should be negative for non-normalized vectors
+}
+
+TEST_F(SearchTest, VectorDistanceTypedDtypes) {
+  EXPECT_FLOAT_EQ(HalfToFloat(0x3C00), 1.0f);
+  EXPECT_FLOAT_EQ(HalfToFloat(0x4000), 2.0f);
+  EXPECT_FLOAT_EQ(HalfToFloat(0xC000), -2.0f);
+  EXPECT_FLOAT_EQ(HalfToFloat(0x0000), 0.0f);
+  EXPECT_FLOAT_EQ(HalfToFloat(0x4200), 3.0f);
+  EXPECT_FLOAT_EQ(Bf16ToFloat(0x3F80), 1.0f);
+  EXPECT_FLOAT_EQ(Bf16ToFloat(0x4000), 2.0f);
+  EXPECT_FLOAT_EQ(Bf16ToFloat(0x40C0), 6.0f);
+
+  // Encoders (float -> half), exact for representable values and round-trip.
+  EXPECT_EQ(FloatToHalf(1.0f), 0x3C00);
+  EXPECT_EQ(FloatToHalf(-2.0f), 0xC000);
+  EXPECT_EQ(FloatToBf16(1.0f), 0x3F80);
+  for (float x : {0.0f, 1.0f, -3.5f, 42.0f, 0.25f})
+    EXPECT_FLOAT_EQ(HalfToFloat(FloatToHalf(x)), x);
+
+  // Every dtype holding {1,2,3} vs {4,5,6} must match the float32 reference under all metrics
+  // (integers 1..6 are exactly representable in all six dtypes).
+  const std::vector<float> f1 = {1.0f, 2.0f, 3.0f};
+  const std::vector<float> f2 = {4.0f, 5.0f, 6.0f};
+  auto check = [&](const void* a, const void* b, VectorDataType dt) {
+    for (auto sim : {VectorSimilarity::L2, VectorSimilarity::IP, VectorSimilarity::COSINE}) {
+      float ref = VectorDistance(f1.data(), f2.data(), 3, sim);
+      float got = VectorDistance(a, b, 3, sim, dt);
+      EXPECT_NEAR(got, ref, 1e-4) << "dtype=" << VectorDataTypeToString(dt);
+    }
+  };
+
+  const int8_t i8a[3] = {1, 2, 3}, i8b[3] = {4, 5, 6};
+  const uint8_t u8a[3] = {1, 2, 3}, u8b[3] = {4, 5, 6};
+  const float f32a[3] = {1, 2, 3}, f32b[3] = {4, 5, 6};
+  const double f64a[3] = {1, 2, 3}, f64b[3] = {4, 5, 6};
+  const uint16_t f16a[3] = {0x3C00, 0x4000, 0x4200}, f16b[3] = {0x4400, 0x4500, 0x4600};
+  const uint16_t bf16a[3] = {0x3F80, 0x4000, 0x4040}, bf16b[3] = {0x4080, 0x40A0, 0x40C0};
+
+  check(i8a, i8b, VectorDataType::INT8);
+  check(u8a, u8b, VectorDataType::UINT8);
+  check(f32a, f32b, VectorDataType::FLOAT32);
+  check(f64a, f64b, VectorDataType::FLOAT64);
+  check(f16a, f16b, VectorDataType::FLOAT16);
+  check(bf16a, bf16b, VectorDataType::BFLOAT16);
+}
+
+TEST_F(SearchTest, StubOnesVectorCosineWellDefined) {
+  // The HNSW deleted-node stub is EncodeOnesVector(...). Under COSINE it must have a nonzero norm,
+  // otherwise the distance degenerates to 0 (= maximally close) and biases traversal toward
+  // deleted nodes. Regresses for FLOAT32/BFLOAT16/FLOAT64 if the stub is a raw 0x01 byte fill,
+  // whose squared magnitude underflows the accumulator to zero.
+  const size_t dim = 3;
+  const float kExpected = 1.0f - 1.0f / std::sqrt(3.0f);  // cosine([1,0,0], [1,1,1])
+
+  auto check = [&](VectorDataType dt, const void* query) {
+    std::vector<std::byte> ones = EncodeOnesVector(dim, dt);
+    float d = VectorDistance(query, ones.data(), dim, VectorSimilarity::COSINE, dt);
+    EXPECT_NEAR(d, kExpected, 1e-3) << "dtype=" << VectorDataTypeToString(dt);
+    EXPECT_GT(d, 0.01f) << "degenerate zero-norm stub for dtype=" << VectorDataTypeToString(dt);
+  };
+
+  const float f32q[3] = {1, 0, 0};
+  const double f64q[3] = {1, 0, 0};
+  const uint16_t f16q[3] = {0x3C00, 0, 0};
+  const uint16_t bf16q[3] = {0x3F80, 0, 0};
+  const int8_t i8q[3] = {1, 0, 0};
+  const uint8_t u8q[3] = {1, 0, 0};
+
+  check(VectorDataType::FLOAT32, f32q);
+  check(VectorDataType::FLOAT64, f64q);
+  check(VectorDataType::FLOAT16, f16q);
+  check(VectorDataType::BFLOAT16, bf16q);
+  check(VectorDataType::INT8, i8q);
+  check(VectorDataType::UINT8, u8q);
+}
+
+TEST_F(SearchTest, HalfBf16SpecialValues) {
+  // Special-value branches of the half/bfloat converters (unexercised by the finite-normals test).
+  EXPECT_TRUE(std::isinf(HalfToFloat(0x7C00)));  // +inf
+  EXPECT_TRUE(std::isinf(HalfToFloat(0xFC00)) && HalfToFloat(0xFC00) < 0.0f);
+  EXPECT_TRUE(std::isnan(HalfToFloat(0x7E00)));
+  EXPECT_EQ(FloatToHalf(INFINITY), 0x7C00);
+  EXPECT_EQ(FloatToHalf(1e30f), 0x7C00);  // overflow -> inf
+  EXPECT_TRUE(std::isnan(HalfToFloat(FloatToHalf(std::nanf("")))));
+
+  EXPECT_TRUE(std::isinf(Bf16ToFloat(0x7F80)));
+  EXPECT_TRUE(std::isnan(Bf16ToFloat(0x7FC0)));
+  EXPECT_EQ(FloatToBf16(INFINITY), 0x7F80);
+  EXPECT_TRUE(std::isnan(Bf16ToFloat(FloatToBf16(std::nanf("")))));
+
+  // Smallest positive subnormal half round-trips and stays finite.
+  float sub = HalfToFloat(0x0001);
+  EXPECT_GT(sub, 0.0f);
+  EXPECT_LT(sub, 1e-6f);
+  EXPECT_EQ(FloatToHalf(sub), 0x0001);
 }
 
 TEST_F(SearchTest, VectorDistanceConsistency) {
@@ -2921,6 +3203,21 @@ TEST_F(ScoringTest, BM25StdMultiTerm) {
   EXPECT_DOUBLE_EQ(multi, sum);
 }
 
+TEST_F(ScoringTest, BM25StdNonFiniteWeightStaysFinite) {
+  // A pathological field weight can overflow the effective frequency to +inf; BM25 must not turn
+  // that into NaN (which would corrupt top-K sorting). The TF saturation limit is k1 + 1.
+  ScoringContext ctx{.num_docs = 100};
+  ScoringTermInfo term{.term_freq = 10,
+                       .term_docs = 5,
+                       .field_doc_len = 10,
+                       .field_avg_doc_len = 10.0,
+                       .field_weight = 1e308};  // f = field_weight * term_freq overflows to +inf
+
+  double score = BM25Std(ctx, term);
+  EXPECT_TRUE(std::isfinite(score));
+  EXPECT_GT(score, 0.0);
+}
+
 TEST_F(ScoringTest, TfIdfFormula) {
   // f=2, N=10, n=3
   // IDF = ln(10/3) ~ 1.2039
@@ -2970,8 +3267,33 @@ TEST_F(ScoringTest, ScoreDocumentDispatchesByScorerType) {
       .term_freq = 2, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
 
   EXPECT_DOUBLE_EQ(ScoreDocument(&BM25Std, ctx, {term}), BM25Std(ctx, term));
+  EXPECT_DOUBLE_EQ(ScoreDocument(ScorerSpec{ScorerKind::BM25STD_NORM}, ctx, {term}),
+                   BM25Std(ctx, term));
   EXPECT_DOUBLE_EQ(ScoreDocument(&TfIdf, ctx, {term}), TfIdf(ctx, term));
   EXPECT_DOUBLE_EQ(ScoreDocument(&TfIdfDocNorm, ctx, {term}), TfIdfDocNorm(ctx, term));
+}
+
+TEST_F(ScoringTest, BM25StdTanhAppliesDefaultFactor) {
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{
+      .term_freq = 2, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
+
+  ScorerSpec scorer{ScorerKind::BM25STD_TANH};
+  double raw = ScoreDocument(ScorerSpec{ScorerKind::BM25STD}, ctx, {term});
+
+  EXPECT_NEAR(ScoreDocument(scorer, ctx, {term}), std::tanh(raw / kDefaultBM25StdTanhFactor),
+              1e-12);
+}
+
+TEST_F(ScoringTest, BM25StdTanhAppliesCustomFactor) {
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{
+      .term_freq = 2, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
+
+  ScorerSpec scorer{.kind = ScorerKind::BM25STD_TANH, .bm25std_tanh_factor = 20};
+  double raw = ScoreDocument(ScorerSpec{ScorerKind::BM25STD}, ctx, {term});
+
+  EXPECT_NEAR(ScoreDocument(scorer, ctx, {term}), std::tanh(raw / 20), 1e-12);
 }
 
 TEST_F(ScoringTest, SearchWithScorer) {
@@ -2991,7 +3313,7 @@ TEST_F(ScoringTest, SearchWithScorer) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hello", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   auto result = algo.Search(&index);
 
@@ -3031,7 +3353,7 @@ TEST_F(ScoringTest, SearchPrefixWithScorer) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hel*", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   auto result = algo.Search(&index);
 
@@ -3138,7 +3460,7 @@ TEST_F(ScoringTest, BM25StdAfterDocRemoval) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hello", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   auto result_before = algo.Search(&index);
   ASSERT_EQ(result_before.ids.size(), 3u);
@@ -3150,7 +3472,7 @@ TEST_F(ScoringTest, BM25StdAfterDocRemoval) {
   // Re-search
   SearchAlgorithm algo2;
   ASSERT_TRUE(algo2.Init("hello", &params));
-  algo2.SetScorer(&BM25Std);
+  algo2.SetScorer(ScorerSpec{});
 
   auto result_after = algo2.Search(&index);
   ASSERT_EQ(result_after.ids.size(), 2u);
@@ -3185,7 +3507,7 @@ TEST_F(ScoringTest, ScorerTopKCutoff) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hello", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   // Request only top 3 - should return docs 9, 8, 7 (highest TF)
   auto result = algo.Search(&index, 3);
@@ -3200,9 +3522,9 @@ TEST_F(ScoringTest, ScorerTopKCutoff) {
   EXPECT_TRUE(returned.count(8)) << "Doc8 (TF=9) should be in top-3";
   EXPECT_TRUE(returned.count(7)) << "Doc7 (TF=8) should be in top-3";
 
-  // Verify scores are in descending order
-  for (size_t i = 1; i < result.text_scores.size(); i++) {
-    EXPECT_GE(result.text_scores[i - 1].second, result.text_scores[i].second)
+  // Verify scores are in descending order along result.ids, which carries the ranking.
+  for (size_t i = 1; i < result.ids.size(); i++) {
+    EXPECT_GE(result.text_scores.at(result.ids[i - 1]), result.text_scores.at(result.ids[i]))
         << "Scores should be in descending order";
   }
 }
@@ -3241,7 +3563,7 @@ TEST_F(SearchTest, MatchOptionalScoreBoost) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("~hello", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
 
   auto result = algo.Search(&index);
 
@@ -3361,7 +3683,7 @@ TEST_F(SearchTest, MatchNestedOptionalNoDoubleScore) {
     SearchAlgorithm algo;
     QueryParams params;
     EXPECT_TRUE(algo.Init(query, &params));
-    algo.SetScorer(&BM25Std);
+    algo.SetScorer(ScorerSpec{});
     return algo.Search(&index);
   };
 
@@ -3370,7 +3692,7 @@ TEST_F(SearchTest, MatchNestedOptionalNoDoubleScore) {
 
   ASSERT_EQ(single.text_scores.size(), 1u);
   ASSERT_EQ(nested.text_scores.size(), 1u);
-  EXPECT_NEAR(single.text_scores[0].second, nested.text_scores[0].second, 1e-6)
+  EXPECT_NEAR(single.text_scores.at(0), nested.text_scores.at(0), 1e-6)
       << "Nested optionals must not inflate the score";
 }
 
@@ -3443,17 +3765,345 @@ TEST_F(SearchTest, MatchOptionalKnnIdsScoresAligned) {
   QueryParams params;
   params["v"] = ToBytes({2.5f});  // closest is doc:1 (pos=2) and doc:2 (pos=3)
   ASSERT_TRUE(algo.Init("~hello => [KNN 4 @vec $v]", &params));
-  algo.SetScorer(&BM25Std);
+  algo.SetScorer(ScorerSpec{});
   auto result = algo.Search(&index);
 
   ASSERT_TRUE(result.error.empty()) << result.error;
   ASSERT_EQ(result.ids.size(), result.knn_scores.size())
-      << "ids and knn_scores must have matching size";
-  for (size_t i = 0; i < result.ids.size(); ++i) {
-    EXPECT_EQ(result.ids[i], result.knn_scores[i].first)
-        << "ids[" << i << "] (" << result.ids[i] << ") must align with knn_scores[" << i
-        << "].first (" << result.knn_scores[i].first << ")";
+      << "every KNN result must carry a distance";
+  for (DocId id : result.ids) {
+    EXPECT_TRUE(result.knn_scores.contains(id)) << "id " << id << " must have a knn_score entry";
   }
+}
+
+// Positions end-to-end via TextIndex: verifies that TokenizeWords -> BaseStringIndex::Add ->
+// BlockList -> CompressedSortedSet plumbing preserves per-token positions, that stopwords
+// don't advance positions, and that stem and raw tokens share the same position.
+class PositionsTest : public SearchTest {
+ protected:
+  std::vector<uint32_t> Positions(TextIndex* idx, std::string_view term, DocId doc) {
+    const auto* container = idx->Matching(term);
+    if (!container)
+      return {};
+    for (auto it = container->begin(); it != container->end(); ++it) {
+      if (*it == doc) {
+        auto p = it.Positions();
+        return std::vector<uint32_t>(p.begin(), p.end());
+      }
+    }
+    return {};
+  }
+};
+
+TEST_F(PositionsTest, BasicAdjacent) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc("machine learning algorithm");
+  index.Add(0, doc);
+
+  auto text_indices = index.GetAllTextIndices();
+  ASSERT_EQ(text_indices.size(), 1u);
+  auto* ti = text_indices[0];
+
+  // Tokens "machine", "learning", "algorithm" should land at sequential positions.
+  auto m = Positions(ti, "machine", 0);
+  auto l = Positions(ti, "learning", 0);
+  auto a = Positions(ti, "algorithm", 0);
+  ASSERT_EQ(m.size(), 1u);
+  ASSERT_EQ(l.size(), 1u);
+  ASSERT_EQ(a.size(), 1u);
+  EXPECT_EQ(l[0], m[0] + 1) << "learning must be adjacent to machine";
+  EXPECT_EQ(a[0], l[0] + 1) << "algorithm must follow learning";
+}
+
+TEST_F(PositionsTest, RepeatedTermAccumulates) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc("foo bar foo baz foo");
+  index.Add(0, doc);
+  auto* ti = index.GetAllTextIndices()[0];
+
+  auto foo = Positions(ti, "foo", 0);
+  EXPECT_EQ(foo.size(), 3u);
+  ASSERT_TRUE(std::is_sorted(foo.begin(), foo.end()));
+  // bar and baz fall between the foos at positions foo[0]+1 and foo[1]+1.
+  auto bar = Positions(ti, "bar", 0);
+  auto baz = Positions(ti, "baz", 0);
+  ASSERT_EQ(bar.size(), 1u);
+  ASSERT_EQ(baz.size(), 1u);
+  EXPECT_EQ(bar[0], foo[0] + 1);
+  EXPECT_EQ(baz[0], foo[1] + 1);
+}
+
+TEST_F(PositionsTest, StopwordsDoNotAdvance) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  // "a", "the", "of" are typical English stopwords used by default.
+  IndicesOptions opts{};
+  FieldIndices index{schema, opts, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc("a machine the learning of");
+  index.Add(0, doc);
+  auto* ti = index.GetAllTextIndices()[0];
+
+  auto m = Positions(ti, "machine", 0);
+  auto l = Positions(ti, "learning", 0);
+  ASSERT_EQ(m.size(), 1u);
+  ASSERT_EQ(l.size(), 1u);
+  EXPECT_EQ(l[0], m[0] + 1)
+      << "Stopwords (a/the/of) must not advance positions; machine and learning should be adjacent";
+}
+
+// Exact phrase queries — issue #7294 reproduction and edge cases.
+class PhraseTest : public SearchTest {};
+
+TEST_F(PhraseTest, BasicReproductionFromIssue7294) {
+  PrepareQuery("\"machine learning\"");
+  ExpectAll("machine learning algorithm",  // adjacent, in order
+            "machine learning",            // adjacent, exact
+            "preface machine learning epilogue");
+  ExpectNone("learning machine works",  // reversed order
+             "machine deep learning",   // not adjacent
+             "only machine", "no learning here");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, SingleTokenPhraseEqualsTerm) {
+  PrepareQuery("\"foo\"");
+  ExpectAll("foo", "foo bar", "bar foo baz");
+  ExpectNone("food", "afoo", "bar");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, StopwordsInPhraseDoNotAdvancePositions) {
+  // Both indexing and phrase-tokenize drop stopwords without advancing positions, so
+  // "a machine the learning" indexes as machine@1, learning@2 and the phrase
+  // "the machine learning" tokenizes to [machine, learning] — adjacency holds.
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  IndicesOptions options{{"a", "the", "of"}};
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+
+  vector<string> documents = {"a machine the learning algorithm",  // pos: machine@1, learning@2
+                              "machine learning works",            // pos: machine@1, learning@2
+                              "learning machine"};                 // pos: learning@1, machine@2
+  for (size_t i = 0; i < documents.size(); i++) {
+    MockedDocument doc{{{"field", documents[i]}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("\"the machine learning\"", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0u, 1u));
+}
+
+TEST_F(PhraseTest, ThreeWordAdjacency) {
+  PrepareQuery("\"fully convolutional network\"");
+  ExpectAll("the fully convolutional network is great", "fully convolutional network");
+  ExpectNone("fully network convolutional",       // wrong order
+             "fully deep convolutional network",  // not adjacent
+             "convolutional network only");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, RepeatedTermInPhrase) {
+  // "the the" → after stopword filter is empty → matches nothing.
+  // But repeated content terms like "foo foo" must find adjacent foo,foo.
+  PrepareQuery("\"foo foo\"");
+  ExpectAll("foo foo bar",
+            "bar foo foo baz",  // adjacent pair in middle
+            "foo foo foo");     // three foos contain adjacent pair
+  ExpectNone("foo bar foo",     // separated
+             "foo");            // single
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, FieldScopedPhrase) {
+  PrepareSchema({{"title", SchemaField::TEXT}, {"body", SchemaField::TEXT}});
+  PrepareQuery("@title:\"machine learning\"");
+  ExpectAll(Map{{"title", "machine learning algorithm"}, {"body", "anything"}});
+  ExpectNone(Map{{"title", "learning machine"}, {"body", "machine learning"}});  // wrong field
+  ExpectNone(Map{{"title", "deep learning"}, {"body", "machine learning"}});
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, PhraseAndedWithTerm) {
+  PrepareQuery("algorithm \"machine learning\"");
+  ExpectAll("machine learning algorithm", "algorithm runs machine learning");
+  ExpectNone("machine learning",             // missing 'algorithm'
+             "algorithm works",              // missing phrase
+             "learning machine algorithm");  // phrase order wrong
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, SlopAllowsGap) {
+  PrepareQuery("\"machine learning\"~1");
+  ExpectAll("machine learning",             // gap=0
+            "machine deep learning",        // gap=1
+            "machine learning algorithm");  // contains gap=0 run
+  ExpectNone("machine very deep learning",  // gap=2 (over budget)
+             "learning machine",            // wrong order
+             "machine only");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, SlopThreeWordPhrase) {
+  PrepareQuery("\"a b c\"~1");
+  // slop=1: at most 1 intervening word between consecutive phrase terms.
+  ExpectAll("a b c",       // 0,1,2
+            "a x b c",     // 0,2,3 → gap 1 then 0
+            "a b x c",     // 0,1,3 → gap 0 then 1
+            "a x b y c");  // 0,2,4 → gap 1 each
+  ExpectNone("a x y b c",  // gap=2 between a and b
+             "b a c",      // wrong order
+             "a b");       // missing c
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, SlopRequiresOrder) {
+  // slop > 0 still requires terms in order.
+  PrepareQuery("\"machine learning\"~10");
+  ExpectAll("machine and learning");
+  ExpectNone("learning the machine");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, SlopBacktrackingFindsLaterCandidate) {
+  // Greedy "smallest first" fails when an earlier candidate dead-ends: text "a x a y b" with
+  // "a b"~1 should pick a@2 → b@4 (gap=1), not give up at a@0 where no b is within slop range.
+  PrepareQuery("\"a b\"~1");
+  ExpectAll("a x a y b");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(PhraseTest, OnlyStopwordsInPhraseMatchesNothing) {
+  // Phrase that tokenizes to zero terms (all stopwords) must match no docs.
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  IndicesOptions options{{"a", "the", "of"}};
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+
+  vector<string> documents = {"a the of", "machine learning", "anything else"};
+  for (size_t i = 0; i < documents.size(); i++) {
+    MockedDocument doc{{{"field", documents[i]}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("\"a the of\"", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre());
+}
+
+TEST_F(PhraseTest, PhraseMatchedDocsAreScored) {
+  // Phrase matches must populate text_scores via BM25 — i.e. constituent terms are registered
+  // as matched. Without this, top-K ranking would treat phrase-matched docs as score=0.
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // doc 0 contains the phrase with extra repetition (higher TF → higher BM25).
+  MockedDocument doc0("machine learning machine learning algorithm");
+  MockedDocument doc1("machine learning works");
+  MockedDocument doc2("unrelated content");
+  index.Add(0, doc0);
+  index.Add(1, doc1);
+  index.Add(2, doc2);
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("\"machine learning\"", &params));
+  algo.SetScorer(ScorerSpec{});
+
+  auto result = algo.Search(&index);
+  ASSERT_EQ(result.ids.size(), 2u);
+  EXPECT_EQ(result.text_scores.size(), 2u);
+  for (auto& [doc, score] : result.text_scores)
+    EXPECT_GT(score, 0.0f) << "Phrase-matched doc " << doc << " must have positive score";
+
+  // doc 0 has higher term frequency → must rank higher than doc 1.
+  std::optional<float> s0, s1;
+  for (auto& [doc, score] : result.text_scores) {
+    if (doc == 0)
+      s0 = score;
+    if (doc == 1)
+      s1 = score;
+  }
+  ASSERT_TRUE(s0 && s1);
+  EXPECT_GT(*s0, *s1) << "Higher TF must score higher";
+}
+
+// UTF-8 phrase eval — adjacency works across Unicode word boundaries (Cyrillic).
+// Corpus drawn from a small Ukrainian poem; verifies Cyrillic lowercase + adjacency
+// through the full eval pipeline:
+//   Кіт заліз у холодильник —
+//   Шукав там ковбасу.
+//   Знайшов лише каструлю борщу
+//   І втратив віру в красу.
+TEST_F(PhraseTest, UnicodePhraseAdjacency) {
+  PrepareQuery("\"втратив віру\"");
+  ExpectAll("І втратив віру в красу",         // adjacent, in order (line 4)
+            "він втратив віру назавжди");     // adjacent, embedded
+  ExpectNone("віру втратив швидко",           // reversed
+             "втратив надію а потім віру",    // not adjacent
+             "Кіт заліз у холодильник",       // unrelated line
+             "Знайшов лише каструлю борщу");  // unrelated line
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+// Phrase of 5+ tokens (exceeds positions_stash_ inline capacity of 4).
+TEST_F(PhraseTest, LongPhraseFiveTokens) {
+  PrepareQuery("\"the quick brown fox jumps\"");
+  ExpectAll("the quick brown fox jumps over", "before the quick brown fox jumps after");
+  ExpectNone("the quick brown fox runs",
+             "quick brown fox jumps over",  // missing 'the'
+             "the brown fox jumps over");   // missing 'quick'
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+// Document with many occurrences of a phrase term — exercises position-decoding loop
+// past the InlinedVector<uint32_t, 4> inline capacity.
+TEST_F(PhraseTest, ManyPositionsPerTerm) {
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // 'foo' appears 10x, 'bar' 1x adjacent to one of the foos. Forces the position list
+  // for 'foo' to spill to the heap inside positions_stash_.
+  std::string text;
+  for (int i = 0; i < 9; ++i)
+    text += "foo zzz ";
+  text += "foo bar";  // adjacency at the 10th foo
+  MockedDocument doc({{"field", text}});
+  indices.Add(0, doc);
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("\"foo bar\"", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0u));
+}
+
+// Empty phrase "" must safely match nothing — neither crash nor match-all.
+TEST_F(PhraseTest, EmptyPhrase) {
+  PrepareQuery("\"\"");
+  ExpectNone("foo", "anything", "literally any document");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+// NOOFFSETS index surfaces a typed error to FT.SEARCH callers, not silently empty.
+TEST_F(PhraseTest, NoOffsetsErrorIsExplicit) {
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  IndicesOptions options{{}};
+  options.no_offsets = true;
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc("machine learning algorithm");
+  indices.Add(0, doc);
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("\"machine learning\"", &params));
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.error, testing::HasSubstr("phrase queries require offsets"));
 }
 
 }  // namespace search

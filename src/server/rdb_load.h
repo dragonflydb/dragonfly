@@ -76,8 +76,19 @@ class RdbLoaderBase {
     std::vector<std::pair<std::string, uint32_t>> heap_items;  // parsed one by one
     std::string counters_buffer;  // Unstructured: raw bytes dumped from memory
   };
+
+  struct RdbCuckoo {
+    uint8_t slots_per_bucket = 0;
+    uint16_t max_iterations = 0;
+    uint16_t expansion = 0;
+    uint64_t num_buckets = 0;
+    uint64_t num_items = 0;
+    uint64_t num_deletes = 0;
+    std::vector<std::string> filters;
+  };
+
   using RdbVariant = std::variant<long long, base::PODArray<char>, LzfString,
-                                  std::unique_ptr<LoadTrace>, RdbSBF, RdbCMS, RdbTOPK>;
+                                  std::unique_ptr<LoadTrace>, RdbSBF, RdbCMS, RdbTOPK, RdbCuckoo>;
 
   struct OpaqueObj {
     RdbVariant obj;
@@ -162,13 +173,22 @@ class RdbLoaderBase {
       unsigned hash_cnt = 0;
     };
     std::optional<SbfFilterState> sbf_filter;
+
+    struct CfFilterState {
+      std::string filter_data;
+      size_t offset = 0;
+      uint8_t slots_per_bucket = 0;
+    };
+    std::optional<CfFilterState> cf_filter;
+    uint8_t cf_slots_per_bucket = 0;  // saved on first chunk, reused on resume
   };
 
   struct LoadConfig {
-    bool chunked = false;   // Big value streamed incrementally
-    size_t reserve = 0;     // Number of elements to reserve to optimize big value load
-    bool append = false;    // Append chunk to existing object
-    bool finalize = false;  // Last portion of chunked stream, finalize object
+    bool chunked = false;         // Big value streamed incrementally
+    size_t reserve = 0;           // Number of elements to reserve to optimize big value load
+    bool append = false;          // Append chunk to existing object
+    bool finalize = false;        // Last portion of chunked stream, finalize object
+    bool deep_integrity = false;  // Validate every entry (untrusted RESTORE input)
   };
 
   class OpaqueObjLoader;
@@ -204,14 +224,16 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams(int rdbtype);
-  ::io::Result<OpaqueObj> ReadRedisJson();
+  ::io::Result<OpaqueObj> ReadRedisModule2();
   ::io::Result<OpaqueObj> ReadSBFImpl(bool filter_is_chunked);
   ::io::Result<OpaqueObj> ReadSBF();
   ::io::Result<OpaqueObj> ReadSBF2();
   ::io::Result<OpaqueObj> ReadCMS();
   ::io::Result<OpaqueObj> ReadTOPK();
+  ::io::Result<OpaqueObj> ReadCuckoo();
 
-  std::error_code SkipModuleData();
+  std::error_code SkipModuleAuxData();
+  std::error_code SkipModuleKeyData();
   std::error_code HandleCompressedBlob(int op_type);
   std::error_code HandleCompressedBlobFinish();
   std::error_code AllocateDecompressOnce(int op_type);
@@ -406,15 +428,13 @@ class RdbLoader : protected RdbLoaderBase {
   // issues an FT.CREATE call, but does not start indexing
   void LoadSearchIndexDefFromAux(std::string&& value);
 
-  // Load HNSW index metadata from JSON, sets metadata on the GlobalHnswIndexRegistry
-  void LoadHnswIndexMetadataFromAux(std::string&& value);
-
   // Load synonyms from RESP string and issue FT.SYNUPDATE call
   void LoadSearchSynonymsFromAux(std::string&& value);
 
   // Restore HNSW vector index graph from serialized node data.
   std::error_code RestoreVectorIndex(std::string_view index_key, std::string_view index_name,
-                                     std::string_view field_name, uint64_t elements_number);
+                                     std::string_view field_name, uint64_t elements_number,
+                                     const search::HnswIndexMetadata& metadata);
 
   // Load HNSW vector index nodes into a vector for deferred restoration.
   std::error_code LoadVectorIndexNodes(uint64_t elements_number,

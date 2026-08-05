@@ -13,7 +13,9 @@
 
 #include "absl/strings/escaping.h"
 #include "absl/types/span.h"
+#include "base/cycle_clock.h"
 #include "base/logging.h"
+#include "common/borrowed_string.h"
 #include "facade/error.h"
 #include "util/fibers/proactor_base.h"
 
@@ -63,7 +65,7 @@ template <typename T> enable_if_t<is_integral_v<T>, char*> write_piece(T num, ch
 }
 
 char* write_piece(string_view str, char* dest) {
-  return (char*)memcpy(dest, str.data(), str.size()) + str.size();
+  return str.empty() ? dest : (char*)memcpy(dest, str.data(), str.size()) + str.size();
 }
 
 }  // namespace
@@ -126,6 +128,39 @@ template <typename... Ts> void SinkReplyBuilder::WritePieces(Ts&&... pieces) {
   total_size_ += written;
 }
 
+void SinkReplyBuilder::WriteDecodedAscii(const cmn::BorrowedString& bs) {
+  auto* ops = cmn::BorrowedStringOps::Get();
+  const size_t src_total = bs.view().size();
+  size_t src_offset = 0;
+
+  // Huge strings benefit from max scratch capacity. Going via Flush() (rather
+  // than EnsureCapacity directly) drains any pending iovecs first — otherwise
+  // a reallocate-grow would dangling-pointer the prefix iovec written by the
+  // caller into our own scratch.
+  if (buffer_.Capacity() < kMaxBufferSize)
+    Flush(kMaxBufferSize);
+
+  while (src_offset < src_total) {
+    // Ensure buffer_ has some room.
+    if (buffer_.AppendLen() < 64)
+      Flush();
+    if (ec_)
+      break;
+
+    char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
+    auto r =
+        ops->DecodeChunk(bs, src_total, src_offset, std::span<char>(dest, buffer_.AppendLen()));
+    DCHECK_GT(r.dec_written, 0u);
+    WriteRef(std::string_view(dest, r.dec_written));
+
+    // dest lives inside our scratch — advance the buffer's write cursor so
+    // the next iteration's AppendBuffer().data() doesn't return the same
+    // address and overwrite the chunk we just queued.
+    buffer_.CommitWrite(r.dec_written);
+    src_offset += r.src_consumed;
+  }
+}
+
 void SinkReplyBuilder::WriteRef(std::string_view str) {
   if (vecs_.size() >= IOV_MAX - 2)
     Flush();
@@ -133,31 +168,30 @@ void SinkReplyBuilder::WriteRef(std::string_view str) {
   total_size_ += str.size();
 }
 
-void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
+void SinkReplyBuilder::Flush(size_t additional_bytes) {
   // Fast path: nothing buffered and no buffer resize requested.
-  if (vecs_.empty() && (expected_buffer_cap == 0))
+  if (vecs_.empty() && (additional_bytes == 0))
     return;
 
   if (!vecs_.empty())
     Send();
 
-  // Grow backing buffer if was at least half full and still below it's max size
-  if (buffer_.InputLen() * 2 > buffer_.Capacity() && buffer_.Capacity() * 2 <= kMaxBufferSize)
-    expected_buffer_cap = max(expected_buffer_cap, buffer_.Capacity() * 2);
+  size_t target_capacity = buffer_.Capacity();
+  if (additional_bytes > 0)
+    target_capacity = std::max(buffer_.Capacity() + additional_bytes, buffer_.Capacity() * 2);
 
   total_size_ = 0;
   buffer_.Clear();
   vecs_.clear();
   guaranteed_pieces_ = 0;
 
-  DCHECK_LE(expected_buffer_cap, kMaxBufferSize);  // big strings should be enqueued as iovecs
-
-  if (expected_buffer_cap > buffer_.Capacity())
-    buffer_.Reserve(expected_buffer_cap);
+  target_capacity = std::min(target_capacity, kMaxBufferSize);
+  if (target_capacity != buffer_.Capacity())
+    buffer_.Reserve(target_capacity);
 }
 
-uint64_t SinkReplyBuilder::GetLastSendTimeNs() const {
-  return send_time_ns_;
+uint64_t SinkReplyBuilder::GetLastSendTimeCycles() const {
+  return send_time_cycles_;
 }
 
 void SinkReplyBuilder::Send() {
@@ -165,8 +199,8 @@ void SinkReplyBuilder::Send() {
   DCHECK(!vecs_.empty());
   auto& reply_stats = tl_facade_stats->reply_stats;
 
-  send_time_ns_ = util::fb2::ProactorBase::GetMonotonicTimeNs();
-  PendingPin pin(send_time_ns_);
+  send_time_cycles_ = base::CycleClock::Now();
+  PendingPin pin(send_time_cycles_);
 
   pending_list.push_back(pin);
 
@@ -179,22 +213,22 @@ void SinkReplyBuilder::Send() {
   auto it = PendingList::s_iterator_to(pin);
   pending_list.erase(it);
 
-  send_time_ns_ = 0;
+  send_time_cycles_ = 0;
 
-  uint64_t after_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
+  uint64_t after_cycles = base::CycleClock::Now();
   reply_stats.send_stats.count++;
-  reply_stats.send_stats.total_duration += (after_ns - pin.timestamp_ns);
+  reply_stats.send_stats.total_duration += (after_cycles - pin.timestamp_cycles);
   DVLOG(2) << "Finished writing " << total_size_ << " bytes";
 }
 
 void SinkReplyBuilder::FinishScope() {
   replies_recorded_++;
 
-  if (!batched_ || total_size_ * 2 >= kMaxBufferSize /* copying isn't worth it */)
+  size_t ref_bytes = total_size_ - buffer_.InputLen();
+  if (!batched_ || ref_bytes * 2 >= kMaxBufferSize /* copying isn't worth it */)
     return Flush();
 
   // Check if we have enough space to copy all refs to buffer
-  size_t ref_bytes = total_size_ - buffer_.InputLen();
   if (ref_bytes > buffer_.AppendLen())
     return Flush(ref_bytes);
 
@@ -310,6 +344,14 @@ void RedisReplyBuilderBase::SendBulkString(std::string_view str) {
   WritePieces(kCRLF);
 }
 
+template <typename T>
+requires std::is_same_v<T, std::string>
+void RedisReplyBuilderBase::SendBulkString(T&& str) {
+  DCHECK(!IsScoped());
+  SendBulkString(std::string_view{str});
+}
+template void RedisReplyBuilderBase::SendBulkString(std::string&&);
+
 void RedisReplyBuilderBase::SendLong(long val) {
   ReplyScope scope(this);
   WritePieces(kLongPref, val, kCRLF);
@@ -396,6 +438,27 @@ std::string RedisReplyBuilderBase::SerializeCommand(std::string_view command) {
   return string{command} + kCRLF;
 }
 
+void RedisReplyBuilder::SendBulkStringBorrowed(const cmn::BorrowedString& bs) {
+  ReplyScope scope(this);
+  tl_facade_stats->reply_stats.borrowed_string_sent_cnt++;
+
+  auto* ops = cmn::BorrowedStringOps::Get();
+  size_t total = ops->DecodedSize(bs);
+
+  DVLOG(1) << "SendBulkBorrowed " << total << " enc=" << unsigned(bs.encoding());
+  WritePieces(kLengthPrefix, total, kCRLF);
+  if (bs.IsEncoded()) {
+    WriteDecodedAscii(bs);
+  } else {
+    WriteRef(bs.view());
+  }
+  WritePieces(kCRLF);
+}
+
+void RedisReplyBuilder::SendBulkStringBorrowed(cmn::BorrowedString&& bs) {
+  SendBulkStringBorrowed(static_cast<const cmn::BorrowedString&>(bs));
+}
+
 void RedisReplyBuilder::SendSimpleStrArr(const facade::ArgRange& strs) {
   ReplyScope scope(this);
   StartArray(strs.Size());
@@ -448,6 +511,7 @@ template <typename I> void RedisReplyBuilder::SendLongArr(absl::Span<const I> lo
 }
 
 template void RedisReplyBuilder::SendLongArr<long>(absl::Span<const long>);
+template void RedisReplyBuilder::SendLongArr<long long>(absl::Span<const long long>);
 template void RedisReplyBuilder::SendLongArr<int32_t>(absl::Span<const int32_t>);
 template void RedisReplyBuilder::SendLongArr<uint32_t>(absl::Span<const uint32_t>);
 template void RedisReplyBuilder::SendLongArr<uint64_t>(absl::Span<const uint64_t>);

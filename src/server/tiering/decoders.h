@@ -8,13 +8,16 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 
 #include "core/compact_object.h"
 #include "core/qlist.h"
 
-namespace dfly::tiering {
+namespace dfly::detail {
+struct ListpackWrap;
+}
 
-struct SerializedMap;
+namespace dfly::tiering {
 
 // Decodes serialized value and provides it to callbacks.
 // Acts as generic interface to callback driver (OpManager)
@@ -74,17 +77,24 @@ struct StringDecoder : public Decoder {
   dfly::StringOrView value_;
 };
 
-// Decodes SerializedMaps
-struct SerializedMapDecoder : public Decoder {
+// Decodes listpack maps stored directly as raw listpack bytes on disk.
+struct ListpackMapDecoder : public Decoder {
+  ~ListpackMapDecoder();
+
   std::unique_ptr<Decoder> Clone() const override;
   void Initialize(std::string_view slice) override;
   UploadMetrics GetMetrics() const override;
   void Upload(void* obj) override;
 
-  SerializedMap* Get() const;
+  // Read-only view over the raw disk buffer (no allocation)
+  dfly::detail::ListpackWrap Get() const;
+
+  // Mutable copy - allocates and copies on first call
+  dfly::detail::ListpackWrap* GetMutable();
 
  private:
-  std::unique_ptr<SerializedMap> map_;
+  std::string_view slice_;
+  std::unique_ptr<dfly::detail::ListpackWrap> owned_lw_;
 };
 
 // Decodes QList::Node

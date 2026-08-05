@@ -73,10 +73,30 @@ bool OpManager::HasModificationPending(DiskSegment segment) const {
   return ops_ptr && !ops_ptr->read_only;
 }
 
+bool OpManager::HasReadPending(PendingId id, DiskSegment segment) const {
+  auto it = pending_reads_.find(segment.ContainingPages().offset);
+  if (it == pending_reads_.end())
+    return false;
+
+  auto* ops = it->second.Find(segment);
+  return ops && ops->id == ToOwned(id);
+}
+
 void OpManager::CancelPending(PendingId id) {
   // If the item isn't offloaded, it has io pending, so cancel it
   DCHECK(pending_stash_ver_.count(ToOwned(id)));
   pending_stash_ver_.erase(ToOwned(id));
+}
+
+void OpManager::CancelPendingLoad(DiskSegment segment) {
+  auto it = pending_reads_.find(segment.ContainingPages().offset);
+  DCHECK(it != pending_reads_.end());
+  auto* ops = it->second.Find(segment);
+  DCHECK(ops);
+  for (auto& read_cb : ops->read_cbs) {
+    read_cb(nonstd::make_unexpected(make_error_code(errc::operation_canceled)));
+  }
+  ops->read_cbs.clear();
 }
 
 void OpManager::DeleteOffloaded(DiskSegment segment) {
@@ -89,7 +109,7 @@ void OpManager::DeleteOffloaded(DiskSegment segment) {
   if (pending_read) {
     // Mark that the read operation must finalize with deletion.
     pending_read->deleting = true;
-  } else if (NotifyDelete(segment) && base_it == pending_reads_.end()) {
+  } else if (NotifyDelete(segment, false) && base_it == pending_reads_.end()) {
     storage_.MarkAsFree(segment.ContainingPages());
   }
 }
@@ -188,7 +208,7 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
 
     // If the item is being deleted, check if the full page needs to be deleted.
     if (delete_from_storage)
-      deleting_full |= NotifyDelete(ko.segment);
+      deleting_full |= NotifyDelete(ko.segment, true);
   }
 
   if (deleting_full) {
@@ -210,10 +230,10 @@ OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, Pend
 
   for (auto& ops : entry_ops) {
     if (ops.segment.offset == key_segment.offset) {
-      DCHECK(typeid(*ops.decoder) == typeid(decoder));
-      if (!read_only) {
-        ops.read_only = false;
-      }
+      auto ops_decoder = ops.decoder.get();
+      DCHECK(typeid(*ops_decoder) == typeid(decoder))
+          << typeid(*ops_decoder).name() << " " << typeid(decoder).name();
+      ops.read_only &= read_only;
       return ops;
     }
   }

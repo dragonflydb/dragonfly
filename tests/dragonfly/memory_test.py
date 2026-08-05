@@ -5,11 +5,12 @@ import string
 import time
 
 import pytest
+
 import redis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory
-from .utility import tmp_file_name
+from .utility import assert_eventually, tmp_file_name
 
 
 @pytest.mark.large
@@ -96,6 +97,30 @@ async def test_rss_used_mem_gap(df_factory: DflyInstanceFactory, type, keys, val
 
 
 @pytest.mark.asyncio
+async def test_rss_ratio_canary(df_factory: DflyInstanceFactory):
+    """
+    tests that RSS is within a fixed ratio of used_mem, less than 1.5x.
+    serves as a signal that memory usage has gone beyond acceptable
+    limit for fixed workload
+    """
+    df_server = df_factory.create(proactor_threads=1)
+    df_server.start()
+    client = df_server.client()
+
+    await client.execute_command("DEBUG POPULATE 7000 size 44000")
+    await asyncio.sleep(2)
+
+    info = await client.info("memory")
+    used = info["used_memory"]
+    rss = info["used_memory_rss"]
+    assert used > 256 * 1024 * 1024, "Weak testcase: too little used memory"
+
+    ratio = rss / used
+    logging.info(f"Used memory {used}, rss {rss}, ratio {ratio:.4f}")
+    assert ratio < 1.5, f"RSS ratio {ratio:.3f} over canary threshold (used={used}, rss={rss})"
+
+
+@pytest.mark.asyncio
 @dfly_args(
     {
         "maxmemory": "512mb",
@@ -113,18 +138,22 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     df_server.start()
 
     client = df_server.client()
-    await client.execute_command("DEBUG POPULATE 10000 key 40000 RAND")
+    await client.execute_command("DEBUG POPULATE 10100 key 40000 RAND")
 
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 
     new_client = df_server.admin_client() if admin_port else df_server.client()
-    await new_client.ping()
-
-    info = await new_client.info("memory")
-    logging.debug(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
-
     reject_limit = 256 * 1024 * 1024  # 256mb
-    assert info["used_memory_rss"] > reject_limit
+
+    @assert_eventually(timeout=5)
+    async def rss_compare(gt: bool):
+        info = await new_client.info("memory")
+        rss = info["used_memory_rss"]
+        used = info["used_memory"]
+        logging.info(f"Used memory {used}, rss {rss}")
+        assert (rss > reject_limit) if gt else (rss < reject_limit)
+
+    await rss_compare(True)
 
     # get command from existing connection should not be rejected
     await client.execute_command("get x")
@@ -142,11 +171,8 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     # flush to free memory
     await new_client.flushall()
 
-    await asyncio.sleep(2)  # Wait for another RSS heartbeat update in Dragonfly
-
-    info = await new_client.info("memory")
-    logging.debug(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
-    assert info["used_memory_rss"] < reject_limit
+    await rss_compare(False)
+    await asyncio.sleep(0.5)  # Wait for another RSS heartbeat update in Dragonfly
 
     # new client create shoud not fail after memory usage decrease
     client = df_server.client()
@@ -229,8 +255,8 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
             await client.execute_command(f"LPUSH {name} {rand_str}")
 
     # Make them STICK so we don't evict them
-    await client.execute_command(f"STICK list_1")
-    await client.execute_command(f"STICK list_2")
+    await client.execute_command("STICK list_1")
+    await client.execute_command("STICK list_2")
 
     await client.execute_command("CONFIG SET enable_heartbeat_eviction true")
 
@@ -272,7 +298,7 @@ async def test_no_rss_eviction_overflow_on_expired_keys(df_factory: DflyInstance
     val_size = 1024 * 50  # 50 kb for key
     num_keys = data_fill_size // val_size
 
-    for i in range(0, 5):
+    for i in range(5):
         pipe = client.pipeline(transaction=False)
         step_keys = num_keys + i * 10
         await pipe.execute_command("DEBUG", "POPULATE", step_keys, "key_1", val_size)
@@ -365,7 +391,7 @@ async def test_remove_docs_on_eviction(df_factory):
     await asyncio.sleep(1)
 
     # Get number of docs in index
-    index_info = await client.execute_command(f"FT.INFO idx")
+    index_info = await client.execute_command("FT.INFO idx")
     index_info_num_docs = index_info[9]
 
     # Get number of keys in database
@@ -446,3 +472,34 @@ async def test_expiry_heartbeat_responsiveness(df_factory: DflyInstanceFactory):
     assert (
         worst_ping < 0.5
     ), f"Worst PING latency {worst_ping:.3f}s exceeded 500ms during mass expiry"
+
+
+# BITFIELD and BITOP must be denied on OOM, not abort the process under a hard
+# virtual-memory cap (the fuzzer runs with `ulimit -v`, no maxmemory). opt_only:
+# release builds start under the cap, sanitizer builds reserve far more and can't.
+BIT_OOM_VMEM_CAP = 2 * 1024 * 1024 * 1024
+BIT_OOM_FILLER_OFFSET = 200 * 1024 * 1024 * 8  # 200MiB string, within the max string size
+BIT_OOM_MAXMEMORY = 128 * 1024 * 1024  # below the filler, so the server ends up over maxmemory
+
+
+@pytest.mark.opt_only
+async def test_bitops_denyoom(df_factory: DflyInstanceFactory):
+    df = df_factory.create(proactor_threads=1)
+    df.vmem_limit_bytes = BIT_OOM_VMEM_CAP
+    df.start()
+    client = df.client()
+
+    # SETBIT has the guard, so build the filler before lowering the limit below it.
+    await client.execute_command("SETBIT", "filler", BIT_OOM_FILLER_OFFSET, 1)
+    await client.config_set("maxmemory", BIT_OOM_MAXMEMORY)
+    assert int((await client.info("memory"))["used_memory"]) > BIT_OOM_MAXMEMORY
+
+    # Over maxmemory, denyoom commands are rejected instead of allocating or aborting.
+    for cmd in (
+        ("SETBIT", "guard", 0, 1),
+        ("BITOP", "AND", "dest", "filler", "filler"),
+        ("BITFIELD", "bk", "SET", "u8", 0, 1),
+    ):
+        with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
+            await client.execute_command(*cmd)
+    assert await client.ping()

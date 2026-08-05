@@ -19,16 +19,12 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/conn_context.h"
 
 using namespace std;
-ABSL_FLAG(vector<string>, rename_command, {},
-          "Change the name of commands, format is: <cmd1_name>=<cmd1_new_name>, "
-          "<cmd2_name>=<cmd2_new_name>");
+
 ABSL_FLAG(vector<string>, restricted_commands, {},
           "Commands restricted to connections on the admin port");
-
-ABSL_FLAG(vector<string>, oom_deny_commands, {},
-          "Additinal commands that will be marked as denyoom");
 
 ABSL_FLAG(vector<string>, command_alias, {},
           "Add an alias for given command(s), format is: <alias>=<original>, <alias>=<original>. "
@@ -40,10 +36,13 @@ namespace dfly {
 
 using namespace facade;
 
+CmdArgParser MakeParserFromContext(CommandContext* cntx) {
+  return CmdArgParser{cntx->tail_args()};
+}
+
 using absl::AsciiStrToUpper;
 using absl::GetFlag;
 using absl::StrCat;
-using absl::StrSplit;
 
 namespace {
 
@@ -134,7 +133,8 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
                      int8_t last_key, std::optional<uint32_t> acl_categories)
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
                         acl_categories.value_or(ImplicitAclCategories(mask))) {
-  implicit_acl_ = !acl_categories.has_value();
+  if (!acl_categories.has_value())
+    kind_mask_ |= IMPLICIT_ACL;
   bool is_latency_tracked = GetFlag(FLAGS_latency_tracking);
   if (is_latency_tracked) {
     hdr_histogram* hist = nullptr;
@@ -144,27 +144,52 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     latency_histogram_ = hist;
   }
 
-  if (name_.rfind("EVAL", 0) == 0)
-    kind_multi_ctr_ = CO::MultiControlKind::EVAL;
-  else if (base::_in(name_, {"EXEC", "MULTI", "DISCARD"}))
-    kind_multi_ctr_ = CO::MultiControlKind::EXEC;
-  else if (base::_in(name_, {"PUBLISH", "SUBSCRIBE", "UNSUBSCRIBE"}))
-    kind_pubsub_ = CO::PubSubKind::REGULAR;
-  else if (base::_in(name_, {"PSUBSCRIBE", "PUNSUBSCRIBE"}))
-    kind_pubsub_ = CO::PubSubKind::PATTERN;
-  else if (base::_in(name_, {"SPUBLISH", "SSUBSCRIBE", "SUNSUBSCRIBE"}))
-    kind_pubsub_ = CO::PubSubKind::SHARDED;
-  can_be_monitored_ = (opt_mask_ & CO::ADMIN) == 0 && name_ != "EXEC";
+  if (name_.rfind("EVAL", 0) == 0) {
+    kind_mask_ |= EVAL_CTRL;
+  } else if (base::_in(name_, {"EXEC", "MULTI", "DISCARD"})) {
+    kind_mask_ |= EXEC_CTRL;
+    if (name_ == "EXEC")
+      kind_mask_ |= EXEC;
+    else if (name_ == "MULTI")
+      kind_mask_ |= MULTI;
+  } else if (base::_in(name_, {"PUBLISH", "SUBSCRIBE", "UNSUBSCRIBE"})) {
+    kind_mask_ |= PUBSUB_REGULAR;
+    if (name_ == "PUBLISH")
+      kind_mask_ |= PUBLISH;
+  } else if (base::_in(name_, {"PSUBSCRIBE", "PUNSUBSCRIBE"})) {
+    kind_mask_ |= PUBSUB_PATTERN;
+  } else if (base::_in(name_, {"SPUBLISH", "SSUBSCRIBE", "SUNSUBSCRIBE"})) {
+    kind_mask_ |= PUBSUB_SHARDED;
+    if (name_ == "SPUBLISH")
+      kind_mask_ |= SPUBLISH;
+  } else if (name_ == "REPLCONF") {
+    kind_mask_ |= REPLCONF;
+  } else if (name_ == "QUIT") {
+    kind_mask_ |= QUIT;
+  } else if (name_ == "RESET") {
+    kind_mask_ |= RESET;
+  }
+  if ((opt_mask_ & CO::ADMIN) == 0 && name_ != "EXEC")
+    kind_mask_ |= CAN_MONITOR;
 
   if (base::_in(name_, {"MSET", "MSETNX"}))
     interleave_step_ = 2;
   else if (name_ == "JSON.MSET")
     interleave_step_ = 3;
+
+  // A command has a single key at a fixed position when first_key == last_key > 0 and it
+  // carries no variadic/store-key or global/no-key semantics. DetermineKeys uses this to
+  // skip its generic branching.
+  if (first_key_ > 0 && first_key_ == last_key_ &&
+      (opt_mask_ & (CO::VARIADIC_KEYS | CO::STORE_LAST_KEY | CO::GLOBAL_TRANS |
+                    CO::NO_KEY_TRANSACTIONAL)) == 0) {
+    kind_mask_ |= FIXED_SINGLE_KEY;
+  }
 }
 
 CommandId::~CommandId() {
   // Aliases share the same latency histogram, so we only close it if this is not an alias.
-  if (latency_histogram_ && !is_alias_) {
+  if (latency_histogram_ && !IsAlias()) {
     hdr_close(latency_histogram_);
   }
 }
@@ -175,9 +200,12 @@ CommandId CommandId::Clone(const std::string_view name) const {
   cloned.handler_ = handler_;
   cloned.opt_mask_ = opt_mask_ | CO::HIDDEN;
   cloned.acl_categories_ = acl_categories_;
-  cloned.implicit_acl_ = implicit_acl_;
   cloned.interleave_step_ = interleave_step_;
-  cloned.is_alias_ = true;
+  // An alias is semantically the same command, so inherit the source's full derived identity and
+  // attributes (incl. SUPPORT_ASYNC, pub/sub & exec/eval identity, CAN_MONITOR, IMPLICIT_ACL) -
+  // the ctor recomputed these from the alias name, which is not what we want - and mark it as an
+  // alias.
+  cloned.kind_mask_ = kind_mask_ | IS_ALIAS;
 
   // explicit sharing of the object since it's an alias we can do that.
   // I am assuming that the source object lifetime is at least as of the cloned object.
@@ -192,18 +220,15 @@ bool CommandId::IsTransactional() const {
   if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_TRANSACTIONAL))
     return true;
 
-  if (name_ == "EVAL" || name_ == "EVALSHA" || name_ == "EVAL_RO" || name_ == "EVALSHA_RO" ||
-      name_ == "EXEC")
-    return true;
-
-  return false;
+  // EVAL family (incl. *_RO) and EXEC (but not MULTI/DISCARD) are transactional.
+  return (kind_mask_ & EVAL_CTRL) || (kind_mask_ & EXEC);
 }
 
 bool CommandId::IsMultiTransactional() const {
-  return kind_multi_ctr_.has_value();
+  return kind_mask_ & (EVAL_CTRL | EXEC_CTRL);
 }
 
-optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
+optional<facade::ErrorReply> CommandId::Validate(const facade::ParsedArgs& tail_args) const {
   if ((arity() > 0 && tail_args.size() + 1 != size_t(arity())) ||
       (arity() < 0 && tail_args.size() + 1 < size_t(-arity()))) {
     string prefix;
@@ -222,7 +247,7 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
 }
 
 void CommandId::ResetStats(unsigned thread_index) {
-  command_stats_[thread_index] = {0, 0};
+  command_stats_[thread_index].stats = {0, 0};
   if (hdr_histogram* h = latency_histogram_; h != nullptr) {
     hdr_reset(h);
     std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -232,8 +257,8 @@ void CommandId::ResetStats(unsigned thread_index) {
 void CommandId::RecordLatency(unsigned tid, uint64_t latency_usec) const {
   auto& ent = command_stats_[tid];
 
-  ++ent.first;
-  ent.second += latency_usec;
+  ++ent.stats.first;
+  ent.stats.second += latency_usec;
 
   if (latency_histogram_) {
     hdr_record_value_atomic(latency_histogram_, latency_usec);
@@ -241,14 +266,8 @@ void CommandId::RecordLatency(unsigned tid, uint64_t latency_usec) const {
 }
 
 CommandRegistry::CommandRegistry() {
-  cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
-
   for (const string& name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
-  }
-
-  for (const string& name : GetFlag(FLAGS_oom_deny_commands)) {
-    oomdeny_cmds_.emplace(AsciiStrToUpper(name));
   }
 }
 
@@ -271,22 +290,10 @@ void CommandRegistry::Init(unsigned int thread_count) {
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   string k = string(cmd.name());
-
-  absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
-  const bool is_sub_command = maybe_subcommand.size() == 2;
-  if (const auto it = cmd_rename_map_.find(maybe_subcommand.front()); it != cmd_rename_map_.end()) {
-    if (it->second.empty()) {
-      return *this;  // Incase of empty string we want to remove the command from registry.
-    }
-    k = is_sub_command ? StrCat(it->second, " ", maybe_subcommand[1]) : it->second;
-  }
+  const bool is_sub_command = k.find(' ') != string::npos;
 
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
     cmd.SetRestricted(true);
-  }
-
-  if (oomdeny_cmds_.find(k) != oomdeny_cmds_.end()) {
-    cmd.SetFlag(CO::DENYOOM);
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);
@@ -312,13 +319,6 @@ void CommandRegistry::StartFamily(std::optional<uint32_t> acl_category) {
   acl_category_ = acl_category;
 }
 
-std::string_view CommandRegistry::RenamedOrOriginal(std::string_view orig) const {
-  if (!cmd_rename_map_.empty() && cmd_rename_map_.contains(orig)) {
-    return cmd_rename_map_.find(orig)->second;
-  }
-  return orig;
-}
-
 CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {
   return std::move(family_of_commands_);
 }
@@ -329,7 +329,7 @@ std::pair<const CommandId*, ParsedArgs> CommandRegistry::FindExtended(ParsedArgs
   string cmd = absl::AsciiStrToUpper(args.Front());
   auto tail_args = args.Tail();
 
-  if (cmd == RenamedOrOriginal("ACL"sv)) {
+  if (cmd == "ACL") {
     if (tail_args.empty()) {
       return {Find(cmd), {}};
     }
@@ -360,6 +360,24 @@ absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() c
     cmd_latencies.insert({absl::AsciiStrToLower(cmd_name), cmd.GetLatencyHist()});
   }
   return cmd_latencies;
+}
+
+absl::flat_hash_map<std::string, CmdCallStats> CommandRegistry::NamedCallStats(
+    const std::vector<CmdCallStats>& merged) const {
+  absl::flat_hash_map<std::string, CmdCallStats> res;
+  if (merged.size() != cmd_map_.size()) {
+    LOG_IF(DFATAL, !merged.empty())
+        << "cmd_call_stats size " << merged.size() << " != registry size " << cmd_map_.size();
+    return res;
+  }
+  size_t i = 0;
+  for (const auto& k_v : cmd_map_) {
+    const CmdCallStats& s = merged[i++];
+    if (s.first == 0)
+      continue;
+    res[absl::AsciiStrToLower(k_v.second.name())] = s;
+  }
+  return res;
 }
 
 }  // namespace dfly

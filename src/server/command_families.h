@@ -18,6 +18,7 @@ void RegisterHllFamily(CommandRegistry*);
 void RegisterBloomFamily(CommandRegistry*);
 void RegisterTopkFamily(CommandRegistry*);
 void RegisterCmsFamily(CommandRegistry*);
+void RegisterCuckooFilterFamily(CommandRegistry*);
 void RegisterJsonFamily(CommandRegistry*);
 
 }  // namespace dfly

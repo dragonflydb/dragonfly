@@ -6,6 +6,8 @@
 
 #include <mimalloc.h>
 
+#include "server/detail/egress_throttle.h"
+
 extern "C" {
 #include "redis/zmalloc.h"
 }
@@ -18,6 +20,7 @@ extern "C" {
 #include "facade/facade_stats.h"
 #include "server/common.h"
 #include "server/journal/journal.h"
+#include "strings/human_readable.h"
 #include "util/listener_interface.h"
 
 namespace rng = std::ranges;
@@ -42,6 +45,11 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
 ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
           "Max number of commands squashed in a single shard during squash optimizaiton");
 
+ABSL_FLAG(strings::MemoryBytesFlag, snapshot_egress_limit_bytes, 0,
+          "Per-shard-thread socket egress bandwidth budget in bytes/second. Each shard throttles "
+          "its snapshot traversal loop to stay under this rate. Accepts human-readable sizes "
+          "(e.g. 100mb, 1gb). 0 disables throttling.");
+
 namespace dfly {
 
 using namespace std;
@@ -58,7 +66,7 @@ ServerState::Stats::Stats(unsigned num_shards)
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 26 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 30 * 8, "Stats size mismatch");
 
 #define ADD(x) this->x += (other.x)
 
@@ -76,7 +84,6 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   ADD(multi_squash_exec_hop_usec);
   ADD(multi_squash_exec_reply_usec);
   ADD(squashed_commands);
-  ADD(squash_stats_ignored);
   ADD(blocking_commands_in_pipelines);
   ADD(blocked_on_interpreter);
   ADD(rdb_save_usec);
@@ -88,6 +95,12 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   ADD(oom_error_cmd_cnt);
   ADD(conn_timeout_events);
   ADD(psync_requests_total);
+
+  ADD(batch_write_commands_total);
+  ADD(batch_read_commands_total);
+  ADD(batch_read_commands_bytes);
+  ADD(batch_write_commands_bytes);
+  ADD(rw_throttle_batches_total);
 
   if (this->tx_width_freq_arr.size() > 0) {
     DCHECK_EQ(this->tx_width_freq_arr.size(), other.tx_width_freq_arr.size());
@@ -172,14 +185,30 @@ void ServerState::EnterLameDuck() {
   watcher_cv_.notify_all();
 }
 
-ServerState::MemoryUsageStats ServerState::GetMemoryUsage(uint64_t now_ns) {
-  static constexpr uint64_t kCacheEveryNs = 1000;
-  if (now_ns > used_mem_last_update_ + kCacheEveryNs) {
-    used_mem_last_update_ = now_ns;
+ServerState::MemoryUsageStats ServerState::GetMemoryUsage(uint64_t now_usec) const {
+  if (now_usec != used_mem_last_read_usec_) {
+    used_mem_last_read_usec_ = now_usec;
     memory_stats_cached_.used_mem = used_mem_current.load(std::memory_order_relaxed);
     memory_stats_cached_.rss_mem = rss_mem_current.load(std::memory_order_relaxed);
   }
   return memory_stats_cached_;
+}
+
+bool ServerState::ShouldDenyOnOOM(uint64_t now_usec) {
+  DCHECK_NE(now_usec, 0u);
+  if (is_master) {
+    auto memory_stats = GetMemoryUsage(now_usec);
+
+    size_t limit = max_memory_limit.load(memory_order_relaxed);
+    if (memory_stats.used_mem > limit ||
+        (rss_oom_deny_ratio > 0 && memory_stats.rss_mem > (limit * rss_oom_deny_ratio))) {
+      DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
+                    << memory_stats.rss_mem << " ,limit " << limit;
+      stats.oom_error_cmd_cnt++;
+      return true;
+    }
+  }
+  return false;
 }
 
 bool ServerState::AllowInlineScheduling() const {
@@ -187,14 +216,6 @@ bool ServerState::AllowInlineScheduling() const {
   // will be scheduled before RdbLoader::LoadItemsBuffer is finished. We can't use the regular
   // locking mechanism because RdbLoader is not using transactions.
   if (gstate_ == GlobalState::LOADING)
-    return false;
-
-  // Journal callbacks can preempt; This means we have to disallow inline scheduling
-  // because then we might interleave the callbacks loop from an inlined-scheduled command
-  // and a normally-scheduled command.
-  // The problematic loop is in JournalSlice::AddLogRecord, going over all the callbacks.
-
-  if (journal::HasRegisteredCallbacks())
     return false;
 
   return true;
@@ -239,11 +260,12 @@ void ServerState::UpdateFromFlags() {
   rss_oom_deny_ratio = absl::GetFlag(FLAGS_rss_oom_deny_ratio);
   serialization_max_chunk_size = absl::GetFlag(FLAGS_serialization_max_chunk_size);
   max_squash_cmd_num = absl::GetFlag(FLAGS_max_squashed_cmd_num);
+  egress_throttler_.SetLimit(absl::GetFlag(FLAGS_snapshot_egress_limit_bytes));
 }
 
 vector<string> ServerState::GetMutableFlagNames() {
   return base::GetFlagNames(FLAGS_rss_oom_deny_ratio, FLAGS_serialization_max_chunk_size,
-                            FLAGS_max_squashed_cmd_num);
+                            FLAGS_max_squashed_cmd_num, FLAGS_snapshot_egress_limit_bytes);
 }
 
 Interpreter* ServerState::BorrowInterpreter() {

@@ -1,23 +1,29 @@
 import asyncio
+import difflib
 import functools
 import itertools
-import logging
-import sys
-import wrapt
-from redis import asyncio as aioredis
-import redis
-import random
-import string
-import time
-import difflib
 import json
-import subprocess
-import pytest
+import logging
 import os
-import fakeredis
-from typing import Iterable, Union
-from enum import Enum
+import random
 import re
+import string
+import subprocess
+import sys
+import time
+from collections.abc import Iterable
+from enum import Enum
+from shutil import copyfileobj
+
+import fakeredis
+import pytest
+import wrapt
+from requests import Session
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+import redis
+from redis import asyncio as aioredis
 
 
 def tmp_file_name():
@@ -37,6 +43,25 @@ def chunked(n, iterable):
 def eprint(*args, **kwargs):
     """Print to stderr"""
     print(*args, file=sys.stderr, **kwargs)
+
+
+def download_with_retries(url, dest, max_retries: int = 5) -> None:
+    """Download a file from url to dest with exponential backoff retries."""
+    adapter = HTTPAdapter(
+        max_retries=Retry(
+            total=max_retries,
+            backoff_factor=1,
+            status_forcelist=[500, 502, 503, 504],
+            raise_on_status=True,
+        )
+    )
+    with Session() as session:
+        session.mount("https://", adapter)
+        with session.get(url, stream=True) as r:
+            r.raise_for_status()
+            r.raw.decode_content = True
+            with open(dest, "wb") as f:
+                copyfileobj(r.raw, f)
 
 
 def gen_test_data(n, start=0, seed=None):
@@ -123,12 +148,10 @@ async def info_tick_timer(client: aioredis.Redis, section=None, **kwargs):
 # wait for a process becomes "responsive":
 # for a master - waits that it finishes loading a snapshot if it's budy doing so,
 # and for replica it waits until it finishes its full sync stage and reaches the stable sync state.
-async def wait_available_async(
-    clients: Union[aioredis.Redis, Iterable[aioredis.Redis]], timeout=120
-):
+async def wait_available_async(clients: aioredis.Redis | Iterable[aioredis.Redis], timeout=120):
     if not isinstance(clients, aioredis.Redis):
         # Syntactic sugar to seamlessly handle an array of clients.
-        return await asyncio.gather(*(wait_available_async(c) for c in clients))
+        return await asyncio.gather(*(wait_available_async(c, timeout=timeout) for c in clients))
 
     """Block until instance exits loading phase"""
     # First we make sure that ping passes
@@ -861,7 +884,7 @@ class ExpirySeeder:
         while not self.stop_flag:
             try:
                 pipeline = client.pipeline(transaction=False)
-                for i in range(0, self.batch_size):
+                for i in range(self.batch_size):
                     pipeline.execute_command(f"SET tmp{self.i} bar{self.i} EX {self.timeout}")
                     self.i = self.i + 1
                 await pipeline.execute()
@@ -990,3 +1013,17 @@ class LogMonitor:
         assert not self.matched_lines, f"Log pattern '{self.pattern}' found:\n" + "\n".join(
             self.matched_lines
         )
+
+
+def parse_client_list(raw):
+    # The client library auto-parses bare CLIENT LIST but not its filtered forms - accept both.
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="replace")
+    out = []
+    for line in raw.strip().splitlines():
+        fields = dict(t.split("=", 1) for t in line.split(" ") if "=" in t)
+        if fields:
+            out.append(fields)
+    return out

@@ -11,7 +11,6 @@
 #include <absl/functional/function_ref.h>
 
 #include <atomic>
-// #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -105,17 +104,17 @@ class Transaction {
  public:
   // Result returned by callbacks. Most should use the implicit conversion from OpStatus.
   struct RunnableResult {
-    enum Flag : uint16_t {
+    enum Flag : uint8_t {
       // Can be issued by a **single** shard callback to avoid concluding, i.e. perform one more hop
       // even if not requested ahead. Used for blocking command fallback.
       AVOID_CONCLUDING = 1,
     };
 
-    RunnableResult(OpStatus status = OpStatus::OK, uint16_t flags = 0)
+    RunnableResult(OpStatus status = OpStatus::OK, uint16_t flags = 0)  // NOLINT
         : status(status), flags(flags) {
     }
 
-    operator OpStatus() const {
+    operator OpStatus() const {  // NOLINT
       return status;
     }
 
@@ -146,16 +145,21 @@ class Transaction {
     NON_ATOMIC = 3,
   };
 
-  // Squashed parallel execution requires a separate transaction for each shard. Those "stubs"
-  // perform no scheduling or real hops, but instead execute the handlers directly inline.
-  enum MultiRole {
+  // Atomic squashing uses "stubs" that perform no scheduling or real hops and execute handlers
+  // directly inline, mocking the interface of a real transaction for a single shard. Non-atomic
+  // squashing does not squash on the transaction level at all: MultiCommandSquasher dispatches
+  // each command straight to its target shard's queue and relies on a real, ordinary transaction
+  // (SHARD_LOCAL) that schedules/acquires locks normally, just pinned to that one shard for its
+  // whole lifetime.
+  enum MultiRole : uint8_t {
     DEFAULT = 0,        // Regular multi transaction
     SQUASHER = 1,       // Owner of stub transactions
     SQUASHED_STUB = 2,  // Stub transaction
+    SHARD_LOCAL = 3,    // Non-atomic transaction pinned to a single shard for its whole lifetime
   };
 
   // State on specific shard.
-  enum LocalMask : uint16_t {
+  enum LocalMask : uint8_t {
     ACTIVE = 1,  // Whether its active on this shard (to schedule or execute hops)
     OPTIMISTIC_EXECUTION = 1 << 1,  // Whether the shard executed optimistically (during schedule)
     // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED isn't set
@@ -176,16 +180,19 @@ class Transaction {
     Transaction* tx;
   };
 
-  static void Init(unsigned num_shards);
-  static void Shutdown();
-
   explicit Transaction(const CommandId* cid);
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
   explicit Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id);
 
   // Initialize from command (args) on specific db.
-  OpStatus InitByArgs(Namespace* ns, DbIndex index, CmdArgList args);
+  OpStatus InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args);
+
+  // Same as above but reuses a key index already computed by the caller (e.g. the squasher),
+  // avoiding a redundant DetermineKeys pass. Only valid for regular key-based commands
+  // (not GLOBAL_TRANS / NO_KEY_TRANSACTIONAL).
+  OpStatus InitByArgs(Namespace* ns, DbIndex index, const facade::ParsedArgs& args,
+                      const KeyIndex& key_index);
 
   // Get command arguments for specific shard. Called from shard thread.
   ShardArgs GetShardArgs(ShardId sid) const;
@@ -227,6 +234,15 @@ class Transaction {
   // Must be called from coordinator thread.
   void CancelBlocking(const std::function<OpStatus(ArgSlice)>&);
 
+  // Attempt to cancel a scheduled transaction that has been armed (hop dispatched).
+  // Tries to atomically disarm all active shards. If all shards are successfully disarmed,
+  // the transaction is cancelled and removed from shard queues. If any shard already executed
+  // (couldn't be disarmed), re-arms the previously disarmed shards so the transaction
+  // completes normally.
+  // Returns true if the transaction was successfully cancelled.
+  // Must be called from the coordinator thread after DispatchHop() but before run_barrier_.Wait().
+  bool CancelScheduledTx();
+
   // Prepare a squashed hop on given shards.
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
@@ -241,8 +257,9 @@ class Transaction {
   void StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
                              bool skip_scheduling = false);
 
-  // Start multi in NON_ATOMIC mode.
-  void StartMultiNonAtomic();
+  // Start multi in NON_ATOMIC mode. Use SHARD_LOCAL for squasher-local transactions that are
+  // pinned to a single shard for their whole lifetime (lets shard_data_ use a single cell).
+  void StartMultiNonAtomic(MultiRole role);
 
   // Unlock key locks of a multi transaction.
   // If block is set, wait for unlock to finish.
@@ -480,7 +497,7 @@ class Transaction {
   };
 
   // Init basic fields and reset re-usable.
-  void InitBase(Namespace* ns, DbIndex dbid, CmdArgList args);
+  void InitBase(Namespace* ns, DbIndex dbid, const facade::ParsedArgs& args);
 
   // Init as a global transaction.
   void InitGlobal();
@@ -510,9 +527,6 @@ class Transaction {
   // if execute_optimistic is true - means we can try executing during the scheduling,
   // subject to uncontended keys.
   bool ScheduleInShard(EngineShard* shard, bool execute_optimistic);
-
-  // Optimized extension of ScheduleInShard. Pulls several transactions queued for scheduling.
-  static void ScheduleBatchInShard();
 
   // Set ARMED flags, start run barrier and submit poll tasks. Doesn't wait for the run barrier
   void DispatchHop();
@@ -546,7 +560,13 @@ class Transaction {
   // Should be called immediately after the last hop.
   void LogAutoJournalOnShard(EngineShard* shard, RunnableResult shard_result);
 
-  // Whether the callback can be run directly on this thread without dispatching on the shard queue
+  // Whether the callback can be run directly on this fiber without dispatching on the shard queue.
+  // It checks internally that there are no possible suspension points.
+  //
+  // We do not support suspendable shard callbacks. Because all locks are acquired as intent locks,
+  // we rely on a single ordering to determine if a transaction is able to run. When an inlined
+  // transaction suspends (even as it acquires the locks), there is no way to determine its presence
+  // from the shard queue fiber, so it can start executing a command on the same keys in parallel.
   bool CanRunInlined() const;
 
   uint32_t GetUseCount() const {
@@ -555,6 +575,22 @@ class Transaction {
 
   bool IsActiveMulti() const {
     return multi_ && multi_->role != SQUASHED_STUB;
+  }
+
+  // A non-atomic transaction pinned to a single shard for its whole lifetime (squasher-local).
+  // The pinning is enforced by MultiCommandSquasher, which only routes single-shard commands to
+  // such a tx and creates a separate one per shard, so it never fans out or migrates shards.
+  bool IsShardLocalMulti() const {
+    return multi_ && multi_->role == SHARD_LOCAL && multi_->mode == NON_ATOMIC;
+  }
+
+  // Full per-shard shard_data_ is needed only for multi transactions that may span/migrate across
+  // shards, whose leftover callbacks on other shards might still read shard_data_ after we moved on
+  // to the next command (shrinking it would be a cross-thread use-after-free). Stubs
+  // (SQUASHED_STUB) and shard-local non-atomic squash txs are single-shard for their whole
+  // lifetime, have no such leftover callbacks, and use a single cell.
+  bool NeedsFullShardData() const {
+    return IsActiveMulti() && !IsShardLocalMulti();
   }
 
   unsigned SidToId(ShardId sid) const {
@@ -598,8 +634,10 @@ class Transaction {
   // Fingerprints of keys, precomputed once during the transaction initialization.
   absl::InlinedVector<LockFp, 4> kv_fp_;
 
-  // Stores the full undivided command.
-  CmdArgList full_args_;
+  // Stores the full undivided command. Backed either by a caller-owned span (legacy
+  // callers, via implicit ArgSlice conversion) or a caller-owned BackedArguments
+  // (migrated callers). The backing storage must outlive the transaction's hops.
+  facade::ParsedArgs full_args_;
 
   // Set if a NO_AUTOJOURNAL command asked to enable auto journal again
   bool re_enabled_auto_journal_ = false;
@@ -663,6 +701,6 @@ template <typename F> auto Transaction::ScheduleSingleHopT(F&& f) -> decltype(f(
   return res;
 }
 
-OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args);
+OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs& args);
 
 }  // namespace dfly

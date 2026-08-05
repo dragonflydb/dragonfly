@@ -36,6 +36,7 @@ struct MasterContext {
   std::string dfly_session_id;  // Sync session id for dfly sync.
   unsigned num_flows = 0;
   DflyVersion version = DflyVersion::VER1;
+  std::string lineage_id;  // lineage id of master
 };
 
 // This class manages replication from both Dragonfly and Redis masters.
@@ -124,11 +125,24 @@ class Replica : ProtocolClient {
     return !master_context_.dfly_session_id.empty();
   }
 
+  // The replication id of the lineage root master. Equals the direct master's id, unless the
+  // direct master advertised an ancestor id (cascaded replication), in which case it is the
+  // ancestor's id. Used to negotiate partial sync when reconnecting up the chain.
+  std::string GetLineageId() const {
+    return master_context_.lineage_id;
+  }
+
   std::vector<uint64_t> GetReplicaOffset() const;
   std::string GetSyncId() const;
 
   // Get the current replication phase based on state_mask_
   std::string GetCurrentPhase() const;
+
+  std::string GetClientInfo() const;
+
+  uint32_t GetClientId() const {
+    return client_id_;
+  }
 
   // Used *only* in TakeOver flow and replicaof no one. There is small data race if
   // thread_flow_map_ gets written by the MainReplicationFiber thread but
@@ -136,6 +150,15 @@ class Replica : ProtocolClient {
   std::vector<unsigned> GetFlowMapAtIndex(size_t index) const;
 
   size_t GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const;
+
+  // Investigation-only (DEBUG REPLDIAG): bytes currently sitting unread in the
+  // master socket's kernel receive buffer, or -1 if unavailable. Remove once closed.
+  int GetMasterSocketUnreadBytes();
+
+  // Start the journal in every shard thread at this replica's per-shard executed LSN, so the
+  // journal continues the master's LSN numbering. Enables partial sync from the same source master
+  // (failover) and cascaded partial sync (sub-replicas share the lineage root's LSN space).
+  void StartJournalAtOwnLSN();
 
  private:
   ExecutionState exec_st_;
@@ -162,7 +185,9 @@ class Replica : ProtocolClient {
 
   // repl_offs - till what offset we've already read from the master.
   // ack_offs_ last acknowledged offset.
-  size_t repl_offs_ = 0, ack_offs_ = 0;
+  // initial_repl_offs_ - master-supplied offset at FULLRESYNC; subtract from
+  // repl_offs_ to derive bytes read since this connection was established.
+  size_t repl_offs_ = 0, ack_offs_ = 0, initial_repl_offs_ = 0;
   unsigned state_mask_ = 0;  // see State enum above.
 
   // When replica starts full sync it is set to false and true when it completes the full sync.
@@ -184,6 +209,9 @@ class Replica : ProtocolClient {
   uint32_t reconnect_count_ = 0;
   size_t psync_attempts_ = 0;
   size_t psync_successes_ = 0;
+
+  const time_t creation_time_;
+  const uint32_t client_id_;
 };
 
 class RdbLoader;

@@ -9,6 +9,7 @@
 #include "server/set_family.h"
 #include "server/stream_family.h"
 #include "server/zset_family.h"
+
 namespace dfly {
 
 using namespace std;
@@ -30,7 +31,7 @@ StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
   return nullptr;
 }
 
-StringSet* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
+void* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
   Fail();
   return nullptr;
 }
@@ -40,12 +41,24 @@ uint32_t SetFamily::MaxIntsetEntries() {
   return 0;
 }
 
-LoadBlobResult SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv) {
+bool SetFamily::DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
+                                 const PrimeValue& pv) {
+  Fail();
+  return false;
+}
+
+bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
+                               const PrimeValue& pv) {
+  Fail();
+  return false;
+}
+
+LoadBlobResult SetFamily::LoadLPSetBlob(std::string_view blob, bool deep, PrimeValue* pv) {
   Fail();
   return LoadBlobResult::kCorrupted;
 }
 
-LoadBlobResult SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) {
+LoadBlobResult SetFamily::LoadIntSetBlob(std::string_view blob, bool deep, PrimeValue* pv) {
   Fail();
   return LoadBlobResult::kCorrupted;
 }
@@ -55,7 +68,7 @@ LoadBlobResult HSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv
   return LoadBlobResult::kCorrupted;
 }
 
-LoadBlobResult HSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) {
+LoadBlobResult HSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* pv) {
   Fail();
   return LoadBlobResult::kCorrupted;
 }
@@ -65,12 +78,13 @@ LoadBlobResult ZSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv
   return LoadBlobResult::kCorrupted;
 }
 
-LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) {
+LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* pv) {
   Fail();
   return LoadBlobResult::kCorrupted;
 }
 
-OpResult<ZSetFamily::MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, Transaction* tx,
+OpResult<ZSetFamily::MScoreResponse> ZSetFamily::ZGetMembers(const facade::ParsedArgs& args,
+                                                             Transaction* tx,
                                                              SinkReplyBuilder* builder) {
   Fail();
   return {};

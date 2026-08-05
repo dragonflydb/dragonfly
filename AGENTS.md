@@ -35,6 +35,7 @@
    `ninja <unit_test> && ./unit_test`
 4. ✅ **Format Code** - `pre-commit run --files <files>`
 5. ✅ **Follow Architecture** - See [Architecture Patterns](#architecture-patterns) below
+6. ✅ **Never Push to Main** - Always create a feature branch and open a PR. Never run `git push origin main`.
 
 ### Pull Request Guidelines
 
@@ -117,6 +118,7 @@ git log --oneline -10
 - Global mutable state
 - Edit without reading
 - Skip tests
+- Use `std::regex` in fiber/server paths (recursive implementation can overflow small fiber stacks)
 - Use `./tools/docker/build.sh` for local development (use `ninja` instead)
 - Use `make` for incremental builds (use `ninja` instead)
 
@@ -271,6 +273,19 @@ ctest -V -L DFLY                                    # Run all tests
 ./generic_family_test                               # Run specific test binary
 ./generic_family_test --gtest_filter="Set.*"        # Run specific test case
 ```
+
+**Python Integration Tests (pytest)**:
+```bash
+# Run from the repo root. The binary path defaults to build-dbg/dragonfly.
+# Override with the DRAGONFLY_PATH env var:
+DRAGONFLY_PATH=build-dbg/dragonfly python3 -m pytest tests/dragonfly/pymemcached_test.py -xvs
+
+# Run a single test:
+python3 -m pytest tests/dragonfly/pymemcached_test.py::TestMemcached::test_basic -xvs
+```
+
+- `DRAGONFLY_PATH` — sets the path to the Dragonfly binary the test harness starts. Defaults to `build-dbg/dragonfly` relative to the `tests/dragonfly/` directory.
+- `--df` — passes **extra flags to the Dragonfly process** (not the binary path). For example: `--df logtostdout --df "vmodule=*=1"`.
 
 ---
 

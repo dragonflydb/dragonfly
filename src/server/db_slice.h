@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <atomic>
+#include <limits>
 
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
@@ -29,6 +30,13 @@ class SlotSet;
 }  // namespace cluster
 
 using facade::OpResult;
+
+// Applies a delta to the per-db/per-type counters and to the owning slot's memory_bytes.
+// All of them track resident RAM.
+void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db);
+
+// Applies a delta to the owning slot's tiered_bytes - disk bytes held by the slot's entries.
+void AccountSlotTieredBytes(std::string_view key, int64_t delta, DbTable* db);
 
 struct DbStats : public DbTableStats {
   // number of active keys.
@@ -74,6 +82,9 @@ struct SliceEvents {
   // how many updates and insertions of keys between snapshot intervals
   size_t update = 0;
 
+  // how many journal omit optimizations were performed
+  size_t journal_omit = 0;
+
   uint64_t huff_encode_total = 0, huff_encode_success = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
@@ -84,6 +95,25 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
+  // Consumer of bucket change events than can be registered inside the slice.
+  // It also includes additional methods for interfacing with snapshots and migrations.
+  struct ChangeConsumerInterface {
+    // Called before a specific bucket (or set of buckets) will be mutated
+    virtual void OnChange(DbIndex, const ChangeReq&) = 0;
+
+    // Should return true if any bucket is mid-serialization
+    virtual bool IsAnyBucketBlocked() const {
+      return false;
+    }
+
+    // Should wait for IsAnyBucketBlocked to return false
+    virtual void WaitForNoBucketBlocked() const {
+    }
+
+    bool eventually_consistent_ = false;
+    uint64_t snapshot_version_ = 0;
+  };
+
   // Auto-laundering iterator wrapper. Laundering means re-finding keys if they moved between
   // buckets.
   template <typename T> class IteratorT {
@@ -159,6 +189,10 @@ class DbSlice {
     // Used when the existing object is overridden by a new one.
     void ReduceHeapUsage();
 
+    // Re-reads the entry's current sizes into the baseline. Call it after a blocking tiered
+    // read, which may upload the value back into memory and account for it behind our back.
+    void ResyncBaseline();
+
     void Run();
     void Cancel();
 
@@ -199,26 +233,25 @@ class DbSlice {
   using DocDeletionCallback = std::function<void(std::string_view, const Context&, PrimeValue& pv)>;
 
   struct ExpireParams {
+    ExpireParams() = default;
+
+    // if now_ms = 0 the value is absolute; cap applies to relative dispatch only;
+    // cap=true silently clamps to kMaxExpireDeadlineMs;
+    ExpireParams(TimeUnit unit, int64_t value, uint64_t now_ms = 0, bool cap = false);
+    ExpireParams(ExpT type, int64_t value, uint64_t now_ms = 0, bool cap = false);
+
     bool IsDefined() const {
-      return persist || value > INT64_MIN;
+      return persist || ms_timestamp >= 0;
     }
 
-    static int64_t Cap(int64_t value, TimeUnit unit);
-
-    // Calculate relative and absolue timepoints.
+    // Returns (relative_ms, absolute_ms). On overflow returns {0, -1}.
     std::pair<int64_t, int64_t> Calculate(uint64_t now_msec, bool cap) const;
 
-    // Return true if relative expiration is in the past
-    bool IsExpired(uint64_t now_msec) const {
-      return Calculate(now_msec, false).first < 0;
-    }
+    // INT64_MAX is the year 292M AD — never a real expiration.
+    static constexpr int64_t kOverflow = std::numeric_limits<int64_t>::max();
 
-   public:
-    int64_t value = INT64_MIN;  // undefined
-    TimeUnit unit = TimeUnit::SEC;
-
-    bool absolute = false;
-    bool persist = false;        // persist means remove all expiry
+    int64_t ms_timestamp = -1;  // -1 = undefined; 0 = expire now; kOverflow = overflow.
+    bool persist = false;
     int32_t expire_options = 0;  // ExpireFlags
   };
 
@@ -248,6 +281,10 @@ class DbSlice {
     Iterator it;
     AutoUpdater post_updater;
     bool is_new = false;
+
+    // Set if DbContext::is_omittable_operation was set and the conditions were met.
+    // Means that the journal write should NOT be performed.
+    bool omitted_journal = false;
   };
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
@@ -278,6 +315,10 @@ class DbSlice {
   // Returns OpStatus::OUT_OF_MEMORY if bad_alloc is thrown
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                                 uint64_t expire_at_ms);
+
+  // Must be called before overwriting a value in place. An offloaded value keeps its data on disk
+  // and reports no heap allocation, so overwriting it drops the only reference to its disk extent.
+  void ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv);
 
   // Update entry expiration. Return expiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
@@ -336,6 +377,10 @@ class DbSlice {
     return CheckLock(mode, dbid, LockTag(key).Fingerprint());
   }
 
+  // Returns true if none of lock_args' keys are locked in a conflicting mode. Unlike Acquire(),
+  // this does not register anything in the lock table.
+  bool IsLockFree(IntentLock::Mode mode, const KeyLockArgs& lock_args) const;
+
   size_t db_array_size() const {
     return db_arr_.size();
   }
@@ -388,12 +433,12 @@ class DbSlice {
     return entries_count_;
   }
 
-  using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
+  void RegisterOnChange(ChangeConsumerInterface* consumer);
 
-  //! Registers the callback to be called for each change.
-  //! Returns the registration id which is also the unique version of the dbslice
-  //! at a time of the call.
-  uint64_t RegisterOnChange(ChangeCallback cb);
+  // Not allowed to be called from the consumer callback. Idempotent: returns true only for the
+  // caller that actually removed the consumer, false if it was not registered. This makes it safe
+  // for racing fibers to unregister the same consumer without double-erasing.
+  bool UnregisterOnChange(ChangeConsumerInterface* consumer);
 
   bool HasRegisteredCallbacks() const {
     return !change_cb_.empty();
@@ -402,13 +447,11 @@ class DbSlice {
   // Call registered callbacks with version less than upper_bound.
   void FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound);
 
-  //! Unregisters the callback.
-  void UnregisterOnChange(uint64_t id);
-
   struct DeleteExpiredStats {
-    uint32_t deleted = 0;        // number of deleted items due to expiry.
-    uint32_t deleted_bytes = 0;  // total bytes of deleted items.
-    uint32_t traversed = 0;      // total number of traversed entries in the prime table.
+    uint32_t deleted = 0;                 // number of deleted items due to expiry.
+    uint32_t deleted_bytes = 0;           // total bytes of deleted items.
+    uint32_t traversed = 0;               // total number of traversed entries in the prime table.
+    std::vector<std::string> key_events;  // expired key names for keyspace notifications.
   };
 
   // Deletes some amount of possible expired items.
@@ -417,9 +460,11 @@ class DbSlice {
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
   // Returns number of (elements,bytes) freed due to evictions.
+  // key_events: if non-null, evicted key names are appended for keyspace notifications.
   std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx, const Context& cntx,
                                                             size_t starting_segment_id,
-                                                            size_t increase_goal_bytes);
+                                                            size_t increase_goal_bytes,
+                                                            std::vector<std::string>* key_events);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
 
@@ -483,13 +528,12 @@ class DbSlice {
   // if it's not empty and not EX.
   void SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events);
 
-  bool WillBlockOnJournalWrite() const {
-    return serialization_latch_.IsBlocked();
-  }
+  // Returns true if any registered snapshot is blocked on bucket serialiazion (big value, delayed)
+  // and thus might reject the journal change
+  bool WillBlockOnJournalWrite() const;
 
-  LocalLatch* GetLatch() {
-    return &serialization_latch_;
-  }
+  // Block and wait for WillBlockOnJournalWrite to become false
+  void WaitForUnblockedJournalWrites() const;
 
   void StartSampleTopK(DbIndex db_ind, uint32_t min_freq);
 
@@ -521,7 +565,8 @@ class DbSlice {
                                              PrimeValue obj, uint64_t expire_at_ms,
                                              bool force_update);
 
-  void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version, uint64_t cb_id);
+  void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
+                    ChangeConsumerInterface* consumer);
   util::fb2::Fiber FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
@@ -543,12 +588,18 @@ class DbSlice {
 
   void CreateDb(DbIndex index);
 
+  // Returns true if this write could be ignored during replication without losing consistency
+  bool IsOmittableWrite(const Context& cntx, const ChangeReq& req);
+
   enum class UpdateStatsMode : uint8_t {
     kReadStats,
     kMutableStats,
   };
 
-  PrimeIterator ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
+  // events: if non-null, the expired key is appended to it (caller is in an atomic section and
+  // will send notifications later). If null, the notification is sent immediately (read path).
+  PrimeIterator ExpireIfNeeded(const Context& cntx, PrimeIterator it,
+                               std::vector<std::string>* events = nullptr) const;
 
   OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
                                            std::optional<unsigned> req_obj_type);
@@ -564,11 +615,6 @@ class DbSlice {
   }
 
   void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
-
-  // We need this because registered callbacks might yield and when they do so we want
-  // to avoid Heartbeat or Flushing the db.
-  // This latch protects us against this case.
-  mutable LocalLatch serialization_latch_;
 
   ShardId shard_id_;
   uint8_t cache_mode_ : 1;
@@ -608,7 +654,8 @@ class DbSlice {
   mutable absl::flat_hash_set<uint64_t, FpHasher> uniq_fps_;
 
   // ordered from the smallest to largest version.
-  std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
+  std::list<ChangeConsumerInterface*> change_cb_;
+  mutable LocalLatch change_cb_latch_;  // to avoid deletion during traversal
 
   // Used in temporary computations in Find item and CbFinish
   // This set is used to hold fingerprints of key accessed during the run of
@@ -623,8 +670,9 @@ class DbSlice {
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;
 
-  // Record whenever a key expired to DbTable::expired_keys_events_ for keyspace notifications
   bool expired_keys_events_recording_ = true;
+
+  bool journal_omit_redundant_writes_ = true;
 
   struct Hash {
     size_t operator()(const facade::ConnectionRef& c) const {

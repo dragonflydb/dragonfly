@@ -11,21 +11,29 @@ import subprocess
 import sys
 import time
 import typing
+from contextlib import AsyncExitStack
 from copy import deepcopy
 from pathlib import Path
 from tempfile import gettempdir, mkdtemp
 from time import sleep
-from typing import Dict, List, Union
 
 import pymemcache
 import pytest
 import pytest_asyncio
+
 import redis
 from redis import asyncio as aioredis
 
 from . import PortPicker
-from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
-from .utility import DflySeederFactory, gen_ca_cert, gen_certificate, skip_if_not_in_github
+from .instance import DflyInstance, DflyInstanceFactory, DflyParams, RedisServer
+from .proxy import Proxy
+from .utility import (
+    DflySeederFactory,
+    download_with_retries,
+    gen_ca_cert,
+    gen_certificate,
+    skip_if_not_in_github,
+)
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 # Suppress "Unclosed ClusterNode" warnings from redis-py topology refreshes (not actionable)
@@ -44,7 +52,6 @@ def _download_minio_binary(dest: Path):
     leaving a corrupt binary on interrupted downloads.
     """
     import platform
-    import urllib.request
 
     system = platform.system().lower()
     arch = platform.machine()
@@ -54,7 +61,7 @@ def _download_minio_binary(dest: Path):
     logging.info(f"Downloading MinIO binary from {url}")
     tmp_dest = dest.with_suffix(".tmp")
     try:
-        urllib.request.urlretrieve(url, tmp_dest)
+        download_with_retries(url, tmp_dest)
         tmp_dest.chmod(0o755)
         tmp_dest.rename(dest)
     except Exception:
@@ -64,8 +71,9 @@ def _download_minio_binary(dest: Path):
 
 def _start_minio_server(endpoint):
     """Start MinIO subprocess and configure env vars for S3 tests."""
-    import boto3
     from urllib.parse import urlparse
+
+    import boto3
 
     cache_dir = Path.home() / ".cache" / "dragonfly-tests"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -238,7 +246,21 @@ def df_seeder_factory(request) -> DflySeederFactory:
     return DflySeederFactory(request.config.getoption("--log-seeder"))
 
 
-def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
+@pytest_asyncio.fixture
+async def proxy_factory():
+    async with AsyncExitStack() as stack:
+
+        async def create_proxy(
+            remote_port, remote_host="127.0.0.1", *, host="127.0.0.1", local_port=0
+        ):
+            return await stack.enter_async_context(
+                Proxy(host, local_port, remote_host, remote_port)
+            )
+
+        yield create_proxy
+
+
+def parse_args(args: list[str]) -> dict[str, str | None]:
     args_dict = {}
     for arg in args:
         if "=" in arg:
@@ -372,6 +394,20 @@ async def async_client(async_pool):
     await client.flushall()
     await client.select(DATABASE_INDEX)
     yield client
+
+
+@pytest_asyncio.fixture
+async def replication(df_factory, request):
+    """Decomposable, marker-annotated replication fixture.
+
+    Configure the topology with ``@pytest.mark.replication(...)`` whose keyword
+    arguments are forwarded to :func:`replication_utils.setup_replication`.
+    """
+    from .replication_utils import setup_replication
+
+    marker = request.node.get_closest_marker("replication")
+    kwargs = dict(marker.kwargs) if marker else {}
+    return await setup_replication(df_factory, **kwargs)
 
 
 def pytest_addoption(parser):
@@ -579,7 +615,7 @@ def redis_server(port_picker, df_log_dir) -> RedisServer:
     s = RedisServer(port_picker.get_available_port(), log_dir=df_log_dir)
     try:
         s.start()
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         skip_if_not_in_github()
         raise
     time.sleep(1)

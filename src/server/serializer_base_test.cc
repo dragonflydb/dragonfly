@@ -23,6 +23,7 @@
 #include "server/conn_context.h"
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
+#include "server/engine_shard_set.h"
 #include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
@@ -113,8 +114,9 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                  bool on_update) override;
 
-  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override {
-    RecordSerialized(tde.key.ToString());
+  void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                            time_t expire, uint32_t mc_flags) override {
+    RecordSerialized(pk.ToString());
   }
 
   void ConsumeJournalChange(const journal::JournalChangeItem& item) override;
@@ -125,26 +127,33 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   // TODO: possibly replace with unified loop if we decide on this?
   void Loop();
 
-  void Serialize(BucketIdentity bucket, std::string key) {
-    if (absl::Bernoulli(bg_, params_.delay_prob)) {
+  void Serialize(BucketIdentity bucket, std::string key, unsigned obj_type) {
+    if (obj_type == OBJ_STRING && absl::Bernoulli(bg_, params_.delay_prob)) {
       DelayedEntryHandler::deps_.Increment(bucket);
       unsigned delay = absl::Uniform(bg_, params_.delay_lat_us.first, params_.delay_lat_us.second);
       auto de = std::make_unique<TieredDelayedEntry>(0, CompactKey{key},
                                                      delay_driver_.Enqeue(delay), 0, 0);
       DelayedEntryHandler::delayed_entries_.emplace(bucket, std::move(de));
     } else {
+      std::lock_guard lk{stream_mu_};
       RecordSerialized(std::move(key));
     }
   }
 
   void RecordSerialized(std::string key) {
+    // Simulate occasional yields due to big value flushes
+    while (absl::Bernoulli(bg_, 0.4)) {
+      for (unsigned it = absl::Uniform(bg_, 1, 10); it > 0; it--)
+        util::ThisFiber::Yield();
+    }
+
     CHECK(!emitted_baselines_.contains(key));
     CHECK(!journal_writes_.contains(key));  // No journal entries must exist for this key
     emitted_baselines_.emplace(std::move(key));
   }
 
   void Start() {
-    SerializerBase::RegisterChangeListener();
+    SerializerBase::RegisterChangeListener(false);
     journal::StartInThread();
     journal_id_ = journal::RegisterConsumer(this);
 
@@ -201,13 +210,12 @@ void TestDriver::Loop() {
         ProcessBucket(snapshot_db_indx, it, false);
       });
 
-      util::ThisFiber::Yield();
+      // Simualte yield due to socket flushes
+      for (unsigned i = 0; i < 2; ++i)
+        util::ThisFiber::Yield();
     } while (snapshot_cursor_);
 
-    {
-      std::lock_guard guard(stream_mu_);
-      ProcessDelayedEntries(true, 0, base_cntx_);
-    }
+    ProcessDelayedEntries(true, 0, base_cntx_);
 
     util::ThisFiber::Yield();
   }  // for (dbindex)
@@ -234,7 +242,7 @@ void TestDriver::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   str_vec.erase(str_vec.begin());
 
   // Check all keys were baseline emitted before
-  auto keys = DetermineKeys(cid, str_vec);
+  auto keys = DetermineKeys(cid, CmdArgList{str_vec});
   CHECK(keys);
   for (auto key : keys->Range(str_vec))
     journal_writes_[key]++;
@@ -246,14 +254,9 @@ unsigned TestDriver::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
-    std::lock_guard lk{stream_mu_};
-    Serialize(it.bucket_address(), it->first.ToString());
+    // Call custom serialize instead of SerializerBases' to overwrite yielding behaviour
+    Serialize(it.bucket_address(), it->first.ToString(), it->second.ObjType());
     ++serialized;
-
-    while (absl::Bernoulli(bg_, 0.3)) {
-      for (unsigned it = absl::Uniform(bg_, 1, 10); it > 0; it--)
-        util::ThisFiber::Yield();
-    }
   }
   return serialized;
 }
@@ -345,7 +348,7 @@ TEST_F(SerializerBaseTest, IncreasingLists) {
   // Select keys in range [0, 2 * kKeys] to have a balance of new and existing keys
   std::atomic_bool running = true;
   std::vector<util::fb2::Fiber> workers;
-  for (size_t w = 0; w < 3; w++) {
+  for (size_t w = 0; w < 5; w++) {
     auto worker = pp_->at(w % pp_->size())->LaunchFiber([&, w] {
       std::string id = absl::StrCat("w", w);
       absl::InsecureBitGen bg;
@@ -393,10 +396,9 @@ TEST_F(SerializerBaseTest, IncreasingLists) {
 // Serialization code has many paths that omit empty bucket checks at all -
 // assert those "lost" delayed reads are correctly flushed before new changes
 TEST_F(SerializerBaseTest, DelayedAllDeleted) {
-  GTEST_SKIP() << "To be fixed";
+  GTEST_SKIP() << "Deadlocks";
 
-  // 1-2 ms
-  driver_params = {.delay_prob = 0.9, .delay_lat_us = {1000, 2000}};
+  driver_params = {.delay_prob = 0.9, .delay_lat_us = {200, 600}};
 
   // Fill database with some keys
   const size_t kKeys = 10000;
@@ -413,7 +415,7 @@ TEST_F(SerializerBaseTest, DelayedAllDeleted) {
   // Let all values to be expire deleted
   TEST_current_time_ms = TEST_current_time_ms + 100;
   for (unsigned i = 0; i < kKeys; i++)
-    EXPECT_THAT(Run({"GET", absl::StrCat("key:", i)}), ArgType(RespExpr::NIL));
+    Run({"SET", absl::StrCat("key:", i), "V"});
 
   // Reallow delayed entry resolution
   Change([](TestDriver& d) { d.delay_driver_.Resume(); });
@@ -424,4 +426,58 @@ TEST_F(SerializerBaseTest, DelayedAllDeleted) {
 
   Finish();
 }
+
+// Background eviction can cause delayed entries to be evicted.
+// We must make sure that the baseline is either serialized before the eviction message or aborted.
+// Detail: Yes, currently pure offloaded strings never allocate memory - but the keys do, so they
+// are targets for eviction nonetheless
+TEST_F(SerializerBaseTest, DelayedEvicted) {
+  // 1-2 ms
+  driver_params = {.delay_prob = 0.5, .delay_lat_us = {1000, 2000}};
+
+  // Fill database with some keys
+  const size_t kKeys = 100;
+  Run({"DEBUG", "POPULATE", std::to_string(kKeys), "key", "4096"});
+
+  // Add gigantic set that will eat up memory
+  // Its bucket should not coincide with any of the string keys
+  Run({"SADD", "gigantic-set", "first-entry"});
+
+  // Start and pause reolution of delayed entries
+  Start();
+  Change([](TestDriver& d) { d.delay_driver_.Pause(); });
+
+  // Enable cache mode and grow set
+  shard_set->TEST_EnableCacheMode();
+  max_memory_limit = 10'000;
+  for (unsigned i = 0; i < 1000; i++)
+    Run({"SADD", "gigantic-set",
+         absl::StrCat("some data some data some data some long data @ ", i)});
+
+  // Give heartbeat a change to run if it didn't yet
+  for (unsigned i = 0; i < 10; i++)
+    util::ThisFiber::Yield();
+
+  // Tiered entries blocked all evictions
+  unsigned evicted = GetMetrics().db_stats.front().events.evicted_keys;
+  EXPECT_EQ(evicted, 0u);
+
+  // Reallow delayed entry resolution
+  Change([](TestDriver& d) { d.delay_driver_.Resume(); });
+
+  // Put more memory pressure on it
+  for (unsigned i = 0; i < 1000; i++)
+    Run({"SADD", "gigantic-set",
+         absl::StrCat("more some data some data some data some long data @ ", i)});
+
+  // Now we have evictions
+  evicted = GetMetrics().db_stats.front().events.evicted_keys;
+  EXPECT_GT(evicted, 0u);
+
+  auto [_1, baselines, _2] = Finish();
+
+  // Currently we write baselines before eviction
+  EXPECT_EQ(baselines.size(), kKeys + 1);
+}
+
 }  // namespace dfly

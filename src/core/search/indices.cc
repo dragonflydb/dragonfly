@@ -4,6 +4,7 @@
 
 #include "core/search/indices.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/numbers.h>
@@ -47,40 +48,130 @@ string ToLower(string_view word) {
   return IsAllAscii(word) ? absl::AsciiStrToLower(word) : una::cases::to_lowercase_utf8(word);
 }
 
-// Get all words from text as matched by the ICU library, counting term frequencies
-absl::flat_hash_map<std::string, uint32_t> TokenizeWords(std::string_view text,
-                                                         const TextIndex::StopWords& stopwords,
-                                                         const Synonyms* synonyms) {
-  absl::flat_hash_map<std::string, uint32_t> words;
-  for (std::string_view word : una::views::word_only::utf8(text)) {
-    if (std::string word_lc = una::cases::to_lowercase_utf8(word); !stopwords.contains(word_lc)) {
-      if (synonyms) {
-        if (auto group_id = synonyms->GetGroupToken(word_lc); group_id) {
-          // Index under synonym group token for exact-match scoring.
-          // Also index under original word (with freq=0) so prefix/suffix/infix search still works.
-          words[*group_id]++;
-          words.emplace(std::move(word_lc), 0);
-          continue;
-        }
-      }
+constexpr std::array<bool, 256> MakeSepTable() {
+  std::array<bool, 256> t{};
+  for (unsigned char c : std::string_view{" \t\n\r\v\f,.<>{}[]\"':;!@#$%^&*()-+=~?/|`"})
+    t[c] = true;
+  return t;
+}
+constexpr auto kTextSepTable = MakeSepTable();
 
-      words[std::move(word_lc)]++;
-    }
+// Returns the byte length of the UTF-8 codepoint starting at `s[i]`. Returns 1 if the
+// lead byte announces a multi-byte sequence but the continuation bytes are missing or
+// not in 0x80..0xBF, matching the byte-oriented escape semantics of the query lexer
+// (which consumes exactly one byte after `\`).
+size_t Utf8CodepointLen(std::string_view s, size_t i) {
+  unsigned char lead = static_cast<unsigned char>(s[i]);
+  size_t len = 1;
+  if ((lead & 0xE0) == 0xC0)
+    len = 2;
+  else if ((lead & 0xF0) == 0xE0)
+    len = 3;
+  else if ((lead & 0xF8) == 0xF0)
+    len = 4;
+  if (len == 1)
+    return 1;
+  if (len > s.size() - i)
+    return 1;
+  for (size_t k = 1; k < len; ++k) {
+    unsigned char c = static_cast<unsigned char>(s[i + k]);
+    if ((c & 0xC0) != 0x80)
+      return 1;
   }
-  return words;
+  return len;
 }
 
-// Split taglist, remove duplicates and convert all to lowercase. Freq is always 1 for tags.
-absl::flat_hash_map<string, uint32_t> NormalizeTags(string_view taglist, bool case_sensitive,
-                                                    char separator) {
+// Split on ASCII punctuation separators; backslash glues the next codepoint into the
+// current word regardless of class. Non-ASCII bytes are always word bytes. Fast-path
+// for text without any backslash emits views into the original input.
+void SplitWithEscapes(std::string_view text, absl::FunctionRef<void(std::string_view)> emit) {
+  if (text.find('\\') == std::string_view::npos) {
+    size_t start = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+      unsigned char c = static_cast<unsigned char>(text[i]);
+      if (c < 0x80 && kTextSepTable[c]) {
+        if (i > start)
+          emit(text.substr(start, i - start));
+        start = i + 1;
+      }
+    }
+    if (start < text.size())
+      emit(text.substr(start));
+    return;
+  }
+
+  std::string buf;
+  buf.reserve(text.size());
+  size_t i = 0;
+  while (i < text.size()) {
+    unsigned char c = static_cast<unsigned char>(text[i]);
+    if (c == '\\') {
+      if (i + 1 >= text.size()) {
+        ++i;
+      } else {
+        size_t cp_len = Utf8CodepointLen(text, i + 1);
+        buf.append(text.data() + i + 1, cp_len);
+        i += 1 + cp_len;
+      }
+    } else if (c < 0x80 && kTextSepTable[c]) {
+      if (!buf.empty()) {
+        emit(buf);
+        buf.clear();
+      }
+      ++i;
+    } else {
+      buf.push_back(text[i]);
+      ++i;
+    }
+  }
+  if (!buf.empty())
+    emit(buf);
+}
+
+// Tokenize text into `out`, advancing *pos_counter per non-stopword token. Raw + stem +
+// synonym entries share the same position. Stopwords don't advance the counter.
+void TokenizeWords(std::string_view text, const TextIndex::StopWords& stopwords,
+                   const Synonyms* synonyms, Stemmer* stemmer, uint32_t* pos_counter,
+                   absl::flat_hash_map<std::string, TermInfo>* out) {
+  auto emit = [&](std::string key, uint32_t pos) {
+    auto& info = (*out)[std::move(key)];
+    info.freq++;
+    info.positions.push_back(pos);
+  };
+  SplitWithEscapes(text, [&](std::string_view word) {
+    std::string word_lc = una::cases::to_lowercase_utf8(word);
+    // Leading-space tokens are reserved for synonym group sentinels; user input
+    // (e.g. an escaped leading space) must not be able to forge one.
+    if (word_lc.empty() || word_lc.front() == ' ')
+      return;
+    if (stopwords.contains(word_lc))
+      return;
+    uint32_t pos = ++(*pos_counter);
+    if (synonyms) {
+      if (auto group_id = synonyms->GetGroupToken(word_lc); group_id)
+        emit(*group_id, pos);
+    }
+    if (stemmer) {
+      std::string stem = stemmer->Stem(word_lc);
+      if (stem != word_lc)
+        emit(std::move(stem), pos);
+    }
+    emit(std::move(word_lc), pos);
+  });
+}
+
+// Split taglist, remove duplicates and convert all to lowercase. Freq is always 1 for tags;
+// positions are not tracked (phrase queries don't apply to tag fields).
+void NormalizeTags(string_view taglist, bool case_sensitive, char separator,
+                   absl::flat_hash_map<std::string, TermInfo>* out) {
   // Splitting utf8 by ascii character is safe
-  absl::flat_hash_map<string, uint32_t> tags;
   for (string_view tag : absl::StrSplit(taglist, separator, absl::SkipEmpty())) {
     string_view str = absl::StripAsciiWhitespace(tag);
     std::string s = case_sensitive ? string{str} : ToLower(str);
-    tags.emplace(std::move(s), 1);
+    auto& info = (*out)[std::move(s)];
+    if (info.freq == 0)
+      info.freq = 1;  // dedup: tag presence is binary
   }
-  return tags;
 }
 
 // Iterate over all suffixes of all words
@@ -93,10 +184,89 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
   }
 }
 
+// Literal characters of `pat` up to the first unescaped `*` or `?`. Any term matching `pat` must
+// start with this, so it bounds the dictionary range that has to be scanned.
+string GlobLiteralPrefix(string_view pat) {
+  string prefix;
+  for (size_t i = 0; i < pat.size(); ++i) {
+    char c = pat[i];
+    if (c == '*' || c == '?')
+      break;
+    if (c == '\\' && i + 1 < pat.size())
+      c = pat[++i];
+    prefix.push_back(c);
+  }
+  return prefix;
+}
+
+// Longest run of literal characters in `pat` (bounded by unescaped `*`/`?`), with `\` escapes
+// resolved. Every term matching `pat` must contain this run as a contiguous substring, which the
+// suffix trie can test for a cheap early-exit.
+string GlobLongestLiteralSegment(string_view pat) {
+  string best, cur;
+  auto flush = [&] {
+    if (cur.size() > best.size())
+      best = cur;
+    cur.clear();
+  };
+  for (size_t i = 0; i < pat.size(); ++i) {
+    char c = pat[i];
+    if (c == '*' || c == '?') {
+      flush();
+      continue;
+    }
+    if (c == '\\' && i + 1 < pat.size())
+      c = pat[++i];
+    cur.push_back(c);
+  }
+  flush();
+  return best;
+}
+
+// Matches `text` against glob `pat`: `*` = any run (incl. empty), `?` = exactly one character,
+// `\` escapes the next character to a literal. Two-pointer scan with backtracking to the last `*`.
+// `?` and `*` advance over whole UTF-8 codepoints so single-character matching works on multibyte
+// text; literal bytes in the pattern still match the text byte-for-byte.
+bool GlobMatch(string_view text, string_view pat) {
+  size_t t = 0, p = 0;
+  size_t star_p = string_view::npos;  // pattern index just past the last `*`
+  size_t star_t = 0;                  // text index that `*` is currently matched up to
+  while (t < text.size()) {
+    if (p < pat.size()) {
+      char pc = pat[p];
+      if (pc == '*') {
+        star_p = ++p;
+        star_t = t;
+        continue;
+      }
+      if (pc == '?') {
+        ++p;
+        t += Utf8CodepointLen(text, t);
+        continue;
+      }
+      char lit = (pc == '\\' && p + 1 < pat.size()) ? pat[p + 1] : pc;
+      if (lit == text[t]) {
+        p += (pc == '\\' && p + 1 < pat.size()) ? 2 : 1;
+        ++t;
+        continue;
+      }
+    }
+    if (star_p == string_view::npos)
+      return false;
+    // Extend the last `*` by one codepoint so backtracking stays on character boundaries.
+    p = star_p;
+    star_t += Utf8CodepointLen(text, star_t);
+    t = star_t;
+  }
+  while (p < pat.size() && pat[p] == '*')
+    ++p;
+  return p == pat.size();
+}
+
 // Haversine with earth radius in meters. Used to calculate distance.
 boost::geometry::strategy::distance::haversine haversine_(6372797.560856);
 
-double ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
+double ConvertToRadiusInMeters(double radius, std::string_view arg) {
   const std::string unit = absl::AsciiStrToUpper(arg);
   if (unit == "M") {
     return radius * 1;
@@ -289,8 +459,8 @@ vector<DocId> NumericIndex::GetAllDocsWithNonNullValues() const {
 
 template <typename C>
 BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive,
-                                    bool with_suffix)
-    : case_sensitive_{case_sensitive}, entries_{mr} {
+                                    bool with_suffix, bool with_offsets)
+    : case_sensitive_{case_sensitive}, with_offsets_{with_offsets}, entries_{mr} {
   if (with_suffix)
     suffix_trie_.emplace(mr);
 }
@@ -301,6 +471,13 @@ const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(
   if (strip_whitespace)
     word = absl::StripAsciiWhitespace(word);
 
+  auto it = entries_.find(NormalizeForExactQuery(word).view());
+  return (it != entries_.end()) ? &it->second : nullptr;
+}
+
+template <typename C>
+const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::MatchingNoStem(
+    string_view word) const {
   auto it = entries_.find(NormalizeQueryWord(word).view());
   return (it != entries_.end()) ? &it->second : nullptr;
 }
@@ -414,23 +591,56 @@ void BaseStringIndex<C>::MatchInfixWithTerm(
 }
 
 template <typename C>
+void BaseStringIndex<C>::MatchWildcardWithTerm(
+    std::string_view pattern,
+    absl::FunctionRef<void(std::string_view term, const Container*)> cb) const {
+  StringOrView pattern_norm{NormalizeQueryWord(pattern)};
+  pattern = pattern_norm.view();
+
+  // Early-exit via the suffix trie: every matching term must contain the pattern's longest literal
+  // segment as a substring, so if no term does, skip the dictionary scan. Mirrors
+  // MatchInfixWithTerm.
+  if (suffix_trie_) {
+    string segment = GlobLongestLiteralSegment(pattern);
+    if (!segment.empty()) {
+      auto it = suffix_trie_->lower_bound(segment);
+      if (it == suffix_trie_->end() || !(*it).first.starts_with(segment))
+        return;
+    }
+  }
+
+  string prefix = GlobLiteralPrefix(pattern);
+  for (auto it = entries_.lower_bound(prefix);
+       it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
+    if (GlobMatch((*it).first, pattern))
+      cb((*it).first, &(*it).second);
+  }
+}
+
+template <typename C>
+void BaseStringIndex<C>::MatchWildcard(std::string_view pattern,
+                                       absl::FunctionRef<void(const Container*)> cb) const {
+  MatchWildcardWithTerm(pattern, [&cb](string_view, const Container* c) { cb(c); });
+}
+
+template <typename C>
 bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view field) {
   auto strings_list = GetStrings(doc, field);
   if (!strings_list) {
     return false;
   }
 
-  absl::flat_hash_map<std::string, uint32_t> tokens;
+  absl::flat_hash_map<std::string, TermInfo> tokens;
+  uint32_t pos_counter = 0;
   for (string_view str : strings_list.value()) {
-    for (auto& [token, freq] : Tokenize(str))
-      tokens[std::move(token)] += freq;
+    Tokenize(str, &pos_counter, &tokens);
   }
 
   // Track per-field document length for BM25 scoring.
   if constexpr (kIsScored) {
     uint32_t doc_tf_sum = 0;
-    for (const auto& [_, freq] : tokens)
-      doc_tf_sum += freq;
+    for (const auto& [_, info] : tokens)
+      doc_tf_sum += info.freq;
     if (doc_tf_sum > 0) {
       if (id >= field_doc_lengths_.size())
         field_doc_lengths_.resize(id + 1, 0);
@@ -443,8 +653,9 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
 
   if (tokens.size() > 1)
     unique_ids_ = false;
-  for (const auto& [token, freq] : tokens)
-    GetOrCreate(&entries_, token, kIsScored)->Insert(id, freq);
+  for (const auto& [token, info] : tokens)
+    GetOrCreate(&entries_, token, kIsScored, with_offsets_)
+        ->Insert(id, info.freq, absl::MakeConstSpan(info.positions.data(), info.positions.size()));
 
   if (suffix_trie_) {
     absl::flat_hash_set<std::string> token_keys;
@@ -470,10 +681,10 @@ void BaseStringIndex<C>::Remove(DocId id, const DocumentAccessor& doc, string_vi
 
   auto strings_list = GetStrings(doc, field).value();
 
-  absl::flat_hash_map<std::string, uint32_t> tokens;
+  absl::flat_hash_map<std::string, TermInfo> tokens;
+  uint32_t pos_counter = 0;
   for (string_view str : strings_list) {
-    for (auto& [token, freq] : Tokenize(str))
-      tokens[std::move(token)] += freq;
+    Tokenize(str, &pos_counter, &tokens);
   }
 
   for (const auto& [token, _] : tokens)
@@ -534,10 +745,22 @@ StringOrView BaseStringIndex<C>::NormalizeQueryWord(std::string_view query) cons
 }
 
 template <typename C>
+StringOrView BaseStringIndex<C>::NormalizeForExactQuery(std::string_view query) const {
+  if (case_sensitive_)
+    return StringOrView::FromView(query);
+  std::string lc = ToLower(query);
+  // Synonym group tokens are sentinels prefixed with a space by GetGroupToken; never stem them.
+  if (stemmer_ && !lc.empty() && lc.front() != ' ')
+    lc = stemmer_->Stem(lc);
+  return StringOrView::FromString(std::move(lc));
+}
+
+template <typename C>
 typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(
-    search::RaxTreeMap<Container>* map, string_view word, bool store_freq) {
+    search::RaxTreeMap<Container>* map, string_view word, bool store_freq, bool store_positions) {
   auto* mr = map->get_allocator().resource();
-  return &map->try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */, store_freq)
+  return &map->try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */, store_freq,
+                           store_positions)
               .first->second;
 }
 
@@ -556,8 +779,45 @@ template struct BaseStringIndex<CompressedSortedSet>;
 template struct BaseStringIndex<SortedVector<DocId>>;
 
 TextIndex::TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords,
-                     const Synonyms* synonyms, bool with_suffixtrie)
-    : BaseStringIndex(mr, false, with_suffixtrie), stopwords_{stopwords}, synonyms_{synonyms} {
+                     const Synonyms* synonyms, bool with_suffixtrie, bool no_stem,
+                     std::string_view language, std::string_view language_field, bool with_offsets)
+    : BaseStringIndex(mr, false, with_suffixtrie, with_offsets),
+      stopwords_{stopwords},
+      synonyms_{synonyms},
+      language_field_{language_field} {
+  if (!no_stem) {
+    default_stemmer_.emplace(language);
+    stemmer_ = &*default_stemmer_;
+    if (!language_field_.empty())
+      pool_.emplace();
+  }
+}
+
+// Add/Remove swap the active stemmer to the per-doc one resolved from
+// LANGUAGE_FIELD for the duration of the call, then restore the index default.
+bool TextIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
+  Stemmer* prev = stemmer_;
+  absl::Cleanup restore{[&] { stemmer_ = prev; }};
+  stemmer_ = ResolveStemmer(doc);
+  return BaseStringIndex::Add(id, doc, field);
+}
+
+void TextIndex::Remove(DocId id, const DocumentAccessor& doc, std::string_view field) {
+  Stemmer* prev = stemmer_;
+  absl::Cleanup restore{[&] { stemmer_ = prev; }};
+  stemmer_ = ResolveStemmer(doc);
+  BaseStringIndex::Remove(id, doc, field);
+}
+
+Stemmer* TextIndex::ResolveStemmer(const DocumentAccessor& doc) const {
+  if (!pool_ || language_field_.empty())
+    return stemmer_;
+  auto strs = doc.GetStrings(language_field_);
+  if (!strs || strs->empty())
+    return stemmer_;
+  std::string lang = absl::AsciiStrToLower((*strs)[0]);
+  Stemmer* s = pool_->Get(lang);
+  return s ? s : stemmer_;
 }
 
 std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const DocumentAccessor& doc,
@@ -565,8 +825,21 @@ std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const Document
   return doc.GetStrings(field);
 }
 
-absl::flat_hash_map<std::string, uint32_t> TextIndex::Tokenize(std::string_view value) const {
-  return TokenizeWords(value, *stopwords_, synonyms_);
+void TextIndex::Tokenize(std::string_view value, uint32_t* pos_counter,
+                         absl::flat_hash_map<std::string, TermInfo>* out) const {
+  TokenizeWords(value, *stopwords_, synonyms_, stemmer_, pos_counter, out);
+}
+
+std::vector<std::string> TextIndex::TokenizePhraseQuery(std::string_view phrase) const {
+  std::vector<std::string> out;
+  const StopWords* sw = stopwords_;
+  SplitWithEscapes(phrase, [&](std::string_view word) {
+    std::string lc = una::cases::to_lowercase_utf8(word);
+    if (sw && sw->contains(lc))
+      return;
+    out.push_back(std::move(lc));
+  });
+  return out;
 }
 
 DefragmentResult TagIndex::Defragment(PageUsage* page_usage) {
@@ -589,80 +862,74 @@ std::optional<DocumentAccessor::StringList> TagIndex::GetStrings(const DocumentA
   return doc.GetTags(field);
 }
 
-absl::flat_hash_map<std::string, uint32_t> TagIndex::Tokenize(std::string_view value) const {
-  return NormalizeTags(value, case_sensitive_, separator_);
+void TagIndex::Tokenize(std::string_view value, uint32_t* /*pos_counter*/,
+                        absl::flat_hash_map<std::string, TermInfo>* out) const {
+  NormalizeTags(value, case_sensitive_, separator_, out);
 }
 
-BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim) : dim_{dim}, sim_{sim} {
+BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim, VectorDataType data_type)
+    : dim_{dim}, sim_{sim}, data_type_{data_type} {
 }
 
-std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
-  return {dim_, sim_};
+VectorIndexInfo BaseVectorIndex::Info() const {
+  return {dim_, sim_, data_type_};
 }
 
 bool BaseVectorIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto vector = doc.GetVector(field, dim_);
+  auto vector = doc.GetVector(field, dim_, data_type_);
 
   if (!vector)
     return false;
 
-  if (std::holds_alternative<OwnedFtVector>(*vector)) {
-    const auto& owned_vector = std::get<OwnedFtVector>(*vector);
-    AddVector(id, owned_vector.first.get());
-  } else {
-    const auto& borrowed_vector = std::get<BorrowedFtVector>(*vector);
-    AddVector(id, borrowed_vector);
-  }
+  if (std::holds_alternative<OwnedFtVector>(*vector))
+    AddVector(id, std::get<OwnedFtVector>(*vector).first.get());
+  else
+    AddVector(id, std::get<BorrowedFtVector>(*vector));
 
   return true;
 }
 
-// Each document occupies (dim_ + 1) floats in entries_: dim_ floats for the vector data,
-// followed by one float as a presence marker (1.0 = present, 0.0 = absent/removed).
-// This avoids the previous heuristic of treating all-zero vectors as null.
-static constexpr float kPresent = 1.0f;
-static constexpr float kAbsent = 0.0f;
-
 FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
                                  PMR_NS::memory_resource* mr)
-    : BaseVectorIndex{params.dim, params.sim}, entries_{mr} {
+    : BaseVectorIndex{params.dim, params.sim, params.data_type},
+      stride_bytes_{params.dim * ElementSize(params.data_type)},
+      entries_{mr},
+      present_(mr) {
   DCHECK(!params.use_hnsw);
-  entries_.reserve(params.capacity * (params.dim + 1));
+  entries_.reserve(params.capacity * stride_bytes_);
+  present_.reserve(params.capacity);
 }
 
 void FlatVectorIndex::AddVector(DocId id, const void* vector) {
-  const size_t stride = dim_ + 1;
-  DCHECK_LE(id * stride, entries_.size());
-  if (id * stride == entries_.size())
-    entries_.resize((id + 1) * stride, 0.0f);
+  // Grow, never shrink: DocIds are recycled (see ShardDocIndex free_ids_), so `id` can be smaller
+  // than the current max — an unconditional resize would truncate and drop other docs' vectors.
+  const size_t need_bytes = (static_cast<size_t>(id) + 1) * stride_bytes_;
+  if (entries_.size() < need_bytes)
+    entries_.resize(need_bytes);
+  if (present_.size() <= id)
+    present_.resize(id + 1, false);
 
-  if (vector) {
-    memcpy(&entries_[id * stride], vector, dim_ * sizeof(float));
-    entries_[id * stride + dim_] = kPresent;
-  }
+  present_[id] = vector != nullptr;
+  if (vector)
+    memcpy(entries_.data() + static_cast<size_t>(id) * stride_bytes_, vector, stride_bytes_);
 }
 
 void FlatVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
-  const size_t stride = dim_ + 1;
-  if (id * stride + dim_ < entries_.size())
-    entries_[id * stride + dim_] = kAbsent;
+  if (id < present_.size())
+    present_[id] = false;
 }
 
-const float* FlatVectorIndex::Get(DocId doc) const {
-  const size_t stride = dim_ + 1;
-  if (doc * stride + dim_ >= entries_.size() || entries_[doc * stride + dim_] != kPresent)
+const void* FlatVectorIndex::Get(DocId doc) const {
+  if (doc >= present_.size() || !present_[doc])
     return nullptr;
-  return &entries_[doc * stride];
+  return entries_.data() + static_cast<size_t>(doc) * stride_bytes_;
 }
 
 std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
-  const size_t stride = dim_ + 1;
-  size_t num_slots = entries_.size() / stride;
   std::vector<DocId> result;
-  result.reserve(num_slots);
-  for (DocId id = 0; id < num_slots; ++id) {
-    if (entries_[id * stride + dim_] == kPresent)
-      result.push_back(id);
+  for (size_t id = 0; id < present_.size(); ++id) {
+    if (present_[id])
+      result.push_back(static_cast<DocId>(id));
   }
   return result;
 }

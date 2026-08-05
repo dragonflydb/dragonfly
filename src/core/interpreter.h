@@ -4,13 +4,13 @@
 
 #pragma once
 
-#include <absl/container/fixed_array.h>
 #include <absl/types/span.h>
 
 #include <functional>
 #include <optional>
 #include <string_view>
 
+#include "common/backed_args.h"
 #include "util/fibers/synchronization.h"
 
 typedef struct lua_State lua_State;
@@ -46,12 +46,8 @@ class Interpreter {
 
   // Arguments received from redis.call
   struct CallArgs {
-    // Full arguments, including cmd name.
-    SliceSpan args;
-
-    // Pointer to backing storage for args (excluding cmd name).
-    // Moving can invalidate arg slice pointers. Moved by async to re-use buffer.
-    std::string* buffer;
+    // Full arguments, including cmd name. Owned by Interpreter::backed_args_.
+    const cmn::BackedArguments* args;
 
     ObjectExplorer* translator;
 
@@ -111,6 +107,29 @@ class Interpreter {
 
   void SetGlobalArray(const char* name, SliceSpan args);
 
+  struct GlobalArrayBuilder {
+    GlobalArrayBuilder(const GlobalArrayBuilder&) = delete;
+    GlobalArrayBuilder& operator=(const GlobalArrayBuilder&) = delete;
+
+    GlobalArrayBuilder(GlobalArrayBuilder&& o) noexcept : lua_(o.lua_), name_(o.name_) {
+      o.lua_ = nullptr;
+    }
+
+    ~GlobalArrayBuilder();
+
+    void AddElem(unsigned index, std::string_view elem);
+
+   private:
+    friend class Interpreter;
+    GlobalArrayBuilder(lua_State* lua, const char* name) : lua_(lua), name_(name) {
+    }
+
+    lua_State* lua_;
+    const char* name_;
+  };
+
+  GlobalArrayBuilder CreateGlobalStringArray(unsigned len, const char* name);
+
   // Runs already added function sha returned by a successful call to AddFunction().
   // Returns: true if the call succeeded, otherwise fills error and returns false.
   // sha must be 40 char length.
@@ -150,15 +169,14 @@ class Interpreter {
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
   bool IsTableSafe() const;
 
-  std::optional<absl::FixedArray<std::string_view, 4>> PrepareArgs();
-  bool CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer, SliceSpan args);
+  bool PrepareArgs();
+  bool CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer);
 
   lua_State* lua_;
   unsigned cmd_depth_ = 0;
   RedisFunc redis_func_;
-  std::string buffer_;
+  cmn::BackedArguments backed_args_;
   int64_t used_bytes_ = 0;
-  char name_buffer_[32];  // backing storage for cmd name
 };
 
 // Manages an internal interpreter pool. This allows multiple connections residing on the same

@@ -63,13 +63,14 @@ ABSL_FLAG(bool, break_replication_on_master_restart, false,
           "flushing the replica's data.");
 ABSL_FLAG(std::string, replica_announce_ip, "",
           "IP address that Dragonfly announces to replication master");
+ABSL_FLAG(bool, experimental_cascaded_partial_sync, false, "Experimental cascaded psync");
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint16_t, announce_port);
 ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
-ABSL_FLAG(bool, experimental_replicaof_v2, true,
-          "Use ReplicaOfV2 algorithm for initiating replication");
+ABSL_RETIRED_FLAG(bool, experimental_replicaof_v2, true,
+                  "Deprecated: ReplicaOfV2 is now the only replication algorithm");
 
 namespace dfly {
 
@@ -95,7 +96,12 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
                  std::optional<cluster::SlotRange> slot_range)
-    : ProtocolClient(std::move(host), port), service_(*se), id_{id}, slot_range_(slot_range) {
+    : ProtocolClient(std::move(host), port),
+      service_(*se),
+      id_{id},
+      slot_range_(slot_range),
+      creation_time_(time(nullptr)),
+      client_id_(facade::Connection::NextClientId()) {
   proactor_ = ProactorBase::me();
 }
 
@@ -182,7 +188,10 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   }
 
   if (last_journal_LSNs_.has_value()) {
-    return LastMasterSyncData{master_context_.master_repl_id, last_journal_LSNs_.value()};
+    std::string lineage_id = absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)
+                                 ? GetLineageId()
+                                 : master_context_.master_repl_id;
+    return LastMasterSyncData{lineage_id, last_journal_LSNs_.value()};
   }
   return nullopt;
 }
@@ -267,7 +276,7 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
       if (ec) {
         LOG(WARNING) << "Error greeting " << server().Description()
                      << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
-                     << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                     << ", socket state: " + SockInfo();
         state_mask_ &= R_ENABLED;
         continue;
       }
@@ -285,7 +294,7 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
       if (ec) {
         LOG(WARNING) << "Error syncing with " << server().Description()
                      << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
-                     << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                     << ", socket state: " + SockInfo();
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
         continue;
       }
@@ -305,7 +314,7 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
     if (state_mask_ & R_ENABLED) {  // replication was not stopped.
       LOG(WARNING) << "Error stable sync with " << server().Description()
                    << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
-                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                   << ", socket state: " + SockInfo();
     }
   }
 
@@ -407,10 +416,20 @@ std::error_code Replica::HandleCapaDflyResp() {
     PC_RETURN_ON_BAD_RESPONSE(LastResponseArgs()[3].type == RespExpr::INT64);
     master_context_.version = DflyVersion(get<int64_t>(LastResponseArgs()[3].u));
   }
+
+  // If our master is itself a replica (cascaded), parse lineage id (grandparent id)
+  if (LastResponseArgs().size() >= 5) {
+    PC_RETURN_ON_BAD_RESPONSE(LastResponseArgs()[4].type == RespExpr::STRING);
+    master_context_.lineage_id = ToSV(LastResponseArgs()[4].GetBuf());
+  } else {
+    master_context_.lineage_id = master_context_.master_repl_id;
+  }
+
   VLOG(1) << "Master id: " << master_context_.master_repl_id
           << ", sync id: " << master_context_.dfly_session_id
           << ", num journals: " << param_num_flows
-          << ", version: " << unsigned(master_context_.version);
+          << ", version: " << unsigned(master_context_.version)
+          << ", lineage: " << master_context_.lineage_id;
 
   return error_code{};
 }
@@ -419,7 +438,8 @@ std::error_code Replica::ConfigureDflyMaster() {
   // We need to send this because we may require to use this for cluster commands.
   // this reason to send this here is that in other context we can get an error reply
   // since we are budy with the replication
-  RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF CLIENT-ID ", id_)));
+  RETURN_ON_ERR(
+      SendCommandAndReadResponse(StrCat("REPLCONF CLIENT-ID ", service_.cluster_family().MyID())));
   if (!CheckRespIsSimpleReply("OK")) {
     LOG(WARNING) << "Bad REPLCONF CLIENT-ID response";
   }
@@ -690,6 +710,9 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
   if (sync_type == "partial") {
     ++psync_successes_;
+  } else if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
+    // We replace our dataset with full sync invisibly for other replicas, so force them to re-sync
+    service_.server_family().ForceReplicasToFullSync();
   }
 
   // Joining flows and resetting state is done by cleanup.
@@ -700,7 +723,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 }
 
 error_code Replica::ConsumeRedisStream() {
-  base::IoBuf io_buf(16_KB);
+  base::IoBuf io_buf(128_KB);
   ConnectionContext conn_context{nullptr, {}};
   conn_context.is_replicating = true;
   conn_context.journal_emulated = true;
@@ -720,7 +743,6 @@ error_code Replica::ConsumeRedisStream() {
   // or, alternatively, write commands stream coming from propagate() function.
   // Replica connection must send "REPLCONF ACK xxx" in order to make sure that master replication
   // buffer gets disposed of already processed commands, this is done in a separate fiber.
-  error_code ec;
   LOG(INFO) << "Transitioned into stable sync";
 
   // Set new error handler.
@@ -733,45 +755,54 @@ error_code Replica::ConsumeRedisStream() {
 
   acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
 
-  CommandContext cmnd_ctx;
-  cmnd_ctx.Init(&null_builder, &conn_context);
-  while (true) {
-    // Yield if the fiber has been running for long.
+  // Cap the batch at the squasher's own flush limit.
+  const size_t max_batch = std::max<size_t>(1, ServerState::tlocal()->max_squash_cmd_num);
+
+  struct BatchEntry {
+    CommandContext* cmd = nullptr;
+    size_t cmd_bytes = 0;
+    size_t deferred_ack_bytes = 0;
+    size_t AckBytes() const {
+      return cmd_bytes + deferred_ack_bytes;
+    }
+  };
+
+  std::vector<BatchEntry> batch;
+
+  batch.reserve(max_batch);
+
+  std::vector<CommandContext> ctx_pool(max_batch);
+
+  while (exec_st_.IsRunning()) {
+    // Skipped commands (MULTI/EXEC/PING) may drain buffered data without I/O or dispatch, so
+    // we should yield explicitly to avoid monopolizing thread.
     if (base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) > 1000) {  // 1ms
       ThisFiber::Yield();
     }
 
-    // If the acks-fb or something else triggered a shutdown, then do not attempt to read from the
-    // stream.
-    if (!exec_st_.IsRunning()) {
-      DCHECK(exec_st_.IsError());
-      LOG_REPL_ERROR("Stopping stream consumer in phase "
-                     << GetCurrentPhase()
-                     << " because of external error: " << exec_st_.GetError().Format());
-      acks_fb_.JoinIfNeeded();
-      return exec_st_.GetError();
-    }
-
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
+
     if (!response.has_value()) {
       LOG_REPL_ERROR("Error in Redis Stream at phase "
                      << GetCurrentPhase() << " with " << server().Description()
-                     << ", error: " << response.error()
-                     << ", socket state: " + GetSocketInfo(Sock()->native_handle()));
+                     << ", error: " << response.error() << ", socket state: " + SockInfo());
       exec_st_.ReportError(response.error());
       acks_fb_.JoinIfNeeded();
       return response.error();
     }
 
     const auto& last_args = LastResponseArgs();
+    bool queued = false;
+
     if (!last_args.empty()) {
-      string cmd = absl::CHexEscape(last_args[0].GetView());
+      auto cmd = last_args[0].GetView();
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
-      // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we simply
-      // ignore MULTI/EXEC and execute their inner commands individually.
+      // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we
+      // simply ignore MULTI/EXEC and execute their inner commands individually.
       if (!absl::EqualsIgnoreCase(cmd, "MULTI") && !absl::EqualsIgnoreCase(cmd, "EXEC")) {
-        VLOG(2) << "Got command " << cmd << "\n consumed: " << response->total_read;
+        VLOG(2) << "Got command " << absl::CHexEscape(cmd)
+                << "\n consumed: " << response->total_read;
 
         if (LastResponseArgs()[0].GetBuf()[0] == '\r') {
           for (const auto& arg : LastResponseArgs()) {
@@ -779,16 +810,80 @@ error_code Replica::ConsumeRedisStream() {
           }
         }
 
-        FillBackedArgs(last_args, &cmnd_ctx);
-        service_.DispatchCommand(facade::ParsedArgs{cmnd_ctx}, &cmnd_ctx,
-                                 facade::AsyncPreference::ONLY_SYNC);
+        CommandContext* ctx = &ctx_pool[batch.size()];
+        ctx->ResetForReuse();
+        ctx->Init(&null_builder, &conn_context);
+        FillBackedArgs(last_args, ctx);
+        batch.push_back(BatchEntry{ctx, response->total_read});
+        queued = true;
       }
     }
 
     io_buf.ConsumeInput(response->left_in_buffer);
-    repl_offs_ += response->total_read;
-    replica_waker_.notify();  // Notify to trigger ACKs.
+
+    if (!queued) {
+      // Skipped commands can be ACKed immediately only if there are no earlier queued commands
+      // still waiting to be applied.
+      if (batch.empty()) {
+        repl_offs_ += response->total_read;
+        replica_waker_.notify();
+      } else {
+        // Defer ACK of skipped bytes until the last command is processed.
+        batch.back().deferred_ack_bytes += response->total_read;
+      }
+    }
+
+    // Dispatch when the read buffer is drained or the batch is full, and drain the whole
+    // batch before reading from the socket again.
+    if ((io_buf.InputLen() == 0 || batch.size() >= max_batch) && !batch.empty()) {
+      // Chain the commands together so that the squasher can process them in one go.
+      for (size_t i = 0; i + 1 < batch.size(); ++i) {
+        batch[i].cmd->next = batch[i + 1].cmd;
+      }
+      batch.back().cmd->next = nullptr;
+      size_t idx = 0;
+      while (idx < batch.size() && exec_st_.IsRunning()) {
+        // Try dispatching the batch of commands - if the batch didn't process any commands than
+        // fall back to dispatching the first command in the batch synchronously.
+        auto dispatch_batch = [&](size_t idx) {
+          size_t processed =
+              service_.DispatchSquashedBatch(batch[idx].cmd, batch.size() - idx, &conn_context);
+          if (processed > 0) {
+            return processed;
+          }
+          auto* cmd = batch[idx].cmd;
+          service_.DispatchCommand(facade::ParsedArgs{*cmd}, cmd,
+                                   facade::AsyncPreference::ONLY_SYNC);
+          return size_t{1};
+        };
+
+        size_t processed = dispatch_batch(idx);
+
+        for (size_t i = idx; i < idx + processed; ++i) {
+          // Squashing may run a command as a suspended coroutine instead of to completion;
+          // resuming it here is what lets it finish before its context is recycled.
+          auto* cmd = batch[i].cmd;
+          if (cmd->IsDeferredReply()) {
+            cmd->SendReply();
+          }
+          repl_offs_ += batch[i].AckBytes();
+        }
+
+        idx += processed;
+        replica_waker_.notify();
+      }
+
+      batch.clear();
+    }
   }
+
+  DCHECK(exec_st_.IsError());
+  LOG_REPL_ERROR("Stopping stream consumer in phase "
+                 << GetCurrentPhase()
+                 << " because of external error: " << exec_st_.GetError().Format());
+  acks_fb_.JoinIfNeeded();
+
+  return exec_st_.GetError();
 }
 
 error_code Replica::ConsumeDflyStream() {
@@ -798,8 +893,8 @@ error_code Replica::ConsumeDflyStream() {
     lock_guard lk{flows_op_mu_};
 
     LOG_REPL_ERROR("Replication error in phase "
-                   << GetCurrentPhase() << " with " << server().Description() << ", error: "
-                   << ge.Format() << ", socket state: " + GetSocketInfo(Sock()->native_handle()));
+                   << GetCurrentPhase() << " with " << server().Description()
+                   << ", error: " << ge.Format() << ", socket state: " + SockInfo());
 
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_) {
@@ -810,6 +905,13 @@ error_code Replica::ConsumeDflyStream() {
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
   LOG(INFO) << "Transitioned into stable sync";
+
+  // Continue the master's LSN numbering so cascaded sub-replicas share the lineage root's LSN
+  // space and can negotiate partial sync when reconnecting up the chain.
+  if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
+    StartJournalAtOwnLSN();
+  }
+
   // Transition flows into stable sync.
   {
     auto shard_cb = [&](unsigned index, auto*) {
@@ -1021,7 +1123,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
   while (tx_reader.NextTxData(&reader, cntx, &tx_data)) {
     DVLOG(3) << "Lsn: " << tx_data.lsn;
 
-    last_io_time_ = Proactor()->GetMonotonicTimeNs();
+    last_io_time_ = TimeSec();
     if (tx_data.opcode == journal::Op::LSN) {
       //  Do nothing
     } else if (tx_data.opcode == journal::Op::PING) {
@@ -1069,6 +1171,7 @@ void Replica::RedisStreamAcksFb() {
     ack_cmd = absl::StrCat("REPLCONF ACK ", repl_offs_);
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
     if (auto ec = SendCommand(ack_cmd); ec) {
+      VLOG(1) << "RedisAcks SendCommand failed: " << ec.message() << " offset=" << repl_offs_;
       exec_st_.ReportError(ec);
       break;
     }
@@ -1078,6 +1181,8 @@ void Replica::RedisStreamAcksFb() {
         [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || (!exec_st_.IsRunning()); },
         next_ack_tp);
   }
+  VLOG(1) << "RedisAcks fiber exiting, exec_st_.IsRunning()=" << exec_st_.IsRunning()
+          << " last_acked_offset=" << ack_offs_ << " repl_offs=" << repl_offs_;
 }
 
 void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
@@ -1156,7 +1261,7 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   VLOG(2) << "Execute txid: " << tx_data.txid << " waiting for data in all shards";
   // Wait until shards flows got transaction data and inserted to map.
   // This step enforces that replica will execute multi shard commands that finished on master
-  // and replica recieved all the commands from all shards.
+  // and replica received all the commands from all shards.
   multi_shard_data.block->Wait();
   // Check if we woke up due to cancellation.
   if (!cntx->IsRunning())
@@ -1224,6 +1329,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     size_t pos = header.find(' ');
     if (pos != std::string_view::npos) {
       if (absl::SimpleAtoi(header.substr(pos + 1), &repl_offs_)) {
+        initial_repl_offs_ = repl_offs_;
         master_context_.master_repl_id = string(header.substr(0, pos));
         valid = true;
         VLOG(1) << "master repl_id " << master_context_.master_repl_id << " / " << repl_offs_;
@@ -1289,21 +1395,27 @@ auto Replica::GetSummary() const -> Summary {
     res.full_sync_in_progress = (state_mask_ & R_SYNCING);
     res.full_sync_done = (state_mask_ & R_SYNC_OK);
 
-    uint64_t current_time = ProactorBase::GetMonotonicTimeNs();
+    uint64_t current_time_sec = TimeSec();
     // last_io_time is derived above by reading last_io_time_ from all the flows,
     // by accessing them from a foreign thread, see the loop above. As a result some
     // threads may have last_io_time_ bigger than our current time, so we fix it here.
-    if (last_io_time > current_time) {
+    if (last_io_time > current_time_sec) {
       res.master_last_io_sec = 0;
     } else {
-      res.master_last_io_sec = (current_time - last_io_time) / 1000000000UL;
+      res.master_last_io_sec = current_time_sec - last_io_time;
     }
 
     res.master_id = master_context_.master_repl_id;
     res.reconnect_count = reconnect_count_;
-    res.repl_offset_sum = 0;
-    for (uint64_t offs : GetReplicaOffset()) {
-      res.repl_offset_sum += offs;
+    if (HasDflyMaster()) {
+      res.repl_offset_sum = 0;
+      for (uint64_t offs : GetReplicaOffset()) {
+        res.repl_offset_sum += offs;
+      }
+    } else {
+      // For Redis→Dragonfly replication, repl_offs_ tracks the byte offset
+      // in the Redis replication stream (sent via REPLCONF ACK to the master).
+      res.repl_offset_sum = repl_offs_;
     }
     res.psync_successes = psync_successes_;
     res.psync_attempts = psync_attempts_;
@@ -1330,6 +1442,49 @@ std::string Replica::GetSyncId() const {
   return master_context_.dfly_session_id;
 }
 
+int Replica::GetMasterSocketUnreadBytes() {
+  return GetSocketUnreadBytes();
+}
+
+string Replica::GetClientInfo() const {
+  auto f = [this]() {
+    facade::ClientInfo ci;
+    time_t now = time(nullptr);
+
+    // LastIoTime() is wall-clock seconds (see ProtocolClient::TimeSec).
+    uint64_t last_io_sec = LastIoTime();
+    for (const auto& flow : shard_flows_) {
+      last_io_sec = std::max(last_io_sec, flow->LastIoTime());
+    }
+    if (last_io_sec > 0 && static_cast<time_t>(last_io_sec) <= now) {
+      ci.idle = now - static_cast<time_t>(last_io_sec);
+    }
+
+    ci.id = client_id_;
+    ci.addr = StrCat(server().host, ":", server().port);
+    ci.laddr = "-";
+    if (auto* s = Sock(); s != nullptr && (state_mask_ & R_TCP_CONNECTED)) {
+      auto re = s->RemoteEndpoint();
+      ci.addr = StrCat(re.address().to_string(), ":", re.port());
+      auto le = s->LocalEndpoint();
+      ci.laddr = StrCat(le.address().to_string(), ":", le.port());
+      ci.fd = s->native_handle();
+    }
+    ci.tid = proactor_->GetPoolIndex();
+    ci.age = now - creation_time_;
+    for (uint64_t offs : GetReplicaOffset()) {
+      ci.tot_cmds += offs;
+    }
+    if (repl_offs_ >= initial_repl_offs_)
+      ci.tot_net_in = repl_offs_ - initial_repl_offs_;
+    ci.db = 0;
+    ci.flags = "M";
+    ci.repl_phase = absl::AsciiStrToLower(GetCurrentPhase());
+    return facade::FormatClientInfo(ci);
+  };
+  return proactor_->AwaitBrief(f);
+}
+
 std::string Replica::GetCurrentPhase() const {
   if (!(state_mask_ & R_ENABLED))
     return "DISABLED";
@@ -1337,10 +1492,11 @@ std::string Replica::GetCurrentPhase() const {
     return "TCP_CONNECTING";
   if (!(state_mask_ & R_GREETED))
     return "GREETING";
-  if (!(state_mask_ & R_SYNC_OK))
-    return "INITIAL_SYNC";
+  // R_SYNCING and R_SYNC_OK are exclusive; check R_SYNCING first.
   if (state_mask_ & R_SYNCING)
     return "FULL_SYNC_IN_PROGRESS";
+  if (!(state_mask_ & R_SYNC_OK))
+    return "INITIAL_SYNC";
 
   return "STABLE_SYNC";
 }
@@ -1360,6 +1516,16 @@ size_t Replica::GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes
   }
   // Journal always starts at pos 1
   return std::max<size_t>(1UL, total_shard_lsn);
+}
+
+void Replica::StartJournalAtOwnLSN() {
+  shard_set->RunBriefInParallel([this](EngineShard* shard) {
+    size_t index = shard->shard_id();
+    auto flow_map = GetFlowMapAtIndex(index);
+    size_t rec_executed = GetRecCountExecutedPerShard(flow_map);
+    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
+    journal::StartInThreadAtLsn(rec_executed);
+  });
 }
 
 uint32_t DflyShardReplica::FlowId() const {

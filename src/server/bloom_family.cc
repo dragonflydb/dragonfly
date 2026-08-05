@@ -1,6 +1,11 @@
 // Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <absl/strings/ascii.h>
+
+#include <array>
+#include <optional>
+
 #include "core/bloom.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
@@ -56,7 +61,7 @@ OpStatus OpReserve(const SbfParams& params, const OpArgs& op_args, string_view k
 }
 
 // Returns true, if item was added, false if it was already "present".
-OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, CmdArgList items) {
+OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, ParsedArgs items) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_SBF);
@@ -79,7 +84,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, CmdArgList ite
   return result;
 }
 
-OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, CmdArgList items) {
+OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, ParsedArgs items) {
   auto& db_slice = op_args.GetDbSlice();
   OpResult op_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_SBF);
   if (!op_res)
@@ -125,6 +130,7 @@ OpStatus OpLoadChunk(const OpArgs& op_args, std::string_view blob, std::string_v
       // existing key might not necessarily be SBF, it could be HASH/JSON, and indexed
       RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, op_res->it->second, op_args.shard);
       db_slice.RemoveExpire(op_args.db_cntx.db_index, op_res->it);
+      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &op_res->it->second);
     }
 
     op_res->it->second.SetSBF(load_result.value());
@@ -147,8 +153,7 @@ OpStatus OpLoadChunk(const OpArgs& op_args, std::string_view blob, std::string_v
   return OpStatus::OK;
 }
 
-void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void CmdReserve(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   SbfParams params;
 
@@ -171,12 +176,13 @@ void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
-void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAdd(t->GetOpArgs(shard), key, args);
+    return OpAdd(t->GetOpArgs(shard), key, items);
   };
 
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -191,11 +197,13 @@ void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(status);
 }
 
-void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdExists(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpExists(t->GetOpArgs(shard), key, args);
+    return OpExists(t->GetOpArgs(shard), key, items);
   };
 
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -206,12 +214,13 @@ void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->SendLong(res ? res->front() : 0);
 }
 
-void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdMAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAdd(t->GetOpArgs(shard), key, args);
+    return OpAdd(t->GetOpArgs(shard), key, items);
   };
 
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -230,14 +239,10 @@ void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void CmdScanDump(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const string_view key = parser.Next();
-  const int64_t cursor = parser.Next<int64_t>();
-  if (cursor < 0)
-    return rb->SendError(kInvalidIntErr);
-
+  const int64_t cursor = parser.Next<FInt<int64_t{0}, std::numeric_limits<int64_t>::max()>>();
   if (const auto err = parser.TakeError(); err)
     return rb->SendError(err.MakeReply());
 
@@ -266,19 +271,14 @@ void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendBulkString(res->data);
 }
 
-void CmdLoadChunk(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser(args);
+void CmdLoadChunk(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const std::string_view key = parser.Next();
 
-  const int64_t cursor = parser.Next<int64_t>();
+  const int64_t cursor = parser.Next<FInt<int64_t{1}, std::numeric_limits<int64_t>::max()>>();
+  const std::string_view blob = parser.Next();
   if (const auto err = parser.TakeError(); err)
     return rb->SendError(err.MakeReply());
-
-  if (cursor <= 0)
-    return rb->SendError(kInvalidIntErr);
-
-  const std::string_view blob = parser.Next();
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpLoadChunk(t->GetOpArgs(shard), blob, key, cursor);
@@ -292,12 +292,63 @@ void CmdLoadChunk(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
-void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  args.remove_prefix(1);
+void CmdInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  const string_view key = parser.Next();
+
+  optional<string_view> field;
+  if (parser.HasNext())
+    field = parser.Next();
+
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
+    const auto& db_slice = t->GetDbSlice(shard->shard_id());
+    OpResult op_res = db_slice.FindReadOnly(t->GetOpArgs(shard).db_cntx, key, OBJ_SBF);
+    if (!op_res)
+      return op_res.status();
+
+    const SBF* sbf = op_res.value()->second.GetSBF();
+    if (IsBeingLoaded(sbf))
+      return OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS;
+
+    return array<int64_t, 5>{
+        static_cast<int64_t>(sbf->total_capacity()), static_cast<int64_t>(sbf->MallocUsed()),
+        static_cast<int64_t>(sbf->num_filters()), static_cast<int64_t>(sbf->total_items()),
+        static_cast<int64_t>(sbf->grow_factor())};
+  };
+
+  OpResult<array<int64_t, 5>> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res)
+    return rb->SendError(res.status());
+
+  constexpr string_view kNames[] = {"Capacity", "Size", "Number of filters",
+                                    "Number of items inserted", "Expansion rate"};
+  constexpr string_view kShortNames[] = {"CAPACITY", "SIZE", "FILTERS", "ITEMS", "EXPANSION"};
+
+  if (field) {
+    for (size_t i = 0; i < std::size(kShortNames); ++i) {
+      if (absl::EqualsIgnoreCase(*field, kShortNames[i]))
+        return rb->SendLong((*res)[i]);
+    }
+    return rb->SendError("Invalid info arguments");
+  }
+
+  RedisReplyBuilder::ArrayScope scope{rb, std::size(kNames) * 2};
+  for (size_t i = 0; i < std::size(kNames); ++i) {
+    rb->SendBulkString(kNames[i]);
+    rb->SendLong((*res)[i]);
+  }
+}
+
+void CmdMExists(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  ParsedArgs items = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpExists(t->GetOpArgs(shard), key, args);
+    return OpExists(t->GetOpArgs(shard), key, items);
   };
 
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -306,8 +357,8 @@ void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
   if (!res && res.status() == OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS)
     return rb->SendError(res.status());
 
-  RedisReplyBuilder::ArrayScope scope{rb, args.size()};
-  for (size_t i = 0; i < args.size(); ++i) {
+  RedisReplyBuilder::ArrayScope scope{rb, items.size()};
+  for (size_t i = 0; i < items.size(); ++i) {
     rb->SendLong(res ? res->at(i) : 0);
   }
 }
@@ -321,15 +372,16 @@ using CI = CommandId;
 void RegisterBloomFamily(CommandRegistry* registry) {
   registry->StartFamily();
 
-  *registry
-      << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
-             Reserve)
-      << CI{"BF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
-      << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MAdd)
-      << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
-      << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists)
-      << CI{"BF.SCANDUMP", CO::READONLY, 3, 1, 1, acl::BLOOM}.HFUNC(ScanDump)
-      << CI{"BF.LOADCHUNK", CO::JOURNALED | CO::DENYOOM, 4, 1, 1, acl::BLOOM}.HFUNC(LoadChunk);
+  *registry << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
+                   Reserve)
+            << CI{"BF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
+            << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(
+                   MAdd)
+            << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
+            << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists)
+            << CI{"BF.SCANDUMP", CO::READONLY, 3, 1, 1, acl::BLOOM}.HFUNC(ScanDump)
+            << CI{"BF.LOADCHUNK", CO::JOURNALED | CO::DENYOOM, 4, 1, 1, acl::BLOOM}.HFUNC(LoadChunk)
+            << CI{"BF.INFO", CO::READONLY, -2, 1, 1, acl::BLOOM}.HFUNC(Info);
 };
 
 }  // namespace dfly

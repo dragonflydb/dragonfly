@@ -34,6 +34,13 @@ void ascii_pack_byte(uint8_t* bin, size_t ascii_len, size_t idx, uint8_t ascii);
 void ascii_pack(const char* ascii, size_t len, uint8_t* bin);
 void ascii_pack2(const char* ascii, size_t len, uint8_t* bin);
 
+// Fused ASCII validation + pack. If every byte of [ascii, ascii+len) is 7-bit ASCII (high bit
+// clear), packs them into `bin` in the format ascii_unpack decodes (byte-identical to ascii_pack,
+// but endian-neutral and valid for any len) and returns the packed length binpacked_len(len);
+// returns 0 if any byte has its high bit set. `bin` is scratch: it needs binpacked_len(len) bytes
+// and is written even on failure.
+size_t ascii_try_pack(const char* ascii, size_t len, uint8_t* bin);
+
 // SIMD implementation 1 of ascii_pack.
 void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin);
 

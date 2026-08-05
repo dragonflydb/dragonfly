@@ -1,21 +1,20 @@
 import dataclasses
+import logging
 import os
+import random
+import re
+import shlex
+import signal
+import subprocess
 import threading
 import time
-import subprocess
-import random
-import aiohttp
-import logging
 from dataclasses import dataclass
-from typing import Dict, Optional, List, Union
-import re
+
+import aiohttp
 import psutil
-import itertools
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
 from redis.asyncio import RedisCluster as RedisCluster
-import signal
-
 
 START_DELAY = 0.8
 START_GDB_DELAY = 5.0
@@ -28,7 +27,7 @@ class DflyParams:
     gdb: bool
     direct_output: bool
     buffered_out: bool
-    args: Dict[str, Union[str, None]]
+    args: dict[str, str | None]
     existing_port: int
     existing_admin_port: int
     existing_mc_port: int
@@ -93,12 +92,14 @@ class DflyInstance:
         self.args = args
         self.args.update(params.args)
         self.params = params
-        self.proc: Optional[subprocess.Popen] = None
-        self._client: Optional[RedisClient] = None
-        self.log_files: List[str] = []
+        self.proc: subprocess.Popen | None = None
+        self._client: RedisClient | None = None
+        self.log_files: list[str] = []
         self.dynamic_port = False
         self.sed_proc = None
         self.clients = []
+        # Optional hard RLIMIT_AS cap (mirrors `ulimit -v`) for OOM tests.
+        self.vmem_limit_bytes: int | None = None
 
         if self.params.existing_port:
             self._port = self.params.existing_port
@@ -253,7 +254,7 @@ class DflyInstance:
             # are guranteed to run
             time.sleep(5)
             logging.debug(f"Unable to kill the process on port {self._port}")
-            logging.debug(f"INFO LOGS of DF are:")
+            logging.debug("INFO LOGS of DF are:")
             self.print_info_logs_to_debug_log()
             proc.kill()
             proc.communicate()
@@ -263,6 +264,11 @@ class DflyInstance:
                 self.sed_proc.communicate()
                 self.sed_thread.join()
                 symbolize_stack_trace(proc.args[0], self.stacktrace)
+
+    def wait(self):
+        if self.proc is not None:
+            self.proc.communicate(timeout=120)
+            self.proc = None
 
     def _start(self):
         if self.params.existing_port:
@@ -277,6 +283,12 @@ class DflyInstance:
         run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
             run_cmd = ["gdb", "--ex", "r", "--args"] + run_cmd
+
+        if self.vmem_limit_bytes is not None:
+            # Apply the cap via a shell `ulimit` wrapper (exec keeps the dragonfly pid),
+            # avoiding the unsafe preexec_fn fork path.
+            cmd = " ".join(shlex.quote(a) for a in run_cmd)
+            run_cmd = ["/bin/sh", "-c", f"ulimit -v {self.vmem_limit_bytes // 1024}; exec {cmd}"]
 
         self.proc = subprocess.Popen(
             run_cmd,
@@ -305,7 +317,7 @@ class DflyInstance:
         return self._port
 
     @property
-    def admin_port(self) -> Optional[int]:
+    def admin_port(self) -> int | None:
         if self.params.existing_admin_port:
             return self.params.existing_admin_port
         if "admin_port" in self.args:
@@ -313,7 +325,7 @@ class DflyInstance:
         return None
 
     @property
-    def mc_port(self) -> Optional[int]:
+    def mc_port(self) -> int | None:
         if self.params.existing_mc_port:
             return self.params.existing_mc_port
         if "memcached_port" in self.args:
@@ -344,11 +356,11 @@ class DflyInstance:
             return ports.pop()
         raise RuntimeError("Couldn't parse port")
 
-    def get_logs_from_psutil(self) -> List[str]:
+    def get_logs_from_psutil(self) -> list[str]:
         p = psutil.Process(self.proc.pid)
         rv = []
         for file in p.open_files():
-            if ".log." in file.path and "dragonfly" in file.path:
+            if ".log" in file.path and "dragonfly" in file.path:
                 rv.append(file.path)
         return rv
 
@@ -462,6 +474,7 @@ class DflyInstanceFactory:
             if endpoint_host:
                 args.setdefault("s3_endpoint", endpoint_host)
                 args.setdefault("s3_use_https", "false" if parsed.scheme == "http" else "true")
+                args.setdefault("s3_use_helio_client", "true")
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
@@ -474,14 +487,26 @@ class DflyInstanceFactory:
         if path is not None:
             params = dataclasses.replace(self.params, path=path)
 
-        if version < 1.35:
-            params.args.pop("experimental_io_loop_v2", None)
+        if version < 1.39:
+            args.pop("enable_memcache_io_loop_v2", None)
+            args.pop("enable_resp_io_loop_v2", None)
+            # DflyInstance merges params.args on top of args, so a globally-injected
+            # flag (e.g. --df enable_resp_io_loop_v2) would be re-added even after the
+            # pop above. Strip it from a params copy too so old binaries never see it.
+            if (
+                "enable_memcache_io_loop_v2" in params.args
+                or "enable_resp_io_loop_v2" in params.args
+            ):
+                pargs = dict(params.args)
+                pargs.pop("enable_memcache_io_loop_v2", None)
+                pargs.pop("enable_resp_io_loop_v2", None)
+                params = dataclasses.replace(params, args=pargs)
 
         instance = DflyInstance(params, args)
         self.instances.append(instance)
         return instance
 
-    def start_all(self, instances: List[DflyInstance]):
+    def start_all(self, instances: list[DflyInstance]):
         """Start multiple instances in parallel"""
         for instance in instances:
             instance._start()
@@ -495,7 +520,7 @@ class DflyInstanceFactory:
         for instance in self.instances:
             try:  # ioloop might be no longer running
                 await instance.close_clients()
-            except Exception as e:
+            except Exception:
                 pass
 
             try:
@@ -551,15 +576,18 @@ class RedisServer:
         logging.info(f"Started {self.server_bin} on port {self.port}, pid={self.proc.pid}")
 
     def stop(self):
+        ident = f"{self.server_bin} (port={self.port}, pid={self.proc.pid})"
         ret = self.proc.poll()
         if ret is not None:
-            logging.error(
-                f"{self.server_bin} (port={self.port}, pid={self.proc.pid}) "
-                f"already exited with code {ret}"
-            )
+            logging.error(f"{ident} already exited with code {ret}")
             return
         self.proc.terminate()
         try:
             self.proc.wait(timeout=10)
-        except Exception as e:
-            pass
+        except subprocess.TimeoutExpired:
+            logging.error(f"{ident} did not terminate in 10s; sending SIGKILL")
+            self.proc.kill()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logging.error(f"{ident} did not exit after SIGKILL within 5s")

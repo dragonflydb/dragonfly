@@ -9,6 +9,8 @@ extern "C" {
 #include <absl/functional/overload.h>
 #include <absl/strings/numbers.h>
 
+#include <limits>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/detail/listpack.h"
@@ -69,9 +71,13 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
 ABSL_FLAG(unsigned, list_tiering_threshold, 0,
           "Tiering threshold for lists. Default - no tiering.");
-ABSL_FLAG(uint32_t, list_experimental_zstd_dict_threshold, 0,
+ABSL_FLAG(uint32_t, list_compress_dict_threshold, 0,
           "Minimum list malloc usage in bytes before attempting ZSTD dictionary compression. "
-          "0 disables. Experimental: compression is synchronous and may block the thread.");
+          "0 disables. Note: compression is synchronous and may block the thread.");
+ABSL_FLAG(uint32_t, list_tiering_prefetch_depth, 0,
+          "Before loading a tiered list node, scan up to this many neighboring nodes and "
+          "issue asynchronous load requests for any that are offloaded. A value of 0 disables "
+          "prefetching.");
 
 namespace dfly {
 
@@ -84,6 +90,17 @@ using time_point = Transaction::time_point;
 
 namespace {
 
+// unsigned(timeout * 1000) feeds the blocking layer's millisecond counter, so cap the seconds to
+// keep the float->unsigned conversion in range. Redis reports oversized timeouts as out of range.
+constexpr float kMaxBlockingTimeoutSec = std::numeric_limits<unsigned>::max() / 1000;
+
+RuleError WithinTimeoutLimit(float v) {
+  return {v > kMaxBlockingTimeoutSec, kTimeoutOutOfRangeErr};  // also rejects +inf
+}
+
+using Timeout = Validated<float, NotNan<kTimeoutNotFloatErr>, NonNegative<kTimeoutNegativeErr>,
+                          WithinTimeoutLimit>;
+
 void OffloadListNode(QList* ql, QList::Node* node) {
   TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
   DCHECK(ts);
@@ -93,7 +110,26 @@ void OffloadListNode(QList* ql, QList::Node* node) {
 
 void LoadListNode(QList* ql, QList::Node* node) {
   TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+  const uint32_t tiering_prefetch_depth = absl::GetFlag(FLAGS_list_tiering_prefetch_depth);
   DCHECK(ts);
+
+  // If the list is large enough, scan up to `tiering_prefetch_depth` neighboring nodes in each
+  // direction and asynchronously load any offloaded nodes.
+  if (tiering_prefetch_depth > 0 && ql->node_count() >= 2 * tiering_prefetch_depth) {
+    auto prefetch = [&](QList::Node* n, bool forward) {
+      for (uint32_t i = 0; i < tiering_prefetch_depth && n != nullptr && n != node;
+           ++i, n = forward ? n->next : n->prev) {
+        if (!n->offloaded || n->io_pending) {
+          continue;
+        }
+        QList::stats.onload_requests++;
+        PrefetchTieredListNode(ql->GetDbIndex(), ql, n, ts);
+      }
+    };
+    prefetch(node->next, true);
+    prefetch(node->prev, false);
+  }
+
   QList::stats.onload_requests++;
   auto res = ReadTieredListNode(ql->GetDbIndex(), ql, node, node->GetExternalSlice(), ts).Get();
   if (!res) {
@@ -105,9 +141,14 @@ void CleanupListNode(QList* ql, QList::Node* node) {
   TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
   DCHECK(ts);
   if (!ts->IsClosed()) {
-    if (node->io_pending) {
+    if (node->IsStashPending()) {
       ts->CancelStash(tiering::ListNodeId{ql->GetDbIndex(), ql, node}, node);
     } else {
+      if (node->IsLoadPending()) {
+        // Background prefetch load still in flight: detach its callback so it doesn't touch this
+        // node once freed, then free the disk segment directly since it was never uploaded back.
+        ts->CancelLoad(node->GetExternalSlice());
+      }
       // We don't pass QList pointer so we need to decrease num_offloaded_nodes_ now.
       ql->AdjustOffloadNodeCount(-1);
       ts->Delete(ql->GetDbIndex(), node);
@@ -152,8 +193,7 @@ class ListWrapper {
       ql->EnableTiering(params);
     }
 
-    if (uint32_t zstd_thresh = GetFlag(FLAGS_list_experimental_zstd_dict_threshold);
-        zstd_thresh > 0) {
+    if (uint32_t zstd_thresh = GetFlag(FLAGS_list_compress_dict_threshold); zstd_thresh > 0) {
       ql->set_compr_threshold(zstd_thresh);
     }
     if (lp.Size() > 0) {
@@ -501,7 +541,7 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 }
 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
-                          bool skip_notexist, const facade::ArgRange& vals, bool journal_rewrite) {
+                          bool skip_notexist, const ParsedArgs& vals, bool journal_rewrite) {
   DbSlice::ItAndUpdater res;
 
   if (skip_notexist) {
@@ -529,7 +569,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
-    vector<string_view> mapped(vals.Size() + 1);
+    vector<string_view> mapped(vals.size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
     RecordJournal(op_args, command, mapped, 2);
@@ -630,7 +670,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
         auto blocking_controller = t->GetNamespace().GetBlockingController(shard->shard_id());
         if (blocking_controller) {
           IndexSlice slice(0, 1);
-          ShardArgs sa{absl::MakeSpan(&src, 1), absl::MakeSpan(&slice, 1)};
+          ShardArgs sa{cmn::ArgSlice{&src, 1}, absl::MakeSpan(&slice, 1)};
 
           // hack, again. since we hacked which queue we are waiting on (see RunPair)
           // we must clean-up src key here manually. See RunPair why we do this.
@@ -874,23 +914,19 @@ void MoveGeneric(string_view src, string_view dest, ListDir src_dir, ListDir des
   }
 }
 
-void RPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view src = ArgS(args, 0);
-  string_view dest = ArgS(args, 1);
+void RPopLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view src = parser.Next();
+  string_view dest = parser.Next();
 
   MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
-void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+void BRPopLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
-  float timeout = parser.Next<float>();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  float timeout = parser.Next<Timeout>(kTimeoutNotFloatErr);
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
-
-  if (timeout < 0)
-    return cmd_cntx->SendError("timeout is negative");
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res =
@@ -912,18 +948,14 @@ void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+void BLMove(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
-  float timeout = parser.Next<float>();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  float timeout = parser.Next<Timeout>(kTimeoutNotFloatErr);
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
-
-  if (timeout < 0)
-    return cmd_cntx->SendError("timeout is negative");
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res =
@@ -1027,11 +1059,11 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
   return MoveTwoShards(tx, pop_key_, push_key_, popdir_, pushdir_, true);
 }
 
-void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
+void PushGeneric(ListDir dir, bool skip_notexists, ParsedArgs args, CommandContext* cmd_cntx) {
+  std::string_view key = args[0];
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.subspan(1), false);
+    return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.Tail(1), false);
   };
 
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -1042,16 +1074,11 @@ void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandConte
   return cmd_cntx->SendError(result.status());
 }
 
-void PopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+void PopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
-  uint32_t count = 1;
-  bool return_arr = false;
-  if (parser.HasNext()) {
-    count = parser.Next<uint32_t>();
-    return_arr = true;
-  }
+  bool return_arr = parser.HasNext();
+  uint32_t count = parser.NextOrDefault<uint32_t>(1);
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
@@ -1077,17 +1104,11 @@ void PopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void BPopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
-  DCHECK_GE(args.size(), 2u);
-
-  float timeout;
-  auto timeout_str = ArgS(args, args.size() - 1);
-  if (!absl::SimpleAtof(timeout_str, &timeout)) {
-    return cmd_cntx->SendError("timeout is not a float or out of range");
-  }
-  if (timeout < 0) {
-    return cmd_cntx->SendError("timeout is negative");
-  }
+void BPopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Skip(parser.UnparsedArgs().size() - 1);  // keys are handled by the command key spec
+  float timeout = parser.Next<Timeout>(kTimeoutNotFloatErr);
+  if (auto err = parser.TakeError(); err)
+    return cmd_cntx->SendError(err.MakeReply());
   VLOG(1) << "BPop timeout(" << timeout << ")";
 
   std::string popped_value;
@@ -1154,11 +1175,10 @@ optional<pair<string_view, bool>> GetFirstNonEmptyKeyFound(EngineShard* shard, T
   return result;
 }
 
-void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  CmdArgParser parser{args};
-  parser.Skip(parser.Next<size_t>());  // skip numkeys and keys
+  parser.NextRange();  // numkeys + keys, handled by the command key spec
 
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
   size_t pop_count = 1;
@@ -1235,18 +1255,14 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  CmdArgParser parser{args};
-  float timeout = parser.Next<float>();
+  float timeout = parser.Next<Timeout>(kTimeoutNotFloatErr);
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
 
-  if (timeout < 0)
-    return cmd_cntx->SendError("timeout is negative");
-
-  parser.Skip(parser.Next<size_t>());  // Skip numkeys and keys
+  parser.NextRange();  // numkeys + keys, handled by the command key spec
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 
   size_t pop_count = 1;
@@ -1275,32 +1291,40 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdLPush(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ParsedArgs args = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
   return PushGeneric(ListDir::LEFT, false, args, cmd_cntx);
 }
 
-void CmdLPushX(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLPushX(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ParsedArgs args = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
   return PushGeneric(ListDir::LEFT, true, args, cmd_cntx);
 }
 
-void CmdLPop(CmdArgList args, CommandContext* cmd_cntx) {
-  return PopGeneric(ListDir::LEFT, args, cmd_cntx);
+void CmdLPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  return PopGeneric(ListDir::LEFT, std::move(parser), cmd_cntx);
 }
 
-void CmdRPush(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdRPush(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ParsedArgs args = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
   return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx);
 }
 
-void CmdRPushX(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdRPushX(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ParsedArgs args = parser.RemainingRange(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
   return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx);
 }
 
-void CmdRPop(CmdArgList args, CommandContext* cmd_cntx) {
-  return PopGeneric(ListDir::RIGHT, args, cmd_cntx);
+void CmdRPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  return PopGeneric(ListDir::RIGHT, std::move(parser), cmd_cntx);
 }
 
-void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
-  auto key = ArgS(args, 0);
+void CmdLLen(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto key = parser.Next();
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
   OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
@@ -1312,24 +1336,26 @@ void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+void CmdLPos(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, elem] = parser.Next<string_view, string_view>();
 
-  int rank = 1;
-  std::optional<uint32_t> count;
-  uint32_t max_len = 0;
+  struct LposOpts {
+    int rank = 1;
+    std::optional<uint32_t> count;
+    uint32_t max_len = 0;
+  };
 
-  parser.ApplyOrSkip(Tag("RANK", &rank), Tag("COUNT", &count), Tag("MAXLEN", &max_len));
-
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  static constexpr auto kGrammar = Compile(
+      Options(Field<Validated<int, NotEq<0, facade::kInvalidIntErr>>>("RANK", &LposOpts::rank),
+              Field("COUNT", &LposOpts::count), Field("MAXLEN", &LposOpts::max_len)));
+  auto opts = kGrammar.Apply(&parser);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (rank == 0)
-    return rb->SendError(kInvalidIntErr);
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
 
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
-    return OpPos(t->GetOpArgs(shard), key, elem, rank, count.value_or(1), max_len);
+    return OpPos(t->GetOpArgs(shard), key, elem, opts.rank, opts.count.value_or(1), opts.max_len);
   };
 
   Transaction* trans = cmd_cntx->tx();
@@ -1341,7 +1367,7 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(result.status());
   }
 
-  if (!count.has_value()) {
+  if (!opts.count.has_value()) {
     if (result->empty()) {
       rb->SendNull();
     } else {
@@ -1352,16 +1378,11 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
-  std::string_view index_str = ArgS(args, 1);
-  int32_t index;
+void CmdLIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, index] = parser.Next<string_view, int32_t>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (!absl::SimpleAtoi(index_str, &index)) {
-    rb->SendError(kInvalidIntErr);
-    return;
-  }
+  RETURN_ON_PARSE_ERROR(parser, rb);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIndex(t->GetOpArgs(shard), key, index);
@@ -1378,8 +1399,7 @@ void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 /* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
-void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+void CmdLInsert(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   QList::InsertOpt ins_opt = parser.MapNext("AFTER", QList::AFTER, "BEFORE", QList::BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
@@ -1401,16 +1421,9 @@ void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendError(result.status());
 }
 
-void CmdLTrim(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view s_str = ArgS(args, 1);
-  string_view e_str = ArgS(args, 2);
-  int32_t start, end;
-
-  if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
-    cmd_cntx->SendError(kInvalidIntErr);
-    return;
-  }
+void CmdLTrim(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
@@ -1421,17 +1434,10 @@ void CmdLTrim(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(st);
 }
 
-void CmdLRange(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
-  std::string_view s_str = ArgS(args, 1);
-  std::string_view e_str = ArgS(args, 2);
-  int32_t start, end;
-
+void CmdLRange(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
-    rb->SendError(kInvalidIntErr);
-    return;
-  }
+  RETURN_ON_PARSE_ERROR(parser, rb);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRange(t->GetOpArgs(shard), key, start, end);
@@ -1446,16 +1452,9 @@ void CmdLRange(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
-void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
-  std::string_view index_str = ArgS(args, 1);
-  std::string_view elem = ArgS(args, 2);
-  int32_t count;
-
-  if (!absl::SimpleAtoi(index_str, &count)) {
-    cmd_cntx->SendError(kInvalidIntErr);
-    return;
-  }
+void CmdLRem(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, count, elem] = parser.Next<string_view, int32_t, string_view>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
@@ -1467,16 +1466,9 @@ void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(result.status());
 }
 
-void CmdLSet(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view key = ArgS(args, 0);
-  std::string_view index_str = ArgS(args, 1);
-  std::string_view elem = ArgS(args, 2);
-  int32_t count;
-
-  if (!absl::SimpleAtoi(index_str, &count)) {
-    cmd_cntx->SendError(kInvalidIntErr);
-    return;
-  }
+void CmdLSet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto [key, count, elem] = parser.Next<string_view, int32_t, string_view>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, elem, count);
@@ -1489,16 +1481,15 @@ void CmdLSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdBLPop(CmdArgList args, CommandContext* cmd_cntx) {
-  BPopGeneric(ListDir::LEFT, args, cmd_cntx);
+void CmdBLPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  BPopGeneric(ListDir::LEFT, std::move(parser), cmd_cntx);
 }
 
-void CmdBRPop(CmdArgList args, CommandContext* cmd_cntx) {
-  BPopGeneric(ListDir::RIGHT, args, cmd_cntx);
+void CmdBRPop(CmdArgParser parser, CommandContext* cmd_cntx) {
+  BPopGeneric(ListDir::RIGHT, std::move(parser), cmd_cntx);
 }
 
-void CmdLMove(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+void CmdLMove(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);

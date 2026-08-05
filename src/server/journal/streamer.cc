@@ -12,6 +12,7 @@
 #include <netinet/tcp.h>
 #endif
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/db_slice.h"
@@ -114,7 +115,7 @@ JournalStreamer::JournalStreamer(ExecutionState* cntx, JournalStreamer::Config c
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
   migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
   replication_dispatch_threshold = absl::GetFlag(FLAGS_replication_dispatch_threshold);
-  last_async_write_time_ = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+  last_async_write_time_ = base::CycleClock::Now();
 }
 
 JournalStreamer::~JournalStreamer() {
@@ -173,11 +174,13 @@ size_t JournalStreamer::UsedBytes() const {
 }
 
 std::string JournalStreamer::FormatInternalState() const {
+  uint64_t last_async_ms_ago =
+      base::CycleClock::ToUsec(base::CycleClock::Now() - last_async_write_time_) / 1000;
   return absl::StrCat(
       "pending_buf_size:", pending_buf_.Size(), " in_flight_bytes:", in_flight_bytes_,
       " total_sent:", total_sent_, " throttle_count:", throttle_count_,
       " total_throttle_wait_usec:", total_throttle_wait_usec_,
-      " throttle_waiters:", throttle_waiters_, " last_async_write_time_ms:", last_async_write_time_,
+      " throttle_waiters:", throttle_waiters_, " last_async_time_ms_ago:", last_async_ms_ago,
       " last_lsn_time_s:", last_lsn_time_, " last_lsn_writen_:", last_lsn_writen_);
 }
 
@@ -258,9 +261,9 @@ void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms
 
     // We don't want to force async write to replicate if last data
     // was written recent. Data needs to be stalled for period_ms duration.
+    const uint64_t period_cycles = base::CycleClock::FromUsec(period_ms.count() * 1000);
     if (!pending_buf_.Size() || in_flight_bytes_ > 0 ||
-        ((last_async_write_time_ + period_ms.count()) >
-         (fb2::ProactorBase::GetMonotonicTimeNs() / 1000000))) {
+        ((last_async_write_time_ + period_cycles) > base::CycleClock::Now())) {
       continue;
     }
 
@@ -286,7 +289,9 @@ void JournalStreamer::AsyncWrite(bool force_send) {
 
   in_flight_bytes_ = cur_buf.mem_size;
   total_sent_ += in_flight_bytes_;
-  last_async_write_time_ = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+  last_async_write_time_ = base::CycleClock::Now();
+
+  ServerState::tlocal()->GetEgressThrottler().Record(in_flight_bytes_, false);
 
   const auto v_size = cur_buf.buf.size();
   absl::InlinedVector<iovec, 8> v(v_size);
@@ -372,6 +377,7 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
                  << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
+    LogTcpSocketDiagnostics(dest_);
     cntx_->ReportError("JournalStreamer write operation timeout");
   }
 }
@@ -387,6 +393,7 @@ void JournalStreamer::WaitForInflightToComplete(bool with_timeout) {
         << "Waiting for inflight bytes " << in_flight_bytes_;
 
     if (next >= max_timeout) {
+      LogTcpSocketDiagnostics(dest_);
       if (with_timeout) {
         cntx_->ReportError("JournalStreamer write operation timeout");
         break;
@@ -416,10 +423,8 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, Executi
   DCHECK(slice != nullptr);
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
-  db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 
   cmd_serializer_ = std::make_unique<CmdSerializer>(
-      db_slice_,
       [&](std::string s) {
         Write(std::move(s));
         ThrottleIfNeeded();
@@ -432,12 +437,18 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest) {
     return;
 
   VLOG(1) << "RestoreStreamer start";
-  SerializerBase::RegisterChangeListener();
+  SerializerBase::RegisterChangeListener(true);
   JournalStreamer::Start(dest);
 }
 
 void RestoreStreamer::Run() {
   VLOG(1) << "RestoreStreamer run";
+
+  // If the context was cancelled before Start() ran, RegisterChangeListener was skipped and
+  // db_array_ is empty (see RestoreStreamer::Start). Guard the db_array_.front() access below;
+  // mid-traversal cancellation is handled by the cntx_->IsRunning() check inside the loop.
+  if (db_array_.empty())
+    return;
 
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;
@@ -473,6 +484,9 @@ void RestoreStreamer::Run() {
       stats_.iter_skips++;
       continue;
     }
+
+    // Throttle main loop if we are over the egress limit
+    ServerState::tlocal()->GetEgressThrottler().Throttle();
 
     cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
       if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
@@ -533,17 +547,20 @@ RestoreStreamer::~RestoreStreamer() {
 }
 
 bool RestoreStreamer::Cancel() {
-  auto sver = snapshot_version_;
-  snapshot_version_ = 0;  // to prevent double cancel in another fiber
+  // Cancel the execution context unconditionally, even if the streamer was not started yet. A
+  // concurrent Start() may run after Cancel() on the same shard (e.g. OutgoingMigration::Finish()
+  // cancels the flow while it is between ChangeState(C_SYNC) and PrepareSync()). Start() bails out
+  // early when the context is cancelled, which prevents the streamer from being registered (and
+  // leaked) after cancellation.
   cntx_->Cancel();
-  if (sver != 0) {
-    db_slice_->UnregisterOnChange(sver);
-  }
-  bool res = JournalStreamer::Cancel();
-  LOG_IF(WARNING, res != (sver != 0)) << "Journal and DBSlice unregister state mismatch in "
-                                         "RestoreStreamer Cancel. DBSlice unregister state: "
-                                      << (sver != 0) << ", Journal unregister state: " << res;
-  return res && (sver != 0);
+
+  // UnregisterOnChange is idempotent and returns true only for the caller that actually removed the
+  // listener, so racing Cancel() calls (e.g. Finish() vs ~SliceSlotMigration) can't double-erase.
+  if (!db_slice_->UnregisterOnChange(this))
+    return false;
+
+  JournalStreamer::Cancel();
+  return true;
 }
 
 bool RestoreStreamer::ShouldWrite(const journal::JournalChangeItem& item) const {
@@ -570,9 +587,8 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-// TODO(vlad): 80% similar with Snapshot::SerializeBucket. Move common parts
-unsigned RestoreStreamer::SerializeBucketLocked(DbIndex /* unused */,
-                                                PrimeTable::bucket_iterator it, bool on_update) {
+unsigned RestoreStreamer::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                                bool on_update) {
   auto& shard_stats = EngineShard::tlocal()->stats();
 
   unsigned written = 0;
@@ -585,8 +601,7 @@ unsigned RestoreStreamer::SerializeBucketLocked(DbIndex /* unused */,
     string_view key = it->first.GetSlice(&key_buffer);
     if (ShouldWrite(key)) {
       ++shard_stats.total_migrated_keys;
-      uint64_t expire = it->first.GetExpireTime();
-      WriteEntry(it.bucket_address(), key, it->first, pv, expire);
+      SerializerBase::SerializeEntry(it.bucket_address(), db_index, it->first, pv);
       ++written;
     } else {
       stats_.keys_skipped++;
@@ -597,28 +612,13 @@ unsigned RestoreStreamer::SerializeBucketLocked(DbIndex /* unused */,
   return written;
 }
 
-void RestoreStreamer::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
-  std::lock_guard lk{stream_mu_};
-  cmd_serializer_->SerializeEntry(tde.key.ToString(), tde.key, pv, tde.expire);
-}
-
 // TODO: Update those
 // stats_.throttle_on_db_update += throttle_count_ - throttle_start;
 // stats_.throttle_usec_on_db_update += total_throttle_wait_usec_ - throttle_usec_start;
 
-void RestoreStreamer::WriteEntry(BucketIdentity bucket, string_view key, const PrimeKey& pk,
-                                 const PrimeValue& pv, uint64_t expire_ms) {
-  if (pv.IsExternal()) {
-    if (pv.IsCool()) {
-      WriteEntry(bucket, key, pk, pv.GetCool().record->value, expire_ms);
-    } else {
-      uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(0, pk) : 0;
-      EnqueueOffloaded(bucket, 0, PrimeKey{key}, pv, expire_ms, mc_flags);
-    }
-  } else {
-    std::lock_guard lk{stream_mu_};
-    stats_.commands += cmd_serializer_->SerializeEntry(key, pk, pv, expire_ms);
-  }
+void RestoreStreamer::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk,
+                                           const PrimeValue& pv, time_t expire, uint32_t mc_flags) {
+  stats_.commands += cmd_serializer_->SerializeEntry(pk.ToString(), pk, pv, expire);
 }
 
 }  // namespace dfly

@@ -27,6 +27,20 @@ TEST_F(CmsFamilyTest, InitByDim) {
   EXPECT_THAT(resp, ErrArg("width and depth must be greater than 0"));
 }
 
+TEST_F(CmsFamilyTest, InitByDimRejectsOversizedDimensionsAndPreservesState) {
+  auto resp = Run({"cms.initbydim", "k", "2147483648", "1073741824"});
+  EXPECT_THAT(resp, ErrArg("width must not exceed"));
+  EXPECT_THAT(Run({"exists", "k"}), IntArg(0));
+
+  resp = Run({"cms.incrby", "k", "a", "1"});
+  EXPECT_THAT(resp, ErrArg("CMS: key does not exist"));
+  EXPECT_THAT(Run({"exists", "k"}), IntArg(0));
+
+  EXPECT_EQ(Run({"cms.initbydim", "safe", "100", "5"}), "OK");
+  EXPECT_THAT(Run({"cms.incrby", "safe", "a", "1"}), RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"cms.query", "safe", "a"}), RespElementsAre(IntArg(1)));
+}
+
 TEST_F(CmsFamilyTest, InitByProb) {
   auto resp = Run("cms.initbyprob cms1 0.01 0.01");
   EXPECT_EQ(resp, "OK");
@@ -41,11 +55,17 @@ TEST_F(CmsFamilyTest, InitByProb) {
   EXPECT_THAT(resp, ErrArg("probability must be between 0 and 1"));
 }
 
+TEST_F(CmsFamilyTest, InitByProbRejectsOversizedDerivedDimensions) {
+  auto resp = Run({"cms.initbyprob", "cms", "0.000001", "0.01"});
+  EXPECT_THAT(resp, ErrArg("width must not exceed"));
+  EXPECT_THAT(Run({"exists", "cms"}), IntArg(0));
+}
+
 TEST_F(CmsFamilyTest, IncrBy) {
   Run("cms.initbydim cms 100 5");
 
   auto resp = Run("cms.incrby cms foo 3");
-  EXPECT_THAT(resp, IntArg(3));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3)));
 
   resp = Run("cms.incrby cms foo 4 bar 1");
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(7), IntArg(1))));
@@ -57,6 +77,12 @@ TEST_F(CmsFamilyTest, IncrBy) {
   // Should fail with invalid number
   resp = Run("cms.incrby cms foo notanumber");
   EXPECT_THAT(resp, ErrArg("CMS: Cannot parse number"));
+
+  resp = Run({"cms.incrby", "cms", "foo", "0"});
+  EXPECT_THAT(resp, ErrArg("CMS: increment must be a positive integer"));
+
+  resp = Run({"cms.incrby", "cms", "foo", "1", "bar"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(CmsFamilyTest, Query) {
@@ -64,13 +90,13 @@ TEST_F(CmsFamilyTest, Query) {
   Run("cms.incrby cms foo 5 bar 3");
 
   auto resp = Run("cms.query cms foo");
-  EXPECT_THAT(resp, IntArg(5));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(5)));
 
   resp = Run("cms.query cms foo bar");
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(5), IntArg(3))));
 
   resp = Run("cms.query cms noexist");
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
 
   resp = Run("cms.query noexist foo");
   EXPECT_THAT(resp, ErrArg("CMS: key does not exist"));

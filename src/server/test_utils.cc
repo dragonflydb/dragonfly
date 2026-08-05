@@ -16,10 +16,12 @@ extern "C" {
 #include <absl/strings/match.h>
 #include <absl/strings/str_split.h>
 #include <mimalloc.h>
+#include <unistd.h>
 
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/oah_set.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
@@ -31,6 +33,7 @@ using namespace std;
 ABSL_DECLARE_FLAG(string, dbfilename);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
+ABSL_FLAG(bool, use_oah_set, false, "If true, store SET values in OAHSet instead of StringSet.");
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
 ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
 ABSL_DECLARE_FLAG(bool, enable_heartbeat_rss_eviction);
@@ -93,6 +96,10 @@ void TestConnection::SendInvalidationMessageAsync(InvalidationMessage msg) {
   invalidate_messages.push_back(std::move(msg));
 }
 
+void TestConnection::SendMonitorMessageAsync(std::string msg) {
+  monitor_messages.push_back(std::move(msg));
+}
+
 std::string TestConnection::RemoteEndpointStr() const {
   return "";
 }
@@ -120,7 +127,7 @@ class BaseFamilyTest::TestConnWrapper {
 
   CmdArgVec Args(ArgSlice list);
 
-  RespVec ParseResponse(bool fully_consumed);
+  RespExpr ParseResponse(bool fully_consumed);
 
   // returns: type(pmessage), pattern, channel, message.
   const facade::Connection::PubMessage& GetPubMessage(size_t index) const;
@@ -139,7 +146,6 @@ class BaseFamilyTest::TestConnWrapper {
 
   void ClearSink() {
     sink_.Clear();
-    expr_builder_.Clear();
   }
 
   TestConnection* conn() {
@@ -180,8 +186,6 @@ BaseFamilyTest::BaseFamilyTest() {
 }
 
 BaseFamilyTest::~BaseFamilyTest() {
-  for (auto* v : resp_vec_)
-    delete v;
 }
 
 void BaseFamilyTest::SetUpTestSuite() {
@@ -215,6 +219,7 @@ void BaseFamilyTest::SetUpTestSuite() {
 
 void BaseFamilyTest::SetUp() {
   max_memory_limit = INT_MAX;
+  g_use_oah_set = absl::GetFlag(FLAGS_use_oah_set);
   ResetService();
 }
 
@@ -331,14 +336,14 @@ void BaseFamilyTest::ShutdownService() {
   CleanupSnapshots();
   absl::SetFlag(&FLAGS_dbfilename, "");
 
-  service_->Shutdown();
-  service_.reset();
-
   // Stop the watchdog before shutting down the service, because shutdown tears down namespaces
   // which the watchdog's diagnostic code may access. Must run before we delete shard_set as
   // the watchdog accesses it.
   watchdog_done_.Notify();
   watchdog_fiber_.Join();
+
+  service_->Shutdown();
+  service_.reset();
 
   delete shard_set;
   shard_set = nullptr;
@@ -349,7 +354,9 @@ void BaseFamilyTest::ShutdownService() {
 void BaseFamilyTest::InitWithDbFilename() {
   ShutdownService();
 
-  absl::SetFlag(&FLAGS_dbfilename, "rdbtestdump");
+  // Include PID so parallel ctest runs (different test binaries sharing the
+  // build dir) don't unlink each other's snapshot files via CleanupSnapshots.
+  absl::SetFlag(&FLAGS_dbfilename, absl::StrCat("rdbtestdump_", getpid()));
   CleanupSnapshots();
   ResetService();
 }
@@ -387,7 +394,7 @@ void BaseFamilyTest::ClearMetrics() {
 }
 
 string BaseFamilyTest::FormatMetrics(const Metrics& metrics) const {
-  return service_->server_family().FormatInfoMetrics(metrics, "ALL", true);
+  return service_->server_family().FormatInfoMetrics(metrics, "ALL", true, nullptr);
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
@@ -478,18 +485,9 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   }
 
   unique_lock lk(mu_);
-  last_cmd_dbg_info_ = context->last_command_debug;
+  last_cmd_dbg_info_ = context->last_cmd_stats;
 
-  RespVec vec = conn_wrapper->ParseResponse(single_response_);
-  if (vec.size() == 1)
-    return vec.front();
-  RespVec* new_vec = new RespVec(vec);
-  resp_vec_.push_back(new_vec);
-  RespExpr e;
-  e.type = RespExpr::ARRAY;
-  e.u = new_vec;
-
-  return e;
+  return conn_wrapper->ParseResponse(single_response_);
 }
 
 void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) {
@@ -499,16 +497,20 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, GetId());
   auto* context = conn_wrapper->cmd_cntx();
   context->ns = &namespaces->GetDefaultNamespace();
-  vector<cmn::BackedArguments> backed_args_vec(cmds.size());
+  vector<CommandContext> cmd_cntxs(cmds.size());
   for (size_t i = 0; i < cmds.size(); ++i) {
-    backed_args_vec[i] = cmn::BackedArguments(cmds[i].begin(), cmds[i].end(), cmds[i].size());
+    cmd_cntxs[i].Init(conn_wrapper->builder(), context);
+    cmd_cntxs[i].Assign(cmds[i].begin(), cmds[i].end(), cmds[i].size());
+    if (i + 1 < cmds.size())
+      cmd_cntxs[i].next = &cmd_cntxs[i + 1];
   }
-  auto next_fn = [it = backed_args_vec.begin()]() mutable {
-    ParsedArgs args(*it);
-    ++it;
-    return args;
-  };
-  service_->DispatchManyCommands(next_fn, cmds.size(), conn_wrapper->builder(), context);
+  service_->DispatchSquashedBatch(cmd_cntxs.data(), cmds.size(), context);
+
+  // DispatchSquashedBatch defers replies into the parsed commands; flush them in order.
+  for (auto& cmd_cntx : cmd_cntxs) {
+    if (cmd_cntx.IsDeferredReply())
+      cmd_cntx.SendReply();
+  }
   DCHECK(context->transaction == nullptr);
 }
 
@@ -539,7 +541,7 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, MCArgs args) -
 
   DCHECK(context->transaction == nullptr);
 
-  service_->DispatchMC(&cmd_cntx, AsyncPreference::ONLY_SYNC);
+  service_->DispatchCommandSimple(&cmd_cntx, AsyncPreference::ONLY_SYNC);
 
   DCHECK(context->transaction == nullptr);
 
@@ -575,7 +577,7 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
   }
 
   cmd_cntx.Assign(src, list.end(), list.end() - src);
-  service_->DispatchMC(&cmd_cntx, AsyncPreference::ONLY_SYNC);
+  service_->DispatchCommandSimple(&cmd_cntx, AsyncPreference::ONLY_SYNC);
 
   return conn->SplitLines();
 }
@@ -627,7 +629,7 @@ CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {
   return res;
 }
 
-RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
+RespExpr BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   tmp_str_vec_.emplace_back(new string{sink_.str()});
   auto& s = *tmp_str_vec_.back();
 
@@ -647,29 +649,11 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   // freeing it, since BuildExpr copies string data into owned_strings_.
   auto& parsed = *obj;
 
-  // The old RedisParser unwraps top-level arrays: elements go directly into res.
-  // We match that behavior here for compatibility with existing tests.
-  RespVec res;
-  auto type = parsed.GetType();
-  if (type == RESPObj::Type::ARRAY || type == RESPObj::Type::MAP || type == RESPObj::Type::SET) {
-    auto arr = parsed.As<RESPArray>();
-    if (arr.has_value() && arr->Size() != SIZE_MAX) {
-      for (size_t i = 0; i < arr->Size(); ++i) {
-        res.push_back(expr_builder_.BuildExpr((*arr)[i]));
-      }
-    } else {
-      // Null aggregate (e.g. *-1\r\n) — produce a NIL_ARRAY entry.
-      res.push_back(expr_builder_.BuildExpr(parsed));
-    }
-  } else {
-    res.push_back(expr_builder_.BuildExpr(parsed));
-  }
-
+  // BuildExpr handles scalars and arrays recursively, preserving array cardinality.
   // parsed (RESPObj) goes out of scope here, freeing zmalloc-allocated hiredis
   // reply data on this thread. All needed string data has been copied into
   // expr_builder_.owned_strings_.
-
-  return res;
+  return expr_builder_.BuildExpr(parsed);
 }
 
 const facade::Connection::PubMessage& BaseFamilyTest::TestConnWrapper::GetPubMessage(
@@ -692,6 +676,21 @@ string BaseFamilyTest::GetId() const {
   int32 id = ProactorBase::me()->GetPoolIndex();
   CHECK_GE(id, 0);
   return absl::StrCat("IO", id);
+}
+
+bool BaseFamilyTest::IsConnBlocked(string_view conn_id) {
+  unique_lock lk(mu_);
+  auto it = connections_.find(conn_id);
+  // The connection may not exist yet: it is created lazily by the first Run
+  // on its thread, which is exactly the window callers are waiting out.
+  return it != connections_.end() && it->second->cmd_cntx()->blocked;
+}
+
+size_t BaseFamilyTest::NumSubscriptions(string_view conn_id) const {
+  auto it = connections_.find(conn_id);
+  CHECK(it != connections_.end());
+
+  return it->second->conn()->cntx()->subscriptions;
 }
 
 size_t BaseFamilyTest::SubscriberMessagesLen(string_view conn_id) const {
@@ -725,11 +724,11 @@ const facade::Connection::InvalidationMessage& BaseFamilyTest::GetInvalidationMe
   return it->second->GetInvalidationMessage(index);
 }
 
-ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id) const {
+ConnectionContext::LastCommandStats BaseFamilyTest::GetDebugInfo(const std::string& id) const {
   auto it = connections_.find(id);
   CHECK(it != connections_.end());
 
-  return it->second->cmd_cntx()->last_command_debug;
+  return it->second->cmd_cntx()->last_cmd_stats;
 }
 
 auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestConnWrapper* {
@@ -745,6 +744,14 @@ auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestCon
     it->second->ClearSink();
   }
   return it->second.get();
+}
+
+Transaction* BaseFamilyTest::GetTransaction(string_view conn_id) {
+  unique_lock lk(mu_);
+  auto it = connections_.find(conn_id);
+  if (it == connections_.end())
+    return nullptr;
+  return it->second->cmd_cntx()->transaction;
 }
 
 vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {

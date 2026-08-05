@@ -1,0 +1,10 @@
+# Memory
+used_memory:6350000000
+used_memory_human:6.35G
+used_memory_rss:6900000000
+used_memory_rss_human:6.90G
+used_memory_peak:6477000000
+maxmemory:0
+maxmemory_policy:noeviction
+mem_fragmentation_ratio:1.09
+mem_allocator:mimalloc

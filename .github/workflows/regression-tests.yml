@@ -15,12 +15,14 @@ jobs:
         proactor: [Uring]
         build-type: [Debug, Release]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+        enable_resp_io_loop_v2: [false, true]
 
     runs-on: ${{ matrix.runner }}
 
     permissions:
       id-token: write
       contents: read
+      actions: write # To allow deleting cache
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -44,7 +46,13 @@ jobs:
       - name: Build Dragonfly
         uses: ./.github/actions/builder
         with:
+          enable-ccache: 'true'
+          ccache-save: 'true'
+          enable-deps-cache: 'true'
           build-type: ${{matrix.build-type}}
+          cache-key-suffix: 'df_common_bin'
+          c-compiler: gcc
+          cxx-compiler: g++
           targets: 'dragonfly'
 
       - name: Authenticate to AWS
@@ -61,7 +69,10 @@ jobs:
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           build-folder-name: build
           filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
+          df-runtime-flags: enable_resp_io_loop_v2=${{ matrix.enable_resp_io_loop_v2 }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
 
       - name: Upload logs on failure
         if: failure()

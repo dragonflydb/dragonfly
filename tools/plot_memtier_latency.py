@@ -29,10 +29,8 @@ Note: If plotly is not available, falls back to static SVG charts.
 
 import json
 import matplotlib.pyplot as plt
-import numpy as np
 from pathlib import Path
 import webbrowser
-import tempfile
 import os
 
 # Try to import plotly for interactive charts
@@ -84,15 +82,15 @@ def extract_latency_timeseries(data, operation, ignore_last_seconds=3):
     for time_point in sorted_times:
         interval_data = time_serie[time_point]
         times.append(int(time_point))
-        avg_latencies.append(interval_data["Average Latency"])
-        p50_latencies.append(interval_data.get("p50.00", 0))
-        p99_latencies.append(interval_data.get("p99.00", 0))
-        p99_9_latencies.append(interval_data.get("p99.90", 0))
-        min_latencies.append(interval_data["Min Latency"])
-        max_latencies.append(interval_data["Max Latency"])
+        avg_latencies.append(interval_data.get("Average Latency"))
+        p50_latencies.append(interval_data.get("p50.00"))
+        p99_latencies.append(interval_data.get("p99.00"))
+        p99_9_latencies.append(interval_data.get("p99.90"))
+        min_latencies.append(interval_data.get("Min Latency"))
+        max_latencies.append(interval_data.get("Max Latency"))
 
         # Calculate ops/sec for this interval (count per second)
-        ops_per_sec.append(interval_data["Count"])
+        ops_per_sec.append(interval_data.get("Count", 0))
 
     return {
         "times": times,
@@ -104,6 +102,31 @@ def extract_latency_timeseries(data, operation, ignore_last_seconds=3):
         "max": max_latencies,
         "ops_per_sec": ops_per_sec,
     }
+
+
+def get_latency_operations(all_stats):
+    """Return operations with latency time-series samples."""
+    operations = []
+    for key, op_stats in all_stats.items():
+        if key == "Runtime" or not isinstance(op_stats, dict) or "Time-Serie" not in op_stats:
+            continue
+
+        time_serie = op_stats["Time-Serie"]
+        if any("Average Latency" in interval for interval in time_serie.values()):
+            operations.append(key)
+
+    return operations
+
+
+def get_global_time_range(ops_data):
+    """Return the global time range across all operation series."""
+    times = [time for op_data in ops_data.values() for time in op_data["times"]]
+    if not times:
+        return None
+
+    start = min(times)
+    end = max(times)
+    return [start, end] if start < end else None
 
 
 def plot_latency_chart_interactive(data, output_file="latency_chart.html", open_browser=True):
@@ -123,11 +146,7 @@ def plot_latency_chart_interactive(data, output_file="latency_chart.html", open_
 
     # Get all available operations from ALL STATS (excluding 'Runtime')
     all_stats = data["ALL STATS"]
-    operations = [
-        key
-        for key in all_stats.keys()
-        if key != "Runtime" and isinstance(all_stats[key], dict) and "Time-Serie" in all_stats[key]
-    ]
+    operations = get_latency_operations(all_stats)
 
     if not operations:
         print("Error: No operation data found in JSON")
@@ -162,13 +181,18 @@ def plot_latency_chart_interactive(data, output_file="latency_chart.html", open_
         specs = [[{"secondary_y": False}] for _ in range(rows)]
         subplot_titles = [f"{op} Latency" for op in operations] + ["Throughput"]
 
+    # Plotly's default subplot title placement gets cramped once we have multiple rows.
+    # Use a taller layout and more inter-row spacing so titles do not overlap the plots below.
+    vertical_spacing = 0.18 if rows == 2 else 0.14
+    figure_height = 360 * rows
+
     # Create subplots
     fig = make_subplots(
         rows=rows,
         cols=cols,
         subplot_titles=subplot_titles,
         specs=specs,
-        vertical_spacing=0.12,
+        vertical_spacing=vertical_spacing,
         horizontal_spacing=0.1,
     )
 
@@ -286,14 +310,24 @@ def plot_latency_chart_interactive(data, output_file="latency_chart.html", open_
     fig.update_xaxes(title_text="Time (seconds)", row=tp_row, col=tp_col)
     fig.update_yaxes(title_text="Operations per Second", row=tp_row, col=tp_col)
 
+    time_range = get_global_time_range(ops_data)
+    fig.update_xaxes(matches="x", range=time_range)
+
     # Update layout
     fig.update_layout(
-        title_text="Memtier Benchmark - Latency Analysis (Interactive - Click legend to toggle)",
-        height=300 * rows,
+        title_text=(
+            "Memtier Benchmark - Latency Analysis "
+            "(Interactive - Click legend to toggle, time axis linked)"
+        ),
+        height=figure_height,
         hovermode="x unified",
         showlegend=True,
         legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
+        margin=dict(t=110, b=120, l=80, r=220),
     )
+
+    for annotation in fig.layout.annotations[: len(subplot_titles)]:
+        annotation.update(font=dict(size=13), yshift=12)
 
     # Add annotation with statistics
     stats_lines = ["<b>Overall Statistics (last 3 seconds excluded):</b><br>"]
@@ -344,11 +378,7 @@ def plot_latency_chart(data, output_file="latency_chart.svg", open_browser=True)
     """
     # Get all available operations from ALL STATS (excluding 'Runtime')
     all_stats = data["ALL STATS"]
-    operations = [
-        key
-        for key in all_stats.keys()
-        if key != "Runtime" and isinstance(all_stats[key], dict) and "Time-Serie" in all_stats[key]
-    ]
+    operations = get_latency_operations(all_stats)
 
     if not operations:
         print("Error: No operation data found in JSON")
@@ -358,6 +388,8 @@ def plot_latency_chart(data, output_file="latency_chart.svg", open_browser=True)
     ops_data = {}
     for op in operations:
         ops_data[op] = extract_latency_timeseries(data, op, ignore_last_seconds=3)
+
+    time_range = get_global_time_range(ops_data)
 
     # Determine number of subplots needed
     num_ops = len(operations)
@@ -394,6 +426,8 @@ def plot_latency_chart(data, output_file="latency_chart.svg", open_browser=True)
         ax.set_title(f"{op} Operations - Latency Percentiles", fontsize=14, fontweight="bold")
         ax.legend(loc="best")
         ax.grid(True, alpha=0.3)
+        if time_range is not None:
+            ax.set_xlim(time_range)
 
     # Comparison plot (if multiple operations)
     if num_ops > 1:
@@ -417,6 +451,8 @@ def plot_latency_chart(data, output_file="latency_chart.svg", open_browser=True)
         ax_comp.set_title("Operations Comparison - Latency", fontsize=14, fontweight="bold")
         ax_comp.legend(loc="best")
         ax_comp.grid(True, alpha=0.3)
+        if time_range is not None:
+            ax_comp.set_xlim(time_range)
 
     # Throughput plot
     throughput_idx = min(num_ops + 1, len(axes) - 1) if num_ops > 1 else len(axes) - 1
@@ -433,6 +469,8 @@ def plot_latency_chart(data, output_file="latency_chart.svg", open_browser=True)
     ax_throughput.set_title("Throughput Over Time", fontsize=14, fontweight="bold")
     ax_throughput.legend(loc="best")
     ax_throughput.grid(True, alpha=0.3)
+    if time_range is not None:
+        ax_throughput.set_xlim(time_range)
 
     # Hide any unused subplots
     for idx in range(throughput_idx + 1, len(axes)):
@@ -482,7 +520,7 @@ def print_summary(data):
     config = data["configuration"]
     runtime = data["ALL STATS"]["Runtime"]
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  Server: {config['server']}:{config['port']}")
     print(f"  Clients: {config['clients']}")
     print(f"  Threads: {config['threads']}")
@@ -534,10 +572,10 @@ def main():
     if not Path(input_file).exists():
         print(f"Error: Input file '{input_file}' not found!")
         print(f"\nUsage: {sys.argv[0]} [input_file.json] [output_file.html|.svg]")
-        print(f"\nTo generate the JSON file, run memtier_benchmark with --json-out-file:")
-        print(f"  memtier_benchmark --server <host> --port <port> \\")
-        print(f"      --json-out-file memtier_out.json \\")
-        print(f"      [other options...]")
+        print("\nTo generate the JSON file, run memtier_benchmark with --json-out-file:")
+        print("  memtier_benchmark --server <host> --port <port> \\")
+        print("      --json-out-file memtier_out.json \\")
+        print("      [other options...]")
         sys.exit(1)
 
     # Load and process data
@@ -548,7 +586,7 @@ def main():
     print_summary(data)
 
     # Generate chart
-    print(f"Generating latency chart...")
+    print("Generating latency chart...")
 
     # Use interactive chart if output is .html, otherwise use matplotlib
     if output_file.endswith(".html"):
@@ -556,9 +594,9 @@ def main():
     else:
         plot_latency_chart(data, output_file)
 
-    print(f"\nDone!")
+    print("\nDone!")
     if PLOTLY_AVAILABLE:
-        print(f"Tip: Use .html extension for interactive charts with toggleable series")
+        print("Tip: Use .html extension for interactive charts with toggleable series")
 
 
 if __name__ == "__main__":

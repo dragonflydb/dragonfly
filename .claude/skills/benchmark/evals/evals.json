@@ -1,0 +1,39 @@
+{
+  "skill_name": "benchmark",
+  "evals": [
+    {
+      "id": 0,
+      "name": "full-report-vs-valkey",
+      "prompt":
+          "I just finished a benchmark run comparing Dragonfly against Valkey 9.0 on AWS. The raw artifacts are in the directory I'm pointing you at: dfly_bench JSON output (write and read phases) and INFO memory dumps for both datastores on m7g.2xlarge and m7g.4xlarge, plus a RUN_NOTES.txt with the hardware, exact commands, and DBSIZE after each write phase. Generate the benchmark report from this data, with charts and a raw-data appendix.",
+      "expected_output":
+          "A markdown report mirroring the team format: conditions section, a Simple Strings use-case section with a TLDR, per-instance (m7g.2xlarge, m7g.4xlarge) QPS/memory and latency tables, embedded QPS-over-time charts, and an appendix with exact commands, environment, and raw output. QPS/P99 must match the data; bytes-per-entry reported both logical (~127 DF / ~149-150 Valkey) and RSS.",
+      "files": [
+        "fixtures/"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "memory-focus-single-datastore",
+      "prompt":
+          "Here's raw output from a Dragonfly-only run on m7g.4xlarge (dfly_bench write/read JSON + INFO memory dump + run notes with DBSIZE). I care mostly about memory efficiency. Write me a short benchmark report focused on memory usage per entry, plus the throughput numbers.",
+      "expected_output":
+          "A report covering only Dragonfly (no fabricated Valkey/Redis comparison column), reporting both logical (used_memory/DBSIZE ~127) and RSS bytes-per-entry, plus write/read QPS and P99. Honest about it being single-datastore.",
+      "files": [
+        "fixtures/df_4xl_write.json",
+        "fixtures/df_4xl_read.json",
+        "fixtures/df_4xl_info_memory.txt",
+        "fixtures/RUN_NOTES.txt"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "kickoff-planning-interactive",
+      "prompt":
+          "I've got two m7g.4xlarge boxes in AWS. Benchmark Dragonfly against Valkey on a simple strings workload.",
+      "expected_output":
+          "The skill should engage its interactive front-end: ask which box is the server vs the client (load generator must be separate), confirm SSH access, plan to run servers on port 6380, plan to start the monitoring stack (and fix the prometheus scrape port to 6380), and lay out the write/read workload plan. It must NOT invent benchmark numbers it hasn't measured.",
+      "files": []
+    }
+  ]
+}

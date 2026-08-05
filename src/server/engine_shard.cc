@@ -20,6 +20,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 #include "server/blocking_controller.h"
+#include "server/channel_store.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -231,7 +232,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
-  static_assert(sizeof(Stats) == 152);
+  static_assert(sizeof(Stats) == 136);
 
 #define ADD(x) x += o.x
 
@@ -244,8 +245,6 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
   ADD(poll_execution_total);
   ADD(tx_ooo_total);
   ADD(tx_optimistic_total);
-  ADD(tx_batch_schedule_calls_total);
-  ADD(tx_batch_scheduled_items_total);
   ADD(total_heartbeat_expired_keys);
   ADD(total_heartbeat_expired_bytes);
   ADD(total_heartbeat_expired_calls);
@@ -367,6 +366,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
   uint64_t attempts = 0;
 
   DbTable* db_table = slice.GetDBTable(defrag_state_.dbid);
+  std::string scratch;
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
@@ -377,7 +377,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
       if (did) {
         reallocations++;
         if (const ssize_t delta = it->second.MallocUsed() - original_size; delta != 0) {
-          db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+          AccountObjectMemory(it->first.GetSlice(&scratch), it->second.ObjType(), delta, db_table);
         }
       }
     });
@@ -511,12 +511,12 @@ static void RunFPeriodically(std::function<void()> f, std::chrono::milliseconds 
       return;
     }
 
-    int64_t now_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+    int64_t now_ms = absl::GetCurrentTimeNanos() / 1000000;
     if (now_ms - 5 * period_ms.count() > last_heartbeat_ms) {
       VLOG(1) << "This " << error_msg << " step took " << now_ms - last_heartbeat_ms << "ms";
     }
     f();
-    last_heartbeat_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+    last_heartbeat_ms = absl::GetCurrentTimeNanos() / 1000000;
   }
 }
 
@@ -537,7 +537,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
     RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
   });
-  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); }, "defrag");
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
@@ -607,12 +607,37 @@ void EngineShard::DestroyThreadLocal() {
   VLOG(1) << "Shard reset " << shard_id;
 }
 
-// Is called by Transaction::ExecuteAsync in order to run transaction tasks.
-// Only runs in its own thread.
 void EngineShard::PollExecution(const char* context, Transaction* trans) {
+  // Only one transaction can run at a time, so we have to abort the Poll while running_tx is
+  // suspended. Running tx issues a follow up Poll is needs_repoll_ was set
+  if (running_tx_) {
+    // Check that trans doesn't need processing or is guaranteed to be found via txq/continuation
+    DCHECK(trans == nullptr || !trans->DEBUG_IsArmedInShard(shard_id())  // tx was already disarmed
+           || trans->DEBUG_GetTxqPosInShard(shard_id()) != TxQueue::kEnd ||
+           continuation_trans_ == trans);
+    needs_repoll_ = true;
+    return;
+  }
+
+  needs_repoll_ = false;
+  PollExecutionInternal(context, trans);
+
+  // Executing `trans` out of order above would not follow up with queue processing, so
+  // we need to issue another poll if we interruped another poll request.
+  // Because it runs with trans=nullptr, it progresses only on the loop and does not need follow ups
+  PollExecutionIfDeferred();
+}
+
+void EngineShard::PollExecutionIfDeferred() {
+  if (std::exchange(needs_repoll_, false))
+    PollExecutionInternal("repoll", nullptr);
+}
+
+void EngineShard::PollExecutionInternal(const char* context, Transaction* trans) {
   DVLOG(2) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "") << " "
            << txq_.size() << " " << (continuation_trans_ ? continuation_trans_->DebugId() : "");
 
+  DCHECK(running_tx_ == nullptr) << running_tx_->DebugId();
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
 
@@ -751,6 +776,9 @@ void EngineShard::Heartbeat() {
   DVLOG(3) << " Hearbeat";
   DCHECK(namespaces);
 
+  // Reap zero-copy GET pins whose refcnt has dropped to 0. Cheap and idempotent.
+  CompactObj::DrainPendingReads();
+
   CacheStats();
 
   // TODO: iterate over all namespaces
@@ -760,7 +788,14 @@ void EngineShard::Heartbeat() {
   // This is determined by attempting to check if shard lock can be acquired.
   const bool can_acquire_global_lock = shard_lock()->Check(IntentLock::Mode::EXCLUSIVE);
 
-  if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock) {
+  // Also skip if a transaction callback is suspended mid-execution on this shard (e.g. an
+  // optimistic transaction that preempted on a journal write without registering its keys in
+  // the lock table, see ScheduleInShard's lazy lock registration).
+  // Note that this stalls the heartbeat for as long as callbacks keep getting suspended.
+  // If this starves expiry/eviction in practice, the design should consider changing direction:
+  // lazily register the suspended transaction's locks here (like ScheduleInShard does) and
+  // proceed instead of skipping.
+  if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock || running_tx_ != nullptr) {
     uint64_t now = absl::GetCurrentTimeNanos();
 
     uint64_t elapsed_ms = (now - stalled_start_ns_) / 1000000;
@@ -794,15 +829,16 @@ void EngineShard::Heartbeat() {
         check_huffman = false;  // trigger only once.
 
         // launch the task
-        huffman_check_task_id_ =
-            ProactorBase::me()->AddOnIdleTask([task = HuffmanCheckTask{}]() mutable {
+        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask(
+            [task = HuffmanCheckTask{}]() mutable {
               if (!shard_ || !namespaces) {
                 return -1;
               }
 
               DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
               return task.Run(&db_slice);
-            });
+            },
+            "huffman_check");
       }
     }
   }
@@ -824,9 +860,6 @@ void EngineShard::Heartbeat() {
 }
 
 void EngineShard::RetireExpiredAndEvict() {
-  // Disable flush journal changes to prevent preemtion
-  journal::DisableFlushGuard journal_flush_guard(journal_);
-
   // TODO: iterate over all namespaces
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   constexpr double kTtlDeleteLimit = 200;
@@ -849,51 +882,73 @@ void EngineShard::RetireExpiredAndEvict() {
   size_t deleted_bytes = 0;
   size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
 
-  for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-    if (!db_slice.IsDbValid(i))
-      continue;
+  // Accumulate keyspace notification events per-db during the atomic section; send after.
+  vector<vector<string>> per_db_events(db_slice.db_array_size());
 
-    db_cntx.db_index = i;
-    auto* pt = db_slice.GetTables(i);
-    uint64_t expire_count = db_slice.GetDBTable(i)->stats.expire_count;
-    if (expire_count > 0) {
-      // Scale traversal count to compensate for TTL key dilution in the prime table.
-      // Since we now scan the prime table (not a dedicated expire table), most entries
-      // may not have TTLs. We need more bucket traversals to check the same number of
-      // TTL keys, but cap to avoid excessive work when TTL keys are extremely sparse.
-      unsigned db_ttl_delete_target = ttl_delete_target;
+  {
+    // Disable journal flush to prevent preemption. Scoped so that SendMessages below,
+    // which may suspend on backpressure, runs outside the atomic section.
+    journal::DisableFlushGuard journal_flush_guard(journal_);
 
-      if (pt->size() >= expire_count * 2) {
-        unsigned ratio = std::min<uint64_t>(pt->size() / expire_count, 7);
-        db_ttl_delete_target = ttl_delete_target * ratio;
+    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+      if (!db_slice.IsDbValid(i))
+        continue;
+
+      db_cntx.db_index = i;
+      auto* pt = db_slice.GetTables(i);
+      uint64_t expire_count = db_slice.GetDBTable(i)->stats.expire_count;
+      if (expire_count > 0) {
+        // Scale traversal count to compensate for TTL key dilution in the prime table.
+        // Since we now scan the prime table (not a dedicated expire table), most entries
+        // may not have TTLs. We need more bucket traversals to check the same number of
+        // TTL keys, but cap to avoid excessive work when TTL keys are extremely sparse.
+        unsigned db_ttl_delete_target = ttl_delete_target;
+
+        if (pt->size() >= expire_count * 2) {
+          unsigned ratio = std::min<uint64_t>(pt->size() / expire_count, 7);
+          db_ttl_delete_target = ttl_delete_target * ratio;
+        }
+        DbSlice::DeleteExpiredStats stats =
+            db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
+
+        if (!stats.key_events.empty())
+          per_db_events[i] = std::move(stats.key_events);
+
+        deleted_bytes += stats.deleted_bytes;
+        eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
+        counter_[TTL_TRAVERSE].IncBy(stats.traversed);
+        counter_[TTL_DELETE].IncBy(stats.deleted);
+        stats_.total_heartbeat_expired_keys += stats.deleted;
+        stats_.total_heartbeat_expired_bytes += stats.deleted_bytes;
+        ++stats_.total_heartbeat_expired_calls;
+        VLOG(2) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
+                << stats.deleted_bytes << " with total expire flow calls "
+                << stats_.total_heartbeat_expired_calls;
       }
-      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
 
-      deleted_bytes += stats.deleted_bytes;
-      eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
-      counter_[TTL_TRAVERSE].IncBy(stats.traversed);
-      counter_[TTL_DELETE].IncBy(stats.deleted);
-      stats_.total_heartbeat_expired_keys += stats.deleted;
-      stats_.total_heartbeat_expired_bytes += stats.deleted_bytes;
-      ++stats_.total_heartbeat_expired_calls;
-      VLOG(2) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
-              << stats.deleted_bytes << " with total expire flow calls "
-              << stats_.total_heartbeat_expired_calls;
+      if (eviction_goal) {
+        uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
+        auto [evicted_items, evicted_bytes] = db_slice.FreeMemWithEvictionStepAtomic(
+            i, db_cntx, starting_segment_id, eviction_goal, &per_db_events[i]);
+
+        VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
+                << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
+                << " bytes. Max eviction per heartbeat: "
+                << GetFlag(FLAGS_max_eviction_per_heartbeat);
+
+        deleted_bytes += evicted_bytes;
+        eviction_goal -= std::min(eviction_goal, evicted_bytes);
+      }
     }
+  }  // journal_flush_guard destroyed here — atomic section ends before SendMessages
 
-    if (eviction_goal) {
-      uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-      auto [evicted_items, evicted_bytes] =
-          db_slice.FreeMemWithEvictionStepAtomic(i, db_cntx, starting_segment_id, eviction_goal);
-
-      VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
-              << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
-              << " bytes. Max eviction per heartbeat: "
-              << GetFlag(FLAGS_max_eviction_per_heartbeat);
-
-      deleted_bytes += evicted_bytes;
-      eviction_goal -= std::min(eviction_goal, evicted_bytes);
-    }
+  // Send keyspace notifications for expired/evicted keys outside the atomic section
+  // because SendMessages may suspend on connection backpressure (see issue #7052).
+  for (unsigned i = 0; i < per_db_events.size(); ++i) {
+    if (per_db_events[i].empty())
+      continue;
+    channel_store->SendMessages(absl::StrCat("__keyevent@", i, "__:expired"), per_db_events[i],
+                                false);
   }
 
   // Track deleted bytes only if we expect to lower memory
@@ -1022,10 +1077,6 @@ size_t EngineShard::CalculateEvictionBytes() {
 }
 
 void EngineShard::CacheStats() {
-  uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs();
-  if (last_mem_params_.updated_at + 1000000 > now)  // 1ms
-    return;
-
   size_t used_mem = UsedMemory();
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
@@ -1047,7 +1098,7 @@ void EngineShard::CacheStats() {
   }
 
   db_slice.UpdateMemoryParams(free_mem / shard_set->size(), bytes_per_obj);
-  last_mem_params_ = {now, used_mem};
+  last_mem_params_ = {used_mem};
 }
 
 size_t EngineShard::UsedMemory() const {
@@ -1142,17 +1193,18 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   return info;
 }
 
-size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
+EngineShard::CompactTableStats EngineShard::CompactTable(double threshold, DbIndex db_idx) {
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   auto& prime = db_slice.GetDBTable(db_idx)->prime;
-  size_t total_seg_merged = 0;
+  CompactTableStats stats;
 
   while (true) {
     bool merged_any = false;
     // Prompt GetSegmentCount() each iteration to handle directory resizes across preemptions
     for (size_t seg_id = 0; seg_id < prime.GetSegmentCount(); seg_id = prime.NextSeg(seg_id)) {
       if (SliceSnapshot::IsSnaphotInProgress()) {
-        return total_seg_merged;
+        stats.exited_on_snapshot = true;
+        return stats;
       }
       // Fetch segment pointer fresh each iteration
       auto* seg = prime.GetSegment(seg_id);
@@ -1166,15 +1218,21 @@ size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
 
       auto* buddy = prime.GetSegment(buddy_id);
 
+      // max_size is threshold * ONE segment's capacity, but combined is the SUM of both
+      // buddies, so each buddy must average under roughly threshold/2 full to qualify.
       const size_t combined = seg->SlowSize() + buddy->SlowSize();
       const size_t max_size = threshold * seg->capacity();
 
       if (combined > max_size)
         continue;
 
-      if (prime.Merge(seg_id, buddy_id)) {
-        ++total_seg_merged;
+      ++stats.attempted;
+      auto [seg_merged, declined_depth_guard] = prime.Merge(seg_id, buddy_id);
+      if (seg_merged) {
+        ++stats.merged;
         merged_any = true;
+      } else if (!declined_depth_guard) {
+        ++stats.rolled_back;
       }
 
       // Yield after merge (don't hold pointers across yield)
@@ -1185,7 +1243,7 @@ size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
       break;
   }
 
-  return total_seg_merged;
+  return stats;
 }
 
 }  // namespace dfly

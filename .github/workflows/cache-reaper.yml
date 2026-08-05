@@ -1,0 +1,41 @@
+# - Keep the repository's Actions cache quota under control.
+# - On closed pull requests, delete all ccache and dependency caches for refs/pull/<N>/merge.
+# - On scheduled or manual runs, keep only the newest cache for each ref and configuration.
+# - This removes timestamped ccache duplicates and obsolete dependency-definition keys.
+name: Cache reaper
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
+
+# One reap per PR - scheduled/manual reaps share a single group. A newer run supersedes an in-flight one.
+concurrency:
+  group: cache-reaper-${{ github.event.pull_request.number || 'scheduled' }}
+  cancel-in-progress: true
+
+jobs:
+  reap:
+    # - Run independent pull-request cleanups in parallel; serialize scheduled and manual cleanup runs.
+    if: github.repository == 'dragonflydb/dragonfly' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write   # required to delete caches
+      contents: read   # required to check out the cache helper script
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Ensures the sourced script is from the trusted target branch revision
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+      - name: Reap caches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+          source "${GITHUB_WORKSPACE}/.github/actions/builder/scripts/actions_cache_ccache_helper.sh"
+          actions_cache_ccache_reap "$GITHUB_EVENT_NAME" "$PR_REF"

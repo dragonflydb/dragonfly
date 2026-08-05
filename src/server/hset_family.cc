@@ -13,6 +13,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include "absl/flags/declare.h"
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/overloaded.h"
@@ -29,9 +30,11 @@ extern "C" {
 #include "server/search/doc_index.h"
 #include "server/tiered_storage.h"
 #include "server/tiering/decoders.h"
-#include "server/tiering/serialized_map.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
+
+ABSL_DECLARE_FLAG(size_t, listpack_max_field_len);
+ABSL_DECLARE_FLAG(size_t, listpack_max_bytes);
 
 using namespace std;
 
@@ -46,7 +49,33 @@ using IncrByParam = std::variant<double, int64_t>;
 using OptStr = std::optional<std::string>;
 enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
 
-bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
+// FIELDS arg-count error for the hash field-TTL commands. HTTL/HPEXPIRETIME/HGETEX additionally
+// pass kInvalidNumFields for a non-positive numfields.
+constexpr char kNumFieldsMismatch[] =
+    "The `numfields` parameter must match the number of arguments";
+
+// TODO: replace all the listpack code with our detail::Listpack wrapper.
+bool IsGoodForListpack(const ParsedArgs& args, const uint8_t* lp) {
+  DCHECK_GE(args.size(), 2u);
+
+  // For a single field-value pair on an empty or single-entry listpack, approve automatically
+  // even with large values. A one-field hash is efficient to look-up or mutate.
+  if (args.size() == 2 && args[0].size() < 4096) {
+    if (lpLength((uint8_t*)lp) == 0)
+      return true;
+
+    // if we override the same field of a singleton hashmap, we allow listpack as well.
+    if (lpLength((uint8_t*)lp) == 2) {
+      uint8_t* first = lpFirst((uint8_t*)lp);
+      unsigned slen = 0;
+      long long lval;
+      uint8_t* vstr = lpGetValue(first, &slen, &lval);
+      if (vstr && args[0].size() == slen && memcmp(vstr, args[0].data(), slen) == 0) {
+        return true;
+      }
+    }
+  }
+
   size_t sum = 0;
   for (auto s : args) {
     if (s.size() > server.max_map_field_len)
@@ -63,22 +92,18 @@ using container_utils::GetStringMap;
 // holding a variant of:
 // 1. Listpack
 // 2. StringMap
-// 3. SerializedMap (tiered)
 struct HMapWrap {
  private:
-  template <typename F> decltype(auto) VisitRef(F f) const {  // Cast T* to T&
+  template <typename F> decltype(auto) VisitRef(F f) const {
     return std::visit(Overloaded{[&f](auto* s) { return f(*s); }, f}, impl_);
   }
 
   template <typename F> decltype(auto) VisitMut(F& f) {
-    auto serialized_bust = [&](tiering::SerializedMap* s) {
-      ABSL_UNREACHABLE();                          // Serialized maps should never be mutable
-      return f(static_cast<StringMap*>(nullptr));  // purely for same return type
-    };
-    return std::visit(Overloaded{f, serialized_bust}, impl_);
+    return std::visit(Overloaded{[&f](auto* s) { return f(*s); }, f}, impl_);
   }
 
  public:
+  // Create from non-external prime value
   HMapWrap(const PrimeValue& pv, DbContext db_cntx) {
     DCHECK(!pv.IsExternal() || pv.IsCool());
     if (pv.Encoding() == kEncodingListPack)
@@ -87,14 +112,13 @@ struct HMapWrap {
       impl_ = GetStringMap(pv, db_cntx);
   }
 
-  explicit HMapWrap(tiering::SerializedMap* sm) : impl_{sm} {
+  explicit HMapWrap(detail::ListpackWrap lw) : impl_{std::move(lw)} {
   }
 
   size_t Length() const {
     Overloaded ov{
         [](StringMap* s) { return s->UpperBoundSize(); },
         [](const detail::ListpackWrap& lw) { return lw.size(); },
-        [](tiering::SerializedMap* s) { return s->size(); },
     };
     return visit(ov, impl_);
   }
@@ -111,7 +135,7 @@ struct HMapWrap {
   auto Range() const {
     auto f = [](auto p) -> pair<string_view, string_view> { return p; };  // implicit conversion
     using IT = base::it::CompoundIterator<decltype(f), detail::ListpackWrap::Iterator,
-                                          StringMap::iterator, tiering::SerializedMap::Iterator>;
+                                          StringMap::iterator>;
     auto cb = [f](auto& h) -> std::pair<IT, IT> {
       return {{f, h.begin()}, {std::nullopt, h.end()}};
     };
@@ -119,21 +143,29 @@ struct HMapWrap {
   }
 
   bool Erase(std::string_view key) {
-    Overloaded ov{[key](StringMap* s) { return s->Erase(key); },
+    Overloaded ov{[key](StringMap& s) { return s.Erase(key); },
                   [key](detail::ListpackWrap& lw) { return lw.Delete(key); }};
     return VisitMut(ov);
   }
 
   void AddOrUpdate(std::string_view key, std::string_view value) {
-    Overloaded ov{[&](StringMap* sm) { sm->AddOrUpdate(key, value, UINT32_MAX, true); },
+    Overloaded ov{[&](StringMap& sm) { sm.AddOrUpdate(key, value, UINT32_MAX, true); },
                   [&](detail::ListpackWrap& lw) { lw.Insert(key, value, false); }};
     VisitMut(ov);
   }
 
   void Launder(PrimeValue& pv) {
     Overloaded ov{
-        [](StringMap* s) {},
+        [](StringMap& s) {},
         [&](detail::ListpackWrap& lw) { pv.SetRObjPtr(lw.GetPointer()); },
+    };
+    VisitMut(ov);
+  }
+
+  void Launder(tiering::ListpackMapDecoder* dec) {
+    Overloaded ov{
+        [](StringMap& s) {},
+        [&](detail::ListpackWrap& lw) { *dec->GetMutable() = lw; },
     };
     VisitMut(ov);
   }
@@ -145,8 +177,8 @@ struct HMapWrap {
   }
 
  private:
-  variant<StringMap*, tiering::SerializedMap*, detail::ListpackWrap> impl_;
-};  // namespace dfly
+  variant<StringMap*, detail::ListpackWrap> impl_;
+};
 
 // Delete if length is zero
 void DeleteHw(HMapWrap& hw, const OpArgs& op_args, std::string_view key) {
@@ -194,9 +226,14 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
 
     // Enqueue read for future values
     if (pv.IsExternal() && !pv.IsCool()) {
-      using D = tiering::SerializedMapDecoder;
+      using D = tiering::ListpackMapDecoder;
       util::fb2::Future<OpResult<T>> fut;
       auto read_cb = [fut, f = std::move(f)](io::Result<D*> res) mutable {
+        if (!res) {
+          fut.Resolve(OpResult<T>{OpStatus::IO_ERROR});
+          return;
+        }
+
         HMapWrap hw{res.value()->Get()};
         fut.Resolve(f(hw));
       };
@@ -220,19 +257,39 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
   return Unwrap(tx->ScheduleSingleHopT(std::move(shard_cb)));
 }
 
-// Wrap write handler with field-level extraction for HNSW external data preservation.
-// Note: modified_fields contains string_views into CmdArgList data, which the transaction
-// keeps alive for the duration of execution.
+// Wrap write handler
 template <typename F>
-auto WrapW(F&& f, absl::InlinedVector<std::string_view, 4> modified_fields = {}) {
-  using RT = std::invoke_result_t<F, HMapWrap&>;
-  return [f = std::forward<F>(f), fields = std::move(modified_fields)](Transaction* t,
-                                                                       EngineShard* es) -> RT {
+auto ExecuteW(Transaction* tx, F&& f,
+              absl::InlinedVector<std::string_view, 4> modified_fields = {}) {
+  using T = typename std::invoke_result_t<F, HMapWrap&>::Type;
+  auto shard_cb = [f = std::forward<F>(f), fields = std::move(modified_fields)](
+                      Transaction* t, EngineShard* es) -> OpResult<CbVariant<T>> {
+    // Fetch value of hash type
     auto [key, op_args] = KeyAndArgs(t, es);
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
     auto& pv = it_res->it->second;
+
+    // Enqueue read for future values
+    if (pv.IsExternal() && !pv.IsCool()) {
+      using D = tiering::ListpackMapDecoder;
+      util::fb2::Future<OpResult<T>> fut;
+      auto read_cb = [fut, f = std::move(f)](io::Result<D*> res) mutable {
+        if (!res) {
+          fut.Resolve(OpResult<T>{OpStatus::IO_ERROR});
+          return;
+        }
+
+        HMapWrap hw{*res.value()->GetMutable()};
+        fut.Resolve(f(hw));
+        hw.Launder(res.value());
+      };
+
+      es->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
+                                 pv.GetExternalSlice(), D{}, std::move(read_cb), false);
+      return CbVariant<T>{std::move(fut)};
+    }
 
     // Remove document before modification, preserving HNSW external vector data.
     op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv, fields);
@@ -249,11 +306,14 @@ auto WrapW(F&& f, absl::InlinedVector<std::string_view, 4> modified_fields = {})
     else
       op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
-    return res;
+    RETURN_ON_BAD_STATUS(res);
+    return CbVariant<T>{std::move(res).value()};
   };
+
+  return Unwrap(tx->ScheduleSingleHopT(std::move(shard_cb)));
 }
 
-size_t EstimateListpackMinBytes(CmdArgList members) {
+size_t EstimateListpackMinBytes(const ParsedArgs& members) {
   size_t bytes = 0;
   for (const auto& member : members) {
     bytes += (member.size() + 1);  // string + at least 1 byte for string header.
@@ -308,6 +368,10 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 
   auto& add_res = *op_res;
   PrimeValue& pv = add_res.it->second;
+
+  if (pv.IsExternal() && !pv.IsCool())
+    return OpStatus::CANCELLED;  // Not supported for offloaded values
+
   if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
   } else {
@@ -400,30 +464,29 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
   return res;
 }
 
-OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, CmdArgList fields) {
+OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, const ParsedArgs& fields) {
   DCHECK(!fields.empty());
 
   std::vector<OptStr> result(fields.size());
-  if (auto lw = hw.Get<detail::ListpackWrap>(); lw) {
+  if (auto sm = hw.Get<StringMap*>(); sm) {
+    for (size_t i = 0; i < fields.size(); ++i) {
+      if (auto it = (*sm)->Find(fields[i]); it != (*sm)->end()) {
+        result[i].emplace(it->second, sdslen(it->second));
+      }
+    }
+  } else {
     absl::flat_hash_map<string_view, absl::InlinedVector<size_t, 3>> reverse;
     reverse.reserve(fields.size() + 1);
     for (size_t i = 0; i < fields.size(); ++i) {
-      reverse[ArgS(fields, i)].push_back(i);  // map fields to their index.
+      reverse[fields[i]].push_back(i);  // map fields to their index.
     }
 
-    for (const auto [key, value] : *lw) {
+    for (const auto [key, value] : hw.Range()) {
       if (auto it = reverse.find(key); it != reverse.end()) {
         for (size_t index : it->second) {
           DCHECK_LT(index, result.size());
           result[index].emplace(value);
         }
-      }
-    }
-  } else {
-    StringMap* sm = *hw.Get<StringMap*>();
-    for (size_t i = 0; i < fields.size(); ++i) {
-      if (auto it = sm->Find(fields[i]); it != sm->end()) {
-        result[i].emplace(it->second, sdslen(it->second));
       }
     }
   }
@@ -432,13 +495,34 @@ OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, CmdArgList fields) {
 }
 
 struct OpSetParams {
-  bool skip_if_exists = false;
+  enum class Mode : uint8_t {
+    kNormal,  // overwrite every field
+    kNX,      // set each field only if it does not already exist
+    kFNX,     // set all fields only if none of them exist
+    kFXX,     // set all fields only if all of them exist
+  };
+
+  // Selects how OpSet reports its result: Dragonfly returns the number of created fields, Redis
+  // returns 1 when the fields were applied. (Tiering support is gated by ttl, not by format.)
+  enum class Format : uint8_t { kDragonfly, kRedis };
+
   uint32_t ttl = UINT32_MAX;
   bool keepttl = false;
+  Mode mode = Mode::kNormal;
+  Format format = Format::kDragonfly;
+
+  optional<util::fb2::Future<bool>>* backpressure = nullptr;
 };
 
-OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
-                         const OpSetParams& op_sp = OpSetParams{}) {
+// OpSet's reported result: Dragonfly returns the number of newly created fields, Redis returns 1
+// (the fields were applied — any FNX/FXX condition has already been verified by the caller).
+uint32_t SetReply(const OpSetParams& op_sp, uint32_t created) {
+  return op_sp.format == OpSetParams::Format::kRedis ? 1u : created;
+}
+
+OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
+                                    const ParsedArgs& values,
+                                    const OpSetParams& op_sp = OpSetParams{}) {
   DCHECK(!values.empty() && 0 == values.size() % 2);
   VLOG(2) << "OpSet(" << key << ")";
 
@@ -450,6 +534,36 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   uint8_t* lp = nullptr;
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
+
+  // Only Dragonfly NX skips existing fields; FNX/FXX were already resolved by the caller, so every
+  // other mode overwrites.
+  const bool skip_existing = op_sp.mode == OpSetParams::Mode::kNX;
+
+  // If the value is external, enqueue read and modify it there
+  if (pv.IsExternal() && !pv.IsCool()) {
+    if (op_sp.ttl != UINT32_MAX)
+      return OpStatus::CANCELLED;  // member TTLs can't be stored in an offloaded hash
+
+    using D = tiering::ListpackMapDecoder;
+    util::fb2::Future<OpResult<uint32_t>> fut;
+    auto read_cb = [fut, values, op_sp, skip_existing](io::Result<D*> res) mutable {
+      if (!res) {
+        fut.Resolve({OpStatus::IO_ERROR});
+        return;
+      }
+
+      auto& lw = *res.value()->GetMutable();
+      uint32_t created = 0;
+      for (size_t i = 0; i < values.size(); i += 2) {
+        created += lw.Insert(values[i], values[i + 1], skip_existing);
+      }
+      fut.Resolve(SetReply(op_sp, created));
+    };
+
+    op_args.shard->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
+                                          pv.GetExternalSlice(), D{}, std::move(read_cb), false);
+    return CbVariant<uint32_t>{std::move(fut)};
+  }
 
   if (add_res.is_new) {
     if (op_sp.ttl == UINT32_MAX) {
@@ -487,7 +601,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     }
     detail::ListpackWrap lw{lp};
     for (size_t i = 0; i < values.size(); i += 2) {
-      created += lw.Insert(values[i], values[i + 1], op_sp.skip_if_exists);
+      created += lw.Insert(values[i], values[i + 1], skip_existing);
     }
     pv.SetRObjPtr(lw.GetPointer());
   } else {
@@ -499,7 +613,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     for (size_t i = 0; i < values.size(); i += 2) {
       string_view field = values[i];
       string_view value = values[i + 1];
-      if (op_sp.skip_if_exists)
+      if (skip_existing)
         added = sm->AddOrSkip(field, value, op_sp.ttl);
       else
         added = sm->AddOrUpdate(field, value, op_sp.ttl, op_sp.keepttl);
@@ -511,13 +625,13 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   if (auto* ts = op_args.shard->tiered_storage(); ts) {
-    StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, nullptr);
+    StashPrimeValue(op_args.db_cntx.db_index, key, it->first, &pv, ts, op_sp.backpressure);
   }
 
-  return created;
+  return CbVariant<uint32_t>{SetReply(op_sp, created)};
 }
 
-void HGetGeneric(CmdArgList args, uint8_t getall_mask, CommandContext* cmd_cntx) {
+void HGetGeneric(uint8_t getall_mask, CommandContext* cmd_cntx) {
   auto cb = [getall_mask](const HMapWrap& hw) -> OpResult<vector<string>> {
     vector<string> res;
     bool keyval = (getall_mask == (FIELDS | VALUES));
@@ -547,80 +661,201 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, CommandContext* cmd_cntx)
 }
 
 OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
-                                 ExpireFlags flags, CmdArgList values) {
+                                 ExpireFlags flags, const ParsedArgs& values) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(op_res);
 
   PrimeValue* pv = &((*op_res).it->second);
+  if (pv->IsExternal() && !pv->IsCool())
+    return OpStatus::CANCELLED;  // can't mutate offloaded hashes synchronously
+
+  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
+  const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
+
   auto res = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
 
   // If it is a hash which became empty after expiring fields, we must delete the key safely.
   // We use DelMutable which consumes the iterator/updater to prevent the crash.
+  bool key_deleted = false;
   if (pv->Encoding() == kEncodingStrMap2) {
     auto* sm = static_cast<StringMap*>(pv->RObjPtr());
     if (sm->UpperBoundSize() == 0) {
       db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+      key_deleted = true;
+    }
+  }
+
+  // Journaling below may yield; disarm the updater so no dash iterator survives the yield
+  // (DelMutable already consumed it in the deleted case).
+  if (!key_deleted)
+    op_res->post_updater.Run();
+
+  if (op_args.shard->journal()) {
+    if (key_deleted) {
+      // The replayed command re-applies a relative TTL against the replica clock and
+      // cannot reproduce this deletion; journal it explicitly.
+      RecordJournal(op_args, "DEL"sv, {key});
+    } else if (had_member_expiry) {
+      // A field probed while lazily expired is still alive on a lagging replica and the
+      // replayed command would re-arm it there; delete it explicitly.
+      absl::InlinedVector<string_view, 4> missing{key};
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (res[i] == -2)
+          missing.push_back(values[i]);
+      }
+      if (missing.size() > 1)
+        RecordJournal(op_args, "HDEL"sv, missing);
     }
   }
 
   return res;
 }
 
-// HSETEX key [NX] [KEEPTTL] tll_sec field value field value ...
-void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+// Evaluates the FNX/FXX collective condition of HSETEX.
+//   fnx=true  (FNX): holds only if NONE of the fields exist.
+//   fnx=false (FXX): holds only if ALL of the fields exist.
+// A missing key counts as "no fields exist".
+OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key,
+                                    const ParsedArgs& fields, bool fnx) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  if (!res) {
+    if (res.status() == OpStatus::KEY_NOTFOUND)
+      return fnx;  // none exist: FNX holds, FXX fails
+    return res.status();
+  }
 
-  string_view key = parser.Next();
-  OpSetParams op_sp;
+  const PrimeValue& pv = (*res)->second;
+  if (pv.IsExternal() && !pv.IsCool())
+    return OpStatus::CANCELLED;  // can't inspect offloaded hashes synchronously
 
-  const auto option_already_set = [&cmd_cntx] {
-    return cmd_cntx->SendError(WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
-  };
+  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
+  const bool had_member_expiry = pv.Encoding() == kEncodingStrMap2 && pv.HasMemberExpiration();
 
-  while (true) {
-    if (parser.Check("NX")) {
-      if (op_sp.skip_if_exists) {
-        return option_already_set();
-      }
-      op_sp.skip_if_exists = true;
-    } else if (parser.Check("KEEPTTL")) {
-      if (op_sp.keepttl) {
-        return option_already_set();
-      }
-      op_sp.keepttl = true;
-    } else {
+  HMapWrap hw{pv, op_args.db_cntx};
+  bool holds = true;
+  absl::InlinedVector<string_view, 4> missing{key};
+  for (size_t i = 0; i < fields.size(); i += 2) {
+    const bool found = bool(hw.Find(fields[i]));
+    if (had_member_expiry && !found)
+      missing.push_back(fields[i]);
+    // FNX requires every field to be absent; FXX requires every field to be present.
+    if (fnx == found) {
+      holds = false;
       break;
     }
   }
+  if (hw.Length() == 0) {  // Find() may have lazily expired fields and emptied the hash.
+    DeleteHw(hw, op_args, key);
+  } else if (missing.size() > 1 && op_args.shard->journal()) {
+    // A field probed while lazily expired is still alive on a lagging replica and the
+    // replayed condition would decide differently there; delete it explicitly first.
+    RecordJournal(op_args, "HDEL"sv, missing);
+  }
+  return holds;
+}
 
-  op_sp.ttl = parser.Next<uint32_t>();
-  auto* rb = cmd_cntx->rb();
-  if (parser.HasError()) {
-    return cmd_cntx->SendError(parser.TakeError().MakeReply());
+struct HSetExParams {
+  OpSetParams op_sp;
+  ExpiryOption expiry;
+  CmdArgParser::Range fields;  // field/value pairs; valid only when the parser has no error.
+};
+
+optional<DbSlice::ExpireParams> MakeFieldExpireParams(ExpT type, int64_t value, uint64_t now_ms,
+                                                      bool allow_expired) {
+  if (value < 0)
+    return nullopt;
+
+  DbSlice::ExpireParams params{type, value, now_ms};
+  auto [ttl_ms, expire_at_ms] = params.Calculate(now_ms, false);
+  if (expire_at_ms < 0 || ttl_ms > kMaxExpireDeadlineMs || (!allow_expired && ttl_ms <= 0))
+    return nullopt;
+  return params;
+}
+
+// Parses HSETEX arguments after the key, reporting any error into `parser` (surfaced by the caller
+// via RETURN_ON_PARSE_ERROR). `cmd_name` is only used to format error messages.
+//
+// Dragonfly format: HSETEX key [NX | FNX | FXX] [KEEPTTL] ttl_sec field value [field value ...]
+// Redis format:     HSETEX key [FNX | FXX] [EX sec | PX ms | EXAT ts-sec | PXAT ts-ms | KEEPTTL]
+//                          FIELDS numfields field value [field value ...]
+//
+// The syntaxes are told apart by the token following the leading flags: the Redis format has its
+// mandatory FIELDS keyword, the Dragonfly format a bare numeric ttl_sec. NX (per-field skip) and
+// the collective FNX/FXX condition are mutually exclusive; FNX/FXX behave identically in both
+// syntaxes (set all-or-nothing). Only the reported value differs (see OpSetParams::Format).
+HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name, uint64_t now_ms) {
+  using Mode = OpSetParams::Mode;
+  using Format = OpSetParams::Format;
+
+  static constexpr auto kGrammar = Compile(
+      Options(Into(&HSetExParams::op_sp, OneOf("", Map(&OpSetParams::mode, "NX", Mode::kNX, "FNX",
+                                                       Mode::kFNX, "FXX", Mode::kFXX))),
+              Into(&HSetExParams::op_sp, OneOf("", Exist("KEEPTTL", &OpSetParams::keepttl))),
+              Into(&HSetExParams::expiry, ExpiryOneOf())));
+  HSetExParams res = kGrammar.Apply(parser);
+  OpSetParams& op_sp = res.op_sp;
+  ExpiryOption& expiry = res.expiry;
+
+  if (expiry.value) {
+    auto expire_params = MakeFieldExpireParams(expiry.type, *expiry.value, now_ms, false);
+    if (!expire_params) {
+      parser->ReportCustom(InvalidExpireTime(cmd_name));
+    } else {
+      int64_t ttl_ms = expire_params->Calculate(now_ms, false).first;
+      op_sp.ttl = (ttl_ms + 999) / 1000;
+    }
   }
 
-  constexpr uint32_t kMaxTtl = (1UL << 26);
-  if (op_sp.ttl == 0 || op_sp.ttl > kMaxTtl) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+  // FIELDS marks the Redis format, a bare ttl_sec the Dragonfly format. The parser short-circuits
+  // once errored, so the steps below need no per-step checks.
+  if (parser->Check("FIELDS")) {
+    op_sp.format = Format::kRedis;
+    if (op_sp.mode == Mode::kNX || (op_sp.keepttl && expiry.value))
+      parser->Report(CmdArgParser::CUSTOM_ERROR);  // NX is Dragonfly-only; one expiry option max
+    res.fields = parser->NextRange(2, kNumFieldsMismatch, /*consume_all=*/true);
+  } else if (expiry.value) {
+    // EX/PX/EXAT/PXAT belong to the Redis form; without FIELDS the command is malformed.
+    parser->Report(CmdArgParser::CUSTOM_ERROR);
+  } else {
+    op_sp.format = Format::kDragonfly;
+    op_sp.ttl = parser->Next<FInt<int64_t{1}, kMaxExpireDeadlineSec>>();
+
+    res.fields = parser->RemainingRange();
+    if (res.fields.empty() || res.fields.size() % 2 != 0)
+      parser->ReportCustom(WrongNumArgsError(cmd_name));
   }
+  return res;
+}
 
-  CmdArgList fields = parser.Tail();
+void HSetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
+  HSetExParams parsed = ParseHSetEx(&parser, cmd_cntx->cid()->name(), now_ms);
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  if (fields.empty() || fields.size() % 2 != 0) {
-    return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
-  }
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
+  // Evaluate the FNX/FXX condition (if any), then let OpSet set the fields and report the
+  // format-appropriate value (created count for Dragonfly, 1 for Redis).
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CbVariant<uint32_t>> {
+    using Mode = OpSetParams::Mode;
+    auto op_args = t->GetOpArgs(shard);
+    const OpSetParams& op_sp = parsed.op_sp;
+    if (op_sp.mode == Mode::kFNX || op_sp.mode == Mode::kFXX) {
+      OpResult<bool> cond =
+          CheckHSetExCondition(op_args, key, parsed.fields, op_sp.mode == Mode::kFNX);
+      RETURN_ON_BAD_STATUS(cond);
+      if (!*cond)
+        return CbVariant<uint32_t>{uint32_t(0)};  // condition not met -> nothing set
+    }
+    return OpSet(op_args, key, parsed.fields, op_sp);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    rb->SendLong(*result);
-  } else {
+  OpResult<uint32_t> result = Unwrap(cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb)));
+  if (result)
+    cmd_cntx->rb()->SendLong(*result);
+  else
     cmd_cntx->SendError(result.status());
-  }
 }
 
 struct HSetReplies {
@@ -637,9 +872,12 @@ struct HSetReplies {
   CommandContext* cmd_cntx;
 };
 
-void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHDel(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
   // Collect field names for HNSW data preservation.
-  auto fields_span = args.subspan(1);
+  ParsedArgs fields_span = parser.RemainingRange(WrongNumArgsError("HDEL"));
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
   absl::InlinedVector<std::string_view, 4> field_names;
   for (auto f : fields_span)
     field_names.push_back(f);
@@ -650,12 +888,11 @@ void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
       deleted += hw.Erase(s);
     return deleted;
   };
-  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(WrapW(cb, std::move(field_names))));
+  HSetReplies{cmd_cntx}.Send(ExecuteW(cmd_cntx->tx(), std::move(cb), std::move(field_names)));
 }
 
-void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
-  using MinMaxTtl = FInt<0, (1 << 26)>;
+void CmdHExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
+  using MinMaxTtl = FInt<int64_t{0}, kMaxExpireDeadlineSec>;
   auto [key, ttl_sec] = parser.Next<string_view, MinMaxTtl>();
 
   ExpireFlags flags = parser
@@ -672,13 +909,7 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
                                kSyntaxErrType);
   }
 
-  uint32_t numFields = parser.Next<uint32_t>();
-
-  CmdArgList fields = parser.Tail();
-  if (fields.size() != numFields) {
-    return rb->SendError("The `numfields` parameter must match the number of arguments",
-                         kSyntaxErrType);
-  }
+  CmdArgParser::Range fields = parser.NextRange(1, kNumFieldsMismatch, /*consume_all=*/true);
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
@@ -691,79 +922,228 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
     case OpStatus::OK:
       return rb->SendLongArr(absl::MakeConstSpan(result.value()));
     case OpStatus::KEY_NOTFOUND:
-      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(numFields, -2)));
+      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(fields.size(), -2)));
     default:
       return cmd_cntx->SendError(result.status());
   };
 }
 
-OpResult<vector<long>> OpHTtl(Transaction* t, EngineShard* shard, string_view key,
-                              CmdArgList fields) {
+enum class FieldExpireOutput : uint8_t {
+  kTtlSeconds,    // remaining time-to-live in seconds (HTTL)
+  kPExpireTimeMs  // absolute expiration as a Unix timestamp in milliseconds (HPEXPIRETIME)
+};
+
+template <FieldExpireOutput kOut>
+OpResult<vector<int64_t>> OpHExpireTime(Transaction* t, EngineShard* shard, string_view key,
+                                        const ParsedArgs& fields) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   const DbContext& db_cntx = t->GetDbContext();
   auto it_res = db_slice.FindReadOnly(db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(it_res);
 
   const PrimeValue& pv = (*it_res)->second;
-  vector<long> res;
+  if (pv.IsExternal() && !pv.IsCool())
+    return OpStatus::CANCELLED;  // can't inspect offloaded hashes synchronously
+
+  vector<int64_t> res;
   res.reserve(fields.size());
 
   for (auto field : fields) {
     int32_t exp_time = HSetFamily::FieldExpireTime(db_cntx, pv, field);
     if (exp_time <= 0) {
-      // -3 from FieldExpireTime means field not found -> HTTL returns -2
-      // -1 means no expiry -> stays -1
+      // -3 from FieldExpireTime means field not found -> -2; -1 means no expiry -> stays -1.
       res.push_back(exp_time == -3 ? -2 : exp_time);
+    } else if constexpr (kOut == FieldExpireOutput::kTtlSeconds) {
+      res.push_back(int64_t(exp_time) - MemberTimeSeconds(db_cntx.time_now_ms));
     } else {
-      res.push_back(int32_t(exp_time - MemberTimeSeconds(db_cntx.time_now_ms)));
+      // FieldExpireTime is relative to kMemberExpiryBase; convert to an absolute Unix ms timestamp.
+      res.push_back((static_cast<int64_t>(exp_time) + static_cast<int64_t>(kMemberExpiryBase)) *
+                    1000);
     }
   }
 
-  // FieldExpireTime calls StringMap::Find which triggers lazy field expiry.
-  // If all fields expired, delete the now-empty hash key.
+  // FieldExpireTime triggers lazy field expiry; drop the key if all fields are now gone.
   HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, pv);
 
   return res;
 }
 
-void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
-  CmdArgParser parser{args};
+// Shared handler for HTTL and HPEXPIRETIME; the per-field value format differs via kOut. A missing
+// key replies with -2 for every requested field.
+template <FieldExpireOutput kOut>
+void HExpireTimeGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
+  parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
+  CmdArgParser::Range fields =
+      parser.NextRange(1, kNumFieldsMismatch, /*consume_all=*/true, kInvalidNumFields);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (parser.HasError()) {
-    return cmd_cntx->SendError(parser.TakeError().MakeReply());
-  }
-  if (!parser.Check("FIELDS"sv)) {
-    return cmd_cntx->SendError("Mandatory argument FIELDS is missing or not at the right position",
-                               kSyntaxErrType);
-  }
-
-  uint32_t numFields = parser.Next<uint32_t>();
-
-  CmdArgList fields = parser.Tail();
-  if (fields.size() != numFields) {
-    return rb->SendError("The `numfields` parameter must match the number of arguments",
-                         kSyntaxErrType);
-  }
-
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) { return OpHTtl(t, shard, key, fields); };
-  OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpHExpireTime<kOut>(t, shard, key, fields);
+  };
+  OpResult<vector<int64_t>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   switch (result.status()) {
     case OpStatus::OK:
       return rb->SendLongArr(absl::MakeConstSpan(result.value()));
     case OpStatus::KEY_NOTFOUND:
-      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(numFields, -2)));
+      return rb->SendLongArr(absl::MakeConstSpan(vector<int64_t>(fields.size(), -2)));
     default:
       return cmd_cntx->SendError(result.status());
   };
 }
 
-void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<string> {
+void CmdHTtl(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HExpireTimeGeneric<FieldExpireOutput::kTtlSeconds>(std::move(parser), cmd_cntx);
+}
+
+void CmdHPExpireTime(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HExpireTimeGeneric<FieldExpireOutput::kPExpireTimeMs>(std::move(parser), cmd_cntx);
+}
+
+// Removes the TTL from the listed existing fields by re-inserting them without an expiry.
+// No-op for listpack-encoded hashes (which never store per-field TTLs).
+void PersistFields(const OpArgs& op_args, string_view key, const ParsedArgs& fields,
+                   PrimeValue* pv) {
+  if (pv->Encoding() != kEncodingStrMap2)
+    return;
+
+  absl::InlinedVector<string_view, 4> field_names(fields.begin(), fields.end());
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv, field_names);
+
+  StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
+  for (string_view field : field_names) {
+    auto it = sm->Find(field);
+    if (it != sm->end() && it.HasExpiry())
+      sm->AddOrUpdate(field, string_view{it->second, sdslen(it->second)}, UINT32_MAX, false);
+  }
+
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+}
+
+OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const ParsedArgs& fields,
+                                  const DbSlice::ExpireParams& exp_params) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
+  RETURN_ON_BAD_STATUS(op_res);
+  PrimeValue* pv = &((*op_res).it->second);
+
+  if (pv->IsExternal() && !pv->IsCool())
+    return OpStatus::CANCELLED;  // offloaded hashes can't be read/mutated synchronously
+
+  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
+  const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
+
+  // Capture the current field values before mutating TTLs: a past/zero expiry deletes the field,
+  // but its value must still be returned (Redis semantics).
+  vector<OptStr> values;
+  {
+    HMapWrap hw{*pv, op_args.db_cntx};
+    values = std::move(*OpHMGet(hw, fields));
+  }
+
+  if (exp_params.persist) {
+    PersistFields(op_args, key, fields, pv);
+  } else if (exp_params.IsDefined()) {
+    // A non-positive relative TTL means the expiry is already due: ttl_sec 0 deletes the field
+    // (its value was captured above).
+    int64_t rel_msec = exp_params.Calculate(op_args.db_cntx.time_now_ms, false).first;
+    uint32_t ttl_sec = rel_msec <= 0 ? 0 : static_cast<uint32_t>((rel_msec + 999) / 1000);
+    HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key, fields, pv);
+  }
+
+  // Lazy field expiry during the read, or a 0-ttl deletion above, may have emptied the hash.
+  bool key_deleted = false;
+  if (pv->Encoding() == kEncodingStrMap2) {
+    auto* sm = static_cast<StringMap*>(pv->RObjPtr());
+    if (sm->UpperBoundSize() == 0) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+      key_deleted = true;
+    }
+  }
+
+  // Journaling below may yield; disarm the updater so no dash iterator survives the yield
+  // (DelMutable already consumed it in the deleted case).
+  if (!key_deleted)
+    op_res->post_updater.Run();
+
+  if (op_args.shard->journal()) {
+    if (key_deleted) {
+      // The replayed command re-applies a relative TTL against the replica clock and
+      // cannot reproduce this deletion; journal it explicitly.
+      RecordJournal(op_args, "DEL"sv, {key});
+    } else if (had_member_expiry) {
+      // A field probed while lazily expired is still alive on a lagging replica and the
+      // replayed command would re-arm or persist it there; delete it explicitly.
+      absl::InlinedVector<string_view, 4> missing{key};
+      for (size_t i = 0; i < fields.size(); ++i) {
+        if (!values[i].has_value())
+          missing.push_back(fields[i]);
+      }
+      if (missing.size() > 1)
+        RecordJournal(op_args, "HDEL"sv, missing);
+    }
+  }
+
+  return values;
+}
+
+DbSlice::ExpireParams BuildHGetExpiry(CmdArgParser* p, const ExpiryOrPersistOptions& o,
+                                      uint64_t now_ms, string_view cmd_name) {
+  DbSlice::ExpireParams out;
+  out.persist = o.persist;  // PERSIST and an expiry are mutually exclusive (OneOf)
+  if (!o.expiry.value)
+    return out;
+
+  auto params = MakeFieldExpireParams(o.expiry.type, *o.expiry.value, now_ms, true);
+  if (!params)
+    p->ReportCustom(InvalidExpireTime(cmd_name));
+  return params.value_or(out);
+}
+
+void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+
+  uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
+  static constexpr auto kGrammar = Compile(Options(ExpiryOrPersist()));
+  auto opts = kGrammar.Apply(&parser);
+
+  DbSlice::ExpireParams exp_params =
+      BuildHGetExpiry(&parser, opts, now_ms, cmd_cntx->cid()->name());
+
+  parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
+  CmdArgParser::Range fields =
+      parser.NextRange(1, kNumFieldsMismatch, /*consume_all=*/true, kInvalidNumFields);
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpHGetEx(t->GetOpArgs(shard), key, fields, exp_params);
+  };
+  OpResult<vector<OptStr>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+
+  switch (result.status()) {
+    case OpStatus::OK:
+    case OpStatus::KEY_NOTFOUND: {
+      RedisReplyBuilder::ArrayScope scope{rb, fields.size()};
+      for (size_t i = 0; i < fields.size(); i++) {
+        if (result.ok() && (*result)[i].has_value())
+          rb->SendBulkString(*(*result)[i]);
+        else
+          rb->SendNull();
+      }
+    } break;
+    default:
+      cmd_cntx->SendError(result.status());
+  };
+}
+
+void CmdHGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  auto cb = [field = parser.Next()](const HMapWrap& hw) -> OpResult<string> {
     if (auto it = hw.Find(field); it)
       return string{it->second};
     return OpStatus::KEY_NOTFOUND;
@@ -781,8 +1161,9 @@ void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
-  auto fields = args.subspan(1);
+void CmdHMGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  ParsedArgs fields = parser.UnparsedArgs();
   auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
   OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx->tx(), cb);
@@ -803,8 +1184,9 @@ void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [field = ArgS(args, 1)](const HMapWrap& hw) -> OpResult<uint32_t> {
+void CmdHStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  auto cb = [field = parser.Next()](const HMapWrap& hw) -> OpResult<uint32_t> {
     if (auto it = hw.Find(field); it)
       return it->second.length();
     return OpStatus::KEY_NOTFOUND;
@@ -812,27 +1194,24 @@ void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void CmdHLen(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHLen(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
   HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void CmdHExists(CmdArgList args, CommandContext* cmd_cntx) {
-  auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
+void CmdHExists(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  auto cb = [field = parser.Next()](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
   HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view field = ArgS(args, 1);
-  string_view incrs = ArgS(args, 2);
-  int64_t ival = 0;
-
-  if (!absl::SimpleAtoi(incrs, &ival)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
-  }
+void CmdHIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view field = parser.Next();
+  int64_t ival = parser.Next<int64_t>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   IncrByParam param{ival};
 
@@ -859,19 +1238,11 @@ void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view field = ArgS(args, 1);
-  string_view incrs = ArgS(args, 2);
-  double dval = 0;
-
-  if (!absl::SimpleAtod(incrs, &dval)) {
-    return cmd_cntx->SendError(kInvalidFloatErr);
-  }
-
-  if (isnan(dval) || isinf(dval)) {
-    return cmd_cntx->SendError(kNanOrInfDuringIncr);
-  }
+void CmdHIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
+  string_view field = parser.Next();
+  double dval = parser.Next<Validated<double, Finite<kNanOrInfDuringIncr>>>();
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   IncrByParam param{dval};
 
@@ -896,20 +1267,21 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHKeys(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, FIELDS, cmd_cntx);
+void CmdHKeys(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HGetGeneric(FIELDS, cmd_cntx);
 }
 
-void CmdHVals(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, VALUES, cmd_cntx);
+void CmdHVals(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HGetGeneric(VALUES, cmd_cntx);
 }
 
-void CmdHGetAll(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx);
+void CmdHGetAll(CmdArgParser parser, CommandContext* cmd_cntx) {
+  HGetGeneric(GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx);
 }
 
-void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
-  std::string_view token = ArgS(args, 1);
+void CmdHScan(CmdArgParser parser, CommandContext* cmd_cntx) {
+  parser.Next();  // skip key
+  std::string_view token = parser.Next();
   uint64_t cursor = 0;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(token, &cursor)) {
@@ -917,12 +1289,12 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   // HSCAN key cursor [MATCH pattern] [COUNT count] [NOVALUES]
-  if (args.size() > 7) {
-    DVLOG(1) << "got " << args.size() << " this is more than it should be";
+  if (cmd_cntx->tail_args().size() > 7) {
+    DVLOG(1) << "got " << cmd_cntx->tail_args().size() << " this is more than it should be";
     return rb->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2), true);
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(cmd_cntx->tail_args().Tail(2), true);
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
     return cmd_cntx->SendError(ops.status());
@@ -937,8 +1309,9 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
       cursor = 0;
       [[fallthrough]];
     case OpStatus::OK: {
+      std::string cursor_str = absl::StrCat(cursor);
       RedisReplyBuilder::ArrayScope scope{rb, 2};
-      rb->SendBulkString(absl::StrCat(cursor));
+      rb->SendBulkString(cursor_str);
       rb->SendBulkStrArr(*result);
       break;
     }
@@ -947,21 +1320,29 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-
+void CmdHSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view cmd{cmd_cntx->cid()->name()};
   auto* rb = cmd_cntx->rb();
-  if (args.size() % 2 != 1) {
+  // tail_args = key + field/value pairs; a valid command has an odd count.
+  if (cmd_cntx->tail_args().size() % 2 != 1) {
     return rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
 
-  args.remove_prefix(1);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args);
+  string_view key = parser.Next();
+
+  optional<util::fb2::Future<bool>> tiered_backpressure;
+  OpSetParams params{.backpressure = &tiered_backpressure};
+
+  ParsedArgs values = parser.UnparsedArgs();
+  auto cb = [&, values](Transaction* t, EngineShard* shard) {
+    return OpSet(t->GetOpArgs(shard), key, values, params);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  auto delayed_result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = Unwrap(std::move(delayed_result));
+
+  if (tiered_backpressure)
+    tiered_backpressure->GetFor(10ms);
 
   if (result && cmd == "HSET") {
     rb->SendLong(*result);
@@ -970,13 +1351,16 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
+void CmdHSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view key = parser.Next();
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args.subspan(1), OpSetParams{.skip_if_exists = true});
+  ParsedArgs values = parser.RemainingRange(WrongNumArgsError("HSETNX"));
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  auto cb = [&, values](Transaction* t, EngineShard* shard) {
+    return OpSet(t->GetOpArgs(shard), key, values, OpSetParams{.mode = OpSetParams::Mode::kNX});
   };
-  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  HSetReplies{cmd_cntx}.Send(Unwrap(cmd_cntx->tx()->ScheduleSingleHopT(cb)));
 }
 
 void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
@@ -987,28 +1371,16 @@ void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
   str_vec.emplace_back(absl::StrCat(lp.lval));
 }
 
-void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (args.size() > 3) {
-    DVLOG(1) << "Wrong number of command arguments: " << args.size();
-    return rb->SendError(kSyntaxErr);
-  }
 
-  string_view key = ArgS(args, 0);
-  int32_t count;
-  bool with_values = false;
+  string_view key = parser.Next();
+  bool has_count = parser.HasNext();
+  int32_t count = has_count ? parser.Next<int32_t>("count value is not an integer") : 0;
+  bool with_values = parser.Check("WITHVALUES");
 
-  if ((args.size() > 1) && (!SimpleAtoi(ArgS(args, 1), &count))) {
-    return rb->SendError("count value is not an integer", kSyntaxErrType);
-  }
-
-  if (args.size() == 3) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, 2));
-    if (arg != "WITHVALUES")
-      return rb->SendError(kSyntaxErr);
-    else
-      with_values = true;
-  }
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
@@ -1024,7 +1396,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
     if (pv.Encoding() == kEncodingStrMap2) {
       StringMap* string_map = GetStringMap(pv, db_context);
 
-      if (args.size() == 1) {
+      if (!has_count) {
         auto opt_pair = string_map->RandomPair();
         if (opt_pair.has_value()) {
           auto [key, value] = *opt_pair;
@@ -1051,10 +1423,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
       }
 
       if (string_map->Empty()) {  // Can happen if we use a TTL on hash members.
-        auto res_it = db_slice.FindMutable(db_context, key, OBJ_HASH);
-        if (res_it) {
-          db_slice.DelMutable(db_context, std::move(*res_it));
-        }
+        HSetFamily::DeleteIfEmpty(db_slice, db_context, key, pv);
         return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {
@@ -1062,7 +1431,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
       size_t lplen = lpLength(lp);
       CHECK(lplen > 0 && lplen % 2 == 0);
       size_t hlen = lplen / 2;
-      if (args.size() == 1) {
+      if (!has_count) {
         listpackEntry key;
         lpRandomPair(lp, hlen, &key, NULL);
         StrVecEmplaceBack(str_vec, key);
@@ -1096,7 +1465,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    if (result->size() == 1 && args.size() == 1)
+    if (result->size() == 1 && !has_count)
       rb->SendBulkString(result->front());
     else if (with_values) {
       const auto result_size = result->size();
@@ -1114,7 +1483,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
     } else
       rb->SendBulkStrArr(*result, CollectionType::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    if (args.size() == 1)
+    if (!has_count)
       rb->SendNull();
     else
       rb->SendEmptyArray();
@@ -1143,6 +1512,8 @@ void HSetFamily::Register(CommandRegistry* registry) {
                    HIncrByFloat)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
             << CI{"HEXPIRE", CO::JOURNALED | CO::FAST | CO::DENYOOM, -5, 1, 1}.HFUNC(HExpire)
+            << CI{"HPEXPIRETIME", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HPExpireTime)
+            << CI{"HGETEX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HGetEx)
             << CI{"HTTL", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HTtl)
             << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1}.HFUNC(HRandField)
             << CI{"HSCAN", CO::READONLY, -3, 1, 1}.HFUNC(HScan)
@@ -1178,8 +1549,9 @@ auto HSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv) -> LoadB
   return LoadBlobResult::kSuccess;
 }
 
-auto HSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
-  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+auto HSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* pv)
+    -> LoadBlobResult {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), deep ? 1 : 0, nullptr, nullptr)) {
     LOG(ERROR) << "Hash listpack integrity check failed.";
     return LoadBlobResult::kCorrupted;
   }
@@ -1223,8 +1595,8 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
     detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
     return lw.Find(field) == lw.end() ? -3 : -1;
   } else {
+    pv.SetMemberTime(MemberTimeSeconds(db_context.time_now_ms));
     StringMap* string_map = (StringMap*)pv.RObjPtr();
-    string_map->set_time(MemberTimeSeconds(db_context.time_now_ms));
     auto it = string_map->Find(field);
     if (it == string_map->end())
       return -3;
@@ -1255,7 +1627,7 @@ bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std:
 // 0 if the specified NX | XX | GT | LT condition has not been met.
 // 1 if the expiration time was set/updated.
 // 2 when HEXPIRE/HPEXPIRE is called with 0 seconds and the field is deleted.
-static std::vector<long> UpdateTTL(facade::CmdArgList values, uint32_t ttl_sec, ExpireFlags flags,
+static std::vector<long> UpdateTTL(ParsedArgs values, uint32_t ttl_sec, ExpireFlags flags,
                                    StringMap* owner) {
   std::vector<long> res;
   res.reserve(values.size());
@@ -1308,11 +1680,11 @@ static std::vector<long> UpdateTTL(facade::CmdArgList values, uint32_t ttl_sec, 
 }
 
 vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                             ExpireFlags flags, string_view key, CmdArgList values,
-                                             PrimeValue* pv) {
+                                             ExpireFlags flags, string_view key,
+                                             const ParsedArgs& fields, PrimeValue* pv) {
   DCHECK_EQ(OBJ_HASH, pv->ObjType());
   // values contains field names — collect them for HNSW field data preservation.
-  absl::InlinedVector<std::string_view, 4> field_names(values.begin(), values.end());
+  absl::InlinedVector<std::string_view, 4> field_names(fields.begin(), fields.end());
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv, field_names);
 
   if (pv->Encoding() == kEncodingListPack) {
@@ -1324,7 +1696,7 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
 
   // This needs to be explicitly fetched again since the pv might have changed.
   StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
-  vector<long> res = UpdateTTL(values, ttl_sec, flags, sm);
+  vector<long> res = UpdateTTL(fields, ttl_sec, flags, sm);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
   return res;
 }

@@ -5,6 +5,7 @@
 
 #include "absl/types/span.h"
 #include "base/logging.h"
+#include "facade/reply_payload.h"
 #include "reply_capture.h"
 
 #define SKIP_LESS(needed)     \
@@ -51,7 +52,24 @@ void CapturingReplyBuilder::SendSimpleString(std::string_view str) {
 
 void CapturingReplyBuilder::SendBulkString(std::string_view str) {
   SKIP_LESS(ReplyMode::FULL);
-  Capture(BulkString{string{str}});
+  if (str.size() < 12 || str.size() > inline_buffer_.size())
+    return Capture(BulkString{std::string{str}});
+
+  memcpy(inline_buffer_.data(), str.data(), str.size());
+  Capture(BulkStringRef{std::string_view{inline_buffer_.data(), str.size()}});
+  inline_buffer_ = inline_buffer_.subspan(str.size());
+}
+
+void CapturingReplyBuilder::SendVerbatimString(std::string_view str, VerbatimFormat format) {
+  SKIP_LESS(ReplyMode::FULL);
+  Capture(make_unique<VerbatimString>(string{str}, static_cast<uint8_t>(format)));
+}
+
+// Capture the borrow into the payload, extending the pin's lifetime until
+// replay moves it into the real sink where it is parked across the writev.
+void CapturingReplyBuilder::SendBulkStringBorrowed(cmn::BorrowedString&& bs) {
+  SKIP_LESS(ReplyMode::FULL);
+  Capture(std::move(bs));
 }
 
 void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
@@ -75,8 +93,8 @@ void CapturingReplyBuilder::SendDirect(Payload&& val) {
   bool is_err = holds_alternative<Error>(val);
   ReplyMode min_mode = is_err ? ReplyMode::ONLY_ERR : ReplyMode::FULL;
   if (reply_mode_ >= min_mode) {
-    DCHECK_EQ(current_.index(), 0u);
-    current_ = std::move(val);
+    // Capture() appends to an open collection if one exists, otherwise stores into current_.
+    Capture(std::move(val));
   } else {
     current_ = monostate{};
   }
@@ -123,6 +141,19 @@ struct CaptureVisitor {
     static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs);
   }
 
+  void operator()(const unique_ptr<payload::VerbatimString>& vs) {
+    using VF = RedisReplyBuilder::VerbatimFormat;
+    static_cast<RedisReplyBuilder*>(rb)->SendVerbatimString(vs->str, static_cast<VF>(vs->format));
+  }
+
+  void operator()(const cmn::BorrowedString& bs) {
+    static_cast<RedisReplyBuilder*>(rb)->SendBulkStringBorrowed(bs);
+  }
+
+  void operator()(const payload::BulkStringRef& bs) {
+    static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs);
+  }
+
   void operator()(payload::Null) {
     static_cast<RedisReplyBuilder*>(rb)->SendNull();
   }
@@ -143,7 +174,7 @@ struct CaptureVisitor {
     }
     builder->StartCollection(cp->len, cp->type);
     for (auto& pl : cp->arr)
-      visit(*this, std::move(pl));
+      visit(*this, pl);
   }
 
   SinkReplyBuilder* rb;
@@ -155,8 +186,12 @@ void CapturingReplyBuilder::Apply(Payload&& pl, SinkReplyBuilder* rb) {
     return;
   }
 
+  Apply(static_cast<const Payload&>(pl), rb);
+}
+
+void CapturingReplyBuilder::Apply(const Payload& pl, SinkReplyBuilder* rb) {
   CaptureVisitor cv{rb};
-  visit(cv, std::move(pl));
+  visit(cv, pl);
 }
 
 void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {

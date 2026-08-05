@@ -37,12 +37,6 @@ class EngineShard {
     uint64_t tx_optimistic_total = 0;
     uint64_t tx_ooo_total = 0;
 
-    // Number of ScheduleBatchInShard calls.
-    uint64_t tx_batch_schedule_calls_total = 0;
-
-    // Number of transactions scheduled via ScheduleBatchInShard.
-    uint64_t tx_batch_scheduled_items_total = 0;
-
     uint64_t total_heartbeat_expired_keys = 0;
     uint64_t total_heartbeat_expired_bytes = 0;
     uint64_t total_heartbeat_expired_calls = 0;
@@ -97,6 +91,9 @@ class EngineShard {
   // Processes TxQueue, blocked transactions or any other execution state related to that
   // shard. Tries executing the passed transaction if possible (does not guarantee though).
   void PollExecution(const char* context, Transaction* trans);
+
+  // Call after running inlined to keep progress on the transaction queue if it was interrupted
+  void PollExecutionIfDeferred();
 
   // Returns transaction queue.
   TxQueue* txq() {
@@ -167,6 +164,14 @@ class EngineShard {
     return continuation_trans_;
   }
 
+  Transaction* running_tx() const {
+    return running_tx_;
+  }
+
+  void set_running_tx(Transaction* tx) {
+    running_tx_ = tx;
+  }
+
   void StopPeriodicFiber();
 
   struct TxQueueItem {
@@ -216,8 +221,28 @@ class EngineShard {
     return defrag_state_.cursor;
   }
 
-  // Return total segments merged.
-  size_t CompactTable(double threshold, DbIndex db_idx);
+  struct CompactTableStats {
+    // Segments successfully merged.
+    size_t merged = 0;
+    // Buddy pairs that passed the size gate and were handed to Merge.
+    size_t attempted = 0;
+    // Attempted merges that moved items into the buddy and then had to roll back
+    // after a failed insertion.
+    size_t rolled_back = 0;
+    // True if we bailed out early due to a snapshot in progress.
+    bool exited_on_snapshot = false;
+
+    CompactTableStats& operator+=(const CompactTableStats& o) {
+      merged += o.merged;
+      attempted += o.attempted;
+      rolled_back += o.rolled_back;
+      exited_on_snapshot = exited_on_snapshot || o.exited_on_snapshot;
+      return *this;
+    }
+  };
+
+  // Merge underutilized buddy-segment pairs in the dash table.
+  CompactTableStats CompactTable(double threshold, DbIndex db_idx);
 
  private:
   struct DefragTaskState {
@@ -262,6 +287,8 @@ class EngineShard {
 
   EngineShard(util::ProactorBase* pb, mi_heap_t* heap);
 
+  void PollExecutionInternal(const char* context, Transaction* trans);
+
   // blocks the calling fiber.
   void Shutdown();  // called before destructing EngineShard.
 
@@ -301,13 +328,16 @@ class EngineShard {
   MiMemoryResource mi_resource_;
 
   struct {
-    uint64_t updated_at = 0;  // from GetMonotonicTimeNs
     size_t used_mem = 0;
   } last_mem_params_;
 
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;
+
   Transaction* continuation_trans_ = nullptr;
+  Transaction* running_tx_ = nullptr;
+  bool needs_repoll_ = false;  // set when running_tx_ interrupted a PollExecution call
+
   std::string continuation_debug_id_;
   unsigned poll_concurrent_factor_ = 0;
 

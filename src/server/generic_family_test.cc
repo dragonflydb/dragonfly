@@ -12,12 +12,16 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "server/channel_store.h"
 #include "server/conn_context.h"
+#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
+ABSL_DECLARE_FLAG(uint32_t, container_iteration_yield_interval_usec);
+ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 
 using namespace testing;
 using namespace std;
@@ -75,6 +79,69 @@ TEST_F(GenericFamilyTest, Expire) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
+TEST_F(GenericFamilyTest, ExpireCornerCases) {
+  // EXPIRE / PEXPIRE with non-positive TTL deletes the key immediately and reports success.
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expire", "key", "-1"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expire", "key", "0"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expire", "key", "-100"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"pexpire", "key", "-1"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"pexpire", "key", "0"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  // EXPIREAT / PEXPIREAT with a past absolute timestamp (including 0 and negatives) deletes
+  // the key.
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expireat", "key", "0"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expireat", "key", "-100"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"pexpireat", "key", "0"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"pexpireat", "key", "-1"}), IntArg(1));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  // Huge absolute timestamps overflow the kMaxExpireDeadlineMs cap and surface OUT_OF_RANGE.
+  Run({"set", "key", "val"});
+  EXPECT_THAT(Run({"expireat", "key", absl::StrCat(INT64_MAX)}), ErrArg("expiry is out of range"));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(1));
+
+  EXPECT_THAT(Run({"pexpireat", "key", absl::StrCat(INT64_MAX)}), ErrArg("expiry is out of range"));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(1));
+
+  // Huge relative TTLs are silently capped to kMaxExpireDeadlineSec (~8.5 years).
+  EXPECT_THAT(Run({"expire", "key", "99999999999"}), IntArg(1));
+  EXPECT_EQ(CheckedInt({"ttl", "key"}), kMaxExpireDeadlineSec);
+
+  EXPECT_THAT(Run({"pexpire", "key", absl::StrCat(int64_t{kMaxExpireDeadlineMs} * 10)}), IntArg(1));
+  EXPECT_EQ(CheckedInt({"pttl", "key"}), kMaxExpireDeadlineMs);
+
+  // Expire commands on a missing key return 0 regardless of the TTL value.
+  EXPECT_THAT(Run({"del", "missing"}), IntArg(0));
+  EXPECT_THAT(Run({"expire", "missing", "5"}), IntArg(0));
+  EXPECT_THAT(Run({"expire", "missing", "-1"}), IntArg(0));
+  EXPECT_THAT(Run({"expireat", "missing", "0"}), IntArg(0));
+  EXPECT_THAT(Run({"pexpireat", "missing", "0"}), IntArg(0));
+}
+
 TEST_F(GenericFamilyTest, ExpireOptions) {
   // NX and XX are mutually exclusive
   Run({"set", "key", "val"});
@@ -84,6 +151,15 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   // GT and LT are mutually exclusive
   resp = Run({"expire", "key", "3600", "GT", "LT"});
   ASSERT_THAT(resp, ErrArg("GT and LT options at the same time are not compatible"));
+
+  // Duplicate flags are tolerated (idempotent), like Redis.
+  resp = Run({"expire", "key", "3600", "NX", "NX"});
+  ASSERT_THAT(resp, IntArg(1));
+  Run({"persist", "key"});
+
+  // Unknown option -> error naming the offending token.
+  resp = Run({"expire", "key", "3600", "FOO"});
+  ASSERT_THAT(resp, ErrArg("Unsupported option: FOO"));
 
   // NX option should be added since there is no expiry
   resp = Run({"expire", "key", "3600", "NX"});
@@ -618,6 +694,20 @@ TEST_F(GenericFamilyTest, Move) {
   fb_blpop.Join();
 }
 
+TEST_F(GenericFamilyTest, MoveUpdatesMemoryAccounting) {
+  EXPECT_EQ(1, CheckedInt({"lpush", "list", "elem"}));
+
+  Metrics metrics = GetMetrics();
+  size_t list_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  ASSERT_GT(list_usage, 0);
+
+  EXPECT_THAT(Run({"move", "list", "1"}), IntArg(1));
+
+  metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].memory_usage_by_type[OBJ_LIST], 0u);
+  EXPECT_EQ(metrics.db_stats[1].memory_usage_by_type[OBJ_LIST], list_usage);
+}
+
 using testing::AnyOf;
 using testing::Each;
 using testing::StartsWith;
@@ -646,6 +736,15 @@ TEST_F(GenericFamilyTest, Scan) {
   EXPECT_EQ(10, vec.size());
   EXPECT_THAT(vec, Each(StartsWith("zset")));
 
+  EXPECT_THAT(Run({"scan", "0", "count"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"scan", "0", "count", "not-a-number"}), ErrArg("value is not an integer"));
+  EXPECT_THAT(Run({"scan", "0", "type", "not-a-type"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"scan", "0", "NOVALUES"}), ErrArg("syntax error"));
+
+  // COUNT is a size_t hint: values above UINT32_MAX must still parse.
+  resp = Run({"scan", "0", "count", "5000000000"});
+  EXPECT_THAT(resp, ArrLen(2));
+
   Run({"flushdb"});
 
   Run({"set", "", "foo"});
@@ -653,7 +752,7 @@ TEST_F(GenericFamilyTest, Scan) {
   resp = Run({"keys", "*"});
   EXPECT_THAT(resp, RespArray(ElementsAre("bar", "")));
   resp = Run({"keys", ""});
-  EXPECT_EQ(resp, "");
+  EXPECT_THAT(resp, RespElementsAre(""));
 }
 
 TEST_F(GenericFamilyTest, ScanWithAttr) {
@@ -734,15 +833,15 @@ TEST_F(GenericFamilyTest, Sort) {
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "10"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "10.1"));
-  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "1", "1"}), "2.20");
-  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "4", "2"}), "200");
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "1", "1"}), RespElementsAre("2.20"));
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "4", "2"}), RespElementsAre("200"));
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "5", "2"}), ArrLen(0));
   // limits desc
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "0", "5"}).GetVec(),
               ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "2", "2"}).GetVec(),
               ElementsAre("3.5", "2.20"));
-  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "1", "1"}), "10.1");
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "1", "1"}), RespElementsAre("10.1"));
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "5", "2"}), ArrLen(0));
 
   // Test set sort
@@ -781,7 +880,7 @@ TEST_F(GenericFamilyTest, Sort) {
   ASSERT_THAT(Run({"sort", "foo"}), ErrArg("WRONGTYPE "));
 
   Run({"rpush", "list-3", ""});
-  ASSERT_THAT(Run({"sort", "list-3"}), "");
+  ASSERT_THAT(Run({"sort", "list-3"}), RespElementsAre(""));
 
   Run({"rpush", "list-3", "2", "0", "", "-0.14", "0.12", "-0", "-123123", "7654"});
   ASSERT_THAT(Run({"sort", "list-3"}).GetVec(),
@@ -844,10 +943,10 @@ TEST_F(GenericFamilyTest, SortStore) {
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(), ElementsAre("3.5", "10.1"));
   resp = Run({"sort", "list-1", "LIMIT", "1", "1", "store", "list-2"});
   EXPECT_EQ(1, resp.GetInt());
-  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), "2.20");
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), RespElementsAre("2.20"));
   resp = Run({"sort", "list-1", "LIMIT", "4", "2", "store", "list-2"});
   EXPECT_EQ(1, resp.GetInt());
-  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), "200");
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), RespElementsAre("200"));
   resp = Run({"sort", "list-1", "LIMIT", "5", "2", "store", "list-2"});
   EXPECT_EQ(0, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), ArrLen(0));
@@ -953,15 +1052,15 @@ TEST_F(GenericFamilyTest, Sort_RO) {
   ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "0", "10"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "10.1"));
-  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "1", "1"}), "2.20");
-  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "4", "2"}), "200");
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "1", "1"}), RespElementsAre("2.20"));
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "4", "2"}), RespElementsAre("200"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "5", "2"}), ArrLen(0));
   // limits desc
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "0", "5"}).GetVec(),
               ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "2", "2"}).GetVec(),
               ElementsAre("3.5", "2.20"));
-  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "1", "1"}), "10.1");
+  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "1", "1"}), RespElementsAre("10.1"));
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "5", "2"}), ArrLen(0));
 
   // Test set sort
@@ -1003,7 +1102,7 @@ TEST_F(GenericFamilyTest, Sort_RO) {
   ASSERT_THAT(Run({"sort_ro", "foo"}), ErrArg("WRONGTYPE "));
 
   Run({"rpush", "list-3", ""});
-  ASSERT_THAT(Run({"sort_ro", "list-3"}), "");
+  ASSERT_THAT(Run({"sort_ro", "list-3"}), RespElementsAre(""));
 
   Run({"rpush", "list-3", "2", "0", "", "-0.14", "0.12", "-0", "-123123", "7654"});
   ASSERT_THAT(Run({"sort_ro", "list-3"}).GetVec(),
@@ -1221,7 +1320,7 @@ TEST_F(GenericFamilyTest, Restore) {
   resp = Run({"restore", "my-zset", "0", ToSV(ZSET_LISTPACK_DUMP)});
   EXPECT_EQ(resp.GetString(), "OK");
   resp = Run({"zrange", "my-zset", "0", "-1"});
-  EXPECT_EQ("elon", resp.GetString());
+  EXPECT_THAT(resp, RespElementsAre("elon"));
 
   // corrupt the dump file but keep the crc correct.
   ZSET_LISTPACK_DUMP[0] = 0x12;
@@ -1229,6 +1328,49 @@ TEST_F(GenericFamilyTest, Restore) {
   memcpy(ZSET_LISTPACK_DUMP + 19, crc64, 8);
   resp = Run({"restore", "invalid", "0", ToSV(ZSET_LISTPACK_DUMP)});
   EXPECT_THAT(resp, ErrArg("ERR Bad data format"));
+}
+
+// A crafted RESTORE payload with a valid listpack header but an interior 32-bit string entry
+// of declared length 0x7fffffff must be rejected. The trailing read triggers the deferred
+// crash for types that store the listpack as-is.
+
+TEST_F(GenericFamilyTest, RestoreOobSetListpack) {
+  uint8_t payload[] = {0x14, 0x0c, 0x0c, 0x00, 0x00, 0x00, 0x01, 0x00, 0xf0, 0xff, 0xff, 0xff,
+                       0x7f, 0xff, 0x0b, 0x00, 0xdf, 0x34, 0x52, 0xe8, 0xed, 0x1f, 0xfe, 0x61};
+  EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
+  Run({"smembers", "pwn"});
+}
+
+TEST_F(GenericFamilyTest, RestoreOobHashListpack) {
+  uint8_t payload[] = {0x10, 0x0c, 0x0c, 0x00, 0x00, 0x00, 0x02, 0x00, 0xf0, 0xff, 0xff, 0xff,
+                       0x7f, 0xff, 0x0b, 0x00, 0xed, 0x55, 0x88, 0x24, 0xae, 0xbc, 0xbd, 0xa0};
+  EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
+  Run({"hgetall", "pwn"});
+}
+
+TEST_F(GenericFamilyTest, RestoreOobZsetListpack) {
+  uint8_t payload[] = {0x11, 0x0c, 0x0c, 0x00, 0x00, 0x00, 0x02, 0x00, 0xf0, 0xff, 0xff, 0xff,
+                       0x7f, 0xff, 0x0b, 0x00, 0xc1, 0xf6, 0xd5, 0x74, 0xd3, 0x02, 0x6a, 0x79};
+  EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
+  Run({"zrange", "pwn", "0", "-1"});
+}
+
+TEST_F(GenericFamilyTest, RestoreOobListQuicklist) {
+  uint8_t payload[] = {0x12, 0x01, 0x02, 0x0c, 0x0c, 0x00, 0x00, 0x00, 0x01,
+                       0x00, 0xf0, 0xff, 0xff, 0xff, 0x7f, 0xff, 0x0b, 0x00,
+                       0xc2, 0x3d, 0x24, 0x8b, 0xeb, 0x8c, 0x05, 0x25};
+  EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
+  Run({"lrange", "pwn", "0", "-1"});
+}
+
+TEST_F(GenericFamilyTest, RestoreOobStreamListpack) {
+  uint8_t payload[] = {0x0f, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1d, 0x1d, 0x00, 0x00, 0x00, 0x09, 0x00,
+                       0x01, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
+                       0x01, 0x01, 0x01, 0xf0, 0xff, 0xff, 0xff, 0x7f, 0x05, 0xff, 0x01, 0x00, 0x00,
+                       0x00, 0x0b, 0x00, 0x22, 0x31, 0x24, 0xa4, 0x6a, 0x6d, 0x9d, 0x7f};
+  EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
+  Run({"xrange", "pwn", "-", "+"});
 }
 
 TEST_F(GenericFamilyTest, Info) {
@@ -1277,6 +1419,37 @@ TEST_F(GenericFamilyTest, Info) {
   EXPECT_THAT(Run({"del", "k3"}), IntArg(1));
   resp = Run({"info", "persistence"});
   EXPECT_EQ(2, get_rdb_changes_since_last_save(resp.GetString()));
+}
+
+TEST_F(GenericFamilyTest, BgSaveSchedule) {
+  InitWithDbFilename();
+
+  auto changes_since_save = [](const string& info) -> int {
+    const string m = "rdb_changes_since_last_success_save:";
+    auto pos = info.find(m);
+    if (pos == string::npos)
+      return -1;
+    pos += m.size();
+    auto end = info.find('\r', pos);
+    return atoi(info.substr(pos, end - pos).c_str());
+  };
+
+  auto bgsave_and_wait = [&](const std::vector<std::string_view>& cmd) {
+    EXPECT_EQ(Run({"set", "k", "1"}), "OK");
+    EXPECT_EQ(Run(cmd), "OK");
+    EXPECT_TRUE(WaitUntilCondition(
+        [&] {
+          return changes_since_save(Run({"info", "persistence"}).GetString()) == 0;
+        },
+        500ms));
+  };
+
+  bgsave_and_wait({"bgsave", "SCHEDULE"});
+  bgsave_and_wait({"bgsave", "schedule"});
+  bgsave_and_wait({"bgsave", "SCHEDULE", "DF"});
+
+  // SAVE must still reject the subcommand.
+  EXPECT_THAT(Run({"save", "SCHEDULE"}), ErrArg("Unknown subcommand"));
 }
 
 TEST_F(GenericFamilyTest, FieldTtl) {
@@ -1972,6 +2145,132 @@ TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
   EXPECT_EQ(Run({"dbsize"}), 5);
 }
 
+// Verifies that long-running container iteration is yielding.
+// This test uses a sorted set iteration path, but the same yielding
+// behavior is expected for other containers (SET, HASH, LIST) with non
+// listpack encodings.
+TEST_F(GenericFamilyTest, ContainerIterationYields) {
+  // Build a large sorted set that will be encoded as SKIPLIST.
+  constexpr int N = 500'000;
+  for (int start = 0; start < N; start += 1'000) {
+    std::vector<std::string> args = {"zadd", "zs"};
+    for (int i = start; i < start + 1000; i++) {
+      args.push_back(StrCat(i));
+      args.push_back(StrCat("m:", i));
+    }
+    Run(absl::Span<const std::string>(args));
+  }
+
+  // Run IterateSortedSet directly on the shard and verify that the
+  // long-running iteration path triggers fiber preemption.
+  uint64_t delta = 0;
+  ShardId sid = Shard("zs", shard_set->size());
+  shard_set->Await(sid, [&delta] {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+    auto* table = db.GetDBTable(0);
+    auto it = table->prime.Find(string_view{"zs"});
+    ASSERT_EQ(it->second.Encoding(), OBJ_ENCODING_SKIPLIST);
+    uint64_t before = ThisFiber::GetPreemptCount();
+    container_utils::IterateSortedSet(it->second,
+                                      [](container_utils::ContainerEntry, double) { return true; });
+    delta = ThisFiber::GetPreemptCount() - before;
+  });
+
+  // Iteration should yield at least once during long-running execution.
+  EXPECT_GT(delta, 0);
+}
+
+// Verifies that a yielding container iteration is protected by its read transaction.
+// While a read transaction iterates over a large list and yields, a concurrent
+// fiber performs RPUSH operations. The key must not be modified while the read
+// transaction is running.
+TEST_F(GenericFamilyTest, ConcurrentWritesDuringContainerYield) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_container_iteration_yield_interval_usec, 1);
+
+  constexpr int kListSize = 75'000;
+  constexpr int kIterations = 50;
+  constexpr int kPushIterations = 100'000;
+  constexpr int kWriterFibersPerShard = 8;
+  const char* key = "list1";
+  constexpr int kBatch = 1'000;
+
+  vector<string> batch_args = {"RPUSH", key};
+  batch_args.insert(batch_args.end(), kBatch, "A");
+  for (int start = 0; start < kListSize; start += kBatch) {
+    Run(absl::Span<const string>(batch_args));
+  }
+
+  atomic_bool done{false};
+
+  // Run the iterator through a read-only transaction so the size check happens
+  // while the key's shared lock is held, including across iteration yields. Calling
+  // LRANGE directly would not let the test atomically observe whether the key changed
+  // during the command, so this uses the same transaction shape and checks the QList
+  // size inside the transaction callback.
+  auto verify_yielding_iteration_is_protected = [&] {
+    static CommandId cid{"CONTAINER_ITERATION", CO::READONLY, 1, 1, 1};
+    boost::intrusive_ptr<Transaction> tx(new Transaction{&cid});
+
+    CmdArgVec args{key};
+    OpStatus init_status = tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, CmdArgList{args});
+    CHECK_EQ(init_status, OpStatus::OK);
+
+    auto cb = [&](Transaction* tx, EngineShard* shard) -> OpResult<void> {
+      auto op_args = tx->GetOpArgs(shard);
+      auto res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+      CHECK(res);
+      const auto& it = res.value();
+      EXPECT_EQ(it->second.Encoding(), kEncodingQL2);
+      // Compare size before/after iteration to verify that the key was not modified.
+      size_t size_before = it->second.Size();
+      uint64_t preempt_before = ThisFiber::GetPreemptCount();
+      container_utils::IterateList(it->second,
+                                   [](container_utils::ContainerEntry) { return true; });
+      uint64_t preempt_delta = ThisFiber::GetPreemptCount() - preempt_before;
+      EXPECT_EQ(size_before, it->second.Size());
+      EXPECT_GT(preempt_delta, 0);
+      return OpStatus::OK;
+    };
+
+    OpResult<void> result = tx->ScheduleSingleHopT(std::move(cb));
+    EXPECT_EQ(result.status(), OpStatus::OK);
+  };
+
+  auto reader = pp_->at(0)->LaunchFiber([&] {
+    for (int i = 0; i < kIterations; i++) {
+      verify_yielding_iteration_is_protected();
+    }
+    done.store(true);
+  });
+
+  vector<Fiber> writer_fibers;
+  writer_fibers.reserve(2 * kWriterFibersPerShard);
+
+  auto launch_writers = [&](unsigned proactor_index, string_view value) {
+    for (int fiber_index = 0; fiber_index < kWriterFibersPerShard; fiber_index++) {
+      writer_fibers.push_back(
+          pp_->at(proactor_index)->LaunchFiber([&, proactor_index, fiber_index, value] {
+            string id = StrCat("shard_", proactor_index, "_", fiber_index);
+            for (int i = 0; i < kPushIterations && !done.load(); i++) {
+              Run(id, {"RPUSH", key, value});
+            }
+          }));
+    }
+  };
+
+  // Writers in same shard.
+  launch_writers(0, "B");
+
+  // Writers from different shard.
+  launch_writers(1, "C");
+
+  reader.Join();
+  for (Fiber& writer : writer_fibers) {
+    writer.Join();
+  }
+}
+
 // Regression test for SORT BY nosort STORE inside MULTI/EXEC does a
 // non-concluding Execute() hop to fetch elements, then falls through to the
 // unsorted reply path without a concluding hop or Conclude().
@@ -1998,6 +2297,44 @@ TEST_F(GenericFamilyTest, SortByNosortStoreInMulti) {
   // Verify the store actually happened and the server is healthy.
   EXPECT_THAT(Run({"lrange", "dest", "0", "-1"}), ArrLen(3));
   EXPECT_EQ(Run({"get", "x"}), "9");
+}
+
+// Regression test for https://github.com/dragonflydb/dragonfly/issues/7052
+// Heartbeat-driven key expiry must not call SendMessages inside a fiber-atomic section.
+TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
+  // Enable expired-key keyspace notifications.
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  Run({"set", "mykey", "myval"});
+  Run({"expire", "mykey", "1"});
+  AdvanceTime(1100);
+
+  // Drive expiry the same way the heartbeat does: DeleteExpiredStep returns events,
+  // which are sent outside the atomic section (see issue #7052).
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    DbContext db_cntx;
+    db_cntx.db_index = 0;
+    db_cntx.time_now_ms = TEST_current_time_ms;
+    DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, 100);
+    if (!stats.key_events.empty())
+      channel_store->SendMessages("__keyevent@0__:expired", stats.key_events, false);
+  });
+
+  // Flush all async dispatch callbacks so the subscriber's thread receives the message.
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_EQ("__keyevent@0__:expired", msg.channel);
+  EXPECT_EQ("mykey", msg.message);
+
+  // Restore the flag so it doesn't bleed into other tests.
+  Run({"CONFIG", "SET", "notify_keyspace_events", ""});
 }
 
 }  // namespace dfly

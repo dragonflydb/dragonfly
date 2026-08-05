@@ -123,7 +123,7 @@ line number. Suggest what to investigate.>
 
 - The triage script uses port **6379** (resp) or **11211** (memcache).
   Ensure no other Dragonfly or Redis instance is using these ports.
-- The script adds `--rename_command` flags to avoid false positives from
+- The script adds `--restricted_commands` flags to avoid false positives from
   commands like DEBUG SLEEP that the fuzzer might generate.
 - Some crashes are non-deterministic (thread timing). The script reports
   these as "FALSE POSITIVE" — note this clearly, it doesn't mean the bug

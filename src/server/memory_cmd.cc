@@ -183,9 +183,7 @@ MemoryCmd::MemoryCmd(ServerFamily* owner, CommandContext* cmd_cntx)
     : cmd_cntx_(cmd_cntx), owner_(owner) {
 }
 
-void MemoryCmd::Run(CmdArgList args) {
-  CmdArgParser parser(args);
-
+void MemoryCmd::Run(CmdArgParser parser) {
   if (parser.Check("HELP")) {
     string_view help_arr[] = {
         "MEMORY <subcommand> [<arg> ...]. Subcommands are:",
@@ -251,7 +249,11 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (parser.Check("DECOMMIT")) {
-    if (parser.Check("COOL")) {
+    bool cool = parser.Check("COOL");
+    if (parser.HasNext()) {
+      return cmd_cntx_->SendError(kSyntaxErr);
+    }
+    if (cool) {
       shard_set->RunBriefInParallel([](EngineShard* shard) {
         if (auto* ts = shard->tiered_storage(); ts) {
           ts->ReclaimMemory(SIZE_MAX);
@@ -270,18 +272,19 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (parser.Check("ARENA")) {
-    return ArenaStats(args);
+    return ArenaStats(parser);
   }
 
   if (parser.Check("TRACK")) {
-    args.remove_prefix(1);
-    return Track(args);
+    return Track(parser);
   }
 
   if (parser.Check("DEFRAGMENT")) {
     static const float default_threshold =
         absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     const float threshold = parser.NextOrDefault(default_threshold);
+    if (const auto err = parser.TakeError(); err)
+      return cmd_cntx_->SendError(err.MakeReply());
 
     std::vector<CollectedPageStats> results(shard_set->size());
     shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
@@ -299,7 +302,7 @@ void MemoryCmd::Run(CmdArgList args) {
     return rb->SendVerbatimString(merged.ToString());
   }
 
-  string err = UnknownSubCmd(parser.Next(), "MEMORY");
+  const string err = UnknownSubCmd(parser.Next(), "MEMORY");
   return cmd_cntx_->SendError(err, kSyntaxErrType);
 }
 
@@ -393,42 +396,28 @@ void MemoryCmd::MallocStats() {
   return rb->SendVerbatimString(report);
 }
 
-void MemoryCmd::ArenaStats(CmdArgList args) {
+void MemoryCmd::ArenaStats(CmdArgParser parser) {
   uint32_t tid = 0;
   bool backing = false;
   bool show_arenas = false;
   bool summarize = false;
 
-  if (args.size() >= 2) {
-    string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 1));
-
-    if (sub_cmd == "SHOW") {
-      if (args.size() != 2)
-        return cmd_cntx_->SendError(kSyntaxErr, kSyntaxErrType);
+  if (parser.HasNext()) {
+    if (parser.Check("SHOW")) {
       show_arenas = true;
-    } else {
-      unsigned tid_indx = 1;
-
-      if (sub_cmd == "SUMMARY") {
-        ++tid_indx;
-        summarize = true;
-
-        if (args.size() > tid_indx) {
-          sub_cmd = absl::AsciiStrToUpper(ArgS(args, tid_indx));
-        }
-      }
-
-      if (sub_cmd == "BACKING") {
-        ++tid_indx;
-        backing = true;
-      }
-
-      if (summarize && args.size() > tid_indx) {
+      if (parser.HasNext())
         return cmd_cntx_->SendError(kSyntaxErr, kSyntaxErrType);
-      }
+    } else {
+      summarize = parser.Check("SUMMARY");
+      backing = parser.Check("BACKING");
 
-      if (args.size() > tid_indx && !absl::SimpleAtoi(ArgS(args, tid_indx), &tid)) {
-        return cmd_cntx_->SendError(kInvalidIntErr);
+      if (summarize) {
+        if (parser.HasNext())
+          return cmd_cntx_->SendError(kSyntaxErr, kSyntaxErrType);
+      } else if (parser.HasNext()) {
+        tid = parser.Next<uint32_t>();
+        if (auto err = parser.TakeError(); err)
+          return cmd_cntx_->SendError(err.MakeReply());
       }
     }
   }
@@ -484,12 +473,10 @@ void MemoryCmd::Usage(std::string_view key, bool account_key_memory_usage) {
   rb->SendLong(memory_usage);
 }
 
-void MemoryCmd::Track(CmdArgList args) {
+void MemoryCmd::Track(CmdArgParser parser) {
 #ifndef DFLY_ENABLE_MEMORY_TRACKING
   return cmd_cntx_->SendError("MEMORY TRACK must be enabled at build time.");
 #endif
-
-  CmdArgParser parser(args);
 
   if (parser.Check("ADD")) {
     AllocationTracker::TrackingInfo tracking_info;

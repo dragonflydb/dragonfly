@@ -211,4 +211,28 @@ TEST_F(RespSrvParserTest, InlineReset) {
   EXPECT_EQ(13, consumed_);
 }
 
+static string SetCmd(size_t val_size) {
+  const string val(val_size, 'x');
+  return absl::StrCat("*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$", val_size, "\r\n", val, "\r\n");
+}
+
+TEST_F(RespSrvParserTest, ResetForParseChecksFloor) {
+  ASSERT_EQ(RespSrvParser::OK, Parse(SetCmd(10 * 1024)));
+  const size_t grown = args_.HeapMemory();
+  EXPECT_GE(grown, 10 * 1024);
+
+  ASSERT_EQ(RespSrvParser::OK, Parse("*1\r\n$4\r\nPING\r\n"));
+  ASSERT_EQ(RespSrvParser::OK, Parse("*1\r\n$4\r\nPING\r\n"));
+  // not reclaimed if below floor
+  EXPECT_EQ(grown, args_.HeapMemory());
+}
+
+TEST_F(RespSrvParserTest, ResetForParseShrinksAfterSingleCommand) {
+  ASSERT_EQ(RespSrvParser::OK, Parse(SetCmd(512 * 1024)));
+  EXPECT_GE(args_.HeapMemory(), 512u * 1024);
+
+  ASSERT_EQ(RespSrvParser::OK, Parse("*1\r\n$4\r\nPING\r\n"));
+  EXPECT_EQ(0u, args_.HeapMemory());
+}
+
 }  // namespace facade

@@ -9,6 +9,7 @@
 #include <variant>
 
 #include "base/function2.hpp"
+#include "common/borrowed_string.h"
 #include "facade/facade_types.h"
 
 namespace facade {
@@ -21,11 +22,18 @@ using Error = std::unique_ptr<std::pair<std::string, std::string>>;
 using Null = std::nullptr_t;  // SendNull or SendNullArray
 
 struct CollectionPayload;
-struct SimpleString : public std::string {};  // SendSimpleString
-struct BulkString : public std::string {};    // SendBulkString
+struct SimpleString : public std::string {};        // SendSimpleString
+struct BulkString : public std::string {};          // SendBulkString
+struct BulkStringRef : public std::string_view {};  // SendBulkString with guaranteed lifetime
+
+struct VerbatimString {
+  std::string str;
+  uint8_t format;  // RedisReplyBuilder::VerbatimFormat avoided include
+};
 
 using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
-                             std::unique_ptr<CollectionPayload>>;
+                             BulkStringRef, std::unique_ptr<VerbatimString> /* big struct */,
+                             cmn::BorrowedString, std::unique_ptr<CollectionPayload>>;
 
 #if defined(__linux__) && !defined(_LIBCPP_VERSION)
 static_assert(sizeof(Payload) == 40);

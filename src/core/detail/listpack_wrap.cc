@@ -33,8 +33,10 @@ void ListpackWrap::Iterator::Read() {
   next_ptr_ = lpNext(lp_, next_ptr_);
 }
 
-ListpackWrap::~ListpackWrap() {
-  DCHECK(!dirty_);
+ListpackWrap ListpackWrap::Readonly(uint8_t* lp) {
+  ListpackWrap w{lp};
+  w.readonly_ = true;
+  return w;
 }
 
 ListpackWrap ListpackWrap::WithCapacity(size_t capacity) {
@@ -42,7 +44,6 @@ ListpackWrap ListpackWrap::WithCapacity(size_t capacity) {
 }
 
 uint8_t* ListpackWrap::GetPointer() {
-  dirty_ = false;
   return lp_;
 }
 
@@ -55,6 +56,7 @@ ListpackWrap::Iterator ListpackWrap::Find(std::string_view key) const {
 }
 
 bool ListpackWrap::Delete(std::string_view key) {
+  DCHECK(!readonly_);
   if (size() == 0)
     return false;
 
@@ -63,11 +65,11 @@ bool ListpackWrap::Delete(std::string_view key) {
     return false;
 
   lp_ = lpDeleteRangeWithEntry(lp_, &ptr, 2);
-  dirty_ = true;
   return true;
 }
 
 bool ListpackWrap::Insert(std::string_view key, std::string_view value, bool skip_exists) {
+  DCHECK(!readonly_);
   uint8_t* vptr;
   uint8_t* fptr = lpFirst(lp_);
   uint8_t* fsrc = key.empty() ? lp_ : (uint8_t*)key.data();
@@ -90,7 +92,6 @@ bool ListpackWrap::Insert(std::string_view key, std::string_view value, bool ski
       lp_ = lpReplace(lp_, &vptr, vsrc, value.size());
       DCHECK_EQ(0u, lpLength(lp_) % 2);
 
-      dirty_ = true;
       updated = true;
     }
   }
@@ -100,7 +101,6 @@ bool ListpackWrap::Insert(std::string_view key, std::string_view value, bool ski
     // TODO: we should at least allocate once for both elements
     lp_ = lpAppend(lp_, fsrc, key.size());
     lp_ = lpAppend(lp_, vsrc, value.size());
-    dirty_ = true;
   }
 
   return !updated;
@@ -108,6 +108,10 @@ bool ListpackWrap::Insert(std::string_view key, std::string_view value, bool ski
 
 size_t ListpackWrap::size() const {
   return lpLength(lp_) / 2;
+}
+
+size_t ListpackWrap::DataBytes() const {
+  return lpBytes(lp_);
 }
 
 ListpackWrap::Iterator ListpackWrap::begin() const {

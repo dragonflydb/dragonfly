@@ -10,12 +10,13 @@
 #define OBJ_SBF  16U
 #define OBJ_CMS  17U
 #define OBJ_TOPK 18U
+#define OBJ_CUCKOOFILTER 19U
 
 // A pseudo type for keys stored in the db, same as OBJ_MODULE which is not used in Dragonfly.
 #define OBJ_KEY  5U
 
 /* How many types of objects exist */
-#define OBJ_TYPE_MAX 19U
+#define OBJ_TYPE_MAX 20U
 
 #define CONFIG_RUN_ID_SIZE 40U
 

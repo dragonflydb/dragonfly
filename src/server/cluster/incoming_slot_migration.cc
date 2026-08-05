@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_utility.h"
@@ -67,7 +68,8 @@ class ClusterShardMigration {
     });
     JournalReader reader{source, 0};
     TransactionReader tx_reader;
-    uint64_t last_sleep = fb2::ProactorBase::GetMonotonicTimeNs();
+    uint64_t last_sleep = base::CycleClock::Now();
+    const uint64_t sleep_interval_cycles = base::CycleClock::FromUsec(100);
 
     const uint64_t throttle_us = absl::GetFlag(FLAGS_slot_migration_throttle_us);
     TransactionData tx_data;
@@ -125,9 +127,9 @@ class ClusterShardMigration {
       }
       if (throttle_us > 0) {
         // every 100us we do sleep for 20us to allow other commands to be processed
-        if (uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs(); now - last_sleep > 100000) {
+        if (base::CycleClock::Now() - last_sleep > sleep_interval_cycles) {
           ThisFiber::SleepFor(std::chrono::microseconds(throttle_us));
-          last_sleep = now;
+          last_sleep = base::CycleClock::Now();
         }
       }
     }

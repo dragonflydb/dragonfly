@@ -3,10 +3,23 @@ Test compatibility with the redis-py client search module.
 Search correctness should be ensured with unit tests.
 """
 
+import asyncio
 import copy
+import json
+import time
 
 import numpy as np
-from redis.commands.search.field import TextField, NumericField, TagField, VectorField, GeoField
+import pytest
+from redis.commands.search.field import (
+    GeoField,
+    NumericField,
+    TagField,
+    TextField,
+    VectorField,
+)
+
+import redis
+from redis import asyncio as aioredis
 
 try:
     from redis.commands.search.indexDefinition import IndexDefinition, IndexType
@@ -16,8 +29,13 @@ from redis.commands.search.query import Query
 
 from . import dfly_args
 from .instance import DflyInstanceFactory
-from .seeder import HnswSearchSeeder
-from .utility import *
+from .seeder import HnswSearchSeeder, np_dtype_for
+from .utility import (
+    check_all_replicas_finished,
+    skip_if_not_in_github,
+    tmp_file_name,
+    wait_available_async,
+)
 
 TEST_DATA = [
     {
@@ -103,6 +121,139 @@ def contains_test_data(itype, res, td_indices):
     return True
 
 
+def _search_response(value):
+    if isinstance(value, bytes):
+        return value.decode()
+    if isinstance(value, list):
+        return [_search_response(v) for v in value]
+    return value
+
+
+def _search_info_dict(info):
+    info = _search_response(info)
+    return {info[i]: info[i + 1] for i in range(0, len(info), 2)}
+
+
+def _search_attribute(info, identifier):
+    for attribute in _search_info_dict(info)["attributes"]:
+        try:
+            if attribute[attribute.index("identifier") + 1] == identifier:
+                return attribute
+        except ValueError:
+            pass
+    raise AssertionError(f"Missing search attribute {identifier}")
+
+
+def _search_doc_ids(response):
+    response = _search_response(response)
+    return set(response[1::2])
+
+
+async def _create_search_option_indexes(client: aioredis.Redis):
+    await client.execute_command(
+        "FT.CREATE",
+        "idx_nooff",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "nooff:",
+        "NOOFFSETS",
+        "SCHEMA",
+        "t",
+        "TEXT",
+    )
+    await client.hset("nooff:1", mapping={"t": "machine learning"})
+
+    await client.execute_command(
+        "FT.CREATE",
+        "idx_nostem",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "nostem:",
+        "SCHEMA",
+        "t",
+        "TEXT",
+        "NOSTEM",
+    )
+    await client.hset("nostem:1", mapping={"t": "running"})
+
+    await client.execute_command(
+        "FT.CREATE",
+        "idx_lang",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "de:",
+        "LANGUAGE",
+        "german",
+        "SCHEMA",
+        "body",
+        "TEXT",
+    )
+    await client.hset("de:1", mapping={"body": "viele Häuser hier"})
+    await client.hset("de:2", mapping={"body": "ein altes Haus"})
+    await client.hset("de:3", mapping={"body": "des Hauses Wert"})
+
+    await client.execute_command(
+        "FT.CREATE",
+        "idx_lang_field",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "lf:",
+        "LANGUAGE",
+        "english",
+        "LANGUAGE_FIELD",
+        "lang",
+        "SCHEMA",
+        "body",
+        "TEXT",
+        "lang",
+        "TEXT",
+        "NOSTEM",
+    )
+    await client.hset("lf:en", mapping={"body": "machine learning", "lang": "english"})
+    await client.hset("lf:de", mapping={"body": "viele Häuser", "lang": "german"})
+    await client.hset("lf:fallback", mapping={"body": "she learned"})
+
+
+async def _assert_search_option_indexes(client: aioredis.Redis):
+    nooff_info = _search_info_dict(await client.execute_command("FT.INFO", "idx_nooff"))
+    assert nooff_info["index_options"] == ["NOOFFSETS"]
+    with pytest.raises(redis.exceptions.ResponseError, match="phrase queries require offsets"):
+        await client.execute_command("FT.SEARCH", "idx_nooff", '"machine learning"')
+
+    nostem_info = await client.execute_command("FT.INFO", "idx_nostem")
+    assert "NOSTEM" in _search_attribute(nostem_info, "t")
+    assert (
+        _search_doc_ids(await client.execute_command("FT.SEARCH", "idx_nostem", "@t:(run)"))
+        == set()
+    )
+
+    lang_info = _search_info_dict(await client.execute_command("FT.INFO", "idx_lang"))
+    lang_definition = _search_info_dict(lang_info["index_definition"])
+    assert lang_definition["default_language"] == "german"
+    assert _search_doc_ids(
+        await client.execute_command("FT.SEARCH", "idx_lang", "@body:(Haus)")
+    ) == {
+        "de:1",
+        "de:2",
+        "de:3",
+    }
+
+    lang_field_info = _search_info_dict(await client.execute_command("FT.INFO", "idx_lang_field"))
+    lang_field_definition = _search_info_dict(lang_field_info["index_definition"])
+    assert lang_field_definition["language_field"] == "lang"
+    assert _search_doc_ids(
+        await client.execute_command("FT.SEARCH", "idx_lang_field", "@body:(Haus)")
+    ) == {"lf:de"}
+
+
 @dfly_args({"proactor_threads": 4})
 async def test_management(async_client: aioredis.Redis):
     SCHEMA_1 = [TextField("f1"), NumericField("f2", sortable=True)]
@@ -139,12 +290,14 @@ async def test_management(async_client: aioredis.Redis):
         "HASH",
         "prefixes",
         ["p1"],
+        "default_language",
+        "english",
         "default_score",
         1,
     ]
     assert i1info["num_docs"] == 10
     assert sorted(i1info["attributes"]) == [
-        ["identifier", "f1", "attribute", "f1", "type", "TEXT"],
+        ["identifier", "f1", "attribute", "f1", "type", "TEXT", "WEIGHT", "1.000000"],
         [
             "identifier",
             "f2",
@@ -164,6 +317,8 @@ async def test_management(async_client: aioredis.Redis):
         "HASH",
         "prefixes",
         ["p2"],
+        "default_language",
+        "english",
         "default_score",
         1,
     ]
@@ -197,10 +352,16 @@ async def test_management(async_client: aioredis.Redis):
             "1",
             "distance_metric",
             "L2",
+            "initial_cap",
+            "100",
             "M",
             "16",
             "ef_construction",
             "200",
+            "ef_runtime",
+            "10",
+            "epsilon",
+            "0.010000",
         ],
     ]
 
@@ -279,8 +440,8 @@ async def test_big_json(async_client: aioredis.Redis):
     await i1.dropindex()
 
 
-async def knn_query(idx, query, vector):
-    params = {"vec": np.array(vector, dtype=np.float32).tobytes()}
+async def knn_query(idx, query, vector, np_dtype=np.float32):
+    params = {"vec": np.array(vector, dtype=np_dtype).tobytes()}
     result = await idx.search(query, params)
     return {doc["id"] for doc in result.docs}
 
@@ -336,6 +497,69 @@ async def test_knn(async_client: aioredis.Redis, index_type, algo_type):
 
     assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos $vec]", [10.0] == {"k8", "k10", "k12"})
     await i2.dropindex()
+
+
+@dfly_args({"proactor_threads": 4})
+@pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
+@pytest.mark.parametrize("algo_type", ["FLAT", "HNSW"])
+@pytest.mark.parametrize("data_type", ["INT8", "UINT8", "FLOAT16", "BFLOAT16", "FLOAT64"])
+async def test_knn_dtypes(async_client: aioredis.Redis, index_type, algo_type, data_type):
+    """End-to-end KNN via redis-py for every non-float32 dtype, over HASH+JSON and FLAT+HNSW.
+    Positions are small integers, exactly representable in all dtypes, so ordering is exact."""
+    np_dtype = np_dtype_for(data_type)
+    idx = async_client.ft(f"i-{index_type}-{algo_type}-{data_type}")
+
+    vector_field = VectorField(
+        "pos",
+        algorithm=algo_type,
+        attributes={"TYPE": data_type, "DIM": 1, "DISTANCE_METRIC": "L2"},
+    )
+    await idx.create_index(
+        fix_schema_naming(index_type, [TagField("even"), vector_field]),
+        definition=IndexDefinition(index_type=index_type),
+    )
+
+    n = 40  # keep within int8/uint8 range
+    pipe = async_client.pipeline()
+    for i in range(n):
+        even = "yes" if i % 2 == 0 else "no"
+        if index_type == IndexType.HASH:
+            pipe.hset(
+                f"k{i}",
+                mapping={"even": even, "pos": np.array([i], dtype=np_dtype).tobytes()},
+            )
+        else:
+            pipe.json().set(f"k{i}", "$", {"even": even, "pos": [i]})
+    await pipe.execute()
+
+    assert await knn_query(idx, "* => [KNN 3 @pos $vec]", [20], np_dtype) == {"k19", "k20", "k21"}
+    assert await knn_query(idx, "@even:{yes} => [KNN 3 @pos $vec]", [10], np_dtype) == {
+        "k8",
+        "k10",
+        "k12",
+    }
+    await idx.dropindex()
+
+
+@dfly_args({"proactor_threads": 4})
+@pytest.mark.parametrize("data_type", ["INT8", "UINT8", "FLOAT16", "BFLOAT16", "FLOAT64"])
+async def test_ftinfo_vector_data_type(async_client: aioredis.Redis, data_type):
+    """FT.INFO must round-trip the vector field's declared data_type (redisvl validates on it)."""
+    name = f"info-{data_type}"
+    idx = async_client.ft(name)
+    await idx.create_index(
+        [
+            VectorField(
+                "pos",
+                algorithm="HNSW",
+                attributes={"TYPE": data_type, "DIM": 4, "DISTANCE_METRIC": "L2"},
+            )
+        ],
+        definition=IndexDefinition(index_type=IndexType.HASH),
+    )
+    attr = _search_attribute(await async_client.execute_command("FT.INFO", name), "pos")
+    assert attr[attr.index("data_type") + 1] == data_type
+    await idx.dropindex()
 
 
 NUM_DIMS = 10
@@ -450,18 +674,15 @@ async def test_vector_empty_and_update(async_client: aioredis.Redis, index_type,
     await idx.dropindex()
 
 
-@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
-@pytest.mark.parametrize("start_threads, reload_threads", [(4, 4), (4, 2), (2, 4)])
-async def test_hnsw_reload_different_threads(
-    df_factory: DflyInstanceFactory, document_type, start_threads, reload_threads
+async def _hnsw_save_reload_check(
+    df_factory: DflyInstanceFactory, seeder: HnswSearchSeeder, start_threads=4, reload_threads=4
 ):
-    """HNSW KNN must still work after SAVE + restart with a different thread count."""
-    dbfilename = f"hnsw_threads_{tmp_file_name()}"
+    """Seed an HNSW index, SAVE, restart, and assert every doc stays indexed after reload."""
+    dbfilename = f"hnsw_reload_{tmp_file_name()}"
     inst = df_factory.create(proactor_threads=start_threads, dbfilename=dbfilename)
     inst.start()
     client = inst.client()
 
-    seeder = HnswSearchSeeder(num_initial_docs=50, num_dims=8, document_type=document_type)
     await seeder.create_index(client)
     await seeder.seed_initial_docs(client)
 
@@ -489,6 +710,63 @@ async def test_hnsw_reload_different_threads(
         assert await seeder._search_knn_filtered(
             client2, query_vec, key, k=1
         ), f"doc {key} lost from index after reload"
+
+
+@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
+@pytest.mark.parametrize("start_threads, reload_threads", [(4, 4), (4, 2), (2, 4)])
+async def test_hnsw_reload_different_threads(
+    df_factory: DflyInstanceFactory, document_type, start_threads, reload_threads
+):
+    """HNSW KNN must still work after SAVE + restart with a different thread count."""
+    seeder = HnswSearchSeeder(num_initial_docs=50, num_dims=8, document_type=document_type)
+    await _hnsw_save_reload_check(df_factory, seeder, start_threads, reload_threads)
+
+
+@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
+@pytest.mark.parametrize("data_type", ["INT8", "UINT8", "FLOAT16", "BFLOAT16", "FLOAT64"])
+async def test_hnsw_reload_dtypes(df_factory: DflyInstanceFactory, document_type, data_type):
+    """A non-float32 HNSW index survives SAVE + reload with its native width intact."""
+    seeder = HnswSearchSeeder(
+        num_initial_docs=50, num_dims=8, document_type=document_type, data_type=data_type
+    )
+    await _hnsw_save_reload_check(df_factory, seeder)
+
+
+async def test_search_options_reload(df_factory: DflyInstanceFactory):
+    dbfilename = f"search_options_{tmp_file_name()}"
+    inst = df_factory.create(proactor_threads=4, dbfilename=dbfilename)
+    inst.start()
+    client = inst.client()
+
+    await _create_search_option_indexes(client)
+    await _assert_search_option_indexes(client)
+
+    await client.execute_command("SAVE")
+    inst.stop()
+
+    inst2 = df_factory.create(proactor_threads=2, dbfilename=dbfilename)
+    inst2.start()
+    client2 = inst2.client()
+    await wait_available_async(client2)
+
+    await _assert_search_option_indexes(client2)
+
+
+async def test_search_options_full_sync_replication(df_factory: DflyInstanceFactory):
+    master = df_factory.create(proactor_threads=4)
+    master.start()
+    c_master = master.client()
+
+    await _create_search_option_indexes(c_master)
+    await _assert_search_option_indexes(c_master)
+
+    replica = df_factory.create(proactor_threads=2, replicaof=f"localhost:{master.port}")
+    replica.start()
+    c_replica = replica.client()
+    await wait_available_async(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    await _assert_search_option_indexes(c_replica)
 
 
 @dfly_args({"proactor_threads": 4})
@@ -827,8 +1105,6 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     Tests with different thread counts between master and replica to ensure proper
     shard handling during replication.
     """
-    from .instance import DflyInstanceFactory
-
     master = df_factory.create(proactor_threads=master_threads)
     # logbuflevel=-1 forces glog to flush every log line immediately, so INFO messages
     # are visible in the log file when we read it (before the process exits).
@@ -1295,3 +1571,302 @@ async def test_ft_aggregate_addscores(async_client: aioredis.Redis):
         assert float(results[0]["__score"]) >= float(results[1]["__score"])
 
     await async_client.execute_command("FT.DROPINDEX", "agg_score_idx")
+
+
+# Documents must be diverse enough that BM25/TFIDF rankings differ between docs;
+# ~200 docs spread across 4 shards puts ~50 docs per shard, enough that local
+# IDF/avgdl differ measurably from global if scoring is per-shard.
+def _make_scorer_corpus():
+    base_terms = [
+        "alpha beta",
+        "alpha gamma delta",
+        "beta gamma delta epsilon",
+        "alpha epsilon",
+        "gamma",
+        "delta epsilon zeta",
+        "alpha zeta eta",
+        "alpha alpha alpha beta",
+        "epsilon eta theta",
+        "beta beta gamma theta iota",
+    ]
+    docs = []
+    for i in range(200):
+        content = base_terms[i % len(base_terms)]
+        if i % 7 == 0:
+            content = content + " kappa lambda mu nu xi omicron"
+        if i % 13 == 0:
+            content = content + " " + content
+        docs.append({"key": f"sdoc:{i}", "content": content})
+    return docs
+
+
+async def _index_and_query_with_scorer(client, scorer: str, query: str, k: int):
+    idx_name = f"scorer_shard_idx_{scorer.lower().replace('.', '_')}"
+    await client.execute_command(
+        "FT.CREATE", idx_name, "ON", "HASH", "PREFIX", "1", "sdoc:", "SCHEMA", "content", "TEXT"
+    )
+
+    for doc in _make_scorer_corpus():
+        await client.hset(doc["key"], mapping={"content": doc["content"]})
+
+    res = await client.execute_command(
+        "FT.SEARCH",
+        idx_name,
+        query,
+        "WITHSCORES",
+        "SCORER",
+        scorer,
+        "LIMIT",
+        "0",
+        str(k),
+    )
+
+    total = int(res[0])
+    docs = []
+    i = 1
+    while i < len(res):
+        key = res[i].decode() if isinstance(res[i], bytes) else res[i]
+        score_raw = res[i + 1]
+        score = float(score_raw.decode() if isinstance(score_raw, bytes) else score_raw)
+        docs.append((key, score))
+        i += 3  # skip key, score, fields
+
+    await client.execute_command("FT.DROPINDEX", idx_name)
+    return total, docs
+
+
+@pytest.mark.parametrize(
+    "scorer", ["BM25STD", "TFIDF", "TFIDF.DOCNORM", "BM25STD.NORM", "BM25STD.TANH"]
+)
+async def test_scorer_consistent_across_shards(df_factory: DflyInstanceFactory, scorer: str):
+    """Top-K and scores must be identical regardless of proactor_threads count.
+
+    Reproducer for the per-shard IDF/avgdl bug: when a scorer is computed using
+    only the docs that live on the executing shard, IDF and avgdl shift with
+    shard count and ranking degrades. The fix runs a stats-collection phase
+    across all shards before scoring so that every shard uses the same global
+    statistics. This test verifies that property.
+    """
+    inst1 = df_factory.create(proactor_threads=1)
+    inst4 = df_factory.create(proactor_threads=4)
+    df_factory.start_all([inst1, inst4])
+
+    client1 = inst1.client()
+    client4 = inst4.client()
+
+    # Query that matches a meaningful subset (most docs contain at least one of these).
+    query = "alpha|beta|gamma"
+    k = 20
+
+    total1, docs1 = await _index_and_query_with_scorer(client1, scorer, query, k)
+    total4, docs4 = await _index_and_query_with_scorer(client4, scorer, query, k)
+
+    assert total1 == total4, f"total_hits diverged: 1-shard={total1}, 4-shard={total4}"
+
+    keys1 = [d[0] for d in docs1]
+    keys4 = [d[0] for d in docs4]
+    assert keys1 == keys4, (
+        f"top-{k} ordering differs across shard counts (scorer={scorer}).\n"
+        f"  1-shard: {keys1}\n"
+        f"  4-shard: {keys4}"
+    )
+
+    # Scores: identical inputs to the scorer => identical outputs (bit-equality
+    # would be ideal, but tolerate tiny FP variation from sum order).
+    by_key1 = dict(docs1)
+    by_key4 = dict(docs4)
+    for key in keys1:
+        s1, s4 = by_key1[key], by_key4[key]
+        denom = max(abs(s1), abs(s4), 1e-9)
+        assert abs(s1 - s4) / denom < 1e-4, (
+            f"score for {key} differs across shard counts (scorer={scorer}): "
+            f"1-shard={s1}, 4-shard={s4}"
+        )
+
+
+async def _aggregate_with_scorer(client, scorer: str, query: str, k: int):
+    idx_name = f"agg_scorer_idx_{scorer.lower().replace('.', '_')}"
+    await client.execute_command(
+        "FT.CREATE",
+        idx_name,
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "sdoc:",
+        "SCHEMA",
+        "content",
+        "TEXT",
+        "doc_id",
+        "TAG",
+    )
+    for doc in _make_scorer_corpus():
+        await client.hset(doc["key"], mapping={"content": doc["content"], "doc_id": doc["key"]})
+
+    res = await client.execute_command(
+        "FT.AGGREGATE",
+        idx_name,
+        query,
+        "LOAD",
+        "1",
+        "@doc_id",
+        "SCORER",
+        scorer,
+        "ADDSCORES",
+        "SORTBY",
+        "2",
+        "@__score",
+        "DESC",
+        "LIMIT",
+        "0",
+        str(k),
+    )
+
+    docs = []
+    for row in res[1:]:
+        kv = {}
+        for i in range(0, len(row), 2):
+            k_ = row[i].decode() if isinstance(row[i], bytes) else row[i]
+            v_ = row[i + 1].decode() if isinstance(row[i + 1], bytes) else row[i + 1]
+            kv[k_] = v_
+        docs.append((kv["doc_id"], float(kv["__score"])))
+
+    await client.execute_command("FT.DROPINDEX", idx_name)
+    return docs
+
+
+@pytest.mark.parametrize(
+    "scorer", ["BM25STD", "TFIDF", "TFIDF.DOCNORM", "BM25STD.NORM", "BM25STD.TANH"]
+)
+async def test_aggregate_scorer_consistent_across_shards(
+    df_factory: DflyInstanceFactory, scorer: str
+):
+    """FT.AGGREGATE top-K and order must be identical regardless of shard count.
+
+    Tied scores are broken implicitly by doc key in Aggregator::DoSort.
+    """
+    inst1 = df_factory.create(proactor_threads=1)
+    inst4 = df_factory.create(proactor_threads=4)
+    df_factory.start_all([inst1, inst4])
+
+    docs1 = await _aggregate_with_scorer(inst1.client(), scorer, "alpha|beta|gamma", 20)
+    docs4 = await _aggregate_with_scorer(inst4.client(), scorer, "alpha|beta|gamma", 20)
+
+    assert [d[0] for d in docs1] == [d[0] for d in docs4], (
+        f"FT.AGGREGATE top-K differs across shards (scorer={scorer}).\n"
+        f"  1-shard: {[d[0] for d in docs1]}\n  4-shard: {[d[0] for d in docs4]}"
+    )
+    for (k1, s1), (k4, s4) in zip(docs1, docs4):
+        denom = max(abs(s1), abs(s4), 1e-9)
+        assert abs(s1 - s4) / denom < 1e-4, f"score for {k1} differs: {s1} vs {s4}"
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_bm25std_norm_single_global_winner(async_client: aioredis.Redis):
+    """Multi-shard BM25STD.NORM uses one global max: only the single global-best document
+    reaches 1.0. A per-shard normalization bug would make one document per shard reach 1.0."""
+    await async_client.execute_command(
+        "FT.CREATE", "norm_win_idx", "ON", "HASH", "PREFIX", "1", "nw:", "SCHEMA", "content", "TEXT"
+    )
+    # Distinct "hello" frequencies -> distinct scores; keys spread across the 4 shards.
+    for i in range(1, 13):
+        await async_client.hset(f"nw:{i}", mapping={"content": " ".join(["hello"] * i)})
+
+    def parse(res):
+        out = {}
+        i = 1
+        while i + 1 < len(res):
+            key = res[i].decode() if isinstance(res[i], bytes) else res[i]
+            s = res[i + 1]
+            out[key] = float(s.decode() if isinstance(s, bytes) else s)
+            i += 2  # NOCONTENT -> (key, score) pairs
+        return out
+
+    raw = parse(
+        await async_client.execute_command(
+            "FT.SEARCH",
+            "norm_win_idx",
+            "hello",
+            "NOCONTENT",
+            "WITHSCORES",
+            "SCORER",
+            "BM25STD",
+            "LIMIT",
+            "0",
+            "100",
+        )
+    )
+    norm = parse(
+        await async_client.execute_command(
+            "FT.SEARCH",
+            "norm_win_idx",
+            "hello",
+            "NOCONTENT",
+            "WITHSCORES",
+            "SCORER",
+            "BM25STD.NORM",
+            "LIMIT",
+            "0",
+            "100",
+        )
+    )
+
+    assert len(raw) == 12
+    assert len(norm) == 12
+    max_raw = max(raw.values())
+    winners = [k for k, v in norm.items() if abs(v - 1.0) < 1e-6]
+    assert len(winners) == 1, f"expected exactly one global winner, got {winners}"
+    for k, v in norm.items():
+        assert v == pytest.approx(raw[k] / max_raw, abs=1e-5)
+        assert v <= 1.0 + 1e-9
+
+    await async_client.execute_command("FT.DROPINDEX", "norm_win_idx")
+
+
+async def test_sortby_with_scores_alignment(async_client: aioredis.Redis):
+    """Regression: SORTBY+WITHSCORES must keep score/sort_score/key consistent
+    after per-shard re-rank (re-rank must not desync sort_scores).
+    """
+    await async_client.execute_command(
+        "FT.CREATE",
+        "sw_idx",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "sw:",
+        "SCHEMA",
+        "name",
+        "TEXT",
+        "rank",
+        "NUMERIC",
+        "SORTABLE",
+    )
+    for i in range(1, 13):
+        await async_client.hset(f"sw:{i}", mapping={"name": "alpha beta", "rank": str(100 - i)})
+
+    res = await async_client.execute_command(
+        "FT.SEARCH", "sw_idx", "alpha", "SORTBY", "rank", "DESC", "WITHSCORES", "LIMIT", "0", "5"
+    )
+
+    total = int(res[0])
+    assert total == 12
+
+    keys, ranks = [], []
+    i = 1
+    while i < len(res):
+        key = res[i].decode() if isinstance(res[i], bytes) else res[i]
+        fields = res[i + 2]
+        kv = {}
+        for j in range(0, len(fields), 2):
+            k_ = fields[j].decode() if isinstance(fields[j], bytes) else fields[j]
+            v_ = fields[j + 1].decode() if isinstance(fields[j + 1], bytes) else fields[j + 1]
+            kv[k_] = v_
+        keys.append(key)
+        ranks.append(int(kv["rank"]))
+        i += 3
+
+    # SORTBY rank DESC: ranks must be strictly descending. If re-rank desynced
+    # sort_scores from ids, ranks would be jumbled.
+    assert ranks == sorted(ranks, reverse=True), f"SORTBY desynced: {keys} -> {ranks}"
+    await async_client.execute_command("FT.DROPINDEX", "sw_idx")

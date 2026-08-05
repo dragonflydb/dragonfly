@@ -18,13 +18,13 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
+#include "server/command_registry.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
 
 ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
-ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
@@ -112,38 +112,6 @@ TEST_F(DflyEngineTest, Sds) {
   sdsfreesplitres(argv, argc);
 }
 
-class DflyRenameCommandTest : public DflyEngineTest {
- protected:
-  DflyRenameCommandTest() {
-    // rename flushall to myflushall, flushdb command will not be able to execute
-    absl::SetFlag(
-        &FLAGS_rename_command,
-        std::vector<std::string>({"flushall=myflushall", "flushdb=", "ping=abcdefghijklmnop"}));
-  }
-
-  absl::FlagSaver _saver;
-};
-
-TEST_F(DflyRenameCommandTest, RenameCommand) {
-  Run({"set", "a", "1"});
-  ASSERT_EQ(1, CheckedInt({"dbsize"}));
-  // flushall should not execute anything and should return error, as it was renamed.
-  ASSERT_THAT(Run({"flushall"}), ErrArg("unknown command `FLUSHALL`"));
-
-  ASSERT_EQ(1, CheckedInt({"dbsize"}));
-
-  ASSERT_EQ(Run({"myflushall"}), "OK");
-
-  ASSERT_EQ(0, CheckedInt({"dbsize"}));
-
-  ASSERT_THAT(Run({"flushdb", "0"}), ErrArg("unknown command `FLUSHDB`"));
-
-  ASSERT_THAT(Run({""}), ErrArg("unknown command ``"));
-
-  ASSERT_THAT(Run({"ping"}), ErrArg("unknown command `PING`"));
-  ASSERT_THAT(Run({"abcdefghijklmnop"}), "PONG");
-}
-
 TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {
   Run({"set", "a", "1"});
   Run({"move", "a", "1"});
@@ -172,6 +140,23 @@ TEST_F(DflyEngineTest, EvalResp) {
   ASSERT_THAT(resp, ArrLen(4));
   EXPECT_THAT(resp.GetVec(), AnyOf(ElementsAre("a", IntArg(1), "b", IntArg(2)),
                                    ElementsAre("b", IntArg(2), "a", IntArg(1))));
+}
+
+TEST_F(DflyEngineTest, EvalGetLargeBorrowedStrings) {
+  std::string raw(32 * 1024, '\x81');
+  std::string ascii(32 * 1024, 'a');
+
+  EXPECT_THAT(Run({"set", "ascii", ascii}), "OK");
+  EXPECT_THAT(Run({"set", "raw", raw}), "OK");
+  optional<int64_t> ascii_usage = Run({"memory", "usage", "ascii"}).GetInt();
+  optional<int64_t> raw_usage = Run({"memory", "usage", "raw"}).GetInt();
+  ASSERT_TRUE(ascii_usage);
+  ASSERT_TRUE(raw_usage);
+  EXPECT_GT(*raw_usage, *ascii_usage);
+
+  EXPECT_THAT(Run({"eval", "return {redis.call('get', KEYS[1]), redis.call('get', KEYS[2])}", "2",
+                   "ascii", "raw"}),
+              RespElementsAre(ascii, raw));
 }
 
 TEST_F(DflyEngineTest, EvalPublish) {
@@ -301,11 +286,11 @@ TEST_F(DflyEngineTest, ScriptFlush) {
   resp = Run({"evalsha", sha, "0"});
   EXPECT_THAT(5, resp.GetInt());
   resp = Run({"script", "exists", sha});
-  EXPECT_THAT(1, resp.GetInt());
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 
   resp = Run({"script", "flush"});
   resp = Run({"script", "exists", sha});
-  EXPECT_THAT(0, resp.GetInt());
+  EXPECT_THAT(resp, RespElementsAre(IntArg(0)));
   EXPECT_THAT(Run({"evalsha", sha, "0"}), ErrArg("NOSCRIPT No matching script. Please use EVAL."));
 
   resp = Run({"script", "load", "return 5"});
@@ -314,7 +299,7 @@ TEST_F(DflyEngineTest, ScriptFlush) {
   resp = Run({"evalsha", sha, "0"});
   EXPECT_THAT(5, resp.GetInt());
   resp = Run({"script", "exists", sha});
-  EXPECT_THAT(1, resp.GetInt());
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 TEST_F(DflyEngineTestWithRegistry, Hello) {
@@ -686,6 +671,17 @@ TEST_F(DflyEngineTest, PUnsubscribe) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "b*", IntArg(0)));
 }
 
+TEST_F(DflyEngineTest, MonitorSubscriptionsAccounting) {
+  EXPECT_EQ(Run({"monitor"}), "OK");
+  EXPECT_EQ(1u, NumSubscriptions("IO0"));
+
+  // Deactivating the monitor (here via QUIT) must fully undo its contribution to `subscriptions`,
+  // so the connection is treated as non-subscribed again (eligible for thread migration and
+  // synchronous dispatch).
+  EXPECT_EQ(Run({"quit"}), "OK");
+  EXPECT_EQ(0u, NumSubscriptions("IO0"));
+}
+
 TEST_F(DflyEngineTest, Bug468) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
@@ -693,7 +689,7 @@ TEST_F(DflyEngineTest, Bug468) {
   ASSERT_EQ(resp, "QUEUED");
 
   resp = Run({"exec"});
-  ASSERT_THAT(resp, ErrArg("not an integer"));
+  ASSERT_THAT(resp, RespElementsAre(ErrArg("not an integer")));
 
   ASSERT_FALSE(IsLocked(0, "foo"));
 
@@ -703,15 +699,27 @@ TEST_F(DflyEngineTest, Bug468) {
   ASSERT_FALSE(IsLocked(0, "foo"));
 }
 
+struct CountingConsumer : public DbSlice::ChangeConsumerInterface {
+  explicit CountingConsumer(unsigned* cb_hits) : cb_hits_(cb_hits) {
+  }
+
+  void OnChange(DbIndex db_index, const ChangeReq&) {
+    (*cb_hits_)++;
+  }
+
+  unsigned* cb_hits_;
+};
+
 TEST_F(DflyEngineTest, Bug496) {
   shard_set->RunBlockingInParallel([](EngineShard* shard) {
     auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
-    int cb_hits = 0;
+    unsigned cb_hits = 0;
+    CountingConsumer consumer{&cb_hits};
+
     // RegisterOnChange requires the shard lock to be held (see #7153).
     shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
-    uint32_t cb_id =
-        db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
+    db.RegisterOnChange(&consumer);
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
 
     {
@@ -732,7 +740,29 @@ TEST_F(DflyEngineTest, Bug496) {
       EXPECT_EQ(cb_hits, 3);
     }
 
-    db.UnregisterOnChange(cb_id);
+    EXPECT_TRUE(db.UnregisterOnChange(&consumer));
+  });
+}
+
+TEST_F(DflyEngineTest, ReduceHeapUsageIdempotent) {
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+
+    {
+      auto res = *db.AddOrFind({}, "key", std::nullopt);
+      res.it->second.SetString(string(1000, 'x'));
+    }
+
+    size_t before = db.GetStats().db_stats[0].obj_memory_usage;
+    EXPECT_GT(before, 0u);
+
+    auto res = db.FindMutable({}, "key");
+    res.post_updater.ReduceHeapUsage();
+    // A second call before the value is replaced must not subtract the same bytes again.
+    res.post_updater.ReduceHeapUsage();
+    res.post_updater.Run();
+
+    EXPECT_EQ(db.GetStats().db_stats[0].obj_memory_usage, before);
   });
 }
 
@@ -1088,7 +1118,7 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   EXPECT_EQ(Run({"___ping"}), "PONG");
 
   Metrics metrics = GetMetrics();
-  const auto& stats = metrics.cmd_stats_map;
+  auto stats = service_->mutable_registry()->NamedCallStats(metrics.cmd_call_stats);
 
   EXPECT_THAT(stats, Contains(Pair("___set", Key(1))));
   EXPECT_THAT(stats, Contains(Pair("set", Key(1))));
@@ -1098,13 +1128,14 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   // test stats within multi-exec
   EXPECT_EQ(Run({"multi"}), "OK");
   EXPECT_EQ(Run({"___set", "a", "x"}), "QUEUED");
-  EXPECT_EQ(Run({"exec"}), "OK");
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("OK"));
 
   metrics = GetMetrics();
-  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("___set", Key(2))));
-  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("set", Key(1))));
-  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("multi", Key(1))));
-  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("exec", Key(1))));
+  stats = service_->mutable_registry()->NamedCallStats(metrics.cmd_call_stats);
+  EXPECT_THAT(stats, Contains(Pair("___set", Key(2))));
+  EXPECT_THAT(stats, Contains(Pair("set", Key(1))));
+  EXPECT_THAT(stats, Contains(Pair("multi", Key(1))));
+  EXPECT_THAT(stats, Contains(Pair("exec", Key(1))));
 }
 
 TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {
@@ -1120,5 +1151,41 @@ TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {
   EXPECT_EQ(command_histograms.at("set"), command_histograms.at("___set"));
   EXPECT_EQ(command_histograms.at("ping"), command_histograms.at("___ping"));
 }
+
+static void BM_FindExtended(benchmark::State& state) {
+  CommandRegistry registry;
+
+  registry.StartFamily();
+  registry << CommandId{"SET", CO::JOURNALED | CO::DENYOOM, -3, 1, 1}
+           << CommandId{"GET", CO::READONLY | CO::FAST, 2, 1, 1}
+           << CommandId{"DEL", CO::JOURNALED, -2, 1, -1}
+           << CommandId{"MGET", CO::READONLY | CO::FAST, -2, 1, -1}
+           << CommandId{"MSET", CO::JOURNALED | CO::DENYOOM, -3, 1, -1}
+           << CommandId{"PING", CO::FAST, -1, 0, 0}
+           << CommandId{"EXPIRE", CO::JOURNALED | CO::FAST, 3, 1, 1}
+           << CommandId{"TTL", CO::READONLY | CO::FAST, 2, 1, 1}
+           << CommandId{"LPUSH", CO::JOURNALED | CO::DENYOOM, -3, 1, 1}
+           << CommandId{"SADD", CO::JOURNALED | CO::DENYOOM, -3, 1, 1}
+           << CommandId{"ZADD", CO::JOURNALED | CO::DENYOOM, -4, 1, 1}
+           << CommandId{"HSET", CO::JOURNALED | CO::DENYOOM, -4, 1, 1}
+           << CommandId{"SUBSCRIBE", CO::LOADING, -2, 0, 0}
+           << CommandId{"PUBLISH", CO::LOADING, 3, 0, 0}
+           << CommandId{"EVAL", CO::NOSCRIPT, -3, 0, 0}
+           << CommandId{"XADD", CO::JOURNALED | CO::DENYOOM, -5, 1, 1};
+
+  registry.Init(1);
+
+  const string_view kCommands[] = {"set", "get", "del", "ping", "hset", "zadd", "mget", "eval"};
+  constexpr size_t kNumCommands = sizeof(kCommands) / sizeof(kCommands[0]);
+
+  size_t i = 0;
+  while (state.KeepRunning()) {
+    string_view cmd = kCommands[i++ % kNumCommands];
+    facade::ParsedArgs args(CmdArgList{&cmd, 1});
+    auto [cid, tail] = registry.FindExtended(args);
+    benchmark::DoNotOptimize(cid);
+  }
+}
+BENCHMARK(BM_FindExtended);
 
 }  // namespace dfly

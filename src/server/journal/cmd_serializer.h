@@ -25,8 +25,7 @@ class CmdSerializer {
  public:
   using FlushSerialized = std::function<void(std::string)>;
 
-  explicit CmdSerializer(DbSlice* db_slice, FlushSerialized cb,
-                         size_t max_serialization_buffer_size);
+  explicit CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size);
 
   // Returns how many commands we broke this entry into (like multiple HSETs etc)
   size_t SerializeEntry(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
@@ -45,7 +44,6 @@ class CmdSerializer {
   void SerializeRestore(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
                         uint64_t expire_ms);
 
-  DbSlice* db_slice_;
   FlushSerialized cb_;
   size_t max_serialization_buffer_size_;
   std::unique_ptr<RdbSerializer> serializer_;

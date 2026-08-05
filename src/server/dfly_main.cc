@@ -84,6 +84,11 @@ ABSL_DECLARE_FLAG(std::string, admin_bind);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, maxmemory);
 ABSL_DECLARE_FLAG(uint32_t, proactor_threads);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
+ABSL_FLAG(bool, use_oah_set, false, "If true, store SET values in OAHSet instead of StringSet.");
+
+namespace dfly {
+extern bool g_use_oah_set;  // defined in core/oah_set.h
+}
 
 #ifdef USE_ABSL_LOG
 ABSL_FLAG(bool, alsologtostderr, false, "also log messages to stderr in addition to logfiles");
@@ -138,6 +143,9 @@ using absl::StrCat;
 using strings::HumanReadableNumBytes;
 
 namespace dfly {
+
+// Forward-declared here to avoid pulling the heavy protocol_client.h into this translation unit.
+bool ValidateClientTlsFlags();
 
 namespace {
 
@@ -528,14 +536,17 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   iouring_res = -iouring_res;
 
   if (iouring_res == ENOSYS) {
-    LOG(WARNING) << "iouring API is not supported. switching to epoll.";
+    LOG(WARNING) << "iouring API is not supported. Switching to epoll.";
   } else if (iouring_res == ENOMEM) {
     LOG(WARNING) << "io_uring does not have enough memory. That can happen when your "
                     "max locked memory is too limited. If you run via docker, "
                     "try adding '--ulimit memlock=-1' to \"docker run\" command."
                     "Meanwhile, switching to epoll";
+  } else if (iouring_res == EPERM) {
+    LOG(WARNING) << "Check if io_uring is disabled via /proc/sys/kernel/io_uring_disabled. "
+                    "Switching to epoll.";
   } else {
-    LOG(WARNING) << "Weird error " << iouring_res << " switching to epoll";
+    LOG(WARNING) << "Weird error " << strerror(iouring_res) << " switching to epoll";
   }
 
   return true;
@@ -780,6 +791,8 @@ void RegisterBufRings(ProactorPool* pool) {
                     "io_uring proactor";
     return;
   }
+
+  CHECK_LE(bufcnt, 16384u);
 
   // We need a power of 2 length.
   bufcnt = absl::bit_ceil(bufcnt);
@@ -1113,6 +1126,15 @@ Usage: dragonfly [FLAGS]
     return 1;
   }
 
+  // Validate startup flags (TLS + snapshot filename) BEFORE creating the pidfile and before
+  // starting the proactor pool. They return false on a bad config; we exit cleanly (code 1)
+  // here, before the fiber runtime exists, which avoids a stale pidfile and aborting during
+  // fiber-runtime teardown.
+  if (!dfly::ValidateServerTlsFlags() || !dfly::ValidateClientTlsFlags() ||
+      !dfly::ValidateSnapshotFilenameFlags()) {
+    return 1;
+  }
+
   string pidfile_path = GetFlag(FLAGS_pidfile);
   if (!pidfile_path.empty()) {
     if (!CreatePidFile(pidfile_path)) {
@@ -1139,6 +1161,7 @@ Usage: dragonfly [FLAGS]
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
 
   dfly::max_memory_limit = absl::GetFlag(FLAGS_maxmemory);
+  dfly::g_use_oah_set = absl::GetFlag(FLAGS_use_oah_set);
 
   if (dfly::max_memory_limit == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";

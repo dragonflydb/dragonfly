@@ -15,6 +15,11 @@
 namespace dfly {
 namespace {
 
+size_t AllocationSize(size_t len) {
+  CHECK_LE(len, std::numeric_limits<size_t>::max() / sizeof(int64_t));
+  return len * sizeof(int64_t);
+}
+
 uint32_t Offset(uint64_t h1, uint64_t h2, uint32_t row, uint32_t width) {
   uint32_t idx = static_cast<uint32_t>((h1 + (row * h2)) % width);
   return row * width + idx;
@@ -25,13 +30,13 @@ uint32_t Offset(uint64_t h1, uint64_t h2, uint32_t row, uint32_t width) {
 CMS::CMS(uint32_t width, uint32_t depth, PMR_NS::memory_resource* mr)
     : width_(width), depth_(depth), mr_(mr) {
   size_t len = NumCounters();
-  counters_ = static_cast<int64_t*>(mr_->allocate(len * sizeof(int64_t), alignof(int64_t)));
+  counters_ = static_cast<int64_t*>(mr_->allocate(AllocationSize(len), alignof(int64_t)));
   std::fill_n(counters_, len, 0);
 }
 
 CMS::~CMS() {
   if (counters_) {
-    mr_->deallocate(counters_, NumCounters() * sizeof(int64_t), alignof(int64_t));
+    mr_->deallocate(counters_, AllocationSize(NumCounters()), alignof(int64_t));
   }
 }
 
@@ -50,7 +55,7 @@ CMS::CMS(CMS&& other) noexcept
 CMS& CMS::operator=(CMS&& other) noexcept {
   if (this != &other) {
     if (counters_) {
-      mr_->deallocate(counters_, NumCounters() * sizeof(int64_t), alignof(int64_t));
+      mr_->deallocate(counters_, AllocationSize(NumCounters()), alignof(int64_t));
     }
     width_ = other.width_;
     depth_ = other.depth_;

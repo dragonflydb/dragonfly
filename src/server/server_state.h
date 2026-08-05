@@ -13,6 +13,7 @@
 #include "server/acl/acl_log.h"
 #include "server/channel_store.h"
 #include "server/common_types.h"
+#include "server/detail/egress_throttle.h"
 #include "server/script_mgr.h"
 #include "server/slowlog.h"
 #include "util/sliding_counter.h"
@@ -122,7 +123,6 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t multi_squash_exec_hop_usec = 0;
     uint64_t multi_squash_exec_reply_usec = 0;
     uint64_t squashed_commands = 0;
-    uint64_t squash_stats_ignored = 0;
     uint64_t blocking_commands_in_pipelines = 0;
     uint64_t blocked_on_interpreter = 0;
 
@@ -137,6 +137,13 @@ class ServerState {  // public struct - to allow initialization.
     uint32_t conn_timeout_events = 0;
     uint64_t psync_requests_total = 0;
     std::valarray<uint64_t> tx_width_freq_arr, squash_width_freq_arr;
+
+    // Throttling metrics
+    uint64_t batch_write_commands_total = 0;
+    uint64_t batch_read_commands_total = 0;
+    uint64_t batch_read_commands_bytes = 0;
+    uint64_t batch_write_commands_bytes = 0;
+    uint64_t rw_throttle_batches_total = 0;
 
     // Memory size of stored commands during multi-exec in connections
     size_t stored_cmd_bytes = 0;
@@ -190,7 +197,8 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t rss_mem = 0;
   };
 
-  MemoryUsageStats GetMemoryUsage(uint64_t now_ns);
+  MemoryUsageStats GetMemoryUsage(uint64_t now_usec) const;
+  bool ShouldDenyOnOOM(uint64_t now_usec);
 
   bool AllowInlineScheduling() const;
 
@@ -243,6 +251,10 @@ class ServerState {  // public struct - to allow initialization.
 
   uint32_t thread_index() const {
     return thread_index_;
+  }
+
+  detail::EgressThrottler& GetEgressThrottler() {
+    return egress_throttler_;
   }
 
   bool ShouldLogSlowCmd(unsigned latency_usec) const;
@@ -326,8 +338,11 @@ class ServerState {  // public struct - to allow initialization.
   absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
   uint32_t thread_index_ = 0;
 
-  uint64_t used_mem_last_update_ = 0;
-  MemoryUsageStats memory_stats_cached_;  // thread local cache of used and rss memory current
+  detail::EgressThrottler egress_throttler_{0};
+
+  mutable uint64_t used_mem_last_read_usec_ = 0;
+  mutable MemoryUsageStats
+      memory_stats_cached_;  // thread local cache of used and rss memory current
 
   static __thread ServerState* state_;
 };

@@ -41,7 +41,7 @@ $3
 za1
 $3
 za2
-*4
+*5
 $11
 ZINTERSTORE
 $4
@@ -52,7 +52,7 @@ $3
 za1
 $3
 za2
-*5
+*4
 $10
 ZINTERCARD
 $1
@@ -117,8 +117,8 @@ $1
 -
 $1
 +
-*6
-$15
+*8
+$16
 ZREVRANGEBYSCORE
 $3
 za1
@@ -135,7 +135,7 @@ $1
 $1
 2
 *4
-$13
+$14
 ZREVRANGEBYLEX
 $3
 za1

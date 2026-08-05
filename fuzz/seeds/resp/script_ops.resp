@@ -1,14 +1,14 @@
 *3
 $4
 EVAL
-$28
+$25
 return redis.call('PING')
 $1
 0
-*4
+*5
 $4
 EVAL
-$44
+$42
 return redis.call('SET', KEYS[1], ARGV[1])
 $1
 1
@@ -19,7 +19,7 @@ ev
 *4
 $7
 EVAL_RO
-$37
+$33
 return redis.call('GET', KEYS[1])
 $1
 1

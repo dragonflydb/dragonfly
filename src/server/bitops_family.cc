@@ -14,11 +14,13 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/namespaces.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 #include "util/varz.h"
@@ -33,6 +35,7 @@ namespace {
 
 using ShardStringResults = vector<OpResult<string>>;
 const int32_t OFFSET_FACTOR = 8;  // number of bits in byte
+constexpr char kBitArgErr[] = "The bit argument must be 1 or 0";
 const char* OR_OP_NAME = "OR";
 const char* XOR_OP_NAME = "XOR";
 const char* AND_OP_NAME = "AND";
@@ -42,13 +45,13 @@ using BitsStrVec = vector<string>;
 
 // The following is the list of the functions that would handle the
 // commands that handle the bit operations
-void BitPos(CmdArgList args, CommandContext* cmd_cntx);
-void BitCount(CmdArgList args, CommandContext* cmd_cntx);
-void BitField(CmdArgList args, CommandContext* cmd_cntx);
-void BitFieldRo(CmdArgList args, CommandContext* cmd_cntx);
-void BitOp(CmdArgList args, CommandContext* cmd_cntx);
-void GetBit(CmdArgList args, CommandContext* cmd_cntx);
-void SetBit(CmdArgList args, CommandContext* cmd_cntx);
+void BitPos(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void BitCount(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void BitField(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void BitFieldRo(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void BitOp(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void GetBit(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+void SetBit(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
 OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShard* shard);
 OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset);
@@ -57,6 +60,11 @@ OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, string_view key, 
 OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, string_view key, bool value,
                                         int64_t start, int64_t end, bool as_bit);
 string GetString(const PrimeValue& pv);
+// Materializes the full string value, reading it back from tiered storage if it
+// was offloaded. bitops must never touch an external value directly - the
+// CompactObj accessors CHECK(!IsExternal()).
+OpResult<string> ReadStringValue(DbIndex dbid, string_view key, const PrimeValue& pv,
+                                 EngineShard* shard);
 bool SetBitValue(uint32_t offset, bool bit_value, string* entry);
 std::size_t CountBitSetByByteIndices(string_view at, std::size_t start, std::size_t end);
 std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits);
@@ -272,7 +280,13 @@ class ElementAccess {
     return updater_.is_new;
   }
 
-  string Value() const;
+  // True if the existing value was offloaded to tiered storage.
+  bool IsExternal() const {
+    return !IsNewEntry() && updater_.it->second.IsExternal();
+  }
+
+  // Materializes the value, reading it back from tiered storage if offloaded.
+  OpResult<string> Value() const;
 
   bool GetByteAtIndex(size_t idx, uint8_t* res) const;
   void SetByteAtIndex(size_t idx, uint8_t value) const;
@@ -306,8 +320,13 @@ OpStatus ElementAccess::Find(bool allow_wrong_type) {
   return OpStatus::OK;
 }
 
-string ElementAccess::Value() const {
-  return IsNewEntry() ? string{} : GetString(updater_.it->second);
+OpResult<string> ElementAccess::Value() const {
+  if (IsNewEntry())
+    return OpResult<string>{string{}};
+
+  auto res = ReadStringValue(context_.db_index, key_, updater_.it->second, EngineShard::tlocal());
+  updater_.post_updater.ResyncBaseline();  // the read may have uploaded the value
+  return res;
 }
 
 bool ElementAccess::GetByteAtIndex(size_t idx, uint8_t* res) const {
@@ -334,8 +353,14 @@ void ElementAccess::Commit(string_view new_value) const {
     }
     context_.ns->GetCurrentDbSlice().Del(context_, updater_.it);
   } else {
-    if (!IsNewEntry() && updater_.it->second.ObjType() != OBJ_STRING) {
+    const bool is_external = IsExternal();
+    // The value is replaced wholesale below, so drop the old heap accounting once.
+    if (!IsNewEntry()) {
       updater_.post_updater.ReduceHeapUsage();
+    }
+    if (is_external) {
+      EngineShard::tlocal()->tiered_storage()->Delete(context_.db_index, key_,
+                                                      &updater_.it->second);
     }
     updater_.it->second.SetString(new_value);
     updater_.post_updater.Run();
@@ -369,10 +394,11 @@ OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset,
     return old_value;
   }
 
-  // Get byte where bit offset is located. If offset is out of bound it means
-  // that we need to extend the string otherwise we just update.
+  // In-memory value whose target byte already exists: flip the bit in place.
+  // An offloaded value can't be modified byte-in-place, so it falls through to
+  // the read-modify-write path below.
   uint8_t existing_byte;
-  if (element_access.GetByteAtIndex(byte_index, &existing_byte)) {
+  if (!element_access.IsExternal() && element_access.GetByteAtIndex(byte_index, &existing_byte)) {
     VLOG(2) << "Updating key: " << key << " at byte index: " << byte_index;
     uint32_t bit_index = GetNormalizedBitIndex(offset);
     old_value = CheckBitStatus(existing_byte, bit_index);
@@ -381,15 +407,19 @@ OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset,
           bit_value ? TurnBitOn(existing_byte, bit_index) : TurnBitOff(existing_byte, bit_index);
       element_access.SetByteAtIndex(byte_index, existing_byte);
     }
-  } else {
-    VLOG(2) << "Extending key: " << key << " to " << (byte_index + 1) << " bytes";
-    string existing_entry{element_access.Value()};
-    existing_entry.resize(byte_index + 1, 0);
-    SetBitValue(offset, bit_value, &existing_entry);
-    // We always need to commit the extended key
-    element_access.Commit(existing_entry);
+    return old_value;
   }
 
+  // Read the whole value (loading it back from tiered storage if offloaded), set
+  // the bit - extending the string if the offset is out of bounds - and commit.
+  auto value = element_access.Value();
+  if (!value)
+    return value.status();
+  string existing_entry = std::move(*value);
+  if (byte_index >= existing_entry.size())
+    existing_entry.resize(byte_index + 1, 0);
+  old_value = SetBitValue(offset, bit_value, &existing_entry);
+  element_access.Commit(existing_entry);
   return old_value;
 }
 
@@ -458,7 +488,7 @@ OpResult<string> RunBitOpNot(const OpArgs& op_args, string_view key) {
   DbSlice& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (find_res) {
-    return GetString(find_res.value()->second);
+    return ReadStringValue(op_args.db_cntx.db_index, key, find_res.value()->second, op_args.shard);
   } else {
     return find_res.status();
   }
@@ -480,7 +510,11 @@ OpResult<string> RunBitOpOnShard(string_view op, const OpArgs& op_args, ShardArg
   for (; start != end; ++start) {
     auto find_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_STRING);
     if (find_res) {
-      values.emplace_back(GetString(find_res.value()->second));
+      auto value = ReadStringValue(op_args.db_cntx.db_index, *start, find_res.value()->second,
+                                   op_args.shard);
+      if (!value)
+        return value.status();
+      values.emplace_back(std::move(*value));
     } else {
       if (find_res.status() == OpStatus::KEY_NOTFOUND) {
         continue;  // this is allowed, just return empty string per Redis
@@ -509,8 +543,13 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
       case OpStatus::OUT_OF_MEMORY:
         builder->SendError(kOutOfMemory);
         break;
+      case OpStatus::KEY_NOTFOUND:
+        builder->SendLong(0);  // a missing key behaves as an all-zero value
+        break;
       default:
-        builder->SendLong(0);  // in case we don't have the value we should just send 0
+        // Surface real errors (e.g. a failed tiered read) instead of masking
+        // them as a valid 0 reply.
+        builder->SendError(result.status());
         break;
     }
   }
@@ -518,48 +557,20 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
 
 // ------------------------------------------------------------------------- //
 //  Impl for the command functions
-void BitPos(CmdArgList args, CommandContext* cmd_cntx) {
+void BitPos(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Support for the command BITPOS
   // See details at https://redis.io/commands/bitpos/
   auto* builder = cmd_cntx->rb();
-  if (args.size() < 1 || args.size() > 5) {
-    return builder->SendError(kSyntaxErr);
-  }
 
-  string_view key = ArgS(args, 0);
+  auto key = parser.Next<string_view>();
+  int32_t value = parser.Next<Validated<int32_t, ClosedRange<0, 1, kBitArgErr>>>();
 
-  int32_t value{0};
-  int64_t start = 0;
-  int64_t end = std::numeric_limits<int64_t>::max();
-  bool as_bit = false;
+  int64_t start = parser.NextOrDefault<int64_t>();
+  int64_t end = parser.NextOrDefault<int64_t>(std::numeric_limits<int64_t>::max());
+  bool as_bit = parser.HasNext() ? parser.MapNext("BIT", true, "BYTE", false) : false;
 
-  if (!absl::SimpleAtoi(ArgS(args, 1), &value)) {
-    return builder->SendError(kInvalidIntErr);
-  } else if (value != 0 && value != 1) {
-    return builder->SendError("The bit argument must be 1 or 0");
-  }
-
-  if (args.size() >= 3) {
-    if (!absl::SimpleAtoi(ArgS(args, 2), &start)) {
-      return builder->SendError(kInvalidIntErr);
-    }
-
-    if (args.size() >= 4) {
-      if (!absl::SimpleAtoi(ArgS(args, 3), &end)) {
-        return builder->SendError(kInvalidIntErr);
-      }
-
-      if (args.size() >= 5) {
-        string arg = absl::AsciiStrToUpper(ArgS(args, 4));
-        if (arg == "BIT") {
-          as_bit = true;
-        } else if (arg == "BYTE") {
-          as_bit = false;
-        } else {
-          return builder->SendError(kSyntaxErr);
-        }
-      }
-    }
+  if (!parser.Finalize()) {
+    return builder->SendError(parser.TakeError().MakeReply());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -569,28 +580,23 @@ void BitPos(CmdArgList args, CommandContext* cmd_cntx) {
   HandleOpValueResult(res, builder);
 }
 
-void BitCount(CmdArgList args, CommandContext* cmd_cntx) {
+void BitCount(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Support for the command BITCOUNT
   // See details at https://redis.io/commands/bitcount/
   // Please note that if the key don't exists, it would return 0
 
-  CmdArgParser parser(args);
   auto key = parser.Next<string_view>();
 
-  std::pair<int64_t, int64_t> start_end;
-  if (parser.HasNext()) {
-    auto tuple_result = parser.Next<int64_t, int64_t>();
-    start_end = std::make_pair(std::get<0>(tuple_result), std::get<1>(tuple_result));
-  } else {
-    start_end = std::make_pair(0, std::numeric_limits<int64_t>::max());
-  }
+  int64_t start = 0, end = std::numeric_limits<int64_t>::max();
+  if (parser.HasNext())
+    std::tie(start, end) = parser.Next<int64_t, int64_t>();
 
   bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
-  auto cb = [&, start_end](Transaction* t, EngineShard* shard) {
-    return CountBitsForValue(t->GetOpArgs(shard), key, start_end.first, start_end.second, as_bit);
+  auto cb = [&, start, end](Transaction* t, EngineShard* shard) {
+    return CountBitsForValue(t->GetOpArgs(shard), key, start, end, as_bit);
   };
   OpResult<std::size_t> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   HandleOpValueResult(res, cmd_cntx->rb());
@@ -951,8 +957,13 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
   }
   string value;
   if (*res) {
-    access_.Find(false);
-    value = access_.Value();
+    auto find_res = access_.Find(false);
+    if (find_res != OpStatus::OK)
+      return find_res;
+    auto materialized = access_.Value();
+    if (!materialized)
+      return materialized.status();
+    value = std::move(*materialized);
   }
 
   vector<ResultType> results;
@@ -965,7 +976,9 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
   }
 
   if (visitor.ShouldCommit()) {
-    access_.Find(false);
+    auto find_res = access_.Find(false);
+    if (find_res != OpStatus::OK)
+      return find_res;
     access_.Commit(visitor.Bitfield());
   }
 
@@ -975,11 +988,27 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
 const char kInvalidBitfieldTypeErr[] =
     "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 is.";
 
-nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser) {
+const char kBitOffsetOutOfRange[] = "bit offset is not an integer or out of range";
+
+// A write grows the string up to the last touched byte, so it must stay within
+// kMaxStrLen (the same cap SETRANGE enforces). Since kMaxStrLen < 2^29, a passing
+// offset also fits the uint32 the bit-index helpers use; the short-circuit keeps
+// the addition from overflowing.
+bool IsBitWriteInRange(uint64_t bit_offset, uint64_t bit_size) {
+  return bit_offset < uint64_t{kMaxStrLen} * 8 && (bit_offset + bit_size - 1) / 8 < kMaxStrLen;
+}
+
+// A read never grows the string and returns 0 past its end, so only guard against
+// offsets that wouldn't fit the uint32 bit-index helpers (which would truncate).
+bool IsBitReadInRange(uint64_t bit_offset) {
+  return bit_offset <= std::numeric_limits<uint32_t>::max();
+}
+
+nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser, bool is_write) {
   CommonAttributes parsed;
   using nonstd::make_unexpected;
 
-  auto [encoding, offset_str] = parser->Next<string_view, string_view>();
+  auto encoding = parser->Next<string_view>();
 
   if (encoding.empty()) {
     return make_unexpected(kSyntaxErr);
@@ -1016,15 +1045,21 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
   }
 
   bool is_proxy = false;
-  if (absl::StartsWith(offset_str, "#")) {
-    offset_str = offset_str.substr(1);
-    is_proxy = true;
-  }
-  if (!absl::SimpleAtoi(offset_str, &parsed.offset)) {
+  parsed.offset = parser->NextWithPrefix<size_t>("#", &is_proxy);
+  if (parser->HasError()) {
     return make_unexpected(kSyntaxErr);
   }
   if (is_proxy) {
+    // scaling the field index can't exceed the offsets the bit-index helpers handle
+    if (parsed.offset > std::numeric_limits<uint32_t>::max() / parsed.encoding_bit_size) {
+      return make_unexpected(kBitOffsetOutOfRange);
+    }
     parsed.offset = parsed.offset * parsed.encoding_bit_size;
+  }
+  const bool in_range = is_write ? IsBitWriteInRange(parsed.offset, parsed.encoding_bit_size)
+                                 : IsBitReadInRange(parsed.offset);
+  if (!in_range) {
+    return make_unexpected(kBitOffsetOutOfRange);
   }
   return parsed;
 }
@@ -1032,13 +1067,12 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
 // Parses a list of arguments (without key) to a CommandList.
 // Returns the CommandList if the parsing completed succefully or string
 // to indicate an error
-nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool read_only) {
+nonstd::expected<CommandList, string> ParseToCommandList(CmdArgParser parser, bool read_only) {
   enum class Cmds { OVERFLOW_OPT, GET_OPT, SET_OPT, INCRBY_OPT };
   CommandList result;
 
   using nonstd::make_unexpected;
 
-  CmdArgParser parser(args);
   while (parser.HasNext()) {
     auto cmd = parser.MapNext("OVERFLOW", Cmds::OVERFLOW_OPT, "GET", Cmds::GET_OPT, "SET",
                               Cmds::SET_OPT, "INCRBY", Cmds::INCRBY_OPT);
@@ -1058,7 +1092,9 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
       return make_unexpected(kSyntaxErr);
     }
 
-    auto maybe_attr = ParseCommonAttr(&parser);
+    // GET only reads; SET/INCRBY grow the value and need the stricter write bound.
+    const bool is_write = !read_only && cmd != Cmds::GET_OPT;
+    auto maybe_attr = ParseCommonAttr(&parser, is_write);
     if (!maybe_attr.has_value()) {
       parser.TakeError();
       return make_unexpected(std::move(maybe_attr.error()));
@@ -1111,14 +1147,15 @@ void SendResults(const vector<ResultType>& results, SinkReplyBuilder* builder) {
   }
 }
 
-void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReplyBuilder* builder) {
-  if (args.size() == 1) {
+void BitFieldGeneric(CmdArgParser parser, bool read_only, Transaction* tx,
+                     SinkReplyBuilder* builder) {
+  if (!parser.HasAtLeast(2)) {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->SendEmptyArray();
     return;
   }
-  auto key = ArgS(args, 0);
-  auto maybe_ops_list = ParseToCommandList(args.subspan(1), read_only);
+  auto key = parser.Next<string_view>();
+  auto maybe_ops_list = ParseToCommandList(parser, read_only);
 
   if (!maybe_ops_list.has_value()) {
     builder->SendError(maybe_ops_list.error());
@@ -1133,35 +1170,45 @@ void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReply
 
   OpResult<vector<ResultType>> res = tx->ScheduleSingleHopT(std::move(cb));
 
-  if (res == OpStatus::WRONG_TYPE) {
-    builder->SendError(kWrongTypeErr);
+  if (!res) {
+    builder->SendError(res.status());
     return;
   }
 
   SendResults(*res, builder);
 }
 
-void BitField(CmdArgList args, CommandContext* cmd_cntx) {
-  BitFieldGeneric(args, false, cmd_cntx->tx(), cmd_cntx->rb());
+void BitField(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  BitFieldGeneric(parser, false, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
-void BitFieldRo(CmdArgList args, CommandContext* cmd_cntx) {
-  BitFieldGeneric(args, true, cmd_cntx->tx(), cmd_cntx->rb());
+void BitFieldRo(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  BitFieldGeneric(parser, true, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
 #ifndef __clang__
 #pragma GCC diagnostic pop
 #endif
 
-void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
+void BitOp(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   static const std::array<string_view, 4> BITOP_OP_NAMES{OR_OP_NAME, XOR_OP_NAME, AND_OP_NAME,
                                                          NOT_OP_NAME};
-  string op = absl::AsciiStrToUpper(ArgS(args, 0));
-  string_view dest_key = ArgS(args, 1);
+  string op = absl::AsciiStrToUpper(parser.Next<string_view>());
+  string_view dest_key = parser.Next<string_view>();
+
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->rb()->SendError(err.MakeReply());
+  }
+
   bool illegal = rng::none_of(BITOP_OP_NAMES, [&op](auto val) { return op == val; });
 
+  // Count remaining args (src keys); for NOT there must be exactly one src key.
+  // The transaction args include dest_key + src_keys, so src key count = total tail - 2.
+  // We check via cmd_cntx->tail_args() which has all args including op and dest.
+  size_t num_src_keys = cmd_cntx->tail_args().size() - 2;
+
   auto* builder = cmd_cntx->rb();
-  if (illegal || (op == NOT_OP_NAME && args.size() > 3)) {
+  if (illegal || (op == NOT_OP_NAME && num_src_keys > 1)) {
     return builder->SendError(kSyntaxErr);  // too many arguments
   }
 
@@ -1226,15 +1273,14 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GetBit(CmdArgList args, CommandContext* cmd_cntx) {
+void GetBit(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Support for the command "GETBIT key offset"
   // see https://redis.io/commands/getbit/
 
-  uint32_t offset{0};
-  string_view key = ArgS(args, 0);
+  auto [key, offset] = parser.Next<string_view, uint32_t>();
 
-  if (!absl::SimpleAtoi(ArgS(args, 1), &offset)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
   }
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return ReadValueBitsetAt(t->GetOpArgs(shard), key, offset);
@@ -1243,15 +1289,18 @@ void GetBit(CmdArgList args, CommandContext* cmd_cntx) {
   HandleOpValueResult(res, cmd_cntx->rb());
 }
 
-void SetBit(CmdArgList args, CommandContext* cmd_cntx) {
+void SetBit(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Support for the command "SETBIT key offset new_value"
   // see https://redis.io/commands/setbit/
 
-  CmdArgParser parser(args);
   auto [key, offset, value] = parser.Next<string_view, uint32_t, FInt<0, 1>>();
 
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
+  }
+
+  if (!IsBitWriteInRange(offset, 1)) {
+    return cmd_cntx->SendError(kBitOffsetOutOfRange);
   }
 
   auto cb = [&, &key = key, &offset = offset, &value = value](Transaction* t, EngineShard* shard) {
@@ -1270,6 +1319,17 @@ string GetString(const PrimeValue& pv) {
   return res;
 }
 
+OpResult<string> ReadStringValue(DbIndex dbid, string_view key, const PrimeValue& pv,
+                                 EngineShard* shard) {
+  if (!pv.IsExternal())
+    return GetString(pv);
+
+  auto res = ReadTieredString(dbid, key, pv, shard->tiered_storage()).Get();
+  if (!res)
+    return OpStatus::IO_ERROR;
+  return std::move(res).value();
+}
+
 OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset) {
   DbSlice& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
@@ -1279,9 +1339,17 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_
   }
 
   const PrimeValue& pv = it_res.value()->second;
+  const size_t byte_index = GetByteIndex(offset);
 
   uint8_t byte_value = 0;
-  if (!pv.GetByteAtIndex(GetByteIndex(offset), &byte_value)) {
+  if (pv.IsExternal()) {
+    auto value = ReadStringValue(op_args.db_cntx.db_index, key, pv, op_args.shard);
+    if (!value)
+      return value.status();
+    if (byte_index >= value->size())
+      return false;
+    byte_value = static_cast<uint8_t>((*value)[byte_index]);
+  } else if (!pv.GetByteAtIndex(byte_index, &byte_value)) {
     return false;
   }
 
@@ -1296,9 +1364,7 @@ OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShar
     return it_res.status();
   }
 
-  const PrimeValue& pv = it_res.value()->second;
-
-  return GetString(pv);
+  return ReadStringValue(context.db_index, key, it_res.value()->second, shard);
 }
 
 OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, string_view key, int64_t start,
@@ -1366,8 +1432,12 @@ OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, string_view key, 
   // even though it contradicts its docs:
   //     If a clear bit isn't found in the specified range, the function returns -1
   //     as the user specified a clear range and there are no 0 bits in that range
+  // Only KEY_NOTFOUND maps to that; real errors (e.g. a failed tiered read) are
+  // propagated instead of being masked as a missing key.
   if (!value) {
-    return bit_value ? -1 : 0;
+    if (value.status() == OpStatus::KEY_NOTFOUND)
+      return bit_value ? -1 : 0;
+    return value.status();
   }
 
   string_view value_str = value.value();
@@ -1405,9 +1475,10 @@ void RegisterBitopsFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::BITMAP);
   *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1}.SetHandler(&BitPos)
             << CI{"BITCOUNT", CO::READONLY, -2, 1, 1}.SetHandler(&BitCount)
-            << CI{"BITFIELD", CO::JOURNALED, -2, 1, 1}.SetHandler(&BitField)
+            << CI{"BITFIELD", CO::JOURNALED | CO::DENYOOM, -2, 1, 1}.SetHandler(&BitField)
             << CI{"BITFIELD_RO", CO::FAST | CO::READONLY, -2, 1, 1}.SetHandler(&BitFieldRo)
-            << CI{"BITOP", CO::JOURNALED | CO::NO_AUTOJOURNAL, -4, 2, -1}.SetHandler(&BitOp)
+            << CI{"BITOP", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::DENYOOM, -4, 2, -1}.SetHandler(
+                   &BitOp)
             << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1}.SetHandler(&GetBit)
             << CI{"SETBIT", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetHandler(&SetBit);
 }

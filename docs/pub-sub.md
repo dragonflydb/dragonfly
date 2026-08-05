@@ -2,9 +2,10 @@
 
 This document describes how Dragonfly implements the Publish-Subscribe (Pub/Sub) messaging
 paradigm within its shared-nothing, multi-threaded architecture. It covers the global
-subscription registry, the Read-Copy-Update (RCU) mechanism used to prevent lock contention
-on the publish path, the asynchronous message delivery pipeline, and the backpressure system
-that protects the server from slow-subscriber OOM.
+subscription registry backed by a `ShardedHashMap` with fine-grained per-shard locking,
+the RCU-style pointer swap and per-shard shared locking used for concurrent reads on the
+publish path, the asynchronous message delivery pipeline, and the backpressure system that
+protects the server from slow-subscriber OOM.
 
 ## Overview
 
@@ -13,19 +14,21 @@ unique challenge: subscriptions must be globally addressable across all threads,
 global lock on every `PUBLISH` would create a severe bottleneck. A single popular channel
 with thousands of subscribers could serialize all publish operations onto one shard thread.
 
-Dragonfly solves this by using a **centralized `ChannelStore` updated via RCU
-(Read-Copy-Update)**:
+Dragonfly solves this with a **`ChannelStore` backed by `ShardedHashMap`** — a hash map
+split into 16 independently-locked shards:
 
-- **Reads (`PUBLISH` / `SPUBLISH`)** are lock-free and use a thread-local pointer to the
-  most recent `ChannelStore` snapshot.
-- **Writes (`SUBSCRIBE` / `UNSUBSCRIBE` / `PSUBSCRIBE` / `PUNSUBSCRIBE`)** are serialized
-  by a single mutex, performed by copying the necessary routing maps, applying the mutation,
-  and atomically swapping the global pointer.
+- **Reads (`PUBLISH` / `SPUBLISH`)** acquire a per-shard shared read lock (`read_mu_`) and
+  read the `SubscribeMap` pointer via an atomic acquire load (`UpdatablePointer::Get()`).
+  Multiple readers on the same shard proceed concurrently.
+- **Writes (`SUBSCRIBE` / `UNSUBSCRIBE` / `PSUBSCRIBE` / `PUNSUBSCRIBE`)** acquire the
+  shard's exclusive write lock (`write_mu_`), copy the `SubscribeMap`, apply the mutation,
+  and atomically swap the pointer — all without blocking readers. Concurrent writes to
+  *different* shards are fully independent.
 
 This design avoids contention on a single shard thread for heavy throughput on a single
 channel and seamlessly scales across multiple threads even with a small number of channels.
-Publish latency is lower than a shard-routed design because no inter-thread hop is required
-to look up subscribers — the caller reads its local copy directly.
+Publish latency is low because no inter-thread hop is required to look up subscribers — any
+thread can read the global `ChannelStore` directly.
 
 Dragonfly supports three flavors of Pub/Sub:
 
@@ -39,13 +42,13 @@ Dragonfly supports three flavors of Pub/Sub:
 
 | Type | Location | Role |
 |------|----------|------|
-| `ChannelStore` | `src/server/channel_store.h` | Centralized registry mapping channels/patterns to subscribers. Updated via RCU. |
-| `ChannelStoreUpdater` | `src/server/channel_store.h` | Orchestrates RCU mutations (add/remove) to the `ChannelStore`. |
+| `ChannelStore` | `src/server/channel_store.h` | Global registry mapping channels/patterns to subscribers. Backed by two `ShardedHashMap` instances (channels and patterns). |
+| `ChannelStoreUpdater` | `src/server/channel_store.h` | Batches subscribe/unsubscribe operations per shard and applies them via `ShardedHashMap::Mutate`. |
 | `ChannelStore::Subscriber` | `src/server/channel_store.h` | Represents a subscribed client. Wraps `facade::ConnectionRef` plus a pattern string. |
-| `ChannelStore::ControlBlock` | `src/server/channel_store.h` | Holds the `most_recent` atomic pointer and `update_mu` mutex. Prevents overlapping structural updates. |
-| `ChannelStore::ChannelMap` | `src/server/channel_store.h` | `flat_hash_map<string, UpdatablePointer>` — maps channel/pattern names to subscriber lists. |
+| `ShardedHashMap` | `src/core/sharded_hash_map.h` | Generic thread-safe sharded hash map template with independently locked shards (`write_mu_` and `read_mu_`); shard count depends on the template instantiation. |
+| `ChannelStore::ChannelMap` | `src/server/channel_store.h` | `ShardedHashMap<string, UpdatablePointer, 16, StringViewHash, std::equal_to<>>` — maps channel/pattern names to subscriber lists across 16 independently locked shards, supporting transparent `std::string_view` lookups. |
 | `ChannelStore::SubscribeMap` | `src/server/channel_store.h` | `flat_hash_map<ConnectionContext*, ThreadId>` — maps subscriber contexts to their owning thread. |
-| `ChannelStore::UpdatablePointer` | `src/server/channel_store.h` | Atomic wrapper around `SubscribeMap*`. Supports lock-free reads (`acquire`) and RCU-style swaps (`release`). |
+| `ChannelStore::UpdatablePointer` | `src/server/channel_store.h` | Atomic wrapper around `SubscribeMap*`. Supports concurrent reads (per-shard shared `read_mu_` + atomic acquire load) and RCU-style swaps (`release`). |
 | `ConnectionState::SubscribeInfo` | `src/server/conn_context.h` | Per-connection set of subscribed channels and patterns. Created lazily on first subscription. |
 | `Connection::PubMessage` | `src/facade/dragonfly_connection.h` | Carries a formatted pub/sub message through the async dispatch queue. |
 | `Connection::MessageHandle` | `src/facade/dragonfly_connection.h` | Variant wrapper (`PubMessage`, `MonitorMessage`, `MigrationRequest`, etc.) for the control-path dispatch queue. |
@@ -55,92 +58,119 @@ Dragonfly supports three flavors of Pub/Sub:
 ## Data Flow Overview
 
 <div align="center">
-  <img src="pubsub/pubsub_data_flow_overview.svg" alt="Pub/Sub Data Flow" width="1000"/>
+  <img src="pubsub/pubsub_data_flow_overview.svg" alt="Pub/Sub Data Flow Overview" width="700"/>
 </div>
 
-## Subscription Management (RCU)
+## Subscription Management (Shard-Locked ChannelStore)
 
 ### Data Structure Layout
 
-Each `ChannelStore` instance holds two `ChannelMap` pointers:
+The `ChannelStore` holds two `ChannelMap` instances — one for exact-channel subscriptions and
+one for pattern subscriptions. Each `ChannelMap` is a `ShardedHashMap<string, UpdatablePointer, 16>`
+backed by 16 independently-locked shards:
 
 <div align="center">
-  <img src="pubsub/pubsub_data_structure_layout.svg" alt="Data Structure Layout" width="700"/>
+  <img src="pubsub/pubsub_data_structure_layout.svg" alt="ChannelStore Data Structure Layout" width="700"/>
 </div>
+
+Each shard carries two fiber-aware locks:
+
+| Lock | Type | Purpose |
+|------|------|---------|
+| `write_mu_` | `util::fb2::Mutex` | Serializes writers within the shard. Readers never acquire it. |
+| `read_mu_` | `util::fb2::SharedMutex` | Acquired shared by readers (`FindIf`, `ForEachShared`); acquired exclusively only for structural map changes (insert/erase) and for safe deletion of old `SubscribeMap` pointers (draining in-flight readers). |
 
 `UpdatablePointer` wraps a `std::atomic<SubscribeMap*>` with `memory_order_acquire` on read
 and `memory_order_release` on write. This ensures that when a thread reads the pointer, it
 also sees the fully constructed `SubscribeMap` that the writer published.
 
-### Two Levels of RCU
+### Two Granularities of Update
 
-The `ChannelStoreUpdater` implements two granularities of copy-on-write:
+The `ChannelStoreUpdater` groups pending operations by shard index and processes each shard
+in a single `Mutate()` call, minimizing lock acquisitions:
 
-1. **ChannelMap-level copy** — triggered when a channel slot must be added (first subscriber)
-   or removed (last subscriber leaves). The entire `ChannelMap` is shallow-copied, the slot is
-   added/removed on the copy, a new `ChannelStore` is allocated pointing to the new map, and
-   the global `control_block.most_recent` is swapped.
+1. **RCU pointer swap (existing channel)** — when a subscriber is added/removed from a channel
+   that already exists in the map. The `SubscribeMap` is copied, the mutation is applied, and
+   the `UpdatablePointer` is atomically swapped via `Set()`. This happens under `write_mu_`
+   only — readers are NOT blocked. The old `SubscribeMap` is placed in a `freelist_` and
+   deleted after acquiring `read_mu_` exclusively (draining in-flight readers).
 
-2. **SubscribeMap-level RCU** — triggered when adding/removing a subscriber to an existing
-   channel (the map slot already exists). Only the `SubscribeMap` for that channel is copied,
-   the mutation is applied, and the `UpdatablePointer` is atomically swapped. No new
-   `ChannelStore` or `ChannelMap` is needed.
-
-This two-level scheme is implemented in `ChannelStoreUpdater::GetTargetMap()`:
-
-```cpp
-pair<ChannelStore::ChannelMap*, bool> ChannelStoreUpdater::GetTargetMap(ChannelStore* store) {
-  auto* target = pattern_ ? store->patterns_ : store->channels_;
-
-  for (auto key : ops_) {
-    auto it = target->find(key);
-    DCHECK(it != target->end() || to_add_);
-    // We need to make a copy, if we are going to add or delete a new map slot.
-    if ((to_add_ && it == target->end()) || (!to_add_ && it->second->size() == 1))
-      return {new ChannelStore::ChannelMap{*target}, true};
-  }
-
-  return {target, false};
-}
-```
+2. **Structural map change (new channel / last subscriber leaves)** — when a channel slot must
+   be inserted (first subscriber) or erased (last subscriber leaves). Inside the `Mutate()`
+   callback, the `AcquireReaderExclusiveLock` callable is invoked, which acquires `read_mu_`
+   exclusively, blocking all readers on that shard while the key is inserted or erased.
+   Writers on *other* shards are unaffected.
 
 ### Apply() Flow
 
 <div align="center">
-  <img src="pubsub/pubsub_apply.svg" alt="Apply Flow" width="1000"/>
+  <img src="pubsub/pubsub_apply_flow.svg" alt="ChannelStoreUpdater Apply() Flow" width="700"/>
 </div>
 
-Step 8 uses `AwaitBrief` (non-preempting dispatch) to update each thread's local pointer.
-The `seq_cst` load in the callback ensures the thread reads the latest pointer value _and_
-the memory published behind it.
+The `ChannelStoreUpdater::Apply()` method iterates over each shard that has pending
+operations and calls `map.Mutate(ShardId{sid}, ...)` to acquire `write_mu_` once per shard.
+Inside the callback:
 
-### Modify() — Per-Key Mutation
+1. **Phase 1 — RCU pointer swaps (under `write_mu_` only):** For each key where the channel
+   already exists, the `SubscribeMap` is copied, the subscriber is added/removed, and the
+   `UpdatablePointer` is atomically swapped. Old `SubscribeMap` pointers are saved in a
+   per-shard `freelist_`. Readers continue concurrently on the shared `read_mu_`.
 
-For each key in the pending operations:
+2. **Phase 2 — Structural map changes (under `read_mu_` exclusive):** If any keys require
+   inserting a new slot or erasing the last subscriber's slot, `AcquireReaderExclusiveLock()`
+   is called. This acquires `read_mu_` exclusively, draining any in-flight readers on this
+   shard. The insert/erase is then performed on the mutable map reference.
+
+3. **Phase 3 — Freelist cleanup:** After `Mutate()` returns (releasing `write_mu_`),
+   `WithReadExclusiveLock(ShardId{sid}, ...)` is called to acquire `read_mu_` exclusively
+   once more, ensuring all readers that may have loaded old `SubscribeMap` pointers have
+   completed. The old `SubscribeMap` pointers in the freelist are then safely deleted.
+
+### Per-Key Mutation Logic
+
+Inside the `Mutate()` callback, each key in the shard's pending operations is processed:
 
 ```
-Modify(target, key)
-  it = target->find(key)
+Phase 1 — RCU swaps (write_mu_ held, read_mu_ NOT held):
 
-  Case 1: Adding, key not in map (new channel)
-    → target->emplace(key, new SubscribeMap{{cntx_, thread_id_}})
+  For each key in shard_keys:
+    it = m.find(key)
 
-  Case 2: Removing, last subscriber (channel disappears)
-    → freelist_.push_back(it->second.Get())  // defer deletion
-    → target->erase(it)
+    Case 1: Adding, key exists (existing channel)
+      → old_sm = it->second.Get()
+      → new_sm = new SubscribeMap{*old_sm}
+      → new_sm->emplace(cntx_, thread_id_)
+      → it->second.Set(new_sm)            // atomic release-store
+      → freelist_.push_back(old_sm)        // defer deletion
 
-  Case 3: Existing channel, add/remove subscriber (RCU on SubscribeMap)
-    → replacement = new SubscribeMap{*it->second}
-    → if to_add_: replacement->emplace(cntx_, thread_id_)
-      else:       replacement->erase(cntx_)
-    → freelist_.push_back(it->second.Get())  // old map, defer deletion
-    → it->second.Set(replacement)            // atomic release-store
+    Case 2: Removing, key exists, >1 subscriber
+      → old_sm = it->second.Get()
+      → new_sm = new SubscribeMap{*old_sm}
+      → new_sm->erase(cntx_)
+      → it->second.Set(new_sm)            // atomic release-store
+      → freelist_.push_back(old_sm)        // defer deletion
+
+    Case 3: Adding, key NOT in map (new channel)
+      → mark needs_map_change[i] = true   // deferred to Phase 2
+
+    Case 4: Removing, last subscriber (channel disappears)
+      → mark needs_map_change[i] = true   // deferred to Phase 2
+
+Phase 2 — Structural changes (read_mu_ acquired exclusive):
+
+  If any needs_map_change:
+    locked_map = AcquireReaderExclusiveLock()
+
+    Case 3: → locked_map.map.emplace(key, new SubscribeMap{{cntx_, thread_id_}})
+    Case 4: → delete it->second.Get()
+             → locked_map.map.erase(it)
 ```
 
-Old `SubscribeMap` pointers are not immediately deleted because concurrent `PUBLISH`
-operations on other threads may still be reading them. They are placed in a `freelist_` and
-deleted only after `AwaitBrief` completes — at which point every thread has acknowledged the
-new state and no reader can hold a reference to the old maps.
+Old `SubscribeMap` pointers from Phase 1 are not immediately deleted because concurrent
+readers on other threads may still hold references obtained via `UpdatablePointer::Get()`.
+They are placed in a `freelist_` and deleted only after `WithReadExclusiveLock` completes —
+at which point every reader on that shard has released `read_mu_` (shared) and no reader can
+hold a reference to the old maps.
 
 ### Connection-Level Subscription State
 
@@ -176,9 +206,9 @@ When a client issues `PUBLISH channel message` (or `SPUBLISH`):
 ```
 SendMessages(channel, messages, sharded)
   1. subscribers = FetchSubscribers(channel)
-     → exact match: channels_->find(channel)
-     → pattern match: for each (pat, subs) in *patterns_:
-         if GlobMatcher{pat}.Matches(channel): Fill(subs, pat, &result)
+     → exact match: channels_.FindIf(channel, ...) (shared read lock on shard)
+     → pattern match: patterns_.ForEachShared(...)
+         for each (pat, subs): if GlobMatcher{pat}.Matches(channel): Fill(subs, pat, &result)
      → sort result by thread_id  (enables efficient per-thread dispatch)
 
   2. If subscribers empty → return 0
@@ -186,7 +216,8 @@ SendMessages(channel, messages, sharded)
   3. Backpressure gate (per destination thread):
      For each unique subscriber thread:
        Connection::EnsureMemoryBudget(sub_thread)
-       → blocks fiber if that thread's subscriber_bytes > publish_buffer_limit
+       → blocks fiber if that thread's subscriber_bytes > hard limit
+         (publish_buffer_limit * kPubSubHardMultiplier)
 
   4. Build message payload:
      BuildSender copies channel + message into a single shared_ptr<char[]>
@@ -221,16 +252,22 @@ string allocations.
 
 ```
 FetchSubscribers(channel)
-  1. Exact match: channels_->find(channel)
+  1. Exact match: channels_.FindIf(channel, ...)
+     → acquires read_mu_ shared on the channel's shard
      → if found, Fill() creates Subscriber entries from the SubscribeMap
 
-  2. Pattern match: iterate ALL patterns
+  2. Pattern match: patterns_.ForEachShared(...)
+     → iterates ALL pattern shards (each read_mu_ shared independently)
      → for each (pat, subs): GlobMatcher{pat, case_sensitive=true}.Matches(channel)
      → matching subscribers are added with their pattern string
 
   3. Sort by Subscriber::ByThread (thread_id ordering)
      → enables O(log n) per-thread lookup during dispatch
 ```
+
+Note: `FetchSubscribers` is not a global snapshot — each shard is locked independently, so
+the result may not reflect a fully consistent state. This trade-off is acceptable for pub/sub
+use cases.
 
 The `Fill` helper reads the `SubscribeMap` (via `UpdatablePointer::Get()` — acquire load)
 and creates `Subscriber` structs that hold a `ConnectionRef` (weak reference) obtained via
@@ -248,7 +285,7 @@ I/O loop implementations, selected at connection setup time:
 | Loop | Flag / Condition | Protocols | Architecture |
 |------|-----------------|-----------|--------------|
 | **v1** (`IoLoop` + `AsyncFiber`) | Default for Redis, TLS | Redis (RESP), TLS connections | Two-fiber: blocking recv loop (producer) + `AsyncFiber` (consumer) |
-| **v2** (`IoLoopV2`) | `--experimental_io_loop_v2` (default: true), non-TLS Memcache only | Memcache | Single-fiber: event-driven via `RegisterOnRecv`, dispatch queue drained inline |
+| **v2** (`IoLoopV2`) | `--enable_memcache_io_loop_v2` (default: true) for Memcache; `--enable_resp_io_loop_v2` (default: false) for RESP | Memcache (and optionally RESP) | Single-fiber: event-driven via `RegisterOnRecv`, dispatch queue drained inline |
 
 ### v1: `IoLoop` + `AsyncFiber` (Redis connections)
 
@@ -276,7 +313,7 @@ starving the Data Path: after processing `async_dispatch_quota` dispatch queue i
 interleaving pipeline work, the fiber yields to let `IoLoop` parse pending socket data, then
 switches to pipeline processing.
 
-### v2: `IoLoopV2` (Memcache connections)
+### v2: `IoLoopV2` (Memcache and optional RESP connections)
 
 `IoLoopV2` is an event-driven, single-fiber loop that uses `socket->RegisterOnRecv()`
 instead of blocking on `recv()`. There is no separate `AsyncFiber` — the dispatch queue is
@@ -285,9 +322,9 @@ the same `AsyncOperations` handler as v1. Key differences: no `async_dispatch_qu
 interleaving, no pipeline squashing, and backpressure uses `notifyAll()` instead of
 per-publisher `notify()`.
 
-> **Note**: `IoLoopV2` is currently enabled only for non-TLS Memcache connections
-> (`--experimental_io_loop_v2`, default: true). Since Pub/Sub is a Redis-only feature,
-> **all Pub/Sub traffic flows through the v1 `AsyncFiber` path**.
+> **Note**: By default, Pub/Sub traffic flows through the v1 `AsyncFiber` path because
+> `--enable_resp_io_loop_v2` defaults to `false`. When `--enable_resp_io_loop_v2` is
+> enabled, non-TLS RESP connections (including Pub/Sub subscribers) use `IoLoopV2` instead.
 
 ### PubMessage Processing (shared by v1 and v2)
 
@@ -317,61 +354,132 @@ operator()(const PubMessage& pub_msg)
 Messages are sent as RESP3 Push types (`CollectionType::PUSH`) via
 `RedisReplyBuilder::SendBulkStrArr`.
 
-## Backpressure
+## Backpressure (RESP V1)
 
-Fast publishers sending to slow subscribers can cause unbounded memory growth in the
-dispatch queues. Dragonfly prevents this with a **per-thread memory budget** for subscriber
-messages.
+This section describes the current publisher back-pressure behavior for
+Redis/RESP connections using Dragonfly's V1 connection loop (`IoLoop` plus
+`AsyncFiber`). It focuses on a fast `PUBLISH`/`SPUBLISH` producer and a
+subscriber that does not read from its socket. The V2 connection loop is
+intentionally out of scope.
 
-### Memory Accounting
+Dragonfly does not block a publisher on an individual subscriber socket.
+Instead, published messages are placed on each subscriber connection's
+control-path dispatch queue, and the queued Pub/Sub memory is accounted per I/O
+thread in `QueueBackpressure::subscriber_bytes`. Two thresholds derive from
+`publish_buffer_limit`:
 
-Memory is tracked at two levels:
+- **Soft limit** — `publish_buffer_limit`. Crossing it starts a back-pressure
+  *episode* and enables slow-subscriber protection (see below), but does **not**
+  park publishers.
+- **Hard limit** — `publish_buffer_limit * kPubSubHardMultiplier` (hardcoded to `4`).
+  Publishers targeting the thread park their fibers only once
+  `subscriber_bytes` reaches this red line, until queued subscriber messages are
+  processed or the connections are closed.
 
-| Scope | Variable | Location |
-|-------|----------|----------|
-| **Per-thread** (all connections) | `QueueBackpressure::subscriber_bytes` | `atomic_size_t`, thread-local struct |
-| **Per-connection** | `dispatch_q_subscriber_bytes_` | Connection member |
-| **Per-thread stats** | `conn_stats.dispatch_queue_subscriber_bytes` | `ConnectionStats` |
+The hard limit is a throttling point, not a strict cap. A publish
+checks the budget before dispatching and does not reserve space, so concurrent
+publishers can add messages after the check and temporarily push the total
+above the configured value.
 
-`UpdateDispatchStats(msg, add)` is called:
-- **On enqueue** (`add=true`): in `SendAsync()`, before pushing to `dispatch_q_`.
-  Atomically increments `subscriber_bytes`.
-- **On dequeue** (`add=false`): via `absl::Cleanup` in `ProcessAdminMessage()`, after the
-  message handler returns. Atomically decrements `subscriber_bytes`.
+### IoLoopV1 delivery path
 
-### Throttling Publishers
+For `PUBLISH` and the non-cluster `SPUBLISH` path, the delivery sequence is:
 
-Before dispatching messages, `ChannelStore::SendMessages` calls
-`Connection::EnsureMemoryBudget(sub_thread)` for each unique destination thread:
+1. `ChannelStore::SendMessages` finds exact and pattern subscribers and sorts
+   them by their owning I/O thread.
+2. Before dispatching, it calls
+   `Connection::EnsureMemoryBudget(thread_id)` once per destination thread.
+   `QueueBackpressure::EnsureBelowLimit` parks the publishing fiber only while
+   `subscriber_bytes` exceeds the **hard** limit (the equality case is allowed);
+   being above the soft limit alone does not park publishers.
+3. `BuildSender` creates one shared payload containing the channel and message
+   arguments. `DispatchBrief` runs on each I/O thread and calls
+   `Connection::SendPubMessageAsync` for local subscribers.
+4. `SendPubMessageAsync` wraps the `PubMessage` in a `MessageHandle` and calls
+   `SendAsync`. The message is appended to the connection's `dispatch_q_`,
+   the V1 `AsyncFiber` is started if necessary, and the fiber is notified.
+5. `AsyncFiber` consumes the control path. `ProcessAdminMessage` invokes the
+   Pub/Sub handler, which formats a RESP push (`message`, `smessage`, or
+   `pmessage`) into the subscriber's reply builder.
+6. After the handler returns, the message's queue accounting is removed. The
+   reply builder flushes according to the normal V1 connection-loop rules. A
+   slow or non-reading socket therefore leaves messages in `dispatch_q_`,
+   keeping the subscriber memory accounted and eventually throttling
+   publishers for that I/O thread.
 
-```cpp
-void Connection::EnsureMemoryBudget(unsigned tid) {
-  thread_queue_backpressure[tid].EnsureBelowLimit();
-}
+The budget is shared by all subscriber connections on one I/O thread. A
+single stuck subscriber can therefore throttle publishers sending to other
+subscribers assigned to the same thread, but it does not directly consume the
+budget of other I/O threads.
 
-void QueueBackpressure::EnsureBelowLimit() {
-  pubsub_ec.await([this] {
-    return subscriber_bytes.load(memory_order_relaxed) <= publish_buffer_limit;
-  });
-}
-```
+### Slow-subscriber protection
 
-This blocks the publishing fiber (not the thread) until the destination thread's subscriber
-memory drops below the `publish_buffer_limit` (default: 128MB, configurable via
-`--publish_buffer_limit`).
+To keep one stuck subscriber from throttling publishers up to the hard limit,
+Dragonfly can close it once it is clearly the culprit. `ProcessAdminMessage`
+records `async_op_start_cycle_` around the `std::visit` that runs the Pub/Sub
+send, so the connection knows how long its current send has been blocked.
 
-### Wake-up Path
+`SendPubMessageAsync` (which runs on the subscriber's thread while that send is
+parked) closes the subscriber when its active send has been blocked continuously
+for at least `--pubsub_slow_subscriber_timeout_ms` and **either** of these
+conditions holds:
 
-In the `AsyncFiber` loop, after processing a dispatch queue message:
+1. this connection's queued Pub/Sub data has reached one-sixteenth of
+   `publish_buffer_limit`, or
+2. the thread is in a soft-limit episode (`subscriber_bytes` above the soft
+   limit).
 
-```cpp
-if (subscriber_over_limit &&
-    conn_stats.dispatch_queue_subscriber_bytes < qbp.publish_buffer_limit)
-  qbp.pubsub_ec.notify();  // wake ONE blocked publisher
-```
+Thus, a slow connection cannot consume the entire per-thread budget before the
+policy can evict it, while a full thread can evict any subscriber with a
+timed-out send. A slow send below the per-connection threshold is left alone
+until the thread reaches its soft limit, and a full budget with a
+still-progressing send is also left alone. When the policy triggers,
+`RequestPubsubClose` discards the new message, evicts the connection's queued
+`PubMessage` items (immediately releasing their subscriber accounting and waking
+parked publishers), and calls the non-blocking `MarkForClose` — it never waits,
+joins, or interrupts the in-flight write. `ProcessAdminMessage` observes
+`request_shutdown_` once the parked send returns and lets the normal shutdown
+path close the connection; further pub messages are dropped in the meantime.
 
-The check snapshots the "over limit" state before processing and only notifies if the state
-transitioned from over-limit to under-limit. This avoids spurious wake-ups.
+`--pubsub_slow_subscriber_timeout_ms` is startup-only (like
+`publish_buffer_limit`) and defaults to `0`, which disables the protection.
+
+### Limits, cleanup, and observability
+
+Queued Pub/Sub messages are accounted both per connection and in the owning
+I/O thread's `QueueBackpressure::subscriber_bytes`. When a message is
+processed, or when a connection closes and its queue is drained, the bytes are
+released. Once the thread falls back below the hard limit, V1 wakes waiting
+publishers. Messages are normally retained until they are processed or the
+subscriber disconnects; stale messages are dropped after the client leaves
+Pub/Sub mode.
+
+The main configuration knobs are `publish_buffer_limit` (196 MB per I/O thread,
+startup-only) and `pubsub_slow_subscriber_timeout_ms` (startup-only, `0`
+disables). `proactor_threads` changes how subscribers and independent budgets
+are distributed. Other V1 pipeline and socket settings can affect processing or
+output latency, but do not change Pub/Sub admission directly.
+
+For diagnosis, use:
+
+- `dispatch_queue_subscriber_bytes`: queued Pub/Sub bytes;
+- `pubsub_backpressure_events_total{event=...}`: back-pressure and
+  slow-subscriber events by type — `soft_limit` (soft-limit crossings),
+  `hard_limit` (publisher throttle episodes), `forced_disconnect` (subscribers
+  closed by the policy), and `messages_discarded`;
+- `send_delay_ms` / `send_delay_seconds`: age of the oldest pending send;
+- `total_net_output_bytes` and `total_writes_processed`: output progress; and
+- `cmdstat_publish`: indirect evidence of publisher waiting.
+
+Aside from `pubsub_backpressure_events_total`, these signals are aggregated and
+do not identify the specific subscriber holding the budget; the policy also
+emits a rate-limited structured log naming the connection it closes.
+`pipeline_queue_bytes` and `pipeline_throttle_total` can indicate competing
+data-path pressure. Coverage is in
+`tests/dragonfly/connection_test.py`: `test_publish_stuck` (publishers resume
+after the stuck subscriber disconnects), `test_pubsub_slow_subscriber_closed`
+(the policy force-closes a stuck subscriber), and
+`test_pubsub_slow_subscriber_disabled` (a `0` timeout never closes).
 
 ## Cluster Mode Integration
 
@@ -411,20 +519,19 @@ is called:
 
 ```
 UnsubscribeAfterClusterSlotMigration(deleted_slots)
-  for each (channel, _) in *channels_:
-    if deleted_slots.Contains(KeySlot(channel)):
-      csu.Record(channel)
-  csu.ApplyAndUnsubscribe()
+  1. Collect: ForEachShared over channels_, collect subscribers for channels
+     whose slot is in deleted_slots
+  2. Remove: RemoveAllSubscribers(channel) for each matched channel
+     → uses Mutate() to erase under exclusive read_mu_
+  3. Notify: AwaitFiberOnAll dispatches force-unsubscribe messages
+     to affected connections on their owning threads
 ```
 
-`ApplyAndUnsubscribe()` differs from `Apply()`:
-1. It deep-copies the `ChannelMap` and removes the migrated channels.
-2. It calls `FetchSubscribers` for each removed channel _before_ updating the store
-   (since `FetchSubscribers` reads from the current active store).
-3. It uses `AwaitFiberOnAll` (fiber-based, may preempt) instead of `AwaitBrief` to dispatch
-   both the store update and unsubscription messages.
-4. On each thread, `UnsubscribeConnectionsFromDeletedSlots` sends `PubMessage`s with
-   `force_unsubscribe=true`, which triggers `sunsubscribe` push messages to affected clients.
+`RemoveAllSubscribers` calls `map.Mutate(channel, ...)` which acquires `write_mu_` and then
+`read_mu_` exclusively to erase the channel entry and delete its `SubscribeMap`.
+
+On each thread, `UnsubscribeConnectionsFromDeletedSlots` sends `PubMessage`s with
+`force_unsubscribe=true`, which triggers `sunsubscribe` push messages to affected clients.
 
 ## Keyspace Event Notifications
 
@@ -439,8 +546,7 @@ When enabled:
 3. At the end of `DeleteExpiredStep`, batched events are published:
 
 ```cpp
-ChannelStore* store = ServerState::tlocal()->channel_store();
-store->SendMessages(
+channel_store->SendMessages(
     absl::StrCat("__keyevent@", cntx.db_index, "__:expired"),
     events, false);
 events.clear();
@@ -466,7 +572,7 @@ All Pub/Sub commands are registered in `Service::Register` (`src/server/main_ser
 | `PUBSUB` | -1 | `CO::LOADING \| CO::FAST` | `SLOW` |
 
 Notable flags:
-- `CO::FAST` on `PUBLISH`/`SPUBLISH` — these are non-transactional, lock-free reads.
+- `CO::FAST` on `PUBLISH`/`SPUBLISH` — these are non-transactional, concurrent reads (shared `read_mu_`).
 - `CO::NOSCRIPT` on all subscribe/unsubscribe — cannot be called from Lua scripts.
 - `CO::LOADING` — permitted during database loading.
 - None of the Pub/Sub commands are transactional (`IsTransactional() == false`).
@@ -476,11 +582,12 @@ Notable flags:
 | Purpose | File Path |
 |---------|-----------|
 | ChannelStore & ChannelStoreUpdater | `src/server/channel_store.h`, `src/server/channel_store.cc` |
+| ShardedHashMap (shard-locked backing store) | `src/core/sharded_hash_map.h` |
 | Pub/Sub command handlers | `src/server/main_service.cc` (`Publish`, `Subscribe`, `Unsubscribe`, `PSubscribe`, `PUnsubscribe`, `Pubsub`) |
 | Connection-level subscription state | `src/server/conn_context.h`, `src/server/conn_context.cc` (`ChangeSubscriptions`, `UnsubscribeAll`, `PUnsubscribeAll`) |
 | PubMessage, AsyncFiber, backpressure | `src/facade/dragonfly_connection.h`, `src/facade/dragonfly_connection.cc` |
 | ConnectionRef (weak subscriber refs) | `src/facade/connection_ref.h` |
-| ServerState channel_store_ pointer | `src/server/server_state.h`, `src/server/server_state.cc` |
+| Global `channel_store` pointer | `src/server/channel_store.h` (extern), `src/server/main_service.cc` (lifecycle) |
 | Keyspace event integration | `src/server/db_slice.cc` (`DeleteExpiredStep`) |
-| Cluster slot migration unsub | `src/server/channel_store.cc` (`UnsubscribeAfterClusterSlotMigration`, `ApplyAndUnsubscribe`) |
+| Cluster slot migration unsub | `src/server/channel_store.cc` (`UnsubscribeAfterClusterSlotMigration`, `RemoveAllSubscribers`) |
 | GlobMatcher for pattern matching | `src/core/glob_matcher.h` |

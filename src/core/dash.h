@@ -211,15 +211,24 @@ class DashTable : public detail::DashTableBase {
     return buddy_idx;
   }
 
+  // Result of Merge(): `merged` is true iff the two segments were merged. When `merged` is
+  // false, `declined_depth_guard` tells apart the two ways it can fail: true means Merge
+  // refused to run because it would violate the initial_depth invariant (no items were
+  // touched); false means a real rollback happened (items were moved into `keep` then moved
+  // back after a failed insertion).
+  struct MergeResult {
+    bool merged = false;
+    bool declined_depth_guard = false;
+  };
+
   // - Moves all items from `buddy_id` to `keep_id` (merges the two segments).
   //   After merge completes, `buddy_id` segment is deleted.
-  // - Return true if the two segments merged successfully.
-  // - If an insertion fails we rollback and abort the merge (return false).
+  // - If an insertion fails we rollback and abort the merge.
   // - Merge can run only if there are no active snapshots.
   // - Prefer calling this function only when the combined size of both segments
   //   than x * segment_capacity. With x: 0 < x < 0.25 as statistically this won't
   //   trigger rollbacks.
-  bool Merge(unsigned keep_id, unsigned buddy_id) {
+  MergeResult Merge(unsigned keep_id, unsigned buddy_id) {
     auto* keep = GetSegment(keep_id);
     auto* buddy = GetSegment(buddy_id);
 
@@ -233,7 +242,7 @@ class DashTable : public detail::DashTableBase {
     // After merge, keep will have depth-1, which determines unique_segments
     uint8_t depth_after_merge = keep->local_depth() - 1;
     if (depth_after_merge < initial_depth_) {
-      return false;
+      return {.merged = false, .declined_depth_guard = true};
     }
 
     bool should_rollback = false;
@@ -267,7 +276,7 @@ class DashTable : public detail::DashTableBase {
       auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
       keep->Split(hash_fn, buddy, [](auto&&...) {});
 
-      return false;
+      return {.merged = false, .declined_depth_guard = false};
     }
 
     // Same as Split()
@@ -287,7 +296,7 @@ class DashTable : public detail::DashTableBase {
     --unique_segments_;
     bucket_count_ -= keep->num_buckets();
 
-    return true;
+    return {.merged = true, .declined_depth_guard = false};
   }
 
   size_t GetSegmentCount() const {
@@ -462,14 +471,40 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   uint8_t slot_id_;
   bool done_;
 
+  // For single bucket iterators we pin the segment to its pointer. Because the iterators are held
+  // across suspension points during concurrent modifications, growing the dashtable will displace
+  // the seg_id_ pointing it to a different bucket.
+  using PinnedType = std::conditional_t<IsSingleBucket, SegmentType*, std::nullptr_t>;
+  PinnedType pinned_seg_ = {};
+
   friend class DashTable;
+
+  // Resolves the segment backing this iterator. Single-bucket iterators use the pinned pointer;
+  // multi-bucket iterators always read the live directory entry.
+  SegmentType* GetSegment() const {
+    if constexpr (IsSingleBucket) {
+      return pinned_seg_;
+    } else {
+      return owner_->segment_[seg_id_];
+    }
+  }
+
+  // Pins the segment pointer from the current directory index (single-bucket iterators only).
+  void PinSegment() {
+    if constexpr (IsSingleBucket) {
+      pinned_seg_ =
+          (owner_ && seg_id_ < owner_->segment_.size()) ? owner_->segment_[seg_id_] : nullptr;
+    }
+  }
 
   Iterator(Owner* me, uint32_t seg_id, detail::PhysicalBid bid, uint8_t sid)
       : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(sid), done_(false) {
+    PinSegment();
   }
 
   Iterator(Owner* me, uint32_t seg_id, detail::PhysicalBid bid)
       : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(0), done_(false) {
+    PinSegment();
     Seek2Occupied();
   }
 
@@ -489,6 +524,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
         bucket_id_(other.bucket_id_),
         slot_id_(other.slot_id_),
         done_(other.done_) {
+    PinSegment();
   }
 
   // Copy constructor from iterator to bucket_iterator and vice versa.
@@ -499,6 +535,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
         bucket_id_(other.bucket_id_),
         slot_id_(IsSingleBucket ? 0 : other.slot_id_),
         done_(other.done_) {
+    PinSegment();
     // if this - is a bucket_iterator - we reset slot_id to the first occupied space.
     if constexpr (IsSingleBucket) {
       Seek2Occupied();
@@ -515,20 +552,21 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   Iterator& operator=(const Iterator& other) = default;
   Iterator& operator=(Iterator&& other) = default;
 
-  // pre
-  Iterator& operator++() {
+  // Advancing is restricted to single-bucket iterators. A multi-bucket iterator may easily be
+  // invalidated across suspension points, so the cursors and the Traverse function should be used
+  Iterator& operator++() requires IsSingleBucket {
     ++slot_id_;
     Seek2Occupied();
     return *this;
   }
 
-  Iterator& operator+=(int delta) {
+  Iterator& operator+=(int delta) requires IsSingleBucket {
     slot_id_ += delta;
     Seek2Occupied();
     return *this;
   }
 
-  Iterator& AdvanceIfNotOccupied() {
+  Iterator& AdvanceIfNotOccupied() requires IsSingleBucket {
     if (!IsOccupied()) {
       this->operator++();
     }
@@ -536,7 +574,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   }
 
   IteratorPairType operator->() const {
-    auto* seg = owner_->segment_[seg_id_];
+    auto* seg = GetSegment();
     return {seg->Key(bucket_id_, slot_id_), seg->Value(bucket_id_, slot_id_)};
   }
 
@@ -546,8 +584,12 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   }
 
   bool IsOccupied() const {
-    return (seg_id_ < owner_->segment_.size()) &&
-           ((owner_->segment_[seg_id_]->IsBusy(bucket_id_, slot_id_)));
+    if constexpr (IsSingleBucket) {
+      return pinned_seg_ && pinned_seg_->IsBusy(bucket_id_, slot_id_);
+    } else {
+      return (seg_id_ < owner_->segment_.size()) &&
+             ((owner_->segment_[seg_id_]->IsBusy(bucket_id_, slot_id_)));
+    }
   }
 
   Owner& owner() const {
@@ -558,12 +600,12 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   requires B uint64_t GetVersion()
   const {
     assert(owner_ && seg_id_ < owner_->segment_.size());
-    return owner_->segment_[seg_id_]->GetVersion(bucket_id_);
+    return GetSegment()->GetVersion(bucket_id_);
   }
 
   template <bool B = Policy::kUseVersion>
   requires B void SetVersion(uint64_t v) {
-    return owner_->segment_[seg_id_]->SetVersion(bucket_id_, v);
+    return GetSegment()->SetVersion(bucket_id_, v);
   }
 
   friend bool operator==(const Iterator& lhs, const Iterator& rhs) {
@@ -594,7 +636,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   // segment splits are blocked while a snapshot version is registered).
   uintptr_t bucket_address() const {
     assert(owner_ && seg_id_ < owner_->segment_.size());
-    return reinterpret_cast<uintptr_t>(&owner_->segment_[seg_id_]->GetBucket(bucket_id_));
+    return reinterpret_cast<uintptr_t>(&GetSegment()->GetBucket(bucket_id_));
   }
 
   unsigned slot_id() const {
@@ -623,6 +665,14 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
   bool operator==(const BucketSet& other) const {
     return owner_ == other.owner_ && seg_id_ == other.seg_id_ && limit_ == other.limit_ &&
            ids_[0] == other.ids_[0] && ids_[1] == other.ids_[1];
+  }
+
+  // Construct a BucketSet containing a single bucket.
+  explicit BucketSet(bucket_iterator it)
+      : owner_{&it.owner()},
+        seg_id_{static_cast<uint32_t>(it.segment_id())},
+        limit_{1},
+        ids_{static_cast<uint8_t>(it.bucket_id()), 0} {
   }
 
  private:
@@ -658,7 +708,7 @@ void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::Seek2Oc
   assert(seg_id_ < owner_->segment_.size());
 
   if constexpr (IsSingleBucket) {
-    const auto& b = owner_->segment_[seg_id_]->GetBucket(bucket_id_);
+    const auto& b = GetSegment()->GetBucket(bucket_id_);
     uint32_t mask = b.GetBusy() >> slot_id_;
     if (mask) {
       int slot = __builtin_ctz(mask);

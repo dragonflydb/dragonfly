@@ -1,4 +1,4 @@
-option(DF_ENABLE_MEMORY_TRACKING "Adds memory tracking debugging via MEMORY TRACK command" ON)
+option(DF_ENABLE_MEMORY_TRACKING "Adds memory tracking debugging via MEMORY TRACK command" OFF)
 option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on SIGUSR1" OFF)
 
 option(WITH_COLLECTION_CMDS "Compile SET/HASH/ZSET/STREAM commands" ON)
@@ -76,7 +76,7 @@ endif()
 
 # Optionally compile extension commands
 if (WITH_EXTENSION_CMDS)
-  list(APPEND DF_FAMILY_SRCS geo_family.cc hll_family.cc bitops_family.cc bloom_family.cc topk_family.cc cms_family.cc json_family.cc)
+  list(APPEND DF_FAMILY_SRCS geo_family.cc hll_family.cc bitops_family.cc bloom_family.cc topk_family.cc cms_family.cc cuckoo_filter_family.cc json_family.cc)
   add_definitions(-DWITH_EXTENSION_CMDS)
 endif()
 
@@ -84,12 +84,12 @@ endif()
 add_library(dragonfly_lib
             engine_shard.cc engine_shard_set.cc
             config_registry.cc conn_context.cc
-            debugcmd.cc dflycmd.cc error.cc family_utils.cc string_stats.cc ${DF_SEARCH_SRCS}
+            debugcmd.cc dflycmd.cc error.cc family_utils.cc metrics.cc string_stats.cc ${DF_SEARCH_SRCS}
             server_family.cc string_family.cc list_family.cc generic_family.cc
             ${DF_FAMILY_SRCS}
             main_service.cc memory_cmd.cc rdb_load.cc rdb_load_context.cc rdb_save.cc replica.cc http_api.cc
             protocol_client.cc serializer_base.cc snapshot.cc script_mgr.cc
-            detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc
+            detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc detail/egress_throttle.cc
             version.cc container_utils.cc
             multi_command_squasher.cc
             ${DF_TIERING_SRCS}
@@ -153,6 +153,7 @@ helio_cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_sm
 helio_cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(transaction_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(json_family_memory_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
@@ -161,11 +162,13 @@ helio_cxx_test(string_stats_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(topk_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cms_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(cuckoo_filter_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(serializer_base_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(detail/egress_throttle_test dfly_test_lib LABELS DFLY)
 
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test

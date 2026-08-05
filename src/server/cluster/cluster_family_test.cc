@@ -13,11 +13,18 @@
 #include "absl/strings/substitute.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/compact_object.h"
 #include "core/detail/gen_utils.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "facade/facade_test.h"
+#include "server/engine_shard_set.h"
 #include "server/test_utils.h"
+#include "server/tiered_storage.h"
+
+ABSL_DECLARE_FLAG(bool, force_epoll);
 
 namespace dfly::cluster {
 namespace {
@@ -27,11 +34,18 @@ using namespace testing;
 
 class ClusterFamilyTest : public BaseFamilyTest {
  public:
-  ClusterFamilyTest() {
+  ClusterFamilyTest() = default;
+
+ protected:
+  virtual void ConfigureClusterFlags() {
     SetTestFlag("cluster_mode", "yes");
   }
 
- protected:
+  void SetUp() override {
+    ConfigureClusterFlags();
+    BaseFamilyTest::SetUp();
+  }
+
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 
   string GetMyId() {
@@ -168,30 +182,31 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:1"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
 
-  EXPECT_THAT(Run({"cluster", "shards"}),
-              RespArray(ElementsAre("slots",                                            //
-                                    RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
-                                    "nodes",                                            //
-                                    RespArray(ElementsAre(                              //
-                                        RespArray(ElementsAre(                          //
-                                            "id", "abcd1234",                           //
-                                            "endpoint", "10.0.0.1",                     //
-                                            "ip", "10.0.0.1",                           //
-                                            "port", IntArg(7000),                       //
-                                            "role", "master",                           //
-                                            "replication-offset", IntArg(0),            //
-                                            "health", "online")))))));
+  EXPECT_THAT(
+      Run({"cluster", "shards"}),
+      RespElementsAre(RespArray(ElementsAre("slots",                                            //
+                                            RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
+                                            "nodes",                                            //
+                                            RespArray(ElementsAre(                              //
+                                                RespArray(ElementsAre(                          //
+                                                    "id", "abcd1234",                           //
+                                                    "endpoint", "10.0.0.1",                     //
+                                                    "ip", "10.0.0.1",                           //
+                                                    "port", IntArg(7000),                       //
+                                                    "role", "master",                           //
+                                                    "replication-offset", IntArg(0),            //
+                                                    "health", "online"))))))));
 
   EXPECT_THAT(Run({"get", "x"}).GetString(),
               testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
 
   EXPECT_THAT(Run({"cluster", "slots"}),
-              RespArray(ElementsAre(IntArg(0),              //
-                                    IntArg(16'383),         //
-                                    RespArray(ElementsAre(  //
-                                        "10.0.0.1",         //
-                                        IntArg(7'000),      //
-                                        "abcd1234")))));
+              RespElementsAre(RespArray(ElementsAre(IntArg(0),              //
+                                                    IntArg(16'383),         //
+                                                    RespArray(ElementsAre(  //
+                                                        "10.0.0.1",         //
+                                                        IntArg(7'000),      //
+                                                        "abcd1234"))))));
 
   EXPECT_EQ(Run({"cluster", "nodes"}),
             "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\n");
@@ -232,39 +247,40 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:2"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
 
-  EXPECT_THAT(Run({"cluster", "shards"}),
-              RespArray(ElementsAre("slots",                                            //
-                                    RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
-                                    "nodes",                                            //
-                                    RespArray(ElementsAre(                              //
-                                        RespArray(ElementsAre(                          //
-                                            "id", "abcd1234",                           //
-                                            "endpoint", "10.0.0.1",                     //
-                                            "ip", "10.0.0.1",                           //
-                                            "port", IntArg(7000),                       //
-                                            "role", "master",                           //
-                                            "replication-offset", IntArg(0),            //
-                                            "health", "online")),                       //
-                                        RespArray(ElementsAre(                          //
-                                            "id", "wxyz",                               //
-                                            "endpoint", "10.0.0.10",                    //
-                                            "ip", "10.0.0.10",                          //
-                                            "port", IntArg(8000),                       //
-                                            "role", "replica",                          //
-                                            "replication-offset", IntArg(0),            //
-                                            "health", "online")))))));
+  EXPECT_THAT(
+      Run({"cluster", "shards"}),
+      RespElementsAre(RespArray(ElementsAre("slots",                                            //
+                                            RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
+                                            "nodes",                                            //
+                                            RespArray(ElementsAre(                              //
+                                                RespArray(ElementsAre(                          //
+                                                    "id", "abcd1234",                           //
+                                                    "endpoint", "10.0.0.1",                     //
+                                                    "ip", "10.0.0.1",                           //
+                                                    "port", IntArg(7000),                       //
+                                                    "role", "master",                           //
+                                                    "replication-offset", IntArg(0),            //
+                                                    "health", "online")),                       //
+                                                RespArray(ElementsAre(                          //
+                                                    "id", "wxyz",                               //
+                                                    "endpoint", "10.0.0.10",                    //
+                                                    "ip", "10.0.0.10",                          //
+                                                    "port", IntArg(8000),                       //
+                                                    "role", "replica",                          //
+                                                    "replication-offset", IntArg(0),            //
+                                                    "health", "online"))))))));
 
   EXPECT_THAT(Run({"cluster", "slots"}),
-              RespArray(ElementsAre(IntArg(0),              //
-                                    IntArg(16'383),         //
-                                    RespArray(ElementsAre(  //
-                                        "10.0.0.1",         //
-                                        IntArg(7'000),      //
-                                        "abcd1234")),       //
-                                    RespArray(ElementsAre(  //
-                                        "10.0.0.10",        //
-                                        IntArg(8'000),      //
-                                        "wxyz")))));
+              RespElementsAre(RespArray(ElementsAre(IntArg(0),              //
+                                                    IntArg(16'383),         //
+                                                    RespArray(ElementsAre(  //
+                                                        "10.0.0.1",         //
+                                                        IntArg(7'000),      //
+                                                        "abcd1234")),       //
+                                                    RespArray(ElementsAre(  //
+                                                        "10.0.0.10",        //
+                                                        IntArg(8'000),      //
+                                                        "wxyz"))))));
 
   EXPECT_EQ(Run({"cluster", "nodes"}),
             "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\n"
@@ -563,12 +579,14 @@ TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
 
   for (int i = 0; i <= 1'000; ++i) {
     EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespArray(ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _, _, _)));
+                RespElementsAre(RespArray(
+                    ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _, _, _))));
   }
 
   for (int i = 1'001; i <= 16'383; ++i) {
     EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _, _, _)));
+                RespElementsAre(
+                    RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _, _, _))));
   }
 }
 
@@ -622,6 +640,297 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
                                 "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))),
           RespArray(ElementsAre(IntArg(2), "key_count", IntArg(0), "total_reads", IntArg(0),
                                 "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
+}
+
+// SlotStats::memory_bytes tracks resident RAM.
+class ClusterMemoryTest : public ClusterFamilyTest {
+ protected:
+  ClusterMemoryTest() {
+    num_threads_ = 1;
+  }
+
+  struct SlotInfo {
+    int64_t key_count = 0;
+    int64_t total_reads = 0;
+    int64_t total_writes = 0;
+    int64_t memory_bytes = 0;
+    int64_t tiered_bytes = 0;  // reported only when non-zero
+  };
+
+  SlotInfo GetSlotInfo(SlotId slot) {
+    auto resp = RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)});
+    const auto& row = resp.GetVec()[0].GetVec();
+    SlotInfo info{*row[2].GetInt(), *row[4].GetInt(), *row[6].GetInt(), *row[8].GetInt()};
+    if (row.size() >= 11) {
+      EXPECT_EQ(row[9], "tiered_bytes");
+      info.tiered_bytes = *row[10].GetInt();
+    }
+    return info;
+  }
+
+  // GETSLOTINFO adds a fixed per-key table-space term.
+  int64_t RawSlotMemory(SlotId slot) {
+    SlotInfo info = GetSlotInfo(slot);
+    return info.memory_bytes - info.key_count * int64_t(sizeof(CompactObj)) * 2;
+  }
+
+  void ExpectSlotEmpty(SlotId slot) {
+    SlotInfo info = GetSlotInfo(slot);
+    EXPECT_EQ(info.key_count, 0);
+    EXPECT_EQ(info.memory_bytes, 0);
+    EXPECT_EQ(info.tiered_bytes, 0);
+  }
+
+  // The slot ledgers must mirror the db-wide ones.
+  void ExpectSlotMirrorsDb(SlotId slot) {
+    auto db_stats = GetMetrics().db_stats[0];
+    EXPECT_EQ(RawSlotMemory(slot), int64_t(db_stats.obj_memory_usage));
+    EXPECT_EQ(GetSlotInfo(slot).tiered_bytes, int64_t(db_stats.tiered_used_bytes));
+  }
+};
+
+#ifdef WITH_TIERING
+
+class ClusterTieredTest : public ClusterMemoryTest {
+ protected:
+  void SetUp() override {
+    if (absl::GetFlag(FLAGS_force_epoll)) {
+      GTEST_SKIP() << "Tiered storage requires io_uring";
+    }
+    flag_saver_.emplace();
+    SetTestFlag("tiered_prefix", "/tmp/cluster_tiered_test");
+    SetTestFlag("tiered_offload_threshold", "1.0");
+    SetTestFlag("tiered_min_value_size", "64");
+    SetTestFlag("tiered_experimental_cooling", "false");
+    ClusterMemoryTest::SetUp();
+    ConfigSingleNodeCluster(GetMyId());
+  }
+
+  void TearDown() override {
+    if (service_)
+      ClusterMemoryTest::TearDown();
+    flag_saver_.reset();
+  }
+
+  void WaitForOffload(size_t entries) {
+    ExpectConditionWithinTimeout(
+        [this, entries] { return GetMetrics().db_stats[0].tiered_entries == entries; });
+  }
+
+  // The background offloader keeps moving bytes between the counters; park it and drain
+  // in-flight stashes so that multi-command assertions see a stable state.
+  void StopOffloading() {
+    SetTestFlag("tiered_offload_threshold", "0.0");
+    pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+    ExpectConditionWithinTimeout(
+        [this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0u; });
+  }
+
+  std::optional<absl::FlagSaver> flag_saver_;
+};
+
+// memory_bytes tracks resident RAM only: offloading removes the value's bytes from it, and it
+// must return to zero once the slot is empty.
+TEST_F(ClusterTieredTest, SlotCountersFollowOffloadAndDelete) {
+  const string kKey = "tiered-del";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  EXPECT_EQ(RawSlotMemory(slot), 0);
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(CheckedInt({"DEL", kKey}), 1);
+  ExpectSlotEmpty(slot);
+}
+
+// The single key lives in one slot, so the slot counters must mirror the db-wide ones exactly.
+TEST_F(ClusterTieredTest, SlotCountersFollowExternalOverwrite) {
+  const string kKey = "tiered-set";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  // Overwriting an offloaded value releases its disk extent; the new value may get offloaded
+  // again right away, so compare against the db-wide counters instead of fixed values.
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'y')}), "OK");
+  StopOffloading();
+
+  ExpectSlotMirrorsDb(slot);
+  // The old extent was released: at most one value's worth of disk is held.
+  EXPECT_LE(GetMetrics().db_stats[0].tiered_used_bytes, 3584u);
+}
+
+TEST_F(ClusterTieredTest, SlotCountersReleasedOnFlushSlots) {
+  const string kKey = "tiered-flush";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+  ASSERT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", absl::StrCat(slot), absl::StrCat(slot)}),
+            "OK");
+  ExpectConditionWithinTimeout([&]() { return GetSlotInfo(slot).key_count == 0; });
+
+  ExpectSlotEmpty(slot);
+}
+
+TEST_F(ClusterTieredTest, SlotCountersReleasedOnExpiry) {
+  const string kKey = "tiered-ttl";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+  ASSERT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(CheckedInt({"PEXPIRE", kKey, "10"}), 1);
+  AdvanceTime(100);
+  EXPECT_THAT(Run({"GET", kKey}), ArgType(RespExpr::NIL));
+  ExpectSlotEmpty(slot);
+}
+
+// Uploads and re-offloads move bytes in and out of memory_bytes; it must mirror the db-wide
+// counter at every step and never wrap around zero.
+TEST_F(ClusterTieredTest, SlotCountersFollowUploadAndAppend) {
+  const string kKey = "tiered-append";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4000, 'x')}), "OK");
+  WaitForOffload(1);
+
+  for (int i = 0; i < 6; ++i)
+    Run({"APPEND", kKey, string(512, 'y')});
+  StopOffloading();
+
+  ExpectSlotMirrorsDb(slot);
+
+  EXPECT_EQ(CheckedInt({"DEL", kKey}), 1);
+  ExpectSlotEmpty(slot);
+}
+
+TEST_F(ClusterTieredTest, SlotCountersReleasedOnConfigSlotRemoval) {
+  Run({"debug", "populate", "20", "key", "3000", "SLOTS", "1", "1"});
+  WaitForOffload(20);
+  ASSERT_GT(GetSlotInfo(1).tiered_bytes, 0);
+
+  ConfigSingleNodeCluster("abc");
+  ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
+
+  ExpectSlotEmpty(1);
+}
+
+class ClusterTieredCoolingTest : public ClusterTieredTest {
+ protected:
+  void SetUp() override {
+    ClusterTieredTest::SetUp();
+    if (!service_)  // skipped
+      return;
+    SetTestFlag("tiered_experimental_cooling", "true");
+    pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+  }
+};
+
+// A cool value is invisible to the RAM ledger but still holds its disk extent, so it counts
+// in tiered_bytes only.
+TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnFlushSlots) {
+  const string kKey = "cool-flush";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  ExpectSlotMirrorsDb(slot);
+  EXPECT_EQ(RawSlotMemory(slot), 0);
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", absl::StrCat(slot), absl::StrCat(slot)}),
+            "OK");
+  ExpectConditionWithinTimeout([&]() { return GetSlotInfo(slot).key_count == 0; });
+
+  ExpectSlotEmpty(slot);
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+// Warming a cool value up returns its bytes to the RAM ledger and releases the disk extent.
+TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnWarmup) {
+  const string kKey = "cool-warm";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+  ASSERT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+  StopOffloading();
+
+  EXPECT_EQ(Run({"GET", kKey}), string(4096, 'x'));
+
+  ExpectSlotMirrorsDb(slot);
+  EXPECT_GT(RawSlotMemory(slot), 0);
+  EXPECT_EQ(GetSlotInfo(slot).tiered_bytes, 0);
+}
+
+#endif  // WITH_TIERING
+
+TEST_F(ClusterMemoryTest, SlotMemoryFollowsDefrag) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  const SlotId slot = KeySlot("{tag}0");
+  const int kKeys = 120;
+
+  // Arrays grown element by element keep spare capacity that defrag drops, so the post-defrag
+  // delta is non-zero only for a non-power-of-two element count.
+  for (int i = 0; i < kKeys; ++i) {
+    Run({"JSON.SET", absl::StrCat("{tag}", i), "$", "[]"});
+    for (int j = 0; j < 40; ++j)
+      Run({"JSON.ARRAPPEND", absl::StrCat("{tag}", i), "$", absl::StrCat(j)});
+  }
+
+  shard_set->pool()->AwaitFiberOnAll([](unsigned, util::ProactorBase*) {
+    auto* shard = EngineShard::tlocal();
+    if (!shard)
+      return;
+    for (int i = 0; i < 100; ++i) {
+      PageUsage page_usage{CollectPageStats::NO, 0, CycleQuota::Unlimited()};
+      page_usage.SetForceReallocate(true);
+      shard->DoDefrag(&page_usage);
+      if (shard->GetDefragCursor() == 0)
+        break;
+    }
+  });
+
+  ASSERT_GT(GetMetrics().shard_stats.defrag_realloc_total, 0u);
+
+  // Every key shares one hashtag.
+  ExpectSlotMirrorsDb(slot);
+
+  for (int i = 0; i < kKeys; ++i)
+    Run({"DEL", absl::StrCat("{tag}", i)});
+
+  ExpectSlotEmpty(slot);
+}
+
+TEST_F(ClusterMemoryTest, SlotTrafficCountersSurviveFlush) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  const string kKey = "traffic-key";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(1000, '#')}), "OK");
+  Run({"GET", kKey});
+
+  SlotInfo before = GetSlotInfo(slot);
+  ASSERT_GT(before.total_reads, 0);
+  ASSERT_GT(before.total_writes, 0);
+
+  Run({"FLUSHALL"});
+
+  SlotInfo after = GetSlotInfo(slot);
+  EXPECT_EQ(after.key_count, 0);
+  EXPECT_EQ(after.memory_bytes, 0);
+  EXPECT_EQ(after.total_reads, before.total_reads);
+  EXPECT_EQ(after.total_writes, before.total_writes);
 }
 
 // Test issue #1302
@@ -837,9 +1146,10 @@ TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
     EXPECT_THAT(Run({"cluster", "keyslot", "key:0"}), IntArg(2592));
     EXPECT_THAT(Run({"dbsize"}), IntArg(count));
     auto slot_size_response = Run({"dflycluster", "getslotinfo", "slots", "2592"});
-    EXPECT_THAT(slot_size_response, RespArray(ElementsAre(_, "key_count", _, "total_reads", _,
-                                                          "total_writes", _, "memory_bytes", _)));
-    auto slot_size = slot_size_response.GetVec()[2].GetInt();
+    EXPECT_THAT(slot_size_response,
+                RespElementsAre(RespArray(ElementsAre(_, "key_count", _, "total_reads", _,
+                                                      "total_writes", _, "memory_bytes", _))));
+    auto slot_size = slot_size_response.GetVec()[0].GetVec()[2].GetInt();
     EXPECT_TRUE(slot_size.has_value());
 
     EXPECT_EQ(Run({"dflycluster", "flushslots", "2592", "2592"}), "OK");
@@ -912,6 +1222,55 @@ TEST_F(ClusterFamilyTest, FlushSlotsDoesNotDeleteEntriesInsertedAfterFlush) {
   });
 }
 
+TEST_F(ClusterFamilyTest, MoveNotAllowedInClusterMode) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  EXPECT_EQ(Run({"set", "key", "val"}), "OK");
+  EXPECT_THAT(Run({"move", "key", "1"}), ErrArg("MOVE is not allowed in cluster mode"));
+  EXPECT_EQ(Run({"get", "key"}), "val");
+}
+
+TEST_F(ClusterFamilyTest, AclSelectDbNotAllowedInClusterMode) {
+  EXPECT_THAT(Run({"acl", "setuser", "u1", "on", ">pw", "~*", "+@all", "$1"}),
+              ErrArg("not allowed in cluster mode"));
+  EXPECT_EQ(Run({"acl", "setuser", "u2", "on", ">pw", "~*", "+@all", "$0"}), "OK");
+  EXPECT_EQ(Run({"acl", "setuser", "u3", "on", ">pw", "~*", "+@all", "$ALL"}), "OK");
+}
+
+// The flush's on_change fires for every db index but must only touch db 0; the bug charged
+// db 0's table for a db 1 deletion (FATAL underflow in debug).
+TEST_F(ClusterFamilyTest, FlushSlotsOnChangeIgnoresNonDefaultDb) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+    db_slice.ActivateDb(1);
+    DbContext cntx{&namespaces->GetDefaultNamespace(), 1, GetCurrentTimeMs()};
+
+    PrimeValue val;
+    val.SetString(string(128, 'x'));
+    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val), 0).ok());
+
+    cluster::SlotRanges ranges({{0, 16383}});
+    es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    db_slice.FlushSlots(ranges);
+    es->shard_lock()->Release(IntentLock::EXCLUSIVE);
+
+    // Overwrite without yielding: PreUpdateBlocking fires on_change with db_index=1.
+    PrimeValue val2;
+    val2.SetString(string(128, 'y'));
+    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val2), 0).ok());
+
+    util::ThisFiber::SleepFor(50ms);  // let the flush fiber finish
+
+    // db 1 is not covered by slot operations; the entry stays.
+    EXPECT_EQ(db_slice.DbSize(1), 1u);
+    EXPECT_EQ(db_slice.DbSize(0), 0u);
+  });
+}
+
 TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
   ConfigSingleNodeCluster(GetMyId());
 
@@ -919,7 +1278,7 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
   EXPECT_EQ(Run({"GET", "key"}), "value");
 
   EXPECT_EQ(Run({"MSET", "key", "value2"}), "OK");
-  EXPECT_EQ(Run({"MGET", "key"}), "value2");
+  EXPECT_THAT(Run({"MGET", "key"}), RespElementsAre("value2"));
 
   EXPECT_THAT(Run({"MSET", "key", "value", "key2", "value2"}), ErrArg("CROSSSLOT"));
   EXPECT_THAT(Run({"MGET", "key", "key2"}), ErrArg("CROSSSLOT"));
@@ -930,12 +1289,26 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
 }
 
 class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
- public:
-  ClusterFamilyEmulatedTest() {
+ protected:
+  void ConfigureClusterFlags() override {
     SetTestFlag("cluster_mode", "emulated");
     SetTestFlag("cluster_announce_ip", "fake-host");
+    SetTestFlag("announce_port", "6379");
   }
 };
+
+// slots_stats is null outside real cluster mode; GetSlotStats must not crash.
+TEST_F(ClusterFamilyEmulatedTest, GetSlotStatsWithoutClusterMode) {
+  EXPECT_EQ(Run({"set", "key", "value"}), "OK");
+
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+    SlotStats stats = db_slice.GetSlotStats(0);
+    EXPECT_EQ(stats.key_count, 0u);
+  });
+}
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
   string cluster_info = Run({"cluster", "info"}).GetString();
@@ -947,29 +1320,48 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
 }
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterShardInfos) {
-  EXPECT_THAT(Run({"cluster", "shards"}),
-              RespArray(ElementsAre("slots",                                           //
-                                    RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //
-                                    "nodes",                                           //
-                                    RespArray(ElementsAre(                             //
-                                        RespArray(ElementsAre(                         //
-                                            "id", GetMyId(),                           //
-                                            "endpoint", "fake-host",                   //
-                                            "ip", "fake-host",                         //
-                                            "port", IntArg(6379),                      //
-                                            "role", "master",                          //
-                                            "replication-offset", IntArg(0),           //
-                                            "health", "online")))))));
+  EXPECT_THAT(
+      Run({"cluster", "shards"}),
+      RespElementsAre(RespArray(ElementsAre("slots",                                           //
+                                            RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //
+                                            "nodes",                                           //
+                                            RespArray(ElementsAre(                             //
+                                                RespArray(ElementsAre(                         //
+                                                    "id", GetMyId(),                           //
+                                                    "endpoint", "fake-host",                   //
+                                                    "ip", "fake-host",                         //
+                                                    "port", IntArg(6379),                      //
+                                                    "role", "master",                          //
+                                                    "replication-offset", IntArg(0),           //
+                                                    "health", "online"))))))));
+
+  EXPECT_EQ(RunPrivileged({"config", "set", "cluster_announce_ip", "updated-host"}), "OK");
+  EXPECT_EQ(RunPrivileged({"config", "set", "announce_port", "6380"}), "OK");
+
+  EXPECT_THAT(
+      Run({"cluster", "shards"}),
+      RespElementsAre(RespArray(ElementsAre("slots",                                           //
+                                            RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //
+                                            "nodes",                                           //
+                                            RespArray(ElementsAre(                             //
+                                                RespArray(ElementsAre(                         //
+                                                    "id", GetMyId(),                           //
+                                                    "endpoint", "updated-host",                //
+                                                    "ip", "updated-host",                      //
+                                                    "port", IntArg(6380),                      //
+                                                    "role", "master",                          //
+                                                    "replication-offset", IntArg(0),           //
+                                                    "health", "online"))))))));
 }
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterSlots) {
   EXPECT_THAT(Run({"cluster", "slots"}),
-              RespArray(ElementsAre(IntArg(0),              //
-                                    IntArg(16383),          //
-                                    RespArray(ElementsAre(  //
-                                        "fake-host",        //
-                                        IntArg(6379),       //
-                                        GetMyId())))));
+              RespElementsAre(RespArray(ElementsAre(IntArg(0),              //
+                                                    IntArg(16383),          //
+                                                    RespArray(ElementsAre(  //
+                                                        "fake-host",        //
+                                                        IntArg(6379),       //
+                                                        GetMyId()))))));
 }
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterNodes) {

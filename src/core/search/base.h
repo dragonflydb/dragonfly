@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -40,7 +41,26 @@ inline std::pair<ShardId, DocId> DecomposeGlobalDocId(GlobalDocId id) {
 
 enum class VectorSimilarity { L2, IP, COSINE };
 
-using OwnedFtVector = std::pair<std::unique_ptr<float[]>, size_t /* dimension (size) */>;
+enum class VectorDataType { FLOAT32, FLOAT64, FLOAT16, BFLOAT16, INT8, UINT8 };
+
+constexpr size_t ElementSize(VectorDataType dt) {
+  switch (dt) {
+    case VectorDataType::FLOAT32:
+      return 4;
+    case VectorDataType::FLOAT64:
+      return 8;
+    case VectorDataType::FLOAT16:
+    case VectorDataType::BFLOAT16:
+      return 2;
+    case VectorDataType::INT8:
+    case VectorDataType::UINT8:
+      return 1;
+  }
+  return 4;
+}
+
+// Owns a vector's native-width bytes (int8=1B/elem, fp16=2B, fp32=4B, ...); second is elem count.
+using OwnedFtVector = std::pair<std::unique_ptr<std::byte[]>, size_t /* dimension (size) */>;
 using BorrowedFtVector = const char*;
 
 // Query params represent named parameters for queries supplied via PARAMS.
@@ -84,7 +104,8 @@ struct DocumentAccessor {
   virtual std::optional<StringList> GetStrings(std::string_view active_field) const = 0;
 
   /* Returns nullopt if the specified field is not a vector */
-  virtual std::optional<VectorInfo> GetVector(std::string_view active_field, size_t dim) const = 0;
+  virtual std::optional<VectorInfo> GetVector(std::string_view active_field, size_t dim,
+                                              VectorDataType dtype) const = 0;
 
   /* Return nullopt if the specified field is not a list of doubles */
   virtual std::optional<NumsList> GetNumbers(std::string_view active_field) const = 0;

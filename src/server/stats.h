@@ -73,6 +73,9 @@ struct TieredStats {
   // Memory used by the cooling layer (recently stashed values held before full eviction).
   size_t cold_storage_bytes = 0;
 
+  // Bytes currently in-flight to disk (submitted stash IOs not yet completed).
+  size_t pending_stash_bytes = 0;
+
   // Current number of throttled clients.
   uint64_t clients_throttled = 0;
 

@@ -37,7 +37,7 @@ namespace fs = std::filesystem;
 
 constexpr std::string_view kS3Prefix = "s3://";
 constexpr std::string_view kGCSPrefix = "gs://";
-constexpr std::string_view kAzurePrefix = "az://";
+constexpr std::string_view kAzureBlobEndpointSuffix = ".blob.core.windows.net";
 
 const size_t kBucketConnectMs = 2000;
 
@@ -143,7 +143,7 @@ class AzureSnapshotStorage : public SnapshotStorage {
   AzureSnapshotStorage();
   ~AzureSnapshotStorage();
 
-  std::error_code Init(unsigned connect_ms);
+  std::error_code Init(std::string_view uri, unsigned connect_ms);
 
   io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
       const std::string& path) override;
@@ -244,9 +244,7 @@ inline bool IsGCSPath(std::string_view path) {
   return absl::StartsWith(path, detail::kGCSPrefix);
 }
 
-inline bool IsAzurePath(std::string_view path) {
-  return absl::StartsWith(path, detail::kAzurePrefix);
-}
+bool IsAzurePath(std::string_view path);
 
 inline bool IsCloudPath(std::string_view path) {
   return IsS3Path(path) || IsGCSPath(path) || IsAzurePath(path);

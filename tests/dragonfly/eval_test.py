@@ -7,10 +7,12 @@ import time
 
 import async_timeout
 import pytest
+
 from redis import asyncio as aioredis
 
 from . import dfly_args, dfly_multi_test_args
-from .instance import DflyInstance
+from .instance import DflyInstance, DflyInstanceFactory
+from .utility import is_saving
 
 DJANGO_CACHEOPS_SCRIPT = """
 local prefix = KEYS[1]
@@ -121,9 +123,7 @@ async def test_django_cacheops_script(async_client, num_keys=500):
         assert await async_client.exists(k)
         for table, fields in DJANGO_CACHEOPS_SCHEMA(vs).items():
             for sub_schema in fields:
-                conj_key = f"conj:{table}:" + "&".join(
-                    "{}={}".format(f, v) for f, v in sub_schema.items()
-                )
+                conj_key = f"conj:{table}:" + "&".join(f"{f}={v}" for f, v in sub_schema.items())
                 assert await async_client.sismember(conj_key, k)
 
 
@@ -235,7 +235,7 @@ async def test_eval_error_propagation(async_client):
             await async_client.eval(template.format(cmd), 1, "l")
             if does_abort:
                 assert False, "Eval must have thrown an error: " + cmd
-        except aioredis.RedisError as e:
+        except aioredis.RedisError:
             if not does_abort:
                 assert False, "Error should have been ignored: " + cmd
 
@@ -372,7 +372,7 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
           end
         end
     """
-    for i in range(0, 1000):
+    for i in range(1000):
         await asyncio.gather(*(async_client.eval(SCRIPT, 0) for _ in range(5)))
 
     info = await async_client.info("memory")
@@ -391,7 +391,7 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
 
     await async_client.execute_command("CONFIG", "SET", "lua_mem_gc_threshold", "1000")
 
-    for i in range(0, 1000):
+    for i in range(1000):
         await asyncio.gather(*(async_client.eval(SCRIPT, 0) for _ in range(5)))
 
     info = await async_client.info("memory")
@@ -412,6 +412,21 @@ async def test_StackOverflowByHincrbyfloat(df_server: DflyInstance):
     await client.execute_command("HSET myhash field 1.0")
     await client.eval("return redis.pcall('HINCRBYFLOAT', KEYS[1], 'field', '1.5')", 1, "myhash")
     assert "2.5" == await client.execute_command("HGET myhash field")
+
+
+@dfly_args({"proactor_threads": 1})
+async def test_eval_no_resp_injection(async_client: aioredis.Redis):
+    """Verify redis.error_reply() and redis.status_reply() strip embedded CRLF (RESP injection)."""
+    for script in [
+        'return redis.error_reply("ERR msg\\r\\n+INJECTED\\r\\n")',
+        'return redis.status_reply("OK\\r\\n+INJECTED\\r\\n")',
+    ]:
+        pipe = async_client.pipeline(transaction=False)
+        pipe.eval(script, 0)
+        pipe.ping()
+        results = await pipe.execute(raise_on_error=False)
+        # If CRLF is not stripped, "+INJECTED\r\n" is consumed as PING's response instead of "+PONG"
+        assert results[1] is True, f"RESP injection detected for: {script}"
 
 
 @dfly_args({"proactor_threads": 4})
@@ -447,3 +462,67 @@ async def test_eval_commandstats_nested_call(async_client: aioredis.Redis):
     stats = await async_client.info("commandstats")
     assert calls(stats, "eval") == 4
     assert calls(stats, "exists") == 3
+
+
+@pytest.mark.asyncio
+async def test_lua_schedule_during_bgsave(df_factory: DflyInstanceFactory):
+    server = df_factory.create(
+        proactor_threads=8,
+        num_shards=8,
+        dir="{DRAGONFLY_TMP}/",
+        dbfilename="test-lua-fiber-invariant",
+    )
+    server.start()
+
+    c_save = server.client()
+    eval_clients = [server.client() for _ in range(100)]
+
+    await c_save.execute_command("DEBUG", "POPULATE", "20000", "k", "10")
+
+    script = "redis.call('SET', KEYS[1], ARGV[1]); return 1"
+
+    # Warm up all connections so each migrates to its assigned shard thread.
+    for c in eval_clients:
+        await c.eval(script, 1, "warmup", "v")
+
+    stop_event = asyncio.Event()
+
+    async def bgsave_loop():
+        for _ in range(10):
+            if stop_event.is_set():
+                break
+            try:
+                await c_save.execute_command("BGSAVE")
+                while await is_saving(c_save):
+                    await asyncio.sleep(0)
+            except Exception:
+                stop_event.set()
+                break
+        stop_event.set()
+
+    async def eval_loop(client, slot):
+        i = 0
+        while not stop_event.is_set():
+            try:
+                await client.eval(script, 1, f"lua:{slot}", f"v{i}")
+                i += 1
+            except Exception:
+                stop_event.set()
+                break
+
+    await asyncio.gather(
+        bgsave_loop(),
+        *[eval_loop(c, i) for i, c in enumerate(eval_clients)],
+        return_exceptions=True,
+    )
+
+    await c_save.aclose()
+    for c in eval_clients:
+        await c.aclose()
+    server.stop()
+
+    bad_lines = server.find_in_logs("Unexpected fiber")
+    assert not bad_lines, (
+        "DbSlice change callback fired from DflyConn_* fiber during BGSAVE+EVAL "
+        "(SerializerBase::OnChangeBlocking invariant violated).\n" + "\n".join(bad_lines)
+    )

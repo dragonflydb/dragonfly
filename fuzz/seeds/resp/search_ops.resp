@@ -1,4 +1,4 @@
-*8
+*9
 $9
 FT.CREATE
 $5
@@ -17,12 +17,12 @@ $5
 score
 $7
 NUMERIC
-*3
+*2
 $7
 FT.INFO
 $5
 myidx
-*8
+*6
 $4
 HSET
 $4
@@ -35,7 +35,7 @@ $5
 score
 $1
 1
-*8
+*6
 $4
 HSET
 $4
@@ -55,7 +55,7 @@ $5
 myidx
 $5
 hello
-*5
+*6
 $9
 FT.SEARCH
 $5
@@ -68,10 +68,10 @@ $1
 0
 $1
 5
-*2
+*1
 $8
 FT._LIST
-*3
+*2
 $12
 FT.DROPINDEX
 $5

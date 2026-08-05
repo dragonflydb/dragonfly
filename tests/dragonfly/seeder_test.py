@@ -1,11 +1,15 @@
 import asyncio
-import async_timeout
 import string
+
+import async_timeout
+import pytest
+
 from redis import asyncio as aioredis
+
 from . import dfly_args
-from .seeder import Seeder, DebugPopulateSeeder
-from .instance import DflyInstanceFactory, DflyInstance
-from .utility import *
+from .instance import DflyInstanceFactory
+from .seeder import DebugPopulateSeeder, Seeder
+from .utility import DflySeederFactory, ValueType
 
 
 @dfly_args({"proactor_threads": 4})

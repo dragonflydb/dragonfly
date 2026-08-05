@@ -5,7 +5,9 @@
 
 extern "C" {
 #include "redis/crc64.h"
+#include "redis/listpack.h"
 #include "redis/redis_aux.h"
+#include "redis/stream.h"
 #include "redis/zmalloc.h"
 }
 
@@ -16,14 +18,19 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/bloom.h"
+#include "core/cuckoo.h"
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
+#include "io/file_util.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/serializer.h"
+#include "server/journal/types.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/serializer_commons.h"
 #include "server/test_utils.h"
+#include "strings/human_readable.h"
 
 namespace rng = std::ranges;
 
@@ -42,6 +49,23 @@ ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 ABSL_DECLARE_FLAG(bool, serialize_hnsw_index);
 ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
+ABSL_DECLARE_FLAG(std::string, dbfilename);
+
+namespace {
+
+uint64_t EncodeModuleId(std::string_view name, int ver) {
+  CHECK_LE(name.size(), 9u) << "Module names are encoded in at most 9 chars";
+  constexpr std::string_view kCharset =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  uint64_t bits = 0;
+  for (char c : name) {
+    size_t idx = kCharset.find(c);
+    bits = (bits << 6) | idx;
+  }
+  return (bits << 10) | static_cast<uint64_t>(ver);
+}
+
+}  // namespace
 
 namespace dfly {
 
@@ -194,9 +218,10 @@ TEST_F(RdbTest, Stream) {
                               "1655444851523-1", "entries-read", kMatchNil, "lag", kMatchNil));
 
   resp = Run({"xinfo", "groups", "key:1"});  // test dereferences array of size 1
-  EXPECT_THAT(resp, RespElementsAre("name", "g2", "consumers", IntArg(0), "pending", IntArg(0),
-                                    "last-delivered-id", "1655444851523-1", "entries-read",
-                                    kMatchNil, "lag", kMatchNil));
+  EXPECT_THAT(resp,
+              RespElementsAre(RespElementsAre("name", "g2", "consumers", IntArg(0), "pending",
+                                              IntArg(0), "last-delivered-id", "1655444851523-1",
+                                              "entries-read", kMatchNil, "lag", kMatchNil)));
 
   resp = Run({"xinfo", "groups", "key:2"});
   EXPECT_THAT(resp, ArrLen(0));
@@ -713,7 +738,6 @@ TEST_F(RdbTest, SBF) {
 }
 
 TEST_F(RdbTest, SBFLargeFilterChunking) {
-  absl::SetFlag(&FLAGS_rdb_sbf_chunked, true);
   max_memory_limit = 200000000;
 
   // Using this set of parameters for the BF.RESERVE command resulted in a
@@ -1195,8 +1219,7 @@ TEST_F(RdbTest, TopkSerializationEmptyEdgeCase) {
   // After loading an empty TOPK, adding items must work correctly.
   Run({"TOPK.INCRBY", "topk_empty", "new_item", "100"});
   resp = Run({"TOPK.LIST", "topk_empty"});
-  // Run() unwraps single-element arrays to a scalar string
-  EXPECT_EQ(resp, "new_item");
+  EXPECT_THAT(resp, RespElementsAre("new_item"));
 }
 
 // Tests that the decay parameter (double) is correctly serialized using SaveBinaryDouble/
@@ -1243,19 +1266,18 @@ class MemBufControllerTest : public Test {
   }
 
   std::string Flush() {
-    auto current = controller_.CurrentBuffer()->InputBuffer();
-    const auto blob = controller_.BuildBlob(current);
+    const auto blob = controller_.BuildBlob();
     EXPECT_EQ(controller_.FlushableSize(), 0);
     return blob;
   }
 
   void Write(std::string_view s) {
-    controller_.CurrentBuffer()->WriteAndCommit(s.data(), s.size());
+    controller_.Buffer()->WriteAndCommit(s.data(), s.size());
   }
 
-  void AssertDefaultState() const {
+  void AssertDefaultState() {
     EXPECT_EQ(controller_.active_id_, 0u);
-    EXPECT_EQ(controller_.CurrentBuffer(), &controller_.default_buffer_);
+    EXPECT_EQ(controller_.Buffer(), &controller_.buffer_);
   }
 
   void MarkMidFlush() {
@@ -1280,30 +1302,35 @@ class MemBufControllerTest : public Test {
   void Restore(MemBufController::EntryId id) {
     controller_.RestoreStateAfterConsume(id);
     EXPECT_EQ(controller_.active_id_, id);
-    EXPECT_EQ(controller_.CurrentBuffer(), &controller_.entry_buffer_);
+  }
+
+  void WriteEntry(std::string_view data, bool save_successful = true) {
+    controller_.StartEntry();
+    Write(data);
+    controller_.FinishEntry(save_successful);
   }
 };
 
 TEST_F(MemBufControllerTest, TaggedData) {
   controller_.SetTagEntries(true);
 
-  const std::string_view data = "a_a_a_";
+  constexpr std::string_view data = "a_a_a_";
   const auto saved_id = SplitAndSuspend(data, 1);
   EXPECT_TRUE(HasSplitEntries());
 
   Write("a");
   Restore(saved_id);
-  EXPECT_EQ(controller_.FlushableSize(), 1);
+  ASSERT_EQ(controller_.FlushableSize(), 1);
 
   Write("b");
-  EXPECT_EQ(controller_.FlushableSize(), 2);
-  controller_.FinishEntry();
+  ASSERT_EQ(controller_.FlushableSize(), 2);
+  controller_.FinishEntry(true);
   EXPECT_FALSE(HasSplitEntries());
 
   const std::string blob = Flush();
 
-  EXPECT_EQ(blob.size(), MemBufController::kHeaderSize + 2);
-  EXPECT_EQ(blob[0], 'a');
+  ASSERT_EQ(blob.size(), MemBufController::kHeaderSize + 2);
+  ASSERT_EQ(blob[0], 'a');
   AssertTaggedData(blob.substr(1), "b");
 }
 
@@ -1315,7 +1342,7 @@ TEST_F(MemBufControllerTest, NestedInterleaving) {
 
   controller_.StartEntry();
   Write("ccc");
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
   AssertDefaultState();
 
   EXPECT_EQ(controller_.FlushableSize(), 3);
@@ -1324,13 +1351,13 @@ TEST_F(MemBufControllerTest, NestedInterleaving) {
 
   Restore(saved_id_b);
   Write("x");
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
 
   AssertTaggedData(Flush(), "x", 2);
 
   Restore(saved_id_a);
   Write("y");
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
   EXPECT_FALSE(HasSplitEntries());
 
   AssertTaggedData(Flush(), "y");
@@ -1349,7 +1376,7 @@ TEST_F(MemBufControllerTest, BuildBlobEdgeCases) {
   EXPECT_EQ(blob[0], 'p');
   AssertTaggedData(blob.substr(1), "x");
 
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
   AssertDefaultState();
 }
 
@@ -1358,7 +1385,7 @@ TEST_F(MemBufControllerTest, UnsplitEntry) {
 
   controller_.StartEntry();
   Write("hello");
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
   AssertDefaultState();
 
   EXPECT_EQ(controller_.FlushableSize(), 5);
@@ -1376,9 +1403,62 @@ TEST_F(MemBufControllerTest, TaggingDisabled) {
   Restore(saved_id);
 
   Write("def");
-  controller_.FinishEntry();
+  controller_.FinishEntry(true);
 
   EXPECT_EQ(Flush(), "def");
+}
+
+TEST_F(MemBufControllerTest, RollbackPartialEntry) {
+  for (const auto state : {true, false}) {
+    controller_.SetTagEntries(state);
+
+    WriteEntry("hello", true);
+    WriteEntry("world", false);
+
+    EXPECT_EQ(Flush(), "hello");
+
+    // empty buffer case
+    WriteEntry("a", false);
+
+    EXPECT_EQ(controller_.FlushableSize(), 0);
+    EXPECT_EQ(Flush(), "");
+
+    // next write works as expected ie no state corruption
+    WriteEntry("abc", true);
+    EXPECT_EQ(Flush(), "abc");
+  }
+}
+
+TEST_F(MemBufControllerTest, RollbackPartialEntrySplit) {
+  controller_.SetTagEntries(true);
+  auto entry = SplitAndSuspend("abc", 1);
+  EXPECT_TRUE(HasSplitEntries());
+  Restore(entry);
+  Write("bbb");
+
+  controller_.FinishEntry(false);
+  EXPECT_FALSE(HasSplitEntries());
+  EXPECT_EQ(controller_.FlushableSize(), 0);
+  EXPECT_EQ(Flush(), "");
+}
+
+TEST_F(MemBufControllerTest, RollbackOnSuspendedEntry) {
+  controller_.SetTagEntries(true);
+
+  const auto id_a = SplitAndSuspend("aaa", 1);
+
+  // a failed entry written
+  WriteEntry("bbb", false);
+
+  // controller still has aaa in map
+  EXPECT_TRUE(HasSplitEntries());
+
+  Restore(id_a);
+  Write("a_tail");
+  controller_.FinishEntry(true);
+
+  AssertTaggedData(Flush(), "a_tail", 1);
+  EXPECT_FALSE(HasSplitEntries());
 }
 
 namespace {
@@ -1441,33 +1521,61 @@ void AppendBinaryDouble(std::string* out, double val) {
   out->append(reinterpret_cast<const char*>(buf), sizeof(buf));
 }
 
+// Drives interleaving SaveEntry calls from the serializer's consume callback to exercise
+// tagged-chunk framing when a serialization is preempted mid-entry.
+struct InterleaveHarness {
+  struct Pending {
+    std::string key;
+    const PrimeValue* value;
+  };
+
+  std::vector<Pending> queued;
+  size_t next = 0;
+  std::string body;
+  RdbSerializer* serializer = nullptr;
+  std::optional<uint64_t> last_journal_offset;
+
+  void AddKey(std::string_view key, DbContext& ctx) {
+    auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, key, OBJ_HASH);
+    ASSERT_TRUE(it.ok());
+    queued.push_back(Pending{std::string{key}, &it.value()->second});
+  }
+
+  // Each invocation appends the supplied blob to the body, then injects a SaveEntry for the next
+  // queued key (sandwiched between a journal offset and a journal entry) to force interleaved
+  // tagged chunks. Passed to serializer as consume_fun_, so the blob is the flushed data
+  // accumulated in serializer.
+  std::error_code operator()(std::string blob) {
+    body += blob;
+    if (next >= queued.size())
+      return {};
+
+    uint64_t offset = last_journal_offset.value_or(0) + 100;
+    last_journal_offset = offset;
+    EXPECT_FALSE(serializer->SendJournalOffset(offset));
+
+    const auto& entry = queued[next++];
+    // SaveEntry calls get preempted (not by fiber but call stack) every time consume_fun_ is
+    // called. So the call stack looks like: SaveEntry(A) -> consume_fun_ -> SaveEntry(B) ->
+    // consume_fun_ -> ... The last entry in queue (next == queued size) does not add anything, it
+    // simply returns until the entry is completed. From that point on all entries simply flush
+    // repeatedly until completed, moving down the stack.
+    EXPECT_TRUE(serializer->SaveEntry(PrimeKey{entry.key}, *entry.value, 0, 0, 0).has_value());
+
+    io::StringSink sink;
+    JournalWriter writer(&sink);
+    writer.Write(journal::Entry{journal::Op::PING, 0, std::nullopt});
+    EXPECT_FALSE(serializer->WriteJournalEntry(std::move(sink).str()));
+    return {};
+  }
+};
+
 }  // namespace
 
 // The following are tests that directly feed byte data to loader to exercise chunk loading.
 // Some of these will become redundant once the saver starts sending chunked data, so instead of
 // hand-crafting data we will be able to load from the db directly.
-
-TEST_F(RdbTest, LoadTwoChunks) {
-  std::string first;
-  first.push_back(RDB_TYPE_HASH);
-  AppendString(&first, "h");
-  AppendLen(&first, 2);
-  AddKV(&first, "f1", "v1");
-
-  std::string second;
-  AddKV(&second, "f2", "v2");
-
-  std::string body;
-  // hash is split across two tagged chunks
-  body += MakeTaggedChunk(1, first);
-  body += MakeTaggedChunk(1, second);
-
-  const auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
-  ASSERT_FALSE(ec) << ec.message();
-
-  EXPECT_EQ(Run({"HGET", "h", "f1"}), "v1");
-  EXPECT_EQ(Run({"HGET", "h", "f2"}), "v2");
-}
 
 TEST_F(RdbTest, InterleavedLoad) {
   // must have >1 shards for non inlined path check. find a key that lands in shard 1 by hashing, to
@@ -1522,32 +1630,29 @@ TEST_F(RdbTest, InterleavedLoad) {
   EXPECT_EQ(Run({"SELECT", "0"}), "OK");
 }
 
-TEST_F(RdbTest, ChunksAroundJournalOffset) {
+TEST_F(RdbTest, EofWithPendingChunkState) {
+  // will be skipped
   std::string a1;
   a1.push_back(RDB_TYPE_HASH);
-  AppendString(&a1, "a");
+  AppendString(&a1, "partial_hash");
   AppendLen(&a1, 2);
   AddKV(&a1, "f1", "v1");
 
-  std::string a2;
-  AddKV(&a2, "f2", "v2");
+  // will survive
+  std::string b;
+  b.push_back(RDB_TYPE_STRING);
+  AppendString(&b, "complete_key");
+  AppendString(&b, "hello");
 
   std::string body;
   body += MakeTaggedChunk(1, a1);
+  body += b;
 
-  // put the journal offset in the middle
-  body.push_back(static_cast<char>(RDB_OPCODE_JOURNAL_OFFSET));
-  uint8_t offset_bytes[8];
-  absl::little_endian::Store64(offset_bytes, 1234);
-  body.append(reinterpret_cast<const char*>(offset_bytes), sizeof(offset_bytes));
-
-  body += MakeTaggedChunk(1, a2);
-
-  auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body), 1234); });
+  const auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
   ASSERT_FALSE(ec) << ec.message();
 
-  EXPECT_EQ(Run({"HGET", "a", "f1"}), "v1");
-  EXPECT_EQ(Run({"HGET", "a", "f2"}), "v2");
+  EXPECT_THAT(Run({"EXISTS", "partial_hash"}), IntArg(0));
+  EXPECT_EQ(Run({"GET", "complete_key"}), "hello");
 }
 
 TEST_F(RdbTest, SplitSBF) {
@@ -1645,6 +1750,548 @@ TEST_F(RdbTest, SplitSBF) {
   for (size_t i = 0; i < 50; ++i) {
     EXPECT_THAT(Run({"BF.EXISTS", "bf_loaded", StrCat("item", i)}), IntArg(1));
   }
+}
+
+TEST_F(RdbTest, SplitCuckoo) {
+  auto resp = Run("cf.reserve cf_src 4 expansion 2");
+  EXPECT_EQ(resp, "OK");
+  for (size_t i = 0; i < 100; ++i) {
+    resp = Run(StrCat("cf.add cf_src item", i));
+    EXPECT_THAT(resp, IntArg(1));
+  }
+
+  std::string first;
+  std::string last_blob;
+
+  // split the blob of the last filter into three chunks.
+  constexpr size_t kFirstSplit = 17;
+  constexpr size_t kSecondSplit = 13;
+
+  pp_->at(0)->Await([&] {
+    const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    const auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, "cf_src", OBJ_CUCKOOFILTER);
+    ASSERT_TRUE(it.ok());
+
+    const CuckooFilter* cf = it.value()->second.GetCuckooFilter();
+    ASSERT_GE(cf->NumFilters(), 2u);
+    const size_t num_filters = cf->NumFilters();
+
+    last_blob = std::string{cf->FilterBytes(num_filters - 1)};
+    ASSERT_GT(last_blob.size(), kFirstSplit + kSecondSplit);
+
+    first.push_back(RDB_TYPE_CUCKOO);
+    // brand new key whose shape is copied off cf_src
+    AppendString(&first, "cf_loaded");
+    AppendLen(&first, cf->SlotsPerBucket());
+    AppendLen(&first, cf->MaxIterations());
+    AppendLen(&first, cf->Expansion());
+    AppendLen(&first, cf->NumBuckets());
+    AppendLen(&first, cf->NumItems());
+    AppendLen(&first, cf->NumDeletes());
+    AppendLen(&first, num_filters);
+
+    // every filter but the last is written whole, in a single chunk
+    for (size_t i = 0; i + 1 < num_filters; ++i) {
+      const std::string blob{cf->FilterBytes(i)};
+      AppendLen(&first, blob.size());
+      AppendLen(&first, blob.size());
+      first.append(blob);
+    }
+
+    // total size of the last filter's blob
+    AppendLen(&first, last_blob.size());
+    // only kFirstSplit bytes of it in this chunk
+    AppendLen(&first, kFirstSplit);
+    first.append(last_blob.data(), kFirstSplit);
+  });
+
+  // add this plain string between chunks of the split filter
+  std::string plain;
+  plain.push_back(RDB_TYPE_STRING);
+  AppendString(&plain, "plain_key");
+  AppendString(&plain, "plain_val");
+
+  // p2 of last_blob
+  std::string second;
+  AppendLen(&second, kSecondSplit);
+  second.append(last_blob.data() + kFirstSplit, kSecondSplit);
+
+  // p3 of last_blob
+  std::string third;
+  constexpr auto kPrefixConsumed = kFirstSplit + kSecondSplit;
+  AppendLen(&third, last_blob.size() - kPrefixConsumed);
+  third.append(last_blob.data() + kPrefixConsumed, last_blob.size() - kPrefixConsumed);
+
+  std::string body;
+  body += MakeTaggedChunk(1, first);
+  body += plain;
+  body += MakeTaggedChunk(1, second);
+  body += MakeTaggedChunk(1, third);
+
+  EXPECT_EQ(Run("flushall"), "OK");
+
+  auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run("type cf_loaded"), "MBbloomCF");
+  EXPECT_EQ(Run("get plain_key"), "plain_val");
+
+  for (size_t i = 0; i < 100; ++i) {
+    EXPECT_THAT(Run(StrCat("cf.exists cf_loaded item", i)), IntArg(1));
+  }
+}
+
+TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
+  absl::FlagSaver fs;
+  SetTestFlag("cache_mode", "false");
+  SetTestFlag("num_shards", "1");
+  SetTestFlag("serialization_tagged_chunks", "true");
+  ResetService();
+
+  // create hset named key, then fill it with count fields each with 128 char long string
+  auto fill_hash = [&](std::string_view key, int count, char ch) {
+    for (int i = 0; i < count; ++i) {
+      auto res = Run({"HSET", key, StrCat("field:", i), std::string(128, ch)});
+      EXPECT_THAT(res, IntArg(1));
+    }
+  };
+
+  // Some hashes have many more fields to make them flush mid-entry during serialization
+  auto num_fields_in_hash_set = [](std::string s) {
+    if ((s[0] - 'A') % 3 == 2)
+      return 4;
+    return 200;
+  };
+
+  // note: going to Z causes stack size issues because of the recursive nature of the harness
+  constexpr auto from = 'A';
+  constexpr auto to = 'F';
+  for (auto ch = from; ch <= to; ++ch) {
+    std::string s{ch};
+    fill_hash(s, num_fields_in_hash_set(s), ch);
+  }
+
+  std::string body;
+  std::optional<uint64_t> last_journal_offset;
+
+  pp_->at(0)->Await([&] {
+    DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+
+    InterleaveHarness harness;
+    // Queue up B..F to be injected when A yields mid-SaveEntry through PushToConsumerIfNeeded.
+    for (auto ch = 'B'; ch <= to; ++ch) {
+      std::string s{ch};
+      harness.AddKey(s, ctx);
+    }
+
+    RdbSerializer serializer(
+        CompressionMode::NONE,
+        [&](std::string blob) -> std::error_code {
+          harness(std::move(blob));
+          return {};
+        },
+        256);
+
+    harness.serializer = &serializer;
+    serializer.SetTagEntries(true);
+
+    auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, "A", OBJ_HASH);
+    ASSERT_TRUE(it.ok());
+
+    ASSERT_TRUE(serializer.SaveEntry(PrimeKey{"A"}, it.value()->second, 0, 0, 0).has_value());
+
+    if (auto tail = serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry); !tail.empty())
+      harness.body += tail;
+
+    body = std::move(harness.body);
+    last_journal_offset = harness.last_journal_offset;
+  });
+
+  EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+
+  auto ec = pp_->at(0)->Await(
+      [&] { return LoadRdbData(service_.get(), WrapInRdb(body), last_journal_offset); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  auto verify_hash = [&](std::string_view key, int count, char ch) {
+    EXPECT_EQ(CheckedInt({"HLEN", std::string{key}}), count);
+    for (int i = 0; i < count; ++i) {
+      EXPECT_EQ(Run({"HGET", std::string{key}, StrCat("field:", i)}), std::string(128, ch));
+    }
+  };
+
+  for (auto ch = from; ch <= to; ++ch) {
+    std::string s{ch};
+    verify_hash(s, num_fields_in_hash_set(s), ch);
+  }
+}
+
+std::string MakeJournalDel(std::string_view key) {
+  io::StringSink sink;
+  JournalWriter writer(&sink);
+  writer.Write(journal::Entry{1, journal::Op::COMMAND, 0, std::nullopt,
+                              journal::Entry::Payload("DEL", ArgSlice{key})});
+
+  RdbSerializer serializer(CompressionMode::NONE);
+  CHECK(!serializer.WriteJournalEntry(std::move(sink).str()));
+  return serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry);
+}
+
+TEST_F(RdbTest, JournalDelWaitsForShardLoads) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  std::string key;
+  for (unsigned i = 0; i < 1000; ++i) {
+    key = StrCat("journal-del-barrier-", i);
+    if (Shard(key, shard_set->size()) != 0)
+      break;
+  }
+  ASSERT_NE(Shard(key, shard_set->size()), 0u);
+  const ShardId sid = Shard(key, shard_set->size());
+
+  // Priming key on same shard as key so that it can schedule before the RDB load callback.
+  std::string priming_key;
+  for (unsigned i = 0; i < 1000; ++i) {
+    priming_key = StrCat("journal-del-prime-", i);
+    if (Shard(priming_key, shard_set->size()) == sid)
+      break;
+  }
+  ASSERT_EQ(Shard(priming_key, shard_set->size()), sid);
+
+  EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+
+  std::atomic_bool release_shard_queue{false};
+
+  // block sid task queue for 50ms. releaser will unlock this after 50ms
+  shard_set->Add(sid, [&] {
+    while (!release_shard_queue.load(std::memory_order_relaxed)) {
+      ThisFiber::SleepFor(chrono::milliseconds(1));
+    }
+  });
+
+  const auto ec = pp_->at(0)->Await([&] {
+    Fiber releaser([&] {
+      ThisFiber::SleepFor(chrono::milliseconds(50));
+      release_shard_queue.store(true, std::memory_order_relaxed);
+    });
+
+    // Run priming key so that transaction scheduling is already in the shard set task queue by the
+    // time delete runs.
+    Fiber scheduler_primer([&] { EXPECT_EQ(Run({"SET", priming_key, "1"}), "OK"); });
+    ThisFiber::SleepFor(chrono::milliseconds(10));
+
+    std::string entry;
+    entry.push_back(RDB_TYPE_STRING);
+    AppendString(&entry, key);
+    AppendString(&entry, "baseline");
+
+    // create artificial rdb
+    // one entry key -> baseline
+    // one delete journal entry for same key
+    std::string body;
+
+    // this entry will be added to task set after the blocked entry from
+    // src/server/rdb_load.cc:2824
+    body += entry;
+    // this entry will be executed directly in the already running batch without going to task queue
+    // task queue will look like this for sid
+    // 1. 50ms blocker
+    // 2. schedule batch in shard (which will run SET priming_key and then DEL key in same batch)
+    // 3. then finally loader callback which creates the key
+    body += MakeJournalDel(key);
+
+    const std::string rdb = WrapInRdb(body);
+    io::BytesSource src{io::Buffer(rdb)};
+    RdbLoadContext load_context;
+    RdbLoader loader(service_.get(), &load_context);
+
+    const auto ec_ = loader.Load(&src);
+    EXPECT_EQ(loader.journal_offset(), std::nullopt);
+    scheduler_primer.Join();
+    releaser.Join();
+    shard_set->Await(sid, [] {});
+    return ec_;
+  });
+
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_THAT(Run({"GET", key}), ArgType(RespExpr::NIL));
+}
+
+// Test that an unsupported module type is skipped, and that the keys before and after it are
+// loaded correctly.
+TEST_F(RdbTest, ModuleUnsupportedTypeSkipped) {
+  std::string body;
+
+  body.push_back(RDB_TYPE_STRING);
+  AddKV(&body, "key_before", "val_before");
+
+  body.push_back(RDB_TYPE_MODULE_2);
+  AppendString(&body, "key_with_unsupported_module");
+  AppendLen(&body, EncodeModuleId("invalid", 1));
+  AppendLen(&body, RDB_MODULE_OPCODE_STRING);
+  AppendString(&body, "value");
+  AppendLen(&body, RDB_MODULE_OPCODE_EOF);
+
+  body.push_back(RDB_TYPE_STRING);
+  AddKV(&body, "key_after", "val_after");
+
+  auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run({"GET", "key_before"}), "val_before");
+  EXPECT_THAT(Run({"EXISTS", "key_with_unsupported_module"}), IntArg(0));
+  EXPECT_EQ(Run({"GET", "key_after"}), "val_after");
+}
+
+// Every global-PEL entry of a loaded consumer group must be owned by exactly one
+// consumer. A crafted stream that violates this must be rejected: two consumers
+// sharing one entry leave a NACK double-freed on consumer deletion, and an
+// unclaimed entry leaves nack->consumer == nullptr for XACK/XCLAIM to dereference.
+TEST_F(RdbTest, RestoreStreamConsumerGroupCorruption) {
+  auto u64le = [](std::string* out, uint64_t v) {
+    uint8_t b[8];
+    absl::little_endian::Store64(b, v);
+    out->append(reinterpret_cast<const char*>(b), sizeof(b));
+  };
+
+  struct Consumer {
+    std::string name;
+    std::vector<std::string> pel;
+  };
+
+  // Builds a DUMP payload for a stream with an empty body and a single consumer
+  // group whose global PEL and consumers are as specified.
+  auto build = [&](const std::vector<std::string>& global_pel,
+                   const std::vector<Consumer>& consumers) {
+    std::string p;
+    p.push_back(RDB_TYPE_STREAM_LISTPACKS);
+    AppendLen(&p, 0);  // listpack node count: empty stream body
+    AppendLen(&p, 0);  // stream_len
+    AppendLen(&p, 0);  // last_id.ms
+    AppendLen(&p, 0);  // last_id.seq
+
+    AppendLen(&p, 1);       // one consumer group
+    AppendString(&p, "g");  // group name
+    AppendLen(&p, 0);       // group last_id.ms
+    AppendLen(&p, 0);       // group last_id.seq
+
+    AppendLen(&p, global_pel.size());
+    for (const auto& id : global_pel) {
+      p.append(id);
+      u64le(&p, 0);      // delivery_time
+      AppendLen(&p, 0);  // delivery_count
+    }
+
+    AppendLen(&p, consumers.size());
+    for (const auto& c : consumers) {
+      AppendString(&p, c.name);
+      u64le(&p, 0);  // seen_time
+      AppendLen(&p, c.pel.size());
+      for (const auto& id : c.pel)
+        p.append(id);
+    }
+
+    // DUMP footer: 2-byte version, then CRC64 over everything preceding it.
+    uint8_t ver[2];
+    absl::little_endian::Store16(ver, RDB_SER_VERSION);
+    p.append(reinterpret_cast<const char*>(ver), sizeof(ver));
+    uint64_t cs = crc64(0, reinterpret_cast<const uint8_t*>(p.data()), p.size());
+    u64le(&p, cs);
+    return p;
+  };
+
+  const std::string x(16, 'A');
+  const std::string y(16, 'B');
+
+  // Two consumers claim the same global-PEL entry: accepted by a vulnerable
+  // loader, then a double-free when both consumers are deleted.
+  EXPECT_THAT(Run({"RESTORE", "shared", "0", build({x}, {{"c1", {x}}, {"c2", {x}}})}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "shared"}), IntArg(0));
+
+  // A global-PEL entry that no consumer claims: accepted by a vulnerable loader,
+  // leaving nack->consumer == nullptr.
+  EXPECT_THAT(Run({"RESTORE", "unclaimed", "0", build({x}, {{"c1", {}}})}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "unclaimed"}), IntArg(0));
+
+  // One consumer lists the same id twice (duplicate consumer-PEL insert).
+  EXPECT_THAT(Run({"RESTORE", "dup", "0", build({x}, {{"c1", {x, x}}})}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "dup"}), IntArg(0));
+
+  // Positive controls: well-formed groups must still load.
+  EXPECT_EQ(Run({"RESTORE", "ok1", "0", build({x}, {{"c1", {x}}})}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "ok1"}), IntArg(1));
+  EXPECT_EQ(Run({"RESTORE", "ok2", "0", build({x, y}, {{"c1", {x}}, {"c2", {y}}})}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "ok2"}), IntArg(1));
+}
+
+// A master entry declaring more fields than the listpack holds makes stream iteration walk
+// lpNext past the end and crash; RESTORE must reject the inconsistent stream.
+TEST_F(RdbTest, RestoreStreamListpackMasterFieldsOverflow) {
+  auto u64le = [](std::string* out, uint64_t v) {
+    uint8_t b[8];
+    absl::little_endian::Store64(b, v);
+    out->append(reinterpret_cast<const char*>(b), sizeof(b));
+  };
+
+  // A one-node stream DUMP whose master entry declares the given counts. An optional record with
+  // no fields can be added to test consistency between deleted_count and the record flags.
+  auto build = [&](int64_t count, int64_t deleted, int64_t num_master_fields,
+                   std::optional<int64_t> record_flags = std::nullopt) {
+    uint8_t* lp = lpNew(0);
+    lp = lpAppendInteger(lp, count);              // valid entry count
+    lp = lpAppendInteger(lp, deleted);            // deleted count
+    lp = lpAppendInteger(lp, num_master_fields);  // master fields (untrusted)
+    lp = lpAppendInteger(lp, 0);                  // terminator
+    if (record_flags) {
+      CHECK_EQ(num_master_fields, 0);
+      lp = lpAppendInteger(lp, *record_flags);
+      lp = lpAppendInteger(lp, 0);  // entry ID milliseconds delta
+      lp = lpAppendInteger(lp, 0);  // entry ID sequence delta
+      lp = lpAppendInteger(lp, 3);  // flags + two ID deltas
+    }
+    std::string lp_blob(reinterpret_cast<const char*>(lp), lpBytes(lp));
+    lpFree(lp);
+
+    std::string p;
+    p.push_back(RDB_TYPE_STREAM_LISTPACKS);
+    AppendLen(&p, 1);                           // one listpack node
+    AppendString(&p, std::string(16, '\x01'));  // 16-byte master ID (sizeof(streamID))
+    AppendString(&p, lp_blob);                  // the crafted master-entry listpack
+    AppendLen(&p, 0);                           // stream_len
+    AppendLen(&p, 0);                           // last_id.ms
+    AppendLen(&p, 0);                           // last_id.seq
+    AppendLen(&p, 0);                           // consumer-group count
+
+    uint8_t ver[2];
+    absl::little_endian::Store16(ver, RDB_SER_VERSION);
+    p.append(reinterpret_cast<const char*>(ver), sizeof(ver));
+    u64le(&p, crc64(0, reinterpret_cast<const uint8_t*>(p.data()), p.size()));
+    return p;
+  };
+
+  // Control: truthful counts must still load.
+  EXPECT_EQ(Run({"RESTORE", "safe", "0", build(0, 0, 0)}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "safe"}), IntArg(1));
+
+  // Inflated master-fields count: crashes a vulnerable loader in streamGetEdgeID, rejected here.
+  EXPECT_THAT(Run({"RESTORE", "overflow", "0", build(0, 0, 1000)}), ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "overflow"}), IntArg(0));
+
+  // valid + deleted counts whose signed sum overflows; must not wrap negative and skip the walk.
+  EXPECT_THAT(Run({"RESTORE", "sumovf", "0", build(INT64_MAX, 1, 0)}), ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "sumovf"}), IntArg(0));
+
+  // The number of records carrying the DELETED flag must match deleted_count in the master entry.
+  EXPECT_THAT(Run({"RESTORE", "deleted-mismatch", "0",
+                   build(1, 0, 0, STREAM_ITEM_FLAG_SAMEFIELDS | STREAM_ITEM_FLAG_DELETED)}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "deleted-mismatch"}), IntArg(0));
+
+  // Real streams must still round-trip, exercising both SAMEFIELDS and full records.
+  Run({"XADD", "s", "1-1", "a", "1", "b", "2"});  // master fields {a, b}
+  Run({"XADD", "s", "2-1", "a", "3", "b", "4"});  // same fields -> SAMEFIELDS
+  Run({"XADD", "s", "3-1", "c", "5"});            // different fields -> full record
+  auto dump = Run({"DUMP", "s"});
+  Run({"DEL", "s"});
+  EXPECT_EQ(Run({"RESTORE", "s", "0", dump.GetString()}), "OK");
+  EXPECT_THAT(Run({"XLEN", "s"}), IntArg(3));
+}
+
+// An early EOF with trailing bytes passes the non-deep lpValidateIntegrity but must be
+// rejected by the walk; otherwise reverse iteration (lpLast/lpPrev) reads the trailing bytes
+// out of bounds. Exercised via the non-deep full-RDB load path.
+TEST_F(RdbTest, LoadStreamListpackEarlyEof) {
+  uint8_t* lp = lpNew(0);
+  lp = lpAppendInteger(lp, 0);  // count
+  lp = lpAppendInteger(lp, 0);  // deleted
+  lp = lpAppendInteger(lp, 0);  // num master fields
+  lp = lpAppendInteger(lp, 0);  // terminator
+  std::string blob(reinterpret_cast<const char*>(lp), lpBytes(lp));
+  lpFree(lp);
+
+  // The trailing LP_EOF becomes an early EOF once junk and a new final EOF follow it; patch
+  // the header total-bytes to the enlarged size so lpValidateIntegrity still accepts it.
+  blob.append(4, '\x7f');
+  blob.push_back('\xff');
+  absl::little_endian::Store32(reinterpret_cast<uint8_t*>(blob.data()), blob.size());
+
+  std::string body;
+  body.push_back(RDB_TYPE_STREAM_LISTPACKS);
+  AppendString(&body, "earlyeof");               // key
+  AppendLen(&body, 1);                           // one listpack node
+  AppendString(&body, std::string(16, '\x01'));  // 16-byte master ID
+  AppendString(&body, blob);                     // the early-EOF listpack
+  AppendLen(&body, 0);                           // stream_len
+  AppendLen(&body, 0);                           // last_id.ms
+  AppendLen(&body, 0);                           // last_id.seq
+  AppendLen(&body, 0);                           // consumer-group count
+
+  // Skipping the corrupt key is non-fatal; the point is that it is never stored.
+  std::ignore = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  EXPECT_THAT(Run({"EXISTS", "earlyeof"}), IntArg(0));
+}
+
+// Integration test for snapshot egress throttling (--snapshot_egress_limit_bytes).
+// Bandwidth limiting is inherently time-based, so this test runs a snapshot large enough
+// that the throttled run takes a few seconds. It asserts two robust properties:
+//   1. The effective egress rate does not exceed the configured limit (the core guarantee).
+//   2. The limit - not inherent serialization cost - is what slows the save down.
+TEST_F(RdbTest, SnapshotEgressThrottle) {
+  absl::FlagSaver fs;
+  // Disable compression so the on-disk size equals the tracked egress and serialization
+  // stays cheap, ensuring the throttle (not CPU) dominates the timing.
+  SetFlag(&FLAGS_compression_mode, CompressionMode::NONE);
+
+  // ~20MB spread across shards.
+  Run({"debug", "populate", "20000", "key", "1000"});
+
+  auto save_and_measure = [&]() -> std::pair<double, size_t> {
+    int64_t start = absl::GetCurrentTimeNanos();
+    RespExpr resp = Run({"save", "rdb"});
+    CHECK_EQ(resp, "OK");
+    double secs = double(absl::GetCurrentTimeNanos() - start) / 1e9;
+    auto files = io::StatFiles(absl::StrCat(absl::GetFlag(FLAGS_dbfilename), "*"));
+    CHECK(files) << files.error().message();
+    size_t total = 0;
+    for (const auto& f : *files)
+      total += f.size;
+    return {secs, total};
+  };
+
+  // Baseline save with no limit to measure the machine's serialization capacity.
+  Run({"config", "set", "snapshot_egress_limit_bytes", "0"});
+  auto [t_base, bytes] = save_and_measure();
+  ASSERT_GT(bytes, 1u << 20) << "populated dataset too small to test throttling";
+
+  // The limit is per-shard-thread, so throttle each shard to a small fraction of the machine's
+  // measured per-shard capacity. That way the limit - not CPU - is the bottleneck on any machine
+  // (including slow ASAN/CI). Aim for a run of at least a couple of seconds so several sliding
+  // windows elapse. Pacing makes each shard's average rate converge to the limit, so the
+  // aggregate rate converges to limit * num_shards and the expected duration is ~target_sec.
+  uint64_t shards = shard_set->size();
+  double target_sec = std::max(2.0, t_base * 8);
+  uint64_t limit = uint64_t(bytes / shards / target_sec);
+  Run({"config", "set", "snapshot_egress_limit_bytes", absl::StrCat(limit)});
+  auto [t_lim, bytes2] = save_and_measure();
+
+  double rate = double(bytes2) / t_lim;
+  double per_shard_rate = rate / shards;
+  LOG(INFO) << "egress throttle: bytes=" << bytes2 << " shards=" << shards << " limit=" << limit
+            << "B/s t_base=" << t_base << "s t_lim=" << t_lim << "s rate=" << uint64_t(rate)
+            << "B/s per_shard_rate=" << uint64_t(per_shard_rate) << "B/s";
+
+  // Core guarantee: each shard's achieved egress rate stays at/below the limit. The only slack is
+  // the one-window initial burst plus per-bucket overshoot, comfortably within 1.6x.
+  EXPECT_LE(per_shard_rate, limit * 1.6) << "egress exceeded the configured per-shard limit";
+
+  // Sanity: the slowdown is caused by the limit, not by inherent save cost.
+  EXPECT_GT(t_lim, t_base * 3);
 }
 
 }  // namespace dfly

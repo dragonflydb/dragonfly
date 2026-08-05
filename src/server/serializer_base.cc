@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "redis/redis_aux.h"
 #include "server/common_types.h"
@@ -19,6 +20,9 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
+#include "util/fibers/synchronization.h"
+
+ABSL_DECLARE_FLAG(bool, serialization_tagged_chunks);
 
 namespace dfly {
 
@@ -36,6 +40,9 @@ void BucketDependencies::Decrement(BucketIdentity bucket) {
   it->second->unlock();
   if (!it->second->IsBlocked())
     deps_.erase(it);
+
+  if (deps_.empty())
+    empty_q_.notify_all();
 }
 
 void BucketDependencies::Wait(BucketIdentity bucket) const {
@@ -47,8 +54,9 @@ void BucketDependencies::Wait(BucketIdentity bucket) const {
   counter->Wait();
 }
 
-bool BucketDependencies::DEBUG_IsBusy(BucketIdentity bucket) const {
-  return deps_.contains(bucket);
+void BucketDependencies::WaitEmpty() const {
+  util::fb2::NoOpLock lock;
+  empty_q_.wait(lock, [&] { return deps_.empty(); });
 }
 
 void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_index, PrimeKey pk,
@@ -114,11 +122,35 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
 SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
     : DelayedEntryHandler(static_cast<BucketDependencies&>(*this)),
       db_slice_(slice),
-      base_cntx_(cntx) {
+      base_cntx_(cntx),
+      // Enable stream mutex if tagged chunks are disabled
+      stream_mu_(!absl::GetFlag(FLAGS_serialization_tagged_chunks)) {
   DCHECK(base_cntx_);
 }
 
 SerializerBase::~SerializerBase() {
+}
+
+void SerializerBase::SerializeEntry(BucketIdentity bucket, DbIndex db_index, const PrimeKey& pk,
+                                    const PrimeValue& pv) {
+  if (pv.IsExternal() && pv.IsCool())
+    return SerializeEntry(bucket, db_index, pk, pv.GetCool().record->value);
+
+  time_t expire_time = pk.GetExpireTime();
+  uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_index, pk) : 0;
+
+  if (pv.IsExternal()) {
+    // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
+    EnqueueOffloaded(bucket, db_index, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+  } else {
+    std::lock_guard lk{stream_mu_};
+    SerializeEntryLocked(db_index, pk, pv, expire_time, mc_flags);
+  }
+}
+
+void SerializerBase::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
+  std::lock_guard lk{stream_mu_};
+  SerializeEntryLocked(tde.dbid, tde.key, pv, tde.expire, tde.mc_flags);
 }
 
 // Ordering invariant:
@@ -126,20 +158,20 @@ SerializerBase::~SerializerBase() {
 //   that mutates K.
 // RegisterChangeListener registers the DbSlice callback that routes mutations through
 //   SerializerBase::OnChange. ConsumeJournalChange runs later on the
-//   same fiber, so the baseline is serialized first. big_value_mu_ prevents this callback path
+//   same fiber, so the baseline is serialized first. stream_mu_ prevents this callback path
 //   from interleaving with the traversal fiber's bucket serialization, which may preempt while
 //   emitting large values.
-void SerializerBase::RegisterChangeListener() {
+void SerializerBase::RegisterChangeListener(bool replication) {
   db_array_ = db_slice_->databases();  // copy pointers to survive flush
-  auto cb = [this](DbIndex dbid, const ChangeReq& req) {
-    std::visit([&](auto it) { OnChangeBlocking(dbid, it); }, req);
-  };
-  snapshot_version_ = db_slice_->RegisterOnChange(cb);
+  db_slice_->RegisterOnChange(this);
+  eventually_consistent_ = replication;
 }
 
 void SerializerBase::UnregisterChangeListener() {
-  if (auto version = std::exchange(snapshot_version_, 0); version > 0)
-    db_slice_->UnregisterOnChange(version);
+  DCHECK(!IsAnyBucketBlocked());
+  if (snapshot_version_ > 0)
+    if (!db_slice_->UnregisterOnChange(this))
+      LOG(DFATAL) << "UnregisterOnChange failed for snapshot_version_ " << snapshot_version_;
 }
 
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
@@ -148,7 +180,8 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   if (it.is_done() || it.GetVersion() >= snapshot_version_) {
     stats_.buckets_skipped++;
 
-    // Update versions for empty buckets
+    // Update versions for empty buckets to mark that won't visit them anymore
+    // TODO: Flush changes to earlier callbacks
     if (it.GetVersion() < snapshot_version_)
       it.SetVersion(snapshot_version_);
 
@@ -165,12 +198,9 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   // acquire serialization latch.
   // We must make sure that earlier snapshots serialized this bucket before we update its
   // version below.
-  std::optional<std::lock_guard<LocalLatch>> db_guard;
-  if (!on_update) {
+  if (!on_update)
     db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
                                              snapshot_version_);
-    db_guard.emplace(*db_slice_->GetLatch());
-  }
 
   // The block above with updating earlier callbacks is not exlusive - check version again
   if (it.GetVersion() >= snapshot_version_)
@@ -192,24 +222,22 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   return true;
 }
 
-void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  std::string_view active_name = util::fb2::detail::FiberActive()->name();
-  if (!absl::StartsWith(active_name, "shard_queue") &&  //
-      !absl::StartsWith(active_name, "l2_queue") &&     // pipelining
-      !absl::StartsWith(active_name, "SliceSnapshot") &&
-      active_name != "Dispatched" &&   // Comes from OnAllShards(... { migration->RunSync(); });
-      active_name != "Debug/Traverse"  // DEBUG OBJHIST/UNIQ-STRS cleanup of lazy-expired empty
-                                       // containers; runs on the shard proactor so ordering holds.
-  ) {
-    LOG(DFATAL) << "Unexpected fiber: " << active_name << " on " << util::fb2::GetStacktrace();
-  }
-
-  ProcessBucket(db_index, it, true);
+void SerializerBase::WaitForNoBucketBlocked() const {
+  BucketDependencies::WaitEmpty();
 }
 
-void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& bucket_set) {
+void SerializerBase::OnChange(DbIndex db_index, const ChangeReq& req) {
+  // OnChangeBlocking can be reached almost from any fiber.
+  // Specifically, they can be called from the following fibers:
+  // 1. shard_queue, SliceSnapshot - trivial.
+  // 2. DflyConn/AsyncFiber - connection fiber that runs an inline transaction.
+  // 3. l2_queue via pipelining.
+  // 4."Debug/Traverse" - DEBUG OBJHIST/UNIQ-STRS delete lazy-expired empty collections.
+  // 5. "Dispatched" -  OnAllShards(... { migration->RunSync(); });
+  // 6. "shard_stable_sync_read" - on replica
+
   // We call Process even for up-to-date buckets to ensure all operations (delayed) are finished.
-  for (auto it : bucket_set.buckets())
+  for (auto it : req.buckets())
     ProcessBucket(db_index, it, true);
 }
 

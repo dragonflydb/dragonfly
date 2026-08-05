@@ -6,6 +6,7 @@
 
 #include <absl/strings/str_join.h>
 
+#include <functional>
 #include <memory>
 #include <queue>
 #include <ranges>
@@ -204,6 +205,14 @@ string DocIndexInfo::BuildRestoreCommand() const {
       absl::StrAppend(&out, " ", sw);
   }
 
+  if (base_index.options.no_offsets)
+    absl::StrAppend(&out, " NOOFFSETS");
+
+  absl::StrAppend(&out, " LANGUAGE ", base_index.schema.default_language);
+
+  if (!base_index.schema.language_field.empty())
+    absl::StrAppend(&out, " LANGUAGE_FIELD ", base_index.schema.language_field);
+
   absl::StrAppend(&out, " SCHEMA");
   for (const auto& [fident, finfo] : base_index.schema.fields) {
     // Store field name, alias and type
@@ -214,16 +223,17 @@ string DocIndexInfo::BuildRestoreCommand() const {
     Overloaded info{
         [](monostate) {},
         [out = &out](const search::SchemaField::VectorParams& params) {
-          auto sim = params.sim == search::VectorSimilarity::L2   ? "L2"
-                     : params.sim == search::VectorSimilarity::IP ? "IP"
-                                                                  : "COSINE";
+          auto sim = search::VectorSimilarityToString(params.sim);
           if (params.use_hnsw) {
-            absl::StrAppend(out, " HNSW 12 TYPE ", params.data_type, " DIM ", params.dim,
-                            " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity, " M ",
-                            params.hnsw_m, " EF_CONSTRUCTION ", params.hnsw_ef_construction);
+            absl::StrAppend(out, " HNSW 16 TYPE ", search::VectorDataTypeToString(params.data_type),
+                            " DIM ", params.dim, " DISTANCE_METRIC ", sim, " INITIAL_CAP ",
+                            params.capacity, " M ", params.hnsw_m, " EF_CONSTRUCTION ",
+                            params.hnsw_ef_construction, " EF_RUNTIME ", params.hnsw_ef_runtime,
+                            " EPSILON ", params.hnsw_epsilon);
           } else {
-            absl::StrAppend(out, " FLAT 8 TYPE ", params.data_type, " DIM ", params.dim,
-                            " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity);
+            absl::StrAppend(out, " FLAT 8 TYPE ", search::VectorDataTypeToString(params.data_type),
+                            " DIM ", params.dim, " DISTANCE_METRIC ", sim, " INITIAL_CAP ",
+                            params.capacity);
           }
         },
         [out = &out](const search::SchemaField::TagParams& params) {
@@ -234,8 +244,11 @@ string DocIndexInfo::BuildRestoreCommand() const {
             absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
         },
         [out = &out](const search::SchemaField::TextParams& params) {
+          absl::StrAppend(out, " ", "WEIGHT", " ", std::to_string(params.weight));
           if (params.with_suffixtrie)
             absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
+          if (params.no_stem)
+            absl::StrAppend(out, " ", "NOSTEM");
         },
         [out = &out](const search::SchemaField::NumericParams& params) {
           absl::StrAppend(out, " ", "BLOCKSIZE", " ", std::to_string(params.block_size));
@@ -456,6 +469,8 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_vie
 
   auto update_indices = [&](bool remove) {
     for (DocId doc_id : docs_to_rebuild) {
+      if (!key_index_.IsValid(doc_id))
+        continue;
       std::string_view key = key_index_.Get(doc_id);
       auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
 
@@ -816,53 +831,69 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
                                                             const OpArgs& op_args) const {
   DCHECK_GT(limit, 0u) << "Limit=0 still has O(ids->size()) complexity";
 
-  auto comp = [order = sort.order](const auto& lhs, const auto& rhs) {
-    return order == SortOrder::ASC ? lhs < rhs : lhs > rhs;
-  };
-  // Priority queue keeps top-k values in reverse order (to compare against top - worst value)
   using QPair = std::pair<search::SortableValue, DocId>;
-  std::priority_queue<QPair, std::vector<QPair>, decltype(comp)> q(comp);
 
-  // Iterate over all documents, extract sortable field and update the queue
-  for (DocId id : *ids) {
-    auto entry = LoadEntry(id, op_args);
-    if (!entry)
-      continue;
+  // ValueCmp (std::less/std::greater) selects the direction for present values; docs missing the
+  // sort field hold a monostate value and always rank last, independent of direction, so that rule
+  // wraps ValueCmp. ranks_before(a, b) is true when a should rank before b; the priority queue
+  // keeps the max (worst) on top, so it is evicted first when a better candidate arrives.
+  auto select = [&](auto value_cmp) {
+    auto ranks_before = [value_cmp](const QPair& a, const QPair& b) {
+      bool a_missing = std::holds_alternative<std::monostate>(a.first);
+      bool b_missing = std::holds_alternative<std::monostate>(b.first);
+      if (a_missing != b_missing)
+        return !a_missing;  // present ranks before missing
+      return value_cmp(a, b);
+    };
+    std::priority_queue<QPair, std::vector<QPair>, decltype(ranks_before)> q(ranks_before);
 
-    auto result = entry->second->Serialize(base_->schema, {sort.field});
-    if (result.empty())
-      continue;
+    for (DocId id : *ids) {
+      auto entry = LoadEntry(id, op_args);
+      if (!entry)
+        continue;
 
-    // Check if the extracted value is better than the worst (q.top())
-    if (q.size() < limit || comp(result.begin()->second, q.top().first)) {
-      if (q.size() >= limit)
-        q.pop();
-      q.emplace(std::move(result.begin()->second), id);
+      search::SortableValue value = std::monostate{};
+      if (auto result = entry->second->Serialize(base_->schema, {sort.field}); !result.empty())
+        value = std::move(result.begin()->second);
+
+      QPair candidate{std::move(value), id};
+      if (q.size() < limit || ranks_before(candidate, q.top())) {
+        if (q.size() >= limit)
+          q.pop();
+        q.push(std::move(candidate));
+      }
     }
-  }
 
-  // Reorder ids and collect scores
-  vector<search::SortableValue> out(q.size());
-  for (int i = 0; !q.empty(); i++) {
-    auto [v, id] = q.top();
-    (*ids)[i] = id;
-    out[i] = std::move(v);
-    q.pop();
-  }
-  return out;
+    // Reorder ids and collect scores
+    vector<search::SortableValue> out(q.size());
+    for (int i = 0; !q.empty(); i++) {
+      auto [v, id] = q.top();
+      (*ids)[i] = id;
+      out[i] = std::move(v);
+      q.pop();
+    }
+    return out;
+  };
+
+  return sort.order == SortOrder::ASC ? select(std::less<QPair>{}) : select(std::greater<QPair>{});
 }
 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
-                                   search::SearchAlgorithm* search_algo,
-                                   bool is_knn_prefilter) const {
+                                   search::SearchAlgorithm* search_algo, bool is_knn_prefilter,
+                                   const search::GlobalScoringStats* global_stats) const {
   size_t limit = params.limit_offset + params.limit_total;
+
+  // Disable BasicSearch's per-shard cutoff; we re-rank by (score, key) below.
+  const bool sort_by_text_score = params.scorer || params.with_scores;
+  const auto knn_sort_option = search_algo->GetKnnScoreSortOption();
 
   // If we don't sort the documents, we don't need to copy more ids than are requested
   // Also for HNSW KNN search we don't cut results at the search stage.
-  bool can_cut = !params.sort_option && !search_algo->GetKnnScoreSortOption() && !is_knn_prefilter;
+  bool can_cut =
+      !params.sort_option && !knn_sort_option && !is_knn_prefilter && !sort_by_text_score;
   size_t id_cutoff_limit = can_cut ? limit : numeric_limits<size_t>::max();
 
-  auto result = search_algo->Search(&*indices_, id_cutoff_limit);
+  auto result = search_algo->Search(&*indices_, id_cutoff_limit, global_stats);
   if (!result.error.empty())
     return {facade::ErrorReply(std::move(result.error))};
 
@@ -871,14 +902,14 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
   // Tune sort for KNN: Skip if it's on the knn field, otherwise extend the limit if needed
   bool skip_sort = false;
-  if (auto ko = search_algo->GetKnnScoreSortOption(); ko) {
-    skip_sort = !params.sort_option || params.sort_option->IsSame(*ko);
+  if (knn_sort_option) {
+    skip_sort = !params.sort_option || params.sort_option->IsSame(*knn_sort_option);
     if (skip_sort) {
       // Caller (SearchReply) will globally reorder by knn_score. Don't cut at the
       // shard level — otherwise multi-shard top-K-by-distance can drop true winners.
       limit = numeric_limits<size_t>::max();
     } else {
-      limit = max(limit, ko->limit);
+      limit = max(limit, knn_sort_option->limit);
     }
   }
 
@@ -907,32 +938,57 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       if (params.ShouldReturnAllFields())
         return_fields.push_back(so.field);
     }
+  }
 
-    // If we sorted with knn_scores present, rearrange them
-    if (!sort_scores.empty() && !result.knn_scores.empty()) {
-      unordered_map<DocId, float> score_lookup(result.knn_scores.begin(), result.knn_scores.end());
-      for (size_t i = 0; i < min(limit, result.ids.size()); i++)
-        result.knn_scores[i] = {result.ids[i], score_lookup[result.ids[i]]};
+  // Re-rank by (score, key) so per-shard top-K matches what a global merge
+  // would pick. Skipped when SORTBY or KNN drives the order — those vectors
+  // are positionally aligned with result.ids and reordering desyncs them.
+  if (sort_by_text_score && sort_scores.empty() && result.knn_scores.empty() &&
+      !result.text_scores.empty()) {
+    struct Scored {
+      float score;
+      std::string_view key;
+      search::DocId doc;
+    };
+    std::vector<Scored> entries;
+    entries.reserve(result.text_scores.size());
+    for (const auto& [doc, score] : result.text_scores)
+      entries.push_back({score, key_index_.Get(doc), doc});
+
+    const size_t take = std::min(limit, entries.size());
+    std::partial_sort(entries.begin(), entries.begin() + take, entries.end(),
+                      [](const Scored& a, const Scored& b) {
+                        if (a.score != b.score)
+                          return a.score > b.score;
+                        return a.key < b.key;
+                      });
+
+    // Keep only the surviving top-K, both in result order (ids) and in the by-id score map.
+    result.ids.clear();
+    result.ids.reserve(take);
+    absl::flat_hash_map<search::DocId, float> top_scores;
+    top_scores.reserve(take);
+    for (size_t i = 0; i < take; i++) {
+      result.ids.push_back(entries[i].doc);
+      top_scores[entries[i].doc] = entries[i].score;
     }
+    result.text_scores = std::move(top_scores);
   }
 
   // Cut off unnecessary items
   result.ids.resize(min(result.ids.size(), limit));
 
-  // Build text score lookup (DocId -> score) if available
-  absl::flat_hash_map<search::DocId, float> text_score_map;
-  for (const auto& [doc, score] : result.text_scores)
-    text_score_map[doc] = score;
-
-  // Serialize documents
+  // Serialize documents. knn_scores/text_scores are keyed by DocId (looked up per result id).
   vector<SerializedSearchDoc> out;
   out.reserve(min(limit, result.ids.size()));
 
   size_t expired_count = 0;
   for (size_t i = 0; i < result.ids.size(); i++) {
-    float knn_score = result.knn_scores.empty() ? 0 : result.knn_scores[i].second;
+    float knn_score = 0;
+    if (auto it = result.knn_scores.find(result.ids[i]); it != result.knn_scores.end())
+      knn_score = it->second;
     float text_score = 0;
-    if (auto it = text_score_map.find(result.ids[i]); it != text_score_map.end())
+    if (auto it = result.text_scores.find(result.ids[i]); it != result.text_scores.end())
       text_score = it->second;
     auto sort_score = sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i]);
 
@@ -962,35 +1018,85 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
         {result.ids[i], string{key}, std::move(fields), knn_score, text_score, sort_score});
   }
 
-  return {result.total - expired_count, std::move(out), std::move(result.profile)};
+  // Recompute the max over docs that survived loading. Expired/missing docs were dropped above,
+  // so the pre-filter result.max_text_score could otherwise normalize BM25STD.NORM by a document
+  // that is not returned, pushing the best returned document below 1.0.
+  auto max_it = std::ranges::max_element(
+      out, [](const auto& a, const auto& b) { return a.text_score < b.text_score; });
+  float max_text_score = max_it == out.end() ? 0.0f : max_it->text_score;
+
+  return {result.total - expired_count, std::move(out), std::move(result.profile), max_text_score};
+}
+
+SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParams& params,
+                                        search::SearchAlgorithm* search_algo,
+                                        const search::GlobalScoringStats* global_stats) const {
+  auto result = search_algo->Search(&*indices_, numeric_limits<size_t>::max(), global_stats);
+  if (!result.error.empty())
+    return {facade::ErrorReply(std::move(result.error))};
+
+  if (!params.IdsOnly()) {
+    vector<DocId> live_ids;
+    absl::flat_hash_map<DocId, float> live_text_scores;
+    live_ids.reserve(result.ids.size());
+    if (!result.text_scores.empty())
+      live_text_scores.reserve(result.text_scores.size());
+
+    for (DocId id : result.ids) {
+      if (!LoadEntry(id, op_args))
+        continue;
+
+      live_ids.push_back(id);
+      if (auto it = result.text_scores.find(id); it != result.text_scores.end())
+        live_text_scores[id] = it->second;
+    }
+
+    // Recompute the max over live docs only, mirroring ShardDocIndex::Search: a dropped
+    // top-scoring doc must not inflate the BM25STD.NORM denominator.
+    auto max_it = std::ranges::max_element(
+        live_text_scores, [](const auto& a, const auto& b) { return a.second < b.second; });
+    float max_text_score = max_it == live_text_scores.end() ? 0.0f : max_it->second;
+
+    return {live_ids.size(), std::move(live_ids), std::move(live_text_scores),
+            std::move(result.profile), max_text_score};
+  }
+
+  // NOCONTENT returns ids without a per-id liveness check (ignore-expiration fast path); a winner
+  // deleted before the load hop is dropped there, which can yield <k results — acceptable here.
+  return {result.total, std::move(result.ids), std::move(result.text_scores),
+          std::move(result.profile), result.max_text_score};
+}
+
+search::ShardScoringStats ShardDocIndex::CollectScoringStats(
+    search::SearchAlgorithm* search_algo) const {
+  return search_algo->CollectScoringStats(&*indices_);
 }
 
 vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
     search::SearchAlgorithm* search_algo) const {
-  auto search_results = search_algo->Search(&*indices_);
+  auto search_results = search_algo->Search(&*indices_, std::numeric_limits<size_t>::max(),
+                                            params.global_scoring_stats);
 
   if (!search_results.error.empty())
     return {};
 
-  // Build distance lookup for FLAT VECTOR_RANGE so the YIELD_DISTANCE_AS alias is
-  // available in the aggregation pipeline. HNSW VECTOR_RANGE uses LoadHnswRangeDocsForAggregator.
+  // Distance lookup for FLAT KNN/VECTOR_RANGE so the score alias is available in the
+  // aggregation pipeline. HNSW paths use LoadHnswRangeDocsForAggregator.
   absl::flat_hash_map<DocId, float> knn_score_map;
   std::string score_alias;
-  if (auto* vr = search_algo->GetVectorRangeNode(); vr && !vr->score_alias.empty()) {
+  if (auto option = search_algo->GetKnnScoreSortOption();
+      option && !option->score_field_alias.empty()) {
+    score_alias = option->score_field_alias;
+    knn_score_map = std::move(search_results.knn_scores);
+  } else if (auto* vr = search_algo->GetVectorRangeNode(); vr && !vr->score_alias.empty()) {
     score_alias = vr->score_alias;
-    knn_score_map.reserve(search_results.knn_scores.size());
-    for (auto& [doc_id, dist] : search_results.knn_scores)
-      knn_score_map[doc_id] = dist;
+    knn_score_map = std::move(search_results.knn_scores);
   }
 
-  // Build text score lookup for ADDSCORES injection (keyed by DocId, safe across expired docs)
   absl::flat_hash_map<DocId, float> text_score_map;
-  if (params.add_scores && !search_results.text_scores.empty()) {
-    text_score_map.reserve(search_results.text_scores.size());
-    for (auto& [doc_id, score] : search_results.text_scores)
-      text_score_map[doc_id] = score;
-  }
+  if (params.add_scores)
+    text_score_map = std::move(search_results.text_scores);
 
   return LoadDocEntriesWithScores(op_args, params, search_results.ids, score_alias, knn_score_map,
                                   text_score_map);
@@ -1024,7 +1130,7 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
     auto entry = LoadEntry(doc, op_args);
     if (!entry)
       continue;
-    auto& [_, accessor] = *entry;
+    auto& [key, accessor] = *entry;
 
     SearchDocData extracted_sort_indicies;
     extracted_sort_indicies.reserve(sort_indicies.size());
@@ -1042,9 +1148,11 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
         out.back()[string{score_alias}] = static_cast<double>(it->second);
     }
 
-    if (!text_score_map.empty()) {
-      if (auto it = text_score_map.find(doc); it != text_score_map.end())
-        out.back()["__score"] = static_cast<double>(it->second);
+    if (params.add_scores) {
+      auto it = text_score_map.find(doc);
+      out.back()["__score"] = it != text_score_map.end() ? static_cast<double>(it->second) : 0.0;
+      // Hidden tie-breaker for SORTBY @__score; not added to fields_to_print.
+      out.back()["__key"] = string{key};
     }
   }
   return out;
@@ -1178,15 +1286,20 @@ ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
 }
 
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
-                                shared_ptr<const DocIndex> index_ptr) {
+                                shared_ptr<const DocIndex> index_ptr, bool is_journal) {
   auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr));
   auto [it, _] = indices_.emplace(name, std::move(shard_index));
 
   it->second->InitHnswShardIndices();
 
-  // Don't build while loading, shutting down, etc.
-  // After loading, indices are rebuilt separately
-  if (ServerState::tlocal()->gstate() == GlobalState::ACTIVE)
+  // Build now when ACTIVE, or for a journaled FT.CREATE/FT.ALTER replayed
+  // during a replica's full sync (gstate==LOADING) so AddDoc has an
+  // initialized indices_ to write into. RDB-aux load defers to
+  // PerformPostLoad's RebuildAllIndices, which also re-runs for the journal
+  // case and covers any docs not yet present when this Rebuild started. Other
+  // states (SHUTTING_DOWN, TAKEN_OVER) don't build.
+  const GlobalState gstate = ServerState::tlocal()->gstate();
+  if (gstate == GlobalState::ACTIVE || (gstate == GlobalState::LOADING && is_journal))
     it->second->Rebuild(op_args, &local_mr_);
 
   op_args.GetDbSlice().SetDocDeletionCallback(
@@ -1223,13 +1336,21 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
     JsonAccessor::RemoveFieldFromCache(fident);
 }
 
-void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args, bool is_restored) {
+void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
   for (auto& [index_name, ptr] : indices_) {
     ptr->InitHnswShardIndices();
-    // Only use the restore path for indices that have populated key mappings.
-    // When shard counts differ, PerformPostLoad remaps the mappings; if remapping fails,
-    // the mappings are removed so the index falls back to full rebuild here.
-    bool index_restored = is_restored && ptr->key_index_.Size() > 0;
+    // Use the restore path only when the HNSW graph was actually populated AND we have
+    // matching key mappings — otherwise (no graph, no mappings, or a corrupted save
+    // that left one without the other) fall back to a full rebuild from the keyspace.
+    bool any_hnsw_field_has_nodes = false;
+    for (const auto& [_, field] : GetIndexedHnswFields(ptr->base_->schema)) {
+      if (auto h = GlobalHnswIndexRegistry::Instance().Get(index_name, field.short_name);
+          h && h->GetNodeCount() > 0) {
+        any_hnsw_field_has_nodes = true;
+        break;
+      }
+    }
+    bool index_restored = any_hnsw_field_has_nodes && ptr->key_index_.Size() > 0;
     ptr->Rebuild(op_args, &local_mr_, index_restored);
   }
 }

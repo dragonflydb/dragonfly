@@ -22,11 +22,16 @@
 #include "server/search/serialization_utils.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "strings/human_readable.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
+
 ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
+ABSL_FLAG(bool, serialization_tagged_chunks, true,
+          "Allow serializer output to be split into tagged chunks and reassembled by receiver");
 
 namespace dfly {
 
@@ -51,8 +56,7 @@ SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
     : SerializerBase(slice, cntx),
       compression_mode_(compression_mode),
       replica_dfly_version_(replica_dfly_version),
-      consumer_(consumer),
-      cntx_(cntx) {
+      consumer_(consumer) {
   tl_slice_snapshots.insert(this);
 }
 
@@ -77,7 +81,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
   use_background_mode_ = absl::GetFlag(FLAGS_background_snapshotting);
-  SerializerBase::RegisterChangeListener();
+  SerializerBase::RegisterChangeListener(stream_journal);
 
   if (stream_journal) {
     journal_cb_id_ = journal::RegisterConsumer(this);
@@ -87,20 +91,20 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   RdbSerializer::ConsumeFun consume_fun;
   if (allow_flush == SnapshotFlush::kAllow) {
     flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
-    if (flush_threshold != 0) {
-      // The callback receives data directly from the serializer, no need to call back into it.
-      consume_fun = [this](std::string data) {
-        HandleFlushData(std::move(data));
-        VLOG(2) << "HandleFlushData via callback";
-        ++ServerState::tlocal()->stats.big_value_preemptions;
-      };
-    }
+    // The callback receives data directly from the serializer, no need to call back into it.
+    if (flush_threshold != 0)
+      consume_fun = std::bind_front(&SliceSnapshot::ConsumeBigValueChunk, this);
   }
+
   bool serialize_index = SaveMode() != dfly::SaveMode::RDB &&
                          absl::GetFlag(FLAGS_serialize_hnsw_index) &&
                          replica_dfly_version_ >= DflyVersion::VER6;
 
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_, consume_fun, flush_threshold);
+
+  if (allow_flush == SnapshotFlush::kAllow) {
+    serializer_->SetTagEntries(absl::GetFlag(FLAGS_serialization_tagged_chunks));
+  }
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -165,7 +169,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   }
 
   for (DbIndex snapshot_db_indx = 0; snapshot_db_indx < db_array_.size(); ++snapshot_db_indx) {
-    if (!cntx_->IsRunning())
+    if (!base_cntx_->IsRunning())
       return;
 
     if (!db_array_[snapshot_db_indx])
@@ -175,9 +179,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << snapshot_db_indx;
 
     do {
-      if (!cntx_->IsRunning()) {
+      if (!base_cntx_->IsRunning())
         return;
-      }
 
       snapshot_cursor_ = pt->TraverseBuckets(
           snapshot_cursor_,
@@ -197,10 +200,14 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
           }
         }
       }
+
+      // Suspend the traversal loop if we are exceeding the egress budget, letting
+      // high priority writes drain first. Guarantees the loop its reserved share.
+      ServerState::tlocal()->GetEgressThrottler().Throttle();
     } while (snapshot_cursor_);
 
     // Wait for all the outstanding delayed entries and serialize them as well.
-    ProcessDelayedEntries(true, 0, cntx_);
+    ProcessDelayedEntries(true, 0, base_cntx_);
 
     PushSerialized(true);
   }  // for (dbindex)
@@ -229,43 +236,25 @@ unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::buck
   unsigned serialized = 0;
 
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-    // Version is already stamped by SerializerBase::ProcessBucketInternal.
+    // Version is already stamped by SerializerBase::ProcessBucket.
     DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
     ++serialized;
 
     // might preempt due to big value serialization.
-    SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
+    SerializerBase::SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
   }
 
   serialize_bucket_running_ = false;
   return serialized;
 }
 
-void SliceSnapshot::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
-  std::lock_guard lk{stream_mu_};
-  auto res = serializer_->SaveEntry(tde.key, pv, tde.expire, tde.mc_flags, tde.dbid);
-  CHECK(res);
-}
-
-void SliceSnapshot::SerializeEntry(BucketIdentity bucket, DbIndex db_indx, const PrimeKey& pk,
-                                   const PrimeValue& pv) {
-  if (pv.IsExternal() && pv.IsCool())
-    return SerializeEntry(bucket, db_indx, pk, pv.GetCool().record->value);
-
-  time_t expire_time = pk.GetExpireTime();
-  uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
-
-  if (pv.IsExternal()) {
-    // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    EnqueueOffloaded(bucket, db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
-    ++type_freq_map_[RDB_TYPE_STRING];
-  } else {
-    std::lock_guard lk{stream_mu_};
-    io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
-    CHECK(res);
+void SliceSnapshot::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                                         time_t expire, uint32_t mc_flags) {
+  io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire, mc_flags, db_index);
+  LOG_IF(ERROR, !res.has_value()) << "Serialization error: " << res.error();
+  if (res)
     ++type_freq_map_[*res];
-  }
 }
 
 void SliceSnapshot::HandleFlushData(std::string data) {
@@ -297,8 +286,12 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   // update last_pushed_id_ to 5.
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
 
+  // Track egress just before the socket write. Attribute it to a high priority (out of order)
+  // write when we don't run on the snapshot fiber.
+  ServerState::tlocal()->GetEgressThrottler().Record(serialized, !snapshot_fb_.IsActive());
+
   // Blocking point.
-  consumer_->ConsumeData(std::move(data), cntx_);
+  consumer_->ConsumeData(std::move(data), base_cntx_);
 
   DCHECK_EQ(last_pushed_id_ + 1, id);
   last_pushed_id_ = id;
@@ -315,6 +308,18 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   VLOG(2) << "Pushed with Serialize() " << serialized;
 }
 
+std::error_code SliceSnapshot::ConsumeBigValueChunk(std::string data) {
+  if (base_cntx_->IsError())
+    return base_cntx_->GetError();
+
+  if (base_cntx_->IsCancelled())
+    return std::make_error_code(std::errc::operation_canceled);
+
+  HandleFlushData(std::move(data));
+  ++ServerState::tlocal()->stats.big_value_preemptions;
+  return {};
+}
+
 size_t SliceSnapshot::FlushSerialized() {
   std::string blob = serializer_->Flush(RdbSerializer::FlushState::kFlushEndEntry);
 
@@ -329,7 +334,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
   return FlushSerialized();
 }
 
-// big_value_mu_ prevents expiry/eviction DEL journal entries from interleaving with an
+// stream_mu_ prevents expiry/eviction DEL journal entries from interleaving with an
 // in-progress SaveEntry for a large value. SaveEntry may yield mid-entry (emitting chunks
 // across multiple scheduler turns); expiry paths emit DEL via RecordDelete directly,
 // bypassing OnChange. Without the lock, such a DEL could be written between two chunks
@@ -342,13 +347,9 @@ bool SliceSnapshot::PushSerialized(bool force) {
 //
 // Note: for transaction-driven mutations, baseline-before-journal ordering is already
 // guaranteed by call order on the mutation fiber (OnChange precedes ConsumeJournalChange);
-// big_value_mu_ is not needed for that ordering.
+// stream_mu_ is not needed for that ordering.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   std::lock_guard lk{stream_mu_};
-
-  // remove when we support interleaving chunks.
-  LOG_IF(DFATAL, serialize_bucket_running_)
-      << "Internal error: can not run interleave journal and bucket serialization";
   std::ignore = serializer_->WriteJournalEntry(item.journal_item.data);
   ++stats_.jounal_changes;
 }

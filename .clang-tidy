@@ -77,7 +77,6 @@ Checks: >
   readability-string-compare,
   readability-suspicious-call-argument,
   readability-uniqueptr-delete-release,
-  readability-use-anyofallof
 
 
 # Disabled because they're currently too disruptive, but one day might be nice to have:

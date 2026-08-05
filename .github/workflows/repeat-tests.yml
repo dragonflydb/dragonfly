@@ -1,4 +1,5 @@
 name: Repeat Tests
+run-name: "Repeat [${{ inputs.build_type || 'Debug' }}] ${{ inputs.expression }} ×${{ inputs.count || 1 }}"
 
 on:
   workflow_dispatch:
@@ -26,12 +27,12 @@ on:
         type: string
         default: "60m"
       epoll:
-        description: "Force epoll mode in test"
+        description: "Force epoll mode in test (yes/true/epoll to enable)"
         required: false
         type: string
         default: "no"
       use_release:
-        description: "Use latest release instead of building dragonfly"
+        description: "Use latest release instead of building dragonfly (yes/true to enable)"
         required: false
         type: string
         default: "no"
@@ -48,6 +49,15 @@ on:
           - Debug
           - Release
         default: "Debug"
+      arch:
+        description: "CPU architecture to run on"
+        required: false
+        type: choice
+        options:
+          - x86_64
+          - arm64
+          - both
+        default: "x86_64"
 
 jobs:
   build:
@@ -56,7 +66,7 @@ jobs:
         container: ["ubuntu-dev:24"]
         proactor: [Uring]
         build-type: ["${{ inputs.build_type || 'Debug' }}"]
-        runner: [ubuntu-latest]
+        runner: ${{ fromJSON(inputs.arch == 'arm64' && '[["self-hosted", "linux", "ARM64"]]' || inputs.arch == 'both' && '["ubuntu-latest", ["self-hosted", "linux", "ARM64"]]' || '["ubuntu-latest"]') }}
 
     runs-on: ${{ matrix.runner }}
 
@@ -84,19 +94,25 @@ jobs:
 
       - name: Fetch release
         shell: bash
-        if: ${{ inputs.use_release == 'yes' }}
+        if: ${{ contains(fromJSON('["yes","true"]'), inputs.use_release) }}
         run: |
           mkdir "${GITHUB_WORKSPACE}"/build
           cd "${GITHUB_WORKSPACE}"/build
-          wget -q https://github.com/dragonflydb/dragonfly/releases/latest/download/dragonfly-x86_64.tar.gz
-          tar xf dragonfly-x86_64.tar.gz
-          mv dragonfly-x86_64 dragonfly
+          arch=$(uname -m)
+          tarball="dragonfly-${arch}.tar.gz"
+          wget -q "https://github.com/dragonflydb/dragonfly/releases/latest/download/${tarball}"
+          tar xf "${tarball}"
+          mv "dragonfly-${arch}" dragonfly
           ls -l
 
       - name: Build Dragonfly
-        if: ${{ inputs.use_release != 'yes' }}
+        if: ${{ !contains(fromJSON('["yes","true"]'), inputs.use_release) }}
         uses: ./.github/actions/builder
         with:
+          enable-ccache: 'true'
+          cache-key-suffix: 'df_common_bin'
+          c-compiler: gcc
+          cxx-compiler: g++
           build-type: ${{matrix.build-type}}
           targets: 'dragonfly'
 

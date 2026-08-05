@@ -25,6 +25,7 @@ class Listener;
 namespace dfly {
 
 using facade::CmdArgList;
+using facade::CmdArgParser;
 
 class ConnectionContext;
 namespace acl {
@@ -39,22 +40,22 @@ class AclFamily final {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  void Acl(CmdArgList args, CommandContext* cmd_cntx);
-  void List(CmdArgList args, CommandContext* cmd_cntx);
-  void SetUser(CmdArgList args, CommandContext* cmd_cntx);
-  void DelUser(CmdArgList args, CommandContext* cmd_cntx);
-  void WhoAmI(CmdArgList args, CommandContext* cmd_cntx);
-  void Save(CmdArgList args, CommandContext* cmd_cntx);
-  void Load(CmdArgList args, CommandContext* cmd_cntx);
+  void Acl(CmdArgParser parser, CommandContext* cmd_cntx);
+  void List(CmdArgParser parser, CommandContext* cmd_cntx);
+  void SetUser(CmdArgParser parser, CommandContext* cmd_cntx);
+  void DelUser(CmdArgParser parser, CommandContext* cmd_cntx);
+  void WhoAmI(CmdArgParser parser, CommandContext* cmd_cntx);
+  void Save(CmdArgParser parser, CommandContext* cmd_cntx);
+  void Load(CmdArgParser parser, CommandContext* cmd_cntx);
   // Helper function for bootstrap
   bool Load();
-  void Log(CmdArgList args, CommandContext* cmd_cntx);
-  void Users(CmdArgList args, CommandContext* cmd_cntx);
-  void Cat(CmdArgList args, CommandContext* cmd_cntx);
-  void GetUser(CmdArgList args, CommandContext* cmd_cntx);
-  void DryRun(CmdArgList args, CommandContext* cmd_cntx);
-  void GenPass(CmdArgList args, CommandContext* cmd_cntx);
-  void Help(CmdArgList args, CommandContext* cmd_cntx);
+  void Log(CmdArgParser parser, CommandContext* cmd_cntx);
+  void Users(CmdArgParser parser, CommandContext* cmd_cntx);
+  void Cat(CmdArgParser parser, CommandContext* cmd_cntx);
+  void GetUser(CmdArgParser parser, CommandContext* cmd_cntx);
+  void DryRun(CmdArgParser parser, CommandContext* cmd_cntx);
+  void GenPass(CmdArgParser parser, CommandContext* cmd_cntx);
+  void Help(CmdArgParser parser, CommandContext* cmd_cntx);
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads
@@ -93,7 +94,7 @@ class AclFamily final {
   std::optional<std::string> MaybeParseNamespace(std::string_view command) const;
 
   std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
-      const facade::ArgRange& args, bool hashed = false, bool has_all_keys = false,
+      facade::ParsedArgs args, bool hashed = false, bool has_all_keys = false,
       bool has_all_channels = false) const;
 
   void BuildIndexers(RevCommandsIndexStore families);
@@ -129,6 +130,7 @@ class AclFamily final {
                                       {"CONNECTION", CONNECTION},
                                       {"TRANSACTION", TRANSACTION},
                                       {"SCRIPTING", SCRIPTING},
+                                      {"CUCKOO_FILTER", CUCKOO_FILTER},
                                       {"TOPK", TOPK},
                                       {"CMS", CMS},
                                       {"BLOOM", BLOOM},
@@ -142,11 +144,12 @@ class AclFamily final {
   // bit 1 at index 1
   // bit n at index n
   const ReverseCategoryIndexTable reverse_cat_table_{
-      "KEYSPACE",  "READ",      "WRITE",     "SET",       "SORTEDSET",  "LIST",        "HASH",
-      "STRING",    "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",     "PUBSUB",      "ADMIN",
-      "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS", "CONNECTION", "TRANSACTION", "SCRIPTING",
-      "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "TOPK",        "CMS",
-      "BLOOM",     "FT_SEARCH", "THROTTLE",  "JSON"};
+      "KEYSPACE",   "READ",          "WRITE",     "SET",       "SORTEDSET", "LIST",
+      "HASH",       "STRING",        "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",
+      "PUBSUB",     "ADMIN",         "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS",
+      "CONNECTION", "TRANSACTION",   "SCRIPTING", "_RESERVED", "_RESERVED", "_RESERVED",
+      "_RESERVED",  "CUCKOO_FILTER", "TOPK",      "CMS",       "BLOOM",     "FT_SEARCH",
+      "THROTTLE",   "JSON"};
 
   // We need this to act as a const member, since the initialization of const data members
   // must be done on the constructor. However, these are initialized a little later, when

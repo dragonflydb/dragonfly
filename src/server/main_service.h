@@ -42,21 +42,18 @@ class Service : public facade::ServiceInterface {
                                          facade::AsyncPreference apref) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  facade::DispatchManyResult DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
-                                                  unsigned count, facade::SinkReplyBuilder* builder,
-                                                  facade::ConnectionContext* cntx) final;
+  uint32_t DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
+                                 facade::ConnectionContext* cntx) final;
 
   // Check OOM and invoke command with args
-  facade::DispatchResult InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx);
+  facade::DispatchResult InvokeCmd(const facade::ParsedArgs& tail_args, CommandContext* cmd_cntx);
 
   // Verify command prepares execution in correct state.
   // It's usually called before command execution. Only for multi/exec transactions it's checked
   // when the command is queued for execution, not before the execution itself.
-  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId& cid, ArgSlice tail_args,
+  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId& cid,
+                                                       const facade::ParsedArgs& tail_args,
                                                        const ConnectionContext& cntx);
-
-  facade::DispatchResult DispatchMC(facade::ParsedCommand* parsed_cmd,
-                                    facade::AsyncPreference apref) final;
 
   facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
   facade::ParsedCommand* AllocateParsedCommand() final;
@@ -129,50 +126,54 @@ class Service : public facade::ServiceInterface {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Quit(CmdArgList args, CommandContext* cmd_cntx);
-  static void Multi(CmdArgList args, CommandContext* cmd_cntx);
+  static void Quit(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Reset(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Multi(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
-  static void Watch(CmdArgList args, CommandContext* cmd_cntx);
-  static void Unwatch(CmdArgList args, CommandContext* cmd_cntx);
+  static void Watch(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Unwatch(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
-  void Discard(CmdArgList args, CommandContext* cmd_cntx);
-  void Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only = false);
-  void EvalRo(CmdArgList args, CommandContext* cmd_cntx);
-  void EvalSha(CmdArgList args, CommandContext* cmd_cntx, bool read_only = false);
-  void EvalShaRo(CmdArgList args, CommandContext* cmd_cntx);
-  void Exec(CmdArgList args, CommandContext* cmd_cntx);
-  void Publish(CmdArgList args, CommandContext* cmd_cntx);
-  void Subscribe(CmdArgList args, CommandContext* cmd_cntx);
-  void Unsubscribe(CmdArgList args, CommandContext* cmd_cntx);
-  void PSubscribe(CmdArgList args, CommandContext* cmd_cntx);
-  void PUnsubscribe(CmdArgList args, CommandContext* cmd_cntx);
-  void Function(CmdArgList args, CommandContext* cmd_cntx);
-  void Monitor(CmdArgList args, CommandContext* cmd_cntx);
-  void Pubsub(CmdArgList args, CommandContext* cmd_cntx);
-  void Command(CmdArgList args, CommandContext* cmd_cntx);
+  void Discard(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Eval(facade::CmdArgParser parser, CommandContext* cmd_cntx, bool read_only = false);
+  void EvalRo(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void EvalSha(facade::CmdArgParser parser, CommandContext* cmd_cntx, bool read_only = false);
+  void EvalShaRo(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Exec(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Publish(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Subscribe(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Unsubscribe(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void PSubscribe(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void PUnsubscribe(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Function(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Monitor(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Pubsub(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  void Command(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   void PubsubChannels(std::string_view pattern, SinkReplyBuilder* builder);
   void PubsubPatterns(SinkReplyBuilder* builder);
-  void PubsubNumSub(CmdArgList channels, SinkReplyBuilder* builder);
+  void PubsubNumSub(facade::ParsedArgs channels, SinkReplyBuilder* builder);
 
   struct EvalArgs {
-    std::string_view sha;  // only one of them is defined.
-    CmdArgList keys, args;
+    std::string_view sha;
+    facade::ParsedArgs keys_args;
+    uint32_t num_keys = 0;
   };
 
   // Return error if not all keys are owned by the server when running in cluster mode
-  std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId& cid, CmdArgList args,
+  std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId& cid,
+                                                       const facade::ParsedArgs& args,
                                                        const ConnectionContext& dfly_cntx);
 
   // Return moved error if we *own* the slot. This function is used from flows that assume our
   // state is TAKEN_OVER which happens after a replica takeover.
-  std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId& cid, CmdArgList args,
+  std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId& cid,
+                                                       const facade::ParsedArgs& args,
                                                        const ConnectionContext& dfly_cntx);
 
-  void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                    bool read_only, CommandContext* cmd_cntx);
-  void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter, bool read_only,
-               CommandContext* cmd_cntx);
+  void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, bool read_only,
+                    CommandContext* cmd_cntx);
+  void CallSHA(const facade::ParsedArgs& args, std::string_view sha, Interpreter* interpreter,
+               bool read_only, CommandContext* cmd_cntx);
 
   // Return optional payload - first received error that occured when executing commands.
   std::optional<facade::payload::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
@@ -183,7 +184,10 @@ class Service : public facade::ServiceInterface {
 
   void CallFromScript(Interpreter::CallArgs& args, CommandContext* cmd_cntx);
 
-  OpResult<KeyIndex> FindKeys(const CommandId* cid, CmdArgList args);
+  std::variant<CommandId*, facade::DispatchResult> HandleMemcacheCommand(
+      facade::ParsedCommand* parsed_cmd, facade::AsyncPreference async_pref);
+
+  OpResult<KeyIndex> FindKeys(const CommandId* cid, const facade::ParsedArgs& args);
 
   void RegisterCommands();
   void Register(CommandRegistry* registry);

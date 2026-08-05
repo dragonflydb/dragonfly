@@ -5,6 +5,7 @@
 #pragma once
 
 #include "base/flags.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/facade_types.h"
 #include "server/tx_base.h"
 
@@ -24,39 +25,39 @@ class GenericFamily {
   static OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys, bool async);
 
  private:
-  static void Delex(CmdArgList args, CommandContext* cmd_cntx);
-  static void Ping(CmdArgList args, CommandContext* cmd_cntx);
-  static void Exists(CmdArgList args, CommandContext* cmd_cntx);
-  static void Expire(CmdArgList args, CommandContext* cmd_cntx);
-  static void ExpireAt(CmdArgList args, CommandContext* cmd_cntx);
-  static void Persist(CmdArgList args, CommandContext* cmd_cntx);
-  static void Keys(CmdArgList args, CommandContext* cmd_cntx);
-  static void PexpireAt(CmdArgList args, CommandContext* cmd_cntx);
-  static void Pexpire(CmdArgList args, CommandContext* cmd_cntx);
-  static void Stick(CmdArgList args, CommandContext* cmd_cntx);
-  static void Sort(CmdArgList args, CommandContext* cmd_cntx);
-  static void Sort_RO(CmdArgList args, CommandContext* cmd_cntx);
-  static void Move(CmdArgList args, CommandContext* cmd_cntx);
+  static void Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Ping(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Exists(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void ExpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Persist(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void PexpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Pexpire(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Stick(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Sort(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Sort_RO(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Move(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
-  static void Rename(CmdArgList args, CommandContext* cmd_cntx);
-  static void RenameNx(CmdArgList args, CommandContext* cmd_cntx);
-  static void Copy(CmdArgList args, CommandContext* cmd_cntx);
-  static void ExpireTime(CmdArgList args, CommandContext* cmd_cntx);
-  static void PExpireTime(CmdArgList args, CommandContext* cmd_cntx);
-  static void Ttl(CmdArgList args, CommandContext* cmd_cntx);
-  static void Pttl(CmdArgList args, CommandContext* cmd_cntx);
+  static void Rename(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void RenameNx(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Copy(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void ExpireTime(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void PExpireTime(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Ttl(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Pttl(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
-  static void Echo(CmdArgList args, CommandContext* cmd_cntx);
-  static void Select(CmdArgList args, CommandContext* cmd_cntx);
-  static void Scan(CmdArgList args, CommandContext* cmd_cntx);
-  static void Rm(CmdArgList args, CommandContext* cmd_cntx);
-  static void Time(CmdArgList args, CommandContext* cmd_cntx);
-  static void Type(CmdArgList args, CommandContext* cmd_cntx);
-  static void Dump(CmdArgList args, CommandContext* cmd_cntx);
-  static void Restore(CmdArgList args, CommandContext* cmd_cntx);
-  static void RandomKey(CmdArgList args, CommandContext* cmd_cntx);
-  static void FieldTtl(CmdArgList args, CommandContext* cmd_cntx);
-  static void FieldExpire(CmdArgList args, CommandContext* cmd_cntx);
+  static void Echo(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Select(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Scan(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Rm(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Time(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Type(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Dump(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Restore(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void RandomKey(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void FieldTtl(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void FieldExpire(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 };
 
 }  // namespace dfly

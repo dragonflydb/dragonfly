@@ -44,6 +44,7 @@ enum AclCat {
   SCRIPTING = 1ULL << 20,
 
   // Extensions
+  CUCKOO_FILTER = 1ULL << 25,
   TOPK = 1ULL << 26,
   CMS = 1ULL << 27,
   BLOOM = 1ULL << 28,

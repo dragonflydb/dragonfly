@@ -31,6 +31,10 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void SendDouble(double val) override;
   void SendSimpleString(std::string_view str) override;
   void SendBulkString(std::string_view str) override;
+  using RedisReplyBuilderBase::SendBulkString;  // keep the guarded rvalue overload visible
+  void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT) override;
+
+  void SendBulkStringBorrowed(cmn::BorrowedString&& bs) override;
 
   void StartCollection(unsigned len, CollectionType type) override;
   void SendNullArray() override;
@@ -55,8 +59,17 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   // Send payload to builder.
   static void Apply(Payload&& pl, SinkReplyBuilder* builder);
 
+  // Send payload to builder without consuming it. String refs into the payload remain valid,
+  // making this safe to use under a ReplyScope when the payload outlives the scope.
+  static void Apply(const Payload& pl, SinkReplyBuilder* builder);
+
   // If an error is stored inside payload, get a reference to it.
   static std::optional<ErrorRef> TryExtractError(const Payload& pl);
+
+  // Provide inline buffer to avoid allocations. Payload references it - track the lifetime!
+  void ProvideInlineBuffer(std::span<char> buf) {
+    inline_buffer_ = buf;
+  }
 
  private:
   // Send payload directly, bypassing external interface. For efficient passing between two
@@ -70,6 +83,9 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void CollapseFilledCollections();
 
   ReplyMode reply_mode_;
+
+  // A buffer that can be used to avoid allocations. The lifetime is guaranteed by the user
+  std::span<char> inline_buffer_;
 
   // List of nested active collections that are being built.
   std::stack<std::pair<std::unique_ptr<payload::CollectionPayload>, int>> stack_;
