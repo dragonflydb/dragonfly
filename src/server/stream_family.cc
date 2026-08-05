@@ -3029,9 +3029,14 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
                                   std::string_view key) -> KeyReadyResult {
     auto& db_slice = context.GetDbSlice(owner->shard_id());
     auto res_it = db_slice.FindReadOnly(context, key, OBJ_STREAM);
-    if (!res_it.ok())
-      return res_it.status() == OpStatus::WRONG_TYPE ? KeyReadyResult::kNotReady
-                                                     : KeyReadyResult::kKeyNotFound;
+    if (!res_it.ok()) {
+      // A blocked XREADGROUP must revalidate when its key is no longer a stream. The wake path
+      // distinguishes a missing stream (NOGROUP) from a non-stream value (WRONGTYPE). A plain
+      // XREAD keeps waiting for the stream to be recreated.
+      // TODO: Make kKeyNotFound a per-waiter result in BlockingController. It currently
+      // short-circuits the whole queue, so a blocked XREAD would hide an XREADGROUP behind it.
+      return opts->read_group ? KeyReadyResult::kReady : KeyReadyResult::kNotReady;
+    }
 
     StreamIDsItem& sitem = opts->stream_ids.at(key);
     const CompactObj& cobj = (*res_it)->second;
@@ -3086,10 +3091,24 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
       StreamIDsItem& sitem = opts->stream_ids.at(*wake_key);
       range_opts.start = sitem.id;
 
-      // Expect group to exist? No guarantees from transactional framework
-      if (opts->read_group && !sitem.group) {
-        result = OpStatus::INVALID_VALUE;
-        return OpStatus::OK;
+      // sitem.group was resolved before we blocked and the stream may have been deleted or
+      // retyped since. Re-resolve it against the current table instead of dereferencing a stale
+      // pointer, preserving WRONGTYPE when a non-stream replaced the key.
+      if (opts->read_group) {
+        auto op_args = t->GetOpArgs(shard);
+        auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, *wake_key, OBJ_STREAM);
+        if (!res_it.ok()) {
+          result = res_it.status() == OpStatus::WRONG_TYPE ? OpStatus::WRONG_TYPE
+                                                           : OpStatus::INVALID_VALUE;
+          return OpStatus::OK;
+        }
+
+        sitem.group =
+            StreamLookupCG(GetReadOnlyStream((*res_it)->second), WrapSds(opts->group_name));
+        if (!sitem.group) {
+          result = OpStatus::INVALID_VALUE;
+          return OpStatus::OK;
+        }
       }
 
       // '>' is encoded as UINT64_MAX-UINT64_MAX and is only accepted for XREADGROUP, so the start
@@ -3158,6 +3177,8 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     return StreamReplies{rb}.SendStreamRecords(key, *result);
   } else if (result.status() == OpStatus::INVALID_VALUE) {
     return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists");
+  } else if (result.status() == OpStatus::WRONG_TYPE) {
+    return rb->SendError(result.status());
   }
   return rb->SendNullArray();
 }
