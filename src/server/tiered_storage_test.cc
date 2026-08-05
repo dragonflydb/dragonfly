@@ -495,8 +495,7 @@ TEST_F(PureDiskTSTest, RenameOffloadedSmallBin) {
   EXPECT_EQ(Run({"GET", "moved"}), val(victim));
 
   Run({"FLUSHALL"});
-  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
-  EXPECT_EQ(GetMetrics().tiered_stats.allocated_bytes, 0u);
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0u; });
 }
 
 // discovers and defragments a large number of bins that became fragmented while there was no upload
