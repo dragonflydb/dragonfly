@@ -53,6 +53,7 @@ extern "C" {
 #include "search/doc_index.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/user_registry.h"
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
@@ -1917,6 +1918,9 @@ void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait)
   vector<fb2::Fiber> fibers(shard_set->size());
   transaction->Execute(
       [db_ind, &fibers](Transaction* t, EngineShard* shard) {
+        if (auto* bc = t->GetNamespace().GetBlockingController(shard->shard_id()); bc) {
+          bc->AwakenWatched(db_ind);
+        }
         fibers[shard->shard_id()] = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
         return OpStatus::OK;
       },
