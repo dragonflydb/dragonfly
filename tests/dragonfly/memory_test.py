@@ -19,7 +19,9 @@ from .utility import assert_eventually, tmp_file_name
     "type, keys, val_size, elements",
     [
         ("JSON", 200_000, 100, 100),
-        ("SET", 280_000, 100, 100),
+        # OAHSet do ASCII encoding, so 32M values are required
+        # to keep this workload above the test's 3 GiB threshold.
+        ("SET", 320_000, 100, 100),
         ("HASH", 250_000, 100, 100),
         ("ZSET", 250_000, 100, 100),
         ("LIST", 300_000, 100, 100),
