@@ -32,6 +32,20 @@ jobs:
       - name: GCloud setup
         uses: 'google-github-actions/setup-gcloud@v3'
 
+      - name: Fetch published RPMs
+        # Fetch existing RPM files from bucket. Those are already signed, we will not
+        # re-sign them again, so that we do not end up changing their checksum. If this
+        # step fails the job must fail, rather than re-sign all releases found on GitHub
+        # in the next step.
+        working-directory: tools/packaging/osrepos
+        run: |
+          mkdir -p $SiteRoot/rpm
+          gcloud storage rsync ${{ secrets.GCP_PACKAGES_BUCKET }}/rpm $SiteRoot/rpm \
+            --recursive --exclude="^repodata/.*|.*index\.html$"
+
+          echo "=== Published RPMs fetched ==="
+          find $SiteRoot/rpm -type f -name "*.rpm" -exec sha256sum {} +
+
       - name: Download packages
         working-directory: tools/packaging/osrepos
         env:
