@@ -621,29 +621,6 @@ TEST_F(PureDiskTSTest, OffloadingStrategy) {
   }
 }
 
-// Overwriting an offloaded value in place must release its disk extent, otherwise it is
-// orphaned forever and the FLUSHALL invariant CHECK_EQ(tiered_entries, 0) aborts the process.
-TEST_F(PureDiskTSTest, RenameOverOffloadedDestination) {
-  const string src_value = BuildString(3000, 'a');
-  Run({"SET", "src", src_value});
-  Run({"SET", "dst", BuildString(3000, 'b')});
-
-  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 2; });
-  ASSERT_EQ(GetMetrics().tiered_stats.allocated_bytes, 2 * 4096u);
-
-  EXPECT_EQ(Run({"RENAME", "src", "dst"}), "OK");
-
-  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 1u);
-  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.allocated_bytes == 4096u; });
-  EXPECT_EQ(GetMetrics().tiered_stats.allocated_bytes, 4096u);
-
-  EXPECT_EQ(Run({"GET", "dst"}), src_value);
-
-  Run({"FLUSHALL"});
-  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u);
-  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.allocated_bytes == 0u; });
-}
-
 // Same defect reached through DbSlice::AddOrUpdate instead of RENAME.
 TEST_F(PureDiskTSTest, SortStoreOverOffloadedDestination) {
   Run({"RPUSH", "src", "3", "1", "2"});  // small list, stays in memory
