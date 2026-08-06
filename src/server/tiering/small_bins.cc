@@ -108,7 +108,7 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   }
 
   stats_.stashed_entries_cnt += list.size();
-  stashed_bins_.InsertNew(segment.offset, StashInfo{uint8_t(list.size()), bytes});
+  stashed_bins_.InsertNew(segment.offset, StashInfo{uint8_t(list.size()), bytes, bytes});
 
   return list;
 }
@@ -157,9 +157,8 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
       return {full_segment, false /* fragmented */, true /* empty */};
     }
 
-    if (bin.bytes < kPageSize / 2) {
-      return {full_segment, true /* fragmented */, false /* empty */};
-    }
+    bool fragmented = bin.bytes < bin.orig_bytes / 2;
+    return {full_segment, fragmented, false /* empty */};
   }
 
   return {segment};
@@ -167,14 +166,14 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 
 bool SmallBins::IsFragmented(size_t offset) {
   if (auto it = stashed_bins_.Find(offset); it != stashed_bins_.end())
-    return it->second.bytes < kPageSize / 2;
+    return it->second.bytes < it->second.orig_bytes / 2;
   return false;
 }
 
 ::dfly::detail::DashCursor SmallBins::TraverseFragmented(::dfly::detail::DashCursor cursor,
                                                          absl::FunctionRef<void(size_t)> f) {
   return stashed_bins_.Traverse(cursor, [f](Dash::iterator it) {
-    if (it->second.bytes < kPageSize / 2)
+    if (it->second.bytes < it->second.orig_bytes / 2)
       f(it->first);
   });
 }
