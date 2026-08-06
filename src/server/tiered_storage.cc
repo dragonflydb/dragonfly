@@ -580,16 +580,13 @@ bool TieredStorage::PrepareKeyForTransfer(DbIndex dbid, string_view key, PrimeVa
 
   DCHECK(!pv->IsCool());  // FindMutableInternal warms cooled values up
 
-  // Full size values don't have the key encoded
   tiering::DiskSegment segment = pv->GetExternalSlice();
-  if (OccupiesWholePages(segment.length))
-    return true;
-
-  // Force upload with bare decoder
   util::fb2::Future<bool> done;
-  auto cb = [done](io::Result<tiering::BareDecoder*> res) mutable {
-    done.Resolve(res.has_value());
-  };
+  auto cb = [done](auto res) mutable { done.Resolve(res.has_value()); };
+
+  // Force upload value with bare decoder. Ensure:
+  // 1. No small bins endoded keys back reference the key
+  // 2. No pending reads back reference the key
   Read(KeyRef{dbid, key}, segment, tiering::BareDecoder{}, std::move(cb),
        tiering::ReadOptions{.read_only = false, .force_upload = true});
   return done.Get();
