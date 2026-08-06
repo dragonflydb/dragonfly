@@ -106,7 +106,7 @@ ABSL_FLAG(uint64_t, max_bulk_len, 2u << 30,
           "Maximum bulk length that is "
           "allowed to be accepted when parsing RESP protocol");
 
-ABSL_FLAG(strings::MemoryBytesFlag, max_client_iobuf_len, 1u << 16,
+ABSL_FLAG(strings::MemoryBytesFlag, max_client_iobuf_len, 1u << 15,
           "Maximum io buffer length that is used to read client requests.");
 
 ABSL_FLAG(bool, migrate_connections, true,
@@ -148,11 +148,24 @@ ABSL_FLAG(
 
 ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
           "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
+
 ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
           "Enable the event-driven IoLoopV2 for non-TLS RESP connections.");
+
 ABSL_FLAG(bool, enable_pipeline_squashing_v2, true,
           "Enable vectorized pipeline squashing for the V2 dispatch loop. Groups consecutive "
           "single-shard pipeline commands by shard and executes them in parallel.");
+
+ABSL_FLAG(bool, enable_iobuf_shrink, true,
+          "Enable gradual shrinking of underused client input buffers.");
+
+ABSL_FLAG(uint32_t, iobuf_shrink_min_idle_sec, 30,
+          "Minimum receive-idle time (in seconds) before a client input buffer may shrink.");
+
+ABSL_FLAG(uint32_t, iobuf_shrink_interval_sec, 30,
+          "Minimum time between client input-buffer shrink operations; growth restarts the "
+          "shrink interval.");
+
 ABSL_RETIRED_FLAG(bool, experimental_io_loop_v2, true, "retired.");
 
 using namespace util;
@@ -195,16 +208,30 @@ bool MatchHttp11Line(string_view line) {
 // To use it as RAII object, call the ctor, or if the update should be immediate, call
 // ReadBufTracker::Update() directly.
 struct ReadBufTracker {
-  explicit ReadBufTracker(const io::IoBuf& io_buf, uint32_t conn_id)
-      : io_buf_(io_buf), last_capacity_(io_buf.Capacity()), id_(conn_id) {
+  static constexpr string_view kReasonHttpProbe = "http_probe";
+  static constexpr string_view kReasonConnectionSetup = "connection_setup";
+  static constexpr string_view kReasonNeedMoreInput = "need_more_input";
+  static constexpr string_view kReasonLowUsage = "low_usage";
+  static constexpr string_view kReasonReceiveIdle = "receive_idle";
+  static constexpr string_view kReasonRegister = "register";
+  static constexpr string_view kReasonUnregister = "unregister";
+  static constexpr string_view kReasonRecvProvidedBuffers = "recv_provided_buffers";
+
+  explicit ReadBufTracker(const io::IoBuf& io_buf, uint32_t conn_id,
+                          string_view capacity_change_reason)
+      : io_buf_(io_buf),
+        last_capacity_(io_buf.Capacity()),
+        id_(conn_id),
+        capacity_change_reason_(capacity_change_reason) {
   }
 
   ~ReadBufTracker() {
-    Update(last_capacity_, io_buf_.Capacity(), id_);
+    Update(last_capacity_, io_buf_.Capacity(), id_, capacity_change_reason_);
   }
 
   // Make it static so we may also call it directly without constructing a ReadBufTracker object.
-  static void Update(size_t previous_capacity, size_t new_capacity, uint32_t conn_id) {
+  static void Update(size_t previous_capacity, size_t new_capacity, uint32_t conn_id,
+                     string_view capacity_change_reason) {
     if (previous_capacity == new_capacity)
       return;
     DCHECK(tl_facade_stats);
@@ -223,13 +250,16 @@ struct ReadBufTracker {
         read_buf_capacity -= delta;
     }
     VLOG(2) << "[" << conn_id << "] io_buf capacity changed from " << previous_capacity << " to "
-            << new_capacity << " (read_buf_capacity = " << read_buf_capacity << ")";
+            << new_capacity << " (read_buf_capacity = " << read_buf_capacity << ")"
+            << (capacity_change_reason.empty() ? "" : ", capacity_change_reason=")
+            << capacity_change_reason;
   }
 
  private:
   const io::IoBuf& io_buf_;
   size_t last_capacity_;
   uint32_t id_;
+  string_view capacity_change_reason_;
 };
 
 struct ConnectionMemoryTracker {
@@ -626,6 +656,11 @@ ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
 }
 
 thread_local uint32_t max_busy_read_cycles_cached = UINT32_MAX;
+thread_local const size_t max_client_iobuf_len_cached = GetFlag(FLAGS_max_client_iobuf_len);
+thread_local const uint32_t iobuf_shrink_min_idle_sec_cached =
+    GetFlag(FLAGS_iobuf_shrink_min_idle_sec);
+thread_local const uint32_t iobuf_shrink_interval_sec_cached =
+    GetFlag(FLAGS_iobuf_shrink_interval_sec);
 thread_local bool always_flush_pipeline_cached = absl::GetFlag(FLAGS_always_flush_pipeline);
 thread_local uint32_t pipeline_squash_limit_cached = absl::GetFlag(FLAGS_pipeline_squash_limit);
 thread_local bool pipeline_prioritize_large_batches_cached =
@@ -848,10 +883,16 @@ void Connection::Shutdown() {
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
     : io_buf_(kMinReadSize),
+      io_buf_last_read_time_(time(nullptr)),
+      iobuf_resize_allowed_time_(io_buf_last_read_time_),
+      id_(NextClientId()),
       protocol_(protocol),
       http_listener_(http_listener),
       ssl_ctx_(ctx),
       service_(service),
+      creation_time_(io_buf_last_read_time_),
+      last_interaction_(io_buf_last_read_time_),
+      self_(make_shared<std::monostate>(), this),
       flags_(0) {
   // TODO: to move parser initialization to where we initialize the reply builder.
   switch (protocol) {
@@ -865,15 +906,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       break;
   }
 
-  creation_time_ = time(nullptr);
-  last_interaction_ = creation_time_;
-  id_ = NextClientId();
-
   migration_enabled_ = GetFlag(FLAGS_migrate_connections);
-
-  // Create shared_ptr with empty value and associate it with `this` pointer (aliasing constructor).
-  // We use it for reference counting and accessing `this` (without managing it).
-  self_ = {make_shared<std::monostate>(), this};
+  enable_iobuf_shrink_ = GetFlag(FLAGS_enable_iobuf_shrink);
 
 #ifdef DFLY_USE_SSL
   // Increment reference counter so Listener won't free the context while we're
@@ -884,7 +918,6 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 #endif
 
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
-  migration_allowed_to_register_ = false;
 }
 
 Connection::~Connection() {
@@ -1336,7 +1369,10 @@ io::Result<bool> Connection::CheckForHttpProto() {
     auto buf = io_buf_.AppendBuffer();
     DCHECK(!buf.empty());
 
+    const uint64_t io_buf_generation = io_buf_.generation();
     ::io::Result<size_t> recv_sz = peer->Recv(buf);
+    // io_buf_ should not be modified during the Recv().
+    DCHECK_EQ(io_buf_.generation(), io_buf_generation);
     if (!recv_sz) {
       return make_unexpected(recv_sz.error());
     }
@@ -1346,6 +1382,7 @@ io::Result<bool> Connection::CheckForHttpProto() {
     }
 
     io_buf_.CommitWrite(*recv_sz);
+    UpdateIoBufReadState();
     string_view ib = io::View(io_buf_.InputBuffer());
     if (ib.size() >= 2 && ib[0] == 22 && ib[1] == 3) {
       // We matched the TLS handshake raw data, which means "peer" is a TCP socket.
@@ -1364,10 +1401,12 @@ io::Result<bool> Connection::CheckForHttpProto() {
       return MatchHttp11Line(ib);
     }
     last_len = io_buf_.InputLen();
+    const size_t previous_capacity = io_buf_.Capacity();
     {
-      ReadBufTracker tracker(io_buf_, id_);
+      ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonHttpProbe);
       io_buf_.EnsureCapacity(128);
     }
+    UpdateIoBufCapacityChange(previous_capacity);
   } while (last_len < 1024);
 
   return false;
@@ -1405,7 +1444,7 @@ void Connection::ConnectionFlow() {
   // Main loop.
   if (parse_status != ERROR && !ec) {
     {
-      ReadBufTracker tracker(io_buf_, id_);
+      ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonConnectionSetup);
       io_buf_.EnsureCapacity(64);
     }
     variant<error_code, Connection::ParserStatus> res;
@@ -1626,8 +1665,11 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
       GetLocalConnStats().num_read_yields++;
 
       fiber_park_spot_ = FiberParkSpot::kParseYield;
+      const uint64_t io_buf_generation = io_buf.generation();
       ThisFiber::Yield();
       fiber_park_spot_ = FiberParkSpot::kNone;
+      // io_buf_ backing storage should not be replaced while read_buffer is retained.
+      DCHECK_EQ(io_buf.generation(), io_buf_generation);
 
       // Note:
       // - read_buffer stays valid across this yield since proactor only calls ReadPendingInput ->
@@ -1800,7 +1842,10 @@ io::Result<size_t> Connection::HandleRecvSocket() {
 
   io::MutableBytes append_buf = io_buf_.AppendBuffer();
   DCHECK(!append_buf.empty());
+  const uint64_t io_buf_generation = io_buf_.generation();
   ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
+  // io_buf_ should not be modified during the Recv().
+  DCHECK_EQ(io_buf_.generation(), io_buf_generation);
   last_interaction_ = time(nullptr);
 
   // In case the socket was closed orderly, we get 0 bytes read.
@@ -1809,6 +1854,7 @@ io::Result<size_t> Connection::HandleRecvSocket() {
     DVLOG(2) << CONN_ID << "Received " << commit_sz << " bytes from socket";
 
     io_buf_.CommitWrite(commit_sz);
+    UpdateIoBufReadState();
 
     conn_stats.io_read_bytes += commit_sz;
     local_stats_.net_bytes_in += commit_sz;
@@ -1822,7 +1868,6 @@ io::Result<size_t> Connection::HandleRecvSocket() {
 variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
   error_code ec;
   ParserStatus parse_status = OK;
-  size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
@@ -1853,44 +1898,11 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
       return reply_builder_->GetError();
     }
 
-    if (parse_status == NEED_MORE) {
-      parse_status = OK;
-
-      size_t capacity = io_buf_.Capacity();
-      if (capacity < max_iobfuf_len) {
-        size_t parser_hint = 0;
-        if (redis_parser_)
-          parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
-
-        // If we got a partial request and we managed to parse its
-        // length, make sure we have space to store it instead of
-        // increasing space incrementally.
-        // (Note: The buffer object is only working in power-of-2 sizes,
-        // so there's no danger of accidental O(n^2) behavior.)
-        if (parser_hint > capacity) {
-          ReadBufTracker tracker(io_buf_, id_);
-          io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint));
-        }
-
-        // If we got a partial request because iobuf was full, grow it up to
-        // a reasonable limit to save on Recv() calls.
-        if (reached_capacity && capacity < max_iobfuf_len / 2) {
-          // Last io used most of the io_buf to the end.
-          ReadBufTracker tracker(io_buf_, id_);
-          io_buf_.Reserve(capacity * 2);  // Valid growth range.
-        }
-
-        if (io_buf_.AppendLen() == 0U) {
-          // it can happen with memcached but not for RedisParser, because RedisParser fully
-          // consumes the passed buffer
-          LOG_EVERY_T(WARNING, 10)
-              << CONN_ID
-              << "Maximum io_buf length reached, consider to increase max_client_iobuf_len flag";
-        }
-      }
-    } else if (parse_status != OK) {
+    if (parse_status == ERROR)
       break;
-    }
+
+    MaybeAdjustIoBufCapacity(parse_status, reached_capacity);
+    parse_status = OK;
   } while (peer->IsOpen());
 
   return parse_status;
@@ -2876,7 +2888,7 @@ void Connection::RegisterReadBufCapacity() {
   DCHECK(tl_facade_stats);
   DCHECK(!read_buf_capacity_registered_);
   // Registration includes setting the flag and adding the current buffer capacity.
-  ReadBufTracker::Update(0, io_buf_.Capacity(), id_);
+  ReadBufTracker::Update(0, io_buf_.Capacity(), id_, ReadBufTracker::kReasonRegister);
   read_buf_capacity_registered_ = true;
 }
 
@@ -2884,7 +2896,7 @@ void Connection::UnregisterReadBufCapacity() {
   DCHECK(tl_facade_stats);
   DCHECK(read_buf_capacity_registered_);
   // Unregistration includes clearing the flag and subtracting the current buffer capacity.
-  ReadBufTracker::Update(io_buf_.Capacity(), 0, id_);
+  ReadBufTracker::Update(io_buf_.Capacity(), 0, id_, ReadBufTracker::kReasonUnregister);
   read_buf_capacity_registered_ = false;
 }
 
@@ -3483,9 +3495,9 @@ void Connection::ProcessRecvNotification(const util::FiberSocketBase::RecvNotifi
     return;
   }
 
-  using RecvNoti = util::FiberSocketBase::RecvNotification::RecvCompletion;
-  if (std::holds_alternative<RecvNoti>(n.read_result)) {
-    if (!std::get<RecvNoti>(n.read_result)) {  // false - connection aborted
+  using RecvNotification = util::FiberSocketBase::RecvNotification::RecvCompletion;
+  if (std::holds_alternative<RecvNotification>(n.read_result)) {
+    if (!std::get<RecvNotification>(n.read_result)) {  // false - connection aborted
       io_ec_ = make_error_code(errc::connection_aborted);
       return;
     }
@@ -3494,10 +3506,11 @@ void Connection::ProcessRecvNotification(const util::FiberSocketBase::RecvNotifi
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
     {
-      ReadBufTracker tracker(io_buf_, id_);
+      ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonRecvProvidedBuffers);
       io_buf_.WriteAndCommit(buf.data(), buf.size());
     }
     last_interaction_ = time(nullptr);
+    UpdateIoBufReadState();
 
     DCHECK(tl_facade_stats);
     auto& conn_stats = tl_facade_stats->conn_stats;
@@ -3525,6 +3538,7 @@ void Connection::ReadPendingInput() {
   // - EBUSY (device_or_resource_busy, TLS only): another fiber holds the socket, no wake - keep it
   //   latched and retry on a later pass (neither clear it nor set io_ec_).
   // - Any other error: a real I/O failure - surface via io_ec_.
+  bool done_read = false;
   while (!buf.empty()) {
     io::Result<size_t> res = socket_->TryRecv(buf);
     if (!res) {
@@ -3555,44 +3569,148 @@ void Connection::ReadPendingInput() {
 
     last_interaction_ = time(nullptr);
     io_buf_.CommitWrite(commit_sz);
+    done_read = true;
     buf = io_buf_.AppendBuffer();
+  }
+
+  if (done_read) {
+    UpdateIoBufReadState();
   }
 }
 
-void Connection::CheckIoBufCapacity(bool reached_capacity, base::IoBuf* io_buf) {
-  size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
+void Connection::MaybeAdjustIoBufCapacity(ParserStatus parse_status, bool reached_capacity) {
+  DCHECK_NE(parse_status, ERROR);
 
-  size_t capacity = io_buf->Capacity();
-  if (capacity < max_io_buf_len) {
-    size_t parser_hint = 0;
-    if (redis_parser_)
-      parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
-
-    // If we got a partial request and we managed to parse its
-    // length, make sure we have space to store it instead of
-    // increasing space incrementally.
-    // (Note: The buffer object is only working in power-of-2 sizes,
-    // so there's no danger of accidental O(n^2) behavior.)
-    if (parser_hint > capacity) {
-      ReadBufTracker tracker(*io_buf, id_);
-      io_buf->Reserve(std::min(max_io_buf_len, parser_hint));
-    }
-
-    // If we got a partial request because iobuf was full, grow it up to
-    // a reasonable limit to save on Recv() calls.
-    if (reached_capacity && capacity < max_io_buf_len / 2) {
-      // Last io used most of the io_buf to the end.
-      ReadBufTracker tracker(*io_buf, id_);
-      io_buf->Reserve(capacity * 2);  // Valid growth range.
-    }
-
-    if (io_buf->AppendLen() == 0U) {
-      // it can happen with memcached but not for RedisParser, because RedisParser fully
-      // consumes the passed buffer
-      LOG_EVERY_T(WARNING, 10) << CONN_ID << "Maximum io_buf length reached " << io_buf->Capacity()
-                               << ", consider to increase max_client_iobuf_len flag";
+  // A completed parse can reuse its existing allocation - only an incomplete request needs more
+  // input before it can make progress.
+  if (parse_status == NEED_MORE) {
+    const size_t capacity = io_buf_.Capacity();
+    if (capacity < max_client_iobuf_len_cached) {
+      size_t target_capacity = capacity;
+      if (redis_parser_) {
+        // Avoid incremental reallocations when the parser already knows the request size.
+        const size_t parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
+        if (parser_hint > capacity) {
+          target_capacity = std::min(max_client_iobuf_len_cached, parser_hint);
+        }
+      }
+      if (reached_capacity) {
+        // The preceding receive exhausted append space, so grow geometrically to reduce Recv()
+        // calls. min() allows the final doubling to reach the configured limit without exceeding
+        // it. Taking the maximum preserves a larger parser-hint target.
+        target_capacity =
+            std::max(target_capacity, std::min(max_client_iobuf_len_cached, capacity * 2));
+      }
+      if (target_capacity > capacity) {
+        {
+          ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonNeedMoreInput);
+          io_buf_.Reserve(target_capacity);
+        }
+        UpdateIoBufCapacityChange(capacity);
+        return;
+      }
     }
   }
+  // If we are here, we never grew the buffer, so we can consider shrinking it.
+  MaybeShrinkIoBufOnLowUsage();
+}
+
+void Connection::UpdateIoBufReadState() {
+  io_buf_last_read_time_ = time(nullptr);
+  io_buf_high_watermark_ = std::max(io_buf_high_watermark_, io_buf_.InputLen());
+}
+
+void Connection::ResetIoBufUsageWindow(time_t now) {
+  io_buf_high_watermark_ = io_buf_.InputLen();
+  iobuf_resize_allowed_time_ = now + iobuf_shrink_interval_sec_cached;
+  DVLOG(2) << CONN_ID << "io_buf usage window reset: next resize at " << iobuf_resize_allowed_time_
+           << ", high_watermark=" << io_buf_high_watermark_;
+}
+
+void Connection::UpdateIoBufCapacityChange(size_t previous_capacity) {
+  const size_t capacity = io_buf_.Capacity();
+  if (capacity == previous_capacity) {
+    return;
+  }
+
+  auto& conn_stats = GetLocalConnStats();
+  ++conn_stats.iobuf_capacity_change_cnt;
+
+  // A resized buffer starts a new usage window at its current occupancy.
+  ResetIoBufUsageWindow(time(nullptr));
+}
+
+bool Connection::CanShrinkIoBuf(time_t now) const {
+  return enable_iobuf_shrink_ && (now >= iobuf_resize_allowed_time_) &&
+         (io_buf_.Capacity() > kMinReadSize);
+}
+
+bool Connection::IsIoBufShrinkSafe() const {
+  // External shrinking is only safe while the V2 fiber is fully idle. Other park spots may retain
+  // parser state or have an active dispatch/reply that can receive input in the proactor callback.
+  DCHECK(ioloop_v2_);
+  return (fiber_park_spot_ == FiberParkSpot::kIdleAwait) && (io_buf_.InputLen() == 0) &&
+         !pending_input_ && (recv_buf_.res_len == 0);
+}
+
+bool Connection::ShrinkIoBufTo(size_t target_capacity, string_view capacity_change_reason) {
+  DCHECK(CanShrinkIoBuf(time(nullptr)));
+  DCHECK_LT(target_capacity, io_buf_.Capacity());
+
+  const size_t previous_capacity = io_buf_.Capacity();
+  {
+    ReadBufTracker tracker(io_buf_, id_, capacity_change_reason);
+    // Callers pass a smaller power-of-two target that preserves unread input; failure is a real
+    // bug, not an optional-shrink outcome, so retain this check in release builds.
+    CHECK(io_buf_.ShrinkTo(target_capacity));
+  }
+  UpdateIoBufCapacityChange(previous_capacity);
+  return true;
+}
+
+void Connection::MaybeShrinkIoBufOnLowUsage() {
+  if (!enable_iobuf_shrink_) {
+    return;
+  }
+
+  const time_t now = time(nullptr);
+  if (!CanShrinkIoBuf(now)) {
+    return;
+  }
+
+  size_t half_capacity = io_buf_.Capacity() / 2;
+  if (io_buf_high_watermark_ < half_capacity) {  // shrink
+    const size_t target_capacity =
+        std::max({half_capacity, absl::bit_ceil(io_buf_.InputLen()), kMinReadSize});
+    ShrinkIoBufTo(target_capacity, ReadBufTracker::kReasonLowUsage);
+    return;
+  }
+
+  // Start a new fixed observation window. An exact sliding window would need to retain enough
+  // timestamped observations to recover the next maximum after the old one expires. Keeping only
+  // the watermark avoids that state, so reset it after each evaluation.
+  ResetIoBufUsageWindow(now);
+}
+
+bool Connection::MaybeShrinkIoBufOnReceiveIdle() {
+  if (!ioloop_v2_ || !enable_iobuf_shrink_) {
+    return false;
+  }
+
+  const time_t now = time(nullptr);
+  // Shrink only if all are true:
+  // 1. Enough time has passed since the last read (that makes the connection receive-idle).
+  // 2. The V2 connection is safely parked for an external buffer resize. V1 does not expose an
+  //    externally observable receive-safe park point.
+  // 3. The resize interval elapsed and the buffer can still shrink.
+  time_t idle_for = std::max(now, io_buf_last_read_time_) - io_buf_last_read_time_;
+  if ((idle_for >= iobuf_shrink_min_idle_sec_cached) && IsIoBufShrinkSafe() &&
+      CanShrinkIoBuf(now)) {
+    return ShrinkIoBufTo(std::max(io_buf_.Capacity() / 2, kMinReadSize),
+                         ReadBufTracker::kReasonReceiveIdle);
+  }
+
+  return false;
 }
 
 void Connection::MaybeEnableRecvMultishot() {
@@ -3851,10 +3969,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       continue;
     }
 
-    if (parse_status == NEED_MORE) {
-      parse_status = OK;
-      CheckIoBufCapacity(reached_capacity, &io_buf_);
-    }
+    MaybeAdjustIoBufCapacity(parse_status, reached_capacity);
+    parse_status = OK;
   } while (peer->IsOpen());
 
   return parse_status;
@@ -3874,6 +3990,7 @@ void ResetStats() {
   cstats.io_read_bytes = 0;
   cstats.proactor_reads = 0;
   cstats.proactor_parse = 0;
+  cstats.iobuf_capacity_change_cnt = 0;
 
   tl_facade_stats->reply_stats = {};
   if (io_req_size_hist)
