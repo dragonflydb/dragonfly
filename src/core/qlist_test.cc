@@ -353,6 +353,61 @@ TEST_F(QListTest, CompressionPlain) {
   EXPECT_EQ(500, i);
 }
 
+// A read decompresses the node it touches and marks it for recompression. Recompression used to
+// happen only when the iterator advanced off the node or on a subsequent write, so a read that
+// stopped early (partial LRANGE, LINDEX) left the node decompressed and grew MallocUsed().
+// DbSlice only re-accounts obj_memory_usage around writes, so the tracked total fell behind and
+// the next write tripped its DCHECK_GE.
+TEST_F(QListTest, PartialReadIsFootprintNeutral) {
+  ql_ = QList(-1, 1);  // 4KB nodes, compress depth 1: interior nodes are LZF compressed.
+
+  // Repetitive payloads so that interior nodes compress well past MIN_COMPRESS_IMPROVE.
+  for (unsigned i = 0; i < 300; ++i) {
+    ql_.Push(StrCat("value-", i, "-", string(200, 'x')), QList::TAIL);
+  }
+  ASSERT_GT(ql_.node_count(), 4u);
+
+  const QList::Node* interior = ql_.Head()->next;
+  ASSERT_TRUE(interior->IsCompressed());
+
+  const size_t tracked = ql_.MallocUsed(false);
+  const size_t actual = ql_.MallocUsed(true);
+
+  // A partial range read (LRANGE q 100 150) stops in the middle of an interior node.
+  unsigned count = 0;
+  ql_.Iterate(
+      [&](const QList::Entry& e) {
+        ++count;
+        return true;
+      },
+      100, 150);
+  ASSERT_EQ(51u, count);
+  EXPECT_EQ(tracked, ql_.MallocUsed(false));
+  EXPECT_LE(ql_.MallocUsed(true), actual);
+
+  // A callback that stops early is a partial read as well (LPOS with COUNT).
+  count = 0;
+  ql_.Iterate([&](const QList::Entry& e) { return ++count < 120; }, 0, -1);
+  ASSERT_EQ(120u, count);
+  EXPECT_EQ(tracked, ql_.MallocUsed(false));
+  EXPECT_LE(ql_.MallocUsed(true), actual);
+
+  // A single element read (LINDEX q 150): the cursor restores the node when it goes out of scope.
+  {
+    auto cur = ql_.GetReadCursor(150);
+    ASSERT_TRUE(cur.Valid());
+    EXPECT_FALSE(cur.Get().view().empty());
+  }
+  EXPECT_EQ(tracked, ql_.MallocUsed(false));
+  EXPECT_LE(ql_.MallocUsed(true), actual);
+  EXPECT_TRUE(interior->IsCompressed());
+
+  // The list is still intact and writable after the reads.
+  EXPECT_EQ(300u, ql_.Size());
+  ql_.Pop(QList::HEAD);
+  EXPECT_EQ(299u, ql_.Size());
+}
+
 TEST_F(QListTest, LargeValues) {
   string val(100000, 'a');
   ql_.Push(val, QList::HEAD);
@@ -1457,6 +1512,43 @@ TEST_F(QListZstdTest, IndexAccess) {
   ASSERT_TRUE(it.Valid());
   entry = it.Get();
   EXPECT_NE(entry.data(), nullptr);
+}
+
+// Same read-side accounting leak as QListTest.PartialReadIsFootprintNeutral, but in ZSTD
+// dictionary mode (list_compress_dict_threshold instead of list_compress_depth).
+TEST_F(QListZstdTest, PartialReadIsFootprintNeutral) {
+  QList ql(-1, 0);  // compress=0 so the ZSTD dict path is active (LZF disabled)
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+  ASSERT_GT(ql.node_count(), 4u);
+
+  const QList::Node* interior = ql.Head()->next;
+  ASSERT_TRUE(interior->IsCompressed());
+
+  const size_t tracked = ql.MallocUsed(false);
+  const size_t actual = ql.MallocUsed(true);
+
+  // Partial range read (LRANGE q 100 150).
+  unsigned count = 0;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        ++count;
+        return true;
+      },
+      100, 150);
+  ASSERT_EQ(51u, count);
+  EXPECT_EQ(tracked, ql.MallocUsed(false));
+  EXPECT_LE(ql.MallocUsed(true), actual);
+
+  // Single element read (LINDEX q 150): the cursor restores the node when it goes out of scope.
+  {
+    auto cur = ql.GetReadCursor(150);
+    ASSERT_TRUE(cur.Valid());
+    EXPECT_FALSE(cur.Get().view().empty());
+  }
+  EXPECT_EQ(tracked, ql.MallocUsed(false));
+  EXPECT_LE(ql.MallocUsed(true), actual);
+  EXPECT_TRUE(interior->IsCompressed());
 }
 
 TEST_F(QListZstdTest, IncrementalCompression) {
