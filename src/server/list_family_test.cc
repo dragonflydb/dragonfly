@@ -2,10 +2,12 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/flags/reflection.h>
 #include <absl/strings/match.h>
 
 #include <random>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/error.h"
@@ -20,7 +22,11 @@
 using namespace testing;
 using namespace std;
 using namespace util;
+using absl::SetFlag;
 using absl::StrCat;
+
+ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
+ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 
 namespace dfly {
 
@@ -516,6 +522,38 @@ TEST_F(ListFamilyTest, LRange) {
 
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec(), ElementsAre("1", "2"));
+}
+
+// LRANGE/LINDEX decompress the node they touch. Recompression used to be deferred to the moment
+// the iterator advanced off the node or to the next write, so a read that stopped early left the
+// node decompressed and grew the object's MallocUsed(). DbSlice re-accounts obj_memory_usage only
+// around writes, so its tracked total fell behind and the following LPOP hit
+//   DCHECK_GE(obj_memory_usage, MallocUsed())
+// in DbSlice::FindMutableInternal.
+TEST_F(ListFamilyTest, PartialReadMemoryAccounting) {
+  absl::FlagSaver fs;
+  SetFlag(&FLAGS_list_compress_depth, 1);
+  SetFlag(&FLAGS_list_max_listpack_size, -1);  // 4KB nodes, so we get many of them.
+
+  // Celery-like payloads: ~200 compressible bytes each, enough entries for several nodes.
+  vector<string> push_args = {"rpush", kKey1};
+  for (unsigned i = 0; i < 3000; ++i) {
+    push_args.push_back(StrCat("{\"id\": \"b3e4b923-8a77-4053-aff0-", 100000 + i,
+                               "\", \"task\": \"process_job\", \"args\": [", i, "], ",
+                               "\"kwargs\": {}, \"retries\": 0, \"eta\": null, ",
+                               "\"expires\": null, \"origin\": \"gen917779@hut\"}"));
+  }
+  ASSERT_THAT(Run(push_args), IntArg(3000));
+
+  // A partial range read stops inside an interior, compressed node.
+  ASSERT_THAT(Run({"lrange", kKey1, "100", "200"}), ArrLen(101));
+
+  // A single element read does the same.
+  EXPECT_THAT(Run({"lindex", kKey1, "150"}), ArgType(RespExpr::STRING));
+
+  // The write triggers FindMutable → DCHECK. Must not crash.
+  EXPECT_THAT(Run({"lpop", kKey1}), ArgType(RespExpr::STRING));
+  EXPECT_EQ(2999, CheckedInt({"llen", kKey1}));
 }
 
 TEST_F(ListFamilyTest, Lset) {

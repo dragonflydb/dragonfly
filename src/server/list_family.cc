@@ -276,9 +276,9 @@ class ListWrapper {
 
   string First(QList::Where where) const {
     return visit(Overload{[&](QList* ql) {
-                            auto it = ql->GetIterator(where);
-                            CHECK(it.Valid());
-                            return it.Get().to_string();
+                            auto cur = ql->GetReadCursor(where);
+                            CHECK(cur.Valid());
+                            return cur.Get().to_string();
                           },
                           [&](const LP& lp) { return lp.First(where); }},
                  impl_);
@@ -286,10 +286,10 @@ class ListWrapper {
 
   std::optional<string> At(long index) const {
     return visit(Overload{[&](QList* ql) -> optional<string> {
-                            auto it = ql->GetIterator(index);
-                            if (!it.Valid())
+                            auto cur = ql->GetReadCursor(index);
+                            if (!cur.Valid())
                               return nullopt;
-                            return it.Get().to_string();
+                            return cur.Get().to_string();
                           },
                           [&](const LP& lp) { return lp.At(index); }},
                  impl_);
@@ -335,7 +335,7 @@ vector<uint32_t> ListWrapper::Pos(string_view element, uint32_t rank, uint32_t c
   vector<uint32_t> matches;
 
   auto* ql = std::get<QList*>(impl_);
-  auto it = ql->GetIterator(where);
+  auto it = ql->GetReadCursor(where);
   if (!it.Valid())
     return matches;
 
