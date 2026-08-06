@@ -103,9 +103,9 @@ jobs:
 
       - name: Deploy site
         working-directory: tools/packaging/osrepos
-        run: |
-          gcloud storage rm ${{ secrets.GCP_PACKAGES_BUCKET }}/**
-          gcloud storage rsync $SiteRoot ${{ secrets.GCP_PACKAGES_BUCKET }} --recursive --delete-unmatched-destination-objects
+        # checksums-only compares hash instead of mtime, so we don't upload unchanged package files,
+        # and so we don't change their last modified time in bucket everytime the job runs
+        run: gcloud storage rsync $SiteRoot ${{ secrets.GCP_PACKAGES_BUCKET }} --recursive --checksums-only
 
       - name: Disable caching for repo metadata
         run: |
