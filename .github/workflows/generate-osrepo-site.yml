@@ -23,6 +23,15 @@ jobs:
         working-directory: tools/packaging/osrepos
         run: pip install -r requirements.txt
 
+      - name: Authenticate
+        uses: 'google-github-actions/auth@v3'
+        with:
+          project_id: 'dragonflydb'
+          credentials_json: ${{ secrets.GCP_BUCKET_CREDENTIALS }}
+
+      - name: GCloud setup
+        uses: 'google-github-actions/setup-gcloud@v3'
+
       - name: Download packages
         working-directory: tools/packaging/osrepos
         env:
@@ -68,15 +77,6 @@ jobs:
       - name: Generate Directory Listings
         working-directory: tools/packaging/osrepos
         run: python scripts/generate-index.py $SiteRoot
-
-      - name: Authenticate
-        uses: 'google-github-actions/auth@v3'
-        with:
-          project_id: 'dragonflydb'
-          credentials_json: ${{ secrets.GCP_BUCKET_CREDENTIALS }}
-
-      - name: GCloud setup
-        uses: 'google-github-actions/setup-gcloud@v3'
 
       - name: Log locally built metadata
         working-directory: tools/packaging/osrepos
