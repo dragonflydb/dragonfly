@@ -579,6 +579,20 @@ TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnRetypedStream) {
   EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
 }
 
+TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnFlushDb) {
+  Run({"XGROUP", "CREATE", "foo", "group", "0", "MKSTREAM"});
+
+  RespExpr resp0;
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run({"XREADGROUP", "GROUP", "group", "alice", "BLOCK", "200", "streams", "foo", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  Run({"FLUSHDB"});
+  fb0.Join();
+  EXPECT_THAT(resp0, ErrArg("consumer group this client was blocked on no longer exists"));
+}
+
 TEST_F(StreamFamilyTest, XReadGroupBlockHonorsCount) {
   Run({"xgroup", "create", "foo", "group", "0", "MKSTREAM"});
 
