@@ -43,7 +43,9 @@ jobs:
       - uses: actions/checkout@v6
       - name: Wait for repo version
         if: github.event_name == 'workflow_run'
-        run: python3 tools/packaging/osrepos/scripts/wait_for_repo_version.py
+        run: |
+          apt update && apt install -y python3
+          python3 tools/packaging/osrepos/scripts/wait_for_repo_version.py
       - name: Install on ubuntu
         run: |
           apt update
