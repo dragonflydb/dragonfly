@@ -157,7 +157,7 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
       return {full_segment, false /* fragmented */, true /* empty */};
     }
 
-    bool fragmented = bin.bytes < bin.orig_bytes / 2;
+    bool fragmented = bin.bytes * 2 < bin.orig_bytes;
     return {full_segment, fragmented, false /* empty */};
   }
 
@@ -166,14 +166,14 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 
 bool SmallBins::IsFragmented(size_t offset) {
   if (auto it = stashed_bins_.Find(offset); it != stashed_bins_.end())
-    return it->second.bytes < it->second.orig_bytes / 2;
+    return it->second.bytes * 2 < it->second.orig_bytes;
   return false;
 }
 
 ::dfly::detail::DashCursor SmallBins::TraverseFragmented(::dfly::detail::DashCursor cursor,
                                                          absl::FunctionRef<void(size_t)> f) {
   return stashed_bins_.Traverse(cursor, [f](Dash::iterator it) {
-    if (it->second.bytes < it->second.orig_bytes / 2)
+    if (it->second.bytes * 2 < it->second.orig_bytes)
       f(it->first);
   });
 }
