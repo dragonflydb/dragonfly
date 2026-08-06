@@ -2526,8 +2526,7 @@ async def test_pipeline_cache_size(df_server: DflyInstance):
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
         "max_client_iobuf_len": 4096,
-        "iobuf_shrink_min_idle_sec": 1,
-        "iobuf_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": 1,
     }
 )
 async def test_iobuf_shrinks_when_receive_idle(df_server: DflyInstance):
@@ -2570,8 +2569,7 @@ async def test_iobuf_shrinks_when_receive_idle(df_server: DflyInstance):
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
         "max_client_iobuf_len": 4096,
-        "iobuf_shrink_min_idle_sec": 1,
-        "iobuf_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": 1,
     }
 )
 async def test_iobuf_regrows_after_receive_idle_shrink(df_server: DflyInstance):
@@ -2607,10 +2605,8 @@ async def test_iobuf_regrows_after_receive_idle_shrink(df_server: DflyInstance):
     {
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
-        "enable_iobuf_shrink": "false",
         "max_client_iobuf_len": 4096,
-        "iobuf_shrink_min_idle_sec": 1,
-        "iobuf_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": 0,
     }
 )
 async def test_iobuf_does_not_shrink_when_disabled(df_server: DflyInstance):
@@ -2638,7 +2634,7 @@ async def test_iobuf_does_not_shrink_when_disabled(df_server: DflyInstance):
     {
         "proactor_threads": 1,
         "max_client_iobuf_len": 4096,
-        "iobuf_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": 1,
     }
 )
 async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
@@ -2683,7 +2679,7 @@ async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
     {
         "proactor_threads": 1,
         "max_client_iobuf_len": 4096,
-        "iobuf_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": 1,
     }
 )
 async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
@@ -2714,7 +2710,7 @@ async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
     {
         "proactor_threads": 1,
         "max_client_iobuf_len": 4096,
-        "iobuf_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": 1,
     }
 )
 async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
@@ -2740,8 +2736,7 @@ async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
         "max_client_iobuf_len": 4096,
-        "iobuf_shrink_min_idle_sec": 1,
-        "iobuf_shrink_interval_sec": 3,
+        "iobuf_min_shrink_interval_sec": 3,
     }
 )
 async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):

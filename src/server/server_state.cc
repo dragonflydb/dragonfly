@@ -46,7 +46,7 @@ ABSL_FLAG(strings::MemoryBytesFlag, snapshot_egress_limit_bytes, 0,
           "Per-shard-thread socket egress bandwidth budget in bytes/second. Each shard throttles "
           "its snapshot traversal loop to stay under this rate. Accepts human-readable sizes "
           "(e.g. 100mb, 1gb). 0 disables throttling.");
-ABSL_DECLARE_FLAG(bool, enable_iobuf_shrink);
+ABSL_DECLARE_FLAG(uint32_t, iobuf_min_shrink_interval_sec);
 
 namespace dfly {
 
@@ -307,10 +307,11 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
 
     const uint32_t timeout = absl::GetFlag(FLAGS_timeout);
     const uint32_t send_timeout = absl::GetFlag(FLAGS_send_timeout);
-    const bool enable_iobuf_shrink = absl::GetFlag(FLAGS_enable_iobuf_shrink);
+    const uint32_t iobuf_min_shrink_interval_sec =
+        absl::GetFlag(FLAGS_iobuf_min_shrink_interval_sec);
     VLOG(1) << "ConnectionsWatcherFb: timeout=" << timeout << ", send_timeout=" << send_timeout;
 
-    if ((timeout == 0) && (send_timeout == 0) && !enable_iobuf_shrink) {
+    if ((timeout == 0) && (send_timeout == 0) && (iobuf_min_shrink_interval_sec == 0)) {
       continue;
     }
 

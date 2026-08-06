@@ -156,15 +156,8 @@ ABSL_FLAG(bool, enable_pipeline_squashing_v2, true,
           "Enable vectorized pipeline squashing for the V2 dispatch loop. Groups consecutive "
           "single-shard pipeline commands by shard and executes them in parallel.");
 
-ABSL_FLAG(bool, enable_iobuf_shrink, true,
-          "Enable gradual shrinking of underused client input buffers.");
-
-ABSL_FLAG(uint32_t, iobuf_shrink_min_idle_sec, 30,
-          "Minimum receive-idle time (in seconds) before a client input buffer may shrink.");
-
-ABSL_FLAG(uint32_t, iobuf_shrink_interval_sec, 30,
-          "Minimum time between client input-buffer shrink operations; growth restarts the "
-          "shrink interval.");
+ABSL_FLAG(uint32_t, iobuf_min_shrink_interval_sec, 30,
+          "Minimum time (in seconds) before a client input buffer may shrink; 0 disables.");
 
 ABSL_RETIRED_FLAG(bool, experimental_io_loop_v2, true, "retired.");
 
@@ -657,10 +650,8 @@ ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
 
 thread_local uint32_t max_busy_read_cycles_cached = UINT32_MAX;
 thread_local const size_t max_client_iobuf_len_cached = GetFlag(FLAGS_max_client_iobuf_len);
-thread_local const uint32_t iobuf_shrink_min_idle_sec_cached =
-    GetFlag(FLAGS_iobuf_shrink_min_idle_sec);
-thread_local const uint32_t iobuf_shrink_interval_sec_cached =
-    GetFlag(FLAGS_iobuf_shrink_interval_sec);
+thread_local const uint32_t iobuf_min_shrink_interval_sec_cached =
+    GetFlag(FLAGS_iobuf_min_shrink_interval_sec);
 thread_local bool always_flush_pipeline_cached = absl::GetFlag(FLAGS_always_flush_pipeline);
 thread_local uint32_t pipeline_squash_limit_cached = absl::GetFlag(FLAGS_pipeline_squash_limit);
 thread_local bool pipeline_prioritize_large_batches_cached =
@@ -907,8 +898,6 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   }
 
   migration_enabled_ = GetFlag(FLAGS_migrate_connections);
-  enable_iobuf_shrink_ = GetFlag(FLAGS_enable_iobuf_shrink);
-
 #ifdef DFLY_USE_SSL
   // Increment reference counter so Listener won't free the context while we're
   // still using it.
@@ -3622,7 +3611,7 @@ void Connection::UpdateIoBufReadState() {
 
 void Connection::ResetIoBufUsageWindow(time_t now) {
   io_buf_high_watermark_ = io_buf_.InputLen();
-  iobuf_resize_allowed_time_ = now + iobuf_shrink_interval_sec_cached;
+  iobuf_resize_allowed_time_ = now + iobuf_min_shrink_interval_sec_cached;
   DVLOG(2) << CONN_ID << "io_buf usage window reset: next resize at " << iobuf_resize_allowed_time_
            << ", high_watermark=" << io_buf_high_watermark_;
 }
@@ -3641,7 +3630,7 @@ void Connection::UpdateIoBufCapacityChange(size_t previous_capacity) {
 }
 
 bool Connection::CanShrinkIoBuf(time_t now) const {
-  return enable_iobuf_shrink_ && (now >= iobuf_resize_allowed_time_) &&
+  return (iobuf_min_shrink_interval_sec_cached > 0) && (now >= iobuf_resize_allowed_time_) &&
          (io_buf_.Capacity() > kMinReadSize);
 }
 
@@ -3669,7 +3658,7 @@ bool Connection::ShrinkIoBufTo(size_t target_capacity, string_view capacity_chan
 }
 
 void Connection::MaybeShrinkIoBufOnLowUsage() {
-  if (!enable_iobuf_shrink_) {
+  if (iobuf_min_shrink_interval_sec_cached == 0) {
     return;
   }
 
@@ -3693,7 +3682,7 @@ void Connection::MaybeShrinkIoBufOnLowUsage() {
 }
 
 bool Connection::MaybeShrinkIoBufOnReceiveIdle() {
-  if (!ioloop_v2_ || !enable_iobuf_shrink_) {
+  if (!ioloop_v2_ || (iobuf_min_shrink_interval_sec_cached == 0)) {
     return false;
   }
 
@@ -3704,7 +3693,7 @@ bool Connection::MaybeShrinkIoBufOnReceiveIdle() {
   //    externally observable receive-safe park point.
   // 3. The resize interval elapsed and the buffer can still shrink.
   time_t idle_for = std::max(now, io_buf_last_read_time_) - io_buf_last_read_time_;
-  if ((idle_for >= iobuf_shrink_min_idle_sec_cached) && IsIoBufShrinkSafe() &&
+  if ((idle_for >= iobuf_min_shrink_interval_sec_cached) && IsIoBufShrinkSafe() &&
       CanShrinkIoBuf(now)) {
     return ShrinkIoBufTo(std::max(io_buf_.Capacity() / 2, kMinReadSize),
                          ReadBufTracker::kReasonReceiveIdle);

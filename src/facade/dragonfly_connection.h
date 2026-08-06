@@ -333,7 +333,7 @@ class Connection : public util::Connection {
   bool IsSending() const;
 
   // Reclaims capacity for receive-idle connections when the V2 fiber is safely parked.
-  // A receive-idle connection has not received data for iobuf_shrink_min_idle_sec.
+  // A receive-idle connection has not received data for the configured minimum duration.
   // Returns true if the buffer capacity changed.
   bool MaybeShrinkIoBufOnReceiveIdle();
 
@@ -815,8 +815,6 @@ class Connection : public util::Connection {
       bool proactor_parse_error_ : 1;
 
       bool request_shutdown_ : 1;  // set when the connection is requested to shutdown
-
-      bool enable_iobuf_shrink_ : 1;
     };
   };
 
