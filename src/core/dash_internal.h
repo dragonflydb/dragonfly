@@ -585,11 +585,11 @@ class Segment {
     segment_id_ = new_id;
   }
 
-  void IteratorBorrowed() {
+  void BorrowPinnedIterator() {
     ++live_iterators_;
   }
 
-  void IteratorReturned() {
+  void ReturnPinnedIterator() {
     assert(live_iterators_ > 0);
     --live_iterators_;
   }

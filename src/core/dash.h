@@ -471,7 +471,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     explicit SegmentPin(SegmentType* p) noexcept : segment_(p) {
       // copy ctor, increment borrow count of segment
       if (segment_)
-        segment_->IteratorBorrowed();
+        segment_->BorrowPinnedIterator();
     }
 
     SegmentPin(const SegmentPin& other) noexcept : SegmentPin(other.segment_) {
@@ -491,7 +491,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
 
     ~SegmentPin() {
       if (segment_)
-        segment_->IteratorReturned();
+        segment_->ReturnPinnedIterator();
     }
 
     SegmentType* get() const {
@@ -538,9 +538,9 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   }
 
   // Pins the same segment as other if both are single bucket iterators
-  template <bool OtherConst, bool OtherSingleBucket>
-  void PinSegment(const Iterator<OtherConst, OtherSingleBucket>& other) {
-    if constexpr (IsSingleBucket && OtherSingleBucket)
+  template <bool TIsConst, bool TIsSingle>
+  void PinSegment(const Iterator<TIsConst, TIsSingle>& other) {
+    if constexpr (IsSingleBucket && TIsSingle)
       pinned_seg_ = SegmentPin{other.pinned_seg_.get()};
     else
       PinSegment();
