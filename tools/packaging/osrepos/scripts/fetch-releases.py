@@ -53,8 +53,11 @@ class Package:
 
 def collect_download_urls() -> list[Package]:
     packages = []
-    # TODO retry logic
-    response = requests.get(RELEASE_URL)
+    headers = {}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    response = requests.get(RELEASE_URL, headers=headers)
     releases = response.json()
     for release in releases[:5]:
         for asset in release["assets"]:
