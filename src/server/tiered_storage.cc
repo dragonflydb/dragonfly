@@ -941,11 +941,62 @@ void TieredStorage::StashPartialValue(tiering::PendingId id, const StashDescript
 
 void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
                 function<void(io::Result<string_view>)> readf, TieredStorage* ts) {
+  if (!value.IsExternal() || value.GetExternalRep() != CompactObj::ExternalRep::STRING) {
+    readf(nonstd::make_unexpected(make_error_code(errc::invalid_argument)));
+    return;
+  }
+
   auto cb = [readf = std::move(readf)](io::Result<tiering::StringDecoder*> res) mutable {
     readf(res.transform([](tiering::StringDecoder* d) { return d->GetView(); }));
   };
   ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::StringDecoder{value},
            std::move(cb));
+}
+
+TieredStorage::TResult<PrimeValue> ReadTieredValue(DbIndex dbid, std::string_view key,
+                                                   const PrimeValue& value, TieredStorage* ts) {
+  DCHECK(value.IsExternal());
+  DCHECK(!value.IsCool());
+
+  TieredStorage::TResult<PrimeValue> future;
+  switch (value.GetExternalRep()) {
+    case CompactObj::ExternalRep::STRING:
+      return ReadTiered<PrimeValue>(
+          dbid, key, value,
+          [has_flag = value.HasFlag()](string_view value) {
+            PrimeValue pv{value};
+            pv.SetFlag(has_flag);
+            return pv;
+          },
+          ts);
+    case CompactObj::ExternalRep::SERIALIZED_MAP: {
+      auto cb = [future,
+                 has_flag = value.HasFlag()](io::Result<tiering::ListpackMapDecoder*> res) mutable {
+        if (!res) {
+          future.Resolve(res.get_unexpected());
+          return;
+        }
+
+        // Decoder may be shared by coalesced reads; copy before handing off ownership.
+        auto source = (*res)->Get();
+        string_view bytes{reinterpret_cast<const char*>(source.GetPointer()), source.UsedBytes()};
+        tiering::ListpackMapDecoder detached;
+        detached.Initialize(bytes);
+        PrimeValue pv;
+        detached.Upload(&pv);
+        pv.SetFlag(has_flag);
+        future.Resolve(io::Result<PrimeValue>{std::move(pv)});
+      };
+      ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::ListpackMapDecoder{},
+               std::move(cb));
+      break;
+    }
+    case CompactObj::ExternalRep::LIST_NODE:
+      future.Resolve(
+          nonstd::make_unexpected(std::make_error_code(std::errc::operation_not_supported)));
+      break;
+  }
+  return future;
 }
 
 TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::Node* node,

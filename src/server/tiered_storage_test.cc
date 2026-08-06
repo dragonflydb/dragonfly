@@ -922,6 +922,99 @@ TEST_F(PureDiskTSTest, Dump) {
   EXPECT_EQ(resp, "OK");
 }
 
+TEST_F(PureDiskTSTest, OffloadedStringSnapshotPreservesMemcacheFlags) {
+  SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
+  InitWithDbFilename();
+
+  constexpr uint32_t kFlags = 0x12345678;
+  const string key = "mc-flags";
+  const string value = BuildString(3000, 'm');
+  ASSERT_EQ(Run({"SET", key, value, "_MCFLAGS", absl::StrCat(kFlags)}), "OK");
+
+  auto is_offloaded_string_with_flags = [this, &key] {
+    bool result = false;
+    pp_->at(0)->AwaitBrief([&] {
+      EngineShard* shard = EngineShard::tlocal();
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+      auto it = db.GetDBTable(0)->prime.Find(key);
+      result = IsValid(it) && it->second.IsExternal() && !it->second.IsCool() &&
+               it->second.ObjType() == OBJ_STRING &&
+               it->second.GetExternalRep() == CompactObj::ExternalRep::STRING &&
+               it->second.HasFlag();
+    });
+    return result;
+  };
+  ExpectConditionWithinTimeout(is_offloaded_string_with_flags);
+  ASSERT_TRUE(is_offloaded_string_with_flags());
+
+  ASSERT_EQ(Run({"DEBUG", "RELOAD"}), "OK");
+
+  EXPECT_THAT(
+      RunMC(MemcacheParser::GET, key),
+      ElementsAre(absl::StrCat("VALUE ", key, " ", kFlags, " ", value.size()), value, "END"));
+}
+
+TEST_F(PureDiskTSTest, OffloadedHashSnapshotReload) {
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
+  InitWithDbFilename();
+
+  constexpr size_t kNumHashes = 100;
+  auto key_for = [](size_t index) { return absl::StrCat("hash:", index); };
+  // Individual fields stay listpack-compatible while each complete hash exceeds the tiering
+  // minimum. Multiple hashes fill the small-bin pages and guarantee at least one offload.
+  auto value_for = [](size_t index, char fill) {
+    return absl::StrCat(BuildString(40, fill), ":", index);
+  };
+
+  for (size_t i = 0; i < kNumHashes; ++i) {
+    Run({"HSET", key_for(i), "field-a", value_for(i, 'a'), "field-b", value_for(i, 'b')});
+  }
+
+  optional<size_t> target_index;
+  auto find_offloaded_hash = [this, &target_index, &key_for] {
+    bool result = false;
+    pp_->at(0)->AwaitBrief([&] {
+      EngineShard* shard = EngineShard::tlocal();
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+      for (size_t i = 0; i < kNumHashes; ++i) {
+        auto it = db.GetDBTable(0)->prime.Find(key_for(i));
+        if (IsValid(it) && it->second.IsExternal() && !it->second.IsCool() &&
+            it->second.ObjType() == OBJ_HASH &&
+            it->second.GetExternalRep() == CompactObj::ExternalRep::SERIALIZED_MAP) {
+          target_index = i;
+          result = true;
+          break;
+        }
+      }
+    });
+    return result;
+  };
+  ExpectConditionWithinTimeout(find_offloaded_hash);
+  ASSERT_TRUE(target_index.has_value());
+  const string target = key_for(*target_index);
+
+  auto dump = Run({"DUMP", target});
+  ASSERT_EQ(Run({"RESTORE", "restored-hash", "0", facade::ToSV(dump.GetBuf())}), "OK");
+  EXPECT_EQ(Run({"TYPE", "restored-hash"}), "hash");
+  EXPECT_THAT(Run({"HLEN", "restored-hash"}), IntArg(2));
+  EXPECT_EQ(Run({"HGET", "restored-hash", "field-a"}), value_for(*target_index, 'a'));
+  EXPECT_EQ(Run({"HGET", "restored-hash", "field-b"}), value_for(*target_index, 'b'));
+  EXPECT_THAT(Run({"DEL", "restored-hash"}), IntArg(1));
+
+  ASSERT_EQ(Run({"DEBUG", "RELOAD"}), "OK");
+
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(kNumHashes));
+  for (size_t i = 0; i < kNumHashes; ++i) {
+    SCOPED_TRACE(i);
+    const string key = key_for(i);
+    EXPECT_EQ(Run({"TYPE", key}), "hash");
+    EXPECT_THAT(Run({"HLEN", key}), IntArg(2));
+    EXPECT_EQ(Run({"HGET", key, "field-a"}), value_for(i, 'a'));
+    EXPECT_EQ(Run({"HGET", key, "field-b"}), value_for(i, 'b'));
+  }
+}
+
 TEST_P(LatentCoolingTSTest, SimpleHash) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_experimental_hash_support, true);

@@ -210,6 +210,11 @@ inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::s
       dbid, key, value, [](std::string_view val) { return std::string(val); }, ts);
 }
 
+// Read an offloaded top-level value into a detached copy while preserving its type. Usual fetch
+// side effects apply.
+TieredStorage::TResult<PrimeValue> ReadTieredValue(DbIndex dbid, std::string_view key,
+                                                   const PrimeValue& value, TieredStorage* ts);
+
 TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::Node* node,
                                                 const tiering::DiskSegment& segment,
                                                 TieredStorage* ts);
@@ -351,6 +356,12 @@ inline void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& val
 inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::string_view key,
                                                             const PrimeValue& value,
                                                             TieredStorage* ts) {
+  return {};
+}
+
+inline TieredStorage::TResult<PrimeValue> ReadTieredValue(DbIndex dbid, std::string_view key,
+                                                          const PrimeValue& value,
+                                                          TieredStorage* ts) {
   return {};
 }
 

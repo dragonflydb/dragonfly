@@ -64,10 +64,9 @@ void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_ind
                                            uint32_t mc_flags) {
   DCHECK(pv.IsExternal());
   DCHECK(!pv.IsCool());
-  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
 
   auto key = pk.ToString();
-  auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
+  auto future = ReadTieredValue(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
   auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
                                                     expire_time, mc_flags);
 
@@ -112,8 +111,7 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
       return;
     }
 
-    PrimeValue pv{*value};
-    SerializeFetchedEntry(*entry, pv);
+    SerializeFetchedEntry(*entry, *value);
 
     deps_.Decrement(target.key());
   };
