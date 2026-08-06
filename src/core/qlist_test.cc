@@ -1617,6 +1617,41 @@ TEST_F(QListZstdTest, MallocUsedTracksSteadyStateCompression) {
 // Erase() drops whole interior nodes without decompressing them first, so DelNode() used to
 // subtract the uncompressed node->sz for a node that had only contributed its compressed length
 // to malloc_size_. The counter is unsigned, so the over-subtraction wrapped it around.
+TEST_F(QListZstdTest, DelNodeReleasesCompressionStats) {
+  // Sums the compressed payload the list currently holds, i.e. what compressed_bytes should be
+  // accounting for.
+  auto live_compressed = [](const QList& ql) {
+    ssize_t total = 0;
+    for (const QList::Node* node = ql.Head(); node; node = node->next) {
+      if (node->IsCompressed()) {
+        void* data = nullptr;
+        total += node->GetLZF(&data);
+      }
+    }
+    return total;
+  };
+
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+  ASSERT_GT(ql.node_count(), 10u);
+
+  const ssize_t live_before = live_compressed(ql);
+  const ssize_t stats_before = QList::stats.compressed_bytes;
+  const ssize_t raw_before = QList::stats.raw_compressed_bytes;
+  ASSERT_GT(live_before, 0);
+
+  // Drops whole compressed interior nodes through DelNode().
+  ql.Erase(100, 200);
+  ASSERT_EQ(ql.Size(), 300u);
+
+  // Whatever left the list must have left the counters as well. Compared as deltas because the
+  // stats are thread-local and accumulate across tests in this binary.
+  EXPECT_EQ(stats_before - ssize_t(QList::stats.compressed_bytes),
+            live_before - live_compressed(ql));
+  EXPECT_GT(raw_before - ssize_t(QList::stats.raw_compressed_bytes), 0);
+}
+
 TEST_F(QListZstdTest, EraseWholeCompressedNodesKeepsMallocSize) {
   QList ql(-1, 0);
   ql.set_compr_threshold(1);
