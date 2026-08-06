@@ -95,9 +95,9 @@ class TieredStorage : public TieredStorageBase {
   // Delete value, must be offloaded (external type)
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
 
-  // Prepre key to be transferred between databases / renamed.
-  // Tiered storage must invalidate all back references to it: serialized
-  // small bin entries that store (dbid, key) pair to recover the key are deleted
+  // Prepare key to be transferred between databases / renamed.
+  // Tiered storage must invalidate all back references to it: values in small bins serializing
+  // the key and pending reads referencing the key
   bool PrepareKeyForTransfer(DbIndex dbid, std::string_view key, PrimeValue* pv);
 
   // Returns true if there is a pending modification for the given segment.
