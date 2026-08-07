@@ -45,6 +45,13 @@ struct TieredStats {
   // Values stashed during background offloading scans (subset of total_stashes).
   uint64_t total_offloading_stashes = 0;
 
+  // Values re-offloaded by the background repack scan to re-group scattered buckets.
+  uint64_t total_buckets_repacked = 0;
+
+  // Buckets the background repack scan found fragmented (small tiered values spread over enough
+  // distinct disk pages to exceed the repack threshold).
+  float estimated_bin_bucket_fragmentation = 0;
+
   // Disk space currently in use (tracked by ExternalAllocator).
   size_t allocated_bytes = 0;
 

@@ -107,7 +107,7 @@ class TieredStorage : public TieredStorageBase {
   void CancelLoad(tiering::DiskSegment segment);
 
   // Run offloading loop until i/o device is loaded or all entries were traversed
-  void RunOffloading(DbIndex dbid);
+  void Heartbeat();
 
   // Prune cool entries to reach the set memory goal with freed memory
   size_t ReclaimMemory(size_t goal);
@@ -145,11 +145,25 @@ class TieredStorage : public TieredStorageBase {
   // Scan small bins for fragmented ones and enqueue for defrag
   void RunDefragScan();
 
+  // Runs offloading and background scans for a single db. Called from Heartbeat per valid db.
+  void RunOffloading(DbIndex dbid);
+
+  // Scan prime table buckets for offloaded small values scattered across many disk pages.
+  // Compute stimated fragmentation score. Upload all values from a fragmented bucket.
+  void RunRepackScan(DbIndex dbid);
+
   PrimeValue DeleteCool(tiering::TieredCoolRecord* record);
   tiering::TieredCoolRecord* PopCool();
 
   detail::DashCursor offloading_cursor_;  // where RunOffloading left off
   detail::DashCursor defrag_cursor_;      // where defrag left off
+
+  struct {
+    detail::DashCursor cursor;
+
+    size_t cycle_buckets = 0;
+    size_t cycle_pages = 0;
+  } repack_state_;
 
   // Number of bins the previous defrag scan enqueued. Used to scale the next scan's cpu time-slice.
   unsigned last_defrag_scan_hits_ = 0;
@@ -173,6 +187,7 @@ class TieredStorage : public TieredStorageBase {
     float upload_threshold;
     bool experimental_hash_offload;
     bool experimental_list_offload;
+    uint32_t experimental_repack_limit;
     uint32_t min_ttl_to_offload_ms;
   } config_;
 
@@ -183,6 +198,9 @@ class TieredStorage : public TieredStorageBase {
     uint64_t offloading_stashes = 0;
     uint64_t total_clients_throttled = 0;
     size_t cool_memory_used = 0;
+
+    uint64_t total_buckets_repacked = 0;
+    float estimated_bin_bucket_fragmentation = 0;
   } stats_;
 };
 
@@ -311,7 +329,7 @@ class TieredStorage : public TieredStorageBase {
     return {};
   }
 
-  void RunOffloading(DbIndex dbid) {
+  void Heartbeat() {
   }
 
   void UpdateFromFlags() {
