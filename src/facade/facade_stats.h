@@ -74,6 +74,7 @@ struct ConnectionStats {
   uint32_t num_read_yields = 0;
   uint64_t num_migrations = 0;
   uint64_t num_recv_provided_calls = 0;
+  uint64_t iobuf_capacity_change_cnt = 0;
 
   // Number of times the tls connection was closed by the time we started reading from it.
   uint64_t tls_accept_disconnects = 0;  // number of TLS socket disconnects during the handshake

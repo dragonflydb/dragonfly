@@ -332,6 +332,11 @@ class Connection : public util::Connection {
 
   bool IsSending() const;
 
+  // Reclaims capacity for receive-idle connections when the V2 fiber is safely parked.
+  // A receive-idle connection has not received data for the configured minimum duration.
+  // Returns true if the buffer capacity changed.
+  bool MaybeShrinkIoBufOnReceiveIdle();
+
   void Notify() {
     io_event_.notify();
   }
@@ -385,7 +390,35 @@ class Connection : public util::Connection {
   // Drains currently available bytes from socket into io_buf_ using non-blocking reads.
   void ReadPendingInput();
 
-  void CheckIoBufCapacity(bool reached_capacity, base::IoBuf* buf);
+  // Grows the buffer when parsing needs more data, or evaluates low-usage shrinking otherwise.
+  // `parse_status` is the parser result; `reached_capacity` marks the preceding read filled it.
+  void MaybeAdjustIoBufCapacity(ParserStatus parse_status, bool reached_capacity);
+
+  // Halves the buffer when its peak unread input is below half capacity; otherwise starts a new
+  // observation window.
+  void MaybeShrinkIoBufOnLowUsage();
+
+  // Records the time of the latest received data and updates the peak unread input.
+  void UpdateIoBufReadState();
+
+  // Updates resize statistics and starts a new observation window when the capacity changed.
+  // `previous_capacity` is compared with the current capacity.
+  void UpdateIoBufCapacityChange(size_t previous_capacity);
+
+  // Starts a new observation window and initializes the peak with current unread input.
+  // `now` determines when the next resize is allowed.
+  void ResetIoBufUsageWindow(time_t now);
+
+  // Returns true when shrinking is enabled, the resize cooldown elapsed, and the buffer is larger
+  // than the minimum capacity. `now` is compared with the resize deadline.
+  bool CanShrinkIoBuf(time_t now) const;
+
+  // Returns true when the V2 fiber is idle and no pending input or receive result uses the buffer.
+  bool IsIoBufShrinkSafe() const;
+
+  // Shrinks the buffer and updates capacity accounting. `target_capacity` is the new capacity and
+  // `reason` identifies the resize in diagnostics. Returns true when the capacity changes.
+  bool ShrinkIoBufTo(size_t target_capacity, std::string_view reason);
 
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
@@ -625,7 +658,13 @@ class Connection : public util::Connection {
   size_t request_consumed_bytes_ = 0;
 
   util::FiberSocketBase::ProvidedBuffer recv_buf_;
-  io::IoBuf io_buf_;  // used in io loop and parsers
+
+  // IO buffer for reading data from the socket, and parsing commands from it.
+  io::IoBuf io_buf_;
+  time_t io_buf_last_read_time_;
+  time_t iobuf_resize_allowed_time_;
+  size_t io_buf_high_watermark_ = 0;
+
   std::unique_ptr<RespSrvParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;

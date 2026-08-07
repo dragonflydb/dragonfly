@@ -2521,6 +2521,250 @@ async def test_pipeline_cache_size(df_server: DflyInstance):
     assert info["dispatch_queue_bytes"] == 0
 
 
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "enable_resp_io_loop_v2": "true",
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 1,
+    }
+)
+async def test_iobuf_shrinks_when_receive_idle(df_server: DflyInstance):
+    """V2 idle connections reclaim input-buffer capacity."""
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets V2 receive-idle IoBuf shrinking")
+
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    async def client_read_buffer_bytes():
+        metrics = await df_server.metrics()
+        return next(
+            sample.value
+            for sample in metrics["dragonfly_memory_by_class_bytes"].samples
+            if sample.labels["class"] == "client_read_buffer"
+        )
+
+    baseline = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    await client.set("iobuf-shrink", "x" * 2048)
+
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    metric_peak = await client_read_buffer_bytes()
+    assert peak > baseline
+
+    @assert_eventually(timeout=5)
+    async def wait_for_reclamation():
+        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+        assert current < peak
+        assert await client_read_buffer_bytes() < metric_peak
+
+    await wait_for_reclamation()
+    await client.aclose()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "enable_resp_io_loop_v2": "true",
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 1,
+    }
+)
+async def test_iobuf_regrows_after_receive_idle_shrink(df_server: DflyInstance):
+    """A V2 buffer that shrank while idle regrows and processes a later large command."""
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets V2 receive-idle IoBuf shrinking")
+
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    await client.set("iobuf-regrow-before", "x" * 2048)
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    @assert_eventually(timeout=5)
+    async def wait_for_shrink():
+        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+        assert current < peak
+
+    await wait_for_shrink()
+    shrunk = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    value = "y" * 3072
+    assert await client.set("iobuf-regrow-after", value) is True
+    assert await client.get("iobuf-regrow-after") == value
+    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) > shrunk
+
+    await client.aclose()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "enable_resp_io_loop_v2": "true",
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 0,
+    }
+)
+async def test_iobuf_does_not_shrink_when_disabled(df_server: DflyInstance):
+    """Disabling IoBuf shrinking retains capacity after a receive-idle interval."""
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets V2 receive-idle IoBuf shrinking")
+
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    await client.set("iobuf-shrink-disabled", "x" * 2048)
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    await asyncio.sleep(3)
+
+    current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    assert current == peak
+
+    await client.aclose()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 1,
+    }
+)
+async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
+    """Both loops self-shrink after low usage without corrupting a partial command."""
+    observer = df_server.client()
+    await observer.ping()
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+
+    value = b"x" * 2048
+    writer.write(b"*3\r\n$3\r\nSET\r\n$7\r\nprefill\r\n$2048\r\n" + value + b"\r\n")
+    await writer.drain()
+    assert await reader.readuntil(b"\r\n") == b"+OK\r\n"
+
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    await asyncio.sleep(2)
+
+    partial_value = b"y" * 100
+    writer.write(b"*3\r\n$3\r\nSET\r\n$7\r\npartial\r\n$1024\r\n" + partial_value)
+    await writer.drain()
+    await asyncio.sleep(2)
+
+    writer.write(b"y")
+    await writer.drain()
+
+    @assert_eventually(timeout=5)
+    async def wait_for_reclamation():
+        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+        assert current < peak
+
+    await wait_for_reclamation()
+
+    writer.write(b"y" * (1024 - len(partial_value) - 1) + b"\r\n")
+    await writer.drain()
+    assert await reader.readuntil(b"\r\n") == b"+OK\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 1,
+    }
+)
+async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
+    """Both loops restart the usage window before shrinking after low-use commands."""
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    await client.set("iobuf-shrink-complete", "x" * 2048)
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    await asyncio.sleep(2)
+    await client.ping()
+    await asyncio.sleep(2)
+    await client.ping()
+
+    @assert_eventually(timeout=5)
+    async def wait_for_reclamation():
+        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+        assert current < peak
+
+    await wait_for_reclamation()
+    await client.aclose()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 1,
+    }
+)
+async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
+    """Both loops retain capacity when the usage window contains a large read."""
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    await client.set("iobuf-shrink-high-usage", "x" * 2048)
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    await asyncio.sleep(2)
+    await client.ping()
+
+    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == peak
+
+    await client.aclose()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "enable_resp_io_loop_v2": "true",
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 3,
+    }
+)
+async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
+    """Receive-idle shrinking performs at most one resize during each cooldown interval."""
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets V2 receive-idle IoBuf shrinking")
+
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    await client.set("iobuf-shrink-cooldown", "x" * 2048)
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    @assert_eventually(timeout=7)
+    async def wait_for_first_shrink():
+        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+        assert current < peak
+
+    await wait_for_first_shrink()
+    after_first_shrink = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    await asyncio.sleep(1)
+    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == after_first_shrink
+
+    await client.aclose()
+    await observer.aclose()
+
+
 @dfly_multi_test_args(
     {
         "proactor_threads": 4,
