@@ -973,6 +973,14 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
     cursor = next;
     ThisFiber::Yield();
+
+    // Del above only marks the watchers of a deleted stream as awakened; normally the deleting
+    // transaction dispatches them when it concludes. This fiber has no such transaction, so
+    // dispatch here - between bucket traversals, where preempting in a readiness check is safe.
+    if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
+        bc && owner_->GetContTx() == nullptr) {
+      bc->NotifyPending();
+    }
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;

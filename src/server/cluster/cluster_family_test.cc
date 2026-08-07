@@ -1127,6 +1127,25 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                                   _, "total_writes", _, "memory_bytes", _)))));
 }
 
+TEST_F(ClusterFamilyTest, FlushSlotsWakesBlockedXReadGroup) {
+  ConfigSingleNodeCluster(GetMyId());
+  EXPECT_EQ(Run({"XGROUP", "CREATE", "s", "group", "0", "MKSTREAM"}), "OK");
+
+  RespExpr blocked_resp;
+  auto reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    blocked_resp =
+        Run({"XREADGROUP", "GROUP", "group", "consumer", "BLOCK", "2000", "STREAMS", "s", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  const string slot = absl::StrCat(CheckedInt({"CLUSTER", "KEYSLOT", "s"}));
+  EXPECT_EQ(RunPrivileged({"DFLYCLUSTER", "FLUSHSLOTS", slot, slot}), "OK");
+
+  reader.Join();
+  EXPECT_THAT(blocked_resp, ErrArg("consumer group this client was blocked on no longer exists"));
+  EXPECT_THAT(Run({"EXISTS", "s"}), IntArg(0));
+}
+
 TEST_F(ClusterFamilyTest, FlushSlotsOutOfBounds) {
   EXPECT_THAT(RunPrivileged({"dflycluster", "flushslots", "0", "16384"}),
               ErrArg("value is not an integer or out of range"));
