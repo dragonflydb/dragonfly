@@ -340,6 +340,31 @@ async def test_rewrites(replication):
         assert abs(ttl1 - ttl2) <= 1
 
     async with m_replica:
+        # Pick GEORADIUS/GEORADIUSBYMEMBER STORE dest keys that are deliberately on a different
+        # shard than the source (gh #7996 — the crash this guards against only reproduces when
+        # source and destination land on different shards). Each probe SET/DEL is journaled, so
+        # it must be skip_cmd()'d like any other setup write in this monitor block.
+        async def get_shard(key):
+            await c_master.execute_command(f"SET {key} v")
+            await skip_cmd()
+            debug_key_info = await c_master.execute_command(f"DEBUG OBJECT {key}")
+            shard_id = int(dict(map(lambda s: s.split(":"), debug_key_info.split()))["shard"])
+            await c_master.execute_command(f"DEL {key}")
+            await skip_cmd()
+            return shard_id
+
+        async def cross_shard_key(prefix, other_shard):
+            i = 0
+            while True:
+                candidate = f"{prefix}{i}"
+                if await get_shard(candidate) != other_shard:
+                    return candidate
+                i += 1
+
+        src_shard = await get_shard("geo-src")
+        geo_dst = await cross_shard_key("geo-dst", src_shard)
+        geo_dst2 = await cross_shard_key("geo-dst2", src_shard)
+
         # CHECK EXPIRE, PEXPIRE, PEXPIRE turn into EXPIREAT
         await c_master.set("k-exp", "v")
         await skip_cmd()
@@ -415,6 +440,24 @@ async def test_rewrites(replication):
 
         # Check ZUNIONSTORE turns into DEL and ZADD
         await check_list_ooo("ZUNIONSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k (.*?)"])
+
+        # Check GEORADIUS/GEORADIUSBYMEMBER with STORE turn into DEL and ZADD (gh #7996 — a
+        # raw-command replay is invalid when the source and destination keys land on different
+        # shards; geo_dst/geo_dst2 were pre-selected above to be cross-shard from geo-src).
+        await c_master.execute_command(
+            "GEOADD geo-src 13.361389 38.115556 Palermo 15.087269 37.502669 Catania"
+        )
+        await skip_cmd()
+        await check_list_ooo(
+            f"GEORADIUS geo-src 15 37 200 km STORE {geo_dst}",
+            [rf"DEL {geo_dst}", rf"ZADD {geo_dst} (.*?)"],
+        )
+
+        # Check GEORADIUSBYMEMBER with STORE turns into DEL and ZADD
+        await check_list_ooo(
+            f"GEORADIUSBYMEMBER geo-src Palermo 200 km STORE {geo_dst2}",
+            [rf"DEL {geo_dst2}", rf"ZADD {geo_dst2} (.*?)"],
+        )
 
         await c_master.set("k1", "1000")
         await c_master.set("k2", "1100")
