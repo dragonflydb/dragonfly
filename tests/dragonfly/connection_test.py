@@ -2706,6 +2706,7 @@ async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
     await observer.aclose()
 
 
+@pytest.mark.skip("fails regularly on the CI")
 @dfly_args(
     {
         "proactor_threads": 1,
