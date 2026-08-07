@@ -5,6 +5,7 @@
 
 #include <array>
 #include <ranges>
+#include <utility>
 #include <vector>
 
 #include "absl/random/random.h"
@@ -59,19 +60,14 @@ class DashTable : public detail::DashTableBase {
     struct ByType {
       bucket_iterator regular_buckets[kRegularBuckets];
       bucket_iterator stash_buckets[SegmentType::kStashBucketNum];
-    };
-
-    union Probes {
-      ByType by_type;
-      bucket_iterator arr[kNumBuckets];
-
-      Probes() : arr() {
-      }
     } probes;
 
     // id must be in the range [0, kNumBuckets).
     bucket_iterator at(unsigned id) const {
-      return probes.arr[id];
+      if (id < kRegularBuckets) {
+        return probes.regular_buckets[id];
+      }
+      return probes.stash_buckets[id - kRegularBuckets];
     }
 
     unsigned num_buckets;
@@ -421,6 +417,10 @@ class DashTable : public detail::DashTableBase {
     return stash_unloaded_;
   }
 
+  // Attempts to reallocate segment for defragmentation. Will not continue if segment has outgoing
+  // iterators holding pointers to it as these will become invalid on relocation.
+  bool TryRelocateSegment(size_t segment_id);
+
  private:
   enum class InsertMode {
     kInsertIfNotFound,
@@ -463,6 +463,45 @@ class DashTable : public detail::DashTableBase {
 template <typename _Key, typename _Value, typename Policy>
 template <bool IsConst, bool IsSingleBucket>
 class DashTable<_Key, _Value, Policy>::Iterator {
+  // RAII class to increase, decrease segment iterator count on its lifetime
+  class SegmentPin {
+   public:
+    SegmentPin() = default;
+
+    explicit SegmentPin(SegmentType* p) noexcept : segment_(p) {
+      // copy ctor, increment borrow count of segment
+      if (segment_)
+        segment_->BorrowPinnedIterator();
+    }
+
+    SegmentPin(const SegmentPin& other) noexcept : SegmentPin(other.segment_) {
+      // defer to copy ctor, increment count
+    }
+
+    SegmentPin(SegmentPin&& other) noexcept : segment_(std::exchange(other.segment_, nullptr)) {
+      // move ctor, do not increment count, clear other segment ptr
+      // other segment will not reduce count on destruction
+    }
+
+    SegmentPin& operator=(SegmentPin other) noexcept {
+      // copy and swap to decrement count of original segment_ when other is destroyed
+      std::swap(segment_, other.segment_);
+      return *this;
+    }
+
+    ~SegmentPin() {
+      if (segment_)
+        segment_->ReturnPinnedIterator();
+    }
+
+    SegmentType* get() const {
+      return segment_;
+    }
+
+   private:
+    SegmentType* segment_ = nullptr;
+  };
+
   using Owner = std::conditional_t<IsConst, const DashTable, DashTable>;
 
   Owner* owner_;
@@ -474,7 +513,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   // For single bucket iterators we pin the segment to its pointer. Because the iterators are held
   // across suspension points during concurrent modifications, growing the dashtable will displace
   // the seg_id_ pointing it to a different bucket.
-  using PinnedType = std::conditional_t<IsSingleBucket, SegmentType*, std::nullptr_t>;
+  using PinnedType = std::conditional_t<IsSingleBucket, SegmentPin, std::nullptr_t>;
   PinnedType pinned_seg_ = {};
 
   friend class DashTable;
@@ -483,7 +522,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   // multi-bucket iterators always read the live directory entry.
   SegmentType* GetSegment() const {
     if constexpr (IsSingleBucket) {
-      return pinned_seg_;
+      return pinned_seg_.get();
     } else {
       return owner_->segment_[seg_id_];
     }
@@ -492,9 +531,19 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   // Pins the segment pointer from the current directory index (single-bucket iterators only).
   void PinSegment() {
     if constexpr (IsSingleBucket) {
-      pinned_seg_ =
-          (owner_ && seg_id_ < owner_->segment_.size()) ? owner_->segment_[seg_id_] : nullptr;
+      SegmentType* segment =
+          owner_ && seg_id_ < owner_->segment_.size() ? owner_->segment_[seg_id_] : nullptr;
+      pinned_seg_ = SegmentPin{segment};
     }
+  }
+
+  // Pins the same segment as other if both are single bucket iterators
+  template <bool TIsConst, bool TIsSingle>
+  void PinSegment(const Iterator<TIsConst, TIsSingle>& other) {
+    if constexpr (IsSingleBucket && TIsSingle)
+      pinned_seg_ = SegmentPin{other.pinned_seg_.get()};
+    else
+      PinSegment();
   }
 
   Iterator(Owner* me, uint32_t seg_id, detail::PhysicalBid bid, uint8_t sid)
@@ -515,6 +564,8 @@ class DashTable<_Key, _Value, Policy>::Iterator {
       std::conditional_t<IsConst, detail::IteratorPair<const Key_t, const Value_t>,
                          detail::IteratorPair<Key_t, Value_t>>;
 
+  ~Iterator() = default;
+
   // Copy constructor from iterator to const_iterator.
   template <bool TIsConst = IsConst, bool TIsSingleB>
   requires TIsConst Iterator(const Iterator<!TIsConst, TIsSingleB>& other)
@@ -524,7 +575,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
         bucket_id_(other.bucket_id_),
         slot_id_(other.slot_id_),
         done_(other.done_) {
-    PinSegment();
+    PinSegment(other);
   }
 
   // Copy constructor from iterator to bucket_iterator and vice versa.
@@ -535,7 +586,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
         bucket_id_(other.bucket_id_),
         slot_id_(IsSingleBucket ? 0 : other.slot_id_),
         done_(other.done_) {
-    PinSegment();
+    PinSegment(other);
     // if this - is a bucket_iterator - we reset slot_id to the first occupied space.
     if constexpr (IsSingleBucket) {
       Seek2Occupied();
@@ -546,11 +597,9 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   }
 
   Iterator(const Iterator& other) = default;
-
-  Iterator(Iterator&& other) = default;
-
+  Iterator(Iterator&& other) noexcept = default;
   Iterator& operator=(const Iterator& other) = default;
-  Iterator& operator=(Iterator&& other) = default;
+  Iterator& operator=(Iterator&& other) noexcept = default;
 
   // Advancing is restricted to single-bucket iterators. A multi-bucket iterator may easily be
   // invalidated across suspension points, so the cursors and the Traverse function should be used
@@ -585,7 +634,8 @@ class DashTable<_Key, _Value, Policy>::Iterator {
 
   bool IsOccupied() const {
     if constexpr (IsSingleBucket) {
-      return pinned_seg_ && pinned_seg_->IsBusy(bucket_id_, slot_id_);
+      SegmentType* segment = pinned_seg_.get();
+      return segment && segment->IsBusy(bucket_id_, slot_id_);
     } else {
       return (seg_id_ < owner_->segment_.size()) &&
              ((owner_->segment_[seg_id_]->IsBusy(bucket_id_, slot_id_)));
@@ -1015,11 +1065,11 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       hotspot.key_hash = key_hash;
 
       for (unsigned j = 0; j < HotBuckets::kRegularBuckets; ++j) {
-        hotspot.probes.by_type.regular_buckets[j] = bucket_iterator{this, target_seg_id, bid[j]};
+        hotspot.probes.regular_buckets[j] = bucket_iterator{this, target_seg_id, bid[j]};
       }
 
       for (unsigned i = 0; i < SegmentType::kStashBucketNum; ++i) {
-        hotspot.probes.by_type.stash_buckets[i] =
+        hotspot.probes.stash_buckets[i] =
             bucket_iterator{this, target_seg_id, uint8_t(Policy::kBucketNum + i), 0};
       }
       hotspot.num_buckets = HotBuckets::kNumBuckets;
@@ -1198,6 +1248,33 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
   } while (!fetched);
 
   return Cursor{global_depth_, sid, bid};
+}
+
+template <typename _Key, typename _Value, typename Policy>
+bool DashTable<_Key, _Value, Policy>::TryRelocateSegment(size_t segment_id) {
+  static_assert(std::is_nothrow_move_constructible_v<SegmentType>);
+
+  SegmentType* segment = segment_[segment_id];
+  if (!segment->IsSafeToDefragment())
+    return false;
+
+  const size_t chunk = size_t{1} << (global_depth_ - segment->local_depth());
+  const size_t start = segment->segment_id();
+
+  PMR_NS::polymorphic_allocator<SegmentType> allocator(segment_.get_allocator());
+  using A = std::allocator_traits<decltype(allocator)>;
+
+  SegmentType* new_segment = allocator.allocate(1);
+  // invokes move ctor. will move: segment -> bucket[] -> key[],value[] etc.
+  // if key,values data is heap allocated, moving the handle moves ownership
+  A::construct(allocator, new_segment, std::move(*segment));
+
+  std::fill_n(segment_.begin() + start, chunk, new_segment);
+
+  A::destroy(allocator, segment);
+  A::deallocate(allocator, segment, 1);
+
+  return true;
 }
 
 template <typename _Key, typename _Value, typename Policy>

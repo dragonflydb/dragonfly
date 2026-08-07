@@ -222,10 +222,10 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
   // Disable flush journal changes to prevent preemtion in evict.
   journal::DisableFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
-  constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.by_type.stash_buckets);
+  constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.stash_buckets);
 
   // choose "randomly" a stash bucket to evict an item.
-  auto bucket_it = eb.probes.by_type.stash_buckets[eb.key_hash % kNumStashBuckets];
+  auto bucket_it = eb.probes.stash_buckets[eb.key_hash % kNumStashBuckets];
   auto last_slot_it = bucket_it;
   last_slot_it += (PrimeTable::kSlotNum - 1);
   if (!last_slot_it.is_done()) {
