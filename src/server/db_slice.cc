@@ -1990,10 +1990,9 @@ bool DbSlice::DefragTableSegments(DbIndex db_ind, PageUsage* page_usage) {
     // only relocate one segment at a time, must not yield, if it yields, then new bucket iterators
     // might be created, and then we might relocate the segment and break their held pointers
     FiberAtomicGuard g;
-    cursor = pt.VisitSegment(cursor, [&](size_t, auto* seg_ptr) {
-      if (page_usage->IsPageForObjectUnderUtilized(seg_ptr)) {
-        // relocate the segment using first arg segment id
-      }
+    cursor = pt.VisitSegment(cursor, [&](size_t segment_id, auto* seg_ptr) {
+      if (page_usage->IsPageForObjectUnderUtilized(seg_ptr))
+        pt.TryRelocateSegment(segment_id);
     });
   } while (cursor && !page_usage->QuotaDepleted());
   db_table->segment_defrag_cursor = cursor;
