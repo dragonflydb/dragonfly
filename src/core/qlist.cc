@@ -459,8 +459,14 @@ size_t QList::DefragIfNeeded(PageUsage* page_usage) {
     // of their constant (and relatively small, ~40 bytes per object) size. Defragmentation fixes
     // fragmented memory allocation, which usually happens when variable-sized blocks of data are
     // allocated and deallocated, which is not expected with nodes.
-    uint8_t* new_entry = static_cast<uint8_t*>(zmalloc(curr->sz));
-    memcpy(new_entry, curr->entry, curr->sz);
+    //
+    // For compressed nodes curr->sz holds the *uncompressed* size, while curr->entry points to a
+    // quicklistLZF allocated with sizeof(quicklistLZF) + lzf->sz bytes, which is strictly smaller.
+    // Using curr->sz there would over-read the source buffer and over-allocate the new one.
+    const size_t entry_sz =
+        curr->IsCompressed() ? sizeof(quicklistLZF) + GetLzf(curr)->sz : curr->sz;
+    uint8_t* new_entry = static_cast<uint8_t*>(zmalloc(entry_sz));
+    memcpy(new_entry, curr->entry, entry_sz);
 
     uint8_t* old_entry = curr->entry;
     curr->entry = new_entry;
@@ -689,13 +695,13 @@ void QList::Iterate(IterateFunc cb, long start, long end) const {
 
   if (end < 0 || end >= long(Size()))
     end = Size() - 1;
-  Iterator it = GetIterator(start);
-  if (it.Valid()) {
+  ReadCursor cur = GetReadCursor(start);
+  if (cur.Valid()) {
     do {
-      if (start > end || !cb(it.Get()))
+      if (start > end || !cb(cur.Get()))
         break;
       start++;
-    } while (it.Next());
+    } while (cur.Next());
   }
 }
 
@@ -808,7 +814,7 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
     uint8_t* new_entry = LP_Insert(node->entry, elem, it.zi_, after ? LP_AFTER : LP_BEFORE);
     malloc_size_ += NodeSetEntry(node, new_entry);
     node->count++;
-    malloc_size_ += RecompressNode(node);
+    RecompressNode(node);
   } else {
     bool insert_tail = at_tail && after;
     bool insert_head = at_head && !after;
@@ -819,8 +825,8 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       AccessForReads(true, new_node);
       malloc_size_ += NodeSetEntry(new_node, LP_Prepend(new_node->entry, elem));
       new_node->count++;
-      malloc_size_ += RecompressNode(new_node);
-      malloc_size_ += RecompressNode(node);
+      RecompressNode(new_node);
+      RecompressNode(node);
     } else if (insert_head && avail_prev) {
       /* If we are: at head, previous has free space, and inserting before:
        *   - insert entry at tail of previous node. */
@@ -828,8 +834,8 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       AccessForReads(true, new_node);
       malloc_size_ += NodeSetEntry(new_node, LP_Append(new_node->entry, elem));
       new_node->count++;
-      malloc_size_ += RecompressNode(new_node);
-      malloc_size_ += RecompressNode(node);
+      RecompressNode(new_node);
+      RecompressNode(node);
     } else if (insert_tail || insert_head) {
       /* If we are: full, and our prev/next has no available space, then:
        *   - create new node and attach to qlist */
@@ -999,11 +1005,9 @@ void QList::CompressByDepth(Node* node) {
   // Handle the recompress flag via dict and return.
   if (IsZstdDictMode()) {
     if (node && node->recompress && tl_zstd_dict && CanCompressWithZstdDict(node)) {
-      size_t sz = node->sz;
-      if (CompressNodeWithDict(node)) {
+      // CompressNodeWithDict updates malloc_size_ itself.
+      if (CompressNodeWithDict(node))
         node->recompress = 0;
-        malloc_size_ += ssize_t(((quicklistLZF*)node->entry)->sz) - sz;
-      }
     }
     return;
   }
@@ -1197,7 +1201,20 @@ void QList::DelNode(Node* node) {
 
   // Offloaded nodes don't have entry data, so we only update malloc_size_ for non-offloaded nodes.
   if (!node->offloaded) {
-    malloc_size_ -= node->sz;
+    // node->sz keeps the uncompressed length, but a compressed node only ever contributed its
+    // compressed payload length to malloc_size_. Subtracting node->sz here would over-subtract
+    // and drive the counter negative. Erase() reaches this with a still-compressed node when it
+    // drops whole interior nodes.
+    if (node->IsCompressed()) {
+      // Dropping a compressed node also retires its share of the compression stats, the same way
+      // Clear() does. Without this the counters keep accounting for bytes that no longer exist.
+      size_t compressed_sz = GetLzf(node)->sz;
+      malloc_size_ -= compressed_sz;
+      stats.compressed_bytes -= compressed_sz;
+      stats.raw_compressed_bytes -= node->sz;
+    } else {
+      malloc_size_ -= node->sz;
+    }
   }
 
   if (tiering_enabled_ && (node->offloaded || node->io_pending)) {
@@ -1358,6 +1375,14 @@ auto QList::GetIterator(long idx) const -> Iterator {
   return iter;
 }
 
+void QList::EndRead(const Iterator& it) const {
+  if (it.current_ == nullptr)
+    return;
+
+  QList* self = const_cast<QList*>(this);
+  self->RecompressNode(it.current_);
+}
+
 auto QList::Erase(Iterator it) -> Iterator {
   DCHECK(it.current_);
 
@@ -1471,7 +1496,7 @@ bool QList::Erase(const long start, unsigned count) {
       if (node->count == 0) {
         DelNode(node);
       } else {
-        malloc_size_ += RecompressNode(node);
+        RecompressNode(node);
       }
     }
 
@@ -1624,11 +1649,9 @@ void QList::BackfillCompressWithZstdDict() {
       break;
     if (node->sz >= MIN_COMPRESS_BYTES)
       any_attempted = true;
-    size_t prev_size = zmalloc_usable_size(node->entry);
-    if (CompressNodeWithDict(node)) {
+    // CompressNodeWithDict updates malloc_size_ itself.
+    if (CompressNodeWithDict(node))
       any_compressed = true;
-      malloc_size_ += zmalloc_usable_size(node->entry) - prev_size;
-    }
   }
 
   // Avoid full scan again by setting either of flags.
@@ -1693,22 +1716,24 @@ bool QList::CompressNodeWithDict(Node* node) {
   zfree(node->entry);
   node->entry = (unsigned char*)dest;
   node->encoding = QLIST_NODE_ENCODING_ZSTD;
+
+  // node->sz keeps holding the *uncompressed* length, while the payload now takes csz bytes.
+  // Account for the difference here so that no caller can forget to do it. Uses the same
+  // convention as TryCompress/TryDecompressInternal, i.e. the quicklistLZF header is ignored.
+  malloc_size_ += ssize_t(csz) - ssize_t(node->sz);
   return true;
 }
 
-ssize_t QList::RecompressNode(Node* node) {
+void QList::RecompressNode(Node* node) {
   if (!node->recompress || node->dont_compress)
-    return 0;
+    return;
   if (IsZstdDictMode() && tl_zstd_dict && CanCompressWithZstdDict(node)) {
-    size_t sz = node->sz;
-    if (CompressNodeWithDict(node)) {
+    // CompressNodeWithDict updates malloc_size_ itself.
+    if (CompressNodeWithDict(node))
       node->recompress = 0;
-      return ssize_t(((quicklistLZF*)node->entry)->sz) - sz;
-    }
   } else if (CompressRaw(node)) {
-    return ssize_t(GetLzf(node)->sz) - node->sz;
+    malloc_size_ += ssize_t(GetLzf(node)->sz) - ssize_t(node->sz);
   }
-  return 0;
 }
 
 bool QList::DecompressZstdNode(const Node* node, std::string* dest) {

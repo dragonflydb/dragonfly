@@ -1036,7 +1036,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("pipeline_squash");
   config_registry.RegisterMutable("lua_mem_gc_threshold");
   config_registry.RegisterMutable("background_debug_jobs");
-  config_registry.RegisterMutable("snapshot_egress_limit_bytes");
 
   RegisterMutableFlags(&config_registry,
                        base::GetFlagNames(FLAGS_write_connection_throttling_sleep_usec), []() {
@@ -1656,7 +1655,7 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  cmd_cntx->start_time_usec = base::CycleClock::ToUsec(base::CycleClock::Now());
+  cmd_cntx->start_cycle = base::CycleClock::Now();
 
   ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   auto* builder = cmd_cntx->rb();
@@ -1665,7 +1664,8 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
 
   ServerState& ss = *ServerState::tlocal();
 
-  if ((cid->opt_mask() & CO::DENYOOM) && ss.ShouldDenyOnOOM(cmd_cntx->start_time_usec)) {
+  if ((cid->opt_mask() & CO::DENYOOM) &&
+      ss.ShouldDenyOnOOM(base::CycleClock::ToUsec(cmd_cntx->start_cycle))) {
     cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
     return DispatchResult::OOM;
   }
@@ -1792,17 +1792,15 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     ParsedArgs args{*cmd_cntx};
     const auto [cid, tail_args] = registry_.FindExtended(args);
 
-    // Stop the batch at the first command that can't join it;
-    // the connection's regular dispatch path then handles exceptions
-    // (and the rest of the pipeline) with the real reply builder, after the replies squashed so
-    // far are flushed in order. Commands that stop the batch:
+    // Stop the batch at the first command that can't join it; the connection's regular dispatch
+    // path then handles exceptions (and the rest of the pipeline) with the real reply builder,
+    // after the replies squashed so far are flushed in order. Commands that stop the batch:
     //  - unknown commands (cid == nullptr): dispatched standalone to produce their error reply;
     //  - MULTI/EXEC and the commands queued between them: sequential, stored in ExecInfo;
     //  - EVAL: scripts may require a stricter multi mode than the non-atomic squashing tx;
     //  - blocking commands: prior replies must be flushed before the fiber blocks;
-    //  - QUIT: closes the reply builder, dropping any deferred replies not yet sent;
-    //  - RESET: mutates auth/ACL/RESP state that later commands are validated against, so it must
-    //    run standalone before the rest of the pipeline is re-verified;
+    //  - connection commands: may change state used by VerifyCommandState or reply encoding, so
+    //    they run standalone and fully apply before the next command is validated or captured;
     //  - subscribe/unsubscribe: emit one reply per channel (multiple top-level replies), which the
     //    CapturingReplyBuilder backing deferred replies cannot represent;
     //  - admin commands (e.g. REPLCONF, DFLY): control commands that may produce no top-level
@@ -1812,8 +1810,10 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
 
     const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() || cid->IsExecGroup();
     const bool is_eval = cid->IsEvalGroup();
-    if (is_multi || is_eval || cid->IsBlocking() || (cid->opt_mask() & CO::ADMIN) ||
-        cid->IsQuit() || cid->IsReset() || cid->IsSubscribeFamily())
+    const bool is_connection_state_cmd = cid->acl_categories() & acl::CONNECTION;
+    const bool is_admin_cmd = cid->opt_mask() & CO::ADMIN;
+    if (is_multi || is_eval || cid->IsBlocking() || is_admin_cmd || is_connection_state_cmd ||
+        cid->IsSubscribeFamily())
       break;
 
     if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {

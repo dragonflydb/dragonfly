@@ -1001,7 +1001,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
 
   if (IsValid(to_res.it)) {
     to_res.post_updater.ReduceHeapUsage();
-    db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, &to_res.it->second);
+    db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, to_key, &to_res.it->second);
     to_res.it->second = std::move(from_obj);
 
     if (exp_ts) {
@@ -1297,6 +1297,9 @@ void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx)
           es->tiered_storage());
 
       auto result = fut.Get();
+      // The read may have uploaded the value back into memory and accounted for it right away,
+      // which leaves the updater's baseline behind. Resync before any return.
+      it_res->post_updater.ResyncBaseline();
       if (!result)
         // Tiered storage read failed - return generic I/O error
         return OpStatus::IO_ERROR;

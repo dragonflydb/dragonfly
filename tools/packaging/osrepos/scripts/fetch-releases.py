@@ -53,8 +53,11 @@ class Package:
 
 def collect_download_urls() -> list[Package]:
     packages = []
-    # TODO retry logic
-    response = requests.get(RELEASE_URL)
+    headers = {}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    response = requests.get(RELEASE_URL, headers=headers)
     releases = response.json()
     for release in releases[:5]:
         for asset in release["assets"]:
@@ -79,10 +82,15 @@ def download_packages(root: str, packages: list[Package]):
 
         print(f"Downloading {package.download_url}")
         path = package.storage_path(root)
+        target = os.path.join(path, package.filename)
+
+        if os.path.exists(target) and package.kind == AssetKind.RPM:
+            print(f"Skipping download of already existing RPM: {target}")
+            continue
+
         if not os.path.exists(path):
             os.makedirs(path)
 
-        target = os.path.join(path, package.filename)
         # TODO retry logic
         response = requests.get(package.download_url)
         with open(target, "wb") as f:

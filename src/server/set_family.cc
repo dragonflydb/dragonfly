@@ -13,6 +13,7 @@ extern "C" {
 }
 
 #include "base/cycle_clock.h"
+#include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/detail/listpack_wrap.h"
@@ -29,9 +30,15 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/transaction.h"
 
+ABSL_FLAG(bool, use_oah_set, true, "If true, store SET values in OAHSet instead of StringSet.");
+
 namespace rng = std::ranges;
 
 namespace dfly {
+
+void InitSetFamilyFlags() {
+  g_use_oah_set = absl::GetFlag(FLAGS_use_oah_set);
+}
 
 using namespace facade;
 
@@ -521,9 +528,10 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   // to overwrite the key. However, if the set is empty it means we should delete the
   // key if it exists.
   if (overwrite && (vals_it.begin() == vals_it.end())) {
-    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
-    if (res_it) {
-      db_slice.DelMutable(op_args.db_cntx, std::move(*res_it));
+    // Lookup is untyped: an empty result deletes the destination regardless of its type.
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key);
+    if (IsValid(res_it.it)) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(res_it));
       if (journal_update && op_args.shard->journal()) {
         RecordJournal(op_args, "DEL"sv, ArgSlice{key});
       }
@@ -565,7 +573,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
       // inside InitSet is reported to the client as OOM and must leave the value readable.
       PrimeValue replacement;
       InitSet(vals, &replacement);
-      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, &co);
+      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &co);
       co = std::move(replacement);
     } else {
       InitSet(vals, &co);

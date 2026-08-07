@@ -268,7 +268,7 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
     // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
     if (!add_res.is_new && zparams.override) {
       RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, pv, op_args.shard);
-      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, &pv);
+      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &pv);
     }
 
     pv.InitRobj(OBJ_ZSET, encoding, robj_ptr);
@@ -1955,9 +1955,10 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
   auto& db_slice = op_args.GetDbSlice();
 
   if (zparams.override && members.empty()) {
-    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
-    if (res_it && IsValid(res_it->it)) {
-      db_slice.DelMutable(op_args.db_cntx, std::move(*res_it));
+    // Lookup is untyped: an empty result deletes the destination regardless of its type.
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key);
+    if (IsValid(res_it.it)) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(res_it));
       if (zparams.journal_update && op_args.shard->journal()) {
         RecordJournal(op_args, "DEL"sv, ArgSlice{key});
       }

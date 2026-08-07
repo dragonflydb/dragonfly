@@ -48,23 +48,11 @@ class OAHSet : public OAHTable<OAHEntry> {
   }
 
   // TODO: Consider using chunks for this as in StringSet
-  void Fill(OAHSet* other) {
-    assert(other->entries_.empty());
-    other->Reserve(UpperBoundSize());
-    other->set_time(time_now());
-    for (auto it = begin(), it_end = end(); it != it_end; ++it) {
-      // Copy the stored (already-encoded) content verbatim -- no decode/re-encode round-trip.
-      const oah::key::Stored s = (*it).StoredKey();
-      const uint32_t ttl = it.HasExpiry() ? it.ExpiryTime() - time_now() : UINT32_MAX;
-      other->AddImpl({s.content, s.header.content_size}, s.header.len, ttl);
-    }
-  }
+  void Fill(OAHSet* other);
 
  private:
   bool AddImpl(std::string_view content, uint32_t len, uint32_t ttl_sec) {
-    if (size_ >= entries_.size() * kOverloadFactor) [[unlikely]] {
-      GrowCapacity(BucketCount() * 2);
-    }
+    TryGrow();
     assert(Capacity() >= kDisplacementSize);
 
     uint64_t hash = Hash(content);

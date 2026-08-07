@@ -4,6 +4,7 @@ import aiohttp
 
 from . import dfly_args
 from .instance import DflyInstance
+from .utility import info_tick_timer
 
 
 def get_http_session(*args):
@@ -66,8 +67,11 @@ async def test_http_metrics_does_not_leak_read_buffer_capacity(df_server: DflyIn
     writer.close()
     await writer.wait_closed()
 
-    current_read_buffer_bytes = int((await observer.info("clients"))["client_read_buffer_bytes"])
-    assert current_read_buffer_bytes == baseline_read_buffer_bytes
+    # The response can reach the client before the server finishes cleaning up its read buffer.
+    # Wait for the metric to reflect that cleanup before checking for a leak.
+    async for info, breaker in info_tick_timer(observer, section="clients"):
+        with breaker:
+            assert int(info["client_read_buffer_bytes"]) == baseline_read_buffer_bytes
 
     await observer.aclose()
 

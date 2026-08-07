@@ -120,29 +120,7 @@ template <typename Entry> class OAHPtr {
   // Defragments fragmented buffers under this slot: the entry's string, or for a vector every inner
   // entry plus the array. Returns the cumulative usable-size delta; *realloced is set if anything
   // moved.
-  ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
-    *realloced = false;
-    if (Empty())
-      return 0;
-    if (!IsVector())
-      return Entry(*slot_).ReallocIfNeeded(page_usage, realloced);
-
-    ssize_t obj_alloc_delta = 0;
-    Vector vec = AsVector();
-    for (TaggedPtr& cell : vec) {
-      Entry entry(cell);
-      if (entry) {
-        bool inner_moved = false;
-        obj_alloc_delta += entry.ReallocIfNeeded(page_usage, &inner_moved);
-        *realloced |= inner_moved;
-      }
-    }
-    if (page_usage->IsPageForObjectUnderUtilized(Raw())) {
-      vec.Realloc();
-      *realloced = true;
-    }
-    return obj_alloc_delta;
-  }
+  ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced);
 
   char* Raw() const {
     return reinterpret_cast<char*>(*slot_ & ~oah::kTagMask);

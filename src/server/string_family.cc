@@ -22,6 +22,7 @@
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/blocking_controller.h"
 #include "server/cmd_support.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
@@ -33,6 +34,7 @@
 #include "server/family_utils.h"
 #include "server/generic_family.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
@@ -278,14 +280,14 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
     auto tier = ReadTieredString(op_args.db_cntx.db_index, key, res.it->second,
                                  op_args.shard->tiered_storage())
                     .Get();
+    res.post_updater.ResyncBaseline();  // the read may have uploaded the value
     if (!tier)
       return OpStatus::IO_ERROR;
     string slice = std::move(tier).value();
     string new_val = prepend ? absl::StrCat(val, slice) : absl::StrCat(slice, val);
-    // The read may have warmed the value back into memory; re-check before Delete.
+    res.post_updater.ReduceHeapUsage();
     if (res.it->second.IsExternal()) {
-      res.post_updater.ReduceHeapUsage();
-      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
     }
     res.it->second.SetString(new_val);
     return true;
@@ -321,6 +323,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
     auto res = ReadTieredString(op_args.db_cntx.db_index, key, add_res.it->second,
                                 op_args.shard->tiered_storage())
                    .Get();
+    add_res.post_updater.ResyncBaseline();  // the read may have uploaded the value
     if (!res)
       return OpStatus::IO_ERROR;
     tmp = std::move(res).value();
@@ -342,11 +345,9 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
 
-  // The tiered read may have warmed the value back into memory; re-check so Delete
-  // only runs while it is still external.
+  add_res.post_updater.ReduceHeapUsage();
   if (add_res.it->second.IsExternal()) {
-    add_res.post_updater.ReduceHeapUsage();
-    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &add_res.it->second);
+    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &add_res.it->second);
   }
   add_res.it->second.SetString(str);
 
@@ -970,6 +971,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   }
 
   bool has_expire = key.HasExpire();
+  const bool was_stream = prime_value.ObjType() == OBJ_STREAM;
 
   it_upd->post_updater.ReduceHeapUsage();
 
@@ -983,11 +985,17 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
-    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, &prime_value);
+    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, it_upd->it.key(), &prime_value);
   }
 
   // overwrite existing entry.
   prime_value.SetString(value);
+
+  if (was_stream) {
+    if (auto* bc = op_args_.db_cntx.ns->GetBlockingController(shard->shard_id()); bc) {
+      bc->Awaken(op_args_.db_cntx.db_index, it_upd->it.key());
+    }
+  }
 
   DCHECK_EQ(has_expire, key.HasExpire());
 

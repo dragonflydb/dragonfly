@@ -43,12 +43,12 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
 
  public:
   static constexpr std::uint32_t kShiftLog = 4;                         // TODO make template
-  static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
 
   // Table grows once live entries reach capacity * kOverloadFactor (200% load, by default).
   static constexpr std::uint32_t kOverloadFactor = 2;
-  static constexpr size_t kMinBucketCount = 1u << kMinCapacityLog;
+  // Keep capacity_log_ nonzero in nonempty tables.
+  static constexpr size_t kMinBucketCount = 2;
 
   class iterator {
    public:
@@ -194,9 +194,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   OAHTable(const OAHTable&) = delete;
   OAHTable& operator=(const OAHTable&) = delete;
 
-  ~OAHTable() {
-    FreeAllSlots();
-  }
+  ~OAHTable();
 
   // Reserves enough capacity to hold `sz` live entries without triggering a resize.
   void Reserve(size_t sz) {
@@ -204,66 +202,16 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   }
 
   // Shrinks toward `new_size` buckets, never below what's needed for live entries at
-  // kOverloadFactor. No-op if not smaller than the current bucket count.
-  void Shrink(size_t new_size) {
-    size_t required = size_ / kOverloadFactor + (size_ % kOverloadFactor != 0);
-    size_t target = absl::bit_ceil(std::max({new_size, kMinBucketCount, required}));
-    if (target >= BucketCount())
-      return;
+  // kOverloadFactor. No-op if not smaller than the current bucket count. Uses the raw
+  // (possibly stale, pre-expiry) size_ as the floor to avoid an extra full-table pass;
+  // ShrinkBucket() still reaps expired entries during compaction.
+  void Shrink(size_t new_size);
 
-    size_t prev_size = entries_.size();
-    capacity_log_ = absl::bit_width(target) - 1;
-
-    // Process from low to high (opposite of Grow/Rehash).
-    for (size_t i = 0; i < prev_size; ++i) {
-      ShrinkBucket(i);
-    }
-
-    entries_.resize(Capacity());
-    entries_.shrink_to_fit();
-  }
-
-  void Clear() {
-    FreeAllSlots();
-    capacity_log_ = 0;
-    entries_.resize(0);
-    size_ = 0;
-    obj_alloc_used_ = 0;
-    ptr_vectors_alloc_used_ = 0;
-    expiration_used_ = false;
-  }
+  void Clear();
 
   // Incrementally clears [start, start+count). Returns the next bucket index; equals
   // Capacity() when the table is empty. Mirrors DenseSet::ClearStep (AsyncDeleter).
-  uint32_t ClearStep(uint32_t start, uint32_t count) {
-    const uint32_t total = entries_.size();
-    const uint32_t end = std::min(total, start + count);
-    for (uint32_t i = start; i < end; ++i) {
-      auto bucket = At(i);
-      if (bucket.Empty())
-        continue;
-
-      if (bucket.IsVector()) {
-        auto vec = bucket.AsVector();
-        for (TaggedPtr& cell : vec) {
-          Entry entry(cell);
-          if (entry) {
-            obj_alloc_used_ -= entry.AllocSize();
-            --size_;
-          }
-        }
-        ptr_vectors_alloc_used_ -= vec.AllocSize();
-      } else {
-        obj_alloc_used_ -= bucket[0].AllocSize();
-        --size_;
-      }
-      bucket.Clear();
-    }
-    // Match Clear() semantics: once incrementally cleared empty, the TTL flag is stale.
-    if (size_ == 0)
-      expiration_used_ = false;
-    return end;
-  }
+  uint32_t ClearStep(uint32_t start, uint32_t count);
 
   /**
    * stable scanning api. has the same guarantees as redis scan command.
@@ -421,23 +369,22 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     return expiration_used_;
   }
 
-  size_t SizeSlow() {
-    if (expiration_used_)
-      CollectExpired();
-    return size_;
-  }
+  size_t SizeSlow();
 
  protected:
   // Grows the table so entries_.size() >= bucket_capacity (power of 2), rehashing in place.
-  void GrowCapacity(size_t bucket_capacity) {
-    bucket_capacity = absl::bit_ceil(bucket_capacity);
-    if (bucket_capacity > entries_.size()) {
-      capacity_log_ = std::max(kMinCapacityLog, uint32_t(absl::bit_width(bucket_capacity) - 1));
-      size_t prev_size = entries_.size();
-      entries_.resize(Capacity());
-      Rehash(prev_size);
+  void GrowCapacity(size_t bucket_capacity);
+
+  // Grows the table once size_ crosses the overload threshold. GrowCapacity takes a
+  // bucket_capacity target, so divide by kOverloadFactor to undo Reserve()'s scaling.
+  void TryGrow() {
+    if (size_ >= entries_.size() * kOverloadFactor) [[unlikely]] {
+      size_t target = size_ + 1;
+      if constexpr (kOverloadFactor > 1) {
+        target = (target + kOverloadFactor - 1) / kOverloadFactor;
+      }
+      GrowCapacity(target);
     }
-    assert(entries_.size() >= kDisplacementSize);
   }
 
   static uint64_t Hash(std::string_view str) {
@@ -455,41 +402,23 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   }
 
   // Frees the blob/vector of every non-empty bucket. Used by ~OAHTable and Clear().
-  void FreeAllSlots() {
-    for (size_t i = 0, n = entries_.size(); i < n; ++i) {
-      if (entries_[i])
-        At(i).Clear();
-    }
-  }
+  void FreeAllSlots();
 
   // Reaps every expired entry so size_ becomes the live count. Nulls slots the same way the
   // iterator and Erase do, which is safe under fixed-window displacement probing.
-  void CollectExpired() {
-    if (time_now_ == 0)
-      return;
-    const uint32_t now = time_now_;
-    for (size_t b = 0, n = entries_.size(); b < n; ++b) {
-      if (!entries_[b])
-        continue;
-      auto bucket = At(b);
-      for (uint32_t i = 0, m = bucket.ElementsNum(); i < m; ++i) {
-        auto entry = bucket[i];
-        if (entry && entry.HasExpiry() && entry.GetExpiry() <= now)
-          entry.ExpireIfNeeded(now, &size_, &obj_alloc_used_);
-      }
-    }
-  }
+  void CollectExpired();
 
   // was Grow in StringSet
   void Rehash(uint32_t prev_size) {
     if (prev_size == 0) {
       return;
     }
-    // we should prevent moving elements before current possition to avoid double processing.
+    // We should prevent moving elements before current position to avoid double processing.
     // Detach the first mix_size slots into locals; each `bucket` view is freed explicitly
     // after its entries are redistributed into entries_ (a TaggedPtr slot has no dtor).
-    constexpr size_t mix_size = (2 << kShiftLog) - 1;
-    std::array<TaggedPtr, mix_size> old_buckets{};
+    constexpr size_t kMixSize = (2 << kShiftLog) - 1;
+    std::array<TaggedPtr, kMixSize> old_buckets{};
+    const size_t mix_size = std::min<size_t>(prev_size, old_buckets.size());
     for (size_t i = 0; i < mix_size; ++i) {
       old_buckets[i] = entries_[i];
       entries_[i] = 0;
@@ -519,8 +448,8 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     bucket.Clear();
   }
 
-  // it is inefficient for now,
-  // TODO predict new position by current position and extended hash
+  // It is inefficient for now.
+  // TODO: predict new position by current position and extended hash.
   void ShrinkBucket(uint32_t bucket_id) {
     // Detach the slot bits into a local; `bucket` views the local and is freed
     // explicitly below (At(new_bucket_id) writes into entries_, never this local).
@@ -570,7 +499,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
       if (uint32_t empties = (data == uint64_t(0)).GetMSBs())
         return bid + off + std::countr_zero(empties);
     }
-    // TODO add expiration logic
+    // TODO: add expiration logic.
     const uint32_t ext = GetExtensionPoint(bid);
     assert(ext < entries_.size());
     return ext;

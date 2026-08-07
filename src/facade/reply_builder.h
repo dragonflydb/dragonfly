@@ -262,7 +262,7 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
     resp_ = resp_version;
   }
 
-  RespVersion GetRespVersion() {
+  RespVersion GetRespVersion() const {
     return resp_;
   }
 

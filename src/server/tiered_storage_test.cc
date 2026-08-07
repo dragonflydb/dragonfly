@@ -99,6 +99,23 @@ INSTANTIATE_TEST_SUITE_P(TS, LatentCoolingTSTest, testing::Values(true, false));
 
 // Disabled cooling and all values are offloaded
 class PureDiskTSTest : public TieredStorageTest {
+ protected:
+  // Offload "k" holding value, upload it back via mutate and expect no RAM ledger leak.
+  template <typename F> void ExpectNoUploadLeak(std::string_view value, F mutate) {
+    Run({"SET", "k", value});
+    ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries == 1u; });
+
+    // The first read only marks the entry as touched; the next one uploads it.
+    Run({"GET", "k"});
+    mutate();
+
+    Run({"DEL", "k"});
+    auto metrics = GetMetrics();
+    EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
+    EXPECT_EQ(metrics.db_stats[0].obj_memory_usage, 0u);
+  }
+
+ private:
   void SetUp() override {
     fs.emplace();
     SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
@@ -436,6 +453,92 @@ TEST_F(TieredStorageTest, Defrag) {
   EXPECT_EQ(metrics.tiered_stats.total_defrags, 3u);
   EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 0u);
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+}
+
+// Verify that the background defrag scan (RunDefragScan, driven by the periodic heartbeat)
+// discovers and defragments a large number of bins that became fragmented while there was no upload
+// budget (so the immediate defrag path in NotifyDelete was skipped). Also checks that once
+// everything is compacted the scan does no further work (dynamic / low-cpu behaviour).
+TEST_F(TieredStorageTest, RunDefragScan) {
+  absl::FlagSaver saver;
+
+  // offload_threshold == 1.0 keeps ShouldOffload() true so the heartbeat always runs offloading
+  // (and therefore the defrag scan). The upload_threshold toggles the sign of UploadBudget():
+  //   UploadBudget() == memory_budget - upload_threshold * (max_memory_limit / shards)
+  // With a single shard and memory_budget == max_memory_limit - used_memory, upload_threshold
+  // == 1.0 gives a negative budget (immediate defrag + scan suppressed), and 0.0 gives a positive
+  // budget.
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+  SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
+  UpdateFromFlags();
+  max_memory_limit = 1024_MB;  // well above used memory, so no eviction interferes
+
+  // Read the current upload budget on the shard (recomputed by the heartbeat's CacheStats()).
+  auto upload_budget = [this] {
+    return pp_->at(0)->AwaitBrief(
+        [] { return EngineShard::tlocal()->tiered_storage()->UploadBudget(); });
+  };
+
+  // Integer values, fixed 600-byte width so exactly 7 pack into one 4KB bin (as in the Defrag
+  // test). 600 digits overflows int64, so each value is stored as a raw string and is eligible for
+  // stashing.
+  const int kNum = 700;
+  auto value_for = [](int i) {
+    string v(600, '0');
+    string digits = absl::StrCat(i);
+    v.replace(v.size() - digits.size(), digits.size(), digits);
+    return v;
+  };
+
+  for (int i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), value_for(i)});
+  }
+
+  // Wait until all full bins are stashed. kNum/7 bins hold 7 entries each; the trailing few keep
+  // the current bin filling.
+  const unsigned kBins = kNum / 7;
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.small_bins_cnt >= kBins - 1; });
+
+  // Wait until the heartbeat has recomputed a negative budget, so fragmentation below won't trigger
+  // the immediate defrag path.
+  ExpectConditionWithinTimeout([&] { return upload_budget() < 0; });
+
+  // Fragment every full bin: delete 4 of each consecutive group of 7 keys, leaving 3 (< 7/2).
+  for (int i = 0; i < kNum; i++) {
+    if (i % 7 < 4)
+      Run({"DEL", absl::StrCat("k", i)});
+  }
+
+  // No defrag may have happened yet: the immediate path is suppressed and the scan bails on a
+  // negative budget. Capture the number of survivors still living in fragmented stashed bins.
+  auto frag_metrics = GetMetrics();
+  ASSERT_EQ(frag_metrics.tiered_stats.total_defrags, 0u);
+  const size_t survivors = frag_metrics.tiered_stats.small_bins_entries_cnt;
+  ASSERT_GT(survivors, 0u);
+
+  // Give back upload budget. The next heartbeats run RunDefragScan, which repacks the survivors.
+  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);
+  UpdateFromFlags();
+  ExpectConditionWithinTimeout([&] { return upload_budget() > 0; });
+
+  // The scan recovers every survivor that lived in a fragmented bin (each is defragged at least
+  // once). Wait until all survivors have been recovered and pending reads have drained.
+  ExpectConditionWithinTimeout([&] {
+    auto m = GetMetrics();
+    return m.tiered_stats.total_defrags >= survivors && m.tiered_stats.pending_read_cnt == 0;
+  });
+
+  auto after = GetMetrics();
+  // Compaction: the survivors now occupy strictly fewer bins than before defragmentation.
+  EXPECT_LT(after.tiered_stats.small_bins_cnt, frag_metrics.tiered_stats.small_bins_cnt);
+
+  // Data integrity: every surviving key still returns its original value.
+  for (int i = 0; i < kNum; i++) {
+    if (i % 7 >= 4) {
+      EXPECT_EQ(Run({"GET", absl::StrCat("k", i)}), value_for(i));
+    }
+  }
 }
 
 TEST_F(PureDiskTSTest, BackgroundOffloading) {
@@ -1382,6 +1485,89 @@ TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
       << "Cool queue should be flushed after MEMORY DECOMMIT COOL";
 }
 
+// Ensure that uploading still happens even if the memory if occupied by cool entries.
+// Uploading should start evicting those to make room for itself, otherwise the cache flow
+// might be blocked unless the cold entries are read or evicted due to real memory pressure
+TEST_F(TieredStorageTest, CoolQueueDoesNotBlockUpload) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // always offload
+  SetFlag(&FLAGS_tiered_upload_threshold, 0.5f);   // upload only when >50% of maxmemory is free
+  UpdateFromFlags();
+
+  const string value = BuildString(tiering::kPageSize);  // occupies a whole page
+
+  struct ShardView {
+    int64_t upload_budget = 0;
+    size_t cool_bytes = 0;
+    ssize_t memory_budget = 0;
+  };
+  auto view = [&] {
+    ShardView v;
+    pp_->at(0)->AwaitBrief([&] {
+      EngineShard* shard = EngineShard::tlocal();
+      auto* ts = shard->tiered_storage();
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+      v.upload_budget = ts->UploadBudget();
+      v.cool_bytes = ts->CoolMemoryUsage();
+      v.memory_budget = db.memory_budget();
+    });
+    return v;
+  };
+
+  // Phase A: create a few values and push them fully to disk (out of the cool queue), so that
+  // reading them later must go through the disk-fetch/upload path in NotifyFetched.
+  const int kExt = 10;
+  for (int i = 0; i < kExt; i++)
+    Run({"SET", absl::StrCat("ext:", i), value});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kExt; });
+
+  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->ReclaimMemory(SIZE_MAX); });
+  ASSERT_EQ(view().cool_bytes, 0u) << "cool queue should be flushed";
+
+  // Phase B: build a large cool pile from other keys. These stay resident in the cool queue.
+  const int kCool = 300;
+  for (int i = 0; i < kCool; i++)
+    Run({"SET", absl::StrCat("cool:", i), value});
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().db_stats[0].tiered_entries >= kExt + kCool; });
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.cold_storage_bytes > 0; });
+
+  // Shrink maxmemory so that free memory hovers just above the upload threshold, i.e.
+  // UploadBudget() is slightly negative while the cool pile is large and fully reclaimable.
+  const int64_t kMargin = 128 * 1024;
+  pp_->at(0)->AwaitBrief([&] {
+    EngineShard* shard = EngineShard::tlocal();
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    int64_t used = max_memory_limit.load() - db.memory_budget();  // single shard
+    // UploadBudget = (max - used) - 0.5 * max = 0.5 * max - used; solve for == -kMargin.
+    max_memory_limit = 2 * (used - kMargin);
+  });
+
+  // Let the heartbeat recompute the budget and confirm the problematic state.
+  ExpectConditionWithinTimeout([&] { return view().upload_budget < 0; });
+  auto before = view();
+  ASSERT_LT(before.upload_budget, 0);
+  ASSERT_GT(before.cool_bytes, size_t(kMargin))
+      << "cool pile should dwarf the deficit and be reclaimable";
+  const size_t uploads_before = GetMetrics().tiered_stats.total_uploads;
+
+  // Access the fully-external values twice each (two touches trigger an upload).
+  for (int rep = 0; rep < 2; rep++) {
+    for (int i = 0; i < kExt; i++)
+      EXPECT_EQ(Run({"GET", absl::StrCat("ext:", i)}), value);
+  }
+
+  // With the fix, reads reclaim the stale cool pile and bring accessed values back to RAM.
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.total_uploads > uploads_before; });
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.tiered_stats.total_uploads, uploads_before)
+      << "negative UploadBudget with a large cool queue blocked uploads";
+  EXPECT_LT(metrics.tiered_stats.cold_storage_bytes, before.cool_bytes)
+      << "cool pile was never reclaimed to make room for uploads";
+}
+
 // bitops commands must work on values that tiering has offloaded to disk.
 // PureDiskTSTest makes a stashed value fully external (no cool in-memory copy).
 
@@ -1667,6 +1853,112 @@ TEST_F(PureDiskTSMTTest, SquashedVerifyFailConcurrent) {
   }
 
   EXPECT_EQ(Run({"PING"}), "PONG");
+}
+
+// Expiry removes the entry without the lookup that would have warmed a cool value up.
+TEST_F(TieredStorageTest, CoolExpiryReleasesObjectMemory) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  UpdateFromFlags();
+
+  const int kNum = 20;
+  for (int i = 0; i < kNum; ++i)
+    Run({"SET", absl::StrCat("k", i), BuildString(4000), "PX", "20000"});
+
+  ExpectConditionWithinTimeout(
+      [this] { return GetMetrics().db_stats[0].tiered_entries == unsigned(kNum); });
+
+  // Cool values are tracked by the cool cache only; their bytes left the RAM ledger.
+  EXPECT_LT(GetMetrics().db_stats[0].obj_memory_usage, 1000u);
+  EXPECT_GT(GetMetrics().tiered_stats.cold_storage_bytes, 0u);
+
+  AdvanceTime(30000);
+  for (int i = 0; i < kNum; ++i)
+    EXPECT_THAT(Run({"GET", absl::StrCat("k", i)}), ArgType(RespExpr::NIL));
+
+  EXPECT_EQ(CheckedInt({"DBSIZE"}), 0);
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
+  EXPECT_EQ(metrics.db_stats[0].obj_memory_usage, 0u);
+}
+
+TEST_F(PureDiskTSTest, McAppendAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000), [&] {
+    RunMC(MemcacheParser::APPEND, "k", MCArgs{"suffix", 0});
+  });
+}
+
+TEST_F(PureDiskTSTest, IncrByFloatAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(absl::StrCat("1.", string(4000, '0'), "5"), [&] {
+    Run({"INCRBYFLOAT", "k", "1.5"});
+  });
+}
+
+TEST_F(PureDiskTSTest, BitfieldAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000), [&] { Run({"BITFIELD", "k", "SET", "u8", "0", "255"}); });
+}
+
+TEST_F(PureDiskTSTest, SetBitAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000), [&] { Run({"SETBIT", "k", "40000", "1"}); });
+}
+
+TEST_F(PureDiskTSTest, ReadOnlyBitfieldAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000), [&] { Run({"BITFIELD", "k", "GET", "u8", "0"}); });
+}
+
+// The error path returns before the value is replaced.
+TEST_F(PureDiskTSTest, IncrByFloatParseErrorAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000, 'z'), [&] {
+    EXPECT_THAT(Run({"INCRBYFLOAT", "k", "1.5"}), ErrArg("not a valid float"));
+  });
+}
+
+// The no-delete outcome returns with the value still in place after the conditional read.
+TEST_F(PureDiskTSTest, DelExNoMatchAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000), [&] {
+    EXPECT_EQ(CheckedInt({"DELEX", "k", "IFEQ", "nomatch"}), 0);
+  });
+}
+
+TEST_F(PureDiskTSTest, PfAddInvalidHllAfterUploadReleasesObjectMemory) {
+  ExpectNoUploadLeak(BuildString(4000, 'z'), [&] { Run({"PFADD", "k", "elem"}); });
+}
+
+TEST_F(PureDiskTSTest, TotalDeletesReported) {
+  const int kNum = 5;
+  for (int i = 0; i < kNum; ++i)
+    Run({"SET", absl::StrCat("k", i), BuildString(4000)});
+
+  ExpectConditionWithinTimeout(
+      [this] { return GetMetrics().db_stats[0].tiered_entries == unsigned(kNum); });
+
+  EXPECT_EQ(GetMetrics().tiered_stats.total_deletes, 0u);
+
+  for (int i = 0; i < kNum; ++i)
+    Run({"DEL", absl::StrCat("k", i)});
+
+  EXPECT_EQ(GetMetrics().tiered_stats.total_deletes, unsigned(kNum));
+}
+
+// Cooling is type agnostic, so a hash can reach the tiered delete path holding a cool record.
+TEST_F(TieredStorageTest, CoolHashDeleteDoesNotAbort) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+
+  // Listpack hashes go through small bins, which only flush at 4KB - one hash never stashes.
+  const int kNum = 60;
+  for (int i = 0; i < kNum; ++i)
+    Run({"HSET", absl::StrCat("h", i), "f", BuildString(200)});
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries > 0u; });
+
+  Run({"FLUSHALL"});
+  EXPECT_EQ(Run({"PING"}), "PONG");
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
 }
 
 }  // namespace dfly

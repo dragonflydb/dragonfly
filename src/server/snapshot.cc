@@ -28,10 +28,7 @@
 #include "util/fibers/synchronization.h"
 
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
-ABSL_FLAG(strings::MemoryBytesFlag, snapshot_egress_limit_bytes, 0,
-          "Per-shard-thread socket egress bandwidth budget in bytes/second. Each shard throttles "
-          "its snapshot traversal loop to stay under this rate. Accepts human-readable sizes "
-          "(e.g. 100mb, 1gb). 0 disables throttling.");
+
 ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
 ABSL_FLAG(bool, serialization_tagged_chunks, true,
           "Allow serializer output to be split into tagged chunks and reassembled by receiver");
@@ -50,10 +47,6 @@ thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
 // Controls the chunks size for pushing serialized data. The larger the chunk the more CPU
 // it may require (especially with compression), and less responsive the server may be.
 constexpr size_t kMinBlobSize = 8_KB;
-
-uint64_t CurrentEgressLimitBytes() {
-  return absl::GetFlag(FLAGS_snapshot_egress_limit_bytes);
-}
 
 }  // namespace
 
@@ -210,10 +203,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
       // Suspend the traversal loop if we are exceeding the egress budget, letting
       // high priority writes drain first. Guarantees the loop its reserved share.
-      if (uint64_t limit = CurrentEgressLimitBytes(); limit > 0) {
-        throttler_.SetLimit(limit);  // Re-read to pick up CONFIG SET
-        throttler_.Throttle();
-      }
+      ServerState::tlocal()->GetEgressThrottler().Throttle();
     } while (snapshot_cursor_);
 
     // Wait for all the outstanding delayed entries and serialize them as well.
@@ -298,10 +288,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
 
   // Track egress just before the socket write. Attribute it to a high priority (out of order)
   // write when we don't run on the snapshot fiber.
-  if (uint64_t limit = CurrentEgressLimitBytes(); limit > 0) {
-    throttler_.SetLimit(limit);
-    throttler_.Record(serialized, !snapshot_fb_.IsActive());
-  }
+  ServerState::tlocal()->GetEgressThrottler().Record(serialized, !snapshot_fb_.IsActive());
 
   // Blocking point.
   consumer_->ConsumeData(std::move(data), base_cntx_);

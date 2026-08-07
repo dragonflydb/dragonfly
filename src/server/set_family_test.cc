@@ -386,7 +386,9 @@ TEST_F(SetFamilyTest, SScan) {
   resp = Run({"sscan", "mystrset", "0", "match", "str-1*", "count", "3"});
   vec = StrArray(resp.GetVec()[1]);
   EXPECT_THAT(vec, IsSubsetOf({"str-1", "str-10", "str-11", "str-12", "str-13", "str-14"}));
-  EXPECT_EQ(vec.size(), 3);
+  // COUNT is a hint. OAHSet scans an entire bucket at a time, so a response can contain more
+  // than the requested number of matching members.
+  EXPECT_GE(vec.size(), 3);
 
   // nothing should match this
   resp = Run({"sscan", "mystrset", "0", "match", "1*"});
@@ -842,6 +844,15 @@ TEST_F(SetFamilyTest, ShrinkMemoryAccountingSet) {
   // Must not crash in FindMutable → DCHECK.
   Run({"SREM", "s1", absl::StrCat("temp", members_to_remove)});
   EXPECT_THAT(Run({"SCARD", "s1"}), IntArg(9));
+}
+
+// An empty result deletes the destination regardless of its previous type.
+TEST_F(SetFamilyTest, EmptyStoreDeletesForeignTypeDest) {
+  for (std::string_view cmd : {"SINTERSTORE"sv, "SUNIONSTORE"sv, "SDIFFSTORE"sv}) {
+    Run({"SET", "dest", "hello"});
+    EXPECT_THAT(Run({cmd, "dest", "nx1", "nx2"}), IntArg(0)) << cmd;
+    EXPECT_THAT(Run({"EXISTS", "dest"}), IntArg(0)) << cmd;
+  }
 }
 
 }  // namespace dfly

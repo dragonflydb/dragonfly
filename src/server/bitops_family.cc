@@ -321,9 +321,12 @@ OpStatus ElementAccess::Find(bool allow_wrong_type) {
 }
 
 OpResult<string> ElementAccess::Value() const {
-  return IsNewEntry()
-             ? OpResult<string>{string{}}
-             : ReadStringValue(context_.db_index, key_, updater_.it->second, EngineShard::tlocal());
+  if (IsNewEntry())
+    return OpResult<string>{string{}};
+
+  auto res = ReadStringValue(context_.db_index, key_, updater_.it->second, EngineShard::tlocal());
+  updater_.post_updater.ResyncBaseline();  // the read may have uploaded the value
+  return res;
 }
 
 bool ElementAccess::GetByteAtIndex(size_t idx, uint8_t* res) const {
@@ -351,13 +354,13 @@ void ElementAccess::Commit(string_view new_value) const {
     context_.ns->GetCurrentDbSlice().Del(context_, updater_.it);
   } else {
     const bool is_external = IsExternal();
-    // Overwriting a non-string type or an offloaded value: drop the old heap
-    // accounting once, and release the disk segment before storing in memory.
-    if (!IsNewEntry() && (updater_.it->second.ObjType() != OBJ_STRING || is_external)) {
+    // The value is replaced wholesale below, so drop the old heap accounting once.
+    if (!IsNewEntry()) {
       updater_.post_updater.ReduceHeapUsage();
     }
     if (is_external) {
-      EngineShard::tlocal()->tiered_storage()->Delete(context_.db_index, &updater_.it->second);
+      EngineShard::tlocal()->tiered_storage()->Delete(context_.db_index, key_,
+                                                      &updater_.it->second);
     }
     updater_.it->second.SetString(new_value);
     updater_.post_updater.Run();

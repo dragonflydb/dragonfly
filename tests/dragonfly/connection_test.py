@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import re
 import socket
 import ssl
 import string
@@ -8,6 +9,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from threading import Thread
+from typing import Awaitable, Callable
 
 import async_timeout
 import pytest
@@ -1375,14 +1377,389 @@ async def test_reset_stops_pipeline_squash(df_server: DflyInstance):
 
 def _resp_cmd_writer(writer):
     async def cmd(*args):
-        buf = ("*%d\r\n" % len(args)).encode()
-        for a in args:
-            a = str(a).encode()
-            buf += b"$%d\r\n%s\r\n" % (len(a), a)
-        writer.write(buf)
+        writer.write(_encode_resp_command(args))
         await writer.drain()
 
     return cmd
+
+
+# type alias - defines what a scenario may expect for one reply:
+ReplyExpectation = bytes | Callable[[bytes], bool]
+# type alias - defines an async function that receives a Dragonfly server and prepares test data, returning nothing.
+ScenarioSetup = Callable[[DflyInstance], Awaitable[None]]
+
+
+# immutable value object, describing one pipeline regression scenario.
+@dataclass(frozen=True)
+class ConnectionPipelineScenario:
+    name: str
+    commands: tuple[tuple[str, ...], ...]
+    expected_replies: tuple[ReplyExpectation, ...]
+    authenticate_first: bool = True
+    setup: ScenarioSetup | None = None
+
+    def __post_init__(self):
+        if len(self.commands) != len(self.expected_replies):
+            raise ValueError(f"{self.name}: command and expected reply counts differ")
+
+
+# Scenario setup helper - prepares the key that the authentication scenario will read.
+async def _seed_auth_scenario(server: DflyInstance) -> None:
+    client = server.client(password="XXX")
+    try:
+        await client.set("auth-key", "auth-value")
+    finally:
+        await client.aclose()
+
+
+# Scenario setup helper - prepares different values in database 0 and database 1,
+# so SELECT 1 becomes externally observable.
+async def _seed_database_selection_scenario(server: DflyInstance) -> None:
+    client = server.client(password="XXX")
+    try:
+        await client.set("select-zero", "db-zero")
+        assert await client.execute_command("SELECT", "1") is True
+        await client.set("select-one", "db-one")
+    finally:
+        await client.aclose()
+
+
+# Raw RESP command encoder (converts a tuple into a RESP array)
+def _encode_resp_command(command: tuple[object, ...]) -> bytes:
+    encoded = [f"*{len(command)}\r\n".encode()]
+    for argument in command:
+        value = str(argument).encode()
+        encoded.extend((f"${len(value)}\r\n".encode(), value, b"\r\n"))
+    return b"".join(encoded)
+
+
+# Raw RESP frame reader - this reads exactly one complete RESP response, preserving its original raw bytes.
+# It does not assume TCP packet boundaries match RESP message boundaries.
+async def _read_resp_frame(reader: asyncio.StreamReader) -> bytes:
+    """Read one complete fixed-length RESP2/RESP3 frame without assuming packet boundaries.
+
+    The matrix uses only scalar replies and the small, fixed-length HELLO map. Streamed aggregates
+    and chunked strings are deliberately unsupported so a new scenario fails immediately instead
+    of leaving unread bytes that could make a later frame read hang.
+    """
+    prefix = await reader.readexactly(1)
+    header = await reader.readuntil(b"\r\n")
+    frame = prefix + header
+
+    if header == b"?\r\n":
+        raise AssertionError("raw RESP test helper does not support streamed aggregate replies")
+
+    if prefix in (b"$", b"!", b"="):
+        length = int(header[:-2])
+        if length == -1:
+            return frame
+        if length < -1:
+            raise AssertionError(f"invalid RESP bulk length: {length}")
+        if length >= 0:
+            frame += await reader.readexactly(length + 2)
+    elif prefix in (b"*", b"%", b"~", b">", b"|"):
+        length = int(header[:-2])
+        if length >= 0:
+            item_count = length * 2 if prefix in (b"%", b"|") else length
+            for _ in range(item_count):
+                frame += await _read_resp_frame(reader)
+
+    return frame
+
+
+# Opens a plain TCP connection to Dragonfly. If authenticate=True, it sends `AUTH XXX``, waits for the
+# response, and requires +OK.
+async def _open_raw_resp_connection(
+    server: DflyInstance, authenticate: bool
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+    if authenticate:
+        writer.write(_encode_resp_command(("AUTH", "XXX")))
+        await writer.drain()
+        assert await _read_resp_frame(reader) == b"+OK\r\n"
+    return reader, writer
+
+
+# Runs the command list as a serial baseline (Each command fully completes before the next starts):
+# - Open and optionally authenticate a raw connection.
+# - Encode and write one command.
+# - Wait for exactly one complete RESP reply.
+# - Repeat for the next command.
+# - Close the connection.
+async def _run_raw_resp_commands_serially(
+    server: DflyInstance, commands: tuple[tuple[str, ...], ...], authenticate: bool
+) -> list[bytes]:
+    reader, writer = await _open_raw_resp_connection(server, authenticate)
+    try:
+        replies: list[bytes] = []
+        for command in commands:
+            writer.write(_encode_resp_command(command))
+            await writer.drain()
+            replies.append(await _read_resp_frame(reader))
+        return replies
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+# Runs the same command list as a pipeline:
+# - Open and optionally authenticate a raw connection.
+# - RESP-encode every scenario command.
+# - Join all encoded commands.
+# - Call writer.write(...) once for the entire scenario.
+# - Read one full reply frame for every command.
+# - Close the connection.
+async def _run_raw_resp_pipeline(
+    server: DflyInstance, commands: tuple[tuple[str, ...], ...], authenticate: bool
+) -> list[bytes]:
+    reader, writer = await _open_raw_resp_connection(server, authenticate)
+    try:
+        writer.write(b"".join(_encode_resp_command(command) for command in commands))
+        await writer.drain()
+        return [await _read_resp_frame(reader) for _ in commands]
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+#
+# Reply matchers
+#
+def _is_resp3_hello(reply: bytes) -> bool:
+    return reply.startswith(b"%") and b"$5\r\nproto\r\n:3\r\n" in reply
+
+
+def _is_noauth_error(reply: bytes) -> bool:
+    return reply.startswith(b"-NOAUTH ")
+
+
+def _canonical_reply(reply: bytes) -> bytes:
+    # HELLO contains a connection-specific client id, so normalize only that value before comparing
+    # otherwise exact serial and pipelined replies.
+    return re.sub(rb"(\$2\r\nid\r\n):\d+\r\n", rb"\1:<client-id>\r\n", reply)
+
+
+# Reads Dragonfly’s dragonfly_cmd_squash_commands metric.
+async def _squashed_command_count(server: DflyInstance) -> int:
+    metrics = await server.metrics()
+    return int(metrics["dragonfly_cmd_squash_commands"].samples[0].value)
+
+
+# Test definition data, each entry specifies:
+# - a scenario name used by pytest,
+# - commands to send,
+# - expected serial replies,
+# - whether the helper should authenticate before the sequence,
+# - optional setup to seed server data.
+#
+# The common invariant for all scenarios is:
+# The raw pipelined run must produce the same ordered externally visible behavior as serial execution,
+# while actually causing at least one command to be squashed.
+SQUASH_CONNECTION_PIPELINE_SCENARIOS = [
+    # AUTH changes whether later commands pass connection-state validation. The three GETs
+    # form a squashable post-AUTH batch at both pipeline_squash thresholds.
+    ConnectionPipelineScenario(
+        "authentication",
+        (
+            ("AUTH", "XXX"),
+            ("PING",),
+            ("GET", "auth-key"),
+            ("GET", "auth-key"),
+            ("GET", "auth-key"),
+            ("PING",),
+        ),
+        (
+            b"+OK\r\n",
+            b"+PONG\r\n",
+            b"$10\r\nauth-value\r\n",
+            b"$10\r\nauth-value\r\n",
+            b"$10\r\nauth-value\r\n",
+            b"+PONG\r\n",
+        ),
+        authenticate_first=False,
+        setup=_seed_auth_scenario,
+    ),
+    # SELECT changes the database used by later key commands. DB-specific seeded values make
+    # the selected database externally observable, followed by a squashable GET batch.
+    ConnectionPipelineScenario(
+        "database selection",
+        (
+            ("PING",),
+            ("SELECT", "1"),
+            ("GET", "select-one"),
+            ("GET", "select-zero"),
+            ("GET", "select-one"),
+            ("PING",),
+        ),
+        (
+            b"+PONG\r\n",
+            b"+OK\r\n",
+            b"$6\r\ndb-one\r\n",
+            b"$-1\r\n",
+            b"$6\r\ndb-one\r\n",
+            b"+PONG\r\n",
+        ),
+        setup=_seed_database_selection_scenario,
+    ),
+    # The GETs force a squashable batch before HELLO switches reply encoding to RESP3; CLIENT
+    # TRACKING must then observe that change before it validates its RESP3-only mode.
+    ConnectionPipelineScenario(
+        "resp3 tracking",
+        (
+            ("PING",),
+            ("GET", "tracking-key-1"),
+            ("GET", "tracking-key-2"),
+            ("GET", "tracking-key-3"),
+            ("HELLO", "3"),
+            ("CLIENT", "TRACKING", "ON"),
+            ("PING",),
+        ),
+        (
+            b"+PONG\r\n",
+            b"$-1\r\n",
+            b"$-1\r\n",
+            b"$-1\r\n",
+            _is_resp3_hello,
+            b"+OK\r\n",
+            b"+PONG\r\n",
+        ),
+    ),
+    # The GETs force a squashable batch before OPTIN tracking changes the behavior of CLIENT
+    # CACHING, which must observe that option in the same write.
+    ConnectionPipelineScenario(
+        "resp3 optin tracking",
+        (
+            ("PING",),
+            ("GET", "optin-key-1"),
+            ("GET", "optin-key-2"),
+            ("GET", "optin-key-3"),
+            ("HELLO", "3"),
+            ("CLIENT", "TRACKING", "ON", "OPTIN"),
+            ("CLIENT", "CACHING", "YES"),
+            ("PING",),
+        ),
+        (
+            b"+PONG\r\n",
+            b"$-1\r\n",
+            b"$-1\r\n",
+            b"$-1\r\n",
+            _is_resp3_hello,
+            b"+OK\r\n",
+            b"+OK\r\n",
+            b"+PONG\r\n",
+        ),
+    ),
+    # CLIENT SETNAME writes per-connection state; CLIENT GETNAME immediately reads it back to
+    # detect reordering or an incorrectly captured connection command.
+    ConnectionPipelineScenario(
+        "client name",
+        (
+            ("PING",),
+            ("CLIENT", "SETNAME", "pipeline-state-test"),
+            ("CLIENT", "GETNAME"),
+            ("GET", "client-name-key-1"),
+            ("GET", "client-name-key-2"),
+            ("GET", "client-name-key-3"),
+            ("PING",),
+        ),
+        (
+            b"+PONG\r\n",
+            b"+OK\r\n",
+            b"$19\r\npipeline-state-test\r\n",
+            b"$-1\r\n",
+            b"$-1\r\n",
+            b"$-1\r\n",
+            b"+PONG\r\n",
+        ),
+    ),
+    # RESET restores RESP2 and removes authentication. The two later failures confirm that
+    # commands after it are re-validated against reset state, rather than stale batch state.
+    ConnectionPipelineScenario(
+        "reset",
+        (
+            ("PING",),
+            ("GET", "reset-key-1"),
+            ("GET", "reset-key-2"),
+            ("GET", "reset-key-3"),
+            ("HELLO", "3"),
+            ("RESET",),
+            ("CLIENT", "TRACKING", "ON"),
+            ("PING",),
+        ),
+        (
+            b"+PONG\r\n",
+            b"$-1\r\n",
+            b"$-1\r\n",
+            b"$-1\r\n",
+            _is_resp3_hello,
+            b"+RESET\r\n",
+            _is_noauth_error,
+            _is_noauth_error,
+        ),
+    ),
+]
+
+assert len(SQUASH_CONNECTION_PIPELINE_SCENARIOS) == 6
+
+
+# Run every scenario twice: once with pipeline_squash=1 and once with pipeline_squash=2.
+@dfly_multi_test_args(
+    {
+        "proactor_threads": 1,
+        "pipeline_squash": 1,
+        "pipeline_wait_batch_usec": 1000,
+        "requirepass": "XXX",
+    },
+    {
+        "proactor_threads": 1,
+        "pipeline_squash": 2,
+        "pipeline_wait_batch_usec": 1000,
+        "requirepass": "XXX",
+    },
+)
+@pytest.mark.parametrize(
+    "scenario",
+    SQUASH_CONNECTION_PIPELINE_SCENARIOS,
+    ids=lambda scenario: scenario.name,
+)
+async def test_squashed_connection_state_pipeline_matches_serial(
+    df_server: DflyInstance, scenario: ConnectionPipelineScenario
+):
+    """Compare one pipelined write with serial execution across connection-state boundaries.
+
+    The serial connection establishes the expected reply sequence and final observable state. The
+    pipelined connection sends the same commands in one write, forcing squashing once enough
+    commands are queued; replies must remain equivalent and ordered after every state transition.
+    """
+
+    # Seed keys or database state needed by this scenario.
+    if scenario.setup:
+        await scenario.setup(df_server)
+
+    # Run commands one at a time for the expected replies.
+    serial_replies = await _run_raw_resp_commands_serially(
+        df_server, scenario.commands, authenticate=scenario.authenticate_first
+    )
+
+    # Record the squash counter before sending the pipeline.
+    before_squashing = await _squashed_command_count(df_server)
+
+    # Send the same commands in one write.
+    pipelined_replies = await _run_raw_resp_pipeline(
+        df_server, scenario.commands, authenticate=scenario.authenticate_first
+    )
+    # Make sure the pipeline used the squash path.
+    assert await _squashed_command_count(df_server) > before_squashing
+
+    # Each serial reply must match the expected raw RESP bytes. For replies with values that
+    # change per connection, such as HELLO, the scenario uses a matcher instead.
+    for reply, expected in zip(serial_replies, scenario.expected_replies):
+        assert expected(reply) if callable(expected) else reply == expected
+
+    # Ignore HELLO's per-connection ID, then compare replies in order.
+    assert [_canonical_reply(reply) for reply in pipelined_replies] == [
+        _canonical_reply(reply) for reply in serial_replies
+    ]
 
 
 @dfly_args({"proactor_threads": 1})
@@ -2142,6 +2519,250 @@ async def test_pipeline_cache_size(df_server: DflyInstance):
             info = await good_client.info()
 
     assert info["dispatch_queue_bytes"] == 0
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "enable_resp_io_loop_v2": "true",
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 1,
+    }
+)
+async def test_iobuf_shrinks_when_receive_idle(df_server: DflyInstance):
+    """V2 idle connections reclaim input-buffer capacity."""
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets V2 receive-idle IoBuf shrinking")
+
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    async def client_read_buffer_bytes():
+        metrics = await df_server.metrics()
+        return next(
+            sample.value
+            for sample in metrics["dragonfly_memory_by_class_bytes"].samples
+            if sample.labels["class"] == "client_read_buffer"
+        )
+
+    baseline = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    await client.set("iobuf-shrink", "x" * 2048)
+
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    metric_peak = await client_read_buffer_bytes()
+    assert peak > baseline
+
+    @assert_eventually(timeout=5)
+    async def wait_for_reclamation():
+        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+        assert current < peak
+        assert await client_read_buffer_bytes() < metric_peak
+
+    await wait_for_reclamation()
+    await client.aclose()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "enable_resp_io_loop_v2": "true",
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 1,
+    }
+)
+async def test_iobuf_regrows_after_receive_idle_shrink(df_server: DflyInstance):
+    """A V2 buffer that shrank while idle regrows and processes a later large command."""
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets V2 receive-idle IoBuf shrinking")
+
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    await client.set("iobuf-regrow-before", "x" * 2048)
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    @assert_eventually(timeout=5)
+    async def wait_for_shrink():
+        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+        assert current < peak
+
+    await wait_for_shrink()
+    shrunk = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    value = "y" * 3072
+    assert await client.set("iobuf-regrow-after", value) is True
+    assert await client.get("iobuf-regrow-after") == value
+    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) > shrunk
+
+    await client.aclose()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "enable_resp_io_loop_v2": "true",
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 0,
+    }
+)
+async def test_iobuf_does_not_shrink_when_disabled(df_server: DflyInstance):
+    """Disabling IoBuf shrinking retains capacity after a receive-idle interval."""
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets V2 receive-idle IoBuf shrinking")
+
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    await client.set("iobuf-shrink-disabled", "x" * 2048)
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    await asyncio.sleep(3)
+
+    current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    assert current == peak
+
+    await client.aclose()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 1,
+    }
+)
+async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
+    """Both loops self-shrink after low usage without corrupting a partial command."""
+    observer = df_server.client()
+    await observer.ping()
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+
+    value = b"x" * 2048
+    writer.write(b"*3\r\n$3\r\nSET\r\n$7\r\nprefill\r\n$2048\r\n" + value + b"\r\n")
+    await writer.drain()
+    assert await reader.readuntil(b"\r\n") == b"+OK\r\n"
+
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    await asyncio.sleep(2)
+
+    partial_value = b"y" * 100
+    writer.write(b"*3\r\n$3\r\nSET\r\n$7\r\npartial\r\n$1024\r\n" + partial_value)
+    await writer.drain()
+    await asyncio.sleep(2)
+
+    writer.write(b"y")
+    await writer.drain()
+
+    @assert_eventually(timeout=5)
+    async def wait_for_reclamation():
+        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+        assert current < peak
+
+    await wait_for_reclamation()
+
+    writer.write(b"y" * (1024 - len(partial_value) - 1) + b"\r\n")
+    await writer.drain()
+    assert await reader.readuntil(b"\r\n") == b"+OK\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 1,
+    }
+)
+async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
+    """Both loops restart the usage window before shrinking after low-use commands."""
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    await client.set("iobuf-shrink-complete", "x" * 2048)
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    await asyncio.sleep(2)
+    await client.ping()
+    await asyncio.sleep(2)
+    await client.ping()
+
+    @assert_eventually(timeout=5)
+    async def wait_for_reclamation():
+        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+        assert current < peak
+
+    await wait_for_reclamation()
+    await client.aclose()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 1,
+    }
+)
+async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
+    """Both loops retain capacity when the usage window contains a large read."""
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    await client.set("iobuf-shrink-high-usage", "x" * 2048)
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    await asyncio.sleep(2)
+    await client.ping()
+
+    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == peak
+
+    await client.aclose()
+    await observer.aclose()
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "enable_resp_io_loop_v2": "true",
+        "max_client_iobuf_len": 4096,
+        "iobuf_min_shrink_interval_sec": 3,
+    }
+)
+async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
+    """Receive-idle shrinking performs at most one resize during each cooldown interval."""
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets V2 receive-idle IoBuf shrinking")
+
+    observer = df_server.client()
+    client = df_server.client()
+    await observer.ping()
+
+    await client.set("iobuf-shrink-cooldown", "x" * 2048)
+    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+
+    @assert_eventually(timeout=7)
+    async def wait_for_first_shrink():
+        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+        assert current < peak
+
+    await wait_for_first_shrink()
+    after_first_shrink = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    await asyncio.sleep(1)
+    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == after_first_shrink
+
+    await client.aclose()
+    await observer.aclose()
 
 
 @dfly_multi_test_args(

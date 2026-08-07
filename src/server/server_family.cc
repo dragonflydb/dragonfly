@@ -53,6 +53,7 @@ extern "C" {
 #include "search/doc_index.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/user_registry.h"
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
@@ -1917,6 +1918,9 @@ void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait)
   vector<fb2::Fiber> fibers(shard_set->size());
   transaction->Execute(
       [db_ind, &fibers](Transaction* t, EngineShard* shard) {
+        if (auto* bc = t->GetNamespace().GetBlockingController(shard->shard_id()); bc) {
+          bc->AwakenWatched(db_ind);
+        }
         fibers[shard->shard_id()] = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
         return OpStatus::OK;
       },
@@ -2837,7 +2841,6 @@ string ServerFamily::FormatInfoMetrics(
     append("tiered_total_deletes", m.tiered_stats.total_deletes);
     append("tiered_total_uploads", m.tiered_stats.total_uploads);
     append("tiered_total_defrags", m.tiered_stats.total_defrags);
-    append("tiered_delayed_defrag_queue_size", m.tiered_stats.delayed_defrag_queue_size);
     append("tiered_total_stash_overflows", m.tiered_stats.total_stash_overflows);
     append("tiered_heap_buf_allocations", m.tiered_stats.total_heap_buf_allocs);
     append("tiered_registered_buf_allocations", m.tiered_stats.total_registered_buf_allocs);
