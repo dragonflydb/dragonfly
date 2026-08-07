@@ -857,6 +857,10 @@ void EngineShard::Heartbeat() {
       tiered_storage_->RunOffloading(i);
     }
   }
+
+  // Safe point for wake-ups queued by expiry/eviction above: no traversal is in progress and no
+  // transaction is running on this shard.
+  RunDeferredBlockingWakes();
 }
 
 void EngineShard::RetireExpiredAndEvict() {
@@ -1110,6 +1114,25 @@ bool EngineShard::ShouldThrottleForTiering() const {
   // Throttle if the tiered storage is busy offloading (at least 30% of allowed capacity)
   return tiered_storage_ && tiered_storage_->WriteDepthUsage() > 0.3 &&
          tiered_storage_->ShouldOffload();
+}
+
+void EngineShard::DeferBlockingWake(BlockingController* bc) {
+  if (find(deferred_blocking_wakes_.begin(), deferred_blocking_wakes_.end(), bc) ==
+      deferred_blocking_wakes_.end()) {
+    deferred_blocking_wakes_.push_back(bc);
+  }
+}
+
+void EngineShard::RunDeferredBlockingWakes() {
+  // NotifyPending requires that no transaction is mid-flight on this shard.
+  if (deferred_blocking_wakes_.empty() || continuation_trans_ != nullptr || running_tx_ != nullptr)
+    return;
+
+  decltype(deferred_blocking_wakes_) wakes;
+  wakes.swap(deferred_blocking_wakes_);
+  for (BlockingController* bc : wakes) {
+    bc->NotifyPending();
+  }
 }
 
 void EngineShard::FinalizeMulti(Transaction* tx) {

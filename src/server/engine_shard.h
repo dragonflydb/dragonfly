@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/container/inlined_vector.h>
+
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
@@ -16,6 +18,7 @@ typedef char* sds;
 
 namespace dfly {
 
+class BlockingController;
 class EngineShardSet;
 class TieredStorage;
 class ShardDocIndices;
@@ -171,6 +174,17 @@ class EngineShard {
   void set_running_tx(Transaction* tx) {
     running_tx_ = tx;
   }
+
+  // Registers a blocking controller that has awakened keys pending dispatch.
+  // Background paths that mutate the db outside of a transaction (heartbeat expiry/eviction,
+  // slot flush) must not dispatch wake-ups in place: readiness checkers read the db slice, which
+  // may lazily expire other keys and preempt on a journal write, while the caller is in the
+  // middle of a prime table traversal or inside a FiberAtomicGuard.
+  void DeferBlockingWake(BlockingController* bc);
+
+  // Dispatches the wake-ups registered by DeferBlockingWake(). Must only be called from a
+  // preemption-safe point that holds no prime table iterators.
+  void RunDeferredBlockingWakes();
 
   void StopPeriodicFiber();
 
@@ -337,6 +351,10 @@ class EngineShard {
   Transaction* continuation_trans_ = nullptr;
   Transaction* running_tx_ = nullptr;
   bool needs_repoll_ = false;  // set when running_tx_ interrupted a PollExecution call
+
+  // Blocking controllers with awakened keys queued by background (non transactional) writers.
+  // Drained by RunDeferredBlockingWakes(). Entries are owned by Namespace and outlive the shard.
+  absl::InlinedVector<BlockingController*, 2> deferred_blocking_wakes_;
 
   std::string continuation_debug_id_;
   unsigned poll_concurrent_factor_ = 0;
