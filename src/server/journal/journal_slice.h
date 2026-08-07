@@ -4,8 +4,11 @@
 
 #pragma once
 
+#include <absl/container/inlined_vector.h>
+
 #include <boost/circular_buffer.hpp>
-#include <optional>
+#include <boost/circular_buffer/space_optimized.hpp>
+#include <cstdint>
 #include <shared_mutex>
 #include <string_view>
 
@@ -67,7 +70,8 @@ class JournalSlice {
 
   void ResetRingBuffer() {
     ring_buffer_.clear();
-    ring_buffer_bytes_ = ring_buffer_.capacity() * sizeof(JournalItem);
+    time_buckets_.clear();
+    ring_buffer_bytes_ = 0;
   }
 
   void SetStartingLSN(LSN lsn) {
@@ -75,8 +79,19 @@ class JournalSlice {
   }
 
  private:
+  struct TimeBucket {
+    uint64_t start_time_ms;
+    LSN first_lsn;
+  };
+
   void CallOnChange(JournalChangeItem* item);
-  boost::circular_buffer<JournalItem> ring_buffer_;
+  void AddTimeBucket(uint64_t now_ms);
+  void Prune(size_t next_item_bytes, uint64_t now_ms);
+  void PopFront();
+  static size_t ItemBytes(const JournalItem& item);
+
+  boost::circular_buffer_space_optimized<JournalItem> ring_buffer_;
+  absl::InlinedVector<TimeBucket, 6> time_buckets_;
 
   mutable util::fb2::SharedMutex cb_mu_;  // to prevent removing callback during call
   std::list<std::pair<uint32_t, JournalConsumerInterface*>> journal_consumers_arr_;
@@ -86,6 +101,9 @@ class JournalSlice {
   uint32_t next_cb_id_ = 1;
   std::error_code status_ec_;
   bool enable_journal_flush_ = true;
+
+  uint32_t max_age_ms_ = 0;
+  size_t max_bytes_ = 0;
 
   size_t ring_buffer_bytes_ = 0;
 };

@@ -563,18 +563,18 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
 
 
 @pytest.mark.parametrize(
-    "master_threads, backlog_len, stream_during, stream_target_ops, num_drops, sleep_range, check_stale_log",
+    "master_threads, backlog_max_bytes, stream_during, stream_target_ops, num_drops, sleep_range, check_stale_log",
     [
         (6, None, False, None, 10, (0, 10), False),
-        (4, 4000, True, 4000, 3, (10, 20), False),
-        (4, 1, True, None, 3, (5, 10), True),
+        (4, "4mb", True, 4000, 3, (10, 20), False),
+        (4, "1b", True, None, 3, (5, 10), True),
     ],
 )
 async def test_network_disconnect(
     df_factory,
     df_seeder_factory,
     master_threads,
-    backlog_len,
+    backlog_max_bytes,
     stream_during,
     stream_target_ops,
     num_drops,
@@ -583,8 +583,8 @@ async def test_network_disconnect(
     proxy_factory,
 ):
     master_kwargs = dict(proactor_threads=master_threads)
-    if backlog_len is not None:
-        master_kwargs["shard_repl_backlog_len"] = backlog_len
+    if backlog_max_bytes is not None:
+        master_kwargs["shard_repl_backlog_max_bytes"] = backlog_max_bytes
     master = df_factory.create(**master_kwargs)
     replica = df_factory.create(proactor_threads=4)
 
@@ -987,12 +987,19 @@ async def test_replica_of_replica(df_factory):
 
 
 @pytest.mark.parametrize(
-    "use_takeover, backlog_len",
-    [(False, 2), (False, 1), (True, 1), (True, 10)],
+    "use_takeover, backlog_max_bytes, send_writes",
+    [
+        (False, "1mb", False),
+        (False, "1b", False),
+        (True, "1b", False),
+        (True, "1mb", True),
+    ],
 )
-async def test_partial_replication_on_same_source_master(df_factory, use_takeover, backlog_len):
+async def test_partial_replication_on_same_source_master(
+    df_factory, use_takeover, backlog_max_bytes, send_writes
+):
     master = df_factory.create()
-    replica1 = df_factory.create(shard_repl_backlog_len=backlog_len)
+    replica1 = df_factory.create(shard_repl_backlog_max_bytes=backlog_max_bytes)
     replica2 = df_factory.create()
 
     df_factory.start_all([master, replica1, replica2])
@@ -1020,7 +1027,7 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
     if use_takeover:
         # Promote first replica to master
         await c_replica1.execute_command("REPLTAKEOVER 5")
-        if backlog_len > 1:
+        if send_writes:
             await c_replica1.execute_command("SET bar foo")
             await c_replica1.execute_command("SET foo bar")
 
@@ -1277,8 +1284,8 @@ async def test_cascaded_partial_sync_split_brain(df_factory):
 
 
 @pytest.mark.parametrize("proactors", [1, 4, 6])
-@pytest.mark.parametrize("backlog_len", [1, 256, 1024, 1300])
-async def test_partial_sync(df_factory, proactors, backlog_len, proxy_factory):
+@pytest.mark.parametrize("stream_count", [1, 256, 1024, 1300])
+async def test_partial_sync(df_factory, proactors, stream_count, proxy_factory):
     keys = 5_000
     if proactors > 1:
         keys = 10_000
@@ -1286,7 +1293,10 @@ async def test_partial_sync(df_factory, proactors, backlog_len, proxy_factory):
     # We use lock_on_hashtag because we want to seed enough elements to one flow/journal such that
     # the partial sync stales.
     master = df_factory.create(
-        proactor_threads=proactors, shard_repl_backlog_len=backlog_len, lock_on_hashtags=True
+        proactor_threads=proactors,
+        shard_repl_backlog_time_ms=0,
+        shard_repl_backlog_max_bytes="1b",
+        lock_on_hashtags=True,
     )
     replica = df_factory.create(proactor_threads=proactors)
 
@@ -1307,7 +1317,7 @@ async def test_partial_sync(df_factory, proactors, backlog_len, proxy_factory):
         # Reach stable sync
         await wait_for_replicas_state(c_replica)
         # Stream some elements
-        await stream(c_master, backlog_len)
+        await stream(c_master, stream_count)
 
         proxy.drop_connection()
         # Give time to detect dropped connection and reconnect
@@ -1319,7 +1329,7 @@ async def test_partial_sync(df_factory, proactors, backlog_len, proxy_factory):
 
         await proxy.close()
         # Whoops we moved too much, no partial sync here
-        await stream(c_master, backlog_len + 10)
+        await stream(c_master, stream_count + 10)
         await proxy.start_serving()
         await asyncio.sleep(1.0)
 
@@ -1340,6 +1350,39 @@ async def test_partial_sync(df_factory, proactors, backlog_len, proxy_factory):
     # Second partial sync failed because of stale LSN
     lines = master.find_in_logs("Partial sync requested from stale LSN")
     assert len(lines) == 1
+
+
+async def test_partial_sync_keeps_oversized_backlog_record(df_factory, proxy_factory):
+    master = df_factory.create(
+        proactor_threads=2,
+        shard_repl_backlog_time_ms=5_000,
+        shard_repl_backlog_max_bytes="64kb",
+    )
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
+
+    c_master, c_replica = master.client(), replica.client()
+    proxy = await proxy_factory(master.port)
+
+    await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+    await wait_for_replicas_state(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Keep the replica disconnected while the master receives a record larger than the configured
+    # byte budget. The record must remain available for partial sync.
+    await proxy.close()
+    await c_master.append("large", "x" * (128 * 1024))
+    await proxy.start_serving()
+
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.get("large") == "x" * (128 * 1024)
+
+    await c_master.aclose()
+    await c_replica.aclose()
+    master.stop()
+    replica.stop()
+
+    assert len(master.find_in_logs("Partial sync requested from LSN")) == 1
 
 
 @pytest.mark.large
