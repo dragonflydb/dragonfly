@@ -942,7 +942,7 @@ TEST_F(DefragDflyEngineTest, SegmentsRelocated) {
     PageUsage page_usage{CollectPageStats::NO, 0, CycleQuota::Unlimited()};
     page_usage.SetForceReallocate(true);
 
-    EXPECT_TRUE(slice.DefragTableSegments(0, &page_usage));
+    slice.DefragTableSegments(0, &page_usage);
 
     const auto after = collect_addresses();
 

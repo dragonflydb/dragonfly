@@ -328,25 +328,19 @@ void MemoryCmd::DefragmentSegments(CmdArgParser parser) {
   const DbIndex db_ind = conn_cntx->db_index();
 
   std::vector<CollectedPageStats> results(shard_set->size());
-  std::atomic_bool completed{true};
-  shard_set->pool()->AwaitFiberOnAll(
-      [threshold, ns, db_ind, &results, &completed](util::ProactorBase*) {
-        if (auto* shard = EngineShard::tlocal(); shard) {
-          PageUsage page_usage{CollectPageStats::YES, threshold,
-                               CycleQuota{CycleQuota::kDefaultDefragQuota}};
-          const ShardId sid = shard->shard_id();
-          if (!ns->GetDbSlice(sid).DefragTableSegments(db_ind, &page_usage))
-            completed.store(false, memory_order_relaxed);
-          results[sid] = page_usage.CollectedStats();
-        }
-      });
+  shard_set->pool()->AwaitFiberOnAll([threshold, ns, db_ind, &results](util::ProactorBase*) {
+    if (auto* shard = EngineShard::tlocal(); shard) {
+      PageUsage page_usage{CollectPageStats::YES, threshold,
+                           CycleQuota{CycleQuota::kDefaultDefragQuota}};
+      const ShardId sid = shard->shard_id();
+      ns->GetDbSlice(sid).DefragTableSegments(db_ind, &page_usage);
+      results[sid] = page_usage.CollectedStats();
+    }
+  });
 
   const CollectedPageStats merged = CollectedPageStats::Merge(std::move(results), threshold);
-  std::string response = merged.ToString();
-  const auto done = completed.load(memory_order_relaxed) ? "true" : "false";
-  absl::StrAppend(&response, "\nTraversal complete: ", done);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
-  return rb->SendVerbatimString(response);
+  return rb->SendVerbatimString(merged.ToString());
 }
 
 namespace {

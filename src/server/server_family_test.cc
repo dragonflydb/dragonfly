@@ -797,7 +797,8 @@ TEST_F(ServerFamilyTest, MemoryParserErrorHandling) {
 
 TEST_F(ServerFamilyTest, MemoryDefragSegments) {
   auto resp = Run({"MEMORY", "DEFRAGMENT-SEGMENTS", "0.9"});
-  EXPECT_THAT(resp.GetString(), HasSubstr("Traversal complete:"));
+  EXPECT_THAT(resp.GetString(), HasSubstr("Page usage threshold: 90"));
+  ;
 
   resp = Run({"MEMORY", "DEFRAGMENT-SEGMENTS", "0.9", "xyz"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
