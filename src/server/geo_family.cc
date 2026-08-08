@@ -734,7 +734,6 @@ void CmdGeoSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   GeoSearchStoreGeneric(cmd_cntx->tx(), builder, st.shape, key, member, st.geo_ops);
 }
 
-// GEOSEARCHSTORE dest src <search-options> — search src and store matches in dest (Redis 6.2+).
 void CmdGeoSearchStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
 

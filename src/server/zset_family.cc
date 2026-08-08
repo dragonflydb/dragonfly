@@ -2052,7 +2052,7 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
       // absl::StrCat truncates to ~6 significant digits; scores must round-trip exactly
       // (e.g. geohash-derived scores from GEORADIUS/GEORADIUSBYMEMBER STORE) since this is
       // the only replay path for callers using NO_AUTOJOURNAL.
-      scores.push_back(RedisReplyBuilder::FormatDouble(score, buf, sizeof(buf)));
+      scores.emplace_back(RedisReplyBuilder::FormatDouble(score, buf, sizeof(buf)));
       mapped.push_back(scores.back());
       mapped.push_back(member);
     }

@@ -1454,6 +1454,19 @@ TEST_F(ZSetFamilyTest, RangeStore) {
   EXPECT_THAT(resp, ArrLen(0));
 }
 
+TEST_F(ZSetFamilyTest, RangeStorePreservesScorePrecision) {
+  constexpr string_view score = "56.4412578701582";
+  Run({"ZADD", "src_precise", score, "member"});
+  EXPECT_EQ(1, CheckedInt({"ZRANGESTORE", "dest_precise", "src_precise", "0", "-1"}));
+  auto resp = Run({"ZSCORE", "dest_precise", "member"});
+  EXPECT_EQ(resp.GetString(), score);
+
+  Run({"ZADD", "src_geo", "3471766229222696", "Madrid"});
+  EXPECT_EQ(1, CheckedInt({"ZRANGESTORE", "dest_geo", "src_geo", "0", "-1"}));
+  resp = Run({"ZSCORE", "dest_geo", "Madrid"});
+  EXPECT_EQ(resp.GetString(), "3471766229222696");
+}
+
 TEST_F(ZSetFamilyTest, ZRangeZeroElements) {
   Run({"zadd", "myzset", "1", "one"});
   auto resp = Run({"ZRANGE", "myzset", "0", "-1", "LIMIT", "2", "10"});
