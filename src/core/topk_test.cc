@@ -18,6 +18,15 @@ namespace dfly {
 
 using namespace std;
 
+namespace {
+TOPK MakeTOPK(PMR_NS::memory_resource* mr, uint32_t k, uint32_t width = TOPK::kDefaultWidth,
+              uint32_t depth = TOPK::kDefaultDepth, double decay = TOPK::kDefaultDecay) {
+  TOPK topk(mr);
+  topk.Init(k, width, depth, decay);
+  return topk;
+}
+}  // namespace
+
 class TOPKTest : public ::testing::Test {
  protected:
   // Use decay=0 to disable probabilistic decay, making tests deterministic.
@@ -25,7 +34,7 @@ class TOPKTest : public ::testing::Test {
   // so counters only grow and are never decremented by colliding items.
   // Having a decay != 0 will cause probabilistic flakiness in tests, as items may be randomly
   // evicted due to decay rather than true count comparisons.
-  TOPKTest() : topk_(PMR_NS::get_default_resource(), 5, 100, 5, 0.0) {
+  TOPKTest() : topk_(MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, 0.0)) {
   }
 
   double ComputeDecayProbability(TOPK* topk, uint32_t count) const {
@@ -40,7 +49,7 @@ class TOPKTest : public ::testing::Test {
 
 // Verify K(), Width(), Depth(), Decay() return the exact values passed to the constructor.
 TEST(TOPKBasic, ConstructorStoresParameters) {
-  TOPK topk(PMR_NS::get_default_resource(), 10, 200, 7, 0.85);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 10, 200, 7, 0.85);
   EXPECT_EQ(topk.K(), 10u);
   EXPECT_EQ(topk.Width(), 200u);
   EXPECT_EQ(topk.Depth(), 7u);
@@ -50,8 +59,8 @@ TEST(TOPKBasic, ConstructorStoresParameters) {
 // Verify that default decay reuses the static process-wide table (saving memory),
 // while a custom decay value allocates its own ~32KB lookup table.
 TEST(TOPKBasic, DecayTableMemoryAllocation) {
-  TOPK default_topk(PMR_NS::get_default_resource(), 5, 100, 5, TOPK::kDefaultDecay);
-  TOPK custom_topk(PMR_NS::get_default_resource(), 5, 100, 5, 0.75);
+  TOPK default_topk = MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, TOPK::kDefaultDecay);
+  TOPK custom_topk = MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, 0.75);
 
   size_t default_mem = default_topk.MallocUsed();
   size_t custom_mem = custom_topk.MallocUsed();
@@ -81,11 +90,11 @@ TEST_F(TOPKTest, MoveConstructorTransfersOwnership) {
 
 // Move-assign a populated TOPK into another; verify same post-conditions as move constructor.
 TEST(TOPKBasic, MoveAssignmentTransfersOwnership) {
-  TOPK src(PMR_NS::get_default_resource(), 3, 50, 3, 0.0);
+  TOPK src = MakeTOPK(PMR_NS::get_default_resource(), 3, 50, 3, 0.0);
   src.Add("x");
   src.Add("y");
 
-  TOPK dst(PMR_NS::get_default_resource(), 1, 10, 1, 0.0);
+  TOPK dst = MakeTOPK(PMR_NS::get_default_resource(), 1, 10, 1, 0.0);
   dst = std::move(src);
 
   EXPECT_EQ(dst.K(), 3u);
@@ -175,8 +184,8 @@ TEST_F(TOPKTest, IncrByZeroReturnsNullopt) {
 
 // IncrBy(item, 1) should behave the same as Add(item) — both increment by 1.
 TEST(TOPKBasic, IncrByOneBehavesLikeAdd) {
-  TOPK a(PMR_NS::get_default_resource(), 3, 100, 5, 0.0);
-  TOPK b(PMR_NS::get_default_resource(), 3, 100, 5, 0.0);
+  TOPK a = MakeTOPK(PMR_NS::get_default_resource(), 3, 100, 5, 0.0);
+  TOPK b = MakeTOPK(PMR_NS::get_default_resource(), 3, 100, 5, 0.0);
 
   a.Add("x");
   b.IncrBy("x", 1);
@@ -294,7 +303,7 @@ TEST_F(TOPKTest, CountForHeapItemMatchesListCount) {
 
 // List() returns an empty vector on a freshly constructed TOPK.
 TEST(TOPKBasic, ListEmptyOnConstruction) {
-  TOPK fresh(PMR_NS::get_default_resource(), 5, 100, 5, 0.0);
+  TOPK fresh = MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, 0.0);
   EXPECT_TRUE(fresh.List().empty());
 }
 
@@ -336,7 +345,7 @@ TEST_F(TOPKTest, ListNeverExceedsKItems) {
 // For count < kDecayLookupSize, ComputeDecayProbability equals std::pow(decay, count).
 TEST_F(TOPKTest, ProbabilityBelowTableSize) {
   double decay_val = 0.85;
-  TOPK topk(PMR_NS::get_default_resource(), 5, 100, 5, decay_val);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, decay_val);
 
   // ComputeDecayProbability enforces DCHECK_GT(count, 0u), so we start at 1.
   for (uint32_t count = 1; count < TOPK::kDecayLookupSize; ++count) {
@@ -349,7 +358,7 @@ TEST_F(TOPKTest, ProbabilityBelowTableSize) {
 
 // For count >= kDecayLookupSize, the extrapolation path should not crash or produce NaN.
 TEST(TOPKBasic, ProbabilityAboveTableSizeNoCrash) {
-  TOPK topk(PMR_NS::get_default_resource(), 3, 10, 3, 0.999);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 3, 10, 3, 0.999);
 
   // Push counter safely above kDecayLookupSize (4097)
   topk.IncrBy("big", 5000);
@@ -369,7 +378,7 @@ TEST(TOPKBasic, ProbabilityAboveTableSizeNoCrash) {
 TEST(TOPKBasic, VeryHighCountApproachesZero) {
   // decay=0.5: 0.5^4096 is astronomically small (< kDecayEpsilon). The extrapolation
   // path should return 0.0, meaning no decay fires for counts above the table range.
-  TOPK topk(PMR_NS::get_default_resource(), 3, 10, 3, 0.5);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 3, 10, 3, 0.5);
   topk.IncrBy("stable", 10000);
   auto count_before = topk.Count("stable");
   // Adding more items should not decay "stable"'s counter because the decay
@@ -385,7 +394,7 @@ TEST(TOPKBasic, VeryHighCountApproachesZero) {
 // With decay=0.0, the decay probability is always 0 (0^n = 0 for n>0),
 // so counters should grow monotonically.
 TEST(TOPKBasic, ZeroDecayNeverDecays) {
-  TOPK topk(PMR_NS::get_default_resource(), 3, 50, 3, 0.0);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 3, 50, 3, 0.0);
   topk.IncrBy("mono", 100);
   auto count1 = topk.Count("mono");
   topk.IncrBy("mono", 50);
@@ -400,7 +409,7 @@ TEST(TOPKBasic, ZeroDecayNeverDecays) {
 // The counter therefore oscillates: 0 → 1 (add to zero-counter) → 0 (decay fires) → repeat.
 // It is mathematically impossible for the counter to exceed 1.
 TEST(TOPKBasic, DecayOneAlwaysDecays) {
-  TOPK topk(PMR_NS::get_default_resource(), 3, 10, 3, 1.0);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 3, 10, 3, 1.0);
 
   for (int i{}; i < 1000; ++i) {
     topk.Add("suppressed");
@@ -417,7 +426,7 @@ TEST(TOPKBasic, DecayOneAlwaysDecays) {
 
 // MallocUsed() after filling the heap should be larger than right after construction.
 TEST(TOPKBasic, MallocUsedIncreaseWithHeapGrowth) {
-  TOPK topk(PMR_NS::get_default_resource(), 5, 100, 5, 0.0);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, 0.0);
   size_t before = topk.MallocUsed();
   for (int i{}; i < 5; ++i) {
     topk.IncrBy(absl::StrCat("item_with_a_long_name_", i), 100);
@@ -452,7 +461,8 @@ TEST_F(TOPKTest, SerializeRoundTripPreservesConfiguration) {
   topk_.IncrBy("a", 10);
   auto data = ExtractData(topk_);
 
-  TOPK restored(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
+  TOPK restored =
+      MakeTOPK(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
   restored.Deserialize(data);
 
   EXPECT_EQ(restored.K(), topk_.K());
@@ -468,7 +478,8 @@ TEST_F(TOPKTest, SerializeRoundTripPreservesHeapItems) {
   topk_.IncrBy("gamma", 25);
 
   auto data = ExtractData(topk_);
-  TOPK restored(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
+  TOPK restored =
+      MakeTOPK(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
   restored.Deserialize(data);
 
   auto orig_list = topk_.List();
@@ -486,7 +497,8 @@ TEST_F(TOPKTest, SerializeRoundTripPreservesCounters) {
   topk_.IncrBy("bar", 77);
 
   auto data = ExtractData(topk_);
-  TOPK restored(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
+  TOPK restored =
+      MakeTOPK(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
   restored.Deserialize(data);
 
   EXPECT_EQ(topk_.Count("foo"), restored.Count("foo"));
@@ -500,7 +512,8 @@ TEST_F(TOPKTest, DeserializeRebuildsValidHeapProperty) {
   }
 
   auto data = ExtractData(topk_);
-  TOPK restored(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
+  TOPK restored =
+      MakeTOPK(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
   restored.Deserialize(data);
 
   // The restored heap is full (K items). A heavy new item should evict the minimum.
@@ -511,7 +524,7 @@ TEST_F(TOPKTest, DeserializeRebuildsValidHeapProperty) {
 
 // Serializing a fresh TOPK produces empty heap_items and a zero-filled counters vector.
 TEST(TOPKBasic, SerializeEmptyTOPK) {
-  TOPK topk(PMR_NS::get_default_resource(), 5, 100, 5, 0.0);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, 0.0);
   auto data = ExtractData(topk);
 
   EXPECT_TRUE(data.heap_items.empty());
@@ -527,7 +540,7 @@ TEST(TOPKBasic, SerializeEmptyTOPK) {
 
 // Explicitly passing get_default_resource() works correctly without crashing.
 TEST(TOPKBasic, PMRExplicitDefaultResourceWorks) {
-  TOPK topk(PMR_NS::get_default_resource(), 5, 100, 5, 0.9);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, 0.9);
   topk.Add("works");
   EXPECT_EQ(topk.List().size(), 1u);
 }
@@ -550,7 +563,7 @@ TEST(TOPKBasic, PMRExplicitDefaultResourceWorks) {
 // we bypass that math to ensure our "Hot" items are strictly,
 // deterministically larger than the noise.
 TEST(TOPKBasic, TopKItemsIdentifiedUnderHeavyLoad) {
-  TOPK topk(PMR_NS::get_default_resource(), 5, 500, 5, 0.0);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 5, 500, 5, 0.0);
   // Hot items get a large, deterministic count via IncrBy.
   for (int h{}; h < 5; ++h) {
     topk.IncrBy(absl::StrCat("hot", h), 1000);
@@ -580,7 +593,7 @@ TEST(TOPKBasic, TopKItemsIdentifiedUnderHeavyLoad) {
 // Uses decay=0.0 and IncrBy so "dominant" has a deterministically high count
 // that minor items (each added once, count=1) can never exceed.
 TEST(TOPKBasic, KEqualsOneTracksOnlyTopItem) {
-  TOPK topk(PMR_NS::get_default_resource(), 1, 500, 5, 0.0);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 1, 500, 5, 0.0);
 
   // "dominant" gets a large, fixed count.
   topk.IncrBy("dominant", 1000);
@@ -613,7 +626,7 @@ TEST(TOPKBasic, DeserializeRestoresHeapProperty) {
   data.heap_items.push_back({500, "medium"});
   data.heap_items.push_back({10, "light"});
 
-  TOPK restored(PMR_NS::get_default_resource(), 5, 100, 5, 0.0);
+  TOPK restored = MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, 0.0);
   restored.Deserialize(data);
 
   // List() sorts descending — correct only if make_heap built a valid heap.
@@ -656,24 +669,24 @@ TEST_F(TOPKTest, CounterSaturationPreventsOverflow) {
 // ---------------------------------------------------------------------------
 
 #ifndef NDEBUG
-// k=0 violates DCHECK_GT(k_, 0u) in the constructor.
+// k=0 violates DCHECK_GT(k, 0u) in Init().
 TEST(TOPKDeathTest, ZeroKCrashes) {
-  EXPECT_DEBUG_DEATH(TOPK(PMR_NS::get_default_resource(), 0, 100, 5, 0.9), "k_ > 0");
+  EXPECT_DEBUG_DEATH(MakeTOPK(PMR_NS::get_default_resource(), 0, 100, 5, 0.9), "k > 0");
 }
 
-// width=0 violates DCHECK_GT(width_, 0u) in the constructor.
+// width=0 violates DCHECK_GT(width, 0u) in Init().
 TEST(TOPKDeathTest, ZeroWidthCrashes) {
-  EXPECT_DEBUG_DEATH(TOPK(PMR_NS::get_default_resource(), 5, 0, 5, 0.9), "width_ > 0");
+  EXPECT_DEBUG_DEATH(MakeTOPK(PMR_NS::get_default_resource(), 5, 0, 5, 0.9), "width > 0");
 }
 
-// decay=1.5 violates DCHECK_LE(decay_, 1.0) in the constructor.
+// decay=1.5 violates DCHECK_LE(decay, 1.0) in Init().
 TEST(TOPKDeathTest, DecayAboveOneCrashes) {
-  EXPECT_DEBUG_DEATH(TOPK(PMR_NS::get_default_resource(), 5, 100, 5, 1.5), "decay_ <= 1.0");
+  EXPECT_DEBUG_DEATH(MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, 1.5), "decay <= 1.0");
 }
 
 // Deserializing data with a mismatched k violates DCHECK_EQ(data.k, k_).
 TEST(TOPKDeathTest, DeserializeDimensionMismatchCrashes) {
-  TOPK topk(PMR_NS::get_default_resource(), 5, 100, 5, 0.9);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, 0.9);
   TOPK::SerializedData bad;
   bad.k = 10;  // Mismatch: object was constructed with k=5.
   bad.width = 100;
@@ -685,7 +698,7 @@ TEST(TOPKDeathTest, DeserializeDimensionMismatchCrashes) {
 
 // Deserializing data with a mismatched decay violates DCHECK_EQ(data.decay, decay_).
 TEST(TOPKDeathTest, DeserializeDecayMismatchCrashes) {
-  TOPK topk(PMR_NS::get_default_resource(), 5, 100, 5, 0.9);
+  TOPK topk = MakeTOPK(PMR_NS::get_default_resource(), 5, 100, 5, 0.9);
   TOPK::SerializedData bad;
   bad.k = 5;
   bad.width = 100;

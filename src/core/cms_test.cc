@@ -14,9 +14,23 @@ namespace dfly {
 
 using namespace std;
 
+namespace {
+CMS MakeCMS(uint32_t width, uint32_t depth, PMR_NS::memory_resource* mr) {
+  CMS cms(mr);
+  cms.Init(width, depth);
+  return cms;
+}
+
+CMS MakeCMS(CMS::ErrorRateTag tag, double error, double probability, PMR_NS::memory_resource* mr) {
+  CMS cms(mr);
+  cms.Init(tag, error, probability);
+  return cms;
+}
+}  // namespace
+
 class CMSTest : public ::testing::Test {
  protected:
-  CMSTest() : cms_(CMS(1000, 5, PMR_NS::get_default_resource())) {
+  CMSTest() : cms_(MakeCMS(1000, 5, PMR_NS::get_default_resource())) {
   }
 
   CMS cms_;
@@ -32,13 +46,13 @@ TEST_F(CMSTest, InitialCountIsZero) {
 // Use width=1 so every item maps to column 0, exercising all counters.
 // This catches initialization bugs (e.g. counters not zeroed).
 TEST(CMSBasic, InitialCountIsZeroSmall) {
-  CMS cms(1, 1, PMR_NS::get_default_resource());
+  CMS cms = MakeCMS(1, 1, PMR_NS::get_default_resource());
   EXPECT_EQ(cms.Query("x"), 0);
   EXPECT_EQ(cms.Query("y"), 0);
 }
 
 TEST(CMSBasic, IncrBySmall) {
-  CMS cms(1, 1, PMR_NS::get_default_resource());
+  CMS cms = MakeCMS(1, 1, PMR_NS::get_default_resource());
   EXPECT_EQ(cms.IncrBy("a", 3), 3);
   // width=1 means all items collide; "b" should also return 3.
   EXPECT_EQ(cms.Query("b"), 3);
@@ -46,7 +60,7 @@ TEST(CMSBasic, IncrBySmall) {
 
 // Inspired by fakeredis test_cms_create: initbyprob computes correct dimensions.
 TEST(CMSBasic, InitByProb) {
-  CMS cms(CMS::ErrorRateTag{}, 0.01, 0.01, PMR_NS::get_default_resource());
+  CMS cms = MakeCMS(CMS::ErrorRateTag{}, 0.01, 0.01, PMR_NS::get_default_resource());
 
   // width = ceil(e / 0.01) = ceil(271.8..) = 272
   EXPECT_EQ(cms.width(), static_cast<uint32_t>(std::ceil(M_E / 0.01)));
@@ -114,7 +128,7 @@ TEST_F(CMSTest, MallocUsed) {
 
 // Inspired by fakeredis test_cms_merge: basic merge of two sketches.
 TEST_F(CMSTest, MergeFrom) {
-  CMS other(1000, 5, PMR_NS::get_default_resource());
+  CMS other = MakeCMS(1000, 5, PMR_NS::get_default_resource());
   cms_.IncrBy("foo", 3);
   other.IncrBy("foo", 4);
   other.IncrBy("bar", 1);
@@ -125,7 +139,7 @@ TEST_F(CMSTest, MergeFrom) {
 }
 
 TEST_F(CMSTest, MergeFromWithWeight) {
-  CMS other(1000, 5, PMR_NS::get_default_resource());
+  CMS other = MakeCMS(1000, 5, PMR_NS::get_default_resource());
   other.IncrBy("x", 5);
 
   cms_.IncrBy("x", 10);
@@ -135,10 +149,10 @@ TEST_F(CMSTest, MergeFromWithWeight) {
 }
 
 TEST_F(CMSTest, MergeDimensionMismatch) {
-  CMS other(500, 5, PMR_NS::get_default_resource());
+  CMS other = MakeCMS(500, 5, PMR_NS::get_default_resource());
   EXPECT_FALSE(cms_.MergeFrom(other));
 
-  CMS other2(1000, 3, PMR_NS::get_default_resource());
+  CMS other2 = MakeCMS(1000, 3, PMR_NS::get_default_resource());
   EXPECT_FALSE(cms_.MergeFrom(other2));
 }
 
@@ -146,9 +160,9 @@ TEST_F(CMSTest, MergeDimensionMismatch) {
 // Mirrors the exact sequence: C=A+B, C+=A*1+B*2, C+=A*2+B*3, then check info.count.
 TEST(CMSBasic, MergeMultipleWithWeights) {
   auto* mr = PMR_NS::get_default_resource();
-  CMS a(1000, 5, mr);
-  CMS b(1000, 5, mr);
-  CMS c(1000, 5, mr);
+  CMS a = MakeCMS(1000, 5, mr);
+  CMS b = MakeCMS(1000, 5, mr);
+  CMS c = MakeCMS(1000, 5, mr);
 
   a.IncrBy("foo", 5);
   a.IncrBy("bar", 3);
@@ -190,7 +204,7 @@ TEST(CMSBasic, MergeMultipleWithWeights) {
 // Inspired by fakeredis test_cms_info: verify count tracks total of all IncrBy operations.
 TEST(CMSBasic, CountTracking) {
   auto* mr = PMR_NS::get_default_resource();
-  CMS a(1000, 5, mr);
+  CMS a = MakeCMS(1000, 5, mr);
 
   EXPECT_EQ(a.total_count(), 0);
 
@@ -204,9 +218,9 @@ TEST(CMSBasic, CountTracking) {
 // Inspired by fakeredis test_cms_info: count is updated by MergeFrom.
 TEST(CMSBasic, CountAfterMerge) {
   auto* mr = PMR_NS::get_default_resource();
-  CMS a(1000, 5, mr);
-  CMS b(1000, 5, mr);
-  CMS c(1000, 5, mr);
+  CMS a = MakeCMS(1000, 5, mr);
+  CMS b = MakeCMS(1000, 5, mr);
+  CMS c = MakeCMS(1000, 5, mr);
 
   a.IncrBy("foo", 5);
   a.IncrBy("bar", 3);
@@ -241,7 +255,7 @@ TEST_F(CMSTest, MoveConstruct) {
 
 TEST_F(CMSTest, MoveAssign) {
   cms_.IncrBy("foo", 42);
-  CMS other(500, 3, PMR_NS::get_default_resource());
+  CMS other = MakeCMS(500, 3, PMR_NS::get_default_resource());
   other = std::move(cms_);
 
   EXPECT_EQ(other.Query("foo"), 42);
