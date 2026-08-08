@@ -957,6 +957,34 @@ string_view McTypeToCmdName(MemcacheParser::CmdType type) {
   }
 }
 
+// Memoizes last command lookup to avoid hashmap access + ascii upper casting
+class CommandCache {
+ public:
+  explicit CommandCache(const CommandRegistry& registry) : registry_(registry) {
+  }
+
+  std::pair<const CommandId*, facade::ParsedArgs> Resolve(const facade::ParsedArgs& args) {
+    std::string_view verb = args.Front();
+    if (last_cid_ && verb == last_verb_)
+      return {last_cid_, args.Tail()};
+
+    auto [cid, tail] = registry_.FindExtended(args);
+
+    // Cache if it was a single verb command
+    last_cid_ = nullptr;
+    if (cid && tail.size() + 1 == args.size()) {
+      last_verb_.assign(verb);
+      last_cid_ = cid;
+    }
+    return {cid, tail};
+  }
+
+ private:
+  const CommandRegistry& registry_;
+  std::string last_verb_;
+  const CommandId* last_cid_ = nullptr;
+};
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1785,12 +1813,15 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     }
   };
 
+  // Skip FindExtended for repeated verbs (the common case in pipelines).
+  CommandCache cmd_cache{registry_};
+
   auto* cmd = first;
   for (unsigned i = 0; i < count && cmd; i++) {
     auto* cmd_cntx = static_cast<CommandContext*>(cmd);
 
     ParsedArgs args{*cmd_cntx};
-    const auto [cid, tail_args] = registry_.FindExtended(args);
+    const auto [cid, tail_args] = cmd_cache.Resolve(args);
 
     // Stop the batch at the first command that can't join it; the connection's regular dispatch
     // path then handles exceptions (and the rest of the pipeline) with the real reply builder,
