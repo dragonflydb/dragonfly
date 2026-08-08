@@ -276,7 +276,7 @@ TEST_F(GeoFamilyTest, GeoSearchStoreScoresMatchGeoRadiusStore) {
 
   auto store_scores = Run({"ZRANGE", "gr_store", "0", "-1", "WITHSCORES"});
   auto search_scores = Run({"ZRANGE", "gr_search", "0", "-1", "WITHSCORES"});
-  EXPECT_THAT(search_scores.GetVec(), store_scores.GetVec());
+  EXPECT_EQ(StrArray(search_scores), StrArray(store_scores));
 
   EXPECT_EQ(2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STOREDIST",
                            "gr_dist_store"}));
@@ -284,7 +284,7 @@ TEST_F(GeoFamilyTest, GeoSearchStoreScoresMatchGeoRadiusStore) {
                            "BYRADIUS", "700", "KM", "STOREDIST"}));
   auto dist_store = Run({"ZRANGE", "gr_dist_store", "0", "-1", "WITHSCORES"});
   auto dist_search = Run({"ZRANGE", "gr_dist_search", "0", "-1", "WITHSCORES"});
-  EXPECT_THAT(dist_search.GetVec(), dist_store.GetVec());
+  EXPECT_EQ(StrArray(dist_search), StrArray(dist_store));
 }
 
 TEST_F(GeoFamilyTest, GeoRadiusByMember) {
