@@ -421,6 +421,8 @@ class DashTable : public detail::DashTableBase {
   // iterators holding pointers to it as these will become invalid on relocation.
   bool TryRelocateSegment(size_t segment_id);
 
+  template <typename Cb> Cursor VisitSegment(Cursor cursor, Cb cb);
+
  private:
   enum class InsertMode {
     kInsertIfNotFound,
@@ -1275,6 +1277,24 @@ bool DashTable<_Key, _Value, Policy>::TryRelocateSegment(size_t segment_id) {
   A::deallocate(allocator, segment, 1);
 
   return true;
+}
+
+template <typename _Key, typename _Value, typename Policy>
+template <typename Cb>
+auto DashTable<_Key, _Value, Policy>::VisitSegment(Cursor cursor, Cb cb) -> Cursor {
+  uint32_t sid = cursor.segment_id(global_depth_);
+  if (sid >= segment_.size())
+    return Cursor::end();
+
+  auto* seg = segment_[sid];
+  sid = seg->segment_id();
+
+  Cursor next = Cursor::end();
+  if (const auto nid = NextSeg(sid); nid < segment_.size())
+    next = Cursor{global_depth_, static_cast<uint32_t>(nid), 0};
+
+  cb(sid, seg);
+  return next;
 }
 
 template <typename _Key, typename _Value, typename Policy>
