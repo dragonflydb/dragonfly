@@ -287,7 +287,8 @@ auto ExecuteW(Transaction* tx, F&& f,
       };
 
       es->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
-                                 pv.GetExternalSlice(), D{}, std::move(read_cb), false);
+                                 pv.GetExternalSlice(), D{}, std::move(read_cb),
+                                 tiering::ReadOptions{.read_only = false});
       return CbVariant<T>{std::move(fut)};
     }
 
@@ -561,7 +562,8 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
     };
 
     op_args.shard->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
-                                          pv.GetExternalSlice(), D{}, std::move(read_cb), false);
+                                          pv.GetExternalSlice(), D{}, std::move(read_cb),
+                                          tiering::ReadOptions{.read_only = false});
     return CbVariant<uint32_t>{std::move(fut)};
   }
 

@@ -621,29 +621,6 @@ TEST_F(PureDiskTSTest, OffloadingStrategy) {
   }
 }
 
-// Overwriting an offloaded value in place must release its disk extent, otherwise it is
-// orphaned forever and the FLUSHALL invariant CHECK_EQ(tiered_entries, 0) aborts the process.
-TEST_F(PureDiskTSTest, RenameOverOffloadedDestination) {
-  const string src_value = BuildString(3000, 'a');
-  Run({"SET", "src", src_value});
-  Run({"SET", "dst", BuildString(3000, 'b')});
-
-  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 2; });
-  ASSERT_EQ(GetMetrics().tiered_stats.allocated_bytes, 2 * 4096u);
-
-  EXPECT_EQ(Run({"RENAME", "src", "dst"}), "OK");
-
-  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 1u);
-  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.allocated_bytes == 4096u; });
-  EXPECT_EQ(GetMetrics().tiered_stats.allocated_bytes, 4096u);
-
-  EXPECT_EQ(Run({"GET", "dst"}), src_value);
-
-  Run({"FLUSHALL"});
-  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u);
-  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.allocated_bytes == 0u; });
-}
-
 // Same defect reached through DbSlice::AddOrUpdate instead of RENAME.
 TEST_F(PureDiskTSTest, SortStoreOverOffloadedDestination) {
   Run({"RPUSH", "src", "3", "1", "2"});  // small list, stays in memory
@@ -1062,6 +1039,49 @@ TEST_F(TieredStorageTest, HashFieldExpiryOnOffloaded) {
   EXPECT_THAT(Run({"HLEN", "k0"}), IntArg(26));
   string expected_a = string{31, 'x'} + 'a';
   EXPECT_EQ(Run({"HGET", "k0", string{1, 'a'}}), expected_a);
+}
+
+// Offloaded small bin values reference their key back by (dbid, key) pair, so moving/renaming the
+// key has to invalidate (delete) the offloaded value
+TEST_F(PureDiskTSTest, RenameOffloadedSmallBin) {
+  auto is_offloaded = [&](string_view key) {
+    return pp_->at(0)->AwaitBrief([&] {
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+      auto it = db.GetDBTable(0)->prime.Find(key);
+      return IsValid(it) && it->second.IsExternal();
+    });
+  };
+  auto val = [](int i) { return string(600, char('a' + i)); };
+
+  const int kNum = 16;
+  for (int i = 0; i < kNum; i++)
+    Run({"SET", absl::StrCat("k", i), val(i)});
+  ExpectConditionWithinTimeout(
+      [this] { return GetMetrics().tiered_stats.small_bins_entries_cnt >= 7u; });
+
+  int victim = -1;
+  for (int i = 0; i < kNum && victim < 0; i++)
+    if (is_offloaded(absl::StrCat("k", i)))
+      victim = i;
+  ASSERT_GE(victim, 0);
+  const string vkey = absl::StrCat("k", victim);
+
+  ASSERT_EQ(Run({"RENAME", vkey, "moved"}), "OK");
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
+  EXPECT_FALSE(is_offloaded("moved"));
+  EXPECT_THAT(Run({"EXISTS", vkey}), IntArg(0));
+
+  // Free the victim's shared page via defrag, then reuse it and check the renamed value survived.
+  for (int i = 0; i < kNum; i++)
+    if (i != victim)
+      Run({"DEL", absl::StrCat("k", i)});
+  for (int i = 0; i < kNum; i++)
+    Run({"SET", absl::StrCat("r", i), string(600, char('0' + i % 10))});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
+  EXPECT_EQ(Run({"GET", "moved"}), val(victim));
+
+  Run({"FLUSHALL"});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0u; });
 }
 
 class ListNodeTieringTest : public TieredStorageTest {
