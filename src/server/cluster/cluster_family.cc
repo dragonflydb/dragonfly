@@ -496,13 +496,47 @@ namespace {
 
 // FlushSlots calls RegisterOnChange which requires the shard lock to be held (see #7153).
 // Execute under a global transaction so the shard lock is acquired properly.
+//
+// The journal record is emitted from inside that same transaction, not from a separate pass over
+// the proactors afterwards. Replicas classify DFLYCLUSTER FLUSHSLOTS as a global command and
+// rendezvous all their flows on it through a map keyed by txid, which needs two properties the
+// separate pass could not give:
+//   1. A txid unique per flush. The pass hardcoded 0, so two records emitted close together
+//      aliased onto one map entry, every flow decremented an already-drained counter and the
+//      flows blocked forever.
+//   2. Emission that cannot interleave with flow registration. DFLY SYNC and DFLY STARTSTABLE
+//      register the streamers under Transaction::Guard, itself a global transaction, so no
+//      global transaction can run while a replica is being wired up. A proactor pass can, and a
+//      replica that registers halfway through it receives the record on some flows only - the
+//      same permanent block, reached from the other side.
+//
+// As with any journaled global command (FLUSHALL, FLUSHDB), the write can throttle for up to
+// --replication_timeout while the shard lock is held if a replica stopped draining its socket.
 void DeleteSlots(Transaction* trans, const SlotRanges& slots_ranges) {
   if (slots_ranges.Empty()) {
     return;
   }
 
+  vector<string> args;
+  args.reserve(slots_ranges.Size() * 2 + 1);
+  args.push_back("FLUSHSLOTS");
+  for (SlotRange range : slots_ranges) {
+    args.push_back(absl::StrCat(range.start));
+    args.push_back(absl::StrCat(range.end));
+  }
+  vector<string_view> args_view(args.begin(), args.end());
+
   trans->Execute(
-      [&slots_ranges](Transaction* t, EngineShard* shard) {
+      [&slots_ranges, &args_view](Transaction* t, EngineShard* shard) {
+        // Record before flushing: FlushSlots allocates, and a bad_alloc out of this callback is
+        // swallowed per shard, so flushing first would let one shard skip the record while the
+        // others already sent it. This narrows the window, it does not close it - RecordEntry
+        // allocates too.
+        // TODO: Break slot migration upon FLUSHSLOTS
+        if (shard->journal()) {
+          journal::RecordEntry(t->txid(), journal::Op::COMMAND, /* dbid= */ 0, nullopt,
+                               Payload("DFLYCLUSTER", args_view));
+        }
         namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
         return OpStatus::OK;
       },
@@ -510,44 +544,6 @@ void DeleteSlots(Transaction* trans, const SlotRanges& slots_ranges) {
 
   auto deleted = SlotSet(slots_ranges);
   channel_store->UnsubscribeAfterClusterSlotMigration(deleted);
-}
-
-void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
-  if (slot_ranges.Empty()) {
-    return;
-  }
-
-  // Build args
-  vector<string> args;
-  args.reserve(slot_ranges.Size() + 1);
-  args.push_back("FLUSHSLOTS");
-  for (SlotRange range : slot_ranges) {
-    args.push_back(absl::StrCat(range.start));
-    args.push_back(absl::StrCat(range.end));
-  }
-
-  // Build view
-  vector<string_view> args_view(args.size());
-  for (size_t i = 0; i < args.size(); ++i) {
-    args_view[i] = args[i];
-  }
-
-  auto cb = [&](auto*) {
-    EngineShard* shard = EngineShard::tlocal();
-    if (shard == nullptr) {
-      return;
-    }
-
-    if (!shard->journal()) {
-      return;
-    }
-
-    // Send journal entry
-    // TODO: Break slot migration upon FLUSHSLOTS
-    journal::RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0, nullopt,
-                         Payload("DFLYCLUSTER", args_view));
-  };
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
 }  // namespace
 
@@ -634,7 +630,6 @@ void ClusterFamily::DflyClusterConfig(CmdArgParser parser, CommandContext* cmd_c
       DeleteSlots(cmd_cntx->tx(), deleted_slots);
       LOG_IF(INFO, !deleted_slots.Empty())
           << "Flushing newly unowned slots: " << deleted_slots.ToString();
-      WriteFlushSlotsToJournal(deleted_slots);
     }
 
     // Start new migrations only after stale data is flushed. This ensures DFLYMIGRATE FLOW
@@ -998,7 +993,6 @@ void ClusterFamily::InitMigration(CmdArgParser parser, CommandContext* cmd_cntx)
         new Transaction{server_family_->service().FindCmd("DFLYCLUSTER")});
     flush_tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
     DeleteSlots(flush_tx.get(), slots);
-    WriteFlushSlotsToJournal(slots);
   }
 
   if (migration->GetState() == MigrationState::C_FATAL) {

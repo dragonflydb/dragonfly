@@ -3790,3 +3790,230 @@ async def test_slot_migration_oom_replica_rollback(df_factory):
     assert (
         replica_keys == 0
     ), f"target_replica has {replica_keys} keys but master has 0 — replica was not rolled back"
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "replication_timeout": 3000})
+async def test_repeated_flushslots_with_replica(df_factory: DflyInstanceFactory):
+    """
+    A shard being decommissioned gets a sequence of DFLYCLUSTER CONFIG pushes that each drop
+    another chunk of slots, and each push journals one `DFLYCLUSTER FLUSHSLOTS` record
+    (DeleteSlots in cluster_family.cc). The replica classifies that record as a global command
+    (TransactionData::IsGlobalCmd) and rendezvouses all flows on it through a map keyed by the
+    record's txid (MultiShardExecution::InsertTxToSharedMap), erasing the entry only once
+    every flow is done (DflyShardReplica::ExecuteTx).
+
+    The record used to be emitted by a separate pass after the flush transaction, with a
+    hardcoded txid of 0. Two pushes in quick succession were then enough for the second
+    record to find the first record's map entry still alive: emplace() returned the existing
+    entry and every flow called block->Dec() on a counter that had already reached zero. In a
+    debug build that trips DCHECK_GT(prev, 0u) in helio EmbeddedBlockingCounter::Dec and the
+    replica aborts; in a release build the DCHECK is compiled out, the uint64 counter wraps,
+    and block->Wait() never returns - the flow fibers, which are also the socket-read fibers,
+    stop draining their sockets until the master's replication_timeout kills the session.
+
+    The fix emits the record from inside the flush transaction with its real txid; the txid
+    assertions at the end of this test check that invariant directly.
+    """
+    # logbuflevel=-1 flushes every log record instead of buffering INFO for up to 30s.
+    # Both instances are SIGKILLed below, so without it the records this test greps for can
+    # still be sitting in the FILE* buffer.
+    # replica=2 turns on the per-flow rendezvous trace in DflyShardReplica::ExecuteTx, which
+    # is the only place the txid carried by a FLUSHSLOTS record is observable - the master
+    # never prints it (journal::Entry::ToString omits txid).
+    master = df_factory.create(port=next(next_port), admin_port=next(next_port), logbuflevel=-1)
+    replica = df_factory.create(
+        port=next(next_port),
+        admin_port=next(next_port),
+        logbuflevel=-1,
+        vmodule="replica=2,cluster_family=1,db_slice=1,dflycmd=1",
+    )
+    df_factory.start_all([master, replica])
+
+    c_master, c_master_admin = master.client(), master.admin_client()
+    c_replica, c_replica_admin = replica.client(), replica.admin_client()
+    master_id = await get_node_id(c_master)
+    replica_id = await get_node_id(c_replica)
+
+    def make_config(start_slot):
+        # Slots below start_slot move to a placeholder owner, so the master has to flush them.
+        dropped = (
+            ""
+            if start_slot == 0
+            else f""",
+            {{
+              "slot_ranges": [{{ "start": 0, "end": {start_slot - 1} }}],
+              "master": {{ "id": "other-master", "ip": "localhost", "port": 9000 }},
+              "replicas": []
+            }}"""
+        )
+        return f"""
+          [
+            {{
+              "slot_ranges": [{{ "start": {start_slot}, "end": 16383 }}],
+              "master": {{ "id": "{master_id}", "ip": "localhost", "port": {master.port} }},
+              "replicas": [
+                {{ "id": "{replica_id}", "ip": "localhost", "port": {replica.port} }}
+              ]
+            }}{dropped}
+          ]
+        """
+
+    await push_config(make_config(0), [c_master_admin, c_replica_admin])
+    await c_master.execute_command("debug", "populate", "100000")
+    await c_replica.execute_command("REPLICAOF", "localhost", master.port)
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.execute_command("dbsize") == 100_000
+    logging.info("stable sync reached with %d keys", await c_master.execute_command("dbsize"))
+
+    stop = False
+
+    async def write_load():
+        # Keys land on slots that are never dropped, so they must survive every flush.
+        value = "v" * 4096
+        i = 0
+        async with master.client() as c:
+            while not stop:
+                pipe = c.pipeline(transaction=False)
+                for _ in range(50):
+                    pipe.set(f"{{a}}:{i}", value)
+                    i += 1
+                try:
+                    await pipe.execute()
+                except Exception as e:
+                    logging.warning("write load error: %s", e)
+                    await asyncio.sleep(0.05)
+
+    async def probe(name, client):
+        t0 = time.perf_counter()
+        try:
+            await asyncio.wait_for(client.execute_command("PING"), timeout=5)
+            logging.info("%s answers PING in %.1f ms", name, (time.perf_counter() - t0) * 1000)
+            return True
+        except Exception as e:
+            logging.warning("%s does not answer PING: %r", name, e)
+            return False
+
+    load = asyncio.create_task(write_load())
+    master_alive = replica_alive = False
+    converged = True
+    try:
+        # Walk the ownership window forward, dropping slots back to back. Whether two records
+        # actually collide is a race - the window is the few microseconds between the last
+        # flow's counter decrement and the fastest flow's insert for the next record (both in
+        # DflyShardReplica::ExecuteTx) - so this series is a stress knob,
+        # not the detector. The txid assertions at the end of this test are the detector: they
+        # check the invariant the fix establishes and do not depend on the race firing.
+        pushes, step = 15, 500
+        for start in range(step, step * pushes + 1, step):
+            await push_config(make_config(start), [c_master_admin, c_replica_admin])
+            logging.info("pushed config owning slots %d-16383", start)
+
+        stop = True
+        # The flag is only checked between iterations and nothing bounds this test otherwise
+        # (no pytest-timeout in tests/pytest.ini), so do not wait on an in-flight pipeline
+        # forever if the master ever stops answering.
+        try:
+            await asyncio.wait_for(load, timeout=30)
+        except asyncio.TimeoutError:
+            load.cancel()
+            await asyncio.gather(load, return_exceptions=True)
+
+        master_alive = await probe("master", c_master)
+        replica_alive = await probe("replica", c_replica)
+
+        for name, client in (("master", c_master), ("replica", c_replica)):
+            try:
+                info = await asyncio.wait_for(client.info("replication"), timeout=5)
+                keep = {
+                    k: v
+                    for k, v in info.items()
+                    if k
+                    in (
+                        "role",
+                        "master_link_status",
+                        "master_last_io_seconds_ago",
+                        "master_sync_in_progress",
+                        "connected_slaves",
+                        "slave0",
+                    )
+                }
+                logging.info("%s INFO replication: %s", name, keep)
+            except Exception as e:
+                logging.warning("%s INFO replication failed: %r", name, e)
+
+        try:
+            await asyncio.wait_for(
+                check_all_replicas_finished([c_replica], c_master, timeout=30), 45
+            )
+
+            # FlushSlots runs in a detached fiber on both sides (DbSlice::FlushSlots),
+            # so an acked journal record does not mean the keys are gone. dbsize equality on
+            # its own is not a completion signal either: both sides shrink at their own pace
+            # and assert_eventually returns on the first success, so it can accept a value the
+            # two happen to pass through. Require the dropped range to be empty on both sides
+            # first, and only then compare sizes (same shape as
+            # test_cluster_flush_slots_after_config_change).
+            dropped = f"0-{step * pushes - 1}"
+            slotinfo = ("DFLYCLUSTER", "GETSLOTINFO", "SLOTS", dropped)
+
+            @assert_eventually(timeout=30)
+            async def dropped_slots_empty():
+                m_slots, r_slots, m, r = await asyncio.gather(
+                    c_master_admin.execute_command(*slotinfo),
+                    c_replica_admin.execute_command(*slotinfo),
+                    c_master.execute_command("dbsize"),
+                    c_replica.execute_command("dbsize"),
+                )
+                m_left = sum(row[2] for row in m_slots)
+                r_left = sum(row[2] for row in r_slots)
+                assert m_left == 0, f"master still holds {m_left} keys in slots {dropped}"
+                assert r_left == 0, f"replica still holds {r_left} keys in slots {dropped}"
+                assert m == r, f"master and replica diverged across repeated FLUSHSLOTS: {m} vs {r}"
+                logging.info("after the flush sequence: master dbsize=%d replica dbsize=%d", m, r)
+
+            await dropped_slots_empty()
+        except AssertionError:
+            raise
+        except Exception as e:
+            converged = False
+            logging.warning("replication never converged after the flush sequence: %r", e)
+    finally:
+        stop = True
+        load.cancel()
+        await asyncio.gather(load, return_exceptions=True)
+        # A wedged replica ignores SIGTERM, and the fixture's graceful stop would then burn
+        # ~125s per instance before killing. Never let that mask the real failure.
+        master.stop(kill=True)
+        replica.stop(kill=True)
+
+    def hits(inst, pat):
+        return sorted({l.strip() for l in inst.find_in_logs(pat)})
+
+    timeouts = hits(master, "Stream timed out")
+    disconnects = hits(master, "Disconnecting from replica")
+    logging.info("RESULT stream_timeouts=%d master_disconnects=%d", len(timeouts), len(disconnects))
+    for line in timeouts:
+        logging.info("  MASTER %s", line)
+    logging.info(
+        "RESULT master_alive=%s replica_alive=%s converged=%s",
+        master_alive,
+        replica_alive,
+        converged,
+    )
+
+    # The invariant the fix establishes, checked directly and without relying on the race:
+    # every FLUSHSLOTS record carries the flush transaction's own txid, so each flush shows up
+    # under exactly one non-zero txid. A revert to the hardcoded txid 0 collapses this to
+    # {0}; emitting the record outside the transaction so each shard picks its own txid blows
+    # it up to pushes * num_flows. Both are caught.
+    txid_re = r"Execute txid: (\d+) waiting for data in all shards"
+    txids = [int(re.search(txid_re, l).group(1)) for l in hits(replica, txid_re)]
+    logging.info("RESULT flushslots_txids=%s", sorted(set(txids)))
+    assert txids, "replica logged no global-command rendezvous - is vmodule=replica=2 set?"
+    assert 0 not in txids, "FLUSHSLOTS was journaled with txid 0"
+    assert (
+        len(set(txids)) == pushes
+    ), f"expected one distinct txid per FLUSHSLOTS, got {sorted(set(txids))}"
+
+    assert not timeouts, "replication stalled past replication_timeout during repeated FLUSHSLOTS"
+    assert converged, "replication never converged after repeated FLUSHSLOTS"
