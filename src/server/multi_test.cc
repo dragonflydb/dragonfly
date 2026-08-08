@@ -40,13 +40,13 @@ namespace {
 constexpr unsigned kPoolThreadCount = 4;
 
 const char kKey1[] = "x";
-const char kKey2[] = "b";
+const char kKey2[] = "u";
 const char kKey3[] = "c";
-const char kKey4[] = "y";
+const char kKey4[] = "j";
 
-const char kKeySid0[] = "x";
-const char kKeySid1[] = "c";
-const char kKeySid2[] = "b";
+const char kKeySid0[] = "a";
+const char kKeySid1[] = "i";
+const char kKeySid2[] = "c";
 
 }  // namespace
 
@@ -521,21 +521,21 @@ TEST_F(MultiTest, MultiCommandsWithBonusKeys) {
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_multi_exec_squash, true);
 
-  EXPECT_EQ(Shard("za", shard_set->size()), Shard("zb", shard_set->size()));
-  EXPECT_EQ(Shard("zb", shard_set->size()), Shard("ze", shard_set->size()));
+  EXPECT_EQ(Shard("a", shard_set->size()), Shard("f", shard_set->size()));
+  EXPECT_EQ(Shard("f", shard_set->size()), Shard("h", shard_set->size()));
 
   // Check bonus keys are correctly processed with squashing
   Run({"multi"});
-  Run({"zadd", "za", "1", "a", "2", "b"});
-  Run({"zadd", "zb", "2", "b", "3", "c"});
-  Run({"zinterstore", "ze", "2", "za", "zb"});
+  Run({"zadd", "a", "1", "a", "2", "b"});
+  Run({"zadd", "f", "2", "b", "3", "c"});
+  Run({"zinterstore", "h", "2", "a", "f"});
   auto resp = Run({"exec"});
   EXPECT_THAT(resp.GetVec()[2], IntArg(1));
-  EXPECT_THAT(Run({"zcard", "ze"}), IntArg(1));
+  EXPECT_THAT(Run({"zcard", "h"}), IntArg(1));
 
   // Check squashing correctly pre-validates commands
   Run({"multi"});
-  Run({"zinterstore", "ze", "2", "za", "zb", "z one extra"});
+  Run({"zinterstore", "h", "2", "a", "f", "z one extra"});
   resp = Run({"exec"});
   EXPECT_THAT(resp, RespElementsAre(ErrArg("syntax error")));
 }
@@ -1379,16 +1379,16 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
     LOG(INFO) << key << ": shard " << Shard(key, shard_set->size());
   }
 
-  Run({"mget", "x5", "x8", "x9", "x13", "x16", "x17"});
+  Run({"mget", "a", "f", "g", "h", "l", "m"});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
 
   auto fb1 = pp_->at(1)->LaunchFiber(Launch::post, [&] {
     // Runs multi on shard0 1000 times.
     for (unsigned j = 0; j < 1000; ++j) {
       Run({"multi"});
-      Run({"incrby", "x13", "1"});
-      Run({"incrby", "x16", "1"});
-      Run({"incrby", "x17", "1"});
+      Run({"incrby", "h", "1"});
+      Run({"incrby", "l", "1"});
+      Run({"incrby", "m", "1"});
       Run({"exec"});
     }
   });
@@ -1397,9 +1397,9 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
     // Runs multi on shard0 1000 times.
     for (unsigned j = 0; j < 1000; ++j) {
       Run({"multi"});
-      Run({"incrby", "x5", "1"});
-      Run({"incrby", "x8", "1"});
-      Run({"incrby", "x9", "1"});
+      Run({"incrby", "a", "1"});
+      Run({"incrby", "f", "1"});
+      Run({"incrby", "g", "1"});
       Run({"exec"});
     }
   });
@@ -1422,7 +1422,7 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
 
   bool success = pp_->at(0)->Await([&]() -> bool {
     for (unsigned j = 0; j < 1000; ++j) {
-      auto resp = Run({"mget", "x5", "x8", "x9", "x13", "x16", "x17"});
+      auto resp = Run({"mget", "a", "f", "g", "h", "l", "m"});
       const RespExpr::Vec& arr = resp.GetVec();
       CHECK_EQ(6u, arr.size());
 
