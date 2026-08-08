@@ -66,7 +66,6 @@ extern "C" {
 
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
-ABSL_DECLARE_FLAG(uint32_t, list_compress_dict_threshold);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_FLAG(bool, deserialize_hnsw_index, false, "Deserialize HNSW vector index graph structure");
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
@@ -711,9 +710,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   } else {
     qlv2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
                                          GetFlag(FLAGS_list_compress_depth));
-    if (uint32_t zstd_thresh = GetFlag(FLAGS_list_compress_dict_threshold); zstd_thresh > 0) {
-      qlv2->set_compr_threshold(zstd_thresh);
-    }
+    qlv2->set_compr_policy(QList::PolicyFromFlags());
   }
 
   auto cleanup = absl::Cleanup([&] {
