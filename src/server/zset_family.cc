@@ -2047,7 +2047,8 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
     mapped.reserve(members.size() * 2 + 1);
     mapped.push_back(key);
     for (const auto& [score, member] : members) {
-      scores.push_back(absl::StrCat(score));
+      char buf[64];
+      scores.emplace_back(RedisReplyBuilder::FormatDouble(score, buf, sizeof(buf)));
       mapped.push_back(scores.back());
       mapped.push_back(member);
     }

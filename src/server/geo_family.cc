@@ -109,6 +109,7 @@ struct GeoSearchParse {
   optional<GeoSearchSource> source;
   string_view member;
   GeoShape shape{};
+  bool storedist = false;
 };
 
 bool ValidateLongLat(double longitude, double latitude) {
@@ -288,6 +289,15 @@ constexpr auto kGeoSearchGrammar = Compile(Options(
     Into(&GeoSearchParse::geo_ops, Exist("WITHCOORD", &GeoSearchOpts::withcoord)),
     Into(&GeoSearchParse::geo_ops, Exist("WITHDIST", &GeoSearchOpts::withdist)),
     Into(&GeoSearchParse::geo_ops, Exist("WITHHASH", &GeoSearchOpts::withhash))));
+
+constexpr auto kGeoSearchStoreGrammar = Compile(Options(
+    OneOf(kFromMemberLonglatErr, Action("FROMMEMBER", ParseGeoSearchFromMember),
+          Action<GeoSearchParse>("FROMLONLAT", ParseLongLat)),
+    OneOf(kByRadiusBoxErr, Action("BYRADIUS", ParseGeoSearchByRadius),
+          Action("BYBOX", ParseGeoSearchByBox)),
+    Into(&GeoSearchParse::geo_ops, OneOf(kAscDescErr, Map(&GeoSearchOpts::sorting, "ASC",
+                                                          Sorting::kAsc, "DESC", Sorting::kDesc))),
+    Action("COUNT", ParseGeoSearchCount), Exist("STOREDIST", &GeoSearchParse::storedist)));
 
 void CmdGeoAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
@@ -476,6 +486,47 @@ std::vector<ZSetFamily::ZRangeSpec> GetGeoRangeSpec(const GeoHashRadius& n) {
   return range_specs;
 }
 
+bool IsGeoStoreMode(const GeoSearchOpts& geo_ops) {
+  return geo_ops.store == GeoStoreType::kStoreHash || geo_ops.store == GeoStoreType::kStoreDist;
+}
+
+OpStatus GeoStoreToDest(Transaction* tx, string_view dest_key,
+                        const vector<ScoredMemberView>& smvec, RedisReplyBuilder* rb) {
+  OpResult<ZSetFamily::AddResult> add_result;
+  ShardId dest_shard = Shard(dest_key, shard_set->size());
+  auto store_cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() == dest_shard) {
+      add_result = ZSetFamily::OpAdd(t->GetOpArgs(shard),
+                                     ZSetFamily::ZParams{.override = true, .journal_update = true},
+                                     dest_key, ScoredMemberSpan{smvec});
+      if (add_result.status() == OpStatus::OUT_OF_MEMORY) {
+        return OpStatus::OUT_OF_MEMORY;
+      }
+    }
+    return OpStatus::OK;
+  };
+  tx->Execute(std::move(store_cb), true);
+
+  if (!add_result) {
+    rb->SendError(add_result.status());
+    return add_result.status();
+  }
+
+  rb->SendLong(smvec.size());
+  return OpStatus::OK;
+}
+
+OpStatus GeoStoreEmptyDest(Transaction* tx, string_view dest_key, RedisReplyBuilder* rb) {
+  return GeoStoreToDest(tx, dest_key, {}, rb);
+}
+
+void FinalizeGeoSearchCount(GeoSearchOpts* geo_ops) {
+  if (geo_ops->count != UINT64_MAX && geo_ops->sorting == Sorting::kUnsorted && !geo_ops->any) {
+    geo_ops->sorting = Sorting::kAsc;
+  }
+  geo_ops->count = (geo_ops->count == UINT64_MAX) ? 0 : geo_ops->count;
+}
+
 void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
   if (sorting == Sorting::kUnsorted) {
     if (count && ga->size() > count) {
@@ -522,6 +573,10 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
     tx->Execute(std::move(cb), false);
     auto member_sts = member_score.status();
     if (member_sts != OpStatus::OK) {
+      if (member_sts == OpStatus::KEY_NOTFOUND && IsGeoStoreMode(geo_ops)) {
+        GeoStoreEmptyDest(tx, geo_ops.store_key, rb);
+        return;
+      }
       tx->Conclude();
       switch (member_sts) {
         case OpStatus::WRONG_TYPE:
@@ -547,6 +602,10 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
     tx->Execute(std::move(cb), false);
     auto result_sts = result.status();
     if (result_sts != OpStatus::OK) {
+      if (result_sts == OpStatus::KEY_NOTFOUND && IsGeoStoreMode(geo_ops)) {
+        GeoStoreEmptyDest(tx, geo_ops.store_key, rb);
+        return;
+      }
       tx->Conclude();
       switch (result_sts) {
         case OpStatus::WRONG_TYPE:
@@ -633,10 +692,6 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
   } else {
     // case 3: write mode, !kNoStore
     DCHECK(geo_ops.store == GeoStoreType::kStoreDist || geo_ops.store == GeoStoreType::kStoreHash);
-    ShardId dest_shard = Shard(geo_ops.store_key, shard_set->size());
-    DVLOG(1) << "store shard:" << dest_shard << ", key " << geo_ops.store_key;
-
-    OpResult<ZSetFamily::AddResult> add_result;
     vector<ScoredMemberView> smvec;
     for (const auto& p : ga) {
       if (geo_ops.store == GeoStoreType::kStoreDist) {
@@ -646,21 +701,9 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
         smvec.emplace_back(p.score, p.member);
       }
     }
-
-    auto store_cb = [&](Transaction* t, EngineShard* shard) {
-      if (shard->shard_id() == dest_shard) {
-        ZSetFamily::ZParams zparams;
-        zparams.override = true;
-        add_result = ZSetFamily::OpAdd(t->GetOpArgs(shard), zparams, geo_ops.store_key,
-                                       ScoredMemberSpan{smvec})
-                         .value();
-      }
-      return OpStatus::OK;
-    };
-
-    tx->Execute(std::move(store_cb), true);
-
-    rb->SendLong(smvec.size());
+    if (GeoStoreToDest(tx, geo_ops.store_key, smvec, rb) != OpStatus::OK) {
+      return;
+    }
   }
 }
 
@@ -683,12 +726,40 @@ void CmdGeoSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     return builder->SendError(kCountError);
   }
 
-  st.geo_ops.count = (st.geo_ops.count == UINT64_MAX) ? 0 : st.geo_ops.count;
+  FinalizeGeoSearchCount(&st.geo_ops);
   optional<string_view> member;
   if (*st.source == GeoSearchSource::kMember) {
     member = st.member;
   }
   GeoSearchStoreGeneric(cmd_cntx->tx(), builder, st.shape, key, member, st.geo_ops);
+}
+
+void CmdGeoSearchStore(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* builder = cmd_cntx->rb();
+
+  string_view dest = parser.Next();
+  string_view src = parser.Next();
+  auto st = kGeoSearchStoreGrammar.Apply(&parser);
+
+  if (HandleGeoParserFinalize(st.shape, &parser, cmd_cntx)) {
+    return;
+  }
+
+  if (!st.source || st.shape.type == 0) {
+    return builder->SendError(kSyntaxErr);
+  } else if (st.geo_ops.count == 0) {
+    return builder->SendError(kCountError);
+  }
+
+  st.geo_ops.store = st.storedist ? GeoStoreType::kStoreDist : GeoStoreType::kStoreHash;
+  st.geo_ops.store_key = dest;
+  FinalizeGeoSearchCount(&st.geo_ops);
+
+  optional<string_view> member;
+  if (*st.source == GeoSearchSource::kMember) {
+    member = st.member;
+  }
+  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, st.shape, src, member, st.geo_ops);
 }
 
 void GeoRadiusByMemberGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool read_only) {
@@ -714,7 +785,7 @@ void GeoRadiusByMemberGeneric(CmdArgParser parser, CommandContext* cmd_cntx, boo
     return builder->SendError(kStoreCompatByMemberErr);
   }
 
-  geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
+  FinalizeGeoSearchCount(&geo_ops);
   GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, optional<string_view>{member},
                         geo_ops);
 }
@@ -743,7 +814,7 @@ void GeoRadiusGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool read_o
     return builder->SendError(kStoreCompatRadErr);
   }
 
-  geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
+  FinalizeGeoSearchCount(&geo_ops);
   GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, nullopt, geo_ops);
 }
 
@@ -769,16 +840,20 @@ void CmdGeoRadiusRO(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void RegisterGeoFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::GEO);
-  *registry << CI{"GEOADD", CO::JOURNALED | CO::DENYOOM, -5, 1, 1}.HFUNC(GeoAdd)
-            << CI{"GEOHASH", CO::READONLY, -2, 1, 1}.HFUNC(GeoHash)
-            << CI{"GEOPOS", CO::READONLY, -2, 1, 1}.HFUNC(GeoPos)
-            << CI{"GEODIST", CO::READONLY, -4, 1, 1}.HFUNC(GeoDist)
-            << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1}.HFUNC(GeoSearch)
-            << CI{"GEORADIUSBYMEMBER", CO::JOURNALED | CO::STORE_LAST_KEY, -5, 1, 1}.HFUNC(
-                   GeoRadiusByMember)
-            << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1}.HFUNC(GeoRadiusByMemberRO)
-            << CI{"GEORADIUS", CO::JOURNALED | CO::STORE_LAST_KEY, -6, 1, 1}.HFUNC(GeoRadius)
-            << CI{"GEORADIUS_RO", CO::READONLY, -6, 1, 1}.HFUNC(GeoRadiusRO);
+  *registry
+      << CI{"GEOADD", CO::JOURNALED | CO::DENYOOM, -5, 1, 1}.HFUNC(GeoAdd)
+      << CI{"GEOHASH", CO::READONLY, -2, 1, 1}.HFUNC(GeoHash)
+      << CI{"GEOPOS", CO::READONLY, -2, 1, 1}.HFUNC(GeoPos)
+      << CI{"GEODIST", CO::READONLY, -4, 1, 1}.HFUNC(GeoDist)
+      << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1}.HFUNC(GeoSearch)
+      << CI{"GEOSEARCHSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -8, 1, 2}.HFUNC(
+             GeoSearchStore)
+      << CI{"GEORADIUSBYMEMBER", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -5, 1, 1}
+             .HFUNC(GeoRadiusByMember)
+      << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1}.HFUNC(GeoRadiusByMemberRO)
+      << CI{"GEORADIUS", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -6, 1, 1}.HFUNC(
+             GeoRadius)
+      << CI{"GEORADIUS_RO", CO::READONLY, -6, 1, 1}.HFUNC(GeoRadiusRO);
 }
 
 }  // namespace dfly

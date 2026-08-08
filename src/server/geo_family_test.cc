@@ -198,6 +198,95 @@ TEST_F(GeoFamilyTest, GeoSearchNaNCoord) {
   EXPECT_THAT(resp, ErrArg("invalid longitude,latitude pair"));
 }
 
+TEST_F(GeoFamilyTest, GeoSearchStore) {
+  Run({"GEOADD", "points", "13.361389", "38.115556", "Palermo", "15.087269", "37.502669",
+       "Catania"});
+
+  EXPECT_EQ(2, CheckedInt({"GEOSEARCHSTORE", "points2", "points", "FROMLONLAT", "13.361389",
+                           "38.115556", "BYRADIUS", "500", "KM"}));
+  auto resp = Run({"ZRANGE", "points2", "0", "-1"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Palermo", "Catania")));
+
+  EXPECT_EQ(2, CheckedInt({"GEOSEARCHSTORE", "points_dist", "points", "FROMLONLAT", "13.361389",
+                           "38.115556", "BYRADIUS", "500", "KM", "STOREDIST"}));
+  resp = Run({"ZRANGE", "points_dist", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("Palermo", DoubleArg(0), "Catania", DoubleArg(166.274152))));
+
+  resp = Run({"GEOSEARCHSTORE", "points2", "invalid_key", "FROMLONLAT", "13.361389", "38.115556",
+              "BYRADIUS", "500", "KM"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"EXISTS", "points2"}), IntArg(0));
+
+  Run({"SET", "points2", "hello"});
+  resp = Run({"GEOSEARCHSTORE", "points2", "invalid_key", "FROMLONLAT", "13.361389", "38.115556",
+              "BYRADIUS", "500", "KM"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"EXISTS", "points2"}), IntArg(0));
+
+  resp = Run({"GEOSEARCHSTORE", "points2", "points", "FROMMEMBER", "invalid_member", "BYRADIUS",
+              "500", "KM"});
+  EXPECT_THAT(resp, ErrArg("could not decode requested zset member"));
+
+  resp = Run({"GEOSEARCHSTORE", "points2", "points", "FROMLONLAT", "13.361389", "38.115556",
+              "BYRADIUS", "50", "KM", "STORE", "points2"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"GEOSEARCHSTORE", "points2", "points", "FROMLONLAT", "13.361389", "38.115556",
+              "BYRADIUS", "500", "KM", "WITHDIST"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  EXPECT_EQ(1, CheckedInt({"GEOSEARCHSTORE", "points2", "points", "FROMLONLAT", "13.361389",
+                           "38.115556", "BYRADIUS", "500", "KM", "COUNT", "1"}));
+  resp = Run({"ZRANGE", "points2", "0", "-1"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Palermo")));
+
+  EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
+                            "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
+                            "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
+                            "52.3702", "Amsterdam", "10.7522", "59.9139", "Oslo",     "23.7275",
+                            "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
+                            "53.3498", "Dublin"}));
+  EXPECT_EQ(2, CheckedInt({"GEOSEARCHSTORE", "europe_near", "Europe", "FROMMEMBER", "Madrid",
+                           "BYRADIUS", "700", "KM"}));
+  resp = Run({"ZRANGE", "europe_near", "0", "-1"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "Lisbon")));
+
+  resp = Run({"GEOSEARCHSTORE", "europe_box", "Europe", "FROMLONLAT", "13.4050", "52.5200", "BYBOX",
+              "1000", "1000", "KM"});
+  EXPECT_GE(CheckedInt({"ZCARD", "europe_box"}), 1);
+
+  resp = Run({"GEOSEARCHSTORE", "points2", "points", "FROMLONLAT", "13.361389", "38.115556",
+              "BYRADIUS", "1", "KM", "COUNT", "0"});
+  EXPECT_THAT(resp, ErrArg("ERR COUNT must be > 0"));
+}
+
+TEST_F(GeoFamilyTest, GeoSearchStoreScoresMatchGeoRadiusStore) {
+  EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
+                            "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
+                            "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
+                            "52.3702", "Amsterdam", "10.7522", "59.9139", "Oslo",     "23.7275",
+                            "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
+                            "53.3498", "Dublin"}));
+
+  EXPECT_EQ(
+      2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STORE", "gr_store"}));
+  EXPECT_EQ(2, CheckedInt({"GEOSEARCHSTORE", "gr_search", "Europe", "FROMMEMBER", "Madrid",
+                           "BYRADIUS", "700", "KM"}));
+
+  auto store_scores = Run({"ZRANGE", "gr_store", "0", "-1", "WITHSCORES"});
+  auto search_scores = Run({"ZRANGE", "gr_search", "0", "-1", "WITHSCORES"});
+  EXPECT_EQ(StrArray(search_scores), StrArray(store_scores));
+
+  EXPECT_EQ(2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STOREDIST",
+                           "gr_dist_store"}));
+  EXPECT_EQ(2, CheckedInt({"GEOSEARCHSTORE", "gr_dist_search", "Europe", "FROMMEMBER", "Madrid",
+                           "BYRADIUS", "700", "KM", "STOREDIST"}));
+  auto dist_store = Run({"ZRANGE", "gr_dist_store", "0", "-1", "WITHSCORES"});
+  auto dist_search = Run({"ZRANGE", "gr_dist_search", "0", "-1", "WITHSCORES"});
+  EXPECT_EQ(StrArray(dist_search), StrArray(dist_store));
+}
+
 TEST_F(GeoFamilyTest, GeoRadiusByMember) {
   EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
                             "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
@@ -210,7 +299,7 @@ TEST_F(GeoFamilyTest, GeoRadiusByMember) {
   EXPECT_THAT(resp.GetVec().empty(), true);
 
   resp = Run({"GEORADIUSBYMEMBER", "invalid_key", "Madrid", "900", "KM", "STORE", "store_key"});
-  EXPECT_THAT(resp.GetVec().empty(), true);
+  EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"GEORADIUSBYMEMBER", "Europe", "invalid_mem", "900", "KM", "STORE", "store_key"});
   EXPECT_THAT(resp, ErrArg("could not decode requested zset member"));
@@ -360,7 +449,7 @@ TEST_F(GeoFamilyTest, GeoRadius) {
   EXPECT_THAT(resp, ErrArg("ERR COUNT must be > 0"));
 
   resp = Run("GEORADIUS Sicily 15 37 200 km COUNT 1");
-  EXPECT_THAT(resp, RespElementsAre("Agrigento"));
+  EXPECT_THAT(resp, RespElementsAre("Catania"));
 
   auto err =
       "ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORDS options"sv;
