@@ -1467,13 +1467,8 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
     }
   }
 
-  auto obj_type = it->second.ObjType();
-  if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
-    doc_del_cb_(key, cntx, it->second);
-  }
-
-  const_cast<DbSlice*>(this)->PerformDeletionAtomic(Iterator(it, StringOrView::FromView(key)),
-                                                    db.get());
+  // Route through Del so that expiry runs the same per-type hooks as an explicit DEL.
+  const_cast<DbSlice*>(this)->Del(cntx, Iterator(it, StringOrView::FromView(key)), db.get());
 
   ++events_.expired_keys;
   db->stats.events.expired_keys++;
@@ -1589,15 +1584,22 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     checked++;
 
     string_view key = it->first.GetSlice(&stash);
-    if (!CheckLock(IntentLock::EXCLUSIVE, cntx.db_index, key))
-      return;
 
     int64_t ttl = it->first.GetExpireTime() - cntx.time_now_ms;
-    if (ttl <= 0) {
-      result.deleted_bytes += it->first.MallocUsed() + it->second.MallocUsed();
-      ExpireIfNeeded(cntx, it, &result.key_events);
-      ++result.deleted;
+    if (ttl > 0)
+      return;
+
+    if (!CheckLock(IntentLock::EXCLUSIVE, cntx.db_index, key)) {
+      // A client blocked on this key holds the lock itself, so we can never expire it here.
+      // Wake it instead: its readiness check lazily expires the key.
+      if (auto* bc = ns_->GetBlockingController(owner_->shard_id()); bc)
+        bc->Awaken(cntx.db_index, key);
+      return;
     }
+
+    result.deleted_bytes += it->first.MallocUsed() + it->second.MallocUsed();
+    ExpireIfNeeded(cntx, it, &result.key_events);
+    ++result.deleted;
   };
 
   unsigned i = 0;

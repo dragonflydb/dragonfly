@@ -565,6 +565,55 @@ TEST_F(StreamFamilyTest, XReadBlockStaysBlockedOnDeletedStream) {
   EXPECT_THAT(stream_resp[1].GetVec()[0].GetVec(), ElementsAre("2-0", ArrLen(2)));
 }
 
+// A blocked XREADGROUP must be woken when its stream expires, not only when it is deleted.
+TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnExpiredStream) {
+  Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
+  Run({"pexpire", "foo", "10"});
+
+  RespExpr resp;
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"xreadgroup", "group", "group", "alice", "block", "0", "streams", "foo", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  // Touching the key lazily expires it, dropping the stream and its consumer group.
+  AdvanceTime(100);
+  pp_->at(1)->Await([&] { return Run({"exists", "foo"}); });
+
+  bool woken = WaitUntilCondition([&] { return !IsConnBlocked("IO0"); }, 2000ms);
+  if (!woken) {
+    // Release the reader so that the test fails cleanly instead of hanging on Join().
+    pp_->at(1)->Await([&] { return Run({"xadd", "foo", "1-0", "k", "v"}); });
+  }
+  reader.Join();
+  ASSERT_TRUE(woken) << "XREADGROUP stayed blocked although its stream expired";
+  EXPECT_THAT(resp, ErrArg("consumer group this client was blocked on no longer exists"));
+}
+
+// Active expiry cannot reclaim a key that a blocked client locks, so the heartbeat must still
+// wake the reader.
+TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnActivelyExpiredStream) {
+  Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
+  Run({"pexpire", "foo", "10"});
+
+  RespExpr resp;
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"xreadgroup", "group", "group", "alice", "block", "0", "streams", "foo", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  // No client touches the key afterwards: only the heartbeat can unblock the reader.
+  AdvanceTime(100);
+  bool woken = WaitUntilCondition([&] { return !IsConnBlocked("IO0"); }, 3000ms);
+  if (!woken) {
+    // Release the reader so that the test fails cleanly instead of hanging on Join().
+    pp_->at(1)->Await([&] { return Run({"del", "foo"}); });
+  }
+  reader.Join();
+  ASSERT_TRUE(woken) << "XREADGROUP stayed blocked although its stream expired";
+  EXPECT_THAT(resp, ErrArg("consumer group this client was blocked on no longer exists"));
+}
+
 TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnRetypedStream) {
   Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
 
