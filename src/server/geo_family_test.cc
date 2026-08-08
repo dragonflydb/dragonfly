@@ -261,6 +261,32 @@ TEST_F(GeoFamilyTest, GeoSearchStore) {
   EXPECT_THAT(resp, ErrArg("ERR COUNT must be > 0"));
 }
 
+TEST_F(GeoFamilyTest, GeoSearchStoreScoresMatchGeoRadiusStore) {
+  EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
+                            "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
+                            "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
+                            "52.3702", "Amsterdam", "10.7522", "59.9139", "Oslo",     "23.7275",
+                            "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
+                            "53.3498", "Dublin"}));
+
+  EXPECT_EQ(
+      2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STORE", "gr_store"}));
+  EXPECT_EQ(2, CheckedInt({"GEOSEARCHSTORE", "gr_search", "Europe", "FROMMEMBER", "Madrid",
+                           "BYRADIUS", "700", "KM"}));
+
+  auto store_scores = Run({"ZRANGE", "gr_store", "0", "-1", "WITHSCORES"});
+  auto search_scores = Run({"ZRANGE", "gr_search", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(search_scores.GetVec(), store_scores.GetVec());
+
+  EXPECT_EQ(2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STOREDIST",
+                           "gr_dist_store"}));
+  EXPECT_EQ(2, CheckedInt({"GEOSEARCHSTORE", "gr_dist_search", "Europe", "FROMMEMBER", "Madrid",
+                           "BYRADIUS", "700", "KM", "STOREDIST"}));
+  auto dist_store = Run({"ZRANGE", "gr_dist_store", "0", "-1", "WITHSCORES"});
+  auto dist_search = Run({"ZRANGE", "gr_dist_search", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(dist_search.GetVec(), dist_store.GetVec());
+}
+
 TEST_F(GeoFamilyTest, GeoRadiusByMember) {
   EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
                             "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",

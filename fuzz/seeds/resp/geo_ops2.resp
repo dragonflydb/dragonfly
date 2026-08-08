@@ -91,7 +91,7 @@ ASC
 *10
 $14
 GEOSEARCHSTORE
-$4
+$5
 gdst2
 $3
 gx1
@@ -109,10 +109,10 @@ $2
 km
 $9
 STOREDIST
-*9
+*8
 $14
 GEOSEARCHSTORE
-$4
+$5
 gdst3
 $3
 gx1
