@@ -939,6 +939,15 @@ cleanup() {
 
     if [[ -n "$SERVER_PID" ]]; then
         kill "$SERVER_PID" 2>/dev/null || true
+        local i=0
+        while kill -0 "$SERVER_PID" 2>/dev/null && (( i < 40 )); do
+            sleep 0.15
+            i=$(( i + 1 ))
+        done
+        if kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "[!] ${SERVER_TYPE} didn't exit during cleanup, sending SIGKILL"
+            kill -9 "$SERVER_PID" 2>/dev/null || true
+        fi
         wait "$SERVER_PID" 2>/dev/null || true
         SERVER_PID=""
     fi
