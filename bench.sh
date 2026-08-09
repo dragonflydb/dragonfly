@@ -1651,7 +1651,7 @@ run_pubsub_bench() {
             if [[ -n "$REMOTE_MODE" ]]; then
             ssh -n -o ControlMaster=no -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
                 "${SSH_USER}@${CLIENT_IP}" \
-                "redis-cli -h $SERVER_IP -p $PORT SUBSCRIBE bench_chan > /dev/null 2>&1" &
+                "timeout 75 redis-cli -h $SERVER_IP -p $PORT SUBSCRIBE bench_chan > /dev/null 2>&1" &
             else
                 $CLIENT_TASKSET redis-cli -p $PORT SUBSCRIBE bench_chan > /dev/null 2>&1 &
             fi
@@ -1699,18 +1699,13 @@ run_pubsub_bench() {
             kill "$pid" 2>/dev/null || true
         done
 
-        if [[ -n "$REMOTE_MODE" ]]; then
-            # Kill all redis-cli on client. -n prevents ssh from stealing stdin.
-            ssh -n -o ConnectTimeout=3 -o ControlMaster=no \
-                "${SSH_USER}@${CLIENT_IP}" "pkill -9 redis-cli" 2>/dev/null || true
-        fi
-
-        # Watchdog: if SSH proxy processes hang, force-kill after 2s.
-        ( sleep 2; kill -9 "${SUB_PIDS[@]}" 2>/dev/null || true ) &
-        local watchdog_pid=$!
-
-        wait "${SUB_PIDS[@]}" 2>/dev/null || true
-        kill "$watchdog_pid" 2>/dev/null || true
+        # Do not wait for SSH subscriber wrappers: a disconnected wrapper can remain
+        # alive indefinitely even after SIGKILL. Each remote subscriber has a 75s cap,
+        # and the local wrapper exits when its server-side connection closes.
+        sleep 1
+        for pid in "${SUB_PIDS[@]}"; do
+            kill -9 "$pid" 2>/dev/null || true
+        done
         SUB_PIDS=()
 
         echo -e "${PIPELINE}\t${RPS}\t${PUB_P50}\t${SEND_DELTA}\t${num_subs}" >> "$RESULTS_TMP"
