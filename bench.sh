@@ -124,6 +124,14 @@ Environment variables (for cross-machine benchmarking):
                 SET uses the async dispatch path; ZADD uses the synchronous path
                 (the connection blocks until the shard completes each command).
                 Both multi_conn and single_conn modes respect this variable.
+  RATIO:        SET:GET ratio for default memtier SET workloads (default: 1:0).
+                A ratio with GETs (for example 0:1 or 1:10) first populates a
+                small deterministic keyspace, then benchmarks only that populated
+                range so GET replies contain real values. Ignored by pubsub and
+                unavailable with CMD=zadd or MEMTIER_ARGS. Example: RATIO=1:10 PREFILL_KEYS=10000
+  PREFILL_KEYS: Number of keys populated before a GET-containing RATIO (default:
+                10000). The same bounded range is used by the measured workload.
+                This is ignored for RATIO=1:0 and when MEMTIER_ARGS is supplied.
   EXTRA_SERVER_FLAGS: Additional flags passed verbatim to the server binary on every
                 invocation. Works for all SERVER_TYPE values.
                 For dragonfly/ok_backend: appended after all script-managed flags.
@@ -354,7 +362,8 @@ run_batch_mode() {
     fi
     # Per-run knobs must live on each line, not in the global environment, so one
     # run's settings never silently leak into every other run.
-    local -a forbidden=(SERVER_TYPE VALKEY_IO_THREADS PIPELINE CMD EXTRA_SERVER_FLAGS
+    local -a forbidden=(SERVER_TYPE VALKEY_IO_THREADS PIPELINE CMD RATIO PREFILL_KEYS
+                        PREFILL_PIPELINE EXTRA_SERVER_FLAGS
                         MEMTIER_ARGS REDIS_CLI_ARGS NUM_RUNS BENCH_DURATION
                         CLIENT_TIMEOUT CLIENT_DELAY_US SERVER_METRICS_PORT SERVER_LOG_DIR
                         METRICS_DIR)
@@ -648,6 +657,9 @@ CLIENT_DELAY_US=${CLIENT_DELAY_US:-0}
 PIPELINE_FILTER=${PIPELINE:-""}
 CMD=${CMD:-"set"}
 BENCH_DURATION=${BENCH_DURATION:-15}
+RATIO=${RATIO:-"1:0"}
+PREFILL_KEYS=${PREFILL_KEYS:-10000}
+PREFILL_PIPELINE=${PREFILL_PIPELINE:-100}
 
 # Value size in bytes. For single_conn/multi_conn this is memtier's -d (the SET
 # value size); for pubsub it is the published message length. Lets a batch line
@@ -679,6 +691,41 @@ KEY_MAXIMUM=${KEY_MAXIMUM:-1000000}
 MEMTIER_KEYMAX_ARGS=()
 if [[ -n "$KEY_MAXIMUM" && "$KEY_MAXIMUM" != "0" && "$KEY_MAXIMUM" != "off" ]]; then
     MEMTIER_KEYMAX_ARGS=(--key-maximum="$KEY_MAXIMUM")
+fi
+
+# Parse the default memtier SET:GET ratio. A GET-containing workload must use a
+# prefilled bounded range; otherwise random GETs would primarily benchmark misses.
+if ! [[ "$RATIO" =~ ^([0-9]+):([0-9]+)$ ]] || (( ${BASH_REMATCH[1]} == 0 && ${BASH_REMATCH[2]} == 0 )); then
+    echo "[!] Error: RATIO must be SET:GET with at least one non-zero side (for example 1:0, 0:1, 1:10)."
+    echo "    Got: '$RATIO'"
+    exit 1
+fi
+RATIO_GET_COUNT=${BASH_REMATCH[2]}
+RATIO_HAS_GETS=0
+(( RATIO_GET_COUNT > 0 )) && RATIO_HAS_GETS=1
+
+if ! [[ "$PREFILL_KEYS" =~ ^[0-9]+$ ]] || (( PREFILL_KEYS < 1 )); then
+    echo "[!] Error: PREFILL_KEYS must be a positive integer. Got: '$PREFILL_KEYS'"
+    exit 1
+fi
+if ! [[ "$PREFILL_PIPELINE" =~ ^[0-9]+$ ]] || (( PREFILL_PIPELINE < 1 )); then
+    echo "[!] Error: PREFILL_PIPELINE must be a positive integer. Got: '$PREFILL_PIPELINE'"
+    exit 1
+fi
+if [[ "$CMD" != "set" && "$RATIO" != "1:0" ]]; then
+    echo "[!] Error: RATIO applies only to CMD=set; CMD=$CMD uses its own workload definition."
+    exit 1
+fi
+if [[ -n "${MEMTIER_ARGS:-}" && "$RATIO" != "1:0" ]]; then
+    echo "[!] Error: RATIO cannot be combined with MEMTIER_ARGS, which defines its own command mix."
+    exit 1
+fi
+
+# The read-containing workload and its prefill share exactly this inclusive key
+# range. Keeping it small makes prefill a short setup step rather than a benchmark.
+MEMTIER_BENCH_KEY_ARGS=("${MEMTIER_KEYMAX_ARGS[@]}")
+if (( RATIO_HAS_GETS )); then
+    MEMTIER_BENCH_KEY_ARGS=(--key-minimum=1 --key-maximum="$PREFILL_KEYS")
 fi
 
 # --- Server memory safety net (--maxmemory) --------------------------------
@@ -1295,6 +1342,51 @@ start_server() {
     verify_metrics_endpoint
 }
 
+# Populate the exact small key range used by a read-containing default workload.
+# A single pipelined client avoids turning setup into a second saturation benchmark.
+prefill_read_keyspace() {
+    local target=$1 data_size=$2
+    (( RATIO_HAS_GETS )) || return 0
+    [[ -z "${MEMTIER_ARGS:-}" ]] || return 0
+
+    local -a prefill_cmd=(memtier_benchmark
+        -s "$target"
+        -p "$PORT"
+        -t 1
+        -c 1
+        -n "$PREFILL_KEYS"
+        --pipeline="$PREFILL_PIPELINE"
+        --ratio=1:0
+        -d "$data_size"
+        --key-pattern=S:S
+        --key-minimum=1
+        --key-maximum="$PREFILL_KEYS"
+        --key-prefix=bench
+        --hide-histogram)
+
+    echo "  [prefill] ${PREFILL_KEYS} keys, ${data_size}B values, pipeline=${PREFILL_PIPELINE}"
+    if [[ -n "$REMOTE_MODE" ]]; then
+        echo "  [prefill cmd] ssh ${SSH_USER}@${CLIENT_IP} ${prefill_cmd[*]}"
+    else
+        echo "  [prefill cmd] $CLIENT_TASKSET ${prefill_cmd[*]}"
+    fi
+
+    local output
+    if ! output=$(run_on_client "${prefill_cmd[@]}" 2>&1); then
+        echo "[!] Error: keyspace prefill failed."
+        echo "$output"
+        return 1
+    fi
+    local dbsize
+    dbsize=$(redis-cli -p "$PORT" DBSIZE 2>/dev/null || true)
+    if ! [[ "$dbsize" =~ ^[0-9]+$ ]] || (( dbsize < PREFILL_KEYS )); then
+        echo "[!] Error: prefill expected at least ${PREFILL_KEYS} keys, but DBSIZE returned '${dbsize:-unavailable}'."
+        return 1
+    fi
+    echo "  [prefill] complete: DBSIZE=${dbsize}; resetting server stats before measurement."
+    reset_server_stats
+}
+
 # ---------------------------------------------------------------------------
 # run_bench <v2_flag> <label> <threads> <clients> <data_size> <mode_name>
 #           <pipelines...> [-- <extra_server_flags...>]
@@ -1321,6 +1413,8 @@ run_bench() {
     local target
     target=$(client_target)
 
+    prefill_read_keyspace "$target" "$data_size"
+
     RESULTS_TMP=$(mktemp)
     echo -e "PIPELINE\tRPS\tAVG_LAT(ms)\tP50(ms)\tP99(ms)\tP99.9(ms)\tSEND_SYSCALLS\tBATCH_DENSITY" > "$RESULTS_TMP"
 
@@ -1342,10 +1436,10 @@ run_bench() {
                 -t "$threads"
                 -c "$clients"
                 --pipeline="$PIPELINE"
-                --ratio=1:0
+                --ratio="$RATIO"
                 -d "$data_size"
                 --key-pattern=R:R
-                "${MEMTIER_KEYMAX_ARGS[@]}"
+                "${MEMTIER_BENCH_KEY_ARGS[@]}"
                 --key-prefix=bench
                 --test-time=$BENCH_DURATION
                 --hide-histogram)
@@ -1800,7 +1894,8 @@ print_final_report() {
     fi
     echo "######################################################################"
     echo "  commit=${GIT_SHA}  server_type=${SERVER_TYPE}  ver=${VER}  mode=${MODE}  runs=${RUNS}  threads=${PROACTOR_THREADS}"
-    echo "  data_size=${DATA_SIZE_RAW}B  pipelines=${PIPELINE_FILTER:-1,10,50,100}  cmd=${CMD}"
+    echo "  data_size=${DATA_SIZE_RAW}B  pipelines=${PIPELINE_FILTER:-1,10,50,100}  cmd=${CMD}  ratio=${RATIO}"
+    (( RATIO_HAS_GETS )) && echo "  prefill_keys=${PREFILL_KEYS}  prefill_pipeline=${PREFILL_PIPELINE}"
     [[ -n "${EXTRA_SERVER_FLAGS:-}" ]] && echo "  extra_server_flags=${EXTRA_SERVER_FLAGS}"
     echo "  server_cmd: ${SERVER_CMD_STR:-<unknown>}"
     echo "######################################################################"
