@@ -1286,9 +1286,11 @@ stop_server() {
 check_stale_server() {
     command -v ss >/dev/null 2>&1 || return 0
     local pids
-    pids=$( { ss -H -ltnp "( sport = :${PORT} )" 2>/dev/null; \
-              ss -H -ltnp "( sport = :${ADMIN_PORT} )" 2>/dev/null; } \
-            | grep -oP 'pid=\K[0-9]+' | sort -un | tr '\n' ' ')
+        # grep returns 1 when both ports are free, which is the expected case and
+        # must not abort this set -e, pipefail harness.
+        pids=$( { ss -H -ltnp "( sport = :${PORT} )" 2>/dev/null; \
+                            ss -H -ltnp "( sport = :${ADMIN_PORT} )" 2>/dev/null; } \
+                        | grep -oP 'pid=\K[0-9]+' | sort -un | tr '\n' ' ' || true)
     pids=${pids% }
     [[ -z "$pids" ]] && return 0
     echo "[!] Error: port ${PORT} or ${ADMIN_PORT} is already in use:"
