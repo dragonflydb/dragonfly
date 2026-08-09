@@ -1756,10 +1756,12 @@ run_pubsub_bench() {
         # Tear down this cell's subscribers: local ones directly (they are real
         # children of this script), remote ones by process group (each was its own
         # session leader via setsid at launch, so no ssh wrapper is ever waited on).
-        for pid in "${SUB_PIDS[@]}"; do
-            kill "$pid" 2>/dev/null || true
-        done
-        wait "${SUB_PIDS[@]}" 2>/dev/null || true
+        if (( ${#SUB_PIDS[@]} > 0 )); then
+            for pid in "${SUB_PIDS[@]}"; do
+                kill "$pid" 2>/dev/null || true
+            done
+            wait "${SUB_PIDS[@]}" 2>/dev/null || true
+        fi
         SUB_PIDS=()
 
         _kill_remote_pgids "${REMOTE_SUB_PGIDS[@]}"
