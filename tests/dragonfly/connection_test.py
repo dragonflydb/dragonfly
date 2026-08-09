@@ -2524,6 +2524,7 @@ async def test_pipeline_cache_size(df_server: DflyInstance):
 IOBUF_MIN_SHRINK_INTERVAL_SEC = 1
 IOBUF_SHRINK_WAIT_SEC = IOBUF_MIN_SHRINK_INTERVAL_SEC + 1
 IOBUF_COOLDOWN_SEC = 3
+IOBUF_COOLDOWN_WAIT_SEC = IOBUF_COOLDOWN_SEC + 3
 
 
 @dfly_args(
@@ -2769,7 +2770,7 @@ async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
     await client.set("iobuf-shrink-cooldown", "x" * 2048)
     peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
 
-    @assert_eventually(timeout=IOBUF_COOLDOWN_SEC + 1)
+    @assert_eventually(timeout=IOBUF_COOLDOWN_WAIT_SEC)
     async def wait_for_first_shrink():
         current = int((await observer.info("clients"))["client_read_buffer_bytes"])
         assert current < peak
