@@ -929,11 +929,12 @@ cleanup() {
     done
     SUB_PIDS=()
 
-    # Kill remote client tools if in cross-machine mode.
-    if [[ -n "$REMOTE_MODE" ]]; then
-            ssh -n -o ConnectTimeout=3 -o ControlMaster=no \
-                "${SSH_USER}@${CLIENT_IP}" \
-                "pkill -9 redis-cli; pkill -9 redis-benchmark; pkill -9 memtier_benchmark" 2>/dev/null || true
+    # Only remove this benchmark's Pub/Sub subscribers. Do not kill unrelated client
+    # tools that may be running on the shared remote host.
+    if [[ -n "$REMOTE_MODE" && ( "$MODE" == "pubsub" || "$MODE" == "all" ) ]]; then
+        ssh -n -o ConnectTimeout=3 -o ControlMaster=no "${SSH_USER}@${CLIENT_IP}" \
+            "pkill -f -- 'redis-cli -h ${SERVER_IP} -p ${PORT} SUBSCRIBE bench_chan'" \
+            2>/dev/null || true
     fi
 
     if [[ -n "$SERVER_PID" ]]; then
@@ -1694,14 +1695,20 @@ run_pubsub_bench() {
         PUB_P50=$(echo "$OUTPUT" | tr '\r' '\n' | grep -i 'requests per second' | tail -n 1 | grep -oP 'p50=\K[0-9]+\.[0-9]+' | head -n 1 || true)
         PUB_P50=${PUB_P50:-"N/A"}
 
-        # Tear down subscribers.
+        # Tear down subscribers on both hosts before the next pipeline depth. Killing
+        # the local SSH wrappers alone leaves their remote redis-cli children alive.
         for pid in "${SUB_PIDS[@]}"; do
             kill "$pid" 2>/dev/null || true
         done
 
+        if [[ -n "$REMOTE_MODE" ]]; then
+            ssh -n -o ConnectTimeout=3 -o ControlMaster=no "${SSH_USER}@${CLIENT_IP}" \
+                "pkill -f -- 'redis-cli -h ${SERVER_IP} -p ${PORT} SUBSCRIBE bench_chan'" \
+                2>/dev/null || true
+        fi
+
         # Do not wait for SSH subscriber wrappers: a disconnected wrapper can remain
-        # alive indefinitely even after SIGKILL. Each remote subscriber has a 75s cap,
-        # and the local wrapper exits when its server-side connection closes.
+        # alive indefinitely even after its remote redis-cli process exits.
         sleep 1
         for pid in "${SUB_PIDS[@]}"; do
             kill -9 "$pid" 2>/dev/null || true
