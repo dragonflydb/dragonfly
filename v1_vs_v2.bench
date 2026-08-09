@@ -32,8 +32,9 @@ PIPELINE=1,10,100 BENCH_DURATION=30 DATA_SIZE=256,1024,4096 RATIO=1:1 PREFILL_KE
 PIPELINE=1,10,100 BENCH_DURATION=30 DATA_SIZE=256,1024,4096 RATIO=1:10 PREFILL_KEYS=100000 PREFILL_PIPELINE=100 ./build-opt/dragonfly multi_conn 3 v1v2_mix_1to10_multi both
 
 # === Publish one message to multiple subscribers
-# Baseline: 18 timed publisher cases (3 PIPELINE x 2 loops x 3 repeats). Single 256B
-# payload only: a 4096B x 50k-publish x 10-subscriber cell is a fan-out/backpressure
-# stress test, not a focused RESP I/O-loop comparison, and it stalled the batch.
-# Test larger payloads separately, with fewer messages, if that is needed later.
-PIPELINE=1,10,100 DATA_SIZE=256 ./build-opt/dragonfly pubsub 3 v1v2_pubsub_256b both
+# Three payload rows use approximately the same total payload volume per subscriber:
+# 256B x 50,000 = 1024B x 12,500 = 4096B x 3,125.
+# Each row has 18 timed publisher cases (3 PIPELINE x 2 loops x 3 repeats).
+PIPELINE=1,10,100 DATA_SIZE=256 PUBSUB_MESSAGES=50000 ./build-opt/dragonfly pubsub 3 v1v2_pubsub_256b both
+PIPELINE=1,10,100 DATA_SIZE=1024 PUBSUB_MESSAGES=12500 ./build-opt/dragonfly pubsub 3 v1v2_pubsub_1kb both
+PIPELINE=1,10,100 DATA_SIZE=4096 PUBSUB_MESSAGES=3125 ./build-opt/dragonfly pubsub 3 v1v2_pubsub_4kb both

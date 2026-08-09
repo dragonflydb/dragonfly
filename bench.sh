@@ -2122,22 +2122,23 @@ run_single_conn() {
 # For non-dragonfly SERVER_TYPE: runs once with the server type as label (ver ignored).
 run_pubsub() {
     local pipelines
+    local num_msgs=${PUBSUB_MESSAGES:-50000}
     read -ra pipelines <<< "$(filter_pipelines 1 10 50 100)"
 
     # Non-dragonfly servers have no V1/V2 distinction: run once with server type as label.
     if [[ "$SERVER_TYPE" != "dragonfly" ]]; then
         _metrics_verified=0
-        run_pubsub_bench false "$SERVER_TYPE" 10 50000 "${pipelines[@]}"
+        run_pubsub_bench false "$SERVER_TYPE" 10 "$num_msgs" "${pipelines[@]}"
         return
     fi
 
     if [[ "$VER" != "v2" ]]; then
         _metrics_verified=0
-        run_pubsub_bench false "V1" 10 50000 "${pipelines[@]}"
+        run_pubsub_bench false "V1" 10 "$num_msgs" "${pipelines[@]}"
     fi
     if [[ "$VER" != "v1" ]]; then
         _metrics_verified=0
-        run_pubsub_bench true  "V2" 10 50000 "${pipelines[@]}"
+        run_pubsub_bench true  "V2" 10 "$num_msgs" "${pipelines[@]}"
     fi
 }
 
