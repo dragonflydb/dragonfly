@@ -25,9 +25,6 @@ struct TieredStats {
   // Defragmentation operations (small bins read and consolidated back to memory).
   uint64_t total_defrags = 0;
 
-  // Number of segments waiting in the delayed defragmentation queue.
-  size_t delayed_defrag_queue_size = 0;
-
   // Values restored from disk to memory (e.g. after modification).
   uint64_t total_uploads = 0;
 

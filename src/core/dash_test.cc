@@ -16,6 +16,7 @@
 #include "base/hash.h"
 #include "base/logging.h"
 #include "base/zipf_gen.h"
+#include "core/compact_object.h"
 #include "core/dash.h"
 #include "io/file.h"
 #include "io/line_reader.h"
@@ -323,6 +324,168 @@ TEST_F(DashTest, SegmentFull) {
   }
 }
 
+class CompactSegmentTest : public testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    auto* heap = mi_heap_get_backing();
+
+    init_zmalloc_threadlocal(heap);
+    SmallString::InitThreadLocal(heap);
+
+    thread_local MiMemoryResource memory_resource(heap);
+    CompactObj::InitThreadLocal(&memory_resource);
+    InitTLStatelessAllocMR(&memory_resource);
+  }
+
+  static void TearDownTestSuite() {
+    CleanupStatelessAllocMR();
+  }
+};
+
+struct CompactTestPolicy {
+  enum : uint8_t { kSlotNum = 14, kBucketNum = 56 };
+  static constexpr bool kUseVersion = true;
+};
+
+// Tests the segment move constructor copies internals correctly
+TEST_F(CompactSegmentTest, SegmentMove) {
+  using CompactSegment = detail::Segment<CompactKey, CompactValue, CompactTestPolicy>;
+  static_assert(std::is_nothrow_move_constructible_v<CompactSegment>);
+
+  auto get_stash_size = [](const CompactSegment& segment) {
+    size_t size = 0;
+    for (size_t i = 0; i < CompactSegment::kStashBucketNum; ++i)
+      size += segment.GetBucket(CompactSegment::kBucketNum + i).Size();
+    return size;
+  };
+
+  struct ExpectedEntry {
+    string key;
+    string value;
+    uint64_t hash;
+  };
+
+  constexpr uint8_t kLocalDepth = 3;
+  constexpr uint32_t kSegmentId = 17;
+  constexpr uint64_t kBucketVersion = 12345;
+
+  auto source =
+      make_unique<CompactSegment>(kLocalDepth, kSegmentId, PMR_NS::get_default_resource());
+  vector<ExpectedEntry> expected;
+
+  struct Pred {
+    string_view key_view;
+    bool operator()(const CompactKey& key) const {
+      return key == key_view;
+    }
+  };
+  auto no_op = [](auto&&...) {};
+
+  for (unsigned i = 0; i < 10000; ++i) {
+    string key = absl::StrCat(i, "-", string(128, 'k'));
+    string value = absl::StrCat(i, "-", string(256, 'v'));
+    const uint64_t hash = CompactObj::HashCode(key);
+    auto [it, inserted] =
+        source->Insert(CompactKey{key}, CompactValue{value}, hash, Pred{key}, no_op);
+    if (!inserted)
+      break;
+
+    ASSERT_TRUE(it.found());
+    expected.push_back({std::move(key), std::move(value), hash});
+    // something went to stash, so we have some data in regular buckets and some in stash
+    if (get_stash_size(*source))
+      break;
+  }
+
+  const size_t original_size = source->SlowSize();
+  const size_t original_stash_size = get_stash_size(*source);
+  ASSERT_EQ(original_size, expected.size());
+  ASSERT_GT(original_stash_size, 0);
+  ASSERT_TRUE(source->IsSafeToDefragment());
+
+  source->SetVersion(0, kBucketVersion);
+
+  CompactSegment destination = std::move(*source);
+  source.reset();
+
+  EXPECT_EQ(destination.SlowSize(), original_size);
+  EXPECT_EQ(get_stash_size(destination), original_stash_size);
+  EXPECT_EQ(destination.local_depth(), kLocalDepth);
+  EXPECT_EQ(destination.segment_id(), kSegmentId);
+  EXPECT_EQ(destination.GetVersion(0), kBucketVersion);
+  EXPECT_TRUE(destination.IsSafeToDefragment());
+
+  for (const auto& [key, value, hash] : expected) {
+    auto it = destination.FindIt(hash, Pred{key});
+    ASSERT_TRUE(it.found());
+
+    string k;
+    string v;
+    EXPECT_EQ(destination.Key(it.index, it.slot).GetSlice(&k), string_view{key});
+    EXPECT_EQ(destination.Value(it.index, it.slot).GetSlice(&v), string_view{value});
+  }
+}
+
+TEST_F(DashTest, RelocateSegment) {
+  for (uint64_t i = 0; i < 100; ++i)
+    ASSERT_TRUE(dt_.Insert(i, i * 2).second);
+
+  auto* old_segment = dt_.GetSegment(0);
+  const uintptr_t old_address = reinterpret_cast<uintptr_t>(old_segment);
+
+  const size_t old_size = dt_.size();
+  const size_t old_segment_count = dt_.unique_segments();
+  const size_t old_bucket_count = dt_.bucket_count();
+
+  ASSERT_TRUE(dt_.TryRelocateSegment(0));
+
+  auto* new_segment = dt_.GetSegment(0);
+  EXPECT_NE(reinterpret_cast<uintptr_t>(new_segment), old_address);
+
+  EXPECT_EQ(dt_.size(), old_size);
+  EXPECT_EQ(dt_.unique_segments(), old_segment_count);
+  EXPECT_EQ(dt_.bucket_count(), old_bucket_count);
+
+  for (uint64_t i = 0; i < 100; ++i) {
+    auto it = dt_.Find(i);
+    ASSERT_FALSE(it.is_done());
+    EXPECT_EQ(it->second, i * 2);
+  }
+}
+
+TEST_F(DashTest, SegmentRelocateUpdateAliases) {
+  for (size_t i = 0; i < 4000; ++i)
+    dt_.Insert(i, i);
+  ASSERT_EQ(dt_.depth(), 3);
+
+  for (size_t i = 0; i < 4000; ++i)
+    dt_.Erase(i);
+
+  ASSERT_TRUE(dt_.Merge(0, 1).merged);
+  ASSERT_EQ(dt_.GetSegment(0), dt_.GetSegment(1));
+
+  auto* old_segment = dt_.GetSegment(0);
+  const uintptr_t old_address = reinterpret_cast<uintptr_t>(old_segment);
+  ASSERT_TRUE(dt_.TryRelocateSegment(1));
+
+  auto* new_segment = dt_.GetSegment(0);
+  EXPECT_NE(reinterpret_cast<uintptr_t>(new_segment), old_address);
+  EXPECT_EQ(dt_.GetSegment(0), new_segment);
+  EXPECT_EQ(dt_.GetSegment(1), new_segment);
+}
+
+TEST_F(DashTest, SegmentSafeToMove) {
+  const auto* original = dt_.GetSegment(0);
+  // relocate not accepted as long as an iterator is live
+  {
+    auto bucket_it = dt_.BucketIt(0, 0);
+    EXPECT_FALSE(dt_.TryRelocateSegment(0));
+  }
+  EXPECT_EQ(dt_.GetSegment(0), original);
+
+  EXPECT_TRUE(dt_.TryRelocateSegment(0));
+}
+
 TEST_F(DashTest, FirstStash) {
   constexpr unsigned kRegularCapacity = Segment::kBucketNum * Segment::kSlotNum;
   unsigned less_seventy = 0;
@@ -484,7 +647,7 @@ TEST_F(DashTest, MergeFailureRollback) {
 
   size_t total_size_before = dt_.size();
 
-  bool merge_succeeded = dt_.Merge(sid, buddy_id);
+  bool merge_succeeded = dt_.Merge(sid, buddy_id).merged;
 
   EXPECT_EQ(dt_.size(), total_size_before);
 
@@ -561,7 +724,7 @@ TEST_F(DashTest, MergePreservesSize) {
     auto* buddy = dt_.GetSegment(buddy_id);
     size_t combined_size = seg->SlowSize() + buddy->SlowSize();
     if (combined_size <= static_cast<size_t>(0.25 * seg->capacity())) {
-      bool merged = dt_.Merge(seg_id, buddy_id);
+      bool merged = dt_.Merge(seg_id, buddy_id).merged;
       if (merged) {
         // Size must be unchanged after each merge
         EXPECT_EQ(dt_.size(), size_before)
@@ -608,7 +771,7 @@ TEST_F(DashTest, MergeKeyLookupConsistency) {
       auto* buddy = dt_.GetSegment(buddy_id);
       size_t combined_size = seg->SlowSize() + buddy->SlowSize();
       if (combined_size <= static_cast<size_t>(0.25 * seg->capacity())) {
-        if (dt_.Merge(seg_id, buddy_id)) {
+        if (dt_.Merge(seg_id, buddy_id).merged) {
           merged_any = true;
         }
       }
@@ -717,7 +880,7 @@ TEST_F(DashTest, MergeDirectoryConsistency) {
       size_t combined = keep->SlowSize() + buddy->SlowSize();
 
       if (combined <= static_cast<size_t>(0.25 * keep->capacity())) {
-        bool merged = dt_.Merge(keep_id, buddy_id);
+        bool merged = dt_.Merge(keep_id, buddy_id).merged;
         ASSERT_TRUE(merged);
 
         // After merge, all dir entries that covered buddy must now point to keep
@@ -760,7 +923,7 @@ TEST_F(DashTest, MergeWithAliasedEntries) {
     size_t threshold = static_cast<size_t>(0.25 * seg0->capacity());
 
     if (combined <= threshold) {
-      bool ok = dt_.Merge(0, 1);
+      bool ok = dt_.Merge(0, 1).merged;
       ASSERT_TRUE(ok);
 
       // Now segment at entries 0 and 1 is the same depth-2 object
@@ -790,7 +953,7 @@ TEST_F(DashTest, MergeWithAliasedEntries) {
       if (seg2 != seg3) {
         size_t combined23 = seg2->SlowSize() + seg3->SlowSize();
         if (combined23 <= static_cast<size_t>(0.25 * seg2->capacity())) {
-          bool ok23 = dt_.Merge(2, 3);
+          bool ok23 = dt_.Merge(2, 3).merged;
           if (ok23) {
             // Now both {0,1} and {2,3} are depth-2 segments — they ARE buddies
             // FindBuddyId(0): bit_pos=1, buddy_idx=0^2=2, GetSegment(2)->local_depth()=2 == 2 -> 2
@@ -886,8 +1049,8 @@ TEST_F(DashTest, FindBuddyIdCanonicalForStripe) {
   }
 
   ASSERT_NE(keep_a, UINT_MAX);
-  ASSERT_TRUE(dt_.Merge(keep_a, bud_a));
-  ASSERT_TRUE(dt_.Merge(keep_b, bud_b));
+  ASSERT_TRUE(dt_.Merge(keep_a, bud_a).merged);
+  ASSERT_TRUE(dt_.Merge(keep_b, bud_b).merged);
 
   // After both merges:
   //   - segment at keep_a has local_depth = d-1, aliased by stripe {keep_a, keep_a+1}
@@ -968,7 +1131,7 @@ TEST_F(DashTest, NextSegCanonicalBehavior) {
     auto* buddy = dt_.GetSegment(next);
     if (buddy->local_depth() == seg->local_depth() &&
         seg->SlowSize() + buddy->SlowSize() <= static_cast<size_t>(0.25 * seg->capacity())) {
-      bool ok = dt_.Merge(static_cast<unsigned>(i), static_cast<unsigned>(next));
+      bool ok = dt_.Merge(static_cast<unsigned>(i), static_cast<unsigned>(next)).merged;
       if (ok)
         break;
     }
@@ -1327,7 +1490,7 @@ struct TestEvictionPolicy {
     if (!evict_enabled)
       return 0;
 
-    auto it = hotb.probes.by_type.regular_buckets[0];
+    auto it = hotb.probes.regular_buckets[0];
     unsigned res = 0;
     for (; !it.is_done(); ++it) {
       LOG(INFO) << "Deleting " << it->first;
@@ -1703,10 +1866,10 @@ struct ShiftRightPolicy {
   }
 
   unsigned Evict(const U64Dash::HotBuckets& hotb, U64Dash* me) {
-    constexpr unsigned kNumStashBuckets = ABSL_ARRAYSIZE(hotb.probes.by_type.stash_buckets);
+    constexpr unsigned kNumStashBuckets = ABSL_ARRAYSIZE(hotb.probes.stash_buckets);
 
     unsigned stash_pos = hotb.key_hash % kNumStashBuckets;
-    auto stash_it = hotb.probes.by_type.stash_buckets[stash_pos];
+    auto stash_it = hotb.probes.stash_buckets[stash_pos];
     stash_it += (U64Dash::kSlotNum - 1);  // go to the last slot.
 
     uint64_t k = stash_it->first;

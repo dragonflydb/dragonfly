@@ -5,6 +5,7 @@
 #include "core/interpreter.h"
 
 #include <absl/base/casts.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <absl/time/clock.h>
@@ -14,7 +15,6 @@
 
 #include <cstring>
 #include <optional>
-#include <regex>
 #include <set>
 #include <variant>
 
@@ -939,6 +939,84 @@ Interpreter::GlobalArrayBuilder::~GlobalArrayBuilder() {
   }
 }
 
+namespace {
+
+bool IsAsciiSpace(char c) {
+  return absl::ascii_isspace(static_cast<unsigned char>(c));
+}
+
+bool IsIdentChar(char c) {
+  return absl::ascii_isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+// True if body[pos - kw.size(), pos) == kw and it's not a suffix of a larger identifier.
+bool MatchesWordEndingAt(const string& body, size_t pos, string_view kw) {
+  if (pos < kw.size() || body.compare(pos - kw.size(), kw.size(), kw) != 0)
+    return false;
+  size_t word_start = pos - kw.size();
+  return word_start == 0 || !IsIdentChar(body[word_start - 1]);
+}
+
+// Result of scanning a single line for a "--" comment marker. `unresolved_string` is set when
+// the line ends still "inside" a '...'/"..." literal as seen by this line-local scan - which
+// can happen legitimately (an apostrophe inside a `[[...]]` long string, or the closing quote of
+// a `\`-newline-continued string, both invisible to this per-line scan) and does not mean the
+// line is actually malformed Lua.
+struct LineCommentScan {
+  size_t comment_start = string_view::npos;
+  bool unresolved_string = false;
+};
+
+// Finds a "--" line-comment marker in `line`, ignoring occurrences inside a '...' or "..."
+// string literal (respecting backslash escapes).
+LineCommentScan FindLineCommentStart(string_view line) {
+  char in_string = 0;
+  for (size_t i = 0; i < line.size(); ++i) {
+    char c = line[i];
+    if (in_string) {
+      if (c == '\\') {
+        ++i;  // skip the escaped character, it can't close or start a string
+      } else if (c == in_string) {
+        in_string = 0;
+      }
+      continue;
+    }
+    if (c == '\'' || c == '"') {
+      in_string = c;
+    } else if (c == '-' && i + 1 < line.size() && line[i + 1] == '-') {
+      return {i, false};
+    }
+  }
+  return {string_view::npos, in_string != 0};
+}
+
+// Last whitespace-delimited token of `line`, ignoring a trailing "-- comment".
+// Returns an empty string for a blank or comment-only line, and nullopt if this line-local scan
+// couldn't reliably resolve quoting (see LineCommentScan::unresolved_string) - callers should
+// treat the line's continuation status as unknown rather than trusting the returned word.
+optional<string> LastWordOfCode(string_view line) {
+  LineCommentScan scan = FindLineCommentStart(line);
+  if (scan.unresolved_string)
+    return nullopt;
+  if (scan.comment_start != string_view::npos)
+    line = line.substr(0, scan.comment_start);
+  size_t end = line.find_last_not_of(" \t\r\v\f");
+  if (end == string_view::npos)
+    return string();
+  size_t start = line.find_last_of(" \t\r\v\f", end);
+  start = (start == string_view::npos) ? 0 : start + 1;
+  return string(line.substr(start, end - start + 1));
+}
+
+bool IsCommentOnlyLine(string_view line) {
+  size_t i = 0;
+  while (i < line.size() && IsAsciiSpace(line[i]))
+    ++i;
+  return i + 1 < line.size() && line[i] == '-' && line[i + 1] == '-';
+}
+
+}  // namespace
+
 optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   // We want to detect `redis.call` expressions with unused return values, i.e. they are a
   // standalone statement, not part of a expression, condition, function call or assignment.
@@ -949,7 +1027,12 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   //
   // If we need to check the previous line, we search for the last word (before comments, if it has
   // one).
-  static const regex kRegex{"(?:(\\S+)(\\s*--.*?)*\\s*\n|(then)|(do)|(^))\\s*redis\\.(p*call)"};
+  //
+  // NOTE: this used to be a single std::regex with nested quantifiers. libstdc++'s ECMAScript
+  // engine backtracks recursively (one stack frame per backtracked character), so a script
+  // containing a long contiguous run of non-whitespace characters could exhaust a fiber's small
+  // stack and abort the process (see #7973). This is a plain iterative scan instead: no
+  // backtracking, no recursion, so stack usage no longer depends on script content.
 
   // Taken from https://www.lua.org/manual/5.4/manual.html - 3.1 - Lexical conventions
 
@@ -967,7 +1050,6 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
     return s.size() < n ? s : s.substr(s.size() - n, n);
   };
 
-  smatch sm;
   string body{body_sv};
   vector<size_t> targets;
 
@@ -975,20 +1057,89 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   if (body.find("--[[") != string::npos)
     return {};
 
-  sregex_iterator it{body.begin(), body.end(), kRegex};
-  sregex_iterator end{};
+  size_t search_from = 0;
+  while (true) {
+    size_t call_pos = body.find("redis.", search_from);
+    if (call_pos == string::npos)
+      break;
 
-  for (; it != end; it++) {
-    auto last_word = it->str(1);
-
-    if (kContOperators.count(last_n(last_word, 2)) > 0 ||
-        kContOperators.count(last_n(last_word, 1)) > 0)
+    size_t after = call_pos + 6;
+    size_t call_start;  // position right before 'call'/'pcall', where 'a' would be inserted
+    if (body.compare(after, 5, "pcall") == 0 || body.compare(after, 4, "call") == 0) {
+      call_start = after;
+    } else {
+      search_from = after;
       continue;
+    }
+    search_from = call_start;
 
-    if (kContTokens.count(last_word) > 0)
-      continue;
+    // Skip whitespace immediately preceding "redis." (the shared \s* prefix in the old regex),
+    // tracking in the same backward pass whether that whitespace run crossed a newline. This
+    // only looks at [i, call_pos) - no separate forward scan of the rest of the body, which
+    // would make a large single-line script (no newlines at all) an O(n^2) scan overall.
+    size_t i = call_pos;
+    bool crossed_newline = false;
+    while (i > 0 && IsAsciiSpace(body[i - 1])) {
+      --i;
+      if (body[i] == '\n')
+        crossed_newline = true;
+    }
 
-    targets.push_back(it->position(it->size() - 1));
+    bool is_target = false;
+    if (!crossed_newline) {
+      // redis.call is preceded on the same line only by whitespace (or nothing).
+      if (i == 0 || MatchesWordEndingAt(body, i, "then") || MatchesWordEndingAt(body, i, "do")) {
+        is_target = true;
+      }
+      // Otherwise it directly follows some other token (e.g. "=", "+", "if") on the same line,
+      // meaning its return value is used - not a target.
+    } else {
+      // redis.call starts a new line. Walk back over blank/comment-only lines to find the last
+      // real line of code and its last token, to see whether it's a multi-line continuation.
+      size_t line_end = i;
+      string last_word;
+      bool found_real_line = false;
+      bool unresolved = false;
+      while (line_end > 0) {
+        size_t nl = body.rfind('\n', line_end - 1);
+        size_t line_start = (nl == string::npos) ? 0 : nl + 1;
+        string_view line(body.data() + line_start, line_end - line_start);
+        if (!IsCommentOnlyLine(line)) {
+          optional<string> word = LastWordOfCode(line);
+          if (!word) {
+            // This line's quoting couldn't be resolved locally (e.g. an apostrophe inside a
+            // `[[...]]` long string, or the closing quote of a `\`-newline-continued string) -
+            // we can't tell whether it's a continuation. Don't rewrite: a missed optimization
+            // is fine, mistakenly using an async call's return value is not.
+            unresolved = true;
+            break;
+          }
+          if (!word->empty()) {
+            last_word = std::move(*word);
+            found_real_line = true;
+            break;
+          }
+        }
+        if (line_start == 0)
+          break;
+        line_end = line_start - 1;
+      }
+
+      if (unresolved) {
+        is_target = false;
+      } else if (!found_real_line) {
+        is_target = true;  // nothing but blanks/comments above - treat as start of script
+      } else if (kContOperators.count(last_n(last_word, 2)) > 0 ||
+                 kContOperators.count(last_n(last_word, 1)) > 0 ||
+                 kContTokens.count(last_word) > 0) {
+        is_target = false;
+      } else {
+        is_target = true;
+      }
+    }
+
+    if (is_target)
+      targets.push_back(call_start);
   }
 
   if (targets.empty())

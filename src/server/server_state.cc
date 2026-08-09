@@ -6,6 +6,8 @@
 
 #include <mimalloc.h>
 
+#include "server/detail/egress_throttle.h"
+
 extern "C" {
 #include "redis/zmalloc.h"
 }
@@ -18,6 +20,7 @@ extern "C" {
 #include "facade/facade_stats.h"
 #include "server/common.h"
 #include "server/journal/journal.h"
+#include "strings/human_readable.h"
 #include "util/listener_interface.h"
 
 namespace rng = std::ranges;
@@ -29,18 +32,21 @@ ABSL_FLAG(uint32_t, timeout, 0,
           "Close the connection after it is idle for N seconds (0 to disable)");
 ABSL_FLAG(uint32_t, send_timeout, 0,
           "Close the connection after it is stuck on send for N seconds (0 to disable)");
-
 ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
           "When the ratio between maxmemory and RSS memory exceeds this value, commands marked as "
           "DENYOOM will fail with OOM error and new connections to non-admin port will be "
           "rejected. Negative value disables this feature.");
-
 ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
           "serialization. 0 - to disable streaming mode");
 ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
           "Max number of commands squashed in a single shard during squash optimizaiton");
+ABSL_FLAG(strings::MemoryBytesFlag, snapshot_egress_limit_bytes, 0,
+          "Per-shard-thread socket egress bandwidth budget in bytes/second. Each shard throttles "
+          "its snapshot traversal loop to stay under this rate. Accepts human-readable sizes "
+          "(e.g. 100mb, 1gb). 0 disables throttling.");
+ABSL_DECLARE_FLAG(uint32_t, iobuf_min_shrink_interval_sec);
 
 namespace dfly {
 
@@ -252,11 +258,12 @@ void ServerState::UpdateFromFlags() {
   rss_oom_deny_ratio = absl::GetFlag(FLAGS_rss_oom_deny_ratio);
   serialization_max_chunk_size = absl::GetFlag(FLAGS_serialization_max_chunk_size);
   max_squash_cmd_num = absl::GetFlag(FLAGS_max_squashed_cmd_num);
+  egress_throttler_.SetLimit(absl::GetFlag(FLAGS_snapshot_egress_limit_bytes));
 }
 
 vector<string> ServerState::GetMutableFlagNames() {
   return base::GetFlagNames(FLAGS_rss_oom_deny_ratio, FLAGS_serialization_max_chunk_size,
-                            FLAGS_max_squashed_cmd_num);
+                            FLAGS_max_squashed_cmd_num, FLAGS_snapshot_egress_limit_bytes);
 }
 
 Interpreter* ServerState::BorrowInterpreter() {
@@ -300,9 +307,11 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
 
     const uint32_t timeout = absl::GetFlag(FLAGS_timeout);
     const uint32_t send_timeout = absl::GetFlag(FLAGS_send_timeout);
+    const uint32_t iobuf_min_shrink_interval_sec =
+        absl::GetFlag(FLAGS_iobuf_min_shrink_interval_sec);
     VLOG(1) << "ConnectionsWatcherFb: timeout=" << timeout << ", send_timeout=" << send_timeout;
 
-    if (timeout == 0 && send_timeout == 0) {
+    if ((timeout == 0) && (send_timeout == 0) && (iobuf_min_shrink_interval_sec == 0)) {
       continue;
     }
 
@@ -330,10 +339,13 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       bool stuck_sending = send_timeout != 0 && !is_replica && dfly_conn->IsSending() &&
                            dfly_conn->GetSendWaitTimeSec() > send_timeout;
 
-      VLOG(2) << "Connection check: " << dfly_conn->GetClientInfo()
+      bool iobuf_shrunk = dfly_conn->MaybeShrinkIoBufOnReceiveIdle();
+
+      VLOG(2) << std::boolalpha << "Connection check: " << dfly_conn->GetClientInfo()
               << ", phase=" << static_cast<int>(phase) << ", idle_time=" << dfly_conn->idle_time()
               << ", is_replica=" << is_replica << ", is_sending=" << dfly_conn->IsSending()
-              << ", idle_read=" << idle_read << ", stuck_sending=" << stuck_sending;
+              << ", idle_read=" << idle_read << ", stuck_sending=" << stuck_sending
+              << ", iobuf_shrunk=" << iobuf_shrunk;
 
       if (idle_read || stuck_sending) {
         conn_refs.push_back(dfly_conn->Borrow());

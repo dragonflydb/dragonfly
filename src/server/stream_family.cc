@@ -3029,20 +3029,18 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
                                   std::string_view key) -> KeyReadyResult {
     auto& db_slice = context.GetDbSlice(owner->shard_id());
     auto res_it = db_slice.FindReadOnly(context, key, OBJ_STREAM);
-    if (!res_it.ok())
-      return res_it.status() == OpStatus::WRONG_TYPE ? KeyReadyResult::kNotReady
-                                                     : KeyReadyResult::kKeyNotFound;
+    if (!res_it.ok()) {
+      // A blocked XREADGROUP must revalidate when its key is no longer a stream. The wake path
+      // distinguishes a missing stream (NOGROUP) from a non-stream value (WRONGTYPE). A plain
+      // XREAD keeps waiting for the stream to be recreated.
+      // TODO: Make kKeyNotFound a per-waiter result in BlockingController. It currently
+      // short-circuits the whole queue, so a blocked XREAD would hide an XREADGROUP behind it.
+      return opts->read_group ? KeyReadyResult::kReady : KeyReadyResult::kNotReady;
+    }
 
     StreamIDsItem& sitem = opts->stream_ids.at(key);
-    if (sitem.id.val.ms != UINT64_MAX && sitem.id.val.seq != UINT64_MAX)
-      return KeyReadyResult::kReady;
-
     const CompactObj& cobj = (*res_it)->second;
     stream* s = GetReadOnlyStream(cobj);
-    streamID last_id = s->last_id;
-    if (s->length) {
-      StreamLastValidID(s, &last_id);
-    }
 
     // Update group pointer and check it's validity
     if (opts->read_group) {
@@ -3051,8 +3049,22 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
         return KeyReadyResult::kReady;  // abort
     }
 
-    return streamCompareID(&last_id, &sitem.group->last_id) > 0 ? KeyReadyResult::kReady
-                                                                : KeyReadyResult::kNotReady;
+    // An empty stream has nothing to serve: s->last_id only records the last generated id and
+    // survives XDEL and XTRIM.
+    if (!s->length)
+      return KeyReadyResult::kNotReady;
+
+    streamID last_id;
+    StreamLastValidID(s, &last_id);
+
+    // XREADGROUP only blocks on '>', which asks for entries the group has not delivered yet.
+    // XREAD blocks on a concrete id and must stay blocked until an entry reaches it.
+    if (opts->read_group) {
+      return streamCompareID(&last_id, &sitem.group->last_id) > 0 ? KeyReadyResult::kReady
+                                                                  : KeyReadyResult::kNotReady;
+    }
+    return streamCompareID(&last_id, &sitem.id.val) >= 0 ? KeyReadyResult::kReady
+                                                         : KeyReadyResult::kNotReady;
   };
 
   if (auto status =
@@ -3079,14 +3091,31 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
       StreamIDsItem& sitem = opts->stream_ids.at(*wake_key);
       range_opts.start = sitem.id;
 
-      // Expect group to exist? No guarantees from transactional framework
-      if (opts->read_group && !sitem.group) {
-        result = OpStatus::INVALID_VALUE;
-        return OpStatus::OK;
+      // sitem.group was resolved before we blocked and the stream may have been deleted or
+      // retyped since. Re-resolve it against the current table instead of dereferencing a stale
+      // pointer, preserving WRONGTYPE when a non-stream replaced the key.
+      if (opts->read_group) {
+        auto op_args = t->GetOpArgs(shard);
+        auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, *wake_key, OBJ_STREAM);
+        if (!res_it.ok()) {
+          result = res_it.status() == OpStatus::WRONG_TYPE ? OpStatus::WRONG_TYPE
+                                                           : OpStatus::INVALID_VALUE;
+          return OpStatus::OK;
+        }
+
+        sitem.group =
+            StreamLookupCG(GetReadOnlyStream((*res_it)->second), WrapSds(opts->group_name));
+        if (!sitem.group) {
+          result = OpStatus::INVALID_VALUE;
+          return OpStatus::OK;
+        }
       }
 
-      if (sitem.id.val.ms == UINT64_MAX || sitem.id.val.seq == UINT64_MAX) {
-        range_opts.start.val = sitem.group->last_id;  // only for '>'
+      // '>' is encoded as UINT64_MAX-UINT64_MAX and is only accepted for XREADGROUP, so the start
+      // comes from the group. A plain XREAD has no group and reads from the id it asked for, even
+      // when that id happens to carry a UINT64_MAX component.
+      if (opts->read_group && sitem.id.val.ms == UINT64_MAX && sitem.id.val.seq == UINT64_MAX) {
+        range_opts.start.val = sitem.group->last_id;
         StreamIncrID(&range_opts.start.val);
       }
 
@@ -3148,6 +3177,8 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     return StreamReplies{rb}.SendStreamRecords(key, *result);
   } else if (result.status() == OpStatus::INVALID_VALUE) {
     return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists");
+  } else if (result.status() == OpStatus::WRONG_TYPE) {
+    return rb->SendError(result.status());
   }
   return rb->SendNullArray();
 }
@@ -3942,9 +3973,11 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
 
   stream* s = GetReadOnlyStream(*cobj);
 
-  // Fetch last id
+  // Fetch last id. s->last_id is only the last *generated* id: XDEL, XTRIM and XSETID leave it
+  // behind on an empty stream, so it must not be treated as a readable entry.
+  const bool stream_has_entries = s->length > 0;
   streamID last_id = s->last_id;
-  if (s->length)
+  if (stream_has_entries)
     StreamLastValidID(s, &last_id);
 
   // Check requested
@@ -3975,7 +4008,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     }
 
     // we know the requested last_id only when we already have it
-    if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
+    if (stream_has_entries && streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
       requested_sitem.id.val = requested_sitem.group->last_id;
       StreamIncrID(&requested_sitem.id.val);
     }
@@ -3989,7 +4022,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     }
   }
 
-  return streamCompareID(&last_id, &requested_sitem.id.val) >= 0;
+  return stream_has_entries && streamCompareID(&last_id, &requested_sitem.id.val) >= 0;
 }
 
 void CmdXRead(CmdArgParser parser, CommandContext* cmd_cntx) {

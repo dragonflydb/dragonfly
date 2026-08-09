@@ -366,6 +366,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
   uint64_t attempts = 0;
 
   DbTable* db_table = slice.GetDBTable(defrag_state_.dbid);
+  std::string scratch;
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
@@ -376,7 +377,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
       if (did) {
         reallocations++;
         if (const ssize_t delta = it->second.MallocUsed() - original_size; delta != 0) {
-          db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+          AccountObjectMemory(it->first.GetSlice(&scratch), it->second.ObjType(), delta, db_table);
         }
       }
     });
@@ -536,7 +537,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
     RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
   });
-  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); }, "defrag");
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
@@ -828,15 +829,16 @@ void EngineShard::Heartbeat() {
         check_huffman = false;  // trigger only once.
 
         // launch the task
-        huffman_check_task_id_ =
-            ProactorBase::me()->AddOnIdleTask([task = HuffmanCheckTask{}]() mutable {
+        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask(
+            [task = HuffmanCheckTask{}]() mutable {
               if (!shard_ || !namespaces) {
                 return -1;
               }
 
               DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
               return task.Run(&db_slice);
-            });
+            },
+            "huffman_check");
       }
     }
   }
@@ -952,6 +954,13 @@ void EngineShard::RetireExpiredAndEvict() {
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
     eviction_state_.deleted_bytes_at_prev_eviction = deleted_bytes;
+  }
+
+  // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
+  // section, because readiness checks read the db slice and may preempt.
+  if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
+      bc && GetContTx() == nullptr) {
+    bc->NotifyPending();
   }
 }
 
@@ -1191,17 +1200,18 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   return info;
 }
 
-size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
+EngineShard::CompactTableStats EngineShard::CompactTable(double threshold, DbIndex db_idx) {
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   auto& prime = db_slice.GetDBTable(db_idx)->prime;
-  size_t total_seg_merged = 0;
+  CompactTableStats stats;
 
   while (true) {
     bool merged_any = false;
     // Prompt GetSegmentCount() each iteration to handle directory resizes across preemptions
     for (size_t seg_id = 0; seg_id < prime.GetSegmentCount(); seg_id = prime.NextSeg(seg_id)) {
       if (SliceSnapshot::IsSnaphotInProgress()) {
-        return total_seg_merged;
+        stats.exited_on_snapshot = true;
+        return stats;
       }
       // Fetch segment pointer fresh each iteration
       auto* seg = prime.GetSegment(seg_id);
@@ -1215,15 +1225,21 @@ size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
 
       auto* buddy = prime.GetSegment(buddy_id);
 
+      // max_size is threshold * ONE segment's capacity, but combined is the SUM of both
+      // buddies, so each buddy must average under roughly threshold/2 full to qualify.
       const size_t combined = seg->SlowSize() + buddy->SlowSize();
       const size_t max_size = threshold * seg->capacity();
 
       if (combined > max_size)
         continue;
 
-      if (prime.Merge(seg_id, buddy_id)) {
-        ++total_seg_merged;
+      ++stats.attempted;
+      auto [seg_merged, declined_depth_guard] = prime.Merge(seg_id, buddy_id);
+      if (seg_merged) {
+        ++stats.merged;
         merged_any = true;
+      } else if (!declined_depth_guard) {
+        ++stats.rolled_back;
       }
 
       // Yield after merge (don't hold pointers across yield)
@@ -1234,7 +1250,7 @@ size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
       break;
   }
 
-  return total_seg_merged;
+  return stats;
 }
 
 }  // namespace dfly

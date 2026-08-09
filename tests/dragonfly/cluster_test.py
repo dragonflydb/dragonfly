@@ -12,19 +12,19 @@ from binascii import crc_hqx
 from dataclasses import dataclass
 
 import pytest
-from redis import asyncio as aioredis
-from redis.cluster import ClusterNode
-from redis.cluster import RedisCluster
+from redis.cluster import ClusterNode, RedisCluster
 from redis.exceptions import MovedError
 
+from redis import asyncio as aioredis
+
 from . import dfly_args
-from .instance import DflyInstanceFactory, DflyInstance
-from .replication_test import check_all_replicas_finished
+from .instance import DflyInstance, DflyInstanceFactory
 from .seeder import DebugPopulateSeeder
 from .utility import (
     DflySeederFactory,
     ExpirySeeder,
     assert_eventually,
+    check_all_replicas_finished,
     extract_int_after_prefix,
     info_tick_timer,
     is_saving,
@@ -1433,13 +1433,15 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
     status = await nodes[0].admin_client.execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
     )
-    status[0].pop()
+    assert status[0].pop() == "[3000, 9000]"  # slot_ranges
+    status[0].pop()  # error
     assert status[0] == ["out", nodes[1].id, "FINISHED", 7]
 
     status = await nodes[1].admin_client.execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
     )
-    status[0].pop()
+    assert status[0].pop() == "[3000, 9000]"  # slot_ranges
+    status[0].pop()  # error
     assert status[0] == ["in", nodes[0].id, "FINISHED", 7]
 
     nodes[0].migrations = []
@@ -1690,7 +1692,7 @@ async def test_cluster_fuzzymigration(
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             logging.debug(states)
             for state in states:
-                direction, node_id, st, _, _ = state
+                direction, node_id, st, _, _, _ = state
                 if direction == "out":
                     if st == "FINISHED":
                         m_id = [id for id, x in enumerate(node.migrations) if x.node_id == node_id][
@@ -2667,7 +2669,7 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
     migration_nodes = len(instances) - 1
     slot_step = 16384 // migration_nodes
     ranges = []
-    for i in range(0, migration_nodes):
+    for i in range(migration_nodes):
         ranges.append(i * slot_step)
     ranges.append(16384)
 
@@ -3432,7 +3434,7 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
     cclient = instances[0].cluster_client()
 
     docs_num = 100
-    for i in range(0, docs_num):
+    for i in range(docs_num):
         assert await cclient.execute_command("HSET", f"s{i}", "title", f"test {i}") == 1
 
     async def search_test():
@@ -3440,7 +3442,7 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
             "FT.SEARCH", "idx", "@title:test", "text", "LIMIT", "0", "1000"
         )
         assert res[0] == docs_num
-        for i in range(0, docs_num):
+        for i in range(docs_num):
             assert f"s{i}" in res
 
     await asyncio.gather(*(search_test() for _ in range(docs_num)))
@@ -3475,7 +3477,7 @@ async def test_SortedSearchRequest(df_factory: DflyInstanceFactory):
     cclient = instances[0].cluster_client()
 
     docs_num = 100
-    for i in range(0, docs_num):
+    for i in range(docs_num):
         assert (
             await cclient.execute_command("HSET", f"s{i}", "title", f"test {i}", "size", f"{i}")
             == 2
@@ -3500,7 +3502,7 @@ async def test_SortedSearchRequest(df_factory: DflyInstanceFactory):
         for i in range(offset, offset + limit_size):
             assert f"s{i}" in res, f"offset: {offset}, limit_size: {limit_size}, res: {res}"
 
-        for i in range(0, offset):
+        for i in range(offset):
             assert f"s{i}" not in res
 
         for i in range(offset + limit_size, docs_num):
@@ -3538,7 +3540,7 @@ async def test_remove_docs_on_cluster_migration(df_factory):
 
     # Populate node 0
     keys = 100
-    for i in range(0, keys):
+    for i in range(keys):
         random_string = "".join(random.choices(string.ascii_letters + string.digits, k=1_000))
         await nodes[0].client.execute_command("HSET", f"doc:{i}", "v", random_string)
 

@@ -32,7 +32,10 @@ class OAHPair {
  public:
   using TaggedPtr = oah::TaggedPtr;
 
-  static TaggedPtr Create(std::string_view key, std::string_view value,
+  // Creates a pair blob storing `key` (already-encoded content) verbatim plus a fresh copy of
+  // `value`. The header records `real_size`; whether the key is encoded is derived from
+  // key.size() != real_size.
+  static TaggedPtr Create(std::string_view key, uint32_t real_size, std::string_view value,
                           uint32_t expiry = UINT32_MAX);
   static void Destroy(TaggedPtr tagged_ptr);
 
@@ -55,9 +58,11 @@ class OAHPair {
     return result;
   }
 
-  std::string_view Key() const {
+  // Deserializes the stored key: its codec header plus a pointer to the stored content bytes. The
+  // table decodes/compares this (OAHPair itself never ascii-encodes or decodes).
+  oah::key::Stored StoredKey() const {
     const Header header = ParseHeader();
-    return {header.key, header.key_size};
+    return {header.key, header.key_content};
   }
 
   std::string_view Value() const {
@@ -65,9 +70,17 @@ class OAHPair {
     return {ReadValuePtr(header), header.value_size};
   }
 
-  std::pair<std::string_view, std::string_view> KeyValue() const {
+  // Stored key content (ascii-packed or raw) used for hashing. Not the logical key.
+  std::string_view KeyContent() const {
     const Header header = ParseHeader();
-    return {{header.key, header.key_size}, {ReadValuePtr(header), header.value_size}};
+    return {header.key_content, header.key.content_size};
+  }
+
+  // Compares this pair's key against a query key (content bytes + logical length). Reads the header
+  // inline (not via StoredKey) to stay register-friendly on the hot path.
+  bool KeyMatches(std::string_view content, uint32_t len) const {
+    const Header header = ParseHeader();
+    return oah::key::Matches(header.key, header.key_content, content, len);
   }
 
   bool HasExpiry() const {
@@ -106,18 +119,18 @@ class OAHPair {
  protected:
   struct Header {
     char* value_ptr_field;
-    char* key;
-    uint32_t key_size;
+    char* key_content;  // packed/raw key content bytes (stored after value_ptr)
     uint32_t value_size;
+    oah::key::Header key;  // encoded flag, logical length, header/content sizes
   };
 
   Header ParseHeader() const {
     char* p = Raw() + GetExpirySize();
-    const oah::size::Decoded key = oah::size::Read(p);
+    const oah::key::Header key = oah::key::ReadHeader(p);
     p += key.field_size;
     const oah::size::Decoded value = oah::size::Read(p);
     p += value.field_size;
-    return {p, p + sizeof(char*), key.size, value.size};
+    return {p, p + sizeof(char*), value.size, key};
   }
 
   static char* ReadValuePtr(const Header& header) {
@@ -130,10 +143,12 @@ class OAHPair {
     return ReadValuePtr(ParseHeader());
   }
 
-  // Builds a blob that takes ownership of `value_ptr` (null for an empty value): Create allocates a
-  // fresh value buffer, Rebuild passes the existing one through unchanged.
-  static TaggedPtr BuildBlob(std::string_view key, char* value_ptr, size_t value_size,
-                             uint32_t expiry);
+  // Builds a blob that takes ownership of `value_ptr` (null for an empty value), storing the
+  // already-encoded `key` content verbatim. The header records `real_size`; whether the key is
+  // encoded is derived from key.size() != real_size. Create allocates a fresh value buffer; Rebuild
+  // passes the existing key/value through unchanged.
+  static TaggedPtr BuildBlob(std::string_view key, uint32_t real_size, char* value_ptr,
+                             size_t value_size, uint32_t expiry);
 
   // Reallocates the blob with `expiry`, preserving key, value and the cached ext-hash.
   void Rebuild(uint32_t expiry);

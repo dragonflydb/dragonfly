@@ -68,6 +68,8 @@ using namespace std;
 
 uint32_t toUint32(string_view src);
 double toDouble(string_view src);
+// Defined in lexer.lex: strips backslashes from \X sequences.
+string UnescapeTerm(string_view src);
 
 }
 
@@ -460,12 +462,13 @@ tag_list:
 tag_list_element:
   TERM        { $$ = AstTermNode(std::move($1));   }
   | PHRASE {
-      /* Inside {..}, quoted strings are literal tag values. ~N slop is only meaningful for
-         phrases, so reject it here rather than silently dropping it. */
+      /* Inside {..}, quoted strings are literal tag values with one layer of `\X` escapes,
+         matching the unquoted tag path (make_Tag). ~N slop is only meaningful for phrases,
+         so reject it here rather than silently dropping it. */
       auto p = std::move($1);
       if (p.slop != 0)
         throw Parser::syntax_error(@$, "slop is not allowed in tag values");
-      $$ = AstTermNode(std::move(p.raw));
+      $$ = AstTermNode(UnescapeTerm(p.raw));
     }
   | PREFIX    { $$ = AstPrefixNode(std::move($1)); }
   | SUFFIX    { $$ = AstSuffixNode(std::move($1)); }

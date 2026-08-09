@@ -9,6 +9,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "base/logging.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
@@ -218,6 +219,30 @@ void BlockingController::Awaken(DbIndex db_index, string_view db_key) {
   if (wt.AddAwakeEvent(db_key)) {
     VLOG(1) << "Touch: db(" << db_index << ") " << db_key;
     awakened_indices_.insert(db_index);
+  }
+}
+
+void BlockingController::AwakenWatched(DbIndex db_index) {
+  const auto update_awakened = [&](DbWatchTable& wt, DbIndex index) {
+    for (const auto& [key, queue] : wt.queue_map) {
+      if (queue->state == WatchQueue::SUSPENDED) {
+        wt.awakened_keys.insert(key);
+      }
+    }
+
+    if (!wt.awakened_keys.empty()) {
+      awakened_indices_.insert(index);
+    }
+  };
+
+  if (db_index == DbSlice::kDbAll) {
+    for (const auto& [index, wt] : watched_dbs_) {
+      update_awakened(*wt, index);
+    }
+  } else {
+    if (auto it = watched_dbs_.find(db_index); it != watched_dbs_.end()) {
+      update_awakened(*it->second, db_index);
+    }
   }
 }
 

@@ -11,13 +11,12 @@ namespace dfly {
 
 using namespace oah;
 
-TaggedPtr OAHEntry::Create(std::string_view key, uint32_t expiry) {
-  const size_t key_size = key.size();
-  assert(key_size <= size::kMaxSize);
+TaggedPtr OAHEntry::Create(std::string_view key, uint32_t real_size, uint32_t expiry) {
+  const uint8_t encoded_bit = (key.size() != real_size) * key::kEncodedBit;
   const uint32_t expiry_size = (expiry != UINT32_MAX) * sizeof(expiry);
-  const uint32_t key_size_field = size::FieldSize(key_size);
+  const uint32_t hdr_size = size::FieldSize(real_size);
 
-  auto* blob = (char*)zmalloc(expiry_size + key_size_field + key_size);
+  auto* blob = (char*)zmalloc(expiry_size + hdr_size + key.size());
   TaggedPtr tagged_ptr = reinterpret_cast<TaggedPtr>(blob);
   if (expiry_size) {
     tagged_ptr |= kExpiryBit;
@@ -25,10 +24,10 @@ TaggedPtr OAHEntry::Create(std::string_view key, uint32_t expiry) {
   }
 
   char* p = blob + expiry_size;
-  size::Write(key_size, key_size_field, p);
-  p += key_size_field;
-  DCHECK(key.data());  // args are never null, even when empty (see CmdArgParser::SafeSV)
-  std::memcpy(p, key.data(), key_size);
+  key::WriteHeader(encoded_bit, real_size, p);
+  // args are never null, even when empty (see CmdArgParser::SafeSV), so memcpy needs no size guard.
+  DCHECK(key.data());
+  std::memcpy(p + hdr_size, key.data(), key.size());
   return tagged_ptr;
 }
 
@@ -52,7 +51,10 @@ void OAHEntry::SetExtHash(uint64_t ext_hash) {
 
 void OAHEntry::Rebuild(uint32_t expiry) {
   const uint64_t saved_hash = GetHash();
-  TaggedPtr rebuilt = Create(Key(), expiry);
+  // Copy the stored key verbatim (already encoded): no decode/re-encode, keep the encoded flag.
+  const char* hdr = Raw() + GetExpirySize();
+  const key::Header h = key::ReadHeader(hdr);
+  TaggedPtr rebuilt = Create({hdr + h.field_size, h.content_size}, h.len, expiry);
   OAHEntry(rebuilt).SetExtHash(saved_hash);
   Destroy(Release());
   SetTaggedPtr(rebuilt);

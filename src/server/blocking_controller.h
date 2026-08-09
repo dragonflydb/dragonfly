@@ -45,6 +45,9 @@ class BlockingController {
   // Mark given key as awakened. Called by commands mutating this key.
   void Awaken(DbIndex db_index, std::string_view key);
 
+  // Mark all watched keys in a specific db as awakened.
+  void AwakenWatched(DbIndex db_index);
+
   // Notify transactions of awakened keys
   void NotifyPending();
 

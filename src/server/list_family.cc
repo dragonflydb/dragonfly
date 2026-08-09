@@ -276,9 +276,9 @@ class ListWrapper {
 
   string First(QList::Where where) const {
     return visit(Overload{[&](QList* ql) {
-                            auto it = ql->GetIterator(where);
-                            CHECK(it.Valid());
-                            return it.Get().to_string();
+                            auto cur = ql->GetReadCursor(where);
+                            CHECK(cur.Valid());
+                            return cur.Get().to_string();
                           },
                           [&](const LP& lp) { return lp.First(where); }},
                  impl_);
@@ -286,10 +286,10 @@ class ListWrapper {
 
   std::optional<string> At(long index) const {
     return visit(Overload{[&](QList* ql) -> optional<string> {
-                            auto it = ql->GetIterator(index);
-                            if (!it.Valid())
+                            auto cur = ql->GetReadCursor(index);
+                            if (!cur.Valid())
                               return nullopt;
-                            return it.Get().to_string();
+                            return cur.Get().to_string();
                           },
                           [&](const LP& lp) { return lp.At(index); }},
                  impl_);
@@ -335,7 +335,7 @@ vector<uint32_t> ListWrapper::Pos(string_view element, uint32_t rank, uint32_t c
   vector<uint32_t> matches;
 
   auto* ql = std::get<QList*>(impl_);
-  auto it = ql->GetIterator(where);
+  auto it = ql->GetReadCursor(where);
   if (!it.Valid())
     return matches;
 
@@ -1339,21 +1339,23 @@ void CmdLLen(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdLPos(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, elem] = parser.Next<string_view, string_view>();
 
-  int rank = 1;
-  std::optional<uint32_t> count;
-  uint32_t max_len = 0;
+  struct LposOpts {
+    int rank = 1;
+    std::optional<uint32_t> count;
+    uint32_t max_len = 0;
+  };
 
-  // TODO: remove runtime parsing (migrate to cap grammar).
-  parser.ApplyOrSkip(Tag("RANK", &rank), Tag("COUNT", &count), Tag("MAXLEN", &max_len));
-
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  static constexpr auto kGrammar = Compile(
+      Options(Field<Validated<int, NotEq<0, facade::kInvalidIntErr>>>("RANK", &LposOpts::rank),
+              Field("COUNT", &LposOpts::count), Field("MAXLEN", &LposOpts::max_len)));
+  auto opts = kGrammar.Apply(&parser);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (rank == 0)
-    return rb->SendError(kInvalidIntErr);
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
 
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
-    return OpPos(t->GetOpArgs(shard), key, elem, rank, count.value_or(1), max_len);
+    return OpPos(t->GetOpArgs(shard), key, elem, opts.rank, opts.count.value_or(1), opts.max_len);
   };
 
   Transaction* trans = cmd_cntx->tx();
@@ -1365,7 +1367,7 @@ void CmdLPos(CmdArgParser parser, CommandContext* cmd_cntx) {
     return rb->SendError(result.status());
   }
 
-  if (!count.has_value()) {
+  if (!opts.count.has_value()) {
     if (result->empty()) {
       rb->SendNull();
     } else {

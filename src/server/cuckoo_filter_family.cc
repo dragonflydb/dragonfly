@@ -2,15 +2,31 @@
 // See LICENSE for licensing terms.
 //
 
+#include "base/flags.h"
 #include "core/cuckoo.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
+#include "server/config_registry.h"
 #include "server/conn_context.h"
 #include "server/db_slice.h"
+#include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/transaction.h"
+
+// Defaults used when a filter is auto-created without explicit BUCKETSIZE/CAPACITY/MAXITERATIONS/
+// EXPANSION (CF.ADD, CF.ADDNX, CF.INSERT without CAPACITY), and the cap on sub-filter growth
+// enforced by CF.ADD/CF.ADDNX/CF.INSERT/CF.INSERTNX. All are also settable via CONFIG SET; see
+// the RegisterMutable calls below for the cached values hot-path code actually reads.
+ABSL_FLAG(uint32_t, cf_bucket_size, 2, "Default cuckoo filter bucket size (slots per bucket)");
+ABSL_FLAG(uint64_t, cf_initial_size, 1024, "Default cuckoo filter initial capacity");
+ABSL_FLAG(uint32_t, cf_max_iterations, 20,
+          "Default cuckoo filter max relocation iterations before an insert fails");
+ABSL_FLAG(uint32_t, cf_expansion_factor, 1, "Default cuckoo filter sub-filter growth factor");
+ABSL_FLAG(uint32_t, cf_max_expansions, 32,
+          "Maximum number of sub-filters a cuckoo filter can grow to via CF.ADD/CF.ADDNX/"
+          "CF.INSERT/CF.INSERTNX before those commands start failing");
 
 namespace dfly {
 
@@ -19,12 +35,36 @@ using namespace std;
 
 namespace {
 
-constexpr uint64_t kDefaultCapacity = 1024;
-
-constexpr char kCapacityErr[] = "CF: capacity must be greater than 0";
 constexpr char kBucketSizeErr[] = "CF: bucket size must be between 1 and 255";
 constexpr char kMaxIterationsErr[] = "CF: max iterations must be between 1 and 65535";
-constexpr char kExpansionErr[] = "CF: expansion must be between 0 and 32767";
+constexpr char kExpansionErr[] = "CF: expansion must be between 0 and 32768";
+
+// Per-thread cached copies of the flags above, seeded from the flag at each thread's startup.
+// Every proactor thread in shard_set->pool() also handles connections, so these cover both
+// command parsing and shard execution. Refreshed on all threads via ConfigRegistry callbacks (see
+// RegisterCuckooFilterConfig) on CONFIG SET, so hot-path command code never calls
+// absl::GetFlag() directly.
+thread_local uint8_t tl_cf_bucket_size = static_cast<uint8_t>(absl::GetFlag(FLAGS_cf_bucket_size));
+thread_local uint64_t tl_cf_initial_size = absl::GetFlag(FLAGS_cf_initial_size);
+thread_local uint16_t tl_cf_max_iterations =
+    static_cast<uint16_t>(absl::GetFlag(FLAGS_cf_max_iterations));
+thread_local uint16_t tl_cf_expansion_factor =
+    static_cast<uint16_t>(absl::GetFlag(FLAGS_cf_expansion_factor));
+thread_local uint32_t tl_cf_max_expansions = absl::GetFlag(FLAGS_cf_max_expansions);
+
+// capacity must be at least 2*bucket_size (two buckets worth of room) and at most the max.
+bool CapacityInRange(uint64_t capacity, uint8_t bucket_size) {
+  return capacity >= 2ULL * bucket_size && capacity <= kCuckooFilterMaxCapacity;
+}
+
+CuckooFilterOptions NewFilterOptions(uint64_t capacity) {
+  return CuckooFilterOptions{
+      .capacity = capacity,
+      .slots_per_bucket = tl_cf_bucket_size,
+      .max_iterations = tl_cf_max_iterations,
+      .expansion = tl_cf_expansion_factor,
+  };
+}
 
 struct CuckooInfo {
   size_t size = 0;
@@ -37,36 +77,61 @@ struct CuckooInfo {
   uint16_t max_iterations = 0;
 };
 
+// Checked before AddOrFind (which would otherwise insert a dangling entry): cf-initial-size and
+// cf-bucket-size are independently CONFIG-settable and may currently violate CapacityInRange.
+OpStatus CheckCapacityBeforeAutoCreate(const OpArgs& op_args, string_view key) {
+  if (CapacityInRange(tl_cf_initial_size, tl_cf_bucket_size))
+    return OpStatus::OK;
+  auto peek = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
+  if (peek.status() == OpStatus::KEY_NOTFOUND)
+    return OpStatus::CUCKOO_FILTER_INVALID_CAPACITY;
+  return OpStatus::OK;
+}
+
 OpResult<bool> OpAdd(const OpArgs& op_args, string_view key, string_view item) {
+  if (OpStatus st = CheckCapacityBeforeAutoCreate(op_args, key); st != OpStatus::OK)
+    return st;
+
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
   RETURN_ON_BAD_STATUS(op_res);
 
   PrimeValue& pv = op_res->it->second;
   if (op_res->is_new) {
-    pv.SetCuckooFilter(CuckooFilterOptions{.capacity = kDefaultCapacity});
+    pv.SetCuckooFilter(NewFilterOptions(tl_cf_initial_size));
   }
 
-  if (!pv.GetCuckooFilter()->Insert(CuckooFilter::Hash(item)))
+  CuckooFilter* cf = pv.GetCuckooFilter();
+  if (cf->NumFilters() >= tl_cf_max_expansions)
+    return OpStatus::CUCKOO_FILTER_MAX_EXPANSIONS;
+
+  if (!cf->Insert(CuckooFilter::Hash(item)))
     return OpStatus::CUCKOO_FILTER_FULL;
   return true;
 }
 
 OpResult<bool> OpAddNx(const OpArgs& op_args, string_view key, string_view item) {
+  if (OpStatus st = CheckCapacityBeforeAutoCreate(op_args, key); st != OpStatus::OK)
+    return st;
+
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_CUCKOOFILTER);
   RETURN_ON_BAD_STATUS(op_res);
 
   PrimeValue& pv = op_res->it->second;
   if (op_res->is_new) {
-    pv.SetCuckooFilter(CuckooFilterOptions{.capacity = kDefaultCapacity});
+    pv.SetCuckooFilter(NewFilterOptions(tl_cf_initial_size));
   }
 
+  CuckooFilter* cf = pv.GetCuckooFilter();
   uint64_t hash = CuckooFilter::Hash(item);
-  if (pv.GetCuckooFilter()->Exists(hash))
+  if (cf->Exists(hash))
     return false;
 
-  if (!pv.GetCuckooFilter()->Insert(hash))
+  if (cf->NumFilters() >= tl_cf_max_expansions)
+    return OpStatus::CUCKOO_FILTER_MAX_EXPANSIONS;
+
+  if (!cf->Insert(hash))
     return OpStatus::CUCKOO_FILTER_FULL;
   return true;
 }
@@ -113,7 +178,7 @@ OpResult<bool> OpDel(const OpArgs& op_args, string_view key, string_view item) {
 
   CuckooFilter* cf = op_res->it->second.GetCuckooFilter();
   bool deleted = cf->Delete(CuckooFilter::Hash(item));
-  // auto-compact once deletes exceed 10% of items (mirrors RedisBloom's threshold)
+  // auto-compact once deletes exceed 10% of items
   if (deleted && cf->NumFilters() > 1 && cf->NumDeletes() > cf->NumItems() / 10)
     cf->Compact(/*cont=*/false);
   return deleted;
@@ -132,7 +197,7 @@ OpStatus OpCompact(const OpArgs& op_args, string_view key) {
 
 struct InsertOptions {
   string_view key;
-  uint64_t capacity = kDefaultCapacity;
+  uint64_t capacity = tl_cf_initial_size;
   bool nocreate = false;
 };
 
@@ -159,12 +224,15 @@ OpResult<vector<int>> OpInsert(const OpArgs& op_args, ParsedArgs items, const In
     auto add_res = db_slice.AddOrFind(op_args.db_cntx, opts.key, OBJ_CUCKOOFILTER);
     RETURN_ON_BAD_STATUS(add_res);
     if (add_res->is_new) {
-      add_res->it->second.SetCuckooFilter(CuckooFilterOptions{.capacity = opts.capacity});
+      add_res->it->second.SetCuckooFilter(NewFilterOptions(opts.capacity));
     }
     it_and_updater = std::move(*add_res);
   }
 
   CuckooFilter* cf = it_and_updater.it->second.GetCuckooFilter();
+  if (cf->NumFilters() >= tl_cf_max_expansions)
+    return OpStatus::CUCKOO_FILTER_MAX_EXPANSIONS;
+
   vector<int> result(items.size());
   for (size_t i = 0; i < items.size(); ++i) {
     const uint64_t hash = CuckooFilter::Hash(items[i]);
@@ -195,13 +263,10 @@ OpStatus OpReserve(const OpArgs& op_args, string_view key, const CuckooFilterOpt
 
 struct ReserveOpts {
   string_view key;
-  Validated<uint64_t, NotEq<uint64_t{0}, kCapacityErr>> capacity;
-  Validated<uint8_t, NotEq<uint8_t{0}, kBucketSizeErr>> bucket_size{
-      CuckooFilterOptions::kDefaultSlotsPerBucket};
-  Validated<uint16_t, NotEq<uint16_t{0}, kMaxIterationsErr>> max_iterations{
-      CuckooFilterOptions::kDefaultMaxIterations};
-  Validated<uint16_t, Bounded<uint16_t{0}, uint16_t{32767}, kExpansionErr>> expansion{
-      CuckooFilterOptions::kDefaultExpansion};
+  uint64_t capacity = 0;
+  Validated<uint8_t, NotEq<uint8_t{0}, kBucketSizeErr>> bucket_size{tl_cf_bucket_size};
+  Validated<uint16_t, NotEq<uint16_t{0}, kMaxIterationsErr>> max_iterations{tl_cf_max_iterations};
+  Validated<uint16_t, ClosedRange<0, 32768, kExpansionErr>> expansion{tl_cf_expansion_factor};
 };
 
 constexpr auto kReserveGrammar =
@@ -218,6 +283,9 @@ void CmdReserve(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!parser.Finalize()) {
     return rb->SendError(parser.TakeError().MakeReply());
   }
+
+  if (!CapacityInRange(opts.capacity, opts.bucket_size))
+    return rb->SendError(kCuckooFilterInvalidCapacity);
 
   CuckooFilterOptions options{opts.capacity, opts.bucket_size, opts.max_iterations, opts.expansion};
 
@@ -364,8 +432,11 @@ void CmdInsertImpl(CmdArgParser parser, CommandContext* cmd_cntx, bool nx) {
   kInsertGrammar.Apply(&parser, &opts);
   RETURN_ON_PARSE_ERROR(parser, rb);
 
-  if (!opts.nocreate && opts.capacity == 0)
-    return rb->SendError(kCapacityErr);
+  // Validated unconditionally, regardless of NOCREATE or whether the key already exists —
+  // CF.INSERT accepts CAPACITY only to describe how an about-to-be-created filter should look,
+  // but a bogus value is rejected up front either way.
+  if (!CapacityInRange(opts.capacity, tl_cf_bucket_size))
+    return rb->SendError(kCuckooFilterInvalidCapacity);
 
   if (!parser.Check("ITEMS")) {
     return rb->SendError("CF.INSERT requires ITEMS keyword");
@@ -408,6 +479,52 @@ void CmdCompact(CmdArgParser parser, CommandContext* cmd_cntx) {
   return cmd_cntx->SendError(res);
 }
 
+void RegisterCuckooFilterConfig() {
+  auto* pool = shard_set->pool();
+
+  config_registry.RegisterMutable("cf_bucket_size", [pool](const absl::CommandLineFlag& flag) {
+    auto val = flag.TryGet<uint32_t>();
+    if (!val || *val < 1 || *val > 255)
+      return false;
+    pool->AwaitBrief([v = static_cast<uint8_t>(*val)](unsigned, auto*) { tl_cf_bucket_size = v; });
+    return true;
+  });
+
+  config_registry.RegisterMutable("cf_initial_size", [pool](const absl::CommandLineFlag& flag) {
+    auto val = flag.TryGet<uint64_t>();
+    if (!val || *val < 4 || *val > kCuckooFilterMaxCapacity)
+      return false;
+    pool->AwaitBrief([v = *val](unsigned, auto*) { tl_cf_initial_size = v; });
+    return true;
+  });
+
+  config_registry.RegisterMutable("cf_max_iterations", [pool](const absl::CommandLineFlag& flag) {
+    auto val = flag.TryGet<uint32_t>();
+    if (!val || *val < 1 || *val > 65535)
+      return false;
+    pool->AwaitBrief(
+        [v = static_cast<uint16_t>(*val)](unsigned, auto*) { tl_cf_max_iterations = v; });
+    return true;
+  });
+
+  config_registry.RegisterMutable("cf_expansion_factor", [pool](const absl::CommandLineFlag& flag) {
+    auto val = flag.TryGet<uint32_t>();
+    if (!val || *val > 32768)
+      return false;
+    uint16_t v = static_cast<uint16_t>(*val);
+    pool->AwaitBrief([v](unsigned, auto*) { tl_cf_expansion_factor = v; });
+    return true;
+  });
+
+  config_registry.RegisterMutable("cf_max_expansions", [pool](const absl::CommandLineFlag& flag) {
+    auto val = flag.TryGet<uint32_t>();
+    if (!val || *val < 1 || *val > 65536)
+      return false;
+    pool->AwaitBrief([v = *val](unsigned, auto*) { tl_cf_max_expansions = v; });
+    return true;
+  });
+}
+
 }  // namespace
 
 using CI = CommandId;
@@ -415,6 +532,8 @@ using CI = CommandId;
 #define HFUNC(x) SetHandler(&Cmd##x)
 
 void RegisterCuckooFilterFamily(CommandRegistry* registry) {
+  RegisterCuckooFilterConfig();
+
   registry->StartFamily(acl::CUCKOO_FILTER);
 
   *registry << CI{"CF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1}.HFUNC(Reserve)

@@ -1,18 +1,17 @@
+import asyncio
+import logging
 import pathlib
 import subprocess
-from typing import Awaitable
-from redis import asyncio as aioredis
-import pytest
 import time
-import asyncio
-from datetime import datetime
-from sys import stderr
-import logging
+from collections.abc import Awaitable
 
-from .utility import assert_eventually, wait_available_async
+import pytest
 
-from .instance import DflyInstanceFactory
+from redis import asyncio as aioredis
+
 from . import dfly_args
+from .instance import DflyInstanceFactory
+from .utility import assert_eventually, wait_available_async
 
 
 # Helper function to parse some sentinel cli commands output as key value dictionaries.
@@ -74,7 +73,7 @@ class Sentinel:
             f"port {self.port}",
             f"sentinel monitor {self.default_deployment} 127.0.0.1 {self.initial_master_port} 1",
             f"sentinel down-after-milliseconds {self.default_deployment} 3000",
-            f"slave-priority 100",
+            "slave-priority 100",
         ]
         self.config_file.write_text("\n".join(config))
 

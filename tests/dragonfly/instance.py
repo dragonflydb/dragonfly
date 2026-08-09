@@ -9,7 +9,6 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, List, Union
 
 import aiohttp
 import psutil
@@ -28,7 +27,7 @@ class DflyParams:
     gdb: bool
     direct_output: bool
     buffered_out: bool
-    args: Dict[str, Union[str, None]]
+    args: dict[str, str | None]
     existing_port: int
     existing_admin_port: int
     existing_mc_port: int
@@ -93,14 +92,14 @@ class DflyInstance:
         self.args = args
         self.args.update(params.args)
         self.params = params
-        self.proc: Optional[subprocess.Popen] = None
-        self._client: Optional[RedisClient] = None
-        self.log_files: List[str] = []
+        self.proc: subprocess.Popen | None = None
+        self._client: RedisClient | None = None
+        self.log_files: list[str] = []
         self.dynamic_port = False
         self.sed_proc = None
         self.clients = []
         # Optional hard RLIMIT_AS cap (mirrors `ulimit -v`) for OOM tests.
-        self.vmem_limit_bytes: Optional[int] = None
+        self.vmem_limit_bytes: int | None = None
 
         if self.params.existing_port:
             self._port = self.params.existing_port
@@ -318,7 +317,7 @@ class DflyInstance:
         return self._port
 
     @property
-    def admin_port(self) -> Optional[int]:
+    def admin_port(self) -> int | None:
         if self.params.existing_admin_port:
             return self.params.existing_admin_port
         if "admin_port" in self.args:
@@ -326,7 +325,7 @@ class DflyInstance:
         return None
 
     @property
-    def mc_port(self) -> Optional[int]:
+    def mc_port(self) -> int | None:
         if self.params.existing_mc_port:
             return self.params.existing_mc_port
         if "memcached_port" in self.args:
@@ -357,7 +356,7 @@ class DflyInstance:
             return ports.pop()
         raise RuntimeError("Couldn't parse port")
 
-    def get_logs_from_psutil(self) -> List[str]:
+    def get_logs_from_psutil(self) -> list[str]:
         p = psutil.Process(self.proc.pid)
         rv = []
         for file in p.open_files():
@@ -507,7 +506,7 @@ class DflyInstanceFactory:
         self.instances.append(instance)
         return instance
 
-    def start_all(self, instances: List[DflyInstance]):
+    def start_all(self, instances: list[DflyInstance]):
         """Start multiple instances in parallel"""
         for instance in instances:
             instance._start()

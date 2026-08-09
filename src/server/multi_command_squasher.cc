@@ -169,6 +169,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
 
   // In pipeline mode the reply is captured and deferred into the parsed command, preserving
   // the reply order with squashed commands whose replies are sent later by the connection.
+  [[maybe_unused]] const RespVersion original_resp = rb->GetRespVersion();
   optional<CapturingReplyBuilder> crb;
   if (opts_.pipeline_mode) {
     DCHECK(cmd.cmd_cntx);
@@ -197,6 +198,10 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
   cmd_cntx.SetupTx(cmd.cid, tx);
   cmd_cntx.SetTailArgs(cmd.args);
   service_->InvokeCmd(cmd.args, &cmd_cntx);
+
+  DCHECK(!crb || crb->GetRespVersion() == original_resp)
+      << cmd.cid->name() << " changed its RESP version while captured";
+
   resolve();
 
   return true;
@@ -247,6 +252,11 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       else
         crb.ProvideInlineBuffer({});  // reset buffer
 
+      // For async commands we need to exchange the reply builder as they still can access it
+      // mutably (for example for last_error_ updates). Sync commands use the local context with the
+      // local one
+      SinkReplyBuilder* saved_rb = nullptr;
+
       // With tiered storage enabled, it makes sense to dispatch async commands concurrently
       // to allow concurrent disk operations. Tiered futures are only blocked on during replies
       bool do_async = es->tiered_storage() && !IsAtomic() && opts_.pipeline_mode &&
@@ -254,6 +264,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       if (do_async) {
         ctx = dispatched.cmd_cntx;
         ctx->SetDeferredReply();
+        saved_rb = ctx->SwapReplyBuilder(&crb);
       }
 
       ctx->SetupTx(dispatched.cid, local_cntx.tx());
@@ -266,8 +277,12 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       } else {
         ctx->UpdateCid(dispatched.cid);
         ctx->SetTailArgs(dispatched.args);
+
         service_->InvokeCmd(dispatched.args, ctx);
       }
+
+      if (saved_rb)
+        ctx->SwapReplyBuilder(saved_rb);
 
       if (!do_async) {
         move_reply(&dispatched);  // Async commands resolve the context directly

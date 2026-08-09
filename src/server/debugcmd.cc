@@ -695,6 +695,9 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "    Prints histogram of object sizes.",
         "STACKTRACE",
         "    Prints the stacktraces of all current fibers to the logs.",
+        "REPLDIAG",
+        "    Investigation-only: like STACKTRACE, plus (if this instance is a redis-"
+        "    stream replica) the unread byte count in the master socket's kernel recv buffer.",
         "SHARDS",
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
         "TOPK ON [min_freq] | OFF [max_keys]",
@@ -733,8 +736,11 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "    Prints segment info for the current database.",
         "COMPACT-TABLE [threshold]",
         "    Merge underutilized buddy-segment pairs in the dash table to reclaim memory.",
-        "    <threshold> is the maximum combined fill ratio (0, 1] below which two buddy",
-        "    segments are merged; defaults to 0.25. Returns the number of segments merged.",
+        "    Two buddy segments are merged when their combined size is <= threshold *",
+        "    segment_capacity, so on average each buddy must be under roughly threshold/2",
+        "    full. <threshold> is in (0, 1] and defaults to 0.25. Returns a stats map with",
+        "    'merged', 'attempted', 'rolled_back' counts and 'exited_on_snapshot' (1 if the",
+        "    scan exited early due to an in-progress snapshot).",
         "UNIQ-STRS",
         "    Prints per-object unique string stats and estimated dedup savings across shards.",
         "HELP",
@@ -781,6 +787,10 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (subcmd == "STACKTRACE") {
     return Stacktrace(cmd_cntx);
+  }
+
+  if (subcmd == "REPLDIAG") {
+    return ReplDiag(cmd_cntx);
   }
 
   if (subcmd == "SHARDS") {
@@ -839,11 +849,8 @@ void DebugCmd::Shutdown() {
 }
 
 void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
-  bool no_save = false;
-
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  // TODO: remove runtime parsing (single option -> Check).
-  parser.Apply(Exist("NOSAVE", &no_save));
+  bool no_save = parser.Check("NOSAVE");
   if (!parser.Finalize()) {
     (void)parser.TakeError();
     return cmd_cntx->SendError("DEBUG RELOAD only supports the NOSAVE options.");
@@ -1370,6 +1377,35 @@ void DebugCmd::Stacktrace(CommandContext* cmd_cntx) {
   rb->SendOk();
 }
 
+// Investigation-only: dumps everything Stacktrace() does, plus (on a redis-stream
+// replica) the current unread byte count on the master socket, to tell apart "data is sitting
+// unread" (missed wakeup) from "genuinely nothing to read yet" at the moment of a stall. Remove
+// once the stalled-replica bug is closed.
+void DebugCmd::ReplDiag(CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  if (auto unread = sf_.GetReplicaMasterSocketUnreadBytes(); unread) {
+    LOG(WARNING) << "DEBUG REPLDIAG: master_socket_unread_bytes=" << *unread;
+  } else {
+    LOG(WARNING) << "DEBUG REPLDIAG: not a redis-stream replica (no master socket)";
+  }
+
+  fb2::Mutex m;
+  shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+    EngineShard* es = EngineShard::tlocal();
+    string txq;
+    if (es) {
+      EngineShard::TxQueueInfo txq_info = es->AnalyzeTxQueue();
+      txq = txq_info.Format();
+    }
+    std::unique_lock lk(m);
+    LOG_IF(INFO, !txq.empty()) << "Shard" << index << ": " << txq;
+    fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+  });
+  base::FlushLogs();
+  rb->SendOk();
+}
+
 void DebugCmd::Shards(CommandContext* cmd_cntx) {
   struct ShardInfo {
     uint64_t used_memory = 0;
@@ -1770,12 +1806,25 @@ void DebugCmd::CompactTable(facade::CmdArgParser parser, CommandContext* cmd_cnt
   }
 
   const DbIndex db_idx = cmd_cntx->server_conn_cntx()->db_index();
-  std::vector<size_t> results(shard_set->size());
+  std::vector<EngineShard::CompactTableStats> results(shard_set->size());
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     results[shard->shard_id()] = shard->CompactTable(threshold, db_idx);
   });
 
-  rb->SendLong(std::accumulate(results.begin(), results.end(), 0ul));
+  EngineShard::CompactTableStats total;
+  for (const auto& r : results) {
+    total += r;
+  }
+
+  rb->StartCollection(4, CollectionType::MAP);
+  rb->SendSimpleString("merged");
+  rb->SendLong(total.merged);
+  rb->SendSimpleString("attempted");
+  rb->SendLong(total.attempted);
+  rb->SendSimpleString("rolled_back");
+  rb->SendLong(total.rolled_back);
+  rb->SendSimpleString("exited_on_snapshot");
+  rb->SendLong(total.exited_on_snapshot ? 1 : 0);
 }
 
 void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {

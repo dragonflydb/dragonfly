@@ -142,6 +142,23 @@ TEST_F(DflyEngineTest, EvalResp) {
                                    ElementsAre("b", IntArg(2), "a", IntArg(1))));
 }
 
+TEST_F(DflyEngineTest, EvalGetLargeBorrowedStrings) {
+  std::string raw(32 * 1024, '\x81');
+  std::string ascii(32 * 1024, 'a');
+
+  EXPECT_THAT(Run({"set", "ascii", ascii}), "OK");
+  EXPECT_THAT(Run({"set", "raw", raw}), "OK");
+  optional<int64_t> ascii_usage = Run({"memory", "usage", "ascii"}).GetInt();
+  optional<int64_t> raw_usage = Run({"memory", "usage", "raw"}).GetInt();
+  ASSERT_TRUE(ascii_usage);
+  ASSERT_TRUE(raw_usage);
+  EXPECT_GT(*raw_usage, *ascii_usage);
+
+  EXPECT_THAT(Run({"eval", "return {redis.call('get', KEYS[1]), redis.call('get', KEYS[2])}", "2",
+                   "ascii", "raw"}),
+              RespElementsAre(ascii, raw));
+}
+
 TEST_F(DflyEngineTest, EvalPublish) {
   auto resp = pp_->at(1)->Await([&] { return Run({"subscribe", "foo"}); });
   EXPECT_THAT(resp, ArrLen(3));
@@ -724,6 +741,28 @@ TEST_F(DflyEngineTest, Bug496) {
     }
 
     EXPECT_TRUE(db.UnregisterOnChange(&consumer));
+  });
+}
+
+TEST_F(DflyEngineTest, ReduceHeapUsageIdempotent) {
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+
+    {
+      auto res = *db.AddOrFind({}, "key", std::nullopt);
+      res.it->second.SetString(string(1000, 'x'));
+    }
+
+    size_t before = db.GetStats().db_stats[0].obj_memory_usage;
+    EXPECT_GT(before, 0u);
+
+    auto res = db.FindMutable({}, "key");
+    res.post_updater.ReduceHeapUsage();
+    // A second call before the value is replaced must not subtract the same bytes again.
+    res.post_updater.ReduceHeapUsage();
+    res.post_updater.Run();
+
+    EXPECT_EQ(db.GetStats().db_stats[0].obj_memory_usage, before);
   });
 }
 

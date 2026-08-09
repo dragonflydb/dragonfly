@@ -291,6 +291,8 @@ void JournalStreamer::AsyncWrite(bool force_send) {
   total_sent_ += in_flight_bytes_;
   last_async_write_time_ = base::CycleClock::Now();
 
+  ServerState::tlocal()->GetEgressThrottler().Record(in_flight_bytes_, false);
+
   const auto v_size = cur_buf.buf.size();
   absl::InlinedVector<iovec, 8> v(v_size);
 
@@ -375,6 +377,7 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
                  << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
+    LogTcpSocketDiagnostics(dest_);
     cntx_->ReportError("JournalStreamer write operation timeout");
   }
 }
@@ -390,6 +393,7 @@ void JournalStreamer::WaitForInflightToComplete(bool with_timeout) {
         << "Waiting for inflight bytes " << in_flight_bytes_;
 
     if (next >= max_timeout) {
+      LogTcpSocketDiagnostics(dest_);
       if (with_timeout) {
         cntx_->ReportError("JournalStreamer write operation timeout");
         break;
@@ -480,6 +484,9 @@ void RestoreStreamer::Run() {
       stats_.iter_skips++;
       continue;
     }
+
+    // Throttle main loop if we are over the egress limit
+    ServerState::tlocal()->GetEgressThrottler().Throttle();
 
     cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
       if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt

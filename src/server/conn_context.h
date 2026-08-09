@@ -454,7 +454,7 @@ class CommandContext : public facade::ParsedCommand {
     return tail_args_;
   }
 
-  uint64_t start_time_usec = 0;
+  uint64_t start_cycle = 0;
 
  protected:
   void ReuseInternal() final;

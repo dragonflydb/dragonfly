@@ -1768,7 +1768,7 @@ size_t CompactObj::MallocUsed(bool slow) const {
   }
 
   if (taglen_ == SDS_TTL_TAG) {
-    return sdsAllocSize(u_.sds_ttl.sds_ptr);
+    return zmalloc_usable_size(sdsAllocPtr(u_.sds_ttl.sds_ptr));
   }
 
   if (taglen_ == TOPK_TAG) {

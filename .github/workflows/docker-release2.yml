@@ -1,5 +1,9 @@
 name: Docker Release-v2
 
+# Note: do not add a GitHub Actions cache (type=gha) here when running in the
+# dragonflydb/dragonfly repo: the shared 10 GB cache is limited and better used
+# by the far more frequent CI builds. This runs only on release / manual dispatch.
+
 on:
   workflow_dispatch:
     inputs:
@@ -107,8 +111,6 @@ jobs:
             ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           file: tools/packaging/Dockerfile.${{ matrix.flavor }}-prod
-          cache-from: type=gha,scope=prod-${{ matrix.flavor }}
-          cache-to: type=gha,scope=prod-${{ matrix.flavor }},mode=max
           load: true  # Load the build images into the local docker.
 
       - name: Test Image

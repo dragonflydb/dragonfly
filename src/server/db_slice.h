@@ -29,7 +29,16 @@ class SlotRanges;
 class SlotSet;
 }  // namespace cluster
 
+class BlockingController;
+
 using facade::OpResult;
+
+// Applies a delta to the per-db/per-type counters and to the owning slot's memory_bytes.
+// All of them track resident RAM.
+void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db);
+
+// Applies a delta to the owning slot's tiered_bytes - disk bytes held by the slot's entries.
+void AccountSlotTieredBytes(std::string_view key, int64_t delta, DbTable* db);
 
 struct DbStats : public DbTableStats {
   // number of active keys.
@@ -182,6 +191,10 @@ class DbSlice {
     // Used when the existing object is overridden by a new one.
     void ReduceHeapUsage();
 
+    // Re-reads the entry's current sizes into the baseline. Call it after a blocking tiered
+    // read, which may upload the value back into memory and account for it behind our back.
+    void ResyncBaseline();
+
     void Run();
     void Cancel();
 
@@ -244,7 +257,7 @@ class DbSlice {
     int32_t expire_options = 0;  // ExpireFlags
   };
 
-  DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
+  DbSlice(uint32_t index, bool cache_mode, EngineShard* owner, Namespace* ns);
   ~DbSlice();
 
   // Returns statistics for the whole db slice. A bit heavy operation.
@@ -304,6 +317,10 @@ class DbSlice {
   // Returns OpStatus::OUT_OF_MEMORY if bad_alloc is thrown
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                                 uint64_t expire_at_ms);
+
+  // Must be called before overwriting a value in place. An offloaded value keeps its data on disk
+  // and reports no heap allocation, so overwriting it drops the only reference to its disk extent.
+  void ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv);
 
   // Update entry expiration. Return expiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
@@ -605,6 +622,9 @@ class DbSlice {
   uint8_t cache_mode_ : 1;
 
   EngineShard* owner_;
+
+  // The namespace owning this slice. Never null and never changes.
+  Namespace* ns_;
 
   bool expire_allowed_ = true;
 

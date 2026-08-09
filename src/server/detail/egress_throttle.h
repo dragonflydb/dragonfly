@@ -29,6 +29,7 @@ class EgressThrottler {
   // Block fiber until egress limit is available again.
   void Throttle() const;
 
+ protected:
   // Advances the TATs for `bytes` observed at time `now_us`.
   void RecordAt(uint64_t bytes, bool high_prio, uint64_t now_us);
 

@@ -61,6 +61,7 @@ ABSL_DECLARE_FLAG(std::string, dir);
 #include "server/generic_family.h"
 #include "server/main_service.h"
 #include "server/server_family.h"
+#include "server/set_family.h"
 #include "server/version.h"
 #include "server/version_monitor.h"
 #include "strings/human_readable.h"
@@ -84,11 +85,6 @@ ABSL_DECLARE_FLAG(std::string, admin_bind);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, maxmemory);
 ABSL_DECLARE_FLAG(uint32_t, proactor_threads);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
-ABSL_FLAG(bool, use_oah_set, false, "If true, store SET values in OAHSet instead of StringSet.");
-
-namespace dfly {
-extern bool g_use_oah_set;  // defined in core/oah_set.h
-}
 
 #ifdef USE_ABSL_LOG
 ABSL_FLAG(bool, alsologtostderr, false, "also log messages to stderr in addition to logfiles");
@@ -536,14 +532,17 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   iouring_res = -iouring_res;
 
   if (iouring_res == ENOSYS) {
-    LOG(WARNING) << "iouring API is not supported. switching to epoll.";
+    LOG(WARNING) << "iouring API is not supported. Switching to epoll.";
   } else if (iouring_res == ENOMEM) {
     LOG(WARNING) << "io_uring does not have enough memory. That can happen when your "
                     "max locked memory is too limited. If you run via docker, "
                     "try adding '--ulimit memlock=-1' to \"docker run\" command."
                     "Meanwhile, switching to epoll";
+  } else if (iouring_res == EPERM) {
+    LOG(WARNING) << "Check if io_uring is disabled via /proc/sys/kernel/io_uring_disabled. "
+                    "Switching to epoll.";
   } else {
-    LOG(WARNING) << "Weird error " << iouring_res << " switching to epoll";
+    LOG(WARNING) << "Weird error " << strerror(iouring_res) << " switching to epoll";
   }
 
   return true;
@@ -1158,7 +1157,7 @@ Usage: dragonfly [FLAGS]
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
 
   dfly::max_memory_limit = absl::GetFlag(FLAGS_maxmemory);
-  dfly::g_use_oah_set = absl::GetFlag(FLAGS_use_oah_set);
+  dfly::InitSetFamilyFlags();
 
   if (dfly::max_memory_limit == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";

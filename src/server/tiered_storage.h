@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/dash_internal.h"
 #include "core/tiering_types.h"
 #include "io/io.h"  // for io::Result (TODO: replace with nonstd/expected)
 #include "server/stats.h"
@@ -92,6 +93,8 @@ class TieredStorage : public TieredStorageBase {
                          BackPressureFuture* backpressure);
 
   // Delete value, must be offloaded (external type)
+  void Delete(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref);
+  // List node fragments carry no key; per-slot counters cannot follow them.
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
 
   // Returns true if there is a pending modification for the given segment.
@@ -110,7 +113,7 @@ class TieredStorage : public TieredStorageBase {
   size_t ReclaimMemory(size_t goal);
 
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
-  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
+  PrimeValue Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item);
 
   TieredStats GetStats() const;
 
@@ -139,12 +142,17 @@ class TieredStorage : public TieredStorageBase {
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
 
-  void ProcessDelayedDeframents();
+  // Scan small bins for fragmented ones and enqueue for defrag
+  void RunDefragScan();
 
   PrimeValue DeleteCool(tiering::TieredCoolRecord* record);
   tiering::TieredCoolRecord* PopCool();
 
-  PrimeTable::Cursor offloading_cursor_;  // where RunOffloading left off
+  detail::DashCursor offloading_cursor_;  // where RunOffloading left off
+  detail::DashCursor defrag_cursor_;      // where defrag left off
+
+  // Number of bins the previous defrag scan enqueued. Used to scale the next scan's cpu time-slice.
+  unsigned last_defrag_scan_hits_ = 0;
 
   // Stash operations waiting for completion to throttle
   tiering::EntryMap<::util::fb2::Future<bool>> stash_backpressure_;
@@ -271,6 +279,9 @@ class TieredStorage : public TieredStorageBase {
              BackPressureFuture* backpressure) {
   }
 
+  void Delete(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref) {
+  }
+
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref) {
   }
 
@@ -318,7 +329,7 @@ class TieredStorage : public TieredStorageBase {
     return 0;
   }
 
-  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
+  PrimeValue Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item) {
     return PrimeValue{};
   }
 

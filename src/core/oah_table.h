@@ -42,9 +42,13 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   using Buckets = std::vector<TaggedPtr, StatelessAllocator<TaggedPtr>>;
 
  public:
-  static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
-  static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
+  static constexpr std::uint32_t kShiftLog = 4;                         // TODO make template
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
+
+  // Table grows once live entries reach capacity * kOverloadFactor (200% load, by default).
+  static constexpr std::uint32_t kOverloadFactor = 2;
+  // Keep capacity_log_ nonzero in nonempty tables.
+  static constexpr size_t kMinBucketCount = 2;
 
   class iterator {
    public:
@@ -190,82 +194,24 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   OAHTable(const OAHTable&) = delete;
   OAHTable& operator=(const OAHTable&) = delete;
 
-  ~OAHTable() {
-    FreeAllSlots();
-  }
+  ~OAHTable();
 
+  // Reserves enough capacity to hold `sz` live entries without triggering a resize.
   void Reserve(size_t sz) {
-    sz = absl::bit_ceil(sz);
-    if (sz > entries_.size()) {
-      capacity_log_ = std::max(kMinCapacityLog, uint32_t(absl::bit_width(sz) - 1));
-      size_t prev_size = entries_.size();
-      entries_.resize(Capacity());
-      Rehash(prev_size);
-    }
-    assert(entries_.size() >= kDisplacementSize);
+    GrowCapacity((sz + kOverloadFactor - 1) / kOverloadFactor);
   }
 
-  // TODO rewrite using extended hash approach
-  //
-  // Shrinks the table to new_size (power of 2, >= 1 << kMinCapacityLog and >= element count).
-  void Shrink(size_t new_size) {
-    assert(absl::has_single_bit(new_size));
-    assert(new_size >= (1u << kMinCapacityLog));
-    assert(new_size < entries_.size());
+  // Shrinks toward `new_size` buckets, never below what's needed for live entries at
+  // kOverloadFactor. No-op if not smaller than the current bucket count. Uses the raw
+  // (possibly stale, pre-expiry) size_ as the floor to avoid an extra full-table pass;
+  // ShrinkBucket() still reaps expired entries during compaction.
+  void Shrink(size_t new_size);
 
-    size_t prev_size = entries_.size();
-    capacity_log_ = absl::bit_width(new_size) - 1;
-
-    // Process from low to high (opposite of Grow/Rehash).
-    for (size_t i = 0; i < prev_size; ++i) {
-      ShrinkBucket(i);
-    }
-
-    entries_.resize(Capacity());
-    entries_.shrink_to_fit();
-  }
-
-  void Clear() {
-    FreeAllSlots();
-    capacity_log_ = 0;
-    entries_.resize(0);
-    size_ = 0;
-    obj_alloc_used_ = 0;
-    ptr_vectors_alloc_used_ = 0;
-    expiration_used_ = false;
-  }
+  void Clear();
 
   // Incrementally clears [start, start+count). Returns the next bucket index; equals
   // Capacity() when the table is empty. Mirrors DenseSet::ClearStep (AsyncDeleter).
-  uint32_t ClearStep(uint32_t start, uint32_t count) {
-    const uint32_t total = entries_.size();
-    const uint32_t end = std::min(total, start + count);
-    for (uint32_t i = start; i < end; ++i) {
-      auto bucket = At(i);
-      if (bucket.Empty())
-        continue;
-
-      if (bucket.IsVector()) {
-        auto vec = bucket.AsVector();
-        for (TaggedPtr& cell : vec) {
-          Entry entry(cell);
-          if (entry) {
-            obj_alloc_used_ -= entry.AllocSize();
-            --size_;
-          }
-        }
-        ptr_vectors_alloc_used_ -= vec.AllocSize();
-      } else {
-        obj_alloc_used_ -= bucket[0].AllocSize();
-        --size_;
-      }
-      bucket.Clear();
-    }
-    // Match Clear() semantics: once incrementally cleared empty, the TTL flag is stale.
-    if (size_ == 0)
-      expiration_used_ = false;
-    return end;
-  }
+  uint32_t ClearStep(uint32_t start, uint32_t count);
 
   /**
    * stable scanning api. has the same guarantees as redis scan command.
@@ -282,6 +228,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
    * cursor = 0 - initiates a new scan.
    */
 
+  // The view is valid for the duration of the callback.
   using ItemCb = std::function<void(std::string_view)>;
 
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) {
@@ -306,7 +253,8 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   bool Erase(std::string_view str) {
     if (entries_.empty())
       return false;
-    const uint64_t hash = Hash(str);
+    const ASCIIStr key(str);
+    const uint64_t hash = Hash(key.content());
     const uint32_t bid = BucketId(hash, capacity_log_);
     const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
     const LaneMasks masks = ProbeWindowShifted(&entries_[bid], ext_hash << oah::kExtHashShift);
@@ -316,7 +264,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     TaggedPtr* base = entries_.data();
     for (uint32_t cand_bits = masks.candidates; cand_bits; cand_bits &= cand_bits - 1) {
       TaggedPtr* cell = &base[bid + std::countr_zero(cand_bits)];
-      if (Entry(*cell).Key() == str) {
+      if (Entry(*cell).KeyMatches(key.content(), key.len())) {
         matched = cell;
         break;
       }
@@ -324,7 +272,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     const uint32_t ext_bid = GetExtensionPoint(bid);
     bool in_vector = false;
     if (!matched && At(ext_bid).IsVector()) {
-      matched = ProbeExtensionVector(ext_bid, str, ext_hash);
+      matched = ProbeExtensionVector(ext_bid, key.content(), key.len(), ext_hash);
       in_vector = matched != nullptr;
     }
     if (!matched)
@@ -351,14 +299,18 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   iterator Find(std::string_view member) {
     if (entries_.empty())
       return end();
-    const uint64_t hash = Hash(member);
-    const uint32_t bid = BucketId(hash, capacity_log_);
-    return expiration_used_ ? FindInternal<true>(bid, member, hash)
-                            : FindInternal<false>(bid, member, hash);
+    const ASCIIStr key(member);
+    return Find(key.content(), key.len());
   }
 
   bool Contains(std::string_view member) {
     return Find(member) != end();
+  }
+
+  // Returns an allocation-free logical key: raw content is viewed in place and encoded content is
+  // decoded into bounded inline storage.
+  static oah::key::Decoded DecodeKey(Entry e) {
+    return oah::key::Decode(e.StoredKey());
   }
 
   // Iterator to a uniformly random non-empty entry, or end() if empty (SPOP/SRANDMEMBER).
@@ -417,13 +369,24 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     return expiration_used_;
   }
 
-  size_t SizeSlow() {
-    if (expiration_used_)
-      CollectExpired();
-    return size_;
-  }
+  size_t SizeSlow();
 
  protected:
+  // Grows the table so entries_.size() >= bucket_capacity (power of 2), rehashing in place.
+  void GrowCapacity(size_t bucket_capacity);
+
+  // Grows the table once size_ crosses the overload threshold. GrowCapacity takes a
+  // bucket_capacity target, so divide by kOverloadFactor to undo Reserve()'s scaling.
+  void TryGrow() {
+    if (size_ >= entries_.size() * kOverloadFactor) [[unlikely]] {
+      size_t target = size_ + 1;
+      if constexpr (kOverloadFactor > 1) {
+        target = (target + kOverloadFactor - 1) / kOverloadFactor;
+      }
+      GrowCapacity(target);
+    }
+  }
+
   static uint64_t Hash(std::string_view str) {
     constexpr uint64_t kHashSeed = 24061983;
     return rapidhashMicro_withSeed(str.data(), str.size(), kHashSeed);
@@ -439,41 +402,23 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   }
 
   // Frees the blob/vector of every non-empty bucket. Used by ~OAHTable and Clear().
-  void FreeAllSlots() {
-    for (size_t i = 0, n = entries_.size(); i < n; ++i) {
-      if (entries_[i])
-        At(i).Clear();
-    }
-  }
+  void FreeAllSlots();
 
   // Reaps every expired entry so size_ becomes the live count. Nulls slots the same way the
   // iterator and Erase do, which is safe under fixed-window displacement probing.
-  void CollectExpired() {
-    if (time_now_ == 0)
-      return;
-    const uint32_t now = time_now_;
-    for (size_t b = 0, n = entries_.size(); b < n; ++b) {
-      if (!entries_[b])
-        continue;
-      auto bucket = At(b);
-      for (uint32_t i = 0, m = bucket.ElementsNum(); i < m; ++i) {
-        auto entry = bucket[i];
-        if (entry && entry.HasExpiry() && entry.GetExpiry() <= now)
-          entry.ExpireIfNeeded(now, &size_, &obj_alloc_used_);
-      }
-    }
-  }
+  void CollectExpired();
 
   // was Grow in StringSet
   void Rehash(uint32_t prev_size) {
     if (prev_size == 0) {
       return;
     }
-    // we should prevent moving elements before current possition to avoid double processing.
+    // We should prevent moving elements before current position to avoid double processing.
     // Detach the first mix_size slots into locals; each `bucket` view is freed explicitly
     // after its entries are redistributed into entries_ (a TaggedPtr slot has no dtor).
-    constexpr size_t mix_size = (2 << kShiftLog) - 1;
-    std::array<TaggedPtr, mix_size> old_buckets{};
+    constexpr size_t kMixSize = (2 << kShiftLog) - 1;
+    std::array<TaggedPtr, kMixSize> old_buckets{};
+    const size_t mix_size = std::min<size_t>(prev_size, old_buckets.size());
     for (size_t i = 0; i < mix_size; ++i) {
       old_buckets[i] = entries_[i];
       entries_[i] = 0;
@@ -503,8 +448,8 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     bucket.Clear();
   }
 
-  // it is inefficient for now,
-  // TODO predict new position by current position and extended hash
+  // It is inefficient for now.
+  // TODO: predict new position by current position and extended hash.
   void ShrinkBucket(uint32_t bucket_id) {
     // Detach the slot bits into a local; `bucket` views the local and is freed
     // explicitly below (At(new_bucket_id) writes into entries_, never this local).
@@ -554,7 +499,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
       if (uint32_t empties = (data == uint64_t(0)).GetMSBs())
         return bid + off + std::countr_zero(empties);
     }
-    // TODO add expiration logic
+    // TODO: add expiration logic.
     const uint32_t ext = GetExtensionPoint(bid);
     assert(ext < entries_.size());
     return ext;
@@ -696,7 +641,8 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
         if (e.Empty())
           continue;
       }
-      cb(e.Key());
+      const oah::key::Decoded key = DecodeKey(e);
+      cb(key.view());
       reported = true;
     }
 
@@ -717,7 +663,8 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
             if (el.Empty())
               continue;
           }
-          cb(el.Key());
+          const oah::key::Decoded key = DecodeKey(el);
+          cb(key.view());
           reported = true;
         }
       }
@@ -726,10 +673,10 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     return reported;
   }
 
-  // Searches the extension-point vector for `str`. Returns the matched slot, or nullptr if absent.
-  // Callers derive the vector position (Find) or the in-vector flag (Erase) from the result; it
-  // does not expire, so the returned entry may be live or already-expired.
-  TaggedPtr* ProbeExtensionVector(uint32_t ext_bid, std::string_view str, uint64_t ext_hash) {
+  // Searches the extension-point vector for the query key. Returns the matched slot, or nullptr.
+  // Does not expire, so the returned entry may be live or already-expired.
+  TaggedPtr* ProbeExtensionVector(uint32_t ext_bid, std::string_view content, uint32_t len,
+                                  uint64_t ext_hash) {
     auto vec = At(ext_bid).AsVector();
     TaggedPtr* raw_arr = vec.Raw();
     const size_t size = vec.Size();
@@ -744,26 +691,34 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
       while (cand_bits) {
         const uint32_t j = std::countr_zero(cand_bits);
         cand_bits &= cand_bits - 1;
-        if (Entry(raw_arr[base + j]).Key() == str)
+        if (Entry(raw_arr[base + j]).KeyMatches(content, len))
           return &raw_arr[base + j];
       }
     }
     return nullptr;
   }
 
-  // Probes for `str`; returns an iterator to the live entry or end(). Used by Find. Templated on
-  // Expire: when no TTLs exist a key match is provably live, so the empty re-check is dropped.
-  template <bool Expire> iterator FindInternal(uint32_t bid, std::string_view str, uint64_t hash) {
+  // Probes for an already-encoded query key (content bytes + logical length); assumes entries_ is
+  // non-empty. Overload so OAHMap's insert path doesn't re-encode.
+  iterator Find(std::string_view content, uint32_t len) {
+    const uint64_t hash = Hash(content);
+    const uint32_t bid = BucketId(hash, capacity_log_);
+    return expiration_used_ ? FindInternal<true>(bid, content, len, hash)
+                            : FindInternal<false>(bid, content, len, hash);
+  }
+
+  // Probes for the query key; returns an iterator to the live entry or end(). Templated on Expire:
+  // with no TTLs a key match is provably live, so the expiry re-check is compiled out.
+  template <bool Expire>
+  iterator FindInternal(uint32_t bid, std::string_view content, uint32_t len, uint64_t hash) {
     const uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
     const LaneMasks masks = ProbeWindowShifted(&entries_[bid], ext_hash << oah::kExtHashShift);
 
-    // Find returns an iterator built straight from the match. With no TTLs a key match is always
-    // live, so ExpireIfNeeded and the resulting empty re-check are compiled out.
     TaggedPtr* base = entries_.data();
     for (uint32_t cand_bits = masks.candidates; cand_bits; cand_bits &= cand_bits - 1) {
       const uint32_t bucket_id = bid + std::countr_zero(cand_bits);
       Entry e(base[bucket_id]);
-      if (e.Key() == str) {
+      if (e.KeyMatches(content, len)) {
         if constexpr (Expire) {
           ExpireIfNeeded(e);
           if (e.Empty())
@@ -774,7 +729,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     }
     const uint32_t ext_bid = GetExtensionPoint(bid);
     if (At(ext_bid).IsVector()) {
-      if (TaggedPtr* hit = ProbeExtensionVector(ext_bid, str, ext_hash)) {
+      if (TaggedPtr* hit = ProbeExtensionVector(ext_bid, content, len, ext_hash)) {
         if constexpr (Expire) {
           Entry e(*hit);
           ExpireIfNeeded(e);
@@ -799,7 +754,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
 
   // Recomputes the entry's hash, refreshes its stored ext-hash, and returns its new bucket.
   uint32_t RehashEntry(Entry entry) {
-    uint64_t hash = Hash(entry.Key());
+    uint64_t hash = Hash(entry.KeyContent());
     entry.SetExtHash(CalcExtHash(hash, capacity_log_));
     return BucketId(hash, capacity_log_);
   }

@@ -13,14 +13,14 @@ inputs:
     default: 'build'
     type: string
   c-compiler:
-    description: "C compiler to use"
+    description: "C compiler to use. Leave unset only if the container default is intended"
     required: false
-    default: ''
+    default: 'unknwn_c_cmpl'
     type: string
   cxx-compiler:
-    description: "C++ compiler to use"
+    description: "C++ compiler to use. Leave unset only if the container default is intended"
     required: false
-    default: ''
+    default: 'unkn_cpp_cmpl'
     type: string
   cxx-flags:
     description: "C++ compiler flags"
@@ -35,17 +35,143 @@ inputs:
   with-aws:
     description: "Build with AWS support"
     required: false
-    default: 'ON'
+    default: 'OFF'
     type: string
   targets:
     description: "Build targets to compile"
     required: false
     default: 'src/all'
     type: string
+  enable-ccache:
+    description: "Use ccache. 'true' restores/saves the cache; 'false' (default) skips it and builds with -DENABLE_CCACHE=OFF"
+    required: false
+    default: 'false'
+    type: string
+  ccache-save:
+    description: "When ccache is on, set to 'true' to save the updated cache back; 'false' (default) restores read-only"
+    required: false
+    default: 'false'
+    type: string
+  ccache-max-size:
+    description: "Max ccache size per config (e.g. 1G, 2G, 500M)"
+    required: false
+    default: '1G'
+    type: string
+  cache-key-suffix:
+    description: "Extra token mixed into the cache key; callers pass the container so glibc/musl caches don't collide"
+    required: false
+    default: 'default'
+    type: string
+  enable-deps-cache:
+    description: "Cache the built third-party deps (third_party/_deps) and their build artifacts, skipping both download and compilation on a hit. 'false' (default) skips it."
+    required: false
+    default: 'false'
+    type: string
 
 runs:
   using: "composite"
   steps:
+    - name: Check ccache cache-key-suffix
+      if: ${{ inputs.enable-ccache == 'true' && inputs.ccache-save == 'true' }}
+      shell: bash
+      run: |
+        source "${GITHUB_ACTION_PATH}/scripts/actions_cache_ccache_helper.sh"
+        actions_cache_ccache_validate_suffix "${{ inputs.cache-key-suffix }}"
+    - name: Restore/save cache (ccache)
+      if: ${{ inputs.enable-ccache == 'true' }}
+      # - Reuse compiled objects across runners so unchanged files are not recompiled.
+      # - The action restores here and saves in its GitHub Actions post-step (auto-generated): "Post Restore/save cache (ccache)".
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        # - This is the ccache key template used by every caller.
+        # - Changing it or one of its inputs creates a new cache. Keep main's cache producer aligned with this key so
+        #   pull requests can restore the cache warmed on main.
+        key: dfly-ccache-${{ inputs.cache-key-suffix }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-${{ inputs.c-compiler }}-${{ inputs.cxx-compiler }}-${{ inputs.sanitizers }}
+        max-size: ${{ inputs.ccache-max-size }}
+        save: ${{ inputs.ccache-save }}
+        verbose: 1
+
+    - name: Compute third-party deps cache key
+      # - Generate one key for restore, save, and failure cleanup so those steps always use the same cache entry.
+      # - Require a caller-specific suffix: third-party artifacts are incompatible across container environments.
+      # - hashFiles() includes dependency definitions, dependency build settings, and patches. Add any new file that
+      #   changes a dependency's fetched source or build output, or an old cache could be restored incorrectly.
+      # - internal.cmake, sanitizers, and cxx-flags affect the compiler settings inherited by dependencies, so each
+      #   setting combination needs its own cache entry. Hash flags to keep the key shell-safe and delimiter-stable.
+      # - ccache is separate: it caches individual object files and also covers src/.
+      if: inputs.enable-deps-cache == 'true'
+      id: deps-cache-key
+      shell: bash
+      run: |
+        source "${GITHUB_ACTION_PATH}/scripts/actions_cache_deps_helper.sh"
+        actions_cache_deps_set_key \
+          "${{ inputs.cache-key-suffix }}" \
+          "${{ hashFiles('src/external_libs.cmake', 'CMakeLists.txt', 'src/CMakeLists.txt', 'helio/cmake/third_party.cmake', 'helio/cmake/internal.cmake', 'patches/**', 'helio/patches/**') }}" \
+          "${{ runner.os }}" "${{ runner.arch }}" "${{ inputs.build-type }}" \
+          "${{ inputs.cxx-compiler }}" "${{ inputs.sanitizers }}" "${{ inputs.cxx-flags }}" \
+          "${{ inputs.with-aws }}" "${{ inputs.build-dir }}"
+
+    - name: Restore cache (deps)
+      # - actions/cache/restore only downloads a cache; unlike the combined cache action, it never saves automatically.
+      # - The separate Save step can therefore require a successful build, while the failure step can delete this key.
+      # - third_party contains the ExternalProject sources, per-step stamps and installed libs; _deps contains the
+      #   FetchContent builds (e.g. abseil).
+      # - .ninja_log is REQUIRED for a usable hit. Ninja only trusts a previously-built output if its build log records
+      #   that Ninja built it. On a fresh (or tar-restored) tree without the log, Ninja re-runs every ExternalProject
+      #   step regardless of file mtimes - and re-running the non-idempotent AWS 'patch -p1' against already-patched
+      #   sources fails the build. Restoring .ninja_log makes Ninja treat the cached third_party/_deps work as done.
+      # - Manifest validation intentionally excludes mtimes: the tar round-trip regression test verifies they survive.
+      # - Archive restoration so Ninja can continue trusting the restored build log.
+      # - CMakeFiles/*_project-complete are the final ExternalProject markers; caching them keeps the hit fully clean.
+      # - Paths are workspace-relative because actions/cache runs inside the job's container, where host paths do not
+      #   exist.
+      if: inputs.enable-deps-cache == 'true'
+      id: deps-cache-restore
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          ${{ steps.deps-cache-key.outputs.paths }}
+          ${{ steps.deps-cache-key.outputs.manifest_path }}
+        key: ${{ steps.deps-cache-key.outputs.key }}
+
+    - name: Validate restored cache (deps)
+      # A cache archive can restore successfully yet contain an incomplete or inconsistent dependency tree.
+      # Validate (using the manifest) before calling CMake/Ninja. On failure discard local paths, attempt remote deletion, and cold-build.
+      if: inputs.enable-deps-cache == 'true' && steps.deps-cache-restore.outputs.cache-hit == 'true'
+      id: deps-cache-validate
+      shell: bash
+      run: |
+        source "${GITHUB_ACTION_PATH}/scripts/actions_cache_deps_helper.sh"
+        actions_cache_deps_validate_restore \
+          "${GITHUB_WORKSPACE}" \
+          "${GITHUB_WORKSPACE}/${{ steps.deps-cache-key.outputs.manifest_path }}" \
+          "${{ steps.deps-cache-key.outputs.paths }}" \
+          "${{ steps.deps-cache-key.outputs.key }}"
+
+    - name: Delete invalid remote cache (deps)
+      # Delete before rebuilding so a successful cold build can save under this immutable key. For PRs, also try the
+      # base ref because the invalid exact hit may have been restored from that scope.
+      if: inputs.enable-deps-cache == 'true' && steps.deps-cache-validate.outputs.deps_cache_is_valid == 'false'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        source "${GITHUB_ACTION_PATH}/scripts/actions_cache_deps_helper.sh"
+        actions_cache_deps_delete_invalid_remote \
+          "${{ steps.deps-cache-key.outputs.key }}" "${{ github.ref }}" \
+          "${{ github.event_name }}" "${{ github.base_ref }}" "${{ github.repository }}"
+
+    - name: Report cache status (deps)
+      # - Only exact cache keys are used (no restore-keys), so a hit means the config matches the saved artifacts.
+      if: always() && inputs.enable-deps-cache == 'true'
+      shell: bash
+      run: |
+        source "${GITHUB_ACTION_PATH}/scripts/actions_cache_deps_helper.sh"
+        actions_cache_deps_report_status \
+          "${{ steps.deps-cache-restore.outputs.cache-hit }}" \
+          "${{ steps.deps-cache-validate.outputs.deps_cache_is_valid }}" \
+          "${{ steps.deps-cache-key.outputs.key }}"
+
     - name: Configure CMake
       shell: bash
       run: |
@@ -65,11 +191,19 @@ runs:
           -GNinja
         )
 
-        # Add optional compiler flags
-        if [ -n "${{ inputs.c-compiler }}" ]; then
+        # Pass ccache on/off explicitly so the build never depends on the CMake default.
+        if [ "${{ inputs.enable-ccache }}" = "true" ]; then
+          CMAKE_CMD+=(-DENABLE_CCACHE=ON)
+        else
+          CMAKE_CMD+=(-DENABLE_CCACHE=OFF)
+        fi
+
+        # Add optional compiler overrides. 'unknwn_c_cmpl' / 'unkn_cpp_cmpl' are the key-only sentinel
+        # defaults (see the inputs above): treat them like "unset".
+        if [ -n "${{ inputs.c-compiler }}" ] && [ "${{ inputs.c-compiler }}" != "unknwn_c_cmpl" ]; then
           CMAKE_CMD+=(-DCMAKE_C_COMPILER="${{ inputs.c-compiler }}")
         fi
-        if [ -n "${{ inputs.cxx-compiler }}" ]; then
+        if [ -n "${{ inputs.cxx-compiler }}" ] && [ "${{ inputs.cxx-compiler }}" != "unkn_cpp_cmpl" ]; then
           CMAKE_CMD+=(-DCMAKE_CXX_COMPILER="${{ inputs.cxx-compiler }}")
         fi
         if [ -n "${{ inputs.cxx-flags }}" ]; then
@@ -95,6 +229,40 @@ runs:
     - name: Build
       shell: bash
       run: |
-        cd ${GITHUB_WORKSPACE}/${{ inputs.build-dir }}
+        # - Use $GITHUB_WORKSPACE: it is the workspace path inside the container. github.workspace is the host path.
+        cd "${GITHUB_WORKSPACE}/${{ inputs.build-dir }}"
         echo "Building target: ${{ inputs.targets }}"
+        if [ "${{ inputs.enable-ccache }}" = "true" ]; then
+          ccache -z || true   # zero stats so the summary below reflects only this build
+        fi
         ninja ${{ inputs.targets }}
+        if [ "${{ inputs.enable-ccache }}" = "true" ]; then
+          echo "===== ccache stats (this build) ====="
+          ccache -s || true
+        fi
+
+    - name: Generate cache manifest (deps)
+      # actions/cache/save can only archive existing paths. Generate the manifest after the cold build,
+      # before the external save action archives the dependency tree and its manifest together.
+      if: success() && inputs.enable-deps-cache == 'true' && (steps.deps-cache-restore.outputs.cache-hit != 'true' || steps.deps-cache-validate.outputs.deps_cache_is_valid == 'false')
+      shell: bash
+      run: |
+        source "${GITHUB_ACTION_PATH}/scripts/actions_cache_deps_helper.sh"
+        actions_cache_deps_generate_manifest \
+          "${GITHUB_WORKSPACE}" \
+          "${GITHUB_WORKSPACE}/${{ steps.deps-cache-key.outputs.manifest_path }}" \
+          "${{ steps.deps-cache-key.outputs.paths }}"
+
+    - name: Save cache (deps)
+      # - Save only after configuration and build succeed. Later test failures must not discard a valid deps cache.
+      # - Never save a failed or cancelled build: it may contain incomplete artifacts.
+      # - Do not save after a verified cache hit. There is nothing new to upload, and saving it again would create an
+      #   unnecessary copy for this run's branch or pull request. An invalid hit is rebuilt and save is attempted;
+      #   if remote deletion failed, Actions caches retain the existing key because they cannot be overwritten.
+      if: success() && inputs.enable-deps-cache == 'true' && (steps.deps-cache-restore.outputs.cache-hit != 'true' || steps.deps-cache-validate.outputs.deps_cache_is_valid == 'false')
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          ${{ steps.deps-cache-key.outputs.paths }}
+          ${{ steps.deps-cache-key.outputs.manifest_path }}
+        key: ${{ steps.deps-cache-key.outputs.key }}

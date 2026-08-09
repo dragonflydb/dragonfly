@@ -22,6 +22,7 @@
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/blocking_controller.h"
 #include "server/cmd_support.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
@@ -33,6 +34,7 @@
 #include "server/family_utils.h"
 #include "server/generic_family.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
@@ -278,14 +280,14 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
     auto tier = ReadTieredString(op_args.db_cntx.db_index, key, res.it->second,
                                  op_args.shard->tiered_storage())
                     .Get();
+    res.post_updater.ResyncBaseline();  // the read may have uploaded the value
     if (!tier)
       return OpStatus::IO_ERROR;
     string slice = std::move(tier).value();
     string new_val = prepend ? absl::StrCat(val, slice) : absl::StrCat(slice, val);
-    // The read may have warmed the value back into memory; re-check before Delete.
+    res.post_updater.ReduceHeapUsage();
     if (res.it->second.IsExternal()) {
-      res.post_updater.ReduceHeapUsage();
-      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
     }
     res.it->second.SetString(new_val);
     return true;
@@ -321,6 +323,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
     auto res = ReadTieredString(op_args.db_cntx.db_index, key, add_res.it->second,
                                 op_args.shard->tiered_storage())
                    .Get();
+    add_res.post_updater.ResyncBaseline();  // the read may have uploaded the value
     if (!res)
       return OpStatus::IO_ERROR;
     tmp = std::move(res).value();
@@ -342,11 +345,9 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
 
-  // The tiered read may have warmed the value back into memory; re-check so Delete
-  // only runs while it is still external.
+  add_res.post_updater.ReduceHeapUsage();
   if (add_res.it->second.IsExternal()) {
-    add_res.post_updater.ReduceHeapUsage();
-    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &add_res.it->second);
+    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &add_res.it->second);
   }
   add_res.it->second.SetString(str);
 
@@ -708,8 +709,12 @@ OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view ke
 
 // Helper for building replies for strings
 struct GetReplies {
-  GetReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
-    DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
+  GetReplies(CommandContext* cmd_cntx) : cmd_cntx{cmd_cntx} {
+  }
+
+  // Fetch the reply builder lazily only after were allowed to reply (after await)
+  RedisReplyBuilder* rb() const {
+    return static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   }
 
   template <typename T> void Send(OpResult<T>&& res) const {
@@ -717,18 +722,18 @@ struct GetReplies {
       case OpStatus::OK:
         return Send(std::move(res.value()));
       case OpStatus::WRONG_TYPE:
-        return rb->SendError(kWrongTypeErr);
+        return rb()->SendError(kWrongTypeErr);
       case OpStatus::IO_ERROR:
-        return rb->SendError(kTieredIoError);
+        return rb()->SendError(kTieredIoError);
       default:
-        rb->SendNull();
+        rb()->SendNull();
     }
   }
 
   template <typename T> void Send(optional<T>&& res) const {
     if (res.has_value())
       return Send(std::move(*res));
-    return rb->SendNull();
+    return rb()->SendNull();
   }
 
   template <typename T> void Send(TResultOrT<T>&& res) const {
@@ -748,7 +753,7 @@ struct GetReplies {
     if (holds_alternative<cmn::BorrowedString>(res)) {
       // Move the BorrowedString into SendBulkStringBorrowed; the reply builder takes ownership
       // of the borrow (and associated pin) and parks the pin until all the writes complete.
-      rb->SendBulkStringBorrowed(std::move(get<cmn::BorrowedString>(res)));
+      rb()->SendBulkStringBorrowed(std::move(get<cmn::BorrowedString>(res)));
       return;
     }
     auto fut = get<TieredStorage::TResult<std::string>>(std::move(res));
@@ -760,20 +765,20 @@ struct GetReplies {
   }
 
   void Send(size_t val) const {
-    rb->SendLong(val);
+    rb()->SendLong(val);
   }
 
   // TODO: to remove.
   void Send(string_view str) const {
     LOG(FATAL) << "SHOULD NOT SEND STRINGVIEW DIRECTLY";
-    rb->SendBulkString(str);
+    rb()->SendBulkString(str);
   }
 
   void Send(const std::string& str) const {
-    rb->SendBulkString(str);
+    rb()->SendBulkString(str);
   }
 
-  RedisReplyBuilder* rb;
+  CommandContext* cmd_cntx;
 };
 
 cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -787,8 +792,7 @@ cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
       return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
 
-    RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-    GetReplies{rb}.Send(co_await cmd::SingleHopT(cb));
+    GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   } else {
     // Memcached skips if key is missing
     auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -967,6 +971,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   }
 
   bool has_expire = key.HasExpire();
+  const bool was_stream = prime_value.ObjType() == OBJ_STREAM;
 
   it_upd->post_updater.ReduceHeapUsage();
 
@@ -980,11 +985,17 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
-    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, &prime_value);
+    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, it_upd->it.key(), &prime_value);
   }
 
   // overwrite existing entry.
   prime_value.SetString(value);
+
+  if (was_stream) {
+    if (auto* bc = op_args_.db_cntx.ns->GetBlockingController(shard->shard_id()); bc) {
+      bc->Awaken(op_args_.db_cntx.db_index, it_upd->it.key());
+    }
+  }
 
   DCHECK_EQ(has_expire, key.HasExpire());
 
@@ -1206,7 +1217,7 @@ cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    GetReplies{rb}.Send(std::move(prev));
+    GetReplies{cmd_cntx}.Send(std::move(prev));
     co_return std::nullopt;
   }
 
@@ -1293,7 +1304,7 @@ cmd::CmdR CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
     return BorrowStringOrRead(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1309,7 +1320,7 @@ cmd::CmdR CmdGetDel(CmdArgParser parser, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1368,7 +1379,7 @@ cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (status != OpStatus::OK) {
     cmd_cntx->rb()->SendError(status);
   } else {
-    GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
+    GetReplies{cmd_cntx}.Send(std::move(prev));
   }
   co_return std::nullopt;
 }
@@ -1376,37 +1387,24 @@ cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
-  ExpT exp_type_value = ExpT::EX;
-  int64_t int_arg = 0;
-  bool persist = false;
-  bool defined = false;
+  static constexpr char kGetExExpiryErr[] = "invalid expire time in 'getex' command";
+  using ExpiryValue = Validated<int64_t, ClosedRange<int64_t{1}, INT64_MAX, kGetExExpiryErr>>;
+  static constexpr auto kGrammar = Compile(Options(ExpiryOrPersist<ExpiryValue>()));
+  auto opts = kGrammar.Apply(&parser);
 
-  auto expiry = [&](ExpT type) {
-    return [&, type](CmdArgParser* p) {
-      exp_type_value = type;
-      int_arg = p->Next<int64_t>();
-      defined = true;
-    };
-  };
-  // TODO: remove runtime parsing (migrate to cap grammar).
-  parser.Apply(OneOf(Tag("EX", expiry(ExpT::EX)), Tag("PX", expiry(ExpT::PX)),
-                     Tag("EXAT", expiry(ExpT::EXAT)), Tag("PXAT", expiry(ExpT::PXAT)),
-                     Exist("PERSIST", &persist)));
   if (!parser.Finalize()) {
     co_return parser.TakeError().MakeReply();
-  }
-  if (defined && int_arg <= 0) {
-    co_return facade::ErrorReply{InvalidExpireTime("getex")};
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringResult> {
     auto op_args = t->GetOpArgs(shard);
 
     DbSlice::ExpireParams exp_params;
-    if (defined) {
-      exp_params = DbSlice::ExpireParams{exp_type_value, int_arg, op_args.db_cntx.time_now_ms};
+    if (opts.expiry.value) {
+      exp_params =
+          DbSlice::ExpireParams{opts.expiry.type, *opts.expiry.value, op_args.db_cntx.time_now_ms};
     }
-    exp_params.persist = persist;
+    exp_params.persist = opts.persist;
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
     if (!it_res)
@@ -1434,7 +1432,7 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1665,7 +1663,7 @@ cmd::CmdR CmdStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [key = parser.Next()](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1679,7 +1677,7 @@ cmd::CmdR CmdGetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1698,7 +1696,7 @@ cmd::CmdR CmdSetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 

@@ -14,6 +14,9 @@ namespace dfly {
 
 using namespace std;
 
+void InitSetFamilyFlags() {
+}
+
 namespace {
 void Fail() {
   CHECK(false) << "Compiled without command support";

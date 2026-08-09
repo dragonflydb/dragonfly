@@ -1,7 +1,8 @@
 import asyncio
-from redis import asyncio as aioredis
 
 import pytest
+
+from redis import asyncio as aioredis
 
 
 @pytest.mark.parametrize("index", range(50))

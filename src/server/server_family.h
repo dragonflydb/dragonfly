@@ -26,6 +26,7 @@ struct hdr_histogram;
 
 namespace facade {
 class Listener;
+struct TlsCertInfo;
 }  // namespace facade
 
 namespace util {
@@ -161,8 +162,8 @@ class ServerFamily {
   // Collects server metrics. See MetricsCollectOpts; a default-constructed value collects all.
   Metrics GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) const;
 
-  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section,
-                                bool priveleged) const;
+  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section, bool priveleged,
+                                const std::shared_ptr<const facade::TlsCertInfo>& cert_info) const;
 
   ScriptMgr* script_mgr() {
     return script_mgr_.get();
@@ -203,13 +204,24 @@ class ServerFamily {
   void PauseReplication(bool pause) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
+  // Investigation-only (DEBUG REPLDIAG). Remove once closed.
+  std::optional<int> GetReplicaMasterSocketUnreadBytes() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
   const std::string& master_replid() const {
     return master_replid_;
   }
 
+  // The lineage root replication id of this node: its own replid if it is a true master, or the
+  // ancestor id advertised by its master when it is itself a replica (cascaded replication).
+  std::string GetLineageId() const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
   DflyCmd* GetDflyCmd() const {
     return dfly_cmd_.get();
   }
+
+  // Forces all replicas of this node to perform a full sync by breaking the replication connection
+  // with a cancellation error (DfylCmd::CancelReplicas) and resetting the journal
+  void ForceReplicasToFullSync();
 
   std::optional<LastMasterSyncData> GetLastMasterData() const {
     return last_master_data_;
@@ -302,8 +314,6 @@ class ServerFamily {
 
   void ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmnd_cntx,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  void StartJournalInShardThreads(Replica* repl_ptr);
 
   void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 

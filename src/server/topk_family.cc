@@ -36,10 +36,6 @@ namespace {
 constexpr char kDecayRangeErr[] = "decay must be between 0 and 1";
 constexpr char kIncrRangeErr[] = "increment must be between 1 and 100000";
 
-RuleError DecayRange(double v) {
-  return {!(v >= 0 && v <= 1), kDecayRangeErr};
-}
-
 OpStatus OpReserve(const OpArgs& op_args, string_view key, uint32_t k, uint32_t width,
                    uint32_t depth, double decay) {
   auto& db_slice = op_args.GetDbSlice();
@@ -200,7 +196,7 @@ void TopkFamily::Reserve(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   if (parser.HasNext()) {
     width = parser.Next<uint32_t>();
     depth = parser.Next<uint32_t>();
-    decay = parser.Next<Validated<double, DecayRange>>();
+    decay = parser.Next<Validated<double, ClosedRange<0, 1, kDecayRangeErr>>>();
     RETURN_ON_PARSE_ERROR(parser, rb);
 
     if ((width == 0) || (depth == 0)) {
@@ -268,8 +264,7 @@ void TopkFamily::IncrBy(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   items.reserve(parser.UnparsedArgs().size() / 2);
   while (parser.HasNext()) {
     auto [item, incr] =
-        parser.Next<string_view,
-                    Validated<uint32_t, Bounded<uint32_t{1}, uint32_t{100000}, kIncrRangeErr>>>();
+        parser.Next<string_view, Validated<uint32_t, ClosedRange<1, 100000, kIncrRangeErr>>>();
     items.emplace_back(item, incr);
   }
   RETURN_ON_PARSE_ERROR(parser, rb);
@@ -352,10 +347,7 @@ void TopkFamily::Count(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 void TopkFamily::List(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  bool with_count = false;
-
-  // TODO: remove runtime parsing (single option -> Check).
-  parser.Apply(OneOf(Exist("WITHCOUNT", &with_count)));
+  bool with_count = parser.Check("WITHCOUNT");
 
   if (!parser.Finalize())
     return rb->SendError(parser.TakeError().MakeReply());

@@ -7,6 +7,7 @@
 #include <cctype>
 #include <chrono>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -35,6 +36,7 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_log.h"
 #include "server/acl/validator.h"
+#include "server/cluster_support.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/config_registry.h"
@@ -587,10 +589,20 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  string command = absl::AsciiStrToUpper(parser.Next());
-  auto* cid = cmd_registry_->Find(command);
+  const facade::ParsedArgs simulated_cmd = parser.UnparsedArgs();
+  // Use the same lookup as real dispatch (FindExtended), not a plain single-token Find: multi-word
+  // commands like "ACL SETUSER" otherwise resolve to the bare family command ("ACL") and get
+  // checked against the wrong, less restrictive ACL category.
+  auto [cid, simulated_args] = cmd_registry_->FindExtended(simulated_cmd);
   if (!cid || cid->IsAlias()) {
-    auto error = absl::StrCat("Command '", command, "' not found");
+    // Mirror the lookup key FindExtended actually used: for ACL sub-commands that's "ACL
+    // SUBCMD", not just "ACL", otherwise a bad sub-command misleadingly reports "ACL" itself
+    // as not found.
+    std::string looked_up = absl::AsciiStrToUpper(simulated_cmd.Front());
+    if (looked_up == "ACL" && simulated_cmd.size() > 1) {
+      absl::StrAppend(&looked_up, " ", absl::AsciiStrToUpper(simulated_cmd[1]));
+    }
+    auto error = absl::StrCat("Command '", looked_up, "' not found");
     rb->SendError(error);
     return;
   }
@@ -598,18 +610,31 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
   const auto& user = registry.find(username)->second;
   // Stub, used to mimic connection context for a user.
   ConnectionContext stub(nullptr, acl::UserCredentials{});
+  stub.authed_username = username;
   stub.acl_commands = user.AclCommandsRef();
-  // "mock" without an actual connection we can't know which db is active so we skip this check
-  // for DryRun.
-  stub.acl_db_idx = {};
-  stub.keys = {{}, true};
-  const auto [is_allowed, reason] = IsUserAllowedToInvokeCommandGeneric(stub, *cid, {});
+  stub.pub_sub = user.PubSub();
+  stub.acl_db_idx = user.Db();
+  stub.conn_state.db_index =
+      stub.acl_db_idx == std::numeric_limits<size_t>::max() ? 0 : stub.acl_db_idx;
+  stub.keys = user.Keys();
+  // The regular command path validates arity before checking ACLs. DRYRUN historically accepts a
+  // command without its arguments, so skip key-pattern validation for an incomplete simulation.
+  if (cid->Validate(simulated_args))
+    stub.keys = {{}, true};
+  // Check pub/sub channel ACLs too, the same way a real PUBLISH/SUBSCRIBE/PSUBSCRIBE dispatch
+  // would. We can't use the IsUserAllowedToInvokeCommand wrapper here: on denial it logs to
+  // AclLog, which reads the real Connection* for client info - the stub above has none.
+  const bool is_allowed =
+      cid->IsPubSub() ? IsPubSubCommandAuthorized(cid->IsPatternPubSub(), stub.acl_commands,
+                                                  stub.pub_sub, simulated_args, *cid)
+                            .first
+                      : IsUserAllowedToInvokeCommandGeneric(stub, *cid, simulated_args).first;
   if (is_allowed) {
     rb->SendOk();
     return;
   }
 
-  auto msg = absl::StrCat("This user has no permissions to run the '", command, "' command");
+  auto msg = absl::StrCat("This user has no permissions to run the '", cid->name(), "' command");
 
   rb->SendBulkString(msg);
 }
@@ -1112,6 +1137,10 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
       if (req.select_db) {
         return ErrorReply("ERR Error, select db $ was used twice");
       }
+      // AUTH switches the connection to this db, bypassing the SELECT restriction.
+      if (IsClusterEnabled() && *res != 0 && *res != std::numeric_limits<size_t>::max()) {
+        return ErrorReply("ERR Error, select db $ is not allowed in cluster mode");
+      }
       req.select_db = res;
       continue;
     }
@@ -1266,7 +1295,7 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
   *registry << CI{"ACL USERS", kAclMask, 1, 0, 0, acl::kUsers}.HFUNC(Users);
   *registry << CI{"ACL CAT", kAclMask, -1, 0, 0, acl::kCat}.HFUNC(Cat);
   *registry << CI{"ACL GETUSER", kAclMask, 2, 0, 0, acl::kGetUser}.HFUNC(GetUser);
-  *registry << CI{"ACL DRYRUN", kAclMask, 3, 0, 0, acl::kDryRun}.HFUNC(DryRun);
+  *registry << CI{"ACL DRYRUN", kAclMask, -3, 0, 0, acl::kDryRun}.HFUNC(DryRun);
   *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kGenPass}.HFUNC(
       GenPass);
   *registry << CI{"ACL HELP", kAclMask, 0, 0, 0, acl::kHelp}.HFUNC(Help);

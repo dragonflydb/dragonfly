@@ -47,11 +47,13 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
+#include "facade/tls_helpers.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "search/doc_index.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/user_registry.h"
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
@@ -166,6 +168,7 @@ ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
+ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
@@ -328,7 +331,7 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
   } else if (detail::IsAzurePath(uri)) {
     auto azure = std::make_shared<detail::AzureSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await(
-        [&] { return azure->Init(detail::kBucketConnectMs); });
+        [&] { return azure->Init(uri, detail::kBucketConnectMs); });
     if (ec) {
       LOG(ERROR) << "Failed to initialize Azure snapshot storage: " << ec.message();
       exit(1);
@@ -798,8 +801,8 @@ nonstd::expected<ReplicaOfArgs, ErrorReply> ReplicaOfArgs::FromCmdArgs(facade::P
     replicaof_args.port = 0;
   } else {
     replicaof_args.host = parser.Next<string>();
-    replicaof_args.port = parser.Next<uint16_t>();
-    if (auto err = parser.TakeError(); err || replicaof_args.port < 1) {
+    replicaof_args.port = parser.Next<Positive<uint16_t>>("port is out of range");
+    if (auto err = parser.TakeError(); err) {
       return nonstd::make_unexpected(ErrorReply("port is out of range"));
     }
     if (parser.HasNext()) {
@@ -960,6 +963,30 @@ bool IsMaster() {
     return true;
   }
   return ServerState::tlocal()->is_master;
+}
+
+void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
+  static constexpr string_view kSaveHelp[] = {
+      "DF",
+      "    Save in dragonfly-specific snapshotting format (default).",
+      "RDB",
+      "    Save in standard redis rdb format.",
+      "CLOUD_URI",
+      "    Specifies a cloud storage URI (s3://, gs://, azure://) to save the snapshot.",
+      "BASENAME",
+      "    The base filename for the snapshot files. <dbfilename> if omitted",
+  };
+
+  string format_line = is_bgsave ? "BGSAVE [SCHEDULE]" : "SAVE";
+  format_line.append(" [DF|RDB [CLOUD_URI [BASENAME]]]. Sub-options are:");
+  vector<string_view> help_arr{format_line};
+
+  if (is_bgsave) {
+    help_arr.emplace_back("SCHEDULE");
+    help_arr.emplace_back("    Optional. Parsed for client compatibility (no-op).");
+  }
+  help_arr.insert(help_arr.end(), begin(kSaveHelp), end(kSaveHelp));
+  rb->SendSimpleStrArr(help_arr);
 }
 
 }  // namespace
@@ -1494,11 +1521,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
 
       // Loaded data bypasses the journal, so force replicas into full sync.
-      dfly_cmd_->CancelReplicas();
-      shard_set->RunBriefInParallel([](EngineShard* shard) {
-        if (shard->journal())
-          journal::ClearBuffer();
-      });
+      ForceReplicasToFullSync();
     }
 
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
@@ -1623,6 +1646,17 @@ std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
     auto repl_ptr = replica_;
     CHECK(repl_ptr);
     return ReplicaOffsetInfo{repl_ptr->GetSyncId(), repl_ptr->GetReplicaOffset()};
+  }
+  return nullopt;
+}
+
+std::optional<int> ServerFamily::GetReplicaMasterSocketUnreadBytes() {
+  util::fb2::LockGuard lk(replicaof_mu_);
+
+  if (!IsMaster()) {
+    auto repl_ptr = replica_;
+    CHECK(repl_ptr);
+    return repl_ptr->GetMasterSocketUnreadBytes();
   }
   return nullopt;
 }
@@ -1884,6 +1918,9 @@ void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait)
   vector<fb2::Fiber> fibers(shard_set->size());
   transaction->Execute(
       [db_ind, &fibers](Transaction* t, EngineShard* shard) {
+        if (auto* bc = t->GetNamespace().GetBlockingController(shard->shard_id()); bc) {
+          bc->AwakenWatched(db_ind);
+        }
         fibers[shard->shard_id()] = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
         return OpStatus::OK;
       },
@@ -2319,6 +2356,11 @@ void ServerFamily::Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx)
       // delete the now-empty key to prevent zombie keys that crash SAVE.
       if (ds->Empty()) {
         db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
+        // The replayed SHRINK re-applies relative member TTLs against the replica clock
+        // and cannot reproduce this deletion; journal it explicitly.
+        if (shard->journal()) {
+          RecordJournal(t->GetOpArgs(shard), "DEL"sv, {key});
+        }
       }
 
       return bytes_before - bytes_after;
@@ -2397,13 +2439,18 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(facade::ParsedArgs ar
   return save_cmd_opts;
 }
 
-// BGSAVE [SCHEDULE] [DF|RDB] [CLOUD_URI] [BASENAME]
+// BGSAVE [SCHEDULE] [DF|RDB] [CLOUD_URI [BASENAME] | BASENAME]
 void ServerFamily::BgSave(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   facade::ParsedArgs args = parser.UnparsedArgs();
   // SCHEDULE is parsed for client compatibility but is a no-op: concurrent
   // saves are still rejected by DoSaveCheckAndStart; we do not queue.
   if (!args.empty() && absl::EqualsIgnoreCase(args[0], "SCHEDULE")) {
     args = args.Tail();
+  }
+
+  if (!args.empty() && absl::EqualsIgnoreCase(args[0], "HELP")) {
+    return SendSaveHelp(rb, true);
   }
 
   auto maybe_res = GetSaveCmdOpts(args, cmd_cntx);
@@ -2421,12 +2468,17 @@ void ServerFamily::BgSave(CmdArgParser parser, CommandContext* cmd_cntx) {
   cmd_cntx->rb()->SendOk();
 }
 
-// SAVE [DF|RDB] [CLOUD_URI] [BASENAME]
+// SAVE [DF|RDB] [CLOUD_URI [BASENAME] | BASENAME]
 // Allows saving the snapshot of the dataset on disk, potentially overriding the format
 // and the snapshot name.
 void ServerFamily::Save(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  auto maybe_res = GetSaveCmdOpts(parser.UnparsedArgs(), cmd_cntx);
+  facade::ParsedArgs args = parser.UnparsedArgs();
+  if (!args.empty() && absl::EqualsIgnoreCase(args[0], "HELP")) {
+    return SendSaveHelp(rb, false);
+  }
+
+  auto maybe_res = GetSaveCmdOpts(args, cmd_cntx);
   if (!maybe_res) {
     return;
   }
@@ -2539,8 +2591,9 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
   return result;
 }
 
-string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view section,
-                                       bool priveleged) const {
+string ServerFamily::FormatInfoMetrics(
+    const Metrics& m, std::string_view section, bool priveleged,
+    const std::shared_ptr<const facade::TlsCertInfo>& cert_info) const {
   string info;
   DbStats total;
 
@@ -2595,6 +2648,15 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     }
     append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
+
+#ifdef DFLY_USE_SSL
+    if (cert_info) {
+      append("tls_cert_subject", cert_info->subject);
+      append("tls_cert_issuer", cert_info->issuer);
+      append("tls_cert_not_before", cert_info->not_before);
+      append("tls_cert_not_after", cert_info->not_after);
+    }
+#endif
 
     // Add availability_zone if it's not empty
     const auto& az = GetFlag(FLAGS_availability_zone);
@@ -2779,7 +2841,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("tiered_total_deletes", m.tiered_stats.total_deletes);
     append("tiered_total_uploads", m.tiered_stats.total_uploads);
     append("tiered_total_defrags", m.tiered_stats.total_defrags);
-    append("tiered_delayed_defrag_queue_size", m.tiered_stats.delayed_defrag_queue_size);
     append("tiered_total_stash_overflows", m.tiered_stats.total_stash_overflows);
     append("tiered_heap_buf_allocations", m.tiered_stats.total_heap_buf_allocs);
     append("tiered_registered_buf_allocations", m.tiered_stats.total_registered_buf_allocs);
@@ -3118,12 +3179,14 @@ void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // output). The command does not abort or return an error if some sections are invalid. This
   // matches Valkey behavior.
   if (sections.empty()) {  // No sections: default to all sections.
-    info = FormatInfoMetrics(metrics, "", is_priveleged);
+    info = FormatInfoMetrics(metrics, "", is_priveleged, cmd_cntx->conn()->GetTlsCertInfo());
   } else if (sections.size() == 1) {  // Single section
-    info = FormatInfoMetrics(metrics, sections[0], is_priveleged);
+    info =
+        FormatInfoMetrics(metrics, sections[0], is_priveleged, cmd_cntx->conn()->GetTlsCertInfo());
   } else {  // Multiple sections: concatenate results for each requested section.
     for (const auto& section : sections) {
-      const std::string section_str = FormatInfoMetrics(metrics, section, is_priveleged);
+      const std::string section_str =
+          FormatInfoMetrics(metrics, section, is_priveleged, cmd_cntx->conn()->GetTlsCertInfo());
       if (!section_str.empty()) {
         if (!info.empty()) {
           absl::StrAppend(&info, "\r\n", section_str);
@@ -3290,13 +3353,11 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
 }
 
-void ServerFamily::StartJournalInShardThreads(Replica* repl_ptr) {
-  shard_set->RunBriefInParallel([this, repl_ptr](auto* shard) {
-    size_t index = shard->shard_id();
-    auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
-    size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
-    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
-    journal::StartInThreadAtLsn(rec_executed);
+void ServerFamily::ForceReplicasToFullSync() {
+  dfly_cmd_->CancelReplicas();
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    if (shard->journal())
+      journal::ClearBuffer();
   });
 }
 
@@ -3309,7 +3370,7 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
     auto repl_ptr = replica_;
     if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
       // Start journal and keep offsets.
-      StartJournalInShardThreads(repl_ptr.get());
+      repl_ptr->StartJournalAtOwnLSN();
     }
     // flip flag before clearing replica_
     SetMasterFlagOnAllThreads(true);
@@ -3429,7 +3490,7 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
   CHECK(repl_ptr);
 
   // Start journal to allow partial sync from same source master
-  StartJournalInShardThreads(repl_ptr.get());
+  repl_ptr->StartJournalAtOwnLSN();
 
   auto info = replica_->GetSummary();
   if (!info.full_sync_done) {
@@ -3455,10 +3516,17 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
   return builder->SendOk();
 }
 
+std::string ServerFamily::GetLineageId() const {
+  util::fb2::LockGuard lk(replicaof_mu_);
+  return replica_ ? replica_->GetLineageId() : master_replid_;
+}
+
 void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
   facade::ParsedArgs args = parser.UnparsedArgs();
   auto* builder = cmd_cntx->rb();
-  {
+
+  // Replicating a replica (cascaded replication) is only supported behind the experimental flag.
+  if (!absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
     util::fb2::LockGuard lk(replicaof_mu_);
     if (!IsMaster()) {
       return cmd_cntx->SendError("Replicating a replica is unsupported");
@@ -3489,13 +3557,17 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
 
         cntx->replica_conn = true;
 
-        // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads> <version>
+        // The response for 'capa dragonfly' is:
+        //   <masterid> <syncid> <numthreads> <version> <lineage_id>
+        std::string lineage_id = GetLineageId();
+
         auto* rb = static_cast<RedisReplyBuilder*>(builder);
-        rb->StartArray(4);
+        rb->StartArray(5);
         rb->SendSimpleString(master_replid_);
         rb->SendSimpleString(sync_id);
         rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
+        rb->SendSimpleString(lineage_id);
         return;
       }
     } else if (cmd == "LISTENING-PORT") {

@@ -30,6 +30,8 @@ tools/replay/traffic-replay
 .claude/skills/benchmark-workspace/
 # Valkey-search integration tests (synced from external repo)
 tests/dragonfly/valkey_search/integration/
+# Valkey TCL tests (harness + stream suites synced from external repo)
+tests/dragonfly/valkey_tcl/upstream/
 _codeql_build_dir/
 # CocoIndex Code (ccc)
 /.cocoindex_code/

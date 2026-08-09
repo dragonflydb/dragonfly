@@ -16,23 +16,23 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import gettempdir, mkdtemp
 from time import sleep
-from typing import Dict, List, Union
 
 import pymemcache
 import pytest
 import pytest_asyncio
+
 import redis
 from redis import asyncio as aioredis
 
 from . import PortPicker
-from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
+from .instance import DflyInstance, DflyInstanceFactory, DflyParams, RedisServer
 from .proxy import Proxy
 from .utility import (
     DflySeederFactory,
+    download_with_retries,
     gen_ca_cert,
     gen_certificate,
     skip_if_not_in_github,
-    download_with_retries,
 )
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -71,8 +71,9 @@ def _download_minio_binary(dest: Path):
 
 def _start_minio_server(endpoint):
     """Start MinIO subprocess and configure env vars for S3 tests."""
-    import boto3
     from urllib.parse import urlparse
+
+    import boto3
 
     cache_dir = Path.home() / ".cache" / "dragonfly-tests"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -259,7 +260,7 @@ async def proxy_factory():
         yield create_proxy
 
 
-def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
+def parse_args(args: list[str]) -> dict[str, str | None]:
     args_dict = {}
     for arg in args:
         if "=" in arg:
@@ -393,6 +394,20 @@ async def async_client(async_pool):
     await client.flushall()
     await client.select(DATABASE_INDEX)
     yield client
+
+
+@pytest_asyncio.fixture
+async def replication(df_factory, request):
+    """Decomposable, marker-annotated replication fixture.
+
+    Configure the topology with ``@pytest.mark.replication(...)`` whose keyword
+    arguments are forwarded to :func:`replication_utils.setup_replication`.
+    """
+    from .replication_utils import setup_replication
+
+    marker = request.node.get_closest_marker("replication")
+    kwargs = dict(marker.kwargs) if marker else {}
+    return await setup_replication(df_factory, **kwargs)
 
 
 def pytest_addoption(parser):

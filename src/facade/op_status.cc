@@ -58,6 +58,10 @@ std::string_view StatusToMsg(OpStatus status) {
       return kBloomFilterLoadInProgress;
     case OpStatus::CUCKOO_FILTER_FULL:
       return kCuckooFilterFull;
+    case OpStatus::CUCKOO_FILTER_MAX_EXPANSIONS:
+      return kCuckooFilterMaxExpansions;
+    case OpStatus::CUCKOO_FILTER_INVALID_CAPACITY:
+      return kCuckooFilterInvalidCapacity;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       return "Internal error";

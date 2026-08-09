@@ -7,8 +7,48 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <string_view>
+
+#include "core/detail/bitpacking.h"
 
 namespace dfly {
+
+// A key reduced once to the bytes used for hashing and comparison: 7-bit ASCII-packed into buf_
+// when worth it (ascii, length 8..128) via the shared detail::ascii_try_pack codec, else a view
+// of the original bytes. Non-copyable: content() may alias buf_.
+class ASCIIStr {
+ public:
+  static constexpr uint32_t kMinLen = 8;    // shorter strings pack to the same size, so stay raw
+  static constexpr uint32_t kMaxLen = 128;  // largest length we ascii-encode
+
+  explicit ASCIIStr(std::string_view s) : content_(s), len_(static_cast<uint32_t>(s.size())) {
+    if (s.size() >= kMinLen && s.size() <= kMaxLen) {
+      const size_t packed =
+          detail::ascii_try_pack(s.data(), s.size(), reinterpret_cast<uint8_t*>(buf_));
+      if (packed)
+        content_ = std::string_view{buf_, packed};
+    }
+  }
+
+  ASCIIStr(const ASCIIStr&) = delete;
+  ASCIIStr& operator=(const ASCIIStr&) = delete;
+
+  std::string_view content() const {
+    return content_;
+  }
+  uint32_t len() const {
+    return len_;
+  }
+  bool encoded() const {
+    return content_.size() != len_;  // packed keys are strictly shorter than their logical length
+  }
+
+ private:
+  std::string_view content_;
+  uint32_t len_;
+  char buf_[kMaxLen];
+};
 
 // Shared building blocks for the open-addressing hash containers (OAHEntry/OAHPair/OAHTable).
 namespace oah {
@@ -32,10 +72,9 @@ inline void PrefetchRead(const void* ptr) noexcept {
   __builtin_prefetch(ptr, 0, 1);
 }
 
-// Variable-width size field shared by OAHEntry and OAHPair.
-//
-// Control-byte layout:
-//   bit 7    : reserved ASCII/raw encoding flag (currently always 0)
+// Variable-width size field shared by OAHEntry and OAHPair. Control-byte layout (size::Read masks
+// bit 7 off, so the key codec below can layer its flag there without disturbing the size):
+//   bit 7    : kEncodingBit   - key-codec flag (ascii-packed key); 0 for a plain size
 //   bit 6    : kBigSizeBit    - size doesn't fit in 6 bits, extra bytes follow
 //   bit 5    : kThreeBytesBit - when kBigSizeBit is set: 3 extra bytes (otherwise 1)
 //   bits 0-5 : inline size (< 64B); or bits 0-4 hold the low 5 bits of a larger size
@@ -101,5 +140,125 @@ inline Decoded Read(const char* src) {
 }
 
 }  // namespace size
+
+// Key codec shared by OAHEntry/OAHPair. A stored key is a control/size header followed by content
+// bytes (ascii-packed or raw). Hashing and comparison run on the content bytes; only retrieval
+// (Decode) reconstructs the logical key. The header and content need not be contiguous (the map
+// keeps the value pointer between them), so read/compare/decode take the two pointers separately.
+namespace key {
+
+inline constexpr uint8_t kEncodedBit = size::kEncodingBit;  // control bit 7 marks an encoded key
+
+struct Header {
+  bool encoded;
+  uint32_t len;           // logical key length
+  uint32_t field_size;    // header (control/size) bytes
+  uint32_t content_size;  // stored content bytes (packed or raw)
+};
+
+// A deserialized key: its header plus a pointer to the stored content bytes (packed or raw).
+// OAHEntry/OAHPair produce this from a blob; the table compares (Matches) or decodes (Decode) it.
+struct Stored {
+  Header header;
+  const char* content;
+};
+
+// Writes the key header for a logical length `len` at `hdr`; returns its size. The length uses the
+// oah::size encoding (bit 7 clear); `encoded_bit` (kEncodedBit or 0) is then set on top to flag an
+// ascii-packed key, keeping the size format independent of the flag.
+inline uint32_t WriteHeader(uint8_t encoded_bit, uint32_t len, char* hdr) {
+  const uint32_t fs = size::FieldSize(len);
+  size::Write(len, fs, hdr);
+  *hdr = static_cast<char>(*hdr | encoded_bit);
+  return fs;
+}
+
+inline Header ReadHeader(const char* hdr) {
+  const bool encoded = static_cast<uint8_t>(*hdr) & kEncodedBit;
+  const size::Decoded d = size::Read(hdr);  // ignores bit 7, so the flag doesn't disturb the size
+  const uint32_t content_size =
+      encoded ? static_cast<uint32_t>(detail::binpacked_len(d.size)) : d.size;
+  return {encoded, d.size, d.field_size, content_size};
+}
+
+// Compares a stored key (header `h`, content `content`) against a query key (its stored content
+// bytes `key_content` and logical length `key_len`). The len check guards packed keys whose
+// distinct lengths collide to the same packed size (e.g. 15 and 16 chars both pack to 14 bytes).
+inline bool Matches(const Header& h, const char* content, std::string_view key_content,
+                    uint32_t key_len) {
+  const bool key_encoded = key_content.size() != key_len;
+  if (h.encoded != key_encoded || (h.encoded && h.len != key_len))
+    return false;
+  return h.content_size == key_content.size() &&
+         std::memcmp(content, key_content.data(), key_content.size()) == 0;
+}
+
+// A logical-key view that keeps decoded content inline. Raw keys remain a zero-copy view into their
+// entry; encoded keys are unpacked into the bounded inline buffer. Keeping this object alive keeps
+// an encoded key view valid across nested calls and fiber yields, without thread-local storage.
+class Decoded {
+ public:
+  explicit Decoded(const Stored& stored)
+      : content_(stored.content), len_(stored.header.len), encoded_(stored.header.encoded) {
+    assert(!encoded_ || (len_ >= ASCIIStr::kMinLen && len_ <= ASCIIStr::kMaxLen));
+    if (encoded_) {
+      detail::ascii_unpack(reinterpret_cast<const uint8_t*>(content_), len_, decoded_);
+      content_ = nullptr;
+    }
+  }
+
+  Decoded(const Decoded& other) noexcept
+      : content_(other.content_), len_(other.len_), encoded_(other.encoded_) {
+    if (encoded_)
+      std::memcpy(decoded_, other.decoded_, len_);
+  }
+
+  Decoded& operator=(const Decoded& other) noexcept {
+    if (this != &other) {
+      content_ = other.content_;
+      len_ = other.len_;
+      encoded_ = other.encoded_;
+      if (encoded_)
+        std::memcpy(decoded_, other.decoded_, len_);
+    }
+    return *this;
+  }
+
+  Decoded(Decoded&& other) noexcept : Decoded(other) {
+  }
+
+  Decoded& operator=(Decoded&& other) noexcept {
+    return operator=(other);
+  }
+
+  std::string_view view() const& {
+    return {data(), len_};
+  }
+  std::string_view view() const&& = delete;
+
+  const char* data() const& {
+    return encoded_ ? decoded_ : content_;
+  }
+  const char* data() const&& = delete;
+  size_t size() const {
+    return len_;
+  }
+  bool empty() const {
+    return len_ == 0;
+  }
+
+ private:
+  const char* content_;
+  uint32_t len_;
+  bool encoded_;
+  char decoded_[ASCIIStr::kMaxLen];
+};
+
+inline Decoded Decode(const Stored& stored) {
+  return Decoded{stored};
+}
+
+}  // namespace key
+
 }  // namespace oah
 }  // namespace dfly

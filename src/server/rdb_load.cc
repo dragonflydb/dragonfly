@@ -91,6 +91,12 @@ int64_t LpGetIntegerIfValid(unsigned char* ele, int* valid) {
 }
 
 // Returns 1 if the stream listpack entries structure is valid, 0 otherwise.
+// Beyond the structural listpack check, it verifies the stream master entry and every
+// record are internally consistent - in particular that the declared field and record
+// counts match the entries actually present - so that later stream iteration cannot walk
+// past the listpack end. Mirrors upstream streamValidateListpackIntegrity. The semantic
+// walk runs regardless of `deep`: on a no-auth deployment an attacker can point the server
+// at a hostile master via REPLICAOF, so the replication load path is not trusted either.
 int StreamValidateListpackIntegrity(unsigned char* lp, size_t size, int deep) {
   int valid_record;
   unsigned char *p, *next;
@@ -104,26 +110,121 @@ int StreamValidateListpackIntegrity(unsigned char* lp, size_t size, int deep) {
   if (!p)
     return 0;
 
-  LpGetIntegerIfValid(p, &valid_record);
+  // Master entry header: valid-count, deleted-count, num-master-fields.
+  int64_t entry_count = LpGetIntegerIfValid(p, &valid_record);
   if (!valid_record)
     return 0;
   p = next;
   if (!lpValidateNext(lp, &next, size))
     return 0;
 
-  LpGetIntegerIfValid(p, &valid_record);
+  int64_t deleted_count = LpGetIntegerIfValid(p, &valid_record);
   if (!valid_record)
     return 0;
   p = next;
   if (!lpValidateNext(lp, &next, size))
     return 0;
 
-  LpGetIntegerIfValid(p, &valid_record);
+  int64_t master_fields = LpGetIntegerIfValid(p, &valid_record);
   if (!valid_record)
     return 0;
   p = next;
   if (!lpValidateNext(lp, &next, size))
     return 0;
+
+  if (entry_count < 0 || deleted_count < 0 || master_fields < 0)
+    return 0;
+
+  // The master field names.
+  for (int64_t i = 0; i < master_fields; i++) {
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+  }
+
+  // The zero terminator that closes the master entry.
+  int64_t zero = LpGetIntegerIfValid(p, &valid_record);
+  if (!valid_record || zero != 0)
+    return 0;
+  p = next;
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+
+  // Records. Their number is bounded by the declared valid + deleted counts, and each
+  // record's trailing lp-count must match the entries it spans. Both counts are already
+  // non-negative, so the total is summed in uint64_t: a signed sum could overflow to a
+  // negative value (undefined behavior) and skip the loop, bypassing validation.
+  uint64_t actual_deleted = 0;
+  uint64_t records = static_cast<uint64_t>(entry_count) + static_cast<uint64_t>(deleted_count);
+  while (records-- > 0) {
+    if (!p)
+      return 0;
+
+    int64_t fields = master_fields, extra_fields = 3;
+    int64_t flags = LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record)
+      return 0;
+    if (flags & STREAM_ITEM_FLAG_DELETED)
+      ++actual_deleted;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+
+    // The two entry-id deltas (ms, seq) relative to the master id.
+    LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record)
+      return 0;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+    LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record)
+      return 0;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+
+    if (!(flags & STREAM_ITEM_FLAG_SAMEFIELDS)) {
+      fields = LpGetIntegerIfValid(p, &valid_record);
+      if (!valid_record || fields < 0)
+        return 0;
+      p = next;
+      if (!lpValidateNext(lp, &next, size))
+        return 0;
+
+      // Per-record field names.
+      for (int64_t i = 0; i < fields; i++) {
+        p = next;
+        if (!lpValidateNext(lp, &next, size))
+          return 0;
+      }
+      extra_fields += fields + 1;
+    }
+
+    // The field values.
+    for (int64_t i = 0; i < fields; i++) {
+      p = next;
+      if (!lpValidateNext(lp, &next, size))
+        return 0;
+    }
+
+    int64_t lp_count = LpGetIntegerIfValid(p, &valid_record);
+    if (!valid_record || lp_count != fields + extra_fields)
+      return 0;
+    p = next;
+    if (!lpValidateNext(lp, &next, size))
+      return 0;
+  }
+
+  if (actual_deleted != static_cast<uint64_t>(deleted_count))
+    return 0;
+
+  // The walk must consume the whole listpack: p must be the final (EOF) byte. Rejects an
+  // early EOF with trailing bytes, which a non-deep load accepts and later reverse iteration
+  // (lpLast/lpPrev) would then read out of bounds.
+  if (next || p != lp + size - 1)
+    return 0;
+
   return 1;
 }
 
@@ -874,6 +975,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
       }
     }
 
+    uint64_t assigned = 0;
     for (const auto& cons : cg.cons_arr) {
       streamConsumer* consumer = StreamCreateConsumer(
           cgroup, ToSV(cons.name, &buf1_), cons.seen_time, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
@@ -896,17 +998,34 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
           return;
         }
 
+        // Each global PEL entry belongs to exactly one consumer; a second claim
+        // would share the NACK across consumer PELs and double-free it on delete.
+        if (nack->consumer != nullptr) {
+          LOG(ERROR) << "Global PEL entry already assigned to a consumer";
+          ec_ = RdbError(errc::rdb_file_corrupted);
+          return;
+        }
+
         /* Set the NACK consumer, that was left to NULL when
          * loading the global PEL. Then set the same shared
          * NACK structure also in the consumer-specific PEL. */
         nack->consumer = consumer;
+        ++assigned;
         if (!raxTryInsert(consumer->pel, ptr, rawid.size(), nack, NULL)) {
           LOG(ERROR) << "Duplicated consumer PEL entry loading a stream consumer group";
-          streamFreeNACK(nack);
+          // nack is owned by cgroup->pel and freed once during stream teardown.
           ec_ = RdbError(errc::duplicate_key);
           return;
         }
       }
+    }
+
+    // Every global PEL entry must be claimed by exactly one consumer; an
+    // unclaimed one leaves nack->consumer == nullptr for later dereference.
+    if (assigned != raxSize(cgroup->pel)) {
+      LOG(ERROR) << "Unclaimed global PEL entry loading a stream consumer group";
+      ec_ = RdbError(errc::rdb_file_corrupted);
+      return;
     }
   }
 
@@ -1301,7 +1420,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       }
       break;
     case RDB_TYPE_MODULE_2:
-      iores = ReadRedisJson();
+      iores = ReadRedisModule2();
       break;
     case RDB_TYPE_SBF:
       iores = ReadSBF();
@@ -1828,20 +1947,25 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
 }
 
-auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
-  auto json_magic_number = LoadLen(nullptr);
-  if (!json_magic_number) {
+auto RdbLoaderBase::ReadRedisModule2() -> io::Result<OpaqueObj> {
+  auto module_id = LoadLen(nullptr);
+  if (!module_id) {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
   constexpr string_view kJsonModule = "ReJSON-RL"sv;
-  string module_name = ModuleTypeName(*json_magic_number);
+  string module_name = ModuleTypeName(*module_id);
   if (module_name != kJsonModule) {
-    LOG(ERROR) << "Unsupported module: " << module_name;
-    return Unexpected(errc::unsupported_operation);
+    // We don't support any other module type except ReJSON, so we skip the key instead of
+    // failing the load.
+    LOG(WARNING) << "Skipping key with unsupported module type: " << module_name;
+    if (error_code ec = SkipModuleKeyData(); ec) {
+      return make_unexpected(ec);
+    }
+    return Unexpected(errc::feature_not_supported);
   }
 
-  int encver = *json_magic_number & 1023;
+  int encver = *module_id & 1023;
   if (encver != 3) {
     LOG(ERROR) << "Unsupported ReJSON version: " << encver;
     return Unexpected(errc::unsupported_operation);
@@ -2468,7 +2592,7 @@ error_code RdbLoader::Load(io::Source* src) {
       string module_name = ModuleTypeName(module_id);
 
       LOG(WARNING) << "WARNING: Skipping data for module " << module_name;
-      RETURN_ON_ERR(SkipModuleData());
+      RETURN_ON_ERR(SkipModuleAuxData());
       continue;
     }
 
@@ -2695,12 +2819,20 @@ error_code RdbLoaderBase::AllocateDecompressOnce(int op_type) {
   return {};
 }
 
-error_code RdbLoaderBase::SkipModuleData() {
+error_code RdbLoaderBase::SkipModuleAuxData() {
   uint64_t opcode;
   SET_OR_RETURN(LoadLen(nullptr), opcode);  // ignore field 'when_opcode'
+
   if (opcode != RDB_MODULE_OPCODE_UINT)
     return RdbError(errc::rdb_file_corrupted);
+
   SET_OR_RETURN(LoadLen(nullptr), opcode);  // ignore field 'when'
+
+  return SkipModuleKeyData();
+}
+
+error_code RdbLoaderBase::SkipModuleKeyData() {
+  uint64_t opcode;
 
   while (true) {
     SET_OR_RETURN(LoadLen(nullptr), opcode);
@@ -3219,8 +3351,14 @@ io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& 
   const bool was_appending = pending_read_.remaining != 0;
 
   // Read a part of the object. Updates remaining items
-  if (auto ec = ReadObj(object_type, &item->val); ec)
+  if (auto ec = ReadObj(object_type, &item->val); ec) {
+    if (ec == RdbError(errc::feature_not_supported)) {
+      LOG(WARNING) << "Skipping unsupported key: " << key;
+      pending_read_ = {};
+      return true;
+    }
     return make_unexpected(ec);
+  }
 
   const bool finalized = pending_read_.remaining == 0;
 

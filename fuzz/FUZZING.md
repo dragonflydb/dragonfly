@@ -48,12 +48,26 @@ Configuration via environment variables:
 | `AFL_PROACTOR_THREADS` | `1` | Server threads (1 = most stable coverage) |
 | `AFL_LOOP_LIMIT` | `10000` | Iterations before server restart (= `AFL_PERSISTENT_RECORD`) |
 | `AFL_ENABLE_SAVE` | off | Set to `1` to enable SAVE/BGSAVE (tests snapshot serialization) |
+| `AFL_ENABLE_TIERING` | off | Set to `1` to enable tiered storage (offload/fetch code paths) |
+| `AFL_TIER_DIR` | `/tmp` | Base directory for tiering backing files |
+| `AFL_TIER_COOLING` | unset | Pin `tiered_experimental_cooling`; unset = `AFL_RUN_NUMBER` parity in CI, `true` locally |
 | `BUILD_DIR` | `build-dbg` | Path to build directory |
 
 Save mode (`AFL_ENABLE_SAVE=1`) enables `--dbfilename=dump` and writes snapshots
 to a temp directory. Enabled automatically in nightly (long) fuzzing campaigns.
 The dump directory is cleaned before each AFL++ loop cycle to ensure RECORD files
 capture the full state needed for crash reproduction.
+
+Tiering mode (`AFL_ENABLE_TIERING=1`) starts the server with tiered storage
+(`--tiered_offload_threshold=1.0`, eager offload) so offload/fetch paths are
+fuzzed. Backing files are opened with O_DIRECT when the backing filesystem
+supports it (probed at startup; matches the production default) and with
+buffered IO otherwise (tmpfs/overlayfs). CI places backing files on a real
+disk (`AFL_TIER_DIR` points at the runner temp dir) and alternates
+`tiered_experimental_cooling` by run number parity, so both cooling code
+paths get nightly coverage. The chosen values are recorded in `repro.env`;
+`triage_crashes.sh` re-probes O_DIRECT locally and falls back to buffered IO
+if the local filesystem rejects it.
 
 ## Custom Mutators
 
@@ -85,39 +99,6 @@ mutator runs — AFL++'s byte-level stages and the dictionary are disabled. Reas
 Locally you can drop `AFL_CUSTOM_MUTATOR_ONLY` to also run the byte-level stages
 and the dictionary (`dict/*.dict`) for ad-hoc parser-edge-case exploration.
 
-## Experimental Persistent Nightly
-
-`.github/workflows/fuzz-experimental-persistent.yml` runs an experimental nightly
-campaign at 00:00 UTC, two hours before the regular long fuzzing campaign. It is
-separate from the PR and long fuzzing workflows and intentionally keeps its state
-between runs.
-
-Differences from the regular long campaign:
-
-- SAVE/BGSAVE testing is disabled (`AFL_ENABLE_SAVE` is not set).
-- `AFL_CUSTOM_MUTATOR_ONLY` is not set, so AFL++ byte-level stages and dictionaries
-  run together with the protocol mutators.
-- AFL output and corpus state are stored under
-  `fuzz/artifacts/experimental-persistent/<target>` and
-  `fuzz/corpus/experimental-persistent/<target>`.
-- The workflow restores the previous AFL state from cache and saves the updated
-  state after each run when it stays under the cache size guard.
-- Manual dispatch has a `reset_state` input that drops the restored state and starts
-  again from the seed corpus.
-- Exit 137 is treated as an experimental resource stop, not a Dragonfly failure,
-  unless crash or hang artifacts were produced.
-- Health statistics and warnings are written to the job log, the GitHub step
-  summary, and `fuzz-experimental-persistent-<target>-health-*` artifacts.
-
-The experimental layout keeps AFL's usual `default/crashes` structure, so existing
-crash packaging and replay scripts still work by passing the experimental crashes
-directory explicitly.
-
-Before saving restored state for the next run, the workflow removes transient
-`default/crashes` and `default/hangs` directories but keeps the AFL queue and
-resume metadata. A known issue can therefore be rediscovered until the queue is
-manually reset or curated.
-
 ## Crash Replay
 
 Dragonfly uses AFL++ persistent mode — the server accumulates state across
@@ -148,6 +129,12 @@ Download the crashes zip from CI artifacts and run:
 
 Each crash has a `repro.env` with the exact Dragonfly flags used during fuzzing.
 Use it to start the server with the same configuration:
+
+> Note: tiering-run archives may record `--backing_file_direct=true` (the fuzz
+> machine supported O_DIRECT). If your filesystem rejects O_DIRECT
+> (tmpfs/overlayfs on older kernels), the server aborts at startup — append
+> `--backing_file_direct=false` after `"${DF_FLAGS[@]}"` (the last occurrence
+> wins). `triage_crashes.sh` handles this automatically.
 
 ```bash
 # Load flags from repro.env:

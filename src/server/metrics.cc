@@ -149,6 +149,21 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 
   AppendMetricWithoutLabels("pipeline_throttle_total", "", conn_stats.pipeline_throttle_count,
                             MetricType::COUNTER, &resp->body());
+
+  {
+    const auto& pbp = conn_stats.pubsub_backpressure;
+    AppendMetricHeader("pubsub_backpressure_events_total",
+                       "Pub/Sub back-pressure and slow-subscriber protection events by type",
+                       MetricType::COUNTER, &resp->body());
+    AppendMetricValue("pubsub_backpressure_events_total", pbp.soft_limit_crossing, {"event"},
+                      {"soft_limit"}, &resp->body());
+    AppendMetricValue("pubsub_backpressure_events_total", pbp.hard_limit_throttled, {"event"},
+                      {"hard_limit"}, &resp->body());
+    AppendMetricValue("pubsub_backpressure_events_total", pbp.forced_disconnect, {"event"},
+                      {"forced_disconnect"}, &resp->body());
+    AppendMetricValue("pubsub_backpressure_events_total", pbp.messages_discarded, {"event"},
+                      {"messages_discarded"}, &resp->body());
+  }
   AppendMetricWithoutLabels("pipeline_commands_total", "", conn_stats.pipelined_cmd_cnt,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_calls_total", "", conn_stats.pipeline_dispatch_calls,
@@ -299,6 +314,8 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   AppendMetricWithoutLabels("net_input_recv_total", "", conn_stats.io_read_cnt, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("net_read_yields_total", "", conn_stats.num_read_yields,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("iobuf_capacity_change_count", "", conn_stats.iobuf_capacity_change_cnt,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("proactor_reads_total", "V2 OnRecv reads that actually drained bytes",
                             conn_stats.proactor_reads, MetricType::COUNTER, &resp->body());
