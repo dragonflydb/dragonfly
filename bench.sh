@@ -911,14 +911,35 @@ filter_pipelines() {
 
 # Global PID tracking for cleanup.
 SERVER_PID=""
-SUB_PIDS=()
+SUB_PIDS=()          # Local-mode Pub/Sub subscriber PIDs (direct children of this script).
+REMOTE_SUB_PGIDS=()  # Remote-mode Pub/Sub subscriber process-group IDs on CLIENT_IP. Each
+                     # subscriber is launched via setsid as its own session leader, so its
+                     # pgid equals its pid - signaling "-$pgid" reaches it and any child
+                     # (e.g. the wrapping `timeout`) in one shot.
 # Full server command string of the most recent start_server call. Printed in the
 # AVERAGE RESULTS header so each batch run's summary records exactly how the server
 # was launched (it is identical across all repeats of a single batch line).
 SERVER_CMD_STR=""
 
+# _kill_remote_pgids <pgid> [pgid...]
+# Sends SIGTERM to each remote Pub/Sub subscriber process group on CLIENT_IP, waits
+# briefly, then SIGKILL any still alive. One bounded ssh round-trip so an unreachable
+# or slow client can't block the benchmark or its cleanup.
+_kill_remote_pgids() {
+    local pgids=("$@")
+    [[ ${#pgids[@]} -eq 0 || -z "$REMOTE_MODE" ]] && return 0
+    local term_cmd="" kill_cmd="" g
+    for g in "${pgids[@]}"; do
+        term_cmd+="kill -TERM -${g} 2>/dev/null; "
+        kill_cmd+="kill -KILL -${g} 2>/dev/null; "
+    done
+    ssh -n -o ConnectTimeout=3 -o ControlMaster=no "${SSH_USER}@${CLIENT_IP}" \
+        "${term_cmd}sleep 0.3; ${kill_cmd}true" 2>/dev/null || true
+}
+
 cleanup() {
     local exit_code=$?
+    local server_was_alive=0
     echo ""
     echo "[*] Cleaning up (exit_code=$exit_code)..."
 
@@ -929,15 +950,13 @@ cleanup() {
     done
     SUB_PIDS=()
 
-    # Only remove this benchmark's Pub/Sub subscribers. Do not kill unrelated client
-    # tools that may be running on the shared remote host.
-    if [[ -n "$REMOTE_MODE" && ( "$MODE" == "pubsub" || "$MODE" == "all" ) ]]; then
-        ssh -n -o ConnectTimeout=3 -o ControlMaster=no "${SSH_USER}@${CLIENT_IP}" \
-            "pkill -f -- 'redis-cli -h ${SERVER_IP} -p ${PORT} SUBSCRIBE bench_chan'" \
-            2>/dev/null || true
-    fi
+    # Only remove this benchmark's own Pub/Sub subscribers (tracked by process group),
+    # never unrelated client tools that may be running on the shared remote host.
+    _kill_remote_pgids "${REMOTE_SUB_PGIDS[@]}"
+    REMOTE_SUB_PGIDS=()
 
     if [[ -n "$SERVER_PID" ]]; then
+        kill -0 "$SERVER_PID" 2>/dev/null && server_was_alive=1
         kill "$SERVER_PID" 2>/dev/null || true
         local i=0
         while kill -0 "$SERVER_PID" 2>/dev/null && (( i < 40 )); do
@@ -952,11 +971,21 @@ cleanup() {
         SERVER_PID=""
     fi
 
-    # Crash fallback: save log if server was still running when we exited.
+    # Distinguish an abrupt harness exit (server was still alive - the script or a
+    # client-side call failed/was interrupted, not necessarily the server) from the
+    # server having already exited on its own before cleanup ran (an actual crash).
     if [[ -n "$SERVER_LOG_DIR" && -s "$SERVER_LOG" ]]; then
-        local save_name="server_${TAG:-${GIT_SHA}}_$(date +%Y%m%d_%H%M%S)_crash.log"
-        cp "$SERVER_LOG" "${SERVER_LOG_DIR}/${save_name}"
-        echo "[*] Server crash log saved to ${SERVER_LOG_DIR}/${save_name}"
+        if (( server_was_alive )); then
+            local save_name
+            save_name="server_${TAG:-${GIT_SHA}}_$(date +%Y%m%d_%H%M%S)_aborted.log"
+            cp "$SERVER_LOG" "${SERVER_LOG_DIR}/${save_name}"
+            echo "[*] Server was still running at exit (harness aborted); log saved to ${SERVER_LOG_DIR}/${save_name}"
+        else
+            local save_name
+            save_name="server_${TAG:-${GIT_SHA}}_$(date +%Y%m%d_%H%M%S)_crash.log"
+            cp "$SERVER_LOG" "${SERVER_LOG_DIR}/${save_name}"
+            echo "[*] Server exited unexpectedly; log saved to ${SERVER_LOG_DIR}/${save_name}"
+        fi
     fi
     rm -f "$ACCUM_FILE" "$STATS_FILE" "$SERVER_LOG"
     echo "[*] Done."
@@ -1249,6 +1278,28 @@ stop_server() {
     sleep 0.6 # let OS release the TCP port
 }
 
+# check_stale_server
+# Aborts if another process already owns this benchmark's server or admin port.
+# Matches by the actual listening socket, not by process name, so an unrelated
+# process (e.g. a test binary launched with a different --port) is never mistaken
+# for a conflict, and a real conflict on a differently-named binary is still caught.
+check_stale_server() {
+    command -v ss >/dev/null 2>&1 || return 0
+    local pids
+    pids=$( { ss -H -ltnp "( sport = :${PORT} )" 2>/dev/null; \
+              ss -H -ltnp "( sport = :${ADMIN_PORT} )" 2>/dev/null; } \
+            | grep -oP 'pid=\K[0-9]+' | sort -un | tr '\n' ' ')
+    pids=${pids% }
+    [[ -z "$pids" ]] && return 0
+    echo "[!] Error: port ${PORT} or ${ADMIN_PORT} is already in use:"
+    local pid
+    for pid in $pids; do
+        echo "    PID $pid: $(ps -o cmd= -p "$pid" 2>/dev/null || echo '<process exited>')"
+    done
+    echo "    Kill them first, e.g.: kill $pids"
+    exit 1
+}
+
 start_server() {
     local v2_flag=$1; shift
     local label=$1; shift
@@ -1260,15 +1311,7 @@ start_server() {
     # -----------------------------------------------------------------------
     if [[ "$SERVER_TYPE" == "valkey" ]]; then
         # For valkey, SERVER_BIN is the valkey-server binary (passed as [binary] arg).
-        local _stale_bin
-        _stale_bin=$(basename "$SERVER_BIN")
-        local _stale_pids
-        _stale_pids=$(pgrep -x "$_stale_bin" 2>/dev/null || true)
-        if [[ -n "$_stale_pids" ]]; then
-            echo "[!] Error: Found existing ${_stale_bin} process(es): PIDs $_stale_pids"
-            echo "    Kill them first: kill $_stale_pids"
-            exit 1
-        fi
+        check_stale_server
         echo ""
         echo ">>> Starting Valkey [${label}] mode=${mode_name} (binary=${SERVER_BIN}, io-threads=${VALKEY_IO_THREADS})"
         local vk_cmd=($SERVER_TASKSET "$SERVER_BIN"
@@ -1302,16 +1345,9 @@ start_server() {
     # -----------------------------------------------------------------------
     # Dragonfly / ok_backend mode (default).
     # -----------------------------------------------------------------------
-    # Ensure no stale server process is running (from a previous crashed/interrupted run).
-    local _stale_bin
-    _stale_bin=$(basename "$SERVER_BIN")
-    local _stale_pids
-    _stale_pids=$(pgrep -x "$_stale_bin" 2>/dev/null || true)
-    if [[ -n "$_stale_pids" ]]; then
-        echo "[!] Error: Found existing ${_stale_bin} process(es): PIDs $_stale_pids"
-        echo "    Kill them first: kill $_stale_pids"
-        exit 1
-    fi
+    # Ensure nothing already owns this benchmark's ports (from a previous crashed
+    # or interrupted run). Checked by listening socket, not process name.
+    check_stale_server
 
     # Append env-provided flags (works for all server types)
     if [[ -n "${EXTRA_SERVER_FLAGS:-}" ]]; then
@@ -1657,15 +1693,26 @@ run_pubsub_bench() {
             echo "  [client sub cmd x${num_subs}] ${sub_cmd_str}"
         fi
         SUB_PIDS=()
+        REMOTE_SUB_PGIDS=()
         for ((s = 0; s < num_subs; s++)); do
             if [[ -n "$REMOTE_MODE" ]]; then
-            ssh -n -o ControlMaster=no -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
-                "${SSH_USER}@${CLIENT_IP}" \
-                "timeout 75 redis-cli -h $SERVER_IP -p $PORT SUBSCRIBE bench_chan > /dev/null 2>&1" &
+                # setsid makes the subscriber its own session leader, so its pgid equals
+                # its pid; echoing $! (non-interactive ssh command, no job control) gives
+                # us back that same pid so cleanup can target the whole group later.
+                local rpid
+                rpid=$(ssh -n -o ControlMaster=no -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+                    "${SSH_USER}@${CLIENT_IP}" \
+                    "setsid timeout 75 redis-cli -h $SERVER_IP -p $PORT SUBSCRIBE bench_chan </dev/null >/dev/null 2>&1 & echo \$!" \
+                    2>/dev/null)
+                if [[ "$rpid" =~ ^[0-9]+$ ]]; then
+                    REMOTE_SUB_PGIDS+=("$rpid")
+                else
+                    echo "[!] Warning: failed to capture remote subscriber PID (got '${rpid:-empty}')"
+                fi
             else
                 $CLIENT_TASKSET redis-cli -p $PORT SUBSCRIBE bench_chan > /dev/null 2>&1 &
+                SUB_PIDS+=($!)
             fi
-            SUB_PIDS+=($!)
         done
         sleep 1.2  # let all subscribers register
 
@@ -1704,25 +1751,17 @@ run_pubsub_bench() {
         PUB_P50=$(echo "$OUTPUT" | tr '\r' '\n' | grep -i 'requests per second' | tail -n 1 | grep -oP 'p50=\K[0-9]+\.[0-9]+' | head -n 1 || true)
         PUB_P50=${PUB_P50:-"N/A"}
 
-        # Tear down subscribers on both hosts before the next pipeline depth. Killing
-        # the local SSH wrappers alone leaves their remote redis-cli children alive.
+        # Tear down this cell's subscribers: local ones directly (they are real
+        # children of this script), remote ones by process group (each was its own
+        # session leader via setsid at launch, so no ssh wrapper is ever waited on).
         for pid in "${SUB_PIDS[@]}"; do
             kill "$pid" 2>/dev/null || true
         done
-
-        if [[ -n "$REMOTE_MODE" ]]; then
-            ssh -n -o ConnectTimeout=3 -o ControlMaster=no "${SSH_USER}@${CLIENT_IP}" \
-                "pkill -f -- 'redis-cli -h ${SERVER_IP} -p ${PORT} SUBSCRIBE bench_chan'" \
-                2>/dev/null || true
-        fi
-
-        # Do not wait for SSH subscriber wrappers: a disconnected wrapper can remain
-        # alive indefinitely even after its remote redis-cli process exits.
-        sleep 1
-        for pid in "${SUB_PIDS[@]}"; do
-            kill -9 "$pid" 2>/dev/null || true
-        done
+        wait "${SUB_PIDS[@]}" 2>/dev/null || true
         SUB_PIDS=()
+
+        _kill_remote_pgids "${REMOTE_SUB_PGIDS[@]}"
+        REMOTE_SUB_PGIDS=()
 
         echo -e "${PIPELINE}\t${RPS}\t${PUB_P50}\t${SEND_DELTA}\t${num_subs}" >> "$RESULTS_TMP"
         echo "${label}|${mode_name}|${PIPELINE}|${RPS}|N/A|${SEND_DELTA}|N/A|${PUB_P50}|N/A|N/A" >> "$ACCUM_FILE"
