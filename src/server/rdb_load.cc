@@ -2700,25 +2700,21 @@ void RdbLoader::DiscardChunkedValuesOnFinish() {
     now_chunked_.clear();
   }
 
-  size_t total = 0;
-  for (auto& values : by_shard)
-    total += values.size();
-  if (total > 0)
-    LOG(ERROR) << "unexpected " << total << " values found in chunk map on RDB load finish";
-
   BlockingCounter bc{0};
   for (ShardId sid = 0; sid < by_shard.size(); ++sid) {
     auto& values = by_shard[sid];
     if (values.empty())
       continue;
 
+    LOG(ERROR) << "unexpected " << values.size() << " values found in chunk map on RDB load finish";
     bc->Add(1);
     shard_set->Add(sid, [values = std::move(values), bc]() mutable {
       values.clear();
       bc->Dec();
     });
   }
-  bc->Wait();  // block until every shard has finished freeing its leftover values
+
+  bc->Wait();
 }
 
 void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
@@ -3150,13 +3146,22 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   PrimeValue* pv_ptr = &pv;
   DbIndex db_ind = db_cntx.db_index;
 
+  LoadConfig config_copy = item->load_config;
+  ChunkedKey chunked_key{db_ind, item->key};
+
+  bool failed_should_cleanup = false;
+  absl::Cleanup maybe_remove_chunk_entry = [&] {
+    if (!failed_should_cleanup)
+      return;
+    std::unique_lock l{now_chunked_mu_};
+    now_chunked_.erase(chunked_key);
+  };
+
   auto error_msg = [](const auto* item, auto db_ind) {
     return absl::StrCat("Found empty key: ", item->key, " in DB ", db_ind, " rdb_type ",
                         item->val.rdb_type);
   };
 
-  LoadConfig config_copy = item->load_config;
-  ChunkedKey chunked_key{db_ind, item->key};
   if (item->load_config.chunked && item->load_config.append) {
     std::unique_lock lk{now_chunked_mu_};
     if (auto it = now_chunked_.find(chunked_key); it != now_chunked_.end()) {
@@ -3176,6 +3181,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 
   if (auto ec = FromOpaque(item->val, config_copy, pv_ptr); ec) {
+    failed_should_cleanup = item->load_config.chunked;
     if (ec.value() == errc::value_expired) {
       // hmap and sset values can expire and we ok with it,
       // so we don't set ec_ in this case
