@@ -1786,11 +1786,13 @@ TEST_F(DashTest, VisitSegmentOnce) {
   std::unordered_set<Dash64::Segment_t*> visited;
   Dash64::Cursor cursor;
   do {
-    cursor = dt_.VisitSegment(cursor, [&](size_t sid, auto* segment) {
-      EXPECT_EQ(sid, segment->segment_id());
-      EXPECT_EQ(segment, dt_.GetSegment(sid));
-      EXPECT_TRUE(visited.insert(segment).second);
-    });
+    auto [next, segment] = dt_.VisitSegment(cursor);
+    cursor = next;
+    ASSERT_TRUE(segment);
+    const auto [sid, ptr] = *segment;
+    EXPECT_EQ(sid, ptr->segment_id());
+    EXPECT_EQ(ptr, dt_.GetSegment(sid));
+    EXPECT_TRUE(visited.insert(ptr).second);
   } while (cursor);
 
   // each segment visited exactly once
@@ -1798,13 +1800,18 @@ TEST_F(DashTest, VisitSegmentOnce) {
 }
 
 TEST_F(DashTest, VisitSegmentCursorSurvivesGrowth) {
-  auto cursor = dt_.VisitSegment(Dash64::Cursor{}, [](size_t sid, auto*) { EXPECT_EQ(sid, 0); });
+  auto [cursor, first] = dt_.VisitSegment(Dash64::Cursor{});
+  ASSERT_TRUE(first);
+  EXPECT_EQ(first->first, 0);
 
   GrowSegments(dt_);
 
   vector<size_t> visited;
   do {
-    cursor = dt_.VisitSegment(cursor, [&](size_t sid, auto*) { visited.push_back(sid); });
+    auto [next, segment] = dt_.VisitSegment(cursor);
+    cursor = next;
+    ASSERT_TRUE(segment);
+    visited.push_back(segment->first);
   } while (cursor);
 
   // global depth grows from 1->3, so bits in next segment id of cursor go from 1->100 i.e. 4
@@ -1815,14 +1822,17 @@ TEST_F(DashTest, VisitSegmentCursorAfterMerge) {
   GrowSegments(dt_);
   FreeItemsForMerge(dt_);
 
-  auto cursor = dt_.VisitSegment(Dash64::Cursor{}, [](size_t sid, auto*) { EXPECT_EQ(sid, 0); });
+  auto [cursor, first] = dt_.VisitSegment(Dash64::Cursor{});
+  ASSERT_TRUE(first);
+  EXPECT_EQ(first->first, 0);
   ASSERT_EQ(cursor.segment_id(dt_.depth()), 1);
   ASSERT_TRUE(dt_.Merge(0, 1).merged);
 
-  cursor = dt_.VisitSegment(cursor, [&](size_t sid, auto* segment) {
-    EXPECT_EQ(sid, 0);
-    EXPECT_EQ(segment, dt_.GetSegment(0));
-  });
+  auto [next, segment] = dt_.VisitSegment(cursor);
+  cursor = next;
+  ASSERT_TRUE(segment);
+  EXPECT_EQ(segment->first, 0);
+  EXPECT_EQ(segment->second, dt_.GetSegment(0));
   EXPECT_EQ(cursor.segment_id(dt_.depth()), 2);
 }
 

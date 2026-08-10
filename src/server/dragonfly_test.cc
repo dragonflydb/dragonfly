@@ -927,11 +927,15 @@ TEST_F(DefragDflyEngineTest, SegmentsRelocated) {
     auto collect_addresses = [&] {
       absl::flat_hash_map<size_t, uintptr_t> seg_ptrs;
       PrimeTable::Cursor cursor;
-      do
-        cursor = table.VisitSegment(cursor, [&](auto sid, auto* p) {
-          seg_ptrs.emplace(sid, reinterpret_cast<uintptr_t>(p));
-        });
-      while (cursor);
+      do {
+        auto [next, segment] = table.VisitSegment(cursor);
+        cursor = next;
+        if (!segment) {
+          ADD_FAILURE() << "Valid cursor did not resolve to a segment";
+          return seg_ptrs;
+        }
+        seg_ptrs.emplace(segment->first, reinterpret_cast<uintptr_t>(segment->second));
+      } while (cursor);
       return seg_ptrs;
     };
 
