@@ -8,6 +8,10 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "server/blocking_controller.h"
+#include "server/engine_shard_set.h"
+#include "server/namespaces.h"
+#include "server/sharding.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -351,6 +355,82 @@ TEST_F(StreamFamilyTest, XReadBlock) {
   EXPECT_THAT(resp1.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(1)));
 }
 
+TEST_F(StreamFamilyTest, XReadBlockIgnoresNonDataWake) {
+  Run({"XADD", "foo", "1-0", "field", "value"});
+
+  RespExpr resp;
+  auto reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"XREAD", "BLOCK", "0", "STREAMS", "foo", "$"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  EXPECT_THAT(Run({"PEXPIRE", "foo", "60000"}), IntArg(1));
+  EXPECT_TRUE(IsConnBlocked("IO1"));
+
+  // PEXPIRE is a non-data update. Repeat the wake explicitly so this test also checks the
+  // readiness predicate on the parent revision, where PEXPIRE did not notify blocked readers.
+  const ShardId sid = Shard("foo", shard_set->size());
+  shard_set->Await(sid, [] {
+    auto* bc =
+        namespaces->GetDefaultNamespace().GetBlockingController(EngineShard::tlocal()->shard_id());
+    ASSERT_NE(bc, nullptr);
+    bc->Awaken(0, "foo");
+    bc->NotifyPending();
+  });
+
+  if (WaitUntilCondition([&] { return !IsConnBlocked("IO1"); }, 500ms)) {
+    ADD_FAILURE() << "non-data wake unblocked XREAD";
+    reader.Join();
+    return;
+  }
+
+  Run({"XADD", "foo", "2-0", "field", "next"});
+  reader.Join();
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(1)));
+  EXPECT_EQ(resp.GetVec()[0].GetVec()[1].GetVec()[0].GetVec()[0], "2-0");
+}
+
+TEST_F(StreamFamilyTest, XReadBlockIgnoresGeneratedIdChanges) {
+  Run({"XGROUP", "CREATE", "plain", "unused", "0", "MKSTREAM"});
+  Run({"XSETID", "plain", "100-0"});
+
+  RespExpr plain_resp;
+  auto plain_reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    plain_resp = Run({"XREAD", "BLOCK", "0", "STREAMS", "plain", "100-0"});
+  });
+  if (!WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms)) {
+    ADD_FAILURE() << "XREAD completed without a stream entry";
+    plain_reader.Join();
+    return;
+  }
+
+  Run({"XSETID", "plain", "200-0"});
+  EXPECT_TRUE(IsConnBlocked("IO1"));
+  Run({"XADD", "plain", "201-0", "field", "value"});
+  plain_reader.Join();
+  EXPECT_EQ(plain_resp.GetVec()[0].GetVec()[1].GetVec()[0].GetVec()[0], "201-0");
+
+  Run({"XGROUP", "CREATE", "grouped", "group", "0", "MKSTREAM"});
+  Run({"XSETID", "grouped", "100-0"});
+
+  RespExpr group_resp;
+  auto group_reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    group_resp =
+        Run({"XREADGROUP", "GROUP", "group", "consumer", "BLOCK", "0", "STREAMS", "grouped", ">"});
+  });
+  if (!WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms)) {
+    ADD_FAILURE() << "XREADGROUP completed without a stream entry";
+    group_reader.Join();
+    return;
+  }
+
+  Run({"XSETID", "grouped", "200-0"});
+  EXPECT_TRUE(IsConnBlocked("IO1"));
+  Run({"XADD", "grouped", "201-0", "field", "value"});
+  group_reader.Join();
+  EXPECT_EQ(group_resp.GetVec()[0].GetVec()[1].GetVec()[0].GetVec()[0], "201-0");
+}
+
 TEST_F(StreamFamilyTest, XReadGroupBlockwithoutBlock) {
   Run({"xadd", "foo", "1-*", "k1", "v1"});
   Run({"xadd", "foo", "1-*", "k2", "v2"});
@@ -626,6 +706,52 @@ TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnRetypedStream) {
   pp_->at(1)->Await([&] { return Run({"set", "foo", "value"}); });
   reader.Join();
   EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+}
+
+TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnBitOpRetype) {
+  Run({"XGROUP", "CREATE", "foo", "group", "0", "MKSTREAM"});
+  Run({"SET", "src1", "a"});
+  Run({"SET", "src2", "b"});
+
+  RespExpr resp0;
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run({"XREADGROUP", "GROUP", "group", "alice", "BLOCK", "200", "streams", "foo", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  Run({"BITOP", "OR", "foo", "src1", "src2"});
+  fb0.Join();
+  EXPECT_THAT(resp0, ErrArg("WRONGTYPE"));
+}
+
+TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnStoreRetypes) {
+  Run({"XGROUP", "CREATE", "rename-dst", "group", "0", "MKSTREAM"});
+  Run({"SET", "rename-src", "value"});
+
+  RespExpr rename_resp;
+  auto rename_reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    rename_resp = Run(
+        {"XREADGROUP", "GROUP", "group", "alice", "BLOCK", "200", "STREAMS", "rename-dst", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  Run({"RENAME", "rename-src", "rename-dst"});
+  rename_reader.Join();
+  EXPECT_THAT(rename_resp, ErrArg("WRONGTYPE"));
+
+  Run({"XGROUP", "CREATE", "union-dst", "group", "0", "MKSTREAM"});
+  Run({"SADD", "union-src", "member"});
+
+  RespExpr union_resp;
+  auto union_reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    union_resp =
+        Run({"XREADGROUP", "GROUP", "group", "alice", "BLOCK", "200", "STREAMS", "union-dst", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  Run({"SUNIONSTORE", "union-dst", "union-src"});
+  union_reader.Join();
+  EXPECT_THAT(union_resp, ErrArg("WRONGTYPE"));
 }
 
 TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnFlushDb) {
