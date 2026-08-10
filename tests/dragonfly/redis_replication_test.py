@@ -218,6 +218,7 @@ replication_specs = [
 ]
 
 
+@pytest.mark.large
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
 async def test_redis_replication_all(
     df_factory: DflyInstanceFactory,
