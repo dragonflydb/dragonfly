@@ -13,6 +13,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  GTEST_BRIEF: 1
+
 jobs:
   # Do not rename this job name without updating any matching required status check in repository settings.
   pre-commit:

@@ -7,7 +7,7 @@
 
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
-다른 언어 번역본:  [English](README.zh-CN.md) [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [Português](README.pt-BR.md)
+다른 언어 번역본:  [English](README.md) [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [Português](README.pt-BR.md)
 
 [Website](https://www.dragonflydb.io/) • [Docs](https://dragonflydb.io/docs) • [Quick Start](https://www.dragonflydb.io/docs/getting-started) • [Community Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly Forum](https://dragonfly.discourse.group/) • [Join the Dragonfly Community](https://www.dragonflydb.io/community)
 
@@ -97,7 +97,7 @@ Dragonfly는 현재 아래와 같은 Redis 인수들을 지원합니다 :
   * `bind`: `localhost`를 사용하여 로컬호스트 연결만 허용하거나 공용 IP 주소를 사용하여 해당 IP 주소에 연결을 허용합니다.(즉, 외부에서도 가능)
   * `requirepass`: AUTH 인증을 위한 패스워드 (`기본값: ""`).
   * `maxmemory`: 데이터베이스에서 사용하는 최대 메모리 제한(사람이 읽을 수 있는 바이트 단위) (`기본값: 0`). `maxmemory` 의 값이 `0` 이면 프로그램이 최대 메모리 사용량을 자동으로 결정합니다.
-  * `dir`: Dragonfly Docker는 스냅샷을 위해 기본적으로 `/data` 폴더를 사용하고, CLI은 `""`을 사용합니다. Docker 옵션인 `-v` 을 통해서 호스트 폴더에 매핑할 수 있습니다.
+  * `dir`: Dragonfly Docker는 스냅샷을 위해 기본적으로 `/data` 폴더를 사용하고, CLI는 `""`을 사용합니다. Docker 옵션인 `-v` 을 통해서 호스트 폴더에 매핑할 수 있습니다.
   * `dbfilename`: 저장하고 불러올 데이터베이스 파일 이름 (`기본값: dump`).
 
 아래는 Dragonfly 전용 인수 입니다 :
@@ -126,9 +126,9 @@ Dragonfly는 현재 아래와 같은 Redis 인수들을 지원합니다 :
 
 ## <a name="roadmap-status"><a/>로드맵과 상태
 
-Dragonfly는 현재 ~185개의 Redis 명령어들과 `cas` 뿐만 아니라 모든 Memcached 명령어를 지원합니다. 이는 거의 Redis 5 API와 동등하며, Dragonfly의 다음 마일스톤은 기본 기능 을 안정화하고 복제 API를 구현하는 것입니다. 아직 구현되지 않은 필요한 명령가 있다면, 이슈를 오픈해주세요.
+Dragonfly는 현재 ~185개의 Redis 명령어들과 `cas` 뿐만 아니라 모든 Memcached 명령어를 지원합니다. 이는 거의 Redis 5 API와 동등하며, Dragonfly의 다음 마일스톤은 기본 기능 을 안정화하고 복제 API를 구현하는 것입니다. 아직 구현되지 않은 필요한 명령어가 있다면, 이슈를 오픈해주세요.
 
-Draginfly 고유 복제기능을 위해, 저희는 몇 배 높은 속도를 지원할 수 있는 분산 로그 형식을 설계하고 있습니다.
+Dragonfly 고유 복제기능을 위해, 저희는 몇 배 높은 속도를 지원할 수 있는 분산 로그 형식을 설계하고 있습니다.
 
 복제 기능을 추가한 뒤에 저희는 Redis 3-6 API에 해당되는 누락 명령어들을 계속 추가할 예정입니다.
 
@@ -158,10 +158,10 @@ Dragonfly와 Redis의 만료 기한에 대한 구현의 차이는 [여기서 확
 
 Prometheus에서 내보내는 매트릭들은 Grafana 대시보드와 호환됩니다. 자세한 내용은 [여기](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json)를 참조해주세요.
 
-중요! HTTP 노솔은 안전한 네트워크 내에서 접근하도록 설계되었습니다. Dragonfly의 TCP 포트를 외부로 노출한다면, `--http_admin_console=false` 혹은 `--nohttp_admin_console`과 같은 인수를 활용하여 콘솔을 비활성화하는 것을 조언해드립니다.
+중요! HTTP 콘솔은 안전한 네트워크 내에서 접근하도록 설계되었습니다. Dragonfly의 TCP 포트를 외부로 노출한다면, `--http_admin_console=false` 혹은 `--nohttp_admin_console`과 같은 인수를 활용하여 콘솔을 비활성화하는 것을 조언해드립니다.
 
 
-## <a name="background"><a/>개발배경
+## <a name="background"><a/>개발 배경
 
 Dragonfly는 2022년에 인-메모리 데이터스토어를 설계한다면 어땠을까에 대한 실험으로 시작되었습니다. 클라우드 회사에서 근무한 엔지니어 및 메모리 스토어 사용자의 경험을 바탕으로, 저희는 Dragonfly에 핵심적인 두 가지 핵심 특성을 보존해야함을 알았습니다: 모든 작업에 대한 원자성 보장과 매우 높은 처리량에 대한 밀리초 이하의 낮은 지연 시간을 보장하는 것이었습니다.
 
@@ -175,7 +175,7 @@ Dragonfly는 2022년에 인-메모리 데이터스토어를 설계한다면 어�
  * LRU와 LFU 같은 다른 캐시 전략보다 더 높은 히트율을 달성하는 새로운 캐시 방출 알고리즘과 **제로 메모리 오버헤드**.
  * 새로운 **fork-less** 스냅샷 알고리즘.
 
-저희는 Dragonfly의 기반을 구축하고 성능에 만족하게 되었을 때, Redis와 Memcached의 기능을 구현하기 시작했습니다. 저희는 약 185개의 Redis 명령(대략적으로 Redis 5.0 API와 동등)과 13개의 Memecached 명령을 구현했습니다.
+저희는 Dragonfly의 기반을 구축하고 성능에 만족하게 되었을 때, Redis와 Memcached의 기능을 구현하기 시작했습니다. 저희는 약 185개의 Redis 명령(대략적으로 Redis 5.0 API와 동등)과 13개의 Memcached 명령을 구현했습니다.
 
 마지막으로, <br>
 <em>저희의 임무는 최신 하드웨어 발전을 활용하는 클라우드 작업을 위한 멋진 설계와 초고속 처리량 그리고 비용효율적인 인-메모리 데이터스토어를 만드는 것입니다. 저희는 현재 솔루션의 제품 API들이나 제안을 유지하면서 당면 과제를 해결하고자 합니다.</em>

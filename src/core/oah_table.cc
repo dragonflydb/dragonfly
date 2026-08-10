@@ -78,9 +78,9 @@ template <typename Entry> size_t OAHTable<Entry>::SizeSlow() {
 }
 
 template <typename Entry> void OAHTable<Entry>::GrowCapacity(size_t bucket_capacity) {
-  bucket_capacity = absl::bit_ceil(bucket_capacity);
+  bucket_capacity = std::max(kMinBucketCount, absl::bit_ceil(bucket_capacity));
   if (bucket_capacity > entries_.size()) {
-    capacity_log_ = std::max(kMinCapacityLog, uint32_t(absl::bit_width(bucket_capacity) - 1));
+    capacity_log_ = uint32_t(absl::bit_width(bucket_capacity) - 1);
     size_t prev_size = entries_.size();
     entries_.resize(Capacity());
     Rehash(prev_size);

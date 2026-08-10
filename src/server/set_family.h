@@ -14,6 +14,9 @@ namespace dfly {
 
 using facade::OpResult;
 
+// Captures the selected SET implementation after command-line flags have been parsed.
+void InitSetFamilyFlags();
+
 class StringSet;
 
 class SetFamily {

@@ -43,12 +43,12 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
 
  public:
   static constexpr std::uint32_t kShiftLog = 4;                         // TODO make template
-  static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
 
   // Table grows once live entries reach capacity * kOverloadFactor (200% load, by default).
   static constexpr std::uint32_t kOverloadFactor = 2;
-  static constexpr size_t kMinBucketCount = 1u << kMinCapacityLog;
+  // Keep capacity_log_ nonzero in nonempty tables.
+  static constexpr size_t kMinBucketCount = 2;
 
   class iterator {
    public:
@@ -375,6 +375,18 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   // Grows the table so entries_.size() >= bucket_capacity (power of 2), rehashing in place.
   void GrowCapacity(size_t bucket_capacity);
 
+  // Grows the table once size_ crosses the overload threshold. GrowCapacity takes a
+  // bucket_capacity target, so divide by kOverloadFactor to undo Reserve()'s scaling.
+  void TryGrow() {
+    if (size_ >= entries_.size() * kOverloadFactor) [[unlikely]] {
+      size_t target = size_ + 1;
+      if constexpr (kOverloadFactor > 1) {
+        target = (target + kOverloadFactor - 1) / kOverloadFactor;
+      }
+      GrowCapacity(target);
+    }
+  }
+
   static uint64_t Hash(std::string_view str) {
     constexpr uint64_t kHashSeed = 24061983;
     return rapidhashMicro_withSeed(str.data(), str.size(), kHashSeed);
@@ -404,8 +416,9 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     // We should prevent moving elements before current position to avoid double processing.
     // Detach the first mix_size slots into locals; each `bucket` view is freed explicitly
     // after its entries are redistributed into entries_ (a TaggedPtr slot has no dtor).
-    constexpr size_t mix_size = (2 << kShiftLog) - 1;
-    std::array<TaggedPtr, mix_size> old_buckets{};
+    constexpr size_t kMixSize = (2 << kShiftLog) - 1;
+    std::array<TaggedPtr, kMixSize> old_buckets{};
+    const size_t mix_size = std::min<size_t>(prev_size, old_buckets.size());
     for (size_t i = 0; i < mix_size; ++i) {
       old_buckets[i] = entries_[i];
       entries_[i] = 0;

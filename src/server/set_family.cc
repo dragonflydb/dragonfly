@@ -13,6 +13,7 @@ extern "C" {
 }
 
 #include "base/cycle_clock.h"
+#include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/detail/listpack_wrap.h"
@@ -29,9 +30,15 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/transaction.h"
 
+ABSL_FLAG(bool, use_oah_set, true, "If true, store SET values in OAHSet instead of StringSet.");
+
 namespace rng = std::ranges;
 
 namespace dfly {
+
+void InitSetFamilyFlags() {
+  g_use_oah_set = absl::GetFlag(FLAGS_use_oah_set);
+}
 
 using namespace facade;
 

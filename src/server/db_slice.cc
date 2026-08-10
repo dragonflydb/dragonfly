@@ -21,12 +21,14 @@ extern "C" {
 #include "core/top_keys.h"
 #include "facade/dragonfly_connection.h"
 #include "search/doc_index.h"
+#include "server/blocking_controller.h"
 #include "server/channel_store.h"
 #include "server/cluster/slot_set.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "strings/human_readable.h"
@@ -220,10 +222,10 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
   // Disable flush journal changes to prevent preemtion in evict.
   journal::DisableFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
-  constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.by_type.stash_buckets);
+  constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.stash_buckets);
 
   // choose "randomly" a stash bucket to evict an item.
-  auto bucket_it = eb.probes.by_type.stash_buckets[eb.key_hash % kNumStashBuckets];
+  auto bucket_it = eb.probes.stash_buckets[eb.key_hash % kNumStashBuckets];
   auto last_slot_it = bucket_it;
   last_slot_it += (PrimeTable::kSlotNum - 1);
   if (!last_slot_it.is_done()) {
@@ -456,11 +458,13 @@ class DbSlice::PrimeBumpPolicy {
   }
 };
 
-DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
+DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner, Namespace* ns)
     : shard_id_(index),
       cache_mode_(cache_mode),
       owner_(owner),
+      ns_(ns),
       client_tracking_map_(owner->memory_resource()) {
+  CHECK(ns_ != nullptr);
   db_arr_.emplace_back();
   CreateDb(0);
   std::string keyspace_events = GetFlag(FLAGS_notify_keyspace_events);
@@ -904,7 +908,16 @@ void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table, bool async) {
   DbTable* table = db_table ? db_table : db_arr_[cntx.db_index].get();
   auto obj_type = it->second.ObjType();
 
-  if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
+  if (obj_type == OBJ_STREAM) {
+    // A blocked XREADGROUP watches a key that can never become ready again once the stream is
+    // gone. Mark it awakened so that the readiness check re-evaluates it and the reader learns
+    // that its consumer group disappeared. The awakened keys are dispatched by the transaction
+    // that performs this deletion when it concludes.
+    if (auto* bc = ns_->GetBlockingController(owner_->shard_id()); bc) {
+      string tmp;
+      bc->Awaken(table->index, it->first.GetSlice(&tmp));
+    }
+  } else if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
     string tmp;
     string_view key = it->first.GetSlice(&tmp);
     doc_del_cb_(key, cntx, it->second);
