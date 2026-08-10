@@ -516,15 +516,20 @@ void DeleteSlots(Transaction* trans, const SlotRanges& slots_ranges) {
 
   trans->Execute(
       [&slots_ranges, &args_view](Transaction* t, EngineShard* shard) {
+        namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
+
         // TODO: Break slot migration upon FLUSHSLOTS
         if (shard->journal()) {
           journal::RecordEntry(t->txid(), journal::Op::COMMAND, /* dbid= */ 0, nullopt,
                                Payload("DFLYCLUSTER", args_view));
         }
-        namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
         return OpStatus::OK;
       },
       true);
+
+  OpStatus status = *trans->LocalResultPtr();
+  LOG_IF(ERROR, status != OpStatus::OK)
+      << "Failed to flush slots " << slots_ranges.ToString() << ": " << status;
 
   auto deleted = SlotSet(slots_ranges);
   channel_store->UnsubscribeAfterClusterSlotMigration(deleted);
