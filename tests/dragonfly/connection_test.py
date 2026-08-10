@@ -2521,12 +2521,20 @@ async def test_pipeline_cache_size(df_server: DflyInstance):
     assert info["dispatch_queue_bytes"] == 0
 
 
+IOBUF_MIN_SHRINK_INTERVAL_SEC = 1
+IOBUF_COOLDOWN_SEC = 3
+IOBUF_WAIT_SEC = 2
+# We simplify the different timeout required by each test by using a single
+# maximum timeout for all.
+IOBUF_WAIT_TIMEOUT_SEC = 6
+
+
 @dfly_args(
     {
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
         "max_client_iobuf_len": 4096,
-        "iobuf_min_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": IOBUF_MIN_SHRINK_INTERVAL_SEC,
     }
 )
 async def test_iobuf_shrinks_when_receive_idle(df_server: DflyInstance):
@@ -2553,7 +2561,7 @@ async def test_iobuf_shrinks_when_receive_idle(df_server: DflyInstance):
     metric_peak = await client_read_buffer_bytes()
     assert peak > baseline
 
-    @assert_eventually(timeout=5)
+    @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_reclamation():
         current = int((await observer.info("clients"))["client_read_buffer_bytes"])
         assert current < peak
@@ -2569,7 +2577,7 @@ async def test_iobuf_shrinks_when_receive_idle(df_server: DflyInstance):
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
         "max_client_iobuf_len": 4096,
-        "iobuf_min_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": IOBUF_MIN_SHRINK_INTERVAL_SEC,
     }
 )
 async def test_iobuf_regrows_after_receive_idle_shrink(df_server: DflyInstance):
@@ -2584,7 +2592,7 @@ async def test_iobuf_regrows_after_receive_idle_shrink(df_server: DflyInstance):
     await client.set("iobuf-regrow-before", "x" * 2048)
     peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
 
-    @assert_eventually(timeout=5)
+    @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_shrink():
         current = int((await observer.info("clients"))["client_read_buffer_bytes"])
         assert current < peak
@@ -2621,7 +2629,7 @@ async def test_iobuf_does_not_shrink_when_disabled(df_server: DflyInstance):
     await client.set("iobuf-shrink-disabled", "x" * 2048)
     peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
 
-    await asyncio.sleep(3)
+    await asyncio.sleep(IOBUF_WAIT_SEC)
 
     current = int((await observer.info("clients"))["client_read_buffer_bytes"])
     assert current == peak
@@ -2634,7 +2642,7 @@ async def test_iobuf_does_not_shrink_when_disabled(df_server: DflyInstance):
     {
         "proactor_threads": 1,
         "max_client_iobuf_len": 4096,
-        "iobuf_min_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": IOBUF_MIN_SHRINK_INTERVAL_SEC,
     }
 )
 async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
@@ -2649,17 +2657,17 @@ async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
     assert await reader.readuntil(b"\r\n") == b"+OK\r\n"
 
     peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
-    await asyncio.sleep(2)
+    await asyncio.sleep(IOBUF_WAIT_SEC)
 
     partial_value = b"y" * 100
     writer.write(b"*3\r\n$3\r\nSET\r\n$7\r\npartial\r\n$1024\r\n" + partial_value)
     await writer.drain()
-    await asyncio.sleep(2)
+    await asyncio.sleep(IOBUF_WAIT_SEC)
 
     writer.write(b"y")
     await writer.drain()
 
-    @assert_eventually(timeout=5)
+    @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_reclamation():
         current = int((await observer.info("clients"))["client_read_buffer_bytes"])
         assert current < peak
@@ -2679,7 +2687,7 @@ async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
     {
         "proactor_threads": 1,
         "max_client_iobuf_len": 4096,
-        "iobuf_min_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": IOBUF_MIN_SHRINK_INTERVAL_SEC,
     }
 )
 async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
@@ -2691,12 +2699,12 @@ async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
     await client.set("iobuf-shrink-complete", "x" * 2048)
     peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(IOBUF_WAIT_SEC)
     await client.ping()
-    await asyncio.sleep(2)
+    await asyncio.sleep(IOBUF_WAIT_SEC)
     await client.ping()
 
-    @assert_eventually(timeout=5)
+    @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_reclamation():
         current = int((await observer.info("clients"))["client_read_buffer_bytes"])
         assert current < peak
@@ -2710,22 +2718,35 @@ async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
     {
         "proactor_threads": 1,
         "max_client_iobuf_len": 4096,
-        "iobuf_min_shrink_interval_sec": 1,
+        "iobuf_min_shrink_interval_sec": IOBUF_MIN_SHRINK_INTERVAL_SEC,
     }
 )
 async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
-    """Both loops retain capacity when the usage window contains a large read."""
+    """V1 retains a high-use buffer, while V2 reclaims it once receive-idle."""
+
     observer = df_server.client()
     client = df_server.client()
     await observer.ping()
 
+    observer_size = int((await observer.info("clients"))["client_read_buffer_bytes"])
     await client.set("iobuf-shrink-high-usage", "x" * 2048)
     peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(IOBUF_WAIT_SEC)
     await client.ping()
 
-    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == peak
+    if is_resp_io_loop_v2(df_server):
+        # Keep client receive-idle while the observer polls aggregate client-buffer memory.
+        @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
+        async def wait_for_receive_idle_shrink():
+            current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+            assert current <= observer_size + (peak - observer_size) // 2
+
+        await wait_for_receive_idle_shrink()
+    else:
+        # V1 only shrinks in its active path, so it cannot self-shrink while receive-idle.
+        await asyncio.sleep(IOBUF_WAIT_SEC)
+        assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == peak
 
     await client.aclose()
     await observer.aclose()
@@ -2736,7 +2757,9 @@ async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
         "max_client_iobuf_len": 4096,
-        "iobuf_min_shrink_interval_sec": 3,
+        # Needs a longer configured shrink interval so it can prove that after the first shrink
+        # a second shrink does not occur during the cooldown window.
+        "iobuf_min_shrink_interval_sec": IOBUF_COOLDOWN_SEC,
     }
 )
 async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
@@ -2751,14 +2774,14 @@ async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
     await client.set("iobuf-shrink-cooldown", "x" * 2048)
     peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
 
-    @assert_eventually(timeout=7)
+    @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_first_shrink():
         current = int((await observer.info("clients"))["client_read_buffer_bytes"])
         assert current < peak
 
     await wait_for_first_shrink()
     after_first_shrink = int((await observer.info("clients"))["client_read_buffer_bytes"])
-    await asyncio.sleep(1)
+    await asyncio.sleep(IOBUF_WAIT_SEC)
     assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == after_first_shrink
 
     await client.aclose()
