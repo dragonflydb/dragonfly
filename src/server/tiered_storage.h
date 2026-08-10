@@ -43,6 +43,7 @@ struct TieredStorageBase {
   };
 
   struct StashContext {
+    DbIndex dbid = 0;
     uint64_t key_expire_ms = 0;  // 0 means no expiry
   };
 
@@ -114,6 +115,11 @@ class TieredStorage : public TieredStorageBase {
 
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
   PrimeValue Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item);
+
+  // Brings an offloaded HASH back into memory so a search index can read its fields. The returned
+  // future resolves to false if a disk-resident value could not be read.
+  util::fb2::Future<bool> MaterializeForIndexing(DbIndex dbid, std::string_view key,
+                                                 PrimeValue* pv);
 
   TieredStats GetStats() const;
 
@@ -331,6 +337,13 @@ class TieredStorage : public TieredStorageBase {
 
   PrimeValue Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item) {
     return PrimeValue{};
+  }
+
+  util::fb2::Future<bool> MaterializeForIndexing(DbIndex dbid, std::string_view key,
+                                                 PrimeValue* pv) {
+    util::fb2::Future<bool> fut;
+    fut.Resolve(true);
+    return fut;
   }
 
   bool IsClosed() const {

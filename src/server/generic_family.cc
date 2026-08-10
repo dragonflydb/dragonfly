@@ -263,6 +263,37 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
   return true;
 }
 
+OpStatus MaterializeHashForDb0Search(DbIndex source_db, string_view key,
+                                     DbSlice::ItAndUpdater* entry, EngineShard* shard) {
+  if (!IsValid(entry->it)) {
+    entry->post_updater.Cancel();
+    return OpStatus::IO_ERROR;
+  }
+
+  if (entry->it->second.ObjType() != OBJ_HASH || !entry->it->second.IsExternal() ||
+      !shard->search_indices()->HasHashIndexes()) {
+    return OpStatus::OK;
+  }
+
+  auto future = shard->tiered_storage()->MaterializeForIndexing(source_db, key, &entry->it->second);
+  const bool fetched = future.Get();
+
+  // Cluster slot flushing can remove an entry while this fiber waits even though regular
+  // transactions retain their key locks. Never let the updater outlive a removed key.
+  if (!IsValid(entry->it)) {
+    entry->post_updater.Cancel();
+    return OpStatus::IO_ERROR;
+  }
+
+  // A successful tiered upload accounted resident bytes behind this updater's back. Resync on
+  // every surviving entry so an error or concurrent replacement cannot double-account it.
+  entry->post_updater.ResyncBaseline();
+  if (!fetched || entry->it->second.ObjType() != OBJ_HASH || entry->it->second.IsExternal())
+    return OpStatus::IO_ERROR;
+
+  return OpStatus::OK;
+}
+
 OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArgs& op_args) {
   string str_res;
 
@@ -299,10 +330,11 @@ class Renamer {
   ErrorReply Rename(bool destination_should_not_exist);
 
  private:
-  void FetchData();
+  void FetchData(bool materialize_destination);
   facade::OpStatus FinalizeRename();
 
   bool KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const;
+  OpStatus PrepareDest(Transaction* t, EngineShard* shard);
   void SerializeSrc(Transaction* t, EngineShard* shard);
 
   OpStatus DelSrc(Transaction* t, EngineShard* shard);
@@ -325,12 +357,13 @@ class Renamer {
   bool src_found_ = false;
   bool dest_found_ = false;
   bool do_copy_ = false;
+  OpStatus dest_status_ = OpStatus::OK;
 
   OpResult<SerializedValue> serialized_value_;
 };
 
 ErrorReply Renamer::Rename(bool destination_should_not_exist) {
-  FetchData();
+  FetchData(!destination_should_not_exist);
 
   if (!src_found_) {
     transaction_->Conclude();
@@ -347,6 +380,11 @@ ErrorReply Renamer::Rename(bool destination_should_not_exist) {
     return ErrorReply{kInvalidDumpValueErr};
   }
 
+  if (dest_status_ != OpStatus::OK) {
+    transaction_->Conclude();
+    return dest_status_;
+  }
+
   if (dest_found_ && destination_should_not_exist) {
     transaction_->Conclude();
     return OpStatus::KEY_EXISTS;
@@ -355,8 +393,8 @@ ErrorReply Renamer::Rename(bool destination_should_not_exist) {
   return FinalizeRename();
 }
 
-void Renamer::FetchData() {
-  auto cb = [this](Transaction* t, EngineShard* shard) {
+void Renamer::FetchData(bool materialize_destination) {
+  auto cb = [this, materialize_destination](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
     DCHECK(1 == args.Size() || do_copy_);
 
@@ -367,7 +405,10 @@ void Renamer::FetchData() {
     }
 
     if (shard_id == dest_sid_) {
-      dest_found_ = KeyExists(t, shard, dest_key_);
+      if (materialize_destination)
+        dest_status_ = PrepareDest(t, shard);
+      else
+        dest_found_ = KeyExists(t, shard, dest_key_);
     }
 
     return OpStatus::OK;
@@ -406,6 +447,21 @@ bool Renamer::KeyExists(Transaction* t, EngineShard* shard, std::string_view key
   return IsValid(it);
 }
 
+OpStatus Renamer::PrepareDest(Transaction* t, EngineShard* shard) {
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  auto it = db_slice.FindReadOnly(t->GetDbContext(), dest_key_);
+  dest_found_ = IsValid(it);
+
+  const bool materialize = dest_found_ && t->GetDbIndex() == 0 &&
+                           it->second.ObjType() == OBJ_HASH && it->second.IsExternal() &&
+                           shard->search_indices()->HasHashIndexes();
+  if (!materialize)
+    return OpStatus::OK;
+
+  auto res = db_slice.FindMutable(t->GetDbContext(), dest_key_);
+  return MaterializeHashForDb0Search(0, dest_key_, &res, shard);
+}
+
 void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto it = db_slice.FindReadOnly(t->GetDbContext(), src_key_);
@@ -415,14 +471,30 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
     return;
   }
 
-  OpResult<string> res = DumpToString(src_key_, it->second, t->GetOpArgs(shard));
-  if (res.ok()) {
-    optional rdb_version = GetRdbVersion(*res);
-    int64_t exp_time = it->first.GetExpireTime();
-    serialized_value_ =
-        SerializedValue{std::move(*res), rdb_version, exp_time, it->first.IsSticky()};
+  auto serialize = [&](const auto& entry) {
+    OpResult<string> dump = DumpToString(src_key_, entry->second, t->GetOpArgs(shard));
+    if (dump.ok()) {
+      optional rdb_version = GetRdbVersion(*dump);
+      int64_t exp_time = entry->first.GetExpireTime();
+      serialized_value_ =
+          SerializedValue{std::move(*dump), rdb_version, exp_time, entry->first.IsSticky()};
+    } else {
+      serialized_value_ = dump.status();
+    }
+  };
+
+  const bool materialize = t->GetDbIndex() == 0 && it->second.ObjType() == OBJ_HASH &&
+                           it->second.IsExternal() && shard->search_indices()->HasHashIndexes();
+  if (materialize) {
+    auto res = db_slice.FindMutable(t->GetDbContext(), src_key_);
+    OpStatus status = MaterializeHashForDb0Search(0, src_key_, &res, shard);
+    if (status != OpStatus::OK) {
+      serialized_value_ = status;
+      return;
+    }
+    serialize(res.it);
   } else {
-    serialized_value_ = res.status();
+    serialize(it);
   }
 }
 
@@ -939,6 +1011,15 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   if (IsValid(to_res))
     return OpStatus::KEY_EXISTS;
 
+  // Existing DB 0 values may still be external during the initial sweep, and values entering
+  // DB 0 from another database were never covered by its resident gate.
+  if (op_args.db_cntx.db_index == 0 || target_db == 0) {
+    OpStatus status =
+        MaterializeHashForDb0Search(op_args.db_cntx.db_index, key, &from_res, op_args.shard);
+    if (status != OpStatus::OK)
+      return status;
+  }
+
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = from_res.it->first.GetExpireTime();
   RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, from_res.it->second, op_args.shard);
@@ -979,11 +1060,29 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   if (from_key == to_key)
     return destination_should_not_exist ? OpStatus::KEY_EXISTS : OpStatus::OK;
 
+  if (destination_should_not_exist && IsValid(db_slice.FindReadOnly(op_args.db_cntx, to_key)))
+    return OpStatus::KEY_EXISTS;
+
+  if (op_args.db_cntx.db_index == 0) {
+    OpStatus status = MaterializeHashForDb0Search(0, from_key, &from_res, op_args.shard);
+    if (status != OpStatus::OK)
+      return status;
+  }
+
   bool is_prior_list = false;
   auto to_res = db_slice.FindMutable(op_args.db_cntx, to_key);
   if (IsValid(to_res.it)) {
-    if (destination_should_not_exist)
-      return OpStatus::KEY_EXISTS;
+    if (op_args.db_cntx.db_index == 0) {
+      OpStatus status = MaterializeHashForDb0Search(0, to_key, &to_res, op_args.shard);
+      // Destination materialization can suspend. Cluster slot flushing may remove the source
+      // despite the transaction lock, so do not retain its updater or dereference it afterward.
+      if (!IsValid(from_res.it)) {
+        from_res.post_updater.Cancel();
+        return OpStatus::IO_ERROR;
+      }
+      if (status != OpStatus::OK)
+        return status;
+    }
 
     RemoveKeyFromIndexesIfNeeded(to_key, op_args.db_cntx, to_res.it->second, op_args.shard);
     is_prior_list = (to_res.it->second.ObjType() == OBJ_LIST);
@@ -2332,7 +2431,7 @@ void GenericFamily::Move(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
       res = OpMove(op_args, key, target_db);
       // MOVE runs as global command but we want to write the
       // command to only one journal.
-      if (op_args.shard->journal()) {
+      if (res != OpStatus::IO_ERROR && op_args.shard->journal()) {
         RecordJournal(op_args, "MOVE"sv, ArgSlice{key, target_db_str});
       }
     }
@@ -2342,6 +2441,8 @@ void GenericFamily::Move(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   // Exactly one shard will call OpMove.
   DCHECK(res != OpStatus::SKIPPED);
+  if (res == OpStatus::IO_ERROR)
+    return cmd_cntx->SendError(res);
   cmd_cntx->SendLong(res == OpStatus::OK);
 }
 
