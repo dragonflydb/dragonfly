@@ -1229,12 +1229,25 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     if (!ValidateServerTlsFlags()) {
       return false;
     }
-    for (facade::Listener* l : listeners_) {
-      // Must reconfigure in the listener proactor to avoid a race.
-      if (!l->socket()->proactor()->Await([l] { return l->ReconfigureTLS(); })) {
+#ifdef DFLY_USE_SSL
+    // Build the new context before touching any listener: a bad cert/key must fail here, not
+    // midway through the listeners (a failed callback only rolls back the flag value, so a
+    // partial switch would leave listeners split between old and new TLS state).
+    SSL_CTX* ctx = nullptr;
+    if (absl::GetFlag(FLAGS_tls)) {
+      ctx = facade::CreateSslCntx(facade::TlsContextRole::SERVER);
+      if (!ctx) {
         return false;
       }
     }
+    for (facade::Listener* l : listeners_) {
+      // Must reconfigure in the listener proactor to avoid a race.
+      l->socket()->proactor()->Await([l, ctx] { l->ApplyTlsCtx(ctx); });
+    }
+    if (ctx) {
+      SSL_CTX_free(ctx);
+    }
+#endif
     return true;
   });
   config_registry.RegisterMutable("tls_cert_file");
@@ -2532,6 +2545,10 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
   // Fold per-thread partials into the aggregate result on this thread.
   for (const Metrics& partial : partials)
     result.Merge(partial);
+
+  // The per-thread deltas are read at slightly different moments, so the sum can transiently
+  // dip below zero.
+  result.tls_bytes = std::max<int64_t>(0, result.tls_bytes);
 
 #ifdef WITH_SEARCH
   // HNSW indices live in a single global registry shared across shards, so their

@@ -223,9 +223,14 @@ string NormalizePaths(std::string_view path) {
   return string(path);
 }
 
-template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
-  auto res = make_unique<Listener>(std::forward<Args>(args)...);
-  res->SetConnFiberStackSize(kFiberDefaultStackSize);
+template <typename... Args> unique_ptr<Listener> MakeListener(ProactorPool* pool, Args&&... args) {
+  unique_ptr<Listener> res;
+  // The constructor allocates TLS state; run it on a proactor thread so those bytes land on a
+  // thread included in the tls_bytes sum (the main thread is not).
+  pool->GetNextProactor()->Await([&] {
+    res = make_unique<Listener>(std::forward<Args>(args)...);
+    res->SetConnFiberStackSize(kFiberDefaultStackSize);
+  });
   return res;
 }
 
@@ -328,7 +333,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   // we depend on tcp listener to be at the front since we later
   // need to pass it to the AclFamily::Init
   if (!tcp_disabled) {
-    auto listener = MakeListener(Protocol::REDIS, &service, Listener::Role::MAIN);
+    auto listener = MakeListener(pool, Protocol::REDIS, &service, Listener::Role::MAIN);
     main_listener = listener.get();
     listeners.push_back(listener.release());
   }
@@ -393,7 +398,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     }
     unlink(unix_sock.c_str());
 
-    auto uds_listener = MakeListener(Protocol::REDIS, &service);
+    auto uds_listener = MakeListener(pool, Protocol::REDIS, &service);
     error_code ec =
         acceptor->AddUDSListener(unix_sock.c_str(), unix_socket_perm, uds_listener.get());
     if (ec) {
@@ -423,7 +428,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     const char* interface_addr = admin_bind.empty() ? nullptr : admin_bind.c_str();
     const std::string printable_addr =
         absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
-    auto admin_listener = MakeListener(Protocol::REDIS, &service, Listener::Role::PRIVILEGED);
+    auto admin_listener = MakeListener(pool, Protocol::REDIS, &service, Listener::Role::PRIVILEGED);
 
     error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener.get());
 
@@ -449,7 +454,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   }
 
   if (mc_port > 0 && !tcp_disabled) {
-    auto listener = MakeListener(Protocol::MEMCACHE, &service);
+    auto listener = MakeListener(pool, Protocol::MEMCACHE, &service);
     error_code ec = acceptor->AddListener(bind_addr, mc_port, listener.get());
     if (ec) {
       LOG(ERROR) << "Could not open memcached port " << mc_port << ", error: " << ec.message();

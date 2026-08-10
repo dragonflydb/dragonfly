@@ -109,7 +109,10 @@ bool ConfigureKeepAlive(int fd) {
 }
 
 struct ListenerStats {
-  size_t tls_allocated_bytes = 0;
+  // Signed: OpenSSL objects are allocated and freed on different threads (contexts are built
+  // once and shared across listeners), so per-thread values can go negative; only the sum
+  // across threads is meaningful.
+  int64_t tls_allocated_bytes = 0;
   uint64_t refused_conn_maxclients_reached_cnt = 0;
 };
 
@@ -125,8 +128,12 @@ void* OverriddenSSLMalloc(size_t size, const char* file, int line) {
 void* OverriddenSSLRealloc(void* addr, size_t size, const char* file, int line) {
   size_t prev_size = mi_malloc_usable_size(addr);
   void* res = mi_realloc(addr, size);
-  listener_tl_stats.tls_allocated_bytes += mi_malloc_usable_size(res);
-  listener_tl_stats.tls_allocated_bytes -= prev_size;
+  // On failure the original block stays allocated and will be freed (and subtracted) later,
+  // so adjusting the counter here would subtract it twice.
+  if (res) {
+    listener_tl_stats.tls_allocated_bytes += mi_malloc_usable_size(res);
+    listener_tl_stats.tls_allocated_bytes -= prev_size;
+  }
   return res;
 }
 
@@ -283,7 +290,32 @@ std::shared_ptr<const TlsCertInfo> Listener::GetTlsCertInfo() const {
 #endif
 }
 
-size_t Listener::TLSUsedMemoryThreadLocal() {
+void Listener::ApplyTlsCtx(SSL_CTX* ctx) {
+#ifdef DFLY_USE_SSL
+  const bool tls_on_privileged_port = !GetFlag(FLAGS_no_tls_on_admin_port);
+  SSL_CTX* prev_ctx = ctx_;
+  std::shared_ptr<const TlsCertInfo> info;
+  if (ctx && (!IsPrivilegedInterface() || tls_on_privileged_port)) {
+    SSL_CTX_up_ref(ctx);
+    ctx_ = ctx;
+    auto parsed = ParseTlsCertInfo(SSL_CTX_get0_certificate(ctx));
+    if (parsed) {
+      info = std::make_shared<const TlsCertInfo>(*parsed);
+    }
+  } else {
+    ctx_ = nullptr;
+  }
+  {
+    util::fb2::LockGuard lk(tls_cert_info_mu_);
+    tls_cert_info_ = std::move(info);
+  }
+  if (prev_ctx) {
+    SSL_CTX_free(prev_ctx);
+  }
+#endif
+}
+
+int64_t Listener::TLSUsedMemoryThreadLocal() {
   return listener_tl_stats.tls_allocated_bytes;
 }
 
