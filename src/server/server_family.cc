@@ -166,6 +166,7 @@ ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
           "when set, preserves journal offsets after REPLICAOF NO ONE");
 
 ABSL_DECLARE_FLAG(int32_t, port);
+ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
 ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
@@ -990,6 +991,15 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
 }
 
 }  // namespace
+
+bool ValidateNotifyKeyspaceEventsFlag() {
+  const string value = absl::GetFlag(FLAGS_notify_keyspace_events);
+  if (!value.empty() && !absl::EqualsIgnoreCase(value, "EX")) {
+    LOG(ERROR) << "Invalid notify_keyspace_events value, only Ex is currently supported";
+    return false;
+  }
+  return true;
+}
 
 bool ValidateServerTlsFlags() {
   if (!absl::GetFlag(FLAGS_tls)) {

@@ -467,12 +467,6 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner, Namespace*
   CHECK(ns_ != nullptr);
   db_arr_.emplace_back();
   CreateDb(0);
-  std::string keyspace_events = GetFlag(FLAGS_notify_keyspace_events);
-  if (!keyspace_events.empty() && keyspace_events != "Ex") {
-    LOG(ERROR) << "Only Ex is currently supported";
-    exit(0);
-  }
-  expired_keys_events_recording_ = !keyspace_events.empty();
   journal_omit_redundant_writes_ = absl::GetFlag(FLAGS_journal_omit_redundant_writes);
 }
 
@@ -1827,10 +1821,6 @@ void DbSlice::ResetEvents() {
       db->stats.events = {};
     }
   }
-}
-
-void DbSlice::SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events) {
-  expired_keys_events_recording_ = !notify_keyspace_events.empty();
 }
 
 void DbSlice::QueueInvalidationTrackingMessageAtomic(std::string_view key) {
