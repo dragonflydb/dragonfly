@@ -846,8 +846,8 @@ void RegisterGeoFamily(CommandRegistry* registry) {
       << CI{"GEOPOS", CO::READONLY, -2, 1, 1}.HFUNC(GeoPos)
       << CI{"GEODIST", CO::READONLY, -4, 1, 1}.HFUNC(GeoDist)
       << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1}.HFUNC(GeoSearch)
-      << CI{"GEOSEARCHSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -8, 1, 2}
-             .HFUNC(GeoSearchStore)
+      << CI{"GEOSEARCHSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -8, 1, 2}.HFUNC(
+             GeoSearchStore)
       << CI{"GEORADIUSBYMEMBER", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -5, 1, 1}
              .HFUNC(GeoRadiusByMember)
       << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1}.HFUNC(GeoRadiusByMemberRO)
