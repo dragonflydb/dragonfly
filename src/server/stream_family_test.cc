@@ -646,6 +646,20 @@ TEST_F(StreamFamilyTest, Issue854) {
   EXPECT_THAT(resp, ErrArg("is not allowed"));
 }
 
+TEST_F(StreamFamilyTest, XGroupHelpBatchCacheCollision) {
+  // Regression: within a squashed pipeline batch, XGROUP HELP resolves to the hidden _XGROUP_HELP
+  // command. It must not poison the per-verb command cache, otherwise a following XGROUP CREATE
+  // would run the help handler instead of creating the group.
+  RunMany({{"xgroup", "help"}, {"xgroup", "create", "foo", "group", "$", "MKSTREAM"}});
+
+  auto resp = Run({"xinfo", "stream", "foo"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto vec = resp.GetVec();
+  // The "groups" field must report a single created consumer group.
+  EXPECT_THAT(vec[14], "groups");
+  EXPECT_THAT(vec[15], IntArg(1));
+}
+
 TEST_F(StreamFamilyTest, XGroupConsumer) {
   Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
   auto resp = Run({"xgroup", "createconsumer", "foo", "group", "bob"});
