@@ -986,6 +986,14 @@ TEST_F(PureDiskTSTest, OffloadedHashSnapshotReload) {
   EXPECT_EQ(Run({"HGET", "restored-hash", "field-b"}), value_for(*target_index, 'b'));
   EXPECT_THAT(Run({"DEL", "restored-hash"}), IntArg(1));
 
+  // COPY drives Renamer::SerializeSrc, the second DumpToString caller.
+  EXPECT_THAT(Run({"COPY", target, "copied-hash"}), IntArg(1));
+  EXPECT_EQ(Run({"TYPE", "copied-hash"}), "hash");
+  EXPECT_THAT(Run({"HLEN", "copied-hash"}), IntArg(2));
+  EXPECT_EQ(Run({"HGET", "copied-hash", "field-a"}), value_for(*target_index, 'a'));
+  EXPECT_EQ(Run({"HGET", "copied-hash", "field-b"}), value_for(*target_index, 'b'));
+  EXPECT_THAT(Run({"DEL", "copied-hash"}), IntArg(1));
+
   ASSERT_EQ(Run({"DEBUG", "RELOAD"}), "OK");
 
   EXPECT_THAT(Run({"DBSIZE"}), IntArg(kNumHashes));

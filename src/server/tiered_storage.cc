@@ -1010,43 +1010,35 @@ TieredStorage::TResult<PrimeValue> ReadTieredValue(DbIndex dbid, std::string_vie
   DCHECK(!value.IsCool());
 
   TieredStorage::TResult<PrimeValue> future;
-  switch (value.GetExternalRep()) {
-    case CompactObj::ExternalRep::STRING:
-      return ReadTiered<PrimeValue>(
-          dbid, key, value,
-          [has_flag = value.HasFlag()](string_view value) {
-            PrimeValue pv{value};
-            pv.SetFlag(has_flag);
-            return pv;
-          },
-          ts);
-    case CompactObj::ExternalRep::SERIALIZED_MAP: {
-      auto cb = [future,
-                 has_flag = value.HasFlag()](io::Result<tiering::ListpackMapDecoder*> res) mutable {
-        if (!res) {
-          future.Resolve(res.get_unexpected());
-          return;
-        }
-
-        // Decoder may be shared by coalesced reads; copy before handing off ownership.
-        auto source = (*res)->Get();
-        string_view bytes{reinterpret_cast<const char*>(source.GetPointer()), source.UsedBytes()};
-        tiering::ListpackMapDecoder detached;
-        detached.Initialize(bytes);
-        PrimeValue pv;
-        detached.Upload(&pv);
-        pv.SetFlag(has_flag);
-        future.Resolve(io::Result<PrimeValue>{std::move(pv)});
-      };
-      ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::ListpackMapDecoder{},
-               std::move(cb));
-      break;
+  auto cb = [future, rep = value.GetExternalRep(), enc = value.GetStrEncoding(),
+             has_flag = value.HasFlag()](io::Result<tiering::BareDecoder*> res) mutable {
+    if (!res) {
+      future.Resolve(res.get_unexpected());
+      return;
     }
-    case CompactObj::ExternalRep::LIST_NODE:
-      future.Resolve(
-          nonstd::make_unexpected(std::make_error_code(std::errc::operation_not_supported)));
-      break;
-  }
+
+    // Decode from the raw slice: the stored decoder may be shared by coalesced reads.
+    string_view slice = (*res)->slice;
+    PrimeValue pv;
+    switch (rep) {
+      case CompactObj::ExternalRep::STRING:
+        pv = PrimeValue{enc.Decode(slice).view()};
+        break;
+      case CompactObj::ExternalRep::SERIALIZED_MAP: {
+        tiering::ListpackMapDecoder detached;
+        detached.Initialize(slice);
+        detached.Upload(&pv);
+        break;
+      }
+      case CompactObj::ExternalRep::LIST_NODE:
+        future.Resolve(
+            nonstd::make_unexpected(std::make_error_code(std::errc::operation_not_supported)));
+        return;
+    }
+    pv.SetFlag(has_flag);
+    future.Resolve(io::Result<PrimeValue>{std::move(pv)});
+  };
+  ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::BareDecoder{}, std::move(cb));
   return future;
 }
 
