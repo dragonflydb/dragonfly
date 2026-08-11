@@ -1001,6 +1001,13 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   if (!IsValid(from_res.it))
     return OpStatus::KEY_NOTFOUND;
 
+  // We must prepare tiered values for transfer to break any back references from disk to this key
+  if (auto* ts = op_args.shard->tiered_storage(); ts && from_res.it->second.IsExternal()) {
+    if (!ts->PrepareKeyForTransfer(op_args.db_cntx.db_index, key, &from_res.it->second))
+      return OpStatus::IO_ERROR;
+    from_res.post_updater.ResyncBaseline();  // the read may have uploaded the value
+  }
+
   // Ensure target database exists.
   db_slice.ActivateDb(target_db);
 
@@ -1067,6 +1074,13 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     OpStatus status = MaterializeHashForDb0Search(0, from_key, &from_res, op_args.shard);
     if (status != OpStatus::OK)
       return status;
+  }
+
+  // We must prepare tiered values for transfer to break any back references from disk to this key
+  if (auto* ts = es->tiered_storage(); ts && from_res.it->second.IsExternal()) {
+    if (!ts->PrepareKeyForTransfer(op_args.db_cntx.db_index, from_key, &from_res.it->second))
+      return OpStatus::IO_ERROR;
+    from_res.post_updater.ResyncBaseline();  // the read may have uploaded the value
   }
 
   bool is_prior_list = false;

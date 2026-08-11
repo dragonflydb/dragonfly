@@ -227,7 +227,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   bool NotifyFetched(const OwnedEntryId& id, tiering::DiskSegment segment,
-                     tiering::Decoder* decoder) override;
+                     tiering::Decoder* decoder, const tiering::ReadOptions& options) override;
 
   bool NotifyDelete(tiering::DiskSegment segment, bool in_memory) override;
 
@@ -240,23 +240,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Set value to be an in-memory type again. Update memory stats.
   void Upload(DbIndex dbid, string_view key, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
-    switch (pv->GetExternalRep()) {
-      case CompactObj::ExternalRep::STRING: {
-        pv->Materialize(value, true);
-        break;
-      }
-      case CompactObj::ExternalRep::SERIALIZED_MAP: {
-        tiering::ListpackMapDecoder decoder{};
-        decoder.Initialize(value);
-        decoder.Upload(pv);
-        break;
-      }
-      case CompactObj::ExternalRep::LIST_NODE: {
-        LOG(DFATAL) << "LIST_NODE should not be uploaded to PrimeValue";
-        break;
-      }
-    };
-
+    tiering::BareDecoder decoder;
+    decoder.slice = value;
+    decoder.Upload(pv);
     AccountTieredUpload(*pv, value.size(), key, db_slice_.GetDBTable(dbid));
   }
 
@@ -370,7 +356,8 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
 
 bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
                                                   tiering::DiskSegment segment,
-                                                  tiering::Decoder* decoder) {
+                                                  tiering::Decoder* decoder,
+                                                  const tiering::ReadOptions& options) {
   ++stats_.total_fetches;
 
   if (const auto* i = std::get_if<uintptr_t>(&id); i) {
@@ -383,8 +370,8 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
 
   tiering::Decoder::UploadMetrics metrics = decoder->GetMetrics();
 
-  // We must upload the value if it was modified
-  bool should_upload = metrics.modified;
+  // We must upload the value if it was modified or the caller forces it
+  bool should_upload = metrics.modified || options.force_upload;
 
   // Snapshotting casuses reads that are not from clients, so ignore request to upload
   // List tiering uploads on it own rules from the ends
@@ -418,7 +405,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
   if (const auto* key = std::get_if<tiering::DbKeyId>(&id); key) {
     auto* pv = Find(key->first, key->second);
     if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-      if (metrics.modified || pv->WasTouched()) {
+      if (metrics.modified || pv->WasTouched() || options.force_upload) {
         ++stats_.total_uploads;
         decoder->Upload(pv);
         AccountTieredUpload(*pv, segment.length, key->second, db_slice_.GetDBTable(key->first));
@@ -462,7 +449,8 @@ void TieredStorage::ShardOpManager::EnqueueForDefrag(tiering::DiskSegment segmen
   stats_.pending_defrags++;
   Enqueue(
       kFragmentedBin, segment, tiering::BareDecoder{},
-      [this](io::Result<tiering::Decoder*> res) { stats_.pending_defrags--; }, true);
+      [this](io::Result<tiering::Decoder*> res) { stats_.pending_defrags--; },
+      tiering::ReadOptions{.read_only = true});
 }
 
 void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) {
@@ -520,10 +508,10 @@ void TieredStorage::CancelLoad(tiering::DiskSegment segment) {
 void TieredStorage::ReadInternal(tiering::ReadId id, const tiering::DiskSegment& segment,
                                  const tiering::Decoder& decoder,
                                  std::function<void(io::Result<tiering::Decoder*>)> cb,
-                                 bool read_only) {
+                                 tiering::ReadOptions options) {
   // TODO: improve performance by avoiding one more function wrap
   op_manager_->Enqueue(std::visit([](auto&& value) -> tiering::PendingId { return value; }, id),
-                       segment, decoder, std::move(cb), read_only);
+                       segment, decoder, std::move(cb), options);
 }
 
 void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDescriptor& blobs,
@@ -584,6 +572,24 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
   }
   fragment_ref.ClearOffloaded();
   op_manager_->DeleteOffloaded(dbid, segment);
+}
+
+bool TieredStorage::PrepareKeyForTransfer(DbIndex dbid, string_view key, PrimeValue* pv) {
+  if (!pv->IsExternal())
+    return true;
+
+  DCHECK(!pv->IsCool());  // FindMutableInternal warms cooled values up
+
+  tiering::DiskSegment segment = pv->GetExternalSlice();
+  util::fb2::Future<bool> done;
+  auto cb = [done](auto res) mutable { done.Resolve(res.has_value()); };
+
+  // Force upload value with bare decoder. Ensure:
+  // 1. No small bins endoded keys back reference the key
+  // 2. No pending reads back reference the key
+  Read(KeyRef{dbid, key}, segment, tiering::BareDecoder{}, std::move(cb),
+       tiering::ReadOptions{.read_only = false, .force_upload = true});
+  return done.Get();
 }
 
 void TieredStorage::CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref) {
@@ -922,7 +928,7 @@ util::fb2::Future<bool> TieredStorage::MaterializeForIndexing(DbIndex dbid, stri
           (*res)->GetMutable();
         fut.Resolve(res.has_value());
       },
-      false /* read_only */);
+      tiering::ReadOptions{.read_only = false});
   return fut;
 }
 
@@ -1031,7 +1037,7 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
     future.Resolve(res.transform([&modf](auto* d) { return modf(d->Write()); }));
   };
   ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::StringDecoder{value},
-           std::move(cb), false);
+           std::move(cb), tiering::ReadOptions{.read_only = false});
 
   return future;
 }
