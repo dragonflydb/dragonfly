@@ -351,12 +351,10 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     string exp_str, evict_str;
     for (size_t i = 0; i < m.db_stats.size(); ++i) {
       const auto& s = m.db_stats[i];
-      if (s.events.expired_keys > 0)
-        AppendMetricValue("expired_keys_total", s.events.expired_keys, {"db"}, {StrCat("db", i)},
-                          &exp_str);
-      if (s.events.evicted_keys > 0)
-        AppendMetricValue("evicted_keys_total", s.events.evicted_keys, {"db"}, {StrCat("db", i)},
-                          &evict_str);
+      AppendMetricValue("expired_keys_total", s.events.expired_keys, {"db"}, {StrCat("db", i)},
+                        &exp_str);
+      AppendMetricValue("evicted_keys_total", s.events.evicted_keys, {"db"}, {StrCat("db", i)},
+                        &evict_str);
     }
     AppendMetricHeader("expired_keys_total", "", MetricType::COUNTER, &resp->body());
     absl::StrAppend(&resp->body(), exp_str);
