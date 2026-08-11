@@ -955,6 +955,13 @@ void EngineShard::RetireExpiredAndEvict() {
   if (eviction_state_.track_deleted_bytes) {
     eviction_state_.deleted_bytes_at_prev_eviction = deleted_bytes;
   }
+
+  // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
+  // section, because readiness checks read the db slice and may preempt.
+  if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
+      bc && GetContTx() == nullptr) {
+    bc->NotifyPending();
+  }
 }
 
 // Adjust deleted bytes w.r.t shard used memory. If we increase shard used

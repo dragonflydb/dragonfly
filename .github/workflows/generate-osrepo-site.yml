@@ -13,7 +13,7 @@ jobs:
     name: Generate index and site assets
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install packaging tools
         # RPM tools are available on ubuntu
@@ -22,6 +22,29 @@ jobs:
       - name: Setup requirements
         working-directory: tools/packaging/osrepos
         run: pip install -r requirements.txt
+
+      - name: Authenticate
+        uses: 'google-github-actions/auth@v3'
+        with:
+          project_id: 'dragonflydb'
+          credentials_json: ${{ secrets.GCP_BUCKET_CREDENTIALS }}
+
+      - name: GCloud setup
+        uses: 'google-github-actions/setup-gcloud@v3'
+
+      - name: Fetch published RPMs
+        # Fetch existing RPM files from bucket. Those are already signed, we will not
+        # re-sign them again, so that we do not end up changing their checksum. If this
+        # step fails the job must fail, rather than re-sign all releases found on GitHub
+        # in the next step.
+        working-directory: tools/packaging/osrepos
+        run: |
+          mkdir -p $SiteRoot/rpm
+          gcloud storage rsync ${{ secrets.GCP_PACKAGES_BUCKET }}/rpm $SiteRoot/rpm \
+            --recursive --exclude="^repodata/.*|.*index\.html$"
+
+          echo "=== Published RPMs fetched ==="
+          find $SiteRoot/rpm -type f -name "*.rpm" -exec sha256sum {} +
 
       - name: Download packages
         working-directory: tools/packaging/osrepos
@@ -69,15 +92,6 @@ jobs:
         working-directory: tools/packaging/osrepos
         run: python scripts/generate-index.py $SiteRoot
 
-      - name: Authenticate
-        uses: 'google-github-actions/auth@v3'
-        with:
-          project_id: 'dragonflydb'
-          credentials_json: ${{ secrets.GCP_BUCKET_CREDENTIALS }}
-
-      - name: GCloud setup
-        uses: 'google-github-actions/setup-gcloud@v3'
-
       - name: Log locally built metadata
         working-directory: tools/packaging/osrepos
         run: |
@@ -89,14 +103,20 @@ jobs:
 
       - name: Deploy site
         working-directory: tools/packaging/osrepos
+        # checksums-only compares hash instead of mtime, so we don't upload unchanged package files,
+        # and so we don't change their last modified time in bucket everytime the job runs. The index
+        # files are copied with no-cache, max-age=0. The other files we dont care if they are cached.
         run: |
-          gcloud storage rm ${{ secrets.GCP_PACKAGES_BUCKET }}/**
-          gcloud storage rsync $SiteRoot ${{ secrets.GCP_PACKAGES_BUCKET }} --recursive --delete-unmatched-destination-objects
-
-      - name: Disable caching for repo metadata
-        run: |
-          gcloud storage objects update "${{ secrets.GCP_PACKAGES_BUCKET }}/deb/dists/**" --cache-control="no-cache, max-age=0"
-          gcloud storage objects update "${{ secrets.GCP_PACKAGES_BUCKET }}/rpm/repodata/**" --cache-control="no-cache, max-age=0"
+          gcloud storage rsync $SiteRoot ${{ secrets.GCP_PACKAGES_BUCKET }} --recursive --checksums-only \
+            --exclude="^(rpm/repodata/repomd\.xml.*|deb/dists/.*)"
+          gcloud storage rsync $SiteRoot/deb/dists ${{ secrets.GCP_PACKAGES_BUCKET }}/deb/dists --recursive --checksums-only \
+            --exclude="^noble/(InRelease|Release|Release\.gpg)$" \
+            --cache-control="no-cache, max-age=0"
+          gcloud storage cp $SiteRoot/deb/dists/noble/InRelease $SiteRoot/deb/dists/noble/Release \
+            $SiteRoot/deb/dists/noble/Release.gpg ${{ secrets.GCP_PACKAGES_BUCKET }}/deb/dists/noble/ \
+            --cache-control="no-cache, max-age=0"
+          gcloud storage cp $SiteRoot/rpm/repodata/repomd.xml $SiteRoot/rpm/repodata/repomd.xml.asc \
+            ${{ secrets.GCP_PACKAGES_BUCKET }}/rpm/repodata/ --cache-control="no-cache, max-age=0"
 
       - name: Verify deployed site
         run: |

@@ -869,6 +869,9 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
     const OpArgs& op_args = params.t->GetOpArgs(params.shard);
     if (expired) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{(params.key)});
+    } else if (params.expire_params.persist) {
+      // GAT 0 removes the expiry; PEXPIREAT with the returned 0 would delete the replica's key.
+      RecordJournal(op_args, "PERSIST"sv, ArgSlice{(params.key)});
     } else {
       RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{(params.key), (absl::StrCat(value))});
     }

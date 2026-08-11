@@ -25,7 +25,7 @@ jobs:
       actions: write   # required to delete caches
       contents: read   # required to check out the cache helper script
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # Ensures the sourced script is from the trusted target branch revision
           ref: ${{ github.event.pull_request.base.sha || github.sha }}

@@ -315,6 +315,8 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             &resp->body());
   AppendMetricWithoutLabels("net_read_yields_total", "", conn_stats.num_read_yields,
                             MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("iobuf_capacity_change_count", "", conn_stats.iobuf_capacity_change_cnt,
+                            MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("proactor_reads_total", "V2 OnRecv reads that actually drained bytes",
                             conn_stats.proactor_reads, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("proactor_parse_total",

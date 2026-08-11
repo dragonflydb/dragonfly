@@ -29,7 +29,7 @@ jobs:
         - /mnt:/mnt
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -73,5 +73,5 @@ jobs:
   lint-test-chart:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/lint-test-chart

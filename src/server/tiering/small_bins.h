@@ -98,9 +98,13 @@ class SmallBins {
  private:
   struct StashInfo {
     uint8_t entries = 0;
+    // Live bytes still occupied by non-deleted entries.
     uint16_t bytes = 0;
+    // Bytes at stash time; used to detect real fragmentation from deletes rather than
+    // flagging bins that were simply packed small.
+    uint16_t orig_bytes = 0;
   };
-  static_assert(sizeof(StashInfo) == sizeof(unsigned));
+  static_assert(sizeof(StashInfo) == 6);
 
   BinId last_bin_id_ = 0;
   FilledBin current_bin_{last_bin_id_};

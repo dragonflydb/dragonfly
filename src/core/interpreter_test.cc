@@ -502,6 +502,12 @@ TEST_F(InterpreterTest, AsyncReplacement) {
       R"(
     --[[ WE SKIP COMMENT BLOCKS FOR NOW ]]
     redis.call('ECHO', 'TEST')
+    )",
+      R"(
+      redis.[A]pcall('INCR', 'A')
+    )",
+      R"(
+      local x = redis.pcall('GET', 'A')
     )"};
 
   for (auto test : kCases) {
@@ -512,6 +518,75 @@ TEST_F(InterpreterTest, AsyncReplacement) {
     string_view output = result ? *result : input;
 
     EXPECT_EQ(expected, output);
+  }
+}
+
+// Regression test for #7973: a long contiguous run of non-whitespace characters (or many
+// consecutive comment lines) used to make the old std::regex-based implementation recurse deeply
+// enough to abort the process via the fiber stack margin check. This must complete without
+// crashing regardless of run length.
+TEST_F(InterpreterTest, AsyncReplacementLongRun) {
+  string long_run(10000, 'x');
+  string script = absl::StrCat(long_run, "\nredis.call('GET', 'A')\n");
+  auto result = Interpreter::DetectPossibleAsyncCalls(script);
+  ASSERT_TRUE(result);
+  EXPECT_NE(result->find("redis.acall"), string::npos);
+
+  string many_comments;
+  for (int i = 0; i < 5000; ++i)
+    absl::StrAppend(&many_comments, "-- comment\n");
+  absl::StrAppend(&many_comments, "redis.call('GET', 'A')\n");
+  result = Interpreter::DetectPossibleAsyncCalls(many_comments);
+  ASSERT_TRUE(result);
+  EXPECT_NE(result->find("redis.acall"), string::npos);
+}
+
+// A "--" inside a string literal on a continuation line must not be mistaken for a line
+// comment: doing so hides the real last token of that line (here the ".." continuation
+// operator), making DetectPossibleAsyncCalls think the call is a standalone statement.
+TEST_F(InterpreterTest, AsyncReplacementCommentInString) {
+  const string_view kCases[] = {
+      R"(
+      print("Output -- not a comment" ..
+        redis.call('GET', 'A')
+      )
+    )",
+      R"(
+      print('Output -- not a comment' ..
+        redis.call('GET', 'A')
+      )
+    )",
+      R"(
+      print("escaped \" -- still a string" ..
+        redis.call('GET', 'A')
+      )
+    )",
+  };
+
+  for (auto test : kCases) {
+    auto result = Interpreter::DetectPossibleAsyncCalls(test);
+    string_view output = result ? *result : test;
+    EXPECT_EQ(test, output);
+  }
+}
+
+// A "--" line-comment scan is line-local and doesn't understand `[[...]]` long strings or
+// `\`-newline string continuations, so an apostrophe inside either can leave it thinking the
+// line ends "inside" a string, hiding a real trailing comment and thus the true last token of
+// the line. When that happens DetectPossibleAsyncCalls must not guess: it should leave the
+// script untouched rather than risk rewriting a call whose return value is actually used.
+TEST_F(InterpreterTest, AsyncReplacementAmbiguousQuoting) {
+  const string_view kCases[] = {
+      R"(
+      x = [[ it's ok ]] .. -- concat
+      redis.call('GET', 'A')
+    )",
+  };
+
+  for (auto test : kCases) {
+    auto result = Interpreter::DetectPossibleAsyncCalls(test);
+    string_view output = result ? *result : test;
+    EXPECT_EQ(test, output);
   }
 }
 

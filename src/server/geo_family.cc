@@ -651,6 +651,7 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
       if (shard->shard_id() == dest_shard) {
         ZSetFamily::ZParams zparams;
         zparams.override = true;
+        zparams.journal_update = true;
         add_result = ZSetFamily::OpAdd(t->GetOpArgs(shard), zparams, geo_ops.store_key,
                                        ScoredMemberSpan{smvec})
                          .value();
@@ -769,16 +770,18 @@ void CmdGeoRadiusRO(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void RegisterGeoFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::GEO);
-  *registry << CI{"GEOADD", CO::JOURNALED | CO::DENYOOM, -5, 1, 1}.HFUNC(GeoAdd)
-            << CI{"GEOHASH", CO::READONLY, -2, 1, 1}.HFUNC(GeoHash)
-            << CI{"GEOPOS", CO::READONLY, -2, 1, 1}.HFUNC(GeoPos)
-            << CI{"GEODIST", CO::READONLY, -4, 1, 1}.HFUNC(GeoDist)
-            << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1}.HFUNC(GeoSearch)
-            << CI{"GEORADIUSBYMEMBER", CO::JOURNALED | CO::STORE_LAST_KEY, -5, 1, 1}.HFUNC(
-                   GeoRadiusByMember)
-            << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1}.HFUNC(GeoRadiusByMemberRO)
-            << CI{"GEORADIUS", CO::JOURNALED | CO::STORE_LAST_KEY, -6, 1, 1}.HFUNC(GeoRadius)
-            << CI{"GEORADIUS_RO", CO::READONLY, -6, 1, 1}.HFUNC(GeoRadiusRO);
+  *registry
+      << CI{"GEOADD", CO::JOURNALED | CO::DENYOOM, -5, 1, 1}.HFUNC(GeoAdd)
+      << CI{"GEOHASH", CO::READONLY, -2, 1, 1}.HFUNC(GeoHash)
+      << CI{"GEOPOS", CO::READONLY, -2, 1, 1}.HFUNC(GeoPos)
+      << CI{"GEODIST", CO::READONLY, -4, 1, 1}.HFUNC(GeoDist)
+      << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1}.HFUNC(GeoSearch)
+      << CI{"GEORADIUSBYMEMBER", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -5, 1, 1}
+             .HFUNC(GeoRadiusByMember)
+      << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1}.HFUNC(GeoRadiusByMemberRO)
+      << CI{"GEORADIUS", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -6, 1, 1}.HFUNC(
+             GeoRadius)
+      << CI{"GEORADIUS_RO", CO::READONLY, -6, 1, 1}.HFUNC(GeoRadiusRO);
 }
 
 }  // namespace dfly

@@ -4,14 +4,22 @@
 
 #include "server/search/index_builder.h"
 
+#include <algorithm>
 #include <ranges>
 
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
 #include "server/search/global_hnsw_index.h"
+#include "server/tiered_storage.h"
 
 namespace dfly::search {
+
+namespace {
+
+constexpr size_t kOffloadedBatchSize = 64;
+
+}  // namespace
 
 void IndexBuilder::Start(const OpArgs& op_args, bool is_restored,
                          std::function<void()> on_complete) {
@@ -55,42 +63,168 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
     PrimeValue& pv = it->second;
     std::string_view key = it->first.GetSlice(&scratch);
 
-    if (!index_->Matches(key, pv.ObjType()))
-      return;
+    const bool matches = index_->Matches(key, pv.ObjType());
+    const bool must_be_resident = matches && index_->base_->type == DocIndex::HASH &&
+                                  db_cntx.db_index == 0 && pv.ObjType() == OBJ_HASH;
 
-    // TODO: make it a parameter of SharDocIndex::AddDoc()
-    if (is_restored_) {
-      // Use existing DocIds from the restored key_index_ to keep them aligned with
-      // GlobalDocIds stored in the serialized HNSW graph. Only add to regular indices
-      // (text/tag/numeric); vector indices are handled separately by VectorLoop.
-      if (auto doc_id = index_->key_index().Find(key); doc_id) {
-        auto accessor = GetAccessor(db_cntx, pv);
-        if (!index_->indices_->Add(*doc_id, *accessor)) {
-          LOG(WARNING) << "Failed to restore index entry for key: " << key
-                       << ", removing from key index";
-          index_->key_index_.Remove(*doc_id);
-        }
-      } else {
-        // New document not in the restored key_index_ (added by journal events during
-        // full sync before the index was created). Use AddNew to allocate a fresh DocId
-        // that won't collide with serialized HNSW node ids from freed slots.
-        auto accessor = GetAccessor(db_cntx, pv);
-        DocId id = index_->key_index_.AddNew(key);
-        if (!index_->indices_->Add(id, *accessor)) {
-          index_->key_index_.Remove(id);
-        }
-      }
-    } else {
-      index_->AddDoc(key, db_cntx, pv);
+    // Existing non-matching HASH values can stay external. Generic key-moving commands
+    // materialize them before a new key can start matching an index prefix.
+    if (must_be_resident && pv.HasStashPending()) {
+      EngineShard::tlocal()->tiered_storage()->CancelStash(std::make_pair(db_cntx.db_index, key),
+                                                           &pv);
     }
+
+    // Reading from disk suspends, which is unsafe inside PrimeTable traversal. Defer the key and
+    // re-lookup it after traversal yields a stable cursor.
+    if (must_be_resident && pv.IsExternal()) {
+      offloaded_keys_.push_back(
+          {std::string(key), is_restored_ ? index_->key_index().Find(key) : std::nullopt});
+      return;
+    }
+
+    if (matches)
+      IndexEntry(key, db_cntx, pv);
   };
 
   PrimeTable::Cursor cursor;
   do {
     cursor = table->prime.Traverse(cursor, cb);
+    if (offloaded_keys_.size() >= kOffloadedBatchSize)
+      IndexOffloaded(table, db_cntx);
     if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
       util::ThisFiber::Yield();
   } while (cursor && state_.IsRunning());
+
+  IndexOffloaded(table, db_cntx);
+  offloaded_keys_ = {};
+}
+
+void IndexBuilder::IndexOffloaded(dfly::DbTable* table, DbContext db_cntx) {
+  TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+
+  // Issue a batch before waiting so reads from the same small-bin page are coalesced and reads
+  // from different pages can overlap.
+  struct PendingRead {
+    std::string_view key;
+    std::pair<size_t, size_t> segment;
+    std::optional<DocId> restored_id;
+    util::fb2::Future<bool> future;
+  };
+  std::vector<PendingRead> pending;
+  pending.reserve(offloaded_keys_.size());
+
+  auto cleanup_restored = [&](std::string_view key, std::optional<DocId> restored_id,
+                              bool remove_mapping) {
+    if (!restored_id)
+      return;
+
+    index_->RemoveFromAllHnswIndices(*restored_id);
+    const auto current_id = index_->key_index().Find(key);
+    const auto& indexed_docs = index_->indices_->GetAllDocs();
+    if (remove_mapping && current_id == restored_id &&
+        !std::binary_search(indexed_docs.begin(), indexed_docs.end(), *restored_id)) {
+      index_->key_index_.Remove(*restored_id);
+    }
+  };
+
+  for (const OffloadedKey& deferred : offloaded_keys_) {
+    if (!state_.IsRunning())
+      break;
+    const std::string& key = deferred.key;
+
+    auto it = table->prime.Find(key);
+    if (!IsValid(it) || !index_->Matches(key, it->second.ObjType())) {
+      cleanup_restored(key, deferred.restored_id, true);
+      continue;
+    }
+
+    // The key may have been materialized by another fiber since CursorLoop deferred it.
+    if (!it->second.IsExternal()) {
+      if (deferred.restored_id && index_->key_index().Find(key) != deferred.restored_id)
+        cleanup_restored(key, deferred.restored_id, false);
+      IndexEntry(key, db_cntx, it->second);
+      continue;
+    }
+
+    pending.push_back({key, it->second.GetExternalSlice(), deferred.restored_id,
+                       ts->MaterializeForIndexing(db_cntx.db_index, key, &it->second)});
+  }
+
+  for (auto& read : pending) {
+    if (!state_.IsRunning())
+      break;
+
+    // Waiting can move or replace the table entry, so never retain its old iterator/reference.
+    read.future.Get();
+
+    auto is_ready = [&](auto it) {
+      return IsValid(it) && !it->second.IsExternal() &&
+             index_->Matches(read.key, it->second.ObjType());
+    };
+    auto is_same_external_hash = [&](auto it) {
+      return IsValid(it) && it->second.ObjType() == OBJ_HASH && it->second.IsExternal() &&
+             it->second.GetExternalSlice() == read.segment;
+    };
+
+    auto it = table->prime.Find(read.key);
+    if (!is_ready(it) && is_same_external_hash(it)) {
+      // Retry once for a transient I/O failure. A persistent failure must not keep index
+      // construction alive indefinitely.
+      ts->MaterializeForIndexing(db_cntx.db_index, read.key, &it->second).Get();
+      it = table->prime.Find(read.key);
+    }
+
+    const bool ready = is_ready(it);
+    const auto current_id = is_restored_ ? index_->key_index().Find(read.key) : std::nullopt;
+
+    // A restored graph still contains the node captured before this read. If the document went
+    // away, could not be indexed, or now maps to a different id, remove that stale node. A
+    // concurrently added replacement is buffered while the index is restoring and will be added
+    // when pending vector updates are drained.
+    if (read.restored_id && (!ready || current_id != read.restored_id))
+      cleanup_restored(read.key, read.restored_id, !ready);
+
+    if (ready) {
+      IndexEntry(read.key, db_cntx, it->second);
+    } else {
+      LOG_IF(ERROR, is_same_external_hash(it))
+          << "Failed to materialize an indexed value for key: " << read.key;
+    }
+
+    if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
+      util::ThisFiber::Yield();
+  }
+
+  offloaded_keys_.clear();
+}
+
+// TODO: make restored handling a parameter of ShardDocIndex::AddDoc().
+void IndexBuilder::IndexEntry(std::string_view key, const DbContext& db_cntx,
+                              const PrimeValue& pv) {
+  if (!is_restored_) {
+    index_->AddDoc(key, db_cntx, pv);
+    return;
+  }
+
+  // Reuse restored DocIds so they stay aligned with ids serialized in the HNSW graph. Vector
+  // fields are populated later by VectorLoop.
+  auto accessor = GetAccessor(db_cntx, pv);
+  if (auto doc_id = index_->key_index().Find(key); doc_id) {
+    const auto& indexed_docs = index_->indices_->GetAllDocs();
+    if (std::binary_search(indexed_docs.begin(), indexed_docs.end(), *doc_id))
+      return;
+
+    if (!index_->indices_->Add(*doc_id, *accessor)) {
+      LOG(WARNING) << "Failed to restore index entry for key: " << key
+                   << ", removing from key index";
+      index_->RemoveFromAllHnswIndices(*doc_id);
+      index_->key_index_.Remove(*doc_id);
+    }
+  } else {
+    DocId id = index_->key_index_.AddNew(key);
+    if (!index_->indices_->Add(id, *accessor))
+      index_->key_index_.Remove(id);
+  }
 }
 
 void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {

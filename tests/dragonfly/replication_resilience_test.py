@@ -681,7 +681,7 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
 
     c_replica = replica.client()
 
-    await c_replica.execute_command("DEBUG POPULATE 1000 key 500 RAND type set elements 500")
+    await c_replica.execute_command("DEBUG POPULATE 1000 key 1000 RAND type set elements 500")
 
     replica.stop()
     replica.start()

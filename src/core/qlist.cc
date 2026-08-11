@@ -1205,7 +1205,16 @@ void QList::DelNode(Node* node) {
     // compressed payload length to malloc_size_. Subtracting node->sz here would over-subtract
     // and drive the counter negative. Erase() reaches this with a still-compressed node when it
     // drops whole interior nodes.
-    malloc_size_ -= node->IsCompressed() ? GetLzf(node)->sz : node->sz;
+    if (node->IsCompressed()) {
+      // Dropping a compressed node also retires its share of the compression stats, the same way
+      // Clear() does. Without this the counters keep accounting for bytes that no longer exist.
+      size_t compressed_sz = GetLzf(node)->sz;
+      malloc_size_ -= compressed_sz;
+      stats.compressed_bytes -= compressed_sz;
+      stats.raw_compressed_bytes -= node->sz;
+    } else {
+      malloc_size_ -= node->sz;
+    }
   }
 
   if (tiering_enabled_ && (node->offloaded || node->io_pending)) {

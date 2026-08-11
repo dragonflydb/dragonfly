@@ -105,7 +105,13 @@ async def test_client_kill(df_factory):
 
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
             await admin_client.execute_command("CLIENT KILL LADDR 127.0.0.1:1111")
-            assert len(await admin_client.execute_command("CLIENT LIST")) == 1
+
+            # Shutdown is asynchronous, so wait for the listener to remove the connection.
+            @assert_eventually(timeout=10)
+            async def assert_client_is_killed():
+                assert len(await admin_client.execute_command("CLIENT LIST")) == 1
+
+            await assert_client_is_killed()
             with pytest.raises(redis.exceptions.ConnectionError):
                 await client_conn.ping()
 

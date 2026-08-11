@@ -4,6 +4,8 @@
 
 #include "server/generic_family.h"
 
+#include <absl/cleanup/cleanup.h>
+
 extern "C" {
 #include "redis/rdb.h"
 }
@@ -2335,6 +2337,48 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
 
   // Restore the flag so it doesn't bleed into other tests.
   Run({"CONFIG", "SET", "notify_keyspace_events", ""});
+}
+
+// A rejected CONFIG SET must not leave the invalid value observable: CONFIG GET has to keep
+// returning the previous value (a poisoned raw flag would also crash later flag consumers).
+TEST_F(GenericFamilyTest, ConfigSetRejectedValueRollsBack) {
+  auto initial = Run({"CONFIG", "GET", "notify_keyspace_events"});
+  ASSERT_THAT(initial, ArrLen(2));
+  const string prev = initial.GetVec()[1].GetString();
+
+  EXPECT_THAT(Run({"CONFIG", "SET", "notify_keyspace_events", "nonsense"}),
+              ErrArg("CONFIG SET failed"));
+  auto resp = Run({"CONFIG", "GET", "notify_keyspace_events"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("notify_keyspace_events", prev));
+}
+
+// CONFIG SET notify_keyspace_events must apply to every namespace, not only the default one,
+// and namespaces created afterwards must inherit the current setting.
+TEST_F(GenericFamilyTest, ConfigNotifyAppliesToAllNamespaces) {
+  Namespace* ns = pp_->at(0)->Await([] { return &namespaces->GetOrInsert("ns1"); });
+
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  // Scoped so a fatal assertion below cannot leak the setting into other tests.
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    EXPECT_TRUE(ns->GetDbSlice(i).IsExpiredEventsRecording()) << i;
+  }
+
+  Namespace* late_ns = pp_->at(0)->Await([] { return &namespaces->GetOrInsert("ns2"); });
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    EXPECT_TRUE(late_ns->GetDbSlice(i).IsExpiredEventsRecording()) << i;
+  }
+
+  Run({"CONFIG", "SET", "notify_keyspace_events", ""});
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    EXPECT_FALSE(ns->GetDbSlice(i).IsExpiredEventsRecording()) << i;
+    EXPECT_FALSE(late_ns->GetDbSlice(i).IsExpiredEventsRecording()) << i;
+  }
 }
 
 }  // namespace dfly

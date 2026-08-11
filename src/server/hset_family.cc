@@ -49,6 +49,26 @@ using IncrByParam = std::variant<double, int64_t>;
 using OptStr = std::optional<std::string>;
 enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
 
+OpStatus MaterializeForHashIndex(const OpArgs& op_args, string_view key,
+                                 DbSlice::ItAndUpdater* entry) {
+  if (op_args.db_cntx.db_index != 0 || !entry->it->second.IsExternal() ||
+      !op_args.shard->search_indices()->HasHashIndexes()) {
+    return OpStatus::OK;
+  }
+
+  bool fetched =
+      op_args.shard->tiered_storage()->MaterializeForIndexing(0, key, &entry->it->second).Get();
+  if (!IsValid(entry->it)) {
+    entry->post_updater.Cancel();
+    return OpStatus::IO_ERROR;
+  }
+
+  entry->post_updater.ResyncBaseline();
+  return fetched && entry->it->second.ObjType() == OBJ_HASH && !entry->it->second.IsExternal()
+             ? OpStatus::OK
+             : OpStatus::IO_ERROR;
+}
+
 // FIELDS arg-count error for the hash field-TTL commands. HTTL/HPEXPIRETIME/HGETEX additionally
 // pass kInvalidNumFields for a non-positive numfields.
 constexpr char kNumFieldsMismatch[] =
@@ -269,6 +289,10 @@ auto ExecuteW(Transaction* tx, F&& f,
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
+    OpStatus materialized = MaterializeForHashIndex(op_args, key, &*it_res);
+    if (materialized != OpStatus::OK)
+      return materialized;
+
     auto& pv = it_res->it->second;
 
     // Enqueue read for future values
@@ -287,7 +311,8 @@ auto ExecuteW(Transaction* tx, F&& f,
       };
 
       es->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
-                                 pv.GetExternalSlice(), D{}, std::move(read_cb), false);
+                                 pv.GetExternalSlice(), D{}, std::move(read_cb),
+                                 tiering::ReadOptions{.read_only = false});
       return CbVariant<T>{std::move(fut)};
     }
 
@@ -531,6 +556,10 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
+  OpStatus materialized = MaterializeForHashIndex(op_args, key, &add_res);
+  if (materialized != OpStatus::OK)
+    return materialized;
+
   uint8_t* lp = nullptr;
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
@@ -561,7 +590,8 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
     };
 
     op_args.shard->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
-                                          pv.GetExternalSlice(), D{}, std::move(read_cb), false);
+                                          pv.GetExternalSlice(), D{}, std::move(read_cb),
+                                          tiering::ReadOptions{.read_only = false});
     return CbVariant<uint32_t>{std::move(fut)};
   }
 

@@ -53,6 +53,7 @@ extern "C" {
 #include "search/doc_index.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/user_registry.h"
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
@@ -165,6 +166,7 @@ ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
           "when set, preserves journal offsets after REPLICAOF NO ONE");
 
 ABSL_DECLARE_FLAG(int32_t, port);
+ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
 ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
@@ -989,6 +991,15 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
 }
 
 }  // namespace
+
+bool ValidateNotifyKeyspaceEventsFlag() {
+  const string value = absl::GetFlag(FLAGS_notify_keyspace_events);
+  if (!value.empty() && !absl::EqualsIgnoreCase(value, "EX")) {
+    LOG(ERROR) << "Invalid notify_keyspace_events value, only Ex is currently supported";
+    return false;
+  }
+  return true;
+}
 
 bool ValidateServerTlsFlags() {
   if (!absl::GetFlag(FLAGS_tls)) {
@@ -1917,6 +1928,9 @@ void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait)
   vector<fb2::Fiber> fibers(shard_set->size());
   transaction->Execute(
       [db_ind, &fibers](Transaction* t, EngineShard* shard) {
+        if (auto* bc = t->GetNamespace().GetBlockingController(shard->shard_id()); bc) {
+          bc->AwakenWatched(db_ind);
+        }
         fibers[shard->shard_id()] = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
         return OpStatus::OK;
       },
