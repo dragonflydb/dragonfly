@@ -1413,6 +1413,13 @@ void DbSlice::PreUpdateBlocking(DbIndex db_ind, const Iterator& it) {
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
+  // A blocked reader may watch this key expecting a different type, e.g. XREADGROUP when the
+  // stream is overwritten by BITOP/RENAME/SUNIONSTORE. Let the readiness check re-evaluate it.
+  if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
+      bc && bc->HasBlockedTransactions()) {
+    bc->Awaken(db_ind, key);
+  }
+
   auto& db = *db_arr_[db_ind];
   auto& watched_keys = db.watched_keys;
   if (!watched_keys.empty()) {
