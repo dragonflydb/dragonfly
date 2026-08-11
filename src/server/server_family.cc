@@ -165,6 +165,10 @@ ABSL_FLAG(bool, keep_legacy_memory_metrics, false, "legacy metrics format");
 ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
           "when set, preserves journal offsets after REPLICAOF NO ONE");
 
+ABSL_FLAG(bool, flush_on_promotion, false,
+          "when set, the instance flushes all its data once it is promoted to master with "
+          "REPLICAOF NO ONE. Promotions via REPLTAKEOVER are not affected");
+
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -3374,6 +3378,10 @@ void ServerFamily::ForceReplicasToFullSync() {
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   util::fb2::LockGuard lk(replicaof_mu_);
 
+  // Whether this call actually promoted the instance. Calling REPLICAOF NO ONE on a master is
+  // a no-op, so it must not have any side effects (the flush below in particular).
+  bool promoted = false;
+
   if (!IsMaster()) {
     CHECK(replica_);
 
@@ -3388,10 +3396,18 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
     last_master_data_ = replica_->Stop();
     replica_.reset();
     StopAllClusterReplicas();
+    promoted = true;
   }
 
   // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
   service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+
+  // Used by cache deployments that must not serve stale data after a failover: drop the dataset
+  // right at promotion time, before the new master starts accepting traffic.
+  if (promoted && absl::GetFlag(FLAGS_flush_on_promotion)) {
+    LOG(INFO) << "Flushing all data after promotion to master";
+    FlushAll(&namespaces->GetDefaultNamespace());
+  }
 
   return builder->SendOk();
 }
