@@ -3403,7 +3403,8 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
 
   // Used by cache deployments that must not serve stale data after a failover: drop the dataset
-  // right at promotion time, before the new master starts accepting traffic.
+  // right at promotion time, before the new master starts accepting traffic. Scoped to the default
+  // namespace, the only namespace replication ever touches (see JournalExecutor).
   if (promoted && absl::GetFlag(FLAGS_flush_on_promotion)) {
     LOG(INFO) << "Flushing all data after promotion to master";
     FlushAll(&namespaces->GetDefaultNamespace());
