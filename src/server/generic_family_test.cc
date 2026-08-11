@@ -1762,6 +1762,109 @@ TEST_F(GenericFamilyTest, RestoreOOM) {
   EXPECT_THAT(resp, ErrArg("Out of memory"));
 }
 
+// Regression for #5296: FinalizeRename used to delete the source key and
+// deserialize into the destination in the same hop, in unspecified order across
+// shards. If DeserializeDest failed (e.g. OOM), the source could already be gone,
+// losing the data. The source must survive a failed rename.
+TEST_F(GenericFamilyTest, RenameOOMPreservesSource) {
+  // With 2 shards (XXH64 seed 120577240643): myset -> shard 0, dst -> shard 1 (see
+  // RenameCmsNanCrash above), so this exercises the cross-shard Renamer::FinalizeRename
+  // path this test targets, not the single-shard OpRen fast path.
+  num_threads_ = 2;
+  ResetService();
+
+  max_memory_limit = 20000000;
+  Run({"set", "myset", string(5000, 'x')});
+  auto dump_resp = Run({"dump", "myset"});
+  string dump = dump_resp.GetString();
+
+  // Let Dragonfly propagate max_memory_limit to shards.
+  usleep(10000);
+  RespExpr resp;
+  // Fill via RESTORE, like RestoreOOM above: it has no DENYOOM flag, same as
+  // RENAME's deserialize path, so this reaches the same real allocation-failure
+  // boundary that RENAME will hit below (SET's DENYOOM soft check stops too early).
+  // The per-shard memory budget means a single failure only proves one shard is
+  // full - keep going until many consecutive attempts fail, so every shard
+  // (including whichever one "dst" hashes to) is exhausted.
+  unsigned i = 0;
+  unsigned consecutive_failures = 0;
+  for (; i < 100000 && consecutive_failures < 200; ++i) {
+    resp = Run({"restore", absl::StrCat("filler", i), "0", dump});
+    consecutive_failures = (resp != "OK") ? consecutive_failures + 1 : 0;
+  }
+  ASSERT_GE(consecutive_failures, 200u) << "never reached OOM on all shards";
+
+  resp = Run({"rename", "myset", "dst"});
+  EXPECT_THAT(resp, ErrArg("Out of memory"));
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "myset"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "dst"}));
+}
+
+// Regression for the review on #8053: a RENAME onto an *existing* destination that fails with
+// OOM must not lose the destination's prior value either. DeserializeDest used to delete the
+// old dest_key_ unconditionally before attempting the fallible deserialize/allocation work, so
+// an OOM there dropped dest's old value with nothing taking its place - even though the source
+// was already preserved by the fix above.
+TEST_F(GenericFamilyTest, RenameOOMPreservesExistingDest) {
+  num_threads_ = 2;
+  ResetService();
+
+  max_memory_limit = 20000000;
+  Run({"set", "myset", string(5000, 'x')});
+  Run({"set", "dst", "original-dst-value"});
+  auto dump_resp = Run({"dump", "myset"});
+  string dump = dump_resp.GetString();
+
+  usleep(10000);
+  RespExpr resp;
+  unsigned i = 0;
+  unsigned consecutive_failures = 0;
+  for (; i < 100000 && consecutive_failures < 200; ++i) {
+    resp = Run({"restore", absl::StrCat("filler", i), "0", dump});
+    consecutive_failures = (resp != "OK") ? consecutive_failures + 1 : 0;
+  }
+  ASSERT_GE(consecutive_failures, 200u) << "never reached OOM on all shards";
+
+  resp = Run({"rename", "myset", "dst"});
+  EXPECT_THAT(resp, ErrArg("Out of memory"));
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "myset"}));
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "dst"}));
+  EXPECT_EQ(Run({"get", "dst"}), "original-dst-value");
+}
+
+// Regression for the review on #8053 (BorysTheDev): a RENAME whose destination is much larger
+// than its source must still succeed while the shard is over budget, as long as deleting the
+// destination frees enough memory for the source to fit. The early OOM-bailout added by this
+// PR must account for that freed memory, not just look at the shard's current budget - otherwise
+// a RENAME that would actually reduce memory usage gets rejected before it's even attempted.
+TEST_F(GenericFamilyTest, RenameSucceedsWhenDeletingDestFreesEnoughMemory) {
+  num_threads_ = 2;
+  ResetService();
+
+  max_memory_limit = 20000000;
+  Run({"set", "dst", string(8000000, 'y')});  // ~8MB destination, well over the 1KB source below
+  Run({"set", "myset", string(1000, 'x')});
+  auto dump_resp = Run({"dump", "myset"});
+  string dump = dump_resp.GetString();
+
+  usleep(10000);
+  RespExpr resp;
+  unsigned i = 0;
+  unsigned consecutive_failures = 0;
+  for (; i < 100000 && consecutive_failures < 200; ++i) {
+    resp = Run({"restore", absl::StrCat("filler", i), "0", dump});
+    consecutive_failures = (resp != "OK") ? consecutive_failures + 1 : 0;
+  }
+  ASSERT_GE(consecutive_failures, 200u) << "never reached OOM on all shards";
+
+  resp = Run({"rename", "myset", "dst"});
+  EXPECT_THAT(resp, "OK");
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "myset"}));
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "dst"}));
+  EXPECT_EQ(Run({"get", "dst"}).GetString().size(), 1000u);
+}
+
 TEST_F(GenericFamilyTest, Bug4466) {
   auto resp = Run({"SCAN", "9223372036854775808"});  // an invalid cursor should not crash us.
   EXPECT_THAT(resp, RespElementsAre("0", RespElementsAre()));

@@ -177,6 +177,10 @@ class RdbRestoreValue : protected RdbLoaderBase {
     rdb_version_ = rdb_version;
   }
 
+  // Parses the payload without touching db_slice, so callers can defer deleting an
+  // existing key until after this succeeds.
+  OpResult<PrimeValue> Load(string_view payload);
+
   OpResult<DbSlice::ItAndUpdater> Add(string_view key, string_view payload, const DbContext& cntx,
                                       const RestoreArgs& args, DbSlice* db_slice);
 
@@ -209,9 +213,7 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(io::Source* sourc
   return std::optional<OpaqueObj>(std::move(obj));
 }
 
-OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_view data,
-                                                     const DbContext& cntx, const RestoreArgs& args,
-                                                     DbSlice* db_slice) {
+OpResult<PrimeValue> RdbRestoreValue::Load(string_view data) {
   InMemSource data_src(data);
   PrimeValue pv;
   bool first_parse = true;
@@ -244,7 +246,18 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
     }
   } while (pending_read_.remaining > 0);
 
-  auto res = db_slice->AddOrUpdate(cntx, key, std::move(pv), args.ExpirationTime());
+  return pv;
+}
+
+OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_view data,
+                                                     const DbContext& cntx, const RestoreArgs& args,
+                                                     DbSlice* db_slice) {
+  auto load_res = Load(data);
+  if (!load_res) {
+    return load_res.status();
+  }
+
+  auto res = db_slice->AddOrUpdate(cntx, key, std::move(*load_res), args.ExpirationTime());
   if (res) {
     res->it->first.SetSticky(args.Sticky());
     AddKeyToIndexesIfNeeded(key, cntx, res->it->second, db_slice->shard_owner());
@@ -418,27 +431,47 @@ void Renamer::FetchData(bool materialize_destination) {
 }
 
 OpStatus Renamer::FinalizeRename() {
-  OpStatus del_status = OpStatus::OK;
+  // Deserialize into the destination first. Only delete the source once we know the
+  // destination write succeeded, so a failure here (e.g. OOM) can't drop the source
+  // key's data - see #5296.
   OpStatus deserialize_status = OpStatus::OK;
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    const ShardId shard_id = shard->shard_id();
-
-    if (!do_copy_ && shard_id == src_sid_) {
-      del_status = DelSrc(t, shard);
-    } else if (shard_id == dest_sid_) {
+  auto deserialize_cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() == dest_sid_) {
       deserialize_status = DeserializeDest(t, shard);
     }
     return OpStatus::OK;
   };
+  transaction_->Execute(std::move(deserialize_cb), do_copy_);
 
-  transaction_->Execute(std::move(cb), true);
+  // A bad_alloc unwinds past the assignment above; check the transaction's own captured
+  // result too.
+  if (deserialize_status == OpStatus::OK)
+    deserialize_status = *transaction_->LocalResultPtr();
 
   LOG_IF(DFATAL,
-         (deserialize_status != OpStatus::OK && deserialize_status != OpStatus::OUT_OF_MEMORY) ||
-             del_status != OpStatus::OK)
-      << "Error during rename command, deserialize_status: " << deserialize_status
-      << " del_status: " << del_status;
-  return deserialize_status != OpStatus::OK ? deserialize_status : del_status;
+         deserialize_status != OpStatus::OK && deserialize_status != OpStatus::OUT_OF_MEMORY)
+      << "Error during rename command, deserialize_status: " << deserialize_status;
+
+  if (do_copy_)
+    return deserialize_status;
+
+  if (deserialize_status != OpStatus::OK) {
+    transaction_->Conclude();
+    return deserialize_status;
+  }
+
+  OpStatus del_status = OpStatus::OK;
+  auto del_cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() == src_sid_) {
+      del_status = DelSrc(t, shard);
+    }
+    return OpStatus::OK;
+  };
+  transaction_->Execute(std::move(del_cb), true);
+
+  LOG_IF(DFATAL, del_status != OpStatus::OK)
+      << "Error during rename command, del_status: " << del_status;
+  return del_status;
 }
 
 bool Renamer::KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const {
@@ -526,16 +559,21 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   }
 
   auto& db_slice = t->GetDbSlice(shard->shard_id());
-  auto dest_res = db_slice.FindMutable(op_args.db_cntx, dest_key_);
 
-  if (dest_found_) {
+  auto delete_dest_if_found = [&] {
+    if (!dest_found_)
+      return;
     DVLOG(1) << "Rename: deleting the destiny key '" << dest_key_;
-    db_slice.DelMutable(op_args.db_cntx, std::move(dest_res));
-  }
+    auto dest_res = db_slice.FindMutable(op_args.db_cntx, dest_key_);
+    if (IsValid(dest_res.it)) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(dest_res));
+    }
+  };
 
   if (restore_args.Expired()) {
     VLOG(1) << "Rename: the new key '" << dest_key_ << "' already expired, will not save the value";
 
+    delete_dest_if_found();
     if (dest_found_ && shard->journal()) {  // We need to delete old dest_key_ from replica
       RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_}, 2);
     }
@@ -545,17 +583,75 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
 
   restore_args.SetSticky(serialized_value_->sticky);
 
+  // Looked up once, reused for the freed-memory estimate and the backup below.
+  DbSlice::ConstIterator dest_it;
+  if (dest_found_)
+    dest_it = db_slice.FindReadOnly(op_args.db_cntx, dest_key_);
+  const size_t dest_freed_bytes =
+      IsValid(dest_it) ? dest_it->first.MallocUsed() + dest_it->second.MallocUsed() : 0;
+
+  // If deleting dest_key_ still wouldn't bring us under budget, the insert below is doomed
+  // either way - bail out before touching dest_key_. (Cache mode can still succeed over
+  // budget via eviction.)
+  if (!db_slice.IsCacheMode() &&
+      db_slice.memory_budget() + static_cast<int64_t>(dest_freed_bytes) <= 0) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
+
+  // AddOrFind only checks the budget for new keys, so dest_key_ must be deleted before the
+  // insert below - risking its value if that insert then fails (see #5296 / review on #8053).
+  // Only back it up when near the budget limit; comfortably-under-budget renames (the common
+  // case) skip the serialize.
+  struct DestBackup {
+    string dump;
+    RdbVersion version;
+    int64_t expire_ts;
+    bool sticky;
+  };
+  std::optional<DestBackup> dest_backup;
+  const bool near_budget_limit =
+      db_slice.memory_budget() <= static_cast<int64_t>(serialized_value_->value.size());
+  if (dest_found_ && !db_slice.IsCacheMode() && near_budget_limit && IsValid(dest_it)) {
+    auto dump = DumpToString(dest_key_, dest_it->second, op_args);
+    auto version = dump.ok() ? GetRdbVersion(*dump) : std::nullopt;
+    if (dump.ok() && version) {
+      dest_backup = DestBackup{std::move(*dump), *version,
+                               static_cast<int64_t>(dest_it->first.GetExpireTime()),
+                               dest_it->first.IsSticky()};
+    }
+    // If we couldn't back it up (e.g. IO_ERROR reading a tiered value), we still have to
+    // proceed - there's no way to avoid deleting a value we can't capture - so a failure
+    // below would lose it. That's a pre-existing risk on this rare path, not a new one.
+  }
+
+  delete_dest_if_found();
+
   RdbRestoreValue loader(serialized_value_->version.value());
   auto add_res =
       loader.Add(dest_key_, serialized_value_->value, op_args.db_cntx, restore_args, &db_slice);
 
   if (!add_res) {
-    // SKIPPED means all fields expired during deserialize - treat as success
+    // SKIPPED means all fields expired during deserialize - treat as success, dest_key_ stays
+    // deleted (matches the pre-existing "write nothing" semantics; no restore needed).
     if (add_res.status() == OpStatus::SKIPPED) {
       if (dest_found_ && shard->journal()) {
         RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_}, 2);
       }
       return OpStatus::OK;
+    }
+
+    // A genuine failure (e.g. OOM): restore dest_key_'s prior value instead of losing it.
+    if (dest_backup) {
+      RestoreArgs backup_args{dest_backup->expire_ts, true, true};
+      if (backup_args.UpdateExpiration(op_args.db_cntx.time_now_ms) && !backup_args.Expired()) {
+        backup_args.SetSticky(dest_backup->sticky);
+        RdbRestoreValue restorer(dest_backup->version);
+        auto restore_res =
+            restorer.Add(dest_key_, dest_backup->dump, op_args.db_cntx, backup_args, &db_slice);
+        LOG_IF(WARNING, !restore_res) << "Rename: failed to restore destination key '" << dest_key_
+                                      << "' after a failed RESTORE (status " << add_res.status()
+                                      << "); its previous value is lost: " << restore_res.status();
+      }
     }
     return add_res.status();
   }
