@@ -1995,6 +1995,26 @@ unique_ptr<base::Histogram> DbSlice::StopSampleValues(DbIndex db_ind) {
   return unique_ptr<base::Histogram>{exchange(db.sample_values_hist, nullptr)};
 }
 
+void DbSlice::DefragTableSegments(DbIndex db_ind, PageUsage* page_usage) {
+  if (!IsDbValid(db_ind))
+    return;
+
+  DbTable* db_table = GetDBTable(db_ind);
+  PrimeTable& pt = db_table->prime;
+
+  detail::DashCursor cursor = db_table->segment_defrag_cursor;
+  do {
+    // only relocate one segment at a time, must not yield, if it yields, then new bucket iterators
+    // might be created, and then we might relocate the segment and break their held pointers
+    FiberAtomicGuard g;
+    const auto [next, segment] = pt.VisitSegment(cursor);
+    cursor = next;
+    if (segment && page_usage->IsPageForObjectUnderUtilized(segment->second))
+      pt.TryRelocateSegment(segment->first);
+  } while (cursor && !page_usage->QuotaDepleted());
+  db_table->segment_defrag_cursor = cursor;
+}
+
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async) {
   FiberAtomicGuard guard;
   size_t table_before = table->table_memory();

@@ -913,6 +913,58 @@ TEST_F(DefragDflyEngineTest, DefragEventuallyFinishes) {
   });
 }
 
+TEST_F(DefragDflyEngineTest, SegmentsRelocated) {
+  // runs defrag on all segments, checks whether the state is consistent afterwards
+  constexpr size_t kKeys = 5000;
+  Run({"DEBUG", "POPULATE", std::to_string(kKeys), "key", "32"});
+
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned, ProactorBase*) {
+    auto* shard = EngineShard::tlocal();
+    auto& slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    auto* db = slice.GetDBTable(0);
+    auto& table = db->prime;
+
+    auto collect_addresses = [&] {
+      absl::flat_hash_map<size_t, uintptr_t> seg_ptrs;
+      PrimeTable::Cursor cursor;
+      do {
+        auto [next, segment] = table.VisitSegment(cursor);
+        cursor = next;
+        if (!segment) {
+          ADD_FAILURE() << "Valid cursor did not resolve to a segment";
+          return seg_ptrs;
+        }
+        seg_ptrs.emplace(segment->first, reinterpret_cast<uintptr_t>(segment->second));
+      } while (cursor);
+      return seg_ptrs;
+    };
+
+    const auto before = collect_addresses();
+    const size_t size_before = table.size();
+    ASSERT_GT(before.size(), 1u);
+
+    PageUsage page_usage{CollectPageStats::NO, 0, CycleQuota::Unlimited()};
+    page_usage.SetForceReallocate(true);
+
+    slice.DefragTableSegments(0, &page_usage);
+
+    const auto after = collect_addresses();
+
+    EXPECT_EQ(after.size(), before.size());
+    EXPECT_EQ(table.size(), size_before);
+
+    for (const auto& [sid, old_address] : before) {
+      ASSERT_TRUE(after.contains(sid));
+      EXPECT_NE(after.at(sid), old_address);
+    }
+  });
+
+  EXPECT_EQ(CheckedInt({"DBSIZE"}), kKeys);
+  // check some random keys
+  for (size_t i = 0; i < kKeys; i += 341)
+    EXPECT_EQ(CheckedInt({"STRLEN", absl::StrFormat("key:%d", i)}), 32);
+}
+
 TEST_F(DflyEngineTest, Issue752) {
   // https://github.com/dragonflydb/dragonfly/issues/752
   // local_result_ member was not reset between commands

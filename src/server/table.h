@@ -136,6 +136,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   mutable DbTableStats stats;
   std::unique_ptr<SlotStats[]> slots_stats;
   PrimeTable::Cursor expire_cursor;
+  PrimeTable::Cursor segment_defrag_cursor;
 
   struct SampleTopKeys {
     TopKeys* top_keys = nullptr;

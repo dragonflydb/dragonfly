@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <ranges>
 #include <utility>
 #include <vector>
@@ -52,6 +53,13 @@ class DashTable : public detail::DashTableBase {
   using const_bucket_iterator = Iterator<true, true>;
   using bucket_iterator = Iterator<false, true>;
   using Cursor = detail::DashCursor;
+
+  struct SegmentVisitResult {
+    using SegmentRef = std::pair<uint32_t, SegmentType*>;
+    Cursor next;
+    // pointer must be consumed without yielding, or it can be invalidated.
+    std::optional<SegmentRef> id_and_pointer{std::nullopt};
+  };
 
   struct HotBuckets {
     static constexpr size_t kRegularBuckets = 4;
@@ -420,6 +428,8 @@ class DashTable : public detail::DashTableBase {
   // Attempts to reallocate segment for defragmentation. Will not continue if segment has outgoing
   // iterators holding pointers to it as these will become invalid on relocation.
   bool TryRelocateSegment(size_t segment_id);
+
+  SegmentVisitResult VisitSegment(Cursor cursor);
 
  private:
   enum class InsertMode {
@@ -1275,6 +1285,22 @@ bool DashTable<_Key, _Value, Policy>::TryRelocateSegment(size_t segment_id) {
   A::deallocate(allocator, segment, 1);
 
   return true;
+}
+
+template <typename _Key, typename _Value, typename Policy>
+auto DashTable<_Key, _Value, Policy>::VisitSegment(Cursor cursor) -> SegmentVisitResult {
+  uint32_t sid = cursor.segment_id(global_depth_);
+  if (sid >= segment_.size())
+    return {Cursor::end(), std::nullopt};
+
+  auto* seg = segment_[sid];
+  sid = seg->segment_id();
+
+  Cursor next = Cursor::end();
+  if (const auto nid = NextSeg(sid); nid < segment_.size())
+    next = Cursor{global_depth_, static_cast<uint32_t>(nid), 0};
+
+  return {next, std::make_pair(sid, seg)};
 }
 
 template <typename _Key, typename _Value, typename Policy>
