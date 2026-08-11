@@ -119,8 +119,10 @@ JournalStreamer::JournalStreamer(ExecutionState* cntx, JournalStreamer::Config c
 }
 
 JournalStreamer::~JournalStreamer() {
-  if (!cntx_->IsError()) {
-    DCHECK_EQ(in_flight_bytes_, 0u);
+  if (in_flight_bytes_ != 0u) {
+    LOG(ERROR) << "JournalStreamer destroyed with " << in_flight_bytes_ << " bytes still in flight";
+    // Defensive: Cancel() should have already drained any in-flight write.
+    WaitForInflightToComplete(false);
   }
   VLOG(1) << "~JournalStreamer";
 }
