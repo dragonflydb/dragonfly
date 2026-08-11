@@ -7,6 +7,7 @@
 #include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include "absl/flags/internal/flag.h"
 #include "absl/flags/reflection.h"
@@ -68,7 +69,8 @@ class TieredStorageTest : public BaseFamilyTest {
 
     SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 32_MB);
     if (GetFlag(FLAGS_tiered_prefix).empty()) {
-      SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_storage_test");
+      // Suffixed with the pid so each test run gets its own directory.
+      SetFlag(&FLAGS_tiered_prefix, absl::StrCat("/tmp/tiered_storage_test_", getpid()));
     }
 
     BaseFamilyTest::SetUp();
