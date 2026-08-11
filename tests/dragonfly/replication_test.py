@@ -1177,19 +1177,24 @@ async def test_flush_on_promotion(df_factory):
     df_factory.start_all([master, replica])
     c_master = master.client()
     c_replica = replica.client()
+    c_master_db1 = master.client(db=1)
+    c_replica_db1 = replica.client(db=1)
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
     await c_master.execute_command("debug populate 100")
+    await c_master_db1.execute_command("debug populate 50")
     await check_all_replicas_finished([c_replica], c_master)
     assert await c_replica.dbsize() == 100
+    assert await c_replica_db1.dbsize() == 50
 
-    # Promotion drops the dataset.
+    # Promotion drops every database, not just the selected one. Visibility is synchronous:
+    # Drakarys() swaps in empty tables inside the transaction, only the reclamation of the old
+    # tables is deferred to a fiber.
     await c_replica.execute_command("REPLICAOF NO ONE")
-    async with async_timeout.timeout(5):
-        while await c_replica.dbsize() > 0:
-            await asyncio.sleep(0.05)
+    assert await c_replica.dbsize() == 0
+    assert await c_replica_db1.dbsize() == 0
 
     # REPLICAOF NO ONE on an instance that is already a master is a no-op: data is preserved.
     await c_replica.execute_command("debug populate 100")
