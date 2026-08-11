@@ -210,6 +210,12 @@ runs:
           CMAKE_CMD+=(-DCMAKE_CXX_FLAGS="${{ inputs.cxx-flags }}")
         fi
 
+        # Use minimal debug info for CI Debug builds. Measurements showed ~60% smaller objects and ~5% faster builds.
+        # This makes builds and ccache transfers faster while preserving crash stack traces.
+        if [ "${{ inputs.build-type }}" = "Debug" ]; then
+          CMAKE_CMD+=(-DDF_MINIMAL_DEBUG_INFO=ON)
+        fi
+
         # Add fixed options
         CMAKE_CMD+=(
           -DPRINT_STACKTRACES_ON_SIGNAL=ON
