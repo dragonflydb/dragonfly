@@ -1779,8 +1779,9 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   StreamMemTracker mem_tracker;
   bool stream_created_by_mkstream = false;
   if (!res_it) {
-    if (opts.flags & kCreateOptMkstream) {
-      // MKSTREAM is enabled, so create the stream
+    // If the key doesn't exists and we have the MKSTREAM flag, we need create the stream.
+    // Otherwise, we return an error.
+    if (res_it.status() == OpStatus::KEY_NOTFOUND && opts.flags & kCreateOptMkstream) {
       res_it = db_slice.AddNew(op_args.db_cntx, key, PrimeValue{}, 0);
       if (!res_it)
         return res_it.status();
