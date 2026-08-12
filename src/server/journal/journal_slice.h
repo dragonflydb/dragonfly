@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <absl/container/inlined_vector.h>
-
 #include <boost/circular_buffer.hpp>
 #include <boost/circular_buffer/space_optimized.hpp>
 #include <cstdint>
@@ -70,7 +68,6 @@ class JournalSlice {
 
   void ResetRingBuffer() {
     ring_buffer_.clear();
-    time_buckets_.clear();
     ring_buffer_bytes_ = 0;
   }
 
@@ -79,19 +76,11 @@ class JournalSlice {
   }
 
  private:
-  struct TimeBucket {
-    uint64_t start_time_ms;
-    LSN first_lsn;
-  };
-
   void CallOnChange(JournalChangeItem* item);
-  void AddTimeBucket(uint64_t now_ms);
-  void Prune(size_t next_item_bytes, uint64_t now_ms);
-  void PopFront();
+  void CleanEntries(size_t next_item_bytes, uint64_t now_ms);
   static size_t ItemBytes(const JournalItem& item);
 
   boost::circular_buffer_space_optimized<JournalItem> ring_buffer_;
-  absl::InlinedVector<TimeBucket, 6> time_buckets_;
 
   mutable util::fb2::SharedMutex cb_mu_;  // to prevent removing callback during call
   std::list<std::pair<uint32_t, JournalConsumerInterface*>> journal_consumers_arr_;

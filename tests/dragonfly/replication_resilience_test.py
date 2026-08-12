@@ -1284,8 +1284,7 @@ async def test_cascaded_partial_sync_split_brain(df_factory):
 
 
 @pytest.mark.parametrize("proactors", [1, 4, 6])
-@pytest.mark.parametrize("stream_count", [1, 256, 1024, 1300])
-async def test_partial_sync(df_factory, proactors, stream_count, proxy_factory):
+async def test_partial_sync(df_factory, proactors, proxy_factory):
     keys = 5_000
     if proactors > 1:
         keys = 10_000
@@ -1316,8 +1315,10 @@ async def test_partial_sync(df_factory, proactors, stream_count, proxy_factory):
         await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
         # Reach stable sync
         await wait_for_replicas_state(c_replica)
-        # Stream some elements
-        await stream(c_master, stream_count)
+        await stream(c_master, 2)
+        # The first reconnect must start at the current LSN; the one-byte backlog cannot cover
+        # records that are still in flight.
+        await check_all_replicas_finished([c_replica], c_master)
 
         proxy.drop_connection()
         # Give time to detect dropped connection and reconnect
@@ -1328,8 +1329,8 @@ async def test_partial_sync(df_factory, proactors, stream_count, proxy_factory):
         assert hash1 == hash2
 
         await proxy.close()
-        # Whoops we moved too much, no partial sync here
-        await stream(c_master, stream_count + 10)
+        # The one-byte backlog retains only the latest record, making this flow stale.
+        await stream(c_master, 2)
         await proxy.start_serving()
         await asyncio.sleep(1.0)
 

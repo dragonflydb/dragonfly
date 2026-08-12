@@ -213,48 +213,39 @@ void AddSetRecord(JournalSlice* slice, string_view value) {
       Entry{0, Op::COMMAND, 0, nullopt, Entry::Payload{"SET", ArgSlice{args.data(), args.size()}}});
 }
 
-TEST(Journal, BacklogRetainsOversizedRecord) {
-  absl::FlagSaver flag_saver;
-  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 1000u);
-  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{1024});
-
-  JournalSlice slice;
-  slice.Init();
-
-  string large_value(2048, 'x');
-  AddSetRecord(&slice, large_value);
-  EXPECT_TRUE(slice.IsLSNInBuffer(1));
-
-  AddSetRecord(&slice, "x");
-  EXPECT_FALSE(slice.IsLSNInBuffer(1));
-  EXPECT_TRUE(slice.IsLSNInBuffer(2));
-
-  AddSetRecord(&slice, large_value);
-  EXPECT_FALSE(slice.IsLSNInBuffer(2));
-  EXPECT_TRUE(slice.IsLSNInBuffer(3));
-}
-
-TEST(Journal, BacklogHonorsByteLimit) {
+TEST(Journal, BacklogHonorsByteLimitAndReplacesOversizedRecord) {
   absl::FlagSaver flag_saver;
   absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 0u);
 
   JournalSlice probe;
   probe.Init();
-  AddSetRecord(&probe, "value");
+  AddSetRecord(&probe, "x");
   const size_t item_bytes = probe.GetRingBufferBytes();
   ASSERT_GT(item_bytes, 1u);
 
-  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{2 * item_bytes - 1});
+  const size_t max_bytes = 2 * item_bytes - 1;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{max_bytes});
   JournalSlice slice;
   slice.Init();
 
-  AddSetRecord(&slice, "value");
-  AddSetRecord(&slice, "value");
-
+  AddSetRecord(&slice, "x");
+  AddSetRecord(&slice, "x");
   EXPECT_EQ(slice.GetRingBufferSize(), 1u);
   EXPECT_FALSE(slice.IsLSNInBuffer(1));
   EXPECT_TRUE(slice.IsLSNInBuffer(2));
-  EXPECT_LE(slice.GetRingBufferBytes(), 2 * item_bytes - 1);
+  EXPECT_LE(slice.GetRingBufferBytes(), max_bytes);
+
+  string large_value(2048, 'x');
+  AddSetRecord(&slice, large_value);
+  EXPECT_EQ(slice.GetRingBufferSize(), 1u);
+  EXPECT_FALSE(slice.IsLSNInBuffer(2));
+  EXPECT_TRUE(slice.IsLSNInBuffer(3));
+
+  AddSetRecord(&slice, "x");
+  EXPECT_EQ(slice.GetRingBufferSize(), 1u);
+  EXPECT_FALSE(slice.IsLSNInBuffer(3));
+  EXPECT_TRUE(slice.IsLSNInBuffer(4));
+  EXPECT_LE(slice.GetRingBufferBytes(), max_bytes);
 }
 
 TEST(Journal, BacklogDefaultByteLimitUsesHalfPercentOfMaxmemory) {
@@ -296,42 +287,40 @@ TEST(Journal, BacklogGrowsBeyondInitialCapacity) {
   EXPECT_TRUE(slice.IsLSNInBuffer(kRecordCount));
 }
 
-TEST(Journal, BacklogDropsOldestWhenAtByteCapacity) {
+TEST(Journal, BacklogDropsOldestWhenMetadataCannotGrow) {
   absl::FlagSaver flag_saver;
   absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 0u);
-  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{4 * 1024 * 1024});
 
-  JournalSlice probe;
-  probe.Init();
-  AddSetRecord(&probe, "value");
-  const size_t item_bytes = probe.GetRingBufferBytes();
+  const string large_value(128, 'x');
+  JournalSlice large_probe;
+  large_probe.Init();
+  AddSetRecord(&large_probe, large_value);
+  const size_t large_item_bytes = large_probe.GetRingBufferBytes();
+
+  JournalSlice small_probe;
+  small_probe.Init();
+  AddSetRecord(&small_probe, "x");
+  const size_t small_item_bytes = small_probe.GetRingBufferBytes();
+  ASSERT_LT(small_item_bytes, large_item_bytes);
 
   constexpr size_t kInitialCapacity = 8192;
-  ASSERT_GT(item_bytes, 1u);
   absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes,
-                strings::MemoryBytesFlag{kInitialCapacity * item_bytes + item_bytes - 1});
+                strings::MemoryBytesFlag{kInitialCapacity * large_item_bytes + small_item_bytes});
 
   JournalSlice slice;
   slice.Init();
   for (size_t i = 0; i < kInitialCapacity; ++i) {
-    AddSetRecord(&slice, "value");
+    AddSetRecord(&slice, large_value);
   }
 
-  AddSetRecord(&slice, "value");
-  EXPECT_EQ(slice.GetRingBufferSize(), kInitialCapacity);
-  EXPECT_FALSE(slice.IsLSNInBuffer(1));
-  EXPECT_TRUE(slice.IsLSNInBuffer(2));
-  EXPECT_TRUE(slice.IsLSNInBuffer(kInitialCapacity + 1));
+  AddSetRecord(&slice, "x");
 
-  AddSetRecord(&slice, "value");
   EXPECT_EQ(slice.GetRingBufferSize(), kInitialCapacity);
   EXPECT_FALSE(slice.IsLSNInBuffer(1));
-  EXPECT_FALSE(slice.IsLSNInBuffer(2));
-  EXPECT_TRUE(slice.IsLSNInBuffer(3));
-  EXPECT_TRUE(slice.IsLSNInBuffer(kInitialCapacity + 2));
+  EXPECT_TRUE(slice.IsLSNInBuffer(kInitialCapacity + 1));
 }
 
-TEST(Journal, BacklogRetainsRecordsWhileIdle) {
+TEST(Journal, BacklogCleansExpiredEntriesOnAppend) {
   absl::FlagSaver flag_saver;
   absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 1000u);
   absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{1024 * 1024});
@@ -342,20 +331,24 @@ TEST(Journal, BacklogRetainsRecordsWhileIdle) {
 
   JournalSlice slice;
   slice.Init();
-  AddSetRecord(&slice, "value");
+  AddSetRecord(&slice, "first");
+  EXPECT_TRUE(slice.IsLSNInBuffer(1));
+
+  TEST_current_time_ms = 1999;
   EXPECT_TRUE(slice.IsLSNInBuffer(1));
 
   TEST_current_time_ms = 2000;
   EXPECT_TRUE(slice.IsLSNInBuffer(1));
 
-  TEST_current_time_ms = 3000;
-  EXPECT_TRUE(slice.IsLSNInBuffer(1));
+  AddSetRecord(&slice, "second");
   EXPECT_EQ(slice.GetRingBufferSize(), 1u);
+  EXPECT_FALSE(slice.IsLSNInBuffer(1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(2));
 }
 
-TEST(Journal, BacklogExpiresNonAlignedTimeOnAppend) {
+TEST(Journal, BacklogBoundsTimeBasedCleanup) {
   absl::FlagSaver flag_saver;
-  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 5001u);
+  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 1000u);
   absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{1024 * 1024});
 
   const uint64_t original_time = TEST_current_time_ms;
@@ -365,74 +358,19 @@ TEST(Journal, BacklogExpiresNonAlignedTimeOnAppend) {
   slice.Init();
 
   TEST_current_time_ms = 1000;
-  AddSetRecord(&slice, "first");
-  TEST_current_time_ms = 7000;
-  AddSetRecord(&slice, "second");
-  TEST_current_time_ms = 7001;
-  AddSetRecord(&slice, "third");
+  constexpr size_t kExpiredEntries = 101;
+  for (size_t i = 0; i < kExpiredEntries; ++i) {
+    AddSetRecord(&slice, "expired");
+  }
+
+  TEST_current_time_ms = 2000;
+  AddSetRecord(&slice, "current");
 
   EXPECT_EQ(slice.GetRingBufferSize(), 2u);
   EXPECT_FALSE(slice.IsLSNInBuffer(1));
-  EXPECT_TRUE(slice.IsLSNInBuffer(2));
-  EXPECT_TRUE(slice.IsLSNInBuffer(3));
-}
-
-TEST(Journal, BacklogDropsMultipleExpiredSecondBuckets) {
-  absl::FlagSaver flag_saver;
-  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 5000u);
-  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{1024 * 1024});
-
-  const uint64_t original_time = TEST_current_time_ms;
-  auto restore_time = absl::MakeCleanup([original_time] { TEST_current_time_ms = original_time; });
-
-  JournalSlice slice;
-  slice.Init();
-
-  TEST_current_time_ms = 1000;
-  AddSetRecord(&slice, "first");
-  TEST_current_time_ms = 2000;
-  AddSetRecord(&slice, "second");
-  TEST_current_time_ms = 3000;
-  AddSetRecord(&slice, "third");
-
-  TEST_current_time_ms = 9000;
-  AddSetRecord(&slice, "fourth");
-
-  EXPECT_EQ(slice.GetRingBufferSize(), 1u);
-  EXPECT_FALSE(slice.IsLSNInBuffer(1));
-  EXPECT_FALSE(slice.IsLSNInBuffer(2));
-  EXPECT_FALSE(slice.IsLSNInBuffer(3));
-  EXPECT_TRUE(slice.IsLSNInBuffer(4));
-}
-
-TEST(Journal, BacklogDropsExpiredSecondBucket) {
-  absl::FlagSaver flag_saver;
-  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 1000u);
-  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{1024 * 1024});
-
-  const uint64_t original_time = TEST_current_time_ms;
-  auto restore_time = absl::MakeCleanup([original_time] { TEST_current_time_ms = original_time; });
-
-  JournalSlice slice;
-  slice.Init();
-
-  TEST_current_time_ms = 1000;
-  AddSetRecord(&slice, "first");
-  TEST_current_time_ms = 1999;
-  AddSetRecord(&slice, "second");
-  TEST_current_time_ms = 2000;
-  AddSetRecord(&slice, "third");
-
-  EXPECT_TRUE(slice.IsLSNInBuffer(1));
-  EXPECT_TRUE(slice.IsLSNInBuffer(2));
-
-  TEST_current_time_ms = 3000;
-  AddSetRecord(&slice, "fourth");
-
-  EXPECT_FALSE(slice.IsLSNInBuffer(1));
-  EXPECT_FALSE(slice.IsLSNInBuffer(2));
-  EXPECT_TRUE(slice.IsLSNInBuffer(3));
-  EXPECT_TRUE(slice.IsLSNInBuffer(4));
+  EXPECT_FALSE(slice.IsLSNInBuffer(kExpiredEntries - 1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(kExpiredEntries));
+  EXPECT_TRUE(slice.IsLSNInBuffer(kExpiredEntries + 1));
 }
 
 }  // namespace journal

@@ -25,8 +25,8 @@ ABSL_RETIRED_FLAG(uint32_t, shard_repl_backlog_len, 0,
                   "--shard_repl_backlog_max_bytes instead.");
 ABSL_FLAG(uint32_t, shard_repl_backlog_time_ms, 5000,
           "Target retention age in milliseconds of entries in the per-shard replication backlog. "
-          "Entries are evicted in one-second buckets and can be retained for up to one extra "
-          "second. 0 disables time-based eviction.");
+          "Entries older than this are evicted on later journal writes. 0 disables time-based "
+          "eviction.");
 ABSL_FLAG(strings::MemoryBytesFlag, shard_repl_backlog_max_bytes, 0,
           "Total bytes retained by replication backlog. 0 (the default) uses 0.5% of maxmemory.");
 
@@ -36,7 +36,7 @@ using namespace std;
 using namespace util;
 
 namespace {
-constexpr uint64_t kTimeBucketMs = 1000;
+constexpr size_t kMaxTimeEvictionsPerCall = 100;
 
 size_t GetPerShardBacklogMaxBytes() {
   size_t total_max_bytes = absl::GetFlag(FLAGS_shard_repl_backlog_max_bytes).value;
@@ -137,11 +137,14 @@ void JournalSlice::CallOnChange(JournalChangeItem* change_item) {
   // This lock is never blocking because it contends with UnregisterOnChange, which is cpu only.
   // Hence this lock prevents the UnregisterOnChange to start running in the middle of CallOnChange.
   // CallOnChange is atomic if JournalSlice::SetFlushMode(false) is called before.
+  auto& item = change_item->journal_item;
+  const uint64_t now_ms = GetCurrentTimeMs();
+  item.time_ms = now_ms;
+
   std::shared_lock lk(cb_mu_);
   for (auto k_v : journal_consumers_arr_) {
     k_v.second->ConsumeJournalChange(*change_item);
   }
-  auto& item = change_item->journal_item;
 
   // We preserve order here. After ConsumeJournalChange there can be reordering.
   if (!ring_buffer_.empty()) {
@@ -155,32 +158,9 @@ void JournalSlice::CallOnChange(JournalChangeItem* change_item) {
     data.shrink_to_fit();
   }
   const size_t item_bytes = ItemBytes(item);
-  const uint64_t now_ms = max_age_ms_ != 0 ? GetCurrentTimeMs() : 0;
-
-  Prune(item_bytes, now_ms);
-
-  if (ring_buffer_.full()) {
-    const size_t capacity = ring_buffer_.capacity();
-    const size_t avg_item_bytes = ring_buffer_bytes_ / capacity;
-    DCHECK_GT(avg_item_bytes, 0u);
-
-    const size_t available_bytes =
-        max_bytes_ > ring_buffer_bytes_ ? max_bytes_ - ring_buffer_bytes_ : 0;
-    const size_t growth = available_bytes / avg_item_bytes;
-    if (growth == 0) {
-      // Do not grow the metadata buffer once the byte budget is exhausted.
-      // Pop explicitly so boost::circular_buffer does not overwrite without accounting for it.
-      PopFront();
-    } else {
-      ring_buffer_.set_capacity(capacity + growth);
-    }
-  }
+  CleanEntries(item_bytes, now_ms);
   ring_buffer_.push_back(std::move(item));
   ring_buffer_bytes_ += item_bytes;
-
-  if (max_age_ms_ != 0) {
-    AddTimeBucket(now_ms);
-  }
 
   if (enable_journal_flush_) {
     for (auto k_v : journal_consumers_arr_) {
@@ -189,50 +169,60 @@ void JournalSlice::CallOnChange(JournalChangeItem* change_item) {
   }
 }
 
-void JournalSlice::AddTimeBucket(uint64_t now_ms) {
-  DCHECK_NE(max_age_ms_, 0u);
-
-  const uint64_t bucket_start_ms = now_ms - now_ms % kTimeBucketMs;
-  if (!time_buckets_.empty() && bucket_start_ms <= time_buckets_.back().start_time_ms) {
-    return;
-  }
-
-  time_buckets_.push_back(TimeBucket{bucket_start_ms, ring_buffer_.back().lsn});
-}
-
 size_t JournalSlice::ItemBytes(const JournalItem& item) {
   return sizeof(item) + item.data.capacity();
 }
 
-void JournalSlice::Prune(size_t next_item_bytes, uint64_t now_ms) {
-  if (max_age_ms_ != 0) {
-    const uint64_t max_bucket_age_ms = uint64_t{max_age_ms_} + kTimeBucketMs;
-    auto first_retained = time_buckets_.begin();
-    while (first_retained != time_buckets_.end() && now_ms >= first_retained->start_time_ms &&
-           now_ms - first_retained->start_time_ms >= max_bucket_age_ms) {
-      ++first_retained;
-    }
-    if (first_retained != time_buckets_.begin()) {
-      const LSN first_retained_lsn =
-          first_retained == time_buckets_.end() ? lsn_ : first_retained->first_lsn;
-      while (!ring_buffer_.empty() && ring_buffer_.front().lsn < first_retained_lsn) {
-        PopFront();
+void JournalSlice::CleanEntries(size_t next_item_bytes, uint64_t now_ms) {
+  size_t retained_bytes = ring_buffer_bytes_;
+  size_t time_evictions = 0;
+  size_t bytes_to_free = 0;
+
+  auto first_retained = ring_buffer_.begin();
+  while (first_retained != ring_buffer_.end()) {
+    const bool exceeds_byte_limit =
+        retained_bytes > max_bytes_ || next_item_bytes > max_bytes_ - retained_bytes;
+    const bool expired = max_age_ms_ != 0 && now_ms >= first_retained->time_ms &&
+                         now_ms - first_retained->time_ms >= max_age_ms_;
+    const bool evict_for_time = expired && time_evictions < kMaxTimeEvictionsPerCall;
+    bool evict_for_capacity = bytes_to_free != 0;
+
+    if (!exceeds_byte_limit && !evict_for_time && !evict_for_capacity &&
+        first_retained == ring_buffer_.begin() && ring_buffer_.full()) {
+      const size_t capacity = ring_buffer_.capacity();
+      const size_t avg_item_bytes = retained_bytes / capacity;
+      DCHECK_GT(avg_item_bytes, 0u);
+
+      const size_t available_bytes = max_bytes_ > retained_bytes ? max_bytes_ - retained_bytes : 0;
+      const size_t growth = available_bytes / avg_item_bytes;
+      if (growth != 0) {
+        ring_buffer_.set_capacity(capacity + growth);
+        return;
       }
-      time_buckets_.erase(time_buckets_.begin(), first_retained);
+      bytes_to_free = next_item_bytes;
+      evict_for_capacity = true;
     }
+
+    if (!exceeds_byte_limit && !evict_for_time && !evict_for_capacity) {
+      break;
+    }
+
+    const size_t item_bytes = ItemBytes(*first_retained);
+    DCHECK_GE(retained_bytes, item_bytes);
+    retained_bytes -= item_bytes;
+    if (evict_for_capacity) {
+      bytes_to_free = item_bytes >= bytes_to_free ? 0 : bytes_to_free - item_bytes;
+    }
+    if (evict_for_time && !exceeds_byte_limit && !evict_for_capacity) {
+      ++time_evictions;
+    }
+    ++first_retained;
   }
 
-  while (!ring_buffer_.empty() &&
-         (ring_buffer_bytes_ > max_bytes_ || next_item_bytes > max_bytes_ - ring_buffer_bytes_)) {
-    PopFront();
+  if (first_retained != ring_buffer_.begin()) {
+    ring_buffer_bytes_ = retained_bytes;
+    ring_buffer_.rerase(ring_buffer_.begin(), first_retained);
   }
-}
-
-void JournalSlice::PopFront() {
-  const size_t item_bytes = ItemBytes(ring_buffer_.front());
-  DCHECK_GE(ring_buffer_bytes_, item_bytes);
-  ring_buffer_bytes_ -= item_bytes;
-  ring_buffer_.pop_front();
 }
 
 uint32_t JournalSlice::RegisterOnChange(JournalConsumerInterface* consumer) {
