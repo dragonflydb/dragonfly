@@ -1113,7 +1113,8 @@ void SlowLogGet(facade::ParsedArgs args, std::string_view sub_cmd, util::Proacto
 std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                 facade::Connection* conn, ClientPause pause_state,
                                 std::function<bool()> is_pause_in_progress,
-                                std::function<void()> maybe_cleanup) {
+                                std::function<void()> maybe_cleanup,
+                                std::optional<cluster::SlotRanges> slot_ranges) {
   // Track connections and set pause state to be able to wait until all running transactions read
   // the new pause state. Exlude already paused commands from the busy count. Exlude tracking
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
@@ -1121,20 +1122,29 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   //    command that did not pause on the new state yet we will pause after waking up.
   DispatchTracker tracker{listeners, conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
-  shard_set->pool()->AwaitFiberOnAll([&tracker, pause_state](unsigned, util::ProactorBase*) {
-    // Commands don't suspend before checking the pause state, so
-    // it's impossible to deadlock on waiting for a command that will be paused.
-    tracker.TrackOnThread();
-    ServerState::tlocal()->SetPauseState(pause_state, true);
-  });
+  shard_set->pool()->AwaitFiberOnAll(
+      [&tracker, pause_state, &slot_ranges](unsigned, util::ProactorBase*) {
+        // Commands don't suspend before checking the pause state, so
+        // it's impossible to deadlock on waiting for a command that will be paused.
+        tracker.TrackOnThread();
+        if (slot_ranges) {
+          ServerState::tlocal()->SetSlotPauseState(*slot_ranges, true);
+        } else {
+          ServerState::tlocal()->SetPauseState(pause_state, true);
+        }
+      });
 
   // Wait for all busy commands to finish running before replying to guarantee
   // that no more (write) operations will occur.
   const absl::Duration kDispatchTimeout = absl::Seconds(absl::GetFlag(FLAGS_pause_wait_timeout));
   if (!tracker.Wait(kDispatchTimeout)) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
-    shard_set->pool()->AwaitBrief([pause_state](unsigned, util::ProactorBase*) {
-      ServerState::tlocal()->SetPauseState(pause_state, false);
+    shard_set->pool()->AwaitBrief([pause_state, &slot_ranges](unsigned, util::ProactorBase*) {
+      if (slot_ranges) {
+        ServerState::tlocal()->SetSlotPauseState(*slot_ranges, false);
+      } else {
+        ServerState::tlocal()->SetPauseState(pause_state, false);
+      }
     });
     return std::nullopt;
   }
@@ -1143,28 +1153,37 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   shard_set->RunBriefInParallel(
       [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(false); });
 
-  return fb2::Fiber("client_pause",
-                    [is_pause_in_progress, pause_state, ns, maybe_cleanup]() mutable {
-                      // On server shutdown we sleep 10ms to make sure all running task finish,
-                      // therefore 10ms steps ensure this fiber will not left hanging .
-                      constexpr auto step = 10ms;
-                      while (is_pause_in_progress()) {
-                        ThisFiber::SleepFor(step);
-                      }
+  return fb2::Fiber("client_pause", [is_pause_in_progress, pause_state, ns, maybe_cleanup,
+                                     slot_ranges]() mutable {
+    // On server shutdown we sleep 10ms to make sure all running task finish,
+    // therefore 10ms steps ensure this fiber will not left hanging .
+    constexpr auto step = 10ms;
+    while (is_pause_in_progress()) {
+      ThisFiber::SleepFor(step);
+    }
 
-                      ServerState& etl = *ServerState::tlocal();
-                      if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
-                        shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-                          ServerState::tlocal()->SetPauseState(pause_state, false);
-                        });
-                        shard_set->RunBriefInParallel([ns](EngineShard* shard) {
-                          ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
-                        });
-                      }
-                      if (maybe_cleanup) {
-                        maybe_cleanup();
-                      }
-                    });
+    ServerState& etl = *ServerState::tlocal();
+    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+      shard_set->pool()->AwaitFiberOnAll([pause_state, &slot_ranges](util::ProactorBase* pb) {
+        if (slot_ranges) {
+          ServerState::tlocal()->SetSlotPauseState(*slot_ranges, false);
+        } else {
+          ServerState::tlocal()->SetPauseState(pause_state, false);
+        }
+      });
+      shard_set->RunBriefInParallel([ns](EngineShard* shard) {
+        // Only re-enable expiry/eviction if no other pause remains active on this thread -
+        // otherwise this pause ending would prematurely re-enable it while a different,
+        // concurrent pause (e.g. another slot migration's finalize) still needs it disabled.
+        auto& etl = *ServerState::tlocal();
+        if (!etl.IsPaused() && !etl.HasActiveSlotPause())
+          ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
+      });
+    }
+    if (maybe_cleanup) {
+      maybe_cleanup();
+    }
+  });
 }
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {

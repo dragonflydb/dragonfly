@@ -6,6 +6,7 @@
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest-matchers.h>
 
+#include <atomic>
 #include <string>
 #include <string_view>
 
@@ -1125,6 +1126,59 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                                   _, "total_writes", _, "memory_bytes", _)),
                             RespArray(ElementsAre(IntArg(1), "key_count", IntArg(0), "total_reads",
                                                   _, "total_writes", _, "memory_bytes", _)))));
+}
+
+// Regression test for the slot migration finalize pause: it must only block commands touching
+// the slots being migrated, not every command on the node (see OutgoingMigration::
+// FinalizeMigration, which used to pause ClientPause::ALL for the whole finalize step).
+TEST_F(ClusterFamilyTest, SlotScopedPauseOnlyBlocksMatchingSlot) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  const SlotId paused_slot = CheckedInt({"CLUSTER", "KEYSLOT", "in"});
+  const SlotId other_slot = CheckedInt({"CLUSTER", "KEYSLOT", "out"});
+  ASSERT_NE(paused_slot, other_slot);
+  cluster::SlotRanges paused_ranges({{paused_slot, paused_slot}});
+
+  // Driven directly by `pause_active` (not a wall-clock deadline), so the pause stays up for
+  // exactly as long as this test needs it, regardless of CI/host speed.
+  std::atomic_bool pause_active{true};
+  auto is_pause_in_progress = [&pause_active] { return pause_active.load(); };
+  // Pause() must run from a proactor-pool fiber (as it does in production, from a connection or
+  // migration fiber) since its continuation touches ServerState::tlocal(), which is only set up
+  // on those threads.
+  bool started = false;
+  pp_->at(0)->Await([&] {
+    auto pause_fb = dfly::Pause(service_->server_family().GetNonPriviligedListeners(),
+                                &namespaces->GetDefaultNamespace(), nullptr, ClientPause::ALL,
+                                is_pause_in_progress, /*maybe_cleanup=*/{}, paused_ranges);
+    started = pause_fb.has_value();
+    if (pause_fb)
+      pause_fb->Detach();
+  });
+  ASSERT_TRUE(started);
+
+  // A command touching an unrelated slot must complete promptly, even while the slot-scoped
+  // pause is active - proven by running it in its own fiber and waiting for it to finish.
+  std::atomic_bool unrelated_done{false};
+  auto unrelated_reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    Run({"get", "out"});
+    unrelated_done.store(true);
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return unrelated_done.load(); }, 2000ms));
+  unrelated_reader.Join();
+
+  // A command touching the paused slot must actually block while the pause is active...
+  std::atomic_bool paused_get_done{false};
+  auto paused_reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    Run({"get", "in"});
+    paused_get_done.store(true);
+  });
+  EXPECT_FALSE(WaitUntilCondition([&] { return paused_get_done.load(); }, 200ms));
+
+  // ...and must complete promptly once the pause ends.
+  pause_active.store(false);
+  ASSERT_TRUE(WaitUntilCondition([&] { return paused_get_done.load(); }, 2000ms));
+  paused_reader.Join();
 }
 
 TEST_F(ClusterFamilyTest, FlushSlotsWakesBlockedXReadGroup) {

@@ -836,17 +836,21 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
   }
 }
 
-// Check CLIENT PAUSE state and block if needed
-void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, const CommandId* cid) {
+// Check CLIENT PAUSE state and block if needed. `keys_slot`, when set, additionally blocks on any
+// pause scoped to that slot (e.g. an in-progress slot migration finalize), regardless of whether
+// the command is a write.
+void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, const CommandId* cid,
+                     std::optional<SlotId> keys_slot) {
   auto& etl = *ServerState::tlocal();
-  if (etl.IsPaused() && !conn->IsPrivileged()) {
+  bool is_slot_paused = keys_slot.has_value() && etl.IsSlotPaused(*keys_slot);
+  if ((etl.IsPaused() || is_slot_paused) && !conn->IsPrivileged()) {
     bool is_write = cid->IsJournaled();
     // PUBLISH and writable EVAL/EVALSHA (not the *_RO variants) count as writes here.
     is_write |= cid->IsPublish() || (cid->IsEvalGroup() && !cid->IsReadOnly());
     is_write |= cid->IsExec() && dfly_cntx->conn_state.exec_info.is_write;
 
     dfly_cntx->paused = true;
-    etl.AwaitPauseState(is_write);
+    etl.AwaitPauseState(is_write, keys_slot);
     dfly_cntx->paused = false;
   }
 }
@@ -1220,13 +1224,10 @@ OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, const facade::ParsedA
   return DetermineKeys(cid, args);
 }
 
-optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid,
+optional<ErrorReply> Service::ResolveCommandSlot(const CommandId& cid,
                                                  const facade::ParsedArgs& args,
-                                                 const ConnectionContext& dfly_cntx) {
-  if (dfly_cntx.is_replicating) {
-    // Always allow commands on the replication port, as it might be for future-owned keys.
-    return nullopt;
-  }
+                                                 optional<SlotId>* slot) {
+  *slot = nullopt;
 
   if (cid.first_key_pos() == 0 && !cid.IsShardedPubSub()) {
     return nullopt;  // No key command.
@@ -1249,7 +1250,25 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid,
     return ErrorReply{kCrossSlotError};
   }
 
-  optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
+  *slot = slot_checker.GetUniqueSlotId();
+  return nullopt;
+}
+
+optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid,
+                                                 const facade::ParsedArgs& args,
+                                                 const ConnectionContext& dfly_cntx,
+                                                 const optional<SlotId>* precomputed_slot) {
+  if (dfly_cntx.is_replicating) {
+    // Always allow commands on the replication port, as it might be for future-owned keys.
+    return nullopt;
+  }
+
+  optional<SlotId> keys_slot;
+  if (precomputed_slot) {
+    keys_slot = *precomputed_slot;
+  } else if (auto err = ResolveCommandSlot(cid, args, &keys_slot); err) {
+    return err;
+  }
 
   if (keys_slot.has_value()) {
     if (auto error = cluster::SlotOwnershipError(*keys_slot);
@@ -1261,32 +1280,13 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid,
   return nullopt;
 }
 
-// TODO(kostas) refactor. Almost 1-1 with CheckKeyOwnership() above.
 std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId& cid,
                                                               const facade::ParsedArgs& args,
                                                               const ConnectionContext& dfly_cntx) {
-  if (cid.first_key_pos() == 0 && !cid.IsShardedPubSub()) {
-    return nullopt;  // No key command.
+  optional<SlotId> keys_slot;
+  if (auto err = ResolveCommandSlot(cid, args, &keys_slot); err) {
+    return err;
   }
-
-  OpResult<KeyIndex> key_index_res = FindKeys(&cid, args);
-
-  if (!key_index_res) {
-    return ErrorReply{key_index_res.status()};
-  }
-
-  const auto& key_index = *key_index_res;
-
-  UniqueSlotChecker slot_checker;
-  for (string_view key : key_index.Range(args)) {
-    slot_checker.Add(key);
-  }
-
-  if (slot_checker.IsCrossSlot()) {
-    return ErrorReply{kCrossSlotError};
-  }
-
-  optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
   if (!keys_slot.has_value()) {
     return nullopt;
   }
@@ -1341,7 +1341,8 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
                                                       const facade::ParsedArgs& tail_args,
-                                                      const ConnectionContext& dfly_cntx) {
+                                                      const ConnectionContext& dfly_cntx,
+                                                      const optional<SlotId>* precomputed_slot) {
   ServerState& etl = *ServerState::tlocal();
 
   // If there is no connection owner, it means the command it being called
@@ -1424,7 +1425,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
   }
 
   if (IsClusterEnabled()) {
-    if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
+    if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx, precomputed_slot); err)
       return err;
   }
 
@@ -1514,6 +1515,19 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
   cmd_cntx->SetTailArgs(args_no_cmd);
 
+  // Only resolve the command's slot if a slot-scoped pause (migration finalize) is actually in
+  // progress - this keeps the common case (no migration running) free of the extra key lookup.
+  // When resolution succeeds, reuse it below for both the pause check and CheckKeysOwnership
+  // (inside VerifyCommandState) instead of resolving the same command's slot twice. On error
+  // (cross-slot, bad key spec), leave precomputed_slot null so CheckKeysOwnership re-resolves
+  // and reports the error itself.
+  optional<SlotId> keys_slot;
+  const optional<SlotId>* precomputed_slot = nullptr;
+  if (IsClusterEnabled() && ServerState::tlocal()->HasActiveSlotPause()) {
+    if (!ResolveCommandSlot(*cid, args_no_cmd, &keys_slot))
+      precomputed_slot = &keys_slot;
+  }
+
   // Block on CLIENT PAUSE if needed
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
     if (VLOG_IS_ON(2)) {
@@ -1525,11 +1539,11 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
     // Check pause state only if it is a top level transaction.
     if (dfly_cntx->transaction == nullptr)
-      CheckPauseState(conn, dfly_cntx, cid);
+      CheckPauseState(conn, dfly_cntx, cid, keys_slot);
   }
 
   // Verify command state
-  if (auto err = VerifyCommandState(*cid, args_no_cmd, *dfly_cntx); err) {
+  if (auto err = VerifyCommandState(*cid, args_no_cmd, *dfly_cntx, precomputed_slot); err) {
     LOG_IF(WARNING, dfly_cntx->replica_conn || !dfly_cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
@@ -1734,7 +1748,12 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
   auto* ss = ServerState::tlocal();
 
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
-  if (ss->IsPaused())
+  // Squashed commands bypass CheckPauseState (see DispatchCommand), so also bail out whenever a
+  // slot-scoped pause is active anywhere - conservative (it doesn't matter whether this batch's
+  // commands actually touch the paused slots), but simple and safe: it falls back to the regular
+  // per-command dispatch path, which does check pause state per command, for the bounded duration
+  // of a migration finalize.
+  if (ss->IsPaused() || ss->HasActiveSlotPause())
     return 0;
 
   vector<CmdRef> cmd_refs;
@@ -2543,6 +2562,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   }
 
   auto keys = CollectAllKeys(&exec_info);
+  optional<SlotId> exec_slot;
   if (IsClusterEnabled()) {
     UniqueSlotChecker slot_checker;
     for (const auto& s : keys) {
@@ -2552,6 +2572,18 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
     if (slot_checker.IsCrossSlot()) {
       return rb->SendError(kCrossSlotError);
     }
+    exec_slot = slot_checker.GetUniqueSlotId();
+  }
+
+  // EXEC invokes its queued commands directly via InvokeCmd rather than through DispatchCommand,
+  // so they never go through CheckPauseState. If this transaction's (single, per the cross-slot
+  // check above) slot is currently under a migration-finalize pause, block here before scheduling
+  // - otherwise EXEC could initialize a transaction with stale slot-ownership info for exactly the
+  // slot the pause exists to protect.
+  if (exec_slot.has_value() && ServerState::tlocal()->IsSlotPaused(*exec_slot)) {
+    cntx->paused = true;
+    ServerState::tlocal()->AwaitPauseState(false, exec_slot);
+    cntx->paused = false;
   }
 
   // The transaction can contain script load script execution, determine their presence ahead to

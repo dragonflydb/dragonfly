@@ -413,10 +413,13 @@ class ServerFamily {
   bool legacy_format_metrics_ = true;
 };
 
-// Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
-std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
-                                      facade::Connection* conn, ClientPause pause_state,
-                                      std::function<bool()> is_pause_in_progress,
-                                      std::function<void()> maybe_cleanup = {});
+// Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress.
+// If `slot_ranges` is set, the pause only blocks commands whose keys fall in those slots
+// (used by slot migration finalize); otherwise it blocks every command, as CLIENT PAUSE does.
+std::optional<util::fb2::Fiber> Pause(
+    std::vector<facade::Listener*> listeners, Namespace* ns, facade::Connection* conn,
+    ClientPause pause_state, std::function<bool()> is_pause_in_progress,
+    std::function<void()> maybe_cleanup = {},
+    std::optional<cluster::SlotRanges> slot_ranges = std::nullopt);
 
 }  // namespace dfly
