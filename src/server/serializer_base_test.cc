@@ -119,6 +119,12 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
     RecordSerialized(pk.ToString());
   }
 
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override {
+    CHECK_GT(delayed_enqueued_, 0u);
+    --delayed_enqueued_;
+    SerializerBase::SerializeFetchedEntry(tde, pv);
+  }
+
   void ConsumeJournalChange(const journal::JournalChangeItem& item) override;
 
   void ThrottleIfNeeded() override {
@@ -134,6 +140,7 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
       auto de = std::make_unique<TieredDelayedEntry>(0, CompactKey{key},
                                                      delay_driver_.Enqeue(delay), 0, 0);
       DelayedEntryHandler::delayed_entries_.emplace(bucket, std::move(de));
+      ++delayed_enqueued_;
     } else {
       std::lock_guard lk{stream_mu_};
       RecordSerialized(std::move(key));
@@ -157,12 +164,15 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
     journal::StartInThread();
     journal_id_ = journal::RegisterConsumer(this);
 
+    // Start paused so that no delayed entry can be enqueued and resolved by
+    // resolver_fb_/snapshot_fb_ before an explicit Resume() call.
+    delay_driver_.Start();
+    delay_driver_.Pause();
+
     snapshot_fb_ = util::fb2::Fiber{[this] {
       Loop();
       UnregisterChangeListener();
     }};
-
-    delay_driver_.Start();
   }
 
   void Wait() {
@@ -187,6 +197,9 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
 
   // subdriver for delayed entries
   TestDelayDriver delay_driver_;
+
+  // Number of delayed entries currently enqueued.
+  unsigned delayed_enqueued_ = 0;
 
   absl::flat_hash_set<std::string> emitted_baselines_;
   absl::flat_hash_map<std::string, unsigned> journal_writes_;
@@ -408,9 +421,7 @@ TEST_F(SerializerBaseTest, DelayedAllDeleted) {
   for (unsigned i = 0; i < kKeys; i++)
     Run({"PEXPIRE", absl::StrCat("key:", i), "10"});
 
-  // Start and pause reolution of delayed entries
   Start();
-  Change([](TestDriver& d) { d.delay_driver_.Pause(); });
 
   // Let all values to be expire deleted
   TEST_current_time_ms = TEST_current_time_ms + 100;
@@ -443,9 +454,13 @@ TEST_F(SerializerBaseTest, DelayedEvicted) {
   // Its bucket should not coincide with any of the string keys
   Run({"SADD", "gigantic-set", "first-entry"});
 
-  // Start and pause reolution of delayed entries
   Start();
-  Change([](TestDriver& d) { d.delay_driver_.Pause(); });
+
+  // Wait until at least one delayed entry exists.
+  Change([](TestDriver& d) {
+    while (d.delayed_enqueued_ == 0)
+      util::ThisFiber::Yield();
+  });
 
   // Enable cache mode and grow set
   shard_set->TEST_EnableCacheMode();

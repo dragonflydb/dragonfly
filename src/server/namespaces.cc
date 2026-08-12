@@ -11,6 +11,7 @@
 #include "server/engine_shard_set.h"
 
 ABSL_DECLARE_FLAG(bool, cache_mode);
+ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 
 namespace dfly {
 
@@ -50,6 +51,11 @@ BlockingController* Namespace::GetBlockingController(ShardId sid) {
 }
 
 Namespaces::Namespaces() {
+  {
+    // Startup only: CONFIG SET is not reachable yet, the validated flag is safe to read.
+    util::fb2::LockGuard guard(mu_);
+    expired_events_recording_default_ = !absl::GetFlag(FLAGS_notify_keyspace_events).empty();
+  }
   default_namespace_ = &GetOrInsert("");
 }
 
@@ -81,6 +87,20 @@ Namespace& Namespaces::GetDefaultNamespace() const {
   return *default_namespace_;
 }
 
+void Namespaces::SetExpiredEventsRecording(bool enable) {
+  util::fb2::LockGuard guard(mu_);
+  expired_events_recording_default_ = enable;
+  // mu_ serializes this with namespace creation, which inherits the default.
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned, util::ProactorBase*) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard) {
+      for (auto& entry : ABSL_TS_UNCHECKED_READ(namespaces_)) {
+        entry.second.GetDbSlice(shard->shard_id()).SetExpiredEventsRecording(enable);
+      }
+    }
+  });
+}
+
 Namespace& Namespaces::GetOrInsert(std::string_view ns) {
   {
     // Try to look up under a shared lock
@@ -94,7 +114,17 @@ Namespace& Namespaces::GetOrInsert(std::string_view ns) {
   {
     // Key was not found, so we create create it under unique lock
     util::fb2::LockGuard guard(mu_);
-    return namespaces_[ns];
+    auto it = namespaces_.find(ns);
+    if (it != namespaces_.end()) {
+      return it->second;
+    }
+
+    Namespace& new_ns = namespaces_[ns];
+    // Not published yet (mu_ is held), so plain writes are safe.
+    for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
+      new_ns.GetDbSlice(sid).SetExpiredEventsRecording(expired_events_recording_default_);
+    }
+    return new_ns;
   }
 }
 

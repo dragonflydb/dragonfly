@@ -767,6 +767,35 @@ TEST_F(ClusterTieredTest, SlotCountersFollowOffloadAndDelete) {
   ExpectSlotEmpty(slot);
 }
 
+// List-node tiering offloads individual QList nodes, not the whole value; slot counters must
+// still track those bytes and return to zero after DEL.
+TEST_F(ClusterTieredTest, SlotCountersFollowListNodeOffloadAndDelete) {
+  const string kKey = "tiered-list-del";
+  const SlotId slot = KeySlot(kKey);
+  const int kItems = 8;  // Total number of nodes in the list.
+
+  SetTestFlag("tiered_experimental_list_support", "true");
+  SetTestFlag("list_tiering_threshold", "1");
+  SetTestFlag("list_max_listpack_size", "1");
+
+  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_THAT(Run({"RPUSH", kKey, string(2048, char('A' + i))}), IntArg(i + 1));
+  }
+
+  WaitForOffload(6);
+
+  // Only the head and tail nodes stay resident - 2 nods; Due to additional structure
+  // overhead we can still expect that the memory_bytes is less than 3 * 2048.
+  EXPECT_LT(RawSlotMemory(slot), int64_t(3 * 2048));
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+  ExpectSlotMirrorsDb(slot);
+
+  EXPECT_EQ(CheckedInt({"DEL", kKey}), 1);
+  ExpectSlotEmpty(slot);
+}
+
 // The single key lives in one slot, so the slot counters must mirror the db-wide ones exactly.
 TEST_F(ClusterTieredTest, SlotCountersFollowExternalOverwrite) {
   const string kKey = "tiered-set";

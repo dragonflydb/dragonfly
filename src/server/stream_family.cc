@@ -1779,8 +1779,9 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   StreamMemTracker mem_tracker;
   bool stream_created_by_mkstream = false;
   if (!res_it) {
-    if (opts.flags & kCreateOptMkstream) {
-      // MKSTREAM is enabled, so create the stream
+    // If the key doesn't exists and we have the MKSTREAM flag, we need create the stream.
+    // Otherwise, we return an error.
+    if (res_it.status() == OpStatus::KEY_NOTFOUND && opts.flags & kCreateOptMkstream) {
       res_it = db_slice.AddNew(op_args.db_cntx, key, PrimeValue{}, 0);
       if (!res_it)
         return res_it.status();
@@ -3034,7 +3035,8 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
       // distinguishes a missing stream (NOGROUP) from a non-stream value (WRONGTYPE). A plain
       // XREAD keeps waiting for the stream to be recreated.
       // TODO: Make kKeyNotFound a per-waiter result in BlockingController. It currently
-      // short-circuits the whole queue, so a blocked XREAD would hide an XREADGROUP behind it.
+      // short-circuits the whole queue, allowing a blocked XREAD to hide a later XREADGROUP
+      // waiter. Return kNotReady until the controller handles heterogeneous queues.
       return opts->read_group ? KeyReadyResult::kReady : KeyReadyResult::kNotReady;
     }
 
@@ -3050,7 +3052,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     }
 
     // An empty stream has nothing to serve: s->last_id only records the last generated id and
-    // survives XDEL and XTRIM.
+    // survives XDEL, XTRIM and metadata-only XSETID.
     if (!s->length)
       return KeyReadyResult::kNotReady;
 
@@ -3077,90 +3079,144 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   // transaction to proceed.
   OpResult<RecordVec> result;
   std::string key;
-  auto range_cb = [&](Transaction* t, EngineShard* shard) {
-    if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
-      RangeOpts range_opts;
-      // Ensure the woken read honors COUNT like the non-blocking path
-      // (OpRead) does: without it, a consumer woken by a transaction that
-      // added multiple entries receives all of them in one reply.
-      range_opts.count = opts->count;
-      range_opts.end = ParsedStreamId{.val = streamID{
-                                          .ms = UINT64_MAX,
-                                          .seq = UINT64_MAX,
-                                      }};
-      StreamIDsItem& sitem = opts->stream_ids.at(*wake_key);
-      range_opts.start = sitem.id;
 
-      // sitem.group was resolved before we blocked and the stream may have been deleted or
-      // retyped since. Re-resolve it against the current table instead of dereferencing a stale
-      // pointer, preserving WRONGTYPE when a non-stream replaced the key.
-      if (opts->read_group) {
-        auto op_args = t->GetOpArgs(shard);
-        auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, *wake_key, OBJ_STREAM);
-        if (!res_it.ok()) {
-          result = res_it.status() == OpStatus::WRONG_TYPE ? OpStatus::WRONG_TYPE
+  auto send_nogroup = [rb] {
+    return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists");
+  };
+
+  // Re-resolves the streams owned by a single shard. Never trusts the cached streamCG*: background
+  // deletions (slot flush, eviction) bypass intent locks, so a stream may have been freed since it
+  // was last seen. Returns INVALID_VALUE for a missing stream or group, WRONG_TYPE if the key was
+  // replaced by another type.
+  auto validate_shard_keys = [&](const OpArgs& op_args, const ShardArgs& keys) {
+    OpStatus status = OpStatus::OK;
+    for (string_view skey : keys) {
+      auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
+      if (!res_it.ok()) {
+        if (status == OpStatus::OK) {
+          status = res_it.status() == OpStatus::WRONG_TYPE ? OpStatus::WRONG_TYPE
                                                            : OpStatus::INVALID_VALUE;
-          return OpStatus::OK;
         }
-
-        sitem.group =
-            StreamLookupCG(GetReadOnlyStream((*res_it)->second), WrapSds(opts->group_name));
-        if (!sitem.group) {
-          result = OpStatus::INVALID_VALUE;
-          return OpStatus::OK;
-        }
+        continue;
       }
 
-      // '>' is encoded as UINT64_MAX-UINT64_MAX and is only accepted for XREADGROUP, so the start
-      // comes from the group. A plain XREAD has no group and reads from the id it asked for, even
-      // when that id happens to carry a UINT64_MAX component.
-      if (opts->read_group && sitem.id.val.ms == UINT64_MAX && sitem.id.val.seq == UINT64_MAX) {
-        range_opts.start.val = sitem.group->last_id;
-        StreamIncrID(&range_opts.start.val);
+      StreamIDsItem& stream_item = opts->stream_ids.at(skey);
+      stream_item.group =
+          StreamLookupCG(GetReadOnlyStream((*res_it)->second), WrapSds(opts->group_name));
+      if (!stream_item.group && status == OpStatus::OK)
+        status = OpStatus::INVALID_VALUE;
+    }
+    return status;
+  };
+
+  // While we were blocked any of the watched streams could have been deleted, retyped or lost its
+  // consumer group. XREADGROUP mutates the stream (it moves entries into the consumer PEL), so it
+  // must not touch the woken key if another stream already invalidated the request. Streams on the
+  // woken shard are validated inside the action hop for free, so only reads that actually span
+  // shards pay for this extra hop.
+  // Note this must not be folded into the action hop with a cross shard barrier: waiting for
+  // sibling shards from inside a transaction callback stalls the whole shard and can deadlock two
+  // interleaved multi shard readers.
+  if (opts->read_group && tx->GetUniqueShardCnt() > 1) {
+    // Indexed by shard id - every shard writes only its own slot, so no synchronization is needed
+    // beyond the hop boundary.
+    vector<OpStatus> validation_status(shard_set->size(), OpStatus::OK);
+
+    auto validate_cb = [&](Transaction* t, EngineShard* shard) {
+      const ShardId sid = shard->shard_id();
+      validation_status[sid] = validate_shard_keys(t->GetOpArgs(shard), t->GetShardArgs(sid));
+      return OpStatus::OK;
+    };
+    tx->Execute(validate_cb, false);
+
+    for (OpStatus status : validation_status) {
+      if (status == OpStatus::OK)
+        continue;
+
+      tx->Conclude();
+      if (status != OpStatus::INVALID_VALUE)
+        return rb->SendError(status);
+      return send_nogroup();
+    }
+  }
+
+  auto range_cb = [&](Transaction* t, EngineShard* shard) {
+    auto wake_key = t->GetWakeKey(shard->shard_id());
+    if (!wake_key)
+      return OpStatus::OK;
+
+    RangeOpts range_opts;
+    // Ensure the woken read honors COUNT like the non-blocking path
+    // (OpRead) does: without it, a consumer woken by a transaction that
+    // added multiple entries receives all of them in one reply.
+    range_opts.count = opts->count;
+    range_opts.end = ParsedStreamId{.val = streamID{
+                                        .ms = UINT64_MAX,
+                                        .seq = UINT64_MAX,
+                                    }};
+    StreamIDsItem& sitem = opts->stream_ids.at(*wake_key);
+    range_opts.start = sitem.id;
+
+    if (opts->read_group) {
+      // Validates the woken key too, so the action hop never trusts a stale group pointer.
+      if (OpStatus status =
+              validate_shard_keys(t->GetOpArgs(shard), t->GetShardArgs(shard->shard_id()));
+          status != OpStatus::OK) {
+        result = status;
+        return OpStatus::OK;
+      }
+    }
+
+    // '>' is encoded as UINT64_MAX-UINT64_MAX and is only accepted for XREADGROUP, so the start
+    // comes from the group. A plain XREAD has no group and reads from the id it asked for, even
+    // when that id happens to carry a UINT64_MAX component.
+    if (opts->read_group && sitem.id.val.ms == UINT64_MAX && sitem.id.val.seq == UINT64_MAX) {
+      range_opts.start.val = sitem.group->last_id;
+      StreamIncrID(&range_opts.start.val);
+    }
+
+    range_opts.group = sitem.group;
+
+    // Update consumer, only for XReadGroup path
+    std::optional<StreamMemTracker> tracker;
+    if (sitem.group) {
+      tracker = StreamMemTracker{};
+      sitem.is_consumer_new = false;
+      range_opts.consumer = FindOrAddConsumer(opts->consumer_name, sitem.group, GetCurrentTimeMs(),
+                                              &sitem.is_consumer_new);
+      sitem.consumer = range_opts.consumer;
+      if (!sitem.consumer) {
+        result = OpStatus::OUT_OF_MEMORY;
+        return OpStatus::OUT_OF_MEMORY;
       }
 
-      range_opts.group = sitem.group;
-
-      // Update consumer, only for XReadGroup path
-      std::optional<StreamMemTracker> tracker;
-      if (sitem.group) {
-        tracker = StreamMemTracker{};
-        sitem.is_consumer_new = false;
-        range_opts.consumer = FindOrAddConsumer(opts->consumer_name, sitem.group,
-                                                GetCurrentTimeMs(), &sitem.is_consumer_new);
-        sitem.consumer = range_opts.consumer;
-        if (!sitem.consumer) {
-          return OpStatus::OUT_OF_MEMORY;
-        }
-
-        if (sitem.consumer->pel->numnodes == 0) {
-          LOG(DFATAL) << "Internal error when accessing consumer data, seen_time "
-                      << sitem.consumer->seen_time;
-          result = OpStatus::CANCELLED;
-          return OpStatus::OK;
-        }
+      if (sitem.consumer->pel->numnodes == 0) {
+        LOG(DFATAL) << "Internal error when accessing consumer data, seen_time "
+                    << sitem.consumer->seen_time;
+        result = OpStatus::CANCELLED;
+        return OpStatus::OK;
       }
+    }
 
-      key = *wake_key;
+    key = *wake_key;
 
-      if (tracker) {
-        auto op_args = t->GetOpArgs(shard);
-        auto& db_slice = op_args.GetDbSlice();
-        auto it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
-        DCHECK(it);
-        if (it) {
-          tracker->UpdateStreamSize(it->it->second);
-        }
+    if (tracker) {
+      auto op_args = t->GetOpArgs(shard);
+      auto& db_slice = op_args.GetDbSlice();
+      auto it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
+      DCHECK(it);
+      if (it) {
+        tracker->UpdateStreamSize(it->it->second);
       }
+    }
 
-      range_opts.noack = opts->noack;
-      range_opts.access_kind = StreamAccessKind::kSequential;
+    range_opts.noack = opts->noack;
+    range_opts.access_kind = StreamAccessKind::kSequential;
 
-      result = OpRange(t->GetOpArgs(shard), *wake_key, range_opts);
-      if (result) {
-        JournalConsumerCreationIfNeeded(t->GetOpArgs(shard), *opts, *wake_key);
-        JournalXReadGroupIfNeeded(t->GetOpArgs(shard), *opts, *result, *wake_key);
-      }
+    result = OpRange(t->GetOpArgs(shard), *wake_key, range_opts);
+    if (result) {
+      JournalConsumerCreationIfNeeded(t->GetOpArgs(shard), *opts, *wake_key);
+      JournalXReadGroupIfNeeded(t->GetOpArgs(shard), *opts, *result, *wake_key);
     }
     return OpStatus::OK;
   };
@@ -3176,8 +3232,9 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     }
     return StreamReplies{rb}.SendStreamRecords(key, *result);
   } else if (result.status() == OpStatus::INVALID_VALUE) {
-    return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists");
-  } else if (result.status() == OpStatus::WRONG_TYPE) {
+    return send_nogroup();
+  } else if (result.status() == OpStatus::WRONG_TYPE ||
+             result.status() == OpStatus::OUT_OF_MEMORY) {
     return rb->SendError(result.status());
   }
   return rb->SendNullArray();

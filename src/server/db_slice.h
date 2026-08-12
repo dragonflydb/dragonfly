@@ -526,9 +526,14 @@ class DbSlice {
     client_tracking_map_[key].insert(conn_ref);
   }
 
-  // Does not check for non supported events. Callers must parse the string and reject it
-  // if it's not empty and not EX.
-  void SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events);
+  bool IsExpiredEventsRecording() const {
+    return expired_keys_events_recording_;
+  }
+
+  // Driven by Namespaces::SetExpiredEventsRecording; call on the owning shard thread.
+  void SetExpiredEventsRecording(bool enable) {
+    expired_keys_events_recording_ = enable;
+  }
 
   // Returns true if any registered snapshot is blocked on bucket serialiazion (big value, delayed)
   // and thus might reject the journal change

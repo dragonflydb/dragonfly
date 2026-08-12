@@ -27,12 +27,25 @@ void BareDecoder::Initialize(std::string_view slice) {
 }
 
 void BareDecoder::Upload(void* obj) {
-  ABSL_UNREACHABLE();
+  auto* compact_obj = static_cast<CompactObj*>(obj);
+  switch (compact_obj->GetExternalRep()) {
+    case CompactObj::ExternalRep::STRING:
+      compact_obj->Materialize(slice, true);
+      break;
+    case CompactObj::ExternalRep::SERIALIZED_MAP: {
+      ListpackMapDecoder decoder{};
+      decoder.Initialize(slice);
+      decoder.Upload(compact_obj);
+      break;
+    }
+    case CompactObj::ExternalRep::LIST_NODE:
+      LOG(DFATAL) << "LIST_NODE should not be uploaded to PrimeValue";
+      break;
+  }
 }
 
 Decoder::UploadMetrics BareDecoder::GetMetrics() const {
-  ABSL_UNREACHABLE();
-  return UploadMetrics{};
+  return UploadMetrics{.modified = false, .estimated_mem_usage = slice.size()};
 }
 
 StringDecoder::StringDecoder(const CompactObj& obj) : StringDecoder{obj.GetStrEncoding()} {
@@ -46,7 +59,7 @@ std::unique_ptr<Decoder> StringDecoder::Clone() const {
 }
 
 void StringDecoder::Initialize(std::string_view slice) {
-  slice_ = slice;
+  BareDecoder::Initialize(slice);
   value_ = encoding_.Decode(slice);
 }
 
@@ -55,7 +68,7 @@ void StringDecoder::Upload(void* obj) {
   if (modified_)
     compact_obj->Materialize(value_.view(), false);
   else
-    compact_obj->Materialize(slice_, true);
+    compact_obj->Materialize(slice, true);
 }
 
 Decoder::UploadMetrics StringDecoder::GetMetrics() const {
@@ -80,12 +93,8 @@ std::unique_ptr<Decoder> ListpackMapDecoder::Clone() const {
   return std::make_unique<ListpackMapDecoder>();
 }
 
-void ListpackMapDecoder::Initialize(std::string_view slice) {
-  slice_ = slice;
-}
-
 Decoder::UploadMetrics ListpackMapDecoder::GetMetrics() const {
-  size_t bytes = owned_lw_ ? owned_lw_->UsedBytes() : slice_.size();
+  size_t bytes = owned_lw_ ? owned_lw_->UsedBytes() : slice.size();
   return UploadMetrics{
       .modified = owned_lw_ != nullptr,
       .estimated_mem_usage = bytes,
@@ -106,13 +115,13 @@ detail::ListpackWrap ListpackMapDecoder::Get() const {
   if (owned_lw_)
     return *owned_lw_;
   return detail::ListpackWrap::Readonly(
-      const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(slice_.data())));
+      const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(slice.data())));
 }
 
 detail::ListpackWrap* ListpackMapDecoder::GetMutable() {
   if (!owned_lw_) {
-    uint8_t* lp = (uint8_t*)zmalloc(slice_.size());
-    memcpy(lp, slice_.data(), slice_.size());
+    uint8_t* lp = (uint8_t*)zmalloc(slice.size());
+    memcpy(lp, slice.data(), slice.size());
     owned_lw_ = std::make_unique<detail::ListpackWrap>(lp);
   }
   return owned_lw_.get();
@@ -125,17 +134,9 @@ std::unique_ptr<Decoder> ListNodeDecoder::Clone() const {
   return std::make_unique<ListNodeDecoder>(ql_);
 }
 
-void ListNodeDecoder::Initialize(std::string_view slice) {
-  slice_ = slice;
-}
-
 void ListNodeDecoder::Upload(void* obj) {
   QList::Node* node_obj = reinterpret_cast<QList::Node*>(obj);
-  node_obj->Upload(ql_, slice_);
-}
-
-Decoder::UploadMetrics ListNodeDecoder::GetMetrics() const {
-  return UploadMetrics{.modified = false, .estimated_mem_usage = slice_.size()};
+  node_obj->Upload(ql_, slice);
 }
 
 }  // namespace dfly::tiering

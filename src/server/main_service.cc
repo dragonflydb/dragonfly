@@ -1090,24 +1090,21 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("search_query_string_bytes");
 #endif
 
-  config_registry.RegisterMutable(
-      "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
-        auto res = flag.TryGet<std::string>();
-        if (!res.has_value() || (!res->empty() && !absl::EqualsIgnoreCase(*res, "EX"))) {
-          return false;
-        }
+  // dfly_main validates before the pidfile/listeners exist; backstop for other embeddings.
+  if (!ValidateNotifyKeyspaceEventsFlag()) {
+    exit(1);
+  }
 
-        pool->AwaitBrief([&res](unsigned, auto*) {
-          auto* shard = EngineShard::tlocal();
-          if (shard) {
-            auto shard_id = shard->shard_id();
-            auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id);
-            db_slice.SetNotifyKeyspaceEvents(*res);
-          }
-        });
+  config_registry.RegisterMutable("notify_keyspace_events", [](const absl::CommandLineFlag& flag) {
+    // The candidate value is already parsed into the flag at this point.
+    auto res = flag.TryGet<std::string>();
+    if (!res.has_value() || !ValidateNotifyKeyspaceEventsFlag()) {
+      return false;
+    }
 
-        return true;
-      });
+    namespaces->SetExpiredEventsRecording(!res->empty());
+    return true;
+  });
 
   config_registry.RegisterMutable("aclfile");
   config_registry.RegisterSetter<uint32_t>("acllog_max_len", [](uint32_t val) {

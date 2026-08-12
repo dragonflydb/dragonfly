@@ -142,6 +142,20 @@ TEST_F(StreamFamilyTest, GroupCreate) {
   EXPECT_THAT(resp, ErrArg("BUSYGROUP"));
 }
 
+TEST_F(StreamFamilyTest, GroupCreateOnWrongType) {
+  Run({"set", "key", "value"});
+
+  auto resp = Run({"xgroup", "create", "key", "grname", "$"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+
+  resp = Run({"xgroup", "create", "key", "grname", "$", "MKSTREAM"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+
+  // The existing string value must remain untouched.
+  resp = Run({"get", "key"});
+  EXPECT_EQ(resp, "value");
+}
+
 TEST_F(StreamFamilyTest, XRead) {
   Run({"xadd", "foo", "1-*", "k1", "v1"});
   Run({"xadd", "foo", "1-*", "k2", "v2"});
@@ -754,6 +768,188 @@ TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnStoreRetypes) {
   EXPECT_THAT(union_resp, ErrArg("WRONGTYPE"));
 }
 
+TEST_F(StreamFamilyTest, XReadAheadDoesNotSuppressXReadGroupWake) {
+  Run({"XGROUP", "CREATE", "foo", "group", "0", "MKSTREAM"});
+
+  RespExpr xreadgroup_resp;
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    Run({"XREAD", "BLOCK", "0", "STREAMS", "foo", "$"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  auto fb1 = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
+    xreadgroup_resp =
+        Run({"XREADGROUP", "GROUP", "group", "bob", "BLOCK", "200", "streams", "foo", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO2"); }, 500ms));
+
+  Run({"DEL", "foo"});
+  fb1.Join();
+  EXPECT_THAT(xreadgroup_resp,
+              ErrArg("consumer group this client was blocked on no longer exists"));
+
+  Run({"XADD", "foo", "1-0", "k", "v"});
+  fb0.Join();
+}
+
+TEST_F(StreamFamilyTest, XReadGroupBlockMultiStreamRevalidatesGroups) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  const string key_a = "multi-stream-a";
+  string key_b;
+  for (unsigned i = 0; key_b.empty(); ++i) {
+    string candidate = absl::StrCat("multi-stream-b-", i);
+    if (Shard(candidate, shard_set->size()) != Shard(key_a, shard_set->size()))
+      key_b = std::move(candidate);
+  }
+  ASSERT_NE(Shard(key_a, shard_set->size()), Shard(key_b, shard_set->size()));
+
+  Run({"XGROUP", "CREATE", key_a, "group", "0", "MKSTREAM"});
+  Run({"XGROUP", "CREATE", key_b, "group", "0", "MKSTREAM"});
+
+  // Keep the target read behind another waiter on key_b. Destroying key_b's group wakes this
+  // guard, forcing the target transaction to wake on key_a and revalidate key_b remotely.
+  RespExpr guard_resp;
+  auto guard = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    guard_resp =
+        Run({"XREADGROUP", "GROUP", "group", "guard", "BLOCK", "0", "STREAMS", key_b, ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  RespExpr target_resp;
+  auto target = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
+    target_resp = Run({"XREADGROUP", "GROUP", "group", "target", "BLOCK", "0", "STREAMS", key_a,
+                       key_b, ">", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO2"); }, 500ms));
+
+  Run({"MULTI"});
+  Run({"XADD", key_a, "1-0", "f", "v"});
+  Run({"XGROUP", "DESTROY", key_b, "group"});
+  Run({"EXEC"});
+
+  guard.Join();
+  target.Join();
+  EXPECT_THAT(guard_resp, ErrArg("consumer group this client was blocked on no longer exists"));
+  EXPECT_THAT(target_resp, ErrArg("consumer group this client was blocked on no longer exists"));
+  auto pending = Run({"XPENDING", key_a, "group"});
+  EXPECT_THAT(pending.GetVec()[0], IntArg(0));
+}
+
+// This is the wrong-type counterpart of XReadGroupBlockMultiStreamRevalidatesGroups.
+// The target is woken only by key_a, while key_b is retyped behind its guard. The final
+// XREADGROUP action must validate key_b before it adds key_a's entry to the consumer PEL.
+TEST_F(StreamFamilyTest, XReadGroupBlockMultiStreamRevalidatesRetypedStream) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  const string key_a = "multi-stream-retype-a";
+  string key_b;
+  for (unsigned i = 0; key_b.empty(); ++i) {
+    string candidate = absl::StrCat("multi-stream-retype-b-", i);
+    if (Shard(candidate, shard_set->size()) != Shard(key_a, shard_set->size()))
+      key_b = std::move(candidate);
+  }
+  ASSERT_NE(Shard(key_a, shard_set->size()), Shard(key_b, shard_set->size()));
+
+  Run({"XGROUP", "CREATE", key_a, "group", "0", "MKSTREAM"});
+  Run({"XGROUP", "CREATE", key_b, "group", "0", "MKSTREAM"});
+
+  RespExpr guard_resp;
+  auto guard = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    guard_resp =
+        Run({"XREADGROUP", "GROUP", "group", "guard", "BLOCK", "200", "STREAMS", key_b, ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  RespExpr target_resp;
+  auto target = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
+    target_resp = Run({"XREADGROUP", "GROUP", "group", "target", "BLOCK", "200", "STREAMS", key_a,
+                       key_b, ">", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO2"); }, 500ms));
+
+  Run({"MULTI"});
+  Run({"XADD", key_a, "1-0", "f", "v"});
+  Run({"SET", key_b, "value"});
+  Run({"EXEC"});
+
+  guard.Join();
+  target.Join();
+  EXPECT_THAT(guard_resp, ErrArg("WRONGTYPE"));
+  EXPECT_THAT(target_resp, ErrArg("WRONGTYPE"));
+  auto pending = Run({"XPENDING", key_a, "group"});
+  EXPECT_THAT(pending.GetVec()[0], IntArg(0));
+}
+
+// Same as XReadGroupBlockMultiStreamRevalidatesGroups, but both streams live on one shard, so the
+// remote validation hop is skipped and the action hop must validate them itself.
+TEST_F(StreamFamilyTest, XReadGroupBlockSingleShardMultiStreamRevalidatesGroups) {
+  const string key_a = "same-shard-a";
+  string key_b;
+  for (unsigned i = 0; key_b.empty(); ++i) {
+    string candidate = absl::StrCat("same-shard-b-", i);
+    if (Shard(candidate, shard_set->size()) == Shard(key_a, shard_set->size()))
+      key_b = std::move(candidate);
+  }
+  ASSERT_EQ(Shard(key_a, shard_set->size()), Shard(key_b, shard_set->size()));
+
+  Run({"XGROUP", "CREATE", key_a, "group", "0", "MKSTREAM"});
+  Run({"XGROUP", "CREATE", key_b, "group", "0", "MKSTREAM"});
+
+  RespExpr guard_resp;
+  auto guard = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    guard_resp =
+        Run({"XREADGROUP", "GROUP", "group", "guard", "BLOCK", "0", "STREAMS", key_b, ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  RespExpr target_resp;
+  auto target = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
+    target_resp = Run({"XREADGROUP", "GROUP", "group", "target", "BLOCK", "0", "STREAMS", key_a,
+                       key_b, ">", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO2"); }, 500ms));
+
+  Run({"MULTI"});
+  Run({"XADD", key_a, "1-0", "f", "v"});
+  Run({"XGROUP", "DESTROY", key_b, "group"});
+  Run({"EXEC"});
+
+  guard.Join();
+  target.Join();
+  EXPECT_THAT(guard_resp, ErrArg("consumer group this client was blocked on no longer exists"));
+  EXPECT_THAT(target_resp, ErrArg("consumer group this client was blocked on no longer exists"));
+  auto pending = Run({"XPENDING", key_a, "group"});
+  EXPECT_THAT(pending.GetVec()[0], IntArg(0));
+}
+
+TEST_F(StreamFamilyTest, XReadGroupBlockLazyExpireDuringWakeDoesNotCrash) {
+  Run({"XGROUP", "CREATE", "s", "g", "0", "MKSTREAM"});
+
+  RespExpr resp0;
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run({"XREADGROUP", "GROUP", "g", "c", "BLOCK", "200", "STREAMS", "s", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  Run({"PEXPIRE", "s", "1"});
+  AdvanceTime(2);
+
+  // Trigger readiness directly after the TTL has elapsed. FindReadOnly lazily deletes the stream
+  // while NotifyPending is scanning it, which queues a duplicate wake for the now-active queue.
+  const ShardId sid = Shard("s", shard_set->size());
+  shard_set->Await(sid, [] {
+    auto* bc =
+        namespaces->GetDefaultNamespace().GetBlockingController(EngineShard::tlocal()->shard_id());
+    ASSERT_NE(bc, nullptr);
+    bc->Awaken(0, "s");
+    bc->NotifyPending();
+  });
+
+  fb0.Join();
+  EXPECT_THAT(resp0, ErrArg("consumer group this client was blocked on no longer exists"));
+}
+
 TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnFlushDb) {
   Run({"XGROUP", "CREATE", "foo", "group", "0", "MKSTREAM"});
 
@@ -764,6 +960,20 @@ TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnFlushDb) {
   ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
 
   Run({"FLUSHDB"});
+  fb0.Join();
+  EXPECT_THAT(resp0, ErrArg("consumer group this client was blocked on no longer exists"));
+}
+
+TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnImmediateExpire) {
+  Run({"XGROUP", "CREATE", "foo", "group", "0", "MKSTREAM"});
+
+  RespExpr resp0;
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run({"XREADGROUP", "GROUP", "group", "alice", "BLOCK", "200", "streams", "foo", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  Run({"EXPIREAT", "foo", "1"});
   fb0.Join();
   EXPECT_THAT(resp0, ErrArg("consumer group this client was blocked on no longer exists"));
 }
