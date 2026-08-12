@@ -226,8 +226,9 @@ string NormalizePaths(std::string_view path) {
 template <typename... Args> unique_ptr<Listener> MakeListener(ProactorPool* pool, Args&&... args) {
   unique_ptr<Listener> res;
   // The constructor allocates TLS state; run it on a proactor thread so those bytes land on a
-  // thread included in the tls_bytes sum (the main thread is not).
-  pool->GetNextProactor()->Await([&] {
+  // thread included in the tls_bytes sum (the main thread is not). at(0), not GetNextProactor():
+  // the latter would shift the round-robin AddListener uses to spread accept loops.
+  pool->at(0)->Await([&] {
     res = make_unique<Listener>(std::forward<Args>(args)...);
     res->SetConnFiberStackSize(kFiberDefaultStackSize);
   });

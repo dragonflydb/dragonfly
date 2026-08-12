@@ -7,6 +7,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
@@ -16,11 +17,13 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
+#include "util/accept_server.h"
 
 ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
@@ -1098,6 +1101,30 @@ TEST_F(DflyEngineTest, ExpireInlineKeyAccounting) {
   EXPECT_EQ(stats.inline_keys, 0u);
   EXPECT_EQ(stats.expire_count, 0u);
   EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
+}
+
+// AddListener picks the accept-loop proactor via the pool's shared round-robin, so listener
+// construction (see MakeListener in dfly_main.cc) must not call GetNextProactor() in between —
+// that would stack several accept loops on one proactor.
+TEST_F(DflyEngineTest, ListenerAcceptLoopDistribution) {
+  util::AcceptServer acceptor{pp_.get(), /*break_on_int=*/false};
+  const size_t kListeners = 3;
+  ASSERT_LE(kListeners, pp_->size());
+
+  std::vector<facade::Listener*> listeners;
+  for (size_t i = 0; i < kListeners; ++i) {
+    facade::Listener* listener = nullptr;
+    // Construct on a fixed proactor, mirroring MakeListener.
+    pp_->at(0)->Await(
+        [&] { listener = new facade::Listener(facade::Protocol::REDIS, service_.get()); });
+    ASSERT_FALSE(acceptor.AddListener("localhost", 0, listener));  // Takes ownership.
+    listeners.push_back(listener);
+  }
+
+  absl::flat_hash_set<util::ProactorBase*> accept_proactors;
+  for (facade::Listener* listener : listeners)
+    accept_proactors.insert(listener->socket()->proactor());
+  EXPECT_EQ(kListeners, accept_proactors.size());
 }
 
 class DflyCommandAliasTest : public DflyEngineTest {

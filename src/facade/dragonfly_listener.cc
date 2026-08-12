@@ -249,33 +249,16 @@ error_code Listener::ConfigureServerSocket(int fd) {
 
 bool Listener::ReconfigureTLS() {
 #ifdef DFLY_USE_SSL
-  SSL_CTX* prev_ctx = ctx_;
-  const bool tls_on_privileged_port = !GetFlag(FLAGS_no_tls_on_admin_port);
-
-  if (GetFlag(FLAGS_tls) && (!IsPrivilegedInterface() || tls_on_privileged_port)) {
-    SSL_CTX* ctx = CreateSslCntx(facade::TlsContextRole::SERVER);
+  SSL_CTX* ctx = nullptr;
+  if (GetFlag(FLAGS_tls)) {
+    ctx = CreateSslCntx(facade::TlsContextRole::SERVER);
     if (!ctx) {
       return false;
     }
-    ctx_ = ctx;
-    X509* cert = SSL_CTX_get0_certificate(ctx);
-    auto info = ParseTlsCertInfo(cert);
-    {
-      util::fb2::LockGuard lk(tls_cert_info_mu_);
-      tls_cert_info_ = info ? std::make_shared<const TlsCertInfo>(*info) : nullptr;
-    }
-  } else {
-    ctx_ = nullptr;
-    {
-      util::fb2::LockGuard lk(tls_cert_info_mu_);
-      tls_cert_info_.reset();
-    }
   }
-
-  if (prev_ctx) {
-    // SSL_CTX is reference counted so if other connections have a reference
-    // to the context it won't be freed yet.
-    SSL_CTX_free(prev_ctx);
+  ApplyTlsCtx(ctx);
+  if (ctx) {
+    SSL_CTX_free(ctx);
   }
 #endif
   return true;

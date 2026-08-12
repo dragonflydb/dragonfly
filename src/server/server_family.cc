@@ -2547,7 +2547,11 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
     result.Merge(partial);
 
   // The per-thread deltas are read at slightly different moments, so the sum can transiently
-  // dip below zero.
+  // dip below zero; a large negative value however means an accounting leak.
+  constexpr int64_t kTlsAccountingDipThreshold = -1024 * 1024;
+  if (result.tls_bytes < kTlsAccountingDipThreshold) {
+    LOG_EVERY_T(WARNING, 60) << "tls_bytes accounting went negative: " << result.tls_bytes;
+  }
   result.tls_bytes = std::max<int64_t>(0, result.tls_bytes);
 
 #ifdef WITH_SEARCH
