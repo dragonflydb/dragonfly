@@ -20,9 +20,15 @@
 #ifdef WITH_SEARCH
 #include "server/search/doc_index.h"
 #endif
+#include "core/detail/listpack_wrap.h"
 #include "server/test_utils.h"
+#include "server/tiering/decoders.h"
 #include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
+
+extern "C" {
+#include "redis/zmalloc.h"
+}
 
 using namespace std;
 using namespace testing;
@@ -936,6 +942,49 @@ TEST_F(PureDiskTSTest, OffloadedStringSnapshotPreservesMemcacheFlags) {
   EXPECT_THAT(
       RunMC(MemcacheParser::GET, key),
       ElementsAre(absl::StrCat("VALUE ", key, " ", kFlags, " ", value.size()), value, "END"));
+}
+
+// Snapshot baselines are built with UploadCopy on a decoder possibly shared with coalesced
+// modify-reads. It must expose their modifications (post-image) without consuming them:
+// their journal entries may never reach the replica, and NotifyFetched uploads afterwards.
+TEST_F(TieredStorageTest, DecoderUploadCopyKeepsSharedState) {
+  pp_->at(0)->AwaitBrief([] {
+    // STRING: non-ascii bytes keep NONE encoding, so the raw slice equals the plain value.
+    const string base(100, '\xF1');
+    PrimeValue src{base};
+    tiering::StringDecoder dec{src};
+    dec.Initialize(base);
+    dec.Write()->append(":1:");  // simulate a coalesced APPEND
+
+    PrimeValue stub;
+    stub.SetExternal(0, base.size(), CompactObj::ExternalRep::STRING);
+    dec.UploadCopy(&stub);
+    EXPECT_EQ(stub.ToString(), absl::StrCat(base, ":1:"));
+    EXPECT_TRUE(dec.GetMetrics().modified);
+
+    PrimeValue upload_target;
+    upload_target.SetExternal(0, base.size(), CompactObj::ExternalRep::STRING);
+    dec.Upload(&upload_target);  // NotifyFetched still sees the modification
+    EXPECT_EQ(upload_target.ToString(), absl::StrCat(base, ":1:"));
+
+    // SERIALIZED_MAP: same contract for hashes.
+    auto lw = detail::ListpackWrap::WithCapacity(64);
+    lw.Insert("f1", "v1", false);
+    string blob{reinterpret_cast<const char*>(lw.GetPointer()), lw.UsedBytes()};
+    zfree(lw.GetPointer());
+
+    tiering::ListpackMapDecoder mdec;
+    mdec.Initialize(blob);
+    mdec.GetMutable()->Insert("f2", "v2", false);  // simulate a coalesced HSET
+
+    PrimeValue mstub;
+    mstub.SetExternal(0, blob.size(), CompactObj::ExternalRep::SERIALIZED_MAP);
+    mdec.UploadCopy(&mstub);
+    ASSERT_EQ(mstub.ObjType(), OBJ_HASH);
+    auto view = detail::ListpackWrap::Readonly(static_cast<uint8_t*>(mstub.RObjPtr()));
+    EXPECT_EQ(view.size(), 2u);
+    EXPECT_TRUE(mdec.GetMetrics().modified);
+  });
 }
 
 TEST_F(PureDiskTSTest, OffloadedHashSnapshotReload) {

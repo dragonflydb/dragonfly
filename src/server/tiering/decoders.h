@@ -50,6 +50,10 @@ struct BareDecoder : public Decoder {
   UploadMetrics GetMetrics() const override;
   void Upload(void* obj) override;
 
+  // Upload the current (possibly modified) state without consuming decoder state.
+  // Safe to call on a decoder shared by coalesced reads.
+  virtual void UploadCopy(void* obj) const;
+
   std::string_view slice;
 };
 
@@ -61,6 +65,7 @@ struct StringDecoder : public BareDecoder {
   void Initialize(std::string_view slice) override;
   UploadMetrics GetMetrics() const override;
   void Upload(void* obj) override;
+  void UploadCopy(void* obj) const override;
 
   std::string_view GetView() const {
     return value_.view();
@@ -83,6 +88,7 @@ struct ListpackMapDecoder : public BareDecoder {
   std::unique_ptr<Decoder> Clone() const override;
   UploadMetrics GetMetrics() const override;
   void Upload(void* obj) override;
+  void UploadCopy(void* obj) const override;
 
   // Read-only view over the raw disk buffer (no allocation)
   dfly::detail::ListpackWrap Get() const;

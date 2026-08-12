@@ -1022,10 +1022,9 @@ TieredStorage::TResult<PrimeValue> ReadTieredValue(DbIndex dbid, std::string_vie
       return;
     }
 
-    // Upload from a local decoder: the stored one may be shared by coalesced reads.
-    tiering::BareDecoder detached;
-    detached.slice = (*res)->slice;
-    detached.Upload(stub.get());
+    // Include modifications applied by coalesced reads: their journal entries may never reach
+    // the replica, so the baseline must carry their effects.
+    (*res)->UploadCopy(stub.get());
     future.Resolve(io::Result<PrimeValue>{std::move(*stub)});
   };
   ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::BareDecoder{}, std::move(cb));

@@ -27,6 +27,10 @@ void BareDecoder::Initialize(std::string_view slice) {
 }
 
 void BareDecoder::Upload(void* obj) {
+  UploadCopy(obj);
+}
+
+void BareDecoder::UploadCopy(void* obj) const {
   auto* compact_obj = static_cast<CompactObj*>(obj);
   switch (compact_obj->GetExternalRep()) {
     case CompactObj::ExternalRep::STRING:
@@ -64,6 +68,10 @@ void StringDecoder::Initialize(std::string_view slice) {
 }
 
 void StringDecoder::Upload(void* obj) {
+  UploadCopy(obj);
+}
+
+void StringDecoder::UploadCopy(void* obj) const {
   CompactObj* compact_obj = reinterpret_cast<CompactObj*>(obj);
   if (modified_)
     compact_obj->Materialize(value_.view(), false);
@@ -109,6 +117,14 @@ void ListpackMapDecoder::Upload(void* robj) {
 
   obj->InitRobj(OBJ_HASH, kEncodingListPack, owned_lw_->GetPointer());
   owned_lw_.reset();
+}
+
+void ListpackMapDecoder::UploadCopy(void* robj) const {
+  auto source = Get();
+  std::string_view bytes{reinterpret_cast<const char*>(source.GetPointer()), source.UsedBytes()};
+  ListpackMapDecoder detached;
+  detached.Initialize(bytes);
+  detached.Upload(robj);
 }
 
 detail::ListpackWrap ListpackMapDecoder::Get() const {
