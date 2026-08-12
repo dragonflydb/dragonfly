@@ -1009,34 +1009,24 @@ TieredStorage::TResult<PrimeValue> ReadTieredValue(DbIndex dbid, std::string_vie
   DCHECK(value.IsExternal());
   DCHECK(!value.IsCool());
 
+  DCHECK(value.GetExternalRep() != CompactObj::ExternalRep::LIST_NODE);
+
+  // Clone the source stub so Upload sees its representation, encoding and flags.
+  auto stub = std::make_shared<PrimeValue>();
+  static_cast<CompactObj&>(*stub) = value.CloneExternal();
+
   TieredStorage::TResult<PrimeValue> future;
-  auto cb = [future, rep = value.GetExternalRep(), enc = value.GetStrEncoding(),
-             has_flag = value.HasFlag()](io::Result<tiering::BareDecoder*> res) mutable {
+  auto cb = [future, stub = std::move(stub)](io::Result<tiering::BareDecoder*> res) mutable {
     if (!res) {
       future.Resolve(res.get_unexpected());
       return;
     }
 
-    // Decode from the raw slice: the stored decoder may be shared by coalesced reads.
-    string_view slice = (*res)->slice;
-    PrimeValue pv;
-    switch (rep) {
-      case CompactObj::ExternalRep::STRING:
-        pv = PrimeValue{enc.Decode(slice).view()};
-        break;
-      case CompactObj::ExternalRep::SERIALIZED_MAP: {
-        tiering::ListpackMapDecoder detached;
-        detached.Initialize(slice);
-        detached.Upload(&pv);
-        break;
-      }
-      case CompactObj::ExternalRep::LIST_NODE:
-        future.Resolve(
-            nonstd::make_unexpected(std::make_error_code(std::errc::operation_not_supported)));
-        return;
-    }
-    pv.SetFlag(has_flag);
-    future.Resolve(io::Result<PrimeValue>{std::move(pv)});
+    // Upload from a local decoder: the stored one may be shared by coalesced reads.
+    tiering::BareDecoder detached;
+    detached.slice = (*res)->slice;
+    detached.Upload(stub.get());
+    future.Resolve(io::Result<PrimeValue>{std::move(*stub)});
   };
   ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::BareDecoder{}, std::move(cb));
   return future;

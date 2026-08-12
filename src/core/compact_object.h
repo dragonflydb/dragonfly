@@ -426,6 +426,9 @@ class CompactObj {
   void SetExternal(size_t offset, uint32_t sz, ExternalRep rep);
   ExternalRep GetExternalRep() const;
 
+  // Clone a non-cool external stub: copies representation, disk segment, encoding and mask bits.
+  CompactObj CloneExternal() const;
+
   // Switches to empty, non-external string.
   // Preserves all the attributes.
   void RemoveExternal() {
