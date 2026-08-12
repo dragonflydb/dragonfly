@@ -20,9 +20,15 @@
 #ifdef WITH_SEARCH
 #include "server/search/doc_index.h"
 #endif
+#include "core/detail/listpack_wrap.h"
 #include "server/test_utils.h"
+#include "server/tiering/decoders.h"
 #include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
+
+extern "C" {
+#include "redis/zmalloc.h"
+}
 
 using namespace std;
 using namespace testing;
@@ -904,6 +910,150 @@ TEST_F(PureDiskTSTest, Dump) {
   EXPECT_THAT(Run({"del", "k0"}), IntArg(1));
   resp = Run({"restore", "k0", "0", facade::ToSV(resp.GetBuf())});
   EXPECT_EQ(resp, "OK");
+}
+
+TEST_F(PureDiskTSTest, OffloadedStringSnapshotPreservesMemcacheFlags) {
+  SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
+  InitWithDbFilename();
+
+  constexpr uint32_t kFlags = 0x12345678;
+  const string key = "mc-flags";
+  const string value = BuildString(3000, 'm');
+  ASSERT_EQ(Run({"SET", key, value, "_MCFLAGS", absl::StrCat(kFlags)}), "OK");
+
+  auto is_offloaded_string_with_flags = [this, &key] {
+    bool result = false;
+    pp_->at(0)->AwaitBrief([&] {
+      EngineShard* shard = EngineShard::tlocal();
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+      auto it = db.GetDBTable(0)->prime.Find(key);
+      result = IsValid(it) && it->second.IsExternal() && !it->second.IsCool() &&
+               it->second.ObjType() == OBJ_STRING &&
+               it->second.GetExternalRep() == CompactObj::ExternalRep::STRING &&
+               it->second.HasFlag();
+    });
+    return result;
+  };
+  ExpectConditionWithinTimeout(is_offloaded_string_with_flags);
+  ASSERT_TRUE(is_offloaded_string_with_flags());
+
+  ASSERT_EQ(Run({"DEBUG", "RELOAD"}), "OK");
+
+  EXPECT_THAT(
+      RunMC(MemcacheParser::GET, key),
+      ElementsAre(absl::StrCat("VALUE ", key, " ", kFlags, " ", value.size()), value, "END"));
+}
+
+// Snapshot baselines are built with UploadCopy on a decoder possibly shared with coalesced
+// modify-reads. It must expose their modifications (post-image) without consuming them:
+// their journal entries may never reach the replica, and NotifyFetched uploads afterwards.
+TEST_F(TieredStorageTest, DecoderUploadCopyKeepsSharedState) {
+  pp_->at(0)->AwaitBrief([] {
+    // STRING: non-ascii bytes keep NONE encoding, so the raw slice equals the plain value.
+    const string base(100, '\xF1');
+    PrimeValue src{base};
+    tiering::StringDecoder dec{src};
+    dec.Initialize(base);
+    dec.Write()->append(":1:");  // simulate a coalesced APPEND
+
+    PrimeValue stub;
+    stub.SetExternal(0, base.size(), CompactObj::ExternalRep::STRING);
+    dec.UploadCopy(&stub);
+    EXPECT_EQ(stub.ToString(), absl::StrCat(base, ":1:"));
+    EXPECT_TRUE(dec.GetMetrics().modified);
+
+    PrimeValue upload_target;
+    upload_target.SetExternal(0, base.size(), CompactObj::ExternalRep::STRING);
+    dec.Upload(&upload_target);  // NotifyFetched still sees the modification
+    EXPECT_EQ(upload_target.ToString(), absl::StrCat(base, ":1:"));
+
+    // SERIALIZED_MAP: same contract for hashes.
+    auto lw = detail::ListpackWrap::WithCapacity(64);
+    lw.Insert("f1", "v1", false);
+    string blob{reinterpret_cast<const char*>(lw.GetPointer()), lw.UsedBytes()};
+    zfree(lw.GetPointer());
+
+    tiering::ListpackMapDecoder mdec;
+    mdec.Initialize(blob);
+    mdec.GetMutable()->Insert("f2", "v2", false);  // simulate a coalesced HSET
+
+    PrimeValue mstub;
+    mstub.SetExternal(0, blob.size(), CompactObj::ExternalRep::SERIALIZED_MAP);
+    mdec.UploadCopy(&mstub);
+    ASSERT_EQ(mstub.ObjType(), OBJ_HASH);
+    auto view = detail::ListpackWrap::Readonly(static_cast<uint8_t*>(mstub.RObjPtr()));
+    EXPECT_EQ(view.size(), 2u);
+    EXPECT_TRUE(mdec.GetMetrics().modified);
+  });
+}
+
+TEST_F(PureDiskTSTest, OffloadedHashSnapshotReload) {
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
+  InitWithDbFilename();
+
+  constexpr size_t kNumHashes = 100;
+  auto key_for = [](size_t index) { return absl::StrCat("hash:", index); };
+  // Individual fields stay listpack-compatible while each complete hash exceeds the tiering
+  // minimum. Multiple hashes fill the small-bin pages and guarantee at least one offload.
+  auto value_for = [](size_t index, char fill) {
+    return absl::StrCat(BuildString(40, fill), ":", index);
+  };
+
+  for (size_t i = 0; i < kNumHashes; ++i) {
+    Run({"HSET", key_for(i), "field-a", value_for(i, 'a'), "field-b", value_for(i, 'b')});
+  }
+
+  optional<size_t> target_index;
+  auto find_offloaded_hash = [this, &target_index, &key_for] {
+    bool result = false;
+    pp_->at(0)->AwaitBrief([&] {
+      EngineShard* shard = EngineShard::tlocal();
+      auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+      for (size_t i = 0; i < kNumHashes; ++i) {
+        auto it = db.GetDBTable(0)->prime.Find(key_for(i));
+        if (IsValid(it) && it->second.IsExternal() && !it->second.IsCool() &&
+            it->second.ObjType() == OBJ_HASH &&
+            it->second.GetExternalRep() == CompactObj::ExternalRep::SERIALIZED_MAP) {
+          target_index = i;
+          result = true;
+          break;
+        }
+      }
+    });
+    return result;
+  };
+  ExpectConditionWithinTimeout(find_offloaded_hash);
+  ASSERT_TRUE(target_index.has_value());
+  const string target = key_for(*target_index);
+
+  auto dump = Run({"DUMP", target});
+  ASSERT_EQ(Run({"RESTORE", "restored-hash", "0", facade::ToSV(dump.GetBuf())}), "OK");
+  EXPECT_EQ(Run({"TYPE", "restored-hash"}), "hash");
+  EXPECT_THAT(Run({"HLEN", "restored-hash"}), IntArg(2));
+  EXPECT_EQ(Run({"HGET", "restored-hash", "field-a"}), value_for(*target_index, 'a'));
+  EXPECT_EQ(Run({"HGET", "restored-hash", "field-b"}), value_for(*target_index, 'b'));
+  EXPECT_THAT(Run({"DEL", "restored-hash"}), IntArg(1));
+
+  // COPY drives Renamer::SerializeSrc, the second DumpToString caller.
+  EXPECT_THAT(Run({"COPY", target, "copied-hash"}), IntArg(1));
+  EXPECT_EQ(Run({"TYPE", "copied-hash"}), "hash");
+  EXPECT_THAT(Run({"HLEN", "copied-hash"}), IntArg(2));
+  EXPECT_EQ(Run({"HGET", "copied-hash", "field-a"}), value_for(*target_index, 'a'));
+  EXPECT_EQ(Run({"HGET", "copied-hash", "field-b"}), value_for(*target_index, 'b'));
+  EXPECT_THAT(Run({"DEL", "copied-hash"}), IntArg(1));
+
+  ASSERT_EQ(Run({"DEBUG", "RELOAD"}), "OK");
+
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(kNumHashes));
+  for (size_t i = 0; i < kNumHashes; ++i) {
+    SCOPED_TRACE(i);
+    const string key = key_for(i);
+    EXPECT_EQ(Run({"TYPE", key}), "hash");
+    EXPECT_THAT(Run({"HLEN", key}), IntArg(2));
+    EXPECT_EQ(Run({"HGET", key, "field-a"}), value_for(i, 'a'));
+    EXPECT_EQ(Run({"HGET", key, "field-b"}), value_for(i, 'b'));
+  }
 }
 
 TEST_P(LatentCoolingTSTest, SimpleHash) {

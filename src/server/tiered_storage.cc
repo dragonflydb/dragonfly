@@ -991,11 +991,43 @@ void TieredStorage::StashPartialValue(tiering::PendingId id, const StashDescript
 
 void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
                 function<void(io::Result<string_view>)> readf, TieredStorage* ts) {
+  if (!value.IsExternal() || value.GetExternalRep() != CompactObj::ExternalRep::STRING) {
+    readf(nonstd::make_unexpected(make_error_code(errc::invalid_argument)));
+    return;
+  }
+
   auto cb = [readf = std::move(readf)](io::Result<tiering::StringDecoder*> res) mutable {
     readf(res.transform([](tiering::StringDecoder* d) { return d->GetView(); }));
   };
   ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::StringDecoder{value},
            std::move(cb));
+}
+
+TieredStorage::TResult<PrimeValue> ReadTieredValue(DbIndex dbid, std::string_view key,
+                                                   const PrimeValue& value, TieredStorage* ts) {
+  DCHECK(value.IsExternal());
+  DCHECK(!value.IsCool());
+
+  DCHECK(value.GetExternalRep() != CompactObj::ExternalRep::LIST_NODE);
+
+  // Clone the source stub so Upload sees its representation, encoding and flags.
+  auto stub = std::make_shared<PrimeValue>();
+  static_cast<CompactObj&>(*stub) = value.CloneExternal();
+
+  TieredStorage::TResult<PrimeValue> future;
+  auto cb = [future, stub = std::move(stub)](io::Result<tiering::BareDecoder*> res) mutable {
+    if (!res) {
+      future.Resolve(res.get_unexpected());
+      return;
+    }
+
+    // Include modifications applied by coalesced reads: their journal entries may never reach
+    // the replica, so the baseline must carry their effects.
+    (*res)->UploadCopy(stub.get());
+    future.Resolve(io::Result<PrimeValue>{std::move(*stub)});
+  };
+  ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::BareDecoder{}, std::move(cb));
+  return future;
 }
 
 TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::Node* node,

@@ -1416,6 +1416,17 @@ CompactObj::ExternalRep CompactObj::GetExternalRep() const {
   return static_cast<CompactObj::ExternalRep>(u_.ext_ptr.representation);
 }
 
+CompactObj CompactObj::CloneExternal() const {
+  DCHECK(IsExternal() && !IsCool());
+
+  CompactObj res{is_key_};
+  res.taglen_ = taglen_;
+  res.mask_ = mask_;
+  res.encoding_ = encoding_;
+  res.u_.ext_ptr = u_.ext_ptr;
+  return res;
+}
+
 void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
                          tiering::TieredCoolRecord* record) {
   encoding_ = record->value.encoding_;

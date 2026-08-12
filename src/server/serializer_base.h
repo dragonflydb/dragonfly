@@ -86,7 +86,7 @@ struct BucketDependencies {
 struct TieredDelayedEntry {
   DbIndex dbid;
   PrimeKey key;
-  util::fb2::Future<io::Result<std::string>> value;
+  util::fb2::Future<io::Result<PrimeValue>> value;
   time_t expire;
   uint32_t mc_flags;
 };

@@ -41,7 +41,7 @@ namespace dfly {
 // Driver for "artificially" resolving delayed entries with some delay
 // driven by a fiber in the background
 struct TestDelayDriver {
-  using Fut = util::fb2::Future<io::Result<std::string>>;
+  using Fut = util::fb2::Future<io::Result<PrimeValue>>;
   using OrdEntry = std::pair<std::chrono::steady_clock::time_point, Fut>;
 
   struct Comp {
@@ -68,7 +68,7 @@ struct TestDelayDriver {
         q_.pop();
 
         util::ThisFiber::SleepUntil(entry.first);
-        entry.second.Resolve(std::string{});
+        entry.second.Resolve(PrimeValue{});
       }
     }
   }

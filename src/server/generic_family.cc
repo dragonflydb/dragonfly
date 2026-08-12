@@ -300,12 +300,11 @@ OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArg
   if (pv.IsExternal() && !pv.IsCool()) {
     // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
     auto res =
-        ReadTieredString(op_args.db_cntx.db_index, key, pv, op_args.shard->tiered_storage()).Get();
+        ReadTieredValue(op_args.db_cntx.db_index, key, pv, op_args.shard->tiered_storage()).Get();
     if (!res.has_value())
       return OpStatus::IO_ERROR;
 
-    // TODO: allow saving string directly without proxy object
-    str_res = RdbSerializer::DumpValue(PrimeValue{*res});
+    str_res = RdbSerializer::DumpValue(*res);
   } else {
     str_res = RdbSerializer::DumpValue(pv);
   }
