@@ -3084,10 +3084,9 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists");
   };
 
-  // Re-resolves the streams owned by a single shard. Never trusts the cached streamCG*: background
-  // deletions (slot flush, eviction) bypass intent locks, so a stream may have been freed since it
-  // was last seen. Returns INVALID_VALUE for a missing stream or group, WRONG_TYPE if the key was
-  // replaced by another type.
+  // Re-resolves the streams owned by a single shard. The cached streamCG* predates the wake: the
+  // waking transaction can drop the group or replace the key. Returns INVALID_VALUE for a missing
+  // stream or group, WRONG_TYPE if the key was replaced by another type.
   auto validate_shard_keys = [&](const OpArgs& op_args, const ShardArgs& keys) {
     OpStatus status = OpStatus::OK;
     for (string_view skey : keys) {
@@ -3112,14 +3111,11 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   // While we were blocked any of the watched streams could have been deleted, retyped or lost its
   // consumer group. XREADGROUP mutates the stream (it moves entries into the consumer PEL), so it
   // must not touch the woken key if another stream already invalidated the request. Streams on the
-  // woken shard are validated inside the action hop for free, so only reads that actually span
-  // shards pay for this extra hop.
-  // Note this must not be folded into the action hop with a cross shard barrier: waiting for
-  // sibling shards from inside a transaction callback stalls the whole shard and can deadlock two
-  // interleaved multi shard readers.
+  // woken shard are validated inside the action hop, so only cross shard reads pay for this hop.
+  // It cannot be folded into the action hop: waiting for sibling shards from inside a transaction
+  // callback stalls the shard and can deadlock two interleaved multi shard readers.
   if (opts->read_group && tx->GetUniqueShardCnt() > 1) {
-    // Indexed by shard id - every shard writes only its own slot, so no synchronization is needed
-    // beyond the hop boundary.
+    // Indexed by shard id; each shard writes only its own slot.
     vector<OpStatus> validation_status(shard_set->size(), OpStatus::OK);
 
     auto validate_cb = [&](Transaction* t, EngineShard* shard) {
