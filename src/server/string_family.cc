@@ -126,12 +126,12 @@ class SetCmd {
   OpStatus SetExisting(const SetParams& params, std::string_view value,
                        DbSlice::ItAndUpdater* it_upd);
 
-  void AddNew(const SetParams& params, const DbSlice::Iterator& it, std::string_view key,
+  void AddNew(const SetParams& params, DbSlice::ItAndUpdater& it_upd, std::string_view key,
               std::string_view value);
 
   // Called at the end of AddNew of SetExisting
   void PostEdit(const SetParams& params, std::string_view key, std::string_view value, PrimeKey* pk,
-                PrimeValue* pv);
+                PrimeValue* pv, DbSlice::AutoUpdater& post_updater);
 
   void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);
 
@@ -938,10 +938,10 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
       return status;
 
     return SetExisting(params, value, &(*op_res));
-  } else {
-    AddNew(params, op_res->it, key, value);
-    return OpStatus::OK;
   }
+
+  AddNew(params, *op_res, key, value);
+  return OpStatus::OK;
 }
 
 OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
@@ -990,13 +990,14 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 
   DCHECK_EQ(has_expire, key.HasExpire());
 
-  PostEdit(params, it_upd->it.key(), value, &key, &prime_value);
+  PostEdit(params, it_upd->it.key(), value, &key, &prime_value, it_upd->post_updater);
   return OpStatus::OK;
 }
 
-void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::string_view key,
+void SetCmd::AddNew(const SetParams& params, DbSlice::ItAndUpdater& it_upd, std::string_view key,
                     std::string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
+  const auto& it = it_upd.it;
   it->second = PrimeValue{value};
 
   if (params.expire_after_ms) {
@@ -1013,11 +1014,14 @@ void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::s
     it->first.SetSticky(true);
   }
 
-  PostEdit(params, key, value, &it->first, &it->second);
+  PostEdit(params, key, value, &it->first, &it->second, it_upd.post_updater);
 }
 
 void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string_view value,
-                      PrimeKey* pk, PrimeValue* pv) {
+                      PrimeKey* pk, PrimeValue* pv, DbSlice::AutoUpdater& post_updater) {
+  // Finish accounting before an offload or journal operation can suspend this fiber. Otherwise,
+  // a concurrent stash can subtract the value's memory before this update adds it.
+  post_updater.Run();
   EngineShard* shard = op_args_.shard;
 
   // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.

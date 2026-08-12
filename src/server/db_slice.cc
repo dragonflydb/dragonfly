@@ -385,7 +385,8 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable*
   if (delta < 0 && slot_memory < uint64_t(-delta)) {
     // Legacy glog used in release builds does not support LOG_EVERY_T(DFATAL, ...).
     LOG_EVERY_T(ERROR, 1) << "Encountered underflow of per-slot memory usage: " << slot_memory
-                          << " + " << delta << ", slot: " << sid;
+                          << " + " << delta << ", slot: " << sid
+                          << ", object type: " << ObjTypeToString(type) << " (" << type << ")";
     DCHECK(false);
     delta = -int64_t(slot_memory);
   }
