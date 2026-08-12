@@ -2,10 +2,12 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest-matchers.h>
 
+#include <atomic>
 #include <string>
 #include <string_view>
 
@@ -20,9 +22,13 @@
 #include "core/detail/gen_utils.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "facade/facade_test.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/test_utils.h"
 #include "server/tiered_storage.h"
+#include "util/fibers/fibers.h"
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
 
@@ -726,6 +732,22 @@ class ClusterTieredTest : public ClusterMemoryTest {
         [this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0u; });
   }
 
+  void PadSlot(string_view tag, int count) {
+    const string value(48, 'p');
+    for (int i = 0; i < count; ++i)
+      Run({"SET", absl::StrCat("{", tag, "}p", i), value});
+    ASSERT_EQ(CheckedInt({"DBSIZE"}), count);
+  }
+
+  uint32_t StartJournalWithConsumer(journal::JournalConsumerInterface* consumer) {
+    uint32_t id = 0;
+    pp_->at(0)->AwaitBrief([&] {
+      journal::StartInThread();
+      id = journal::RegisterConsumer(consumer);
+    });
+    return id;
+  }
+
   std::optional<absl::FlagSaver> flag_saver_;
 };
 
@@ -849,6 +871,101 @@ TEST_F(ClusterTieredTest, SlotCountersReleasedOnConfigSlotRemoval) {
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 
   ExpectSlotEmpty(1);
+}
+
+// Helper to block a command until the stash operation completes
+class WaitTillStash : public journal::JournalConsumerInterface {
+ public:
+  explicit WaitTillStash(string key) : key_(std::move(key)) {
+  }
+
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+    if (item.cmd != "SET" || done_.load(std::memory_order_relaxed) || item.slot != KeySlot(key_))
+      return;
+
+    const absl::Time deadline = absl::Now() + absl::Seconds(5);
+    while (absl::Now() < deadline) {
+      auto& db_slice =
+          namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+      if (auto it = db_slice.GetDBTable(0)->prime.Find(key_);
+          IsValid(it) && it->second.IsExternal()) {
+        done_.store(true, std::memory_order_relaxed);
+        return;
+      }
+      util::ThisFiber::SleepFor(chrono::microseconds(100));
+    }
+  }
+
+  void ThrottleIfNeeded() override {
+  }
+
+  bool done() const {
+    return done_.load(std::memory_order_relaxed);
+  }
+
+ private:
+  string key_;
+  std::atomic_bool done_{false};
+};
+
+TEST_F(ClusterTieredTest, SetCmdAccounting) {
+  // tests that if a value is set which is stashed, then the accounting is correct, ie in order:
+  // 1. size is added to memory accounting
+  // 2. size is removed by stash operation
+  // 3. sum total of operations remains 0
+  // Fixes a bug where step 2 happened before step 1, and then step 1 computed size as 0
+  constexpr string_view kTag = "t";
+  const string kKey = absl::StrCat("{", kTag, "}k");
+  const SlotId slot = KeySlot(kKey);
+
+  // fill slot memory, so that we do not hit the DCHECK (value < delta), instead we just get wrong
+  // numbers after update
+  PadSlot(kTag, 512);
+  const int64_t slot_baseline = RawSlotMemory(slot);
+  const size_t db_baseline = GetMetrics().db_stats[0].obj_memory_usage;
+  ASSERT_GT(slot_baseline, 4096);
+
+  WaitTillStash waiter{kKey};
+  // will not let SET command finish until stash is done
+  const uint32_t consumer_id = StartJournalWithConsumer(&waiter);
+  absl::Cleanup unregister = [&] {
+    pp_->at(0)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+
+  ASSERT_TRUE(waiter.done()) << "the stash did not complete inside SET";
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(RawSlotMemory(slot), slot_baseline);
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, db_baseline);
+}
+
+TEST_F(ClusterTieredTest, SetCmdAccountingOverWrite) {
+  constexpr string_view kTag = "t";
+  const string kKey = absl::StrCat("{", kTag, "}k");
+  const SlotId slot = KeySlot(kKey);
+
+  PadSlot(kTag, 512);
+  const int64_t slot_baseline = RawSlotMemory(slot);
+  const size_t db_baseline = GetMetrics().db_stats[0].obj_memory_usage;
+  ASSERT_GT(slot_baseline, 4096);
+
+  EXPECT_EQ(Run({"SET", kKey, string(48, 'a')}), "OK");
+
+  WaitTillStash waiter{kKey};
+  const uint32_t consumer_id = StartJournalWithConsumer(&waiter);
+  absl::Cleanup unregister = [&] {
+    pp_->at(0)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+
+  ASSERT_TRUE(waiter.done()) << "the stash did not complete inside SET";
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(RawSlotMemory(slot), slot_baseline);
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, db_baseline);
 }
 
 class ClusterTieredCoolingTest : public ClusterTieredTest {

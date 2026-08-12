@@ -375,18 +375,25 @@ template <typename F> struct CallbackConsumer : public DbSlice::ChangeConsumerIn
 namespace {
 
 void UpdateSlotStat(string_view key, int64_t delta, DbTable* db, uint64_t SlotStats::*stat,
-                    string_view name) {
+                    string_view name, std::optional<unsigned> obj_type = std::nullopt) {
   if (delta == 0 || !db->slots_stats)
     return;
 
   const SlotId sid = KeySlot(key);
   uint64_t& value = db->slots_stats[sid].*stat;
-  if (delta < 0 && value < uint64_t(-delta)) {
+  if (delta < 0 && value < static_cast<uint64_t>(-delta)) {
     // Legacy glog used in release builds does not support LOG_EVERY_T(DFATAL, ...).
-    LOG_EVERY_T(ERROR, 1) << "Encountered underflow of per-slot " << name << ": " << value << " + "
-                          << delta << ", slot: " << sid;
+    if (obj_type) {
+      LOG_EVERY_T(ERROR, 1) << "Encountered underflow of per-slot " << name << ": " << value
+                            << " + " << delta << ", slot: " << sid
+                            << ", object type: " << ObjTypeToString(*obj_type) << " (" << *obj_type
+                            << ")";
+    } else {
+      LOG_EVERY_T(ERROR, 1) << "Encountered underflow of per-slot " << name << ": " << value
+                            << " + " << delta << ", slot: " << sid;
+    }
     DCHECK(false);
-    delta = -int64_t(value);
+    delta = -static_cast<int64_t>(value);
   }
   value += delta;
 }
@@ -399,7 +406,7 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable*
     return;
 
   db->stats.AddTypeMemoryUsage(type, delta);
-  UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage");
+  UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage", type);
 }
 
 void AccountSlotTieredBytes(string_view key, int64_t delta, DbTable* db) {
