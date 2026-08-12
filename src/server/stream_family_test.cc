@@ -142,6 +142,20 @@ TEST_F(StreamFamilyTest, GroupCreate) {
   EXPECT_THAT(resp, ErrArg("BUSYGROUP"));
 }
 
+TEST_F(StreamFamilyTest, GroupCreateOnWrongType) {
+  Run({"set", "key", "value"});
+
+  auto resp = Run({"xgroup", "create", "key", "grname", "$"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+
+  resp = Run({"xgroup", "create", "key", "grname", "$", "MKSTREAM"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+
+  // The existing string value must remain untouched.
+  resp = Run({"get", "key"});
+  EXPECT_EQ(resp, "value");
+}
+
 TEST_F(StreamFamilyTest, XRead) {
   Run({"xadd", "foo", "1-*", "k1", "v1"});
   Run({"xadd", "foo", "1-*", "k2", "v2"});
