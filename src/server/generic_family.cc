@@ -1140,6 +1140,14 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
 
   AddKeyToIndexesIfNeeded(to_key, op_args.db_cntx, to_res.it->second, op_args.shard);
 
+  // When tiering is enabled, update tiered-storage metadata to the new key.
+  if (EngineShard::tlocal()->tiered_storage()) {
+    if (to_res.it->second.ObjType() == OBJ_LIST && to_res.it->second.Encoding() == kEncodingQL2) {
+      auto* ql = static_cast<QList*>(to_res.it->second.RObjPtr());
+      ql->SetKey(to_key);
+    }
+  }
+
   auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {
     bc->Awaken(op_args.db_cntx.db_index, to_key);

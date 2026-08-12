@@ -281,7 +281,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   // Finalize stash for a fragments identified by pointer
   void SetExternal(tiering::ListNodeId id, tiering::DiskSegment segment) {
-    auto* stats = GetDbTableStats(std::get<0>(id));
+    DbTable* table = db_slice_.GetDBTable(std::get<0>(id));
+    DbTableStats* stats = &table->stats;
 
     stats->tiered_entries++;
     stats->tiered_used_bytes += segment.length;
@@ -296,7 +297,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     ql->AdjustMallocSize(-segment.length);
     node->SetExternal(segment.offset, segment.length);
 
-    stats->AddTypeMemoryUsage(OBJ_LIST, -segment.length);
+    AccountSlotTieredBytes(ql->GetKey(), segment.length, table);
+    AccountObjectMemory(ql->GetKey(), OBJ_LIST, -int64_t(segment.length), table);
   }
 
   // If any backpressure (throttling) is active, notify that the operation finished
@@ -391,14 +393,11 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
 
   if (const auto* key = std::get_if<tiering::ListNodeId>(&id); key) {
     DbIndex db_id = std::get<0>(*key);
+    QList* ql = reinterpret_cast<QList*>(std::get<1>(*key));
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
     ++stats_.total_uploads;
     decoder->Upload(node);
-    // TODO: per-slot accounting is skipped because node ids carry no slot/key information.
-    auto* stats = GetDbTableStats(db_id);
-    stats->AddTypeMemoryUsage(OBJ_LIST, node->sz);
-    stats->tiered_entries--;
-    stats->tiered_used_bytes -= segment.length;
+    AccountTieredUpload(node, segment.length, ql->GetKey(), db_slice_.GetDBTable(db_id));
     return true;
   }
 
