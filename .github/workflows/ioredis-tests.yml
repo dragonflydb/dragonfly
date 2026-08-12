@@ -1,0 +1,98 @@
+name: ioredis-tests
+
+on:
+  schedule:
+    - cron: '15 7 * * *' # run at 7:15 AM daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22.12.0"
+
+jobs:
+  build:
+    if: github.repository == 'dragonflydb/dragonfly'
+    runs-on: ubuntu-latest
+    name: Build
+    timeout-minutes: 60
+
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Build Dragonfly
+        run: |
+          cmake -B ${GITHUB_WORKSPACE}/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_AWS=OFF \
+            -DWITH_GCP=OFF \
+            -DWITH_UNWIND=OFF \
+            -DWITH_GPERF=OFF \
+            -GNinja \
+            -L
+          cd ${GITHUB_WORKSPACE}/build && ninja dragonfly
+
+      - name: Install Node.js
+        run: |
+          wget -q https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64-glibc-217.tar.xz
+          tar -xf node-v${NODE_VERSION}-linux-x64-glibc-217.tar.xz
+          cp -r node-v${NODE_VERSION}-linux-x64-glibc-217/* /usr/local/
+          apt-get update && apt-get install -y jq redis-tools git
+          node --version
+          npm --version
+
+      - name: Start Dragonfly
+        run: |
+          mkdir -p /tmp/df-logs
+          ${GITHUB_WORKSPACE}/build/dragonfly \
+            --alsologtostderr \
+            --log_dir=/tmp/df-logs \
+            --cluster_mode=emulated \
+            --lock_on_hashtags \
+            --dbfilename= \
+            --port 6379 \
+            >/tmp/df-logs/stdout.log 2>/tmp/df-logs/stderr.log &
+          timeout 15s bash -c 'until redis-cli -p 6379 PING 2>/dev/null | grep -q PONG; do sleep 0.1; done'
+
+      - name: Build ioredis
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          git clone https://github.com/luin/ioredis
+          cd ioredis
+          npm install
+
+      - name: Run ioredis tests
+        run: |
+          cd ${GITHUB_WORKSPACE}/ioredis
+          cp ${GITHUB_WORKSPACE}/tests/integration/.run_ioredis_valid_test.sh ./run_tests.sh
+          chmod +x ./run_tests.sh
+          npm run env -- TS_NODE_TRANSPILE_ONLY=true NODE_ENV=test ./run_tests.sh
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dragonfly-logs
+          path: /tmp/df-logs/
+
+      - name: Send notification on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="ioredis e2e tests failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'

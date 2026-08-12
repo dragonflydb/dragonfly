@@ -121,6 +121,9 @@ be in lower case.
 Integration tests for ioredis client.
 [ioredis](https://github.com/luin/ioredis) is a robust, performance-focused and full-featured Redis client for Node.js.
 It contains a very extensive test coverage for Redis. Currently not all features are supported by Dragonfly.
+These tests also run automatically once a day against `main` via the
+[ioredis-tests](../.github/workflows/ioredis-tests.yml) GitHub Actions workflow (can also be triggered manually
+via `workflow_dispatch`), mirroring the existing `bullmq-tests` workflow.
 As such please use the scripts for running the test successfully -
  **[run_ioredis_on_docker.sh](./integration/run_ioredis_on_docker.sh)**: to run the supported tests on a docker image
  Please note that you can run this script in two forms:
