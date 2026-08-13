@@ -327,6 +327,9 @@ class DbSlice {
   facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it,
                                          const ExpireParams& params);
 
+  // Publishes the expired keyspace event; call AFTER the deletion has been journaled.
+  void SendExpiredKeyEvent(const Context& cntx, std::string_view key) const;
+
   // Adds expiry on a key. If the key already has expiry, updates it.
   void AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at);
 
