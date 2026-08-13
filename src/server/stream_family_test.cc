@@ -374,7 +374,7 @@ TEST_F(StreamFamilyTest, XReadBlock) {
   auto fb2 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     resp3_reply = Run({"xread", "block", "0", "streams", "foo", "$"});
   });
-  ThisFiber::SleepFor(50us);
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
 
   resp = pp_->at(1)->Await([&] { return Run("xadd", {"xadd", "foo", "1-*", "k6", "v6"}); });
 
