@@ -457,6 +457,10 @@ ParseResult<DocIndex> CreateDocIndex(std::string_view name, CmdArgParser* parser
     }
   }
 
+  if (!parser->HasError() && index.schema.fields.empty()) {
+    return CreateSyntaxError("Missing required SCHEMA clause with at least one field"sv);
+  }
+
   return index;
 }
 
