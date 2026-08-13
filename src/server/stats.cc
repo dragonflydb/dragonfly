@@ -11,7 +11,7 @@ namespace dfly {
 #define ADD(x) (x) += o.x
 
 TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 176);
+  static_assert(sizeof(TieredStats) == 184);
 
   ADD(total_stashes);
   ADD(total_fetches);
@@ -36,7 +36,8 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
   ADD(total_stash_overflows);
   ADD(cold_storage_bytes);
   ADD(pending_stash_bytes);
-  ADD(total_offloading_steps);
+  ADD(total_offloading_usec);
+  ADD(total_defrag_usec);
   ADD(total_offloading_stashes);
 
   ADD(clients_throttled);

@@ -68,6 +68,18 @@ ABSL_FLAG(bool, tiered_experimental_list_support, false, "Experimental list node
 ABSL_FLAG(uint32, tiered_min_ttl_to_offload_ms, 5000,
           "Min remaining TTL in ms for a value to be eligible for offloading");
 
+ABSL_FLAG(uint32, tiered_offload_scan_budget_us, 100,
+          "Base cpu time-slice in microseconds granted to a single background offloading scan. "
+          "Set to 0 to disable offloading scans");
+
+ABSL_FLAG(uint32, tiered_defrag_scan_budget_us, 2,
+          "Base cpu time-slice in microseconds granted to a single background defragmentation "
+          "scan. Scales up to 3x this value with the amount of fragmentation found. Set to 0 to "
+          "disable defragmentation scans");
+
+ABSL_FLAG(uint32, tiered_max_pending_defrags, 50,
+          "Maximum number of concurrent defragmentation read operations");
+
 namespace dfly {
 
 using namespace std;
@@ -84,10 +96,6 @@ bool OccupiesWholePages(size_t size) {
 
 // Stashed bins no longer have bin ids, so this sentinel is used to differentiate from regular reads
 constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
-
-// Memory budget (UploadBudget) does not account for buffers allocated for in-flight defrag reads,
-// so we cap the number of concurrent defragmentation operations to avoid unbounded memory growth.
-constexpr uint32_t kMaxPendingDefrags = 50;
 
 // Called when a value returns to RAM and its disk segment is dropped: the bytes go back to the
 // RAM ledger and leave the tiered counters.
@@ -434,7 +442,7 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment, b
   // Otherwise background scans of fragmented bins will discover them
   if (bin.fragmented && ts_->UploadBudget() > 0) {
     // Limit number of IO operations if we need to read from disk (in_memory is false)
-    if (in_memory || stats_.pending_defrags < kMaxPendingDefrags) {
+    if (in_memory || stats_.pending_defrags < ts_->config_.max_pending_defrags) {
       EnqueueForDefrag(bin.segment);
     }
   }
@@ -640,7 +648,8 @@ TieredStats TieredStorage::GetStats() const {
     stats.total_deletes = stats_.total_deletes;
     stats.total_stash_overflows = stats_.stash_overflow_cnt;
     stats.cold_storage_bytes = stats_.cool_memory_used;
-    stats.total_offloading_steps = stats_.offloading_steps;
+    stats.total_offloading_usec = stats_.offloading_usec;
+    stats.total_defrag_usec = stats_.defrag_usec;
     stats.total_offloading_stashes = stats_.offloading_stashes;
     stats.clients_throttled = stash_backpressure_.size();
     stats.total_clients_throttled = stats_.total_clients_throttled;
@@ -663,6 +672,9 @@ void TieredStorage::UpdateFromFlags() {
       .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_support),
       .experimental_list_offload = absl::GetFlag(FLAGS_tiered_experimental_list_support),
       .min_ttl_to_offload_ms = absl::GetFlag(FLAGS_tiered_min_ttl_to_offload_ms),
+      .offload_scan_budget_us = absl::GetFlag(FLAGS_tiered_offload_scan_budget_us),
+      .defrag_scan_budget_us = absl::GetFlag(FLAGS_tiered_defrag_scan_budget_us),
+      .max_pending_defrags = absl::GetFlag(FLAGS_tiered_max_pending_defrags),
   };
 
   LOG_IF(WARNING, config_.upload_threshold > config_.offload_threshold)
@@ -675,7 +687,8 @@ std::vector<std::string> TieredStorage::GetMutableFlagNames() {
                             FLAGS_tiered_max_pending_stash_bytes, FLAGS_tiered_offload_threshold,
                             FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
                             FLAGS_tiered_experimental_list_support,
-                            FLAGS_tiered_min_ttl_to_offload_ms);
+                            FLAGS_tiered_min_ttl_to_offload_ms, FLAGS_tiered_offload_scan_budget_us,
+                            FLAGS_tiered_defrag_scan_budget_us, FLAGS_tiered_max_pending_defrags);
 }
 
 bool TieredStorage::ShouldOffload() const {
@@ -697,8 +710,6 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   if (SliceSnapshot::IsSnaphotInProgress())
     return;
 
-  const auto start_cycles = base::CycleClock::Now();
-
   // Takes up a small bounded amount of time and is best done before offloading (to be picked up)
   RunDefragScan();
 
@@ -707,9 +718,11 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   if (disk_stats.allocated_bytes + 1_MB > disk_stats.max_file_size)
     return;
 
+  if (config_.offload_scan_budget_us == 0)
+    return;
+
   string tmp;
   auto cb = [this, dbid, &tmp](PrimeIterator it) mutable {
-    stats_.offloading_steps++;
     auto blobs = ShouldStash(
         it->second, StashContext{.dbid = dbid, .key_expire_ms = it->first.GetExpireTime()});
     if (blobs) {
@@ -725,6 +738,8 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   PrimeTable& table = op_manager_->db_slice_.GetDBTable(dbid)->prime;
 
+  const auto start_cycles = base::CycleClock::Now();
+
   // Loop over entry with time and max stash budget.
   uint64_t cycles = 0;
   do {
@@ -737,15 +752,20 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
     // TODO: yield as background fiber to perform more work on idle
     // Limit allowed cpu-timeslice
     cycles = base::CycleClock::Now() - start_cycles;
-    if (base::CycleClock::ToUsec(cycles) >= 100)
+    if (base::CycleClock::ToUsec(cycles) >= config_.offload_scan_budget_us)
       break;
   } while (offloading_cursor_);
+
+  stats_.offloading_usec += base::CycleClock::ToUsec(cycles);
 }
 
 void TieredStorage::RunDefragScan() {
-  constexpr uint64_t kBaseUs = 2;
-  constexpr uint64_t kUsPerHit = 5;
-  constexpr uint64_t kMaxUs = 25;
+  // Scale the cpu time-slice with the backlog found by the previous scan, up to 3x the base
+  // budget: sleepy on a stale table, more aggressive while there's fragmentation to clear.
+  const uint64_t time_budget_us =
+      config_.defrag_scan_budget_us * std::min<uint64_t>(1 + last_defrag_scan_hits_, 3);
+  if (time_budget_us == 0)
+    return;
 
   const auto start_cycles = base::CycleClock::Now();
 
@@ -758,16 +778,12 @@ void TieredStorage::RunDefragScan() {
     }
   };
 
-  // Scale the cpu time-slice by how much work the previous scan found: sleepy on a stale table,
-  // more aggressive while there's a backlog to clear.
-  const uint64_t time_budget_us = std::min(kBaseUs + last_defrag_scan_hits_ * kUsPerHit, kMaxUs);
-
   uint64_t cycles = 0;
   do {
     if (UploadBudget() <= 0)
       break;
 
-    if (op_manager_->stats_.pending_defrags >= kMaxPendingDefrags)
+    if (op_manager_->stats_.pending_defrags >= config_.max_pending_defrags)
       break;
 
     defrag_cursor_ = bins_->TraverseFragmented(defrag_cursor_, cb);
@@ -779,6 +795,7 @@ void TieredStorage::RunDefragScan() {
       break;
   } while (defrag_cursor_);
 
+  stats_.defrag_usec += base::CycleClock::ToUsec(cycles);
   last_defrag_scan_hits_ = hits;
 }
 
