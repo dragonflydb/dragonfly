@@ -2887,7 +2887,8 @@ string ServerFamily::FormatInfoMetrics(
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
     append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
     append("tiered_cold_storage_bytes", m.tiered_stats.cold_storage_bytes);
-    append("tiered_offloading_steps", m.tiered_stats.total_offloading_steps);
+    append("tiered_offloading_usec", m.tiered_stats.total_offloading_usec);
+    append("tiered_defrag_usec", m.tiered_stats.total_defrag_usec);
     append("tiered_offloading_stashes", m.tiered_stats.total_offloading_stashes);
     append("tiered_ram_hits", m.events.ram_hits);
     append("tiered_ram_cool_hits", m.events.ram_cool_hits);

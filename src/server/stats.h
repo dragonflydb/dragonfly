@@ -39,8 +39,11 @@ struct TieredStats {
   // (disjoint with total_stashes).
   uint64_t total_stash_overflows = 0;
 
-  // Iterations through the primary table during background offloading scans.
-  uint64_t total_offloading_steps = 0;
+  // Cumulative time in microseconds spent in background offloading scans.
+  uint64_t total_offloading_usec = 0;
+
+  // Cumulative time in microseconds spent in background defragmentation scans.
+  uint64_t total_defrag_usec = 0;
 
   // Values stashed during background offloading scans (subset of total_stashes).
   uint64_t total_offloading_stashes = 0;
