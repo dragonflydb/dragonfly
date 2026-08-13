@@ -3220,7 +3220,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
 
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(rb);
-    if (opts->read_group && rb->IsResp3()) {
+    if (rb->IsResp3()) {
       rb->StartCollection(1, CollectionType::MAP);
     } else {
       rb->StartArray(1);
