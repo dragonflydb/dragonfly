@@ -771,7 +771,7 @@ TEST_F(ZSetFamilyTest, ZUnionStoreOpts) {
   Run({"ZADD", "bar", "-inf", "e1", "0.0", "e2"});
   Run({"ZUNIONSTORE", "dest", "3", "foo", "bar", "foo"});
   resp = Run({"ZSCORE", "dest", "e1"});
-  EXPECT_THAT(resp, DoubleArg(0));
+  EXPECT_THAT(resp, DoubleArg(numeric_limits<double>::infinity()));
 }
 
 TEST_F(ZSetFamilyTest, ZInterStore) {

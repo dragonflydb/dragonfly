@@ -45,6 +45,8 @@ class BlockingControllerTest : public Test {
 };
 
 void BlockingControllerTest::SetUp() {
+  const char kKeySid0[] = "m";
+  const char kKeySid2[] = "d";
   pp_.reset(fb2::Pool::Epoll(kNumThreads));
   pp_->Run();
   pp_->AwaitBrief([](unsigned index, ProactorBase* p) {
@@ -59,15 +61,15 @@ void BlockingControllerTest::SetUp() {
 
   trans_.reset(new Transaction{&cid_});
 
-  str_vec_.assign({"x", "z", "0"});
+  str_vec_.assign({kKeySid0, kKeySid2, "0"});
   for (auto& s : str_vec_) {
     arg_vec_.emplace_back(s);
   }
 
   trans_->InitByArgs(&namespaces->GetDefaultNamespace(), 0,
                      CmdArgList{arg_vec_.data(), arg_vec_.size()});
-  CHECK_EQ(0u, Shard("x", shard_set->size()));
-  CHECK_EQ(2u, Shard("z", shard_set->size()));
+  CHECK_EQ(0u, Shard(kKeySid0, shard_set->size()));
+  CHECK_EQ(2u, Shard(kKeySid2, shard_set->size()));
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
   LOG(INFO) << "Starting " << test_info->name();

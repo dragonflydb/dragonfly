@@ -226,13 +226,13 @@ TEST_F(StringFamilyTest, MGetSet) {
   auto resp = Run({"mget", "z"});  // single key
   EXPECT_THAT(resp, RespElementsAre("0"));
 
-  Run({"mset", "x", "0", "b", "0"});
+  Run({"mset", "x", "0", "a", "0"});
 
   ASSERT_EQ(2, GetDebugInfo("IO0").shards_count);
 
   auto mget_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 1000; ++i) {
-      RespExpr resp = Run({"mget", "b", "x"});
+      RespExpr resp = Run({"mget", "a", "x"});
       ASSERT_THAT(resp, ArrLen(2));
       auto ivec = ToIntArr(resp);
 
@@ -323,44 +323,52 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
   Run({"del", vec[1]});
   Run({"lpush", vec[1], "a"});
 
+  // Capture bumps after setup so any bump caused by del/lpush (which depends on
+  // vec[1]'s bucket position, not something this test cares about) doesn't
+  // pollute the count we're actually measuring below.
+  resp = Run({"info", "stats"});
+  size_t bumps_before = get_bump_ups(resp.GetString());
+
   resp = Run({"get", vec[2]});
   string val = resp.GetString();
   auto mget_resp = StrArray(Run({"mget", vec[2], vec[2], vec[2]}));
   EXPECT_THAT(mget_resp, ElementsAre(val, val, val));
 
   resp = Run({"info", "stats"});
-  size_t bumps = get_bump_ups(resp.GetString());
-  EXPECT_EQ(bumps, 2);  // one bump for get and one for mget
+  size_t bumps = get_bump_ups(resp.GetString()) - bumps_before;
+  EXPECT_EQ(bumps, 2);  // one bump for get and one for mget (deduped within mget)
 }
 
 TEST_F(StringFamilyTest, MSetGet) {
-  Run({"mset", "x", "0", "y", "0", "a", "0", "b", "0"});
+  Run({"mset", "x", "0", "m", "0", "a", "0", "b", "0"});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
 
-  Run({"mset", "x", "0", "y", "0"});
+  // x and b are on the same shard.
+  Run({"mset", "x", "0", "b", "0"});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
 
-  Run({"mset", "x", "1", "b", "5", "x", "0"});
+  // x and m are on different shards.
+  Run({"mset", "x", "1", "m", "5", "x", "0"});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
 
   int64_t val = CheckedInt({"get", "x"});
   EXPECT_EQ(0, val);
 
-  val = CheckedInt({"get", "b"});
+  val = CheckedInt({"get", "m"});
   EXPECT_EQ(5, val);
 
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 1000; ++i) {
-      RespExpr resp = Run({"mset", "x", StrCat(i), "b", StrCat(i)});
+      RespExpr resp = Run({"mset", "x", StrCat(i), "m", StrCat(i)});
       ASSERT_EQ(resp, "OK") << i;
     }
   });
 
-  // A problematic order when mset is not atomic: set x, get x, get b (old), set b
+  // A problematic order when mset is not atomic: set x, get x, get m (old), set m
   auto get_fb = pp_->at(2)->LaunchFiber([&] {
     for (size_t i = 0; i < 1000; ++i) {
       int64_t x = CheckedInt({"get", "x"});
-      int64_t z = CheckedInt({"get", "b"});
+      int64_t z = CheckedInt({"get", "m"});
 
       ASSERT_LE(x, z) << "Inconsistency at " << i;
     }
@@ -394,28 +402,29 @@ TEST_F(StringFamilyTest, IntKey) {
 }
 
 TEST_F(StringFamilyTest, SingleShard) {
-  Run({"mset", "x", "1", "y", "1"});
+  Run({"mset", "x", "1", "b", "1"});
   ASSERT_EQ(1, GetDebugInfo("IO0").shards_count);
 
-  Run({"mget", "x", "y", "b"});
+  Run({"mget", "x", "m", "b"});
   ASSERT_EQ(2, GetDebugInfo("IO0").shards_count);
 
-  auto resp = Run({"mget", "x", "y"});
+  auto resp = Run({"mget", "x", "b"});
   ASSERT_EQ(1, GetDebugInfo("IO0").shards_count);
   ASSERT_THAT(ToIntArr(resp), ElementsAre(1, 1));
 
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 100; ++i) {
-      Run({"mset", "x", "0", "y", "0"});
+      Run({"mset", "x", "0", "b", "0"});
     }
   });
 
   // Specially multiple shards to avoid fast-path.
   auto mget_fb = pp_->at(1)->LaunchFiber([&] {
     for (size_t i = 0; i < 100; ++i) {
-      Run({"mget", "x", "b", "y"});
+      Run({"mget", "x", "b", "m"});
     }
   });
+
   mset_fb.Join();
   mget_fb.Join();
 }
