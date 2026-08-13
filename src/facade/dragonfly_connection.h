@@ -549,8 +549,10 @@ class Connection : public util::Connection {
 
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
-  // Returns true on successful execution, false on reply builder error.
-  bool ExecuteBatch();
+  // Returns kDeferToControlPath only when V2 stops to let IoLoopV2 drain control messages that
+  // precede the next parsed command.
+  enum class ExecuteBatchResult : uint8_t { kSuccess, kFailure, kDeferToControlPath };
+  ExecuteBatchResult ExecuteBatch();
 
   // V2 vectorized squash phase: dispatch the run starting at parsed_to_execute_ through
   // DispatchSquashedBatch when squashing is enabled. Returns true if a squashed batch was

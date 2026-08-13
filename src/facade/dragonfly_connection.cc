@@ -1708,7 +1708,8 @@ auto Connection::ParseLoop() -> ParserStatus {
 
     // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
     // earlier replies in order before we report it.
-    if (!ExecuteBatch())
+    ExecuteBatchResult execute_result = ExecuteBatch();
+    if (execute_result == ExecuteBatchResult::kFailure)
       return ERROR;
 
     if (!ReplyBatch())
@@ -1718,7 +1719,11 @@ auto Connection::ParseLoop() -> ParserStatus {
     // protocol error reply (using parser_error_) and close the connection.
     if (parse_status == ERROR)
       return ERROR;
-  } while (parse_status == OK && io_buf_.InputLen() > 0);
+
+    // V2: let IoLoopV2 drain control messages that were queued before this pipeline.
+    if (execute_result == ExecuteBatchResult::kDeferToControlPath)
+      return OK;
+  } while ((parse_status == OK) && (io_buf_.InputLen() > 0));
 
   return parse_status;  // OK or NEED_MORE
 }
@@ -3023,13 +3028,13 @@ bool Connection::SquashPipelineV2() {
   return true;
 }
 
-bool Connection::ExecuteBatch() {
+Connection::ExecuteBatchResult Connection::ExecuteBatch() {
   // Invariant: batched_ must be false on entry.
   // Both ReplyBatch() and ExecuteBatch() reset it via absl::Cleanup guards on all return paths.
   DCHECK(!reply_builder_->IsBatchMode());
 
   if (parsed_to_execute_ == nullptr) {
-    return true;  // no errors.
+    return ExecuteBatchResult::kSuccess;  // no errors.
   }
 
   ConnectionMemoryTracker memory_tracker(this);
@@ -3061,7 +3066,17 @@ bool Connection::ExecuteBatch() {
 
   while (parsed_to_execute_ != nullptr) {
     if (reply_builder_->GetError())
-      return false;
+      return ExecuteBatchResult::kFailure;
+
+    // The V2 loop may parse a pipeline while older control messages are still queued. Running this
+    // command first would let e.g. UNSUBSCRIBE drop those messages, so yield to IoLoopV2, which
+    // owns control-path draining, and retry once the older prefix is gone. dispatch_q_ is FIFO by
+    // dispatch_cycle (checkpoints are front-inserted), so testing the front covers the prefix.
+    if (ioloop_v2_ && !dispatch_q_.empty() &&
+        (dispatch_q_.front().IsCheckPoint() ||
+         dispatch_q_.front().dispatch_cycle < parsed_to_execute_->parsed_cycle)) {
+      return ExecuteBatchResult::kDeferToControlPath;
+    }
 
     if (pipeline_squashing_v2_ && dispatch_waiting_count_ > 1) {
       // if we squashed any commands, continue the loop to check if there are
@@ -3175,7 +3190,7 @@ bool Connection::ExecuteBatch() {
     }
   }
 
-  return true;
+  return ExecuteBatchResult::kSuccess;
 }
 
 bool Connection::ReplyBatch() {
@@ -3784,8 +3799,13 @@ void Connection::DrainQueuedCommands() {
   size_t mem_before = GetLocalConnStats().pipeline_queue_bytes;
 
   if (parsed_head_) {
-    if (HasCommandToExecute())
-      ExecuteBatch();
+    if (HasCommandToExecute()) {
+      ExecuteBatchResult execute_result = ExecuteBatch();
+      if (execute_result == ExecuteBatchResult::kFailure)
+        return;  // IoLoopV2 observes the reply-builder error.
+      if (execute_result == ExecuteBatchResult::kDeferToControlPath)
+        return;  // The next IoLoopV2 iteration drains dispatch_q_ before retrying.
+    }
     ReplyBatch();
   }
 
