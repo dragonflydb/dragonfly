@@ -689,6 +689,8 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                       &resp->body());
     AppendMetricValue("tiered_small_bins", m.tiered_stats.small_bins_entries_cnt, {"type"},
                       {"entries"}, &resp->body());
+    AppendMetricValue("tiered_small_bins", m.tiered_stats.small_bins_entries_bytes, {"type"},
+                      {"entries_bytes"}, &resp->body());
 
     // Cumulative time spent in background scans
     AppendMetricHeader("tiered_scan_usec", "Time in microseconds spent in background scans",

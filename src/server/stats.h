@@ -67,6 +67,9 @@ struct TieredStats {
   // Total entries across all fully written bins on disk.
   uint64_t small_bins_entries_cnt = 0;
 
+  // Total value bytes across all fully written bins on disk.
+  uint64_t small_bins_entries_bytes = 0;
+
   // Bytes accumulated in the in-memory bin currently being filled.
   size_t small_bins_filling_bytes = 0;
 

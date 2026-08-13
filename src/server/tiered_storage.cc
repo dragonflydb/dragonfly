@@ -625,6 +625,7 @@ TieredStats TieredStorage::GetStats() const {
     tiering::SmallBins::Stats bins_stats = bins_->GetStats();
     stats.small_bins_cnt = bins_stats.stashed_bins_cnt;
     stats.small_bins_entries_cnt = bins_stats.stashed_entries_cnt;
+    stats.small_bins_entries_bytes = bins_stats.stashed_entries_bytes;
     stats.small_bins_filling_bytes = bins_stats.current_bin_bytes;
     stats.small_bins_filling_entries_cnt = bins_stats.current_entries_cnt;
   }

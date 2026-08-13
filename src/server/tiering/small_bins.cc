@@ -108,6 +108,7 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   }
 
   stats_.stashed_entries_cnt += list.size();
+  stats_.stashed_entries_bytes += bytes;
   stashed_bins_.InsertNew(segment.offset, StashInfo{uint8_t(list.size()), bytes});
 
   return list;
@@ -150,6 +151,7 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 
     DCHECK_LE(segment.length, bin.bytes);
     bin.bytes -= segment.length;
+    stats_.stashed_entries_bytes -= segment.length;
 
     if (--bin.entries == 0) {
       DCHECK_EQ(bin.bytes, 0u);
@@ -182,6 +184,7 @@ bool SmallBins::IsFragmented(size_t offset) {
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
                .stashed_entries_cnt = stats_.stashed_entries_cnt,
+               .stashed_entries_bytes = stats_.stashed_entries_bytes,
                .current_bin_bytes = current_bin_.bytes_,
                .current_entries_cnt = current_bin_.entries_.size()};
 }
@@ -195,6 +198,7 @@ SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_v
 
   auto bin = it->second;
   stats_.stashed_entries_cnt -= bin.entries;
+  stats_.stashed_entries_bytes -= bin.bytes;
   stashed_bins_.Erase(it);
 
   const char* data = value.data();

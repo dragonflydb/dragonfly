@@ -27,6 +27,7 @@ class SmallBins {
   struct Stats {
     size_t stashed_bins_cnt = 0;
     size_t stashed_entries_cnt = 0;
+    size_t stashed_entries_bytes = 0;
     size_t current_bin_bytes = 0;
     size_t current_entries_cnt = 0;
   };
@@ -133,6 +134,7 @@ class SmallBins {
 
   struct {
     size_t stashed_entries_cnt = 0;
+    size_t stashed_entries_bytes = 0;
   } stats_;
 };
 
