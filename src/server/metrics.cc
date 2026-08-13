@@ -666,6 +666,8 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                       &resp->body());
     AppendMetricValue("tiered_events", m.tiered_stats.total_offloading_stashes, {"type"},
                       {"offload_stash"}, &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_repacks, {"type"}, {"repack"},
+                      &resp->body());
 
     // Buffer allocations for disk I/O
     AppendMetricHeader("tiered_buf_allocations", "Tiered buffer allocations", MetricType::COUNTER,
@@ -691,6 +693,8 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                       {"entries"}, &resp->body());
     AppendMetricValue("tiered_small_bins", m.tiered_stats.small_bins_entries_bytes, {"type"},
                       {"entries_bytes"}, &resp->body());
+    AppendMetricValue("tiered_small_bins", m.tiered_stats.estimated_bin_bucket_fragmentation,
+                      {"type"}, {"bucket_fragmentation"}, &resp->body());
 
     // Cumulative time spent in background scans
     AppendMetricHeader("tiered_scan_usec", "Time in microseconds spent in background scans",
@@ -698,6 +702,8 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricValue("tiered_scan_usec", m.tiered_stats.total_offloading_usec, {"type"},
                       {"offload"}, &resp->body());
     AppendMetricValue("tiered_scan_usec", m.tiered_stats.total_defrag_usec, {"type"}, {"defrag"},
+                      &resp->body());
+    AppendMetricValue("tiered_scan_usec", m.tiered_stats.total_repack_usec, {"type"}, {"repack"},
                       &resp->body());
 
     // Hits: ram, cool, missed

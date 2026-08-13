@@ -847,6 +847,13 @@ void EngineShard::Heartbeat() {
     RetireExpiredAndEvict();
   }
 
+  if (tiered_storage_) {
+    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+      if (db_slice.IsDbValid(i))
+        tiered_storage_->RunRepackScan(i);
+    }
+  }
+
   if (tiered_storage_ && tiered_storage_->ShouldOffload()) {
     VLOG(1) << "Running Offloading, memory=" << db_slice.memory_budget()
             << ", cool memory: " << tiered_storage_->CoolMemoryUsage();

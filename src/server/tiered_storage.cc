@@ -79,6 +79,18 @@ ABSL_FLAG(uint32, tiered_defrag_scan_budget_us, 2,
 ABSL_FLAG(uint32, tiered_max_pending_defrags, 50,
           "Maximum number of concurrent defragmentation read operations");
 
+ABSL_FLAG(uint32, tiered_repack_scan_budget_us, 0,
+          "Base cpu time-slice in microseconds granted to a single background bin-bucket repack "
+          "scan, which regroups small offloaded values scattered across disk pages. Set to 0 "
+          "(default) to disable repack scans");
+
+ABSL_FLAG(uint32, tiered_repack_max_reads, 10,
+          "Maximum number of concurrent page reads a single repack scan may issue");
+
+ABSL_FLAG(uint32, tiered_repack_acceptable_waste, 2,
+          "How many more disk pages than the theoretical minimum a bucket may spread its small "
+          "values over before the repack scan regroups it");
+
 namespace dfly {
 
 using namespace std;
@@ -636,7 +648,10 @@ TieredStats TieredStorage::GetStats() const {
     stats.cold_storage_bytes = stats_.cool_memory_used;
     stats.total_offloading_usec = stats_.offloading_usec;
     stats.total_defrag_usec = stats_.defrag_usec;
+    stats.total_repack_usec = stats_.repack_usec;
     stats.total_offloading_stashes = stats_.offloading_stashes;
+    stats.total_repacks = stats_.total_repacks;
+    stats.estimated_bin_bucket_fragmentation = stats_.estimated_bin_bucket_fragmentation;
     stats.clients_throttled = stash_backpressure_.size();
     stats.total_clients_throttled = stats_.total_clients_throttled;
   }
@@ -661,6 +676,9 @@ void TieredStorage::UpdateFromFlags() {
       .offload_scan_budget_us = absl::GetFlag(FLAGS_tiered_offload_scan_budget_us),
       .defrag_scan_budget_us = absl::GetFlag(FLAGS_tiered_defrag_scan_budget_us),
       .max_pending_defrags = absl::GetFlag(FLAGS_tiered_max_pending_defrags),
+      .repack_scan_budget_us = absl::GetFlag(FLAGS_tiered_repack_scan_budget_us),
+      .repack_max_reads = absl::GetFlag(FLAGS_tiered_repack_max_reads),
+      .repack_acceptable_waste = absl::GetFlag(FLAGS_tiered_repack_acceptable_waste),
   };
 
   LOG_IF(WARNING, config_.upload_threshold > config_.offload_threshold)
@@ -674,7 +692,9 @@ std::vector<std::string> TieredStorage::GetMutableFlagNames() {
                             FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
                             FLAGS_tiered_experimental_list_support,
                             FLAGS_tiered_min_ttl_to_offload_ms, FLAGS_tiered_offload_scan_budget_us,
-                            FLAGS_tiered_defrag_scan_budget_us, FLAGS_tiered_max_pending_defrags);
+                            FLAGS_tiered_defrag_scan_budget_us, FLAGS_tiered_max_pending_defrags,
+                            FLAGS_tiered_repack_scan_budget_us, FLAGS_tiered_repack_max_reads,
+                            FLAGS_tiered_repack_acceptable_waste);
 }
 
 bool TieredStorage::ShouldOffload() const {
@@ -782,6 +802,100 @@ void TieredStorage::RunDefragScan() {
 
   stats_.defrag_usec += base::CycleClock::ToUsec(cycles);
   last_defrag_scan_hits_ = hits;
+}
+
+void TieredStorage::RunRepackScan(DbIndex dbid) {
+  // Only run when explicitly enabled and there are small values stashed on disk to regroup.
+  if (config_.repack_scan_budget_us == 0 || bins_->GetStats().stashed_bins_cnt == 0)
+    return;
+
+  if (SliceSnapshot::IsSnaphotInProgress())
+    return;
+
+  PrimeTable& table = op_manager_->db_slice_.GetDBTable(dbid)->prime;
+  const auto start_cycles = base::CycleClock::Now();
+
+  size_t issued_reads = 0;
+
+  // With negative upload budget we only recalculate the fragmentation estimate and issue no reads.
+  if (UploadBudget() < 0)
+    issued_reads = config_.repack_max_reads + 1;
+
+  auto cb = [&](PrimeTable::bucket_iterator it) {
+    size_t total_size = 0;
+    std::vector<size_t> pages;
+
+    auto it2 = it;
+    for (it2.AdvanceIfNotOccupied(); !it2.is_done(); ++it2) {
+      PrimeValue& pv = it2->second;
+      if (!pv.IsExternal() || pv.IsCool())
+        continue;
+      tiering::DiskSegment segment{pv.GetExternalSlice()};
+      if (OccupiesWholePages(segment.length))
+        continue;
+      total_size += segment.length;
+      size_t page = segment.ContainingPages().offset;
+      if (std::find(pages.begin(), pages.end(), page) == pages.end())
+        pages.push_back(page);
+    }
+
+    if (pages.empty())
+      return;
+
+    repack_state_.cycle_buckets++;
+    repack_state_.cycle_pages += pages.size();
+
+    // Skip buckets already within the acceptable page-waste bound above the theoretical minimum.
+    size_t min_required = total_size / tiering::kPageSize + 1;
+    if (pages.size() <= min_required + config_.repack_acceptable_waste)
+      return;
+
+    if (issued_reads > config_.repack_max_reads)
+      return;
+
+    stats_.total_repacks++;
+
+    std::string scratch;
+    for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+      PrimeValue& pv = it->second;
+      if (!pv.IsExternal() || pv.IsCool())
+        continue;
+      tiering::DiskSegment segment{pv.GetExternalSlice()};
+      if (OccupiesWholePages(segment.length))
+        continue;
+      if (op_manager_->HasModificationPending(segment))
+        continue;
+
+      pv.SetTouched(true);
+      string_view key = it->first.GetSlice(&scratch);
+      Read(
+          tiering::KeyRef{dbid, key}, segment, tiering::StringDecoder{pv},
+          [](io::Result<tiering::StringDecoder*>) {}, /*read_only=*/true);
+    }
+    issued_reads += pages.size();
+  };
+
+  // TraverseBuckets advances the cursor monotonically each call (visiting a bounded number of
+  // buckets and returning an end-cursor once the whole table is covered), so the clock budget
+  // alone bounds the scan.
+  uint64_t cycles = 0;
+  do {
+    repack_state_.cursor = table.TraverseBuckets(repack_state_.cursor, cb);
+    cycles = base::CycleClock::Now() - start_cycles;
+    if (base::CycleClock::ToUsec(cycles) >= config_.repack_scan_budget_us)
+      break;
+  } while (repack_state_.cursor);
+
+  stats_.repack_usec += base::CycleClock::ToUsec(cycles);
+
+  if (!repack_state_.cursor) {  // completed a full pass over the table
+    if (repack_state_.cycle_buckets > 0) {
+      stats_.estimated_bin_bucket_fragmentation =
+          float(repack_state_.cycle_pages) / float(repack_state_.cycle_buckets);
+    }
+    repack_state_.cycle_buckets = 0;
+    repack_state_.cycle_pages = 0;
+  }
 }
 
 size_t TieredStorage::ReclaimMemory(size_t goal) {
