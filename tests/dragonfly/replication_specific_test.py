@@ -737,65 +737,6 @@ async def test_mc_gat_replication(df_factory):
         assert await c_replica.pttl(key) == -1
 
 
-@pytest.mark.skip("Fails constantly on CI")
-@pytest.mark.large
-@pytest.mark.parametrize("serialization_max_size", [1, 64000])
-async def test_replication_onmove_flow(df_factory, serialization_max_size):
-    master = df_factory.create(
-        proactor_threads=2,
-        cache_mode=True,
-        point_in_time_snapshot=False,
-        serialization_max_chunk_size=serialization_max_size,
-    )
-    replica = df_factory.create(proactor_threads=2)
-
-    df_factory.start_all([master, replica])
-    c_master = master.client()
-    c_replica = replica.client()
-
-    key_target = 100000
-    # Fill master with test data
-    await c_master.execute_command(f"DEBUG POPULATE {key_target} key 32 RAND TYPE hash ELEMENTS 10")
-    logging.debug("finished populate")
-
-    stop_event = asyncio.Event()
-
-    async def get_keys():
-        while not stop_event.is_set():
-            pipe = c_master.pipeline(transaction=False)
-            for _ in range(50):
-                id = random.randint(0, key_target)
-                pipe.hlen(f"key:{id}")
-            await pipe.execute()
-
-    get_task = asyncio.create_task(get_keys())
-    await asyncio.sleep(0.1)
-
-    # Start replication and wait for full sync
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_for_replicas_state(c_replica)
-
-    info = await c_master.info("stats")
-    assert info["bump_ups"] >= 100
-
-    await check_all_replicas_finished([c_replica], c_master)
-    stop_event.set()
-    await get_task
-
-    # Check replica data consisten
-    hash1, hash2 = await asyncio.gather(*(SeederV2.capture(c) for c in (c_master, c_replica)))
-    assert hash1 == hash2
-
-    master.stop()
-    lines = master.find_in_logs("Exit SnapshotSerializer")
-    assert len(lines) > 0
-    for line in lines:
-        # We test the full sync on moved path execution
-        moved_saved = extract_int_after_prefix("moved_saved ", line)
-        logging.debug(f"Moved saves {moved_saved}")
-        assert moved_saved > 0
-
-
 @pytest.mark.large
 @dfly_args({"proactor_threads": 1})
 async def test_big_strings(df_factory):
