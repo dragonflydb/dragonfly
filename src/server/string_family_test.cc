@@ -1248,6 +1248,90 @@ TEST_F(StringFamilyTest, PastExpiryEmitsExpiredEvent) {
   pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
   ASSERT_EQ(2u, SubscriberMessagesLen("IO1"));
   EXPECT_EQ("key", GetPublishedMessage("IO1", 1).message);
+
+  Run({"SET", "foo2", "bar"});
+  EXPECT_EQ(Run({"SET", "foo2", "x", "PXAT", "1"}), "OK");
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+  ASSERT_EQ(3u, SubscriberMessagesLen("IO1"));
+  EXPECT_EQ("foo2", GetPublishedMessage("IO1", 2).message);
+
+  MCArgs past_args{"new"};
+  past_args.ttl = std::chrono::seconds{TEST_current_time_ms / 1000 - 100};
+  EXPECT_THAT(RunMC(MP::SET, "k2", MCArgs{"val"}), ElementsAre("+STORED"));
+  EXPECT_THAT(RunMC(MP::SET, "k2", past_args), ElementsAre("+STORED"));
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+  ASSERT_EQ(4u, SubscriberMessagesLen("IO1"));
+  EXPECT_EQ("k2", GetPublishedMessage("IO1", 3).message);
+
+  EXPECT_THAT(RunMC(MP::SET, "k3", MCArgs{"val"}), ElementsAre("+STORED"));
+  EXPECT_THAT(RunMC(MP::REPLACE, "k3", past_args), ElementsAre("+STORED"));
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+  ASSERT_EQ(5u, SubscriberMessagesLen("IO1"));
+  EXPECT_EQ("k3", GetPublishedMessage("IO1", 4).message);
+}
+
+TEST_F(StringFamilyTest, SetPastExpiryHonorsConditions) {
+  // NX on an existing key: the condition fails first - key kept, nil reply.
+  Run({"SET", "foo", "bar"});
+  EXPECT_THAT(Run({"SET", "foo", "x", "NX", "PXAT", "1"}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"GET", "foo"}), "bar");
+
+  // NX on a missing key: nothing to store (the value would already be expired), OK reply.
+  EXPECT_EQ(Run({"SET", "nokey", "x", "NX", "PXAT", "1"}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "nokey"}), IntArg(0));
+
+  // XX on a missing key: nil, nothing created.
+  EXPECT_THAT(Run({"SET", "nokey2", "x", "XX", "PXAT", "1"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"EXISTS", "nokey2"}), IntArg(0));
+
+  // GET returns the old value while the key is deleted.
+  EXPECT_EQ(Run({"SET", "foo", "x", "GET", "PXAT", "1"}), "bar");
+  EXPECT_THAT(Run({"EXISTS", "foo"}), IntArg(0));
+
+  // NX+GET on an existing key: the aborted set still replies with the old value, key kept.
+  Run({"SET", "foo3", "bar"});
+  EXPECT_EQ(Run({"SET", "foo3", "x", "GET", "NX", "PXAT", "1"}), "bar");
+  EXPECT_EQ(Run({"GET", "foo3"}), "bar");
+
+  // Options after the past expiry are still parsed: trailing garbage is a syntax error.
+  Run({"SET", "foo2", "bar"});
+  EXPECT_THAT(Run({"SET", "foo2", "x", "PXAT", "1", "BOGUS"}), ErrArg("syntax error"));
+  EXPECT_EQ(Run({"GET", "foo2"}), "bar");
+
+  // Unconditional set on a missing key: OK, nothing stored.
+  EXPECT_EQ(Run({"SET", "nokey3", "x", "PXAT", "1"}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "nokey3"}), IntArg(0));
+}
+
+// An expiration equal to the current time is already elapsed: delete, not persist.
+TEST_F(StringFamilyTest, SetExpiryAtNowDeletes) {
+  Run({"SET", "foo", "bar"});
+  EXPECT_EQ(Run({"SET", "foo", "x", "PXAT", absl::StrCat(TEST_current_time_ms)}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "foo"}), IntArg(0));
+}
+
+// Memcached SET/ADD/REPLACE with a past absolute exptime: store conditions are honored first,
+// then delete-instead-of-store applies. RunMC bypasses the text parser, so ttl is absolute
+// unix seconds.
+TEST_F(StringFamilyTest, McSetPastExpiry) {
+  using MP = facade::MemcacheParser;
+  MCArgs past_args{"new"};
+  past_args.ttl = std::chrono::seconds{TEST_current_time_ms / 1000 - 100};
+
+  EXPECT_THAT(RunMC(MP::SET, "key", MCArgs{"val"}), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::SET, "key", past_args), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::GET, "key"), ElementsAre("END"));
+
+  EXPECT_THAT(RunMC(MP::SET, "key", MCArgs{"val"}), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::ADD, "key", past_args), ElementsAre("NOT_STORED"));
+  EXPECT_THAT(RunMC(MP::GET, "key"), ElementsAre("VALUE key 0 3", "val", "END"));
+
+  EXPECT_THAT(RunMC(MP::ADD, "miss", past_args), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::GET, "miss"), ElementsAre("END"));
+
+  EXPECT_THAT(RunMC(MP::REPLACE, "key", past_args), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::GET, "key"), ElementsAre("END"));
+  EXPECT_THAT(RunMC(MP::REPLACE, "miss2", past_args), ElementsAre("NOT_STORED"));
 }
 
 }  // namespace dfly
