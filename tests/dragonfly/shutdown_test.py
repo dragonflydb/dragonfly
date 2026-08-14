@@ -4,6 +4,8 @@ import pytest
 
 import redis
 from redis import asyncio as aioredis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 
 from . import dfly_args
 from .instance import DflyInstanceFactory
@@ -12,51 +14,72 @@ from .utility import wait_available_async
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
 
 
-@pytest.mark.skip(
-    reason="Currently we can not guarantee that on shutdown if command is executed and value is written we response before breaking the connection"
-)
 @dfly_args({"proactor_threads": "4"})
-class TestDflyAutoLoadSnapshot:
+class TestGracefulShutdown:
     """
-    Test automatic loading of dump files on startup with timestamp.
-    When command is executed if a value is written we should send the response before shutdown
+    SHUTDOWN saves the snapshot only after all client connections are torn down, so
+    every acknowledged write must survive the restart. The reply to a single in-flight
+    command may be lost when the connection is severed, so the restored value may
+    exceed the last acknowledged one by at most 1.
     """
 
     @pytest.mark.asyncio
-    async def test_gracefull_shutdown(self, df_factory):
-        df_args = {"dbfilename": "dump", **BASIC_ARGS, "port": 1111}
-
-        df_server = df_factory.create(**df_args)
+    async def test_shutdown_snapshot_contains_acknowledged_writes(self, df_factory):
+        df_server = df_factory.create(dbfilename="dump", **BASIC_ARGS)
         df_server.start()
-        client = aioredis.Redis(port=df_server.port)
 
-        async def counter(key):
-            value = 0
-            await client.execute_command(f"SET {key} 0")
+        def make_client():
+            # One pinned connection, no retries: a lost reply must surface as
+            # ConnectionError instead of a silent re-send. Clients are registered
+            # on the instance, so fixture teardown closes them on any failure.
+            return df_server.client(
+                single_connection_client=True,
+                retry=Retry(NoBackoff(), 0),
+                retry_on_error=[],
+            )
+
+        control = make_client()
+        workers = [make_client() for _ in range(16)]
+
+        # All SETs are acknowledged before the shutdown starts, so no key may be
+        # missing after the restart.
+        await asyncio.gather(*(w.set(f"key{i}", 0) for i, w in enumerate(workers)))
+
+        async def counter(i, client):
+            key, ack = f"key{i}", 0
             while True:
                 try:
-                    value = await client.execute_command(f"INCR {key}")
-                except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError):
-                    break
-            return key, value
+                    ack = await client.incr(key)
+                except redis.exceptions.ConnectionError:
+                    return key, ack, "connection closed"
+                except redis.exceptions.ResponseError:
+                    return key, ack, "command rejected"
 
-        async def delayed_takeover():
+        tasks = [asyncio.create_task(counter(i, w)) for i, w in enumerate(workers)]
+        try:
             await asyncio.sleep(1)
-            await client.execute_command("SHUTDOWN")
-            await client.connection_pool.disconnect()
+            try:
+                await control.execute_command("SHUTDOWN")
+            except redis.exceptions.ConnectionError:
+                pass  # the reply may be cut off together with the connection
+            results = await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-        _, *results = await asyncio.gather(
-            delayed_takeover(), *[counter(f"key{i}") for i in range(16)]
-        )
-
+        df_server.wait()  # the snapshot is written before the process exits
         df_server.start()
-        client = aioredis.Redis(port=df_server.port)
 
-        for key, acknowleged_value in results:
-            value_from_snapshot = await client.get(key)
-            assert acknowleged_value == int(value_from_snapshot)
-
-        await client.connection_pool.disconnect()
+        client = df_server.client()
+        await wait_available_async(client)
+        for key, acknowledged, reason in results:
+            restored = await client.get(key)
+            assert restored is not None, f"{key} missing after restart ({reason})"
+            assert (
+                acknowledged <= int(restored) <= acknowledged + 1
+            ), f"{key}: acknowledged={acknowledged} restored={int(restored)} ({reason})"
+        df_server.stop()
 
 
 @dfly_args({"proactor_threads": "2"})
