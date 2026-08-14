@@ -98,8 +98,9 @@ TEST_F(BlockingControllerTest, Basic) {
 
 // Regression for https://github.com/dragonflydb/dragonfly/pull/7225:
 // NotifyWatchQueue used to walk every queued waiter (O(N) per notify) when
-// the key was absent. The fast path now short-circuits via FindReadOnly. We
-// assert the per-waiter checker is never invoked.
+// the key was absent. The fast path short-circuits same-checker-type waiters once one of
+// them reports the key missing (see NotifyWatchQueueHeterogeneousCheckers for why the skip
+// is scoped to matching checker types rather than the whole queue).
 TEST_F(BlockingControllerTest, NotifyWatchQueueFastPathOnAbsentKey) {
   constexpr size_t kWaiters = 64;
   const std::string_view key = str_vec_[0];  // "x", hashes to shard 0 (verified in SetUp)
@@ -136,6 +137,54 @@ TEST_F(BlockingControllerTest, NotifyWatchQueueFastPathOnAbsentKey) {
   // With the enum-based fast path, the first item's checker is called once and returns
   // kKeyNotFound, aborting the scan without visiting the remaining kWaiters-1 items.
   EXPECT_EQ(1u, checker_calls) << "fast path did not short-circuit";
+}
+
+// Regression for https://github.com/dragonflydb/dragonfly/issues/8067:
+// a queue can hold waiters from different command families (e.g. BLPOP and XREADGROUP)
+// on the same key. When the front waiter's checker reports the key missing, later waiters
+// using a *different* checker must still be probed instead of being hidden by the abort.
+TEST_F(BlockingControllerTest, NotifyWatchQueueHeterogeneousCheckers) {
+  const std::string_view key = str_vec_[0];  // "x", hashes to shard 0 (verified in SetUp)
+
+  auto t1 = boost::intrusive_ptr<Transaction>(new Transaction{&cid_});
+  t1->InitByArgs(&namespaces->GetDefaultNamespace(), 0,
+                 CmdArgList{arg_vec_.data(), arg_vec_.size()});
+  auto t2 = boost::intrusive_ptr<Transaction>(new Transaction{&cid_});
+  t2->InitByArgs(&namespaces->GetDefaultNamespace(), 0,
+                 CmdArgList{arg_vec_.data(), arg_vec_.size()});
+
+  size_t first_checker_calls = 0;
+  size_t second_checker_calls = 0;
+
+  shard_set->Await(0, [&] {
+    EngineShard* shard = EngineShard::tlocal();
+    BlockingController bc(shard, &namespaces->GetDefaultNamespace());
+
+    // Mimics BLPOP: key absent means keep waiting, never wake this waiter.
+    auto first_checker = [&first_checker_calls](EngineShard*, const DbContext&, std::string_view) {
+      ++first_checker_calls;
+      return KeyReadyResult::kKeyNotFound;
+    };
+    // A different command family with its own checker type. What it returns doesn't matter here;
+    // the point is that it must be probed at all instead of being hidden by the first waiter's
+    // kKeyNotFound abort.
+    auto second_checker = [&second_checker_calls](EngineShard*, const DbContext&,
+                                                  std::string_view) {
+      ++second_checker_calls;
+      return KeyReadyResult::kNotReady;
+    };
+
+    bc.AddWatched(t1->GetShardArgs(shard->shard_id()), first_checker, t1.get());
+    bc.AddWatched(t2->GetShardArgs(shard->shard_id()), second_checker, t2.get());
+    ASSERT_EQ(1u, bc.NumWatched(0));  // 1 watched key, 2 items in its queue
+
+    bc.Awaken(0, key);
+    bc.NotifyPending();
+  });
+
+  EXPECT_EQ(1u, first_checker_calls);
+  EXPECT_EQ(1u, second_checker_calls)
+      << "a differently-typed later waiter must still be probed, not hidden by the abort";
 }
 
 TEST_F(BlockingControllerTest, Timeout) {

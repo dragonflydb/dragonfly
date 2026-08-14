@@ -114,7 +114,7 @@ class LockTag {
 };
 
 enum class KeyReadyResult {
-  kKeyNotFound,  // key doesn't exist - abort the entire watch queue
+  kKeyNotFound,  // key doesn't exist - skip this tx, try next (may fast-skip same-checker peers)
   kNotReady,     // key exists but per-tx conditions not met - skip this tx, try next
   kReady,        // wake this tx
 };

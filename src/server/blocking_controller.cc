@@ -6,7 +6,9 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include <algorithm>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <typeinfo>
 
 #include "base/logging.h"
 #include "server/db_slice.h"
@@ -256,13 +258,27 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
 
   // In the most cases we shouldn't have skipped elements at all
   absl::InlinedVector<dfly::WatchItem, 4> skipped;
+
   while (!queue.empty()) {
     auto& wi = queue.front();
     Transaction* head = wi.get();
     KeyReadyResult result = wi.key_ready_checker(owner_, context, key);
+
     if (result == KeyReadyResult::kKeyNotFound) {
-      // Key is gone - no tx in this queue can be woken, abort the scan entirely.
-      break;
+      // If every remaining waiter shares this exact checker (the common case: many waiters of
+      // one command family, e.g. BLPOP, on one absent key), none of them can be woken either -
+      // stop here with no further probing or queue churn. A waiter of a different command
+      // family (e.g. XREADGROUP sharing the queue with BLPOP) may react differently to a
+      // missing key and must still be probed individually, so only that case falls through to
+      // the per-item handling below.
+      const std::type_info& checker_type = wi.key_ready_checker.target_type();
+      bool rest_same_family =
+          all_of(queue.begin(), queue.end(), [&checker_type](const WatchItem& item) {
+            return item.key_ready_checker.target_type() == checker_type;
+          });
+      if (rest_same_family)
+        break;
+      skipped.push_back(std::move(wi));
     } else if (result == KeyReadyResult::kReady) {
       DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key << " committed txid "
                << owner_->committed_txid();
