@@ -21,7 +21,6 @@
 #include "server/synchronization.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
-#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
@@ -30,10 +29,6 @@ ABSL_DECLARE_FLAG(bool, serialization_tagged_chunks);
 
 using namespace facade;
 using namespace std::chrono_literals;
-
-ABSL_FLAG(strings::MemoryBytesFlag, tiered_serialization_inflight_bytes_cap, 256_KB,
-          "If non zero, throttles the serialization traversal as long as the pending disk read "
-          "volume exceeds this cap");
 
 namespace dfly {
 
@@ -245,19 +240,14 @@ void SerializerBase::Throttle() {
   if (!HasDelayedEntries())
     return;
 
-  // Throttle on pending disk reads to avoid overloading the disk and thus disturbing client reads
-  const uint64_t hi = absl::GetFlag(FLAGS_tiered_serialization_inflight_bytes_cap).value;
-  const uint64_t lo = hi / 2;  // hysteresis to avoid thrashing around the limit
-  if (hi == 0)
-    return;
-
+  // Throttle on total usage to avoid overloading regular clients, wait with gap
   EngineShard* es = EngineShard::tlocal();
   TieredStorage* ts = es ? es->tiered_storage() : nullptr;
-  if (ts == nullptr || ts->PendingReadBytes() < hi)
+  if (ts == nullptr || ts->TotalUsage() < 100)
     return;
 
   int steps_left = 10;
-  while (base_cntx_->IsRunning() && ts->PendingReadBytes() > lo && steps_left-- > 0) {
+  while (base_cntx_->IsRunning() && ts->TotalUsage() > 70 && steps_left-- > 0) {
     ProcessDelayedEntries(false, 0, base_cntx_);
     util::ThisFiber::SleepFor(100us);
   }

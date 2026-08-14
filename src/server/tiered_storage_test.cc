@@ -26,7 +26,7 @@ ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
-ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
@@ -61,7 +61,7 @@ class TieredStorageTest : public BaseFamilyTest {
       SetFlag(&FLAGS_registered_buffer_size, 0);
     }
 
-    SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 32_MB);
+    SetFlag(&FLAGS_tiered_max_pending_bytes, 32_MB);
     if (GetFlag(FLAGS_tiered_prefix).empty()) {
       SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_storage_test");
     }
@@ -812,7 +812,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
   // Set low limit so all clients are throttled
-  absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 1);
+  absl::SetFlag(&FLAGS_tiered_max_pending_bytes, 1);
   UpdateFromFlags();
 
   // issue client pause to accumualte SETs

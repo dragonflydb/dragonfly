@@ -123,12 +123,16 @@ class TieredStorage : public TieredStorageBase {
   void UpdateFromFlags();  // Update internal values based on current flag values
   static std::vector<std::string> GetMutableFlagNames();  // Triggers UpdateFromFlags
 
-  bool ShouldOffload() const;     // True if below tiered_offload_threshold
-  float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashes
+  bool ShouldOffload() const;  // True if below tiered_offload_threshold
 
-  // Volume, in bytes, of disk reads currently in flight. Counts real pages read (deduped across
-  // small values sharing a page/bin). Used as a cheap backpressure signal by serializers.
-  size_t PendingReadBytes() const;
+  // In-flight read pressure as a percentage of tiered_max_pending_bytes
+  unsigned ReadUsage() const;
+
+  // In-flight write pressure as a percentage of tiered_max_pending_bytes
+  unsigned WriteUsage() const;
+
+  // ReadUsage + WriteUsage
+  unsigned TotalUsage() const;
 
   // How much we are above tiered_upload_threshold. Can be negative!
   int64_t UploadBudget() const;
@@ -182,7 +186,7 @@ class TieredStorage : public TieredStorageBase {
   struct {
     size_t min_value_size;
     bool experimental_cooling;
-    size_t max_pending_stash_bytes;
+    size_t max_pending_bytes;
     float offload_threshold;
     float upload_threshold;
     bool experimental_hash_offload;
@@ -314,11 +318,15 @@ class TieredStorage : public TieredStorageBase {
     return 0;
   }
 
-  float WriteDepthUsage() const {
+  unsigned ReadUsage() const {
     return 0;
   }
 
-  size_t PendingReadBytes() const {
+  unsigned WriteUsage() const {
+    return 0;
+  }
+
+  unsigned TotalUsage() const {
     return 0;
   }
 
