@@ -912,30 +912,47 @@ def parse_lag(replication_info: str):
     return int(lags[0])
 
 
-async def assert_lag_condition(inst, client, condition):
+async def assert_lag_condition(inst, client, condition, timeout=5.0):
     """
-    Since lag is a bit random, and we want stable tests, we check
-    10 times in quick succession and validate that the condition
-    is satisfied at least once.
+    Since lag is a bit random, and we want stable tests, we poll until `condition`
+    is satisfied, bounded by `timeout` seconds.
     We check both `INFO REPLICATION` redis protocol and the `/metrics`
     prometheus endpoint.
     """
-    for _ in range(10):
+    # Prometheus metrics
+    start = time.time()
+    while True:
         lag = await get_metric_value(inst, "dragonfly_connected_replica_lag_records")
+        print(f"prometheus lag={lag}")
         if condition(lag):
             break
-        print("current prometheus lag =", lag)
+        assert (
+            time.time() - start < timeout
+        ), f"Lag from prometheus metrics never satisfied condition (last lag={lag})"
         await asyncio.sleep(0.05)
-    else:
-        assert False, "Lag from prometheus metrics has never satisfied condition!"
-    for _ in range(10):
+
+    # Redis info replication
+    start = time.time()
+    while True:
         lag = parse_lag(await client.execute_command("info replication"))
+        print(f"info lag={lag}")
         if condition(lag):
             break
-        print("current lag =", lag)
+        assert (
+            time.time() - start < timeout
+        ), f"Lag from info replication never satisfied condition (last lag={lag})"
         await asyncio.sleep(0.05)
-    else:
-        assert False, "Lag has never satisfied condition!"
+
+
+async def _poll_lsn_continuous(client, stop_event):
+    """Continuously sample INFO replication's lag until stopped from outside,
+    and return the highest lag seen."""
+    max_lag = 0
+    while not stop_event.is_set():
+        lag = parse_lag(await client.execute_command("info replication"))
+        print(f"continous lag={lag}")
+        max_lag = max(max_lag, lag)
+    return max_lag
 
 
 @dfly_args({"proactor_threads": 2})
@@ -943,14 +960,25 @@ async def assert_lag_condition(inst, client, condition):
 async def test_replication_info(replication, df_seeder_factory, n_keys=2000):
     master, [replica], c_master, [c_replica] = replication
 
+    # No lag at start
     await assert_lag_condition(master, c_master, lambda lag: lag == 0)
 
     seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
-    fill_task = asyncio.create_task(seeder.run(target_ops=3000))
-    await assert_lag_condition(master, c_master, lambda lag: lag > 30)
-    seeder.stop()
+    fill_task = asyncio.create_task(seeder.run(target_ops=30000))
 
+    # Start continous lsn sampling in the background
+    stop_poll = asyncio.Event()
+    poll_task = asyncio.create_task(_poll_lsn_continuous(c_master, stop_poll))
+
+    # Wait for seeder to finish, then stop polling.
     await fill_task
+    stop_poll.set()
+
+    max_lag = await poll_task
+
+    assert max_lag > 30, f"Lag never exceeded 30 while filling (max observed: {max_lag})"
+
+    # Wait for replica to catch all up.
     await wait_available_async(c_replica)
     await assert_lag_condition(master, c_master, lambda lag: lag == 0)
 
