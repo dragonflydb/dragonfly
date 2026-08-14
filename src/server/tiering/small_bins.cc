@@ -21,13 +21,16 @@ using namespace std;
 
 namespace {
 
+// Fixed per-entry header: 2 dbid + 8 hash + 2 strlen.
+constexpr size_t kEntryHeaderSize = 12;
+
 // See FlushBin() for format details
 size_t StashedValueSize(string_view value) {
-  return 2 /* dbid */ + 8 /* hash */ + 2 /* strlen*/ + value.size();
+  return kEntryHeaderSize + value.size();
 }
 
 // The biggest a single entry (value + fixed header) can ever be.
-constexpr size_t kMaxEntrySize = (2_KB - 1) + 12;
+constexpr size_t kMaxEntrySize = (2_KB - 1) + kEntryHeaderSize;
 
 // We offload a bin at a minimum of ~49.7% utilization; use a cutoff below that to flag real
 // fragmentation.
@@ -108,7 +111,7 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   uint16_t bytes = 0;
   SmallBins::KeySegmentList list;
   for (auto& [key, sub_segment] : seg_map) {
-    bytes += sub_segment.length;
+    bytes += sub_segment.length + kEntryHeaderSize;
 
     DiskSegment real_segment{segment.offset + sub_segment.offset, sub_segment.length};
     list.emplace_back(key.first, key.second, real_segment);
@@ -155,8 +158,8 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
     stats_.stashed_entries_cnt--;
     auto& bin = it->second;
 
-    DCHECK_LE(segment.length, bin.bytes);
-    bin.bytes -= segment.length;
+    DCHECK_LE(segment.length + kEntryHeaderSize, bin.bytes);
+    bin.bytes -= segment.length + kEntryHeaderSize;
 
     if (--bin.entries == 0) {
       DCHECK_EQ(bin.bytes, 0u);
