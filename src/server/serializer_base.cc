@@ -7,6 +7,8 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 
+#include <chrono>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "redis/redis_aux.h"
@@ -15,14 +17,23 @@
 #include "server/engine_shard.h"
 #include "server/execution_state.h"
 #include "server/journal/journal.h"
+#include "server/server_state.h"
 #include "server/synchronization.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
+#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
 ABSL_DECLARE_FLAG(bool, serialization_tagged_chunks);
+
+using namespace facade;
+using namespace std::chrono_literals;
+
+ABSL_FLAG(strings::MemoryBytesFlag, tiered_serialization_inflight_bytes_cap, 256_KB,
+          "If non zero, throttles the serialization traversal as long as the pending disk read "
+          "volume exceeds this cap");
 
 namespace dfly {
 
@@ -77,7 +88,8 @@ void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_ind
 
 void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush_bucket,
                                                 ExecutionState* cntx) {
-  const size_t kMaxDelayedEntries = 512;
+  // Force flush before letting the delayed size grow too large
+  const size_t kMaxDelayedEntries = 128;
   if (delayed_entries_.size() > kMaxDelayedEntries)
     force |= true;
 
@@ -224,6 +236,31 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
 
 void SerializerBase::WaitForNoBucketBlocked() const {
   BucketDependencies::WaitEmpty();
+}
+
+void SerializerBase::Throttle() {
+  // Egress backpressure: suspend if the destination sink is not keeping up.
+  ServerState::tlocal()->GetEgressThrottler().Throttle();
+
+  if (!HasDelayedEntries())
+    return;
+
+  // Throttle on pending disk reads to avoid overloading the disk and thus disturbing client reads
+  const uint64_t hi = absl::GetFlag(FLAGS_tiered_serialization_inflight_bytes_cap).value;
+  const uint64_t lo = hi / 2;  // hysteresis to avoid thrashing around the limit
+  if (hi == 0)
+    return;
+
+  EngineShard* es = EngineShard::tlocal();
+  TieredStorage* ts = es ? es->tiered_storage() : nullptr;
+  if (ts == nullptr || ts->PendingReadBytes() < hi)
+    return;
+
+  int steps_left = 10;
+  while (base_cntx_->IsRunning() && ts->PendingReadBytes() > lo && steps_left-- > 0) {
+    ProcessDelayedEntries(false, 0, base_cntx_);
+    util::ThisFiber::SleepFor(100us);
+  }
 }
 
 void SerializerBase::OnChange(DbIndex db_index, const ChangeReq& req) {

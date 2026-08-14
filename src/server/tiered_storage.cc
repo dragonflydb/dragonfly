@@ -76,7 +76,7 @@ ABSL_FLAG(uint32, tiered_defrag_scan_budget_us, 2,
           "scan. Scales up to 3x this value with the amount of fragmentation found. Set to 0 to "
           "disable defragmentation scans");
 
-ABSL_FLAG(uint32, tiered_max_pending_defrags, 50,
+ABSL_FLAG(uint32, tiered_max_pending_defrags, 20,
           "Maximum number of concurrent defragmentation read operations");
 
 ABSL_FLAG(uint32, tiered_repack_scan_budget_us, 0,
@@ -626,6 +626,7 @@ TieredStats TieredStorage::GetStats() const {
     tiering::OpManager::Stats op_stats = op_manager_->GetStats();
     stats.pending_read_cnt = op_stats.pending_read_cnt;
     stats.pending_stash_cnt = op_stats.pending_stash_cnt;
+    stats.pending_read_bytes = op_stats.disk_stats.pending_read_bytes;
     stats.allocated_bytes = op_stats.disk_stats.allocated_bytes;
     stats.capacity_bytes = op_stats.disk_stats.capacity_bytes;
     stats.pending_stash_bytes = op_stats.disk_stats.pending_stash_bytes;
@@ -661,6 +662,10 @@ TieredStats TieredStorage::GetStats() const {
 float TieredStorage::WriteDepthUsage() const {
   auto disk_stats = op_manager_->GetStats().disk_stats;
   return 1.0f * float(disk_stats.pending_stash_bytes) / float(config_.max_pending_stash_bytes);
+}
+
+size_t TieredStorage::PendingReadBytes() const {
+  return op_manager_->GetStats().disk_stats.pending_read_bytes;
 }
 
 void TieredStorage::UpdateFromFlags() {
