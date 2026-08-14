@@ -919,29 +919,25 @@ async def assert_lag_condition(inst, client, condition, timeout=5.0):
     We check both `INFO REPLICATION` redis protocol and the `/metrics`
     prometheus endpoint.
     """
-    # Prometheus metrics
-    start = time.time()
-    while True:
+
+    @assert_eventually(timeout=timeout)
+    async def check_prometheus_lag():
         lag = await get_metric_value(inst, "dragonfly_connected_replica_lag_records")
         print(f"prometheus lag={lag}")
-        if condition(lag):
-            break
-        assert (
-            time.time() - start < timeout
+        assert condition(
+            lag
         ), f"Lag from prometheus metrics never satisfied condition (last lag={lag})"
-        await asyncio.sleep(0.05)
 
-    # Redis info replication
-    start = time.time()
-    while True:
+    @assert_eventually(timeout=timeout)
+    async def check_info_replication_lag():
         lag = parse_lag(await client.execute_command("info replication"))
         print(f"info lag={lag}")
-        if condition(lag):
-            break
-        assert (
-            time.time() - start < timeout
+        assert condition(
+            lag
         ), f"Lag from info replication never satisfied condition (last lag={lag})"
-        await asyncio.sleep(0.05)
+
+    await check_prometheus_lag()
+    await check_info_replication_lag()
 
 
 async def _poll_lsn_continuous(client, stop_event):
@@ -952,6 +948,7 @@ async def _poll_lsn_continuous(client, stop_event):
         lag = parse_lag(await client.execute_command("info replication"))
         print(f"continous lag={lag}")
         max_lag = max(max_lag, lag)
+        await asyncio.sleep(0.01)
     return max_lag
 
 
@@ -971,8 +968,11 @@ async def test_replication_info(replication, df_seeder_factory, n_keys=2000):
     poll_task = asyncio.create_task(_poll_lsn_continuous(c_master, stop_poll))
 
     # Wait for seeder to finish, then stop polling.
-    await fill_task
-    stop_poll.set()
+    try:
+        await fill_task
+        await asyncio.sleep(0.5)  # give some time for the replica to catch up
+    finally:
+        stop_poll.set()
 
     max_lag = await poll_task
 
