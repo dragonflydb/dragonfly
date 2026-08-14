@@ -203,7 +203,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
       // Suspend the traversal loop if we are exceeding the egress budget, letting
       // high priority writes drain first. Guarantees the loop its reserved share.
-      ServerState::tlocal()->GetEgressThrottler().Throttle();
+      // Also applies tiered read-volume backpressure when disk reads are saturated.
+      Throttle();
     } while (snapshot_cursor_);
 
     // Wait for all the outstanding delayed entries and serialize them as well.

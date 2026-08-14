@@ -485,8 +485,8 @@ void RestoreStreamer::Run() {
       continue;
     }
 
-    // Throttle main loop if we are over the egress limit
-    ServerState::tlocal()->GetEgressThrottler().Throttle();
+    // Throttle main loop if we are over the egress limit or the tiered read queue is saturated.
+    Throttle();
 
     cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
       if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt

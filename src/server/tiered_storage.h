@@ -134,6 +134,10 @@ class TieredStorage : public TieredStorageBase {
   bool ShouldOffload() const;     // True if below tiered_offload_threshold
   float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashes
 
+  // Volume, in bytes, of disk reads currently in flight. Counts real pages read (deduped across
+  // small values sharing a page/bin). Used as a cheap backpressure signal by serializers.
+  size_t PendingReadBytes() const;
+
   // How much we are above tiered_upload_threshold. Can be negative!
   int64_t UploadBudget() const;
   size_t CoolMemoryUsage() const {
@@ -315,6 +319,10 @@ class TieredStorage : public TieredStorageBase {
   }
 
   float WriteDepthUsage() const {
+    return 0;
+  }
+
+  size_t PendingReadBytes() const {
     return 0;
   }
 

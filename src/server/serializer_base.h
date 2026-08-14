@@ -104,6 +104,11 @@ struct DelayedEntryHandler {
   // Serialize delayed entry that was fetched with serializer specific implementation
   virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
 
+  // True while this serializer still has offloaded entries waiting on tiered (disk) reads.
+  bool HasDelayedEntries() const {
+    return !delayed_entries_.empty();
+  }
+
  protected:
   explicit DelayedEntryHandler(BucketDependencies& deps) : deps_{deps} {
   }
@@ -186,6 +191,9 @@ class SerializerBase : public BucketDependencies,
   // on_update is true if it's being called in the OnChangeBlocking flow,
   // and false if called by the traversal loop.
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
+
+  // Sleep for egress throttling or disk overload - must be called from iteration fiber
+  void Throttle();
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.

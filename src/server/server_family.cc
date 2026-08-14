@@ -2880,6 +2880,7 @@ string ServerFamily::FormatInfoMetrics(
     append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
 
     append("tiered_pending_read_cnt", m.tiered_stats.pending_read_cnt);
+    append("tiered_pending_read_bytes", m.tiered_stats.pending_read_bytes);
     append("tiered_pending_stash_cnt", m.tiered_stats.pending_stash_cnt);
     append("tiered_pending_stash_bytes", m.tiered_stats.pending_stash_bytes);
 

@@ -27,6 +27,7 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
 
   ADD(pending_read_cnt);
   ADD(pending_stash_cnt);
+  ADD(pending_read_bytes);
 
   ADD(small_bins_cnt);
   ADD(small_bins_entries_cnt);
