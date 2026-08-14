@@ -48,12 +48,17 @@ ABSL_FLAG(bool, tiered_experimental_cooling, true,
 
 ABSL_RETIRED_FLAG(unsigned, tiered_storage_write_depth, 200,
                   "Maximum number of concurrent stash requests issued by background offload. "
-                  "Deprecated: prefer tiered_max_pending_stash_bytes.");
+                  "Deprecated: prefer tiered_max_pending_bytes.");
+
+ABSL_RETIRED_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes, 256_KB,
+                  "Deprecated: prefer tiered_max_pending_bytes.");
 
 // 256kb is a realistic limit for moden NVMe drives: in-flight = avg latency * throughput/s
-ABSL_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes, 256_KB,
-          "Maximum bytes in-flight to disk before rejecting new stashes or applying client "
-          "backpressure. Allows batching writes to saturate disk I/O even with few clients");
+ABSL_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes, 256_KB,
+          "Cap on the total volume of in-flight bytes to the tiered (disk) device, counting both "
+          "reads and writes. Governs stash write backpressure, and throttles background "
+          "serialization (snapshot/migration) and defragmentation while the device is overloaded, "
+          "so those do not starve client reads.");
 
 ABSL_FLAG(float, tiered_offload_threshold, 0.5,
           "Ratio of free memory (free/max memory) below which offloading starts");
@@ -434,7 +439,8 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment, b
   // Otherwise background scans of fragmented bins will discover them
   if (bin.fragmented && ts_->UploadBudget() > 0) {
     // Limit number of IO operations if we need to read from disk (in_memory is false)
-    if (in_memory || stats_.pending_defrags < kMaxPendingDefrags) {
+    bool underloaded = stats_.pending_defrags < kMaxPendingDefrags && ts_->TotalUsage() < 100;
+    if (in_memory || underloaded) {
       EnqueueForDefrag(bin.segment);
     }
   }
@@ -546,8 +552,9 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
     return;
   }
 
-  // Throttle if we're low on memory and reached the offloading limit
-  if (backpressure && ShouldOffload() && WriteDepthUsage() >= 1.0f) {
+  // Throttle if we're low on memory and the device is at its pressure cap
+  // TODO: possibly change to TotalUsage() to give reads priority
+  if (backpressure && ShouldOffload() && WriteUsage() >= 100) {
     stats_.total_clients_throttled++;
     *backpressure = stash_backpressure_[{dbid, string{key}}];
   }
@@ -649,20 +656,29 @@ TieredStats TieredStorage::GetStats() const {
   return stats;
 }
 
-float TieredStorage::WriteDepthUsage() const {
-  auto disk_stats = op_manager_->GetStats().disk_stats;
-  return 1.0f * float(disk_stats.pending_stash_bytes) / float(config_.max_pending_stash_bytes);
+unsigned TieredStorage::ReadUsage() const {
+  uint64_t cap = config_.max_pending_bytes;
+  if (cap == 0)
+    return 0;
+  return static_cast<unsigned>(op_manager_->GetStats().disk_stats.pending_read_bytes * 100 / cap);
 }
 
-size_t TieredStorage::PendingReadBytes() const {
-  return op_manager_->GetStats().disk_stats.pending_read_bytes;
+unsigned TieredStorage::WriteUsage() const {
+  uint64_t cap = config_.max_pending_bytes;
+  if (cap == 0)
+    return 0;
+  return static_cast<unsigned>(op_manager_->GetStats().disk_stats.pending_stash_bytes * 100 / cap);
+}
+
+unsigned TieredStorage::TotalUsage() const {
+  return ReadUsage() + WriteUsage();
 }
 
 void TieredStorage::UpdateFromFlags() {
   config_ = {
       .min_value_size = absl::GetFlag(FLAGS_tiered_min_value_size),
       .experimental_cooling = absl::GetFlag(FLAGS_tiered_experimental_cooling),
-      .max_pending_stash_bytes = absl::GetFlag(FLAGS_tiered_max_pending_stash_bytes),
+      .max_pending_bytes = absl::GetFlag(FLAGS_tiered_max_pending_bytes),
       .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
       .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_support),
@@ -677,7 +693,7 @@ void TieredStorage::UpdateFromFlags() {
 
 std::vector<std::string> TieredStorage::GetMutableFlagNames() {
   return base::GetFlagNames(FLAGS_tiered_min_value_size, FLAGS_tiered_experimental_cooling,
-                            FLAGS_tiered_max_pending_stash_bytes, FLAGS_tiered_offload_threshold,
+                            FLAGS_tiered_max_pending_bytes, FLAGS_tiered_offload_threshold,
                             FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
                             FLAGS_tiered_experimental_list_support,
                             FLAGS_tiered_min_ttl_to_offload_ms);
@@ -733,8 +749,8 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   // Loop over entry with time and max stash budget.
   uint64_t cycles = 0;
   do {
-    // We hit backpressure limit, so stop
-    if (op_manager_->GetStats().disk_stats.pending_stash_bytes >= config_.max_pending_stash_bytes)
+    // Ignore ReadUsage() as we potentially running out of memory - writes are more important now
+    if (WriteUsage() >= 100)
       break;
 
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
@@ -751,6 +767,10 @@ void TieredStorage::RunDefragScan() {
   constexpr uint64_t kBaseUs = 2;
   constexpr uint64_t kUsPerHit = 5;
   constexpr uint64_t kMaxUs = 25;
+
+  // Skip the scan while the device is overloaded so defrag reads don't starve client reads.
+  if (TotalUsage() >= 100)
+    return;
 
   const auto start_cycles = base::CycleClock::Now();
 
@@ -858,9 +878,9 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
   if (fragment_ref.ObjType() == OBJ_LIST && !OccupiesWholePages(estimated_size))
     return nullopt;
 
-  // Track if we oversature disk (backpressure fails to stop clients, possibly many new).
+  // Track if we oversaturate disk (backpressure fails to stop clients, possibly many new).
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
-  if (disk_stats.pending_stash_bytes >= 2 * config_.max_pending_stash_bytes) {
+  if (WriteUsage() >= 200) {
     ++stats_.stash_overflow_cnt;
     // Discard the write if we don't require offloading to not oversaturate the disk
     if (!should_offload)

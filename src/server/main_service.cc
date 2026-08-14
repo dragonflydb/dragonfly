@@ -1109,7 +1109,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
   config_registry.RegisterMutable("slot_migration_throttle_us");
-  config_registry.RegisterMutable("tiered_serialization_inflight_bytes_cap");
   config_registry.RegisterMutable("table_growth_margin");
   config_registry.RegisterMutable("tcp_keepalive");
   config_registry.RegisterMutable("timeout");

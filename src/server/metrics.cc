@@ -22,9 +22,11 @@
 #include "server/search/doc_index.h"
 #include "server/server_family.h"
 #include "server/snapshot.h"
+#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 
 ABSL_DECLARE_FLAG(uint32_t, maxclients);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
 
 namespace dfly {
 
@@ -676,6 +678,20 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                       {"client throttling"}, &resp->body());
     AppendMetricValue("tiered_overload", m.tiered_stats.total_stash_overflows, {"type"},
                       {"stash overflows"}, &resp->body());
+
+    // Device pressure: in-flight IO bytes as a percentage of the aggregate
+    const uint64_t per_shard_cap = GetFlag(FLAGS_tiered_max_pending_bytes).value;
+    const uint64_t total_cap = per_shard_cap * shard_set->size();
+    const uint64_t read_pct = total_cap ? (m.tiered_stats.pending_read_bytes * 100) / total_cap : 0;
+    const uint64_t write_pct =
+        total_cap ? (m.tiered_stats.pending_stash_bytes * 100) / total_cap : 0;
+    AppendMetricHeader("tiered_device_usage_percent",
+                       "Tiered device pressure as percent of tiered_max_pending_bytes cap",
+                       MetricType::GAUGE, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", read_pct, {"type"}, {"read"}, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", write_pct, {"type"}, {"write"}, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", read_pct + write_pct, {"type"}, {"total"},
+                      &resp->body());
 
     AppendMetricHeader("tiered_list_events", "Tiered List Events", MetricType::COUNTER,
                        &resp->body());
