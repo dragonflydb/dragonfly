@@ -68,6 +68,10 @@ struct TieredStats {
   // In-flight read operations.
   uint32_t pending_read_cnt = 0;
 
+  // Volume, in bytes, of in-flight disk reads. Counts real pages read (deduped across small
+  // values that share a page/bin), so it reflects device read pressure rather than op count.
+  size_t pending_read_bytes = 0;
+
   // In-flight stash (write) operations.
   uint32_t pending_stash_cnt = 0;
 
