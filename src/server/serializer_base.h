@@ -109,6 +109,11 @@ struct DelayedEntryHandler {
   // Serialize delayed entry that was fetched with serializer specific implementation
   virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
 
+  // True while this serializer still has offloaded entries waiting on tiered (disk) reads.
+  bool HasDelayedEntries() const {
+    return !delayed_entries_.empty();
+  }
+
  protected:
   explicit DelayedEntryHandler(BucketDependencies& deps) : deps_{deps} {
   }
@@ -212,6 +217,9 @@ class SerializerBase : public BucketDependencies,
   virtual bool ShouldSerialize(DbIndex db_index, const PrimeKey& pk) const {
     return true;
   }
+
+  // Sleep for egress throttling or disk overload - must be called from iteration fiber
+  void Throttle();
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // Serializes the entries accepted by ShouldSerialize. Called without holding stream_mu_, which

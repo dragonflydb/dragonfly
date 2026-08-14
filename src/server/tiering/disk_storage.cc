@@ -160,9 +160,11 @@ void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
     }
     ReturnBuf(buf);
     pending_ops_--;
+    pending_read_bytes_ -= len;
   };
 
   pending_ops_++;
+  pending_read_bytes_ += len;
   if (buf.buf_idx != kHeapSliceId)
     backing_file_->ReadFixedAsync(buf.bytes, segment.offset, buf.buf_idx, std::move(io_cb));
   else
@@ -238,6 +240,7 @@ DiskStorage::Stats DiskStorage::GetStats() const {
                .max_file_size = static_cast<size_t>(max_size_),
                .pending_ops = pending_ops_,
                .pending_stash_bytes = pending_stash_bytes_,
+               .pending_read_bytes = pending_read_bytes_,
                .segment_bytes = alloc_stats.segment_bytes,
                .large_allocated_bytes = alloc_stats.large_allocated_bytes,
                .free_extent_bytes = alloc_stats.free_extent_bytes};

@@ -630,6 +630,7 @@ TieredStats TieredStorage::GetStats() const {
     tiering::OpManager::Stats op_stats = op_manager_->GetStats();
     stats.pending_read_cnt = op_stats.pending_read_cnt;
     stats.pending_stash_cnt = op_stats.pending_stash_cnt;
+    stats.pending_read_bytes = op_stats.disk_stats.pending_read_bytes;
     stats.allocated_bytes = op_stats.disk_stats.allocated_bytes;
     stats.capacity_bytes = op_stats.disk_stats.capacity_bytes;
     stats.alloc_segment_bytes = op_stats.disk_stats.segment_bytes;
@@ -665,6 +666,10 @@ TieredStats TieredStorage::GetStats() const {
 float TieredStorage::WriteDepthUsage() const {
   auto disk_stats = op_manager_->GetStats().disk_stats;
   return 1.0f * float(disk_stats.pending_stash_bytes) / float(config_.max_pending_stash_bytes);
+}
+
+size_t TieredStorage::PendingReadBytes() const {
+  return op_manager_->GetStats().disk_stats.pending_read_bytes;
 }
 
 void TieredStorage::UpdateFromFlags() {
