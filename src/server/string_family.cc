@@ -878,6 +878,7 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
   }
 
   if (expired) {
+    db_slice.SendExpiredKeyEvent(ctx, params.key);
     return OpStatus::KEY_NOTFOUND;
   }
   return find_res->it;
@@ -1420,21 +1421,29 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     StringResult value = ReadString(t->GetDbIndex(), key, it_res->it->second, shard);
 
+    bool key_expired = false;
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
-      RETURN_ON_BAD_STATUS(
-          op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it, exp_params));
+      auto expire_res = op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it, exp_params);
+      RETURN_ON_BAD_STATUS(expire_res);
+      key_expired = *expire_res == -1;
     }
 
-    // Replicate GETEX as PEXPIREAT or PERSIST
+    // Replicate GETEX as DEL (already-past expiration), PEXPIREAT or PERSIST.
     if (shard->journal() && exp_params.IsDefined()) {
       if (exp_params.persist) {
         RecordJournal(op_args, "PERSIST", {key});
+      } else if (key_expired) {
+        RecordJournal(op_args, "DEL", {key});
       } else {
         auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms, false);
         auto abs_time_str = absl::StrCat(abs_time);
         RecordJournal(op_args, "PEXPIREAT", {key, abs_time_str});
       }
+    }
+
+    if (key_expired) {
+      op_args.GetDbSlice().SendExpiredKeyEvent(op_args.db_cntx, key);
     }
 
     return value;

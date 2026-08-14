@@ -1,6 +1,8 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <absl/cleanup/cleanup.h>
+
 #include <random>
 
 #include "base/gtest.h"
@@ -1215,6 +1217,37 @@ TEST_F(StringFamilyTest, PendingReadDrainNonOrphaned) {
     CompactObj::DrainPendingReads();
     cobj.Reset();
   });
+}
+
+// GETEX and memcached GAT with an already-past expiration delete the key and must emit the
+// expired keyspace event.
+TEST_F(StringFamilyTest, PastExpiryEmitsExpiredEvent) {
+  using MP = facade::MemcacheParser;
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  Run({"SET", "foo", "bar"});
+  EXPECT_EQ(Run({"GETEX", "foo", "PXAT", "1"}), "bar");
+  EXPECT_THAT(Run({"EXISTS", "foo"}), IntArg(0));
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});  // flush pending publishes
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  EXPECT_EQ("foo", GetPublishedMessage("IO1", 0).message);
+
+  // Replies keep their raw RESP form in subscriber mode.
+  EXPECT_THAT(RunMC(MP::SET, "key", MCArgs{"val"}), ElementsAre("+STORED"));
+  EXPECT_THAT(GetMC(MP::GAT, {absl::StrCat(TEST_current_time_ms / 1000 - 100), "key"}),
+              ElementsAre("END"));
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+  ASSERT_EQ(2u, SubscriberMessagesLen("IO1"));
+  EXPECT_EQ("key", GetPublishedMessage("IO1", 1).message);
 }
 
 }  // namespace dfly
