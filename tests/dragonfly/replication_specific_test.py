@@ -737,6 +737,25 @@ async def test_mc_gat_replication(df_factory):
         assert await c_replica.pttl(key) == -1
 
 
+async def test_set_past_expiry_replication(df_factory):
+    master = df_factory.create(proactor_threads=1)
+    replica = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    async with master.client() as c_master, replica.client() as c_replica:
+        await c_master.set("k", "v")
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_available_async(c_replica)
+        assert await c_replica.get("k") == "v"
+
+        # SET with a past expiry deletes the key; SET is not auto-journaled, so the delete
+        # needs an explicit journal record to reach the replica
+        assert await c_master.execute_command("SET", "k", "v2", "PXAT", "1")
+        assert await c_master.exists("k") == 0
+        await check_all_replicas_finished([c_replica], c_master)
+        assert await c_replica.exists("k") == 0
+
+
 @pytest.mark.large
 @dfly_args({"proactor_threads": 1})
 async def test_big_strings(df_factory):
