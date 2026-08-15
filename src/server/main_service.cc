@@ -487,7 +487,8 @@ void InterpreterReplier::SendSimpleString(string_view str) {
 }
 
 void InterpreterReplier::SendNullArray() {
-  SendSimpleStrArr(ArgSlice{});
+  // A null array converts to false, same as a null string.
+  explr_->OnNil();
   PostItem();
 }
 
