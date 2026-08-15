@@ -706,6 +706,14 @@ int SortedMap::AddElem(double score, std::string_view ele, int in_flags, int* ou
     }
   }
 
+  // GT/LT? Only update if score is greater/less than current.
+  double curscore = GetObjScore(obj);
+  if (((in_flags & ZADD_IN_LT) && score >= curscore) ||
+      ((in_flags & ZADD_IN_GT) && score <= curscore)) {
+    *out_flags = ZADD_OUT_NOP;
+    return 1;
+  }
+
   // Update the score.
   CHECK(score_tree->Delete(obj));
   SetObjScore(obj, score);

@@ -168,6 +168,37 @@ TEST_F(ZSetFamilyTest, Add) {
   EXPECT_EQ(resp, "1.1");
 }
 
+TEST_F(ZSetFamilyTest, AddGtLtSkiplist) {
+  // A 33-byte member forces skiplist encoding immediately (ZSET_MAX_LISTPACK_VALUE is 32).
+  string long_member(33, 'a');
+
+  auto resp = Run({"zadd", "x", "gt", "10", long_member});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // GT with a lower score must be a no-op.
+  resp = Run({"zadd", "x", "gt", "3", long_member});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(Run({"zscore", "x", long_member}), "10");
+
+  // GT with a higher score must update.
+  resp = Run({"zadd", "x", "gt", "20", long_member});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(Run({"zscore", "x", long_member}), "20");
+
+  resp = Run({"zadd", "y", "lt", "10", long_member});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // LT with a higher score must be a no-op.
+  resp = Run({"zadd", "y", "lt", "20", long_member});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(Run({"zscore", "y", long_member}), "10");
+
+  // LT with a lower score must update.
+  resp = Run({"zadd", "y", "lt", "3", long_member});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(Run({"zscore", "y", long_member}), "3");
+}
+
 TEST_F(ZSetFamilyTest, AddNonUniqeMembers) {
   auto resp = Run({"zadd", "x", "2", "a", "1", "a"});
   EXPECT_THAT(resp, IntArg(1));
