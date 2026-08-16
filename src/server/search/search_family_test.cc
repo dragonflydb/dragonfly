@@ -366,21 +366,54 @@ template <typename... Matchers> auto IsUnordArrayWithSize(Matchers... matchers) 
 }
 
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
-  EXPECT_EQ(Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "prefix-1"}), "OK");
-  EXPECT_EQ(Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2"}), "OK");
-  EXPECT_EQ(Run({"ft.create", "idx-3", "ON", "JSON", "PREFIX", "1", "prefix-3"}), "OK");
+  EXPECT_EQ(
+      Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "prefix-1", "SCHEMA", "f", "TEXT"}),
+      "OK");
+  EXPECT_EQ(
+      Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2", "SCHEMA", "f", "TEXT"}),
+      "OK");
+  EXPECT_EQ(
+      Run({"ft.create", "idx-3", "ON", "JSON", "PREFIX", "1", "prefix-3", "SCHEMA", "f", "TEXT"}),
+      "OK");
 
   EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::UnorderedElementsAre("idx-1", "idx-2", "idx-3"));
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-2"}), "OK");
   EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::UnorderedElementsAre("idx-1", "idx-3"));
 
-  EXPECT_THAT(Run({"ft.create", "idx-1"}), ErrArg("Index already exists"));
+  EXPECT_THAT(Run({"ft.create", "idx-1", "ON", "HASH", "SCHEMA", "f", "TEXT"}),
+              ErrArg("Index already exists"));
 
   EXPECT_THAT(Run({"ft.dropindex", "idx-100"}), ErrArg("Index with name 'idx-100' not found"));
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
   EXPECT_THAT(Run({"ft._list"}), RespElementsAre("idx-3"));
+}
+
+// Regression for #7953: a zero-field index is a broken state (FT.INFO says "not found" while
+// FT._LIST lists it, and it doesn't survive serialization), so SCHEMA with at least one field
+// must be required unconditionally - not inferred from a heuristic over the skipped tokens.
+TEST_F(SearchFamilyTest, CreateWithoutSchemaKeywordIsError) {
+  const auto kMissingSchema = "Missing required SCHEMA clause with at least one field";
+
+  // Forgotten SCHEMA keyword before field definitions.
+  EXPECT_THAT(Run({"ft.create", "idx_ts_test", "ON", "HASH", "PREFIX", "1", "ot:foo", "name",
+                   "TEXT", "timestamp", "NUMERIC", "SORTABLE"}),
+              ErrArg(kMissingSchema));
+  EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::IsEmpty());
+  EXPECT_THAT(Run({"ft.info", "idx_ts_test"}), ErrArg("Index with name 'idx_ts_test' not found"));
+
+  // No SCHEMA clause at all, and no field-like tokens either - still rejected, since the
+  // resulting index would be just as unusable regardless of how it ended up with zero fields.
+  EXPECT_THAT(Run({"ft.create", "idx_empty", "ON", "HASH"}), ErrArg(kMissingSchema));
+  EXPECT_THAT(Run({"ft.create", "idx_skip_scan", "ON", "HASH", "SKIPINITIALSCAN"}),
+              ErrArg(kMissingSchema));
+
+  // SCHEMA keyword present but with no fields after it.
+  EXPECT_THAT(Run({"ft.create", "idx_bare_schema", "ON", "HASH", "SCHEMA"}),
+              ErrArg("Fields arguments are missing"));
+
+  EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::IsEmpty());
 }
 
 TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
@@ -415,7 +448,7 @@ TEST_F(SearchFamilyTest, AlterIndex) {
   Run({"hset", "d:1", "color", "blue", "cost", "150"});
   Run({"hset", "d:2", "color", "green", "cost", "200"});
 
-  Run({"ft.create", "idx-1", "ON", "HASH"});
+  Run({"ft.create", "idx-1", "ON", "HASH", "SCHEMA", "unused", "TAG"});
 
   EXPECT_EQ(Run({"ft.alter", "idx-1", "schema", "add", "color", "tag"}), "OK");
   WaitForIndexReady("idx-1");
@@ -3937,7 +3970,7 @@ TEST_F(SearchFamilyTest, SearchStatsInfoRace) {
     for (int i = 1; i <= 5; ++i) {
       std::string idx_name = absl::StrCat("idx", i);
       std::string prefix = absl::StrCat("prefix", i, ":");
-      Run({"FT.CREATE", idx_name, "ON", "HASH", "PREFIX", "1", prefix});
+      Run({"FT.CREATE", idx_name, "ON", "HASH", "PREFIX", "1", prefix, "SCHEMA", "f", "TEXT"});
       Run({"FT.DROPINDEX", idx_name});
     }
   });

@@ -4294,7 +4294,7 @@ void StreamFamily::Register(CommandRegistry* registry) {
       << CI{"XSETID", CO::JOURNALED, 3, 1, 1, acl::kXSetId}.HFUNC(XSetId)
       << CI{"XTRIM", CO::JOURNALED | CO::FAST | CO::NO_AUTOJOURNAL, -4, 1, 1, acl::kXTrim}.HFUNC(
              XTrim)
-      << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, acl::kXGroupHelp}.SetHandler(
+      << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 1, 0, 0, acl::kXGroupHelp}.SetHandler(
              XGroupHelp)
       << CI{"XACK", CO::JOURNALED | CO::FAST, -4, 1, 1, acl::kXAck}.HFUNC(XAck)
       << CI{"XAUTOCLAIM", CO::JOURNALED | CO::FAST, -6, 1, 1, acl::kXAutoClaim}.HFUNC(XAutoClaim);

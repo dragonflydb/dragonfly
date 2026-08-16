@@ -1289,13 +1289,23 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return OpStatus::SKIPPED;
 
   // If we update and the new value is already expired, delete the key
+  // Already-expired new value: delete; the caller emits the expired event after journaling.
   if (rel_msec <= 0) {
     Del(cntx, prime_it);
+    ++events_.expired_keys;
+    db_arr_[cntx.db_index]->stats.events.expired_keys++;
     return -1;
   }
 
   AddExpire(cntx.db_index, prime_it, abs_msec);
   return abs_msec;
+}
+
+void DbSlice::SendExpiredKeyEvent(const Context& cntx, std::string_view key) const {
+  if (!expired_keys_events_recording_)
+    return;
+  channel_store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"),
+                              absl::Span<const std::string_view>{&key, 1}, false);
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx,
