@@ -1802,6 +1802,27 @@ async def test_reset_clears_client_tracking(df_server: DflyInstance):
 
 
 @dfly_args({"proactor_threads": 1})
+async def test_zmpop_empty_null_array(df_server: DflyInstance):
+    """An empty ZMPOP result is a null array on the wire: *-1 under RESP2 and _ under RESP3,
+    never the RESP2 null string $-1, which aggregate-reply parsers reject."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+    cmd = _resp_cmd_writer(writer)
+
+    await cmd("ZMPOP", "1", "nokey", "MIN")
+    assert await _read_resp_frame(reader) == b"*-1\r\n"
+
+    # Drain the entire HELLO map so trailing fields cannot desync later frame reads.
+    await cmd("HELLO", "3")
+    await _read_resp_frame(reader)
+
+    await cmd("ZMPOP", "1", "nokey", "MIN")
+    assert await _read_resp_frame(reader) == b"_\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+
+
+@dfly_args({"proactor_threads": 1})
 async def test_invalidation_dropped_on_resp2_connection(df_server: DflyInstance):
     """An invalidation can be generated for a connection that left RESP3 while tracking was still on
     (RESET does exactly this - switches to RESP2 and disables tracking - but a queued invalidation

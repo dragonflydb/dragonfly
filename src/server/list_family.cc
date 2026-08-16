@@ -1230,7 +1230,7 @@ void CmdLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (found_wrong_type) {
       response_builder->SendError(kWrongTypeErr);
     } else {
-      response_builder->SendNull();
+      response_builder->SendNullArray();
     }
     return;
   }
@@ -1254,7 +1254,7 @@ void CmdLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
     response_builder->SendBulkString(*key_to_pop);
     response_builder->SendBulkStrArr(*result);
   } else {
-    response_builder->SendNull();
+    response_builder->SendNullArray();
   }
 }
 
@@ -1289,9 +1289,24 @@ void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
     response_builder->StartArray(2);
     response_builder->SendBulkString(*popped_key);
     response_builder->SendBulkStrArr(*result);
-  } else {
-    response_builder->SendNull();
+    return;
   }
+
+  switch (popped_key.status()) {
+    case OpStatus::WRONG_TYPE:
+      return cmd_cntx->SendError(kWrongTypeErr);
+    case OpStatus::CANCELLED:
+    case OpStatus::TIMED_OUT:
+      return response_builder->SendNullArray();
+    case OpStatus::KEY_MOVED: {
+      auto error = cluster::SlotOwnershipError(*cmd_cntx->tx()->GetUniqueSlotId());
+      CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
+      return cmd_cntx->SendError(error);
+    }
+    default:
+      LOG(ERROR) << "Unexpected error " << popped_key.status();
+  }
+  return response_builder->SendNullArray();
 }
 
 void CmdLPush(CmdArgParser parser, CommandContext* cmd_cntx) {

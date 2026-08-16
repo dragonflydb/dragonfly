@@ -932,9 +932,8 @@ TEST_F(ZSetFamilyTest, ZMPopInvalidSyntax) {
 }
 
 TEST_F(ZSetFamilyTest, ZMPop) {
-  // All sets are empty.
   auto resp = Run({"zmpop", "1", "e", "MIN"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 
   // Min operation.
   resp = Run({"zadd", "a", "1", "a1", "2", "a2"});
@@ -1102,7 +1101,7 @@ TEST_F(ZSetFamilyTest, BMPOPBlockingTimeout) {
 
   // Check that the timeout duration is not too crazy.
   EXPECT_LT(AbsDuration(dur - absl::Milliseconds(1000)), absl::Milliseconds(300));
-  EXPECT_THAT(resp0, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp0, ArgType(RespExpr::NIL_ARRAY));
 }
 
 TEST_F(ZSetFamilyTest, ZPopMin) {

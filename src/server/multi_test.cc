@@ -1761,4 +1761,16 @@ TEST_F(MultiTest, ResetSelectsDB0) {
   EXPECT_THAT(Run({"get", "resetkey"}), "val");
 }
 
+TEST_F(MultiTest, EvalMPopEmptyIsFalse) {
+  // Empty-result ZMPOP/LMPOP inside a script replies with a null array, which must
+  // produce Lua false, never a table.
+  auto resp = Run(
+      {"eval", "local r = redis.call('zmpop', '1', KEYS[1], 'MIN') return type(r)", "1", "nozset"});
+  EXPECT_EQ(resp, "boolean");
+
+  resp = Run({"eval", "local r = redis.call('lmpop', '1', KEYS[1], 'LEFT') return type(r)", "1",
+              "nolist"});
+  EXPECT_EQ(resp, "boolean");
+}
+
 }  // namespace dfly
