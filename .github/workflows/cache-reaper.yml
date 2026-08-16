@@ -8,7 +8,8 @@ on:
   pull_request:
     types: [closed]
   schedule:
-    - cron: "0 */3 * * *"
+    # Run every hour
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 # One reap per PR - scheduled/manual reaps share a single group. A newer run supersedes an in-flight one.
