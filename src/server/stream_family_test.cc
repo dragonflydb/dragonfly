@@ -1310,7 +1310,9 @@ TEST_F(StreamFamilyTest, XPendingEmpty) {
   Run({"XADD", "stream", "*", "foo", "bar"});
   Run({"XGROUP", "CREATE", "stream", "group", "0"});
   auto resp = Run({"XPENDING", "stream", "group"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), kMatchNil, kMatchNil, kMatchNil)));
+  // Empty PEL: null min/max ids and a null array for the consumers list.
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre(IntArg(0), kMatchNil, kMatchNil, ArgType(RespExpr::NIL_ARRAY))));
 }
 
 TEST_F(StreamFamilyTest, XAck) {
@@ -1560,7 +1562,7 @@ TEST_F(StreamFamilyTest, XInfoStream) {
       ElementsAre("length", IntArg(0), "radix-tree-keys", IntArg(0), "radix-tree-nodes", IntArg(1),
                   "last-generated-id", "0-0", "max-deleted-entry-id", "0-0", "entries-added",
                   IntArg(0), "recorded-first-entry-id", "0-0", "groups", IntArg(1), "first-entry",
-                  ArgType(RespExpr::NIL_ARRAY), "last-entry", ArgType(RespExpr::NIL_ARRAY)));
+                  ArgType(RespExpr::NIL), "last-entry", ArgType(RespExpr::NIL)));
 
   Run({"xadd", "mystream", "1-1", "message", "one"});
   Run({"xadd", "mystream", "2-1", "message", "two"});

@@ -2571,7 +2571,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   }
 
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
-    return rb->SendNull();
+    return rb->SendNullArray();
   }
 
   auto keys = CollectAllKeys(&exec_info);
@@ -2609,7 +2609,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   if (!exec_info.watched_keys.empty() &&
       !CheckWatchedKeyExpiry(cntx, registry_.Find("EXISTS"), exec_cid_)) {
     cmd_cntx->tx()->UnlockMulti();
-    return rb->SendNull();
+    return rb->SendNullArray();
   }
 
   exec_info.state = ConnectionState::ExecInfo::EXEC_RUNNING;
@@ -2880,15 +2880,20 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
     return rb->SendLong(cmd_cnt);
   }
 
-  // INFO [cmd]
+  // INFO [cmd ...]
   if (subcmd == "INFO" && parser.HasNext()) {
-    string cmd = absl::AsciiStrToUpper(parser.Next());
+    vector<string> names;
+    while (parser.HasNext())
+      names.push_back(absl::AsciiStrToUpper(parser.Next()));
 
-    if (const auto* cid = registry_.Find(cmd); cid) {
-      rb->StartArray(1);
-      serialize_command(cmd, *cid);
-    } else {
-      rb->SendNull();
+    // One entry per requested name; an unknown name gets a null entry.
+    rb->StartArray(names.size());
+    for (const string& name : names) {
+      if (const auto* cid = registry_.Find(name); cid) {
+        serialize_command(name, *cid);
+      } else {
+        rb->SendNull();
+      }
     }
 
     return;

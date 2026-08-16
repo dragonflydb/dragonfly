@@ -386,8 +386,8 @@ TEST_F(ZSetFamilyTest, ZRank) {
   EXPECT_EQ(0, CheckedInt({"zrevrank", "x", "b"}));
   EXPECT_THAT(Run({"zrevrank", "x", "c"}), ArgType(RespExpr::NIL));
   EXPECT_THAT(Run({"zrank", "y", "c"}), ArgType(RespExpr::NIL));
-  EXPECT_THAT(Run({"zrevrank", "x", "c", "WITHSCORE"}), ArgType(RespExpr::NIL));
-  EXPECT_THAT(Run({"zrank", "y", "c", "WITHSCORE"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"zrevrank", "x", "c", "WITHSCORE"}), ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(Run({"zrank", "y", "c", "WITHSCORE"}), ArgType(RespExpr::NIL_ARRAY));
 
   auto resp = Run({"zrank", "x", "a", "WITHSCORE"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
