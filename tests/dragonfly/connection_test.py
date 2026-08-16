@@ -2173,6 +2173,8 @@ async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Re
         "tiered_offload_threshold": "1.0",
         "tiered_experimental_cooling": "false",
         "maxmemory": "2G",
+        # The intentional tiered disk read of 256MB can exceed the 1-second (total 2 with retry) default.
+        "pause_wait_timeout": 30,
     }
 )
 async def test_client_pause_v2_inflight_async_write_gap(df_server: DflyInstance):
