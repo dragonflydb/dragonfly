@@ -1053,6 +1053,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   dfly::search::InitSimSIMD();
 #endif
 
+  // Read on every accept in Listener::PickConnectionProactor, so changes take
+  // effect immediately for new connections.
+  config_registry.RegisterMutable("conn_use_incoming_cpu");
   config_registry.RegisterMutable("dbfilename");
   config_registry.Register("dbnum");  // equivalent to databases in redis.
   config_registry.Register("dir");
