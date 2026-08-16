@@ -4,4 +4,4 @@ set key2 0 0 1
 b
 delete key1
 delete key2 noreply
-get key1
+get key1 key2

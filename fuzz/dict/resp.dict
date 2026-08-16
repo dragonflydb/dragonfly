@@ -72,6 +72,7 @@
 
 # Key operations
 "DEL"
+"RM"
 "EXISTS"
 "EXPIRE"
 "TTL"
@@ -123,6 +124,7 @@
 "BF.MEXISTS"
 "BF.SCANDUMP"
 "BF.LOADCHUNK"
+"BF.INFO"
 
 # Cuckoo filter commands
 "CF.RESERVE"
@@ -429,9 +431,6 @@
 
 # Function/script commands
 "FUNCTION"
-"FUNCTION LOAD"
-"FUNCTION LIST"
-"FUNCTION DELETE"
 
 # More JSON commands
 "JSON.ARRINSERT"
@@ -453,7 +452,6 @@
 # More Geo commands
 "GEOPOS"
 "GEOHASH"
-"GEOSEARCHSTORE"
 "GEORADIUSBYMEMBER"
 
 # Search commands
@@ -514,3 +512,146 @@
 # RESP edge cases (small fragments only)
 "$0\x0d\x0a\x0d\x0a"
 "$-1\x0d\x0a"
+
+# ---- Added by the 2026-08 seed corpus audit ----
+
+# Scripting (supported SCRIPT/FUNCTION grammar)
+"FUNCTION FLUSH"
+"SCRIPT LOAD"
+"SCRIPT EXISTS"
+"SCRIPT FLAGS"
+"SCRIPT LIST"
+"SCRIPT LATENCY"
+"SCRIPT GC"
+"SCRIPT FLUSH"
+"allow-undeclared-keys"
+"disable-atomicity"
+"legacy-float"
+
+# Pub/Sub (sharded + introspection)
+"SPUBLISH"
+"SSUBSCRIBE"
+"SUNSUBSCRIBE"
+"PUBSUB"
+"CHANNELS"
+"NUMSUB"
+"NUMPAT"
+
+# ACL SETUSER grammar
+"ON"
+"OFF"
+"nopass"
+"resetpass"
+"~*"
+"~key*"
+"%R~"
+"%W~"
+"%RW~"
+"ALLKEYS"
+"RESETKEYS"
+"&*"
+"&chan*"
+"ALLCHANNELS"
+
+# Geo options
+"STOREDIST"
+"FROMMEMBER"
+"FROMLONLAT"
+"BYRADIUS"
+"BYBOX"
+"WITHCOORD"
+"WITHDIST"
+"WITHHASH"
+
+# Stream subcommands / options / IDs
+"NOMKSTREAM"
+"MKSTREAM"
+"ENTRIESREAD"
+"JUSTID"
+"FORCE"
+"RETRYCOUNT"
+"LASTID"
+"CREATECONSUMER"
+"DELCONSUMER"
+"SETID"
+"DESTROY"
+"FULL"
+"NOACK"
+"STREAMS"
+"1-1"
+"5-*"
+"(1-1"
+
+# Hash-field expiry / zset options
+"FIELDS"
+"WITHSCORE"
+"WITHVALUES"
+"NOVALUES"
+
+# DELEX conditions, SCAN/RM options, SORT/RESTORE extras
+"IFEQ"
+"IFNE"
+"IFDEQ"
+"IFDNE"
+"nosort"
+"BUCKET"
+"ATTR"
+"MINMSZ"
+"STICK"
+"SCHEDULE"
+
+# Server introspection subcommands
+"LATEST"
+"HISTOGRAM"
+"STATS"
+"USAGE"
+"WITHOUTKEY"
+"MALLOC-STATS"
+"ARENA"
+"SUMMARY"
+"BACKING"
+"DECOMMIT"
+"DEFRAGMENT"
+"RESETSTAT"
+"SETNAME"
+"GETNAME"
+"SETINFO"
+"HELP"
+
+# Search commands + schema keywords
+"FT.AGGREGATE"
+"FT.PROFILE"
+"FT.HYBRID"
+"FT.CONFIG"
+"FT.TAGVALS"
+"FT.SYNDUMP"
+"FT.SYNUPDATE"
+"FT._LIST"
+"FT._DEBUG"
+"SCHEMA"
+"HASH"
+"JSON"
+"PREFIX"
+"TEXT"
+"TAG"
+"NUMERIC"
+"VECTOR"
+"SORTABLE"
+"NOINDEX"
+"NOSTEM"
+"WEIGHT"
+"WITHSUFFIXTRIE"
+"SEPARATOR"
+
+# JSON.GET formatting / bit ranges
+"NOESCAPE"
+"INDENT"
+"NEWLINE"
+"SPACE"
+"BYTE"
+"BIT"
+
+# BF.INFO field selectors + SBF dump header (LoadSBFHeader-accepted prefix)
+"SIZE"
+"FILTERS"
+"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x40"

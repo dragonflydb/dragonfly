@@ -30,6 +30,9 @@ COMMANDS = [
     ("replace", "store"),
     ("append",  "store"),
     ("prepend", "store"),
+    # cas dispatch is dead in Dragonfly (no MP::CAS case in McTypeToCmdName ->
+    # always CLIENT_ERROR), but it uniquely exercises MemcacheParser::ParseStore's
+    # CAS branch (opt_pos shift, cas_unique parsing), so keep generating it.
     ("cas",     "cas"),
     # Retrieval
     ("get",     "get"),
@@ -40,18 +43,17 @@ COMMANDS = [
     ("delete",  "del"),
     ("incr",    "delta"),
     ("decr",    "delta"),
-    # Utility
-    ("flush_all", "bare"),
+    # Utility. flush_all is intentionally absent: it maps to FLUSHDB, which is on
+    # the fuzz --restricted_commands list, so it can only ever produce SERVER_ERROR.
     ("stats",     "bare"),
     ("version",   "bare"),
     ("quit",      "bare"),
-    # Meta commands
+    # Meta commands. mn/me are intentionally absent: the parser/dispatch rejects
+    # them unconditionally (no META_NOOP dispatch; 'meta debug' not implemented).
     ("ms",      "meta_store"),
     ("mg",      "meta"),
     ("md",      "meta"),
-    ("ma",      "meta"),
-    ("mn",      "bare"),
-    ("me",      "meta"),
+    ("ma",      "meta_arithm"),
 ]
 # fmt: on
 
@@ -60,7 +62,12 @@ VALUES = [b"abc", b"hello", b"x", b"", b"0", b"12345", b"\x00\xff", b"a" * 100]
 EXPIRY = [b"0", b"10", b"100", b"3600", b"9999999"]
 FLAGS = [b"0", b"1", b"255", b"65535", b"4294967295"]
 DELTAS = [b"1", b"5", b"10", b"100", b"0", b"99999999999"]
-META_FLAGS = [b"T30", b"N10", b"R", b"v", b"h", b"l", b"t", b"c", b"f1", b"q", b"k"]
+# Flags recognized by MemcacheParser::ParseMeta: T<ttl>, b, F<flags>, M<mode>,
+# D<delta>, q, f, v, t, l, h, c. Anything else is PARSE_ERROR, so stick to these.
+META_FLAGS = [b"T30", b"T0", b"F7", b"v", b"h", b"l", b"t", b"c", b"f", b"q"]
+# Mode flags are type-specific: ms accepts MS/ME/MA/MR/MP, ma accepts MI/MD.
+MS_MODES = [b"MS", b"ME", b"MA", b"MR", b"MP"]
+MA_FLAGS = [b"D5", b"D10", b"MI", b"MD", b"T30", b"q", b"v"]
 FUZZ_VALUES = [b"\x00", b"\xff" * 4, b"\r\n", b"A" * 256, b"-1", b"NaN"]
 
 
@@ -157,11 +164,19 @@ def _random_command():
     elif cmd_type == "meta_store":
         key = _random_key()
         value = _random_value()
-        meta_flags = b" ".join(random.sample(META_FLAGS, random.randint(0, 3)))
-        extra = (b" " + meta_flags) if meta_flags else b""
+        flags = random.sample(META_FLAGS, random.randint(0, 3))
+        if random.random() < 0.4:
+            flags.append(random.choice(MS_MODES))
+        extra = (b" " + b" ".join(flags)) if flags else b""
         return (
             cmd + b" " + key + b" " + str(len(value)).encode() + extra + b"\r\n" + value + b"\r\n"
         )
+
+    elif cmd_type == "meta_arithm":
+        key = _random_key()
+        flags = random.sample(MA_FLAGS, random.randint(0, 2))
+        extra = (b" " + b" ".join(flags)) if flags else b""
+        return cmd + b" " + key + extra + b"\r\n"
 
     elif cmd_type == "meta":
         key = _random_key()
