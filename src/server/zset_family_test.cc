@@ -169,34 +169,51 @@ TEST_F(ZSetFamilyTest, Add) {
 }
 
 TEST_F(ZSetFamilyTest, AddGtLtSkiplist) {
-  // A 33-byte member forces skiplist encoding immediately (ZSET_MAX_LISTPACK_VALUE is 32).
+  // A 33-byte member converts the key to skiplist inside ZsetAdd (ZSET_MAX_LISTPACK_VALUE is 32).
   string long_member(33, 'a');
 
-  auto resp = Run({"zadd", "x", "gt", "10", long_member});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(Run({"zadd", "x", "gt", "10", long_member}), IntArg(1));
+  EXPECT_THAT(Run({"debug", "object", "x"}).GetString(), HasSubstr("encoding:btree"));
 
-  // GT with a lower score must be a no-op.
-  resp = Run({"zadd", "x", "gt", "3", long_member});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"zadd", "x", "gt", "ch", "3", long_member}), IntArg(0));
   EXPECT_EQ(Run({"zscore", "x", long_member}), "10");
 
-  // GT with a higher score must update.
-  resp = Run({"zadd", "x", "gt", "20", long_member});
-  EXPECT_THAT(resp, IntArg(0));
+  // Equal score pins the >= / <= direction.
+  EXPECT_THAT(Run({"zadd", "x", "gt", "ch", "10", long_member}), IntArg(0));
+  EXPECT_EQ(Run({"zscore", "x", long_member}), "10");
+
+  EXPECT_THAT(Run({"zadd", "x", "gt", "ch", "20", long_member}), IntArg(1));
   EXPECT_EQ(Run({"zscore", "x", long_member}), "20");
 
-  resp = Run({"zadd", "y", "lt", "10", long_member});
-  EXPECT_THAT(resp, IntArg(1));
+  // A rejected GT+INCR replies nil and leaves the score alone.
+  EXPECT_THAT(Run({"zadd", "x", "gt", "incr", "-5", long_member}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"zscore", "x", long_member}), "20");
+  EXPECT_EQ(Run({"zadd", "x", "gt", "incr", "5", long_member}), "25");
 
-  // LT with a higher score must be a no-op.
-  resp = Run({"zadd", "y", "lt", "20", long_member});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"zadd", "x", "xx", "gt", "ch", "1", long_member}), IntArg(0));
+  EXPECT_EQ(Run({"zscore", "x", long_member}), "25");
+
+  EXPECT_THAT(Run({"zadd", "y", "lt", "10", long_member}), IntArg(1));
+  EXPECT_THAT(Run({"zadd", "y", "lt", "ch", "20", long_member}), IntArg(0));
   EXPECT_EQ(Run({"zscore", "y", long_member}), "10");
-
-  // LT with a lower score must update.
-  resp = Run({"zadd", "y", "lt", "3", long_member});
-  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"zadd", "y", "lt", "ch", "10", long_member}), IntArg(0));
+  EXPECT_EQ(Run({"zscore", "y", long_member}), "10");
+  EXPECT_THAT(Run({"zadd", "y", "lt", "ch", "3", long_member}), IntArg(1));
   EXPECT_EQ(Run({"zscore", "y", long_member}), "3");
+  EXPECT_THAT(Run({"zadd", "y", "lt", "incr", "5", long_member}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"zscore", "y", long_member}), "3");
+}
+
+TEST_F(ZSetFamilyTest, AddGtLtSkiplistManyMembers) {
+  for (unsigned i = 0; i < 129; ++i) {
+    Run({"zadd", "z", "10", absl::StrCat("m", i)});
+  }
+  EXPECT_THAT(Run({"debug", "object", "z"}).GetString(), HasSubstr("encoding:btree"));
+
+  EXPECT_THAT(Run({"zadd", "z", "gt", "ch", "3", "m1"}), IntArg(0));
+  EXPECT_EQ(Run({"zscore", "z", "m1"}), "10");
+  EXPECT_THAT(Run({"zadd", "z", "lt", "ch", "30", "m1"}), IntArg(0));
+  EXPECT_EQ(Run({"zscore", "z", "m1"}), "10");
 }
 
 TEST_F(ZSetFamilyTest, AddNonUniqeMembers) {
