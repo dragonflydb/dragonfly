@@ -2489,7 +2489,7 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
 
   if (!key_to_pop.has_value() && (!is_blocking || cmd_cntx->tx()->IsMulti())) {
     cmd_cntx->tx()->Conclude();
-    response_builder->SendNull();
+    response_builder->SendNullArray();
     return;
   }
   // if we don't have any key to pop and it's blocking then we will block it using `WaitOnWatch`
@@ -2520,7 +2520,7 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
                                      &cntx->paused);
 
     if (status != OpStatus::OK) {
-      response_builder->SendNull();
+      response_builder->SendNullArray();
       return;
     }
 

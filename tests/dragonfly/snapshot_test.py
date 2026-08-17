@@ -219,44 +219,49 @@ async def test_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     assert file is not None, os.listdir(tmp_dir)
 
 
-@pytest.mark.skip("Fails and also causes all TLS tests to fail")
 @pytest.mark.large
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-failed-saving", "snapshot_cron": "* * * * *"})
-async def test_cron_snapshot_failed_saving(df_server, tmp_dir: Path, async_client: aioredis.Redis):
-    await DebugPopulateSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-failed-saving"})
+async def test_cron_snapshot_failed_saving(df_factory, tmp_dir: Path):
+    snapshot_dir = tmp_dir / f"failed-snapshots-{uuid.uuid4().hex}"
+    snapshot_dir.mkdir()
 
-    backups_total = await get_metric_value(df_server, "dragonfly_backups")
-    failed_backups_total = await get_metric_value(df_server, "dragonfly_failed_backups")
+    # Directories cannot be opened as snapshot files, even when Dragonfly runs as root.
+    for suffix in ("0000", "summary"):
+        (snapshot_dir / f"test-failed-saving-{suffix}.dfs.tmp").mkdir()
 
-    file = None
-    async with timeout(65):
-        while file is None:
-            await asyncio.sleep(1)
-            file = find_main_file(tmp_dir, "test-failed-saving-summary.dfs")
+    df_server = None
 
-    assert file is not None, os.listdir(tmp_dir)
+    try:
+        # A single shard makes the expected temporary snapshot paths deterministic.
+        df_server = df_factory.create(dir=str(snapshot_dir), num_shards=1)
+        df_server.start()
 
-    await assert_metric_value(df_server, "dragonfly_backups", backups_total + 1)
-    await assert_metric_value(df_server, "dragonfly_failed_backups", failed_backups_total)
+        async with df_server.client() as async_client:
+            await DebugPopulateSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
-    # Remove all files from directory
-    for dir_file in tmp_dir.iterdir():
-        os.unlink(dir_file)
+            backups_total = await get_metric_value(df_server, "dragonfly_backups")
+            failed_backups_total = await get_metric_value(df_server, "dragonfly_failed_backups")
 
-    # Make directory read-only
-    os.chmod(tmp_dir, 0o555)
+            # Start the scheduler only after the sentinels and metric baseline are in place.
+            await async_client.config_set("snapshot_cron", "* * * * *")
 
-    # Wait for the next SAVE command
-    await asyncio.sleep(65)
-    file = find_main_file(tmp_dir, "test-failed-saving-summary.dfs")
+            @assert_eventually(timeout=65)
+            async def assert_failed_snapshot():
+                await assert_metric_value(df_server, "dragonfly_backups", backups_total + 1)
+                await assert_metric_value(
+                    df_server, "dragonfly_failed_backups", failed_backups_total + 1
+                )
 
-    # Make directory writable again
-    os.chmod(tmp_dir, 0o777)
-
-    assert file is None, os.listdir(tmp_dir)
-
-    await assert_metric_value(df_server, "dragonfly_backups", backups_total + 2)
-    await assert_metric_value(df_server, "dragonfly_failed_backups", failed_backups_total + 1)
+            await assert_failed_snapshot()
+            assert not list(snapshot_dir.iterdir())
+    finally:
+        if df_server is not None:
+            try:
+                async with df_server.client() as shutdown_client:
+                    await shutdown_client.shutdown(nosave=True)
+            except Exception:
+                pass
+            df_server.stop()
 
 
 @pytest.mark.large

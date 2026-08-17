@@ -371,7 +371,7 @@ void RedisReplyBuilderBase::SendDouble(double val) {
 
 void RedisReplyBuilderBase::SendNullArray() {
   ReplyScope scope(this);
-  WritePieces("*-1", kCRLF);
+  IsResp3() ? WritePieces(kNullStringR3) : WritePieces("*-1", kCRLF);
 }
 
 constexpr static const char START_SYMBOLS2[4][2] = {"*", "~", "%", ">"};

@@ -367,6 +367,24 @@ TEST_F(StreamFamilyTest, XReadBlock) {
   // Both xread calls should have been unblocked.
   EXPECT_THAT(resp0.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(1)));
   EXPECT_THAT(resp1.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(1)));
+
+  // With the RESP3 protocol, a blocked XREAD woken by a new entry should get a valid response.
+  Run({"HELLO", "3"});
+  RespExpr resp3_reply;
+  auto fb2 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp3_reply = Run({"xread", "block", "0", "streams", "foo", "$"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  resp = pp_->at(1)->Await([&] { return Run("xadd", {"xadd", "foo", "1-*", "k6", "v6"}); });
+
+  fb2.Join();
+
+  ASSERT_THAT(resp3_reply, RespArray(ElementsAre("foo", ArrLen(1))));
+  const auto foo_resp = resp3_reply.GetVec()[1];
+  const auto first_entry = foo_resp.GetVec()[0];
+  const auto expected = RespArray(ElementsAre("k6", "v6"));
+  ASSERT_THAT(first_entry, RespArray(ElementsAre(_, expected)));
 }
 
 TEST_F(StreamFamilyTest, XReadBlockIgnoresNonDataWake) {
@@ -990,6 +1008,20 @@ TEST_F(StreamFamilyTest, Issue854) {
 
   resp = Run({"eval", "redis.call('xgroup', 'help')", "0"});
   EXPECT_THAT(resp, ErrArg("is not allowed"));
+}
+
+TEST_F(StreamFamilyTest, XGroupHelpBatchCacheCollision) {
+  // Regression: within a squashed pipeline batch, XGROUP HELP resolves to the hidden _XGROUP_HELP
+  // command. It must not poison the per-verb command cache, otherwise a following XGROUP CREATE
+  // would run the help handler instead of creating the group.
+  RunMany({{"xgroup", "help"}, {"xgroup", "create", "foo", "group", "$", "MKSTREAM"}});
+
+  auto resp = Run({"xinfo", "stream", "foo"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto vec = resp.GetVec();
+  // The "groups" field must report a single created consumer group.
+  EXPECT_THAT(vec[14], "groups");
+  EXPECT_THAT(vec[15], IntArg(1));
 }
 
 TEST_F(StreamFamilyTest, XGroupConsumer) {

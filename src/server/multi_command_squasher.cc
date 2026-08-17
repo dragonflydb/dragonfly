@@ -15,6 +15,7 @@
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
 
@@ -225,18 +226,24 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     sinfo.reply_size_total_ptr->fetch_add(sz, std::memory_order_relaxed);
   };
 
+  constexpr size_t kPrefetchBatch = 8;
   const size_t dispatched_sz = sinfo.dispatched.size();
-  for (size_t batch_start = 0; batch_start < dispatched_sz; batch_start += 8) {
-    size_t batch_end = batch_start + 8;
-    if (batch_end > dispatched_sz)
-      batch_end = dispatched_sz;
 
-    // We are in the context of a shard thread, so prefetching allows faster access
-    // to the command arguments.
-    for (size_t i = batch_start; i < batch_end; ++i) {
-      auto& dispatched = sinfo.dispatched[i];
-      if (dispatched.cmd_cntx) {
-        __builtin_prefetch(dispatched.cmd_cntx, 0, 3);
+  PrimeTable* prime = nullptr;
+  if (DbTable* t = namespaces->GetDefaultNamespace()
+                       .GetDbSlice(es->shard_id())
+                       .GetDBTable(cntx_->conn_state.db_index))
+    prime = &t->prime;
+
+  for (size_t batch_start = 0; batch_start < dispatched_sz; batch_start += kPrefetchBatch) {
+    const size_t batch_end = std::min(batch_start + kPrefetchBatch, dispatched_sz);
+
+    // Prefetch prime table buckets for all commands to avoid stalling on dashtable memory access
+    // See git-blame source PR for different prefetch comparisons
+    if (prime) {
+      for (size_t i = batch_start; i < batch_end; ++i) {
+        const auto& dispatched = sinfo.dispatched[i];
+        prime->Prefetch(dispatched.args[dispatched.key_index.start]);
       }
     }
 

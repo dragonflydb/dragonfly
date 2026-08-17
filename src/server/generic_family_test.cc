@@ -2304,8 +2304,12 @@ TEST_F(GenericFamilyTest, SortByNosortStoreInMulti) {
 // Regression test for https://github.com/dragonflydb/dragonfly/issues/7052
 // Heartbeat-driven key expiry must not call SendMessages inside a fiber-atomic section.
 TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
-  // Enable expired-key keyspace notifications.
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
   Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
 
   single_response_ = false;
   auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
@@ -2334,9 +2338,6 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
   const auto& msg = GetPublishedMessage("IO1", 0);
   EXPECT_EQ("__keyevent@0__:expired", msg.channel);
   EXPECT_EQ("mykey", msg.message);
-
-  // Restore the flag so it doesn't bleed into other tests.
-  Run({"CONFIG", "SET", "notify_keyspace_events", ""});
 }
 
 // A rejected CONFIG SET must not leave the invalid value observable: CONFIG GET has to keep
@@ -2379,6 +2380,33 @@ TEST_F(GenericFamilyTest, ConfigNotifyAppliesToAllNamespaces) {
     EXPECT_FALSE(ns->GetDbSlice(i).IsExpiredEventsRecording()) << i;
     EXPECT_FALSE(late_ns->GetDbSlice(i).IsExpiredEventsRecording()) << i;
   }
+}
+
+// EXPIRE with an already-past time deleted the key silently, so a subscriber waiting for the
+// expired event blocked forever.
+TEST_F(GenericFamilyTest, ExpirePastEmitsExpiredEvent) {
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  Run({"SET", "foo", "1"});
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  EXPECT_THAT(Run({"EXPIRE", "foo", "-1"}), IntArg(1));
+  EXPECT_THAT(Run({"GET", "foo"}), ArgType(RespExpr::NIL));
+
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});  // flush pending publishes
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_EQ("__keyevent@0__:expired", msg.channel);
+  EXPECT_EQ("foo", msg.message);
+  EXPECT_GE(GetMetrics().events.expired_keys, 1u);
 }
 
 }  // namespace dfly

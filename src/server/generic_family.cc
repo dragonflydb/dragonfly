@@ -870,6 +870,10 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
     }
   }
 
+  if (res.ok() && res.value() == -1) {
+    db_slice.SendExpiredKeyEvent(op_args.db_cntx, key);
+  }
+
   return res.status();
 }
 

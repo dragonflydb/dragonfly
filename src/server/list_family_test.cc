@@ -146,6 +146,17 @@ TEST_F(ListFamilyTest, BLMPopInvalidSyntax) {
   EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
+TEST_F(ListFamilyTest, BLMPopWrongType) {
+  Run({"set", "str_key", "value"});
+  auto resp = Run({"blmpop", "0.1", "1", "str_key", "LEFT"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+
+  // A wrong-typed key preceding a non-empty list must still report the error.
+  Run({"rpush", "real_list", "a"});
+  resp = Run({"blmpop", "0.1", "2", "str_key", "real_list", "LEFT"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+}
+
 TEST_F(ListFamilyTest, BLMPopBlocking) {
   // attempting to pop from empty key results in blocking and returns
   // null if no values are pushed to the key.
@@ -158,7 +169,7 @@ TEST_F(ListFamilyTest, BLMPopBlocking) {
 
   fb0.Join();
   ASSERT_FALSE(IsLocked(0, kKey1));
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 
   // BLMPOP should not block if there is a non-empty key available
   resp = Run({"lpush", kKey1, "0"});
@@ -1315,9 +1326,8 @@ TEST_F(ListFamilyTest, LMPopInvalidSyntax) {
 }
 
 TEST_F(ListFamilyTest, LMPop) {
-  // All lists are empty
   auto resp = Run({"lmpop", "1", "e", "LEFT"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 
   // LEFT operation
   resp = Run({"lpush", "a", "a1", "a2"});
@@ -1410,11 +1420,11 @@ TEST_F(ListFamilyTest, LMPopEdgeCases) {
   Run({"rpush", "empty_list", "a"});
   Run({"lpop", "empty_list"});
   auto resp = Run({"lmpop", "1", "empty_list", "LEFT"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 
   // Test with non-existent list
   resp = Run({"lmpop", "1", "nonexistent", "LEFT"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 
   // Test with wrong type key
   Run({"set", "string_key", "value"});
@@ -1440,7 +1450,7 @@ TEST_F(ListFamilyTest, LMPopEdgeCases) {
 TEST_F(ListFamilyTest, LMPopDocExample) {
   // Try to pop from non-existing lists
   auto resp = Run({"LMPOP", "2", "non1", "non2", "LEFT", "COUNT", "10"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 
   // Create first list and test basic pop
   resp = Run({"LPUSH", "mylist", "one", "two", "three", "four", "five"});
