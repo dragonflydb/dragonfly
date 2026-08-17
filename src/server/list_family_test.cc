@@ -582,6 +582,8 @@ TEST_F(ListFamilyTest, LPop) {
   auto resp = Run({"lpop", "foo", "0"});
   EXPECT_THAT(resp, RespArray(ElementsAre()));
   resp = Run({"lpop", "bar", "0"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+  resp = Run({"lpop", "bar"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
@@ -809,7 +811,7 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
 }
 
 TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
-  EXPECT_THAT(Run({"brpoplpush", "x", "y", "0.05"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "0.05"}), ArgType(RespExpr::NIL_ARRAY));
   ASSERT_EQ(0, NumWatched());
 
   EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
@@ -846,7 +848,7 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBug2857) {
 
   // Timeout
   f = pp_->at(1)->LaunchFiber(Launch::dispatch, blpop);
-  EXPECT_THAT(Run({"brpoplpush", "src", "dest", "1"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"brpoplpush", "src", "dest", "1"}), ArgType(RespExpr::NIL_ARRAY));
   f.Join();
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
@@ -916,7 +918,7 @@ TEST_F(ListFamilyTest, BRPopContended) {
 
 TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   RespExpr resp;
-  EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.05"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.05"}), ArgType(RespExpr::NIL_ARRAY));
 
   ASSERT_EQ(0, NumWatched());
 
@@ -957,7 +959,7 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
 }
 
 TEST_F(ListFamilyTest, BLMove) {
-  EXPECT_THAT(Run({"blmove", "x", "y", "right", "right", "0.05"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"blmove", "x", "y", "right", "right", "0.05"}), ArgType(RespExpr::NIL_ARRAY));
   ASSERT_EQ(0, NumWatched());
 
   EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
@@ -1010,6 +1012,15 @@ TEST_F(ListFamilyTest, BlockingTimeoutValidation) {
   // A large-but-representable timeout is accepted (returns immediately since the key exists).
   Run({"rpush", "k", "v"});
   EXPECT_THAT(Run({"blpop", "k", "4000000"}).GetVec(), ElementsAre("k", "v"));
+}
+
+TEST_F(ListFamilyTest, BLMoveMultiNull) {
+  // Inside MULTI blocking is denied and the miss reply is a scalar null,
+  // unlike the null array replied on a blocking timeout.
+  Run({"multi"});
+  Run({"blmove", "nokey", "dst", "LEFT", "RIGHT", "0.01"});
+  auto resp = Run({"exec"});
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::NIL))));
 }
 
 // Wake two BLMOVEs on the same shard simultaneously

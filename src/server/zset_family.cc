@@ -1847,7 +1847,8 @@ void ZRankGeneric(CmdArgParser parser, bool reverse, CommandContext* cmd_cntx) {
       rb->SendLong(result->rank);
     }
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    rb->SendNull();
+    // With WITHSCORE the reply is an aggregate, so its null form is a null array.
+    with_score ? rb->SendNullArray() : rb->SendNull();
   } else {
     cmd_cntx->SendError(result.status());
   }

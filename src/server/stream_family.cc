@@ -3851,14 +3851,14 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
           if (sinfo->first_entry.kv_arr.size() != 0) {
             StreamReplies{rb}.SendRecord(sinfo->first_entry);
           } else {
-            rb->SendNullArray();
+            rb->SendNull();
           }
 
           rb->SendBulkString("last-entry");
           if (sinfo->last_entry.kv_arr.size() != 0) {
             StreamReplies{rb}.SendRecord(sinfo->last_entry);
           } else {
-            rb->SendNullArray();
+            rb->SendNull();
           }
         }
         return;
@@ -3956,8 +3956,9 @@ void CmdXPending(CmdArgParser parser, CommandContext* cmd_cntx) {
         rb->SendLong(count);
       }
     } else {
-      for (unsigned j = 0; j < 3; ++j)
-        rb->SendNull();
+      rb->SendNull();       // min id
+      rb->SendNull();       // max id
+      rb->SendNullArray();  // consumer list
     }
   } else {
     const auto& res = std::get<PendingExtendedResultList>(result);

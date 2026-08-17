@@ -689,7 +689,7 @@ TEST_F(MultiTest, Eval) {
 }
 
 TEST_F(MultiTest, Watch) {
-  auto kExecFail = ArgType(RespExpr::NIL);
+  auto kExecFail = ArgType(RespExpr::NIL_ARRAY);
   auto kExecSuccess = ArgType(RespExpr::ARRAY);
 
   // Check watch doesn't run in multi.
@@ -728,6 +728,14 @@ TEST_F(MultiTest, Watch) {
   Run({"watch", "a"});
   Run({"expire", "a", "1"});
   AdvanceTime(1000);
+  Run({"multi"});
+  Run({"get", "a"});
+  ASSERT_THAT(Run({"exec"}), kExecFail);
+
+  // A TTL set before WATCH that lapses untouched aborts EXEC via the expiry check.
+  Run({"set", "a", "1", "ex", "1"});
+  Run({"watch", "a"});
+  AdvanceTime(1100);
   Run({"multi"});
   Run({"get", "a"});
   ASSERT_THAT(Run({"exec"}), kExecFail);

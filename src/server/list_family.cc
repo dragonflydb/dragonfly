@@ -942,8 +942,9 @@ void BRPopLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
   switch (op_res.status()) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
-      return builder->SendNull();
-      break;
+      // On a miss deny-blocking (MULTI/script) replies a scalar null, a blocked timeout replies a
+      // null array.
+      return cmd_cntx->tx()->IsMulti() ? builder->SendNull() : builder->SendNullArray();
 
     default:
       return builder->SendError(op_res.status());
@@ -971,8 +972,9 @@ void BLMove(CmdArgParser parser, CommandContext* cmd_cntx) {
   switch (op_res.status()) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
-      return builder->SendNull();
-      break;
+      // On a miss deny-blocking (MULTI/script) replies a scalar null, a blocked timeout replies a
+      // null array.
+      return cmd_cntx->tx()->IsMulti() ? builder->SendNull() : builder->SendNullArray();
 
     default:
       return builder->SendError(op_res.status());
@@ -1093,7 +1095,8 @@ void PopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
-      return rb->SendNull();
+      // With COUNT the reply is an aggregate, so its null form is a null array.
+      return return_arr ? rb->SendNullArray() : rb->SendNull();
     case OpStatus::WRONG_TYPE:
       return cmd_cntx->SendError(kWrongTypeErr);
     default:;
