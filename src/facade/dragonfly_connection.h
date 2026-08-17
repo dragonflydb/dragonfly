@@ -387,8 +387,14 @@ class Connection : public util::Connection {
   // provided the buffer ring is configured and the connection is not using TLS.
   void MaybeEnableRecvMultishot();
 
-  // Drains currently available bytes from socket into io_buf_ using non-blocking reads.
-  void ReadPendingInput();
+  // Drains currently available bytes from socket into the supplied buffer using non-blocking reads.
+  void ReadPendingInput(base::IoBuf& input_buf);
+
+  // Returns the buffer used by the V2 read and parse paths.
+  base::IoBuf& GetInputBuffer();
+
+  // Applies the V2 receive-result contract. Returns true when a positive read can be committed.
+  bool HandleRecvResult(const io::Result<size_t>& result);
 
   // Grows the buffer when parsing needs more data, or evaluates low-usage shrinking otherwise.
   // `parse_status` is the parser result; `reached_capacity` marks the preceding read filled it.
@@ -545,7 +551,7 @@ class Connection : public util::Connection {
   void ParseFromBuffer(base::IoBuf& buf);
 
   // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
-  ParserStatus ParseLoop();
+  ParserStatus ParseLoop(base::IoBuf& input_buf);
 
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
@@ -596,7 +602,7 @@ class Connection : public util::Connection {
 
   // IoLoopV2 data path when input is available and we are under the pipeline limit: parse, execute
   // and reply. Returns the parser status.
-  ParserStatus RunParsePath();
+  ParserStatus RunParsePath(base::IoBuf& input_buf);
 
   // IoLoopV2 data path with no new input to parse: execute ready commands and send completed
   // replies, freeing pipeline memory without growing the queue.
