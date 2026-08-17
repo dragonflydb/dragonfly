@@ -1425,7 +1425,7 @@ void Connection::ConnectionFlow() {
     if (redis_parser_ && !ioloop_v2_) {
       parse_status = ParseRedis(io_buf_, 10000, /*enqueue_only=*/false);
     } else {
-      parse_status = ParseLoop();
+      parse_status = ParseLoop(io_buf_);
     }
   }
 
@@ -1694,15 +1694,15 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   return ERROR;
 }
 
-auto Connection::ParseLoop() -> ParserStatus {
+auto Connection::ParseLoop(base::IoBuf& input_buf) -> ParserStatus {
   auto parse_func =
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
 
   ParserStatus parse_status = NEED_MORE;
 
   do {
-    DCHECK_GT(io_buf_.InputLen(), 0u);
-    parse_status = (this->*parse_func)(io_buf_);
+    DCHECK_GT(input_buf.InputLen(), 0u);
+    parse_status = (this->*parse_func)(input_buf);
 
     // V2 large-batch prioritization (pipeline_prioritize_large_batches):
     // - When a real pipeline is forming (>1 queued) and more socket data is expected
@@ -1726,7 +1726,7 @@ auto Connection::ParseLoop() -> ParserStatus {
     // protocol error reply (using parser_error_) and close the connection.
     if (parse_status == ERROR)
       return ERROR;
-  } while (parse_status == OK && io_buf_.InputLen() > 0);
+  } while (parse_status == OK && input_buf.InputLen() > 0);
 
   return parse_status;  // OK or NEED_MORE
 }
@@ -1888,7 +1888,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
       parse_status = ParseRedis(io_buf_, max_busy_read_cycles_cached, /*enqueue_only=*/false);
     } else {
       DCHECK(memcache_parser_);
-      parse_status = ParseLoop();
+      parse_status = ParseLoop(io_buf_);
     }
 
     if (reply_builder_->GetError()) {
@@ -3471,13 +3471,15 @@ bool ConnectionRef::operator==(const ConnectionRef& other) const {
 void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotification& n) {
   DVLOG(2) << CONN_ID << "OnRecvNotification: io_buf_ input_len=" << io_buf_.InputLen()
            << " pending_input=" << pending_input_;
+  const uint64_t start_epoch = fb2::FiberSwitchEpoch();
   ProcessRecvNotification(n);
 
   if (!IsOverPipelineLimit()) {
+    base::IoBuf& input_buf = GetInputBuffer();
     // Drain the socket while the fiber is suspended (no-op when io_buf_ is full / no append room).
-    const size_t before = io_buf_.InputLen();
-    ReadPendingInput();
-    if (io_buf_.InputLen() > before)
+    const size_t before = input_buf.InputLen();
+    ReadPendingInput(input_buf);
+    if (input_buf.InputLen() > before)
       ++GetLocalConnStats().proactor_reads;
 
     // Parse In Proactor: parse newly-read bytes while the fiber is parked, so the next batch is
@@ -3490,9 +3492,9 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
         (fiber_park_spot_ == FiberParkSpot::kSquashHop ||
          fiber_park_spot_ == FiberParkSpot::kSendReply ||
          fiber_park_spot_ == FiberParkSpot::kSimpleHop) &&
-        redis_parser_ && (io_buf_.InputLen() > 0)) {
+        redis_parser_ && (input_buf.InputLen() > 0)) {
       size_t cmds_before = parsed_cmd_q_len_;
-      ParserStatus st = ParseRedis(io_buf_, 0, /*enqueue_only=*/true);
+      ParserStatus st = ParseRedis(input_buf, 0, /*enqueue_only=*/true);
       if (parsed_cmd_q_len_ > cmds_before)
         ++GetLocalConnStats().proactor_parse;
       // The recv callback cannot return a status. If parsing hit a protocol error, flag it so
@@ -3504,6 +3506,8 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
     }
   }
 
+  // No preemption is allowed in proactor callbacks.
+  DCHECK_EQ(fb2::FiberSwitchEpoch(), start_epoch);
   io_event_.notify();
 }
 
@@ -3542,12 +3546,38 @@ void Connection::ProcessRecvNotification(const util::FiberSocketBase::RecvNotifi
   }
 }
 
-void Connection::ReadPendingInput() {
+base::IoBuf& Connection::GetInputBuffer() {
+  DCHECK(ioloop_v2_);
+  return io_buf_;
+}
+
+bool Connection::HandleRecvResult(const io::Result<size_t>& result) {
+  if (result) {
+    if (*result > 0)  // Positive read.
+      return true;
+
+    // EOF
+    io_ec_ = make_error_code(errc::connection_aborted);
+    pending_input_ = false;
+    return false;
+  }
+
+  // error case
+  const std::error_code ec = result.error();
+  if ((ec == errc::resource_unavailable_try_again) || (ec == errc::operation_would_block)) {
+    pending_input_ = false;
+  } else if (ec != errc::device_or_resource_busy) {
+    io_ec_ = ec;
+  }
+  return false;
+}
+
+void Connection::ReadPendingInput(base::IoBuf& input_buf) {
   if (!pending_input_)
     return;
 
-  // Drain available socket data into io_buf_.
-  io::MutableBytes buf = io_buf_.AppendBuffer();
+  // Drain available socket data into buf.
+  io::MutableBytes buf = input_buf.AppendBuffer();
   // pending_input_ lifecycle in this drain loop (see TlsSocket::TryRecv contract in tls_socket.h):
   // - Positive read: possibly short, not a "drained" signal - keep looping without clearing it. If
   //   the loop exits because io_buf_ is full, it stays set for the next pass.
@@ -3559,19 +3589,7 @@ void Connection::ReadPendingInput() {
   bool done_read = false;
   while (!buf.empty()) {
     io::Result<size_t> res = socket_->TryRecv(buf);
-    if (!res) {
-      auto ec = res.error();
-      if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
-        pending_input_ = false;
-      } else if (ec != errc::device_or_resource_busy) {
-        io_ec_ = ec;
-      }
-      break;
-    }
-
-    if (*res == 0) {
-      io_ec_ = make_error_code(errc::connection_aborted);  // *res == 0, clean EOF
-      pending_input_ = false;
+    if (!HandleRecvResult(res)) {
       break;
     }
 
@@ -3586,9 +3604,9 @@ void Connection::ReadPendingInput() {
     ++local_stats_.read_cnt;
 
     last_interaction_ = time(nullptr);
-    io_buf_.CommitWrite(commit_sz);
+    input_buf.CommitWrite(commit_sz);
     done_read = true;
-    buf = io_buf_.AppendBuffer();
+    buf = input_buf.AppendBuffer();
   }
 
   if (done_read) {
@@ -3798,10 +3816,10 @@ bool Connection::DrainControlPath(uint32_t quota) {
   return !quota_reached;
 }
 
-Connection::ParserStatus Connection::RunParsePath() {
+Connection::ParserStatus Connection::RunParsePath(base::IoBuf& input_buf) {
   // We have input data AND memory budget - parse new commands, execute, reply.
   size_t mem_before = GetLocalConnStats().pipeline_queue_bytes;
-  ParserStatus parse_status = ParseLoop();
+  ParserStatus parse_status = ParseLoop(input_buf);
   NotifyIfMemReleased(mem_before);
   return parse_status;
 }
@@ -3903,7 +3921,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       current_wait_.emplace(parsed_head_, &cmd_completion_waiter);
     }
 
-    ReadPendingInput();
+    ReadPendingInput(GetInputBuffer());
 
     // Idle park: flush and sleep only when the fiber is truly idle (ShouldWakeIdle() is false).
     // When synchronous commands (e.g. PUBLISH) are pipelined, ExecuteBatch processes them
@@ -3922,7 +3940,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     }
 
     phase_ = PROCESS;
-    bool reached_capacity = io_buf_.AppendLen() == 0;
+    bool reached_capacity = GetInputBuffer().AppendLen() == 0;
 
     // Control path: drain dispatch_q_. Restart the loop (so fresh socket data is read first)
     // unless we hit the quota, in which case fall through to the data path to avoid starving it.
@@ -3931,7 +3949,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     }
 
     bool over_limit = IsOverPipelineLimit();
-    if (io_buf_.InputLen() == 0 || over_limit) {
+    base::IoBuf& input_buf = GetInputBuffer();
+    if (input_buf.InputLen() == 0 || over_limit) {
       // Drain-only path: either there is no new input to parse, or we are over the pipeline memory
       // limit (parsing would only grow the queue further). Either way, drain queued commands to
       // free memory instead of parsing. When over the limit, also park until another connection
@@ -3943,7 +3962,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       parse_status = NEED_MORE;
     } else {
       // Input available and under budget: parse, execute, reply.
-      parse_status = RunParsePath();
+      parse_status = RunParsePath(input_buf);
     }
 
     // Release any checkpoints deferred while async commands were in flight, now that the in-flight

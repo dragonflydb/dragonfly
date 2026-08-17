@@ -299,7 +299,7 @@ async def test_debug_traffic_records_pipeline_in_dispatch_order(df_server, tmp_p
 
 @dfly_args({"enable_resp_io_loop_v2": "true", "proactor_threads": 1})
 async def test_debug_traffic_v2_parse_in_proactor_does_not_preempt(df_server, tmp_path):
-    """V2 logging records queued commands and does not preempt proactor parsing."""
+    """V2 DEBUG TRAFFIC callback parsing does not preempt and leaves the connection usable."""
     client = df_server.client()
     log_prefix = tmp_path / "traffic-proactor"
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
@@ -324,6 +324,9 @@ async def test_debug_traffic_v2_parse_in_proactor_does_not_preempt(df_server, tm
         assert b"traffic:block" in first_response
         assert b"unblock" in first_response
         assert second_response == b"+OK\r\n"
+        writer.write(b"PING\r\n")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.readuntil(b"+PONG\r\n"), timeout=2) == b"+PONG\r\n"
         assert await client.execute_command("DEBUG", "TRAFFIC", "STOP") == "OK"
     finally:
         writer.close()
