@@ -10,6 +10,9 @@ permissions:
 
 env:
   NODE_VERSION: "22.12.0"
+  # Pinned so nightly failures reflect Dragonfly regressions rather than
+  # unrelated upstream ioredis changes. Bump deliberately when needed.
+  IOREDIS_REF: "v5.4.1"
 
 jobs:
   build:
@@ -67,8 +70,9 @@ jobs:
       - name: Build ioredis
         run: |
           cd ${GITHUB_WORKSPACE}
-          git clone https://github.com/luin/ioredis
+          git clone --depth 1 --branch "${IOREDIS_REF}" https://github.com/luin/ioredis
           cd ioredis
+          git rev-parse HEAD
           npm install
 
       - name: Run ioredis tests
@@ -85,8 +89,14 @@ jobs:
           name: dragonfly-logs
           path: /tmp/df-logs/
 
+  notify:
+    needs: build
+    if: always() && needs.build.result == 'failure' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    name: Notify on failure
+    timeout-minutes: 5
+    steps:
       - name: Send notification on failure
-        if: failure() && github.ref == 'refs/heads/main'
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           message="ioredis e2e tests failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
