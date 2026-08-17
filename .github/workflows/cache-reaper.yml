@@ -28,8 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Ensures the sourced script is from the trusted target branch revision
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          # Always source the helper from the current trusted default branch.
+          # A PR's base commit can predate the time helper (actions_cache_ccache_helper.sh) was introduced - and job will fail.
+          ref: ${{ github.event.repository.default_branch }}
       - name: Reap caches
         shell: bash
         env:
