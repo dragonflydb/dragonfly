@@ -1,0 +1,47 @@
+                   .--::--.
+   :+*=:          =@@@@@@@@=          :+*+:
+  %@@@@@@%*=.     =@@@@@@@@-     .=*%@@@@@@#
+  @@@@@@@@@@@@#+-. .%@@@@#. .-+#@@@@@@@@@@@%
+  -@@@@@@@@@@@@@@@@*:#@@#:*@@@@@@@@@@@@@@@@-
+    :+*********####-%@%%@%-####********++.
+   .%@@@@@@@@@@@@@%:@@@@@@:@@@@@@@@@@@@@@%
+   .@@@@@@@@%*+-:   =@@@@=  .:-+*%@@@@@@@%.
+     =*+-:           ###*          .:-+*=
+                     %@@%
+                     *@@*
+                     +@@=
+                     :##:
+                     :@@:
+                      @@
+                      ..
+* Logs will be written to the first available of the following paths:
+/tmp/dragonfly.*
+* For the available flags type dragonfly [--help | --helpfull]
+* Documentation can be found at: https://www.dragonflydb.io/docs
+I0817 13:27:30.109828  142244 dfly_main.cc:1104] Starting dragonfly df-dev-0000000
+I0817 13:27:30.109910  142244 dfly_main.cc:1154] Using proactor_threads=10 (overriding cgroup-derived 0)
+W0817 13:27:30.109916  142244 dfly_main.cc:1161] SWAP is enabled. Consider disabling it when running Dragonfly.
+I0817 13:27:30.110011  142244 dfly_main.cc:1167] maxmemory has not been specified. Deciding myself....
+I0817 13:27:30.110012  142244 dfly_main.cc:1176] Found 27.93GiB available memory. Setting maxmemory to 22.34GiB
+I0817 13:27:30.110415  142245 uring_proactor.cc:263] IORing with 1024 entries, allocated 98368 bytes, cq_entries is 2048
+I0817 13:27:30.111345  142244 proactor_pool.cc:149] Running 10 io threads
+I0817 13:27:30.112683  142244 dragonfly_listener.cc:152] SSL version: OpenSSL 3.0.13 30 Jan 2024
+W0817 13:27:30.112701  142244 dfly_main.cc:353] Protected mode enabled. Binding to localhost only because no password is set. To accept remote connections, set a password with --requirepass or specify a bind address with --bind.
+I0817 13:27:30.113049  142244 dfly_main.cc:437] Listening on admin socket any:46031
+I0817 13:27:30.113827  142244 server_family.cc:1207] Host OS: Linux 7.0.0-28-generic x86_64 with 10 threads
+I0817 13:27:30.114063  142247 listener_interface.cc:102] sock[26] AcceptServer - listening on 127.0.0.1:26031
+I0817 13:27:30.114055  142246 listener_interface.cc:102] sock[25] AcceptServer - listening on 0.0.0.0:46031
+I0817 13:27:31.136210  142248 dflycmd.cc:1712] Registered replica 127.0.0.1:26032
+I0817 13:27:32.141518  142248 dflycmd.cc:878] Started full-sync fanout batch with 1 replica(s)
+I0817 13:27:32.145412  142248 dflycmd.cc:1208] Started sync with replica 127.0.0.1:26032
+W0817 13:27:32.532373  142249 proactor_base.cc:231] OnIdle task is taking too long: 2605 us defrag
+E0817 13:27:33.853764  142247 scheduler.cc:206] Should not preempt dispatcher: 0x56be76c96f43  util::fb2::Mutex::lock()
+0x56be763f7620  std::_Function_handler<>::_M_invoke()
+0x56be7640a2e9  dfly::FullSyncFanout::FinishMemberCallback()
+0x56be7640da75  dfly::FullSyncFanout::OnWriteDone()
+0x56be76d04bde  std::_Function_handler<>::_M_invoke()
+0x56be76cfa36d  fu2::abi_400::detail::type_erasure::invocation_table::function_trait<>::internal_invoker<>::invoke()
+0x56be76cf4400  util::fb2::UringProactor::ProcessCqeBatch()
+0x56be76cf44cf  util::fb2::UringProactor::ReapCompletions()
+0x56be76cf56e4  util::fb2::UringProactor::MainLoop()
+0x56be76c91bc1  util::fb2::ProactorDispatcher::Run()

@@ -1270,7 +1270,7 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
 
   void StartSnapshotting(bool stream_journal, ExecutionState* cntx, EngineShard* shard);
 
-  void StopSnapshotting(EngineShard* shard);
+  std::optional<LSN> StopSnapshotting(EngineShard* shard);
   void WaitForSnapshottingFinish(EngineShard* shard);
 
   // Pushes snapshot data. Called from SliceSnapshot
@@ -1484,10 +1484,10 @@ void RdbSaver::Impl::Finalize() {
 }
 
 // called from replication flow
-void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
+std::optional<LSN> RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
   auto& snapshot = GetSnapshot(shard);
   CHECK(snapshot);
-  snapshot->FinalizeJournalStream(false);
+  return snapshot->FinalizeJournalStream(false);
 }
 
 void RdbSaver::Impl::CancelInShard(EngineShard* shard) {
@@ -1708,8 +1708,11 @@ error_code RdbSaver::WaitSnapshotInShard(EngineShard* shard) {
   return SaveEpilog();
 }
 
-error_code RdbSaver::StopFullSyncInShard(EngineShard* shard) {
-  impl_->StopSnapshotting(shard);
+error_code RdbSaver::StopFullSyncInShard(EngineShard* shard, LSN* journal_lsn) {
+  std::optional<LSN> cut_lsn = impl_->StopSnapshotting(shard);
+  if (journal_lsn && cut_lsn) {
+    *journal_lsn = *cut_lsn;
+  }
   return SaveEpilog();
 }
 

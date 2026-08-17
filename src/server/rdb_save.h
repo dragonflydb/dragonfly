@@ -195,7 +195,8 @@ class RdbSaver {
   void StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard);
 
   // Stops full-sync serialization for replication in the shard's thread.
-  std::error_code StopFullSyncInShard(EngineShard* shard);
+  // If journal_lsn is provided, receives the final journal offset.
+  std::error_code StopFullSyncInShard(EngineShard* shard, LSN* journal_lsn = nullptr);
 
   // Wait for snapshotting finish in shard thread. Called from save flows in shard thread.
   std::error_code WaitSnapshotInShard(EngineShard* shard);

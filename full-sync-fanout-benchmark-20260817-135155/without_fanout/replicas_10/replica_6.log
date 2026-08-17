@@ -1,0 +1,57 @@
+                   .--::--.
+   :+*=:          =@@@@@@@@=          :+*+:
+  %@@@@@@%*=.     =@@@@@@@@-     .=*%@@@@@@#
+  @@@@@@@@@@@@#+-. .%@@@@#. .-+#@@@@@@@@@@@%
+  -@@@@@@@@@@@@@@@@*:#@@#:*@@@@@@@@@@@@@@@@-
+    :+*********####-%@%%@%-####********++.
+   .%@@@@@@@@@@@@@%:@@@@@@:@@@@@@@@@@@@@@%
+   .@@@@@@@@%*+-:   =@@@@=  .:-+*%@@@@@@@%.
+     =*+-:           ###*          .:-+*=
+                     %@@%
+                     *@@*
+                     +@@=
+                     :##:
+                     :@@:
+                      @@
+                      ..
+* Logs will be written to the first available of the following paths:
+/tmp/dragonfly.*
+* For the available flags type dragonfly [--help | --helpfull]
+* Documentation can be found at: https://www.dragonflydb.io/docs
+I0817 13:52:17.662332  170803 dfly_main.cc:1104] Starting dragonfly df-dev-0000000
+I0817 13:52:17.662469  170803 dfly_main.cc:1154] Using proactor_threads=10 (overriding cgroup-derived 0)
+W0817 13:52:17.662477  170803 dfly_main.cc:1161] SWAP is enabled. Consider disabling it when running Dragonfly.
+I0817 13:52:17.662533  170803 dfly_main.cc:1167] maxmemory has not been specified. Deciding myself....
+I0817 13:52:17.662535  170803 dfly_main.cc:1176] Found 20.41GiB available memory. Setting maxmemory to 16.32GiB
+I0817 13:52:17.663113  170804 uring_proactor.cc:263] IORing with 1024 entries, allocated 98368 bytes, cq_entries is 2048
+I0817 13:52:17.664107  170803 proactor_pool.cc:149] Running 10 io threads
+I0817 13:52:17.665161  170803 dragonfly_listener.cc:152] SSL version: OpenSSL 3.0.13 30 Jan 2024
+W0817 13:52:17.665192  170803 dfly_main.cc:353] Protected mode enabled. Binding to localhost only because no password is set. To accept remote connections, set a password with --requirepass or specify a bind address with --bind.
+I0817 13:52:17.665435  170803 dfly_main.cc:437] Listening on admin socket any:38222
+I0817 13:52:17.666196  170803 server_family.cc:1207] Host OS: Linux 7.0.0-28-generic x86_64 with 10 threads
+I0817 13:52:17.666357  170805 listener_interface.cc:102] sock[25] AcceptServer - listening on 0.0.0.0:38222
+I0817 13:52:17.666364  170806 listener_interface.cc:102] sock[26] AcceptServer - listening on 127.0.0.1:18222
+I0817 13:52:17.922147  170806 server_family.cc:3393] Initiate replication with: 127.0.0.1:18216
+I0817 13:52:17.936605  170806 replica.cc:681] Started full sync with 127.0.0.1:18216
+I0817 13:52:21.401637  170806 replica.cc:720] full sync finished in 3.48 s
+I0817 13:52:21.401764  170806 replica.cc:907] Transitioned into stable sync
+I0817 13:52:21.784526  170806 listener_interface.cc:230] Listener stopped for port 18222
+I0817 13:52:21.784530  170805 listener_interface.cc:230] Listener stopped for port 38222
+W0817 13:52:21.784693  170813 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.784737  170813 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.784773  170804 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.784783  170810 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.784808  170810 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.784815  170810 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.784793  170804 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.784894  170806 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.784907  170806 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.784949  170813 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.784990  170813 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.785038  170809 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.785040  170806 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+W0817 13:52:21.785074  170809 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.785095  170809 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.785136  170808 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:21.785178  170806 protocol_client.cc:277] Socket error: Operation canceled: ExecutionState cancelled in 127.0.0.1:18216, socket info: State: ESTABLISHED, Local: 127.0.0.1:52006, Remote: 127.0.0.1:18216, Inode: 408796
+I0817 13:52:21.788232  170806 replica.cc:939] Exit stable sync

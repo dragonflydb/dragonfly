@@ -1,0 +1,365 @@
+                   .--::--.
+   :+*=:          =@@@@@@@@=          :+*+:
+  %@@@@@@%*=.     =@@@@@@@@-     .=*%@@@@@@#
+  @@@@@@@@@@@@#+-. .%@@@@#. .-+#@@@@@@@@@@@%
+  -@@@@@@@@@@@@@@@@*:#@@#:*@@@@@@@@@@@@@@@@-
+    :+*********####-%@%%@%-####********++.
+   .%@@@@@@@@@@@@@%:@@@@@@:@@@@@@@@@@@@@@%
+   .@@@@@@@@%*+-:   =@@@@=  .:-+*%@@@@@@@%.
+     =*+-:           ###*          .:-+*=
+                     %@@%
+                     *@@*
+                     +@@=
+                     :##:
+                     :@@:
+                      @@
+                      ..
+* Logs will be written to the first available of the following paths:
+/tmp/dragonfly.*
+* For the available flags type dragonfly [--help | --helpfull]
+* Documentation can be found at: https://www.dragonflydb.io/docs
+I0817 13:51:55.654380  170057 dfly_main.cc:1104] Starting dragonfly df-dev-0000000
+I0817 13:51:55.654579  170057 dfly_main.cc:1154] Using proactor_threads=10 (overriding cgroup-derived 0)
+W0817 13:51:55.654591  170057 dfly_main.cc:1161] SWAP is enabled. Consider disabling it when running Dragonfly.
+I0817 13:51:55.654678  170057 dfly_main.cc:1167] maxmemory has not been specified. Deciding myself....
+I0817 13:51:55.654682  170057 dfly_main.cc:1176] Found 23.12GiB available memory. Setting maxmemory to 18.49GiB
+I0817 13:51:55.655685  170059 uring_proactor.cc:263] IORing with 1024 entries, allocated 98368 bytes, cq_entries is 2048
+I0817 13:51:55.656409  170057 proactor_pool.cc:149] Running 10 io threads
+I0817 13:51:55.657808  170057 dragonfly_listener.cc:152] SSL version: OpenSSL 3.0.13 30 Jan 2024
+W0817 13:51:55.657829  170057 dfly_main.cc:353] Protected mode enabled. Binding to localhost only because no password is set. To accept remote connections, set a password with --requirepass or specify a bind address with --bind.
+I0817 13:51:55.658022  170057 dfly_main.cc:437] Listening on admin socket any:38216
+I0817 13:51:55.658719  170057 server_family.cc:1207] Host OS: Linux 7.0.0-28-generic x86_64 with 10 threads
+I0817 13:51:55.658913  170060 listener_interface.cc:102] sock[26] AcceptServer - listening on 127.0.0.1:18216
+I0817 13:51:55.658913  170059 listener_interface.cc:102] sock[25] AcceptServer - listening on 0.0.0.0:38216
+I0817 13:51:55.964190  170061 dflycmd.cc:1712] Registered replica 127.0.0.1:18217
+I0817 13:51:55.971531  170061 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18217
+I0817 13:51:56.301389  170061 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18217
+I0817 13:51:56.344684  170061 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18217
+W0817 13:51:56.344712  170061 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:51:56.344752  170061 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:51:56.482879  170059 dflycmd.cc:1712] Registered replica 127.0.0.1:18218
+I0817 13:51:56.482913  170058 dflycmd.cc:1712] Registered replica 127.0.0.1:18217
+I0817 13:51:56.489795  170058 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18217
+I0817 13:51:56.504941  170059 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18218
+I0817 13:51:57.145866  170058 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18217
+I0817 13:51:57.152037  170059 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18218
+I0817 13:51:57.183865  170059 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18218
+W0817 13:51:57.183897  170059 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:51:57.183925  170059 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:51:57.216078  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18217
+W0817 13:51:57.216102  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:51:57.216126  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:51:57.405721  170067 dflycmd.cc:1712] Registered replica 127.0.0.1:18219
+I0817 13:51:57.405758  170058 dflycmd.cc:1712] Registered replica 127.0.0.1:18218
+I0817 13:51:57.406244  170066 dflycmd.cc:1712] Registered replica 127.0.0.1:18217
+I0817 13:51:57.418643  170058 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18218
+I0817 13:51:57.438532  170067 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18219
+I0817 13:51:57.479862  170066 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18217
+I0817 13:51:58.401938  170058 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18218
+I0817 13:51:58.404883  170067 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18219
+I0817 13:51:58.415473  170066 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18217
+I0817 13:51:58.482012  170067 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18219
+W0817 13:51:58.482055  170067 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:51:58.482107  170067 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:51:58.514168  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18218
+W0817 13:51:58.514195  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:51:58.514215  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:51:58.546396  170066 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18217
+W0817 13:51:58.546423  170066 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:51:58.546446  170066 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:51:58.820782  170067 dflycmd.cc:1712] Registered replica 127.0.0.1:18220
+I0817 13:51:58.820820  170058 dflycmd.cc:1712] Registered replica 127.0.0.1:18219
+I0817 13:51:58.820843  170066 dflycmd.cc:1712] Registered replica 127.0.0.1:18218
+I0817 13:51:58.821499  170065 dflycmd.cc:1712] Registered replica 127.0.0.1:18217
+I0817 13:51:58.830121  170067 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18220
+I0817 13:51:58.844232  170066 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18218
+I0817 13:51:58.877188  170058 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18219
+I0817 13:51:58.905999  170065 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18217
+I0817 13:52:00.188712  170067 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18220
+I0817 13:52:00.192015  170066 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18218
+I0817 13:52:00.201132  170058 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18219
+I0817 13:52:00.202019  170065 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18217
+I0817 13:52:00.262648  170067 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18220
+W0817 13:52:00.262686  170067 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:00.262717  170067 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:00.295669  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18219
+W0817 13:52:00.295698  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:00.295720  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:00.327957  170066 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18218
+W0817 13:52:00.327989  170066 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:00.328016  170066 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:00.392147  170065 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18217
+W0817 13:52:00.392177  170065 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:00.392206  170065 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:00.720549  170066 dflycmd.cc:1712] Registered replica 127.0.0.1:18220
+I0817 13:52:00.720674  170067 dflycmd.cc:1712] Registered replica 127.0.0.1:18221
+I0817 13:52:00.720701  170058 dflycmd.cc:1712] Registered replica 127.0.0.1:18218
+I0817 13:52:00.720715  170059 dflycmd.cc:1712] Registered replica 127.0.0.1:18219
+I0817 13:52:00.720740  170065 dflycmd.cc:1712] Registered replica 127.0.0.1:18217
+I0817 13:52:00.731008  170059 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18219
+I0817 13:52:00.749064  170058 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18218
+I0817 13:52:00.767677  170066 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18220
+I0817 13:52:00.795755  170067 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18221
+I0817 13:52:00.880311  170065 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18217
+I0817 13:52:02.489883  170059 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18219
+I0817 13:52:02.498523  170058 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18218
+I0817 13:52:02.504282  170066 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18220
+I0817 13:52:02.506647  170067 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18221
+I0817 13:52:02.511285  170065 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18217
+I0817 13:52:02.650675  170067 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18221
+W0817 13:52:02.650710  170067 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:02.650749  170067 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:02.683336  170066 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18220
+W0817 13:52:02.683379  170066 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:02.683424  170066 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:02.748175  170059 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18219
+W0817 13:52:02.748207  170059 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:02.748234  170059 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:02.812631  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18218
+W0817 13:52:02.812660  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:02.812686  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:02.877109  170065 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18217
+W0817 13:52:02.877141  170065 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:02.877179  170065 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:03.262006  170058 dflycmd.cc:1712] Registered replica 127.0.0.1:18219
+I0817 13:52:03.262055  170059 dflycmd.cc:1712] Registered replica 127.0.0.1:18217
+I0817 13:52:03.262186  170061 dflycmd.cc:1712] Registered replica 127.0.0.1:18220
+I0817 13:52:03.262289  170060 dflycmd.cc:1712] Registered replica 127.0.0.1:18222
+I0817 13:52:03.262352  170067 dflycmd.cc:1712] Registered replica 127.0.0.1:18221
+I0817 13:52:03.262686  170066 dflycmd.cc:1712] Registered replica 127.0.0.1:18218
+I0817 13:52:03.273647  170058 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18219
+I0817 13:52:03.297783  170066 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18218
+I0817 13:52:03.320283  170067 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18221
+I0817 13:52:03.382945  170060 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18222
+I0817 13:52:03.428681  170059 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18217
+I0817 13:52:03.513246  170061 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18220
+I0817 13:52:05.404315  170058 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18219
+I0817 13:52:05.406710  170066 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18218
+I0817 13:52:05.416075  170067 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18221
+I0817 13:52:05.425660  170060 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18222
+I0817 13:52:05.443477  170059 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18217
+I0817 13:52:05.451670  170061 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18220
+I0817 13:52:05.519948  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18222
+W0817 13:52:05.519973  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.519998  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.552541  170067 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18221
+W0817 13:52:05.552573  170067 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.552623  170067 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.585592  170061 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18220
+W0817 13:52:05.585619  170061 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.585648  170061 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.649750  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18219
+W0817 13:52:05.649773  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.649795  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.714454  170066 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18218
+W0817 13:52:05.714482  170066 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.714507  170066 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.778421  170059 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18217
+W0817 13:52:05.778451  170059 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:05.778474  170059 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:06.213609  170060 dflycmd.cc:1712] Registered replica 127.0.0.1:18223
+I0817 13:52:06.213701  170059 dflycmd.cc:1712] Registered replica 127.0.0.1:18222
+I0817 13:52:06.213751  170062 dflycmd.cc:1712] Registered replica 127.0.0.1:18217
+I0817 13:52:06.213775  170064 dflycmd.cc:1712] Registered replica 127.0.0.1:18220
+I0817 13:52:06.213809  170061 dflycmd.cc:1712] Registered replica 127.0.0.1:18218
+I0817 13:52:06.213837  170063 dflycmd.cc:1712] Registered replica 127.0.0.1:18221
+I0817 13:52:06.213969  170058 dflycmd.cc:1712] Registered replica 127.0.0.1:18219
+I0817 13:52:06.226133  170059 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18222
+I0817 13:52:06.240442  170061 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18218
+I0817 13:52:06.265638  170064 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18220
+I0817 13:52:06.295516  170063 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18221
+I0817 13:52:06.329125  170062 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18217
+I0817 13:52:06.394164  170058 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18219
+I0817 13:52:06.449719  170060 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18223
+I0817 13:52:08.595367  170059 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18222
+I0817 13:52:08.631681  170061 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18218
+I0817 13:52:08.641196  170064 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18220
+I0817 13:52:08.644152  170063 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18221
+I0817 13:52:08.645615  170062 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18217
+I0817 13:52:08.646621  170058 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18219
+I0817 13:52:08.653506  170060 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18223
+I0817 13:52:08.790885  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18223
+W0817 13:52:08.790919  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:08.790945  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:08.821367  170059 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18222
+W0817 13:52:08.821402  170059 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:08.821430  170059 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:08.854228  170063 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18221
+W0817 13:52:08.854266  170063 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:08.854306  170063 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:08.918545  170064 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18220
+W0817 13:52:08.918574  170064 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:08.918604  170064 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:08.982665  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18219
+W0817 13:52:08.982686  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:08.982708  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:09.017807  170061 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18218
+W0817 13:52:09.017840  170061 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:09.017871  170061 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:09.053932  170062 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18217
+W0817 13:52:09.053960  170062 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:09.053986  170062 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:09.542884  170063 dflycmd.cc:1712] Registered replica 127.0.0.1:18224
+I0817 13:52:09.543035  170062 dflycmd.cc:1712] Registered replica 127.0.0.1:18222
+I0817 13:52:09.543132  170058 dflycmd.cc:1712] Registered replica 127.0.0.1:18219
+I0817 13:52:09.543155  170064 dflycmd.cc:1712] Registered replica 127.0.0.1:18218
+I0817 13:52:09.543344  170066 dflycmd.cc:1712] Registered replica 127.0.0.1:18220
+I0817 13:52:09.543433  170061 dflycmd.cc:1712] Registered replica 127.0.0.1:18217
+I0817 13:52:09.543621  170067 dflycmd.cc:1712] Registered replica 127.0.0.1:18223
+I0817 13:52:09.543765  170065 dflycmd.cc:1712] Registered replica 127.0.0.1:18221
+I0817 13:52:09.558229  170063 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18224
+I0817 13:52:09.573847  170064 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18218
+I0817 13:52:09.593527  170058 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18219
+I0817 13:52:09.668022  170067 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18223
+I0817 13:52:09.700910  170062 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18222
+I0817 13:52:09.833157  170065 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18221
+I0817 13:52:09.889520  170066 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18220
+I0817 13:52:09.950876  170061 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18217
+I0817 13:52:12.242258  170063 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18224
+I0817 13:52:12.295813  170064 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18218
+I0817 13:52:12.312200  170058 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18219
+I0817 13:52:12.349747  170067 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18223
+I0817 13:52:12.362205  170062 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18222
+I0817 13:52:12.374732  170065 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18221
+I0817 13:52:12.377938  170066 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18220
+I0817 13:52:12.379195  170061 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18217
+I0817 13:52:12.540301  170063 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18224
+W0817 13:52:12.540339  170063 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.540384  170063 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.572274  170067 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18223
+W0817 13:52:12.572307  170067 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.572345  170067 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.636668  170062 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18222
+W0817 13:52:12.636696  170062 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.636721  170062 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.701875  170065 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18221
+W0817 13:52:12.701905  170065 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.701937  170065 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.766000  170066 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18220
+W0817 13:52:12.766031  170066 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.766062  170066 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.831198  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18219
+W0817 13:52:12.831225  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.831259  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.895419  170064 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18218
+W0817 13:52:12.895447  170064 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.895471  170064 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.959951  170061 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18217
+W0817 13:52:12.959977  170061 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:12.960003  170061 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:13.499405  170066 dflycmd.cc:1712] Registered replica 127.0.0.1:18221
+I0817 13:52:13.499434  170058 dflycmd.cc:1712] Registered replica 127.0.0.1:18219
+I0817 13:52:13.499495  170059 dflycmd.cc:1712] Registered replica 127.0.0.1:18223
+I0817 13:52:13.499601  170067 dflycmd.cc:1712] Registered replica 127.0.0.1:18222
+I0817 13:52:13.499621  170062 dflycmd.cc:1712] Registered replica 127.0.0.1:18224
+I0817 13:52:13.499694  170061 dflycmd.cc:1712] Registered replica 127.0.0.1:18218
+I0817 13:52:13.499750  170063 dflycmd.cc:1712] Registered replica 127.0.0.1:18220
+I0817 13:52:13.500240  170065 dflycmd.cc:1712] Registered replica 127.0.0.1:18217
+I0817 13:52:13.500307  170060 dflycmd.cc:1712] Registered replica 127.0.0.1:18225
+I0817 13:52:13.524432  170058 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18219
+I0817 13:52:13.538769  170067 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18222
+I0817 13:52:13.556737  170066 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18221
+I0817 13:52:13.582972  170062 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18224
+I0817 13:52:13.613456  170061 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18218
+I0817 13:52:13.658958  170063 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18220
+I0817 13:52:13.706592  170059 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18223
+I0817 13:52:13.931411  170065 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18217
+I0817 13:52:14.170369  170060 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18225
+I0817 13:52:16.600871  170058 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18219
+I0817 13:52:16.631333  170067 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18222
+I0817 13:52:16.657393  170066 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18221
+I0817 13:52:16.674687  170062 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18224
+I0817 13:52:16.686323  170061 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18218
+I0817 13:52:16.691558  170063 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18220
+I0817 13:52:16.695250  170059 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18223
+I0817 13:52:16.702863  170065 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18217
+I0817 13:52:16.716487  170060 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18225
+I0817 13:52:16.877242  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18225
+W0817 13:52:16.877278  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:16.877320  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:16.908574  170062 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18224
+W0817 13:52:16.908602  170062 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:16.908630  170062 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:16.940977  170059 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18223
+W0817 13:52:16.941010  170059 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:16.941040  170059 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.005175  170067 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18222
+W0817 13:52:17.005211  170067 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.005241  170067 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.070119  170066 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18221
+W0817 13:52:17.070149  170066 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.070177  170066 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.134752  170063 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18220
+W0817 13:52:17.134781  170063 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.134807  170063 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.199727  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18219
+W0817 13:52:17.199751  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.199772  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.264344  170061 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18218
+W0817 13:52:17.264375  170061 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.264402  170061 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.328117  170065 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18217
+W0817 13:52:17.328146  170065 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.328184  170065 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:17.923548  170063 dflycmd.cc:1712] Registered replica 127.0.0.1:18221
+I0817 13:52:17.923791  170066 dflycmd.cc:1712] Registered replica 127.0.0.1:18225
+I0817 13:52:17.923882  170061 dflycmd.cc:1712] Registered replica 127.0.0.1:18222
+I0817 13:52:17.923908  170062 dflycmd.cc:1712] Registered replica 127.0.0.1:18219
+I0817 13:52:17.923930  170064 dflycmd.cc:1712] Registered replica 127.0.0.1:18217
+I0817 13:52:17.924030  170067 dflycmd.cc:1712] Registered replica 127.0.0.1:18224
+I0817 13:52:17.924085  170058 dflycmd.cc:1712] Registered replica 127.0.0.1:18223
+I0817 13:52:17.924134  170059 dflycmd.cc:1712] Registered replica 127.0.0.1:18226
+I0817 13:52:17.924145  170065 dflycmd.cc:1712] Registered replica 127.0.0.1:18218
+I0817 13:52:17.927272  170060 dflycmd.cc:1712] Registered replica 127.0.0.1:18220
+I0817 13:52:17.939367  170063 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18221
+I0817 13:52:17.962284  170065 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18218
+I0817 13:52:17.984278  170061 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18222
+I0817 13:52:18.014775  170067 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18224
+I0817 13:52:18.059831  170059 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18226
+I0817 13:52:18.106060  170066 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18225
+I0817 13:52:18.149406  170064 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18217
+I0817 13:52:18.217272  170058 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18223
+I0817 13:52:18.273077  170062 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18219
+I0817 13:52:18.385013  170060 dflycmd.cc:1267] Started sync with replica 127.0.0.1:18220
+I0817 13:52:21.318767  170063 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18221
+I0817 13:52:21.353116  170065 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18218
+I0817 13:52:21.401567  170061 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18222
+I0817 13:52:21.422033  170067 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18224
+I0817 13:52:21.432087  170059 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18226
+I0817 13:52:21.434134  170066 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18225
+I0817 13:52:21.436261  170058 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18223
+I0817 13:52:21.437911  170062 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18219
+I0817 13:52:21.438395  170064 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18217
+I0817 13:52:21.439918  170060 dflycmd.cc:1405] Transitioned into stable sync with replica 127.0.0.1:18220
+I0817 13:52:21.529852  170059 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18226
+W0817 13:52:21.529888  170059 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.529929  170059 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.593990  170066 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18225
+W0817 13:52:21.594025  170066 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.594053  170066 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.658807  170067 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18224
+W0817 13:52:21.658838  170067 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.658864  170067 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.723470  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18223
+W0817 13:52:21.723500  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.723542  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.787133  170061 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18222
+W0817 13:52:21.787181  170061 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.787209  170061 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.854365  170063 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18221
+W0817 13:52:21.854402  170063 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.854431  170063 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.920027  170058 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18220
+W0817 13:52:21.920057  170058 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.920094  170058 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.984226  170062 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18219
+W0817 13:52:21.984251  170062 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:21.984276  170062 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:22.049489  170065 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18218
+W0817 13:52:22.049519  170065 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:22.049557  170065 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:22.112896  170064 dflycmd.cc:790] Disconnecting from replica 127.0.0.1:18217
+W0817 13:52:22.112922  170064 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+I0817 13:52:22.112953  170064 dflycmd.cc:1702] Replication error: Operation canceled: ExecutionState cancelled
+I0817 13:52:22.175598  170060 listener_interface.cc:230] Listener stopped for port 18216
+I0817 13:52:22.175629  170059 listener_interface.cc:230] Listener stopped for port 38216

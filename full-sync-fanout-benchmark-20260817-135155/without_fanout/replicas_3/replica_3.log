@@ -1,0 +1,50 @@
+                   .--::--.
+   :+*=:          =@@@@@@@@=          :+*+:
+  %@@@@@@%*=.     =@@@@@@@@-     .=*%@@@@@@#
+  @@@@@@@@@@@@#+-. .%@@@@#. .-+#@@@@@@@@@@@%
+  -@@@@@@@@@@@@@@@@*:#@@#:*@@@@@@@@@@@@@@@@-
+    :+*********####-%@%%@%-####********++.
+   .%@@@@@@@@@@@@@%:@@@@@@:@@@@@@@@@@@@@@%
+   .@@@@@@@@%*+-:   =@@@@=  .:-+*%@@@@@@@%.
+     =*+-:           ###*          .:-+*=
+                     %@@%
+                     *@@*
+                     +@@=
+                     :##:
+                     :@@:
+                      @@
+                      ..
+* Logs will be written to the first available of the following paths:
+/tmp/dragonfly.*
+* For the available flags type dragonfly [--help | --helpfull]
+* Documentation can be found at: https://www.dragonflydb.io/docs
+I0817 13:51:57.359166  170156 dfly_main.cc:1104] Starting dragonfly df-dev-0000000
+I0817 13:51:57.359296  170156 dfly_main.cc:1154] Using proactor_threads=10 (overriding cgroup-derived 0)
+W0817 13:51:57.359304  170156 dfly_main.cc:1161] SWAP is enabled. Consider disabling it when running Dragonfly.
+I0817 13:51:57.359359  170156 dfly_main.cc:1167] maxmemory has not been specified. Deciding myself....
+I0817 13:51:57.359362  170156 dfly_main.cc:1176] Found 20.16GiB available memory. Setting maxmemory to 16.13GiB
+I0817 13:51:57.359954  170157 uring_proactor.cc:263] IORing with 1024 entries, allocated 98368 bytes, cq_entries is 2048
+I0817 13:51:57.360627  170156 proactor_pool.cc:149] Running 10 io threads
+I0817 13:51:57.361769  170156 dragonfly_listener.cc:152] SSL version: OpenSSL 3.0.13 30 Jan 2024
+W0817 13:51:57.361800  170156 dfly_main.cc:353] Protected mode enabled. Binding to localhost only because no password is set. To accept remote connections, set a password with --requirepass or specify a bind address with --bind.
+I0817 13:51:57.362034  170156 dfly_main.cc:437] Listening on admin socket any:38219
+I0817 13:51:57.362899  170156 server_family.cc:1207] Host OS: Linux 7.0.0-28-generic x86_64 with 10 threads
+I0817 13:51:57.363074  170159 listener_interface.cc:102] sock[26] AcceptServer - listening on 127.0.0.1:18219
+I0817 13:51:57.363066  170158 listener_interface.cc:102] sock[25] AcceptServer - listening on 0.0.0.0:38219
+I0817 13:51:57.405356  170159 server_family.cc:3393] Initiate replication with: 127.0.0.1:18216
+I0817 13:51:57.408030  170159 replica.cc:681] Started full sync with 127.0.0.1:18216
+I0817 13:51:58.404944  170159 replica.cc:720] full sync finished in 999 ms
+I0817 13:51:58.405080  170159 replica.cc:907] Transitioned into stable sync
+I0817 13:51:58.480870  170158 listener_interface.cc:230] Listener stopped for port 38219
+I0817 13:51:58.480982  170159 listener_interface.cc:230] Listener stopped for port 18219
+W0817 13:51:58.481094  170161 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:51:58.481109  170165 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:51:58.481146  170157 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:51:58.481160  170161 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:51:58.481165  170165 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:51:58.481211  170157 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:51:58.481216  170157 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:51:58.481218  170159 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+W0817 13:51:58.481238  170160 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:51:58.481263  170159 protocol_client.cc:277] Socket error: Operation canceled: ExecutionState cancelled in 127.0.0.1:18216, socket info: State: ESTABLISHED, Local: 127.0.0.1:58822, Remote: 127.0.0.1:18216, Inode: 401315
+I0817 13:51:58.482778  170159 replica.cc:939] Exit stable sync

@@ -1,0 +1,51 @@
+                   .--::--.
+   :+*=:          =@@@@@@@@=          :+*+:
+  %@@@@@@%*=.     =@@@@@@@@-     .=*%@@@@@@#
+  @@@@@@@@@@@@#+-. .%@@@@#. .-+#@@@@@@@@@@@%
+  -@@@@@@@@@@@@@@@@*:#@@#:*@@@@@@@@@@@@@@@@-
+    :+*********####-%@%%@%-####********++.
+   .%@@@@@@@@@@@@@%:@@@@@@:@@@@@@@@@@@@@@%
+   .@@@@@@@@%*+-:   =@@@@=  .:-+*%@@@@@@@%.
+     =*+-:           ###*          .:-+*=
+                     %@@%
+                     *@@*
+                     +@@=
+                     :##:
+                     :@@:
+                      @@
+                      ..
+* Logs will be written to the first available of the following paths:
+/tmp/dragonfly.*
+* For the available flags type dragonfly [--help | --helpfull]
+* Documentation can be found at: https://www.dragonflydb.io/docs
+I0817 13:52:06.112919  170448 dfly_main.cc:1104] Starting dragonfly df-dev-0000000
+I0817 13:52:06.113065  170448 dfly_main.cc:1154] Using proactor_threads=10 (overriding cgroup-derived 0)
+W0817 13:52:06.113083  170448 dfly_main.cc:1161] SWAP is enabled. Consider disabling it when running Dragonfly.
+I0817 13:52:06.113151  170448 dfly_main.cc:1167] maxmemory has not been specified. Deciding myself....
+I0817 13:52:06.113153  170448 dfly_main.cc:1176] Found 20.36GiB available memory. Setting maxmemory to 16.29GiB
+I0817 13:52:06.113772  170449 uring_proactor.cc:263] IORing with 1024 entries, allocated 98368 bytes, cq_entries is 2048
+I0817 13:52:06.114437  170448 proactor_pool.cc:149] Running 10 io threads
+I0817 13:52:06.115529  170448 dragonfly_listener.cc:152] SSL version: OpenSSL 3.0.13 30 Jan 2024
+W0817 13:52:06.115563  170448 dfly_main.cc:353] Protected mode enabled. Binding to localhost only because no password is set. To accept remote connections, set a password with --requirepass or specify a bind address with --bind.
+I0817 13:52:06.115777  170448 dfly_main.cc:437] Listening on admin socket any:38222
+I0817 13:52:06.116604  170448 server_family.cc:1207] Host OS: Linux 7.0.0-28-generic x86_64 with 10 threads
+I0817 13:52:06.116767  170451 listener_interface.cc:102] sock[26] AcceptServer - listening on 127.0.0.1:18222
+I0817 13:52:06.116763  170450 listener_interface.cc:102] sock[25] AcceptServer - listening on 0.0.0.0:38222
+I0817 13:52:06.212439  170451 server_family.cc:3393] Initiate replication with: 127.0.0.1:18216
+I0817 13:52:06.219596  170451 replica.cc:681] Started full sync with 127.0.0.1:18216
+I0817 13:52:08.596881  170451 replica.cc:720] full sync finished in 2.38 s
+I0817 13:52:08.597084  170451 replica.cc:907] Transitioned into stable sync
+I0817 13:52:08.819383  170451 listener_interface.cc:230] Listener stopped for port 18222
+I0817 13:52:08.819480  170450 listener_interface.cc:230] Listener stopped for port 38222
+W0817 13:52:08.819554  170453 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:08.819595  170453 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:08.819603  170453 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:08.819609  170453 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:08.819726  170455 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:08.819749  170455 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:08.819754  170455 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:08.819773  170454 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:08.819785  170451 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+W0817 13:52:08.819804  170454 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:52:08.819842  170451 protocol_client.cc:277] Socket error: Operation canceled: ExecutionState cancelled in 127.0.0.1:18216, socket info: State: ESTABLISHED, Local: 127.0.0.1:39288, Remote: 127.0.0.1:18216, Inode: 404391
+I0817 13:52:08.821405  170451 replica.cc:939] Exit stable sync

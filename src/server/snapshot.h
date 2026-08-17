@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "server/detail/egress_throttle.h"
 #include "server/journal/types.h"
 #include "server/rdb_save.h"
@@ -60,7 +62,8 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   // Finalizes journal streaming writes. Only called for replication.
   // Blocking. Must be called from the Snapshot thread.
-  void FinalizeJournalStream(bool cancel);
+  // Returns the final journal offset when not cancelled.
+  std::optional<LSN> FinalizeJournalStream(bool cancel);
 
   // Waits for a regular, non journal snapshot to finish.
   // Called only for non-replication, backups usecases.

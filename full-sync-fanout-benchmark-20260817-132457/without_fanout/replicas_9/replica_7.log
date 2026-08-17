@@ -1,0 +1,108 @@
+                   .--::--.
+   :+*=:          =@@@@@@@@=          :+*+:
+  %@@@@@@%*=.     =@@@@@@@@-     .=*%@@@@@@#
+  @@@@@@@@@@@@#+-. .%@@@@#. .-+#@@@@@@@@@@@%
+  -@@@@@@@@@@@@@@@@*:#@@#:*@@@@@@@@@@@@@@@@-
+    :+*********####-%@%%@%-####********++.
+   .%@@@@@@@@@@@@@%:@@@@@@:@@@@@@@@@@@@@@%
+   .@@@@@@@@%*+-:   =@@@@=  .:-+*%@@@@@@@%.
+     =*+-:           ###*          .:-+*=
+                     %@@%
+                     *@@*
+                     +@@=
+                     :##:
+                     :@@:
+                      @@
+                      ..
+* Logs will be written to the first available of the following paths:
+/tmp/dragonfly.*
+* For the available flags type dragonfly [--help | --helpfull]
+* Documentation can be found at: https://www.dragonflydb.io/docs
+I0817 13:26:13.937639  141514 dfly_main.cc:1104] Starting dragonfly df-dev-0000000
+I0817 13:26:13.937772  141514 dfly_main.cc:1154] Using proactor_threads=10 (overriding cgroup-derived 0)
+W0817 13:26:13.937780  141514 dfly_main.cc:1161] SWAP is enabled. Consider disabling it when running Dragonfly.
+I0817 13:26:13.937834  141514 dfly_main.cc:1167] maxmemory has not been specified. Deciding myself....
+I0817 13:26:13.937836  141514 dfly_main.cc:1176] Found 23.58GiB available memory. Setting maxmemory to 18.86GiB
+I0817 13:26:13.938450  141515 uring_proactor.cc:263] IORing with 1024 entries, allocated 98368 bytes, cq_entries is 2048
+I0817 13:26:13.939218  141514 proactor_pool.cc:149] Running 10 io threads
+I0817 13:26:13.940242  141514 dragonfly_listener.cc:152] SSL version: OpenSSL 3.0.13 30 Jan 2024
+W0817 13:26:13.940271  141514 dfly_main.cc:353] Protected mode enabled. Binding to localhost only because no password is set. To accept remote connections, set a password with --requirepass or specify a bind address with --bind.
+I0817 13:26:13.940466  141514 dfly_main.cc:437] Listening on admin socket any:50175
+I0817 13:26:13.941379  141514 server_family.cc:1207] Host OS: Linux 7.0.0-28-generic x86_64 with 10 threads
+I0817 13:26:13.941550  141516 listener_interface.cc:102] sock[25] AcceptServer - listening on 0.0.0.0:50175
+I0817 13:26:13.941558  141517 listener_interface.cc:102] sock[26] AcceptServer - listening on 127.0.0.1:30175
+I0817 13:26:14.092933  141517 server_family.cc:3393] Initiate replication with: 127.0.0.1:30168
+I0817 13:26:14.099641  141517 replica.cc:681] Started full sync with 127.0.0.1:30168
+W0817 13:26:21.948183  141515 proactor_base.cc:231] OnIdle task is taking too long: 10134 us defrag
+W0817 13:26:28.627684  141519 proactor_base.cc:231] OnIdle task is taking too long: 3118 us defrag
+W0817 13:26:32.352941  141521 proactor_base.cc:231] OnIdle task is taking too long: 4031 us defrag
+W0817 13:26:34.419096  141519 proactor_base.cc:231] OnIdle task is taking too long: 3137 us defrag
+W0817 13:26:36.408863  141520 proactor_base.cc:231] OnIdle task is taking too long: 23708 us defrag
+W0817 13:26:39.373858  141523 proactor_base.cc:231] OnIdle task is taking too long: 39987 us defrag
+W0817 13:26:41.379764  141521 proactor_base.cc:231] OnIdle task is taking too long: 3911 us defrag
+W0817 13:26:43.452360  141522 proactor_base.cc:231] OnIdle task is taking too long: 71559 us defrag
+W0817 13:26:45.464098  141517 proactor_base.cc:231] OnIdle task is taking too long: 8990 us defrag
+W0817 13:26:48.520080  141519 proactor_base.cc:231] OnIdle task is taking too long: 74714 us defrag
+W0817 13:26:51.602228  141523 proactor_base.cc:231] OnIdle task is taking too long: 22068 us defrag
+W0817 13:26:54.173163  141521 proactor_base.cc:231] OnIdle task is taking too long: 10316 us defrag
+W0817 13:26:56.256690  141522 proactor_base.cc:231] OnIdle task is taking too long: 27725 us defrag
+I0817 13:26:55.527090  141524 rdb_load.cc:3289] Took 12064 ms to load rdb_type 16
+I0817 13:26:59.284121  141515 rdb_load.cc:3289] Took 26037 ms to load rdb_type 0
+W0817 13:26:59.468472  141522 proactor_base.cc:231] OnIdle task is taking too long: 251992 us defrag
+I0817 13:27:00.621408  141524 rdb_load.cc:3289] Took 3244 ms to load rdb_type 0
+I0817 13:27:02.811470  141517 replica.cc:720] full sync finished in 48.7 s
+I0817 13:27:02.815007  141517 replica.cc:907] Transitioned into stable sync
+I0817 13:27:03.713465  141516 listener_interface.cc:230] Listener stopped for port 50175
+I0817 13:27:03.713494  141517 listener_interface.cc:230] Listener stopped for port 30175
+W0817 13:27:03.715198  141521 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715234  141521 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715214  141519 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715288  141519 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715313  141519 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715319  141519 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715325  141519 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715363  141520 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715413  141520 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715420  141520 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715427  141520 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715457  141516 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715482  141516 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715491  141516 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715500  141516 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715505  141516 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715517  141517 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715499  141515 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715537  141517 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715548  141515 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715546  141523 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715555  141518 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715564  141523 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715594  141518 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715601  141518 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715607  141518 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715614  141518 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715618  141518 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715623  141518 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715622  141517 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715679  141522 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715703  141522 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715717  141522 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715722  141522 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715759  141524 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715775  141524 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715779  141524 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715783  141524 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715787  141524 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715800  141524 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715824  141522 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715830  141522 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715834  141522 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715962  141516 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.715972  141516 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.716049  141516 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.716057  141516 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.716093  141522 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.716114  141522 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 13:27:03.716019  141517 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+W0817 13:27:03.716142  141517 protocol_client.cc:277] Socket error: Operation canceled: ExecutionState cancelled in 127.0.0.1:30168, socket info: State: ESTABLISHED, Local: 127.0.0.1:35346, Remote: 127.0.0.1:30168, Inode: 352447
+I0817 13:27:03.718242  141517 replica.cc:939] Exit stable sync

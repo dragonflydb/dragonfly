@@ -1,0 +1,269 @@
+{
+  "fanout_delay_seconds": 1,
+  "load_threads": 10,
+  "proactor_backend": "io_uring (default; locked-memory limit: 3.83 GiB)",
+  "proactor_threads_per_instance": 10,
+  "requested_data_bytes": 1073741824,
+  "results": [
+    {
+      "fanout": false,
+      "full_sync_seconds": 0.367,
+      "load_breakdown": {
+        "GET": 3495,
+        "HGET": 867,
+        "HSET": 431,
+        "INCRBY": 432,
+        "SET": 3530
+      },
+      "load_operations": 8755,
+      "replicas": 1
+    },
+    {
+      "fanout": false,
+      "full_sync_seconds": 0.679,
+      "load_breakdown": {
+        "GET": 2007,
+        "HGET": 533,
+        "HSET": 241,
+        "INCRBY": 248,
+        "SET": 2120
+      },
+      "load_operations": 5149,
+      "replicas": 2
+    },
+    {
+      "fanout": false,
+      "full_sync_seconds": 1.045,
+      "load_breakdown": {
+        "GET": 3102,
+        "HGET": 732,
+        "HSET": 380,
+        "INCRBY": 385,
+        "SET": 3161
+      },
+      "load_operations": 7760,
+      "replicas": 3
+    },
+    {
+      "fanout": false,
+      "full_sync_seconds": 1.404,
+      "load_breakdown": {
+        "GET": 2508,
+        "HGET": 615,
+        "HSET": 324,
+        "INCRBY": 340,
+        "SET": 2626
+      },
+      "load_operations": 6413,
+      "replicas": 4
+    },
+    {
+      "fanout": false,
+      "full_sync_seconds": 1.825,
+      "load_breakdown": {
+        "GET": 2610,
+        "HGET": 628,
+        "HSET": 333,
+        "INCRBY": 322,
+        "SET": 2603
+      },
+      "load_operations": 6496,
+      "replicas": 5
+    },
+    {
+      "fanout": false,
+      "full_sync_seconds": 2.205,
+      "load_breakdown": {
+        "GET": 2222,
+        "HGET": 548,
+        "HSET": 265,
+        "INCRBY": 284,
+        "SET": 2188
+      },
+      "load_operations": 5507,
+      "replicas": 6
+    },
+    {
+      "fanout": false,
+      "full_sync_seconds": 2.462,
+      "load_breakdown": {
+        "GET": 2111,
+        "HGET": 542,
+        "HSET": 307,
+        "INCRBY": 228,
+        "SET": 2095
+      },
+      "load_operations": 5283,
+      "replicas": 7
+    },
+    {
+      "fanout": false,
+      "full_sync_seconds": 2.873,
+      "load_breakdown": {
+        "GET": 2640,
+        "HGET": 669,
+        "HSET": 354,
+        "INCRBY": 327,
+        "SET": 2630
+      },
+      "load_operations": 6620,
+      "replicas": 8
+    },
+    {
+      "fanout": false,
+      "full_sync_seconds": 3.25,
+      "load_breakdown": {
+        "GET": 2363,
+        "HGET": 585,
+        "HSET": 285,
+        "INCRBY": 280,
+        "SET": 2383
+      },
+      "load_operations": 5896,
+      "replicas": 9
+    },
+    {
+      "fanout": false,
+      "full_sync_seconds": 3.529,
+      "load_breakdown": {
+        "GET": 1361,
+        "HGET": 328,
+        "HSET": 163,
+        "INCRBY": 183,
+        "SET": 1332
+      },
+      "load_operations": 3367,
+      "replicas": 10
+    },
+    {
+      "fanout": true,
+      "full_sync_seconds": 1.431,
+      "load_breakdown": {
+        "GET": 40085,
+        "HGET": 9814,
+        "HSET": 5014,
+        "INCRBY": 4991,
+        "SET": 40023
+      },
+      "load_operations": 99927,
+      "replicas": 1
+    },
+    {
+      "fanout": true,
+      "full_sync_seconds": 1.602,
+      "load_breakdown": {
+        "GET": 39883,
+        "HGET": 9803,
+        "HSET": 5056,
+        "INCRBY": 5014,
+        "SET": 39764
+      },
+      "load_operations": 99520,
+      "replicas": 2
+    },
+    {
+      "fanout": true,
+      "full_sync_seconds": 1.757,
+      "load_breakdown": {
+        "GET": 38988,
+        "HGET": 9699,
+        "HSET": 5018,
+        "INCRBY": 4916,
+        "SET": 39100
+      },
+      "load_operations": 97721,
+      "replicas": 3
+    },
+    {
+      "fanout": true,
+      "full_sync_seconds": 1.974,
+      "load_breakdown": {
+        "GET": 39757,
+        "HGET": 9693,
+        "HSET": 4946,
+        "INCRBY": 4977,
+        "SET": 39302
+      },
+      "load_operations": 98675,
+      "replicas": 4
+    },
+    {
+      "fanout": true,
+      "full_sync_seconds": 2.194,
+      "load_breakdown": {
+        "GET": 28822,
+        "HGET": 7047,
+        "HSET": 3680,
+        "INCRBY": 3529,
+        "SET": 28652
+      },
+      "load_operations": 71730,
+      "replicas": 5
+    },
+    {
+      "fanout": true,
+      "full_sync_seconds": 2.429,
+      "load_breakdown": {
+        "GET": 39466,
+        "HGET": 9832,
+        "HSET": 4871,
+        "INCRBY": 4834,
+        "SET": 39385
+      },
+      "load_operations": 98388,
+      "replicas": 6
+    },
+    {
+      "fanout": true,
+      "full_sync_seconds": 2.624,
+      "load_breakdown": {
+        "GET": 39589,
+        "HGET": 10042,
+        "HSET": 4974,
+        "INCRBY": 5118,
+        "SET": 39486
+      },
+      "load_operations": 99209,
+      "replicas": 7
+    },
+    {
+      "fanout": true,
+      "full_sync_seconds": 2.833,
+      "load_breakdown": {
+        "GET": 39018,
+        "HGET": 9657,
+        "HSET": 4819,
+        "INCRBY": 4792,
+        "SET": 38747
+      },
+      "load_operations": 97033,
+      "replicas": 8
+    },
+    {
+      "fanout": true,
+      "full_sync_seconds": 3.039,
+      "load_breakdown": {
+        "GET": 39921,
+        "HGET": 9982,
+        "HSET": 5089,
+        "INCRBY": 4897,
+        "SET": 39569
+      },
+      "load_operations": 99458,
+      "replicas": 9
+    },
+    {
+      "fanout": true,
+      "full_sync_seconds": 2.26,
+      "load_breakdown": {
+        "GET": 4037,
+        "HGET": 1034,
+        "HSET": 508,
+        "INCRBY": 486,
+        "SET": 4069
+      },
+      "load_operations": 10134,
+      "replicas": 10
+    }
+  ]
+}

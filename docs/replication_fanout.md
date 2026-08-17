@@ -23,7 +23,7 @@ partial-sync policy.
 - A short, configurable collection delay lets multiple requests join one batch.
 - All members receive the same initial stream and the same per-shard journal handoff positions.
 - A serving node creates at most one snapshot at a time.
-- A slow or disconnected replica is removed without blocking the other members.
+- A disconnected or stalled replica is removed without retaining data indefinitely.
 - Batch membership is fixed once snapshot streaming starts; later requests form a later batch.
 - A completed snapshot is not retained or replayed for later requests.
 
@@ -117,8 +117,9 @@ buffer.
 
 The normal five-second partial-sync retention is not enough for a full sync that takes longer. The
 batch therefore uses its own shared delta feed during the handoff and while serving its members.
-Output limits and timeouts bound its memory use: if a replica cannot keep up, the source drops that
-replica rather than retaining data indefinitely.
+When a member queue reaches its limit, the source waits for output progress. If the queue makes no
+progress until the replication timeout, the source drops that replica rather than retaining data or
+waiting indefinitely.
 
 
 ## Limits and failures
@@ -126,7 +127,7 @@ replica rather than retaining data indefinitely.
 | Situation | Required behavior |
 | --- | --- |
 | A replica disconnects, times out, or cannot make output progress | Drop only that replica. The remaining members continue. |
-| Per-replica output or shared delta-feed memory reaches its limit | Drop the lagging replica before memory becomes unbounded. |
+| A member queue reaches its limit | Wait for output progress. If it does not progress by the replication timeout, drop that member. |
 | No batch members remain | Stop the batch and release its snapshot and delta-feed resources. |
 | Snapshot creation or the shared delta feed fails | Fail the batch cleanly, release resources, and allow a later retry. |
 | Another batch is ready while one snapshot is active | It waits; a second snapshot job never starts. |
@@ -141,5 +142,5 @@ visible to operators.
 | Full-sync batch delay | Configurable, measured in seconds. It trades the first request's startup latency for more members sharing one snapshot. |
 | Maximum batch size | Configurable. Reaching the limit starts the batch. |
 | Active full-sync jobs | Fixed at one per serving node. |
-| Per-replica output limit and timeout | Bound how much a slow replica can delay or buffer. Exceeding either disconnects it. |
+| Per-replica output limit and timeout | Bound queued memory and the time spent waiting for output progress. A timeout disconnects the replica. |
 | Partial-sync journal retention | Five seconds in the best case. It is not the only store for a long active full sync. |

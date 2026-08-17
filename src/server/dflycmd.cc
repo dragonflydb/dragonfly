@@ -8,10 +8,18 @@
 #include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
 
+#include <chrono>
+#include <ctime>
+#include <deque>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <ranges>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/strings/numbers.h"
@@ -25,7 +33,9 @@
 #include "server/cluster_support.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/full_sync_fanout.h"
 #include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/journal/streamer.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
@@ -42,10 +52,20 @@ ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
 ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
 
+ABSL_FLAG(bool, full_sync_fanout, true,
+          "Batch compatible full-sync requests and share one snapshot stream");
+ABSL_FLAG(uint32_t, full_sync_fanout_delay, 3,
+          "Seconds to collect compatible full-sync requests before starting a shared snapshot");
+ABSL_FLAG(uint32_t, full_sync_fanout_max_replicas, 50,
+          "Maximum number of replicas in one full-sync fanout batch");
+ABSL_FLAG(uint32_t, full_sync_fanout_output_limit, 32 * 1024 * 1024,
+          "Maximum queued full-sync fanout output per replica in bytes");
+
 namespace dfly {
 
 using namespace facade;
 using namespace util;
+using namespace std::chrono_literals;
 
 using std::string;
 using util::ProactorBase;
@@ -145,9 +165,11 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
     if (!replica->GetExecState().IsRunning()) {
       return false;
     }
+    std::string stream_state =
+        flow->streamer ? flow->streamer->FormatInternalState() : "shared full-sync fanout feed";
     LOG_EVERY_T(INFO, 1) << "Replica lsn:" << flow->last_acked_lsn
                          << " master lsn:" << journal::GetLsn()
-                         << "; Journal streamer state: " << flow->streamer->FormatInternalState();
+                         << "; Journal streamer state: " << stream_state;
     ThisFiber::SleepFor(1ms);
   }
 
@@ -155,6 +177,609 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
 }
 
 }  // namespace
+
+class FullSyncBatch : public std::enable_shared_from_this<FullSyncBatch> {
+ private:
+  struct Member {
+    std::weak_ptr<DflyCmd::ReplicaInfo> replica;
+    bool active = true;
+    bool ready = false;
+    bool stable = false;
+    unsigned stable_flows = 0;
+  };
+
+ public:
+  struct MemberRef {
+    uint32_t sync_id;
+    std::shared_ptr<DflyCmd::ReplicaInfo> replica;
+  };
+
+  enum class State { QUEUED, STARTING, STARTED, FINISHING, FINISHED, FAILED };
+
+  FullSyncBatch(DflyCmd* owner, DflyVersion version, unsigned flow_count,
+                std::chrono::steady_clock::time_point eligible_at);
+  ~FullSyncBatch();
+
+  bool CanAccept(DflyVersion version, size_t max_members) const {
+    std::lock_guard lk(mu_);
+    return state_ == State::QUEUED && std::chrono::steady_clock::now() < eligible_at_ &&
+           version == version_ && ActiveMemberCountLocked() < max_members;
+  }
+
+  void Expedite() {
+    std::lock_guard lk(mu_);
+    if (state_ == State::QUEUED) {
+      eligible_at_ = std::chrono::steady_clock::now();
+      NotifyLocked();
+    }
+  }
+
+  void AddMember(uint32_t sync_id, const std::shared_ptr<DflyCmd::ReplicaInfo>& replica) {
+    std::lock_guard lk(mu_);
+    DCHECK(state_ == State::QUEUED);
+    DCHECK(!members_.contains(sync_id));
+    members_.emplace(sync_id, Member{.replica = replica});
+    NotifyLocked();
+  }
+
+  bool Contains(uint32_t sync_id) const {
+    std::lock_guard lk(mu_);
+    return members_.contains(sync_id);
+  }
+
+  bool IsMemberActive(uint32_t sync_id) const {
+    std::lock_guard lk(mu_);
+    auto it = members_.find(sync_id);
+    return it != members_.end() && it->second.active;
+  }
+
+  bool IsEligible() const {
+    std::lock_guard lk(mu_);
+    return std::chrono::steady_clock::now() >= eligible_at_;
+  }
+
+  State state() const {
+    std::lock_guard lk(mu_);
+    return state_;
+  }
+
+  bool HasActiveMembers() const {
+    std::lock_guard lk(mu_);
+    return ActiveMemberCountLocked() > 0;
+  }
+
+  bool TryMarkStarting() {
+    std::lock_guard lk(mu_);
+    if (state_ != State::QUEUED || ActiveMemberCountLocked() == 0) {
+      return false;
+    }
+    state_ = State::STARTING;
+    NotifyLocked();
+    return true;
+  }
+
+  void MarkStarted() {
+    std::lock_guard lk(mu_);
+    DCHECK(state_ == State::STARTING);
+    state_ = State::STARTED;
+    NotifyLocked();
+  }
+
+  bool MarkFailed() {
+    std::lock_guard lk(mu_);
+    if (state_ == State::FAILED) {
+      return false;
+    }
+    state_ = State::FAILED;
+    NotifyLocked();
+    return true;
+  }
+
+  bool MarkReady(uint32_t sync_id) {
+    std::lock_guard lk(mu_);
+    auto it = members_.find(sync_id);
+    if (it == members_.end() || !it->second.active ||
+        (state_ != State::STARTED && state_ != State::FINISHING)) {
+      return false;
+    }
+    it->second.ready = true;
+    NotifyLocked();
+    return true;
+  }
+
+  bool TryBeginFinishing() {
+    std::lock_guard lk(mu_);
+    if (state_ != State::STARTED || ActiveMemberCountLocked() == 0 ||
+        !AllActiveMembersReadyLocked()) {
+      return false;
+    }
+    state_ = State::FINISHING;
+    NotifyLocked();
+    return true;
+  }
+
+  bool TryMarkFinished() {
+    std::lock_guard lk(mu_);
+    if (state_ != State::FINISHING || ActiveMemberCountLocked() == 0 ||
+        !AllActiveMembersStableLocked()) {
+      return false;
+    }
+    state_ = State::FINISHED;
+    NotifyLocked();
+    return true;
+  }
+
+  bool IsMemberStable(uint32_t sync_id) const {
+    std::lock_guard lk(mu_);
+    auto it = members_.find(sync_id);
+    return it != members_.end() && it->second.stable;
+  }
+
+  bool WaitUntilAllActiveMembersStable() {
+    while (true) {
+      uint64_t generation;
+      {
+        std::lock_guard lk(mu_);
+        if (state_ == State::FAILED || ActiveMemberCountLocked() == 0) {
+          return false;
+        }
+        if (AllActiveMembersStableLocked()) {
+          return true;
+        }
+        generation = generation_;
+      }
+      WaitForChange(generation);
+    }
+  }
+
+  void WaitUntilEligibleOrChanged() {
+    while (true) {
+      uint64_t generation;
+      std::chrono::steady_clock::time_point eligible_at;
+      {
+        std::lock_guard lk(mu_);
+        if (state_ != State::QUEUED || std::chrono::steady_clock::now() >= eligible_at_) {
+          return;
+        }
+        generation = generation_;
+        eligible_at = eligible_at_;
+      }
+      state_changed_.await_until(
+          [this, generation] {
+            std::lock_guard lk(mu_);
+            return generation_ != generation || state_ != State::QUEUED;
+          },
+          eligible_at);
+    }
+  }
+
+  void WaitForChange(uint64_t generation) {
+    state_changed_.await([this, generation] {
+      std::lock_guard lk(mu_);
+      return generation_ != generation;
+    });
+  }
+
+  uint64_t generation() const {
+    std::lock_guard lk(mu_);
+    return generation_;
+  }
+
+  void Notify() {
+    std::lock_guard lk(mu_);
+    NotifyLocked();
+  }
+
+  std::vector<MemberRef> ActiveMembers() const {
+    std::vector<MemberRef> result;
+    std::lock_guard lk(mu_);
+    result.reserve(members_.size());
+    for (const auto& [sync_id, member] : members_) {
+      if (!member.active) {
+        continue;
+      }
+      if (auto replica = member.replica.lock()) {
+        result.push_back({sync_id, std::move(replica)});
+      }
+    }
+    return result;
+  }
+
+  void DropMember(uint32_t sync_id) {
+    if (!MemberCancelled(sync_id)) {
+      return;
+    }
+    owner_->StopBatchMember(shared_from_this(), sync_id);
+  }
+
+  bool MemberCancelled(uint32_t sync_id) {
+    if (!MarkMemberInactive(sync_id)) {
+      return false;
+    }
+    owner_->OnFullSyncBatchMemberRemoved(shared_from_this());
+    return true;
+  }
+
+  void RemoveMemberInShard(ShardId sid, uint32_t sync_id);
+  void StopIfEmptyInShard(EngineShard* shard);
+  OpStatus StartInShard(EngineShard* shard, ServerFamily* sf);
+  OpStatus FinishInShard(EngineShard* shard);
+  void AbortInShard(EngineShard* shard);
+  void StopInShard(EngineShard* shard);
+  int64_t LastWriteTime(ShardId sid, uint32_t sync_id) const;
+  size_t UsedBytes(ShardId sid) const;
+
+  bool TryScheduleStop() {
+    std::lock_guard lk(mu_);
+    if (stop_scheduled_) {
+      return false;
+    }
+    stop_scheduled_ = true;
+    return true;
+  }
+
+ private:
+  class SharedJournalFeed final : public journal::JournalConsumerInterface {
+   public:
+    SharedJournalFeed(FullSyncBatch* batch, FullSyncFanout* fanout)
+        : batch_(batch), fanout_(fanout) {
+    }
+
+    ~SharedJournalFeed() override {
+      DCHECK_EQ(callback_id_, 0u);
+    }
+
+    void Start() {
+      DCHECK_EQ(callback_id_, 0u);
+      callback_id_ = journal::RegisterConsumer(this);
+    }
+
+    void Activate(LSN next_lsn) {
+      DCHECK_GT(next_lsn, 0u);
+      DCHECK(!active_);
+      active_ = true;
+      next_lsn_ = next_lsn;
+      for (auto& entry : buffered_) {
+        if (entry.lsn >= next_lsn_) {
+          Send(entry.lsn, entry.data);
+        }
+      }
+      buffered_.clear();
+      buffered_bytes_ = 0;
+    }
+
+    void Stop() {
+      if (callback_id_) {
+        uint32_t callback_id = std::exchange(callback_id_, 0);
+        journal::UnregisterConsumer(callback_id);
+      }
+    }
+
+    size_t UsedBytes() const {
+      return buffered_bytes_;
+    }
+
+    void ConsumeJournalChange(const journal::JournalChangeItem& item) final {
+      if (!active_) {
+        buffered_.push_back({item.journal_item.lsn, item.journal_item.data});
+        buffered_bytes_ += sizeof(BufferedEntry) + buffered_.back().data.capacity();
+        return;
+      }
+      if (item.journal_item.lsn >= next_lsn_) {
+        Send(item.journal_item.lsn, item.journal_item.data);
+      }
+    }
+
+    void ThrottleIfNeeded() final {
+      // Per-replica queues are bounded. A lagging child is disconnected instead of slowing down
+      // the source shard.
+    }
+
+   private:
+    struct BufferedEntry {
+      LSN lsn;
+      std::string data;
+    };
+
+    void Send(LSN lsn, std::string_view data) {
+      if (std::error_code ec = fanout_->Write(io::Buffer(data)); ec) {
+        LOG(INFO) << "Shared full-sync journal feed has no writable members: " << ec.message();
+        batch_->OnFeedWriteError();
+        return;
+      }
+
+      const time_t now = time(nullptr);
+      if (now - last_lsn_time_ <= 3) {
+        return;
+      }
+      last_lsn_time_ = now;
+      io::StringSink sink;
+      JournalWriter writer(&sink);
+      writer.Write(journal::Entry{journal::Op::LSN, lsn});
+      if (std::error_code ec = fanout_->Write(io::Buffer(std::move(sink).str())); ec) {
+        LOG(INFO) << "Shared full-sync journal feed could not write LSN: " << ec.message();
+        batch_->OnFeedWriteError();
+      }
+    }
+
+    FullSyncBatch* batch_;
+    FullSyncFanout* fanout_;
+    uint32_t callback_id_ = 0;
+    bool active_ = false;
+    LSN next_lsn_ = 0;
+    time_t last_lsn_time_ = 0;
+    std::deque<BufferedEntry> buffered_;
+    size_t buffered_bytes_ = 0;
+  };
+
+  struct ShardState {
+    std::shared_ptr<FullSyncFanout> fanout;
+    std::unique_ptr<RdbSaver> saver;
+    std::unique_ptr<SharedJournalFeed> feed;
+  };
+
+  size_t ActiveMemberCountLocked() const {
+    return std::count_if(members_.begin(), members_.end(), [](const auto& item) {
+      return item.second.active && !item.second.replica.expired();
+    });
+  }
+
+  bool AllActiveMembersReadyLocked() const {
+    return std::ranges::all_of(members_, [](const auto& item) {
+      return !item.second.active || item.second.replica.expired() || item.second.ready;
+    });
+  }
+
+  bool AllActiveMembersStableLocked() const {
+    return std::ranges::all_of(members_, [](const auto& item) {
+      return !item.second.active || item.second.replica.expired() || item.second.stable;
+    });
+  }
+
+  bool MarkMemberInactive(uint32_t sync_id) {
+    std::lock_guard lk(mu_);
+    auto it = members_.find(sync_id);
+    if (it == members_.end() || !it->second.active) {
+      return false;
+    }
+    it->second.active = false;
+    NotifyLocked();
+    return true;
+  }
+
+  void OnEofSent(ShardId sid, uint32_t sync_id, std::error_code ec) {
+    DCHECK_EQ(sid, EngineShard::tlocal()->shard_id());
+    if (ec) {
+      DropMember(sync_id);
+      return;
+    }
+
+    std::lock_guard lk(mu_);
+    auto it = members_.find(sync_id);
+    if (it == members_.end() || !it->second.active) {
+      return;
+    }
+    DCHECK_LT(it->second.stable_flows, flow_count_);
+    if (++it->second.stable_flows == flow_count_) {
+      it->second.stable = true;
+      NotifyLocked();
+    }
+  }
+
+  void OnFeedWriteError() {
+    if (!HasActiveMembers()) {
+      owner_->OnFullSyncBatchMemberRemoved(shared_from_this());
+    }
+  }
+
+  void NotifyLocked() {
+    ++generation_;
+    state_changed_.notifyAll();
+  }
+
+  DflyCmd* owner_;
+  const DflyVersion version_;
+  const unsigned flow_count_;
+  std::chrono::steady_clock::time_point eligible_at_;
+  std::vector<ShardState> shards_;
+  ExecutionState exec_st_;
+
+  mutable fb2::Mutex mu_;
+  std::unordered_map<uint32_t, Member> members_;
+  State state_ = State::QUEUED;
+  uint64_t generation_ = 0;
+  bool stop_scheduled_ = false;
+  util::fb2::EventCount state_changed_;
+};
+
+FullSyncBatch::FullSyncBatch(DflyCmd* owner, DflyVersion version, unsigned flow_count,
+                             std::chrono::steady_clock::time_point eligible_at)
+    : owner_(owner),
+      version_(version),
+      flow_count_(flow_count),
+      eligible_at_(eligible_at),
+      shards_(flow_count),
+      exec_st_([this](const GenericError&) {
+        if (auto self = weak_from_this().lock()) {
+          owner_->AbortFullSyncBatch(std::move(self));
+        }
+      }) {
+}
+
+FullSyncBatch::~FullSyncBatch() {
+  for (const auto& shard : shards_) {
+    DCHECK(!shard.saver);
+    DCHECK(!shard.feed);
+  }
+}
+
+void FullSyncBatch::RemoveMemberInShard(ShardId sid, uint32_t sync_id) {
+  DCHECK_EQ(sid, EngineShard::tlocal()->shard_id());
+  auto& shard = shards_[sid];
+  if (shard.fanout) {
+    shard.fanout->RemoveMember(sync_id);
+    StopIfEmptyInShard(EngineShard::tlocal());
+  }
+  MemberCancelled(sync_id);
+}
+
+void FullSyncBatch::StopIfEmptyInShard(EngineShard* shard) {
+  DCHECK(shard);
+  DCHECK_EQ(shard->shard_id(), EngineShard::tlocal()->shard_id());
+  auto& state = shards_[shard->shard_id()];
+  if (!state.fanout || !state.fanout->Empty()) {
+    return;
+  }
+
+  // This runs from the owning flow cleanup, so release the shard-local resources here instead
+  // of dispatching another cross-shard shutdown while cancellation is already in progress.
+  if (state.saver) {
+    state.saver->CancelInShard(shard);
+    state.saver.reset();
+  }
+  if (state.feed) {
+    state.feed->Stop();
+    state.feed.reset();
+  }
+  state.fanout.reset();
+}
+
+OpStatus FullSyncBatch::StartInShard(EngineShard* shard, ServerFamily* sf) {
+  DCHECK(shard);
+  const ShardId sid = shard->shard_id();
+  auto& state = shards_[sid];
+  DCHECK(!state.saver);
+  DCHECK(!state.fanout);
+
+  auto weak_batch = weak_from_this();
+  state.fanout = std::make_shared<FullSyncFanout>(
+      absl::GetFlag(FLAGS_full_sync_fanout_output_limit), [weak_batch](uint32_t sync_id) {
+        if (auto batch = weak_batch.lock()) {
+          batch->DropMember(sync_id);
+        }
+      });
+
+  for (const MemberRef& member : ActiveMembers()) {
+    FlowInfo& flow = member.replica->GetFlow(sid);
+    if (!flow.conn) {
+      DropMember(member.sync_id);
+      continue;
+    }
+    state.fanout->AddMember(member.sync_id, flow.conn->socket());
+    flow.full_sync_batch = shared_from_this();
+    flow.cleanup = [weak_batch, sid, sync_id = member.sync_id, flow = &flow] {
+      flow->TryShutdownSocket();
+      if (auto batch = weak_batch.lock()) {
+        batch->RemoveMemberInShard(sid, sync_id);
+      }
+      flow->full_sync_batch.reset();
+    };
+  }
+
+  if (state.fanout->Empty()) {
+    state.fanout.reset();
+    return OpStatus::CANCELLED;
+  }
+
+  SaveMode save_mode = sid == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
+  state.saver = std::make_unique<RdbSaver>(state.fanout.get(), save_mode, false, "", version_);
+
+  std::error_code ec;
+  if (state.saver->Mode() == SaveMode::SUMMARY ||
+      state.saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY) {
+    ec = state.saver->SaveHeader(state.saver->GetGlobalData(&sf->service(), true));
+  } else {
+    ec = state.saver->SaveHeader(state.saver->GetGlobalData(&sf->service(), false));
+  }
+  if (ec) {
+    exec_st_.ReportError(ec);
+    return OpStatus::CANCELLED;
+  }
+
+  state.saver->StartSnapshotInShard(true, &exec_st_, shard);
+  return OpStatus::OK;
+}
+
+OpStatus FullSyncBatch::FinishInShard(EngineShard* shard) {
+  DCHECK(shard);
+  const ShardId sid = shard->shard_id();
+  auto& state = shards_[sid];
+  if (!state.saver || !state.fanout) {
+    return OpStatus::CANCELLED;
+  }
+
+  state.feed = std::make_unique<SharedJournalFeed>(this, state.fanout.get());
+  state.feed->Start();
+
+  LSN journal_lsn = 0;
+  std::error_code ec = state.saver->StopFullSyncInShard(shard, &journal_lsn);
+  if (ec || journal_lsn == 0) {
+    state.feed->Stop();
+    state.feed.reset();
+    if (ec) {
+      exec_st_.ReportError(ec);
+    }
+    return OpStatus::CANCELLED;
+  }
+  state.saver.reset();
+
+  // The feed buffers writes while the RDB saver writes its final offset. Queue the terminator
+  // first, then release buffered/live feed data behind it on every member stream.
+  for (const MemberRef& member : ActiveMembers()) {
+    FlowInfo& flow = member.replica->GetFlow(sid);
+    auto weak_batch = weak_from_this();
+    state.fanout->WriteToMember(
+        member.sync_id, io::Buffer(flow.eof_token),
+        [weak_batch, sid, sync_id = member.sync_id](std::error_code write_ec) {
+          if (auto batch = weak_batch.lock()) {
+            batch->OnEofSent(sid, sync_id, write_ec);
+          }
+        });
+  }
+  state.feed->Activate(journal_lsn);
+  return OpStatus::OK;
+}
+
+void FullSyncBatch::AbortInShard(EngineShard* shard) {
+  DCHECK(shard);
+  auto& state = shards_[shard->shard_id()];
+  if (state.saver) {
+    state.saver->CancelInShard(shard);
+    state.saver.reset();
+  }
+  if (state.feed) {
+    state.feed->Stop();
+    state.feed.reset();
+  }
+  if (state.fanout) {
+    state.fanout->RemoveAllMembers();
+    state.fanout.reset();
+  }
+}
+
+void FullSyncBatch::StopInShard(EngineShard* shard) {
+  AbortInShard(shard);
+}
+
+int64_t FullSyncBatch::LastWriteTime(ShardId sid, uint32_t sync_id) const {
+  const auto& state = shards_[sid];
+  return state.fanout ? state.fanout->LastWriteTime(sync_id) : -1;
+}
+
+size_t FullSyncBatch::UsedBytes(ShardId sid) const {
+  const auto& state = shards_[sid];
+  size_t bytes = 0;
+  if (state.fanout) {
+    bytes += state.fanout->UsedBytes();
+  }
+  if (state.saver) {
+    bytes += state.saver->GetTotalBuffersSize();
+  }
+  if (state.feed) {
+    bytes += state.feed->UsedBytes();
+  }
+  return bytes;
+}
 
 void DflyCmd::ReplicaInfo::Cancel() {
   util::fb2::LockGuard lk{shared_mu_};
@@ -184,6 +809,169 @@ void DflyCmd::ReplicaInfo::Cancel() {
 }
 
 DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
+}
+
+std::shared_ptr<FullSyncBatch> DflyCmd::EnqueueFullSync(
+    uint32_t sync_id, const std::shared_ptr<ReplicaInfo>& replica) {
+  util::fb2::LockGuard lk(mu_);
+  const size_t max_members =
+      std::max<size_t>(1, absl::GetFlag(FLAGS_full_sync_fanout_max_replicas));
+  const DflyVersion version = replica->GetVersion();
+
+  for (auto it = queued_full_sync_batches_.rbegin(); it != queued_full_sync_batches_.rend(); ++it) {
+    if ((*it)->CanAccept(version, max_members)) {
+      (*it)->AddMember(sync_id, replica);
+      if (!(*it)->CanAccept(version, max_members)) {
+        (*it)->Expedite();
+      }
+      return *it;
+    }
+  }
+
+  auto eligible_at = std::chrono::steady_clock::now() +
+                     std::chrono::seconds(absl::GetFlag(FLAGS_full_sync_fanout_delay));
+  auto batch = std::make_shared<FullSyncBatch>(this, version, shard_set->size(), eligible_at);
+  batch->AddMember(sync_id, replica);
+  if (max_members == 1) {
+    batch->Expedite();
+  }
+  queued_full_sync_batches_.push_back(batch);
+  return batch;
+}
+
+bool DflyCmd::TryStartFullSyncBatch(const std::shared_ptr<FullSyncBatch>& batch) {
+  util::fb2::LockGuard lk(mu_);
+  if (active_full_sync_batch_ || queued_full_sync_batches_.empty() ||
+      queued_full_sync_batches_.front() != batch || !batch->IsEligible()) {
+    return false;
+  }
+
+  if (!batch->TryMarkStarting()) {
+    if (!batch->HasActiveMembers()) {
+      batch->MarkFailed();
+      queued_full_sync_batches_.pop_front();
+      for (const auto& queued : queued_full_sync_batches_) {
+        queued->Notify();
+      }
+    }
+    return false;
+  }
+
+  queued_full_sync_batches_.pop_front();
+  active_full_sync_batch_ = batch;
+  return true;
+}
+
+OpStatus DflyCmd::StartFullSyncBatch(const std::shared_ptr<FullSyncBatch>& batch, Transaction* tx) {
+  Transaction::Guard tg{tx};
+  AggregateStatus status;
+  shard_set->RunBlockingInParallel(
+      [batch, this, &status](EngineShard* shard) { status = batch->StartInShard(shard, sf_); });
+
+  if (*status != OpStatus::OK || !batch->HasActiveMembers()) {
+    AbortFullSyncBatch(batch);
+    return OpStatus::CANCELLED;
+  }
+
+  batch->MarkStarted();
+  LOG(INFO) << "Started full-sync fanout batch with " << batch->ActiveMembers().size()
+            << " replica(s)";
+  return OpStatus::OK;
+}
+
+OpStatus DflyCmd::FinishFullSyncBatch(const std::shared_ptr<FullSyncBatch>& batch,
+                                      Transaction* tx) {
+  {
+    Transaction::Guard tg{tx};
+    AggregateStatus status;
+    shard_set->RunBlockingInParallel(
+        [batch, &status](EngineShard* shard) { status = batch->FinishInShard(shard); });
+
+    if (*status != OpStatus::OK) {
+      AbortFullSyncBatch(batch);
+      return OpStatus::CANCELLED;
+    }
+  }
+
+  // The snapshot slot stays occupied until the full-sync terminator reaches every surviving
+  // member. Socket writes are asynchronous, so do not hold the transaction guard while waiting.
+  if (!batch->WaitUntilAllActiveMembersStable()) {
+    return OpStatus::CANCELLED;
+  }
+  if (!batch->TryMarkFinished()) {
+    return OpStatus::CANCELLED;
+  }
+  ReleaseFullSyncBatch(batch);
+  return OpStatus::OK;
+}
+
+std::shared_ptr<FullSyncBatch> DflyCmd::GetActiveFullSyncBatch(uint32_t sync_id) {
+  util::fb2::LockGuard lk(mu_);
+  if (active_full_sync_batch_ && active_full_sync_batch_->Contains(sync_id)) {
+    return active_full_sync_batch_;
+  }
+  return {};
+}
+
+void DflyCmd::ReleaseFullSyncBatch(const std::shared_ptr<FullSyncBatch>& batch) {
+  util::fb2::LockGuard lk(mu_);
+  if (active_full_sync_batch_ == batch) {
+    active_full_sync_batch_.reset();
+  }
+  for (const auto& queued : queued_full_sync_batches_) {
+    queued->Notify();
+  }
+}
+
+void DflyCmd::OnFullSyncBatchMemberRemoved(const std::shared_ptr<FullSyncBatch>& batch) {
+  if (batch->HasActiveMembers()) {
+    batch->Notify();
+    return;
+  }
+
+  bool abort = false;
+  {
+    util::fb2::LockGuard lk(mu_);
+    if (active_full_sync_batch_ == batch) {
+      abort = true;
+    } else {
+      auto it =
+          std::find(queued_full_sync_batches_.begin(), queued_full_sync_batches_.end(), batch);
+      if (it != queued_full_sync_batches_.end()) {
+        batch->MarkFailed();
+        queued_full_sync_batches_.erase(it);
+      }
+    }
+    for (const auto& queued : queued_full_sync_batches_) {
+      queued->Notify();
+    }
+  }
+
+  if (abort) {
+    AbortFullSyncBatch(batch);
+  }
+}
+
+void DflyCmd::AbortFullSyncBatch(const std::shared_ptr<FullSyncBatch>& batch) {
+  batch->MarkFailed();
+  ReleaseFullSyncBatch(batch);
+  if (!batch->TryScheduleStop()) {
+    return;
+  }
+
+  auto members = batch->ActiveMembers();
+  fb2::Fiber("abort_full_sync_batch", [this, batch, members = std::move(members)] {
+    shard_set->RunBlockingInParallel([batch](EngineShard* shard) { batch->AbortInShard(shard); });
+    for (const auto& member : members) {
+      StopReplication(member.sync_id);
+    }
+  }).Detach();
+}
+
+void DflyCmd::StopBatchMember(const std::shared_ptr<FullSyncBatch>& batch, uint32_t sync_id) {
+  fb2::Fiber("stop_full_sync_fanout_member", [this, batch, sync_id] {
+    StopReplication(sync_id);
+  }).Detach();
 }
 
 void DflyCmd::Run(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -391,6 +1179,59 @@ void DflyCmd::Sync(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!sync_id)
     return;
 
+  if (absl::GetFlag(FLAGS_full_sync_fanout)) {
+    {
+      util::fb2::LockGuard lk{replica_ptr->GetMutex()};
+      if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::PREPARATION, cmd_cntx))
+        return;
+
+      // DFLY SYNC is only valid for a full sync. A replica that was offered PARTIAL must use the
+      // partial-sync transition instead of joining a full-sync batch.
+      for (size_t sid = 0; sid < replica_ptr->GetFlowCount(); ++sid) {
+        if (replica_ptr->GetFlow(sid).start_partial_sync_at.has_value()) {
+          return cmd_cntx->SendError(kInvalidState);
+        }
+      }
+      replica_ptr->SetReplicaState(SyncState::FULL_SYNC);
+    }
+
+    auto batch = EnqueueFullSync(sync_id, replica_ptr);
+    while (true) {
+      if (!batch->IsMemberActive(sync_id)) {
+        return cmd_cntx->SendError(kInvalidState);
+      }
+
+      uint64_t generation = batch->generation();
+      switch (batch->state()) {
+        case FullSyncBatch::State::STARTED:
+          LOG(INFO) << "Started sync with replica " << replica_ptr->GetAddress() << ":"
+                    << replica_ptr->GetListeningPort();
+          return cmd_cntx->SendOk();
+        case FullSyncBatch::State::FAILED:
+          return cmd_cntx->SendError(kInvalidState);
+        case FullSyncBatch::State::QUEUED:
+          if (!batch->IsEligible()) {
+            batch->WaitUntilEligibleOrChanged();
+            continue;
+          }
+          if (TryStartFullSyncBatch(batch)) {
+            if (StartFullSyncBatch(batch, cmd_cntx->tx()) != OpStatus::OK) {
+              return cmd_cntx->SendError(kInvalidState);
+            }
+            continue;
+          }
+          break;
+        case FullSyncBatch::State::STARTING:
+          break;
+        case FullSyncBatch::State::FINISHING:
+        case FullSyncBatch::State::FINISHED:
+          return cmd_cntx->SendError(kInvalidState);
+      }
+
+      batch->WaitForChange(generation);
+    }
+  }
+
   util::fb2::LockGuard lk{replica_ptr->GetMutex()};
   if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::PREPARATION, cmd_cntx))
     return;
@@ -439,6 +1280,89 @@ void DflyCmd::StartStable(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [sync_id, replica_ptr] = GetReplicaInfoOrReply(sync_id_str, cmd_cntx);
   if (!sync_id)
     return;
+
+  if (absl::GetFlag(FLAGS_full_sync_fanout)) {
+    auto batch = GetActiveFullSyncBatch(sync_id);
+    {
+      util::fb2::LockGuard lk{replica_ptr->GetMutex()};
+      auto repl_state = replica_ptr->GetReplicaState();
+      if (repl_state != SyncState::FULL_SYNC && repl_state != SyncState::PREPARATION) {
+        cmd_cntx->SendError(kInvalidState);
+        return;
+      }
+
+      // This might happen if a flow abruptly disconnected before sending the SYNC request.
+      if (!replica_ptr->AllFlowsConnected()) {
+        cmd_cntx->SendError(kInvalidState);
+        return;
+      }
+    }
+
+    if (batch) {
+      if (!batch->MarkReady(sync_id)) {
+        return cmd_cntx->SendError(kInvalidState);
+      }
+
+      while (true) {
+        uint64_t generation = batch->generation();
+        switch (batch->state()) {
+          case FullSyncBatch::State::STARTED:
+            if (batch->TryBeginFinishing()) {
+              if (FinishFullSyncBatch(batch, cmd_cntx->tx()) != OpStatus::OK) {
+                return cmd_cntx->SendError(kInvalidState);
+              }
+            }
+            break;
+          case FullSyncBatch::State::FINISHED:
+            if (batch->IsMemberStable(sync_id)) {
+              util::fb2::LockGuard lk{replica_ptr->GetMutex()};
+              if (replica_ptr->GetReplicaState() == SyncState::CANCELLED) {
+                return cmd_cntx->SendError(kInvalidState);
+              }
+              replica_ptr->SetReplicaState(SyncState::STABLE_SYNC);
+              LOG(INFO) << "Transitioned into stable sync with replica "
+                        << replica_ptr->GetAddress() << ":" << replica_ptr->GetListeningPort();
+              return cmd_cntx->SendOk();
+            }
+            break;
+          case FullSyncBatch::State::FAILED:
+            return cmd_cntx->SendError(kInvalidState);
+          case FullSyncBatch::State::QUEUED:
+          case FullSyncBatch::State::STARTING:
+            return cmd_cntx->SendError(kInvalidState);
+          case FullSyncBatch::State::FINISHING:
+            break;
+        }
+        batch->WaitForChange(generation);
+      }
+    }
+
+    // The only non-batch path when fanout is enabled is partial sync. It has no RDB saver to
+    // stop, so it can transition directly to its journal stream.
+    bool is_partial = true;
+    for (size_t sid = 0; sid < replica_ptr->GetFlowCount(); ++sid) {
+      is_partial &= replica_ptr->GetFlow(sid).start_partial_sync_at.has_value();
+    }
+    if (!is_partial) {
+      return cmd_cntx->SendError(kInvalidState);
+    }
+
+    {
+      Transaction::Guard tg{cmd_cntx->tx()};
+      shard_set->RunBlockingInParallel([this, replica_ptr](EngineShard* shard) {
+        FlowInfo* flow = &replica_ptr->GetFlow(shard->shard_id());
+        StartStableSyncInThread(flow, &replica_ptr->GetExecState(), shard);
+      });
+    }
+
+    LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->GetAddress() << ":"
+              << replica_ptr->GetListeningPort();
+    {
+      util::fb2::LockGuard lk{replica_ptr->GetMutex()};
+      replica_ptr->SetReplicaState(SyncState::STABLE_SYNC);
+    }
+    return cmd_cntx->SendOk();
+  }
 
   util::fb2::LockGuard lk{replica_ptr->GetMutex()};
   auto repl_state = replica_ptr->GetReplicaState();
@@ -817,6 +1741,26 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
     return;
   VLOG(1) << "Stopping replication for sync_id: " << sync_id;
 
+  // A session can disconnect during the collection window, before its flows own cleanup
+  // handlers. For active batches the flow cleanup below repeats this call harmlessly.
+  std::shared_ptr<FullSyncBatch> batch;
+  {
+    util::fb2::LockGuard lk(mu_);
+    if (active_full_sync_batch_ && active_full_sync_batch_->Contains(sync_id)) {
+      batch = active_full_sync_batch_;
+    } else {
+      for (const auto& queued : queued_full_sync_batches_) {
+        if (queued->Contains(sync_id)) {
+          batch = queued;
+          break;
+        }
+      }
+    }
+  }
+  if (batch) {
+    batch->MemberCancelled(sync_id);
+  }
+
   // Because CancelReplication holds the per-replica mutex,
   // aborting connection will block here until cancellation finishes.
   // This allows keeping resources alive during the cleanup phase.
@@ -838,16 +1782,21 @@ void DflyCmd::BreakStalledFlowsInShard() {
 
   ShardId sid = EngineShard::tlocal()->shard_id();
 
-  vector<uint32_t> deleted;
+  vector<pair<uint32_t, shared_ptr<ReplicaInfo>>> deleted;
 
   for (auto [sync_id, replica_ptr] : replica_infos_) {
     dfly::SharedLock replica_lock{replica_ptr->GetMutex()};
 
-    if (!replica_ptr->GetFlow(sid).saver)
+    const FlowInfo& flow = replica_ptr->GetFlow(sid);
+    int64_t last_write_ns = -1;
+    if (flow.saver) {
+      last_write_ns = flow.saver->GetLastWriteTime();
+    } else if (flow.full_sync_batch) {
+      last_write_ns = flow.full_sync_batch->LastWriteTime(sid, sync_id);
+    }
+    if (last_write_ns < 0)
       continue;
 
-    // If saver is present - we are currently using it for full sync.
-    int64_t last_write_ns = replica_ptr->GetFlow(sid).saver->GetLastWriteTime();
     int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_replication_timeout)) * 1'000'000LL;
     int64_t now = absl::GetCurrentTimeNanos();
     if (last_write_ns > 0 && last_write_ns + timeout_ns < now) {
@@ -855,13 +1804,19 @@ void DflyCmd::BreakStalledFlowsInShard() {
                 << sync_id << " last_write_ms: " << last_write_ns / 1000'000
                 << ", now: " << now / 1000'000;
 
-      deleted.push_back(sync_id);
-      replica_lock.unlock();
-      replica_ptr->Cancel();
+      deleted.emplace_back(sync_id, replica_ptr);
     }
   }
 
-  for (auto sync_id : deleted)
+  // Flow cleanup for a fanout member notifies the batch coordinator, which needs mu_. Do not
+  // cancel while holding the global lock.
+  global_lock.unlock();
+  for (const auto& [_, replica_ptr] : deleted) {
+    replica_ptr->Cancel();
+  }
+  global_lock.lock();
+
+  for (const auto& [sync_id, _] : deleted)
     replica_infos_.erase(sync_id);
 
   if (!deleted.empty())
@@ -918,6 +1873,7 @@ ReplicationMemoryStats DflyCmd::GetReplicationMemoryStats(EngineShard* shard) {
   if (!replica_infos)
     return stats;
 
+  std::unordered_set<const FullSyncBatch*> counted_batches;
   for (const auto& [_, info] : *replica_infos) {
     DCHECK_GT(info->GetFlowCount(), 0u);
     if (info->GetFlowCount() == 0)
@@ -932,6 +1888,9 @@ ReplicationMemoryStats DflyCmd::GetReplicationMemoryStats(EngineShard* shard) {
       DCHECK(flow.saver->Mode() == SaveMode::SINGLE_SHARD ||
              flow.saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY);
       stats.full_sync_buf_bytes += flow.saver->GetTotalBuffersSize();
+    }
+    if (flow.full_sync_batch && counted_batches.insert(flow.full_sync_batch.get()).second) {
+      stats.full_sync_buf_bytes += flow.full_sync_batch->UsedBytes(shard->shard_id());
     }
   }
   return stats;
@@ -1030,14 +1989,32 @@ bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& repl_info, SyncState e
 
 void DflyCmd::CancelReplicas() {
   ReplicaInfoMap pending;
+  std::vector<std::shared_ptr<FullSyncBatch>> batches;
+  std::vector<std::shared_ptr<FullSyncBatch>> batches_to_stop;
   {
     util::fb2::LockGuard lk(mu_);
     pending = std::move(replica_infos_);
+    if (active_full_sync_batch_) {
+      batches.push_back(std::move(active_full_sync_batch_));
+    }
+    for (auto& batch : queued_full_sync_batches_) {
+      batches.push_back(std::move(batch));
+    }
+    queued_full_sync_batches_.clear();
     UpdateReplicaInfoCacheLocked();
   }
 
+  for (const auto& batch : batches) {
+    batch->MarkFailed();
+    if (batch->TryScheduleStop()) {
+      batches_to_stop.push_back(batch);
+    }
+  }
   for (auto& [_, replica_ptr] : pending) {
     replica_ptr->Cancel();
+  }
+  for (const auto& batch : batches_to_stop) {
+    shard_set->RunBlockingInParallel([batch](EngineShard* shard) { batch->StopInShard(shard); });
   }
 }
 

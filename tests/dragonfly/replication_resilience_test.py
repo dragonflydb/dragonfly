@@ -836,12 +836,17 @@ async def test_replication_timeout_on_full_sync(
         # Timeout set to 3 seconds because we must first saturate the socket such that subsequent
         # writes block. Otherwise, we will break the flows before Heartbeat actually deadlocks.
         master = df_factory.create(
-            proactor_threads=2, replication_timeout=3000, vmodule="replica=2,dflycmd=2"
+            proactor_threads=2,
+            replication_timeout=3000,
+            full_sync_fanout_delay=0,
+            vmodule="replica=2,dflycmd=2",
         )
     else:
         # setting replication_timeout to a very small value to force the replica to timeout
         master = df_factory.create(
-            replication_timeout=100, vmodule="replica=2,dflycmd=2,snapshot=1,rdb_save=1,rdb_load=1"
+            replication_timeout=100,
+            full_sync_fanout_delay=0,
+            vmodule="replica=2,dflycmd=2,snapshot=1,rdb_save=1,rdb_load=1",
         )
     replica = df_factory.create()
 

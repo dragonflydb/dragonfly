@@ -125,14 +125,14 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
 }
 
 // Called only for replication use-case.
-void SliceSnapshot::FinalizeJournalStream(bool cancel) {
+std::optional<LSN> SliceSnapshot::FinalizeJournalStream(bool cancel) {
   VLOG(1) << "FinalizeJournalStream";
   DCHECK(db_slice_->shard_owner()->IsMyThread());
   if (!journal_cb_id_) {  // Finalize only once.
     // In case of incremental snapshotting in StartIncremental, if an error is encountered,
     // journal_cb_id_ may not be set, but the snapshot fiber is still running.
     snapshot_fb_.JoinIfNeeded();
-    return;
+    return std::nullopt;
   }
   uint32_t cb_id = journal_cb_id_;
   journal_cb_id_ = 0;
@@ -143,10 +143,13 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   journal::UnregisterConsumer(cb_id);
   if (!cancel) {
     // always succeeds because serializer_ flushes to string.
-    VLOG(1) << "FinalizeJournalStream lsn: " << journal::GetLsn();
-    std::ignore = serializer_->SendJournalOffset(journal::GetLsn());
+    LSN journal_lsn = journal::GetLsn();
+    VLOG(1) << "FinalizeJournalStream lsn: " << journal_lsn;
+    std::ignore = serializer_->SendJournalOffset(journal_lsn);
     PushSerialized(true);
+    return journal_lsn;
   }
+  return std::nullopt;
 }
 
 // The algorithm is to go over all the buckets and serialize those with

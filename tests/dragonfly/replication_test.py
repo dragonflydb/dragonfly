@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import os
 import random
 import re
+import threading
 import time
 
 import async_timeout
@@ -43,6 +45,94 @@ M_SLOW = [pytest.mark.large]
 
 M_STRESS = [pytest.mark.large, pytest.mark.opt_only]
 M_NOT_EPOLL = [pytest.mark.exclude_epoll]
+
+FULL_SYNC_FANOUT_DATA_BYTES = 4 * 1024 * 1024 * 1024
+FULL_SYNC_FANOUT_VALUE_BYTES = 1024 * 1024
+FULL_SYNC_FANOUT_KEY_COUNT = FULL_SYNC_FANOUT_DATA_BYTES // FULL_SYNC_FANOUT_VALUE_BYTES
+FULL_SYNC_FANOUT_SAMPLE_KEYS = (
+    "size:0",
+    f"size:{FULL_SYNC_FANOUT_KEY_COUNT // 2}",
+    f"size:{FULL_SYNC_FANOUT_KEY_COUNT - 1}",
+)
+FULL_SYNC_FANOUT_TIMEOUT_SECONDS = 900
+FULL_SYNC_FANOUT_LOAD_KEY_COUNT = 256
+FULL_SYNC_FANOUT_LOAD_VALUE = "x" * 1024
+
+
+class FullSyncFanoutLoad:
+    """Two independent master-side clients that continuously issue SET and GET."""
+
+    def __init__(self, port: int):
+        self._port = port
+        self._stop = threading.Event()
+        self._ready = {"set": threading.Event(), "get": threading.Event()}
+        self._errors = []
+        self._set_ops = 0
+        self._get_ops = 0
+        self._threads = [
+            threading.Thread(target=self._run_set, name="fanout-load-set", daemon=True),
+            threading.Thread(target=self._run_get, name="fanout-load-get", daemon=True),
+        ]
+
+    def start(self):
+        for thread in self._threads:
+            thread.start()
+        for operation, ready in self._ready.items():
+            assert ready.wait(timeout=5), f"{operation} load worker did not start"
+        self._raise_if_failed()
+
+    def stop(self) -> dict[str, int]:
+        self._stop.set()
+        for thread in self._threads:
+            thread.join(timeout=10)
+            assert not thread.is_alive(), f"{thread.name} did not stop"
+        self._raise_if_failed()
+        return {"set": self._set_ops, "get": self._get_ops}
+
+    def _new_client(self):
+        return redis.Redis(
+            host="localhost",
+            port=self._port,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+
+    @staticmethod
+    def _key(index: int) -> str:
+        return f"fanout:load:{index}"
+
+    def _run_set(self):
+        self._run("set")
+
+    def _run_get(self):
+        self._run("get")
+
+    def _run(self, operation: str):
+        client = self._new_client()
+        try:
+            client.ping()
+            self._ready[operation].set()
+            index = 0
+            while not self._stop.is_set():
+                key = self._key(index)
+                if operation == "set":
+                    client.set(key, FULL_SYNC_FANOUT_LOAD_VALUE)
+                    self._set_ops += 1
+                else:
+                    assert client.get(key) is not None
+                    self._get_ops += 1
+                index = (index + 1) % FULL_SYNC_FANOUT_LOAD_KEY_COUNT
+        except Exception as error:
+            if not self._stop.is_set():
+                self._errors.append(error)
+        finally:
+            self._ready[operation].set()
+            client.close()
+
+    def _raise_if_failed(self):
+        if self._errors:
+            raise AssertionError("full-sync load worker failed") from self._errors[0]
 
 
 """
@@ -174,6 +264,171 @@ async def test_replication_all(
     for replica in c_replicas:
         select_calls = (await replica.info("ALL"))["cmdstat_select"]["calls"]
         assert select_calls < 16
+
+
+@pytest.mark.large
+@pytest.mark.opt_only
+async def test_full_sync_fanout_timing_under_load(df_factory: DflyInstanceFactory):
+    """Compare full-sync time under concurrent master-side SET and GET load."""
+    available_cores = (
+        len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+    )
+    multi_replica_count = min(available_cores, 5)
+    replica_counts = [1]
+    if multi_replica_count > 1:
+        replica_counts.append(multi_replica_count)
+
+    async def run_case(fanout_enabled: bool, replica_count: int) -> tuple[float, dict[str, int]]:
+        master = df_factory.create(
+            proactor_threads=1,
+            compression_mode=0,
+            full_sync_fanout="true" if fanout_enabled else "false",
+            # A one-member batch has no fanout benefit, so do not add collection latency. A
+            # multi-replica run leaves a short window for concurrently arriving requests.
+            full_sync_fanout_delay=0 if replica_count == 1 else 1,
+            full_sync_fanout_max_replicas=replica_count,
+        )
+        replicas = [df_factory.create(proactor_threads=1) for _ in range(replica_count)]
+        instances = [master, *replicas]
+        df_factory.start_all(instances)
+
+        c_master = master.client()
+        c_replicas = [replica.client() for replica in replicas]
+        elapsed = None
+        workload = None
+        workload_ops = {}
+        try:
+            # Use a random 4 GiB payload and disable snapshot compression so each snapshot
+            # carries the intended volume.
+            await c_master.execute_command(
+                "DEBUG POPULATE",
+                str(FULL_SYNC_FANOUT_KEY_COUNT),
+                "size",
+                str(FULL_SYNC_FANOUT_VALUE_BYTES),
+                "RAND",
+            )
+            await c_master.mset(
+                {
+                    FullSyncFanoutLoad._key(index): FULL_SYNC_FANOUT_LOAD_VALUE
+                    for index in range(FULL_SYNC_FANOUT_LOAD_KEY_COUNT)
+                }
+            )
+
+            workload = FullSyncFanoutLoad(master.port)
+            workload.start()
+            started = time.monotonic()
+            await asyncio.gather(
+                *(
+                    client.execute_command(f"REPLICAOF localhost {master.port}")
+                    for client in c_replicas
+                )
+            )
+            async with async_timeout.timeout(FULL_SYNC_FANOUT_TIMEOUT_SECONDS):
+                await wait_for_replicas_state(*c_replicas)
+            elapsed = time.monotonic() - started
+            workload_ops = workload.stop()
+            workload = None
+
+            expected_key_count = FULL_SYNC_FANOUT_KEY_COUNT + FULL_SYNC_FANOUT_LOAD_KEY_COUNT
+            assert await c_master.dbsize() == expected_key_count
+            assert all(
+                size == expected_key_count
+                for size in await asyncio.gather(*(client.dbsize() for client in c_replicas))
+            )
+            for key in FULL_SYNC_FANOUT_SAMPLE_KEYS:
+                expected = await c_master.get(key)
+                assert expected is not None
+                assert all(
+                    value == expected
+                    for value in await asyncio.gather(*(client.get(key) for client in c_replicas))
+                )
+            await c_master.set("fanout:after-sync", "ok")
+
+            @assert_eventually(timeout=5)
+            async def post_sync_write_reaches_all_replicas():
+                assert all(
+                    value == "ok"
+                    for value in await asyncio.gather(
+                        *(client.get("fanout:after-sync") for client in c_replicas)
+                    )
+                )
+
+            await post_sync_write_reaches_all_replicas()
+        finally:
+            if workload is not None:
+                workload.stop()
+            for instance in instances:
+                await instance.close_clients()
+            for instance in reversed(instances):
+                instance.stop()
+
+        if fanout_enabled:
+            assert (
+                len(
+                    master.find_in_logs(
+                        re.escape(f"Started full-sync fanout batch with {replica_count} replica(s)")
+                    )
+                )
+                == 1
+            )
+        assert elapsed is not None
+        return elapsed, workload_ops
+
+    for replica_count in replica_counts:
+        without_fanout, without_fanout_ops = await run_case(False, replica_count)
+        with_fanout, with_fanout_ops = await run_case(True, replica_count)
+        logging.info(
+            "full-sync fanout under load with %d replica(s): without fanout %.2fs "
+            "(SET %d, GET %d), with fanout %.2fs (SET %d, GET %d)",
+            replica_count,
+            without_fanout,
+            without_fanout_ops["set"],
+            without_fanout_ops["get"],
+            with_fanout,
+            with_fanout_ops["set"],
+            with_fanout_ops["get"],
+        )
+
+
+async def test_full_sync_fanout_completes_multiple_replicas(df_factory: DflyInstanceFactory):
+    """Complete one shared full sync for several replicas."""
+    replica_count = 3
+    master = df_factory.create(
+        proactor_threads=2,
+        compression_mode=0,
+        full_sync_fanout_delay=1,
+        full_sync_fanout_max_replicas=replica_count,
+    )
+    replicas = [df_factory.create(proactor_threads=2) for _ in range(replica_count)]
+    instances = [master, *replicas]
+    df_factory.start_all(instances)
+
+    c_master = master.client()
+    c_replicas = [replica.client() for replica in replicas]
+    try:
+        await c_master.execute_command("DEBUG POPULATE", 256, "fanout:callback", 4096, "RAND")
+        await asyncio.gather(
+            *(
+                client.execute_command("REPLICAOF", "localhost", master.port)
+                for client in c_replicas
+            )
+        )
+        async with async_timeout.timeout(30):
+            await wait_for_replicas_state(*c_replicas)
+
+        assert (
+            len(
+                master.find_in_logs(
+                    re.escape(f"Started full-sync fanout batch with {replica_count} replica(s)")
+                )
+            )
+            == 1
+        )
+    finally:
+        for instance in instances:
+            await instance.close_clients()
+        for instance in reversed(instances):
+            instance.stop()
 
 
 """
@@ -890,7 +1145,7 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 @pytest.mark.large
 @pytest.mark.exclude_epoll
 async def test_flushall_in_full_sync(df_factory):
-    master = df_factory.create(proactor_threads=4)
+    master = df_factory.create(proactor_threads=4, full_sync_fanout_delay=0)
     replica = df_factory.create(proactor_threads=2)
 
     df_factory.start_all([master, replica])

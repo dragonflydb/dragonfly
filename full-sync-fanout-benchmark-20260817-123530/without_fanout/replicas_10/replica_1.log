@@ -1,0 +1,49 @@
+                   .--::--.
+   :+*=:          =@@@@@@@@=          :+*+:
+  %@@@@@@%*=.     =@@@@@@@@-     .=*%@@@@@@#
+  @@@@@@@@@@@@#+-. .%@@@@#. .-+#@@@@@@@@@@@%
+  -@@@@@@@@@@@@@@@@*:#@@#:*@@@@@@@@@@@@@@@@-
+    :+*********####-%@%%@%-####********++.
+   .%@@@@@@@@@@@@@%:@@@@@@:@@@@@@@@@@@@@@%
+   .@@@@@@@@%*+-:   =@@@@=  .:-+*%@@@@@@@%.
+     =*+-:           ###*          .:-+*=
+                     %@@%
+                     *@@*
+                     +@@=
+                     :##:
+                     :@@:
+                      @@
+                      ..
+* Logs will be written to the first available of the following paths:
+/tmp/dragonfly.*
+* For the available flags type dragonfly [--help | --helpfull]
+* Documentation can be found at: https://www.dragonflydb.io/docs
+I0817 12:35:52.766089   66202 dfly_main.cc:1104] Starting dragonfly df-dev-0000000
+I0817 12:35:52.766224   66202 dfly_main.cc:1154] Using proactor_threads=10 (overriding cgroup-derived 0)
+W0817 12:35:52.766235   66202 dfly_main.cc:1161] SWAP is enabled. Consider disabling it when running Dragonfly.
+I0817 12:35:52.766308   66202 dfly_main.cc:1167] maxmemory has not been specified. Deciding myself....
+I0817 12:35:52.766310   66202 dfly_main.cc:1176] Found 19.76GiB available memory. Setting maxmemory to 15.81GiB
+I0817 12:35:52.766808   66203 uring_proactor.cc:263] IORing with 1024 entries, allocated 98368 bytes, cq_entries is 2048
+I0817 12:35:52.767636   66202 proactor_pool.cc:149] Running 10 io threads
+I0817 12:35:52.768454   66202 dragonfly_listener.cc:152] SSL version: OpenSSL 3.0.13 30 Jan 2024
+W0817 12:35:52.768476   66202 dfly_main.cc:353] Protected mode enabled. Binding to localhost only because no password is set. To accept remote connections, set a password with --requirepass or specify a bind address with --bind.
+I0817 12:35:52.768685   66202 dfly_main.cc:437] Listening on admin socket any:45245
+I0817 12:35:52.769719   66202 server_family.cc:1207] Host OS: Linux 7.0.0-28-generic x86_64 with 10 threads
+I0817 12:35:52.769862   66204 listener_interface.cc:102] sock[25] AcceptServer - listening on 0.0.0.0:45245
+I0817 12:35:52.769876   66205 listener_interface.cc:102] sock[26] AcceptServer - listening on 127.0.0.1:25245
+I0817 12:35:53.288051   66205 server_family.cc:3393] Initiate replication with: 127.0.0.1:25244
+I0817 12:35:53.303892   66205 replica.cc:681] Started full sync with 127.0.0.1:25244
+I0817 12:35:56.814236   66205 replica.cc:720] full sync finished in 3.52 s
+I0817 12:35:56.814400   66205 replica.cc:907] Transitioned into stable sync
+I0817 12:35:57.495443   66205 listener_interface.cc:230] Listener stopped for port 25245
+I0817 12:35:57.495479   66204 listener_interface.cc:230] Listener stopped for port 45245
+W0817 12:35:57.495567   66212 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 12:35:57.495601   66204 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 12:35:57.495603   66212 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 12:35:57.495611   66204 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 12:35:57.495638   66203 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 12:35:57.495659   66203 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 12:35:57.495684   66205 execution_state.cc:93] ReportError: Operation canceled: ExecutionState cancelled
+W0817 12:35:57.495694   66207 main_service.cc:1536] VerifyCommandState error: Can not execute during SHUTTING DOWN
+W0817 12:35:57.495727   66205 protocol_client.cc:277] Socket error: Operation canceled: ExecutionState cancelled in 127.0.0.1:25244, socket info: State: ESTABLISHED, Local: 127.0.0.1:52808, Remote: 127.0.0.1:25244, Inode: 223997
+I0817 12:35:57.497805   66205 replica.cc:939] Exit stable sync

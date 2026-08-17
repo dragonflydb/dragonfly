@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
 #include <memory>
 
 #include "facade/cmd_arg_parser.h"
@@ -29,8 +30,10 @@ namespace dfly {
 class EngineShard;
 class EngineShardSet;
 class ServerFamily;
+class Transaction;
 class RdbSaver;
 class JournalStreamer;
+class FullSyncBatch;
 struct ReplicaRoleInfo;
 struct ReplicationMemoryStats;
 
@@ -48,6 +51,9 @@ struct FlowInfo {
   // ever reads or writes these pointers, so no synchronization is needed.
   std::unique_ptr<RdbSaver> saver;            // Saver for full sync phase.
   std::unique_ptr<JournalStreamer> streamer;  // Streamer for stable sync phase
+  // Kept while this flow is fed by a shared full-sync batch, including its stable journal feed.
+  // Batches retain only weak references to ReplicaInfo, avoiding an ownership cycle.
+  std::shared_ptr<FullSyncBatch> full_sync_batch;
   std::string eof_token;
 
   std::optional<LSN> start_partial_sync_at;
@@ -107,6 +113,8 @@ struct FlowInfo {
 //
 //
 class DflyCmd {
+  friend class FullSyncBatch;
+
  public:
   // See class comments for state descriptions.
   enum class SyncState { PREPARATION, FULL_SYNC, STABLE_SYNC, CANCELLED };
@@ -314,6 +322,21 @@ class DflyCmd {
   // Start stable sync in thread. Called for each flow.
   void StartStableSyncInThread(FlowInfo* flow, ExecutionState* cntx, EngineShard* shard);
 
+  // Full-sync fanout coordinator. A queued batch uses the transaction of the request that starts
+  // it to register its shared snapshot consistently on all shards.
+  std::shared_ptr<FullSyncBatch> EnqueueFullSync(uint32_t sync_id,
+                                                 const std::shared_ptr<ReplicaInfo>& replica);
+  bool TryStartFullSyncBatch(const std::shared_ptr<FullSyncBatch>& batch);
+  facade::OpStatus StartFullSyncBatch(const std::shared_ptr<FullSyncBatch>& batch, Transaction* tx);
+  facade::OpStatus FinishFullSyncBatch(const std::shared_ptr<FullSyncBatch>& batch,
+                                       Transaction* tx);
+  std::shared_ptr<FullSyncBatch> GetActiveFullSyncBatch(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
+  void ReleaseFullSyncBatch(const std::shared_ptr<FullSyncBatch>& batch) ABSL_LOCKS_EXCLUDED(mu_);
+  void OnFullSyncBatchMemberRemoved(const std::shared_ptr<FullSyncBatch>& batch)
+      ABSL_LOCKS_EXCLUDED(mu_);
+  void AbortFullSyncBatch(const std::shared_ptr<FullSyncBatch>& batch);
+  void StopBatchMember(const std::shared_ptr<FullSyncBatch>& batch, uint32_t sync_id);
+
   // Get ReplicaInfo by sync_id.
   std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
@@ -345,6 +368,11 @@ class DflyCmd {
   uint32_t next_sync_id_ = 1;
 
   ReplicaInfoMap replica_infos_ ABSL_GUARDED_BY(mu_);
+
+  // At most one batch owns snapshot serializers. A finished batch can remain alive through
+  // FlowInfo while it feeds stable journal records, but no longer occupies this slot.
+  std::deque<std::shared_ptr<FullSyncBatch>> queued_full_sync_batches_ ABSL_GUARDED_BY(mu_);
+  std::shared_ptr<FullSyncBatch> active_full_sync_batch_ ABSL_GUARDED_BY(mu_);
 
   mutable util::fb2::Mutex mu_;  // Guard global operations. See header top for locking levels.
 };
