@@ -55,6 +55,8 @@ const char kStoreCompatByMemberErr[] =
 const char kMemberNotFound[] = "could not decode requested zset member";
 const char kInvalidUnit[] = "unsupported unit provided. please use M, KM, FT, MI";
 const char kCountError[] = "ERR COUNT must be > 0";
+constexpr char kNegativeRadiusErr[] = "radius must be positive";
+constexpr char kNegativeBoxErr[] = "box width and height must be positive";
 constexpr string_view kGeoAlphabet = "0123456789bcdefghjkmnpqrstuvwxyz"sv;
 
 using MScoreResponse = std::vector<std::optional<double>>;
@@ -202,6 +204,10 @@ double ParseGeoUnit(std::string_view arg, facade::RuleError& err) {
 
 void ParseCircularShape(CmdArgParser* parser, GeoShape* shape, GeoSearchOpts* geo_ops) {
   shape->t.radius = parser->Next<double>();
+  if (shape->t.radius <= 0) {
+    parser->ReportCustom(kNegativeRadiusErr);
+    return;
+  }
   geo_ops->conversion = shape->conversion = parser->Next(ParseGeoUnit);
   shape->type = CIRCULAR_TYPE;
 }
@@ -263,6 +269,10 @@ void ParseLongLat(CmdArgParser* parser, GeoSearchParse* opts) {
 void ParseGeoSearchByRadius(CmdArgParser* parser, GeoSearchParse* opts) {
   GeoShape& shape = opts->shape;
   shape.t.radius = parser->Next<double>();
+  if (shape.t.radius <= 0) {
+    parser->ReportCustom(kNegativeRadiusErr);
+    return;
+  }
   opts->geo_ops.conversion = shape.conversion = parser->Next(ParseGeoUnit);
   shape.type = CIRCULAR_TYPE;
 }
@@ -270,6 +280,10 @@ void ParseGeoSearchByRadius(CmdArgParser* parser, GeoSearchParse* opts) {
 void ParseGeoSearchByBox(CmdArgParser* parser, GeoSearchParse* opts) {
   GeoShape& shape = opts->shape;
   std::tie(shape.t.r.width, shape.t.r.height) = parser->Next<double, double>();
+  if (shape.t.r.width <= 0 || shape.t.r.height <= 0) {
+    parser->ReportCustom(kNegativeBoxErr);
+    return;
+  }
   opts->geo_ops.conversion = shape.conversion = parser->Next(ParseGeoUnit);
   shape.type = RECTANGLE_TYPE;
 }
