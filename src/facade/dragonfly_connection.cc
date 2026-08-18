@@ -2372,6 +2372,11 @@ void Connection::ShutdownSelfBlocking() {
 }
 
 bool Connection::Migrate(util::fb2::ProactorBase* dest) {
+  // A connection holding a borrowed interpreter must not move; refuse before the CHECKs below.
+  if (cc_->IsMigrationBlocked()) {
+    return false;
+  }
+
   // Migrate() runs synchronously and only supports connections without subscriptions and with no
   // background command processing, as enforced by the CHECKs below.
   //
