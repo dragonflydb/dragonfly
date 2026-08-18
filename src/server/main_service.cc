@@ -2232,21 +2232,26 @@ void Service::CallSHA(const facade::ParsedArgs& args, string_view sha, Interpret
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
 }
 
-void LoadScript(string_view sha, ScriptMgr* script_mgr, Interpreter* interpreter) {
+// Returns false if the script body is unknown to the script manager and can not be run.
+[[nodiscard]] bool LoadScript(string_view sha, ScriptMgr* script_mgr, Interpreter* interpreter) {
   if (interpreter->Exists(sha))
-    return;
+    return true;
 
   auto script_data = script_mgr->Find(sha);
   if (!script_data) {
-    LOG(DFATAL) << "Script " << sha << " not found in script mgr";
-    return;
+    // Unreachable: params are cached only for scripts that have a body.
+    LOG_EVERY_T(WARNING, 1) << "Script " << sha << " has cached params but no body";
+    return false;
   }
 
   string err;
   Interpreter::AddResult add_res = interpreter->AddFunction(sha, script_data->body, &err);
   if (add_res != Interpreter::ADD_OK) {
     LOG(DFATAL) << "Error adding " << sha << " to database, err " << err;
+    return false;
   }
+
+  return true;
 }
 
 // Determine multi mode based on script params.
@@ -2319,7 +2324,9 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     return cmd_cntx->SendError(facade::kScriptNotFound);
   }
 
-  LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter);
+  if (!LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter)) {
+    return cmd_cntx->SendError(facade::kScriptNotFound);
+  }
 
   string error;
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
