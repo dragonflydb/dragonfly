@@ -287,6 +287,28 @@ TEST_F(GeoFamilyTest, GeoSearchStoreScoresMatchGeoRadiusStore) {
   EXPECT_EQ(StrArray(dist_search), StrArray(dist_store));
 }
 
+TEST_F(GeoFamilyTest, RejectsNegativeGeoDimensions) {
+  EXPECT_EQ(4, CheckedInt({"GEOADD", "points", "13.361389", "38.115556", "Palermo", "13.3619",
+                           "38.1159", "Catania", "13.3608", "38.1152", "Catania2"}));
+
+  auto resp =
+      Run({"GEOSEARCH", "points", "FROMLONLAT", "13.361389", "38.115556", "BYRADIUS", "-1", "M"});
+  EXPECT_THAT(resp, ErrArg("radius must be positive"));
+
+  resp = Run(
+      {"GEOSEARCH", "points", "FROMLONLAT", "13.361389", "38.115556", "BYBOX", "-1", "-1", "KM"});
+  EXPECT_THAT(resp, ErrArg("box width and height must be positive"));
+
+  EXPECT_EQ(1, CheckedInt({"ZADD", "dest_zset", "1", "placeholder"}));
+  resp = Run({"GEOSEARCHSTORE", "dest_zset", "points", "FROMLONLAT", "13.361389", "38.115556",
+              "BYBOX", "-1", "1", "KM"});
+  EXPECT_THAT(resp, ErrArg("box width and height must be positive"));
+  EXPECT_EQ(1, CheckedInt({"ZCARD", "dest_zset"}));
+
+  resp = Run({"GEORADIUS", "points", "13.361389", "38.115556", "-1", "M", "STORE", "dest_rad"});
+  EXPECT_THAT(resp, ErrArg("radius must be positive"));
+}
+
 TEST_F(GeoFamilyTest, GeoRadiusByMember) {
   EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
                             "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
