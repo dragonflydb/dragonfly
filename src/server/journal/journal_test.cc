@@ -1,18 +1,27 @@
+#include <absl/cleanup/cleanup.h>
+#include <absl/flags/reflection.h>
 #include <absl/strings/str_join.h>
 
-#include <boost/circular_buffer.hpp>
+#include <array>
 #include <random>
 #include <string>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
 #include "server/common.h"
+#include "server/engine_shard_set.h"
+#include "server/journal/journal_slice.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/serializer_commons.h"
+#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
+
+ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_time_ms);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, shard_repl_backlog_max_bytes);
 
 using namespace testing;
 using namespace std;
@@ -198,31 +207,170 @@ TEST(Journal, PendingBuf) {
   ASSERT_EQ(pbuf.Size(), 0);
 }
 
-TEST(Journal, CircularMemory) {
-  boost::circular_buffer<string> ring_buffer(1024);
-  for (int i = 0; i < 2000; ++i) {
-    ring_buffer.push_back(string(512, 'a'));
+void AddSetRecord(JournalSlice* slice, string_view value) {
+  array<string_view, 2> args{"key", value};
+  slice->AddLogRecord(
+      Entry{0, Op::COMMAND, 0, nullopt, Entry::Payload{"SET", ArgSlice{args.data(), args.size()}}});
+}
+
+TEST(Journal, BacklogHonorsByteLimitAndReplacesOversizedRecord) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 0u);
+
+  JournalSlice probe;
+  probe.Init();
+  AddSetRecord(&probe, "x");
+  const size_t item_bytes = probe.GetRingBufferBytes();
+  ASSERT_GT(item_bytes, 1u);
+
+  const size_t max_bytes = 2 * item_bytes - 1;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{max_bytes});
+  JournalSlice slice;
+  slice.Init();
+
+  AddSetRecord(&slice, "x");
+  AddSetRecord(&slice, "x");
+  EXPECT_EQ(slice.GetRingBufferSize(), 1u);
+  EXPECT_FALSE(slice.IsLSNInBuffer(1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(2));
+  EXPECT_LE(slice.GetRingBufferBytes(), max_bytes);
+
+  string large_value(2048, 'x');
+  AddSetRecord(&slice, large_value);
+  EXPECT_EQ(slice.GetRingBufferSize(), 1u);
+  EXPECT_FALSE(slice.IsLSNInBuffer(2));
+  EXPECT_TRUE(slice.IsLSNInBuffer(3));
+
+  AddSetRecord(&slice, "x");
+  EXPECT_EQ(slice.GetRingBufferSize(), 1u);
+  EXPECT_FALSE(slice.IsLSNInBuffer(3));
+  EXPECT_TRUE(slice.IsLSNInBuffer(4));
+  EXPECT_LE(slice.GetRingBufferBytes(), max_bytes);
+}
+
+TEST(Journal, BacklogDefaultByteLimitUsesHalfPercentOfMaxmemory) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 1000u);
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{});
+
+  const size_t original_max_memory = max_memory_limit.exchange(200 * 1024, memory_order_relaxed);
+  auto restore_max_memory = absl::MakeCleanup(
+      [original_max_memory] { max_memory_limit.store(original_max_memory, memory_order_relaxed); });
+
+  JournalSlice slice;
+  slice.Init();
+
+  string large_value(2048, 'x');
+  AddSetRecord(&slice, large_value);
+  AddSetRecord(&slice, "x");
+
+  // 0.5% of 200 KiB is 1 KiB, so the oversized record is evicted.
+  EXPECT_FALSE(slice.IsLSNInBuffer(1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(2));
+}
+
+TEST(Journal, BacklogGrowsBeyondInitialCapacity) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 0u);
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{4 * 1024 * 1024});
+
+  JournalSlice slice;
+  slice.Init();
+
+  constexpr size_t kRecordCount = 10'000;
+  for (size_t i = 0; i < kRecordCount; ++i) {
+    AddSetRecord(&slice, "value");
   }
 
-  size_t cap = 0;
-  for (size_t i = 0; i < ring_buffer.size(); ++i) {
-    cap += ring_buffer[i].capacity();
-  }
-  LOG(INFO) << "Total capacity: " << cap;
-  for (size_t i = 0; i < 2000; ++i) {
-    ring_buffer.push_back(string(16, 'a'));
-  }
-  cap = 0;
-  for (size_t i = 0; i < ring_buffer.size(); ++i) {
-    cap += ring_buffer[i].capacity();
-  }
-  LOG(INFO) << "Total capacity after push: " << cap;
+  EXPECT_EQ(slice.GetRingBufferSize(), kRecordCount);
+  EXPECT_TRUE(slice.IsLSNInBuffer(1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(kRecordCount));
+}
 
-  string tmp(1 << 16, 'x');
-  tmp = string(4, 'a');
-  LOG(INFO) << "Tmp string capacity: " << tmp.capacity();
-  tmp = string(32, 'a');
-  LOG(INFO) << "Tmp string capacity: " << tmp.capacity();
+TEST(Journal, BacklogDropsOldestWhenMetadataCannotGrow) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 0u);
+
+  const string large_value(128, 'x');
+  JournalSlice large_probe;
+  large_probe.Init();
+  AddSetRecord(&large_probe, large_value);
+  const size_t large_item_bytes = large_probe.GetRingBufferBytes();
+
+  JournalSlice small_probe;
+  small_probe.Init();
+  AddSetRecord(&small_probe, "x");
+  const size_t small_item_bytes = small_probe.GetRingBufferBytes();
+  ASSERT_LT(small_item_bytes, large_item_bytes);
+
+  constexpr size_t kInitialCapacity = 8192;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes,
+                strings::MemoryBytesFlag{kInitialCapacity * large_item_bytes + small_item_bytes});
+
+  JournalSlice slice;
+  slice.Init();
+  for (size_t i = 0; i < kInitialCapacity; ++i) {
+    AddSetRecord(&slice, large_value);
+  }
+
+  AddSetRecord(&slice, "x");
+
+  EXPECT_EQ(slice.GetRingBufferSize(), kInitialCapacity);
+  EXPECT_FALSE(slice.IsLSNInBuffer(1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(kInitialCapacity + 1));
+}
+
+TEST(Journal, BacklogCleansExpiredEntriesOnAppend) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 1000u);
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{1024 * 1024});
+
+  const uint64_t original_time = TEST_current_time_ms;
+  auto restore_time = absl::MakeCleanup([original_time] { TEST_current_time_ms = original_time; });
+  TEST_current_time_ms = 1000;
+
+  JournalSlice slice;
+  slice.Init();
+  AddSetRecord(&slice, "first");
+  EXPECT_TRUE(slice.IsLSNInBuffer(1));
+
+  TEST_current_time_ms = 1999;
+  EXPECT_TRUE(slice.IsLSNInBuffer(1));
+
+  TEST_current_time_ms = 2000;
+  EXPECT_TRUE(slice.IsLSNInBuffer(1));
+
+  AddSetRecord(&slice, "second");
+  EXPECT_EQ(slice.GetRingBufferSize(), 1u);
+  EXPECT_FALSE(slice.IsLSNInBuffer(1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(2));
+}
+
+TEST(Journal, BacklogBoundsTimeBasedCleanup) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 1000u);
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{1024 * 1024});
+
+  const uint64_t original_time = TEST_current_time_ms;
+  auto restore_time = absl::MakeCleanup([original_time] { TEST_current_time_ms = original_time; });
+
+  JournalSlice slice;
+  slice.Init();
+
+  TEST_current_time_ms = 1000;
+  constexpr size_t kExpiredEntries = 101;
+  for (size_t i = 0; i < kExpiredEntries; ++i) {
+    AddSetRecord(&slice, "expired");
+  }
+
+  TEST_current_time_ms = 2000;
+  AddSetRecord(&slice, "current");
+
+  EXPECT_EQ(slice.GetRingBufferSize(), 2u);
+  EXPECT_FALSE(slice.IsLSNInBuffer(1));
+  EXPECT_FALSE(slice.IsLSNInBuffer(kExpiredEntries - 1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(kExpiredEntries));
+  EXPECT_TRUE(slice.IsLSNInBuffer(kExpiredEntries + 1));
 }
 
 }  // namespace journal
