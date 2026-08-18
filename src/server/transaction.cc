@@ -450,7 +450,9 @@ void Transaction::StartMultiGlobal(Namespace* ns, DbIndex dbid) {
   multi_->mode = GLOBAL;
   InitBase(ns, dbid, {});
   InitGlobal();
-  multi_->lock_mode = IntentLock::EXCLUSIVE;
+  // ScheduleInternal below acquires the shard lock in this mode, so it must not be hardcoded:
+  // a read-only command (EVAL_RO) takes it shared.
+  multi_->lock_mode = LockMode();
 
   ScheduleInternal();
 }
@@ -1537,7 +1539,7 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
   DCHECK(multi_ && multi_->lock_mode);
 
   if (multi_->mode == GLOBAL) {
-    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+    shard->shard_lock()->Release(*multi_->lock_mode);
   } else {
     GetDbSlice(shard->shard_id()).Release(*multi_->lock_mode, KeyLockArgs{db_index_, fps});
   }
