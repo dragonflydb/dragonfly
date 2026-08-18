@@ -1714,6 +1714,26 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
         if (lt.Find(LockTag(key)).has_value())
           continue;
 
+        // Eviction deletes the key without going through the CoW OnChange hook (it runs
+        // under FiberAtomicGuard, which disallows OnChange's blocking call), so a full-sync
+        // snapshot that hasn't serialized this key's bucket yet, or is currently mid-flight
+        // streaming a large value from an earlier bucket, won't get a chance to capture the
+        // key's baseline before the eviction's journal DEL reaches the wire. The DEL can then
+        // race ahead of the bucket's still-in-progress baseline, so the replica applies it as
+        // a no-op and later resurrects the key once the baseline finishes loading. Skip such
+        // keys here; they remain eligible for eviction once no snapshot is in this state.
+        bool snapshot_race_risk = false;
+        for (auto* cb : change_cb_) {
+          if (!cb->is_snapshot_)
+            continue;
+          if (evict_it.GetVersion() < cb->snapshot_version_ || cb->IsAnyBucketBlocked()) {
+            snapshot_race_risk = true;
+            break;
+          }
+        }
+        if (snapshot_race_risk)
+          continue;
+
         if (record_keys)
           keys_to_journal.emplace_back(key);
 
