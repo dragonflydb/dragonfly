@@ -82,6 +82,9 @@ struct SliceEvents {
   // how many journal omit optimizations were performed
   size_t journal_omit = 0;
 
+  // how many times the forced snapshot serialization was skipped (superset of journal_omit)
+  size_t serialize_skip = 0;
+
   uint64_t huff_encode_total = 0, huff_encode_success = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
@@ -585,8 +588,13 @@ class DbSlice {
 
   void CreateDb(DbIndex index);
 
-  // Returns true if this write could be ignored during replication without losing consistency
-  bool IsOmittableWrite(const Context& cntx, const ChangeReq& req);
+  struct OmitDecision {
+    bool skip_serialize = false;
+    bool omit_journal = false;
+  };
+
+  // Decides whether the forced snapshot serialization and/or the journal write can be skipped.
+  OmitDecision IsOmittableWrite(const Context& cntx, const ChangeReq& req);
 
   enum class UpdateStatsMode : uint8_t {
     kReadStats,

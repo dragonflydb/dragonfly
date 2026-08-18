@@ -2825,6 +2825,7 @@ string ServerFamily::FormatInfoMetrics(
     append("lua_gc_duration_total_sec", m.lua_stats.gc_duration_ns * 1e-9);
 
     append("total_journal_omits", m.events.journal_omit);
+    append("total_serialize_skips", m.events.serialize_skip);
   };
 
   auto add_tiered_info = [&] {
