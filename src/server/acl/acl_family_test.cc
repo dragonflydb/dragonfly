@@ -490,7 +490,7 @@ TEST_F(AclFamilyTest, GeoSearchStoreDryRun) {
   resp = Run(absl::StrCat("ACL DRYRUN gss-ok ", cmd));
   EXPECT_THAT(resp, "OK");
 
-  resp = Run("ACL SETUSER gss-nocmd ON >pass +@geo resetkeys %RW~out %R~secret");
+  resp = Run("ACL SETUSER gss-nocmd ON >pass +@geo -GEOSEARCHSTORE resetkeys %RW~out %R~secret");
   EXPECT_THAT(resp, "OK");
 
   resp = Run(absl::StrCat("ACL DRYRUN gss-nocmd ", cmd));
