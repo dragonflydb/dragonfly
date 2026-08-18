@@ -288,7 +288,7 @@ TEST_F(GeoFamilyTest, GeoSearchStoreScoresMatchGeoRadiusStore) {
 }
 
 TEST_F(GeoFamilyTest, RejectsNegativeGeoDimensions) {
-  EXPECT_EQ(4, CheckedInt({"GEOADD", "points", "13.361389", "38.115556", "Palermo", "13.3619",
+  EXPECT_EQ(3, CheckedInt({"GEOADD", "points", "13.361389", "38.115556", "Palermo", "13.3619",
                            "38.1159", "Catania", "13.3608", "38.1152", "Catania2"}));
 
   auto resp =
