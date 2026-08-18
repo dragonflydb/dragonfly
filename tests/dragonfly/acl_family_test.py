@@ -620,6 +620,7 @@ async def test_geosearchstore_acl(async_client):
     await async_client.execute_command("AUTH gssuser pass")
     with pytest.raises(redis.exceptions.NoPermissionError):
         await async_client.execute_command(cmd)
+    await async_client.execute_command("AUTH default nopass")
     assert await async_client.execute_command("ZRANGE out 0 -1") == ["placeholder"]
 
     await async_client.execute_command("ACL SETUSER gssuser resetkeys %R~out %R~secret")
