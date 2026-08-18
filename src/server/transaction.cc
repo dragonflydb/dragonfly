@@ -7,6 +7,8 @@
 #include <absl/strings/match.h>
 
 #include <memory>
+#include <new>
+#include <stdexcept>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -1520,14 +1522,41 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
     shard->set_running_tx(this);
   }
 
-  auto result = cb(this, shard);
-  db_slice.OnCbFinishBlocking();
+  // Cleanup that must run regardless of how cb() exits (normal return, converted OOM, or an
+  // exception we don't handle here and let propagate) -- unlike the OOM handling below, this is
+  // unconditional so a rethrown exception can never leave running_tx_ dangling or skip
+  // OnCbFinishBlocking (see #8102).
+  auto cleanup = [&] {
+    db_slice.OnCbFinishBlocking();
+    if (owns_running_tx)
+      shard->set_running_tx(nullptr);
+  };
+
+  RunnableResult result;
+  try {
+    result = cb(this, shard);
+  } catch (std::bad_alloc&) {
+    // Mirrors RunCallback's bad_alloc handling: convert to a regular client-visible error instead
+    // of letting the exception escape uncaught, which would leave the reply unsent (see #8102).
+    // Unlike RunCallback, other exceptions are intentionally left uncaught here rather than
+    // LOG(FATAL)'d, since this stub runs squashed sub-commands and a crash here is worse than
+    // falling back to the generic top-level handler in Service::InvokeCmd.
+    LOG_EVERY_T(ERROR, 1) << " out of memory";
+    result = OpStatus::OUT_OF_MEMORY;
+  } catch (std::length_error&) {
+    // A too-large container growth request (e.g. a cuckoo filter sub-filter allocation that
+    // clears the SIZE_MAX overflow guard but still exceeds the target container's max_size())
+    // throws length_error rather than bad_alloc. Same handling applies.
+    LOG_EVERY_T(ERROR, 1) << " out of memory";
+    result = OpStatus::OUT_OF_MEMORY;
+  } catch (...) {
+    cleanup();
+    throw;
+  }
+  cleanup();
 
   LogAutoJournalOnShard(shard, result);
   MaybeInvokeTrackingCb();
-
-  if (owns_running_tx)
-    shard->set_running_tx(nullptr);
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
   return result;

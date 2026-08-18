@@ -11,10 +11,13 @@
 #include <absl/functional/function_ref.h>
 
 #include <atomic>
+#include <new>
+#include <stdexcept>
 #include <string_view>
 #include <variant>
 #include <vector>
 
+#include "base/logging.h"
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 #include "facade/op_status.h"
@@ -695,7 +698,20 @@ template <typename F> auto Transaction::ScheduleSingleHopT(F&& f) -> decltype(f(
   decltype(f(this, nullptr)) res;
 
   ScheduleSingleHop([&res, f = std::forward<F>(f)](Transaction* t, EngineShard* shard) {
-    res = f(t, shard);
+    // f() may throw (e.g. bad_alloc/length_error from container growth). Catch it here, at the
+    // point that owns `res`, rather than letting it propagate to RunCallback/RunSquashedMultiCb:
+    // those only see the RunnableResult returned below, not `res` itself, so a caught-but-not-set
+    // `res` would stay default-constructed (status OK) and the caller would see a misleadingly
+    // successful reply instead of OOM (see #8102).
+    try {
+      res = f(t, shard);
+    } catch (std::bad_alloc&) {
+      LOG_EVERY_T(ERROR, 1) << " out of memory";
+      res = OpStatus::OUT_OF_MEMORY;
+    } catch (std::length_error&) {
+      LOG_EVERY_T(ERROR, 1) << " out of memory";
+      res = OpStatus::OUT_OF_MEMORY;
+    }
     return res.status();
   });
   return res;
