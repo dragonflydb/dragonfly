@@ -998,6 +998,11 @@ void ClusterFamily::DflyMigrateFlow(CmdArgParser parser, CommandContext* cmd_cnt
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
+  // Refuse before the SendOk + sync_dispatch flip below; a declined Migrate would reply twice.
+  if (cmd_cntx->server_conn_cntx()->IsMigrationBlocked()) {
+    return cmd_cntx->SendError("DFLYMIGRATE FLOW not allowed while holding a Lua interpreter");
+  }
+
   VLOG(1) << "Create flow " << source_id << " shard_id: " << shard_id;
 
   cmd_cntx->conn()->SetName(absl::StrCat("migration_flow_", source_id));

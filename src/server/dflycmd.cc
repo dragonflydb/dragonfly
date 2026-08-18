@@ -266,6 +266,11 @@ void DflyCmd::Thread(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (num_thread < pool->size()) {
     if (int(num_thread) != ProactorBase::me()->GetPoolIndex()) {
+      // Migrate refuses this too, but a plain error beats its "invalid state".
+      if (cmd_cntx->server_conn_cntx()->IsMigrationBlocked()) {
+        return cmd_cntx->SendError("DFLY THREAD not allowed while holding a Lua interpreter");
+      }
+
       auto* conn = cmd_cntx->conn();
       if (!conn->Migrate(pool->at(num_thread))) {
         // Listener::PreShutdown() triggered
@@ -283,6 +288,11 @@ void DflyCmd::Thread(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Refuse before SetupFlowConnection mutates the connection and Migrate then declines.
+  if (cmd_cntx->server_conn_cntx()->IsMigrationBlocked()) {
+    return cmd_cntx->SendError("DFLY FLOW not allowed while holding a Lua interpreter");
+  }
+
   string_view master_id = parser.Next<string_view>();
   string_view sync_id_str = parser.Next<string_view>();
   string_view flow_id_str = parser.Next<string_view>();

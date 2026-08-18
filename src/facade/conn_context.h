@@ -48,6 +48,11 @@ class ConnectionContext {
 
   virtual void OnSocketError(uint32_t epoll_mask){};
 
+  // True while the connection holds thread-pinned state (a borrowed interpreter); blocks Migrate.
+  virtual bool IsMigrationBlocked() const {
+    return false;
+  }
+
   // connection state / properties.
   bool conn_closing : 1;
   bool req_auth : 1;

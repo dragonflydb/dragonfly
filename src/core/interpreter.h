@@ -17,6 +17,8 @@ typedef struct lua_State lua_State;
 
 namespace dfly {
 
+class InterpreterManager;
+
 class ObjectExplorer {
  public:
   virtual ~ObjectExplorer() = default;
@@ -75,8 +77,9 @@ class Interpreter {
   Interpreter(const Interpreter&) = delete;
   void operator=(const Interpreter&) = delete;
 
-  Interpreter(Interpreter&&) = default;
-  Interpreter& operator=(Interpreter&&) = default;
+  // lua keeps pointers back to us, so a moved-from object stays reachable and gets closed twice.
+  Interpreter(Interpreter&&) = delete;
+  Interpreter& operator=(Interpreter&&) = delete;
 
   // Note: We leak the state for now.
   // Production code should not access this method.
@@ -164,6 +167,8 @@ class Interpreter {
   int RedisGenericCommand(CallArgs::Type call_type, ObjectExplorer* explorer = nullptr);
 
  private:
+  friend class InterpreterManager;
+
   // Returns true if function was successfully added,
   // otherwise returns false and sets the error.
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
@@ -177,6 +182,10 @@ class Interpreter {
   RedisFunc redis_func_;
   cmn::BackedArguments backed_args_;
   int64_t used_bytes_ = 0;
+
+  // Stamped by Get: owner catches a foreign return, generation catches a stale (post-Reset) one.
+  InterpreterManager* pool_owner_ = nullptr;
+  uint64_t pool_generation_ = 0;
 };
 
 // Manages an internal interpreter pool. This allows multiple connections residing on the same
@@ -196,17 +205,17 @@ class InterpreterManager {
   };
 
  public:
-  InterpreterManager(unsigned num) : waker_{}, available_{}, storage_{} {
-    // We pre-allocate the backing storage during initialization and
-    // start storing pointers to slots in the available vector.
-    storage_.reserve(num);
+  explicit InterpreterManager(unsigned num) : num_(num) {
+    available_.reserve(num);
   }
+
+  ~InterpreterManager();
 
   // Borrow interpreter. Always return it after usage.
   Interpreter* Get();
   void Return(Interpreter*);
 
-  // Clear all interpreters, keeps capacity. Waits until all are returned.
+  // Drops all interpreters. Never blocks: borrowed ones are destroyed once returned.
   void Reset();
 
   // Run on all unused interpreters. Those are marked as used at once, so the callback can preempt
@@ -215,13 +224,15 @@ class InterpreterManager {
   static Stats& tl_stats();
 
  private:
-  util::fb2::EventCount waker_, reset_ec_;
-  std::vector<Interpreter*> available_;
-  std::vector<Interpreter> storage_;
+  util::fb2::EventCount waker_;
+  const unsigned num_;
+
+  uint64_t generation_ = 0;   // bumped by Reset()
+  unsigned total_alive_ = 0;  // live count incl. borrowed and stale; capped at num_
+
+  std::vector<Interpreter*> available_;  // idle, current generation only
 
   util::fb2::Mutex reset_mu_;  // Acts as a singleton.
-
-  unsigned return_untracked_ = 0;  // Number of returned interpreters during reset.
 };
 
 }  // namespace dfly
