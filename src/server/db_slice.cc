@@ -321,6 +321,10 @@ int32_t AsyncDeleter::IdleCb() {
   if (head_ == nullptr)
     return -1;  // unregister itself.
 
+  if (EngineShard* shard = EngineShard::tlocal(); shard) {
+    shard->stats().async_delete_task_invocation_total++;
+  }
+
   auto* current = head_;
   DVLOG(2) << "IdleCb " << current->cursor;
   if (current->step(current)) {
