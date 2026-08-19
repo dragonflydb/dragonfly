@@ -2333,6 +2333,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
   sinfo->lock_tags.reserve(eval_args.num_keys);
   sinfo->read_only = read_only;
   memcpy(sinfo->stats.sha, eval_args.sha.data(), eval_args.sha.size());
+  sinfo->acl_commands = conn_cntx->acl_commands;
+  sinfo->acl_keys = conn_cntx->keys;
+  sinfo->acl_pub_sub = conn_cntx->pub_sub;
+  sinfo->acl_db_idx = conn_cntx->acl_db_idx;
 
   optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;

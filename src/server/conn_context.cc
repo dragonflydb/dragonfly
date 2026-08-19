@@ -198,7 +198,8 @@ size_t ConnectionState::ExecInfo::ClearStoredCmds() {
 }
 
 size_t ConnectionState::ScriptInfo::UsedMemory() const {
-  return HeapSize(lock_tags) + async_cmds_heap_mem;
+  return HeapSize(lock_tags) + async_cmds_heap_mem + HeapSize(acl_commands) +
+         HeapSize(acl_keys.key_globs) + HeapSize(acl_pub_sub.globs);
 }
 
 size_t ConnectionState::SubscribeInfo::UsedMemory() const {
