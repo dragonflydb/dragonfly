@@ -3773,23 +3773,23 @@ async def test_slot_migration_oom_replica_rollback(df_factory):
     await wait_for_status(source_node.admin_client, target_node.id, "FATAL", 300)
     await wait_for_status(target_node.admin_client, source_node.id, "FATAL")
 
-    # Give the replica time to catch up with whatever the master has after rollback
-    await check_all_replicas_finished([c_replica_admin], target_node.admin_client)
+    # Eventually, after the source's retry + second INIT, both nodes flush their slots and DBSIZE reaches 0.
+    # We can't rely that the offsets are equal here because the slots might have not yet been flushed.
+    @assert_eventually(timeout=5)
+    async def rollback_finished():
+        master_keys, replica_keys = await asyncio.gather(
+            target_node.admin_client.execute_command("DBSIZE"),
+            c_replica_admin.execute_command("DBSIZE"),
+        )
 
-    master_keys = await target_node.admin_client.execute_command("DBSIZE")
-    replica_keys = await c_replica_admin.execute_command("DBSIZE")
+        logging.info("target_master DBSIZE=%d, target_replica DBSIZE=%d", master_keys, replica_keys)
 
-    logging.info("target_master DBSIZE=%d, target_replica DBSIZE=%d", master_keys, replica_keys)
+        assert master_keys == 0, f"target_master still has {master_keys} keys after OOM rollback"
+        assert (
+            replica_keys == 0
+        ), f"target_replica has {replica_keys} keys but master has 0 - replica was not rolled back"
 
-    # After OOM rollback the master must have 0 keys (DeleteSlots ran).
-    assert master_keys == 0, f"target_master still has {master_keys} keys after OOM rollback"
-
-    # The replica must also have 0 keys. This fails without the WriteFlushSlotsToJournal fix
-    # because the master's DeleteSlots is not written to the journal, so the replica never
-    # receives the deletion and retains the migrated keys.
-    assert (
-        replica_keys == 0
-    ), f"target_replica has {replica_keys} keys but master has 0 — replica was not rolled back"
+    await rollback_finished()
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "replication_timeout": 3000})
