@@ -1624,6 +1624,18 @@ TEST_F(MultiTest, EvalRo) {
   EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
 }
 
+TEST_F(MultiTest, EvalRoUndeclaredKeys) {
+  EXPECT_THAT(Run({"set", "foo", "bar"}), "OK");
+
+  // Undeclared keys make the script global, and read-only takes the shard lock in shared mode.
+  EXPECT_THAT(
+      Run({"eval_ro", "--!df flags=allow-undeclared-keys\nreturn redis.call('get', 'foo')", "0"}),
+      "bar");
+
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_TRUE(shard->shard_lock()->IsFree()); });
+}
+
 TEST_F(MultiTest, EvalShaRo) {
   RespExpr resp;
 
