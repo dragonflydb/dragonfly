@@ -1522,7 +1522,14 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
     shard->set_running_tx(this);
   }
 
-  auto result = cb(this, shard);
+  // An escaping exception would skip the cleanup below and leave the EXEC reply incomplete.
+  RunnableResult result;
+  try {
+    result = cb(this, shard);
+  } catch (std::bad_alloc&) {
+    LOG_EVERY_T(ERROR, 1) << " out of memory";
+    result = OpStatus::OUT_OF_MEMORY;
+  }
   db_slice.OnCbFinishBlocking();
 
   LogAutoJournalOnShard(shard, result);
