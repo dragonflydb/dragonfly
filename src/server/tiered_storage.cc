@@ -642,6 +642,10 @@ void TieredStorage::CancelStash(tiering::PendingId id, tiering::FragmentRef frag
   fragment_ref.SetStashPending(false);
 }
 
+size_t TieredStorage::UsedMemory() const {
+  return bins_->UsedMemory() + op_manager_->UsedMemory();
+}
+
 TieredStats TieredStorage::GetStats() const {
   TieredStats stats{};
 
@@ -691,6 +695,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.clients_throttled = stash_backpressure_.size();
     stats.total_clients_throttled = stats_.total_clients_throttled;
     stats.max_pending_bytes = config_.max_pending_bytes;
+    stats.used_memory = UsedMemory();
   }
   return stats;
 }
