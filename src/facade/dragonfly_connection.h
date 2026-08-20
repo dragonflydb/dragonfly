@@ -554,6 +554,12 @@ class Connection : public util::Connection {
   enum class ExecuteBatchResult : uint8_t { kSuccess, kFailure, kDeferToControlPath };
   ExecuteBatchResult ExecuteBatch();
 
+  // V2: Returns true if the connection is currently logging traffic to a file.
+  bool ShouldLogTrafficV2() const;
+
+  // V2: A helper function to log a single command to a file.
+  void LogTrafficV2(ParsedCommand* cmd);
+
   // V2 vectorized squash phase: dispatch the run starting at parsed_to_execute_ through
   // DispatchSquashedBatch when squashing is enabled. Returns true if a squashed batch was
   // dispatched (and parsed_to_execute_ advanced).

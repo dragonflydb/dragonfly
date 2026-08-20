@@ -5,6 +5,7 @@ import re
 import socket
 import ssl
 import string
+import struct
 import subprocess
 import time
 from dataclasses import dataclass
@@ -245,6 +246,134 @@ async def test_monitor_multi_exec_close(df_server: DflyInstance):
     # If we get here, the server did not crash.
     client = df_server.client()
     assert await client.ping()
+
+
+def _read_traffic_log_records(path):
+    """Helper for test_debug_traffic_records_pipeline_in_dispatch_order."""
+    data = path.read_bytes()
+    assert data[0] == 3
+
+    offset = 2
+    records = []
+    while offset < len(data):
+        _, _, _, has_more, num_parts = struct.unpack_from("<IQIII", data, offset)
+        offset += struct.calcsize("<IQIII")
+        part_lengths = struct.unpack_from(f"<{num_parts}I", data, offset)
+        offset += 4 * num_parts
+        parts = []
+        for part_len in part_lengths:
+            parts.append(data[offset : offset + part_len])
+            offset += part_len
+        records.append((has_more, parts))
+    return records
+
+
+@dfly_multi_test_args(
+    {"enable_resp_io_loop_v2": "false", "proactor_threads": 1},
+    {"enable_resp_io_loop_v2": "true", "proactor_threads": 1},
+)
+async def test_debug_traffic_records_pipeline_in_dispatch_order(df_server, tmp_path):
+    """Verify DEBUG TRAFFIC records a non-transactional pipeline in dispatch order."""
+    client = aioredis.Redis(port=df_server.port)
+    log_prefix = tmp_path / "traffic"
+
+    try:
+        assert await client.execute_command("DEBUG", "TRAFFIC", "START", str(log_prefix)) == b"OK"
+
+        pipeline = client.pipeline(transaction=False)
+        pipeline.set("traffic:key:1", "one")
+        pipeline.set("traffic:key:2", "two")
+        pipeline.get("traffic:key:1")
+        assert await pipeline.execute() == [True, True, b"one"]
+
+        assert await client.execute_command("DEBUG", "TRAFFIC", "STOP") == b"OK"
+    finally:
+        await client.aclose()
+
+    assert _read_traffic_log_records(log_prefix.with_name("traffic-000.bin")) == [
+        (1, [b"SET", b"traffic:key:1", b"one"]),
+        (1, [b"SET", b"traffic:key:2", b"two"]),
+        (0, [b"GET", b"traffic:key:1"]),
+    ]
+
+
+@dfly_args({"enable_resp_io_loop_v2": "true", "proactor_threads": 1})
+async def test_debug_traffic_v2_parse_in_proactor_does_not_preempt(df_server, tmp_path):
+    """V2 logging records queued commands and does not preempt proactor parsing."""
+    client = df_server.client()
+    log_prefix = tmp_path / "traffic-proactor"
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+
+    try:
+        # The SET is queued behind the blocking command before logging starts.
+        writer.write(b"BLPOP traffic:block 0\r\nSET traffic:queued before-start\r\n")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+
+        assert await client.execute_command("DEBUG", "TRAFFIC", "START", str(log_prefix)) == "OK"
+
+        # BLPOP keeps the execution fiber parked at kSimpleHop. This later input is parsed by
+        # OnRecvNotification in the proactor callback, where traffic logging must not suspend.
+        writer.write(b"SET traffic:proactor one\r\n")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        assert await client.lpush("traffic:block", "unblock") == 1
+
+        first_response = await asyncio.wait_for(reader.readuntil(b"+OK\r\n"), timeout=2)
+        second_response = await asyncio.wait_for(reader.readuntil(b"+OK\r\n"), timeout=2)
+        assert b"traffic:block" in first_response
+        assert b"unblock" in first_response
+        assert second_response == b"+OK\r\n"
+        assert await client.execute_command("DEBUG", "TRAFFIC", "STOP") == "OK"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await client.aclose()
+
+    logged_commands = [
+        parts
+        for _, parts in _read_traffic_log_records(log_prefix.with_name("traffic-proactor-000.bin"))
+    ]
+    assert [b"SET", b"traffic:queued", b"before-start"] in logged_commands
+    assert [b"SET", b"traffic:proactor", b"one"] in logged_commands
+
+
+@dfly_args(
+    {
+        "enable_resp_io_loop_v2": "true",
+        "enable_pipeline_squashing_v2": "false",
+        "proactor_threads": 1,
+    }
+)
+async def test_debug_traffic_v2_logs_retried_sync_command_once(df_server, tmp_path):
+    """V2 does not log a command rejected with WOULD_BLOCK before retrying it as the head."""
+    client = df_server.client()
+    log_prefix = tmp_path / "traffic-retry"
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+
+    try:
+        assert await client.execute_command("DEBUG", "TRAFFIC", "START", str(log_prefix)) == "OK"
+
+        # SET first attempts ONLY_ASYNC behind BLPOP and returns WOULD_BLOCK. Once BLPOP finishes,
+        # it retries as the head and must produce only one traffic record.
+        writer.write(b"BLPOP traffic:retry:block 0\r\nSET traffic:retry:key value\r\n")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        assert await client.lpush("traffic:retry:block", "unblock") == 1
+
+        await asyncio.wait_for(reader.readuntil(b"+OK\r\n"), timeout=2)
+        assert await client.execute_command("DEBUG", "TRAFFIC", "STOP") == "OK"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await client.aclose()
+
+    logged_set_commands = [
+        parts
+        for _, parts in _read_traffic_log_records(log_prefix.with_name("traffic-retry-000.bin"))
+        if parts == [b"SET", b"traffic:retry:key", b"value"]
+    ]
+    assert logged_set_commands == [[b"SET", b"traffic:retry:key", b"value"]]
 
 
 """

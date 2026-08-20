@@ -846,14 +846,14 @@ error_code Replica::ConsumeRedisStream() {
         // Try dispatching the batch of commands - if the batch didn't process any commands than
         // fall back to dispatching the first command in the batch synchronously.
         auto dispatch_batch = [&](size_t idx) {
-          size_t processed =
-              service_.DispatchSquashedBatch(batch[idx].cmd, batch.size() - idx, &conn_context);
+          size_t processed = service_.DispatchSquashedBatch(batch[idx].cmd, batch.size() - idx,
+                                                            &conn_context, nullptr);
           if (processed > 0) {
             return processed;
           }
           auto* cmd = batch[idx].cmd;
           service_.DispatchCommand(facade::ParsedArgs{*cmd}, cmd,
-                                   facade::AsyncPreference::ONLY_SYNC);
+                                   facade::AsyncPreference::ONLY_SYNC, nullptr);
           return size_t{1};
         };
 

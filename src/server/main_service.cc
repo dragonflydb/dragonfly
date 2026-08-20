@@ -1488,12 +1488,17 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
   return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
-                                        facade::AsyncPreference async_pref) {
+DispatchResult Service::DispatchCommand(
+    facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd, facade::AsyncPreference async_pref,
+    absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) {
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
   const CommandId* cid = nullptr;
   ParsedArgs args_no_cmd;
+  auto invoke_pre_dispatch = [&] {
+    if (pre_dispatch_cb)
+      (*pre_dispatch_cb)(parsed_cmd);
+  };
 
   if (parsed_cmd->mc_command()) {
     auto mc_res = HandleMemcacheCommand(parsed_cmd, async_pref);
@@ -1508,6 +1513,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   }
 
   if (cid == nullptr) {
+    invoke_pre_dispatch();
     if (async_pref != AsyncPreference::ONLY_SYNC) {
       parsed_cmd->SetDeferredReply();
     }
@@ -1532,6 +1538,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
         parsed_cmd->SetDeferredReply();
       break;
   };
+
+  invoke_pre_dispatch();
 
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
@@ -1754,8 +1762,9 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
   return res;
 }
 
-uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
-                                        facade::ConnectionContext* cntx) {
+uint32_t Service::DispatchSquashedBatch(
+    facade::ParsedCommand* first, unsigned count, facade::ConnectionContext* cntx,
+    absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) {
   auto* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
 
@@ -1845,6 +1854,8 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
         cid->IsSubscribeFamily())
       break;
 
+    if (pre_dispatch_cb)
+      (*pre_dispatch_cb)(cmd);
     if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
       CapturingReplyBuilder crb{ReplyMode::FULL, rb->GetRespVersion()};
       crb.SendError(std::move(*err));
@@ -2172,7 +2183,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
       auto saved_tail = cmd_cntx->tail_args();
 
       auto* prev = cmd_cntx->SwapReplier(&replier);
-      DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
+      DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
       cmd_cntx->SwapReplier(prev);
 
       cmd_cntx->SetTailArgs(saved_tail);
