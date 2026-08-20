@@ -9,7 +9,7 @@
 #include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/gtest.h"
-#include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/socket_utils.h"
 #include "server/test_utils.h"
@@ -904,6 +904,91 @@ TEST_F(ServerFamilyTest, InfoCommandStatsAggregation) {
 
 TEST_F(ServerFamilyTest, InfoClusterMigrationErrors) {
   EXPECT_THAT(Run({"INFO", "CLUSTER"}).GetString(), HasSubstr("migration_errors_total:0"));
+}
+
+TEST_F(ServerFamilyTest, CommandList) {
+  // CASE: No filter
+  auto resp = Run({"command", "list"});
+  const size_t total = resp.GetVec().size();
+  EXPECT_EQ(total, CheckedInt({"command", "count"}));
+
+  // Also validating all entries are strings
+  for (const auto& entry : resp.GetVec())
+    EXPECT_EQ(entry.type, RespExpr::STRING);
+
+  // CASE: PATTERN — known match
+  resp = Run({"command", "list", "filterby", "pattern", "gEt*"});
+  ASSERT_GT(resp.GetVec().size(), 0);
+  for (const auto& entry : resp.GetVec()) {
+    const string name = absl::AsciiStrToLower(entry.GetString());
+    EXPECT_TRUE(absl::StartsWith(name, "get"));
+  }
+
+  // CASE: PATTERN — no match
+  resp = Run({"command", "list", "filterby", "pattern", "zzznomatch*"});
+  EXPECT_EQ(resp.GetVec().size(), 0);
+
+  // CASE: PATTERN exact match (no wildcards)
+  resp = Run({"command", "list", "filterby", "pattern", "GET"});
+  ASSERT_EQ(resp.GetVec().size(), 1);
+  EXPECT_EQ(absl::AsciiStrToUpper(resp.GetVec()[0].GetString()), "GET");
+
+  // CASE: PATTERN wildcard-only matches everything
+  resp = Run({"command", "list", "filterby", "pattern", "*"});
+  EXPECT_EQ(resp.GetVec().size(), total);
+
+  // CASE: PATTERN with ? single-char wildcard
+  resp = Run({"command", "list", "filterby", "pattern", "G?T"});
+  ASSERT_GT(resp.GetVec().size(), 0);
+  for (const auto& entry : resp.GetVec())
+    EXPECT_EQ(absl::AsciiStrToUpper(entry.GetString()).size(), 3);
+
+  // CASE: PATTERN with character class
+  resp = Run({"command", "list", "filterby", "pattern", "[gs]et"});
+  ASSERT_GE(resp.GetVec().size(), 1);
+  for (const auto& entry : resp.GetVec()) {
+    const string name = absl::AsciiStrToLower(entry.GetString());
+    EXPECT_TRUE(name == "get" || name == "set");
+  }
+
+  // CASE: PATTERN empty string
+  resp = Run({"command", "list", "filterby", "pattern", ""});
+  EXPECT_EQ(resp.GetVec().size(), 0);
+
+  // CASE: FILTERBY is case-insensitive
+  resp = Run({"command", "list", "FilterBy", "pattern", "gEt*"});
+  EXPECT_GT(resp.GetVec().size(), 0);
+
+  // CASE: ACLCAT — verify response entries are strings (like bare LIST)
+  resp = Run({"command", "list", "filterby", "aclcat", "string"});
+  ASSERT_GT(resp.GetVec().size(), 0);
+  for (const auto& entry : resp.GetVec())
+    EXPECT_EQ(entry.type, RespExpr::STRING);
+
+  // CASE: ACLCAT with @ prefix (same results as without)
+  auto resp2 = Run({"command", "list", "filterby", "aclcat", "@string"});
+  EXPECT_EQ(resp.GetVec().size(), resp2.GetVec().size());
+
+  // CASE: ACLCAT unknown category
+  resp = Run({"command", "list", "filterby", "aclcat", "nonexistent"});
+  EXPECT_EQ(resp.GetVec().size(), 0);
+
+  // CASE: ACLCAT empty category
+  resp = Run({"command", "list", "filterby", "aclcat", ""});
+  EXPECT_EQ(resp.GetVec().size(), 0);
+
+  // CASE: MODULE
+  resp = Run({"command", "list", "filterby", "module", "anything"});
+  EXPECT_EQ(resp.GetVec().size(), 0);
+
+  // CASE: Validating syntax errors
+  EXPECT_THAT(Run({"command", "list", "extraarg"}), ErrArg(kSyntaxErr));
+  EXPECT_THAT(Run({"command", "list", "filterby"}), ErrArg(kSyntaxErr));
+  EXPECT_THAT(Run({"command", "list", "filterby", "pattern"}), ErrArg(kSyntaxErr));
+  EXPECT_THAT(Run({"command", "list", "notfilterby", "pattern", "g*"}), ErrArg(kSyntaxErr));
+
+  // CASE: Unknown filter type
+  EXPECT_THAT(Run({"command", "list", "filterby", "unknown", "x"}), ErrArg(kSyntaxErr));
 }
 
 }  // namespace dfly
