@@ -16,6 +16,15 @@ namespace dfly {
 
 using namespace std;
 
+namespace {
+SBF MakeSBF(uint64_t initial_capacity, double fp_prob, double grow_factor,
+            PMR_NS::memory_resource* mr) {
+  SBF sbf(mr);
+  sbf.Init(initial_capacity, fp_prob, grow_factor, mr);
+  return sbf;
+}
+}  // namespace
+
 class BloomTest : public ::testing::Test {
  protected:
   BloomTest() {
@@ -76,7 +85,7 @@ TEST_F(BloomTest, Extreme) {
 }
 
 TEST_F(BloomTest, SBF) {
-  SBF sbf(10, 0.001, 2, PMR_NS::get_default_resource());
+  SBF sbf = MakeSBF(10, 0.001, 2, PMR_NS::get_default_resource());
 
   unsigned collisions = 0;
   constexpr unsigned kNumElems = 2000000;
@@ -93,7 +102,7 @@ TEST_F(BloomTest, SBF) {
 
 TEST_F(BloomTest, DumpAndLoadRoundTrip) {
   auto* mr = PMR_NS::get_default_resource();
-  SBF src(10, 0.001, 2, mr);
+  SBF src = MakeSBF(10, 0.001, 2, mr);
 
   constexpr unsigned kNumElems = 200;
   for (unsigned i = 0; i < kNumElems; ++i)
@@ -139,7 +148,7 @@ TEST_F(BloomTest, DumpAndLoadRoundTrip) {
 }
 
 TEST_F(BloomTest, DumpPastEndCursorReturnsEof) {
-  SBF sbf(10, 0.001, 2, PMR_NS::get_default_resource());
+  SBF sbf = MakeSBF(10, 0.001, 2, PMR_NS::get_default_resource());
   SBFDumpIterator it(sbf, 999999);
   auto [cursor, data] = it.Next();
   EXPECT_EQ(cursor, 0);
@@ -148,7 +157,7 @@ TEST_F(BloomTest, DumpPastEndCursorReturnsEof) {
 
 TEST_F(BloomTest, DumpWithGrowthDuringIteration) {
   auto* mr = PMR_NS::get_default_resource();
-  SBF sbf(10, 0.001, 2, mr);
+  SBF sbf = MakeSBF(10, 0.001, 2, mr);
 
   constexpr unsigned initial = 100;
   for (unsigned i = 0; i < initial; ++i)
