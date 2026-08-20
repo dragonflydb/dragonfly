@@ -603,12 +603,17 @@ class DbSlice {
 
   void CreateDb(DbIndex index);
 
+  // Describes what events caused by a write during ongoing serialization can be safely skipped.
   struct OmitDecision {
-    bool skip_serialize = false;
-    bool omit_journal = false;
+    bool skip_serialize = false;  // Skip bucket serialization caused by on-change consumers
+    bool omit_journal = false;    // Skip emitting journal event
   };
 
   // Decides whether the forced snapshot serialization and/or the journal write can be skipped.
+  // In general, we serialize buckets just before a modification, even if the modified value is
+  // completely overwritten - this is wasteful. If the snapshot traversal loop has not yet reached
+  // the targets bucket, we can skip forced serialization, as it will be eventually serialized with
+  // the new value
   OmitDecision DetermineOmitPossibility(const Context& cntx, const ChangeReq& req);
 
   enum class UpdateStatsMode : uint8_t {
