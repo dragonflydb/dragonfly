@@ -71,9 +71,6 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
 ABSL_FLAG(unsigned, list_tiering_threshold, 0,
           "Tiering threshold for lists. Default - no tiering.");
-ABSL_FLAG(uint32_t, list_compress_dict_threshold, 0,
-          "Minimum list malloc usage in bytes before attempting ZSTD dictionary compression. "
-          "0 disables. Note: compression is synchronous and may block the thread.");
 ABSL_FLAG(uint32_t, list_tiering_prefetch_depth, 0,
           "Before loading a tiered list node, scan up to this many neighboring nodes and "
           "issue asynchronous load requests for any that are offloaded. A value of 0 disables "
@@ -195,9 +192,7 @@ class ListWrapper {
       ql->EnableTiering(params);
     }
 
-    if (uint32_t zstd_thresh = GetFlag(FLAGS_list_compress_dict_threshold); zstd_thresh > 0) {
-      ql->set_compr_threshold(zstd_thresh);
-    }
+    ql->set_compr_policy(QList::PolicyFromFlags());
     if (lp.Size() > 0) {
       ql->AppendListpack(lp.GetPointer());
     }
