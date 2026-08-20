@@ -20,7 +20,6 @@
 #include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/histogram.h"
-#include "base/io_buf.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "common/heap_size.h"
@@ -29,12 +28,14 @@
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
 #include "facade/op_status.h"
+#include "facade/proactor_read_buffer.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_srv_parser.h"
 #include "facade/service_interface.h"
 #include "facade/socket_utils.h"
 #include "io/file.h"
+#include "io/io_buf.h"
 #include "strings/human_readable.h"
 #include "util/fiber_socket_base.h"
 #include "util/fibers/fibers.h"
@@ -152,6 +153,12 @@ ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
 ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
           "Enable the event-driven IoLoopV2 for non-TLS RESP connections.");
 
+ABSL_FLAG(bool, enable_shared_read_buffer, true,
+          "Use one read buffer per proactor for eligible RESP IoLoopV2 connections.");
+
+ABSL_FLAG(strings::MemoryBytesFlag, shared_read_buffer_len, 1u << 15,
+          "Capacity of the per-proactor RESP IoLoopV2 shared read buffer.");
+
 ABSL_FLAG(bool, enable_pipeline_squashing_v2, true,
           "Enable vectorized pipeline squashing for the V2 dispatch loop. Groups consecutive "
           "single-shard pipeline commands by shard and executes them in parallel.");
@@ -177,6 +184,8 @@ namespace {
 // limit. Publishers are only parked in EnsureMemoryBudget once the per-thread subscriber memory
 // reaches soft_limit * kPubSubHardMultiplier.
 constexpr uint32_t kPubSubHardMultiplier = 4;
+
+thread_local ProactorReadBuffer tl_shared_read_buf;
 
 void SendProtocolError(RespSrvParser::Result pres, SinkReplyBuilder* builder) {
   constexpr string_view res = "-ERR Protocol error: "sv;
@@ -865,6 +874,27 @@ void Connection::Init(unsigned io_threads) {
       exit(-1);
     }
   }
+
+  if (GetFlag(FLAGS_enable_shared_read_buffer)) {
+    const size_t capacity = GetFlag(FLAGS_shared_read_buffer_len);
+    LOG(INFO) << "Shared RESP V2 read buffer enabled: " << capacity << " bytes per proactor, "
+              << capacity * io_threads << " bytes across " << io_threads << " proactors";
+  } else {
+    LOG(INFO) << "Shared RESP V2 read buffer disabled";
+  }
+}
+
+void Connection::InitThreadLocal() {
+  if (!GetFlag(FLAGS_enable_shared_read_buffer)) {
+    return;
+  }
+
+  tl_shared_read_buf.Init(GetFlag(FLAGS_shared_read_buffer_len));
+  ReadBufTracker::Update(0, tl_shared_read_buf.Capacity(), 0, "shared_read_buffer_per_proactor");
+}
+
+void Connection::ShutdownThreadLocal() {
+  pipeline_req_pool_.clear();
 }
 
 void Connection::Shutdown() {
@@ -954,7 +984,7 @@ void Connection::OnPreMigrateThread() {
   socket_->CancelOnErrorCb();
   DCHECK(!async_fb_.IsJoinable()) << GetClientId();
 
-  UnregisterReadBufCapacity();
+  HandleReadBufCapacityRegistration(false);
   DecreaseConnStats();
 }
 
@@ -989,7 +1019,7 @@ void Connection::OnPostMigrateThread() {
     LaunchAsyncFiberIfNeeded();
   }
 
-  RegisterReadBufCapacity();
+  HandleReadBufCapacityRegistration(true);
   IncreaseConnStats();
 }
 
@@ -1024,8 +1054,8 @@ void Connection::HandleRequests() {
   // Read-buffer capacity is registered before TLS and protocol detection, so it must be removed on
   // every exit, including HTTP and early-failure paths. Normal connection stats are owned by
   // ConnectionFlow and transferred separately during migration.
-  RegisterReadBufCapacity();
-  absl::Cleanup read_buf_guard = [this] { UnregisterReadBufCapacity(); };
+  HandleReadBufCapacityRegistration(true);
+  absl::Cleanup read_buf_guard = [this] { HandleReadBufCapacityRegistration(false); };
 
   auto remote_ep = RemoteEndpointStr();
 
@@ -1144,6 +1174,8 @@ void Connection::HandleRequests() {
                    (protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_resp_io_loop_v2));
       pipeline_squashing_v2_ =
           ioloop_v2_ && GetFlag(FLAGS_enable_pipeline_squashing_v2) && protocol_ == Protocol::REDIS;
+      shared_read_buf_enabled_ =
+          ioloop_v2_ && protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_shared_read_buffer);
 
       socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       switch (protocol_) {
@@ -1420,7 +1452,9 @@ void Connection::ConnectionFlow() {
 
   // At the start we read from the socket to determine the HTTP/Memstore protocol.
   // Therefore we may already have some data in the buffer.
-  if (io_buf_.InputLen() > 0) {
+  if (shared_read_buf_enabled_ && io_buf_.InputLen() > 0) {
+    MoveInputToOverflow(io_buf_);
+  } else if (io_buf_.InputLen() > 0) {
     phase_ = PROCESS;
     if (redis_parser_ && !ioloop_v2_) {
       parse_status = ParseRedis(io_buf_, 10000, /*enqueue_only=*/false);
@@ -2420,10 +2454,6 @@ Connection::WeakRef Connection::Borrow() {
   return {self_, unsigned(socket_->proactor()->GetPoolIndex()), id_};
 }
 
-void Connection::ShutdownThreadLocal() {
-  pipeline_req_pool_.clear();
-}
-
 bool Connection::IsCurrentlyDispatching() const {
   if (!cc_)
     return false;
@@ -2886,20 +2916,21 @@ void Connection::DecreaseConnStats() {
   conn_stats.pipeline_queue_bytes -= parsed_cmd_q_bytes_;
 }
 
-void Connection::RegisterReadBufCapacity() {
+void Connection::HandleReadBufCapacityRegistration(bool do_register) {
   DCHECK(tl_facade_stats);
-  DCHECK(!read_buf_capacity_registered_);
-  // Registration includes setting the flag and adding the current buffer capacity.
-  ReadBufTracker::Update(0, io_buf_.Capacity(), id_, ReadBufTracker::kReasonRegister);
-  read_buf_capacity_registered_ = true;
-}
+  DCHECK_EQ(read_buf_capacity_registered_, !do_register);
 
-void Connection::UnregisterReadBufCapacity() {
-  DCHECK(tl_facade_stats);
-  DCHECK(read_buf_capacity_registered_);
-  // Unregistration includes clearing the flag and subtracting the current buffer capacity.
-  ReadBufTracker::Update(io_buf_.Capacity(), 0, id_, ReadBufTracker::kReasonUnregister);
-  read_buf_capacity_registered_ = false;
+  // overflow_buf_ is included when the connection has retained input from the per-proactor shared
+  // read buffer.
+  size_t overflow_buf_capacity = overflow_buf_ ? overflow_buf_->Capacity() : 0;
+  DCHECK(!overflow_buf_ || (overflow_buf_capacity > 0u));
+  const size_t capacity = io_buf_.Capacity() + overflow_buf_capacity;
+  const size_t previous_capacity = do_register ? 0 : capacity;
+  const size_t new_capacity = do_register ? capacity : 0;
+  const string_view reason =
+      do_register ? ReadBufTracker::kReasonRegister : ReadBufTracker::kReasonUnregister;
+  ReadBufTracker::Update(previous_capacity, new_capacity, id_, reason);
+  read_buf_capacity_registered_ = do_register;
 }
 
 void Connection::BreakOnce(uint32_t ev_mask) {
@@ -3105,7 +3136,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
       // if we squashed any commands, continue the loop to check if there are
       // non-squashable commands to process.
       DVLOG(2) << CONN_ID << "Squashing pipeline " << dispatch_waiting_count_ << " commands "
-               << pending_input_ << " " << io_buf_.InputLen();
+               << pending_input_ << " " << GetUnreadInputLen();
 
       if (SquashPipelineV2()) {
         // - This helps with throughput. Explanation:
@@ -3113,7 +3144,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
         //   By breaking now we give the io-loop a chance to add more commands to the pipeline.
         // - Skip the break when parse-in-proactor is on: the proactor already parsed those bytes
         //   into the queue during the squash wait, so keep squashing in place instead.
-        if (!pipeline_parse_in_proactor_cached && (pending_input_ || io_buf_.InputLen() > 0))
+        if (!pipeline_parse_in_proactor_cached && (pending_input_ || GetUnreadInputLen() > 0))
           break;
         continue;
       }
@@ -3489,13 +3520,30 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
   const uint64_t start_epoch = fb2::FiberSwitchEpoch();
   ProcessRecvNotification(n);
 
-  if (!IsOverPipelineLimit()) {
-    base::IoBuf& input_buf = GetInputBuffer();
+  auto parse_in_proactor = [this](auto&& parse_cb) {
+    size_t cmds_before = parsed_cmd_q_len_;
+    ParserStatus status = parse_cb();
+    if (parsed_cmd_q_len_ > cmds_before)
+      ++GetLocalConnStats().proactor_parse;
+    // The recv callback cannot return a status. If parsing hit a protocol error, flag it so
+    // IoLoopV2 surfaces ParserStatus::ERROR and sends the protocol-error reply.
+    if (status == ERROR)
+      proactor_parse_error_ = true;
+    DVLOG(1) << CONN_ID << "Parse-in-proactor added " << (parsed_cmd_q_len_ - cmds_before)
+             << " commands, pq_len=" << parsed_cmd_q_len_;
+  };
+  auto can_parse_in_proactor = [this] {
+    return pipeline_parse_in_proactor_cached && (fiber_park_spot_ == FiberParkSpot::kSquashHop ||
+                                                 fiber_park_spot_ == FiberParkSpot::kSendReply ||
+                                                 fiber_park_spot_ == FiberParkSpot::kSimpleHop);
+  };
+
+  if (shared_read_buf_enabled_ && can_parse_in_proactor()) {
+    // TODO: Bound callback read/parse work to prevent a busy connection from starving the proactor.
+    parse_in_proactor([this] { return ReadAndParseShared(/*from_proactor_callback=*/true); });
+  } else if (!shared_read_buf_enabled_ && !IsOverPipelineLimit()) {
     // Drain the socket while the fiber is suspended (no-op when io_buf_ is full / no append room).
-    const size_t before = input_buf.InputLen();
-    ReadPendingInput(input_buf);
-    if (input_buf.InputLen() > before)
-      ++GetLocalConnStats().proactor_reads;
+    ReadPendingInput(io_buf_, /*from_proactor_callback=*/true);
 
     // Parse In Proactor: parse newly-read bytes while the fiber is parked, so the next batch is
     // already larger on resume. Enabled only at parks where the parser is idle AND the fiber waits
@@ -3503,21 +3551,8 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
     // overlaps real work. Parks that run nothing in parallel (e.g. a self-preemption yield) are
     // excluded - offloading them buys nothing.
     // - Calling ParseRedis() with max_busy_cycles==0: proactor's callbacks must not suspend.
-    if (pipeline_parse_in_proactor_cached &&
-        (fiber_park_spot_ == FiberParkSpot::kSquashHop ||
-         fiber_park_spot_ == FiberParkSpot::kSendReply ||
-         fiber_park_spot_ == FiberParkSpot::kSimpleHop) &&
-        redis_parser_ && (input_buf.InputLen() > 0)) {
-      size_t cmds_before = parsed_cmd_q_len_;
-      ParserStatus st = ParseRedis(input_buf, 0, /*enqueue_only=*/true);
-      if (parsed_cmd_q_len_ > cmds_before)
-        ++GetLocalConnStats().proactor_parse;
-      // The recv callback cannot return a status. If parsing hit a protocol error, flag it so
-      // IoLoopV2 surfaces ParserStatus::ERROR and sends the protocol-error reply.
-      if (st == ERROR)
-        proactor_parse_error_ = true;
-      DVLOG(1) << CONN_ID << "Parse-in-proactor added " << (parsed_cmd_q_len_ - cmds_before)
-               << " commands, pq_len=" << parsed_cmd_q_len_;
+    if (can_parse_in_proactor() && redis_parser_ && (io_buf_.InputLen() > 0)) {
+      parse_in_proactor([this] { return ParseRedis(io_buf_, 0, /*enqueue_only=*/true); });
     }
   }
 
@@ -3541,6 +3576,7 @@ void Connection::ProcessRecvNotification(const util::FiberSocketBase::RecvNotifi
 
     pending_input_ = true;
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
+    CHECK(!shared_read_buf_enabled_);
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
     {
       ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonRecvProvidedBuffers);
@@ -3561,12 +3597,7 @@ void Connection::ProcessRecvNotification(const util::FiberSocketBase::RecvNotifi
   }
 }
 
-base::IoBuf& Connection::GetInputBuffer() {
-  DCHECK(ioloop_v2_);
-  return io_buf_;
-}
-
-bool Connection::HandleRecvResult(const io::Result<size_t>& result) {
+bool Connection::HandleTryRecvResult(const io::Result<size_t>& result) {
   if (result) {
     if (*result > 0)  // Positive read.
       return true;
@@ -3587,7 +3618,130 @@ bool Connection::HandleRecvResult(const io::Result<size_t>& result) {
   return false;
 }
 
-void Connection::ReadPendingInput(base::IoBuf& input_buf) {
+void Connection::RecordRecvBytes(size_t bytes, bool from_proactor_callback) {
+  DCHECK(tl_facade_stats);
+  auto& conn_stats = tl_facade_stats->conn_stats;
+  conn_stats.io_read_bytes += bytes;
+  local_stats_.net_bytes_in += bytes;
+  ++conn_stats.io_read_cnt;
+  ++local_stats_.read_cnt;
+  if (from_proactor_callback)
+    ++conn_stats.proactor_reads;
+  last_interaction_ = time(nullptr);
+  io_buf_last_read_time_ = last_interaction_;
+}
+
+void Connection::MoveInputToOverflow(io::IoBuf& input_buf) {
+  if (input_buf.InputLen() == 0)
+    return;
+
+  CHECK(!overflow_buf_);
+  // During setup, input_buf is the private io_buf_. So its unread input must fit in the shared
+  // buffer that will receive it on the first shared read.
+  CHECK_LE(input_buf.InputLen(), tl_shared_read_buf.Capacity());
+  // TODO: Optimize overflow-buffer memory management, e.g. by retaining or pooling allocations.
+  overflow_buf_ = make_unique<io::IoBuf>(input_buf.InputLen());
+  overflow_buf_->WriteAndCommit(input_buf.InputBuffer().data(), input_buf.InputLen());
+  input_buf.Clear();
+  if (read_buf_capacity_registered_) {
+    ReadBufTracker::Update(0, overflow_buf_->Capacity(), id_, "shared_overflow");
+  }
+}
+
+void Connection::RestoreOverflowToInput(io::IoBuf& input_buf) {
+  CHECK(overflow_buf_);
+  CHECK_EQ(input_buf.InputLen(), 0u);
+  DCHECK_GT(overflow_buf_->InputLen(), 0u);
+  CHECK_LE(overflow_buf_->InputLen(), input_buf.AppendLen());
+  input_buf.WriteAndCommit(overflow_buf_->InputBuffer().data(), overflow_buf_->InputLen());
+  if (read_buf_capacity_registered_) {
+    ReadBufTracker::Update(overflow_buf_->Capacity(), 0, id_, "shared_overflow");
+  }
+  overflow_buf_.reset();
+}
+
+void Connection::FinalizeSharedInput(io::IoBuf& input_buf, bool discard) {
+  CHECK(!overflow_buf_);
+  if (!discard && (input_buf.InputLen() > 0)) {
+    MoveInputToOverflow(input_buf);
+    // Keep increment outside, since the above helper is also used during connection setup.
+    ++GetLocalConnStats().shared_buf_overflow_copies;
+  }
+  input_buf.Clear();
+}
+
+size_t Connection::GetUnreadInputLen() const {
+  if (shared_read_buf_enabled_) {
+    DCHECK(!tl_shared_read_buf.in_use());
+    return overflow_buf_ ? overflow_buf_->InputLen() : 0;
+  }
+  return io_buf_.InputLen();
+}
+
+Connection::ParserStatus Connection::ReadAndParseShared(bool from_proactor_callback) {
+  DCHECK(shared_read_buf_enabled_);
+  if (!pending_input_ && GetUnreadInputLen() == 0)
+    return NEED_MORE;
+  if (IsOverPipelineLimit())
+    return NEED_MORE;
+
+  auto borrow = tl_shared_read_buf.TryBorrow(id_);
+  if (!borrow) {
+    LOG(DFATAL) << CONN_ID << "Shared read buffer is already borrowed by "
+                << tl_shared_read_buf.OwnerConnId();
+    io_ec_ = make_error_code(errc::operation_canceled);
+    pending_input_ = false;
+    return ERROR;
+  }
+  const uint64_t borrow_start = CycleClock::Now();
+  io::IoBuf& input_buf = borrow->buf();
+
+  if (overflow_buf_) {
+    RestoreOverflowToInput(input_buf);
+  }
+
+  // Drain until EAGAIN, EOF, error, or backpressure.
+  ParserStatus status = NEED_MORE;
+  while (!IsOverPipelineLimit()) {
+    if (input_buf.InputLen() > 0) {
+      status = ParseRedis(input_buf, 0, /*enqueue_only=*/true);
+      if (status == ERROR) {
+        break;
+      }
+
+      // The parser stashes incomplete tokens internally, so unread bytes here only remain when
+      // backpressure stops parsing - retain that suffix outside the shared buffer.
+      if (input_buf.InputLen() > 0)
+        break;
+
+      // Reset the consumed buffer so the next socket read can use its full capacity. This allows a
+      // pipeline larger than one shared-buffer capacity to be read in successive chunks.
+      input_buf.Clear();
+    }
+
+    if (!pending_input_)
+      break;
+    io::Result<size_t> result = socket_->TryRecv(input_buf.AppendBuffer());
+    if (!HandleTryRecvResult(result)) {
+      break;
+    }
+
+    input_buf.CommitWrite(*result);
+    RecordRecvBytes(*result, from_proactor_callback);
+  }
+  // A parser or socket error discards unparsed residue before returning the shared buffer.
+  const bool io_or_parser_error = (status == ERROR) || io_ec_;
+  FinalizeSharedInput(input_buf, io_or_parser_error);
+  auto& conn_stats = GetLocalConnStats();
+  uint64_t borrow_usec = CycleClock::ToUsec(CycleClock::Now() - borrow_start);
+  if (from_proactor_callback)
+    conn_stats.shared_buf_borrow_usec_callback += borrow_usec;
+  else
+    conn_stats.shared_buf_borrow_usec_fiber += borrow_usec;
+  return status;
+}
+
+void Connection::ReadPendingInput(io::IoBuf& input_buf, bool from_proactor_callback) {
   if (!pending_input_)
     return;
 
@@ -3604,22 +3758,15 @@ void Connection::ReadPendingInput(base::IoBuf& input_buf) {
   bool done_read = false;
   while (!buf.empty()) {
     io::Result<size_t> res = socket_->TryRecv(buf);
-    if (!HandleRecvResult(res)) {
+    if (!HandleTryRecvResult(res)) {
       break;
     }
 
     DVLOG(1) << CONN_ID << "Read " << *res << " bytes from socket";
 
-    auto& conn_stats = tl_facade_stats->conn_stats;
     size_t commit_sz = *res;
-    conn_stats.io_read_bytes += commit_sz;
-    local_stats_.net_bytes_in += commit_sz;
-
-    ++conn_stats.io_read_cnt;
-    ++local_stats_.read_cnt;
-
-    last_interaction_ = time(nullptr);
     input_buf.CommitWrite(commit_sz);
+    RecordRecvBytes(commit_sz, from_proactor_callback);
     done_read = true;
     buf = input_buf.AppendBuffer();
   }
@@ -3631,6 +3778,8 @@ void Connection::ReadPendingInput(base::IoBuf& input_buf) {
 
 void Connection::MaybeAdjustIoBufCapacity(ParserStatus parse_status, bool reached_capacity) {
   DCHECK_NE(parse_status, ERROR);
+  if (shared_read_buf_enabled_)
+    return;
 
   // A completed parse can reuse its existing allocation - only an incomplete request needs more
   // input before it can make progress.
@@ -3744,7 +3893,7 @@ void Connection::MaybeShrinkIoBufOnLowUsage() {
 }
 
 bool Connection::MaybeShrinkIoBufOnReceiveIdle() {
-  if (!ioloop_v2_ || (iobuf_min_shrink_interval_sec_cached == 0)) {
+  if (!ioloop_v2_ || shared_read_buf_enabled_ || (iobuf_min_shrink_interval_sec_cached == 0)) {
     return false;
   }
 
@@ -3769,7 +3918,7 @@ void Connection::MaybeEnableRecvMultishot() {
   if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
     auto* up = static_cast<fb2::UringProactor*>(fb2::ProactorBase::me());
     // Only enable if the buffer ring is configured and we aren't using TLS
-    if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_) {
+    if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_ && !shared_read_buf_enabled_) {
       static_cast<fb2::UringSocket*>(socket_.get())->EnableRecvMultishot();
       pending_input_ = false;
     }
@@ -3810,7 +3959,7 @@ bool Connection::ShouldWakeIdle() const {
 
   // On top of the control events, the idle park also wakes for incoming data and for a head command
   // that is now ready to run.
-  return io_buf_.InputLen() > 0 || pending_input_ || HasCommandToExecute() || HasControlEvent();
+  return GetUnreadInputLen() > 0 || pending_input_ || HasCommandToExecute() || HasControlEvent();
 }
 
 bool Connection::DrainControlPath(uint32_t quota) {
@@ -3941,7 +4090,11 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       current_wait_.emplace(parsed_head_, &cmd_completion_waiter);
     }
 
-    ReadPendingInput(GetInputBuffer());
+    if (shared_read_buf_enabled_) {
+      parse_status = ReadAndParseShared(/*from_proactor_callback=*/false);
+    } else {
+      ReadPendingInput(io_buf_, /*from_proactor_callback=*/false);
+    }
 
     // Idle park: flush and sleep only when the fiber is truly idle (ShouldWakeIdle() is false).
     // When synchronous commands (e.g. PUBLISH) are pipelined, ExecuteBatch processes them
@@ -3960,7 +4113,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     }
 
     phase_ = PROCESS;
-    bool reached_capacity = GetInputBuffer().AppendLen() == 0;
+    bool reached_capacity = !shared_read_buf_enabled_ && io_buf_.AppendLen() == 0;
 
     // Control path: drain dispatch_q_. Restart the loop (so fresh socket data is read first)
     // unless we hit the quota, in which case fall through to the data path to avoid starving it.
@@ -3968,21 +4121,34 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       continue;
     }
 
+    // Drain-only path (execute and reply without parsing):
+    // Drain already-queued commands to free memory. If the pipeline memory limit
+    // is exceeded, park the fiber until another connection relieves the pressure
+    // (may return immediately; Empty queues are never over the
+    // limit, ensuring admin commands can always parse).
+    //
+    // We enter this path under two distinct modes:
+    // * Shared Buffer Mode:
+    //   Read-parse and execute-reply operations should be strictly split. Parsing
+    //   already occurred while this connection owned the borrowed buffer. Any
+    //   retained input resides in `overflow_buf_` and must not be passed to the
+    //   `io_buf_` parser here.
+    // * Private Buffer Mode:
+    //   Entered either because there is no new input to parse, or because pipeline
+    //   backpressure prevents further parsing (which would only grow the queue).
     bool over_limit = IsOverPipelineLimit();
-    base::IoBuf& input_buf = GetInputBuffer();
-    if (input_buf.InputLen() == 0 || over_limit) {
-      // Drain-only path: either there is no new input to parse, or we are over the pipeline memory
-      // limit (parsing would only grow the queue further). Either way, drain queued commands to
-      // free memory instead of parsing. When over the limit, also park until another connection
-      // relieves the pressure. (Empty queues are never over the limit, so admin commands can still
-      // parse.)
+    if (shared_read_buf_enabled_ || io_buf_.InputLen() == 0 || over_limit) {
       DrainQueuedCommands();
       if (over_limit)
         ParkOnBackpressure(&backpressure_waiter);
-      parse_status = NEED_MORE;
+
+      // ReadAndParseShared already supplied this iteration's status. Private buffer mode did not
+      // parse here, so report that it requires more input for capacity bookkeeping below.
+      if (!shared_read_buf_enabled_)
+        parse_status = NEED_MORE;
     } else {
       // Input available and under budget: parse, execute, reply.
-      parse_status = RunParsePath(input_buf);
+      parse_status = RunParsePath(io_buf_);
     }
 
     // Release any checkpoints deferred while async commands were in flight, now that the in-flight
@@ -4047,6 +4213,9 @@ void ResetStats() {
   cstats.io_read_bytes = 0;
   cstats.proactor_reads = 0;
   cstats.proactor_parse = 0;
+  cstats.shared_buf_overflow_copies = 0;
+  cstats.shared_buf_borrow_usec_callback = 0;
+  cstats.shared_buf_borrow_usec_fiber = 0;
   cstats.iobuf_capacity_change_cnt = 0;
 
   tl_facade_stats->reply_stats = {};
