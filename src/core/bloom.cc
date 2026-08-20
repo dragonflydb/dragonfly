@@ -426,8 +426,7 @@ SBFLoadResult AddNewFilterToSBF(std::string_view data, SBF* sbf) {
   if (data_length == 0 || !absl::has_single_bit(data_length))
     return kBadInput;
 
-  // probability should be 0 to 1 (probably less than 1)
-  if (!std::isfinite(state.fp_prob) || state.fp_prob <= 0.0 || state.fp_prob >= 1.0)
+  if (!std::isfinite(state.fp_prob) || state.fp_prob <= 0.0 || state.fp_prob > kMaxSBFFpProb)
     return kBadInput;
 
   if (state.max_capacity == 0 || state.current_size >= state.max_capacity)

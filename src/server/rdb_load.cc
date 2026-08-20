@@ -2003,15 +2003,24 @@ auto RdbLoaderBase::ReadSBFImpl(bool filter_is_chunked) -> io::Result<OpaqueObj>
     if (options != 0)
       return Unexpected(errc::rdb_file_corrupted);
     SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
-    SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
-    if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
+    // A later expansion multiplies by grow_factor, so guard it as LoadSBFHeader does - RESTORE
+    // and replicas reach this without going through that check.
+    if (!std::isfinite(res.grow_factor) || res.grow_factor < 1.0)
       return Unexpected(errc::rdb_file_corrupted);
-    }
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
     SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
     SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
     SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
 
     SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+
+    // A filterless SBF is a BF.LOADCHUNK restore that stopped after the header: no probability
+    // and no sizes yet. A populated one must satisfy the loader's fp_prob range.
+    const bool state_ok = num_filters == 0 ? res.fp_prob == 0 && res.prev_size == 0 &&
+                                                 res.current_size == 0 && res.max_capacity == 0
+                                           : res.fp_prob > 0 && res.fp_prob <= kMaxSBFFpProb;
+    if (!state_ok)
+      return Unexpected(errc::rdb_file_corrupted);
   } else {
     num_filters = pending_read_.remaining;
     pending_read_.remaining = 0;

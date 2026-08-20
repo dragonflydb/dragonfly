@@ -785,7 +785,8 @@ void Connection::AsyncOperations::operator()(ParsedCommand& cmd) {
            << "Dispatching pipeline: " << cmd.Front();
 
   ++self->local_stats_.cmds;
-  self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd, facade::AsyncPreference::ONLY_SYNC);
+  self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd, facade::AsyncPreference::ONLY_SYNC,
+                                  nullptr);
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
@@ -1579,12 +1580,14 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
 
 Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t max_busy_cycles,
                                                 bool enqueue_only) {
+  DCHECK_EQ(enqueue_only, ioloop_v2_)
+      << "enqueue_only==true should only be used for ioloop_v2_ and vice versa";
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
 
   auto dispatch_sync = [this] {
     service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_,
-                              facade::AsyncPreference::ONLY_SYNC);
+                              facade::AsyncPreference::ONLY_SYNC, nullptr);
   };
   auto dispatch_async = [this]() -> void {
     PipelineMessagePtr ptr = GetFromPoolOrCreate();
@@ -1614,8 +1617,13 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
         io_req_size_hist->Add(request_consumed_bytes_);
       request_consumed_bytes_ = 0;
       bool has_more = consumed < read_buffer.size();
+      parsed_cmd_->has_unparsed_input = has_more;
 
-      if (tl_traffic_logger.log_file && tl_traffic_logger.listener_type == listener_type_) {
+      // V1 only: log traffic if requested. Traffic logging may write to a file and suspend the
+      // fiber. Since we cannot allow suspending the fiber during ParseRedis in V2 (e.g read+parse
+      // in proactor), traffic logging is done just before execution.
+      if (!enqueue_only && tl_traffic_logger.log_file &&
+          tl_traffic_logger.listener_type == listener_type_) {
         LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()));
       }
 
@@ -1708,7 +1716,8 @@ auto Connection::ParseLoop() -> ParserStatus {
 
     // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
     // earlier replies in order before we report it.
-    if (!ExecuteBatch())
+    ExecuteBatchResult execute_result = ExecuteBatch();
+    if (execute_result == ExecuteBatchResult::kFailure)
       return ERROR;
 
     if (!ReplyBatch())
@@ -1718,7 +1727,11 @@ auto Connection::ParseLoop() -> ParserStatus {
     // protocol error reply (using parser_error_) and close the connection.
     if (parse_status == ERROR)
       return ERROR;
-  } while (parse_status == OK && io_buf_.InputLen() > 0);
+
+    // V2: let IoLoopV2 drain control messages that were queued before this pipeline.
+    if (execute_result == ExecuteBatchResult::kDeferToControlPath)
+      return OK;
+  } while ((parse_status == OK) && (io_buf_.InputLen() > 0));
 
   return parse_status;  // OK or NEED_MORE
 }
@@ -1937,7 +1950,7 @@ void Connection::SquashPipeline() {
   cc_->async_dispatch = true;
 
   uint32_t squashed =
-      service_->DispatchSquashedBatch(parsed_to_execute_, pipeline_count, cc_.get());
+      service_->DispatchSquashedBatch(parsed_to_execute_, pipeline_count, cc_.get(), nullptr);
 
   // Nothing was squashed (the head command can't join a batch, e.g. MULTI/EXEC, EVAL,
   // subscribe, blocking, or unknown). Hand it off to regular dispatch without flushing or
@@ -2144,7 +2157,7 @@ void Connection::ProcessPipelineCommandV1() {
 
   cc_->async_dispatch = true;
   local_stats_.cmds++;
-  service_->DispatchCommand(ParsedArgs{*cmd}, cmd, facade::AsyncPreference::ONLY_SYNC);
+  service_->DispatchCommand(ParsedArgs{*cmd}, cmd, facade::AsyncPreference::ONLY_SYNC, nullptr);
   last_interaction_ = time(nullptr);
   skip_next_squashing_ = false;
   cc_->async_dispatch = false;
@@ -2987,6 +3000,15 @@ Connection::ParserStatus Connection::ParseMCBatch(base::IoBuf& io_buf) {
   return OK;
 }
 
+bool Connection::ShouldLogTrafficV2() const {
+  return ioloop_v2_ && (protocol_ == Protocol::REDIS) && tl_traffic_logger.log_file &&
+         (tl_traffic_logger.listener_type == listener_type_);
+}
+
+void Connection::LogTrafficV2(ParsedCommand* cmd) {
+  LogTraffic(id_, cmd->has_unparsed_input, *cmd, service_->GetContextInfo(cc_.get()));
+}
+
 bool Connection::SquashPipelineV2() {
   // vectorized squash phase: pack multiple commands and dispatch at once.
   // dispatch_waiting_count_ is the exact length of the run starting at parsed_to_execute_, so the
@@ -3000,8 +3022,14 @@ bool Connection::SquashPipelineV2() {
   // Invariant: clear on entry - only reached from the V2 loop between per-command dispatches.
   DCHECK(!cc_->sync_dispatch);
   cc_->sync_dispatch = true;
+  const bool log_traffic = ShouldLogTrafficV2();
+  auto log_command = [this](ParsedCommand* cmd) { LogTrafficV2(cmd); };
+  // FunctionRef is non-owning. Keep log_command and the log_command_ref alive through the
+  // synchronous dispatch.
+  absl::FunctionRef<void(ParsedCommand*)> log_command_ref = log_command;
   unsigned squashed =
-      service_->DispatchSquashedBatch(parsed_to_execute_, dispatch_waiting_count_, cc_.get());
+      service_->DispatchSquashedBatch(parsed_to_execute_, dispatch_waiting_count_, cc_.get(),
+                                      log_traffic ? &log_command_ref : nullptr);
   cc_->sync_dispatch = false;
   fiber_park_spot_ = FiberParkSpot::kNone;
 
@@ -3023,13 +3051,13 @@ bool Connection::SquashPipelineV2() {
   return true;
 }
 
-bool Connection::ExecuteBatch() {
+Connection::ExecuteBatchResult Connection::ExecuteBatch() {
   // Invariant: batched_ must be false on entry.
   // Both ReplyBatch() and ExecuteBatch() reset it via absl::Cleanup guards on all return paths.
   DCHECK(!reply_builder_->IsBatchMode());
 
   if (parsed_to_execute_ == nullptr) {
-    return true;  // no errors.
+    return ExecuteBatchResult::kSuccess;  // no errors.
   }
 
   ConnectionMemoryTracker memory_tracker(this);
@@ -3061,7 +3089,17 @@ bool Connection::ExecuteBatch() {
 
   while (parsed_to_execute_ != nullptr) {
     if (reply_builder_->GetError())
-      return false;
+      return ExecuteBatchResult::kFailure;
+
+    // The V2 loop may parse a pipeline while older control messages are still queued. Running this
+    // command first would let e.g. UNSUBSCRIBE drop those messages, so yield to IoLoopV2, which
+    // owns control-path draining, and retry once the older prefix is gone. dispatch_q_ is FIFO by
+    // dispatch_cycle (checkpoints are front-inserted), so testing the front covers the prefix.
+    if (ioloop_v2_ && !dispatch_q_.empty() &&
+        (dispatch_q_.front().IsCheckPoint() ||
+         dispatch_q_.front().dispatch_cycle < parsed_to_execute_->parsed_cycle)) {
+      return ExecuteBatchResult::kDeferToControlPath;
+    }
 
     if (pipeline_squashing_v2_ && dispatch_waiting_count_ > 1) {
       // if we squashed any commands, continue the loop to check if there are
@@ -3135,7 +3173,13 @@ bool Connection::ExecuteBatch() {
     // need to update is_true_pipeline.
     size_t q_len_before_dispatch = parsed_cmd_q_len_;
     uint64_t dispatch_start = CycleClock::Now();
-    auto dispatch_res = service_->DispatchCommandSimple(cmd, mode);
+    // Log here because V2 parsing may run in a proactor callback, where logging must not suspend.
+    // Note: Squashed commands are logged in SquashPipelineV2.
+    const bool log_traffic = ShouldLogTrafficV2();
+    auto log_command = [this](ParsedCommand* command) { LogTrafficV2(command); };
+    absl::FunctionRef<void(ParsedCommand*)> log_command_ref = log_command;
+    auto dispatch_res =
+        service_->DispatchCommandSimple(cmd, mode, log_traffic ? &log_command_ref : nullptr);
     if (ioloop_v2_) {
       fiber_park_spot_ = FiberParkSpot::kNone;
       cc_->sync_dispatch = false;
@@ -3175,7 +3219,7 @@ bool Connection::ExecuteBatch() {
     }
   }
 
-  return true;
+  return ExecuteBatchResult::kSuccess;
 }
 
 bool Connection::ReplyBatch() {
@@ -3784,8 +3828,13 @@ void Connection::DrainQueuedCommands() {
   size_t mem_before = GetLocalConnStats().pipeline_queue_bytes;
 
   if (parsed_head_) {
-    if (HasCommandToExecute())
-      ExecuteBatch();
+    if (HasCommandToExecute()) {
+      ExecuteBatchResult execute_result = ExecuteBatch();
+      if (execute_result == ExecuteBatchResult::kFailure)
+        return;  // IoLoopV2 observes the reply-builder error.
+      if (execute_result == ExecuteBatchResult::kDeferToControlPath)
+        return;  // The next IoLoopV2 iteration drains dispatch_q_ before retrying.
+    }
     ReplyBatch();
   }
 

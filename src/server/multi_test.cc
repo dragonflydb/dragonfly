@@ -12,6 +12,7 @@
 #include "base/logging.h"
 #include "core/interpreter.h"
 #include "facade/facade_test.h"
+#include "facade/reply_builder.h"
 #include "facade/resp_expr.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
@@ -1624,6 +1625,18 @@ TEST_F(MultiTest, EvalRo) {
   EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
 }
 
+TEST_F(MultiTest, EvalRoUndeclaredKeys) {
+  EXPECT_THAT(Run({"set", "foo", "bar"}), "OK");
+
+  // Undeclared keys make the script global, and read-only takes the shard lock in shared mode.
+  EXPECT_THAT(
+      Run({"eval_ro", "--!df flags=allow-undeclared-keys\nreturn redis.call('get', 'foo')", "0"}),
+      "bar");
+
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_TRUE(shard->shard_lock()->IsFree()); });
+}
+
 TEST_F(MultiTest, EvalShaRo) {
   RespExpr resp;
 
@@ -1779,6 +1792,45 @@ TEST_F(MultiTest, EvalMPopEmptyIsFalse) {
   resp = Run({"eval", "local r = redis.call('lmpop', '1', KEYS[1], 'LEFT') return type(r)", "1",
               "nolist"});
   EXPECT_EQ(resp, "boolean");
+}
+
+// A bad_alloc thrown by a shard callback inside a squashed MULTI must surface as an error reply.
+TEST_F(MultiTest, SquashedCallbackBadAlloc) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_squash, true);
+
+  static atomic_bool threw_in_stub;
+  threw_in_stub = false;
+
+  auto handler = [](CmdArgParser, CommandContext* cmd_cntx) {
+    auto cb = [](Transaction* t, EngineShard*) -> OpResult<long> {
+      threw_in_stub = t->IsSquashedStub();
+      throw std::bad_alloc{};
+    };
+    OpResult<long> res = cmd_cntx->tx()->ScheduleSingleHopT(cb);
+    auto* rb = cmd_cntx->rb();
+    if (res)
+      rb->SendLong(*res);
+    else
+      rb->SendError(res.status());
+  };
+  std::move(*service_->mutable_registry()->Find("LPUSH")).SetHandler(handler);
+
+  Run({"multi"});
+  Run({"lpush", kKey1, "a"});
+  Run({"set", kKey2, "b"});
+  RespExpr resp = Run({"exec"});
+
+  // Otherwise the throw happened on the unsquashed path and the test is vacuous.
+  EXPECT_TRUE(threw_in_stub.load());
+
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], ErrArg("Out of memory"));
+  EXPECT_EQ(resp.GetVec()[1], "OK");
+
+  // The connection must stay in sync after the failed sub-command.
+  EXPECT_EQ(Run({"ping"}), "PONG");
+  EXPECT_EQ(Run({"get", kKey2}), "b");
 }
 
 }  // namespace dfly

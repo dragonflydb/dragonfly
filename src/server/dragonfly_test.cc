@@ -305,6 +305,22 @@ TEST_F(DflyEngineTest, ScriptFlush) {
   EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
+// SCRIPT FLAGS on a sha that was never loaded used to publish script params without a body, so
+// EVALSHA passed its NOSCRIPT guard and aborted inside LoadScript. See #8103.
+TEST_F(DflyEngineTest, ScriptFlagsUnknownSha) {
+  const char kSha[] = "0000000000000000000000000000000000000000";
+
+  EXPECT_EQ(Run({"script", "flags", kSha, "no-writes"}), "OK");
+  EXPECT_THAT(Run({"evalsha", kSha, "0"}), ErrArg("NOSCRIPT No matching script. Please use EVAL."));
+  EXPECT_EQ(Run({"ping"}), "PONG");
+
+  // A body-less entry must not leak into SCRIPT LIST, which is also what gets written to snapshots.
+  auto resp = Run({"script", "load", "return 7"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  string sha{ToSV(resp.GetBuf())};
+  EXPECT_THAT(Run({"script", "list"}), RespElementsAre(RespElementsAre(sha, "return 7")));
+}
+
 TEST_F(DflyEngineTestWithRegistry, Hello) {
   auto resp = Run({"hello"});
   ASSERT_THAT(resp, ArrLen(14));

@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/functional/function_ref.h>
+
 #include <string>
 
 #include "facade/facade_types.h"
@@ -39,14 +41,19 @@ class ServiceInterface {
   virtual ~ServiceInterface() {
   }
 
-  virtual DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference) = 0;
-  DispatchResult DispatchCommandSimple(ParsedCommand* cmd, AsyncPreference mode);
+  virtual DispatchResult DispatchCommand(
+      ParsedArgs args, ParsedCommand* cmd, AsyncPreference,
+      absl::FunctionRef<void(ParsedCommand*)>* pre_dispatch_cb) = 0;
+  DispatchResult DispatchCommandSimple(ParsedCommand* cmd, AsyncPreference mode,
+                                       absl::FunctionRef<void(ParsedCommand*)>* pre_dispatch_cb);
 
   // Dispatches a batch of pipelined commands, squashing consecutive single-shard commands.
+  // If non-null, calls pre_dispatch_cb for each accepted command before its execution path.
   // Replies are deferred into the parsed commands and are sent by the connection afterwards.
   // Returns the number of squashed commands.
   virtual uint32_t DispatchSquashedBatch(ParsedCommand* first, unsigned count,
-                                         ConnectionContext* cntx) {
+                                         ConnectionContext* cntx,
+                                         absl::FunctionRef<void(ParsedCommand*)>* pre_dispatch_cb) {
     return 0;
   }
 

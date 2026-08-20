@@ -450,7 +450,9 @@ void Transaction::StartMultiGlobal(Namespace* ns, DbIndex dbid) {
   multi_->mode = GLOBAL;
   InitBase(ns, dbid, {});
   InitGlobal();
-  multi_->lock_mode = IntentLock::EXCLUSIVE;
+  // ScheduleInternal below acquires the shard lock in this mode, so it must not be hardcoded:
+  // a read-only command (EVAL_RO) takes it shared.
+  multi_->lock_mode = LockMode();
 
   ScheduleInternal();
 }
@@ -1520,7 +1522,14 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
     shard->set_running_tx(this);
   }
 
-  auto result = cb(this, shard);
+  // An escaping exception would skip the cleanup below and leave the EXEC reply incomplete.
+  RunnableResult result;
+  try {
+    result = cb(this, shard);
+  } catch (std::bad_alloc&) {
+    LOG_EVERY_T(ERROR, 1) << " out of memory";
+    result = OpStatus::OUT_OF_MEMORY;
+  }
   db_slice.OnCbFinishBlocking();
 
   LogAutoJournalOnShard(shard, result);
@@ -1537,7 +1546,7 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
   DCHECK(multi_ && multi_->lock_mode);
 
   if (multi_->mode == GLOBAL) {
-    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+    shard->shard_lock()->Release(*multi_->lock_mode);
   } else {
     GetDbSlice(shard->shard_id()).Release(*multi_->lock_mode, KeyLockArgs{db_index_, fps});
   }
