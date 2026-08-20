@@ -58,6 +58,10 @@ class DiskStorage {
 
   Stats GetStats() const;
 
+  size_t UsedMemory() const {
+    return alloc_.UsedMemory();
+  }
+
  private:
   // Try asynchronously growing backing file by at least min requested size
   std::error_code RequestGrow(off_t min_size);

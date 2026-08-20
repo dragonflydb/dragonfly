@@ -95,6 +95,10 @@ class SmallBins {
 
   Stats GetStats() const;
 
+  size_t UsedMemory() const {
+    return stashed_bins_.mem_usage();
+  }
+
  private:
   struct StashInfo {
     uint8_t entries = 0;
