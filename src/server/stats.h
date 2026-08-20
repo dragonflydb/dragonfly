@@ -93,6 +93,8 @@ struct TieredStats {
   // Total number of client throttle events.
   uint64_t total_clients_throttled = 0;
 
+  size_t used_memory = 0;
+
   TieredStats& operator+=(const TieredStats&);
 };
 

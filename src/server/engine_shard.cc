@@ -1029,7 +1029,8 @@ size_t EngineShard::UsedMemoryWithoutSearch() const {
 }
 
 size_t EngineShard::UsedMemory() const {
-  return UsedMemoryWithoutSearch() + search_indices()->GetUsedMemory();
+  return UsedMemoryWithoutSearch() + search_indices()->GetUsedMemory() +
+         (tiered_storage_ ? tiered_storage_->UsedMemory() : 0);
 }
 
 bool EngineShard::ShouldThrottleForTiering() const {
