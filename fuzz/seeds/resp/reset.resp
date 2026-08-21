@@ -35,9 +35,3 @@ PING
 *1
 $7
 MONITOR
-*1
-$5
-RESET
-*1
-$4
-PING

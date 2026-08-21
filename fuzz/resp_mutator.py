@@ -44,7 +44,7 @@ COMMANDS = [
     (b"DUMP", 1, 1), (b"RESTORE", 3, 7), (b"TOUCH", 1, 6), (b"RANDOMKEY", 0, 0),
     (b"KEYS", 1, 1), (b"SCAN", 1, 8), (b"SORT", 1, 10), (b"SORT_RO", 1, 9),
     (b"MOVE", 2, 2), (b"STICK", 1, 6), (b"DELEX", 1, 3), (b"FIELDEXPIRE", 3, 8),
-    (b"FIELDTTL", 2, 2),
+    (b"FIELDTTL", 2, 2), (b"RM", 1, 7),
     # List
     (b"LPUSH", 2, 6), (b"RPUSH", 2, 6), (b"LPUSHX", 2, 6), (b"RPUSHX", 2, 6),
     (b"LPOP", 1, 2), (b"RPOP", 1, 2), (b"LLEN", 1, 1), (b"LINDEX", 2, 2),
@@ -78,7 +78,7 @@ COMMANDS = [
     # Stream
     (b"XADD", 4, 10), (b"XLEN", 1, 1), (b"XRANGE", 3, 5), (b"XREVRANGE", 3, 5),
     (b"XREAD", 3, 9), (b"XREADGROUP", 5, 11), (b"XTRIM", 3, 6), (b"XDEL", 2, 6),
-    (b"XINFO", 1, 3), (b"XACK", 3, 6), (b"XGROUP", 2, 6), (b"XAUTOCLAIM", 5, 7),
+    (b"XINFO", 1, 5), (b"XACK", 3, 6), (b"XGROUP", 2, 6), (b"XAUTOCLAIM", 5, 7),
     (b"XCLAIM", 5, 10), (b"XPENDING", 2, 6), (b"XSETID", 2, 2),
     # HyperLogLog
     (b"PFADD", 2, 6), (b"PFCOUNT", 1, 4), (b"PFMERGE", 2, 5),
@@ -92,7 +92,7 @@ COMMANDS = [
     # Pub/Sub
     (b"SUBSCRIBE", 1, 4), (b"UNSUBSCRIBE", 0, 4), (b"PSUBSCRIBE", 1, 4), (b"PUNSUBSCRIBE", 0, 4),
     (b"SSUBSCRIBE", 1, 4), (b"SUNSUBSCRIBE", 0, 4), (b"PUBLISH", 2, 2), (b"SPUBLISH", 2, 2),
-    (b"PUBSUB", 0, 3),
+    (b"PUBSUB", 1, 3),
     # Transaction
     (b"MULTI", 0, 0), (b"EXEC", 0, 0), (b"DISCARD", 0, 0), (b"WATCH", 1, 4),
     (b"UNWATCH", 0, 0),
@@ -109,6 +109,7 @@ COMMANDS = [
     # Bloom filter
     (b"BF.ADD", 2, 2), (b"BF.EXISTS", 2, 2), (b"BF.MADD", 2, 6), (b"BF.MEXISTS", 2, 6),
     (b"BF.RESERVE", 3, 5), (b"BF.SCANDUMP", 2, 2), (b"BF.LOADCHUNK", 3, 3),
+    (b"BF.INFO", 1, 2),
     # Cuckoo filter
     (b"CF.RESERVE", 2, 8), (b"CF.ADD", 2, 2), (b"CF.ADDNX", 2, 2), (b"CF.EXISTS", 2, 2),
     (b"CF.MEXISTS", 2, 6), (b"CF.INFO", 1, 1), (b"CF.COUNT", 2, 2), (b"CF.DEL", 2, 2),
@@ -130,7 +131,7 @@ COMMANDS = [
     (b"MEMORY", 1, 3), (b"ACL", 1, 5), (b"MONITOR", 0, 0), (b"HELLO", 0, 5),
     (b"BGSAVE", 0, 4), (b"SAVE", 0, 3), (b"LATENCY", 1, 2), (b"SLOWLOG", 1, 2),
     (b"SHRINK", 1, 1), (b"QUIT", 0, 0), (b"TIME", 0, 0), (b"WAIT", 2, 2),
-    (b"RESET", 0, 0),
+    (b"RESET", 0, 0), (b"ROLE", 0, 0), (b"LASTSAVE", 0, 0),
     # Throttle
     (b"CL.THROTTLE", 4, 5),
 ]
@@ -196,12 +197,24 @@ SPECIAL = [
     b"FIELDS",
     b"JUSTID",
     b"IDLE",
+    b"NOMKSTREAM",
+    b"MKSTREAM",
+    b"FORCE",
+    b"RETRYCOUNT",
+    b"LASTID",
+    b"CREATECONSUMER",
+    b"DELCONSUMER",
+    b"SETID",
+    b"DESTROY",
+    b"FULL",
     b"FROMMEMBER",
     b"FROMLONLAT",
     b"BYRADIUS",
     b"BYBOX",
     b"WITHCOORD",
     b"WITHDIST",
+    b"WITHHASH",
+    b"STOREDIST",
     b"m",
     b"km",
     # bitfield / restore / misc
@@ -213,6 +226,16 @@ SPECIAL = [
     b"ABSTTL",
     b"u8",
     b"i64",
+    # delex conditions / scan-rm options / save variants
+    b"IFEQ",
+    b"IFNE",
+    b"IFDEQ",
+    b"IFDNE",
+    b"MINMSZ",
+    b"BUCKET",
+    b"ATTR",
+    b"SCHEDULE",
+    b"nosort",
     # cuckoo filter options
     b"NOCREATE",
     b"ITEMS",

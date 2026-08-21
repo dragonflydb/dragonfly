@@ -10,3 +10,8 @@ $6
 GETDEL
 $1
 k
+*2
+$6
+EXISTS
+$1
+k
