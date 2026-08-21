@@ -337,6 +337,10 @@ ExternalAllocator::~ExternalAllocator() {
   }
 }
 
+size_t ExternalAllocator::UsedMemory() const {
+  return segments_.capacity() * sizeof(SegmentDescr*) + segments_metadata_bytes_;
+}
+
 int64_t ExternalAllocator::Malloc(size_t sz) {
   uint8_t bin_idx = ToBinIdx(sz);
   Page* page = free_pages_[bin_idx];
@@ -467,10 +471,11 @@ auto ExternalAllocator::FindPage(PageClass pc) -> Page* {
       segments_.resize(seg_idx + 1);
     }
 
-    void* ptr =
-        mi_malloc_aligned(sizeof(SegmentDescr) + num_pages * sizeof(Page), kSegDescrAlignment);
+    size_t metadata_size = sizeof(SegmentDescr) + num_pages * sizeof(Page);
+    void* ptr = mi_malloc_aligned(metadata_size, kSegDescrAlignment);
     SegmentDescr* seg = new (ptr) SegmentDescr(pc, op_range->first, num_pages);
     segments_[seg_idx] = seg;
+    segments_metadata_bytes_ += metadata_size;
 
     DCHECK(sq_[pc] == NULL);
     DCHECK(seg->next == seg->prev && seg == seg->next);

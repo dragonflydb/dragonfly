@@ -430,6 +430,9 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   AppendMetricValue("memory_by_class_bytes", total.obj_memory_usage, {"class"}, {"object_used"},
                     &memory_by_class_bytes);
 
+  AppendMetricValue("memory_by_class_bytes", m.tiered_stats.used_memory, {"class"},
+                    {"tiered_utility_ram"}, &memory_by_class_bytes);
+
   AppendMetricValue("memory_by_class_bytes", m.coordinator_stats.stored_cmd_bytes, {"class"},
                     {"conn_stored_commands"}, &memory_by_class_bytes);
 
