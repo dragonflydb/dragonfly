@@ -1628,21 +1628,21 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     ++result.deleted;
   };
 
-  unsigned i = 0;
-
   auto quota_remains = [] {
     // Break out of traversal if we spent more than 1ms
     return base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) < 1000;
   };
 
-  for (; i < count / 3 && quota_remains(); ++i) {
-    db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
+  constexpr unsigned kStep = 8;
+
+  while (result.traversed < count / 3 && quota_remains()) {
+    db.expire_cursor = db.prime.TraverseBySegmentOrder(db.expire_cursor, cb, kStep);
   }
 
   // Continue traversing if we had a strong deletion rate among checked TTL keys.
   if (result.deleted * 4 > checked) {
-    for (; i < count && quota_remains(); ++i) {
-      db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
+    while (result.traversed < count && quota_remains()) {
+      db.expire_cursor = db.prime.TraverseBySegmentOrder(db.expire_cursor, cb, kStep);
     }
   }
 
