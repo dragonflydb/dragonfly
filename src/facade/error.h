@@ -23,6 +23,7 @@ inline constexpr char kKeyNotFoundErr[] = "no such key";
 inline constexpr char kInvalidIntErr[] = "value is not an integer or out of range";
 inline constexpr char kInvalidFloatErr[] = "value is not a valid float";
 inline constexpr char kUintErr[] = "value is out of range, must be positive";
+inline constexpr char kCountNotGreaterThanZeroErr[] = "count should be greater than 0";
 inline constexpr char kTimeoutNegativeErr[] = "timeout is negative";
 inline constexpr char kTimeoutNotFloatErr[] = "timeout is not a float or out of range";
 inline constexpr char kTimeoutOutOfRangeErr[] = "timeout is out of range";
