@@ -1451,7 +1451,8 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
   --stats->num_blocked_clients;
 
   *pause_flag = true;
-  ServerState::tlocal()->AwaitPauseState(true);  // blocking are always write commands
+  // blocking are always write commands
+  ServerState::tlocal()->AwaitPauseState(true, GetUniqueSlotId());
   *pause_flag = false;
 
   OpStatus result = OpStatus::OK;

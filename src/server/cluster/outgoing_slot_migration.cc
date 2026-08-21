@@ -376,13 +376,14 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   // Migration finalization has to be done via client pause because commands need to
-  // be blocked on coordinator level to avoid intializing transactions with stale cluster slot info
-  // TODO implement blocking on migrated slots only
+  // be blocked on coordinator level to avoid intializing transactions with stale cluster slot
+  // info. Only the slots actually being migrated are paused, so traffic to the rest of the
+  // keyspace keeps flowing during finalize.
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt =
       dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
-                  nullptr, ClientPause::ALL, is_pause_in_progress);
+                  nullptr, ClientPause::ALL, is_pause_in_progress, {}, migration_info_.slot_ranges);
 
   DCHECK(pause_fb_opt);
   if (!pause_fb_opt) {

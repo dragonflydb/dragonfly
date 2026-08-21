@@ -53,9 +53,11 @@ class Service : public facade::ServiceInterface {
   // Verify command prepares execution in correct state.
   // It's usually called before command execution. Only for multi/exec transactions it's checked
   // when the command is queued for execution, not before the execution itself.
-  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId& cid,
-                                                       const facade::ParsedArgs& tail_args,
-                                                       const ConnectionContext& cntx);
+  // `precomputed_slot`, when non-null, is an already-resolved slot (see ResolveCommandSlot) that
+  // CheckKeysOwnership reuses instead of re-resolving it from `tail_args`.
+  std::optional<facade::ErrorReply> VerifyCommandState(
+      const CommandId& cid, const facade::ParsedArgs& tail_args, const ConnectionContext& cntx,
+      const std::optional<SlotId>* precomputed_slot = nullptr);
 
   facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
   facade::ParsedCommand* AllocateParsedCommand() final;
@@ -161,16 +163,26 @@ class Service : public facade::ServiceInterface {
     uint32_t num_keys = 0;
   };
 
-  // Return error if not all keys are owned by the server when running in cluster mode
-  std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId& cid,
-                                                       const facade::ParsedArgs& args,
-                                                       const ConnectionContext& dfly_cntx);
+  // Return error if not all keys are owned by the server when running in cluster mode.
+  // `precomputed_slot`, when non-null, is an already-resolved slot (see ResolveCommandSlot) that
+  // is reused instead of re-resolving it from `args`.
+  std::optional<facade::ErrorReply> CheckKeysOwnership(
+      const CommandId& cid, const facade::ParsedArgs& args, const ConnectionContext& dfly_cntx,
+      const std::optional<SlotId>* precomputed_slot = nullptr);
 
   // Return moved error if we *own* the slot. This function is used from flows that assume our
   // state is TAKEN_OVER which happens after a replica takeover.
   std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId& cid,
                                                        const facade::ParsedArgs& args,
                                                        const ConnectionContext& dfly_cntx);
+
+  // Resolves the single slot touched by a keyed command's keys, validating that they all hash to
+  // the same slot. *slot is reset to nullopt at entry and stays nullopt both for non-keyed
+  // commands and on error (cross-slot access or key lookup failure) - callers must check the
+  // return value to distinguish "no keys" from "resolution failed".
+  std::optional<facade::ErrorReply> ResolveCommandSlot(const CommandId& cid,
+                                                       const facade::ParsedArgs& args,
+                                                       std::optional<SlotId>* slot);
 
   void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, bool read_only,
                     CommandContext* cmd_cntx);

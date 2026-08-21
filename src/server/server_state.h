@@ -12,6 +12,7 @@
 #include "core/interpreter.h"
 #include "server/acl/acl_log.h"
 #include "server/channel_store.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/common_types.h"
 #include "server/detail/egress_throttle.h"
 #include "server/script_mgr.h"
@@ -274,12 +275,33 @@ class ServerState {  // public struct - to allow initialization.
   // whether this is starting or ending the pause.
   void SetPauseState(ClientPause state, bool start);
 
+  // Starts or ends a pause scoped to the given slot ranges (e.g. while finalizing a slot
+  // migration), instead of pausing every command on this thread. Unlike SetPauseState, this
+  // never blocks non-keyed or out-of-range commands.
+  void SetSlotPauseState(cluster::SlotRanges ranges, bool start);
+
   // Awaits until the pause is over and the command can execute.
   // @is_write controls whether the command is a write command or not.
-  void AwaitPauseState(bool is_write);
+  // @slot, when set, additionally awaits any slot-scoped pause covering that slot, regardless of
+  // @is_write (both reads and writes must wait out a slot migration's finalize step).
+  void AwaitPauseState(bool is_write, std::optional<SlotId> slot = std::nullopt);
 
   bool IsPaused() const {
     return (client_pauses_[0] + client_pauses_[1]) > 0;
+  }
+
+  // True if any slot-scoped pause (see SetSlotPauseState) is currently active on this thread.
+  // Cheap to call on every dispatch to gate whether it's worth resolving a command's slot at all.
+  bool HasActiveSlotPause() const {
+    return !paused_slot_ranges_.empty();
+  }
+
+  bool IsSlotPaused(SlotId slot) const {
+    for (const auto& ranges : paused_slot_ranges_) {
+      if (ranges.Contains(slot))
+        return true;
+    }
+    return false;
   }
 
   SlowLogShard& GetSlowLog() {
@@ -324,6 +346,10 @@ class ServerState {  // public struct - to allow initialization.
   // should subscribe to `client_pause_ec_` through `AwaitPauseState` to be
   // notified when the break is over.
   int client_pauses_[2] = {};
+  // Slot ranges currently paused by in-progress slot migrations. Concurrent migrations covering
+  // disjoint ranges each contribute their own entry; a command only waits if its slot falls in
+  // one of them. Expected to stay small (bounded by the number of concurrent migrations).
+  std::vector<cluster::SlotRanges> paused_slot_ranges_;
   util::fb2::EventCount client_pause_ec_;
 
   // Monitors connections. Currently responsible for closing timed out connections.

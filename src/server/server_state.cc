@@ -226,10 +226,31 @@ void ServerState::SetPauseState(ClientPause state, bool start) {
   }
 }
 
-void ServerState::AwaitPauseState(bool is_write) {
-  client_pause_ec_.await([is_write, this]() {
-    return client_pauses_[int(ClientPause::ALL)] == 0 &&
-           (!is_write || client_pauses_[int(ClientPause::WRITE)] == 0);
+void ServerState::SetSlotPauseState(cluster::SlotRanges ranges, bool start) {
+  if (start) {
+    paused_slot_ranges_.push_back(std::move(ranges));
+  } else {
+    auto it = rng::find(paused_slot_ranges_, ranges);
+    DCHECK(it != paused_slot_ranges_.end());
+    if (it != paused_slot_ranges_.end())
+      paused_slot_ranges_.erase(it);
+  }
+  client_pause_ec_.notifyAll();
+}
+
+void ServerState::AwaitPauseState(bool is_write, std::optional<SlotId> slot) {
+  client_pause_ec_.await([is_write, slot, this]() {
+    if (client_pauses_[int(ClientPause::ALL)] != 0)
+      return false;
+    if (is_write && client_pauses_[int(ClientPause::WRITE)] != 0)
+      return false;
+    if (slot.has_value()) {
+      for (const auto& ranges : paused_slot_ranges_) {
+        if (ranges.Contains(*slot))
+          return false;
+      }
+    }
+    return true;
   });
 }
 
