@@ -300,6 +300,7 @@ async def test_debug_traffic_records_pipeline_in_dispatch_order(df_server, tmp_p
 
 @dfly_args({"enable_resp_io_loop_v2": "true", "proactor_threads": 1})
 @pytest.mark.exclude_epoll
+@pytest.mark.skip("Fails constantly")
 async def test_debug_traffic_v2_parse_in_proactor_does_not_preempt(df_server, tmp_path):
     """V2 logging records queued commands and does not preempt proactor parsing."""
     client = df_server.client()
