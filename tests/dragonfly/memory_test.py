@@ -170,11 +170,7 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
         with pytest.raises(redis.exceptions.ConnectionError):
             await client.ping()
 
-    # flush to free memory. Plain flushall() (and even flushall(asynchronous=False) in redis-py)
-    # only sends "FLUSHALL" without the SYNC keyword, which Dragonfly runs asynchronously and
-    # detaches the decommit fibers (see ServerFamily::Drakarys) -- RSS then drops on its own
-    # schedule and can race the rss_compare(False) timeout below under CI load. FLUSHALL SYNC
-    # blocks until the decommit finishes, matching the pattern used by test_rss_used_mem_gap above.
+    # Wait for decommit
     await new_client.execute_command("FLUSHALL", "SYNC")
 
     await rss_compare(False)
