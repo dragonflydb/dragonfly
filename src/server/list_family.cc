@@ -1187,11 +1187,15 @@ void CmdLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.NextRange();  // numkeys + keys, handled by the command key spec
 
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
-  size_t pop_count = 1;
-  parser.Check("COUNT", &pop_count);
+  int64_t count_arg = 1;
+  parser.Check("COUNT", &count_arg);
+  if (!parser.HasError() && (count_arg < 1 || count_arg > UINT32_MAX))
+    return cmd_cntx->SendError(kCountNotGreaterThanZeroErr);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
+
+  uint32_t pop_count = static_cast<uint32_t>(count_arg);
 
   // Create a vector to store first found key for each shard
   vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
@@ -1271,11 +1275,15 @@ void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.NextRange();  // numkeys + keys, handled by the command key spec
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 
-  size_t pop_count = 1;
-  parser.Check("COUNT", &pop_count);
+  int64_t count_arg = 1;
+  parser.Check("COUNT", &count_arg);
+  if (!parser.HasError() && (count_arg < 1 || count_arg > UINT32_MAX))
+    return cmd_cntx->SendError(kCountNotGreaterThanZeroErr);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
+
+  uint32_t pop_count = static_cast<uint32_t>(count_arg);
 
   OpResult<StringVec> result;
   auto cb = [&](Transaction* t, EngineShard* shard, string_view key) {

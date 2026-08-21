@@ -654,15 +654,10 @@ void IntervalVisitor::PopListPack(ZSetFamily::TopNScored sc) {
     Next(zl, &eptr, &sptr);
   }
 
-  int start = 0;
-  if (params_.reverse) {
-    /* If the number of elements to delete is greater than the listpack length,
-     * we set the start to 0 because lpseek fails to search beyond length in reverse */
-    start = (2 * sc > lpLength(zl)) ? 0 : -2 * sc;
-  }
-
-  /* We can finally delete the elements */
-  pv_->SetRObjPtr(lpDeleteRange(zl, start, 2 * sc));
+  /* Cap at the listpack length: 2 * sc overflows uint32 for sc >= 2^31. */
+  unsigned long del_count = std::min<uint64_t>(2 * uint64_t{sc}, lpLength(zl));
+  long start = params_.reverse ? -static_cast<long>(del_count) : 0;
+  pv_->SetRObjPtr(lpDeleteRange(zl, start, del_count));
 }
 
 void IntervalVisitor::PopSkipList(ZSetFamily::TopNScored sc) {
@@ -2442,8 +2437,12 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
   CmdArgParser::Range keys = parser.NextRange();  // numkeys + keys, handled by the key spec.
   bool is_max = parser.MapNext("MAX", true, "MIN", false);
 
-  int pop_count = 1;
-  parser.Check("COUNT", &pop_count);
+  int64_t count_arg = 1;
+  parser.Check("COUNT", &count_arg);
+  if (!parser.HasError() && (count_arg < 1 || count_arg > UINT32_MAX)) {
+    cmd_cntx->SendError(kCountNotGreaterThanZeroErr);
+    return;
+  }
 
   if (!parser.Finalize()) {
     cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2537,6 +2536,7 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
   DCHECK(key_to_pop.has_value());
 
   // Pop elements from relevant set.
+  uint32_t pop_count = static_cast<uint32_t>(count_arg);
   OpResult<ScoredArray> pop_result =
       ZPopMinMaxInternal(*key_to_pop, FilterShards::YES, pop_count, is_max, cmd_cntx->tx());
 

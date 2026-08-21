@@ -141,6 +141,13 @@ TEST_F(ListFamilyTest, BLMPopInvalidSyntax) {
   resp = Run({"blmpop", "0.01", "1", kKey1, "LEFT", "COUNT", "boo"});
   EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 
+  // Non-positive count errors immediately, even with an infinite timeout
+  resp = Run({"blmpop", "0", "1", kKey1, "LEFT", "COUNT", "0"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  resp = Run({"blmpop", "0", "1", kKey1, "LEFT", "COUNT", "-1"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
   // Too many arguments
   resp = Run({"blmpop", "0.01", "1", "c", "LEFT", "COUNT", "2", "foo"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
@@ -1331,9 +1338,40 @@ TEST_F(ListFamilyTest, LMPopInvalidSyntax) {
   resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "boo"});
   EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 
+  // COUNT is zero
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "0"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  // COUNT is negative
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "-1"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "-9223372036854775808"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  // COUNT above UINT32_MAX
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "4294967296"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "9223372036854775807"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  // Non-positive count errors even with trailing junk
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "0", "foo"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
   // Too many arguments
   resp = Run({"lmpop", "1", "c", "LEFT", "COUNT", "2", "foo"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
+TEST_F(ListFamilyTest, LMPopCountLargerThanList) {
+  Run({"rpush", "a", "a1", "a2", "a3"});
+
+  // Count above the list size (up to UINT32_MAX) pops the whole list.
+  auto resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "4294967295"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("a", RespArray(ElementsAre("a1", "a2", "a3")))));
+  EXPECT_THAT(Run({"exists", "a"}), IntArg(0));
 }
 
 TEST_F(ListFamilyTest, LMPop) {
@@ -1451,11 +1489,11 @@ TEST_F(ListFamilyTest, LMPopEdgeCases) {
 
   // Test with COUNT = 0 - should return error
   resp = Run({"lmpop", "1", "list", "LEFT", "COUNT", "0"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("list", RespArray(ElementsAre()))));
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
 
   // Test with negative COUNT - should return error
   resp = Run({"lmpop", "1", "list", "LEFT", "COUNT", "-1"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
 }
 
 TEST_F(ListFamilyTest, LMPopDocExample) {
