@@ -92,12 +92,17 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
     return false;
   }
 
+  // While a script is running, redis.call() must be checked against the
+  // ACL rules that were in effect when the script started.
+  const auto* sinfo = cntx.conn_state.script_info.get();
+  const std::vector<uint64_t>& acl_commands = sinfo ? sinfo->acl_commands : cntx.acl_commands;
+  const AclPubSub& pub_sub = sinfo ? sinfo->acl_pub_sub : cntx.pub_sub;
+
   std::pair<bool, AclLog::Reason> auth_res;
 
   if (id.IsPubSub()) {
     bool is_pattern = id.IsPatternPubSub();
-    auth_res =
-        IsPubSubCommandAuthorized(is_pattern, cntx.acl_commands, cntx.pub_sub, tail_args, id);
+    auth_res = IsPubSubCommandAuthorized(is_pattern, acl_commands, pub_sub, tail_args, id);
   } else {
     auth_res = IsUserAllowedToInvokeCommandGeneric(cntx, id, tail_args);
   }
@@ -114,22 +119,26 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
 
 [[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
     const ConnectionContext& cntx, const CommandId& id, const facade::ParsedArgs& tail_args) {
+  // See the comment in IsUserAllowedToInvokeCommand: while a script is running, checks are done
+  // against the ACL snapshot taken when the script started, not the connection's live rules.
+  const auto* sinfo = cntx.conn_state.script_info.get();
+  const std::vector<uint64_t>& acl_commands = sinfo ? sinfo->acl_commands : cntx.acl_commands;
+  const AclKeys& keys = sinfo ? sinfo->acl_keys : cntx.keys;
+  const size_t acl_db_idx = sinfo ? sinfo->acl_db_idx : cntx.acl_db_idx;
+
   const size_t max = std::numeric_limits<size_t>::max();
   // Once we support ranges this must change
-  const bool reject_move_command = cntx.acl_db_idx != max && id.name() == "MOVE";
+  const bool reject_move_command = acl_db_idx != max && id.name() == "MOVE";
   const bool reject_trans_command =
-      cntx.acl_db_idx != max && cntx.acl_db_idx != cntx.db_index() && id.IsTransactional();
+      acl_db_idx != max && acl_db_idx != cntx.db_index() && id.IsTransactional();
   if (reject_move_command || reject_trans_command) {
     return {false, AclLog::Reason::AUTH};
   }
   size_t res = 0;
   if (tail_args.size() == 1 && id.name() == "SELECT" && absl::SimpleAtoi(tail_args[0], &res) &&
-      cntx.acl_db_idx != max && cntx.acl_db_idx != res) {
+      acl_db_idx != max && acl_db_idx != res) {
     return {false, AclLog::Reason::AUTH};
   }
-
-  const auto& acl_commands = cntx.acl_commands;
-  const auto& keys = cntx.keys;
   if (!ValidateCommand(acl_commands, id)) {
     return {false, AclLog::Reason::COMMAND};
   }

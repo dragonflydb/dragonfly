@@ -681,7 +681,7 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
 
     c_replica = replica.client()
 
-    await c_replica.execute_command("DEBUG POPULATE 1000 key 1000 RAND type set elements 500")
+    await c_replica.execute_command("DEBUG POPULATE 2100 key 1000 RAND type set elements 1000")
 
     replica.stop()
     replica.start()
@@ -713,6 +713,11 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     # Check one we finish loading snapshot replicaof success
     await wait_available_async(c_replica, timeout=180)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica, timeout=180)
+
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    await c_replica.execute_command("FLUSHALL")
+    await master.client().execute_command("FLUSHALL")
 
 
 async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
