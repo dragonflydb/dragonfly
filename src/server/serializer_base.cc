@@ -161,6 +161,7 @@ void SerializerBase::SerializeFetchedEntry(const TieredDelayedEntry& tde, const 
 //   emitting large values.
 void SerializerBase::RegisterChangeListener(bool replication) {
   db_array_ = db_slice_->databases();  // copy pointers to survive flush
+  is_snapshot_ = true;
   db_slice_->RegisterOnChange(this);
   eventually_consistent_ = replication;
 }

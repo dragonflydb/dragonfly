@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/node_hash_map.h>
+#include <absl/functional/function_ref.h>
 
 #include <memory>
 #include <string>
@@ -27,11 +28,11 @@ class Namespace {
  public:
   Namespace();
 
-  DbSlice& GetCurrentDbSlice();
+  DbSlice& GetCurrentDbSlice() const;
 
-  DbSlice& GetDbSlice(ShardId sid);
+  DbSlice& GetDbSlice(ShardId sid) const;
   BlockingController* GetOrAddBlockingController(EngineShard* shard);
-  BlockingController* GetBlockingController(ShardId sid);
+  BlockingController* GetBlockingController(ShardId sid) const;
 
  private:
   std::vector<std::unique_ptr<DbSlice>> shard_db_slices_;
@@ -58,6 +59,11 @@ class Namespaces {
 
   Namespace& GetDefaultNamespace() const;  // No locks
   Namespace& GetOrInsert(std::string_view ns) ABSL_LOCKS_EXCLUDED(mu_);
+
+  // Calls fn(ns) for every namespace while holding a shared lock.
+  // fn must not yield or re-acquire mu_.
+  void ForEachNamespace(absl::FunctionRef<void(const Namespace&)> fn) const
+      ABSL_LOCKS_EXCLUDED(mu_);
 
   // Applies to all namespaces and becomes the default for namespaces created later.
   void SetExpiredEventsRecording(bool enable) ABSL_LOCKS_EXCLUDED(mu_);

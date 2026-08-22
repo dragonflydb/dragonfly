@@ -27,13 +27,13 @@ Namespace::Namespace() {
   });
 }
 
-DbSlice& Namespace::GetCurrentDbSlice() {
+DbSlice& Namespace::GetCurrentDbSlice() const {
   EngineShard* es = EngineShard::tlocal();
   CHECK(es != nullptr);
   return GetDbSlice(es->shard_id());
 }
 
-DbSlice& Namespace::GetDbSlice(ShardId sid) {
+DbSlice& Namespace::GetDbSlice(ShardId sid) const {
   CHECK_LT(sid, shard_db_slices_.size());
   return *shard_db_slices_[sid];
 }
@@ -46,7 +46,7 @@ BlockingController* Namespace::GetOrAddBlockingController(EngineShard* shard) {
   return shard_blocking_controller_[shard->shard_id()].get();
 }
 
-BlockingController* Namespace::GetBlockingController(ShardId sid) {
+BlockingController* Namespace::GetBlockingController(ShardId sid) const {
   return shard_blocking_controller_[sid].get();
 }
 
@@ -85,6 +85,13 @@ void Namespaces::Clear() {
 Namespace& Namespaces::GetDefaultNamespace() const {
   CHECK(default_namespace_ != nullptr);
   return *default_namespace_;
+}
+
+void Namespaces::ForEachNamespace(absl::FunctionRef<void(const Namespace&)> fn) const {
+  dfly::SharedLock guard(mu_);
+  for (const auto& [name, ns] : namespaces_) {
+    fn(ns);
+  }
 }
 
 void Namespaces::SetExpiredEventsRecording(bool enable) {
