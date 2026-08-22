@@ -48,6 +48,15 @@ ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "memory page under utilization threshold. Ratio between used and committed size, below "
           "this, memory in this page will defragmented");
 
+ABSL_FLAG(uint64_t, mem_defrag_max_burst_duration_us, 0,
+          "Maximum real (CycleClock-measured) time DefragTask() may spend running at the "
+          "proactor's highest on-idle priority before forcing a cooldown. 0 disables the "
+          "duty-cycle cap (unbounded, previous behavior)");
+
+ABSL_FLAG(uint32_t, mem_defrag_backoff_duration_us, 0,
+          "Duration in microseconds to drop to low on-idle priority once "
+          "mem_defrag_max_burst_duration_us is reached, before resuming at high priority");
+
 ABSL_FLAG(int32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
           "Warning: not advised to decrease in production.");
@@ -232,7 +241,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
-  static_assert(sizeof(Stats) == 136);
+  static_assert(sizeof(Stats) == 144);
 
 #define ADD(x) x += o.x
 
@@ -242,6 +251,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
   ADD(defrag_skipped_mem_under_threshold);
   ADD(defrag_skipped_within_check_interval);
   ADD(defrag_skipped_not_enough_fragmentation);
+  ADD(async_delete_task_invocation_total);
   ADD(poll_execution_total);
   ADD(tx_ooo_total);
   ADD(tx_optimistic_total);
@@ -278,6 +288,18 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // (control by mem_defrag_waste_threshold flag)
 EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequired() {
   using enum SkipReason;
+
+  // Duty-cycle backoff takes priority over everything else, including an in-progress cursor:
+  // once mem_defrag_max_burst_duration_us of real time was spent this burst, we force a rest
+  // period before resuming, regardless of how much of the pass is left.
+  if (cooldown_until_cycles != 0) {
+    if (base::CycleClock::Now() < cooldown_until_cycles) {
+      return CoolingDown;
+    }
+    cooldown_until_cycles = 0;
+    consecutive_burst_cycles = 0;
+  }
+
   if (cursor > kCursorDoneState) {
     VLOG(2) << "cursor: " << cursor;
     return NotSkipped;
@@ -434,10 +456,26 @@ uint32_t EngineShard::DefragTask() {
     // TODO (abhijat): implement move ctor for PageUsage so this object can be moved into the task.
     PageUsage page_usage{CollectPageStats::NO, threshold,
                          CycleQuota{CycleQuota::kDefaultDefragQuota}};
-    if (DoDefrag(&page_usage)) {
+    const uint64_t call_start_cycles = base::CycleClock::Now();
+    const bool scan_incomplete = bool(DoDefrag(&page_usage));
+    defrag_state_.consecutive_burst_cycles += base::CycleClock::Now() - call_start_cycles;
+    if (scan_incomplete) {
       // we didn't finish the scan
+      const uint64_t max_burst_cycles =
+          base::CycleClock::FromUsec(GetFlag(FLAGS_mem_defrag_max_burst_duration_us));
+      if (max_burst_cycles > 0 && defrag_state_.consecutive_burst_cycles >= max_burst_cycles) {
+        // Burst budget spent. Force a cooldown before we're allowed to spin again, capping
+        // the achievable duty cycle insteadof running flat-out until completion.
+        defrag_state_.consecutive_burst_cycles = 0;
+        defrag_state_.cooldown_until_cycles =
+            base::CycleClock::Now() +
+            base::CycleClock::FromUsec(GetFlag(FLAGS_mem_defrag_backoff_duration_us));
+        return 6;
+      }
       return ProactorBase::kOnIdleMaxLevel;
     }
+    // Pass finished naturally - start the next pass with a fresh burst budget.
+    defrag_state_.consecutive_burst_cycles = 0;
   } else {
     std::string_view reason;
     switch (check_result) {
@@ -459,6 +497,9 @@ uint32_t EngineShard::DefragTask() {
         break;
       case CheckInProgress:
         reason = "check is in progress";
+        break;
+      case CoolingDown:
+        reason = "cooling down after duty-cycle burst limit";
         break;
       default:
         DCHECK(false) << "unexpected result";
