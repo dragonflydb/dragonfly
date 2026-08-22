@@ -114,9 +114,13 @@ class LockTag {
 };
 
 enum class KeyReadyResult {
-  kKeyNotFound,  // key doesn't exist - abort the entire watch queue
-  kNotReady,     // key exists but per-tx conditions not met - skip this tx, try next
-  kReady,        // wake this tx
+  // Key doesn't exist. This waiter is skipped. When every waiter in the queue has
+  // wake_on_absent_key==false (homogeneous queue), NotifyWatchQueue short-circuits here
+  // as an O(1) fast path. Checkers that need to wake on a missing key (e.g. XREADGROUP,
+  // which surfaces NOGROUP) should return kReady instead.
+  kKeyNotFound,
+  kNotReady,  // key exists but per-tx conditions not met - skip this tx, try next
+  kReady,     // wake this tx
 };
 
 // Checks whether the touched key is valid for a blocking transaction watching it.

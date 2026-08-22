@@ -3031,12 +3031,9 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     auto& db_slice = context.GetDbSlice(owner->shard_id());
     auto res_it = db_slice.FindReadOnly(context, key, OBJ_STREAM);
     if (!res_it.ok()) {
-      // A blocked XREADGROUP must revalidate when its key is no longer a stream. The wake path
-      // distinguishes a missing stream (NOGROUP) from a non-stream value (WRONGTYPE). A plain
-      // XREAD keeps waiting for the stream to be recreated.
-      // TODO: Make kKeyNotFound a per-waiter result in BlockingController. It currently
-      // short-circuits the whole queue, allowing a blocked XREAD to hide a later XREADGROUP
-      // waiter. Return kNotReady until the controller handles heterogeneous queues.
+      // A blocked XREADGROUP must revalidate when its key is no longer a stream. The wake
+      // path distinguishes a missing stream (NOGROUP) from a non-stream value (WRONGTYPE).
+      // A plain XREAD keeps waiting for the stream to be recreated (either status).
       return opts->read_group ? KeyReadyResult::kReady : KeyReadyResult::kNotReady;
     }
 
@@ -3069,8 +3066,11 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
                                                          : KeyReadyResult::kNotReady;
   };
 
-  if (auto status =
-          tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, &cntx->blocked, &cntx->paused);
+  // wake_on_absent_key=true for XREADGROUP: its checker returns kReady for a missing stream
+  // (to surface NOGROUP), so the blocking-controller queue scan must not short-circuit when
+  // a preceding BLPOP/BZPOP waiter returns kKeyNotFound for the same key.
+  if (auto status = tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, &cntx->blocked,
+                                    &cntx->paused, /*wake_on_absent_key=*/opts->read_group);
       status != OpStatus::OK)
     return rb->SendNullArray();
 
