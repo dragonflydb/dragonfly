@@ -5,7 +5,7 @@
 #include "server/main_service.h"
 
 #include "absl/strings/str_split.h"
-#include "facade/resp_expr.h"
+#include "core/glob_matcher.h"
 #include "util/fibers/detail/fiber_interface.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/proactor_base.h"
@@ -2917,6 +2917,120 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
+  // LIST [FILTERBY <MODULE module-name | ACLCAT category | PATTERN pattern>]
+  if (subcmd == "LIST") {
+    // COMMAND LIST
+    if (!parser.HasNext()) {
+      vector<string_view> matching_cmds;
+
+      registry_.Traverse([&](string_view name, const CommandId& cid) {
+        if (cid.opt_mask() & CO::HIDDEN)
+          return;
+
+        matching_cmds.emplace_back(name);
+      });
+
+      rb->StartArray(matching_cmds.size());
+      for (string_view cmd_name : matching_cmds)
+        rb->SendBulkString(cmd_name);
+
+      return;
+    }
+
+    // LIST must be followed by FILTERBY.
+    parser.ExpectTag("FILTERBY");
+    if (parser.HasError()) {
+      parser.TakeError();
+      return rb->SendError(kSyntaxErr, kSyntaxErrType);
+    }
+
+    if (!parser.HasNext())
+      return rb->SendError(kSyntaxErr, kSyntaxErrType);
+
+    string filter_type = absl::AsciiStrToUpper(parser.Next());
+
+    if (!parser.HasNext())
+      return rb->SendError(kSyntaxErr, kSyntaxErrType);
+
+    string_view filter_value = parser.Next();
+
+    // MODULE commands are not supported by Dragonfly.
+    if (filter_type == "MODULE") {
+      if (parser.HasNext())
+        return rb->SendError(kSyntaxErr, kSyntaxErrType);
+
+      return rb->SendEmptyArray();
+    }
+
+    uint32_t cat_bit = 0;
+    bool is_pattern = false;
+
+    if (filter_type == "ACLCAT") {
+      if (filter_value.empty()) {
+        if (parser.HasNext())
+          return rb->SendError(kSyntaxErr, kSyntaxErrType);
+
+        return rb->SendEmptyArray();
+      }
+
+      if (parser.HasNext())
+        return rb->SendError(kSyntaxErr, kSyntaxErrType);
+
+      const string_view cat = absl::StripPrefix(filter_value, "@");
+      const auto& rev_table = acl_family_.GetRevTable();
+
+      auto it = std::find_if(rev_table.begin(), rev_table.end(), [cat](string_view rev_cat) {
+        return absl::EqualsIgnoreCase(rev_cat, cat);
+      });
+
+      auto dist = std::distance(rev_table.begin(), it);
+
+      // Enforce 32-bit width of the ACL category bitmask.
+      if (it == rev_table.end() || std::cmp_greater_equal(dist, sizeof(acl::AclCat) * CHAR_BIT)) {
+        return rb->SendEmptyArray();
+      }
+
+      cat_bit = dist;
+    } else if (filter_type == "PATTERN") {
+      if (parser.HasNext())
+        return rb->SendError(kSyntaxErr, kSyntaxErrType);
+
+      is_pattern = true;
+    } else {
+      return rb->SendError(kSyntaxErr, kSyntaxErrType);
+    }
+
+    // Lazy-construct GlobMatcher only for PATTERN filter.
+    std::optional<GlobMatcher> pattern_matcher;
+    if (is_pattern)
+      pattern_matcher.emplace(filter_value, false);
+
+    vector<string_view> matching_cmds;
+
+    registry_.Traverse([&](string_view name, const CommandId& cid) {
+      if (cid.opt_mask() & CO::HIDDEN)
+        return;
+
+      bool keep = false;
+
+      if (pattern_matcher) {
+        keep = pattern_matcher->Matches(name);
+      } else {
+        keep = cid.acl_categories() & (1u << cat_bit);
+      }
+
+      if (keep)
+        matching_cmds.emplace_back(name);
+    });
+
+    rb->StartArray(matching_cmds.size());
+
+    for (string_view cmd_name : matching_cmds)
+      rb->SendBulkString(cmd_name);
+
+    return;
+  }
+
   if (subcmd == "DOCS" && !parser.HasNext()) {
     // Returning an error here forces the interactive CLI client to fall back to static hints and
     // tab completion
@@ -2928,10 +3042,12 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
     constexpr string_view help[] = {
         "(no subcommand)",
         "    Return details about all commands.",
-        "INFO command-name",
-        "    Return details about specified command.",
         "COUNT",
         "    Return the total number of commands in this server.",
+        "INFO [<command-name> ...]",
+        "    Return details about one or more commands.",
+        "LIST [FILTERBY <MODULE module-name | ACLCAT category | PATTERN pattern>]",
+        "    Return a list of command names, optionally filtered.",
     };
     return rb->SendSimpleStrArr(help);
   }
