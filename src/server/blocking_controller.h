@@ -36,8 +36,11 @@ class BlockingController {
     return awakened_transactions_;
   }
 
-  // Associate given keys with transaction, checked via the krc checker
-  void AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* me);
+  // Associate given keys with transaction, checked via the krc checker.
+  // Set wake_on_absent_key=true for commands (e.g. XREADGROUP) whose checker returns kReady
+  // for a missing key — this prevents the scan from short-circuiting on kKeyNotFound.
+  void AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* me,
+                  bool wake_on_absent_key = false);
 
   // Remove transaction from watching these keys
   void RemovedWatched(Keys keys, Transaction* tx);

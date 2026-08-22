@@ -21,17 +21,25 @@ using namespace std;
 struct WatchItem {
   Transaction* trans;
   KeyReadyChecker key_ready_checker;
+  // True for waiters whose checker may return kReady for an absent key (e.g. XREADGROUP,
+  // which surfaces NOGROUP when the stream no longer exists). Used by NotifyWatchQueue to
+  // decide whether to short-circuit on kKeyNotFound.
+  bool wake_on_absent_key = false;
 
   Transaction* get() const {
     return trans;
   }
 
-  WatchItem(Transaction* t, KeyReadyChecker krc) : trans(t), key_ready_checker(std::move(krc)) {
+  WatchItem(Transaction* t, KeyReadyChecker krc, bool absent)
+      : trans(t), key_ready_checker(std::move(krc)), wake_on_absent_key(absent) {
   }
 };
 
 struct BlockingController::WatchQueue {
   deque<WatchItem> items;
+  // Count of items with wake_on_absent_key == true currently in this queue.
+  // When zero, NotifyWatchQueue can short-circuit on kKeyNotFound (fast path preserved).
+  int absent_key_wakers = 0;
 
   // Updated  by both coordinator and shard threads but at different times.
   enum State { SUSPENDED, ACTIVE } state = SUSPENDED;
@@ -71,6 +79,8 @@ bool BlockingController::DbWatchTable::UnwatchTx(string_view key, Transaction* t
 
   bool res = false;
   if (wq->state == WatchQueue::ACTIVE && wq->items.front().get() == tx) {
+    if (wq->items.front().wake_on_absent_key)
+      --wq->absent_key_wakers;
     wq->items.pop_front();
 
     // We suspend the queue and add keys to re-verification.
@@ -87,6 +97,8 @@ bool BlockingController::DbWatchTable::UnwatchTx(string_view key, Transaction* t
     // This shard has not been awakened and in case this transaction in the queue
     // we must clean it up.
     if (auto it = wq->Find(tx); it != wq->items.end()) {
+      if (it->wake_on_absent_key)
+        --wq->absent_key_wakers;
       wq->items.erase(it);
     }
   }
@@ -181,7 +193,8 @@ void BlockingController::NotifyPending() {
   awakened_indices_.clear();
 }
 
-void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* trans) {
+void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* trans,
+                                    bool wake_on_absent_key) {
   auto [dbit, added] = watched_dbs_.emplace(trans->GetDbIndex(), nullptr);
   if (added) {
     dbit->second = make_unique<DbWatchTable>();
@@ -203,7 +216,9 @@ void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transa
         continue;
     }
     DVLOG(2) << "Emplace " << trans->DebugId() << " to watch " << key;
-    res->second->items.emplace_back(trans, krc);
+    res->second->items.emplace_back(trans, krc, wake_on_absent_key);
+    if (wake_on_absent_key)
+      ++res->second->absent_key_wakers;
   }
 }
 
@@ -261,8 +276,13 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
     Transaction* head = wi.get();
     KeyReadyResult result = wi.key_ready_checker(owner_, context, key);
     if (result == KeyReadyResult::kKeyNotFound) {
-      // Key is gone - no tx in this queue can be woken, abort the scan entirely.
-      break;
+      if (wq->absent_key_wakers == 0) {
+        // Homogeneous queue: no waiter can wake on an absent key — restore the O(1) fast path.
+        break;
+      }
+      // Heterogeneous queue: a later waiter (e.g. XREADGROUP returning kReady for NOGROUP)
+      // may still need waking. Treat like kNotReady and continue the scan.
+      skipped.push_back(std::move(wi));
     } else if (result == KeyReadyResult::kReady) {
       DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key << " committed txid "
                << owner_->committed_txid();

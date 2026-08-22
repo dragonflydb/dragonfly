@@ -351,9 +351,8 @@ TEST_F(StreamFamilyTest, XReadBlock) {
 
   // Run XREAD BLOCK from 2 fibers.
   RespExpr resp0, resp1;
-  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    resp0 = Run({"xread", "block", "0", "streams", "foo", "$"});
-  });
+  auto fb0 = pp_->at(0)->LaunchFiber(
+      Launch::dispatch, [&] { resp0 = Run({"xread", "block", "0", "streams", "foo", "$"}); });
   auto fb1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
     resp1 = Run({"xread", "block", "0", "streams", "foo", "bar", "$", "$"});
   });
@@ -371,9 +370,8 @@ TEST_F(StreamFamilyTest, XReadBlock) {
   // With the RESP3 protocol, a blocked XREAD woken by a new entry should get a valid response.
   Run({"HELLO", "3"});
   RespExpr resp3_reply;
-  auto fb2 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    resp3_reply = Run({"xread", "block", "0", "streams", "foo", "$"});
-  });
+  auto fb2 = pp_->at(0)->LaunchFiber(
+      Launch::dispatch, [&] { resp3_reply = Run({"xread", "block", "0", "streams", "foo", "$"}); });
   ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
 
   resp = pp_->at(1)->Await([&] { return Run("xadd", {"xadd", "foo", "1-*", "k6", "v6"}); });
@@ -391,9 +389,8 @@ TEST_F(StreamFamilyTest, XReadBlockIgnoresNonDataWake) {
   Run({"XADD", "foo", "1-0", "field", "value"});
 
   RespExpr resp;
-  auto reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
-    resp = Run({"XREAD", "BLOCK", "0", "STREAMS", "foo", "$"});
-  });
+  auto reader = pp_->at(1)->LaunchFiber(
+      Launch::dispatch, [&] { resp = Run({"XREAD", "BLOCK", "0", "STREAMS", "foo", "$"}); });
   ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
 
   EXPECT_THAT(Run({"PEXPIRE", "foo", "60000"}), IntArg(1));
@@ -575,9 +572,8 @@ TEST_F(StreamFamilyTest, XReadBlockIgnoresEntriesBelowRequestedId) {
   Run({"xadd", "foo", "1-0", "k", "v"});
 
   RespExpr resp;
-  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    resp = Run({"xread", "block", "0", "streams", "foo", "5-0"});
-  });
+  auto reader = pp_->at(0)->LaunchFiber(
+      Launch::dispatch, [&] { resp = Run({"xread", "block", "0", "streams", "foo", "5-0"}); });
   ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
 
   // The wake is processed on the shard thread, so give it a window to land before concluding
@@ -698,9 +694,8 @@ TEST_F(StreamFamilyTest, XReadBlockStaysBlockedOnDeletedStream) {
   Run({"xadd", "foo", "1-0", "k", "v"});
 
   RespExpr resp;
-  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    resp = Run({"xread", "block", "0", "streams", "foo", "1-1"});
-  });
+  auto reader = pp_->at(0)->LaunchFiber(
+      Launch::dispatch, [&] { resp = Run({"xread", "block", "0", "streams", "foo", "1-1"}); });
   ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
 
   pp_->at(1)->Await([&] { return Run({"del", "foo"}); });
@@ -767,9 +762,8 @@ TEST_F(StreamFamilyTest, XReadAheadDoesNotSuppressXReadGroupWake) {
   Run({"XGROUP", "CREATE", "foo", "group", "0", "MKSTREAM"});
 
   RespExpr xreadgroup_resp;
-  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
-    Run({"XREAD", "BLOCK", "0", "STREAMS", "foo", "$"});
-  });
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch,
+                                     [&] { Run({"XREAD", "BLOCK", "0", "STREAMS", "foo", "$"}); });
   ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
 
   auto fb1 = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
@@ -2133,6 +2127,45 @@ TEST_F(StreamFamilyTest, XAutoClaimEmptyConsumer) {
   Run({"xgroup", "create", "stream4", "group2", "0"});
   auto resp = Run({"xautoclaim", "stream4", "group2", "", "0", "0-0"});
   EXPECT_THAT(resp, AnyOf(ErrArg(""), ArgType(RespExpr::ARRAY)));
+}
+
+// A heterogeneous (db, key) queue where a BLPOP waiter sits ahead of an XREADGROUP waiter.
+// When the key is deleted, the BLPOP checker returns kKeyNotFound; previously that aborted the
+// entire queue scan so the XREADGROUP behind it was never checked and stayed blocked forever.
+// After the fix the scan continues and the XREADGROUP waiter receives NOGROUP.
+TEST_F(StreamFamilyTest, XReadGroupBlockBehindBlpopWakesOnDelete) {
+  const string key = "het-queue-key";
+
+  // BLPOP registers first so it is the queue head.
+  RespExpr blpop_resp;
+  auto blpop_fiber =
+      pp_->at(0)->LaunchFiber(Launch::dispatch, [&] { blpop_resp = Run({"BLPOP", key, "0"}); });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+  // Create the stream+group while BLPOP is already blocked.
+  pp_->at(1)->Await([&] { return Run({"XGROUP", "CREATE", key, "g", "0", "MKSTREAM"}); });
+
+  // XREADGROUP registers second — it is behind BLPOP in the (db, key) watch queue.
+  RespExpr xrg_resp;
+  auto xrg_fiber = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    xrg_resp = Run({"XREADGROUP", "GROUP", "g", "c", "BLOCK", "0", "STREAMS", key, ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  // DEL fires the wake event. BLPOP's checker → kKeyNotFound, XREADGROUP's checker → kReady.
+  pp_->at(2)->Await([&] { return Run({"DEL", key}); });
+
+  // XREADGROUP must be woken and return NOGROUP; BLPOP must stay blocked.
+  ASSERT_TRUE(WaitUntilCondition([&] { return !IsConnBlocked("IO1"); }, 500ms))
+      << "XREADGROUP behind BLPOP was not woken on DEL";
+  xrg_fiber.Join();
+  EXPECT_THAT(xrg_resp, ErrArg("consumer group this client was blocked on no longer exists"));
+  EXPECT_TRUE(IsConnBlocked("IO0")) << "BLPOP should still be blocked after DEL";
+
+  // Unblock BLPOP with an LPUSH so the fiber can exit cleanly.
+  pp_->at(2)->Await([&] { return Run({"LPUSH", key, "v"}); });
+  blpop_fiber.Join();
+  EXPECT_THAT(blpop_resp, RespArray(ElementsAre(key, "v")));
 }
 
 }  // namespace dfly

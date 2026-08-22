@@ -1413,7 +1413,7 @@ ShardArgs Transaction::GetShardArgs(ShardId sid) const {
 }
 
 OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReadyChecker krc,
-                                  bool* block_flag, bool* pause_flag) {
+                                  bool* block_flag, bool* pause_flag, bool wake_on_absent_key) {
   if (blocking_barrier_.IsClaimed()) {  // Might have been cancelled ahead by a dropping connection
     Conclude();
     return OpStatus::CANCELLED;
@@ -1426,9 +1426,10 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
     if (wkeys) {  // single string_view.
       IndexSlice is(0, 1);
       ShardArgs sa(cmn::ArgSlice{&wkeys.value(), 1}, absl::MakeSpan(&is, 1));
-      t->WatchInShard(&t->GetNamespace(), sa, shard, krc);
+      t->WatchInShard(&t->GetNamespace(), sa, shard, krc, wake_on_absent_key);
     } else {
-      t->WatchInShard(&t->GetNamespace(), t->GetShardArgs(shard->shard_id()), shard, krc);
+      t->WatchInShard(&t->GetNamespace(), t->GetShardArgs(shard->shard_id()), shard, krc,
+                      wake_on_absent_key);
     }
     return OpStatus::OK;
   };
@@ -1470,14 +1471,14 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
 }
 
 void Transaction::WatchInShard(Namespace* ns, ShardArgs keys, EngineShard* shard,
-                               KeyReadyChecker krc) {
+                               KeyReadyChecker krc, bool wake_on_absent_key) {
   auto& sd = shard_data_[SidToId(shard->shard_id())];
 
   CHECK_EQ(0, sd.local_mask & WAS_SUSPENDED);
   sd.local_mask |= WAS_SUSPENDED;
   sd.local_mask &= ~OUT_OF_ORDER;
 
-  ns->GetOrAddBlockingController(shard)->AddWatched(keys, std::move(krc), this);
+  ns->GetOrAddBlockingController(shard)->AddWatched(keys, std::move(krc), this, wake_on_absent_key);
   DVLOG(2) << "WatchInShard " << DebugId();
 }
 

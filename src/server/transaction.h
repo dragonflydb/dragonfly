@@ -224,7 +224,7 @@ class Transaction {
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
   facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeys keys, KeyReadyChecker krc,
-                               bool* block_flag, bool* pause_flag);
+                               bool* block_flag, bool* pause_flag, bool wake_on_absent_key = false);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue.
@@ -538,7 +538,8 @@ class Transaction {
   void RunCallback(EngineShard* shard);
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
-  void WatchInShard(Namespace* ns, ShardArgs keys, EngineShard* shard, KeyReadyChecker krc);
+  void WatchInShard(Namespace* ns, ShardArgs keys, EngineShard* shard, KeyReadyChecker krc,
+                    bool wake_on_absent_key = false);
 
   // Expire blocking transaction, unlock keys and unregister it from the blocking controller
   void ExpireBlocking(WaitKeys keys);
