@@ -5,6 +5,7 @@
 #include "core/interpreter.h"
 
 #include <absl/base/casts.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
@@ -1482,15 +1483,25 @@ InterpreterManager::Stats& InterpreterManager::tl_stats() {
   return stats;
 }
 
-Interpreter* InterpreterManager::Get() {
-  // Grow if none is available and we have unused capacity left.
-  if (available_.empty() && storage_.size() < storage_.capacity()) {
-    storage_.emplace_back();
-    return &storage_.back();
-  }
+InterpreterManager::~InterpreterManager() {
+  DCHECK(retired_.empty());
+}
 
-  bool blocked = waker_.await([this]() { return !available_.empty(); });
+bool InterpreterManager::IsLive(const Interpreter* ir) const {
+  return any_of(storage_.begin(), storage_.end(), [ir](const auto& up) { return up.get() == ir; });
+}
+
+Interpreter* InterpreterManager::Get() {
+  // Retired interpreters are still alive, so they count against the pool capacity - otherwise
+  // every SCRIPT FLUSH would allow a fresh generation on top of the previous one.
+  bool blocked = waker_.await(
+      [this]() { return !available_.empty() || storage_.size() + retired_.size() < num_; });
   tl_stats().blocked_cnt += (uint64_t)blocked;
+
+  if (available_.empty()) {
+    storage_.push_back(make_unique<Interpreter>());
+    return storage_.back().get();
+  }
 
   Interpreter* ir = available_.back();
   available_.pop_back();
@@ -1501,6 +1512,15 @@ void InterpreterManager::Return(Interpreter* ir) {
   const uint64_t max_memory_usage = absl::GetFlag(FLAGS_lua_mem_gc_threshold);
   using namespace chrono;
   ++tl_stats().interpreter_return;
+
+  // Determine ownership before touching *ir, so a stale pointer is diagnosed, not dereferenced.
+  auto retired_it = retired_.find(ir);
+  const bool doomed = retired_it != retired_.end();
+  if (!doomed && !IsLive(ir)) {
+    LOG(DFATAL) << "Returning untracked interpreter";
+    return;
+  }
+
   int64_t delta = ir->TakeUsedBytes();
   if (max_memory_usage != 0 && (tl_stats().used_bytes + delta) > max_memory_usage) {
     ++tl_stats().force_gc_calls;
@@ -1518,41 +1538,37 @@ void InterpreterManager::Return(Interpreter* ir) {
     tl_stats().gc_duration_ns += duration_cast<nanoseconds>(after - before).count();
   }
   tl_stats().used_bytes += delta;
-  if (ir >= storage_.data() && ir < storage_.data() + storage_.size()) {
-    available_.push_back(ir);
-    waker_.notify();
-  } else if (return_untracked_ > 0) {
-    return_untracked_--;
-    if (return_untracked_ == 0) {
-      reset_ec_.notify();
-    }
-  } else {
-    LOG(DFATAL) << "Returning untracked interpreter";
+
+  if (doomed) {
+    retired_.erase(retired_it);  // lua_close runs here, on this manager's own thread.
+    waker_.notify();             // freed a slot against num_
+    return;
   }
+
+  available_.push_back(ir);
+  waker_.notify();
 }
 
 void InterpreterManager::Reset() {
   lock_guard guard{reset_mu_};
 
-  // we perform double buffer swapping with storage and wait for the old interepreters to be
-  // returned.
-  return_untracked_ = storage_.size() - available_.size();
-
-  std::vector<Interpreter> next_storage;
-  next_storage.reserve(storage_.capacity());
-  next_storage.resize(storage_.size());
-  next_storage.swap(storage_);
-
+  // Must not block: the caller may itself hold one of these interpreters, or a lock its holder
+  // is waiting for.
+  absl::flat_hash_set<Interpreter*> idle{available_.begin(), available_.end()};
   available_.clear();
-  for (auto& ir : storage_) {
-    available_.push_back(&ir);
-  }
 
-  reset_ec_.await([this]() { return return_untracked_ == 0; });
-  VLOG(1) << "InterpreterManager::Reset ended";
+  for (auto& ir : storage_) {
+    if (!idle.contains(ir.get()))
+      retired_.emplace(ir.get(), std::move(ir));
+  }
+  storage_.clear();
+
+  waker_.notifyAll();  // the pool is empty now, but growable again
+  VLOG(1) << "InterpreterManager::Reset ended, " << retired_.size() << " interpreters retired";
 }
 
 void InterpreterManager::Alter(std::function<void(Interpreter*)> modf) {
+  // A Reset() during modf sees available_ empty and retires taken, keeping it alive until Return.
   vector<Interpreter*> taken;
   swap(taken, available_);  // swap data because modf can preempt
 
