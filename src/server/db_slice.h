@@ -114,6 +114,13 @@ class DbSlice {
 
     bool eventually_consistent_ = false;
     uint64_t snapshot_version_ = 0;
+
+    // True for consumers that stream a point-in-time baseline to a remote target (full sync,
+    // migration), where a bucket not yet reached by snapshot_version_ still needs its old state
+    // captured before mutation. False for consumers like FlushSlots' CallbackConsumer, which
+    // register on_change purely to react to concurrent mutations during their own traversal and
+    // are not affected by this ordering requirement.
+    bool is_snapshot_ = false;
   };
 
   // Auto-laundering iterator wrapper. Laundering means re-finding keys if they moved between
@@ -537,6 +544,14 @@ class DbSlice {
   void SetExpiredEventsRecording(bool enable) {
     expired_keys_events_recording_ = enable;
   }
+
+  // Returns true if any registered snapshot consumer has not yet visited the bucket at
+  // `bucket_version`, or is currently mid-flight serializing a large value from an earlier bucket.
+  // In either state, evicting a key from that bucket without going through CallChangeCallbacks
+  // can produce a journal DEL that races ahead of the key's still-in-progress baseline on the
+  // replica wire, resurrecting a key the master no longer holds.
+  // Safe to call under FiberAtomicGuard (no fiber yields).
+  bool EvictWouldRaceWithSnapshot(uint64_t bucket_version) const;
 
   // Returns true if any registered snapshot is blocked on bucket serialiazion (big value, delayed)
   // and thus might reject the journal change

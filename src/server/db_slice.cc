@@ -219,40 +219,49 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
   if (!can_evict_ || db_slice_->WillBlockOnJournalWrite())
     return 0;
 
-  // Disable flush journal changes to prevent preemtion in evict.
+  // Disable flush journal changes to prevent preemption in evict.
   journal::DisableFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
   constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.stash_buckets);
 
-  // choose "randomly" a stash bucket to evict an item.
-  auto bucket_it = eb.probes.stash_buckets[eb.key_hash % kNumStashBuckets];
-  auto last_slot_it = bucket_it;
-  last_slot_it += (PrimeTable::kSlotNum - 1);
-  if (!last_slot_it.is_done()) {
-    // don't evict sticky items
-    if (last_slot_it->first.IsSticky()) {
-      return 0;
+  DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
+  auto& lt = table->trans_locks;
+  string scratch;
+
+  // Try each stash bucket in turn until we find one we can use (either its last slot is
+  // already empty, or we can safely evict it).  Trying all buckets prevents a spurious
+  // return-0 (and the resulting bad_alloc from DashTable::InsertInternal) when the
+  // hash-chosen bucket's last slot is sticky, locked, or temporarily unsafe due to an
+  // in-progress full-sync snapshot.
+  for (size_t i = 0; i < kNumStashBuckets; ++i) {
+    auto bucket_it = eb.probes.stash_buckets[(eb.key_hash + i) % kNumStashBuckets];
+    auto last_slot_it = bucket_it;
+    last_slot_it += (PrimeTable::kSlotNum - 1);
+
+    if (!last_slot_it.is_done()) {
+      // Last slot is occupied; we need to evict it to make room for the shift.
+      if (last_slot_it->first.IsSticky())
+        continue;
+      string_view key = last_slot_it->first.GetSlice(&scratch);
+      if (lt.Find(LockTag(key)).has_value())
+        continue;
+      // Skip if any snapshot consumer hasn't reached this bucket yet, or is mid-flight
+      // serializing a large value. Eviction bypasses CallChangeCallbacks (DisableFlushGuard
+      // disallows the blocking call), so without this guard the journal DEL can race ahead
+      // of the key's still-in-progress baseline on the replica, resurrecting it.
+      if (db_slice_->EvictWouldRaceWithSnapshot(last_slot_it.GetVersion()))
+        continue;
+
+      if (auto journal = db_slice_->shard_owner()->journal(); journal)
+        RecordExpiryBlocking(cntx_.db_index, key);
+      db_slice_->Del(cntx_, DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)));
+      ++evicted_;
     }
-
-    DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
-    auto& lt = table->trans_locks;
-    string scratch;
-    string_view key = last_slot_it->first.GetSlice(&scratch);
-    // do not evict locked keys
-    if (lt.Find(LockTag(key)).has_value())
-      return 0;
-
-    // log the evicted keys to journal.
-    if (auto journal = db_slice_->shard_owner()->journal(); journal) {
-      RecordExpiryBlocking(cntx_.db_index, key);
-    }
-    db_slice_->Del(cntx_, DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)));
-
-    ++evicted_;
+    // Either the last slot was already empty, or we just evicted it; shift right into it.
+    me->ShiftRight(bucket_it);
+    return 1;
   }
-  me->ShiftRight(bucket_it);
-
-  return 1;
+  return 0;
 }
 
 class AsyncDeleter {
@@ -374,7 +383,7 @@ template <typename F> struct CallbackConsumer : public DbSlice::ChangeConsumerIn
 
 namespace {
 
-void UpdateSlotStat(string_view key, int64_t delta, DbTable* db, uint64_t SlotStats::*stat,
+void UpdateSlotStat(string_view key, int64_t delta, DbTable* db, uint64_t SlotStats::* stat,
                     string_view name, std::optional<unsigned> obj_type = std::nullopt) {
   if (delta == 0 || !db->slots_stats)
     return;
@@ -1560,6 +1569,19 @@ bool DbSlice::WillBlockOnJournalWrite() const {
   return ranges::any_of(change_cb_, &ChangeConsumerInterface::IsAnyBucketBlocked);
 }
 
+bool DbSlice::EvictWouldRaceWithSnapshot(uint64_t bucket_version) const {
+  // Safe to iterate change_cb_ without change_cb_latch_: every call site holds a
+  // DisableFlushGuard (which prevents fiber preemption on this shard thread), so
+  // RemoveChangeCallback cannot run concurrently and change_cb_ is stable.
+  for (auto* cb : change_cb_) {
+    if (!cb->is_snapshot_)
+      continue;
+    if (bucket_version < cb->snapshot_version_ || cb->IsAnyBucketBlocked())
+      return true;
+  }
+  return false;
+}
+
 void DbSlice::WaitForUnblockedJournalWrites() const {
   std::lock_guard lk{change_cb_latch_};
   while (WillBlockOnJournalWrite())
@@ -1712,6 +1734,17 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
         const auto& lt = db_table->trans_locks;
         string_view key = evict_it->first.GetSlice(&tmp);
         if (lt.Find(LockTag(key)).has_value())
+          continue;
+
+        // Eviction deletes the key without going through the CoW OnChange hook (it runs
+        // under FiberAtomicGuard, which disallows OnChange's blocking call), so a full-sync
+        // snapshot that hasn't serialized this key's bucket yet, or is currently mid-flight
+        // streaming a large value from an earlier bucket, won't get a chance to capture the
+        // key's baseline before the eviction's journal DEL reaches the wire. The DEL can then
+        // race ahead of the bucket's still-in-progress baseline, so the replica applies it as
+        // a no-op and later resurrects the key once the baseline finishes loading. Skip such
+        // keys here; they remain eligible for eviction once no snapshot is in this state.
+        if (EvictWouldRaceWithSnapshot(evict_it.GetVersion()))
           continue;
 
         if (record_keys)
