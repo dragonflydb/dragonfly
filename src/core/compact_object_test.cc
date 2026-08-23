@@ -1415,6 +1415,15 @@ TEST_F(CompactObjectTest, TryBorrow_DefragSkipsWhenPinned) {
   cobj_.Reset();
 }
 
+TEST_F(CompactObjectTest, StreamSizeDoesNotWrap) {
+  cobj_.InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, streamNew());
+  const auto initial = cobj_.MallocUsed(true);
+  cobj_.AddStreamSize(initial);
+  cobj_.AddStreamSize(-static_cast<int64_t>(initial) - 1);
+  EXPECT_EQ(cobj_.MallocUsed(), cobj_.MallocUsed(true));
+  EXPECT_GT(cobj_.MallocUsed(), 0);
+}
+
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
   const char* end = ascii + len;
 
