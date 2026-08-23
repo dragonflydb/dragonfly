@@ -313,6 +313,24 @@ class Connection : public util::Connection {
   // Get quick debug info for logs
   std::string DebugInfo() const;
 
+#ifndef NDEBUG
+  // Debug-only diagnostic for a DispatchTracker/CLIENT PAUSE checkpoint that hasn't released on
+  // this connection. Classifies the stall as one of:
+  //  - "dropped": the checkpoint never reached the deferral handler (still queued or lost).
+  //  - "leaked": HasInFlightCommands() already false but a deferred checkpoint is still held -
+  //    the release call was skipped despite its condition being satisfied.
+  //  - "livelock": the in-flight command's own completion flag (CanReply()) is already set, but
+  //    this connection's dispatch bookkeeping never consumed it.
+  //  - "executing": the in-flight command genuinely hasn't finished yet (real contention/latency,
+  //    not a bug in this mechanism).
+  // Returns an empty string if there is nothing outstanding on this connection.
+  std::string DebugCheckpointState() const;
+#else
+  std::string DebugCheckpointState() const {
+    return {};
+  }
+#endif
+
   bool IsHttp() const;
 
   static void UpdateFromFlags();                          // Set values from flags
@@ -664,6 +682,14 @@ class Connection : public util::Connection {
   // - Assumption: usually this vectors holds 0-1 entries, and at any given (extreme) point of time,
   // the number of deferred checkpoints is minimal (<10, no inlined vector required).
   std::vector<util::fb2::BlockingCounter> deferred_checkpoints_;
+
+#ifndef NDEBUG
+  // Debug-only counter for DebugCheckpointState(): incremented every main-loop pass that finds a
+  // deferred checkpoint still waiting on HasInFlightCommands() to clear. A high count over a short
+  // external wait rules out scheduler starvation for this connection - its loop kept running and
+  // kept re-checking, the in-flight command just hadn't finished (or its completion was missed).
+  uint32_t inflight_recheck_misses_ = 0;
+#endif
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
