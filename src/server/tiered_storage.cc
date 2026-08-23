@@ -23,6 +23,7 @@
 #include "core/qlist.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/server_state.h"
 #include "server/snapshot.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
@@ -298,7 +299,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
       // The value's bytes leave the RAM ledger; a cool copy is tracked by the cool cache only.
       AccountObjectMemory(key.second, pv->ObjType(), -int64_t(pv->MallocUsed()), table);
-      if (ts_->config_.experimental_cooling) {
+      if (ts_->ShouldCool()) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
       } else {
@@ -1000,6 +1001,11 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
     return blobs;
   }
   return nullopt;
+}
+
+bool TieredStorage::ShouldCool() const {
+  // Don't cool while loading lots of values into memory as those are not client writes
+  return config_.experimental_cooling && ServerState::tlocal()->gstate() != GlobalState::LOADING;
 }
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
