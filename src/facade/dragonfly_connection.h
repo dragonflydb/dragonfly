@@ -292,9 +292,11 @@ class Connection : public util::Connection {
   // Starts traffic logging in the calling thread. Must be a proactor thread.
   // Each thread creates its own log file containing requests from connections on
   // that thread whose listener type equals `listener_type`. Exactly one listener
-  // kind per recording — mixing protocols in a single file is not supported.
+  // kind per recording — mixing protocols in a single file is not supported. All
+  // threads in a recording session receive the same `start_logging_cycle`.
   static StartTrafficResult StartTrafficLogging(std::string_view base_path,
-                                                ListenerType listener_type);
+                                                ListenerType listener_type,
+                                                uint64_t start_logging_cycle);
 
   // Stops traffic logging in this thread. A noop if the thread is not logging.
   static void StopTrafficLogging();
@@ -557,7 +559,8 @@ class Connection : public util::Connection {
   // V2: Returns true if the connection is currently logging traffic to a file.
   bool ShouldLogTrafficV2() const;
 
-  // V2: A helper function to log a single command to a file.
+  // V2: Records a command only while logging is active at dispatch and it was parsed after the
+  // current logger started. STOP can therefore suppress a command parsed while logging was active.
   void LogTrafficV2(ParsedCommand* cmd);
 
   // V2 vectorized squash phase: dispatch the run starting at parsed_to_execute_ through

@@ -300,18 +300,32 @@ async def test_debug_traffic_records_pipeline_in_dispatch_order(df_server, tmp_p
 
 @dfly_args({"enable_resp_io_loop_v2": "true", "proactor_threads": 1})
 @pytest.mark.exclude_epoll
-@pytest.mark.skip("Fails constantly")
 async def test_debug_traffic_v2_parse_in_proactor_does_not_preempt(df_server, tmp_path):
-    """V2 logging records queued commands and does not preempt proactor parsing."""
+    """Validates that V2 logging keeps parser-time eligibility while deferring writes from proactor parsing."""
     client = df_server.client()
     log_prefix = tmp_path / "traffic-proactor"
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
 
     try:
-        # The SET is queued behind the blocking command before logging starts.
+        writer.write(b"CLIENT ID\r\n")
+        await writer.drain()
+        client_id = int((await asyncio.wait_for(reader.readuntil(b"\r\n"), timeout=2))[1:-2])
+
+        # This SET arrives before logging starts, so it must not be recorded even though execution
+        # is delayed behind BLPOP until after START.
         writer.write(b"BLPOP traffic:block 0\r\nSET traffic:queued before-start\r\n")
         await writer.drain()
-        await asyncio.sleep(0.05)
+
+        @assert_eventually(timeout=2)
+        async def wait_for_pipeline_to_parse():
+            connection = parse_client_list(
+                await client.execute_command("CLIENT LIST ID", client_id)
+            )
+            assert len(connection) == 1
+            assert int(connection[0].get("pipeline", 0)) >= 2
+
+        # This assertion proves both commands were parsed and queued before the test sends "DEBUG TRAFFIC START"
+        await wait_for_pipeline_to_parse()
 
         assert await client.execute_command("DEBUG", "TRAFFIC", "START", str(log_prefix)) == "OK"
 
@@ -337,7 +351,10 @@ async def test_debug_traffic_v2_parse_in_proactor_does_not_preempt(df_server, tm
         parts
         for _, parts in _read_traffic_log_records(log_prefix.with_name("traffic-proactor-000.bin"))
     ]
-    assert [b"SET", b"traffic:queued", b"before-start"] in logged_commands
+
+    # The queued SET was parsed before DEBUG TRAFFIC START, so delayed execution must not add it
+    # retroactively to the log. The later SET was parsed after START, so it is expected to be logged.
+    assert [b"SET", b"traffic:queued", b"before-start"] not in logged_commands
     assert [b"SET", b"traffic:proactor", b"one"] in logged_commands
 
 

@@ -1153,20 +1153,21 @@ void DebugCmd::LogTraffic(CmdArgParser parser, CommandContext* cmd_cntx) {
   std::atomic<unsigned> already_logging{0};
   std::atomic<unsigned> open_failed{0};
   std::string path_str(path);
-  shard_set->pool()->AwaitFiberOnAll(
-      [path_str, listener_type, &started_new, &already_logging, &open_failed](auto*) {
-        switch (Connection::StartTrafficLogging(path_str, listener_type)) {
-          case Connection::StartTrafficResult::kStarted:
-            started_new.fetch_add(1, std::memory_order_relaxed);
-            break;
-          case Connection::StartTrafficResult::kAlreadyLogging:
-            already_logging.fetch_add(1, std::memory_order_relaxed);
-            break;
-          case Connection::StartTrafficResult::kOpenFailed:
-            open_failed.fetch_add(1, std::memory_order_relaxed);
-            break;
-        }
-      });
+  uint64_t start_logging_cycle = base::CycleClock::Now();
+  shard_set->pool()->AwaitFiberOnAll([path_str, listener_type, start_logging_cycle, &started_new,
+                                      &already_logging, &open_failed](auto*) {
+    switch (Connection::StartTrafficLogging(path_str, listener_type, start_logging_cycle)) {
+      case Connection::StartTrafficResult::kStarted:
+        started_new.fetch_add(1, std::memory_order_relaxed);
+        break;
+      case Connection::StartTrafficResult::kAlreadyLogging:
+        already_logging.fetch_add(1, std::memory_order_relaxed);
+        break;
+      case Connection::StartTrafficResult::kOpenFailed:
+        open_failed.fetch_add(1, std::memory_order_relaxed);
+        break;
+    }
+  });
 
   unsigned started = started_new.load(std::memory_order_relaxed);
   unsigned refused = already_logging.load(std::memory_order_relaxed);
