@@ -283,6 +283,8 @@ struct TrafficLogger {
   // matching `listener_type_` produce records; others are skipped on the hot path.
   // Set once when the file is opened, cleared in ResetLocked().
   Connection::ListenerType listener_type = Connection::ListenerType::MAIN_RESP;
+  // Commands parsed before this cycle do not belong to the current recording.
+  uint64_t start_logging_cycle = 0;
 
   void ResetLocked();
   // Returns true if Write succeeded, false if it failed and the recording should be aborted.
@@ -296,6 +298,7 @@ void TrafficLogger::ResetLocked() {
     log_file.reset();
   }
   listener_type = Connection::ListenerType::MAIN_RESP;
+  start_logging_cycle = 0;
 }
 
 // Returns true if Write succeeded, false if it failed and the recording should be aborted.
@@ -330,7 +333,8 @@ thread_local uint32 pipeline_wait_batch_usec = absl::GetFlag(FLAGS_pipeline_wait
 // we fail to open a file). `listener_type` is only committed after the file is
 // successfully opened so the logger's state stays consistent on failure.
 Connection::StartTrafficResult OpenTrafficLogger(string_view base_path,
-                                                 Connection::ListenerType listener_type) {
+                                                 Connection::ListenerType listener_type,
+                                                 uint64_t start_logging_cycle) {
   using Res = Connection::StartTrafficResult;
   unique_lock lk{tl_traffic_logger.mutex};
   if (tl_traffic_logger.log_file)
@@ -345,6 +349,8 @@ Connection::StartTrafficResult OpenTrafficLogger(string_view base_path,
     LOG(ERROR) << "Error opening a file " << path << " for traffic logging: " << file.error();
     return Res::kOpenFailed;
   }
+  // Publish the common parser-time boundary before exposing an active logger.
+  tl_traffic_logger.start_logging_cycle = start_logging_cycle;
   tl_traffic_logger.log_file = unique_ptr<io::WriteFile>{file.value()};
   tl_traffic_logger.listener_type = listener_type;
 #else
@@ -2727,8 +2733,9 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force
 }
 
 Connection::StartTrafficResult Connection::StartTrafficLogging(string_view path,
-                                                               ListenerType listener_type) {
-  return OpenTrafficLogger(path, listener_type);
+                                                               ListenerType listener_type,
+                                                               uint64_t start_logging_cycle) {
+  return OpenTrafficLogger(path, listener_type, start_logging_cycle);
 }
 
 void Connection::StopTrafficLogging() {
@@ -3006,6 +3013,10 @@ bool Connection::ShouldLogTrafficV2() const {
 }
 
 void Connection::LogTrafficV2(ParsedCommand* cmd) {
+  if (cmd->parsed_cycle < tl_traffic_logger.start_logging_cycle)
+    // Skip logging commands that were parsed before traffic logging was started.
+    return;
+
   LogTraffic(id_, cmd->has_unparsed_input, *cmd, service_->GetContextInfo(cc_.get()));
 }
 
