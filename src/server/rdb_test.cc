@@ -50,6 +50,7 @@ ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 ABSL_DECLARE_FLAG(bool, serialize_hnsw_index);
 ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
+ABSL_DECLARE_FLAG(uint32_t, max_rdb_save_serialize_buffer_capacity);
 
 namespace {
 
@@ -2326,6 +2327,27 @@ TEST_F(RdbTest, EofWithRemoteShardChunksPending) {
 
   // Key was never fully loaded before EOF, so it must not exist.
   EXPECT_EQ(Run({"EXISTS", key}), 0);
+}
+
+TEST(RdbSerializerTest, BufferShrinksIfOverCap) {
+  absl::FlagSaver fs;
+  constexpr uint32_t kMaxCap = 8 * 1024;
+  SetFlag(&FLAGS_max_rdb_save_serialize_buffer_capacity, kMaxCap);
+
+  RdbSerializer serializer{CompressionMode::NONE};
+
+  const string big(kMaxCap + 1, 'x');
+  ASSERT_FALSE(serializer.WriteRaw(io::Buffer(big)));
+  ASSERT_GT(serializer.GetBufferCapacity(), kMaxCap);
+
+  EXPECT_EQ(serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry), big);
+  EXPECT_EQ(serializer.SerializedLen(), 0);
+  EXPECT_EQ(serializer.GetBufferCapacity(), kMaxCap);
+
+  constexpr string_view tail = "tail entry";
+  ASSERT_FALSE(serializer.WriteRaw(io::Buffer(tail)));
+  ASSERT_EQ(serializer.GetBufferCapacity(), kMaxCap);
+  EXPECT_EQ(serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry), tail);
 }
 
 }  // namespace dfly

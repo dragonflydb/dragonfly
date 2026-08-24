@@ -509,11 +509,18 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
-@pytest.mark.skip("fails, investigating")
 @pytest.mark.large
+@pytest.mark.exclude_epoll
 @pytest.mark.opt_only
 @pytest.mark.parametrize("tagged_chunks", [True, False])
-@dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
+@dfly_args(
+    {
+        "proactor_threads": 2,
+        "serialization_max_chunk_size": 5000,
+        "compression_mode": "0",
+        "proactor_busy_poll_usec": 500,
+    }
+)
 async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory, tagged_chunks):
     """
     Restart replicating instance with huge values. Tests that interrupting the streaming process doesn't hinder retrying replication
